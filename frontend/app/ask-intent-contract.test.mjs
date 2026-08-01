@@ -38,6 +38,18 @@ test("blocking reasoning ambiguity is visibly confirmed before retrieval", () =>
 });
 
 
+test("a selected source scope always opens the review gate before retrieval", () => {
+  const branches = ifBranchesIn(findFunction(page, "runAsk"));
+  const reviewGate = branches.find(
+    (branch) => branch.condition.includes("needs_clarification")
+      && branch.condition.includes("source_scope"),
+  );
+  assert.ok(reviewGate, "runAsk 没有把 source_scope 当作独立的确认门");
+  assert.ok(reviewGate.thenCalls.includes("setAskIntentReview"));
+  assert.ok(reviewGate.thenReturns, "来源确认卡打开后仍继续提交了 durable ask");
+});
+
+
 // 问题理解跑在持久 job 之前,后端此时无从产出轨迹。前端合成这几步并把它们拼在
 // 后端流下来的步骤之前,用户看到的才是一条从「理解问题」直达「作答」的连续轨迹,
 // 而不是先盯一条与轨迹无关的提示、再看轨迹从中途冒出来。

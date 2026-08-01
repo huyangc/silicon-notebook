@@ -495,14 +495,20 @@ class CandidateRetrievalService(_RetrievalState):
             cache[key] = vec
         return vec
     def _gather_elements(self, db: object, notebook_id: str,
-                         with_vectors: bool = True) -> List[dict]:
+                         with_vectors: bool = True,
+                         allowed_source_ids=None) -> List[dict]:
         # 运行时截断旁路(计划 §1.2 旁路 1):element 兜底不走 build_matrix,逐向量
         # 进 retrieval.cosine 与 _embed_query(已截断,T2)比较 —— cosine 对 len 不等
         # 静默返 0.0,漏截 = 全部 element 静默零相似度。
         from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
 
         rd = resolve_runtime_dim(self.settings)
-        rows = self.sources.retrieval_element_rows(db, notebook_id)
+        if allowed_source_ids is None:
+            rows = self.sources.retrieval_element_rows(db, notebook_id)
+        else:
+            rows = self.sources.retrieval_element_rows(
+                db, notebook_id, allowed_source_ids
+            )
         elements: List[dict] = []
         for row in rows:
             vector = None
@@ -531,8 +537,18 @@ class CandidateRetrievalService(_RetrievalState):
             for element in elements
             if element.get("vector")
         }
-    def _gather_chunks(self, db: object, notebook_id: str) -> List[dict]:
-        rows = self.chunks.retrieval_rows(db, notebook_id)
+    def _gather_chunks(
+        self, db: object, notebook_id: str, allowed_source_ids=None
+    ) -> List[dict]:
+        if allowed_source_ids is None:
+            rows = self.chunks.retrieval_rows(db, notebook_id)
+        else:
+            id_rows = self.chunks.ids_for_sources(
+                db, notebook_id, allowed_source_ids
+            )
+            rows = self.chunks.hydrate_rows(
+                db, [row["id"] for row in id_rows]
+            )
         return [{
             "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
             "section_path": r["section_path"], "source_title": r["source_title"],
@@ -652,10 +668,18 @@ class CandidateRetrievalService(_RetrievalState):
         recall: int,
         *,
         site: str,
+        allowed_source_ids=None,
     ) -> list[dict]:
         """Fail-open bounded lexical object recall shared by KG and relations."""
         try:
-            return self.knowledge.fts_search(db, notebook_id, query, k=recall)
+            if allowed_source_ids is None:
+                return self.knowledge.fts_search(
+                    db, notebook_id, query, k=recall
+                )
+            return self.knowledge.fts_search(
+                db, notebook_id, query, k=recall,
+                allowed_source_ids=allowed_source_ids,
+            )
         except Exception as exc:  # noqa: BLE001 — lexical failure keeps ANN usable
             self.event_log.emit({
                 "kind": "lexical_retrieval_failed",
@@ -1057,7 +1081,8 @@ class CandidateRetrievalService(_RetrievalState):
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,
-                         w_semantic: float = W_SEMANTIC) -> List[RetrievedKnowledge]:
+                         w_semantic: float = W_SEMANTIC, *,
+                         allowed_source_ids=None) -> List[RetrievedKnowledge]:
         """Score KG objects of `types` (default all 4 _KG_TYPES) for `query`,
         returning RetrievedKnowledge sorted by fused relevance desc. Shared by
         the reasoning retriever's tools; `w_keyword`/`w_semantic` carry the
@@ -1072,7 +1097,13 @@ class CandidateRetrievalService(_RetrievalState):
         # (column-name) type — exactly "flag on AND this notebook has knowhow
         # graph content" (or a caller explicitly asked for one). Flag off /
         # non-knowhow ⇒ empty ⇒ pure no-op, no bridge query, no injection.
-        knowhow_on = bool(set(type_list) & set(knowhow_types))
+        source_filter = (
+            tuple(dict.fromkeys(str(value) for value in allowed_source_ids if value))
+            if allowed_source_ids is not None else None
+        )
+        if source_filter is not None and not source_filter:
+            return []
+        knowhow_on = bool(set(type_list) & set(knowhow_types)) and source_filter is None
         query_vector = self._embed_query(query)
         t_embed = time.perf_counter()
         # indexed 时用 (ANN 核 ⊕ delta)∪FTS 取有界候选。candidate_filter 与
@@ -1080,7 +1111,27 @@ class CandidateRetrievalService(_RetrievalState):
         cand_sims: Optional[dict[str, float]] = None
         candidate_filter: Optional[set[str]] = None
         lexical_candidate_count = 0
-        if query_vector is not None:
+        if source_filter is not None:
+            # Selected-source runs never enter a notebook-wide fallback.  The
+            # indexed provenance table gates completeness, while lexical SQL
+            # applies the source predicate before LIMIT.  This path deliberately
+            # skips the notebook-wide ANN until artifacts carry an aligned
+            # source partition, so out-of-scope labels cannot occupy its top-K.
+            with self._connect() as db:
+                if not self.knowledge.source_index_backfilled(db, notebook_id):
+                    return []
+                lexical_hits = self._lexical_object_hits(
+                    db, notebook_id, query, self.settings.chunk_recall,
+                    site="kg_source_scoped_fts",
+                    allowed_source_ids=source_filter,
+                )
+            lexical_ids = [hit["object_id"] for hit in lexical_hits]
+            lexical_candidate_count = len(lexical_ids)
+            cand_sims = {}
+            candidate_filter = set(lexical_ids)
+            if not candidate_filter:
+                return []
+        elif query_vector is not None:
             idx = self._scale_index(notebook_id, allow_stale=True)
             if idx is None:
                 # 无 ANN 核 → 本次退回全量暴力(O(N))。O(1) once-set 兜底:大库应
@@ -1150,6 +1201,20 @@ class CandidateRetrievalService(_RetrievalState):
             kg_objs = {t: self._knowledge_objects(db, notebook_id, t, id_filter=id_filter)
                        for t in type_list}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
+            if source_filter is not None:
+                allowed_sources = set(source_filter)
+                for obj in all_kg_objs:
+                    obj["evidence"] = [
+                        ev for ev in obj.get("evidence", [])
+                        if ev.source_id in allowed_sources
+                    ]
+                all_kg_objs = [obj for obj in all_kg_objs if obj["evidence"]]
+                allowed_object_ids = {obj["id"] for obj in all_kg_objs}
+                for object_type in tuple(kg_objs):
+                    kg_objs[object_type] = [
+                        obj for obj in kg_objs[object_type]
+                        if obj["id"] in allowed_object_ids
+                    ]
             # P0-A: candidate_filter is not None ⟺ bounded ANN∪FTS candidate path
             # (≤2*chunk_recall objects, plus bounded knowhow bridge) — skip the COUNT probe
             # and the process-wide cache (which the candidate-set-varies-per-query
@@ -1254,6 +1319,8 @@ class CandidateRetrievalService(_RetrievalState):
         types: Optional[Iterable[str]] = None,
         w_keyword: float = W_KEYWORD,
         w_semantic: float = W_SEMANTIC,
+        *,
+        allowed_source_keys=None,
     ) -> List[RetrievedKnowledge]:
         """Gather scored KG candidates from {base notebook(s)} ∪ {active personal
         notebook}, tagging each hit with .notebook_id and .tier.
@@ -1273,9 +1340,26 @@ class CandidateRetrievalService(_RetrievalState):
             )
 
         all_hits: List[RetrievedKnowledge] = []
+        sources_by_notebook = None
+        if allowed_source_keys is not None:
+            sources_by_notebook = {}
+            for source_notebook_id, source_id in allowed_source_keys:
+                if source_notebook_id and source_id:
+                    sources_by_notebook.setdefault(source_notebook_id, []).append(source_id)
         for nid in notebook_ids:
-            hits = self._retrieve_scored(
-                nid, query, types=types, w_keyword=w_keyword, w_semantic=w_semantic)
+            if sources_by_notebook is not None:
+                allowed = sources_by_notebook.get(nid)
+                if not allowed:
+                    continue
+                hits = self._retrieve_scored(
+                    nid, query, types=types, w_keyword=w_keyword,
+                    w_semantic=w_semantic, allowed_source_ids=allowed,
+                )
+            else:
+                hits = self._retrieve_scored(
+                    nid, query, types=types, w_keyword=w_keyword,
+                    w_semantic=w_semantic,
+                )
             tier = tier_map.get(nid, "personal")
             for h in hits:
                 h.notebook_id = nid
@@ -1304,6 +1388,31 @@ class CandidateRetrievalService(_RetrievalState):
             all_hits.extend(hits)
         all_hits.sort(key=lambda it: it.score, reverse=True)
         return all_hits
+
+    def _federated_retrieve_elements_impl(
+        self, active_notebook_id: str, query: str, *,
+        allowed_source_keys, limit: int = 8,
+    ) -> List[RetrievedElement]:
+        """Search raw elements only in explicitly authorized participants."""
+        with self._connect() as db:
+            notebook_ids, _tier_map = self.notebooks.participant_tiers(
+                db, active_notebook_id
+            )
+        sources_by_notebook: dict[str, list[str]] = {}
+        for notebook_id, source_id in allowed_source_keys:
+            if notebook_id and source_id:
+                sources_by_notebook.setdefault(notebook_id, []).append(source_id)
+        hits: List[RetrievedElement] = []
+        for notebook_id in notebook_ids:
+            source_ids = sources_by_notebook.get(notebook_id)
+            if not source_ids:
+                continue
+            hits.extend(self._retrieve_elements(
+                notebook_id, query, limit=limit,
+                allowed_source_ids=source_ids,
+            ))
+        hits.sort(key=lambda item: item.score, reverse=True)
+        return hits[:limit]
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
                             direction: str = "both") -> List[RetrievedKnowledge]:
@@ -1353,14 +1462,20 @@ class CandidateRetrievalService(_RetrievalState):
             ))
         return out
     def _retrieve_elements(self, notebook_id: str, query: str,
-                           limit: int = 8) -> List[RetrievedElement]:
+                           limit: int = 8, *,
+                           allowed_source_ids=None) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2)."""
-        if not self.notebook_copy_stats(notebook_id)["copyable"]:
+        if (allowed_source_ids is not None
+                or not self.notebook_copy_stats(notebook_id)["copyable"]):
             # source_elements 没有独立 ANN；绝不恢复 17 万元素×4096 维的
             # 全表扫描。先走已有 chunk ANN/FTS 召回，再只按这些 chunk 的
-            # element_ids 做有界 PK hydration，仍能返回精确 element_id。
+            # element_ids 做有界 PK hydration，仍能返回精确 element_id。显式
+            # 来源范围不论 notebook 是否 copyable 都走这条路：一个
+            # 小文件仍可以产生大量 element/vector，所以 copyable 不是
+            # 选定来源的候选行数上限。
             chunks, _ids, _matrix = self._retrieve_chunks(
-                notebook_id, query, recall=max(limit * 4, limit)
+                notebook_id, query, recall=max(limit * 4, limit),
+                allowed_source_ids=allowed_source_ids,
             )
             elements = self._retrieve_elements_from_chunks(
                 query, chunks, limit=limit
@@ -1374,7 +1489,14 @@ class CandidateRetrievalService(_RetrievalState):
             return elements
         query_vector = self._embed_query(query)
         with self._connect() as db:
-            elements = self._gather_elements(db, notebook_id, with_vectors=True)
+            elements = (
+                self._gather_elements(db, notebook_id, with_vectors=True)
+                if allowed_source_ids is None
+                else self._gather_elements(
+                    db, notebook_id, with_vectors=True,
+                    allowed_source_ids=allowed_source_ids,
+                )
+            )
         return score_elements(query, elements, query_vector, limit=limit)
 
     def _retrieve_elements_from_chunks(
@@ -1467,7 +1589,10 @@ class CandidateRetrievalService(_RetrievalState):
                 score=coarse_scores.get(element_id, 0.0),
             ))
         return lexical
-    def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
+    def _retrieve_chunks(
+        self, notebook_id: str, query: str, recall: int = 0, *,
+        allowed_source_ids=None,
+    ):
         """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
         (matrix 行已 L2 归一化, 点积即余弦)。"""
         from app.services.retrieval import (
@@ -1476,12 +1601,26 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import query_sims
         recall = recall or self.settings.chunk_recall
         query_vector = self._embed_query(query)
-        if self.settings.chunk_ann_enabled and query_vector is not None:
+        if (allowed_source_ids is None
+                and self.settings.chunk_ann_enabled
+                and query_vector is not None):
             idx = self._scale_index(notebook_id, allow_stale=True)
             if idx is not None and getattr(idx, "chunk_ann_labels", None):
-                ann = self._retrieve_chunks_ann(notebook_id, query, query_vector, idx, recall)
+                ann = self._retrieve_chunks_ann(
+                    notebook_id, query, query_vector, idx, recall
+                )
                 if ann is not None:
                     return ann
+        if allowed_source_ids is not None:
+            # A selected scope is always a bounded candidate query.  Do not
+            # materialize every chunk/vector merely because the enclosing
+            # notebook is below the broad copy/share threshold.  The degraded
+            # helper uses n_chunks only for diagnostics; avoid an otherwise
+            # unnecessary whole-notebook COUNT on this source-bounded path.
+            return self._retrieve_chunks_fts_degraded(
+                notebook_id, query, query_vector, recall, -1,
+                allowed_source_ids=allowed_source_ids,
+            )
         # ── 大库暴力守卫(镜像 #171 冷矩阵守卫哲学):走到这里 = ANN 不可用(未建
         # scale 索引 / embed 失败 query_vector=None / ANN fail-open)。超阈值的库
         # 绝不落进下面「全表拉文本 + 逐 chunk 纯 Python 分词」——生产 55 万 KG 级
@@ -1498,11 +1637,30 @@ class CandidateRetrievalService(_RetrievalState):
                 n_chunks = self.chunks.count_row(db, notebook_id)["c"]
             if large or n_chunks > threshold:
                 return self._retrieve_chunks_fts_degraded(
-                    notebook_id, query, query_vector, recall, n_chunks)
+                    notebook_id, query, query_vector, recall, n_chunks
+                )
         # ↓ 现有暴力路径保持不变
         with self._connect() as db:
-            chunks = self._gather_chunks(db, notebook_id)
-            ids, mat = self._vector_matrix(db, notebook_id, "chunk_embeddings", "chunk_id")
+            chunks = (
+                self._gather_chunks(db, notebook_id)
+                if allowed_source_ids is None
+                else self._gather_chunks(
+                    db, notebook_id, allowed_source_ids=allowed_source_ids
+                )
+            )
+            if allowed_source_ids is None:
+                ids, mat = self._vector_matrix(
+                    db, notebook_id, "chunk_embeddings", "chunk_id"
+                )
+            else:
+                from app.services.vector_index import build_matrix
+                chunk_ids = [chunk["chunk_id"] for chunk in chunks]
+                vector_rows = self.embeddings.vector_rows_for_ids(
+                    db, notebook_id, "chunk_embeddings", "chunk_id", chunk_ids
+                )
+                ids, mat = build_matrix(
+                    (row["vid"], row["vector"]) for row in vector_rows
+                )
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
         supports = {}
@@ -1518,7 +1676,8 @@ class CandidateRetrievalService(_RetrievalState):
         add_chunk_supports(scored, supports)
         return scored, ids, mat
     def _retrieve_chunks_fts_degraded(self, notebook_id, query, query_vector,
-                                      recall, n_chunks):
+                                      recall, n_chunks, *,
+                                      allowed_source_ids=None):
         """大库且 chunk ANN 不可用时的有界降级:FTS5 词法候选(k=recall)→ 只对
         候选 hydrate 文本+向量,候选内做关键词+语义融合打分。绝不 _gather_chunks
         全表、不全量分词、不触发全量向量矩阵加载(与 PR#158「查询恒定成本」取向
@@ -1531,8 +1690,15 @@ class CandidateRetrievalService(_RetrievalState):
         hits, fts_error = [], ""
         try:
             with self._connect() as db:
-                hits = self.knowledge.chunk_fts_search(
-                    db, notebook_id, query, k=recall)
+                if allowed_source_ids is None:
+                    hits = self.knowledge.chunk_fts_search(
+                        db, notebook_id, query, k=recall
+                    )
+                else:
+                    hits = self.knowledge.chunk_fts_search(
+                        db, notebook_id, query, k=recall,
+                        allowed_source_ids=allowed_source_ids,
+                    )
         except Exception as exc:  # noqa: BLE001 — 降级中的降级,守卫本身绝不抛
             fts_error = f"{type(exc).__name__}: {exc}"
         event = {
@@ -2114,6 +2280,9 @@ class CandidateRetrievalService(_RetrievalState):
 
     def federated_retrieve_relations(self, *args, **kwargs):
         return self._federated_retrieve_relations_impl(*args, **kwargs)
+
+    def federated_retrieve_elements(self, *args, **kwargs):
+        return self._federated_retrieve_elements_impl(*args, **kwargs)
 
     def retrieve_neighbors(self, *args, **kwargs):
         return self._retrieve_neighbors(*args, **kwargs)

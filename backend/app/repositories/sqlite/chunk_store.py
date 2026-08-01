@@ -17,6 +17,18 @@ class ChunkStore:
     def __init__(self, database: SqliteDatabase) -> None:
         self.database = database
 
+    @staticmethod
+    def ids_for_sources(db, notebook_id: str, source_ids: Sequence[str]):
+        values = list(dict.fromkeys(source_ids))
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        return db.execute(
+            f"SELECT id FROM chunks WHERE notebook_id=? "
+            f"AND source_id IN ({placeholders})",
+            (notebook_id, *values),
+        ).fetchall()
+
     def source_elements_for_chunking(self, source_id: str) -> list:
         """元素 id 形如 el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。
         额外带出 metadata 里的 caption：MinerU 带图注的 image 元素需凭它进检索

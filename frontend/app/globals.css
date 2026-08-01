@@ -2418,6 +2418,69 @@ button.chat-session-card {
   box-shadow: 0 0 0 3px rgba(122, 160, 239, 0.18);
 }
 
+.intent-card-source-scope {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #cbdaf5;
+  border-radius: 10px;
+  background: #f3f7ff;
+  color: #2d4779;
+  font-size: 12px;
+}
+
+.intent-card-source-scope ul,
+.answer-source-scope ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.intent-card-source-scope li,
+.answer-source-scope li {
+  min-width: 0;
+}
+
+.intent-card-source-scope li span,
+.answer-source-scope li span {
+  overflow-wrap: anywhere;
+}
+
+.intent-card-source-scope li small,
+.answer-source-scope li small {
+  display: block;
+  margin-top: 2px;
+  color: #66758f;
+  overflow-wrap: anywhere;
+}
+
+.intent-card-question textarea:disabled {
+  border-color: #e0e5ed;
+  background: #f4f6f9;
+  color: #4b5563;
+  opacity: 1;
+}
+
+.intent-card-scope-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  border: 1px solid #cbdaf5;
+  border-radius: 9px;
+  padding: 7px 10px;
+  background: #f3f7ff;
+  color: #294b8c;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.intent-card-scope-confirmation input {
+  margin: 0;
+}
+
 /* ---- 签核脊 ---- */
 .intent-card-asks {
   display: grid;
@@ -5238,6 +5301,43 @@ button.chat-session-card {
   justify-self: start;
   background: #e6f4ea;
   color: #1e7e34;
+}
+
+.answer-source-scope {
+  margin: 8px 0 10px;
+  border: 1px solid #d9e3f4;
+  border-radius: 9px;
+  background: #f7f9fe;
+  color: #334155;
+  font-size: 12px;
+}
+
+.answer-source-scope > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  list-style: none;
+  color: #35548c;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.answer-source-scope > summary::-webkit-details-marker {
+  display: none;
+}
+
+.answer-source-scope > summary svg {
+  flex: none;
+  transition: transform 0.12s ease;
+}
+
+.answer-source-scope[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.answer-source-scope ul {
+  padding: 0 12px 10px 30px;
 }
 .answer-overview {
   justify-self: start;

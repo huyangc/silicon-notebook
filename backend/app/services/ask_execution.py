@@ -77,6 +77,10 @@ class AskServicePort(Protocol):
         on_trace: "Callable[[Any], None] | None" = None,
     ) -> "AskResponse": ...
 
+    def validate_reasoning_submission(
+        self, notebook_id: str, payload: "AskRequest",
+    ) -> None: ...
+
 
 class AskCancellationRegistry:
     """WS2a 在途 ask 的 {job_id: cancel_event} 进程内注册表。
@@ -149,6 +153,13 @@ class AskExecutionCoordinator:
         """
         events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
         cancel_event = threading.Event()
+        service = self.ask()
+        # The API route runs this before yielding stream headers.  Keep the
+        # same guard here for direct coordinator callers; compatibility fakes
+        # used by narrow unit tests may intentionally omit it.
+        validate = getattr(service, "validate_reasoning_submission", None)
+        if validate is not None:
+            validate(notebook_id, payload)
         job_id, conversation_id = self.ask_state.begin_durable_job(
             notebook_id, payload, mode.id, user_id)
         self.cancellations.register(job_id, cancel_event)
@@ -179,7 +190,7 @@ class AskExecutionCoordinator:
 
         def worker() -> None:
             try:
-                response = self.ask().ask(
+                response = service.ask(
                     notebook_id, payload, user_id=user_id,
                     job_id=job_id, on_trace=on_trace, cancel_event=cancel_event,
                 )

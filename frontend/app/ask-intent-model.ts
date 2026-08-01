@@ -13,6 +13,20 @@ export type QueryIntentAmbiguity = {
   options?: string[];
 };
 
+export type QueryIntentSourceSnapshot = {
+  source_id: string;
+  notebook_id: string;
+  title: string;
+  source_file_name: string;
+};
+
+export type QueryIntentSourceScope = {
+  mode: "selected";
+  sources: QueryIntentSourceSnapshot[];
+  /** Opaque, short-lived server capability echoed only when confirming scope. */
+  preview_capability?: string;
+};
+
 export type QueryIntentContract = {
   objective: string;
   resolved_question: string;
@@ -20,6 +34,10 @@ export type QueryIntentContract = {
   result_scope: "ranked" | "complete" | "aggregate" | "hybrid";
   completeness_required: boolean;
   entities: string[];
+  /** 用户明确写出的来源引用；缺省/空数组保持历史全来源行为。 */
+  source_refs?: string[];
+  /** 服务端在授权目录中解析、签发的只读来源范围快照。 */
+  source_scope?: QueryIntentSourceScope;
   mandatory_topics: QueryIntentTopic[];
   comparison_axes: string[];
   constraints: string[];

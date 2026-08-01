@@ -27,7 +27,16 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import AskRequest, AskResponse, NotebookCreate
+from app.models.ask import (
+    AskIntentConfirmation,
+    QueryIntentAnswer,
+    QueryIntentContract,
+    QueryIntentSourceScope,
+    QueryIntentSourceSnapshot,
+)
+from app.models.common import Evidence
 from app.services.ask_service import AskService
+from app.services.evidence_scope import issue_source_scope_preview_capability
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 import asyncio
@@ -232,6 +241,9 @@ class _MinimalEvidence:
     def citation_source_info(self, source_ids):
         return {}
 
+    def citations_from(self, hits, element_ids, label, notebook_id=""):
+        return []
+
     def truncate_kg_block(self, block, max_tokens):
         return block
 
@@ -406,6 +418,127 @@ def test_reasoning_conditional_complete_query_does_not_claim_full_table():
     assert response.result_coverage is None
     assert "不能视为全部结果" in response.conclusion
     assert service.knowhow_store.catalog_calls == 1
+
+
+def test_selected_reasoning_scope_blocks_outer_memory_knowhow_and_assistant_history(
+    monkeypatch,
+):
+    """The confirmed ceiling is installed before every outer evidence plane."""
+    from app.services.evidence_scope import (
+        ResolvedEvidenceScope,
+        SourceIdentitySnapshot,
+    )
+    from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+
+    scope = ResolvedEvidenceScope.selected([
+        SourceIdentitySnapshot(
+            source_id="source-a", notebook_id="nb", title="Manual A",
+            source_file_name="a.pdf",
+        ),
+        SourceIdentitySnapshot(
+            source_id="source-b", notebook_id="nb", title="Manual B",
+            source_file_name="b.pdf",
+        ),
+    ])
+
+    class _Directory:
+        def resolve_evidence_scope(self, *args, **kwargs):
+            return scope
+
+    class _HistoryState(_MinimalAskState):
+        def prepare_turn(self, notebook_id, conversation_id, question, user_id):
+            return SimpleNamespace(
+                conversation_id="conv",
+                history="Assistant: third-manual secret\nUser: earlier question",
+            )
+
+    class _ForbiddenKnowhow:
+        def __getattr__(self, name):
+            raise AssertionError("selected scope must not inspect Knowhow")
+
+    service = _minimal_ask_service()
+    service.ask_state = _HistoryState()
+    service.collection_enumeration = _Directory()
+    service.collection_catalog = None
+    service.knowhow_store = _ForbiddenKnowhow()
+    service._memory_hits = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("selected scope must not retrieve Memory")
+    )
+
+    captured = {}
+
+    def _run(self, notebook_id, question, history="", **kwargs):
+        captured["history"] = history
+        captured["scope"] = kwargs["evidence_scope"]
+        return ReasoningResult(
+            top_hits=[
+                RetrievedKnowledge(
+                    object_id="ko-a", notebook_id="nb", object_type="claim",
+                    payload={"name": "A command"}, status="approved",
+                    relevance=0.9, score=0.9,
+                    evidence=[Evidence(
+                        source_id="source-a", source_title="Manual A",
+                        element_id="el-a", element_type="paragraph",
+                        location_label="Commands", quoted_span="A", confidence=1.0,
+                    )],
+                )
+            ],
+            evidence_scope=scope,
+        )
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    question = "只依据《Manual A》和《Manual B》列出所有命令"
+    contract = QueryIntentContract(
+        objective=question,
+        resolved_question=question,
+        result_scope="complete",
+        completeness_required=True,
+        source_refs=["Manual A", "Manual B"],
+        source_scope=QueryIntentSourceScope(sources=[
+            QueryIntentSourceSnapshot(
+                source_id=item.source_id, notebook_id=item.notebook_id,
+                title=item.title, source_file_name=item.source_file_name,
+            )
+            for item in scope.sources
+        ]),
+        ambiguities=[{
+            "id": "source_scope_confirmation",
+            "question": "确认本次仅依据指定来源吗？",
+            "required": True,
+            "options": ["确认"],
+        }],
+        needs_clarification=True,
+        confirmed=True,
+    )
+    contract = contract.model_copy(update={
+        "source_scope": contract.source_scope.model_copy(update={
+            "preview_capability": issue_source_scope_preview_capability("nb", contract),
+        }),
+    })
+
+    response = service.ask_reasoning(
+        "nb",
+        AskRequest(
+            question=question,
+            mode="reasoning",
+            intent=AskIntentConfirmation(
+                contract=contract,
+                resolved_question=question,
+                answers=[QueryIntentAnswer(
+                    id="source_scope_confirmation", answer="确认",
+                )],
+            ),
+        ),
+        user_id="user",
+    )
+
+    assert captured["history"] == ""
+    assert captured["scope"].allowed_source_ids == {"source-a", "source-b"}
+    assert [item.id for item in response.related_knowledge] == ["ko-a"]
+    assert response.result_sets == []
+    assert response.intent is not None
+    assert response.intent.source_scope is not None
+    assert response.intent.source_scope.preview_capability == ""
 
 
 def test_stream_route_helper_uses_ask_stream_port_without_runtime():

@@ -186,6 +186,7 @@ def _candidate_rows_for_terms(
     terms: list[str],
     per_term_limit: int,
     live_only: bool = False,
+    allowed_source_ids: list[str] | None = None,
 ):
     """Run one indexed LATERAL probe per term in a single PostgreSQL query."""
     if not terms or per_term_limit <= 0:
@@ -206,6 +207,21 @@ def _candidate_rows_for_terms(
     ]
     if live_only:
         predicates.append(target.live_predicate)
+    source_params: list[object] = []
+    if allowed_source_ids is not None:
+        if not allowed_source_ids:
+            return []
+        if target.table == "knowledge_objects":
+            predicates.append(
+                f"EXISTS (SELECT 1 FROM knowledge_object_sources kos "
+                f"WHERE kos.notebook_id={table_sql}.notebook_id "
+                f"AND kos.object_id={table_sql}.{id_sql} AND kos.source_id=ANY(%s))"
+            )
+        elif target.table == "chunks":
+            predicates.append(f"{table_sql}.source_id=ANY(%s)")
+        else:
+            raise ValueError("source-scoped lexical search target is unsupported")
+        source_params.append(allowed_source_ids)
     # The LIKE pattern is escaped and wrapped in Python so LIKE metacharacters
     # in the term stay literal; the trigram arm keeps the raw term.
     predicates.append(
@@ -232,12 +248,15 @@ def _candidate_rows_for_terms(
         for term_rank, term in enumerate(terms)
         for value in (term_rank, term, like_contains_pattern(term))
     ]
-    params.extend((notebook_id, int(per_term_limit)))
+    params.append(notebook_id)
+    params.extend(source_params)
+    params.append(int(per_term_limit))
     return connection.execute(statement, params).fetchall()
 
 
 def knowledge_candidate_rows_for_terms(
-    connection, notebook_id: str, terms: list[str], per_term_limit: int
+    connection, notebook_id: str, terms: list[str], per_term_limit: int,
+    allowed_source_ids: list[str] | None = None,
 ):
     return _candidate_rows_for_terms(
         connection,
@@ -248,11 +267,13 @@ def knowledge_candidate_rows_for_terms(
         terms=terms,
         per_term_limit=per_term_limit,
         live_only=True,
+        allowed_source_ids=allowed_source_ids,
     )
 
 
 def chunk_candidate_rows_for_terms(
-    connection, notebook_id: str, terms: list[str], per_term_limit: int
+    connection, notebook_id: str, terms: list[str], per_term_limit: int,
+    allowed_source_ids: list[str] | None = None,
 ):
     return _candidate_rows_for_terms(
         connection,
@@ -262,6 +283,7 @@ def chunk_candidate_rows_for_terms(
         notebook_id=notebook_id,
         terms=terms,
         per_term_limit=per_term_limit,
+        allowed_source_ids=allowed_source_ids,
     )
 
 
