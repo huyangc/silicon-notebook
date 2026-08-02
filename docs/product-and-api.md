@@ -390,7 +390,11 @@ The title is resolved once, at the moment a target table is first created for
 a job; a job that already landed rows keeps writing to that SAME table via its
 remembered `applied_table_id` even if the canonical title changes later (a
 paper title arriving through a later metadata backfill does not rename or
-split the table). A candidate whose command already has a row is reported
+split the table). Re-running extraction (a fresh job whose own
+`applied_table_id` starts empty) reuses that same table too, by inheriting
+the most recent prior job's confirmed target for this source — the derived
+title is only used to create or find a table when that inherited target has
+since been deleted. A candidate whose command already has a row is reported
 in `conflicts` and the existing row is left untouched — v1 deliberately never
 overwrites content a person may have corrected by hand. A full diff/merge is a
 later task. Columns are addressed by name, so editing the target table's columns
