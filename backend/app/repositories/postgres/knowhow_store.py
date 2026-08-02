@@ -1140,6 +1140,18 @@ class KnowhowStore:
             raise KeyError(table_id)
         return str(row["title"])
 
+    def knowhow_table_notebook_id(self, table_id: str) -> str:
+        """See the SQLite mirror /
+        ``KnowhowStorePort.knowhow_table_notebook_id``. One point lookup by
+        primary key, no rows/cells/columns touched."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT notebook_id FROM knowhow_tables WHERE id = %s", (table_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(table_id)
+        return str(row["notebook_id"])
+
     def knowhow_anchor_existing_values(
         self, column_id: str, values: Sequence[str]
     ) -> set[str]:

@@ -8,6 +8,7 @@ that are genuinely backend-specific — the migration actually adds the two new
 ``catalog_jobs`` columns on PostgreSQL, and the bounded ``KnowhowStorePort``
 methods (``knowhow_table_columns``, ``knowhow_anchor_existing_values``,
 ``knowhow_table_id_by_title``, ``knowhow_table_title``,
+``knowhow_table_notebook_id``,
 ``append_knowhow_rows_skipping_existing_anchors``) behave the same way
 against real PostgreSQL SQL (``btrim`` instead of SQLite's ``trim``,
 ``= ANY(%s)`` instead of ``IN (...)``, ``COLLATE "C"`` instead of SQLite's
@@ -380,6 +381,32 @@ def test_knowhow_table_title_is_a_bare_point_lookup_and_raises_on_a_missing_tabl
 
     with pytest.raises(KeyError):
         harness.knowhow.knowhow_table_title("khtbl-does-not-exist")
+
+
+def test_knowhow_table_notebook_id_is_a_bare_point_lookup_and_raises_on_a_missing_table(
+    catalog_harness,
+):
+    """R20 (codex PR #412 评审第 20 轮,P2): the bounded owning-notebook
+    accessor `_inherit_applied_table` uses to re-verify an inherited apply
+    target directly by id, instead of a title round-trip that a colliding
+    title can resolve to the wrong table. Mirrors `knowhow_table_title`
+    above — one point lookup by primary key, KeyError when the table is
+    gone."""
+    harness = catalog_harness
+    table_id = harness.knowhow.create_knowhow_table(
+        harness.notebook_id,
+        "命令目录：OpenROAD 手册",
+        "",
+        [
+            {"name": "命令", "role": "anchor"},
+            {"name": "说明", "role": "attribute"},
+        ],
+        "user-catalog",
+    )
+    assert harness.knowhow.knowhow_table_notebook_id(table_id) == harness.notebook_id
+
+    with pytest.raises(KeyError):
+        harness.knowhow.knowhow_table_notebook_id("khtbl-does-not-exist")
 
 
 def test_knowhow_anchor_existing_values_is_bounded_and_normalizes_whitespace(

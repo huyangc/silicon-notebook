@@ -94,6 +94,20 @@ R19(codex PR #412 R19 评审 P2)修复补充覆盖(变异验证见交付报告):
     对已删行的容忍与「探活触发的停止不发事件」是两件分开的事:前者是
     `finish_job` 本就无操作之外再加一次「已删 vs 已终态」的区分性日志,后者是
     `run()` 的 `except CatalogJobGone` 干脆不取行、不 `_emit`。
+
+R20(codex PR #412 R20 评审 P2)修复补充覆盖(变异验证见交付报告):
+
+20. **继承目标的归属校验按 id 直接点查,不再按标题回查** —— R18 的
+    `_inherit_applied_table` 用 `knowhow_table_id_by_title(notebook_id, title)
+    == candidate_table_id` 判断继承目标属于当前笔记本,但标题不唯一:被改名的
+    候选表若撞上**同一笔记本内、更早创建**的另一张同名表,`knowhow_
+    table_id_by_title` 按其自身文档写明的创建时间 tie-break 会解析到那张更早
+    的表而不是候选表,等值判断失败——合法的继承目标被误拒,`_inherit_applied_
+    table` 落回按标题 create-or-find,凭空多分叉出第三张表,正是这个方法本该
+    防止的「静默分叉」被它自己的归属校验复活。新增 `KnowhowStorePort.
+    knowhow_table_notebook_id`(有界主键点查,契约与相邻的 `knowhow_table_
+    title` 一致)让归属校验直接读候选表自己的 `notebook_id` 列,标题相同与否
+    不再参与判断。
 """
 from __future__ import annotations
 
@@ -3036,6 +3050,63 @@ def test_apply_by_a_rerun_job_never_inherits_a_target_from_a_different_notebook(
     local_table = repo.get_knowhow_table(result["table_id"])
     assert local_table["rows"]
     assert local_table["title"] == f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+
+
+# --------------------- R20 P2: inheritance membership by id, not by title ---
+def test_apply_by_a_rerun_job_inherits_by_id_past_a_colliding_earlier_title(repo):
+    """R20 (codex PR #412 评审第 20 轮,P2): R18's membership re-check for an
+    inherited apply target used to be a TITLE round-trip
+    (`knowhow_table_id_by_title(notebook_id, title) == candidate_table_id`).
+    A table's title is not unique — a person can rename job A's table to a
+    string that collides with an EARLIER, unrelated table already living in
+    the SAME notebook. `knowhow_table_id_by_title`'s documented tie-break
+    (creation order) then resolves that collided title to the EARLIER table,
+    not job A's — so the equality check failed for an inherited target that
+    in fact still belonged to this notebook, and `_inherit_applied_table`
+    fell through to create-or-find, forking a THIRD table under the derived
+    title and losing sight of job A's row entirely (the same "irreversible
+    fork" this whole method exists to prevent, reintroduced by its own
+    membership check). Reading the candidate's own `notebook_id` column
+    directly must let job B still converge on job A's table."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    collide_title = "手工重命名后的表"
+    unrelated_table_id = repo.create_knowhow_table(
+        notebook.id, "不相关的表", "",
+        [{"name": "命令", "role": "anchor"}],
+        "tester",
+    )
+    # Give the unrelated table an unambiguously EARLIER creation order than
+    # job A's table (created below), so the documented `created_at, id`
+    # tie-break resolves the collided title to THIS row, not job A's.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE knowhow_tables SET title=?, created_at=? WHERE id=?",
+            (collide_title, "2000-01-01T00:00:00+00:00", unrelated_table_id),
+        )
+
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job_a = _run_ok(repo, notebook.id, "s1", 1)
+    first = service.apply(
+        notebook.id, "s1", job_a["id"], all_pending=True, actor="tester"
+    )
+    table_id = first["table_id"]
+    assert table_id != unrelated_table_id
+    repo.update_knowhow_table_meta(table_id, title=collide_title)
+
+    _, job_b = _run_ok(repo, notebook.id, "s1", 1)
+    second = service.apply(
+        notebook.id, "s1", job_b["id"], all_pending=True, actor="tester"
+    )
+    assert second["table_id"] == table_id
+    assert second["created"] is False
+    # The re-extracted "set_thing_0" already has a row from job A -> conflict,
+    # not a second write into a freshly forked table.
+    assert second["rows_added"] == 0
+    assert {item["command_name"] for item in second["conflicts"]} == {"set_thing_0"}
+    # The unrelated, earlier-created table sharing the collided title was
+    # never touched, and no third table was forked under the derived title.
+    assert repo.get_knowhow_table(unrelated_table_id)["rows"] == []
+    assert len(repo.list_knowhow_tables(notebook.id)) == 2
 
 
 def test_apply_refuses_rather_than_forks_when_an_inherited_table_lost_its_shape(repo):
