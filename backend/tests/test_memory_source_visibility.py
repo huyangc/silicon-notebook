@@ -215,9 +215,30 @@ def test_report_source_rows_excludes_memory_source(store, notebook_id):
         store, notebook_id, "src-memory", title="Memory Doc",
         source_type="memory", doc_type="memory", memory_id="mem-1",
     )
-    titles = [r["title"] for r in store.report_source_rows(notebook_id)]
+    titles = [
+        r["title"]
+        for r in store.report_source_rows(notebook_id)["representatives"]
+    ]
     assert "Memory Doc" not in titles
     assert "Normal Doc" in titles
+
+
+def test_report_source_rows_aggregates_more_sources_than_representative_limit(
+    store, notebook_id
+):
+    for index in range(37):
+        _insert(
+            store, notebook_id, f"src-{index:02d}",
+            doc_type="academic_paper" if index % 2 else "textbook",
+            file_hash=f"hash-{index:02d}",
+        )
+    snapshot = store.report_source_rows(notebook_id, representative_limit=7)
+    assert snapshot["total_sources"] == 37
+    assert len(snapshot["representatives"]) == 7
+    assert sum(row["count"] for row in snapshot["type_distribution"]) == 37
+    assert {row["doc_type"] for row in snapshot["representatives"]} >= {
+        "academic_paper", "textbook"
+    }
 
 
 def test_meta_sources_excludes_memory_source(store, notebook_id):

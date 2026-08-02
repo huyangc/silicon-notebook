@@ -523,22 +523,99 @@ class SourceStore:
             (notebook_id,),
         ).fetchall()
 
-    def report_source_rows(self, notebook_id: str) -> List[Dict[str, object]]:
-        """Complete visible-source projection for deterministic report profiling.
+    def report_source_rows(
+        self, notebook_id: str, *, representative_limit: int = 20,
+        distribution_limit: int = 32,
+    ) -> Dict[str, object]:
+        """Bounded corpus profile: SQL aggregates plus a small representative set.
 
-        Excludes source_type IN ('memory', 'knowhow') so a hidden Memory- or
-        knowhow-projection-derived title is never shown to the report planner
-        as a source doc (their KG objects/chunks still participate via
-        knowledge_objects/chunks — same "hidden container, visible content"
-        split as the other memory-kg-extract sites in this file)."""
+        The database may scan/group the visible collection, but Python never
+        materialises every source identity.  Exact family resolution is a
+        separate bounded lookup over evidence source ids.
+        """
+        representative_limit = max(1, min(int(representative_limit), 64))
+        distribution_limit = max(1, min(int(distribution_limit), 64))
+        visible = "s.notebook_id=? AND s.source_type NOT IN ('memory','knowhow')"
+        with self.database.connect() as db:
+            totals = dict(db.execute(
+                "SELECT COUNT(*) AS total_sources,"
+                "SUM(CASE WHEN COALESCE(m.is_paper,0)=1 "
+                "AND TRIM(COALESCE(m.paper_title,''))<>'' THEN 1 ELSE 0 END) AS metadata_sources,"
+                "SUM(CASE WHEN COALESCE(m.is_paper,0)=1 "
+                "AND m.pub_year BETWEEN 1000 AND 9999 THEN 1 ELSE 0 END) AS known_year_sources,"
+                "SUM(CASE WHEN COALESCE(s.file_hash,'')='' AND NOT "
+                "(COALESCE(m.is_paper,0)=1 AND TRIM(COALESCE(m.paper_title,''))<>'') "
+                "THEN 1 ELSE 0 END) AS identity_uncertain_sources "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                f"WHERE {visible}",
+                (notebook_id,),
+            ).fetchone())
+            type_rows = [dict(row) for row in db.execute(
+                "SELECT COALESCE(NULLIF(TRIM(s.doc_type),''),"
+                "NULLIF(TRIM(s.source_type),''),'unknown') AS type,COUNT(*) AS count "
+                "FROM sources s WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory','knowhow') GROUP BY 1 "
+                "ORDER BY count DESC,type LIMIT ?",
+                (notebook_id, distribution_limit + 1),
+            ).fetchall()]
+            year_rows = [dict(row) for row in db.execute(
+                "SELECT m.pub_year AS year,COUNT(*) AS count FROM sources s "
+                "JOIN source_paper_meta m ON m.source_id=s.id WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory','knowhow') "
+                "AND m.pub_year BETWEEN 1000 AND 9999 GROUP BY m.pub_year "
+                "ORDER BY m.pub_year DESC LIMIT ?",
+                (notebook_id, distribution_limit + 1),
+            ).fetchall()]
+            duplicate_row = dict(db.execute(
+                "SELECT "
+                "COALESCE((SELECT SUM(n-1) FROM (SELECT COUNT(*) AS n FROM sources s "
+                "WHERE s.notebook_id=? AND s.source_type NOT IN ('memory','knowhow') "
+                "AND COALESCE(s.file_hash,'')<>'' GROUP BY s.file_hash HAVING COUNT(*)>1)),0) "
+                "AS hash_duplicate_excess,"
+                "COALESCE((SELECT SUM(n-1) FROM (SELECT COUNT(*) AS n FROM sources s "
+                "JOIN source_paper_meta m ON m.source_id=s.id WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory','knowhow') AND m.is_paper=1 "
+                "AND TRIM(COALESCE(m.paper_title,''))<>'' "
+                "GROUP BY LOWER(TRIM(m.paper_title)) HAVING COUNT(*)>1)),0) "
+                "AS title_duplicate_excess",
+                (notebook_id, notebook_id),
+            ).fetchone())
+            representatives = [dict(row) for row in db.execute(
+                "WITH ranked AS (SELECT s.id,s.title,s.file_name,s.source_type,s.doc_type,"
+                "m.paper_title,m.pub_year,m.is_paper,s.created_at,"
+                "ROW_NUMBER() OVER (PARTITION BY COALESCE(NULLIF(TRIM(s.doc_type),''),"
+                "NULLIF(TRIM(s.source_type),''),'unknown') ORDER BY s.created_at,s.id) AS type_rank,"
+                "ROW_NUMBER() OVER (PARTITION BY COALESCE(CAST(m.pub_year AS TEXT),'unknown') "
+                "ORDER BY s.created_at,s.id) AS year_rank FROM sources s "
+                "LEFT JOIN source_paper_meta m ON m.source_id=s.id WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory','knowhow')) "
+                "SELECT id,title,file_name,source_type,doc_type,paper_title,pub_year,is_paper "
+                "FROM ranked ORDER BY CASE WHEN type_rank=1 THEN 0 WHEN year_rank=1 THEN 1 ELSE 2 END,"
+                "COALESCE(doc_type,source_type),pub_year DESC,created_at,id LIMIT ?",
+                (notebook_id, representative_limit),
+            ).fetchall()]
+        return {
+            **totals,
+            **duplicate_row,
+            "type_distribution": type_rows[:distribution_limit],
+            "type_distribution_truncated": len(type_rows) > distribution_limit,
+            "year_distribution": year_rows[:distribution_limit],
+            "year_distribution_truncated": len(year_rows) > distribution_limit,
+            "representatives": representatives,
+        }
+
+    def report_source_identity_rows(
+        self, source_ids: Sequence[str]
+    ) -> List[Dict[str, object]]:
+        ids = list(dict.fromkeys(str(value) for value in source_ids if value))[:1024]
+        if not ids:
+            return []
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT s.id,s.title,s.file_name,s.source_type,s.doc_type,s.file_hash,"
-                "m.paper_title,m.pub_year,m.is_paper "
-                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
-                "WHERE s.notebook_id=? AND s.source_type NOT IN ('memory','knowhow') "
-                "ORDER BY s.created_at,s.id",
-                (notebook_id,),
+                "SELECT s.id,s.file_hash,m.paper_title,m.is_paper FROM sources s "
+                "LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                f"WHERE s.id IN ({','.join('?' for _ in ids)})",
+                ids,
             ).fetchall()
         return [dict(row) for row in rows]
 

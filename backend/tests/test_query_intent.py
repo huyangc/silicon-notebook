@@ -123,6 +123,26 @@ def test_query_intent_keeps_explicit_source_references_for_confirmation(question
     assert contract["confirmed"] is False
 
 
+def test_query_intent_can_disable_source_reference_contract_for_reports():
+    class _SourceRefClient:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert "source_refs" not in messages[-1]["content"]
+            assert "source_refs" not in schema_hint
+            return json.dumps({
+                "normalized_question": "分析资料",
+                "source_refs": ["manual.pdf"],
+                "mandatory_topics": [],
+                "ambiguities": [],
+            })
+
+    contract = plan_query_intent(
+        _SourceRefClient(), "分析资料", source_refs_enabled=False
+    )
+    assert "source_refs" not in contract
+
+
 def test_source_references_are_bounded_and_legacy_serialization_omits_empty_field():
     refs = [f"manual-{index}-" + ("x" * 600) + ".pdf" for index in range(12)]
 

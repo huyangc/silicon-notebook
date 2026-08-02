@@ -664,6 +664,13 @@ class SourceStorePort(Protocol):
         allowed_source_ids: Sequence[str] | None = None,
     ) -> list[Any]: ...
     def source_titles(self, source_ids: list[str]) -> dict[str, str]: ...
+    def report_source_rows(
+        self, notebook_id: str, *, representative_limit: int = 20,
+        distribution_limit: int = 32,
+    ) -> dict[str, Any]: ...
+    def report_source_identity_rows(
+        self, source_ids: Sequence[str]
+    ) -> list[dict[str, Any]]: ...
     def get_source(self, source_id: str) -> SourceDetail: ...
     @staticmethod
     def source_exists_tx(connection: object, source_id: str) -> bool: ...
@@ -2055,10 +2062,15 @@ class MemoryStorePort(Protocol):
 
 
 class ReportSourceQueryPort(Protocol):
-    """Complete visible-source projection for deterministic report profiling."""
+    """Bounded report corpus statistics and source-identity projection."""
 
     def report_source_rows(
-        self, notebook_id: str
+        self, notebook_id: str, *, representative_limit: int = 20,
+        distribution_limit: int = 32,
+    ) -> dict[str, Any]: ...
+
+    def report_source_identity_rows(
+        self, source_ids: Sequence[str]
     ) -> list[dict[str, Any]]: ...
 
 

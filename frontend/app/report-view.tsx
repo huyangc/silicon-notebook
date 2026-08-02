@@ -21,7 +21,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { normalizeMathMarkdown } from "./math-markdown";
 import { remarkCitations } from "./answer-citations";
-import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
+import { computeSourceTierCounts, referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { quotedPhraseHint } from "./query-syntax";
@@ -118,6 +118,7 @@ export type ReportCorpusProfileT = {
   independent_documents?: number;
   independent_families?: number;
   duplicate_inflation?: number;
+  identified_duplicate_lower_bound?: number;
   identity_uncertain_sources?: number;
   type_distribution?: ReportDistributionT[] | Record<string, number>;
   year_distribution?: ReportDistributionT[] | Record<string, number>;
@@ -156,6 +157,11 @@ export type ReportCredibilityT = {
   anchor_count?: number;
   top1_share?: number;
   top1_concentration?: number;
+  /** 全篇综合的执行结果；旧报告缺失时不渲染状态。 */
+  synthesis_status?: "not_requested" | "available" | "skipped_no_evidence" | "failed_model" | "failed_validation";
+  /** 有可用主张账本的章节数及本次报告总章节数。 */
+  claim_ledgers_available?: number;
+  claim_ledgers_total?: number;
 };
 
 export type ReportCitationAuditT = {
@@ -278,6 +284,31 @@ async function copyReportContent(text: string): Promise<void> {
 // cite-chip,点击高亮并滚动到「参考文献」段(h2 覆盖挂 id=report-references)。
 // ---------------------------------------------------------------------------
 
+/**
+ * 报告和 Ask 都必须按「用户实际可见的引用」统计来源层级。这里仅做 wire
+ * shape 适配，计数始终委托给 answer-formatting 的唯一实现。
+ */
+function reportReferencesAsAnswerReferences(
+  references: ReportDetailT["references"],
+): AnswerReference[] {
+  return references.map((reference, index) => ({
+    id: `report:${reference.key}`,
+    displayLabel: `[${index + 1}]`,
+    anchor: {
+      key: reference.key,
+      object_id: reference.object_id || "",
+      object_type: reference.object_type || "",
+      label: reference.label,
+      name: reference.name,
+      source_title: reference.source_title,
+      source_file_name: reference.source_file_name,
+      location_label: reference.location_label,
+      snippet: reference.snippet,
+      tier: reference.tier,
+    },
+  }));
+}
+
 export function ReportMarkdown({
   markdown,
   references = [],
@@ -286,22 +317,7 @@ export function ReportMarkdown({
   references?: ReportDetailT["references"];
 }) {
   const [selectedRefKey, setSelectedRefKey] = useState<string | null>(null);
-  const refObjs: AnswerReference[] = references.map((r, i) => ({
-    id: `report:${r.key}`,
-    displayLabel: `[${i + 1}]`,
-    anchor: {
-      key: r.key,
-      object_id: r.object_id || "",
-      object_type: r.object_type || "",
-      label: r.label,
-      name: r.name,
-      source_title: r.source_title,
-      source_file_name: r.source_file_name,
-      location_label: r.location_label,
-      snippet: r.snippet,
-      tier: r.tier,
-    },
-  }));
+  const refObjs = reportReferencesAsAnswerReferences(references);
   const refsByKey = referenceByAnchorKey(refObjs);
   const selectedReference = selectedRefKey ? refsByKey[selectedRefKey]?.anchor : undefined;
   const components = {
@@ -692,6 +708,66 @@ function citationSummary(report: ReportDetailT): {
   return { independent, top1 };
 }
 
+const SYNTHESIS_STATUS_COPY: Record<NonNullable<ReportCredibilityT["synthesis_status"]>, string> = {
+  not_requested: "本次报告未请求全篇综合。",
+  available: "全篇综合已完成，已用于检查跨章节的一致性。",
+  skipped_no_evidence: "已跳过全篇综合：可用资料不足，正文保持逐节结果。",
+  failed_model: "全篇综合未完成：模型调用失败，正文未被改写。",
+  failed_validation: "全篇综合未完成：返回结果未通过校验，正文未被改写。",
+};
+
+/** 报告生成的可见可信度回执；缺失字段的历史报告保持静默。 */
+export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) {
+  const credibility = report.understanding?.credibility;
+  if (!credibility) return null;
+  const synthesisStatus = credibility.synthesis_status;
+  const ledgersAvailable = credibility.claim_ledgers_available;
+  const ledgersTotal = credibility.claim_ledgers_total;
+  const showLedgers = typeof ledgersAvailable === "number" || typeof ledgersTotal === "number";
+  if (!synthesisStatus && !showLedgers) return null;
+  const statusClass = synthesisStatus === "failed_model" || synthesisStatus === "failed_validation"
+    ? "failed"
+    : synthesisStatus === "skipped_no_evidence"
+      ? "skipped"
+      : "ok";
+  return (
+    <section className="report-credibility-summary" aria-label="报告可信度回执">
+      {synthesisStatus && (
+        <p className={`report-synthesis-status ${statusClass}`}>
+          <strong>全篇综合：</strong>{SYNTHESIS_STATUS_COPY[synthesisStatus]}
+        </p>
+      )}
+      {showLedgers && (
+        <p className="report-claim-ledgers">
+          主张账本：{typeof ledgersAvailable === "number" ? ledgersAvailable : 0}
+          {typeof ledgersTotal === "number" ? `/${ledgersTotal}` : ""} 节可用
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** 资料集中度与个人/公共来源口径共用 Ask 的显示引用统计。 */
+export function ReportCitationDistribution({ report }: { report: ReportDetailT }) {
+  const summary = citationSummary(report);
+  const { personal, base } = computeSourceTierCounts(
+    reportReferencesAsAnswerReferences(report.references || []),
+  );
+  if (summary.independent == null && !summary.top1 && personal + base === 0) return null;
+  return (
+    <div className="report-source-dist" title="按可区分资料统计，不以引用标记数量代替资料数量">
+      {summary.independent != null && <>可区分资料 {summary.independent}</>}
+      {summary.top1 && <><span aria-hidden> · </span>最集中资料占 {summary.top1}</>}
+      {personal + base > 0 && (
+        <span className="tag source-dist" title="本次引用的来源分布（个人知识库 / 公共知识库）">
+          来源 · 个人 {personal}
+          {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function citationAuditLabel(audit: ReportCitationAuditT | undefined): string | null {
   if (!audit) return null;
   const fromRate = percent(audit.support_rate);
@@ -715,6 +791,8 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
   const representativeTitles = (profile?.representatives || [])
     .map((item) => String(item.title || item.label || item.source_title || "").trim())
     .filter(Boolean);
+  const duplicateLowerBound = profile?.identified_duplicate_lower_bound
+    ?? profile?.duplicate_inflation;
   return (
     <section className="report-corpus-basis" aria-label="资料基础">
       <div className="report-corpus-basis-head">
@@ -734,8 +812,8 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
           {typeof profile.identity_uncertain_sources === "number" && profile.identity_uncertain_sources > 0 && (
             <span>另有 {profile.identity_uncertain_sources} 份资料无法可靠合并</span>
           )}
-          {typeof profile.duplicate_inflation === "number" && profile.duplicate_inflation > 0 && (
-            <span>保守识别重复 {profile.duplicate_inflation} 份</span>
+          {typeof duplicateLowerBound === "number" && duplicateLowerBound > 0 && (
+            <span>保守识别重复至少 {duplicateLowerBound} 份</span>
           )}
           {percent(profile.metadata_coverage) && (
             <span>资料识别信息完整度 {percent(profile.metadata_coverage)}</span>
@@ -788,6 +866,16 @@ export function ReportFrameEditor({
       {facets.map((facet, index) => (
         <fieldset key={facet.id || `facet-${index}`}>
           <legend>分类维度</legend>
+          <button
+            type="button"
+            className="report-frame-remove"
+            title="删除此分类维度"
+            aria-label={`删除分类维度：${facet.name || index + 1}`}
+            disabled={disabled}
+            onClick={() => patch({ facets: facets.filter((_, itemIndex) => itemIndex !== index) })}
+          >
+            <X size={14} aria-hidden="true" /> 删除
+          </button>
           <label>
             <span>名称</span>
             <input value={facet.name || ""} disabled={disabled} onChange={(event) => {
@@ -818,6 +906,16 @@ export function ReportFrameEditor({
       {axes.map((axis, index) => (
         <fieldset key={axis.id || `axis-${index}`}>
           <legend>比较条件</legend>
+          <button
+            type="button"
+            className="report-frame-remove"
+            title="删除此比较条件"
+            aria-label={`删除比较条件：${axis.name || index + 1}`}
+            disabled={disabled}
+            onClick={() => patch({ axes: axes.filter((_, itemIndex) => itemIndex !== index) })}
+          >
+            <X size={14} aria-hidden="true" /> 删除
+          </button>
           <label>
             <span>名称</span>
             <input value={axis.name || ""} disabled={disabled} onChange={(event) => {
@@ -1533,16 +1631,8 @@ export function ReportsPanel({
           </div>
         )}
         <ReportCorpusBasis report={active} />
-        {active.content_md && (() => {
-          const summary = citationSummary(active);
-          if (summary.independent == null && !summary.top1) return null;
-          return (
-            <div className="report-source-dist" title="按可区分资料统计，不以引用标记数量代替资料数量">
-              {summary.independent != null && <>可区分资料 {summary.independent}</>}
-              {summary.top1 && <><span aria-hidden> · </span>最集中资料占 {summary.top1}</>}
-            </div>
-          );
-        })()}
+        <ReportCredibilitySummary report={active} />
+        {active.content_md && <ReportCitationDistribution report={active} />}
         {active.content_md && active.sections.some((section) => citationAuditLabel(section.citation_audit)) && (
           <div className="report-section-audits" aria-label="章节引证覆盖率">
             {active.sections.map((section, index) => {

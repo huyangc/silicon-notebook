@@ -33,6 +33,10 @@ gate, and revocation guidance synchronized with the product/API contract and
 
 Treat `fangan_done.md` as a required deliverable of finishing spec work, not an afterthought.
 
+## Deep Report Credibility Contract
+
+Deep reports reuse the shared intent contract and persist `result_scope` / `completeness_required`; until report-side complete enumeration exists, they must not present relevance retrieval as an exhaustive result. Build the visible corpus basis from SQL aggregates plus bounded representatives, never by copying a complete source-family map into intent, outline, polling payloads, or prompts; resolve identities only for source ids actually touched by evidence. At depth ≥ 8, all section retrieval completes before at most one report-wide synthesis call and parallel drafting; lower depths retain per-section retrieve→draft streaming. Synthesis skip/failure and claim-ledger availability are user-visible, and model/validation failures fail open and remain observable. The high-risk citation audit always discloses its result but automatic evidence-level downgrade is controlled by a separate default-off flag. The final editor audits and summarizes but never rewrites body sections or adds facts. Keep numeric rails only in `docs/product-and-api.md` and `docs/product-and-api_zh.md`.
+
 ## Full-Stack Parity (Backend ⇄ Frontend)
 
 **No half-features.** In this product, every user-facing backend capability MUST ship with a corresponding frontend UI in the same change. It is not allowed to implement only one side.

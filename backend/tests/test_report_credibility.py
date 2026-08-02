@@ -7,16 +7,55 @@ from app.services.query_intent import confirmed_research_question
 from app.services.report_corpus_profile import ReportCorpusProfileService
 from app.services.report_engine import (
     audit_high_risk_assertions,
-    fair_editor_sections,
 )
+from app.services.report_synthesis import fair_editor_context
 
 
 class _Sources:
     def __init__(self, rows):
         self.rows = rows
 
-    def report_source_rows(self, notebook_id):
-        return list(self.rows)
+    def report_source_rows(self, notebook_id, *, representative_limit=20,
+                           distribution_limit=32):
+        known_years = sum(row.get("pub_year") is not None for row in self.rows)
+        metadata = sum(row.get("is_paper") is not None for row in self.rows)
+        hash_counts = {}
+        title_counts = {}
+        for row in self.rows:
+            if row.get("file_hash"):
+                hash_counts[row["file_hash"]] = hash_counts.get(row["file_hash"], 0) + 1
+            if row.get("is_paper") and row.get("paper_title"):
+                title = " ".join(row["paper_title"].casefold().split())
+                title_counts[title] = title_counts.get(title, 0) + 1
+        representatives = []
+        seen_types = set()
+        for row in self.rows:
+            doc_type = row.get("doc_type") or row.get("source_type") or "unknown"
+            if doc_type not in seen_types:
+                representatives.append(row)
+                seen_types.add(doc_type)
+        representatives.extend(
+            row for row in self.rows if row not in representatives
+        )
+        return {
+            "total_sources": len(self.rows),
+            "metadata_sources": metadata,
+            "known_year_sources": known_years,
+            "identity_uncertain_sources": sum(
+                not row.get("file_hash") and not (
+                    row.get("is_paper") and row.get("paper_title")
+                ) for row in self.rows
+            ),
+            "hash_duplicate_excess": sum(max(0, count - 1) for count in hash_counts.values()),
+            "title_duplicate_excess": sum(max(0, count - 1) for count in title_counts.values()),
+            "type_distribution": [],
+            "year_distribution": [],
+            "representatives": representatives[:representative_limit],
+        }
+
+    def report_source_identity_rows(self, source_ids):
+        wanted = set(source_ids)
+        return [row for row in self.rows if row["id"] in wanted]
 
 
 def test_corpus_profile_counts_whole_collection_and_stratifies_representatives():
@@ -37,13 +76,13 @@ def test_corpus_profile_counts_whole_collection_and_stratifies_representatives()
         "nb", result_scope="complete"
     )
     assert profile["total_sources"] == 25
-    assert profile["independent_families"] == 24
     assert profile["representative_count"] == 20
     assert any(row["doc_type"] == "textbook" for row in profile["representatives"])
     assert profile["unknown_year"] == 1
     assert profile["metadata_sources"] == 24
     assert profile["complete_enumeration_performed"] is False
-    assert profile["duplicate_inflation"] == 1
+    assert profile["identified_duplicate_lower_bound"] == 1
+    assert "family_by_source" not in profile
 
 
 def test_corpus_profile_merges_equal_grounded_titles_even_when_hashes_differ():
@@ -56,9 +95,21 @@ def test_corpus_profile_merges_equal_grounded_titles_even_when_hashes_differ():
         "is_paper": 1, "paper_title": " The  Same   Paper ", "pub_year": 2025,
         "source_type": "file", "doc_type": "academic_paper",
     }]
-    profile = ReportCorpusProfileService(_Sources(rows)).build("nb")
-    assert profile["independent_families"] == 1
-    assert profile["family_by_source"]["a"] == profile["family_by_source"]["b"]
+    resolution = ReportCorpusProfileService(_Sources(rows)).resolve_families(["a", "b"])
+    assert resolution["family_by_source"]["a"] == resolution["family_by_source"]["b"]
+
+
+def test_family_resolver_caps_identity_hydration_and_discloses_truncation():
+    rows = [{
+        "id": f"s-{index}", "file_hash": f"h-{index}",
+        "is_paper": None, "paper_title": None,
+    } for index in range(1026)]
+    resolution = ReportCorpusProfileService(_Sources(rows)).resolve_families(
+        [row["id"] for row in rows]
+    )
+    assert resolution["requested_count"] == 1026
+    assert resolution["truncated"] is True
+    assert resolution["unresolved_source_ids"][-2:] == ["s-1024", "s-1025"]
 
 
 def test_high_risk_audit_requires_valid_same_sentence_anchor_and_exempts_marked_prose():
@@ -74,7 +125,19 @@ def test_high_risk_audit_requires_valid_same_sentence_anchor_and_exempts_marked_
     assert audit["high_risk_assertions"] == 3
     assert audit["supported"] == 1
     assert audit["unsupported"] == 2
-    assert audit["downgraded"] is True
+    assert audit["threshold_exceeded"] is True
+    assert audit["downgrade_applied"] is False
+
+
+def test_high_risk_audit_ignores_ordinary_prose_and_section_numbers():
+    markdown = """## 普通说明
+平均而言，这是一种 parallel implementation challenge。
+Nevertheless, alluvial layers are described in Chapter 2.
+第 2 节介绍流程，图 3 展示结构。
+"""
+    audit = audit_high_risk_assertions(markdown, {}, max_unsupported_ratio=0.25)
+    assert audit["high_risk_assertions"] == 0
+    assert audit["threshold_exceeded"] is False
 
 
 def test_report_retrieval_query_can_exclude_assumptions_without_losing_constraints():
@@ -93,27 +156,51 @@ def test_report_retrieval_query_can_exclude_assumptions_without_losing_constrain
 
 def test_fair_editor_context_includes_every_section_tail():
     sections = [
-        {"markdown": f"## S{index}\n" + (str(index) * 2000) + f"TAIL-{index}"}
-        for index in range(4)
+        {
+            "title": f"S{index}",
+            "markdown": f"## S{index}\n" + (str(index) * 3000) + f"TAIL-{index}",
+            "claims": [
+                {"claim_id": f"c-{index}-{claim}", "statement": "x" * 500}
+                for claim in range(24)
+            ],
+            "claim_ledger_status": "available",
+        }
+        for index in range(6)
     ]
-    block = fair_editor_sections(sections, total_chars=4000)
-    for index in range(4):
-        assert f"## S{index}" in block
+    block = fair_editor_context(
+        sections,
+        frame={"subject_kind": "model", "facets": [], "axes": []},
+        blueprint={"central_answer": "z" * 20_000, "claims": [{}] * 96},
+        max_chars=24_000,
+    )
+    assert len(block) <= 24_000
+    assert "blueprint_summary" in block
+    for index in range(6):
+        assert f'"title": "S{index}"' in block
         assert f"TAIL-{index}" in block
+    assert '"claims_truncated": true' in block
 
 
-def test_source_projections_are_uncapped_and_keep_postgres_sqlite_parity():
+def test_source_projections_are_bounded_aggregates_with_identity_lookup_parity():
     from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
     from app.repositories.sqlite.source_store import SourceStore as SQLiteSourceStore
 
     for implementation in (PostgresSourceStore, SQLiteSourceStore):
         source = inspect.getsource(implementation.report_source_rows)
-        assert "LIMIT 20" not in source
-        for field in (
-            "s.id", "s.title", "s.file_name", "s.source_type", "s.doc_type",
-            "s.file_hash", "m.paper_title", "m.pub_year", "m.is_paper",
-        ):
-            assert field in source
+        assert "COUNT(*) AS total_sources" in source
+        assert "LIMIT" in source
+        assert "representatives" in source
+        identity = inspect.getsource(implementation.report_source_identity_rows)
+        assert "[:1024]" in identity
+        assert "file_hash" in identity and "paper_title" in identity
+
+
+def test_report_source_facade_methods_are_one_hop_delegates():
+    from app.services.repository_facade import RepositoryFacade
+
+    for method_name in ("report_source_rows", "report_source_identity_rows"):
+        source = inspect.getsource(getattr(RepositoryFacade, method_name))
+        assert "self._runtime.source_store" in source
 
 
 def test_shared_report_intent_preserves_complete_scope():
@@ -149,8 +236,11 @@ def test_high_risk_threshold_is_configurable():
     settings = Settings(
         _env_file=None,
         REPORT_HIGH_RISK_UNSUPPORTED_RATIO="0.4",
+        REPORT_HIGH_RISK_DOWNGRADE_ENABLED="true",
     )
     assert settings.report_high_risk_unsupported_ratio == 0.4
+    assert settings.report_high_risk_downgrade_enabled is True
+    assert Settings(_env_file=None).report_high_risk_downgrade_enabled is False
 
 
 def test_sufficiency_probe_excludes_low_relevance_sources_from_family_counts():
@@ -176,14 +266,90 @@ def test_sufficiency_probe_excludes_low_relevance_sources_from_family_counts():
         def retrieve_elements(self, notebook_id, query, *, limit):
             return []
 
-    result = _engine(_deps(retrieval=_Retrieval()))._probe_queries(
-        "nb", ["q"], family_by_source={
-            "s-relevant": "family-relevant",
-            "s-noise-a": "family-noise-a",
-            "s-noise-b": "family-noise-b",
-        },
-    )
+    sources = _Sources([
+        {"id": source_id, "file_hash": source_id, "is_paper": None,
+         "paper_title": None}
+        for source_id in ("s-relevant", "s-noise-a", "s-noise-b")
+    ])
+    deps = _deps(retrieval=_Retrieval(), source_query=sources)
+    result = _engine(deps)._probe_queries("nb", ["q"])
 
     assert result["relevant_items"] == 1
     assert result["source_hits"] == 3
     assert result["relevant_family_count"] == 1
+
+
+def test_sufficiency_judge_cannot_promote_one_family_even_with_many_hits():
+    from tests.test_report_engine_ports import _deps, _engine
+
+    class _Judge:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "verdicts": [{"title": "A", "sufficiency": "充足"}]
+            })
+
+    deps = _deps()
+    object.__setattr__(deps, "model_clients", type("Models", (), {
+        "chat": lambda self, workload: _Judge(),
+        "parallelism": lambda self, workload: 1,
+    })())
+    sections = _engine(deps)._judge_sufficiency(
+        "q", [{"title": "A"}], [{
+            "title": "A", "hits": 1000, "base_hits": 1000,
+            "element_hits": 96, "source_hits": 1,
+            "relevant_items": 1000, "relevant_supports": 1000,
+            "relevant_family_count": 1, "top_family_share": 1.0,
+            "source_identity_uncertain": 0,
+        }],
+    )
+    assert sections[0]["sufficiency"] == "薄弱"
+
+
+def test_probe_deduplicates_same_evidence_across_queries_and_keeps_share_units_aligned():
+    from tests.test_report_engine_ports import _deps, _engine
+
+    class _Retrieval:
+        def federated_retrieve(self, notebook_id, query):
+            return [SimpleNamespace(
+                object_id="same", relevance=0.9, tier="active",
+                evidence=[SimpleNamespace(source_id="s1")],
+            )]
+
+        def retrieve_elements(self, notebook_id, query, *, limit):
+            return []
+
+    sources = _Sources([{
+        "id": "s1", "file_hash": "h1", "is_paper": None, "paper_title": None,
+    }])
+    result = _engine(_deps(retrieval=_Retrieval(), source_query=sources))._probe_queries(
+        "nb", ["q1", "q2"]
+    )
+    assert result["relevant_items"] == 1
+    assert result["relevant_supports"] == 1
+    assert result["top_family_share"] == 1.0
+
+
+def test_probe_does_not_count_unidentified_sources_as_independent_families():
+    from tests.test_report_engine_ports import _deps, _engine
+
+    class _Retrieval:
+        def federated_retrieve(self, notebook_id, query):
+            return [SimpleNamespace(
+                object_id="claim", relevance=0.9, tier="active",
+                evidence=[SimpleNamespace(source_id="s-unknown")],
+            )]
+
+        def retrieve_elements(self, notebook_id, query, *, limit):
+            return []
+
+    sources = _Sources([{
+        "id": "s-unknown", "file_hash": "", "is_paper": None,
+        "paper_title": None,
+    }])
+    result = _engine(_deps(retrieval=_Retrieval(), source_query=sources))._probe_queries(
+        "nb", ["q"]
+    )
+    assert result["source_identity_uncertain"] == 1
+    assert result["relevant_family_count"] == 0

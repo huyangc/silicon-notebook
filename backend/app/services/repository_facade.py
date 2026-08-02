@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from app.core.config import Settings
@@ -1508,6 +1508,21 @@ class RepositoryFacade:
 
     def get_source(self, source_id: str) -> SourceDetail:
         return self._runtime.source_store.get_source(source_id)
+
+    def report_source_rows(
+        self, notebook_id: str, *, representative_limit: int = 20,
+        distribution_limit: int = 32,
+    ) -> dict[str, Any]:
+        return self._runtime.source_store.report_source_rows(
+            notebook_id,
+            representative_limit=representative_limit,
+            distribution_limit=distribution_limit,
+        )
+
+    def report_source_identity_rows(
+        self, source_ids: Sequence[str]
+    ) -> list[dict[str, Any]]:
+        return self._runtime.source_store.report_source_identity_rows(source_ids)
 
     def _source_pipeline_hooks(self) -> SourcePipelineHooks:
         """Task 12: mint FRESH hooks on every ingestion call from the facade's

@@ -972,19 +972,6 @@ def query_intent_prompt(question: str, max_topics: int = 6,
     )
 
 
-def report_intent_prompt(question: str, max_topics: int = 6,
-                         history_block: str = "", *,
-                         confirmation_mode: bool = False) -> str:
-    return query_intent_prompt(
-        question,
-        max_topics=max_topics,
-        history_block=history_block,
-        purpose="deep report",
-        confirmation_mode=confirmation_mode,
-        source_refs_enabled=False,
-    )
-
-
 def report_outline_prompt(question: str, max_sections: int = 6,
                           history_block: str = "") -> str:
     history_section = (
@@ -1257,8 +1244,11 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
     return (
         "You judge whether the notebook library has ENOUGH evidence for each planned "
         "report section. You are given each section's title and its OBJECTIVE retrieval "
-        "signals. relevant_items are relevant evidence objects/elements; "
-        "independent_families and top_family_share describe document diversity. "
+        "signals. relevant_items are distinct relevant evidence objects/elements; "
+        "relevant_supports counts distinct (evidence item, source family) pairs, "
+        "and top_family_share uses those same pairs for numerator and denominator. "
+        "independent_families counts only sources with resolvable identity; "
+        "identity_uncertain must not be treated as additional independent support. "
         "base_hits is only a governance-tier count, NOT a separate proof of authority "
         "or sufficiency. Trust these signals as the ground truth of coverage; your job "
         "is to interpret them into a verdict + a one-line gap note + a suggested "

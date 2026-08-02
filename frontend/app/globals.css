@@ -2814,6 +2814,30 @@ button.chat-session-card {
   font-weight: 700;
 }
 
+.report-frame-remove {
+  justify-self: end;
+  margin-top: -29px;
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 6px;
+  color: #a43b3b;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.report-frame-remove:hover:not(:disabled),
+.report-frame-remove:focus-visible {
+  background: #fff0f0;
+  outline: none;
+}
+
+.report-frame-remove:disabled {
+  color: #9ba6b7;
+  cursor: default;
+}
+
 .report-frame-check {
   display: inline-flex !important;
   grid-template-columns: auto 1fr;
@@ -8060,10 +8084,38 @@ button.chat-session-card {
   font-weight: 600;
 }
 .report-source-dist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--muted);
   margin: 0 0 10px;
 }
+
+.report-source-dist .source-dist {
+  margin-left: 4px;
+}
+
+.report-credibility-summary {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #dfe6f2;
+  border-radius: 8px;
+  color: #566274;
+  background: #fbfcff;
+  font-size: 12px;
+}
+
+.report-credibility-summary p {
+  margin: 0;
+}
+
+.report-synthesis-status.failed { color: #a43b3b; }
+.report-synthesis-status.skipped { color: #876522; }
+.report-synthesis-status.ok { color: #46607f; }
 .auth-gate { min-height: 100vh; display: grid; place-items: center; background: var(--bg, #0b0d12); }
 .auth-card { width: 320px; padding: 28px; border-radius: 14px; background: #161a22; color: #e7ecf3;
   box-shadow: 0 10px 40px rgba(0,0,0,.4); display: flex; flex-direction: column; gap: 12px; }

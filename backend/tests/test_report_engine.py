@@ -90,7 +90,7 @@ def test_report_crud_roundtrip(repo):
 
 def test_report_prompts_contract():
     from app.services.prompts import (
-        report_intent_prompt, report_outline_prompt, report_section_prompt,
+        query_intent_prompt, report_outline_prompt, report_section_prompt,
         report_summary_prompt, REPORT_INTENT_SCHEMA_HINT,
         REPORT_OUTLINE_SCHEMA_HINT, REPORT_SECTION_SCHEMA_HINT)
     op = report_outline_prompt("q", max_sections=5, history_block="h")
@@ -109,14 +109,18 @@ def test_report_prompts_contract():
     assert "【通识】" not in sp2
     su = report_summary_prompt("总问题", "## 节1\nmd")
     assert "executive summary" in su.lower()
-    intent = report_intent_prompt("原始问题", max_topics=4)
+    intent = query_intent_prompt(
+        "原始问题", max_topics=4, purpose="deep report",
+        source_refs_enabled=False,
+    )
     assert "before seeing any corpus" in intent and "原始问题" in intent
     assert "mandatory_topics" in REPORT_INTENT_SCHEMA_HINT
     assert "ambiguities" in REPORT_INTENT_SCHEMA_HINT and "needs_clarification" in intent
     assert "source_refs" not in REPORT_INTENT_SCHEMA_HINT
     assert "source_refs" not in intent
-    confirmed = report_intent_prompt(
-        "已确认的问题", history_block="对象：PLL", confirmation_mode=True
+    confirmed = query_intent_prompt(
+        "已确认的问题", history_block="对象：PLL", purpose="deep report",
+        confirmation_mode=True, source_refs_enabled=False,
     )
     assert "authoritative" in confirmed and "needs_clarification=false" in confirmed
 
@@ -290,8 +294,10 @@ def test_assemble_builds_report_body_only(repo):
     md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
     # 报告主体
     assert "## 执行摘要" in md and "总结" in md
+    assert "## 资料基础" in md
     assert "## A" in md and "## B" in md
     assert "## 参考文献" in md and "Razavi" in md
+    assert "> 引证分布：" in md
     assert references[0]["label"] == "Razavi"
     # 移除项:无诊断堆砌 / 无内部机制外显
     assert "## 知识缺口" not in md and "## 分析计划" not in md
@@ -412,6 +418,11 @@ def test_assemble_global_citation_renumber_and_references(repo, monkeypatch):
     bibliography = md.split("## 参考文献")[1]
     assert "[k1]" in bibliography and "[k3]" in bibliography
     assert "Razavi Analog CMOS" in bibliography
+    bibliography_rows = [
+        line for line in bibliography.splitlines() if line.startswith("- ")
+    ]
+    assert len(bibliography_rows) == 2
+    assert "[k1] [k3]" in bibliography_rows[0]
 
 
 def test_assemble_prefers_parsed_paper_title_over_upload_name(repo):
@@ -639,6 +650,41 @@ def test_standard_report_adds_no_report_wide_model_call(repo, monkeypatch):
     assert "_synthesis_blueprint" not in sections[0]
 
 
+def test_standard_report_drafts_ready_section_before_slowest_retrieval(repo, monkeypatch):
+    from types import SimpleNamespace
+    import threading
+
+    eng = _mk_engine(repo, _OutlineLLM())
+    allow_slow_retrieval = threading.Event()
+    events = []
+
+    def _deep(_nb, section, *_args, **_kwargs):
+        if section["title"] == "B":
+            assert allow_slow_retrieval.wait(timeout=3)
+        events.append(f"retrieve:{section['title']}")
+        return SimpleNamespace(top_hits=[], elements=[], chunks=[])
+
+    def _draft(_nb, section, *_args, **_kwargs):
+        events.append(f"draft:{section['title']}")
+        if section["title"] == "A":
+            allow_slow_retrieval.set()
+        return {"title": section["title"], "scope": "s", "markdown": "## x",
+                "grounded": False, "id_map": {}, "claims": [],
+                "claim_ledger_status": "missing"}
+
+    monkeypatch.setattr(eng, "_deep_dive", _deep)
+    monkeypatch.setattr(eng, "_draft_section", _draft)
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    sections = eng._run_sections(
+        nb.id, rid,
+        [{"title": "A", "scope": "s"}, {"title": "B", "scope": "s"}],
+        "q", depth=2,
+    )
+    assert [section["title"] for section in sections] == ["A", "B"]
+    assert events.index("draft:A") < events.index("retrieve:B")
+
+
 def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, monkeypatch):
     from types import SimpleNamespace
 
@@ -655,6 +701,14 @@ def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, mon
 
     llm = _MalformedBlueprintLLM()
     eng = _mk_engine(repo, llm)
+    notes = []
+    events = []
+    repo._runtime.models.note_model_error = (
+        lambda stage, error, *, workload_id: notes.append((stage, workload_id))
+    )
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
     hit = SimpleNamespace(
         object_id="o1", object_type="Claim", relevance=0.9,
         payload={"name": "claim", "definition": "evidence"},
@@ -683,6 +737,38 @@ def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, mon
     assert llm.synthesis_calls == 1
     assert "synthesis" not in draft_options[0]
     assert "_synthesis_blueprint" not in sections[0]
+    assert sections[0]["_synthesis_status"] == "failed_validation"
+    assert ("report_synthesis", "report_summary") in notes
+    assert events[-1]["kind"] == "report_synthesis_failed"
+
+
+def test_detailed_report_without_evidence_discloses_skip_without_model_error(repo, monkeypatch):
+    from types import SimpleNamespace
+
+    eng = _mk_engine(repo, _OutlineLLM())
+    notes = []
+    repo._runtime.models.note_model_error = (
+        lambda stage, error, *, workload_id: notes.append((stage, workload_id))
+    )
+    monkeypatch.setattr(
+        eng, "_deep_dive",
+        lambda *args, **kwargs: SimpleNamespace(top_hits=[], elements=[], chunks=[]),
+    )
+    monkeypatch.setattr(
+        eng, "_draft_section",
+        lambda _nb, section, *_args, **_kwargs: {
+            "title": section["title"], "scope": "s", "markdown": "## x",
+            "grounded": False, "id_map": {}, "claims": [],
+            "claim_ledger_status": "missing",
+        },
+    )
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    sections = eng._run_sections(
+        nb.id, rid, [{"title": "A", "scope": "s"}], "q", depth=8
+    )
+    assert sections[0]["_synthesis_status"] == "skipped_no_evidence"
+    assert notes == []
 
 
 def test_run_sections_writes_section_status(repo, monkeypatch):
@@ -1319,6 +1405,40 @@ def test_report_section_uses_direct_element_and_recomputes_grounding(repo):
     assert out["grounded"] is True and out["evidence_level"] == "grounded"
     assert out["id_map"]["k4001"]["element_id"] == "el-1"
     assert out["intent_ids"] == ["intent-1"]
+
+
+def test_report_section_high_risk_downgrade_is_opt_in(repo):
+    from app.services.reasoning_retrieval import ReasoningResult
+    from app.services.retrieval import RetrievedElement
+
+    class _RiskyLLM:
+        configured = True
+        model = "risk-audit-model"
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "markdown": "## 结果\n机理来自资料 [k4001]。吞吐提升 25%。",
+                "grounded": True,
+            })
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _RiskyLLM())
+    result = ReasoningResult(elements=[RetrievedElement(
+        element_id="el-risk", source_id="src-risk", source_title="Risk notes",
+        location_label="p. 1", element_type="paragraph",
+        text="The mechanism is documented.", score=0.9,
+    )])
+    section = {"title": "结果", "scope": "解释结果", "sub_queries": ["result"]}
+
+    out = eng._draft_section(nb.id, section, "解释结果", result)
+    assert out["evidence_level"] == "grounded"
+    assert out["citation_audit"]["threshold_exceeded"] is True
+    assert out["citation_audit"]["downgrade_applied"] is False
+
+    eng.settings.report_high_risk_downgrade_enabled = True
+    downgraded = eng._draft_section(nb.id, section, "解释结果", result)
+    assert downgraded["evidence_level"] == "overview"
+    assert downgraded["citation_audit"]["downgrade_applied"] is True
 
 
 def test_report_section_model_grounded_flag_cannot_validate_fake_marker(repo):
