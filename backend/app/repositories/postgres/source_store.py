@@ -561,10 +561,11 @@ class SourceStore:
             ).fetchone())
             representatives = [dict(row) for row in connection.execute(
                 "WITH base AS (SELECT s.id,s.title,s.file_name,s.source_type,s.doc_type,"
-                "m.paper_title,m.pub_year,m.is_paper,s.created_at,"
+                "m.paper_title,CASE WHEN m.is_paper=1 THEN m.pub_year ELSE NULL END AS pub_year,"
+                "m.is_paper,s.created_at,"
                 "COALESCE(NULLIF(BTRIM(s.doc_type),''),"
                 "NULLIF(BTRIM(s.source_type),''),'unknown') AS type_key,"
-                "CASE WHEN m.pub_year BETWEEN 1000 AND 9999 "
+                "CASE WHEN m.is_paper=1 AND m.pub_year BETWEEN 1000 AND 9999 "
                 "THEN m.pub_year ELSE NULL END AS year_key FROM sources s "
                 "LEFT JOIN source_paper_meta m ON m.source_id=s.id "
                 "AND m.notebook_id=s.notebook_id WHERE s.notebook_id=%s "

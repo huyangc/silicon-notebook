@@ -1409,6 +1409,7 @@ def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(
         "profile-a", "profile-b", "profile-c", "profile-corrupt-meta"
     }
     assert representatives["profile-corrupt-meta"]["paper_title"] is None
+    assert representatives["profile-c"]["pub_year"] is None
     identity = core_stores.sources.report_source_identity_rows(
         ["profile-corrupt-meta"]
     )[0]

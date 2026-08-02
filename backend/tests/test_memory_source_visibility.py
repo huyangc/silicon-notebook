@@ -335,6 +335,7 @@ def test_report_source_rows_executes_every_aggregate_and_scopes_paper_meta(
         "profile-a", "profile-b", "profile-c", "profile-corrupt-meta"
     }
     assert representatives["profile-corrupt-meta"]["paper_title"] is None
+    assert representatives["profile-c"]["pub_year"] is None
     identity = store.report_source_identity_rows(["profile-corrupt-meta"])[0]
     assert identity["paper_title"] is None
     assert not identity["is_paper"]
