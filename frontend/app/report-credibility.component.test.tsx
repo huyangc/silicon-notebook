@@ -178,6 +178,24 @@ test("报告来源层级徽章复用可见引用的个人/公共口径", () => {
 
   expect(screen.getByText(/来源 · 个人 2/)).toBeVisible();
   expect(screen.getByText("公共 1")).toBeVisible();
+  expect(screen.queryByText(/可区分资料/)).toBeNull();
+  expect(screen.queryByText(/最集中资料占/)).toBeNull();
+});
+
+
+test("旧报告不从未知身份引用推断可区分资料或 Top-1", () => {
+  render(
+    <ReportCitationDistribution report={detail({
+      references: [
+        { key: "k1", label: "旧资料一", source_id: "legacy-one", family_key: "legacy-one" },
+        { key: "k2", label: "旧资料二", source_id: "legacy-two", family_key: "legacy-two" },
+      ],
+    })} />,
+  );
+
+  expect(screen.getByText(/来源 · 个人 2/)).toBeVisible();
+  expect(screen.queryByText(/可区分资料 2/)).toBeNull();
+  expect(screen.queryByText(/最集中资料占 50%/)).toBeNull();
 });
 
 

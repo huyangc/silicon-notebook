@@ -1355,12 +1355,33 @@ def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(
                 "authors": [],
             },
         )
+    # Simulate a malformed historical row: current writers clear publication
+    # years when is_paper becomes false, but report distributions must remain
+    # self-consistent if an old row retained one.
+    core_stores.sources.upsert_paper_meta(
+        "profile-c",
+        notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Stale non-paper",
+            "pub_year": 2024,
+            "authors": [],
+        },
+    )
+    with core_stores.database.write() as connection:
+        connection.execute(
+            "UPDATE source_paper_meta SET is_paper=0 WHERE source_id=%s AND notebook_id=%s",
+            ("profile-c", notebook_id),
+        )
     core_stores.sources.upsert_paper_meta(
         "profile-corrupt-meta",
         other_notebook_id,
         {
             "is_paper": True,
-            "paper_title": "Wrong notebook metadata",
+            # Deliberately collides with the valid title above. Removing the
+            # notebook join from title-duplicate aggregation must change the
+            # count, not merely the hydrated representative fields.
+            "paper_title": "Profile Paper",
             "pub_year": 1999,
             "authors": [],
         },

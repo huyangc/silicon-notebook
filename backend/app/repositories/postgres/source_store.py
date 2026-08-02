@@ -540,7 +540,7 @@ class SourceStore:
                 "JOIN source_paper_meta m ON m.source_id=s.id "
                 "AND m.notebook_id=s.notebook_id WHERE s.notebook_id=%s "
                 "AND s.source_type NOT IN ('memory','knowhow') "
-                "AND m.pub_year BETWEEN 1000 AND 9999 GROUP BY m.pub_year "
+                "AND m.is_paper=1 AND m.pub_year BETWEEN 1000 AND 9999 GROUP BY m.pub_year "
                 "ORDER BY m.pub_year DESC LIMIT %s",
                 (notebook_id, distribution_limit + 1),
             ).fetchall()]

@@ -691,20 +691,15 @@ function citationSummary(report: ReportDetailT): {
   const declared = credibility.independent_documents
     ?? credibility.independent_source_families
     ?? credibility.independent_sources;
-  const familyCounts = new Map<string, number>();
-  for (const reference of report.references || []) {
-    // Never use the number of citation anchors as a source count. A row without
-    // a stable source/family identity is deliberately excluded from this metric.
-    const key = String(reference.family_key || reference.source_id || "").trim();
-    if (key) familyCounts.set(key, (familyCounts.get(key) || 0) + 1);
-  }
+  // Legacy references do not say whether family_key/source_id was identity
+  // verified.  Deriving these metrics from them would count every unresolved
+  // source as independent and understate the conservative Top-1 bound.  Show
+  // only the backend-persisted credibility values; the source-tier badge below
+  // remains available for old reports.
   const independent = typeof declared === "number" && Number.isFinite(declared)
     ? declared
-    : familyCounts.size > 0 ? familyCounts.size : null;
-  const top1 = percent(credibility.top1_share ?? credibility.top1_concentration)
-    ?? (familyCounts.size > 0
-      ? percent(Math.max(...familyCounts.values()) / Math.max(1, [...familyCounts.values()].reduce((a, b) => a + b, 0)))
-      : null);
+    : null;
+  const top1 = percent(credibility.top1_share ?? credibility.top1_concentration);
   return { independent, top1 };
 }
 
