@@ -25,12 +25,16 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/models/knowledge.py" \
   "$ROOT_DIR/backend/app/models/kg.py" \
   "$ROOT_DIR/backend/app/models/knowhow.py" \
+  "$ROOT_DIR/backend/app/models/command_catalog.py" \
   "$ROOT_DIR/backend/app/models/content_overview.py" \
   "$ROOT_DIR/backend/app/models/admin.py" \
   "$ROOT_DIR/backend/app/models/model_services.py" \
   "$ROOT_DIR/backend/app/models/schemas.py" \
   "$ROOT_DIR/backend/app/services/ask_modes.py" \
   "$ROOT_DIR/backend/app/services/cancellation.py" \
+  "$ROOT_DIR/backend/app/services/catalog_job.py" \
+  "$ROOT_DIR/backend/app/repositories/sqlite/catalog_store.py" \
+  "$ROOT_DIR/backend/app/repositories/postgres/catalog_store.py" \
   "$ROOT_DIR/backend/app/services/extraction_profiles.py" \
   "$ROOT_DIR/backend/app/services/kg/extract.py" \
   "$ROOT_DIR/backend/app/services/kg/graph_reason.py" \
@@ -58,6 +62,7 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/api/kg_routes.py" \
   "$ROOT_DIR/backend/app/api/knowhow_routes.py" \
   "$ROOT_DIR/backend/app/api/knowhow_agent_routes.py" \
+  "$ROOT_DIR/backend/app/api/catalog_routes.py" \
   "$ROOT_DIR/backend/app/api/knowledge_routes.py" \
   "$ROOT_DIR/backend/app/api/memory_routes.py" \
   "$ROOT_DIR/backend/app/api/notebook_routes.py" \

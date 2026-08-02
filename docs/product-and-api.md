@@ -286,6 +286,160 @@ invent local completion after a fixed time cap. Safe structured events cover
 `kg_build_stopping`, `kg_build_succeeded`, and `kg_build_failed` without
 provider diagnostics, prompts, source text, tokens, or credentials.
 
+## Command catalog (tool manuals)
+
+A tool's **command reference** is the shape ordinary ingestion handles worst.
+The chunker splits one command's description, arguments and examples into
+unrelated segments, and the KG extractor turns a parameter table into
+free-floating claims — so a question about a command's contract comes back as
+prose *about* the command. The command catalog ingests that source as
+structured entries instead (name, syntax, arguments, defaults, examples) and
+lands them, after explicit human confirmation, in an ordinary knowhow table.
+
+Everything is opt-in and per source. Nothing runs on upload.
+
+**Precondition: the source must already be parsed.** Both the cost preview and
+the start endpoint require `parse_status` to be in the repository-wide
+"parsed" whitelist (`parsed` / `extracting` / `extracted` — the last two are
+KG-extraction stages that happen after the elements have landed), and return a
+`409` with a user-readable message otherwise: wait for parsing to finish, or, on
+a failed parse, reparse or re-upload. A cost preview over a source with no
+elements yet reports "about 0 command sections", which reads as "this document
+has nothing to extract"; starting a run against one records a fraction of a
+manual as a complete extraction.
+
+**Cost preview.** `.../command-catalog/preview` reports shape-detection counts
+(identifier-named headings, usage-line sections, flag-dense sections) plus the
+number of sections and model calls an extraction would cost, with **zero model
+calls**. It reads only a bounded prefix of the source, so when
+`sampled` is `true` the numbers are a lower bound from the document's head, not
+a census — a preview that scanned the document it is estimating would defeat its
+own purpose. `is_manual` is a threshold verdict offered as a default; the counts
+are what a person should decide on.
+
+**Extraction.** One background job per source, guarded by a partial unique index
+covering `queued` and `running` — the row is written before the worker starts,
+so a duplicate request in that window is rejected rather than scheduling a
+second writer. One model call per slice, where a slice is one command's worth of
+parameters (a large parameter table overruns the output budget in one call, so
+slicing is mandatory rather than an optimisation). There is no second-opinion
+pass and no refinement pass.
+
+**Grounding, and why entries get rejected.** Every extracted entry is checked
+against the section's own text before it is stored: the command name must be on
+the server-supplied candidate list *and* appear verbatim; every parameter name
+must appear in its original form (a `-density` documented with its dash is
+rejected when the answer drops it); `syntax` must be a
+contiguous copy of a usage line; a `default` that is not in the text is cleared.
+A name failure vetoes the whole entry; the others drop just that field. **The
+rejected entries are stored too**, with the reason and a bounded look at the
+text they were searched for in — when a run produces little, those rows are the
+only way to tell "the model went wrong" from "this source is not a manual".
+
+**Commands without flags still get their arguments.** A section with no `-flag`
+anywhere is not a section without parameters: a **positional** argument
+(`set_dont_use lib_cells`) is how a one-line command is usually documented. No
+parameter list can be served for those, so the ask is different (copy the
+positional arguments off the usage line, and return none only when there really
+are none) while the grounding is identical — the name has to be verbatim in the
+section text, and an invented one is rejected and stored like any other.
+
+**Each slice is judged against its own assignment.** A slice asks for a
+specific list of parameters, and its answer is held to that list in both
+directions. A parameter that grounds perfectly but was never asked for belongs
+to another slice and is dropped (every parameter of one command lives in the
+same section text, so grounding alone cannot tell them apart); a parameter that
+was asked for and never came back is recorded on the row as missing. Both show
+up in the review panel next to that command. The second one is also what keeps
+the keep-rate honest: its denominator is what the run was asked for, not what
+it chose to return, so answering one parameter out of twenty scores 5% rather
+than 100%. A slice that comes back covering less than half of a large
+assignment is re-asked once, split in two — the same remedy an over-long answer
+gets, since it is the same complaint — while an answer that returned as many
+parameters as it was assigned and simply got them wrong is not re-asked, since
+asking for fewer cannot help.
+
+**Circuit breaker.** After ten sections the run fails, with a user-readable
+reason, if any of three things is true: a command-name veto rate above 20%, an
+argument keep-rate below 50%, or more than 20% of slices producing nothing
+usable at all. Three axes rather than one because each is blind to the others:
+an entry can name the right command and still invent every parameter, and a
+model that answers nothing at all is reported as its own cause rather than as a
+missing-parameter symptom — that run would otherwise pay for the whole manual
+and report success with an empty catalog. A transient provider failure (rate
+limit, upstream error) is not treated as an extraction result at all: it fails
+the job instead of being recorded as "this section had no commands".
+
+**Model-authored fields are bounded and labelled.** `description`, `examples`
+and each parameter's own description are the fields grounding deliberately does
+not check (prose cannot be matched verbatim), so each is capped before the row
+is written — per field, and, for parameter descriptions, per row as well, with
+the number of descriptions the row budget cut reported alongside the other
+rejections. Examples are shown in the review panel under a note saying they are
+model-generated and not checked against the source.
+
+**Confirmation and merge.** Candidates are unconfirmed until a person applies
+them. Apply creates a knowhow table named `命令目录：<source title>` with fixed
+columns (命令 / 语法 / 参数 / 说明 / 示例 / 出处, with 命令 as the row-title
+column) if it does not exist, and otherwise **only appends commands the table
+does not already have**. A candidate whose command already has a row is reported
+in `conflicts` and the existing row is left untouched — v1 deliberately never
+overwrites content a person may have corrected by hand. A full diff/merge is a
+later task. Columns are addressed by name, so editing the target table's columns
+cannot silently shift content into the wrong one; a table that has lost its 命令
+column is refused rather than written to. One `all_pending` call confirms at most
+a page and reports the rest in `pending_remaining`. Writes go through the
+ordinary knowhow service layer, so the table's change history records them like
+any other edit.
+
+Every exit path settles the job row, including `Ctrl-C`/`SIGTERM`; a row left
+`queued`/`running` would hold that source's guard until the next backend
+restart, so startup recovery settles anything the process could not.
+
+**Re-running extraction is blocked while candidates remain unreviewed, and
+dismiss is the explicit way out.** A source's latest job is the only one
+`.../job` ever returns, so starting a new run while the previous run's
+candidates are still `candidate`-state would orphan them — reachable by
+nobody, forever. Both the frontend and `.../command-catalog`'s own 409 refuse
+a new run in that case (covering every terminal status the previous run could
+have reached — succeeded, failed, or cancelled), and the guard's own copy says
+"confirm or dismiss". Apply only ever moves a candidate out of `candidate`
+state without landing a row when it CONFLICTS with an existing row in the
+target table; a candidate a reviewer simply does not want otherwise had no
+route out at all. `.../command-catalog/dismiss` is that route: the review
+panel's "跳过所选" / "跳过全部待审阅" actions, mirroring apply's own selection
+contract, per-target lock and owner-only authorization, but touching no
+knowhow table at all.
+
+**A reparse invalidates the run.** Each job records the **source generation**
+it was created against (the single landing instant every element of that source
+shares; a reparse replaces the whole batch), and `apply` / `dismiss` compare it
+before doing anything: a mismatch returns a `409` with a user-readable message
+and, in the same call, marks every remaining candidate of that job `dismissed`
+with reason `source_reparsed`. Candidate rows carry command names, excerpts and
+section paths taken from the elements the run actually read, so confirming one
+after a reparse would write content the document no longer contains. Expiring
+them is not a courtesy: the unreviewed-candidates guard above reads that same
+set, and leaving it in place would deadlock the source — every confirm refused
+as stale, every re-run refused as unreviewed. The same comparison lets a new run
+start (sweeping the dead candidates on the way) when the source has been
+reparsed, which is precisely when a person wants to re-run. The generation is
+deliberately NOT `sources.updated_at`: that is the intentionally coarse change
+signal and also moves on lifecycle transitions (a KG re-extraction, a summary
+write) that never touch the elements, so keying on it would claim a reparse that
+never happened and charge the user for a whole re-extraction.
+
+Endpoints (all scoped to a source of the notebook in the path; reads need
+notebook read, writes need owner):
+
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — shape signal + cost estimate, `sampled` when the bounded read hit its cap; `409` with a user-readable message when the source is not parsed yet or its parse failed
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog` — start extraction; `409` with a user-readable message when this source already has an active job (fetch it from `.../job`), the extraction model is unconfigured, the source is not parsed yet or its parse failed, or the previous run still has unreviewed candidates (confirm or dismiss them first). Candidates already expired by a reparse do not block: they are swept and the run proceeds
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` — the source's latest job: `status` plus `progress` (`sections_total`, `sections_done`, `entries`, `rejected`, `uncovered`, `truncated_sections`, `pending_candidates`) and, on failure, `failure_reason`. The internal `diagnostic` column is deliberately not exposed
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` — `cancelling` (the worker stops at its next slice boundary, or as soon as an in-flight model call notices the cancellation — it does not wait for that call to return), `cancelled` (no worker in this process; the row is settled directly), or `not_running`
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/candidates` — keyset page (`job_id?`, `state=candidate|rejected|applied|dismissed`, `cursor`, `limit`), plus per-state `counts`. `next_cursor` is the last row's `position`, not an offset: applying candidates changes their state, and an offset would skip or repeat rows. A `dismissed` candidate carries `dismiss_reason`: `conflict_existing_row` (apply found an existing row), `user_dismissed` (dismissed explicitly), or `source_reparsed` (the source was reparsed and the whole run expired)
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` — body `{candidate_ids}` or `{all_pending: true}`; returns `table_id`, `created`, `applied`, `rows_added`, `conflicts` and `pending_remaining` (one call confirms at most a page). `409` with a user-readable message when the source was reparsed after this run, which also expires the job's remaining candidates; a reparse still IN FLIGHT (elements not swapped yet) is a second, differently worded `409` that expires nothing — a parse can fail before the swap, leaving those candidates valid
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` — body `{candidate_ids}` or `{all_pending: true}`, same selection contract and page cap as apply; marks the selected `candidate`-state rows `dismissed` (reason `user_dismissed`) without touching any knowhow table; returns `dismissed` (the ids actually moved) and `pending_remaining`. Both reparse `409`s behave as they do on apply (the completed one expires the whole run, the in-flight one expires nothing)
+
 ## Retrieval modes (Ask)
 
 `POST /ask` dispatches on `mode` — the registry `backend/app/services/ask_modes.py` is the single source of truth (default `chunk`). Federation is path-specific: baseline `chunk` is active-notebook-only; its optional KG overlay/PPR can add federated KG context and base-backed chunks; `graph` and `reasoning` use federated KG paths. Knowledge-object hits from `federated_retrieve()` keep tier-blind scores and use `base` only as the secondary key on an exact tie; `federated_retrieve_relations()` remains score-only. These ordering signals never feed grounding thresholds.
@@ -495,6 +649,7 @@ Key local beta APIs:
 - `GET /api/sources/{id}`, `DELETE /api/sources/{id}`, `POST /api/sources/{id}/parse`, `GET /api/sources/{id}/elements` — owner-or-member scope, keyed on the source's own notebook
 - `GET /api/notebooks/{id}/sources/{source_id}`, `GET /api/notebooks/{id}/sources/{source_id}/elements` — the same two reads, authorized on the **active** notebook in the path and resolved inside its valid participant set (itself plus the reference libraries it has effectively mounted). Mounting a reference library never grants direct membership in it, so the browser keeps filtering on the active notebook only and the backend proxies the read internally; the participant set is re-evaluated per request, so a demoted/transferred/mid-copy library or an unmounted edge returns 404 immediately. Same-notebook sources take this identical path (the participant set always starts with the active notebook), and the response reports the source's real owning notebook so the client can render it read-only. Writes are deliberately not proxied — re-parse and delete stay owner-only on `/api/sources/{id}`. The detail response is a narrower model than `/api/sources/{id}`'s: it drops `file_path` and the raw `error_message` (both can carry server-side absolute paths) and reports a `parse_failed` boolean instead; a cross-library source of a hidden synthetic type (`memory`/`knowhow` projection rows, which the collection map deliberately counts) is refused outright
 - `GET /api/notebooks/{id}/assets/{asset_id}` — image assets (knowhow cell images, source figures) under the same participant-set rule: the notebook in the path is the viewer's active notebook, the asset declares its own owning notebook, and any asset outside the active notebook's valid participant set is 404. An asset served from a mounted library is `Cache-Control: no-store` so unmounting takes effect immediately; assets of the active notebook itself keep the long private cache
+- Command catalog: `GET .../sources/{sid}/command-catalog/preview` (zero-model cost estimate), `POST .../sources/{sid}/command-catalog` (start; 409 when a job is already active for that source, or the previous run still has unreviewed candidates), `GET .../command-catalog/job`, `POST .../command-catalog/cancel`, `GET .../command-catalog/candidates?job_id=&state=&cursor=&limit=` (keyset page + per-state counts), `POST .../command-catalog/apply` body `{candidate_ids}` or `{all_pending}` (creates or appends to `命令目录：<source>`, never overwrites an existing row), `POST .../command-catalog/dismiss` body `{candidate_ids}` or `{all_pending}` (marks candidates skipped without writing any table — the only way to clear the unreviewed-candidates guard for a candidate that does not conflict — see [Command catalog](#command-catalog-tool-manuals))
 - `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - Knowhow tables: `GET|POST /api/notebooks/{id}/knowhow`, `GET|PATCH|DELETE .../knowhow/{table_id}`, `POST .../knowhow/{table_id}/reproject` — plus import (`POST .../knowhow/import/preview`, `POST .../knowhow/import`), column/row/cell editing (`POST .../knowhow/{table_id}/columns`, `PATCH|DELETE .../columns/{column_id}`, `POST .../knowhow/{table_id}/rows`, `DELETE .../rows/{row_id}`, `PATCH .../rows/{row_id}/cells/{column_id}`), the Excel template round-trip (`GET .../knowhow/{table_id}/template`, `POST .../knowhow/{table_id}/append` with `mode=preview|commit`), an explicit suggestion-only wording rewrite (`POST .../rows/{row_id}/cells/{column_id}/optimize`), and reasoning-backed row completion suggestions (`POST .../knowhow/{table_id}/rows/{row_id}/complete`, optional `target_column_ids`, response `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`)

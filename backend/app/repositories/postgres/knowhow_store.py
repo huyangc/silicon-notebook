@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Callable, Sequence
 
 from app.repositories.knowhow_asset_refs import required_asset_ids
-from app.repositories.ports import KNOWHOW_COLUMN_KINDS
+from app.repositories.ports import CATALOG_MAX_CANDIDATE_PAGE, KNOWHOW_COLUMN_KINDS
 from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalized_clock,
@@ -754,6 +754,20 @@ class KnowhowStore:
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
         return self.knowhow_table_health_inputs(notebook_id)
 
+    def knowhow_table_id_by_title(self, notebook_id: str, title: str) -> str:
+        """See the SQLite mirror for the full contract — a bounded point
+        lookup on ``(notebook_id, title)`` in place of the health-aggregated
+        ``list_knowhow_tables`` scan. Ties resolve to the same row
+        ``list_knowhow_tables`` surfaces first (``created_at``, then ``id``
+        under ``C`` collation, matching that method's own ``ORDER BY``)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT id FROM knowhow_tables WHERE notebook_id=%s AND title=%s "
+                "ORDER BY created_at,id COLLATE \"C\" LIMIT 1",
+                (notebook_id, title),
+            ).fetchone()
+        return str(row["id"]) if row is not None else ""
+
     def knowhow_enumeration_catalog(
         self, notebook_id: str, *, limit: int = 8, query: str = ""
     ) -> dict:
@@ -1090,6 +1104,56 @@ class KnowhowStore:
                 for row in row_rows
             ],
         }
+
+    def knowhow_table_columns(self, table_id: str) -> list[dict]:
+        """A table's columns alone — never its rows or cells. See the SQLite
+        mirror for the full contract. Raises ``KeyError`` if the table is
+        gone."""
+        with self.database.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM knowhow_tables WHERE id = %s", (table_id,)
+            ).fetchone() is None:
+                raise KeyError(table_id)
+            column_rows = db.execute(
+                "SELECT id, name, role, position FROM knowhow_columns "
+                "WHERE table_id = %s ORDER BY position, id COLLATE \"C\"",
+                (table_id,),
+            ).fetchall()
+        return [
+            {
+                "id": column["id"],
+                "name": column["name"],
+                "role": column["role"],
+                "position": column["position"],
+            }
+            for column in column_rows
+        ]
+
+    def knowhow_anchor_existing_values(
+        self, column_id: str, values: Sequence[str]
+    ) -> set[str]:
+        """Which of `values` already have a row in `column_id`'s column — see
+        the SQLite mirror for the full contract. `column_id` alone scopes the
+        query to exactly one table, so this is one indexed IN-lookup (the
+        PostgreSQL 0005 mirror of the v21 normalized-anchor expression index)
+        without joining `knowhow_rows`."""
+        wanted = [
+            value
+            for value in dict.fromkeys(
+                js_trim(str(item)) for item in list(values)[:CATALOG_MAX_CANDIDATE_PAGE]
+            )
+            if value
+        ]
+        if not wanted:
+            return set()
+        normalized = postgres_js_trim_expression("content_md")
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT DISTINCT {normalized} AS value FROM knowhow_cells "
+                f"WHERE column_id = %s AND {normalized} = ANY(%s)",
+                (column_id, wanted),
+            ).fetchall()
+        return {row["value"] for row in rows}
 
     def table_exists(self, table_id: str) -> bool:
         """Cheap existence probe (a single ``SELECT 1``, not the full

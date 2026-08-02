@@ -1043,6 +1043,16 @@ class RepositoryFacade:
         """
         return self._runtime.kg_analysis
 
+    @property
+    def command_catalog(self):
+        """命令目录抽取 service(方案 C·C1b)——一跳委托到中性 runtime 上的那一个实例。
+
+        与 ``kg_analysis`` 同一条理由落在 runtime 而不是各 facade:它只吃端口与可调用,
+        自己不 import 任何后端。单例在这里是**语义要求**:取消事件注册表挂在实例上,
+        发起 job 的请求线程与跑 job 的后台线程必须共用同一份,分身即失联。
+        """
+        return self._runtime.command_catalog
+
 
 
 

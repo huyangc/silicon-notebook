@@ -57,6 +57,15 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("sources", "reparse"),
     ("sources", None),
     ("sources", None, "elements"),
+    # 命令目录抽取(方案 C·C1b)。第三段之后全是固定字面量,来源 id 走 None 打
+    # {id},所以整条路径可以原样进诊断快照——job_id / state / cursor 都在查询串里。
+    ("sources", None, "command-catalog"),
+    ("sources", None, "command-catalog", "preview"),
+    ("sources", None, "command-catalog", "job"),
+    ("sources", None, "command-catalog", "cancel"),
+    ("sources", None, "command-catalog", "candidates"),
+    ("sources", None, "command-catalog", "apply"),
+    ("sources", None, "command-catalog", "dismiss"),
     ("backfill-vectors",),
     ("assets",),
     ("assets", None),

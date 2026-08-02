@@ -1604,6 +1604,575 @@
           "title": "CitationKnowhowRef",
           "type": "object"
         },
+        "CommandCatalogApplyRequest": {
+          "properties": {
+            "all_pending": {
+              "default": false,
+              "title": "All Pending",
+              "type": "boolean"
+            },
+            "candidate_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Candidate Ids",
+              "type": "array"
+            }
+          },
+          "title": "CommandCatalogApplyRequest",
+          "type": "object"
+        },
+        "CommandCatalogApplyResult": {
+          "description": "确认落库的结果。\n\n`conflicts` 是**没有写入**的那些:目标表里已经有同名命令的行。v1 刻意保守——\n绝不覆盖用户手工编辑过的内容,完整 diff/merge 属后续任务。\n\n`pending_remaining` 是这次确认之后**仍待审阅**的候选数。一次 `all_pending`\n最多确认一页,所以它不是可选的装饰:少了它,300 条候选的库点一次「确认全部」\n看到 `rows_added: 100` 会以为做完了。前端必须据它继续提示。",
+          "properties": {
+            "applied": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Applied",
+              "type": "array"
+            },
+            "conflicts": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/CommandCatalogConflict"
+              },
+              "title": "Conflicts",
+              "type": "array"
+            },
+            "created": {
+              "default": false,
+              "title": "Created",
+              "type": "boolean"
+            },
+            "pending_remaining": {
+              "default": 0,
+              "title": "Pending Remaining",
+              "type": "integer"
+            },
+            "rows_added": {
+              "default": 0,
+              "title": "Rows Added",
+              "type": "integer"
+            },
+            "table_id": {
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "table_id"
+          ],
+          "title": "CommandCatalogApplyResult",
+          "type": "object"
+        },
+        "CommandCatalogArg": {
+          "properties": {
+            "default": {
+              "default": "",
+              "title": "Default",
+              "type": "string"
+            },
+            "desc": {
+              "default": "",
+              "title": "Desc",
+              "type": "string"
+            },
+            "name": {
+              "default": "",
+              "title": "Name",
+              "type": "string"
+            },
+            "required": {
+              "default": false,
+              "title": "Required",
+              "type": "boolean"
+            }
+          },
+          "title": "CommandCatalogArg",
+          "type": "object"
+        },
+        "CommandCatalogCancelResponse": {
+          "properties": {
+            "job": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CommandCatalogJob"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "CommandCatalogCancelResponse",
+          "type": "object"
+        },
+        "CommandCatalogCandidate": {
+          "properties": {
+            "anchors": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Anchors",
+              "type": "array"
+            },
+            "args": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/CommandCatalogArg"
+              },
+              "title": "Args",
+              "type": "array"
+            },
+            "command_name": {
+              "default": "",
+              "title": "Command Name",
+              "type": "string"
+            },
+            "desc_overflow": {
+              "default": 0,
+              "title": "Desc Overflow",
+              "type": "integer"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "dismiss_reason": {
+              "default": "",
+              "title": "Dismiss Reason",
+              "type": "string"
+            },
+            "examples": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Examples",
+              "type": "array"
+            },
+            "excerpt": {
+              "default": "",
+              "title": "Excerpt",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "position": {
+              "default": 0,
+              "title": "Position",
+              "type": "integer"
+            },
+            "rejections": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/CommandCatalogRejection"
+              },
+              "title": "Rejections",
+              "type": "array"
+            },
+            "rejections_overflow": {
+              "default": 0,
+              "title": "Rejections Overflow",
+              "type": "integer"
+            },
+            "section_path": {
+              "default": "",
+              "title": "Section Path",
+              "type": "string"
+            },
+            "state": {
+              "default": "candidate",
+              "title": "State",
+              "type": "string"
+            },
+            "suspect_related": {
+              "default": false,
+              "title": "Suspect Related",
+              "type": "boolean"
+            },
+            "syntax": {
+              "default": "",
+              "title": "Syntax",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "title": "CommandCatalogCandidate",
+          "type": "object"
+        },
+        "CommandCatalogCandidatePage": {
+          "description": "一页候选 + 这个 job 各档的总数。\n\n`next_cursor` 是 keyset 游标(上一页最后一条的 `position`),不是 offset:\n确认候选会改 `state`,offset 分页会在筛选后的集合上漏行/重行。",
+          "properties": {
+            "counts": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "default": {},
+              "title": "Counts",
+              "type": "object"
+            },
+            "has_more": {
+              "default": false,
+              "title": "Has More",
+              "type": "boolean"
+            },
+            "items": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/CommandCatalogCandidate"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "next_cursor": {
+              "default": 0,
+              "title": "Next Cursor",
+              "type": "integer"
+            }
+          },
+          "title": "CommandCatalogCandidatePage",
+          "type": "object"
+        },
+        "CommandCatalogConflict": {
+          "properties": {
+            "candidate_id": {
+              "title": "Candidate Id",
+              "type": "string"
+            },
+            "command_name": {
+              "title": "Command Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "candidate_id",
+            "command_name"
+          ],
+          "title": "CommandCatalogConflict",
+          "type": "object"
+        },
+        "CommandCatalogDismissRequest": {
+          "description": "跳过请求。形状与 `CommandCatalogApplyRequest` 逐字相同(`candidate_ids`\n二选一 `all_pending`),但刻意分开建模:这是各端点自己的传输合同,不是同一个\n请求体在两个 URL 下复用——将来任一个的字段独立演化都不会牵动另一个。",
+          "properties": {
+            "all_pending": {
+              "default": false,
+              "title": "All Pending",
+              "type": "boolean"
+            },
+            "candidate_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Candidate Ids",
+              "type": "array"
+            }
+          },
+          "title": "CommandCatalogDismissRequest",
+          "type": "object"
+        },
+        "CommandCatalogDismissResult": {
+          "description": "跳过的结果。不写 knowhow 表,所以没有 `apply` 结果里的\n`table_id`/`created`/`conflicts` 三个字段——那三个字段都是「写了哪张表」\n的追问,跳过从不触碰任何表,复用 `CommandCatalogApplyResult` 会强迫这里\n永远填一堆空/假值,读着像是「这次没写」而不是「这个动作压根不写」。\n\n`dismissed` 是这次真正被标记为 `dismissed` 的候选 id(已经不是\n`candidate` 状态的 id 静默跳过,不重复报告,与 `apply` 的 `selected` 过滤\n同一口径)。`pending_remaining` 与 `apply` 同名字段同一语义:这次动作之后\n仍待审阅的候选数,写在这里是因为它是「重新识别」拦截守卫读的同一个数字,\n前端跳过后要能立即知道守卫是否已经解除。",
+          "properties": {
+            "dismissed": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Dismissed",
+              "type": "array"
+            },
+            "pending_remaining": {
+              "default": 0,
+              "title": "Pending Remaining",
+              "type": "integer"
+            }
+          },
+          "title": "CommandCatalogDismissResult",
+          "type": "object"
+        },
+        "CommandCatalogJob": {
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "failure_reason": {
+              "default": "",
+              "title": "Failure Reason",
+              "type": "string"
+            },
+            "finished_at": {
+              "default": "",
+              "title": "Finished At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "progress": {
+              "$ref": "#/components/schemas/CommandCatalogProgress",
+              "default": {
+                "entries": 0,
+                "pending_candidates": 0,
+                "rejected": 0,
+                "sections_done": 0,
+                "sections_total": 0,
+                "truncated_sections": 0,
+                "uncovered": 0
+              }
+            },
+            "source_id": {
+              "title": "Source Id",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "source_id",
+            "status"
+          ],
+          "title": "CommandCatalogJob",
+          "type": "object"
+        },
+        "CommandCatalogJobResponse": {
+          "properties": {
+            "job": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CommandCatalogJob"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "CommandCatalogJobResponse",
+          "type": "object"
+        },
+        "CommandCatalogPreview": {
+          "properties": {
+            "element_limit": {
+              "default": 0,
+              "title": "Element Limit",
+              "type": "integer"
+            },
+            "estimated_calls": {
+              "default": 0,
+              "title": "Estimated Calls",
+              "type": "integer"
+            },
+            "estimated_sections": {
+              "default": 0,
+              "title": "Estimated Sections",
+              "type": "integer"
+            },
+            "sampled": {
+              "default": false,
+              "title": "Sampled",
+              "type": "boolean"
+            },
+            "signal": {
+              "$ref": "#/components/schemas/CommandCatalogSignal",
+              "default": {
+                "command_ratio": 0.0,
+                "command_shaped_sections": 0,
+                "flag_ratio": 0.0,
+                "flag_sections": 0,
+                "identifier_headings": 0,
+                "is_manual": false,
+                "reason": "no_sections",
+                "syntax_sections": 0,
+                "total_sections": 0
+              }
+            },
+            "source_id": {
+              "title": "Source Id",
+              "type": "string"
+            },
+            "source_title": {
+              "default": "",
+              "title": "Source Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id"
+          ],
+          "title": "CommandCatalogPreview",
+          "type": "object"
+        },
+        "CommandCatalogProgress": {
+          "properties": {
+            "entries": {
+              "default": 0,
+              "title": "Entries",
+              "type": "integer"
+            },
+            "pending_candidates": {
+              "default": 0,
+              "title": "Pending Candidates",
+              "type": "integer"
+            },
+            "rejected": {
+              "default": 0,
+              "title": "Rejected",
+              "type": "integer"
+            },
+            "sections_done": {
+              "default": 0,
+              "title": "Sections Done",
+              "type": "integer"
+            },
+            "sections_total": {
+              "default": 0,
+              "title": "Sections Total",
+              "type": "integer"
+            },
+            "truncated_sections": {
+              "default": 0,
+              "title": "Truncated Sections",
+              "type": "integer"
+            },
+            "uncovered": {
+              "default": 0,
+              "title": "Uncovered",
+              "type": "integer"
+            }
+          },
+          "title": "CommandCatalogProgress",
+          "type": "object"
+        },
+        "CommandCatalogRejection": {
+          "description": "一处被接地校验丢掉的值:哪个字段、什么值、为什么、以及在原文哪一段找的。\n\n`window` 是**有界**的原文片段(C1a 的 `REJECT_WINDOW_CHARS`),存在的理由是\n「模型少写了一个短横」这类问题只有把原文摆出来才看得懂。",
+          "properties": {
+            "field": {
+              "default": "",
+              "title": "Field",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "value": {
+              "default": "",
+              "title": "Value",
+              "type": "string"
+            },
+            "window": {
+              "default": "",
+              "title": "Window",
+              "type": "string"
+            }
+          },
+          "title": "CommandCatalogRejection",
+          "type": "object"
+        },
+        "CommandCatalogSignal": {
+          "description": "形状检测的计数证据 + 一个从不单独成立的阈值判断。\n\n`is_manual` 只是让调用方有个默认值;计数才是重点——「找到约 N 个命令段落」交给\n人来判断,是对一个启发式唯一诚实的用法。",
+          "properties": {
+            "command_ratio": {
+              "default": 0.0,
+              "title": "Command Ratio",
+              "type": "number"
+            },
+            "command_shaped_sections": {
+              "default": 0,
+              "title": "Command Shaped Sections",
+              "type": "integer"
+            },
+            "flag_ratio": {
+              "default": 0.0,
+              "title": "Flag Ratio",
+              "type": "number"
+            },
+            "flag_sections": {
+              "default": 0,
+              "title": "Flag Sections",
+              "type": "integer"
+            },
+            "identifier_headings": {
+              "default": 0,
+              "title": "Identifier Headings",
+              "type": "integer"
+            },
+            "is_manual": {
+              "default": false,
+              "title": "Is Manual",
+              "type": "boolean"
+            },
+            "reason": {
+              "default": "no_sections",
+              "title": "Reason",
+              "type": "string"
+            },
+            "syntax_sections": {
+              "default": 0,
+              "title": "Syntax Sections",
+              "type": "integer"
+            },
+            "total_sections": {
+              "default": 0,
+              "title": "Total Sections",
+              "type": "integer"
+            }
+          },
+          "title": "CommandCatalogSignal",
+          "type": "object"
+        },
+        "CommandCatalogStartResponse": {
+          "properties": {
+            "job": {
+              "$ref": "#/components/schemas/CommandCatalogJob"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "job"
+          ],
+          "title": "CommandCatalogStartResponse",
+          "type": "object"
+        },
         "ConceptWhitelistAdd": {
           "properties": {
             "note": {
@@ -16186,6 +16755,431 @@
             }
           },
           "summary": "Get Source In Scope"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog": {
+        "post": {
+          "description": "发起抽取。重复发起 → 409(用户可读文案;既有任务从 `.../job` 取)。\n\nR8:来源尚未完成解析(或解析失败)同样 409——对着还没落下元素的来源发起,\n抽出来的是「这份手册的一小段」却会被记成完整的一次识别。",
+          "operationId": "start_command_catalog_api_notebooks__notebook_id__sources__source_id__command_catalog_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CommandCatalogStartResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Start Command Catalog"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/apply": {
+        "post": {
+          "description": "把选中的候选落进「命令目录：<来源标题>」表。\n\nv1 合并语义刻意保守:表不存在就建,存在只**新增**表里没有的命令;同名命令\n一律不改行、原样回报为 `conflicts`。落库全部走 knowhow 既有服务层,所以\n变更流水(record_change)照常产生;重投影与其他 knowhow 写端点同样由这里\n在服务层返回后调度。",
+          "operationId": "apply_command_catalog_api_notebooks__notebook_id__sources__source_id__command_catalog_apply_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "job_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandCatalogApplyRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CommandCatalogApplyResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Apply Command Catalog"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/cancel": {
+        "post": {
+          "description": "取消:`cancelling`(worker 会在下一个分片边界停,飞行中的一次模型调用被\n取消时也会停,不必等它返回)/ `cancelled`(本进程没有在跑它,直接落终态)/\n`not_running`(没有活跃任务)。",
+          "operationId": "cancel_command_catalog_api_notebooks__notebook_id__sources__source_id__command_catalog_cancel_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CommandCatalogCancelResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Cancel Command Catalog"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/candidates": {
+        "get": {
+          "description": "一页候选(keyset)。`job_id` 省略时取该来源最近一次任务。",
+          "operationId": "command_catalog_candidates_api_notebooks__notebook_id__sources__source_id__command_catalog_candidates_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "job_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Job Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "state",
+              "required": false,
+              "schema": {
+                "default": "candidate",
+                "title": "State",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "cursor",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Cursor",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 25,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CommandCatalogCandidatePage"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Command Catalog Candidates"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/dismiss": {
+        "post": {
+          "description": "把选中的候选标记为「已跳过」,不写任何表。\n\nR7(codex PR #412 评审 P1):R5/R6 加的「有待审候选拦重跑」守卫要求审阅者\n先「确认或跳过」才能重新发起识别,但此前只有 `apply` 在冲突时才会自动把\n候选标记为 `dismissed`——审阅者刻意不要的一条候选没有任何路可走,会把\n整个来源永久锁在重新识别之外。这是那条缺失的显式路径,选择语义\n(`candidate_ids` 二选一 `all_pending`,上限同 `apply`)、锁边界(同一把\nper-target 锁,理由见 `CommandCatalogService.dismiss` 的 docstring)与权限\n(owner-only,同 `apply`)都镜像 `apply`,只是不落库,所以没有 knowhow\n调度、没有 actor/审计标签。",
+          "operationId": "dismiss_command_catalog_api_notebooks__notebook_id__sources__source_id__command_catalog_dismiss_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "job_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandCatalogDismissRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CommandCatalogDismissResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Dismiss Command Catalog"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/job": {
+        "get": {
+          "operationId": "command_catalog_job_api_notebooks__notebook_id__sources__source_id__command_catalog_job_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CommandCatalogJobResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Command Catalog Job"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/preview": {
+        "get": {
+          "description": "零模型调用的形状检测 + 成本预告(有界读取,数字是下界)。\n\nR8:来源还没解析完(或解析失败)时同样 409。一份对着还没有元素的来源做的成本\n预告会报出「约 0 个命令节」,读起来像「这份文档没什么可抽的」而不是「过一会\n儿再来」——成本预告唯一不能出的错就是这个方向。",
+          "operationId": "command_catalog_preview_api_notebooks__notebook_id__sources__source_id__command_catalog_preview_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CommandCatalogPreview"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Command Catalog Preview"
         }
       },
       "/api/notebooks/{notebook_id}/sources/{source_id}/elements": {

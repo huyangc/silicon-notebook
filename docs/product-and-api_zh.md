@@ -251,6 +251,113 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 `kg_build_stopping`、`kg_build_succeeded` 与 `kg_build_failed`，不记录 provider
 诊断、prompt、来源正文、token 或凭据。
 
+## 命令目录（工具手册）
+
+工具的**命令手册**是常规摄取处理得最差的一类文档：分块会把同一条命令的说明、参数、
+示例切成互不相干的片段，KG 抽取又会把参数表变成一堆游离的断言——于是一个关于命令
+契约的问题，回来的是一段**关于**这条命令的散文。命令目录改为把这类来源按结构化条目
+摄取（命令名、语法、参数、默认值、示例），并在人工确认后落进一张普通的 Knowhow 表。
+
+全流程 opt-in、按来源触发，上传时什么也不跑。
+
+**前提：来源必须已经解析完。** 成本预告与发起都要求 `parse_status` 落在
+「已解析」这一档（`parsed` / `extracting` / `extracted`——后两档是解析之后的知识图谱
+抽取阶段，元素早已齐了），否则返回带用户可读文案的 `409`：还在解析（或只导入了
+元数据）就请等解析完成，解析失败则请重新解析或重新上传。对着还没落下元素的来源做的
+成本预告会报出「约 0 个命令节」，读起来像「这份文档没什么可抽的」；对它发起识别则会
+把一份手册的一小段记成完整的一次识别。
+
+**成本预告。** `.../command-catalog/preview` 给出形状检测的计数（标识符式标题、
+用法行段落、参数密集段落）以及一次抽取要跑多少节、发多少次模型调用，**零模型调用**。
+它只读来源的一段有界前缀，所以 `sampled=true` 时这些数字是文档开头的**下界**而不是
+普查——一个会把自己要估算的那次扫描先做一遍的成本预告没有意义。`is_manual` 只是给
+调用方一个默认值，真正该拿去判断的是那些计数。
+
+**抽取。** 每个来源一个后台任务，由覆盖 `queued` 与 `running` 的条件唯一索引守卫：
+行先写、线程后起，落在那个窗口里的重复请求会被挡住，而不是排出第二个写同一份候选的
+worker。每个分片一次模型调用，一个分片是一条命令的一批参数（大参数表一次问会撑爆
+输出预算，所以分片是必需的而不是优化）。没有第二意见，也没有精炼轮次。
+
+**接地校验，以及条目为什么会被拦。** 每条抽取结果落库前都要拿本节原文核对：命令名
+必须在服务端给出的候选清单里、且逐字出现在原文；每个参数名必须以原始形态出现（写成
+`-density` 的就得带前导短横，本节原文里写着 `-density` 而回答只给 `density` 一律拦）；
+`syntax` 必须是原文某条用法行的连续拷贝；原文里找不到的 `default` 会被
+清空。命令名不过关否决整条，其余只丢那一个字段。**被拦的条目同样入表**，带上原因和
+一段有界的原文窗口——一次产出很少的抽取，用户唯一能自己判断「是模型错了还是这份
+文档根本不是手册」的依据就是它们。
+
+**没有短横参数的命令照样抽参数。** 一整节里一个 `-flag` 都没有，不等于这条命令没有
+参数——`set_dont_use lib_cells` 这种**位置参数**正是单行文档最常见的写法。这类命令没有
+可服务的参数清单，所以问法不同（照着用法行把位置参数原样抄回来，真没有才回空），但
+把关的规则一模一样：名字必须逐字出现在本节原文，编出来的照样被拦并入表。
+
+**每一批参数只按它自己那批判。** 一条命令的参数多时会分几批提取，每批只问其中一部分，
+而它的回答要在两个方向上都对得上那一批：不在这一批里的参数即便逐字对得上原文也要丢掉
+（同一条命令的所有参数都写在同一段原文里，光靠接地校验分不出它属于哪一批），这一批里
+问了却没回来的参数则记在这条命令上。两者都在审阅面板里挨着这条命令显示。后者同时是
+保留率诚实的前提：分母是「这一轮问了多少」而不是「模型愿意答多少」，所以二十个参数只
+答一个是 5% 而不是 100%。一批参数覆盖率不到一半时会拆成两半重问一次——与回答过长走的
+是同一个补救，因为是同一个毛病；而回答条数与所问一样多、只是答错了的那种不重问，问得
+更少也救不了它。
+
+**熔断。** 处理满十节之后，命令名整条否决率超过 20%、参数保留率低于 50%、或「完全没给出
+可用回答的分片占比超过 20%」，任一成立就直接判失败并给出用户可读的理由，而不是带着一份看
+起来合理的近空目录收工。三根轴缺一不可，因为它们互相看不见：一条结果完全可以选对命令名、
+同时把参数全部编造出来；而一个什么都不返回的模型要按「它没在回答」如实报出来，而不是报成
+「参数丢了」这个症状——那一轮会付完整本手册的钱，最后报成功、目录是空的。瞬态的模型服务
+错误（限流、上游报错）不算抽取结果：它直接判任务失败，绝不会被记成「这一节本来就没有
+命令」。
+
+**模型自撰的字段有上界，也有标注。** 说明、示例和每个参数自己的说明是接地校验刻意不查的
+三个字段（散文无法逐字比对），所以都在候选落库前截断：每个字段各有上界，参数说明还额外
+有整行的总量上界，被总量截掉的条数与其他拦截原因一起如实报出。示例在审阅面板里显示，并
+附一句「示例为模型生成，未经原文校验」。
+
+**确认与合并。** 候选在人工确认前都是未生效的。确认时若不存在则创建名为
+「命令目录：<来源标题>」的 Knowhow 表（固定六列：命令 / 语法 / 参数 / 说明 / 示例 /
+出处，其中「命令」是行标题列），已存在则**只新增表里没有的命令**。候选的命令在表里
+已有对应行时，会原样回报进 `conflicts`，那一行**不动**——v1 刻意绝不覆盖用户可能已经
+手工订正过的内容，完整的 diff/merge 属于后续任务。列按**名字**寻址，所以之后编辑目标表的
+列不会把内容悄悄挪进错误的一列；表若已丢掉「命令」列，则拒绝写入而不是硬写。一次
+`all_pending` 最多确认一页，剩余数量由 `pending_remaining` 如实回报。落库全部走 Knowhow
+既有服务层，所以表的变更历史会像记录任何一次普通编辑那样记录它们。
+
+每一条退出路径都会把任务行落成终态，`Ctrl-C`/`SIGTERM` 也不例外：留在
+`queued`/`running` 的行会一直占住这个来源的守卫直到后端重启，进程自己兜不住的那部分
+由启动兜底收尾。
+
+**上一轮还有候选没审阅完时，重新发起识别会被拦住，跳过是唯一的显式放弃出口。**
+`.../job` 只会返回一个来源最近一次任务，若这时又发起新一轮，上一轮的候选就再也够不着
+了——永远留在 `candidate` 态、却没有任何页面能重新打开它。前端与 `.../command-catalog`
+自己的 `409` 都会拦住这种情况（覆盖上一轮可能到达的任意终态：成功、失败或取消），
+拦截提示写的就是「确认或跳过」。`apply` 只在候选与目标表冲突时才会把它挪出 `candidate`
+态而不落库；一条审阅者单纯不想要、又不冲突的候选此前没有任何路可走。
+`.../command-catalog/dismiss` 就是这条路——审阅面板里「跳过所选」/「跳过全部待审阅」
+两个动作，选择契约、per-target 锁与 owner-only 权限都镜像 `apply`，只是完全不碰
+Knowhow 表。
+
+**来源被重新解析之后，这一轮的结果就作废了。** 每个任务在创建时记下当时的**来源代次**
+（该来源全部元素共有的那一个落库时刻，重新解析会整批换掉它们），`apply` / `dismiss`
+在动手之前先比一次：对不上就返回带用户可读文案的 `409`，并在同一次调用里把这个任务
+剩下的候选整批标成 `dismissed`（原因 `source_reparsed`）。候选里的命令名、原文摘录与
+出处指向的全是抽取时读到的那一代元素，原样确认进知识表写下去的就是文档里已经不存在的
+内容。整批作废不是附赠的：上面那条「待审阅候选拦重跑」的守卫会读同一批候选，不清掉它们
+就会两头卡死——每次确认因为过期被拒，每次重跑又因为还有未审候选被拒。同一条判据也让
+重新发起识别在来源已重新解析时直接放行（顺手清掉旧候选），因为重新解析恰恰就是用户想
+重跑的原因。代次刻意**不**取 `sources.updated_at`：那是有意做粗的变更信号，每次状态迁移
+（重新抽取知识图谱、写摘要）都会推进而元素纹丝不动，按它判会在一次普通的重新抽取之后
+谎报「来源已重新解析」，并逼用户重跑一整轮付费识别。
+
+端点（都作用在路径里那个笔记本自己的来源上；读取需要笔记本读权限，写入需要 owner）：
+
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` —— 形状信号 + 成本预告，有界读取触顶时带 `sampled`；来源尚未解析完或解析失败时返回带用户可读文案的 `409`
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog` —— 发起抽取；该来源已有活跃任务（既有任务从 `.../job` 取）、抽取模型未配置、来源尚未解析完或解析失败、或上一轮还有候选没审阅完（需先确认或跳过）时返回带用户可读文案的 `409`。上一轮的候选若已因来源被重新解析而过期，则不拦，改为整批清掉再放行
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` —— 该来源最近一次任务：`status` 与 `progress`（`sections_total`、`sections_done`、`entries`、`rejected`、`uncovered`、`truncated_sections`、`pending_candidates`），失败时带 `failure_reason`。内部诊断列 `diagnostic` 刻意不进响应
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` —— `cancelling`（worker 会在下一个分片边界停，飞行中的一次模型调用被取消时也会停，不必等到那次调用返回）、`cancelled`（本进程没有在跑它，直接落终态）或 `not_running`
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/candidates` —— keyset 分页（`job_id?`、`state=candidate|rejected|applied|dismissed`、`cursor`、`limit`）并带各档 `counts`。`next_cursor` 是上一页最后一条的 `position` 而不是 offset：确认候选会改 `state`，offset 分页会漏行/重行。`dismissed` 候选带 `dismiss_reason`：`conflict_existing_row`（apply 发现已有同名行）、`user_dismissed`（人工显式跳过）或 `source_reparsed`（来源已重新解析，这一轮结果整批过期）
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` —— body 为 `{candidate_ids}` 或 `{all_pending: true}`；返回 `table_id`、`created`、`applied`、`rows_added`、`conflicts` 与 `pending_remaining`（一次调用最多确认一页）。来源在这一轮之后被重新解析时返回带用户可读文案的 `409`，并整批作废该任务剩余候选；重新解析**正在进行中**（还没换掉元素）时是另一条 `409`，措辞不同且**不作废任何候选**——解析可能在换元素之前就失败，那批候选仍然有效
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` —— body 为 `{candidate_ids}` 或 `{all_pending: true}`，选择契约与单页上限同 `apply`；把选中的 `candidate` 态候选标记为 `dismissed`（原因 `user_dismissed`），不碰任何 Knowhow 表；返回 `dismissed`（真正被标记的 id）与 `pending_remaining`。来源被重新解析、或重新解析正在进行中时，两条 `409` 都同 `apply`
+
 ## 检索模式（问答）
 
 `POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。联合范围按路径区分：`chunk` 基线 active-only；可选 KG overlay / PPR 可加入 federated KG 与 base-backed chunk；`graph` / `reasoning` 走 federated KG。`federated_retrieve()` 的知识对象命中不改 score，只在完全平局时以 `base` 为第二排序键；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。这些排序信号不进入接地阈值。
@@ -460,6 +567,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements` —— owner∪成员口径，按来源自己所属的笔记本判权限
 - `GET /api/notebooks/{id}/sources/{source_id}`、`GET /api/notebooks/{id}/sources/{source_id}/elements` —— 同样两个读取，但权限按路径里的**当前活跃**笔记本判，目标在它的有效参与集（自身 + 已生效挂载的参考库）内解析。挂载参考库不等于获得该库的直接成员权限，因此浏览器始终只用活跃笔记本过权限、由后端内部代理读取；参与集每次请求实时判定，被挂库降级/易主/深拷贝中或挂载被取消时当场 404。本库来源走的是同一条路径（参与集首项恒为活跃笔记本自身），响应如实返回来源真正所属的笔记本，供前端据此按只读渲染。写入刻意不代理——重新解析与删除仍是 `/api/sources/{id}` 上的 owner-only 操作。详情响应比 `/api/sources/{id}` 更窄：去掉 `file_path` 与原始 `error_message`（两者都可能带服务端绝对路径），改回一个如实的 `parse_failed` 布尔；跨库的隐藏合成源（memory/knowhow 投影行，集合地图刻意把它们算进作用域）直接拒绝
 - `GET /api/notebooks/{id}/assets/{asset_id}` —— 图片资产（knowhow 单元格图片、来源插图）适用同一条参与集规则：路径里的笔记本是查看者的活跃笔记本，资产自己声明所属笔记本，不在活跃笔记本有效参与集内的资产一律 404。经挂载库代理来的资产用 `Cache-Control: no-store`，取消挂载即刻生效；活跃笔记本自己的资产保持原有长缓存
+- 命令目录：`GET .../sources/{sid}/command-catalog/preview`（零模型调用的成本预告）、`POST .../sources/{sid}/command-catalog`（发起；该来源已有活跃任务、或上一轮还有候选没审阅完时 409）、`GET .../command-catalog/job`、`POST .../command-catalog/cancel`、`GET .../command-catalog/candidates?job_id=&state=&cursor=&limit=`（keyset 分页 + 各档计数）、`POST .../command-catalog/apply` body `{candidate_ids}` 或 `{all_pending}`（创建或追加「命令目录：<来源>」表，绝不覆盖已有行）、`POST .../command-catalog/dismiss` body `{candidate_ids}` 或 `{all_pending}`（把候选标记为已跳过，不写任何表——不冲突的候选唯一的放弃出口——见[命令目录](#命令目录工具手册)）
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`）、显式的建议式表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`），以及带全库推理取证的单行空列补全建议（`POST .../knowhow/{table_id}/rows/{row_id}/complete`，可选 `target_column_ids`，返回 `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`）

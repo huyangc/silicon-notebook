@@ -212,6 +212,60 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "诊断通道。真实响应由 test_knowhow_api.py 的解析失败、属性按行提示与列数不一致"
         "用例覆盖，均断言 X-User-Message。"
     ),
+    "app/api/catalog_routes.py::start_command_catalog": (
+        "三处 detail：本文件顶部维护的中文常量 `_ALREADY_RUNNING_MESSAGE`"
+        "（该来源已有识别任务在跑）、`catalog_job.MODEL_UNAVAILABLE_MESSAGE`"
+        "（模型未配置），以及 `catalog_job.pending_candidates_message(exc.pending)`"
+        "（R5 P2：上一轮成功但还有待审阅候选，`.../job` 只返回最近一次任务、"
+        "新一轮会让旧候选永远够不着——文案是同模块维护的纯中文模板 f-string，只插入"
+        "一个整数计数，无内部黑话）。真实响应由 test_command_catalog_job.py 的"
+        "test_api_duplicate_start_is_a_user_readable_409、"
+        "test_api_start_without_a_configured_model_is_a_user_readable_409 与"
+        "test_api_second_start_with_unreviewed_candidates_is_a_user_readable_409 覆盖，均"
+        "断言 X-User-Message 头与逐字 detail。"
+    ),
+    "app/api/catalog_routes.py::_not_parsed_error": (
+        "R8：detail 是 `catalog_job` 维护的两个中文常量之一——"
+        "`SOURCE_PARSE_FAILED_MESSAGE`（来源解析失败，要重新解析或重新上传）与"
+        "`SOURCE_NOT_PARSED_MESSAGE`（来源尚未完成解析，要等待）。二选一只看"
+        "`CatalogSourceNotParsed.parse_status` 这个**字段**，不看异常文本，"
+        "异常原文既不参与判断也不外泄；helper 只是把 preview/start 两个端点共用的"
+        "这段选择收拢到一处，避免同一份文案抄两遍走样。真实响应由"
+        "test_command_catalog_job.py 的"
+        "test_api_start_and_preview_refuse_a_source_that_is_not_parsed_yet 与"
+        "test_api_start_and_preview_refuse_a_source_whose_parse_failed 覆盖，"
+        "均断言 X-User-Message 头与逐字 detail。"
+    ),
+    "app/api/catalog_routes.py::apply_command_catalog": (
+        "五处 detail 都是本文件/`catalog_job` 维护的中文常量："
+        "`_APPLY_EMPTY_MESSAGE`（未选择候选）、`_APPLY_TOO_MANY_MESSAGE`"
+        "（显式选择超过 MAX_APPLY_CANDIDATES）、`catalog_job."
+        "APPLY_TABLE_SHAPE_MESSAGE`（目标表丢失命令列，走策展常量而非"
+        "`str(exc)` —— 与同文件 CatalogModelUnavailable 的先例一致）、R8 的"
+        "`catalog_job.SOURCE_STALE_MESSAGE`（来源已重新解析，候选同时被过期），"
+        "以及 R10 的 `catalog_job.SOURCE_BUSY_MESSAGE`（来源正在重新解析，确认"
+        "无法安全落库）。后两条刻意分开：stale 那条连带过期了候选，busy 这条"
+        "什么都没过期，所以不能叫用户去「重新识别」。真实响应由"
+        "test_command_catalog_job.py 的"
+        "test_api_apply_without_a_selection_is_a_user_readable_400、"
+        "test_api_apply_with_too_many_explicit_candidates_is_a_user_readable_422、"
+        "test_api_apply_refuses_a_broken_table_with_a_user_readable_400、"
+        "test_api_apply_after_a_reparse_is_a_user_readable_409 与"
+        "test_api_apply_during_an_in_flight_reparse_is_a_user_readable_409 覆盖，"
+        "均断言 X-User-Message 头与逐字 detail。"
+    ),
+    "app/api/catalog_routes.py::dismiss_command_catalog": (
+        "R7：四处 detail 都是本文件顶部/`catalog_job` 维护的中文常量，逐条镜像同文件"
+        "apply 的先例——`_DISMISS_EMPTY_MESSAGE`（未选择候选）、"
+        "`_DISMISS_TOO_MANY_MESSAGE`（显式选择超过 MAX_APPLY_CANDIDATES）、R8 的"
+        "`catalog_job.SOURCE_STALE_MESSAGE`（来源已重新解析）与 R10 的"
+        "`catalog_job.SOURCE_BUSY_MESSAGE`（来源正在重新解析）。真实响应由"
+        "test_command_catalog_job.py 的"
+        "test_api_dismiss_without_a_selection_is_a_user_readable_400、"
+        "test_api_dismiss_with_too_many_explicit_candidates_is_a_user_readable_422 与"
+        "test_api_dismiss_during_an_in_flight_reparse_is_a_user_readable_409 覆盖，"
+        "均断言 X-User-Message 头与逐字 detail。"
+    ),
 }
 
 

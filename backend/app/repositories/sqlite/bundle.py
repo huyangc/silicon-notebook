@@ -9,6 +9,7 @@ from app.core.config import Settings
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.ports import RepositorySeams
 from app.repositories.sqlite.ask_state_store import AskStateStore
+from app.repositories.sqlite.catalog_store import CatalogStore
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.embedding_store import EmbeddingStore
@@ -54,6 +55,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     governance: GovernanceStore
     index_projection: IndexProjectionStore
     kg_build_jobs: KgBuildJobStore
+    catalog: CatalogStore
     knowhow: KnowhowStore
     knowhow_history: KnowhowHistoryStore
     knowhow_transfer: KnowhowTransferStore
@@ -98,6 +100,7 @@ class SqlitePersistenceBundleFactory:
         kg_build_jobs = KgBuildJobStore(
             database, new_id=seams.new_id, now=seams.now
         )
+        catalog = CatalogStore(database, new_id=seams.new_id, now=seams.now)
         knowhow = KnowhowStore(database, new_id=seams.new_id, now=seams.now)
         knowhow_history = KnowhowHistoryStore(
             database, new_id=seams.new_id, now=seams.now
@@ -126,6 +129,7 @@ class SqlitePersistenceBundleFactory:
             governance=governance,
             index_projection=index_projection,
             kg_build_jobs=kg_build_jobs,
+            catalog=catalog,
             knowhow=knowhow,
             knowhow_history=knowhow_history,
             knowhow_transfer=knowhow_transfer,

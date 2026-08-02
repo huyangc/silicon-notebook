@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import Callable, Sequence
 
 from app.repositories.knowhow_asset_refs import required_asset_ids
-from app.repositories.ports import KNOWHOW_COLUMN_KINDS
+from app.repositories.ports import CATALOG_MAX_CANDIDATE_PAGE, KNOWHOW_COLUMN_KINDS
 from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
@@ -759,6 +759,24 @@ class KnowhowStore:
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
         return self.knowhow_table_health_inputs(notebook_id)
 
+    def knowhow_table_id_by_title(self, notebook_id: str, title: str) -> str:
+        """See ``KnowhowStorePort.knowhow_table_id_by_title`` for the
+        contract. A bounded point lookup on ``(notebook_id, title)`` — never
+        the health-aggregated ``list_knowhow_tables`` scan a title lookup
+        (command-catalog's by-title table resolution) has no use for.
+
+        Ties (more than one table sharing the title) resolve to the same row
+        ``list_knowhow_tables`` would surface first: earliest ``created_at``,
+        then ``id`` — matching that method's own ``ORDER BY``.
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT id FROM knowhow_tables WHERE notebook_id=? AND title=? "
+                "ORDER BY created_at,id LIMIT 1",
+                (notebook_id, title),
+            ).fetchone()
+        return str(row["id"]) if row is not None else ""
+
     def knowhow_enumeration_catalog(
         self, notebook_id: str, *, limit: int = 8, query: str = ""
     ) -> dict:
@@ -1093,6 +1111,67 @@ class KnowhowStore:
                 for row in row_rows
             ],
         }
+
+    def knowhow_table_columns(self, table_id: str) -> list[dict]:
+        """A table's columns alone — never its rows or cells. Raises
+        ``KeyError`` if the table is gone, same as ``get_knowhow_table``, so a
+        caller that only needs "does this still exist, and what are its
+        columns" (command-catalog apply resolving a remembered target) never
+        pays for hydrating rows/cells it does not need — a table can hold
+        thousands of rows; its column list never scales with them."""
+        with self.database.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM knowhow_tables WHERE id = ?", (table_id,)
+            ).fetchone() is None:
+                raise KeyError(table_id)
+            column_rows = db.execute(
+                "SELECT id, name, role, position FROM knowhow_columns "
+                "WHERE table_id = ? ORDER BY position, id",
+                (table_id,),
+            ).fetchall()
+        return [
+            {
+                "id": column["id"],
+                "name": column["name"],
+                "role": column["role"],
+                "position": column["position"],
+            }
+            for column in column_rows
+        ]
+
+    def knowhow_anchor_existing_values(
+        self, column_id: str, values: Sequence[str]
+    ) -> set[str]:
+        """Which of `values` already have a row in `column_id`'s column,
+        bounded to `CATALOG_MAX_CANDIDATE_PAGE` values and answered with one
+        indexed lookup — never a scan of the target table's rows.
+
+        `column_id` alone scopes the query to exactly one table (a column
+        belongs to exactly one table), so this reuses the v21 normalized-
+        anchor expression index (`column_id`, JS-trimmed `content_md`,
+        `row_id`) on its leading two columns without joining `knowhow_rows`
+        at all. Trimmed on both sides so a manually-edited cell carrying
+        incidental whitespace still matches — the same normalization the
+        guarded-write anchor-membership check already applies.
+        """
+        wanted = [
+            value
+            for value in dict.fromkeys(
+                js_trim(str(item)) for item in list(values)[:CATALOG_MAX_CANDIDATE_PAGE]
+            )
+            if value
+        ]
+        if not wanted:
+            return set()
+        normalized = sqlite_js_trim_expression("content_md")
+        placeholders = ",".join("?" for _ in wanted)
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT DISTINCT {normalized} AS value FROM knowhow_cells "
+                f"WHERE column_id = ? AND {normalized} IN ({placeholders})",
+                (column_id, *wanted),
+            ).fetchall()
+        return {row["value"] for row in rows}
 
     def table_exists(self, table_id: str) -> bool:
         """Cheap existence probe (a single ``SELECT 1``, not the full

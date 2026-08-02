@@ -71,14 +71,16 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _rollback_v34(db: sqlite3.Connection) -> None:
-    """Remove the v34-v38 additions before forging an older deployment.
+    """Remove the v34-v39 additions before forging an older deployment.
 
     A faithful pre-v34 shape lacks everything EVERY later migration adds, not
     just v34's: leaving _migration_36's tables behind would make the replay
     observe no addition for them and fail closed as manifest-addition-missing.
-    Roll back newest-first; DROP TABLE takes
-    idx_kg_source_profiles_nb_mainstream with it.
+    Roll back newest-first; DROP TABLE takes each table's own indexes with it
+    (idx_kg_source_profiles_nb_mainstream, and _migration_39's six).
     """
+    db.execute("DROP TABLE catalog_candidates")                # _migration_39
+    db.execute("DROP TABLE catalog_jobs")                      # _migration_39
     db.execute("DROP INDEX idx_sources_visible_identity")      # _migration_38
     db.execute("DROP INDEX idx_source_elements_source_type")   # _migration_37
     db.execute("DROP TABLE kg_analysis_artifacts")             # _migration_36
@@ -723,11 +725,12 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
 
 
 def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
-    """A deployed v36 database is missing the v37 and v38 indexes (both
-    asked_at and the three KG-analysis precompute tables already landed at v35
-    and v36). Rolling back the full v34-v38 helper would also strip those, which
-    a genuine v36 deployment still has, so this test drops exactly the later
-    additions instead of reusing `_rollback_v34`."""
+    """A deployed v36 database is missing the v37 and v38 indexes plus
+    _migration_39's two tables (both asked_at and the three KG-analysis
+    precompute tables already landed at v35 and v36). Rolling back the full
+    v34-v39 helper would also strip those, which a genuine v36 deployment still
+    has, so this test drops exactly the later additions instead of reusing
+    `_rollback_v34`."""
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
     upgraded = module.SQLiteRepository(
@@ -735,7 +738,9 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
-        rollback.execute("DROP INDEX idx_sources_visible_identity")  # _migration_38
+        rollback.execute("DROP TABLE catalog_candidates")               # _migration_39
+        rollback.execute("DROP TABLE catalog_jobs")                     # _migration_39
+        rollback.execute("DROP INDEX idx_sources_visible_identity")     # _migration_38
         rollback.execute("DROP INDEX idx_source_elements_source_type")  # _migration_37
         rollback.execute("PRAGMA user_version = 36")
 
@@ -743,6 +748,33 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 36
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
+def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
+    """A deployed v38 database is missing exactly _migration_39's two tables.
+
+    This is the hop that catches DDL smuggled into a sealed migration: the
+    version gate short-circuits on `current >= SCHEMA_VERSION`, so anything
+    added to an already-released migration never runs on a deployed database
+    and only a forged deployment at the previous version can see it.
+    """
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE catalog_candidates")
+        rollback.execute("DROP TABLE catalog_jobs")
+        rollback.execute("PRAGMA user_version = 38")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 38
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
 

@@ -1119,6 +1119,36 @@
         "type": "index"
       },
       {
+        "name": "idx_catalog_candidates_job_state",
+        "sql_sha256": "f3e2f5a2d6c340bb9a0eb0a63882c81eb6816865f859f9468ce077325750b382",
+        "type": "index"
+      },
+      {
+        "name": "idx_catalog_candidates_nb",
+        "sql_sha256": "738b240d838d3f500716dadddd398679aaf949feaa8d94050f1a9fa176885428",
+        "type": "index"
+      },
+      {
+        "name": "idx_catalog_candidates_source",
+        "sql_sha256": "70b360041c1f5d255dd1fe259eb03cbcfd2d2216c91c1aa45813f808c8bfed4b",
+        "type": "index"
+      },
+      {
+        "name": "idx_catalog_jobs_nb_created",
+        "sql_sha256": "a4bb29656711e409a6ff6959ecc3f017b322888162c1b8d040d53856ede5d747",
+        "type": "index"
+      },
+      {
+        "name": "idx_catalog_jobs_one_active",
+        "sql_sha256": "a537d80e3fee8b419bbd89a64ebb3ce1208c8c328180aa50d9de9409103acdfe",
+        "type": "index"
+      },
+      {
+        "name": "idx_catalog_jobs_source_created",
+        "sql_sha256": "475f528dafb5a1705ea8a02c79a805c8e494b18da43aadd0e36014bd309dc7ca",
+        "type": "index"
+      },
+      {
         "name": "idx_chunk_embeddings_nb",
         "sql_sha256": "886fffe3b799daf910469c1e9668e2a64f961c8349533e35e62fa5b32e039b3f",
         "type": "index"
@@ -1574,6 +1604,16 @@
         "type": "table"
       },
       {
+        "name": "catalog_candidates",
+        "sql_sha256": "adb17f892b64fdf822a97585d92e578b2dfc246bd1a17c7ad224f9c707dae5ca",
+        "type": "table"
+      },
+      {
+        "name": "catalog_jobs",
+        "sql_sha256": "a5e541eb67c05e4395063073d29f6c6ee0ff890c81b86ed0f229c8eae8ca2808",
+        "type": "table"
+      },
+      {
         "name": "chunk_embeddings",
         "sql_sha256": "ecc28ea792bf4078408e8973082923250c9a257ba026cdc30c14ef02db391867",
         "type": "table"
@@ -1959,6 +1999,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 38
+    "user_version": 39
   }
 }

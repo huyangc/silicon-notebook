@@ -72,7 +72,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 16
+    assert PostgresMigrator(postgres_database).migrate() == 17
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -324,7 +324,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 16
+    assert PostgresMigrator(postgres_database).migrate() == 17
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -402,7 +402,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 16
+    assert PostgresMigrator(postgres_database).migrate() == 17
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -467,7 +467,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 16
+    assert PostgresMigrator(postgres_database).migrate() == 17
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -1574,3 +1574,102 @@ def test_notebook_delete_returns_paths_and_removes_orphan_embeddings(
         "SELECT 1 FROM knowledge_embeddings WHERE object_id=%s",
         ("ko-delete",),
     ) is None
+
+
+# ---------------------------------------------------------- command catalog
+# The PostgreSQL CatalogStore had no behavioural coverage at all: only the
+# schema/migration phase test touched it. Four things in it are PG-ONLY code
+# paths that a SQLite-side test can never reach, and each fails differently:
+#
+#   * the `errors.UniqueViolation` -> `CatalogJobAlreadyRunning` mapping keyed
+#     on the literal constraint name — if that name is ever wrong, a duplicate
+#     start surfaces as a 500 instead of a 409, and only on PostgreSQL;
+#   * `id = ANY(%s)` instead of bounded placeholders;
+#   * `COLLATE "C"` on the ordering keys, so a non-C-collated database still
+#     pages in the order SQLite does;
+#   * the NULL -> "" `finished_at` sentinel that keeps the domain shape
+#     identical across backends.
+def _catalog_stores(request):
+    from app.repositories.postgres.catalog_store import CatalogStore
+
+    stores = request.getfixturevalue("core_stores")
+    new_id = _new_id_factory()
+    return stores, CatalogStore(stores.database, new_id=new_id, now=lambda: NOW)
+
+
+def test_postgres_catalog_single_flight_maps_the_unique_violation(request):
+    from app.repositories.ports import CatalogJobAlreadyRunning
+
+    stores, catalog = _catalog_stores(request)
+    owner = stores.identity.create_user("c00123456", "password-catalog")
+    notebook_id = stores.notebooks.create_row(NotebookCreate(name="Manual"), owner.id)
+    stores.sources.insert_source(
+        source_id="src-catalog", notebook_id=notebook_id, title="Manual",
+        source_type="markdown", status="extracted", parse_status="extracted",
+        file_name="m.md", file_path="/tmp/m.md", file_size=1, file_hash="h",
+        summary="", doc_type="",
+    )
+
+    queued = catalog.create_job(notebook_id, "src-catalog", owner.id)
+    assert queued["status"] == "queued"
+    assert queued["finished_at"] == ""  # NULL restored to the domain sentinel
+    with pytest.raises(CatalogJobAlreadyRunning):
+        catalog.create_job(notebook_id, "src-catalog", owner.id)
+
+    assert catalog.start_job(queued["id"], 3) is True
+    with pytest.raises(CatalogJobAlreadyRunning):
+        catalog.create_job(notebook_id, "src-catalog", owner.id)  # running too
+
+    assert catalog.record_section(
+        queued["id"], entries=2, rejected=1, uncovered=0
+    ) is True
+    assert catalog.finish_job(queued["id"], "succeeded") is True
+    assert catalog.finish_job(queued["id"], "succeeded") is False  # idempotent
+    settled = catalog.get_job(queued["id"])
+    assert settled["sections_done"] == 1 and settled["entries"] == 2
+    assert settled["finished_at"]
+    # Guard released with the terminal state.
+    assert catalog.active_job("src-catalog") is None
+    assert catalog.create_job(notebook_id, "src-catalog", owner.id)["status"] == "queued"
+
+
+def test_postgres_catalog_candidate_paging_and_id_lookup(request):
+    stores, catalog = _catalog_stores(request)
+    owner = stores.identity.create_user("d00123456", "password-catalog2")
+    notebook_id = stores.notebooks.create_row(NotebookCreate(name="Manual2"), owner.id)
+    stores.sources.insert_source(
+        source_id="src-catalog2", notebook_id=notebook_id, title="Manual2",
+        source_type="markdown", status="extracted", parse_status="extracted",
+        file_name="m2.md", file_path="/tmp/m2.md", file_size=1, file_hash="h2",
+        summary="", doc_type="",
+    )
+    job = catalog.create_job(notebook_id, "src-catalog2", owner.id)
+    catalog.add_candidates([
+        {
+            "job_id": job["id"], "notebook_id": notebook_id,
+            "source_id": "src-catalog2", "position": index + 1,
+            "command_name": f"set_thing_{index}",
+            "payload": {"syntax": f"set_thing_{index} -x"},
+            "state": "candidate" if index % 2 == 0 else "rejected",
+            "reject_info": {"fields": []},
+        }
+        for index in range(6)
+    ])
+
+    counts = catalog.candidate_counts(job["id"])
+    assert counts["candidate"] == 3 and counts["rejected"] == 3
+
+    first = catalog.list_candidates(job["id"], state="candidate", cursor=0, limit=2)
+    assert [row["position"] for row in first] == [1, 3]
+    assert first[0]["payload"]["syntax"] == "set_thing_0 -x"  # jsonb round-trip
+    rest = catalog.list_candidates(
+        job["id"], state="candidate", cursor=first[-1]["position"], limit=2
+    )
+    assert [row["position"] for row in rest] == [5]
+
+    wanted = [row["id"] for row in first]
+    fetched = catalog.candidates_by_ids(job["id"], wanted, limit=10)  # id = ANY(%s)
+    assert [row["id"] for row in fetched] == wanted
+    assert catalog.mark_candidates_applied(job["id"], wanted) == 2
+    assert catalog.candidate_counts(job["id"])["applied"] == 2
+    assert catalog.mark_candidates_applied(job["id"], wanted) == 0  # state-scoped

@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=38, postgres_version=16, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=39, postgres_version=17, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -50,7 +50,9 @@ COLUMN_TRANSFORMS = {
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 _FILESYSTEM_PATH_COLUMNS = frozenset({"sources.file_path"})
-_NON_FILESYSTEM_PATH_COLUMNS = frozenset({"chunks.section_path"})
+_NON_FILESYSTEM_PATH_COLUMNS = frozenset(
+    {"chunks.section_path", "catalog_candidates.section_path"}
+)
 _FTS5_SHADOW_SUFFIXES = ("data", "idx", "content", "docsize", "config")
 _POSTGRES_SPECIAL_TYPES = {
     "bytea": "bytea",
@@ -72,6 +74,8 @@ _SQLITE_NULL_GUARD_KEYS = frozenset(
         "app_settings.key",
         "ask_jobs.id",
         "auth_sessions.token",
+        "catalog_candidates.id",
+        "catalog_jobs.id",
         "chunk_embeddings.chunk_id",
         "chunks.id",
         "communities.id",
@@ -503,6 +507,29 @@ _TABLES = (
         (),
         ReplicationKeyKind.DECLARED_PK,
         69,
+    ),
+    # SQLite v39 / PostgreSQL v17: the command-catalog extraction tables. Ranks
+    # are appended past the rebuilt/shadow-internal tail rather than slotted at
+    # 65/66, because `copy_rank` is only ever used as a sort key over
+    # `manifest.replicated` (bulk_copy / replicator / verifier all sort that
+    # collection alone). Ranks therefore have to be unique, positive, and
+    # FK-consistent among REPLICATED tables — which 70/71 already are, since
+    # every parent (notebooks rank 15, sources rank 49) ranks lower — and
+    # renumbering five untouched entries to preserve a cosmetic contiguity
+    # would be pure churn on a frozen operational manifest.
+    _table(
+        "catalog_jobs",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        70,
+        "timestamptz",
+    ),
+    _table(
+        "catalog_candidates",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        71,
+        "jsonb+timestamptz",
     ),
 )
 

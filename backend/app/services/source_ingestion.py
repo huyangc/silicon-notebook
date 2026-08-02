@@ -271,6 +271,30 @@ class SourceIngestionService:
                 self._embedding_sources.pop(source_id, None)
 
     @contextmanager
+    def _held_source_chunk_lock(self, source_id: str, timeout: float | None):
+        """``hold_source_chunk_lock`` / ``try_hold_source_chunk_lock`` 的共同实现:
+        登记租约 → 取锁(可带超时)→ yield「是否真的持到锁」→ 释放锁 → 减租约。
+
+        超时失败时**照样**走 finally 减租约,且此时 pop 仍然安全:取锁失败意味着锁正被
+        别人持有,而持锁方(process_source 在管线入口登记、``_held_source_chunk_lock``
+        自己在取锁前登记)的租约必 ≥1,所以本方这一减不可能把计数减到 0、不会 pop 掉别人
+        正持有的锁对象。这与下面 ``hold_source_chunk_lock`` 文档里那条不变式是同一条。
+        """
+        with self._active_sources_lock:
+            self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
+        try:
+            # 租约已≥1,注册表项在本方持有期不会被 pop,get-or-create 与 pop 无竞争。
+            lock = self._source_chunk_lock(source_id)
+            acquired = lock.acquire() if timeout is None else lock.acquire(timeout=timeout)
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    lock.release()
+        finally:
+            self._release_source_lease(source_id)
+
+    @contextmanager
     def hold_source_chunk_lock(self, source_id: str):
         """给**非 process_source 的持锁方**(体检 backfill)用的守卫:持有该源分块锁的同时,
         把它登记进活跃租约(``_active_sources``),使 process_source 的 finally **不会在本方仍
@@ -284,14 +308,27 @@ class SourceIngestionService:
         process_source 在 `_source_chunk_lock` 取到的是**同一对象**(租约≥1 保证注册表项不被中途 pop
         重建);任一方持锁,另一方 acquire 阻塞。process_source 持锁时其租约必≥1(在管线入口登记、
         finally 才减),故本方减租约到 0 时必无 process_source 持锁,pop 安全。"""
-        with self._active_sources_lock:
-            self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
-        try:
-            # 租约已≥1,注册表项在本方持有期不会被 pop,get-or-create 与 pop 无竞争。
-            with self._source_chunk_lock(source_id):
-                yield
-        finally:
-            self._release_source_lease(source_id)
+        with self._held_source_chunk_lock(source_id, None):
+            yield
+
+    @contextmanager
+    def try_hold_source_chunk_lock(self, source_id: str, *, timeout: float):
+        """``hold_source_chunk_lock`` 的**有界等待**版:yield 的是「是否持到锁」。
+
+        语义与 ``threading.Lock.acquire(timeout=...)`` 逐字一致——yield ``True`` 表示锁在本
+        ``with`` 体内被持有,yield ``False`` 表示等待超时、**本方没有任何锁**。调用方必须先
+        判断再动手(见 ``CommandCatalogService._source_write_barrier``:False 直接抬手回一个
+        「来源正在重新解析」的 409,body 里不做任何写)。
+
+        为什么需要有界版:这把锁被 ``process_source`` 从 ``replace_elements`` 一路持到
+        ``build_chunks``,中间夹着 summarize 与 paper_meta 两次 LLM 调用,最坏可达分钟级。让一个
+        同步 HTTP 请求线程无限期等在上面,换来的答案还是同一个 409,不划算;有界等待把它变成
+        「几秒内如实告知正在解析」。刻意**不**把它做成异常:异常类型会逼调用方 import 本模块
+        (它拖着解析/嵌入/KG 的整条依赖),而 ``catalog_job`` 是刻意的后端中性模块,只吃端口与
+        可调用对象。返回布尔让那条边界保持只有一个鸭子类型方法名。
+        """
+        with self._held_source_chunk_lock(source_id, timeout) as acquired:
+            yield acquired
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
