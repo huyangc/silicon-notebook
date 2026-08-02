@@ -5040,6 +5040,120 @@ def test_dismiss_allows_every_already_parsed_status(repo, status):
     assert len(result["dismissed"]) == 2
 
 
+# --------------------- R17 (rebutted): the status check stays point-in-time
+def test_apply_tolerates_a_reparse_flipping_to_parsing_after_the_status_check(repo):
+    """This is the REVERSE guard for R17 (codex PR #412 review) — a P1 the
+    maintainer rebutted rather than fixed. This test is what makes that a
+    decision instead of a drift: turning `_require_not_parsing` (or
+    `_require_current_generation`) into a value re-checked against the write
+    that follows it — e.g. re-reading `parse_status` a second time right
+    before `_apply_locked` writes — must fail THIS test. If it does not, the
+    rebuttal in `_require_not_parsing`'s own docstring (R17 paragraph) is no
+    longer true of the code and needs to be revisited on purpose, not
+    discovered by accident.
+
+    codex's claim: a reparse that flips the source to `parsing` right AFTER
+    this check passes, but before `_apply_locked` finishes landing its rows,
+    leaves "permanently stale" knowhow rows with no later signal ever marking
+    them stale.
+
+    Rebuttal, pinned in two parts:
+      (1) `apply` already holds `_source_write_barrier(source_id)` across its
+          ENTIRE write (R10; see `test_apply_holds_the_parse_barrier_across_
+          its_write`), and `replace_elements` cannot run without that same
+          barrier — so no element the write reads can possibly have changed
+          in this window no matter what the STATUS column does. The flip
+          modelled here is deliberately just the status write (the one
+          `process_source` performs before ever touching the barrier — see
+          `_require_not_parsing`'s own docstring on why that ordering exists
+          in production) with no accompanying `replace_elements`, because
+          that status-only write is the entire scenario R17 describes: real
+          `hold_source_chunk_lock` contention is already covered by the R10
+          tests above.
+      (2) A reparse whose parse stage starts only after this check returns is
+          indistinguishable, from the source's own history, from a user
+          clicking 「重新解析」 the instant AFTER this apply call finishes —
+          plain serial ordering, not a race this call is part of. The R8
+          generation guard (`_require_current_generation`) already owns that
+          ordering: the SAME job's next touch sees the reparse that actually
+          completed and expires every surviving candidate as
+          `source_reparsed`. Part 3 below proves that half is not aspirational.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 3)
+    service, job = _run_ok(repo, notebook.id, "s1", 3)
+
+    def candidate_id(name: str) -> str:
+        page = service.catalog.list_candidates(
+            job["id"], state="candidate", cursor=0, limit=10
+        )
+        return next(row["id"] for row in page if row["command_name"] == name)
+
+    # The flip R17 is about, modelled at the narrowest possible grain: since
+    # `_require_not_parsing` is a single point-in-time read, wrapping it to
+    # perform the flip the INSTANT it returns normally (i.e. only once the
+    # check has already passed) IS the gap the claim describes — no thread
+    # or timing assumption required to land in it.
+    original_check = service._require_not_parsing
+
+    def _check_then_a_reparse_starts(notebook_id, source_id):
+        original_check(notebook_id, source_id)
+        repo._runtime.source_ingestion.set_source_status(source_id, "parsing")
+
+    service._require_not_parsing = _check_then_a_reparse_starts
+
+    # Partial apply — two of three commands — so a genuinely unreviewed
+    # candidate survives into part 3 below.
+    result = service.apply(
+        notebook.id, "s1", job["id"],
+        candidate_ids=[candidate_id("set_thing_0"), candidate_id("set_thing_1")],
+        actor="tester",
+    )
+
+    # Part 1: the confirm SUCCEEDED — neither `CatalogSourceBusy` nor
+    # `CatalogSourceChanged` — even though the source now reads `parsing`,
+    # because that flip landed after the only check that looks at it.
+    assert result["rows_added"] == 2
+    assert repo.get_source("s1").parse_status == "parsing"
+
+    # Part 2: the rows that landed describe the PRE-flip elements — the only
+    # elements that ever existed during this call.
+    table = repo.get_knowhow_table(result["table_id"])
+    anchor = table["columns"][0]["id"]
+    names = sorted(row["cells"].get(anchor, "") for row in table["rows"])
+    assert names == ["set_thing_0", "set_thing_1"]
+
+    # Part 3: the serial case the rebuttal leans on. A REAL reparse now
+    # actually completes — elements swapped through `replace_elements`, status
+    # settled back the way `process_source` leaves it — the thing the flip
+    # above only announced without ever finishing. The same job's surviving
+    # pending candidate (`set_thing_2`) is stale against it, and the R8
+    # generation guard is what is supposed to catch that on the very next
+    # touch of this job.
+    _reparse(repo, notebook.id, "s1", _manual_elements("s1", 3), LATER)
+    repo._runtime.source_ingestion.set_source_status("s1", "extracted")
+
+    with pytest.raises(CatalogSourceChanged):
+        service.apply(
+            notebook.id, "s1", job["id"], all_pending=True, actor="tester"
+        )
+
+    # Nothing new was written — `_apply_locked` never ran a second time, so
+    # this is still the one table part 2 already inspected.
+    tables = repo.list_knowhow_tables(notebook.id)
+    assert len(tables) == 1
+    assert tables[0]["id"] == result["table_id"]
+    counts = service.catalog.candidate_counts(job["id"])
+    assert counts["candidate"] == 0
+    assert counts["dismissed"] == 1
+    dismissed = service.catalog.list_candidates(
+        job["id"], state="dismissed", cursor=0, limit=10
+    )
+    assert {row["reject_info"]["reason"] for row in dismissed} == {
+        "source_reparsed"
+    }
+
+
 def test_a_runtime_without_ingestion_still_confirms(repo):
     """The unwired barrier yields straight through, and that is correct rather
     than a hole: the only writer it defends against lives on the very service
