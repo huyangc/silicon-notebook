@@ -1605,6 +1605,7 @@
           "type": "object"
         },
         "CommandCatalogApplyRequest": {
+          "description": "确认请求。`candidate_ids` 与 `all_pending` 二选一,不是各自独立的开关:\n两者同时非空/为真会被路由层拒成 422(R13,codex PR #412 评审第 13 轮),不再\n像早前那样静默偏向 `all_pending` 而悄悄吞掉调用方明确写出的 `candidate_ids`。",
           "properties": {
             "all_pending": {
               "default": false,
@@ -1869,7 +1870,7 @@
           "type": "object"
         },
         "CommandCatalogDismissRequest": {
-          "description": "跳过请求。形状与 `CommandCatalogApplyRequest` 逐字相同(`candidate_ids`\n二选一 `all_pending`),但刻意分开建模:这是各端点自己的传输合同,不是同一个\n请求体在两个 URL 下复用——将来任一个的字段独立演化都不会牵动另一个。",
+          "description": "跳过请求。形状与 `CommandCatalogApplyRequest` 逐字相同(`candidate_ids`\n二选一 `all_pending`,同时非空/为真同样 422,见该请求模型的注释),但刻意\n分开建模:这是各端点自己的传输合同,不是同一个请求体在两个 URL 下复用——\n将来任一个的字段独立演化都不会牵动另一个。",
           "properties": {
             "all_pending": {
               "default": false,

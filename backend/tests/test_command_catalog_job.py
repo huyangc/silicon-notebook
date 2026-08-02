@@ -218,6 +218,19 @@ def _add_manual(repo, notebook_id: str, source_id: str, commands: int, **kwargs)
     return _add_elements(repo, notebook_id, source_id, "OpenROAD 手册", elements)
 
 
+def _mark_grounded_paper(repo, notebook_id: str, source_id: str, paper_title: str) -> None:
+    """Attach a grounded ``source_paper_meta`` row the way paper-metadata
+    extraction does, for R13's `source_display_title` table-naming tests —
+    minimal columns, the rest keep their schema defaults (see
+    `tests/test_collection_enumeration.py` for the same shape)."""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO source_paper_meta (source_id,notebook_id,is_paper,"
+            "paper_title,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            (source_id, notebook_id, 1, paper_title, NOW, NOW),
+        )
+
+
 def _numbered(source_id: str, raw: list[dict]) -> list[dict]:
     return [
         {**item, "id": f"el-{source_id}-{index + 1:04d}"}
@@ -1932,6 +1945,165 @@ def test_apply_creates_the_table_and_records_a_change_entry(repo):
     assert again["table_id"] == result["table_id"]
 
 
+# R13 (codex PR #412 评审第 13 轮 P2) 修复补充覆盖:目标表名/提要标题改走
+# `source_display.source_display_title` 这个单一真源,不再用来源原始上传标题
+# (`sources.title`)绕过它——已接地判定为论文且解析出非空 `paper_title` 的
+# 来源,引用卡/证据卡/清单卡处处显示论文标题,目录表名不能是唯一的例外。
+def test_apply_table_name_uses_the_grounded_paper_title_not_the_upload_name(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Grounded Paper Title")
+    service, job = _run_ok(repo, notebook.id, "s1", 1)
+    result = service.apply(
+        notebook.id, "s1", job["id"], all_pending=True, actor="tester"
+    )
+    table = repo.get_knowhow_table(result["table_id"])
+    assert table["title"] == f"{CATALOG_TABLE_TITLE_PREFIX}A Grounded Paper Title"
+    provenance = table["columns"][5]["id"]
+    assert "A Grounded Paper Title" in table["rows"][0]["cells"][provenance]
+    assert "OpenROAD 手册" not in table["rows"][0]["cells"][provenance]
+
+
+def test_preview_source_title_uses_the_grounded_paper_title(repo):
+    """`preview` shows the source's canonical name in its cost estimate, the
+    same one the eventual apply would name the target table after — a
+    grounded paper must not be called two different things across the two
+    calls of the same feature."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Grounded Paper Title")
+    preview = _service(repo).preview(notebook.id, "s1")
+    assert preview.source_title == "A Grounded Paper Title"
+
+
+def test_apply_table_name_ignores_a_non_paper_or_ungrounded_source(repo):
+    """A stale/ungrounded `is_paper=0` row (or no row at all) must not
+    surface a title — the ordinary source name keeps naming the table,
+    matching `source_display_title`'s own precedence rule."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO source_paper_meta (source_id,notebook_id,is_paper,"
+            "paper_title,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("s1", notebook.id, 0, "Stale title from a rejected extraction",
+             NOW, NOW),
+        )
+    service, job = _run_ok(repo, notebook.id, "s1", 1)
+    result = service.apply(
+        notebook.id, "s1", job["id"], all_pending=True, actor="tester"
+    )
+    table = repo.get_knowhow_table(result["table_id"])
+    assert table["title"] == f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+
+
+def test_apply_table_name_snapshot_survives_a_paper_title_backfill_mid_job(repo):
+    """The SAME job's second apply must keep writing to the table its first
+    apply created, even though a paper-metadata backfill lands in between and
+    changes what `_display_source_title` would now return.
+
+    This is `_resolve_target_table`'s existing `applied_table_id`-first
+    resolution (see its docstring) carrying a NEW kind of drift it was never
+    exercised against before: `sources.title` is immutable for the life of a
+    source, so before this fix the derived title could never actually change
+    between two applies of one job. A canonical title CAN — paper-metadata
+    extraction runs asynchronously and can complete after the catalog job's
+    first apply already created the table. The job's own remembered
+    `applied_table_id` is what keeps that from splitting the table in two;
+    this proves it actually does for the NEW kind of drift too.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    service, job = _run_ok(repo, notebook.id, "s1", 2)
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    first_id, second_id = page["items"][0]["id"], page["items"][1]["id"]
+
+    first = service.apply(
+        notebook.id, "s1", job["id"], candidate_ids=[first_id], actor="tester"
+    )
+    assert first["created"] is True
+    table_id = first["table_id"]
+    assert repo.get_knowhow_table(table_id)["title"] == (
+        f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+    )
+
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Later-Grounded Title")
+
+    second = service.apply(
+        notebook.id, "s1", job["id"], candidate_ids=[second_id], actor="tester"
+    )
+    assert second["created"] is False
+    assert second["table_id"] == table_id
+
+    # Exactly one command-catalog table exists for this source — the
+    # post-backfill canonical title never spawned a second one.
+    titles = {t["title"] for t in repo.list_knowhow_tables(notebook.id)}
+    assert titles == {f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"}
+
+    # The provenance cell written by the SECOND apply reflects what the
+    # source was canonically called AT THAT MOMENT — a descriptive detail,
+    # not a table identity, so it is free to pick up the new title even
+    # though the table itself did not move.
+    table = repo.get_knowhow_table(table_id)
+    provenance = table["columns"][5]["id"]
+    by_anchor = {
+        row["cells"][table["columns"][0]["id"]]: row["cells"][provenance]
+        for row in table["rows"]
+    }
+    assert "OpenROAD 手册" in by_anchor["set_thing_0"]
+    assert "A Later-Grounded Title" in by_anchor["set_thing_1"]
+
+
+def test_start_stale_sweep_lock_key_matches_apply_after_a_paper_title_backfill(repo):
+    """`start`'s stale-candidate sweep (`_reject_if_pending_candidates`) takes
+    the SAME per-target lock `apply`/`dismiss` take, keyed on the SAME derived
+    title (see `_target_lock_key`'s docstring: "every writer that could
+    collide computes the same key"). Both call sites must resolve the
+    canonical title through `_display_source_title` — if one of them read the
+    raw upload title instead, a paper-metadata backfill would silently split
+    them onto two different lock keys, defeating the mutual exclusion the
+    lock exists for.
+
+    This drives the actual `start()` code path (not just the pure helper) by
+    spying on `_target_lock_key`: a reparse after an unreviewed job leaves the
+    stale-sweep branch of `_reject_if_pending_candidates` the only thing that
+    calls it during `start`, and the key it is called with is asserted equal
+    to what `apply`/`dismiss` would independently compute for the SAME source
+    right after.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job = _run_ok(repo, notebook.id, "s1", 1)  # leaves 1 pending candidate
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Grounded Paper Title")
+    _reparse(repo, notebook.id, "s1", _manual_elements("s1", 1), LATER)
+
+    seen_keys: list[tuple] = []
+    original = service._target_lock_key
+
+    def spy(nb_id, title):
+        key = original(nb_id, title)
+        seen_keys.append(key)
+        return key
+
+    service._target_lock_key = spy
+    try:
+        second_job = service.start(notebook.id, "s1")
+    finally:
+        service._target_lock_key = original
+
+    source = service._scoped_source(notebook.id, "s1")
+    expected = service._target_lock_key(
+        notebook.id, service._display_source_title("s1", source)
+    )
+    assert expected == (
+        "title", notebook.id, f"{CATALOG_TABLE_TITLE_PREFIX}A Grounded Paper Title"
+    )
+    # The stale sweep ran (the prior job's one candidate is no longer pending)
+    # and computed EXACTLY this key — not the raw-title one.
+    assert seen_keys == [expected]
+    assert second_job["id"] != job["id"]
+
+
 # R11 (codex PR #412 R11 评审 P2) 修复补充覆盖:`_find_table` 改走
 # `knowhow_table_id_by_title` 有界点查,不再拿 `list_knowhow_tables` 的健康聚合
 # 全表扫描去过一遍标题匹配。
@@ -3601,6 +3773,38 @@ def test_api_apply_with_too_many_explicit_candidates_is_a_user_readable_422(http
     assert str(MAX_APPLY_CANDIDATES) in response.json()["detail"]
 
 
+def test_api_apply_with_both_scopes_is_a_user_readable_422_and_writes_nothing(http):
+    """R13 (codex PR #412 评审第 13 轮 P2): `all_pending=true` alongside a
+    non-empty `candidate_ids` used to silently prefer `all_pending` — a
+    WIDER write than the caller explicitly enumerated, with no signal that
+    `candidate_ids` was ever read. It must be refused before anything is
+    read or written, not resolved by picking one of the two."""
+    client, repo = http
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+    before = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    first_id = before["items"][0]["id"]
+
+    response = client.post(
+        f"/api/notebooks/{notebook.id}/sources/s1/command-catalog/apply",
+        json={"candidate_ids": [first_id], "all_pending": True},
+    )
+    assert response.status_code == 422
+    assert response.headers.get("X-User-Message") == "1"
+
+    # Zero writes: no table was created, and every candidate — including the
+    # one explicitly named — is still `candidate`, not `applied`.
+    assert repo.list_knowhow_tables(notebook.id) == []
+    after = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert {item["id"] for item in after["items"]} == {
+        item["id"] for item in before["items"]
+    }
+
+
 # ----------------------------------------------------------------- API dismiss
 def test_api_dismiss_clears_the_pending_guard_so_a_new_run_is_allowed(http):
     """R7's core end-to-end assertion. The guard's own copy has always said
@@ -3703,6 +3907,32 @@ def test_api_dismiss_with_too_many_explicit_candidates_is_a_user_readable_422(ht
     assert response.status_code == 422
     assert response.headers.get("X-User-Message") == "1"
     assert str(MAX_APPLY_CANDIDATES) in response.json()["detail"]
+
+
+def test_api_dismiss_with_both_scopes_is_a_user_readable_422_and_writes_nothing(http):
+    """R13: mirrors the apply-side dual-scope refusal — same constant, same
+    reason (see that test's docstring)."""
+    client, repo = http
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+    before = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    first_id = before["items"][0]["id"]
+
+    response = client.post(
+        f"/api/notebooks/{notebook.id}/sources/s1/command-catalog/dismiss",
+        json={"candidate_ids": [first_id], "all_pending": True},
+    )
+    assert response.status_code == 422
+    assert response.headers.get("X-User-Message") == "1"
+
+    after = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert {item["id"] for item in after["items"]} == {
+        item["id"] for item in before["items"]
+    }
 
 
 def test_api_dismiss_with_an_unknown_job_id_is_404(http):

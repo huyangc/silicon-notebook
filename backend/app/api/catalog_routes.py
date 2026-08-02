@@ -70,6 +70,13 @@ _APPLY_TOO_MANY_MESSAGE = f"一次最多确认 {MAX_APPLY_CANDIDATES} 条，请�
 # on a 300-id request would read as done.
 _DISMISS_EMPTY_MESSAGE = "请先选择要跳过的命令，或勾选“跳过全部待审阅”。"
 _DISMISS_TOO_MANY_MESSAGE = f"一次最多跳过 {MAX_APPLY_CANDIDATES} 条，请分批跳过。"
+# R13 (codex PR #412 评审第 13 轮 P2): `all_pending=true` 且 `candidate_ids`
+# 非空是一份自相矛盾的载荷——之前静默偏向 `all_pending`(比调用方明确写出的
+# 选择更宽的一次写),调用方永远看不出自己传的 `candidate_ids` 被无声吞掉了。
+# 两个端点共用同一条常量:两者都是同一个「二选一」传输合同(见
+# `CommandCatalogApplyRequest`/`CommandCatalogDismissRequest` 的字段注释),
+# 拒绝的理由与措辞不因写不写库而不同。
+_DUAL_SCOPE_MESSAGE = "一次只能选择一种确认范围：逐条选择或全部待审阅。"
 
 
 def _job_with_pending(service: CommandCatalogService, job: dict) -> CommandCatalogJob:
@@ -292,6 +299,12 @@ def apply_command_catalog(
     在服务层返回后调度。
     """
     _owned_source(notebook_id, source_id)
+    if payload.all_pending and payload.candidate_ids:
+        # R13: a payload that says BOTH "all of it" and "just these" used to
+        # silently pick `all_pending` — a wider write than what the caller
+        # explicitly enumerated, with no signal that `candidate_ids` was ever
+        # read. Refuse instead of guessing which one the caller meant.
+        raise user_error(422, _DUAL_SCOPE_MESSAGE)
     if not payload.all_pending and not payload.candidate_ids:
         raise user_error(400, _APPLY_EMPTY_MESSAGE)
     if not payload.all_pending and len(payload.candidate_ids) > MAX_APPLY_CANDIDATES:
@@ -387,6 +400,11 @@ def dismiss_command_catalog(
     调度、没有 actor/审计标签。
     """
     _owned_source(notebook_id, source_id)
+    if payload.all_pending and payload.candidate_ids:
+        # R13: mirrors apply's own dual-scope refusal — see that endpoint's
+        # comment. Same constant, same reason: a caller writing both fields
+        # gets told to pick one instead of `all_pending` silently winning.
+        raise user_error(422, _DUAL_SCOPE_MESSAGE)
     if not payload.all_pending and not payload.candidate_ids:
         raise user_error(400, _DISMISS_EMPTY_MESSAGE)
     if not payload.all_pending and len(payload.candidate_ids) > MAX_APPLY_CANDIDATES:

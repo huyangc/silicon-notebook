@@ -67,6 +67,7 @@ from app.services.command_catalog import (
 )
 from app.services.kg.json_utils import safe_json
 from app.services.model_work import ModelProviderError
+from app.services.source_display import source_display_title
 
 
 # The workload is `kg_extract`, deliberately reused rather than registered as a
@@ -591,7 +592,7 @@ class CommandCatalogService:
         estimated_calls = sum(len(extraction_slices(section)) for section in sections)
         return CatalogPreview(
             source_id=source_id,
-            source_title=getattr(source, "title", "") or "",
+            source_title=self._canonical_source_title(source),
             signal={
                 "total_sections": signal.total_sections,
                 "identifier_headings": signal.identifier_headings,
@@ -781,6 +782,64 @@ class CommandCatalogService:
         if getattr(source, "notebook_id", "") != notebook_id:
             raise KeyError(source_id)
         return source
+
+    def _canonical_source_title(self, source: Any) -> str:
+        """The name THIS source is called everywhere else in the product —
+        ``""`` if it has no name at all (never a placeholder).
+
+        ``source.title`` alone is the file it was uploaded under — for a
+        grounded paper that is a different string from what the citation
+        cards, the retrieval evidence and the enumeration list already show
+        for the same source (``app.services.source_display.source_display_title``,
+        the one frozen rule those three share). Deriving the catalog's own
+        table title from the raw upload name would give a grounded paper two
+        visible names in the same session: its real title everywhere else,
+        its filename on the 「命令目录：<name>」 table.
+
+        ``get_source`` already hydrates ``paper_meta`` on every call this
+        service makes (``_scoped_source``), so this reads what is already in
+        hand rather than issuing a second query — the row shape
+        ``source_display_title`` wants is assembled from the ``SourceDetail``
+        model's own fields here, not fetched again.
+        """
+        paper_meta = getattr(source, "paper_meta", None)
+        row = {
+            "is_paper": bool(getattr(paper_meta, "is_paper", False)),
+            "paper_title": getattr(paper_meta, "title", None),
+            "title": getattr(source, "title", None),
+            "file_name": getattr(source, "file_name", None),
+        }
+        return source_display_title(row)
+
+    def _display_source_title(self, source_id: str, source: Any) -> str:
+        """``_canonical_source_title``, falling back to the opaque
+        ``source_id`` when the source has no name at all — matching every
+        call site below that previously fell back to the same thing on the
+        raw upload title.
+
+        Every caller that derives the「命令目录：<title>」table name or the
+        target lock key (``_target_lock_key`` — ``start``'s stale-candidate
+        sweep, ``apply``, ``dismiss``) MUST go through this one function: the
+        lock's whole safety argument is that every writer that could collide
+        computes the identical key from the identical inputs. A canonical
+        title that could change later (a paper title arriving after a
+        backfill) does not retroactively rename or split the table — the
+        title is only ever read again at the moment a NEW table would be
+        created (``_find_table``/``_ensure_table``); a job that has already
+        landed rows keeps writing to that same table via its remembered
+        ``applied_table_id`` regardless of what this function returns on a
+        later call (see ``_resolve_target_table``). The per-target LOCK key is
+        likewise only ever computed at call time from whatever title is
+        canonical THEN — it does not need to survive a later title change,
+        because nothing revisits an old lock key after the table it protected
+        already exists.
+
+        ``preview`` deliberately does NOT go through this: it shows the
+        source's canonical name in a cost estimate, not a table/lock
+        identity, so it keeps ``_canonical_source_title``'s own ``""``
+        fallback rather than surfacing the opaque id as if it were a name.
+        """
+        return self._canonical_source_title(source) or source_id
 
     def _require_parsed(self, notebook_id: str, source_id: str):
         """``_scoped_source`` plus the R8 parse-status precondition.
@@ -973,7 +1032,7 @@ class CommandCatalogService:
         generation = self.catalog.source_element_generation(source_id)
         self._reject_if_pending_candidates(
             source_id,
-            getattr(source, "title", "") or source_id,
+            self._display_source_title(source_id, source),
             notebook_id,
             generation,
         )
@@ -1873,7 +1932,7 @@ class CommandCatalogService:
         if job["notebook_id"] != notebook_id or job["source_id"] != source_id:
             raise KeyError(job_id)
         source = self._scoped_source(notebook_id, source_id)
-        source_title = getattr(source, "title", "") or source_id
+        source_title = self._display_source_title(source_id, source)
         lock_key = self._target_lock_key(notebook_id, source_title)
         with self._source_write_barrier(source_id):
             with self._apply_lock(lock_key):
@@ -2111,7 +2170,7 @@ class CommandCatalogService:
         if job["notebook_id"] != notebook_id or job["source_id"] != source_id:
             raise KeyError(job_id)
         source = self._scoped_source(notebook_id, source_id)
-        source_title = getattr(source, "title", "") or source_id
+        source_title = self._display_source_title(source_id, source)
         lock_key = self._target_lock_key(notebook_id, source_title)
         with self._source_write_barrier(source_id):
             with self._apply_lock(lock_key):
