@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 FRAME_MAX_FACETS = 8
@@ -527,12 +527,64 @@ def fair_editor_context(
     blueprint: dict | None = None, max_chars: int = EDITOR_CONTEXT_MAX_CHARS,
 ) -> str:
     """Allocate valid, bounded audit context without dropping later sections."""
-    if not sections:
+    max_chars = max(0, int(max_chars))
+    if not sections or max_chars == 0:
         return ""
+
+    def bounded_conflicts() -> tuple[list[str], int]:
+        conflicts = exclusive_frame_conflicts(sections, frame)
+        return [_text(value, 360) for value in conflicts[:8]], len(conflicts)
+
+    def bounded_audit(value: object) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        scalar_keys = (
+            "high_risk_assertions", "supported", "unsupported", "support_rate",
+            "unsupported_ratio", "threshold", "threshold_exceeded",
+            "downgrade_applied", "cited", "total",
+        )
+        result = {
+            key: raw for key in scalar_keys
+            if key in value
+            and isinstance((raw := value.get(key)), (bool, int, float))
+        }
+        samples = value.get("unsupported_samples")
+        if isinstance(samples, list) and samples:
+            result["unsupported_samples"] = [
+                _text(sample, 200) for sample in samples[:2] if _text(sample, 200)
+            ]
+            result["unsupported_samples_total"] = len(samples)
+        return result
+
+    def bounded_claim(value: object) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        raw_assignments = value.get("frame_assignments")
+        assignments = {}
+        if isinstance(raw_assignments, dict):
+            for key, assigned in list(raw_assignments.items())[:FRAME_MAX_FACETS]:
+                bounded_key = _text(key, 80)
+                if bounded_key:
+                    assignments[bounded_key] = _text(assigned, 120)
+        return {
+            "claim_id": _text(value.get("claim_id") or value.get("id"), 80),
+            "statement": _text(value.get("statement"), 1600),
+            "type": _text(value.get("type"), 24),
+            "entities": _strings(value.get("entities"), 12, 160),
+            "evidence_keys": _strings(value.get("evidence_keys"), 16, 32),
+            "conditions": _strings(value.get("conditions"), 8, 300),
+            "same_paper_baseline": bool(value.get("same_paper_baseline", False)),
+            "confidence": _confidence(value.get("confidence", 0.0)),
+            "frame_assignments": assignments,
+        }
+
+    conflicts, conflict_count = bounded_conflicts()
     overhead: dict = {
         "frame": frame or {},
         "blueprint": blueprint or {},
-        "conflicts": exclusive_frame_conflicts(sections, frame),
+        "conflicts": conflicts,
+        "conflicts_total": conflict_count,
+        "conflicts_truncated": conflict_count > len(conflicts),
     }
     head_budget = max(0, max_chars // 3)
     serialized_overhead = json.dumps(overhead, ensure_ascii=False)
@@ -552,38 +604,70 @@ def fair_editor_context(
                 "claim_count": len(blueprint_value.get("claims") or []),
                 "section_count": len(blueprint_value.get("sections") or []),
             },
-            "conflicts": exclusive_frame_conflicts(sections, frame),
+            "conflicts": conflicts,
+            "conflicts_total": conflict_count,
+            "conflicts_truncated": conflict_count > len(conflicts),
         }
         serialized_overhead = json.dumps(overhead, ensure_ascii=False)
     head = "Report audit contracts:\n" + serialized_overhead
-    separators = 2 * len(sections)
-    remaining = max(0, max_chars - len(head) - separators)
-    share = remaining // len(sections)
-    blocks = [head]
-    for section in sections:
-        markdown = str(section.get("markdown") or "")
-        raw_claims = list(section.get("claims") or [])
-        meta_value = {
-            "title": section.get("title", ""),
+
+    raw_claims_by_section = [
+        [bounded_claim(claim) for claim in list(section.get("claims") or [])[:SECTION_MAX_CLAIMS]]
+        for section in sections
+    ]
+    base_values = []
+    for section, raw_claims in zip(sections, raw_claims_by_section):
+        base_values.append({
+            "title": _text(section.get("title"), 160),
             "claims": [],
-            "claims_total": len(raw_claims),
+            "claims_total": len(section.get("claims") or []),
             "claims_included": 0,
             "claims_truncated": bool(raw_claims),
-            "claim_ledger_status": section.get("claim_ledger_status", "missing"),
-            "citation_audit": section.get("citation_audit") or {},
+            "claim_ledger_status": _text(
+                section.get("claim_ledger_status", "missing"), 40
+            ),
+            "citation_audit": bounded_audit(section.get("citation_audit")),
+        })
+
+    delimiter = "\nProse excerpt:\n"
+    separators = 2 * len(sections)
+    base_serialized = [json.dumps(value, ensure_ascii=False) for value in base_values]
+    minimum_sections = sum(len(value) + len(delimiter) for value in base_serialized)
+    if len(head) + separators + minimum_sections > max_chars:
+        # This branch is only for callers supplying a smaller-than-production
+        # budget.  It still returns complete JSON rather than slicing a payload.
+        compact = {
+            "sections_total": len(sections),
+            "titles": [_text(section.get("title"), 80) for section in sections],
+            "audit_context_truncated": True,
         }
-        meta_budget = max(0, share // 2)
+        serialized = json.dumps(compact, ensure_ascii=False)
+        if len(serialized) <= max_chars:
+            return serialized
+        minimal = json.dumps({"sections_total": len(sections)}, ensure_ascii=False)
+        return minimal if len(minimal) <= max_chars else ""
+
+    remaining_extra = max_chars - len(head) - separators - minimum_sections
+    blocks = [head]
+    for index, (section, raw_claims, base_value, base_meta) in enumerate(zip(
+        sections, raw_claims_by_section, base_values, base_serialized
+    )):
+        markdown = str(section.get("markdown") or "")
+        sections_left = len(sections) - index
+        extra_share = remaining_extra // sections_left
+        meta_value = dict(base_value)
+        meta_budget = len(base_meta) + (extra_share // 2)
         for claim in raw_claims:
             candidate = dict(meta_value)
             candidate["claims"] = [*meta_value["claims"], claim]
             candidate["claims_included"] = len(candidate["claims"])
-            candidate["claims_truncated"] = candidate["claims_included"] < len(raw_claims)
+            candidate["claims_truncated"] = candidate["claims_included"] < candidate["claims_total"]
             if len(json.dumps(candidate, ensure_ascii=False)) > meta_budget:
                 break
             meta_value = candidate
         meta = json.dumps(meta_value, ensure_ascii=False)
-        delimiter = "\nProse excerpt:\n"
-        prose_room = max(0, share - len(meta) - len(delimiter))
+        meta_extra = len(meta) - len(base_meta)
+        prose_room = max(0, extra_share - meta_extra)
         if len(markdown) <= prose_room:
             excerpt = markdown
         elif prose_room <= 3:
@@ -594,4 +678,7 @@ def fair_editor_context(
             first = content_room // 2
             excerpt = markdown[:first] + marker + markdown[-(content_room - first):]
         blocks.append(meta + delimiter + excerpt)
-    return "\n\n".join(blocks)
+        remaining_extra -= meta_extra + len(excerpt)
+    result = "\n\n".join(blocks)
+    assert len(result) <= max_chars
+    return result

@@ -415,6 +415,77 @@ def test_outline_patch_persists_the_user_confirmed_report_frame(client, monkeypa
     assert generated["understanding"]["report_frame"] == frame
 
 
+def test_outline_patch_clears_the_user_confirmed_report_frame_end_to_end(
+    client, monkeypatch
+):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+    from app.services.report_engine import ReportEngine
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
+    ).json()["report_id"]
+    old_frame = {
+        "subject_kind": "model",
+        "facets": [{
+            "id": "mixer", "name": "Sequence mixer",
+            "values": ["Attention", "SSM"], "exclusive": True,
+        }],
+        "axes": [],
+        "instance_policy": "old",
+    }
+    old_contract = {"confirmed": True, "report_frame": old_frame}
+    old_sections = [
+        {
+            "title": title, "scope": "s", "sub_queries": [title],
+            "report_frame": old_frame, "intent_contract": old_contract,
+        }
+        for title in ("A", "B")
+    ]
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        understanding={"confirmed": True, "report_frame": old_frame},
+        outline=old_sections,
+    )
+
+    # The browser submits its edited section objects, so each row can still
+    # contain the old section-level copy while the explicit frame is cleared.
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": old_sections, "frame": {}},
+    )
+    assert response.status_code == 200
+    detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert "report_frame" not in detail["understanding"]
+    assert all("report_frame" not in section for section in detail["outline"])
+    assert all(
+        "report_frame" not in section.get("intent_contract", {})
+        for section in detail["outline"]
+    )
+
+    claims = [
+        {"entities": ["Mamba"], "frame_assignments": {"mixer": value}}
+        for value in ("Attention", "SSM")
+    ]
+    engine = ReportEngine.from_repository(repository(), repository().settings)
+    content, _, _ = engine._assemble(
+        nb["id"], rid, "compare A and B", detail["outline"],
+        [
+            {
+                "title": title, "scope": "s", "markdown": f"## {title}\ntext",
+                "grounded": True, "claims": [claim], "id_map": {},
+            }
+            for title, claim in zip(("A", "B"), claims)
+        ],
+    )
+    assert "分析框架冲突" not in content
+    generated = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert "report_frame" not in generated["understanding"]
+
+
 def test_outline_patch_rejects_a_malformed_user_frame(client, monkeypatch):
     import app.api.report_routes as R
     from app.api.deps import repository

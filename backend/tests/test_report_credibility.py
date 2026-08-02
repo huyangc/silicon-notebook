@@ -2,6 +2,8 @@ import inspect
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from app.core.config import Settings
 from app.services.query_intent import confirmed_research_question
 from app.services.report_corpus_profile import ReportCorpusProfileService
@@ -134,6 +136,7 @@ def test_high_risk_audit_ignores_ordinary_prose_and_section_numbers():
 平均而言，这是一种 parallel implementation challenge。
 Nevertheless, alluvial layers are described in Chapter 2.
 第 2 节介绍流程，图 3 展示结构。
+第一章介绍背景，第一步执行检索。
 """
     audit = audit_high_risk_assertions(markdown, {}, max_unsupported_ratio=0.25)
     assert audit["high_risk_assertions"] == 0
@@ -179,6 +182,86 @@ def test_fair_editor_context_includes_every_section_tail():
         assert f'"title": "S{index}"' in block
         assert f"TAIL-{index}" in block
     assert '"claims_truncated": true' in block
+
+
+def test_fair_editor_context_bounds_maximum_contract_without_broken_json():
+    frame = {
+        "subject_kind": "x" * 160,
+        "facets": [
+            {
+                "id": f"facet-{facet}",
+                "name": f"Facet {facet}",
+                "values": [f"value-{value}" for value in range(12)],
+                "exclusive": True,
+            }
+            for facet in range(8)
+        ],
+        "axes": [
+            {"id": f"axis-{axis}", "name": f"Axis {axis}", "condition_fields": ["x"] * 8}
+            for axis in range(8)
+        ],
+    }
+    sections = []
+    for section_index in range(6):
+        claims = []
+        for claim_index in range(24):
+            claims.append({
+                "claim_id": f"claim-{section_index}-{claim_index}",
+                "statement": f"claim {claim_index} " + ("x" * 1580),
+                "type": "comparison",
+                "entities": [f"entity-{claim_index}"],
+                "evidence_keys": [f"k{key}" for key in range(16)],
+                "conditions": [("condition-" + ("y" * 290))] * 8,
+                "confidence": 0.9,
+                "frame_assignments": {
+                    f"facet-{facet}": f"value-{section_index % 2}"
+                    for facet in range(8)
+                },
+            })
+        sections.append({
+            "title": f"MAX-SECTION-{section_index}",
+            "markdown": f"HEAD-{section_index}\n" + ("body" * 2000) + f"TAIL-{section_index}",
+            "claims": claims,
+            "claim_ledger_status": "available",
+            "citation_audit": {
+                "high_risk_assertions": 100,
+                "supported": 60,
+                "unsupported": 40,
+                "unsupported_ratio": 0.4,
+                "threshold": 0.25,
+                "threshold_exceeded": True,
+                "unsupported_samples": [("unsupported " + ("z" * 1000))] * 100,
+                "unbounded_internal_field": "must-not-cross-editor-boundary" * 1000,
+            },
+        })
+    block = fair_editor_context(
+        sections,
+        frame=frame,
+        blueprint={
+            "central_answer": "z" * 20_000,
+            "shared_definitions": [{}] * 24,
+            "claims": [{"statement": "q" * 1600}] * 96,
+            "sections": [{}] * 6,
+        },
+        max_chars=24_000,
+    )
+
+    assert len(block) <= 24_000
+    head, *section_blocks = block.split("\n\n")
+    overhead = json.loads(head.removeprefix("Report audit contracts:\n"))
+    assert overhead["blueprint_summary"]["status"] == "summarized"
+    assert overhead["conflicts_total"] >= len(overhead["conflicts"])
+    assert all(len(value) <= 360 for value in overhead["conflicts"])
+    assert len(section_blocks) == 6
+    for section_index, section_block in enumerate(section_blocks):
+        meta_text, prose = section_block.split("\nProse excerpt:\n", 1)
+        meta = json.loads(meta_text)
+        assert meta["title"] == f"MAX-SECTION-{section_index}"
+        assert meta["claims_truncated"] is True
+        assert meta["citation_audit"]["unsupported_samples_total"] == 100
+        assert "unbounded_internal_field" not in meta["citation_audit"]
+        assert f"HEAD-{section_index}" in prose
+        assert f"TAIL-{section_index}" in prose
 
 
 def test_source_projections_are_bounded_aggregates_with_identity_lookup_parity():
@@ -353,3 +436,58 @@ def test_probe_does_not_count_unidentified_sources_as_independent_families():
     )
     assert result["source_identity_uncertain"] == 1
     assert result["relevant_family_count"] == 0
+
+
+def test_probe_uses_unknown_identity_as_a_conservative_top1_upper_bound():
+    """Seven A / one B / six unknown supports must not look 50% diverse.
+
+    The unknown identities are excluded from the independent-family count, but
+    any of them could be another copy of A.  The coverage signal must therefore
+    expose 13/14, not split them into a friendly synthetic family bucket.
+    """
+    from tests.test_report_engine_ports import _deps, _engine
+
+    class _Retrieval:
+        def federated_retrieve(self, notebook_id, query):
+            return [
+                SimpleNamespace(
+                    object_id=f"a-{index}", relevance=0.9, tier="active",
+                    evidence=[SimpleNamespace(source_id="source-a")],
+                )
+                for index in range(7)
+            ] + [
+                SimpleNamespace(
+                    object_id="b-0", relevance=0.9, tier="active",
+                    evidence=[SimpleNamespace(source_id="source-b")],
+                )
+            ] + [
+                SimpleNamespace(
+                    object_id=f"unknown-{index}", relevance=0.9, tier="active",
+                    evidence=[SimpleNamespace(source_id=f"source-u-{index}")],
+                )
+                for index in range(6)
+            ]
+
+        def retrieve_elements(self, notebook_id, query, *, limit):
+            return []
+
+    sources = _Sources([
+        {"id": "source-a", "file_hash": "hash-a", "is_paper": None,
+         "paper_title": None},
+        {"id": "source-b", "file_hash": "hash-b", "is_paper": None,
+         "paper_title": None},
+        *[
+            {"id": f"source-u-{index}", "file_hash": "", "is_paper": None,
+             "paper_title": None}
+            for index in range(6)
+        ],
+    ])
+    result = _engine(_deps(
+        retrieval=_Retrieval(), source_query=sources
+    ))._probe_queries("nb", ["q"])
+
+    assert result["relevant_supports"] == 14
+    assert result["relevant_family_count"] == 2
+    assert result["unknown_supports"] == 6
+    assert result["source_identity_uncertain"] == 6
+    assert result["top_family_share"] == pytest.approx(13 / 14)

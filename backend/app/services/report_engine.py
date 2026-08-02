@@ -59,7 +59,7 @@ _HIGH_RISK_NUMBER = re.compile(
 )
 _HIGH_RISK_COMPLEXITY = re.compile(r"\bO\s*\([^\n)]{1,80}\)", re.IGNORECASE)
 _HIGH_RISK_ASSERTION_CJK = re.compile(
-    r"(?:最(?:高|低|快|慢|强|弱|优|差|大|小)|第一|唯一|全部|所有|必然|"
+    r"(?:最(?:高|低|快|慢|强|弱|优|差|大|小)|唯一|全部|所有|必然|"
     r"显著(?:高于|低于|优于|劣于)|优于|劣于|高于|低于|排名|排序)"
 )
 _HIGH_RISK_ASSERTION_EN = re.compile(
@@ -678,24 +678,37 @@ class ReportEngine:
         family_by_source = dict(resolution.get("family_by_source") or {})
         uncertain = set(resolution.get("uncertain_source_ids") or [])
         unresolved = set(resolution.get("unresolved_source_ids") or [])
+        # Identity is deliberately handled on two distinct axes:
+        #
+        # * resolved families may contribute independent support;
+        # * an unresolved identity must never pretend to be independent, but
+        #   must also never dilute a possible single-family concentration.
+        #
+        # Treat every relevant unit with at least one unresolved source as a
+        # possible extra support for the largest resolved family.  This yields
+        # a conservative Top-1 upper bound rather than an attractive-but-false
+        # diversity score from an ``identity:unverified`` denominator bucket.
         family_support: Dict[str, int] = {}
+        unknown_supports = 0
+        unidentified_source_ids: set[str] = set(uncertain | unresolved)
         for unit_sources in relevant_units.values():
-            # Numerator and denominator are both unique (evidence unit, family)
-            # pairs. Unknown identities share one conservative bucket rather
-            # than masquerading as independent documents.
-            unit_families = {
-                (
-                    "identity:unverified"
-                    if source_id in uncertain or source_id in unresolved
-                    else family_by_source.get(source_id, "identity:unverified")
-                )
-                for source_id in unit_sources
-            }
+            unit_families = set()
+            unit_has_unknown = False
+            for source_id in unit_sources:
+                family = family_by_source.get(source_id)
+                if source_id in uncertain or source_id in unresolved or not family:
+                    unit_has_unknown = True
+                    unidentified_source_ids.add(source_id)
+                else:
+                    unit_families.add(family)
             for family in unit_families:
                 family_support[family] = family_support.get(family, 0) + 1
-        relevant_supports = sum(family_support.values())
+            if unit_has_unknown:
+                unknown_supports += 1
+        relevant_supports = sum(family_support.values()) + unknown_supports
+        largest_verified_support = max(family_support.values()) if family_support else 0
         top_family_share = (
-            max(family_support.values()) / relevant_supports
+            (largest_verified_support + unknown_supports) / relevant_supports
             if relevant_supports else 1.0
         )
         return {
@@ -705,12 +718,10 @@ class ReportEngine:
             "source_hits": len(sources),
             "relevant_items": len(relevant_units),
             "relevant_supports": relevant_supports,
-            "relevant_family_count": len([
-                family for family in family_support
-                if family != "identity:unverified"
-            ]),
+            "relevant_family_count": len(family_support),
+            "unknown_supports": unknown_supports,
             "top_family_share": top_family_share,
-            "source_identity_uncertain": len(uncertain | unresolved),
+            "source_identity_uncertain": len(unidentified_source_ids),
         }
 
     def _probe_intent_coverage(self, notebook_id: str, intent_contract: dict) -> List[dict]:
@@ -1022,7 +1033,7 @@ class ReportEngine:
                 for key in (
                     "hits", "base_hits", "element_hits", "source_hits",
                     "relevant_items", "relevant_supports", "relevant_family_count",
-                    "top_family_share", "source_identity_uncertain",
+                    "unknown_supports", "top_family_share", "source_identity_uncertain",
                 )
             }
             s.setdefault("sufficiency", fallback)
@@ -1035,6 +1046,7 @@ class ReportEngine:
                 f"relevant_items={p.get('relevant_items', 0)} "
                 f"relevant_supports={p.get('relevant_supports', 0)} "
                 f"independent_families={p.get('relevant_family_count', 0)} "
+                f"unknown_supports={p.get('unknown_supports', 0)} "
                 f"identity_uncertain={p.get('source_identity_uncertain', 0)} "
                 f"top_family_share={float(p.get('top_family_share', 1.0)):.3f}"
                 for p in probe
@@ -1881,8 +1893,10 @@ class ReportEngine:
         def _family_key(ctx):
             source_id = str(ctx.get("source_id") or "")
             if source_id:
-                if source_id in uncertain_source_ids:
-                    return "identity:unverified"
+                # Display groups retain each unresolved source separately.  A
+                # conservative uncertainty bucket is used only for the Top-1
+                # audit below; reusing it here would hide source labels from
+                # the reader and merge unrelated bibliography entries.
                 return family_by_source.get(source_id, f"source:{source_id}")
             # Legacy/test evidence can lack source_id.  Keep distinct named
             # sources distinct rather than collapsing every missing id.
@@ -2001,19 +2015,23 @@ class ReportEngine:
             gaps.append(f"{unsupported_assertions} 句高风险事实断言缺少同句引证")
 
         family_counts: Dict[str, int] = {}
-        audit_family_counts: Dict[str, int] = {}
+        verified_family_counts: Dict[str, int] = {}
         for reference in references:
             family = str(reference.get("family_key") or "source:unknown")
             family_counts[family] = family_counts.get(family, 0) + 1
-            audit_family = (
-                "identity:unverified"
-                if reference.get("family_identity_uncertain") else family
-            )
-            audit_family_counts[audit_family] = audit_family_counts.get(audit_family, 0) + 1
-        top_family_count = max(audit_family_counts.values()) if audit_family_counts else 0
+            if not reference.get("family_identity_uncertain"):
+                verified_family_counts[family] = (
+                    verified_family_counts.get(family, 0) + 1
+                )
         uncertain_reference_count = sum(
             bool(reference.get("family_identity_uncertain")) for reference in references
         )
+        largest_verified_anchor_count = max(verified_family_counts.values(), default=0)
+        # Every identity-uncertain anchor could belong to the already-largest
+        # verified family.  Report the resulting upper bound instead of
+        # allowing unresolved identities to make a concentrated bibliography
+        # look diverse.
+        top_family_count = largest_verified_anchor_count + uncertain_reference_count
         verified_families = {
             str(reference.get("family_key") or "") for reference in references
             if not reference.get("family_identity_uncertain")
@@ -2034,7 +2052,10 @@ class ReportEngine:
             "top1_share": (
                 top_family_count / len(references) if references else 0.0
             ),
-            "anchor_inflation": max(0, len(references) - len(audit_family_counts)),
+            # This is a display-family statistic: unknown sources remain
+            # visible as distinct bibliography groups, while concentration is
+            # calculated separately by the conservative upper bound above.
+            "anchor_inflation": max(0, len(references) - len(family_counts)),
             "unsupported_high_risk_assertions": unsupported_assertions,
             "high_risk_assertions": sum(
                 int((section.get("citation_audit") or {}).get("high_risk_assertions") or 0)
@@ -2089,10 +2110,11 @@ class ReportEngine:
             parts += ["## 参考文献", ""] + bibliography + [""]
             parts += [
                 f"> 引证分布：{len(references)} 处证据锚点来自 {len(family_counts)} 个可区分来源组；"
-                f"占比最高的单一文档族为 {credibility['top1_family_share']:.1%}；"
+                f"占比最高的单一文档族上界为 {credibility['top1_family_share']:.1%}；"
                 f"同族多锚点形成的锚点膨胀为 {credibility['anchor_inflation']}。"
                 + (
-                    f"其中 {uncertain_reference_count} 处锚点的来源身份不足，集中度审计已保守合并计算。"
+                    f"其中 {uncertain_reference_count} 处锚点的来源身份不足；它们不计入独立来源数，"
+                    "并在集中度上界中按最不利分配计入占比最高的来源组。"
                     if uncertain_reference_count else ""
                 ),
                 "",

@@ -246,6 +246,12 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
             section["intent_contract"] = section_intent_contract
         if report_frame:
             section["report_frame"] = report_frame
+        else:
+            # ``section`` started as a copy of the submitted row, which may
+            # still carry the previously confirmed frame.  Clearing the frame
+            # is authoritative too: do not let that stale section-level copy
+            # outrank the synchronized compatibility contract during assembly.
+            section.pop("report_frame", None)
         secs.append(section)
     if not secs:
         raise HTTPException(status_code=422, detail="at least one valid section required")

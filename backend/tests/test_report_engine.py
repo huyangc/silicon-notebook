@@ -335,6 +335,70 @@ def test_assemble_multikey_citation_renumbered(repo):
     assert "SrcA" in md and "SrcB" in md
 
 
+def test_assemble_keeps_unknown_sources_visible_and_uses_conservative_top1(repo, monkeypatch):
+    """Unknown bibliography entries stay source-addressable, not silently merged.
+
+    Seven anchors from A, one from B, and six unresolved source ids have a
+    conservative concentration upper bound of 13/14: each unknown anchor may
+    be another copy of A, but none may inflate the independent-source count.
+    """
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    unknown_ids = [f"source-u-{index}" for index in range(6)]
+    monkeypatch.setattr(
+        eng,
+        "_resolve_source_families",
+        lambda source_ids: {
+            "family_by_source": {
+                "source-a": "hash:a",
+                "source-b": "hash:b",
+            },
+            "uncertain_source_ids": unknown_ids,
+            "unresolved_source_ids": [],
+        },
+    )
+    source_ids = [*("source-a" for _ in range(7)), "source-b", *unknown_ids]
+    id_map = {
+        f"k{index + 1}": {
+            "object_id": f"object-{index + 1}",
+            "object_type": "chunk",
+            "source_id": source_id,
+            "source_title": (
+                "Source A" if source_id == "source-a" else
+                "Source B" if source_id == "source-b" else
+                f"Unknown {index - 7}"
+            ),
+            "location_label": f"§{index + 1}",
+            "tier": "personal",
+        }
+        for index, source_id in enumerate(source_ids)
+    }
+    markers = ", ".join(id_map)
+    sections = [{
+        "title": "A",
+        "scope": "sa",
+        "markdown": f"## A\nEvidence [{markers}]",
+        "grounded": True,
+        "id_map": id_map,
+        "attempted": [],
+    }]
+    rid = repo.create_report(nb.id, "q")
+    md, _gaps, references = eng._assemble(
+        nb.id, rid, "q", [{"title": "A", "scope": "sa"}], sections
+    )
+
+    bibliography = md.split("## 参考文献", 1)[1].split("> 引证分布：", 1)[0]
+    assert len([line for line in bibliography.splitlines() if line.startswith("- ")]) == 8
+    assert {reference["family_key"] for reference in references if reference["source_id"] in unknown_ids} == {
+        f"source:{source_id}" for source_id in unknown_ids
+    }
+    credibility = repo.get_report(nb.id, rid)["understanding"]["credibility"]
+    assert credibility["independent_cited_families"] == 2
+    assert credibility["identity_uncertain_anchors"] == 6
+    assert credibility["top1_family_share"] == pytest.approx(13 / 14)
+    assert "上界为 92.9%" in md
+
+
 def test_assemble_multikey_fails_closed_if_any_key_is_unknown(repo):
     """任一本节未知 key 使整个复合 marker fail closed，且不产生部分 reference。"""
     nb = _mk_nb(repo)
