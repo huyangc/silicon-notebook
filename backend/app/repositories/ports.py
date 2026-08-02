@@ -695,6 +695,27 @@ class CatalogStorePort(Protocol):
     def get_job(self, job_id: str) -> dict: ...
     def latest_job(self, source_id: str) -> dict | None: ...
     def active_job(self, source_id: str) -> dict | None: ...
+    def latest_applied_table_id(self, source_id: str) -> str:
+        """The most recently landed target across EVERY job this source has
+        ever had — a bounded point query on the same
+        ``(source_id, created_at DESC, id DESC)`` index ``latest_job`` already
+        uses, narrowed to rows whose ``applied_table_id`` is non-empty. ``""``
+        when no job for this source has ever landed a row anywhere.
+
+        R18 (codex PR #412 review round 18): read by
+        ``CommandCatalogService._resolve_target_table`` as the fallback a
+        rerun's brand NEW job (its own ``applied_table_id`` still empty) uses
+        so its confirm converges on the table an EARLIER job for the same
+        source already wrote to, instead of re-deriving a title that may no
+        longer resolve it (a knowhow rename, or a paper-metadata backfill
+        changing the source's canonical title) and forking a second table.
+
+        The id this returns is a HINT, exactly like ``job["applied_table_id"]``
+        itself — the caller re-proves both existence and notebook membership
+        before trusting it; this method does not touch ``knowhow_tables`` at
+        all.
+        """
+        ...
     def start_job(self, job_id: str, sections_total: int) -> bool: ...
     def set_section_total(self, job_id: str, sections_total: int) -> bool: ...
     def record_section(

@@ -2800,6 +2800,178 @@ def test_apply_after_the_table_is_renamed_still_targets_it_via_the_job(repo):
     assert len(repo.list_knowhow_tables(notebook.id)) == 1
 
 
+# --------------------- R18 P2: a RERUN job inherits the SOURCE's last target
+def test_apply_by_a_rerun_job_inherits_the_previous_jobs_renamed_table(repo):
+    """R18 (codex PR #412 review round 18): the fix above only covers the
+    SAME job applying twice. A rerun ("重新识别") creates a brand NEW job
+    whose OWN `applied_table_id` starts empty — and before this fix,
+    `_resolve_target_table` fell straight through to a by-title lookup for a
+    job in that state. Rename the table between job A's apply and job B's
+    (the SAME event M1 already covers, but across two DIFFERENT jobs for the
+    same source): job B's by-title guess ("命令目录：OpenROAD 手册") no
+    longer finds it, and without inheritance would fork a second table under
+    the OLD title — same-command conflict detection would then be blind to
+    the row job A already wrote. `latest_applied_table_id` must let job B
+    converge on job A's table instead."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job_a = _run_ok(repo, notebook.id, "s1", 1)
+    first = service.apply(
+        notebook.id, "s1", job_a["id"], all_pending=True, actor="tester"
+    )
+    table_id = first["table_id"]
+    assert first["created"] is True
+    repo.update_knowhow_table_meta(table_id, title="手工重命名后的表")
+
+    _, job_b = _run_ok(repo, notebook.id, "s1", 1)
+    second = service.apply(
+        notebook.id, "s1", job_b["id"], all_pending=True, actor="tester"
+    )
+    assert second["table_id"] == table_id
+    assert second["created"] is False
+    # The re-extracted "set_thing_0" already has a row from job A -> conflict,
+    # not a second write.
+    assert second["rows_added"] == 0
+    assert {item["command_name"] for item in second["conflicts"]} == {"set_thing_0"}
+    assert service.catalog.get_job(job_b["id"])["applied_table_id"] == table_id
+    # No second 「命令目录：…」 table exists under the derived title.
+    assert len(repo.list_knowhow_tables(notebook.id)) == 1
+
+
+def test_apply_by_a_rerun_job_inherits_the_target_after_a_source_title_change(repo):
+    """R18: the OTHER known way a rerun's derived title stops resolving the
+    original table — a paper-metadata backfill lands on the source AFTER job
+    A already created the table, promoting `_display_source_title` to a
+    different string than job A ever used. The table itself was never
+    renamed, but job B's fresh by-title guess ("命令目录：<new paper
+    title>") does not match it either. Inheritance is keyed by SOURCE, not
+    by title, so job B must still land in job A's table."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job_a = _run_ok(repo, notebook.id, "s1", 1)
+    first = service.apply(
+        notebook.id, "s1", job_a["id"], all_pending=True, actor="tester"
+    )
+    table_id = first["table_id"]
+    assert repo.get_knowhow_table(table_id)["title"] == (
+        f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+    )
+
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Later-Grounded Title")
+    assert service._display_source_title(
+        "s1", service._scoped_source(notebook.id, "s1")
+    ) == "A Later-Grounded Title"
+
+    _, job_b = _run_ok(repo, notebook.id, "s1", 1)
+    second = service.apply(
+        notebook.id, "s1", job_b["id"], all_pending=True, actor="tester"
+    )
+    assert second["table_id"] == table_id
+    assert second["created"] is False
+    assert second["rows_added"] == 0
+    assert {item["command_name"] for item in second["conflicts"]} == {"set_thing_0"}
+    assert len(repo.list_knowhow_tables(notebook.id)) == 1
+
+
+def test_apply_by_a_rerun_job_recreates_the_table_when_the_inherited_target_was_deleted(
+    repo,
+):
+    """R18: inheritance is a hint, re-verified like the same-job fast path
+    already is — a deleted table falls through to create-or-find rather than
+    raising or resurrecting the id."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job_a = _run_ok(repo, notebook.id, "s1", 1)
+    first = service.apply(
+        notebook.id, "s1", job_a["id"], all_pending=True, actor="tester"
+    )
+    table_id = first["table_id"]
+    repo.delete_knowhow_table(table_id)
+
+    _, job_b = _run_ok(repo, notebook.id, "s1", 1)
+    second = service.apply(
+        notebook.id, "s1", job_b["id"], all_pending=True, actor="tester"
+    )
+    assert second["created"] is True
+    assert second["table_id"] != table_id
+    assert second["rows_added"] == 1
+    new_table = repo.get_knowhow_table(second["table_id"])
+    assert new_table["title"] == f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+
+
+def test_apply_by_a_rerun_job_never_inherits_a_target_from_a_different_notebook(repo):
+    """R18: `latest_applied_table_id` is scoped by SOURCE alone, not by
+    notebook — nothing in the store query itself proves the id it returns
+    still lives in the notebook the current job belongs to. A real transfer
+    (`app/services/knowhow/transfer.py`) never mutates an existing table
+    row's `notebook_id` in place (move deletes the source row and creates a
+    new one in the target notebook under a new id), so this simulates the
+    only shape that could put a foreign id in `applied_table_id` — a stale
+    job row recorded against this source but naming a table that lives
+    elsewhere — directly, the same way this file already writes fixture rows
+    by hand elsewhere (`_mark_grounded_paper`). Apply must refuse to write
+    into it and fall back to an ordinary local create."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    other_notebook = repo.create_notebook(NotebookCreate(name="other"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    foreign_table_id = repo.create_knowhow_table(
+        other_notebook.id, "外库表", "",
+        [{"name": "命令", "role": "anchor"}],
+        "tester",
+    )
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO catalog_jobs (id,notebook_id,source_id,created_by,"
+            "status,sections_total,sections_done,entries,rejected,uncovered,"
+            "truncated_sections,failure_reason,diagnostic,applied_table_id,"
+            "source_generation,created_at,updated_at,finished_at) VALUES "
+            "(?,?,?,?,'succeeded',1,1,1,0,0,0,'','',?,'',?,?,?)",
+            (
+                "cjb-r18-foreign-stale", notebook.id, "s1", "tester",
+                foreign_table_id, NOW, NOW, NOW,
+            ),
+        )
+
+    service, job_b = _run_ok(repo, notebook.id, "s1", 1)
+    result = service.apply(
+        notebook.id, "s1", job_b["id"], all_pending=True, actor="tester"
+    )
+    assert result["table_id"] != foreign_table_id
+    assert result["created"] is True
+    assert repo.get_knowhow_table(foreign_table_id)["rows"] == []
+    local_table = repo.get_knowhow_table(result["table_id"])
+    assert local_table["rows"]
+    assert local_table["title"] == f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+
+
+def test_apply_refuses_rather_than_forks_when_an_inherited_table_lost_its_shape(repo):
+    """R18: the anchor-shape check (`APPLY_TABLE_SHAPE_MESSAGE`) already
+    covers the same-job fast path (`test_apply_refuses_a_table_that_lost_its_
+    command_column` et al.). It must also fire for a table reached through
+    inheritance, not get silently bypassed into forking a second table —
+    both the rename (so by-title fallback cannot find it either) and the
+    anchor removal are applied to the SAME table so only inheritance, not
+    the ordinary by-title path, can even reach it."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job_a = _run_ok(repo, notebook.id, "s1", 1)
+    first = service.apply(
+        notebook.id, "s1", job_a["id"], all_pending=True, actor="tester"
+    )
+    table_id = first["table_id"]
+    repo.update_knowhow_table_meta(table_id, title="重命名后的破损表")
+    repo.set_knowhow_anchor_column(table_id, None, actor="tester")
+
+    _, job_b = _run_ok(repo, notebook.id, "s1", 1)
+    with pytest.raises(ValueError) as excinfo:
+        service.apply(
+            notebook.id, "s1", job_b["id"], all_pending=True, actor="tester"
+        )
+    assert str(excinfo.value) == APPLY_TABLE_SHAPE_MESSAGE
+    # Refused, not silently forked into a second (correctly-shaped) table.
+    assert len(repo.list_knowhow_tables(notebook.id)) == 1
+
+
 def test_apply_existence_check_does_not_hydrate_the_whole_target_table(repo):
     """M2: apply's "does this command already have a row" check used to load
     the ENTIRE target table (`get_knowhow_table`, every row and cell) just to

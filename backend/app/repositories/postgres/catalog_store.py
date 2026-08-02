@@ -129,6 +129,19 @@ class CatalogStore:
             ).fetchone()
         return self._job_row(row) if row is not None else None
 
+    def latest_applied_table_id(self, source_id: str) -> str:
+        """See the SQLite mirror. Same ``COLLATE "C"`` tie-break on ``id`` as
+        ``latest_job`` so a non-C-collated database still resolves ties the
+        same way SQLite's default binary collation does."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT applied_table_id FROM catalog_jobs WHERE source_id=%s "
+                "AND applied_table_id != '' "
+                'ORDER BY created_at DESC,id COLLATE "C" DESC LIMIT 1',
+                (source_id,),
+            ).fetchone()
+        return str(row["applied_table_id"]) if row is not None else ""
+
     def start_job(self, job_id: str, sections_total: int) -> bool:
         with self.database.write() as connection:
             cursor = connection.execute(

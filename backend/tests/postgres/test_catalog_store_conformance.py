@@ -138,6 +138,55 @@ def test_catalog_jobs_gains_truncated_sections_and_applied_table_id_columns(
     assert harness.catalog.get_job(job["id"])["applied_table_id"] == "khtbl-example"
 
 
+def test_latest_applied_table_id_is_a_bounded_point_lookup_across_jobs(catalog_harness):
+    """R18 (codex PR #412 review round 18): `latest_applied_table_id` is the
+    store primitive `_resolve_target_table` (SQLite side; behaviourally
+    covered exhaustively in `tests/test_command_catalog_job.py`) reads so a
+    rerun's brand-new job converges on the table an EARLIER job for the same
+    source already applied to. This only proves the primitive itself against
+    real PostgreSQL SQL: no job for the source yet -> "", the MOST RECENT
+    (`created_at DESC, id COLLATE "C" DESC`) job with a non-empty
+    `applied_table_id` wins over an older one, a job that has not applied
+    yet is invisible to it, and a different source's jobs never leak in."""
+    harness = catalog_harness
+
+    assert harness.catalog.latest_applied_table_id(harness.source_id) == ""
+
+    job_a = harness.catalog.create_job(
+        harness.notebook_id, harness.source_id, "user-catalog"
+    )
+    # Created, but has not applied yet -> still nothing to inherit.
+    assert harness.catalog.latest_applied_table_id(harness.source_id) == ""
+
+    harness.catalog.set_applied_table_id(job_a["id"], "khtbl-first")
+    assert harness.catalog.latest_applied_table_id(harness.source_id) == "khtbl-first"
+    assert harness.catalog.finish_job(job_a["id"], "succeeded") is True
+
+    job_b = harness.catalog.create_job(
+        harness.notebook_id, harness.source_id, "user-catalog"
+    )
+    # job_b exists but has not applied yet -> job_a's target is still the
+    # most recent non-empty one.
+    assert harness.catalog.latest_applied_table_id(harness.source_id) == "khtbl-first"
+
+    harness.catalog.set_applied_table_id(job_b["id"], "khtbl-second")
+    assert harness.catalog.latest_applied_table_id(harness.source_id) == "khtbl-second"
+    assert harness.catalog.finish_job(job_b["id"], "succeeded") is True
+
+    # A different source's jobs are invisible to this lookup.
+    other_source = "src-catalog-other"
+    mark = "%s"
+    with harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+            "created_at,updated_at) "
+            f"VALUES ({','.join([mark] * 8)})",
+            (other_source, harness.notebook_id, "另一个手册", "markdown", "extracted",
+             "extracted", NOW, NOW),
+        )
+    assert harness.catalog.latest_applied_table_id(other_source) == ""
+
+
 def test_mark_candidates_dismissed_converges_pending_past_a_conflicting_page(
     catalog_harness,
 ):

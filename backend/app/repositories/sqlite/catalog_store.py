@@ -143,6 +143,20 @@ class CatalogStore:
             ).fetchone()
         return self._job_row(row) if row is not None else None
 
+    def latest_applied_table_id(self, source_id: str) -> str:
+        """See ``CatalogStorePort.latest_applied_table_id``. Same index as
+        ``latest_job`` (``idx_catalog_jobs_source_created``), narrowed to
+        ``applied_table_id != ''`` — a bounded point lookup, never a scan of
+        every job this source has ever had."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT applied_table_id FROM catalog_jobs WHERE source_id=? "
+                "AND applied_table_id != '' "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+        return str(row["applied_table_id"]) if row is not None else ""
+
     def start_job(self, job_id: str, sections_total: int) -> bool:
         with self.database.write() as db:
             cursor = db.execute(

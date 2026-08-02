@@ -2426,6 +2426,43 @@ class CommandCatalogService:
         one path where the derived string can be stale), while the create/
         by-title path returns the derived string directly — it is exact by
         construction there, so there is nothing to re-read.
+
+        **R18 (codex PR #412 review round 18).** A job whose OWN
+        ``applied_table_id`` is empty is not necessarily a source's FIRST
+        job — it is exactly what a rerun's brand-new job looks like
+        (「重新识别」 after a reparse, or simply confirming a second page of a
+        fresh run). Falling straight through to by-title create-or-find in
+        that case only finds the EARLIER job's table when the derived title
+        still matches it — and two ordinary events break that match without
+        touching the table's identity at all: a person renaming the table by
+        hand, or paper-metadata grounding completing asynchronously and
+        promoting the source's canonical title (``source_title`` is the
+        derived string's only input). Either one used to fork a second
+        「命令目录：<来源>」 for the SAME source, and same-name conflict
+        detection could no longer see the original table's rows at all —
+        the one irreversible thing this whole feature protects against.
+
+        So between the fast path and create-or-find, one more hint is tried:
+        ``_inherit_applied_table`` asks the catalog store for the most
+        recently applied target ACROSS EVERY JOB THIS SOURCE HAS EVER HAD
+        (``latest_applied_table_id`` — a bounded point query, not a scan),
+        and — same discipline as the fast path — re-proves it before trusting
+        it: the table must still exist, AND it must still belong to THIS
+        notebook. The second half matters because a knowhow table can be
+        copied or moved to a different notebook (``app/services/knowhow/
+        transfer.py``); inheriting a stale reference to a table that no
+        longer lives here would land this notebook's confirm in ANOTHER
+        notebook's table, so a title round-trip through THIS notebook
+        (``knowhow_table_id_by_title(notebook_id, current_title) ==
+        candidate_table_id``) is required, not assumed. Either failure falls
+        through identically to the fast path's own dangling reference: create
+        or find by the derived title, never guess.
+
+        An inherited target that no longer has the required anchor shape
+        (checked by the caller, ``_apply_locked``) still fails loudly
+        (``CatalogApplyTargetInvalid``) rather than silently forking a new
+        table — the shape check already applies to whatever ``table_id`` this
+        method returns, from any of the three paths.
         """
         applied_table_id = str(job.get("applied_table_id") or "")
         if applied_table_id:
@@ -2436,6 +2473,12 @@ class CommandCatalogService:
             if columns is not None:
                 title = self._known_table_title(applied_table_id, source_title)
                 return applied_table_id, False, columns, title
+        inherited = self._inherit_applied_table(job, notebook_id)
+        if inherited is not None:
+            inherited_table_id, inherited_columns, inherited_title = inherited
+            if inherited_table_id != applied_table_id:
+                self.catalog.set_applied_table_id(job["id"], inherited_table_id)
+            return inherited_table_id, False, inherited_columns, inherited_title
         table_id, created = self._ensure_table(notebook_id, source_title, actor)
         if table_id != applied_table_id:
             self.catalog.set_applied_table_id(job["id"], table_id)
@@ -2445,6 +2488,46 @@ class CommandCatalogService:
             self.knowhow.knowhow_table_columns(table_id),
             f"{CATALOG_TABLE_TITLE_PREFIX}{source_title}",
         )
+
+    def _inherit_applied_table(
+        self, job: Mapping[str, Any], notebook_id: str
+    ) -> tuple[str, list[dict], str] | None:
+        """R18: the most recent OTHER job's applied target for this job's
+        source — see the R18 paragraph on ``_resolve_target_table`` for why
+        this exists. Returns ``None`` (never a stale id) when there is
+        nothing safe to inherit.
+
+        Existence and notebook membership are proven in ONE round trip each,
+        both inside the same ``try``: ``knowhow_table_columns`` answers
+        existence (and is what the caller actually needs, so fetching it here
+        avoids a second read on the fast path this feeds), and
+        ``knowhow_table_title`` supplies the CURRENT title membership is
+        checked against. A ``KeyError`` from either — the table is gone, full
+        stop — is treated as nothing to inherit; there is no partial state
+        worth distinguishing (a table missing its title but not its columns,
+        or vice versa, is not a shape SQLite or PostgreSQL can produce).
+
+        Membership: ``knowhow_table_id_by_title(notebook_id, title)`` must
+        resolve back to the SAME candidate id. A title that resolves to
+        NOTHING, or to a DIFFERENT id (the table moved to another notebook, or
+        this notebook happens to have an unrelated table sharing that exact
+        title), is treated identically — not "ours", fall through and let
+        create-or-find decide. This never guesses: an id this method returns
+        is one the caller can prove is both alive and local.
+        """
+        candidate_table_id = self.catalog.latest_applied_table_id(
+            str(job.get("source_id") or "")
+        )
+        if not candidate_table_id:
+            return None
+        try:
+            columns = self.knowhow.knowhow_table_columns(candidate_table_id)
+            title = self.knowhow.knowhow_table_title(candidate_table_id)
+        except KeyError:
+            return None
+        if self.knowhow.knowhow_table_id_by_title(notebook_id, title) != candidate_table_id:
+            return None
+        return candidate_table_id, columns, title
 
 
 def raise_if_catalog_cancelled(cancel: CancelEvent) -> None:
