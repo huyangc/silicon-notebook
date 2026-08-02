@@ -1311,6 +1311,54 @@ def test_plan_outline_freezes_intent_before_corpus_scout(repo, monkeypatch):
     assert outline[0]["intent_ids"] == ["intent-1"]
     assert outline[0]["intent_contract"]["objective"] == "用户原问题"
 
+
+def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_it(
+    repo, monkeypatch
+):
+    from app.services.report_engine import ReportEngine
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "用户原问题")
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    events = []
+    monkeypatch.setattr(eng.dependencies.event_log, "emit", events.append)
+    monkeypatch.setattr(
+        eng, "_plan_intent_contract",
+        lambda *_args, **_kwargs: {
+            "objective": "用户原问题",
+            "mandatory_topics": [{
+                "id": "intent-1", "title": "原问题", "question": "用户原问题",
+                "retrieval_queries": ["用户原问题"],
+            }],
+        },
+    )
+    monkeypatch.setattr(
+        eng, "_corpus_profile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad SQL")),
+    )
+    monkeypatch.setattr(eng, "_probe_intent_coverage", lambda *_args: [])
+    monkeypatch.setattr(eng, "_build_corpus_map", lambda *_args: "MAP")
+    monkeypatch.setattr(
+        eng, "_storm_outline",
+        lambda *_args, **_kwargs: [{
+            "title": "原问题", "scope": "s", "sub_queries": ["用户原问题"],
+            "intent_ids": ["intent-1"],
+        }],
+    )
+    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args: [])
+    monkeypatch.setattr(eng, "_judge_sufficiency", lambda _q, sections, _p: sections)
+
+    eng.plan_outline(nb.id, rid, "用户原问题")
+
+    assert events == [{
+        "kind": "report_corpus_profile_failed",
+        "notebook_id": nb.id,
+        "report_id": rid,
+    }]
+    detail = repo.get_report(nb.id, rid)
+    assert detail["understanding"]["corpus_profile"] == {}
+
+
 def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
     nb = _mk_nb(repo)

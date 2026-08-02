@@ -7,6 +7,7 @@ import {
   ReportCitationDistribution,
   ReportCredibilitySummary,
   ReportCorpusBasis,
+  ReportsPanel,
   type ReportDetailT,
 } from "./report-view";
 
@@ -131,6 +132,39 @@ test("可信度回执明确显示全篇综合失败或跳过，并展示可用�
 });
 
 
+test("标准档不显示预期的未请求综合和 0/N 账本噪音，高档异常仍可见", () => {
+  const { rerender } = render(
+    <ReportCredibilitySummary report={detail({
+      depth: 2,
+      understanding: {
+        credibility: {
+          synthesis_status: "not_requested",
+          claim_ledgers_available: 0,
+          claim_ledgers_total: 3,
+        },
+      },
+    })} />,
+  );
+
+  expect(screen.queryByLabelText("报告可信度回执")).toBeNull();
+
+  rerender(
+    <ReportCredibilitySummary report={detail({
+      depth: 8,
+      understanding: {
+        credibility: {
+          synthesis_status: "not_requested",
+          claim_ledgers_available: 0,
+          claim_ledgers_total: 3,
+        },
+      },
+    })} />,
+  );
+
+  expect(screen.getByLabelText("报告可信度回执")).toHaveTextContent("未请求全篇综合");
+});
+
+
 test("报告来源层级徽章复用可见引用的个人/公共口径", () => {
   render(
     <ReportCitationDistribution report={detail({
@@ -144,6 +178,48 @@ test("报告来源层级徽章复用可见引用的个人/公共口径", () => {
 
   expect(screen.getByText(/来源 · 个人 2/)).toBeVisible();
   expect(screen.getByText("公共 1")).toBeVisible();
+});
+
+
+test("报告详情实际挂载可信度回执与引证分布，而非只测试独立组件", async () => {
+  const report = detail({
+    id: "rep-mounted-credibility",
+    depth: 8,
+    status: "done",
+    content_md: "# 完整报告\n\n结论 [k1]。",
+    understanding: {
+      credibility: {
+        synthesis_status: "failed_validation",
+        claim_ledgers_available: 1,
+        claim_ledgers_total: 1,
+        independent_documents: 1,
+        top1_share: 1,
+      },
+    },
+    references: [{
+      key: "k1", label: "资料一", tier: "personal", family_key: "family:one",
+    }],
+  });
+  render(
+    <ReportsPanel
+      notebookId="nb-1"
+      listReports={vi.fn().mockResolvedValue([])}
+      getReport={vi.fn().mockResolvedValue(report)}
+      createReport={vi.fn()}
+      confirmReportIntent={vi.fn()}
+      updateReportOutline={vi.fn()}
+      generateReport={vi.fn()}
+      cancelReport={vi.fn()}
+      deleteReport={vi.fn()}
+      downloadReportsZip={vi.fn()}
+      setToast={vi.fn()}
+      focusReportId="rep-mounted-credibility"
+      onFocusConsumed={vi.fn()}
+    />,
+  );
+
+  expect(await screen.findByLabelText("报告可信度回执")).toHaveTextContent("返回结果未通过校验");
+  expect(screen.getByTitle("按可区分资料统计，不以引用标记数量代替资料数量")).toHaveTextContent("可区分资料 1");
 });
 
 

@@ -514,28 +514,31 @@ class SourceStore:
         with self.database.connect() as connection:
             totals = dict(connection.execute(
                 "SELECT COUNT(*) AS total_sources,"
-                "SUM(CASE WHEN COALESCE(m.is_paper,FALSE)=TRUE "
+                "SUM(CASE WHEN COALESCE(m.is_paper,0)=1 "
                 "AND BTRIM(COALESCE(m.paper_title,''))<>'' THEN 1 ELSE 0 END) AS metadata_sources,"
-                "SUM(CASE WHEN COALESCE(m.is_paper,FALSE)=TRUE "
+                "SUM(CASE WHEN COALESCE(m.is_paper,0)=1 "
                 "AND m.pub_year BETWEEN 1000 AND 9999 THEN 1 ELSE 0 END) AS known_year_sources,"
                 "SUM(CASE WHEN COALESCE(s.file_hash,'')='' AND NOT "
-                "(COALESCE(m.is_paper,FALSE)=TRUE AND BTRIM(COALESCE(m.paper_title,''))<>'') "
+                "(COALESCE(m.is_paper,0)=1 AND BTRIM(COALESCE(m.paper_title,''))<>'') "
                 "THEN 1 ELSE 0 END) AS identity_uncertain_sources "
                 "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND m.notebook_id=s.notebook_id "
                 "WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow')",
                 (notebook_id,),
             ).fetchone())
             type_rows = [dict(row) for row in connection.execute(
-                "SELECT COALESCE(NULLIF(BTRIM(s.doc_type),''),"
+                "SELECT type,count FROM (SELECT "
+                "COALESCE(NULLIF(BTRIM(s.doc_type),''),"
                 "NULLIF(BTRIM(s.source_type),''),'unknown') AS type,COUNT(*) AS count "
                 "FROM sources s WHERE s.notebook_id=%s "
-                "AND s.source_type NOT IN ('memory','knowhow') GROUP BY 1 "
+                "AND s.source_type NOT IN ('memory','knowhow') GROUP BY 1) grouped "
                 "ORDER BY count DESC,type COLLATE \"C\" LIMIT %s",
                 (notebook_id, distribution_limit + 1),
             ).fetchall()]
             year_rows = [dict(row) for row in connection.execute(
                 "SELECT m.pub_year AS year,COUNT(*) AS count FROM sources s "
-                "JOIN source_paper_meta m ON m.source_id=s.id WHERE s.notebook_id=%s "
+                "JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND m.notebook_id=s.notebook_id WHERE s.notebook_id=%s "
                 "AND s.source_type NOT IN ('memory','knowhow') "
                 "AND m.pub_year BETWEEN 1000 AND 9999 GROUP BY m.pub_year "
                 "ORDER BY m.pub_year DESC LIMIT %s",
@@ -548,26 +551,31 @@ class SourceStore:
                 "AND COALESCE(s.file_hash,'')<>'' GROUP BY s.file_hash HAVING COUNT(*)>1) d),0) "
                 "AS hash_duplicate_excess,"
                 "COALESCE((SELECT SUM(n-1) FROM (SELECT COUNT(*) AS n FROM sources s "
-                "JOIN source_paper_meta m ON m.source_id=s.id WHERE s.notebook_id=%s "
-                "AND s.source_type NOT IN ('memory','knowhow') AND m.is_paper=TRUE "
+                "JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND m.notebook_id=s.notebook_id WHERE s.notebook_id=%s "
+                "AND s.source_type NOT IN ('memory','knowhow') AND m.is_paper=1 "
                 "AND BTRIM(COALESCE(m.paper_title,''))<>'' "
                 "GROUP BY LOWER(BTRIM(m.paper_title)) HAVING COUNT(*)>1) d),0) "
                 "AS title_duplicate_excess",
                 (notebook_id, notebook_id),
             ).fetchone())
             representatives = [dict(row) for row in connection.execute(
-                "WITH ranked AS (SELECT s.id,s.title,s.file_name,s.source_type,s.doc_type,"
+                "WITH base AS (SELECT s.id,s.title,s.file_name,s.source_type,s.doc_type,"
                 "m.paper_title,m.pub_year,m.is_paper,s.created_at,"
-                "ROW_NUMBER() OVER (PARTITION BY COALESCE(NULLIF(BTRIM(s.doc_type),''),"
-                "NULLIF(BTRIM(s.source_type),''),'unknown') "
-                "ORDER BY s.created_at,s.id COLLATE \"C\") AS type_rank,"
-                "ROW_NUMBER() OVER (PARTITION BY COALESCE(m.pub_year::text,'unknown') "
-                "ORDER BY s.created_at,s.id COLLATE \"C\") AS year_rank FROM sources s "
-                "LEFT JOIN source_paper_meta m ON m.source_id=s.id WHERE s.notebook_id=%s "
-                "AND s.source_type NOT IN ('memory','knowhow')) "
+                "COALESCE(NULLIF(BTRIM(s.doc_type),''),"
+                "NULLIF(BTRIM(s.source_type),''),'unknown') AS type_key,"
+                "CASE WHEN m.pub_year BETWEEN 1000 AND 9999 "
+                "THEN m.pub_year ELSE NULL END AS year_key FROM sources s "
+                "LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND m.notebook_id=s.notebook_id WHERE s.notebook_id=%s "
+                "AND s.source_type NOT IN ('memory','knowhow')),"
+                "ranked AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY type_key "
+                "ORDER BY created_at,id COLLATE \"C\") AS type_rank,"
+                "ROW_NUMBER() OVER (PARTITION BY year_key "
+                "ORDER BY created_at,id COLLATE \"C\") AS year_rank FROM base) "
                 "SELECT id,title,file_name,source_type,doc_type,paper_title,pub_year,is_paper "
                 "FROM ranked ORDER BY CASE WHEN type_rank=1 THEN 0 WHEN year_rank=1 THEN 1 ELSE 2 END,"
-                "COALESCE(doc_type,source_type) COLLATE \"C\",pub_year DESC,created_at,"
+                "type_key COLLATE \"C\",year_key DESC NULLS LAST,created_at,"
                 "id COLLATE \"C\" LIMIT %s",
                 (notebook_id, representative_limit),
             ).fetchall()]
@@ -590,7 +598,8 @@ class SourceStore:
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT s.id,s.file_hash,m.paper_title,m.is_paper FROM sources s "
-                "LEFT JOIN source_paper_meta m ON m.source_id=s.id WHERE s.id=ANY(%s)",
+                "LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "AND m.notebook_id=s.notebook_id WHERE s.id=ANY(%s)",
                 (ids,),
             ).fetchall()
         return [dict(row) for row in rows]

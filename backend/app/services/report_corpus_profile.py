@@ -166,7 +166,10 @@ class ReportCorpusProfileService:
         }
 
     def resolve_families(self, source_ids: Sequence[str]) -> dict[str, Any]:
-        all_requested = list(dict.fromkeys(
+        # Callers frequently aggregate ids in a set.  Sorting before the 1,024
+        # lookup rail makes the selected window stable across hash seeds and
+        # processes instead of resolving an arbitrary subset on each run.
+        all_requested = sorted(set(
             str(value) for value in source_ids if str(value or "").strip()
         ))
         requested = all_requested[:1024]

@@ -725,6 +725,17 @@ export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) 
   const ledgersTotal = credibility.claim_ledgers_total;
   const showLedgers = typeof ledgersAvailable === "number" || typeof ledgersTotal === "number";
   if (!synthesisStatus && !showLedgers) return null;
+  // Standard/low-depth reports deliberately use the streaming path and never
+  // request a report-wide synthesis.  Rendering only "not requested" plus
+  // "0/N ledgers" on every such report is diagnostic noise, not a useful
+  // credibility receipt.  Keep old reports visible when depth is absent: their
+  // execution tier cannot be recovered safely from this payload.
+  const isExpectedLowDepthNoop = report.depth != null
+    && report.depth < 8
+    && synthesisStatus === "not_requested"
+    && ledgersAvailable === 0
+    && typeof ledgersTotal === "number";
+  if (isExpectedLowDepthNoop) return null;
   const statusClass = synthesisStatus === "failed_model" || synthesisStatus === "failed_validation"
     ? "failed"
     : synthesisStatus === "skipped_no_evidence"

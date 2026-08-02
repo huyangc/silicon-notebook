@@ -53,7 +53,10 @@ if TYPE_CHECKING:
 
 _MARKER = re.compile(r"\[(k\d+(?:\s*,\s*k\d+)*)\]")   # 节内 [k_i] 或 [k_i, k_j] 引用标记(全局重编号用)
 _HIGH_RISK_NUMBER = re.compile(
-    r"(?<![\w])\d+(?:[.,]\d+)?\s*(?:%|％|秒|分钟|小时|天|万|亿|参数|倍|层|篇|份|个|"
+    # Python's ``\w`` includes CJK, so a ``(?<!\w)`` guard silently misses
+    # ordinary Chinese prose such as “降低了30%”.  Exclude only ASCII
+    # identifier continuations; Chinese characters are valid sentence context.
+    r"(?<![A-Za-z0-9_])\d+(?:[.,]\d+)?\s*(?:%|％|秒|分钟|小时|天|万|亿|参数|倍|层|篇|份|个|"
     r"(?:ms|s|KB|MB|GB|TB|K|M|B|tokens?)(?![A-Za-z]))",
     re.IGNORECASE,
 )
@@ -635,10 +638,6 @@ class ReportEngine:
                         if str(getattr(evidence, "source_id", "") or "")
                     }
                     sources.update(unit_sources)
-                    for evidence in (getattr(hit, "evidence", None) or []):
-                        source_id = str(getattr(evidence, "source_id", "") or "")
-                        if source_id:
-                            sources.add(source_id)
                     if relevant:
                         relevant_units.setdefault(unit, set()).update(unit_sources)
             except Exception:
@@ -840,7 +839,17 @@ class ReportEngine:
                 )
             except Exception:
                 # Profiling is additive governance.  A malformed row/projection
-                # must not make the report fail.
+                # must not make the report fail, but its absence must be
+                # observable: the reader disclosure already renders the empty
+                # profile as unavailable, and operations receives a safe event.
+                try:
+                    self.dependencies.event_log.emit({
+                        "kind": "report_corpus_profile_failed",
+                        "notebook_id": notebook_id,
+                        "report_id": rid,
+                    })
+                except Exception:
+                    pass
                 corpus_profile = {}
             intent_contract = dict(intent_contract)
             intent_contract["corpus_profile"] = corpus_profile
@@ -2109,7 +2118,7 @@ class ReportEngine:
                 )
             parts += ["## 参考文献", ""] + bibliography + [""]
             parts += [
-                f"> 引证分布：{len(references)} 处证据锚点来自 {len(family_counts)} 个可区分来源组；"
+                f"> 引证分布：{len(references)} 处证据锚点来自 {len(family_counts)} 个可见来源组；"
                 f"占比最高的单一文档族上界为 {credibility['top1_family_share']:.1%}；"
                 f"同族多锚点形成的锚点膨胀为 {credibility['anchor_inflation']}。"
                 + (

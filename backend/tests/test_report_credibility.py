@@ -111,7 +111,27 @@ def test_family_resolver_caps_identity_hydration_and_discloses_truncation():
     )
     assert resolution["requested_count"] == 1026
     assert resolution["truncated"] is True
-    assert resolution["unresolved_source_ids"][-2:] == ["s-1024", "s-1025"]
+    selected = sorted(row["id"] for row in rows)[:1024]
+    assert set(resolution["family_by_source"]) == set(selected)
+    assert resolution["unresolved_source_ids"] == sorted(
+        set(row["id"] for row in rows) - set(selected)
+    )
+
+
+def test_family_resolver_set_input_has_a_deterministic_truncation_window():
+    rows = [{
+        "id": f"s-{index:04d}", "file_hash": f"h-{index}",
+        "is_paper": None, "paper_title": None,
+    } for index in range(1030)]
+    sources = _Sources(rows)
+    forward = ReportCorpusProfileService(sources).resolve_families(
+        {row["id"] for row in rows}
+    )
+    reverse = ReportCorpusProfileService(sources).resolve_families(
+        {row["id"] for row in reversed(rows)}
+    )
+    assert forward == reverse
+    assert list(forward["family_by_source"]) == sorted(row["id"] for row in rows)[:1024]
 
 
 def test_high_risk_audit_requires_valid_same_sentence_anchor_and_exempts_marked_prose():
@@ -141,6 +161,19 @@ Nevertheless, alluvial layers are described in Chapter 2.
     audit = audit_high_risk_assertions(markdown, {}, max_unsupported_ratio=0.25)
     assert audit["high_risk_assertions"] == 0
     assert audit["threshold_exceeded"] is False
+
+
+def test_high_risk_audit_detects_unit_numbers_joined_to_chinese_prose():
+    markdown = """## 中文数字断言
+吞吐降低了30%。容量提升2倍[k1]。资料共收录128篇。
+"""
+    audit = audit_high_risk_assertions(
+        markdown, {"k1": {"object_id": "x"}}, max_unsupported_ratio=0.25
+    )
+    assert audit["high_risk_assertions"] == 3
+    assert audit["supported"] == 1
+    assert audit["unsupported"] == 2
+    assert audit["unsupported_samples"] == ["吞吐降低了30%。", "资料共收录128篇。"]
 
 
 def test_report_retrieval_query_can_exclude_assumptions_without_losing_constraints():

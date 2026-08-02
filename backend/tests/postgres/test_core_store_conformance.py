@@ -1297,6 +1297,207 @@ def test_bounded_visible_source_identity_rows_match_sqlite_semantics(
     assert "source_type" in index["indexdef"]
 
 
+def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(
+    core_stores: CoreStores,
+):
+    """Execute every new corpus-profile query against PostgreSQL itself.
+
+    This is intentionally a behavior test in the G3 conformance lane: source
+    inspection cannot detect PostgreSQL type/alias errors or NULL ordering.
+    The SQLite lane seeds the same result shape in
+    ``test_memory_source_visibility``.
+    """
+    owner = core_stores.identity.create_user("r00123456", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Report corpus profile"), owner.id
+    )
+    other_notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Other report corpus"), owner.id
+    )
+
+    def insert_source(
+        source_id: str, source_type: str, doc_type: str, file_hash: str
+    ) -> None:
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash=file_hash,
+            summary="",
+            doc_type=doc_type,
+        )
+
+    for values in (
+        ("profile-a", "markdown", "", "shared-hash"),
+        ("profile-b", "pdf", "academic_paper", "shared-hash"),
+        ("profile-c", "pdf", "textbook", ""),
+        ("profile-corrupt-meta", "notes", "", ""),
+        ("profile-hidden", "memory", "memory", ""),
+    ):
+        insert_source(*values)
+    for source_id, title in (
+        ("profile-a", "Profile Paper"),
+        ("profile-b", "  Profile Paper  "),
+    ):
+        core_stores.sources.upsert_paper_meta(
+            source_id,
+            notebook_id,
+            {
+                "is_paper": True,
+                "paper_title": title,
+                "pub_year": 2026,
+                "authors": [],
+            },
+        )
+    core_stores.sources.upsert_paper_meta(
+        "profile-corrupt-meta",
+        other_notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Wrong notebook metadata",
+            "pub_year": 1999,
+            "authors": [],
+        },
+    )
+
+    snapshot = core_stores.sources.report_source_rows(
+        notebook_id, representative_limit=16, distribution_limit=16
+    )
+
+    assert snapshot["total_sources"] == 4
+    assert snapshot["metadata_sources"] == 2
+    assert snapshot["known_year_sources"] == 2
+    assert snapshot["identity_uncertain_sources"] == 2
+    assert snapshot["hash_duplicate_excess"] == 1
+    assert snapshot["title_duplicate_excess"] == 1
+    assert snapshot["type_distribution"] == [
+        {"type": "academic_paper", "count": 1},
+        {"type": "markdown", "count": 1},
+        {"type": "notes", "count": 1},
+        {"type": "textbook", "count": 1},
+    ]
+    assert snapshot["year_distribution"] == [{"year": 2026, "count": 2}]
+    representatives = {row["id"]: row for row in snapshot["representatives"]}
+    assert set(representatives) == {
+        "profile-a", "profile-b", "profile-c", "profile-corrupt-meta"
+    }
+    assert representatives["profile-corrupt-meta"]["paper_title"] is None
+    identity = core_stores.sources.report_source_identity_rows(
+        ["profile-corrupt-meta"]
+    )[0]
+    assert identity["paper_title"] is None
+    assert not identity["is_paper"]
+
+
+def test_report_representative_prefix_matches_sqlite_with_null_years(
+    core_stores: CoreStores,
+):
+    owner = core_stores.identity.create_user("s00123456", "password-12")
+
+    def seed(notebook_id: str, source_id: str, source_type: str) -> None:
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash=source_id,
+            summary="",
+            doc_type="",
+        )
+
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Representative null ordering"), owner.id
+    )
+    seed(notebook_id, "rep-known", "markdown")
+    seed(notebook_id, "rep-unknown", "pdf")
+    core_stores.sources.upsert_paper_meta(
+        "rep-known",
+        notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Known year",
+            "pub_year": 2026,
+            "authors": [],
+        },
+    )
+    assert core_stores.sources.report_source_rows(
+        notebook_id, representative_limit=1
+    )["representatives"][0]["id"] == "rep-known"
+
+    type_notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Representative type ordering"), owner.id
+    )
+    seed(type_notebook_id, "rep-a-unknown", "aaa")
+    seed(type_notebook_id, "rep-z-known", "zzz")
+    core_stores.sources.upsert_paper_meta(
+        "rep-z-known",
+        type_notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Known but later type",
+            "pub_year": 2026,
+            "authors": [],
+        },
+    )
+    assert core_stores.sources.report_source_rows(
+        type_notebook_id, representative_limit=1
+    )["representatives"][0]["id"] == "rep-a-unknown"
+
+    null_order_notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Representative explicit null order"), owner.id
+    )
+    for source_id in (
+        "a-type-first",
+        "b-known-sentinel",
+        "c-null-sentinel",
+        "d-known-candidate",
+        "e-null-candidate",
+    ):
+        seed(null_order_notebook_id, source_id, "pdf")
+    # Make every row share the normalized type key. The two candidate rows
+    # below then both have type_rank > 1 and year_rank > 1.
+    with core_stores.database.write() as connection:
+        connection.execute(
+            "UPDATE sources SET doc_type='shared-type' WHERE notebook_id=%s",
+            (null_order_notebook_id,),
+        )
+    for source_id, year in (
+        ("a-type-first", 2020),
+        ("b-known-sentinel", 2026),
+        ("d-known-candidate", 2026),
+    ):
+        core_stores.sources.upsert_paper_meta(
+            source_id,
+            null_order_notebook_id,
+            {
+                "is_paper": True,
+                "paper_title": source_id,
+                "pub_year": year,
+                "authors": [],
+            },
+        )
+    ordered_ids = [
+        row["id"]
+        for row in core_stores.sources.report_source_rows(
+            null_order_notebook_id, representative_limit=5
+        )["representatives"]
+    ]
+    assert ordered_ids.index("d-known-candidate") < ordered_ids.index(
+        "e-null-candidate"
+    )
+
+
 def test_postgres_element_page_stays_on_the_typed_index(core_stores: CoreStores):
     """禁全表扫描:PostgreSQL 侧的翻页也必须落在
     ``idx_source_elements_source_type`` 上。计划器细节(Index Scan /

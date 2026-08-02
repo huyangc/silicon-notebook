@@ -36,3 +36,19 @@ test("deep report exposes reader-facing credibility disclosure without internal 
   assert.match(sourceText, /本报告按相关性检索生成，未做完整枚举。/);
   assert.doesNotMatch(sourceText, /\bKG\b|\bchunk\b|canonical/i);
 });
+
+test("the report detail mounts both credibility disclosures from its active report", () => {
+  // Component tests prove the rendered user path.  This AST guard makes a
+  // delete/move mutation fail even if a test fixture accidentally renders the
+  // standalone component instead of the report-detail composition.
+  for (const name of ["ReportCredibilitySummary", "ReportCitationDistribution"]) {
+    const mounts = jsxElements(reportView, name).filter((element) => (
+      element.scope.endsWith(".ReportsPanel") && element.bindings?.report === "active"
+    ));
+    assert.equal(
+      mounts.length,
+      1,
+      `${name} must be mounted once by the active report detail`,
+    );
+  }
+});
