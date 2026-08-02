@@ -8,7 +8,7 @@ touches the world: it reads a source's elements, drives one model call per
 slice, writes the reviewable candidate rows, and — on an explicit human
 confirmation — lands the confirmed rows in a knowhow table.
 
-Three properties are load-bearing and every change here has to preserve them.
+Four properties are load-bearing and every change here has to preserve them.
 
 **Cost is proportional to slices, not to retries or reflection.** One planned
 model call per ``ExtractionSlice``, no second opinion, no refinement pass. The
@@ -21,12 +21,23 @@ breaker below turns a run that is mostly rejecting into a failed job with a
 user-readable reason instead of a plausible-looking near-empty result, and the
 rejected entries are written to the candidate table so a person can see why.
 
-**The job row always reaches a terminal state.** Including on Ctrl-C/SIGTERM,
-which inherit ``BaseException`` and never reach ``except Exception``. The
-single-flight guard is a partial unique index covering queued AND running, so a
-row stranded in either state locks that source out of extraction forever — and
-an offline process has no standing to clean up a row that may belong to a live
-backend, so it cannot be repaired until the next restart.
+**The job row always reaches a terminal state — or stops mattering.**
+Including on Ctrl-C/SIGTERM, which inherit ``BaseException`` and never reach
+``except Exception``. The single-flight guard is a partial unique index
+covering queued AND running, so a row stranded in either state locks that
+source out of extraction forever — and an offline process has no standing to
+clean up a row that may belong to a live backend, so it cannot be repaired
+until the next restart. A source or notebook delete mid-run is the other side
+of the same coin: it cascades the row (and every candidate under it) away
+(``ON DELETE CASCADE``) with nobody calling ``cancel()``, so a liveness probe
+(``_raise_if_stopped``) runs at every point a cancel check already runs —
+including inside every model call's own halving and coverage retries — and
+stops the run the moment the row is gone, via its own ``CatalogJobGone``
+signal rather than piggy-backing on ``CatalogCancelled`` (see that type's
+docstring for why the two must not share a handler). No further model calls,
+no further writes: a row an FK already erased has nothing left to reach a
+terminal state IN, and paying for more model calls on its behalf would be
+pure waste.
 """
 from __future__ import annotations
 
@@ -275,6 +286,26 @@ def pending_candidates_message(pending: int) -> str:
 
 class CatalogCancelled(Exception):
     """The owner cancelled this run between slices."""
+
+
+class CatalogJobGone(Exception):
+    """The job row this run needs to settle or report on no longer exists.
+
+    Deliberately NOT a subtype of `CatalogCancelled`: `run()`'s `except
+    CatalogCancelled` clause reads the row back
+    (`self.catalog.get_job(job_id)`) to build the `catalog_job_finished`
+    event, and that read would raise this SAME `KeyError` a second time —
+    uncaught, inside an `except` clause, past every remaining handler. This
+    gets its OWN clause instead, one that settles through `_settle` (a
+    documented no-op for a row that is not there) and skips the event
+    entirely, because there is nothing left for a caller to read back.
+
+    Raised by `CommandCatalogService._raise_if_stopped` when its liveness
+    probe's `get_job` misses — a source or notebook delete cascaded
+    `catalog_jobs`/`catalog_candidates` away (`ON DELETE CASCADE`) while this
+    run was still going, and nobody called `cancel()`, so nothing ever set
+    the run's own cancel event.
+    """
 
 
 class CatalogCircuitOpen(Exception):
@@ -1165,8 +1196,32 @@ class CommandCatalogService:
     def _settle(
         self, job_id: str, status: str, failure_reason: str, diagnostic: str
     ) -> bool:
+        """Write a terminal status — or, when the row is not there anymore,
+        do nothing and say so quietly.
+
+        `finish_job`'s `UPDATE ... WHERE id=? AND status IN ('queued',
+        'running')` already returns `False` without raising when nothing
+        matched, and that covers two DIFFERENT situations: an ordinary
+        idempotent double-settle (the row exists, already terminal — see
+        `finish_job`'s own docstring, and see NOTHING further below, this is
+        the expected, unremarkable case), or the row is not there at all
+        anymore — a cascaded source/notebook delete removed it mid-run (`ON
+        DELETE CASCADE`). Telling the two apart costs one more bounded point
+        lookup, paid ONLY on this already-uncommon "nothing matched" branch,
+        and it exists purely for the log line: "terminal status is not the
+        job's row anymore" is a race worth a line, "there is no job's row
+        anymore" is not a failure at all. The "构建任务必须落终态" redline is
+        a claim about rows that still EXIST; a row a foreign key already
+        erased has no terminal state left to reach, and returning quietly —
+        not raising, not retrying, not resurrecting the row — is the only
+        contract that still makes sense for it.
+
+        This never raises for a missing row, on either branch: the worker
+        thread's `finally` (which releases the in-process cancel-event entry)
+        has to run regardless of which of these it hits.
+        """
         try:
-            return self.catalog.finish_job(
+            settled = self.catalog.finish_job(
                 job_id,
                 status,
                 failure_reason=failure_reason,
@@ -1184,10 +1239,61 @@ class CommandCatalogService:
             except Exception:  # noqa: BLE001
                 pass
             return False
+        if settled:
+            return True
+        try:
+            self.catalog.get_job(job_id)
+        except KeyError:
+            # Confirmed gone, not merely already-terminal. A log line, not an
+            # exception: see the docstring above for why this is the correct
+            # outcome rather than a degraded one.
+            try:
+                self.event_log.logger.info(
+                    "catalog job %s: row gone before settle could land "
+                    "(status=%s) — source or notebook deleted mid-run",
+                    job_id,
+                    status,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
     def _discard_cancel(self, job_id: str) -> None:
         with self._cancels_lock:
             self._cancels.pop(job_id, None)
+
+    def _raise_if_stopped(self, job_id: str, cancel: CancelEvent) -> None:
+        """Cancel-or-gone, checked together, at every point the run already
+        checks `cancel` for an owner-initiated stop — including every model
+        call `_call` makes, halving and coverage retries included, since
+        every one of those funnels through it.
+
+        The liveness probe (`self.catalog.get_job`) is one bounded point
+        lookup on `catalog_jobs`' primary key — microseconds, next to a model
+        call's whole seconds — paid only where a call, or the work leading up
+        to one, is about to happen, never on a tighter loop. It exists
+        because a source or notebook delete mid-run cascades this job's row
+        (and every candidate row under it) away (`ON DELETE CASCADE`)
+        without anybody calling `cancel()`: nothing sets the in-process
+        cancel event, so `raise_if_catalog_cancelled` alone would let the
+        worker keep paying for calls whose output has nowhere left to land,
+        all the way until the next place it happens to read the row back.
+
+        `raise_if_catalog_cancelled` runs FIRST so an explicit owner cancel
+        keeps taking priority and keeps producing exactly the outcomes the
+        existing cancel tests pin (`cancelled_by_owner`); this probe only
+        ever fires for a deletion that outright removed the row, which a
+        real cancel never does. Raises `CatalogJobGone`, not
+        `CatalogCancelled` — see that type's docstring for why the two must
+        not share a handler.
+        """
+        raise_if_catalog_cancelled(cancel)
+        try:
+            self.catalog.get_job(job_id)
+        except KeyError:
+            raise CatalogJobGone() from None
 
     # ------------------------------------------------------------------- run
     def run(self, job_id: str) -> dict:
@@ -1224,6 +1330,20 @@ class CommandCatalogService:
                 latency_ms=latency_ms(),
             )
             return {"job_id": job_id, "cancelled": True}
+        except CatalogJobGone:
+            # See `CatalogJobGone`'s own docstring for why this cannot share
+            # `except CatalogCancelled`'s handler: the row is not merely
+            # terminal, it does not exist, so building the `_emit` payload
+            # above (`self.catalog.get_job(job_id)`) would raise this SAME
+            # `KeyError` a second time. `_settle` below is a documented
+            # no-op for exactly this case (nothing matches its `UPDATE`), and
+            # is called anyway so every exit path still funnels through one
+            # place — but there is no row left to build an event about, so
+            # this branch, unlike every other one here, does not call
+            # `_emit` at all: an event nobody can read the job back for is
+            # not "user visible", it is a dangling pointer.
+            self._settle(job_id, "cancelled", CANCELLED_MESSAGE, "job_deleted_mid_run")
+            return {"job_id": job_id, "job_deleted": True}
         except CatalogCircuitOpen as exc:
             self._settle(job_id, "failed", CIRCUIT_OPEN_MESSAGE, exc.diagnostic)
             self._emit(
@@ -1264,6 +1384,21 @@ class CommandCatalogService:
             # Claim the row BEFORE paying for the read. A job cancelled while it
             # sat in the queue should cost nothing, and the read below is the
             # single most expensive non-model step in the run.
+            #
+            # `start_job`'s `UPDATE ... WHERE id=? AND status='queued'` fails
+            # to match for the SAME two reasons `_settle`'s own `finish_job`
+            # can: the row is already past `queued` (the ordinary cancel
+            # race this branch exists for), or the row is not there at all —
+            # deleted between `start()` publishing it and this thread
+            # reaching here. Telling them apart here, rather than always
+            # raising `CatalogCancelled`, matters because `run()`'s `except
+            # CatalogCancelled` clause reads the row back for its event; for
+            # a row that is truly gone that read raises the SAME `KeyError` a
+            # second time, uncaught. See `CatalogJobGone`'s docstring.
+            try:
+                self.catalog.get_job(job["id"])
+            except KeyError:
+                raise CatalogJobGone() from None
             raise CatalogCancelled()
         # `start_job` claiming the row is not itself a cancellation check: a
         # cancel that lands in the instant between `cancel()` setting the
@@ -1271,7 +1406,9 @@ class CommandCatalogService:
         # the FIRST per-slice check inside `_process_section` — by which
         # point the whole-source read right below has already run for
         # nothing, for a job that was cancelled before it did any real work.
-        raise_if_catalog_cancelled(cancel)
+        # Combined with the liveness probe for the same reason: see
+        # `_raise_if_stopped`.
+        self._raise_if_stopped(job["id"], cancel)
         # One whole source's elements, deliberately: this is the exact fetch
         # chunking already performs for every source that is ingested, and C1a
         # is built to consume its rows unchanged. Sectioning needs document
@@ -1295,7 +1432,7 @@ class CommandCatalogService:
         total_slices = 0
         total_slice_failures = 0
         for section in sections:
-            raise_if_catalog_cancelled(cancel)
+            self._raise_if_stopped(job["id"], cancel)
             work = self._process_section(client, job, section, position, cancel)
             position += len(work.rows)
             total_calls += work.calls
@@ -1451,10 +1588,10 @@ class CommandCatalogService:
         excerpt = _clip(section.text, CANDIDATE_EXCERPT_CHARS)
         next_position = position
         for extraction in extraction_slices(section):
-            raise_if_catalog_cancelled(cancel)
+            self._raise_if_stopped(job["id"], cancel)
             work.slices += 1
             payloads, calls, failed = self._extract_slice(
-                client, section, candidates, extraction, cancel
+                client, section, candidates, extraction, cancel, job["id"]
             )
             work.calls += calls
             if failed:
@@ -1681,6 +1818,7 @@ class CommandCatalogService:
         candidates: Sequence[str],
         extraction: ExtractionSlice,
         cancel: CancelEvent,
+        job_id: str,
         depth: int = 0,
     ) -> tuple[list[Mapping[str, Any]], int, bool]:
         """One slice's payloads, the calls it cost, and whether it failed.
@@ -1749,7 +1887,7 @@ class CommandCatalogService:
         args by name so a parameter answered twice still lands once, and never
         discarding an answer already paid for is this module's standing rule.
         """
-        outcome = self._call(client, section, candidates, extraction, cancel)
+        outcome = self._call(client, section, candidates, extraction, cancel, job_id)
         calls = 1
         if outcome.payload is not None:
             payloads = [outcome.payload]
@@ -1757,7 +1895,7 @@ class CommandCatalogService:
                 coverage = assignment_coverage(payloads, extraction.param_names)
                 if _coverage_retry_warranted(coverage):
                     recovered, extra_calls = self._halve_and_ask(
-                        client, section, candidates, extraction, cancel, depth
+                        client, section, candidates, extraction, cancel, job_id, depth
                     )
                     payloads.extend(recovered)
                     calls += extra_calls
@@ -1768,14 +1906,14 @@ class CommandCatalogService:
             and len(extraction.param_names) > 1
         ):
             payloads, half_calls = self._halve_and_ask(
-                client, section, candidates, extraction, cancel, depth
+                client, section, candidates, extraction, cancel, job_id, depth
             )
             calls += half_calls
             # NOT the OR of each half's own `failed` — see the docstring: one
             # successful half means this slice, as a whole, produced usable
             # output.
             return payloads, calls, not payloads
-        retry = self._call(client, section, candidates, extraction, cancel)
+        retry = self._call(client, section, candidates, extraction, cancel, job_id)
         calls += 1
         if retry.payload is not None:
             return [retry.payload], calls, False
@@ -1788,6 +1926,7 @@ class CommandCatalogService:
         candidates: Sequence[str],
         extraction: ExtractionSlice,
         cancel: CancelEvent,
+        job_id: str,
         depth: int,
     ) -> tuple[list[Mapping[str, Any]], int]:
         """Split this slice's assignment in two and ask for each half.
@@ -1810,7 +1949,7 @@ class CommandCatalogService:
         calls = 0
         for half in halves:
             half_payloads, half_calls, _half_failed = self._extract_slice(
-                client, section, candidates, half, cancel, depth + 1
+                client, section, candidates, half, cancel, job_id, depth + 1
             )
             payloads.extend(half_payloads)
             calls += half_calls
@@ -1823,8 +1962,15 @@ class CommandCatalogService:
         candidates: Sequence[str],
         extraction: ExtractionSlice,
         cancel: CancelEvent,
+        job_id: str,
     ) -> _SliceOutcome:
-        raise_if_catalog_cancelled(cancel)
+        # The liveness probe here is what makes the guarantee actually cover
+        # "every model call": `_extract_slice`'s halving and coverage-retry
+        # branches call `_call` directly, recursing through `_halve_and_ask`
+        # without ever returning to `_process_section`'s per-slice loop — so
+        # THIS is the one choke point every `chat_json` call, including every
+        # retry, is guaranteed to pass through. See `_raise_if_stopped`.
+        self._raise_if_stopped(job_id, cancel)
         kwargs: dict[str, Any] = dict(cap_kwargs(client, "kg_extract_max_tokens"))
         if getattr(client, "settings", None) is not None:
             # The sole admission ticket into the content-addressed cache — read

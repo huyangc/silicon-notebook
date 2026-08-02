@@ -80,6 +80,20 @@ R14(codex PR #412 R14 评审 P1)修复补充覆盖(变异验证见交付报告):
 18. **锁序全景在一处成文** —— 只剩两把锁(来源栅栏在外、每库目录锁在内),完整
     枚举写在 `_target_lock_key` 的 docstring 里,`_apply_locked` 只指回去,避免同
     一份推演在多处各写一半、又各自过期。
+
+R19(codex PR #412 R19 评审 P2)修复补充覆盖(变异验证见交付报告):
+
+19. **抽取 worker 对来源/笔记本删除的探活** —— `catalog_jobs`/`catalog_candidates`
+    都是 `ON DELETE CASCADE`,但删除不会设置 worker 自己进程内的取消事件(没人调
+    `cancel()`)。没有探活,worker 会一直付费做模型调用,直到下一次偶然读回那行——
+    而那次读回本身(`run()` 里为 `_emit` 取的 `self.catalog.get_job(job_id)`)会在
+    `except` 分支内部再抛一次 `KeyError`,未捕获。`_raise_if_stopped` 在既有取消
+    检查的**同一位置**(含 `_call`——每次模型调用、每次二分/补救重试唯一必经的
+    choke point)加一次有界点查,行消失即抛专属的 `CatalogJobGone`(不与
+    `CatalogCancelled` 共用处理分支,原因见该类型自己的 docstring)。`_settle`
+    对已删行的容忍与「探活触发的停止不发事件」是两件分开的事:前者是
+    `finish_job` 本就无操作之外再加一次「已删 vs 已终态」的区分性日志,后者是
+    `run()` 的 `except CatalogJobGone` 干脆不取行、不 `_emit`。
 """
 from __future__ import annotations
 
@@ -1909,6 +1923,86 @@ def test_cancel_reports_the_row_not_the_branch_it_took(repo):
     assert result["job"]["status"] in {"queued", "running"}
     service.run(second["id"])
     assert service.catalog.get_job(second["id"])["status"] == "cancelled"
+
+
+def test_job_row_deleted_mid_run_stops_further_model_calls(repo):
+    """codex PR #412 R19 P2: a source or notebook can be deleted while an
+    extraction job is mid-run (`catalog_jobs`/`catalog_candidates` are both
+    `ON DELETE CASCADE`), and nothing sets the worker's own cancel event —
+    `cancel()` is never called for a delete. Without a liveness probe before
+    every model call, the worker just keeps paying for calls whose output
+    has nowhere left to land, until the next place it happens to read the
+    row back — which used to be `_emit`'s own `self.catalog.get_job(job_id)`
+    argument, raising `KeyError` uncaught deep inside an `except` clause.
+
+    Two slices (`param_count=40`) so the delete, landing right after slice
+    1's call, is caught by the SAME per-slice checkpoint
+    `raise_if_catalog_cancelled` already used — before slice 2's call, and
+    before this section's `add_candidates` (which only runs once, after ALL
+    of a section's slices are done) ever gets a chance to write a row for a
+    job that no longer exists.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "大参数手册",
+        _large_param_manual("s1", param_count=40),
+    )
+    service = _service(repo)
+    job_ref: dict[str, str] = {}
+
+    def delete_after_first_call(prompt, call):
+        if call == 1:
+            with repo._write() as db:
+                db.execute(
+                    "DELETE FROM catalog_candidates WHERE job_id=?",
+                    (job_ref["id"],),
+                )
+                db.execute(
+                    "DELETE FROM catalog_jobs WHERE id=?", (job_ref["id"],)
+                )
+        return _good_reply(prompt, call)
+
+    client = _Client(delete_after_first_call)
+    bind_chat_client(repo, "kg_extract", client)
+    job = service.start(notebook.id, "s1")
+    job_ref["id"] = job["id"]
+    result = service.run(job["id"])
+
+    assert len(client.calls) == 1, "slice 2's call must never have happened"
+    assert result == {"job_id": job["id"], "job_deleted": True}
+    with pytest.raises(KeyError):
+        service.catalog.get_job(job["id"])
+    with repo._connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) FROM catalog_candidates WHERE source_id=?", ("s1",)
+        ).fetchone()[0]
+    assert remaining == 0, "no candidate row may be written after the delete"
+    # The worker thread ended normally — no uncaught exception, and no stale
+    # guard row left behind for the source (there is no row left at all).
+    assert service.catalog.active_job("s1") is None
+
+
+def test_settle_tolerates_a_job_row_thats_already_gone(repo):
+    """`_settle` is the single choke point every exit path in `run()` writes
+    a terminal status through — including the new `CatalogJobGone` branch,
+    which settles through it as a documented no-op. Any settle attempt can
+    in principle land after the row is already gone (a concurrent delete
+    finishing between the liveness probe and the settle write), and it must
+    be tolerated the exact same way: quietly, without raising, so the worker
+    thread's `finally` (which releases the in-process cancel-event entry)
+    still runs."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    with repo._write() as db:
+        db.execute("DELETE FROM catalog_candidates WHERE job_id=?", (job["id"],))
+        db.execute("DELETE FROM catalog_jobs WHERE id=?", (job["id"],))
+
+    settled = service._settle(job["id"], "failed", "内部消息", "diag")
+
+    assert settled is False  # nothing to write, and it must not raise
 
 
 # ----------------------------------------------------------------------- apply
