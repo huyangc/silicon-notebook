@@ -1309,6 +1309,11 @@
         "type": "index"
       },
       {
+        "name": "idx_knowhow_tables_nb_title",
+        "sql_sha256": "e91cef007fdacbd688949a1f39a5e554a1c624fd383946231e14bd37dd14cbb8",
+        "type": "index"
+      },
+      {
         "name": "idx_knowledge_embeddings_nb",
         "sql_sha256": "cc4f740d660bed770b5b2434ca4ba1d2dce477e6a6e4327dc2f9f3f801b34c90",
         "type": "index"

@@ -1978,6 +1978,18 @@ class SqliteMigrator:
         是有意做粗的变更信号,每次生命周期状态迁移(`extracting`/`extracted`、摘要、
         重新抽取)都会推进,而这些都不碰 `source_elements`——按它判会在一次普通的
         重新抽取之后谎报「来源已重新解析」,并逼用户重跑一整轮付费识别。
+
+        `idx_knowhow_tables_nb_title` 是本迁移里**唯一建在既有表上**的索引,由 R14 P2
+        评审追加。命令目录按标题解析目标表(`knowhow_table_id_by_title`)是一次
+        `WHERE notebook_id=? AND title=? ORDER BY created_at,id LIMIT 1`;库里原本只有
+        `idx_knowhow_tables_nb` 单列索引,那条查询会把该 notebook 下**每一张**表都取出来
+        再按标题过滤、再排序,代价随知识库里的表数线性增长——而它落在 apply/dismiss 的
+        持锁窗口内,正是最不该做线性扫描的地方。四列复合索引把它变成一次索引定位:前两
+        列做等值 seek,后两列直接给出 `list_knowhow_tables` 那份 `ORDER BY created_at,id`
+        的 tie-break 顺序,`LIMIT 1` 不再需要额外排序步骤。给既有表加索引写在这份**尚未
+        发布**的迁移里是合法追加(与 `truncated_sections`/`applied_table_id`/
+        `source_generation` 三处发布前修复同一条理由):v39 还没有任何已部署库,版本闸
+        不会对谁短路,已部署的 v38 库升级时会照常执行到这一句。
         """
         with self._connect() as db:
             db.executescript(
@@ -2028,6 +2040,9 @@ class SqliteMigrator:
                   ON catalog_candidates(notebook_id);
                 CREATE INDEX IF NOT EXISTS idx_catalog_candidates_source
                   ON catalog_candidates(source_id);
+
+                CREATE INDEX IF NOT EXISTS idx_knowhow_tables_nb_title
+                  ON knowhow_tables(notebook_id, title, created_at, id);
                 """
             )
 

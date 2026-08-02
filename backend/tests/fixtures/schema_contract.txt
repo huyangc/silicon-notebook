@@ -595,6 +595,7 @@ idx_knowhow_columns_table
 idx_knowhow_milestones_table
 idx_knowhow_rows_table
 idx_knowhow_tables_nb
+idx_knowhow_tables_nb_title
 idx_knowledge_embeddings_nb
 idx_knowledge_embeddings_nb_created
 idx_knowledge_objects_nb_status

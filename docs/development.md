@@ -65,6 +65,12 @@ or grounding-rejected entry, keyset-ordered by a per-job `position`).
 `catalog_jobs.source_generation` records the source element generation the run
 was created against, so a reparse expires that run's candidates rather than
 letting them be confirmed into content the document no longer holds.
+v39 also installs `idx_knowhow_tables_nb_title` on
+`knowhow_tables(notebook_id, title, created_at, id)` — the migration's only
+index on a pre-existing table — so by-title target resolution seeks on
+`(notebook_id, title)` and takes its `(created_at, id)` tie-break straight from
+the index, rather than reading every table row in the notebook inside the
+locked apply window.
 `catalog_candidates.job_id` deliberately carries no foreign key: the rows
 cascade from notebooks/sources directly, and an incoming foreign key would make
 `catalog_jobs` a non-leaf table, leaving its single-column `source_id` guard

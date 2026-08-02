@@ -416,8 +416,8 @@ state without landing a row when it CONFLICTS with an existing row in the
 target table; a candidate a reviewer simply does not want otherwise had no
 route out at all. `.../command-catalog/dismiss` is that route: the review
 panel's "跳过所选" / "跳过全部待审阅" actions, mirroring apply's own selection
-contract, per-target lock and owner-only authorization, but touching no
-knowhow table at all.
+contract, per-notebook catalog lock and owner-only authorization, but touching
+no knowhow table at all.
 
 **A reparse invalidates the run.** Each job records the **source generation**
 it was created against (the single landing instant every element of that source

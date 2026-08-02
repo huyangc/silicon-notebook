@@ -77,8 +77,11 @@ def _rollback_v34(db: sqlite3.Connection) -> None:
     just v34's: leaving _migration_36's tables behind would make the replay
     observe no addition for them and fail closed as manifest-addition-missing.
     Roll back newest-first; DROP TABLE takes each table's own indexes with it
-    (idx_kg_source_profiles_nb_mainstream, and _migration_39's six).
+    (idx_kg_source_profiles_nb_mainstream, and _migration_39's six). The
+    seventh index _migration_39 installs sits on the PRE-EXISTING
+    knowhow_tables, so no DROP TABLE reaches it and it must be named.
     """
+    db.execute("DROP INDEX idx_knowhow_tables_nb_title")       # _migration_39
     db.execute("DROP TABLE catalog_candidates")                # _migration_39
     db.execute("DROP TABLE catalog_jobs")                      # _migration_39
     db.execute("DROP INDEX idx_sources_visible_identity")      # _migration_38
@@ -738,6 +741,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")      # _migration_39
         rollback.execute("DROP TABLE catalog_candidates")               # _migration_39
         rollback.execute("DROP TABLE catalog_jobs")                     # _migration_39
         rollback.execute("DROP INDEX idx_sources_visible_identity")     # _migration_38
@@ -753,12 +757,22 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
 
 
 def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
-    """A deployed v38 database is missing exactly _migration_39's two tables.
+    """A deployed v38 database is missing exactly _migration_39's additions:
+    its two tables AND the one index it puts on a pre-existing table.
 
     This is the hop that catches DDL smuggled into a sealed migration: the
     version gate short-circuits on `current >= SCHEMA_VERSION`, so anything
     added to an already-released migration never runs on a deployed database
     and only a forged deployment at the previous version can see it.
+
+    `idx_knowhow_tables_nb_title` (R14 P2) is the reason this test names an
+    index at all. Every earlier v39 index rides on `catalog_jobs`/
+    `catalog_candidates`, so dropping those tables removed them implicitly;
+    this one is on `knowhow_tables`, which a v38 deployment already has. If the
+    backfill path did not install it, the replay would find the index present
+    afterwards but absent from the forged v38 source and fail closed — which is
+    precisely the assertion that proves the deployed-database upgrade really
+    creates it, rather than it only ever existing on freshly built schemas.
     """
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -766,7 +780,18 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         module.offline_settings(database, tmp_path / "upgrade-storage")
     )
     upgraded.close_local()
+
+    # The committed fixture is a real v9 DEPLOYED database, so the upgrade just
+    # run is itself the backfill path: a migration that only ever installed
+    # this index on freshly built schemas would leave it absent here.
+    with sqlite3.connect(database) as check:
+        assert check.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='idx_knowhow_tables_nb_title'"
+        ).fetchone() is not None
+
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")
         rollback.execute("DROP TABLE catalog_candidates")
         rollback.execute("DROP TABLE catalog_jobs")
         rollback.execute("PRAGMA user_version = 38")

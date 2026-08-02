@@ -34,7 +34,7 @@
 - 门禁分为 G0 目标测试、G1 `bash scripts/check.sh` 标准门（编辑期及每次 PR/push，默认 12 个后端 pytest worker + 语法/契约/harness + 前端 test/负责类型检查的 production build 三条并发泳道；Node/Vitest 各限 4 workers，Apple Silicon warm 目标 ≤60 秒）、G2 `bash scripts/check_extended.sh` 扩展门（再补跑 slow 真实索引/性能测试与 architecture_contract 全仓语义扫描，每天 18:17 UTC/北京时间次日 02:17 一次，也可手动触发）和 G3 独立 PostgreSQL 集成门。G1/G2 的 backend marker 必须精确互补。测试加速保持断言和生产默认值不变：全仓语法扫描按进程复用解析结果，纯缓存策略不搭建无关数据库/索引，生命周期脚本仅通过私有 `_SCRIPT_TEST_*` 控制缩短测试轮询，并发顺序用 event/barrier 而不是固定 sleep 证明；与规模无关的边界分支只降低测试局部阈值并另断言生产 floor，共享同一不可变产物的多组断言只做一次真实构建，纯算术/观测分支用最小接缝且邻近集成测试仍真实构建、打开和查询产物；`next build` 未启用 `ignoreBuildErrors`，因此 G1 不得在它之前重复运行同一遍 `tsc --noEmit`。
 - **仅 Codex 的沙箱规则（Claude Code 不适用）**：Codex 第一次运行 `scripts/check.sh` 就必须申请沙箱外执行，因为后端生命周期测试会绑定 loopback 端口并管理子进程；不得先在沙箱内试错。GitHub 网络操作（`git fetch`、`git push`、`gh auth/repo/pr`）也必须直接申请沙箱外执行；普通本地只读 Git 检查仍在沙箱内完成。
 - 数据库专项门只覆盖直接 PostgreSQL 后端；已退役的 SQLite 后端实现专项测试、SQLite→PostgreSQL 导入/正向 shadow 测试与跨后端 parity 测试不得重新加入当前套件。
-- **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。当前 SQLite schema 为 v39；PostgreSQL checksummed schema 为 v17；除关系端点 keyset 覆盖索引和关系补全的来源代次水位外，两侧还包含生成中 Ask 的浏览器提交时间 `ask_jobs.asked_at`、图谱质量分析的三张预计算产物表、按 `(source_id, element_type, created_at, id)` 的集合枚举索引 `idx_source_elements_source_type`，排除隐藏 Memory/Knowhow 投影的部分可见来源身份索引 `idx_sources_visible_identity`，以及命令目录抽取的 `catalog_jobs`／`catalog_candidates`（前者带按来源的 `queued`/`running` 条件唯一单飞索引与记录创建时刻来源代次的 `source_generation`；后者**刻意不给 `job_id` 加外键**，否则 `catalog_jobs` 不再是叶表，正向 shadow 就没有可用的 UNIQUE 停车方案）。
+- **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。当前 SQLite schema 为 v39；PostgreSQL checksummed schema 为 v17；除关系端点 keyset 覆盖索引和关系补全的来源代次水位外，两侧还包含生成中 Ask 的浏览器提交时间 `ask_jobs.asked_at`、图谱质量分析的三张预计算产物表、按 `(source_id, element_type, created_at, id)` 的集合枚举索引 `idx_source_elements_source_type`，排除隐藏 Memory/Knowhow 投影的部分可见来源身份索引 `idx_sources_visible_identity`，以及命令目录抽取的 `catalog_jobs`／`catalog_candidates`（前者带按来源的 `queued`/`running` 条件唯一单飞索引与记录创建时刻来源代次的 `source_generation`；后者**刻意不给 `job_id` 加外键**，否则 `catalog_jobs` 不再是叶表，正向 shadow 就没有可用的 UNIQUE 停车方案）与它按标题解析目标表用的 `idx_knowhow_tables_nb_title`（`knowhow_tables(notebook_id, title, created_at, id)`，v39 里唯一建在既有表上的索引）。
 - **界面词汇**：面向用户的文案只用「界面词」，不得出现 `projection`/`tier`/`canonical`/`chunk`/`KG`/`schema` 这类内部黑话。真源是 `AGENTS.md`「界面词汇表」，`scripts/check_ui_vocabulary.py` 是硬门。**唯一放行的英文界面词是「图谱 Schema」**（图谱对象类型/字段管理，原「内容类型」，现从知识图谱视图头部进入）——守卫的 `SANCTIONED_UI` 只放行这一个复合短语（带 CJK 前置断言，不吞「知识图谱」尾字），裸 `schema`/`Schema` 仍拦。
 - **错误文案**：deny by default，信任按**出处**判定而非文本形状。后端中文用户文案必须走 `backend/app/api/deps.py` 的 `user_error()`（打 `X-User-Message` 头），前端翻译只在 `frontend/app/errors.ts`。
 - **Knowhow 导入校验**：属性按行/按列必须在解析前按用户选择统一；横向合并记录分组导致展开后首行重复时，应提示改选「属性按行」。只有 `GridParseError` / `KnowhowImportValidationError` 的固定可操作文案可经 `user_error()` 上屏，其他 `ValueError` 保持诊断专用。
@@ -94,10 +94,13 @@ conflict（分不出「陈旧行」与「人工订正过的行」，覆盖是本
 走 knowhow 既有服务层因而自带 record_change。列按**名字**寻址而不是按位置——目标表有实时
 增删列端点，位置映射在用户删一列之后仍会「正常工作」，只是把语法写进「说明」；缺「命令」列
 直接拒绝写入。一次 `all_pending` 最多确认一页，必须用 `pending_remaining` 如实回报剩余，
-不能让 300 条候选的库看到 `rows_added: 100` 就以为做完了。apply 的并发锁**一律按派生标题**
-（`("title", notebook_id, 命令目录：<来源>)`）——`applied_table_id` 只用于锁内的目标解析，
-绝不当锁键：按表 id 取锁的那一刻，「表存不存在」正被这把锁自己保护的 `create_knowhow_table`
-改写，先到者拿 title 锁、后到者读到新表拿 table 锁，两把锁互不排斥。⑥**模型自撰字段在合并处
+不能让 300 条候选的库看到 `rows_added: 100` 就以为做完了。apply/dismiss/陈旧清扫的并发锁
+**一律是 `("catalog", notebook_id)`**，判据只有一条:锁键必须**不可变**。按表 id 取锁的那一刻，
+「表存不存在」正被这把锁自己保护的 `create_knowhow_table` 改写；按派生标题取锁则会被论文元数据
+接地在两次 apply 之间把上传名换成论文标题。按来源取锁同样不行——两个派生标题相同的不同来源
+解析到同一张表，而来源写栅栏是 per source、挡不住它们。`applied_table_id` 只用于锁内的目标解析，
+绝不当锁键。锁序:来源写栅栏在外、目录锁在内，完整枚举在 `_target_lock_key` 的 docstring 里。
+粗粒度的代价（同库不同来源的确认会串行）是刻意接受的:每个写者都有界、不调模型、由人点击触发。⑥**模型自撰字段在合并处
 封顶**——说明/示例/每个参数的 desc 都是接地校验刻意不查的，`_merge_entry` 是它们到库之间
 唯一的收口；参数 desc 需要两道闸（每条 `MODEL_ARG_DESC_CHARS`、整行 `MODEL_ARG_DESC_TOTAL_CHARS`,
 一行的条数等于命令的参数个数），总量截断从尾部截并把条数记进 `reject_info.desc_overflow`
