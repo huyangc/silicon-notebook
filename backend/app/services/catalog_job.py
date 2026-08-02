@@ -2598,11 +2598,11 @@ class CommandCatalogService:
         copied or moved to a different notebook (``app/services/knowhow/
         transfer.py``); inheriting a stale reference to a table that no
         longer lives here would land this notebook's confirm in ANOTHER
-        notebook's table, so a title round-trip through THIS notebook
-        (``knowhow_table_id_by_title(notebook_id, current_title) ==
-        candidate_table_id``) is required, not assumed. Either failure falls
-        through identically to the fast path's own dangling reference: create
-        or find by the derived title, never guess.
+        notebook's table, so a direct point lookup of the candidate's own
+        ``notebook_id`` column (``knowhow_table_notebook_id``, R20) is
+        required, not assumed. Either failure falls through identically to
+        the fast path's own dangling reference: create or find by the
+        derived title, never guess.
 
         An inherited target that no longer has the required anchor shape
         (checked by the caller, ``_apply_locked``) still fails loudly
@@ -2644,22 +2644,37 @@ class CommandCatalogService:
         nothing safe to inherit.
 
         Existence and notebook membership are proven in ONE round trip each,
-        both inside the same ``try``: ``knowhow_table_columns`` answers
+        all three inside the same ``try``: ``knowhow_table_columns`` answers
         existence (and is what the caller actually needs, so fetching it here
-        avoids a second read on the fast path this feeds), and
-        ``knowhow_table_title`` supplies the CURRENT title membership is
-        checked against. A ``KeyError`` from either — the table is gone, full
-        stop — is treated as nothing to inherit; there is no partial state
-        worth distinguishing (a table missing its title but not its columns,
-        or vice versa, is not a shape SQLite or PostgreSQL can produce).
+        avoids a second read on the fast path this feeds), ``knowhow_table_
+        title`` supplies the table's CURRENT title (returned to the caller as
+        a display value — see R20 below for why it is no longer part of the
+        membership check itself), and ``knowhow_table_notebook_id`` answers
+        membership. A ``KeyError`` from any of the three — the table is gone,
+        full stop — is treated as nothing to inherit; there is no partial
+        state worth distinguishing (a table missing one column but not
+        another is not a shape SQLite or PostgreSQL can produce).
 
-        Membership: ``knowhow_table_id_by_title(notebook_id, title)`` must
-        resolve back to the SAME candidate id. A title that resolves to
-        NOTHING, or to a DIFFERENT id (the table moved to another notebook, or
-        this notebook happens to have an unrelated table sharing that exact
-        title), is treated identically — not "ours", fall through and let
-        create-or-find decide. This never guesses: an id this method returns
-        is one the caller can prove is both alive and local.
+        Membership: the candidate's own ``notebook_id`` column must equal
+        ``notebook_id``. A candidate that has moved to another notebook is
+        treated identically to a deleted one — not "ours", fall through and
+        let create-or-find decide. This never guesses: an id this method
+        returns is one the caller can prove is both alive and local.
+
+        **R20 (codex PR #412 review round 20).** Membership used to be proven
+        by a title round-trip instead
+        (``knowhow_table_id_by_title(notebook_id, title) ==
+        candidate_table_id``), but a table's title is not unique — a user is
+        free to rename tables to collide. When the inherited candidate had
+        been renamed to a title that collides with an EARLIER, unrelated
+        table in the SAME notebook, ``knowhow_table_id_by_title``'s
+        documented creation-order tie-break resolved to that earlier table
+        instead of the candidate, so the equality check failed for a target
+        that in fact still belonged here — silently forking a second
+        「命令目录：<来源>」 table, exactly the failure this whole method
+        exists to prevent, reintroduced by its own membership check.
+        ``knowhow_table_notebook_id`` reads the row's own column directly, so
+        title collisions elsewhere in the notebook cannot perturb the answer.
         """
         candidate_table_id = self.catalog.latest_applied_table_id(
             str(job.get("source_id") or "")
@@ -2669,9 +2684,12 @@ class CommandCatalogService:
         try:
             columns = self.knowhow.knowhow_table_columns(candidate_table_id)
             title = self.knowhow.knowhow_table_title(candidate_table_id)
+            owner_notebook_id = self.knowhow.knowhow_table_notebook_id(
+                candidate_table_id
+            )
         except KeyError:
             return None
-        if self.knowhow.knowhow_table_id_by_title(notebook_id, title) != candidate_table_id:
+        if owner_notebook_id != notebook_id:
             return None
         return candidate_table_id, columns, title
 

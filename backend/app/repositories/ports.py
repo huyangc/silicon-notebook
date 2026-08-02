@@ -2403,6 +2403,23 @@ class KnowhowStorePort(Protocol):
         ``get_knowhow_table`` row/cell hydrate just to read one column.
         """
         ...
+    def knowhow_table_notebook_id(self, table_id: str) -> str:
+        """A table's owning ``notebook_id`` alone. Raises ``KeyError`` if the
+        table is gone, same contract as ``knowhow_table_title``.
+
+        Exists for command catalog's R20 (codex PR #412 review round 20)
+        cross-notebook membership check on an INHERITED apply target
+        (``_inherit_applied_table``): that check used to be a title
+        round-trip (``knowhow_table_id_by_title(notebook_id, title) ==
+        candidate_table_id``), but a table's title is not unique — when the
+        candidate had been renamed to collide with an EARLIER, unrelated
+        table in the same notebook, the by-title lookup's documented
+        creation-order tie-break resolves to that earlier table instead, and
+        a target that in fact still belongs to this notebook gets rejected.
+        Reading the row's own ``notebook_id`` column directly sidesteps title
+        collisions entirely.
+        """
+        ...
     def knowhow_anchor_existing_values(
         self, column_id: str, values: Sequence[str]
     ) -> set[str]:
