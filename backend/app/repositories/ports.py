@@ -2455,6 +2455,37 @@ class KnowhowStorePort(Protocol):
         actor: str = "",
         origin: str = "user",
     ) -> list[str]: ...
+    def append_knowhow_rows_skipping_existing_anchors(
+        self,
+        table_id: str,
+        anchor_column_id: str,
+        rows: Sequence[dict[str, str]],
+        actor: str = "",
+        origin: str = "user",
+    ) -> dict:
+        """``append_knowhow_rows``, but anchor-membership de-duplication and
+        the insert share ONE write transaction — the membership check
+        (js-trim normalized, same expression ``knowhow_anchor_existing_values``
+        uses) is re-run under this method's own lock instead of trusting a
+        caller's earlier, separately-locked read. Closes the window where an
+        ordinary knowhow row/cell edit (not covered by the command catalog's
+        own apply lock) lands between a caller's pre-read and a would-be
+        separate append, double-inserting a command.
+
+        Returns ``{"row_ids": {anchor_value: row_id}, "skipped_anchor_values":
+        set[str]}`` keyed by NORMALIZED anchor value: for each input row, if
+        its (js-trim normalized) value at ``anchor_column_id`` already has a
+        row in this table OR was already claimed earlier in THIS batch, it is
+        skipped (recorded in ``skipped_anchor_values``); a blank/missing
+        anchor value has nothing to collide with and is always inserted.
+        ``anchor_column_id`` must currently be ``table_id``'s anchor column
+        (``role == 'anchor'``), re-verified under this same lock; raises
+        ``ValueError`` if it is not. Empty ``rows`` and skip-everything
+        batches are silent no-ops — no transaction opens (former) or nothing
+        is recorded (latter), mirroring ``append_knowhow_rows``'s own
+        empty-batch convention.
+        """
+        ...
     def add_knowhow_rows(
         self, table_id: str, rows: list[dict[str, str]],
         actor: str = "",

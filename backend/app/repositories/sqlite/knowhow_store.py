@@ -1465,6 +1465,172 @@ class KnowhowStore:
             )
         return row_ids
 
+    def append_knowhow_rows_skipping_existing_anchors(
+        self,
+        table_id: str,
+        anchor_column_id: str,
+        rows: Sequence[dict[str, str]],
+        actor: str = "",
+        origin: str = "user",
+    ) -> dict:
+        """``append_knowhow_rows``, but the anchor-membership check and the
+        insert share ONE write transaction instead of a caller doing its own
+        pre-read (``knowhow_anchor_existing_values``) before a separate call
+        here.
+
+        That split used to leave a real gap: the command catalog's apply
+        lock (``CatalogJobService._apply_lock``) serializes concurrent
+        *catalog* applies for a notebook, but does NOT cover the ordinary
+        knowhow row/cell edit endpoints — a user can add a row naming the
+        same command through the live table UI in the window between the
+        pre-read and the write, and the old two-step apply would double it
+        up. Folding the check into this method's own ``database.write()``
+        block closes that window the same way SQLite's process-wide write
+        lock already closes it for ``append_knowhow_rows`` vs.
+        ``add_knowhow_row``: no other writer can observe or mutate this
+        table's cells between the SELECT and the INSERTs below.
+
+        ``anchor_column_id`` is re-verified as `table_id`'s CURRENT anchor
+        column under this same lock — not trusted from a caller's earlier
+        read — mirroring the guarded-write anchor check's own re-verification
+        (see ``update_knowhow_cells_bulk_guarded``'s docstring) for the same
+        reason: the anchor designation can move between a caller's read and
+        this call.
+
+        Matching is by each row's OWN value at ``anchor_column_id`` in its
+        ``cells`` dict, js-trim normalized — the identical normalization
+        ``knowhow_anchor_existing_values`` and the anchor guarded-write path
+        already use, so a row already present with incidental whitespace
+        still counts as a match. A blank/missing anchor value has nothing to
+        collide with and is inserted unconditionally, same as
+        ``knowhow_anchor_existing_values`` treating blank as absent. Two rows
+        in THIS SAME batch that normalize to the same anchor value: the
+        first wins, the rest are skipped — a batch must not double-insert a
+        name it saw twice, independent of what already exists.
+
+        Returns ``{"row_ids": {anchor_value: row_id}, "skipped_anchor_values":
+        set[str]}`` — keyed by NORMALIZED anchor value rather than a
+        positional list, since the only caller (command-catalog apply)
+        already de-duplicates candidate names before calling this, so each
+        value maps to at most one candidate; that lets it re-attribute
+        results to candidate ids without a second positional zip.
+
+        Zero-row and skip-everything batches are silent no-ops — no
+        transaction opens (empty ``rows``) or nothing is recorded (every row
+        skipped), mirroring ``append_knowhow_rows``'s own empty-batch
+        convention and this store's zero-row-write convention generally: a
+        confirm that lands nothing new must not fabricate a history entry.
+        """
+        batch_rows = [dict(row) for row in rows]
+        if not batch_rows:
+            return {"row_ids": {}, "skipped_anchor_values": set()}
+        now = self.now()
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            table = db.execute(
+                "SELECT notebook_id FROM knowhow_tables WHERE id=?", (table_id,)
+            ).fetchone()
+            if table is None:
+                raise KeyError(table_id)
+            anchor_row = db.execute(
+                "SELECT role FROM knowhow_columns WHERE id=? AND table_id=?",
+                (anchor_column_id, table_id),
+            ).fetchone()
+            if anchor_row is None or anchor_row["role"] != "anchor":
+                raise ValueError("锚点列不属于本表或已不是锚点列")
+            valid_columns = {
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM knowhow_columns WHERE table_id=?", (table_id,)
+                ).fetchall()
+            }
+            if any(
+                column_id not in valid_columns
+                for cells in batch_rows
+                for column_id in cells
+            ):
+                raise ValueError("单元格列不属于本表")
+            self._require_assets_for_notebook(
+                db,
+                str(table["notebook_id"]),
+                required_asset_ids(
+                    (),
+                    (
+                        ("", content)
+                        for cells in batch_rows
+                        for content in cells.values()
+                    ),
+                ),
+            )
+            wanted = [
+                value
+                for value in dict.fromkeys(
+                    js_trim(str(cells.get(anchor_column_id) or ""))
+                    for cells in batch_rows
+                )
+                if value
+            ]
+            existing: set[str] = set()
+            if wanted:
+                normalized = sqlite_js_trim_expression("content_md")
+                placeholders = ",".join("?" for _ in wanted)
+                existing = {
+                    row["value"]
+                    for row in db.execute(
+                        f"SELECT DISTINCT {normalized} AS value FROM knowhow_cells "
+                        f"WHERE column_id = ? AND {normalized} IN ({placeholders})",
+                        (anchor_column_id, *wanted),
+                    ).fetchall()
+                }
+            count_row = db.execute(
+                "SELECT COUNT(*) AS n FROM knowhow_rows WHERE table_id=?", (table_id,)
+            ).fetchone()
+            start_position = int(count_row["n"])
+            row_ids: dict[str, str] = {}
+            skipped: set[str] = set()
+            payload_rows: list[dict] = []
+            claimed: set[str] = set()
+            offset = 0
+            for cells in batch_rows:
+                anchor_value = js_trim(str(cells.get(anchor_column_id) or ""))
+                if anchor_value and (anchor_value in existing or anchor_value in claimed):
+                    skipped.add(anchor_value)
+                    continue
+                if anchor_value:
+                    claimed.add(anchor_value)
+                position = start_position + offset
+                row_id = self._insert_knowhow_row_on(
+                    db, table_id, cells, position, now
+                )
+                offset += 1
+                if anchor_value:
+                    row_ids[anchor_value] = row_id
+                payload_rows.append(
+                    {
+                        "row_id": row_id,
+                        "position": position,
+                        "created_at": now,
+                        "cells": cells,
+                        "code": [],
+                    }
+                )
+            if payload_rows:
+                db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq=mutation_seq+1 WHERE id=?",
+                    (table_id,),
+                )
+                record_change(
+                    db,
+                    new_id=self.new_id,
+                    now=self.now,
+                    table_id=table_id,
+                    kind="import_append",
+                    payload={"rows": payload_rows},
+                    actor=actor,
+                    origin=origin,
+                )
+        return {"row_ids": row_ids, "skipped_anchor_values": skipped}
+
     def add_knowhow_rows(
         self,
         table_id: str,
