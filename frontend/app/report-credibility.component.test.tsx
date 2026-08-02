@@ -237,7 +237,7 @@ test("报告详情实际挂载可信度回执与引证分布，而非只测试�
   );
 
   expect(await screen.findByLabelText("报告可信度回执")).toHaveTextContent("返回结果未通过校验");
-  expect(screen.getByTitle("按可区分资料统计，不以引用标记数量代替资料数量")).toHaveTextContent("可区分资料 1");
+  expect(screen.getByTitle("报告引证的资料数量与个人/公共来源分布")).toHaveTextContent("可区分资料 1");
 });
 
 

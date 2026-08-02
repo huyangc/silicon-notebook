@@ -761,7 +761,7 @@ export function ReportCitationDistribution({ report }: { report: ReportDetailT }
   );
   if (summary.independent == null && !summary.top1 && personal + base === 0) return null;
   return (
-    <div className="report-source-dist" title="按可区分资料统计，不以引用标记数量代替资料数量">
+    <div className="report-source-dist" title="报告引证的资料数量与个人/公共来源分布">
       {summary.independent != null && <>可区分资料 {summary.independent}</>}
       {summary.top1 && <><span aria-hidden> · </span>最集中资料占 {summary.top1}</>}
       {personal + base > 0 && (
