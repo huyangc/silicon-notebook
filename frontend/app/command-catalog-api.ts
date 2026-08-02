@@ -169,9 +169,16 @@ export type CommandCatalogConflict = {
  *
  * `conflicts` 是**没有写入**的那些:目标表里已经有同名命令的行。v1 刻意保守 ——
  * 绝不覆盖用户手工编辑过的内容。`pending_remaining` 是这次确认之后仍待审阅的数量。
+ *
+ * `table_title` 是这次 apply 实际解析/创建的目标表标题(后端权威——论文来源
+ * 优先用接地论文标题而非上传文件名)。前端必须直接显示这个值,不得再用
+ * `sourceDetail.title` 自己拼「命令目录：<来源标题>」预测——两者在论文来源
+ * 上可以不同,预测会让「已写入《命令目录：<预测名>》」这句话撒谎(R15,codex
+ * PR #412 评审第 15 轮)。
  */
 export type CommandCatalogApplyResult = {
   table_id: string;
+  table_title: string;
   created: boolean;
   applied: string[];
   rows_added: number;

@@ -254,9 +254,17 @@ class CommandCatalogApplyResult(BaseModel):
     `pending_remaining` 是这次确认之后**仍待审阅**的候选数。一次 `all_pending`
     最多确认一页,所以它不是可选的装饰:少了它,300 条候选的库点一次「确认全部」
     看到 `rows_added: 100` 会以为做完了。前端必须据它继续提示。
+
+    `table_title` 是这次 apply 实际解析/创建的目标表标题(`CATALOG_TABLE_TITLE_
+    PREFIX` 拼当前来源的**规范**标题——论文来源优先用接地论文标题,而不是上传
+    文件名)。R15(codex PR #412 评审第 15 轮,P2)之前前端只能自己用
+    `sourceDetail.title`(原始上传名)预测这个标题,论文来源两者一旦不一致,
+    「已写入《命令目录：<预测名>》」这句话就在撒谎——用户点开的其实是
+    《命令目录：<论文标题>》。这个字段让前端直接读后端权威值,不再预测。
     """
 
     table_id: str
+    table_title: str = ""
     created: bool = False
     applied: List[str] = []
     rows_added: int = 0

@@ -2048,6 +2048,12 @@ def test_apply_table_name_snapshot_survives_a_paper_title_backfill_mid_job(repo)
     )
     assert second["created"] is False
     assert second["table_id"] == table_id
+    # R15: `table_title` must report the table's REAL current title (still
+    # 「OpenROAD 手册」 — it did not move), never a freshly re-derived guess
+    # from the now-changed canonical source title. Getting this wrong here
+    # would be the same class of lie the frontend prediction fix (R15) exists
+    # to remove — just reintroduced on the backend's own response.
+    assert second["table_title"] == f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
 
     # Exactly one command-catalog table exists for this source — the
     # post-backfill canonical title never spawned a second one.
@@ -2298,7 +2304,39 @@ def test_apply_with_nothing_nameable_does_not_conjure_an_empty_table(repo):
     assert result["rows_added"] == 0
     assert result["created"] is False
     assert result["table_id"] == ""
+    # R15: no table exists, so there is nothing to name — an empty string,
+    # not a hypothetical derived title for a table that was never written.
+    assert result["table_title"] == ""
     assert repo.list_knowhow_tables(notebook.id) == []
+
+
+def test_apply_with_nothing_nameable_reports_the_real_title_of_a_remembered_table(repo):
+    """R15: the same no-op branch as
+    `test_apply_with_nothing_nameable_does_not_conjure_an_empty_table`, but
+    for a job whose FIRST apply already landed a table — a second apply that
+    adds nothing (e.g. a page of pure conflicts/rejections) must still report
+    that table's REAL title, through the same `applied_table_id`-first path
+    `_resolve_target_table` uses, not a freshly re-derived guess that a
+    mid-job paper-metadata backfill could have made stale."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job = _run_ok(repo, notebook.id, "s1", 1)
+    first = service.apply(
+        notebook.id, "s1", job["id"], all_pending=True, actor="tester"
+    )
+    assert first["rows_added"] == 1
+    table_id = first["table_id"]
+
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Later-Grounded Title")
+
+    # Nothing left to confirm for this job — the one candidate was already
+    # applied — so this call takes the "nothing nameable" branch.
+    second = service.apply(
+        notebook.id, "s1", job["id"], all_pending=True, actor="tester"
+    )
+    assert second["rows_added"] == 0
+    assert second["table_id"] == table_id
+    assert second["table_title"] == f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
 
 
 def test_apply_never_touches_an_existing_row_for_the_same_command(repo):
@@ -3482,6 +3520,40 @@ def test_api_preview_start_job_candidates_and_apply(http):
     assert applied.status_code == 200, applied.text
     assert applied.json()["rows_added"] == 2
     assert applied.json()["created"] is True
+    # R15 (codex PR #412 评审第 15 轮,P2): 响应必须带服务端权威的目标表标题,
+    # 前端不再自己用来源标题预测——这里是普通(非论文)来源,与来源名一致。
+    assert applied.json()["table_title"] == f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+
+
+def test_api_apply_table_title_uses_the_grounded_paper_title_not_the_upload_name(http):
+    """R15 (codex PR #412 评审第 15 轮,P2):`apply` 的 HTTP 响应必须带服务端解析
+    到的真实表标题。这条钉住的是引发本轮评审的具体场景——一份被接地判定为论文
+    的来源,`sources.title`(上传文件名)与后端实际建表所用的规范标题(论文标题)
+    不同,前端此前只能靠自己预测(`catalogTableTitle(sourceDetail.title)`),对
+    论文来源必然预测错;这里必须原样等于 `CATALOG_TABLE_TITLE_PREFIX` 拼接后端
+    真正写入的论文标题,而不是拼接 `OpenROAD 手册` 这个上传名。"""
+    client, repo = http
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Grounded Paper Title")
+    base = f"/api/notebooks/{notebook.id}/sources/s1/command-catalog"
+
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    job_id = client.post(base).json()["job"]["id"]
+    _await_terminal(repo, job_id)
+
+    applied = client.post(
+        f"{base}/apply", params={"job_id": job_id}, json={"all_pending": True}
+    )
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["rows_added"] == 1
+    assert applied.json()["table_title"] == (
+        f"{CATALOG_TABLE_TITLE_PREFIX}A Grounded Paper Title"
+    )
+    assert "OpenROAD 手册" not in applied.json()["table_title"]
+    table = repo.get_knowhow_table(applied.json()["table_id"])
+    # 响应里的标题必须是这张表**真实**的标题,不是巧合等值。
+    assert table["title"] == applied.json()["table_title"]
 
 
 def test_api_candidates_state_dismissed_surfaces_the_conflict_reason(http):

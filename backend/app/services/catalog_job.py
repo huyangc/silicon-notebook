@@ -2029,18 +2029,26 @@ class CommandCatalogService:
             # does — a rename between two applies must not surface the WRONG
             # table_id even on this read-only branch.
             applied_table_id = str(job.get("applied_table_id") or "")
-            existing_id = applied_table_id or self._find_table(
-                notebook_id, source_title
-            )
+            if applied_table_id:
+                existing_id = applied_table_id
+                table_title = self._known_table_title(applied_table_id, source_title)
+            else:
+                existing_id = self._find_table(notebook_id, source_title)
+                # Found (or not) BY the derived title, so the derived string
+                # is exact here — no drift possible, nothing to re-read.
+                table_title = (
+                    f"{CATALOG_TABLE_TITLE_PREFIX}{source_title}" if existing_id else ""
+                )
             return {
                 "table_id": existing_id or "",
+                "table_title": table_title,
                 "created": False,
                 "applied": [],
                 "rows_added": 0,
                 "conflicts": [],
                 "pending_remaining": self._pending_remaining(job_id, 0),
             }
-        table_id, created, columns = self._resolve_target_table(
+        table_id, created, columns, table_title = self._resolve_target_table(
             job, notebook_id, source_title, actor
         )
         # Columns are addressed BY NAME, never by position. The target table is
@@ -2146,6 +2154,7 @@ class CommandCatalogService:
             )
         return {
             "table_id": table_id,
+            "table_title": table_title,
             "created": created,
             "applied": applied,
             "rows_added": len(batch),
@@ -2304,16 +2313,41 @@ class CommandCatalogService:
         )
         return str(table_id), True
 
+    def _known_table_title(self, table_id: str, source_title: str) -> str:
+        """The REAL current title of ``table_id`` — for a caller that already
+        resolved it through the job's REMEMBERED ``applied_table_id`` rather
+        than by a fresh by-title lookup.
+
+        That fast path is the one place a derived
+        ``f"{CATALOG_TABLE_TITLE_PREFIX}{source_title}"`` guess can be wrong:
+        ``source_title`` can drift AFTER this job's first apply already
+        created/landed rows in a table (async paper-metadata backfill
+        completing mid-job — see
+        ``test_apply_table_name_snapshot_survives_a_paper_title_backfill_mid_job``),
+        or the table can have been renamed by hand between two applies. Both
+        by-title paths (create, or find-by-title) do not have this problem —
+        the derived string IS how they located or named the row — so only
+        this one caller needs the extra point read. ``KeyError`` (the table
+        vanished between its own existence check and this call) falls back to
+        the derived guess rather than raising: this is a display value on an
+        already-successful write, not a write-path invariant.
+        """
+        try:
+            return self.knowhow.knowhow_table_title(table_id)
+        except KeyError:
+            return f"{CATALOG_TABLE_TITLE_PREFIX}{source_title}"
+
     def _resolve_target_table(
         self,
         job: Mapping[str, Any],
         notebook_id: str,
         source_title: str,
         actor: str,
-    ) -> tuple[str, bool, list[dict]]:
-        """The table THIS apply writes to, its columns, and whether it was
-        just created — resolved WITHOUT ever hydrating the target's rows or
-        cells (see ``KnowhowStorePort.knowhow_table_columns``).
+    ) -> tuple[str, bool, list[dict], str]:
+        """The table THIS apply writes to, its columns, whether it was just
+        created, and its REAL current title — resolved WITHOUT ever
+        hydrating the target's rows or cells (see
+        ``KnowhowStorePort.knowhow_table_columns``).
 
         ``job["applied_table_id"]`` is tried first: it is the table THIS job
         has already been landing rows in, so reusing it is what survives the
@@ -2326,6 +2360,12 @@ class CommandCatalogService:
         ordinary by-title create-or-find. Every path that settles on a
         ``table_id`` DIFFERENT from what the job currently has recorded
         writes it back, so the NEXT apply for this job takes the fast path.
+
+        The title returned alongside it takes the SAME split: the fast path
+        asks for the table's actual title (``_known_table_title`` — it is the
+        one path where the derived string can be stale), while the create/
+        by-title path returns the derived string directly — it is exact by
+        construction there, so there is nothing to re-read.
         """
         applied_table_id = str(job.get("applied_table_id") or "")
         if applied_table_id:
@@ -2334,11 +2374,17 @@ class CommandCatalogService:
             except KeyError:
                 columns = None
             if columns is not None:
-                return applied_table_id, False, columns
+                title = self._known_table_title(applied_table_id, source_title)
+                return applied_table_id, False, columns, title
         table_id, created = self._ensure_table(notebook_id, source_title, actor)
         if table_id != applied_table_id:
             self.catalog.set_applied_table_id(job["id"], table_id)
-        return table_id, created, self.knowhow.knowhow_table_columns(table_id)
+        return (
+            table_id,
+            created,
+            self.knowhow.knowhow_table_columns(table_id),
+            f"{CATALOG_TABLE_TITLE_PREFIX}{source_title}",
+        )
 
 
 def raise_if_catalog_cancelled(cancel: CancelEvent) -> None:

@@ -43,7 +43,6 @@ import {
   catalogPendingReviewNote,
   catalogPreviewCopy,
   catalogStatusLine,
-  catalogTableTitle,
   dismissReasonText,
   isCatalogBusy,
   isCatalogSettled,
@@ -701,7 +700,7 @@ export function CommandCatalogReview({
     setError("");
     try {
       const result = await applyCommandCatalog(notebookId, sourceId, body, jobId);
-      const summary = catalogApplyOutcome(result, catalogTableTitle(sourceTitle));
+      const summary = catalogApplyOutcome(result);
       setOutcome(summary);
       setAppliedTableId(result.table_id);
       if (result.rows_added > 0) onToast(summary.headline);

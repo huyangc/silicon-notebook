@@ -1016,6 +1016,7 @@ test("确认所选：报出新增/冲突/剩余三件事，剩余可以接着确
   });
   vi.mocked(applyCommandCatalog).mockResolvedValue({
     table_id: "t-9",
+    table_title: "命令目录：工具手册",
     created: true,
     applied: ["c1"],
     rows_added: 1,
@@ -1210,7 +1211,8 @@ test("apply 在飞时页签禁用，落地后恢复——防止 runApply 用旧�
 
   await act(async () => {
     settleApply({
-      table_id: "t-9", created: true, applied: ["c1"], rows_added: 1, conflicts: [], pending_remaining: 0,
+      table_id: "t-9", table_title: "命令目录：工具手册", created: true, applied: ["c1"], rows_added: 1,
+      conflicts: [], pending_remaining: 0,
     });
   });
 
@@ -1241,7 +1243,8 @@ test("切页签时确认结果卡不残留——它是上一次确认动作的�
       }
   ));
   vi.mocked(applyCommandCatalog).mockResolvedValue({
-    table_id: "t-9", created: true, applied: ["c1"], rows_added: 1, conflicts: [], pending_remaining: 0,
+    table_id: "t-9", table_title: "命令目录：工具手册", created: true, applied: ["c1"], rows_added: 1,
+    conflicts: [], pending_remaining: 0,
   });
   mount();
 
@@ -1269,7 +1272,8 @@ test("确认全部待审阅走 all_pending，并在确认后从头重拉列表�
     counts: { candidate: 1, rejected: 0, applied: 0, dismissed: 0 },
   });
   vi.mocked(applyCommandCatalog).mockResolvedValue({
-    table_id: "t-9", created: false, applied: ["c1"], rows_added: 1, conflicts: [], pending_remaining: 0,
+    table_id: "t-9", table_title: "命令目录：工具手册", created: false, applied: ["c1"], rows_added: 1,
+    conflicts: [], pending_remaining: 0,
   });
   mount();
 
@@ -1342,6 +1346,7 @@ test("确认掉最后一条候选、关掉弹窗后，「重新识别」重新�
   });
   vi.mocked(applyCommandCatalog).mockResolvedValue({
     table_id: "t-9",
+    table_title: "命令目录：工具手册",
     created: true,
     applied: ["c1"],
     rows_added: 1,
