@@ -2062,11 +2062,12 @@ class CommandCatalogService:
         # column away from 「命令」 while adding an ordinary attribute column
         # also called 「命令」, or add a SECOND 「命令」 column outright. Either
         # shape must be refused, not silently written to whichever column a
-        # dict comprehension happens to keep last — `append_knowhow_rows`
-        # writes the ANCHOR value into whatever id this resolves to, and the
-        # anchor is what makes a row a graph node named after the command
-        # (see the module header comment). Exactly one column may be named
-        # 「命令」, and it must BE the table's anchor (`role == "anchor"`).
+        # dict comprehension happens to keep last —
+        # `append_knowhow_rows_skipping_existing_anchors` writes the ANCHOR
+        # value into whatever id this resolves to, and the anchor is what
+        # makes a row a graph node named after the command (see the module
+        # header comment). Exactly one column may be named 「命令」, and it
+        # must BE the table's anchor (`role == "anchor"`).
         command_columns = [
             column for column in columns
             if str(column.get("name") or "") == CATALOG_COMMAND_COLUMN
@@ -2081,6 +2082,16 @@ class CommandCatalogService:
         # most `MAX_APPLY_CANDIDATES`) already have a row, answered by one
         # indexed lookup on the anchor column — never a full `get_knowhow_table`
         # hydrate of a target table that may already hold thousands of rows.
+        #
+        # This is a PRE-READ, not the decision: it only lets an already-taken
+        # name be classified as a conflict without paying for a doomed write.
+        # `_apply_lock` serializes concurrent catalog APPLIES for this
+        # notebook, but does not cover the ordinary knowhow row/cell edit
+        # endpoints — a user can add a row naming the same command through
+        # the live table UI in the window between this read and the write
+        # below. Whatever actually lands is decided authoritatively by
+        # `append_knowhow_rows_skipping_existing_anchors`, which re-checks
+        # anchor membership INSIDE the same write transaction as the insert.
         candidate_names = sorted(
             {
                 str(row.get("command_name") or "").strip()
@@ -2095,6 +2106,7 @@ class CommandCatalogService:
         applied: list[str] = []
         conflicts: list[dict] = []
         batch: list[dict] = []
+        candidate_by_name: dict[str, str] = {}
         claimed: set[str] = set()
         for row in selected:
             name = str(row.get("command_name") or "").strip()
@@ -2104,7 +2116,7 @@ class CommandCatalogService:
                 conflicts.append({"candidate_id": row["id"], "command_name": name})
                 continue
             claimed.add(name)
-            applied.append(row["id"])
+            candidate_by_name[name] = row["id"]
             cells = _catalog_cells(
                 name,
                 row.get("payload") or {},
@@ -2118,6 +2130,7 @@ class CommandCatalogService:
                     if column in column_ids_by_name
                 }
             )
+        rows_added = 0
         if batch:
             # Two writes, in this order on purpose. They are not one
             # transaction — they live in different stores, and forcing them
@@ -2131,10 +2144,27 @@ class CommandCatalogService:
             # conflicts, so it adds nothing and changes nothing. The opposite
             # order would mark candidates applied and then fail to write them —
             # silently losing work with no way to notice.
-            self.knowhow.append_knowhow_rows(
-                table_id, batch, actor=actor, origin="import"
+            #
+            # The knowhow write itself is now atomic against a concurrent
+            # ordinary edit (see the method's own docstring), so its
+            # `skipped_anchor_values` is AUTHORITATIVE — it overrides this
+            # pre-read's belief that these names were free. A name it reports
+            # inserted is applied; a name it reports skipped is reclassified
+            # as a conflict, exactly like a pre-read hit above.
+            result = self.knowhow.append_knowhow_rows_skipping_existing_anchors(
+                table_id, command_column, batch, actor=actor, origin="import"
             )
-            self.catalog.mark_candidates_applied(job_id, applied)
+            skipped_names = result["skipped_anchor_values"]
+            for name, candidate_id in candidate_by_name.items():
+                if name in skipped_names:
+                    conflicts.append(
+                        {"candidate_id": candidate_id, "command_name": name}
+                    )
+                else:
+                    applied.append(candidate_id)
+            rows_added = len(result["row_ids"])
+            if applied:
+                self.catalog.mark_candidates_applied(job_id, applied)
         if conflicts:
             # A conflict candidate is never applied, but it must still leave
             # `candidate` state — otherwise `pending_candidates`'s cursor=0
@@ -2157,7 +2187,7 @@ class CommandCatalogService:
             "table_title": table_title,
             "created": created,
             "applied": applied,
-            "rows_added": len(batch),
+            "rows_added": rows_added,
             "conflicts": conflicts,
             "pending_remaining": self._pending_remaining(job_id, len(applied)),
         }

@@ -7,10 +7,12 @@ identical assertions, same service layer). This file only proves the things
 that are genuinely backend-specific — the migration actually adds the two new
 ``catalog_jobs`` columns on PostgreSQL, and the bounded ``KnowhowStorePort``
 methods (``knowhow_table_columns``, ``knowhow_anchor_existing_values``,
-``knowhow_table_id_by_title``, ``knowhow_table_title``) behave the same way
+``knowhow_table_id_by_title``, ``knowhow_table_title``,
+``append_knowhow_rows_skipping_existing_anchors``) behave the same way
 against real PostgreSQL SQL (``btrim`` instead of SQLite's ``trim``,
 ``= ANY(%s)`` instead of ``IN (...)``, ``COLLATE "C"`` instead of SQLite's
-default binary collation) as they do against SQLite.
+default binary collation, ``FOR UPDATE`` row locking instead of SQLite's
+process-wide write mutex) as they do against SQLite.
 """
 from __future__ import annotations
 
@@ -399,3 +401,123 @@ def test_knowhow_table_id_by_title_is_a_bounded_point_lookup_matching_list_order
         harness.knowhow.knowhow_table_id_by_title(harness.notebook_id, "从未出现过")
         == ""
     )
+
+
+def _knowhow_change_kinds(database, table_id: str) -> list[str]:
+    with database.connect() as connection:
+        rows = connection.execute(
+            "SELECT kind FROM knowhow_changes WHERE table_id=%s ORDER BY seq",
+            (table_id,),
+        ).fetchall()
+    return [row["kind"] for row in rows]
+
+
+def test_append_knowhow_rows_skipping_existing_anchors_dedups_atomically(
+    catalog_harness,
+):
+    """R16 P2 (codex PR #412 review round 16): the anchor-membership check
+    and the row insert must share ONE write transaction, or a row landed
+    through the ordinary knowhow row/cell edit endpoints — not covered by
+    the command catalog's own apply lock — between a caller's pre-read and a
+    separate write could double a command up.
+
+    Mirrors the SQLite store-level test's contract exactly
+    (``test_append_knowhow_rows_skipping_existing_anchors_store_semantics``):
+    a row already present (real PostgreSQL ``btrim`` + ``= ANY(%s)``
+    normalized match) or duplicated within the SAME batch is skipped; only
+    genuinely new rows are inserted, and exactly one ``import_append``
+    change entry is recorded, covering only the rows that landed."""
+    harness = catalog_harness
+    table_id = harness.knowhow.create_knowhow_table(
+        harness.notebook_id,
+        "命令目录：OpenROAD 手册",
+        "",
+        [
+            {"name": "命令", "role": "anchor"},
+            {"name": "说明", "role": "attribute"},
+        ],
+        "user-catalog",
+    )
+    table = harness.knowhow.get_knowhow_table(table_id)
+    anchor = table["columns"][0]["id"]
+    harness.knowhow.add_knowhow_row(table_id, {anchor: "set_thing_0"})
+    before_kinds = _knowhow_change_kinds(harness.database, table_id)
+
+    result = harness.knowhow.append_knowhow_rows_skipping_existing_anchors(
+        table_id,
+        anchor,
+        [
+            {anchor: "set_thing_0"},  # already has a row -> skipped
+            {anchor: "set_thing_1"},  # new -> inserted
+            {anchor: "set_thing_1"},  # duplicate WITHIN this batch -> skipped
+            {anchor: "  set_thing_2  "},  # incidental whitespace, still inserted
+        ],
+        actor="user-catalog",
+        origin="import",
+    )
+    assert result["skipped_anchor_values"] == {"set_thing_0", "set_thing_1"}
+    assert set(result["row_ids"]) == {"set_thing_1", "set_thing_2"}
+
+    after = harness.knowhow.get_knowhow_table(table_id)
+    names = {row["cells"].get(anchor, "") for row in after["rows"]}
+    assert names == {"set_thing_0", "set_thing_1", "  set_thing_2  "}
+
+    # One new change entry for the two rows that landed.
+    after_kinds = _knowhow_change_kinds(harness.database, table_id)
+    assert after_kinds == before_kinds + ["import_append"]
+
+    # A batch that skips EVERY row records nothing new — the empty-batch
+    # convention `append_knowhow_rows` already has.
+    noop = harness.knowhow.append_knowhow_rows_skipping_existing_anchors(
+        table_id, anchor, [{anchor: "set_thing_0"}],
+        actor="user-catalog", origin="import",
+    )
+    assert noop == {"row_ids": {}, "skipped_anchor_values": {"set_thing_0"}}
+    assert _knowhow_change_kinds(harness.database, table_id) == after_kinds
+
+    empty = harness.knowhow.append_knowhow_rows_skipping_existing_anchors(
+        table_id, anchor, [], actor="user-catalog", origin="import",
+    )
+    assert empty == {"row_ids": {}, "skipped_anchor_values": set()}
+    assert _knowhow_change_kinds(harness.database, table_id) == after_kinds
+
+
+def test_append_knowhow_rows_skipping_existing_anchors_requires_the_live_anchor_column(
+    catalog_harness,
+):
+    """``anchor_column_id`` is re-verified as the table's CURRENT anchor
+    column under the SAME `FOR UPDATE` lock this method takes — not trusted
+    from a caller's earlier read. Mirrors the SQLite store-level test."""
+    harness = catalog_harness
+    table_id = harness.knowhow.create_knowhow_table(
+        harness.notebook_id,
+        "命令目录：OpenROAD 手册",
+        "",
+        [
+            {"name": "命令", "role": "anchor"},
+            {"name": "说明", "role": "attribute"},
+        ],
+        "user-catalog",
+    )
+    table = harness.knowhow.get_knowhow_table(table_id)
+    anchor = next(c["id"] for c in table["columns"] if c["role"] == "anchor")
+    attribute = next(c["id"] for c in table["columns"] if c["role"] != "anchor")
+
+    with pytest.raises(ValueError):
+        harness.knowhow.append_knowhow_rows_skipping_existing_anchors(
+            table_id, attribute, [{anchor: "set_thing_0"}], actor="user-catalog",
+        )
+
+    harness.knowhow.set_knowhow_anchor_column(table_id, None, actor="user-catalog")
+    with pytest.raises(ValueError):
+        harness.knowhow.append_knowhow_rows_skipping_existing_anchors(
+            table_id, anchor, [{anchor: "set_thing_0"}], actor="user-catalog",
+        )
+
+    assert harness.knowhow.get_knowhow_table(table_id)["rows"] == []
+
+    with pytest.raises(KeyError):
+        harness.knowhow.append_knowhow_rows_skipping_existing_anchors(
+            "khtbl-does-not-exist", anchor, [{anchor: "set_thing_0"}],
+            actor="user-catalog",
+        )

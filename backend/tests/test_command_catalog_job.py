@@ -2371,6 +2371,229 @@ def test_apply_never_touches_an_existing_row_for_the_same_command(repo):
     assert after["rows"][0]["cells"][description_column] == "人工订正过的说明"
 
 
+# ------------------- R16 P2: apply's anchor check must be atomic with the write
+def test_append_knowhow_rows_skipping_existing_anchors_store_semantics(repo):
+    """Direct store-level coverage of the new atomic write port
+    (``KnowhowStorePort.append_knowhow_rows_skipping_existing_anchors``):
+    only a row whose anchor value has NEITHER an existing row NOR an earlier
+    duplicate within the SAME batch is inserted; everything else is reported
+    back in ``skipped_anchor_values`` and left untouched. Exactly one change
+    entry is recorded, covering only the rows that actually landed — not the
+    skipped ones."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    table_id = repo.create_knowhow_table(
+        notebook.id,
+        "命令目录：测试",
+        "",
+        [dict(column) for column in CATALOG_TABLE_COLUMNS],
+        created_by="tester",
+        actor="tester",
+    )
+    table = repo.get_knowhow_table(table_id)
+    anchor = next(c["id"] for c in table["columns"] if c["role"] == "anchor")
+    store = repo.command_catalog.knowhow
+
+    store.add_knowhow_row(table_id, {anchor: "set_thing_0"}, actor="tester")
+    before_changes = len(repo.list_knowhow_changes(table_id))
+
+    result = store.append_knowhow_rows_skipping_existing_anchors(
+        table_id,
+        anchor,
+        [
+            {anchor: "set_thing_0"},  # already has a row -> skipped
+            {anchor: "set_thing_1"},  # new -> inserted
+            {anchor: "set_thing_1"},  # duplicate WITHIN this batch -> skipped
+            {anchor: " set_thing_2 "},  # incidental whitespace, still inserted
+        ],
+        actor="tester",
+        origin="import",
+    )
+    assert result["skipped_anchor_values"] == {"set_thing_0", "set_thing_1"}
+    assert set(result["row_ids"]) == {"set_thing_1", "set_thing_2"}
+
+    # Cell content is stored verbatim (untrimmed) exactly like
+    # `append_knowhow_rows` — js-trim is a MATCHING normalization, not a
+    # storage one — so the padded name keeps its incidental whitespace (a
+    # leading space sorts before any letter, hence its position here).
+    after = repo.get_knowhow_table(table_id)
+    names = sorted(row["cells"].get(anchor, "") for row in after["rows"])
+    assert names == [" set_thing_2 ", "set_thing_0", "set_thing_1"]
+
+    # One new change entry for the two rows that landed — not four.
+    changes = repo.list_knowhow_changes(table_id)
+    assert len(changes) == before_changes + 1
+    latest = changes[0]
+    assert latest["kind"] == "import_append"
+    assert len(latest["payload"]["rows"]) == 2
+
+    # A batch that skips EVERY row (all already present/duplicated) is a
+    # silent no-op: no new row, no new change entry — mirrors
+    # `append_knowhow_rows`'s own empty-batch convention.
+    before_changes = len(repo.list_knowhow_changes(table_id))
+    noop = store.append_knowhow_rows_skipping_existing_anchors(
+        table_id, anchor, [{anchor: "set_thing_0"}], actor="tester", origin="import"
+    )
+    assert noop == {"row_ids": {}, "skipped_anchor_values": {"set_thing_0"}}
+    assert len(repo.list_knowhow_changes(table_id)) == before_changes
+    assert len(repo.get_knowhow_table(table_id)["rows"]) == 3
+
+    # A blank anchor value has nothing to collide with — always inserted.
+    blank_result = store.append_knowhow_rows_skipping_existing_anchors(
+        table_id, anchor, [{anchor: ""}], actor="tester", origin="import"
+    )
+    assert blank_result["skipped_anchor_values"] == set()
+    assert len(blank_result["row_ids"]) == 0  # blank isn't a keyable anchor value
+    assert len(repo.get_knowhow_table(table_id)["rows"]) == 4
+
+    # Empty batch: no transaction, no history.
+    before_changes = len(repo.list_knowhow_changes(table_id))
+    empty = store.append_knowhow_rows_skipping_existing_anchors(
+        table_id, anchor, [], actor="tester", origin="import"
+    )
+    assert empty == {"row_ids": {}, "skipped_anchor_values": set()}
+    assert len(repo.list_knowhow_changes(table_id)) == before_changes
+
+
+def test_append_knowhow_rows_skipping_existing_anchors_requires_the_live_anchor_column(
+    repo,
+):
+    """``anchor_column_id`` is re-verified as the table's CURRENT anchor
+    column under the same lock, mirroring the guarded-write anchor check —
+    not trusted from a caller's earlier read. A column that is not (or is no
+    longer) the anchor raises, same as `apply`'s own shape guard."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    table_id = repo.create_knowhow_table(
+        notebook.id,
+        "命令目录：测试",
+        "",
+        [dict(column) for column in CATALOG_TABLE_COLUMNS],
+        created_by="tester",
+        actor="tester",
+    )
+    table = repo.get_knowhow_table(table_id)
+    anchor = next(c["id"] for c in table["columns"] if c["role"] == "anchor")
+    attribute = next(c["id"] for c in table["columns"] if c["role"] != "anchor")
+    store = repo.command_catalog.knowhow
+
+    with pytest.raises(ValueError):
+        store.append_knowhow_rows_skipping_existing_anchors(
+            table_id, attribute, [{anchor: "set_thing_0"}], actor="tester",
+        )
+
+    # The anchor moves off this column entirely.
+    repo.set_knowhow_anchor_column(table_id, None, actor="tester")
+    with pytest.raises(ValueError):
+        store.append_knowhow_rows_skipping_existing_anchors(
+            table_id, anchor, [{anchor: "set_thing_0"}], actor="tester",
+        )
+
+    # Nothing was written by either failed call.
+    assert repo.get_knowhow_table(table_id)["rows"] == []
+
+
+def test_apply_atomic_write_wins_a_race_against_a_stale_pre_read(repo):
+    """R16 P2 (codex PR #412 review round 16): the anchor-membership
+    pre-read (`knowhow_anchor_existing_values`) and the actual knowhow write
+    used to be two separate calls, with no lock in between covering the
+    ordinary knowhow row/cell edit endpoints — only `_apply_lock` serializes
+    concurrent catalog APPLIES, not a plain `add_knowhow_row` through the
+    live table UI. A row landing in that gap used to get double-inserted.
+
+    Simulated deterministically instead of with real threads: the pre-read
+    is monkeypatched to answer honestly for the moment it actually ran (truly
+    nothing existed yet), and as a side effect of that very call a row for
+    the SAME command is inserted directly through the plain `add_knowhow_row`
+    endpoint — modelling a concurrent manual edit landing in exactly that
+    gap, between the pre-read returning and the write starting.
+
+    `append_knowhow_rows_skipping_existing_anchors`'s OWN re-check, inside
+    its own write transaction, must catch it anyway: no double insert, the
+    candidate is reported back as a conflict (never `applied`), and it must
+    end up `dismissed` — not silently dropped and not stuck in `candidate`
+    forever (see the fully-conflicting-rerun convergence tests above for why
+    that would matter).
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    service, job = _run_ok(repo, notebook.id, "s1", 2)
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=5)
+    first_id = next(
+        row["id"] for row in page["items"] if row["command_name"] == "set_thing_0"
+    )
+
+    # Seed the target table for real with the FIRST command, so the table
+    # (and its anchor column) already exist before the race — mirrors a
+    # re-run against a source that was already confirmed once.
+    first = service.apply(
+        notebook.id, "s1", job["id"], candidate_ids=[first_id], actor="tester"
+    )
+    table_id = first["table_id"]
+    assert first["rows_added"] == 1
+    table = repo.get_knowhow_table(table_id)
+    anchor = next(c["id"] for c in table["columns"] if c["role"] == "anchor")
+
+    # The first job's OTHER candidate (`set_thing_1`) is still sitting
+    # unreviewed in `candidate` state — `start`'s own pending-candidates
+    # guard would refuse a fresh run over the same source while that is
+    # true, so dismiss it before starting the second run (a real reviewer
+    # choice, unrelated to the race this test is proving).
+    remaining_id = next(
+        row["id"] for row in page["items"] if row["command_name"] == "set_thing_1"
+    )
+    service.dismiss(notebook.id, "s1", job["id"], candidate_ids=[remaining_id])
+
+    # A fresh run over the same source reproduces the SECOND command as a
+    # new candidate — the race target. Nothing named `set_thing_1` exists in
+    # the table yet at this point.
+    second_service, second_job = _run_ok(repo, notebook.id, "s1", 2)
+    second_page = second_service.candidates_page(
+        second_job["id"], state="candidate", cursor=0, limit=5
+    )
+    race_id = next(
+        row["id"] for row in second_page["items"]
+        if row["command_name"] == "set_thing_1"
+    )
+
+    original_pre_read = second_service.knowhow.knowhow_anchor_existing_values
+
+    def stale_pre_read(column_id, values):
+        # Answers as of THIS instant — truthfully empty, nothing exists yet.
+        result = original_pre_read(column_id, values)
+        # ...and only THEN does the race land: a concurrent ordinary edit
+        # through the plain add-row endpoint, which `_apply_lock` never
+        # covers.
+        repo.add_knowhow_row(
+            table_id, {anchor: "set_thing_1"}, actor="concurrent-editor"
+        )
+        return result
+
+    second_service.knowhow.knowhow_anchor_existing_values = stale_pre_read
+    try:
+        result = second_service.apply(
+            notebook.id, "s1", second_job["id"],
+            candidate_ids=[race_id], actor="tester",
+        )
+    finally:
+        second_service.knowhow.knowhow_anchor_existing_values = original_pre_read
+
+    # No double insert: exactly the one row the concurrent editor landed.
+    table_after = repo.get_knowhow_table(table_id)
+    names = sorted(row["cells"].get(anchor, "") for row in table_after["rows"])
+    assert names == ["set_thing_0", "set_thing_1"], (
+        "the stale pre-read let apply double-insert set_thing_1"
+    )
+
+    assert result["rows_added"] == 0
+    assert result["applied"] == []
+    assert {c["command_name"] for c in result["conflicts"]} == {"set_thing_1"}
+
+    row = second_service.catalog.candidates_by_ids(
+        second_job["id"], [race_id], limit=1
+    )[0]
+    assert row["state"] == "dismissed"
+    assert row["reject_info"].get("reason") == "conflict_existing_row"
+
+
 def test_repeated_all_pending_apply_on_a_fully_conflicting_rerun_converges(repo):
     """Before the fix, a conflict candidate never left `state='candidate'`, so
     `pending_candidates`'s cursor=0 keyset read returned the SAME conflicting
@@ -3384,10 +3607,11 @@ def test_dismiss_serializes_behind_a_concurrent_apply_of_the_same_candidate(repo
     `mark_candidates_applied`'s own `WHERE state='candidate'` guard then
     silently updates zero rows instead of surfacing the clash.
 
-    Blocks `append_knowhow_rows` (not `create_knowhow_table`, unlike the
-    apply/apply concurrency tests above) because the race this proves needs
-    apply to still be mid-flight AFTER it has already decided to write this
-    exact candidate but BEFORE `mark_candidates_applied` runs.
+    Blocks `append_knowhow_rows_skipping_existing_anchors` (not
+    `create_knowhow_table`, unlike the apply/apply concurrency tests above)
+    because the race this proves needs apply to still be mid-flight AFTER it
+    has already decided to write this exact candidate but BEFORE
+    `mark_candidates_applied` runs.
     """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
     _add_manual(repo, notebook.id, "s1", 1)
@@ -3397,14 +3621,14 @@ def test_dismiss_serializes_behind_a_concurrent_apply_of_the_same_candidate(repo
 
     entered = threading.Event()
     release = threading.Event()
-    original_append = service.knowhow.append_knowhow_rows
+    original_append = service.knowhow.append_knowhow_rows_skipping_existing_anchors
 
     def blocking_append(*args, **kwargs):
         entered.set()
         release.wait(10)
         return original_append(*args, **kwargs)
 
-    service.knowhow.append_knowhow_rows = blocking_append
+    service.knowhow.append_knowhow_rows_skipping_existing_anchors = blocking_append
     results: dict[str, dict] = {}
     try:
         apply_thread = threading.Thread(
@@ -3438,7 +3662,7 @@ def test_dismiss_serializes_behind_a_concurrent_apply_of_the_same_candidate(repo
         apply_thread.join(10)
         dismiss_thread.join(10)
     finally:
-        service.knowhow.append_knowhow_rows = original_append
+        service.knowhow.append_knowhow_rows_skipping_existing_anchors = original_append
 
     assert results["apply"]["rows_added"] == 1
     # The lock made dismiss wait until apply had already flipped the row to
@@ -4482,8 +4706,9 @@ def test_api_start_accepts_every_status_that_means_the_elements_have_landed(
 # writer that swaps a source's elements — runs under a completely different
 # mutex (`SourceIngestionService`'s per-source chunk lock), so check and write
 # were still a TOCTOU pair: generation reads current, the reparse commits,
-# `append_knowhow_rows` then lands rows describing sections the document no
-# longer has. These tests pin the barrier that closes it.
+# `append_knowhow_rows_skipping_existing_anchors` then lands rows describing
+# sections the document no longer has. These tests pin the barrier that
+# closes it.
 class _BlockingKnowhow:
     """The knowhow store, with a controllable stall inside the ONE call that
     actually lands rows.
@@ -4501,10 +4726,12 @@ class _BlockingKnowhow:
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
-    def append_knowhow_rows(self, *args, **kwargs):
+    def append_knowhow_rows_skipping_existing_anchors(self, *args, **kwargs):
         self._reached.set()
         assert self._release.wait(timeout=10), "apply was never released"
-        return self._inner.append_knowhow_rows(*args, **kwargs)
+        return self._inner.append_knowhow_rows_skipping_existing_anchors(
+            *args, **kwargs
+        )
 
 
 def _reparse_the_way_the_pipeline_does(repo, notebook_id, source_id, elements, when):
