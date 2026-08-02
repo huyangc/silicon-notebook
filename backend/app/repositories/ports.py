@@ -111,6 +111,10 @@ class KgBuildAlreadyRunning(RuntimeError):
     """One notebook already has a durable running KG build job."""
 
 
+class CatalogJobAlreadyRunning(RuntimeError):
+    """One source already has a durable queued/running command-catalog job."""
+
+
 @dataclass(frozen=True)
 class ChunkWrite:
     id: str
@@ -647,6 +651,147 @@ class KgBuildJobStorePort(Protocol):
         error_message: str = "",
     ) -> bool: ...
     def fail_submission(self, job_id: str) -> bool: ...
+
+
+# Both catalog stores share these bounds. They live here, on the neutral port,
+# rather than in either adapter: a backend store must never import the other
+# backend's module, and duplicating a bound in two adapters is exactly how the
+# two silently drift into paging differently.
+#
+# MAX_CANDIDATE_BATCH bounds one ``add_candidates`` write (one section's rows);
+# the pure layer already caps a section's rejections and its candidate list, so
+# this is the write-side belt to those braces. MAX_CANDIDATE_PAGE is the hard
+# ceiling on any single candidate page regardless of what a caller asks for.
+CATALOG_MAX_CANDIDATE_BATCH = 128  # rows per INSERT batch; the input is
+# CHUNKED to this size, never truncated to it — a store that drops rows the
+# caller already counted produces exactly the under-report this feature
+# exists to eliminate.
+CATALOG_MAX_CANDIDATE_PAGE = 100
+CATALOG_CANDIDATE_STATES = frozenset(
+    {"candidate", "rejected", "applied", "dismissed"}
+)
+CATALOG_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+@runtime_checkable
+class CatalogStorePort(Protocol):
+    """Durable state for command-catalog extraction: one job row per run plus
+    its reviewable candidate rows.
+
+    Every read here is bounded on purpose. ``list_candidates`` is a keyset page
+    over ``(job_id, state, position)``; ``candidates_by_ids`` and
+    ``pending_candidates`` take explicit caps; ``preview_elements`` clips both
+    the row count and each row's text so a cost preview can never turn into a
+    full-source scan."""
+
+    def create_job(
+        self,
+        notebook_id: str,
+        source_id: str,
+        created_by: str,
+        *,
+        source_generation: str = "",
+    ) -> dict: ...
+    def get_job(self, job_id: str) -> dict: ...
+    def latest_job(self, source_id: str) -> dict | None: ...
+    def active_job(self, source_id: str) -> dict | None: ...
+    def start_job(self, job_id: str, sections_total: int) -> bool: ...
+    def set_section_total(self, job_id: str, sections_total: int) -> bool: ...
+    def record_section(
+        self,
+        job_id: str,
+        *,
+        entries: int,
+        rejected: int,
+        uncovered: int,
+        truncated: int = 0,
+    ) -> bool: ...
+    def set_applied_table_id(self, job_id: str, table_id: str) -> bool:
+        """Remember which knowhow table THIS job's confirms have landed in.
+
+        Written once the first successful ``apply`` resolves a target (create
+        or find-by-title) and read back on every later ``apply`` for the SAME
+        job so a second confirmation page targets the SAME table even if a
+        person renamed it in between — resolving by title again would either
+        miss it (rename) or, worse, resolve a DIFFERENT table that happens to
+        share the derived title with another source. Unconditional: apply is
+        legal regardless of the job's own run status.
+        """
+        ...
+    def finish_job(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        failure_reason: str = "",
+        diagnostic: str = "",
+    ) -> bool: ...
+    def add_candidates(self, rows: Sequence[Mapping[str, Any]]) -> None: ...
+    def list_candidates(
+        self, job_id: str, *, state: str, cursor: int, limit: int
+    ) -> list[dict]: ...
+    def candidate_counts(self, job_id: str) -> dict[str, int]: ...
+    def candidates_by_ids(
+        self, job_id: str, candidate_ids: Sequence[str], *, limit: int
+    ) -> list[dict]: ...
+    def pending_candidates(self, job_id: str, *, limit: int) -> list[dict]: ...
+    def mark_candidates_applied(
+        self, job_id: str, candidate_ids: Sequence[str]
+    ) -> int: ...
+    def mark_candidates_dismissed(
+        self,
+        job_id: str,
+        candidate_ids: Sequence[str],
+        *,
+        reject_info: Mapping[str, Any],
+    ) -> int:
+        """Move candidates OUT of ``candidate`` state without landing a row.
+
+        Used for apply-time conflicts: a candidate whose command already has a
+        row is left un-applied (v1's conservative merge, see
+        ``CommandCatalogService.apply``) but must still leave ``candidate``
+        state, or ``pending_candidates``'s cursor=0 keyset read would return
+        the exact same page forever and a source whose first page is entirely
+        conflicts could never be confirmed past it. ``dismissed`` is a
+        terminal, non-`candidate` state distinct from ``rejected`` (which
+        means "the model/grounding pass itself produced nothing usable") —
+        this row WAS a legitimate command, it just already exists.
+        """
+        ...
+    def expire_pending_candidates(
+        self, job_id: str, *, reject_info: Mapping[str, Any]
+    ) -> int:
+        """Dismiss every still-``candidate`` row of one job in one statement.
+
+        The complete-set counterpart of ``mark_candidates_dismissed``: that one
+        takes an explicit, page-capped selection (apply's conflict set), this
+        one takes the whole job. Used when a reparse invalidates a run — the
+        restart guard reads "are any candidates still unreviewed", so a
+        page-bounded expiry would leave a large job blocked forever.
+        """
+        ...
+    def source_element_generation(self, source_id: str) -> str:
+        """Opaque token that changes IFF this source's ``source_elements`` were
+        swapped by ``replace_elements`` (a reparse).
+
+        Snapshotted into ``catalog_jobs.source_generation`` when a run starts,
+        and re-read before ``apply``/``dismiss``: a candidate row's command
+        name, excerpt and section path all point at the element generation the
+        run actually read, so confirming them after a reparse would write
+        content the document no longer contains.
+
+        Deliberately narrower than ``source_change_signal_rows``' token, which
+        is built from ``sources.updated_at`` and is intentionally COARSE (it
+        also moves on lifecycle transitions that never touch the elements).
+        That signal feeds a count cache, where a false invalidation costs a
+        recount; this one refuses a confirm and tells the user their source was
+        reparsed, so it must not fire when it was not. Bounded: one indexed
+        aggregate over one source, on human-paced paths only.
+        """
+        ...
+    def preview_elements(
+        self, source_id: str, *, limit: int, text_chars: int
+    ) -> tuple[list[dict], bool]: ...
 
 
 @runtime_checkable
@@ -2199,6 +2344,44 @@ class KnowhowStorePort(Protocol):
         """
         ...
     def get_knowhow_table(self, table_id: str) -> dict: ...
+    def knowhow_table_id_by_title(self, notebook_id: str, title: str) -> str:
+        """The id of the table named exactly ``title`` in ``notebook_id``, or
+        ``""`` when none matches — a bounded point lookup on
+        ``(notebook_id, title)``, never the health-aggregated
+        ``list_knowhow_tables`` scan (row counts, projection status, cell
+        activity, code inputs for every table in the notebook) that a title
+        lookup has no use for.
+
+        When more than one table shares the derived title (a user is free to
+        rename tables to collide), the tie-break is the same one
+        ``list_knowhow_tables`` already produces by construction — creation
+        order (``created_at``, then ``id``) — so callers that used to take
+        the first match out of the health-aggregated list see byte-identical
+        results from this cheaper path.
+        """
+        ...
+    def knowhow_table_columns(self, table_id: str) -> list[dict]:
+        """A table's columns alone — ``id``/``name``/``role``/``position`` —
+        never its rows or cells. Raises ``KeyError`` if the table is gone (the
+        same contract ``get_knowhow_table`` uses), so a caller that only needs
+        "does this table still exist, and what are its columns" (command
+        catalog's apply, resolving a remembered target) never has to pay for a
+        full row/cell hydrate just to find out.
+        """
+        ...
+    def knowhow_anchor_existing_values(
+        self, column_id: str, values: Sequence[str]
+    ) -> set[str]:
+        """Which of `values` already have a row in `column_id`'s anchor
+        column — bounded to `values` (callers pass at most a page's worth),
+        and indexed on `column_id` alone via the same normalized-anchor
+        expression index the guarded-write anchor-membership check already
+        relies on (migration 21 / PostgreSQL 0005). Never touches
+        `knowhow_rows`: `column_id` already scopes to exactly one table, so
+        this costs one indexed IN-lookup regardless of how many OTHER rows
+        that table holds.
+        """
+        ...
     def create_knowhow_table(
         self, notebook_id: str, title: str, description: str, columns: list[dict],
         created_by: str = "",

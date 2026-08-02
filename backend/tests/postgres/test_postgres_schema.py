@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 16
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 17
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 16
-    assert migrator.migrate() == 16
-    assert migrator.current_version() == 16
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 16
+    assert migrator.migrate() == 17
+    assert migrator.migrate() == 17
+    assert migrator.current_version() == 17
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 17
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 16
+    assert migrator.migrate() == 17
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 16
+        assert PostgresMigrator(databases[1]).migrate() == 17
     finally:
         for database in databases:
             database.close()
@@ -184,6 +184,7 @@ def test_packaged_index_migration_phases_are_exact():
         (14, "kg_analysis_precompute"),
         (15, "source_element_type_index"),
         (16, "visible_source_identity_index"),
+        (17, "command_catalog"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -273,6 +274,22 @@ def test_packaged_index_migration_phases_are_exact():
     # Migration 16 pairs SQLite v38's bounded visible-source identity roster.
     v38_index = index_declarations(16)
     assert v38_index == [(False, "idx_sources_visible_identity")]
+
+    # Migration 17 mirrors SQLite v39's command-catalog tables. The partial
+    # unique index is the cross-process single-flight guard and its predicate
+    # must cover queued AND running: the job row is written before the worker
+    # thread starts, so a running-only guard would admit a second writer for the
+    # same candidate set.
+    v39_indexes = index_declarations(17)
+    assert v39_indexes == [
+        (False, "idx_catalog_candidates_nb"),
+        (False, "idx_catalog_candidates_source"),
+        (True, "idx_catalog_jobs_one_active"),
+        (False, "idx_catalog_jobs_source_created"),
+        (False, "idx_catalog_jobs_nb_created"),
+        (False, "idx_catalog_candidates_job_state"),
+    ]
+    assert "WHERE status IN ('queued', 'running')" in migrations[17].sql
 
 
 def test_initial_migration_guards_utf8_before_business_ddl():

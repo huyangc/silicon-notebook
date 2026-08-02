@@ -28,7 +28,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the current SQLite v38 / PostgreSQL v16
+# Every ordinary application table in the current SQLite v39 / PostgreSQL v17
 # compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
 # the migration ledger/shadow control tables are adapter-internal. Import and
 # shadow preflight use this reverse-totality list to reject unrelated/live
@@ -43,6 +43,8 @@ POSTGRES_BUSINESS_TABLES = (
     "ask_trace_steps",
     "auth_sessions",
     "canonical_relations",
+    "catalog_candidates",
+    "catalog_jobs",
     "chunk_embeddings",
     "chunks",
     "communities",
@@ -135,6 +137,8 @@ POSTGRES_JSON_COLUMNS = frozenset(
         "ask_jobs.trace_json",
         "ask_trace_steps.step_json",
         "canonical_relations.sample_relation_ids",
+        "catalog_candidates.payload",
+        "catalog_candidates.reject_info",
         "chunks.element_ids",
         "communities.findings",
         "communities.member_ids",
@@ -193,6 +197,7 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
         "ask_jobs.created_at",
         "ask_jobs.updated_at",
         "ask_trace_steps.created_at",
+        "catalog_jobs.finished_at",
         "kg_build_jobs.finished_at",
         "knowledge_objects.last_reviewed",
         "merge_review_jobs.started_at",
@@ -202,10 +207,10 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v38. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v39. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=38,
-    postgres_version=16,
+    sqlite_version=39,
+    postgres_version=17,
 )

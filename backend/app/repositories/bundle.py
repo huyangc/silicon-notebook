@@ -7,6 +7,7 @@ from typing import Protocol, runtime_checkable
 from app.core.config import Settings
 from app.repositories.ports import (
     AskStateStorePort,
+    CatalogStorePort,
     ChunkStorePort,
     EmbeddingStorePort,
     GovernanceStorePort,
@@ -43,6 +44,7 @@ class PersistenceBundle(Protocol):
     governance: GovernanceStorePort
     index_projection: IndexProjectionStorePort
     kg_build_jobs: KgBuildJobStorePort
+    catalog: CatalogStorePort
     knowhow: KnowhowStorePort
     knowhow_history: KnowhowHistoryStorePort
     knowhow_transfer: KnowhowTransferStorePort

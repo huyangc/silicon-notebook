@@ -32,6 +32,7 @@ _SAFE_JOB_PREFIXES = (
     ("knowhow-asset-sweep:", "knowhow-asset-sweep"),
     ("knowhow-project-", "knowhow-project"),
     ("conflictresolve-", "conflictresolve"),
+    ("catalog-", "catalog"),
     ("mergereview-", "mergereview"),
     ("report-plan-", "report-plan"),
     ("report-gen-", "report-gen"),

@@ -2436,6 +2436,84 @@ MIGRATION_MANIFEST[(37, 38)] = {
     "views": {},
 }
 
+# v39: the command-catalog extraction job row (with its per-source
+# queued/running single-flight partial unique index) and its reviewable
+# candidate rows.  Same cascade as every other hop: broadcast onto every prior
+# hop key rebased to v39, then register the explicit (38, 39) single hop.  SQL
+# text matches sqlite_master storage verbatim (SQLite strips "IF NOT EXISTS"
+# and keeps the source indentation).
+COMMAND_CATALOG_TABLES = {
+    "catalog_jobs": """CREATE TABLE catalog_jobs (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'queued',
+                  sections_total INTEGER NOT NULL DEFAULT 0,
+                  sections_done INTEGER NOT NULL DEFAULT 0,
+                  entries INTEGER NOT NULL DEFAULT 0,
+                  rejected INTEGER NOT NULL DEFAULT 0,
+                  uncovered INTEGER NOT NULL DEFAULT 0,
+                  truncated_sections INTEGER NOT NULL DEFAULT 0,
+                  failure_reason TEXT NOT NULL DEFAULT '',
+                  diagnostic TEXT NOT NULL DEFAULT '',
+                  applied_table_id TEXT NOT NULL DEFAULT '',
+                  source_generation TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  finished_at TEXT NOT NULL DEFAULT ''
+                )""",
+    "catalog_candidates": """CREATE TABLE catalog_candidates (
+                  id TEXT PRIMARY KEY,
+                  job_id TEXT NOT NULL,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  position INTEGER NOT NULL DEFAULT 0,
+                  section_path TEXT NOT NULL DEFAULT '',
+                  command_name TEXT NOT NULL DEFAULT '',
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  state TEXT NOT NULL DEFAULT 'candidate',
+                  reject_info TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL
+                )""",
+}
+COMMAND_CATALOG_INDEXES = {
+    "idx_catalog_jobs_one_active":
+        "CREATE UNIQUE INDEX idx_catalog_jobs_one_active\n"
+        "                  ON catalog_jobs(source_id) "
+        "WHERE status IN ('queued', 'running')",
+    "idx_catalog_jobs_source_created":
+        "CREATE INDEX idx_catalog_jobs_source_created\n"
+        "                  ON catalog_jobs(source_id, created_at DESC, id DESC)",
+    "idx_catalog_jobs_nb_created":
+        "CREATE INDEX idx_catalog_jobs_nb_created\n"
+        "                  ON catalog_jobs(notebook_id, created_at DESC, id DESC)",
+    "idx_catalog_candidates_job_state":
+        "CREATE INDEX idx_catalog_candidates_job_state\n"
+        "                  ON catalog_candidates(job_id, state, position)",
+    "idx_catalog_candidates_nb":
+        "CREATE INDEX idx_catalog_candidates_nb\n"
+        "                  ON catalog_candidates(notebook_id)",
+    "idx_catalog_candidates_source":
+        "CREATE INDEX idx_catalog_candidates_source\n"
+        "                  ON catalog_candidates(source_id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 39, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **COMMAND_CATALOG_TABLES},
+        "indexes": {**manifest["indexes"], **COMMAND_CATALOG_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(38, 39)] = {
+    "tables": COMMAND_CATALOG_TABLES,
+    "columns": {},
+    "indexes": COMMAND_CATALOG_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

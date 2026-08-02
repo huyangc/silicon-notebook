@@ -495,6 +495,28 @@ class PostgresMaintenanceAdapter:
                 "updated_at=%s,finished_at=%s WHERE status='running'",
                 (now, now),
             )
+            # Mirrors the SQLite sweep: the command-catalog single-flight
+            # predicate covers queued AND running, so a row stranded before its
+            # worker thread started would otherwise hold that source's guard
+            # forever.
+            # Wording kept in sync with app/services/catalog_job.py's
+            # INTERRUPTED_MESSAGE: the user-facing verb is "识别" ("recognize"),
+            # not the internal "抽取" ("extract") — this SQL literal bypasses
+            # user_error()/the frontend vocabulary gate and lands on screen
+            # verbatim, so it is on its own to keep the interface vocabulary right.
+            # R6 P1: dropped the unconditional "可重新发起识别" promise — retained
+            # is not the same as reachable, `.../job` only ever returns the
+            # latest run, and a restart from here now orphans those candidates
+            # exactly like a restart from `succeeded` (see catalog_job.py's
+            # `_reject_if_pending_candidates`, which now blocks this status too).
+            db.execute(
+                "UPDATE catalog_jobs SET status='failed',"
+                "failure_reason='服务重启导致命令目录识别中断；已生成的候选已保留，"
+                "请先在审阅面板确认或跳过，再重新发起识别。',"
+                "diagnostic='worker_interrupted',"
+                "updated_at=%s,finished_at=%s WHERE status IN ('queued','running')",
+                (now, now),
+            )
             db.execute("DELETE FROM kg_cluster_scratch")
             db.execute("DELETE FROM kg_canonical_scratch")
 

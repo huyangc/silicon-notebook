@@ -94,6 +94,10 @@ _SQLITE_INT64_MAX = 2**63 - 1
 _ORDERING_SQLSTATES = frozenset({"23503", "23505", "23P01"})
 _UNIQUE_SQLSTATE = "23505"
 _UNIQUE_PREDICATES = {
+    "idx_catalog_jobs_one_active": (
+        "status IN ('queued', 'running')",
+        ("status", "in", "'queued'", "'running'"),
+    ),
     "idx_kg_build_jobs_one_running": (
         "status = 'running'",
         ("status", "=", "'running'"),

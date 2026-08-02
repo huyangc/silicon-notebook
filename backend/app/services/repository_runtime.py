@@ -17,6 +17,7 @@ from app.repositories.ports import (
     SharingStorePort,
 )
 from app.repositories.source_files import SourceFileStore
+from app.services.catalog_job import CommandCatalogService
 from app.services.kg_analysis import KgAnalysisService
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
@@ -308,6 +309,21 @@ class RepositoryRuntime:
         # eager. Task 5's projector and Task 6's import/table API depend on
         # the facade's one-hop delegates over this exact instance.
         self.knowhow_store = bundle.knowhow
+        # 方案 C·C1b:命令目录抽取。**后端中性**——它吃的全是端口/可调用
+        # (catalog/source/chunk/knowhow store + models + event_log + 两个 seam),
+        # 自己不 import 任何后端,所以和 kg_analysis 一样落在这个中性 runtime,而不是
+        # 每个 facade 各构一份。单例是必要的而非顺手:取消事件的注册表挂在实例上,
+        # 「发起 job 的请求」与「跑 job 的后台线程」必须看到同一份。
+        self.command_catalog = CommandCatalogService(
+            catalog=bundle.catalog,
+            sources=self.source_store,
+            chunks=self.chunk_store,
+            knowhow=self.knowhow_store,
+            models=self.models,
+            event_log=self.event_log,
+            now=seams.now,
+            current_user_id=lambda: self.identity.current_user().id,
+        )
         # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）。id/时钟
         # 由 transfer.py 的 _remap 直接从 repo._runtime.seams 取（见该文件头
         # 注释），store 自己不需要——不带 new_id/now 构造参数。
@@ -669,6 +685,14 @@ class RepositoryRuntime:
         # holds `catalog` (e.g. ScaleArtifactRuntime) keep the whole facade
         # alive — see test_scale_artifact_runtime's retention tests.
         self.catalog.source_ingestion = weakref.ref(self.source_ingestion)
+        # 方案 C·C1b R10:命令目录 apply/dismiss 的「解析栅栏」。它要持有的正是
+        # SourceIngestionService 那把 per-source 分块锁——`replace_elements` 唯一
+        # 的持锁方——否则代次校验与 knowhow 落库之间存在 TOCTOU 窗口(见
+        # CommandCatalogService._source_write_barrier)。同上面 catalog 一样是**延迟
+        # seam**(command_catalog 在本方法之前就 eager 构造好了)且同样用 **weakref**:
+        # SourceIngestionService 闭包持有 facade,强引用会让任何长期持有
+        # command_catalog 的对象把整个 facade 钉住(见 scale/catalog 的滞留测试)。
+        self.command_catalog.source_locks = weakref.ref(self.source_ingestion)
         # paper-meta backfill in the pending-actions bell (Task 5): same
         # deferred-seam problem as catalog above (pending_actions_service is
         # constructed in wire_query_services(), before this method runs), but

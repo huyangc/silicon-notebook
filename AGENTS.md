@@ -198,8 +198,8 @@ Confirmed scope:
 - Schema changes stay version-gated behind `SqliteMigrator` (append `_migration_N` + bump `SCHEMA_VERSION`); startup recovery/seed/admin-upgrade run every boot outside the version gate. Pre-refactor databases must keep loading: the frozen v9 fixture replay (`backend/tests/fixtures/repository_v9/`, `test_repository_v9_fixture.py`) and the backup-only real-database verifier `scripts/verify_repository_snapshot.py` are the remaining guards. The verifier uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, never constructs the repository on an original database/storage path, and reports a retained temporary backup on cleanup failure without private row data. Original DB/WAL metadata and SHM existence/size are guarded; on a live WAL attachment only SHM mtime is exempt.
 - Database-specific test coverage now targets the direct PostgreSQL backend only. Retired tests for the SQLite backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and cross-backend parity must not be restored to the active suite.
 
-The current schema version is 38. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v38 and remains readable. Those migrations
+The current schema version is 39. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v39 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -240,7 +240,176 @@ adds the indexed `(source_id, element_type, created_at, id)` ordering on
 v37. SQLite v38 and PostgreSQL migration v16 add the partial
 `idx_sources_visible_identity` index on `(notebook_id, created_at, id)` for
 bounded visible-source identity lookup while excluding hidden Memory/Knowhow
-projection rows; v16 is the paired business schema.
+projection rows. SQLite v39 adds the command-catalog extraction tables: `catalog_jobs`
+(one row per run, carrying the per-source `queued`/`running` partial unique
+index that is the cross-process single-flight guard) and `catalog_candidates`
+(one reviewable row per extracted or grounding-rejected entry, keyset-ordered
+by a per-job `position`). `catalog_jobs.source_generation` records the source
+element generation the run was created against.
+`catalog_candidates.job_id` deliberately carries no
+foreign key — the rows cascade from notebooks/sources directly, and an incoming
+foreign key would make `catalog_jobs` a non-leaf table and leave the
+single-column `source_id` guard with no static parking strategy for the forward
+shadow. PostgreSQL migration v17 mirrors v39 and is the paired business
+schema.
+
+### Command Catalog Extraction Contract
+
+Command-manual ingestion is opt-in per source. The pure layer is
+`backend/app/services/command_catalog.py`; the job, model calls, persistence and
+apply step are `backend/app/services/catalog_job.py`. Five properties are
+load-bearing.
+
+**Cost preview is bounded and honest.** `preview` makes zero model calls and
+reads only a bounded prefix of the source, with both the row count and each
+row's text clipped in SQL. Hitting the cap must be reported as `sampled`; a
+preview that scans the document it is estimating defeats its own purpose, and
+silently presenting a partial count as a census is the one failure mode it must
+not have.
+
+**Single flight and terminal state.** `catalog_jobs` carries a partial unique
+index over `queued` AND `running`. The row is written before the worker thread
+starts, so a guard that covered only `running` would let a duplicate request in
+that window schedule a second writer for the same candidate set. Every exit path
+settles the row, including `KeyboardInterrupt`/`SystemExit` (they inherit
+`BaseException` and never reach `except Exception`); startup recovery settles
+both states, since a stranded `queued` row holds the guard just as effectively
+as a `running` one.
+
+**Grounding is not optional.** An entry's command name must be on the
+server-supplied candidate list and appear verbatim at token boundaries (failing
+either vetoes the whole entry); every parameter name must appear in its original
+form including its leading dash; `syntax` must be a contiguous copy of source
+text; a `default` that is not in the text is cleared. Rejected entries are
+persisted with their reasons and a bounded text window — for a run that produces
+little, those rows are the only evidence distinguishing a bad model from a
+source that is not a manual.
+
+**A slice's answer is judged against its own assignment.** Every parameter of a
+command lives in the same section text, so grounding alone cannot tell one
+slice's parameters from another's: `validate_entry` also takes the slice's
+`param_names` and rejects anything outside it (`arg_outside_slice`), and the
+job records the assigned parameters nothing answered for (`arg_not_returned`)
+on that section's ledger and on the command's own candidate row. Both halves
+are required. Without attribution, a reply about another slice grounds
+perfectly and is admitted — including into the content-addressed cache, whose
+sole admission ticket is that same `validate_entry` call, so a wrong-slice
+reply would be served for the whole TTL. Without the uncovered ledger,
+`args_keep_ratio`'s denominator is what the model chose to return, and
+answering 1 of 20 assigned parameters scores 100%. The denominator is therefore
+`args_seen + args_uncovered`, and the axis gate below is "was anything asked
+for", never `args_seen > 0`. An empty assignment (a flagless command) means
+unconstrained, not "nothing may be returned" — positional arguments are exactly
+what such a section documents, and the prompt's no-flag branch must ASK for
+them (`parameter_names` is a flag scanner, so `set_dont_use lib_cells` yields no
+assignment; ordering `args: []` there loses that whole class of argument
+metadata). No list can be served for those, so grounding alone keeps them
+honest: the name must still be verbatim in the section text, coverage
+contributes nothing (nothing was assigned, so nothing can be missing), and such
+a section does count toward the args axis once the model answers.
+
+A slice that comes back covering less than `SLICE_COVERAGE_RETRY_RATIO` of an
+assignment of at least `MIN_ASSIGNED_FOR_COVERAGE_RETRY` parameters is halved
+and re-asked once, reusing the remedy below; still-low coverage is recorded, not
+retried again. The remedy is gated on the answer also being SHORT (fewer
+parameters returned than assigned): an answer that returned its whole
+assignment and simply got the names wrong has a grounding problem, and asking
+for half as many buys a second wrong answer at full price. It fires at depth 0
+only, which is what keeps `MAX_CALLS_PER_SLICE` unchanged — the two remedies are
+mutually exclusive at a given depth and both cost `1 + 2·f(1)`.
+
+**Three-axis circuit breaker.** After `MIN_SECTIONS_BEFORE_ALERT` sections, a
+command-name veto ratio above `COMMAND_REJECT_ALERT_RATIO` or an args-keep ratio
+below `ARGS_KEEP_ALERT_RATIO` fails the job with a user-readable
+`failure_reason`. The args axis is gated on `args_seen + args_uncovered > 0`:
+the published ratio is 0.0 when nothing was asked for, so an ungated check would
+fail a manual of genuinely flagless commands on its tenth clean section. Never
+finish a mostly-rejecting run with a plausible-looking near-empty catalog.
+
+**Model-authored fields are bounded where they are merged.** `description`,
+`examples` and each parameter's `desc` are the fields grounding deliberately
+never checks, so `_merge_entry` is the only choke point between model prose and
+the DB. Parameter descriptions need two bounds, not one: `MODEL_ARG_DESC_CHARS`
+per description and `MODEL_ARG_DESC_TOTAL_CHARS` per candidate row, since one
+row carries as many descriptions as the command has parameters. The aggregate
+budget cuts from the tail and reports how many parameters it bit under
+`reject_info.desc_overflow` — a separate key from `overflow`, which counts
+rejection records that did not fit; folding them together would leave a number
+answering neither question.
+
+**Apply is conservative by construction.** The target knowhow table is created
+if missing and otherwise only appended to; a candidate whose command already has
+a row is reported as a conflict and that row is left untouched. Its concurrency
+lock keys on the DERIVED TITLE and nothing else — `applied_table_id` resolves
+WHICH table to write to, inside the held lock, and must never be the lock key:
+"does a table for this target exist" is rewritten by the `create_knowhow_table`
+this very lock protects, so a table-id key puts the first applier on a title
+lock and every later arrival on a table lock, which do not exclude each other. Nothing here can
+distinguish a stale row from one a person corrected by hand, and overwriting is
+this feature's only irreversible damage. All writes go through the existing
+knowhow service layer, so change history is recorded like any other edit.
+
+Cost contract: one planned model call per extraction slice, no second-opinion or
+refinement pass. The only extra calls are two bounded remedies that share one
+mechanism — halve the slice's parameter list and ask again — triggered by an
+unusable reply or by the coverage gate above, capped so a slice costs at most
+`MAX_CALLS_PER_SLICE` however it fails; every failed slice is recorded as a
+rejected row rather than dropped.
+
+Two seam facts decide how that remedy is triggered, and both are easy to get
+wrong. First, `chat_json` does not return `finish_reason` (its signature is
+pinned by a contract test), and `_validate_json_object` raises the same
+`malformed_response` for an empty body as for a truncated one — so at this seam
+"the model returned nothing usable" is ONE observation, not two. Second, the
+handler must branch on the provider's stable error **code**, never on the
+exception class: the scheduled adapter re-raises everything as
+`ModelInvocationError`, a sibling of `MalformedModelResponse`, so a
+class-based `except` matches only a test double and never production. Transient
+provider failures (rate limit, upstream 5xx, auth) are explicitly not the
+halving case — they propagate and fail the job rather than being recorded as
+"this section had no commands".
+
+The circuit breaker therefore reads three axes, not two: command-name veto rate,
+args-keep rate, and the share of slices that produced nothing usable. The third
+is not optional even though the args axis now counts unanswered assignments: a
+slice that returns nothing leaves the name ratio innocuous, and the args ratio
+it does drag down names the symptom ("parameters went missing") rather than the
+cause ("the endpoint is returning garbage") — that run would otherwise pay for
+the whole manual and report success with an empty catalog. When several axes
+fire, the reported one is the most specific: an unusable response explains a bad
+args ratio, never the other way round.
+
+**The source must be parsed, and a reparse invalidates the run.** `preview` and
+`start` both require `parse_status` in the repository-wide parsed whitelist
+(`parsed`/`extracting`/`extracted` — the last two are post-parse KG stages, so
+the elements are already complete) and otherwise return a user-readable 409 with
+distinct copy for "still parsing" and "parse failed". `catalog_jobs.source_generation`
+snapshots `MAX(source_elements.created_at)` at creation: `replace_elements`
+writes a whole replacement batch under one `created_at`, so that token moves if
+and only if the elements were swapped. `apply` and `dismiss` compare it inside
+the same per-target lock before reading or writing anything; a mismatch returns a
+user-readable 409 and expires the job's remaining candidates through
+`expire_pending_candidates` (reason `source_reparsed`). Three parts are
+load-bearing. The token must NOT be `sources.updated_at` (nor the
+`source_change_signal_rows` token built from it): that signal is deliberately
+coarse and also moves on lifecycle transitions — a KG re-extraction, a summary
+write — that never touch the elements, and where its own consumer is a count
+cache paying a recount for a false positive, this one refuses a confirm and
+tells the user their source was reparsed, so it must not fire when it did not
+happen. The expiry must be the COMPLETE-SET statement, not the page-capped
+`mark_candidates_dismissed`, or a job with more than `MAX_APPLY_CANDIDATES`
+candidates stays half-expired and still blocked. And `start` must sweep an
+already-stale previous job and proceed rather than refusing, or the
+unreviewed-candidates guard and this one deadlock each other: every confirm
+refused as stale, every re-run refused as unreviewed. On the frontend, every
+apply/dismiss — including the failure path, since the reparse 409 changes server
+state — must call back so the entry card re-reads `.../job`; the review modal
+renders at the page root and the card inside the source detail, so page.tsx is
+the only wire between them and a card holding a stale `pending_candidates` keeps
+"重新识别" disabled forever.
+
+The extraction workload reuses `kg_extract`; no new workload configuration
+surface is introduced.
 
 ### Typed Collection Citation Contract
 
@@ -260,10 +429,10 @@ if they sourced the list.
 - At the `open_fresh_live_sqlite` call boundary, a non-transient `sqlite3.OperationalError` is a source-binding identity failure. Locked, busy, and interrupted opens remain transient whole-batch retries; SQLite operational errors after that open boundary retain their existing schema/query classifications.
 - The single factory is the only backend-selection branch. PostgreSQL uses its own persistence bundle, checksummed migrations, bounded Psycopg pool, row/advisory locks, and transaction isolation for cross-process access; it must not copy SQLite's process-local write lock. Both backends auto-migrate at startup and fail closed without falling back to the other backend.
 - PostgreSQL stores float32 vectors as `bytea`; pgvector is not installed or required. It requires `pg_trgm` in the `public` schema. Production remains `--workers 1` because the model scheduler, breakers, and cancellation registries are process-local.
-- `SHADOW_DATABASE_URL` remains inert by itself. The temporary `migration/shadow` boundary currently provides the exact SQLite v38/PostgreSQL v16/epoch-1 preflight/control/guards, run-bound atomic SQLite snapshots, bounded resumable 64-table baseline COPY through atomic H0, and a fail-stop single-consumer forward apply engine. The engine reads the global SQLite log strictly from checkpoint+1 without filtering away gaps, validates every run/epoch/table/op/key, hydrates current rows only for upserts in a short source snapshot, keeps deletes key-only with zero hydrated bytes, and preserves all seven SQLite rowid ordinals. Repeated stable keys in an accepted prefix coalesce to the last event and are emitted in global last-seq order; raw seq/checkpoint continuity is unchanged, while the final actual apply for an identity overrides any synthetic dependency contribution; only dependency-only identities contribute one reference-counted synthetic row and its bytes. A short read window ending below the allocated high-water is an immediate suffix gap before hydration/apply; a full window below high-water must probe the adjacent sequence in the same snapshot and fail if it is absent. Batches are hard-capped at 4,096 events/64 MiB: only one final bundle may exceed the byte cap, and a same-key replacement that grows past the cap must roll back and defer when another actual bundle is already accepted. FK parents come unconditionally from that same verified current-state snapshot through a 64-row-per-event closure; the fixed v16 graph's branch-counted bound is exactly 9 row slots. Dependency rows count toward bytes and deduplicate across the batch; never scan or trust suffix change-log metadata to authorize them. Target savepoints defer only FK/UNIQUE ordering SQLSTATEs; CHECK/NOT NULL poison immediately. Migration-derived plans cover exactly 86 PG16 unique surfaces: nullable columns park at NULL; non-FK/non-CHECK text/bigint use deterministic candidates scoped by indexable equality for non-NULL values and `IS NULL` for NULL values on the other unique columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first gap only when both int64 bounds are occupied); and only a statically proven no-incoming-FK leaf whose conflict key has an accepted current-final apply may delete/reinsert inside the same target transaction. Parked state is per unique surface and row identity; each stagnant pass parks every independently parkable conflict, and a successful final apply clears every parked surface for that identity. Deferred work is capped at eight passes, 32 actual statements per apply, and 16,384 actual statements total; every candidate query counts toward that budget, and ordering, statement, pass, and `ProgramLimitExceeded`/`DataError` candidate-search or candidate-update capacity exhaustion stays non-poison; `QueryCanceled` remains transient and retries the whole transaction. A final-window unparkable UNIQUE failure instead poisons its earliest actual event seq. `run_forever` doubles from 256 events/8 MiB through the hard caps after ordering-blocked; hard-cap exhaustion stays non-poison. After claiming the worker, the apply transaction must recheck existing poison for that run/direction before any business DML. Poison publication must likewise lock and inspect any existing run/direction poison after binding/checkpoint validation: an exact replay is ACK-loss success, while any differing record is stale and must never create a second poison. The target transaction follows migration→control→run→worker→checkpoint lock order, takes `SHARE ROW EXCLUSIVE` on the migration ledger plus all 64 business tables, revalidates the run-bound exact v16 catalog plus snapshot source/target and live target identities, requires `progress.applied_seq == checkpoint.last_seq` at snapshot and again before business apply, and commits business rows, redacted run progress, and contiguous checkpoint together. Ambiguous commit recognition and poison publication repeat the same identity binding. Transient pool/connection/deadlock/serialization/lock/statement-timeout failures retry the whole transaction with capped jittered backoff; SQLite path/file binding failures use a dedicated identity exception rather than message-based conversion classification; proven conversion, schema, identity, constraint, and continuity failures record exactly one redacted poison at the actual blocking seq and never skip or advance. Every valid batch outcome emits exactly one metric; batch-event count is the actual accepted/observed raw-event count rather than lag, and retry counts are retained whenever observable. Metrics contain only run/direction/checkpoints/lag/counts/bytes/duration/retries/poison count, never table labels, keys, row values, URLs, worker ids, or exception text. Never wait for PG while holding a SQLite transaction. The explicit operator CLI owns preflight/start-forward/status/verify; a foreground worker holds one database-clock lease, finishes the current atomic batch on SIGTERM/INT, and runs conservative retention only behind FULL verification, active barriers, replay checkpoints, poison, seven days, and 100,000 tail events. This is an operational SQLite-active forward-shadow path only: cutover, reverse replication, and automatic `DATABASE_URL` changes remain unimplemented. Changing `DATABASE_URL` does not copy or synchronize data, and PostgreSQL-only writes are never replayed into SQLite.
+- `SHADOW_DATABASE_URL` remains inert by itself. The temporary `migration/shadow` boundary currently provides the exact SQLite v39/PostgreSQL v17/epoch-1 preflight/control/guards, run-bound atomic SQLite snapshots, bounded resumable 66-table baseline COPY through atomic H0, and a fail-stop single-consumer forward apply engine. The engine reads the global SQLite log strictly from checkpoint+1 without filtering away gaps, validates every run/epoch/table/op/key, hydrates current rows only for upserts in a short source snapshot, keeps deletes key-only with zero hydrated bytes, and preserves all seven SQLite rowid ordinals. Repeated stable keys in an accepted prefix coalesce to the last event and are emitted in global last-seq order; raw seq/checkpoint continuity is unchanged, while the final actual apply for an identity overrides any synthetic dependency contribution; only dependency-only identities contribute one reference-counted synthetic row and its bytes. A short read window ending below the allocated high-water is an immediate suffix gap before hydration/apply; a full window below high-water must probe the adjacent sequence in the same snapshot and fail if it is absent. Batches are hard-capped at 4,096 events/64 MiB: only one final bundle may exceed the byte cap, and a same-key replacement that grows past the cap must roll back and defer when another actual bundle is already accepted. FK parents come unconditionally from that same verified current-state snapshot through a 64-row-per-event closure; the fixed v17 graph's branch-counted bound is exactly 9 row slots. Dependency rows count toward bytes and deduplicate across the batch; never scan or trust suffix change-log metadata to authorize them. Target savepoints defer only FK/UNIQUE ordering SQLSTATEs; CHECK/NOT NULL poison immediately. Migration-derived plans cover exactly 89 PG17 unique surfaces: nullable columns park at NULL; non-FK/non-CHECK text/bigint use deterministic candidates scoped by indexable equality for non-NULL values and `IS NULL` for NULL values on the other unique columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first gap only when both int64 bounds are occupied); and only a statically proven no-incoming-FK leaf whose conflict key has an accepted current-final apply may delete/reinsert inside the same target transaction. Parked state is per unique surface and row identity; each stagnant pass parks every independently parkable conflict, and a successful final apply clears every parked surface for that identity. Deferred work is capped at eight passes, 32 actual statements per apply, and 16,384 actual statements total; every candidate query counts toward that budget, and ordering, statement, pass, and `ProgramLimitExceeded`/`DataError` candidate-search or candidate-update capacity exhaustion stays non-poison; `QueryCanceled` remains transient and retries the whole transaction. A final-window unparkable UNIQUE failure instead poisons its earliest actual event seq. `run_forever` doubles from 256 events/8 MiB through the hard caps after ordering-blocked; hard-cap exhaustion stays non-poison. After claiming the worker, the apply transaction must recheck existing poison for that run/direction before any business DML. Poison publication must likewise lock and inspect any existing run/direction poison after binding/checkpoint validation: an exact replay is ACK-loss success, while any differing record is stale and must never create a second poison. The target transaction follows migration→control→run→worker→checkpoint lock order, takes `SHARE ROW EXCLUSIVE` on the migration ledger plus all 66 business tables, revalidates the run-bound exact v17 catalog plus snapshot source/target and live target identities, requires `progress.applied_seq == checkpoint.last_seq` at snapshot and again before business apply, and commits business rows, redacted run progress, and contiguous checkpoint together. Ambiguous commit recognition and poison publication repeat the same identity binding. Transient pool/connection/deadlock/serialization/lock/statement-timeout failures retry the whole transaction with capped jittered backoff; SQLite path/file binding failures use a dedicated identity exception rather than message-based conversion classification; proven conversion, schema, identity, constraint, and continuity failures record exactly one redacted poison at the actual blocking seq and never skip or advance. Every valid batch outcome emits exactly one metric; batch-event count is the actual accepted/observed raw-event count rather than lag, and retry counts are retained whenever observable. Metrics contain only run/direction/checkpoints/lag/counts/bytes/duration/retries/poison count, never table labels, keys, row values, URLs, worker ids, or exception text. Never wait for PG while holding a SQLite transaction. The explicit operator CLI owns preflight/start-forward/status/verify; a foreground worker holds one database-clock lease, finishes the current atomic batch on SIGTERM/INT, and runs conservative retention only behind FULL verification, active barriers, replay checkpoints, poison, seven days, and 100,000 tail events. This is an operational SQLite-active forward-shadow path only: cutover, reverse replication, and automatic `DATABASE_URL` changes remain unimplemented. Changing `DATABASE_URL` does not copy or synchronize data, and PostgreSQL-only writes are never replayed into SQLite.
 - Shadow verification must record `Hv` in a SQLite read snapshot, release SQLite before waiting for PostgreSQL, pin a `REPEATABLE READ, READ ONLY` target snapshot at `Ht`, then scan the retained `(Hv,Hseen]` source log in a new SQLite transaction and exclude only those proven concurrent stable keys. Keep the PostgreSQL verifier barrier until the report commits. Structural verification covers the exact schema/guard contract, stable key sets and normalized hashes, FK/unique/cascade semantics, and storage-root-confined file references; full adds selected domain projections, float32 byte/dimension/norm/sampled-cosine checks, and the fixed bilingual retrieval gates (recall@12 loss ≤1 percentage point, top-10 overlap ≥0.90, exact citation/source-id sets). Cutover rechecks SQLite remains write-frozen and requires `Hv=Ht=MAX(seq)`, zero concurrent keys, 100% coverage, and a preceding complete full/cutover report. Persistent reports must remain redacted; only a clean report at the same or stronger level may supersede prior drift.
-- Baseline snapshot/COPY requires an owner-only non-symlink snapshot directory, fully qualifies every business-table statement to the run-bound schema, revalidates enabled live SQLite capture under a short `BEGIN IMMEDIATE` at initial binding, each committed batch/completion, and final H0 publication, and never holds that SQLite fence across PG prefix proof or `ANALYZE`. Snapshot and live-fence access must open a dedicated fresh connection to the file currently named by `SqliteDatabase.db_path`, never the repository thread-local connection; bind and recheck the resolved path plus `(st_dev, st_ino)` across open/transaction and immediately before snapshot publication or PG commit. This is a cooperative-operations boundary: replacing the file outside those checks is unsupported and the next check fails closed. JSONB prefix proofs canonicalize JSON numeric leaves only (bool excluded; int/float/Decimal share exact finite decimal semantics and negative zero becomes zero) while non-JSON SQL numeric columns retain their distinct type semantics. Resume uses bounded named server cursors; PG statements have a bounded timeout and cancellation polls surround proofs/migration/analysis. Full initial/final validation is derived from the checksummed packaged migrations and covers the exact v16 tables, columns, PK/FK/unique/check groups, operational and GIN indexes, and `public.pg_trgm`; lightweight per-batch validation must not rescan the 64-table catalog.
-- The final SQLite fence is a lease across commit, not a point-in-time check: acquire it only after PG migration/control/run/table locks and the long 64-table proof/`ANALYZE` phase, retain it while writing and committing the PG H0 checkpoint plus run progress, then release it. A PG transaction/commit failure rolls PG back and releases SQLite with no H0 publication; never acquire a pool/advisory lock or run long PG work while holding this fence.
+- Baseline snapshot/COPY requires an owner-only non-symlink snapshot directory, fully qualifies every business-table statement to the run-bound schema, revalidates enabled live SQLite capture under a short `BEGIN IMMEDIATE` at initial binding, each committed batch/completion, and final H0 publication, and never holds that SQLite fence across PG prefix proof or `ANALYZE`. Snapshot and live-fence access must open a dedicated fresh connection to the file currently named by `SqliteDatabase.db_path`, never the repository thread-local connection; bind and recheck the resolved path plus `(st_dev, st_ino)` across open/transaction and immediately before snapshot publication or PG commit. This is a cooperative-operations boundary: replacing the file outside those checks is unsupported and the next check fails closed. JSONB prefix proofs canonicalize JSON numeric leaves only (bool excluded; int/float/Decimal share exact finite decimal semantics and negative zero becomes zero) while non-JSON SQL numeric columns retain their distinct type semantics. Resume uses bounded named server cursors; PG statements have a bounded timeout and cancellation polls surround proofs/migration/analysis. Full initial/final validation is derived from the checksummed packaged migrations and covers the exact v17 tables, columns, PK/FK/unique/check groups, operational and GIN indexes, and `public.pg_trgm`; lightweight per-batch validation must not rescan the 66-table catalog.
+- The final SQLite fence is a lease across commit, not a point-in-time check: acquire it only after PG migration/control/run/table locks and the long 66-table proof/`ANALYZE` phase, retain it while writing and committing the PG H0 checkpoint plus run progress, then release it. A PG transaction/commit failure rolls PG back and releases SQLite with no H0 publication; never acquire a pool/advisory lock or run long PG work while holding this fence.
 - The separate `scripts/migrate_sqlite_to_postgres.py` is the owned stopped-snapshot import and local-activation boundary: dry-run by default; target URL from a named environment variable; read-only SQLite backup-API snapshot; schema upgrade only on a private working copy; exact manifest/empty-target guards; FK-ordered bounded COPY; reviewed JSON/timestamp/legacy-vector/NUL transforms; historical rowid→ordinal preservation and reseed; content checksums for every table; per-table checkpoint commits so a stopped import resumes; idempotent finalize; bounded session bulk-load tuning; and a credential-free receipt. It excludes only the reviewed SQLite-only `shadow_capture_control` / `shadow_change_log` operational tables regardless of prior audit rows and records that exclusion in the receipt; retired user-data tables remain empty-only. Default preview/apply never changes `DATABASE_URL`. Explicit activation requires both `--activate-env` and `--confirm-service-stopped`, re-snapshots the stopped source, revalidates the target, and atomically updates the env file while retaining the old SQLite URL as inert `SHADOW_DATABASE_URL`. It must never share a PostgreSQL target with `scripts/shadow_sqlite_to_postgres.py`, import MySQL, copy storage files, silently discard non-empty retired tables, expose credentials/row values, or permit a non-empty import target.
 - An online stopped-import rehearsal captures no later SQLite writes; that limitation does not describe the separate forward-shadow worker. A formal authority switch remains an operational stop/change/start boundary. PostgreSQL-only writes are never replayed into SQLite; before the first PG business write URL rollback is allowed, afterward external PG→SQLite reconciliation is mandatory.
 - `batch_ingest` phases `ingest` / `kg` / `index` / `all` / `embed` / `metadata` / `reparse` / `backfill-source-index` support both formal backends through the central factory. Direct PostgreSQL mutation is an offline boundary: reject it before repository construction unless the operator passes `--confirm-service-stopped`, then hold the independent-session database-wide advisory lock for the whole command and close the repository on every exit. The confirmation flag never stops services. `vectors-to-blob` is the only SQLite-only batch phase and PostgreSQL must reject it before repository construction; dry-run remains backend-independent and opens no repository. Production maintenance wrappers use the same shared opener/preflight/lock boundary.

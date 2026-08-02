@@ -411,6 +411,19 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
                 "('kg-done',%s,'incremental','done','finished','kept','kept','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
                 (notebook.id, notebook.id),
             )
+            db.execute(
+                "INSERT INTO catalog_jobs "
+                "(id,notebook_id,source_id,created_by,status,failure_reason,diagnostic,"
+                "created_at,updated_at,finished_at) VALUES "
+                "('catalog-running',%s,%s,%s,'running','','','2020-01-01T00:00:00Z',"
+                "'2020-01-01T00:00:00Z',NULL),"
+                "('catalog-done',%s,%s,%s,'succeeded','','','2020-01-01T00:00:00Z',"
+                "'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                (
+                    notebook.id, sources[0].id, owner.id,
+                    notebook.id, sources[1].id, owner.id,
+                ),
+            )
         repository.close()
 
         restarted = PostgresRepository(postgres_settings)
@@ -446,6 +459,10 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
                 kg_rows = {
                     row["id"]: row
                     for row in db.execute("SELECT * FROM kg_build_jobs").fetchall()
+                }
+                catalog_rows = {
+                    row["id"]: row
+                    for row in db.execute("SELECT * FROM catalog_jobs").fetchall()
                 }
             assert merge_rows[notebook.id]["status"] == "failed"
             assert merge_rows[notebook.id]["error"] == "中断:服务重启"
@@ -485,6 +502,19 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
             assert kg_rows["kg-done"]["status"] == "done"
             assert kg_rows["kg-done"]["error_code"] == "kept"
             assert kg_rows["kg-done"]["updated_at"].year == 2020
+            assert catalog_rows["catalog-running"]["status"] == "failed"
+            assert catalog_rows["catalog-running"]["diagnostic"] == "worker_interrupted"
+            # 措辞钉死: 与 app/services/catalog_job.py 的 INTERRUPTED_MESSAGE 同口径
+            # 用「识别」而非内部叫法「抽取」——这条 SQL 字面量绕过 user_error()/前端
+            # 词汇门,原样上屏。
+            failure_reason = catalog_rows["catalog-running"]["failure_reason"]
+            assert "抽取" not in failure_reason
+            assert "识别" in failure_reason
+            assert catalog_rows["catalog-running"]["updated_at"].year > 2020
+            assert catalog_rows["catalog-running"]["finished_at"].year > 2020
+            assert catalog_rows["catalog-done"]["status"] == "succeeded"
+            assert catalog_rows["catalog-done"]["failure_reason"] == ""
+            assert catalog_rows["catalog-done"]["updated_at"].year == 2020
         finally:
             restarted.close()
     finally:

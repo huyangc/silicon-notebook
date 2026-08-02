@@ -24,7 +24,9 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # rewritten wholesale by rebuild_communities under the community_seq gate.
 # v37 adds the indexed (source_id, element_type, created_at, id) keyset order
 # on source_elements for bounded, per-type collection enumeration.
-SCHEMA_VERSION = 38
+# v39 adds the command-catalog extraction job row (with its per-source
+# single-flight partial unique index) and its reviewable candidate rows.
+SCHEMA_VERSION = 39
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1922,6 +1924,113 @@ class SqliteMigrator:
                 "WHERE source_type NOT IN ('memory','knowhow')"
             )
 
+    def _migration_39(self) -> None:
+        """命令目录抽取(方案 C)的任务行与候选行。
+
+        `catalog_jobs` 是**跨进程单飞守卫的载体**,与 `kg_build_jobs` 同一条先例:
+        条件唯一索引把「一个来源同时只能有一个活跃抽取」钉在库里,而不是靠进程内
+        的一个集合——后者在多 worker / 进程重启后一文不值。守卫的粒度是 **source**
+        而非 notebook:一本手册一个来源,同库的另一本手册没有理由被挡住。
+        `queued` 与 `running` 都进守卫谓词:行先建、线程后起,那个窗口里重复 POST
+        必须被挡住,否则会排出两个写同一份候选的 job。
+
+        `catalog_candidates` 存**未确认**的抽取结果,包括被接地校验整条拦下的那些
+        (`state='rejected'`)。被拦条目入表是刻意的:一次「零产出」的抽取,用户唯一
+        能自己判断「是模型错了还是文档不是手册」的依据就是这些被拦记录与它们的
+        `reject_info`;把它们丢掉只会留下一个无从解释的空目录。
+
+        `position` 是**每个 job 内自增的插入序号**,存在的理由只有一个:候选列表要按
+        keyset 翻页,而 id 是随机 uuid、`created_at` 在同一节内逐字相同,两者都排不出
+        稳定全序。job 是单飞且不续跑的,所以序号由跑批的那一个线程递增即可,不需要
+        库内 `MAX()+1` 的读-改-写。索引 `(job_id, state, position)` 正是分页谓词。
+
+        `payload` / `reject_info` 是 JSON 文本(PostgreSQL 侧为 jsonb),`diagnostic`
+        是**内部诊断**、绝不上屏——只有 `failure_reason` 是按 `user_error()` 口径写的
+        中文用户文案。两列分开而不是合并,是为了让「能给用户看」这件事按出处判定,
+        而不是靠事后猜测某个字段的形态。
+
+        两张表的 `ON DELETE CASCADE` 都指向真正的主人:删来源/删库时,抽取任务与候选
+        必须一起走,不能留成指向已删来源的孤儿审阅队列。`catalog_candidates.job_id`
+        **刻意没有外键**(与 PostgreSQL 侧逐字对齐,理由见 0016 迁移的注释):任务行是
+        历史、从不单独删,真正的删除路径只有「删来源」「删库」,而候选自己挂在这两张
+        表上;反过来,一条指向 catalog_jobs 的入向外键会让它不再是叶表,而
+        `idx_catalog_jobs_one_active` 是 source_id 单列面(source_id 本身又是外键列、
+        NOT NULL),正向 shadow 的 UNIQUE 停车策略就只剩「叶表同事务 delete/reinsert」
+        这一条——加了那条外键会让整个 PG16 catalog 变成不可停车。
+
+        `truncated_sections` 与 `applied_table_id` 是这份迁移**发布前**的两处 C1b
+        评审修复,直接改在这张刚建、还没有任何部署过的表上(而不是追加
+        `_migration_40`)——`catalog_jobs` 本身就是本特性这一批引入的新表,没有
+        "已部署库版本闸短路" 的顾虑。`truncated_sections` 把 C1a 早就统计好的
+        `SectionOutcome.truncation.applied` 计数透传出来,好让审阅界面能说
+        「N 节因过长被截断」而不是让这条信息停在服务层。`applied_table_id` 记录
+        confirm 落进的知识库表:第一次 apply 成功后写入,后续同一个 job 的 apply
+        优先按它解析目标——按标题回退只在这一列为空、或它指向的表已经不在时才
+        发生,这样表被人工改名之后,同一个 job 的第二页确认依然写回同一张表,而
+        不是因为标题对不上就另起一张「命令目录：<来源>」。
+
+        `source_generation` 是同一批**发布前**评审修复的第三处(R8):这一列存的是
+        任务创建那一刻**来源元素的代次**——`MAX(source_elements.created_at)`,而
+        `replace_elements` 把重解析后的整批新元素写成同一个 `created_at`,所以它
+        当且仅当元素被换过时才变。候选行里的命令名、摘录、出处全部指向抽取时读到
+        的那一代元素;重解析之后原地把它们确认进知识表,写进去的就是文档里已经不
+        存在的内容。刻意**不**用 `sources.updated_at`(那也是这一列曾经的候选):它
+        是有意做粗的变更信号,每次生命周期状态迁移(`extracting`/`extracted`、摘要、
+        重新抽取)都会推进,而这些都不碰 `source_elements`——按它判会在一次普通的
+        重新抽取之后谎报「来源已重新解析」,并逼用户重跑一整轮付费识别。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS catalog_jobs (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'queued',
+                  sections_total INTEGER NOT NULL DEFAULT 0,
+                  sections_done INTEGER NOT NULL DEFAULT 0,
+                  entries INTEGER NOT NULL DEFAULT 0,
+                  rejected INTEGER NOT NULL DEFAULT 0,
+                  uncovered INTEGER NOT NULL DEFAULT 0,
+                  truncated_sections INTEGER NOT NULL DEFAULT 0,
+                  failure_reason TEXT NOT NULL DEFAULT '',
+                  diagnostic TEXT NOT NULL DEFAULT '',
+                  applied_table_id TEXT NOT NULL DEFAULT '',
+                  source_generation TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  finished_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_jobs_one_active
+                  ON catalog_jobs(source_id) WHERE status IN ('queued', 'running');
+                CREATE INDEX IF NOT EXISTS idx_catalog_jobs_source_created
+                  ON catalog_jobs(source_id, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_catalog_jobs_nb_created
+                  ON catalog_jobs(notebook_id, created_at DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS catalog_candidates (
+                  id TEXT PRIMARY KEY,
+                  job_id TEXT NOT NULL,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  position INTEGER NOT NULL DEFAULT 0,
+                  section_path TEXT NOT NULL DEFAULT '',
+                  command_name TEXT NOT NULL DEFAULT '',
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  state TEXT NOT NULL DEFAULT 'candidate',
+                  reject_info TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_catalog_candidates_job_state
+                  ON catalog_candidates(job_id, state, position);
+                CREATE INDEX IF NOT EXISTS idx_catalog_candidates_nb
+                  ON catalog_candidates(notebook_id);
+                CREATE INDEX IF NOT EXISTS idx_catalog_candidates_source
+                  ON catalog_candidates(source_id);
+                """
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
@@ -1972,6 +2081,24 @@ class SqliteMigrator:
                 "error_message='服务重启导致本次分析中断；"
                 "已完成内容已保留，可继续分析未完成内容。', "
                 "updated_at=?, finished_at=? WHERE status='running'",
+                (now, now),
+            )
+            # 命令目录抽取同理,且**必须连 'queued' 一起收**:单飞守卫的谓词是
+            # `status IN ('queued','running')`,只扫 running 会让一行崩在「已建行、
+            # 线程未起」窗口里的 queued 永久占住该来源的守卫,用户既看不到进度也
+            # 无法重新发起,而离线 CLI 无权自清。
+            # 措辞与 app/services/catalog_job.py 的 INTERRUPTED_MESSAGE 同步维护:
+            # 用户可见的动作叫「识别」,不是内部叫法「抽取」——这条 SQL 字面量绕开了
+            # user_error()/前端词汇门,原样上屏,必须自己保证界面词正确。R6 P1:
+            # 去掉「可重新发起识别」的无条件承诺——保留不等于够得着,`.../job` 只
+            # 返回最近一次任务,新任务一发起旧候选就永久孤儿化(见 catalog_job.py
+            # 的 `_reject_if_pending_candidates`,它现在也拦截这个终态)。
+            db.execute(
+                "UPDATE catalog_jobs SET status='failed', "
+                "failure_reason='服务重启导致命令目录识别中断；已生成的候选已保留，"
+                "请先在审阅面板确认或跳过，再重新发起识别。', "
+                "diagnostic='worker_interrupted', "
+                "updated_at=?, finished_at=? WHERE status IN ('queued','running')",
                 (now, now),
             )
             # 重聚类的两张 scratch 表是**纯瞬态**的:只有一次进行中的 rebuild 会读

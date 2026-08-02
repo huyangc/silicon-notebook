@@ -30,6 +30,15 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # "notebooks" carries the single source row that the copy service rewrites
 # into the destination's hidden 'copying' sentinel. Order matters only for
 # readability; the INSERT order (FK-safe) is owned by NotebookCopyService.
+#
+# Deliberately absent: `catalog_jobs` / `catalog_candidates` (command-catalog
+# extraction, schema v38). Those rows are transient *process* state — one run's
+# job progress and its not-yet-confirmed review queue — not knowledge. What a
+# person actually confirmed already lives in an ordinary knowhow table, which
+# this snapshot does copy. A copy therefore arrives with no half-reviewed
+# queue, which is the right shape: the queue belongs to the run that produced
+# it. Recorded here rather than left silent so the next reader can tell a
+# decision from an omission.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id = ?"),
     ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),

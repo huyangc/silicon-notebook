@@ -124,6 +124,12 @@ import {
   testSystemModelService,
 } from "./model-services.ts";
 import { FloatingModalCard } from "./floating-modal-card";
+import {
+  CommandCatalogReview,
+  CommandCatalogSection,
+  type CatalogConfirmRequest,
+  type CatalogReviewRequest,
+} from "./command-catalog-panel";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
@@ -821,6 +827,27 @@ export default function Home() {
   const [reparsingSource, setReparsingSource] = useState(false);
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
+  // 命令目录审阅弹窗:提升到 page 根层渲染(P0 修复,见 command-catalog-panel.tsx
+  // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
+  // 开关状态与渲染都在这里,与成本预告 `infoModal`/`confirmCommandCatalog` 同构。
+  const [catalogReview, setCatalogReview] = useState<CatalogReviewRequest | null>(null);
+  // R8(codex PR #412 评审 P1):审阅弹窗每完成一次确认/跳过就 +1,入口卡片据此
+  // 重新读一次 job。两者之间没有共享状态(弹窗在根层、卡片在来源详情里),而
+  // 卡片手里的 job 快照带着「重新识别」的拦截判据 pending_candidates —— 候选全
+  // 部审完之后不重读,那颗按钮会一直禁用到用户重开来源详情为止。
+  const [catalogReviewSeq, setCatalogReviewSeq] = useState(0);
+  // 审阅弹窗不再是来源详情的子树,不会随它一起卸载——必须自己在来源切换/来源
+  // 详情关闭/切换笔记本时跟着关,否则会有一个指向旧来源的审阅弹窗孤零零地浮在
+  // 界面上。openSourceById 是打开任意来源的唯一入口(见其注释),换源与关闭都会
+  // 改变或清空 sourceDetail?.id;currentNotebookId 一并纳入依赖,和 lift 之前
+  // CommandCatalogSection 内部那条 `[notebookId, sourceId]` 重置 effect 同一口径。
+  // 计数器与弹窗同一次归零:它是「本次来源里做过几次审阅动作」,换源后旧来源的
+  // 次数对新来源没有意义。归零也走 CommandCatalogSection 的 `reviewSeq <= 0`
+  // 提前 return,不会给刚切过去的来源白发一次请求。
+  useEffect(() => {
+    setCatalogReview(null);
+    setCatalogReviewSeq(0);
+  }, [sourceDetail?.id, currentNotebookId]);
   const [toast, setToast] = useState("");
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [modelStatusState, setModelStatusState] = useState({
@@ -4105,6 +4132,27 @@ export default function Home() {
     setKnowhowNavigation(openKnowhowNavigation({ jumpTarget: { tableId, rowId } }));
   }
 
+  // 命令目录确认落库后的「去看这张表」落点：只定位到表，不指定行（刚写入的是一批
+  // 行，挑其中任意一行当落点都是随意的）。KnowhowJumpTarget.rowId 本就允许 null。
+  function openKnowhowTable(tableId: string) {
+    setSourceDetail(null);
+    setKnowhowNavigation(openKnowhowNavigation({ jumpTarget: { tableId, rowId: null } }));
+  }
+
+  // 命令目录入口的成本预告确认：复用本文件既有的 infoModal（已经是可拖动的
+  // FloatingModalCard），不让面板自己再造一套居中确认框。
+  function confirmCommandCatalog(request: CatalogConfirmRequest) {
+    setInfoModal({
+      title: request.title,
+      message: request.body,
+      sections: request.sections,
+      actions: [
+        { label: "取消", action: () => {} },
+        { label: request.confirmLabel, primary: true, action: request.onConfirm },
+      ],
+    });
+  }
+
   async function openKgView(
     targetNodeId?: string,
     notebookId: string | null = currentNotebookId,
@@ -6324,6 +6372,21 @@ export default function Home() {
                   ))}
                 </div>
               )}
+              {/* 命令目录（方案 C）：只对本笔记本自己的来源渲染。参考库来源是只读的，
+                  发起/取消/确认在后端都是 owner-only 且按 notebook 收窄，对一个只是被
+                  挂载进来的库发起会花这个库的钱、写那个库的知识——授权语义是错的，
+                  入口连出现都不该出现（与上方重新解析/删除同一条判据）。 */}
+              {!sourceDetailBaseId && currentNotebookId && (
+                <CommandCatalogSection
+                  notebookId={currentNotebookId}
+                  sourceId={sourceDetail.id}
+                  sourceTitle={sourceDetail.title}
+                  canEdit={!isReader}
+                  onConfirm={confirmCommandCatalog}
+                  onOpenReview={setCatalogReview}
+                  reviewSeq={catalogReviewSeq}
+                />
+              )}
               <div className="source-element-stack">
                 {sourceElements.length > 0 ? sourceElements.map((element) => (
                   <article
@@ -6353,6 +6416,25 @@ export default function Home() {
                 )}
           </div>
         </SourceDetailWindow>
+      )}
+
+      {/* 命令目录审阅弹窗:必须挂在 page 根层、不能挂进上面 SourceDetailWindow 的
+          子树——那张卡片自己就是 FloatingModalCard,桌面态恒带 translate3d 因而
+          是 fixed 后代的包含块,920px 宽的审阅弹窗塞进 740px 的来源详情卡片会被
+          overflow:hidden 裁掉(P0,两次评审独立确认)。与 infoModal/MemorySaveDialog
+          同一种「调用方持有开关状态、根层渲染」形状。 */}
+      {catalogReview && (
+        <CommandCatalogReview
+          notebookId={catalogReview.notebookId}
+          sourceId={catalogReview.sourceId}
+          sourceTitle={catalogReview.sourceTitle}
+          jobId={catalogReview.jobId}
+          canEdit={!isReader}
+          onClose={() => setCatalogReview(null)}
+          onOpenTable={openKnowhowTable}
+          onToast={setToast}
+          onReviewed={() => setCatalogReviewSeq((seq) => seq + 1)}
+        />
       )}
 
       {analytics && (

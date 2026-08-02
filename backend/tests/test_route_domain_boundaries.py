@@ -5,6 +5,7 @@ from fastapi.routing import APIRoute
 
 from app.api.admin_routes import router as admin_router
 from app.api.ask_routes import router as ask_router
+from app.api.catalog_routes import router as catalog_router
 from app.api.content_overview_routes import router as content_overview_router
 from app.api.kg_routes import router as kg_router
 from app.api.knowhow_routes import router as knowhow_router
@@ -29,6 +30,7 @@ DOMAIN_ROUTERS = (
     report_router,
     kg_router,
     admin_router,
+    catalog_router,
 )
 EXPECTED_COMPOSITION_NAMES = (
     "memory_router",
@@ -42,6 +44,13 @@ EXPECTED_COMPOSITION_NAMES = (
     "report_router",
     "kg_router",
     "admin_router",
+    # Appended, not slotted next to source_router: this just continues the
+    # existing habit of adding new domain routers at the end. It is not
+    # enforced by anything — the api_contract fixture is written with
+    # `sort_keys=True` (see generate_repository_contract_fixtures.py's
+    # `_write_json`), so `paths` lands sorted by path string regardless of
+    # registration order (see the comment at the composition site).
+    "catalog_router",
 )
 
 

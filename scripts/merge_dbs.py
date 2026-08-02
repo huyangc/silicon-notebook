@@ -96,6 +96,12 @@ SKIP_SECONDARY_TABLES = [
     # 全局设置 KV(含每笔记本文档数量上限的全局默认)属于 primary 部署;导入副库的
     # app_settings 会覆盖 primary 的部署级配置,故与部署健康表同款只保 primary。
     "app_settings",
+    # 命令目录抽取(command-catalog, v38)的运行期*进程*状态 —— 一次运行的任务进度与
+    # 尚未审阅完的候选队列, 不是知识。人已经确认过的内容早就落进普通 knowhow 表(会
+    # 随 NOTEBOOK_SCOPED_TABLES 正常合并), 副库这份队列合进来只会带来一个半审阅完的
+    # 残局, 谁也接不上。同一理由与措辞见 sharing_store.py 深拷贝快照里对这两张表的
+    # 同款排除注释。
+    "catalog_jobs", "catalog_candidates",
     # --- 理由 (b): KG 质量分析的预计算产物(跨板块边 / 来源画像 / 产物账本, v34)。---
     # 三张都是 `rebuild_communities` 一次事务整体重写的派生数据,而 `kg_analysis_artifacts`
     # 这本账里每行都钉着它建于哪个 `kg_mutation_seq`。这个版本戳只在**它自己那个库**里

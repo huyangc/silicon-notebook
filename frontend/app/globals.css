@@ -4402,6 +4402,15 @@ button.chat-session-card {
   cursor: pointer;
 }
 
+/* 写死了 background/color，浏览器默认的 :disabled 变灰对它完全无效（同 .icon-button/
+   .sort-button/.ghost-button 那条共用规则要解决的问题，本文件搜 "对它们完全无效" 定位）
+   ——命令目录审阅弹窗给页签加 disabled(见 command-catalog-panel.tsx)防 apply 在飞时切
+   页签串台，这里补上视觉信号，否则禁用了却看不出来。 */
+.chat-tab:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
 .chat-tab.active {
   background: #101820;
   color: #fff;
@@ -8496,3 +8505,252 @@ button.chat-session-card {
    不可逆,这一行必须比上面的说明文字更醒目。复用 .base-picker-hint 同款告警色,
    但加粗:这里警示的后果("这些笔记本会立即失去参考库")比"检索会变慢"更严重。 */
 .delete-mount-warning { margin: 8px 0 0; color: var(--warning, #b8860b); font-weight: 600; line-height: 1.45; }
+
+/* ── 命令目录(方案 C):来源详情里的入口卡片 + 审阅弹窗 ───────────────────────
+   卡片形态而非标题栏图标的理由见 command-catalog-panel.tsx 头注释(要同时装下
+   进度行、失败文案和取消按钮)。视觉上刻意比 .source-guide-card 轻:它是"这份
+   来源能做什么"的操作区,不是内容区,不该跟摘要抢注意力。 */
+.catalog-card {
+  margin: 12px 0 4px;
+  padding: 14px 18px;
+  border: 1px solid #dfe3ec;
+  border-radius: 16px;
+  background: #fbfcfe;
+}
+
+.catalog-card-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink, #17202a);
+}
+
+.catalog-card-head p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted, #657080);
+}
+
+/* 状态行三档语气。异常走 --danger、进行中走中性强调、正常结果走 muted ——
+   与来源异常小字(AnomalyBadge)同一套 token,不另造颜色。 */
+.catalog-status {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.catalog-status--progress { color: var(--ink, #17202a); font-weight: 600; }
+.catalog-status--info { color: var(--muted, #657080); }
+.catalog-status--danger { color: var(--danger, #b42318); }
+
+/* 轮询窗口过期后的手动刷新入口:内联在提示文案里,不需要卡片主按钮那样的
+   视觉分量——与它旁边 .catalog-status--info 的文案同一行、同一种克制的语气。 */
+.catalog-poll-refresh {
+  margin-left: 8px;
+  min-height: 24px;
+  padding: 0 10px;
+  border: 1px solid #d2d6df;
+  border-radius: 999px;
+  background: #fff;
+  color: #22272e;
+  font-size: 12px;
+  vertical-align: middle;
+}
+
+.catalog-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+/* 卡片里的按钮比页面主 CTA 小一号:它们是局部动作,42px 在这张卡里显得过重。 */
+.catalog-card-actions .new-pill,
+.catalog-card-actions .sort-button {
+  min-height: 34px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+
+/* ── 审阅弹窗 ──────────────────────────────────────────────────────────────── */
+.catalog-review-card {
+  width: min(920px, 94vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 标题栏第二行是来源名,可能很长 —— 单行省略号截断,全名由 title 暴露。 */
+.catalog-review-card .source-modal-header p {
+  max-width: 620px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-review-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.catalog-review-counts { display: flex; flex-wrap: wrap; gap: 8px; }
+.catalog-review-tabs { margin: 0; }
+
+.catalog-select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted, #657080);
+}
+
+.catalog-review-list { display: flex; flex-direction: column; gap: 10px; }
+
+.catalog-item {
+  border: 1px solid #e3e7ef;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #fff;
+}
+
+/* 一行四段(勾选/命令名/出处/参数数)靠 flex 对齐;命令名占剩余宽度并省略号截断,
+   出处标签给一个上限,免得深层面包屑把整行推爆。 */
+.catalog-item-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.catalog-item-name {
+  flex: 1;
+  min-width: 120px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-item-section {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-item-suspect { color: var(--warning, #8a5a00); }
+
+.catalog-item-toggle { min-height: 28px; padding: 0 10px; font-size: 12px; }
+
+.catalog-syntax,
+.catalog-excerpt {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f4f6fa;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.catalog-excerpt { background: #fbf7ee; color: #5c4a22; max-height: 200px; overflow: auto; }
+
+.catalog-reject-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--danger, #b42318);
+}
+
+/* 展开面板里那份「未采纳的内容」。同一批记录挂在一条**能用**的候选上时降一档
+   语气:整条被拦下(未通过页签)才是 --danger,个别字段落空是提醒。 */
+.catalog-reject-list--notice { color: var(--warning, #8a5a00); }
+
+.catalog-item-detail { margin-top: 10px; }
+.catalog-item-desc { margin: 0 0 8px; font-size: 13px; line-height: 1.55; }
+
+/* 展开面板里的小节标题(目前只有「示例」)。参数表自带表头,不需要它。 */
+.catalog-detail-title {
+  margin: 12px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted, #657080);
+}
+
+/* 中性 info 口径的说明小字。示例是模型自撰、未经接地校验的内容,这句话必须
+   跟着它一起出现——但它是一条属性说明,不是异常,所以不走 --danger/--warning。 */
+.catalog-item-note {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted, #657080);
+}
+
+.catalog-example-block .catalog-item-toggle { margin-top: 8px; }
+
+.catalog-arg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.catalog-arg-table th,
+.catalog-arg-table td {
+  border-bottom: 1px solid #eceff5;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.catalog-arg-table th { color: var(--muted, #657080); font-weight: 600; }
+
+.catalog-excerpt-stack { display: flex; flex-direction: column; gap: 6px; }
+
+.catalog-empty { margin: 12px 0; font-size: 13px; color: var(--muted, #657080); }
+.catalog-more { align-self: flex-start; min-height: 34px; padding: 0 16px; font-size: 14px; }
+
+.catalog-outcome {
+  border: 1px solid #dde6f5;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #f4f8ff;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.catalog-outcome-headline { margin: 0; font-size: 14px; font-weight: 700; }
+.catalog-outcome-note { margin: 0; font-size: 13px; color: var(--muted, #657080); line-height: 1.5; }
+
+/* 底栏与列表同宽、常驻可见(不随列表滚动),确认动作永远够得着。 */
+.catalog-review-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 24px 18px;
+  border-top: 1px solid #eceff5;
+}
+
+.catalog-selected-count { flex: 1; min-width: 160px; font-size: 13px; color: var(--muted, #657080); }
+.catalog-review-footer .new-pill,
+.catalog-review-footer .sort-button { min-height: 36px; padding: 0 18px; font-size: 14px; }
+
+@media (max-width: 720px) {
+  .catalog-review-card { width: 96vw; }
+  .catalog-item-section { max-width: 160px; }
+}

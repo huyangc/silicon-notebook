@@ -361,6 +361,16 @@ def model_provider_if_initialized():
     return repository()._runtime.models  # type: ignore[attr-defined]
 
 
+from app.services.catalog_job import CommandCatalogService  # noqa: E402
+
+
+def command_catalog_service() -> CommandCatalogService:
+    """命令目录抽取 service(方案 C·C1b)。构造在**中性 runtime** 里,facade 只是一跳
+    委托;facade 是 lru_cache 单例 → 这个 service 也是单例,取消事件注册表因此跨请求
+    与后台线程存活(发起 job 的请求线程与跑 job 的线程必须看到同一份)。"""
+    return repository().command_catalog  # type: ignore[attr-defined]
+
+
 def model_service_binding_summary() -> dict[str, bool]:
     """Read-only readiness summary with no service identity or live diagnostics."""
     models = repository()._runtime.models  # type: ignore[attr-defined]
