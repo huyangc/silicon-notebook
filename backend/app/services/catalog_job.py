@@ -989,6 +989,36 @@ class CommandCatalogService:
         is told to wait, with the SAME copy the barrier-contention case uses,
         because from the outside the two situations are indistinguishable and
         the remedy is identical either way.
+
+        R17 (codex PR #412 review, rebutted) — this is DELIBERATELY a
+        point-in-time read, not a value re-checked against the write that
+        follows it. The claim was that a reparse flipping the source to
+        ``parsing`` right AFTER this check returns — but before
+        ``_apply_locked`` lands its rows — leaves "permanently stale" knowhow
+        rows, and that the fix is to make the status flip and this check
+        synchronous. Rebutted on two independent grounds: first, ``apply``
+        already holds ``_source_write_barrier(source_id)`` for the ENTIRE
+        write, and ``replace_elements`` cannot run without that same barrier
+        (see ``_reparse_the_way_the_pipeline_does`` in the tests) — so no
+        element the write reads can have changed inside this call no matter
+        when the status column itself flips; the row lands describing the
+        SAME generation this check just confirmed. Second, a reparse whose
+        parse stage begins only after this check returns is, from the source's
+        own perspective, indistinguishable from a user clicking 「重新解析」 the
+        instant AFTER this apply call finishes — a plain serial ordering, not
+        a race this call is any part of. That ordering already has an owner:
+        the NEXT touch of this job runs ``_require_current_generation`` first
+        and finds the generation this apply's write landed against no longer
+        current, expiring every surviving ``candidate`` row as
+        ``source_reparsed`` (see that guard, and
+        ``test_apply_tolerates_a_reparse_flipping_to_parsing_after_the_status_check``
+        below for both halves pinned together). Making this check synchronous
+        with the write would not shrink the set of reachable terminal states —
+        the reparse still eventually completes and the generation guard still
+        eventually catches it — it would only require ``SourceIngestionService``
+        to reach back for the catalog's own lock, the one cycle
+        ``_target_lock_key``'s docstring refuses to create, in exchange for
+        zero additional correctness.
         """
         source = self._scoped_source(notebook_id, source_id)
         parse_status = str(getattr(source, "parse_status", "") or "")
