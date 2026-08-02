@@ -315,7 +315,12 @@ worker。每个分片一次模型调用，一个分片是一条命令的一批�
 
 **确认与合并。** 候选在人工确认前都是未生效的。确认时若不存在则创建名为
 「命令目录：<来源标题>」的 Knowhow 表（固定六列：命令 / 语法 / 参数 / 说明 / 示例 /
-出处，其中「命令」是行标题列），已存在则**只新增表里没有的命令**。候选的命令在表里
+出处，其中「命令」是行标题列），已存在则**只新增表里没有的命令**。`<来源标题>` 与来源在
+产品其他各处（引用卡、证据卡、清单卡）显示的名字是同一个：来源已接地判定为论文且解析出
+非空 `paper_title` 时用论文标题，否则用普通来源名/上传文件名——同一份手册不会在自己的
+目录表上叫另一个名字。这个标题只在**首次**为某个任务创建目标表那一刻解析一次；此后该
+任务的确认都按它记住的 `applied_table_id` 继续写回同一张表，哪怕后续论文元数据补抽让
+标题变了，也不会改名或劈出第二张表。候选的命令在表里
 已有对应行时，会原样回报进 `conflicts`，那一行**不动**——v1 刻意绝不覆盖用户可能已经
 手工订正过的内容，完整的 diff/merge 属于后续任务。列按**名字**寻址，所以之后编辑目标表的
 列不会把内容悄悄挪进错误的一列；表若已丢掉「命令」列，则拒绝写入而不是硬写。一次
@@ -355,8 +360,8 @@ Knowhow 表。
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` —— 该来源最近一次任务：`status` 与 `progress`（`sections_total`、`sections_done`、`entries`、`rejected`、`uncovered`、`truncated_sections`、`pending_candidates`），失败时带 `failure_reason`。内部诊断列 `diagnostic` 刻意不进响应
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` —— `cancelling`（worker 会在下一个分片边界停，飞行中的一次模型调用被取消时也会停，不必等到那次调用返回）、`cancelled`（本进程没有在跑它，直接落终态）或 `not_running`
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/candidates` —— keyset 分页（`job_id?`、`state=candidate|rejected|applied|dismissed`、`cursor`、`limit`）并带各档 `counts`。`next_cursor` 是上一页最后一条的 `position` 而不是 offset：确认候选会改 `state`，offset 分页会漏行/重行。`dismissed` 候选带 `dismiss_reason`：`conflict_existing_row`（apply 发现已有同名行）、`user_dismissed`（人工显式跳过）或 `source_reparsed`（来源已重新解析，这一轮结果整批过期）
-- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` —— body 为 `{candidate_ids}` 或 `{all_pending: true}`；返回 `table_id`、`created`、`applied`、`rows_added`、`conflicts` 与 `pending_remaining`（一次调用最多确认一页）。来源在这一轮之后被重新解析时返回带用户可读文案的 `409`，并整批作废该任务剩余候选；重新解析**正在进行中**（还没换掉元素）时是另一条 `409`，措辞不同且**不作废任何候选**——解析可能在换元素之前就失败，那批候选仍然有效
-- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` —— body 为 `{candidate_ids}` 或 `{all_pending: true}`，选择契约与单页上限同 `apply`；把选中的 `candidate` 态候选标记为 `dismissed`（原因 `user_dismissed`），不碰任何 Knowhow 表；返回 `dismissed`（真正被标记的 id）与 `pending_remaining`。来源被重新解析、或重新解析正在进行中时，两条 `409` 都同 `apply`
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` —— body 为 `{candidate_ids}` **二选一** `{all_pending: true}`——两者同时非空/为真会返回带用户可读文案的 `422`（此前会静默偏向 `all_pending`，比调用方明确写出的 `candidate_ids` 更宽的一次写，调用方看不出自己传的选择被悄悄吞掉）；返回 `table_id`、`created`、`applied`、`rows_added`、`conflicts` 与 `pending_remaining`（一次调用最多确认一页）。来源在这一轮之后被重新解析时返回带用户可读文案的 `409`，并整批作废该任务剩余候选；重新解析**正在进行中**（还没换掉元素）时是另一条 `409`，措辞不同且**不作废任何候选**——解析可能在换元素之前就失败，那批候选仍然有效
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` —— body 为 `{candidate_ids}` **二选一** `{all_pending: true}`，选择契约（含两者同传时的 `422`）与单页上限同 `apply`；把选中的 `candidate` 态候选标记为 `dismissed`（原因 `user_dismissed`），不碰任何 Knowhow 表；返回 `dismissed`（真正被标记的 id）与 `pending_remaining`。来源被重新解析、或重新解析正在进行中时，两条 `409` 都同 `apply`
 
 ## 检索模式（问答）
 
