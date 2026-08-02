@@ -367,6 +367,7 @@ def apply_command_catalog(
         knowhow_api.get_scheduler(repo).schedule(result["table_id"])
     return CommandCatalogApplyResult(
         table_id=result["table_id"],
+        table_title=str(result["table_title"]),
         created=bool(result["created"]),
         applied=list(result["applied"]),
         rows_added=int(result["rows_added"]),

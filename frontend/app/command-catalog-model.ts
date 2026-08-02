@@ -320,12 +320,14 @@ export type CatalogApplyOutcome = {
  *  · 哪些**没有**写入(conflicts:目标表已有同名行,v1 绝不覆盖手工编辑过的内容);
  *  · 还剩几条待审阅(pending_remaining:一次最多确认一页,300 条点一次「确认全部」
  *    拿到 rows_added:100 会以为做完了)。
+ *
+ * 表名读 `result.table_title`(后端权威值,R15/codex PR #412 评审第 15 轮),
+ * 不再由调用方传一个从 `sourceDetail.title` 预测出来的字符串——论文来源的
+ * 上传文件名与后端实际建表所用的规范标题(接地论文标题优先)可以不同,预测
+ * 会让「已写入《命令目录：<预测名>》」这句话在那种来源上撒谎。
  */
-export function catalogApplyOutcome(
-  result: CommandCatalogApplyResult,
-  tableTitle: string,
-): CatalogApplyOutcome {
-  const where = tableTitle ? `《${tableTitle}》` : "命令目录表";
+export function catalogApplyOutcome(result: CommandCatalogApplyResult): CatalogApplyOutcome {
+  const where = result.table_title ? `《${result.table_title}》` : "命令目录表";
   const headline = result.rows_added > 0
     ? (result.created
       ? `已新建${where}并写入 ${result.rows_added} 条命令`
@@ -362,9 +364,4 @@ export function catalogDismissOutcome(result: CommandCatalogDismissResult): Cata
     ? `还有 ${result.pending_remaining} 条待审阅，可以继续确认或跳过。`
     : "";
   return { headline, conflictNote: "", remainingNote, canOpenTable: false };
-}
-
-/** 「命令目录：<来源标题>」—— 与后端 CATALOG_TABLE_TITLE_PREFIX 逐字对齐。 */
-export function catalogTableTitle(sourceTitle: string): string {
-  return `命令目录：${sourceTitle}`;
 }

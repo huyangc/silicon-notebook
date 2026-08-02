@@ -2369,6 +2369,19 @@ class KnowhowStorePort(Protocol):
         full row/cell hydrate just to find out.
         """
         ...
+    def knowhow_table_title(self, table_id: str) -> str:
+        """A table's current ``title`` alone. Raises ``KeyError`` if the
+        table is gone, same contract as ``knowhow_table_columns``.
+
+        Exists for the same reason ``knowhow_table_columns`` does: a caller
+        that resolved a target table through a REMEMBERED id (command
+        catalog's ``applied_table_id`` fast path) cannot assume the title it
+        would DERIVE today still matches — the source's canonical title can
+        drift mid-job (async paper-metadata backfill) or the table can have
+        been renamed by hand between two calls — and must not pay for a full
+        ``get_knowhow_table`` row/cell hydrate just to read one column.
+        """
+        ...
     def knowhow_anchor_existing_values(
         self, column_id: str, values: Sequence[str]
     ) -> set[str]:

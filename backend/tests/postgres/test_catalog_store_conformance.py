@@ -7,10 +7,10 @@ identical assertions, same service layer). This file only proves the things
 that are genuinely backend-specific — the migration actually adds the two new
 ``catalog_jobs`` columns on PostgreSQL, and the bounded ``KnowhowStorePort``
 methods (``knowhow_table_columns``, ``knowhow_anchor_existing_values``,
-``knowhow_table_id_by_title``) behave the same way against real PostgreSQL
-SQL (``btrim`` instead of SQLite's ``trim``, ``= ANY(%s)`` instead of
-``IN (...)``, ``COLLATE "C"`` instead of SQLite's default binary collation)
-as they do against SQLite.
+``knowhow_table_id_by_title``, ``knowhow_table_title``) behave the same way
+against real PostgreSQL SQL (``btrim`` instead of SQLite's ``trim``,
+``= ANY(%s)`` instead of ``IN (...)``, ``COLLATE "C"`` instead of SQLite's
+default binary collation) as they do against SQLite.
 """
 from __future__ import annotations
 
@@ -305,6 +305,30 @@ def test_knowhow_table_columns_never_hydrates_rows_and_raises_on_a_missing_table
 
     with pytest.raises(KeyError):
         harness.knowhow.knowhow_table_columns("khtbl-does-not-exist")
+
+
+def test_knowhow_table_title_is_a_bare_point_lookup_and_raises_on_a_missing_table(
+    catalog_harness,
+):
+    """R15 (codex PR #412 评审第 15 轮,P2): the new bounded title-only
+    accessor `apply`'s `applied_table_id` fast path uses to report a
+    non-stale `table_title`. Mirrors `knowhow_table_columns` above — one
+    point lookup by primary key, KeyError when the table is gone."""
+    harness = catalog_harness
+    table_id = harness.knowhow.create_knowhow_table(
+        harness.notebook_id,
+        "命令目录：OpenROAD 手册",
+        "",
+        [
+            {"name": "命令", "role": "anchor"},
+            {"name": "说明", "role": "attribute"},
+        ],
+        "user-catalog",
+    )
+    assert harness.knowhow.knowhow_table_title(table_id) == "命令目录：OpenROAD 手册"
+
+    with pytest.raises(KeyError):
+        harness.knowhow.knowhow_table_title("khtbl-does-not-exist")
 
 
 def test_knowhow_anchor_existing_values_is_bounded_and_normalizes_whitespace(

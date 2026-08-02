@@ -1139,6 +1139,17 @@ class KnowhowStore:
             for column in column_rows
         ]
 
+    def knowhow_table_title(self, table_id: str) -> str:
+        """See ``KnowhowStorePort.knowhow_table_title``. One point lookup by
+        primary key, no rows/cells/columns touched."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT title FROM knowhow_tables WHERE id = ?", (table_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(table_id)
+        return str(row["title"])
+
     def knowhow_anchor_existing_values(
         self, column_id: str, values: Sequence[str]
     ) -> set[str]:

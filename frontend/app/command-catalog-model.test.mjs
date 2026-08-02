@@ -17,7 +17,6 @@ import {
   catalogPreviewCopy,
   catalogProgressText,
   catalogStatusLine,
-  catalogTableTitle,
   dismissReasonText,
   isCatalogBusy,
   isCatalogSettled,
@@ -301,20 +300,18 @@ test("提交顺序按 position，不按勾选顺序（列表看到的就是提�
 });
 
 test("确认结果三件事齐全：新增几条 / 哪些没写入 / 还剩几条", () => {
-  const outcome = catalogApplyOutcome(
-    {
-      table_id: "t-1",
-      created: true,
-      applied: ["c1", "c2"],
-      rows_added: 100,
-      conflicts: [
-        { candidate_id: "c9", command_name: "set_db" },
-        { candidate_id: "c8", command_name: "report_timing" },
-      ],
-      pending_remaining: 200,
-    },
-    catalogTableTitle("工具手册"),
-  );
+  const outcome = catalogApplyOutcome({
+    table_id: "t-1",
+    table_title: "命令目录：工具手册",
+    created: true,
+    applied: ["c1", "c2"],
+    rows_added: 100,
+    conflicts: [
+      { candidate_id: "c9", command_name: "set_db" },
+      { candidate_id: "c8", command_name: "report_timing" },
+    ],
+    pending_remaining: 200,
+  });
   assert.match(outcome.headline, /已新建《命令目录：工具手册》并写入 100 条命令/);
   assert.match(outcome.conflictNote, /2 条已存在同名行，未改动，已跳过，不再重复确认：set_db、report_timing/);
   // 300 条候选点一次「确认全部」拿到 100 会以为做完了 —— 剩余必须显式提示。
@@ -322,28 +319,48 @@ test("确认结果三件事齐全：新增几条 / 哪些没写入 / 还剩几�
   assert.equal(outcome.canOpenTable, true);
 });
 
+test("表名读后端 table_title——论文来源的上传文件名与实际建表标题可以不同", () => {
+  // R15(codex PR #412 评审第 15 轮，P2）：headline 必须原样使用后端返回的
+  // table_title，而不是调用方自己从来源标题（论文来源的上传文件名）拼出来的
+  // 预测；这里 table_title 刻意是「接地论文标题」，与「上传文件名」不同字面，
+  // 证明摘要跟着后端值走。
+  const outcome = catalogApplyOutcome({
+    table_id: "t-1",
+    table_title: "命令目录：A Grounded Paper Title",
+    created: true,
+    applied: ["c1"],
+    rows_added: 1,
+    conflicts: [],
+    pending_remaining: 0,
+  });
+  assert.match(outcome.headline, /已新建《命令目录：A Grounded Paper Title》并写入 1 条命令/);
+});
+
 test("既有表只说「新增」，不说「新建」", () => {
-  const outcome = catalogApplyOutcome(
-    { table_id: "t-1", created: false, applied: ["c1"], rows_added: 1, conflicts: [], pending_remaining: 0 },
-    catalogTableTitle("工具手册"),
-  );
+  const outcome = catalogApplyOutcome({
+    table_id: "t-1",
+    table_title: "命令目录：工具手册",
+    created: false,
+    applied: ["c1"],
+    rows_added: 1,
+    conflicts: [],
+    pending_remaining: 0,
+  });
   assert.match(outcome.headline, /已向《命令目录：工具手册》新增 1 条命令/);
   assert.equal(outcome.conflictNote, "");
   assert.equal(outcome.remainingNote, "");
 });
 
 test("零新增不给「去看这张表」入口——那次确认没有任何东西可看", () => {
-  const outcome = catalogApplyOutcome(
-    {
-      table_id: "",
-      created: false,
-      applied: [],
-      rows_added: 0,
-      conflicts: [{ candidate_id: "c1", command_name: "set_db" }],
-      pending_remaining: 0,
-    },
-    catalogTableTitle("工具手册"),
-  );
+  const outcome = catalogApplyOutcome({
+    table_id: "",
+    table_title: "",
+    created: false,
+    applied: [],
+    rows_added: 0,
+    conflicts: [{ candidate_id: "c1", command_name: "set_db" }],
+    pending_remaining: 0,
+  });
   assert.equal(outcome.headline, "没有新增命令");
   assert.equal(outcome.canOpenTable, false);
   assert.match(outcome.conflictNote, /1 条已存在同名行/);
@@ -354,18 +371,19 @@ test("冲突很多时只列前几条，不把一屏命令名倒进提示里", ()
     candidate_id: `c${i}`,
     command_name: `cmd_${i}`,
   }));
-  const outcome = catalogApplyOutcome(
-    { table_id: "t-1", created: false, applied: [], rows_added: 0, conflicts, pending_remaining: 0 },
-    catalogTableTitle("手册"),
-  );
+  const outcome = catalogApplyOutcome({
+    table_id: "t-1",
+    table_title: "命令目录：手册",
+    created: false,
+    applied: [],
+    rows_added: 0,
+    conflicts,
+    pending_remaining: 0,
+  });
   assert.match(
     outcome.conflictNote,
     /^9 条已存在同名行，未改动，已跳过，不再重复确认：cmd_0、cmd_1、cmd_2、cmd_3、cmd_4 等 9 条$/,
   );
-});
-
-test("表名与后端 CATALOG_TABLE_TITLE_PREFIX 逐字一致", () => {
-  assert.equal(catalogTableTitle("Innovus 手册"), "命令目录：Innovus 手册");
 });
 
 // ------------------------------------------------------------- R6 P1:重新发起拦截
