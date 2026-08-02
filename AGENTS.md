@@ -250,8 +250,12 @@ element generation the run was created against.
 foreign key — the rows cascade from notebooks/sources directly, and an incoming
 foreign key would make `catalog_jobs` a non-leaf table and leave the
 single-column `source_id` guard with no static parking strategy for the forward
-shadow. PostgreSQL migration v17 mirrors v39 and is the paired business
-schema.
+shadow. v39 also installs `idx_knowhow_tables_nb_title` on
+`knowhow_tables(notebook_id, title, created_at, id)` — its only index on a
+pre-existing table — so by-title target resolution is an index seek whose last
+two columns already supply the `(created_at, id)` tie-break, instead of reading
+every table row in the notebook inside the locked apply window. PostgreSQL
+migration v17 mirrors v39 and is the paired business schema.
 
 ### Command Catalog Extraction Contract
 
@@ -340,14 +344,24 @@ answering neither question.
 **Apply is conservative by construction.** The target knowhow table is created
 if missing and otherwise only appended to; a candidate whose command already has
 a row is reported as a conflict and that row is left untouched. Its concurrency
-lock keys on the DERIVED TITLE and nothing else — `applied_table_id` resolves
-WHICH table to write to, inside the held lock, and must never be the lock key:
-"does a table for this target exist" is rewritten by the `create_knowhow_table`
-this very lock protects, so a table-id key puts the first applier on a title
-lock and every later arrival on a table lock, which do not exclude each other. Nothing here can
-distinguish a stale row from one a person corrected by hand, and overwriting is
-this feature's only irreversible damage. All writes go through the existing
-knowhow service layer, so change history is recorded like any other edit.
+lock keys on `("catalog", notebook_id)` and nothing else. The key must be
+IMMUTABLE, which rules out both finer identities tried before it: a table-id key
+is rewritten by the very `create_knowhow_table` the lock protects (first applier
+on one key, every later arrival on another, no mutual exclusion), and a
+derived-title key moves when paper-metadata grounding promotes an upload name to
+a paper title between two applies. A per-source key is also wrong — two
+different sources whose titles derive identically resolve to ONE table, and the
+per-source parse barrier does not cover them. `applied_table_id` resolves WHICH
+table to write to, inside the held lock, and is a resolution input, never the
+key. Lock order is source parse barrier OUTSIDE, catalog lock INSIDE, with the
+exhaustive enumeration in `_target_lock_key`'s docstring; nothing acquires them
+in the other order. The cost of the coarse key is that two confirms for
+different sources of one notebook serialize, which is accepted deliberately:
+every writer is bounded, makes no model call, and is human-triggered. Nothing
+here can distinguish a stale row from one a person corrected by hand, and
+overwriting is this feature's only irreversible damage. All writes go through
+the existing knowhow service layer, so change history is recorded like any other
+edit.
 
 Cost contract: one planned model call per extraction slice, no second-opinion or
 refinement pass. The only extra calls are two bounded remedies that share one

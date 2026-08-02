@@ -136,3 +136,22 @@ CREATE INDEX idx_catalog_jobs_nb_created
   ON catalog_jobs(notebook_id, created_at DESC, id DESC);
 CREATE INDEX idx_catalog_candidates_job_state
   ON catalog_candidates(job_id, state, position);
+
+-- The only index in this migration that lands on a pre-existing table, added by
+-- the R14 P2 review. Command-catalog target resolution
+-- (knowhow_table_id_by_title) is a single
+--   WHERE notebook_id=%s AND title=%s ORDER BY created_at, id LIMIT 1
+-- and the only index the table had was idx_knowhow_tables_nb on notebook_id
+-- alone, so that query read EVERY table row in the notebook, filtered by title
+-- and then sorted -- a cost that grows with the knowledge base, inside the
+-- locked apply/dismiss window where a linear scan is least affordable. The four
+-- column composite turns it into one index probe: the first two columns seek on
+-- equality, the last two are already the (created_at, id) tie-break
+-- list_knowhow_tables orders by, so LIMIT 1 needs no sort node. Every column is
+-- COLLATE "C" in the table definition, so the index ordering matches the
+-- query's own `id COLLATE "C"` verbatim. Editing this not-yet-released
+-- migration in place is the same call the pre-release fixes above document:
+-- migrator checksums are derived from this file at load time and no database
+-- has applied v17 yet.
+CREATE INDEX idx_knowhow_tables_nb_title
+  ON knowhow_tables(notebook_id, title, created_at, id);

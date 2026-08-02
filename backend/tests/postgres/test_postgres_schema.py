@@ -279,7 +279,9 @@ def test_packaged_index_migration_phases_are_exact():
     # unique index is the cross-process single-flight guard and its predicate
     # must cover queued AND running: the job row is written before the worker
     # thread starts, so a running-only guard would admit a second writer for the
-    # same candidate set.
+    # same candidate set. The last entry is the R14 P2 addition and the only one
+    # on a pre-existing table: it backs the bounded by-title target resolution
+    # (`knowhow_table_id_by_title`) that runs inside the locked apply window.
     v39_indexes = index_declarations(17)
     assert v39_indexes == [
         (False, "idx_catalog_candidates_nb"),
@@ -288,8 +290,16 @@ def test_packaged_index_migration_phases_are_exact():
         (False, "idx_catalog_jobs_source_created"),
         (False, "idx_catalog_jobs_nb_created"),
         (False, "idx_catalog_candidates_job_state"),
+        (False, "idx_knowhow_tables_nb_title"),
     ]
     assert "WHERE status IN ('queued', 'running')" in migrations[17].sql
+    # Column order is the contract, not just the name: (notebook_id, title) are
+    # the equality seek and (created_at, id) ARE the tie-break the point lookup
+    # orders by, so `LIMIT 1` resolves without a sort node.
+    assert (
+        "ON knowhow_tables(notebook_id, title, created_at, id)"
+        in migrations[17].sql
+    )
 
 
 def test_initial_migration_guards_utf8_before_business_ddl():

@@ -506,12 +506,13 @@ class CommandCatalogService:
         # duplicate table or duplicate rows — and v1's whole promise is that it
         # never damages a table. The backend is single-process (the model
         # scheduler is process-local and enforces `--workers 1`), so one
-        # per-TARGET lock closes both the realistic case (a double-clicked
+        # per-NOTEBOOK lock closes both the realistic case (a double-clicked
         # confirm) and the one a per-SOURCE lock would miss: two different
         # sources whose derived title happens to match, applying for the
-        # first time concurrently. The target's identity is the DERIVED TITLE
-        # and never the resolved table id — see `_target_lock_key` for why a
-        # key the locked write can change is not a key at all.
+        # first time concurrently. The key is `notebook_id` and nothing else —
+        # see `_target_lock_key` for why every finer identity tried here (the
+        # derived title, the resolved table id) turned out to be mutable, and
+        # why a key the locked write can change is not a key at all.
         self._apply_locks: dict[tuple, threading.Lock] = {}
         self._apply_locks_guard = threading.Lock()
         # R10: the parse barrier. A `weakref.ref` to the SourceIngestionService
@@ -643,7 +644,7 @@ class CommandCatalogService:
         """Hold the source's parse barrier for the whole confirm, or refuse.
 
         R10 (codex PR #412 review) — the hole this closes. R8 put the
-        source-generation guard inside the per-TARGET lock, which serializes
+        source-generation guard inside the catalog lock, which serializes
         confirms against each other but says nothing about the OTHER writer:
         ``replace_elements`` runs under ``SourceIngestionService``'s own
         per-SOURCE chunk lock, a completely different mutex. So the check and
@@ -661,24 +662,16 @@ class CommandCatalogService:
         swap can commit between ``_require_current_generation`` and the knowhow
         write, which is what makes the generation check mean anything.
 
-        **Lock order: source barrier OUTSIDE, per-target lock INSIDE.** Nothing
-        acquires them in the other order, so no cycle exists to deadlock on —
-        the exhaustive argument, since "no cycle" is only worth as much as the
-        enumeration behind it:
-
-        * ``process_source`` and the checkup backfill take the source lock and
-          never touch this service, so they can never hold it and wait for a
-          target lock.
-        * ``start``'s stale sweep (``_reject_if_pending_candidates``) takes the
-          target lock and NOT the barrier — deliberately, see below — so it
-          can never hold a target lock and wait for the barrier.
-        * ``apply``/``dismiss`` are the only holders of both, and both take
-          them in this order.
+        **Lock order: source barrier OUTSIDE, catalog lock INSIDE.** Nothing
+        acquires them in the other order, so no cycle exists to deadlock on.
+        The exhaustive enumeration behind that claim lives in
+        ``_target_lock_key``, which owns the whole panorama now that the inner
+        lock is one per-notebook mutex.
 
         Source-outside is also the only order that is safe under contention
         even ignoring deadlock: the barrier can be held by a reparse for
-        minutes, and waiting for it while holding a target lock would stall
-        every OTHER confirm for that target (including confirms of sources
+        minutes, and waiting for it while holding the catalog lock would stall
+        every OTHER confirm in that notebook (including confirms of sources
         that are not being reparsed at all) behind an unrelated pipeline.
 
         Why ``start`` deliberately stays outside this barrier: it writes no
@@ -701,7 +694,7 @@ class CommandCatalogService:
         nothing about the PARSE STAGE that precedes that lock — ``apply`` and
         ``dismiss`` close that separately, via ``_require_not_parsing``, in
         the same locked window right after this context manager and the
-        target lock. See that method's docstring for why the gap exists and
+        catalog lock. See that method's docstring for why the gap exists and
         why it needs a status check rather than another lock.
 
         An unwired ``source_locks`` yields straight through. That is not a
@@ -724,50 +717,93 @@ class CommandCatalogService:
                 raise CatalogSourceBusy(source_id)
             yield
 
-    def _target_lock_key(self, notebook_id: str, source_title: str) -> tuple:
-        """The identity apply's per-target lock serializes on: the DERIVED
-        TITLE, always — never the resolved table id.
+    def _target_lock_key(self, notebook_id: str) -> tuple:
+        """The identity every catalog writer serializes on: the NOTEBOOK, and
+        nothing else.
 
-        The derived title is a pure function of ``(notebook_id, source_title)``
-        and needs no reads, so every writer that could collide computes the
-        same key with no window in which two of them can disagree. That last
-        clause is the whole reason this is title-only. R1 keyed the lock on
-        ``("table", id)`` whenever a table for the target could be found — by
-        ``applied_table_id`` or by a read-only by-title lookup — and that
-        lookup's answer CHANGES the moment the first applier commits its
-        ``create_knowhow_table``, which happens INSIDE the lock. So during
-        exactly the window the lock exists to protect (first apply for a fresh
-        target), the holder was on ``("title", ...)`` while every later arrival
-        read the freshly created table and took ``("table", id)``: two locks,
-        no mutual exclusion, both sides free to pass the anchor-column
-        existence check and append a row for the same command. A lock key that
-        is a function of mutable state the lock itself mutates cannot work; the
-        fix is to key on something the write cannot change.
+        ``notebook_id`` is a caller-supplied routing id that is fixed for the
+        entire life of every writer that could collide, needs no read to
+        compute, and is the same value all of them already hold. That is the
+        entire specification a lock key has to meet, and the two candidates
+        this replaced each failed it in a different way.
 
-        ``applied_table_id`` keeps its real job — deciding WHICH table to write
-        to (``_resolve_target_table``), resolved INSIDE the held lock. Renames
-        are still handled there, and re-derived here every call, so the two
-        never drift.
+        **Why not the derived title (R14).** ``_display_source_title`` resolves
+        through ``source_display_title``, which prefers a grounded paper title
+        over the upload name — and paper-metadata grounding runs
+        asynchronously, so it can land BETWEEN two applies of one job. The
+        title is therefore mutable state, and R2's title key inherited exactly
+        the defect R2 had diagnosed in R1's table key: two writers for one
+        target computing two different keys and both entering. Concretely, a
+        double-clicked confirm whose backfill lands between the two clicks
+        takes ``("title", nb, 命令目录：<upload name>)`` and
+        ``("title", nb, 命令目录：<paper title>)`` — no mutual exclusion, both
+        past the anchor-column existence check, two rows for one command, or
+        two tables.
 
-        The rename case, spelled out because it is the one that looks unsafe:
-        job J applied once into table T and someone then renames T. J's next
-        apply still resolves to T (correct — that is what ``applied_table_id``
-        is for), while its lock is still ``("title", nb, 命令目录：<J's source>)``.
-        Every other writer FOR THE SAME TARGET takes that same key — a second
-        apply of J, a retry, another source whose title derives identically —
-        so mutual exclusion holds exactly where duplicate rows could happen.
+        **Why not the finer split key.** The obvious repair is per-target
+        rather than per-notebook: lock ``("table", job.applied_table_id)`` when
+        the job already landed rows, and a per-notebook creation lock only for
+        the first-apply path, taking the table lock nested inside it once the
+        target resolves (order create→table, never the reverse). That is sound
+        for the two races R1/R2 were about, and it was rejected anyway,
+        because a full enumeration turns up two more:
 
-        The one residual: a rename can make TWO different derived titles
-        resolve to ONE table (rename T to another source's derived title, then
-        race J against that source's first apply). Those two take different
-        locks and could both append. It is deliberately not defended — R1's
-        table-id key covered it while leaving the first-creation window above
-        wide open, and that window is the reachable one (a double-clicked
-        confirm), whereas this needs a manual rename onto another source's
-        exact derived title plus concurrent applies. Trading a live race for a
-        contrived one is the trade being made here, not an oversight.
+        1. ``applied_table_id`` is mutable in the one way that matters — it
+           transitions ``""``→``T``. A writer that read the job row while it
+           was still empty keys on the creation lock; a writer that reads it
+           after keys on ``("table", T)``. Those two are concurrent. Reachable
+           by a dismiss and a second apply of ONE job, which is precisely the
+           pair ``dismiss``'s lock exists to separate. Closing it needs a
+           re-read of the job inside the lock plus a re-lock when it moved.
+        2. ``_resolve_target_table`` falls through to create-or-find when
+           ``applied_table_id`` names a table that has since been DELETED. That
+           fall-through creates a table while holding only ``("table", T)`` —
+           outside the creation lock — so it races a genuine first-time
+           applier. Closing it needs the creation lock, which the fixed
+           create→table order forbids acquiring from there; the only way out is
+           to drop the lock and retry the whole body.
+
+        Both repairs are validate-and-retry loops, i.e. more machinery than
+        this entire method, guarding a distinction that buys nothing real:
+        every writer here is bounded (at most ``MAX_APPLY_CANDIDATES`` rows),
+        makes no model or network call, and is triggered by a person clicking
+        confirm on one source. What the coarse key costs is that two confirms
+        for DIFFERENT sources of the same notebook serialize; on the shipped
+        SQLite backend they largely serialize anyway, since
+        ``append_knowhow_rows`` takes the process-wide write lock. This module
+        has had four lock defects found in review (R1, R2, R10, R12); a key
+        with no state in it and no ordering to get wrong is worth more than the
+        concurrency it gives up.
+
+        **Lock-order panorama.** Two mutexes exist on these paths and they are
+        always taken in this order, so no cycle exists:
+
+        1. ``_source_write_barrier`` — the ingestion service's per-SOURCE chunk
+           lock (see that method for why it is outermost and why a reparse must
+           not be waited on while holding anything else).
+        2. this per-NOTEBOOK catalog lock.
+
+        Exhaustively, every holder of either:
+
+        * ``process_source`` and the checkup backfill take the source lock and
+          never call into this service, so they can never hold it and wait for
+          the catalog lock.
+        * ``start``'s stale sweep (``_reject_if_pending_candidates``) takes the
+          catalog lock and deliberately NOT the barrier, so it can never hold
+          the catalog lock and wait for a barrier.
+        * ``apply``/``dismiss`` are the only holders of both, and both take
+          them in the order above.
+
+        Nothing nests a second catalog lock inside the first, so the notebook
+        lock does not need to be re-entrant.
+
+        ``applied_table_id`` keeps its real job — deciding WHICH table a given
+        apply writes to (``_resolve_target_table``), resolved INSIDE the held
+        lock. It is a resolution input, not an identity the lock keys on, and
+        that separation is what lets it be revised (rename, deletion) without
+        ever splitting the mutual exclusion.
         """
-        return ("title", notebook_id, f"{CATALOG_TABLE_TITLE_PREFIX}{source_title}")
+        return ("catalog", notebook_id)
 
     def _scoped_source(self, notebook_id: str, source_id: str):
         """The source, only if it belongs to ``notebook_id``; else ``KeyError``.
@@ -817,22 +853,24 @@ class CommandCatalogService:
         call site below that previously fell back to the same thing on the
         raw upload title.
 
-        Every caller that derives the「命令目录：<title>」table name or the
-        target lock key (``_target_lock_key`` — ``start``'s stale-candidate
-        sweep, ``apply``, ``dismiss``) MUST go through this one function: the
-        lock's whole safety argument is that every writer that could collide
-        computes the identical key from the identical inputs. A canonical
-        title that could change later (a paper title arriving after a
-        backfill) does not retroactively rename or split the table — the
-        title is only ever read again at the moment a NEW table would be
-        created (``_find_table``/``_ensure_table``); a job that has already
-        landed rows keeps writing to that same table via its remembered
-        ``applied_table_id`` regardless of what this function returns on a
-        later call (see ``_resolve_target_table``). The per-target LOCK key is
-        likewise only ever computed at call time from whatever title is
-        canonical THEN — it does not need to survive a later title change,
-        because nothing revisits an old lock key after the table it protected
-        already exists.
+        Every caller that derives the「命令目录：<title>」table name goes
+        through this one function, and that is now its ONLY job: what this
+        returns can change under a running job (paper-metadata grounding
+        completes asynchronously and promotes the upload name to the paper
+        title), so it names things and never identifies them.
+
+        R14 is the review that drew that line. The per-notebook catalog lock
+        used to key on this value, and a backfill landing between two applies
+        of one job therefore put them on two different keys — mutual exclusion
+        silently gone at exactly the moment it was needed. ``_target_lock_key``
+        keys on ``notebook_id`` alone now and calls nothing here.
+
+        A later title change still does not rename or split a table: the title
+        is only read again at the moment a NEW table would be created
+        (``_find_table``/``_ensure_table``), and a job that already landed rows
+        keeps writing to the same table through its remembered
+        ``applied_table_id`` (see ``_resolve_target_table``) whatever this
+        returns on a later call.
 
         ``preview`` deliberately does NOT go through this: it shows the
         source's canonical name in a cost estimate, not a table/lock
@@ -864,7 +902,7 @@ class CommandCatalogService:
         """Refuse to act on candidates whose source has since been reparsed,
         and expire them in the same breath.
 
-        Called INSIDE the per-target lock by both ``apply`` and ``dismiss``, so
+        Called INSIDE the catalog lock by both ``apply`` and ``dismiss``, so
         the check and the sweep are serialized against each other and against a
         concurrent confirm of the same target.
 
@@ -921,12 +959,13 @@ class CommandCatalogService:
         happened; there is no second check).
 
         Must be called INSIDE the same locked window as
-        ``_require_current_generation`` — after the barrier, after the
-        per-target lock — so the two checks together are atomic with respect
-        to a concurrent reparse. Reads the source FRESH here rather than
-        trusting the copy ``apply``/``dismiss`` fetched earlier to compute the
-        lock key: that earlier read happened before either lock was taken, so
-        by the time this runs it may already be behind.
+        ``_require_current_generation`` — after the barrier, after the catalog
+        lock — so the two checks together are atomic with respect to a
+        concurrent reparse. Reads the source FRESH here rather than trusting
+        the copy ``apply``/``dismiss`` fetched earlier for its scope check (and,
+        in ``apply``, for the table title): that earlier read happened before
+        either lock was taken, so by the time this runs it may already be
+        behind.
 
         The whitelist is ``PARSED_SOURCE_STATUSES`` — the SAME one
         ``_require_parsed`` uses to decide a source is readable at all
@@ -957,7 +996,7 @@ class CommandCatalogService:
             raise CatalogSourceBusy(source_id)
 
     def _reject_if_pending_candidates(
-        self, source_id: str, source_title: str, notebook_id: str, live: str
+        self, source_id: str, notebook_id: str, live: str
     ) -> None:
         """Block a new run while the source's latest job reached ANY terminal
         status and still has unreviewed candidates (see
@@ -988,8 +1027,11 @@ class CommandCatalogService:
         them holding this guard would lock the source out of extraction forever.
         The reparse is precisely the reason a user wants to re-run, so the run
         is allowed and the dead candidates are expired with a recorded reason.
-        The sweep takes the SAME per-target lock ``apply``/``dismiss`` use, so
-        it cannot interleave with an in-flight confirm of the same target.
+        The sweep takes the SAME catalog lock ``apply``/``dismiss`` use, so it
+        cannot interleave with an in-flight confirm of the same target. It
+        needs no title of its own to do that (R14): the key is the notebook,
+        which this method is handed directly, so there is no derived value here
+        that could drift out of step with what a confirm computes.
         """
         latest = self.catalog.latest_job(source_id)
         if latest is None or latest.get("status") not in CATALOG_TERMINAL_STATUSES:
@@ -998,7 +1040,7 @@ class CommandCatalogService:
         if pending <= 0:
             return
         if str(latest.get("source_generation") or "") != str(live or ""):
-            with self._apply_lock(self._target_lock_key(notebook_id, source_title)):
+            with self._apply_lock(self._target_lock_key(notebook_id)):
                 self.catalog.expire_pending_candidates(
                     latest["id"], reject_info={"reason": SOURCE_REPARSED_REASON}
                 )
@@ -1026,16 +1068,11 @@ class CommandCatalogService:
         fails in the safe direction (refuse the confirm, offer a re-run);
         recording it later would need a second write per run to buy that back.
         """
-        source = self._require_parsed(notebook_id, source_id)
+        self._require_parsed(notebook_id, source_id)
         if not self.models.configured(CATALOG_WORKLOAD):
             raise CatalogModelUnavailable(MODEL_UNAVAILABLE_MESSAGE)
         generation = self.catalog.source_element_generation(source_id)
-        self._reject_if_pending_candidates(
-            source_id,
-            self._display_source_title(source_id, source),
-            notebook_id,
-            generation,
-        )
+        self._reject_if_pending_candidates(source_id, notebook_id, generation)
         job = self.catalog.create_job(
             notebook_id,
             source_id,
@@ -1901,13 +1938,15 @@ class CommandCatalogService:
         (see ``_resolve_target_table``), not by title on every call — a job
         that already landed rows once keeps writing to that SAME table even if
         it gets renamed in between two apply calls. That resolution happens
-        INSIDE the lock; the lock itself keys on the DERIVED TITLE alone (see
-        ``_target_lock_key``), which is computable without reading anything and
-        therefore identical for every writer that could collide — two DIFFERENT
-        sources deriving the same title, a job whose ``applied_table_id`` is
-        already set racing a first-time apply, or the same job applying twice
-        from two tabs. None of them can race each other past the anchor-column
-        existence check into a duplicate row or table.
+        INSIDE the lock; the lock itself keys on the NOTEBOOK alone (see
+        ``_target_lock_key``), which is computable without reading anything,
+        cannot change under a writer, and is therefore identical for every
+        writer that could collide — two DIFFERENT sources deriving the same
+        title, a job whose ``applied_table_id`` is already set racing a
+        first-time apply, the same job applying twice from two tabs, or a
+        confirm straddling the paper-title backfill that made the OLD
+        title-derived key mutable (R14). None of them can race each other past
+        the anchor-column existence check into a duplicate row or table.
 
         R8: a reparse between the run and this confirm makes every candidate
         describe a document that no longer exists, so the source-generation
@@ -1917,7 +1956,7 @@ class CommandCatalogService:
         R10: that guard is only meaningful while the source's parse barrier is
         held — otherwise the swap it checks for is free to commit between the
         check and ``append_knowhow_rows``. The barrier is taken OUTSIDE the
-        target lock; see ``_source_write_barrier`` for the ordering argument.
+        catalog lock; see ``_source_write_barrier`` for the ordering argument.
 
         R12: the barrier and the generation check together still miss the
         PARSE STAGE of a reparse — ``process_source`` marks the source
@@ -1933,7 +1972,7 @@ class CommandCatalogService:
             raise KeyError(job_id)
         source = self._scoped_source(notebook_id, source_id)
         source_title = self._display_source_title(source_id, source)
-        lock_key = self._target_lock_key(notebook_id, source_title)
+        lock_key = self._target_lock_key(notebook_id)
         with self._source_write_barrier(source_id):
             with self._apply_lock(lock_key):
                 self._require_current_generation(job)
@@ -1955,6 +1994,23 @@ class CommandCatalogService:
         all_pending: bool,
         actor: str,
     ) -> dict:
+        """The whole read-then-write, run with both mutexes already held.
+
+        Entered ONLY from ``apply``, and only inside
+        ``_source_write_barrier(source_id)`` → ``_apply_lock(("catalog", nb))``,
+        in that order. Everything below is therefore free to read state and
+        act on it several statements later — "does a table exist by this
+        title", "does this command already have a row", "which candidates are
+        still `candidate`" — because no other writer for this notebook's
+        catalog can run between the read and the write.
+
+        Nothing here may acquire a third lock, and in particular must not
+        reach back for a source barrier (that is the one order that would
+        close a cycle; see ``_target_lock_key`` for the full panorama and the
+        enumeration of every holder of either mutex). ``_resolve_target_table``
+        may CREATE the table from inside this window, which is exactly why the
+        lock key cannot be anything the creation reveals or changes.
+        """
         job_id = job["id"]
         if all_pending:
             rows = self.catalog.pending_candidates(
@@ -2124,7 +2180,7 @@ class CommandCatalogService:
         `MAX_APPLY_CANDIDATES` — identical to `apply`'s own contract, because
         this is a page-scoped human decision, never a whole-run sweep.
 
-        The per-TARGET lock is taken here too, even though dismiss never
+        The catalog lock is taken here too, even though dismiss never
         touches knowhow at all. It has to be: `apply`'s conflict branch calls
         the SAME `mark_candidates_dismissed` this method calls, and the two
         are a read-then-write sequence each (read which rows are still
@@ -2169,9 +2225,11 @@ class CommandCatalogService:
         job = self.catalog.get_job(job_id)
         if job["notebook_id"] != notebook_id or job["source_id"] != source_id:
             raise KeyError(job_id)
-        source = self._scoped_source(notebook_id, source_id)
-        source_title = self._display_source_title(source_id, source)
-        lock_key = self._target_lock_key(notebook_id, source_title)
+        # Scoping is still re-checked here even though nothing below reads the
+        # source: `dismiss` takes a caller-supplied `source_id`, and the lock
+        # key no longer needs a title to be derived from it (R14).
+        self._scoped_source(notebook_id, source_id)
+        lock_key = self._target_lock_key(notebook_id)
         with self._source_write_barrier(source_id):
             with self._apply_lock(lock_key):
                 self._require_current_generation(job)

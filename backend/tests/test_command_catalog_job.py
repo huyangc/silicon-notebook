@@ -38,8 +38,9 @@ R1(codex PR #412 评审)修复补充覆盖(变异验证:改回违规形态确认
 记录在本任务的交付报告里):
 
 12. **apply 目标锁身份归一** —— `_target_lock_key` 对「已知 applied_table_id 的
-    job」与「同一目标首次 apply 的 job」必须解析到同一把锁(按需先做一次只读
-    `_find_table`),否则两把不互斥的锁各自通过存在性检查就会把同名命令写两遍。
+    job」与「同一目标首次 apply 的 job」必须解析到同一把锁,否则两把不互斥的锁
+    各自通过存在性检查就会把同名命令写两遍。(R2 把这把锁从表 id 改成派生标题,
+    R14 又把标题也拿掉——见下面第 18 条。)
 13. **锚点列形状校验** —— 目标表必须恰好一列名为「命令」且其 `role == "anchor"`;
     第二个「命令」列、或锚点被移到别的列,都必须拒绝而不是写进非锚点/歧义列。
 
@@ -66,6 +67,19 @@ R10(codex PR #412 R10 评审 P1)修复补充覆盖(变异验证见交付报告):
     (锁序:来源锁在外、目标锁在内)。有界等待超时时回一条与 stale **不同**的
     409,且**不过期**任何候选——解析可能在 `replace_elements` 之前就失败,那批
     候选仍然有效。
+
+R14(codex PR #412 R14 评审 P1)修复补充覆盖(变异验证见交付报告):
+
+17. **锁键必须是不可变身份** —— 这把锁先后用过三种身份:R1 的表 id(首次建表窗口
+    内会变)、R2 的派生标题(论文元数据接地会异步把上传名换成论文标题)、现在的
+    `("catalog", notebook_id)`。前两种都是并发写者能改的状态,改了就等于同一个目标
+    上的两个写者各持一把互不互斥的锁。可达形状是**跨来源**的:来源写栅栏是 per
+    source,只挡同一来源;两个派生标题相同的不同来源解析到同一张表,中间任何一侧
+    被接地改名,R2 的键就劈开了。判据是「结构断言 + 并发计数」两条一起:只数并发
+    不够(键劈开但恰好没撞上的一次也会绿),只看键也不够(键相同但锁没真拿也会绿)。
+18. **锁序全景在一处成文** —— 只剩两把锁(来源栅栏在外、每库目录锁在内),完整
+    枚举写在 `_target_lock_key` 的 docstring 里,`_apply_locked` 只指回去,避免同
+    一份推演在多处各写一半、又各自过期。
 """
 from __future__ import annotations
 
@@ -2056,20 +2070,23 @@ def test_apply_table_name_snapshot_survives_a_paper_title_backfill_mid_job(repo)
 
 def test_start_stale_sweep_lock_key_matches_apply_after_a_paper_title_backfill(repo):
     """`start`'s stale-candidate sweep (`_reject_if_pending_candidates`) takes
-    the SAME per-target lock `apply`/`dismiss` take, keyed on the SAME derived
-    title (see `_target_lock_key`'s docstring: "every writer that could
-    collide computes the same key"). Both call sites must resolve the
-    canonical title through `_display_source_title` — if one of them read the
-    raw upload title instead, a paper-metadata backfill would silently split
-    them onto two different lock keys, defeating the mutual exclusion the
-    lock exists for.
+    the SAME catalog lock `apply`/`dismiss` take (see `_target_lock_key`'s
+    docstring: "every writer that could collide computes the same key").
+
+    Before R14 this test guarded a much more fragile property: the two call
+    sites both had to resolve the canonical title through
+    `_display_source_title`, or a paper-metadata backfill would silently split
+    them onto two lock keys. R14 removed the hazard rather than re-checking it
+    — the key is the notebook id, which `start` is handed directly — so the
+    backfill here now proves the STRONGER statement: the sweep's key is
+    unaffected by grounding that changes what the source is called.
 
     This drives the actual `start()` code path (not just the pure helper) by
     spying on `_target_lock_key`: a reparse after an unreviewed job leaves the
     stale-sweep branch of `_reject_if_pending_candidates` the only thing that
-    calls it during `start`, and the key it is called with is asserted equal
-    to what `apply`/`dismiss` would independently compute for the SAME source
-    right after.
+    calls it during `start`. The spy takes `*args` so it stays honest about
+    WHAT the production call passes — a version that went back to feeding the
+    key a mutable title would be recorded here, not silently normalised away.
     """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
     _add_manual(repo, notebook.id, "s1", 1)
@@ -2078,10 +2095,12 @@ def test_start_stale_sweep_lock_key_matches_apply_after_a_paper_title_backfill(r
     _reparse(repo, notebook.id, "s1", _manual_elements("s1", 1), LATER)
 
     seen_keys: list[tuple] = []
+    seen_args: list[tuple] = []
     original = service._target_lock_key
 
-    def spy(nb_id, title):
-        key = original(nb_id, title)
+    def spy(*args, **kwargs):
+        key = original(*args, **kwargs)
+        seen_args.append(args)
         seen_keys.append(key)
         return key
 
@@ -2091,16 +2110,14 @@ def test_start_stale_sweep_lock_key_matches_apply_after_a_paper_title_backfill(r
     finally:
         service._target_lock_key = original
 
-    source = service._scoped_source(notebook.id, "s1")
-    expected = service._target_lock_key(
-        notebook.id, service._display_source_title("s1", source)
-    )
-    assert expected == (
-        "title", notebook.id, f"{CATALOG_TABLE_TITLE_PREFIX}A Grounded Paper Title"
-    )
+    expected = service._target_lock_key(notebook.id)
+    assert expected == ("catalog", notebook.id)
     # The stale sweep ran (the prior job's one candidate is no longer pending)
-    # and computed EXACTLY this key — not the raw-title one.
+    # and computed EXACTLY this key.
     assert seen_keys == [expected]
+    # And it did so from the notebook id alone: no title reached the key, so
+    # the grounded title above could not have moved it.
+    assert seen_args == [(notebook.id,)]
     assert second_job["id"] != job["id"]
 
 
@@ -2133,6 +2150,51 @@ def test_find_table_uses_the_bounded_point_lookup_and_matches_list_ordering(repo
 
     # A title nobody used resolves to "", not an exception.
     assert service._find_table(notebook.id, "从未出现过的标题") == ""
+
+
+def test_find_table_point_lookup_is_index_backed_not_a_notebook_scan(repo):
+    """R14 P2: `_migration_39` installs `idx_knowhow_tables_nb_title` on
+    `(notebook_id, title, created_at, id)`, and the by-title resolution must
+    actually plan onto it.
+
+    R11 already moved this off `list_knowhow_tables`, which was the expensive
+    half — but the replacement still had only `idx_knowhow_tables_nb` to work
+    with, a single-column index on `notebook_id`. That plans as "read every
+    table row in the notebook, filter by title, sort by (created_at, id)":
+    bounded by the notebook's table count rather than by anything about the
+    query, and paid inside the locked apply/dismiss window. Asserting the plan
+    (rather than just the behaviour) is the only thing that catches a
+    regression here: dropping the index leaves every functional test green.
+
+    The plan must be a SEARCH (an index seek), not a SCAN, and must carry no
+    "USE TEMP B-TREE FOR ORDER BY" step — the last two index columns already
+    supply the tie-break order, so `LIMIT 1` resolves without sorting.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    title = f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+    repo.create_knowhow_table(
+        notebook.id, title, "", [{"name": "命令", "role": "anchor"}], "tester",
+    )
+
+    with repo._write() as db:
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id FROM knowhow_tables WHERE notebook_id=? AND title=? "
+            "ORDER BY created_at,id LIMIT 1",
+            (notebook.id, title),
+        ).fetchall()
+    detail = " | ".join(str(row["detail"]) for row in plan)
+
+    assert "idx_knowhow_tables_nb_title" in detail, detail
+    assert "SEARCH knowhow_tables" in detail, detail
+    assert "SCAN knowhow_tables" not in detail, detail
+    assert "TEMP B-TREE" not in detail, detail
+    # Both equality columns are consumed by the seek, so the title is not left
+    # as a residual filter over every table in the notebook.
+    assert "notebook_id=? AND title=?" in detail, detail
+
+    # And the behaviour the plan serves is unchanged.
+    assert _service(repo)._find_table(notebook.id, "OpenROAD 手册") != ""
 
 
 def test_find_table_never_calls_the_health_aggregated_table_scan(repo, monkeypatch):
@@ -2691,31 +2753,32 @@ def test_concurrent_applies_of_the_same_job_from_two_tabs_write_the_command_once
     assert sum(item["rows_added"] for item in outcomes) == 1
 
 
-def test_target_lock_key_is_the_derived_title_before_and_after_a_table_exists(
-    repo,
-):
-    """R2 P2 (direct): the lock key must be a pure function of
-    ``(notebook_id, source_title)`` and must NOT change when the target table
-    comes into existence.
+def test_target_lock_key_is_immutable_across_every_thing_that_can_change(repo):
+    """R14 P1 (direct): the lock key is ``("catalog", notebook_id)`` — it
+    carries no derived title and no table id, so nothing a writer does or a
+    background job backfills can move it.
 
-    R1 keyed on ``("table", id)`` as soon as a table could be found — by
-    ``applied_table_id`` or by a read-only by-title lookup. That lookup's
-    answer flips the instant the first applier commits its
-    ``create_knowhow_table``, which happens INSIDE the lock, so during exactly
-    the window the lock exists to protect the holder sat on ``("title", ...)``
-    while every later arrival read the new table and took ``("table", id)``.
+    Three identities were tried here across three review rounds. R1 keyed on
+    ``("table", id)`` as soon as a table could be found; that answer flips the
+    instant the first applier commits its ``create_knowhow_table`` INSIDE the
+    lock. R2 replaced it with the derived title, which looked immutable only
+    because `sources.title` is — but `_display_source_title` resolves through
+    `source_display_title`, and paper-metadata grounding promotes the upload
+    name to the paper title asynchronously, which can land BETWEEN two applies
+    of one job. Both are state a concurrent writer can change; only the
+    notebook id is not.
 
-    This is the deterministic, non-timing-dependent proof: the same call
-    before and after a real apply created the table, plus a job that already
-    knows its ``applied_table_id``, all land on one key.
+    Deterministic and non-timing-dependent on purpose: this walks every event
+    that used to move the key — a real apply creating the table, the job
+    learning its `applied_table_id`, a paper-title backfill, and a second
+    source in the same notebook — and asserts the key never budges.
     """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
     _add_manual(repo, notebook.id, "s1", 1)
     service, job_a = _run_ok(repo, notebook.id, "s1", 1)
-    expected = ("title", notebook.id, f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册")
+    expected = ("catalog", notebook.id)
 
-    before = service._target_lock_key(notebook.id, "OpenROAD 手册")
-    assert before == expected
+    assert service._target_lock_key(notebook.id) == expected
 
     applied = service.apply(
         notebook.id, "s1", job_a["id"], all_pending=True, actor="a"
@@ -2723,13 +2786,27 @@ def test_target_lock_key_is_the_derived_title_before_and_after_a_table_exists(
     assert service.catalog.get_job(job_a["id"])["applied_table_id"] == applied[
         "table_id"
     ]
-    after = service._target_lock_key(notebook.id, "OpenROAD 手册")
-    assert after == before
+    assert service._target_lock_key(notebook.id) == expected
 
-    # A different source deriving the same title takes the same key too —
-    # that is what makes "same target" and "same lock" the same statement.
+    # The R14 event itself: grounding lands after the table already exists and
+    # changes what this source is canonically called.
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Later-Grounded Title")
+    assert service._display_source_title(
+        "s1", service._scoped_source(notebook.id, "s1")
+    ) == "A Later-Grounded Title"
+    assert service._target_lock_key(notebook.id) == expected
+
+    # A different source in the same notebook takes the same key too — that is
+    # what makes "could collide" and "same lock" the same statement, and it no
+    # longer depends on the two deriving a matching title.
     _add_manual(repo, notebook.id, "s2", 1)
-    assert service._target_lock_key(notebook.id, "OpenROAD 手册") == expected
+    assert service._target_lock_key(notebook.id) == expected
+
+    # Nothing title-shaped or table-shaped survives in the key at all.
+    assert CATALOG_TABLE_TITLE_PREFIX not in "".join(
+        str(part) for part in service._target_lock_key(notebook.id)
+    )
+    assert applied["table_id"] not in service._target_lock_key(notebook.id)
 
 
 def test_concurrent_table_known_and_first_time_applies_for_the_same_target_serialize(
@@ -2839,6 +2916,152 @@ def test_concurrent_table_known_and_first_time_applies_for_the_same_target_seria
     outcomes = [results["a"], results["b"]]
     written = [item for item in outcomes if item["rows_added"] == 1]
     assert len(written) == 1, results
+
+
+def test_a_paper_title_backfill_between_applies_cannot_split_the_lock(repo):
+    """R14 P1 (integration): a paper-metadata backfill landing between two
+    applies must not put two writers for ONE table on two different locks.
+
+    The reachable shape, and why the parse barrier does not already cover it:
+    the barrier is per SOURCE, so it only serializes confirms of the SAME
+    source. Two DIFFERENT sources whose derived titles agree resolve to one
+    table (`_add_manual` titles every source "OpenROAD 手册", and by-title
+    resolution finds the first one's table), and their barriers are different
+    mutexes, so the catalog lock is the ONLY thing between them.
+
+    Under R2's title key that lock split the moment grounding changed one
+    side's canonical name:
+
+      * job A (s1) applies once, creating T and recording `applied_table_id`;
+      * grounding lands on s1, so A's derived title becomes
+        "A Later-Grounded Title" while its target is still T;
+      * job B (s2) applies for the first time, derives "OpenROAD 手册", and
+        resolves by title to that same T.
+
+    Two writers, one table, two keys — both free through the anchor-column
+    existence check, both appending a row for `set_thing_1`. The key is the
+    notebook id now, so they share one lock whatever either is called.
+
+    Concurrency is COUNTED at the existence check rather than inferred from
+    "did B return early": a B that raced in and then parked on this same mock
+    is indistinguishable from a correctly queued B from the outside.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    _add_manual(repo, notebook.id, "s2", 2)
+    service, job_a = _run_ok(repo, notebook.id, "s1", 2)
+    _, job_b = _run_ok(repo, notebook.id, "s2", 2)
+
+    def candidate_id(job_id: str, name: str) -> str:
+        page = service.catalog.list_candidates(
+            job_id, state="candidate", cursor=0, limit=10
+        )
+        return next(row["id"] for row in page if row["command_name"] == name)
+
+    first = service.apply(
+        notebook.id, "s1", job_a["id"],
+        candidate_ids=[candidate_id(job_a["id"], "set_thing_0")],
+        actor="a",
+    )
+    assert first["created"] is True
+    table_id = first["table_id"]
+    assert service.catalog.get_job(job_a["id"])["applied_table_id"] == table_id
+
+    # The R14 event: s1 is now canonically called something else, so its
+    # derived title no longer matches s2's — and no longer matches the title
+    # of the table it is still writing into.
+    _mark_grounded_paper(repo, notebook.id, "s1", "A Later-Grounded Title")
+    assert repo.get_knowhow_table(table_id)["title"] == (
+        f"{CATALOG_TABLE_TITLE_PREFIX}OpenROAD 手册"
+    )
+
+    seen_keys: list[tuple] = []
+    original_key = service._target_lock_key
+    keys_guard = threading.Lock()
+
+    def key_spy(*args, **kwargs):
+        key = original_key(*args, **kwargs)
+        with keys_guard:
+            seen_keys.append(key)
+        return key
+
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+    entered = threading.Event()
+    release = threading.Event()
+    original = service.knowhow.knowhow_anchor_existing_values
+
+    def tracking(*args, **kwargs):
+        nonlocal active, max_active
+        with guard:
+            active += 1
+            max_active = max(max_active, active)
+        entered.set()
+        release.wait(10)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            with guard:
+                active -= 1
+
+    service._target_lock_key = key_spy
+    service.knowhow.knowhow_anchor_existing_values = tracking
+    results: dict[str, dict] = {}
+    try:
+        first_thread = threading.Thread(
+            target=lambda: results.__setitem__(
+                "a",
+                service.apply(
+                    notebook.id, "s1", job_a["id"],
+                    candidate_ids=[candidate_id(job_a["id"], "set_thing_1")],
+                    actor="a",
+                ),
+            )
+        )
+        first_thread.start()
+        assert entered.wait(10), "first apply never reached the existence check"
+
+        second_thread = threading.Thread(
+            target=lambda: results.__setitem__(
+                "b",
+                service.apply(
+                    notebook.id, "s2", job_b["id"],
+                    candidate_ids=[candidate_id(job_b["id"], "set_thing_1")],
+                    actor="b",
+                ),
+            )
+        )
+        second_thread.start()
+        time.sleep(0.3)  # give a split lock a chance to race in
+
+        release.set()
+        first_thread.join(10)
+        second_thread.join(10)
+    finally:
+        service.knowhow.knowhow_anchor_existing_values = original
+        service._target_lock_key = original_key
+
+    assert max_active == 1, "both applies entered the existence check concurrently"
+
+    # Both still wrote into the SAME table, and `set_thing_1` landed once.
+    assert results["a"]["table_id"] == results["b"]["table_id"] == table_id
+    assert len(repo.list_knowhow_tables(notebook.id)) == 1
+    table = repo.get_knowhow_table(table_id)
+    anchor = next(c["id"] for c in table["columns"] if c["role"] == "anchor")
+    assert sorted(row["cells"][anchor] for row in table["rows"]) == [
+        "set_thing_0", "set_thing_1"
+    ]
+    written = [item for item in results.values() if item["rows_added"] == 1]
+    conflicted = [item for item in results.values() if item["conflicts"]]
+    assert len(written) == 1, results
+    assert len(conflicted) == 1, results
+
+    # The structural half: every key computed during the race is the SAME
+    # immutable one. A key carrying either source's derived title would show
+    # up here as two distinct values — the exact defect, visible without
+    # depending on the timing above.
+    assert set(seen_keys) == {("catalog", notebook.id)}, seen_keys
 
 
 def test_an_applier_that_arrives_after_the_table_appears_still_waits(repo):
@@ -4452,7 +4675,7 @@ def test_apply_rereads_parse_status_inside_the_lock_not_before_it(repo):
     _add_manual(repo, notebook.id, "s1", 2)
     service, job = _run_ok(repo, notebook.id, "s1", 2)
 
-    lock_key = service._target_lock_key(notebook.id, "OpenROAD 手册")
+    lock_key = service._target_lock_key(notebook.id)
     target_lock = service._apply_lock(lock_key)
     assert target_lock.acquire(timeout=5)
 

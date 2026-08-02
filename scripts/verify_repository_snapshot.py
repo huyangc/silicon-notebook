@@ -2497,6 +2497,14 @@ COMMAND_CATALOG_INDEXES = {
     "idx_catalog_candidates_source":
         "CREATE INDEX idx_catalog_candidates_source\n"
         "                  ON catalog_candidates(source_id)",
+    # R14 P2: the only v39 index on a PRE-EXISTING table, so a deployed v38
+    # database gains it without gaining a table.  That is exactly the shape the
+    # replay would otherwise miss -- DROP TABLE takes an index with it, a
+    # standalone index has to be dropped by name (see the rollback helpers in
+    # tests/test_repository_snapshot_verifier.py).
+    "idx_knowhow_tables_nb_title":
+        "CREATE INDEX idx_knowhow_tables_nb_title\n"
+        "                  ON knowhow_tables(notebook_id, title, created_at, id)",
 }
 MIGRATION_MANIFEST = {
     (key[0], 39, *key[2:]): {
