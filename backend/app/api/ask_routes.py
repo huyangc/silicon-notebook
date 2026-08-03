@@ -16,6 +16,7 @@ from app.api.deps import (
     user_error,
 )
 from app.models.notebooks import NotebookSummary
+from app.models.source_scope import SourceScope
 from app.models.ask import (
     AskIntentPreviewRequest,
     AskRequest,
@@ -43,7 +44,26 @@ from app.services.query_intent import (
 router = APIRouter()
 
 
-def _require_ask_available(notebook: NotebookSummary) -> None:
+def _source_scope_has_local_sources(repo, notebook_id: str, scope: SourceScope) -> bool:
+    if scope.mode == "include":
+        return bool(scope.source_ids)
+    return repo.visible_source_count(notebook_id) > len(scope.source_ids)
+
+
+def _validate_source_scope(repo, notebook: NotebookSummary,
+                           scope: SourceScope | None) -> None:
+    if scope is None:
+        return
+    valid = repo.visible_source_ids(notebook.id, scope.source_ids)
+    if valid != scope.source_ids:
+        raise user_error(422, "检索范围包含不属于当前笔记本的来源")
+    if not _source_scope_has_local_sources(repo, notebook.id, scope) \
+            and not notebook.base_notebooks:
+        raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
+
+
+def _require_ask_available(notebook: NotebookSummary, repo=None,
+                           source_scope: SourceScope | None = None) -> None:
     """硬约束(PR#334):笔记本在任一模式下都取不到可检索证据(NotebookSummary
     .ask_available=False——无可见来源/knowhow chunk/可用 KG/带图参考库/confirmed memory)
     时,回答只会是凭空生成,拒绝提问。前端会据同一信号禁用对话框,但那只是 UX;这里是
@@ -60,6 +80,8 @@ def _require_ask_available(notebook: NotebookSummary) -> None:
             "该笔记本还没有可用于回答的内容，请先添加来源，"
             "或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
         )
+    if repo is not None:
+        _validate_source_scope(repo, notebook, source_scope)
 
 
 @router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
@@ -117,7 +139,7 @@ async def preview_ask_intent(
             notebook = repo.get_notebook(notebook_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Notebook not found")
-        _require_ask_available(notebook)
+        _require_ask_available(notebook, repo, payload.source_scope)
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
         )
@@ -208,7 +230,7 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
-    _require_ask_available(notebook)
+    _require_ask_available(notebook, repo, payload.source_scope)
     _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     try:
         return repo.ask(notebook_id, payload)
@@ -282,7 +304,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
-    _require_ask_available(notebook)  # 硬约束:空库 ask 权威拒绝(复用上面已拉的快照,零额外查询)
+    _require_ask_available(notebook, repo, payload.source_scope)  # 空库/空来源范围权威拒绝
     _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     return StreamingResponse(
         _stream_ask_events(repo, notebook_id, payload, spec, request),

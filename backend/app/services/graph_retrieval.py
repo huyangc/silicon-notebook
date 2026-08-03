@@ -1298,7 +1298,12 @@ class GraphRetrievalService(_RetrievalState):
         return self._vector_cache.get(f"{notebook_id}:entchunk", version, _load)
 
     def ppr_retrieve(self, *args, **kwargs):
-        return self._ppr_retrieve(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "chunk", self._ppr_retrieve(*args, **kwargs)
+        )
 
     def follow_chain(self, *args, **kwargs):
         return self._follow_chain(*args, **kwargs)

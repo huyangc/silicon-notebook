@@ -1572,6 +1572,34 @@ def test_report_section_model_grounded_flag_cannot_validate_fake_marker(repo):
     assert out["grounded"] is False and out["evidence_level"] == "inferred"
 
 
+def test_report_section_does_not_read_memory_under_selected_source_scope(repo):
+    from dataclasses import replace
+
+    from app.models.source_scope import SourceScope
+    from app.services.reasoning_retrieval import ReasoningResult
+    from app.services.source_scope import source_scope_context
+
+    class _Memory:
+        def notebook_memory_hits(self, *_args, **_kwargs):
+            raise AssertionError("selected source scope must not query Memory")
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    eng.dependencies = replace(eng.dependencies, memory_retriever=_Memory())
+
+    with source_scope_context(
+        nb.id, SourceScope(mode="include", source_ids=["src-selected"])
+    ):
+        out = eng._draft_section(
+            nb.id,
+            {"title": "T", "scope": "S", "sub_queries": ["q"]},
+            "q",
+            ReasoningResult(),
+        )
+
+    assert out["markdown"]
+
+
 def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo):
     class _EditorLLM:
         configured = True

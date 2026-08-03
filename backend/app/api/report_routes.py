@@ -20,6 +20,7 @@ from app.models.reports import (
     ReportOutlineUpdate,
     ReportSummary,
 )
+from app.api.ask_routes import _validate_source_scope
 
 
 router = APIRouter()
@@ -33,7 +34,8 @@ def _report_llm_ready(repo) -> bool:
 
 
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
-                     auto_generate: bool = False, intent_contract=None) -> None:
+                     auto_generate: bool = False, intent_contract=None,
+                     source_scope=None) -> None:
     """Run corpus-blind understanding, or resume planning after confirmation.
 
     The first call has no ``intent_contract`` and stops at ``intent_ready``.
@@ -45,7 +47,8 @@ def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: s
     repo.report_execution.start_plan(
         notebook_id, rid, question, history, auto_generate,
         user_id=repo.current_user().id,
-        intent_contract=intent_contract)
+        intent_contract=intent_contract,
+        source_scope=source_scope)
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
@@ -64,13 +67,33 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
         raise HTTPException(status_code=422, detail="question required")
     if not _report_llm_ready(repo):
         raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        notebook = repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    _validate_source_scope(repo, notebook, payload.source_scope)
     depth = max(1, min(16, int(payload.depth)))
     try:
         rid = repo.create_report(notebook_id, payload.question.strip(), depth=depth)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    _launch_plan_job(repo, notebook_id, rid, payload.question.strip(), payload.history,
-                     payload.auto_generate)
+    scope_payload = (
+        payload.source_scope.model_dump() if payload.source_scope is not None else None
+    )
+    if scope_payload is not None:
+        repo.update_report(
+            notebook_id, rid, understanding={"source_scope": scope_payload}
+        )
+    if scope_payload is None:
+        _launch_plan_job(
+            repo, notebook_id, rid, payload.question.strip(), payload.history,
+            payload.auto_generate,
+        )
+    else:
+        _launch_plan_job(
+            repo, notebook_id, rid, payload.question.strip(), payload.history,
+            payload.auto_generate, source_scope=scope_payload,
+        )
     return {"report_id": rid, "status": "pending"}
 
 
@@ -122,6 +145,9 @@ def confirm_report_intent(notebook_id: str, report_id: str,
     understanding["confirmed"] = True
     if not repo.claim_report_intent(notebook_id, report_id, understanding):
         raise user_error(409, "当前报告不再处于问题确认阶段")
+    launch_kwargs = {"intent_contract": understanding}
+    if understanding.get("source_scope") is not None:
+        launch_kwargs["source_scope"] = understanding["source_scope"]
     _launch_plan_job(
         repo,
         notebook_id,
@@ -129,7 +155,7 @@ def confirm_report_intent(notebook_id: str, report_id: str,
         cur["question"],
         "",
         bool(understanding.get("auto_generate_requested")),
-        intent_contract=understanding,
+        **launch_kwargs,
     )
     return {"status": "planning"}
 

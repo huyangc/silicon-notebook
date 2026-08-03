@@ -4441,6 +4441,12 @@ button.chat-session-card {
   border-color: #101820;
 }
 
+.chat-tab.scope-disabled:not(.active) {
+  background: #f4f5f7;
+  border-color: #e3e6eb;
+  color: #a0a7b2;
+}
+
 .knowledge-item-title {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
@@ -5077,7 +5083,7 @@ button.chat-session-card {
 
 .source-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
   align-items: center;
   gap: 6px;
   width: 100%;
@@ -5086,6 +5092,46 @@ button.chat-session-card {
   border-radius: 10px;
   padding: 0 6px 0 10px;
   background: transparent;
+}
+
+.source-scope-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.source-scope-toolbar span {
+  margin-right: auto;
+}
+
+.source-scope-toolbar button {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  padding: 3px 4px;
+  cursor: pointer;
+}
+
+.source-scope-toolbar button:disabled {
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+.source-scope-check {
+  width: 22px;
+  min-height: 54px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.source-scope-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--blue);
 }
 
 .source-row:hover {

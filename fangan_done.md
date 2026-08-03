@@ -70,6 +70,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 - 两列工作区：左 Source Stack / 右侧主区域；主区域为 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab，固定 Studio 右栏已移除。
 - 左上角 notebook 名称可编辑保存；左栏显示来源数量、仅显示用户导入文件；网络来源检索保留为 disabled affordance。
+- **按来源选择检索范围（§6.5 / §11，2026-08-03）**：左栏每个可见导入来源新增复选框及全选/清空，默认全选；当前选择同时约束问答意图预检与执行、新建深度报告，并在后端统一过滤当前 notebook 的 chunk、元素、KG/关系证据、图路径与 PPR 结果。收窄范围时隐藏 Memory/Knowhow 投影不参与，挂载参考库仍保持在参与集；本地全不选且未挂库时，前端置灰问答输入和新建报告，后端对绕过 UI 的请求返回 409。外库/隐藏/失效 source id 返回 422，旧客户端省略 `source_scope` 时保持整库行为；报告会把该范围持久化至 understanding 合同，意图确认、规划和生成阶段持续复用。
 - Notebook 顶栏保持紧凑：标题下不再渲染 description，description 在没有对话时进入问答欢迎态；顶部分析工具栏具备横向 overflow 保护，桌面宽度下动作标签不会被截断。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。

@@ -3,6 +3,8 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.models.source_scope import SourceScope
+
 from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT,
     ResultScope,
@@ -191,6 +193,7 @@ class QueryIntentContract(BaseModel):
 class AskIntentPreviewRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     conversation_id: Optional[str] = Field(default=None, max_length=200)
+    source_scope: Optional[SourceScope] = None
 
 
 class AskIntentConfirmation(BaseModel):
@@ -215,6 +218,9 @@ class AskRequest(BaseModel):
     # User-controlled resource level.  It selects immutable hard ceilings from
     # ask_retrieval_policy; the model may stop early but cannot increase them.
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
+    # None preserves the historical whole-notebook behavior. include=[] is an
+    # explicit empty local scope; mounted base notebooks remain participants.
+    source_scope: Optional[SourceScope] = None
     # reasoning only: returned by /ask/intent and confirmed by the user (or
     # auto-confirmed by the UI when no blocking ambiguity exists).
     intent: Optional[AskIntentConfirmation] = None

@@ -67,6 +67,7 @@ from app.services.prompts import (
     followup_rewrite_prompt,
 )
 from app.services.retrieval import RetrievedKnowledge, classify_evidence
+from app.services.source_scope import source_scope_restricted
 
 # Matches both one provenance marker and the comma-group form models commonly
 # emit (`[k1, k3]`). A group binds only when every key exists in id_map.
@@ -289,13 +290,16 @@ class AskService:
         reaches streaming engines (mirrors the frozen route-runner split)."""
         from app.services.ask_modes import resolve_mode
 
+        from app.services.source_scope import source_scope_context
+
         spec = resolve_mode(getattr(payload, "mode", None))
         handler = getattr(self, spec.handler)
-        if spec.streaming:
+        with source_scope_context(notebook_id, getattr(payload, "source_scope", None)):
+            if spec.streaming:
+                return handler(notebook_id, payload, user_id=user_id,
+                               job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
             return handler(notebook_id, payload, user_id=user_id,
-                           job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
-        return handler(notebook_id, payload, user_id=user_id,
-                       job_id=job_id, cancel_event=cancel_event)
+                           job_id=job_id, cancel_event=cancel_event)
 
     def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """Run the synchronous Ask surface through the durable job lifecycle.
@@ -485,6 +489,17 @@ class AskService:
         它是响应契约的一部分,不因为这一轮跑通了就变成假的。
         """
         from app.services.reasoning_retrieval import enumeration_wiring_active
+        from app.services.source_scope import current_source_scope
+
+        source_scope = current_source_scope()
+        if source_scope is not None and source_scope.restricted:
+            # Scoped runs deliberately disable whole-collection enumeration,
+            # but selected documents still expose raw element search. Keep the
+            # no-KG guard from short-circuiting before that tool can run.
+            return (
+                source_scope.mode == "exclude"
+                or bool(source_scope.source_ids)
+            )
 
         if not enumeration_wiring_active(
             self.settings, self.collection_catalog, self.collection_enumeration
@@ -522,6 +537,13 @@ class AskService:
         return self.evidence_context.parse_anchors(answer, id_map)
 
     def _memory_hits(self, user_id: str, notebook_id: str, query: str):
+        from app.services.source_scope import source_scope_restricted
+
+        # Memory/Knowhow projection sources are intentionally absent from the
+        # checkbox list. Once the user narrows that list, only selected imported
+        # sources (plus mounted bases) may contribute evidence.
+        if source_scope_restricted():
+            return []
         if self.memory_retriever is None:
             return []
         return self.memory_retriever.notebook_memory_hits(
@@ -1537,6 +1559,12 @@ class AskService:
             job_id=job_id,
         )
         conversation_id, history = turn.conversation_id, turn.history
+        from app.services.source_scope import scoped_conversation_history
+
+        # A previous answer may contain evidence from sources that are no
+        # longer selected.  Do not let it influence rewrite, retrieval, or
+        # synthesis under the new source ceiling.
+        history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
         retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
@@ -1847,6 +1875,9 @@ class AskService:
             job_id=job_id,
         )
         conversation_id, history = turn.conversation_id, turn.history
+        from app.services.source_scope import scoped_conversation_history
+
+        history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
         intent_contract = self._confirmed_reasoning_intent(payload, history)
         evidence_scope = self._confirmed_evidence_scope(
@@ -1973,6 +2004,7 @@ class AskService:
             intent_contract.completeness_required
             and self.knowhow_store is not None
             and not evidence_scope.restricted
+            and not source_scope_restricted()
         ):
             from app.services.structured_retrieval import (
                 enumerate_knowhow,
@@ -2260,14 +2292,19 @@ class AskService:
             try:
                 # 端口化构造(与冻结的 from_repository 工厂逐字段同源):检索/模型/
                 # 社区端口直通,communities 逐次新建 —— sibling_min_bridge 调用时读。
+                scoped_collections = not source_scope_restricted()
                 result = ReasoningRetriever(
                     retrieval=self.retrieval,
                     model_clients=self.model_clients,
                     communities=self.communities(),
                     settings=self.settings,
                     cancel_event=cancel_event,
-                    collection_catalog=self.collection_catalog,
-                    collection_enumeration=self.collection_enumeration,
+                    collection_catalog=(
+                        self.collection_catalog if scoped_collections else None
+                    ),
+                    collection_enumeration=(
+                        self.collection_enumeration if scoped_collections else None
+                    ),
                 ).run(
                     notebook_id,
                     research_question,
@@ -2892,6 +2929,9 @@ class AskService:
             job_id=job_id,
         )
         conversation_id, history = turn.conversation_id, turn.history
+        from app.services.source_scope import scoped_conversation_history
+
+        history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
@@ -2986,8 +3026,13 @@ class AskService:
                 raise_if_cancelled(cancel_event)
                 if ppr_chunks:
                     from app.services.retrieval import RetrievedChunk, RetrievalSupport
-                    reports = self.community_reports(
-                        notebook_id)[: self.settings.ppr_community_context_top_n]
+                    from app.services.source_scope import source_scope_restricted
+
+                    reports = (
+                        [] if source_scope_restricted() else self.community_reports(
+                            notebook_id
+                        )[: self.settings.ppr_community_context_top_n]
+                    )
                     community_chunks = [RetrievedChunk(
                         chunk_id=f"community:{i}", source_id="",
                         source_title="Knowledge base theme", section_path=r["title"],
@@ -3135,6 +3180,18 @@ class AskService:
                 max_depth=getattr(self.settings, "graph_max_depth", 3),
                 max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
             )
+            from app.services.source_scope import source_scope_restricted
+
+            if source_scope_restricted():
+                allowed_ids = {
+                    hit.object_id for hit in top_hits
+                } | set(use_seeds)
+                subgraph = [
+                    (node, edge, src)
+                    for node, edge, src in subgraph
+                    if node.get("object_id") in allowed_ids
+                    and (not src or src in allowed_ids)
+                ]
             # Render subgraph into (context_block, id_map) — same k{i} format as
             # _answer_context so grouped marker resolution works unchanged.
             context_block, id_map = render_subgraph_context(subgraph, id_offset=0)

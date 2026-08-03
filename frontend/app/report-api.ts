@@ -1,13 +1,19 @@
 import { requestBlob, requestJson } from "./api-client.ts";
 import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-view.tsx";
+import type { SourceScopePayload } from "./source-scope.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
-export const createReport = (nb: string, question: string, depth: number) =>
+export const createReport = (
+  nb: string,
+  question: string,
+  depth: number,
+  sourceScope?: SourceScopePayload,
+) =>
   requestJson<{ report_id: string }>(`/notebooks/${nb}/reports`, {
     ...options,
     method: "POST",
-    body: JSON.stringify({ question, depth }),
+    body: JSON.stringify({ question, depth, source_scope: sourceScope }),
   });
 
 export const confirmReportIntent = (

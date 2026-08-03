@@ -2173,6 +2173,16 @@ class CandidateRetrievalService(_RetrievalState):
             return "", {}, [], {}
         subgraph = multihop_subgraph(G, oid_to_idx, idx_to_oid, seed_ids=seeds,
                                      edge_types=None, max_depth=1, max_fan_out=self._MIX_FANOUT)
+        from app.services.source_scope import source_scope_restricted
+
+        if source_scope_restricted():
+            allowed_ids = set(seeds)
+            subgraph = [
+                (node, edge, src)
+                for node, edge, src in subgraph
+                if node.get("object_id") in allowed_ids
+                and (not src or src in allowed_ids)
+            ]
         if not subgraph:
             return "", {}, [], {}
         block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
@@ -2276,16 +2286,38 @@ class CandidateRetrievalService(_RetrievalState):
         return self._retrieve_scored(*args, **kwargs)
 
     def federated_retrieve(self, *args, **kwargs):
-        return self._federated_retrieve_impl(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("active_notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "knowledge",
+            self._federated_retrieve_impl(*args, **kwargs),
+        )
 
     def federated_retrieve_relations(self, *args, **kwargs):
-        return self._federated_retrieve_relations_impl(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("active_notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "relation",
+            self._federated_retrieve_relations_impl(*args, **kwargs),
+        )
 
     def federated_retrieve_elements(self, *args, **kwargs):
         return self._federated_retrieve_elements_impl(*args, **kwargs)
 
     def retrieve_neighbors(self, *args, **kwargs):
-        return self._retrieve_neighbors(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "knowledge", self._retrieve_neighbors(*args, **kwargs)
+        )
 
     def retrieve_elements(self, *args, **kwargs):
-        return self._retrieve_elements(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "element", self._retrieve_elements(*args, **kwargs)
+        )
