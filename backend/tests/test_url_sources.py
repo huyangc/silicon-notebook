@@ -26,7 +26,7 @@ def cloud_repo(tmp_path, monkeypatch):
 @pytest.fixture
 def notoken_repo(tmp_path, monkeypatch):
     _base_env(tmp_path, monkeypatch)
-    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
     monkeypatch.setenv("MINERU_MODE", "off")
     return SQLiteRepository(Settings())
 
@@ -35,7 +35,7 @@ def notoken_repo(tmp_path, monkeypatch):
 def local_repo(tmp_path, monkeypatch):
     """本地 MinerU(http) 已配置、云端 token 缺失：URL 来源应走本地。"""
     _base_env(tmp_path, monkeypatch)
-    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
     monkeypatch.setenv("MINERU_MODE", "http")
     monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
     return SQLiteRepository(Settings())

@@ -7455,6 +7455,11 @@
               "title": "Parse Failed",
               "type": "boolean"
             },
+            "parse_quality_warning": {
+              "default": false,
+              "title": "Parse Quality Warning",
+              "type": "boolean"
+            },
             "parse_status": {
               "default": "",
               "title": "Parse Status",
@@ -7811,6 +7816,11 @@
                 }
               ],
               "title": "Paper Meta Status"
+            },
+            "parse_quality_warning": {
+              "default": false,
+              "title": "Parse Quality Warning",
+              "type": "boolean"
             },
             "parse_status": {
               "default": "",
@@ -8207,6 +8217,11 @@
                 }
               ],
               "title": "Paper Meta Status"
+            },
+            "parse_quality_warning": {
+              "default": false,
+              "title": "Parse Quality Warning",
+              "type": "boolean"
             },
             "parse_status": {
               "default": "",
@@ -8902,6 +8917,11 @@
                 }
               ],
               "title": "Paper Meta Status"
+            },
+            "parse_quality_warning": {
+              "default": false,
+              "title": "Parse Quality Warning",
+              "type": "boolean"
             },
             "parse_status": {
               "default": "",
@@ -18646,6 +18666,7 @@
       "notebook_id": "nb-api",
       "paper_meta": null,
       "paper_meta_status": "missing",
+      "parse_quality_warning": false,
       "parse_status": "extracted",
       "pub_year": null,
       "source_url": "",
