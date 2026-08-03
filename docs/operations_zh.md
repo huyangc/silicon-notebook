@@ -391,9 +391,9 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 ## 用 MinerU 解析 PDF
 
-PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 时才调用它，否则回退到 pypdf 纯文本。
+PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 时才调用它，否则回退到本地 PyMuPDF4LLM 版面/Markdown 解析（pypdf 只作解析器报错后的最后兜底）。
 
-- **本机 / 无 GPU**：保持 `MINERU_MODE=off`，PDF 走 pypdf（仅纯文本）。
+- **本机 / 无 GPU**：保持 `MINERU_MODE=off`，PDF 走 PyMuPDF4LLM，保留分页 Markdown、标题、阅读顺序和重建表格，不依赖远端服务。
 - **GPU 部署机（推荐 HTTP 服务）**：把 MinerU 作为独立服务运行，让后端指向它：
 
   ```bash
@@ -443,9 +443,9 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 
   `.env.example` 默认仍保持 `MINERU_MODE=off`，让其他环境默认离线安全。
 
-**URL 来源（「添加链接」）优先用本地 MinerU。** 只要配置了本地 MinerU 服务（`MINERU_MODE=http`/`cli`），公开 PDF 链接就由本地解析：后端下载后走与文件上传相同的「本地 MinerU→pypdf」路径。为防 SSRF，下载器会校验初始地址和每次重定向，拒绝 localhost、私网、link-local 与保留地址；内部文档请改用文件上传。`MINERU_API_TOKEN` 云端（mineru.net）仅在未配置本地 MinerU 时作为回退——一旦走本地，绝不会再静默调用云端。添加链接需要本地 MinerU 或云端 token 二者其一。文件上传遵循同一条规则：本地 MinerU 未配置、仅配置了云端 token 时，上传文件同样经该云端 v4 路径解析（含图片、公式、表格），云端调用失败会自动回落 pypdf。
+**URL 来源（「添加链接」）优先用本地 MinerU。** 只要配置了本地 MinerU 服务（`MINERU_MODE=http`/`cli`），公开 PDF 链接就由本地解析：后端下载后走与文件上传相同的「本地 MinerU→PyMuPDF4LLM」路径。为防 SSRF，下载器会校验初始地址和每次重定向，拒绝 localhost、私网、link-local 与保留地址；内部文档请改用文件上传。`MINERU_API_TOKEN` 云端（mineru.net）只在未配置本地 MinerU 时使用——一旦走本地，绝不会再静默调用云端。添加链接需要本地 MinerU 或云端 token 二者其一。文件上传遵循同一条规则：本地 MinerU 未配置、仅配置云端 token 时，上传文件经同一云端 v4 路径解析（含图片、公式、表格）。自建 HTTP 与云端传输会按 `MINERU_MAX_RETRIES` 重试瞬态失败（默认首次后再试 2 次）；URL/文件云解析最终失败或没有可用元素时，后端会下载/打开 PDF 并用 PyMuPDF4LLM 完成本地解析，只有该解析器自身失败时才最后回落 pypdf。
 
-MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。桌面端的来源详情窗口使用常规关闭按钮，并可按住标题栏拖动——应用里其它居中浮动弹窗（模型服务状态、添加来源、知识/图谱、报告、各类确认框）同样可拖动，共用同一套拖动 hook；窄屏继续使用固定弹窗布局，详情正文保持独立滚动。
+MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级；PyMuPDF4LLM 的分页 Markdown 也会转换到同一套标题/段落/表格元素模型。前端用 KaTeX 渲染公式，并直接渲染 HTML 表格。MinerU 降级到 Python 解析成功时，来源仍为 `extracted`；原始诊断只留在 pipeline log 和私有 source `error_message`，列表/详情仅返回 `parse_quality_warning`。来源详情会明确提示版面、公式、表格或 OCR 可能有差异，并给 owner「重新解析」「删除来源」操作；后续 MinerU 重解析成功会清掉警告。若某 PDF 仍解析出 0 文本，会给出扫描/图片型 PDF 提示而不是看起来“空成功”。桌面端的来源详情窗口使用常规关闭按钮并可拖动；窄屏继续使用固定弹窗布局，详情正文保持独立滚动。
 
 ### 单文件解析自检(`scripts/mineru_probe.py`)
 

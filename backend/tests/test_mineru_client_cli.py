@@ -2,6 +2,7 @@ import base64
 import json
 import subprocess
 from pathlib import Path
+from urllib.error import URLError
 
 import pytest
 
@@ -185,6 +186,40 @@ def test_parse_with_images_http_gated_off(monkeypatch):
     cl, images = client.parse_with_images("/tmp/d.pdf", "d.pdf")
     assert images == {}
     assert cl and cl[0]["text"] == "hi"
+
+
+def test_http_parse_retries_two_transient_transport_failures(monkeypatch):
+    settings = Settings(
+        MINERU_MODE="http",
+        MINERU_API_URL="http://mineru.internal",
+        MINERU_MAX_RETRIES="2",
+    )
+    client = MinerUClient(settings)
+    attempts = 0
+    sleeps = []
+
+    def flaky_post(fields, file_path, file_name):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise URLError("temporary network failure")
+        return {
+            "results": {
+                file_name: {
+                    "content_list": [{"type": "text", "text": "recovered"}]
+                }
+            }
+        }
+
+    monkeypatch.setattr(client, "_post_file_parse", flaky_post)
+    monkeypatch.setattr(client, "_sleep", sleeps.append)
+
+    content, images = client.parse_with_images("/tmp/flaky.pdf", "flaky.pdf")
+
+    assert content == [{"type": "text", "text": "recovered"}]
+    assert images == {}
+    assert attempts == 3
+    assert sleeps == [1.0, 2.0]
 
 
 class FakePopenWithImages:

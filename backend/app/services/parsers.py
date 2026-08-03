@@ -105,6 +105,11 @@ def parse_markdown_text(source_id: str, text: str) -> List[SourceElement]:
                 metadata["anchor_id"] = block.anchor_id
         if block.type == "code_block":
             metadata["lang"] = block.lang
+        if block.type == "table" and block.raw.lstrip().lower().startswith("<table"):
+            # PyMuPDF4LLM can emit reconstructed HTML tables in reading order.
+            # Preserve that renderable representation while Block.text remains
+            # the compact retrieval/embedding form.
+            metadata["table_html"] = block.raw.strip()
         if block.type == "image":
             metadata.update(block.metadata)
         elements.append(
@@ -348,11 +353,12 @@ def parse_pdf(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    """Parse a PDF via MinerU when configured, else fall back to pypdf text.
+    """Parse a PDF via MinerU when configured, else use the Python fallback.
 
     MinerU (run on the GPU deployment host) recovers formulas (as LaTeX),
     tables (as HTML), and reading order. When it is not configured or fails,
-    we degrade to pypdf's flat text extraction so local/no-GPU dev still works.
+    PyMuPDF4LLM produces layout-aware Markdown locally. pypdf remains the final
+    dependency/parser-error fallback so local/no-GPU ingestion still completes.
     """
     if mineru_client is not None and getattr(mineru_client, "configured", False):
         try:
@@ -369,13 +375,70 @@ def parse_pdf(
                 mineru_client, "last_error", ""
             ):
                 mineru_client.last_error = str(exc)
-            # Fall through to pypdf so a MinerU outage never blocks ingestion.
+            # Fall through to the Python parser so MinerU outage never blocks ingestion.
             pass
+    return parse_pdf_python(source_id, path)
+
+
+def parse_pdf_python(source_id: str, path: Path) -> List[SourceElement]:
+    """High-quality local PDF fallback: PyMuPDF4LLM, then pypdf as last resort.
+
+    Page-chunked Markdown preserves headings, multi-column reading order and
+    tables substantially better than plain text extraction. Image files are
+    intentionally not emitted here: the source may be a short-lived downloaded
+    URL temp file, and dangling image paths must never enter persisted elements.
+    """
+    try:
+        import pymupdf4llm
+
+        page_chunks = pymupdf4llm.to_markdown(
+            str(path),
+            page_chunks=True,
+            show_progress=False,
+            write_images=False,
+            embed_images=False,
+            table_output="html",
+        )
+        elements: List[SourceElement] = []
+        if isinstance(page_chunks, list):
+            for page_number, chunk in enumerate(page_chunks, start=1):
+                if not isinstance(chunk, dict):
+                    continue
+                markdown = str(chunk.get("text", "") or "")
+                if not markdown.strip():
+                    continue
+                for ordinal, element in enumerate(
+                    parse_markdown_text(source_id, markdown), start=1
+                ):
+                    metadata = dict(element.metadata)
+                    metadata.update(
+                        {
+                            "parser": "pymupdf4llm",
+                            "page_number": page_number,
+                            "source_format": "pdf",
+                        }
+                    )
+                    elements.append(
+                        element.model_copy(
+                            update={
+                                "location_label": (
+                                    f"PDF p.{page_number} {element.element_type} {ordinal}"
+                                ),
+                                "metadata": metadata,
+                            }
+                        )
+                    )
+        if elements:
+            return elements
+    except Exception:
+        # The fallback itself is deliberately fail-open. A missing wheel,
+        # unsupported PDF feature, or OCR/layout error gets one final pypdf try.
+        pass
     return parse_pdf_pypdf(source_id, path)
 
 
 def parse_pdf_pypdf(source_id: str, path: Path) -> List[SourceElement]:
-    """Offline PDF fallback (no MinerU).
+    """Last-resort offline PDF fallback when PyMuPDF4LLM is unavailable/fails.
 
     Uses pypdf's layout-aware extraction (better reading order and column/row
     spacing than the default mode) and segments each page into paragraph and

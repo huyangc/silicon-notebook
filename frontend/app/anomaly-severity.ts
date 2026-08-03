@@ -28,6 +28,9 @@ const PARSE_FAILED_TOOLTIP = "这个来源没能解析成功，可删除后重�
 const EXTRACTION_WARNING_LABEL = "部分内容未分析";
 // tooltip 用后端返回的 extraction_warning 原文,不在此处硬编码。
 
+const PARSE_QUALITY_WARNING_LABEL = "降级解析";
+const PARSE_QUALITY_WARNING_TOOLTIP = "MinerU 暂时不可用，已改用本地 Python PDF 解析；版面、公式、表格或扫描内容可能不完整。可重新解析，不满意可删除来源。";
+
 const PAPER_META_MISSING_LABEL = "待补全";
 const PAPER_META_MISSING_TOOLTIP = "论文作者/机构等信息尚未补全";
 
@@ -174,6 +177,7 @@ export function sourceAnomalies(source: {
   parse_status?: string | null;
   status?: string | null;
   extraction_warning?: string | null;
+  parse_quality_warning?: boolean;
   paper_meta_status?: string | null;
 }): Anomaly[] {
   const anomalies: Anomaly[] = [];
@@ -192,6 +196,14 @@ export function sourceAnomalies(source: {
       severity: "retrieval",
       label: EXTRACTION_WARNING_LABEL,
       tooltip: source.extraction_warning,
+    });
+  }
+
+  if (source.parse_quality_warning) {
+    anomalies.push({
+      severity: "retrieval",
+      label: PARSE_QUALITY_WARNING_LABEL,
+      tooltip: PARSE_QUALITY_WARNING_TOOLTIP,
     });
   }
 

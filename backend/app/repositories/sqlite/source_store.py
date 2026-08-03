@@ -13,6 +13,7 @@ from app.models.sources import (
     SourceDetail,
     SourceElement,
     SourceSummary,
+    has_pdf_python_fallback_warning,
 )
 from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.sqlite.database import SqliteDatabase
@@ -1237,6 +1238,7 @@ class SourceStore:
             doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
             source_url=row["source_url"] if "source_url" in row.keys() else "",
             extraction_warning=self.extraction_warning(db, row["id"]),
+            parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
             kg_extracted=kg_extracted,
             authors=[a["name"] for a in pm["authors"]] if pm else [],
             pub_year=pm["pub_year"] if pm else None,
@@ -1336,6 +1338,7 @@ class SourceStore:
                 doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
                 source_url=row["source_url"] if "source_url" in row.keys() else "",
                 extraction_warning=_warning(sid),
+                parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
                 kg_extracted=sid in kg_extracted_ids,
                 authors=[a["name"] for a in pm["authors"]] if pm else [],
                 pub_year=pm["pub_year"] if pm else None,

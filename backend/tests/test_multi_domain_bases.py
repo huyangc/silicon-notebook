@@ -1638,13 +1638,14 @@ class TestParticipantScopedSourceAndAssetProxy:
     def test_proxied_reads_disclose_no_backend_internals(self, two_users_client):
         """代理读取把参考库的来源交给一个非 owner 非成员的用户,后端内部形态不能跟着出去:
         `file_path`(本机绝对路径)与 `error_message`(原样落库的异常串,同样可能带绝对路径)
-        整个字段不在响应模型里,只留如实的 `parse_failed` 布尔。"""
+        整个字段不在响应模型里,只留由 parse_status 推导的 `parse_failed` 布尔。成功的
+        Python 降级也会带诊断,因此绝不能再用 error_message 非空推断解析失败。"""
         c = two_users_client
         client = c["client"]
         active, _base, seeded, repo_api = self._mounted_base(c)
         with repo_api._write() as db:
             db.execute(
-                "UPDATE sources SET file_path=?, error_message=? WHERE id=?",
+                "UPDATE sources SET file_path=?, parse_status='failed', error_message=? WHERE id=?",
                 ("/srv/silicon/storage/notebooks/secret/base.md",
                  "FileNotFoundError: /srv/silicon/storage/notebooks/secret/base.md",
                  seeded["source_id"]),

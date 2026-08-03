@@ -212,7 +212,7 @@ Chinese counterparts are linked from the top of each split document.
 
 - SQLite is the shipped default; PostgreSQL 16 is a supported direct backend. The repository includes a verified one-way SQLite→PostgreSQL snapshot importer; it does not provide live synchronization, PostgreSQL→SQLite replay, or MySQL migration.
 - No Docker is required or provided as the default first-version workflow.
-- High-fidelity formulas, tables, layout, and scanned PDFs require MinerU; `MINERU_MODE=off` uses pypdf text fallback.
+- Highest-fidelity formulas, images, and complex scanned PDFs require MinerU; `MINERU_MODE=off` uses the local PyMuPDF4LLM layout/Markdown fallback (with pypdf only as a last resort). Remote MinerU HTTP calls retry transient failures twice by default (three total attempts; `MINERU_MAX_RETRIES`). If a cloud URL parse still fails, the backend downloads the PDF and completes through the local fallback; the source UI warns about possible quality loss and offers reparse/delete actions.
 - Knowledge extraction and model-backed answers require the relevant workload bindings; offline mode does not synthesize knowledge.
 - Graph Ask remains opt-in/experimental; `chunk` is the default.
 - Memory is manual opt-in and creator-private.

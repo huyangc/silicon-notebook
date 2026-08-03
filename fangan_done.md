@@ -101,12 +101,12 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - `SourceElement`（id / source_id / element_type / location_label / text / metadata）+ `source_elements` 表。
 - parser：Markdown（heading/paragraph/list_item）、DOCX（paragraph/table_row）、PPTX、PDF、plain text fallback。
 - **PPTX 升级为元素级**：按 shape / text box 逐个产出 `slide_text` 元素，并解析 `ppt/notesSlides/*.xml` speaker notes 为 `speaker_notes` 元素。
-- **PDF 解析经 MinerU 适配器（`mineru_client.py`）与 GPU 解耦**：`MINERU_MODE=http` 调远端 `mineru-api`，`cli` 在隔离 Python 子进程中调用 MinerU `do_parse/read_fn`，`off`（默认）用 pypdf 回退。FastAPI 后端进程不引入 torch/MinerU；MinerU 不可达/出错时降级 pypdf，并在 pipeline log / source `error_message` 留下回退诊断。MinerU 输出映射为结构化元素：公式→`formula`（保留 LaTeX）、表格→`table`（HTML 存 metadata）、标题保留层级。
-- **off 回退质量已提升**：`parse_pdf_pypdf` 改用 pypdf **layout 抽取模式**（更好的阅读顺序、行/列间距），并按空行切分为 `heading` / `page_text` 元素（不再单块压平）；零新依赖、许可证友好。无公式/表格保真（那需 MinerU）。
+- **PDF 解析经 MinerU 适配器（`mineru_client.py`）与 GPU 解耦**：`MINERU_MODE=http` 调远端 `mineru-api`，`cli` 在隔离 Python 子进程中调用 MinerU `do_parse/read_fn`，`off`（默认）用 PyMuPDF4LLM 回退。FastAPI 后端进程不引入 torch/MinerU；MinerU URL/文件解析在远端瞬态错误默认共尝试 3 次，最终失败或产出 0 元素时降级本地解析，并在 pipeline log / source `error_message` 留下回退诊断。MinerU 输出映射为结构化元素：公式→`formula`（保留 LaTeX）、表格→`table`（HTML 存 metadata）、标题保留层级。
+- **off/故障回退质量已提升**：PyMuPDF4LLM 按页产出版面感知 Markdown，保留标题、多栏阅读顺序和重建 HTML 表格，再转为现有 `SourceElement`；pypdf 仅作新解析器缺失/报错后的最后兜底。成功降级的来源保持 `extracted` 并返回安全的 `parse_quality_warning`，详情页提示潜在质量差异并提供重新解析/删除，MinerU 后续成功会清警告。
 - **本机已启用 MinerU(MLX)**：本机为 Apple Silicon，已装 `mineru[core]` + `mlx-vlm`（VLM 模型 MinerU2.5-Pro 已下载），`.env` 设 `MINERU_MODE=cli`、`MINERU_BACKEND=vlm-auto-engine`、`MINERU_PARSE_METHOD=auto`、`MINERU_LANG=en`、`MINERU_TIMEOUT_SECONDS=1800`，`vlm-auto-engine` 自动走 MLX 引擎（Engram 第一页实测 24.57s，完整论文可能超过 600s）。公式/表格/版面离线可得。
 - **空 PDF 止血**：PDF 解析出 0 元素时写明确提示（疑似扫描/图片型 PDF，需 MinerU/OCR），避免"假成功空结果"。
 - 每个元素带 `location_label`，作为 evidence citation 锚点。
-- `.env.example` 默认仍保持 `MINERU_MODE=off`，其它环境默认离线 pypdf。
+- `.env.example` 默认仍保持 `MINERU_MODE=off`，其它环境默认离线 PyMuPDF4LLM（pypdf 最后兜底）。
 
 ## 8. Source Summary
 

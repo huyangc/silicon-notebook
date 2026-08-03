@@ -6441,6 +6441,36 @@ export default function Home() {
                   ))}
                 </div>
               )}
+              {sourceDetail.parse_quality_warning && (
+                <section className="source-pdf-fallback-warning" aria-label="PDF 降级解析提示">
+                  <div>
+                    <strong>当前内容由本地 Python PDF 解析器生成</strong>
+                    <p>MinerU 重试后仍未成功，版面、公式、表格或扫描内容可能存在异常。请先检查内容；MinerU 恢复后可重新解析，不满意也可以删除该来源。</p>
+                  </div>
+                  {!sourceDetailBaseId && !isReader && (
+                    <div className="source-pdf-fallback-actions">
+                      <button
+                        type="button"
+                        className="button secondary"
+                        aria-label="重新解析降级 PDF"
+                        disabled={reparsingSource || sourceDetailDeleting}
+                        onClick={() => reparseSource().catch(reportError)}
+                      >
+                        {reparsingSource ? "重新解析中…" : "重新解析"}
+                      </button>
+                      <button
+                        type="button"
+                        className="button secondary source-pdf-fallback-delete"
+                        aria-label="删除降级 PDF 来源"
+                        disabled={reparsingSource || sourceDetailDeleting}
+                        onClick={() => confirmDeleteSource(sourceDetail)}
+                      >
+                        {sourceDetailDeleting ? "删除中…" : "删除来源"}
+                      </button>
+                    </div>
+                  )}
+                </section>
+              )}
               {/* 命令目录（方案 C）：只对本笔记本自己的来源渲染。参考库来源是只读的，
                   发起/取消/确认在后端都是 owner-only 且按 notebook 收窄，对一个只是被
                   挂载进来的库发起会花这个库的钱、写那个库的知识——授权语义是错的，

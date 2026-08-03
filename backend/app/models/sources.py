@@ -3,6 +3,14 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+PDF_PYTHON_FALLBACK_WARNING_PREFIX = "[pdf-python-fallback]"
+
+
+def has_pdf_python_fallback_warning(error_message: object) -> bool:
+    """Return only the safe public fact, never the stored MinerU diagnostic."""
+    return str(error_message or "").startswith(PDF_PYTHON_FALLBACK_WARNING_PREFIX)
+
+
 class PaperAuthor(BaseModel):
     name: str
     affiliation: str = ""  # 多机构以 "; " 连接;接地校验不过则为空
@@ -46,6 +54,10 @@ class SourceSummary(BaseModel):
     # Non-empty when the latest KG extraction had network-failed windows that
     # silently contributed zero nodes (degraded run, not a clean "completed").
     extraction_warning: Optional[str] = None
+    # MinerU failed after its retry budget and this source completed through
+    # the local Python PDF parser. The raw upstream error remains private in
+    # SourceDetail.error_message; clients receive only this stable safe fact.
+    parse_quality_warning: bool = False
     # 该 source 是否已抽取 KG / 已入图
     kg_extracted: bool = False
     # 论文元数据投影:作者姓名按署名序;非论文/未抽取为空(paper-metadata)。
@@ -134,7 +146,7 @@ class ScopedSourceDetail(SourceSummary):
     def of(cls, detail: SourceDetail) -> "ScopedSourceDetail":
         return cls(
             **detail.model_dump(exclude={"file_path", "error_message"}),
-            parse_failed=bool(detail.error_message),
+            parse_failed=detail.parse_status == "failed",
         )
 
 

@@ -18,6 +18,7 @@ from app.core.event_logging import EventLogger
 from app.core.llm import cap_kwargs
 from app.models.sources import (
     AddUrlSourcesResult,
+    PDF_PYTHON_FALLBACK_WARNING_PREFIX,
     RejectedUrl,
     SourceDetail,
     SourceElement,
@@ -865,9 +866,9 @@ class SourceIngestionService:
     def parse_url_via_local(
         self, source_id: str, url: str, file_name: str, persist_image: Any = None
     ) -> List[SourceElement]:
-        """下载 URL 到临时文件，走本地 MinerU(http/cli)/pypdf 解析（数据不出网）。
+        """下载 URL 到临时文件，走本地 MinerU/PyMuPDF4LLM 解析（数据不出网）。
 
-        复用 parse_source_file 的「本地 MinerU 失败→pypdf 兜底」路径，与文件上传一致；
+        复用 parse_source_file 的「本地 MinerU 失败→Python 兜底」路径，与文件上传一致；
         全程不触达 mineru.net 云端。解析后无论成败都清理临时文件。`persist_image`
         (Task 8) 与文件上传路径同款透传给 parse_source_file/parse_pdf。
         """
@@ -944,7 +945,7 @@ class SourceIngestionService:
                 source.notebook_id, source_id, getattr(source, "created_by", "") or ""
             )
             # URL 来源：本地 MinerU 已配置则优先本地（下载到临时文件，数据不出网），
-            # 否则走 mineru.net 云端；本地文件来源走 MinerU(http/cli)/pypdf。
+            # 否则走 mineru.net 云端；本地文件来源走 MinerU/Python fallback。
             # 本地优先时绝不静默回落云端——内网部署不能把内部 PDF 外发。
             if source.source_url:
                 mineru_client = self.mineru_client()
@@ -956,20 +957,34 @@ class SourceIngestionService:
                     parser_mode = f"mineru_local({mineru_client.mode})"
                 else:
                     cloud_client = self.mineru_cloud_client()
-                    content_list, images = cloud_client.parse_url_with_images(
-                        source.source_url, data_id=source_id
-                    )
-                    elements = mineru_content_list_to_elements(
-                        source_id, content_list, images=images, persist_image=persist_image
-                    )
-                    mineru_error = str(getattr(cloud_client, "last_error", "") or "")
-                    parser_mode = "mineru_cloud"
+                    try:
+                        content_list, images = cloud_client.parse_url_with_images(
+                            source.source_url, data_id=source_id
+                        )
+                        elements = mineru_content_list_to_elements(
+                            source_id, content_list, images=images, persist_image=persist_image
+                        )
+                        if not elements:
+                            raise RuntimeError(
+                                "MinerU cloud content_list mapped to zero source elements"
+                            )
+                        mineru_error = str(getattr(cloud_client, "last_error", "") or "")
+                        parser_mode = "mineru_cloud"
+                    except Exception as exc:
+                        # The cloud request has already exhausted the shared retry
+                        # budget. Download the public PDF and parse it locally so a
+                        # transient mineru.net outage does not fail the source.
+                        mineru_error = str(getattr(cloud_client, "last_error", "") or exc)
+                        elements = self.parse_url_via_local(
+                            source_id, source.source_url, source.file_name, persist_image
+                        )
+                        parser_mode = "python_pdf_fallback_after_cloud_error"
             else:
                 mineru_client = self.mineru_client()
                 cloud_client = self.mineru_cloud_client()
                 if not mineru_client.configured and cloud_client.configured:
                     # 本地 http/cli 未配置 + 云端已配 → 上传文件走云端(对称 URL 分支)；
-                    # 云端任一步失败 → 回落 pypdf，摄取不中断。
+                    # 云端任一步失败 → 回落本地 Python PDF 解析，摄取不中断。
                     try:
                         content_list, images = cloud_client.parse_file_with_images(
                             source.file_path, data_id=source_id
@@ -977,6 +992,10 @@ class SourceIngestionService:
                         elements = mineru_content_list_to_elements(
                             source_id, content_list, images=images, persist_image=persist_image
                         )
+                        if not elements:
+                            raise RuntimeError(
+                                "MinerU cloud content_list mapped to zero source elements"
+                            )
                         mineru_error = str(getattr(cloud_client, "last_error", "") or "")
                         parser_mode = "mineru_cloud"
                     except Exception as exc:
@@ -985,9 +1004,9 @@ class SourceIngestionService:
                             source_id, source.file_path, source.file_name, mineru_client,
                             persist_image=persist_image,
                         )
-                        parser_mode = "pypdf_fallback_after_cloud_error"
+                        parser_mode = "python_pdf_fallback_after_cloud_error"
                 else:
-                    # 本地已配(http/cli) 或 两者都没配 → 现状：本地 MinerU / pypdf。
+                    # 本地已配(http/cli) 或 两者都没配 → 本地 MinerU / Python fallback。
                     elements = self.parse_file(
                         source_id, source.file_path, source.file_name, mineru_client,
                         persist_image=persist_image,
@@ -1082,19 +1101,30 @@ class SourceIngestionService:
                     "Enable MinerU (MINERU_MODE) or add OCR to parse it."
                 )
             fallback_hint = ""
-            if (
+            used_python_fallback_after_mineru_error = (
                 source.file_name.lower().endswith(".pdf")
-                and self.mineru_client().configured
-                and elements
                 and "mineru" not in element_parsers
-            ):
+                and (
+                    parser_mode == "python_pdf_fallback_after_cloud_error"
+                    or self.mineru_client().configured
+                )
+            )
+            if used_python_fallback_after_mineru_error:
                 fallback_hint = (
-                    "MinerU did not produce usable elements; fell back to pypdf text extraction. "
-                    "Check MinerU settings/logs if layout, formula, or table fidelity is expected."
+                    f"{PDF_PYTHON_FALLBACK_WARNING_PREFIX} "
+                    "MinerU did not produce usable elements after retries; used a local "
+                    "Python PDF parser. Layout, formulas, tables, or OCR may still differ "
+                    "from MinerU output; reparse this source when MinerU is available."
                 )
                 if mineru_error:
                     fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"
-            terminal_msg = empty_hint or fallback_hint
+            # Keep the stable fallback prefix first even when the local parser
+            # also finds zero text (common for scans/blank pages). Otherwise
+            # `empty_hint or fallback_hint` hides the fallback fact and clients
+            # lose parse_quality_warning + the reparse/delete recovery actions.
+            terminal_msg = " ".join(
+                message for message in (fallback_hint, empty_hint) if message
+            )
             # Auto-fill notebook name/description from sources (only while name is a
             # default placeholder / purpose is still auto). Persist BEFORE the
             # terminal 'extracted' mark so the frontend's extracted-triggered

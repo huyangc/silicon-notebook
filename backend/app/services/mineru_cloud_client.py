@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from app.core.config import Settings
+from app.services.mineru_http_retry import call_with_mineru_http_retries
 
 
 class MinerUCloudNotConfigured(RuntimeError):
@@ -54,7 +55,7 @@ class MinerUCloudClient:
         try:
             task_id = self._submit(url, data_id)
             zip_url = self._poll(task_id)
-            zip_bytes = self._http_bytes(zip_url)
+            zip_bytes = self._request_bytes(zip_url)
             content_list = self._content_list_from_zip(zip_bytes)
             if not content_list:
                 raise RuntimeError("MinerU 云端结果为空 content_list")
@@ -80,7 +81,7 @@ class MinerUCloudClient:
             file_path = Path(path)
             batch_id, item_data_id = self._submit_file(file_path, data_id)
             zip_url = self._poll_batch(batch_id, item_data_id)
-            zip_bytes = self._http_bytes(zip_url)
+            zip_bytes = self._request_bytes(zip_url)
             content_list = self._content_list_from_zip(zip_bytes)
             if not content_list:
                 raise RuntimeError("MinerU 云端结果为空 content_list")
@@ -104,7 +105,9 @@ class MinerUCloudClient:
         }
         if data_id:
             body["data_id"] = data_id
-        payload = self._http_json("POST", self._api("/api/v4/extract/task"), body)
+        payload = self._request_json(
+            "POST", self._api("/api/v4/extract/task"), body
+        )
         if payload.get("code") not in (0, "0"):
             raise RuntimeError(f"MinerU 云端提交失败: {payload.get('msg') or payload}")
         task_id = (payload.get("data") or {}).get("task_id")
@@ -122,7 +125,9 @@ class MinerUCloudClient:
             "enable_table": self.settings.mineru_cloud_table_enable,
             "language": self.settings.mineru_cloud_language,
         }
-        payload = self._http_json("POST", self._api("/api/v4/file-urls/batch"), body)
+        payload = self._request_json(
+            "POST", self._api("/api/v4/file-urls/batch"), body
+        )
         if payload.get("code") not in (0, "0"):
             raise RuntimeError(f"MinerU 云端申请上传失败: {payload.get('msg') or payload}")
         data = payload.get("data") or {}
@@ -130,7 +135,7 @@ class MinerUCloudClient:
         file_urls = data.get("file_urls") or []
         if not batch_id or not file_urls:
             raise RuntimeError("MinerU 云端未返回 batch_id/file_urls")
-        self._http_put_file(str(file_urls[0]), path.read_bytes())
+        self._request_put_file(str(file_urls[0]), path.read_bytes())
         return str(batch_id), item_data_id
 
     def _poll(self, task_id: str) -> str:
@@ -139,7 +144,7 @@ class MinerUCloudClient:
         max_polls = max(1, math.ceil(timeout / interval))
         url = self._api(f"/api/v4/extract/task/{task_id}")
         for _ in range(max_polls):
-            payload = self._http_json("GET", url)
+            payload = self._request_json("GET", url)
             data = payload.get("data") or {}
             state = str(data.get("state", "")).lower()
             if state == "done":
@@ -159,7 +164,7 @@ class MinerUCloudClient:
         max_polls = max(1, math.ceil(timeout / interval))
         url = self._api(f"/api/v4/extract-results/batch/{batch_id}")
         for _ in range(max_polls):
-            payload = self._http_json("GET", url)
+            payload = self._request_json("GET", url)
             data = payload.get("data") or {}
             results = data.get("extract_result") or []
             item = next((r for r in results if str(r.get("data_id")) == str(data_id)), None)
@@ -192,6 +197,38 @@ class MinerUCloudClient:
         return []
 
     # -- network seams (tests override these) ----------------------------------
+
+    def _request_json(
+        self, method: str, url: str, payload: Optional[dict] = None
+    ) -> dict:
+        return call_with_mineru_http_retries(
+            lambda: self._http_json(method, url, payload),
+            max_retries=self.settings.mineru_max_retries,
+            sleep=self._sleep,
+        )
+
+    def _request_bytes(self, url: str) -> bytes:
+        def read_nonempty() -> bytes:
+            data = self._http_bytes(url)
+            if not data:
+                # A 2xx with an empty body is the same transient failure shape
+                # seen from the JSON endpoint. ConnectionError deliberately
+                # routes it through the shared retry classifier.
+                raise ConnectionError("MinerU remote response body is empty")
+            return data
+
+        return call_with_mineru_http_retries(
+            read_nonempty,
+            max_retries=self.settings.mineru_max_retries,
+            sleep=self._sleep,
+        )
+
+    def _request_put_file(self, url: str, data: bytes) -> None:
+        call_with_mineru_http_retries(
+            lambda: self._http_put_file(url, data),
+            max_retries=self.settings.mineru_max_retries,
+            sleep=self._sleep,
+        )
 
     def _http_json(self, method: str, url: str, payload: Optional[dict] = None) -> dict:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None

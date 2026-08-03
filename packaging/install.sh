@@ -88,7 +88,7 @@ log "自检 python 依赖…"
 import importlib.util, sys
 mods = ["fastapi", "uvicorn", "pydantic", "pydantic_settings", "numpy", "scipy",
         "hnswlib", "networkx", "rustworkx", "igraph", "orjson", "openai", "httpx",
-        "yaml", "docx", "pypdf", "openpyxl", "markdown_it"]
+        "yaml", "docx", "pypdf", "pymupdf4llm", "openpyxl", "markdown_it"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 if missing:
     print("  缺少:", ", ".join(missing)); sys.exit(1)
