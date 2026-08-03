@@ -1097,6 +1097,11 @@ class CandidateRetrievalService(_RetrievalState):
         # (column-name) type — exactly "flag on AND this notebook has knowhow
         # graph content" (or a caller explicitly asked for one). Flag off /
         # non-knowhow ⇒ empty ⇒ pure no-op, no bridge query, no injection.
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        allowed_source_ids = scoped_allowed_source_ids(
+            notebook_id, allowed_source_ids
+        )
         source_filter = (
             tuple(dict.fromkeys(str(value) for value in allowed_source_ids if value))
             if allowed_source_ids is not None else None
@@ -1346,9 +1351,17 @@ class CandidateRetrievalService(_RetrievalState):
             for source_notebook_id, source_id in allowed_source_keys:
                 if source_notebook_id and source_id:
                     sources_by_notebook.setdefault(source_notebook_id, []).append(source_id)
+        from app.services.source_scope import scoped_allowed_source_ids
+
         for nid in notebook_ids:
-            if sources_by_notebook is not None:
-                allowed = sources_by_notebook.get(nid)
+            explicit_allowed = (
+                sources_by_notebook.get(nid)
+                if sources_by_notebook is not None else None
+            )
+            if sources_by_notebook is not None and not explicit_allowed:
+                continue
+            allowed = scoped_allowed_source_ids(nid, explicit_allowed)
+            if allowed is not None:
                 if not allowed:
                     continue
                 hits = self._retrieve_scored(
@@ -1379,7 +1392,15 @@ class CandidateRetrievalService(_RetrievalState):
                 db, active_notebook_id,
             )
         all_hits: List["RetrievedRelation"] = []
+        from app.services.source_scope import scoped_allowed_source_ids
+
         for nid in notebook_ids:
+            # Relation ANN/FTS artifacts are not source partitioned yet.  Do
+            # not let an active-notebook relation outside the checkbox ceiling
+            # occupy a bounded candidate slot or steer graph expansion.  Base
+            # participants remain independent and searchable.
+            if nid == active_notebook_id and scoped_allowed_source_ids(nid) is not None:
+                continue
             hits = self._retrieve_relations_scored(nid, query)
             tier = tier_map.get(nid, "personal")
             for h in hits:
@@ -1465,6 +1486,11 @@ class CandidateRetrievalService(_RetrievalState):
                            limit: int = 8, *,
                            allowed_source_ids=None) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2)."""
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        allowed_source_ids = scoped_allowed_source_ids(
+            notebook_id, allowed_source_ids
+        )
         if (allowed_source_ids is not None
                 or not self.notebook_copy_stats(notebook_id)["copyable"]):
             # source_elements 没有独立 ANN；绝不恢复 17 万元素×4096 维的
@@ -1595,6 +1621,11 @@ class CandidateRetrievalService(_RetrievalState):
     ):
         """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
         (matrix 行已 L2 归一化, 点积即余弦)。"""
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        allowed_source_ids = scoped_allowed_source_ids(
+            notebook_id, allowed_source_ids
+        )
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
         )
@@ -1901,10 +1932,19 @@ class CandidateRetrievalService(_RetrievalState):
         if not needle:
             return []
         recall = recall or self.settings.chunk_recall
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        allowed_source_ids = scoped_allowed_source_ids(notebook_id)
         try:
             with self._connect() as db:
-                hits = self.knowledge.chunk_fts_search(
-                    db, notebook_id, needle, k=recall)
+                if allowed_source_ids is None:
+                    hits = self.knowledge.chunk_fts_search(
+                        db, notebook_id, needle, k=recall)
+                else:
+                    hits = self.knowledge.chunk_fts_search(
+                        db, notebook_id, needle, k=recall,
+                        allowed_source_ids=allowed_source_ids,
+                    )
             if not hits:
                 return []
             chunks, _ids, _mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
@@ -1934,6 +1974,14 @@ class CandidateRetrievalService(_RetrievalState):
         `_keyword_chunk_candidates`, and fail-open for the same reason: a
         supplementary recall channel must never take the whole retrieval down.
         """
+        from app.services.source_scope import scoped_allowed_source_ids
+
+        # The exact-section helper currently allocates slots before hydration
+        # and has no source predicate.  Skipping this supplementary channel is
+        # safer than allowing an out-of-scope heading to starve an allowed one;
+        # source-bounded chunk FTS remains active.
+        if scoped_allowed_source_ids(notebook_id) is not None:
+            return []
         if not self.settings.exact_lookup_enabled:
             return []
         from app.services.exact_lookup import (
@@ -2151,7 +2199,10 @@ class CandidateRetrievalService(_RetrievalState):
         再触发任何检索;小库字节不变。真正的修复是给关系建 ANN 索引(镜像
         chunk_ann,scale index 侧)——这个守卫只是在那之前把 ask 路径钳制在
         O(bounded)。"""
-        if self._federated_graph_is_large(notebook_id):
+        from app.services.source_scope import source_scope_restricted
+
+        restricted = source_scope_restricted()
+        if not restricted and self._federated_graph_is_large(notebook_id):
             self.event_log.emit({
                 "kind": "graph_walk_refused",
                 "notebook_id": notebook_id,
@@ -2161,6 +2212,27 @@ class CandidateRetrievalService(_RetrievalState):
             return "", {}, [], {}
         from app.services.kg.graph_reason import multihop_subgraph, render_subgraph_context
         node_hits = self.federated_retrieve(notebook_id, query)[: self._MIX_NODE_SEEDS]
+        if restricted:
+            # The whole federated graph is not source partitioned, but direct
+            # federated KG search is: the active participant receives the
+            # checkbox allow-list before LIMIT and mounted bases stay intact.
+            # Render those safe seeds as isolated nodes, then map only their
+            # own evidence back to chunks.  This preserves base-backed chunk
+            # answers even when every active source is unchecked.
+            subgraph = [
+                ({
+                    "object_id": hit.object_id,
+                    "object_type": hit.object_type,
+                    "name": str((hit.payload or {}).get("name") or hit.object_id),
+                    "tier": getattr(hit, "tier", "personal"),
+                    "notebook_id": getattr(hit, "notebook_id", ""),
+                }, None, None)
+                for hit in node_hits
+            ]
+            block, id_map = render_subgraph_context(
+                subgraph, id_offset=id_offset
+            )
+            return block, id_map, node_hits, {}
         rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[: self._MIX_REL_SEEDS]
         seeds = [h.object_id for h in node_hits]
         for r in rel_hits:
@@ -2220,6 +2292,8 @@ class CandidateRetrievalService(_RetrievalState):
         PPR 跨文档扩散的噪声由 ask_chunk 侧现成 rerank 免费压低。"""
         vector_chunks = self._gather_vector_chunks(notebook_id, sub_queries)
         kg_block, kg_id_map, kg_hits, kg_chunks = "", {}, [], []
+        from app.services.source_scope import source_scope_restricted
+
         overlay_on = self.settings.chunk_kg_overlay_enabled and (
             self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg(notebook_id))
         if overlay_on:
@@ -2230,7 +2304,11 @@ class CandidateRetrievalService(_RetrievalState):
                 support_by_object=support_by_object,
             )
         # 概念漫游(PPR)第 3 路:gated GRAPH_PPR_ENABLED;无 KG/无 reset → []。
-        ppr_chunks = self._ppr_retrieve(notebook_id, query) if self.settings.graph_ppr_enabled else []
+        ppr_chunks = (
+            self._ppr_retrieve(notebook_id, query)
+            if self.settings.graph_ppr_enabled and not source_scope_restricted()
+            else []
+        )
         from app.services.retrieval import merge_retrieval_supports
 
         merged, seen, by_id = [], set(), {}
@@ -2276,16 +2354,38 @@ class CandidateRetrievalService(_RetrievalState):
         return self._retrieve_scored(*args, **kwargs)
 
     def federated_retrieve(self, *args, **kwargs):
-        return self._federated_retrieve_impl(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("active_notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "knowledge",
+            self._federated_retrieve_impl(*args, **kwargs),
+        )
 
     def federated_retrieve_relations(self, *args, **kwargs):
-        return self._federated_retrieve_relations_impl(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("active_notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "relation",
+            self._federated_retrieve_relations_impl(*args, **kwargs),
+        )
 
     def federated_retrieve_elements(self, *args, **kwargs):
         return self._federated_retrieve_elements_impl(*args, **kwargs)
 
     def retrieve_neighbors(self, *args, **kwargs):
-        return self._retrieve_neighbors(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "knowledge", self._retrieve_neighbors(*args, **kwargs)
+        )
 
     def retrieve_elements(self, *args, **kwargs):
-        return self._retrieve_elements(*args, **kwargs)
+        from app.services.source_scope import filter_retrieval_items
+
+        notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
+        return filter_retrieval_items(
+            notebook_id, "element", self._retrieve_elements(*args, **kwargs)
+        )

@@ -2,12 +2,15 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+from app.models.source_scope import SourceScope
+
 
 class ReportCreate(BaseModel):
     question: str
     history: str = ""
     depth: int = 2
     auto_generate: bool = False
+    source_scope: SourceScope | None = None
 
 
 class ReportOutlineUpdate(BaseModel):

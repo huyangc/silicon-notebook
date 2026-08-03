@@ -14,6 +14,15 @@ import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
 import { AnalyticsLoadScope, startAnalyticsLoads } from "./analytics-loaders";
 import { sourceAnomalies } from "./anomaly-severity";
+import {
+  defaultSourceScopeSelection,
+  removeSourceFromSelection,
+  selectedSourceCount,
+  sourceIsSelected,
+  sourceScopePayload,
+  toggleSourceSelection,
+  type SourceScopeSelection,
+} from "./source-scope";
 import { AnomalyBadge } from "./anomaly-badge";
 import {
   answerIdBatches,
@@ -737,6 +746,9 @@ export default function Home() {
   const [currentNotebook, setCurrentNotebook] = useState<NotebookSummary | null>(null);
   const [outerView, setOuterView] = useState<"notebooks" | "memory">("notebooks");
   const [sources, setSources] = useState<SourceSummary[]>([]);
+  const [sourceScopeSelection, setSourceScopeSelection] = useState<SourceScopeSelection>(
+    defaultSourceScopeSelection,
+  );
   const [sourcesTotal, setSourcesTotal] = useState(0);
   // sourcesTotal follows the source-list filter (it holds the search-matched count
   // while a source search is active, which pagination needs). The Ask composer / welcome
@@ -2169,8 +2181,20 @@ export default function Home() {
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
   // 硬约束:后端判定该库无任何可检索证据时,锁死对话框(输入/发送/快捷提问),占位改为
   // 引导文案。判据单一真源见 ask-availability(读后端 ask_available)。
-  const askBlocked = isAskBlocked(currentNotebook);
-  const askPlaceholderText = askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
+  const selectedLocalSourceCount = selectedSourceCount(
+    sourceScopeSelection,
+    notebookSourceTotal,
+  );
+  const hasMountedBase = (currentNotebook?.base_notebooks?.length ?? 0) > 0;
+  const sourceScopeBlocked = selectedLocalSourceCount === 0 && !hasMountedBase;
+  const askBlocked = isAskBlocked(currentNotebook) || sourceScopeBlocked;
+  const askPlaceholderText = sourceScopeBlocked
+    ? "请至少选择一个来源或挂载参考库，再开始对话"
+    : askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
+  const currentSourceScope = sourceScopePayload(
+    sourceScopeSelection,
+    notebookSourceTotal,
+  );
   // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
   // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。
   const askQuotedPhraseHint = useMemo(() => quotedPhraseHint(question), [question]);
@@ -2671,6 +2695,7 @@ export default function Home() {
       sourcesPage.total_count - filteredSourcesPage.removedCount,
     );
     setSources(filteredSourcesPage.items);
+    setSourceScopeSelection(defaultSourceScopeSelection());
     setSourcesTotal(visibleSourcesTotal);
     setNotebookSourceTotal(visibleSourcesTotal);
     setSourcesPage(0);
@@ -2786,6 +2811,7 @@ export default function Home() {
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
     setSources([]);
+    setSourceScopeSelection(defaultSourceScopeSelection());
     setTitleDraft("");
     setTurns([]);
     setConversationId(null);
@@ -3246,6 +3272,7 @@ export default function Home() {
       // collection/notebook/checkup 的权威校准随后并行进行，不再把网络瀑布算进“删除中”。
       const wasVisible = sourcesRef.current.some((item) => item.id === source.id);
       setSources((previous) => previous.filter((item) => item.id !== source.id));
+      setSourceScopeSelection((previous) => removeSourceFromSelection(previous, source.id));
       if (wasVisible) setSourcesTotal((total) => Math.max(0, total - 1));
       setNotebookSourceTotal((total) => Math.max(0, total - 1));
       setKnowledge(EMPTY_KNOWLEDGE);
@@ -3327,8 +3354,10 @@ export default function Home() {
     ) return;
     const q = nextQuestion.trim();
     if (!q) return;
-    if (isAskBlocked(currentNotebook)) {
-      setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
+    if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
+      setToast(sourceScopeBlocked
+        ? "当前检索范围为空，请至少选择一个来源或挂载参考库。"
+        : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
     if (requiresKg(askMode) && !kgAvailable) {
@@ -3363,7 +3392,7 @@ export default function Home() {
     const understandingStartedAt = Date.now();
     try {
       const contract = await previewAskIntent(
-        notebookId, q, conversationIdAtStart, controller.signal,
+        notebookId, q, conversationIdAtStart, controller.signal, currentSourceScope,
       );
       if (
         controller.signal.aborted
@@ -3459,8 +3488,10 @@ export default function Home() {
     const q = nextQuestion.trim();
     if (!q) return false;
     // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
-    if (isAskBlocked(currentNotebook)) {
-      setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
+    if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
+      setToast(sourceScopeBlocked
+        ? "当前检索范围为空，请至少选择一个来源或挂载参考库。"
+        : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return false;
     }
     if (requiresKg(selectedMode) && !kgAvailable) {
@@ -3500,6 +3531,7 @@ export default function Home() {
         conversation_id: conversationId ?? undefined,
         mode: selectedMode,
         retrieval_effort: askRetrievalEffort,
+        source_scope: currentSourceScope,
         ...(intent ? { intent } : {}),
       };
       const response = await runAskStream<AskResponse>(
@@ -5298,6 +5330,19 @@ export default function Home() {
                     }
                   }}
                 />
+                <div className="source-scope-toolbar" role="group" aria-label="问答与深度报告检索范围">
+                  <span>检索范围 · 已选 {selectedLocalSourceCount}/{notebookSourceTotal}</span>
+                  <button
+                    type="button"
+                    disabled={askInFlight || notebookSourceTotal === 0}
+                    onClick={() => setSourceScopeSelection(defaultSourceScopeSelection())}
+                  >全选</button>
+                  <button
+                    type="button"
+                    disabled={askInFlight || selectedLocalSourceCount === 0}
+                    onClick={() => setSourceScopeSelection({ allSelected: false, ids: new Set() })}
+                  >清空</button>
+                </div>
                 <div className="source-list">
                   {sources.length === 0 ? (
                     <article className="source-empty">
@@ -5315,6 +5360,22 @@ export default function Home() {
                         title={source.title}
                         aria-busy={deletingSource || undefined}
                       >
+                        <label
+                          className="source-scope-check"
+                          title={sourceIsSelected(sourceScopeSelection, source.id)
+                            ? "此来源会参与问答与深度报告检索"
+                            : "此来源不会参与问答与深度报告检索"}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={sourceIsSelected(sourceScopeSelection, source.id)}
+                            disabled={deletingSource || askInFlight}
+                            aria-label={`检索来源：${source.title}`}
+                            onChange={() => setSourceScopeSelection((previous) => (
+                              toggleSourceSelection(previous, source.id)
+                            ))}
+                          />
+                        </label>
                         <button
                           className="source-row-main"
                           disabled={deletingSource}
@@ -5402,7 +5463,11 @@ export default function Home() {
                   {CHAT_MODES.map(([mode, label]) => (
                     <button
                       key={mode}
-                      className={`chat-tab ${chatMode === mode ? "active" : ""}`}
+                      className={`chat-tab ${chatMode === mode ? "active" : ""}${mode === "reports" && sourceScopeBlocked ? " scope-disabled" : ""}`}
+                      aria-disabled={mode === "reports" && sourceScopeBlocked || undefined}
+                      title={mode === "reports" && sourceScopeBlocked
+                        ? "当前检索范围为空；仍可查看已有报告，但不能生成新报告"
+                        : undefined}
                       onClick={() => switchChatMode(mode)}
                     >{label}</button>
                   ))}
@@ -5596,7 +5661,9 @@ export default function Home() {
                     notebookId={currentNotebookId}
                     listReports={listReports}
                     getReport={getReport}
-                    createReport={createReport}
+                    createReport={(nb, reportQuestion, depth) => createReport(
+                      nb, reportQuestion, depth, currentSourceScope,
+                    )}
                     confirmReportIntent={confirmReportIntent}
                     updateReportOutline={updateReportOutline}
                     generateReport={generateReport}
@@ -5607,6 +5674,8 @@ export default function Home() {
                     focusReportId={pendingReportFocusId}
                     onFocusConsumed={() => setPendingReportFocusId(null)}
                     readOnly={!capabilities.canManageReports}
+                    creationDisabled={sourceScopeBlocked}
+                    creationDisabledReason="当前检索范围为空，请至少选择一个来源或挂载参考库"
                   />
                 )}
 
@@ -5636,7 +5705,7 @@ export default function Home() {
                   abortLabel={intentChecking ? "取消问题理解" : "中断生成"}
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                 >
-                  <span>{notebookSourceTotal} 个来源</span>
+                  <span>检索 {selectedLocalSourceCount}/{notebookSourceTotal} 个来源</span>
                   {/* 只在用户真的敲了英文双引号时才出现:确认哪几段被当成完整短语,
                       或说明为什么这次没识别。判据与后端同一份规则的镜像。 */}
                   {askQuotedPhraseHint && (

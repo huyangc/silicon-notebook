@@ -67,6 +67,7 @@ from app.services.prompts import (
     followup_rewrite_prompt,
 )
 from app.services.retrieval import RetrievedKnowledge, classify_evidence
+from app.services.source_scope import source_scope_restricted
 
 # Matches both one provenance marker and the comma-group form models commonly
 # emit (`[k1, k3]`). A group binds only when every key exists in id_map.
@@ -289,13 +290,16 @@ class AskService:
         reaches streaming engines (mirrors the frozen route-runner split)."""
         from app.services.ask_modes import resolve_mode
 
+        from app.services.source_scope import source_scope_context
+
         spec = resolve_mode(getattr(payload, "mode", None))
         handler = getattr(self, spec.handler)
-        if spec.streaming:
+        with source_scope_context(notebook_id, getattr(payload, "source_scope", None)):
+            if spec.streaming:
+                return handler(notebook_id, payload, user_id=user_id,
+                               job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
             return handler(notebook_id, payload, user_id=user_id,
-                           job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
-        return handler(notebook_id, payload, user_id=user_id,
-                       job_id=job_id, cancel_event=cancel_event)
+                           job_id=job_id, cancel_event=cancel_event)
 
     def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """Run the synchronous Ask surface through the durable job lifecycle.
@@ -485,6 +489,17 @@ class AskService:
         它是响应契约的一部分,不因为这一轮跑通了就变成假的。
         """
         from app.services.reasoning_retrieval import enumeration_wiring_active
+        from app.services.source_scope import current_source_scope
+
+        source_scope = current_source_scope()
+        if source_scope is not None and source_scope.restricted:
+            # Scoped runs deliberately disable whole-collection enumeration,
+            # but selected documents still expose raw element search. Keep the
+            # no-KG guard from short-circuiting before that tool can run.
+            return (
+                source_scope.mode == "exclude"
+                or bool(source_scope.source_ids)
+            )
 
         if not enumeration_wiring_active(
             self.settings, self.collection_catalog, self.collection_enumeration
@@ -522,6 +537,11 @@ class AskService:
         return self.evidence_context.parse_anchors(answer, id_map)
 
     def _memory_hits(self, user_id: str, notebook_id: str, query: str):
+        # Memory/Knowhow projection sources are intentionally absent from the
+        # checkbox list. Once the user narrows that list, only selected imported
+        # sources (plus mounted bases) may contribute evidence.
+        if source_scope_restricted():
+            return []
         if self.memory_retriever is None:
             return []
         return self.memory_retriever.notebook_memory_hits(
@@ -570,6 +590,13 @@ class AskService:
                         f"找不到指定来源：{exc.reference}，请核对来源标题或文件名"
                     ) from exc
                 raise ValueError("指定来源当前不可用，请重新选择来源") from exc
+            from app.services.source_scope import source_allowed
+
+            if any(
+                not source_allowed(item.notebook_id, item.source_id)
+                for item in resolved.sources
+            ):
+                raise ValueError("指定来源未在当前勾选的检索范围内")
             contract["source_scope"] = self._intent_scope_snapshot(resolved).model_dump()
             # A selected source set is a user-reviewed retrieval contract, even
             # when the semantic question itself is otherwise clear.
@@ -644,6 +671,13 @@ class AskService:
         resolved = self.collection_enumeration.resolve_evidence_scope(
             notebook_id, intent.source_refs, cancel_event=cancel_event
         )
+        from app.services.source_scope import source_allowed
+
+        if any(
+            not source_allowed(item.notebook_id, item.source_id)
+            for item in resolved.sources
+        ):
+            raise ValueError("指定来源超出当前勾选的检索范围，请重新确认")
         if intent.source_scope is None:
             raise ValueError("指定来源尚未确认，请重新确认问题理解")
         expected = {
@@ -1537,6 +1571,12 @@ class AskService:
             job_id=job_id,
         )
         conversation_id, history = turn.conversation_id, turn.history
+        from app.services.source_scope import scoped_conversation_history
+
+        # A previous answer may contain evidence from sources that are no
+        # longer selected.  Do not let it influence rewrite, retrieval, or
+        # synthesis under the new source ceiling.
+        history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
         retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
@@ -1847,6 +1887,9 @@ class AskService:
             job_id=job_id,
         )
         conversation_id, history = turn.conversation_id, turn.history
+        from app.services.source_scope import scoped_conversation_history
+
+        history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
         intent_contract = self._confirmed_reasoning_intent(payload, history)
         evidence_scope = self._confirmed_evidence_scope(
@@ -1973,6 +2016,7 @@ class AskService:
             intent_contract.completeness_required
             and self.knowhow_store is not None
             and not evidence_scope.restricted
+            and not source_scope_restricted()
         ):
             from app.services.structured_retrieval import (
                 enumerate_knowhow,
@@ -2892,6 +2936,9 @@ class AskService:
             job_id=job_id,
         )
         conversation_id, history = turn.conversation_id, turn.history
+        from app.services.source_scope import scoped_conversation_history
+
+        history = scoped_conversation_history(history)
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
@@ -2980,14 +3027,17 @@ class AskService:
 
             # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
             # 别的文档相关 chunk 也召回,_answer_chunks 出 chunk 引用(跨多篇)。
-            if self.settings.graph_ppr_enabled:
+            if self.settings.graph_ppr_enabled and not source_scope_restricted():
                 raise_if_cancelled(cancel_event)
                 ppr_chunks = self.retrieval.ppr_retrieve(notebook_id, question)
                 raise_if_cancelled(cancel_event)
                 if ppr_chunks:
                     from app.services.retrieval import RetrievedChunk, RetrievalSupport
-                    reports = self.community_reports(
-                        notebook_id)[: self.settings.ppr_community_context_top_n]
+                    reports = (
+                        [] if source_scope_restricted() else self.community_reports(
+                            notebook_id
+                        )[: self.settings.ppr_community_context_top_n]
+                    )
                     community_chunks = [RetrievedChunk(
                         chunk_id=f"community:{i}", source_id="",
                         source_title="Knowledge base theme", section_path=r["title"],
@@ -3091,7 +3141,8 @@ class AskService:
             # 并发 graph_walk_refused 事件;顺带省掉 _graph_seed_fusion 的
             # expand_query LLM 调用。放在 PPR 分支之后:大库若有 scale 索引,
             # PPR 分支仍可正常出跨文档答案,不受此守卫影响。
-            if self.candidates.graph_is_large(notebook_id):
+            if (not source_scope_restricted()
+                    and self.candidates.graph_is_large(notebook_id)):
                 self.event_log.emit({
                     "kind": "graph_walk_refused",
                     "notebook_id": notebook_id,
@@ -3115,26 +3166,43 @@ class AskService:
                     user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
                 return response
 
-            base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
-            raise_if_cancelled(cancel_event)
-            use_seeds = self.candidates.fuse_graph_seeds(
-                notebook_id, question, base_seeds, cancel_event)
+            if source_scope_restricted():
+                # The persisted full graph has no source partition.  Even if
+                # out-of-scope neighbours are removed after traversal, they can
+                # still steer seed fusion/BFS.  A checkbox-scoped graph request
+                # therefore renders the already source-bounded KG seeds as
+                # isolated evidence nodes and performs no whole-graph walk.
+                subgraph = [
+                    ({
+                        "object_id": hit.object_id,
+                        "object_type": hit.object_type,
+                        "name": str((hit.payload or {}).get("name") or hit.object_id),
+                        "tier": getattr(hit, "tier", "personal"),
+                        "notebook_id": getattr(hit, "notebook_id", ""),
+                    }, None, None)
+                    for hit in top_hits[:5]
+                ]
+            else:
+                base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
+                raise_if_cancelled(cancel_event)
+                use_seeds = self.candidates.fuse_graph_seeds(
+                    notebook_id, question, base_seeds, cancel_event)
 
-            G, idx_to_oid, oid_to_idx = self.graph.federated_graph(notebook_id)
-            raise_if_cancelled(cancel_event)
-            subgraph = multihop_subgraph(
-                G, oid_to_idx, idx_to_oid,
-                seed_ids=use_seeds,
-                # TD2: include "synonym" so multihop walks THROUGH the transit-
-                # only cross-doc cluster hubs (their member edges are "synonym").
-                # Scoped to this call only — DEFAULT_REASONING_EDGES (a frozenset)
-                # is NOT broadened globally. The hub node itself is still filtered
-                # from the result/render/verify by build_rx_graph + multihop_subgraph
-                # (kind="cluster" pass-through), so the LLM never cites a hub.
-                edge_types=DEFAULT_REASONING_EDGES | {"synonym"},
-                max_depth=getattr(self.settings, "graph_max_depth", 3),
-                max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
-            )
+                G, idx_to_oid, oid_to_idx = self.graph.federated_graph(notebook_id)
+                raise_if_cancelled(cancel_event)
+                subgraph = multihop_subgraph(
+                    G, oid_to_idx, idx_to_oid,
+                    seed_ids=use_seeds,
+                    # TD2: include "synonym" so multihop walks THROUGH the transit-
+                    # only cross-doc cluster hubs (their member edges are "synonym").
+                    # Scoped to this call only — DEFAULT_REASONING_EDGES (a frozenset)
+                    # is NOT broadened globally. The hub node itself is still filtered
+                    # from the result/render/verify by build_rx_graph + multihop_subgraph
+                    # (kind="cluster" pass-through), so the LLM never cites a hub.
+                    edge_types=DEFAULT_REASONING_EDGES | {"synonym"},
+                    max_depth=getattr(self.settings, "graph_max_depth", 3),
+                    max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
+                )
             # Render subgraph into (context_block, id_map) — same k{i} format as
             # _answer_context so grouped marker resolution works unchanged.
             context_block, id_map = render_subgraph_context(subgraph, id_offset=0)

@@ -1216,6 +1216,8 @@ export interface ReportsPanelProps {
   focusReportId?: string | null;
   onFocusConsumed?: () => void;
   readOnly?: boolean;
+  creationDisabled?: boolean;
+  creationDisabledReason?: string;
 }
 
 export function ReportsPanel({
@@ -1233,6 +1235,8 @@ export function ReportsPanel({
   focusReportId,
   onFocusConsumed,
   readOnly = false,
+  creationDisabled = false,
+  creationDisabledReason = "",
 }: ReportsPanelProps) {
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
@@ -1353,7 +1357,7 @@ export function ReportsPanel({
 
   async function submitCreate() {
     const q = question.trim();
-    if (!q || creating) return;
+    if (!q || creating || creationDisabled) return;
     setCreating(true);
     try {
       await createReport(notebookId, q, DEPTHS[depthIdx]);
@@ -1674,9 +1678,11 @@ export function ReportsPanel({
         <textarea
           className="report-compose-input"
           rows={2}
-          placeholder="想深入研究什么？例如：对比库内各时序收敛方法的适用场景、代价与已知坑"
+          placeholder={creationDisabled
+            ? (creationDisabledReason || "请先选择检索来源")
+            : "想深入研究什么？例如：对比库内各时序收敛方法的适用场景、代价与已知坑"}
           value={question}
-          disabled={creating}
+          disabled={creating || creationDisabled}
           onChange={(event) => setQuestion(event.target.value)}
         />
         <div className="report-compose-actions">
@@ -1693,12 +1699,12 @@ export function ReportsPanel({
               options={DEPTH_OPTIONS}
               value={String(depthIdx)}
               onChange={(id) => setDepthIdx(Number(id))}
-              disabled={creating}
+              disabled={creating || creationDisabled}
             />
             <button
               className="button"
               type="button"
-              disabled={creating || !question.trim()}
+              disabled={creating || creationDisabled || !question.trim()}
               onClick={() => void submitCreate()}
             >
               {creating ? "提交中…" : "生成深度报告"}

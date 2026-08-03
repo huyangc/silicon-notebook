@@ -1448,6 +1448,19 @@ class ReasoningRetriever:
             cls, repository, settings, cancel_event, fail_closed
         )
 
+    def _unsafe_scope_restricted(self) -> bool:
+        """Whether non-source-partitioned channels must be disabled.
+
+        ``ResolvedEvidenceScope`` covers the model-reviewed source subset;
+        the top-level checkbox ceiling is request-local and intentionally a
+        separate contract.  Unsafe graph/enumeration channels must honor both,
+        while direct KG/element search keeps using the reviewed scope's source
+        keys and lets candidate retrieval intersect the checkbox ceiling.
+        """
+        from app.services.source_scope import source_scope_restricted
+
+        return self._evidence_scope.restricted or source_scope_restricted()
+
     # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
         """本 run 是否提供类型化集合枚举工具。
@@ -1463,7 +1476,7 @@ class ReasoningRetriever:
         """
         return bool(
             self.allow_enumeration
-            and not self._evidence_scope.restricted
+            and not self._unsafe_scope_restricted()
             and enumeration_wiring_active(
                 self.settings, self.collection_catalog, self.collection_enumeration
             )
@@ -1478,7 +1491,7 @@ class ReasoningRetriever:
         # disabled before I/O for a selected source scope; in all-source mode
         # they must retain the historical candidate-filter behavior.
         if kind == "chain":
-            return [] if self._evidence_scope.restricted else values
+            return [] if self._unsafe_scope_restricted() else values
         return list(restrict_evidence_candidates(self._evidence_scope, kind, values))
 
     def search(self, notebook_id, query, types=None, prefer="balanced"):
@@ -1687,7 +1700,7 @@ class ReasoningRetriever:
                     element_kinds=element_kinds, object_types=object_types,
                     outline=outline,
                     source_scope_tools=source_scope_tools,
-                    selected_source_scope=self._evidence_scope.restricted,
+                    selected_source_scope=self._unsafe_scope_restricted(),
                 ),
             }]
             if self.untrusted_evidence:
@@ -2057,7 +2070,7 @@ class ReasoningRetriever:
         # 也就没有「已绑定证据的周边」可谈,所以关闭态天然零查询。
         kg_gap_active = (
             outline_active
-            and not self._evidence_scope.restricted
+            and not self._unsafe_scope_restricted()
             and bool(
             getattr(self.settings, "reasoning_outline_kg_gap_enabled", True)
             )
@@ -2090,7 +2103,7 @@ class ReasoningRetriever:
             if on_step:
                 on_step(step)
 
-        if self._evidence_scope.restricted:
+        if self._unsafe_scope_restricted():
             record(TraceStep(
                 step_type="skip",
                 summary="限定来源下已关闭无法安全隔离的图扩展通道",
@@ -2116,7 +2129,7 @@ class ReasoningRetriever:
         # 无人 join 且池未关闭"的线程泄漏,也不会出现两处 shutdown 各触发一次。
         ppr_future = None
         ppr_pool = None
-        if (not self._evidence_scope.restricted
+        if (not self._unsafe_scope_restricted()
                 and self.allow_ppr and self.settings.graph_ppr_enabled and getattr(
                 self.settings, "reasoning_ppr_prefetch", True)):
             ppr_pool = ThreadPoolExecutor(max_workers=1)
@@ -2242,7 +2255,7 @@ class ReasoningRetriever:
 
             # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
             # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
-            if (not self._evidence_scope.restricted
+            if (not self._unsafe_scope_restricted()
                     and self.allow_ppr and self.settings.graph_ppr_enabled):
                 raise_if_cancelled(self.cancel_event)
                 ppr_all = (ppr_future.result() if ppr_future is not None
@@ -2265,7 +2278,7 @@ class ReasoningRetriever:
             seed_terms = (self._exact_lookup_terms(question)
                           if self.settings.exact_lookup_enabled
                           and self.allow_exact_lookup
-                          and not self._evidence_scope.restricted else [])
+                          and not self._unsafe_scope_restricted() else [])
             if seed_terms:
                 raise_if_cancelled(self.cancel_event)
                 # 检索串用抽出的名称本身,不用整句问题——与 reflect 动作同构
@@ -2552,7 +2565,7 @@ class ReasoningRetriever:
             # 探测排在 trace 之前:它的结果是这一步的账目之一。关闭态零调用。
             kg_gap_new = (
                 collect_kg_gap(bound)
-                if kg_gap_active and not self._evidence_scope.restricted
+                if kg_gap_active and not self._unsafe_scope_restricted()
                 else 0
             )
             outline_detail = {
@@ -2794,7 +2807,7 @@ class ReasoningRetriever:
                 decision.next_action == "expand_community"
                 and (
                     not self.allow_community_expansion
-                    or self._evidence_scope.restricted
+                    or self._unsafe_scope_restricted()
                 )
             ):
                 record(TraceStep(
@@ -2803,7 +2816,7 @@ class ReasoningRetriever:
                     detail={
                         "reason": (
                             "source_scope_unsafe_channel"
-                            if self._evidence_scope.restricted
+                            if self._unsafe_scope_restricted()
                             else "community_expansion_disabled"
                         )
                     },
@@ -2814,7 +2827,7 @@ class ReasoningRetriever:
                 + enum_rows_used
             )
             if (
-                self._evidence_scope.restricted
+                self._unsafe_scope_restricted()
                 and decision.next_action in (
                     ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
                 )
@@ -2865,7 +2878,7 @@ class ReasoningRetriever:
                 ))
             elif decision.next_action == "expand_graph":
                 oid = decision.expand_object_id
-                if self._evidence_scope.restricted:
+                if self._unsafe_scope_restricted():
                     record(TraceStep(
                         step_type="skip",
                         summary="跳过关系扩展（指定来源范围下不可用）",
@@ -3244,7 +3257,7 @@ class ReasoningRetriever:
                     decision, overflow_repair=overflow_repair_submission
                 )
             elif decision.next_action == "ppr_retrieve":
-                if self._evidence_scope.restricted:
+                if self._unsafe_scope_restricted():
                     record(TraceStep(
                         step_type="skip",
                         summary="跳过概念漫游（指定来源范围下不可用）",
@@ -3287,7 +3300,7 @@ class ReasoningRetriever:
                 probed = (self._exact_lookup_terms(term, honor_quotes=False)
                           if term else [])
                 fresh = [t for t in probed if _norm_query(t) not in exact_terms_done]
-                if self._evidence_scope.restricted:
+                if self._unsafe_scope_restricted():
                     feed_exact_lookup_skip(
                         "source_scope_unsafe_channel", [],
                         "指定来源范围下按名称精确查找不可用"
@@ -3366,7 +3379,7 @@ class ReasoningRetriever:
                     decision.chain_edge_type or "",
                     decision.chain_direction,
                 )
-                if self._evidence_scope.restricted:
+                if self._unsafe_scope_restricted():
                     record(TraceStep(
                         step_type="skip",
                         summary="跳过两跳推导（指定来源范围下不可用）",
@@ -3660,7 +3673,7 @@ class ReasoningRetriever:
         outline_evidence = restrict_evidence_candidates(
             self._evidence_scope, "knowledge", outline_evidence
         )
-        if self._evidence_scope.restricted:
+        if self._unsafe_scope_restricted():
             chains = []
             enumerations = []
             collection_map_text = ""

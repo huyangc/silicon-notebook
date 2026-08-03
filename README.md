@@ -110,6 +110,8 @@ Database-specific coverage now targets the direct PostgreSQL backend. Retired te
 
 Inside a notebook, the workspace stays two-column: imported sources on the left and **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report) in the main area.
 
+Each imported source has a retrieval checkbox shared by Ask and new Deep Reports. All visible sources are selected by default; the selection is a hard active-notebook ceiling that model-planned source scope may only narrow. Clearing every source makes the local retrieval scope empty, while mounted reference libraries remain available. With neither a selected local source nor a mounted reference library, the Ask composer and new-report controls are disabled.
+
 Deleting a source immediately shows a deleting state, blocks duplicate clicks, and suppresses stale list responses. The backend locks the source before projection cleanup, uses the source reverse index when available, caps affected-object delete statements at 500 ids, and removes referenced image assets in one database round trip. Historical notebooks do not trigger a whole-notebook reverse-index rebuild inside the request; their keyset-paged database-native fallback may still scan legacy KG rows, so operators should prebuild or repair the index offline with `backfill-source-index` for large libraries.
 
 Detailed product behavior, retrieval semantics, MCP tools, and endpoint paths are documented in [Product and API reference](./docs/product-and-api.md).

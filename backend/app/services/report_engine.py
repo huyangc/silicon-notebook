@@ -533,7 +533,8 @@ class ReportEngine:
         return finalize_query_intent(legacy)
 
     def prepare_intent(self, notebook_id: str, rid: str, question: str,
-                       history: str = "", *, auto_generate: bool = False) -> None:
+                       history: str = "", *, auto_generate: bool = False,
+                       source_scope=None) -> None:
         """Understand the request without touching notebook or mounted-base corpus."""
         reports = self.dependencies.reports
         try:
@@ -546,6 +547,12 @@ class ReportEngine:
             # followed by publishing a fresh intent_ready state.
             raise_if_cancelled(self.cancel_event)
             contract["auto_generate_requested"] = bool(auto_generate)
+            if source_scope is None:
+                from app.services.source_scope import current_source_scope_payload
+
+                source_scope = current_source_scope_payload()
+            if source_scope is not None:
+                contract["source_scope"] = dict(source_scope)
             progress = (
                 "需要补充关键信息" if contract.get("needs_clarification")
                 else "问题理解已就绪，请确认"
@@ -762,15 +769,18 @@ class ReportEngine:
         给 STORM 规划接地(治盲规划)。任一子步失败静默降级为空段。"""
         deps = self.dependencies
         parts: List[str] = []
-        try:
-            active_profile = (
-                profile
-                or getattr(self, "_planning_corpus_profile", None)
-                or self._corpus_profile(notebook_id)
-            )
-            parts.append(corpus_profile_planner_block(active_profile))
-        except Exception:
-            pass
+        from app.services.source_scope import source_scope_restricted
+
+        if not source_scope_restricted():
+            try:
+                active_profile = (
+                    profile
+                    or getattr(self, "_planning_corpus_profile", None)
+                    or self._corpus_profile(notebook_id)
+                )
+                parts.append(corpus_profile_planner_block(active_profile))
+            except Exception:
+                pass
         try:
             kg = deps.retrieval.federated_retrieve(notebook_id, question)[: self._SCOUT_KG_N]
             if kg:
@@ -779,19 +789,23 @@ class ReportEngine:
                     f"[{h.object_type}][{getattr(h,'tier','personal')}]" for h in kg))
         except Exception:
             pass
-        try:
-            chunks = deps.retrieval.ppr_retrieve(notebook_id, question)[: self._SCOUT_CHUNK_N]
-            if chunks:
-                parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
-                    f"- {c.source_title} · {c.section_path}" for c in chunks))
-        except Exception:
-            pass
+        if not source_scope_restricted():
+            try:
+                chunks = deps.retrieval.ppr_retrieve(
+                    notebook_id, question
+                )[: self._SCOUT_CHUNK_N]
+                if chunks:
+                    parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
+                        f"- {c.source_title} · {c.section_path}" for c in chunks))
+            except Exception:
+                pass
         try:
             memories = (
                 deps.memory_retriever.notebook_memory_hits(
                     self.user_id, notebook_id, question, 8
                 )
-                if deps.memory_retriever is not None else []
+                if deps.memory_retriever is not None and not source_scope_restricted()
+                else []
             )
             if memories:
                 parts.append("用户已确认 Memory:\n" + "\n".join(
@@ -833,9 +847,17 @@ class ReportEngine:
                 intent_contract, question
             )
             try:
-                corpus_profile = self._corpus_profile(
-                    notebook_id,
-                    result_scope=str(intent_contract.get("result_scope") or "ranked"),
+                from app.services.source_scope import source_scope_restricted
+
+                corpus_profile = (
+                    {}
+                    if source_scope_restricted()
+                    else self._corpus_profile(
+                        notebook_id,
+                        result_scope=str(
+                            intent_contract.get("result_scope") or "ranked"
+                        ),
+                    )
                 )
             except Exception:
                 # Profiling is additive governance.  A malformed row/projection
@@ -1309,13 +1331,16 @@ class ReportEngine:
                 chain_map = {}
         memory_map = {}
         try:
+            from app.services.source_scope import source_scope_restricted
+
             memories = (
                 deps.memory_retriever.notebook_memory_hits(
                     self.user_id, notebook_id,
                     f"{question} {section['title']} {' '.join(section['sub_queries'])}",
                     8,
                 )
-                if deps.memory_retriever is not None else []
+                if deps.memory_retriever is not None and not source_scope_restricted()
+                else []
             )
             memory_block, memory_map = (
                 deps.memory_retriever.context(memories, id_offset=3000)
@@ -1773,11 +1798,12 @@ class ReportEngine:
     # --- 编排:规划(→outline_ready)+(auto_generate 时)生成,保留一键直出 ---
     def run(self, notebook_id, rid, question, history="", depth: int = 2,
             auto_generate: bool = False, intent_contract=None,
-            require_intent_review: bool = False) -> None:
+            require_intent_review: bool = False, source_scope=None) -> None:
         if require_intent_review and intent_contract is None:
             self.prepare_intent(
                 notebook_id, rid, question, history,
                 auto_generate=auto_generate,
+                source_scope=source_scope,
             )
             return
         self.plan_outline(

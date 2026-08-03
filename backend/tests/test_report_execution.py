@@ -276,6 +276,23 @@ def test_start_generate_names_job_and_unregisters():
     assert registry.cancel("rid-4") is False
 
 
+def test_start_generate_fails_closed_when_persisted_scope_cannot_be_read():
+    reports = _Reports(boom=True)
+    registry = ReportCancellationRegistry()
+    submitter = _CapturingSubmitter(registry, "rid-scope-read")
+    coord, engine, _reg, _captured = _coordinator(
+        reports=reports, registry=registry, submitter=submitter
+    )
+
+    coord.start_generate("nb", "rid-scope-read", "q", user_id="u")
+    with pytest.raises(KeyError, match="rid-scope-read"):
+        submitter.calls[0]["fn"]()
+
+    assert engine.generate_calls == []
+    assert reports.updates[-1][1]["status"] == "failed"
+    assert registry.cancel("rid-scope-read") is False
+
+
 def test_coordinator_submits_through_background_jobs_with_copied_context():
     from app.services import background_jobs
     probe = contextvars.ContextVar("task25_exec_probe", default="")

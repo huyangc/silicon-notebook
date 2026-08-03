@@ -1359,6 +1359,59 @@ def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_
     assert detail["understanding"]["corpus_profile"] == {}
 
 
+def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
+    from app.models.source_scope import SourceScope
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import source_scope_context
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "用户原问题")
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    monkeypatch.setattr(
+        eng, "_plan_intent_contract",
+        lambda *_args, **_kwargs: {
+            "objective": "用户原问题",
+            "mandatory_topics": [{
+                "id": "intent-1", "title": "原问题", "question": "用户原问题",
+                "retrieval_queries": ["用户原问题"],
+            }],
+        },
+    )
+    monkeypatch.setattr(
+        eng, "_corpus_profile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scoped report must not read whole-corpus profile")
+        ),
+    )
+    monkeypatch.setattr(
+        repo.retrieval, "ppr_retrieve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scoped report must not run whole-graph PPR")
+        ),
+    )
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda *_args: [])
+    monkeypatch.setattr(eng, "_probe_intent_coverage", lambda *_args: [])
+    monkeypatch.setattr(
+        eng, "_storm_outline",
+        lambda *_args, **_kwargs: [{
+            "title": "原问题", "scope": "s", "sub_queries": ["用户原问题"],
+            "intent_ids": ["intent-1"],
+        }],
+    )
+    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args: [])
+    monkeypatch.setattr(
+        eng, "_judge_sufficiency", lambda _q, sections, _p: sections
+    )
+
+    with source_scope_context(
+        nb.id, SourceScope(mode="include", source_ids=["s1"])
+    ):
+        eng.plan_outline(nb.id, rid, "用户原问题")
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["understanding"]["corpus_profile"] == {}
+
+
 def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
     nb = _mk_nb(repo)
@@ -1570,6 +1623,34 @@ def test_report_section_model_grounded_flag_cannot_validate_fake_marker(repo):
         "q", ReasoningResult(),
     )
     assert out["grounded"] is False and out["evidence_level"] == "inferred"
+
+
+def test_report_section_does_not_read_memory_under_selected_source_scope(repo):
+    from dataclasses import replace
+
+    from app.models.source_scope import SourceScope
+    from app.services.reasoning_retrieval import ReasoningResult
+    from app.services.source_scope import source_scope_context
+
+    class _Memory:
+        def notebook_memory_hits(self, *_args, **_kwargs):
+            raise AssertionError("selected source scope must not query Memory")
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    eng.dependencies = replace(eng.dependencies, memory_retriever=_Memory())
+
+    with source_scope_context(
+        nb.id, SourceScope(mode="include", source_ids=["src-selected"])
+    ):
+        out = eng._draft_section(
+            nb.id,
+            {"title": "T", "scope": "S", "sub_queries": ["q"]},
+            "q",
+            ReasoningResult(),
+        )
+
+    assert out["markdown"]
 
 
 def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo):

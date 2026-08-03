@@ -848,6 +848,16 @@
               "minLength": 1,
               "title": "Question",
               "type": "string"
+            },
+            "source_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SourceScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -912,6 +922,16 @@
               },
               "title": "Scenario",
               "type": "object"
+            },
+            "source_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SourceScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -6996,6 +7016,16 @@
             "question": {
               "title": "Question",
               "type": "string"
+            },
+            "source_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SourceScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -8079,6 +8109,30 @@
             "mainstream_share"
           ],
           "title": "SourceProfileRow",
+          "type": "object"
+        },
+        "SourceScope": {
+          "description": "User-selected imported-source scope for one retrieval run.\n\n``include`` means only the listed active-notebook sources participate;\n``exclude`` means every visible active-notebook source except the listed\nones participates. Mounted base notebooks remain independent participants.\nOmitting this model from a request preserves the historical whole-scope\nbehavior for compatibility clients.",
+          "properties": {
+            "mode": {
+              "default": "exclude",
+              "enum": [
+                "include",
+                "exclude"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "source_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 10000,
+              "title": "Source Ids",
+              "type": "array"
+            }
+          },
+          "title": "SourceScope",
           "type": "object"
         },
         "SourceSummary": {

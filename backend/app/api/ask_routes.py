@@ -16,6 +16,7 @@ from app.api.deps import (
     user_error,
 )
 from app.models.notebooks import NotebookSummary
+from app.models.source_scope import SourceScope
 from app.models.ask import (
     AskIntentPreviewRequest,
     AskRequest,
@@ -43,7 +44,36 @@ from app.services.query_intent import (
 router = APIRouter()
 
 
-def _require_ask_available(notebook: NotebookSummary) -> None:
+def _validate_source_scope(repo, notebook: NotebookSummary,
+                           scope: SourceScope | None) -> SourceScope | None:
+    """Validate and freeze a checkbox scope as an explicit active-source ceiling.
+
+    The browser uses exclusions while "all" is selected because that keeps
+    toggles compact.  Workers must not carry that moving definition: normalize
+    it once to an include-list so concurrent uploads cannot widen the run and
+    every candidate producer can push the same allow-list below its LIMIT.
+    """
+    if scope is None:
+        return None
+    valid = repo.visible_source_ids(notebook.id, scope.source_ids)
+    if valid != scope.source_ids:
+        raise user_error(422, "检索范围包含不属于当前笔记本的来源")
+    if scope.mode == "include":
+        selected = list(scope.source_ids)
+    else:
+        excluded = set(scope.source_ids)
+        selected = [
+            source_id for source_id in repo.all_visible_source_ids(notebook.id)
+            if source_id not in excluded
+        ]
+    resolved = SourceScope(mode="include", source_ids=selected)
+    if not resolved.source_ids and not notebook.base_notebooks:
+        raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
+    return resolved
+
+
+def _require_ask_available(notebook: NotebookSummary, repo=None,
+                           source_scope: SourceScope | None = None) -> SourceScope | None:
     """硬约束(PR#334):笔记本在任一模式下都取不到可检索证据(NotebookSummary
     .ask_available=False——无可见来源/knowhow chunk/可用 KG/带图参考库/confirmed memory)
     时,回答只会是凭空生成,拒绝提问。前端会据同一信号禁用对话框,但那只是 UX;这里是
@@ -60,6 +90,9 @@ def _require_ask_available(notebook: NotebookSummary) -> None:
             "该笔记本还没有可用于回答的内容，请先添加来源，"
             "或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
         )
+    if repo is not None:
+        return _validate_source_scope(repo, notebook, source_scope)
+    return source_scope
 
 
 @router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
@@ -117,14 +150,19 @@ async def preview_ask_intent(
             notebook = repo.get_notebook(notebook_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Notebook not found")
-        _require_ask_available(notebook)
+        resolved_source_scope = _require_ask_available(
+            notebook, repo, payload.source_scope
+        )
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
         )
         try:
-            return repo.preview_reasoning_intent(
-                notebook_id, question, history, cancel_event=cancel_event
-            )
+            from app.services.source_scope import source_scope_context
+
+            with source_scope_context(notebook_id, resolved_source_scope):
+                return repo.preview_reasoning_intent(
+                    notebook_id, question, history, cancel_event=cancel_event
+                )
         except ValueError as exc:
             raise user_error(
                 422, str(exc)
@@ -188,8 +226,15 @@ def _validate_reasoning_scope_preflight(repo, notebook_id: str, spec, payload: A
     """Keep invalid/expired selected scopes out of durable jobs and streams."""
     if spec.id != "reasoning":
         return
+    from app.services.source_scope import source_scope_context
+
     try:
-        repo.validate_reasoning_submission(notebook_id, payload)
+        # This runs before a durable job or stream header exists, so it must
+        # see the same frozen checkbox ceiling as the eventual worker.  In
+        # particular, a signed intent preview cannot be replayed after its
+        # named source was unchecked.
+        with source_scope_context(notebook_id, payload.source_scope):
+            repo.validate_reasoning_submission(notebook_id, payload)
     except ValueError as exc:
         raise user_error(409, str(exc)) from exc
 
@@ -208,7 +253,11 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
-    _require_ask_available(notebook)
+    resolved_source_scope = _require_ask_available(
+        notebook, repo, payload.source_scope
+    )
+    if resolved_source_scope is not payload.source_scope:
+        payload = payload.model_copy(update={"source_scope": resolved_source_scope})
     _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     try:
         return repo.ask(notebook_id, payload)
@@ -282,7 +331,11 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
-    _require_ask_available(notebook)  # 硬约束:空库 ask 权威拒绝(复用上面已拉的快照,零额外查询)
+    resolved_source_scope = _require_ask_available(
+        notebook, repo, payload.source_scope
+    )  # 空库/空来源范围权威拒绝
+    if resolved_source_scope is not payload.source_scope:
+        payload = payload.model_copy(update={"source_scope": resolved_source_scope})
     _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     return StreamingResponse(
         _stream_ask_events(repo, notebook_id, payload, spec, request),

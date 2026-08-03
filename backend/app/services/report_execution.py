@@ -86,7 +86,8 @@ class ReportExecutionCoordinator:
 
     def start_plan(self, notebook_id: str, report_id: str, question: str,
                    history: str = "", auto_generate: bool = False, *,
-                   user_id: str = "", intent_contract=None) -> bool:
+                   user_id: str = "", intent_contract=None,
+                   source_scope=None) -> bool:
         """Run pre-retrieval understanding or resume with a confirmed contract."""
         cancel = threading.Event()
         # A previous phase publishes intent_ready/outline_ready immediately
@@ -112,16 +113,22 @@ class ReportExecutionCoordinator:
                     priority=ModelPriority.REPORT, parent_id=report_id
                 ):
                     engine = self.engine_factory(user_id=user_id, cancel_event=cancel)
-                    if intent_contract is None:
-                        engine.run(
-                            notebook_id, report_id, question, history, depth=depth,
-                            auto_generate=auto_generate,
-                            require_intent_review=True)
-                    else:
-                        engine.run(
-                            notebook_id, report_id, question, history, depth=depth,
-                            auto_generate=auto_generate,
-                            intent_contract=intent_contract)
+                    from app.services.source_scope import source_scope_context
+
+                    effective_scope = source_scope
+                    if effective_scope is None and isinstance(intent_contract, dict):
+                        effective_scope = intent_contract.get("source_scope")
+                    with source_scope_context(notebook_id, effective_scope):
+                        if intent_contract is None:
+                            engine.run(
+                                notebook_id, report_id, question, history, depth=depth,
+                                auto_generate=auto_generate,
+                                require_intent_review=True)
+                        else:
+                            engine.run(
+                                notebook_id, report_id, question, history, depth=depth,
+                                auto_generate=auto_generate,
+                                intent_contract=intent_contract)
             finally:
                 self.cancellations.unregister(report_id, cancel)
 
@@ -153,13 +160,30 @@ class ReportExecutionCoordinator:
                     report = self.reports.get_report(notebook_id, report_id)
                     if report.get("status") == "cancelled" or cancel.is_set():
                         return
-                except Exception:
-                    pass
+                    source_scope = (report.get("understanding") or {}).get(
+                        "source_scope"
+                    )
+                except Exception as exc:
+                    # The persisted understanding contract is the authority for
+                    # generation.  A transient read failure must never erase a
+                    # user-selected source ceiling and continue against the
+                    # whole notebook.
+                    try:
+                        self.reports.update_report(
+                            notebook_id, report_id, status="failed",
+                            error=f"{type(exc).__name__}: {exc}", progress="失败",
+                        )
+                    except Exception:
+                        pass
+                    raise
                 with model_work_scope(
                     priority=ModelPriority.REPORT, parent_id=report_id
                 ):
-                    self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
-                        notebook_id, report_id, question, depth=depth)
+                    from app.services.source_scope import source_scope_context
+
+                    with source_scope_context(notebook_id, source_scope):
+                        self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
+                            notebook_id, report_id, question, depth=depth)
             finally:
                 self.cancellations.unregister(report_id, cancel)
 

@@ -15,6 +15,7 @@ import {
 } from "./ask-stream.ts";
 import type { AskJobDetail } from "./ask-reconnect.ts";
 import type { QueryIntentContract } from "./ask-intent-model.ts";
+import type { SourceScopePayload } from "./source-scope.ts";
 import type {
   AskResponse,
   ConversationDetail,
@@ -35,12 +36,14 @@ export const previewAskIntent = (
   question: string,
   conversationId?: string | null,
   signal?: AbortSignal,
+  sourceScope?: SourceScopePayload,
 ) => requestJson<QueryIntentContract>(`/notebooks/${notebookId}/ask/intent`, {
   ...options,
   method: "POST",
   body: JSON.stringify({
     question,
     conversation_id: conversationId || undefined,
+    source_scope: sourceScope,
   }),
   signal,
 });
