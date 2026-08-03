@@ -55,8 +55,13 @@ _MARKER = re.compile(r"\[(k\d+(?:\s*,\s*k\d+)*)\]")   # 节内 [k_i] 或 [k_i, k
 _HIGH_RISK_NUMBER = re.compile(
     # Python's ``\w`` includes CJK, so a ``(?<!\w)`` guard silently misses
     # ordinary Chinese prose such as “降低了30%”.  Exclude only ASCII
-    # identifier continuations; Chinese characters are valid sentence context.
-    r"(?<![A-Za-z0-9_])\d+(?:[.,]\d+)?\s*(?:%|％|秒|分钟|小时|天|万|亿|参数|倍|层|篇|份|个|"
+    # identifier continuations; Chinese characters are valid sentence context —
+    # with one exception: ``第`` marks an ordinal (“第3层” names a layer, it does
+    # not assert a quantity), so it is excluded both adjacent and across one
+    # space (“第 3 层”).  Without this the audit denominator counts structural
+    # self-references as high-risk claims, which is exactly the miscalibration
+    # the opt-in downgrade flag is waiting on real-run distributions to tune.
+    r"(?<![A-Za-z0-9_第])(?<!第\s)\d+(?:[.,]\d+)?\s*(?:%|％|秒|分钟|小时|天|万|亿|参数|倍|层|篇|份|个|"
     r"(?:ms|s|KB|MB|GB|TB|K|M|B|tokens?)(?![A-Za-z]))",
     re.IGNORECASE,
 )
@@ -66,7 +71,9 @@ _HIGH_RISK_ASSERTION_CJK = re.compile(
     r"显著(?:高于|低于|优于|劣于)|优于|劣于|高于|低于|排名|排序)"
 )
 _HIGH_RISK_ASSERTION_EN = re.compile(
-    r"\b(?:best|worst|fastest|slowest|all|always|never|"
+    # ``all(?!-)``: the standalone quantifier is high-risk (“all models …”),
+    # but ``all-reduce``/``all-to-all`` are operation names, not claims.
+    r"\b(?:best|worst|fastest|slowest|all(?!-)|always|never|"
     r"significantly\s+(?:better|worse|higher|lower)|outperform(?:s|ed)?)\b",
     re.IGNORECASE,
 )

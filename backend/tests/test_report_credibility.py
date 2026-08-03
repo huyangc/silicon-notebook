@@ -176,6 +176,27 @@ def test_high_risk_audit_detects_unit_numbers_joined_to_chinese_prose():
     assert audit["unsupported_samples"] == ["吞吐降低了30%。", "资料共收录128篇。"]
 
 
+def test_high_risk_audit_ignores_ordinals_and_operation_names():
+    """序数与操作名不是数量断言(#425 复核 P2):「第3层」指称一个层的位置、
+    「all-reduce」是通信原语的名字,都不该进高风险分母——那个分母直接决定
+    REPORT_HIGH_RISK_DOWNGRADE_ENABLED 默认值要用的真机分布,尺子必须先准。
+    无空格(第3层)与单空格(第 1 个)两种排版都要挡;真正的数量断言
+    (12层/30%)在同一段里必须照常命中,防止把「排除序数」写宽成「排除一切
+    带层/个的数字」。"""
+    markdown = """## 序数与操作名
+第3层使用了残差连接。第 1 个方案已被否决。这是第2篇论文。
+all-reduce 操作在此执行。
+该模型共有12层[k1]。端到端延迟降低了30%。
+"""
+    audit = audit_high_risk_assertions(
+        markdown, {"k1": {"object_id": "x"}}, max_unsupported_ratio=0.25
+    )
+    # 只有「12层」「30%」两句是真断言;序数三句与 all-reduce 一句都不计。
+    assert audit["high_risk_assertions"] == 2
+    assert audit["supported"] == 1
+    assert audit["unsupported_samples"] == ["端到端延迟降低了30%。"]
+
+
 def test_report_retrieval_query_can_exclude_assumptions_without_losing_constraints():
     contract = {
         "resolved_question": "比较 A 与 B",
