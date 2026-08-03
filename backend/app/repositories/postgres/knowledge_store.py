@@ -21,7 +21,7 @@ from psycopg import sql
 
 from app.core.json_safety import validate_finite_json
 from app.models.common import Evidence
-from app.repositories.lexical_query import lexical_recall_terms
+from app.repositories.lexical_query import corpus_gated_recall_terms
 from app.repositories.postgres._store_utils import (
     execute_many,
     iso_timestamp,
@@ -68,9 +68,15 @@ def _lexical_candidate_union(
     output_id: str,
     text_field: str,
     allowed_source_ids: Sequence[str] | None = None,
+    corpus_langs: Sequence[str] | None = None,
 ) -> list[dict]:
-    """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query."""
-    terms = lexical_recall_terms(query)
+    """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query.
+
+    Every surviving term costs one real LATERAL probe here, which is why the
+    corpus gate matters far more on this backend than on SQLite: see
+    `corpus_gated_recall_terms` for the measured 29.7s → 0.96s.
+    """
+    terms = corpus_gated_recall_terms(query, corpus_langs)
     result_limit = max(0, int(k))
     if not terms or not result_limit:
         return []
@@ -2031,6 +2037,7 @@ class KnowledgeStore:
     def fts_search(
         db, notebook_id: str, q: str, k: int = 30, *,
         allowed_source_ids: Sequence[str] | None = None,
+        corpus_langs: Sequence[str] | None = None,
     ) -> List[Dict]:
         """Return deterministic lexical knowledge hits from trigram candidates."""
         needle = (q or "").strip()
@@ -2044,12 +2051,14 @@ class KnowledgeStore:
             output_id="object_id",
             text_field="name",
             allowed_source_ids=allowed_source_ids,
+            corpus_langs=corpus_langs,
         )
 
     @staticmethod
     def chunk_fts_search(
         db, notebook_id: str, q: str, k: int = 30, *,
         allowed_source_ids: Sequence[str] | None = None,
+        corpus_langs: Sequence[str] | None = None,
     ) -> List[Dict]:
         """Return deterministic lexical chunk hits from trigram candidates."""
         needle = (q or "").strip()
@@ -2063,6 +2072,7 @@ class KnowledgeStore:
             output_id="chunk_id",
             text_field="text",
             allowed_source_ids=allowed_source_ids,
+            corpus_langs=corpus_langs,
         )
 
     @staticmethod

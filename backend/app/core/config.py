@@ -485,6 +485,14 @@ class Settings(BaseSettings):
     chunk_overlap_chars: int = Field(0, validation_alias="CHUNK_OVERLAP_CHARS")
     # chunk-native 检索: 大召回候选数 / MMR 精选数 / MMR λ / 答案上下文预算(长上下文综合)。
     chunk_recall: int = Field(200, validation_alias="CHUNK_RECALL")   # mix 候选池/MMR 候选;LightRAG 风格猛召回
+    # 词法候选的语料语言闸:库内没有任何 CJK 字符时,丢掉纯 CJK 的三字片段词项
+    # ——它们对该库保证零命中,却在 PostgreSQL 上各买一次真实探针(实测 7,026 块
+    # 的英文库:64 词项 29.7s/26 行,其中 26 行全部来自 2 个拉丁词项;报告 4 节
+    # 并发即撞 POSTGRES_STATEMENT_TIMEOUT_SECONDS,整条词法臂 fail-open 阵亡)。
+    # 只做 CJK 方向,只过滤优先头之后的词项;判据是既有采样探针 `_notebook_langs`。
+    # 设 false 完全回到接入前(不过滤、零行为差异),用于探针误判某库时的临时恢复。
+    lexical_language_gate_enabled: bool = Field(
+        True, validation_alias="LEXICAL_LANGUAGE_GATE_ENABLED")
     chunk_mmr_k: int = Field(16, validation_alias="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, validation_alias="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, validation_alias="CHUNK_ANSWER_BUDGET_CHARS")

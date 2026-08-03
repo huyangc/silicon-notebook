@@ -550,6 +550,7 @@ REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工�
 REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）；同一个开关也管深度报告每节深挖在穷尽档（depth 16，见下方 REPORT_MAX_SECTIONS）的启用，不另设报告专属开关
 REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）；深度报告每节深挖到达穷尽档时同样生效
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
+LEXICAL_LANGUAGE_GATE_ENABLED # 语料采样中没有任何 CJK 字符时，丢弃纯 CJK 的词法词项（默认 true；这些探针对该库保证零命中，却各买一次真实的 PostgreSQL LATERAL 探针——7,026 块的英文库实测：64 词项冷 29.7s / 3 词项暖 0.26s，返回同样的 26 行，未过滤形态在报告多节并发下会直接超时。绝不过滤用户引号短语与整句词项，不做拉丁方向，也不作用于选定来源的运行——那条路的词法臂是它唯一的候选来源。设 false 回到接入前逐字一致的行为，用于某库语言采样误判时的临时恢复）
 CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）
 RERANK_MAX_DOCS              # 单次 rerank 文档上限，超出自动切 batch 并发（默认 500）

@@ -351,7 +351,9 @@ def test_knowledge_search_unions_memory_before_limit_even_when_kg_fills_limit(
     monkeypatch.setattr(
         service.knowledge,
         "fts_search",
-        lambda _db, _nb, _query, _limit: [
+        # `**_kwargs` absorbs the corpus-language gate's `corpus_langs`; this
+        # test is about the Memory union, not about which terms get probed.
+        lambda _db, _nb, _query, _limit, **_kwargs: [
             {
                 "object_id": "ko-low",
                 "name": "Low KG hit",
