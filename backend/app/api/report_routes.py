@@ -20,8 +20,12 @@ from app.models.reports import (
     ReportOutlineUpdate,
     ReportSummary,
 )
-from app.models.source_scope import SourceScope
-from app.api.ask_routes import _validate_source_scope
+from app.models.source_scope import BaseNotebookScope, SourceScope
+from app.api.ask_routes import (
+    _require_non_empty_scope,
+    _validate_base_scope,
+    _validate_source_scope,
+)
 
 
 router = APIRouter()
@@ -36,7 +40,7 @@ def _report_llm_ready(repo) -> bool:
 
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
                      auto_generate: bool = False, intent_contract=None,
-                     source_scope=None) -> None:
+                     source_scope=None, base_scope=None) -> None:
     """Run corpus-blind understanding, or resume planning after confirmation.
 
     The first call has no ``intent_contract`` and stops at ``intent_ready``.
@@ -49,7 +53,8 @@ def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: s
         notebook_id, rid, question, history, auto_generate,
         user_id=repo.current_user().id,
         intent_contract=intent_contract,
-        source_scope=source_scope)
+        source_scope=source_scope,
+        base_scope=base_scope)
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
@@ -75,6 +80,12 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
     resolved_source_scope = _validate_source_scope(
         repo, notebook, payload.source_scope
     )
+    resolved_base_scope = _validate_base_scope(notebook, payload.base_scope)
+    # Before create_report(): an empty scope must not leave a report row behind,
+    # and (the reason this check exists at all) must not let the plan job burn
+    # model calls producing a zero-evidence report. Deliberately NOT the
+    # ask_available gate -- only the D12 scope-emptiness half.
+    _require_non_empty_scope(notebook, resolved_source_scope, resolved_base_scope)
     depth = max(1, min(16, int(payload.depth)))
     try:
         rid = repo.create_report(notebook_id, payload.question.strip(), depth=depth)
@@ -84,20 +95,33 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
         resolved_source_scope.model_dump()
         if resolved_source_scope is not None else None
     )
+    base_scope_payload = (
+        resolved_base_scope.model_dump()
+        if resolved_base_scope is not None else None
+    )
+    understanding_update: dict = {}
     if scope_payload is not None:
+        understanding_update["source_scope"] = scope_payload
+    if base_scope_payload is not None:
+        understanding_update["base_scope"] = base_scope_payload
+    if understanding_update:
         repo.update_report(
-            notebook_id, rid, understanding={"source_scope": scope_payload}
+            notebook_id, rid, understanding=understanding_update
         )
-    if scope_payload is None:
-        _launch_plan_job(
-            repo, notebook_id, rid, payload.question.strip(), payload.history,
-            payload.auto_generate,
-        )
-    else:
-        _launch_plan_job(
-            repo, notebook_id, rid, payload.question.strip(), payload.history,
-            payload.auto_generate, source_scope=scope_payload,
-        )
+    # Only pass the kwargs that are actually set (rather than always passing
+    # both, even as None): _launch_plan_job's own callers/monkeypatch doubles
+    # assert on its exact call shape, and a plain unscoped report must keep
+    # invoking it with the same bare positional signature as before either
+    # scope dimension existed.
+    launch_kwargs: dict = {}
+    if scope_payload is not None:
+        launch_kwargs["source_scope"] = scope_payload
+    if base_scope_payload is not None:
+        launch_kwargs["base_scope"] = base_scope_payload
+    _launch_plan_job(
+        repo, notebook_id, rid, payload.question.strip(), payload.history,
+        payload.auto_generate, **launch_kwargs,
+    )
     return {"report_id": rid, "status": "pending"}
 
 
@@ -115,15 +139,29 @@ def confirm_report_intent(notebook_id: str, report_id: str,
 
     understanding = dict(cur.get("understanding") or {})
     persisted_scope = understanding.get("source_scope")
-    if persisted_scope is not None:
+    persisted_base_scope = understanding.get("base_scope")
+    if persisted_scope is not None or persisted_base_scope is not None:
+        resolved_scope = None
+        resolved_base_scope = None
         try:
             notebook = repo.get_notebook(notebook_id)
-            resolved_scope = _validate_source_scope(
-                repo, notebook, SourceScope.model_validate(persisted_scope)
-            )
+            if persisted_scope is not None:
+                resolved_scope = _validate_source_scope(
+                    repo, notebook, SourceScope.model_validate(persisted_scope)
+                )
+                understanding["source_scope"] = resolved_scope.model_dump()
+            if persisted_base_scope is not None:
+                resolved_base_scope = _validate_base_scope(
+                    notebook, BaseNotebookScope.model_validate(persisted_base_scope)
+                )
+                understanding["base_scope"] = resolved_base_scope.model_dump()
         except (TypeError, ValueError):
             raise user_error(409, "报告保存的来源范围无效，请重新创建报告")
-        understanding["source_scope"] = resolved_scope.model_dump()
+        # Re-freezing against the CURRENT notebook can empty a scope that was
+        # non-empty at create time (every selected source deleted, every
+        # selected library unmounted), so the D12 check must run again here --
+        # this is the last gate before planning is claimed and launched.
+        _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
     ambiguities = {
         str(row.get("id") or ""): row
         for row in (understanding.get("ambiguities") or [])
@@ -162,6 +200,8 @@ def confirm_report_intent(notebook_id: str, report_id: str,
     launch_kwargs = {"intent_contract": understanding}
     if understanding.get("source_scope") is not None:
         launch_kwargs["source_scope"] = understanding["source_scope"]
+    if understanding.get("base_scope") is not None:
+        launch_kwargs["base_scope"] = understanding["base_scope"]
     _launch_plan_job(
         repo,
         notebook_id,
@@ -332,16 +372,34 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
         raise HTTPException(status_code=409, detail="generate only from outline_ready")
     understanding = dict(cur.get("understanding") or {})
     persisted_scope = understanding.get("source_scope")
-    if persisted_scope is not None:
+    persisted_base_scope = understanding.get("base_scope")
+    understanding_changed = False
+    if persisted_scope is not None or persisted_base_scope is not None:
+        resolved_scope = None
+        resolved_base_scope = None
         try:
             notebook = repo.get_notebook(notebook_id)
-            resolved_scope = _validate_source_scope(
-                repo, notebook, SourceScope.model_validate(persisted_scope)
-            )
+            if persisted_scope is not None:
+                resolved_scope = _validate_source_scope(
+                    repo, notebook, SourceScope.model_validate(persisted_scope)
+                )
+                if resolved_scope.model_dump() != persisted_scope:
+                    understanding["source_scope"] = resolved_scope.model_dump()
+                    understanding_changed = True
+            if persisted_base_scope is not None:
+                resolved_base_scope = _validate_base_scope(
+                    notebook, BaseNotebookScope.model_validate(persisted_base_scope)
+                )
+                if resolved_base_scope.model_dump() != persisted_base_scope:
+                    understanding["base_scope"] = resolved_base_scope.model_dump()
+                    understanding_changed = True
         except (TypeError, ValueError):
             raise user_error(409, "报告保存的来源范围无效，请重新创建报告")
-        if resolved_scope.model_dump() != persisted_scope:
-            understanding["source_scope"] = resolved_scope.model_dump()
+        # Same D12 gate as create/confirm: sources or libraries may have gone
+        # away since the outline was approved, and generation is by far the
+        # most expensive phase to run against an empty universe.
+        _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
+        if understanding_changed:
             repo.update_report(
                 notebook_id, report_id, understanding=understanding
             )

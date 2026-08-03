@@ -205,6 +205,43 @@ def test_start_plan_with_confirmed_intent_resumes_without_review_gate():
     ]
 
 
+def test_start_plan_wires_confirmed_base_scope_into_source_scope_context():
+    """``start_plan``'s ``effective_base_scope = intent_contract.get(
+    "base_scope")`` fallback and the ``with source_scope_context(notebook_id,
+    effective_scope, effective_base_scope):`` around the engine call are the
+    ONLY place a confirmed contract's checkbox library selection reaches the
+    understanding-phase worker. A mutation that drops the
+    ``intent_contract.get("base_scope")`` read (leaving ``effective_base_scope``
+    at its ``None`` default) would silently restore "every mounted library
+    participates" for a report whose confirmed contract excluded one, while
+    every other coordinator test in this file -- none of which inspect
+    ``current_source_scope()`` -- stays green."""
+    from app.services.source_scope import current_source_scope
+
+    captured = {}
+
+    class _ScopeEngine(_Engine):
+        def run(self, notebook_id, rid, question, history="", depth=2,
+                auto_generate=False, require_intent_review=False,
+                intent_contract=None):
+            scope = current_source_scope()
+            captured["base_notebook_ids"] = (
+                set(scope.base_notebook_ids) if scope is not None else None
+            )
+            super().run(notebook_id, rid, question, history, depth,
+                        auto_generate, require_intent_review, intent_contract)
+
+    coord, engine, _reg, _cap = _coordinator(engine=_ScopeEngine())
+    contract = {
+        "objective": "q", "confirmed": True,
+        "base_scope": {"mode": "include", "notebook_ids": ["b1"]},
+    }
+    coord.start_plan(
+        "nb", "rid-scope-plan", "q", user_id="u1", intent_contract=contract
+    )
+    assert captured["base_notebook_ids"] == {"b1"}
+
+
 def test_worker_observes_durable_cancel_that_preceded_event_registration():
     reports = _Reports()
     reports.get_report = lambda *_args: {
@@ -274,6 +311,48 @@ def test_start_generate_names_job_and_unregisters():
     assert engine.generate_calls == [("nb", "rid-4", "q", 5)]
     assert captured["user_id"] == "u2"
     assert registry.cancel("rid-4") is False
+
+
+def test_start_generate_wires_persisted_base_scope_into_source_scope_context():
+    """``start_generate`` reads ``base_scope = understanding.get("base_scope")``
+    off the persisted report row and threads it through
+    ``with source_scope_context(notebook_id, source_scope, base_scope):``
+    around the generation-phase engine call -- the only seam that turns the
+    confirmed understanding contract's checkbox library selection into an
+    active retrieval ceiling once generation (a SEPARATE background job from
+    planning) starts. A mutation that drops that
+    ``understanding.get("base_scope")`` read (leaving ``base_scope`` at
+    ``None``) would silently restore "every mounted library participates"
+    for the generation phase of a report whose confirmed understanding
+    excluded one, while every other coordinator test in this file -- none of
+    which inspect ``current_source_scope()`` -- stays green."""
+    from app.services.source_scope import current_source_scope
+
+    captured = {}
+
+    class _ScopeReports(_Reports):
+        def get_report(self, notebook_id, report_id):
+            return {
+                "id": report_id, "depth": self.depth,
+                "understanding": {
+                    "source_scope": None,
+                    "base_scope": {"mode": "include", "notebook_ids": ["b1"]},
+                },
+            }
+
+    class _ScopeEngine(_Engine):
+        def generate(self, notebook_id, rid, question, depth=2):
+            scope = current_source_scope()
+            captured["base_notebook_ids"] = (
+                set(scope.base_notebook_ids) if scope is not None else None
+            )
+            super().generate(notebook_id, rid, question, depth)
+
+    coord, engine, _reg, _cap = _coordinator(
+        reports=_ScopeReports(), engine=_ScopeEngine()
+    )
+    coord.start_generate("nb", "rid-scope-gen", "q", 3, user_id="u1")
+    assert captured["base_notebook_ids"] == {"b1"}
 
 
 def test_start_generate_fails_closed_when_persisted_scope_cannot_be_read():

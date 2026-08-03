@@ -3,7 +3,11 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.models.source_scope import SourceScope
+from app.models.source_scope import (
+    BaseNotebookScope,
+    RetrievalScopeReceipt,
+    SourceScope,
+)
 
 from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT,
@@ -194,6 +198,10 @@ class AskIntentPreviewRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     conversation_id: Optional[str] = Field(default=None, max_length=200)
     source_scope: Optional[SourceScope] = None
+    # None preserves the historical behavior of every mounted base notebook
+    # participating unconditionally. Independent dimension from source_scope:
+    # this selects whole mounted reference libraries, never sources within them.
+    base_scope: Optional[BaseNotebookScope] = None
 
 
 class AskIntentConfirmation(BaseModel):
@@ -221,6 +229,11 @@ class AskRequest(BaseModel):
     # None preserves the historical whole-notebook behavior. include=[] is an
     # explicit empty local scope; mounted base notebooks remain participants.
     source_scope: Optional[SourceScope] = None
+    # None preserves the historical behavior of every mounted base notebook
+    # participating unconditionally. include=[] is an explicit "no mounted
+    # base library participates" selection. Independent dimension from
+    # source_scope -- see BaseNotebookScope's docstring.
+    base_scope: Optional[BaseNotebookScope] = None
     # reasoning only: returned by /ask/intent and confirmed by the user (or
     # auto-confirmed by the UI when no blocking ambiguity exists).
     intent: Optional[AskIntentConfirmation] = None
@@ -533,6 +546,16 @@ class AskResponse(BaseModel):
         ]
     ] = Field(default_factory=list, exclude_if=lambda value: not value)
     result_coverage: Optional[StructuredBatchCoverage] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # Read-only receipt of the scope this run actually ran under (checkbox
+    # path). Absent -- and therefore serialized byte-identically to every
+    # historical payload -- when the request narrowed NEITHER dimension: a run
+    # that scoped nothing made no selection to report, and manufacturing a
+    # "looks limited" receipt for it is the same class of lie the scope
+    # payload accessors already refuse (see source_scope.py). Distinct from
+    # ``intent.source_scope``, which is the model-reviewed named-source path.
+    retrieval_scope: Optional[RetrievalScopeReceipt] = Field(
         default=None, exclude_if=lambda value: value is None
     )
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。

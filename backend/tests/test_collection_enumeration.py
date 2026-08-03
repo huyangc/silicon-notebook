@@ -2881,3 +2881,204 @@ def test_kg_object_page_query_rides_the_typed_index(repo):
     for plan in plans:
         assert "SCAN knowledge_objects" not in plan, plan
         assert "TEMP B-TREE" not in plan, plan
+
+
+# ---------------------------------------------------------------------------
+# 参考库勾选(库维度)与集合枚举 —— T1 的漏网:R1 说库维度不得进 `restricted`
+# 语义,而枚举工具的总闸恰恰只看 `restricted`,于是"只取消参考库"时枚举全程开着、
+# 且走的是**未经任何过滤**的参与集。这一组盯住三件事:①行不含被取消勾选的库;
+# ②**分母**跟着一起收窄(计数与行同一谓词——只过滤行会让 returned != total,
+# 把一次真的走完的枚举永久判成 concurrent_change);③工具本身照常提供(R1)。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scoped_corpus(repo):
+    """(repo, active, base) —— 一个本地源 + 一个挂载参考库(源更多)。
+
+    刻意让参考库的数量大于本地:分母若没跟着收窄,断言会以"数字没变"的形态
+    失败,而不是以"少了一行"的形态,两者指向的 bug 不同。
+    """
+    active = repo.create_notebook(NotebookCreate(name="nb"))
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    _add_source(repo, active.id, "s-local", [("formula", 2)], title="Local Doc")
+    _add_source(repo, base.id, "s-base-1", [("formula", 5)], title="Library Doc 1")
+    _add_source(repo, base.id, "s-base-2", [("formula", 4)], title="Library Doc 2")
+    _add_kg_object(repo, active.id, "ko-local", "concept", name="local concept")
+    for index in range(4):
+        _add_kg_object(
+            repo, base.id, f"ko-base-{index}", "concept", name=f"library concept {index}"
+        )
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
+    return repo, active.id, base.id
+
+
+def _library_unchecked(active_id):
+    """库维度复选框,按 API 冻结后的形态:include 一个都不选。"""
+    from app.models.source_scope import BaseNotebookScope
+    from app.services.source_scope import source_scope_context
+
+    return source_scope_context(
+        active_id, None, BaseNotebookScope(mode="include", notebook_ids=[])
+    )
+
+
+def test_unchecked_library_leaves_the_collection_map(scoped_corpus):
+    """地图是模型「值不值得列全量」的依据,也是清单的分母来源。
+
+    它每 run 无条件注入 plan/reflect 并随结果进答案合成上下文,所以哪怕用户问的
+    根本不是「有哪些」,一份把被取消勾选的库算进去的地图也已经在诱导模型去枚举
+    它取不到的东西。
+    """
+    repo, active, _base = scoped_corpus
+
+    unscoped = repo.collection_catalog.collection_map(active)
+    assert unscoped.element_count("formula") == 11 and unscoped.sources == 3, (
+        "baseline: 未收窄时参考库确实被算进地图"
+    )
+
+    with _library_unchecked(active):
+        scoped = repo.collection_catalog.collection_map(active)
+
+    assert scoped.element_count("formula") == 2
+    assert scoped.sources == 1
+    assert dict(scoped.kg_objects)["concept"] == 1
+    assert scoped.notebook_ids == (active,)
+
+
+def test_unchecked_library_leaves_element_rows_and_denominator_together(scoped_corpus):
+    """行与分母必须出自同一个谓词。
+
+    只过滤行、分母仍把参考库算进去 → returned != total → coverage 把一次真的
+    走到底的枚举永久判成 partial,模型于是永远拿不到「已全部」。
+    """
+    repo, active, base = scoped_corpus
+
+    with _library_unchecked(active):
+        result = _enum(repo).enumerate_elements(active, "formula", budget=_budget())
+
+    assert {item.notebook_id for item in result.items} == {active}
+    assert {item.source_id for item in result.items} == {"s-local"}
+    assert result.coverage.total == 2                    # 分母
+    assert result.coverage.returned_total == 2           # 行
+    assert result.coverage.complete is True
+    assert result.coverage.truncated_reason == ""
+    assert base not in {item.notebook_id for item in result.items}
+
+
+def test_unchecked_library_leaves_source_rows_and_denominator_together(scoped_corpus):
+    """来源清单是「库里有哪几篇」的主力场景,泄漏的是文档标题 + 已存摘要。"""
+    repo, active, _base = scoped_corpus
+
+    unscoped = _enum(repo).enumerate_sources(active, budget=_budget())
+    assert unscoped.coverage.total == 3, "baseline: 未收窄时参考库的文档确实在清单里"
+
+    with _library_unchecked(active):
+        result = _enum(repo).enumerate_sources(active, budget=_budget())
+
+    assert [item.source_id for item in result.items] == ["s-local"]
+    assert result.coverage.total == 1
+    assert result.coverage.returned_total == 1
+    assert result.coverage.complete is True
+
+
+def test_unchecked_library_leaves_kg_rows_and_denominator_together(scoped_corpus):
+    """KG 清单的每个条目按契约还带一条 Citation —— 泄漏即可引用。"""
+    repo, active, base = scoped_corpus
+
+    with _library_unchecked(active):
+        result = _enum(repo).enumerate_kg_objects(active, "concept", budget=_budget())
+
+    assert [item.object_id for item in result.items] == ["ko-local"]
+    assert base not in {item.notebook_id for item in result.items}
+    assert result.coverage.total == 1
+    assert result.coverage.returned_total == 1
+    assert result.coverage.complete is True
+
+
+def test_unchecked_library_is_not_offered_by_title_resolution(scoped_corpus):
+    """按标题限定单一来源:同名文档分处两库时,取消勾选参考库必须把歧义消掉,
+    而不是把参考库那份解析出来。"""
+    repo, active, base = scoped_corpus
+    _add_source(repo, base, "s-base-dup", [("formula", 1)], title="Local Doc")
+
+    assert _enum(repo).resolve_source_title(active, "formula", "Local Doc") == (
+        "", 2, False
+    ), "baseline: 未收窄时同名文档确实是歧义的"
+
+    with _library_unchecked(active):
+        assert _enum(repo).resolve_source_title(active, "formula", "Local Doc") == (
+            "s-local", 1, False
+        )
+
+
+def test_unchecked_library_is_not_offered_by_evidence_scope_resolution(scoped_corpus):
+    """歧义报错会把候选标题写给用户,所以解析用的名册也必须先收窄 ——
+    否则「找不到/不唯一」的提示本身就是一次泄漏。"""
+    repo, active, base = scoped_corpus
+    _add_source(repo, base, "s-base-dup", [], title="Local Doc")
+
+    with pytest.raises(EvidenceScopeResolutionError) as ambiguous:
+        _enum(repo).resolve_evidence_scope(active, ["Local Doc"])
+    assert ambiguous.value.status == "ambiguous"
+    assert {item.source_id for item in ambiguous.value.candidates} == {
+        "s-local", "s-base-dup"
+    }, "baseline: 未收窄时参考库的同名文档确实出现在候选里"
+
+    with _library_unchecked(active):
+        scope = _enum(repo).resolve_evidence_scope(active, ["Local Doc"])
+    assert scope.allowed_source_keys == {(active, "s-local")}
+
+    with _library_unchecked(active):
+        with pytest.raises(EvidenceScopeResolutionError) as gone:
+            _enum(repo).resolve_evidence_scope(active, ["Library Doc 1"])
+    assert gone.value.status == "not_found"
+
+
+def test_unchecking_a_library_narrows_enumeration_without_disabling_it(scoped_corpus):
+    """R1 的正面用例:库维度收窄**不得**走 `restricted` 那条路。
+
+    走了的话枚举工具会被整个关掉(连同当前库的 PPR、社区报告和私有 Memory),
+    而正确行为是工具照常提供、作用域收窄。这条与
+    test_r1_deselecting_a_base_library_does_not_trip_local_restricted 成对:
+    那条钉住 flag,这条钉住这个 flag 的下游行为。
+    """
+    from app.services.source_scope import source_scope_restricted
+
+    repo, active, _base = scoped_corpus
+
+    with _library_unchecked(active):
+        assert source_scope_restricted() is False
+        result = _enum(repo).enumerate_elements(active, "formula", budget=_budget())
+
+    assert result.items, "工具必须照常返回本地内容,不能被降级成空"
+    assert result.coverage.complete is True
+
+
+def test_unchecked_library_mount_churn_does_not_spoil_completeness(scoped_corpus):
+    """收尾复检比的是**有效**作用域。
+
+    被取消勾选的库本轮一行都没读,它中途被卸载与本次枚举无关 —— 拿它去报
+    concurrent_change 等于因一件无关的事拒绝给出完整答案。而**被勾选**的库
+    发生变化仍必须打断(由既有 test_unmounted_library_never_leaks_into_enumeration
+    一族守住)。
+    """
+    repo, active, base = scoped_corpus
+    original = repo._runtime.notebook_store.participant_ids
+
+    def _unmount_then_resolve(db, notebook_id):
+        ids = list(original(db, notebook_id))
+        return [value for value in ids if value != base]
+
+    with _library_unchecked(active):
+        repo._runtime.notebook_store.participant_ids = _unmount_then_resolve
+        try:
+            result = _enum(repo).enumerate_elements(
+                active, "formula", budget=_budget()
+            )
+        finally:
+            repo._runtime.notebook_store.participant_ids = original
+
+    assert result.coverage.complete is True
+    assert result.coverage.truncated_reason == ""

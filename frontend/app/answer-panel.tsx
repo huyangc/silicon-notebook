@@ -51,6 +51,7 @@ import {
 } from "./ask-retrieval-effort";
 import { shouldShowIndexRequiredBanner, type ScaleIndexStatus } from "./scale-index";
 import { sourceImageAssetUrl } from "./source-image";
+import { retrievalScopeSummary } from "./source-scope";
 import type {
   AskResponse,
   Citation,
@@ -1209,6 +1210,56 @@ export function AnswerView({
             来源 · 个人 {personal}
             {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
           </span>
+        );
+      })()}
+      {/* 本轮实际获准的检索范围回执。与下面那条「本次依据：N 个指定来源」并存而不是
+          替代它：那一条是**模型审阅**路径确认下来的点名来源，这一条是**勾选框**这次
+          放行的范围（含参考库这一维,过去它无条件全量参与、用户看不见)。
+          ⚠ 两条措辞必须分得开。它们能上下相邻,而 reasoning 路径下同时出现时,如果
+          都以「本次依据：」开头,第一条的「本库 12/12」会被读成「这 12 篇都进了答案」,
+          与第二条的「3 个指定来源」正面矛盾。所以这一条说的是**范围**(用户勾了什么,
+          与来源页签工具条的「检索范围 · …」同一句话),下面那条才说**依据**(答案真正
+          落在哪几篇上)。
+          ⚠ 库名直接用回执里的快照，不拿当前挂载列表重新映射：回答活得比挂载边久,
+          重开历史会话时那个库可能已经被卸载,重新映射恰好会丢掉最该解释它的那行。 */}
+      {answer.retrieval_scope && (() => {
+        const scope = answer.retrieval_scope;
+        const includedBases = scope.bases.filter((base) => base.included);
+        // ⚠ 回执**存在**不等于范围**被收窄**过:提问时全选也会发一份显式载荷
+        // (`sourceScopePayload` 从不返回 undefined),后端据此照常回执,于是
+        // 每一条回答上方都会挂一行「本库 12/12 · 参考库 2/2」—— 一句零信息量的
+        // 装饰,却因为 `.chat-answer` 的 grid gap 加卡片外边距把正文整体下推近
+        // 40px。判据只能是回执**内容**本身:任一维少于全量才值得占这一行。
+        // (刻意不改 `sourceScopePayload` 让它全选时返回 undefined —— 那会连带
+        // 改动本地来源那一维的既有请求行为,不在这里解决。)
+        const narrowed = scope.local.selected < scope.local.total
+          || includedBases.length < scope.bases.length;
+        if (!narrowed) return null;
+        return (
+          <details className="answer-source-scope answer-retrieval-scope">
+            <summary title="勾选的来源与参考库才会参与本轮检索">
+              <ChevronRight size={14} aria-hidden="true" />
+              检索范围：{retrievalScopeSummary(
+                scope.local,
+                scope.bases.length > 0
+                  ? { selected: includedBases.length, total: scope.bases.length }
+                  : null,
+              )}
+            </summary>
+            <ul>
+              <li>
+                <span>本笔记本来源 {scope.local.selected}/{scope.local.total}</span>
+              </li>
+              {scope.bases.map((base) => (
+                <li key={base.notebook_id}>
+                  <span className={base.included ? "" : "scope-excluded"}>
+                    参考库《{base.name || "未命名"}》
+                  </span>
+                  <small>{base.included ? "已参与检索" : "本次未参与检索"}</small>
+                </li>
+              ))}
+            </ul>
+          </details>
         );
       })()}
       {answer.intent?.source_scope?.mode === "selected"

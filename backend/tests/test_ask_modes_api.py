@@ -118,3 +118,67 @@ def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
     assert events[-1]["event"] == "final"
     assert events[-1]["response"]["conclusion"] == "service-stub"
     assert seen["user_id"] == repo.current_user().id
+
+
+def test_ask_rejects_a_base_scope_naming_an_unmounted_library(tmp_path, monkeypatch):
+    """Pins the ``_require_ask_available`` -> ``_validate_base_scope(notebook,
+    base_scope)`` call site in ``ask_routes.py``. A mutation that passes
+    ``base_scope`` straight through (skipping validation) would let this
+    request reach 200 -- the submitted id simply matches no mounted library
+    and has no effect on retrieval -- instead of the 422 the checkbox
+    contract promises for a scope naming something not actually mounted."""
+    client = _client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repo, nb)  # PR#334: ask_available must be True first
+
+    r = client.post(f"/api/notebooks/{nb}/ask", json={
+        "question": "q", "mode": "chunk",
+        "base_scope": {"mode": "include", "notebook_ids": ["not-mounted"]},
+    })
+    assert r.status_code == 422
+    assert "参考库" in str(r.json()["detail"])
+
+    rs = client.post(f"/api/notebooks/{nb}/ask/stream", json={
+        "question": "q", "mode": "chunk",
+        "base_scope": {"mode": "include", "notebook_ids": ["not-mounted"]},
+    })
+    assert rs.status_code == 422
+
+
+def test_ask_freezes_an_exclude_nothing_base_scope_before_the_empty_scope_gate(
+    tmp_path, monkeypatch
+):
+    """Pins the same call site from the other side: ``_require_non_empty_scope``
+    reads a resolved base scope's ``notebook_ids`` as if it were already
+    frozen to ``include`` (the selected set). ``_validate_base_scope`` is
+    what performs that freeze -- an unfrozen ``exclude`` scope with an empty
+    list means "exclude nothing" (every mounted library still participates),
+    but read naively it looks like "nothing selected". On a notebook with NO
+    local sources whose only evidence is a mounted library, bypassing
+    ``_validate_base_scope`` would misread "exclude nothing" as empty and
+    wrongly 409 a request the checkbox contract must accept 200."""
+    client = _client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+
+    base = client.post("/api/notebooks", json={"name": "base lib"}).json()["id"]
+    repo.mark_notebook_base(base)
+    now = "2026-07-20T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"ko-{base}", base, "concept", "approved", "{}", "[]", now, now),
+        )
+
+    active = client.post("/api/notebooks", json={"name": "active"}).json()["id"]
+    repo.replace_notebook_bases(active, [base], repo.current_user().id)
+
+    r = client.post(f"/api/notebooks/{active}/ask", json={
+        "question": "q", "mode": "chunk",
+        "base_scope": {"mode": "exclude", "notebook_ids": []},
+    })
+    assert r.status_code == 200

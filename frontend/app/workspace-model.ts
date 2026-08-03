@@ -430,6 +430,23 @@ export type TypedCollectionResult = {
   synthesis_complete?: boolean | null;
 };
 
+/**
+ * 「这轮回答被允许搜哪些地方」的回执（后端 `RetrievalScopeReceipt`）。
+ *
+ * ⚠ `name` 是**授权那一刻的快照**，不是活的查询键：一条回答活得比挂载边久，
+ * 重开历史会话时那个参考库可能已经被卸载/易主/降级，拿当前 `base_notebooks`
+ * 重新映射恰好会把最该解释这条回答的那一行悄悄丢掉。直接显示它。
+ *
+ * 缺席 = 这轮一个范围字段都没提交（全部历史回答都是这样）。⚠ 缺席**不是**
+ * 「没收窄」的同义词：现在的提问框全选时照样发一份显式载荷，后端据此照常回执，
+ * 所以在场的回执里绝大多数是「全量 / 全量」。要不要显示由渲染处按回执**内容**
+ * 判断（见 answer-panel.tsx），不能只判它在不在。
+ */
+export type RetrievalScopeReceipt = {
+  local: { selected: number; total: number };
+  bases: { notebook_id: string; name: string; included: boolean }[];
+};
+
 export type AskResponse = {
   answer_id: string;
   asked_at?: string;
@@ -450,6 +467,8 @@ export type AskResponse = {
   mode?: AskModeId;
   /** 提交本轮时选的 reasoning 检索档位；历史打开时据此恢复。 */
   retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
+  /** 本轮实际获准的检索范围回执；一个范围字段都没提交时后端不返回（历史回答同）。 */
+  retrieval_scope?: RetrievalScopeReceipt | null;
   /**
    * complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。
    * kind 判别的 union（PR-2 T5/T6）：Knowhow 的整表批次（kind="knowhow"）与

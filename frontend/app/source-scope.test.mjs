@@ -2,11 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  baseIsSelected,
+  baseScopePayload,
   crossLibrarySourceNotebookId,
+  defaultBaseScopeSelection,
   defaultSourceScopeSelection,
+  retrievalScopeSummary,
+  selectedBaseCount,
+  selectedBaseIds,
   selectedSourceCount,
   sourceIsSelected,
   sourceScopePayload,
+  toggleBaseSelection,
   toggleSourceSelection,
 } from "./source-scope.ts";
 
@@ -44,4 +51,101 @@ test("all unchecked normalizes to an explicit empty include scope", () => {
     mode: "include",
     source_ids: [],
   });
+});
+
+
+// --- 参考库检索范围 -------------------------------------------------------
+// 真机事故:挂了 84 篇论文参考库的笔记本里勾定单篇文章提问,16 条引用全部来自参考库
+// —— 参考库当时无条件全量参与。以下用例钉住这一维现在真的可被收窄。
+
+test("参考库默认全选,取消勾选后压成 exclude 名单", () => {
+  let selection = defaultBaseScopeSelection();
+  assert.equal(baseIsSelected(selection, "base-a"), true);
+  selection = toggleBaseSelection(selection, "base-a");
+  assert.equal(baseIsSelected(selection, "base-a"), false);
+  assert.deepEqual(selectedBaseIds(selection, ["base-a", "base-b"]), ["base-b"]);
+  assert.equal(selectedBaseCount(selection, ["base-a", "base-b"]), 1);
+  assert.deepEqual(baseScopePayload(selection, ["base-a", "base-b"]), {
+    mode: "exclude",
+    notebook_ids: ["base-a"],
+  });
+});
+
+test("全部取消勾选归一成显式空 include(后端据此判定范围为空)", () => {
+  let selection = defaultBaseScopeSelection();
+  selection = toggleBaseSelection(selection, "base-a");
+  selection = toggleBaseSelection(selection, "base-b");
+  assert.equal(selectedBaseCount(selection, ["base-a", "base-b"]), 0);
+  assert.deepEqual(baseScopePayload(selection, ["base-a", "base-b"]), {
+    mode: "include",
+    notebook_ids: [],
+  });
+});
+
+test("「清空」态(allSelected=false + 空集)同样是显式空 include", () => {
+  const cleared = { allSelected: false, ids: new Set() };
+  assert.equal(baseIsSelected(cleared, "base-a"), false);
+  assert.deepEqual(baseScopePayload(cleared, ["base-a"]), {
+    mode: "include",
+    notebook_ids: [],
+  });
+});
+
+test("单独勾回一个库时提交 include 名单", () => {
+  let selection = { allSelected: false, ids: new Set() };
+  selection = toggleBaseSelection(selection, "base-b");
+  assert.deepEqual(baseScopePayload(selection, ["base-a", "base-b"]), {
+    mode: "include",
+    notebook_ids: ["base-b"],
+  });
+});
+
+// 后端 `_validate_base_scope` 对不在当前挂载集里的 id 一律 422。取消挂载不经过来源
+// 页签、不会触发选择状态重置,所以过滤必须发生在这里,否则一次卸载就让所有后续提问
+// 422 —— 而且 include/exclude 两条分支都要过滤,不能只保 include 那条。
+test("已卸载的旧库 id 不会被提交(exclude 与 include 两条分支都过滤)", () => {
+  let excluding = defaultBaseScopeSelection();
+  excluding = toggleBaseSelection(excluding, "base-gone");
+  excluding = toggleBaseSelection(excluding, "base-a");
+  assert.deepEqual(baseScopePayload(excluding, ["base-a", "base-b"]), {
+    mode: "exclude",
+    notebook_ids: ["base-a"],
+  });
+
+  let including = { allSelected: false, ids: new Set(["base-gone", "base-b"]) };
+  assert.deepEqual(baseScopePayload(including, ["base-a", "base-b"]), {
+    mode: "include",
+    notebook_ids: ["base-b"],
+  });
+});
+
+test("挂载集为空时不会凭空提交任何库", () => {
+  assert.deepEqual(baseScopePayload(defaultBaseScopeSelection(), []), {
+    mode: "include",
+    notebook_ids: [],
+  });
+});
+
+
+// --- 双段计数文案 ---------------------------------------------------------
+// 这句话在来源页签工具条和问答输入框上方各显示一次。收敛成一个纯函数,是为了让
+// 「只改了一处」这个坑在结构上不可能发生。
+
+test("没挂参考库时只报本库一段", () => {
+  assert.equal(retrievalScopeSummary({ selected: 1, total: 5 }, null), "本库 1/5");
+  assert.equal(
+    retrievalScopeSummary({ selected: 1, total: 5 }, { selected: 0, total: 0 }),
+    "本库 1/5",
+  );
+});
+
+test("挂了参考库就必须报出第二段(含 0/L 这种全被排除的情形)", () => {
+  assert.equal(
+    retrievalScopeSummary({ selected: 1, total: 5 }, { selected: 0, total: 1 }),
+    "本库 1/5 · 参考库 0/1",
+  );
+  assert.equal(
+    retrievalScopeSummary({ selected: 5, total: 5 }, { selected: 3, total: 3 }),
+    "本库 5/5 · 参考库 3/3",
+  );
 });

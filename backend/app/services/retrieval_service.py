@@ -70,7 +70,20 @@ class RetrievalService:
         return self.candidates.agent_memory_hits(*args, **kwargs)
 
     def ppr_retrieve(self, *args, **kwargs):
-        """HippoRAG 式 PPR 跨文档传播检索 → List[RetrievedChunk]。"""
+        """HippoRAG 式 PPR 跨文档传播检索 → List[RetrievedChunk]。
+
+        Same accepted second-order cost as ``scoped_subgraph_nodes`` (see its
+        docstring): the library-scope filter here is a pure OUTPUT filter.
+        ``graph_retrieval._ppr_retrieve`` builds/queries the PPR graph
+        (``_ppr_graph``/``scale_ppr``) across every mounted library -- checked
+        or not -- and its own ``ranked[: settings.ppr_top_chunks]`` truncation
+        happens BEFORE this filter runs, so an excluded library's chunks can
+        still occupy some of that fixed budget and get dropped by the
+        truncation rather than by scope, shrinking what a checked library gets
+        to fill. No excluded content is ever returned -- ``filter_retrieval_items``
+        still drops it here -- only recall/budget share is at stake, same as
+        the graph-walk case.
+        """
         return filter_retrieval_items(
             _notebook_id(args, kwargs), "chunk",
             self.graph.ppr_retrieve(*args, **kwargs),
@@ -78,11 +91,19 @@ class RetrievalService:
 
     def follow_chain(self, *args, **kwargs):
         """沿受控可传递关系做查询期两跳组合 → FollowChainResult。"""
-        from app.services.source_scope import filter_evidence, source_scope_restricted
+        from app.services.source_scope import current_source_scope, filter_evidence
 
         notebook_id = _notebook_id(args, kwargs)
         result = self.graph.follow_chain(*args, **kwargs)
-        if not source_scope_restricted():
+        scope = current_source_scope()
+        # Two ORTHOGONAL ceilings gate this result: the local checkbox one
+        # (`restricted`) and the mounted-library one (`base_restricted`).
+        # Testing `source_scope_restricted()` alone hands an unchecked
+        # reference library's chains back untouched, because narrowing only
+        # the library dimension deliberately leaves `restricted` False — that
+        # flag gates the ACTIVE notebook's own PPR/graph expansion and private
+        # Memory, which library selection has nothing to do with.
+        if scope is None or not (scope.restricted or scope.base_restricted):
             return result
         result.nodes = filter_retrieval_items(notebook_id, "knowledge", result.nodes)
         allowed_nodes = {
@@ -96,6 +117,15 @@ class RetrievalService:
                 continue
             scoped_hops = []
             for hop in chain.hops:
+                # Library dimension first, exactly as filter_retrieval_items'
+                # knowledge/relation branch does: a hop carried by an
+                # unchecked reference library is dropped outright.  The
+                # cross-notebook arm below keeps such a hop's evidence
+                # verbatim, which is right for a library that is still checked
+                # and a leak for one that is not.
+                if not scope.covers_notebook(hop.notebook_id):
+                    scoped_hops = []
+                    break
                 evidence = (
                     list(hop.evidence)
                     if hop.notebook_id != notebook_id
@@ -111,15 +141,32 @@ class RetrievalService:
         return result
 
     def node_context(self, *args, **kwargs):
-        """取某对象的邻域上下文。"""
-        from app.services.source_scope import filter_evidence, source_scope_restricted
+        """取某对象的邻域上下文。
+
+        The library gate here serves THIS method's own consumer — reasoning's
+        query-time chain hydration (``reasoning_retrieval`` calls
+        ``retrieval.node_context``) — and nothing else.  It is explicitly NOT
+        the gate for ``evidence_context.knowledge_context()``: that function is
+        wired to the graph service directly
+        (``EvidenceContextService(knowledge=graph)``), never passes through
+        here, and needs a stronger gate anyway — emptying the row it re-reads
+        would still leave the object's name rendering into the prompt behind a
+        live ``k{n}`` anchor.  It carries its own hit-level gate for that
+        reason.  ``{}`` is the existing "gone" sentinel.
+        """
+        from app.services.source_scope import current_source_scope, filter_evidence
 
         row = self.graph.node_context(*args, **kwargs)
         notebook_id = _notebook_id(args, kwargs)
-        if not source_scope_restricted() or not isinstance(row, dict):
+        scope = current_source_scope()
+        if scope is None or not isinstance(row, dict):
             return row
         origin = str(row.get("notebook_id") or notebook_id)
-        if origin != notebook_id:
+        if not scope.covers_notebook(origin):
+            return {}
+        # Local dimension unchanged: only the active notebook's own rows are
+        # evidence-filtered, and only when the checkboxes narrowed it.
+        if not scope.restricted or origin != notebook_id:
             return row
         evidence = filter_evidence(origin, row.get("evidence") or [])
         return {**row, "evidence": evidence} if evidence else {}

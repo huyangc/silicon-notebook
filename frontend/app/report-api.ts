@@ -1,19 +1,28 @@
 import { requestBlob, requestJson } from "./api-client.ts";
 import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-view.tsx";
-import type { SourceScopePayload } from "./source-scope.ts";
+import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
+// ⚠ 深度报告的检索范围在**创建时定格**：`generateReport` 刻意不带 scope，后端从
+// 创建时持久化的 understanding 里取回。参考库范围沿用同一语义，不要试图在生成
+// 阶段重读当前勾选状态。
 export const createReport = (
   nb: string,
   question: string,
   depth: number,
   sourceScope?: SourceScopePayload,
+  baseScope?: BaseScopePayload,
 ) =>
   requestJson<{ report_id: string }>(`/notebooks/${nb}/reports`, {
     ...options,
     method: "POST",
-    body: JSON.stringify({ question, depth, source_scope: sourceScope }),
+    body: JSON.stringify({
+      question,
+      depth,
+      source_scope: sourceScope,
+      base_scope: baseScope,
+    }),
   });
 
 export const confirmReportIntent = (

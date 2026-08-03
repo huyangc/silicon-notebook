@@ -87,7 +87,7 @@ class ReportExecutionCoordinator:
     def start_plan(self, notebook_id: str, report_id: str, question: str,
                    history: str = "", auto_generate: bool = False, *,
                    user_id: str = "", intent_contract=None,
-                   source_scope=None) -> bool:
+                   source_scope=None, base_scope=None) -> bool:
         """Run pre-retrieval understanding or resume with a confirmed contract."""
         cancel = threading.Event()
         # A previous phase publishes intent_ready/outline_ready immediately
@@ -118,7 +118,12 @@ class ReportExecutionCoordinator:
                     effective_scope = source_scope
                     if effective_scope is None and isinstance(intent_contract, dict):
                         effective_scope = intent_contract.get("source_scope")
-                    with source_scope_context(notebook_id, effective_scope):
+                    effective_base_scope = base_scope
+                    if effective_base_scope is None and isinstance(intent_contract, dict):
+                        effective_base_scope = intent_contract.get("base_scope")
+                    with source_scope_context(
+                        notebook_id, effective_scope, effective_base_scope
+                    ):
                         if intent_contract is None:
                             engine.run(
                                 notebook_id, report_id, question, history, depth=depth,
@@ -160,9 +165,9 @@ class ReportExecutionCoordinator:
                     report = self.reports.get_report(notebook_id, report_id)
                     if report.get("status") == "cancelled" or cancel.is_set():
                         return
-                    source_scope = (report.get("understanding") or {}).get(
-                        "source_scope"
-                    )
+                    understanding = report.get("understanding") or {}
+                    source_scope = understanding.get("source_scope")
+                    base_scope = understanding.get("base_scope")
                 except Exception as exc:
                     # The persisted understanding contract is the authority for
                     # generation.  A transient read failure must never erase a
@@ -181,7 +186,7 @@ class ReportExecutionCoordinator:
                 ):
                     from app.services.source_scope import source_scope_context
 
-                    with source_scope_context(notebook_id, source_scope):
+                    with source_scope_context(notebook_id, source_scope, base_scope):
                         self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
                             notebook_id, report_id, question, depth=depth)
             finally:

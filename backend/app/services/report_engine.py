@@ -543,7 +543,7 @@ class ReportEngine:
 
     def prepare_intent(self, notebook_id: str, rid: str, question: str,
                        history: str = "", *, auto_generate: bool = False,
-                       source_scope=None) -> None:
+                       source_scope=None, base_scope=None) -> None:
         """Understand the request without touching notebook or mounted-base corpus."""
         reports = self.dependencies.reports
         try:
@@ -556,12 +556,24 @@ class ReportEngine:
             # followed by publishing a fresh intent_ready state.
             raise_if_cancelled(self.cancel_event)
             contract["auto_generate_requested"] = bool(auto_generate)
+            # The freshly planned contract REPLACES understanding_json wholesale
+            # (report_store.update_report writes `understanding_json = ?`, it does
+            # not merge), so every scope dimension the create endpoint persisted
+            # must be re-attached here or it is silently lost at intent_ready --
+            # after which confirm/generate read None and every mounted reference
+            # library participates again regardless of the user's checkboxes.
             if source_scope is None:
                 from app.services.source_scope import current_source_scope_payload
 
                 source_scope = current_source_scope_payload()
             if source_scope is not None:
                 contract["source_scope"] = dict(source_scope)
+            if base_scope is None:
+                from app.services.source_scope import current_base_scope_payload
+
+                base_scope = current_base_scope_payload()
+            if base_scope is not None:
+                contract["base_scope"] = dict(base_scope)
             progress = (
                 "需要补充关键信息" if contract.get("needs_clarification")
                 else "问题理解已就绪，请确认"
@@ -1807,12 +1819,14 @@ class ReportEngine:
     # --- 编排:规划(→outline_ready)+(auto_generate 时)生成,保留一键直出 ---
     def run(self, notebook_id, rid, question, history="", depth: int = 2,
             auto_generate: bool = False, intent_contract=None,
-            require_intent_review: bool = False, source_scope=None) -> None:
+            require_intent_review: bool = False, source_scope=None,
+            base_scope=None) -> None:
         if require_intent_review and intent_contract is None:
             self.prepare_intent(
                 notebook_id, rid, question, history,
                 auto_generate=auto_generate,
                 source_scope=source_scope,
+                base_scope=base_scope,
             )
             return
         self.plan_outline(

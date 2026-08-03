@@ -55,6 +55,108 @@ export function sourceScopePayload(
   };
 }
 
+// ---------------------------------------------------------------------------
+// 参考库检索范围
+//
+// 挂载的参考库过去无条件全量参与检索,勾选框只约束当前笔记本自己的来源 —— 用户
+// 在挂了 84 篇论文参考库的笔记本里勾定单篇文章提问,16 条引用全部来自参考库。
+//
+// ⚠ 刻意与 `SourceScopeSelection` **分成两份**,不把库 id 塞进它的 `ids`:两者
+// 粒度不同(整个库 vs 单篇来源)、生命周期也不同(挂载边由设置里的编辑表单管理,
+// 来源由来源页签管理),混在一个集合里,任何一侧的「清空」都会连带清掉另一侧,
+// 而后端 `_validate_base_scope` / `_validate_source_scope` 也是分开校验的:一个
+// 来源 id 出现在 `notebook_ids` 里就是 422。
+// ---------------------------------------------------------------------------
+
+export type BaseScopePayload = {
+  mode: "include" | "exclude";
+  notebook_ids: string[];
+};
+
+export type BaseScopeSelection = {
+  /** true: ids 是排除项;false: ids 是包含项。 */
+  allSelected: boolean;
+  ids: Set<string>;
+};
+
+export const defaultBaseScopeSelection = (): BaseScopeSelection => ({
+  allSelected: true,
+  ids: new Set<string>(),
+});
+
+export function baseIsSelected(
+  selection: BaseScopeSelection,
+  baseNotebookId: string,
+): boolean {
+  return selection.allSelected
+    ? !selection.ids.has(baseNotebookId)
+    : selection.ids.has(baseNotebookId);
+}
+
+export function toggleBaseSelection(
+  selection: BaseScopeSelection,
+  baseNotebookId: string,
+): BaseScopeSelection {
+  const ids = new Set(selection.ids);
+  if (ids.has(baseNotebookId)) ids.delete(baseNotebookId);
+  else ids.add(baseNotebookId);
+  return { ...selection, ids };
+}
+
+/**
+ * 当前真正会参与检索的参考库 id。
+ *
+ * 判据只能是**当前挂载集**,不能是选择状态自己:选择状态里可能留着一个已经被卸载
+ * 的库 id(取消挂载不经过来源页签,不会触发这里的重置),而后端要求提交的每个 id
+ * 都在挂载集内。
+ */
+export function selectedBaseIds(
+  selection: BaseScopeSelection,
+  mountedIds: readonly string[],
+): string[] {
+  return mountedIds.filter((id) => baseIsSelected(selection, id));
+}
+
+export function selectedBaseCount(
+  selection: BaseScopeSelection,
+  mountedIds: readonly string[],
+): number {
+  return selectedBaseIds(selection, mountedIds).length;
+}
+
+export function baseScopePayload(
+  selection: BaseScopeSelection,
+  mountedIds: readonly string[],
+): BaseScopePayload {
+  const selected = selectedBaseIds(selection, mountedIds);
+  // 一个都没选中时归一成显式空 include —— 与 `sourceScopePayload` 同一条规则:
+  // 「exclude 掉全部」和「include 空集」在后端是同一个空宇宙,但只有后者能让
+  // D12 的 `_require_non_empty_scope` 一眼看出来。
+  if (selected.length === 0) return { mode: "include", notebook_ids: [] };
+  if (!selection.allSelected) return { mode: "include", notebook_ids: selected };
+  const mounted = new Set(mountedIds);
+  return {
+    mode: "exclude",
+    notebook_ids: Array.from(selection.ids).filter((id) => mounted.has(id)),
+  };
+}
+
+/**
+ * 「检索范围」的双段计数文案。
+ *
+ * 这句话出现在来源页签的工具条和问答输入框上方**两处**,过去各写各的字面量。
+ * 收敛成一个纯函数是为了让两处不一致在结构上不可能发生 —— 它们说的是同一件事,
+ * 不该有两份拼写。`bases` 为 null 表示当前笔记本没挂参考库,那一段整个不出现。
+ */
+export function retrievalScopeSummary(
+  local: { selected: number; total: number },
+  bases: { selected: number; total: number } | null,
+): string {
+  const localText = `本库 ${local.selected}/${local.total}`;
+  if (!bases || bases.total === 0) return localText;
+  return `${localText} · 参考库 ${bases.selected}/${bases.total}`;
+}
+
 export function removeSourceFromSelection(
   selection: SourceScopeSelection,
   sourceId: string,

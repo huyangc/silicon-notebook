@@ -19,6 +19,7 @@ from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, est_tokens,
 )
 from app.services.source_display import source_display_title
+from app.services.source_scope import notebook_in_scope
 
 
 _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
@@ -491,6 +492,19 @@ class EvidenceContextService:
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
         seen_clusters: set[str] = set()
+        # 刻意不按当前 base_scope 收窄 participants(仍是本 notebook 的全部参与库,
+        # 含被取消勾选的):下面每个参与库都要各查一次 cluster_map(),大库可达数百
+        # 万行,narrow 一下能省掉被排除库那份查询/内存。之所以不做,是已用生产数据
+        # 验证过它只是成本问题、不是内容泄漏问题——
+        #   select exists(select 1 from concept_clusters cc
+        #     join knowledge_objects ko on ko.id = cc.member_object_id
+        #     where cc.notebook_id <> ko.notebook_id)   →  f
+        # 即没有任何 canonical 簇的成员跨库:in-scope 对象的 id 不可能出现在被排除
+        # 库的 cluster_map 里,下面 `_canonical()` 对它的查找必然 miss;而
+        # `in_network_relations`(见本函数下方)取回的、两端解析到被排除库对象的关系
+        # 行,会在 `object_to_key` 查找不到 key 时被丢弃(见其后的 `if not source_key
+        # or not target_key ...`)。收窄它需要改动 canonical 折叠/去重语义,超出本次
+        # 修复范围。
         participants = self.notebooks.participant_notebook_ids(notebook_id)
         # 逐 hit 在各参与库的缓存 map 里做有界查找,绝不把它们合并进新 dict:
         # 合并是 O(全库) 的整表拷贝(scale 下 cluster map 可达 5M 条),而本函数
@@ -533,6 +547,17 @@ class EvidenceContextService:
                 origin = raw_origin or notebook_id
                 if raw_origin == notebook_id:
                     raw_origin = ""
+                if not notebook_in_scope(origin):
+                    # 参考库勾选闸,落在**装配点**而不是下面的 node_context 读上。
+                    # 这里是 KG 命中变成「答案 prompt 里的一行 + 一个活的 k{n}
+                    # 锚点」的那一步:node_context 只提供 definition/snippet,把它
+                    # 清空仍会让对象名照常渲染、锚点照常可引用。取消勾选的参考库
+                    # 必须一个字都不进 prompt,所以整条命中在这里跳过。
+                    #
+                    # 库维度专用(notebook_in_scope 而非 source_scope_restricted):
+                    # 只取消参考库时 restricted 恒为 False(R1)。本地维度不在此过滤
+                    # ——命中已在候选边界按来源过滤过。
+                    continue
                 try:
                     context = self.knowledge.node_context(origin, hit.object_id)
                 except KeyError:
@@ -606,6 +631,17 @@ class EvidenceContextService:
 
         object_to_key = {value["object_id"]: key for key, value in evidence_by_id.items()}
         if len(object_to_key) >= 2:
+            # Same deliberate non-narrowing as `participants` above: this query
+            # spans every participant (including a checkbox-excluded library),
+            # not just the ones `_admit` actually let evidence in from. It
+            # cannot leak that library's content -- a relation row only
+            # survives below when BOTH endpoints resolve to a key in
+            # `object_to_key`, and an excluded library's objects were never
+            # admitted into `evidence_by_id` in the first place (no canonical
+            # bridge to one, per the note above) -- so this is pure query cost
+            # for excluded libraries, never a content leak. Narrowing
+            # `participants` here would fix both at once; left alone for the
+            # same canonical-fold/dedup reason.
             relation_rows = self.knowledge.in_network_relations(
                 participants, list(object_to_key)
             )
