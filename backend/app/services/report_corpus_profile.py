@@ -6,8 +6,7 @@ retriever remains a relevance-ranked evidence channel.
 """
 from __future__ import annotations
 
-from collections import Counter
-from typing import Any, Iterable
+from typing import Any, Sequence
 
 from app.services.source_display import source_display_title
 
@@ -102,12 +101,11 @@ def _representative_row(row: dict[str, Any]) -> dict[str, Any]:
         "file_name": _text(row.get("file_name")),
         "doc_type": _text(row.get("doc_type")) or "unknown",
         "pub_year": row.get("pub_year"),
-        "family_key": row["family_key"],
     }
 
 
 class ReportCorpusProfileService:
-    """Build a stable, bounded presentation over all visible source rows."""
+    """Build bounded corpus disclosure and resolve only cited source identities."""
 
     representative_limit = 20
 
@@ -115,91 +113,44 @@ class ReportCorpusProfileService:
         self.source_query = source_query
 
     def build(self, notebook_id: str, *, result_scope: str = "ranked") -> dict[str, Any]:
-        rows = [dict(row) for row in self.source_query.report_source_rows(notebook_id)]
-        family_keys = conservative_source_families(rows)
-        enriched: list[dict[str, Any]] = []
-        for position, row in enumerate(rows):
+        raw = self.source_query.report_source_rows(
+            notebook_id, representative_limit=self.representative_limit
+        )
+        snapshot = dict(raw) if isinstance(raw, dict) else {}
+        total = int(snapshot.get("total_sources") or 0)
+        metadata_sources = int(snapshot.get("metadata_sources") or 0)
+        known_year_sources = int(snapshot.get("known_year_sources") or 0)
+        identity_uncertain = int(snapshot.get("identity_uncertain_sources") or 0)
+        hash_duplicate_excess = int(snapshot.get("hash_duplicate_excess") or 0)
+        title_duplicate_excess = int(snapshot.get("title_duplicate_excess") or 0)
+        # Hash- and title-duplicate groups may overlap.  Without materialising
+        # the full identity graph, max() is a safe "at least" disclosure while
+        # their sum would pretend overlapping rows are two duplicates.
+        duplicate_lower_bound = max(hash_duplicate_excess, title_duplicate_excess)
+        representatives = []
+        for raw_row in (snapshot.get("representatives") or [])[: self.representative_limit]:
+            row = dict(raw_row)
             row["id"] = _text(row.get("id"))
             row["display_title"] = source_display_title(row)
-            row["family_key"] = family_keys.get(
-                row["id"], conservative_source_family(row)
-            )
-            row["_position"] = position
-            enriched.append(row)
-
-        type_counts = Counter(
-            _text(row.get("doc_type")) or _text(row.get("source_type")) or "unknown"
-            for row in enriched
-        )
-        known_years: list[int] = []
-        for row in enriched:
-            try:
-                year = int(row.get("pub_year"))
-            except (TypeError, ValueError):
-                continue
-            if 1000 <= year <= 9999:
-                row["pub_year"] = year
-                known_years.append(year)
-        year_counts = Counter(known_years)
-        metadata_sources = sum(
-            1 for row in enriched
-            if row.get("is_paper") is not None
-        )
-
-        # Stable stratification: first source of every type, then every known
-        # year, then creation order.  It avoids an early-uploaded topical run
-        # monopolising the planner's bounded representative list.
-        representatives: list[dict[str, Any]] = []
-        selected: set[str] = set()
-
-        def take(candidates: Iterable[dict[str, Any]]) -> None:
-            for row in candidates:
-                source_id = row["id"]
-                if not source_id or source_id in selected:
-                    continue
+            if row["display_title"]:
                 representatives.append(row)
-                selected.add(source_id)
-                break
-
-        for name in sorted(type_counts):
-            take(row for row in enriched if (
-                _text(row.get("doc_type")) or _text(row.get("source_type")) or "unknown"
-            ) == name)
-        for year in sorted(year_counts, reverse=True):
-            take(row for row in enriched if row.get("pub_year") == year)
-        for row in enriched:
-            if len(representatives) >= self.representative_limit:
-                break
-            if row["id"] not in selected:
-                representatives.append(row)
-                selected.add(row["id"])
-
-        total = len(enriched)
-        families = {row["family_key"] for row in enriched}
-        unknown_year = total - sum(year_counts.values())
-        identity_uncertain = sum(
-            1 for row in enriched
-            if not _text(row.get("file_hash"))
-            and not (bool(row.get("is_paper")) and _text(row.get("paper_title")))
-        )
         scope = _text(result_scope) or "ranked"
         completeness_required = scope in {"complete", "aggregate", "hybrid"}
         return {
             "total_sources": total,
-            "independent_families": len(families),
-            "duplicate_inflation": max(0, total - len(families)),
-            "family_by_source": {
-                row["id"]: row["family_key"] for row in enriched if row["id"]
-            },
-            "type_distribution": [
-                {"type": name, "count": count}
-                for name, count in sorted(type_counts.items())
-            ],
-            "year_distribution": [
-                {"year": year, "count": count}
-                for year, count in sorted(year_counts.items(), reverse=True)
-            ],
-            "unknown_year": unknown_year,
+            "identified_duplicate_lower_bound": duplicate_lower_bound,
+            "duplicate_identity_overlap_unknown": bool(
+                hash_duplicate_excess and title_duplicate_excess
+            ),
+            "type_distribution": list(snapshot.get("type_distribution") or []),
+            "type_distribution_truncated": bool(
+                snapshot.get("type_distribution_truncated")
+            ),
+            "year_distribution": list(snapshot.get("year_distribution") or []),
+            "year_distribution_truncated": bool(
+                snapshot.get("year_distribution_truncated")
+            ),
+            "unknown_year": max(0, total - known_year_sources),
             "metadata_sources": metadata_sources,
             "metadata_coverage": (metadata_sources / total if total else 0.0),
             "identity_uncertain_sources": identity_uncertain,
@@ -214,6 +165,47 @@ class ReportCorpusProfileService:
             "complete_enumeration_performed": False,
         }
 
+    def resolve_families(self, source_ids: Sequence[str]) -> dict[str, Any]:
+        # Callers frequently aggregate ids in a set.  Sorting before the 1,024
+        # lookup rail makes the selected window stable across hash seeds and
+        # processes instead of resolving an arbitrary subset on each run.
+        all_requested = sorted(set(
+            str(value) for value in source_ids if str(value or "").strip()
+        ))
+        requested = all_requested[:1024]
+        if not requested:
+            return {
+                "family_by_source": {}, "uncertain_source_ids": [],
+                "unresolved_source_ids": [], "requested_count": 0,
+                "truncated": False,
+            }
+        rows = [
+            dict(row) for row in self.source_query.report_source_identity_rows(requested)
+        ]
+        family_by_source = conservative_source_families(rows)
+        row_by_id = {
+            _text(row.get("id")): row for row in rows if _text(row.get("id"))
+        }
+        resolved = set(row_by_id)
+        uncertain = [
+            source_id for source_id in requested
+            if source_id in resolved
+            and not _text(row_by_id[source_id].get("file_hash"))
+            and not (
+                bool(row_by_id[source_id].get("is_paper"))
+                and _text(row_by_id[source_id].get("paper_title"))
+            )
+        ]
+        return {
+            "family_by_source": family_by_source,
+            "uncertain_source_ids": uncertain,
+            "unresolved_source_ids": [
+                source_id for source_id in requested if source_id not in resolved
+            ] + all_requested[1024:],
+            "requested_count": len(all_requested),
+            "truncated": len(all_requested) > len(requested),
+        }
+
 
 def corpus_profile_planner_block(profile: dict[str, Any]) -> str:
     total = int(profile.get("total_sources") or 0)
@@ -222,13 +214,17 @@ def corpus_profile_planner_block(profile: dict[str, Any]) -> str:
         f"{row.get('type') or 'unknown'} {int(row.get('count') or 0)}"
         for row in (profile.get("type_distribution") or [])
     ) or "无"
+    if profile.get("type_distribution_truncated"):
+        types += "（仅显示主要类型）"
     years = "、".join(
         f"{row.get('year')} {int(row.get('count') or 0)}"
         for row in (profile.get("year_distribution") or [])
     ) or "无已知年份"
+    if profile.get("year_distribution_truncated"):
+        years += "（仅显示最近年份）"
     lines = [
-        f"资料基础:可见来源 {total} 份；保守去重后 {int(profile.get('independent_families') or 0)} 个文档族。",
-        f"保守规则识别的重复膨胀 {int(profile.get('duplicate_inflation') or 0)} 份。",
+        f"资料基础:可见来源 {total} 份；完整来源身份未在应用层物化，独立文档族数不作伪精确披露。",
+        f"按内容哈希或已校验论文标题，至少识别重复膨胀 {int(profile.get('identified_duplicate_lower_bound') or 0)} 份。",
         f"类型分布:{types}。",
         f"年份分布:{years}；年份未知 {int(profile.get('unknown_year') or 0)} 份。",
         f"论文元数据覆盖 {int(profile.get('metadata_sources') or 0)}/{total}；身份无法可靠合并 {int(profile.get('identity_uncertain_sources') or 0)} 份。",
@@ -253,18 +249,19 @@ def corpus_profile_reader_markdown(profile: dict[str, Any]) -> list[str]:
             "",
         ]
     total = int(profile.get("total_sources") or 0)
-    families = int(profile.get("independent_families") or 0)
     metadata = int(profile.get("metadata_sources") or 0)
     unknown_year = int(profile.get("unknown_year") or 0)
     lines = [
         "## 资料基础",
         "",
-        f"本报告基于当前可见的 {total} 份资料生成；按保守规则可区分为 {families} 个文档族。"
-        f"其中 {metadata}/{total} 份具有已校验的论文元数据，{unknown_year} 份年份未知。",
+        f"本报告基于当前可见的 {total} 份资料生成。其中 {metadata}/{total} 份具有已校验的论文元数据，"
+        f"{unknown_year} 份年份未知。完整来源身份未载入报告上下文，因此不提供伪精确的独立文档族总数。",
     ]
-    duplicate_inflation = int(profile.get("duplicate_inflation") or 0)
+    duplicate_inflation = int(profile.get("identified_duplicate_lower_bound") or 0)
     if duplicate_inflation:
-        lines.append(f"保守规则识别出 {duplicate_inflation} 份重复膨胀；未被可靠识别的重复仍可能存在。")
+        lines.append(f"保守规则至少识别出 {duplicate_inflation} 份重复膨胀；哈希与标题重复组可能重叠，未识别重复也仍可能存在。")
+    else:
+        lines.append("保守信号未识别出重复；这不等于资料中不存在未标注或无法可靠合并的重复。")
     if profile.get("identity_uncertain"):
         lines.append(
             f"有 {int(profile.get('identity_uncertain_sources') or 0)} 份资料缺少可可靠合并的内容哈希或论文标题，独立文档数可能被高估。"

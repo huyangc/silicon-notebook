@@ -353,9 +353,23 @@ def test_outline_patch_persists_the_user_confirmed_report_frame(client, monkeypa
     rid = client.post(
         f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
     ).json()["report_id"]
+    old_frame = {
+        "subject_kind": "model",
+        "facets": [{"id": "mixer", "name": "Sequence mixer",
+                    "values": ["Attention", "SSM"], "exclusive": False}],
+        "axes": [],
+        "instance_policy": "old",
+    }
+    old_contract = {"confirmed": True, "report_frame": old_frame}
     repository().update_report(
-        nb["id"], rid, status="outline_ready", understanding={"confirmed": True},
-        outline=[{"title": "A and B", "scope": "s", "sub_queries": ["A", "B"]}],
+        nb["id"], rid, status="outline_ready",
+        understanding={"confirmed": True, "report_frame": old_frame},
+        outline=[
+            {"title": "A", "scope": "s", "sub_queries": ["A"],
+             "intent_contract": old_contract},
+            {"title": "B", "scope": "s", "sub_queries": ["B"],
+             "intent_contract": old_contract},
+        ],
     )
     frame = {
         "subject_kind": "model",
@@ -367,13 +381,174 @@ def test_outline_patch_persists_the_user_confirmed_report_frame(client, monkeypa
     }
     response = client.patch(
         f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
-        json={"sections": [{"title": "A and B", "scope": "s",
-                            "sub_queries": ["A", "B"]}], "frame": frame},
+        json={"sections": [
+            {"title": "A", "scope": "s", "sub_queries": ["A"]},
+            {"title": "B", "scope": "s", "sub_queries": ["B"]},
+        ], "frame": frame},
     )
     assert response.status_code == 200
     detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert detail["understanding"]["report_frame"] == frame
-    assert detail["outline"][0]["report_frame"] == frame
+    assert all(section["report_frame"] == frame for section in detail["outline"])
+    assert all(
+        section["intent_contract"]["report_frame"] == frame
+        for section in detail["outline"]
+    )
+
+    from app.services.report_engine import ReportEngine
+    engine = ReportEngine.from_repository(repository(), repository().settings)
+    claims = [
+        {"entities": ["Mamba"], "frame_assignments": {"mixer": value}}
+        for value in ("Attention", "SSM")
+    ]
+    content, _, _ = engine._assemble(
+        nb["id"], rid, "compare A and B", detail["outline"],
+        [
+            {"title": "A", "scope": "s", "markdown": "## A\ntext",
+             "grounded": True, "claims": [claims[0]], "id_map": {}},
+            {"title": "B", "scope": "s", "markdown": "## B\ntext",
+             "grounded": True, "claims": [claims[1]], "id_map": {}},
+        ],
+    )
+    assert "分析框架冲突" in content
+    generated = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert generated["understanding"]["report_frame"] == frame
+
+
+def test_outline_patch_clears_the_user_confirmed_report_frame_end_to_end(
+    client, monkeypatch
+):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+    from app.services.report_engine import ReportEngine
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
+    ).json()["report_id"]
+    old_frame = {
+        "subject_kind": "model",
+        "facets": [{
+            "id": "mixer", "name": "Sequence mixer",
+            "values": ["Attention", "SSM"], "exclusive": True,
+        }],
+        "axes": [],
+        "instance_policy": "old",
+    }
+    old_contract = {"confirmed": True, "report_frame": old_frame}
+    old_sections = [
+        {
+            "title": title, "scope": "s", "sub_queries": [title],
+            "report_frame": old_frame, "intent_contract": old_contract,
+        }
+        for title in ("A", "B")
+    ]
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        understanding={"confirmed": True, "report_frame": old_frame},
+        outline=old_sections,
+    )
+
+    # The browser submits its edited section objects, so each row can still
+    # contain the old section-level copy while the explicit frame is cleared.
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": old_sections, "frame": {}},
+    )
+    assert response.status_code == 200
+    detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert "report_frame" not in detail["understanding"]
+    assert all("report_frame" not in section for section in detail["outline"])
+    assert all(
+        "report_frame" not in section.get("intent_contract", {})
+        for section in detail["outline"]
+    )
+
+    claims = [
+        {"entities": ["Mamba"], "frame_assignments": {"mixer": value}}
+        for value in ("Attention", "SSM")
+    ]
+    engine = ReportEngine.from_repository(repository(), repository().settings)
+    content, _, _ = engine._assemble(
+        nb["id"], rid, "compare A and B", detail["outline"],
+        [
+            {
+                "title": title, "scope": "s", "markdown": f"## {title}\ntext",
+                "grounded": True, "claims": [claim], "id_map": {},
+            }
+            for title, claim in zip(("A", "B"), claims)
+        ],
+    )
+    assert "分析框架冲突" not in content
+    generated = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert "report_frame" not in generated["understanding"]
+
+
+def test_legacy_section_frame_wins_over_stale_embedded_intent_frame(client, monkeypatch):
+    """Old outline_ready rows can contain two disagreeing frame copies.
+
+    The section copy is what the user confirmed in the outline editor.  The
+    planner-era intent copy remains a compatibility mirror only, including for
+    both final understanding persistence and exclusive-facet conflict audit.
+    """
+    import app.api.report_routes as R
+    from app.api.deps import repository
+    from app.services.report_engine import ReportEngine
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
+    ).json()["report_id"]
+    stale_intent_frame = {
+        "subject_kind": "model",
+        "facets": [{
+            "id": "mixer", "name": "Sequence mixer",
+            "values": ["Attention", "SSM"], "exclusive": False,
+        }],
+        "axes": [],
+        "instance_policy": "planner-era mirror",
+    }
+    confirmed_section_frame = {
+        "subject_kind": "model",
+        "facets": [{
+            "id": "mixer", "name": "Sequence mixer",
+            "values": ["Attention", "SSM"], "exclusive": True,
+        }],
+        "axes": [],
+        "instance_policy": "user-confirmed outline",
+    }
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        understanding={"confirmed": True, "report_frame": stale_intent_frame},
+        outline=[{
+            "title": title, "scope": "s", "sub_queries": [title],
+            "report_frame": confirmed_section_frame,
+            "intent_contract": {
+                "confirmed": True, "report_frame": stale_intent_frame,
+            },
+        } for title in ("A", "B")],
+    )
+    outline = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()["outline"]
+    engine = ReportEngine.from_repository(repository(), repository().settings)
+    content, _, _ = engine._assemble(
+        nb["id"], rid, "compare A and B", outline,
+        [{
+            "title": title, "scope": "s", "markdown": f"## {title}\ntext",
+            "grounded": True,
+            "claims": [{
+                "entities": ["Mamba"], "frame_assignments": {"mixer": value},
+            }],
+            "id_map": {},
+        } for title, value in (("A", "Attention"), ("B", "SSM"))],
+    )
+
+    assert "分析框架冲突" in content
+    generated = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert generated["understanding"]["report_frame"] == confirmed_section_frame
 
 
 def test_outline_patch_rejects_a_malformed_user_frame(client, monkeypatch):

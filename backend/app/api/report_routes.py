@@ -235,9 +235,23 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
         if intent_catalog:
             section["intent_catalog"] = intent_catalog
         if intent_contract:
-            section["intent_contract"] = intent_contract
+            # The outline PATCH is the user's frame-confirmation boundary.
+            # Keep the compatibility copy synchronized so an older prompt path
+            # cannot resurrect the planner's pre-confirmation frame.
+            section_intent_contract = dict(intent_contract)
+            if report_frame:
+                section_intent_contract["report_frame"] = report_frame
+            else:
+                section_intent_contract.pop("report_frame", None)
+            section["intent_contract"] = section_intent_contract
         if report_frame:
             section["report_frame"] = report_frame
+        else:
+            # ``section`` started as a copy of the submitted row, which may
+            # still carry the previously confirmed frame.  Clearing the frame
+            # is authoritative too: do not let that stale section-level copy
+            # outrank the synchronized compatibility contract during assembly.
+            section.pop("report_frame", None)
         secs.append(section)
     if not secs:
         raise HTTPException(status_code=422, detail="at least one valid section required")

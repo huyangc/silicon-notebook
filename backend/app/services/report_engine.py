@@ -52,31 +52,22 @@ if TYPE_CHECKING:
     )
 
 _MARKER = re.compile(r"\[(k\d+(?:\s*,\s*k\d+)*)\]")   # 节内 [k_i] 或 [k_i, k_j] 引用标记(全局重编号用)
-_UNRESOLVED_REFERENCE = re.compile(
-    r"(?:这个|那个|这些|那些|上述|前述|刚才|之前提到|该问题|该方案|它们?)"
-    r"|\b(?:this|that|these|those|it|they|above|previous|former|latter)\b",
-    re.IGNORECASE,
-)
-_GENERIC_REQUEST = re.compile(
-    r"^(?:(?:帮我)?(?:分析|研究|介绍|讲讲|说说|看看|总结|比较|对比|优化)(?:一下|下)?"
-    r"(?:这个|那个|它|问题|方案|内容|东西)?|"
-    r"(?:please\s+)?(?:analy[sz]e|review|compare|explain|optimi[sz]e)\s*"
-    r"(?:this|that|it|them)?)\s*[。.!！?？]*$",
-    re.IGNORECASE,
-)
-_INTENT_TYPES = {"explain", "compare", "diagnose", "design", "review", "other"}
-
 _HIGH_RISK_NUMBER = re.compile(
-    r"(?<![\w])\d+(?:[.,]\d+)?\s*(?:%|％|ms|s|秒|分钟|小时|天|KB|MB|GB|TB|"
-    r"K|M|B|万|亿|token(?:s)?|参数|倍|层|篇|份|个)?(?!\w)",
+    # Python's ``\w`` includes CJK, so a ``(?<!\w)`` guard silently misses
+    # ordinary Chinese prose such as “降低了30%”.  Exclude only ASCII
+    # identifier continuations; Chinese characters are valid sentence context.
+    r"(?<![A-Za-z0-9_])\d+(?:[.,]\d+)?\s*(?:%|％|秒|分钟|小时|天|万|亿|参数|倍|层|篇|份|个|"
+    r"(?:ms|s|KB|MB|GB|TB|K|M|B|tokens?)(?![A-Za-z]))",
     re.IGNORECASE,
 )
 _HIGH_RISK_COMPLEXITY = re.compile(r"\bO\s*\([^\n)]{1,80}\)", re.IGNORECASE)
-_HIGH_RISK_ASSERTION = re.compile(
-    r"(?:最(?:高|低|快|慢|强|弱|优|差|大|小)|第一|唯一|全部|所有|均|必然|"
-    r"显著(?:高于|低于|优于|劣于)|优于|劣于|高于|低于|排名|排序|"
-    r"best|worst|fastest|slowest|all|always|never|significantly\s+"
-    r"(?:better|worse|higher|lower)|outperform(?:s|ed)?)",
+_HIGH_RISK_ASSERTION_CJK = re.compile(
+    r"(?:最(?:高|低|快|慢|强|弱|优|差|大|小)|唯一|全部|所有|必然|"
+    r"显著(?:高于|低于|优于|劣于)|优于|劣于|高于|低于|排名|排序)"
+)
+_HIGH_RISK_ASSERTION_EN = re.compile(
+    r"\b(?:best|worst|fastest|slowest|all|always|never|"
+    r"significantly\s+(?:better|worse|higher|lower)|outperform(?:s|ed)?)\b",
     re.IGNORECASE,
 )
 
@@ -109,7 +100,11 @@ def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
         # Preserve a Markdown table row as one assertion unit; prose uses
         # punctuation boundaries so a citation on the next sentence cannot
         # accidentally support the previous one.
-        units = [line] if line.startswith("|") else re.split(r"(?<=[。！？!?；;])\s*", line)
+        units = (
+            [line]
+            if line.startswith("|")
+            else re.split(r"(?<=[。！？!?；;])\s*|(?<=\.)\s+", line)
+        )
         for sentence in units:
             sentence = sentence.strip()
             if not sentence:
@@ -118,7 +113,8 @@ def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
             if not (
                 _HIGH_RISK_COMPLEXITY.search(without_markers)
                 or _HIGH_RISK_NUMBER.search(without_markers)
-                or _HIGH_RISK_ASSERTION.search(without_markers)
+                or _HIGH_RISK_ASSERTION_CJK.search(without_markers)
+                or _HIGH_RISK_ASSERTION_EN.search(without_markers)
             ):
                 continue
             assertions.append(sentence[:500])
@@ -142,27 +138,10 @@ def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
         "support_rate": (supported / total if total else 1.0),
         "unsupported_ratio": ratio,
         "threshold": threshold,
-        "downgraded": bool(total and ratio > threshold),
+        "threshold_exceeded": bool(total and ratio > threshold),
+        "downgrade_applied": False,
         "unsupported_samples": unsupported_samples,
     }
-
-
-def fair_editor_sections(sections: Sequence[dict], *, total_chars: int = 12000) -> str:
-    """Give every section a fair bounded editor view, including both ends."""
-    visible = [section for section in sections if section.get("markdown")]
-    if not visible:
-        return ""
-    share = max(600, total_chars // len(visible))
-    rendered: list[str] = []
-    for section in visible:
-        text = str(section.get("markdown") or "")
-        if len(text) > share:
-            head = share * 2 // 3
-            tail = share - head
-            text = text[:head] + "\n…（本节中段已按审校预算省略）…\n" + text[-tail:]
-        audit = json.dumps(section.get("citation_audit") or {}, ensure_ascii=False)
-        rendered.append(f"{text}\n[本节引证审计]{audit}")
-    return "\n\n".join(rendered)
 
 
 # --- 研究深度 → 检索档位(报告 PR-5,设计文档 §3.4)------------------------
@@ -541,6 +520,7 @@ class ReportEngine:
             history,
             max_topics=self.settings.report_max_sections,
             purpose="deep report",
+            source_refs_enabled=False,
             cancel_event=self.cancel_event,
         )
         if not confirmation_mode:
@@ -627,68 +607,120 @@ class ReportEngine:
             intent_contract, fallback, include_assumptions=False
         )
 
-    def _probe_queries(self, notebook_id: str, queries: List[str], *,
-                       family_by_source: Optional[dict[str, str]] = None) -> dict:
-        seen, base, elements, sources = set(), set(), set(), set()
-        relevant_items = 0
-        family_support: Dict[str, int] = {}
+    def _resolve_source_families(self, source_ids: Sequence[str]) -> dict:
+        service = self.dependencies.corpus_profile or ReportCorpusProfileService(
+            self.dependencies.source_query
+        )
+        return service.resolve_families(source_ids)
 
-        def note_source(source_id: Any, *, relevant: bool = False) -> None:
-            source_id = str(source_id or "")
-            if not source_id:
-                return
-            sources.add(source_id)
-            if not relevant:
-                return
-            family = (family_by_source or {}).get(source_id, f"source:{source_id}")
-            family_support[family] = family_support.get(family, 0) + 1
+    def _probe_queries(self, notebook_id: str, queries: List[str]) -> dict:
+        seen, base, elements, sources = set(), set(), set(), set()
+        # One support unit is one distinct relevant KG object or source element.
+        # Repeated retrieval of the same object through multiple sub-queries does
+        # not inflate either relevant_items or a family's numerator.
+        relevant_units: Dict[str, set[str]] = {}
 
         for query in queries[:4]:
             try:
                 for hit in self.dependencies.retrieval.federated_retrieve(
                     notebook_id, str(query)
                 ):
+                    unit = f"knowledge:{hit.object_id}"
                     seen.add(hit.object_id)
                     if getattr(hit, "tier", "") == "base":
                         base.add(hit.object_id)
                     relevant = float(
                         getattr(hit, "relevance", 0.0) or 0.0
                     ) >= float(self.settings.evidence_tau_low)
+                    unit_sources = {
+                        str(getattr(evidence, "source_id", "") or "")
+                        for evidence in (getattr(hit, "evidence", None) or [])
+                        if str(getattr(evidence, "source_id", "") or "")
+                    }
+                    sources.update(unit_sources)
                     if relevant:
-                        relevant_items += 1
-                    for evidence in (getattr(hit, "evidence", None) or []):
-                        note_source(
-                            getattr(evidence, "source_id", ""), relevant=relevant
-                        )
+                        relevant_units.setdefault(unit, set()).update(unit_sources)
             except Exception:
                 pass
             try:
                 for element in self.dependencies.retrieval.retrieve_elements(
                     notebook_id, str(query), limit=8
                 ):
+                    unit = f"element:{element.element_id}"
                     elements.add(element.element_id)
                     relevant = float(
                         getattr(element, "score", 0.0) or 0.0
                     ) >= float(
                         self.settings.evidence_tau_low
                     )
-                    note_source(element.source_id, relevant=relevant)
+                    source_id = str(element.source_id or "")
+                    if source_id:
+                        sources.add(source_id)
                     if relevant:
-                        relevant_items += 1
+                        relevant_units.setdefault(unit, set()).update(
+                            [source_id] if source_id else []
+                        )
             except Exception:
                 pass
-        support_total = sum(family_support.values())
+        relevant_source_ids = sorted({
+            source_id for unit_sources in relevant_units.values()
+            for source_id in unit_sources
+        })
+        try:
+            resolution = self._resolve_source_families(relevant_source_ids)
+        except Exception:
+            resolution = {
+                "family_by_source": {},
+                "uncertain_source_ids": relevant_source_ids,
+                "unresolved_source_ids": relevant_source_ids,
+            }
+        family_by_source = dict(resolution.get("family_by_source") or {})
+        uncertain = set(resolution.get("uncertain_source_ids") or [])
+        unresolved = set(resolution.get("unresolved_source_ids") or [])
+        # Identity is deliberately handled on two distinct axes:
+        #
+        # * resolved families may contribute independent support;
+        # * an unresolved identity must never pretend to be independent, but
+        #   must also never dilute a possible single-family concentration.
+        #
+        # Treat every relevant unit with at least one unresolved source as a
+        # possible extra support for the largest resolved family.  This yields
+        # a conservative Top-1 upper bound rather than an attractive-but-false
+        # diversity score from an ``identity:unverified`` denominator bucket.
+        family_support: Dict[str, int] = {}
+        unknown_supports = 0
+        unidentified_source_ids: set[str] = set(uncertain | unresolved)
+        for unit_sources in relevant_units.values():
+            unit_families = set()
+            unit_has_unknown = False
+            for source_id in unit_sources:
+                family = family_by_source.get(source_id)
+                if source_id in uncertain or source_id in unresolved or not family:
+                    unit_has_unknown = True
+                    unidentified_source_ids.add(source_id)
+                else:
+                    unit_families.add(family)
+            for family in unit_families:
+                family_support[family] = family_support.get(family, 0) + 1
+            if unit_has_unknown:
+                unknown_supports += 1
+        relevant_supports = sum(family_support.values()) + unknown_supports
+        largest_verified_support = max(family_support.values()) if family_support else 0
         top_family_share = (
-            max(family_support.values()) / support_total if support_total else 1.0
+            (largest_verified_support + unknown_supports) / relevant_supports
+            if relevant_supports else 1.0
         )
         return {
             "hits": len(seen),
             "base_hits": len(base),
             "element_hits": len(elements),
             "source_hits": len(sources),
-            "relevant_items": relevant_items,
+            "relevant_items": len(relevant_units),
+            "relevant_supports": relevant_supports,
             "relevant_family_count": len(family_support),
+            "unknown_supports": unknown_supports,
             "top_family_share": top_family_share,
+            "source_identity_uncertain": len(unidentified_source_ids),
         }
 
     def _probe_intent_coverage(self, notebook_id: str, intent_contract: dict) -> List[dict]:
@@ -769,19 +801,12 @@ class ReportEngine:
             pass
         return ("\n\n".join(parts))[:6000] if parts else "(语料侦察无结果)"
 
-    def _probe_sufficiency(self, notebook_id: str, sections: List[dict], *,
-                           family_by_source: Optional[dict[str, str]] = None) -> List[dict]:
+    def _probe_sufficiency(self, notebook_id: str, sections: List[dict]) -> List[dict]:
         """0-LLM objective signal over both KG objects and raw SourceElements."""
-        family_by_source = (
-            family_by_source
-            if family_by_source is not None
-            else getattr(self, "_planning_family_by_source", None)
-        )
         out = []
         for s in sections:
             counts = self._probe_queries(
-                notebook_id, list(s.get("sub_queries") or []),
-                family_by_source=family_by_source,
+                notebook_id, list(s.get("sub_queries") or [])
             )
             out.append({"title": s.get("title", ""), **counts})
         return out
@@ -814,12 +839,21 @@ class ReportEngine:
                 )
             except Exception:
                 # Profiling is additive governance.  A malformed row/projection
-                # must not make the report fail.
+                # must not make the report fail, but its absence must be
+                # observable: the reader disclosure already renders the empty
+                # profile as unavailable, and operations receives a safe event.
+                try:
+                    self.dependencies.event_log.emit({
+                        "kind": "report_corpus_profile_failed",
+                        "notebook_id": notebook_id,
+                        "report_id": rid,
+                    })
+                except Exception:
+                    pass
                 corpus_profile = {}
             intent_contract = dict(intent_contract)
             intent_contract["corpus_profile"] = corpus_profile
             self._planning_corpus_profile = corpus_profile
-            self._planning_family_by_source = corpus_profile.get("family_by_source") or {}
             self._planning_result_scope = str(
                 intent_contract.get("result_scope") or "ranked"
             )
@@ -1007,7 +1041,8 @@ class ReportEngine:
                       else int(h.get(key, 0)))
                 for key in (
                     "hits", "base_hits", "element_hits", "source_hits",
-                    "relevant_items", "relevant_family_count", "top_family_share",
+                    "relevant_items", "relevant_supports", "relevant_family_count",
+                    "unknown_supports", "top_family_share", "source_identity_uncertain",
                 )
             }
             s.setdefault("sufficiency", fallback)
@@ -1018,7 +1053,10 @@ class ReportEngine:
                 f"- {p['title']}: hits={p['hits']} base_hits={p['base_hits']} "
                 f"element_hits={p.get('element_hits', 0)} "
                 f"relevant_items={p.get('relevant_items', 0)} "
+                f"relevant_supports={p.get('relevant_supports', 0)} "
                 f"independent_families={p.get('relevant_family_count', 0)} "
+                f"unknown_supports={p.get('unknown_supports', 0)} "
+                f"identity_uncertain={p.get('source_identity_uncertain', 0)} "
                 f"top_family_share={float(p.get('top_family_share', 1.0)):.3f}"
                 for p in probe
             )
@@ -1355,8 +1393,13 @@ class ReportEngine:
             id_map,
             max_unsupported_ratio=self.settings.report_high_risk_unsupported_ratio,
         )
-        if citation_audit["downgraded"] and evidence_level == "grounded":
+        if (
+            self.settings.report_high_risk_downgrade_enabled
+            and citation_audit["threshold_exceeded"]
+            and evidence_level == "grounded"
+        ):
             evidence_level = "overview"
+            citation_audit["downgrade_applied"] = True
         blueprint_claim_ids = (
             {str(row.get("id") or "") for row in localized_synthesis.get("claims") or []}
             if localized_synthesis else None
@@ -1368,13 +1411,26 @@ class ReportEngine:
             blueprint_claim_ids=blueprint_claim_ids,
             frame=report_frame,
         )
-        family_by_source = dict(
-            ((section.get("intent_contract") or {}).get("corpus_profile") or {}).get(
-                "family_by_source"
-            ) or {}
-        )
+        claim_source_ids = {
+            str(context.get("source_id") or "")
+            for context in id_map.values()
+            if str(context.get("source_id") or "")
+        }
+        try:
+            family_resolution = self._resolve_source_families(claim_source_ids)
+        except Exception:
+            family_resolution = {
+                "family_by_source": {},
+                "uncertain_source_ids": list(claim_source_ids),
+                "unresolved_source_ids": list(claim_source_ids),
+            }
         claims = annotate_trend_evidence(
-            claims, id_map=id_map, family_by_source=family_by_source
+            claims,
+            id_map=id_map,
+            family_by_source=family_resolution.get("family_by_source") or {},
+            uncertain_source_ids=set(
+                family_resolution.get("uncertain_source_ids") or []
+            ) | set(family_resolution.get("unresolved_source_ids") or []),
         )
         base = {"title": section["title"], "scope": section["scope"],
                 "markdown": markdown, "grounded": evidence_level == "grounded",
@@ -1406,8 +1462,14 @@ class ReportEngine:
         return base
 
     def _synthesize_report_blueprint(self, outline: Sequence[dict], results: Sequence[Any],
-                                     question: str, report_frame: Optional[dict]) -> Optional[dict]:
-        """Use the one detailed-tier report-wide call, then validate atomically."""
+                                     question: str, report_frame: Optional[dict]) -> tuple[
+                                         Optional[dict], str, Optional[Exception]
+                                     ]:
+        """Use the one detailed-tier report-wide call, then validate atomically.
+
+        The status is deliberately separate from the optional blueprint so the
+        UI can distinguish an evidence-free skip from model/validation failure.
+        """
         from app.services.prompts import (
             REPORT_SYNTHESIS_SCHEMA_HINT,
             report_synthesis_prompt,
@@ -1417,7 +1479,7 @@ class ReportEngine:
             outline, results
         )
         if not legal_evidence_ids:
-            return None
+            return None, "skipped_no_evidence", None
         intent_contract = next(
             (dict(section.get("intent_contract") or {}) for section in outline
              if section.get("intent_contract")),
@@ -1435,15 +1497,25 @@ class ReportEngine:
                 REPORT_SYNTHESIS_SCHEMA_HINT,
                 cancel_event=self.cancel_event,
             )
-            return normalize_synthesis_blueprint(
+        except AskCancelled:
+            raise
+        except Exception as exc:
+            return None, "failed_model", exc
+        try:
+            blueprint = normalize_synthesis_blueprint(
                 json.loads(raw), outline=outline,
                 legal_evidence_ids=legal_evidence_ids,
                 frame=report_frame,
             )
+            if not blueprint:
+                return None, "failed_validation", ValueError(
+                    "report synthesis blueprint failed validation"
+                )
+            return blueprint, "available", None
         except AskCancelled:
             raise
-        except Exception:
-            return None
+        except Exception as exc:
+            return None, "failed_validation", exc
 
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
@@ -1524,39 +1596,13 @@ class ReportEngine:
                 persist(force=True)
                 return None, exc
 
-        # One configured service owns capacity.  Do not create a second report
-        # concurrency knob that can exceed the scheduler's physical limit.
-        workers = max(
-            1,
-            min(
-                len(outline),
-                self.dependencies.model_clients.parallelism("report_section"),
-            ),
-        )
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(contextvars.copy_context().run, _retrieve_one, i, s)
-                       for i, s in enumerate(outline)]
-            retrieved = [future.result() for future in futures]
+        report_frame = next((frame for frame in (
+            normalize_report_frame(section.get("report_frame"))
+            for section in outline if section.get("report_frame")
+        ) if frame), None)
 
-        results = [row[0] for row in retrieved]
-        report_frame = next(
-            (normalize_report_frame(section.get("report_frame")) for section in outline
-             if section.get("report_frame")),
-            None,
-        )
-        blueprint = None
-        if depth >= 8:
-            with lock:
-                for index, (result, error) in enumerate(retrieved):
-                    if result is not None and error is None:
-                        status[index]["phase"] = "整合全篇证据"
-            persist(force=True)
-            blueprint = self._synthesize_report_blueprint(
-                outline, results, question, report_frame
-            )
-
-        def _draft_one(i, section):
-            result, retrieval_error = retrieved[i]
+        def _draft_one(i, section, retrieved_row, blueprint):
+            result, retrieval_error = retrieved_row
             if retrieval_error is not None or result is None:
                 return {
                     "title": section["title"], "scope": section["scope"],
@@ -1600,14 +1646,87 @@ class ReportEngine:
             persist(force=True)
             return drafted
 
+        # One configured service owns capacity.  Do not create a second report
+        # concurrency knob that can exceed the scheduler's physical limit.
+        workers = max(
+            1,
+            min(
+                len(outline),
+                self.dependencies.model_clients.parallelism("report_section"),
+            ),
+        )
+
+        # Standard tiers retain the retrieve→draft pipeline: a fast section is
+        # not held behind the slowest retrieval.  Detailed tiers intentionally
+        # use the report-wide evidence barrier below.
+        if depth < 8:
+            def _pipeline_one(i, section):
+                return _draft_one(i, section, _retrieve_one(i, section), None)
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(contextvars.copy_context().run, _pipeline_one, i, section)
+                    for i, section in enumerate(outline)
+                ]
+                return [future.result() for future in futures]
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(contextvars.copy_context().run, _draft_one, i, section)
+            futures = [pool.submit(contextvars.copy_context().run, _retrieve_one, i, s)
+                       for i, s in enumerate(outline)]
+            retrieved = [future.result() for future in futures]
+
+        results = [row[0] for row in retrieved]
+        blueprint = None
+        synthesis_status = "not_requested"
+        with lock:
+            for index, (result, error) in enumerate(retrieved):
+                if result is not None and error is None:
+                    status[index]["phase"] = "整合全篇证据"
+        persist(force=True)
+        outcome = self._synthesize_report_blueprint(
+            outline, results, question, report_frame
+        )
+        if isinstance(outcome, tuple) and len(outcome) == 3:
+            blueprint, synthesis_status, synthesis_error = outcome
+        else:
+            # Compatibility for tests/extensions that replace the hook and
+            # return the historical optional blueprint.
+            blueprint = outcome
+            synthesis_status = "available" if blueprint else "failed_validation"
+            synthesis_error = None
+        if synthesis_status in {"failed_model", "failed_validation"}:
+            error = synthesis_error or RuntimeError(
+                f"report synthesis ended with {synthesis_status}"
+            )
+            try:
+                self.dependencies.model_errors.note_model_error(
+                    "report_synthesis", error, workload_id="report_summary"
+                )
+            except Exception:
+                pass
+            try:
+                self.dependencies.event_log.emit({
+                    "kind": "report_synthesis_failed",
+                    "notebook_id": notebook_id,
+                    "report_id": rid,
+                    "status": synthesis_status,
+                })
+            except Exception:
+                pass
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(
+                contextvars.copy_context().run,
+                _draft_one, i, section, retrieved[i], blueprint,
+            )
                        for i, section in enumerate(outline)]
             drafted_sections = [future.result() for future in futures]
-        if drafted_sections and blueprint:
-            # Ephemeral hand-off to the final editor; generate() removes it before
-            # sections are persisted.
-            drafted_sections[0]["_synthesis_blueprint"] = blueprint
+        if drafted_sections:
+            # Ephemeral hand-off to assembly; generate() removes both fields
+            # before sections are persisted.
+            drafted_sections[0]["_synthesis_status"] = synthesis_status
+            if blueprint:
+                drafted_sections[0]["_synthesis_blueprint"] = blueprint
         return drafted_sections
 
     # --- 入口:Stage B/C/D(生成阶段)——读 outline_json → 深挖 → 汇总 → done ---
@@ -1641,6 +1760,7 @@ class ReportEngine:
             for s in sections:
                 s.pop("id_map", None)          # 账目仅供 assemble,不入库
                 s.pop("_synthesis_blueprint", None)
+                s.pop("_synthesis_status", None)
             reports.update_report(notebook_id, rid, sections=sections,
                                   content_md=content_md, gaps=gaps,
                                   references=references, status="done", progress="完成")
@@ -1689,18 +1809,23 @@ class ReportEngine:
             intent_contract or {"objective": question, "mandatory_topics": intent_catalog},
             ensure_ascii=False,
         )
-        report_frame = (
-            normalize_report_frame(intent_contract.get("report_frame"))
-            or next(
-                (normalize_report_frame(section.get("report_frame"))
-                 for section in outline if section.get("report_frame")),
-                None,
-            )
+        # The section-level value crossed the user confirmation boundary and
+        # therefore wins over the embedded planner-era compatibility copy.
+        report_frame = next((frame for frame in (
+            normalize_report_frame(section.get("report_frame"))
+            for section in outline if section.get("report_frame")
+        ) if frame), None) or normalize_report_frame(
+            intent_contract.get("report_frame")
         )
         synthesis_blueprint = next(
             (dict(section.get("_synthesis_blueprint") or {}) for section in sections
              if section.get("_synthesis_blueprint")),
             None,
+        )
+        synthesis_status = next(
+            (str(section.get("_synthesis_status") or "") for section in sections
+             if section.get("_synthesis_status")),
+            "not_requested",
         )
         editor_coverage: Dict[str, dict] = {}
         contradictions: List[str] = []
@@ -1740,11 +1865,26 @@ class ReportEngine:
         references: List[dict] = []
         ref_pos: Dict[str, int] = {}       # dedup key -> 全局 1-based
         corpus_profile = dict(intent_contract.get("corpus_profile") or {})
-        family_by_source = dict(corpus_profile.get("family_by_source") or {})
-        citation_source_info = self.dependencies.evidence_context.citation_source_info(
+        citation_source_ids = list(dict.fromkeys(
             str(ctx.get("source_id") or "")
             for section in sections
             for ctx in (section.get("id_map") or {}).values()
+            if str(ctx.get("source_id") or "")
+        ))
+        try:
+            family_resolution = self._resolve_source_families(citation_source_ids)
+        except Exception:
+            family_resolution = {
+                "family_by_source": {},
+                "uncertain_source_ids": citation_source_ids,
+                "unresolved_source_ids": citation_source_ids,
+            }
+        family_by_source = dict(family_resolution.get("family_by_source") or {})
+        uncertain_source_ids = set(
+            family_resolution.get("uncertain_source_ids") or []
+        ) | set(family_resolution.get("unresolved_source_ids") or [])
+        citation_source_info = self.dependencies.evidence_context.citation_source_info(
+            citation_source_ids
         )
 
         def _source_title(ctx):
@@ -1762,6 +1902,10 @@ class ReportEngine:
         def _family_key(ctx):
             source_id = str(ctx.get("source_id") or "")
             if source_id:
+                # Display groups retain each unresolved source separately.  A
+                # conservative uncertainty bucket is used only for the Top-1
+                # audit below; reusing it here would hide source labels from
+                # the reader and merge unrelated bibliography entries.
                 return family_by_source.get(source_id, f"source:{source_id}")
             # Legacy/test evidence can lack source_id.  Keep distinct named
             # sources distinct rather than collapsing every missing id.
@@ -1822,6 +1966,10 @@ class ReportEngine:
                             "location_label": str(ctx.get("location_label") or ""),
                             "source_id": str(ctx.get("source_id") or ""),
                             "family_key": _family_key(ctx),
+                            "family_identity_uncertain": (
+                                not str(ctx.get("source_id") or "")
+                                or str(ctx.get("source_id") or "") in uncertain_source_ids
+                            ),
                             "element_id": str(ctx.get("element_id") or ""),
                             "snippet": str(ctx.get("snippet") or ""),
                             "tier": str(ctx.get("tier") or "personal"),
@@ -1876,13 +2024,32 @@ class ReportEngine:
             gaps.append(f"{unsupported_assertions} 句高风险事实断言缺少同句引证")
 
         family_counts: Dict[str, int] = {}
+        verified_family_counts: Dict[str, int] = {}
         for reference in references:
             family = str(reference.get("family_key") or "source:unknown")
             family_counts[family] = family_counts.get(family, 0) + 1
-        top_family_count = max(family_counts.values()) if family_counts else 0
+            if not reference.get("family_identity_uncertain"):
+                verified_family_counts[family] = (
+                    verified_family_counts.get(family, 0) + 1
+                )
+        uncertain_reference_count = sum(
+            bool(reference.get("family_identity_uncertain")) for reference in references
+        )
+        largest_verified_anchor_count = max(verified_family_counts.values(), default=0)
+        # Every identity-uncertain anchor could belong to the already-largest
+        # verified family.  Report the resulting upper bound instead of
+        # allowing unresolved identities to make a concentrated bibliography
+        # look diverse.
+        top_family_count = largest_verified_anchor_count + uncertain_reference_count
+        verified_families = {
+            str(reference.get("family_key") or "") for reference in references
+            if not reference.get("family_identity_uncertain")
+        }
         credibility = {
             "citation_anchors": len(references),
-            "independent_cited_families": len(family_counts),
+            "independent_cited_families": len(verified_families),
+            "distinguishable_cited_families": len(family_counts),
+            "identity_uncertain_anchors": uncertain_reference_count,
             "top1_family_anchors": top_family_count,
             "top1_family_share": (
                 top_family_count / len(references) if references else 0.0
@@ -1890,25 +2057,25 @@ class ReportEngine:
             # Stable UI aliases; values still describe conservative document
             # groups, not semantic/canonical deduplication.
             "anchor_count": len(references),
-            "independent_documents": len(family_counts),
+            "independent_documents": len(verified_families),
             "top1_share": (
                 top_family_count / len(references) if references else 0.0
             ),
+            # This is a display-family statistic: unknown sources remain
+            # visible as distinct bibliography groups, while concentration is
+            # calculated separately by the conservative upper bound above.
             "anchor_inflation": max(0, len(references) - len(family_counts)),
             "unsupported_high_risk_assertions": unsupported_assertions,
             "high_risk_assertions": sum(
                 int((section.get("citation_audit") or {}).get("high_risk_assertions") or 0)
                 for section in sections
             ),
-            "synthesis_status": (
-                "available" if synthesis_blueprint else
-                "unavailable" if any(section.get("synthesis_requested")
-                                     for section in sections) else "not_requested"
-            ),
+            "synthesis_status": synthesis_status,
             "claim_ledgers_available": sum(
                 section.get("claim_ledger_status") == "available"
                 for section in sections
             ),
+            "claim_ledgers_total": len(sections),
             "trend_wording_violations": trend_wording_violations,
         }
         persisted_understanding = dict(intent_contract)
@@ -1951,9 +2118,14 @@ class ReportEngine:
                 )
             parts += ["## 参考文献", ""] + bibliography + [""]
             parts += [
-                f"> 引证分布：{len(references)} 处证据锚点来自 {len(family_counts)} 个可区分文档族；"
-                f"占比最高的单一文档族为 {credibility['top1_family_share']:.1%}；"
-                f"同族多锚点形成的锚点膨胀为 {credibility['anchor_inflation']}。",
+                f"> 引证分布：{len(references)} 处证据锚点来自 {len(family_counts)} 个可见来源组；"
+                f"占比最高的单一文档族上界为 {credibility['top1_family_share']:.1%}；"
+                f"同族多锚点形成的锚点膨胀为 {credibility['anchor_inflation']}。"
+                + (
+                    f"其中 {uncertain_reference_count} 处锚点的来源身份不足；它们不计入独立来源数，"
+                    "并在集中度上界中按最不利分配计入占比最高的来源组。"
+                    if uncertain_reference_count else ""
+                ),
                 "",
             ]
         limitations: List[str] = []

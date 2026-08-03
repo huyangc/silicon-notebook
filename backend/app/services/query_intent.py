@@ -373,10 +373,15 @@ def plan_query_intent(
     *,
     max_topics: int = 6,
     purpose: str = "evidence-grounded answer",
+    source_refs_enabled: bool = True,
     cancel_event: CancelEvent = None,
 ) -> dict:
     """Build one bounded intent contract without reading corpus content."""
-    from app.services.prompts import QUERY_INTENT_SCHEMA_HINT, query_intent_prompt
+    from app.services.prompts import (
+        QUERY_INTENT_SCHEMA_HINT,
+        REPORT_INTENT_SCHEMA_HINT,
+        query_intent_prompt,
+    )
 
     question = str(question or "").strip()
     history = str(history or "")[:8000]
@@ -390,8 +395,10 @@ def plan_query_intent(
                     max_topics=max_topics,
                     history_block=history,
                     purpose=purpose,
+                    source_refs_enabled=source_refs_enabled,
                 )}],
-                QUERY_INTENT_SCHEMA_HINT,
+                (QUERY_INTENT_SCHEMA_HINT if source_refs_enabled
+                 else REPORT_INTENT_SCHEMA_HINT),
                 cancel_event=cancel_event,
             )
             parsed = json.loads(raw)
@@ -449,8 +456,9 @@ def plan_query_intent(
     # Tool/product/domain entities are not promoted into source references by
     # deterministic similarity; uniqueness and authorization belong to the
     # later identity resolver.
-    source_refs = _explicit_source_refs(
-        data.get("source_refs"), question, history
+    source_refs = (
+        _explicit_source_refs(data.get("source_refs"), question, history)
+        if source_refs_enabled else []
     )
     context_for_referent = f"{question}\n{history}".casefold()
     has_verified_referent = any(

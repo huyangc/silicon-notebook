@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 FRAME_MAX_FACETS = 8
@@ -27,7 +27,6 @@ EDITOR_CONTEXT_MAX_CHARS = 24_000
 _CLAIM_TYPES = frozenset({
     "fact", "comparison", "trend", "inference", "general",
 })
-_ANCHOR = re.compile(r"\[(k\d+)(?:\s*,\s*(k\d+))*\]")
 _STRONG_TREND = re.compile(
     r"(?:高置信|确定(?:会|将|性)|必(?:然|将)|已经?成为主流|全面替代|"
     r"high[- ]confidence|certain(?:ly)?|will inevitably|has become mainstream|"
@@ -129,29 +128,6 @@ def _evidence_id(item: object, *names: str) -> str:
         if value:
             return value
     return ""
-
-
-def evidence_ids_for_result(result: object) -> set[str]:
-    ids: set[str] = set()
-    for item in list(getattr(result, "top_hits", None) or []):
-        value = _evidence_id(item, "object_id")
-        if value:
-            ids.add(value)
-    for attr, names in (
-        ("elements", ("element_id",)),
-        ("chunks", ("chunk_id",)),
-        ("outline_evidence", ("object_id",)),
-    ):
-        for item in list(getattr(result, attr, None) or []):
-            value = _evidence_id(item, *names)
-            if value:
-                ids.add(value)
-    for chain in list(getattr(result, "chains", None) or []):
-        for edge in list(getattr(chain, "edges", None) or []):
-            value = _evidence_id(edge, "relation_id", "object_id", "id")
-            if value:
-                ids.add(value)
-    return ids
 
 
 def _item_card(item: object, evidence_id: str, *, kind: str) -> dict:
@@ -477,6 +453,7 @@ def normalize_claim_ledger(
 def annotate_trend_evidence(
     claims: Sequence[dict], *, id_map: Mapping[str, Mapping[str, object]],
     family_by_source: Mapping[str, str],
+    uncertain_source_ids: set[str] | None = None,
 ) -> list[dict]:
     """Cap trend confidence by the number of distinguishable cited documents.
 
@@ -485,6 +462,7 @@ def annotate_trend_evidence(
     independent documents, so it caps the trend at the research tier.
     """
     out: list[dict] = []
+    uncertain_source_ids = uncertain_source_ids or set()
     for claim in claims:
         row = dict(claim)
         if row.get("type") != "trend":
@@ -496,7 +474,10 @@ def annotate_trend_evidence(
             context = id_map.get(str(key)) or {}
             source_id = _text(context.get("source_id"), 160)
             if source_id:
-                families.add(str(family_by_source.get(source_id) or f"source:{source_id}"))
+                if source_id in uncertain_source_ids or source_id not in family_by_source:
+                    identity_unknown = True
+                else:
+                    families.add(str(family_by_source[source_id]))
             else:
                 identity_unknown = True
         count = len(families)
@@ -545,31 +526,159 @@ def fair_editor_context(
     sections: Sequence[dict], *, frame: dict | None = None,
     blueprint: dict | None = None, max_chars: int = EDITOR_CONTEXT_MAX_CHARS,
 ) -> str:
-    """Allocate final-editor context across every section, not just prefixes."""
-    if not sections:
+    """Allocate valid, bounded audit context without dropping later sections."""
+    max_chars = max(0, int(max_chars))
+    if not sections or max_chars == 0:
         return ""
-    overhead = {
+
+    def bounded_conflicts() -> tuple[list[str], int]:
+        conflicts = exclusive_frame_conflicts(sections, frame)
+        return [_text(value, 360) for value in conflicts[:8]], len(conflicts)
+
+    def bounded_audit(value: object) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        scalar_keys = (
+            "high_risk_assertions", "supported", "unsupported", "support_rate",
+            "unsupported_ratio", "threshold", "threshold_exceeded",
+            "downgrade_applied", "cited", "total",
+        )
+        result = {
+            key: raw for key in scalar_keys
+            if key in value
+            and isinstance((raw := value.get(key)), (bool, int, float))
+        }
+        samples = value.get("unsupported_samples")
+        if isinstance(samples, list) and samples:
+            result["unsupported_samples"] = [
+                _text(sample, 200) for sample in samples[:2] if _text(sample, 200)
+            ]
+            result["unsupported_samples_total"] = len(samples)
+        return result
+
+    def bounded_claim(value: object) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        raw_assignments = value.get("frame_assignments")
+        assignments = {}
+        if isinstance(raw_assignments, dict):
+            for key, assigned in list(raw_assignments.items())[:FRAME_MAX_FACETS]:
+                bounded_key = _text(key, 80)
+                if bounded_key:
+                    assignments[bounded_key] = _text(assigned, 120)
+        return {
+            "claim_id": _text(value.get("claim_id") or value.get("id"), 80),
+            "statement": _text(value.get("statement"), 1600),
+            "type": _text(value.get("type"), 24),
+            "entities": _strings(value.get("entities"), 12, 160),
+            "evidence_keys": _strings(value.get("evidence_keys"), 16, 32),
+            "conditions": _strings(value.get("conditions"), 8, 300),
+            "same_paper_baseline": bool(value.get("same_paper_baseline", False)),
+            "confidence": _confidence(value.get("confidence", 0.0)),
+            "frame_assignments": assignments,
+        }
+
+    conflicts, conflict_count = bounded_conflicts()
+    overhead: dict = {
         "frame": frame or {},
         "blueprint": blueprint or {},
-        "conflicts": exclusive_frame_conflicts(sections, frame),
+        "conflicts": conflicts,
+        "conflicts_total": conflict_count,
+        "conflicts_truncated": conflict_count > len(conflicts),
     }
-    head = json.dumps(overhead, ensure_ascii=False)[: max_chars // 3]
-    remaining = max(0, max_chars - len(head))
-    share = max(800, remaining // len(sections))
-    blocks = ["Report audit contracts:\n" + head]
-    for section in sections:
+    head_budget = max(0, max_chars // 3)
+    serialized_overhead = json.dumps(overhead, ensure_ascii=False)
+    if len(serialized_overhead) > head_budget:
+        blueprint_value = blueprint or {}
+        frame_value = frame or {}
+        overhead = {
+            "frame_summary": {
+                "subject_kind": _text(frame_value.get("subject_kind"), 160),
+                "facet_count": len(frame_value.get("facets") or []),
+                "axis_count": len(frame_value.get("axes") or []),
+            },
+            "blueprint_summary": {
+                "status": "summarized",
+                "central_answer": _text(blueprint_value.get("central_answer"), 800),
+                "definition_count": len(blueprint_value.get("shared_definitions") or []),
+                "claim_count": len(blueprint_value.get("claims") or []),
+                "section_count": len(blueprint_value.get("sections") or []),
+            },
+            "conflicts": conflicts,
+            "conflicts_total": conflict_count,
+            "conflicts_truncated": conflict_count > len(conflicts),
+        }
+        serialized_overhead = json.dumps(overhead, ensure_ascii=False)
+    head = "Report audit contracts:\n" + serialized_overhead
+
+    raw_claims_by_section = [
+        [bounded_claim(claim) for claim in list(section.get("claims") or [])[:SECTION_MAX_CLAIMS]]
+        for section in sections
+    ]
+    base_values = []
+    for section, raw_claims in zip(sections, raw_claims_by_section):
+        base_values.append({
+            "title": _text(section.get("title"), 160),
+            "claims": [],
+            "claims_total": len(section.get("claims") or []),
+            "claims_included": 0,
+            "claims_truncated": bool(raw_claims),
+            "claim_ledger_status": _text(
+                section.get("claim_ledger_status", "missing"), 40
+            ),
+            "citation_audit": bounded_audit(section.get("citation_audit")),
+        })
+
+    delimiter = "\nProse excerpt:\n"
+    separators = 2 * len(sections)
+    base_serialized = [json.dumps(value, ensure_ascii=False) for value in base_values]
+    minimum_sections = sum(len(value) + len(delimiter) for value in base_serialized)
+    if len(head) + separators + minimum_sections > max_chars:
+        # This branch is only for callers supplying a smaller-than-production
+        # budget.  It still returns complete JSON rather than slicing a payload.
+        compact = {
+            "sections_total": len(sections),
+            "titles": [_text(section.get("title"), 80) for section in sections],
+            "audit_context_truncated": True,
+        }
+        serialized = json.dumps(compact, ensure_ascii=False)
+        if len(serialized) <= max_chars:
+            return serialized
+        minimal = json.dumps({"sections_total": len(sections)}, ensure_ascii=False)
+        return minimal if len(minimal) <= max_chars else ""
+
+    remaining_extra = max_chars - len(head) - separators - minimum_sections
+    blocks = [head]
+    for index, (section, raw_claims, base_value, base_meta) in enumerate(zip(
+        sections, raw_claims_by_section, base_values, base_serialized
+    )):
         markdown = str(section.get("markdown") or "")
-        meta = json.dumps({
-            "title": section.get("title", ""),
-            "claims": section.get("claims") or [],
-            "claim_ledger_status": section.get("claim_ledger_status", "missing"),
-            "citation_audit": section.get("citation_audit") or {},
-        }, ensure_ascii=False)
-        prose_room = max(0, share - len(meta) - 80)
+        sections_left = len(sections) - index
+        extra_share = remaining_extra // sections_left
+        meta_value = dict(base_value)
+        meta_budget = len(base_meta) + (extra_share // 2)
+        for claim in raw_claims:
+            candidate = dict(meta_value)
+            candidate["claims"] = [*meta_value["claims"], claim]
+            candidate["claims_included"] = len(candidate["claims"])
+            candidate["claims_truncated"] = candidate["claims_included"] < candidate["claims_total"]
+            if len(json.dumps(candidate, ensure_ascii=False)) > meta_budget:
+                break
+            meta_value = candidate
+        meta = json.dumps(meta_value, ensure_ascii=False)
+        meta_extra = len(meta) - len(base_meta)
+        prose_room = max(0, extra_share - meta_extra)
         if len(markdown) <= prose_room:
             excerpt = markdown
+        elif prose_room <= 3:
+            excerpt = markdown[-prose_room:] if prose_room else ""
         else:
-            first = prose_room // 2
-            excerpt = markdown[:first] + "\n…\n" + markdown[-(prose_room - first):]
-        blocks.append(meta + "\nProse excerpt:\n" + excerpt)
-    return "\n\n".join(blocks)[:max_chars]
+            marker = "\n…\n"
+            content_room = max(0, prose_room - len(marker))
+            first = content_room // 2
+            excerpt = markdown[:first] + marker + markdown[-(content_room - first):]
+        blocks.append(meta + delimiter + excerpt)
+        remaining_extra -= meta_extra + len(excerpt)
+    result = "\n\n".join(blocks)
+    assert len(result) <= max_chars
+    return result

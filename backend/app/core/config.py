@@ -141,12 +141,17 @@ class Settings(BaseSettings):
     report_allow_parametric: bool = Field(
         True, validation_alias="REPORT_ALLOW_PARAMETRIC")
     # Deterministic citation audit for numeric/complexity/absolute/ranking
-    # assertions.  A section above this unsupported ratio cannot be grounded.
+    # assertions.  The audit is always disclosed; automatic evidence-level
+    # downgrade stays opt-in until production distributions are calibrated.
     report_high_risk_unsupported_ratio: float = Field(
         0.25,
         ge=0.0,
         le=1.0,
         validation_alias="REPORT_HIGH_RISK_UNSUPPORTED_RATIO",
+    )
+    report_high_risk_downgrade_enabled: bool = Field(
+        False,
+        validation_alias="REPORT_HIGH_RISK_DOWNGRADE_ENABLED",
     )
     # 节间并行度复用 kg_job_concurrency(节深挖无耦合;尊重全局限流退避)。
 

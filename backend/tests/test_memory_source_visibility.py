@@ -215,9 +215,224 @@ def test_report_source_rows_excludes_memory_source(store, notebook_id):
         store, notebook_id, "src-memory", title="Memory Doc",
         source_type="memory", doc_type="memory", memory_id="mem-1",
     )
-    titles = [r["title"] for r in store.report_source_rows(notebook_id)]
+    titles = [
+        r["title"]
+        for r in store.report_source_rows(notebook_id)["representatives"]
+    ]
     assert "Memory Doc" not in titles
     assert "Normal Doc" in titles
+
+
+def test_report_source_rows_aggregates_more_sources_than_representative_limit(
+    store, notebook_id
+):
+    for index in range(37):
+        _insert(
+            store, notebook_id, f"src-{index:02d}",
+            doc_type="academic_paper" if index % 2 else "textbook",
+            file_hash=f"hash-{index:02d}",
+        )
+    snapshot = store.report_source_rows(notebook_id, representative_limit=7)
+    assert snapshot["total_sources"] == 37
+    assert len(snapshot["representatives"]) == 7
+    assert sum(row["count"] for row in snapshot["type_distribution"]) == 37
+    assert {row["doc_type"] for row in snapshot["representatives"]} >= {
+        "academic_paper", "textbook"
+    }
+
+
+def test_report_source_rows_executes_every_aggregate_and_scopes_paper_meta(
+    repo, store, notebook_id
+):
+    """SQLite half of the corpus-profile behavior contract.
+
+    This exercises the six database results (totals, type/year distributions,
+    hash/title duplicate excess, and representatives) instead of inspecting
+    SQL source text.  The PostgreSQL conformance lane seeds the same shape.
+    """
+    other_notebook_id = repo.create_notebook(NotebookCreate(name="other")).id
+    for source_id, source_type, doc_type, file_hash in (
+        ("profile-a", "markdown", "", "shared-hash"),
+        ("profile-b", "pdf", "academic_paper", "shared-hash"),
+        ("profile-c", "pdf", "textbook", ""),
+        ("profile-corrupt-meta", "notes", "", ""),
+        ("profile-hidden", "memory", "memory", ""),
+    ):
+        _insert(
+            store,
+            notebook_id,
+            source_id,
+            source_type=source_type,
+            doc_type=doc_type,
+            file_hash=file_hash,
+        )
+    for source_id, title in (
+        ("profile-a", "Profile Paper"),
+        ("profile-b", "  Profile Paper  "),
+    ):
+        store.upsert_paper_meta(
+            source_id,
+            notebook_id,
+            {
+                "is_paper": True,
+                "paper_title": title,
+                "pub_year": 2026,
+                "authors": [],
+            },
+        )
+    # Simulate a malformed historical row: current writers clear publication
+    # years when is_paper becomes false, but report distributions must remain
+    # self-consistent if an old row retained one.
+    store.upsert_paper_meta(
+        "profile-c",
+        notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Stale non-paper",
+            "pub_year": 2024,
+            "authors": [],
+        },
+    )
+    with store.database.write() as connection:
+        connection.execute(
+            "UPDATE source_paper_meta SET is_paper=0 WHERE source_id=? AND notebook_id=?",
+            ("profile-c", notebook_id),
+        )
+    # A malformed legacy row must not be joined across notebook ownership.
+    store.upsert_paper_meta(
+        "profile-corrupt-meta",
+        other_notebook_id,
+        {
+            "is_paper": True,
+            # Deliberately collides with the valid title above. Removing the
+            # notebook join from title-duplicate aggregation must change the
+            # count, not merely the hydrated representative fields.
+            "paper_title": "Profile Paper",
+            "pub_year": 1999,
+            "authors": [],
+        },
+    )
+
+    snapshot = store.report_source_rows(
+        notebook_id, representative_limit=16, distribution_limit=16
+    )
+
+    assert snapshot["total_sources"] == 4
+    assert snapshot["metadata_sources"] == 2
+    assert snapshot["known_year_sources"] == 2
+    assert snapshot["identity_uncertain_sources"] == 2
+    assert snapshot["hash_duplicate_excess"] == 1
+    assert snapshot["title_duplicate_excess"] == 1
+    assert snapshot["type_distribution"] == [
+        {"type": "academic_paper", "count": 1},
+        {"type": "markdown", "count": 1},
+        {"type": "notes", "count": 1},
+        {"type": "textbook", "count": 1},
+    ]
+    assert snapshot["year_distribution"] == [{"year": 2026, "count": 2}]
+    representatives = {row["id"]: row for row in snapshot["representatives"]}
+    assert set(representatives) == {
+        "profile-a", "profile-b", "profile-c", "profile-corrupt-meta"
+    }
+    assert representatives["profile-corrupt-meta"]["paper_title"] is None
+    assert representatives["profile-c"]["pub_year"] is None
+    identity = store.report_source_identity_rows(["profile-corrupt-meta"])[0]
+    assert identity["paper_title"] is None
+    assert not identity["is_paper"]
+
+
+def test_report_representative_order_normalizes_type_and_null_year(
+    repo, store, notebook_id
+):
+    """The bounded representative page has the same prefix on SQLite and PG.
+
+    Blank ``doc_type`` values deliberately force the order to use the same
+    normalized type expression as the window partition.  The known-year case
+    also catches PostgreSQL's otherwise opposite default NULL ordering.
+    """
+    _insert(store, notebook_id, "rep-known", source_type="markdown", doc_type="")
+    _insert(store, notebook_id, "rep-unknown", source_type="pdf", doc_type="")
+    store.upsert_paper_meta(
+        "rep-known",
+        notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Known year",
+            "pub_year": 2026,
+            "authors": [],
+        },
+    )
+    assert store.report_source_rows(
+        notebook_id, representative_limit=1
+    )["representatives"][0]["id"] == "rep-known"
+
+    # Reversing type-key order proves that the outer ORDER BY no longer sees
+    # both blank doc_type values as one raw empty-string key.
+    second_notebook_id = repo.create_notebook(NotebookCreate(name="type order")).id
+    _insert(
+        store, second_notebook_id, "rep-a-unknown", source_type="aaa", doc_type=""
+    )
+    _insert(
+        store, second_notebook_id, "rep-z-known", source_type="zzz", doc_type=""
+    )
+    store.upsert_paper_meta(
+        "rep-z-known",
+        second_notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Known but later type",
+            "pub_year": 2026,
+            "authors": [],
+        },
+    )
+    assert store.report_source_rows(
+        second_notebook_id, representative_limit=1
+    )["representatives"][0]["id"] == "rep-a-unknown"
+
+    null_order_notebook_id = repo.create_notebook(
+        NotebookCreate(name="representative null order")
+    ).id
+    for source_id in (
+        "a-type-first",
+        "b-known-sentinel",
+        "c-null-sentinel",
+        "d-known-candidate",
+        "e-null-candidate",
+    ):
+        _insert(
+            store,
+            null_order_notebook_id,
+            source_id,
+            source_type="pdf",
+            doc_type="shared-type",
+        )
+    for source_id, year in (
+        ("a-type-first", 2020),
+        ("b-known-sentinel", 2026),
+        ("d-known-candidate", 2026),
+    ):
+        store.upsert_paper_meta(
+            source_id,
+            null_order_notebook_id,
+            {
+                "is_paper": True,
+                "paper_title": source_id,
+                "pub_year": year,
+                "authors": [],
+            },
+        )
+    ordered_ids = [
+        row["id"]
+        for row in store.report_source_rows(
+            null_order_notebook_id, representative_limit=5
+        )["representatives"]
+    ]
+    # Both candidates have type_rank > 1 and year_rank > 1, so only the
+    # explicit year sort can order them. PostgreSQL DESC defaults NULLS FIRST;
+    # deleting its NULLS LAST must therefore make the PG parity test fail.
+    assert ordered_ids.index("d-known-candidate") < ordered_ids.index(
+        "e-null-candidate"
+    )
 
 
 def test_meta_sources_excludes_memory_source(store, notebook_id):

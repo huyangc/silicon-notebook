@@ -175,8 +175,23 @@ class _Sources:
     def __init__(self, rows):
         self.rows = rows
 
-    def report_source_rows(self, notebook_id):
-        return list(self.rows)
+    def report_source_rows(self, notebook_id, *, representative_limit=20,
+                           distribution_limit=32):
+        return {
+            "total_sources": len(self.rows),
+            "metadata_sources": 0,
+            "known_year_sources": 0,
+            "identity_uncertain_sources": len(self.rows),
+            "hash_duplicate_excess": 0,
+            "title_duplicate_excess": 0,
+            "type_distribution": [],
+            "year_distribution": [],
+            "representatives": list(self.rows)[:representative_limit],
+        }
+
+    def report_source_identity_rows(self, source_ids):
+        wanted = set(source_ids)
+        return [row for row in self.rows if str(row.get("id") or "") in wanted]
 
 
 class _BoomSources:

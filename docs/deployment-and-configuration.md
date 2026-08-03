@@ -663,6 +663,8 @@ REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
 REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000; only for callers without a research depth — see the retrieval behaviour-change note)
 REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
+REPORT_HIGH_RISK_DOWNGRADE_ENABLED # deep-report citation audit may cap a grounded section at overview when its unsupported ratio exceeds the contract threshold (default false; disclosure still runs when false)
+REPORT_HIGH_RISK_UNSUPPORTED_RATIO # deep-report high-risk citation-audit threshold; the numeric contract is owned by docs/product-and-api.md
 ```
 
 **Behavior change (PR-5, no new flag):** each report section's deep-dive retrieval budget now follows the report's own `depth` value (1/2/4/8/16, clamped API-side to `[1, 16]`) mapped onto the same named effort tiers reasoning Ask uses (`overview`/`standard`/`deep`/`thorough`/`exhaustive`) rather than always running at the `standard` budget. Low depths therefore retrieve with a smaller budget than before this change and high depths with a larger one — this is an intentional alignment fix (same tier name, same budget in both Ask and Deep Report), not a regression. Reaching depth 16 (`exhaustive`) additionally activates the outline scratchpad and KG weak-support gap feedback described above inside that section's deep-dive only; see `docs/product-and-api.md`'s "Deep Report outline co-evolution" section for the full contract.
