@@ -1589,3 +1589,20 @@ def test_receipt_reads_an_unfrozen_exclude_scope_by_its_mode():
     assert [(b.name, b.included) for b in receipt.bases] == [
         ("论文库", False), ("手册库", True),
     ]
+
+
+def test_receipt_does_not_truncate_below_the_model_cap():
+    """回执是**披露**载体:被裁过的列表当成完整的,会让前端算错分母,还可能藏起对某个
+    被省略库的收窄(codex #431 P3)。构造处的截断上限必须跟随
+    ``RetrievalScopeReceipt.bases`` 的模型上限——更低的值等于静默丢掉模型本可接受的库。
+    """
+    from app.api.ask_routes import _scope_receipt
+
+    bases = [NotebookRef(id=f"b{i}", name=f"参考库{i}") for i in range(1200)]
+    notebook = _receipt_notebook(sources=1, bases=bases)
+    receipt = _scope_receipt(
+        notebook, None, BaseNotebookScope(mode="include", notebook_ids=["b0"]),
+    )
+    assert receipt is not None
+    assert len(receipt.bases) == 1200, "1000 处截断会让回执谎报参考库总数"
+    assert sum(1 for item in receipt.bases if item.included) == 1

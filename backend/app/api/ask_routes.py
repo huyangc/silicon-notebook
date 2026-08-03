@@ -262,8 +262,13 @@ def _scope_receipt(
                 ),
             )
             # Bounded so a pathological mount count can never turn the receipt
-            # into a ValidationError that costs the user their answer.
-            for ref in list(notebook.base_notebooks)[:1_000]
+            # into a ValidationError that costs the user their answer. The cap
+            # must track RetrievalScopeReceipt.bases: a *lower* one would
+            # silently drop libraries the model would have accepted, and the
+            # receipt is a disclosure — a truncated list presented as exhaustive
+            # makes the frontend compute a wrong denominator and can hide a
+            # narrowing applied to an omitted library (codex #431 P3).
+            for ref in list(notebook.base_notebooks)[:10_000]
         ],
     )
 
