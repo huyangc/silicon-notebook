@@ -112,6 +112,42 @@ source_summary = "general"''',
     )
 
 
+def test_chat_service_accepts_fixed_top_p_and_fingerprints_it(tmp_path):
+    first_path = _write_config(
+        tmp_path / "first.toml",
+        _service(extra="top_p = 0.95") + '\n[bindings]\nask_answer = "general"',
+    )
+    second_path = _write_config(
+        tmp_path / "second.toml",
+        _service(extra="top_p = 0.9") + '\n[bindings]\nask_answer = "general"',
+    )
+
+    first = SystemModelServiceRegistry.load(
+        _settings(first_path), {"GENERAL_KEY": "secret"}
+    ).service("general")
+    second = SystemModelServiceRegistry.load(
+        _settings(second_path), {"GENERAL_KEY": "secret"}
+    ).service("general")
+
+    assert first.top_p == 0.95
+    assert first.fingerprint != second.fingerprint
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        _service(extra="top_p = 1.1"),
+        _service(extra='top_p = "0.95"'),
+        _service(kind="embedding", extra="top_p = 0.95"),
+    ],
+)
+def test_registry_rejects_invalid_or_non_chat_top_p(tmp_path, service):
+    path = _write_config(tmp_path / "models.toml", service)
+
+    with pytest.raises(ValueError, match="top_p"):
+        SystemModelServiceRegistry.load(_settings(path), {"GENERAL_KEY": "secret"})
+
+
 def test_registry_accepts_legacy_dashscope_rerank_protocol(tmp_path):
     path = _write_config(
         tmp_path / "models.toml",

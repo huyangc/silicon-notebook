@@ -121,6 +121,7 @@ class OpenAICompatibleClient:
                  api_key: Optional[str] = None, model: Optional[str] = None,
                  max_retries: Optional[int] = None,
                  max_connections: Optional[int] = None,
+                 top_p_override: Optional[float] = None,
                  cache: Optional[CacheBackend] = None):
         self.settings = settings
         # Transport identity is always supplied by the system service registry.
@@ -135,6 +136,7 @@ class OpenAICompatibleClient:
             if max_connections is not None
             else 1,
         )
+        self.top_p_override = top_p_override
         self._client: Optional[OpenAI] = None
         self.interaction_logger = LLMInteractionLogger(settings)
         self._cache = None
@@ -248,6 +250,15 @@ class OpenAICompatibleClient:
             *messages,
         ]
         model = self.model
+        # Some OpenAI-compatible models accept only one provider-defined
+        # nucleus-sampling value (for example top_p=0.95).  A physical-service
+        # override is authoritative over per-workload call defaults so every
+        # request routed to that service satisfies the same protocol contract.
+        effective_top_p = (
+            self.top_p_override
+            if self.top_p_override is not None
+            else top_p
+        )
         # Resolve the effective completion budget up front — it feeds BOTH the
         # cache key and the request kwargs, and the two must agree. max_tokens=None
         # falls back to the global default; a non-positive result means "omit the
@@ -286,7 +297,7 @@ class OpenAICompatibleClient:
                 # request and must never reuse another call's response.
                 ckey = llm_key(
                     model, full_messages, response_schema_hint, self.base_url,
-                    temperature=temperature, top_p=top_p,
+                    temperature=temperature, top_p=effective_top_p,
                     max_tokens=effective_max_tokens,
                 )
                 # Opt-in HIT gate: only a validator-bearing caller may be served a
@@ -310,7 +321,7 @@ class OpenAICompatibleClient:
             "model": model,
             "messages": full_messages,
             "temperature": temperature,
-            "top_p": top_p,
+            "top_p": effective_top_p,
         }
         # Cap the completion length with the resolved budget (see above). A
         # per-call max_tokens (answer synthesis / KG extraction pass a higher

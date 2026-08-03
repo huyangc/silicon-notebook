@@ -55,7 +55,7 @@ mkdir -p .local
 cp model-services.example.toml .local/model-services.toml
 ```
 
-For model-backed answers and extraction, edit `.local/model-services.toml`, bind workloads to physical services, set each service's `max_concurrency`, and place only the secrets named by `api_key_env` in `.env`.
+For model-backed answers and extraction, edit `.local/model-services.toml`, bind workloads to physical services, set each service's `max_concurrency` and optional chat-only fixed `top_p`, and place only the secrets named by `api_key_env` in `.env`. Valid TOML edits are hot-reloaded without restarting the backend.
 
 To run explicitly with deterministic/offline fallbacks, leave this empty in `.env`:
 

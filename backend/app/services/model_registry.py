@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+import math
 import os
 from pathlib import Path
 import re
@@ -41,6 +42,10 @@ class ModelServiceDefinition:
     api_key: str = field(repr=False)
     max_concurrency: int
     fingerprint: str
+    # Optional service-owned sampling override.  ``None`` preserves the
+    # per-call value; a number forces every request sent to this physical chat
+    # service to use the configured value.
+    top_p: float | None = None
 
 
 _WORKLOAD_LABELS = MappingProxyType({
@@ -129,10 +134,12 @@ WORKLOADS = workload_map(
 
 _SERVICE_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_SERVICE_KEYS = frozenset({
+_REQUIRED_SERVICE_KEYS = frozenset({
     "display_name", "kind", "protocol", "base_url", "model", "api_key_env",
     "max_concurrency",
 })
+_OPTIONAL_SERVICE_KEYS = frozenset({"top_p"})
+_SERVICE_KEYS = _REQUIRED_SERVICE_KEYS | _OPTIONAL_SERVICE_KEYS
 _TOP_LEVEL_KEYS = frozenset({"services", "bindings"})
 _PROTOCOLS: Mapping[str, frozenset[str]] = MappingProxyType({
     "chat": frozenset({"openai"}),
@@ -299,7 +306,7 @@ def _parse_service(
     if not isinstance(raw_definition, dict):
         raise ValueError(f"model service {service_id} must be a TOML table")
     _reject_unknown_keys(raw_definition, _SERVICE_KEYS, f"model service {service_id}")
-    missing = _SERVICE_KEYS.difference(raw_definition)
+    missing = _REQUIRED_SERVICE_KEYS.difference(raw_definition)
     if missing:
         raise ValueError(f"model service {service_id} is missing required fields")
 
@@ -325,8 +332,10 @@ def _parse_service(
     max_concurrency = raw_definition["max_concurrency"]
     if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
         raise ValueError(f"model service {service_id} has an invalid max_concurrency")
+    top_p = _optional_top_p(raw_definition.get("top_p"), kind, service_id)
     fingerprint = _fingerprint(
-        service_id, kind, protocol, base_url, model, api_key, str(max_concurrency)
+        service_id, kind, protocol, base_url, model, api_key,
+        str(max_concurrency), "" if top_p is None else repr(top_p),
     )
     return ModelServiceDefinition(
         id=service_id,
@@ -339,7 +348,21 @@ def _parse_service(
         api_key=api_key,
         max_concurrency=max_concurrency,
         fingerprint=fingerprint,
+        top_p=top_p,
     )
+
+
+def _optional_top_p(value: object, kind: str, service_id: str) -> float | None:
+    if value is None:
+        return None
+    if kind != "chat":
+        raise ValueError(f"model service {service_id} top_p is only valid for chat services")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"model service {service_id} has an invalid top_p")
+    normalized = float(value)
+    if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
+        raise ValueError(f"model service {service_id} has an invalid top_p")
+    return normalized
 
 
 def _reject_unknown_keys(raw: Mapping[object, object], allowed: frozenset[str], context: str) -> None:

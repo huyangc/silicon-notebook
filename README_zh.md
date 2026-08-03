@@ -55,7 +55,7 @@ mkdir -p .local
 cp model-services.example.toml .local/model-services.toml
 ```
 
-如需模型回答和知识抽取，编辑 `.local/model-services.toml`，把 workload 绑定到物理服务，设置每个服务的 `max_concurrency`，并只把 `api_key_env` 指定的密钥放进 `.env`。
+如需模型回答和知识抽取，编辑 `.local/model-services.toml`，把 workload 绑定到物理服务，设置每个服务的 `max_concurrency` 和可选的 chat 专用固定 `top_p`，并只把 `api_key_env` 指定的密钥放进 `.env`。合法的 TOML 修改会自动热加载，无需重启后端。
 
 若要明确使用确定性/离线降级，在 `.env` 中留空：
 

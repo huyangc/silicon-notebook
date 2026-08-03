@@ -39,9 +39,16 @@ class ModelStatusService:
         provider,
         status_store: ModelStatusStorePort,
     ) -> None:
-        self.registry = registry
+        self._initial_registry = registry
         self.provider = provider
         self.status_store = status_store
+
+    @property
+    def registry(self) -> SystemModelServiceRegistry:
+        # RuntimeModelProvider replaces its validated registry atomically when
+        # MODEL_SERVICES_CONFIG is hot-reloaded.  Status/probe views must follow
+        # that live registry rather than retaining the startup snapshot.
+        return getattr(self.provider, "registry", self._initial_registry)
 
     def snapshot(self) -> ModelServicesStatus:
         stored = self.status_store.get_all()

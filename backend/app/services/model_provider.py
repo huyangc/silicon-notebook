@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import math
 import os
+from pathlib import Path
 import threading
 import time
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
@@ -51,6 +53,8 @@ from app.services.rerank_client import RerankClient
 
 
 _WORKER_ENVIRONMENT_VARIABLES = ("WEB_CONCURRENCY", "UVICORN_WORKERS")
+_MODEL_CONFIG_RELOAD_INTERVAL_SECONDS = 1.0
+logger = logging.getLogger("silicon_notebook.model_provider")
 
 
 def validate_process_local_scheduler_deployment(
@@ -146,6 +150,7 @@ class _ServiceRuntime:
 
 @dataclass
 class _SubmittedCall:
+    runtime: _ServiceRuntime
     context: Any
     future: Future
     queued_at: float
@@ -262,15 +267,33 @@ class _ScheduledAdapter:
     def __init__(
         self,
         provider: "RuntimeModelProvider",
-        runtime: _ServiceRuntime,
         workload: WorkloadSpec,
+        *,
+        initial_runtime: _ServiceRuntime | None = None,
+        pinned_runtime: _ServiceRuntime | None = None,
     ) -> None:
         self._provider = provider
-        self._runtime = runtime
         self._workload = workload
+        self._pinned_runtime = pinned_runtime
+        # Retain the most recently resolved generation for close/admission
+        # compatibility.  Normal calls refresh it from the live registry; once
+        # provider close begins, routing through this scheduler preserves the
+        # existing typed rejection path instead of leaking a raw close error.
+        self._runtime = pinned_runtime or initial_runtime
+
+    def _current_runtime(self) -> _ServiceRuntime | None:
+        if self._pinned_runtime is not None:
+            return self._pinned_runtime
+        if (
+            self._provider._closing or self._provider._closed
+        ) and self._runtime is not None:
+            return self._runtime
+        self._runtime = self._provider._runtime_for_workload(self._workload)
+        return self._runtime
 
     def _submit(
         self,
+        runtime: _ServiceRuntime,
         invoke: Callable[[], Any],
         *,
         cancel_event: Any = None,
@@ -289,7 +312,7 @@ class _ScheduledAdapter:
         )
         timing: dict[str, Any] = {}
         queued_at = time.perf_counter()
-        breaker_before = self._runtime.scheduler.snapshot().breaker_state
+        breaker_before = runtime.scheduler.snapshot().breaker_state
         submission_context = contextvars.copy_context()
 
         def scheduled() -> Any:
@@ -304,15 +327,16 @@ class _ScheduledAdapter:
                 timing["finished"] = time.perf_counter()
                 if observe:
                     self._provider._mark_completion(
-                        self._runtime.service.id, timing
+                        runtime.service.id, timing
                     )
 
         future = self._provider._submit_scheduled(
-            self._runtime,
+            runtime,
             context=context,
             invoke=scheduled,
         )
         call = _SubmittedCall(
+            runtime=runtime,
             context=context,
             future=future,
             queued_at=queued_at,
@@ -322,7 +346,7 @@ class _ScheduledAdapter:
         )
         if observe:
             self._provider._track_completion(
-                self._runtime, self._workload, call
+                runtime, self._workload, call
             )
         return call
 
@@ -350,7 +374,7 @@ class _ScheduledAdapter:
             return result
 
         assert error is not None
-        typed = _invocation_error(self._runtime, self._workload, call, error)
+        typed = _invocation_error(call.runtime, self._workload, call, error)
         raise typed from error
 
     def _emit(
@@ -363,16 +387,17 @@ class _ScheduledAdapter:
         now = time.perf_counter()
         started = call.timing.get("started", now)
         finished = call.timing.get("finished", now)
-        breaker_after = self._runtime.scheduler.snapshot().breaker_state
+        runtime = call.runtime
+        breaker_after = runtime.scheduler.snapshot().breaker_state
         event = {
             "kind": "model_scheduler",
             "status": status,
             "support_id": call.context.support_id,
             "workload_id": self._workload.id,
             "workload_label": self._workload.display_label,
-            "service_id": self._runtime.service.id,
-            "service_name": self._runtime.service.display_name,
-            "model": self._runtime.service.model,
+            "service_id": runtime.service.id,
+            "service_name": runtime.service.display_name,
+            "model": runtime.service.model,
             "actor_id": call.context.actor_id,
             "parent_id": call.context.parent_id,
             "priority": call.context.priority.value,
@@ -393,11 +418,27 @@ class _ScheduledAdapter:
 
 
 class ScheduledJsonChatClient(_ScheduledAdapter):
-    def __init__(self, provider, runtime, workload) -> None:
-        super().__init__(provider, runtime, workload)
-        self.configured = True
-        self.model = runtime.service.model
-        self.settings = getattr(runtime.raw, "settings", provider.settings)
+    settings: Settings
+
+    def __init__(
+        self, provider, workload, *, initial_runtime=None, pinned_runtime=None
+    ) -> None:
+        super().__init__(
+            provider,
+            workload,
+            initial_runtime=initial_runtime,
+            pinned_runtime=pinned_runtime,
+        )
+        self.settings = provider.settings
+
+    @property
+    def configured(self) -> bool:
+        return self._provider.configured(self._workload.id)
+
+    @property
+    def model(self) -> str:
+        service = self._provider.registry.service_for(self._workload.id)
+        return service.model if service is not None else ""
 
     def chat_json(
         self,
@@ -413,8 +454,14 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         bypass_cache=False,
         response_validator: Callable[[str], bool] | None = None,
     ) -> str:
+        runtime = self._current_runtime()
+        if runtime is None:
+            return self._provider._offline_chat.chat_json(
+                messages, response_schema_hint
+            )
+
         def invoke() -> str:
-            content = self._runtime.raw.chat_json(
+            content = runtime.raw.chat_json(
                 messages,
                 response_schema_hint,
                 timeout=timeout,
@@ -428,34 +475,59 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
             )
             return _validate_json_object(content)
 
-        return self._resolve(self._submit(invoke, cancel_event=cancel_event))
+        return self._resolve(self._submit(
+            runtime, invoke, cancel_event=cancel_event
+        ))
 
 
 class ScheduledEmbedder(_ScheduledAdapter):
-    def __init__(self, provider, runtime, workload) -> None:
-        super().__init__(provider, runtime, workload)
-        self.configured = True
-        self.dim = runtime.raw.dim
+    @property
+    def configured(self) -> bool:
+        return self._provider.configured(self._workload.id)
+
+    @property
+    def dim(self) -> int:
+        runtime = self._current_runtime()
+        return (
+            int(runtime.raw.dim)
+            if runtime is not None
+            else int(self._provider.settings.embed_dim)
+        )
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return self._resolve(self._submit(lambda: self._runtime.raw.embed_texts(texts)))
+        runtime = self._current_runtime()
+        if runtime is None:
+            return self._provider._offline_embedding(self._workload.id).embed_texts(texts)
+        return self._resolve(self._submit(
+            runtime, lambda: runtime.raw.embed_texts(texts)
+        ))
 
     def embed_query(self, text: str) -> list[float]:
-        return self._resolve(self._submit(lambda: self._runtime.raw.embed_query(text)))
+        runtime = self._current_runtime()
+        if runtime is None:
+            return self._provider._offline_embedding(self._workload.id).embed_query(text)
+        return self._resolve(self._submit(
+            runtime, lambda: runtime.raw.embed_query(text)
+        ))
 
 
 class ScheduledRerankClient(_ScheduledAdapter):
-    configured = True
+    @property
+    def configured(self) -> bool:
+        return self._provider.configured(self._workload.id)
 
     def rerank(self, query: str, documents: list[str], on_error=None) -> list[int]:
         if not documents:
             return []
-        maximum = max(1, int(getattr(self._runtime.raw, "max_docs", len(documents))))
+        runtime = self._current_runtime()
+        if runtime is None:
+            return self._provider._offline_rerank.rerank(query, documents, on_error)
+        maximum = max(1, int(getattr(runtime.raw, "max_docs", len(documents))))
         batches = [
             (start, documents[start : start + maximum])
             for start in range(0, len(documents), maximum)
         ]
-        capacity = self._runtime.service.max_concurrency
+        capacity = runtime.service.max_concurrency
         batch_iter = iter(batches)
         calls: list[tuple[int, _SubmittedCall]] = []
 
@@ -467,8 +539,8 @@ class ScheduledRerankClient(_ScheduledAdapter):
                     return
                 calls.append((
                     base,
-                    self._submit(lambda docs=docs: _validate_rerank_rows(
-                        self._runtime.raw._rerank_batch(query, docs), len(docs)
+                    self._submit(runtime, lambda docs=docs: _validate_rerank_rows(
+                        runtime.raw._rerank_batch(query, docs), len(docs)
                     )),
                 ))
 
@@ -523,11 +595,16 @@ class RuntimeModelProvider:
         self.settings = settings
         self.event_log = event_log
         self.registry = registry or SystemModelServiceRegistry.load(settings)
+        self._owns_registry = registry is None
         self._chat_factory = chat_factory or self._raw_chat
         self._embedding_factory = embedding_factory or self._raw_embedding
         self._rerank_factory = rerank_factory or self._raw_rerank
         self._lock = threading.RLock()
-        self._runtimes: dict[str, _ServiceRuntime] = {}
+        # Physical service ids may be redefined by a hot reload.  Key runtimes
+        # by the validated configuration fingerprint so already-submitted work
+        # can finish on its original generation while new work routes to the
+        # replacement generation.
+        self._runtimes: dict[tuple[str, str], _ServiceRuntime] = {}
         self._adapters: dict[tuple[str, str], Any] = {}
         self._closing = False
         self._closed = False
@@ -538,7 +615,7 @@ class RuntimeModelProvider:
             thread_name_prefix="model-status-observer",
         )
         self._observation_accepting = True
-        self._needs_recovery: set[str] = set()
+        self._needs_recovery: set[tuple[str, str]] = set()
         self._completion_counter: dict[str, int] = {}
         self._completion_next: dict[str, int] = {}
         self._completion_pending: dict[
@@ -549,6 +626,86 @@ class RuntimeModelProvider:
         self._offline_chat = _UnconfiguredChatClient(settings)
         self._offline_rerank = _UnconfiguredRerankClient()
         self._offline_embeddings: dict[str, _UnconfiguredEmbedder] = {}
+        self._reload_stop = threading.Event()
+        self._reload_lock = threading.Lock()
+        self._config_path = self._resolved_config_path()
+        self._config_signature = self._read_config_signature()
+        self._reload_thread: threading.Thread | None = None
+        if self._owns_registry and self._config_path is not None:
+            self._reload_thread = threading.Thread(
+                target=self._reload_loop,
+                name="model-config-reloader",
+                daemon=True,
+            )
+            self._reload_thread.start()
+
+    def _resolved_config_path(self) -> Path | None:
+        raw = (self.settings.model_services_config or "").strip()
+        if not raw:
+            return None
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        from app.core.config import _ROOT_DIR
+        return _ROOT_DIR / path
+
+    def _read_config_signature(self) -> tuple[int, int, int] | None:
+        if self._config_path is None:
+            return None
+        try:
+            stat = self._config_path.stat()
+        except OSError:
+            return None
+        return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    def _reload_loop(self) -> None:
+        while not self._reload_stop.wait(_MODEL_CONFIG_RELOAD_INTERVAL_SECONDS):
+            self.reload_if_changed()
+
+    def reload_if_changed(self, *, force: bool = False) -> bool:
+        """Atomically publish a newly valid model-services file.
+
+        Invalid or temporarily missing files never replace the last valid
+        registry.  The attempted file signature is remembered so a half-written
+        file produces one diagnostic rather than a log storm; the next write
+        changes the signature and is retried automatically.
+        """
+        if not self._owns_registry or self._config_path is None:
+            return False
+        signature = self._read_config_signature()
+        with self._reload_lock:
+            if not force and signature == self._config_signature:
+                return False
+            self._config_signature = signature
+            try:
+                candidate = SystemModelServiceRegistry.load(self.settings)
+            except Exception as exc:
+                logger.error(
+                    "model service config reload rejected; keeping previous configuration: %s",
+                    exc,
+                )
+                try:
+                    self.event_log.emit({
+                        "kind": "model_config_reload",
+                        "status": "error",
+                        "code": "invalid_configuration",
+                    })
+                except Exception:
+                    pass
+                return False
+            with self._lock:
+                if self._closing or self._closed:
+                    return False
+                self.registry = candidate
+            try:
+                self.event_log.emit({
+                    "kind": "model_config_reload",
+                    "status": "ok",
+                    "service_count": len(candidate.services()),
+                })
+            except Exception:
+                pass
+            return True
 
     def set_observation_sink(
         self, sink: Callable[[ProviderObservation], None] | None
@@ -617,11 +774,12 @@ class RuntimeModelProvider:
         error: BaseException | None,
     ) -> None:
         service_id = runtime.service.id
+        service_generation = (service_id, runtime.service.fingerprint)
         occurred_at = str(call.timing["occurred_at"])
         if error is None:
-            if service_id not in self._needs_recovery:
+            if service_generation not in self._needs_recovery:
                 return
-            self._needs_recovery.remove(service_id)
+            self._needs_recovery.remove(service_generation)
             self._submit_observation(ProviderObservation(
                 service_id=service_id,
                 config_fingerprint=runtime.service.fingerprint,
@@ -636,7 +794,7 @@ class RuntimeModelProvider:
 
         if classify_provider_failure(error) is FailureKind.IGNORED:
             return
-        self._needs_recovery.add(service_id)
+        self._needs_recovery.add(service_generation)
         typed = _invocation_error(runtime, workload, call, error)
         self._submit_observation(ProviderObservation(
             service_id=service_id,
@@ -695,6 +853,7 @@ class RuntimeModelProvider:
             api_key=service.api_key,
             model=service.model,
             max_connections=service.max_concurrency,
+            top_p_override=service.top_p,
         )
 
     def _raw_embedding(self, service: ModelServiceDefinition):
@@ -761,7 +920,8 @@ class RuntimeModelProvider:
                 raise ModelProviderError(
                     "model provider is closed", code="model_service_unavailable"
                 )
-            runtime = self._runtimes.get(service.id)
+            runtime_key = (service.id, service.fingerprint)
+            runtime = self._runtimes.get(runtime_key)
             if runtime is not None:
                 return runtime
             scheduler = ServiceScheduler(
@@ -778,8 +938,20 @@ class RuntimeModelProvider:
                 scheduler.shutdown()
                 raise
             runtime = _ServiceRuntime(service=service, scheduler=scheduler, raw=raw)
-            self._runtimes[service.id] = runtime
+            self._runtimes[runtime_key] = runtime
             return runtime
+
+    def _runtime_for_workload(
+        self, workload: WorkloadSpec
+    ) -> _ServiceRuntime | None:
+        service = self.registry.service_for(workload.id)
+        return self._runtime(service) if service is not None else None
+
+    def _offline_embedding(self, workload_id: str) -> _UnconfiguredEmbedder:
+        with self._lock:
+            return self._offline_embeddings.setdefault(
+                workload_id, _UnconfiguredEmbedder(dim=self.settings.embed_dim)
+            )
 
     def _submit_scheduled(
         self,
@@ -799,43 +971,43 @@ class RuntimeModelProvider:
 
     def chat(self, workload_id: str):
         workload = self._workload(workload_id, "chat")
-        service = self.registry.service_for(workload_id)
-        if service is None:
-            return self._offline_chat
         key = ("chat", workload_id)
         with self._lock:
             adapter = self._adapters.get(key)
             if adapter is None:
-                adapter = ScheduledJsonChatClient(self, self._runtime(service), workload)
+                adapter = ScheduledJsonChatClient(
+                    self,
+                    workload,
+                    initial_runtime=self._runtime_for_workload(workload),
+                )
                 self._adapters[key] = adapter
             return adapter
 
     def embedding(self, workload_id: str):
         workload = self._workload(workload_id, "embedding")
-        service = self.registry.service_for(workload_id)
-        if service is None:
-            with self._lock:
-                return self._offline_embeddings.setdefault(
-                    workload_id, _UnconfiguredEmbedder(dim=self.settings.embed_dim)
-                )
         key = ("embedding", workload_id)
         with self._lock:
             adapter = self._adapters.get(key)
             if adapter is None:
-                adapter = ScheduledEmbedder(self, self._runtime(service), workload)
+                adapter = ScheduledEmbedder(
+                    self,
+                    workload,
+                    initial_runtime=self._runtime_for_workload(workload),
+                )
                 self._adapters[key] = adapter
             return adapter
 
     def rerank(self, workload_id: str):
         workload = self._workload(workload_id, "rerank")
-        service = self.registry.service_for(workload_id)
-        if service is None:
-            return self._offline_rerank
         key = ("rerank", workload_id)
         with self._lock:
             adapter = self._adapters.get(key)
             if adapter is None:
-                adapter = ScheduledRerankClient(self, self._runtime(service), workload)
+                adapter = ScheduledRerankClient(
+                    self,
+                    workload,
+                    initial_runtime=self._runtime_for_workload(workload),
+                )
                 self._adapters[key] = adapter
             return adapter
 
@@ -864,7 +1036,7 @@ class RuntimeModelProvider:
             display_label="模型服务测试",
         )
         runtime = self._runtime(service)
-        adapter = _ScheduledAdapter(self, runtime, workload)
+        adapter = _ScheduledAdapter(self, workload, pinned_runtime=runtime)
 
         def invoke() -> Any:
             if service.kind == "chat":
@@ -879,7 +1051,7 @@ class RuntimeModelProvider:
             return runtime.raw._rerank_batch("health check", ["health check"])
 
         started = time.perf_counter()
-        call = adapter._submit(invoke, actor_id=actor_id, observe=False)
+        call = adapter._submit(runtime, invoke, actor_id=actor_id, observe=False)
         try:
             adapter._resolve(call)
         except ModelInvocationError as exc:
@@ -904,7 +1076,7 @@ class RuntimeModelProvider:
     def scheduler_snapshot(self, service_id: str) -> SchedulerSnapshot:
         service = self.registry.service(service_id)
         with self._lock:
-            runtime = self._runtimes.get(service_id)
+            runtime = self._runtimes.get((service_id, service.fingerprint))
         if runtime is None:
             return SchedulerSnapshot(
                 active=0,
@@ -1010,6 +1182,9 @@ class RuntimeModelProvider:
         if not owner:
             close_complete.wait()
             return
+        self._reload_stop.set()
+        if self._reload_thread is not None:
+            self._reload_thread.join()
         # `_closing` is the atomic admission boundary: a submit that completed
         # its provider-lock section before this point is in a scheduler; every
         # later submit is rejected. Do not hold the provider lock while
