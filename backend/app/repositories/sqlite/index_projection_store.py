@@ -200,6 +200,20 @@ class IndexProjectionStore:
                 visible.update(row["id"] for row in rows)
         return [source_id for source_id in source_ids if source_id in visible]
 
+    def all_visible_source_ids(self, notebook_id: str) -> List[str]:
+        """Return the complete imported-source id set in stable id order.
+
+        Source checkbox exclusions are normalized to an explicit allow-list at
+        the HTTP boundary.  That one bounded list then follows the background
+        job, so later source additions cannot silently widen an in-flight run.
+        """
+        with self.connect() as db:
+            return [row["id"] for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=? "
+                "AND source_type NOT IN ('memory','knowhow') ORDER BY id",
+                (notebook_id,),
+            ).fetchall()]
+
     def notebook_owner(self, notebook_id: str) -> "str | None":
         with self.connect() as db:
             row = db.execute(

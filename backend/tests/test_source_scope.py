@@ -1,7 +1,12 @@
 from app.models.common import Evidence
+from app.models.ask import AskRequest
 from app.models.source_scope import SourceScope
 from app.models.notebooks import NotebookSummary
-from app.api.ask_routes import _validate_source_scope
+from app.api.ask_routes import (
+    _validate_reasoning_scope_preflight,
+    _validate_source_scope,
+)
+from types import SimpleNamespace
 from fastapi import HTTPException
 import pytest
 from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
@@ -9,6 +14,7 @@ from app.services.kg.follow_chain import ChainHop, FollowChainResult, InferredCh
 from app.services.retrieval_service import RetrievalService
 from app.services.source_scope import (
     filter_retrieval_items,
+    scoped_allowed_source_ids,
     scoped_conversation_history,
     source_allowed,
     source_scope_context,
@@ -153,6 +159,9 @@ class _ScopeRepo:
     def visible_source_count(self, _notebook_id):
         return self.count
 
+    def all_visible_source_ids(self, _notebook_id):
+        return list(self.visible)
+
 
 def _notebook(*, bases=None):
     return NotebookSummary(
@@ -177,3 +186,72 @@ def test_scope_rejects_cross_notebook_source_ids():
             SourceScope(mode="include", source_ids=["foreign"]),
         )
     assert exc.value.status_code == 422
+
+
+def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1", "s2", "s3"], 3),
+        _notebook(),
+        SourceScope(mode="exclude", source_ids=["s2"]),
+    )
+    assert resolved == SourceScope(mode="include", source_ids=["s1", "s3"])
+
+
+def test_checkbox_ceiling_intersects_model_allow_list_and_leaves_base_alone():
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["s1", "s2"])
+    ):
+        assert scoped_allowed_source_ids("nb") == ("s1", "s2")
+        assert scoped_allowed_source_ids("nb", ["s2", "s3"]) == ("s2",)
+        assert scoped_allowed_source_ids("base", ["b1"]) == ("b1",)
+
+
+def test_reasoning_preflight_uses_the_submitted_checkbox_ceiling():
+    class _Repo:
+        def validate_reasoning_submission(self, notebook_id, _payload):
+            if not source_allowed(notebook_id, "s2"):
+                raise ValueError("指定来源超出当前勾选范围")
+
+    payload = AskRequest(
+        question="q",
+        mode="reasoning",
+        source_scope=SourceScope(mode="include", source_ids=["s1"]),
+    )
+    with pytest.raises(HTTPException, match="当前勾选范围") as exc:
+        _validate_reasoning_scope_preflight(
+            _Repo(), "nb", SimpleNamespace(id="reasoning"), payload
+        )
+    assert exc.value.status_code == 409
+
+
+def test_scoped_chunk_overlay_keeps_base_seeds_without_whole_graph_io():
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    base_hit = _knowledge("base-source", notebook_id="base")
+    base_hit.tier = "base"
+
+    class _Candidates:
+        _MIX_NODE_SEEDS = 8
+
+        def federated_retrieve(self, *_args, **_kwargs):
+            return [base_hit]
+
+        def _federated_graph_is_large(self, *_args, **_kwargs):
+            raise AssertionError("scoped direct seeds must not inspect whole graph")
+
+        def federated_retrieve_relations(self, *_args, **_kwargs):
+            raise AssertionError("scoped overlay must not retrieve relations")
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=[])
+    ):
+        block, id_map, hits, supports = (
+            CandidateRetrievalService._chunk_kg_overlay(
+                _Candidates(), "nb", "question", "", 1000
+            )
+        )
+
+    assert hits == [base_hit]
+    assert supports == {}
+    assert id_map["k1001"]["notebook_id"] == "base"
+    assert "base-source" in block

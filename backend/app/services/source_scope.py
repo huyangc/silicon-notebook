@@ -97,6 +97,34 @@ def source_allowed(notebook_id: str, source_id: str) -> bool:
     return True if scope is None else scope.allows(notebook_id, source_id)
 
 
+def scoped_allowed_source_ids(
+    notebook_id: str, explicit: Iterable[str] | None = None
+) -> tuple[str, ...] | None:
+    """Intersect a producer's allow-list with the active checkbox ceiling.
+
+    HTTP requests freeze checkbox exclusions to ``include`` before entering a
+    worker, so the common path always returns an allow-list that SQL/FTS can
+    apply before LIMIT.  The exclude branch remains for direct service callers:
+    it can narrow an existing explicit list, while result-boundary filtering
+    remains the fail-closed fallback when no universe was supplied.
+    """
+    allowed = (
+        tuple(dict.fromkeys(str(value) for value in explicit if str(value)))
+        if explicit is not None else None
+    )
+    scope = current_source_scope()
+    if scope is None or not scope.restricted or notebook_id != scope.notebook_id:
+        return allowed
+    if scope.mode == "include":
+        if allowed is None:
+            return tuple(sorted(scope.source_ids))
+        ceiling = scope.source_ids
+        return tuple(value for value in allowed if value in ceiling)
+    if allowed is not None:
+        return tuple(value for value in allowed if value not in scope.source_ids)
+    return None
+
+
 def _evidence_source_id(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("source_id") or "")

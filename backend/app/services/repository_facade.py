@@ -1520,6 +1520,10 @@ class RepositoryFacade:
         """Return the requested ids that are visible imported sources of notebook."""
         return self._runtime.index_projections.visible_source_ids(notebook_id, source_ids)
 
+    def all_visible_source_ids(self, notebook_id: str) -> List[str]:
+        """Return the current notebook's complete user-visible source id set."""
+        return self._runtime.index_projections.all_visible_source_ids(notebook_id)
+
     def visible_source_count(self, notebook_id: str) -> int:
         return self._runtime.source_store.visible_document_count(notebook_id)
 

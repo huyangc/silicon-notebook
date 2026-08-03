@@ -769,15 +769,18 @@ class ReportEngine:
         给 STORM 规划接地(治盲规划)。任一子步失败静默降级为空段。"""
         deps = self.dependencies
         parts: List[str] = []
-        try:
-            active_profile = (
-                profile
-                or getattr(self, "_planning_corpus_profile", None)
-                or self._corpus_profile(notebook_id)
-            )
-            parts.append(corpus_profile_planner_block(active_profile))
-        except Exception:
-            pass
+        from app.services.source_scope import source_scope_restricted
+
+        if not source_scope_restricted():
+            try:
+                active_profile = (
+                    profile
+                    or getattr(self, "_planning_corpus_profile", None)
+                    or self._corpus_profile(notebook_id)
+                )
+                parts.append(corpus_profile_planner_block(active_profile))
+            except Exception:
+                pass
         try:
             kg = deps.retrieval.federated_retrieve(notebook_id, question)[: self._SCOUT_KG_N]
             if kg:
@@ -786,16 +789,17 @@ class ReportEngine:
                     f"[{h.object_type}][{getattr(h,'tier','personal')}]" for h in kg))
         except Exception:
             pass
+        if not source_scope_restricted():
+            try:
+                chunks = deps.retrieval.ppr_retrieve(
+                    notebook_id, question
+                )[: self._SCOUT_CHUNK_N]
+                if chunks:
+                    parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
+                        f"- {c.source_title} · {c.section_path}" for c in chunks))
+            except Exception:
+                pass
         try:
-            chunks = deps.retrieval.ppr_retrieve(notebook_id, question)[: self._SCOUT_CHUNK_N]
-            if chunks:
-                parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
-                    f"- {c.source_title} · {c.section_path}" for c in chunks))
-        except Exception:
-            pass
-        try:
-            from app.services.source_scope import source_scope_restricted
-
             memories = (
                 deps.memory_retriever.notebook_memory_hits(
                     self.user_id, notebook_id, question, 8
@@ -843,9 +847,17 @@ class ReportEngine:
                 intent_contract, question
             )
             try:
-                corpus_profile = self._corpus_profile(
-                    notebook_id,
-                    result_scope=str(intent_contract.get("result_scope") or "ranked"),
+                from app.services.source_scope import source_scope_restricted
+
+                corpus_profile = (
+                    {}
+                    if source_scope_restricted()
+                    else self._corpus_profile(
+                        notebook_id,
+                        result_scope=str(
+                            intent_contract.get("result_scope") or "ranked"
+                        ),
+                    )
                 )
             except Exception:
                 # Profiling is additive governance.  A malformed row/projection

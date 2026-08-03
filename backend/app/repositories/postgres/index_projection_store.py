@@ -200,6 +200,16 @@ class IndexProjectionStore:
                 visible.update(row["id"] for row in rows)
         return [source_id for source_id in source_ids if source_id in visible]
 
+    def all_visible_source_ids(self, notebook_id: str) -> List[str]:
+        """Return all user-visible imported source ids in stable id order."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM sources WHERE notebook_id=%s "
+                "AND source_type NOT IN ('memory','knowhow') ORDER BY id",
+                (notebook_id,),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def notebook_owner(self, notebook_id: str) -> "str | None":
         with self.connect() as db:
             row = db.execute(

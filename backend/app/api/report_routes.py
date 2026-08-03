@@ -20,6 +20,7 @@ from app.models.reports import (
     ReportOutlineUpdate,
     ReportSummary,
 )
+from app.models.source_scope import SourceScope
 from app.api.ask_routes import _validate_source_scope
 
 
@@ -71,14 +72,17 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
         notebook = repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    _validate_source_scope(repo, notebook, payload.source_scope)
+    resolved_source_scope = _validate_source_scope(
+        repo, notebook, payload.source_scope
+    )
     depth = max(1, min(16, int(payload.depth)))
     try:
         rid = repo.create_report(notebook_id, payload.question.strip(), depth=depth)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     scope_payload = (
-        payload.source_scope.model_dump() if payload.source_scope is not None else None
+        resolved_source_scope.model_dump()
+        if resolved_source_scope is not None else None
     )
     if scope_payload is not None:
         repo.update_report(
@@ -110,6 +114,16 @@ def confirm_report_intent(notebook_id: str, report_id: str,
         raise user_error(409, "当前报告不在问题确认阶段")
 
     understanding = dict(cur.get("understanding") or {})
+    persisted_scope = understanding.get("source_scope")
+    if persisted_scope is not None:
+        try:
+            notebook = repo.get_notebook(notebook_id)
+            resolved_scope = _validate_source_scope(
+                repo, notebook, SourceScope.model_validate(persisted_scope)
+            )
+        except (TypeError, ValueError):
+            raise user_error(409, "报告保存的来源范围无效，请重新创建报告")
+        understanding["source_scope"] = resolved_scope.model_dump()
     ambiguities = {
         str(row.get("id") or ""): row
         for row in (understanding.get("ambiguities") or [])
@@ -316,6 +330,21 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
         raise HTTPException(status_code=404, detail="Report not found")
     if cur.get("status") != "outline_ready":
         raise HTTPException(status_code=409, detail="generate only from outline_ready")
+    understanding = dict(cur.get("understanding") or {})
+    persisted_scope = understanding.get("source_scope")
+    if persisted_scope is not None:
+        try:
+            notebook = repo.get_notebook(notebook_id)
+            resolved_scope = _validate_source_scope(
+                repo, notebook, SourceScope.model_validate(persisted_scope)
+            )
+        except (TypeError, ValueError):
+            raise user_error(409, "报告保存的来源范围无效，请重新创建报告")
+        if resolved_scope.model_dump() != persisted_scope:
+            understanding["source_scope"] = resolved_scope.model_dump()
+            repo.update_report(
+                notebook_id, report_id, understanding=understanding
+            )
     depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
     if not repo.claim_report_generation(notebook_id, report_id):
         raise user_error(409, "当前报告不再处于大纲确认阶段")

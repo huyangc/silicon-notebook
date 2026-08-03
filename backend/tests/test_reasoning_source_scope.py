@@ -7,6 +7,7 @@ import pytest
 
 from app.models.common import Evidence
 from app.models.ask import AskIntentConfirmation, AskRequest, QueryIntentContract
+from app.models.source_scope import SourceScope
 from app.core.config import Settings
 from app.services.ask_service import AskService
 from app.services.evidence_scope import (
@@ -20,6 +21,7 @@ from app.services.reasoning_retrieval import (
     SubQuery,
 )
 from app.services.retrieval import RetrievedElement, RetrievedKnowledge
+from app.services.source_scope import source_scope_context
 
 
 class _Settings:
@@ -196,6 +198,37 @@ def test_confirmed_scope_excludes_third_manual_and_blocks_unsafe_io():
     assert not [step for step in result.trace if step.step_type == "source_scope"]
 
 
+def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
+    retrieval = _Retrieval()
+    settings = _Settings()
+    settings.graph_ppr_enabled = True
+    settings.reasoning_ppr_prefetch = False
+    retriever = ReasoningRetriever(
+        retrieval=retrieval,
+        model_clients=_Models(),
+        communities=_Communities(),
+        settings=settings,
+        collection_enumeration=_ScopeDirectory(),
+    )
+    retriever.plan = lambda *args, **kwargs: [SubQuery(query="plain question")]
+    retriever.reflect = lambda *args, **kwargs: ReflectDecision(
+        next_action="answer", sufficient=True
+    )
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"])
+    ):
+        assert retriever.enumeration_active() is False
+        result = retriever.run("nb", "plain question")
+
+    assert retrieval.ppr_calls == 0
+    unsafe = [
+        step for step in result.trace
+        if step.detail.get("reason") == "source_scope_unsafe_channels"
+    ]
+    assert unsafe
+
+
 def test_all_source_run_cannot_establish_selected_scope_after_retrieval():
     retrieval = _Retrieval()
     retriever = ReasoningRetriever(
@@ -332,6 +365,29 @@ def test_preview_resolves_selected_scope_and_reserves_confirmation_slot():
     assert len(contract.ambiguities) == 8
     assert contract.ambiguities[-1].id == "source_scope_confirmation"
     assert contract.needs_clarification is True
+
+
+def test_preview_cannot_resolve_a_source_outside_checkbox_ceiling():
+    question = "只依据《Manual B》回答"
+
+    class _IntentClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": question,
+                "source_refs": ["Manual B"],
+            })
+
+    service = object.__new__(AskService)
+    service.model_clients = SimpleNamespace(chat=lambda _workload: _IntentClient())
+    service.settings = Settings()
+    service.collection_enumeration = _ScopeDirectory()
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"])
+    ), pytest.raises(ValueError, match="未在当前勾选"):
+        service.preview_reasoning_intent("nb", question)
 
 
 def test_execution_reauthorizes_snapshot_and_rejects_changed_source_set():
