@@ -7,7 +7,7 @@ backend. Nothing here imports torch or MinerU at module load time:
                     and read back its `content_list`.
   - "cli"  mode  -> run MinerU's Python API (`do_parse` / `read_fn`) in an
                     isolated subprocess and read the `*_content_list.json` it writes.
-  - "off"  mode  -> `configured` is False; callers fall back to pypdf.
+  - "off"  mode  -> `configured` is False; callers use the local Python PDF fallback.
 
 The return value is always MinerU's `content_list` (a list of block dicts);
 mapping it to `SourceElement`s lives in `parsers.py` so it stays unit-testable
@@ -24,12 +24,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import List
 
 from app.core.config import Settings
+from app.services.mineru_http_retry import call_with_mineru_http_retries
 
 
 class MinerUClient:
@@ -101,10 +103,17 @@ class MinerUClient:
         if self.settings.mineru_vlm_server_url:
             fields["server_url"] = self.settings.mineru_vlm_server_url
 
-        payload = self._post_file_parse(fields, file_path, file_name)
+        payload = call_with_mineru_http_retries(
+            lambda: self._post_file_parse(fields, file_path, file_name),
+            max_retries=self.settings.mineru_max_retries,
+            sleep=self._sleep,
+        )
         content_list = _extract_content_list(payload)
         images = _extract_images(payload) if want_images else {}
         return content_list, images
+
+    def _sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
 
     # -- CLI mode (local MinerU Python API subprocess) -------------------------
 

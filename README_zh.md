@@ -208,7 +208,7 @@ preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正�
 
 - SQLite 是发行默认值；PostgreSQL 16 已是可直接选择的后端。仓库提供经过校验的单向 SQLite→PostgreSQL 快照 importer；它不提供实时同步、PostgreSQL→SQLite 回放或 MySQL 迁移。
 - Docker 不是一期默认工作流，也不是运行前提。
-- 公式、表格、版面和扫描 PDF 的高保真解析需要 MinerU；`MINERU_MODE=off` 使用 pypdf 文本降级。
+- 公式、图片和复杂扫描 PDF 的最高保真解析需要 MinerU；`MINERU_MODE=off` 使用本地 PyMuPDF4LLM 版面/Markdown 降级解析（pypdf 仅作最后兜底）。远端 MinerU HTTP 调用默认对瞬态失败额外重试 2 次（共最多 3 次；`MINERU_MAX_RETRIES`）。URL 云解析最终失败时，后端会下载 PDF 并用本地解析完成；来源界面会提示可能的质量损失，并提供重新解析/删除操作。
 - 知识抽取和模型回答需要绑定对应 workload；离线模式不会合成知识。
 - 图谱问答仍为 opt-in/实验能力，默认模式是 `chunk`。
 - Memory 只能由用户主动选择保存，并且仅创建者可见。

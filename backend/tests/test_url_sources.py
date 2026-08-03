@@ -1,6 +1,7 @@
 import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.models.sources import ScopedSourceDetail, SourceElement
 from app.services import remote_sources
 from app.services.remote_sources import PdfProbe
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
@@ -134,7 +135,9 @@ def test_process_source_url_prefers_local_over_cloud(local_repo, monkeypatch):
     assert any("Local parsed" in e.text for e in local_repo.source_elements(sid))
 
 
-def test_process_source_url_branch_failure_marks_failed(cloud_repo, monkeypatch):
+def test_process_source_url_cloud_failure_uses_python_fallback_and_can_reparse(
+    cloud_repo, monkeypatch
+):
     nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
     sid = _make_url_source(cloud_repo, monkeypatch, nb.id)
 
@@ -142,10 +145,79 @@ def test_process_source_url_branch_failure_marks_failed(cloud_repo, monkeypatch)
         raise RuntimeError("MinerU 云端解析失败: 超过页数")
 
     monkeypatch.setattr(cloud_repo.mineru_cloud_client, "parse_url_with_images", boom)
+    fallback_calls = []
+
+    def local_python_fallback(source_id, url, file_name, persist_image=None):
+        fallback_calls.append((source_id, url, file_name))
+        return [
+            SourceElement(
+                id="",
+                source_id=source_id,
+                element_type="paragraph",
+                location_label="PDF p.1 paragraph 1",
+                text="Locally recovered text",
+                metadata={"parser": "pymupdf4llm", "page_number": 1},
+            )
+        ]
+
+    monkeypatch.setattr(
+        cloud_repo._runtime.source_ingestion,
+        "parse_url_via_local",
+        local_python_fallback,
+    )
     cloud_repo.process_source(sid)
     detail = cloud_repo.get_source(sid)
-    assert detail.parse_status == "failed"
+    assert detail.parse_status == "extracted"
+    assert detail.parse_quality_warning is True
+    assert cloud_repo.list_sources(nb.id)[0].parse_quality_warning is True
+    assert detail.error_message.startswith("[pdf-python-fallback]")
     assert "超过页数" in detail.error_message
+    assert fallback_calls == [(sid, "https://a/doc.pdf", "doc.pdf")]
+    assert ScopedSourceDetail.of(detail).parse_failed is False
+    assert any(
+        element.text == "Locally recovered text"
+        for element in cloud_repo.source_elements(sid)
+    )
+
+    # The existing reparse action runs the same pipeline. Once MinerU is back,
+    # a successful run clears both the persisted diagnostic and safe warning.
+    monkeypatch.setattr(
+        cloud_repo.mineru_cloud_client,
+        "parse_url_with_images",
+        lambda url, **kw: ([{"type": "text", "text": "MinerU restored"}], {}),
+    )
+    cloud_repo.process_source(sid)
+    reparsed = cloud_repo.get_source(sid)
+    assert reparsed.parse_status == "extracted"
+    assert reparsed.parse_quality_warning is False
+    assert cloud_repo.list_sources(nb.id)[0].parse_quality_warning is False
+    assert reparsed.error_message == ""
+
+
+def test_process_source_url_cloud_failure_empty_fallback_keeps_quality_warning(
+    cloud_repo, monkeypatch
+):
+    nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
+    sid = _make_url_source(cloud_repo, monkeypatch, nb.id)
+    monkeypatch.setattr(
+        cloud_repo.mineru_cloud_client,
+        "parse_url_with_images",
+        lambda url, **kw: (_ for _ in ()).throw(RuntimeError("cloud unavailable")),
+    )
+    monkeypatch.setattr(
+        cloud_repo._runtime.source_ingestion,
+        "parse_url_via_local",
+        lambda *args, **kwargs: [],
+    )
+
+    cloud_repo.process_source(sid)
+
+    detail = cloud_repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    assert detail.parse_quality_warning is True
+    assert detail.error_message.startswith("[pdf-python-fallback]")
+    assert "No extractable text" in detail.error_message
+    assert ScopedSourceDetail.of(detail).parse_failed is False
 
 
 def test_url_scheduler_sees_committed_queued_row(cloud_repo, monkeypatch):

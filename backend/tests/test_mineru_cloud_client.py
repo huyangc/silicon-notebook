@@ -1,6 +1,7 @@
 import io
 import json
 import zipfile
+from urllib.error import HTTPError
 
 import pytest
 
@@ -16,6 +17,7 @@ def _client(monkeypatch, **env):
     monkeypatch.setenv("MINERU_API_TOKEN", env.get("token", "tok"))
     monkeypatch.setenv("MINERU_CLOUD_POLL_INTERVAL_SECONDS", env.get("interval", "1"))
     monkeypatch.setenv("MINERU_CLOUD_TIMEOUT_SECONDS", env.get("timeout", "600"))
+    monkeypatch.setenv("MINERU_MAX_RETRIES", env.get("retries", "2"))
     c = MinerUCloudClient(Settings())
     c._sleep = lambda s: None  # 不真睡
     return c
@@ -29,7 +31,7 @@ def _zip_with(name, data: bytes) -> bytes:
 
 
 def test_not_configured_raises(monkeypatch):
-    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
     c = MinerUCloudClient(Settings())
     assert c.configured is False
     with pytest.raises(MinerUCloudNotConfigured):
@@ -47,6 +49,80 @@ def test_happy_path_returns_content_list(monkeypatch):
     c._http_json = lambda method, url, payload=None: next(responses)
     c._http_bytes = lambda url: _zip_with("out/abc_content_list.json", json.dumps(content).encode())
     assert c.parse_url("https://a/x.pdf", data_id="src-1") == content
+
+
+def test_url_submit_retries_two_empty_json_responses(monkeypatch):
+    c = _client(monkeypatch)
+    content = [{"type": "text", "text": "Recovered", "page_idx": 0}]
+    submit_attempts = 0
+    sleeps = []
+
+    def flaky_json(method, url, payload=None):
+        nonlocal submit_attempts
+        if method == "POST":
+            submit_attempts += 1
+            if submit_attempts < 3:
+                raise json.JSONDecodeError("Expecting value", "", 0)
+            return {"code": 0, "data": {"task_id": "t-recovered"}}
+        return {"data": {"state": "done", "full_zip_url": "https://z/r.zip"}}
+
+    c._sleep = sleeps.append
+    c._http_json = flaky_json
+    c._http_bytes = lambda url: _zip_with(
+        "out/recovered_content_list.json", json.dumps(content).encode()
+    )
+
+    assert c.parse_url("https://a/flaky.pdf") == content
+    assert submit_attempts == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_url_submit_does_not_retry_explicit_http_400(monkeypatch):
+    c = _client(monkeypatch)
+    attempts = 0
+    sleeps = []
+
+    def rejected_json(method, url, payload=None):
+        nonlocal attempts
+        attempts += 1
+        raise HTTPError(url, 400, "bad request", {}, None)
+
+    c._sleep = sleeps.append
+    c._http_json = rejected_json
+
+    with pytest.raises(HTTPError) as exc:
+        c.parse_url("https://a/rejected.pdf")
+
+    assert exc.value.code == 400
+    assert attempts == 1
+    assert sleeps == []
+
+
+def test_result_download_retries_empty_2xx_bodies(monkeypatch):
+    c = _client(monkeypatch)
+    content = [{"type": "text", "text": "Recovered ZIP", "page_idx": 0}]
+    attempts = 0
+    sleeps = []
+
+    c._http_json = lambda method, url, payload=None: (
+        {"code": 0, "data": {"task_id": "t-download"}}
+        if method == "POST"
+        else {"data": {"state": "done", "full_zip_url": "https://z/r.zip"}}
+    )
+
+    def flaky_bytes(url):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return b""
+        return _zip_with("out/recovered_content_list.json", json.dumps(content).encode())
+
+    c._sleep = sleeps.append
+    c._http_bytes = flaky_bytes
+
+    assert c.parse_url("https://a/flaky-download.pdf") == content
+    assert attempts == 3
+    assert sleeps == [1.0, 2.0]
 
 
 def test_failed_state_raises_with_err_msg(monkeypatch):
@@ -180,7 +256,7 @@ def test_parse_file_poll_timeout_raises(monkeypatch, tmp_path):
 
 
 def test_parse_file_not_configured_raises(monkeypatch, tmp_path):
-    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
     c = MinerUCloudClient(Settings())
     with pytest.raises(MinerUCloudNotConfigured):
         c.parse_file_with_images(_fake_pdf(tmp_path))

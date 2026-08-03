@@ -9,7 +9,7 @@
 silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——并由 `DATABASE_URL`
 选择唯一 repository。发行默认 SQLite **无需 GPU、无需数据库服务、无需本地模型服务**；
 准备好可访问的服务后，也可直接使用 PostgreSQL 16。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
-远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 pypdf 回退
+远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 PyMuPDF4LLM 回退
 （`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
 
 ### 前置条件
@@ -58,7 +58,7 @@ cp model-services.example.toml .local/model-services.toml
   重建 scale 索引,见 [docs/runtime-dim-truncation-runbook.md](./runtime-dim-truncation-runbook.md)。
   **切勿改小 `EMBED_DIM` 来降维** —— 那会把全部存量向量当异维丢弃。
 - **PDF 高保真**(可选)—— 一个 MinerU 端点，见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)；
-  保持 `MINERU_MODE=off` 则走 pypdf 文本兜底。
+  保持 `MINERU_MODE=off` 则走本地 PyMuPDF4LLM 版面/Markdown 兜底。
 
 `.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
 服务、绑定与容量模板；[配置](#配置)按组列出常用项。
@@ -600,12 +600,22 @@ MINERU_PARSE_METHOD     # auto | txt | ocr
 MINERU_LANG             # 如 en、ch
 MINERU_MODEL_SOURCE     # huggingface | modelscope
 MINERU_TIMEOUT_SECONDS  # MinerU 调用超时
+MINERU_MAX_RETRIES      # 瞬态 HTTP 失败的额外尝试数，0..5（默认 2，即总共最多 3 次）
 MINERU_FORMULA_ENABLE   # true/false
 MINERU_TABLE_ENABLE     # true/false
 MINERU_RETURN_IMAGES    # 是否保留 PDF/DOCX/PPTX 文档中的内嵌图片（默认开 true；设 0/false 仅保留文字与图注）
 MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出丢弃）
 MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
 ```
+
+`MINERU_MAX_RETRIES` 由自建 `MINERU_MODE=http` 适配器与 mineru.net 云端请求共用，
+覆盖 URL 提交/轮询/结果下载以及签名文件上传。默认按 1 秒、2 秒做有界指数退避，
+只重试网络/超时、HTTP 408/425/429/5xx 和空响应或非 JSON 响应；明确的 4xx、解析
+终态失败和业务拒绝不重试，`MINERU_MODE=cli` 本地子进程仍只执行一次。
+适配器达到终态失败（或没有产出可用元素）后，来源摄取会回退本地 PyMuPDF4LLM；
+URL 来源会先下载已经过安全校验的公开 PDF。降级成功的来源仍为 `extracted`，客户端
+只收到安全的 `parse_quality_warning`，之后可重新解析；只有 PyMuPDF4LLM 自身缺失或
+报错时才使用 pypdf 作最后兜底。
 
 **日志：**
 

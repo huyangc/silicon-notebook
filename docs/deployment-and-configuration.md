@@ -11,7 +11,7 @@ one repository selected by `DATABASE_URL`. The shipped SQLite default requires *
 no database server, and no local model server**. PostgreSQL 16 is also a supported direct
 backend when an accessible server is provisioned. LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
 HTTP (`MINERU_MODE=http`), an isolated same-host subprocess (`MINERU_MODE=cli`), or the
-pypdf fallback (`MINERU_MODE=off`). The pipeline runs offline with deterministic fallbacks
+PyMuPDF4LLM fallback (`MINERU_MODE=off`, with pypdf as last resort). The pipeline runs offline with deterministic fallbacks
 when no model service or MinerU parser is configured.
 
 ### Prerequisites
@@ -63,7 +63,7 @@ answers). Users cannot supply or override model credentials, endpoints, models, 
   [docs/runtime-dim-truncation-runbook.md](./runtime-dim-truncation-runbook.md). Never
   lower `EMBED_DIM` to shrink vectors — that discards every stored vector as wrong-dim.
 - **PDF fidelity** (optional) — a MinerU endpoint, see [PDF parsing with MinerU](./operations.md#pdf-parsing-with-mineru);
-  leave `MINERU_MODE=off` for the pypdf text fallback.
+  leave `MINERU_MODE=off` for the local PyMuPDF4LLM layout/Markdown fallback.
 
 `.env.example` is the authoritative, fully-commented list of non-service variables and
 secret slots; `model-services.example.toml` is the service/binding/capacity template.
@@ -708,12 +708,25 @@ MINERU_PARSE_METHOD     # auto | txt | ocr
 MINERU_LANG             # e.g. en, ch
 MINERU_MODEL_SOURCE     # huggingface | modelscope
 MINERU_TIMEOUT_SECONDS  # MinerU call timeout
+MINERU_MAX_RETRIES      # extra transient HTTP attempts, 0..5 (default 2 = at most 3 total attempts)
 MINERU_FORMULA_ENABLE   # true/false
 MINERU_TABLE_ENABLE     # true/false
 MINERU_RETURN_IMAGES    # retain embedded images from PDF/DOCX/PPTX documents (default on: true; set 0/false to keep text and captions only)
 MINERU_MAX_IMAGE_BYTES  # max size per embedded image (default 5MB; larger images are dropped)
 MINERU_MAX_IMAGES_PER_SOURCE # max embedded images per source (default 200)
 ```
+
+`MINERU_MAX_RETRIES` is shared by the self-hosted `MINERU_MODE=http` adapter and
+mineru.net cloud requests, including URL submission/poll/result download and signed
+file upload. Retries use bounded exponential delays (1 second, then 2 seconds with the
+default) and apply only to transient network/timeout errors, HTTP 408/425/429/5xx, and
+empty or non-JSON responses. Explicit 4xx responses and terminal parsing/business
+failures are not retried; `MINERU_MODE=cli` remains a single local subprocess attempt.
+After the adapter reaches a terminal failure (or returns no usable elements), source
+ingestion falls back to local PyMuPDF4LLM. For URL sources the backend downloads the
+validated public PDF first. A successful fallback remains `extracted`, exposes only a
+safe `parse_quality_warning` to clients, and can be reparsed later; pypdf is used only
+if PyMuPDF4LLM itself is unavailable or errors.
 
 **Logging:**
 

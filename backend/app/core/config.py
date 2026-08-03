@@ -568,7 +568,7 @@ class Settings(BaseSettings):
     debug_logs_enabled: bool = Field(False, validation_alias="DEBUG_LOGS_ENABLED")
 
     # PDF parsing via MinerU (decoupled from GPU). Modes:
-    #   "off"  -> use the built-in pypdf text fallback (default; no GPU, offline)
+    #   "off"  -> use local PyMuPDF4LLM (pypdf last resort; no GPU, offline)
     #   "http" -> call a remote MinerU service (mineru-api) at mineru_api_url
     #   "cli"  -> run MinerU's Python API in an isolated subprocess
     mineru_mode: str = Field("off", validation_alias="MINERU_MODE")
@@ -581,6 +581,14 @@ class Settings(BaseSettings):
     mineru_lang: str = Field("", validation_alias="MINERU_LANG")
     mineru_model_source: str = Field("huggingface", validation_alias="MINERU_MODEL_SOURCE")
     mineru_timeout_seconds: int = Field(600, validation_alias="MINERU_TIMEOUT_SECONDS")
+    # Extra attempts after a transient remote HTTP failure. Shared by the
+    # self-hosted /file_parse adapter and mineru.net cloud requests.
+    mineru_max_retries: int = Field(
+        2,
+        ge=0,
+        le=5,
+        validation_alias="MINERU_MAX_RETRIES",
+    )
     mineru_formula_enable: bool = Field(True, validation_alias="MINERU_FORMULA_ENABLE")
     mineru_table_enable: bool = Field(True, validation_alias="MINERU_TABLE_ENABLE")
 

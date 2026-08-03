@@ -12,6 +12,7 @@ from app.models.sources import (
     SourceDetail,
     SourceElement,
     SourceSummary,
+    has_pdf_python_fallback_warning,
 )
 from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.postgres._store_utils import (
@@ -1011,6 +1012,7 @@ class SourceStore:
             doc_type=row.get("doc_type", ""),
             source_url=row.get("source_url", ""),
             extraction_warning=self.extraction_warning(connection, source_id),
+            parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
             kg_extracted=kg_extracted,
             authors=[author["name"] for author in meta["authors"]] if meta else [],
             pub_year=meta["pub_year"] if meta else None,
@@ -1094,6 +1096,7 @@ class SourceStore:
                 doc_type=row.get("doc_type", ""),
                 source_url=row.get("source_url", ""),
                 extraction_warning=warning(source_id),
+                parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
                 kg_extracted=source_id in kg_extracted_ids,
                 authors=[author["name"] for author in meta["authors"]] if meta else [],
                 pub_year=meta["pub_year"] if meta else None,

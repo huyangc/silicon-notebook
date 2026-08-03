@@ -6694,6 +6694,46 @@ button.chat-session-card {
   margin: 8px 0 4px;
 }
 
+.source-pdf-fallback-warning {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 8px 0 4px;
+  border: 1px solid #e7c978;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #fff9e8;
+  color: #604600;
+}
+
+.source-pdf-fallback-warning p {
+  margin: 4px 0 0;
+  line-height: 1.55;
+}
+
+.source-pdf-fallback-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.source-pdf-fallback-actions .button {
+  white-space: nowrap;
+}
+
+.source-pdf-fallback-actions .source-pdf-fallback-delete {
+  border-color: #e4b7b7;
+  color: #982d2d;
+}
+
+@media (max-width: 760px) {
+  .source-pdf-fallback-warning {
+    flex-direction: column;
+  }
+}
+
 .source-detail-paper { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
 .source-detail-paper .paper-title { font-weight: 600; line-height: 1.4; }
 .source-detail-paper .paper-authors { display: flex; flex-wrap: wrap; gap: 4px 12px; }

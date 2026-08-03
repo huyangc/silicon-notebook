@@ -915,8 +915,8 @@ def test_upload_file_uses_cloud_when_only_cloud_configured(tmp_path, monkeypatch
     assert any(e.element_type == "image" for e in elements)
 
 
-def test_upload_file_cloud_error_falls_back_to_pypdf(tmp_path, monkeypatch):
-    """云端上传解析抛错 → 回落 pypdf 纯文本，摄取不中断(仍产出文本 elements)。"""
+def test_upload_file_cloud_error_falls_back_to_local_python(tmp_path, monkeypatch):
+    """云端上传抛错 → 本地 Python 解析；空白页仍保留降级质量警告。"""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
@@ -938,6 +938,10 @@ def test_upload_file_cloud_error_falls_back_to_pypdf(tmp_path, monkeypatch):
     with repo._write() as db:
         db.execute("UPDATE sources SET file_path=? WHERE id=?", (str(real_pdf), sid))
 
-    repo.process_source(sid)   # 不抛：云端错 → pypdf 兜底
-    assert repo.get_source(sid).parse_status == "extracted"
+    repo.process_source(sid)   # 不抛：云端错 → 本地 Python PDF 兜底
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    assert detail.parse_quality_warning is True
+    assert detail.error_message.startswith("[pdf-python-fallback]")
+    assert "No extractable text" in detail.error_message
     assert repo.source_asset_ids(sid) == []   # 空白页无图片资产

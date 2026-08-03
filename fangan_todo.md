@@ -7,7 +7,7 @@
 
 ## 状态速览
 
-- ✅ 已完成主体：v0.1 闭环、v0.2 Rule 治理、PDF(MinerU+MLX/pypdf+KaTeX)、知识抽取(LLM 分窗+CJK 模糊绑定+启发式+去重/置信度)、混合检索、citation 校验、Article 研究简报+反馈。
+- ✅ 已完成主体：v0.1 闭环、v0.2 Rule 治理、PDF(MinerU+PyMuPDF4LLM/pypdf 最终兜底+KaTeX)、知识抽取(LLM 分窗+CJK 模糊绑定+启发式+去重/置信度)、混合检索、citation 校验、Article 研究简报+反馈。
 - ✅ 本轮(dev 分支)新完成：**Explain Rule(§6.10)**、**Derived Rule Candidate 审核队列(§7.5)**、**创建富字段+6 模板(§6.1/§6.2)**、**CSV/Excel 解析(§6.3)**、**质量/分析看板(§16)**。详见 `fangan_done.md`。
 - 🔧 剩余方向：Article 深度可视化 → v0.4 Review Mode → v1.0 企业。
 
