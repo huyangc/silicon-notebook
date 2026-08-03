@@ -92,8 +92,28 @@ def _validate_base_scope(notebook: NotebookSummary,
     against), but the valid universe is already loaded on ``notebook`` --
     mounted base libraries are not a per-request repo round trip like sources
     are.
+
+    codex #431 R3: ``exclude`` + an EMPTY list means "exclude nothing", i.e.
+    every mounted library participates -- semantically identical to omitting
+    this field entirely. The browser sends exactly this shape whenever the
+    "select all libraries" checkbox is checked (its compact "nothing excluded"
+    representation), on every submission, regardless of how many libraries are
+    mounted. Expanding it into an ``include`` list of every mounted id would
+    make the frozen list's length track the mount count, and
+    ``BaseNotebookScope.notebook_ids`` is capped at 1000 -- a notebook with
+    more than 1000 mounted libraries (the mount API imposes no limit) would
+    raise an uncaught pydantic ``ValidationError`` here, 500ing every browser
+    Ask/report submission. Short-circuit to ``None`` instead: that is the
+    established "unrestricted" value every downstream consumer
+    (``source_scope_context``, ``_scope_receipt``, ``filter_retrieval_items``,
+    ``scoped_subgraph_nodes``, ...) already treats as "no library narrowing",
+    so this also skips their per-item/per-node scope checks on the default
+    (nothing excluded) path instead of expanding to a ceiling that is a no-op
+    by construction.
     """
     if scope is None:
+        return None
+    if scope.mode == "exclude" and not scope.notebook_ids:
         return None
     valid_ids = {ref.id for ref in notebook.base_notebooks}
     submitted = set(scope.notebook_ids)

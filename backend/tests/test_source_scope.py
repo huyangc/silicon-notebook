@@ -352,6 +352,52 @@ def test_validate_base_scope_omitted_returns_none():
     assert _validate_base_scope(notebook, None) is None
 
 
+def test_validate_base_scope_exclude_nothing_short_circuits_to_none():
+    """codex #431 R3: ``exclude`` + an EMPTY list means "exclude nothing" --
+    every mounted library still participates -- which is the exact same
+    selection as omitting ``base_scope`` entirely. The browser sends this
+    compact shape whenever its "select all libraries" checkbox is checked, on
+    every submission.
+
+    Before this fix, the function had no early return for this shape: it fell
+    through to the exclude->include expansion branch below and froze into an
+    ``include`` scope explicitly naming every one of ``notebook``'s mounted
+    libraries. That expansion is what overflows ``BaseNotebookScope
+    .notebook_ids``'s ``max_length=1000`` on notebooks with more than 1000
+    mounted libraries -- see the scale regression right below this test. The
+    fix must short-circuit to ``None`` -- the established "unrestricted"
+    value every downstream consumer already treats as "no library
+    narrowing" -- before that branch ever runs."""
+    notebook = _notebook(bases=[_notebook_ref("b1"), _notebook_ref("b2")])
+    resolved = _validate_base_scope(
+        notebook, BaseNotebookScope(mode="exclude", notebook_ids=[])
+    )
+    assert resolved is None
+
+
+def test_validate_base_scope_exclude_nothing_survives_beyond_the_1000_mount_cap():
+    """Regression for the actual production crash (codex #431 R3): a notebook
+    with MORE mounted reference libraries than ``BaseNotebookScope
+    .notebook_ids``'s ``max_length=1000`` cap must not raise when the
+    browser's default "select all" checkbox state (``exclude`` + ``[]``) is
+    validated. The mount API imposes no limit on how many libraries a
+    notebook may mount, so this is reachable in production.
+
+    Pre-fix, this always expanded ``exclude`` + ``[]`` into an ``include``
+    list naming every one of the 1200 mounted ids here, which pydantic's
+    ``max_length=1000`` on ``BaseNotebookScope.notebook_ids`` rejects with an
+    uncaught ``ValidationError`` -- 500ing every browser Ask/report submission
+    on any notebook past the 1000-mount mark. This asserts the crash is gone:
+    validation must complete and return the unrestricted ``None``, not merely
+    "not crash with some other value"."""
+    bases = [_notebook_ref(f"b{i}") for i in range(1200)]
+    notebook = _notebook(bases=bases)
+    resolved = _validate_base_scope(
+        notebook, BaseNotebookScope(mode="exclude", notebook_ids=[])
+    )
+    assert resolved is None
+
+
 def test_validate_base_scope_rejects_ids_not_mounted_on_this_notebook():
     notebook = _notebook(bases=[_notebook_ref("b1")])
     with pytest.raises(HTTPException) as exc:

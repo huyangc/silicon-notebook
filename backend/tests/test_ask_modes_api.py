@@ -151,13 +151,27 @@ def test_ask_freezes_an_exclude_nothing_base_scope_before_the_empty_scope_gate(
     tmp_path, monkeypatch
 ):
     """Pins the same call site from the other side: ``_require_non_empty_scope``
-    reads a resolved base scope's ``notebook_ids`` as if it were already
-    frozen to ``include`` (the selected set). ``_validate_base_scope`` is
-    what performs that freeze -- an unfrozen ``exclude`` scope with an empty
-    list means "exclude nothing" (every mounted library still participates),
-    but read naively it looks like "nothing selected". On a notebook with NO
-    local sources whose only evidence is a mounted library, bypassing
-    ``_validate_base_scope`` would misread "exclude nothing" as empty and
+    must not read an ``exclude`` scope with an empty list as "nothing
+    selected". ``exclude`` + `[]` means "exclude nothing" (every mounted
+    library still participates) -- the browser sends exactly this compact
+    shape whenever "select all libraries" is checked.
+
+    codex #431 R3 changed HOW ``_validate_base_scope`` handles that shape: it
+    used to freeze it into an ``include`` list naming every mounted library
+    (which made the frozen list's length track the mount count and could
+    exceed ``BaseNotebookScope.notebook_ids``'s 1000-item cap, 500ing the
+    request on any notebook with more than 1000 mounted libraries -- see
+    ``test_ask_accepts_an_exclude_nothing_base_scope_beyond_the_1000_mount_cap``
+    below). It now short-circuits straight to ``None`` -- the same value an
+    omitted ``base_scope`` field resolves to -- because "exclude nothing" and
+    "no scope submitted" are the same selection. This test now pins the
+    OUTCOME (an unfrozen/omitted-equivalent base scope must not make
+    ``_require_non_empty_scope`` treat the notebook's mounted-library evidence
+    as absent) rather than the specific frozen shape, since that shape no
+    longer exists for this input: on a notebook with NO local sources whose
+    only evidence is a mounted library, a regression that made
+    ``_validate_base_scope`` return anything read as "nothing selected" here
+    (the pre-fix frozen empty-selection shape, or a naive empty list) would
     wrongly 409 a request the checkbox contract must accept 200."""
     client = _client(tmp_path, monkeypatch)
     from app.api.ask_routes import repository
