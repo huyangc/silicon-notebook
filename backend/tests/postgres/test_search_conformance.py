@@ -666,3 +666,152 @@ def test_exact_chunk_probe_is_planner_usable_on_the_trigram_index(postgres_datab
         ).fetchall()
     plan = "\n".join(str(next(iter(row.values()))) for row in plan_rows)
     assert "idx_chunks_text_trgm" in plan
+
+
+# ── corpus-language gate on the lexical candidate probe ───────────────
+
+_LONG_CHINESE_QUERY = (
+    "请围绕这份资料回答：关于时序收敛与布局布线优化的整体方法论是什么？"
+    "必须覆盖以下主题：时钟树综合的关键步骤、静态时序分析的约束建模、"
+    "拥塞驱动的布局策略、以及物理验证阶段的常见失败模式。"
+    "请给出结构化的对比与结论，并说明每个结论的依据来源。"
+    "重点关注 set_db 与 place_opt_design 在 timing closure 流程中的作用。"
+)
+
+
+class _ProbeCountingConnection:
+    """Delegates to a real connection while counting LATERAL probe terms.
+
+    The probe count is read off the SQL that PostgreSQL actually executed, so
+    it measures the adapter, not the helper the assertions also call.
+    """
+
+    def __init__(self, connection):
+        self._connection = connection
+        self.lateral_probes = 0
+
+    def execute(self, statement, params=None):
+        if "CROSS JOIN LATERAL" in statement:
+            self.lateral_probes = statement.count("(%s,%s,%s)")
+            assert self.lateral_probes, "expected an inline VALUES term list"
+        return (self._connection.execute(statement, params)
+                if params is not None else self._connection.execute(statement))
+
+
+def _seed_latin_only_notebook(harness: SearchHarness) -> None:
+    """A second notebook holding no CJK character at all."""
+    with harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,"
+            "created_by,created_at,updated_at,tier) "
+            "VALUES (%s,%s,'','semiconductor','ready',%s,%s,%s,'personal')",
+            ("nb-latin", "Latin only", "user-search", NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,status,"
+            "parse_status,file_name,summary,created_at,updated_at) "
+            "VALUES (%s,%s,%s,'file','ready','ready',%s,%s,%s,%s)",
+            ("source-latin", "nb-latin", "Manual", "manual.md", "", NOW, NOW),
+        )
+    harness.chunks.replace_source_chunks(
+        "source-latin", "nb-latin",
+        [
+            ChunkWrite(
+                id="chunk-latin-set-db",
+                text="set_db configures the engine before place_opt_design runs",
+                section_path="Manual > Commands",
+                element_ids=(),
+            ),
+            ChunkWrite(
+                id="chunk-latin-timing",
+                text="timing closure needs placement optimization and CTS",
+                section_path="Manual > Flow",
+                element_ids=(),
+            ),
+            ChunkWrite(
+                id="chunk-latin-distractor",
+                text="unrelated power integrity discussion",
+                section_path="Manual > Misc",
+                element_ids=(),
+            ),
+        ],
+        created_at=NOW,
+    )
+
+
+@pytest.mark.postgres_integration
+def test_all_cjk_terms_return_nothing_from_a_latin_corpus(search_harness):
+    """The proof the gate rests on, executed against a real PostgreSQL.
+
+    Every trigram of an all-CJK term still contains a CJK character, so against
+    a corpus holding none the intersection is empty: `%` cannot fire and ILIKE
+    cannot substring-match. These probes are pure cost.
+    """
+    from app.repositories.lexical_query import lexical_recall_terms
+
+    _seed_latin_only_notebook(search_harness)
+    cjk_terms = [
+        term for term in lexical_recall_terms(_LONG_CHINESE_QUERY)
+        if term and all("㐀" <= char <= "鿿" for char in term)
+    ]
+    assert len(cjk_terms) >= 20, "expected the CJK fragment crowd"
+    with search_harness.database.connect() as connection:
+        rows = chunk_candidate_rows_for_terms(
+            connection, "nb-latin", cjk_terms, per_term_limit=13
+        )
+    assert rows == []
+
+
+@pytest.mark.postgres_integration
+def test_corpus_gate_keeps_every_latin_hit_while_cutting_the_probe_count(
+        search_harness):
+    """Same rows, far fewer LATERAL probes — measured 64 -> 3 on 7,026 chunks."""
+    from app.repositories.lexical_query import (
+        corpus_gated_recall_terms,
+        lexical_recall_terms,
+    )
+
+    _seed_latin_only_notebook(search_harness)
+    ungated_terms = lexical_recall_terms(_LONG_CHINESE_QUERY)
+    gated_terms = corpus_gated_recall_terms(_LONG_CHINESE_QUERY, ["en"])
+    assert len(gated_terms) * 4 < len(ungated_terms)
+
+    with search_harness.database.connect() as connection:
+        ungated_probe = _ProbeCountingConnection(connection)
+        ungated = search_harness.knowledge.chunk_fts_search(
+            ungated_probe, "nb-latin", _LONG_CHINESE_QUERY, 12
+        )
+        gated_probe = _ProbeCountingConnection(connection)
+        gated = search_harness.knowledge.chunk_fts_search(
+            gated_probe, "nb-latin", _LONG_CHINESE_QUERY, 12,
+            corpus_langs=["en"],
+        )
+    assert [row["chunk_id"] for row in gated] == [
+        row["chunk_id"] for row in ungated
+    ]
+    assert "chunk-latin-set-db" in {row["chunk_id"] for row in gated}
+    # The SQL that actually reached PostgreSQL has to carry the smaller term
+    # crowd. Equal rows alone would still pass if the adapter accepted
+    # `corpus_langs` and then quietly ignored it.
+    assert ungated_probe.lateral_probes == len(ungated_terms)
+    assert gated_probe.lateral_probes == len(gated_terms)
+
+
+@pytest.mark.postgres_integration
+def test_corpus_gate_leaves_a_bilingual_notebook_untouched(search_harness):
+    """`nb-search` holds 热设计, so the gate must never fire for it."""
+    with search_harness.database.connect() as connection:
+        ungated = search_harness.knowledge.chunk_fts_search(
+            connection, "nb-search", "热设计", 12
+        )
+        gated = search_harness.knowledge.chunk_fts_search(
+            connection, "nb-search", "热设计", 12, corpus_langs=["zh", "en"]
+        )
+        objects_gated = search_harness.knowledge.fts_search(
+            connection, "nb-search", "热设计", 12, corpus_langs=["zh", "en"]
+        )
+    assert [row["chunk_id"] for row in gated] == [
+        row["chunk_id"] for row in ungated
+    ]
+    assert _recall([row["chunk_id"] for row in gated], EXPECTED_CHUNK_IDS) == 1.0
+    assert _recall([row["object_id"] for row in objects_gated], EXPECTED_IDS) == 1.0

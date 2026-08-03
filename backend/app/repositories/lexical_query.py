@@ -9,6 +9,7 @@ owns that parse and both this layer and the scoring layer read it from there.
 from __future__ import annotations
 
 import re
+from typing import Sequence
 
 # `MAX_EXACT_PHRASE_CHARS` / `MAX_QUOTED_PHRASES` / `exact_probe_query` are
 # re-exported deliberately: this module is the lexical layer's facade, and the
@@ -156,9 +157,23 @@ def lexical_recall_terms(query: str) -> list[str]:
     its historical treatment, and a query without quotes produces byte-identical
     output to the pre-change implementation.
     """
+    return _recall_terms_with_head(query)[0]
+
+
+def _recall_terms_with_head(query: str) -> tuple[list[str], int]:
+    """`lexical_recall_terms` plus the size of its protected priority head.
+
+    One derivation, two views. The term list is exactly what
+    `lexical_recall_terms` has always returned — this is not a second spelling
+    of the decomposition — and the extra number is the count of leading terms
+    the truncation logic below already refuses to evict (the user's quoted
+    spans and the whole-sentence term). `corpus_gated_recall_terms` needs that
+    boundary so a corpus filter can only ever reach the tail; deriving it a
+    second time from the query is exactly the drift this returns to prevent.
+    """
     needle = (query or "").strip()
     if len(needle) < 3:
-        return []
+        return [], 0
 
     phrases, remainder = split_quoted_phrases(needle)
     # Quoted spans are the most precise terms in the query, so they take the
@@ -223,13 +238,19 @@ def lexical_recall_terms(query: str) -> list[str]:
             # query that is nothing but one quoted phrase yields the same string
             # twice and must protect one slot, not two.
             protected += 1
-    protected = max(1, protected)
+    # `protected` is the true head size and is what the corpus gate reads.
+    # The eviction loop below keeps its historical floor of 1 so its output
+    # stays byte-identical; the two numbers differ only for a query with no
+    # quotes whose sentence overflowed MAX_EXACT_PHRASE_CHARS, where "protect
+    # slot 0" was always an eviction-loop guard rather than a claim that the
+    # first term is user-declared.
+    floor = max(1, protected)
     if len(terms) <= MAX_LEXICAL_TERMS:
-        return terms
+        return terms, protected
     keep = terms[:MAX_LEXICAL_TERMS]
     if not ident_terms:
         # No identifiers injected → historical truncation, byte-identical.
-        return keep
+        return keep, protected
     # Identifier terms sit ahead of the run terms, so on overflow they squeeze
     # the tail — which is where the CJK tri-gram terms live. A pasted command
     # list plus a Chinese question measurably lost 9 of 11 CJK terms; without
@@ -238,26 +259,107 @@ def lexical_recall_terms(query: str) -> list[str]:
     # evicting the lowest-priority (last non-CJK, non-phrase) terms. Only
     # active when identifiers were injected — identifier-free queries keep the
     # historical output bit-for-bit.
-    def _has_cjk(term: str) -> bool:
-        return any(_is_cjk(char) for char in term)
-
     overflow_cjk = [t for t in terms[MAX_LEXICAL_TERMS:] if _has_cjk(t)]
     kept_cjk = sum(1 for t in keep if _has_cjk(t))
     need = min(len(overflow_cjk), max(0, CJK_RESERVED_TERMS - kept_cjk))
     for term in overflow_cjk[:need]:
         # Never evict the priority head: the whole-sentence term (slot 0 as
         # before) and, when the user quoted spans, the phrases ahead of it.
-        for index in range(len(keep) - 1, protected - 1, -1):
+        for index in range(len(keep) - 1, floor - 1, -1):
             if not _has_cjk(keep[index]):
                 del keep[index]
                 keep.append(term)
                 break
-    return keep
+    return keep, protected
 
 
-def sqlite_fts_match_expression(query: str) -> str:
-    """Quote every recall term so user input cannot become FTS5 syntax."""
+def _has_cjk(term: str) -> bool:
+    return any(_is_cjk(char) for char in term)
+
+
+def _is_all_cjk(term: str) -> bool:
+    """Every character is CJK — the exact shape the run decomposer emits.
+
+    Deliberately stricter than `_has_cjk`, because the corpus gate below needs
+    a PROOF of zero hits, not a likelihood. Pad an all-CJK term for trigram
+    extraction and every one of its trigrams still contains a CJK character, so
+    against a corpus holding no CJK character at all the trigram intersection
+    is empty (`similarity` is 0, `%` is false) and a substring match is
+    impossible. A *mixed* term such as `abc时序` shares the `abc` trigram and
+    therefore carries no such proof, so it is never dropped.
+    """
+    return bool(term) and all(_is_cjk(char) for char in term)
+
+
+def corpus_language_drops_cjk(corpus_langs: Sequence[str] | None) -> bool:
+    """Would the corpus gate drop CJK terms for this notebook's languages?
+
+    `None`/empty means "unknown", which never gates: the caller has to have
+    actually probed the corpus for a term to be discarded.
+    """
+    return bool(corpus_langs) and "zh" not in corpus_langs
+
+
+def corpus_gated_recall_terms(
+    query: str, corpus_langs: Sequence[str] | None = None
+) -> list[str]:
+    """`lexical_recall_terms` minus the probes the corpus cannot possibly answer.
+
+    A long Chinese question decomposes into ~60 CJK tri-gram terms. Every one
+    of them is a real per-term probe on PostgreSQL, and against a corpus with
+    no CJK character each probe scans the notebook's chunks, computes a
+    trigram similarity per row, and returns nothing: 7,026 chunks × 64 terms
+    measured at 29.7s for 26 rows, all 26 of which came from the two Latin
+    terms. Four report sections in parallel then blow through
+    POSTGRES_STATEMENT_TIMEOUT_SECONDS and the whole lexical arm dies
+    fail-open — so the cost of these guaranteed-empty probes is not slowness,
+    it is the silent loss of the lexical hits that *would* have matched.
+
+    Three deliberate asymmetries:
+
+    * Only the CJK direction. Dropping Latin terms against a Chinese-only
+      corpus would be the mirror-image argument, and it is wrong in practice:
+      Latin identifiers (`set_db`, `config.yaml`, product names, formulas) are
+      ordinary content inside Chinese documents, so "the sampled chunks held
+      no Latin letter" is a far weaker claim than "held no CJK character" —
+      and `_notebook_langs` returns ["en"] for an empty/unknown corpus, which
+      would turn the mirror rule into a filter that fires on a guess.
+    * Only the tail. The priority head — the user's `"..."` spans and the
+      whole-sentence term — is never filtered. A quoted span is the one part of
+      the query the user explicitly declared must be matched verbatim
+      (`app.core.query_syntax`), and the gate must not become a second, quieter
+      truncation of the slots the existing MAX_LEXICAL_TERMS cut already
+      refuses to touch.
+    * Only provably-empty terms (`_is_all_cjk`), never merely CJK-containing
+      ones.
+
+    The corpus language is a SAMPLED probe (`_notebook_langs`, head ∪ tail of
+    the chunk table), so a notebook whose only Chinese source sits in the
+    unsampled middle loses CJK *lexical* recall until the sample sees it again;
+    ANN/semantic recall is untouched, the same probe already decides whether
+    Chinese keywords get minted at all for that notebook, and
+    `LEXICAL_LANGUAGE_GATE_ENABLED=0` turns the whole thing off.
+    """
+    terms, head = _recall_terms_with_head(query)
+    if not corpus_language_drops_cjk(corpus_langs):
+        return terms
+    return [
+        term for index, term in enumerate(terms)
+        if index < head or not _is_all_cjk(term)
+    ]
+
+
+def sqlite_fts_match_expression(
+    query: str, corpus_langs: Sequence[str] | None = None
+) -> str:
+    """Quote every recall term so user input cannot become FTS5 syntax.
+
+    The corpus gate applies here too. FTS5 answers a guaranteed-empty trigram
+    term cheaply, so this side is about determinism rather than cost: both
+    backends must probe the SAME term set, or one notebook's recall would
+    depend on which adapter served it.
+    """
     return " OR ".join(
         '"' + term.replace('"', '""') + '"'
-        for term in lexical_recall_terms(query)
+        for term in corpus_gated_recall_terms(query, corpus_langs)
     )

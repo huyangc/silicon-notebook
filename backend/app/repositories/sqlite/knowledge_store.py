@@ -1812,10 +1812,14 @@ class KnowledgeStore:
     def fts_search(
         db, notebook_id: str, q: str, k: int = 30, *,
         allowed_source_ids: Sequence[str] | None = None,
+        corpus_langs: Sequence[str] | None = None,
     ) -> List[Dict]:
         """FTS5 MATCH(kg_objects_fts, trigram)。notebook 维度过滤。返回
-        [{object_id, name, score, match:'lexical'}]。q 空 → []。"""
-        match_query = sqlite_fts_match_expression(q)
+        [{object_id, name, score, match:'lexical'}]。q 空 → []。
+
+        `corpus_langs` 是调用方已探得的语料语言(`_notebook_langs`);缺省 None
+        = 未探测 = 不过滤,行为逐位不变。见 `corpus_gated_recall_terms`。"""
+        match_query = sqlite_fts_match_expression(q, corpus_langs)
         if not match_query:
             return []
         if allowed_source_ids is not None:
@@ -1846,10 +1850,14 @@ class KnowledgeStore:
     def chunk_fts_search(
         db, notebook_id: str, q: str, k: int = 30, *,
         allowed_source_ids: Sequence[str] | None = None,
+        corpus_langs: Sequence[str] | None = None,
     ) -> List[Dict]:
         """FTS5 MATCH(chunks_fts, trigram)。notebook 维度过滤。返回
-        [{chunk_id, score, match:'lexical'}]。q 空 → []。"""
-        match_query = sqlite_fts_match_expression(q)
+        [{chunk_id, score, match:'lexical'}]。q 空 → []。
+
+        `corpus_langs` 同 `fts_search`:两个后端必须探同一组词项,否则同一个库
+        的召回口径会随适配器分叉。"""
+        match_query = sqlite_fts_match_expression(q, corpus_langs)
         if not match_query:
             return []
         if allowed_source_ids is not None:

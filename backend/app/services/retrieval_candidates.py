@@ -462,6 +462,23 @@ class CandidateRetrievalService(_RetrievalState):
         self._notebook_langs_cache[notebook_id] = langs
         return langs
 
+    def _lexical_corpus_langs(self, notebook_id: str) -> Optional[List[str]]:
+        """The corpus languages a lexical probe set may be filtered against.
+
+        Always the languages of the notebook the ADAPTER is about to query —
+        pass the same `notebook_id` that goes into `fts_search` /
+        `chunk_fts_search`, never the active notebook, or a mounted reference
+        library would be filtered against somebody else's corpus.
+
+        `None` means "do not filter": the adapters treat an unprobed corpus as
+        unknown, so the kill switch is expressed simply by not answering.
+        `_notebook_langs` is cached per notebook and invalidated at chunk-write
+        settle points, so this costs no query on the hot path.
+        """
+        if not self.settings.lexical_language_gate_enabled:
+            return None
+        return self._notebook_langs(notebook_id)
+
     def _embed_query(self, query: str) -> Optional[List[float]]:
         """查询 embedding(端点按原生维出向量)→ 运行时截断(EMBED_RUNTIME_DIM,
         与语料侧 build_matrix 共用 truncate_vec 同一口径)。查询/语料两侧维度
@@ -672,13 +689,15 @@ class CandidateRetrievalService(_RetrievalState):
     ) -> list[dict]:
         """Fail-open bounded lexical object recall shared by KG and relations."""
         try:
+            corpus_langs = self._lexical_corpus_langs(notebook_id)
             if allowed_source_ids is None:
                 return self.knowledge.fts_search(
-                    db, notebook_id, query, k=recall
+                    db, notebook_id, query, k=recall, corpus_langs=corpus_langs
                 )
             return self.knowledge.fts_search(
                 db, notebook_id, query, k=recall,
                 allowed_source_ids=allowed_source_ids,
+                corpus_langs=corpus_langs,
             )
         except Exception as exc:  # noqa: BLE001 — lexical failure keeps ANN usable
             self.event_log.emit({
@@ -1720,15 +1739,18 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import query_sims
         hits, fts_error = [], ""
         try:
+            corpus_langs = self._lexical_corpus_langs(notebook_id)
             with self._connect() as db:
                 if allowed_source_ids is None:
                     hits = self.knowledge.chunk_fts_search(
-                        db, notebook_id, query, k=recall
+                        db, notebook_id, query, k=recall,
+                        corpus_langs=corpus_langs,
                     )
                 else:
                     hits = self.knowledge.chunk_fts_search(
                         db, notebook_id, query, k=recall,
                         allowed_source_ids=allowed_source_ids,
+                        corpus_langs=corpus_langs,
                     )
         except Exception as exc:  # noqa: BLE001 — 降级中的降级,守卫本身绝不抛
             fts_error = f"{type(exc).__name__}: {exc}"
@@ -1827,9 +1849,11 @@ class CandidateRetrievalService(_RetrievalState):
         lexical_ids = set()
         # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
         try:
+            corpus_langs = self._lexical_corpus_langs(notebook_id)
             with self._connect() as db:
                 lex = self.knowledge.chunk_fts_search(
-                    db, notebook_id, query, k=recall)
+                    db, notebook_id, query, k=recall,
+                    corpus_langs=corpus_langs)
             for h in lex:
                 cid = h["chunk_id"]
                 lexical_ids.add(cid)
@@ -1936,14 +1960,17 @@ class CandidateRetrievalService(_RetrievalState):
 
         allowed_source_ids = scoped_allowed_source_ids(notebook_id)
         try:
+            corpus_langs = self._lexical_corpus_langs(notebook_id)
             with self._connect() as db:
                 if allowed_source_ids is None:
                     hits = self.knowledge.chunk_fts_search(
-                        db, notebook_id, needle, k=recall)
+                        db, notebook_id, needle, k=recall,
+                        corpus_langs=corpus_langs)
                 else:
                     hits = self.knowledge.chunk_fts_search(
                         db, notebook_id, needle, k=recall,
                         allowed_source_ids=allowed_source_ids,
+                        corpus_langs=corpus_langs,
                     )
             if not hits:
                 return []
