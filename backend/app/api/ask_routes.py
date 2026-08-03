@@ -147,6 +147,17 @@ def _require_non_empty_scope(
     """
     if resolved_source_scope is None and resolved_base_scope is None:
         return
+    # ⚠ 已知限制(codex #431 P2,核实属实但刻意未修):省略本地维度时按可见来源数判,
+    # 而本地证据宇宙还含 Knowhow 格、已确认 Memory、本地图谱——ask_available 的四个
+    # 分支里有三个是本地的,counts["sources"] 只覆盖第一个的一部分。于是「只有
+    # Knowhow + 显式排除全部参考库」会被误拒成空范围。
+    # 正确修法要 NotebookSummary 暴露「本地证据宇宙」的分解(ask_available 现在是合并
+    # 后的单个布尔,分不出是本地还是参考库撑起来的),改动面超出本次特性。
+    # 不改成无条件 True:那会让「真的零证据 + 排除全部参考库」重新变成不拒,烧一轮
+    # 模型调用产出零证据答案——正是本函数存在的理由(见 test_base_only_submission_
+    # on_a_library_only_notebook_is_409)。
+    # 可达性:浏览器恒发 source_scope(sourceScopePayload 永不返回 undefined),故界面
+    # 路径不可达;只有直连 API 且省略 source_scope、同时提交 base_scope 才触发。
     has_local = (
         bool(resolved_source_scope.source_ids)
         if resolved_source_scope is not None
@@ -327,8 +338,11 @@ async def preview_ask_intent(
         try:
             from app.services.source_scope import source_scope_context
 
+            # 预检必须用与执行**同一个**库上限:预检期 resolve_evidence_scope()
+            # 若还看得见被取消勾选的库,会为它里面的来源签出一份确认预览,而提交时
+            # 按 payload.base_scope 重新解析必然失败——用户拿到一个走不通的确认。
             with source_scope_context(
-                notebook_id, resolved_source_scope, None
+                notebook_id, resolved_source_scope, resolved_base_scope
             ):
                 return repo.preview_reasoning_intent(
                     notebook_id, question, history, cancel_event=cancel_event

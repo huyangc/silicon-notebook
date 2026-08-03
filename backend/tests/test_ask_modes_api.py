@@ -182,3 +182,65 @@ def test_ask_freezes_an_exclude_nothing_base_scope_before_the_empty_scope_gate(
         "base_scope": {"mode": "exclude", "notebook_ids": []},
     })
     assert r.status_code == 200
+
+
+def test_ask_intent_preview_opens_the_same_base_scope_ceiling_as_submission(
+    tmp_path, monkeypatch
+):
+    """codex #431 P2 (fixed, not yet pinned): ``preview_ask_intent`` used to
+    open ``source_scope_context(notebook_id, resolved_source_scope, None)`` --
+    a hardcoded ``None`` for the base-library dimension -- while the eventual
+    ``/ask``/``/ask/stream`` submission opens it with ``payload.base_scope``.
+    A question naming a source that lives only in an UNCHECKED mounted
+    library would then get resolved and signed off during understanding
+    (the preview still saw every mounted library), only to fail once actually
+    submitted with the checkbox scope applied -- a confirmation the user
+    could never act on.
+
+    This pins that the preview now resolves and threads the SAME frozen
+    ``base_scope`` ceiling ``_require_ask_available`` already validates for
+    submission, by stubbing ``preview_reasoning_intent`` with a probe that
+    reads ``current_source_scope()`` from inside the ``source_scope_context``
+    block. A mutation reverting the call site to a literal ``None`` third
+    argument makes this assert against ``scope is None`` fail."""
+    from app.models.ask import QueryIntentContract
+
+    client = _client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+
+    base = client.post("/api/notebooks", json={"name": "base lib"}).json()["id"]
+    repo.mark_notebook_base(base)
+    now = "2026-07-20T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"ko-{base}", base, "concept", "approved", "{}", "[]", now, now),
+        )
+
+    active = client.post("/api/notebooks", json={"name": "active"}).json()["id"]
+    repo.replace_notebook_bases(active, [base], repo.current_user().id)
+
+    captured = {}
+
+    def probe(notebook_id, question, history="", cancel_event=None):
+        from app.services.source_scope import current_source_scope
+        captured["scope"] = current_source_scope()
+        return QueryIntentContract(objective=question, resolved_question=question)
+
+    monkeypatch.setattr(repo, "preview_reasoning_intent", probe)
+
+    r = client.post(f"/api/notebooks/{active}/ask/intent", json={
+        "question": "q",
+        "base_scope": {"mode": "include", "notebook_ids": [base]},
+    })
+    assert r.status_code == 200
+    scope = captured["scope"]
+    assert scope is not None, (
+        "resolved base_scope must reach source_scope_context during "
+        "/ask/intent, not just at submission"
+    )
+    assert scope.base_notebook_ids == frozenset({base})
+    assert scope.base_mode == "include"
