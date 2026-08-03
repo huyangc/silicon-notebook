@@ -226,8 +226,32 @@ def source_scope_restricted() -> bool:
 
 
 def scoped_conversation_history(history: str) -> str:
-    """Prevent prior answers from crossing into a newly narrowed source run."""
-    return "" if source_scope_restricted() else history
+    """Prevent prior answers from crossing into a newly narrowed source run.
+
+    Consults BOTH scope dimensions -- local `restricted` AND
+    `base_restricted` -- unlike most gates in this module, which
+    deliberately stay local-only so that narrowing the base-library
+    dimension never disables the active notebook's own PPR/graph/Memory
+    channels (R1, see `ActiveSourceScope.restricted`'s docstring). History is
+    different: a prior turn's answer can quote content from ANY participant
+    library, including a reference library the user has just unchecked, so
+    it is inherently a CROSS-library value, not an active-notebook channel.
+    Gating it on `restricted` alone would let a deselected library's content
+    ride back into the next turn's query-rewrite/synthesis prompt through
+    the conversation history -- exactly the leak this feature exists to
+    close.
+
+    Trade-off, deliberately accepted: unchecking even a single reference
+    library now clears conversation history for the next turn, so a
+    multi-turn follow-up loses prior context on nothing more than a library
+    checkbox change. That is preferred over the alternative (a deselected
+    library's content silently surviving in the prompt via history), and it
+    is symmetric with the existing local-narrowing behavior below.
+    """
+    scope = current_source_scope()
+    if source_scope_restricted() or bool(scope and scope.base_restricted):
+        return ""
+    return history
 
 
 def source_allowed(notebook_id: str, source_id: str) -> bool:

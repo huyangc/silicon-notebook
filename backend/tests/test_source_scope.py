@@ -84,6 +84,28 @@ def test_restricted_scope_drops_prior_conversation_history():
         assert scoped_conversation_history("prior answer from s2") == ""
 
 
+def test_base_only_narrowing_also_drops_prior_conversation_history():
+    """P1 fix (codex PR #431 round-2 review): unchecking a reference library
+    while local sources stay fully selected must ALSO clear conversation
+    history. A prior answer can quote content from ANY participant library,
+    so history is a cross-library value -- unlike `source_scope_restricted()`
+    itself, which stays local-only by design (R1, see
+    `ActiveSourceScope.restricted`'s docstring) and must never be the sole
+    gate here."""
+    with source_scope_context(
+        "nb", None, BaseNotebookScope(mode="include", notebook_ids=["kept-base"]),
+    ):
+        # R1 still holds: the local dimension is untouched.
+        assert source_scope_restricted() is False
+        assert scoped_conversation_history("prior answer") == ""
+    # Control case: neither dimension restricted leaves history untouched.
+    with source_scope_context(
+        "nb", SourceScope(mode="exclude", source_ids=[]),
+        BaseNotebookScope(mode="exclude", notebook_ids=[]),
+    ):
+        assert scoped_conversation_history("prior answer") == "prior answer"
+
+
 def test_scoped_dict_nodes_keep_only_selected_evidence():
     nodes = [
         {
@@ -262,12 +284,19 @@ def test_r1_deselecting_a_base_library_does_not_trip_local_restricted():
     selected must NOT flip source_scope_restricted() -- that flag gates the
     ACTIVE notebook's own PPR/graph expansion and private Memory
     (ask_service._memory_hits returns [] when restricted), which is
-    orthogonal to which reference libraries participate."""
+    orthogonal to which reference libraries participate.
+
+    `scoped_conversation_history` is DELIBERATELY not pinned to the
+    historical "unchanged" value here: it is cross-library (see
+    `test_base_only_narrowing_also_drops_prior_conversation_history`) and, as
+    of the codex #431 round-2 P1 fix, clearing it is exactly the intended
+    behavior for this same base-only-narrowed context -- conflating that with
+    `restricted` staying False would defeat the point of this test."""
     with source_scope_context(
         "nb", None, BaseNotebookScope(mode="include", notebook_ids=[]),
     ):
         assert source_scope_restricted() is False
-        assert scoped_conversation_history("prior answer") == "prior answer"
+        assert scoped_conversation_history("prior answer") == ""
     # Same when the local scope is explicitly the historical "all" shape.
     with source_scope_context(
         "nb", SourceScope(mode="exclude", source_ids=[]),
