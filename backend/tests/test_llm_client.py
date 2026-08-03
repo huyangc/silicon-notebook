@@ -321,6 +321,27 @@ def test_override_params_win_over_global(monkeypatch):
     assert create.calls[0]["model"] == "reason-model"  # 发出的是覆盖后的 model
 
 
+def test_service_top_p_override_wins_and_is_sent_to_provider(monkeypatch):
+    create = _FakeCreate([_Resp()])
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    client = OpenAICompatibleClient(
+        Settings(_env_file=None),
+        base_url="https://x",
+        api_key="k",
+        model="fixed-sampling-model",
+        top_p_override=0.95,
+    )
+    monkeypatch.setattr(client, "client", lambda: _FakeOpenAI(create))
+
+    assert client.chat_json(
+        [{"role": "user", "content": "hi"}],
+        "{}",
+        top_p=1.0,
+    ) == '{"ok":1}'
+
+    assert create.calls[0]["top_p"] == 0.95
+
+
 def test_default_params_do_not_fall_back_to_retired_settings(monkeypatch):
     """Raw protocol clients never resolve retired Settings/env endpoints."""
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://global")

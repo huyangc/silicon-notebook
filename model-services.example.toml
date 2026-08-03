@@ -18,6 +18,9 @@ base_url = "https://reasoning.example.com/v1"
 model = "reasoning-model"
 api_key_env = "SYSTEM_REASONING_API_KEY"
 max_concurrency = 4
+# Optional: force the provider-required nucleus sampling value for every
+# workload bound to this chat service.
+# top_p = 0.95
 
 [services.embedding]
 display_name = "向量模型"

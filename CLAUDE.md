@@ -28,6 +28,7 @@
 - **MinerU 最终降级**：远端 URL/上传文件在重试耗尽、业务失败或结果映射为 0 元素后，摄取必须回退本地 PyMuPDF4LLM（版面感知 Markdown；pypdf 仅作依赖/解析器异常的最后兜底），不能把可下载的 URL 直接落成失败。成功降级的来源保持 `extracted`，原始诊断只留 pipeline log/source `error_message`，对外只给稳定的 `parse_quality_warning`；来源详情必须提示版面/公式/表格/OCR 可能异常，并给 owner 重新解析/删除入口。后续 MinerU 重解析成功必须清空诊断与警告。
 - **公式渲染**：紧邻正文、独占一行的单行 `$$...$$` 仍按块级公式处理；Ask、报告、Memory、Knowhow 的宽公式只在所属内容块内横向滚动。来源详情、知识对象标题及知识图谱「出处」卡中的 `formula` 元素共用 KaTeX 渲染；直接调用 KaTeX 前先剥除包裹整值的 Markdown 数学定界符，解析失败必须显示原始内容，不能留下空白或仅错误态的可视化。
 - **文档同步**：影响安装、产品行为、架构或开发约束时，`README.md`、`README_zh.md`、`AGENTS.md`、`CLAUDE.md` **四份**一起改，并同步 `docs/` 下负责该主题的中英文权威文档。根 README 只保留精简入口，详细契约不得重新堆回 README。漏掉本文件，Claude Code 侧的规范就会悄悄过期——那正是本文件存在的原因。外部 Agent 的首次接入步骤由 `docs/agent-mcp-memory-sop.md` / `_zh.md` 成对维护；界面路径、Codex/Claude 配置、scope 表、`scripts/example_mcp_memory_client.py` 的可运行命令、Memory 人审门与撤销说明必须和产品/API 契约同步。
+- **模型服务配置热加载**：`MODEL_SERVICES_CONFIG` 的 chat 服务可配置固定 `top_p`，它覆盖调用默认值并进入实际请求/缓存身份。进程监视非空 TOML，只有整份校验通过才原子发布；缺失、半写或非法版本保留上一份有效配置并只发脱敏诊断。新调用解析新绑定/新 runtime 代际，已提交任务留在原代际完成；状态页必须读取实时 registry，业务服务不得缓存或直连物理 raw client 绕开这条边界。
 - **用户使用总览**：先对 `/admin/users` 返回的完整用户集合排序，再做前端分页；默认每页 20 条，可切换 20/50/100 条。用户名、角色、注册时间、各类用量、最近活跃和文档上限表头可切换升降序，排序或翻页时清理已隐藏行的临时交互态。问答用量及展开后的笔记本明细统一返回/展示 `questions`，按归属该用户的持久 `ask_jobs` 提交次数计数（失败/取消任务也算一次已提交提问），不能拿 `conversations` 会话容器数冒充提问次数。用户总数包含其在加入的只读共享笔记本中的提交；展开清单刻意沿用 owner-only，只分解自有笔记本内的提问，不能假设其合计等于用户总数。旧 `conversations` 响应字段仅为兼容保留并标记 deprecated，前端不再用它展示问答用量。
 - 完成 `silicon_notebook_fangan.md` 里定义的特性时，同批更新 `fangan_done.md`。
 - 提交的文档保持通用口径：绝对解释器路径、本机端口占用这类**机器特定细节不进 git**。

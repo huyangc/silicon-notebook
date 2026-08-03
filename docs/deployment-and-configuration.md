@@ -55,6 +55,22 @@ the secrets named by `api_key_env` in `.env`. Delete the path or set it to an em
 for explicit deterministic offline mode (keyword-only retrieval, no model extraction or
 answers). Users cannot supply or override model credentials, endpoints, models, or capacity.
 
+A chat service may optionally set `top_p = 0.95` (or another finite value from `0` through
+`1`) when its provider requires a fixed nucleus-sampling value. This service-owned value
+overrides every workload's call default and is used by both the outgoing request and the
+response-cache key. Omit the field for the historical per-call behavior. `top_p` is rejected
+on embedding and rerank services.
+
+The backend watches a non-empty model-services TOML and normally applies a changed file
+within about one second. Reload is validation-gated and atomic: a valid complete registry
+becomes the source for new calls, while already-submitted calls finish on their original
+service generation. A missing, half-written, or invalid replacement never clears the live
+configuration; the backend keeps the last valid registry and emits one credential-safe
+diagnostic for that file version. Correct and save the file again to trigger another attempt.
+Changes to `.env` secrets alone are not watched; restart the backend, or save the TOML again,
+after changing a referenced secret. Removing `MODEL_SERVICES_CONFIG` from `.env` also still
+requires a restart because the watched path itself is selected at startup.
+
 - **Embedding dimensions** — `EMBED_DIM` must equal the bound embedding model's output
   dimension. Optional `EMBED_RUNTIME_DIM` (default `0` = off) truncates
   the similarity space to its first N dimensions + re-normalize (MRL) — cuts in-process
