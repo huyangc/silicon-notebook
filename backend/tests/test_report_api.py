@@ -835,6 +835,69 @@ def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypat
     }
 
 
+def test_report_base_scope_freezes_mount_set_at_create_time(client, monkeypatch):
+    """codex #431 R4(P1,回归本特性对报告曾整体不成立的一处退化):报告的范围是
+    **创建时定格、跨阶段持久化**的(create_report → confirm_report_intent →
+    generate)。`exclude:[]`——浏览器"全选参考库"的紧凑表示——必须在 create 时
+    就把当时挂载的库集合冻结成显式 include 快照并原样持久化,而不能退化成 None
+    留到确认/生成阶段再按 notebook **此刻**的挂载集重新展开。
+
+    R3 曾把 `_validate_base_scope` 对 `exclude:[]` 的处理短路成 `None`(理由是
+    "与省略字段等价"),这对 Ask 无害——Ask 的校验与检索发生在同一次同步请求内,
+    "创建时挂载的库"与"此刻挂载的库"是同一个集合。但报告不是同步的:确认与生成
+    是两个独立阶段,`None` 会让"当时挂载的就是这些库"这个事实被丢弃,confirm/
+    generate 阶段重新读取的是 notebook 那一刻的挂载集 —— 报告创建之后、确认之前
+    新挂载的参考库会静默参与这份报告。
+
+    这里覆盖完整链路:create(挂 1 个库,发 exclude:[])→ 持久化必须是显式
+    include:[base_id] → 创建后再挂一个新库 → confirm 必须仍只见到最初那一个,
+    新库不参与。"""
+    from app.api.deps import repository
+
+    nb_id, base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
+    created = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "q?",
+            "source_scope": {"mode": "include", "source_ids": []},
+            "base_scope": {"mode": "exclude", "notebook_ids": []},
+        },
+    )
+    assert created.status_code == 200
+    rid = created.json()["report_id"]
+    repo = repository()
+    after_create = repo.get_report(nb_id, rid)["understanding"]
+    assert after_create["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id]
+    }, "create 时必须把 exclude:[] 就地展开成当时挂载集的显式 include 快照,不能落 None"
+
+    # 创建之后再挂一个新库 —— 已冻结的范围绝不能因此扩大。
+    new_base = client.post("/api/notebooks", json={"name": "base2"}).json()
+    repository().mark_notebook_base(new_base["id"])
+    assert client.put(
+        f"/api/notebooks/{nb_id}/bases",
+        json={"base_notebook_ids": [base_id, new_base["id"]]},
+    ).status_code == 200
+
+    understanding = repo.get_report(nb_id, rid)["understanding"]
+    understanding.update(resolved_question="q?", ambiguities=[], needs_clarification=False)
+    repo.update_report(nb_id, rid, status="intent_ready", understanding=understanding)
+
+    launched.clear()
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "q?", "answers": []},
+    )
+    assert confirmed.status_code == 200
+    assert launched[-1][1]["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id]
+    }, "confirm 之后新挂载的库不得混进已冻结的范围"
+    after_intent = repo.get_report(nb_id, rid)["understanding"]
+    assert after_intent["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id]
+    }
+
+
 def test_report_without_any_scope_never_fabricates_one(client, monkeypatch):
     """R2:省略两个范围字段的报告必须和本特性接入前逐位相同 —— understanding 里
     不得凭空出现 source_scope/base_scope(凭空造出的 source_scope 会在确认时被冻结

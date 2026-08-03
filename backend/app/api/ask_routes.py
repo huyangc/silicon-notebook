@@ -93,27 +93,36 @@ def _validate_base_scope(notebook: NotebookSummary,
     mounted base libraries are not a per-request repo round trip like sources
     are.
 
-    codex #431 R3: ``exclude`` + an EMPTY list means "exclude nothing", i.e.
-    every mounted library participates -- semantically identical to omitting
-    this field entirely. The browser sends exactly this shape whenever the
-    "select all libraries" checkbox is checked (its compact "nothing excluded"
-    representation), on every submission, regardless of how many libraries are
-    mounted. Expanding it into an ``include`` list of every mounted id would
-    make the frozen list's length track the mount count, and
-    ``BaseNotebookScope.notebook_ids`` is capped at 1000 -- a notebook with
-    more than 1000 mounted libraries (the mount API imposes no limit) would
-    raise an uncaught pydantic ``ValidationError`` here, 500ing every browser
-    Ask/report submission. Short-circuit to ``None`` instead: that is the
-    established "unrestricted" value every downstream consumer
-    (``source_scope_context``, ``_scope_receipt``, ``filter_retrieval_items``,
-    ``scoped_subgraph_nodes``, ...) already treats as "no library narrowing",
-    so this also skips their per-item/per-node scope checks on the default
-    (nothing excluded) path instead of expanding to a ceiling that is a no-op
-    by construction.
+    codex #431 R4 (P1, reverting R3): ``exclude`` + an EMPTY list -- the
+    browser's compact "select all libraries" representation -- MUST still
+    expand into an explicit ``include`` list naming every currently-mounted
+    library, not short-circuit to ``None``. ``None`` reads as "no scope was
+    submitted at all" to every downstream consumer, which is only harmless
+    for Ask (validation and retrieval happen inside the same synchronous
+    request, so "current mounts" and "mounts at submission time" are the same
+    set). It is NOT harmless for a report: ``create_report`` calls this once
+    and PERSISTS the result into ``understanding["base_scope"]``, and that
+    persisted value is the authoritative ceiling re-applied, unchanged, at
+    intent confirmation and again at generation start -- two later phases,
+    potentially far apart in wall time. Freezing to ``None`` at create time
+    throws away the fact "these are the libraries mounted right now"; a
+    library mounted after creation but before confirm/generate would then
+    silently join a report the user never scoped it into, which is exactly
+    the class of bug freezing exists to prevent (see
+    ``_require_non_empty_scope`` and ``_scope_receipt`` below, and
+    ``test_report_base_scope_freezes_mount_set_at_create_time`` in
+    ``test_report_api.py``).
+
+    The actual production risk R3 was chasing -- a notebook with more mounted
+    libraries than ``BaseNotebookScope.notebook_ids`` could hold, raising an
+    uncaught pydantic ``ValidationError`` here -- is fixed at the cap instead:
+    ``notebook_ids`` (and ``RetrievalScopeReceipt.bases``) are now bounded at
+    10,000, a soft ceiling against pathological requests rather than a
+    supported mount-scale limit (federated retrieval issues one query per
+    participating library and stops being usable long before that count is
+    reached).
     """
     if scope is None:
-        return None
-    if scope.mode == "exclude" and not scope.notebook_ids:
         return None
     valid_ids = {ref.id for ref in notebook.base_notebooks}
     submitted = set(scope.notebook_ids)

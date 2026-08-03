@@ -83,6 +83,21 @@ class RetrievalService:
         to fill. No excluded content is ever returned -- ``filter_retrieval_items``
         still drops it here -- only recall/budget share is at stake, same as
         the graph-walk case.
+
+        codex #431 R4 (known exception on this path): ``_federated_graph_is_large``
+        (the size guard both this and ``_chunk_kg_overlay`` sit behind) walks
+        EVERY mounted participant, not just the ones the checkbox scope still
+        includes -- it cannot consult the per-request scope without either
+        publishing a scope-blind cache under a library-less key or forcing a
+        full multi-million-node rebuild per checkbox combination, the same
+        trade-off ``_federated_graph_is_large`` itself is built to avoid. So
+        UNCHECKING a reference library large enough to trip the guard does not
+        turn it back off: the guard still sees that library mounted and keeps
+        refusing PPR and the chunk/KG overlay for the WHOLE run, including the
+        active notebook's own content. This is a known, deliberately unfixed
+        limitation of this checkbox-scope feature -- see the "生产事故修复"
+        note on ``RetrievalCandidates._chunk_kg_overlay`` for why the guard
+        must stay scope-blind.
         """
         return filter_retrieval_items(
             _notebook_id(args, kwargs), "chunk",

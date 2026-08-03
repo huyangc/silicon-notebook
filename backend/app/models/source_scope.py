@@ -36,10 +36,19 @@ class BaseNotebookScope(BaseModel):
     participates. Omitting this model from a request preserves the
     historical behavior of every mounted base notebook participating
     unconditionally.
+
+    codex #431 R4: ``max_length`` is a soft ceiling against pathological
+    requests, not a supported mount-scale limit -- ``exclude`` + an empty
+    list is frozen (at the API boundary, see ``_validate_base_scope``) into
+    an explicit ``include`` list naming every currently-mounted library, so
+    this bound must exceed any mount count the product actually expects.
+    Federated retrieval issues one query per participating library and stops
+    being usable long before 10,000 mounts, so this is not the real ceiling
+    on how many libraries a notebook may mount.
     """
 
     mode: Literal["include", "exclude"] = "exclude"
-    notebook_ids: List[str] = Field(default_factory=list, max_length=1_000)
+    notebook_ids: List[str] = Field(default_factory=list, max_length=10_000)
 
     @field_validator("notebook_ids")
     @classmethod
@@ -87,7 +96,12 @@ class RetrievalScopeReceipt(BaseModel):
     local: RetrievalScopeLocalReceipt = Field(
         default_factory=RetrievalScopeLocalReceipt
     )
+    # codex #431 R4 (P2): must not be lower than BaseNotebookScope.notebook_ids's
+    # cap -- a run scoped over more mounted libraries than this could fit would
+    # otherwise have its receipt silently truncated, understating how many
+    # libraries actually participated or were excluded. Same soft-ceiling
+    # rationale as that field: not a supported mount-scale limit.
     bases: List[RetrievalScopeBaseReceipt] = Field(
-        default_factory=list, max_length=1_000
+        default_factory=list, max_length=10_000
     )
 

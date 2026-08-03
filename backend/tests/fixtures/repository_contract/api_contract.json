@@ -1179,7 +1179,7 @@
           "type": "object"
         },
         "BaseNotebookScope": {
-          "description": "User-selected mounted-reference-library scope for one retrieval run.\n\nMirrors ``SourceScope``'s shape and validation philosophy, but selects\nwhole mounted base notebooks rather than individual sources within the\nactive notebook -- a different granularity and a different lifecycle, so\nlibrary ids never live on ``SourceScope`` itself.\n\n``include`` means only the listed mounted base notebooks participate;\n``exclude`` means every mounted base notebook except the listed ones\nparticipates. Omitting this model from a request preserves the\nhistorical behavior of every mounted base notebook participating\nunconditionally.",
+          "description": "User-selected mounted-reference-library scope for one retrieval run.\n\nMirrors ``SourceScope``'s shape and validation philosophy, but selects\nwhole mounted base notebooks rather than individual sources within the\nactive notebook -- a different granularity and a different lifecycle, so\nlibrary ids never live on ``SourceScope`` itself.\n\n``include`` means only the listed mounted base notebooks participate;\n``exclude`` means every mounted base notebook except the listed ones\nparticipates. Omitting this model from a request preserves the\nhistorical behavior of every mounted base notebook participating\nunconditionally.\n\ncodex #431 R4: ``max_length`` is a soft ceiling against pathological\nrequests, not a supported mount-scale limit -- ``exclude`` + an empty\nlist is frozen (at the API boundary, see ``_validate_base_scope``) into\nan explicit ``include`` list naming every currently-mounted library, so\nthis bound must exceed any mount count the product actually expects.\nFederated retrieval issues one query per participating library and stops\nbeing usable long before 10,000 mounts, so this is not the real ceiling\non how many libraries a notebook may mount.",
           "properties": {
             "mode": {
               "default": "exclude",
@@ -1194,7 +1194,7 @@
               "items": {
                 "type": "string"
               },
-              "maxItems": 1000,
+              "maxItems": 10000,
               "title": "Notebook Ids",
               "type": "array"
             }
@@ -7392,7 +7392,7 @@
               "items": {
                 "$ref": "#/components/schemas/RetrievalScopeBaseReceipt"
               },
-              "maxItems": 1000,
+              "maxItems": 10000,
               "title": "Bases",
               "type": "array"
             },

@@ -352,50 +352,56 @@ def test_validate_base_scope_omitted_returns_none():
     assert _validate_base_scope(notebook, None) is None
 
 
-def test_validate_base_scope_exclude_nothing_short_circuits_to_none():
-    """codex #431 R3: ``exclude`` + an EMPTY list means "exclude nothing" --
-    every mounted library still participates -- which is the exact same
-    selection as omitting ``base_scope`` entirely. The browser sends this
-    compact shape whenever its "select all libraries" checkbox is checked, on
-    every submission.
+def test_validate_base_scope_exclude_nothing_freezes_every_mounted_library():
+    """codex #431 R4 (P1, reverting R3): ``exclude`` + an EMPTY list means
+    "exclude nothing" -- every mounted library participates -- which reads
+    the same as omitting ``base_scope`` for a *synchronous* Ask/preview
+    request. But it must NOT be resolved to ``None``: for a report, this
+    return value is what gets persisted and re-applied, unchanged, at
+    confirmation and generation, phases that can run long after this call.
+    ``None`` at create time would be re-interpreted later against the
+    notebook's mounts AT THAT LATER MOMENT, letting a library mounted after
+    report creation silently join a run the user never scoped it into (see
+    ``test_report_base_scope_freezes_mount_set_at_create_time`` in
+    ``test_report_api.py``).
 
-    Before this fix, the function had no early return for this shape: it fell
-    through to the exclude->include expansion branch below and froze into an
-    ``include`` scope explicitly naming every one of ``notebook``'s mounted
-    libraries. That expansion is what overflows ``BaseNotebookScope
-    .notebook_ids``'s ``max_length=1000`` on notebooks with more than 1000
-    mounted libraries -- see the scale regression right below this test. The
-    fix must short-circuit to ``None`` -- the established "unrestricted"
-    value every downstream consumer already treats as "no library
-    narrowing" -- before that branch ever runs."""
+    R3 short-circuited this to ``None`` specifically to dodge overflowing
+    ``BaseNotebookScope.notebook_ids``'s old ``max_length=1000`` cap -- see
+    the scale regression right below this test -- but that overflow is now
+    fixed at the cap (raised to 10,000) instead, so the function is free to
+    do the semantically correct thing: expand and freeze."""
     notebook = _notebook(bases=[_notebook_ref("b1"), _notebook_ref("b2")])
     resolved = _validate_base_scope(
         notebook, BaseNotebookScope(mode="exclude", notebook_ids=[])
     )
-    assert resolved is None
+    assert resolved == BaseNotebookScope(
+        mode="include", notebook_ids=["b1", "b2"]
+    )
 
 
 def test_validate_base_scope_exclude_nothing_survives_beyond_the_1000_mount_cap():
     """Regression for the actual production crash (codex #431 R3): a notebook
     with MORE mounted reference libraries than ``BaseNotebookScope
-    .notebook_ids``'s ``max_length=1000`` cap must not raise when the
+    .notebook_ids``'s OLD ``max_length=1000`` cap must not raise when the
     browser's default "select all" checkbox state (``exclude`` + ``[]``) is
     validated. The mount API imposes no limit on how many libraries a
     notebook may mount, so this is reachable in production.
 
-    Pre-fix, this always expanded ``exclude`` + ``[]`` into an ``include``
-    list naming every one of the 1200 mounted ids here, which pydantic's
-    ``max_length=1000`` on ``BaseNotebookScope.notebook_ids`` rejects with an
-    uncaught ``ValidationError`` -- 500ing every browser Ask/report submission
-    on any notebook past the 1000-mount mark. This asserts the crash is gone:
-    validation must complete and return the unrestricted ``None``, not merely
-    "not crash with some other value"."""
+    The fix (codex #431 R4) is NOT to dodge the expansion -- freezing to
+    ``None`` broke report scope persistence across create/confirm/generate,
+    see the test above -- but to raise the cap itself to 10,000, a soft
+    ceiling against pathological requests rather than a supported mount-scale
+    limit. This asserts the crash is gone AND that the expansion actually
+    happened: validation must complete and return the full 1200-id ``include``
+    snapshot, not merely "not crash with some other value"."""
     bases = [_notebook_ref(f"b{i}") for i in range(1200)]
     notebook = _notebook(bases=bases)
     resolved = _validate_base_scope(
         notebook, BaseNotebookScope(mode="exclude", notebook_ids=[])
     )
-    assert resolved is None
+    assert resolved is not None
+    assert resolved.mode == "include"
+    assert resolved.notebook_ids == [f"b{i}" for i in range(1200)]
 
 
 def test_validate_base_scope_rejects_ids_not_mounted_on_this_notebook():
