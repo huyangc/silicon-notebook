@@ -1908,7 +1908,7 @@ class KnowledgeStore:
         rows = db.execute(
             "SELECT id AS object_id FROM knowledge_objects "
             "WHERE notebook_id = %s AND id COLLATE \"C\" > %s "
-            "AND evidence @> jsonb_build_array(jsonb_build_object('source_id', %s)) "
+            "AND evidence @> jsonb_build_array(jsonb_build_object('source_id', %s::text)) "
             "ORDER BY id COLLATE \"C\" LIMIT %s",
             (notebook_id, after_id, source_id, page_limit),
         ).fetchall()

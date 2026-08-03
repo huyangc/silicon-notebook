@@ -157,6 +157,67 @@ def _evidence() -> list[dict]:
     ]
 
 
+def test_unbackfilled_source_cleanup_scans_jsonb_evidence(knowledge_harness):
+    """Legacy cleanup must type its source id inside jsonb_build_object.
+
+    A notebook with no unified_kg_state row is deliberately unbackfilled. This
+    is the path used by interactive source deletion/reparse before the explicit
+    reverse-index backfill has run.
+    """
+    target_evidence = _evidence()
+    unrelated_evidence = [
+        {
+            **target_evidence[0],
+            "source_id": "source-unrelated",
+            "source_title": "Unrelated source",
+        }
+    ]
+    rows = [
+        (
+            "ko-legacy-target",
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": "legacy target"}),
+            json.dumps(target_evidence),
+            "source-unrelated",
+            NOW,
+            NOW,
+        ),
+        (
+            "ko-legacy-unrelated",
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": "legacy unrelated"}),
+            json.dumps(unrelated_evidence),
+            "source-unrelated",
+            NOW,
+            NOW,
+        ),
+    ]
+    with knowledge_harness.database.write() as connection:
+        state = connection.execute(
+            "SELECT 1 AS present FROM unified_kg_state WHERE notebook_id=%s",
+            ("nb-personal",),
+        ).fetchone()
+        assert state is None
+        knowledge_harness.knowledge.insert_object_chunk(connection, rows)
+        knowledge_harness.knowledge.clear_source_extraction_state(
+            connection,
+            "source-golden",
+            "nb-personal",
+            clear_embeddings=True,
+        )
+
+    with knowledge_harness.database.connect() as connection:
+        remaining = connection.execute(
+            "SELECT id FROM knowledge_objects WHERE id=ANY(%s) ORDER BY id COLLATE \"C\"",
+            (["ko-legacy-target", "ko-legacy-unrelated"],),
+        ).fetchall()
+    assert [row["id"] for row in remaining] == ["ko-legacy-unrelated"]
+
+
 def test_usable_status_filter_and_insertion_order_match_golden(knowledge_harness):
     rows = []
     statuses = (*USABLE_STATUSES, "deprecated")
