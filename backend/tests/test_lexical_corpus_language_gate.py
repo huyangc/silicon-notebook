@@ -356,6 +356,67 @@ def test_kill_switch_stops_answering_the_corpus_language(repo, monkeypatch):
     assert candidates._lexical_corpus_langs(notebook.id) is None
 
 
+def test_source_scoped_runs_are_never_gated(repo):
+    """A scoped run's lexical arm is its ONLY candidate generator.
+
+    `_retrieve_chunks` deliberately skips the notebook-wide ANN when sources
+    are selected, so filtering its terms on a misjudged notebook-level sample
+    would not cost a share of a wider pool — it would return no evidence at
+    all. The exemption is therefore about correctness, not caution.
+    (codex #428 round-2 P1)
+    """
+    from app.models.schemas import NotebookCreate
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb-scoped"))
+    _seed_english_chunks(repo, notebook.id)
+    candidates = repo.retrieval.candidates
+    # The sampled hint says English...
+    assert candidates._notebook_langs(notebook.id) == ["en"]
+    # ... yet a scoped run must not be filtered by it.
+    assert candidates._lexical_corpus_langs(
+        notebook.id, source_scoped=True) is None
+    assert candidates._lexical_corpus_langs(
+        notebook.id, source_scoped=False) == ["en"]
+
+
+def test_scoped_chinese_source_still_retrieves_in_a_misjudged_notebook(repo):
+    """End-to-end shape of the hole: an unsampled Chinese source, selected."""
+    from app.models.schemas import NotebookCreate
+    from app.services.sqlite_repository import _now
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb-mixed"))
+    _seed_english_chunks(repo, notebook.id)
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,"
+            "file_path,file_size,file_hash,summary,doc_type,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-zh", notebook.id, "中文手册", "document", "zh.md", "/tmp/zh.md",
+             0, "hz", "", "", "extracted", now, now))
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("c-zh-0", notebook.id, "src-zh",
+             "时序收敛需要布局优化与时钟树综合之间的反复迭代。", "", "[]", now))
+    repo.backfill_chunk_fts(notebook.id)
+
+    candidates = repo.retrieval.candidates
+    # The scoped probe is unfiltered, so the CJK terms survive and hit.
+    scoped_langs = candidates._lexical_corpus_langs(
+        notebook.id, source_scoped=True)
+    with repo._connect() as db:
+        hits = candidates.knowledge.chunk_fts_search(
+            db, notebook.id, "时序收敛的方法", k=10,
+            allowed_source_ids=["src-zh"], corpus_langs=scoped_langs,
+        )
+    assert [hit["chunk_id"] for hit in hits] == ["c-zh-0"]
+
+    # Had the notebook-level hint been applied, every term would have gone.
+    misjudged = corpus_gated_recall_terms("时序收敛的方法", ["en"])
+    assert all(not _is_all_cjk(term) for term in misjudged[1:])
+
+
 def test_a_failing_language_probe_degrades_to_no_filtering(repo, monkeypatch):
     """The probe runs outside the lexical arm's fail-open `except`, so it owns
     its own: an unreadable hint must mean "unknown corpus", not a dead run."""

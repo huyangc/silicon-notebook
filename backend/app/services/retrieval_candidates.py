@@ -462,7 +462,9 @@ class CandidateRetrievalService(_RetrievalState):
         self._notebook_langs_cache[notebook_id] = langs
         return langs
 
-    def _lexical_corpus_langs(self, notebook_id: str) -> Optional[List[str]]:
+    def _lexical_corpus_langs(
+        self, notebook_id: str, *, source_scoped: bool = False
+    ) -> Optional[List[str]]:
         """The corpus languages a lexical probe set may be filtered against.
 
         Always the languages of the notebook the ADAPTER is about to query —
@@ -475,6 +477,20 @@ class CandidateRetrievalService(_RetrievalState):
         `_notebook_langs` is cached per notebook and invalidated at chunk-write
         settle points, so this costs no query on the hot path.
 
+        `source_scoped=True` always answers `None`, and that exemption is
+        load-bearing rather than cautious. A run bounded to selected sources
+        deliberately skips the notebook-wide ANN, so its lexical arm is the
+        ONLY candidate generator — while the language hint is sampled from the
+        notebook's chunk table as a whole. A Chinese source sitting in the
+        unsampled middle of an otherwise English notebook would therefore have
+        every CJK term dropped and return no evidence at all, instead of merely
+        losing its lexical share of a wider candidate pool. The cost argument
+        also inverts here: the source predicate is applied inside the LATERAL
+        before LIMIT, so a scoped probe only ever scans the selected sources'
+        rows — the pathological whole-notebook scan this gate exists to stop
+        cannot happen on that path. Highest risk, lowest reward: do not gate.
+        (codex #428 round-2 P1)
+
         Fail-open, and it has to be: callers run this BEFORE they open their
         connection, which puts it outside the `except` that keeps a failing
         lexical arm from taking retrieval down with it. A language hint that
@@ -483,7 +499,7 @@ class CandidateRetrievalService(_RetrievalState):
         the pre-feature path, and the failure is still visible as an event.
         """
         try:
-            if not self.settings.lexical_language_gate_enabled:
+            if source_scoped or not self.settings.lexical_language_gate_enabled:
                 return None
             return self._notebook_langs(notebook_id)
         except Exception as exc:  # noqa: BLE001 — a hint must never break retrieval
@@ -1180,8 +1196,10 @@ class CandidateRetrievalService(_RetrievalState):
             # skips the notebook-wide ANN until artifacts carry an aligned
             # source partition, so out-of-scope labels cannot occupy its top-K.
             # 语言探针在外层连接之前(冷缓存时它自己要开连接;嵌套获取会在并发
-            # 下坐死连接池)。
-            corpus_langs = self._lexical_corpus_langs(notebook_id)
+            # 下坐死连接池)。这条是**选定来源**分支:词法是它唯一的候选来源,
+            # 一律不过滤(见 `_lexical_corpus_langs` 的 source_scoped 说明)。
+            corpus_langs = self._lexical_corpus_langs(
+                notebook_id, source_scoped=True)
             with self._connect() as db:
                 if not self.knowledge.source_index_backfilled(db, notebook_id):
                     return []
@@ -1209,7 +1227,11 @@ class CandidateRetrievalService(_RetrievalState):
             elif getattr(idx, "ann_labels", None):
                 ann_sims = self._kg_object_candidates(
                     notebook_id, query_vector, idx, self.settings.chunk_recall)
-                corpus_langs = self._lexical_corpus_langs(notebook_id)
+                # `source_filter is None` on this branch; spelled out rather
+                # than assumed so restructuring cannot silently start gating a
+                # source-scoped run.
+                corpus_langs = self._lexical_corpus_langs(
+                    notebook_id, source_scoped=source_filter is not None)
                 with self._connect() as db:
                     lexical_hits = self._lexical_object_hits(
                         db,
@@ -1231,7 +1253,8 @@ class CandidateRetrievalService(_RetrievalState):
             # 49 万对象生产实测数十分钟)。FTS 词法有界兜底:kg_objects_fts 覆盖
             # 全部对象(含 delta),候选的语义分仍由下方按候选 evidence 元素向量
             # 有界补充。FTS 空 → [](与 relation 侧冷矩阵守卫同一 fail-open 出口)。
-            corpus_langs = self._lexical_corpus_langs(notebook_id)
+            corpus_langs = self._lexical_corpus_langs(
+                notebook_id, source_scoped=source_filter is not None)
             with self._connect() as db:
                 lex = self._lexical_object_hits(
                     db,
@@ -1785,7 +1808,9 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import query_sims
         hits, fts_error = [], ""
         try:
-            corpus_langs = self._lexical_corpus_langs(notebook_id)
+            # 选定来源时这条降级路径同样是唯一候选来源(上游刻意跳过全库 ANN)。
+            corpus_langs = self._lexical_corpus_langs(
+                notebook_id, source_scoped=allowed_source_ids is not None)
             with self._connect() as db:
                 if allowed_source_ids is None:
                     hits = self.knowledge.chunk_fts_search(
@@ -2006,7 +2031,8 @@ class CandidateRetrievalService(_RetrievalState):
 
         allowed_source_ids = scoped_allowed_source_ids(notebook_id)
         try:
-            corpus_langs = self._lexical_corpus_langs(notebook_id)
+            corpus_langs = self._lexical_corpus_langs(
+                notebook_id, source_scoped=allowed_source_ids is not None)
             with self._connect() as db:
                 if allowed_source_ids is None:
                     hits = self.knowledge.chunk_fts_search(

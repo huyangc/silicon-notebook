@@ -119,6 +119,33 @@ def test_lexical_helpers_take_corpus_langs_instead_of_probing_themselves():
     assert seen == GATED_HELPERS
 
 
+def test_every_source_scoped_lexical_call_site_opts_out_of_the_gate():
+    """选定来源的运行里,词法是**唯一**候选来源(上游刻意跳过全库 ANN)。
+
+    notebook 级语言采样一旦误判(唯一的中文来源落在未采样的中段),过滤掉 CJK
+    词项就不是「少一份词法召回」,而是**这次检索一条证据都没有**。所以凡是能
+    带 `allowed_source_ids` / `source_filter` 的调用点,都必须显式
+    `source_scoped=`。守卫按「同一函数体内既出现来源范围变量又调用探针」认形态。
+    """
+    scope_markers = ("allowed_source_ids", "source_filter")
+    offenders = []
+    for path in _candidate_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            body = ast.dump(func)
+            if not any(marker in body for marker in scope_markers):
+                continue
+            for call in _probe_calls(func):
+                if not any(kw.arg == "source_scoped" for kw in call.keywords):
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT)}:{call.lineno} "
+                        f"{func.name} 能带来源范围却没显式 source_scoped="
+                    )
+    assert not offenders, "\n".join(offenders)
+
+
 @pytest.mark.parametrize("helper", sorted(GATED_HELPERS))
 def test_every_call_site_passes_a_real_corpus_langs(helper):
     """漏传会 TypeError,但**传 `None`** 只会静默关掉这道闸——同样红。"""
