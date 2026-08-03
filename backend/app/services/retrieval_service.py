@@ -143,6 +143,15 @@ class RetrievalService:
     def notebook_languages(self, notebook_id):
         return self.candidates._notebook_langs(notebook_id)
 
+    def lexical_corpus_languages(self, notebook_id):
+        """Corpus languages a lexical probe set may be filtered against.
+
+        Distinct from `notebook_languages`: this one honours
+        `LEXICAL_LANGUAGE_GATE_ENABLED` and answers `None` when the gate is
+        off, which is how "do not filter" reaches the adapters.
+        """
+        return self.candidates._lexical_corpus_langs(notebook_id)
+
     def chunk_plan(self, notebook_id, queries):
         return self.candidates._build_chunk_retrieval_plan(notebook_id, queries)
 

@@ -298,6 +298,30 @@ def _seed_english_chunks(repo, notebook_id):
                 (f"c-gate-{index}", notebook_id, "src-gate", text, "", "[]", now))
 
 
+def test_kg_search_endpoint_is_gated_too(repo, monkeypatch):
+    """`/notebooks/{id}/kg/search` probes the same `knowledge_objects` trigram
+    surface, so a long Chinese query against an English notebook pays the
+    identical guaranteed-empty probe crowd there. Zero recall loss by the same
+    proof: those terms cannot match this corpus either way.
+    """
+    from app.models.schemas import NotebookCreate
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb-kgsearch"))
+    _seed_english_chunks(repo, notebook.id)
+
+    seen: list[object] = []
+    knowledge = repo._runtime.knowledge_query.knowledge
+    original = knowledge.fts_search
+
+    def _spy(db, notebook_id, q, k=30, **kwargs):
+        seen.append(kwargs.get("corpus_langs"))
+        return original(db, notebook_id, q, k, **kwargs)
+
+    monkeypatch.setattr(knowledge, "fts_search", _spy)
+    repo.kg_search(notebook.id, LONG_CHINESE_QUERY, 12)
+    assert seen == [["en"]]
+
+
 def test_retrieval_passes_the_probed_langs_to_the_chunk_adapter(repo, monkeypatch):
     from app.models.schemas import NotebookCreate
 
@@ -330,3 +354,22 @@ def test_kill_switch_stops_answering_the_corpus_language(repo, monkeypatch):
     monkeypatch.setattr(
         candidates.settings, "lexical_language_gate_enabled", False)
     assert candidates._lexical_corpus_langs(notebook.id) is None
+
+
+def test_a_failing_language_probe_degrades_to_no_filtering(repo, monkeypatch):
+    """The probe runs outside the lexical arm's fail-open `except`, so it owns
+    its own: an unreadable hint must mean "unknown corpus", not a dead run."""
+    from app.models.schemas import NotebookCreate
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb-probe-boom"))
+    candidates = repo.retrieval.candidates
+
+    def _boom(_notebook_id):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(candidates, "_notebook_langs", _boom)
+    assert candidates._lexical_corpus_langs(notebook.id) is None
+    # ... and the terms are then left completely alone.
+    assert corpus_gated_recall_terms(
+        LONG_CHINESE_QUERY, candidates._lexical_corpus_langs(notebook.id)
+    ) == lexical_recall_terms(LONG_CHINESE_QUERY)

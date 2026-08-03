@@ -180,8 +180,14 @@ class KnowledgeQueryService:
         from app.services.kg.search import merge_search_hits
 
         self.catalog.get_notebook(notebook_id)
+        # Probed BEFORE the connection is taken: on a cold language cache the
+        # probe opens its own connection, and nesting that inside this `with`
+        # would contend for the pool. Same shape as every retrieval call site.
+        corpus_langs = self.retrieval().lexical_corpus_languages(notebook_id)
         with self.database.connect() as db:
-            lexical = self.knowledge.fts_search(db, notebook_id, query, limit)
+            lexical = self.knowledge.fts_search(
+                db, notebook_id, query, limit, corpus_langs=corpus_langs
+            )
         semantic = self.semantic_search(notebook_id, query, limit)
         merged = merge_search_hits(lexical, semantic, limit)
         hydrated = self.hydrate_search_hits(notebook_id, merged)

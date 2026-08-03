@@ -443,7 +443,10 @@ def test_community_graph_excludes_rejected_bridges_on_postgres(
     service.settings = SimpleNamespace(
         relation_recall=10,
         kg_about_downweight_enabled=False,
+        lexical_language_gate_enabled=True,
     )
+    # The lexical arm and the corpus-language probe both report failures here.
+    service.event_log = SimpleNamespace(emit=lambda _event: None)
     service._IN_CHUNK = 100
     retrieved = service._retrieve_relations_scored("nb-personal", "supports")
     assert {row.relation_id for row in retrieved} == {
