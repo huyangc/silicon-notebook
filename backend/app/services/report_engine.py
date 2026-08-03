@@ -71,9 +71,11 @@ _HIGH_RISK_ASSERTION_CJK = re.compile(
     r"显著(?:高于|低于|优于|劣于)|优于|劣于|高于|低于|排名|排序)"
 )
 _HIGH_RISK_ASSERTION_EN = re.compile(
-    # ``all(?!-)``: the standalone quantifier is high-risk (“all models …”),
-    # but ``all-reduce``/``all-to-all`` are operation names, not claims.
-    r"\b(?:best|worst|fastest|slowest|all(?!-)|always|never|"
+    # ``(?<!-)all(?!-)``: the standalone quantifier is high-risk (“all models
+    # …”), but ``all-reduce``/``all-to-all`` are operation names, not claims —
+    # the lookbehind covers the TRAILING all in ``all-to-all``, which the
+    # lookahead alone lets through (codex #427 r1).
+    r"\b(?:best|worst|fastest|slowest|(?<!-)all(?!-)|always|never|"
     r"significantly\s+(?:better|worse|higher|lower)|outperform(?:s|ed)?)\b",
     re.IGNORECASE,
 )

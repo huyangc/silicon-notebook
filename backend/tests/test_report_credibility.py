@@ -185,7 +185,7 @@ def test_high_risk_audit_ignores_ordinals_and_operation_names():
     带层/个的数字」。"""
     markdown = """## 序数与操作名
 第3层使用了残差连接。第 1 个方案已被否决。这是第2篇论文。
-all-reduce 操作在此执行。
+all-reduce 操作在此执行。all-to-all 通信随后进行。
 该模型共有12层[k1]。端到端延迟降低了30%。
 """
     audit = audit_high_risk_assertions(
