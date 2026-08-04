@@ -12,6 +12,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   expand: "扩展",
   ppr: "漫游",
   exact_lookup: "精查",
+  source_subgraph: "来源子图",
   expand_community: "对比",
   follow_chain: "推导",
   fallback: "原文",
@@ -85,6 +86,17 @@ function totalDurationMs(steps: ReasoningTraceStep[]): number {
 
 export function getTraceStepDetail(step: ReasoningTraceStep): string {
   const detail = step.detail ?? {};
+  if (step.step_type === "source_subgraph") {
+    const state = typeof detail.state === "string" ? detail.state : "degraded";
+    const sources = typeof detail.selected_source_count === "number"
+      ? detail.selected_source_count : 0;
+    const added = typeof detail.enrichment_count === "number"
+      ? detail.enrichment_count : 0;
+    if (state === "active") return `${sources} 篇来源内 · 补充 ${added} 条`;
+    if (state === "shadow") return `${sources} 篇来源 · 影子评估`;
+    if (state === "off") return "保持原检索结果";
+    return "安全降级为原检索结果";
+  }
   if (step.step_type === "intent" && typeof detail.resolved_question === "string") {
     return detail.resolved_question;
   }

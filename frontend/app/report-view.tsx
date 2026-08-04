@@ -183,6 +183,13 @@ export type ReportDetailT = ReportSummaryT & {
     evidence_level?: string;
     failed?: boolean;
     citation_audit?: ReportCitationAuditT;
+    source_graph?: {
+      state: string;
+      reason: string;
+      selected_source_count: number;
+      enrichment_count: number;
+      baseline_preserved: boolean;
+    };
   }[];
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
@@ -1518,6 +1525,7 @@ export function ReportsPanel({
     const displayQuestion = active.understanding?.confirmed
       ? active.understanding.resolved_question || active.question
       : active.question;
+    const sourceGraph = active.sections.find((section) => section.source_graph)?.source_graph;
     return (
       <div className="report-panel report-detail">
         <div className="report-detail-head">
@@ -1575,6 +1583,18 @@ export function ReportsPanel({
             </small>
           </div>
         </div>
+        {sourceGraph && (
+          <div className={`source-graph-status source-graph-${sourceGraph.state}`}>
+            <strong>来源子图</strong>
+            <span>{sourceGraph.state === "active"
+              ? `报告在所选 ${sourceGraph.selected_source_count} 篇来源内扩展，补充图证据且保留原检索基线`
+              : sourceGraph.state === "shadow"
+                ? "正在影子评估，报告正文仍完全使用原检索结果"
+                : sourceGraph.state === "degraded"
+                  ? "本次报告安全降级为原检索结果"
+                  : "质量门尚未批准启用，报告使用原检索结果"}</span>
+          </div>
+        )}
         {active.status === "failed" && (
           <div className="report-error">
             <span>{active.outline.length > 0

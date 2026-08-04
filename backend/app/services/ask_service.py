@@ -248,6 +248,9 @@ class AskService:
         cancellations=None,
         collection_catalog=None,
         collection_enumeration=None,
+        selected_source_graph=None,
+        scale_version: Callable[[str], Any] = lambda _notebook_id: None,
+        selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
     ) -> None:
         self.ask_state = ask_state
         self.retrieval = retrieval
@@ -273,6 +276,50 @@ class AskService:
         # 组合根照旧可构造,只是那条 run 不提供枚举工具。
         self.collection_catalog = collection_catalog
         self.collection_enumeration = collection_enumeration
+        self.selected_source_graph = selected_source_graph
+        self.scale_version = scale_version
+        self.selected_graph_hydrate = selected_graph_hydrate
+
+    def _activate_selected_source_graph(
+        self,
+        notebook_id: str,
+        chunks,
+        *,
+        top_hits=(),
+        max_results: int = 20,
+    ):
+        """Append quality-approved G after frozen B; otherwise return B."""
+        if self.selected_source_graph is None:
+            return list(chunks), None
+        object_seeds = {
+            str(hit.object_id): float(getattr(hit, "relevance", 0.0) or 0.0)
+            for hit in top_hits
+            if str(getattr(hit, "object_id", "") or "")
+        }
+        chunk_seeds = {
+            str(chunk.chunk_id): float(getattr(chunk, "relevance", 0.0) or 0.0)
+            for chunk in chunks
+            if str(getattr(chunk, "chunk_id", "") or "")
+        }
+
+        result = self.selected_source_graph.run(
+            notebook_id,
+            chunks,
+            object_seeds=object_seeds,
+            chunk_seeds=chunk_seeds,
+            source_titles=self.source_titles,
+            hydrate_chunk_ids=self.selected_graph_hydrate,
+            parent_version=self.scale_version(notebook_id),
+            max_results=max_results,
+            unsafe_scope_drift=bool(
+                getattr(self.retrieval, "unsafe_source_scope_restricted", lambda _nb: False)(
+                    notebook_id
+                )
+            ),
+        )
+        if result.status.state == "historical":
+            return list(result.chunks), None
+        return list(result.chunks), result.status
 
     # ------------------------------------------------------------------
     # dispatch
@@ -1522,7 +1569,7 @@ class AskService:
                 )
             _t = time.perf_counter()
             from app.services.query_rewrite import expand_query
-            from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
+            from app.services.retrieval import quota_fuse, est_tokens
             ex = None
             raise_if_cancelled(cancel_event)
             if self.settings.query_rewrite_enabled:
@@ -1668,6 +1715,14 @@ class AskService:
                     scored, ids, mat, plan.mmr_k, plan.mmr_lambda)
                 ask_stage("retrieve_mmr", _t, recall=len(scored), selected=len(selected))
 
+            historical_selected = list(selected)
+            selected, source_graph_status = self._activate_selected_source_graph(
+                notebook_id,
+                historical_selected,
+                top_hits=kg_hits,
+                max_results=self.settings.ppr_top_chunks,
+            )
+
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
             chunk_baseline: dict = {}
@@ -1763,7 +1818,7 @@ class AskService:
             from app.services.retrieval_baseline import (
                 build_retrieval_baseline_manifest,
             )
-            baseline_manifest = build_retrieval_baseline_manifest(
+            _baseline_manifest = build_retrieval_baseline_manifest(
                 notebook_id=notebook_id,
                 query=retrieval_query,
                 mode="chunk",
@@ -1771,7 +1826,7 @@ class AskService:
                 candidate_knowledge=kg_hits,
                 candidate_chunks=baseline_chunk_candidates,
                 selected_knowledge=kg_hits,
-                selected_chunks=selected,
+                selected_chunks=historical_selected,
                 final_context_block=str(chunk_baseline.get("context_block") or ""),
                 final_id_map=dict(chunk_baseline.get("id_map") or {}),
                 final_ordered_handles=tuple(
@@ -1805,7 +1860,11 @@ class AskService:
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                 evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
                 citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
-                retrieval_query=retrieval_query, top_relevance=top_relevance)
+                retrieval_query=retrieval_query, top_relevance=top_relevance,
+                source_graph=(
+                    source_graph_status.public_dict()
+                    if source_graph_status is not None else None
+                ))
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "chunk"
@@ -2206,6 +2265,8 @@ class AskService:
         # P1-A(本轮 scope):只挂 reasoning 模式。ask_graph/ask_chunk 同样受益,
         # 但等价性回放验证只覆盖了 reasoning——留作后续 fast-follow。
         _emb_token = _ASK_EMBED_CACHE.set({})
+        source_graph_status = None
+        historical_reasoning_chunks = []
         try:
             # intent already streamed above (before memory retrieval); stream_intent
             # stays idempotent because the structured branch may emit it earlier.
@@ -2252,6 +2313,25 @@ class AskService:
                 reasoning_outline = result.outline
                 reasoning_outline_evidence = result.outline_evidence
                 trace = [*pre_trace, *trace]
+                historical_reasoning_chunks = list(chunks)
+                chunks, source_graph_status = self._activate_selected_source_graph(
+                    notebook_id,
+                    historical_reasoning_chunks,
+                    top_hits=top_hits,
+                    max_results=self.settings.ppr_top_chunks,
+                )
+                if source_graph_status is not None:
+                    graph_step = TraceStep(
+                        step_type="source_subgraph",
+                        summary=(
+                            f"来源子图：{source_graph_status.state}，"
+                            f"新增 {source_graph_status.enrichment_count} 条证据"
+                        ),
+                        detail=source_graph_status.public_dict(),
+                    )
+                    trace.append(graph_step)
+                    if on_trace:
+                        on_trace(graph_step)
             except AskCancelled:
                 raise
             except Exception:
@@ -2559,7 +2639,7 @@ class AskService:
                     if candidate_manifest is not None else elements
                 ),
                 selected_knowledge=top_hits,
-                selected_chunks=chunks,
+                selected_chunks=historical_reasoning_chunks,
                 selected_elements=elements,
                 final_context_block=str(reasoning_baseline.get("context_block") or ""),
                 final_id_map=dict(reasoning_baseline.get("id_map") or {}),
@@ -2855,6 +2935,10 @@ class AskService:
                 # 图谱」这件事没有因此变成假的:旗标继续如实上报,前端的建图提示
                 # 与答案并存。它只是不再是一道闸。
                 kg_required=no_usable_kg,
+                source_graph=(
+                    source_graph_status.public_dict()
+                    if source_graph_status is not None else None
+                ),
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
@@ -2920,6 +3004,8 @@ class AskService:
             if callable(unsafe_scope_probe)
             else source_scope_restricted()
         )
+        source_graph_status = None
+        scoped_graph_chunks = []
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
@@ -3161,6 +3247,14 @@ class AskService:
                     }, None, None)
                     for hit in top_hits[:5]
                 ]
+                scoped_graph_chunks, source_graph_status = (
+                    self._activate_selected_source_graph(
+                        notebook_id,
+                        [],
+                        top_hits=top_hits,
+                        max_results=self.settings.ppr_top_chunks,
+                    )
+                )
             else:
                 base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
                 raise_if_cancelled(cancel_event)
@@ -3219,8 +3313,13 @@ class AskService:
             # 有源 chunk → 走 _answer_mix(KG 段 k1001+ / chunk 段 k1..N)、出 chunk 引用、直接 return;
             # 无源 chunk → 落到下方现状 KG-only 答案,行为不变。
             from app.services.retrieval import est_tokens, truncate_by_tokens
-            src_chunks = self.graph.source_chunks(
-                notebook_id, [n["object_id"] for n, _e, _s in subgraph])
+            src_chunks = (
+                scoped_graph_chunks
+                if scoped_graph_chunks
+                else self.graph.source_chunks(
+                    notebook_id, [n["object_id"] for n, _e, _s in subgraph]
+                )
+            )
             if src_chunks:
                 mix_kg_block, mix_id_map = render_subgraph_context(
                     subgraph, id_offset=self._MIX_KG_KEY_BASE)
@@ -3309,6 +3408,19 @@ class AskService:
                         detail={"chunks": len(src_chunks),
                                 "sources": len({c.source_id for c in src_chunks})})])
                 resp.mode = "graph"
+                if source_graph_status is not None:
+                    resp.source_graph = source_graph_status.public_dict()
+                    resp.reasoning_trace = [
+                        TraceStep(
+                            step_type="source_subgraph",
+                            summary=(
+                                f"来源子图：{source_graph_status.state}，"
+                                f"新增 {source_graph_status.enrichment_count} 条证据"
+                            ),
+                            detail=source_graph_status.public_dict(),
+                        ),
+                        *(resp.reasoning_trace or []),
+                    ]
                 resp.model_errors = [ModelError(**e) for e in _err_sink]
                 resp.answer_id = self._save_answer(
                     notebook_id, question, resp, conversation_id,
@@ -3408,6 +3520,15 @@ class AskService:
                 detail={**verify_result,
                         "authority_notes": verify_result.get("authority_notes", [])},
             )]
+            if source_graph_status is not None:
+                graph_trace.insert(0, TraceStep(
+                    step_type="source_subgraph",
+                    summary=(
+                        f"来源子图：{source_graph_status.state}，"
+                        f"新增 {source_graph_status.enrichment_count} 条证据"
+                    ),
+                    detail=source_graph_status.public_dict(),
+                ))
 
             response = AskResponse(
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
@@ -3415,6 +3536,10 @@ class AskService:
                 citations=self._memory_citations(anchors, memory_hits), llm_mode=llm_mode,
                 conversation_id=conversation_id, retrieval_query=question,
                 top_relevance=top_relevance, reasoning_trace=graph_trace,
+                source_graph=(
+                    source_graph_status.public_dict()
+                    if source_graph_status is not None else None
+                ),
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)

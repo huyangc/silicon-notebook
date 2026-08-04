@@ -153,3 +153,4 @@ PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要�
 根 README 保持精简；同时更新 `docs/` 下负责该主题的中英文权威文档：`product-and-api`、`deployment-and-configuration`、`operations` 或 `development`。
 
 SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 source-binding identity；locked、busy、interrupted open 仍按瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。
+- `SelectedSourceGraphActivationService` 是 Ask/深度报告唯一的所选来源图消费入口。调用方必须先完成并冻结历史 `B`；服务只读取服务端冻结、真正收窄的 `include` scope，构建有界 snapshot，依次尝试在线 scoped PPR/邻居 membership，并在必要时读取按来源 partition 伴生产物，最后复验每个返回 source id，再把 `G` 交给 `BaselineProtectedEnrichmentService`。全范围/全选在 snapshot I/O 前直接返回；shadow 返回 `B`，质量批准的 active 模式返回 `B + G`，任何失败都返回 `B`。Ask 各模式与报告章节暴露同一份无正文状态对象和 `source_subgraph` 轨迹；禁止新增第二套 rollout parser、直接图 consumer 或客户端 narrowed 判据。

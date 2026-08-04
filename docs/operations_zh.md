@@ -633,6 +633,8 @@ PYTHONPATH=backend python scripts/eval_selected_source_graph.py \
 
 `--golden` 只是诊断覆盖项。它的输出可以本地检查，但 production 激活只接受随当前版本发布的 canonical suite 摘要；削弱或替换案例不能产生可激活工件。
 
+发布顺序：先启用 `SOURCE_SUBGRAPH_PPR_ENABLED`（超大来源先构建 partition 伴生产物，再开 `SOURCE_PARTITIONED_PPR_ENABLED`），把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE` 设为 `shadow`，检查无正文的 `selected_source_graph` 事件；canonical gate 通过后，配置受信 attestation 路径及精确 corpus/model pin，再依次走 `allowlist` 或稳定 hash `rollout`，最后才考虑 `on`。回滚只需把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=off`，会立即恢复历史 `B`，无需删除工件。不同 corpus signature 或 model contract 之间禁止复制 attestation。
+
 ### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
 
 离线、非破坏性工具,用于把两个各自独立部署、但**共享同一个公共知识库**(同一个 base notebook id)的 silicon-notebook 实例合并成一个。保留哪侧的 base 由 `--keep-base` 指定(通常选更全的那侧)——运行时会先打印两侧 base 的统计(`sources`/`chunks`/`knowledge_objects` 计数)供核对;两侧其余(个人)notebook 原样全部并入,包括各自持有的参考库挂载边(`notebook_bases`)。源库的 `.db`/storage 文件只读,工具始终写出全新的 `--out` / `--out-storage`。两侧输入允许是旧 schema 版本——合并前会先各自迁移到最新(在私有临时副本上进行,不改动源文件)。多领域部署下一侧可能不止一个公共知识库:本工具不支持这种形态、也不会替你猜——若任一侧存在不止一个 `tier='base'` 的 notebook,会立即中止并点名是哪一侧、列出全部候选,而不是自作主张选一个。

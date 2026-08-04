@@ -84,8 +84,8 @@ requires a restart because the watched path itself is selected at startup.
   internal sparse-PPR producer over a frozen selected-source snapshot and defaults to
   `false`. It is independent of `GRAPH_PPR_ENABLED`: switching it off leaves historical
   whole-scope PPR, local graph primitives, direct retrieval, and the protected baseline
-  lane unchanged. The producer has no Ask/Deep Report consumer in this stage, so enabling
-  it alone does not change user-visible retrieval.
+  lane unchanged. It becomes a candidate producer only when the separate selected-source
+  activation gate below runs in shadow or active mode.
 - **Large-source graph companions** — `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED`
   makes a scale rebuild/fold publish a separate source-addressable CSR companion;
   `SOURCE_PARTITIONED_PPR_ENABLED` permits its internal shadow consumer. Both default
@@ -93,15 +93,17 @@ requires a restart because the watched path itself is selected at startup.
   matching companion returns a capability-unavailable reason and never falls back to
   whole-graph traversal. `SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` bounds request-time
   sparse passes; partition publication reuses the existing `SOURCE_SUBGRAPH_MAX_*`
-  row rails. Ask/Deep Report still do not consume this lane in this stage.
+  row rails. Ask/Deep Report may consume it only through the shared activation gate; a
+  missing/mismatched companion remains a local unavailable reason, never a whole-graph fallback.
 - **Selected-source rollout quality gate** — active modes are permitted only from a
   verified, content-free attestation produced by the paired evaluation command. The
   digest is an integrity check, not an authorization signature: keep the input and
   output in a deployment-owned trusted artifact location, and pin the expected corpus
-  signature and model contract when PR11 wires runtime configuration. `shadow` remains
-  the only mode that may run without an approved attestation because it cannot alter
-  user-visible output. This PR installs the decision service but no runtime setting or
-  Ask/Report consumer yet.
+  signature and model contract through `SELECTED_SOURCE_GRAPH_EXPECTED_CORPUS_SIGNATURE`
+  and `SELECTED_SOURCE_GRAPH_EXPECTED_MODEL_JSON`. `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE`
+  defaults to `off`; `shadow` is the only mode that may run without an approved attestation.
+  `allowlist`, stable-hash `rollout`, and `on` additionally use the configured trusted
+  attestation path and fail closed on any mismatch. Ask and Deep Report share this gate.
 
 `.env.example` is the authoritative, fully-commented list of non-service variables and
 secret slots; `model-services.example.toml` is the service/binding/capacity template.

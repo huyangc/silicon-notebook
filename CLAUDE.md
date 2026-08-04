@@ -325,6 +325,8 @@ KG 抽取必须在全局对象同一事务内发布不可变的来源事实和�
 
 **轨迹必须覆盖整轮，不只是检索段。** 问题理解跑在持久 job 之前，前端自行合成理解阶段的前几步（理解中 → 已理解/待澄清 → 已确认）并让后端步骤接在其后，不得再为这一阶段另起轨迹之外的独立提示条；该阶段的客户端墙钟以 `intent.understanding_ms`（可选、有上限、绝不参与检索）回传，成为持久 `intent` 步的 `duration_ms`，重开会话回放时不会凭空少掉这一段。后端必须在 Memory 检索**之前**推送 `intent` 步；命中私有记忆时记 `memory` 步——它记录的是**召回**而非归因（记忆进了 prompt 却没被引用是常态，按锚点过滤会漏报；推迟到合成之后又会离开事情真正发生的位置），归因由答案里的 `[k]` 引用承担，措辞不得声称被采用；零命中改记一条**带耗时的 `skip`**，候选查询与 embedding 调用照样发生，丢掉这段就与「覆盖整轮」矛盾。答案生成之后记 `synthesis` 步——那次生成通常是整轮最长的一段，既不能不可见，也不能被排除在轨迹总耗时之外；它的引用数取绑定锚点，不取检索到的证据卡数。实时轨迹面板按引擎是否真的流式推轨迹（后端 `AskMode.streaming`，前端镜像为 `streamsTrace`，由 `scripts/check_ask_modes_contract.py` 锁同步）判断，**不得按显示分组判断**：深入分析组里的非流式引擎会因此全程只显示「等待后端事件…」。
 
+上面的“本阶段仍无 Ask/Report consumer”属于分阶段历史，现已由统一激活层取代。`SelectedSourceGraphActivationService` 是 Ask `chunk`/`reasoning`/实验 `graph` 与深度报告唯一消费入口，只处理服务端冻结、真正收窄的本地 `include` scope；省略/全选（含单来源 notebook 全选唯一来源）在 snapshot I/O 前留在历史路径，也不新增响应字段。历史 `B` 必须先完成，`G` 只用独立预算并追加在 `B` 后；shadow 恒返回 `B`，active 必须同时通过受信无正文 attestation 与精确 corpus/model pin，任何漂移、失败、越界或 baseline eviction 都返回 `B`。mounted base 保持独立 participant，不得被当前 notebook 的所选来源图遍历。Ask/报告前端显示同一份无正文 active/shadow/off/degraded 回执；轨迹使用 `source_subgraph`，禁止继续显示泛化的“不安全图通道已关闭”。
+
 ## 五、`AGENTS.md` 章节索引
 
 按需查阅，用章节标题定位（不要依赖行号）：

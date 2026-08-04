@@ -5655,6 +5655,23 @@ button.chat-session-card {
   text-decoration: line-through;
 }
 
+.source-graph-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--accent) 12%);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.source-graph-status strong { color: var(--text-primary); }
+.source-graph-active { border-color: color-mix(in srgb, #2aa36b 45%, var(--line)); }
+.source-graph-degraded { border-color: color-mix(in srgb, #d88a2d 45%, var(--line)); }
+
 .cite-chip-wrap {
   display: inline;
 }

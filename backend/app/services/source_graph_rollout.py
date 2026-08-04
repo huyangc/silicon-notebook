@@ -29,7 +29,13 @@ def load_quality_attestation(path: str | Path) -> dict[str, Any]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, Mapping):
         raise ValueError("selected-source quality attestation must be an object")
-    return verify_attestation(value)
+    # Validate the deployment-owned file, but retain its signed digest.  The
+    # rollout decision verifies the object again at the point of use; returning
+    # ``verify_attestation``'s normalized payload would drop that digest and
+    # make every valid file fail the second verification.
+    raw = dict(value)
+    verify_attestation(raw)
+    return raw
 
 
 def _stable_rollout_bucket(notebook_id: str) -> int:

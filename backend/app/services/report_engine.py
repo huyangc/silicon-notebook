@@ -461,6 +461,9 @@ class ReportEngineDependencies:
     memory_retriever: Any = None
     corpus_profile: Any = None
     generation_gate: Any = None
+    selected_source_graph: Any = None
+    scale_version: Any = None
+    selected_graph_hydrate: Any = None
 
 
 class ReportEngine:
@@ -470,6 +473,58 @@ class ReportEngine:
         self.settings = dependencies.settings
         self.user_id = user_id            # 发起者身份(审计归属;模型解析走 ContextVar)
         self.cancel_event = cancel_event
+
+    def _activate_selected_source_graph(self, notebook_id: str, result: Any) -> None:
+        service = self.dependencies.selected_source_graph
+        if service is None:
+            return
+        baseline = list(getattr(result, "chunks", None) or [])
+        object_seeds = {
+            str(hit.object_id): float(getattr(hit, "relevance", 0.0) or 0.0)
+            for hit in (getattr(result, "top_hits", None) or [])
+            if str(getattr(hit, "object_id", "") or "")
+        }
+        chunk_seeds = {
+            str(chunk.chunk_id): float(getattr(chunk, "relevance", 0.0) or 0.0)
+            for chunk in baseline
+            if str(getattr(chunk, "chunk_id", "") or "")
+        }
+
+        activated = service.run(
+            notebook_id,
+            baseline,
+            object_seeds=object_seeds,
+            chunk_seeds=chunk_seeds,
+            source_titles=self.dependencies.source_query.source_titles,
+            hydrate_chunk_ids=self.dependencies.selected_graph_hydrate,
+            parent_version=(
+                self.dependencies.scale_version(notebook_id)
+                if self.dependencies.scale_version is not None else None
+            ),
+            max_results=self.settings.ppr_top_chunks,
+            unsafe_scope_drift=bool(
+                getattr(
+                    self.dependencies.retrieval,
+                    "unsafe_source_scope_restricted",
+                    lambda _nb: False,
+                )(notebook_id)
+            ),
+        )
+        if activated.status.state == "historical":
+            return
+        result.baseline_chunks = baseline
+        result.chunks = list(activated.chunks)
+        result.source_graph_status = activated.status
+        if activated.status is not None:
+            from app.models.ask import TraceStep
+            result.trace.append(TraceStep(
+                step_type="source_subgraph",
+                summary=(
+                    f"来源子图：{activated.status.state}，"
+                    f"新增 {activated.status.enrichment_count} 条证据"
+                ),
+                detail=activated.status.public_dict(),
+            ))
 
     @classmethod
     def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
@@ -1138,8 +1193,10 @@ class ReportEngine:
                             verdict != "充足" or ceiling == "充足"
                         ):
                             s["sufficiency"] = verdict
-                        if v.get("gap_note") is not None: s["gap_note"] = str(v.get("gap_note", ""))
-                        if v.get("action"): s["action"] = str(v["action"])
+                        if v.get("gap_note") is not None:
+                            s["gap_note"] = str(v.get("gap_note", ""))
+                        if v.get("action"):
+                            s["action"] = str(v["action"])
         except AskCancelled:
             raise
         except Exception:
@@ -1272,6 +1329,9 @@ class ReportEngine:
             prior_manifest=prior_baseline_manifest,
             baseline_step_usage=len(result.trace),
         )
+        # B has now been frozen in the manifest. G is appended afterwards and
+        # never participates in the historical candidate/selection contract.
+        self._activate_selected_source_graph(notebook_id, result)
         return result
 
     # --- Stage C(单节):撰写 ---
@@ -1450,7 +1510,9 @@ class ReportEngine:
                 if candidate_manifest is not None else elements
             ),
             selected_knowledge=result.top_hits,
-            selected_chunks=chunks,
+            selected_chunks=(
+                getattr(result, "baseline_chunks", None) or chunks
+            ),
             selected_elements=elements,
             final_context_block=context_block,
             final_id_map=id_map,
@@ -1578,6 +1640,9 @@ class ReportEngine:
                 "intent_ids": list(section.get("intent_ids") or []),
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
+        source_graph_status = getattr(result, "source_graph_status", None)
+        if source_graph_status is not None:
+            base["source_graph"] = source_graph_status.public_dict()
         if not markdown:
             try:
                 deps.model_errors.note_model_error(
