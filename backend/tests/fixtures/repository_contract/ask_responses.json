@@ -351,7 +351,7 @@
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
         "citations": [],
-        "conclusion": "The notebook does not yet contain approved knowledge that matches this question. Upload and review sources to build coverage.",
+        "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "inferred",
         "grounded": false,
@@ -373,7 +373,7 @@
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
         "citations": [],
-        "conclusion": "The notebook does not yet contain approved knowledge that matches this question. Upload and review sources to build coverage.",
+        "conclusion": "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "inferred",
         "grounded": false,
@@ -477,9 +477,19 @@
           },
           {
             "detail": {
+              "found": 1,
+              "query": "fixture gain",
+              "reason": "initial_evidence_empty"
+            },
+            "duration_ms": 1,
+            "step_type": "fallback",
+            "summary": "初始证据未命中，补查来源原文，新增 1 段"
+          },
+          {
+            "detail": {
               "next_action": "answer",
-              "no_progress": true,
-              "stale": 1,
+              "no_progress": false,
+              "stale": 0,
               "sufficient": true
             },
             "duration_ms": 5,
@@ -489,7 +499,7 @@
           {
             "detail": {
               "chains": 0,
-              "elements": 0,
+              "elements": 1,
               "enumerated_items": 0,
               "enumerations": 0,
               "kg": 0,
@@ -508,7 +518,7 @@
               "evidence_level": "inferred",
               "included_chunks": 0,
               "included_collections": 0,
-              "included_elements": 0,
+              "included_elements": 1,
               "included_kg": 0
             },
             "duration_ms": 5,
@@ -519,7 +529,7 @@
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
-        "top_relevance": 0.0
+        "top_relevance": 0.5
       },
       "response": {
         "anchors": [],
@@ -607,9 +617,19 @@
           },
           {
             "detail": {
+              "found": 1,
+              "query": "fixture gain",
+              "reason": "initial_evidence_empty"
+            },
+            "duration_ms": 1,
+            "step_type": "fallback",
+            "summary": "初始证据未命中，补查来源原文，新增 1 段"
+          },
+          {
+            "detail": {
               "next_action": "answer",
-              "no_progress": true,
-              "stale": 1,
+              "no_progress": false,
+              "stale": 0,
               "sufficient": true
             },
             "duration_ms": 5,
@@ -619,7 +639,7 @@
           {
             "detail": {
               "chains": 0,
-              "elements": 0,
+              "elements": 1,
               "enumerated_items": 0,
               "enumerations": 0,
               "kg": 0,
@@ -638,7 +658,7 @@
               "evidence_level": "inferred",
               "included_chunks": 0,
               "included_collections": 0,
-              "included_elements": 0,
+              "included_elements": 1,
               "included_kg": 0
             },
             "duration_ms": 5,
@@ -649,7 +669,7 @@
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
-        "top_relevance": 0.0
+        "top_relevance": 0.5
       }
     },
     "reasoning": {

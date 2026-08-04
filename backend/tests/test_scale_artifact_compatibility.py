@@ -364,3 +364,68 @@ def test_load_scale_optional_artifact_counts_are_checked_when_present(store):
     degraded = store.load_scale("nb-chunk")
     assert degraded is not None                  # not escalated to "corrupt"
     assert degraded.chunk_ann_labels is None
+
+
+def test_chunk_ann_source_sidecar_is_optional_but_strict_when_declared(store):
+    store.save_full("nb-scoped", _artifacts(
+        ["a", "b"],
+        {"version": ["v", 1], "dim": 4, "n_nodes": 2, "n_ann": 2},
+        chunk_ann_vectors=np.eye(2, 4, dtype=np.float32),
+        chunk_ann_labels=["c1", "c2"],
+        chunk_ann_source_names=["s1", "s2"],
+        chunk_ann_source_codes=np.asarray([0, 1], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1, 1], dtype=np.int64),
+    ))
+    live = store.scale_dir("nb-scoped")
+    loaded = store.load_scale("nb-scoped")
+    assert loaded.chunk_ann_source_names == ["s1", "s2"]
+    assert loaded.chunk_ann_source_codes.tolist() == [0, 1]
+
+    np.save(
+        live / "chunk_ann_source_counts.npy",
+        np.asarray([2, 0], dtype=np.int64),
+    )
+    assert store.load_scale("nb-scoped") is None
+
+
+@pytest.mark.parametrize(
+    ("filename", "bad_value"),
+    [
+        (
+            "chunk_ann_source_names.npy",
+            np.asarray([["s1", "s2"]], dtype=object),
+        ),
+        (
+            "chunk_ann_source_names.npy",
+            np.asarray(["s1", "s1"], dtype=object),
+        ),
+        (
+            "chunk_ann_source_codes.npy",
+            np.asarray([0.0, 1.0], dtype=np.float64),
+        ),
+        (
+            "chunk_ann_source_codes.npy",
+            np.asarray([[0, 1]], dtype=np.int32),
+        ),
+        (
+            "chunk_ann_source_counts.npy",
+            np.asarray([1.0, 1.0], dtype=np.float64),
+        ),
+    ],
+)
+def test_chunk_ann_source_sidecar_rejects_bad_dtype_or_shape(
+    store, filename, bad_value
+):
+    store.save_full("nb-malformed", _artifacts(
+        ["a", "b"],
+        {"version": ["v", 1], "dim": 4, "n_nodes": 2, "n_ann": 2},
+        chunk_ann_vectors=np.eye(2, 4, dtype=np.float32),
+        chunk_ann_labels=["c1", "c2"],
+        chunk_ann_source_names=["s1", "s2"],
+        chunk_ann_source_codes=np.asarray([0, 1], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1, 1], dtype=np.int64),
+    ))
+    live = store.scale_dir("nb-malformed")
+    np.save(live / filename, bad_value)
+
+    assert store.load_scale("nb-malformed") is None

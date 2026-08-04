@@ -59,6 +59,24 @@ class SourceStore:
         self.now = now
 
     # ------------------------------------------------------------------ reads
+    def all_visible_source_ids(self, notebook_id: str) -> list[str]:
+        """Return the current visible-source universe for graph drift checks."""
+        with self.database.connect() as db:
+            return [row["id"] for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=? "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id",
+                (notebook_id,),
+            ).fetchall()]
+
+    def all_hidden_source_ids(self, notebook_id: str) -> list[str]:
+        """Return the current hidden-participant universe for drift checks."""
+        with self.database.connect() as db:
+            return [row["id"] for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=? "
+                "AND source_type IN ('memory','knowhow') ORDER BY id",
+                (notebook_id,),
+            ).fetchall()]
+
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         """User-facing source list — excludes Memory-derived AND knowhow-table
         hidden synthetic rows (source_type IN ('memory', 'knowhow')): both are

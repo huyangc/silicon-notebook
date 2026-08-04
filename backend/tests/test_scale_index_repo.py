@@ -821,7 +821,8 @@ def test_scale_index_status_state_machine(repo, monkeypatch):
     assert st2["state"] == "stale" and st2["delta_chunks"] == 2
 
 
-def test_fold_scale_index_delta(repo):
+@pytest.mark.parametrize("legacy_sidecar", [False, True])
+def test_fold_scale_index_delta(repo, legacy_sidecar):
     """端到端 fold:水位后新增 source 经 O(delta) fold 收进现有索引 —— delta 归零、
     index 版本新鲜、ann/chunk_ann 含新 id、n_nodes 增长、新 chunk 经 ANN 可召回。"""
     import json
@@ -851,6 +852,24 @@ def test_fold_scale_index_delta(repo):
     add("s1", "o1", "c1", "current mirror", 1)
     repo.rebuild_unified_kg(nb.id)
     repo.build_scale_index(nb.id)
+    if legacy_sidecar:
+        # Simulate a pre-source-sidecar artifact.  The next ordinary delta
+        # fold must upgrade all existing ANN labels as well as the new rows.
+        artifact_dir = os.path.join(
+            repo.settings.storage_dir, "kg_index", nb.id
+        )
+        manifest_path = os.path.join(artifact_dir, "manifest.json")
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        manifest.pop("has_chunk_ann_sources", None)
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        for filename in (
+            "chunk_ann_source_names.npy",
+            "chunk_ann_source_codes.npy",
+            "chunk_ann_source_counts.npy",
+        ):
+            os.remove(os.path.join(artifact_dir, filename))
     m0 = repo.scale_index_status(nb.id)
 
     # delta 一个新 source:o2 是新概念,o3 与 base 的 o1 同名(跨文档同一概念)
@@ -882,6 +901,15 @@ def test_fold_scale_index_delta(repo):
     assert "o2" in set(idx.ann_labels)
     assert idx.chunk_ann_labels is not None and "c2" in set(idx.chunk_ann_labels)
     assert "o1" in set(idx.ann_labels) and "c1" in set(idx.chunk_ann_labels)
+    assert idx.chunk_ann_source_names is not None
+    source_by_chunk = {
+        chunk_id: idx.chunk_ann_source_names[
+            int(idx.chunk_ann_source_codes[row])
+        ]
+        for row, chunk_id in enumerate(idx.chunk_ann_labels)
+    }
+    assert source_by_chunk["c1"] == "s1"
+    assert source_by_chunk["c2"] == "s2"
     # CSR 节点增长
     assert idx.manifest["n_nodes"] > m0["n_nodes"]
     assert "o2" in set(idx.node_ids) and "c2" in set(idx.node_ids)

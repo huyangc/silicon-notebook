@@ -7925,6 +7925,17 @@
               "title": "Mode",
               "type": "string"
             },
+            "narrowed": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Narrowed"
+            },
             "source_ids": {
               "items": {
                 "type": "string"

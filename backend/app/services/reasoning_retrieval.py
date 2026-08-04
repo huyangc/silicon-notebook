@@ -1436,9 +1436,22 @@ class ReasoningRetriever:
         narrowed; source-addressable KG/element search keeps running and lets
         candidate retrieval intersect that ceiling.
         """
-        from app.services.source_scope import source_scope_restricted
+        from app.services.source_scope import (
+            current_source_scope,
+            source_scope_restricted,
+        )
 
-        return source_scope_restricted()
+        if source_scope_restricted():
+            return True
+        scope = current_source_scope()
+        drift_probe = getattr(
+            self.retrieval, "unsafe_source_scope_restricted", None
+        )
+        return bool(
+            scope is not None
+            and callable(drift_probe)
+            and drift_probe(scope.notebook_id)
+        )
 
     # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
@@ -1901,6 +1914,7 @@ class ReasoningRetriever:
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
+        elements_searches = 0
         chunks: List[RetrievedChunk] = []
         chains: List[object] = []
         seen_chunks: set = set()
@@ -2188,6 +2202,29 @@ class ReasoningRetriever:
                     summary=f"按名称精确查找:新增 {len(found)} 段原文",
                     detail={"terms": list(seed_terms), "found": len(found),
                             "phase": "seed"}))
+
+            # Do not let reflect see a completely empty evidence state and
+            # prematurely declare it sufficient.  This runs after every
+            # deterministic seed channel (KG, PPR, exact lookup), and therefore
+            # also covers a one-source all-selected run where graph channels
+            # stay enabled but produce no seed.  Source-partitioned retrieval
+            # still receives the frozen checkbox ceiling before Top-K.
+            if (
+                not (collected or elements or chunks)
+                and self.settings.reasoning_max_element_searches > 0
+            ):
+                elements_searches = 1
+                found = self.search_elements(notebook_id, question)
+                added = merge_element_hits(elements, found)
+                record(TraceStep(
+                    step_type="fallback",
+                    summary=f"初始证据未命中，补查来源原文，新增 {len(added)} 段",
+                    detail={
+                        "query": question,
+                        "found": len(added),
+                        "reason": "initial_evidence_empty",
+                    },
+                ))
         finally:
             # 无论正常走完、plan/初检索抛异常(含 AskCancelled)、还是上面
             # ppr_future.result() 本身抛异常,这里都无条件关闭线程池且只关一次;
@@ -2274,12 +2311,11 @@ class ReasoningRetriever:
 
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
-        no_progress = len(collected) == 0
+        no_progress = not (collected or elements or chunks)
         # 确定性熔断: 连续无有效进展轮数; search_elements 累计执行次数。
         # 软提示(NO_NEW_EVIDENCE_NOTE)交模型自觉, stale 是硬熔断——模型若无视软提示
         # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
         stale = 1 if no_progress else 0
-        elements_searches = 0
         ppr_searches = 0
         follow_chain_searches = 0
         exact_lookups = 0

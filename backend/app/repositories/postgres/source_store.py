@@ -115,6 +115,26 @@ class SourceStore:
         self.database = database
         self.now = normalized_clock(now)
 
+    def all_visible_source_ids(self, notebook_id: str) -> list[str]:
+        """Return the current visible-source universe for graph drift checks."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM sources WHERE notebook_id=%s "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id",
+                (notebook_id,),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def all_hidden_source_ids(self, notebook_id: str) -> list[str]:
+        """Return the current hidden-participant universe for drift checks."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM sources WHERE notebook_id=%s "
+                "AND source_type IN ('memory','knowhow') ORDER BY id",
+                (notebook_id,),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def list_sources(self, notebook_id: str) -> list[SourceSummary]:
         with self.database.connect() as connection:
             rows = connection.execute(

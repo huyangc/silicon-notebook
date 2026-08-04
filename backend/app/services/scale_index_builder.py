@@ -111,6 +111,42 @@ class ScaleIndexBuilder:
         idx.add_items(vectors, np.arange(vectors.shape[0]))
         return idx
 
+    def _chunk_ann_source_codes(
+        self,
+        notebook_id: str,
+        chunk_ids: Sequence[str],
+        *,
+        source_names: Sequence[str] = (),
+    ) -> tuple[list[str], "np.ndarray", "np.ndarray"]:
+        """Build a compact row-aligned source sidecar for chunk HNSW labels.
+
+        The mapping is read in bounded pages and encoded as int32, avoiding an
+        8M-entry Python id→source dictionary during an offline index build.
+        ``-1`` marks an embedding whose chunk row disappeared during the build;
+        such a row is never admitted by a source-filtered query.
+        """
+        names = list(source_names)
+        source_to_code = {source_id: code for code, source_id in enumerate(names)}
+        codes = np.full(len(chunk_ids), -1, dtype=np.int32)
+        page_size = 10_000
+        for offset in range(0, len(chunk_ids), page_size):
+            page = list(chunk_ids[offset:offset + page_size])
+            mapped = self.projections.chunk_sources_for_ids(notebook_id, page)
+            for index, chunk_id in enumerate(page, start=offset):
+                source_id = mapped.get(chunk_id)
+                if not source_id:
+                    continue
+                code = source_to_code.get(source_id)
+                if code is None:
+                    code = len(names)
+                    names.append(source_id)
+                    source_to_code[source_id] = code
+                codes[index] = code
+        counts = np.bincount(
+            codes[codes >= 0], minlength=len(names)
+        ).astype(np.int64, copy=False)
+        return names, codes, counts
+
     def gather_graph(
         self,
         notebook_id: str,
@@ -316,9 +352,19 @@ class ScaleIndexBuilder:
             # past here. `vecs`/`matrix_raw` are locals, freed on return. The
             # "chunk_matrix" stage now times load+build (still one stage), so
             # build_ms keeps the ANN-build cost attributable.
-            return labels, self._build_ann(vecs)
+            ann = self._build_ann(vecs)
+            names, codes, counts = self._chunk_ann_source_codes(
+                notebook_id, labels
+            )
+            return labels, ann, names, codes, counts
 
-        chunk_ann_labels, chunk_ann_index = timed(
+        (
+            chunk_ann_labels,
+            chunk_ann_index,
+            chunk_ann_source_names,
+            chunk_ann_source_codes,
+            chunk_ann_source_counts,
+        ) = timed(
             "chunk_matrix", _load_build_chunk_ann
         )
         gc.collect()
@@ -398,6 +444,9 @@ class ScaleIndexBuilder:
                 # chunk/relation matrices freed after their ANN was built; pass
                 # the prebuilt indexes (save writes them straight to .bin).
                 "chunk_ann_labels": chunk_ann_labels,
+                "chunk_ann_source_names": chunk_ann_source_names,
+                "chunk_ann_source_codes": chunk_ann_source_codes,
+                "chunk_ann_source_counts": chunk_ann_source_counts,
                 "relation_ann_labels": relation_ann_labels,
                 "prebuilt_ann": kg_ann_index,
                 "prebuilt_chunk_ann": chunk_ann_index,
@@ -586,6 +635,46 @@ class ScaleIndexBuilder:
                 )
                 manifest["has_chunk_ann"] = True
                 manifest["n_chunk_ann"] = len(chunk_labels)
+                if (
+                    idx.chunk_ann_source_names is not None
+                    and idx.chunk_ann_source_codes is not None
+                ):
+                    source_names, delta_codes, _ = (
+                        self._chunk_ann_source_codes(
+                            notebook_id,
+                            chunk_vector_ids,
+                            source_names=idx.chunk_ann_source_names,
+                        )
+                    )
+                    source_codes = np.concatenate([
+                        np.asarray(
+                            idx.chunk_ann_source_codes, dtype=np.int32
+                        ),
+                        delta_codes,
+                    ])
+                    source_counts = np.bincount(
+                        source_codes[source_codes >= 0],
+                        minlength=len(source_names),
+                    ).astype(np.int64, copy=False)
+                else:
+                    # A fold also upgrades a pre-sidecar artifact.  Mapping the
+                    # complete label list is bounded internally and avoids
+                    # forcing an otherwise unnecessary full ANN rebuild after
+                    # rollout of source-filtered Top-K queries.
+                    source_names, source_codes, source_counts = (
+                        self._chunk_ann_source_codes(
+                            notebook_id,
+                            chunk_labels,
+                        )
+                    )
+                if len(source_codes) == len(chunk_labels):
+                    scale_index_module.save_fold_chunk_sources(
+                        str(temporary),
+                        source_names,
+                        source_codes,
+                        source_counts,
+                    )
+                    manifest["has_chunk_ann_sources"] = True
 
             if idx.relation_ann_path and idx.relation_ann_labels is not None:
                 relation_ids = self._delta_relation_ids(
