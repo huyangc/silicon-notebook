@@ -53,6 +53,13 @@ export type NotebookSummary = {
   // knowhow 格子]/已建 KG/参考库有 KG/confirmed memory 任一即真)。仅单库 get() 精确
   // 回填,列表恒 True。前端据此禁用空库对话框(见 ask-availability.isAskBlocked)。
   ask_available?: boolean;
+  /**
+   * 该 notebook **自己**(不含挂载参考库)有没有可检索证据 —— `ask_available` 那批
+   * 判据里的本地那三条(Knowhow 格子 / 该用户已确认的 Memory / 本地图谱)。参考库
+   * 现在可按库取消勾选,「取消之后还剩不剩东西」只能问它,不能拿可见来源数代替
+   * (Knowhow-only 的库来源恒为 0 却照常可搜)。读法见 ask-availability.hasLocalEvidence。
+   */
+  local_evidence_available?: boolean;
   kg_pending_sources?: number;
   kg_build?: KgBuildJobStatus | null;
   access?: "owner" | "reader";
@@ -439,6 +446,23 @@ export type TypedCollectionResult = {
   synthesis_complete?: boolean | null;
 };
 
+/**
+ * 一轮回答**实际获准搜索的范围**的只读回执。真源：
+ * `backend/app/models/source_scope.py RetrievalScopeReceipt`。
+ *
+ * ⚠ 只在**确有收窄**时才由后端产生（浏览器每次都会提交显式范围，全选也不例外，
+ * 所以「回执在场」是信号、「范围对象在场」不是）。缺席 = 这一轮两维都是全量，
+ * 或那条回答早于本特性；两种情况都不该渲染。
+ *
+ * ⚠ `bases[].name` 是**授权时刻的持久化快照**，不是当前挂载表的查询键：一条回答
+ * 活得比挂载边久，重开历史会话时那个库可能已经被卸载、易主或降级，拿当前
+ * `base_notebooks` 重新映射恰好会丢掉最该解释这条回答的那一行。
+ */
+export type RetrievalScopeReceipt = {
+  local: { selected: number; total: number };
+  bases: { notebook_id: string; name: string; included: boolean }[];
+};
+
 export type AskResponse = {
   answer_id: string;
   asked_at?: string;
@@ -459,6 +483,8 @@ export type AskResponse = {
   mode?: AskModeId;
   /** 提交本轮时选的 reasoning 检索档位；历史打开时据此恢复。 */
   retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
+  /** 本轮实际获准的检索范围；后端只在确有收窄时下发，缺席即不渲染。 */
+  retrieval_scope?: RetrievalScopeReceipt | null;
   /**
    * complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。
    * kind 判别的 union（PR-2 T5/T6）：Knowhow 的整表批次（kind="knowhow"）与

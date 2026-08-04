@@ -15,7 +15,7 @@ import {
 } from "./ask-stream.ts";
 import type { AskJobDetail } from "./ask-reconnect.ts";
 import type { QueryIntentContract } from "./ask-intent-model.ts";
-import type { SourceScopePayload } from "./source-scope.ts";
+import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 import type {
   AskResponse,
   ConversationDetail,
@@ -37,6 +37,9 @@ export const previewAskIntent = (
   conversationId?: string | null,
   signal?: AbortSignal,
   sourceScope?: SourceScopePayload,
+  // 预检必须与执行用**同一份**参考库上限：预检读语料目录、执行读证据，两者用不同
+  // 范围就会出现「预检说搜得到、执行搜不到」。省略即历史行为（全部挂载库参与）。
+  baseScope?: BaseScopePayload,
 ) => requestJson<QueryIntentContract>(`/notebooks/${notebookId}/ask/intent`, {
   ...options,
   method: "POST",
@@ -44,6 +47,7 @@ export const previewAskIntent = (
     question,
     conversation_id: conversationId || undefined,
     source_scope: sourceScope,
+    base_scope: baseScope,
   }),
   signal,
 });

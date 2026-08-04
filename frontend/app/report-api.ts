@@ -1,19 +1,27 @@
 import { requestBlob, requestJson } from "./api-client.ts";
 import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-view.tsx";
-import type { SourceScopePayload } from "./source-scope.ts";
+import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
+// 报告的检索范围在**创建那一刻定格**（`generateReport` 因此不带范围）：意图确认与
+// 生成前由后端按持久化的那一份重验，用户在这中间改勾选不会追溯改写已建报告。
 export const createReport = (
   nb: string,
   question: string,
   depth: number,
   sourceScope?: SourceScopePayload,
+  baseScope?: BaseScopePayload,
 ) =>
   requestJson<{ report_id: string }>(`/notebooks/${nb}/reports`, {
     ...options,
     method: "POST",
-    body: JSON.stringify({ question, depth, source_scope: sourceScope }),
+    body: JSON.stringify({
+      question,
+      depth,
+      source_scope: sourceScope,
+      base_scope: baseScope,
+    }),
   });
 
 export const confirmReportIntent = (

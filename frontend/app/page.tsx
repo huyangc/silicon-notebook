@@ -15,12 +15,20 @@ import { ContentOverviewCards } from "./content-overview-cards";
 import { AnalyticsLoadScope, startAnalyticsLoads } from "./analytics-loaders";
 import { sourceAnomalies } from "./anomaly-severity";
 import {
+  baseIsSelected,
+  baseScopePayload,
+  defaultBaseScopeSelection,
   defaultSourceScopeSelection,
+  localScopeIsEmpty,
   removeSourceFromSelection,
+  retrievalScopeSummary,
+  selectedBaseCount,
   selectedSourceCount,
   sourceIsSelected,
   sourceScopePayload,
+  toggleBaseSelection,
   toggleSourceSelection,
+  type BaseScopeSelection,
   type SourceScopeSelection,
 } from "./source-scope";
 import { AnomalyBadge } from "./anomaly-badge";
@@ -168,7 +176,7 @@ import {
   intentUnderstoodStep,
   replaceLastIntentStep,
 } from "./ask-intent-trace";
-import { isAskBlocked } from "./ask-availability";
+import { hasLocalEvidence, isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
@@ -751,6 +759,11 @@ export default function Home() {
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [sourceScopeSelection, setSourceScopeSelection] = useState<SourceScopeSelection>(
     defaultSourceScopeSelection,
+  );
+  // 挂载参考库的检索范围。与来源那一维**分开**存：粒度不同（整个库 vs 单篇来源）、
+  // 生命周期也不同（挂载边在设置里改，来源在这个页签改），后端也是分开校验的。
+  const [baseScopeSelection, setBaseScopeSelection] = useState<BaseScopeSelection>(
+    defaultBaseScopeSelection,
   );
   const [sourcesTotal, setSourcesTotal] = useState(0);
   // sourcesTotal follows the source-list filter (it holds the search-matched count
@@ -2192,11 +2205,36 @@ export default function Home() {
     sourceScopeSelection,
     notebookSourceTotal,
   );
-  const hasMountedBase = (currentNotebook?.base_notebooks?.length ?? 0) > 0;
-  const sourceScopeBlocked = selectedLocalSourceCount === 0 && !hasMountedBase;
+  // 挂载的参考库。owner 与只读访客都能从 NotebookSummary 拿到这一份（notebook-bases.ts
+  // 顶部说明：listBases 是 owner-only，访客的读路径就是这里），所以范围勾选不需要新端点。
+  const mountedBases = useMemo(
+    () => currentNotebook?.base_notebooks ?? [],
+    [currentNotebook],
+  );
+  const mountedBaseIds = useMemo(
+    () => mountedBases.map((base) => base.id),
+    [mountedBases],
+  );
+  const hasMountedBase = mountedBases.length > 0;
+  const selectedBaseNotebookCount = selectedBaseCount(baseScopeSelection, mountedBaseIds);
+  // 真机事故（本次改动的起因）：勾定单篇文章提问，16 条引用全部来自那个 84 篇论文的
+  // 参考库 —— 因为参考库当时无条件全量参与。所以「范围为空」必须**两维同时**为空
+  // 才算无得可搜；把参考库当成恒真的兜底，正是那条 bug 的翻版。
+  //
+  // 本地那一维的空判交给 localScopeIsEmpty（后端 has_local 的镜像）：不能拿「勾了几个
+  // 可见来源」代表本地证据宇宙 —— Knowhow 表与已确认 Memory 没有可见来源，那样的库
+  // 计数恒为 0，会被这道门连同问答输入框和新建报告一起锁死。
+  const sourceScopeBlocked = (
+    localScopeIsEmpty(
+      selectedLocalSourceCount,
+      notebookSourceTotal,
+      hasLocalEvidence(currentNotebook),
+    )
+    && selectedBaseNotebookCount === 0
+  );
   const askBlocked = isAskBlocked(currentNotebook) || sourceScopeBlocked;
   const askPlaceholderText = sourceScopeBlocked
-    ? "请至少选择一个来源或挂载参考库，再开始对话"
+    ? "请至少选择一个来源或参考库，再开始对话"
     : askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
   const currentSourceScope = sourceScopePayload(
     sourceScopeSelection,
@@ -2204,6 +2242,19 @@ export default function Home() {
     sourceQuery.trim() === "" && sources.length === notebookSourceTotal
       ? sources.map((source) => source.id)
       : undefined,
+  );
+  // 没挂参考库时整个维度不提交 —— 请求形状与接入本特性之前逐字一致，后端据此保留
+  // 「省略 = 全部参考库参与」的历史行为。
+  const currentBaseScope = hasMountedBase
+    ? baseScopePayload(baseScopeSelection, mountedBaseIds)
+    : undefined;
+  // 工具条与输入框上方是同一句话的两处显示；共用这**一个**计算结果，不各写各的
+  // 字面量 —— 两处分叉在结构上因此不可能发生。
+  const retrievalScopeText = retrievalScopeSummary(
+    { selected: selectedLocalSourceCount, total: notebookSourceTotal },
+    hasMountedBase
+      ? { selected: selectedBaseNotebookCount, total: mountedBases.length }
+      : null,
   );
   // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
   // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。
@@ -2706,6 +2757,9 @@ export default function Home() {
     );
     setSources(filteredSourcesPage.items);
     setSourceScopeSelection(defaultSourceScopeSelection());
+    // 参考库的选择状态挂在**上一个**笔记本的挂载集上，不一起重置就会把旧库 id 带进
+    // 新笔记本的请求（422），或反过来悄悄沿用旧的排除项。
+    setBaseScopeSelection(defaultBaseScopeSelection());
     setSourcesTotal(visibleSourcesTotal);
     setNotebookSourceTotal(visibleSourcesTotal);
     setSourcesPage(0);
@@ -2822,6 +2876,7 @@ export default function Home() {
     setCurrentNotebook(null);
     setSources([]);
     setSourceScopeSelection(defaultSourceScopeSelection());
+    setBaseScopeSelection(defaultBaseScopeSelection());
     setTitleDraft("");
     setTurns([]);
     setConversationId(null);
@@ -3407,7 +3462,7 @@ export default function Home() {
     if (!q) return;
     if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
       setToast(sourceScopeBlocked
-        ? "当前检索范围为空，请至少选择一个来源或挂载参考库。"
+        ? "当前检索范围为空，请至少选择一个来源或参考库。"
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
@@ -3443,7 +3498,8 @@ export default function Home() {
     const understandingStartedAt = Date.now();
     try {
       const contract = await previewAskIntent(
-        notebookId, q, conversationIdAtStart, controller.signal, currentSourceScope,
+        notebookId, q, conversationIdAtStart, controller.signal,
+        currentSourceScope, currentBaseScope,
       );
       if (
         controller.signal.aborted
@@ -3537,7 +3593,7 @@ export default function Home() {
     // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
     if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
       setToast(sourceScopeBlocked
-        ? "当前检索范围为空，请至少选择一个来源或挂载参考库。"
+        ? "当前检索范围为空，请至少选择一个来源或参考库。"
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return false;
     }
@@ -3579,6 +3635,10 @@ export default function Home() {
         mode: selectedMode,
         retrieval_effort: askRetrievalEffort,
         source_scope: currentSourceScope,
+        // ⚠ 必须留在**顶层**。挪进下面那个条件展开里，字段还在、值也没变，但非
+        // reasoning 模式（intent 为 undefined）下整个 base_scope 消失，参考库静默
+        // 恢复全量参与 —— 正是本次事故本身，而且不报错。
+        base_scope: currentBaseScope,
         ...(intent ? { intent } : {}),
       };
       const response = await runAskStream<AskResponse>(
@@ -5363,32 +5423,93 @@ export default function Home() {
                     </p>
                   );
                 })()}
-                <input
-                  className="source-search"
-                  type="search"
-                  placeholder="搜索来源（标题/作者/文件名）"
-                  value={sourceQuery}
-                  onChange={(e) => setSourceQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && currentNotebookId) {
-                      loadSourcesPage(currentNotebookId, { page: 0, q: sourceQuery }).catch(reportError);
-                    }
-                  }}
-                />
                 <div className="source-scope-toolbar" role="group" aria-label="问答与深度报告检索范围">
-                  <span>检索范围 · 已选 {selectedLocalSourceCount}/{notebookSourceTotal}</span>
+                  {/* title 带上完整计数：窄面板下这行会被省略号截断，不重复一遍就没处看。 */}
+                  <span
+                    className="retrieval-scope-count"
+                    title={`检索范围 · ${retrievalScopeText}（勾选的来源与参考库才会参与问答和深度报告检索）`}
+                  >
+                    检索范围 · {retrievalScopeText}
+                  </span>
                   <button
                     type="button"
-                    disabled={askInFlight || notebookSourceTotal === 0}
-                    onClick={() => setSourceScopeSelection(defaultSourceScopeSelection())}
+                    disabled={askInFlight || (notebookSourceTotal === 0 && !hasMountedBase)}
+                    onClick={() => {
+                      setSourceScopeSelection(defaultSourceScopeSelection());
+                      setBaseScopeSelection(defaultBaseScopeSelection());
+                    }}
                   >全选</button>
+                  {/* 「全选」/「清空」必须一并管参考库 —— 只清本库来源就是本次事故的
+                      翻版：用户以为范围空了，参考库还在整份参与检索。 */}
                   <button
                     type="button"
-                    disabled={askInFlight || selectedLocalSourceCount === 0}
-                    onClick={() => setSourceScopeSelection({ allSelected: false, ids: new Set() })}
+                    disabled={askInFlight || (
+                      selectedLocalSourceCount === 0 && selectedBaseNotebookCount === 0
+                    )}
+                    onClick={() => {
+                      setSourceScopeSelection({ allSelected: false, ids: new Set() });
+                      setBaseScopeSelection({ allSelected: false, ids: new Set() });
+                    }}
                   >清空</button>
                 </div>
-                <div className="source-list">
+                {hasMountedBase && (
+                  <section className="scope-group" aria-label="参考库检索范围">
+                    <h3 className="scope-group-title">参考库</h3>
+                    <div className="base-scope-list">
+                      {mountedBases.map((base) => {
+                        const included = baseIsSelected(baseScopeSelection, base.id);
+                        return (
+                          <label
+                            key={base.id}
+                            className="base-scope-row"
+                            title={`${base.name}${included
+                              ? " — 此参考库会参与问答与深度报告检索"
+                              : " — 此参考库不会参与问答与深度报告检索"}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={included}
+                              disabled={askInFlight}
+                              aria-label={`检索参考库：${base.name}`}
+                              onChange={() => setBaseScopeSelection((previous) => (
+                                toggleBaseSelection(previous, base.id)
+                              ))}
+                            />
+                            <span className="base-scope-name">{base.name}</span>
+                            {base.tier === "base" && (
+                              <span className="base-scope-badge" title="公共知识库">公共</span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </section>
+                )}
+                {/* 标题 + 搜索框成组，但**不**把 .source-list 包进来：那个列表靠
+                    .sources-body 上的 flex:1 1 auto / min-height:0 / overflow:auto 拿到
+                    剩余高度并自己滚动，套一层就得把这套算术原样复制一遍。列表用
+                    aria-labelledby 挂回标题，分组语义不丢。
+                    搜索框是从整个面板最顶上挪下来的：它过去悬在参考库之上，让人误以为
+                    能一并搜到参考库里的内容，而它只查当前笔记本。 */}
+                <div className="scope-group">
+                  <h3 className="scope-group-title" id="local-source-scope-title">本库来源</h3>
+                  <input
+                    className="source-search"
+                    type="search"
+                    placeholder="搜索来源（标题/作者/文件名）"
+                    value={sourceQuery}
+                    onChange={(e) => setSourceQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && currentNotebookId) {
+                        loadSourcesPage(currentNotebookId, { page: 0, q: sourceQuery }).catch(reportError);
+                      }
+                    }}
+                  />
+                </div>
+                {/* role="group" 是 aria-labelledby 的生效条件：挂在无 role 的通用 div
+                    上，辅助技术基本会忽略这条标注，分组语义等于没接。它不影响布局
+                    （这个 div 的滚动算术在 .sources-body 上，见上面那段注释）。 */}
+                <div className="source-list" role="group" aria-labelledby="local-source-scope-title">
                   {sources.length === 0 ? (
                     <article className="source-empty">
                       <div>▧</div>
@@ -5707,7 +5828,7 @@ export default function Home() {
                     listReports={listReports}
                     getReport={getReport}
                     createReport={(nb, reportQuestion, depth) => createReport(
-                      nb, reportQuestion, depth, currentSourceScope,
+                      nb, reportQuestion, depth, currentSourceScope, currentBaseScope,
                     )}
                     confirmReportIntent={confirmReportIntent}
                     updateReportOutline={updateReportOutline}
@@ -5720,7 +5841,7 @@ export default function Home() {
                     onFocusConsumed={() => setPendingReportFocusId(null)}
                     readOnly={!capabilities.canManageReports}
                     creationDisabled={sourceScopeBlocked}
-                    creationDisabledReason="当前检索范围为空，请至少选择一个来源或挂载参考库"
+                    creationDisabledReason="当前检索范围为空，请至少选择一个来源或参考库"
                   />
                 )}
 
@@ -5756,7 +5877,11 @@ export default function Home() {
                   abortLabel={intentChecking ? "取消问题理解" : "中断生成"}
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                 >
-                  <span>检索 {selectedLocalSourceCount}/{notebookSourceTotal} 个来源</span>
+                  {/* 与来源页签工具条同一句话的第二处显示 —— 共用 retrievalScopeText，
+                      两处不一致在结构上就不可能发生。 */}
+                  <span className="retrieval-scope-count" title="勾选的来源与参考库才会参与本次检索">
+                    检索范围 · {retrievalScopeText}
+                  </span>
                   {/* 只在用户真的敲了英文双引号时才出现:确认哪几段被当成完整短语,
                       或说明为什么这次没识别。判据与后端同一份规则的镜像。 */}
                   {askQuotedPhraseHint && (
