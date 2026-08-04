@@ -2584,6 +2584,89 @@ MIGRATION_MANIFEST[(39, 40)] = {
     "views": {},
 }
 
+# v41: one source-owned operational ledger makes historical source-fact
+# projection restartable and auditable without storing evidence text.
+SOURCE_FACT_BACKFILL_TABLES = {
+    "knowledge_source_fact_backfills": """CREATE TABLE knowledge_source_fact_backfills (
+                  source_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES sources(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  projection_version INTEGER NOT NULL DEFAULT 1,
+                  status TEXT NOT NULL DEFAULT 'running'
+                    CHECK(status IN ('running','complete','incomplete','failed')),
+                  after_object_id TEXT NOT NULL DEFAULT '',
+                  objects_scanned INTEGER NOT NULL DEFAULT 0,
+                  facts_written INTEGER NOT NULL DEFAULT 0,
+                  incomplete_objects INTEGER NOT NULL DEFAULT 0,
+                  incomplete_reason TEXT NOT NULL DEFAULT '',
+                  failure_code TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+}
+SOURCE_LOCAL_FACT_TABLE_V41 = """CREATE TABLE knowledge_source_facts (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  local_object_id TEXT NOT NULL,
+                  global_object_id TEXT NOT NULL DEFAULT '',
+                  object_type TEXT NOT NULL,
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  evidence TEXT NOT NULL DEFAULT '[]',
+                  projection_version INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                , projection_origin TEXT NOT NULL DEFAULT 'live' CHECK(projection_origin IN ('live','historical')))"""
+SOURCE_FACT_BACKFILL_COLUMNS = {
+    "knowledge_source_facts": {
+        "projection_origin": (
+            "projection_origin", "TEXT", 1, "'live'", 0
+        ),
+    },
+}
+SOURCE_FACT_BACKFILL_INDEXES = {
+    "idx_knowledge_source_fact_backfills_notebook":
+        "CREATE INDEX idx_knowledge_source_fact_backfills_notebook\n"
+        "                  ON knowledge_source_fact_backfills(notebook_id, status, source_id)",
+    "idx_kos_source_object":
+        "CREATE INDEX idx_kos_source_object\n"
+        "                  ON knowledge_object_sources(source_id, object_id)",
+    "idx_knowledge_source_facts_source_generation_global":
+        "CREATE INDEX idx_knowledge_source_facts_source_generation_global\n"
+        "                  ON knowledge_source_facts(\n"
+        "                    source_id, source_generation, projection_origin,\n"
+        "                    global_object_id\n"
+        "                  )",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 41, *key[2:]): {
+        **manifest,
+        "tables": {
+            **manifest["tables"],
+            **(
+                {"knowledge_source_facts": SOURCE_LOCAL_FACT_TABLE_V41}
+                if "knowledge_source_facts" in manifest["tables"] else {}
+            ),
+            **SOURCE_FACT_BACKFILL_TABLES,
+        },
+        "columns": {
+            **manifest["columns"],
+            **SOURCE_FACT_BACKFILL_COLUMNS,
+        },
+        "indexes": {**manifest["indexes"], **SOURCE_FACT_BACKFILL_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(40, 41)] = {
+    "tables": SOURCE_FACT_BACKFILL_TABLES,
+    "columns": SOURCE_FACT_BACKFILL_COLUMNS,
+    "indexes": SOURCE_FACT_BACKFILL_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

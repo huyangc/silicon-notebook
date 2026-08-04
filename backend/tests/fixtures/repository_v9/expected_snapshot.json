@@ -1393,6 +1393,11 @@
         "type": "index"
       },
       {
+        "name": "idx_knowledge_source_fact_backfills_notebook",
+        "sql_sha256": "400f0d31f61d471c6f16416fda942def416f2e423e157ce59d6d07894f5dc229",
+        "type": "index"
+      },
+      {
         "name": "idx_knowledge_source_fact_elements_source",
         "sql_sha256": "89700937643f2c85d3ec5785455b130c1986dd9a1dd5fa52bd42e09ed0b56517",
         "type": "index"
@@ -1408,6 +1413,11 @@
         "type": "index"
       },
       {
+        "name": "idx_knowledge_source_facts_source_generation_global",
+        "sql_sha256": "455951ed96a3d37a6f68bd4c76c132225122706753b682756ac6fbd7a8c04565",
+        "type": "index"
+      },
+      {
         "name": "idx_kos_notebook",
         "sql_sha256": "786d52f5e142c2a2b8ad01e3c2f29ea971ba68207fe88514cf77a86e259b0bfa",
         "type": "index"
@@ -1420,6 +1430,11 @@
       {
         "name": "idx_kos_source",
         "sql_sha256": "7e3d617725c83ce21e784e3cd3a4bd3625aed69c24a30ea292007fcbf4ae77ba",
+        "type": "index"
+      },
+      {
+        "name": "idx_kos_source_object",
+        "sql_sha256": "03bdca1d4b3dff7e8a287ca0286e74ac4201e96203664e6d0a14d4b9cc3798a1",
         "type": "index"
       },
       {
@@ -1863,13 +1878,18 @@
         "type": "table"
       },
       {
+        "name": "knowledge_source_fact_backfills",
+        "sql_sha256": "ea373a44cdbe7c1841445c81608df852a57d08e44d811ff799067e75cd109302",
+        "type": "table"
+      },
+      {
         "name": "knowledge_source_fact_elements",
         "sql_sha256": "b1aa9fdfe98b193ab651cb84c0c662ea1fdfffaccf1be2e5a9b4d9585733df56",
         "type": "table"
       },
       {
         "name": "knowledge_source_facts",
-        "sql_sha256": "05a46fe2122ab7999a56b18e2ca2893ce047a32941147223b3e7a083bf781fa8",
+        "sql_sha256": "f93da593bed0bf5d282b4bf37d1b31f9d37f5ba33e4409399b8bb54e7d62c781",
         "type": "table"
       },
       {
@@ -2038,6 +2058,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 40
+    "user_version": 41
   }
 }

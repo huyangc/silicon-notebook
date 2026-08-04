@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from app.repositories.ports import VectorBatchEncoder
+from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.sqlite.knowhow_history_store import content_strings_in_payload
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
 from app.services.vector_index import decode_vector
@@ -1118,6 +1119,10 @@ class SQLiteMaintenanceAdapter:
                 (notebook_id,),
             ).fetchone()["c"]
 
+    def source_index_backfilled(self, notebook_id: str) -> bool:
+        with self._runtime.database.connect() as db:
+            return self._runtime.knowledge.source_index_backfilled(db, notebook_id)
+
     def backfill_source_index_batch(
         self, notebook_id: str, last_id: str, batch_size: int
     ) -> tuple:
@@ -1149,6 +1154,251 @@ class SQLiteMaintenanceAdapter:
     def mark_source_index_backfilled(self, notebook_id: str) -> None:
         with self._runtime.database.write() as db:
             self._runtime.knowledge.mark_source_index_backfilled(db, notebook_id)
+
+    def source_fact_backfill_target_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[str]:
+        with self._runtime.database.connect() as db:
+            return [
+                str(row["id"])
+                for row in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id=? AND id>? "
+                    "AND source_type NOT IN ('memory','knowhow') "
+                    "ORDER BY id LIMIT ?",
+                    (notebook_id, after_id, max(1, min(int(limit), 2000))),
+                ).fetchall()
+            ]
+
+    def backfill_source_fact_batch(
+        self,
+        notebook_id: str,
+        source_id: str,
+        *,
+        batch_size: int = 500,
+        projection_version: int = 1,
+        force: bool = False,
+    ) -> dict[str, object]:
+        limit = max(1, min(int(batch_size), 2000))
+        now = self._runtime.seams.now()
+        with self._runtime.database.write() as db:
+            source = db.execute(
+                "SELECT id FROM sources WHERE id=? AND notebook_id=? "
+                "AND source_type NOT IN ('memory','knowhow')",
+                (source_id, notebook_id),
+            ).fetchone()
+            if source is None:
+                return {"status": "deleted", "done": True, "source_id": source_id}
+            latest = db.execute(
+                "SELECT id,status,error_message FROM extraction_runs "
+                "WHERE notebook_id=? AND source_id=? AND run_type='kg' "
+                "ORDER BY created_at DESC,id DESC LIMIT 1",
+                (notebook_id, source_id),
+            ).fetchone()
+            if latest is None or latest["status"] == "running":
+                return {
+                    "status": "busy" if latest else "no_generation",
+                    "done": False if latest else True,
+                    "source_id": source_id,
+                }
+            generation = ""
+            message = str(latest["error_message"] or "")
+            if latest["status"] == "completed" and message.startswith("kg objects="):
+                generation = str(latest["id"])
+            elif latest["status"] == "completed" and "retry_incomplete=1" in message:
+                prior = db.execute(
+                    "SELECT id FROM extraction_runs WHERE notebook_id=? AND source_id=? "
+                    "AND run_type='kg' AND status='completed' "
+                    "AND error_message LIKE 'kg objects=%' "
+                    "ORDER BY created_at DESC,id DESC LIMIT 1",
+                    (notebook_id, source_id),
+                ).fetchone()
+                generation = str(prior["id"]) if prior else ""
+            if not generation:
+                return {"status": "no_generation", "done": True, "source_id": source_id}
+
+            state = db.execute(
+                "SELECT * FROM knowledge_source_fact_backfills WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+            reset = bool(
+                state is None or force
+                or str(state["source_generation"]) != generation
+                or int(state["projection_version"]) != int(projection_version)
+            )
+            if reset:
+                # Preserve current-generation live facts published atomically by
+                # ingestion.  Only stale generations and prior legacy
+                # projections are rebuildable backfill output.
+                db.execute(
+                    "DELETE FROM knowledge_source_facts WHERE source_id=? "
+                    "AND (source_generation<>? OR projection_origin='historical')",
+                    (source_id, generation),
+                )
+                live_count = int(db.execute(
+                    "SELECT COUNT(*) AS c FROM knowledge_source_facts "
+                    "WHERE source_id=? AND source_generation=? "
+                    "AND projection_origin='live'",
+                    (source_id, generation),
+                ).fetchone()["c"])
+                db.execute(
+                    "INSERT INTO knowledge_source_fact_backfills "
+                    "(source_id,notebook_id,source_generation,projection_version,status,"
+                    "after_object_id,objects_scanned,facts_written,incomplete_objects,"
+                    "incomplete_reason,failure_code,created_at,updated_at) "
+                    "VALUES (?,?,?,?, 'running','',0,?,0,'','',?,?) "
+                    "ON CONFLICT(source_id) DO UPDATE SET notebook_id=excluded.notebook_id,"
+                    "source_generation=excluded.source_generation,projection_version=excluded.projection_version,"
+                    "status='running',after_object_id='',objects_scanned=0,"
+                    "facts_written=excluded.facts_written,incomplete_objects=0,"
+                    "incomplete_reason='',failure_code='',created_at=excluded.created_at,"
+                    "updated_at=excluded.updated_at",
+                    (
+                        source_id, notebook_id, generation, projection_version,
+                        live_count, now, now,
+                    ),
+                )
+                after_id = ""
+                scanned = incomplete = 0
+                written = live_count
+            else:
+                if state["status"] in ("complete", "incomplete"):
+                    return {**dict(state), "done": True}
+                after_id = str(state["after_object_id"] or "")
+                scanned = int(state["objects_scanned"])
+                written = int(state["facts_written"])
+                incomplete = int(state["incomplete_objects"])
+                prior_reason = str(state["incomplete_reason"] or "")
+                db.execute(
+                    "UPDATE knowledge_source_fact_backfills SET status='running',"
+                    "failure_code='',updated_at=? WHERE source_id=?",
+                    (now, source_id),
+                )
+
+            reason_codes: set[str] = set()
+            if not reset and incomplete:
+                reason_codes.add(prior_reason or "prior_page")
+
+            rows = db.execute(
+                "WITH owned(id) AS ("
+                " SELECT id FROM knowledge_objects WHERE notebook_id=? "
+                " AND source_id=? AND id>? ORDER BY id LIMIT ?"
+                "), supported(id) AS ("
+                " SELECT object_id FROM knowledge_object_sources "
+                " WHERE notebook_id=? AND source_id=? AND object_id>? "
+                " ORDER BY object_id LIMIT ?"
+                "), candidate_ids(id) AS (SELECT id FROM owned UNION SELECT id FROM supported) "
+                "SELECT ko.id,ko.source_id,ko.object_type,ko.payload,ko.evidence,"
+                "EXISTS(SELECT 1 FROM knowledge_source_facts f WHERE f.source_id=? "
+                "AND f.source_generation=? AND f.global_object_id=ko.id "
+                "AND f.projection_origin='live') AS has_live_fact "
+                "FROM candidate_ids c JOIN knowledge_objects ko ON ko.id=c.id "
+                "AND ko.notebook_id=? ORDER BY ko.id LIMIT ?",
+                (notebook_id, source_id, after_id, limit,
+                 notebook_id, source_id, after_id, limit,
+                 source_id, generation, notebook_id, limit),
+            ).fetchall()
+            rejected = 0
+            candidates = []
+            all_element_ids: list[str] = []
+            for raw in rows:
+                if raw["has_live_fact"]:
+                    continue
+                fact, reason = project_historical_source_fact(
+                    dict(raw), source_id, generation
+                )
+                if fact is None:
+                    rejected += 1
+                    reason_codes.add(reason or "unprojectable")
+                else:
+                    candidates.append(fact)
+                    all_element_ids.extend(fact.element_ids)
+            owned: set[str] = set()
+            element_ids = list(dict.fromkeys(all_element_ids))
+            if element_ids:
+                payload = json.dumps(element_ids, ensure_ascii=False)
+                owned = {
+                    str(row["id"])
+                    for row in db.execute(
+                        "WITH requested(id) AS (SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                        "SELECT se.id FROM requested CROSS JOIN source_elements se "
+                        "ON se.id=requested.id WHERE se.source_id=?",
+                        (payload, source_id),
+                    ).fetchall()
+                }
+            valid = []
+            for fact in candidates:
+                if not set(fact.element_ids).issubset(owned):
+                    rejected += 1
+                    reason_codes.add("missing_element_ownership")
+                else:
+                    valid.append(fact)
+            if valid:
+                local_ids = [fact.local_object_id for fact in valid]
+                payload = json.dumps(local_ids, ensure_ascii=False)
+                collisions = {
+                    str(row["local_object_id"])
+                    for row in db.execute(
+                        "WITH requested(id) AS ("
+                        "SELECT CAST(value AS TEXT) FROM json_each(?)) "
+                        "SELECT f.local_object_id FROM requested CROSS JOIN "
+                        "knowledge_source_facts f ON f.local_object_id=requested.id "
+                        "WHERE f.source_id=? AND f.source_generation=? "
+                        "AND f.projection_origin='live'",
+                        (payload, source_id, generation),
+                    ).fetchall()
+                }
+                if collisions:
+                    rejected += sum(
+                        fact.local_object_id in collisions for fact in valid
+                    )
+                    reason_codes.add("local_id_collision")
+                    valid = [
+                        fact for fact in valid
+                        if fact.local_object_id not in collisions
+                    ]
+            fact_rows = [
+                (f.fact_id, notebook_id, source_id, generation, f.local_object_id,
+                 f.global_object_id, f.object_type, f.payload_json, f.evidence_json,
+                 projection_version, now, now)
+                for f in valid
+            ]
+            element_rows = [
+                (f.fact_id, notebook_id, source_id, generation, element_id, now)
+                for f in valid for element_id in f.element_ids
+            ]
+            self._runtime.knowledge.insert_source_fact_rows(
+                db,
+                fact_rows,
+                element_rows,
+                projection_origin="historical",
+            )
+            scanned += len(rows)
+            written += len(valid)
+            incomplete += rejected
+            new_after = str(rows[-1]["id"]) if rows else after_id
+            done = len(rows) < limit
+            status = ("incomplete" if incomplete else "complete") if done else "running"
+            incomplete_reason = sorted(reason_codes)[0] if incomplete else ""
+            db.execute(
+                "UPDATE knowledge_source_fact_backfills SET status=?,after_object_id=?,"
+                "objects_scanned=?,facts_written=?,incomplete_objects=?,"
+                "incomplete_reason=?,failure_code='',"
+                "updated_at=? WHERE source_id=? AND source_generation=?",
+                (status, new_after, scanned, written, incomplete, incomplete_reason,
+                 now, source_id, generation),
+            )
+            return {"source_id": source_id, "source_generation": generation,
+                    "status": status, "done": done, "objects_scanned": scanned,
+                    "facts_written": written, "incomplete_objects": incomplete,
+                    "after_object_id": new_after}
+
+    def mark_source_fact_backfill_failed(self, source_id: str, code: str) -> None:
+        with self._runtime.database.write() as db:
+            db.execute(
+                "UPDATE knowledge_source_fact_backfills SET status='failed',"
+                "failure_code=?,updated_at=? WHERE source_id=?",
+                (str(code)[:64], self._runtime.seams.now(), source_id),
+            )
 
     # -- knowhow-table assets (PR-2+3 Task 14) ---------------------------------
 

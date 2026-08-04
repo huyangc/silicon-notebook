@@ -341,6 +341,14 @@ def test_copy_notebook_remaps_source_local_facts_and_element_bindings(repo):
             "VALUES (?,?,?,?,?,?)",
             (fact_id, src, source_id, "run-copy", element_id, now),
         )
+        db.execute(
+            "INSERT INTO knowledge_source_fact_backfills "
+            "(source_id,notebook_id,source_generation,projection_version,status,"
+            "after_object_id,objects_scanned,facts_written,incomplete_objects,"
+            "failure_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (source_id, src, "run-copy", 1, "complete", object_id,
+             1, 1, 0, "", now, now),
+        )
 
     copied = repo.copy_notebook(src, new_owner_id="user-fact-copy")
     with repo._connect() as db:
@@ -349,6 +357,10 @@ def test_copy_notebook_remaps_source_local_facts_and_element_bindings(repo):
         ).fetchone()
         binding = db.execute(
             "SELECT * FROM knowledge_source_fact_elements WHERE notebook_id=?",
+            (copied.id,),
+        ).fetchone()
+        backfill = db.execute(
+            "SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id=?",
             (copied.id,),
         ).fetchone()
         copied_object_ids = {
@@ -362,10 +374,30 @@ def test_copy_notebook_remaps_source_local_facts_and_element_bindings(repo):
                 "WHERE s.notebook_id=?", (copied.id,)
             ).fetchall()
         }
+        copied_run = db.execute(
+            "SELECT * FROM extraction_runs WHERE notebook_id=? AND source_id=? "
+            "AND run_type='kg' ORDER BY created_at DESC,id DESC LIMIT 1",
+            (copied.id, fact["source_id"]),
+        ).fetchone()
     assert fact["id"] != fact_id
+    assert fact["projection_origin"] == "live"
     assert fact["global_object_id"] in copied_object_ids
     assert binding["fact_id"] == fact["id"]
     assert binding["element_id"] in copied_element_ids
+    assert copied_run is not None
+    assert copied_run["id"] == fact["source_generation"]
+    assert copied_run["id"] == binding["source_generation"]
+    assert copied_run["status"] == "completed"
+    assert copied_run["error_message"].startswith("kg objects=")
+    assert backfill["incomplete_reason"] == ""
+    assert backfill["source_id"] == fact["source_id"]
+    assert backfill["source_generation"] == copied_run["id"]
+    assert backfill["after_object_id"] == fact["global_object_id"]
+
+    repair = repo.maintenance.backfill_source_fact_batch(
+        copied.id, fact["source_id"], force=True
+    )
+    assert repair["status"] != "no_generation"
 
 
 def test_copy_notebook_clears_memory_id(repo):

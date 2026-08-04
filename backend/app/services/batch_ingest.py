@@ -1186,6 +1186,7 @@ def run_vectors_to_blob(repo: BatchIngestRepository, notebook_id: Optional[str],
 
 
 _KOS_BACKFILL_BATCH_SIZE = 2000
+_SOURCE_FACT_BACKFILL_BATCH_SIZE = 500
 
 
 def _backfill_source_index_for_notebook(
@@ -1246,6 +1247,102 @@ def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional
     print(f"backfill-source-index done: notebooks={len(results)} objects={total_objects} rows={total_rows}",
           flush=True)
     return {"notebooks": results, "objects": total_objects, "rows": total_rows}
+
+
+def _backfill_source_facts_for_notebook(
+    repo: BatchIngestRepository, notebook_id: str, *, force: bool = False
+) -> dict[str, object]:
+    # Build the evidence reverse index once per notebook so every per-source
+    # page is an indexed source-first lookup instead of a repeated JSON scan.
+    # A completed marker is authoritative; do not turn every resumed fact
+    # backfill into another O(all notebook objects) delete+rewrite.  An
+    # interrupted reverse-index build keeps the marker false and is rebuilt
+    # before any source-fact page can run.
+    if not repo.maintenance.source_index_backfilled(notebook_id):
+        _backfill_source_index_for_notebook(repo, notebook_id)
+    totals = {
+        "sources": 0, "complete": 0, "incomplete": 0,
+        "busy": 0, "no_generation": 0, "failed": 0,
+        "objects_scanned": 0, "facts_written": 0,
+        "incomplete_objects": 0,
+    }
+    after_source_id = ""
+    while True:
+        source_ids = repo.maintenance.source_fact_backfill_target_page(
+            notebook_id, after_id=after_source_id, limit=500
+        )
+        if not source_ids:
+            break
+        for source_id in source_ids:
+            totals["sources"] += 1
+            first = True
+            try:
+                while True:
+                    result = repo.maintenance.backfill_source_fact_batch(
+                        notebook_id,
+                        source_id,
+                        batch_size=_SOURCE_FACT_BACKFILL_BATCH_SIZE,
+                        force=force and first,
+                    )
+                    first = False
+                    if result.get("done") or result.get("status") == "busy":
+                        break
+                status = str(result.get("status") or "failed")
+                if status in totals:
+                    totals[status] += 1
+                totals["objects_scanned"] += int(result.get("objects_scanned") or 0)
+                totals["facts_written"] += int(result.get("facts_written") or 0)
+                totals["incomplete_objects"] += int(
+                    result.get("incomplete_objects") or 0
+                )
+                print(
+                    f"  [source-facts] {source_id}: {status} "
+                    f"facts={int(result.get('facts_written') or 0)} "
+                    f"incomplete={int(result.get('incomplete_objects') or 0)}",
+                    flush=True,
+                )
+            except Exception:
+                repo.maintenance.mark_source_fact_backfill_failed(
+                    source_id, "backfill_error"
+                )
+                totals["failed"] += 1
+                print(f"  [source-facts] {source_id}: failed", flush=True)
+        after_source_id = source_ids[-1]
+        if len(source_ids) < 500:
+            break
+    return {"notebook_id": notebook_id, **totals}
+
+
+def run_backfill_source_facts(
+    repo: BatchIngestRepository,
+    notebook_id: Optional[str],
+    *,
+    all_notebooks: bool = False,
+    force: bool = False,
+) -> dict[str, object]:
+    """Offline, restartable historical source-fact projection."""
+    if not notebook_id and not all_notebooks:
+        raise ValueError(
+            "run_backfill_source_facts: 需要 notebook_id 或 all_notebooks=True"
+        )
+    if all_notebooks:
+        targets = repo.maintenance.all_notebook_ids()
+    else:
+        repo.get_notebook(notebook_id)
+        targets = [notebook_id]
+    results = [
+        _backfill_source_facts_for_notebook(repo, target, force=force)
+        for target in targets
+    ]
+    return {
+        "notebooks": results,
+        "sources": sum(int(item["sources"]) for item in results),
+        "facts_written": sum(int(item["facts_written"]) for item in results),
+        "incomplete_objects": sum(
+            int(item["incomplete_objects"]) for item in results
+        ),
+        "failed": sum(int(item["failed"]) for item in results),
+    }
 
 
 def run_metadata(repo, args, workers: int | None = None) -> int:
@@ -1331,11 +1428,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="离线批量摄取目录 → 项目 KG/向量库(SQLite/PostgreSQL)",
     )
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
-                                      "backfill-source-index", "metadata", "reparse"])
+                                      "backfill-source-index", "backfill-source-facts",
+                                      "metadata", "reparse"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--all-notebooks", action="store_true",
-                   help="vectors-to-blob / backfill-source-index 专用:作用于全库全部 notebook,忽略 --notebook-id")
+                   help="vectors-to-blob / backfill-source-index / backfill-source-facts 专用:作用于全库全部 notebook,忽略 --notebook-id")
     p.add_argument("--notebook-name", default=None,
                    help="新建 notebook 名(ingest/all 新建库时必填;不再默认用目录名)")
     p.add_argument("--owner", default=None,
@@ -1364,7 +1462,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="chunk_embedding workload 未绑定时显式允许无向量降级"
                         "(默认拒绝,防静默产出无向量库)")
     p.add_argument("--force", action="store_true",
-                   help="metadata phase: 已有元数据行的源也重抽(prompt/校验升级后刷新)")
+                   help="metadata phase: 已有元数据行的源也重抽；"
+                        "backfill-source-facts phase: 删除该代次的旧回填投影并从头重建")
     p.add_argument("--pool-report-interval", type=int, default=15,
                    help="每 N 秒自报 producer/source 业务线程池占用;0 关闭。"
                         "all/kg/reparse 阶段生效")
@@ -1413,6 +1512,21 @@ def _dispatch_main(
             flush=True,
         )
         return 0
+
+    if args.phase == "backfill-source-facts":
+        _t = time.perf_counter()
+        result = run_backfill_source_facts(
+            repo,
+            args.notebook_id,
+            all_notebooks=args.all_notebooks,
+            force=args.force,
+        )
+        print(
+            f"backfill-source-facts done: {result} "
+            f"({time.perf_counter() - _t:.1f}s)",
+            flush=True,
+        )
+        return 1 if int(result["failed"]) else 0
 
     if args.phase == "metadata":
         print(
@@ -1690,6 +1804,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.phase == "backfill-source-index" and not args.notebook_id and not args.all_notebooks:
         print("error: backfill-source-index 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
+        return 2
+
+    if args.phase == "backfill-source-facts" and not args.notebook_id and not args.all_notebooks:
+        print("error: backfill-source-facts 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
         return 2
 
     settings = Settings()

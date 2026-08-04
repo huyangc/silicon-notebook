@@ -240,6 +240,14 @@ class KnowledgeStore:
         """
         counts: dict[str, int] = {}
         cur = db.execute(
+            "DELETE FROM knowledge_source_fact_backfills WHERE notebook_id=%s "
+            "AND NOT EXISTS (SELECT 1 FROM sources s "
+            "WHERE s.id=knowledge_source_fact_backfills.source_id AND s.notebook_id=%s "
+            "AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
+        )
+        counts["knowledge_source_fact_backfills"] = cur.rowcount
+        cur = db.execute(
             "DELETE FROM knowledge_source_facts WHERE notebook_id=%s "
             "AND NOT EXISTS (SELECT 1 FROM sources s "
             "WHERE s.id=knowledge_source_facts.source_id AND s.notebook_id=%s "
@@ -1380,13 +1388,18 @@ class KnowledgeStore:
         connection: Any,
         rows: Sequence[tuple],
         element_rows: Sequence[tuple],
+        *,
+        projection_origin: str = "live",
     ) -> None:
+        if projection_origin not in {"live", "historical"}:
+            raise ValueError("invalid source-fact projection origin")
         execute_many(
             connection,
             "INSERT INTO knowledge_source_facts "
             "(id, notebook_id, source_id, source_generation, local_object_id, global_object_id, "
-            "object_type, payload, evidence, projection_version, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "object_type, payload, evidence, projection_version, created_at, updated_at, "
+            "projection_origin) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (id) DO NOTHING",
             [
                 (
@@ -1400,6 +1413,7 @@ class KnowledgeStore:
                     row[9],
                     normalize_timestamp(row[10]),
                     normalize_timestamp(row[11]),
+                    projection_origin,
                 )
                 for row in rows
             ],
@@ -2034,6 +2048,11 @@ class KnowledgeStore:
         )
         db.execute(
             "DELETE FROM knowledge_source_facts "
+            "WHERE source_id=%s AND notebook_id=%s",
+            (source_id, notebook_id),
+        )
+        db.execute(
+            "DELETE FROM knowledge_source_fact_backfills "
             "WHERE source_id=%s AND notebook_id=%s",
             (source_id, notebook_id),
         )

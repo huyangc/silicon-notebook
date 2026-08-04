@@ -58,6 +58,12 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
     ),
     (
+        "knowledge_source_fact_backfills",
+        "SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id=%s "
+        "AND status IN ('complete','incomplete') "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
         "knowledge_relations",
         "SELECT * FROM knowledge_relations WHERE notebook_id=%s "
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
@@ -102,6 +108,8 @@ _COPY_VALIDATED_TABLES = (
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_facts", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_fact_elements", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_fact_backfills", "AND status IN ('complete','incomplete') "
+     f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     (
         "knowledge_relations",
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
@@ -133,6 +141,12 @@ _COPY_VALIDATED_JOIN_TABLES = (
     ),
 )
 _COPY_TABLES = frozenset(table for table, _query in _COPY_SNAPSHOT_QUERIES)
+# Operational extraction history is intentionally absent from the source
+# snapshot, but NotebookCopyService synthesizes one copy-local completed KG
+# generation for copied source facts. Keep snapshot eligibility and safe
+# insertion eligibility separate so adding this row cannot start copying run
+# history accidentally.
+_COPY_INSERT_TABLES = _COPY_TABLES | {"extraction_runs"}
 _JSON_COLUMNS = {
     "source_paper_meta": {"keywords", "raw_json"},
     "source_elements": {"metadata"},
@@ -410,7 +424,7 @@ class SharingStore:
             return self._copy_limit_violation(connection, notebook_id) is None
 
     def insert_copy_rows(self, table: str, rows: Sequence[dict], *, chunk_size: int) -> None:
-        if table not in _COPY_TABLES:
+        if table not in _COPY_INSERT_TABLES:
             raise ValueError("unsupported copy table")
         for index in range(0, len(rows), chunk_size):
             with self.database.write() as connection:
@@ -554,7 +568,7 @@ class SharingStore:
 
     @staticmethod
     def insert_row_values(connection, table: str, data: dict) -> None:
-        if table not in _COPY_TABLES:
+        if table not in _COPY_INSERT_TABLES:
             raise ValueError("unsupported copy table")
         data = normalize_timestamp_row(table, data)
         columns = list(data)

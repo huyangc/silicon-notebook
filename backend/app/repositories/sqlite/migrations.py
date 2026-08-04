@@ -26,7 +26,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # on source_elements for bounded, per-type collection enumeration.
 # v39 adds the command-catalog extraction job row (with its per-source
 # single-flight partial unique index) and its reviewable candidate rows.
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2091,6 +2091,47 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_knowledge_source_fact_elements_source
                   ON knowledge_source_fact_elements(
                     source_id, source_generation, element_id, fact_id
+                  );
+                """
+            )
+
+    def _migration_41(self) -> None:
+        """Persist restartable source-fact backfill progress and audit state."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db,
+                "knowledge_source_facts",
+                "projection_origin",
+                "TEXT NOT NULL DEFAULT 'live' "
+                "CHECK(projection_origin IN ('live','historical'))",
+            )
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS knowledge_source_fact_backfills (
+                  source_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES sources(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  projection_version INTEGER NOT NULL DEFAULT 1,
+                  status TEXT NOT NULL DEFAULT 'running'
+                    CHECK(status IN ('running','complete','incomplete','failed')),
+                  after_object_id TEXT NOT NULL DEFAULT '',
+                  objects_scanned INTEGER NOT NULL DEFAULT 0,
+                  facts_written INTEGER NOT NULL DEFAULT 0,
+                  incomplete_objects INTEGER NOT NULL DEFAULT 0,
+                  incomplete_reason TEXT NOT NULL DEFAULT '',
+                  failure_code TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_source_fact_backfills_notebook
+                  ON knowledge_source_fact_backfills(notebook_id, status, source_id);
+                CREATE INDEX IF NOT EXISTS idx_kos_source_object
+                  ON knowledge_object_sources(source_id, object_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_source_facts_source_generation_global
+                  ON knowledge_source_facts(
+                    source_id, source_generation, projection_origin,
+                    global_object_id
                   );
                 """
             )

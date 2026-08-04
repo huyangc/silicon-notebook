@@ -197,9 +197,11 @@ def test_replacement_swaps_fact_generation_and_global_delete_does_not_erase_fact
 
     with repo._runtime.database.write() as db:
         facts = db.execute(
-            "SELECT id, source_generation, global_object_id FROM knowledge_source_facts"
+            "SELECT id, source_generation, global_object_id, projection_origin "
+            "FROM knowledge_source_facts"
         ).fetchall()
         assert [row["source_generation"] for row in facts] == ["run-2"]
+        assert [row["projection_origin"] for row in facts] == ["live"]
         deleted = db.execute(
             "DELETE FROM knowledge_objects WHERE id=?", (facts[0]["global_object_id"],)
         )
