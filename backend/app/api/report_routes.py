@@ -330,8 +330,14 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
         cur = repo.get_report(notebook_id, report_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Report not found")
-    if cur.get("status") != "outline_ready":
-        raise HTTPException(status_code=409, detail="generate only from outline_ready")
+    retrying = cur.get("status") == "failed"
+    if cur.get("status") not in {"outline_ready", "failed"}:
+        raise HTTPException(
+            status_code=409,
+            detail="generate only from outline_ready or failed",
+        )
+    if retrying and not (cur.get("outline") or []):
+        raise user_error(409, "该失败报告没有可复用大纲，请重新创建报告")
     understanding = dict(cur.get("understanding") or {})
     persisted_scope = understanding.get("source_scope")
     resolved_scope = None
@@ -350,7 +356,7 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
             )
     depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
     if not repo.claim_report_generation(notebook_id, report_id):
-        raise user_error(409, "当前报告不再处于大纲确认阶段")
+        raise user_error(409, "当前报告已进入其他处理阶段")
     if resolved_scope is None:
         _launch_generate_job(
             repo, notebook_id, report_id, cur["question"], depth

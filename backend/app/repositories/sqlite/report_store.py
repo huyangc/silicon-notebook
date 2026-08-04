@@ -86,14 +86,18 @@ class ReportStore:
         return cursor.rowcount > 0
 
     def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
-        """Atomically claim one outline-ready report for generation."""
+        """Atomically claim an outline-ready or failed report for generation."""
         now = self.now()
         with self.database.write() as db:
             cursor = db.execute(
                 "UPDATE reports SET status='generating',progress=?,"
-                "understanding_json=json_set(understanding_json,"
+                "error='',content_md='',sections_json='[]',gaps_json='[]',"
+                "references_json='[]',section_status_json='[]',"
+                "understanding_json=json_set(json_remove(understanding_json,"
+                "'$.credibility'),"
                 "'$._generation_started_at',?),updated_at=? "
-                "WHERE id=? AND notebook_id=? AND status='outline_ready'",
+                "WHERE id=? AND notebook_id=? "
+                "AND status IN ('outline_ready','failed')",
                 ("准备生成", now, now, report_id, notebook_id),
             )
         return cursor.rowcount > 0

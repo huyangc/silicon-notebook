@@ -568,11 +568,19 @@ MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
 MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
 REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
 REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000；仅对不带研究深度的调用方生效，见检索段的行为变化说明）
-REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 max_tokens（默认 8192）
+REPORT_GENERATION_CONCURRENCY # 深度报告：每个后端进程同时准入的整篇报告数（默认 1；排队时不占数据库连接）
+REPORT_SECTION_CONCURRENCY   # 深度报告：每篇已准入报告的节级扇出（默认 3；还受模型容量和数据库连接池余量约束）
+REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 completion 上限（默认 65536）
+REPORT_SYNTHESIS_MAX_TOKENS  # 深度报告：全篇 JSON 蓝图 completion 上限（默认 102400）
+REPORT_SUMMARY_MAX_TOKENS    # 深度报告：最终只读终审 completion 上限（默认 102400）
 REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）
 REPORT_HIGH_RISK_DOWNGRADE_ENABLED # 深度报告高风险引证审计超阈值时是否把 grounded 章节封顶为 overview（默认 false；关闭时披露仍运行）
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # 深度报告高风险引证审计阈值；数值契约只在 docs/product-and-api_zh.md 维护
 ```
+
+三个 `REPORT_*_MAX_TOKENS` 是 completion 上限，不是总上下文声明，也不会预占输出。
+prompt + completion 的兼容性由所绑定 provider/model 负责；部署时必须确认它能在对应
+workload 的最大 prompt 下接受这些上限。若 provider 的输出或总窗口更小，应下调相应值。
 
 **行为变化（PR-5，不新增开关）：** 每节深挖的检索预算现在按报告自己的 `depth` 值（1/2/4/8/16，接口侧夹在 `[1, 16]`）映射到与逐步推理相同的档名（`overview`/`standard`/`deep`/`thorough`/`exhaustive`），不再永远按 `standard` 预算跑。低档位因此比这次改动前检索预算更小、高档位更大——这是把同名档位对齐（同一档名在 Ask 与深度报告两处买到同一份预算）的有意修复，不是回归。到达 depth 16（`exhaustive`）时，该节深挖内部还会额外激活上文的大纲便签与 KG 弱支撑边回喂；完整合同见 `docs/product-and-api_zh.md`「深度报告接入大纲共演化」一节。
 

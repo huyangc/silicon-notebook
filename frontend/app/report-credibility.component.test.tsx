@@ -241,6 +241,77 @@ test("报告详情实际挂载可信度回执与引证分布，而非只测试�
 });
 
 
+test("失败报告保留大纲时可从详情页原地重新生成", async () => {
+  const user = userEvent.setup();
+  const failed = detail({
+    id: "rep-retry",
+    depth: 8,
+    status: "failed",
+    error: "internal detail",
+    content_md: "STALE REPORT BODY",
+    sections: [{ title: "old", markdown: "stale", grounded: false, failed: true }],
+    section_status: [{ title: "old", phase: "失败", step: 0 }],
+    gaps: ["old gap"],
+    references: [{ key: "k1", label: "old reference" }],
+    understanding: {
+      credibility: { synthesis_status: "failed_model" },
+    },
+  });
+  const generateReport = vi.fn().mockResolvedValue({ status: "generating" });
+  const setToast = vi.fn();
+  render(
+    <ReportsPanel
+      notebookId="nb-1"
+      listReports={vi.fn().mockResolvedValue([])}
+      getReport={vi.fn().mockResolvedValue(failed)}
+      createReport={vi.fn()}
+      confirmReportIntent={vi.fn()}
+      updateReportOutline={vi.fn()}
+      generateReport={generateReport}
+      cancelReport={vi.fn()}
+      deleteReport={vi.fn()}
+      downloadReportsZip={vi.fn()}
+      setToast={setToast}
+      focusReportId="rep-retry"
+    />,
+  );
+
+  expect(await screen.findByText("STALE REPORT BODY")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "重新生成" }));
+
+  expect(generateReport).toHaveBeenCalledWith("nb-1", "rep-retry", 8);
+  expect(setToast).toHaveBeenCalledWith("已按原确认问题和大纲重新生成");
+  expect(screen.getByText(/正在后台生成/)).toBeVisible();
+  expect(screen.queryByText("STALE REPORT BODY")).toBeNull();
+  expect(screen.queryByLabelText("报告可信度回执")).toBeNull();
+});
+
+
+test("形成大纲前失败的报告不展示误导性的重试按钮", async () => {
+  render(
+    <ReportsPanel
+      notebookId="nb-1"
+      listReports={vi.fn().mockResolvedValue([])}
+      getReport={vi.fn().mockResolvedValue(detail({
+        id: "rep-no-outline", status: "failed", outline: [],
+      }))}
+      createReport={vi.fn()}
+      confirmReportIntent={vi.fn()}
+      updateReportOutline={vi.fn()}
+      generateReport={vi.fn()}
+      cancelReport={vi.fn()}
+      deleteReport={vi.fn()}
+      downloadReportsZip={vi.fn()}
+      setToast={vi.fn()}
+      focusReportId="rep-no-outline"
+    />,
+  );
+
+  expect(await screen.findByText(/请重新创建报告/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "重新生成" })).toBeNull();
+});
+
+
 test("分析框架可以删除维度和条件，避免留下后端拒绝的空名称", async () => {
   const user = userEvent.setup();
   const updateReportOutline = vi.fn().mockResolvedValue({ status: "ok", sections: 1 });

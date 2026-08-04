@@ -19,6 +19,7 @@ import pytest
 from app.services.report_execution import (
     REPORT_CANCELLATIONS,
     ReportCancellationRegistry,
+    ReportGenerationGate,
     ReportExecutionCoordinator,
 )
 
@@ -107,6 +108,72 @@ def test_registry_register_cancel_unregister_roundtrip():
     registry.unregister("r1")
     assert registry.cancel("r1") is False              # 注销后不再命中
     registry.unregister("r1")                          # 幂等
+
+
+def test_generation_gate_queues_without_holding_more_than_capacity():
+    gate = ReportGenerationGate(1)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    second_waiting = threading.Event()
+
+    def first():
+        with gate.slot():
+            first_entered.set()
+            assert release_first.wait(3)
+
+    def second():
+        with gate.slot(on_wait=second_waiting.set):
+            second_entered.set()
+
+    one = threading.Thread(target=first)
+    two = threading.Thread(target=second)
+    one.start()
+    assert first_entered.wait(3)
+    two.start()
+    assert second_waiting.wait(3)
+    assert not second_entered.is_set()
+    release_first.set()
+    one.join(3)
+    two.join(3)
+    assert second_entered.is_set()
+
+
+def test_generation_gate_ignores_wait_notification_failure_without_leaking_slot():
+    gate = ReportGenerationGate(1)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    wait_notified = threading.Event()
+
+    def first():
+        with gate.slot():
+            first_entered.set()
+            assert release_first.wait(3)
+
+    def broken_notification():
+        wait_notified.set()
+        raise RuntimeError("pool saturated")
+
+    def second():
+        with gate.slot(on_wait=broken_notification):
+            second_entered.set()
+
+    one = threading.Thread(target=first)
+    two = threading.Thread(target=second)
+    one.start()
+    assert first_entered.wait(3)
+    two.start()
+    assert wait_notified.wait(3)
+    assert not second_entered.is_set()
+    release_first.set()
+    one.join(3)
+    two.join(3)
+    assert second_entered.is_set()
+
+    # The second waiter released its permit normally after the callback fault.
+    with gate.slot():
+        pass
 
 
 def test_registry_refuses_overwrite_and_unregisters_by_event_identity():

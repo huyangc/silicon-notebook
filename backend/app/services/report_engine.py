@@ -460,6 +460,7 @@ class ReportEngineDependencies:
     event_log: Any
     memory_retriever: Any = None
     corpus_profile: Any = None
+    generation_gate: Any = None
 
 
 class ReportEngine:
@@ -1467,8 +1468,8 @@ class ReportEngine:
         # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
         # (不抛异常)。原先空 markdown 会让本节在 _assemble 里静默消失(无标题/无提示)。
         # 有界重试一次("{}" 不入 LLM 缓存,真·重掷);仍空则标 failed(→渲染「本节生成失败」
-        # note,不再静默)+ emit model_error(report_engine 原先零可观测)。章节更长/预算更小
-        # (report_section_max_tokens 仅 answer 的一半),故比 ask 更易触发。
+        # note,不再静默)+ emit model_error(report_engine 原先零可观测)。报告章节会使用
+        # 独立的 report_section_max_tokens 上限，但思考型模型仍可能把该预算耗在 reasoning 上。
         markdown, llm_grounded, raw_claims = "", False, None
         for _ in range(2):
             try:
@@ -1614,10 +1615,11 @@ class ReportEngine:
                     json.dumps(intent_contract, ensure_ascii=False),
                     json.dumps(report_frame or {}, ensure_ascii=False),
                     json.dumps(evidence_sections, ensure_ascii=False),
-                )}],
-                REPORT_SYNTHESIS_SCHEMA_HINT,
-                cancel_event=self.cancel_event,
-            )
+                    )}],
+                    REPORT_SYNTHESIS_SCHEMA_HINT,
+                    cancel_event=self.cancel_event,
+                    **cap_kwargs(client, "report_synthesis_max_tokens"),
+                )
         except AskCancelled:
             raise
         except Exception as exc:
@@ -1748,7 +1750,9 @@ class ReportEngine:
                     notebook_id, section, question, result, depth, **draft_options
                 )
                 with lock:
-                    status[i]["phase"] = "完成"
+                    status[i]["phase"] = (
+                        "失败" if drafted.get("failed") else "完成"
+                    )
             except AskCancelled:
                 with lock:
                     status[i]["phase"] = "失败"
@@ -1767,13 +1771,20 @@ class ReportEngine:
             persist(force=True)
             return drafted
 
-        # One configured service owns capacity.  Do not create a second report
-        # concurrency knob that can exceed the scheduler's physical limit.
+        # The model service capacity is an upper bound, not a database fan-out
+        # target.  Reserve two pool slots for interactive reads/writes and cap
+        # one report independently so concurrent reports cannot multiply the
+        # service's model capacity into pool exhaustion.
+        database_worker_cap = max(
+            1, int(self.settings.postgres_pool_max_size) - 2
+        )
         workers = max(
             1,
             min(
                 len(outline),
                 self.dependencies.model_clients.parallelism("report_section"),
+                int(self.settings.report_section_concurrency),
+                database_worker_cap,
             ),
         )
 
@@ -1867,24 +1878,54 @@ class ReportEngine:
                 reports.update_report(notebook_id, rid, status="failed",
                                       error="no outline to generate", progress="无大纲")
                 return
-            reports.update_report(notebook_id, rid, status="generating",
-                                  progress=f"章节 0/{len(outline)} 完成")
-            sections = self._run_sections(
-                notebook_id, rid, outline, research_question, depth
+            gate = self.dependencies.generation_gate
+
+            def _queued():
+                reports.update_report(
+                    notebook_id, rid, status="generating",
+                    progress="生成任务排队中",
+                )
+
+            from contextlib import nullcontext
+            slot = (
+                gate.slot(cancel_event=self.cancel_event, on_wait=_queued)
+                if gate is not None else nullcontext()
             )
-            # 中间只写 progress:此刻 sections 仍含 id_map 账目,不落库。
-            reports.update_report(notebook_id, rid, progress="汇总中")
-            content_md, gaps, references = self._assemble(
-                notebook_id, rid, research_question, outline, sections,
-                display_question=display_question,
-            )
-            for s in sections:
-                s.pop("id_map", None)          # 账目仅供 assemble,不入库
-                s.pop("_synthesis_blueprint", None)
-                s.pop("_synthesis_status", None)
-            reports.update_report(notebook_id, rid, sections=sections,
-                                  content_md=content_md, gaps=gaps,
-                                  references=references, status="done", progress="完成")
+            with slot:
+                reports.update_report(notebook_id, rid, status="generating",
+                                      progress=f"章节 0/{len(outline)} 完成")
+                sections = self._run_sections(
+                    notebook_id, rid, outline, research_question, depth
+                )
+                # 中间只写 progress:此刻 sections 仍含 id_map 账目,不落库。
+                reports.update_report(notebook_id, rid, progress="汇总中")
+                content_md, gaps, references = self._assemble(
+                    notebook_id, rid, research_question, outline, sections,
+                    display_question=display_question,
+                )
+                successful_sections = [
+                    section for section in sections
+                    if str(section.get("markdown") or "").strip()
+                    and not section.get("failed")
+                ]
+                for s in sections:
+                    s.pop("id_map", None)          # 账目仅供 assemble,不入库
+                    s.pop("_synthesis_blueprint", None)
+                    s.pop("_synthesis_status", None)
+                if not successful_sections:
+                    reports.update_report(
+                        notebook_id, rid, sections=sections,
+                        content_md=content_md, gaps=gaps,
+                        references=references, status="failed",
+                        error="所有章节均未产出有效正文，可从已确认大纲重试生成",
+                        progress="生成失败",
+                    )
+                    return
+                reports.update_report(
+                    notebook_id, rid, sections=sections,
+                    content_md=content_md, gaps=gaps,
+                    references=references, status="done", progress="完成",
+                )
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
         except Exception as exc:
@@ -1953,15 +1994,26 @@ class ReportEngine:
         contradictions: List[str] = []
         # 执行摘要 + 只读覆盖/冲突审校(容错:失败不拖垮报告,也不重写正文)。
         summary = ""
+        has_successful_body = any(
+            str(section.get("markdown") or "").strip()
+            and not section.get("failed")
+            for section in sections
+        )
         try:
+            if not has_successful_body:
+                raise ValueError("no successful report section to summarize")
             sections_block = fair_editor_context(
                 sections, frame=report_frame, blueprint=synthesis_blueprint
             )
-            raw = self.dependencies.model_clients.chat("report_summary").chat_json(
+            summary_client = self.dependencies.model_clients.chat("report_summary")
+            raw = summary_client.chat_json(
                 [{"role": "user", "content": report_summary_prompt(
                     question, sections_block, intent_block=intent_block
                 )}],
-                REPORT_SUMMARY_SCHEMA_HINT, cancel_event=self.cancel_event)
+                REPORT_SUMMARY_SCHEMA_HINT, cancel_event=self.cancel_event,
+                **cap_kwargs(
+                    summary_client, "report_summary_max_tokens",
+                ))
             data = json.loads(raw)
             summary = str(data.get("summary", "")).strip()
             known_intents = {str(item.get("id") or "") for item in intent_catalog}

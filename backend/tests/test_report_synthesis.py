@@ -55,6 +55,21 @@ def test_synthesis_payload_is_grouped_by_section_not_source():
     assert legal == {"o1", "e1"}
 
 
+def test_synthesis_payload_honors_a_small_caller_context_ceiling():
+    hit = SimpleNamespace(
+        object_id="o1", object_type="Claim", relevance=0.9,
+        payload={"name": "Claim", "definition": "x" * 900},
+    )
+    result = SimpleNamespace(top_hits=[hit], elements=[], chunks=[])
+
+    payload, legal = synthesis_evidence_payload(
+        [{"title": "A"}, {"title": "B"}], [result, result], max_chars=100
+    )
+
+    assert payload[0]["evidence"] == [] and payload[1]["evidence"] == []
+    assert legal == set()
+
+
 def _blueprint():
     return {
         "central_answer": "Use orthogonal dimensions.",
@@ -74,6 +89,57 @@ def _blueprint():
             "handoff": "Next compare conditions.", "do_not_repeat": [],
         }],
     }
+
+
+def _blueprint_with_claim_counts(counts):
+    claims = []
+    sections = []
+    for section_index, count in enumerate(counts, 1):
+        section_id = f"section-{section_index}"
+        claim_ids = []
+        for claim_index in range(1, count + 1):
+            claim_id = f"c{section_index}-{claim_index}"
+            claim_ids.append(claim_id)
+            claims.append({
+                "id": claim_id,
+                "statement": f"Claim {section_index}-{claim_index}",
+                "type": "fact",
+                "facet_id": "",
+                "evidence_keys": ["o1"],
+                "counterevidence_keys": [],
+                "conditions": [],
+                "owner_section_id": section_id,
+            })
+        sections.append({
+            "section_id": section_id,
+            "thesis": f"Thesis {section_index}",
+            "claim_ids": claim_ids,
+            "must_contrast": [],
+            "handoff": "",
+            "do_not_repeat": [],
+        })
+    return {
+        "central_answer": "Bounded blueprint",
+        "shared_definitions": [],
+        "claims": claims,
+        "sections": sections,
+    }
+
+
+def _normalize_counted_blueprint(counts):
+    return normalize_synthesis_blueprint(
+        _blueprint_with_claim_counts(counts),
+        outline=[{"title": f"S{index}"} for index in range(1, len(counts) + 1)],
+        legal_evidence_ids={"o1"},
+        frame=None,
+    )
+
+
+def test_blueprint_enforces_report_and_per_section_claim_limits():
+    assert _normalize_counted_blueprint([12]) is not None
+    assert _normalize_counted_blueprint([13]) is None
+    assert _normalize_counted_blueprint([12, 12, 12, 12, 12]) is not None
+    assert _normalize_counted_blueprint([12, 12, 12, 12, 12, 1]) is None
 
 
 def test_blueprint_rejects_unknown_evidence_atomically():

@@ -15,7 +15,13 @@ def test_report_settings_defaults():
     assert s.report_max_sections == 6
     assert not hasattr(s, "report_section_top_n")   # 已移除:逐节与 ask 统一走自适应预算
     assert s.report_section_chunk_budget == 20000
-    assert s.report_section_max_tokens == 8192
+    assert s.report_section_concurrency == 3
+    assert s.report_generation_concurrency == 1
+    assert not hasattr(s, "report_context_window_tokens")
+    assert not hasattr(s, "report_summary_context_window_tokens")
+    assert s.report_section_max_tokens == 65536
+    assert s.report_synthesis_max_tokens == 102400
+    assert s.report_summary_max_tokens == 102400
     assert s.report_allow_parametric is True
 
 
@@ -23,9 +29,15 @@ def test_report_settings_env(monkeypatch):
     from app.core.config import Settings
     monkeypatch.setenv("REPORT_MAX_SECTIONS", "4")
     monkeypatch.setenv("REPORT_ALLOW_PARAMETRIC", "false")
+    monkeypatch.setenv("REPORT_SECTION_MAX_TOKENS", "70000")
+    monkeypatch.setenv("REPORT_SYNTHESIS_MAX_TOKENS", "71000")
+    monkeypatch.setenv("REPORT_SUMMARY_MAX_TOKENS", "33000")
     s = Settings(_env_file=None)
     assert s.report_max_sections == 4
     assert s.report_allow_parametric is False
+    assert s.report_section_max_tokens == 70000
+    assert s.report_synthesis_max_tokens == 71000
+    assert s.report_summary_max_tokens == 33000
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +94,31 @@ def test_report_crud_roundtrip(repo):
     assert repo.list_reports(nb.id) == []
     with pytest.raises(KeyError):
         repo.get_report(nb.id, rid)
+
+
+def test_failed_report_generation_claim_reuses_outline_and_clears_old_artifacts(repo):
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    outline = [{"title": "A", "scope": "s", "sub_queries": ["q"]}]
+    repo.update_report(
+        nb.id, rid, status="failed", outline=outline,
+        understanding={"confirmed": True, "credibility": {"synthesis_status": "failed_model"}},
+        sections=[{"title": "old", "markdown": "stale"}],
+        gaps=["old"], references=[{"key": "k1"}], content_md="# stale",
+        section_status=[{"title": "old", "phase": "失败", "step": 0}],
+        error="pool timeout",
+    )
+
+    assert repo.claim_report_generation(nb.id, rid) is True
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "generating"
+    assert detail["outline"] == outline
+    assert detail["sections"] == [] and detail["gaps"] == []
+    assert detail["references"] == [] and detail["content_md"] == ""
+    assert detail["section_status"] == [] and detail["error"] == ""
+    assert detail["understanding"]["confirmed"] is True
+    assert "credibility" not in detail["understanding"]
+    assert detail["generation_started_at"]
 
 
 # ---------------------------------------------------------------------------
@@ -590,8 +627,8 @@ def test_assemble_no_citations_omits_references(repo):
 # Task 2(perf): depth 穿透 + 模型工作负载并行度 + 节内实时进度
 # ---------------------------------------------------------------------------
 
-def test_run_sections_concurrency_uses_report_section_parallelism(repo, monkeypatch):
-    """并发 = min(节数, report_section 所属模型并行度)。"""
+def test_run_sections_concurrency_caps_model_parallelism_for_database(repo, monkeypatch):
+    """模型并行度是上限；单报告数据库扇出另受 report section gate 限制。"""
     original_parallelism = repo._runtime.models.parallelism
     monkeypatch.setattr(
         repo._runtime.models, "parallelism",
@@ -602,8 +639,8 @@ def test_run_sections_concurrency_uses_report_section_parallelism(repo, monkeypa
     seen = {"max": 0, "cur": 0}
     import threading as _t
     lk = _t.Lock()
-    # 4 节全部到齐才放行 —— 确定性地观测真并行度(否则极快 stub 会逐个跑完不重叠)。
-    barrier = _t.Barrier(4, timeout=5)
+    # 三个 worker 到齐才放行，确定性观测默认数据库扇出上限。
+    barrier = _t.Barrier(3, timeout=5)
     from app.services.reasoning_retrieval import ReasoningResult
     def _dd(nb_id, section, question, depth=None, on_step=None):
         with lk:
@@ -617,7 +654,7 @@ def test_run_sections_concurrency_uses_report_section_parallelism(repo, monkeypa
     nb = _mk_nb(repo); rid = repo.create_report(nb.id, "q")
     outline = [{"title": f"S{i}", "scope": "s", "sub_queries": ["q"]} for i in range(4)]
     eng._run_sections(nb.id, rid, outline, "q", depth=2)
-    assert seen["max"] == 4          # 4 节 ≤ 上限5 → 全并行
+    assert seen["max"] == 3
 
 
 def test_detailed_report_retrieves_all_sections_then_synthesizes_once_before_writing(
@@ -803,6 +840,64 @@ def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, mon
     assert sections[0]["_synthesis_status"] == "failed_validation"
     assert ("report_synthesis", "report_summary") in notes
     assert events[-1]["kind"] == "report_synthesis_failed"
+
+
+def test_report_stages_use_their_independent_output_budgets(repo):
+    from types import SimpleNamespace
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    class _BudgetClient:
+        configured = True
+
+        def __init__(self):
+            self.settings = repo.settings
+            self.calls = []
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            self.calls.append((messages[-1]["content"], kwargs.get("max_tokens")))
+            if "write ONE section" in messages[-1]["content"]:
+                return json.dumps({
+                    "markdown": "## A\nbody", "grounded": False, "claims": [],
+                })
+            if "EVIDENCE SYNTHESIZER" in messages[-1]["content"]:
+                return json.dumps({
+                    "central_answer": "a", "shared_definitions": [],
+                    "claims": [],
+                    "sections": [{
+                        "section_id": "section-1", "thesis": "t",
+                        "claim_ids": [], "must_contrast": [], "handoff": "",
+                        "do_not_repeat": [],
+                    }],
+                })
+            return json.dumps({"summary": "s", "coverage": [], "contradictions": []})
+
+    client = _BudgetClient()
+    _bind_report_llm(repo, client)
+    eng = _mk_engine(repo, client)
+    nb = _mk_nb(repo)
+    eng._draft_section(
+        nb.id, {"title": "A", "scope": "s", "sub_queries": ["A"]},
+        "q", ReasoningResult(), depth=1,
+    )
+    hit = SimpleNamespace(
+        object_id="o1", object_type="Claim", relevance=0.9,
+        payload={"name": "n", "definition": "e"},
+    )
+    outline = [{"title": "A", "scope": "s", "sub_queries": ["A"]}]
+    blueprint, status, error = eng._synthesize_report_blueprint(
+        outline,
+        [SimpleNamespace(top_hits=[hit], elements=[], chunks=[])],
+        "q", None,
+    )
+    assert blueprint and status == "available" and error is None
+    rid = repo.create_report(nb.id, "q")
+    eng._assemble(
+        nb.id, rid, "q", outline,
+        [{"title": "A", "scope": "s", "markdown": "## A\nbody",
+          "grounded": False, "id_map": {}}],
+    )
+
+    assert [budget for _prompt, budget in client.calls] == [65536, 102400, 102400]
 
 
 def test_detailed_report_without_evidence_discloses_skip_without_model_error(repo, monkeypatch):
@@ -1442,11 +1537,38 @@ def test_generate_runs_sections_on_stored_outline(repo, monkeypatch):
     monkeypatch.setattr(eng, "_deep_dive", lambda *a,**k: ReasoningResult())
     class _S:
         configured=True
-        def chat_json(self,*a,**k): return json.dumps({"summary":"总"})
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "ONLY this section" in messages[-1]["content"]:
+                return json.dumps({"markdown": "## A\n正文", "grounded": False})
+            return json.dumps({"summary":"总"})
     _bind_report_llm(repo, _S())
     eng.generate(nb.id, rid, "q", depth=2)
     d=repo.get_report(nb.id, rid)
     assert d["status"]=="done" and d["content_md"].startswith("#")
+
+
+def test_generate_marks_all_empty_sections_failed_instead_of_done(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    repo.update_report(
+        nb.id, rid, status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+    )
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    monkeypatch.setattr(eng, "_run_sections", lambda *args, **kwargs: [{
+        "title": "A", "scope": "s", "markdown": "", "grounded": False,
+        "failed": True, "error": "pool timeout", "id_map": {}, "claims": [],
+        "claim_ledger_status": "missing",
+    }])
+
+    eng.generate(nb.id, rid, "q", depth=8)
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "failed"
+    assert "所有章节均未产出有效正文" in detail["error"]
+    assert "本节生成失败" in detail["content_md"]
 
 
 def test_generate_keeps_clarifications_out_of_visible_report_title(repo, monkeypatch):
