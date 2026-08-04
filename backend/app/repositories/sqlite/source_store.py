@@ -68,13 +68,57 @@ class SourceStore:
                 (notebook_id,),
             ).fetchall()]
 
-    def all_hidden_source_ids(self, notebook_id: str) -> list[str]:
-        """Return the current hidden-participant universe for drift checks."""
+    def hidden_source_ids(self, notebook_id: str, owner_id: str) -> list[str]:
+        """Hidden Memory/Knowhow projection participants **for one user**, in
+        stable id order.
+
+        The hidden half is NOT uniform.  **Knowhow** projection sources are
+        notebook-wide content — every member reads the table itself, so every
+        member's ceiling admits them.  A **Memory** projection source belongs
+        to ONE user: ``memory_items.created_by`` is the predicate every other
+        Memory path already uses (``MemoryStore.memory_retrieval_rows``'
+        ``m.created_by=?``, ``memory_for_user``, and
+        ``source_change_signal_rows``' unconditional exclusion of Memory from
+        typed-collection listings).  Without this filter, a shared notebook's
+        default non-narrowed request froze EVERY member's Memory projection
+        source into the requesting user's ceiling, and the Memory-derived
+        elements and KG objects those sources own then became reachable
+        through ordinary candidate retrieval and through the whole-graph/PPR
+        channels a non-narrowed run re-enables.
+
+        The filter is in the SQL, not on the result, for two reasons: another
+        member's Memory source ids never enter this process at all, and a
+        later edit cannot drop a result-side ``if`` and silently reopen the
+        leak.  It costs no extra round trip and no extra access path either:
+        ``s.source_type <> 'memory'`` short-circuits the ``EXISTS`` for every
+        Knowhow row, so the primary-key probe into ``memory_items`` fires only
+        for rows that are Memory projections (bounded by the notebook's
+        confirmed-Memory count via ``idx_sources_memory_id``).  A Memory source
+        whose origin row is gone fails the ``EXISTS`` and drops out — fail
+        closed on an orphan.
+
+        Both consumers must pass the SAME identity: the boundary takes it from
+        ``current_user()`` and carries it on the frozen scope, so the retrieval
+        drift probe re-reads this partition in the frame the freeze was taken
+        in.  An owner-scoped freeze compared against an unfiltered live read
+        would report drift forever in any shared notebook that holds another
+        member's Memory, silently disabling the whole-graph/PPR/relation/exact
+        channels for good.
+
+        Deliberately its own query rather than folded into the visible-half
+        read: the compact ``include`` freeze reads only the requested ids plus
+        a count, and merging the two would put every source row back on that
+        hot path to answer a question bounded by the projection count.
+        """
         with self.database.connect() as db:
             return [row["id"] for row in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=? "
-                "AND source_type IN ('memory','knowhow') ORDER BY id",
-                (notebook_id,),
+                "SELECT s.id FROM sources s WHERE s.notebook_id=? "
+                "AND s.source_type IN ('memory','knowhow') "
+                "AND (s.source_type <> 'memory' OR EXISTS ("
+                "SELECT 1 FROM memory_items m "
+                "WHERE m.id = s.memory_id AND m.created_by = ?)) "
+                "ORDER BY s.id",
+                (notebook_id, owner_id),
             ).fetchall()]
 
     def visible_source_scope_snapshot(

@@ -1522,11 +1522,13 @@ class RepositoryFacade:
 
     def all_visible_source_ids(self, notebook_id: str) -> List[str]:
         """Return the current notebook's complete user-visible source id set."""
-        return self._runtime.index_projections.all_visible_source_ids(notebook_id)
+        return self._runtime.source_store.all_visible_source_ids(notebook_id)
 
-    def all_hidden_source_ids(self, notebook_id: str) -> List[str]:
-        """Return the current hidden Memory/Knowhow participant ids."""
-        return self._runtime.index_projections.all_hidden_source_ids(notebook_id)
+    def hidden_source_ids(self, notebook_id: str, owner_id: str) -> List[str]:
+        """Hidden Memory/Knowhow projection participants for ONE user.
+        Knowhow projections are notebook-wide; a Memory projection belongs
+        only to the user who created it, filtered in the adapter's SQL."""
+        return self._runtime.source_store.hidden_source_ids(notebook_id, owner_id)
 
     def visible_source_count(self, notebook_id: str) -> int:
         return self._runtime.source_store.visible_document_count(notebook_id)

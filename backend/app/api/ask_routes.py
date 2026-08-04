@@ -51,9 +51,33 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
     toggles compact.  Workers must not carry that moving definition: normalize
     it once to an include-list so concurrent uploads cannot widen the run and
     every candidate producer can push the same allow-list below its LIMIT.
+
+    The hidden half is read FOR THE REQUESTING USER.  Knowhow projection
+    sources are notebook-wide (every member reads the table itself), but a
+    Memory projection source belongs to one user — the same
+    ``memory_items.created_by`` predicate the Memory retriever and every other
+    Memory path already use.  Read without it, a shared notebook's default
+    non-narrowed request froze every OTHER member's Memory projection source
+    into this run's ceiling, and the elements and KG objects those sources own
+    then became reachable through ordinary candidate retrieval and through the
+    whole-graph/PPR channels a non-narrowed run re-enables.  The identity is
+    taken here rather than passed in by each caller so there is exactly one
+    definition of "whose Memory may enter a ceiling" and no call site can
+    forget it; ``current_user()`` reads the request ContextVar, so it costs no
+    round trip.  For a report re-frozen at confirm/generate that identity is
+    whoever is driving THAT phase — which can differ from the report's author
+    in a shared notebook, and is the fail-closed direction either way (a user
+    only ever gets their own Memory).
+
+    Deliberately NOT folded into the visible-half read: the compact ``include``
+    path reads only the requested ids plus a count, and merging both partitions
+    into one whole-universe query would put every source row back on the hot
+    path to answer a question bounded by the notebook's Memory/Knowhow count.
+    The hidden read stays separate and stays conditional on ``narrowed``.
     """
     if scope is None:
         return None
+    owner_id = repo.current_user().id
     if scope.mode == "include":
         selected = list(scope.source_ids)
         visible_selected, visible_count = repo.visible_source_scope_snapshot(
@@ -84,8 +108,11 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
         narrowed=narrowed,
     )
     resolved._hidden_source_ids = (
-        repo.all_hidden_source_ids(notebook.id) if not narrowed else []
+        [] if narrowed else repo.hidden_source_ids(notebook.id, owner_id)
     )
+    # Carried even on a narrowed run: the drift probe reads the same partition
+    # back and must do so as the same user, whether or not this freeze kept it.
+    resolved._scope_owner_id = owner_id
     if not resolved.source_ids and not notebook.base_notebooks:
         raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
     return resolved
