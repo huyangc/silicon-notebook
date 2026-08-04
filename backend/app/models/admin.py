@@ -1,4 +1,4 @@
-from typing import Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -121,6 +121,113 @@ class AdminUserNotebook(BaseModel):
     reports: int
     created_at: str
     updated_at: str
+
+
+# --- 用户日志页多维度改版 · 「活动」视图(P1) --------------------------------
+#
+# 字段名是与前端冻结的契约,真源见
+# docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md §3-4
+# 及 frontend/app/dev/logs/activity/types.ts —— 改字段名必须两边同步。
+
+
+class ActivityAsk(BaseModel):
+    """一条「提问」活动条目,数据来自 ask_jobs + answers。"""
+
+    type: Literal["ask"] = "ask"
+    id: str
+    notebook_id: str
+    created_at: str
+    asked_at: str = ""
+    conversation_id: str = ""
+    question: str = ""
+    mode: str = ""
+    status: str = ""
+    answer_id: str = ""
+    error: str = ""
+
+
+class ActivitySource(BaseModel):
+    """一条「来源」活动条目,数据来自 sources(+ extraction_runs 派生诊断)。
+
+    ``display_title`` 由路由层经 ``source_display_title()`` 合成
+    (论文标题优先),不是仓储层原始的 ``title``/``file_name`` 列——所有为用户
+    命名来源的路径共用同一份实现(CLAUDE.md 红线)。
+    """
+
+    type: Literal["source"] = "source"
+    id: str
+    notebook_id: str
+    created_at: str
+    display_title: str = ""
+    file_name: str = ""
+    source_type: str = ""
+    parse_status: str = ""
+    status: str = ""
+    # 刻意不是原始 error_message:那个串是 str(exc) 原样落库,可能带服务端绝对
+    # 路径(FileNotFoundError: /…/storage/notebooks/…)。ScopedSourceDetail 出于
+    # 同一理由删掉了它,而 admin 看别人的活动流正是那个模型要防的场景。派生
+    # 规则与 ScopedSourceDetail.of 逐字一致。
+    parse_failed: bool = False
+    extraction_warning: str = ""
+    parse_quality_warning: bool = False
+    paper_meta_status: str = ""
+
+
+class ActivityReport(BaseModel):
+    """一条「报告」活动条目,数据来自 reports。"""
+
+    type: Literal["report"] = "report"
+    id: str
+    notebook_id: str
+    created_at: str
+    updated_at: str = ""
+    question: str = ""
+    depth: int = 0
+    status: str = ""
+    generation_started_at: str = ""
+
+
+# 按 type 判别的活动流条目联合类型 —— 与 frontend/app/dev/logs/activity/types.ts
+# 的 ActivityItem 逐字对应。
+ActivityItem = Annotated[
+    Union[ActivityAsk, ActivitySource, ActivityReport],
+    Field(discriminator="type"),
+]
+
+
+class ActivityCursor(BaseModel):
+    ts: str
+    id: str
+
+
+class ActivityResponse(BaseModel):
+    items: List[ActivityItem] = Field(default_factory=list)
+    has_more: bool = False
+    next_cursor: Optional[ActivityCursor] = None
+
+
+class AskDetail(BaseModel):
+    """右栏「选中提问」详情:GET /admin/users/{user_id}/asks/{job_id} 的响应。
+
+    ``trace``/``answer`` 的形状由既有的 ask-intent-trace / AnswerView 渲染件
+    消费,这里不重新声明(前端契约里两者都是 ``unknown``)。``asked_at``/
+    ``answered_at`` 的权威口径见 ``get_conversation``:前者取自
+    ``ask_jobs.asked_at``(经答案 payload 回传),后者取自 ``answers.created_at``
+    (旧 payload 重开时从答案行回填)——两者都由 ``AskStateStore.get_conversation``
+    统一处理,路由层不重新实现这套口径。
+    """
+
+    job_id: str
+    notebook_id: str
+    conversation_id: str = ""
+    question: str = ""
+    mode: str = ""
+    status: str = ""
+    asked_at: str = ""
+    answered_at: str = ""
+    error: str = ""
+    trace: List[dict] = Field(default_factory=list)
+    answer: Optional[Dict[str, Any]] = None
 
 
 class CacheStats(BaseModel):

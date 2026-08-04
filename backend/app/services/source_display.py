@@ -66,3 +66,25 @@ def source_display_title(row: Any) -> str:
     if values["is_paper"] and paper_title:
         return paper_title
     return str(values["title"] or values["file_name"] or "").strip()
+
+
+def summary_display_title(row: Any, meta: "dict | None") -> str:
+    """``SourceSummary.display_title`` 的取数管道——**不是**规则本身。
+
+    四个构造点(两个后端 × 单条/批量)拿到的是两个载体:sources 行本身,加上
+    ``paper_meta_for_sources`` 单独水合出来的字典(该源没有 paper meta 行时为
+    None)。这里把后者**覆盖**到前者上再委托给 ``source_display_title``,让那
+    一个函数继续是规则的唯一定义点。
+
+    刻意不在这里逐个点名 ``title`` / ``file_name``:那两列本函数一个字都不该
+    懂——懂了就是第二份实现的开始,``test_source_display_title.py`` 的守卫也正是
+    按「同作用域读齐 is_paper/paper_title/file_name」识别这件事的。这里只负责
+    论文元数据那两列的**归位**,其余原样透传。
+
+    ``dict(row)`` 覆盖 sqlite3.Row 与 psycopg 字典行两种形状;两者都支持按键
+    迭代,而 sqlite3.Row 没有 ``.get``(所以不能用 ``{**row}`` 之外的捷径)。
+    """
+    values = dict(row)
+    values["is_paper"] = bool(meta["is_paper"]) if meta else False
+    values["paper_title"] = (meta["paper_title"] if meta else "") or ""
+    return source_display_title(values)

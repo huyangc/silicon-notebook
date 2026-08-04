@@ -38,6 +38,265 @@
           "title": "ActiveAskJob",
           "type": "object"
         },
+        "ActivityAsk": {
+          "description": "一条「提问」活动条目,数据来自 ask_jobs + answers。",
+          "properties": {
+            "answer_id": {
+              "default": "",
+              "title": "Answer Id",
+              "type": "string"
+            },
+            "asked_at": {
+              "default": "",
+              "title": "Asked At",
+              "type": "string"
+            },
+            "conversation_id": {
+              "default": "",
+              "title": "Conversation Id",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "error": {
+              "default": "",
+              "title": "Error",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "mode": {
+              "default": "",
+              "title": "Mode",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "question": {
+              "default": "",
+              "title": "Question",
+              "type": "string"
+            },
+            "status": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            },
+            "type": {
+              "const": "ask",
+              "default": "ask",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "created_at"
+          ],
+          "title": "ActivityAsk",
+          "type": "object"
+        },
+        "ActivityCursor": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "ts": {
+              "title": "Ts",
+              "type": "string"
+            }
+          },
+          "required": [
+            "ts",
+            "id"
+          ],
+          "title": "ActivityCursor",
+          "type": "object"
+        },
+        "ActivityReport": {
+          "description": "一条「报告」活动条目,数据来自 reports。",
+          "properties": {
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "depth": {
+              "default": 0,
+              "title": "Depth",
+              "type": "integer"
+            },
+            "generation_started_at": {
+              "default": "",
+              "title": "Generation Started At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "question": {
+              "default": "",
+              "title": "Question",
+              "type": "string"
+            },
+            "status": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            },
+            "type": {
+              "const": "report",
+              "default": "report",
+              "title": "Type",
+              "type": "string"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "created_at"
+          ],
+          "title": "ActivityReport",
+          "type": "object"
+        },
+        "ActivityResponse": {
+          "properties": {
+            "has_more": {
+              "default": false,
+              "title": "Has More",
+              "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "discriminator": {
+                  "mapping": {
+                    "ask": "#/components/schemas/ActivityAsk",
+                    "report": "#/components/schemas/ActivityReport",
+                    "source": "#/components/schemas/ActivitySource"
+                  },
+                  "propertyName": "type"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ActivityAsk"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ActivitySource"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ActivityReport"
+                  }
+                ]
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "next_cursor": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ActivityCursor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "ActivityResponse",
+          "type": "object"
+        },
+        "ActivitySource": {
+          "description": "一条「来源」活动条目,数据来自 sources(+ extraction_runs 派生诊断)。\n\n``display_title`` 由路由层经 ``source_display_title()`` 合成\n(论文标题优先),不是仓储层原始的 ``title``/``file_name`` 列——所有为用户\n命名来源的路径共用同一份实现(CLAUDE.md 红线)。",
+          "properties": {
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "display_title": {
+              "default": "",
+              "title": "Display Title",
+              "type": "string"
+            },
+            "extraction_warning": {
+              "default": "",
+              "title": "Extraction Warning",
+              "type": "string"
+            },
+            "file_name": {
+              "default": "",
+              "title": "File Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "paper_meta_status": {
+              "default": "",
+              "title": "Paper Meta Status",
+              "type": "string"
+            },
+            "parse_failed": {
+              "default": false,
+              "title": "Parse Failed",
+              "type": "boolean"
+            },
+            "parse_quality_warning": {
+              "default": false,
+              "title": "Parse Quality Warning",
+              "type": "boolean"
+            },
+            "parse_status": {
+              "default": "",
+              "title": "Parse Status",
+              "type": "string"
+            },
+            "source_type": {
+              "default": "",
+              "title": "Source Type",
+              "type": "string"
+            },
+            "status": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            },
+            "type": {
+              "const": "source",
+              "default": "source",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "created_at"
+          ],
+          "title": "ActivitySource",
+          "type": "object"
+        },
         "AddUrlSourcesRequest": {
           "properties": {
             "urls": {
@@ -787,6 +1046,80 @@
             "units"
           ],
           "title": "ArtifactView",
+          "type": "object"
+        },
+        "AskDetail": {
+          "description": "右栏「选中提问」详情:GET /admin/users/{user_id}/asks/{job_id} 的响应。\n\n``trace``/``answer`` 的形状由既有的 ask-intent-trace / AnswerView 渲染件\n消费,这里不重新声明(前端契约里两者都是 ``unknown``)。``asked_at``/\n``answered_at`` 的权威口径见 ``get_conversation``:前者取自\n``ask_jobs.asked_at``(经答案 payload 回传),后者取自 ``answers.created_at``\n(旧 payload 重开时从答案行回填)——两者都由 ``AskStateStore.get_conversation``\n统一处理,路由层不重新实现这套口径。",
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Answer"
+            },
+            "answered_at": {
+              "default": "",
+              "title": "Answered At",
+              "type": "string"
+            },
+            "asked_at": {
+              "default": "",
+              "title": "Asked At",
+              "type": "string"
+            },
+            "conversation_id": {
+              "default": "",
+              "title": "Conversation Id",
+              "type": "string"
+            },
+            "error": {
+              "default": "",
+              "title": "Error",
+              "type": "string"
+            },
+            "job_id": {
+              "title": "Job Id",
+              "type": "string"
+            },
+            "mode": {
+              "default": "",
+              "title": "Mode",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "question": {
+              "default": "",
+              "title": "Question",
+              "type": "string"
+            },
+            "status": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            },
+            "trace": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "Trace",
+              "type": "array"
+            }
+          },
+          "required": [
+            "job_id",
+            "notebook_id"
+          ],
+          "title": "AskDetail",
           "type": "object"
         },
         "AskIntentConfirmation": {
@@ -7328,9 +7661,19 @@
               "title": "Authors",
               "type": "array"
             },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
             "created_label": {
               "default": "",
               "title": "Created Label",
+              "type": "string"
+            },
+            "display_title": {
+              "default": "",
+              "title": "Display Title",
               "type": "string"
             },
             "doc_type": {
@@ -7685,9 +8028,19 @@
               "title": "Authors",
               "type": "array"
             },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
             "created_label": {
               "default": "",
               "title": "Created Label",
+              "type": "string"
+            },
+            "display_title": {
+              "default": "",
+              "title": "Display Title",
               "type": "string"
             },
             "doc_type": {
@@ -8117,9 +8470,19 @@
               "title": "Authors",
               "type": "array"
             },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
             "created_label": {
               "default": "",
               "title": "Created Label",
+              "type": "string"
+            },
+            "display_title": {
+              "default": "",
+              "title": "Display Title",
               "type": "string"
             },
             "doc_type": {
@@ -8817,9 +9180,19 @@
               "title": "Authors",
               "type": "array"
             },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
             "created_label": {
               "default": "",
               "title": "Created Label",
+              "type": "string"
+            },
+            "display_title": {
+              "default": "",
+              "title": "Display Title",
               "type": "string"
             },
             "doc_type": {
@@ -9281,6 +9654,187 @@
           "summary": "List Admin Users"
         }
       },
+      "/api/admin/users/{user_id}/activity": {
+        "get": {
+          "description": "用户活动流:提问 / 来源 / 报告三类,时间倒序归并。自己或 admin 可查。",
+          "operationId": "get_admin_user_activity_api_admin_users__user_id__activity_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "notebook_id",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Notebook Id"
+              }
+            },
+            {
+              "in": "query",
+              "name": "since",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Since"
+              }
+            },
+            {
+              "in": "query",
+              "name": "until",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Until"
+              }
+            },
+            {
+              "in": "query",
+              "name": "before_ts",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Ts"
+              }
+            },
+            {
+              "in": "query",
+              "name": "before_id",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Id"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ActivityResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Admin User Activity"
+        }
+      },
+      "/api/admin/users/{user_id}/asks/{job_id}": {
+        "get": {
+          "description": "右栏「选中提问」详情:完整问答 + 推理轨迹。自己或 admin 可查;job_id\n不属于该用户时 404。\n\n完全复用既有读取路径,不新写 SQL:ask_job_detail(job_id) 给出\nquestion/mode/status/trace/answer_id/error/notebook_id/conversation_id/\ncreated_by;有 conversation_id 时经 get_conversation 按 answer_id 匹配出\n对应 turn —— 它已经把 asked_at(浏览器提交时刻,ask_jobs.asked_at)与\nanswered_at(权威值 answers.created_at,旧 payload 从答案行回填)按红线\n口径处理好,这里不重新实现。job 仍在跑(尚无已保存 answer)时退回\nactive_job 的 asked_at;既未完成又不是当前活跃 job(如已失败/取消且\nconversation 早已收尾)则 asked_at/answered_at/answer 保持空——没有可靠\n数据来源时不编造。",
+          "operationId": "get_admin_user_ask_detail_api_admin_users__user_id__asks__job_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "job_id",
+              "required": true,
+              "schema": {
+                "title": "Job Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AskDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Admin User Ask Detail"
+        }
+      },
       "/api/admin/users/{user_id}/notebooks": {
         "get": {
           "description": "某用户名下笔记本详情。仅 admin。",
@@ -9323,6 +9877,78 @@
             }
           },
           "summary": "List Admin User Notebooks"
+        }
+      },
+      "/api/admin/users/{user_id}/notebooks/{notebook_id}/sources": {
+        "get": {
+          "description": "某用户某笔记本的来源清单(活动视图左栏展开用)。自己或 admin 可查;\nnotebook_id 不属于该用户时 404(不泄露存在性,不用 403)。",
+          "operationId": "get_admin_user_notebook_sources_api_admin_users__user_id__notebooks__notebook_id__sources_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedSources"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Admin User Notebook Sources"
         }
       },
       "/api/admin/users/{user_id}/role": {
@@ -18772,7 +19398,9 @@
     },
     "source_detail": {
       "authors": [],
+      "created_at": "2024-01-02T03:04:05",
       "created_label": "fixture-date",
+      "display_title": "fixture.md",
       "doc_type": "",
       "element_count": 2,
       "error_message": "",

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -14,8 +13,11 @@ from app.models.sources import (
     SourceDetail,
     SourceElement,
     SourceSummary,
+    extraction_warning_text,
     has_pdf_python_fallback_warning,
+    paper_meta_status,
 )
+from app.services.source_display import summary_display_title
 from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -1388,6 +1390,7 @@ class SourceStore:
             id=row["id"],
             notebook_id=row["notebook_id"],
             title=row["title"],
+            display_title=summary_display_title(row, pm),
             type=row["source_type"],
             status=row["status"],
             summary=row["summary"],
@@ -1396,6 +1399,7 @@ class SourceStore:
             file_size=row["file_size"],
             file_hash=row["file_hash"],
             parse_status=row["parse_status"],
+            created_at=row["created_at"] or "",
             created_label=_created_label(row["created_at"]),
             doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
             source_url=row["source_url"] if "source_url" in row.keys() else "",
@@ -1469,16 +1473,9 @@ class SourceStore:
                 latest_error.setdefault(r["source_id"], r["error_message"] or "")
 
         def _warning(source_id: str) -> Optional[str]:
-            if source_id not in latest_error:
-                return None
-            m = re.search(r"windows_failed=(\d+)/(\d+)", latest_error[source_id])
-            if not m:
-                return None
-            fw = int(m.group(1))
-            if fw <= 0:
-                return None
-            tw = int(m.group(2))
-            return f"部分内容因网络问题未完成分析（{fw}/{tw} 段失败），建议重新上传或重试。"
+            # 派生规则只有一份(app.models.sources),这里只负责取到「最近一次抽取的
+            # error_message」这个输入——见该函数 docstring。
+            return extraction_warning_text(latest_error.get(source_id))
 
         out: List[SourceSummary] = []
         for row in rows:
@@ -1488,6 +1485,7 @@ class SourceStore:
                 id=sid,
                 notebook_id=row["notebook_id"],
                 title=row["title"],
+                display_title=summary_display_title(row, pm),
                 type=row["source_type"],
                 status=row["status"],
                 summary=row["summary"],
@@ -1496,6 +1494,7 @@ class SourceStore:
                 file_size=row["file_size"],
                 file_hash=row["file_hash"],
                 parse_status=row["parse_status"],
+                created_at=row["created_at"] or "",
                 created_label=_created_label(row["created_at"]),
                 doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
                 source_url=row["source_url"] if "source_url" in row.keys() else "",
@@ -1513,20 +1512,15 @@ class SourceStore:
     def extraction_warning(self, db: sqlite3.Connection, source_id: str) -> Optional[str]:
         """Surface a user-facing warning when the latest KG extraction left
         network-failed windows (degraded run). Parsed from the run's
-        `windows_failed=N/T` token rather than stored on the source row."""
+        `windows_failed=N/T` token rather than stored on the source row —
+        the parsing itself lives in `app.models.sources.extraction_warning_text`
+        (single implementation); this method only fetches its input."""
         run = db.execute(
             "SELECT error_message FROM extraction_runs WHERE source_id=? "
             "ORDER BY created_at DESC LIMIT 1", (source_id,)).fetchone()
         if run is None:
             return None
-        m = re.search(r"windows_failed=(\d+)/(\d+)", run["error_message"] or "")
-        if not m:
-            return None
-        fw = int(m.group(1))
-        if fw <= 0:
-            return None
-        tw = int(m.group(2))
-        return f"部分内容因网络问题未完成分析（{fw}/{tw} 段失败），建议重新上传或重试。"
+        return extraction_warning_text(run["error_message"])
 
     @staticmethod
     def meta_source_rows(
@@ -1631,25 +1625,17 @@ class SourceStore:
 
     @staticmethod
     def _paper_meta_status_for(row: sqlite3.Row, meta: Optional[dict]) -> Optional[str]:
-        """纯函数:从 sources 行 + 可选 meta 字典派生四态。零 DB 访问(调用方已经
-        通过 paper_meta_for_sources 拿到了 meta,这里只做分类,不再查库)。
+        """从 sources 行 + 可选 meta 字典派生四态。零 DB 访问(调用方已经通过
+        paper_meta_for_sources 拿到了 meta,这里只做分类,不再查库)。
 
-        meta 不为 None(source_paper_meta 行存在,含标记行)时按 is_paper 分流
-        has_meta/not_paper;meta 为 None 时区分"合规但未抽取"(missing)与
-        "不适用"(None) —— 后者涵盖隐藏合成源(memory/knowhow)、非论文
-        doc_type、以及尚未解析完成的源,同 sources_missing_paper_meta 的候选口径。"""
-        if meta is not None:
-            return "has_meta" if meta.get("is_paper") else "not_paper"
-        source_type = row["source_type"] if "source_type" in row.keys() else ""
-        doc_type = row["doc_type"] if "doc_type" in row.keys() else ""
-        parse_status = row["parse_status"] if "parse_status" in row.keys() else ""
-        if source_type in ("memory", "knowhow"):
-            return None
-        if doc_type not in ("", "academic_paper"):
-            return None
-        if parse_status not in ("parsed", "extracting", "extracted"):
-            return None
-        return "missing"
+        分类规则本身只有一份实现(`app.models.sources.paper_meta_status`);这里只
+        负责把 sqlite3.Row 的可选列与「有没有 meta 行」翻译成它的入参。"""
+        return paper_meta_status(
+            None if meta is None else bool(meta.get("is_paper")),
+            row["source_type"] if "source_type" in row.keys() else "",
+            row["doc_type"] if "doc_type" in row.keys() else "",
+            row["parse_status"] if "parse_status" in row.keys() else "",
+        )
 
     @staticmethod
     def paper_meta_model(meta: Optional[dict]) -> Optional[PaperMeta]:

@@ -796,6 +796,30 @@ class RepositoryFacade:
     def list_user_notebooks(self, user_id: str) -> List[Dict[str, Any]]:
         return self._runtime.queries.list_user_notebooks(user_id)
 
+    def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool:
+        return self._runtime.queries.notebook_exists_for_owner(notebook_id, user_id)
+
+    def list_user_activity(
+        self,
+        user_id: str,
+        *,
+        notebook_id: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        before_ts: Optional[str] = None,
+        before_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        return self._runtime.queries.list_user_activity(
+            user_id,
+            notebook_id=notebook_id,
+            since=since,
+            until=until,
+            before_ts=before_ts,
+            before_id=before_id,
+            limit=limit,
+        )
+
     def load_notebook_scale_facts(self, notebook_id: str):
         return self._runtime.queries.load_notebook_scale_facts(notebook_id)
 

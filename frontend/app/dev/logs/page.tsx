@@ -13,10 +13,22 @@ import { fetchAdminUsers, type AdminUserUsage } from "../../admin/usage/api.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
 import { usernameForOwner } from "./owner";
-import { dayLabel, TODAY_VALUE } from "./date.ts";
+import {
+  ALL_TIME_VALUE,
+  activityDayLabel,
+  dayLabel,
+  dayRange,
+  LEGACY_VALUE,
+  TODAY_VALUE,
+} from "./date.ts";
+import { ActivityView } from "./activity/ActivityView.tsx";
 
 const PAGE = 200;
 const POLL_MS = 5000;
+
+// 两个视图共享顶部同一条范围条。「活动」是默认视图（用户活动才是这一页现在要
+// 回答的问题）；「模型调用」是原样保留的既有排障视图。
+type LogsView = "activity" | "llm";
 
 function scopeKey(owner: string, date: string): string {
   return JSON.stringify([owner, date]);
@@ -62,10 +74,16 @@ export default function LogsPage() {
   const [qInput, setQInput] = useState("");
 
   const [me, setMe] = useState<AuthUser | null>(null);
+  // 「当前用户还没回来」与「回来了但取不到」必须是两个可见的态：活动流的用户维度
+  // 就靠 me.id 解析，把两者混进一个 null 会让页面先说「没有活动记录」，或者在
+  // fetchMe 失败后**永远**这么说而不给任何提示。
+  const [meResolved, setMeResolved] = useState(false);
+  const [meError, setMeError] = useState("");
   const [adminUsers, setAdminUsers] = useState<AdminUserUsage[]>([]);
   const [owner, setOwner] = useState("");
   const [date, setDate] = useState(TODAY_VALUE);
   const [days, setDays] = useState<string[]>([]);
+  const [view, setView] = useState<LogsView>("activity");
 
   const filterParams = useMemo(
     () => ({ kind, status, model, q, owner, date }),
@@ -102,7 +120,8 @@ export default function LogsPage() {
     setError("");
   }, []);
 
-  // read ?owner= and ?date= from the URL once on mount (admin drill-down / deep-link entry points)
+  // read ?owner=, ?date= and ?view= from the URL once on mount
+  // (admin drill-down / deep-link entry points)
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
@@ -110,6 +129,8 @@ export default function LogsPage() {
     if (o) setOwner(o);
     const d = params.get("date");
     if (d) setDate(d);
+    const v = params.get("view");
+    if (v === "llm" || v === "activity") setView(v);
   }, []);
 
   // current user + (admin-only) user list for the drill-down dropdown
@@ -117,13 +138,19 @@ export default function LogsPage() {
     fetchMe()
       .then((u) => {
         setMe(u);
+        setMeResolved(true);
         if (u.role === "admin") {
           fetchAdminUsers()
             .then(setAdminUsers)
             .catch(() => undefined);
         }
       })
-      .catch(() => undefined);
+      .catch((e) => {
+        // ⚠ 不能吞。一次瞬时 500 会让活动视图永远解析不出用户 id，界面上却只写着
+        // 「这个范围里没有活动记录」——一句无法证伪的假陈述。
+        setMeResolved(true);
+        setMeError(toUserMessage(e, "当前用户信息加载失败，请刷新页面重试"));
+      });
   }, []);
 
   const selectOwner = useCallback(
@@ -155,11 +182,54 @@ export default function LogsPage() {
     [clearScopedResults, date],
   );
 
+  const selectView = useCallback(
+    (next: LogsView) => {
+      setView(next);
+      // 「模型调用」那一侧的错误横幅只在它自己的分支渲染。切到活动视图时不清掉，
+      // 它会以陈旧形态在切回来时突然弹出来（而那次失败早已过去）。
+      setError("");
+      // 自动刷新的复选框只长在「模型调用」的过滤条上。留着勾选态切到活动视图，
+      // 轮询会继续每 5 秒打日志接口，而**用户没有任何办法关掉它**——控件已经不在
+      // 屏幕上了。切走即关，切回来时由用户自己重新勾。
+      if (next === "activity") setAutoRefresh(false);
+      // `legacy`（历史·未分天）是日志**文件**的分区，活动流读的是库里的 created_at，
+      // 没有这个概念。切到活动视图时归一成空值（= 全部时间）。
+      if (next === "activity" && date === LEGACY_VALUE) selectDate(TODAY_VALUE);
+      // 反方向：两个视图共享同一个 date state，取值集却不同。活动视图是原生日历，
+      // 日历上的任何一天都能选；「模型调用」是 <select>，options 只有「今天」（空值）
+      // + 有日志文件的那几天。带着一个下拉里没有的日期切回去，控件**不会**空白——
+      // React 的受控 <select> 找不到匹配 option 时会回落到第一个可选项
+      // （ReactDOMSelect.updateOptions），于是下拉写着「今天」、请求发的却是那个没有
+      // 日志文件的日子：列表恒空，而且用户点一下那个已经显示着的「今天」不产生
+      // change 事件、根本回不去。两次点击就能复现，而「今天传了来源、零次模型调用」
+      // 恰恰是活动视图换用日历控件的动机。
+      // ⚠ 判据是「在不在 options 里」，不是「是不是 legacy」：`legacy` 当且仅当后端
+      // 列出了那个分区（即它在 days 里）才是这个下拉的合法取值，按 days 归一两种情况
+      // 自动都对；给 legacy 开一个无条件豁免反而会放过「days 里没有它」那一半。
+      if (next === "llm" && date !== TODAY_VALUE && !days.includes(date)) {
+        selectDate(TODAY_VALUE);
+      }
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams(window.location.search);
+      params.set("view", next);
+      window.history.replaceState(null, "", `?${params.toString()}`);
+    },
+    [date, days, selectDate],
+  );
+
   useEffect(() => {
     clearScopedResults();
   }, [clearScopedResults, requestScopeKey]);
 
+  // ⚠ 「模型调用」视图的取数一律按 view 门控（本 effect、下面的 reload、以及自动
+  // 刷新轮询三处）。此前它们在挂载时就发，而默认视图是「活动」——用户一眼看不到的
+  // 一整套请求（含带全量 stats 聚合的 fetchRecords）在每次改 owner、改日期时都要
+  // 再发一遍。CLAUDE.md：效率是一等约束，新增调用先问代价。
+  // 门控只影响**什么时候发**：view 在依赖里，切回「模型调用」时该发的一次照发。
+  // fetchDays 刻意不门控——它喂的日期下拉在两个视图之间共享入口位置，且是一次
+  // 廉价的目录列举，提前备好可以让切过去时不再等一跳。
   useEffect(() => {
+    if (view !== "llm") return;
     const generation = ++channelGenerationRef.current;
     const requestedOwner = owner;
     setChannels([]);
@@ -176,7 +246,7 @@ export default function LogsPage() {
           && requestedOwner === currentOwnerRef.current
         ) setError(toUserMessage(e, "日志加载失败，请重试"));
       });
-  }, [owner]);
+  }, [owner, view]);
 
   useEffect(() => {
     const generation = ++daysGenerationRef.current;
@@ -231,8 +301,9 @@ export default function LogsPage() {
   }, [filterKey, filterParams, requestScopeKey]);
 
   useEffect(() => {
+    if (view !== "llm") return;
     void reload();
-  }, [reload]);
+  }, [reload, view]);
 
   // debounce search box -> q
   useEffect(() => {
@@ -243,7 +314,7 @@ export default function LogsPage() {
   // auto-refresh polling: pull records newer than newestSeq into `pending`
   // (only meaningful for "today" — a fixed historical day has no new records to poll for)
   useEffect(() => {
-    if (!autoRefresh || date !== TODAY_VALUE) return;
+    if (view !== "llm" || !autoRefresh || date !== TODAY_VALUE) return;
     const t = setInterval(async () => {
       if (newestSeq == null) return;
       const generation = listGenerationRef.current;
@@ -281,7 +352,7 @@ export default function LogsPage() {
       }
     }, POLL_MS);
     return () => clearInterval(t);
-  }, [autoRefresh, newestSeq, filterKey, filterParams, requestScopeKey]);
+  }, [autoRefresh, newestSeq, filterKey, filterParams, requestScopeKey, view]);
 
   const showNew = useCallback(() => {
     setRecords((prev) => {
@@ -367,6 +438,24 @@ export default function LogsPage() {
 
   const facets = stats?.facets;
 
+  // 顶部范围条选「我自己」时 owner 是空串，而活动流的端点要的是一个具体用户 id。
+  // 未就绪（me 还没回来）时给空串，ActivityView 会按「尚未确定用户」跳过取数——
+  // 但它同时要知道这是「还没确定」还是「确定了、就是空」，见下面两个标志。
+  const activityUserId = owner || me?.id || "";
+  // 显式选了 owner 时不依赖 me，因此 fetchMe 的挂起/失败都与活动视图无关。
+  const activityUserPending = !activityUserId && !meResolved;
+  const activityUserError = activityUserId ? "" : meError;
+  // 页面级范围键：视图 tab + 用户 + 日期。ActivityView 再叠上 notebook_id。
+  const activityScopeKey = useMemo(
+    () => JSON.stringify([view, owner, date]),
+    [view, owner, date],
+  );
+  const activityRange = useMemo(() => dayRange(date), [date]);
+  // `<input type="date">` 只认 `YYYY-MM-DD`。合法性直接借 dayRange 判定（它已经
+  // 做过 2026-02-30 这类的回环校验），不在这里另写第二份解析：空串 = 全部时间，
+  // `legacy` 这类日志文件分区名同样落到空串。
+  const activityDateValue = activityRange.since ? date : "";
+
   return (
     <div className="logview">
       <PageHeader title="日志查看" />
@@ -388,20 +477,80 @@ export default function LogsPage() {
             ))}
           </select>
         ) : null}
-        <select
-          className="logview-date-select"
-          value={date}
-          onChange={(e) => selectDate(e.target.value)}
-        >
-          <option value={TODAY_VALUE}>{dayLabel(TODAY_VALUE)}</option>
-          {days.map((d) => (
-            <option key={d} value={d}>
-              {dayLabel(d)}
-            </option>
-          ))}
-        </select>
+        {/* 两个视图的日期取值集来自完全不同的地方，所以控件也是两个：
+            · 「模型调用」按天分文件是事实，取值集 = 有日志文件的那几天 → 保留下拉。
+            · 「活动」读的是库里的 created_at。拿日志文件的分天去筛它会同时错两个
+              方向：某用户今天传了 5 份来源、0 次模型调用 → 今天没有 llm 文件 →
+              下拉里没有今天，而空值又被「全部时间」占着，这位用户的当日活动
+              **没有任何办法筛出来**；反过来，只有模型调用的那些天会出现在下拉里、
+              选中后永远是空流。所以这里换成原生日期选择器，日历上的任何一天都能选。 */}
+        {view === "activity" ? (
+          <span className="logview-date-picker">
+            <input
+              aria-label="按日期筛选活动"
+              className="logview-date-input"
+              onChange={(e) => selectDate(e.target.value)}
+              type="date"
+              value={activityDateValue}
+            />
+            {activityDateValue ? (
+              <button
+                className="logview-date-clear"
+                onClick={() => selectDate(ALL_TIME_VALUE)}
+                type="button"
+              >
+                {activityDayLabel(ALL_TIME_VALUE)}
+              </button>
+            ) : (
+              <span className="logview-date-all">{activityDayLabel(ALL_TIME_VALUE)}</span>
+            )}
+          </span>
+        ) : (
+          <select
+            className="logview-date-select"
+            value={date}
+            onChange={(e) => selectDate(e.target.value)}
+          >
+            <option value={TODAY_VALUE}>{dayLabel(TODAY_VALUE)}</option>
+            {days.map((d) => (
+              <option key={d} value={d}>
+                {dayLabel(d)}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
+      <div className="logview-views">
+        <div className="logview-tabs">
+          <button
+            className={`logview-tab${view === "activity" ? " active" : ""}`}
+            onClick={() => selectView("activity")}
+            type="button"
+          >
+            活动
+          </button>
+          <button
+            className={`logview-tab${view === "llm" ? " active" : ""}`}
+            onClick={() => selectView("llm")}
+            type="button"
+          >
+            模型调用
+          </button>
+        </div>
+      </div>
+
+      {view === "activity" ? (
+        <ActivityView
+          scopeKey={activityScopeKey}
+          since={activityRange.since}
+          until={activityRange.until}
+          userError={activityUserError}
+          userId={activityUserId}
+          userPending={activityUserPending}
+        />
+      ) : (
+      <>
       <div className="logview-top">
         <ChannelTabs channels={channels} active={channel} onSelect={() => undefined} />
         <StatsBar stats={stats} />
@@ -479,6 +628,8 @@ export default function LogsPage() {
         />
         <LogDetail record={detail} loading={detailLoading} />
       </div>
+      </>
+      )}
     </div>
   );
 }

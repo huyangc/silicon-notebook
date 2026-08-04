@@ -41,6 +41,45 @@ def _seed(repo):
             )
 
 
+def test_source_count_excludes_hidden_projection_sources(repo):
+    """表头的「来源 N」必须与展开后的清单是同一个口径(F4)。
+
+    memory / knowhow 投影行是隐藏合成源:``list_sources_page``(左栏展开用)与来源
+    页签都带 VISIBLE_SOURCE_TYPES_PREDICATE 把它们排除。这个计数曾经是裸
+    ``COUNT(*)``,于是存过一条 Memory 或建过一张 Knowhow 表的用户,表头写「来源 3」
+    而展开的清单只有 1 条——同一屏自相矛盾。
+    """
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute("INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at)"
+                   " VALUES (?,?,?,?,?,?,?,?)",
+                   ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now))
+        db.execute("INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at)"
+                   " VALUES (?,?,?,?,?,?)", ("n1", "NB-n1", "u1", "ready", now, now))
+        for sid, source_type in (
+            ("s-real", "pdf"), ("s-mem", "memory"), ("s-know", "knowhow"),
+        ):
+            db.execute("INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at)"
+                       " VALUES (?,?,?,?,?,?)", (sid, "n1", sid, source_type, now, now))
+
+    rows = repo.list_user_notebooks("u1")
+    assert rows[0]["sources"] == 1
+    # 与左栏展开用的那条路径逐字对齐(它是这个数字的「展开形态」)。
+    assert repo.list_sources_page("n1", 0, 50).total_count == 1
+
+
+def test_notebook_exists_for_owner_matches_the_activity_owned_predicate(repo):
+    """归属判定是**一行**的问题(F8);谓词必须与 list_user_activity 的 owned 分支
+    逐字相同——包括 ``status != 'copying'`` 那一半(深拷贝中的库不算)。"""
+    _seed(repo)
+    assert repo.notebook_exists_for_owner("n1", "u1") is True
+    assert repo.notebook_exists_for_owner("n3", "u1") is False   # copying
+    assert repo.notebook_exists_for_owner("n1", "u2") is False   # 别人的
+    assert repo.notebook_exists_for_owner("nope", "u1") is False  # 不存在
+    # 与 list_user_notebooks 的口径一致(那份清单同样排除 copying)。
+    assert {r["id"] for r in repo.list_user_notebooks("u1")} == {"n1", "n2"}
+
+
 def test_list_user_notebooks_counts_and_excludes_copying(repo):
     _seed(repo)
     rows = repo.list_user_notebooks("u1")

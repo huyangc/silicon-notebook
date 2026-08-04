@@ -13,7 +13,7 @@ import sqlite3
 
 import pytest
 
-from app.services.source_display import source_display_title
+from app.services.source_display import source_display_title, summary_display_title
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -31,13 +31,25 @@ CONSUMERS = (
 # 不做取舍,所以它们读不全这三个键(实测:全仓仅本文件登记的这几处命中)。
 RULE_COLUMNS = frozenset({"is_paper", "paper_title", "file_name"})
 
-# 唯一豁免:PostgreSQL 存储层对等测试断言 `source_display_rows` 确实返回了这
-# 几列。它检查的是 SQL 选出了什么,不是显示名怎么取——没有任何取舍逻辑。
+# 豁免:全都是「只证明 SQL 选出了这几列」的地方,不含任何取舍逻辑。
 ALLOWED_SITES = {
     DEFINITION_SITE,
+    # PostgreSQL 存储层对等测试断言 `source_display_rows` 确实返回了这几列。
     (
         "backend/tests/postgres/test_core_store_conformance.py",
         "test_typed_collection_enumeration_primitives_match_sqlite_semantics",
+    ),
+    # 用户活动流的两份仓储实现:LEFT JOIN 一次取回 is_paper/paper_title,与
+    # file_name 一起**原样**投影进返回行。显示名怎么取由路由层调
+    # source_display_title 兑现——存储层一个分支都没有,这里读全三个键只是
+    # 「把这几列搬出来」,与上面那条 PG 对等测试同一性质。
+    (
+        "backend/app/repositories/sqlite/query_store.py",
+        "list_user_activity",
+    ),
+    (
+        "backend/app/repositories/postgres/query_store.py",
+        "list_user_activity",
     ),
 }
 
@@ -121,6 +133,48 @@ def test_driver_rows_without_get_are_supported():
     partial = connection.execute("SELECT 'only-a-name' AS title").fetchone()
     assert source_display_title(partial) == "only-a-name"
     connection.close()
+
+
+# ------------------------------------------------- SourceSummary 的取数管道
+
+def _summary_row(**columns):
+    """`sources` 行的形态:论文那两列**不在**这张行上(它们住 source_paper_meta)。"""
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    base = {"title": "", "file_name": ""}
+    base.update(columns)
+    select = ", ".join(f"? AS {name}" for name in base)
+    row = connection.execute(f"SELECT {select}", tuple(base.values())).fetchone()
+    connection.close()
+    return row
+
+
+def test_summary_display_title_prefers_the_grounded_paper_title():
+    """左栏来源清单与中栏活动条目命名的是同一批来源,必须给出同一个名字。
+
+    回归的是「同一篇论文在同一屏里有两个名字」:来源清单走 SourceSummary、
+    活动流走 list_user_activity,两条路都必须落到 source_display_title。
+    """
+    row = _summary_row(title="1706.03762.pdf", file_name="1706.03762.pdf")
+    meta = {"is_paper": True, "paper_title": "Attention Is All You Need"}
+    assert summary_display_title(row, meta) == "Attention Is All You Need"
+
+
+def test_summary_display_title_falls_back_when_the_source_has_no_paper_meta():
+    """没有 source_paper_meta 行(meta=None)= 不是论文,不是「缺标题」。"""
+    row = _summary_row(title="", file_name="q3-report.pdf")
+    assert summary_display_title(row, None) == "q3-report.pdf"
+
+
+def test_summary_display_title_does_not_reinstate_the_shadowed_file_name():
+    """纯空白 title 遮蔽 file_name 返回空串——管道不得把它「修好」。
+
+    这条正是 test_whitespace_only_source_title_still_beats_the_file_name 钉住的
+    刻意行为;取数管道多写一层 `or file_name` 就会让同一份来源在来源清单里有名、
+    在引用卡上无名。
+    """
+    row = _summary_row(title="   ", file_name="q3-report.pdf")
+    assert summary_display_title(row, None) == ""
 
 
 # ------------------------------------------------- 单一真源(源码级守卫)

@@ -2573,6 +2573,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.all_visible_source_ids",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.answer_memory_links",
         "target": "_runtime"
       },
@@ -2778,6 +2784,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.collection_enumeration",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.command_catalog",
         "target": "_runtime"
       },
       {
@@ -3167,6 +3179,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.hidden_source_ids",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.import_sources",
         "target": "_runtime"
       },
@@ -3413,6 +3431,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.list_user_activity",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.list_user_notebooks",
         "target": "_runtime"
       },
@@ -3492,6 +3516,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.notebook_copy_stats",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.notebook_exists_for_owner",
         "target": "_runtime"
       },
       {
@@ -3701,6 +3731,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.report_source_identity_rows",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.report_source_rows",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.require_agent_access",
         "target": "_runtime"
       },
@@ -3846,6 +3888,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.source_elements",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.source_elements_page",
         "target": "_runtime"
       },
       {
@@ -4037,7 +4085,31 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.validate_reasoning_submission",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.visible_document_count",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.visible_source_count",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.visible_source_ids",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.visible_source_scope_snapshot",
         "target": "_runtime"
       },
       {
@@ -4263,6 +4335,21 @@
     "scope": "facade",
     "signature": "(self, user_id: 'str', notebook_id: 'str', query: 'str', include_candidates: 'bool', limit: 'int' = 8) -> 'list'"
   },
+  "all_visible_source_ids": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._validate_source_scope",
+        "target": "all_visible_source_ids"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'List[str]'"
+  },
   "append_knowhow_rows": {
     "consumers": [
       {
@@ -4364,6 +4451,12 @@
   },
   "ask_job_detail": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_ask_detail",
+        "target": "ask_job_detail"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
@@ -4757,6 +4850,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'Dict[str, str]'"
   },
+  "command_catalog": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.command_catalog_service",
+        "target": "command_catalog"
+      }
+    ],
+    "kind": "property",
+    "owner": "RepositoryRuntime.command_catalog",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self)"
+  },
   "concept_detail": {
     "consumers": [
       {
@@ -5117,6 +5225,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._stream_ask_events",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._validate_source_scope",
         "target": "current_user"
       },
       {
@@ -5562,6 +5676,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_ask_detail",
+        "target": "get_conversation"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._intent_history",
         "target": "get_conversation"
@@ -5874,6 +5994,24 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.confirm_report_intent",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.create_report",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.generate_report",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._report_kg_build_already_running",
         "target": "get_notebook"
@@ -6037,6 +6175,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'SourceDetail'"
+  },
+  "hidden_source_ids": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._validate_source_scope",
+        "target": "hidden_source_ids"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', owner_id: 'str') -> 'List[str]'"
   },
   "index_status": {
     "consumers": [
@@ -6430,6 +6583,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'List[SourceSummary]'"
+  },
+  "list_sources_page": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/admin_routes.py",
+        "scope": "<module>.get_admin_user_notebook_sources",
+        "target": "list_sources_page"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceIngestionService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', offset: 'int' = 0, limit: 'int' = 50, q: 'str' = '') -> 'PaginatedSources'"
   },
   "load_notebook_scale_facts": {
     "consumers": [
@@ -8841,6 +9009,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.create_report",
+        "target": "update_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.generate_report",
+        "target": "update_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.update_report_outline",
         "target": "update_report"
       }
@@ -9018,6 +9198,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'int'"
+  },
+  "visible_source_scope_snapshot": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._validate_source_scope",
+        "target": "visible_source_scope_snapshot"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', source_ids: 'List[str]') -> 'tuple[List[str], int]'"
   },
   "warm_open_path_caches": {
     "consumers": [

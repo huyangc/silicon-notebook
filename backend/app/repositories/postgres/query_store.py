@@ -4,11 +4,22 @@ from typing import Any
 
 from psycopg import Error, sql
 
+from app.core.activity_time import (
+    UNRESOLVED_INSTANT,
+    UNRESOLVED_INSTANT_ISO,
+    cursor_instant_text,
+    parse_activity_instant,
+)
 from app.core.config import Settings
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
     NotebookSearchResponse,
     SearchHit,
+)
+from app.models.sources import (
+    extraction_warning_text,
+    has_pdf_python_fallback_warning,
+    paper_meta_status,
 )
 from app.repositories.postgres._store_utils import (
     iso_timestamp,
@@ -22,6 +33,7 @@ from app.repositories.postgres.search import (
     notebook_knowledge_rows,
     notebook_source_rows,
 )
+from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.notebook_scale import NotebookScaleFacts
@@ -42,6 +54,28 @@ _COUNT_IDENTIFIERS = {
 
 def _compat_notebook_rows(rows):
     return [sqlite_compatible_notebook_row(row) for row in rows]
+
+
+def _absolute_instant(column: str) -> str:
+    """PostgreSQL 侧「绝对时刻」的比较形态,用在 ORDER BY / 范围 / 游标三处——
+    ``sqlite/query_store.py::_absolute_instant`` 的孪生实现。
+
+    这里的 ``created_at`` 是原生 ``timestamptz``,不需要 SQLite 那侧的 ``julianday()``
+    折算;``COALESCE`` 这一半却**同样不可省**:``ask_jobs.created_at`` 在 PG schema 里
+    是**可空**的(``0001_initial.sql``,该列无 NOT NULL,而 ``sources`` / ``reports``
+    两张表有),而停机 importer 的 ``_parse_timestamp("") -> None`` 会把 SQLite 那侧
+    ``TEXT NOT NULL DEFAULT ''`` 的空串行迁成 NULL。
+
+    少了它有两处会炸,而且是同一行同时炸两次:
+    * ``ORDER BY created_at DESC`` 在 PG 默认 **NULLS FIRST**,这行必定排在第 1 页;
+    * Python 归并键 ``pool.sort`` 里混进 ``None`` 直接
+      ``TypeError: '<' not supported between instances of 'NoneType' and 'datetime'``。
+
+    于是该用户的活动流每次请求都 500。兜底值与 SQLite 侧**共用同一个哨兵**
+    (``UNRESOLVED_INSTANT_ISO``),两边因此把这类行排到同一个位置(最末),游标也回传
+    同一个可往返的串。刻意不用 ``'-infinity'``:它排序对、却写不成 ISO 游标。
+    """
+    return f"COALESCE({column}, TIMESTAMPTZ '{UNRESOLVED_INSTANT_ISO}')"
 
 
 def _snippet(text: str, needle: str) -> str:
@@ -439,11 +473,15 @@ class QueryStore:
             reports: dict[str, int] = {}
             if ids:
                 placeholders = ",".join("%s" for _ in ids)
+                # VISIBLE_SOURCE_TYPES_PREDICATE 不可省(与 SQLite 侧逐字同一条理由):
+                # 它是「面向用户可见来源数」的单一真源,少了它 memory / knowhow 投影行
+                # 会被算进表头,而展开的清单带谓词、只列可见来源。
                 sources = {
                     row["k"]: row["c"]
                     for row in db.execute(
                         f"SELECT notebook_id AS k, COUNT(*) AS c FROM sources "
-                        f"WHERE notebook_id IN ({placeholders}) GROUP BY notebook_id",
+                        f"WHERE notebook_id IN ({placeholders}) "
+                        f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY notebook_id",
                         ids,
                     ).fetchall()
                 }
@@ -486,6 +524,290 @@ class QueryStore:
             }
             for row in notebooks
         ]
+
+    def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool:
+        """SQLite 孪生实现,谓词逐字相同(见那边的说明)。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM notebooks WHERE id = %s AND created_by = %s "
+                "AND status != 'copying'",
+                (notebook_id, user_id),
+            ).fetchone()
+        return row is not None
+
+    def list_user_activity(
+        self,
+        user_id: str,
+        *,
+        notebook_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        before_ts: str | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """PostgreSQL twin of the SQLite ``list_user_activity`` — same fields,
+        same (created_at DESC, id DESC) keyset semantics, same per-type bounded
+        + in-Python merge (no three-way UNION; see the SQLite implementation's
+        docstring and
+        docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md
+        §4.1 for the rationale).
+
+        ``created_at`` is ``timestamptz`` here (text in SQLite), so the cursor
+        and the ``since``/``until`` range bounds are each normalized once to an
+        aware UTC ``datetime`` and bound natively rather than compared as text.
+        That normalization is the **shared** ``parse_activity_instant`` — the
+        very same function the SQLite backend calls before handing its bound to
+        ``julianday()``. Both backends therefore agree on what
+        ``"2026-07-31T16:00:00.000Z"`` means, and both raise ``ValueError`` on a
+        malformed bound instead of one silently returning a page while the other
+        500s (see ``app.core.activity_time`` for the contract, including why a
+        naive bound is read as UTC).
+
+        The in-Python merge sorts on the native per-row value (``datetime``
+        here, SQLite's own ``julianday()`` output there — in each case exactly
+        the value that backend's ``ORDER BY`` used) and only stringifies via
+        ``iso_timestamp`` when building the output dict, so no comparison ever
+        depends on ``.isoformat()``'s variable-width fractional-second
+        rendering.
+
+        Scope is owner-only for all three types (same as the SQLite twin):
+        rows the user produced inside *someone else's* shared notebook are
+        deliberately absent — the usage totals count them, this expanded feed
+        does not.
+        """
+        limit = max(1, min(200, int(limit)))
+        fetch_limit = limit + 1
+        empty: dict[str, Any] = {"items": [], "has_more": False, "next_cursor": None}
+        cursor_active = before_ts is not None and before_id is not None
+        before_dt = (
+            parse_activity_instant(before_ts, field="before_ts")
+            if cursor_active else None
+        )
+        since_dt = (
+            parse_activity_instant(since, field="since") if since is not None else None
+        )
+        until_dt = (
+            parse_activity_instant(until, field="until") if until is not None else None
+        )
+
+        def _range_and_cursor_clause(prefix: str) -> tuple[str, list[Any]]:
+            instant = _absolute_instant(f"{prefix}created_at")
+            clause = ""
+            params: list[Any] = []
+            if since_dt is not None:
+                clause += f" AND {instant} >= %s"
+                params.append(since_dt)
+            if until_dt is not None:
+                clause += f" AND {instant} < %s"
+                params.append(until_dt)
+            if cursor_active:
+                clause += (
+                    f" AND ({instant} < %s OR "
+                    f"({instant} = %s AND {prefix}id COLLATE \"C\" < %s))"
+                )
+                params.extend([before_dt, before_dt, before_id])
+            return clause, params
+
+        with self.database.connect() as db:
+            if notebook_id is not None:
+                owned = db.execute(
+                    "SELECT 1 FROM notebooks WHERE id = %s AND created_by = %s "
+                    "AND status != 'copying'",
+                    (notebook_id, user_id),
+                ).fetchone()
+                if owned is None:
+                    return empty
+                owned_notebook_ids = [notebook_id]
+            else:
+                owned_notebook_ids = [
+                    row["id"]
+                    for row in db.execute(
+                        "SELECT id FROM notebooks WHERE created_by = %s "
+                        "AND status != 'copying'",
+                        (user_id,),
+                    ).fetchall()
+                ]
+            if not owned_notebook_ids:
+                # 三类都按自有笔记本收窄,一个都没有就没有任何活动可列。
+                return empty
+            owned_placeholders = ",".join("%s" for _ in owned_notebook_ids)
+
+            # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,理由同 SQLite 侧)。
+            # notebook_id 已在上面解析成 owned_notebook_ids == [notebook_id],这条 IN
+            # 同时兑现了「按库过滤」和「归属校验」,不需要第二条谓词。
+            ask_params: list[Any] = [user_id, *owned_notebook_ids]
+            ask_range_clause, ask_range_params = _range_and_cursor_clause("")
+            ask_params.extend(ask_range_params)
+            ask_rows = db.execute(
+                "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
+                "question, mode, status, answer_id, error FROM ask_jobs "
+                f"WHERE created_by = %s AND notebook_id IN ({owned_placeholders})"
+                f"{ask_range_clause} "
+                f"ORDER BY {_absolute_instant('created_at')} DESC, "
+                "id COLLATE \"C\" DESC LIMIT %s",
+                [*ask_params, fetch_limit],
+            ).fetchall()
+
+            # 2. 来源:sources 没有 created_by 列,靠"该用户自己的笔记本 id"限定范围
+            # (与 list_user_notebooks 同口径),VISIBLE_SOURCE_TYPES_PREDICATE 排除
+            # 隐藏合成源,source_paper_meta LEFT JOIN 一次带出 is_paper/paper_title。
+            # s.doc_type / s.error_message 一并带出仅用于 Python 侧派生
+            # paper_meta_status / parse_quality_warning,两者都不作为返回字段。
+            source_params: list[Any] = list(owned_notebook_ids)
+            source_range_clause, source_range_params = _range_and_cursor_clause("s.")
+            source_params.extend(source_range_params)
+            source_rows = db.execute(
+                "SELECT s.id, s.notebook_id, s.created_at, s.title, s.file_name, "
+                "s.source_type, s.parse_status, s.status, s.error_message, "
+                "s.doc_type, m.is_paper, m.paper_title "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                f"WHERE s.notebook_id IN ({owned_placeholders}) "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
+                f"ORDER BY {_absolute_instant('s.created_at')} DESC, "
+                "s.id COLLATE \"C\" DESC LIMIT %s",
+                [*source_params, fetch_limit],
+            ).fetchall()
+
+            # 2b. extraction_warning 是「最近一次 extraction_runs.error_message 里的
+            # windows_failed=N/T 标记」派生态,单独一条批量查询(不是逐行 N+1),只对
+            # 本页已取回的 source id 集合取一次。ORDER BY 与 SourceStore.
+            # sources_from_rows 逐字相同(source_id COLLATE "C", created_at DESC,
+            # ordinal DESC):ordinal 存在的唯一理由就是给并列 created_at 提供确定序,
+            # 少了它「最近一次」在同秒两条记录下就不确定。
+            latest_extraction_error: dict[str, str] = {}
+            source_ids_on_page = [row["id"] for row in source_rows]
+            if source_ids_on_page:
+                ph2 = ",".join("%s" for _ in source_ids_on_page)
+                for r in db.execute(
+                    "SELECT source_id, error_message FROM extraction_runs "
+                    f"WHERE source_id IN ({ph2}) "
+                    "ORDER BY source_id COLLATE \"C\", created_at DESC, ordinal DESC",
+                    source_ids_on_page,
+                ).fetchall():
+                    latest_extraction_error.setdefault(
+                        r["source_id"], r["error_message"] or ""
+                    )
+
+            # 3. 报告:与提问同口径(created_by + 自有笔记本)。understanding_json 一并
+            # 带出仅用于 Python 侧提取 generation_started_at(镜像 ReportStore.
+            # row_to_dict 同一套 jsonb 提取,不发明第二套写法),本身不作为返回字段。
+            report_params: list[Any] = [user_id, *owned_notebook_ids]
+            report_range_clause, report_range_params = _range_and_cursor_clause("")
+            report_params.extend(report_range_params)
+            report_rows = db.execute(
+                "SELECT id, notebook_id, created_at, updated_at, question, depth, "
+                "status, understanding_json FROM reports "
+                f"WHERE created_by = %s AND notebook_id IN ({owned_placeholders})"
+                f"{report_range_clause} "
+                f"ORDER BY {_absolute_instant('created_at')} DESC, "
+                "id COLLATE \"C\" DESC LIMIT %s",
+                [*report_params, fetch_limit],
+            ).fetchall()
+
+        pool: list[dict[str, Any]] = []
+        for row in ask_rows:
+            pool.append(
+                {
+                    "type": "ask",
+                    "id": row["id"],
+                    "notebook_id": row["notebook_id"],
+                    "created_at": row["created_at"],
+                    "asked_at": row["asked_at"],
+                    "conversation_id": row["conversation_id"],
+                    "question": row["question"],
+                    "mode": row["mode"],
+                    "status": row["status"],
+                    "answer_id": row["answer_id"],
+                    "error": row["error"],
+                }
+            )
+        for row in source_rows:
+            pool.append(
+                {
+                    "type": "source",
+                    "id": row["id"],
+                    "notebook_id": row["notebook_id"],
+                    "created_at": row["created_at"],
+                    "title": row["title"],
+                    "file_name": row["file_name"],
+                    "source_type": row["source_type"],
+                    "parse_status": row["parse_status"],
+                    "status": row["status"],
+                    # 刻意**不**返回 sources.error_message(可能带服务端绝对路径);
+                    # 安全事实按 ScopedSourceDetail 的既有做法换成 parse_failed 布尔。
+                    # 与 SQLite 侧逐字同形,理由见那边的注释。
+                    "parse_failed": row["parse_status"] == "failed",
+                    "is_paper": bool(row["is_paper"]),
+                    "paper_title": row["paper_title"] or "",
+                    "extraction_warning": extraction_warning_text(
+                        latest_extraction_error.get(row["id"])
+                    ),
+                    "parse_quality_warning": has_pdf_python_fallback_warning(
+                        row["error_message"]
+                    ),
+                    "paper_meta_status": paper_meta_status(
+                        row["is_paper"], row["source_type"], row["doc_type"],
+                        row["parse_status"],
+                    ),
+                }
+            )
+        for row in report_rows:
+            understanding = json_value(row["understanding_json"], {})
+            generation_started_at = str(
+                understanding.get("_generation_started_at", "") or ""
+            )
+            pool.append(
+                {
+                    "type": "report",
+                    "id": row["id"],
+                    "notebook_id": row["notebook_id"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "question": row["question"],
+                    "depth": int(row["depth"]),
+                    "status": row["status"],
+                    "generation_started_at": generation_started_at,
+                }
+            )
+
+        # created_at 在归并期间保持原生 datetime(与 SQLite 侧字符串同构:两者都在各
+        # 自后端的结果集里同质、可直接比较),只在写出字段前经 iso_timestamp 转字符串,
+        # 避免依赖 isoformat() 的变长小数位表示做字符串比较。
+        #
+        # ⚠ 归并键必须与 SQL 的 ORDER BY 用**同一个** COALESCE 兜底,否则可空的
+        # ask_jobs.created_at 会让 None 混进比较元组、直接 TypeError(SQL 已经把这类行
+        # 排到最末,Python 这一半漏掉就白排了)。哨兵只进排序键,不进输出字段——
+        # 输出仍走下面的 iso_timestamp,NULL 照旧渲染成空串。
+        pool.sort(
+            key=lambda item: (item["created_at"] or UNRESOLVED_INSTANT, item["id"]),
+            reverse=True,
+        )
+        has_more = (
+            len(ask_rows) > limit
+            or len(source_rows) > limit
+            or len(report_rows) > limit
+            or len(pool) > limit
+        )
+        page = pool[:limit]
+        next_cursor = None
+        if has_more and page:
+            last = page[-1]
+            # 与 SQLite 侧同一条:游标只发**自己解析得回来**的值。NULL created_at 经
+            # iso_timestamp 会变成空串,原样发出去会让下一页在 parse_activity_instant
+            # 抛 ValueError;cursor_instant_text 对它回传哨兵——正是该行在
+            # _absolute_instant 里实际参与排序的那个值,游标因此仍指向同一个位置。
+            next_cursor = {
+                "ts": cursor_instant_text(last["created_at"]),
+                "id": last["id"],
+            }
+        for item in page:
+            # created_at 之外,只有 report 的 updated_at 是 timestamptz;asked_at 在
+            # PostgreSQL 侧本就是 text COLLATE "C"(见 migration 0013),无需转换。
+            item["created_at"] = iso_timestamp(item["created_at"])
+            if item["type"] == "report":
+                item["updated_at"] = iso_timestamp(item["updated_at"])
+        return {"items": page, "has_more": has_more, "next_cursor": next_cursor}
 
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
         with self.database.connect() as db:

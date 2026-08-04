@@ -208,7 +208,14 @@ export type PaperMeta = {
 export type SourceSummary = {
   id: string;
   notebook_id: string;
+  /** 原始 `sources.title` 列。**不要拿它给用户命名来源**——那份来源被论文元数据
+   *  接地后，`title` 仍是上传时的文件名。为用户命名一律用 `display_title`（后端
+   *  由 `app/services/source_display.py::source_display_title` 合成，与引用卡、
+   *  检索证据卡、清单卡共用同一份实现）。 */
   title: string;
+  /** 面向用户的显示名（论文标题优先）。CLAUDE.md 红线：所有为用户命名来源的路径
+   *  共用这一个真源，否则同一篇论文会在同一屏里有两个名字。 */
+  display_title: string;
   type: string;
   status: string;
   parse_status: string;
@@ -221,6 +228,11 @@ export type SourceSummary = {
    *  时同内容判重会沿用既有来源，但用户新选的类型仍会写进那条来源——所以这个字段
    *  是判断「这次上传到底改没改东西」的依据。 */
   doc_type?: string;
+  /** 原始 ISO 时间戳，**按浏览器本地时区渲染的权威时间来源**（同一份来源在任何入口
+   *  都必须显示同一个时刻）。`created_label` 是服务端按**服务端**日历日格式化好的旧
+   *  字段（既有来源页签仍在用），新路径一律不要用它——服务端 UTC+8、浏览器 UTC 时，
+   *  同一份来源会一边显示「8月5日」一边显示「8月4日 17:00」。 */
+  created_at: string;
   created_label: string;
   error_message?: string;
   /** 参与集内代理读取（`/notebooks/{active}/sources/{id}`）的响应用它代替

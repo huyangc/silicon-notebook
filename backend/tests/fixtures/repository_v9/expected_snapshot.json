@@ -468,7 +468,9 @@
     },
     "source_detail": {
       "authors": [],
+      "created_at": "<timestamp>",
       "created_label": "2024年1月2日",
+      "display_title": "Fixture amplifier notes",
       "doc_type": "textbook",
       "element_count": 2,
       "error_message": "",
@@ -520,7 +522,9 @@
     "sources": [
       {
         "authors": [],
+        "created_at": "<timestamp>",
         "created_label": "2024年1月2日",
+        "display_title": "Fixture amplifier notes",
         "doc_type": "textbook",
         "element_count": 2,
         "extraction_warning": null,
