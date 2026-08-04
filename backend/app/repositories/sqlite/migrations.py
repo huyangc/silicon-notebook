@@ -137,12 +137,11 @@ class SqliteMigrator:
                 -- were listed here it would land BEFORE doc_type on a fresh
                 -- DB, but _migration_14's ALTER lands it AFTER doc_type on any
                 -- already-deployed DB (doc_type already exists there) --
-                -- a column-order mismatch the schema_contract.txt golden
-                -- would catch. Leaving sources' literal untouched and adding
-                -- memory_id solely via _migration_14 (which every fresh DB
-                -- also runs, in the same migrate() sweep) makes fresh and
-                -- upgraded DBs land on the identical [..., doc_type,
-                -- memory_id] order.
+                -- a fresh-vs-upgraded column-order divergence. Leaving
+                -- sources' literal untouched and adding memory_id solely via
+                -- _migration_14 (which every fresh DB also runs, in the same
+                -- migrate() sweep) makes fresh and upgraded DBs land on the
+                -- identical [..., doc_type, memory_id] order.
 
                 CREATE TABLE IF NOT EXISTS source_elements (
                   id TEXT PRIMARY KEY,
