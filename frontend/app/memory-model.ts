@@ -406,6 +406,66 @@ export function memoryProvenanceRows(memory: {
   return rows.filter(([, value]) => Boolean(value));
 }
 
+export type MemoryCitationReference = {
+  sourceId: string;
+  elementId: string;
+  sourceTitle: string;
+  sourceFileName: string;
+  locationLabel: string;
+  quotedSpan: string;
+  archival: boolean;
+};
+
+/**
+ * Project persisted Ask citations into a stable, display-safe shape.
+ *
+ * Transferred memories retain their original provenance under nested
+ * ``imported_from`` wrappers.  Those references remain useful as an archive,
+ * but are not live navigation targets in the destination notebook.
+ */
+export function memoryCitationReferences(memory: {
+  origin: MemoryOrigin;
+  provenance: Record<string, unknown>;
+}): MemoryCitationReference[] {
+  if (memory.origin !== "ask_answer") return [];
+  const provenance = memory.provenance ?? {};
+  const hops = importedFromChain(provenance);
+  const archival = hops.length > 0;
+  const raw = archival ? hops[hops.length - 1]?.source_provenance : provenance;
+  const source = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const citations = Array.isArray(source.citations) ? source.citations : [];
+  const seen = new Set<string>();
+  const references: MemoryCitationReference[] = [];
+  for (const value of citations) {
+    if (!value || typeof value !== "object") continue;
+    const citation = value as Record<string, unknown>;
+    const sourceId = String(citation.source_id ?? "");
+    const elementId = String(citation.element_id ?? "");
+    const citationLabel = String(citation.label ?? "");
+    const sourceFileName = String(citation.source_file_name ?? "");
+    const locationLabel = String(citation.location_label ?? "");
+    const locationSuffix = locationLabel ? ` · ${locationLabel}` : "";
+    const sourceTitle = locationSuffix && citationLabel.endsWith(locationSuffix)
+      ? citationLabel.slice(0, -locationSuffix.length).trim()
+      : citationLabel;
+    const quotedSpan = String(citation.quoted_span ?? "");
+    if (!sourceTitle && !sourceFileName && !locationLabel && !quotedSpan) continue;
+    const identity = `${sourceId}\u0000${elementId}\u0000${quotedSpan}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    references.push({
+      sourceId,
+      elementId,
+      sourceTitle,
+      sourceFileName,
+      locationLabel,
+      quotedSpan,
+      archival,
+    });
+  }
+  return references;
+}
+
 export type MemoryEvidenceRow = {
   type: string;
   identity: string;

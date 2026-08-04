@@ -117,7 +117,7 @@ import { clearToken, getToken } from "./auth-session";
 import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
-import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, getNotebookSource, getNotebookSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
+import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
@@ -260,6 +260,7 @@ import {
 } from "./workspace-model";
 import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
+const SOURCE_ELEMENT_PAGE_SIZE = 40;
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -838,6 +839,10 @@ export default function Home() {
   // 反复点就会把同一篇重复解析若干遍。
   const [reparsingSource, setReparsingSource] = useState(false);
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
+  const [sourceElementsTotal, setSourceElementsTotal] = useState(0);
+  const [sourceElementStartOffset, setSourceElementStartOffset] = useState(0);
+  const [sourceElementsLoading, setSourceElementsLoading] = useState(false);
+  const sourceDetailRequestGenerationRef = useRef(0);
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   // 命令目录审阅弹窗:提升到 page 根层渲染(P0 修复,见 command-catalog-panel.tsx
   // 里 CatalogReviewRequest 的注释)。CommandCatalogSection 只请求打开,真正的
@@ -3169,20 +3174,61 @@ export default function Home() {
   // 首项恒为 active 自身,本库来源与跨库来源共用这一条路径,不分叉。currentNotebookId
   // 缺席(理论上打不开任何来源)时退回旧的 owner∪member 端点,保持既有行为。
   async function openSourceById(sourceId: string, elementId: string) {
+    const requestGeneration = ++sourceDetailRequestGenerationRef.current;
+    setSourceElementsLoading(false);
     const notebookId = currentNotebookId;
     const workspaceEpoch = workspaceEpochRef.current;
-    const [detail, elements] = await Promise.all([
+    const [detail, elementPage] = await Promise.all([
       notebookId ? getNotebookSource(notebookId, sourceId) : getSource(sourceId),
-      notebookId ? getNotebookSourceElements(notebookId, sourceId) : getSourceElements(sourceId)
+      notebookId
+        ? getNotebookSourceElementsPage(notebookId, sourceId, 0, SOURCE_ELEMENT_PAGE_SIZE, elementId)
+        : getSourceElementsPage(sourceId, 0, SOURCE_ELEMENT_PAGE_SIZE, elementId)
     ]);
     if (
-      (notebookId && activeNotebookIdRef.current !== notebookId)
+      sourceDetailRequestGenerationRef.current !== requestGeneration
+      || (notebookId && activeNotebookIdRef.current !== notebookId)
       || workspaceEpochRef.current !== workspaceEpoch
       || deletedSourceIdsByNotebookRef.current.get(detail.notebook_id)?.has(sourceId)
     ) return;
     setSourceDetail(detail);
-    setSourceElements(elements);
+    setSourceElements(elementPage.items);
+    setSourceElementsTotal(elementPage.total_count);
+    setSourceElementStartOffset(elementPage.offset);
+    setSourceElementsLoading(false);
     setHighlightedElementId(elementId);
+  }
+
+  async function loadSourceElementPage(direction: "previous" | "next") {
+    const detail = sourceDetail;
+    if (!detail || sourceElementsLoading) return;
+    const offset = direction === "previous"
+      ? Math.max(0, sourceElementStartOffset - SOURCE_ELEMENT_PAGE_SIZE)
+      : sourceElementStartOffset + sourceElements.length;
+    const notebookId = currentNotebookId;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const requestGeneration = sourceDetailRequestGenerationRef.current;
+    setSourceElementsLoading(true);
+    try {
+      const page = notebookId
+        ? await getNotebookSourceElementsPage(notebookId, detail.id, offset, SOURCE_ELEMENT_PAGE_SIZE)
+        : await getSourceElementsPage(detail.id, offset, SOURCE_ELEMENT_PAGE_SIZE);
+      if (
+        sourceDetailRequestGenerationRef.current !== requestGeneration
+        || sourceDetailRef.current?.id !== detail.id
+        || workspaceEpochRef.current !== workspaceEpoch
+        || (notebookId && activeNotebookIdRef.current !== notebookId)
+      ) return;
+      setSourceElements((current) => direction === "previous"
+        ? [...page.items, ...current]
+        : [...current, ...page.items]);
+      if (direction === "previous") setSourceElementStartOffset(page.offset);
+      setSourceElementsTotal(page.total_count);
+    } finally {
+      if (
+        sourceDetailRequestGenerationRef.current === requestGeneration
+        && sourceDetailRef.current?.id === detail.id
+      ) setSourceElementsLoading(false);
+    }
   }
 
   // Ask 清单结果卡(answer-panel.tsx CollectionResultCard)元素条目「查看来源」/
@@ -5680,7 +5726,13 @@ export default function Home() {
                 )}
 
                 {chatMode === "memory" && currentNotebookId && (
-                  <MemoryPanel scope="notebook" notebookId={currentNotebookId} bases={notebookPromotionBases} sessionSignal={memorySessionAbortRef.current.signal} />
+                  <MemoryPanel
+                    scope="notebook"
+                    notebookId={currentNotebookId}
+                    bases={notebookPromotionBases}
+                    sessionSignal={memorySessionAbortRef.current.signal}
+                    onOpenSource={onOpenSourceElement}
+                  />
                 )}
               </div>
               {chatMode === "ask" && (
@@ -6348,7 +6400,7 @@ export default function Home() {
       )}
 
       {sourceDetail && (
-        <SourceDetailWindow onClose={() => { setSourceDetail(null); setHighlightedElementId(""); }}>
+        <SourceDetailWindow onClose={() => { sourceDetailRequestGenerationRef.current += 1; setSourceDetail(null); setHighlightedElementId(""); setSourceElementsLoading(false); }}>
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
                 {sourceDetailBaseId ? (
@@ -6396,7 +6448,7 @@ export default function Home() {
                 <span className="tag">{sourceTypeLabel(sourceDetail)}</span>
                 <span className="tag">{label(PARSE_STATUS, sourceDetail.parse_status || sourceDetail.status, "处理中")}</span>
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
-                <span className="tag">{sourceElements.length} 个元素</span>
+                <span className="tag">{sourceElementsTotal || sourceDetail.element_count} 个元素</span>
               </div>
               {sourceDetail.paper_meta_status === "has_meta" && sourceDetail.paper_meta && (
                 <div className="source-detail-paper">
@@ -6487,6 +6539,14 @@ export default function Home() {
                 />
               )}
               <div className="source-element-stack">
+                {sourceElementStartOffset > 0 && (
+                  <button
+                    type="button"
+                    className="button secondary source-elements-page-button"
+                    disabled={sourceElementsLoading}
+                    onClick={() => loadSourceElementPage("previous").catch(reportError)}
+                  >{sourceElementsLoading ? "加载中…" : `加载前面的元素（已显示 ${sourceElements.length}/${sourceElementsTotal}）`}</button>
+                )}
                 {sourceElements.length > 0 ? sourceElements.map((element) => (
                   <article
                     className={`item source-element-card${element.id === highlightedElementId ? " source-element-card--highlighted" : ""}`}
@@ -6512,6 +6572,14 @@ export default function Home() {
                       ? "这个来源没能解析成功，可以删除后重新上传。"
                       : "当前来源还没有解析出元素。"}</p>
                   </article>
+                )}
+                {sourceElementStartOffset + sourceElements.length < sourceElementsTotal && (
+                  <button
+                    type="button"
+                    className="button secondary source-elements-page-button"
+                    disabled={sourceElementsLoading}
+                    onClick={() => loadSourceElementPage("next").catch(reportError)}
+                  >{sourceElementsLoading ? "加载中…" : `继续加载（已显示 ${sourceElements.length}/${sourceElementsTotal}）`}</button>
                 )}
           </div>
         </SourceDetailWindow>

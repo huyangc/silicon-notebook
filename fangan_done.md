@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-31
+更新日期：2026-08-04
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -73,6 +73,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **按来源选择检索范围（§6.5 / §11，2026-08-03）**：左栏每个可见导入来源新增复选框及全选/清空，默认全选；当前选择同时约束问答意图预检与执行、新建深度报告。后端在入口把选择冻结为 include 硬上限，并在有界候选 `LIMIT` 前约束当前 notebook 的 chunk、元素和 KG 直接检索；模型确认的来源子集只能与它取交集。无法安全预过滤的当前库全图/PPR/关系/精确章节/报告整库画像通道在收窄范围时跳过，隐藏 Memory/Knowhow 投影也不参与；挂载参考库仍保持在参与集，并可从 source-safe KG 种子直接映射 base 原文而不走组合全图；本地全不选且未挂库时，前端置灰问答输入和新建报告，后端对绕过 UI 的请求返回 409。外库/隐藏/失效 source id 返回 422，旧客户端省略 `source_scope` 时保持整库行为；报告把解析后的范围持久化至 understanding 合同，并在意图确认与生成前重验。
 - Notebook 顶栏保持紧凑：标题下不再渲染 description，description 在没有对话时进入问答欢迎态；顶部分析工具栏具备横向 overflow 保护，桌面宽度下动作标签不会被截断。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
+- **大型来源详情有界加载（§6.2 / §6.5，2026-08-04）**：浏览器不再一次请求、持有并渲染整篇 `source_elements`；详情首屏按 40 个元素分页，单请求上限 100，可按需加载前后页。Ask/Memory 引用带目标 element 时，后端确定性返回包含它的页并保持高亮定位；本库与挂载参考库共用 active-notebook 参与集授权。旧全量 elements 端点仅保留内部与向后兼容用途。SQLite/PostgreSQL 两个适配器实现同一顺序与窗口语义，并通过分页/anchor/越权回归测试和完整 `scripts/check.sh`。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
 - **主栏当前 tab**：问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report)；Scenario / Case / Checklist 已退役。
   - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过 Ask 顶栏单行 `历史 N` 入口 + 可展开会话管理面板切换/新建/重命名/删除，旁边的 `+` 直接开始新会话，不再保留重复的当前会话上下文栏，避免压缩主问答区。历史按带亚秒精度、跨 UTC offset 仍按绝对时刻正确比较的最近活动时间排序；首轮问题提交后在模型回复前就即时入历史、置为当前会话，即使 `started` 到达前切到同库其他会话仍能返回它并接回进度；切走或重连后终态会刷新轮数/推理标记，同库列表调用会追随最新请求（含跳过失败的中间请求），旧库延迟请求不会覆盖或作废当前库列表。加载 notebook/会话最新详情期间输入框与模式控制保持禁用，避免迟到详情接管新 run。欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。输入框支持 `Enter` 发送、`Shift+Enter` 换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制并恢复草稿问题；若 job id 尚未随 `started` 到达，界面先立即恢复草稿，该 run 的 controller 继续取得 id、调用后端取消，再停止本地流，且不与其他重连 job 串台。
@@ -321,6 +322,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   confirmed Memory 和可信 answer/citation provenance。同一用户重复保存同一 answer 幂等返回已有
   Memory；预览后 answer 删除则保存返回冲突。未配置或调用失败的 LLM 使用问题标题 + 清理显示引用
   后的回答作为确定性 fallback。
+- **Memory 引用可追溯（§19.1 / §19.3，2026-08-04）**：既有 `memory_provenance.citations` 现在在 Memory 卡片展开为来源显示名、不同于显示名时的原始上传文件名、位置和原文摘录，不再只显示数量；notebook 内的活引用可经参与集代理打开精确 source element。跨 notebook 复制/移动后会从嵌套 provenance 的最深原始层恢复引用，但明确标为仅存档且不授予目标库跳转权限。历史已保存 Memory 无需迁移即可恢复显示；前端投影/多跳传输回归、后端保存 API 与完整 `scripts/check.sh` 已通过。
 - **生命周期与权限**：Agent 只能创建 candidate；用户可编辑、确认、拒绝、弃用。Candidate 在同一
   用户、同一 notebook 下由具备 `memory:read_candidates` 的所有 Agent profile 共享；不同用户、
   不同 notebook、rejected/deprecated 均排除。用户丢失 notebook 访问权时 Memory 暂不可读/检索；

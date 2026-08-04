@@ -277,6 +277,13 @@ export type SourceElement = {
   metadata: Record<string, unknown>;
 };
 
+export type PaginatedSourceElements = {
+  items: SourceElement[];
+  total_count: number;
+  offset: number;
+  limit: number;
+};
+
 export type SearchHit = {
   scope: string;
   notebook_id: string;

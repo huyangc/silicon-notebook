@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from app.models.sources import (
+    PaginatedSourceElements,
     PaginatedSources,
     PaperAuthor,
     PaperMeta,
@@ -248,6 +249,61 @@ class SourceStore:
             )
             for row in rows
         ]
+
+    def source_elements_page(
+        self,
+        source_id: str,
+        offset: int = 0,
+        limit: int = 40,
+        anchor_element_id: str = "",
+    ) -> PaginatedSourceElements:
+        """PostgreSQL twin of the bounded source-detail element reader."""
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), 100))
+        with self.database.connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM sources WHERE id=%s", (source_id,)
+            ).fetchone() is None:
+                raise KeyError(source_id)
+            total = int(connection.execute(
+                "SELECT COUNT(*) AS c FROM source_elements WHERE source_id=%s",
+                (source_id,),
+            ).fetchone()["c"])
+            if anchor_element_id:
+                anchor = connection.execute(
+                    "SELECT created_at,id FROM source_elements "
+                    "WHERE source_id=%s AND id=%s",
+                    (source_id, anchor_element_id),
+                ).fetchone()
+                if anchor is not None:
+                    before = int(connection.execute(
+                        "SELECT COUNT(*) AS c FROM source_elements "
+                        "WHERE source_id=%s AND (created_at<%s OR "
+                        "(created_at=%s AND id COLLATE \"C\"<%s))",
+                        (source_id, anchor["created_at"], anchor["created_at"], anchor["id"]),
+                    ).fetchone()["c"])
+                    offset = (before // limit) * limit
+            rows = connection.execute(
+                "SELECT * FROM source_elements WHERE source_id=%s "
+                "ORDER BY created_at,id COLLATE \"C\" LIMIT %s OFFSET %s",
+                (source_id, limit, offset),
+            ).fetchall()
+        return PaginatedSourceElements(
+            items=[
+                SourceElement(
+                    id=row["id"],
+                    source_id=row["source_id"],
+                    element_type=row["element_type"],
+                    location_label=row["location_label"],
+                    text=row["text"],
+                    metadata=json_value(row["metadata"], {}),
+                )
+                for row in rows
+            ],
+            total_count=total,
+            offset=offset,
+            limit=limit,
+        )
 
     # ------------------------------------------- typed-collection catalog
     # Backend twin of the SQLite primitives; see that adapter's docstrings for

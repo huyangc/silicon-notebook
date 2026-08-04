@@ -1669,6 +1669,17 @@ class RepositoryFacade:
     def source_elements(self, source_id: str) -> List[SourceElement]:
         return self._runtime.source_store.source_elements(source_id)
 
+    def source_elements_page(
+        self,
+        source_id: str,
+        offset: int = 0,
+        limit: int = 40,
+        anchor_element_id: str = "",
+    ):
+        return self._runtime.source_store.source_elements_page(
+            source_id, offset, limit, anchor_element_id
+        )
+
     def delete_source(self, source_id: str) -> None:
         return self._runtime.source_ingestion.delete_source_compat(source_id)
 

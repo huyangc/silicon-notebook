@@ -135,8 +135,14 @@ test("delete tombstones suppress stale rows and snapshot reads converge across t
 
   const openDetail = findFunctionIn(page, "Home", "openSourceById");
   const detailText = openDetail.getText(page);
+  assert.match(detailText, /const requestGeneration = \+\+sourceDetailRequestGenerationRef\.current/);
+  assert.match(detailText, /sourceDetailRequestGenerationRef\.current !== requestGeneration/);
   assert.match(detailText, /workspaceEpochRef\.current !== workspaceEpoch/);
   assert.match(detailText, /deletedSourceIdsByNotebookRef\.current\.get\(detail\.notebook_id\)/);
+  const loadPage = findFunctionIn(page, "Home", "loadSourceElementPage");
+  const loadPageText = loadPage.getText(page);
+  assert.match(loadPageText, /const requestGeneration = sourceDetailRequestGenerationRef\.current/);
+  assert.match(loadPageText, /sourceDetailRequestGenerationRef\.current !== requestGeneration/);
   assert.match(removeText, /if \(sourceDetailRef\.current\?\.id === source\.id\)/);
 });
 

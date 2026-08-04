@@ -6749,6 +6749,11 @@ button.chat-session-card {
   min-width: 0;
 }
 
+.source-elements-page-button {
+  align-self: center;
+  min-width: min(100%, 280px);
+}
+
 .source-element-card {
   min-width: 0;
 }

@@ -119,7 +119,7 @@ test("source detail uses the dedicated draggable window shell", () => {
     // 来源」跳转设置的高亮目标会残留到下一次经普通来源列表打开的、无关的来源上
     // （该状态与目标元素同一个 getElementById 效果消费，参见 highlightedElementId
     // 声明处的效果与 openSourceById 的注释）。
-    onClose: '() => { setSourceDetail(null); setHighlightedElementId(""); }',
+    onClose: '() => { sourceDetailRequestGenerationRef.current += 1; setSourceDetail(null); setHighlightedElementId(""); setSourceElementsLoading(false); }',
   });
   assert.equal(
     importsFrom(page, "lucide-react").some(({ imported }) => imported === "PanelRightClose"),

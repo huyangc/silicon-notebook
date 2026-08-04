@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from app.models.sources import (
+    PaginatedSourceElements,
     PaginatedSources,
     PaperAuthor,
     PaperMeta,
@@ -202,6 +203,66 @@ class SourceStore:
             )
             for row in rows
         ]
+
+    def source_elements_page(
+        self,
+        source_id: str,
+        offset: int = 0,
+        limit: int = 40,
+        anchor_element_id: str = "",
+    ) -> PaginatedSourceElements:
+        """Read one stable source-element window instead of hydrating a book.
+
+        The existing full-list method remains for ingestion and internal
+        callers.  Source detail uses this bounded reader; an optional anchor
+        resolves to the page containing a citation target.
+        """
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), 100))
+        with self.database.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM sources WHERE id=?", (source_id,)
+            ).fetchone() is None:
+                raise KeyError(source_id)
+            total = int(db.execute(
+                "SELECT COUNT(*) AS c FROM source_elements WHERE source_id=?",
+                (source_id,),
+            ).fetchone()["c"])
+            if anchor_element_id:
+                anchor = db.execute(
+                    "SELECT created_at,id FROM source_elements "
+                    "WHERE source_id=? AND id=?",
+                    (source_id, anchor_element_id),
+                ).fetchone()
+                if anchor is not None:
+                    before = int(db.execute(
+                        "SELECT COUNT(*) AS c FROM source_elements "
+                        "WHERE source_id=? AND (created_at<? OR "
+                        "(created_at=? AND id<?))",
+                        (source_id, anchor["created_at"], anchor["created_at"], anchor["id"]),
+                    ).fetchone()["c"])
+                    offset = (before // limit) * limit
+            rows = db.execute(
+                "SELECT * FROM source_elements WHERE source_id=? "
+                "ORDER BY created_at ASC,id ASC LIMIT ? OFFSET ?",
+                (source_id, limit, offset),
+            ).fetchall()
+        return PaginatedSourceElements(
+            items=[
+                SourceElement(
+                    id=row["id"],
+                    source_id=row["source_id"],
+                    element_type=row["element_type"],
+                    location_label=row["location_label"],
+                    text=row["text"],
+                    metadata=json.loads(row["metadata"] or "{}"),
+                )
+                for row in rows
+            ],
+            total_count=total,
+            offset=offset,
+            limit=limit,
+        )
 
     # ------------------------------------------- typed-collection catalog
     # (reasoning enumeration tools PR-2): the two primitives behind

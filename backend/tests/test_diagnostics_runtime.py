@@ -245,6 +245,11 @@ def test_module_wrappers_are_noops_without_an_installed_runtime():
             "/api/sources/{id}/elements/{id}",
         ),
         (
+            "/api/sources/src-private456/elements-page",
+            ("src-private456",),
+            "/api/sources/{id}/elements-page",
+        ),
+        (
             "/api/memory/mem-private456",
             ("mem-private456",),
             "/api/memory/{id}",

@@ -78,6 +78,20 @@ class PaginatedSources(BaseModel):
     limit: int
 
 
+class PaginatedSourceElements(BaseModel):
+    """A bounded window used by the source-detail reader.
+
+    ``offset`` is the resolved window start.  When callers provide an anchor
+    element the backend moves the window so that the anchor is included and
+    reports that resolved offset back to the browser.
+    """
+
+    items: List[SourceElement]
+    total_count: int
+    offset: int
+    limit: int
+
+
 class SourceImportFile(BaseModel):
     file_name: str
     file_size: int = 0
