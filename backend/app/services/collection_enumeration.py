@@ -120,6 +120,7 @@ from app.services.collection_catalog import (
 from app.services.extraction_profiles import PROFILES
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.source_display import source_display_title
+from app.services.source_scope import scoped_participants
 
 
 # ``truncated_reason`` vocabulary — exactly the three the design doc fixes.
@@ -787,6 +788,17 @@ class CollectionEnumerationService:
     was mounted but has since been downgraded drops out of retrieval and must
     drop out of enumeration with it.
 
+    That list then passes through ``scoped_participants`` — the run's
+    reference-library checkboxes — at ``_participants`` and
+    ``_closing_participants``, the only two places this service resolves it.
+    Narrowing there rather than at each consumer is what keeps the plan, the
+    walk, the denominator and the closing fingerprint derived from ONE list:
+    they are not three filters that have to agree, they are one filtered list
+    read four times.  ``resolve_participants`` itself is untouched — it is also
+    the authorization predicate, and a retrieval checkbox must not narrow that.
+    ``enumeration_active()`` is likewise untouched: the tool stays available,
+    only its scope shrinks.
+
     Every read of one call runs on ONE connection, and one connection is not
     one snapshot.  That is deliberate: holding a read transaction across an
     action that can legitimately last many pages would park a SQLite reader in
@@ -851,9 +863,7 @@ class CollectionEnumerationService:
         exhausted = True
 
         with self._database.connect() as db:
-            notebook_ids, tiers = self._notebooks.participant_tiers(
-                db, active_notebook_id
-            )
+            notebook_ids, tiers = self._participants(db, active_notebook_id)
             plan = self._catalog.scope_element_plan(db, notebook_ids, kind)
             sources = plan.sources
             total: Optional[int] = plan.total
@@ -1019,9 +1029,7 @@ class CollectionEnumerationService:
         found = ""
         matches = 0
         with self._database.connect() as db:
-            notebook_ids, _tiers = self._notebooks.participant_tiers(
-                db, active_notebook_id
-            )
+            notebook_ids, _tiers = self._participants(db, active_notebook_id)
             sources = self._catalog.scope_element_plan(
                 db, notebook_ids, kind
             ).sources
@@ -1090,9 +1098,7 @@ class CollectionEnumerationService:
         emitted: List[Tuple[str, str]] = list(cursor.emitted_meta) if cursor else []
 
         with self._database.connect() as db:
-            notebook_ids, tiers = self._notebooks.participant_tiers(
-                db, active_notebook_id
-            )
+            notebook_ids, tiers = self._participants(db, active_notebook_id)
             plan = self._catalog.scope_source_plan(db, notebook_ids)
             sources: Optional[Tuple[ScopeSource, ...]] = plan.sources
             total: Optional[int] = plan.total
@@ -1274,9 +1280,7 @@ class CollectionEnumerationService:
         exhausted = True
 
         with self._database.connect() as db:
-            notebook_ids, tiers = self._notebooks.participant_tiers(
-                db, active_notebook_id
-            )
+            notebook_ids, tiers = self._participants(db, active_notebook_id)
             opening_seqs = self._kg_seqs(db, notebook_ids)
             total = self._kg_total(db, notebook_ids, object_type)
             walk_ids: Sequence[str] = notebook_ids
@@ -1564,6 +1568,21 @@ class CollectionEnumerationService:
             payload_chars=walk.payload,
         )
 
+    def _participants(
+        self, db: object, active_notebook_id: str
+    ) -> Tuple[Tuple[str, ...], Dict[str, str]]:
+        """The scope's participants, narrowed by the run's library checkboxes.
+
+        The ONE place this service turns "which libraries could participate"
+        into "which libraries this run reads".  Tiers are returned unfiltered
+        on purpose: they are a display lookup keyed by notebook id, so entries
+        for skipped libraries are simply never asked for.
+        """
+        notebook_ids, tiers = self._notebooks.participant_tiers(
+            db, active_notebook_id
+        )
+        return scoped_participants(notebook_ids), tiers
+
     def _closing_participants(
         self, db: object, active_notebook_id: str
     ) -> Tuple[str, ...]:
@@ -1584,8 +1603,19 @@ class CollectionEnumerationService:
         of "in scope", checked twice.  Tiers are deliberately not re-read: they
         are display metadata already carried by the emitted items, not part of
         the scope's identity.
+
+        The run's library checkboxes are re-applied here too, so the comparison
+        is EFFECTIVE scope against effective scope.  A library the run never
+        reads is not part of this walk's identity: mounting or unmounting an
+        unchecked one mid-chain changes nothing about what was enumerated, and
+        reporting ``concurrent_change`` for it would refuse a complete answer
+        over an event with no bearing on it.  A newly mounted CHECKED library
+        still lands in this list and still breaks the comparison — which is the
+        case that matters, because the walk never visited it.
         """
-        return tuple(self._notebooks.participant_ids(db, active_notebook_id))
+        return scoped_participants(
+            self._notebooks.participant_ids(db, active_notebook_id)
+        )
 
     def _source_display(
         self, db: object, source_ids: Sequence[str]

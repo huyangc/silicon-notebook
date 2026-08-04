@@ -1309,6 +1309,14 @@ class GraphRetrievalService(_RetrievalState):
         return self._follow_chain(*args, **kwargs)
 
     def node_context(self, *args, **kwargs):
+        # Deliberately ungated: this method's two consumers each gate at their
+        # own boundary, and neither is served by a gate here.
+        # ``RetrievalService.node_context`` filters the row it gets back
+        # (reasoning's chain hydration).  ``EvidenceContextService
+        # .knowledge_context`` skips an out-of-scope hit BEFORE calling this at
+        # all — it has to, because emptying the row would still leave the
+        # object's NAME rendering into the prompt behind a live ``k{n}`` anchor,
+        # the row being only the definition/snippet half of what it prints.
         return self.knowledge.node_context(*args, **kwargs)
 
     def scale_ppr(self, *args, **kwargs):

@@ -19,7 +19,28 @@ class CommunityQueryService:
         self.sibling_min_bridge = int(sibling_min_bridge)
 
     def mounted_base_ids(self, active_notebook_id: str) -> List[str]:
-        return self.unified_kg.mounted_base_ids(active_notebook_id)
+        """挂载参考库 id,按本 run 的参考库勾选收窄。
+
+        这是横向对比(共提/社区)唯一的库枚举入口:reasoning 的 ``expand_community``
+        与 chunk 模式的对比子查询各自逐库调 ``resolve_comparison_peers``。收窄放在
+        这里而不是两个调用点,是因为它们问的是同一个问题——「本轮可以向哪些参考库
+        借同类实体」。
+
+        必须收窄:兄弟**实体名**是从那个库的内容里读出来的,它们会原样进可见轨迹、
+        进 ``used_queries``,并被回喂进 reflect prompt —— 「取消勾选的库一个字都不
+        进 prompt」在这条通道上就不成立了。结果由 ``search`` 过滤并不足以补救:
+        泄漏的是**查询词本身**,不是命中。
+
+        判据必须是库维度而不是 ``source_scope_restricted()``:只取消参考库时后者恒为
+        False(R1),这条通道会全程敞着。
+        """
+        from app.services.source_scope import scoped_participants
+
+        return list(
+            scoped_participants(
+                self.unified_kg.mounted_base_ids(active_notebook_id)
+            )
+        )
 
     def community_peers(self, base_notebook_id: str, focal_name: str,
                         question: str, *, top_k: int,
