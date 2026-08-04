@@ -26,7 +26,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # on source_elements for bounded, per-type collection enumeration.
 # v39 adds the command-catalog extraction job row (with its per-source
 # single-flight partial unique index) and its reviewable candidate rows.
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2042,6 +2042,56 @@ class SqliteMigrator:
 
                 CREATE INDEX IF NOT EXISTS idx_knowhow_tables_nb_title
                   ON knowhow_tables(notebook_id, title, created_at, id);
+                """
+            )
+
+    def _migration_40(self) -> None:
+        """Persist immutable source-local KG facts before global fusion.
+
+        Facts deliberately do not foreign-key ``global_object_id``: fusion and
+        governance may deprecate or remove a global projection, while the
+        source-generation fact remains the stable input for scoped retrieval.
+        Source/notebook deletion still cascades through the real owners.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS knowledge_source_facts (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  local_object_id TEXT NOT NULL,
+                  global_object_id TEXT NOT NULL DEFAULT '',
+                  object_type TEXT NOT NULL,
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  evidence TEXT NOT NULL DEFAULT '[]',
+                  projection_version INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_source_facts_source_generation
+                  ON knowledge_source_facts(source_id, source_generation, id);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_source_facts_generation_local
+                  ON knowledge_source_facts(
+                    source_id, source_generation, local_object_id
+                  );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_source_facts_notebook_object
+                  ON knowledge_source_facts(notebook_id, global_object_id);
+
+                CREATE TABLE IF NOT EXISTS knowledge_source_fact_elements (
+                  fact_id TEXT NOT NULL REFERENCES knowledge_source_facts(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  element_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (fact_id, element_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_source_fact_elements_source
+                  ON knowledge_source_fact_elements(
+                    source_id, source_generation, element_id, fact_id
+                  );
                 """
             )
 

@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=39, postgres_version=17, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=40, postgres_version=18, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -530,6 +530,24 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         71,
         "jsonb+timestamptz",
+    ),
+    # SQLite v40 / PostgreSQL v18: immutable source-generation facts and their
+    # normalized element bindings. Both hang from notebooks/sources; elements
+    # are validated transactionally by the writer rather than foreign-keyed so
+    # a reparse cannot erase provenance before generation cleanup commits.
+    _table(
+        "knowledge_source_facts",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        72,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "knowledge_source_fact_elements",
+        ("fact_id", "element_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        73,
+        "timestamptz",
     ),
 )
 

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import os
+from types import SimpleNamespace
 import threading
 import time
 from typing import Any
@@ -28,6 +29,8 @@ from app.repositories.postgres.sharing_store import SharingStore as PostgresShar
 from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
 from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.notebook_catalog import NotebookSummaryQuery
+from app.services.notebook_sharing import NotebookCopyService
+from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services import repository_facade
 
 
@@ -72,7 +75,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 17
+    assert PostgresMigrator(postgres_database).migrate() == 18
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -324,7 +327,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 17
+    assert PostgresMigrator(postgres_database).migrate() == 18
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -402,7 +405,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 17
+    assert PostgresMigrator(postgres_database).migrate() == 18
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -467,7 +470,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 17
+    assert PostgresMigrator(postgres_database).migrate() == 18
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -717,6 +720,121 @@ def test_copy_snapshot_excludes_backend_ordinals_and_serializes_json(
     assert core_stores.sharing.notebook_row("nb-copy-destination")["status"] == "copying"
     core_stores.sharing.compensate_copy("nb-copy-destination")
     assert core_stores.sharing.notebook_row("nb-copy-destination") is None
+
+
+def test_full_notebook_copy_preserves_source_fact_jsonb(
+    core_stores: CoreStores, tmp_path,
+):
+    owner = core_stores.identity.create_user("f00123456", "password-13")
+    recipient = core_stores.identity.create_user("f00987654", "password-13")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Fact copy"), owner.id
+    )
+    core_stores.sources.insert_source(
+        source_id="src-fact-copy",
+        notebook_id=notebook_id,
+        title="Fact source",
+        source_type="markdown",
+        status="parsed",
+        parse_status="parsed",
+        file_name="fact.md",
+        file_path="uploads/fact.md",
+        file_size=1,
+        file_hash="fact-hash",
+        summary="",
+        doc_type="",
+    )
+    with core_stores.database.write() as connection:
+        core_stores.sources.replace_elements(
+            connection,
+            "src-fact-copy",
+            [SourceElementWrite("el-fact-copy", "paragraph", "p", "body", {})],
+            created_at=NOW,
+        )
+        connection.execute(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, status, owner, payload, evidence, "
+            "source_id, created_at, updated_at) VALUES "
+            "(%s, %s, 'concept', 'approved', '', %s::jsonb, %s::jsonb, %s, %s, %s)",
+            (
+                "ko-fact-copy",
+                notebook_id,
+                '{"name":"source fact"}',
+                '[{"source_id":"src-fact-copy","element_id":"el-fact-copy"}]',
+                "src-fact-copy",
+                NOW,
+                NOW,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO knowledge_source_facts "
+            "(id, notebook_id, source_id, source_generation, local_object_id, "
+            "global_object_id, object_type, payload, evidence, projection_version, "
+            "created_at, updated_at) VALUES "
+            "(%s, %s, %s, 'run-fact-copy', 'local-1', %s, 'concept', "
+            "%s::jsonb, %s::jsonb, 1, %s, %s)",
+            (
+                "ksf-fact-copy",
+                notebook_id,
+                "src-fact-copy",
+                "ko-fact-copy",
+                '{"name":"source fact"}',
+                '[{"source_id":"src-fact-copy","element_id":"el-fact-copy"}]',
+                NOW,
+                NOW,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO knowledge_source_fact_elements "
+            "(fact_id, notebook_id, source_id, source_generation, element_id, created_at) "
+            "VALUES ('ksf-fact-copy', %s, 'src-fact-copy', 'run-fact-copy', "
+            "'el-fact-copy', %s)",
+            (notebook_id, NOW),
+        )
+
+    counters: dict[str, int] = {}
+
+    def new_id(prefix: str) -> str:
+        counters[prefix] = counters.get(prefix, 0) + 1
+        return f"{prefix}-fact-copy-{counters[prefix]}"
+
+    class Catalog:
+        def get_notebook(self, target_id: str):
+            row = core_stores.sharing.notebook_row(target_id)
+            assert row is not None
+            return SimpleNamespace(
+                id=target_id, name=row["name"], status=row["status"]
+            )
+
+    copied = NotebookCopyService(
+        store=core_stores.sharing,
+        catalog=Catalog(),
+        seams=RepositoryCompatibilitySeams(
+            new_id=new_id,
+            now=lambda: NOW,
+            copy_chunk_size=lambda: 100,
+            remap_json_ids=repository_facade._remap_json_ids,
+            in_chunk_size=lambda: 500,
+        ),
+        storage_dir=lambda: tmp_path,
+        schedule_projection=lambda _table_id: None,
+    ).copy_notebook(notebook_id, new_owner_id=recipient.id)
+
+    with core_stores.database.connect() as connection:
+        fact = connection.execute(
+            "SELECT payload, evidence, global_object_id FROM knowledge_source_facts "
+            "WHERE notebook_id=%s",
+            (copied.id,),
+        ).fetchone()
+        binding = connection.execute(
+            "SELECT source_id, element_id FROM knowledge_source_fact_elements "
+            "WHERE notebook_id=%s",
+            (copied.id,),
+        ).fetchone()
+    assert fact["payload"] == {"name": "source fact"}
+    assert fact["evidence"][0]["source_id"] == binding["source_id"]
+    assert fact["evidence"][0]["element_id"] == binding["element_id"]
+    assert fact["global_object_id"] != "ko-fact-copy"
 
 
 def test_source_jsonb_hydration_and_ordinal_sample_order(core_stores: CoreStores):

@@ -1108,6 +1108,13 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def insert_object_source_rows(connection: object, rows: object) -> None: ...
     @staticmethod
+    def validate_source_fact_publish(
+        connection: object, notebook_id: str, source_id: str,
+        source_generation: str, element_ids: Sequence[str]
+    ) -> None: ...
+    @staticmethod
+    def insert_source_fact_rows(connection: object, rows: object, element_rows: object) -> None: ...
+    @staticmethod
     def insert_relation_chunk(connection: object, rows: object) -> None: ...
     @staticmethod
     def completion_generation_is_current(

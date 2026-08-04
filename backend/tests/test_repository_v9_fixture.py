@@ -109,9 +109,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 覆盖索引、v34 关系补全水位、v35 生成中 Ask 的浏览器提交时间、v36
     # KG 质量分析的三张预计算产物表、v37 按 (source_id, element_type,
     # created_at, id) 的集合枚举索引、v38 用户可见来源身份索引，以及 v39
-    # 命令目录抽取的 catalog_jobs / catalog_candidates 两张表，合法升级到
-    # 当前版本。
-    assert snapshot["schema"]["user_version"] == 39
+    # 命令目录抽取的 catalog_jobs / catalog_candidates 两张表，以及 v40
+    # source-local fact / evidence-element binding 两张表，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 40
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

@@ -20,6 +20,7 @@
 - 多账号所有权、公共参考库、分享链接、复制/只读成员和管理员控制；用户使用总览支持分页和按表头排序，其中问答用量展示已创建持久任务的用户提问次数，而不是会话容器数量。用户总数包含其在加入笔记本中的提问，展开明细仍只列该用户拥有的笔记本。
 - 结构化 JSONL 日志、有界生产诊断、离线批量摄取、检索回放、迁移和回填工具。
 - 检索候选保留语义、词法、PPR、KG 来源和社区等全部生产者来源；chunk/图混合选择可在不扩大回答预算的前提下，为纯图路径证据预留有界席位。
+- KG 抽取还会在全局融合前持久化不可变的来源代次事实及规范化证据元素绑定。这一步只增加写路径，为后续来源子图检索打底；当前问答排序和通道选择不变。
 
 完整产品行为和端点契约见[产品与 API 参考](./docs/product-and-api_zh.md)。
 
@@ -133,6 +134,7 @@ bash scripts/check.sh
 - SQLite 默认位于 `.local/silicon_notebook.db`；PostgreSQL 是可直接选择的替代后端。两者的上传文件和生成工件仍位于 `.local/`。
 - 生产后端刻意保持单 worker，因为模型队列、熔断、健康和取消状态都在进程内。
 - 默认 `chunk` 检索只读取当前笔记本；图谱增强和推理路径可通过显式挂载的公共库联合检索。
+- 来源事实按 `(notebook, source, extraction generation)` 归属，不会因全局对象折叠而消失；重解析/替换会在全局 KG 写事务内一并换代，复制 notebook 时随来源元素一起重映射。
 - 提问时用**英文半角双引号**括起来的内容整体检索、不做分词：它作为一个不可拆词项进入词法候选，在关键词覆盖率里只算一项（散落着这几个词的文档得不到分），并额外获得一次精确定位探测。引号是强偏好而非硬过滤。只认英文半角双引号、引号内至少 3 个字、一段文本里超过 4 段**不同**的引号内容则整条语法不生效；提问框与深度报告输入框会当场回执识别到的短语，不让没生效的约束静默通过。
 - 词法检索保留整句精确匹配作为排序加分，但会独立召回拉丁字母/数字词项、重叠中文三字片段，以及以 `_`/`-`/`.` 连接的完整标识符（如 `set_db`、`config.yaml`）作为整体词项，不再强制整段查询连续出现；SQLite 安全引用 FTS5 clause，PostgreSQL 应用相同的有界词项并集并转义 LIKE 元字符，使 `set_db` 这类词项保持字面量。带索引的 Chunk 与 KG 检索使用有界的 `ANN ∪ FTS` 候选；带索引的 Relation 检索还会按方向平衡补入与 FTS 命中 KG 端点相邻的有界关系候选。
 - 大库的索引检索会把 ANN 后的数据库 hydration 限制在候选窗口内，并让并发推理子查询单飞加载 ANN handle。Chunk scale 索引还持久化紧凑的 ANN 行到来源映射，使收窄检索在 HNSW 进入 Top-K 前过滤，而不是让未选来源占候选席位。默认会在 `/api/ready` 放行用户流量前加载全部已发布 scale 索引、已启用的 ANN handle 和可安全复用的单索引 PPR core；跨 notebook 组合图保持按需构造，避免成倍复制千万节点图。
@@ -149,7 +151,7 @@ CLI 使用的 PostgreSQL 目标；单独设置它不会启动任何任务，也�
 
 在 `DATABASE_URL` 仍指向 SQLite 时，运维人员可以运行受保护的单向
 SQLite→PostgreSQL 影子同步：preflight 绑定并确认两端数据库身份，`start-forward` 安装
-run-scoped capture/guard 并复制一致的 66 表 baseline，随后由一个受监督的前台 worker
+run-scoped capture/guard 并复制一致的 68 表 baseline，随后由一个受监督的前台 worker
 持续应用 SQLite change log。`status` 提供脱敏的 lag/lease/poison 状态，
 `verify --level full` 执行 barrier-aware 一致性校验。worker 使用数据库时钟的排他 lease，
 对 PostgreSQL 瞬态失败重试，确定性 poison 会 fail-stop；清理策略至少保留已验证进度之后

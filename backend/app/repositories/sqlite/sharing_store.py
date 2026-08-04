@@ -69,6 +69,16 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
     ),
     (
+        "knowledge_source_facts",
+        f"SELECT * FROM knowledge_source_facts WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
+        "knowledge_source_fact_elements",
+        f"SELECT * FROM knowledge_source_fact_elements WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
         "knowledge_relations",
         f"SELECT * FROM knowledge_relations WHERE notebook_id = ? "
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
@@ -134,6 +144,8 @@ _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     ("source_authors", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("chunks", ""),
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_facts", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_fact_elements", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
     ("concept_clusters", ""),
     ("knowhow_tables", ""),

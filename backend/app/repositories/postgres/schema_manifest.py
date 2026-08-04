@@ -28,7 +28,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the current SQLite v39 / PostgreSQL v17
+# Every ordinary application table in the current SQLite v40 / PostgreSQL v18
 # compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
 # the migration ledger/shadow control tables are adapter-internal. Import and
 # shadow preflight use this reverse-totality list to reject unrelated/live
@@ -77,6 +77,8 @@ POSTGRES_BUSINESS_TABLES = (
     "knowledge_object_sources",
     "knowledge_objects",
     "knowledge_relations",
+    "knowledge_source_fact_elements",
+    "knowledge_source_facts",
     "memory_embeddings",
     "memory_items",
     "memory_provenance",
@@ -148,6 +150,8 @@ POSTGRES_JSON_COLUMNS = frozenset(
         "knowledge_objects.evidence",
         "knowledge_objects.payload",
         "knowledge_relations.evidence",
+        "knowledge_source_facts.evidence",
+        "knowledge_source_facts.payload",
         "memory_items.tags_json",
         "memory_provenance.payload_json",
         "memory_revisions.tags_json",
@@ -207,10 +211,10 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v39. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v40. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=39,
-    postgres_version=17,
+    sqlite_version=40,
+    postgres_version=18,
 )

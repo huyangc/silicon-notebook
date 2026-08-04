@@ -71,7 +71,7 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _rollback_v34(db: sqlite3.Connection) -> None:
-    """Remove the v34-v39 additions before forging an older deployment.
+    """Remove the v34-v40 additions before forging an older deployment.
 
     A faithful pre-v34 shape lacks everything EVERY later migration adds, not
     just v34's: leaving _migration_36's tables behind would make the replay
@@ -81,6 +81,8 @@ def _rollback_v34(db: sqlite3.Connection) -> None:
     seventh index _migration_39 installs sits on the PRE-EXISTING
     knowhow_tables, so no DROP TABLE reaches it and it must be named.
     """
+    db.execute("DROP TABLE knowledge_source_fact_elements")    # _migration_40
+    db.execute("DROP TABLE knowledge_source_facts")            # _migration_40
     db.execute("DROP INDEX idx_knowhow_tables_nb_title")       # _migration_39
     db.execute("DROP TABLE catalog_candidates")                # _migration_39
     db.execute("DROP TABLE catalog_jobs")                      # _migration_39
@@ -741,6 +743,8 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE knowledge_source_fact_elements")  # _migration_40
+        rollback.execute("DROP TABLE knowledge_source_facts")          # _migration_40
         rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")      # _migration_39
         rollback.execute("DROP TABLE catalog_candidates")               # _migration_39
         rollback.execute("DROP TABLE catalog_jobs")                     # _migration_39
@@ -791,6 +795,8 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         ).fetchone() is not None
 
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE knowledge_source_fact_elements")
+        rollback.execute("DROP TABLE knowledge_source_facts")
         rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")
         rollback.execute("DROP TABLE catalog_candidates")
         rollback.execute("DROP TABLE catalog_jobs")
@@ -800,6 +806,26 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 38
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
+def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE knowledge_source_fact_elements")
+        rollback.execute("DROP TABLE knowledge_source_facts")
+        rollback.execute("PRAGMA user_version = 39")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 39
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
 

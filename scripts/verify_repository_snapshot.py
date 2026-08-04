@@ -2522,6 +2522,68 @@ MIGRATION_MANIFEST[(38, 39)] = {
     "views": {},
 }
 
+# v40: immutable source-generation facts plus normalized evidence-element
+# bindings. Both tables are additive and source-owned; the global object id is
+# deliberately data, not a foreign key, so fusion cannot erase source truth.
+SOURCE_LOCAL_FACT_TABLES = {
+    "knowledge_source_facts": """CREATE TABLE knowledge_source_facts (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  local_object_id TEXT NOT NULL,
+                  global_object_id TEXT NOT NULL DEFAULT '',
+                  object_type TEXT NOT NULL,
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  evidence TEXT NOT NULL DEFAULT '[]',
+                  projection_version INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "knowledge_source_fact_elements": """CREATE TABLE knowledge_source_fact_elements (
+                  fact_id TEXT NOT NULL REFERENCES knowledge_source_facts(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  element_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (fact_id, element_id)
+                )""",
+}
+SOURCE_LOCAL_FACT_INDEXES = {
+    "idx_knowledge_source_facts_source_generation":
+        "CREATE INDEX idx_knowledge_source_facts_source_generation\n"
+        "                  ON knowledge_source_facts(source_id, source_generation, id)",
+    "idx_knowledge_source_facts_notebook_object":
+        "CREATE INDEX idx_knowledge_source_facts_notebook_object\n"
+        "                  ON knowledge_source_facts(notebook_id, global_object_id)",
+    "uq_knowledge_source_facts_generation_local":
+        "CREATE UNIQUE INDEX uq_knowledge_source_facts_generation_local\n"
+        "                  ON knowledge_source_facts(\n"
+        "                    source_id, source_generation, local_object_id\n"
+        "                  )",
+    "idx_knowledge_source_fact_elements_source":
+        "CREATE INDEX idx_knowledge_source_fact_elements_source\n"
+        "                  ON knowledge_source_fact_elements(\n"
+        "                    source_id, source_generation, element_id, fact_id\n"
+        "                  )",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 40, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SOURCE_LOCAL_FACT_TABLES},
+        "indexes": {**manifest["indexes"], **SOURCE_LOCAL_FACT_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(39, 40)] = {
+    "tables": SOURCE_LOCAL_FACT_TABLES,
+    "columns": {},
+    "indexes": SOURCE_LOCAL_FACT_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

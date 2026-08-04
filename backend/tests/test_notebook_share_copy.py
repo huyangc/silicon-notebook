@@ -308,6 +308,66 @@ def test_copy_notebook_deep_copies_and_remaps(repo):
     assert len(_rows(repo, "knowledge_objects", src)) == 2
 
 
+def test_copy_notebook_remaps_source_local_facts_and_element_bindings(repo):
+    src = _seed_full_notebook(repo)
+    _mk_user(repo, "user-fact-copy")
+    now = _now()
+    with repo._write() as db:
+        source_id = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=?", (src,)
+        ).fetchone()[0]
+        element_id = db.execute(
+            "SELECT id FROM source_elements WHERE source_id=?", (source_id,)
+        ).fetchone()[0]
+        object_id = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=? ORDER BY id LIMIT 1",
+            (src,),
+        ).fetchone()[0]
+        fact_id = "ksf-copy-source"
+        evidence = json.dumps([{"source_id": source_id, "element_id": element_id}])
+        db.execute(
+            "INSERT INTO knowledge_source_facts "
+            "(id,notebook_id,source_id,source_generation,local_object_id,"
+            "global_object_id,object_type,payload,evidence,projection_version,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                fact_id, src, source_id, "run-copy", "local-copy", object_id,
+                "concept", json.dumps({"name": "copy fact"}), evidence, 1, now, now,
+            ),
+        )
+        db.execute(
+            "INSERT INTO knowledge_source_fact_elements "
+            "(fact_id,notebook_id,source_id,source_generation,element_id,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (fact_id, src, source_id, "run-copy", element_id, now),
+        )
+
+    copied = repo.copy_notebook(src, new_owner_id="user-fact-copy")
+    with repo._connect() as db:
+        fact = db.execute(
+            "SELECT * FROM knowledge_source_facts WHERE notebook_id=?", (copied.id,)
+        ).fetchone()
+        binding = db.execute(
+            "SELECT * FROM knowledge_source_fact_elements WHERE notebook_id=?",
+            (copied.id,),
+        ).fetchone()
+        copied_object_ids = {
+            row[0] for row in db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=?", (copied.id,)
+            ).fetchall()
+        }
+        copied_element_ids = {
+            row[0] for row in db.execute(
+                "SELECT se.id FROM source_elements se JOIN sources s ON s.id=se.source_id "
+                "WHERE s.notebook_id=?", (copied.id,)
+            ).fetchall()
+        }
+    assert fact["id"] != fact_id
+    assert fact["global_object_id"] in copied_object_ids
+    assert binding["fact_id"] == fact["id"]
+    assert binding["element_id"] in copied_element_ids
+
+
 def test_copy_notebook_clears_memory_id(repo):
     """Task 6: Memory 记录本身 owner 私有,不随 notebook 深拷贝走——副本源退化为
     普通内容源。若原样搬 memory_id 会悬空引用接收方看不到的 Memory,原 owner 再拷

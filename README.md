@@ -20,6 +20,7 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 - Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls, including a paginated, sortable user-usage table whose Ask usage counts durable question submissions rather than conversation containers. The user total includes questions asked in joined notebooks; the expanded inventory remains limited to notebooks that user owns.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.
 - Retrieval candidates retain all producer provenance (semantic, lexical, PPR, KG source, or community); mixed chunk/graph selection can reserve a bounded graph-only seat without increasing the answer budget.
+- KG extraction also persists immutable source-generation facts and normalized evidence-element bindings before global fusion. This is an additive write path for the upcoming source-subgraph retriever; current Ask ranking and channel selection remain unchanged in this step.
 
 The complete behavior and endpoint contracts live in [Product and API reference](./docs/product-and-api.md).
 
@@ -133,6 +134,7 @@ Optional external services
 - SQLite defaults to `.local/silicon_notebook.db`; PostgreSQL is a direct alternative. Uploaded files and generated artifacts stay under `.local/` for either database.
 - The production backend is deliberately single-worker because model queues, breakers, health, and cancellation state are process-local.
 - Baseline `chunk` retrieval is active-notebook-only. KG-assisted and reasoning paths may federate through explicitly mounted base notebooks.
+- Source-local fact rows are owned by `(notebook, source, extraction generation)` and survive global-object folding; reparse/replacement swaps them in the same transaction as the global KG write, and notebook copies remap them with their source elements.
 - Text wrapped in **ASCII double quotes** is searched whole and never tokenized: the span enters lexical candidates as one indivisible term, counts as a single unit of keyword coverage (a document scattering those words earns nothing for it), and additionally earns an exact-locate probe. Quoting is a strong preference, not a hard filter. ASCII quotes only, at least 3 characters inside, and more than 4 distinct quoted spans in one text disables the syntax for that text; the ask composer and deep-report input echo the recognised phrases as you type so a constraint that did not take effect never passes silently.
 - Lexical retrieval keeps the exact query as a ranking bonus but recalls independent Latin/number terms, overlapping CJK trigrams, and separator-joined identifiers (e.g. `set_db`, `config.yaml`) as whole terms instead of forcing the whole query to be contiguous; SQLite safely quotes FTS5 clauses and PostgreSQL applies the same bounded term union with LIKE metacharacters escaped so an identifier like `set_db` stays literal. Indexed Chunk and KG retrieval use bounded `ANN ∪ FTS` candidates; indexed Relation retrieval adds bounded, direction-balanced relations adjacent to FTS-matched KG endpoints.
 - Indexed large-library retrieval keeps post-ANN database hydration bounded by the candidate window and single-flights ANN handle loading across concurrent reasoning subqueries. Chunk scale indexes also persist a compact ANN-row-to-source map so narrowed retrieval filters inside HNSW before Top-K rather than letting excluded rows consume candidate slots. By default, every published scale index, enabled ANN handle, and safely reusable single-index PPR core is loaded behind `/api/ready` before user traffic is admitted; cross-notebook combined graphs remain lazy to avoid multiplying 10M-node graph copies.
@@ -150,7 +152,7 @@ alone starts nothing and never changes the active backend. Changing `DATABASE_UR
 
 While `DATABASE_URL` remains SQLite, the operator can run a guarded, one-way
 SQLite→PostgreSQL shadow: preflight binds and confirms both database identities, `start-forward`
-installs run-scoped capture/guards and copies a consistent 66-table baseline, and one supervised
+installs run-scoped capture/guards and copies a consistent 68-table baseline, and one supervised
 foreground worker continuously applies the retained SQLite change log. `status` exposes redacted
 lag/lease/poison state and `verify --level full` performs a barrier-aware consistency check. The
 worker uses an exclusive database-clock lease, retries transient PostgreSQL failures, stops on a
