@@ -386,6 +386,32 @@ class Settings(BaseSettings):
     source_partitioned_ppr_enabled: bool = Field(
         False, validation_alias="SOURCE_PARTITIONED_PPR_ENABLED"
     )
+    # User-visible selected-source graph enrichment is independently quality
+    # gated.  ``off`` is the safe default; shadow needs no attestation because
+    # it cannot alter evidence. Active modes require the deployment-owned
+    # content-free attestation plus exact corpus/model pins.
+    selected_source_graph_rollout_mode: Literal[
+        "off", "shadow", "allowlist", "rollout", "on"
+    ] = Field("off", validation_alias="SELECTED_SOURCE_GRAPH_ROLLOUT_MODE")
+    selected_source_graph_attestation_path: str = Field(
+        "", validation_alias="SELECTED_SOURCE_GRAPH_ATTESTATION_PATH"
+    )
+    selected_source_graph_expected_corpus_signature: str = Field(
+        "", validation_alias="SELECTED_SOURCE_GRAPH_EXPECTED_CORPUS_SIGNATURE"
+    )
+    selected_source_graph_expected_model_json: str = Field(
+        "", validation_alias="SELECTED_SOURCE_GRAPH_EXPECTED_MODEL_JSON"
+    )
+    selected_source_graph_notebook_allowlist: str = Field(
+        "", validation_alias="SELECTED_SOURCE_GRAPH_NOTEBOOK_ALLOWLIST"
+    )
+    selected_source_graph_rollout_percent: float = Field(
+        0.0, ge=0.0, le=100.0,
+        validation_alias="SELECTED_SOURCE_GRAPH_ROLLOUT_PERCENT",
+    )
+    selected_source_graph_enrichment_tokens: int = Field(
+        4000, gt=0, validation_alias="SELECTED_SOURCE_GRAPH_ENRICHMENT_TOKENS"
+    )
     # P0-C:seed pass PPR 与 plan LLM 并行(纯调度,结果逐位等价);False=原串行
     reasoning_ppr_prefetch: bool = Field(True, validation_alias="REASONING_PPR_PREFETCH")
     ppr_damping: float = Field(0.5, validation_alias="PPR_DAMPING")               # rx.pagerank alpha

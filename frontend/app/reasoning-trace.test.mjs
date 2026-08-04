@@ -72,6 +72,26 @@ test("follow_chain detail omits unavailable metrics and clamps trust percentages
   );
 });
 
+test("来源子图轨迹披露 active/shadow/off，且不使用旧的泛化关闭文案", () => {
+  const active = {
+    step_type: "source_subgraph",
+    summary: "来源子图：active，新增 4 条证据",
+    detail: { state: "active", selected_source_count: 1, enrichment_count: 4 },
+  };
+  assert.equal(getReasoningTraceSummary([active], true).latestLabel, "来源子图");
+  assert.equal(getTraceStepDetail(active), "1 篇来源内 · 补充 4 条");
+  assert.equal(getTraceStepDetail({
+    step_type: "source_subgraph",
+    summary: "来源子图：shadow",
+    detail: { state: "shadow", selected_source_count: 2, enrichment_count: 3 },
+  }), "2 篇来源 · 影子评估");
+  assert.equal(getTraceStepDetail({
+    step_type: "source_subgraph",
+    summary: "来源子图：off",
+    detail: { state: "off" },
+  }), "保持原检索结果");
+});
+
 // memory/synthesis 是后来补进轨迹的两段:一段是私有记忆参与了作答,另一段是
 // 答案真的写出来了(整轮里通常最长的一段,此前完全不在轨迹里)。
 test("记忆与作答两步有自己的短标签,detail 不落到通用「候选」口径", () => {

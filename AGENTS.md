@@ -853,6 +853,10 @@ For local UI checks, use:
 http://localhost:3000
 ```
 
+## Selected-Source Graph Activation
+
+The earlier staged “no Ask/Report consumer” notes in this file are superseded by the completed activation layer. `SelectedSourceGraphActivationService` is the only consumer seam for Ask `chunk`/`reasoning`/experimental `graph` and Deep Report. It runs only for a server-frozen, genuinely narrowed local `include` scope; omitted/all-selected scope, including a one-source notebook whose sole source is selected, remains on the historical path without snapshot I/O or a new response field. Historical `B` must finish first. `G` uses an independent budget and may only append after `B`; shadow always returns `B`, active rollout requires the trusted content-free attestation plus exact corpus/model pins, and every drift/failure/overflow/baseline eviction returns `B`. Mounted bases remain independent participants and may not be traversed by the active notebook's selected-source graph. Ask and report frontend surfaces must render the same content-free active/shadow/off/degraded receipt and reasoning uses `source_subgraph`, never the generic unsafe-channel-closed message.
+
 ## Git And File Safety
 
 - For every task that will write repository code, tests, documentation, or configuration, create a new linked git worktree and branch before the first write. The main local checkout remains read-only for that task; tiny fixes are not exempt. If the current directory is already an isolated linked worktree, continue there. Pure research, design, status, and review-only work is exempt.

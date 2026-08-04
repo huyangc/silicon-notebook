@@ -455,7 +455,6 @@ def _call_line(func, callee: str) -> int:
     import ast
     import inspect
     import textwrap
-    import textwrap
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
     lines = [
@@ -634,11 +633,10 @@ def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
     assert retrieval.ppr_calls == 0
     assert result.baseline_manifest is not None
     assert result.baseline_manifest.mode == "reasoning"
-    unsafe = [
-        step for step in result.trace
-        if step.detail.get("reason") == "source_scope_unsafe_channels"
-    ]
-    assert unsafe
+    assert not any(
+        step.detail.get("reason") == "source_scope_unsafe_channels"
+        for step in result.trace
+    )
 
 
 def test_all_selected_single_source_recovers_raw_elements_before_reflect():
@@ -711,7 +709,7 @@ def test_all_selected_universe_drift_disables_ppr_before_io():
         result = retriever.run("nb", "plain question")
 
     assert retrieval.ppr_calls == 0
-    assert any(
+    assert not any(
         step.detail.get("reason") == "source_scope_unsafe_channels"
         for step in result.trace
     )

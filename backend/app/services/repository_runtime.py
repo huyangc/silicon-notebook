@@ -13,7 +13,6 @@ from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
 from app.repositories.ports import (
     EmbeddingStorePort,
     IndexProjectionStorePort,
-    RepositorySeams,
     SharingStorePort,
 )
 from app.repositories.source_files import SourceFileStore
@@ -57,6 +56,10 @@ from app.services.source_graph_primitives import SourceGraphPrimitives
 from app.services.source_subgraph import SourceSubgraphService
 from app.services.source_subgraph_ppr import SourceSubgraphPprService
 from app.services.source_partitioned_ppr import SourcePartitionedPprService
+from app.services.source_graph_activation import (
+    SelectedSourceGraphActivationService,
+    hydrate_selected_graph_chunk_rows,
+)
 from app.services.retrieval_enrichment import BaselineProtectedEnrichmentService
 from app.services.vector_cache import VectorCache
 # Task 23: Ask detached-execution composition (appended block — parallel
@@ -235,6 +238,15 @@ class RepositoryRuntime:
             settings=self.settings,
             artifacts=self.scale_artifact_store,
             projections=self.index_projections,
+        )
+        self.selected_source_graph = SelectedSourceGraphActivationService(
+            settings=self.settings,
+            snapshots=self.source_subgraphs,
+            primitives=self.source_graph_primitives,
+            online_ppr=self.source_subgraph_ppr,
+            partitioned_ppr=self.source_partitioned_ppr,
+            enrichment=self.source_graph_enrichment,
+            event_log=self.event_log,
         )
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
         self.scale_builder: "ScaleIndexBuilder | None" = None
@@ -1171,6 +1183,13 @@ class RepositoryRuntime:
                 memory_retriever=self.memory_retriever,
                 corpus_profile=ReportCorpusProfileService(self.source_store),
                 generation_gate=generation_gate,
+                selected_source_graph=self.selected_source_graph,
+                scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
+                selected_graph_hydrate=lambda ids: (
+                    hydrate_selected_graph_chunk_rows(
+                        retrieval_port._hydrate_chunk_candidates(ids)[0]
+                    )
+                ),
             )
             return ReportEngine(
                 dependencies, user_id=user_id, cancel_event=cancel_event
@@ -1254,6 +1273,13 @@ class RepositoryRuntime:
                 # 调用方共用同一份 per-source 计数缓存(地图与清单必须同源)。
                 collection_catalog=self.collection_catalog,
                 collection_enumeration=self.collection_enumeration,
+                selected_source_graph=self.selected_source_graph,
+                scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
+                selected_graph_hydrate=lambda ids: (
+                    hydrate_selected_graph_chunk_rows(
+                        retrieval._hydrate_chunk_candidates(ids)[0]
+                    )
+                ),
             )
         return self.ask
 

@@ -1252,6 +1252,18 @@ export function AnswerView({
           </details>
         );
       })()}
+      {answer.source_graph && (
+        <div className={`source-graph-status source-graph-${answer.source_graph.state}`}>
+          <strong>来源子图</strong>
+          <span>{answer.source_graph.state === "active"
+            ? `已在所选 ${answer.source_graph.selected_source_count} 篇来源内扩展，补充 ${answer.source_graph.enrichment_count} 条证据`
+            : answer.source_graph.state === "shadow"
+              ? "正在影子评估，当前答案仍完全使用原检索结果"
+              : answer.source_graph.state === "degraded"
+                ? "本轮安全降级为原检索结果，未使用跨范围图扩展"
+                : "质量门尚未批准启用，当前答案使用原检索结果"}</span>
+        </div>
+      )}
       <AnswerMarkdown
         answer={answerText}
         anchors={answer.anchors}

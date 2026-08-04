@@ -20,6 +20,22 @@ from app.core.ask_retrieval_policy import (
     ask_retrieval_limits,
 )
 from app.core.config import Settings
+from app.models.ask import TraceStep
+from app.repositories.lexical_query import (
+    MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
+    exact_probe_terms,
+)
+from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.collection_catalog import (
+    ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+)
+from app.services.collection_enumeration import (
+    TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
+)
+from app.services.prompts import reflect_prompt, reflect_schema_hint
+from app.services.retrieval import (
+    RetrievedChunk, RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
+)
 
 if TYPE_CHECKING:
     from app.repositories.ports import (
@@ -52,25 +68,6 @@ class _ReasoningRetrieverFactory(Protocol):
         collection_catalog: object = None,
         collection_enumeration: object = None,
     ) -> object: ...
-
-from app.models.ask import TraceStep
-from app.repositories.lexical_query import (
-    MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
-    exact_probe_terms,
-)
-from app.services.prompts import (
-    PLAN_SCHEMA_HINT, plan_prompt, reflect_prompt, reflect_schema_hint,
-)
-from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.collection_catalog import (
-    ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
-)
-from app.services.collection_enumeration import (
-    TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
-)
-from app.services.retrieval import (
-    RetrievedChunk, RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
-)
 
 KG_TYPES = ("claim", "formula", "procedure", "concept")
 PREFER_WEIGHTS = {
@@ -2005,19 +2002,6 @@ class ReasoningRetriever:
             trace.append(step)
             if on_step:
                 on_step(step)
-
-        if self._unsafe_scope_restricted():
-            record(TraceStep(
-                step_type="skip",
-                summary="限定来源下已关闭无法安全隔离的图扩展通道",
-                detail={
-                    "reason": "source_scope_unsafe_channels",
-                    "channels": [
-                        "ppr", "community", "follow_chain", "neighbors",
-                        "exact_lookup", "enumeration",
-                    ],
-                },
-            ))
 
         # P0-C: seed pass PPR 只依赖原问题与只读图状态,与 plan 的 LLM 时间完全
         # 重叠(copy_context 保住 per-user 模型解析的 ContextVar)。在原 seed pass
