@@ -287,10 +287,10 @@ def test_corpus_map_all_probes_failing_degrades_to_sentinel():
 
 
 # ---------------------------------------------------------------------------
-# model_error sink 抛错不拖垮报告
+# model_error sink 抛错不遮蔽报告的真实终态
 # ---------------------------------------------------------------------------
 
-def test_model_error_sink_failure_does_not_fail_report(monkeypatch):
+def test_model_error_sink_failure_preserves_empty_report_failure(monkeypatch):
     reports = _Reports()
     rid = reports.seed("nb", "q", status="outline_ready",
                        outline=[{"title": "A", "scope": "sa", "sub_queries": ["qa"]}])
@@ -299,7 +299,8 @@ def test_model_error_sink_failure_does_not_fail_report(monkeypatch):
     eng = _engine(deps)
     monkeypatch.setattr(eng, "_deep_dive", lambda *a, **k: ReasoningResult())
     eng.generate("nb", rid, "q", depth=1)
-    assert reports.rows[rid]["status"] == "done"       # 报告不失败
+    # sink 自己抛错不能让引擎崩溃，也不能把零正文报告伪装成完成。
+    assert reports.rows[rid]["status"] == "failed"
     assert reports.rows[rid]["sections"][0].get("failed") is True
 
 

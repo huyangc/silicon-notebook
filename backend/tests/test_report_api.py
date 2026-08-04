@@ -614,3 +614,58 @@ def test_generate_rejects_when_not_outline_ready(client, monkeypatch):
     rid=client.post(f"/api/notebooks/{nb['id']}/reports",json={"question":"q"}).json()["report_id"]
     # 仍 planning(无 outline)→ generate 应 409
     assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/generate",json={}).status_code==409
+
+
+def test_generate_retries_failed_report_from_confirmed_outline(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(repository()._runtime.models, "configured", lambda _workload: True)
+    launched = []
+    monkeypatch.setattr(
+        R, "_launch_generate_job",
+        lambda *args, **kwargs: launched.append((args, kwargs)),
+    )
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "q"}
+    ).json()["report_id"]
+    repository().update_report(
+        nb["id"], rid, status="failed", error="pool timeout",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+        content_md="# stale", sections=[{"title": "A", "markdown": "stale"}],
+    )
+
+    response = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/generate", json={}
+    )
+
+    assert response.status_code == 200
+    assert len(launched) == 1
+    detail = repository().get_report(nb["id"], rid)
+    assert detail["status"] == "generating"
+    assert detail["outline"][0]["title"] == "A"
+    assert detail["content_md"] == "" and detail["sections"] == []
+
+
+def test_generate_does_not_retry_failed_report_without_outline(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(repository()._runtime.models, "configured", lambda _workload: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "q"}
+    ).json()["report_id"]
+    repository().update_report(nb["id"], rid, status="failed", error="planning")
+
+    response = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/generate", json={}
+    )
+
+    assert response.status_code == 409
+    assert response.headers["X-User-Message"] == "1"

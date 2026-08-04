@@ -2077,6 +2077,11 @@ button.chat-session-card {
 }
 
 .report-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   border: 1px solid #f3c7c7;
   border-radius: 10px;
   padding: 12px 14px;

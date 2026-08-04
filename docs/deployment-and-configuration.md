@@ -676,11 +676,21 @@ MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 800
 MAX_TOTAL_TOKENS             # mix total context token budget (default 30000)
 REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
 REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000; only for callers without a research depth — see the retrieval behaviour-change note)
-REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
+REPORT_GENERATION_CONCURRENCY # deep-report: whole reports admitted per backend process (default 1; queued reports hold no DB connection)
+REPORT_SECTION_CONCURRENCY   # deep-report: section fan-out per admitted report (default 3; also capped by model capacity and the DB-pool reserve)
+REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting completion cap (default 65536)
+REPORT_SYNTHESIS_MAX_TOKENS  # deep-report: report-wide JSON blueprint completion cap (default 102400)
+REPORT_SUMMARY_MAX_TOKENS    # deep-report: final read-only editor completion cap (default 102400)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
 REPORT_HIGH_RISK_DOWNGRADE_ENABLED # deep-report citation audit may cap a grounded section at overview when its unsupported ratio exceeds the contract threshold (default false; disclosure still runs when false)
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # deep-report high-risk citation-audit threshold; the numeric contract is owned by docs/product-and-api.md
 ```
+
+The three `REPORT_*_MAX_TOKENS` values are completion ceilings, not total-context
+declarations or reserved output. The bound provider/model owns prompt+completion
+compatibility; verify that it accepts each configured ceiling together with the
+largest prompt that workload receives. Lower these values when a provider has a
+smaller output or total-context limit.
 
 **Behavior change (PR-5, no new flag):** each report section's deep-dive retrieval budget now follows the report's own `depth` value (1/2/4/8/16, clamped API-side to `[1, 16]`) mapped onto the same named effort tiers reasoning Ask uses (`overview`/`standard`/`deep`/`thorough`/`exhaustive`) rather than always running at the `standard` budget. Low depths therefore retrieve with a smaller budget than before this change and high depths with a larger one — this is an intentional alignment fix (same tier name, same budget in both Ask and Deep Report), not a regression. Reaching depth 16 (`exhaustive`) additionally activates the outline scratchpad and KG weak-support gap feedback described above inside that section's deep-dive only; see `docs/product-and-api.md`'s "Deep Report outline co-evolution" section for the full contract.
 

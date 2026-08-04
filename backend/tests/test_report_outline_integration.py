@@ -808,10 +808,8 @@ def _claims_with_definitions(repo, notebook_id, count, *, chars=400):
 def test_the_section_writing_budget_follows_the_level(repo):
     """P2-2:撰写上下文的预算此前是定值(KG 6000 / chunk 20000),与档位无关。
 
-    检索按档缩放、装配却不缩放,等于让用户在「穷尽」上付的钱只买到一半——多检索
-    到的证据在装配这一步被同一把旧尺子截掉。这里量的是**真进 prompt 的条数**而不是
-    传参:60 条带 300 字符定义的知识对象下,概览(4000)< 旧定值(6000)< 穷尽(16000)
-    必须逐级更多。
+    检索按档缩放、装配也必须跟随档位。这里量的是**真进 prompt 的条数**而不是只看
+    传参：60 条带长定义的知识对象下，概览 < 旧固定值 < 穷尽必须逐级更多。
     """
     notebook = _notebook(repo)
     object_ids = _claims_with_definitions(repo, notebook.id, 60)
@@ -833,18 +831,17 @@ def test_the_section_writing_budget_follows_the_level(repo):
             r"Knowledge items \(id: \[type\]\[tier\] name — context\):\n(.*?)\n\n",
             prompt, re.S).group(1)
 
-    # depth=None 是旧的固定 6000,夹在概览与穷尽之间——三者逐级递增同时证明了
-    # 「预算随档位走」和「不选档的调用方没被改掉」。
+    # depth=None 是旧的固定 6000,夹在概览与穷尽之间。
     assert counts[1] < counts[None] < counts[16]
-    assert counts[16] > 2 * counts[None]        # 16000 / 6000,不是抖动
+    assert counts[16] > 2 * counts[None]
     assert len(blocks[1]) <= ask_retrieval_limits("overview").kg_context_chars
-    assert len(blocks[16]) <= ask_retrieval_limits("exhaustive").kg_context_chars
-    # 穷尽档确实吃到了它那一档的预算(而不是刚过 6000 就停)。
-    assert len(blocks[16]) > ask_retrieval_limits("exhaustive").kg_context_chars - 500
+    exhaustive = ask_retrieval_limits("exhaustive")
+    assert len(blocks[16]) <= exhaustive.kg_context_chars
+    assert len(blocks[16]) > exhaustive.kg_context_chars - 500
 
 
 def test_every_writing_budget_is_the_levels_own_number(repo, monkeypatch):
-    """三份预算(chunk / KG / 直接原文段)与元素条数都取自所选档位。
+    """三份预算与元素条数都直接取自所选档位。
 
     上面那条用例量的是 KG 的可观测结果;这一条把另外两份预算与 `answer_element_items`
     钉在传参上——它们各自的可观测面(超长 chunk / 元素择优)要么很贵、要么在别处

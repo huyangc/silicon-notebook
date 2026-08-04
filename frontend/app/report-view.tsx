@@ -1401,6 +1401,33 @@ export function ReportsPanel({
     }
   }
 
+  async function requestRetry() {
+    if (!active || actionBusy || active.status !== "failed" || active.outline.length === 0) return;
+    setActionBusy(true);
+    try {
+      await generateReport(notebookId, active.id, active.depth);
+      const next: ReportDetailT = {
+        ...active,
+        status: "generating",
+        progress: "准备生成",
+        error: "",
+        sections: [],
+        section_status: [],
+        gaps: [],
+        content_md: "",
+        references: [],
+        understanding: { ...active.understanding, credibility: undefined },
+      };
+      setActive(next);
+      setToast("已按原确认问题和大纲重新生成");
+      listReports(notebookId).then(setReports).catch(() => {});
+    } catch (error) {
+      surfaceError(error);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function requestDelete() {
     if (!active || actionBusy) return;
     if (!confirmDelete) { setConfirmDelete(true); return; }
@@ -1548,8 +1575,18 @@ export function ReportsPanel({
             </small>
           </div>
         </div>
-        {active.status === "failed" && active.error && (
-          <div className="report-error">报告没能生成完，可以重试。</div>
+        {active.status === "failed" && (
+          <div className="report-error">
+            <span>{active.outline.length > 0
+              ? "报告没能生成完，可复用已确认的问题和大纲重新生成。"
+              : "报告在形成可复用大纲前失败，请重新创建报告。"}</span>
+            {!readOnly && active.outline.length > 0 && (
+              <button className="report-action" type="button" disabled={actionBusy}
+                onClick={() => void requestRetry()}>
+                重新生成
+              </button>
+            )}
+          </div>
         )}
         {active.status === "planning" && (
           <div className="report-running-hint report-planning-hint">

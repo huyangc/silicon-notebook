@@ -135,8 +135,25 @@ class Settings(BaseSettings):
     #  由 retrieval_top_n / REASONING_TOP_N_* 统一治理;不再有报告专属的 KG 预算旋钮。)
     report_section_chunk_budget: int = Field(
         20000, validation_alias="REPORT_SECTION_CHUNK_BUDGET")
+    # Business-level retrieval/drafting fan-out for one report.  Model calls
+    # remain globally governed by the bound service scheduler; this lower gate
+    # protects the database pool from many reports multiplying that capacity.
+    report_section_concurrency: int = Field(
+        3, ge=1, validation_alias="REPORT_SECTION_CONCURRENCY")
+    # Whole-report jobs admitted per backend process.  Keep this separate from
+    # model-service concurrency because each section performs database work
+    # before and between model calls.
+    report_generation_concurrency: int = Field(
+        1, ge=1, validation_alias="REPORT_GENERATION_CONCURRENCY")
     report_section_max_tokens: int = Field(
-        8192, validation_alias="REPORT_SECTION_MAX_TOKENS")
+        65536, ge=1, validation_alias="REPORT_SECTION_MAX_TOKENS")
+    # Detailed tiers emit one report-wide, evidence-keyed JSON blueprint before
+    # section drafting.  Both this stage and the final editor need independent
+    # high ceilings and must not silently inherit OPENAI_COMPAT_MAX_TOKENS.
+    report_synthesis_max_tokens: int = Field(
+        102400, ge=1, validation_alias="REPORT_SYNTHESIS_MAX_TOKENS")
+    report_summary_max_tokens: int = Field(
+        102400, ge=1, validation_alias="REPORT_SUMMARY_MAX_TOKENS")
     # 【通识】层:允许报告引入库外参数知识(行内标注,仅报告管线读取)。
     report_allow_parametric: bool = Field(
         True, validation_alias="REPORT_ALLOW_PARAMETRIC")

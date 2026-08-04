@@ -224,12 +224,37 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
             ).fetchone()["n"] == 2
 
         report_id = repository.create_report(notebook.id, "Boot report", depth=1)
-        repository.update_report(notebook.id, report_id, status="outline_ready")
+        retry_outline = [{"title": "Boot", "scope": "s", "sub_queries": ["q"]}]
+        repository.update_report(
+            notebook.id,
+            report_id,
+            status="failed",
+            outline=retry_outline,
+            understanding={
+                "confirmed": True,
+                "credibility": {"synthesis_status": "failed_model"},
+            },
+            sections=[{"title": "old", "markdown": "stale"}],
+            section_status=[{"title": "old", "phase": "失败", "step": 0}],
+            gaps=["old"],
+            references=[{"key": "k1"}],
+            content_md="# stale",
+            error="pool timeout",
+        )
         assert repository.claim_report_generation(notebook.id, report_id)
-        generation_started_at = repository.get_report(
-            notebook.id, report_id
-        )["generation_started_at"]
+        assert repository.claim_report_generation(notebook.id, report_id) is False
+        claimed_report = repository.get_report(notebook.id, report_id)
+        generation_started_at = claimed_report["generation_started_at"]
         assert generation_started_at
+        assert claimed_report["outline"] == retry_outline
+        assert claimed_report["sections"] == []
+        assert claimed_report["section_status"] == []
+        assert claimed_report["gaps"] == []
+        assert claimed_report["references"] == []
+        assert claimed_report["content_md"] == ""
+        assert claimed_report["error"] == ""
+        assert claimed_report["understanding"]["confirmed"] is True
+        assert "credibility" not in claimed_report["understanding"]
         repository.update_report(
             notebook.id,
             report_id,

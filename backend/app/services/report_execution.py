@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from app.services.cancellation import AskCancelled
 from app.services.model_work import ModelPriority, model_work_scope
 
 if TYPE_CHECKING:
@@ -73,6 +75,43 @@ class ReportCancellationRegistry:
 
 # 进程全局唯一所有者(见模块 docstring;runtime 按身份引用,不建副本)。
 REPORT_CANCELLATIONS = ReportCancellationRegistry()
+
+
+class ReportGenerationGate:
+    """Bound whole-report database fan-out within one backend process.
+
+    The physical model scheduler already caps model calls, but retrieval happens
+    before those calls and can otherwise multiply across concurrent reports.
+    Waiting workers own no database connection and remain promptly cancellable.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = max(1, int(capacity))
+        self._slots = threading.BoundedSemaphore(self.capacity)
+
+    @contextmanager
+    def slot(self, *, cancel_event=None, on_wait: Callable[[], None] | None = None):
+        notified = False
+        acquired = False
+        try:
+            while not acquired:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise AskCancelled()
+                acquired = self._slots.acquire(timeout=0.25)
+                if not acquired and not notified and on_wait is not None:
+                    notified = True
+                    # Queue progress is observability only.  In particular, a
+                    # saturated PostgreSQL pool must not turn this best-effort
+                    # status write into a failed report while the worker owns
+                    # no generation slot and is deliberately waiting.
+                    try:
+                        on_wait()
+                    except Exception:
+                        pass
+            yield
+        finally:
+            if acquired:
+                self._slots.release()
 
 
 class ReportExecutionCoordinator:

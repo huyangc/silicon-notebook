@@ -19,10 +19,14 @@ FRAME_MAX_FACETS = 8
 FRAME_MAX_VALUES = 12
 FRAME_MAX_AXES = 8
 BLUEPRINT_MAX_DEFINITIONS = 24
-BLUEPRINT_MAX_CLAIMS = 96
-SECTION_MAX_CLAIMS = 24
+BLUEPRINT_MAX_CLAIMS = 60
+BLUEPRINT_SECTION_MAX_CLAIMS = 12
+CLAIM_LEDGER_MAX_CLAIMS = 24
 SYNTHESIS_EVIDENCE_MAX_CHARS = 36_000
-EDITOR_CONTEXT_MAX_CHARS = 24_000
+# The final editor remains deterministically bounded even though the deployment
+# no longer declares an application-side total context window.  Provider/model
+# bindings own the actual prompt+completion compatibility check.
+EDITOR_CONTEXT_MAX_CHARS = 143_712
 
 _CLAIM_TYPES = frozenset({
     "fact", "comparison", "trend", "inference", "general",
@@ -163,7 +167,9 @@ def synthesis_evidence_payload(
     legal: set[str] = set()
     if not outline or not results:
         return sections, legal
-    per_section = max(2_000, max_chars // max(1, min(len(outline), len(results))))
+    # Preserve fair section shares without imposing a per-section minimum that
+    # could exceed a caller-provided evidence ceiling.
+    per_section = max_chars // max(1, min(len(outline), len(results)))
     for index, (section, result) in enumerate(zip(outline, results), 1):
         cards: list[dict] = []
         seen: set[str] = set()
@@ -263,7 +269,13 @@ def normalize_synthesis_blueprint(
             if not isinstance(raw, dict):
                 return None
             section_id = _text(raw.get("section_id"), 80)
-            ids = _strings(raw.get("claim_ids"), SECTION_MAX_CLAIMS, 80)
+            raw_claim_ids = raw.get("claim_ids")
+            if (
+                not isinstance(raw_claim_ids, list)
+                or len(raw_claim_ids) > BLUEPRINT_SECTION_MAX_CLAIMS
+            ):
+                return None
+            ids = _strings(raw_claim_ids, BLUEPRINT_SECTION_MAX_CLAIMS, 80)
             if (
                 section_id not in section_ids or section_id in seen_sections
                 or any(cid not in claim_ids or owners[cid] != section_id for cid in ids)
@@ -393,7 +405,7 @@ def normalize_claim_ledger(
     """Bind claims to exact emitted prose and same-sentence citation markers."""
     if not isinstance(value, list):
         return [], "missing"
-    if len(value) > SECTION_MAX_CLAIMS:
+    if len(value) > CLAIM_LEDGER_MAX_CLAIMS:
         return [], "invalid"
     facet_map = {
         _text(row.get("id"), 80): row
@@ -612,7 +624,8 @@ def fair_editor_context(
     head = "Report audit contracts:\n" + serialized_overhead
 
     raw_claims_by_section = [
-        [bounded_claim(claim) for claim in list(section.get("claims") or [])[:SECTION_MAX_CLAIMS]]
+        [bounded_claim(claim) for claim in
+         list(section.get("claims") or [])[:CLAIM_LEDGER_MAX_CLAIMS]]
         for section in sections
     ]
     base_values = []

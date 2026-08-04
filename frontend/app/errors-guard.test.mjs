@@ -103,7 +103,7 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     reason: "stream diagnostics are logged before a branded scenario error",
   },
   "report-view.tsx|<module>.ReportsPanel|diagnostic|error": {
-    count: 2,
+    count: 1,
     reason: "report failure detail is condition-only and bounded-log-only",
   },
 });

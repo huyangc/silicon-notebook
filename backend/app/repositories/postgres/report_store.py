@@ -82,14 +82,23 @@ class ReportStore:
         return row is not None
 
     def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
-        """Atomically claim one outline-ready report for generation."""
+        """Atomically claim an outline-ready or failed report for generation.
+
+        A failed report retains its confirmed intent and outline, so retry can
+        safely rerun phase 2 without another planning/model interpretation.
+        Prior generated artifacts are cleared in the same CAS transaction.
+        """
         now = normalize_timestamp(self.now())
         with self.database.write() as db:
             row = db.execute(
                 "UPDATE reports SET status='generating',progress=%s,"
-                "understanding_json=jsonb_set(understanding_json,"
+                "error='',content_md='',sections_json='[]'::jsonb,"
+                "gaps_json='[]'::jsonb,references_json='[]'::jsonb,"
+                "section_status_json='[]'::jsonb,"
+                "understanding_json=jsonb_set(understanding_json - 'credibility',"
                 "'{_generation_started_at}',%s,true),updated_at=%s "
-                "WHERE id=%s AND notebook_id=%s AND status='outline_ready' "
+                "WHERE id=%s AND notebook_id=%s "
+                "AND status IN ('outline_ready','failed') "
                 "RETURNING id",
                 (
                     "准备生成",
