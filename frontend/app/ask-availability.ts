@@ -13,6 +13,7 @@
 // 来源解析出 chunk 后 ask_available 翻真,由来源处理轮询重拉 currentNotebook 自动解禁
 // (page.tsx 的 reachedExtracted 分支);解析失败则永不解禁,正确。
 
+import type { NotebookRef } from "./notebook-bases.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
 
 /**
@@ -39,4 +40,87 @@ export function isAskBlocked(notebook: NotebookSummary | null): boolean {
  */
 export function hasLocalEvidence(notebook: NotebookSummary | null): boolean {
   return notebook?.local_evidence_available === true;
+}
+
+
+// --- 严格推理(深入分析 / 知识图谱)本轮取不取得到图谱 -------------------------
+//
+// 参考库现在可以**按库取消勾选**。本笔记本自己没有图谱、用户又取消勾选了唯一带图的
+// 那个参考库时,后端的知识图谱可用性闸已经按库维度收窄、会如实答「无图」,但界面若仍
+// 读**聚合**的 `base_kg_available`,就会:
+//   1. 放行「深入分析 / 知识图谱」这两个这轮根本取不到图谱的模式;
+//   2. 当着用户的面点名一个本轮压根不参与的参考库(「将借用参考库《X》推理」)。
+// 判定因此必须落在「本次勾选集 ∩ 带图库」上,数据来自后端并列下发的分解
+// `base_kg_notebook_ids`(与 `base_kg_available` 出自同一次读取的同一批行)。
+
+
+/**
+ * 本轮检索**真的会借用其知识图谱**的参考库 —— 勾选集 ∩ 已建图谱的库,按挂载顺序。
+ *
+ * 取消勾选的库、以及勾了但没建图的库都不算。
+ *
+ * 字段缺失(旧后端 / 版本 skew)时拿不到「哪几个带图」这份分解,退回聚合布尔:为假一个
+ * 都不算,为真则按勾选集作答 —— 勾选状态是浏览器自己的,不受 skew 影响,所以退化路径
+ * 仍然不会点名一个本轮不参与的库,且**只会比旧判据更保守**,不会凭空多放行一次。
+ */
+export function borrowedKgBases(
+  notebook: NotebookSummary | null,
+  selectedBaseNotebookIds: readonly string[],
+): NotebookRef[] {
+  const mounted = notebook?.base_notebooks ?? [];
+  const selected = new Set(selectedBaseNotebookIds);
+  const decomposition = notebook?.base_kg_notebook_ids;
+  if (decomposition === undefined) {
+    return notebook?.base_kg_available === true
+      ? mounted.filter((base) => selected.has(base.id))
+      : [];
+  }
+  const withKg = new Set(decomposition);
+  return mounted.filter((base) => selected.has(base.id) && withKg.has(base.id));
+}
+
+
+/** 「将借用参考库「…」推理」这句话里该点名的库名 —— 只有真会被借用的那几个。 */
+export function borrowedKgBaseNames(
+  notebook: NotebookSummary | null,
+  selectedBaseNotebookIds: readonly string[],
+): string[] {
+  return borrowedKgBases(notebook, selectedBaseNotebookIds).map((base) => base.name);
+}
+
+
+/**
+ * 严格推理(深入分析 / 知识图谱)本轮能否取到图谱证据:
+ * 本笔记本自己已建图谱,**或**本次勾选的参考库里有带图的。
+ */
+export function kgAvailableForScope(
+  notebook: NotebookSummary | null,
+  selectedBaseNotebookIds: readonly string[],
+): boolean {
+  return notebook?.kg_ready === true
+    || borrowedKgBases(notebook, selectedBaseNotebookIds).length > 0;
+}
+
+
+/**
+ * 取不到图谱,**只是因为已建图谱的参考库这次都没勾选**吗?
+ *
+ * 上面那道门开始按勾选集拦人之后,这一半就必须分得出来:两种情形的出路差着真金白银。
+ * 「一个带图的参考库都没挂」的出路确实是为本笔记本整理一次知识图谱(整库的模型调用);
+ * 「挂了、只是这次没勾」的出路是把那个勾点回来。不分开就会在用户只需点回一个复选框
+ * 的时候,劝他去跑一次整库整理。
+ */
+export function kgBlockedByBaseScope(
+  notebook: NotebookSummary | null,
+  selectedBaseNotebookIds: readonly string[],
+): boolean {
+  if (kgAvailableForScope(notebook, selectedBaseNotebookIds)) return false;
+  const mounted = new Set((notebook?.base_notebooks ?? []).map((base) => base.id));
+  const decomposition = notebook?.base_kg_notebook_ids;
+  if (decomposition === undefined) {
+    // skew:只知道「挂载的库里有图」,不知道是哪几个。这一支只影响措辞,判不准也仅仅
+    // 是少给一句更贴切的指路,不会放行或拦下任何模式。
+    return notebook?.base_kg_available === true && mounted.size > 0;
+  }
+  return decomposition.some((id) => mounted.has(id));
 }

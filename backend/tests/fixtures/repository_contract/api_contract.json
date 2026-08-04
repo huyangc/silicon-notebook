@@ -5648,6 +5648,13 @@
               "title": "Base Kg Available",
               "type": "boolean"
             },
+            "base_kg_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Base Kg Notebook Ids",
+              "type": "array"
+            },
             "base_notebooks": {
               "items": {
                 "$ref": "#/components/schemas/NotebookRef"
@@ -18637,6 +18644,7 @@
       "access_scope": "",
       "ask_available": true,
       "base_kg_available": false,
+      "base_kg_notebook_ids": [],
       "base_notebooks": [],
       "counts": {
         "cases": 0,

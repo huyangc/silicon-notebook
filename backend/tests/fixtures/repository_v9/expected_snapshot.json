@@ -346,6 +346,7 @@
       "access_scope": "private",
       "ask_available": true,
       "base_kg_available": false,
+      "base_kg_notebook_ids": [],
       "base_notebooks": [],
       "counts": {
         "cases": 0,

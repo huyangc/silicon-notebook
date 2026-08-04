@@ -48,6 +48,15 @@ export type NotebookSummary = {
   kg_ready?: boolean;
   kg_building?: boolean;
   base_kg_available?: boolean;
+  /**
+   * `base_kg_available` 的**分解**:上面那批挂载的参考库里,**哪几个**已建知识图谱。
+   *
+   * 参考库现在可以按库取消勾选,而聚合布尔分不出「这次勾选的库里有没有带图的」——
+   * 本库无图、又恰好取消勾选了唯一带图的那个库时,读聚合布尔会放行一个这轮根本取不到
+   * 图谱的模式,还会点名一个本轮不参与的库。读法见 ask-availability 的
+   * `kgAvailableForScope` / `borrowedKgBaseNames`,一律不要在别处重算。
+   */
+  base_kg_notebook_ids?: string[];
   base_notebooks?: NotebookRef[];
   // 该 notebook 能否在任一模式下产出有据回答(后端权威计算:可见来源/任意 chunk[含
   // knowhow 格子]/已建 KG/参考库有 KG/confirmed memory 任一即真)。仅单库 get() 精确

@@ -157,10 +157,18 @@ class NotebookSummaryQuery:
 
     def mounted_bases(
         self, notebook_id: str, db: "object | None" = None
-    ) -> "tuple[list[NotebookRef], bool]":
-        """(参考库列表, 是否任一有 KG) —— 一次查询同时供 NotebookSummary 的
-        base_notebooks 与 base_kg_available,避免每条 summary 各查一次。
-        未挂载 → ([], False)。"""
+    ) -> "tuple[list[NotebookRef], list[str]]":
+        """(参考库列表, 其中**已建 KG 的库 id**) —— 一次查询同时供 NotebookSummary 的
+        base_notebooks、base_kg_notebook_ids 与 base_kg_available,避免每条 summary 各查
+        一次。未挂载 → ([], [])。
+
+        第二项过去是 `any(has_kg)` 后的单个布尔;现在返回那批 id 本身,
+        `base_kg_available` 退化成 `bool(...)`,取值逐字不变(空列表 falsy、非空 truthy),
+        而前端得以按「本次勾选集 ∩ 带图库」判定严格推理是否真的取得到图。
+
+        零新增查询:`mounted_bases_row` 的**每一行本来就带 has_kg**(见两侧 QueryStore 的
+        SQL:`EXISTS(... knowledge_objects ... ko.notebook_id = b.id) AS has_kg`),这里
+        只是不再把它 any(...) 掉。"""
         if db is not None:
             rows = self.queries.mounted_bases_row(db, notebook_id)
         else:
@@ -170,7 +178,7 @@ class NotebookSummaryQuery:
             NotebookRef(id=r["id"], name=r["name"], tier=r["tier"] or "personal")
             for r in rows
         ]
-        return (refs, any(bool(r["has_kg"]) for r in rows))
+        return (refs, [str(r["id"]) for r in rows if bool(r["has_kg"])])
 
     def from_row(
         self,
@@ -198,7 +206,9 @@ class NotebookSummaryQuery:
             except (json.JSONDecodeError, TypeError):
                 return []
 
-        base_refs, base_has_kg = self.mounted_bases(row["id"], connection)
+        # 一次读取,两种投影:布尔 base_kg_available 与它的分解 base_kg_notebook_ids。
+        # 自洽(非空 ⟺ 为真)因此是构造性的 —— 不存在两个独立求值的机会。
+        base_refs, base_kg_ids = self.mounted_bases(row["id"], connection)
         return NotebookSummary(
             id=row["id"],
             name=row["name"],
@@ -214,7 +224,8 @@ class NotebookSummaryQuery:
             access_scope=row["access_scope"] if "access_scope" in keys else "",
             tier=row["tier"] if "tier" in keys else "personal",
             kg_ready=self.has_kg(connection, row["id"]),
-            base_kg_available=base_has_kg,
+            base_kg_available=bool(base_kg_ids),
+            base_kg_notebook_ids=base_kg_ids,
             base_notebooks=base_refs,
             kg_pending_sources=self.visible_pending_kg_sources(
                 connection, row["id"]

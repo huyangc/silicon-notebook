@@ -22,7 +22,7 @@ import {
   localScopeIsEmpty,
   removeSourceFromSelection,
   retrievalScopeSummary,
-  selectedBaseCount,
+  selectedBaseIds,
   selectedSourceCount,
   sourceIsSelected,
   sourceScopePayload,
@@ -176,7 +176,13 @@ import {
   intentUnderstoodStep,
   replaceLastIntentStep,
 } from "./ask-intent-trace";
-import { hasLocalEvidence, isAskBlocked } from "./ask-availability";
+import {
+  borrowedKgBaseNames,
+  hasLocalEvidence,
+  isAskBlocked,
+  kgAvailableForScope,
+  kgBlockedByBaseScope,
+} from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
@@ -2216,7 +2222,13 @@ export default function Home() {
     [mountedBases],
   );
   const hasMountedBase = mountedBases.length > 0;
-  const selectedBaseNotebookCount = selectedBaseCount(baseScopeSelection, mountedBaseIds);
+  // 本轮真正参与检索的参考库 id。计数由它派生 —— 「勾了几个」与「勾了哪几个」出自
+  // 同一次求值,不可能各说各的(严格推理的可用性判定读的正是这一份)。
+  const selectedBaseNotebookIds = useMemo(
+    () => selectedBaseIds(baseScopeSelection, mountedBaseIds),
+    [baseScopeSelection, mountedBaseIds],
+  );
+  const selectedBaseNotebookCount = selectedBaseNotebookIds.length;
   // 真机事故（本次改动的起因）：勾定单篇文章提问，16 条引用全部来自那个 84 篇论文的
   // 参考库 —— 因为参考库当时无条件全量参与。所以「范围为空」必须**两维同时**为空
   // 才算无得可搜；把参考库当成恒真的兜底，正是那条 bug 的翻版。
@@ -2338,7 +2350,22 @@ export default function Home() {
     if (chatMode === "ask" && !wasAsk) revalidateAskAvailability();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatMode]);
-  const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
+  // 严格推理(深入分析 / 知识图谱)本轮取不取得到图谱。判据必须是「本库有图 **或**
+  // 本次勾选的参考库里有带图的」——读聚合的 base_kg_available 会在「本库无图 + 唯一
+  // 带图的参考库被取消勾选」时放行一个这轮根本搜不到图的模式(codex #438 R2)。后端的
+  // 知识图谱可用性闸早已按库维度收窄,界面不能比它宽。判据只有 kgAvailableForScope
+  // 一处实现,别在这里另写一份。
+  const kgAvailable = kgAvailableForScope(currentNotebook, selectedBaseNotebookIds);
+  // 「将借用参考库「…」推理」该点名谁:同一条判据的名称版。过去这里 join 的是**全部
+  // 挂载库名**,会当着用户的面点名一个这次不参与、或压根没建图的库。
+  const borrowedBaseNames = useMemo(
+    () => borrowedKgBaseNames(currentNotebook, selectedBaseNotebookIds),
+    [currentNotebook, selectedBaseNotebookIds],
+  );
+  // 上面那道门开始按勾选集拦人之后,「取不到图谱」有了两种成因,出路差着真金白银:
+  // 挂了带图的参考库、只是这次没勾 → 把勾点回来即可;一个都没挂 → 才真需要为本笔记本
+  // 整理一次图谱(整库的模型调用)。不分开就会在只需点回一个复选框时劝用户去跑整理。
+  const kgBlockedByScope = kgBlockedByBaseScope(currentNotebook, selectedBaseNotebookIds);
   const currentKgBuildView = kgBuildPresentation(
     currentNotebook?.kg_build,
     currentNotebook?.kg_pending_sources ?? 0,
@@ -5934,27 +5961,37 @@ export default function Home() {
                       </span>
                     )}
                     {groupOf(askMode) === "strict" && !kgAvailable && (
-                      <span className="mode-hint">
-                        {`该笔记本尚无知识图谱，${strictLabel}需先整理`}
-                        <button
-                          type="button"
-                          className="mode-engine"
-                          style={{ marginLeft: 6 }}
-                          disabled={buildingKg || asking || sessionLoading}
-                          onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
-                        >
-                          {buildingKg ? "整理中…" : "整理知识图谱"}
-                        </button>
-                      </span>
+                      kgBlockedByScope ? (
+                        // 出路是把勾选点回来,不是花钱整理一次整库图谱 —— 这一支
+                        // 刻意不给「整理知识图谱」按钮。
+                        <span className="mode-hint">
+                          {`已整理知识图谱的参考库这次都没勾选，${strictLabel}取不到图谱；在来源面板重新勾选即可`}
+                        </span>
+                      ) : (
+                        <span className="mode-hint">
+                          {`该笔记本尚无知识图谱，${strictLabel}需先整理`}
+                          <button
+                            type="button"
+                            className="mode-engine"
+                            style={{ marginLeft: 6 }}
+                            disabled={buildingKg || asking || sessionLoading}
+                            onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
+                          >
+                            {buildingKg ? "整理中…" : "整理知识图谱"}
+                          </button>
+                        </span>
+                      )
                     )}
                     {shouldShowBorrowedBaseHint({
                       strict: groupOf(askMode) === "strict",
                       kgAvailable,
-                      baseKgAvailable: Boolean(currentNotebook?.base_kg_available),
+                      // 两个参考库维度的入参都按**本轮勾选集**给:借用的是这次真的
+                      // 参与、且已建图谱的那几个库,不是「挂了几个」。
+                      baseKgAvailable: borrowedBaseNames.length > 0,
                       kgReady: Boolean(currentNotebook?.kg_ready),
-                      baseCount: currentNotebook?.base_notebooks?.length ?? 0,
+                      baseCount: selectedBaseNotebookCount,
                     }) && (
-                      <span className="chat-hint">本笔记本尚无知识图谱，将借用参考库「{currentNotebook?.base_notebooks?.map((b) => b.name).join("、")}」推理</span>
+                      <span className="chat-hint">本笔记本尚无知识图谱，将借用参考库「{borrowedBaseNames.join("、")}」推理</span>
                     )}
                   </div>
                 </AskComposer>

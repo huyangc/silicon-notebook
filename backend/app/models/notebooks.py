@@ -76,9 +76,29 @@ class NotebookSummary(BaseModel):
     # 回填，镜像 kg_building 的 wiring）。重启即 False——补抽本身幂等可重触发。
     paper_meta_backfilling: bool = False
     # 本 notebook 挂载的参考库中是否有任一已建 KG。即便本 notebook 无图,挂了有图的
-    # 参考库也可进行严格推理(reasoning/graph)。前端门控:requiresKg → (kg_ready 或
-    # base_kg_available)。未挂载 → False。
+    # 参考库也可进行严格推理(reasoning/graph)。未挂载 → False。
     base_kg_available: bool = False
+    # 上面那个聚合布尔的**分解**:挂载的参考库里,**哪几个**已建 KG。
+    #
+    # 存在的理由:参考库现在可以按库取消勾选,而 base_kg_available 是 any(...) 之后的
+    # 单个布尔,分不出「这次勾选的库里有没有带图的」。本库无图、用户又恰好取消勾选了
+    # 唯一带图的那个参考库时,聚合布尔仍为真——前端门控(requiresKg)会放行一个这轮
+    # 根本取不到图的模式,「将借用参考库《X》推理」还会点名一个本轮不参与的库。后端的
+    # KG 可用性闸早已按库维度收窄(见 AGENTS.md「参考库维度与 restricted 正交」),
+    # 界面必须能做同样的判断,故把那批 id 原样下发。
+    #
+    # 零新增查询:mounted_bases_row 的**每一行本来就带 has_kg**,base_kg_available 只是
+    # 把它 any(...) 掉了;这里带出的是同一批行的另一种投影。
+    #
+    # ⚠ 与 base_kg_available 必须**自洽**:非空 ⟺ 为真。两者出自同一次读取的同一批行,
+    # 因而构造性成立(test_notebook_ask_availability 反向钉住)。回填路径也与
+    # base_kg_available **逐字相同**(都在 from_row 里算,故列表投影同样有值)——它不是
+    # 谁的补充信号,而是同一份事实的两种形状,分叉即矛盾。
+    #
+    # ⚠ 刻意**不**放在 NotebookRef 上:那个模型同时是 /notebooks/{id}/mountable 的响应
+    # 模型、也是 MountedBase 的基类,那两处并不计算这个标志,加上去等于在两个活端点上
+    # 永久下发一个恒假字段。
+    base_kg_notebook_ids: List[str] = Field(default_factory=list)
     # 本 notebook 挂载的参考库列表(0..N)。基准库不再全局唯一,也不再隐式参与检索。
     base_notebooks: List[NotebookRef] = Field(default_factory=list)
     # 该 notebook 在**任一可用问答模式下能否产出有据回答**:有可见来源、或任意 chunk
