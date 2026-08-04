@@ -135,6 +135,39 @@ class SourceStore:
             ).fetchall()
         return [row["id"] for row in rows]
 
+    def visible_source_scope_snapshot(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> tuple[list[str], int]:
+        """Validate compact selected ids and count the universe in one statement."""
+        requested = list(dict.fromkeys(str(value) for value in source_ids if value))
+        with self.database.connect() as connection:
+            if not requested:
+                total = int(connection.execute(
+                    "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s "
+                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+                    (notebook_id,),
+                ).fetchone()["c"])
+                return [], total
+            if len(requested) > self.IN_CHUNK:
+                universe = [str(row["id"]) for row in connection.execute(
+                    "SELECT id FROM sources WHERE notebook_id=%s "
+                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id",
+                    (notebook_id,),
+                ).fetchall()]
+                visible = set(universe)
+                return [value for value in requested if value in visible], len(universe)
+            bind_slots = ",".join("%s" for _ in requested)
+            rows = connection.execute(
+                "SELECT id, (SELECT COUNT(*) FROM sources "
+                f"WHERE notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE}) AS visible_count "
+                "FROM sources WHERE notebook_id=%s "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} AND id IN ({bind_slots})",
+                (notebook_id, notebook_id, *requested),
+            ).fetchall()
+            visible = {str(row["id"]) for row in rows}
+            total = int(rows[0]["visible_count"]) if rows else 0
+        return [source_id for source_id in requested if source_id in visible], total
+
     def list_sources(self, notebook_id: str) -> list[SourceSummary]:
         with self.database.connect() as connection:
             rows = connection.execute(

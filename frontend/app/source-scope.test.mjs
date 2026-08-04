@@ -45,3 +45,36 @@ test("all unchecked normalizes to an explicit empty include scope", () => {
     source_ids: [],
   });
 });
+
+test("a complete visible universe uses compact include when only one source remains", () => {
+  const selection = {
+    allSelected: true,
+    ids: new Set(["s1", "s2", "s3"]),
+  };
+  assert.deepEqual(sourceScopePayload(selection, 4, ["s1", "s2", "s3", "s4"]), {
+    mode: "include",
+    source_ids: ["s4"],
+  });
+});
+
+test("a complete visible universe uses compact exclude when almost all are included", () => {
+  const selection = {
+    allSelected: false,
+    ids: new Set(["s1", "s2", "s3"]),
+  };
+  assert.deepEqual(sourceScopePayload(selection, 4, ["s1", "s2", "s3", "s4"]), {
+    mode: "exclude",
+    source_ids: ["s4"],
+  });
+});
+
+test("a paged universe preserves the known compact representation", () => {
+  const selection = {
+    allSelected: false,
+    ids: new Set(["s7"]),
+  };
+  assert.deepEqual(sourceScopePayload(selection, 10_000, ["s7"]), {
+    mode: "include",
+    source_ids: ["s7"],
+  });
+});

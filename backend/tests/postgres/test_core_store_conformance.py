@@ -1297,6 +1297,41 @@ def test_bounded_visible_source_identity_rows_match_sqlite_semantics(
     assert "source_type" in index["indexdef"]
 
 
+def test_compact_source_scope_snapshot_matches_sqlite_semantics(
+    core_stores: CoreStores,
+):
+    owner = core_stores.identity.create_user("v00987654", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Compact source scope"), owner.id
+    )
+    for source_id, source_type in (
+        ("src-compact-a", "pdf"),
+        ("src-compact-b", "markdown"),
+        ("src-compact-memory", "memory"),
+    ):
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash="hash",
+            summary="",
+            doc_type="",
+        )
+
+    assert core_stores.sources.visible_source_scope_snapshot(
+        notebook_id, ["src-compact-b", "src-foreign"]
+    ) == (["src-compact-b"], 2)
+    assert core_stores.sources.visible_source_scope_snapshot(
+        notebook_id, []
+    ) == ([], 2)
+
+
 def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(
     core_stores: CoreStores,
 ):

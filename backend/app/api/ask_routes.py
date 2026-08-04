@@ -54,19 +54,28 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
     """
     if scope is None:
         return None
-    universe = repo.all_visible_source_ids(notebook.id)
-    visible = set(universe)
-    if any(source_id not in visible for source_id in scope.source_ids):
-        raise user_error(422, "检索范围包含不属于当前笔记本的来源")
     if scope.mode == "include":
         selected = list(scope.source_ids)
+        visible_selected, visible_count = repo.visible_source_scope_snapshot(
+            notebook.id, selected
+        )
+        if len(visible_selected) != len(selected):
+            raise user_error(422, "检索范围包含不属于当前笔记本的来源")
+        narrowed = len(selected) != visible_count
     else:
+        # Legacy/browser exclude scopes still need their complement frozen to
+        # an explicit include-list. Compact few-source requests use ``include``
+        # and never enter this whole-universe compatibility path.
+        universe = repo.all_visible_source_ids(notebook.id)
+        visible = set(universe)
+        if any(source_id not in visible for source_id in scope.source_ids):
+            raise user_error(422, "检索范围包含不属于当前笔记本的来源")
         excluded = set(scope.source_ids)
         selected = [
             source_id for source_id in universe
             if source_id not in excluded
         ]
-    narrowed = set(selected) != visible
+        narrowed = bool(excluded)
     resolved = SourceScope(
         mode="include",
         source_ids=selected,

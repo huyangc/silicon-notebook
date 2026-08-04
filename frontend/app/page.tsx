@@ -2199,6 +2199,9 @@ export default function Home() {
   const currentSourceScope = sourceScopePayload(
     sourceScopeSelection,
     notebookSourceTotal,
+    sourceQuery.trim() === "" && sources.length === notebookSourceTotal
+      ? sources.map((source) => source.id)
+      : undefined,
   );
   // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
   // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。

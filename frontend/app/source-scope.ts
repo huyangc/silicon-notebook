@@ -45,9 +45,27 @@ export function selectedSourceCount(
 export function sourceScopePayload(
   selection: SourceScopeSelection,
   total: number,
+  visibleSourceIds?: readonly string[],
 ): SourceScopePayload {
-  if (selectedSourceCount(selection, total) === 0) {
+  const selectedCount = selectedSourceCount(selection, total);
+  if (selectedCount === 0) {
     return { mode: "include", source_ids: [] };
+  }
+  const completeUniverse = visibleSourceIds
+    && new Set(visibleSourceIds).size === total
+    ? Array.from(new Set(visibleSourceIds))
+    : null;
+  if (completeUniverse && selection.allSelected) {
+    const included = completeUniverse.filter((sourceId) => !selection.ids.has(sourceId));
+    if (included.length < selection.ids.size) {
+      return { mode: "include", source_ids: included };
+    }
+  }
+  if (completeUniverse && !selection.allSelected) {
+    const excluded = completeUniverse.filter((sourceId) => !selection.ids.has(sourceId));
+    if (excluded.length < selection.ids.size) {
+      return { mode: "exclude", source_ids: excluded };
+    }
   }
   return {
     mode: selection.allSelected ? "exclude" : "include",
