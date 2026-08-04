@@ -73,13 +73,23 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
         raise user_error(422, "检索范围包含不属于当前笔记本的来源")
     if scope.mode == "include":
         selected = list(scope.source_ids)
+        # counts["sources"] is visible_source_count -- the same predicate
+        # all_visible_source_ids uses -- and rides along on the summary the
+        # route already loaded, so measuring "did this narrow anything?" costs
+        # no extra round trip (efficiency is a first-class constraint here).
+        universe = int(notebook.counts.get("sources", 0))
     else:
         excluded = set(scope.source_ids)
+        all_ids = repo.all_visible_source_ids(notebook.id)
         selected = [
-            source_id for source_id in repo.all_visible_source_ids(notebook.id)
-            if source_id not in excluded
+            source_id for source_id in all_ids if source_id not in excluded
         ]
-    return SourceScope(mode="include", source_ids=selected)
+        universe = len(all_ids)
+    # Recomputed unconditionally: a client-supplied `narrowed` is never trusted.
+    return SourceScope(
+        mode="include", source_ids=selected,
+        narrowed=len(selected) < universe,
+    )
 
 
 def _validate_base_scope(notebook: NotebookSummary,
@@ -133,7 +143,13 @@ def _validate_base_scope(notebook: NotebookSummary,
     else:
         excluded = submitted
         selected = [ref.id for ref in notebook.base_notebooks if ref.id not in excluded]
-    return BaseNotebookScope(mode="include", notebook_ids=selected)
+    # Recomputed unconditionally (a client-supplied `narrowed` is never
+    # trusted). The mount roster is already on the summary, so this is pure
+    # arithmetic -- no round trip.
+    return BaseNotebookScope(
+        mode="include", notebook_ids=selected,
+        narrowed=len(selected) < len(valid_ids),
+    )
 
 
 def _require_non_empty_scope(

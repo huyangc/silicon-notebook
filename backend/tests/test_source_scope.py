@@ -17,6 +17,7 @@ from app.services.retrieval_service import RetrievalService
 from app.services.source_scope import (
     ActiveSourceScope,
     current_base_scope_payload,
+    current_source_scope,
     current_source_scope_payload,
     evidence_json_allowed,
     filter_retrieval_items,
@@ -54,6 +55,43 @@ def test_omitted_or_default_exclude_scope_preserves_historical_behavior():
     assert filter_retrieval_items("nb", "chunk", chunks) == chunks
     with source_scope_context("nb", SourceScope(mode="exclude", source_ids=[])):
         assert filter_retrieval_items("nb", "chunk", chunks) == chunks
+
+
+def test_direct_construction_without_narrowed_matches_pre_field_behavior():
+    """Fallback-path guarantee for the `narrowed` field itself: a caller that
+    constructs `ActiveSourceScope` directly -- bypassing the API boundary
+    that computes `source_narrowed`/`base_narrowed` (e.g. a direct
+    service-layer call, or any caller that never went through
+    `_validate_source_scope`/`_validate_base_scope`) -- must observe EXACTLY
+    the old value-driven `restricted`/`base_restricted` judgment, byte-for-
+    byte unchanged by this field's introduction. `source_narrowed` /
+    `base_narrowed` default to `None` and must never be guessed."""
+    # mode="include" always meant restricted, regardless of the id list.
+    assert ActiveSourceScope(
+        notebook_id="nb", mode="include", source_ids=frozenset(),
+    ).restricted is True
+    # mode="exclude" + empty ids is the historical "all sources" shape.
+    assert ActiveSourceScope(
+        notebook_id="nb", mode="exclude", source_ids=frozenset(),
+    ).restricted is False
+    # mode="exclude" + a non-empty id list still reads as restricted (shape-
+    # based judgment predates this field and must be untouched).
+    assert ActiveSourceScope(
+        notebook_id="nb", mode="exclude", source_ids=frozenset({"s1"}),
+    ).restricted is True
+    # Same three shapes, mirrored on the base-library dimension.
+    assert ActiveSourceScope(
+        notebook_id="nb", mode="exclude", source_ids=frozenset(),
+        base_mode="include", base_notebook_ids=frozenset(),
+    ).base_restricted is True
+    assert ActiveSourceScope(
+        notebook_id="nb", mode="exclude", source_ids=frozenset(),
+        base_mode="exclude", base_notebook_ids=frozenset(),
+    ).base_restricted is False
+    assert ActiveSourceScope(
+        notebook_id="nb", mode="exclude", source_ids=frozenset(),
+        base_mode="exclude", base_notebook_ids=frozenset({"b1"}),
+    ).base_restricted is True
 
 
 def test_include_scope_filters_active_chunks_and_kg_evidence_but_keeps_base():
@@ -208,7 +246,8 @@ def test_validate_source_scope_no_longer_raises_409_on_its_own():
         _ScopeRepo([], 0), _notebook(),
         SourceScope(mode="include", source_ids=[]),
     )
-    assert resolved == SourceScope(mode="include", source_ids=[])
+    # universe = notebook.counts["sources"] = 0, selected = [] -> not narrowed.
+    assert resolved == SourceScope(mode="include", source_ids=[], narrowed=False)
 
 
 def test_empty_local_scope_requires_a_mounted_base():
@@ -238,7 +277,33 @@ def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
         _notebook(),
         SourceScope(mode="exclude", source_ids=["s2"]),
     )
-    assert resolved == SourceScope(mode="include", source_ids=["s1", "s3"])
+    # 2 of 3 visible sources selected -> a real narrowing.
+    assert resolved == SourceScope(
+        mode="include", source_ids=["s1", "s3"], narrowed=True
+    )
+
+
+def test_real_narrowing_of_local_sources_is_restricted():
+    """The flip side of the default-full-select fix: a genuine subset
+    selection (``narrowed=True``, exactly as ``_validate_source_scope`` would
+    freeze it) must still gate PPR/private Memory/community reports/corpus
+    profile. Making the full-select case unrestricted must not accidentally
+    make EVERY local-source selection unrestricted."""
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["s1"], narrowed=True),
+    ):
+        assert source_scope_restricted() is True
+
+
+def test_real_narrowing_of_base_libraries_is_restricted():
+    """Base-library mirror of the test above."""
+    with source_scope_context(
+        "nb", None,
+        BaseNotebookScope(mode="include", notebook_ids=["b1"], narrowed=True),
+    ):
+        scope = current_source_scope()
+        assert scope is not None
+        assert scope.base_restricted is True
 
 
 def test_checkbox_ceiling_intersects_model_allow_list_and_leaves_base_alone():
@@ -344,7 +409,10 @@ def test_validate_base_scope_freezes_exclude_to_include():
     resolved = _validate_base_scope(
         notebook, BaseNotebookScope(mode="exclude", notebook_ids=["b2"])
     )
-    assert resolved == BaseNotebookScope(mode="include", notebook_ids=["b1"])
+    # 1 of 2 mounted libraries selected -> a real narrowing.
+    assert resolved == BaseNotebookScope(
+        mode="include", notebook_ids=["b1"], narrowed=True
+    )
 
 
 def test_validate_base_scope_omitted_returns_none():
@@ -374,8 +442,9 @@ def test_validate_base_scope_exclude_nothing_freezes_every_mounted_library():
     resolved = _validate_base_scope(
         notebook, BaseNotebookScope(mode="exclude", notebook_ids=[])
     )
+    # "exclude nothing" selects every mounted library -> not narrowed.
     assert resolved == BaseNotebookScope(
-        mode="include", notebook_ids=["b1", "b2"]
+        mode="include", notebook_ids=["b1", "b2"], narrowed=False
     )
 
 
@@ -458,7 +527,11 @@ def test_base_only_submission_with_local_sources_present_is_not_409():
         BaseNotebookScope(mode="include", notebook_ids=[]),
     )
     assert resolved_source is None
-    assert resolved_base == BaseNotebookScope(mode="include", notebook_ids=[])
+    # Explicit include:[] selects 0 of the 1 mounted library -> a real
+    # narrowing (unlike exclude:[], which means "exclude nothing").
+    assert resolved_base == BaseNotebookScope(
+        mode="include", notebook_ids=[], narrowed=True
+    )
 
 
 def test_scoping_neither_dimension_is_never_rejected_for_emptiness():
@@ -480,8 +553,16 @@ def test_deselecting_only_bases_with_local_sources_present_is_not_409():
         SourceScope(mode="include", source_ids=["s1"]),
         BaseNotebookScope(mode="include", notebook_ids=[]),
     )
-    assert resolved_source == SourceScope(mode="include", source_ids=["s1"])
-    assert resolved_base == BaseNotebookScope(mode="include", notebook_ids=[])
+    # notebook.counts["sources"] is unset (0) on this fixture, so 1 selected
+    # id never reads as "less than the universe" -- not narrowed.
+    assert resolved_source == SourceScope(
+        mode="include", source_ids=["s1"], narrowed=False
+    )
+    # Explicit include:[] selects 0 of the 1 mounted library -> a real
+    # narrowing (unlike exclude:[], which means "exclude nothing").
+    assert resolved_base == BaseNotebookScope(
+        mode="include", notebook_ids=[], narrowed=True
+    )
 
 
 def test_base_only_scope_still_filters_candidates_at_the_result_boundary():
@@ -566,12 +647,15 @@ def test_base_only_scope_never_fabricates_a_local_scope_payload():
     `include:[every visible source]`, whose `restricted` is True -- silently
     disabling private Memory, PPR, community reports and the corpus profile for
     a user who only unchecked a reference library (R1 across persistence)."""
+    # All scopes below are constructed directly, bypassing
+    # _validate_source_scope/_validate_base_scope -- narrowed is therefore
+    # always None (not computed), never a guessed True/False.
     with source_scope_context(
         "nb", None, BaseNotebookScope(mode="include", notebook_ids=["b1"]),
     ):
         assert current_source_scope_payload() is None
         assert current_base_scope_payload() == {
-            "mode": "include", "notebook_ids": ["b1"]
+            "mode": "include", "notebook_ids": ["b1"], "narrowed": None
         }
     # Symmetric: a local-only run must not fabricate a base payload either --
     # persisting one would freeze the libraries mounted at that instant and
@@ -579,7 +663,7 @@ def test_base_only_scope_never_fabricates_a_local_scope_payload():
     with source_scope_context("nb", SourceScope(mode="include", source_ids=["s1"])):
         assert current_base_scope_payload() is None
         assert current_source_scope_payload() == {
-            "mode": "include", "source_ids": ["s1"]
+            "mode": "include", "source_ids": ["s1"], "narrowed": None
         }
     # Both supplied -> both payloads round-trip.
     with source_scope_context(
@@ -587,10 +671,10 @@ def test_base_only_scope_never_fabricates_a_local_scope_payload():
         BaseNotebookScope(mode="exclude", notebook_ids=["b2"]),
     ):
         assert current_source_scope_payload() == {
-            "mode": "include", "source_ids": ["s1"]
+            "mode": "include", "source_ids": ["s1"], "narrowed": None
         }
         assert current_base_scope_payload() == {
-            "mode": "exclude", "notebook_ids": ["b2"]
+            "mode": "exclude", "notebook_ids": ["b2"], "narrowed": None
         }
 
 

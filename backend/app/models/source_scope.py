@@ -1,6 +1,32 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+# Server-computed truth carried on both scope models: did this selection
+# actually narrow anything, or is it the browser's default "everything is
+# checked"?
+#
+# It cannot be derived from ``mode``/the id list at consumption time. The API
+# boundary freezes every submitted scope into an explicit ``include`` snapshot
+# (so a source uploaded, or a library mounted, after the run started cannot
+# widen it -- see ``_validate_source_scope`` / ``_validate_base_scope``), which
+# makes ``mode`` **permanently** ``include`` and the historical
+# "``exclude`` + [] means all" branch unreachable over HTTP. Judging by shape
+# alone therefore reports every default request as narrowed, which silently
+# disables private Memory, whole conversation history, PPR, community reports
+# and the corpus profile for users who never narrowed anything (PR#426).
+#
+# ``None`` means "not computed" and makes the consumer fall back to the old
+# value-driven判据 -- direct service-layer callers construct scopes without a
+# repository and must keep behaving exactly as before.
+#
+# Clients may send this field; the API boundary ALWAYS recomputes and
+# overwrites it, so a forged value cannot widen or narrow a run.
+_NARROWED_FIELD = Field(
+    default=None,
+    description="Server-computed: whether this scope actually narrows the "
+                "notebook's full universe. Client-supplied values are ignored.",
+)
 
 
 class SourceScope(BaseModel):
@@ -15,6 +41,7 @@ class SourceScope(BaseModel):
 
     mode: Literal["include", "exclude"] = "exclude"
     source_ids: List[str] = Field(default_factory=list, max_length=10_000)
+    narrowed: Optional[bool] = _NARROWED_FIELD
 
     @field_validator("source_ids")
     @classmethod
@@ -49,6 +76,7 @@ class BaseNotebookScope(BaseModel):
 
     mode: Literal["include", "exclude"] = "exclude"
     notebook_ids: List[str] = Field(default_factory=list, max_length=10_000)
+    narrowed: Optional[bool] = _NARROWED_FIELD
 
     @field_validator("notebook_ids")
     @classmethod

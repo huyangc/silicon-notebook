@@ -255,3 +255,100 @@ def test_ask_intent_preview_opens_the_same_base_scope_ceiling_as_submission(
     )
     assert scope.base_notebook_ids == frozenset({base})
     assert scope.base_mode == "include"
+
+
+def test_default_full_select_via_full_http_entry_is_not_restricted(
+    tmp_path, monkeypatch
+):
+    """浏览器真实默认形态(两维都发 ``{mode:"exclude", ids:[]}``,即「全选」)经完整
+    ``/ask`` HTTP 入口后,``narrowed=False`` 必须让限定模式关闭。
+
+    这是本轮修复的核心场景:codex #431 把每个提交的范围冻结成显式 include 快照
+    (防止运行期间新增来源/挂载库扩大范围),但那也让 ``mode`` 恒为 ``include``。
+    在加 ``narrowed`` 字段之前,``restricted``/``base_restricted`` 只按 mode/id
+    的形状判断,于是默认全选也被判成「已收窄」,私有 Memory、多轮会话历史、PPR、
+    社区报告和语料画像全部被静默关掉。
+
+    通过桩替换 ``AskService.ask_chunk``(dispatch 目标,而非 ``ask`` 本身 ——
+    ``source_scope_context`` 在 ``AskService.ask`` 内部才进入,桩在 ``ask`` 上
+    会跳过整个 ContextVar 装配)在真实请求处理期间原地读取 ContextVar 状态。"""
+    from app.models.schemas import AskResponse
+    from app.services.source_scope import (
+        current_source_scope,
+        scoped_conversation_history,
+        source_scope_restricted,
+    )
+
+    client = _client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repo, nb)
+    service = repo._runtime.ask_service()
+    captured = {}
+
+    def probe_ask_chunk(notebook_id, payload, *, user_id, job_id="", cancel_event=None):
+        captured["restricted"] = source_scope_restricted()
+        scope = current_source_scope()
+        captured["base_restricted"] = (
+            scope.base_restricted if scope is not None else None
+        )
+        captured["history"] = scoped_conversation_history("prior")
+        # ask_current requires a non-empty answer_id to finish the durable
+        # job as "done" -- a bare probe stub otherwise trips
+        # "synchronous Ask completed without a durable answer".
+        return AskResponse(
+            conclusion="probe", conversation_id=payload.conversation_id or "",
+            answer_id="probe-answer",
+        )
+
+    monkeypatch.setattr(service, "ask_chunk", probe_ask_chunk, raising=False)
+
+    r = client.post(f"/api/notebooks/{nb}/ask", json={
+        "question": "q", "mode": "chunk",
+        "source_scope": {"mode": "exclude", "source_ids": []},
+        "base_scope": {"mode": "exclude", "notebook_ids": []},
+    })
+    assert r.status_code == 200
+    assert captured["restricted"] is False, (
+        "全选本地来源不得触发 restricted -- PPR/私有 Memory/社区报告/语料画像"
+        "不该被默认状态误关"
+    )
+    assert captured["base_restricted"] is False, "全选参考库同理"
+    assert captured["history"] == "prior", (
+        "全选不得清空多轮会话历史 -- 只有真收窄参考库才应清空"
+    )
+
+
+def test_default_full_select_still_produces_an_n_of_n_retrieval_scope_receipt(
+    tmp_path, monkeypatch
+):
+    """⚠ 与直觉相反但已核实为**当前设计**:浏览器全选也发一份显式载荷,后端据此
+    照常产出回执(``_scope_receipt`` 只在两个维度都完全没提交、即
+    ``resolved_source_scope is None and resolved_base_scope is None`` 时才返回
+    ``None`` —— 直连 API 省略两个字段的调用方才会撞到这条,浏览器请求恒不会)。
+
+    抑制这个零信息量的 "N/N" 回执是**前端**职责,不是后端的:见
+    ``frontend/app/answer-panel.tsx`` 里 ``narrowed = scope.local.selected <
+    scope.local.total || includedBases.length < scope.bases.length`` 那段客户端
+    判断,以及 ``frontend/app/answer-retrieval-scope.component.test.tsx`` 的
+    "两维都是全量时不渲染回执" 用例(该用例直接构造了一个 selected==total 的
+    ``retrieval_scope`` 来断言组件不渲染它,证明后端产出、前端抑制正是既有
+    契约)。本用例不走 probe stub(那会跳过 ``_save_answer`` 里实际挂载回执的
+    那一步),而是让 chunk 模式的真实请求走完全程。"""
+    client = _client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repo, nb)
+
+    r = client.post(f"/api/notebooks/{nb}/ask", json={
+        "question": "q", "mode": "chunk",
+        "source_scope": {"mode": "exclude", "source_ids": []},
+        "base_scope": {"mode": "exclude", "notebook_ids": []},
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["retrieval_scope"] == {
+        "local": {"selected": 1, "total": 1}, "bases": []
+    }

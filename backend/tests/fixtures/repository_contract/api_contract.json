@@ -1190,6 +1190,18 @@
               "title": "Mode",
               "type": "string"
             },
+            "narrowed": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Server-computed: whether this scope actually narrows the notebook's full universe. Client-supplied values are ignored.",
+              "title": "Narrowed"
+            },
             "notebook_ids": {
               "items": {
                 "type": "string"
@@ -8247,6 +8259,18 @@
               ],
               "title": "Mode",
               "type": "string"
+            },
+            "narrowed": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Server-computed: whether this scope actually narrows the notebook's full universe. Client-supplied values are ignored.",
+              "title": "Narrowed"
             },
             "source_ids": {
               "items": {

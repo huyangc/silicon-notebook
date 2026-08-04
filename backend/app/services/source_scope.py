@@ -48,9 +48,30 @@ class ActiveSourceScope:
     # would mean guessing.
     source_provided: bool = True
     base_provided: bool = True
+    # Server-computed "did this actually narrow anything?" carried down from the
+    # API boundary (see SourceScope.narrowed / BaseNotebookScope.narrowed).
+    #
+    # Needed because the boundary freezes every submitted scope into an explicit
+    # include snapshot -- necessary so a source uploaded (or library mounted)
+    # after the run started cannot widen it, and load-bearing for reports, whose
+    # frozen scope is persisted and re-applied at confirm and generate. But that
+    # freeze also makes `mode` permanently "include", so the shape-based test
+    # below reports EVERY browser request as restricted: the browser always
+    # sends a scope, even when everything is checked. That silently disabled
+    # private Memory, whole conversation history, PPR, community reports and the
+    # corpus profile for users who never narrowed anything (PR#426).
+    #
+    # None = not computed: direct service-layer callers build scopes without a
+    # repository and must keep the historical value-driven behavior exactly.
+    source_narrowed: bool | None = None
+    base_narrowed: bool | None = None
 
     @property
     def restricted(self) -> bool:
+        # Prefer the boundary's computed fact; fall back to shape only when it
+        # was never computed (direct service-layer construction).
+        if self.source_narrowed is not None:
+            return self.source_narrowed
         # exclude [] is the UI/default representation of "all local sources"
         # and must remain byte-for-byte compatible with the historical path.
         # Base-library selection is a SEPARATE dimension (see
@@ -65,6 +86,12 @@ class ActiveSourceScope:
 
     @property
     def base_restricted(self) -> bool:
+        # Symmetric with `restricted` above, and for the same reason: the
+        # browser's "all libraries checked" default is frozen into an explicit
+        # include snapshot, so shape alone cannot tell it apart from a real
+        # narrowing.
+        if self.base_narrowed is not None:
+            return self.base_narrowed
         return self.base_mode == "include" or bool(self.base_notebook_ids)
 
     def covers_notebook(self, notebook_id: str) -> bool:
@@ -117,6 +144,20 @@ def _scope_dict(scope: Any) -> dict[str, Any] | None:
     return dict(scope)
 
 
+def _narrowed_flag(raw: dict[str, Any] | None) -> bool | None:
+    """Read the boundary-computed narrowing fact, tolerating its absence.
+
+    Absent for scopes built before this field existed (a report's persisted
+    ``understanding`` from an earlier release) and for direct service-layer
+    construction -- both must keep the historical value-driven behavior, so
+    the answer there is ``None``, not ``False``.
+    """
+    if raw is None:
+        return None
+    value = raw.get("narrowed")
+    return None if value is None else bool(value)
+
+
 @contextmanager
 def source_scope_context(
     notebook_id: str, scope: Any, base_scope: Any = None
@@ -136,6 +177,11 @@ def source_scope_context(
         ),
         source_provided=raw is not None,
         base_provided=base_raw is not None,
+        # Rides along on the frozen scope itself, so it survives every hop the
+        # scope already survives -- including a report's persisted
+        # ``understanding`` contract, which is re-read at confirm and generate.
+        source_narrowed=_narrowed_flag(raw),
+        base_narrowed=_narrowed_flag(base_raw),
     )
     token = _CURRENT_SOURCE_SCOPE.set(current)
     try:
@@ -158,11 +204,25 @@ def current_source_scope_payload() -> dict[str, Any] | None:
     ``include:[every visible source]`` -- flipping ``restricted`` on for a run
     that only narrowed the base-library dimension. See the ``source_provided``
     comment on ``ActiveSourceScope``.
+
+    ``narrowed`` MUST ride along here too: this is precisely the hop the
+    ``source_narrowed``/``base_narrowed`` docstring above promises it
+    survives ("re-persisted by report_engine.prepare_intent ... and
+    re-frozen by _validate_source_scope on confirm"). Dropping it would
+    leave the report's ``understanding`` contract carrying an ambiguous
+    (missing) ``narrowed`` between ``prepare_intent``'s write and the next
+    ``_validate_source_scope``/``_validate_base_scope`` call, during which
+    a reader would fall back to the pre-fix shape-based judgment -- exactly
+    the PR#426 bug this field exists to close, reopened for one hop.
     """
     scope = current_source_scope()
     if scope is None or not scope.source_provided:
         return None
-    return {"mode": scope.mode, "source_ids": sorted(scope.source_ids)}
+    return {
+        "mode": scope.mode,
+        "source_ids": sorted(scope.source_ids),
+        "narrowed": scope.source_narrowed,
+    }
 
 
 def current_base_scope_payload() -> dict[str, Any] | None:
@@ -177,11 +237,21 @@ def current_base_scope_payload() -> dict[str, Any] | None:
     run never supplied a base scope: persisting a synthesised ``exclude:[]``
     would be re-frozen on confirm into ``include:[libraries mounted at that
     moment]``, silently locking a later-mounted reference library out of a
-    report the user never scoped."""
+    report the user never scoped.
+
+    ``narrowed`` carries through for the same reason as in
+    ``current_source_scope_payload`` above: this is the hop
+    ``base_narrowed``'s docstring names explicitly, and dropping it here
+    would reopen the PR#426 shape-based-restricted bug for the window
+    between ``prepare_intent``'s write and the next validation call."""
     scope = current_source_scope()
     if scope is None or not scope.base_provided:
         return None
-    return {"mode": scope.base_mode, "notebook_ids": sorted(scope.base_notebook_ids)}
+    return {
+        "mode": scope.base_mode,
+        "notebook_ids": sorted(scope.base_notebook_ids),
+        "narrowed": scope.base_narrowed,
+    }
 
 
 _CURRENT_SCOPE_RECEIPT: ContextVar[Any] = ContextVar(

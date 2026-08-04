@@ -693,8 +693,10 @@ def test_report_create_rejects_when_every_mounted_library_is_unchecked(
         },
     )
     assert ok.status_code == 200
+    # The single mounted library is explicitly selected -> not narrowed
+    # (selecting the whole universe isn't a narrowing).
     assert launched[-1][1]["base_scope"] == {
-        "mode": "include", "notebook_ids": [base_id]
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
     }
 
 
@@ -798,7 +800,10 @@ def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypat
     rid = created.json()["report_id"]
     repo = repository()
     after_create = repo.get_report(nb_id, rid)["understanding"]
-    assert after_create["base_scope"] == {"mode": "include", "notebook_ids": [base_id]}
+    # The single mounted library is explicitly selected -> not narrowed.
+    assert after_create["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
+    }
 
     # 计划任务:report_execution.start_plan 只经 ContextVar 传范围(它并不给
     # engine.run 传 source_scope/base_scope),所以 prepare_intent 的兜底读取
@@ -814,11 +819,15 @@ def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypat
 
     after_intent = repo.get_report(nb_id, rid)
     assert after_intent["status"] == "intent_ready"
+    # prepare_intent recomputes base_scope through the same freeze -- the
+    # single mounted library stays fully selected, so still not narrowed.
     assert after_intent["understanding"]["base_scope"] == {
-        "mode": "include", "notebook_ids": [base_id]
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
     }
+    # universe = notebook.counts["sources"] = 0 (no local sources on this
+    # fixture), selected = [] -> not narrowed.
     assert after_intent["understanding"]["source_scope"] == {
-        "mode": "include", "source_ids": []
+        "mode": "include", "source_ids": [], "narrowed": False
     }
 
     launched.clear()
@@ -828,10 +837,10 @@ def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypat
     )
     assert confirmed.status_code == 200
     assert launched[-1][1]["base_scope"] == {
-        "mode": "include", "notebook_ids": [base_id]
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
     }
     assert launched[-1][1]["intent_contract"]["base_scope"] == {
-        "mode": "include", "notebook_ids": [base_id]
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
     }
 
 
@@ -867,8 +876,10 @@ def test_report_base_scope_freezes_mount_set_at_create_time(client, monkeypatch)
     rid = created.json()["report_id"]
     repo = repository()
     after_create = repo.get_report(nb_id, rid)["understanding"]
+    # "exclude nothing" against the 1 library mounted at create time selects
+    # that whole (then-current) universe -> not narrowed.
     assert after_create["base_scope"] == {
-        "mode": "include", "notebook_ids": [base_id]
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
     }, "create 时必须把 exclude:[] 就地展开成当时挂载集的显式 include 快照,不能落 None"
 
     # 创建之后再挂一个新库 —— 已冻结的范围绝不能因此扩大。
@@ -889,12 +900,84 @@ def test_report_base_scope_freezes_mount_set_at_create_time(client, monkeypatch)
         json={"resolved_question": "q?", "answers": []},
     )
     assert confirmed.status_code == 200
+    # confirm re-validates the persisted scope against the notebook's
+    # CURRENT mount roster (now 2 libraries), so the frozen 1-library
+    # selection now genuinely covers less than the current universe --
+    # narrowed flips to True. This is the correct, intended reading: the
+    # run must treat itself as base_restricted so the newly-mounted library
+    # cannot silently join federated retrieval, exactly what the freeze
+    # exists to prevent.
     assert launched[-1][1]["base_scope"] == {
-        "mode": "include", "notebook_ids": [base_id]
+        "mode": "include", "notebook_ids": [base_id], "narrowed": True
     }, "confirm 之后新挂载的库不得混进已冻结的范围"
     after_intent = repo.get_report(nb_id, rid)["understanding"]
     assert after_intent["base_scope"] == {
-        "mode": "include", "notebook_ids": [base_id]
+        "mode": "include", "notebook_ids": [base_id], "narrowed": True
+    }
+
+
+def test_report_source_scope_freezes_visible_source_set_at_create_time(
+    client, monkeypatch
+):
+    """来源维度镜像上面的 ``test_report_base_scope_freezes_mount_set_at_create_time``:
+    ``exclude:[]``——浏览器"全选本地来源"的紧凑表示——必须在 create 时就把当时
+    可见的来源集合冻结成显式 include 快照并原样持久化,创建之后新上传的来源不得
+    静默参与这份报告(报告的范围创建时定格、跨 create → confirm → generate
+    持久化,与参考库维度同一份契约)。"""
+    from app.api.deps import repository
+
+    nb_id, _, launched = _scoped_client(client, monkeypatch)
+    upload1 = client.post(
+        f"/api/notebooks/{nb_id}/sources",
+        files=[("files", ("a.md", b"# corpus a", "text/markdown"))],
+    )
+    assert upload1.status_code == 200, upload1.text
+    first_id = upload1.json()[0]["id"]
+
+    created = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "q?",
+            "source_scope": {"mode": "exclude", "source_ids": []},
+        },
+    )
+    assert created.status_code == 200
+    rid = created.json()["report_id"]
+    repo = repository()
+    after_create = repo.get_report(nb_id, rid)["understanding"]
+    # "exclude nothing" against the 1 visible source at create time selects
+    # that whole (then-current) universe -> not narrowed.
+    assert after_create["source_scope"] == {
+        "mode": "include", "source_ids": [first_id], "narrowed": False
+    }, "create 时必须把 exclude:[] 就地展开成当时可见来源的显式 include 快照,不能落 None"
+
+    # 创建之后再上传一份来源 —— 已冻结的范围绝不能因此扩大。
+    upload2 = client.post(
+        f"/api/notebooks/{nb_id}/sources",
+        files=[("files", ("b.md", b"# corpus b", "text/markdown"))],
+    )
+    assert upload2.status_code == 200, upload2.text
+
+    understanding = repo.get_report(nb_id, rid)["understanding"]
+    understanding.update(resolved_question="q?", ambiguities=[], needs_clarification=False)
+    repo.update_report(nb_id, rid, status="intent_ready", understanding=understanding)
+
+    launched.clear()
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "q?", "answers": []},
+    )
+    assert confirmed.status_code == 200
+    # confirm re-validates the persisted scope against the notebook's CURRENT
+    # visible-source universe (now 2), so the frozen 1-source selection now
+    # genuinely covers less than the current universe -- narrowed flips to
+    # True, mirroring the base-library case above.
+    assert launched[-1][1]["source_scope"] == {
+        "mode": "include", "source_ids": [first_id], "narrowed": True
+    }, "confirm 之后新上传的来源不得混进已冻结的范围"
+    after_intent = repo.get_report(nb_id, rid)["understanding"]
+    assert after_intent["source_scope"] == {
+        "mode": "include", "source_ids": [first_id], "narrowed": True
     }
 
 
@@ -981,7 +1064,11 @@ def test_library_only_scope_never_becomes_restricted_across_persistence(
         )
 
     after_intent = repo.get_report(nb_id, rid)["understanding"]
-    assert after_intent["base_scope"] == {"mode": "include", "notebook_ids": []}
+    # Explicit include:[] against the 1 mounted library selects none of it
+    # -> a real narrowing (unlike exclude:[], "exclude nothing").
+    assert after_intent["base_scope"] == {
+        "mode": "include", "notebook_ids": [], "narrowed": True
+    }
     assert "source_scope" not in after_intent, (
         "凭空补出的本地范围会在确认时冻结成 include:[全部可见来源] 并翻成 restricted"
     )
