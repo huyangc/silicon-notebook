@@ -1,11 +1,13 @@
 from types import SimpleNamespace
 
+from app.core.config import Settings
+from app.services.ask_service import AskService
 from app.services.retrieval import RetrievedChunk, RetrievalSupport
 from app.services.retrieval_enrichment import BaselineProtectedEnrichmentService
+from app.services.report_engine import ReportEngine
 from app.services.source_graph_activation import SelectedSourceGraphActivationService
 from app.services.source_graph_rollout import SourceGraphRolloutDecision
 from app.services.source_scope import source_scope_context
-from app.core.config import Settings
 
 
 def _chunk(chunk_id: str, source_id: str) -> RetrievedChunk:
@@ -28,7 +30,7 @@ class _Events:
         self.rows.append(row)
 
 
-def _service(*, snapshot, ppr, primitives=None):
+def _service(*, snapshot, ppr, primitives=None, partitioned_ppr=None):
     settings = SimpleNamespace(
         selected_source_graph_attestation_path="",
         selected_source_graph_expected_model_json="",
@@ -48,11 +50,31 @@ def _service(*, snapshot, ppr, primitives=None):
             )
         ),
         online_ppr=SimpleNamespace(retrieve=lambda *_args, **_kwargs: ppr),
-        partitioned_ppr=SimpleNamespace(),
+        partitioned_ppr=partitioned_ppr or SimpleNamespace(),
         enrichment=BaselineProtectedEnrichmentService(),
         event_log=events,
     )
     return service, events
+
+
+def _snapshot(*chunks):
+    return SimpleNamespace(
+        allowed_source_ids=("a",),
+        scope_hash="scope",
+        nodes=(),
+        relations=(),
+        chunks=chunks,
+        memberships=(),
+        degraded_reasons=(),
+    )
+
+
+def _enable_active(service, monkeypatch):
+    monkeypatch.setattr(
+        service,
+        "_decision",
+        lambda _nb: SourceGraphRolloutDecision(True, False, "quality_approved"),
+    )
 
 
 def test_quality_attestation_loader_keeps_digest_for_point_of_use_reverify(
@@ -235,3 +257,236 @@ def test_shadow_lane_never_changes_visible_chunks(monkeypatch):
     assert result.status.state == "shadow"
     assert result.chunks == tuple(baseline)
     assert [chunk.chunk_id for chunk in result.enrichment_chunks] == ["g"]
+
+
+def test_source_title_failure_returns_frozen_baseline(monkeypatch):
+    baseline = [_chunk("b", "a")]
+    ppr = SimpleNamespace(
+        hits=(), cache_hit=False,
+        capability=SimpleNamespace(enabled=True, reason=""),
+    )
+    service, _events = _service(snapshot=_snapshot(), ppr=ppr)
+    _enable_active(service, monkeypatch)
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        result = service.run(
+            "nb",
+            baseline,
+            source_titles=lambda _ids: (_ for _ in ()).throw(RuntimeError("db")),
+        )
+
+    assert result.chunks == tuple(baseline)
+    assert result.enrichment_chunks == ()
+    assert result.status.state == "degraded"
+    assert result.status.reason == "source_titles_failed"
+
+
+def test_ppr_failure_discards_graph_primitive_lane(monkeypatch):
+    baseline = [_chunk("b", "a")]
+    graph_calls = []
+    primitives = SimpleNamespace(expand_graph=lambda *_args, **_kwargs: (
+        graph_calls.append(True),
+        SimpleNamespace(
+            capability=SimpleNamespace(enabled=True, reason=""), nodes=()
+        ),
+    )[1])
+    service, _events = _service(
+        snapshot=_snapshot(), ppr=SimpleNamespace(), primitives=primitives
+    )
+    service._online_ppr = SimpleNamespace(
+        retrieve=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ppr"))
+    )
+    _enable_active(service, monkeypatch)
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        result = service.run("nb", baseline, object_seeds={"o": 1.0})
+
+    assert result.chunks == tuple(baseline)
+    assert result.status.reason == "ppr_run_failed"
+    assert graph_calls == []
+
+
+def test_graph_failure_discards_successful_ppr_lane(monkeypatch):
+    baseline = [_chunk("b", "a")]
+    graph_chunk = SimpleNamespace(
+        chunk_id="g", source_id="a", section_path="G", text="graph",
+        element_ids=("eg",),
+    )
+    ppr = SimpleNamespace(
+        hits=(SimpleNamespace(
+            chunk=graph_chunk,
+            score=0.9,
+            support=RetrievalSupport("ppr", "ppr", "", 0.9),
+        ),),
+        cache_hit=False,
+        capability=SimpleNamespace(enabled=True, reason=""),
+    )
+    primitives = SimpleNamespace(
+        expand_graph=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("graph")
+        )
+    )
+    service, _events = _service(
+        snapshot=_snapshot(graph_chunk), ppr=ppr, primitives=primitives
+    )
+    _enable_active(service, monkeypatch)
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        result = service.run("nb", baseline, object_seeds={"o": 1.0})
+
+    assert result.chunks == tuple(baseline)
+    assert result.enrichment_chunks == ()
+    assert result.status.reason == "graph_expand_failed"
+
+
+def test_partition_failure_and_hydration_failure_return_baseline(monkeypatch):
+    baseline = [_chunk("b", "a")]
+    ppr = SimpleNamespace(
+        hits=(), cache_hit=False,
+        capability=SimpleNamespace(enabled=False, reason="ppr_node_limit_exceeded"),
+    )
+    partitioned = SimpleNamespace(
+        retrieve=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("partition")
+        )
+    )
+    service, _events = _service(
+        snapshot=_snapshot(), ppr=ppr, partitioned_ppr=partitioned
+    )
+    _enable_active(service, monkeypatch)
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        failed_partition = service.run(
+            "nb", baseline, parent_version="v", hydrate_chunk_ids=lambda _ids: ()
+        )
+
+    assert failed_partition.chunks == tuple(baseline)
+    assert failed_partition.status.reason == "source_partition_artifact_load_failed"
+
+    partitioned.retrieve = lambda *_args, **_kwargs: SimpleNamespace(
+        capability=SimpleNamespace(enabled=True, reason=""),
+        cache_hit=False,
+        hits=(SimpleNamespace(
+            chunk_id="g", source_id="a", score=0.9,
+            support=RetrievalSupport("ppr", "ppr", "", 0.9),
+        ),),
+    )
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        failed_hydration = service.run(
+            "nb",
+            baseline,
+            parent_version="v",
+            hydrate_chunk_ids=lambda _ids: (_ for _ in ()).throw(RuntimeError("db")),
+        )
+
+    assert failed_hydration.chunks == tuple(baseline)
+    assert failed_hydration.status.reason == "source_partition_artifact_load_failed"
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        recovered = service.run(
+            "nb",
+            baseline,
+            parent_version="v",
+            hydrate_chunk_ids=lambda _ids: [_chunk("g", "a")],
+        )
+
+    assert [chunk.chunk_id for chunk in recovered.chunks] == ["b", "g"]
+    assert recovered.status.state == "active"
+    assert "ppr_node_limit_exceeded" in recovered.status.degraded_reasons
+
+
+def test_ask_shared_seam_preserves_historical_shape_and_laziness(monkeypatch):
+    baseline = [_chunk("b", "a")]
+    service, _events = _service(snapshot=None, ppr=SimpleNamespace())
+    service._snapshots = SimpleNamespace(
+        snapshot=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("all-selected must not snapshot")
+        )
+    )
+    ask = object.__new__(AskService)
+    ask.selected_source_graph = service
+    ask.source_titles = lambda _ids: (_ for _ in ()).throw(
+        AssertionError("all-selected must not load titles")
+    )
+    ask.selected_graph_hydrate = lambda _ids: ()
+    ask.scale_version = lambda _nb: (_ for _ in ()).throw(
+        AssertionError("all-selected must not open scale metadata")
+    )
+    ask.retrieval = SimpleNamespace(unsafe_source_scope_restricted=lambda _nb: False)
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": False}
+    ):
+        chunks, status = ask._activate_selected_source_graph("nb", baseline)
+
+    assert chunks == baseline
+    assert status is None
+
+
+def test_ask_and_report_consumers_keep_baseline_on_graph_io_failure(monkeypatch):
+    baseline = [_chunk("b", "a")]
+    ppr = SimpleNamespace(
+        hits=(), cache_hit=False,
+        capability=SimpleNamespace(enabled=False, reason="ppr_node_limit_exceeded"),
+    )
+    partitioned = SimpleNamespace(retrieve=lambda *_args, **_kwargs: SimpleNamespace(
+        capability=SimpleNamespace(enabled=True, reason=""),
+        cache_hit=False,
+        hits=(),
+    ))
+    service, _events = _service(
+        snapshot=_snapshot(), ppr=ppr, partitioned_ppr=partitioned
+    )
+    _enable_active(service, monkeypatch)
+
+    ask = object.__new__(AskService)
+    ask.selected_source_graph = service
+    ask.source_titles = lambda _ids: {"a": "A"}
+    ask.selected_graph_hydrate = lambda _ids: ()
+    ask.scale_version = lambda _nb: (_ for _ in ()).throw(RuntimeError("scale"))
+    ask.retrieval = SimpleNamespace(unsafe_source_scope_restricted=lambda _nb: True)
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        ask_chunks, ask_status = ask._activate_selected_source_graph("nb", baseline)
+
+    assert ask_chunks == baseline
+    assert ask_status.state == "degraded"
+    assert ask_status.reason == "source_partition_artifact_load_failed"
+
+    dependencies = SimpleNamespace(
+        selected_source_graph=service,
+        source_query=SimpleNamespace(
+            source_titles=lambda _ids: (_ for _ in ()).throw(RuntimeError("titles"))
+        ),
+        selected_graph_hydrate=lambda _ids: (),
+        scale_version=lambda _nb: "v",
+        retrieval=SimpleNamespace(unsafe_source_scope_restricted=lambda _nb: True),
+    )
+    report = object.__new__(ReportEngine)
+    report.dependencies = dependencies
+    report.settings = SimpleNamespace(ppr_top_chunks=20)
+    result = SimpleNamespace(chunks=list(baseline), top_hits=(), trace=[])
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        report._activate_selected_source_graph("nb", result)
+
+    assert result.chunks == baseline
+    assert result.source_graph_status.state == "degraded"
+    assert result.source_graph_status.reason == "source_titles_failed"
+    assert result.trace[-1].step_type == "source_subgraph"
