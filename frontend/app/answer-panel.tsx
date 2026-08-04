@@ -1211,29 +1211,6 @@ export function AnswerView({
           </span>
         );
       })()}
-      {answer.intent?.source_scope?.mode === "selected"
-        && answer.intent.source_scope.sources.length > 0 && (
-        <details className="answer-source-scope">
-          <summary>
-            <ChevronRight size={14} aria-hidden="true" />
-            本次依据：{answer.intent.source_scope.sources.length} 个指定来源
-          </summary>
-          <ul>
-            {answer.intent.source_scope.sources.map((source) => {
-              const title = source.title || source.source_file_name || "未命名来源";
-              const showFileName = Boolean(
-                source.source_file_name && source.source_file_name !== title,
-              );
-              return (
-                <li key={`${source.notebook_id}\0${source.source_id}`}>
-                  <span>{title}</span>
-                  {showFileName && <small>原始文件：{source.source_file_name}</small>}
-                </li>
-              );
-            })}
-          </ul>
-        </details>
-      )}
       <AnswerMarkdown
         answer={answerText}
         anchors={answer.anchors}

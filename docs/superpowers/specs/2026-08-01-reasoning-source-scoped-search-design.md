@@ -1,7 +1,19 @@
 # Source-scoped evidence search for reasoning Ask
 
+> **SUPERSEDED (2026-08-04) — this design was removed, not shipped as described.**
+> Exact-equality resolution could not honor an abbreviation: asking about
+> "pdagent" when the source is titled "PDAGENT-BENCH: …" resolved to zero
+> matches, and because the design fails closed, an ordinary question died with
+> a deterministic 422 that no retry could clear. Users already select sources
+> themselves (the checkbox scope), so the model-side guess was removed whole:
+> `source_refs`, `QueryIntentSourceScope`, the `source_scope_confirmation`
+> gate, the signed preview capability, `evidence_scope.py`, and the
+> `search_evidence` action are all gone. The retained contract is in
+> `docs/product-and-api.md` § "Source scope is user-selected only". Everything
+> below is kept as a historical record of the removed design.
+
 - Date: 2026-08-01
-- Status: implemented and verified by the full repository gate
+- Status: superseded — removed 2026-08-04 (see banner above)
 - Branch: `codex/reasoning-source-scope`
 - Scope: Ask `reasoning` mode
 

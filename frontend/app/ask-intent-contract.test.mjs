@@ -38,15 +38,14 @@ test("blocking reasoning ambiguity is visibly confirmed before retrieval", () =>
 });
 
 
-test("a selected source scope always opens the review gate before retrieval", () => {
+test("阻断性歧义打开确认卡后不再继续提交 durable ask", () => {
   const branches = ifBranchesIn(findFunction(page, "runAsk"));
   const reviewGate = branches.find(
-    (branch) => branch.condition.includes("needs_clarification")
-      && branch.condition.includes("source_scope"),
+    (branch) => branch.condition.includes("needs_clarification"),
   );
-  assert.ok(reviewGate, "runAsk 没有把 source_scope 当作独立的确认门");
+  assert.ok(reviewGate, "runAsk 的问题理解确认门不见了");
   assert.ok(reviewGate.thenCalls.includes("setAskIntentReview"));
-  assert.ok(reviewGate.thenReturns, "来源确认卡打开后仍继续提交了 durable ask");
+  assert.ok(reviewGate.thenReturns, "确认卡打开后仍继续提交了 durable ask");
 });
 
 

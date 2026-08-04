@@ -1,7 +1,17 @@
 # 逐步推理来源限定搜索功能设计
 
+> **已废弃（2026-08-04）——该设计已被整体移除，并非按此实现长期运行。**
+> 精确等值匹配兑现不了简称：用户问「pdagent」而来源标题是
+> 「PDAGENT-BENCH: …」时解析为零命中，而该设计是 fail closed 的，于是一句
+> 普通问题以确定性 422 失败、重试无效。既然用户本就能自行勾选来源，模型侧
+> 这次猜测被整体移除：`source_refs`、`QueryIntentSourceScope`、
+> `source_scope_confirmation` 审阅闸、签名预检能力、`evidence_scope.py`
+> 与 `search_evidence` 动作全部删除。现行契约见
+> `docs/product-and-api_zh.md`「来源范围只由用户勾选决定」一节。
+> 以下全文仅作为被移除设计的历史记录保留。
+
 - 日期：2026-08-01
-- 状态：已实现，并已通过全仓门禁验证
+- 状态：已废弃 —— 于 2026-08-04 移除（见上方说明）
 - 分支：`codex/reasoning-source-scope`
 - 适用范围：问答的 `reasoning` 模式
 

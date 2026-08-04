@@ -1,12 +1,7 @@
 from app.models.common import Evidence
-from app.models.ask import AskRequest
 from app.models.source_scope import SourceScope
 from app.models.notebooks import NotebookSummary
-from app.api.ask_routes import (
-    _validate_reasoning_scope_preflight,
-    _validate_source_scope,
-)
-from types import SimpleNamespace
+from app.api.ask_routes import _validate_source_scope
 from fastapi import HTTPException
 import pytest
 from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
@@ -18,6 +13,11 @@ from app.services.source_scope import (
     scoped_conversation_history,
     source_allowed,
     source_scope_context,
+)
+from app.services.reasoning_retrieval import (
+    ReasoningRetriever,
+    ReflectDecision,
+    SubQuery,
 )
 
 
@@ -197,7 +197,7 @@ def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
     assert resolved == SourceScope(mode="include", source_ids=["s1", "s3"])
 
 
-def test_checkbox_ceiling_intersects_model_allow_list_and_leaves_base_alone():
+def test_checkbox_ceiling_intersects_producer_allow_list_and_leaves_base_alone():
     with source_scope_context(
         "nb", SourceScope(mode="include", source_ids=["s1", "s2"])
     ):
@@ -206,22 +206,53 @@ def test_checkbox_ceiling_intersects_model_allow_list_and_leaves_base_alone():
         assert scoped_allowed_source_ids("base", ["b1"]) == ("b1",)
 
 
-def test_reasoning_preflight_uses_the_submitted_checkbox_ceiling():
-    class _Repo:
-        def validate_reasoning_submission(self, notebook_id, _payload):
-            if not source_allowed(notebook_id, "s2"):
-                raise ValueError("指定来源超出当前勾选范围")
+def _call_line(func, callee: str) -> int:
+    """按 AST 定位一次真实调用的行号。
 
-    payload = AskRequest(
-        question="q",
-        mode="reasoning",
-        source_scope=SourceScope(mode="include", source_ids=["s1"]),
-    )
-    with pytest.raises(HTTPException, match="当前勾选范围") as exc:
-        _validate_reasoning_scope_preflight(
-            _Repo(), "nb", SimpleNamespace(id="reasoning"), payload
+    刻意不做 `source.index(name)` 那种文本查找:那样连 docstring 和注释里的
+    同名字样都算数,于是「把真实调用挪到后面、同时在函数开头的注释里提到它」
+    就能骗过顺序断言。这两个函数的 docstring 正好就在上方,不是臆想的场景。
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (
+            getattr(node.func, "attr", None) == callee
+            or getattr(node.func, "id", None) == callee
         )
-    assert exc.value.status_code == 409
+    ]
+    assert lines, f"未找到对 {callee} 的调用"
+    return min(lines)
+
+
+def test_reasoning_submission_is_validated_before_a_durable_job_exists():
+    """两条 Ask 路径都必须在发布持久 job 之前校验提交。
+
+    以前包着它的路由预检(_validate_reasoning_scope_preflight)随模型判断来源
+    一起删了——那道预检唯一的工作就是把模型选中的来源集与勾选上限取交集。
+    必须活下来的是**顺序**:无效的 reasoning 提交仍要在持久 job / stream 头
+    出现之前失败,否则用户会看到一个已经发布、注定失败的会话。
+
+    同步与流式两条路径分别由不同模块实现,所以两条都要钉。
+    """
+    from app.services.ask_execution import AskExecutionCoordinator
+    from app.services.ask_service import AskService
+
+    assert (
+        _call_line(AskService.ask_current, "validate_reasoning_submission")
+        < _call_line(AskService.ask_current, "begin_job_current")
+    ), "同步 /ask:校验必须在 begin_job_current 之前"
+
+    assert (
+        _call_line(AskExecutionCoordinator.start, "validate")
+        < _call_line(AskExecutionCoordinator.start, "begin_durable_job")
+    ), "流式 /ask/stream:校验必须在 begin_durable_job 之前"
 
 
 def test_scoped_chunk_overlay_keeps_base_seeds_without_whole_graph_io():
@@ -255,3 +286,182 @@ def test_scoped_chunk_overlay_keeps_base_seeds_without_whole_graph_io():
     assert supports == {}
     assert id_map["k1001"]["notebook_id"] == "base"
     assert "base-source" in block
+
+
+# --- ReasoningRetriever behaviour under a checkbox-only source ceiling ------
+#
+# Migrated from the now-deleted test_reasoning_source_scope.py (that file was
+# dedicated to the now-removed model-inferred source restriction feature from
+# PR #422; this one test function exercised the still-live user checkbox
+# scope instead and is kept here).
+
+
+class _ScopedRunSettings:
+    retrieval_top_n = 12
+    reasoning_top_n_per_query = 3
+    reasoning_top_n_cap = 36
+    reasoning_max_steps = 4
+    reasoning_max_subqueries = 3
+    reasoning_stale_limit = 10
+    reasoning_max_element_searches = 2
+    reasoning_quota_enabled = False
+    graph_ppr_enabled = False
+    reasoning_ppr_prefetch = False
+    exact_lookup_enabled = True
+    exact_lookup_max_identifiers = 3
+    reasoning_timeout_seconds = 5
+    reasoning_max_retries = 0
+    community_peers_topk = 4
+    community_rerank_candidates = 20
+
+
+def _scoped_run_hit(source_id: str) -> RetrievedKnowledge:
+    return RetrievedKnowledge(
+        object_id=f"ko-{source_id}",
+        object_type="claim",
+        payload={"name": f"command-{source_id}"},
+        evidence=[Evidence(
+            source_id=source_id,
+            source_title=f"Manual {source_id}",
+            element_id=f"el-{source_id}",
+            element_type="paragraph",
+            location_label="Commands",
+            quoted_span=f"command from {source_id}",
+            confidence=1.0,
+        )],
+        relevance=0.9,
+        score=0.9,
+        notebook_id="nb",
+    )
+
+
+class _ScopedRunRetrieval:
+    def __init__(self):
+        self.ppr_calls = 0
+
+    def federated_retrieve(self, *args, **kwargs):
+        return [
+            _scoped_run_hit("A"), _scoped_run_hit("B"), _scoped_run_hit("C"),
+        ]
+
+    def retrieve_elements(self, *args, **kwargs):
+        return []
+
+    def retrieve_scored(self, *args, **kwargs):
+        return [
+            _scoped_run_hit("C"), _scoped_run_hit("A"), _scoped_run_hit("B"),
+        ]
+
+    def ppr_retrieve(self, *args, **kwargs):
+        self.ppr_calls += 1
+        raise AssertionError("restricted PPR must have zero I/O")
+
+    def exact_lookup_chunks(self, *args, **kwargs):
+        raise AssertionError("restricted exact lookup must have zero I/O")
+
+
+class _ScopedRunModels:
+    def chat(self, workload_id):
+        return type("Client", (), {"configured": False})()
+
+
+class _ScopedRunCommunities:
+    pass
+
+
+def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
+    retrieval = _ScopedRunRetrieval()
+    settings = _ScopedRunSettings()
+    settings.graph_ppr_enabled = True
+    settings.reasoning_ppr_prefetch = False
+    retriever = ReasoningRetriever(
+        retrieval=retrieval,
+        model_clients=_ScopedRunModels(),
+        communities=_ScopedRunCommunities(),
+        settings=settings,
+    )
+    retriever.plan = lambda *args, **kwargs: [SubQuery(query="plain question")]
+    retriever.reflect = lambda *args, **kwargs: ReflectDecision(
+        next_action="answer", sufficient=True
+    )
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"])
+    ):
+        assert retriever.enumeration_active() is False
+        result = retriever.run("nb", "plain question")
+
+    assert retrieval.ppr_calls == 0
+    unsafe = [
+        step for step in result.trace
+        if step.detail.get("reason") == "source_scope_unsafe_channels"
+    ]
+    assert unsafe
+
+def test_checkbox_scope_skips_per_action_unsafe_channels_with_zero_io():
+    """逐动作的纵深防御:模型即使提交了受限 run 下不该出现的动作,也不能落成 I/O。
+
+    受限 run 的 reflect schema 根本不提供枚举/扩展分支,所以正常情况下走不到
+    这里。但畸形模型响应、或将来有人把 allowed_actions 的构造改坏,都会让
+    decision 落到 run() 循环里那几道逐动作闸上——它们一旦失效,执行器就会对
+    **全库**跑枚举/扩展,把未勾选来源的证据连同 [k] 锚点送进答案。
+
+    此前唯一覆盖这几道闸的是已删除的 test_reasoning_source_scope.py(那份文件
+    专测已移除的模型判断来源特性),整支审查用变异验证确认了覆盖真空:把
+    2716 行的 self._unsafe_scope_restricted() 改成 False,全套测试仍然全绿。
+    这条测试按用户勾选范围补回该覆盖。
+    """
+    from app.services.reasoning_retrieval import (
+        ENUMERATE_ELEMENTS_ACTION,
+    )
+
+    class _NoEnumeration:
+        """任何真实枚举调用都是失败——闸必须在 I/O 之前拦住。"""
+
+        def __getattr__(self, name):
+            def _boom(*args, **kwargs):
+                raise AssertionError(
+                    f"受限 run 不得触发集合枚举 I/O: {name}"
+                )
+            return _boom
+
+    for action, expected_summary_fragment in (
+        (ENUMERATE_ELEMENTS_ACTION, "枚举"),
+        ("expand_graph", "关系扩展"),
+    ):
+        retrieval = _ScopedRunRetrieval()
+        retriever = ReasoningRetriever(
+            retrieval=retrieval,
+            model_clients=_ScopedRunModels(),
+            communities=_ScopedRunCommunities(),
+            settings=_ScopedRunSettings(),
+        )
+        retriever.collection_enumeration = _NoEnumeration()
+        retriever.plan = lambda *a, **k: [SubQuery(query="plain question")]
+        # 第一轮提交那个受限 run 下不该出现的动作,第二轮才收工。
+        decisions = iter([
+            ReflectDecision(
+                next_action=action,
+                expand_object_id="ko-A",
+                enumerate_kind="formula",
+            ),
+            ReflectDecision(next_action="answer", sufficient=True),
+        ])
+        retriever.reflect = lambda *a, **k: next(
+            decisions, ReflectDecision(next_action="answer", sufficient=True)
+        )
+
+        with source_scope_context(
+            "nb", SourceScope(mode="include", source_ids=["A"])
+        ):
+            result = retriever.run("nb", "plain question")
+
+        skipped = [
+            step for step in result.trace
+            if step.detail.get("reason") == "source_scope_unsafe_channel"
+        ]
+        assert skipped, f"{action} 未在受限 run 下留下逐动作跳过记录"
+        assert any(
+            expected_summary_fragment in step.summary for step in skipped
+        ), f"{action} 的跳过文案未说明跳过的是什么"
+        assert result.enumerations == []

@@ -34,10 +34,6 @@ from app.services.collection_enumeration import (
     EnumerationBudget,
 )
 from app.services.embedding import FakeEmbedder
-from app.services.evidence_scope import (
-    EvidenceScopeResolutionError,
-    ResolvedEvidenceScope,
-)
 from app.services.kg.edge_schema import NODE_TYPES
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.source_display import source_display_title
@@ -1148,121 +1144,6 @@ def test_memory_source_cannot_be_reached_by_name_or_by_id(repo):
         _enum(repo).enumerate_elements(
             notebook.id, "formula", source_id="s-mem", budget=_budget()
         )
-
-
-def test_evidence_scope_resolves_only_visible_active_and_mounted_sources(repo):
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
-    base = repo.create_notebook(NotebookCreate(name="base"))
-    other = repo.create_notebook(NotebookCreate(name="other"))
-    repo.mark_notebook_base(base.id)
-    repo.mark_notebook_base(other.id)
-    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
-
-    _add_source(repo, notebook.id, "s-active", [], title="Innovus User Guide")
-    _add_source(repo, base.id, "s-base", [], title="ICC2 Command Reference")
-    _add_source(repo, other.id, "s-unmounted", [], title="Other Manual")
-    _add_source(
-        repo, notebook.id, "s-memory", [], title="Private memory",
-        source_type="memory",
-    )
-    _add_source(
-        repo, notebook.id, "s-knowhow", [], title="Hidden table",
-        source_type="knowhow",
-    )
-    with repo._write() as db:
-        db.execute(
-            "UPDATE sources SET file_name=? WHERE id=?",
-            ("icc2-reference.pdf", "s-base"),
-        )
-
-    scope = _enum(repo).resolve_evidence_scope(
-        notebook.id, ["  INNOVUS USER GUIDE ", "ICC2-REFERENCE.PDF"]
-    )
-    assert scope.restricted is True
-    assert scope.allowed_source_keys == {
-        (notebook.id, "s-active"), (base.id, "s-base")
-    }
-
-    for hidden in ("s-memory", "s-knowhow", "s-unmounted"):
-        with pytest.raises(EvidenceScopeResolutionError) as error:
-            _enum(repo).resolve_evidence_scope(notebook.id, [hidden])
-        assert error.value.status == "not_found"
-
-
-def test_evidence_scope_duplicate_and_missing_references_fail_closed(repo):
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
-    _add_source(repo, notebook.id, "s-a", [], title="Same Manual")
-    _add_source(repo, notebook.id, "s-b", [], title="Same Manual")
-
-    with pytest.raises(EvidenceScopeResolutionError) as ambiguous:
-        _enum(repo).resolve_evidence_scope(notebook.id, ["same manual"])
-    assert ambiguous.value.status == "ambiguous"
-    assert {item.source_id for item in ambiguous.value.candidates} == {
-        "s-a", "s-b"
-    }
-
-    with pytest.raises(EvidenceScopeResolutionError) as missing:
-        _enum(repo).resolve_evidence_scope(notebook.id, ["missing manual"])
-    assert missing.value.status == "not_found"
-
-
-def test_evidence_scope_oversized_catalog_does_not_hydrate_a_prefix(
-    repo, monkeypatch,
-):
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
-    _add_source(repo, notebook.id, "s-a", [], title="Manual A")
-    _add_source(repo, notebook.id, "s-b", [], title="Manual B")
-    monkeypatch.setattr(collection_enumeration, "_MAX_TITLE_RESOLVE_SOURCES", 1)
-
-    calls = []
-    original = repo._runtime.source_store.visible_source_identity_rows_bounded
-
-    def bounded(db, notebook_id, limit):
-        calls.append(limit)
-        return original(db, notebook_id, limit)
-
-    monkeypatch.setattr(
-        repo._runtime.source_store, "visible_source_identity_rows_bounded", bounded
-    )
-    with pytest.raises(EvidenceScopeResolutionError) as error:
-        _enum(repo).resolve_evidence_scope(notebook.id, ["Manual A"])
-    assert error.value.status == "unavailable"
-    assert calls == [2]
-
-
-def test_evidence_scope_mount_change_during_resolution_is_unavailable(repo, monkeypatch):
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
-    base = repo.create_notebook(NotebookCreate(name="base"))
-    repo.mark_notebook_base(base.id)
-    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
-    _add_source(repo, base.id, "s-base", [], title="Manual A")
-    original = repo._runtime.notebook_store.participant_tiers
-    calls = 0
-
-    def changing(db, notebook_id):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return original(db, notebook_id)
-        return ([notebook.id], {notebook.id: "personal"})
-
-    monkeypatch.setattr(repo._runtime.notebook_store, "participant_tiers", changing)
-    with pytest.raises(EvidenceScopeResolutionError) as error:
-        _enum(repo).resolve_evidence_scope(notebook.id, ["Manual A"])
-    assert error.value.status == "unavailable"
-    assert error.value.reference == "Manual A"
-
-
-def test_evidence_scope_none_is_all_with_zero_database_io(repo, monkeypatch):
-    def forbidden():
-        raise AssertionError(
-            "all-source compatibility path must not open the database"
-        )
-
-    monkeypatch.setattr(_enum(repo)._database, "connect", forbidden)
-    assert _enum(repo).resolve_evidence_scope("unused", None) == (
-        ResolvedEvidenceScope.all()
-    )
 
 
 def test_visible_source_identity_roster_uses_partial_ordering_index(repo):

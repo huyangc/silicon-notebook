@@ -3448,9 +3448,7 @@ export default function Home() {
         || activeAskModeRef.current !== "reasoning"
       ) return;
       const understandingMs = elapsedMs(understandingStartedAt, Date.now());
-      // 服务端会把来源范围签核标成 needs_clarification；这里再按快照防御，避免
-      // 旧/异步后端漏置布尔值时，明确来源范围被前端自动确认后直接开跑。
-      if (contract.needs_clarification || Boolean(contract.source_scope)) {
+      if (contract.needs_clarification) {
         askIntentTraceRef.current = replaceLastIntentStep(
           askIntentTraceRef.current, intentClarifyStep(contract, understandingMs),
         );
@@ -3464,9 +3462,7 @@ export default function Home() {
           understandingMs,
           askedAt,
         });
-        setToast(contract.source_scope
-          ? "请确认本轮仅检索所列来源"
-          : "问题存在会改变检索方向的歧义，请先补充确认");
+        setToast("问题存在会改变检索方向的歧义，请先补充确认");
         return;
       }
       askIntentTraceRef.current = replaceLastIntentStep(

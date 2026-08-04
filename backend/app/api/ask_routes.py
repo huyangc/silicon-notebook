@@ -36,7 +36,6 @@ from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
     finalize_query_intent,
-    has_explicit_source_restriction,
     plan_query_intent,
 )
 
@@ -156,17 +155,19 @@ async def preview_ask_intent(
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
         )
-        try:
-            from app.services.source_scope import source_scope_context
+        from app.services.source_scope import source_scope_context
 
-            with source_scope_context(notebook_id, resolved_source_scope):
-                return repo.preview_reasoning_intent(
-                    notebook_id, question, history, cancel_event=cancel_event
-                )
-        except ValueError as exc:
-            raise user_error(
-                422, str(exc)
-            ) from exc
+        # No ValueError handler here on purpose.  The one that used to live at
+        # this seam existed to surface the model-inferred source-scope errors
+        # ("找不到指定来源：…"), and those are gone with that feature.  What
+        # remains reachable is pydantic's ValidationError — a ValueError
+        # subclass carrying English internals — so re-adding a
+        # ``user_error(422, str(exc))`` here would trust an error by its shape
+        # rather than its provenance and leak that text as a user message.
+        with source_scope_context(notebook_id, resolved_source_scope):
+            return repo.preview_reasoning_intent(
+                notebook_id, question, history, cancel_event=cancel_event
+            )
 
     task = asyncio.create_task(asyncio.to_thread(run_preview))
     try:
@@ -196,8 +197,6 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
     if spec.id != "reasoning":
         return
     if payload.intent is None:
-        if has_explicit_source_restriction(payload.question):
-            raise user_error(422, "问题限定了来源范围，请先确认问题理解")
         # Direct compatibility clients may bypass /ask/intent. Keep clear
         # requests compatible, but fail closed on the same deterministic vague
         # wording before begin_durable_job can publish a transient session.
@@ -222,23 +221,6 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
         raise user_error(422, "确认后的问题不能为空")
 
 
-def _validate_reasoning_scope_preflight(repo, notebook_id: str, spec, payload: AskRequest) -> None:
-    """Keep invalid/expired selected scopes out of durable jobs and streams."""
-    if spec.id != "reasoning":
-        return
-    from app.services.source_scope import source_scope_context
-
-    try:
-        # This runs before a durable job or stream header exists, so it must
-        # see the same frozen checkbox ceiling as the eventual worker.  In
-        # particular, a signed intent preview cannot be replayed after its
-        # named source was unchecked.
-        with source_scope_context(notebook_id, payload.source_scope):
-            repo.validate_reasoning_submission(notebook_id, payload)
-    except ValueError as exc:
-        raise user_error(409, str(exc)) from exc
-
-
 @router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_read)])
 def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     repo = repository()
@@ -258,7 +240,6 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     )
     if resolved_source_scope is not payload.source_scope:
         payload = payload.model_copy(update={"source_scope": resolved_source_scope})
-    _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     try:
         return repo.ask(notebook_id, payload)
     except UnknownAskMode as exc:
@@ -336,7 +317,6 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
     )  # 空库/空来源范围权威拒绝
     if resolved_source_scope is not payload.source_scope:
         payload = payload.model_copy(update={"source_scope": resolved_source_scope})
-    _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     return StreamingResponse(
         _stream_ask_events(repo, notebook_id, payload, spec, request),
         media_type="application/x-ndjson",

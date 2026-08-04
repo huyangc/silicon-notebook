@@ -31,12 +31,9 @@ export function intentUnderstoodStep(
   durationMs: number,
 ): ReasoningTraceStep {
   const topics = contract.mandatory_topics.length;
-  const sourceCount = contract.source_scope?.sources.length ?? 0;
   return {
     step_type: INTENT_STEP_TYPE,
-    summary: sourceCount > 0
-      ? `已理解问题，并识别出 ${sourceCount} 个指定来源`
-      : topics > 0 ? `已理解问题，梳理出 ${topics} 个必答要点` : "已理解问题",
+    summary: topics > 0 ? `已理解问题，梳理出 ${topics} 个必答要点` : "已理解问题",
     detail: { resolved_question: contract.resolved_question },
     duration_ms: durationMs,
   };
@@ -47,12 +44,9 @@ export function intentClarifyStep(
   contract: QueryIntentContract,
   durationMs: number,
 ): ReasoningTraceStep {
-  const sourceCount = contract.source_scope?.sources.length ?? 0;
   return {
     step_type: INTENT_STEP_TYPE,
-    summary: sourceCount > 0
-      ? `已识别 ${sourceCount} 个指定来源，等待你确认检索范围`
-      : `发现 ${contract.ambiguities.length} 处会改变检索方向的歧义，等待你补充`,
+    summary: `发现 ${contract.ambiguities.length} 处会改变检索方向的歧义，等待你补充`,
     detail: { resolved_question: contract.resolved_question },
     duration_ms: durationMs,
   };

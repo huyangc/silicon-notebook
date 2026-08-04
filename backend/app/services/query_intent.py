@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from typing import Any, Iterable
 
 from app.core.ask_retrieval_policy import RESULT_SCOPES
@@ -79,194 +78,6 @@ _ANALYSIS_REQUEST = re.compile(
     r"|\b(?:compare|analyse|analyze|trade-?offs?|pros\s+and\s+cons)\b",
     re.IGNORECASE,
 )
-_MAX_SOURCE_REFS = 8
-_MAX_SOURCE_REF_CHARS = 500
-_SOURCE_LABEL_PATTERN = (
-    r"(?:来源|资料|文档|文件|手册|指南|论文|文章|书籍|原文|"
-    r"\b(?:manual|guide|reference|paper|article|book|file|document|source)s?\b)"
-)
-_SOURCE_LABEL = re.compile(
-    _SOURCE_LABEL_PATTERN,
-    re.IGNORECASE,
-)
-_SOURCE_FILE_NAME = re.compile(
-    r"\.(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)$",
-    re.IGNORECASE,
-)
-_SOURCE_FILE_MENTION = re.compile(
-    r"\.(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)(?:\b|$)",
-    re.IGNORECASE,
-)
-_NON_SOURCE_ROLE_AFTER = re.compile(
-    r"^\s*[，,:：]?\s*(?:"
-    r"(?:是|作为)?\s*(?:一个|一款|一种)?\s*"
-    r"(?:工具|产品|命令|函数|库|框架)(?:名|名称)?(?:来)?(?:使用)?"
-    r"|(?:is|used\s+as|as)\s+(?:an?\s+)?"
-    r"(?:tool|product|command|function|library|framework)\b)",
-    re.IGNORECASE,
-)
-
-# This guard is deliberately syntax-only: direct Ask clients must use the
-# preview when they explicitly limit corpus scope, but this preflight must not
-# enumerate or resolve a source catalog.  A product/tool subject by itself is
-# not enough; the phrase must also identify a document-like source.
-_SOURCE_EXCLUSIVITY = re.compile(
-    r"(?:只|仅|仅仅)\s*(?:使用|用|采用|检索|搜索|查阅|参考|依据|根据|基于|按|从)"
-    r"|(?:使用|用|采用|检索|搜索|查阅|参考|依据|根据|基于|按|从)"
-    r"\s*(?:且\s*)?(?:只|仅|仅仅)"
-    r"|唯一(?:的)?\s*(?:来源|参考|依据|文档|文件|手册)"
-    r"|(?:来源|参考|依据|文档|文件|手册)\s*(?:是|为)?\s*唯一"
-    r"|\b(?:only|just|solely|exclusively)\s+"
-    r"(?:use|using|consult|search|retrieve|refer|rely|base|based|according|from)\b"
-    r"|\b(?:use|using|consult|search|retrieve|refer|rely|base|based|according)"
-    r"(?:\s+(?:to|on))?\s+(?:only|just|solely|exclusively)\b"
-    r"|\b(?:restrict(?:ed|ing)?|limit(?:ed|ing)?)\s+to\b"
-    r"|\b(?:no\s+other\s+sources?|sources?\s+other\s+than|"
-    r"only\s+sources?|sole\s+sources?|exclusive\s+sources?)\b",
-    re.IGNORECASE,
-)
-_CONCRETE_SOURCE = (
-    r"(?:《[^》]{1,500}》|[^\s，。；!?！？]{1,500}\."
-    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)|"
-    r"[A-Za-z0-9_.-]{1,120}\s*(?:手册|指南|论文|文档|文件|书籍))"
-)
-_SOURCE_SCOPE_BOUNDARY = re.compile(
-    rf"{_CONCRETE_SOURCE}\s*(?:的)?\s*(?:范围内|之外)"
-    r"|(?:来源|文档|文件|手册|资料)\s*(?:的)?\s*范围内"
-    rf"|(?:限定(?:在|为)?|限于)\s*(?:{_CONCRETE_SOURCE}|这些来源|上述来源|所列来源)"
-    r"|(?:不要|不得|不能|不应).{0,120}(?:"
-    r"之外的\s*(?:来源|文档|文件|资料)|(?:其他|其它|别的)\s*(?:来源|文档|文件|资料))",
-    re.IGNORECASE,
-)
-_DIRECT_CONCRETE_SOURCE_USE = re.compile(
-    # Non-exclusive wording such as “根据 A.pdf 回答” still directs evidence
-    # to a concrete source, but generic subject prose (“this paper is based on
-    # prior work”) must not be blocked.  Couple the use verb to a filename,
-    # Chinese title, or an explicitly named manual/document.
-    r"(?:根据|依据|基于|参考|查阅|使用|用|采用|按|从)\s*"
-    r"(?:文件|文档|手册|指南|论文|书籍)?\s*"
-    r"(?:《[^》]{1,500}》|[^\s，。；!?！？]{1,500}\."
-    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)|"
-    r"[A-Za-z0-9_.-]{1,120}\s*(?:手册|指南|论文|文档|文件|书籍))"
-    r"|\b(?:using|consult(?:ing)?|according\s+to|relying\s+on|from)\s+"
-    r"(?:the\s+)?(?:manual|guide|reference|paper|article|book|file|document|source)\s+"
-    r"[A-Za-z0-9_.-]{1,120}\b"
-    r"|\b(?:using|consult(?:ing)?|according\s+to|relying\s+on|from)\s+"
-    r"[^\s,.;!?]{1,500}\.(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)\b",
-    re.IGNORECASE,
-)
-_BASED_ON_SOURCE_DIRECTIVE = re.compile(
-    r"\b(?:answer|respond|explain|analy[sz]e|compare)\b[^.?!]{0,120}\bbase(?:d)?\s+on\s+"
-    r"(?:(?:the\s+)?(?:manual|guide|reference|paper|article|book|file|document|source)\s+"
-    r"[A-Za-z0-9_.-]{1,120}|[^\s,.;!?]{1,500}\."
-    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?))\b"
-    r"|\bbase(?:d)?\s+on\s+"
-    r"(?:(?:the\s+)?(?:manual|guide|reference|paper|article|book|file|document|source)\s+"
-    r"[A-Za-z0-9_.-]{1,120}|[^\s,.;!?]{1,500}\."
-    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?))"
-    r"[^.?!]{0,120}\b(?:answer|respond|explain|analy[sz]e|compare)\b",
-    re.IGNORECASE,
-)
-
-
-def _normalized_identity_text(value: object) -> str:
-    return unicodedata.normalize("NFKC", str(value or "")).casefold()
-
-
-def has_explicit_source_restriction(question: str) -> bool:
-    """Whether direct reasoning Ask must first obtain a reviewed scope.
-
-    This is intentionally narrower than source-reference extraction.  It only
-    blocks wording that both *limits* retrieval and names a document-like
-    source (a file extension, a source label, or Chinese book-title marks).
-    """
-    text = unicodedata.normalize("NFKC", str(question or ""))
-    exclusive_source = False
-    for match in _SOURCE_EXCLUSIVITY.finditer(text):
-        # Bind the exclusivity grammar to a source cue in the same forward
-        # clause.  A document noun elsewhere must not turn subject prose such
-        # as “this paper is limited to a 2-D experiment” into a scope command.
-        clause = re.split(
-            r"[，,。;；:：!?！？\r\n…—–]|\.{2,}|"
-            r"\.(?=[\"'”’」』】）)]?(?:\s|$))",
-            text[match.start():match.end() + 160],
-            maxsplit=1,
-        )[0]
-        if (
-            _SOURCE_FILE_MENTION.search(clause)
-            or _SOURCE_LABEL.search(clause)
-            or ("《" in clause and "》" in clause)
-        ):
-            exclusive_source = True
-            break
-    return bool(
-        exclusive_source
-        or _SOURCE_SCOPE_BOUNDARY.search(text)
-        or _DIRECT_CONCRETE_SOURCE_USE.search(text)
-        or _BASED_ON_SOURCE_DIRECTIVE.search(text)
-    )
-
-
-def _explicit_source_refs(value: object, question: str, history: str) -> list[str]:
-    """Keep only source identities the user's own wording explicitly contains.
-
-    The model identifies the semantic role, but cannot invent the identity. A
-    literal occurrence plus a nearby source label (or a recognizable file
-    extension) is the deterministic authority boundary. Conversation history
-    contains user questions only; assistant/corpus text never reaches here.
-    """
-
-    if not isinstance(value, list):
-        return []
-    context = _normalized_identity_text(f"{question}\n{history}")
-    accepted: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        reference = item.strip()[:_MAX_SOURCE_REF_CHARS]
-        needle = _normalized_identity_text(reference)
-        if not needle:
-            continue
-        starts: list[int] = []
-        cursor = 0
-        while (start := context.find(needle, cursor)) >= 0:
-            starts.append(start)
-            cursor = start + max(1, len(needle))
-        if not starts:
-            continue
-        explicitly_bound = bool(_SOURCE_FILE_NAME.search(needle))
-        for start in starts:
-            end = start + len(needle)
-            left = context[max(0, start - 64):start]
-            right = context[end:min(len(context), end + 64)]
-            # ASCII quotes are the product's whole-phrase search syntax, not
-            # source syntax.  Book-title marks are unambiguous source identity.
-            wrapped = left.endswith("《") and right.startswith("》")
-            label_before = re.search(
-                _SOURCE_LABEL_PATTERN
-                + r"\s*(?:(?:名为|叫作|标题为)|(?:named|called))?\s*[：:]?\s*$",
-                left,
-                re.IGNORECASE,
-            )
-            label_after = re.match(
-                r"^\s*(?:[》\"”']\s*)?(?:这?(?:份|篇|本))?\s*"
-                + _SOURCE_LABEL_PATTERN,
-                right,
-                re.IGNORECASE,
-            )
-            self_describing_title = bool(
-                _SOURCE_LABEL.search(needle)
-                and not _NON_SOURCE_ROLE_AFTER.search(right)
-            )
-            if wrapped or label_before or label_after or self_describing_title:
-                explicitly_bound = True
-                break
-        if not explicitly_bound:
-            continue
-        accepted.append(reference)
-        if len(accepted) >= _MAX_SOURCE_REFS:
-            break
-    return accepted
 
 
 def _complete_match_is_negated(question: str, match: re.Match) -> bool:
@@ -373,13 +184,11 @@ def plan_query_intent(
     *,
     max_topics: int = 6,
     purpose: str = "evidence-grounded answer",
-    source_refs_enabled: bool = True,
     cancel_event: CancelEvent = None,
 ) -> dict:
     """Build one bounded intent contract without reading corpus content."""
     from app.services.prompts import (
         QUERY_INTENT_SCHEMA_HINT,
-        REPORT_INTENT_SCHEMA_HINT,
         query_intent_prompt,
     )
 
@@ -395,10 +204,8 @@ def plan_query_intent(
                     max_topics=max_topics,
                     history_block=history,
                     purpose=purpose,
-                    source_refs_enabled=source_refs_enabled,
                 )}],
-                (QUERY_INTENT_SCHEMA_HINT if source_refs_enabled
-                 else REPORT_INTENT_SCHEMA_HINT),
+                QUERY_INTENT_SCHEMA_HINT,
                 cancel_event=cancel_event,
             )
             parsed = json.loads(raw)
@@ -452,14 +259,6 @@ def plan_query_intent(
 
     normalized_candidate = str(data.get("normalized_question") or "").strip()
     entities = _bounded_strings(data.get("entities"))
-    # Deliberately trust only the intent model's explicit-source field here.
-    # Tool/product/domain entities are not promoted into source references by
-    # deterministic similarity; uniqueness and authorization belong to the
-    # later identity resolver.
-    source_refs = (
-        _explicit_source_refs(data.get("source_refs"), question, history)
-        if source_refs_enabled else []
-    )
     context_for_referent = f"{question}\n{history}".casefold()
     has_verified_referent = any(
         entity.casefold() in context_for_referent for entity in entities
@@ -489,6 +288,15 @@ def plan_query_intent(
             "required": True,
             "options": [],
         })
+        # ``QueryIntentContract.ambiguities`` has a hard ceiling of eight rows.
+        # The model may legitimately return eight of its own, so inserting the
+        # deterministic row unconditionally can produce a ninth and make the
+        # contract unconstructable — a pydantic ValidationError on an ordinary
+        # unresolved-referent question, i.e. exactly the deterministic failure
+        # this whole area is supposed to avoid.  Drop the model's least
+        # important row instead: the server's own finding is inserted first and
+        # must survive.
+        del ambiguities[8:]
     if bool(data.get("needs_clarification")) and not ambiguities:
         ambiguities.append({
             "id": "ambiguity-1",
@@ -529,11 +337,6 @@ def plan_query_intent(
         ),
         "confirmed": False,
     }
-    # Preserve the historical all-source contract byte shape where practical:
-    # omission means all authorized sources, while an empty list must not be a
-    # second spelling of that mode.
-    if source_refs:
-        contract["source_refs"] = source_refs
     return contract
 
 
@@ -575,18 +378,6 @@ def finalize_query_intent(
         "answer": answer,
     } for ambiguity_id, answer in submitted.items()]
     final = dict(seed)
-    source_refs = _bounded_strings(
-        seed.get("source_refs"),
-        _MAX_SOURCE_REFS,
-        _MAX_SOURCE_REF_CHARS,
-    )
-    if source_refs:
-        # Copy the already-reviewed strings without another model pass.  The
-        # later resolver may resolve or reject them, but cannot reinterpret
-        # what the user confirmed here.
-        final["source_refs"] = source_refs
-    else:
-        final.pop("source_refs", None)
     # The user-visible confirmation field is authoritative when it was edited
     # (or clarification answers changed the reviewed direction).  A clear
     # auto-confirmed preview is different: product policy keeps the original
