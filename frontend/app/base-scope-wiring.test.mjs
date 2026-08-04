@@ -23,6 +23,7 @@ import {
   callSitesIn,
   jsxElements,
   parseModule,
+  variableInitializersIn,
 } from "./test/semantic-source.mjs";
 
 
@@ -425,5 +426,29 @@ test("两处「检索范围」计数共用同一份文案", () => {
     summaryCalls.length,
     1,
     "page.tsx 里只应调用一次 retrievalScopeSummary —— 两处显示共用它的结果",
+  );
+});
+
+
+test("零挂载库时也提交参考库范围快照，不省略这一维", () => {
+  // codex #438 R1:省略这一维等于不冻结它。「创建时零个库」本身就是需要冻结的事实——
+  // 报告范围在创建时定格、跨确认与生成复用,中途挂上的库会静默加入一份早已创建的报告;
+  // Ask 的 job 也脱离连接后台跑完,提交与实际检索之间同样有窗口。
+  //
+  // 所以 currentBaseScope 的 initializer 必须是**直接**的 baseScopePayload 调用,
+  // 不能是「挂了才发」的条件表达式。
+  const entry = variableInitializersIn(page)
+    .find((item) => item.name === "currentBaseScope");
+  assert.ok(entry, "page.tsx 必须有 currentBaseScope");
+  assert.match(
+    entry.initializer,
+    /^baseScopePayload\(/,
+    "currentBaseScope 必须**直接**由 baseScopePayload(...) 算出",
+  );
+  assert.doesNotMatch(
+    entry.initializer,
+    /hasMountedBase|undefined/,
+    "currentBaseScope 不得写成「挂了才发」的条件表达式:省略这一维等于不冻结它,"
+      + "创建之后新挂的库会静默加入一份已冻结的报告/问答",
   );
 });

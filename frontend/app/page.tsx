@@ -2243,11 +2243,14 @@ export default function Home() {
       ? sources.map((source) => source.id)
       : undefined,
   );
-  // 没挂参考库时整个维度不提交 —— 请求形状与接入本特性之前逐字一致，后端据此保留
-  // 「省略 = 全部参考库参与」的历史行为。
-  const currentBaseScope = hasMountedBase
-    ? baseScopePayload(baseScopeSelection, mountedBaseIds)
-    : undefined;
+  // 一个库都没挂时**照样提交**空快照（codex #438 R1）。省略这一维等于不冻结它，而
+  // 「创建时零个库」本身就是需要被冻结的事实：报告的范围在创建时定格、跨确认与生成两
+  // 个阶段复用，中途挂上的库会静默加入一份早已创建的报告；Ask 同理，它的 job 脱离连接
+  // 后台跑完，提交与实际检索之间同样有窗口。
+  //
+  // 代价为零：空快照冻结后 selected 与全集都是 0 ⇒ narrowed 为假 ⇒ 不进限定模式、
+  // 不关任何通道、不产生回执，未挂库笔记本的行为逐位不变。
+  const currentBaseScope = baseScopePayload(baseScopeSelection, mountedBaseIds);
   // 工具条与输入框上方是同一句话的两处显示；共用这**一个**计算结果，不各写各的
   // 字面量 —— 两处分叉在结构上因此不可能发生。
   const retrievalScopeText = retrievalScopeSummary(
