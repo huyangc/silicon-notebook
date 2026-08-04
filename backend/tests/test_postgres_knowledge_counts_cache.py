@@ -23,11 +23,13 @@ class _FakeDB:
     def __init__(self, seq: int):
         self.seq = seq
         self.query_calls = 0
+        self.pending_sql: list[str] = []
 
     def execute(self, sql, params):
         if "kg_mutation_seq" in sql:
             return _Cursor({"kg_mutation_seq": self.seq})
         self.query_calls += 1  # pending 相关子查询
+        self.pending_sql.append(sql)
         return _Cursor({"c": 42})
 
 
@@ -36,7 +38,7 @@ def test_postgres_h6_visible_count_is_seq_gated_memo():
     db = _FakeDB(seq=5)
     assert kcc.visible_pending_source_count(db, "nb-x") == 42
     assert kcc.visible_pending_source_count(db, "nb-x") == 42
-    assert db.query_calls == 1  # 同 kg_mutation_seq → 只跑一次全扫(seq-gated)
+    assert db.query_calls == 1  # 同 kg_mutation_seq → 只跑一次冷查询(seq-gated)
 
     db.seq = 6  # kg_mutation_seq bump(数据变)
     assert kcc.visible_pending_source_count(db, "nb-x") == 42
@@ -57,3 +59,27 @@ def test_postgres_pending_and_visible_are_independent_memos():
     kcc.pending_source_count(db, "nb-y")
     kcc.visible_pending_source_count(db, "nb-y")
     assert db.query_calls == 2  # 同 seq → 都命中缓存
+
+
+def test_pending_query_is_source_driven_and_reads_latest_run_once():
+    """Regression: never evaluate latest-run state once per knowledge object."""
+    db = _FakeDB(seq=1)
+
+    assert kcc._pending_query(db, "nb-shape", visible_only=True) == 42
+
+    sql = db.pending_sql[-1]
+    assert sql.count("LATERAL") == 3
+    assert sql.count("FROM extraction_runs er") == 1
+    assert sql.count("FROM knowledge_objects k") == 1
+    assert "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1" in sql
+    assert "source_kg.found IS NULL" in sql
+    assert "s.source_type NOT IN ('memory','knowhow')" in sql
+    assert "NOT EXISTS(SELECT 1 FROM knowledge_objects" not in sql
+
+
+def test_physical_pending_query_keeps_hidden_sources():
+    db = _FakeDB(seq=1)
+
+    assert kcc._pending_query(db, "nb-shape", visible_only=False) == 42
+
+    assert "s.source_type NOT IN" not in db.pending_sql[-1]
