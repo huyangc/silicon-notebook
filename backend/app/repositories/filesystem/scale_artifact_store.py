@@ -20,6 +20,7 @@ fold failure before the swap leaves the live artifact untouched. Full
 rebuilds (``save_full``) stage through the same .tmp + swap pair, so a
 crashed rebuild can no longer leave the live directory half-overwritten.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,6 +45,16 @@ class ScaleArtifactStore:
 
     def viz_dir(self, notebook_id: str) -> Path:
         return Path(os.path.join(str(self.settings.storage_dir), "kg_viz", notebook_id))
+
+    def source_partition_dir(self, notebook_id: str) -> Path:
+        """Companion root; separate so legacy main artifacts stay readable."""
+        return Path(
+            os.path.join(
+                str(self.settings.storage_dir),
+                "kg_index_partitions",
+                notebook_id,
+            )
+        )
 
     def indexed_notebook_ids(self) -> list[str]:
         """Return published scale-index directory names in stable order.
@@ -121,7 +132,8 @@ class ScaleArtifactStore:
 
     def save_viz(self, notebook_id: str, artifacts: Mapping) -> dict:
         return viz_index_module.save_viz_index(
-            str(self.viz_dir(notebook_id)), **artifacts)
+            str(self.viz_dir(notebook_id)), **artifacts
+        )
 
     def save_full(self, notebook_id: str, artifacts: ScaleBuildArtifacts) -> dict:
         """Full rebuild: stage into {scale_dir}.tmp, then publish atomically.
@@ -140,10 +152,145 @@ class ScaleArtifactStore:
         atomicity is not an option.
         """
         temporary = self.prepare_fold_directory(notebook_id)
-        manifest = scale_index_module.save_scale_index(
-            str(temporary), **artifacts)
+        manifest = scale_index_module.save_scale_index(str(temporary), **artifacts)
         self.swap_fold_directory(notebook_id, temporary)
         return manifest
+
+    def save_source_partitions(
+        self,
+        notebook_id: str,
+        *,
+        parent_version,
+        source_ids,
+        load_rows,
+    ) -> dict:
+        """Build source companions one-at-a-time and atomically publish root.
+
+        A source with incomplete provenance is omitted, not guessed.  The root
+        manifest intentionally carries counts only: runtime addresses a
+        selected source by SHA-256 and never reads an O(all-sources) directory
+        map.  The parent identity is written last and gates every load.
+        """
+        from app.services.kg.source_partition_index import (
+            SOURCE_PARTITION_FORMAT_VERSION,
+            SourcePartitionUnavailable,
+            build_source_partition,
+            save_source_partition,
+            source_partition_key,
+        )
+
+        live = self.source_partition_dir(notebook_id)
+        temporary = Path(str(live) + ".tmp")
+        old = Path(str(live) + ".old")
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        temporary.mkdir(parents=True, exist_ok=True)
+        published = 0
+        unavailable = 0
+        for source_id in source_ids:
+            try:
+                partition = build_source_partition(
+                    load_rows(source_id),
+                    source_id=source_id,
+                    parent_version=parent_version,
+                    max_memberships=self.settings.source_subgraph_max_memberships,
+                )
+            except SourcePartitionUnavailable:
+                unavailable += 1
+                continue
+            save_source_partition(
+                temporary / source_partition_key(source_id), partition
+            )
+            published += 1
+        manifest = {
+            "format_version": SOURCE_PARTITION_FORMAT_VERSION,
+            "parent_version": parent_version,
+            "published_sources": published,
+            "unavailable_sources": unavailable,
+        }
+        with open(temporary / "manifest.json", "w") as handle:
+            json.dump(manifest, handle, ensure_ascii=False)
+
+        if old.exists():
+            shutil.rmtree(old)
+        preserved = live.exists()
+        if preserved:
+            os.rename(live, old)
+        try:
+            os.rename(temporary, live)
+        except Exception as publish_error:
+            if preserved:
+                try:
+                    os.rename(old, live)
+                except Exception as rollback_error:
+                    publish_error.add_note(
+                        "source partition rollback failed; previous artifact "
+                        f"remains at {old}: {rollback_error!r}"
+                    )
+            raise
+        if preserved:
+            shutil.rmtree(old, ignore_errors=True)
+        return manifest
+
+    def load_source_partitions(
+        self,
+        notebook_id: str,
+        source_ids,
+        *,
+        expected_parent_version,
+        expected_source_signatures,
+        max_nodes=None,
+        max_nnz=None,
+    ) -> list:
+        """Preflight selected headers, then open only their payloads."""
+        from app.services.kg.source_partition_index import (
+            SourcePartitionUnavailable,
+            inspect_source_partition_manifest,
+            load_source_partition,
+            validate_partition_root,
+        )
+
+        root = self.source_partition_dir(notebook_id)
+        validate_partition_root(root, expected_parent_version)
+        max_nodes = max_nodes or (
+            int(self.settings.source_subgraph_max_objects)
+            + int(self.settings.source_subgraph_max_chunks)
+            + int(self.settings.source_subgraph_max_cluster_memberships)
+        )
+        max_nnz = max_nnz or 2 * (
+            int(self.settings.source_subgraph_max_relations)
+            + int(self.settings.source_subgraph_max_memberships)
+            + int(self.settings.source_subgraph_max_cluster_memberships)
+        )
+        headers = [
+            inspect_source_partition_manifest(
+                root,
+                source_id=source_id,
+                expected_parent_version=expected_parent_version,
+                expected_source_signature=expected_source_signatures[source_id],
+            )[1]
+            for source_id in source_ids
+        ]
+        # n_relations contains only cross-partition endpoints. Reserve both
+        # reciprocal transition entries before any large payload is opened.
+        if (
+            sum(header["n_nodes"] for header in headers) > max_nodes
+            or sum(
+                header["transition_nnz"] + 2 * header["n_relations"]
+                for header in headers
+            )
+            > max_nnz
+        ):
+            raise SourcePartitionUnavailable("source_partition_union_limit_exceeded")
+        return [
+            load_source_partition(
+                root,
+                source_id=source_id,
+                expected_parent_version=expected_parent_version,
+                expected_source_signature=expected_source_signatures[source_id],
+            )
+            for source_id in source_ids
+        ]
 
     # ──────────────────────────────────────────────────────── fold swap ──
     def prepare_fold_directory(self, notebook_id: str) -> Path:

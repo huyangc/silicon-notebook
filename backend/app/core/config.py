@@ -378,6 +378,14 @@ class Settings(BaseSettings):
     source_subgraph_ppr_enabled: bool = Field(
         False, validation_alias="SOURCE_SUBGRAPH_PPR_ENABLED"
     )
+    # 超大单来源的 source-addressable scale companion 与其 shadow consumer
+    # 分开回滚；两者默认关闭，Ask/Report 本阶段仍无消费者。
+    source_partitioned_graph_artifacts_enabled: bool = Field(
+        False, validation_alias="SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED"
+    )
+    source_partitioned_ppr_enabled: bool = Field(
+        False, validation_alias="SOURCE_PARTITIONED_PPR_ENABLED"
+    )
     # P0-C:seed pass PPR 与 plan LLM 并行(纯调度,结果逐位等价);False=原串行
     reasoning_ppr_prefetch: bool = Field(True, validation_alias="REASONING_PPR_PREFETCH")
     ppr_damping: float = Field(0.5, validation_alias="PPR_DAMPING")               # rx.pagerank alpha
@@ -575,6 +583,11 @@ class Settings(BaseSettings):
     )
     source_subgraph_cache_max_entries: int = Field(
         64, gt=0, validation_alias="SOURCE_SUBGRAPH_CACHE_MAX_ENTRIES"
+    )
+    # The artifact PPR lane shares the selected-source graph row rails above.
+    # Its separate iteration ceiling bounds request-time full-CSR passes.
+    source_partitioned_ppr_max_iterations: int = Field(
+        30, gt=0, le=100, validation_alias="SOURCE_PARTITIONED_PPR_MAX_ITERATIONS"
     )
     # 精确标识符 fast path(exact_lookup):问题里出现 `_`/`-`/`.` 连接的完整命令名
     # (set_db、place_opt_design)时,先精确定位它所在的小节,再把整节的 chunk 一次

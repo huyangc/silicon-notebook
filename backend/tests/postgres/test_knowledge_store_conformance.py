@@ -2500,6 +2500,20 @@ def test_postgres_selected_source_subgraph_projection_executes_all_bounded_legs(
     assert len(rows["facts"]) == 2
     assert len(rows["fact_elements"]) == 2
     assert rows["clusters"][0]["member_object_id"] == "ko-subgraph-1"
+    partition = projection.source_graph_partition_rows(
+        "nb-personal", "source-golden"
+    )
+    assert partition["reasons"] == []
+    assert {row["object_id"] for row in partition["objects"]} == {
+        "ko-subgraph-1",
+        "ko-subgraph-2",
+    }
+    assert [row["chunk_id"] for row in partition["chunks"]] == [
+        "chunk-subgraph"
+    ]
+    assert [row["relation_id"] for row in partition["relations"]] == [
+        "relation-subgraph"
+    ]
 
 
 class _OrderedMembershipSet(set):

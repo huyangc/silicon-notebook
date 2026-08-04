@@ -2377,6 +2377,9 @@ class IndexProjectionStorePort(Protocol):
         source_ids: Sequence[str],
         limits: Mapping[str, int],
     ) -> Mapping[str, Any]: ...
+    def source_graph_partition_rows(
+        self, notebook_id: str, source_id: str
+    ) -> Mapping[str, Any]: ...
     def embedding_matrix(
         self,
         notebook_id: str,
@@ -2387,6 +2390,10 @@ class IndexProjectionStorePort(Protocol):
     def chunk_sources_for_ids(
         self, notebook_id: str, chunk_ids: Sequence[str]
     ) -> dict[str, str]: ...
+    def source_ids(self, notebook_id: str) -> list[str]: ...
+    def visible_source_ids(
+        self, notebook_id: str, source_ids: list[str]
+    ) -> list[str]: ...
 
 
 @runtime_checkable

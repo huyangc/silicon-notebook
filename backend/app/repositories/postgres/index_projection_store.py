@@ -26,6 +26,7 @@ from app.repositories.postgres._store_utils import iso_timestamp, json_value
 from app.repositories.postgres.embedding_store import EmbeddingStore
 from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
 from app.repositories.source_subgraph_projection import (
+    source_graph_partition_rows_on,
     source_subgraph_rows_on,
     source_subgraph_signature_on,
 )
@@ -340,6 +341,30 @@ class IndexProjectionStore:
                 limits,
                 placeholder="%s",
                 postgres=True,
+            )
+
+    def source_graph_partition_rows(
+        self, notebook_id: str, source_id: str
+    ) -> Mapping[str, Any]:
+        """Offline source-local rows for the partitioned scale artifact."""
+        with self.connect() as connection:
+            connection.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+            )
+            return source_graph_partition_rows_on(
+                connection,
+                notebook_id,
+                source_id,
+                placeholder="%s",
+                postgres=True,
+                limits={
+                    "objects": self.settings.source_subgraph_max_objects,
+                    "relations": self.settings.source_subgraph_max_relations,
+                    "chunks": self.settings.source_subgraph_max_chunks,
+                    "facts": self.settings.source_subgraph_max_facts,
+                    "fact_elements": self.settings.source_subgraph_max_fact_elements,
+                    "cluster_memberships": self.settings.source_subgraph_max_cluster_memberships,
+                },
             )
 
     # ─────────────────────────────────────────────────── graph snapshots ──

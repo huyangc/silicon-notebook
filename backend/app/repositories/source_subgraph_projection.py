@@ -367,3 +367,164 @@ def source_subgraph_rows_on(
         "cluster_memberships",
     )
     return result
+
+
+def source_graph_partition_rows_on(
+    connection: Any,
+    notebook_id: str,
+    source_id: str,
+    *,
+    placeholder: str,
+    postgres: bool,
+    limits: Mapping[str, int],
+) -> dict[str, Any]:
+    """Read one bounded *offline* graph partition without touching peers.
+
+    Unlike :func:`source_subgraph_rows_on`, this projection is used only by the
+    scale-index build/fold job. Every statement starts from one source identity
+    and uses the configured LIMIT+1 ceiling, so cost is bounded by that source
+    rather than the notebook. The payload excludes
+    source/chunk text and fact payloads: the partition builder needs only
+    authorization, endpoint types, evidence ownership and element bindings.
+    """
+    signature = source_subgraph_signature_on(
+        connection,
+        notebook_id,
+        (source_id,),
+        placeholder=placeholder,
+        postgres=postgres,
+    )
+    states = _effective_source_states(signature)
+    result: dict[str, Any] = {
+        "signature": signature,
+        "source": states[0] if len(states) == 1 else None,
+        "objects": [],
+        "facts": [],
+        "fact_elements": [],
+        "chunks": [],
+        "relations": [],
+        "clusters": [],
+        "reasons": [],
+    }
+    if len(states) != 1 or states[0]["source_id"] != source_id:
+        result["reasons"].append("source_scope_drift")
+        return result
+    if not signature[2]:
+        result["reasons"].append("source_index_unavailable")
+        return result
+    state = states[0]
+    if (
+        state["projection_status"]
+        not in {
+            "live_pending_validation",
+            "complete",
+            "incomplete",
+        }
+        or not state["generation"]
+    ):
+        result["reasons"].append("source_projection_unavailable")
+        return result
+
+    status_ph = _in_clause(placeholder, USABLE_STATUSES)
+    order = ' COLLATE "C"' if postgres else ""
+
+    def bounded(
+        name: str, sql: str, params: Sequence[Any], limit_key: str
+    ) -> list[dict[str, Any]]:
+        limit = max(1, int(limits[limit_key]))
+        rows = _rows(connection, sql + f" LIMIT {placeholder}", (*params, limit + 1))
+        if len(rows) > limit:
+            result["reasons"].append(f"{name}_limit_exceeded")
+        return rows[:limit]
+
+    object_from = (
+        "FROM knowledge_object_sources kos JOIN knowledge_objects ko "
+        if postgres
+        else "FROM knowledge_object_sources kos INDEXED BY idx_kos_source_object "
+        "CROSS JOIN knowledge_objects ko "
+    )
+    result["objects"] = bounded(
+        "object",
+        "SELECT ko.id AS object_id,ko.object_type "
+        + object_from
+        + "ON ko.id=kos.object_id AND ko.notebook_id=kos.notebook_id "
+        + f"WHERE kos.notebook_id={placeholder} AND kos.source_id={placeholder} "
+        + f"AND ko.status IN ({status_ph}) ORDER BY ko.id{order}",
+        (notebook_id, source_id, *USABLE_STATUSES),
+        "objects",
+    )
+    result["facts"] = bounded(
+        "fact",
+        "SELECT id AS fact_id,global_object_id AS object_id,object_type,"
+        "projection_version FROM knowledge_source_facts "
+        f"WHERE notebook_id={placeholder} AND source_id={placeholder} "
+        f"AND source_generation={placeholder} ORDER BY id{order}",
+        (notebook_id, source_id, state["generation"]),
+        "facts",
+    )
+    result["fact_elements"] = bounded(
+        "fact_element",
+        "SELECT fact_id,element_id FROM knowledge_source_fact_elements "
+        f"WHERE notebook_id={placeholder} AND source_id={placeholder} "
+        f"AND source_generation={placeholder} "
+        f"ORDER BY fact_id{order},element_id{order}",
+        (notebook_id, source_id, state["generation"]),
+        "fact_elements",
+    )
+    chunk_from = (
+        "FROM chunks " if postgres else "FROM chunks INDEXED BY idx_chunks_source "
+    )
+    result["chunks"] = bounded(
+        "chunk",
+        "SELECT id AS chunk_id,element_ids "
+        + chunk_from
+        + f"WHERE notebook_id={placeholder} AND source_id={placeholder} "
+        f"ORDER BY id{order}",
+        (notebook_id, source_id),
+        "chunks",
+    )
+    # Endpoint ownership is deliberately not restricted to this one partition:
+    # an A-owned relation whose target is authorized by selected B must become
+    # available when A+B are combined.  Runtime rechecks both endpoints against
+    # the union of selected object partitions before admitting the edge.
+    result["relations"] = bounded(
+        "relation",
+        "SELECT r.id AS relation_id,r.source_object_id,r.target_object_id,"
+        "r.edge_type,r.evidence,r.review_status "
+        "FROM knowledge_relations r JOIN knowledge_objects so "
+        "ON so.id=r.source_object_id AND so.notebook_id=r.notebook_id "
+        "JOIN knowledge_objects to2 ON to2.id=r.target_object_id "
+        "AND to2.notebook_id=r.notebook_id "
+        f"WHERE r.notebook_id={placeholder} AND r.source_id={placeholder} "
+        "AND COALESCE(r.review_status,'pending')!='rejected' "
+        f"AND so.status IN ({status_ph}) AND to2.status IN ({status_ph}) "
+        f"ORDER BY r.id{order}",
+        (notebook_id, source_id, *USABLE_STATUSES, *USABLE_STATUSES),
+        "relations",
+    )
+    if postgres:
+        cluster_sql = (
+            "SELECT cc.canonical_id,cc.member_object_id "
+            "FROM concept_clusters cc JOIN knowledge_object_sources kos "
+            "ON kos.notebook_id=cc.notebook_id "
+            "AND kos.object_id=cc.member_object_id "
+            f"WHERE cc.notebook_id={placeholder} AND kos.source_id={placeholder} "
+            f"ORDER BY cc.canonical_id{order},cc.member_object_id{order}"
+        )
+    else:
+        cluster_sql = (
+            "SELECT cc.canonical_id,cc.member_object_id "
+            "FROM knowledge_object_sources kos INDEXED BY idx_kos_source_object "
+            "CROSS JOIN concept_clusters cc INDEXED BY idx_clusters_member "
+            "ON cc.notebook_id=kos.notebook_id "
+            "AND cc.member_object_id=kos.object_id "
+            f"WHERE kos.notebook_id={placeholder} AND kos.source_id={placeholder} "
+            "ORDER BY cc.canonical_id,cc.member_object_id"
+        )
+    result["clusters"] = bounded(
+        "cluster",
+        cluster_sql,
+        (notebook_id, source_id),
+        "cluster_memberships",
+    )
+    return result
