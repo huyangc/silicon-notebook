@@ -67,6 +67,35 @@ class ActiveSourceScope:
     base_narrowed: bool | None = None
 
     @property
+    def source_ceiling(self) -> bool:
+        """Is a frozen local allow-list in force for filtering?
+
+        ⚠ NOT the same question as ``restricted``, and conflating them is a
+        real regression (codex #431 R7 P1). Two independent facts:
+
+        * **ceiling** — "must candidates be filtered against the frozen id
+          list?" True whenever a scope was submitted at all, *including* a
+          full selection. The freeze exists so that a source uploaded after
+          validation but before a detached worker retrieves evidence cannot
+          join the run; answering False for a full selection makes ``allows()``
+          bypass the list entirely and the newly uploaded source silently
+          participates.
+        * **restricted** — "should local-only channels (private Memory,
+          conversation history, PPR, community reports, corpus profile) be
+          switched off?" That penalty belongs to an actual narrowing, not to
+          the browser's default "everything is checked".
+
+        Every filtering path consults this; only ``source_scope_restricted()``
+        and ``scoped_conversation_history()`` consult ``restricted``.
+        """
+        return self.mode == "include" or bool(self.source_ids)
+
+    @property
+    def base_ceiling(self) -> bool:
+        """Library-dimension mirror of ``source_ceiling`` (see its docstring)."""
+        return self.base_mode == "include" or bool(self.base_notebook_ids)
+
+    @property
     def restricted(self) -> bool:
         # Prefer the boundary's computed fact; fall back to shape only when it
         # was never computed (direct service-layer construction).
@@ -109,7 +138,7 @@ class ActiveSourceScope:
         """
         if not notebook_id or notebook_id == self.notebook_id:
             return True
-        if not self.base_restricted:
+        if not self.base_ceiling:
             return True
         if self.base_mode == "include":
             return notebook_id in self.base_notebook_ids
@@ -122,7 +151,7 @@ class ActiveSourceScope:
         # governed by the active notebook's source checkboxes.
         if notebook_id and notebook_id != self.notebook_id:
             return True
-        if not self.restricted:
+        if not self.source_ceiling:
             return True
         if not source_id:
             return False
@@ -393,7 +422,7 @@ def scoped_participants(notebook_ids: Iterable[str]) -> tuple[str, ...]:
     ContextVar read and a tuple copy.
     """
     scope = current_source_scope()
-    if scope is None or not scope.base_restricted:
+    if scope is None or not scope.base_ceiling:
         return tuple(str(value) for value in notebook_ids)
     return tuple(
         str(value) for value in notebook_ids if scope.covers_notebook(str(value))
@@ -426,7 +455,7 @@ def scoped_allowed_source_ids(
         # `is not None`, exactly as the include-ceiling branch below already
         # requires.
         return ()
-    if not scope.restricted or notebook_id != scope.notebook_id:
+    if not scope.source_ceiling or notebook_id != scope.notebook_id:
         return allowed
     if scope.mode == "include":
         if allowed is None:
@@ -463,7 +492,7 @@ def filter_retrieval_items(
     # `scope.allows()` -- and its "knowledge"/"relation" branch -- which calls
     # `covers_notebook()` directly -- would never see the base-library ceiling
     # applied.
-    if scope is None or not (scope.restricted or scope.base_restricted):
+    if scope is None or not (scope.source_ceiling or scope.base_ceiling):
         return values
     out: list[Any] = []
     for item in values:
@@ -562,7 +591,7 @@ def scoped_subgraph_nodes(subgraph: Iterable[Any]) -> list[Any]:
     would leak through here.  A new node producer must stamp ``notebook_id``.
     """
     scope = current_source_scope()
-    if scope is None or not scope.base_restricted:
+    if scope is None or not scope.base_ceiling:
         return list(subgraph)
     out: list[Any] = []
     for triple in subgraph:
@@ -579,7 +608,7 @@ def evidence_json_allowed(notebook_id: str, raw: Any) -> bool:
         return True
     if not scope.covers_notebook(notebook_id):
         return False
-    if not scope.restricted or notebook_id != scope.notebook_id:
+    if not scope.source_ceiling or notebook_id != scope.notebook_id:
         return True
     if isinstance(raw, str):
         try:

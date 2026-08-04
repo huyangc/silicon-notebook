@@ -153,3 +153,167 @@ def test_candidate_only_memory_is_not_ask_available(repo):
     summary = repo.get_notebook(nb.id)
     assert summary.counts["memories"] == 1   # 计数看得到候选
     assert summary.ask_available is False     # 但候选不让对话可用
+
+
+# ---------------------------------------------------------------------------
+# local_evidence_available —— ask_available 的**本地那一半**(codex #431 R7 P1)
+#
+# 合并后的单个布尔分不出「有得可搜」是本地撑起来的还是参考库撑起来的,于是「把参考库
+# 全部取消勾选后本地还剩不剩东西」只能退化成拿**可见来源数**回答 —— 而 Knowhow 表、
+# 已确认 Memory、本地图谱都不计入那个数。下面逐条钉住这个信号的边界。
+# ---------------------------------------------------------------------------
+
+
+def test_empty_notebook_has_no_local_evidence(repo):
+    nb = repo.create_notebook(NotebookCreate(name="empty-local"))
+    assert repo.get_notebook(nb.id).local_evidence_available is False
+
+
+def test_knowhow_only_chunks_are_local_evidence(repo):
+    """本条就是被误拒的那个形态:零可见来源,但 knowhow 格子照常可搜。
+    可见来源数为 0 → 旧判据说「本地为空」;local_evidence_available 必须说不是。"""
+    nb = repo.create_notebook(NotebookCreate(name="knowhow-local"))
+    with repo._write() as db:
+        _add_source(db, nb.id, "s-knowhow", "knowhow")
+        _add_chunk(db, nb.id, "s-knowhow", "c-knowhow")
+    summary = repo.get_notebook(nb.id)
+    assert summary.counts["sources"] == 0            # 可见来源确实为 0
+    assert summary.local_evidence_available is True  # 但本地确实有得可搜
+
+
+def test_confirmed_memory_is_local_evidence(repo):
+    """已确认 Memory 同样没有可见来源 —— 它也在本地那一半里。"""
+    nb = repo.create_notebook(NotebookCreate(name="mem-local"))
+    with repo._write() as db:
+        _add_memory(db, nb.id, repo.current_user().id, "m-1", "confirmed")
+    summary = repo.get_notebook(nb.id)
+    assert summary.counts["sources"] == 0
+    assert summary.local_evidence_available is True
+
+
+def test_candidate_only_memory_is_not_local_evidence(repo):
+    """candidate 不作证据 —— 与 ask_available 同一口径。顺带钉住:
+    counts["memories"] 只是**便宜预过滤**(全状态计数),不是判据本身。"""
+    nb = repo.create_notebook(NotebookCreate(name="candidate-local"))
+    with repo._write() as db:
+        _add_memory(db, nb.id, repo.current_user().id, "m-cand", "candidate")
+    summary = repo.get_notebook(nb.id)
+    assert summary.counts["memories"] == 1
+    assert summary.local_evidence_available is False
+
+
+def test_local_usable_kg_is_local_evidence(repo):
+    nb = repo.create_notebook(NotebookCreate(name="kg-local"))
+    with repo._write() as db:
+        _add_kg_object(db, nb.id, "ko-1")
+    assert repo.get_notebook(nb.id).local_evidence_available is True
+
+
+def test_deprecated_only_local_kg_is_not_local_evidence(repo):
+    """本地那一半沿用同一条 USABLE_STATUSES 口径,不因「建过图」就算有证据。"""
+    nb = repo.create_notebook(NotebookCreate(name="dep-kg-local"))
+    with repo._write() as db:
+        _add_kg_object(db, nb.id, "ko-dep", status="deprecated")
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_ready is True
+    assert summary.local_evidence_available is False
+
+
+def test_mounted_base_kg_is_not_local_evidence(repo):
+    """**反向护栏**:挂载参考库的 KG 让 ask_available 为真,但它是**参考库**证据,
+    绝不能算进本地那一半 —— 算进去的话,一个零本地证据的库把参考库全部取消勾选后
+    仍会被放行,Ask 白跑一轮零证据、报告还要落一行 + 调一次意图模型。"""
+    base = repo.create_notebook(NotebookCreate(name="ref-only"))
+    with repo._write() as db:
+        _add_kg_object(db, base.id, "ko-base")
+    repo.mark_notebook_base(base.id)
+    nb = repo.create_notebook(NotebookCreate(name="mounts-ref-only"))
+    repo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    summary = repo.get_notebook(nb.id)
+    assert summary.ask_available is True              # 借参考库可对话
+    assert summary.local_evidence_available is False  # 但本地一无所有
+
+
+# ---------------------------------------------------------------------------
+# 效率回归:新信号不得新增数据库往返
+#
+# 这条路径是「打开笔记本卡 5-6 秒」事故的现场,效率是本仓库的一等约束。四个可用性
+# 探针短路求值,顺序有成本理由;拆出本地那一半只允许**复用**它们的结果。
+# ---------------------------------------------------------------------------
+
+AVAILABILITY_PROBES = (
+    "notebook_has_chunk",
+    "notebook_has_usable_kg",
+    "notebook_has_usable_base_kg",
+    "notebook_has_confirmed_memory",
+)
+
+
+class _CountingQueries:
+    """透明代理:记录每次方法调用名后原样委托。"""
+
+    def __init__(self, inner):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "calls", [])
+
+    def __getattr__(self, name):
+        attribute = getattr(self._inner, name)
+        if not callable(attribute):
+            return attribute
+
+        def recorded(*args, **kwargs):
+            self.calls.append(name)
+            return attribute(*args, **kwargs)
+
+        return recorded
+
+    def probes(self) -> list[str]:
+        return [name for name in self.calls if name in AVAILABILITY_PROBES]
+
+
+def _probe_calls(repo, notebook_id) -> tuple[list[str], list[str]]:
+    summaries = repo._runtime.notebook_summaries
+    original = summaries.queries
+    spy = _CountingQueries(original)
+    summaries.queries = spy
+    try:
+        repo.get_notebook(notebook_id)
+    finally:
+        summaries.queries = original
+    return spy.probes(), spy.calls
+
+
+def test_chunked_notebook_still_costs_one_availability_probe(repo):
+    """绝大多数库(有 chunk)恒 1 次探针 —— 与拆分前逐字一致。"""
+    nb = repo.create_notebook(NotebookCreate(name="one-probe"))
+    with repo._write() as db:
+        _add_source(db, nb.id, "s-doc", "document")
+        _add_chunk(db, nb.id, "s-doc", "c-doc")
+    probes, _calls = _probe_calls(repo, nb.id)
+    assert probes == ["notebook_has_chunk"]
+
+
+def test_empty_notebook_now_costs_one_fewer_probe(repo):
+    """空库:kg_ready/base_kg_available 都为假早已免掉 B/C,而新加的
+    counts["memories"] 预过滤(它是本函数**本来就查**的 memory_counts_by_owner_notebook
+    的结果,不是新查询)连 D 也免了 —— 从拆分前的 2 次降到 1 次。"""
+    nb = repo.create_notebook(NotebookCreate(name="empty-probe"))
+    probes, calls = _probe_calls(repo, nb.id)
+    assert probes == ["notebook_has_chunk"]
+    # 预过滤只复用已在手的那一次分组计数,没有新增第二次 memory 查询。
+    assert calls.count("memory_counts_by_owner_notebook") == 1
+
+
+def test_base_only_notebook_probe_count_is_unchanged(repo):
+    """本条是「C 与 D 换序是否要多付一次查询」的对账点。
+    换序本身会让 base-only 库多付一次 confirmed-memory 探针(local 的取值由 D 决定,
+    c 再真也代替不了);memories 预过滤把它挡掉,于是这个形态仍是 A + C = 2 次,
+    与拆分前逐字一致。"""
+    base = repo.create_notebook(NotebookCreate(name="ref-probe"))
+    with repo._write() as db:
+        _add_kg_object(db, base.id, "ko-base")
+    repo.mark_notebook_base(base.id)
+    nb = repo.create_notebook(NotebookCreate(name="mounts-ref-probe"))
+    repo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    probes, _calls = _probe_calls(repo, nb.id)
+    assert probes == ["notebook_has_chunk", "notebook_has_usable_base_kg"]

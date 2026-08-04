@@ -24,3 +24,18 @@ import type { NotebookSummary } from "./workspace-model.ts";
 export function isAskBlocked(notebook: NotebookSummary | null): boolean {
   return notebook?.ask_available === false;
 }
+
+/**
+ * 本地(当前笔记本自己)那一维**有没有可检索证据**:后端 ask_available 四个判据里的
+ * 前三个 —— 任意 chunk(含 Knowhow 格子)、本地可用 KG、该用户在本库的已确认 Memory。
+ *
+ * 只用来回答「把参考库全部取消勾选之后,本地还剩不剩东西可搜」。这个问题**不能**用
+ * 「可见来源数 > 0」代答:Knowhow 表和 Memory 都没有可见来源,只有 Knowhow / 只有
+ * 已确认 Memory 的库来源数恒为 0,却照常可搜(codex #431 R7 P1)。
+ *
+ * 字段缺失(旧后端/版本 skew)时返回 false —— 消费侧(source-scope.localScopeIsEmpty)
+ * 把它与可见来源数取**或**,所以 false 就是逐字回落到该字段存在之前的判据,只增不减。
+ */
+export function hasLocalEvidence(notebook: NotebookSummary | null): boolean {
+  return notebook?.local_evidence_available === true;
+}

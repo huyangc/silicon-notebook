@@ -513,6 +513,55 @@ def test_base_only_submission_on_a_library_only_notebook_is_409():
     assert exc.value.status_code == 409
 
 
+def test_knowhow_only_notebook_excluding_every_library_is_not_409():
+    """codex #431 R7 P1:本地证据宇宙 ≠ 可见导入来源数。
+
+    只有 Knowhow 表(或只有已确认 Memory)的笔记本可见来源恒为 0,于是浏览器**默认**
+    发出的 `exclude:[]` 被 `_validate_source_scope` 冻结成 `include:[]`、`narrowed=False`
+    —— 这一维**没有表达任何收窄意图**,却被当成「本地为空」。再把参考库全部取消勾选,
+    整个请求就被 409 掉,而那些 Knowhow 格子照常可搜。所以这是**界面可达**的误拒,
+    不是只有直连 API 才碰得到。
+
+    判据改问 `local_evidence_available`(catalog 由 chunk / 本地可用 KG / 已确认 Memory
+    三条本地判据算出),它对这个库为真。
+    """
+    notebook = NotebookSummary(
+        id="nb", name="n", purpose="", primary_domain="", status="ready",
+        counts={"sources": 0}, created_label="",
+        base_notebooks=[_notebook_ref("b1")],
+        local_evidence_available=True,      # Knowhow 格子 / 已确认 Memory
+    )
+    resolved_source, resolved_base = _require_ask_available(
+        notebook, _ScopeRepo([], 0),
+        SourceScope(mode="exclude", source_ids=[]),   # ← 浏览器的「全选」表示法
+        BaseNotebookScope(mode="include", notebook_ids=[]),
+    )
+    assert resolved_source == SourceScope(
+        mode="include", source_ids=[], narrowed=False
+    )
+    assert resolved_base == BaseNotebookScope(
+        mode="include", notebook_ids=[], narrowed=True
+    )
+
+
+def test_clearing_every_local_source_is_still_409():
+    """反向:本地维度**真被收窄**(5 选 0)时以冻结选择为准,本地证据信号不得
+    把用户主动点下的「清空」翻回来。"""
+    notebook = NotebookSummary(
+        id="nb", name="n", purpose="", primary_domain="", status="ready",
+        counts={"sources": 3}, created_label="",
+        base_notebooks=[_notebook_ref("b1")],
+        local_evidence_available=True,
+    )
+    with pytest.raises(HTTPException) as exc:
+        _require_ask_available(
+            notebook, _ScopeRepo(["s1", "s2", "s3"], 3),
+            SourceScope(mode="include", source_ids=[]),
+            BaseNotebookScope(mode="include", notebook_ids=[]),
+        )
+    assert exc.value.status_code == 409
+
+
 def test_base_only_submission_with_local_sources_present_is_not_409():
     """同样只提交库维度,但本地确有来源 —— 必须放行,否则整条特性把「只想少借
     一个参考库」的用户挡在门外。"""
@@ -1690,3 +1739,43 @@ def test_receipt_does_not_truncate_below_the_model_cap():
     assert receipt is not None
     assert len(receipt.bases) == 1200, "1000 处截断会让回执谎报参考库总数"
     assert sum(1 for item in receipt.bases if item.included) == 1
+
+
+def test_full_selection_keeps_its_frozen_ceiling_while_leaving_channels_open():
+    """codex #431 R7 P1:「是否收窄」与「冻结上限是否生效」是两个独立事实。
+
+    浏览器全选 → 入口冻结成 ``include:[当时的全部来源]`` 且 ``narrowed=False``。
+    此时私有 Memory/会话历史/PPR 必须照常开着(不收窄就不该受罚),**但冻结的 id 列表
+    必须照样过滤**——否则校验之后、脱离连接的 worker 取证据之前上传的来源会静默加入
+    本次运行,而冻结机制存在的全部理由就是挡住它。
+    """
+    frozen = ActiveSourceScope(
+        notebook_id="nb",
+        mode="include",
+        source_ids=frozenset({"s1", "s2"}),
+        source_narrowed=False,
+    )
+    assert frozen.restricted is False, "全选不该关闭本地通道"
+    assert frozen.source_ceiling is True, "冻结列表必须仍然生效"
+    assert frozen.allows("nb", "s1") is True
+    assert frozen.allows("nb", "s3") is False, (
+        "校验后新上传的来源必须被冻结列表挡住"
+    )
+
+
+def test_full_library_selection_keeps_its_frozen_mount_ceiling():
+    """参考库维度的同一条:全选挂载库 ⇒ 不收窄,但冻结的挂载集仍是硬上限。"""
+    frozen = ActiveSourceScope(
+        notebook_id="nb",
+        mode="exclude",
+        source_ids=frozenset(),
+        base_mode="include",
+        base_notebook_ids=frozenset({"b1"}),
+        base_narrowed=False,
+    )
+    assert frozen.base_restricted is False
+    assert frozen.base_ceiling is True
+    assert frozen.covers_notebook("b1") is True
+    assert frozen.covers_notebook("b2") is False, (
+        "创建后新挂载的参考库必须被冻结快照挡住"
+    )

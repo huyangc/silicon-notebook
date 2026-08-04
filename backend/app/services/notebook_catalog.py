@@ -253,23 +253,44 @@ class NotebookSummaryQuery:
             # 直接用 kg_ready/base_kg_available(含 deprecated),而用 usable 版查询。短路:
             # has_chunk 覆盖绝大多数库(可见来源 + knowhow 格子;可用活跃 KG 必有 chunk),
             # 放最前;usable-KG 查询用已算好的 kg_ready/base_kg_available 做便宜预过滤(为假
-            # 则连查都免了);confirmed-memory 查询垫底。仅此单库路径回填;列表投影保持默认 True。
-            summary.ask_available = bool(
+            # 则连查都免了);confirmed-memory 查询垫底。仅此单库路径回填;列表投影保持默认。
+            #
+            # 四个判据里**前三个是本地证据、第四个是参考库证据**,所以拆成两步求值:先短路
+            # 求出本地那半(local_evidence_available),参考库那条只在本地为假时才查。
+            # ask_available 的取值与语义**逐字不变**(a or b or d) or c ≡ a or b or c or d。
+            #
+            # 零新增往返(效率是本仓库一等约束,这条路径就是「打开笔记本卡 5-6 秒」的现场):
+            #   * 前三个分支本来就要为 ask_available 求值,结果直接复用,不重查。
+            #   * confirmed-memory 那条新加了一个**已在手**的便宜预过滤 counts["memories"]
+            #     —— 它是上面 memory_counts_by_owner_notebook 的结果(本函数无条件已查),
+            #     按 (created_by, notebook_id) 分组的**全状态** COUNT(*),是 confirmed 的
+            #     严格超集:为 0 即绝无 confirmed,直接免掉那次 EXISTS。形态与 kg_ready /
+            #     base_kg_available 给 usable-KG 查询做预过滤完全一致。
+            #   * 唯一被交换的是 C 与 D 的先后。逐形态对账(A=has_chunk, B=usable KG,
+            #     C=usable base KG, D=confirmed memory):有 chunk 的库(绝大多数)恒 1 次查询,
+            #     与改前一致;最坏情形仍是 4 次,与改前一致;「零 memory 行 + 需要走到 D」的
+            #     库(如刚建的空库)由新预过滤**省下** 1 次;「c 真且 d 假」的库多付 1 次 D
+            #     —— 那是为了如实回答 local_evidence_available 必须付的那一次(local 的取值
+            #     由 D 决定,c 再真也代替不了它),且已被预过滤收窄到「本库对该用户有
+            #     memory 行但一条都没确认」这一形态。
+            local_evidence = bool(
                 self.queries.notebook_has_chunk(db, notebook_id)
                 or (
                     summary.kg_ready
                     and self.queries.notebook_has_usable_kg(db, notebook_id)
                 )
                 or (
-                    summary.base_kg_available
-                    and self.queries.notebook_has_usable_base_kg(db, notebook_id)
-                )
-                or (
-                    user_id is not None
+                    int(summary.counts.get("memories", 0)) > 0
+                    and user_id is not None
                     and self.queries.notebook_has_confirmed_memory(
                         db, notebook_id, user_id
                     )
                 )
+            )
+            summary.local_evidence_available = local_evidence
+            summary.ask_available = local_evidence or bool(
+                summary.base_kg_available
+                and self.queries.notebook_has_usable_base_kg(db, notebook_id)
             )
             job_row = (
                 self.kg_build_jobs.latest_on(db, notebook_id)

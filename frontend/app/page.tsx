@@ -19,6 +19,7 @@ import {
   baseScopePayload,
   defaultBaseScopeSelection,
   defaultSourceScopeSelection,
+  localScopeIsEmpty,
   removeSourceFromSelection,
   retrievalScopeSummary,
   selectedBaseCount,
@@ -173,7 +174,7 @@ import {
   intentUnderstoodStep,
   replaceLastIntentStep,
 } from "./ask-intent-trace";
-import { isAskBlocked } from "./ask-availability";
+import { hasLocalEvidence, isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
@@ -2211,8 +2212,17 @@ export default function Home() {
   // 真机事故(本次改动的起因):勾定单篇文章提问,16 条引用全部来自那个 84 篇论文的
   // 参考库 —— 因为参考库当时无条件全量参与。所以「范围为空」必须**两维同时**为空
   // 才算有得可搜;把参考库当成恒真的兜底,正是那条 bug 的翻版。
+  //
+  // 本地那一维的空判交给 localScopeIsEmpty(后端 has_local 的镜像):不能拿「勾了几个
+  // 可见来源」代表本地证据宇宙 —— Knowhow 表与已确认 Memory 没有可见来源,那样的库
+  // 计数恒为 0,会被这道门连同问答输入框和新建报告一起锁死(codex #431 R7 P1)。
   const sourceScopeBlocked = (
-    selectedLocalSourceCount === 0 && selectedBaseNotebookCount === 0
+    localScopeIsEmpty(
+      selectedLocalSourceCount,
+      notebookSourceTotal,
+      hasLocalEvidence(currentNotebook),
+    )
+    && selectedBaseNotebookCount === 0
   );
   const askBlocked = isAskBlocked(currentNotebook) || sourceScopeBlocked;
   const askPlaceholderText = sourceScopeBlocked

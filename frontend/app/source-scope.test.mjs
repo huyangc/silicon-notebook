@@ -7,6 +7,7 @@ import {
   crossLibrarySourceNotebookId,
   defaultBaseScopeSelection,
   defaultSourceScopeSelection,
+  localScopeIsEmpty,
   retrievalScopeSummary,
   selectedBaseCount,
   selectedBaseIds,
@@ -148,4 +149,36 @@ test("挂了参考库就必须报出第二段(含 0/L 这种全被排除的情�
     retrievalScopeSummary({ selected: 5, total: 5 }, { selected: 3, total: 3 }),
     "本库 5/5 · 参考库 3/3",
   );
+});
+
+
+// ---------------------------------------------------------------------------
+// 本地那一维的空判(后端 _require_non_empty_scope 里 has_local 的镜像)
+//
+// 起因:只有 Knowhow 表(或只有已确认 Memory)的笔记本可见来源恒为 0,勾选计数因此
+// 也恒为 0 —— 拿它当「本地证据宇宙为空」,问答输入框与新建报告会被整个锁死,而那些
+// 格子照常可搜(codex #431 R7 P1)。
+// ---------------------------------------------------------------------------
+
+test("Knowhow-only 库(零可见来源但后端说有本地证据)不算范围为空", () => {
+  assert.equal(localScopeIsEmpty(0, 0, true), false);
+});
+
+test("真的什么都没有(零来源、零本地证据)才算范围为空", () => {
+  assert.equal(localScopeIsEmpty(0, 0, false), true);
+});
+
+test("用户主动清空全部来源时以选择为准,本地证据信号不得把它翻回来", () => {
+  assert.equal(localScopeIsEmpty(0, 5, true), true);
+});
+
+test("勾了一部分来源就不是空范围", () => {
+  assert.equal(localScopeIsEmpty(2, 5, false), false);
+  assert.equal(localScopeIsEmpty(5, 5, false), false);
+});
+
+test("有来源但尚未解析出证据时仍按来源数放行(信号只增不减)", () => {
+  // local_evidence_available 为假(还没有任何 chunk),但 5 篇来源全勾着——
+  // 这与该字段存在之前的行为逐字一致,不能因为新信号而多拦一次。
+  assert.equal(localScopeIsEmpty(5, 5, false), false);
 });

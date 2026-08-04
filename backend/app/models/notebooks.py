@@ -87,6 +87,19 @@ class NotebookSummary(BaseModel):
     # knowhow chunk、confirmed memory 与 base+overlay 配置前端都看不到,故由后端权威计算。
     # 仅单库 get() 精确回填;列表投影恒为默认 True(列表不消费此字段,永不误禁)。
     ask_available: bool = True
+    # ask_available 的**本地那一半**:上面四个判据里去掉「挂载参考库有 KG」之后剩下的
+    # 三个(任意 chunk[含 knowhow 格子]、本地可用 KG、该用户在本库的 confirmed memory)。
+    # 存在的理由:ask_available 是合并后的单个布尔,分不出「有得可搜」是本地撑起来的还是
+    # 参考库撑起来的;而「本次请求把参考库全部取消勾选后还剩不剩东西」恰恰只能问本地那半。
+    # 少了它,后端与前端都只能退化成拿**可见导入来源数**代表本地证据宇宙,于是一个只有
+    # Knowhow 表(或只有已确认 Memory)的库会被误判成空范围:那些证据没有可见来源
+    # (codex #431 R7 P1)。
+    # 默认 **False** —— 与 ask_available 的默认 True 方向相反,但遵循的是同一条规则:
+    # 「未回填时逐字复现该字段存在之前的行为」。消费侧(_require_non_empty_scope /
+    # 前端 localScopeIsEmpty)都写成「local_evidence_available 或 可见来源数>0」,
+    # 所以 False 就等于回落到旧判据、只增不减;默认 True 反而会让列表投影凭空放行一次
+    # 空范围检索。同 ask_available:仅单库 get() 精确回填,列表投影(from_row)保持默认。
+    local_evidence_available: bool = False
     # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
     kg_pending_sources: int = 0
     # Phase 2 只读共享:本用户对该库的访问权。"owner" = 自有(可写);

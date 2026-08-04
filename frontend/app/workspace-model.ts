@@ -53,6 +53,12 @@ export type NotebookSummary = {
   // knowhow 格子]/已建 KG/参考库有 KG/confirmed memory 任一即真)。仅单库 get() 精确
   // 回填,列表恒 True。前端据此禁用空库对话框(见 ask-availability.isAskBlocked)。
   ask_available?: boolean;
+  // ask_available 的**本地那一半**(去掉「挂载参考库有 KG」):任意 chunk[含 knowhow
+  // 格子]/本地可用 KG/该用户的 confirmed memory 任一即真。用来回答「把参考库全部取消
+  // 勾选后本地还剩不剩东西」——那个问题不能用可见来源数代答:Knowhow 表与 Memory 没有
+  // 可见来源(见 source-scope.localScopeIsEmpty)。仅单库 get() 精确回填;缺失当 false,
+  // 消费侧与来源数取或,故只增不减。
+  local_evidence_available?: boolean;
   kg_pending_sources?: number;
   kg_build?: KgBuildJobStatus | null;
   access?: "owner" | "reader";

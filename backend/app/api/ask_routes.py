@@ -167,47 +167,60 @@ def _require_non_empty_scope(
     ``ask_available`` gate: a report may legitimately be created on a notebook
     the Ask box would refuse, and widening that is a separate behaviour change.
 
-    Each dimension answers with its FROZEN selection when the request scoped
-    it, and with the notebook's real universe when it did not. The two
-    fallbacks are ``counts["sources"]`` and ``base_notebooks`` — what exists,
-    not what is selected. Neither costs a round trip: both ride on the
-    ``NotebookSummary`` the caller already loaded, and ``counts["sources"]`` is
-    ``visible_source_count``, which is ``all_visible_source_ids`` counted
-    (identical ``source_type NOT IN ('memory','knowhow')`` predicate), so the
-    omitted-dimension answer agrees exactly with the frozen one.
+    Each dimension answers with its FROZEN selection when the request actually
+    NARROWED it, and with the notebook's real evidence universe when it did
+    not. Neither fallback costs a round trip: both ride on the
+    ``NotebookSummary`` the caller already loaded.
 
-    An omitted dimension must NOT be read as a non-empty one. That shortcut is
-    what let a base-only notebook (zero local sources, ``ask_available`` true
-    via its mounted libraries) submit ``base_scope`` alone with every library
-    unchecked and still be accepted: ``has_local`` said True because nothing
-    was submitted, and Ask then ran a whole round on an empty universe — for a
-    report, that is a persisted row plus an intent model call, which is the
-    exact spend this function exists to prevent.
+    A dimension the request did not narrow must NOT be read as a non-empty one.
+    That shortcut is what let a base-only notebook (zero local evidence,
+    ``ask_available`` true via its mounted libraries) submit ``base_scope``
+    alone with every library unchecked and still be accepted: ``has_local``
+    said True because nothing was submitted, and Ask then ran a whole round on
+    an empty universe — for a report, that is a persisted row plus an intent
+    model call, which is the exact spend this function exists to prevent.
 
     But a request that scoped NEITHER dimension is not making a selection at
-    all, and is left alone: ``ask_available`` is the authority there, and it
-    counts evidence this function cannot see (Knowhow cells, confirmed Memory,
-    a mounted library's KG). Failing those notebooks would reject the historical
-    unscoped call — the one shape that must stay byte-identical.
+    all, and is left alone: ``ask_available`` is the authority there.
     """
     if resolved_source_scope is None and resolved_base_scope is None:
         return
-    # ⚠ 已知限制(codex #431 P2,核实属实但刻意未修):省略本地维度时按可见来源数判,
-    # 而本地证据宇宙还含 Knowhow 格、已确认 Memory、本地图谱——ask_available 的四个
-    # 分支里有三个是本地的,counts["sources"] 只覆盖第一个的一部分。于是「只有
-    # Knowhow + 显式排除全部参考库」会被误拒成空范围。
-    # 正确修法要 NotebookSummary 暴露「本地证据宇宙」的分解(ask_available 现在是合并
-    # 后的单个布尔,分不出是本地还是参考库撑起来的),改动面超出本次特性。
-    # 不改成无条件 True:那会让「真的零证据 + 排除全部参考库」重新变成不拒,烧一轮
-    # 模型调用产出零证据答案——正是本函数存在的理由(见 test_base_only_submission_
-    # on_a_library_only_notebook_is_409)。
-    # 可达性:浏览器恒发 source_scope(sourceScopePayload 永不返回 undefined),故界面
-    # 路径不可达;只有直连 API 且省略 source_scope、同时提交 base_scope 才触发。
-    has_local = (
-        bool(resolved_source_scope.source_ids)
-        if resolved_source_scope is not None
-        else int(notebook.counts.get("sources", 0)) > 0
+    # 本地维度的证据宇宙 ≠ 可见导入来源数。ask_available 的四个判据里有**三个**是本地的
+    # (任意 chunk[含 Knowhow 格子]、本地可用 KG、该用户的已确认 Memory),而
+    # counts["sources"] 只覆盖第一个的一部分:Knowhow 表与 Memory 根本没有可见来源。
+    # 拿来源数当本地宇宙,会把「只有 Knowhow / 只有已确认 Memory + 显式取消勾选全部
+    # 参考库」误拒成空范围 —— 而浏览器恒发 source_scope(sourceScopePayload 永不返回
+    # undefined),零可见来源时它冻结成 include:[],所以那是**界面可达**的误拒
+    # (codex #431 R7 P1)。
+    # 故本地宇宙改问 NotebookSummary.local_evidence_available(catalog 侧由那三个本地
+    # 判据算出,零新增查询),并与 counts["sources"] 取**或**:该信号只增不减,尚在解析
+    # (有来源、还没有 chunk)的库仍按旧判据放行,列表投影未回填时(默认 False)也逐字
+    # 回落到旧行为。
+    # 反向护栏仍在:真正零本地证据的库两个加数都为假 → 与「全部取消勾选参考库」合起来
+    # 照常 409,不烧那轮模型调用(见 test_base_only_submission_on_a_library_only_
+    # notebook_is_409)。
+    local_universe_non_empty = (
+        bool(notebook.local_evidence_available)
+        or int(notebook.counts.get("sources", 0)) > 0
     )
+    if resolved_source_scope is None:
+        has_local = local_universe_non_empty
+    elif resolved_source_scope.source_ids:
+        has_local = True
+    else:
+        # 冻结出**空集**有两种来源,判据是「这一维被收窄了吗」而不是「提交了吗」:
+        #   * narrowed=True —— 用户真的把来源一个不剩地取消了(5 选 0)。以冻结选择
+        #     为准,该拦;本地证据信号不得把用户主动点下的「清空」翻回来。
+        #   * narrowed=False —— 0 选自 0,只是「这个库没有可见来源」。浏览器**默认**
+        #     发的 exclude:[] 在这类库上就冻结成这个形状,它没有表达任何收窄意图,
+        #     必须按真实本地证据宇宙作答,否则 Knowhow-only 的库一进来就被判空。
+        has_local = (
+            not resolved_source_scope.narrowed and local_universe_non_empty
+        )
+    # 库维度**不需要**同样的 narrowed 分支:`_validate_base_scope` 的
+    # narrowed = len(selected) < len(mounted),空选择只有在零挂载时才 narrowed=False,
+    # 而那时的回落值 bool(notebook.base_notebooks) 同样为假 —— 两条规则逐值相同。
+    # 参考库也没有「没有可见行的隐藏证据」这回事:挂载集就是它完整的宇宙。
     has_base = (
         bool(resolved_base_scope.notebook_ids)
         if resolved_base_scope is not None

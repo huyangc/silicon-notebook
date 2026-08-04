@@ -5714,6 +5714,11 @@
               "title": "Kg Ready",
               "type": "boolean"
             },
+            "local_evidence_available": {
+              "default": false,
+              "title": "Local Evidence Available",
+              "type": "boolean"
+            },
             "name": {
               "title": "Name",
               "type": "string"
@@ -18687,6 +18692,7 @@
       "kg_building": false,
       "kg_pending_sources": 0,
       "kg_ready": true,
+      "local_evidence_available": true,
       "name": "API fixture",
       "paper_meta_backfilling": false,
       "primary_domain": "Semiconductor",

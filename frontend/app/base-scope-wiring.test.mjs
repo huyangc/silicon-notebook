@@ -23,7 +23,6 @@ import {
   callSitesIn,
   jsxElements,
   parseModule,
-  variableInitializersIn,
 } from "./test/semantic-source.mjs";
 
 
@@ -325,17 +324,73 @@ function askStreamPayloadObject() {
 }
 
 
+/**
+ * `sourceScopeBlocked` 的初始化表达式**节点**(剥掉外层括号)。
+ *
+ * 走 AST 而不是文本,是因为这道门要钉的是**结构**:顶层的合取、本地那一半由谁回答。
+ * 文本匹配对「把某个子表达式提到顶层」这类移动变异是全绿的 —— 字样都还在。
+ */
+function sourceScopeBlockedInitializer() {
+  const found = [];
+  function visit(node) {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === "sourceScopeBlocked"
+      && node.initializer
+    ) {
+      found.push(node.initializer);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(page);
+  assert.equal(found.length, 1, "找不到唯一的 sourceScopeBlocked 定义");
+  let expression = found[0];
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+  return expression;
+}
+
+
 // 「本地为空但挂了参考库」过去被当成恒真的兜底放行。现在两维都能被收窄,把参考库
 // 当成永远有货就是放行一次空检索。
-test("检索范围为空的判据是两维同时为空", () => {
-  const found = variableInitializersIn(page)
-    .filter((entry) => entry.name === "sourceScopeBlocked");
-  assert.equal(found.length, 1, "找不到唯一的 sourceScopeBlocked 定义");
-  const expression = found[0].initializer;
-  assert.match(expression, /selectedLocalSourceCount === 0/);
-  assert.match(expression, /selectedBaseNotebookCount === 0/);
+//
+// 另一半同样致命且方向相反:本地那一维过去按**勾了几个可见来源**判空。只有 Knowhow
+// 表(或只有已确认 Memory)的笔记本可见来源恒为 0,于是它的问答输入框和新建报告被这
+// 道门整个锁死,而那些格子照常可搜(codex #431 R7 P1)。所以本地那一半必须交给
+// localScopeIsEmpty —— 它同时看后端算好的本地证据信号,是后端 has_local 的镜像。
+test("检索范围为空的判据是两维同时为空,本地那维按证据宇宙判", () => {
+  const expression = sourceScopeBlockedInitializer();
+  assert.ok(
+    ts.isBinaryExpression(expression)
+      && expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken,
+    "顶层必须是「两维同时为空」的 && —— 换成 || 就是任一维为空即禁用",
+  );
+
+  const base = expression.right.getText(page);
+  assert.match(
+    base,
+    /selectedBaseNotebookCount === 0/,
+    `右操作数必须是参考库那一维的空判:${base}`,
+  );
+
+  let local = expression.left;
+  while (ts.isParenthesizedExpression(local)) local = local.expression;
+  assert.ok(
+    ts.isCallExpression(local)
+      && local.expression.getText(page) === "localScopeIsEmpty",
+    "本地那一维必须整个交给共用纯函数 localScopeIsEmpty(后端 has_local 的镜像);"
+      + "把它拆开或提到顶层,零可见来源的 Knowhow 库就会被判成空范围",
+  );
+  assert.deepEqual(
+    local.arguments.map((argument) => argument.getText(page)),
+    ["selectedLocalSourceCount", "notebookSourceTotal", "hasLocalEvidence(currentNotebook)"],
+    "三个实参必须是「勾选数 / 可见来源总数 / 后端本地证据信号」;"
+      + "把参考库那一维的计数喂进来就是把两维混成一维",
+  );
+
+  const whole = expression.getText(page);
   assert.doesNotMatch(
-    expression,
+    whole,
     /hasMountedBase/,
     "不能再拿「挂没挂参考库」当判据 —— 挂着但全被取消勾选时范围同样是空的",
   );

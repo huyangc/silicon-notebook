@@ -55,6 +55,29 @@ export function sourceScopePayload(
   };
 }
 
+/**
+ * 本地那一维的检索范围是否为空 —— 后端 `_require_non_empty_scope` 里 `has_local`
+ * 的镜像,逐条对齐,不另立一套判据。
+ *
+ * 两步:
+ *  1. 这一维**被收窄了吗**(selected < total)?收窄了就以选择为准 —— 用户点了
+ *     「清空」把 5 篇全取消,那就是真的空,该拦。
+ *  2. 没收窄(含 0 选自 0)就按**真实证据宇宙**作答。这里不能只看来源数:Knowhow
+ *     表与已确认 Memory 都没有可见来源,一个只有 Knowhow 的库 total 恒为 0,
+ *     `sourceScopePayload` 因此冻结出 include:[],按来源数判就会把一个照常可搜的
+ *     库判成空范围并禁用问答框(codex #431 R7 P1)。所以再问后端算好的本地证据信号
+ *     (`hasLocalEvidence`),与来源数取**或** —— 只增不减:尚在解析(有来源、还没有
+ *     chunk)的库仍按来源数放行,字段缺失时逐字回落到旧判据。
+ */
+export function localScopeIsEmpty(
+  selected: number,
+  total: number,
+  localEvidenceAvailable: boolean,
+): boolean {
+  if (selected < total) return selected === 0;
+  return !localEvidenceAvailable && total <= 0;
+}
+
 // ---------------------------------------------------------------------------
 // 参考库检索范围
 //
