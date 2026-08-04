@@ -86,6 +86,14 @@ requires a restart because the watched path itself is selected at startup.
   whole-scope PPR, local graph primitives, direct retrieval, and the protected baseline
   lane unchanged. The producer has no Ask/Deep Report consumer in this stage, so enabling
   it alone does not change user-visible retrieval.
+- **Large-source graph companions** — `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED`
+  makes a scale rebuild/fold publish a separate source-addressable CSR companion;
+  `SOURCE_PARTITIONED_PPR_ENABLED` permits its internal shadow consumer. Both default
+  to `false` and are independent rollback controls. Turning on the consumer without a
+  matching companion returns a capability-unavailable reason and never falls back to
+  whole-graph traversal. `SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` bounds request-time
+  sparse passes; partition publication reuses the existing `SOURCE_SUBGRAPH_MAX_*`
+  row rails. Ask/Deep Report still do not consume this lane in this stage.
 
 `.env.example` is the authoritative, fully-commented list of non-service variables and
 secret slots; `model-services.example.toml` is the service/binding/capacity template.

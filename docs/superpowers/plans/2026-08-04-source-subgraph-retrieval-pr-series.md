@@ -1,7 +1,7 @@
 # 来源子图检索“不回退”PR 序列
 
 - 日期：2026-08-04
-- 状态：实施中；PR 1 已在 `codex/source-subgraph-retrieval` worktree 完成首版并通过 backend 稳定测试门
+- 状态：实施中；PR 1–8 已合并，PR 9 正在独立 worktree 实施
 - 设计依据：`docs/superpowers/specs/2026-08-04-source-subgraph-retrieval-design_zh.md`
 - 总目标：用户在大 notebook 中只选择一篇或少数来源时，在所选来源子图内恢复图检索，同时保证现有 source-scoped 直接检索候选、证据、预算和引用不回退。
 
@@ -269,6 +269,8 @@ PR 1、PR 2、PR 3 可以并行开发，但建议按编号依次合并，减少�
 回滚：单独关闭 scoped PPR，不影响 PR 6 的局部原语和 baseline。
 
 ### PR 9 — 超大来源的 source-partitioned scale artifact
+
+实施状态：**worktree 实现与完整门已完成**。采用同时绑定主 scale manifest identity 与无正文 source/run/backfill signature 的独立伴生根；每个可见来源用 SHA-256 目录直寻，运行时只加载所选 partition，旧版/缺失/identity 失配 fail closed。尚待独立 review 与 CI。
 
 建议标题：`feat(scale): add source-partitioned graph artifacts`
 

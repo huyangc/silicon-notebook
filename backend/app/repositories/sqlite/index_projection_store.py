@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.repositories.source_subgraph_projection import (
+    source_graph_partition_rows_on,
     source_subgraph_rows_on,
     source_subgraph_signature_on,
 )
@@ -336,6 +337,28 @@ class IndexProjectionStore:
                 limits,
                 placeholder="?",
                 postgres=False,
+            )
+
+    def source_graph_partition_rows(
+        self, notebook_id: str, source_id: str
+    ) -> Mapping[str, Any]:
+        """Offline source-local rows for the partitioned scale artifact."""
+        with self.connect() as db:
+            db.execute("BEGIN")
+            return source_graph_partition_rows_on(
+                db,
+                notebook_id,
+                source_id,
+                placeholder="?",
+                postgres=False,
+                limits={
+                    "objects": self.settings.source_subgraph_max_objects,
+                    "relations": self.settings.source_subgraph_max_relations,
+                    "chunks": self.settings.source_subgraph_max_chunks,
+                    "facts": self.settings.source_subgraph_max_facts,
+                    "fact_elements": self.settings.source_subgraph_max_fact_elements,
+                    "cluster_memberships": self.settings.source_subgraph_max_cluster_memberships,
+                },
             )
 
     # ─────────────────────────────────────────────────── graph snapshots ──

@@ -317,7 +317,7 @@ PPR 排名只决定 `G` 内部的顺序。它不得重排 `B`，也不得参与�
 - 继续运行来源内 KG/原文/chunk 检索；
 - `expand_graph` / `follow_chain` 继续按端点索引做有界局部遍历；
 - 轨迹显示“来源子图过大，本轮概念漫游降级为有界关系扩展”；
-- 后续通过 scale artifact 的 KG-node / relation-source sidecar 支持大来源诱导 CSR，而不是提高在线内存上限。
+- 通过与主 scale manifest identity 绑定的独立伴生根支持大来源诱导 CSR，而不是提高在线内存上限：离线 full build/fold 每次只发布一个可见来源的哈希直寻 partition；运行时只打开所选 partition，先并授权对象，再复验来源自有跨 partition 关系的同源 evidence、两端与中央 edge registry。旧版、缺失、损坏或 identity 失配伴生产物返回 capability unavailable，绝不切整库 CSR 后过滤。
 
 这保证大来源仍有图搜索，只是暂时没有全子图 PPR；不能把降级描述成完整 PPR。无论是否有 PPR，`B_final` 必须完全保留，因此这是“增强能力未完整上线”，而不是来源内现有检索效果回退。
 

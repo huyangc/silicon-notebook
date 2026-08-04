@@ -75,6 +75,12 @@ cp model-services.example.toml .local/model-services.toml
   snapshot 内部稀疏 PPR producer，默认 `false`。它与 `GRAPH_PPR_ENABLED` 相互独立：
   关闭它不会影响历史全范围 PPR、局部图原语、直接检索或受保护 baseline 通道。本阶段
   producer 尚无 Ask/深度报告 consumer，因此单独开启也不会改变用户可见检索。
+- **超大来源图伴生产物**——`SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED` 让 scale
+  rebuild/fold 额外发布按来源直接寻址的 CSR 伴生产物；`SOURCE_PARTITIONED_PPR_ENABLED`
+  允许内部 shadow consumer 读取它。两者默认均为 `false`，并可独立回滚。只开 consumer
+  而没有 identity 匹配的伴生产物时返回 capability unavailable，绝不回退整图遍历。
+  `SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` 限制请求期稀疏迭代，partition 发布复用既有
+  `SOURCE_SUBGRAPH_MAX_*` 行数护栏。本阶段 Ask/深度报告仍未消费该通道。
 
 `.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
 服务、绑定与容量模板；[配置](#配置)按组列出常用项。

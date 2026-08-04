@@ -56,6 +56,7 @@ from app.services.source_ingestion import SourceIngestionService
 from app.services.source_graph_primitives import SourceGraphPrimitives
 from app.services.source_subgraph import SourceSubgraphService
 from app.services.source_subgraph_ppr import SourceSubgraphPprService
+from app.services.source_partitioned_ppr import SourcePartitionedPprService
 from app.services.retrieval_enrichment import BaselineProtectedEnrichmentService
 from app.services.vector_cache import VectorCache
 # Task 23: Ask detached-execution composition (appended block — parallel
@@ -230,6 +231,11 @@ class RepositoryRuntime:
         # remains deferred; later consumers must finish B before invoking G.
         self.source_graph_enrichment = BaselineProtectedEnrichmentService()
         self.source_subgraph_ppr = SourceSubgraphPprService(settings=self.settings)
+        self.source_partitioned_ppr = SourcePartitionedPprService(
+            settings=self.settings,
+            artifacts=self.scale_artifact_store,
+            projections=self.index_projections,
+        )
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
         self.scale_builder: "ScaleIndexBuilder | None" = None
         self.scale_artifacts: "ScaleArtifactRuntime | None" = None
@@ -848,6 +854,9 @@ class RepositoryRuntime:
             cluster_map=cluster_map,
             incremental_fuse_source=incremental_fuse_source,
             invalidate_scale_cache=invalidate_scale_cache,
+            invalidate_source_partition_cache=(
+                self.source_partitioned_ppr.invalidate
+            ),
             cache_viz=cache_viz,
             building=building,
             building_lock=building_lock,

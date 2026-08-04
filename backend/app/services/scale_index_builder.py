@@ -64,6 +64,7 @@ class ScaleIndexBuilder:
         building_lock,
         notify_index_done: Callable[[str], None],
         now: Callable[[], str],
+        invalidate_source_partition_cache: Callable[[str], None] | None = None,
         invalidate_unified_cache: "Callable[[str], None] | None" = None,
     ) -> None:
         self.settings = settings
@@ -78,6 +79,7 @@ class ScaleIndexBuilder:
         self.cluster_map = cluster_map
         self.incremental_fuse_source = incremental_fuse_source
         self.invalidate_scale_cache = invalidate_scale_cache
+        self.invalidate_source_partition_cache = invalidate_source_partition_cache
         self.cache_viz = cache_viz
         # full_viz_graph('object') caches the whole 8M-object graph dict in the
         # facade's unified_cache and never drops it during the build. Once
@@ -89,6 +91,47 @@ class ScaleIndexBuilder:
         self.building_lock = building_lock
         self.notify_index_done = notify_index_done
         self.now = now
+
+    def _rebuild_source_partitions(
+        self, notebook_id: str, parent_version: Any
+    ) -> dict | None:
+        """Publish optional companions after the main artifact is durable.
+
+        Failure is fail-open for the legacy scale index and fail-closed for the
+        new capability: an old companion's parent identity no longer matches,
+        so runtime returns unavailable instead of traversing stale/full graph.
+        """
+        if not bool(
+            getattr(
+                self.settings,
+                "source_partitioned_graph_artifacts_enabled",
+                False,
+            )
+        ):
+            return None
+        try:
+            all_sources = self.projections.source_ids(notebook_id)
+            source_ids = self.projections.visible_source_ids(
+                notebook_id, all_sources
+            )
+            manifest = self.artifacts.save_source_partitions(
+                notebook_id,
+                parent_version=parent_version,
+                source_ids=source_ids,
+                load_rows=lambda source_id: (
+                    self.projections.source_graph_partition_rows(
+                        notebook_id, source_id
+                    )
+                ),
+            )
+            if self.invalidate_source_partition_cache is not None:
+                self.invalidate_source_partition_cache(notebook_id)
+            return manifest
+        except Exception:  # noqa: BLE001 - optional artifact is fail-open
+            self.event_log.logger.exception(
+                "source-partition artifact build failed for %s", notebook_id
+            )
+            return None
 
     def _build_ann(self, vectors):
         """Build an hnsw index from a (n, dim) float32 matrix — same frozen
@@ -454,6 +497,19 @@ class ScaleIndexBuilder:
                 "ef_construction": self.settings.hnsw_ef_construction,
             },
         )
+        if bool(
+            getattr(
+                self.settings,
+                "source_partitioned_graph_artifacts_enabled",
+                False,
+            )
+        ):
+            timed(
+                "source_partitions",
+                lambda: self._rebuild_source_partitions(
+                    notebook_id, saved_manifest.get("version")
+                ),
+            )
         persist_ms = round((time.perf_counter() - persist_started) * 1000)
         timings["persist"] = persist_ms
         self.event_log.emit(
@@ -721,6 +777,16 @@ class ScaleIndexBuilder:
             with self.building_lock:
                 self.artifacts.swap_fold_directory(notebook_id, temporary)
                 self.invalidate_scale_cache(notebook_id)
+            if bool(
+                getattr(
+                    self.settings,
+                    "source_partitioned_graph_artifacts_enabled",
+                    False,
+                )
+            ):
+                self._rebuild_source_partitions(
+                    notebook_id, manifest.get("version")
+                )
             completed = True
             return manifest
         finally:
