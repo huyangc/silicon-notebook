@@ -330,6 +330,27 @@ class AskService:
             return list(result.chunks), None
         return list(result.chunks), result.status
 
+    def _graph_source_chunks_with_activation(
+        self,
+        notebook_id: str,
+        subgraph,
+        top_hits,
+        *,
+        unsafe_scope: bool,
+    ):
+        """Freeze graph mode's historical source-chunk B before optional G."""
+        baseline = list(self.graph.source_chunks(
+            notebook_id, [node["object_id"] for node, _edge, _source in subgraph]
+        ))
+        if not unsafe_scope:
+            return baseline, None
+        return self._activate_selected_source_graph(
+            notebook_id,
+            baseline,
+            top_hits=top_hits,
+            max_results=self.settings.ppr_top_chunks,
+        )
+
     # ------------------------------------------------------------------
     # dispatch
     # ------------------------------------------------------------------
@@ -3014,7 +3035,6 @@ class AskService:
             else source_scope_restricted()
         )
         source_graph_status = None
-        scoped_graph_chunks = []
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
@@ -3256,14 +3276,6 @@ class AskService:
                     }, None, None)
                     for hit in top_hits[:5]
                 ]
-                scoped_graph_chunks, source_graph_status = (
-                    self._activate_selected_source_graph(
-                        notebook_id,
-                        [],
-                        top_hits=top_hits,
-                        max_results=self.settings.ppr_top_chunks,
-                    )
-                )
             else:
                 base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
                 raise_if_cancelled(cancel_event)
@@ -3322,13 +3334,16 @@ class AskService:
             # 有源 chunk → 走 _answer_mix(KG 段 k1001+ / chunk 段 k1..N)、出 chunk 引用、直接 return;
             # 无源 chunk → 落到下方现状 KG-only 答案,行为不变。
             from app.services.retrieval import est_tokens, truncate_by_tokens
-            src_chunks = (
-                scoped_graph_chunks
-                if scoped_graph_chunks
-                else self.graph.source_chunks(
-                    notebook_id, [n["object_id"] for n, _e, _s in subgraph]
+            src_chunks, graph_activation_status = (
+                self._graph_source_chunks_with_activation(
+                    notebook_id,
+                    subgraph,
+                    top_hits,
+                    unsafe_scope=unsafe_scope,
                 )
             )
+            if graph_activation_status is not None:
+                source_graph_status = graph_activation_status
             if src_chunks:
                 mix_kg_block, mix_id_map = render_subgraph_context(
                     subgraph, id_offset=self._MIX_KG_KEY_BASE)

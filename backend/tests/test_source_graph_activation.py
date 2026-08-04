@@ -407,6 +407,58 @@ def test_partition_failure_and_hydration_failure_return_baseline(monkeypatch):
     assert "ppr_node_limit_exceeded" in recovered.status.degraded_reasons
 
 
+def test_partition_mixed_missing_or_out_of_scope_hydration_discards_all_g(
+    monkeypatch,
+):
+    baseline = [_chunk("b", "a")]
+    ppr = SimpleNamespace(
+        hits=(), cache_hit=False,
+        capability=SimpleNamespace(enabled=False, reason="ppr_node_limit_exceeded"),
+    )
+    partitioned = SimpleNamespace()
+    service, _events = _service(
+        snapshot=_snapshot(), ppr=ppr, partitioned_ppr=partitioned
+    )
+    _enable_active(service, monkeypatch)
+
+    valid_hit = SimpleNamespace(
+        chunk_id="g", source_id="a", score=0.9,
+        support=RetrievalSupport("ppr", "ppr", "", 0.9),
+    )
+    outside_hit = SimpleNamespace(
+        chunk_id="x", source_id="outside", score=0.8,
+        support=RetrievalSupport("ppr", "ppr", "", 0.8),
+    )
+    missing_hit = SimpleNamespace(
+        chunk_id="missing", source_id="a", score=0.7,
+        support=RetrievalSupport("ppr", "ppr", "", 0.7),
+    )
+    cases = (
+        ((valid_hit, outside_hit), [_chunk("g", "a"), _chunk("x", "outside")]),
+        ((valid_hit, missing_hit), [_chunk("g", "a")]),
+    )
+    for hits, hydrated_rows in cases:
+        partitioned.retrieve = lambda *_args, _hits=hits, **_kwargs: SimpleNamespace(
+            capability=SimpleNamespace(enabled=True, reason=""),
+            cache_hit=False,
+            hits=_hits,
+        )
+        with source_scope_context(
+            "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+        ):
+            result = service.run(
+                "nb",
+                baseline,
+                parent_version="v",
+                hydrate_chunk_ids=lambda _ids, _rows=hydrated_rows: _rows,
+            )
+
+        assert result.chunks == tuple(baseline)
+        assert result.enrichment_chunks == ()
+        assert result.status.state == "degraded"
+        assert result.status.reason == "source_partition_hydration_mismatch"
+
+
 def test_ask_shared_seam_preserves_historical_shape_and_laziness(monkeypatch):
     baseline = [_chunk("b", "a")]
     service, _events = _service(snapshot=None, ppr=SimpleNamespace())
@@ -433,6 +485,38 @@ def test_ask_shared_seam_preserves_historical_shape_and_laziness(monkeypatch):
 
     assert chunks == baseline
     assert status is None
+
+
+def test_graph_mode_freezes_real_source_chunk_baseline_before_appending_g():
+    baseline = [_chunk("b", "a")]
+    baseline[0].score = 0.42
+    baseline[0].relevance = 0.73
+    graph_chunk = _chunk("g", "a")
+    seen = {}
+    ask = object.__new__(AskService)
+    ask.graph = SimpleNamespace(source_chunks=lambda _nb, object_ids: (
+        seen.setdefault("object_ids", object_ids), baseline
+    )[1])
+    ask.settings = SimpleNamespace(ppr_top_chunks=20)
+
+    def activate(_notebook_id, chunks, **_kwargs):
+        seen["baseline"] = list(chunks)
+        return [*chunks, graph_chunk], SimpleNamespace(state="active")
+
+    ask._activate_selected_source_graph = activate
+    subgraph = [({"object_id": "o", "name": "O"}, None, None)]
+
+    chunks, status = AskService._graph_source_chunks_with_activation(
+        ask, "nb", subgraph, (), unsafe_scope=True
+    )
+
+    assert seen["object_ids"] == ["o"]
+    assert seen["baseline"] == baseline
+    assert [chunk.chunk_id for chunk in chunks] == ["b", "g"]
+    assert chunks[0] is baseline[0]
+    assert chunks[0].score == 0.42
+    assert chunks[0].relevance == 0.73
+    assert status.state == "active"
 
 
 def test_ask_and_report_consumers_keep_baseline_on_graph_io_failure(monkeypatch):
