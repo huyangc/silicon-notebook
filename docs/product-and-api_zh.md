@@ -100,7 +100,9 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 
 内部正整数护栏为：`SOURCE_SUBGRAPH_MAX_SOURCES=32`、`SOURCE_SUBGRAPH_MAX_OBJECTS=20000`、`SOURCE_SUBGRAPH_MAX_RELATIONS=40000`、`SOURCE_SUBGRAPH_MAX_CHUNKS=20000`、`SOURCE_SUBGRAPH_MAX_FACTS=20000`、`SOURCE_SUBGRAPH_MAX_FACT_ELEMENTS=60000`、`SOURCE_SUBGRAPH_MAX_MEMBERSHIPS=60000`、`SOURCE_SUBGRAPH_MAX_CLUSTER_MEMBERSHIPS=20000`、`SOURCE_SUBGRAPH_CACHE_MAX_ENTRIES=64`。每个数据库分支最多探测对应上限加一行以识别越界；非正值在 Settings 校验阶段直接拒绝。
 
-仅供 shadow 的所选来源原语层尚不改变 Ask/深度报告行为。邻居/扩展、关系搜索和两跳 chain 的每个结果都会再次校验 capability、关系来源、两个端点、evidence 与 review 状态；被排除来源既不能占结果名额，也不能充当中间节点。精确查找只在 snapshot 的所选 chunk 上复用既有标识符分组/子树语义；游标枚举的总数与分页只来自完整的所选 snapshot，不读取 notebook collection map。原语硬上限为：fan-out 16、扩展深度 3、扩展节点 128、chain 结果 16、关系结果 32、枚举页 100；精确查找继续使用既有 `EXACT_LOOKUP_*` 护栏。在不回退基线的合并通道接入前，这些工具保持 internal/shadow。
+仅供 shadow 的所选来源原语层尚不改变 Ask/深度报告行为。邻居/扩展、关系搜索和两跳 chain 的每个结果都会再次校验 capability、关系来源、两个端点、evidence 与 review 状态；被排除来源既不能占结果名额，也不能充当中间节点。精确查找只在 snapshot 的所选 chunk 上复用既有标识符分组/子树语义；游标枚举的总数与分页只来自完整的所选 snapshot，不读取 notebook collection map。原语硬上限为：fan-out 16、扩展深度 3、扩展节点 128、chain 结果 16、关系结果 32、枚举页 100；精确查找继续使用既有 `EXACT_LOOKUP_*` 护栏。
+
+内部受保护增强服务会在调用图 provider 前冻结历史最终 baseline。纯图 chunk 只使用调用方给出的独立 token 预算，并且只追加到 shadow 提案；预算不足时丢弃图候选，不会重新截断 baseline 证据。baseline 中已经存在的 chunk 保持正文、来源与引用句柄、分数、相关度和位置，只有 shadow 副本合并生产者 provenance；用户可见结果始终是原 baseline。图失败或超时时返回同一 baseline 与 manifest；`baseline_evicted_count` 非零时丢弃整段图提案。baseline 与增强 reasoning 动作使用不可相互借用的 step 账本。shadow 关闭或图预算为零时不会调用 provider。本阶段 Ask/深度报告仍未消费这条图通道，因此其调用、prompt、轨迹、响应和引用不变。
 
 ## Knowhow 表
 
