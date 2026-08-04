@@ -284,6 +284,16 @@ def test_candidate_detects_hidden_participant_drift_through_source_store():
         ) is True
 
 
+def test_candidate_without_active_scope_does_not_touch_source_store():
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    # Some bounded adapters construct only the producer fields they use.  An
+    # omitted checkbox scope must retain the historical zero-probe path and
+    # therefore must not require the optional ``sources`` field at all.
+    candidate = CandidateRetrievalService.__new__(CandidateRetrievalService)
+    assert candidate._unsafe_source_scope_restricted("nb") is False
+
+
 def test_explicit_include_of_the_whole_universe_is_not_narrowed():
     resolved = _validate_source_scope(
         _ScopeRepo(["s1", "s2"], 2),

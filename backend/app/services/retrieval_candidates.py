@@ -236,10 +236,17 @@ class _RetrievalState:
     def _unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
         """Whether non-partitioned channels must be disabled before I/O."""
         from app.services.source_scope import (
+            current_source_scope,
             source_scope_restricted,
             source_scope_visible_universe_matches,
         )
 
+        scope = current_source_scope()
+        if scope is None or scope.notebook_id != notebook_id:
+            # Omitted scope is the historical whole-library path.  Do not add
+            # repository probes to it; this also keeps bounded/legacy service
+            # adapters that do not own a SourceStore fully compatible.
+            return False
         if source_scope_restricted():
             return True
         visible_ids = getattr(self.sources, "all_visible_source_ids", None)
