@@ -3568,9 +3568,9 @@ class ReasoningRetriever:
             candidate_knowledge=list(collected.values()),
             candidate_chunks=chunks,
             candidate_elements=elements,
-            selected_knowledge=top_hits,
-            selected_chunks=chunks,
-            selected_elements=elements,
+            # The retriever owns B_candidates only.  B_final is captured by
+            # Ask/report after their context assembler has applied every
+            # character budget, refinement, and citation-map admission rule.
             baseline_step_usage=len(trace),
         )
         return ReasoningResult(

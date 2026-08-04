@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import app.services.retrieval_baseline as baseline_module
+
 from app.models.common import Evidence
 from app.services.retrieval import (
     RetrievedChunk,
@@ -8,7 +10,7 @@ from app.services.retrieval import (
 )
 from app.services.retrieval_baseline import (
     build_retrieval_baseline_manifest,
-    emit_retrieval_baseline,
+    merge_baseline_candidates,
 )
 from app.services.source_scope import source_scope_context
 
@@ -72,6 +74,18 @@ def _build(*, chunks=None):
         selected_knowledge=knowledge,
         selected_chunks=chunks,
         selected_elements=elements,
+        final_context_block=(
+            "k1: [claim] root cause evidence\n"
+            "k2: [chunk] debugger execution evidence\n"
+            "k3: [source-element] raw source evidence"
+        ),
+        final_id_map={
+            "k1": {"object_type": "claim", "object_id": "ko-1"},
+            "k2": {"object_type": "chunk", "object_id": "chunk-1"},
+            "k3": {"object_type": "element", "object_id": "element-1"},
+        },
+        final_ordered_handles=("k1", "k2", "k3"),
+        final_budget_chars=2_000,
         baseline_step_usage=3,
     )
 
@@ -109,7 +123,7 @@ def test_manifest_is_deterministic_and_order_sensitive():
 
     assert first.manifest_hash == same.manifest_hash
     assert first.manifest_hash != reordered.manifest_hash
-    assert [row.item_id for row in first.selected_chunks] == ["chunk-1", "chunk-2"]
+    assert [row.item_id for row in first.selected_chunks] == ["chunk-1"]
 
 
 def test_event_payload_is_redacted_and_counts_selected_evidence():
@@ -126,6 +140,7 @@ def test_event_payload_is_redacted_and_counts_selected_evidence():
     assert payload["selected_chunks"] == 1
     assert payload["selected_elements"] == 1
     assert payload["citation_handles"] == 3
+    assert payload["comparison_ready"] is False
     assert payload["baseline_steps"] == 3
     assert "source-secret" not in rendered
     assert "root cause evidence" not in rendered
@@ -133,22 +148,11 @@ def test_event_payload_is_redacted_and_counts_selected_evidence():
     assert "element-ko-1" not in rendered
 
 
-def test_emit_is_fail_soft():
-    class BrokenLog:
-        logger = None
-
-        def emit(self, _event):
-            raise RuntimeError("logging unavailable")
-
-    with source_scope_context(
-        "nb", {"mode": "include", "source_ids": ["source-secret"], "narrowed": True}
-    ):
-        manifest = _build()
-
-    emit_retrieval_baseline(BrokenLog(), manifest, "nb", site="test")
+def test_baseline_scaffold_has_no_operational_emit_path():
+    assert not hasattr(baseline_module, "emit_retrieval_baseline")
 
 
-def test_manifest_capture_is_fail_soft_for_malformed_legacy_payload():
+def test_manifest_capture_marks_malformed_legacy_payload_partial():
     cyclic = {}
     cyclic["self"] = cyclic
     broken = _knowledge("ko-broken", "text")
@@ -165,4 +169,138 @@ def test_manifest_capture_is_fail_soft_for_malformed_legacy_payload():
             selected_knowledge=[broken],
         )
 
-    assert manifest is None
+    assert manifest is not None
+    assert manifest.capture_status == "partial"
+    assert manifest.capture_error_count == 2
+    assert manifest.comparison_ready is False
+
+
+def test_final_selection_uses_only_handles_that_survived_prompt_assembly():
+    chunks = [_chunk("chunk-1", "first"), _chunk("chunk-2", "trimmed")]
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["source-secret"], "narrowed": True}
+    ):
+        manifest = build_retrieval_baseline_manifest(
+            notebook_id="nb",
+            query="query",
+            mode="chunk",
+            candidate_chunks=chunks,
+            selected_chunks=chunks,
+            final_context_block="k7: [chunk] first",
+            final_id_map={
+                "k7": {"object_type": "chunk", "object_id": "chunk-1"},
+                "k8": {"object_type": "chunk", "object_id": "chunk-2"},
+            },
+            final_ordered_handles=("k7",),
+            final_budget_chars=20,
+        )
+
+    assert [row.item_id for row in manifest.candidate_chunks] == [
+        "chunk-1", "chunk-2"
+    ]
+    assert [row.item_id for row in manifest.selected_chunks] == ["chunk-1"]
+    assert manifest.selected_chunks[0].citation_handles == ("k7",)
+    assert manifest.prompt.citation_handles == ("k7",)
+    assert manifest.prompt.context_chars == len("k7: [chunk] first")
+
+
+def test_generation_identity_is_required_before_shadow_comparison():
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["source-secret"], "narrowed": True}
+    ):
+        manifest = build_retrieval_baseline_manifest(
+            notebook_id="nb",
+            query="query",
+            mode="chunk",
+            final_context_block="",
+            final_id_map={},
+            final_ordered_handles=(),
+            generation_fingerprint="scope-gen:index-gen",
+        )
+
+    assert manifest.capture_status == "complete"
+    assert manifest.generation_fingerprint == "scope-gen:index-gen"
+    assert manifest.comparison_ready is True
+
+
+def test_evidence_text_cannot_fabricate_an_admitted_handle():
+    chunks = [_chunk("chunk-1", "first\nk2: user-authored text"), _chunk("chunk-2", "second")]
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["source-secret"], "narrowed": True}
+    ):
+        manifest = build_retrieval_baseline_manifest(
+            notebook_id="nb",
+            query="query",
+            mode="chunk",
+            selected_chunks=chunks,
+            final_context_block="k1: [chunk] first\nk2: user-authored text",
+            final_id_map={
+                "k1": {"object_type": "chunk", "object_id": "chunk-1"},
+                "k2": {"object_type": "chunk", "object_id": "chunk-2"},
+            },
+            final_ordered_handles=("k1",),
+        )
+
+    assert manifest.prompt.citation_handles == ("k1",)
+    assert [row.item_id for row in manifest.selected_chunks] == ["chunk-1"]
+
+
+def test_finalize_preserves_prior_capture_errors_and_generation():
+    broken = _knowledge("ko-broken", "text")
+    cyclic = {}
+    cyclic["self"] = cyclic
+    broken.payload = cyclic
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["source-secret"], "narrowed": True}
+    ):
+        prior = build_retrieval_baseline_manifest(
+            notebook_id="nb",
+            query="query",
+            mode="reasoning",
+            candidate_knowledge=[broken],
+            generation_fingerprint="scope-gen:index-gen",
+        )
+        final = build_retrieval_baseline_manifest(
+            notebook_id="nb",
+            query="query",
+            mode="reasoning",
+            candidate_knowledge=prior.candidate_knowledge,
+            final_context_block="",
+            final_id_map={},
+            final_ordered_handles=(),
+            prior_manifest=prior,
+        )
+
+    assert prior.capture_status == "partial"
+    assert final.capture_status == "partial"
+    assert final.capture_error_count == prior.capture_error_count
+    assert final.generation_fingerprint == "scope-gen:index-gen"
+    assert final.comparison_ready is False
+
+
+def test_candidate_union_keeps_prior_order_and_adds_new_directions_once():
+    prior = [_chunk("chunk-1", "first"), _chunk("chunk-2", "second")]
+    additional = [_chunk("chunk-2", "new duplicate"), _chunk("chunk-3", "third")]
+
+    merged = merge_baseline_candidates("chunk", prior, additional)
+
+    assert [item.chunk_id for item in merged] == ["chunk-1", "chunk-2", "chunk-3"]
+
+
+def test_candidate_union_preserves_missing_id_for_partial_capture():
+    malformed = _chunk("", "legacy row without an id")
+
+    merged = merge_baseline_candidates("chunk", [], [malformed])
+
+    assert merged == [malformed]
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["source-secret"], "narrowed": True}
+    ):
+        manifest = build_retrieval_baseline_manifest(
+            notebook_id="nb",
+            query="query",
+            mode="report",
+            candidate_chunks=merged,
+        )
+    assert manifest.capture_status == "partial"
+    assert manifest.capture_error_count == 1

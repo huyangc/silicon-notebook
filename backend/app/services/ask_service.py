@@ -97,6 +97,7 @@ class _SectionedSynthesis:
     sections: int
     counts: dict
     section_grounding: list
+    baseline_assemblies: list
 
 
 def _graph_classification_hits(
@@ -645,6 +646,7 @@ class AskService:
         *,
         budget_chars: int,
         heading: str = "",
+        admission_sink: dict | None = None,
     ) -> tuple[str, dict]:
         """Append one evidence block without crossing a partition hard limit."""
         if not block or block == "(none)":
@@ -656,6 +658,10 @@ class AskService:
         if remaining <= len(prefix):
             return context_block, id_map
         rendered = (prefix + block)[:remaining]
+        if admission_sink is not None and len(prefix) + len(block) > remaining:
+            admission_sink["ambiguous_truncations"] = int(
+                admission_sink.get("ambiguous_truncations") or 0
+            ) + 1
         merged = dict(id_map)
         for key, value in block_map.items():
             if re.search(rf"(?m)^{re.escape(str(key))}:", rendered):
@@ -767,6 +773,7 @@ class AskService:
         notebook_id: str = "",
         memory_hits=None,
         llm_client=None,
+        baseline_sink: dict | None = None,
     ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。
@@ -777,6 +784,14 @@ class AskService:
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
         )
+        if baseline_sink is not None:
+            baseline_sink.clear()
+            baseline_sink.update({
+                "context_block": context_block,
+                "id_map": dict(id_map),
+                "ordered_handles": tuple(id_map),
+                "budget_chars": self.settings.chunk_answer_budget_chars,
+            })
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
@@ -804,6 +819,7 @@ class AskService:
         notebook_id: str = "",
         memory_hits=None,
         llm_client=None,
+        baseline_sink: dict | None = None,
     ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
@@ -824,6 +840,14 @@ class AskService:
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
         )
+        if baseline_sink is not None:
+            baseline_sink.clear()
+            baseline_sink.update({
+                "context_block": context_block,
+                "id_map": dict(id_map),
+                "ordered_handles": tuple(id_map),
+                "budget_chars": len(context_block),
+            })
         llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
@@ -999,6 +1023,7 @@ class AskService:
         structured_map: dict | None = None,
         collection_map_block: str = "",
         counts_sink: dict | None = None,
+        baseline_sink: dict | None = None,
         sectioned: bool = False,
         key_offset: int = 0,
         section_title: str = "",
@@ -1041,6 +1066,7 @@ class AskService:
         ))
         source_context = ""
         source_map: dict = {}
+        baseline_admission: dict = {}
         # The collection MAP goes in FIRST, ahead of every other block. It is
         # the smallest thing in the prompt (a fixed header plus one hard-capped
         # counts line) and the only one that cannot be recovered from anywhere
@@ -1052,12 +1078,12 @@ class AskService:
         if collection_map_block:
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, collection_map_block, {},
-                budget_chars=chunk_budget,
+                budget_chars=chunk_budget, admission_sink=baseline_admission,
             )
         if structured_block:
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, structured_block, structured_map or {},
-                budget_chars=chunk_budget,
+                budget_chars=chunk_budget, admission_sink=baseline_admission,
             )
         if chunks:
             # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关;跨 PPR run
@@ -1078,6 +1104,7 @@ class AskService:
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, chunk_block, chunk_id_map,
                 budget_chars=chunk_budget, heading="Retrieved chunks",
+                admission_sink=baseline_admission,
             )
 
         # Direct source elements share the Chunk/source partition instead of
@@ -1098,6 +1125,7 @@ class AskService:
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, element_block, element_id_map,
                 budget_chars=chunk_budget, heading="Direct source elements",
+                admission_sink=baseline_admission,
             )
 
         # Reserve the inter-partition separator inside the KG budget so the
@@ -1121,6 +1149,7 @@ class AskService:
             kg_context, kg_map = self._bounded_context_append(
                 kg_context, kg_map, memory_block, memory_map,
                 budget_chars=effective_kg_budget, heading="Confirmed Memory",
+                admission_sink=baseline_admission,
             )
         if chains:
             from app.services.kg.follow_chain import render_follow_chain_context
@@ -1130,6 +1159,7 @@ class AskService:
             kg_context, kg_map = self._bounded_context_append(
                 kg_context, kg_map, chain_block, chain_id_map,
                 budget_chars=effective_kg_budget, heading="Derived chains",
+                admission_sink=baseline_admission,
             )
         context_block = source_context
         if kg_context:
@@ -1190,6 +1220,17 @@ class AskService:
         if counts_sink is not None:
             counts_sink.clear()
             counts_sink.update(counts)
+        if baseline_sink is not None:
+            baseline_sink.clear()
+            baseline_sink.update({
+                "context_block": context_block,
+                "id_map": dict(id_map),
+                "ordered_handles": tuple(id_map),
+                "budget_chars": total_context_budget,
+                "capture_error_count": int(
+                    baseline_admission.get("ambiguous_truncations") or 0
+                ),
+            })
         raw = answer_client.chat_json(
             [{"role": "user", "content": answer_prompt(
                 question, context_block, history,
@@ -1270,12 +1311,18 @@ class AskService:
         }
         grounded = False
         section_grounding_detail: list = []
+        baseline_assemblies: list[dict] = []
         total = len(slices)
         model_label = getattr(answer_client, "model", "")
         for item in slices:
             section_counts: dict = {}
+            section_baseline: dict = {}
 
-            def _synth_section(item=item, section_counts=section_counts):
+            def _synth_section(
+                item=item,
+                section_counts=section_counts,
+                section_baseline=section_baseline,
+            ):
                 text_, grounded_, anchors_, _counts = self._answer_reasoning(
                     notebook_id, question, item.hits, item.elements, history,
                     cancel_event=cancel_event, chunks=item.chunks,
@@ -1284,6 +1331,7 @@ class AskService:
                     chunk_context_chars=limits.chunk_context_chars,
                     element_items=limits.answer_element_items,
                     counts_sink=section_counts,
+                    baseline_sink=section_baseline,
                     sectioned=True,
                     key_offset=item.key_offset,
                     section_title=item.section.title,
@@ -1297,6 +1345,7 @@ class AskService:
             )
             if not ok:
                 return None
+            baseline_assemblies.append(dict(section_baseline))
             # 分节判定必须在本节自己的证据池与锚点上完成。只留模型自报会绕过
             # classify_evidence 这道真实门;拿合并后的锚点回算又会把另一节的高分
             # 证据借给本节。这个逐节结果既驱动全局确定性降级,也给 v2 留下可测信号。
@@ -1364,6 +1413,7 @@ class AskService:
             sections=len(rendered),
             counts=merged_counts,
             section_grounding=section_grounding_detail,
+            baseline_assemblies=baseline_assemblies,
         )
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
@@ -1540,7 +1590,9 @@ class AskService:
                 ranked = [candidates[i] for i in order]
                 baseline_chunk_candidates = list(ranked)
                 kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
+                untruncated_kg_block = kg_block
                 kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
+                baseline_kg_truncated = kg_block != untruncated_kg_block
                 chunk_budget = max(0, self.settings.max_total_tokens
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
                 from app.services.retrieval import (
@@ -1565,6 +1617,7 @@ class AskService:
                           selected=len(selected), kg_nodes=len(kg_id_map),
                           concept_walk=concept_walk_n)
             elif plan.strategy == "multi":
+                baseline_kg_truncated = False
                 collected, per_query, _ids, _mat = (
                     self.candidates.retrieve_chunk_candidates_multi(notebook_id, sub_queries))
                 raise_if_cancelled(cancel_event)
@@ -1590,6 +1643,7 @@ class AskService:
                                                relevance=lambda c: c.relevance)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
+                baseline_kg_truncated = False
                 scored, ids, mat = self.candidates.retrieve_chunk_candidates(
                     notebook_id, sub_queries[0])
                 # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
@@ -1604,6 +1658,7 @@ class AskService:
 
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
+            chunk_baseline: dict = {}
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
@@ -1613,12 +1668,14 @@ class AskService:
                     lambda: (self._answer_mix(
                                  question, selected, kg_block, kg_id_map, history,
                                  cancel_event=cancel_event, notebook_id=notebook_id,
-                                 memory_hits=memory_hits, llm_client=answer_client)
+                                 memory_hits=memory_hits, llm_client=answer_client,
+                                 baseline_sink=chunk_baseline)
                              if overlay_on else
                              self._answer_chunks(
                                  question, selected, history, cancel_event=cancel_event,
                                  notebook_id=notebook_id, memory_hits=memory_hits,
-                                 llm_client=answer_client)),
+                                 llm_client=answer_client,
+                                 baseline_sink=chunk_baseline)),
                     getattr(answer_client, "model", ""))
                 synth_failed = not _ok
             ask_stage("answer_llm", _t)
@@ -1693,7 +1750,6 @@ class AskService:
 
             from app.services.retrieval_baseline import (
                 build_retrieval_baseline_manifest,
-                emit_retrieval_baseline,
             )
             baseline_manifest = build_retrieval_baseline_manifest(
                 notebook_id=notebook_id,
@@ -1704,12 +1760,13 @@ class AskService:
                 candidate_chunks=baseline_chunk_candidates,
                 selected_knowledge=kg_hits,
                 selected_chunks=selected,
-            )
-            emit_retrieval_baseline(
-                self.event_log,
-                baseline_manifest,
-                notebook_id,
-                site="ask_chunk",
+                final_context_block=str(chunk_baseline.get("context_block") or ""),
+                final_id_map=dict(chunk_baseline.get("id_map") or {}),
+                final_ordered_handles=tuple(
+                    chunk_baseline.get("ordered_handles") or ()
+                ),
+                final_budget_chars=int(chunk_baseline.get("budget_chars") or 0),
+                capture_error_count=1 if baseline_kg_truncated else 0,
             )
 
             if answer:
@@ -2168,15 +2225,6 @@ class AskService:
                     intent_queries=intent_queries,
                     limits=limits,
                 )
-                from app.services.retrieval_baseline import (
-                    emit_retrieval_baseline,
-                )
-                emit_retrieval_baseline(
-                    self.event_log,
-                    getattr(result, "baseline_manifest", None),
-                    notebook_id,
-                    site="ask_reasoning",
-                )
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,
                     result.chains)
@@ -2234,6 +2282,7 @@ class AskService:
             # with other answer paths and stays a 3-tuple, so this closure
             # captures counts as a side effect instead of widening that contract.
             reasoning_counts: dict = {}
+            reasoning_baseline: dict = {}
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
             # 地图块:确定性服务端小块,不依赖 enumerations 是否为空——「集合太大
@@ -2353,7 +2402,8 @@ class AskService:
                     structured_block=structured_block,
                     structured_map=structured_map,
                     collection_map_block=collection_map_prompt_block,
-                    counts_sink=reasoning_counts)
+                    counts_sink=reasoning_counts,
+                    baseline_sink=reasoning_baseline)
                 return ans, llm_grounded_, anchors_
 
             # ---------------------------------------------- 按节合成(设计文档 §3.1)
@@ -2421,6 +2471,31 @@ class AskService:
                 anchors = sectioned.anchors
                 reasoning_counts.clear()
                 reasoning_counts.update(sectioned.counts)
+                reasoning_baseline.clear()
+                reasoning_baseline.update({
+                    "context_block": "\n".join(
+                        str(row.get("context_block") or "")
+                        for row in sectioned.baseline_assemblies
+                    ),
+                    "id_map": {
+                        key: value
+                        for row in sectioned.baseline_assemblies
+                        for key, value in dict(row.get("id_map") or {}).items()
+                    },
+                    "ordered_handles": tuple(
+                        handle
+                        for row in sectioned.baseline_assemblies
+                        for handle in tuple(row.get("ordered_handles") or ())
+                    ),
+                    "budget_chars": sum(
+                        int(row.get("budget_chars") or 0)
+                        for row in sectioned.baseline_assemblies
+                    ),
+                    "capture_error_count": sum(
+                        int(row.get("capture_error_count") or 0)
+                        for row in sectioned.baseline_assemblies
+                    ),
+                })
                 synthesis_ran = True
             # 地图也是合成的触发条件之一:大集合场景里模型 reflect 直接 answer、
             # 一条证据都没检索到,而正确答案就是那个计数——没有这一项,合成压根
@@ -2449,6 +2524,43 @@ class AskService:
                     # 由这一行负责」,哪天单次合成路径多记一条本该保留的错误就会被
                     # 这一行悄悄吞掉。
                     del _err_sink[outline_err_mark:fallback_err_mark]
+
+            from app.services.retrieval_baseline import (
+                build_retrieval_baseline_manifest,
+            )
+            candidate_manifest = getattr(result, "baseline_manifest", None)
+            result.baseline_manifest = build_retrieval_baseline_manifest(
+                notebook_id=notebook_id,
+                query=research_question,
+                mode="reasoning",
+                settings=self.settings,
+                candidate_knowledge=(
+                    candidate_manifest.candidate_knowledge
+                    if candidate_manifest is not None else top_hits
+                ),
+                candidate_chunks=(
+                    candidate_manifest.candidate_chunks
+                    if candidate_manifest is not None else chunks
+                ),
+                candidate_elements=(
+                    candidate_manifest.candidate_elements
+                    if candidate_manifest is not None else elements
+                ),
+                selected_knowledge=top_hits,
+                selected_chunks=chunks,
+                selected_elements=elements,
+                final_context_block=str(reasoning_baseline.get("context_block") or ""),
+                final_id_map=dict(reasoning_baseline.get("id_map") or {}),
+                final_ordered_handles=tuple(
+                    reasoning_baseline.get("ordered_handles") or ()
+                ),
+                final_budget_chars=int(reasoning_baseline.get("budget_chars") or 0),
+                prior_manifest=candidate_manifest,
+                capture_error_count=int(
+                    reasoning_baseline.get("capture_error_count") or 0
+                ),
+                baseline_step_usage=len(trace),
+            )
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
             # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
