@@ -1214,9 +1214,50 @@ class ReportEngine:
             if not any(str(row.get("query") or "") == str(query)
                        for row in result.attempted):
                 result.attempted.append({"query": str(query), "new": new_count, "tries": 1})
+        from app.services.retrieval_baseline import merge_baseline_candidates
+        prior_baseline_manifest = getattr(result, "baseline_manifest", None)
+        prior_candidate_knowledge = (
+            prior_baseline_manifest.candidate_knowledge
+            if prior_baseline_manifest is not None else ()
+        )
+        prior_candidate_chunks = (
+            prior_baseline_manifest.candidate_chunks
+            if prior_baseline_manifest is not None else ()
+        )
+        prior_candidate_elements = (
+            prior_baseline_manifest.candidate_elements
+            if prior_baseline_manifest is not None else ()
+        )
+        # Freeze B_candidates before the final policy clamp.  The clamp owns
+        # B_selected; candidates rejected there must remain visible to the
+        # no-regression oracle so future enrichment cannot change direct recall
+        # or ordering without being detected.
+        baseline_candidate_knowledge = merge_baseline_candidates(
+            "knowledge", prior_candidate_knowledge, result.top_hits
+        )
+        baseline_candidate_chunks = merge_baseline_candidates(
+            "chunk", prior_candidate_chunks, result.chunks
+        )
+        baseline_candidate_elements = merge_baseline_candidates(
+            "element", prior_candidate_elements, result.elements
+        )
         # 方向合并绕过了档位的最终选集上限 —— 每个方向照常执行(账目里的 `new` 记的
         # 是它真的找到多少),合并后再统一压回上限。
         clamp_merged_evidence(result, limits)
+        from app.services.retrieval_baseline import (
+            build_retrieval_baseline_manifest,
+        )
+        result.baseline_manifest = build_retrieval_baseline_manifest(
+            notebook_id=notebook_id,
+            query=sec_question,
+            mode="report",
+            settings=self.settings,
+            candidate_knowledge=baseline_candidate_knowledge,
+            candidate_chunks=baseline_candidate_chunks,
+            candidate_elements=baseline_candidate_elements,
+            prior_manifest=prior_baseline_manifest,
+            baseline_step_usage=len(result.trace),
+        )
         return result
 
     # --- Stage C(单节):撰写 ---
@@ -1375,6 +1416,41 @@ class ReportEngine:
             memory_map = {}
         client = deps.model_clients.chat("report_section")
         id_map = {**chunk_map, **kg_map, **chain_map, **memory_map, **element_map}
+        from app.services.retrieval_baseline import build_retrieval_baseline_manifest
+        candidate_manifest = getattr(result, "baseline_manifest", None)
+        result.baseline_manifest = build_retrieval_baseline_manifest(
+            notebook_id=notebook_id,
+            query=f"{question}\n{section.get('title') or ''}",
+            mode="report",
+            settings=self.settings,
+            candidate_knowledge=(
+                candidate_manifest.candidate_knowledge
+                if candidate_manifest is not None else result.top_hits
+            ),
+            candidate_chunks=(
+                candidate_manifest.candidate_chunks
+                if candidate_manifest is not None else chunks
+            ),
+            candidate_elements=(
+                candidate_manifest.candidate_elements
+                if candidate_manifest is not None else elements
+            ),
+            selected_knowledge=result.top_hits,
+            selected_chunks=chunks,
+            selected_elements=elements,
+            final_context_block=context_block,
+            final_id_map=id_map,
+            final_ordered_handles=(
+                *tuple(chunk_map),
+                *tuple(kg_map),
+                *tuple(element_map),
+                *tuple(chain_map),
+                *tuple(memory_map),
+            ),
+            final_budget_chars=chunk_budget + kg_budget,
+            prior_manifest=candidate_manifest,
+            baseline_step_usage=len(getattr(result, "trace", None) or []),
+        )
         localized_synthesis = localize_blueprint_evidence(synthesis, id_map)
         synthesis_block = (
             json.dumps(localized_synthesis, ensure_ascii=False)
