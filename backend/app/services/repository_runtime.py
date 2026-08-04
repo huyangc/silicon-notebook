@@ -53,6 +53,7 @@ from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
+from app.services.source_graph_primitives import SourceGraphPrimitives
 from app.services.source_subgraph import SourceSubgraphService
 from app.services.vector_cache import VectorCache
 # Task 23: Ask detached-execution composition (appended block — parallel
@@ -215,6 +216,12 @@ class RepositoryRuntime:
         # primitives one backend-neutral, generation-keyed snapshot owner.
         self.source_subgraphs = SourceSubgraphService(
             projections=self.index_projections,
+            settings=self.settings,
+        )
+        # Shadow-only selected-source graph tools. Public Ask/Report wiring is
+        # intentionally deferred to the baseline-preserving rollout PRs.
+        self.source_graph_primitives = SourceGraphPrimitives(
+            snapshots=self.source_subgraphs,
             settings=self.settings,
         )
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
