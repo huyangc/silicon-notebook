@@ -259,6 +259,27 @@ def test_sqlite_compact_scope_snapshot_matches_visibility_and_count(tmp_path, mo
         notebook_id, ["s2", "foreign", "s1"]
     ) == (["s2", "s1"], 2)
 
+    with store.database.connect() as db:
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN WITH requested(id, ordinal) AS ("
+            "SELECT CAST(value AS TEXT), CAST(key AS INTEGER) FROM json_each(?)"
+            ") SELECT requested.id FROM requested "
+            "CROSS JOIN sources ON sources.id=requested.id "
+            "WHERE sources.notebook_id=? AND "
+            "source_type NOT IN ('memory', 'knowhow')",
+            ('["s2", "foreign", "s1"]', notebook_id),
+        ).fetchall()
+    details = [str(row["detail"]) for row in plan]
+    requested_scan = next(
+        index for index, detail in enumerate(details) if "json_each" in detail
+    )
+    source_probe = next(
+        index for index, detail in enumerate(details)
+        if "sources" in detail and "SEARCH" in detail
+    )
+    assert requested_scan < source_probe
+    assert "id=?" in details[source_probe].replace(" ", "")
+
 
 def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
     resolved = _validate_source_scope(

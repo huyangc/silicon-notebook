@@ -103,7 +103,7 @@ class SourceStore:
                 "SELECT CAST(value AS TEXT), CAST(key AS INTEGER) FROM json_each(?)"
                 "), visible AS ("
                 "SELECT requested.id, requested.ordinal FROM requested "
-                "JOIN sources ON sources.id=requested.id "
+                "CROSS JOIN sources ON sources.id=requested.id "
                 f"WHERE sources.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
                 "), stats(visible_count) AS ("
                 "SELECT COUNT(*) FROM sources WHERE notebook_id=? "
