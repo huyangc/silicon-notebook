@@ -69,10 +69,19 @@ def _knowledge(source_id: str, *, notebook_id: str = "nb") -> RetrievedKnowledge
 
 
 class _ScopeRepo:
-    def __init__(self, visible: list[str], count: int, hidden=None):
+    def __init__(self, visible: list[str], count: int, hidden=None,
+                 user_id: str = "user-a"):
         self.visible = visible
         self.count = count
         self.hidden = list(hidden or [])
+        self.user_id = user_id
+
+    def current_user(self):
+        # master 的安全修复在冻结点经 repo.current_user() 取归属身份,
+        # 用来把隐藏那一半按 memory_items.created_by 收窄到本人。
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=self.user_id)
 
     def visible_source_ids(self, _notebook_id, source_ids):
         return [source_id for source_id in source_ids if source_id in self.visible]
@@ -83,7 +92,13 @@ class _ScopeRepo:
     def all_visible_source_ids(self, _notebook_id):
         return list(self.visible)
 
-    def all_hidden_source_ids(self, _notebook_id):
+    def visible_source_scope_snapshot(self, _notebook_id, source_ids):
+        # master #440 的紧凑路径:一条 SQL 同时校验选中 id 与数可见全集,使并发变更
+        # 无法造出「假的全选」分类。这里镜像那个语义(选中∩可见, 可见总数)。
+        requested = list(dict.fromkeys(str(v) for v in source_ids if v))
+        return ([sid for sid in requested if sid in self.visible], self.count)
+
+    def hidden_source_ids(self, _notebook_id, _owner_id):
         return list(self.hidden)
 
 
@@ -381,9 +396,9 @@ def test_knowhow_only_notebook_excluding_every_library_is_not_409():
         SourceScope(mode="exclude", source_ids=[]),   # ← 浏览器的「全选」表示法
         BaseNotebookScope(mode="include", notebook_ids=[]),
     )
-    assert resolved_source == SourceScope(
+    assert resolved_source.model_dump() == SourceScope(
         mode="include", source_ids=[], narrowed=False
-    )
+    ).model_dump()
     assert resolved_base == BaseNotebookScope(
         mode="include", notebook_ids=[], narrowed=True
     )
@@ -436,9 +451,9 @@ def test_deselecting_only_bases_with_local_sources_present_is_not_409():
         SourceScope(mode="include", source_ids=["s1"]),
         BaseNotebookScope(mode="include", notebook_ids=[]),
     )
-    assert resolved_source == SourceScope(
+    assert resolved_source.model_dump() == SourceScope(
         mode="include", source_ids=["s1"], narrowed=False
-    )
+    ).model_dump()
     assert resolved_base == BaseNotebookScope(
         mode="include", notebook_ids=[], narrowed=True
     )
@@ -1133,7 +1148,11 @@ def test_sync_ask_route_carries_the_receipt_into_the_service(monkeypatch):
         def all_visible_source_ids(self, _notebook_id):
             return ["s1", "s2"]
 
-        def all_hidden_source_ids(self, _notebook_id):
+        def visible_source_scope_snapshot(self, _notebook_id, source_ids):
+            requested = list(dict.fromkeys(str(v) for v in source_ids if v))
+            return ([sid for sid in requested if sid in ("s1", "s2")], 2)
+
+        def hidden_source_ids(self, _notebook_id, _owner_id):
             return []
 
         def ask(self, _notebook_id, _payload):

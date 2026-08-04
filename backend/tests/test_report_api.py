@@ -617,6 +617,10 @@ def test_generate_rejects_when_not_outline_ready(client, monkeypatch):
 
 
 def test_generate_retries_failed_report_from_confirmed_outline(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
     monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
     monkeypatch.setattr(repository()._runtime.models, "configured", lambda _workload: True)
     launched = []
@@ -678,6 +682,10 @@ def _scoped_client(client, monkeypatch, *, with_base=False):
     返回 (notebook_id, base_notebook_id|None, launched) —— launched 记录每次
     _launch_plan_job 的 (args, kwargs),用于断言范围真的传给了后台任务。
     """
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
     launched: list = []
     monkeypatch.setattr(
         R, "_launch_plan_job", lambda *args, **kwargs: launched.append((args, kwargs))
