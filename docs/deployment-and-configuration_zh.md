@@ -71,6 +71,10 @@ cp model-services.example.toml .local/model-services.toml
   **切勿改小 `EMBED_DIM` 来降维** —— 那会把全部存量向量当异维丢弃。
 - **PDF 高保真**(可选)—— 一个 MinerU 端点，见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)；
   保持 `MINERU_MODE=off` 则走本地 PyMuPDF4LLM 版面/Markdown 兜底。
+- **所选来源 PPR shadow 开关**——`SOURCE_SUBGRAPH_PPR_ENABLED` 只控制冻结的所选来源
+  snapshot 内部稀疏 PPR producer，默认 `false`。它与 `GRAPH_PPR_ENABLED` 相互独立：
+  关闭它不会影响历史全范围 PPR、局部图原语、直接检索或受保护 baseline 通道。本阶段
+  producer 尚无 Ask/深度报告 consumer，因此单独开启也不会改变用户可见检索。
 
 `.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
 服务、绑定与容量模板；[配置](#配置)按组列出常用项。

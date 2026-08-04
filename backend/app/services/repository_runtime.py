@@ -55,6 +55,7 @@ from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
 from app.services.source_graph_primitives import SourceGraphPrimitives
 from app.services.source_subgraph import SourceSubgraphService
+from app.services.source_subgraph_ppr import SourceSubgraphPprService
 from app.services.retrieval_enrichment import BaselineProtectedEnrichmentService
 from app.services.vector_cache import VectorCache
 # Task 23: Ask detached-execution composition (appended block — parallel
@@ -228,6 +229,7 @@ class RepositoryRuntime:
         # Shadow lane keeps the historical result immutable. Ask/Report wiring
         # remains deferred; later consumers must finish B before invoking G.
         self.source_graph_enrichment = BaselineProtectedEnrichmentService()
+        self.source_subgraph_ppr = SourceSubgraphPprService(settings=self.settings)
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
         self.scale_builder: "ScaleIndexBuilder | None" = None
         self.scale_artifacts: "ScaleArtifactRuntime | None" = None
