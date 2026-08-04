@@ -81,6 +81,9 @@ def _rollback_v34(db: sqlite3.Connection) -> None:
     seventh index _migration_39 installs sits on the PRE-EXISTING
     knowhow_tables, so no DROP TABLE reaches it and it must be named.
     """
+    db.execute("DROP TABLE knowledge_source_fact_backfills")   # _migration_41
+    db.execute("DROP INDEX idx_kos_source_object")              # _migration_41
+    db.execute("DROP INDEX idx_knowledge_source_facts_source_generation_global")
     db.execute("DROP TABLE knowledge_source_fact_elements")    # _migration_40
     db.execute("DROP TABLE knowledge_source_facts")            # _migration_40
     db.execute("DROP INDEX idx_knowhow_tables_nb_title")       # _migration_39
@@ -743,6 +746,9 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE knowledge_source_fact_backfills") # _migration_41
+        rollback.execute("DROP INDEX idx_kos_source_object")            # _migration_41
+        rollback.execute("DROP INDEX idx_knowledge_source_facts_source_generation_global")
         rollback.execute("DROP TABLE knowledge_source_fact_elements")  # _migration_40
         rollback.execute("DROP TABLE knowledge_source_facts")          # _migration_40
         rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")      # _migration_39
@@ -795,6 +801,9 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         ).fetchone() is not None
 
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE knowledge_source_fact_backfills")
+        rollback.execute("DROP INDEX idx_kos_source_object")
+        rollback.execute("DROP INDEX idx_knowledge_source_facts_source_generation_global")
         rollback.execute("DROP TABLE knowledge_source_fact_elements")
         rollback.execute("DROP TABLE knowledge_source_facts")
         rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")
@@ -818,6 +827,9 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE knowledge_source_fact_backfills")
+        rollback.execute("DROP INDEX idx_kos_source_object")
+        rollback.execute("DROP INDEX idx_knowledge_source_facts_source_generation_global")
         rollback.execute("DROP TABLE knowledge_source_fact_elements")
         rollback.execute("DROP TABLE knowledge_source_facts")
         rollback.execute("PRAGMA user_version = 39")
@@ -826,6 +838,32 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 39
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
+def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE knowledge_source_fact_backfills")
+        rollback.execute("DROP INDEX idx_kos_source_object")
+        rollback.execute(
+            "DROP INDEX idx_knowledge_source_facts_source_generation_global"
+        )
+        rollback.execute(
+            "ALTER TABLE knowledge_source_facts DROP COLUMN projection_origin"
+        )
+        rollback.execute("PRAGMA user_version = 40")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 40
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
 

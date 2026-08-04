@@ -156,6 +156,7 @@ class NotebookCopyService:
             chunk_map: dict = {}
             object_map: dict = {}
             fact_map: dict = {}
+            generation_map: dict[tuple[str, str], str] = {}
             relation_map: dict = {}
             # PR-2+3 Task 13: knowhow business-table + hidden-source-content
             # remap maps. ``knowhow_source_ids_old`` is captured from the
@@ -422,12 +423,95 @@ class NotebookCopyService:
                 "knowledge_objects", objects_out, chunk_size=chunk_size
             )
 
+            # Source-local facts are generation-bound: maintenance and the
+            # read-only audit accept a projection only when its generation is
+            # backed by a successful KG extraction run in the SAME notebook.
+            # Operational extraction history deliberately does not travel
+            # with a deep copy, so mint one copy-local completed generation
+            # for every source represented by the copied terminal ledger (or,
+            # for an older projection without a ledger, its newest fact
+            # generation).  Facts, bindings and ledger rows below all remap
+            # through the same (source,generation) key.
+            generations_by_source: dict[str, dict[str, str]] = {}
+            fact_counts_by_generation: dict[tuple[str, str], int] = {}
+            for data in snapshot["knowledge_source_facts"]:
+                source_id = str(data["source_id"])
+                generation = str(data.get("source_generation") or "")
+                if generation:
+                    generations_by_source.setdefault(source_id, {})[generation] = str(
+                        data.get("updated_at") or data.get("created_at") or ""
+                    )
+                    key = (source_id, generation)
+                    fact_counts_by_generation[key] = (
+                        fact_counts_by_generation.get(key, 0) + 1
+                    )
+            active_generation_by_source: dict[str, str] = {}
+            scanned_by_source: dict[str, int] = {}
+            for data in snapshot["knowledge_source_fact_backfills"]:
+                source_id = str(data["source_id"])
+                generation = str(data.get("source_generation") or "")
+                if not generation:
+                    continue
+                active_generation_by_source[source_id] = generation
+                scanned_by_source[source_id] = int(data.get("objects_scanned") or 0)
+                generations_by_source.setdefault(source_id, {})[generation] = str(
+                    data.get("updated_at") or data.get("created_at") or ""
+                )
+            for data in snapshot["knowledge_source_fact_elements"]:
+                source_id = str(data["source_id"])
+                generation = str(data.get("source_generation") or "")
+                if generation:
+                    generations_by_source.setdefault(source_id, {}).setdefault(
+                        generation, str(data.get("created_at") or "")
+                    )
+
+            copy_generation_runs = []
+            for old_source_id, generations in generations_by_source.items():
+                for old_generation in generations:
+                    generation_map[(old_source_id, old_generation)] = remapped_id(
+                        old_generation
+                    )
+                active_generation = active_generation_by_source.get(old_source_id)
+                if not active_generation:
+                    active_generation = max(
+                        generations,
+                        key=lambda generation: (generations[generation], generation),
+                    )
+                new_generation = generation_map[(old_source_id, active_generation)]
+                copied_fact_count = fact_counts_by_generation.get(
+                    (old_source_id, active_generation), 0
+                )
+                object_count = scanned_by_source.get(old_source_id, copied_fact_count)
+                copy_generation_runs.append(
+                    {
+                        "id": new_generation,
+                        "notebook_id": new_id,
+                        "source_id": source_map[old_source_id],
+                        "run_type": "kg",
+                        "status": "completed",
+                        "error_message": (
+                            f"kg objects={object_count} relations=0 copied_generation=1"
+                        ),
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+            self._store.insert_copy_rows(
+                "extraction_runs", copy_generation_runs, chunk_size=chunk_size
+            )
+
             source_facts_out = []
             for data in snapshot["knowledge_source_facts"]:
                 old_fact_id = data["id"]
+                old_source_id = str(data["source_id"])
+                old_generation = str(data.get("source_generation") or "")
                 data["id"] = fact_map.setdefault(old_fact_id, remapped_id(old_fact_id))
                 data["notebook_id"] = new_id
-                data["source_id"] = source_map[data["source_id"]]
+                data["source_id"] = source_map[old_source_id]
+                if old_generation:
+                    data["source_generation"] = generation_map[
+                        (old_source_id, old_generation)
+                    ]
                 data["global_object_id"] = object_map.get(
                     data.get("global_object_id") or "",
                     data.get("global_object_id") or "",
@@ -449,14 +533,39 @@ class NotebookCopyService:
 
             source_fact_elements_out = []
             for data in snapshot["knowledge_source_fact_elements"]:
+                old_source_id = str(data["source_id"])
+                old_generation = str(data.get("source_generation") or "")
                 data["fact_id"] = fact_map[data["fact_id"]]
                 data["notebook_id"] = new_id
-                data["source_id"] = source_map[data["source_id"]]
+                data["source_id"] = source_map[old_source_id]
+                if old_generation:
+                    data["source_generation"] = generation_map[
+                        (old_source_id, old_generation)
+                    ]
                 data["element_id"] = element_map[data["element_id"]]
                 source_fact_elements_out.append(data)
             self._store.insert_copy_rows(
                 "knowledge_source_fact_elements",
                 source_fact_elements_out,
+                chunk_size=chunk_size,
+            )
+
+            source_fact_backfills_out = []
+            for data in snapshot["knowledge_source_fact_backfills"]:
+                old_source_id = str(data["source_id"])
+                old_generation = str(data.get("source_generation") or "")
+                data["source_id"] = source_map[old_source_id]
+                data["notebook_id"] = new_id
+                if old_generation:
+                    data["source_generation"] = generation_map[
+                        (old_source_id, old_generation)
+                    ]
+                old_after = data.get("after_object_id") or ""
+                data["after_object_id"] = object_map.get(old_after, "")
+                source_fact_backfills_out.append(data)
+            self._store.insert_copy_rows(
+                "knowledge_source_fact_backfills",
+                source_fact_backfills_out,
                 chunk_size=chunk_size,
             )
 

@@ -79,6 +79,12 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
     ),
     (
+        "knowledge_source_fact_backfills",
+        f"SELECT * FROM knowledge_source_fact_backfills WHERE notebook_id = ? "
+        f"AND status IN ('complete','incomplete') "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
         "knowledge_relations",
         f"SELECT * FROM knowledge_relations WHERE notebook_id = ? "
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
@@ -146,6 +152,8 @@ _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_facts", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_fact_elements", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_fact_backfills", f"AND status IN ('complete','incomplete') "
+     f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
     ("concept_clusters", ""),
     ("knowhow_tables", ""),

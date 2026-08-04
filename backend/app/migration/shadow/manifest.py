@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=40, postgres_version=18, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=41, postgres_version=19, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -547,6 +547,14 @@ _TABLES = (
         ("fact_id", "element_id"),
         ReplicationKeyKind.DECLARED_PK,
         73,
+        "timestamptz",
+    ),
+    # SQLite v41 / PostgreSQL v19: restartable source-fact backfill ledger.
+    _table(
+        "knowledge_source_fact_backfills",
+        ("source_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        74,
         "timestamptz",
     ),
 )

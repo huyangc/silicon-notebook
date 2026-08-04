@@ -11,6 +11,7 @@
   PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --all-notebooks
   PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebook-id nb-xxx
   PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-notebooks
+  PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-facts --notebook-id nb-xxx
 """
 from app.services.batch_ingest import main
 

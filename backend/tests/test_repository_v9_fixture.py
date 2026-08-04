@@ -110,8 +110,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # KG 质量分析的三张预计算产物表、v37 按 (source_id, element_type,
     # created_at, id) 的集合枚举索引、v38 用户可见来源身份索引，以及 v39
     # 命令目录抽取的 catalog_jobs / catalog_candidates 两张表，以及 v40
-    # source-local fact / evidence-element binding 两张表，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 40
+    # source-local fact / evidence-element binding 两张表，以及 v41 可恢复的
+    # source-fact backfill 状态表，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 41
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

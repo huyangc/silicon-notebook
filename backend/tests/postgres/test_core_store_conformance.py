@@ -75,7 +75,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 18
+    assert PostgresMigrator(postgres_database).migrate() == 19
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -327,7 +327,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 18
+    assert PostgresMigrator(postgres_database).migrate() == 19
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -405,7 +405,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 18
+    assert PostgresMigrator(postgres_database).migrate() == 19
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -470,7 +470,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 18
+    assert PostgresMigrator(postgres_database).migrate() == 19
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -791,6 +791,15 @@ def test_full_notebook_copy_preserves_source_fact_jsonb(
             "'el-fact-copy', %s)",
             (notebook_id, NOW),
         )
+        connection.execute(
+            "INSERT INTO knowledge_source_fact_backfills "
+            "(source_id,notebook_id,source_generation,projection_version,status,"
+            "after_object_id,objects_scanned,facts_written,incomplete_objects,"
+            "failure_code,created_at,updated_at) VALUES "
+            "('src-fact-copy',%s,'run-fact-copy',1,'complete','ko-fact-copy',"
+            "1,1,0,'',%s,%s)",
+            (notebook_id, NOW, NOW),
+        )
 
     counters: dict[str, int] = {}
 
@@ -822,19 +831,40 @@ def test_full_notebook_copy_preserves_source_fact_jsonb(
 
     with core_stores.database.connect() as connection:
         fact = connection.execute(
-            "SELECT payload, evidence, global_object_id FROM knowledge_source_facts "
+            "SELECT payload, evidence, global_object_id, source_generation "
+            "FROM knowledge_source_facts "
             "WHERE notebook_id=%s",
             (copied.id,),
         ).fetchone()
         binding = connection.execute(
-            "SELECT source_id, element_id FROM knowledge_source_fact_elements "
+            "SELECT source_id, element_id, source_generation "
+            "FROM knowledge_source_fact_elements "
             "WHERE notebook_id=%s",
             (copied.id,),
+        ).fetchone()
+        backfill = connection.execute(
+            "SELECT source_id,after_object_id,source_generation "
+            "FROM knowledge_source_fact_backfills "
+            "WHERE notebook_id=%s",
+            (copied.id,),
+        ).fetchone()
+        copied_run = connection.execute(
+            "SELECT id,status,error_message FROM extraction_runs "
+            "WHERE notebook_id=%s AND source_id=%s AND run_type='kg'",
+            (copied.id, binding["source_id"]),
         ).fetchone()
     assert fact["payload"] == {"name": "source fact"}
     assert fact["evidence"][0]["source_id"] == binding["source_id"]
     assert fact["evidence"][0]["element_id"] == binding["element_id"]
     assert fact["global_object_id"] != "ko-fact-copy"
+    assert copied_run is not None
+    assert copied_run["status"] == "completed"
+    assert copied_run["error_message"].startswith("kg objects=")
+    assert fact["source_generation"] == copied_run["id"]
+    assert binding["source_generation"] == copied_run["id"]
+    assert backfill["source_id"] == binding["source_id"]
+    assert backfill["source_generation"] == copied_run["id"]
+    assert backfill["after_object_id"] == fact["global_object_id"]
 
 
 def test_source_jsonb_hydration_and_ordinal_sample_order(core_stores: CoreStores):

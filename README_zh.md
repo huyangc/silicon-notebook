@@ -134,7 +134,7 @@ bash scripts/check.sh
 - SQLite 默认位于 `.local/silicon_notebook.db`；PostgreSQL 是可直接选择的替代后端。两者的上传文件和生成工件仍位于 `.local/`。
 - 生产后端刻意保持单 worker，因为模型队列、熔断、健康和取消状态都在进程内。
 - 默认 `chunk` 检索只读取当前笔记本；图谱增强和推理路径可通过显式挂载的公共库联合检索。
-- 来源事实按 `(notebook, source, extraction generation)` 归属，不会因全局对象折叠而消失；重解析/替换会在全局 KG 写事务内一并换代，复制 notebook 时随来源元素一起重映射。
+- 来源事实按 `(notebook, source, extraction generation)` 归属，不会因全局对象折叠而消失；重解析/替换会在全局 KG 写事务内一并换代。复制 notebook 时会统一重映射事实、证据绑定与终态账本，并生成副本本地的已完成 KG 代次，使审计和离线修复不依赖原 notebook 的运维运行历史。
 - 提问时用**英文半角双引号**括起来的内容整体检索、不做分词：它作为一个不可拆词项进入词法候选，在关键词覆盖率里只算一项（散落着这几个词的文档得不到分），并额外获得一次精确定位探测。引号是强偏好而非硬过滤。只认英文半角双引号、引号内至少 3 个字、一段文本里超过 4 段**不同**的引号内容则整条语法不生效；提问框与深度报告输入框会当场回执识别到的短语，不让没生效的约束静默通过。
 - 词法检索保留整句精确匹配作为排序加分，但会独立召回拉丁字母/数字词项、重叠中文三字片段，以及以 `_`/`-`/`.` 连接的完整标识符（如 `set_db`、`config.yaml`）作为整体词项，不再强制整段查询连续出现；SQLite 安全引用 FTS5 clause，PostgreSQL 应用相同的有界词项并集并转义 LIKE 元字符，使 `set_db` 这类词项保持字面量。带索引的 Chunk 与 KG 检索使用有界的 `ANN ∪ FTS` 候选；带索引的 Relation 检索还会按方向平衡补入与 FTS 命中 KG 端点相邻的有界关系候选。
 - 大库的索引检索会把 ANN 后的数据库 hydration 限制在候选窗口内，并让并发推理子查询单飞加载 ANN handle。Chunk scale 索引还持久化紧凑的 ANN 行到来源映射，使收窄检索在 HNSW 进入 Top-K 前过滤，而不是让未选来源占候选席位。默认会在 `/api/ready` 放行用户流量前加载全部已发布 scale 索引、已启用的 ANN handle 和可安全复用的单索引 PPR core；跨 notebook 组合图保持按需构造，避免成倍复制千万节点图。
@@ -151,7 +151,7 @@ CLI 使用的 PostgreSQL 目标；单独设置它不会启动任何任务，也�
 
 在 `DATABASE_URL` 仍指向 SQLite 时，运维人员可以运行受保护的单向
 SQLite→PostgreSQL 影子同步：preflight 绑定并确认两端数据库身份，`start-forward` 安装
-run-scoped capture/guard 并复制一致的 68 表 baseline，随后由一个受监督的前台 worker
+run-scoped capture/guard 并复制一致的 69 表 baseline，随后由一个受监督的前台 worker
 持续应用 SQLite change log。`status` 提供脱敏的 lag/lease/poison 状态，
 `verify --level full` 执行 barrier-aware 一致性校验。worker 使用数据库时钟的排他 lease，
 对 PostgreSQL 瞬态失败重试，确定性 poison 会 fail-stop；清理策略至少保留已验证进度之后
@@ -181,7 +181,7 @@ Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有�
 - importer 要求目标 PostgreSQL 是空的且使用 UTF-8；目标 URL 只从 `POSTGRES_MIGRATION_URL` 读取，不放在 CLI 参数中。它用 SQLite backup API 获取包含已提交 WAL 的在线一致快照，只在工作副本上升级到配对 schema，按有界 batch 流式 `COPY`，保留 ordinal，把旧 JSON 向量转换成 float32 `bytea`，逐表做内容 checksum，并逐表提交 + 记录 checkpoint，中断（崩溃、远程连接断开、重启）后从最后完成的表续跑而非整体重来；finalize（ordinal reseed、重建索引、`ANALYZE`）是幂等的。SQLite-only 的 shadow control/change-log 表会被明确排除并记录在 receipt 中。可为大目标传入会话级批量装载调优（`--maintenance-work-mem`、`--max-parallel-index-workers`）。默认 preview/apply 不会修改 `DATABASE_URL`，也不会复制 `.local/storage`。
 - 在线迁移只能算演练快照：快照之后继续写入 SQLite 的数据不会被同步。对已经停服的本地部署，显式 `--activate-env ... --confirm-service-stopped` 会重新生成 SQLite 一致快照，并按无凭据 receipt 重算 PostgreSQL 全表 checksum；全部一致后才原子替换 `.env`，把旧 SQLite URL 保存在惰性的 `SHADOW_DATABASE_URL`，并创建权限受限的回退副本。CLI 不会自行停止或重启服务。随后以 `--workers 1` 启动，并在放流量前检查 `/api/ready`、登录、数量、搜索、代表性读取和一次 canary 写入。
 - 切回 SQLite 不会回放 PostgreSQL-only 写入。无损回滚要求切换后尚无新写入，或已经完成并验证双向外部对账迁移。
-- `scripts/batch_ingest.py` 的 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index` 同时支持 SQLite 与 PostgreSQL。PostgreSQL 直连维护只允许离线执行：先停止 API/后台 writer，再显式传 `--confirm-service-stopped`；该参数只是运维确认，不会替你停服务。数据库级 advisory lock 会阻止两个 PostgreSQL 维护 CLI 重叠。`vectors-to-blob` 仍仅适用于 SQLite，因为 PostgreSQL 向量已经是 `bytea`。所有 `kg` 抽取形态（包括 `--limit`、`--retry-partial`）都复用页面“分析”的持久 notebook job；批处理的末尾聚类/索引完成后 job 才成功。页面“继续分析”和 CLI `kg --retry-partial` 都会安全修复 partial run，旧图保留到“零失败窗口且非空”的新图成功提交。
+- `scripts/batch_ingest.py` 的 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index` 和显式离线的 `backfill-source-facts` 同时支持 SQLite 与 PostgreSQL。后者无模型调用、可恢复地投影历史来源事实，显式区分在线事实与历史投影，并在运维失败重试后保留真实不完整原因；无法证明来源归属的旧数据保持可见的 incomplete，`scripts/audit_source_facts.py` 会独立对账 KG 代次/版本/数量，同时只报告计数与有界 source id。PostgreSQL 直连维护只允许离线执行：先停止 API/后台 writer，再显式传 `--confirm-service-stopped`；该参数只是运维确认，不会替你停服务。数据库级 advisory lock 会阻止两个 PostgreSQL 维护 CLI 重叠。`vectors-to-blob` 仍仅适用于 SQLite，因为 PostgreSQL 向量已经是 `bytea`。所有 `kg` 抽取形态（包括 `--limit`、`--retry-partial`）都复用页面“分析”的持久 notebook job；批处理的末尾聚类/索引完成后 job 才成功。页面“继续分析”和 CLI `kg --retry-partial` 都会安全修复 partial，旧图保留到“零失败窗口且非空”的新图成功提交。
 
 preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；按步骤执行的清单见[迁移 runbook](./docs/postgres-migration-runbook.md)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 

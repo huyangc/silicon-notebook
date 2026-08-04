@@ -137,6 +137,146 @@ def test_source_index_backfill_is_bounded_restartable_and_marks_only_at_end(
 
 
 @pytest.mark.postgres_integration
+def test_source_fact_backfill_is_restartable_and_jsonb_safe(postgres_repository):
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="source facts")
+    ).id
+    _seed_source_and_objects(postgres_repository, notebook_id)
+    runtime = postgres_repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES ('el-a','src-a','paragraph','p','body',%s,%s)",
+            (jsonb({}), now),
+        )
+        db.execute(
+            "UPDATE knowledge_objects SET evidence=%s",
+            (jsonb([{"source_id": "src-a", "element_id": "el-a"}]),),
+        )
+        db.execute(
+            "INSERT INTO extraction_runs "
+            "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+            "VALUES ('run-history',%s,'src-a','kg','completed',"
+            "'kg objects=2 relations=0',%s,%s)",
+            (notebook_id, now, now),
+        )
+        db.execute(
+            "INSERT INTO extraction_runs "
+            "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+            "VALUES ('run-paper',%s,'src-a','paper_meta','running','',"
+            "'9999-12-31T23:59:59Z','9999-12-31T23:59:59Z')",
+            (notebook_id,),
+        )
+    maintenance = postgres_repository.maintenance
+    maintenance.clear_source_index(notebook_id)
+    first_index = maintenance.backfill_source_index_batch(notebook_id, "", 10)
+    assert first_index[:2] == (2, 2)
+    maintenance.mark_source_index_backfilled(notebook_id)
+
+    first = maintenance.backfill_source_fact_batch(
+        notebook_id, "src-a", batch_size=1
+    )
+    second = maintenance.backfill_source_fact_batch(
+        notebook_id, "src-a", batch_size=1
+    )
+    final = maintenance.backfill_source_fact_batch(
+        notebook_id, "src-a", batch_size=1
+    )
+    assert first["status"] == second["status"] == "running"
+    assert final["status"] == "complete"
+    assert final["facts_written"] == 2
+    with runtime.database.connect() as db:
+        facts = db.execute(
+            "SELECT payload,evidence FROM knowledge_source_facts "
+            "WHERE source_id='src-a' ORDER BY id"
+        ).fetchall()
+    assert sorted(row["payload"]["name"] for row in facts) == ["ko-a", "ko-z"]
+    assert all(row["evidence"][0]["element_id"] == "el-a" for row in facts)
+
+
+@pytest.mark.postgres_integration
+def test_source_fact_backfill_audits_owned_object_missing_from_reverse_index(
+    postgres_repository,
+):
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="source fact gaps")
+    ).id
+    _seed_source_and_objects(postgres_repository, notebook_id)
+    runtime = postgres_repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES ('el-a','src-a','paragraph','p','body',%s,%s)",
+            (jsonb({}), now),
+        )
+        db.execute(
+            "UPDATE knowledge_objects SET evidence=%s WHERE id='ko-a'",
+            (jsonb([{"source_id": "src-a", "element_id": "el-a"}]),),
+        )
+        db.execute(
+            "UPDATE knowledge_objects SET evidence=%s WHERE id='ko-z'",
+            (jsonb([]),),
+        )
+        db.execute(
+            "INSERT INTO extraction_runs "
+            "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+            "VALUES ('run-history',%s,'src-a','kg','completed',"
+            "'kg objects=2 relations=0',%s,%s)",
+            (notebook_id, now, now),
+        )
+        db.execute(
+            "INSERT INTO knowledge_source_facts "
+            "(id,notebook_id,source_id,source_generation,local_object_id,"
+            "global_object_id,object_type,payload,evidence,projection_version,"
+            "created_at,updated_at) VALUES "
+            "('ksf-orphan-live',%s,'src-a','run-history',"
+            "'legacy:legitimate-live-id','ko-deleted','concept',%s,%s,1,%s,%s)",
+            (
+                notebook_id,
+                jsonb({"name": "orphan live"}),
+                jsonb([{"source_id": "src-a", "element_id": "el-a"}]),
+                now,
+                now,
+            ),
+        )
+        db.execute(
+            "INSERT INTO knowledge_source_fact_elements "
+            "(fact_id,notebook_id,source_id,source_generation,element_id,created_at) "
+            "VALUES ('ksf-orphan-live',%s,'src-a','run-history','el-a',%s)",
+            (notebook_id, now),
+        )
+
+    result = postgres_repository.maintenance.backfill_source_fact_batch(
+        notebook_id, "src-a", batch_size=10
+    )
+    assert result["status"] == "incomplete"
+    assert result["objects_scanned"] == 2
+    assert result["facts_written"] == 2
+    assert result["incomplete_objects"] == 1
+    with runtime.database.connect() as db:
+        state = db.execute(
+            "SELECT incomplete_reason,failure_code "
+            "FROM knowledge_source_fact_backfills "
+            "WHERE source_id='src-a'"
+        ).fetchone()
+        origins = db.execute(
+            "SELECT projection_origin,COUNT(*) AS c FROM knowledge_source_facts "
+            "WHERE source_id='src-a' GROUP BY projection_origin "
+            "ORDER BY projection_origin"
+        ).fetchall()
+    assert state["incomplete_reason"] == "missing_evidence"
+    assert state["failure_code"] == ""
+    assert [(row["projection_origin"], row["c"]) for row in origins] == [
+        ("historical", 1),
+        ("live", 1),
+    ]
+
+
+@pytest.mark.postgres_integration
 def test_node_backfill_releases_read_connection_before_model_work(
     postgres_repository, monkeypatch
 ):

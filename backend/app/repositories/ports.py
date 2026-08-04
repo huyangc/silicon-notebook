@@ -1115,7 +1115,13 @@ class KnowledgeStorePort(Protocol):
         source_generation: str, element_ids: Sequence[str]
     ) -> None: ...
     @staticmethod
-    def insert_source_fact_rows(connection: object, rows: object, element_rows: object) -> None: ...
+    def insert_source_fact_rows(
+        connection: object,
+        rows: object,
+        element_rows: object,
+        *,
+        projection_origin: str = "live",
+    ) -> None: ...
     @staticmethod
     def insert_relation_chunk(connection: object, rows: object) -> None: ...
     @staticmethod
@@ -1940,6 +1946,20 @@ class BatchMaintenancePort(Protocol):
         self, notebook_id: str, last_id: str, batch_size: int
     ) -> tuple[int, int, str]: ...
     def mark_source_index_backfilled(self, notebook_id: str) -> None: ...
+    def source_fact_backfill_target_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[str]: ...
+    def source_index_backfilled(self, notebook_id: str) -> bool: ...
+    def backfill_source_fact_batch(
+        self,
+        notebook_id: str,
+        source_id: str,
+        *,
+        batch_size: int = 500,
+        projection_version: int = 1,
+        force: bool = False,
+    ) -> dict[str, object]: ...
+    def mark_source_fact_backfill_failed(self, source_id: str, code: str) -> None: ...
 
 
 class SQLiteVectorConversionPort(Protocol):
