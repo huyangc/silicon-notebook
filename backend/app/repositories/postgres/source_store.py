@@ -125,13 +125,21 @@ class SourceStore:
             ).fetchall()
         return [row["id"] for row in rows]
 
-    def all_hidden_source_ids(self, notebook_id: str) -> list[str]:
-        """Return the current hidden-participant universe for drift checks."""
+    def hidden_source_ids(self, notebook_id: str, owner_id: str) -> list[str]:
+        """Hidden Memory/Knowhow projection participants **for one user**, in
+        stable id order — see the SQLite adapter for why the Memory owner
+        filter lives in the SQL rather than on the result, and why this stays
+        a separate read (Knowhow projections are notebook-wide, a Memory
+        projection belongs to its ``memory_items.created_by``)."""
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT id FROM sources WHERE notebook_id=%s "
-                "AND source_type IN ('memory','knowhow') ORDER BY id",
-                (notebook_id,),
+                "SELECT s.id FROM sources s WHERE s.notebook_id=%s "
+                "AND s.source_type IN ('memory','knowhow') "
+                "AND (s.source_type <> 'memory' OR EXISTS ("
+                "SELECT 1 FROM memory_items m "
+                "WHERE m.id = s.memory_id AND m.created_by = %s)) "
+                "ORDER BY s.id",
+                (notebook_id, owner_id),
             ).fetchall()
         return [row["id"] for row in rows]
 

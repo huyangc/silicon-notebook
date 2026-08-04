@@ -254,11 +254,18 @@ class _RetrievalState:
             # Compatibility for bounded test/adapter doubles. Production
             # repositories always expose the universe probe.
             return False
-        hidden_ids = getattr(self.sources, "all_hidden_source_ids", None)
+        # Re-read the hidden half with the identity the freeze used, not with
+        # whoever happens to be current here: this runs inside a detached
+        # worker, and that half is owner-scoped. Comparing an owner-scoped
+        # snapshot against an unfiltered (or differently-scoped) live read
+        # would report drift forever in any shared notebook holding another
+        # member's Memory, silently disabling these channels for good.
+        hidden_ids = getattr(self.sources, "hidden_source_ids", None)
         return not source_scope_visible_universe_matches(
             notebook_id,
             visible_ids(notebook_id),
-            hidden_ids(notebook_id) if callable(hidden_ids) else None,
+            (hidden_ids(notebook_id, scope.owner_id)
+             if callable(hidden_ids) else None),
         )
 
     def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:

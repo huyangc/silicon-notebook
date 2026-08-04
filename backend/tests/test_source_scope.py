@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from app.models.common import Evidence
 from app.models.source_scope import SourceScope
 from app.models.notebooks import NotebookSummary
@@ -155,10 +157,24 @@ def test_follow_chain_replaces_hop_evidence_with_scoped_copy():
 
 
 class _ScopeRepo:
-    def __init__(self, visible: list[str], count: int, hidden=None):
+    def __init__(self, visible: list[str], count: int, hidden=None,
+                 owner_hidden: "dict[str, list[str]] | None" = None,
+                 user_id: str = "user-a"):
         self.visible = visible
         self.count = count
+        # Hidden Memory/Knowhow projection sources — no checkbox, never in a
+        # submitted selection, and (on an un-narrowed run) inside the ceiling.
         self.hidden = list(hidden or [])
+        # Per-user hidden half, when a test needs to prove the boundary passes
+        # the REQUESTING user's identity down. The real adapter answers this in
+        # SQL; here it stands in as a lookup so a boundary that hard-coded the
+        # wrong identity would fail visibly.
+        self.owner_hidden = dict(owner_hidden or {})
+        self.user_id = user_id
+        self.hidden_calls: list[tuple[str, str]] = []
+
+    def current_user(self):
+        return SimpleNamespace(id=self.user_id)
 
     def visible_source_ids(self, _notebook_id, source_ids):
         return [source_id for source_id in source_ids if source_id in self.visible]
@@ -172,7 +188,10 @@ class _ScopeRepo:
     def all_visible_source_ids(self, _notebook_id):
         return list(self.visible)
 
-    def all_hidden_source_ids(self, _notebook_id):
+    def hidden_source_ids(self, notebook_id, owner_id):
+        self.hidden_calls.append((notebook_id, owner_id))
+        if self.owner_hidden:
+            return list(self.owner_hidden.get(owner_id, []))
         return list(self.hidden)
 
 
@@ -212,9 +231,11 @@ def test_compact_include_never_materializes_the_visible_source_universe():
         SourceScope(mode="include", source_ids=["selected"]),
     )
 
-    assert resolved == SourceScope(
+    # Compare the wire shape: the server-only owner id is a private attribute
+    # and pydantic equality would otherwise compare it too.
+    assert resolved.model_dump() == SourceScope(
         mode="include", source_ids=["selected"], narrowed=True
-    )
+    ).model_dump()
 
 
 def test_sqlite_compact_scope_snapshot_matches_visibility_and_count(tmp_path, monkeypatch):
@@ -287,9 +308,12 @@ def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
         _notebook(),
         SourceScope(mode="exclude", source_ids=["s2"], narrowed=False),
     )
-    assert resolved == SourceScope(
+    # The wire shape is what travels; the owner id is a server-only private
+    # attribute (pydantic equality would otherwise compare it too).
+    assert resolved.model_dump() == SourceScope(
         mode="include", source_ids=["s1", "s3"], narrowed=True
-    )
+    ).model_dump()
+    assert resolved.scope_owner_id == "user-a"
 
 
 def test_all_selected_is_frozen_but_not_misclassified_as_narrowed():
@@ -345,11 +369,13 @@ def test_candidate_detects_hidden_participant_drift_through_source_store():
     class _Sources:
         visible = ["s1"]
         hidden = ["hidden-memory"]
+        owner_calls: list[str] = []
 
         def all_visible_source_ids(self, _notebook_id):
             return list(self.visible)
 
-        def all_hidden_source_ids(self, _notebook_id):
+        def hidden_source_ids(self, _notebook_id, owner_id):
+            self.owner_calls.append(owner_id)
             return list(self.hidden)
 
     class _Candidates:
@@ -357,6 +383,7 @@ def test_candidate_detects_hidden_participant_drift_through_source_store():
 
     scope = SourceScope(mode="include", source_ids=["s1"], narrowed=False)
     scope._hidden_source_ids = ["hidden-memory"]
+    scope._scope_owner_id = "user-a"
     with source_scope_context("nb", scope):
         assert CandidateRetrievalService._unsafe_source_scope_restricted(
             _Candidates(), "nb"
@@ -365,6 +392,10 @@ def test_candidate_detects_hidden_participant_drift_through_source_store():
         assert CandidateRetrievalService._unsafe_source_scope_restricted(
             _Candidates(), "nb"
         ) is True
+    # The live re-read must use the identity the freeze was taken with: the
+    # hidden half is owner-scoped, so probing as anyone else would compare two
+    # different partitions and report drift on every request forever.
+    assert _Candidates.sources.owner_calls == ["user-a", "user-a"]
 
 
 def test_candidate_without_active_scope_does_not_touch_source_store():
@@ -405,6 +436,7 @@ def _call_line(func, callee: str) -> int:
     """
     import ast
     import inspect
+    import textwrap
     import textwrap
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
@@ -733,3 +765,270 @@ def test_checkbox_scope_skips_per_action_unsafe_channels_with_zero_io():
             expected_summary_fragment in step.summary for step in skipped
         ), f"{action} 的跳过文案未说明跳过的是什么"
         assert result.enumerations == []
+
+
+# ---------------------------------------------------------------------------
+# 冻结上限里的隐藏证据**按种类分别定范围**。
+#
+# 把隐藏投影源整批冻进未收窄请求的上限,而取数那一步没有 owner 过滤 —— 共享笔记本里,
+# 任何一位成员发出的默认全选请求都会把**其他成员**的私有 Memory 投影源冻进自己的上限。
+# 那些源持有 Memory 派生的元素与知识对象,于是普通候选生成(以及未收窄时重新打开的
+# 全图/PPR 通道)可以把别人的私有记忆检索出来。
+#
+# 正确的口径两半不同,且都有既有代码作准:
+#   * Knowhow 投影源是 **notebook 级共享**内容(表格本身对每位成员可见),每位成员的
+#     上限都该收下它;
+#   * Memory 是**按创建者私有**的 —— `MemoryStore.memory_retrieval_rows` 的
+#     `m.created_by=?`、`memory_for_user`,以及 `SourceStore.source_change_signal_rows`
+#     把 Memory 整类排除出清单,用的都是同一条归属判据。
+#
+# 过滤发生在**取数处的 SQL**里:别人的 Memory 源 id 根本不进本进程,后来的改动也无法
+# 靠删掉一个结果侧的 if 悄悄把洞重新打开。
+# ---------------------------------------------------------------------------
+
+_SCOPE_OWNER_NOW = "2026-08-04T00:00:00+00:00"
+
+
+def _shared_notebook_with_two_members(tmp_path, monkeypatch):
+    """一个共享笔记本:1 份可见来源、1 份 Knowhow 投影源,两位成员各 1 条已确认
+    Memory 及其投影源。直接落库(不走确认端点):本条断言的是取数谓词,而真实确认
+    路径会拉起解析/向量后台 job,与被测的那一条 SQL 无关。"""
+    from app.core.config import Settings
+    from app.models.schemas import NotebookCreate
+    from app.services.sqlite_repository import (
+        SQLiteRepository,
+        reset_request_user,
+        set_request_user,
+    )
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'scope-owner.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repo = SQLiteRepository(Settings())
+    alice = repo.create_user("a00123456", "password-12")
+    bob = repo.create_user("b00123456", "password-12")
+    token = set_request_user(alice)
+    try:
+        notebook_id = repo.create_notebook(NotebookCreate(name="共享库")).id
+    finally:
+        reset_request_user(token)
+    repo._runtime.sharing.add_member(notebook_id, bob.id)
+
+    def _insert(source_id: str, source_type: str, memory_id: str = "") -> None:
+        repo._runtime.source_store.insert_source(
+            source_id=source_id, notebook_id=notebook_id, title=source_id,
+            source_type=source_type, status="active", parse_status="parsed",
+            file_name="", file_path="", file_size=0, file_hash="",
+            summary="", doc_type="", memory_id=memory_id,
+        )
+
+    _insert("src-visible", "pdf")
+    _insert("src-knowhow", "knowhow")
+    for user, memory_id, source_id in (
+        (alice, "mem-alice", "src-memory-alice"),
+        (bob, "mem-bob", "src-memory-bob"),
+    ):
+        with repo._write() as db:
+            db.execute(
+                "INSERT INTO memory_items"
+                "(id,notebook_id,created_by,agent_profile_id,source_answer_id,"
+                "origin,status,title,content_md,created_at,updated_at) "
+                "VALUES (?,?,?,NULL,NULL,'ask_answer','confirmed',?,?,?,?)",
+                (memory_id, notebook_id, user.id, "私有记忆", "私有内容",
+                 _SCOPE_OWNER_NOW, _SCOPE_OWNER_NOW),
+            )
+        _insert(source_id, "memory", memory_id=memory_id)
+    return repo, notebook_id, alice, bob
+
+
+def test_hidden_half_never_carries_another_members_private_memory(
+    tmp_path, monkeypatch
+):
+    """取数谓词本身:隐藏那一半按请求用户定范围,且两位成员都拿得到 Knowhow。
+
+    对称地各查一次 —— 只查一位,一个「恒返回自己那条」的错误实现也能通过。
+    """
+    repo, notebook_id, alice, bob = _shared_notebook_with_two_members(
+        tmp_path, monkeypatch
+    )
+
+    assert repo.all_visible_source_ids(notebook_id) == ["src-visible"], (
+        "可见那一半不受隐藏源归属影响"
+    )
+    hidden = repo.hidden_source_ids(notebook_id, bob.id)
+    assert "src-memory-alice" not in hidden, (
+        "共享笔记本里,别人的私有 Memory 投影源绝不能进入本次冻结上限"
+    )
+    assert set(hidden) == {"src-knowhow", "src-memory-bob"}
+
+    hidden_alice = repo.hidden_source_ids(notebook_id, alice.id)
+    assert "src-memory-bob" not in hidden_alice
+    assert set(hidden_alice) == {"src-knowhow", "src-memory-alice"}, (
+        "Knowhow 投影源是 notebook 级共享内容,对每位成员都在上限内"
+    )
+
+    # 陌生身份只拿到共享的 Knowhow,一条 Memory 都没有 —— 孤儿 Memory 源同理
+    # (EXISTS 不成立即丢弃),fail closed。
+    assert repo.hidden_source_ids(notebook_id, "user-nobody") == ["src-knowhow"]
+
+
+def test_boundary_ceiling_is_owner_scoped_end_to_end(tmp_path, monkeypatch):
+    """入口层到消费侧的整条链:B 的默认全选请求冻出的上限里没有 A 的私有 Memory,
+    而 B 自己的 Memory 与共享的 Knowhow 都在。"""
+    from app.services.sqlite_repository import reset_request_user, set_request_user
+
+    repo, notebook_id, _alice, bob = _shared_notebook_with_two_members(
+        tmp_path, monkeypatch
+    )
+    token = set_request_user(bob)
+    try:
+        resolved = _validate_source_scope(
+            repo, repo.get_notebook(notebook_id),
+            SourceScope(mode="exclude", source_ids=[]),
+        )
+    finally:
+        reset_request_user(token)
+
+    assert resolved is not None
+    assert resolved.narrowed is False, "默认全选不是收窄"
+    assert resolved.source_ids == ["src-visible"]
+    assert set(resolved.hidden_source_ids) == {"src-knowhow", "src-memory-bob"}
+
+    # 上限就是这份清单 —— 下推给候选生成的那份也一样。
+    with source_scope_context(notebook_id, resolved):
+        assert source_allowed(notebook_id, "src-memory-bob") is True
+        assert source_allowed(notebook_id, "src-knowhow") is True
+        assert source_allowed(notebook_id, "src-memory-alice") is False, (
+            "别人的私有 Memory 投影证据不得参与"
+        )
+        assert set(scoped_allowed_source_ids(notebook_id)) == {
+            "src-visible", "src-knowhow", "src-memory-bob"
+        }
+
+
+def test_shared_notebook_is_not_permanently_judged_drifted(tmp_path, monkeypatch):
+    """另一位成员的私有 Memory 不得把共享笔记本判成「已漂移」。
+
+    冻结按 owner 过滤而实时探测不过滤(或按别人过滤),两边永远不等 —— 于是每一次
+    默认全选请求都被判成漂移,全图/PPR/关系/精确通道被永久关掉。这是把安全修复做成
+    功能退化的那条路;它不会让任何行为断言变红,只会让检索悄悄变差。
+    """
+    from app.services.retrieval_candidates import CandidateRetrievalService
+    from app.services.sqlite_repository import reset_request_user, set_request_user
+
+    repo, notebook_id, _alice, bob = _shared_notebook_with_two_members(
+        tmp_path, monkeypatch
+    )
+    token = set_request_user(bob)
+    try:
+        resolved = _validate_source_scope(
+            repo, repo.get_notebook(notebook_id),
+            SourceScope(mode="exclude", source_ids=[]),
+        )
+    finally:
+        reset_request_user(token)
+
+    candidates = SimpleNamespace(sources=repo._runtime.source_store)
+    with source_scope_context(notebook_id, resolved):
+        assert CandidateRetrievalService._unsafe_source_scope_restricted(
+            candidates, notebook_id
+        ) is False, (
+            "共享笔记本里别人的 Memory 不是漂移,通道不得因此被永久关闭"
+        )
+        # 真正的漂移仍然要抓到。
+        repo._runtime.source_store.insert_source(
+            source_id="src-added-mid-run", notebook_id=notebook_id,
+            title="并发新增", source_type="pdf", status="active",
+            parse_status="parsed", file_name="", file_path="", file_size=0,
+            file_hash="", summary="", doc_type="",
+        )
+        assert CandidateRetrievalService._unsafe_source_scope_restricted(
+            candidates, notebook_id
+        ) is True, "冻结之后新增的可见来源仍必须判为漂移"
+
+
+def test_boundary_reads_the_hidden_half_for_the_requesting_user():
+    """入口层把**请求用户**的身份传下去 —— 不是笔记本 owner,也不是某个常量。
+
+    真适配器在 SQL 里回答这件事;这里的 double 按 owner 分桶,于是一个把身份写死
+    的入口层会直接取到另一位成员那一桶。
+    """
+    repo = _ScopeRepo(
+        ["s1"], 1,
+        owner_hidden={
+            "user-a": ["src-memory-alice"],
+            "user-b": ["src-memory-bob"],
+        },
+        user_id="user-b",
+    )
+    resolved = _validate_source_scope(
+        repo, _notebook(), SourceScope(mode="exclude", source_ids=[]),
+    )
+    assert repo.hidden_calls == [("nb", "user-b")], (
+        "取数必须带上请求用户的身份,过滤不能挪到结果侧;而且只发一次"
+    )
+    assert resolved.hidden_source_ids == ["src-memory-bob"]
+    assert resolved.scope_owner_id == "user-b", (
+        "身份必须随冻结一起带走,漂移探测要在同一个身份的取景里复读"
+    )
+
+
+def test_both_adapters_filter_memory_ownership_inside_the_single_query():
+    """两个适配器都必须**在 SQL 里**按 owner 过滤,而且仍然只发一条查询。
+
+    这条是结构守卫,不是行为断言 —— 因为「先把整本库的隐藏源取回来、再在 Python 里
+    丢掉别人的」在行为上与正确实现无法区分,但它把另一位成员的私有 Memory 源 id
+    读进了本进程,而且下一次改动删掉那个 `if` 就悄悄把洞重新打开。同一条断言顺带
+    钉住「一次读取返回两个分区」的往返合同:多出第二条 execute 就报红。
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from app.repositories.postgres.source_store import (
+        SourceStore as PostgresSourceStore,
+    )
+    from app.repositories.sqlite.source_store import (
+        SourceStore as SqliteSourceStore,
+    )
+
+    for store in (SqliteSourceStore, PostgresSourceStore):
+        source = inspect.getsource(store.hidden_source_ids)
+        # textwrap.dedent, not inspect.cleandoc: cleandoc lstrips the first
+        # line and dedents the rest independently, which drops a single-line
+        # `def` to column 0 while its body keeps an indent it no longer needs.
+        tree = ast.parse(textwrap.dedent(source))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "execute"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ]
+        assert len(calls) == 1, (
+            f"{store.__module__}: 隐藏那一半必须只发一条查询"
+        )
+        call = calls[0]
+        sql = call.args[0].value
+        assert "FROM sources" in sql
+        assert "memory_items" in sql and "created_by" in sql, (
+            f"{store.__module__}: Memory 归属过滤必须在这条 SQL 里,"
+            "不能取回全部再在结果侧丢弃"
+        )
+        # 归属必须是**参数绑定的谓词**,不是取回来的一列:把 created_by 选进结果、
+        # 再在 Python 里丢掉别人的行,行为上与正确实现无法区分,却把别人的私有
+        # Memory 源 id 读进了本进程 —— 那正是这条守卫要拦的「挪到结果侧」。
+        projection = sql.split(" FROM ", 1)[0]
+        assert "created_by" not in projection, (
+            f"{store.__module__}: 归属不能被选进结果集,必须在 WHERE 里判掉"
+        )
+        assert projection.replace("SELECT ", "").strip() == "s.id", (
+            f"{store.__module__}: 这条查询只该取它要返回的那一列"
+        )
+        assert (
+            isinstance(call.args[1], ast.Tuple) and len(call.args[1].elts) == 2
+        ), f"{store.__module__}: notebook 与 owner 两个参数都必须绑进这条语句"

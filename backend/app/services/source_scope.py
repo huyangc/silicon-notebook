@@ -20,7 +20,18 @@ class ActiveSourceScope:
     mode: str
     source_ids: frozenset[str]
     narrowed: bool | None = None
+    # The boundary also decides WHOSE hidden sources these are, and the two
+    # kinds are not alike: Knowhow projections are notebook-wide, so every
+    # member's ceiling admits them, while a Memory projection belongs to its
+    # ``memory_items.created_by`` and only that user's ceiling may admit it.
+    # That filter lives in the SQL of ``scope_source_ids`` -- another member's
+    # Memory source id never reaches this dataclass -- so nothing here needs
+    # (or may add) a second owner test.
     hidden_source_ids: frozenset[str] = frozenset()
+    # The identity that hidden half was read for, so the drift probe can re-read
+    # the same partition in the same frame.  Empty for direct service-layer
+    # construction, whose ``narrowed is None`` short-circuits that comparison.
+    owner_id: str = ""
 
     @property
     def ceiling_active(self) -> bool:
@@ -73,6 +84,9 @@ def _scope_dict(scope: Any) -> dict[str, Any] | None:
         hidden = getattr(scope, "hidden_source_ids", None)
         if hidden is not None:
             raw["hidden_source_ids"] = list(hidden)
+        owner_id = getattr(scope, "scope_owner_id", None)
+        if owner_id:
+            raw["owner_id"] = str(owner_id)
         return raw
     return dict(scope)
 
@@ -94,6 +108,7 @@ def source_scope_context(notebook_id: str, scope: Any) -> Iterator[None]:
         hidden_source_ids=frozenset(
             str(value) for value in raw.get("hidden_source_ids") or []
         ),
+        owner_id=str(raw.get("owner_id") or ""),
     )
     token = _CURRENT_SOURCE_SCOPE.set(current)
     try:
@@ -253,6 +268,13 @@ def source_scope_visible_universe_matches(
     hidden-projection drift disables non-partitioned graph/PPR/relation/exact
     channels before I/O. ``None`` keeps compatibility for bounded test doubles
     that predate the hidden-participant probe; production supplies both sets.
+
+    Both sets must be read for the SAME identity the freeze used — the hidden
+    half is owner-scoped (Memory is private to its creator), so a live read
+    taken as a different user, or with no owner filter at all, would differ
+    from the frozen snapshot on every request in a shared notebook and pin
+    these channels off permanently.  The caller owns that: it passes
+    ``ActiveSourceScope.owner_id``.
     """
     scope = current_source_scope()
     if (

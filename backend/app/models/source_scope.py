@@ -25,11 +25,29 @@ class SourceScope(BaseModel):
     # They keep the historical Memory/Knowhow projection behavior without
     # exposing hidden source ids in API/report payloads.  API validation always
     # overwrites this field; persisted report scopes recompute it at each gate.
+    #
+    # The two kinds inside it are scoped differently: Knowhow projections are
+    # notebook-wide and reach every member's ceiling, while a Memory projection
+    # is private to its creator and only ever enters that user's ceiling. The
+    # split is enforced in ``scope_source_ids``' SQL, so this list never
+    # carries another member's Memory source id.
     _hidden_source_ids: List[str] = PrivateAttr(default_factory=list)
+    # The identity the hidden half above was read for.  Carried (never
+    # serialized) so the retrieval drift probe can re-read that partition in
+    # the SAME frame the freeze was taken in: an owner-scoped freeze compared
+    # against an unfiltered live read would report drift forever in any shared
+    # notebook holding another member's Memory, permanently disabling the
+    # whole-graph/PPR/relation/exact channels.  Empty for direct service-layer
+    # construction, which never reaches the drift comparison.
+    _scope_owner_id: str = PrivateAttr(default="")
 
     @property
     def hidden_source_ids(self) -> List[str]:
         return list(self._hidden_source_ids)
+
+    @property
+    def scope_owner_id(self) -> str:
+        return self._scope_owner_id
 
     @field_validator("source_ids")
     @classmethod
