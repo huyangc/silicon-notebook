@@ -406,16 +406,44 @@ class SelectedSourceGraphActivationService:
                     )
                 cache_hit = bool(getattr(partitioned, "cache_hit", False))
                 if partitioned.hits:
-                    hydrated = {
-                        chunk.chunk_id: chunk
-                        for chunk in hydrate_chunk_ids(
-                            [hit.chunk_id for hit in partitioned.hits]
-                        )
+                    partition_hits = tuple(partitioned.hits)
+                    requested_chunk_ids = {
+                        str(hit.chunk_id) for hit in partition_hits
                     }
-                    for hit in partitioned.hits:
-                        chunk = hydrated.get(hit.chunk_id)
-                        if chunk is None or chunk.source_id != hit.source_id:
-                            continue
+                    hydrated_rows = tuple(hydrate_chunk_ids(
+                        [hit.chunk_id for hit in partition_hits]
+                    ))
+                    hydrated = {chunk.chunk_id: chunk for chunk in hydrated_rows}
+                    allowed_sources = set(source_ids)
+                    hydration_mismatch = (
+                        len(hydrated) != len(hydrated_rows)
+                        or any(
+                            chunk.chunk_id not in requested_chunk_ids
+                            or chunk.source_id not in allowed_sources
+                            for chunk in hydrated_rows
+                        )
+                        or any(
+                            (chunk := hydrated.get(hit.chunk_id)) is None
+                            or hit.source_id not in allowed_sources
+                            or chunk.source_id != hit.source_id
+                            for hit in partition_hits
+                        )
+                    )
+                    if hydration_mismatch:
+                        return self.fail_closed(
+                            notebook_id,
+                            baseline,
+                            "source_partition_hydration_mismatch",
+                            source_ids=source_ids,
+                            snapshot=snapshot,
+                            build_ms=build_ms,
+                            ppr_ms=round(
+                                (time.perf_counter() - ppr_started) * 1000
+                            ),
+                            degraded_reasons=degraded,
+                        )
+                    for hit in partition_hits:
+                        chunk = hydrated[hit.chunk_id]
                         chunk.score = hit.score
                         chunk.relevance = hit.score
                         chunk.retrieval_supports = (hit.support,)
