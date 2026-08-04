@@ -53,6 +53,7 @@ from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
+from app.services.source_subgraph import SourceSubgraphService
 from app.services.vector_cache import VectorCache
 # Task 23: Ask detached-execution composition (appended block — parallel
 # Gate-8 tracks keep the shared import list above untouched).
@@ -209,6 +210,13 @@ class RepositoryRuntime:
         # reaches them.  Construction stays lazy — no seam calls.
         self.scale_artifact_store = ScaleArtifactStore(settings)
         self.index_projections: IndexProjectionStorePort = bundle.index_projection
+        # Read-only selected-source graph projection. It is intentionally not
+        # consumed by Ask/Report in this PR; wiring it here gives later graph
+        # primitives one backend-neutral, generation-keyed snapshot owner.
+        self.source_subgraphs = SourceSubgraphService(
+            projections=self.index_projections,
+            settings=self.settings,
+        )
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
         self.scale_builder: "ScaleIndexBuilder | None" = None
         self.scale_artifacts: "ScaleArtifactRuntime | None" = None

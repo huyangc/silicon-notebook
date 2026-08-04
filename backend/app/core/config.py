@@ -541,6 +541,37 @@ class Settings(BaseSettings):
     # they clear the existing relevance floor.  It never enlarges the token
     # budget or changes the historical oversized-first-chunk exception.
     chunk_graph_reserve: int = Field(0, validation_alias="CHUNK_GRAPH_RESERVE")
+    # Selected-source graph snapshots are an internal, read-only preparation
+    # surface until a later rollout PR wires them into Ask/Report. Every
+    # projection query probes LIMIT+1 and disables only the affected channel
+    # when a rail is crossed; none may fall back to a whole-notebook scan.
+    source_subgraph_max_sources: int = Field(
+        32, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_SOURCES"
+    )
+    source_subgraph_max_objects: int = Field(
+        20_000, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_OBJECTS"
+    )
+    source_subgraph_max_relations: int = Field(
+        40_000, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_RELATIONS"
+    )
+    source_subgraph_max_chunks: int = Field(
+        20_000, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_CHUNKS"
+    )
+    source_subgraph_max_facts: int = Field(
+        20_000, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_FACTS"
+    )
+    source_subgraph_max_fact_elements: int = Field(
+        60_000, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_FACT_ELEMENTS"
+    )
+    source_subgraph_max_memberships: int = Field(
+        60_000, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_MEMBERSHIPS"
+    )
+    source_subgraph_max_cluster_memberships: int = Field(
+        20_000, gt=0, validation_alias="SOURCE_SUBGRAPH_MAX_CLUSTER_MEMBERSHIPS"
+    )
+    source_subgraph_cache_max_entries: int = Field(
+        64, gt=0, validation_alias="SOURCE_SUBGRAPH_CACHE_MAX_ENTRIES"
+    )
     # 精确标识符 fast path(exact_lookup):问题里出现 `_`/`-`/`.` 连接的完整命令名
     # (set_db、place_opt_design)时,先精确定位它所在的小节,再把整节的 chunk 一次
     # 取齐并入候选——手册小节被 600 字分块切成主描述/参数表/示例,普通检索只召回

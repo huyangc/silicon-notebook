@@ -2368,6 +2368,15 @@ class IndexProjectionStorePort(Protocol):
         synonym_edges: Any = None,
         as_arrays: bool = False,
     ) -> Any: ...
+    def source_subgraph_signature(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> tuple: ...
+    def source_subgraph_rows(
+        self,
+        notebook_id: str,
+        source_ids: Sequence[str],
+        limits: Mapping[str, int],
+    ) -> Mapping[str, Any]: ...
     def embedding_matrix(
         self,
         notebook_id: str,

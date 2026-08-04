@@ -2373,6 +2373,135 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
     assert graph.node_ids == object_ids + chunk_ids
 
 
+def test_postgres_selected_source_subgraph_projection_executes_all_bounded_legs(
+    knowledge_harness: KnowledgeHarness, postgres_settings,
+):
+    database = knowledge_harness.database
+    with database.write() as connection:
+        connection.execute(
+            "INSERT INTO extraction_runs "
+            "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+            "VALUES ('run-subgraph','nb-personal','source-golden','kg','completed',"
+            "'kg objects=2 relations=1',%s,%s)",
+            (NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO unified_kg_state "
+            "(notebook_id,dirty,kg_mutation_seq,cluster_mutation_seq,"
+            "source_index_backfilled,updated_at) VALUES "
+            "('nb-personal',0,5,2,1,%s) "
+            "ON CONFLICT(notebook_id) DO UPDATE SET kg_mutation_seq=5,"
+            "cluster_mutation_seq=2,source_index_backfilled=1,updated_at=EXCLUDED.updated_at",
+            (NOW,),
+        )
+        connection.execute(
+            "INSERT INTO knowledge_source_fact_backfills "
+            "(source_id,notebook_id,source_generation,projection_version,status,"
+            "after_object_id,objects_scanned,facts_written,incomplete_objects,"
+            "incomplete_reason,failure_code,created_at,updated_at) VALUES "
+            "('source-golden','nb-personal','run-subgraph',1,'complete','',2,2,0,'','',%s,%s)",
+            (NOW, NOW),
+        )
+        for index in (1, 2):
+            object_id = f"ko-subgraph-{index}"
+            fact_id = f"fact-subgraph-{index}"
+            element_id = f"element-subgraph-{index}"
+            evidence = json.dumps(
+                [{"source_id": "source-golden", "element_id": element_id}]
+            )
+            connection.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+                "created_at,updated_at) VALUES "
+                "(%s,'nb-personal','concept','approved','',%s::jsonb,%s::jsonb,"
+                "'source-golden',%s,%s)",
+                (object_id, json.dumps({"name": f"safe {index}"}), evidence, NOW, NOW),
+            )
+            connection.execute(
+                "INSERT INTO knowledge_object_sources(object_id,source_id,notebook_id) "
+                "VALUES (%s,'source-golden','nb-personal')",
+                (object_id,),
+            )
+            connection.execute(
+                "INSERT INTO knowledge_source_facts "
+                "(id,notebook_id,source_id,source_generation,local_object_id,"
+                "global_object_id,object_type,payload,evidence,projection_version,"
+                "projection_origin,created_at,updated_at) VALUES "
+                "(%s,'nb-personal','source-golden','run-subgraph',%s,%s,'concept',"
+                "%s::jsonb,%s::jsonb,1,'historical',%s,%s)",
+                (
+                    fact_id,
+                    f"local-{index}",
+                    object_id,
+                    json.dumps({"name": f"safe {index}"}),
+                    evidence,
+                    NOW,
+                    NOW,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO knowledge_source_fact_elements "
+                "(fact_id,notebook_id,source_id,source_generation,element_id,created_at) "
+                "VALUES (%s,'nb-personal','source-golden','run-subgraph',%s,%s)",
+                (fact_id, element_id, NOW),
+            )
+        connection.execute(
+            "INSERT INTO chunks(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES ('chunk-subgraph','nb-personal','source-golden','safe','s',%s::jsonb,%s)",
+            (json.dumps(["element-subgraph-1", "element-subgraph-2"]), NOW),
+        )
+        connection.execute(
+            "INSERT INTO knowledge_relations "
+            "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,"
+            "evidence,review_status,created_at) VALUES "
+            "('relation-subgraph','nb-personal','source-golden','ko-subgraph-1',"
+            "'ko-subgraph-2','part_of','[]'::jsonb,'pending',%s)",
+            (NOW,),
+        )
+        connection.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+            "canonical_description,canonical_desc_sig,created_at) VALUES "
+            "('cluster-subgraph','nb-personal','canonical-subgraph','ko-subgraph-1',"
+            "'safe','concept','','',%s)",
+            (NOW,),
+        )
+
+    projection = PostgresIndexProjectionStore(
+        postgres_settings,
+        connect=database.connect,
+        in_batches=lambda values: [list(values)],
+        ent_chunk_map=lambda _notebook_id: pytest.fail("whole graph map opened"),
+        mention_extra_edges=lambda _notebook_id: pytest.fail("mention graph opened"),
+        vector_matrix=lambda *_args, **_kwargs: pytest.fail("embedding matrix opened"),
+    )
+    rows = projection.source_subgraph_rows(
+        "nb-personal",
+        ["source-golden"],
+        {
+            "objects": 10,
+            "relations": 10,
+            "chunks": 10,
+            "facts": 10,
+            "fact_elements": 10,
+            "memberships": 10,
+            "cluster_memberships": 10,
+        },
+    )
+    assert rows["reasons"] == []
+    assert {row["object_id"] for row in rows["objects"]} == {
+        "ko-subgraph-1",
+        "ko-subgraph-2",
+    }
+    assert [row["relation_id"] for row in rows["relations"]] == [
+        "relation-subgraph"
+    ]
+    assert [row["chunk_id"] for row in rows["chunks"]] == ["chunk-subgraph"]
+    assert len(rows["facts"]) == 2
+    assert len(rows["fact_elements"]) == 2
+    assert rows["clusters"][0]["member_object_id"] == "ko-subgraph-1"
+
+
 class _OrderedMembershipSet(set):
     """A real set with a controlled iterator for hash/insertion-order tests."""
 
