@@ -1364,6 +1364,9 @@ class ReasoningResult:
     # `outline_truncated_kg_evidence`)。它是 `top_hits` 的**补集**,不重复其中
     # 已有的对象;按节合成把两者合起来解析绑定键,别的路径不消费它。
     outline_evidence: List[RetrievedKnowledge] = field(default_factory=list)
+    # Internal selected-source regression oracle.  It is never serialized into
+    # Ask/report responses; callers may emit only its redacted event payload.
+    baseline_manifest: object | None = None
 
 
 class ReasoningRetriever:
@@ -3554,11 +3557,28 @@ class ReasoningRetriever:
         record(TraceStep(step_type="answer",
                          summary="合成候选",
                          detail=answer_detail))
+        from app.services.retrieval_baseline import (
+            build_retrieval_baseline_manifest,
+        )
+        baseline_manifest = build_retrieval_baseline_manifest(
+            notebook_id=notebook_id,
+            query=question,
+            mode="reasoning",
+            settings=self.settings,
+            candidate_knowledge=list(collected.values()),
+            candidate_chunks=chunks,
+            candidate_elements=elements,
+            selected_knowledge=top_hits,
+            selected_chunks=chunks,
+            selected_elements=elements,
+            baseline_step_usage=len(trace),
+        )
         return ReasoningResult(
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
             chains=chains, enumerations=enumerations,
             collection_map_text=collection_map_text, outline=outline,
             outline_evidence=outline_evidence,
+            baseline_manifest=baseline_manifest,
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
                        for a in attempted.values()])
 

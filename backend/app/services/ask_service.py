@@ -1516,6 +1516,7 @@ class AskService:
             plan = self.candidates.chunk_plan(notebook_id, sub_queries)
             overlay_on = plan.overlay_on
             kg_block, kg_id_map, kg_hits = "", {}, []
+            baseline_chunk_candidates = []
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
             if plan.strategy == "mix":
@@ -1537,6 +1538,7 @@ class AskService:
                     ))
                 raise_if_cancelled(cancel_event)
                 ranked = [candidates[i] for i in order]
+                baseline_chunk_candidates = list(ranked)
                 kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
                 kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
                 chunk_budget = max(0, self.settings.max_total_tokens
@@ -1583,6 +1585,7 @@ class AskService:
                         if cur is None or c.relevance > cur.relevance:
                             collected[c.chunk_id] = c
                     per_query = per_query + [{c.chunk_id: c for c in exact_hits}]
+                baseline_chunk_candidates = list(collected.values())
                 selected, _counts = quota_fuse(collected, per_query, plan.fuse_k,
                                                relevance=lambda c: c.relevance)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
@@ -1593,6 +1596,7 @@ class AskService:
                 scored = self.candidates.merge_chunk_candidates(scored, kw_hits)
                 # ∪ exact-identifier whole-section hits (same dedup contract)
                 scored = self.candidates.merge_chunk_candidates(scored, exact_hits)
+                baseline_chunk_candidates = list(scored)
                 raise_if_cancelled(cancel_event)
                 selected = self.candidates.select_chunk_candidates(
                     scored, ids, mat, plan.mmr_k, plan.mmr_lambda)
@@ -1686,6 +1690,27 @@ class AskService:
                 combined_hits, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
             grounded = evidence_level == "grounded"
+
+            from app.services.retrieval_baseline import (
+                build_retrieval_baseline_manifest,
+                emit_retrieval_baseline,
+            )
+            baseline_manifest = build_retrieval_baseline_manifest(
+                notebook_id=notebook_id,
+                query=retrieval_query,
+                mode="chunk",
+                settings=self.settings,
+                candidate_knowledge=kg_hits,
+                candidate_chunks=baseline_chunk_candidates,
+                selected_knowledge=kg_hits,
+                selected_chunks=selected,
+            )
+            emit_retrieval_baseline(
+                self.event_log,
+                baseline_manifest,
+                notebook_id,
+                site="ask_chunk",
+            )
 
             if answer:
                 conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
@@ -2142,6 +2167,15 @@ class AskService:
                     on_step=checked_trace,
                     intent_queries=intent_queries,
                     limits=limits,
+                )
+                from app.services.retrieval_baseline import (
+                    emit_retrieval_baseline,
+                )
+                emit_retrieval_baseline(
+                    self.event_log,
+                    getattr(result, "baseline_manifest", None),
+                    notebook_id,
+                    site="ask_reasoning",
                 )
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,

@@ -499,6 +499,8 @@ def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
         result = retriever.run("nb", "plain question")
 
     assert retrieval.ppr_calls == 0
+    assert result.baseline_manifest is not None
+    assert result.baseline_manifest.mode == "reasoning"
     unsafe = [
         step for step in result.trace
         if step.detail.get("reason") == "source_scope_unsafe_channels"
@@ -543,6 +545,7 @@ def test_all_selected_single_source_recovers_raw_elements_before_reflect():
         result = retriever.run("nb", "plain question")
 
     assert [element.source_id for element in result.elements] == ["A"]
+    assert result.baseline_manifest is None
     assert any(
         step.detail.get("reason") == "initial_evidence_empty"
         and step.detail.get("found") == 1

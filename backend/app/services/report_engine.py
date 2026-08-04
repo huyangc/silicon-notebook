@@ -1217,6 +1217,29 @@ class ReportEngine:
         # 方向合并绕过了档位的最终选集上限 —— 每个方向照常执行(账目里的 `new` 记的
         # 是它真的找到多少),合并后再统一压回上限。
         clamp_merged_evidence(result, limits)
+        from app.services.retrieval_baseline import (
+            build_retrieval_baseline_manifest,
+            emit_retrieval_baseline,
+        )
+        result.baseline_manifest = build_retrieval_baseline_manifest(
+            notebook_id=notebook_id,
+            query=sec_question,
+            mode="report",
+            settings=self.settings,
+            candidate_knowledge=result.top_hits,
+            candidate_chunks=result.chunks,
+            candidate_elements=result.elements,
+            selected_knowledge=result.top_hits,
+            selected_chunks=result.chunks,
+            selected_elements=result.elements,
+            baseline_step_usage=len(result.trace),
+        )
+        emit_retrieval_baseline(
+            deps.event_log,
+            result.baseline_manifest,
+            notebook_id,
+            site="report_section",
+        )
         return result
 
     # --- Stage C(单节):撰写 ---
