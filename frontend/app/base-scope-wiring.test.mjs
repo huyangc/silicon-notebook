@@ -43,6 +43,53 @@ function staticClassName(opening, sourceFile) {
 }
 
 
+/** 某个 JSX 开标签上 onClick 绑定的源码;没有绑定则返回 ""。 */
+function dynamicOnClick(opening) {
+  for (const attribute of opening.attributes.properties) {
+    if (!ts.isJsxAttribute(attribute)) continue;
+    if (attribute.name.getText(opening.getSourceFile()) !== "onClick") continue;
+    const initializer = attribute.initializer;
+    if (initializer && ts.isJsxExpression(initializer) && initializer.expression) {
+      return initializer.expression.getText(opening.getSourceFile());
+    }
+  }
+  return "";
+}
+
+
+/**
+ * 该元素**正文**里的静态文字,用来按人话认出是哪一句提示。
+ *
+ * 既收裸 JsxText,也收直接表达式子节点里的字符串 / 模板字面量片段 —— 这里的提示语
+ * 两种写法都有(`…{`文案${变量}文案`}` 与裸文字),只认一种会把另一种看成空串。
+ */
+function renderedText(element) {
+  const sourceFile = element.getSourceFile();
+  const parts = [];
+  for (const child of element.children) {
+    if (ts.isJsxText(child)) {
+      parts.push(child.getText(sourceFile).replace(/\s+/g, " "));
+      continue;
+    }
+    if (!ts.isJsxExpression(child) || !child.expression) continue;
+    const visit = (node) => {
+      if (
+        ts.isStringLiteral(node)
+        || ts.isNoSubstitutionTemplateLiteral(node)
+        || ts.isTemplateHead(node)
+        || ts.isTemplateMiddle(node)
+        || ts.isTemplateTail(node)
+      ) {
+        parts.push(node.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(child.expression);
+  }
+  return parts.join("").trim();
+}
+
+
 /** 该元素**正文**(直接 JSX 表达式子节点)里引用到的标识符名。 */
 function renderedIdentifiers(element) {
   const names = [];
@@ -75,14 +122,22 @@ function jsxTree(sourceFile) {
   function visit(node) {
     if (ts.isJsxElement(node)) {
       const self = describe(node.openingElement);
-      nodes.push({ ...self, ancestors: [...stack], renders: renderedIdentifiers(node) });
+      nodes.push({
+        ...self,
+        ancestors: [...stack],
+        renders: renderedIdentifiers(node),
+        text: renderedText(node),
+        node,
+      });
       stack.push(self);
       ts.forEachChild(node, visit);
       stack.pop();
       return;
     }
     if (ts.isJsxSelfClosingElement(node)) {
-      nodes.push({ ...describe(node), ancestors: [...stack], renders: [] });
+      nodes.push({
+        ...describe(node), ancestors: [...stack], renders: [], text: "", node,
+      });
     }
     ts.forEachChild(node, visit);
   }
@@ -450,5 +505,132 @@ test("零挂载库时也提交参考库范围快照，不省略这一维", () =>
     /hasMountedBase|undefined/,
     "currentBaseScope 不得写成「挂了才发」的条件表达式:省略这一维等于不冻结它,"
       + "创建之后新挂的库会静默加入一份已冻结的报告/问答",
+  );
+});
+
+
+/**
+ * 某个变量声明的初始化表达式**节点**(剥掉外层括号),要求全文件恰好一处。
+ *
+ * 走 AST 而不是文本,是因为要钉的是**结构**:这个值由谁算出来。文本匹配对「把调用挪到
+ * 旁边一个新变量、原表达式恢复」这类移动变异是全绿的 —— 标识符都还在文件里。
+ */
+function initializerOf(name) {
+  const found = [];
+  function visit(node) {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === name
+      && node.initializer
+    ) {
+      found.push(node.initializer);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(page);
+  assert.equal(found.length, 1, `找不到唯一的 ${name} 定义(实际 ${found.length} 处)`);
+  let expression = found[0];
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+  return expression;
+}
+
+
+// 本笔记本自己没有图谱、用户又取消勾选了**唯一带图**的那个参考库时,聚合的
+// `base_kg_available` 仍为真 —— 界面会放行「深入分析 / 知识图谱」两个这轮根本取不到
+// 图谱的模式,而后端的可用性闸早已按库维度收窄、会如实答「无图」(codex #438 R2)。
+// 判据因此必须落在「勾选集 ∩ 带图库」上,并且只有 kgAvailableForScope 一处实现。
+test("严格推理的可用性由共用纯函数按**勾选集**算,不读聚合的 base_kg_available", () => {
+  const expression = initializerOf("kgAvailable");
+  assert.ok(
+    ts.isCallExpression(expression)
+      && expression.expression.getText(page) === "kgAvailableForScope",
+    "kgAvailable 必须**直接**由共用纯函数 kgAvailableForScope(...) 算出;"
+      + `在 page.tsx 里另写一份判据就会与后端的可用性闸分叉:${expression.getText(page)}`,
+  );
+  assert.deepEqual(
+    expression.arguments.map((argument) => argument.getText(page)),
+    ["currentNotebook", "selectedBaseNotebookIds"],
+    "两个实参必须是「当前笔记本 / 本次勾选的参考库 id」;"
+      + "喂 mountedBaseIds(全部挂载库)等于把取消勾选这件事整个抹掉",
+  );
+});
+
+
+// 过去这句话 join 的是**全部挂载库名**:它会当着用户的面点名一个这次不参与检索、
+// 或者压根没建过图的库。
+test("「将借用参考库」只点名本轮参与且带图的那几个", () => {
+  const hints = TREE.filter((node) => (
+    node.className === "chat-hint" && node.text.includes("将借用参考库")
+  ));
+  assert.equal(hints.length, 1, `期望恰好一处借用提示,实际 ${hints.length} 处`);
+
+  assert.ok(
+    hints[0].renders.includes("borrowedBaseNames"),
+    "这句提示必须渲染按勾选集算出的库名,而不是自己再取一遍挂载列表:"
+      + hints[0].renders.join(", "),
+  );
+  assert.equal(
+    hints[0].renders.includes("base_notebooks"),
+    false,
+    "不能再 join 全部挂载库名 —— 取消勾选的库、没建图的库都会被说成「借用」",
+  );
+
+  const source = initializerOf("borrowedBaseNames").getText(page);
+  assert.match(
+    source,
+    /borrowedKgBaseNames\(\s*currentNotebook,\s*selectedBaseNotebookIds\s*\)/,
+    `borrowedBaseNames 必须由共用纯函数按勾选集算出:${source}`,
+  );
+});
+
+
+// 上面那道门开始按勾选集拦人之后,「取不到图谱」有了两种成因,出路差着真金白银:挂了
+// 带图的库、只是这次没勾 → 把勾点回来即可;一个带图的库都没挂 → 才真需要为本笔记本
+// 跑一次整库的图谱整理。混在一起就会在只需点回一个复选框时劝用户去花那笔钱。
+test("「取不到图谱」的两种成因分开提示,只有该建图那一支给整理按钮", () => {
+  const source = initializerOf("kgBlockedByScope").getText(page);
+  assert.match(
+    source,
+    /kgBlockedByBaseScope\(\s*currentNotebook,\s*selectedBaseNotebookIds\s*\)/,
+    `成因判定必须由共用纯函数按勾选集算出:${source}`,
+  );
+
+  const hints = byClassName("mode-hint");
+  assert.equal(hints.length, 2, `严格推理提示应有两支,实际 ${hints.length} 支`);
+
+  // 判据是「这支提示里到底有没有那颗按钮」——按后代节点判,不按 renders 数标识符:
+  // onClick 挂在按钮的属性上,不是提示正文的直接表达式子节点。
+  const startsKgBuild = (hint) => {
+    let found = false;
+    const visit = (child) => {
+      if (
+        (ts.isJsxOpeningElement(child) || ts.isJsxSelfClosingElement(child))
+        && String(dynamicOnClick(child)).includes("startKgBuild")
+      ) found = true;
+      ts.forEachChild(child, visit);
+    };
+    visit(hint.node);
+    return found;
+  };
+
+  const withBuildButton = hints.filter(startsKgBuild);
+  assert.equal(
+    withBuildButton.length,
+    1,
+    "「整理知识图谱」按钮只能出现在**一支**里 —— 另一支的出路是重新勾选参考库,"
+      + "给按钮就是劝用户为一个复选框跑一次整库整理",
+  );
+  assert.match(
+    withBuildButton[0].text,
+    /该笔记本尚无知识图谱/,
+    `带整理按钮的那支必须是「本笔记本没图」那一支:${withBuildButton[0].text}`,
+  );
+
+  const scopeHint = hints.find((hint) => !startsKgBuild(hint));
+  assert.match(
+    scopeHint.text,
+    /没勾选/,
+    `另一支必须说清成因是「没勾选」:${scopeHint.text}`,
   );
 });

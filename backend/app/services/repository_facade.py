@@ -1082,7 +1082,9 @@ class RepositoryFacade:
 
     def _mounted_bases(
         self, notebook_id: str, db: "object | None" = None
-    ) -> "tuple[list, bool]":
+    ) -> "tuple[list, list]":
+        """(参考库列表, 其中已建 KG 的库 id) —— 第二项过去是 `any(has_kg)` 布尔,现在是
+        那批 id;`bool(...)` 与旧值逐字等价,故按布尔消费的调用方行为不变。"""
         return self._runtime.notebook_summaries.mounted_bases(notebook_id, db)
 
     def _source_ids_from_evidence(self, evidence_json: Optional[str]) -> set:

@@ -229,3 +229,142 @@ def test_local_evidence_defaults_false_on_the_list_projection(repo):
     listed = {row.id: row for row in repo.list_notebooks()}
     assert listed[nb.id].local_evidence_available is False
     assert repo.get_notebook(nb.id).local_evidence_available is True
+
+
+# ---------------------------------------------------------------------------
+# base_kg_notebook_ids —— base_kg_available 的**分解**。
+#
+# 参考库现在可以按库取消勾选,而聚合布尔分不出「这次勾选的库里有没有带图的」:本库
+# 无图、用户又恰好取消勾选了唯一带图的那个参考库时,聚合布尔仍为真,界面就会放行一个
+# 这轮根本取不到图的模式,还会点名一个本轮不参与的库。后端的知识图谱可用性闸早已按库
+# 维度收窄,界面必须能做同样的判断。
+#
+# 两条硬约束:①与 base_kg_available **自洽**(非空 ⟺ 为真);②**零新增查询**——数据来自
+# mounted_bases_row 本来就返回的每行 has_kg。
+# ---------------------------------------------------------------------------
+
+
+def _mounted_base_with_kg(repo, name: str, *, with_kg: bool):
+    base = repo.create_notebook(NotebookCreate(name=name))
+    if with_kg:
+        with repo._write() as db:
+            _add_kg_object(db, base.id, f"ko-{name}")
+    repo.mark_notebook_base(base.id)
+    return base
+
+
+def test_base_kg_notebook_ids_names_only_the_bases_that_have_a_graph(repo):
+    with_kg = _mounted_base_with_kg(repo, "ref-with-kg", with_kg=True)
+    without_kg = _mounted_base_with_kg(repo, "ref-without-kg", with_kg=False)
+    nb = repo.create_notebook(NotebookCreate(name="mounts-both"))
+    repo.replace_notebook_bases(nb.id, [with_kg.id, without_kg.id], "user-local")
+
+    summary = repo.get_notebook(nb.id)
+    assert {b.id for b in summary.base_notebooks} == {with_kg.id, without_kg.id}
+    assert summary.base_kg_notebook_ids == [with_kg.id]
+
+
+@pytest.mark.parametrize(
+    "mounted",
+    [
+        pytest.param([], id="no-mount"),
+        pytest.param([False], id="one-without-kg"),
+        pytest.param([True], id="one-with-kg"),
+        pytest.param([True, False], id="mixed"),
+        pytest.param([False, False], id="none-with-kg"),
+    ],
+)
+def test_base_kg_notebook_ids_is_self_consistent_with_base_kg_available(repo, mounted):
+    """非空 ⟺ base_kg_available 为真。两者出自同一次读取的同一批行,分叉即矛盾 ——
+    消费侧(前端严格推理门控)把新字段当成旧布尔的分解在读,一旦不自洽,门控与提示
+    文案就会各说各的。"""
+    bases = [
+        _mounted_base_with_kg(repo, f"ref-{i}", with_kg=has_kg)
+        for i, has_kg in enumerate(mounted)
+    ]
+    nb = repo.create_notebook(NotebookCreate(name="mounts"))
+    repo.replace_notebook_bases(nb.id, [b.id for b in bases], "user-local")
+
+    summary = repo.get_notebook(nb.id)
+    assert bool(summary.base_kg_notebook_ids) is summary.base_kg_available
+    assert set(summary.base_kg_notebook_ids) <= {b.id for b in summary.base_notebooks}
+
+
+def test_base_kg_notebook_ids_is_filled_on_the_list_projection_too(repo):
+    """回填路径与 base_kg_available **逐字相同**(都在 from_row 里),因为它们是同一份
+    事实的两种形状 —— 一个在列表里有值、另一个没有,自洽约束就会在列表投影上破掉。"""
+    base = _mounted_base_with_kg(repo, "ref", with_kg=True)
+    nb = repo.create_notebook(NotebookCreate(name="listed"))
+    repo.replace_notebook_bases(nb.id, [base.id], "user-local")
+
+    listed = {row.id: row for row in repo.list_notebooks()}[nb.id]
+    assert listed.base_kg_available is True
+    assert listed.base_kg_notebook_ids == [base.id]
+
+
+def test_base_kg_notebook_ids_costs_no_extra_query(repo, monkeypatch):
+    """零新增查询:数据来自 mounted_bases_row **本来就返回的每行 has_kg**。
+
+    两条判据:
+      * 整个 get_notebook 里只有**一条**语句携带 has_kg —— 没有为「哪几个库有图」
+        另开一次查询;
+      * 挂 1 个库与挂 3 个库执行的语句**逐条相同** —— 代价与挂载数无关,不存在
+        per-base 的 N+1 追问。
+    """
+    one = repo.create_notebook(NotebookCreate(name="mounts-1"))
+    repo.replace_notebook_bases(
+        one.id, [_mounted_base_with_kg(repo, "r1", with_kg=True).id], "user-local"
+    )
+    three = repo.create_notebook(NotebookCreate(name="mounts-3"))
+    repo.replace_notebook_bases(
+        three.id,
+        [
+            _mounted_base_with_kg(repo, "r2", with_kg=True).id,
+            _mounted_base_with_kg(repo, "r3", with_kg=False).id,
+            _mounted_base_with_kg(repo, "r4", with_kg=True).id,
+        ],
+        "user-local",
+    )
+    # 预热开放路径的进程内计数缓存,让下面两次追踪只剩稳定语句。
+    repo.get_notebook(one.id)
+    repo.get_notebook(three.id)
+
+    sql: list[str] = []
+    database = repo._runtime.database
+    orig_connect = database.connect
+
+    class _SpyConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, statement, *a, **kw):
+            sql.append(statement)
+            return self._inner.execute(statement, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    monkeypatch.setattr(database, "connect", lambda: _SpyConn(orig_connect()))
+
+    summary_one = repo.get_notebook(one.id)
+    trace_one = list(sql)
+    sql.clear()
+    summary_three = repo.get_notebook(three.id)
+    trace_three = list(sql)
+
+    assert len(summary_one.base_kg_notebook_ids) == 1
+    assert len(summary_three.base_kg_notebook_ids) == 2   # r3 无图
+    carriers = [s for s in trace_three if "has_kg" in s]
+    assert len(carriers) == 1, (
+        f"只应有 mounted_bases_row 一条语句携带 has_kg,实际 {len(carriers)} 条:{carriers}"
+    )
+    assert trace_one == trace_three, (
+        "挂 1 个库与挂 3 个库的语句序列必须逐条相同 —— 不相同就说明有 per-base 的追问"
+    )
