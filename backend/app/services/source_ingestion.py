@@ -1780,6 +1780,7 @@ class SourceIngestionService:
                 objects,
                 relations,
                 replace_source=preserve_existing_until_complete,
+                source_generation=run_id,
             )
             try:
                 self.knowledge_lifecycle.incremental_fuse_source(

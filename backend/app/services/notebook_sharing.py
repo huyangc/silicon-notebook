@@ -155,6 +155,7 @@ class NotebookCopyService:
             element_map: dict = {}
             chunk_map: dict = {}
             object_map: dict = {}
+            fact_map: dict = {}
             relation_map: dict = {}
             # PR-2+3 Task 13: knowhow business-table + hidden-source-content
             # remap maps. ``knowhow_source_ids_old`` is captured from the
@@ -419,6 +420,44 @@ class NotebookCopyService:
                 objects_out.append(data)
             self._store.insert_copy_rows(
                 "knowledge_objects", objects_out, chunk_size=chunk_size
+            )
+
+            source_facts_out = []
+            for data in snapshot["knowledge_source_facts"]:
+                old_fact_id = data["id"]
+                data["id"] = fact_map.setdefault(old_fact_id, remapped_id(old_fact_id))
+                data["notebook_id"] = new_id
+                data["source_id"] = source_map[data["source_id"]]
+                data["global_object_id"] = object_map.get(
+                    data.get("global_object_id") or "",
+                    data.get("global_object_id") or "",
+                )
+                data["payload"] = json.dumps(
+                    self._seams.remap_json_ids(
+                        json.loads(data.get("payload") or "{}"), json_maps
+                    )
+                )
+                data["evidence"] = json.dumps(
+                    self._seams.remap_json_ids(
+                        json.loads(data.get("evidence") or "[]"), json_maps
+                    )
+                )
+                source_facts_out.append(data)
+            self._store.insert_copy_rows(
+                "knowledge_source_facts", source_facts_out, chunk_size=chunk_size
+            )
+
+            source_fact_elements_out = []
+            for data in snapshot["knowledge_source_fact_elements"]:
+                data["fact_id"] = fact_map[data["fact_id"]]
+                data["notebook_id"] = new_id
+                data["source_id"] = source_map[data["source_id"]]
+                data["element_id"] = element_map[data["element_id"]]
+                source_fact_elements_out.append(data)
+            self._store.insert_copy_rows(
+                "knowledge_source_fact_elements",
+                source_fact_elements_out,
+                chunk_size=chunk_size,
             )
 
             relations_out = []

@@ -48,6 +48,16 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) ORDER BY ordinal",
     ),
     (
+        "knowledge_source_facts",
+        "SELECT * FROM knowledge_source_facts WHERE notebook_id=%s "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
+        "knowledge_source_fact_elements",
+        "SELECT * FROM knowledge_source_fact_elements WHERE notebook_id=%s "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
         "knowledge_relations",
         "SELECT * FROM knowledge_relations WHERE notebook_id=%s "
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
@@ -90,6 +100,8 @@ _COPY_VALIDATED_TABLES = (
     ("source_authors", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("chunks", ""),
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_facts", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_source_fact_elements", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     (
         "knowledge_relations",
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
@@ -126,6 +138,7 @@ _JSON_COLUMNS = {
     "source_elements": {"metadata"},
     "chunks": {"element_ids"},
     "knowledge_objects": {"payload", "evidence"},
+    "knowledge_source_facts": {"payload", "evidence"},
     "knowledge_relations": {"evidence"},
 }
 

@@ -240,6 +240,14 @@ class KnowledgeStore:
         """
         counts: dict[str, int] = {}
         cur = db.execute(
+            "DELETE FROM knowledge_source_facts WHERE notebook_id=%s "
+            "AND NOT EXISTS (SELECT 1 FROM sources s "
+            "WHERE s.id=knowledge_source_facts.source_id AND s.notebook_id=%s "
+            "AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
+        )
+        counts["knowledge_source_facts"] = cur.rowcount
+        cur = db.execute(
             "DELETE FROM knowledge_objects WHERE notebook_id = %s "
             "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=knowledge_objects.source_id "
             "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
@@ -1335,6 +1343,76 @@ class KnowledgeStore:
         )
 
     @staticmethod
+    def validate_source_fact_publish(
+        connection: Any,
+        notebook_id: str,
+        source_id: str,
+        source_generation: str,
+        element_ids: Sequence[str],
+    ) -> None:
+        source = connection.execute(
+            "SELECT id FROM sources WHERE id=%s AND notebook_id=%s FOR UPDATE",
+            (source_id, notebook_id),
+        ).fetchone()
+        if source is None:
+            raise RuntimeError("stale source fact generation")
+        row = connection.execute(
+            "SELECT id, status FROM extraction_runs "
+            "WHERE notebook_id=%s AND source_id=%s "
+            "ORDER BY created_at DESC, id COLLATE \"C\" DESC LIMIT 1",
+            (notebook_id, source_id),
+        ).fetchone()
+        if not row or row["id"] != source_generation or row["status"] != "running":
+            raise RuntimeError("stale source fact generation")
+        expected = list(dict.fromkeys(str(value) for value in element_ids if value))
+        if not expected:
+            return
+        owned = int(connection.execute(
+            "SELECT COUNT(*) AS c FROM source_elements "
+            "WHERE source_id=%s AND id=ANY(%s)",
+            (source_id, expected),
+        ).fetchone()["c"])
+        if owned != len(expected):
+            raise RuntimeError("source fact evidence crosses source generation boundary")
+
+    @staticmethod
+    def insert_source_fact_rows(
+        connection: Any,
+        rows: Sequence[tuple],
+        element_rows: Sequence[tuple],
+    ) -> None:
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_source_facts "
+            "(id, notebook_id, source_id, source_generation, local_object_id, global_object_id, "
+            "object_type, payload, evidence, projection_version, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (id) DO NOTHING",
+            [
+                (
+                    *row[:7],
+                    jsonb(_json_document(
+                        row[7], expected=dict, field="source fact payload"
+                    )),
+                    jsonb(_json_document(
+                        row[8], expected=list, field="source fact evidence"
+                    )),
+                    row[9],
+                    normalize_timestamp(row[10]),
+                    normalize_timestamp(row[11]),
+                )
+                for row in rows
+            ],
+        )
+        execute_many(
+            connection,
+            "INSERT INTO knowledge_source_fact_elements "
+            "(fact_id, notebook_id, source_id, source_generation, element_id, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (fact_id, element_id) DO NOTHING",
+            [(*row[:5], normalize_timestamp(row[5])) for row in element_rows],
+        )
+
+    @staticmethod
     def insert_relation_chunk(
         connection: Any, rows: Sequence[tuple]
     ) -> None:
@@ -1953,6 +2031,11 @@ class KnowledgeStore:
         db.execute(
             "DELETE FROM kg_relation_completion_state WHERE source_id = %s",
             (source_id,),
+        )
+        db.execute(
+            "DELETE FROM knowledge_source_facts "
+            "WHERE source_id=%s AND notebook_id=%s",
+            (source_id, notebook_id),
         )
         stale_after_id = ""
         while True:

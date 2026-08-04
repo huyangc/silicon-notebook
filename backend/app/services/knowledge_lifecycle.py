@@ -272,13 +272,16 @@ class KnowledgeLifecycleService:
         relations: List[dict],
         *,
         replace_source: bool = False,
+        source_generation: str | None = None,
     ) -> Tuple[int, int]:
         """Insert KG nodes/edges (remapping local ids to DB ids), embeds payload.
 
         分块执行批量 INSERT，但所有 object/relation 块共享一个事务：source 是
         KG 的持久化边界，任一后续块失败都回滚整源。本地 id->DB id 在分块前一次性
         预分配，跨块关系仍能正确 remap。Relations 引用不到的 local id 静默跳过。
-        ``replace_source`` 把旧图清理并入同一事务；新图写入失败时旧图保持不变。"""
+        ``replace_source`` 把旧图清理并入同一事务；新图写入失败时旧图保持不变。
+        ``source_generation`` 仅由 ingestion 的 extraction run 传入；存在时
+        同事务发布独立的 source-local facts，普通治理/测试写入保持原行为。"""
         CHUNK = 1000
         now = self._now()
         local_to_id: Dict[str, str] = {}
@@ -304,6 +307,34 @@ class KnowledgeLifecycleService:
                     local_to_name.get(rel["target_local_id"], "?"), spans),
             })
 
+        fact_element_ids: dict[str, list[str]] = {}
+        fact_ids: dict[str, str] = {}
+        all_fact_element_ids: list[str] = []
+        if source_generation:
+            if not source_id:
+                raise ValueError("source_generation requires source_id")
+            for obj in objects:
+                element_ids: list[str] = []
+                for evidence in obj.get("evidence") or ():
+                    if not isinstance(evidence, dict):
+                        continue
+                    evidence_source_id = str(evidence.get("source_id") or "")
+                    if evidence_source_id and evidence_source_id != source_id:
+                        raise ValueError("source-local fact evidence must belong to its source")
+                    element_id = str(evidence.get("element_id") or "")
+                    if element_id:
+                        element_ids.append(element_id)
+                element_ids = list(dict.fromkeys(element_ids))
+                if not element_ids:
+                    # An ungrounded object may remain on the legacy global KG
+                    # path, but it is not safe source-local fact material.
+                    continue
+                fact_ids[obj["_oid"]] = "ksf-" + hashlib.sha256(
+                    f"{source_id}\0{source_generation}\0{obj['local_id']}".encode("utf-8")
+                ).hexdigest()[:32]
+                fact_element_ids[obj["_oid"]] = element_ids
+                all_fact_element_ids.extend(element_ids)
+
         # Base strong-review gate (Track F): objects written directly to a base
         # notebook land as 'reviewed' (still in USABLE_STATUSES, so retrievable)
         # rather than 'approved' — the curator confirms via update_knowledge
@@ -314,6 +345,14 @@ class KnowledgeLifecycleService:
         auto_status = 'reviewed' if (nb_row and nb_row["tier"] == 'base') else 'approved'
 
         with self._write() as db:
+            if source_generation:
+                self.knowledge.validate_source_fact_publish(
+                    db,
+                    notebook_id,
+                    source_id or "",
+                    source_generation,
+                    all_fact_element_ids,
+                )
             if replace_source:
                 if not source_id:
                     raise ValueError("replace_source requires source_id")
@@ -347,6 +386,30 @@ class KnowledgeLifecycleService:
                 ]
                 if kos_rows:
                     self.knowledge.insert_object_source_rows(db, kos_rows)
+                if source_generation:
+                    fact_rows = [
+                        (
+                            fact_ids[o["_oid"]], notebook_id, source_id or "", source_generation,
+                            o["local_id"], o["_oid"], o["object_type"],
+                            json.dumps(o["payload"], ensure_ascii=False),
+                            json.dumps(o["evidence"], ensure_ascii=False),
+                            1, now, now,
+                        )
+                        for o in chunk
+                        if o["_oid"] in fact_ids
+                    ]
+                    fact_element_rows = [
+                        (
+                            fact_ids[o["_oid"]], notebook_id, source_id or "", source_generation,
+                            element_id, now,
+                        )
+                        for o in chunk
+                        if o["_oid"] in fact_ids
+                        for element_id in fact_element_ids[o["_oid"]]
+                    ]
+                    self.knowledge.insert_source_fact_rows(
+                        db, fact_rows, fact_element_rows
+                    )
             for i in range(0, len(db_relations), CHUNK):
                 chunk = db_relations[i:i + CHUNK]
                 self.knowledge.insert_relation_chunk(

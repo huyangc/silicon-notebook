@@ -66,6 +66,14 @@ class KnowledgeStore:
         """
         counts: dict[str, int] = {}
         cur = db.execute(
+            "DELETE FROM knowledge_source_facts WHERE notebook_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM sources s "
+            "WHERE s.id=knowledge_source_facts.source_id AND s.notebook_id=? "
+            "AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
+        )
+        counts["knowledge_source_facts"] = cur.rowcount
+        cur = db.execute(
             "DELETE FROM knowledge_objects WHERE notebook_id = ? "
             "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=knowledge_objects.source_id "
             "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow'))",
@@ -1121,6 +1129,59 @@ class KnowledgeStore:
         )
 
     @staticmethod
+    def validate_source_fact_publish(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_id: str,
+        source_generation: str,
+        element_ids: Sequence[str],
+    ) -> None:
+        """Fail closed unless this is the current running source generation."""
+        row = connection.execute(
+            "SELECT er.id, er.status FROM extraction_runs er "
+            "JOIN sources s ON s.id=er.source_id AND s.notebook_id=er.notebook_id "
+            "WHERE er.notebook_id=? AND er.source_id=? "
+            "ORDER BY er.created_at DESC, er.id DESC LIMIT 1",
+            (notebook_id, source_id),
+        ).fetchone()
+        if not row or row["id"] != source_generation or row["status"] != "running":
+            raise RuntimeError("stale source fact generation")
+        expected = list(dict.fromkeys(str(value) for value in element_ids if value))
+        if not expected:
+            return
+        payload = json.dumps(expected, ensure_ascii=False)
+        owned = int(connection.execute(
+            "WITH requested(id) AS (SELECT CAST(value AS TEXT) FROM json_each(?)) "
+            "SELECT COUNT(*) AS c FROM requested CROSS JOIN source_elements se "
+            "ON se.id=requested.id WHERE se.source_id=?",
+            (payload, source_id),
+        ).fetchone()["c"])
+        if owned != len(expected):
+            raise RuntimeError("source fact evidence crosses source generation boundary")
+
+    @staticmethod
+    def insert_source_fact_rows(
+        connection: sqlite3.Connection,
+        rows: Sequence[tuple],
+        element_rows: Sequence[tuple],
+    ) -> None:
+        connection.executemany(
+            "INSERT INTO knowledge_source_facts "
+            "(id, notebook_id, source_id, source_generation, local_object_id, global_object_id, "
+            "object_type, payload, evidence, projection_version, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO NOTHING",
+            rows,
+        )
+        connection.executemany(
+            "INSERT INTO knowledge_source_fact_elements "
+            "(fact_id, notebook_id, source_id, source_generation, element_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(fact_id, element_id) DO NOTHING",
+            element_rows,
+        )
+
+    @staticmethod
     def insert_relation_chunk(
         connection: sqlite3.Connection, rows: Sequence[tuple]
     ) -> None:
@@ -1743,6 +1804,11 @@ class KnowledgeStore:
         db.execute(
             "DELETE FROM kg_relation_completion_state WHERE source_id = ?",
             (source_id,),
+        )
+        db.execute(
+            "DELETE FROM knowledge_source_facts "
+            "WHERE source_id=? AND notebook_id=?",
+            (source_id, notebook_id),
         )
         stale_after_id = ""
         while True:
