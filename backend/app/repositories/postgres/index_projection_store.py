@@ -19,12 +19,16 @@ caller-appended settings tail), so on-disk manifest.version keeps matching.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.repositories.postgres._store_utils import iso_timestamp, json_value
 from app.repositories.postgres.embedding_store import EmbeddingStore
 from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
+from app.repositories.source_subgraph_projection import (
+    source_subgraph_rows_on,
+    source_subgraph_signature_on,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy
@@ -288,6 +292,55 @@ class IndexProjectionStore:
             "WHERE notebook_id=%s AND status!='deprecated' ORDER BY ordinal",
             (notebook_id,),
         ).fetchall()
+
+    def source_subgraph_signature(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> tuple:
+        allowed = tuple(sorted(set(source_ids)))
+        if not allowed:
+            return (0, 0, 0, ())
+        with self.connect() as connection:
+            return source_subgraph_signature_on(
+                connection,
+                notebook_id,
+                allowed,
+                placeholder="%s",
+                postgres=True,
+            )
+
+    def source_subgraph_rows(
+        self,
+        notebook_id: str,
+        source_ids: Sequence[str],
+        limits: Mapping[str, int],
+    ) -> Mapping[str, Any]:
+        allowed = tuple(sorted(set(source_ids)))
+        if not allowed:
+            return {
+                "signature": (0, 0, 0, ()),
+                "kg_generation": 0,
+                "cluster_generation": 0,
+                "sources": [],
+                "objects": [],
+                "relations": [],
+                "chunks": [],
+                "facts": [],
+                "fact_elements": [],
+                "clusters": [],
+                "reasons": ["empty_source_scope"],
+            }
+        with self.connect() as connection:
+            connection.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+            )
+            return source_subgraph_rows_on(
+                connection,
+                notebook_id,
+                allowed,
+                limits,
+                placeholder="%s",
+                postgres=True,
+            )
 
     # ─────────────────────────────────────────────────── graph snapshots ──
     def graph_rows(

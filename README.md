@@ -20,7 +20,7 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 - Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls, including a paginated, sortable user-usage table whose Ask usage counts durable question submissions rather than conversation containers. The user total includes questions asked in joined notebooks; the expanded inventory remains limited to notebooks that user owns.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.
 - Retrieval candidates retain all producer provenance (semantic, lexical, PPR, KG source, or community); mixed chunk/graph selection can reserve a bounded graph-only seat without increasing the answer budget.
-- KG extraction also persists immutable source-generation facts and normalized evidence-element bindings before global fusion. This is an additive write path for the upcoming source-subgraph retriever; current Ask ranking and channel selection remain unchanged in this step.
+- KG extraction persists immutable source-generation facts and normalized evidence-element bindings before global fusion. A backend-neutral, generation-keyed selected-source snapshot can now read only authorized objects, relations, chunks, facts, evidence bindings, and cluster memberships through bounded, source-first queries whose cache-hit identity is constant-cost; it has no Ask/Report consumer yet, so current ranking and channel selection remain unchanged.
 
 The complete behavior and endpoint contracts live in [Product and API reference](./docs/product-and-api.md).
 

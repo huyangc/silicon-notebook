@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.repositories.source_subgraph_projection import (
+    source_subgraph_rows_on,
+    source_subgraph_signature_on,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy
@@ -286,6 +290,53 @@ class IndexProjectionStore:
             "WHERE notebook_id=? AND status!='deprecated'",
             (notebook_id,),
         ).fetchall()
+
+    def source_subgraph_signature(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> tuple:
+        allowed = tuple(sorted(set(source_ids)))
+        if not allowed:
+            return (0, 0, 0, ())
+        with self.connect() as db:
+            return source_subgraph_signature_on(
+                db,
+                notebook_id,
+                allowed,
+                placeholder="?",
+                postgres=False,
+            )
+
+    def source_subgraph_rows(
+        self,
+        notebook_id: str,
+        source_ids: Sequence[str],
+        limits: Mapping[str, int],
+    ) -> Mapping[str, Any]:
+        allowed = tuple(sorted(set(source_ids)))
+        if not allowed:
+            return {
+                "signature": (0, 0, 0, ()),
+                "kg_generation": 0,
+                "cluster_generation": 0,
+                "sources": [],
+                "objects": [],
+                "relations": [],
+                "chunks": [],
+                "facts": [],
+                "fact_elements": [],
+                "clusters": [],
+                "reasons": ["empty_source_scope"],
+            }
+        with self.connect() as db:
+            db.execute("BEGIN")
+            return source_subgraph_rows_on(
+                db,
+                notebook_id,
+                allowed,
+                limits,
+                placeholder="?",
+                postgres=False,
+            )
 
     # ─────────────────────────────────────────────────── graph snapshots ──
     def graph_rows(
