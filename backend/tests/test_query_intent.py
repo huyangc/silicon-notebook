@@ -409,3 +409,56 @@ def test_clear_auto_confirm_keeps_user_wording_authoritative_over_model_rewrite(
 
     assert research.startswith("比较两个 PLL 的锁定性能")
     assert "分析 ADC 的静态线性度" in research
+
+
+def test_deterministic_ambiguity_row_cannot_exceed_the_contract_ceiling():
+    """一个含无法解析指代的普通问题不能因为条数上限而彻底失败。
+
+    模型可以合法返回 8 条 ambiguity,而服务端还会为「指代无法解析」再插一条
+    确定性的。两者相加是 9 条,超过 QueryIntentContract.ambiguities 的
+    max_length=8 —— 契约构造不出来,`/ask/intent` 就以 pydantic ValidationError
+    收场(它是 ValueError 子类,英文原文不该给用户看,更不该变成 500)。
+    服务端自己那条排在最前、必须留下,被挤掉的应当是模型的最后一条。
+    """
+    class _Client:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({
+                "normalized_question": "这个方案的优点是什么？",
+                "intent_type": "explain",
+                "result_scope": "ranked",
+                "completeness_required": False,
+                "entities": [],
+                "mandatory_topics": [],
+                "comparison_axes": [],
+                "constraints": [],
+                "excluded_topics": [],
+                "expected_output": "",
+                "assumptions": [],
+                "ambiguities": [
+                    {
+                        "id": f"a{index}",
+                        "question": f"请澄清第 {index} 点",
+                        "reason": "模型自己提的",
+                        "required": True,
+                        "options": ["x"],
+                    }
+                    for index in range(8)
+                ],
+                "confidence": 0.5,
+                "needs_clarification": True,
+            })
+
+    contract = plan_query_intent(
+        _Client(), "这个方案的优点是什么？", "", max_topics=5
+    )
+
+    assert len(contract["ambiguities"]) == 8
+    # 服务端的确定性行排第一且被保留;挤掉的是模型的最后一条。
+    assert contract["ambiguities"][0]["id"] == "ambiguity-input"
+    assert "请澄清第 7 点" not in [
+        row["question"] for row in contract["ambiguities"]
+    ]
+    # 真正的验收:契约构造得出来,不抛 ValidationError。
+    assert QueryIntentContract(**contract).needs_clarification is True

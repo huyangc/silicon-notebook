@@ -78,6 +78,8 @@ _ANALYSIS_REQUEST = re.compile(
     r"|\b(?:compare|analyse|analyze|trade-?offs?|pros\s+and\s+cons)\b",
     re.IGNORECASE,
 )
+
+
 def _complete_match_is_negated(question: str, match: re.Match) -> bool:
     prefix = question[max(0, match.start() - 24):match.start()]
     prefix = re.split(r"[，,。；;!?！？]", prefix)[-1]
@@ -286,6 +288,15 @@ def plan_query_intent(
             "required": True,
             "options": [],
         })
+        # ``QueryIntentContract.ambiguities`` has a hard ceiling of eight rows.
+        # The model may legitimately return eight of its own, so inserting the
+        # deterministic row unconditionally can produce a ninth and make the
+        # contract unconstructable — a pydantic ValidationError on an ordinary
+        # unresolved-referent question, i.e. exactly the deterministic failure
+        # this whole area is supposed to avoid.  Drop the model's least
+        # important row instead: the server's own finding is inserted first and
+        # must survive.
+        del ambiguities[8:]
     if bool(data.get("needs_clarification")) and not ambiguities:
         ambiguities.append({
             "id": "ambiguity-1",

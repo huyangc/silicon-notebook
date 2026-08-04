@@ -571,12 +571,13 @@ class AskService:
     ) -> None:
         """Freeze a submitted reasoning intent before a durable Ask is created.
 
-        This is intentionally also called from ``ask_reasoning``: API routes
-        protect stream headers/jobs, while direct service callers must reach the
-        same validation.  It runs inside the request's frozen checkbox source
-        ceiling (see ``_validate_reasoning_scope_preflight``), so a submission
-        that no longer satisfies that ceiling fails here rather than after a
-        durable job exists.
+        Both Ask entry points call this above their job-publishing step —
+        ``ask_current`` before ``begin_job_current`` and the streaming
+        coordinator before ``begin_durable_job`` — so an invalid submission
+        fails before a durable job or stream header exists.  It no longer
+        depends on the request's source scope: the checkbox ceiling is applied
+        by ``source_scope_context`` at retrieval boundaries, and the
+        model-inferred scope this used to cross-check is gone.
         """
         from app.services.ask_modes import resolve_mode
 

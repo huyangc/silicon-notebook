@@ -154,9 +154,16 @@ class AskExecutionCoordinator:
         events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
         cancel_event = threading.Event()
         service = self.ask()
-        # The API route runs this before yielding stream headers.  Keep the
-        # same guard here for direct coordinator callers; compatibility fakes
-        # used by narrow unit tests may intentionally omit it.
+        # This is the ONLY validate_reasoning_submission call on the streaming
+        # path — do not delete it as a duplicate of the route.  The route ran
+        # its own copy until the model-inferred source scope was removed; what
+        # it keeps is ``_validate_confirmed_reasoning_intent``, which today
+        # happens to cover the same conditions but is a separate check that
+        # either side may extend.  It must stay above begin_durable_job so an
+        # invalid submission fails before a durable job exists
+        # (test_source_scope.py pins that ordering for both Ask paths).  The
+        # getattr is fail-open only for the narrow unit-test doubles that
+        # intentionally omit the method.
         validate = getattr(service, "validate_reasoning_submission", None)
         if validate is not None:
             validate(notebook_id, payload)
