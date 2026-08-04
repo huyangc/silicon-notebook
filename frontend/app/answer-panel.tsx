@@ -51,6 +51,7 @@ import {
 } from "./ask-retrieval-effort";
 import { shouldShowIndexRequiredBanner, type ScaleIndexStatus } from "./scale-index";
 import { sourceImageAssetUrl } from "./source-image";
+import { retrievalScopeSummary } from "./source-scope";
 import type {
   AskResponse,
   Citation,
@@ -1209,6 +1210,46 @@ export function AnswerView({
             来源 · 个人 {personal}
             {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
           </span>
+        );
+      })()}
+      {/* 本轮实际获准的检索范围回执。真机事故的那一屏——勾定单篇文章提问，16 条引用
+          全部来自 84 篇论文的参考库——要在答案上一眼可见，而不是等用户去数引用。
+          ⚠ 判据只有「回执在不在」这一条：后端只在**确有收窄**时才下发（浏览器每次都会
+          提交显式范围，全选也不例外，所以「提交了范围」不是信号）。刻意不在这里按
+          回执数字重算一遍「算不算收窄」——那会变成第二份判据，而它注定与后端那份漂移：
+          后端的 narrowed 用冻结那一刻的实时全集算，回执里的 total 却刻意用可能滞后的
+          缓存计数（对展示是可接受的陈旧，对闸不是）。并发上传一篇，就会让一次真收窄
+          在浏览器侧被算成 5/5 而整行消失。
+          ⚠ 库名直接用回执里的快照，不拿当前挂载列表重新映射：回答活得比挂载边久，
+          重开历史会话时那个库可能已经被卸载，重新映射恰好会丢掉最该解释它的那一行。 */}
+      {answer.retrieval_scope && (() => {
+        const scope = answer.retrieval_scope;
+        const includedBases = scope.bases.filter((base) => base.included);
+        return (
+          <details className="answer-retrieval-scope">
+            <summary title="勾选的来源与参考库才会参与本轮检索">
+              <ChevronRight size={14} aria-hidden="true" />
+              检索范围：{retrievalScopeSummary(
+                scope.local,
+                scope.bases.length > 0
+                  ? { selected: includedBases.length, total: scope.bases.length }
+                  : null,
+              )}
+            </summary>
+            <ul>
+              <li>
+                <span>本笔记本来源 {scope.local.selected}/{scope.local.total}</span>
+              </li>
+              {scope.bases.map((base) => (
+                <li key={base.notebook_id}>
+                  <span className={base.included ? "" : "scope-excluded"}>
+                    参考库《{base.name || "未命名"}》
+                  </span>
+                  <small>{base.included ? "已参与检索" : "本次未参与检索"}</small>
+                </li>
+              ))}
+            </ul>
+          </details>
         );
       })()}
       <AnswerMarkdown

@@ -5056,12 +5056,102 @@ button.chat-session-card {
   margin-right: auto;
 }
 
+/* 双段计数(本库 N/M · 参考库 K/L)比原来的单段长，来源面板最窄 270px 时要截断，
+   而不是把「全选/清空」两个按钮挤出去。 */
+.source-scope-toolbar .retrieval-scope-count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 检索范围的两个分组：参考库（挂载的整个库）与本库来源（单篇）。粒度不同，所以并列成
+   两组而不是混进同一个列表。搜索框归到「本库来源」标题之下 —— 它只查当前笔记本，
+   摆在整个面板最顶上会让人以为能一并搜到参考库里的内容。 */
+.scope-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.scope-group-title {
+  margin: 0;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.base-scope-list {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  /* 挂多个参考库时自己滚动，不去挤压下面的来源列表（它才是主列表）。 */
+  max-height: 148px;
+  overflow: auto;
+}
+
+/* ⚠ 刻意不复用 .source-row：那是 3 列 grid，却在 max-width:760px 下被覆写成 2 列而
+   实际仍有 3 个 grid item（既有的窄屏错位隐患）。这里另起一套，只对齐视觉：勾选框
+   与来源行的勾选框在同一条竖线上（左内边距 10px + 22px 列宽居中）。 */
+.base-scope-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 6px 0 10px;
+  border-radius: 10px;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.base-scope-row:hover {
+  background: #eef1fb;
+}
+
+.base-scope-row input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  justify-self: center;
+  accent-color: var(--blue);
+}
+
+.base-scope-row:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.base-scope-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.base-scope-badge {
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: #eef2ff;
+  color: #4c5fd7;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .source-scope-toolbar button {
   border: 0;
   background: transparent;
   color: var(--blue);
   padding: 3px 4px;
   cursor: pointer;
+  /* 计数换成双段之后变长，面板最窄 270px 时这两颗按钮会被压成竖排的「全\n选」。
+     它们不参与压缩，让左边的计数去截断。 */
+  flex: none;
+  white-space: nowrap;
 }
 
 .source-scope-toolbar button:disabled {
@@ -5499,6 +5589,70 @@ button.chat-session-card {
   justify-self: start;
   background: #fff4e5;
   color: #b26a00;
+}
+
+/* 本轮检索范围回执。只在后端判定确有收窄时才出现，所以是"值得占一行"的信息，
+   但默认折叠：摘要一行说清双段计数，展开才逐个列出参考库的参与情况。 */
+.answer-retrieval-scope {
+  margin: 8px 0 10px;
+  border: 1px solid #d9e3f4;
+  border-radius: 9px;
+  background: #f7f9fe;
+  color: #334155;
+  font-size: 12px;
+}
+
+.answer-retrieval-scope > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  list-style: none;
+  color: #35548c;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.answer-retrieval-scope > summary::-webkit-details-marker {
+  display: none;
+}
+
+.answer-retrieval-scope > summary svg {
+  flex: none;
+  transition: transform 0.12s ease;
+}
+
+.answer-retrieval-scope[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.answer-retrieval-scope ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0 12px 10px 30px;
+}
+
+.answer-retrieval-scope li {
+  min-width: 0;
+}
+
+.answer-retrieval-scope li span {
+  overflow-wrap: anywhere;
+}
+
+.answer-retrieval-scope li small {
+  display: block;
+  margin-top: 2px;
+  color: #66758f;
+  overflow-wrap: anywhere;
+}
+
+/* 未参与本轮检索的参考库仍逐行列出（它解释了"为什么这条回答里没有它的证据"），
+   只把它压成删除线+弱色，与已参与的行一眼可分。 */
+.answer-retrieval-scope li .scope-excluded {
+  color: #8b95a7;
+  text-decoration: line-through;
 }
 
 .cite-chip-wrap {
