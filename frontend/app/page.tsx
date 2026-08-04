@@ -91,6 +91,7 @@ import {
   leaveNotebook,
   sharedByMe,
   shareModeLabel,
+  shareLinkCopyToast,
   parseShareToken,
   buildShareLink,
   type ShareResponse,
@@ -114,6 +115,7 @@ import {
 import { fetchMe, logoutUser, type AuthUser } from "./auth";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
+import { copyTextSafely } from "./copy-text";
 import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
@@ -4540,17 +4542,15 @@ export default function Home() {
     }
   }
 
-  // 复制分享链接到剪贴板(退化时至少把链接抛到状态栏)
+  // 复制分享链接到剪贴板；失败时引导用户选择紧邻按钮的只读链接。
+  async function handleShareLinkCopy(link: string) {
+    setToast(shareLinkCopyToast(await copyTextSafely(link)));
+  }
+
   async function copyShareLink() {
     if (!shareModal) return;
     const link = buildShareLink(shareModal.share_token, window.location.origin);
-    try {
-      await navigator.clipboard?.writeText(link);
-      setToast("分享链接已复制");
-    } catch {
-      setStatusText(link);
-      setToast("复制失败，链接已显示在状态栏");
-    }
+    await handleShareLinkCopy(link);
   }
 
   // 取消分享:撤销 token → 关弹窗
@@ -6045,9 +6045,7 @@ export default function Home() {
                           className="sort-button"
                           onClick={() => {
                             const link = buildShareLink(item.share_token, window.location.origin);
-                            navigator.clipboard?.writeText(link)
-                              .then(() => setToast("分享链接已复制"))
-                              .catch(() => { setStatusText(link); setToast("复制失败，链接已显示在状态栏"); });
+                            handleShareLinkCopy(link).catch(reportError);
                           }}
                         >复制</button>
                       </div>
