@@ -166,6 +166,9 @@ class _ScopeRepo:
     def visible_source_count(self, _notebook_id):
         return self.count
 
+    def visible_source_scope_snapshot(self, _notebook_id, source_ids):
+        return self.visible_source_ids(_notebook_id, source_ids), self.count
+
     def all_visible_source_ids(self, _notebook_id):
         return list(self.visible)
 
@@ -196,6 +199,86 @@ def test_scope_rejects_cross_notebook_source_ids():
             SourceScope(mode="include", source_ids=["foreign"]),
         )
     assert exc.value.status_code == 422
+
+
+def test_compact_include_never_materializes_the_visible_source_universe():
+    class _CompactRepo(_ScopeRepo):
+        def all_visible_source_ids(self, _notebook_id):
+            raise AssertionError("compact include must not enumerate the universe")
+
+    resolved = _validate_source_scope(
+        _CompactRepo(["selected"], 10_000),
+        _notebook(),
+        SourceScope(mode="include", source_ids=["selected"]),
+    )
+
+    assert resolved == SourceScope(
+        mode="include", source_ids=["selected"], narrowed=True
+    )
+
+
+def test_sqlite_compact_scope_snapshot_matches_visibility_and_count(tmp_path, monkeypatch):
+    from app.core.config import Settings
+    from app.models.schemas import NotebookCreate
+    from app.services.sqlite_repository import SQLiteRepository
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'scope.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    repo = SQLiteRepository(Settings(_env_file=None))
+    notebook_id = repo.create_notebook(NotebookCreate(name="scope")).id
+    store = repo._runtime.source_store
+    for source_id, source_type in (
+        ("s1", "markdown"),
+        ("s2", "pdf"),
+        ("hidden-memory", "memory"),
+    ):
+        store.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="extracted",
+            parse_status="extracted",
+            file_name=f"{source_id}.md",
+            file_path=f"/tmp/{source_id}.md",
+            file_size=0,
+            file_hash="",
+            summary="",
+            doc_type="",
+        )
+
+    assert store.visible_source_scope_snapshot(
+        notebook_id, ["s2", "foreign"]
+    ) == (["s2"], 2)
+    assert store.visible_source_scope_snapshot(notebook_id, []) == ([], 2)
+
+    # Requested rows stay O(selected) even beyond the ordinary IN-clause
+    # threshold; the implementation must not materialize the source universe.
+    store.IN_CHUNK = 1
+    assert store.visible_source_scope_snapshot(
+        notebook_id, ["s2", "foreign", "s1"]
+    ) == (["s2", "s1"], 2)
+
+    with store.database.connect() as db:
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN WITH requested(id, ordinal) AS ("
+            "SELECT CAST(value AS TEXT), CAST(key AS INTEGER) FROM json_each(?)"
+            ") SELECT requested.id FROM requested "
+            "CROSS JOIN sources ON sources.id=requested.id "
+            "WHERE sources.notebook_id=? AND "
+            "source_type NOT IN ('memory', 'knowhow')",
+            ('["s2", "foreign", "s1"]', notebook_id),
+        ).fetchall()
+    details = [str(row["detail"]) for row in plan]
+    requested_scan = next(
+        index for index, detail in enumerate(details) if "json_each" in detail
+    )
+    source_probe = next(
+        index for index, detail in enumerate(details)
+        if "sources" in detail and "SEARCH" in detail
+    )
+    assert requested_scan < source_probe
+    assert "id=?" in details[source_probe].replace(" ", "")
 
 
 def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():

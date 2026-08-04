@@ -135,6 +135,39 @@ class SourceStore:
             ).fetchall()
         return [row["id"] for row in rows]
 
+    def visible_source_scope_snapshot(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> tuple[list[str], int]:
+        """Validate compact selected ids and count the universe in one statement."""
+        requested = list(dict.fromkeys(str(value) for value in source_ids if value))
+        with self.database.connect() as connection:
+            if not requested:
+                total = int(connection.execute(
+                    "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s "
+                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+                    (notebook_id,),
+                ).fetchone()["c"])
+                return [], total
+            requested_json = json.dumps(requested, ensure_ascii=False)
+            rows = connection.execute(
+                "WITH requested(id, ordinal) AS ("
+                "SELECT value, ordinal FROM "
+                "jsonb_array_elements_text(%s::jsonb) WITH ORDINALITY AS r(value, ordinal)"
+                "), visible AS ("
+                "SELECT requested.id, requested.ordinal FROM requested "
+                "JOIN sources ON sources.id=requested.id "
+                f"WHERE sources.notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+                "), stats(visible_count) AS ("
+                "SELECT COUNT(*) FROM sources WHERE notebook_id=%s "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+                ") SELECT visible.id, stats.visible_count FROM stats "
+                "LEFT JOIN visible ON TRUE ORDER BY visible.ordinal",
+                (requested_json, notebook_id, notebook_id),
+            ).fetchall()
+            visible = [str(row["id"]) for row in rows if row["id"] is not None]
+            total = int(rows[0]["visible_count"])
+        return visible, total
+
     def list_sources(self, notebook_id: str) -> list[SourceSummary]:
         with self.database.connect() as connection:
             rows = connection.execute(

@@ -1531,6 +1531,14 @@ class RepositoryFacade:
     def visible_source_count(self, notebook_id: str) -> int:
         return self._runtime.source_store.visible_document_count(notebook_id)
 
+    def visible_source_scope_snapshot(
+        self, notebook_id: str, source_ids: List[str]
+    ) -> tuple[List[str], int]:
+        """Validate a compact include scope without materializing the universe."""
+        return self._runtime.source_store.visible_source_scope_snapshot(
+            notebook_id, source_ids
+        )
+
     def get_source(self, source_id: str) -> SourceDetail:
         return self._runtime.source_store.get_source(source_id)
 
