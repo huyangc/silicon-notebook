@@ -1330,6 +1330,10 @@ def test_compact_source_scope_snapshot_matches_sqlite_semantics(
     assert core_stores.sources.visible_source_scope_snapshot(
         notebook_id, []
     ) == ([], 2)
+    core_stores.sources.IN_CHUNK = 1
+    assert core_stores.sources.visible_source_scope_snapshot(
+        notebook_id, ["src-compact-b", "src-foreign", "src-compact-a"]
+    ) == (["src-compact-b", "src-compact-a"], 2)
 
 
 def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(

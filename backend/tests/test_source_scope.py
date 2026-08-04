@@ -252,6 +252,13 @@ def test_sqlite_compact_scope_snapshot_matches_visibility_and_count(tmp_path, mo
     ) == (["s2"], 2)
     assert store.visible_source_scope_snapshot(notebook_id, []) == ([], 2)
 
+    # Requested rows stay O(selected) even beyond the ordinary IN-clause
+    # threshold; the implementation must not materialize the source universe.
+    store.IN_CHUNK = 1
+    assert store.visible_source_scope_snapshot(
+        notebook_id, ["s2", "foreign", "s1"]
+    ) == (["s2", "s1"], 2)
+
 
 def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
     resolved = _validate_source_scope(

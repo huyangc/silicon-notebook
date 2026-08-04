@@ -97,25 +97,24 @@ class SourceStore:
                     (notebook_id,),
                 ).fetchone()["c"])
                 return [], total
-            if len(requested) > self.IN_CHUNK:
-                universe = [str(row["id"]) for row in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id=? "
-                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} ORDER BY id",
-                    (notebook_id,),
-                ).fetchall()]
-                visible = set(universe)
-                return [value for value in requested if value in visible], len(universe)
-            placeholders = ",".join("?" for _ in requested)
+            requested_json = json.dumps(requested, ensure_ascii=False)
             rows = db.execute(
-                "SELECT id, (SELECT COUNT(*) FROM sources "
-                f"WHERE notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}) AS visible_count "
-                "FROM sources WHERE notebook_id=? "
-                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} AND id IN ({placeholders})",
-                (notebook_id, notebook_id, *requested),
+                "WITH requested(id, ordinal) AS ("
+                "SELECT CAST(value AS TEXT), CAST(key AS INTEGER) FROM json_each(?)"
+                "), visible AS ("
+                "SELECT requested.id, requested.ordinal FROM requested "
+                "JOIN sources ON sources.id=requested.id "
+                f"WHERE sources.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+                "), stats(visible_count) AS ("
+                "SELECT COUNT(*) FROM sources WHERE notebook_id=? "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+                ") SELECT visible.id, stats.visible_count FROM stats "
+                "LEFT JOIN visible ON 1=1 ORDER BY visible.ordinal",
+                (requested_json, notebook_id, notebook_id),
             ).fetchall()
-            visible = {str(row["id"]) for row in rows}
-            total = int(rows[0]["visible_count"]) if rows else 0
-        return [source_id for source_id in requested if source_id in visible], total
+            visible = [str(row["id"]) for row in rows if row["id"] is not None]
+            total = int(rows[0]["visible_count"])
+        return visible, total
 
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         """User-facing source list — excludes Memory-derived AND knowhow-table
