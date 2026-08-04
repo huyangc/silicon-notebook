@@ -378,6 +378,85 @@ def test_reasoning_complete_knowhow_bypasses_ranked_top_n_and_model():
     assert service.knowhow_store.catalog_calls == 2
 
 
+class _BaseKgProbe:
+    """RetrievalService 的最小 candidates:只回答两个 KG 可用性问题。
+
+    `_any_base_notebook_has_kg` 复刻真实实现的形状 —— 一条跨**全部有效挂载库**的
+    mount-join EXISTS,答不了「这次勾了哪些库」。
+    """
+
+    def __init__(self, mounted, with_kg):
+        self._mounted, self._with_kg = list(mounted), set(with_kg)
+        self.notebooks = SimpleNamespace(
+            participant_notebook_ids=lambda active: [active, *self._mounted]
+        )
+
+    def _notebook_has_kg(self, notebook_id):
+        return notebook_id in self._with_kg
+
+    def _any_base_notebook_has_kg(self, _notebook_id):
+        return any(base_id in self._with_kg for base_id in self._mounted)
+
+
+def _ask_service_with_base_kg_gate():
+    """本库无图 + 挂了一个**有图**的参考库,KG 可用性走真实的 RetrievalService 闸。"""
+    from app.services.retrieval_service import RetrievalService
+
+    service = _minimal_ask_service()
+    gate = RetrievalService(
+        candidates=_BaseKgProbe(["base-1"], {"base-1"}),
+        graph=object(), community_queries=lambda: [],
+    )
+    service.candidates.has_kg = gate.has_kg
+    service.candidates.any_base_has_kg = gate.any_base_has_kg
+    return service
+
+
+def test_graph_ask_treats_an_unchecked_reference_library_as_no_kg():
+    """codex #431 R8 (P2-B):库勾选必须一路走到 KG 可用性闸。
+
+    闸本身的单测在 test_source_scope.py;这里钉的是它**真的被 ask 那条路消费到**:
+    本库自己没图、唯一带图的参考库取消勾选 ⇒ graph 路径按「无图」处理
+    (`kg_required=True` + 可操作的中文提示),而不是照常跑一轮遍历、拿一份这次
+    根本不许读的图作答。
+    """
+    from app.models.source_scope import BaseNotebookScope
+
+    service = _ask_service_with_base_kg_gate()
+    response = service.ask(
+        "nb",
+        AskRequest(
+            question="q", mode="graph",
+            base_scope=BaseNotebookScope(
+                mode="include", notebook_ids=[], narrowed=True
+            ),
+        ),
+        user_id="user",
+    )
+
+    assert response.kg_required is True
+    assert "尚未构建知识图谱" in response.conclusion
+
+
+def test_graph_ask_still_runs_when_the_kg_library_stays_checked():
+    """反向护栏:同一配置下**勾着**那个库,graph 照常遍历 —— 证明上面那条不是
+    「有 base_scope 就一律判无图」。"""
+    from app.models.source_scope import BaseNotebookScope
+
+    service = _ask_service_with_base_kg_gate()
+    response = service.ask(
+        "nb",
+        AskRequest(
+            question="q", mode="graph",
+            base_scope=BaseNotebookScope(mode="include", notebook_ids=["base-1"]),
+        ),
+        user_id="user",
+    )
+
+    assert response.kg_required is False
+    assert "Graph traversal found" in response.conclusion
+
+
 def test_reasoning_hybrid_without_kg_keeps_batch_coverage_metadata():
     service = _minimal_ask_service()
     service.knowhow_store = _EnumerableKnowhow()

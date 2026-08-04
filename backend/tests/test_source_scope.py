@@ -283,6 +283,65 @@ def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
     )
 
 
+def _notebook_with_source_count(count: int) -> NotebookSummary:
+    """NotebookSummary 携带的 counts["sources"] —— 路由更早一次 get_notebook() 的
+    **缓存**值。这些用例刻意让它与 repo 的实时来源集不一致。"""
+    return NotebookSummary(
+        id="nb", name="n", purpose="", primary_domain="", status="ready",
+        counts={"sources": count}, created_label="",
+    )
+
+
+def test_include_scope_narrowing_is_measured_against_the_live_universe():
+    """codex #431 R8 (P2-A):`include` 分支的 selected 与 universe 必须出自**同一次
+    实时查询**。
+
+    改前 universe 取 `notebook.counts["sources"]`(更早那次 get_notebook 的缓存计数),
+    selected 取客户端提交的列表 —— 两个数据源算同一个量。于是「get_notebook 之后、
+    冻结之前有一篇上传完成」时,缓存计数仍等于提交列表长度,`narrowed` 算成 False,
+    而冻结出来的 include 列表**确实**把那篇新来源排除在外:一次货真价实的收窄跑在
+    未限定模式下,私有 Memory / 会话历史 / PPR / 社区报告 / 语料画像全都照常开着。
+    """
+    resolved = _validate_source_scope(
+        # 实时查询看得见第三篇(并发上传已完成),缓存计数还停在 2。
+        _ScopeRepo(["s1", "s2", "s3"], 3),
+        _notebook_with_source_count(2),
+        SourceScope(mode="include", source_ids=["s1", "s2"]),
+    )
+    assert resolved == SourceScope(
+        mode="include", source_ids=["s1", "s2"], narrowed=True
+    )
+
+
+def test_include_scope_of_every_live_source_is_not_narrowed():
+    """反向:缓存计数**偏大**(用户在提问前刚删掉一篇)时同样以实时集合为准。
+
+    两个方向一起钉住,才证明 universe 真的换了数据源,而不是碰巧在一个方向上对了:
+    改前这一例会把「全选」判成 narrowed=True,把默认请求推进限定模式 —— 正是
+    PR#426 那条退化。
+    """
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1", "s2"], 2),
+        _notebook_with_source_count(99),
+        SourceScope(mode="include", source_ids=["s1", "s2"]),
+    )
+    assert resolved == SourceScope(
+        mode="include", source_ids=["s1", "s2"], narrowed=False
+    )
+
+
+def test_scope_membership_check_uses_the_same_read_as_the_universe():
+    """成员校验也搬到那一次实时读上:两次查询意味着 422 判据与冻结判据可能看到
+    不同的来源集合,而合并成一次之后 `selected ⊆ all_ids` 是**构造性**成立的
+    (`narrowed` 的比较因此可通约)。这里只钉住 422 行为没有被顺手改掉。"""
+    with pytest.raises(HTTPException) as exc:
+        _validate_source_scope(
+            _ScopeRepo(["s1", "s2"], 2), _notebook_with_source_count(2),
+            SourceScope(mode="include", source_ids=["s1", "gone"]),
+        )
+    assert exc.value.status_code == 422
+
+
 def test_real_narrowing_of_local_sources_is_restricted():
     """The flip side of the default-full-select fix: a genuine subset
     selection (``narrowed=True``, exactly as ``_validate_source_scope`` would
@@ -390,6 +449,147 @@ def test_collapsed_paths_agree_on_an_excluded_base_library():
         # 3) evidence_json_allowed()
         assert evidence_json_allowed("excluded-base", [{"source_id": "s1"}]) is False
         assert evidence_json_allowed("kept-base", [{"source_id": "s1"}]) is True
+
+
+class _KgProbeCandidates:
+    """RetrievalService.any_base_has_kg 需要的三个协作者,各自记账被调了几次。
+
+    `_any_base_notebook_has_kg` 模拟真实实现:一条跨**全部有效挂载库**的
+    mount-join EXISTS —— 它答不了「这次勾了的库里有没有图」,这正是被测的缺陷。
+    """
+
+    def __init__(self, *, mounted, with_kg):
+        self._mounted = list(mounted)
+        self._with_kg = set(with_kg)
+        self.mount_join_calls = 0
+        self.probed = []
+        self.notebooks = SimpleNamespace(
+            participant_notebook_ids=self._participant_notebook_ids
+        )
+
+    def _participant_notebook_ids(self, active_notebook_id):
+        # resolve_participants 的形状:首项恒为 active 本身。
+        return [active_notebook_id, *self._mounted]
+
+    def _notebook_has_kg(self, notebook_id):
+        self.probed.append(notebook_id)
+        return notebook_id in self._with_kg
+
+    def _any_base_notebook_has_kg(self, notebook_id):
+        self.mount_join_calls += 1
+        return any(base_id in self._with_kg for base_id in self._mounted)
+
+
+def _kg_gate(candidates):
+    return RetrievalService(
+        candidates=candidates, graph=object(), community_queries=lambda: []
+    )
+
+
+def test_kg_availability_ignores_an_unchecked_reference_library():
+    """codex #431 R8 (P2-B):KG 可用性闸是第六处未认库维度的地方。
+
+    本库自己没图、唯一带图的参考库被取消勾选时,旧实现仍走那条遍历**全部**挂载库
+    的 mount-join EXISTS,于是报「有图可用」:ask_service 的无图早退不触发、
+    `kg_required` 不翻真、graph 路径照常跑一整轮 —— 跑在一份这次根本不许读的图上。
+    """
+    candidates = _KgProbeCandidates(mounted=["b1"], with_kg={"b1"})
+    gate = _kg_gate(candidates)
+    with source_scope_context(
+        "nb", None,
+        BaseNotebookScope(mode="include", notebook_ids=[], narrowed=True),
+    ):
+        assert gate.any_base_has_kg("nb") is False
+    # 全库盲查那条路一次都不能走(走了就等于没收窄),也不该去探本库自己的图(R1)。
+    assert candidates.mount_join_calls == 0
+    assert candidates.probed == []
+
+
+def test_kg_availability_keeps_a_checked_reference_library():
+    """反向护栏:同样的配置下**勾着**那个库,仍判为可用 —— 证明这不是一刀切关掉。"""
+    candidates = _KgProbeCandidates(mounted=["b1"], with_kg={"b1"})
+    gate = _kg_gate(candidates)
+    with source_scope_context(
+        "nb", None, BaseNotebookScope(mode="include", notebook_ids=["b1"]),
+    ):
+        assert gate.any_base_has_kg("nb") is True
+    assert candidates.probed == ["b1"]
+    assert "nb" not in candidates.probed
+
+
+def test_kg_availability_follows_which_library_was_checked():
+    """挂两个库、只有一个有图:勾中没图的那个判不可用,勾中有图的那个判可用。
+
+    这一对把判据钉成「勾了的库里有没有图」,而不是「勾了几个库」—— 后者对
+    「多库部分勾选」这类真实配置会答错,而它恰是本条 P2 描述的场景。
+    """
+    gate_without = _kg_gate(
+        _KgProbeCandidates(mounted=["b1", "b2"], with_kg={"b2"})
+    )
+    with source_scope_context(
+        "nb", None, BaseNotebookScope(mode="include", notebook_ids=["b1"]),
+    ):
+        assert gate_without.any_base_has_kg("nb") is False
+    gate_with = _kg_gate(
+        _KgProbeCandidates(mounted=["b1", "b2"], with_kg={"b2"})
+    )
+    with source_scope_context(
+        "nb", None, BaseNotebookScope(mode="include", notebook_ids=["b2"]),
+    ):
+        assert gate_with.any_base_has_kg("nb") is True
+
+
+def test_kg_availability_reads_the_frozen_selection_not_the_live_mount_set():
+    """判据是 `base_ceiling`(提交过库维度)而不是 `base_restricted`(收窄过库维度)。
+
+    差别只在「全选」这一种形状上,而那恰恰是 P2-A 同一条竞态的镜像:全选也是一份
+    **冻结**的选择,请求进来之后新挂上的库不在其中,每个候选生产者都会把它滤掉。
+    这时若回头去问那条实时 mount-join,新库的图会被算进可用性,闸与检索当场分叉。
+    """
+    candidates = _KgProbeCandidates(
+        # 实时挂载集里已经多了一个带图的 b2(冻结之后才挂上)。
+        mounted=["b1", "b2"], with_kg={"b2"},
+    )
+    gate = _kg_gate(candidates)
+    with source_scope_context(
+        "nb", None,
+        # 冻结那一刻只挂着 b1,全选 → narrowed=False。
+        BaseNotebookScope(mode="include", notebook_ids=["b1"], narrowed=False),
+    ):
+        assert gate.any_base_has_kg("nb") is False
+    assert candidates.mount_join_calls == 0
+    assert candidates.probed == ["b1"]
+
+
+def test_kg_availability_without_a_base_scope_costs_the_same_one_query():
+    """没提交库维度时逐字回到改前:一条 mount-join EXISTS,零新增往返。
+
+    同时覆盖「只收窄了本地来源」——R1 要求库维度之外的收窄不得改变这道闸的取数
+    方式,否则一次本地勾选会顺带给每个挂载库各买一次探测。
+    """
+    candidates = _KgProbeCandidates(mounted=["b1"], with_kg={"b1"})
+    gate = _kg_gate(candidates)
+    assert gate.any_base_has_kg("nb") is True          # 无 scope 上下文
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["s1"], narrowed=True), None,
+    ):
+        assert gate.any_base_has_kg("nb") is True
+    assert candidates.mount_join_calls == 2
+    assert candidates.probed == []
+
+
+def test_kg_availability_exclude_shaped_base_scope_is_also_narrowed():
+    """`exclude` 形状只有服务层直接构造得出(API 入口一律冻结成 include),但它必须
+    同样被认。收窄发生在 `scoped_participants`/`covers_notebook` 这一个收口上,所以
+    两种形状共用同一份判据,不需要各写一遍。"""
+    candidates = _KgProbeCandidates(mounted=["b1", "b2"], with_kg={"b2"})
+    gate = _kg_gate(candidates)
+    with source_scope_context(
+        "nb", None, BaseNotebookScope(mode="exclude", notebook_ids=["b2"]),
+    ):
+        assert gate.any_base_has_kg("nb") is False
+    assert candidates.mount_join_calls == 0
+    assert candidates.probed == ["b1"]
 
 
 def test_base_scope_default_include_empty_means_no_mounted_base_participates():

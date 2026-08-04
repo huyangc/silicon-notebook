@@ -39,3 +39,34 @@ export function isAskBlocked(notebook: NotebookSummary | null): boolean {
 export function hasLocalEvidence(notebook: NotebookSummary | null): boolean {
   return notebook?.local_evidence_available === true;
 }
+
+/**
+ * 严格推理(深入分析 / 知识图谱)这一组模式**这一次**有没有图可用。
+ *
+ * 判据不再只是 `kg_ready || base_kg_available`:`base_kg_available` 是
+ * `NotebookSummary` 上的**整库聚合**字段,它回答的是「挂着的库里有没有图」,而不是
+ * 「这次勾了的库里有没有图」。把参考库整库取消勾选之后仍拿它开门,就是同一次真机
+ * 事故的镜像——界面按一个这次根本搜不到的图放行模式(codex #431 R8 P2)。
+ *
+ * 前端只收紧它**能证明**的那一种情形:一个参考库都没勾时,任何参考库的图都不参与,
+ * 所以本地无图 = 这次无图。刻意到此为止,不做更激进的推断:
+ *
+ *  * 部分勾选(挂了多个库、恰好把带图的那个取消勾了)前端**证不出来** ——
+ *    `base_kg_available` 是聚合布尔,没有逐库的图状态,而为这一格 UI 亲和度把逐库
+ *    图状态搬上浏览器要新增一个 `NotebookSummary` 字段;
+ *  * 那一格的**权威判据在后端**:`RetrievalService.any_base_has_kg` 现在按同一维度
+ *    收窄,所以前端放行、后端判无图时,graph 模式给的是「尚未构建知识图谱…」这句
+ *    可操作的话,reasoning 模式照常用 chunk/元素证据作答并如实回 `kg_required`。
+ *    换言之这里放宽的代价是一句诚实的后端回答,而收紧的代价是**藏掉一个本可用的
+ *    模式** —— 所以方向必须是「只在证得出来时才禁用」。
+ *
+ * `selectedBaseCount` 由调用方按当前挂载集与勾选状态算出(page.tsx 已有一份,
+ * 工具条与回执文案共用),这里不重复推导。
+ */
+export function strictModeKgAvailable(
+  notebook: NotebookSummary | null,
+  selectedBaseCount: number,
+): boolean {
+  if (notebook?.kg_ready) return true;
+  return !!notebook?.base_kg_available && selectedBaseCount > 0;
+}

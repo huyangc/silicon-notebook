@@ -272,7 +272,77 @@ class RetrievalService:
         return self.candidates._notebook_has_kg(notebook_id)
 
     def any_base_has_kg(self, notebook_id):
-        return self.candidates._any_base_notebook_has_kg(notebook_id)
+        """Does any reference library THIS RUN MAY SEARCH have a knowledge graph?
+
+        codex #431 R8 (P2): the underlying repository query
+        (``_any_base_notebook_has_kg``) is a single EXISTS over the mount join,
+        so it answers for EVERY mounted library -- checked or not. That made
+        this the last KG-side gate blind to the library dimension: with the
+        active notebook carrying no graph of its own and the ONLY graph-bearing
+        library unchecked, it still reported "a KG is available", so
+        ``ask_service``'s no-KG early exit did not fire, ``kg_required`` did not
+        flip, and the graph path ran a whole round over a KG that this run is
+        forbidden to read from. Deciding availability from libraries the
+        candidate producers will then filter out is the definition of a
+        misleading gate.
+
+        The narrowing goes through the two established seams rather than into
+        the SQL: ``participant_notebook_ids`` (``resolve_participants`` /
+        ``mount_sql.py`` -- the shared retrieval AND authorization predicate,
+        which a per-request checkbox must never narrow) followed by
+        ``scoped_participants`` (the consumption-boundary filter the collection
+        map and the typed enumerations already use). Same list, same predicate,
+        one filter -- so this gate can never disagree with what enumeration and
+        federated retrieval consider in scope.
+
+        R1 is preserved: only the BASE dimension is consulted. The active
+        notebook is dropped from the participant list and answered separately by
+        ``has_kg`` at both call sites, so narrowing local sources still cannot
+        touch this, and unchecking a reference library still cannot disable the
+        active notebook's own channels.
+
+        Cost. With no base scope submitted at all this is byte-identical to
+        before: one mount-join EXISTS, zero new queries. With a scope submitted
+        it becomes one bounded mount read plus at most one indexed EXISTS per
+        CHECKED library, short-circuited by ``any()`` -- and zero of the latter
+        when every library is unchecked, which is cheaper than before. That is
+        paid once per run, only on ``reasoning``/``graph`` and only when the
+        active notebook has no graph of its own (both call sites short-circuit
+        on ``has_kg`` first), against a run that then issues dozens of ANN/FTS
+        queries and several model calls.
+
+        Deliberately gated on ``base_ceiling``, not ``base_restricted``: a full
+        selection is still a FROZEN selection, so answering it from the live
+        mount join would reintroduce, on this gate, exactly the stale-universe
+        race ``_validate_source_scope`` was just fixed for (a library mounted
+        after the freeze would count toward availability while every candidate
+        producer excludes it).
+
+        NOT applied to ``RetrievalCandidates``' own overlay gates
+        (``_mix_retrieve``/``_build_chunk_retrieval_plan``): those pick a chunk
+        retrieval STRATEGY, and their KG hits are scope-filtered downstream
+        anyway, so an unchecked library costs some overlay budget there but
+        cannot reach the answer. Changing them would alter ``ChunkRetrievalPlan``
+        for chunk mode, which is a different (cost) decision from this one.
+        """
+        from app.services.source_scope import (
+            current_source_scope,
+            scoped_participants,
+        )
+
+        scope = current_source_scope()
+        if scope is None or not scope.base_ceiling:
+            return self.candidates._any_base_notebook_has_kg(notebook_id)
+        return any(
+            self.has_kg(base_id)
+            for base_id in scoped_participants(
+                self.candidates.notebooks.participant_notebook_ids(notebook_id)
+            )
+            # participant_notebook_ids leads with the active notebook, and
+            # covers_notebook() always keeps it -- this gate is about the base
+            # dimension only (R1).
+            if base_id != notebook_id
+        )
 
     def graph_is_large(self, notebook_id):
         return self.candidates._federated_graph_is_large(notebook_id)

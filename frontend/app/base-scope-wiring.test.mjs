@@ -23,6 +23,7 @@ import {
   callSitesIn,
   jsxElements,
   parseModule,
+  variableInitializersIn,
 } from "./test/semantic-source.mjs";
 
 
@@ -425,5 +426,49 @@ test("两处「检索范围」计数共用同一份文案", () => {
     summaryCalls.length,
     1,
     "page.tsx 里只应调用一次 retrievalScopeSummary —— 两处显示共用它的结果",
+  );
+});
+
+
+// 严格推理(深入分析 / 知识图谱)的可用门:`base_kg_available` 是 NotebookSummary 上的
+// **整库聚合**字段,回答的是「挂着的库里有没有图」。把参考库整库取消勾选之后还拿它
+// 开门,界面就按一个这次根本搜不到的图放行模式(codex #431 R8 P2-B)。
+//
+// ⚠ 判据是「kgAvailable 由谁算出来、算的时候有没有带上库勾选」,不是「文件里出现过
+// strictModeKgAvailable」—— 后者对**移动**变异全绿:把它调用在别处、而 kgAvailable
+// 仍写回 `kg_ready || base_kg_available`,门就原样退回改前。
+test("严格推理可用门连同参考库勾选一起算", () => {
+  const declarations = variableInitializersIn(page)
+    .filter((entry) => entry.name === "kgAvailable");
+  assert.equal(
+    declarations.length,
+    1,
+    `期望恰好一处 kgAvailable 声明,实际 ${declarations.length}`,
+  );
+
+  const initializer = declarations[0].initializer;
+  assert.match(
+    initializer,
+    /strictModeKgAvailable\(/,
+    `kgAvailable 必须由共用的 strictModeKgAvailable 算出:${initializer}`,
+  );
+  assert.match(
+    initializer,
+    /selectedBaseNotebookCount/,
+    `kgAvailable 必须带上本次的参考库勾选数,否则整库取消勾选后仍会开门:${initializer}`,
+  );
+  assert.doesNotMatch(
+    initializer,
+    /base_kg_available/,
+    "kgAvailable 不能再直接读整库聚合的 base_kg_available —— 那正是未收窄的那个字段;"
+      + `判据只能经 strictModeKgAvailable:${initializer}`,
+  );
+
+  const gateCalls = callSitesIn(page)
+    .filter((call) => call.target === "strictModeKgAvailable");
+  assert.equal(
+    gateCalls.length,
+    1,
+    "page.tsx 只应算一次严格推理可用门 —— 第二份必然与第一份漂移",
   );
 });

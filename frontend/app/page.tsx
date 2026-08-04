@@ -174,7 +174,11 @@ import {
   intentUnderstoodStep,
   replaceLastIntentStep,
 } from "./ask-intent-trace";
-import { hasLocalEvidence, isAskBlocked } from "./ask-availability";
+import {
+  hasLocalEvidence,
+  isAskBlocked,
+  strictModeKgAvailable,
+} from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
@@ -2323,7 +2327,12 @@ export default function Home() {
     if (chatMode === "ask" && !wasAsk) revalidateAskAvailability();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatMode]);
-  const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
+  // 参考库整库取消勾选后,`base_kg_available`(整库聚合字段)不能再单独开门 ——
+  // 判据连同本次的库勾选一起算,真源与理由见 ask-availability.strictModeKgAvailable。
+  const kgAvailable = strictModeKgAvailable(
+    currentNotebook,
+    selectedBaseNotebookCount,
+  );
   const currentKgBuildView = kgBuildPresentation(
     currentNotebook?.kg_build,
     currentNotebook?.kg_pending_sources ?? 0,

@@ -65,30 +65,58 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
     also depends on the frozen base-library scope (see ``_validate_base_scope``)
     and is combined once in ``_require_non_empty_scope``, which Ask and the
     report entry points each call.
+
+    codex #431 R8 (P2): membership, the frozen selection AND the universe it is
+    measured against all come from ONE live read. The ``include`` branch used to
+    take its universe from ``notebook.counts["sources"]`` -- a number cached on
+    the summary the route loaded earlier -- while its selection came from the
+    client's list. Two different sources for one comparison is a bug generator,
+    and this one is reachable: an upload that completes between ``get_notebook``
+    and here leaves the cached count equal to the submitted list's length, so
+    ``narrowed`` computes False while the frozen include list demonstrably
+    EXCLUDES the new source. A genuinely narrowed run would then keep private
+    Memory, conversation history, PPR, community reports and the corpus profile
+    switched on -- the exact "restricted" protections narrowing exists to apply.
+
+    Round trips do not go up, because the one read also subsumes the membership
+    check that used to be its own query:
+
+    * ``exclude`` + [] (the browser's default "everything checked" payload, and
+      the hot path): 1 before -- ``visible_source_ids`` short-circuits on the
+      empty list -- and 1 now.
+    * ``exclude`` + ids (the browser's partial-narrowing payload): 2 before,
+      1 now.
+    * ``include`` + ids: 1 before, 1 now (a whole-notebook id read instead of a
+      batched subset read -- the same shape the ``exclude`` default already
+      pays on every request).
+    * ``include`` + [] ("clear all", and the default payload on a notebook with
+      zero visible sources): 0 before, 1 now. The only increase, and it is
+      unavoidable: "did selecting nothing narrow anything?" is exactly the
+      question the stale cached count answers wrongly.
     """
     if scope is None:
         return None
-    valid = repo.visible_source_ids(notebook.id, scope.source_ids)
+    all_ids = repo.all_visible_source_ids(notebook.id)
+    universe = set(all_ids)
+    valid = [
+        source_id for source_id in scope.source_ids if source_id in universe
+    ]
     if valid != scope.source_ids:
         raise user_error(422, "检索范围包含不属于当前笔记本的来源")
     if scope.mode == "include":
+        # Provably a subset of ``all_ids``: the membership check above rejected
+        # the request otherwise. So ``len(selected) <= len(all_ids)`` holds and
+        # the comparison below is commensurable by construction.
         selected = list(scope.source_ids)
-        # counts["sources"] is visible_source_count -- the same predicate
-        # all_visible_source_ids uses -- and rides along on the summary the
-        # route already loaded, so measuring "did this narrow anything?" costs
-        # no extra round trip (efficiency is a first-class constraint here).
-        universe = int(notebook.counts.get("sources", 0))
     else:
         excluded = set(scope.source_ids)
-        all_ids = repo.all_visible_source_ids(notebook.id)
         selected = [
             source_id for source_id in all_ids if source_id not in excluded
         ]
-        universe = len(all_ids)
     # Recomputed unconditionally: a client-supplied `narrowed` is never trusted.
     return SourceScope(
         mode="include", source_ids=selected,
-        narrowed=len(selected) < universe,
+        narrowed=len(selected) < len(all_ids),
     )
 
 
@@ -252,6 +280,15 @@ def _scope_receipt(
     is ``visible_source_count`` -- ``all_visible_source_ids`` counted under an
     identical predicate -- so ``selected`` and ``total`` are commensurable
     (see ``_require_non_empty_scope``).
+
+    Deliberately keeps reading that cached count even though
+    ``_validate_source_scope`` now takes its own universe from a live read
+    (codex #431 R8 P2): a concurrent upload can make this ``total`` lag the
+    frozen scope by one, and for a DISPLAY line that is a tolerable staleness,
+    whereas ``narrowed`` is a GATE -- getting it wrong leaves a narrowed run
+    with private Memory and PPR switched on. Different consequence, different
+    price worth paying. Re-reading here would add a second whole-notebook id
+    read per request to restate a sentence the user reads once.
 
     Both dimensions are read through their ``mode``. Every route caller hands
     over the frozen include ceiling, so the exclude branches are unreachable
