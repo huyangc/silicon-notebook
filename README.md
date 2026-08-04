@@ -82,7 +82,7 @@ npm run start
 npm run stop
 ```
 
-`npm run start` installs backend and locked frontend dependencies, builds in the foreground, launches both services as terminal-independent background processes, waits for backend readiness and frontend HTTP access, then exits. Logs remain under `.local/logs/`; use `npm run stop` to stop the services. Prebuilt deployments may set `SKIP_INSTALL=1`.
+`npm run start` installs backend and locked frontend dependencies, builds in the foreground, launches both services as terminal-independent background processes, and then exits without checking readiness. Logs remain under `.local/logs/`; verify `/api/ready` yourself and use `npm run stop` to stop the services. Prebuilt deployments may set `SKIP_INSTALL=1`.
 
 For a self-contained target with no npm/node or root access, build an offline bundle with `bash scripts/pack.sh` and follow [packaging/DEPLOY.md](./packaging/DEPLOY.md).
 

@@ -159,16 +159,13 @@ npm run stop
 `python -m pip install -r backend/requirements.txt` 把后端依赖安装到 `PYTHON_BIN`
 所在环境，再用 `npm ci --prefix frontend` 按 lockfile 重建前端依赖树。然后在前台
 完成 `next build`，并用 `nohup` 且脱离标准输入的方式后台启动
-`next start` 与单 worker Uvicorn，两者日志都落在 `.local/logs/`。命令会用
-`curl` 轮询后端 `/api/ready`
-(必须 `ready=true`)和前端首页；两者连续两次通过且本次进程仍存活后，
-`npm run start` 成功退出，之后可直接关掉 terminal。若进程提前退出、就绪超时或
-在成功前被中断，脚本会同时向本次两个子进程发 SIGTERM，最多等待
-`START_CLEANUP_GRACE_SECONDS`(默认 10 秒)，对残留进程发 SIGKILL 并 `wait`
-回收后才返回非零。默认就绪超时为 1800 秒，便于大库完成启动预加载；
-可用正整数 `START_TIMEOUT_SECONDS` 覆盖。环境需要 `curl` 以及
+`next start` 与单 worker Uvicorn，两者日志都落在 `.local/logs/`。
+两个脱离 terminal 的进程拉起后，`npm run start` 立即退出，不轮询后端 readiness
+或前端 HTTP；运维方需自行校验 `/api/ready` 和前端。两个子进程完成交接前若被中断，
+脚本会同时发 SIGTERM，最多等待 `START_CLEANUP_GRACE_SECONDS`(默认 10 秒)，
+对残留进程发 SIGKILL 并 `wait` 回收。环境需要
 `ss` / `lsof` / `fuser` 之一；目标端口已被占用时会在安装依赖前拒绝，
-即使当前用户看不到监听器 PID 也不例外，避免把旧监听器的响应误判为本次启动成功。
+即使当前用户看不到监听器 PID 也不例外，避免新进程绑定失败后仍由旧服务占着端口。
 后台服务用 `npm run stop` 停止。
 已同时预装两端依赖的镜像可设 `SKIP_INSTALL=1`；该模式下若缺少
 `frontend/node_modules/.bin/next`，仍会在 build 前直接报错，不会带病继续。
