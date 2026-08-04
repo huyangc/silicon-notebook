@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # silicon-notebook 生产启动:前端 build + start,后端单进程 uvicorn。
 #
-#   npm run start          后台启动两个服务,等待就绪后退出
+#   npm run start          后台启动两个服务后立即退出
 #   SKIP_INSTALL=1 npm run start 跳过前后端依赖安装(镜像已预装时用)
 #   SKIP_BUILD=1 npm run start   跳过 `next build`(镜像/CI 已预构建时用)
 #
 # 环境变量:PYTHON_BIN BACKEND_HOST PORT FRONTEND_PORT SKIP_INSTALL SKIP_BUILD
-#              START_TIMEOUT_SECONDS(默认 1800,允许大库预加载)
-#              START_CLEANUP_GRACE_SECONDS(默认 10,失败启动的 SIGTERM 宽限)
+#              START_CLEANUP_GRACE_SECONDS(默认 10,启动脚本中断时的 SIGTERM 宽限)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -103,13 +102,8 @@ source "$ROOT_DIR/scripts/autotune.sh"
 BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
-START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-1800}"
 START_CLEANUP_GRACE_SECONDS="${START_CLEANUP_GRACE_SECONDS:-10}"
 
-if [[ ! "$START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-  echo "错误: START_TIMEOUT_SECONDS 必须是正整数。" >&2
-  exit 2
-fi
 if [[ ! "$START_CLEANUP_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "错误: START_CLEANUP_GRACE_SECONDS 必须是正整数。" >&2
   exit 2
@@ -122,13 +116,8 @@ if [[ "$BACKEND_HOST" != "127.0.0.1" && "$BACKEND_HOST" != "localhost" && "$BACK
   fi
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo "错误: npm run start 需要 curl 检查前后端是否已就绪。" >&2
-  exit 1
-fi
-
-# 在拉起新进程前拒绝占用中的端口，避免将旧服务的 curl 响应误认为
-# 本次启动成功。生产目标 Ubuntu 有 ss，macOS 回落到 lsof。
+# 在拉起新进程前拒绝占用中的端口，避免新进程绑定失败却留下旧服务。
+# 生产目标 Ubuntu 有 ss，macOS 回落到 lsof。
 listeners() {
   local port="$1" rows pids
   if command -v ss >/dev/null 2>&1; then
@@ -215,67 +204,9 @@ cd "$ROOT_DIR/frontend"
   >>"$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
 
-case "$BACKEND_HOST" in
-  0.0.0.0|'*') BACKEND_PROBE_HOST="127.0.0.1" ;;
-  ::|::1) BACKEND_PROBE_HOST="[::1]" ;;
-  *) BACKEND_PROBE_HOST="$BACKEND_HOST" ;;
-esac
-BACKEND_READY_URL="http://${BACKEND_PROBE_HOST}:${BACKEND_PORT}/api/ready"
-FRONTEND_READY_URL="http://127.0.0.1:${FRONTEND_PORT}/"
-
-backend_ready() {
-  curl --noproxy '*' --fail --silent --show-error --max-time 3 "$BACKEND_READY_URL" 2>/dev/null \
-    | "$PYTHON_BIN" -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("ready") is True else 1)' \
-      2>/dev/null
-}
-
-frontend_ready() {
-  curl --noproxy '*' --fail --silent --show-error --max-time 3 --output /dev/null "$FRONTEND_READY_URL" 2>/dev/null
-}
-
 echo "backend  : http://${BACKEND_HOST}:${BACKEND_PORT}   (PID $BACKEND_PID, log $BACKEND_LOG)"
 echo "frontend : http://0.0.0.0:${FRONTEND_PORT}   (PID $FRONTEND_PID, log $FRONTEND_LOG)"
 echo "(the backend's first log line prints the resolved absolute db/storage/log paths — check it if unsure which .local a launch is using)"
-echo "waiting for readiness (up to ${START_TIMEOUT_SECONDS}s):"
-echo "  curl --fail $BACKEND_READY_URL"
-echo "  curl --fail $FRONTEND_READY_URL"
-
-START_DEADLINE=$((SECONDS + START_TIMEOUT_SECONDS))
-START_POLLS=0
-while [[ "$SECONDS" -lt "$START_DEADLINE" ]]; do
-  if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-    echo "backend process exited before readiness; see $BACKEND_LOG" >&2
-    exit 1
-  fi
-  if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
-    echo "frontend process exited before readiness; see $FRONTEND_LOG" >&2
-    exit 1
-  fi
-
-  if backend_ready && frontend_ready; then
-    # Require a second successful probe after one interval so a conflicting or
-    # immediately-crashing child cannot borrow an older listener's response.
-    sleep "${_SCRIPT_TEST_START_POLL_INTERVAL_SECONDS:-1}"
-    if kill -0 "$BACKEND_PID" 2>/dev/null \
-      && kill -0 "$FRONTEND_PID" 2>/dev/null \
-      && backend_ready \
-      && frontend_ready; then
-      trap - EXIT INT TERM HUP
-      echo "silicon-notebook is ready; background services will keep running after this terminal closes."
-      echo "stop them with: npm run stop"
-      exit 0
-    fi
-  fi
-
-  START_POLLS=$((START_POLLS + 1))
-  if [[ -n "${_SCRIPT_TEST_START_MAX_POLLS:-}" \
-    && "$START_POLLS" -ge "${_SCRIPT_TEST_START_MAX_POLLS}" ]]; then
-    break
-  fi
-  sleep "${_SCRIPT_TEST_START_POLL_INTERVAL_SECONDS:-1}"
-done
-
-echo "startup timed out after ${START_TIMEOUT_SECONDS}s; cleaning up this launch." >&2
-echo "backend log: $BACKEND_LOG" >&2
-echo "frontend log: $FRONTEND_LOG" >&2
-exit 1
+trap - EXIT INT TERM HUP
+echo "silicon-notebook background processes were launched; readiness is not checked by this command."
+echo "stop them with: npm run stop"

@@ -181,17 +181,15 @@ npm run stop
 recreates the locked frontend dependency tree with `npm ci --prefix frontend`. It completes
 `next build` in the foreground, then launches `next start` and the single-worker Uvicorn
 backend under `nohup`, with stdin detached and both logs written under `.local/logs/`.
-The command polls the backend's
-`/api/ready` document with `curl` (requiring `ready=true`) and curls the frontend root;
-after both checks pass twice while both launched PIDs remain alive, it exits successfully.
-The services therefore survive closing the terminal. A process exit, readiness timeout,
-or interruption before success sends SIGTERM to both launched children together, waits the
-bounded `START_CLEANUP_GRACE_SECONDS` (default 10 seconds), SIGKILLs any survivor, reaps both,
-and returns non-zero. The default readiness timeout is 1,800 seconds so large-library startup
-preloading can finish; override it with a positive integer `START_TIMEOUT_SECONDS`. `curl`
-plus one of `ss`, `lsof`, or `fuser` is required. Occupied target ports fail before dependency
+The command exits immediately after launching both detached processes; it does not poll backend
+readiness or frontend HTTP access. The services therefore survive closing the terminal, and the
+operator must verify `/api/ready` and the frontend separately. An interruption before both
+children are handed off sends SIGTERM to both launched children together, waits the bounded
+`START_CLEANUP_GRACE_SECONDS` (default 10 seconds), SIGKILLs any survivor, and reaps both.
+One of `ss`, `lsof`, or `fuser` is required. Occupied target ports fail before dependency
 installation even when the current user cannot see the listener PID, so an old listener cannot
-be mistaken for this run. Use `npm run stop` for the detached services. Prebuilt images that already
+hide a bind failure in the newly launched process. Use `npm run stop` for the detached services.
+Prebuilt images that already
 contain both dependency sets may set `SKIP_INSTALL=1`; with that escape hatch, a missing
 `frontend/node_modules/.bin/next` still fails before build rather than silently continuing.
 

@@ -123,7 +123,7 @@ notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 
 ### 2.6 生产 DFX 诊断边界
 
 生产诊断目标是 Ubuntu 24.04 上从仓库根执行 `npm run start` 的双服务形态，后端保持单
-Uvicorn worker。它是内部基础设施，不新增前端 UI 或 API。卡顿现场的主路径是在操作仍然卡住时
+Uvicorn worker。`npm run start` 只拉起脱离 terminal 的前后端进程就退出，不负责 readiness/HTTP 校验。它是内部基础设施，不新增前端 UI 或 API。卡顿现场的主路径是在操作仍然卡住时
 运行 `python3 scripts/diag.py incident`；自动发现不能唯一选中仓库范围内的生产 Uvicorn 进程时，
 才用 `--pid <backend-pid>` 绑定仍在运行的 worker，不能先重启再采集。
 
