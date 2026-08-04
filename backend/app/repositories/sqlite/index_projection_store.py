@@ -200,9 +200,11 @@ class IndexProjectionStore:
                 visible.update(row["id"] for row in rows)
         return [source_id for source_id in source_ids if source_id in visible]
 
-    def scope_source_ids(self, notebook_id: str) -> "tuple[List[str], List[str]]":
+    def scope_source_ids(
+        self, notebook_id: str, owner_id: str
+    ) -> "tuple[List[str], List[str]]":
         """``(visible imported source ids, hidden projection source ids)``,
-        each in stable id order.
+        each in stable id order.  The hidden half is scoped to ``owner_id``.
 
         Source checkbox exclusions are normalized to an explicit allow-list at
         the HTTP boundary.  That one bounded list then follows the background
@@ -216,14 +218,42 @@ class IndexProjectionStore:
         would double the round trips on the hottest scope path — the browser's
         default "everything checked" request — to answer one question about one
         table.
+
+        codex #431 R10 (P1): the hidden half is NOT uniform.  **Knowhow**
+        projection sources are notebook-wide content — every member reads the
+        table itself, so every member's ceiling admits them.  A **Memory**
+        projection source belongs to ONE user: ``memory_items.created_by`` is
+        the predicate every other Memory path already uses (``MemoryStore
+        .memory_retrieval_rows``' ``m.created_by=?``, ``memory_for_user``,
+        ``SourceStore.source_change_signal_rows``' unconditional exclusion of
+        Memory from typed-collection listings).  Without this filter, a shared
+        notebook's default non-narrowed request froze EVERY member's Memory
+        projection source into the requesting user's ceiling, and the
+        Memory-derived elements and KG objects those sources own then became
+        reachable through ordinary candidate retrieval and through the
+        whole-graph/PPR channels a non-narrowed run re-enables.
+
+        The filter is in the SQL, not on the result, for two reasons: another
+        member's Memory source ids never enter this process at all, and a
+        later edit cannot drop a result-side ``if`` and silently reopen the
+        leak.  It costs no extra round trip and no extra access path either:
+        ``s.source_type <> 'memory'`` short-circuits the ``EXISTS`` for every
+        ordinary and Knowhow row, so the primary-key probe into
+        ``memory_items`` fires only for rows that are Memory projections
+        (bounded by the notebook's confirmed-Memory count via
+        ``idx_sources_memory_id``).  A Memory source whose origin row is gone
+        fails the ``EXISTS`` and drops out — fail closed on an orphan.
         """
         visible: List[str] = []
         hidden: List[str] = []
         with self.connect() as db:
             rows = db.execute(
-                "SELECT id, source_type FROM sources WHERE notebook_id=? "
-                "ORDER BY id",
-                (notebook_id,),
+                "SELECT s.id, s.source_type FROM sources s "
+                "WHERE s.notebook_id=? AND (s.source_type <> 'memory' OR EXISTS ("
+                "SELECT 1 FROM memory_items m "
+                "WHERE m.id = s.memory_id AND m.created_by = ?)) "
+                "ORDER BY s.id",
+                (notebook_id, owner_id),
             ).fetchall()
         for row in rows:
             bucket = (

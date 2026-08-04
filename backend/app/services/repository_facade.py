@@ -1520,10 +1520,16 @@ class RepositoryFacade:
         """Return the requested ids that are visible imported sources of notebook."""
         return self._runtime.index_projections.visible_source_ids(notebook_id, source_ids)
 
-    def scope_source_ids(self, notebook_id: str) -> "tuple[List[str], List[str]]":
+    def scope_source_ids(
+        self, notebook_id: str, owner_id: str
+    ) -> "tuple[List[str], List[str]]":
         """``(visible imported source ids, hidden projection source ids)`` for
-        the retrieval-scope freeze — one query, both partitions."""
-        return self._runtime.index_projections.scope_source_ids(notebook_id)
+        the retrieval-scope freeze — one query, both partitions.  ``owner_id``
+        scopes the hidden half: Knowhow projections are notebook-wide, a
+        Memory projection belongs only to the user who created it."""
+        return self._runtime.index_projections.scope_source_ids(
+            notebook_id, owner_id
+        )
 
     def visible_source_count(self, notebook_id: str) -> int:
         return self._runtime.source_store.visible_document_count(notebook_id)

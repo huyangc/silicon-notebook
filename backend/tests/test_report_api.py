@@ -1044,7 +1044,10 @@ def test_library_only_scope_never_becomes_restricted_across_persistence(
     assert upload.status_code == 200, upload.text
     from app.api.deps import repository as _repo_for_sources
 
-    assert _repo_for_sources().scope_source_ids(nb_id)[0], "本地来源必须真的非空"
+    _sources_repo = _repo_for_sources()
+    assert _sources_repo.scope_source_ids(
+        nb_id, _sources_repo.current_user().id
+    )[0], "本地来源必须真的非空"
     rid = client.post(
         f"/api/notebooks/{nb_id}/reports",
         json={
@@ -1103,7 +1106,10 @@ def test_report_create_rejects_a_base_only_submission_on_a_library_only_notebook
     nb_id, _base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
     from app.api.deps import repository
 
-    assert repository().scope_source_ids(nb_id)[0] == [], "前提:零本地来源"
+    _scope_repo = repository()
+    assert _scope_repo.scope_source_ids(
+        nb_id, _scope_repo.current_user().id
+    )[0] == [], "前提:零本地来源"
 
     response = client.post(
         f"/api/notebooks/{nb_id}/reports",

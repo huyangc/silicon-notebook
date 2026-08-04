@@ -64,6 +64,12 @@ class SourceScope(BaseModel):
     # existing "收窄来源维度时隐藏 Memory/Knowhow 投影证据不参与" contract true
     # by construction rather than by a second consumption-side condition.
     #
+    # The two kinds inside it are scoped differently (codex #431 R10 P1):
+    # Knowhow projections are notebook-wide and reach every member's ceiling,
+    # while a Memory projection is private to its creator and only ever enters
+    # that user's ceiling. The split is enforced in ``scope_source_ids``' SQL,
+    # so this list never carries another member's Memory source id.
+    #
     # Clients may send this field; the API boundary ALWAYS recomputes and
     # overwrites it, exactly as it does for ``narrowed``.
     #

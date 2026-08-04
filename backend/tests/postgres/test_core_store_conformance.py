@@ -1896,3 +1896,89 @@ def test_postgres_catalog_candidate_paging_and_id_lookup(request):
     assert catalog.mark_candidates_applied(job["id"], wanted) == 2
     assert catalog.candidate_counts(job["id"])["applied"] == 2
     assert catalog.mark_candidates_applied(job["id"], wanted) == 0  # state-scoped
+
+
+def test_scope_source_ids_partitions_and_scopes_memory_to_its_owner(
+    core_stores: CoreStores, postgres_settings
+):
+    """``IndexProjectionStore.scope_source_ids`` — the retrieval-scope freeze's
+    single read, in PostgreSQL.
+
+    Same contract as the SQLite adapter (codex #431 R10 P1): one query returns
+    both partitions, the visible half is the checkbox universe, and the hidden
+    half is NOT uniform — Knowhow projection sources are notebook-wide and
+    reach every member, while a Memory projection source belongs to its
+    ``memory_items.created_by`` and only that user's ceiling may admit it. A
+    backend that dropped the owner predicate would freeze one member's private
+    Memory into another member's non-narrowed run, where whole-graph/PPR and
+    ordinary candidate retrieval could then read it.
+    """
+    from app.repositories.postgres.index_projection_store import (
+        IndexProjectionStore as PostgresIndexProjectionStore,
+    )
+
+    alice = core_stores.identity.create_user("s00123456", "password-12")
+    bob = core_stores.identity.create_user("s00123457", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Scope owners"), alice.id
+    )
+    core_stores.sharing.add_member(notebook_id, bob.id)
+
+    def insert(source_id: str, source_type: str, memory_id: str = "") -> None:
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="active",
+            parse_status="parsed",
+            file_name="",
+            file_path="",
+            file_size=0,
+            file_hash="",
+            summary="",
+            doc_type="",
+            memory_id=memory_id,
+        )
+
+    insert("src-scope-visible", "markdown")
+    insert("src-scope-knowhow", "knowhow")
+    for user, memory_id, source_id in (
+        (alice, "mem-scope-alice", "src-scope-memory-alice"),
+        (bob, "mem-scope-bob", "src-scope-memory-bob"),
+    ):
+        _write_sql(
+            core_stores,
+            "INSERT INTO memory_items"
+            "(id,notebook_id,created_by,agent_profile_id,source_answer_id,"
+            "origin,status,promotion_state,title,content_md,tags_json,"
+            "embedding_status,embedding_error,created_at,updated_at) "
+            "VALUES (%s,%s,%s,NULL,NULL,'ask_answer','confirmed','none',"
+            "%s,%s,'[]'::jsonb,'pending','',%s,%s)",
+            (memory_id, notebook_id, user.id, "private", "private body", NOW, NOW),
+        )
+        insert(source_id, "memory", memory_id=memory_id)
+
+    projection = PostgresIndexProjectionStore(
+        postgres_settings,
+        connect=core_stores.database.connect,
+        in_batches=lambda values: [list(values)],
+        ent_chunk_map=lambda _notebook_id: {},
+        mention_extra_edges=lambda _notebook_id: [],
+        vector_matrix=lambda *_args, **_kwargs: ([], []),
+    )
+
+    visible, hidden = projection.scope_source_ids(notebook_id, bob.id)
+    assert visible == ["src-scope-visible"]
+    assert "src-scope-memory-alice" not in hidden
+    assert set(hidden) == {"src-scope-knowhow", "src-scope-memory-bob"}
+
+    visible_alice, hidden_alice = projection.scope_source_ids(notebook_id, alice.id)
+    assert visible_alice == ["src-scope-visible"]
+    assert "src-scope-memory-bob" not in hidden_alice
+    assert set(hidden_alice) == {"src-scope-knowhow", "src-scope-memory-alice"}
+
+    # An unknown identity gets the shared Knowhow projection and no Memory.
+    assert projection.scope_source_ids(notebook_id, "user-nobody") == (
+        ["src-scope-visible"], ["src-scope-knowhow"]
+    )

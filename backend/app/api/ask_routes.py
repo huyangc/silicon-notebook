@@ -114,10 +114,29 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
     Round trips are unchanged: ``scope_source_ids`` returns both partitions
     from the single read that already answered the membership/universe
     question, so the hot path is still 1.
+
+    codex #431 R10 (P1): the hidden half is read FOR THE REQUESTING USER.
+    Knowhow projection sources are notebook-wide (every member reads the table
+    itself), but a Memory projection source belongs to one user — the same
+    ``memory_items.created_by`` predicate the Memory retriever and every other
+    Memory path already use. Read without it, a shared notebook's default
+    non-narrowed request froze every OTHER member's Memory projection source
+    into this run's ceiling, and the elements and KG objects those sources own
+    then became reachable through ordinary candidate retrieval and through the
+    whole-graph/PPR channels a non-narrowed run re-enables. The identity is
+    taken here rather than passed in by each caller so there is exactly one
+    definition of "whose Memory may enter a ceiling" and no call site can
+    forget it; ``current_user()`` reads the request ContextVar, so it costs no
+    round trip. For a report re-frozen at confirm/generate that identity is
+    whoever is driving THAT phase — which can differ from the report's author
+    in a shared notebook, and is the fail-closed direction either way (a user
+    only ever gets their own Memory).
     """
     if scope is None:
         return None
-    all_ids, hidden_ids = repo.scope_source_ids(notebook.id)
+    all_ids, hidden_ids = repo.scope_source_ids(
+        notebook.id, repo.current_user().id
+    )
     universe = set(all_ids)
     valid = [
         source_id for source_id in scope.source_ids if source_id in universe

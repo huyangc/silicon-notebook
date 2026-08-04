@@ -35,6 +35,14 @@ class ActiveSourceScope:
     # membership test below is a no-op. Keeping the condition at the freeze
     # point rather than repeating it here means the two can never disagree.
     #
+    # The boundary also decides WHOSE hidden sources these are, and the two
+    # kinds are not alike (codex #431 R10 P1): Knowhow projections are
+    # notebook-wide, so every member's ceiling admits them, while a Memory
+    # projection belongs to its ``memory_items.created_by`` and only that
+    # user's ceiling may admit it. That filter lives in the SQL of
+    # ``scope_source_ids`` -- another member's Memory source id never reaches
+    # this dataclass -- so nothing here needs (or may add) a second owner test.
+    #
     # Empty for direct service-layer construction, which keeps the pre-field
     # behavior byte-for-byte.
     hidden_source_ids: frozenset[str] = frozenset()
