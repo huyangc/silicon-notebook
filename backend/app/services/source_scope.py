@@ -225,7 +225,10 @@ def source_scope_context(
         hidden_source_ids=frozenset(
             str(value) for value in (raw or {}).get("hidden_source_ids") or []
         ),
-        owner_id=str(raw.get("owner_id") or ""),
+        # (raw or {}):库维度加入后 raw 可以为 None（只提交了 base_scope）。
+        # master 那行写 raw.get(...) 在它自己的前提下成立——它没有第二个维度,
+        # 到这里 raw 必然非空。合并把两边代码放到一起,前提却没跟着合并。
+        owner_id=str((raw or {}).get("owner_id") or ""),
         base_mode=str((base_raw or {}).get("mode") or "exclude"),
         base_notebook_ids=frozenset(
             str(value) for value in (base_raw or {}).get("notebook_ids") or []

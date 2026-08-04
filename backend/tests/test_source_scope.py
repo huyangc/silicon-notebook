@@ -211,7 +211,10 @@ def test_validate_source_scope_no_longer_raises_409_on_its_own():
         _ScopeRepo([], 0), _notebook(),
         SourceScope(mode="include", source_ids=[]),
     )
-    assert resolved == SourceScope(mode="include", source_ids=[], narrowed=False)
+    # PrivateAttr `_hidden_source_ids` 参与 == 比较,期望值无从构造它;比公开契约面
+    assert resolved.model_dump() == SourceScope(
+        mode="include", source_ids=[], narrowed=False
+    ).model_dump()
 
 
 def test_empty_local_scope_requires_a_mounted_base():
