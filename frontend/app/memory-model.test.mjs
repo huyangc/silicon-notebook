@@ -6,6 +6,7 @@ import {
   answerIdBatches,
   canEditMemory,
   memoryListPath,
+  memoryCitationReferences,
   memoryOriginMeta,
   memoryProvenanceRows,
   memoryStatusMeta,
@@ -386,6 +387,54 @@ test("非传输 memory 的 ask-answer 来源渲染保持不变（回归闸）", 
     ["依据", "有据"],
     ["引用", "1 条"],
   ]);
+});
+
+test("Ask Memory 保留可展示和可定位的完整引用", () => {
+  const refs = memoryCitationReferences({
+    origin: "ask_answer",
+    provenance: {
+      citations: [{
+        source_id: "source-1",
+        element_id: "element-7",
+        label: "Loop Stability Handbook · 第 3 页",
+        source_file_name: "loop_stability.pdf",
+        location_label: "第 3 页",
+        quoted_span: "The compensated loop remains stable.",
+      }],
+    },
+  });
+  assert.deepEqual(refs, [{
+    sourceId: "source-1",
+    elementId: "element-7",
+    sourceTitle: "Loop Stability Handbook",
+    sourceFileName: "loop_stability.pdf",
+    locationLabel: "第 3 页",
+    quotedSpan: "The compensated loop remains stable.",
+    archival: false,
+  }]);
+});
+
+test("传输后的 Ask Memory 从最深 provenance 恢复引用并标为仅存档", () => {
+  const refs = memoryCitationReferences({
+    origin: "ask_answer",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-b",
+        source_provenance: {
+          imported_from: {
+            notebook_id: "nb-a",
+            source_provenance: {
+              citations: [{ label: "Original", quoted_span: "archived quote" }],
+            },
+          },
+        },
+      },
+    },
+  });
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].sourceTitle, "Original");
+  assert.equal(refs[0].quotedSpan, "archived quote");
+  assert.equal(refs[0].archival, true);
 });
 
 test("confirm body includes extract_kg when the notebook KG is eligible", () => {

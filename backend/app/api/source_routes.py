@@ -21,6 +21,7 @@ from app.models.identity import UserProfile
 from app.models.sources import (
     AddUrlSourcesRequest,
     AddUrlSourcesResult,
+    PaginatedSourceElements,
     PaginatedSources,
     ReparseSourcesRequest,
     RepairScheduledResult,
@@ -514,6 +515,26 @@ def source_elements(source_id: str, user: UserProfile = Depends(get_current_user
         raise HTTPException(status_code=404, detail="Source not found")
 
 
+@router.get(
+    "/sources/{source_id}/elements-page", response_model=PaginatedSourceElements
+)
+def source_elements_page(
+    source_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(40, ge=1, le=100),
+    anchor_element_id: str = Query("", max_length=200),
+    user: UserProfile = Depends(get_current_user),
+) -> PaginatedSourceElements:
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):
+        raise HTTPException(status_code=404, detail="Source not found")
+    try:
+        return source_repository().source_elements_page(
+            source_id, offset, limit, anchor_element_id
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+
 # --- 参与集内的代理读取(挂载参考库的来源详情 / 元素 / 图片资产)-------------
 #
 # 「挂载公共参考库 ≠ 获得该库的直接成员权限」是红线:上面那对 `/sources/{id}` 端点
@@ -591,6 +612,27 @@ def source_elements_in_scope(notebook_id: str, source_id: str) -> List[SourceEle
     _participant_scoped_source(notebook_id, source_id)
     try:
         return source_repository().source_elements(source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+
+@router.get(
+    "/notebooks/{notebook_id}/sources/{source_id}/elements-page",
+    response_model=PaginatedSourceElements,
+    dependencies=[Depends(require_notebook_read)],
+)
+def source_elements_page_in_scope(
+    notebook_id: str,
+    source_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(40, ge=1, le=100),
+    anchor_element_id: str = Query("", max_length=200),
+) -> PaginatedSourceElements:
+    _participant_scoped_source(notebook_id, source_id)
+    try:
+        return source_repository().source_elements_page(
+            source_id, offset, limit, anchor_element_id
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 

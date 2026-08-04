@@ -26,6 +26,7 @@ import {
   fromAnswerMemoryBody,
   memoryListPath,
   memoryEvidenceRows,
+  memoryCitationReferences,
   memoryOriginMeta,
   memoryPromotionLabel,
   memoryPromotionPath,
@@ -471,6 +472,7 @@ export function MemoryPanel({
   initialNotebookId,
   initialStatus,
   initialMemoryId,
+  onOpenSource,
 }: {
   scope: MemoryScope;
   notebookId: string | null;
@@ -490,6 +492,7 @@ export function MemoryPanel({
   initialNotebookId?: string | null;
   initialStatus?: MemoryStatus | null;
   initialMemoryId?: string | null;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   // 晋升目标三态按记忆各自的 notebook 解析，两个 scope 共用同一套
   // resolvePromotionTarget 判定(不另写一份规则)。notebook 视图里所有记忆
@@ -1118,6 +1121,7 @@ export function MemoryPanel({
             const busy = busyId === memory.id;
             const promotionTarget = promotionTargetFor(memory);
             const provenanceRows = memoryProvenanceRows(memory);
+            const citationReferences = memoryCitationReferences(memory);
             const evidenceRows = memoryEvidenceRows(memory);
             const isExpanded = expandedIds.has(memory.id);
             const detailBlocks = (
@@ -1130,6 +1134,33 @@ export function MemoryPanel({
                         <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
                       ))}
                     </dl>
+                  </details>
+                )}
+                {citationReferences.length > 0 && (
+                  <details className="memory-provenance memory-citations">
+                    <summary><ChevronDown size={14} /> 原文引用（{citationReferences.length}）</summary>
+                    <div className="memory-citation-list">
+                      {citationReferences.map((citation, index) => (
+                        <article key={`${memory.id}-citation-${citation.sourceId}-${citation.elementId}-${index}`}>
+                          <div>
+                            <strong>{citation.sourceTitle || citation.sourceFileName || `来源 ${index + 1}`}</strong>
+                            {citation.locationLabel && <span>{citation.locationLabel}</span>}
+                            {citation.sourceFileName && citation.sourceFileName !== citation.sourceTitle && (
+                              <span>原始文件：{citation.sourceFileName}</span>
+                            )}
+                          </div>
+                          {citation.quotedSpan && <p>{citation.quotedSpan}</p>}
+                          {citation.archival ? (
+                            <small>该引用来自传输前的笔记本，仅作来源存档。</small>
+                          ) : onOpenSource && citation.sourceId && citation.elementId ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenSource(citation.sourceId, citation.elementId)}
+                            >查看原文</button>
+                          ) : null}
+                        </article>
+                      ))}
+                    </div>
                   </details>
                 )}
                 {evidenceRows.length > 0 && (

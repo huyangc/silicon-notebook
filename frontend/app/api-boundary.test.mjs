@@ -28,7 +28,7 @@ test("source detail is opened through the active-notebook proxy readers", async 
     .filter((item) => item.module === "./source-api")
     .map((item) => item.imported);
   assert.ok(imported.includes("getNotebookSource"), "缺 getNotebookSource");
-  assert.ok(imported.includes("getNotebookSourceElements"), "缺 getNotebookSourceElements");
+  assert.ok(imported.includes("getNotebookSourceElementsPage"), "缺 getNotebookSourceElementsPage");
 });
 
 test("notebook search is owned by Ask and imported by the workspace", async () => {

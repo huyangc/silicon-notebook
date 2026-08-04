@@ -6162,6 +6162,38 @@
           "title": "PaginatedMemories",
           "type": "object"
         },
+        "PaginatedSourceElements": {
+          "description": "A bounded window used by the source-detail reader.\n\n``offset`` is the resolved window start.  When callers provide an anchor\nelement the backend moves the window so that the anchor is included and\nreports that resolved offset back to the browser.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/SourceElement"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            },
+            "offset": {
+              "title": "Offset",
+              "type": "integer"
+            },
+            "total_count": {
+              "title": "Total Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total_count",
+            "offset",
+            "limit"
+          ],
+          "title": "PaginatedSourceElements",
+          "type": "object"
+        },
         "PaginatedSources": {
           "properties": {
             "items": {
@@ -17314,6 +17346,88 @@
           "summary": "Source Elements In Scope"
         }
       },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/elements-page": {
+        "get": {
+          "operationId": "source_elements_page_in_scope_api_notebooks__notebook_id__sources__source_id__elements_page_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 40,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "anchor_element_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "maxLength": 200,
+                "title": "Anchor Element Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedSourceElements"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Source Elements Page In Scope"
+        }
+      },
       "/api/notebooks/{notebook_id}/tier": {
         "post": {
           "description": "Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本\n挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己\n的公共知识库。",
@@ -18306,6 +18420,79 @@
             }
           },
           "summary": "Source Elements"
+        }
+      },
+      "/api/sources/{source_id}/elements-page": {
+        "get": {
+          "operationId": "source_elements_page_api_sources__source_id__elements_page_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 40,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "anchor_element_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "maxLength": 200,
+                "title": "Anchor Element Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedSourceElements"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Source Elements Page"
         }
       },
       "/api/sources/{source_id}/parse": {
