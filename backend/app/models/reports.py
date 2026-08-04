@@ -2,7 +2,7 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
-from app.models.source_scope import SourceScope
+from app.models.source_scope import BaseNotebookScope, SourceScope
 
 
 class ReportCreate(BaseModel):
@@ -11,6 +11,10 @@ class ReportCreate(BaseModel):
     depth: int = 2
     auto_generate: bool = False
     source_scope: SourceScope | None = None
+    # None preserves the historical behavior of every mounted base notebook
+    # participating unconditionally. Independent dimension from source_scope
+    # -- see BaseNotebookScope's docstring.
+    base_scope: BaseNotebookScope | None = None
 
 
 class ReportOutlineUpdate(BaseModel):

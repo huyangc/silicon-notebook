@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from app.models.common import Evidence
 from app.models.source_scope import SourceScope
 from app.models.notebooks import NotebookSummary
-from app.api.ask_routes import _validate_source_scope
+from app.api.ask_routes import _require_ask_available, _validate_source_scope
 from fastapi import HTTPException
 import pytest
 from app.services.retrieval import (
@@ -202,10 +202,25 @@ def _notebook(*, bases=None):
     )
 
 
+def test_validate_source_scope_no_longer_raises_409_on_its_own():
+    """Superseded invariant: the "any evidence universe left?" check used to
+    live inside _validate_source_scope, but it must also consider the frozen
+    base-library scope (which this function cannot see), so it moved to
+    ``_require_non_empty_scope``. This is now a pure freeze/422 helper."""
+    resolved = _validate_source_scope(
+        _ScopeRepo([], 0), _notebook(),
+        SourceScope(mode="include", source_ids=[]),
+    )
+    assert resolved == SourceScope(mode="include", source_ids=[], narrowed=False)
+
+
 def test_empty_local_scope_requires_a_mounted_base():
+    # Same scenario as before (empty local scope, zero mounted bases at all)
+    # but now exercised through the combined authority, _require_ask_available,
+    # since that is where the 409 decision now lives.
     with pytest.raises(HTTPException) as exc:
-        _validate_source_scope(
-            _ScopeRepo([], 0), _notebook(),
+        _require_ask_available(
+            _notebook(), _ScopeRepo([], 0),
             SourceScope(mode="include", source_ids=[]),
         )
     assert exc.value.status_code == 409

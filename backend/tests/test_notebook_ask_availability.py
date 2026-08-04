@@ -153,3 +153,79 @@ def test_candidate_only_memory_is_not_ask_available(repo):
     summary = repo.get_notebook(nb.id)
     assert summary.counts["memories"] == 1   # 计数看得到候选
     assert summary.ask_available is False     # 但候选不让对话可用
+
+
+# ---------------------------------------------------------------------------
+# local_evidence_available —— ask_available 的**本地那一半**。
+#
+# ask_available 是合并后的单个布尔,分不出「有得可搜」是本地撑起来的还是参考库撑
+# 起来的;而「本次请求把参考库全部取消勾选后还剩不剩东西」恰恰只能问本地那半。少
+# 了它,后端只能退化成拿**可见导入来源数**代表本地证据宇宙,于是一个只有 Knowhow
+# 表(或只有已确认 Memory)的库会被误判成空范围。
+# ---------------------------------------------------------------------------
+
+
+def test_local_evidence_available_is_false_on_an_empty_notebook(repo):
+    nb = repo.create_notebook(NotebookCreate(name="empty"))
+    summary = repo.get_notebook(nb.id)
+    assert summary.ask_available is False
+    assert summary.local_evidence_available is False
+
+
+def test_knowhow_only_notebook_has_local_evidence_without_a_visible_source(repo):
+    """判据的存在理由:可见来源为 0,本地证据仍为真。"""
+    nb = repo.create_notebook(NotebookCreate(name="knowhow-only"))
+    with repo._write() as db:
+        _add_source(db, nb.id, "s-knowhow", "knowhow")
+        _add_chunk(db, nb.id, "s-knowhow", "c-knowhow")
+    summary = repo.get_notebook(nb.id)
+    assert summary.counts["sources"] == 0
+    assert summary.local_evidence_available is True
+
+
+def test_confirmed_memory_alone_counts_as_local_evidence(repo):
+    nb = repo.create_notebook(NotebookCreate(name="mem"))
+    with repo._write() as db:
+        _add_memory(db, nb.id, repo.current_user().id, "m-1", "confirmed")
+    assert repo.get_notebook(nb.id).local_evidence_available is True
+
+
+def test_candidate_only_memory_is_not_local_evidence(repo):
+    """便宜预过滤(counts["memories"] > 0)是 confirmed 的严格超集,不能替代它。"""
+    nb = repo.create_notebook(NotebookCreate(name="candidate-mem"))
+    with repo._write() as db:
+        _add_memory(db, nb.id, repo.current_user().id, "m-cand", "candidate")
+    summary = repo.get_notebook(nb.id)
+    assert summary.counts["memories"] == 1
+    assert summary.local_evidence_available is False
+
+
+def test_mounted_base_kg_alone_is_ask_available_but_not_local_evidence(repo):
+    """本条就是整个字段存在的场景:ask_available 为真、本地却什么都没有。
+
+    「把参考库全部取消勾选」之后这个库确实无据可答,而 ask_available 一个人答不出
+    这件事。
+    """
+    base = repo.create_notebook(NotebookCreate(name="ref"))
+    with repo._write() as db:
+        _add_kg_object(db, base.id, "ko-base")
+    repo.mark_notebook_base(base.id)
+    nb = repo.create_notebook(NotebookCreate(name="mounts-base"))
+    repo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    summary = repo.get_notebook(nb.id)
+    assert summary.ask_available is True
+    assert summary.local_evidence_available is False
+
+
+def test_local_evidence_defaults_false_on_the_list_projection(repo):
+    """列表投影不精确回填,默认必须是 **False** —— 与 ask_available 的默认 True 方向
+    相反,但遵循同一条规则:「未回填时逐字复现该字段存在之前的行为」。消费侧写成
+    「local_evidence_available 或 可见来源数>0」,所以 False 就等于回落到旧判据、只增
+    不减;默认 True 反而会让列表投影凭空放行一次空范围检索。"""
+    nb = repo.create_notebook(NotebookCreate(name="listed"))
+    with repo._write() as db:
+        _add_source(db, nb.id, "s-doc", "document")
+        _add_chunk(db, nb.id, "s-doc", "c-doc")
+    listed = {row.id: row for row in repo.list_notebooks()}
+    assert listed[nb.id].local_evidence_available is False
+    assert repo.get_notebook(nb.id).local_evidence_available is True

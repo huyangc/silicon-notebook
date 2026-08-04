@@ -831,6 +831,16 @@
         },
         "AskIntentPreviewRequest": {
           "properties": {
+            "base_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BaseNotebookScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "conversation_id": {
               "anyOf": [
                 {
@@ -873,6 +883,16 @@
               "maxLength": 64,
               "title": "Asked At",
               "type": "string"
+            },
+            "base_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BaseNotebookScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "conversation_id": {
               "anyOf": [
@@ -1101,6 +1121,16 @@
               "title": "Retrieval Query",
               "type": "string"
             },
+            "retrieval_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/RetrievalScopeReceipt"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "top_relevance": {
               "default": 0.0,
               "title": "Top Relevance",
@@ -1146,6 +1176,41 @@
             "user"
           ],
           "title": "AuthResult",
+          "type": "object"
+        },
+        "BaseNotebookScope": {
+          "description": "User-selected mounted-reference-library scope for one retrieval run.\n\nMirrors ``SourceScope``'s shape and validation philosophy, but selects\nwhole mounted base notebooks rather than individual sources inside the\nactive notebook -- a different granularity with a different lifecycle, so\nlibrary ids never live on ``SourceScope`` itself.\n\n``include`` means only the listed mounted base notebooks participate;\n``exclude`` means every mounted base notebook except the listed ones\nparticipates. Omitting this model from a request preserves the historical\nbehavior of every mounted base notebook participating unconditionally.\n\n``narrowed`` is the same server-computed fact ``SourceScope`` carries and\nfor the same reason: the API boundary freezes ``exclude`` into an explicit\n``include`` snapshot (so a library mounted after the run started cannot\nwiden it), which makes ``mode`` permanently ``include`` and shape-based\njudgment report every browser request as narrowed. Clients may send the\nfield; the boundary always recomputes and overwrites it.\n\n``max_length`` is a soft ceiling against pathological requests, not a\nsupported mount-scale limit -- federated retrieval issues one query per\nparticipating library and stops being usable long before 10,000 mounts.\nIt exists because ``exclude`` + [] is frozen into an explicit include list\nnaming every currently-mounted library, so the bound must comfortably\nexceed any mount count the product actually expects.",
+          "properties": {
+            "mode": {
+              "default": "exclude",
+              "enum": [
+                "include",
+                "exclude"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "narrowed": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Narrowed"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 10000,
+              "title": "Notebook Ids",
+              "type": "array"
+            }
+          },
+          "title": "BaseNotebookScope",
           "type": "object"
         },
         "BoardEdge": {
@@ -5648,6 +5713,11 @@
               "title": "Kg Ready",
               "type": "boolean"
             },
+            "local_evidence_available": {
+              "default": false,
+              "title": "Local Evidence Available",
+              "type": "boolean"
+            },
             "name": {
               "title": "Name",
               "type": "string"
@@ -6795,6 +6865,16 @@
               "title": "Auto Generate",
               "type": "boolean"
             },
+            "base_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BaseNotebookScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "depth": {
               "default": 2,
               "title": "Depth",
@@ -7068,6 +7148,67 @@
             "status"
           ],
           "title": "ReportSummary",
+          "type": "object"
+        },
+        "RetrievalScopeBaseReceipt": {
+          "description": "One mounted reference library's participation in a finished run.\n\n``name`` is a SNAPSHOT taken while the run was authorized, not a live\nlookup key. An answer outlives its mounts: by the time the turn is\nreopened the library may have been unmounted, handed to another owner or\ndemoted, and a reader that re-derived names from the notebook's *current*\nmounts would silently drop exactly the row that explains the answer.",
+          "properties": {
+            "included": {
+              "default": true,
+              "title": "Included",
+              "type": "boolean"
+            },
+            "name": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Notebook Id",
+              "type": "string"
+            }
+          },
+          "title": "RetrievalScopeBaseReceipt",
+          "type": "object"
+        },
+        "RetrievalScopeLocalReceipt": {
+          "description": "How much of the active notebook this run was allowed to search.",
+          "properties": {
+            "selected": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Selected",
+              "type": "integer"
+            },
+            "total": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Total",
+              "type": "integer"
+            }
+          },
+          "title": "RetrievalScopeLocalReceipt",
+          "type": "object"
+        },
+        "RetrievalScopeReceipt": {
+          "description": "Display-only record of the scope a finished run actually ran under.\n\nPersisted with the answer and **never read back by retrieval**: the\nauthoritative ceiling is the request's ``SourceScope``/``BaseNotebookScope``\nfrozen at the API entry point, and this model exists only so the answer can\nsay what that ceiling was. Nothing here may become an input to a gate --\nsee ``app.services.source_scope`` for where it is carried.\n\nDeliberately carries no file path, no error text and no source identity:\nlibrary names and counts are already visible to anyone who can mount them,\nwhich keeps the disclosure surface narrower than the source-detail proxy.",
+          "properties": {
+            "bases": {
+              "items": {
+                "$ref": "#/components/schemas/RetrievalScopeBaseReceipt"
+              },
+              "maxItems": 10000,
+              "title": "Bases",
+              "type": "array"
+            },
+            "local": {
+              "$ref": "#/components/schemas/RetrievalScopeLocalReceipt"
+            }
+          },
+          "title": "RetrievalScopeReceipt",
           "type": "object"
         },
         "ScaleIndexStatus": {
@@ -18516,6 +18657,7 @@
       "kg_building": false,
       "kg_pending_sources": 0,
       "kg_ready": true,
+      "local_evidence_available": true,
       "name": "API fixture",
       "paper_meta_backfilling": false,
       "primary_domain": "Semiconductor",

@@ -617,10 +617,6 @@ def test_generate_rejects_when_not_outline_ready(client, monkeypatch):
 
 
 def test_generate_retries_failed_report_from_confirmed_outline(client, monkeypatch):
-    import app.api.report_routes as R
-    from app.api.deps import repository
-
-    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
     monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
     monkeypatch.setattr(repository()._runtime.models, "configured", lambda _workload: True)
     launched = []
@@ -669,3 +665,361 @@ def test_generate_does_not_retry_failed_report_without_outline(client, monkeypat
 
     assert response.status_code == 409
     assert response.headers["X-User-Message"] == "1"
+
+
+# ---------------------------------------------------------------------------
+# 检索范围(来源 + 参考库两个维度)在报告三个入口上的权威预检与持久化往返
+# ---------------------------------------------------------------------------
+
+
+def _scoped_client(client, monkeypatch, *, with_base=False):
+    """建一个 notebook(可选挂一个参考库),并 stub 掉 LLM 就绪与 plan job。
+
+    返回 (notebook_id, base_notebook_id|None, launched) —— launched 记录每次
+    _launch_plan_job 的 (args, kwargs),用于断言范围真的传给了后台任务。
+    """
+    launched: list = []
+    monkeypatch.setattr(
+        R, "_launch_plan_job", lambda *args, **kwargs: launched.append((args, kwargs))
+    )
+    monkeypatch.setattr(R, "_launch_generate_job", lambda *args, **kwargs: None)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    base_id = None
+    if with_base:
+        base = client.post("/api/notebooks", json={"name": "base"}).json()
+        repository().mark_notebook_base(base["id"])
+        put = client.put(
+            f"/api/notebooks/{nb['id']}/bases",
+            json={"base_notebook_ids": [base["id"]]},
+        )
+        assert put.status_code == 200
+        base_id = base["id"]
+    return nb["id"], base_id, launched
+
+
+def test_report_create_rejects_an_empty_local_scope_with_no_mounted_library(
+    client, monkeypatch
+):
+    """回归(空范围预检从 _validate_source_scope 搬到 _require_non_empty_scope 之后
+    在报告路径上必须仍然生效):空 allow-list 的报告必须 409,不能建行、不能排
+    plan job —— 否则后台会照跑一轮模型调用产出零证据报告。"""
+    nb_id, _, launched = _scoped_client(client, monkeypatch)
+    response = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={"question": "q?", "source_scope": {"mode": "include", "source_ids": []}},
+    )
+    assert response.status_code == 409
+    assert response.headers.get("X-User-Message") == "1"
+    assert response.json()["detail"] == "当前检索范围为空，请至少选择一个来源或挂载参考库"
+    assert launched == [], "被拒的请求绝不能排出 plan job"
+    assert client.get(f"/api/notebooks/{nb_id}/reports").json() == []
+
+
+def test_report_create_rejects_when_every_mounted_library_is_unchecked(
+    client, monkeypatch
+):
+    """挂着参考库不等于范围非空:本地为空 + 库全部取消勾选,仍必须 409。
+    (notebook.base_notebooks 是「挂了什么」,不是「这次勾了什么」。)"""
+    nb_id, base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
+    response = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "q?",
+            "source_scope": {"mode": "include", "source_ids": []},
+            "base_scope": {"mode": "include", "notebook_ids": []},
+        },
+    )
+    assert response.status_code == 409
+    assert launched == []
+    # 同一空本地范围,但保留那个参考库 → 放行(证明 409 判的是两个维度的合取)。
+    ok = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "q?",
+            "source_scope": {"mode": "include", "source_ids": []},
+            "base_scope": {"mode": "include", "notebook_ids": [base_id]},
+        },
+    )
+    assert ok.status_code == 200
+    # 唯一挂载的库被显式选中 → 覆盖了整个宇宙 → 不算收窄。
+    assert launched[-1][1]["base_scope"].model_dump() == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
+    }
+
+
+def test_report_create_rejects_a_base_only_submission_on_a_library_only_notebook(
+    client, monkeypatch
+):
+    """只提交库维度、省略 source_scope:省略的那一维必须按**真实证据宇宙**判空,
+    不能当成「本地非空」放行。"""
+    nb_id, _base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
+    response = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={"question": "q?", "base_scope": {"mode": "include", "notebook_ids": []}},
+    )
+    assert response.status_code == 409
+    assert launched == []
+
+
+def test_report_create_without_any_scope_is_untouched_by_the_emptiness_check(
+    client, monkeypatch
+):
+    """两维都没提交的请求不是一次「选择」,这道闸完全不参与 —— 报告可以合法建在
+    一个 Ask 框会拒绝的笔记本上,收紧那一点是另一个行为变更。"""
+    nb_id, _base_id, launched = _scoped_client(client, monkeypatch)
+    created = client.post(f"/api/notebooks/{nb_id}/reports", json={"question": "q?"})
+    assert created.status_code == 200
+    assert launched and "source_scope" not in launched[-1][1]
+    assert "base_scope" not in launched[-1][1]
+    from app.api.deps import repository
+
+    stored = repository().get_report(nb_id, created.json()["report_id"])
+    assert (stored.get("understanding") or {}).get("base_scope") is None
+    assert (stored.get("understanding") or {}).get("source_scope") is None
+
+
+def test_report_confirm_and_generate_reject_a_scope_emptied_since_create(
+    client, monkeypatch
+):
+    """创建时非空的范围可能在确认/生成前被掏空(参考库被取消挂载)。两处重新冻结
+    之后都必须再判一次空范围,而不是把空范围交给规划/生成。
+
+    刻意省略 base_scope(而不是显式勾掉那个库):显式选中的库被取消挂载会先撞
+    _validate_base_scope 的 422,永远走不到空范围那一判。"""
+    from app.api.deps import repository
+
+    nb_id, _base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
+    rid = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "q?",
+            "source_scope": {"mode": "include", "source_ids": []},
+        },
+    ).json()["report_id"]
+    # 取消挂载 → 本地空范围此刻已无任何参考库兜底
+    assert client.put(
+        f"/api/notebooks/{nb_id}/bases", json={"base_notebook_ids": []}
+    ).status_code == 200
+    repo = repository()
+    understanding = repo.get_report(nb_id, rid)["understanding"]
+    understanding.update(
+        resolved_question="q?", ambiguities=[], needs_clarification=False
+    )
+    repo.update_report(nb_id, rid, status="intent_ready", understanding=understanding)
+
+    launched.clear()
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "q?", "answers": []},
+    )
+    assert confirmed.status_code == 409
+    assert confirmed.json()["detail"] == "当前检索范围为空，请至少选择一个来源或挂载参考库"
+    assert launched == []
+    assert repo.get_report(nb_id, rid)["status"] == "intent_ready", "不得认领 planning"
+
+    repo.update_report(nb_id, rid, status="outline_ready",
+                       outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}])
+    # generate 走的是 models.configured("report_section") 而不是 _report_llm_ready,
+    # 单独绑一个已配置的桩,免得 409 是「LLM 未配置」那条、白测。
+    from tests.model_testkit import bind_chat_client
+
+    class _Configured:
+        configured = True
+
+    bind_chat_client(repo, "report_section", _Configured())
+    generated = client.post(f"/api/notebooks/{nb_id}/reports/{rid}/generate", json={})
+    assert generated.status_code == 409
+    assert generated.json()["detail"] == "当前检索范围为空，请至少选择一个来源或挂载参考库"
+    assert repo.get_report(nb_id, rid)["status"] == "outline_ready", "不得认领 generating"
+
+
+def test_report_base_scope_freezes_mount_set_at_create_time(client, monkeypatch):
+    """R6:报告的范围是**创建时定格、跨阶段持久化**的(create → confirm → generate)。
+    `exclude:[]`——浏览器「全选参考库」的紧凑表示——必须在 create 时就把当时挂载的
+    库集合冻结成显式 include 快照并原样持久化,不能短路成 None 留到确认/生成阶段
+    再按 notebook **此刻**的挂载集重新展开;否则报告创建之后新挂载的参考库会静默
+    参与这份报告。"""
+    from app.api.deps import repository
+
+    nb_id, base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
+    created = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "q?",
+            "source_scope": {"mode": "include", "source_ids": []},
+            "base_scope": {"mode": "exclude", "notebook_ids": []},
+        },
+    )
+    assert created.status_code == 200
+    rid = created.json()["report_id"]
+    repo = repository()
+    after_create = repo.get_report(nb_id, rid)["understanding"]
+    assert after_create["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
+    }, "create 时必须把 exclude:[] 就地展开成当时挂载集的显式 include 快照,不能落 None"
+
+    # 创建之后再挂一个新库 —— 已冻结的范围绝不能因此扩大。
+    new_base = client.post("/api/notebooks", json={"name": "base2"}).json()
+    repository().mark_notebook_base(new_base["id"])
+    assert client.put(
+        f"/api/notebooks/{nb_id}/bases",
+        json={"base_notebook_ids": [base_id, new_base["id"]]},
+    ).status_code == 200
+
+    understanding = repo.get_report(nb_id, rid)["understanding"]
+    understanding.update(
+        resolved_question="q?", ambiguities=[], needs_clarification=False
+    )
+    repo.update_report(nb_id, rid, status="intent_ready", understanding=understanding)
+
+    launched.clear()
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "q?", "answers": []},
+    )
+    assert confirmed.status_code == 200
+    # confirm 用 notebook **当前**的挂载集(现在是 2 个库)重新冻结,于是那份 1 个库
+    # 的快照如今确实覆盖不到整个宇宙 —— narrowed 翻真。这是正确读法:本 run 必须
+    # 按 base_restricted 处理,新挂上的库不得混进联邦检索,这正是冻结的意义。
+    assert launched[-1][1]["base_scope"].model_dump() == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": True
+    }, "confirm 之后新挂载的库不得混进已冻结的范围"
+    after_intent = repo.get_report(nb_id, rid)["understanding"]
+    assert after_intent["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": True
+    }
+
+
+def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypatch):
+    """回归(本特性对报告曾完全 no-op 的形状):prepare_intent 用模型新产出的
+    contract **整块替换** understanding_json(report_store 写的是
+    `understanding_json = ?`,不是 merge),所以创建时存下的 base_scope 必须由
+    prepare_intent 自己补回,否则确认/生成两阶段读到的恒为 None、参考库照常全量
+    参与。
+
+    这里跑完整链路:create(存范围) → 计划任务在 source_scope_context 里调
+    prepare_intent(与 report_execution.start_plan 逐字同构) → confirm(重新冻结
+    并把范围交给下一段 plan job)。"""
+    import json
+
+    from app.api.deps import repository
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import source_scope_context
+    from tests.model_testkit import bind_chat_client
+
+    class _IntentLLM:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "PLL 环路稳定性的机理是什么？",
+                "intent_type": "explain",
+                "mandatory_topics": [{
+                    "title": "环路稳定性",
+                    "question": "PLL 环路稳定性的机理是什么？",
+                    "retrieval_queries": ["PLL loop stability"],
+                }],
+                "needs_clarification": False,
+                "ambiguities": [],
+            })
+
+    nb_id, base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
+    created = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "分析 PLL 稳定性",
+            "source_scope": {"mode": "include", "source_ids": []},
+            "base_scope": {"mode": "include", "notebook_ids": [base_id]},
+        },
+    )
+    assert created.status_code == 200
+    rid = created.json()["report_id"]
+    repo = repository()
+    after_create = repo.get_report(nb_id, rid)["understanding"]
+    assert after_create["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
+    }
+
+    # 计划任务:report_execution.start_plan 只经 ContextVar 传范围(它并不给
+    # engine.run 传 source_scope/base_scope),所以 prepare_intent 的兜底读取
+    # 就是这条链路上唯一的补回点。
+    for workload_id in ("report_outline", "report_section", "report_summary"):
+        bind_chat_client(repo, workload_id, _IntentLLM())
+    with source_scope_context(
+        nb_id, after_create.get("source_scope"), after_create.get("base_scope")
+    ):
+        ReportEngine.from_repository(repo, repo.settings).prepare_intent(
+            nb_id, rid, "分析 PLL 稳定性"
+        )
+
+    after_intent = repo.get_report(nb_id, rid)
+    assert after_intent["status"] == "intent_ready"
+    assert after_intent["understanding"]["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
+    }
+    assert after_intent["understanding"]["source_scope"] == {
+        "mode": "include", "source_ids": [], "narrowed": False,
+    }
+
+    launched.clear()
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "分析 PLL 环路稳定性", "answers": []},
+    )
+    assert confirmed.status_code == 200
+    assert launched[-1][1]["base_scope"].model_dump() == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
+    }
+    assert launched[-1][1]["intent_contract"]["base_scope"] == {
+        "mode": "include", "notebook_ids": [base_id], "narrowed": False
+    }
+
+
+def test_library_only_report_scope_never_becomes_locally_restricted(
+    client, monkeypatch
+):
+    """R1 跨持久化:只取消参考库勾选的报告,在**每一个**阶段读回来之后都必须让
+    `source_scope_restricted()` 保持 False —— 否则该报告的整库画像、PPR、私有
+    Memory 与社区报告会被静默关掉,而用户只是少借了一个参考库。
+
+    关键在于两处都不得凭空造出一份本地范围:create 不写 source_scope,
+    prepare_intent 的 `current_source_scope_payload()` 兜底也必须返回 None。"""
+    from app.api.deps import repository
+    from app.services.source_scope import (
+        base_scope_restricted,
+        source_scope_restricted,
+        source_scope_context,
+    )
+
+    nb_id, base_id, _launched = _scoped_client(client, monkeypatch, with_base=True)
+    new_base = client.post("/api/notebooks", json={"name": "base2"}).json()
+    repository().mark_notebook_base(new_base["id"])
+    assert client.put(
+        f"/api/notebooks/{nb_id}/bases",
+        json={"base_notebook_ids": [base_id, new_base["id"]]},
+    ).status_code == 200
+
+    created = client.post(
+        f"/api/notebooks/{nb_id}/reports",
+        json={
+            "question": "q?",
+            # 只提交库维度,并且真的少勾了一个。
+            "base_scope": {"mode": "include", "notebook_ids": [base_id]},
+        },
+    )
+    assert created.status_code == 200
+    understanding = repository().get_report(
+        nb_id, created.json()["report_id"]
+    )["understanding"]
+    assert understanding.get("source_scope") is None, "不得替用户伪造一份本地范围"
+    assert understanding["base_scope"]["narrowed"] is True
+
+    with source_scope_context(
+        nb_id, understanding.get("source_scope"), understanding.get("base_scope")
+    ):
+        assert base_scope_restricted() is True
+        assert source_scope_restricted() is False
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)

@@ -16,7 +16,13 @@ from app.api.deps import (
     user_error,
 )
 from app.models.notebooks import NotebookSummary
-from app.models.source_scope import SourceScope
+from app.models.source_scope import (
+    BaseNotebookScope,
+    RetrievalScopeBaseReceipt,
+    RetrievalScopeLocalReceipt,
+    RetrievalScopeReceipt,
+    SourceScope,
+)
 from app.models.ask import (
     AskIntentPreviewRequest,
     AskRequest,
@@ -38,6 +44,7 @@ from app.services.query_intent import (
     finalize_query_intent,
     plan_query_intent,
 )
+from app.services.source_scope import retrieval_scope_receipt_context
 
 
 router = APIRouter()
@@ -74,6 +81,12 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
     into one whole-universe query would put every source row back on the hot
     path to answer a question bounded by the notebook's Memory/Knowhow count.
     The hidden read stays separate and stays conditional on ``narrowed``.
+
+    Deliberately does NOT decide whether the resulting (possibly empty) local
+    scope leaves the run with any evidence universe at all -- that check also
+    depends on the frozen base-library scope (see ``_validate_base_scope``) and
+    is combined once in ``_require_non_empty_scope``, which Ask and the report
+    entry points each call.
     """
     if scope is None:
         return None
@@ -113,13 +126,215 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
     # Carried even on a narrowed run: the drift probe reads the same partition
     # back and must do so as the same user, whether or not this freeze kept it.
     resolved._scope_owner_id = owner_id
-    if not resolved.source_ids and not notebook.base_notebooks:
-        raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
     return resolved
 
 
-def _require_ask_available(notebook: NotebookSummary, repo=None,
-                           source_scope: SourceScope | None = None) -> SourceScope | None:
+def _validate_base_scope(
+    notebook: NotebookSummary, scope: BaseNotebookScope | None
+) -> BaseNotebookScope | None:
+    """Validate and freeze a checkbox library scope as an explicit include
+    ceiling over ``notebook``'s mounted reference libraries.
+
+    Mirrors ``_validate_source_scope``'s exclude→include freeze for the same
+    reason (a race-free, fixed set for every candidate producer to intersect
+    against), but the valid universe already rides on ``notebook`` -- mounted
+    base libraries are not a per-request repo round trip the way sources are,
+    so this costs zero extra queries even on the default all-selected path.
+
+    ``exclude`` + an EMPTY list -- the browser's compact "select all libraries"
+    representation -- MUST still expand into an explicit ``include`` list
+    naming every currently-mounted library, never short-circuit to ``None``.
+    ``None`` reads as "no scope was submitted at all" to every downstream
+    consumer, which is only harmless for Ask (validation and retrieval happen
+    inside one synchronous request).  It is NOT harmless for a report:
+    ``create_report`` calls this once and PERSISTS the result into
+    ``understanding["base_scope"]``, and that persisted value is the
+    authoritative ceiling re-applied at intent confirmation and again at
+    generation start -- two later phases, potentially hours apart.  Freezing to
+    ``None`` at create time would throw away "these are the libraries mounted
+    right now", so a library mounted afterwards would silently join a report
+    the user never scoped it into.
+    """
+    if scope is None:
+        return None
+    valid_ids = {ref.id for ref in notebook.base_notebooks}
+    submitted = set(scope.notebook_ids)
+    if not submitted <= valid_ids:
+        raise user_error(422, "检索范围包含未挂载到当前笔记本的参考库")
+    if scope.mode == "include":
+        selected = list(scope.notebook_ids)
+    else:
+        selected = [
+            ref.id for ref in notebook.base_notebooks if ref.id not in submitted
+        ]
+    # Recomputed unconditionally (a client-supplied ``narrowed`` is never
+    # trusted). The mount roster is already on the summary, so this is pure
+    # arithmetic -- no round trip. Both sides come from that one roster, so the
+    # comparison is commensurable by construction (membership was checked
+    # above, hence ``selected ⊆ valid_ids``).
+    return BaseNotebookScope(
+        mode="include",
+        notebook_ids=selected,
+        narrowed=len(selected) < len(valid_ids),
+    )
+
+
+def _require_non_empty_scope(
+    notebook: NotebookSummary,
+    resolved_source_scope: SourceScope | None,
+    resolved_base_scope: BaseNotebookScope | None,
+) -> None:
+    """Reject a retrieval scope whose evidence universe is empty across BOTH
+    dimensions at once.
+
+    Lives here rather than inside ``_validate_source_scope`` (where the local
+    half used to be) because it needs the frozen base-library scope too, and in
+    its own function rather than inside ``_require_ask_available`` because the
+    report entry points must run this same check WITHOUT the ``ask_available``
+    gate: a report may legitimately be created on a notebook the Ask box would
+    refuse, and widening that is a separate behaviour change.
+
+    判据是「这次勾了哪些库」而不是「挂了哪些库」。Each dimension answers with
+    its FROZEN selection when the request actually NARROWED it, and with the
+    notebook's real evidence universe when it did not. Neither fallback costs a
+    round trip: both ride on the ``NotebookSummary`` the caller already loaded.
+
+    A dimension the request did not narrow must NOT be read as a non-empty one:
+    that shortcut is what would let a library-only notebook (zero local
+    evidence, ``ask_available`` true through its mounted libraries) submit
+    ``base_scope`` alone with every library unchecked and still be accepted.
+    But a request that scoped NEITHER dimension is not making a selection at
+    all and is left alone -- ``ask_available`` is the authority there.
+    """
+    if resolved_source_scope is None and resolved_base_scope is None:
+        return
+    # 本地维度的证据宇宙 ≠ 可见导入来源数。ask_available 的四个判据里有**三个**是本地的
+    # (任意 chunk[含 Knowhow 格子]、本地可用 KG、该用户的已确认 Memory),而
+    # counts["sources"] 只覆盖第一个的一部分:Knowhow 表与 Memory 根本没有可见来源行。
+    # 拿来源数当本地宇宙,会把「只有 Knowhow / 只有已确认 Memory + 显式取消勾选全部
+    # 参考库」误拒成空范围 —— 而浏览器恒发 source_scope,零可见来源时它冻结成
+    # include:[],所以那是**界面可达**的误拒。
+    # 故本地宇宙改问 NotebookSummary.local_evidence_available(catalog 侧由那三个本地
+    # 判据算出,零新增查询),并与 counts["sources"] 取**或**:该信号只增不减,尚在解析
+    # (有来源、还没有 chunk)的库仍按旧判据放行,列表投影未回填时(默认 False)也逐字
+    # 回落到旧行为。
+    local_universe_non_empty = (
+        bool(notebook.local_evidence_available)
+        or int(notebook.counts.get("sources", 0) or 0) > 0
+    )
+    if resolved_source_scope is None:
+        has_local = local_universe_non_empty
+    elif resolved_source_scope.source_ids:
+        has_local = True
+    else:
+        # 冻结出**空集**有两种来源,判据是「这一维被收窄了吗」而不是「提交了吗」:
+        #   * narrowed=True —— 用户真的把来源一个不剩地取消了(5 选 0)。以冻结选择
+        #     为准,该拦;本地证据信号不得把用户主动点下的「清空」翻回来。
+        #   * narrowed=False —— 0 选自 0,只是「这个库没有可见来源」。浏览器**默认**
+        #     发的 exclude:[] 在这类库上就冻结成这个形状,它没有表达任何收窄意图,
+        #     必须按真实本地证据宇宙作答,否则 Knowhow-only 的库一进来就被判空。
+        has_local = (
+            not resolved_source_scope.narrowed and local_universe_non_empty
+        )
+    # 库维度**不需要**同样的 narrowed 分支:`_validate_base_scope` 的
+    # narrowed = len(selected) < len(mounted),空选择只有在零挂载时才 narrowed=False,
+    # 而那时的回落值 bool(notebook.base_notebooks) 同样为假 —— 两条规则逐值相同。
+    # 参考库也没有「没有可见行的隐藏证据」这回事:挂载集就是它完整的宇宙。
+    has_base = (
+        bool(resolved_base_scope.notebook_ids)
+        if resolved_base_scope is not None
+        else bool(notebook.base_notebooks)
+    )
+    if not has_local and not has_base:
+        raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
+
+
+def _scope_receipt(
+    notebook: NotebookSummary,
+    resolved_source_scope: SourceScope | None,
+    resolved_base_scope: BaseNotebookScope | None,
+) -> RetrievalScopeReceipt | None:
+    """Build the display-only "what this run was allowed to search" receipt.
+
+    ABSENT when the request narrowed NEITHER dimension -- the same rule
+    ``current_source_scope_payload``/``current_base_scope_payload`` enforce and
+    for the same reason: the browser always submits both scopes, so a receipt
+    reading "5 of 5 来源" would appear on every ordinary question. When ONE
+    dimension was narrowed the other is still reported, truthfully, as whole --
+    that pairing is what the real incident turned on (a single local source
+    checked while 84 reference-library papers answered the question), so
+    suppressing the untouched half would hide exactly the line worth reading.
+
+    Costs no round trip: every input rides on the ``NotebookSummary`` the
+    caller already loaded. ``counts["sources"]`` is ``visible_source_count`` --
+    ``all_visible_source_ids`` counted under an identical predicate -- so
+    ``selected`` and ``total`` are commensurable.
+
+    Deliberately keeps reading that cached count even though
+    ``_validate_source_scope`` takes its universe from a live read: a
+    concurrent upload can make this ``total`` lag the frozen scope by one, and
+    for a DISPLAY line that is tolerable staleness, whereas ``narrowed`` is a
+    GATE. Different consequence, different price worth paying.
+
+    Both dimensions are read through their ``mode``. Every route caller hands
+    over the frozen include ceiling, so the exclude branches are unreachable
+    from HTTP -- but reading an exclude scope as if it were an include one
+    would INVERT the receipt (report the unchecked libraries as the searched
+    ones), and a scope report that can lie about the scope is worth less than
+    no report.
+    """
+    source_narrowed = bool(
+        resolved_source_scope is not None and resolved_source_scope.narrowed
+    )
+    base_narrowed = bool(
+        resolved_base_scope is not None and resolved_base_scope.narrowed
+    )
+    if not source_narrowed and not base_narrowed:
+        return None
+    total = max(int(notebook.counts.get("sources", 0) or 0), 0)
+    included_ids: set[str] | None = None
+    excluded_ids: set[str] = set()
+    if resolved_base_scope is not None:
+        if resolved_base_scope.mode == "include":
+            included_ids = set(resolved_base_scope.notebook_ids)
+        else:
+            excluded_ids = set(resolved_base_scope.notebook_ids)
+    if resolved_source_scope is None:
+        # An unscoped local dimension searched every visible source, which is
+        # what ``total`` counts -- reporting it as ``selected`` states "all of
+        # them", never a narrowing the user did not request.
+        selected = total
+    elif resolved_source_scope.mode == "include":
+        selected = len(resolved_source_scope.source_ids)
+    else:
+        selected = max(total - len(resolved_source_scope.source_ids), 0)
+    return RetrievalScopeReceipt(
+        local=RetrievalScopeLocalReceipt(selected=selected, total=total),
+        bases=[
+            RetrievalScopeBaseReceipt(
+                notebook_id=ref.id,
+                name=str(ref.name or "")[:500],
+                included=(
+                    ref.id not in excluded_ids if included_ids is None
+                    else ref.id in included_ids
+                ),
+            )
+            # Bounded so a pathological mount count can never turn the receipt
+            # into a ValidationError that costs the user their answer. The cap
+            # must track RetrievalScopeReceipt.bases: a *lower* one would
+            # silently drop libraries, and the receipt is a disclosure -- a
+            # truncated list presented as exhaustive makes the reader compute a
+            # wrong denominator.
+            for ref in list(notebook.base_notebooks)[:10_000]
+        ],
+    )
+
+
+def _require_ask_available(
+    notebook: NotebookSummary, repo=None,
+    source_scope: SourceScope | None = None,
+    base_scope: BaseNotebookScope | None = None,
+) -> tuple[SourceScope | None, BaseNotebookScope | None]:
     """硬约束(PR#334):笔记本在任一模式下都取不到可检索证据(NotebookSummary
     .ask_available=False——无可见来源/knowhow chunk/可用 KG/带图参考库/confirmed memory)
     时,回答只会是凭空生成,拒绝提问。前端会据同一信号禁用对话框,但那只是 UX;这里是
@@ -129,16 +344,24 @@ def _require_ask_available(notebook: NotebookSummary, repo=None,
     repo.ask(空库)的测试。代价是一个**已知且被接受的极窄 TOCTOU 残留**(codex 第11轮
     P2):预检通过后、检索真正取证据前的毫秒级窗口里删掉最后一份证据,本次 ask 仍会跑完、
     可能存下一条空答案。窗口极小、后果良性(仅一条无据答案,非崩溃/越权),故不为它把
-    守卫下沉进服务层。"""
+    守卫下沉进服务层。
+
+    Also freezes and returns the checkbox library scope alongside the source
+    scope, and defers the combined "is anything left to search?" decision to
+    the shared ``_require_non_empty_scope`` (which the report entry points call
+    directly -- see its docstring)."""
     if not notebook.ask_available:
         raise user_error(
             409,
             "该笔记本还没有可用于回答的内容，请先添加来源，"
             "或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
         )
+    resolved_source_scope = source_scope
     if repo is not None:
-        return _validate_source_scope(repo, notebook, source_scope)
-    return source_scope
+        resolved_source_scope = _validate_source_scope(repo, notebook, source_scope)
+    resolved_base_scope = _validate_base_scope(notebook, base_scope)
+    _require_non_empty_scope(notebook, resolved_source_scope, resolved_base_scope)
+    return resolved_source_scope, resolved_base_scope
 
 
 @router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
@@ -196,8 +419,8 @@ async def preview_ask_intent(
             notebook = repo.get_notebook(notebook_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Notebook not found")
-        resolved_source_scope = _require_ask_available(
-            notebook, repo, payload.source_scope
+        resolved_source_scope, resolved_base_scope = _require_ask_available(
+            notebook, repo, payload.source_scope, payload.base_scope
         )
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
@@ -211,7 +434,12 @@ async def preview_ask_intent(
         # subclass carrying English internals — so re-adding a
         # ``user_error(422, str(exc))`` here would trust an error by its shape
         # rather than its provenance and leak that text as a user message.
-        with source_scope_context(notebook_id, resolved_source_scope):
+        # 预检必须用与执行**同一个**库上限:预检期若还看得见被取消勾选的库,
+        # 它侦察出的证据面与提交时按同一份 base_scope 重新解析的结果会不一致,
+        # 用户会拿到一份走不通的确认。
+        with source_scope_context(
+            notebook_id, resolved_source_scope, resolved_base_scope
+        ):
             return repo.preview_reasoning_intent(
                 notebook_id, question, history, cancel_event=cancel_event
             )
@@ -268,6 +496,26 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
         raise user_error(422, "确认后的问题不能为空")
 
 
+def _apply_resolved_scopes(
+    payload: AskRequest,
+    resolved_source_scope: SourceScope | None,
+    resolved_base_scope: BaseNotebookScope | None,
+) -> AskRequest:
+    """Swap the frozen ceilings onto the payload, copying only when one of them
+    actually changed identity.
+
+    ``model_copy`` is skipped entirely when neither dimension was submitted, so
+    a compatibility client's payload reaches ``repo.ask``/``start_ask_stream``
+    as the very same object it was before either scope existed.
+    """
+    updates: dict = {}
+    if resolved_source_scope is not payload.source_scope:
+        updates["source_scope"] = resolved_source_scope
+    if resolved_base_scope is not payload.base_scope:
+        updates["base_scope"] = resolved_base_scope
+    return payload.model_copy(update=updates) if updates else payload
+
+
 @router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_read)])
 def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     repo = repository()
@@ -282,13 +530,19 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
-    resolved_source_scope = _require_ask_available(
-        notebook, repo, payload.source_scope
+    resolved_source_scope, resolved_base_scope = _require_ask_available(
+        notebook, repo, payload.source_scope, payload.base_scope
     )
-    if resolved_source_scope is not payload.source_scope:
-        payload = payload.model_copy(update={"source_scope": resolved_source_scope})
+    payload = _apply_resolved_scopes(
+        payload, resolved_source_scope, resolved_base_scope
+    )
     try:
-        return repo.ask(notebook_id, payload)
+        # The whole synchronous ask runs inside this thread's context, so the
+        # receipt reaches AskService's single answer-persistence seam.
+        with retrieval_scope_receipt_context(
+            _scope_receipt(notebook, resolved_source_scope, resolved_base_scope)
+        ):
+            return repo.ask(notebook_id, payload)
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
@@ -319,16 +573,25 @@ async def _stream_ask_events(
     payload: AskRequest,
     spec,
     request: Request,
+    *,
+    scope_receipt: RetrievalScopeReceipt | None = None,
 ):
     # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
     # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
     # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
     # 交付队列消费与断连轮询。Task 24: 执行体 = runtime-owned AskService(三模式
     # 注册表派发在服务内),不再是 facade runner 回调。
-    events = repo.start_ask_stream(
-        notebook_id, payload, spec,
-        user_id=repo.current_user().id,
-    )
+    # ``scope_receipt`` is keyword-only with a default so every existing
+    # positional caller is unchanged. It cannot be set by ``ask_stream`` around
+    # its own body: the generator is iterated after that coroutine returns, so
+    # the context must be entered HERE, around the submit that snapshots it for
+    # the detached worker. The block contains no ``yield`` -- set and reset
+    # happen inside one ``__anext__``, never across a suspension point.
+    with retrieval_scope_receipt_context(scope_receipt):
+        events = repo.start_ask_stream(
+            notebook_id, payload, spec,
+            user_id=repo.current_user().id,
+        )
     # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
     # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
     while True:
@@ -359,13 +622,19 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
-    resolved_source_scope = _require_ask_available(
-        notebook, repo, payload.source_scope
-    )  # 空库/空来源范围权威拒绝
-    if resolved_source_scope is not payload.source_scope:
-        payload = payload.model_copy(update={"source_scope": resolved_source_scope})
+    resolved_source_scope, resolved_base_scope = _require_ask_available(
+        notebook, repo, payload.source_scope, payload.base_scope
+    )  # 空库/空检索范围权威拒绝
+    payload = _apply_resolved_scopes(
+        payload, resolved_source_scope, resolved_base_scope
+    )
     return StreamingResponse(
-        _stream_ask_events(repo, notebook_id, payload, spec, request),
+        _stream_ask_events(
+            repo, notebook_id, payload, spec, request,
+            scope_receipt=_scope_receipt(
+                notebook, resolved_source_scope, resolved_base_scope
+            ),
+        ),
         media_type="application/x-ndjson",
     )
 

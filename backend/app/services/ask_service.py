@@ -296,7 +296,11 @@ class AskService:
 
         spec = resolve_mode(getattr(payload, "mode", None))
         handler = getattr(self, spec.handler)
-        with source_scope_context(notebook_id, getattr(payload, "source_scope", None)):
+        with source_scope_context(
+            notebook_id,
+            getattr(payload, "source_scope", None),
+            getattr(payload, "base_scope", None),
+        ):
             if spec.streaming:
                 return handler(notebook_id, payload, user_id=user_id,
                                job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
@@ -743,6 +747,14 @@ class AskService:
         # 覆盖 chunk/reasoning/graph 三 handler 的全部 return 路径(含早退),避免逐 handler
         # 多 return 点漏赋值。小库/已索引 → False(默认),无副作用。
         response.index_required = self._needs_index(notebook_id)
+        # 同一收口:把本轮实际检索范围的**只读**回执随答案一起落库。None = 本次请求
+        # 两个维度都没收窄(或调用方根本不经 API 入口),此时字段缺席、序列化与历史
+        # 答案逐位一致。此处只写不读——它不参与任何检索判定。
+        from app.services.source_scope import current_retrieval_scope_receipt
+
+        receipt = current_retrieval_scope_receipt()
+        if receipt is not None:
+            response.retrieval_scope = receipt
         response.asked_at = asked_at or response.asked_at
         if not job_id:
             return self.ask_state.save_answer(
@@ -3170,6 +3182,12 @@ class AskService:
                     max_depth=getattr(self.settings, "graph_max_depth", 3),
                     max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
                 )
+                from app.services.source_scope import scoped_subgraph_nodes
+
+                # The federated graph is process-cached under a scope-blind
+                # key, so the library ceiling is applied to the walk's RESULT
+                # rather than to its per-participant build (see the helper).
+                subgraph = scoped_subgraph_nodes(subgraph)
             # Render subgraph into (context_block, id_map) — same k{i} format as
             # _answer_context so grouped marker resolution works unchanged.
             context_block, id_map = render_subgraph_context(subgraph, id_offset=0)

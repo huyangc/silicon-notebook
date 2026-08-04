@@ -83,6 +83,7 @@ from app.repositories.ports import (
     UnifiedKgStorePort,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.source_scope import scoped_participants
 
 
 # Enumerable element kinds.  paragraph / heading / page_text / knowhow_cell and
@@ -254,6 +255,24 @@ class CollectionCatalogService:
     out of retrieval and must drop out of the map with it; anything else would
     promise the model collections it cannot reach.
 
+    ``collection_map`` then narrows that list by the run's reference-library
+    checkboxes (``scoped_participants``) — the map is the number the model
+    decides to enumerate from, and counting an unchecked library into it would
+    invite it to list documents the enumeration will (correctly) refuse to
+    return.  Every count below is a ``for notebook_id in notebook_ids`` loop,
+    so the filter reaches the element totals, the per-type KG totals, the
+    Knowhow table count and the ``sources`` count from ONE place: they cannot
+    drift apart from the plans the executor walks, which are built from the
+    same filtered list.  The methods that take ``notebook_ids`` as a PARAMETER
+    (``scope_element_plan`` / ``scope_source_plan`` / ``scope_kg_type_counts``
+    / ``scope_signal_fingerprint``) deliberately do not re-filter: their caller
+    already resolved and narrowed the scope, and a second filter would be a
+    second place for the definition to live.
+
+    ``notebook_catalog``'s board counts are pointedly NOT affected — they
+    answer "how much knowledge does this notebook hold", not "what may this run
+    read".
+
     Failures propagate.  A single source's query blowing up must NOT leave a
     wrong number cached, so nothing is written to any cache until its batch has
     come back whole; the fail-open decision (answer without a map) belongs to
@@ -315,7 +334,7 @@ class CollectionCatalogService:
         build recomputes it.  Wrong entries are unreachable, not sticky.
         """
         with self._database.connect() as db:
-            notebook_ids = tuple(
+            notebook_ids = scoped_participants(
                 self._notebooks.participant_ids(db, active_notebook_id)
             )
             elements, sources = self._scope_signal_row_counts(db, notebook_ids)

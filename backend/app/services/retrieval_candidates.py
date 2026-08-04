@@ -1474,9 +1474,22 @@ class CandidateRetrievalService(_RetrievalState):
             for source_notebook_id, source_id in allowed_source_keys:
                 if source_notebook_id and source_id:
                     sources_by_notebook.setdefault(source_notebook_id, []).append(source_id)
-        from app.services.source_scope import scoped_allowed_source_ids
+        from app.services.source_scope import (
+            notebook_in_scope, scoped_allowed_source_ids,
+        )
 
         for nid in notebook_ids:
+            # Library dimension, stated in the loop that owns it. Belt and
+            # braces: `scoped_allowed_source_ids` below already answers `()`
+            # for an unchecked library and this loop already `continue`s on a
+            # falsy allow-list, so no behavioural test can tell the two apart
+            # -- deleting either one alone changes nothing observable (deleting
+            # BOTH reopens the library). It stays because the library question
+            # is the one this loop is being asked, and reading it off the
+            # source-allow-list's emptiness is a `None`-vs-`()` subtlety one
+            # refactor away from silently reopening an unchecked library.
+            if not notebook_in_scope(nid):
+                continue
             explicit_allowed = (
                 sources_by_notebook.get(nid)
                 if sources_by_notebook is not None else None
@@ -1515,7 +1528,15 @@ class CandidateRetrievalService(_RetrievalState):
                 db, active_notebook_id,
             )
         all_hits: List["RetrievedRelation"] = []
+        from app.services.source_scope import notebook_in_scope
+
         for nid in notebook_ids:
+            # Library dimension. The active-notebook check below is
+            # `nid == active_notebook_id`-guarded, so it never even looks at a
+            # participant library -- a run that unchecked one would otherwise
+            # keep searching it and rely entirely on the result boundary.
+            if not notebook_in_scope(nid):
+                continue
             # Relation ANN/FTS artifacts are not source partitioned yet.  A
             # truly narrowed run skips this active-notebook channel before I/O;
             # an all-selected frozen snapshot keeps the normal graph path and
@@ -1548,8 +1569,20 @@ class CandidateRetrievalService(_RetrievalState):
         for notebook_id, source_id in allowed_source_keys:
             if notebook_id and source_id:
                 sources_by_notebook.setdefault(notebook_id, []).append(source_id)
+        from app.services.source_scope import notebook_in_scope
+
         hits: List[RetrievedElement] = []
         for notebook_id in notebook_ids:
+            # Library dimension, and the last point at which an element's
+            # origin library is still known: `RetrievedElement` has no
+            # notebook_id field, so `filter_retrieval_items(..., "element",
+            # ...)` can only ever judge one against the ACTIVE notebook.
+            # Correctness downstream still holds without this line (the inner
+            # `_retrieve_elements` intersects the same ceiling and comes back
+            # empty), but only after paying for the search -- this is what
+            # makes an unchecked library free rather than merely harmless.
+            if not notebook_in_scope(notebook_id):
+                continue
             source_ids = sources_by_notebook.get(notebook_id)
             if not source_ids:
                 continue
@@ -2458,6 +2491,11 @@ class CandidateRetrievalService(_RetrievalState):
             return "", {}, [], {}
         subgraph = multihop_subgraph(G, oid_to_idx, idx_to_oid, seed_ids=seeds,
                                      edge_types=None, max_depth=1, max_fan_out=self._MIX_FANOUT)
+        from app.services.source_scope import scoped_subgraph_nodes
+
+        # The federated graph is process-cached under a scope-blind key, so the
+        # library ceiling is applied to the walk's RESULT (see the helper).
+        subgraph = scoped_subgraph_nodes(subgraph)
         if not subgraph:
             return "", {}, [], {}
         block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
