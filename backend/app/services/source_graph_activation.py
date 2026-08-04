@@ -99,25 +99,60 @@ class SelectedSourceGraphActivationService:
     def _emit(self, notebook_id: str, status: SourceGraphStatus) -> None:
         # Content-free by construction: no query, source ids, evidence, names,
         # text, or citations leave this service.
-        self._event_log.emit({
-            "kind": "selected_source_graph",
-            "notebook_id": notebook_id,
-            "state": status.state,
-            "reason": status.reason,
-            "selected_source_count": status.selected_source_count,
-            "scope_hash": status.scope_hash,
-            "node_count": status.node_count,
-            "relation_count": status.relation_count,
-            "chunk_count": status.chunk_count,
-            "enrichment_count": status.enrichment_count,
-            "cache_hit": status.cache_hit,
-            "build_ms": status.build_ms,
-            "ppr_ms": status.ppr_ms,
-            "baseline_preserved": status.baseline_preserved,
-            "baseline_evicted_count": status.baseline_evicted_count,
-            "post_scope_drop_count": status.post_scope_drop_count,
-            "degraded_reasons": list(status.degraded_reasons),
-        })
+        try:
+            self._event_log.emit({
+                "kind": "selected_source_graph",
+                "notebook_id": notebook_id,
+                "state": status.state,
+                "reason": status.reason,
+                "selected_source_count": status.selected_source_count,
+                "scope_hash": status.scope_hash,
+                "node_count": status.node_count,
+                "relation_count": status.relation_count,
+                "chunk_count": status.chunk_count,
+                "enrichment_count": status.enrichment_count,
+                "cache_hit": status.cache_hit,
+                "build_ms": status.build_ms,
+                "ppr_ms": status.ppr_ms,
+                "baseline_preserved": status.baseline_preserved,
+                "baseline_evicted_count": status.baseline_evicted_count,
+                "post_scope_drop_count": status.post_scope_drop_count,
+                "degraded_reasons": list(status.degraded_reasons),
+            })
+        except Exception:
+            # Observability is subordinate to returning the frozen baseline.
+            pass
+
+    def fail_closed(
+        self,
+        notebook_id: str,
+        baseline_chunks: Sequence[RetrievedChunk],
+        reason: str,
+        *,
+        source_ids: Sequence[str] = (),
+        snapshot: Any = None,
+        build_ms: int = 0,
+        ppr_ms: int = 0,
+        degraded_reasons: Sequence[str] = (),
+    ) -> ActivatedSourceGraphResult:
+        """Return the immutable historical lane for any graph-lane failure."""
+        baseline = tuple(baseline_chunks)
+        status = SourceGraphStatus(
+            state="degraded",
+            reason=reason,
+            selected_source_count=len(source_ids),
+            scope_hash=str(getattr(snapshot, "scope_hash", "") or ""),
+            node_count=len(getattr(snapshot, "nodes", ()) or ()),
+            relation_count=len(getattr(snapshot, "relations", ()) or ()),
+            chunk_count=len(getattr(snapshot, "chunks", ()) or ()),
+            build_ms=build_ms,
+            ppr_ms=ppr_ms,
+            degraded_reasons=tuple(dict.fromkeys(
+                value for value in (*degraded_reasons, reason) if value
+            )),
+        )
+        self._emit(notebook_id, status)
+        return ActivatedSourceGraphResult(baseline, baseline, (), status)
 
     def _decision(self, notebook_id: str):
         attestation = None
@@ -186,13 +221,24 @@ class SelectedSourceGraphActivationService:
         chunk_seeds: Mapping[str, float] | None = None,
         source_titles: Callable[[list[str]], Mapping[str, str]] | None = None,
         hydrate_chunk_ids: Callable[[Sequence[str]], Sequence[RetrievedChunk]] | None = None,
-        parent_version: Any = None,
+        parent_version: Any | Callable[[], Any] = None,
         max_results: int = 20,
-        unsafe_scope_drift: bool = False,
+        unsafe_scope_drift: bool | Callable[[], bool] = False,
     ) -> ActivatedSourceGraphResult:
         baseline = tuple(baseline_chunks)
         scope = current_source_scope()
-        if scope is not None and not scope.restricted and unsafe_scope_drift:
+        try:
+            scope_drifted = bool(
+                unsafe_scope_drift()
+                if callable(unsafe_scope_drift)
+                else unsafe_scope_drift
+            ) if scope is not None and not scope.restricted else False
+        except Exception:
+            return self.fail_closed(
+                notebook_id, baseline, "scope_drift_probe_failed",
+                source_ids=(scope.source_ids if scope is not None else ()),
+            )
+        if scope is not None and not scope.restricted and scope_drifted:
             status = SourceGraphStatus(
                 "degraded",
                 "scope_drift",
@@ -211,7 +257,13 @@ class SelectedSourceGraphActivationService:
             self._emit(notebook_id, status)
             return ActivatedSourceGraphResult(baseline, baseline, (), status)
         source_ids = tuple(sorted(scope.source_ids))
-        decision = self._decision(notebook_id)
+        try:
+            decision = self._decision(notebook_id)
+        except Exception:
+            return self.fail_closed(
+                notebook_id, baseline, "rollout_decision_failed",
+                source_ids=source_ids,
+            )
         if not decision.enabled:
             status = SourceGraphStatus(
                 "off", decision.reason, selected_source_count=len(source_ids)
@@ -237,8 +289,17 @@ class SelectedSourceGraphActivationService:
             self._emit(notebook_id, status)
             return ActivatedSourceGraphResult(baseline, baseline, (), status)
 
-        titles = dict(source_titles(list(source_ids))) if source_titles else {}
+        try:
+            titles = dict(source_titles(list(source_ids))) if source_titles else {}
+        except Exception:
+            return self.fail_closed(
+                notebook_id, baseline, "source_titles_failed",
+                source_ids=source_ids, snapshot=snapshot, build_ms=build_ms,
+            )
         candidates: dict[str, RetrievedChunk] = {}
+        degraded = list(snapshot.degraded_reasons)
+        online_ppr_available = False
+        ppr_unavailable_reason = "ppr_unavailable"
         ppr_started = time.perf_counter()
         try:
             ppr = self._online_ppr.retrieve(
@@ -247,22 +308,31 @@ class SelectedSourceGraphActivationService:
                 chunk_seeds=chunk_seeds,
                 max_results=max_results,
             )
+            online_ppr_available = bool(ppr.capability.enabled)
+            if online_ppr_available:
+                for hit in ppr.hits:
+                    candidates[hit.chunk.chunk_id] = self._chunk_from_snapshot(
+                        hit.chunk,
+                        titles.get(hit.chunk.source_id, ""),
+                        hit.score,
+                        hit.support,
+                    )
+            else:
+                ppr_unavailable_reason = str(
+                    ppr.capability.reason or "ppr_unavailable"
+                )
+                degraded.append(ppr_unavailable_reason)
         except Exception:
-            ppr = type("PprFailure", (), {
-                "hits": (), "cache_hit": False,
-                "capability": type("Capability", (), {
-                    "enabled": False, "reason": "ppr_run_failed"
-                })(),
-            })()
-        for hit in ppr.hits:
-            candidates[hit.chunk.chunk_id] = self._chunk_from_snapshot(
-                hit.chunk, titles.get(hit.chunk.source_id, ""), hit.score, hit.support
+            return self.fail_closed(
+                notebook_id, baseline, "ppr_run_failed",
+                source_ids=source_ids, snapshot=snapshot, build_ms=build_ms,
+                ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
             )
 
-        # Neighbor expansion is useful even when PPR is disabled or has no
-        # reset hits.  Memberships are already part of the frozen snapshot.
+        # Neighbor expansion complements a successful PPR producer.  The G
+        # lane is atomic: one requested producer failing discards all of G.
         neighbor_ids: set[str] = set()
-        if object_seeds:
+        if object_seeds and online_ppr_available:
             try:
                 expanded = self._primitives.expand_graph(
                     snapshot,
@@ -271,15 +341,23 @@ class SelectedSourceGraphActivationService:
                     max_fan_out=8,
                     max_nodes=80,
                 )
-            except Exception:
-                expanded = type("GraphFailure", (), {
-                    "capability": type("Capability", (), {
-                        "enabled": False, "reason": "graph_expand_failed"
-                    })(),
-                    "nodes": (),
-                })()
-            if expanded.capability.enabled:
+                if not expanded.capability.enabled:
+                    return self.fail_closed(
+                        notebook_id,
+                        baseline,
+                        str(expanded.capability.reason or "graph_expand_unavailable"),
+                        source_ids=source_ids,
+                        snapshot=snapshot,
+                        build_ms=build_ms,
+                        ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
+                    )
                 neighbor_ids = {node.object_id for node in expanded.nodes}
+            except Exception:
+                return self.fail_closed(
+                    notebook_id, baseline, "graph_expand_failed",
+                    source_ids=source_ids, snapshot=snapshot, build_ms=build_ms,
+                    ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
+                )
         member_chunk_ids = {
             chunk_id
             for object_id, chunk_id in snapshot.memberships
@@ -293,47 +371,61 @@ class SelectedSourceGraphActivationService:
                 )
 
         cache_hit = bool(getattr(ppr, "cache_hit", False))
-        degraded = list(snapshot.degraded_reasons)
-        if not getattr(ppr.capability, "enabled", False):
-            degraded.append(str(getattr(ppr.capability, "reason", "ppr_unavailable")))
-        if object_seeds and not getattr(expanded.capability, "enabled", False):
-            degraded.append(str(expanded.capability.reason or "graph_expand_unavailable"))
-        if not candidates and hydrate_chunk_ids is not None and parent_version is not None:
+        if not online_ppr_available:
+            if hydrate_chunk_ids is None or parent_version is None:
+                return self.fail_closed(
+                    notebook_id, baseline, ppr_unavailable_reason,
+                    source_ids=source_ids, snapshot=snapshot, build_ms=build_ms,
+                    ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
+                    degraded_reasons=degraded,
+                )
             try:
+                resolved_parent_version = (
+                    parent_version() if callable(parent_version) else parent_version
+                )
                 partitioned = self._partitioned_ppr.retrieve(
                     notebook_id,
                     source_ids,
-                    parent_version=parent_version,
+                    parent_version=resolved_parent_version,
                     object_seeds=object_seeds,
                     chunk_seeds=chunk_seeds,
                     max_results=max_results,
                 )
-            except Exception:
-                partitioned = type("PartitionFailure", (), {
-                    "hits": (), "cache_hit": False,
-                    "capability": type("Capability", (), {
-                        "enabled": False,
-                        "reason": "source_partition_artifact_load_failed",
-                    })(),
-                })()
-            cache_hit = bool(getattr(partitioned, "cache_hit", False))
-            if partitioned.capability.enabled and partitioned.hits:
-                hydrated = {
-                    chunk.chunk_id: chunk
-                    for chunk in hydrate_chunk_ids(
-                        [hit.chunk_id for hit in partitioned.hits]
+                if not partitioned.capability.enabled:
+                    return self.fail_closed(
+                        notebook_id,
+                        baseline,
+                        str(
+                            partitioned.capability.reason
+                            or "source_partition_artifact_unavailable"
+                        ),
+                        source_ids=source_ids,
+                        snapshot=snapshot,
+                        build_ms=build_ms,
+                        ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
                     )
-                }
-                for hit in partitioned.hits:
-                    chunk = hydrated.get(hit.chunk_id)
-                    if chunk is None or chunk.source_id != hit.source_id:
-                        continue
-                    chunk.score = hit.score
-                    chunk.relevance = hit.score
-                    chunk.retrieval_supports = (hit.support,)
-                    candidates[chunk.chunk_id] = chunk
-            elif not partitioned.capability.enabled:
-                degraded.append(partitioned.capability.reason)
+                cache_hit = bool(getattr(partitioned, "cache_hit", False))
+                if partitioned.hits:
+                    hydrated = {
+                        chunk.chunk_id: chunk
+                        for chunk in hydrate_chunk_ids(
+                            [hit.chunk_id for hit in partitioned.hits]
+                        )
+                    }
+                    for hit in partitioned.hits:
+                        chunk = hydrated.get(hit.chunk_id)
+                        if chunk is None or chunk.source_id != hit.source_id:
+                            continue
+                        chunk.score = hit.score
+                        chunk.relevance = hit.score
+                        chunk.retrieval_supports = (hit.support,)
+                        candidates[chunk.chunk_id] = chunk
+            except Exception:
+                return self.fail_closed(
+                    notebook_id, baseline, "source_partition_artifact_load_failed",
+                    source_ids=source_ids, snapshot=snapshot, build_ms=build_ms,
+                    ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
+                )
         ppr_ms = round((time.perf_counter() - ppr_started) * 1000)
 
         allowed = set(source_ids)
@@ -360,14 +452,21 @@ class SelectedSourceGraphActivationService:
         safe_candidates = tuple(
             chunk for chunk in candidates.values() if chunk.source_id in allowed
         )
-        protected = self._enrichment.run(
-            baseline,
-            lambda: safe_candidates,
-            max_enrichment_tokens=int(
-                self._settings.selected_source_graph_enrichment_tokens
-            ),
-            shadow_enabled=True,
-        )
+        try:
+            protected = self._enrichment.run(
+                baseline,
+                lambda: safe_candidates,
+                max_enrichment_tokens=int(
+                    self._settings.selected_source_graph_enrichment_tokens
+                ),
+                shadow_enabled=True,
+            )
+        except Exception:
+            return self.fail_closed(
+                notebook_id, baseline, "baseline_enrichment_failed",
+                source_ids=source_ids, snapshot=snapshot, build_ms=build_ms,
+                ppr_ms=ppr_ms, degraded_reasons=degraded,
+            )
         active = not decision.shadow_only and protected.baseline_evicted_count == 0
         visible = protected.shadow_chunks if active else protected.baseline_chunks
         state = "active" if active else "shadow"

@@ -302,21 +302,30 @@ class AskService:
             if str(getattr(chunk, "chunk_id", "") or "")
         }
 
-        result = self.selected_source_graph.run(
-            notebook_id,
-            chunks,
-            object_seeds=object_seeds,
-            chunk_seeds=chunk_seeds,
-            source_titles=self.source_titles,
-            hydrate_chunk_ids=self.selected_graph_hydrate,
-            parent_version=self.scale_version(notebook_id),
-            max_results=max_results,
-            unsafe_scope_drift=bool(
-                getattr(self.retrieval, "unsafe_source_scope_restricted", lambda _nb: False)(
-                    notebook_id
-                )
-            ),
-        )
+        try:
+            result = self.selected_source_graph.run(
+                notebook_id,
+                chunks,
+                object_seeds=object_seeds,
+                chunk_seeds=chunk_seeds,
+                source_titles=self.source_titles,
+                hydrate_chunk_ids=self.selected_graph_hydrate,
+                parent_version=lambda: self.scale_version(notebook_id),
+                max_results=max_results,
+                unsafe_scope_drift=lambda: bool(
+                    getattr(
+                        self.retrieval,
+                        "unsafe_source_scope_restricted",
+                        lambda _nb: False,
+                    )(notebook_id)
+                ),
+            )
+        except Exception:
+            # Scale-version/scope probes are graph-lane I/O too.  They must
+            # never turn a completed chunk/reasoning baseline into an error.
+            result = self.selected_source_graph.fail_closed(
+                notebook_id, chunks, "activation_seam_failed"
+            )
         if result.status.state == "historical":
             return list(result.chunks), None
         return list(result.chunks), result.status

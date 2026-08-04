@@ -490,26 +490,33 @@ class ReportEngine:
             if str(getattr(chunk, "chunk_id", "") or "")
         }
 
-        activated = service.run(
-            notebook_id,
-            baseline,
-            object_seeds=object_seeds,
-            chunk_seeds=chunk_seeds,
-            source_titles=self.dependencies.source_query.source_titles,
-            hydrate_chunk_ids=self.dependencies.selected_graph_hydrate,
-            parent_version=(
-                self.dependencies.scale_version(notebook_id)
-                if self.dependencies.scale_version is not None else None
-            ),
-            max_results=self.settings.ppr_top_chunks,
-            unsafe_scope_drift=bool(
-                getattr(
-                    self.dependencies.retrieval,
-                    "unsafe_source_scope_restricted",
-                    lambda _nb: False,
-                )(notebook_id)
-            ),
-        )
+        try:
+            activated = service.run(
+                notebook_id,
+                baseline,
+                object_seeds=object_seeds,
+                chunk_seeds=chunk_seeds,
+                source_titles=self.dependencies.source_query.source_titles,
+                hydrate_chunk_ids=self.dependencies.selected_graph_hydrate,
+                parent_version=(
+                    (lambda: self.dependencies.scale_version(notebook_id))
+                    if self.dependencies.scale_version is not None else None
+                ),
+                max_results=self.settings.ppr_top_chunks,
+                unsafe_scope_drift=lambda: bool(
+                    getattr(
+                        self.dependencies.retrieval,
+                        "unsafe_source_scope_restricted",
+                        lambda _nb: False,
+                    )(notebook_id)
+                ),
+            )
+        except Exception:
+            # Report retrieval has already frozen B.  Graph/version/scope I/O
+            # may only degrade the optional enrichment lane.
+            activated = service.fail_closed(
+                notebook_id, baseline, "activation_seam_failed"
+            )
         if activated.status.state == "historical":
             return
         result.baseline_chunks = baseline
