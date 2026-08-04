@@ -233,6 +233,27 @@ class _RetrievalState:
     def _notebook_has_kg(self, notebook_id: str) -> bool:
         return self.knowledge.has_kg(notebook_id)
 
+    def _unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
+        """Whether non-partitioned channels must be disabled before I/O."""
+        from app.services.source_scope import (
+            source_scope_restricted,
+            source_scope_visible_universe_matches,
+        )
+
+        if source_scope_restricted():
+            return True
+        visible_ids = getattr(self.sources, "all_visible_source_ids", None)
+        if not callable(visible_ids):
+            # Compatibility for bounded test/adapter doubles. Production
+            # repositories always expose the universe probe.
+            return False
+        hidden_ids = getattr(self.sources, "all_hidden_source_ids", None)
+        return not source_scope_visible_universe_matches(
+            notebook_id,
+            visible_ids(notebook_id),
+            hidden_ids(notebook_id) if callable(hidden_ids) else None,
+        )
+
     def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:
         if database is not None:
             return self.knowledge.any_mounted_has_kg_on(database, notebook_id)
@@ -1480,14 +1501,16 @@ class CandidateRetrievalService(_RetrievalState):
                 db, active_notebook_id,
             )
         all_hits: List["RetrievedRelation"] = []
-        from app.services.source_scope import scoped_allowed_source_ids
-
         for nid in notebook_ids:
-            # Relation ANN/FTS artifacts are not source partitioned yet.  Do
-            # not let an active-notebook relation outside the checkbox ceiling
-            # occupy a bounded candidate slot or steer graph expansion.  Base
-            # participants remain independent and searchable.
-            if nid == active_notebook_id and scoped_allowed_source_ids(nid) is not None:
+            # Relation ANN/FTS artifacts are not source partitioned yet.  A
+            # truly narrowed run skips this active-notebook channel before I/O;
+            # an all-selected frozen snapshot keeps the normal graph path and
+            # receives result-boundary evidence filtering.  Base participants
+            # remain independent and searchable.
+            if (
+                nid == active_notebook_id
+                and self._unsafe_source_scope_restricted(active_notebook_id)
+            ):
                 continue
             hits = self._retrieve_relations_scored(nid, query)
             tier = tier_map.get(nid, "personal")
@@ -1720,14 +1743,19 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import query_sims
         recall = recall or self.settings.chunk_recall
         query_vector = self._embed_query(query)
-        if (allowed_source_ids is None
-                and self.settings.chunk_ann_enabled
+        if (self.settings.chunk_ann_enabled
                 and query_vector is not None):
             idx = self._scale_index(notebook_id, allow_stale=True)
             if idx is not None and getattr(idx, "chunk_ann_labels", None):
-                ann = self._retrieve_chunks_ann(
-                    notebook_id, query, query_vector, idx, recall
-                )
+                if allowed_source_ids is None:
+                    ann = self._retrieve_chunks_ann(
+                        notebook_id, query, query_vector, idx, recall
+                    )
+                else:
+                    ann = self._retrieve_chunks_ann(
+                        notebook_id, query, query_vector, idx, recall,
+                        allowed_source_ids=allowed_source_ids,
+                    )
                 if ann is not None:
                     return ann
         if allowed_source_ids is not None:
@@ -1808,7 +1836,8 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import query_sims
         hits, fts_error = [], ""
         try:
-            # 选定来源时这条降级路径同样是唯一候选来源(上游刻意跳过全库 ANN)。
+            # 选定来源时，旧索引没有行→来源 sidecar 才会走这条
+            # 降级路径；条件化 ANN 可用时会在 Top-K 前完成来源过滤。
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=allowed_source_ids is not None)
             with self._connect() as db:
@@ -1852,7 +1881,10 @@ class CandidateRetrievalService(_RetrievalState):
             for chunk in scored
         })
         return scored, ids, mat
-    def _retrieve_chunks_ann(self, notebook_id, query, query_vector, idx, recall):
+    def _retrieve_chunks_ann(
+        self, notebook_id, query, query_vector, idx, recall, *,
+        allowed_source_ids=None,
+    ):
         """ANN 候选版 chunk 检索:只对 top-recall 候选打分,避免全表 matmul+重分词。
         返回 (scored, ids, matrix) 同 _retrieve_chunks;失败返回 None(上层回退暴力)。"""
         import numpy as np
@@ -1862,6 +1894,24 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import build_matrix, query_sims
         labels = idx.chunk_ann_labels
         if not labels:
+            return None
+        allowed = (
+            frozenset(str(value) for value in allowed_source_ids)
+            if allowed_source_ids is not None else None
+        )
+        source_codes = getattr(idx, "chunk_ann_source_codes", None)
+        source_names = getattr(idx, "chunk_ann_source_names", None)
+        source_counts = getattr(idx, "chunk_ann_source_counts", None)
+        if allowed is not None and (
+            source_codes is None
+            or source_names is None
+            or source_counts is None
+            or len(source_codes) != len(labels)
+        ):
+            # Older indexes have no row→source sidecar.  Do not run global ANN
+            # and filter its Top-K afterward: out-of-scope rows could starve
+            # valid evidence.  Returning None selects the bounded scoped-FTS
+            # fallback until the index is rebuilt/folded.
             return None
         qarr = np.asarray(query_vector, dtype=np.float32)
         dim = int(idx.manifest.get("dim", qarr.shape[0]))
@@ -1875,8 +1925,33 @@ class CandidateRetrievalService(_RetrievalState):
             return None
         try:
             ann.set_ef(max(recall + 1, 64))
-            k = min(recall, len(labels))
-            labs, dists = ann.knn_query(qarr, k=k)
+            if allowed is None:
+                k = min(recall, len(labels))
+                labs, dists = ann.knn_query(qarr, k=k)
+            else:
+                code_by_source = {
+                    str(source_id): code
+                    for code, source_id in enumerate(source_names)
+                }
+                allowed_codes = frozenset(
+                    code_by_source[source_id]
+                    for source_id in allowed
+                    if source_id in code_by_source
+                )
+                eligible = sum(
+                    int(source_counts[code]) for code in allowed_codes
+                )
+                if eligible:
+                    k = min(recall, eligible)
+                    labs, dists = ann.knn_query(
+                        qarr,
+                        k=k,
+                        filter=lambda label: int(source_codes[int(label)])
+                        in allowed_codes,
+                    )
+                else:
+                    labs = np.empty((1, 0), dtype=np.int64)
+                    dists = np.empty((1, 0), dtype=np.float32)
         except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
             self._note_model_error(
                 "chunk_ann_query",
@@ -1895,10 +1970,16 @@ class CandidateRetrievalService(_RetrievalState):
         if self.settings.scale_search_include_delta:
             try:
                 delta = self._index_delta(notebook_id)
-                if delta["delta_sources"]:
+                delta_sources = list(delta["delta_sources"])
+                if allowed is not None:
+                    delta_sources = [
+                        source_id for source_id in delta_sources
+                        if source_id in allowed
+                    ]
+                if delta_sources:
                     drows = []
                     with self._connect() as db:
-                        for batch in self._in_batches(delta["delta_sources"]):
+                        for batch in self._in_batches(delta_sources):
                             drows.extend(self.embeddings.chunk_delta_rows(
                                 db, notebook_id, batch,
                             ))
@@ -1920,10 +2001,15 @@ class CandidateRetrievalService(_RetrievalState):
         lexical_ids = set()
         # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
         try:
-            corpus_langs = self._lexical_corpus_langs(notebook_id)
+            corpus_langs = self._lexical_corpus_langs(
+                notebook_id, source_scoped=allowed is not None
+            )
             with self._connect() as db:
                 lex = self.knowledge.chunk_fts_search(
                     db, notebook_id, query, k=recall,
+                    allowed_source_ids=(
+                        tuple(sorted(allowed)) if allowed is not None else None
+                    ),
                     corpus_langs=corpus_langs)
             for h in lex:
                 cid = h["chunk_id"]
@@ -1938,6 +2024,15 @@ class CandidateRetrievalService(_RetrievalState):
         if not cand_ids:
             return [], [], None
         chunks, ids, mat = self._hydrate_chunk_candidates(cand_ids)
+        if allowed is not None:
+            chunks = [chunk for chunk in chunks if chunk["source_id"] in allowed]
+            kept_ids = {chunk["chunk_id"] for chunk in chunks}
+            chunk_sims = {
+                chunk_id: score for chunk_id, score in chunk_sims.items()
+                if chunk_id in kept_ids
+            }
+            lexical_ids.intersection_update(kept_ids)
+            semantic_ids.intersection_update(kept_ids)
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
         add_chunk_supports(scored, {
             chunk.chunk_id: [
@@ -2073,13 +2168,11 @@ class CandidateRetrievalService(_RetrievalState):
         `_keyword_chunk_candidates`, and fail-open for the same reason: a
         supplementary recall channel must never take the whole retrieval down.
         """
-        from app.services.source_scope import scoped_allowed_source_ids
-
         # The exact-section helper currently allocates slots before hydration
-        # and has no source predicate.  Skipping this supplementary channel is
-        # safer than allowing an out-of-scope heading to starve an allowed one;
-        # source-bounded chunk FTS remains active.
-        if scoped_allowed_source_ids(notebook_id) is not None:
+        # and has no source predicate.  Skip it only for a truly narrowed run;
+        # an all-selected frozen snapshot keeps the historical channel and its
+        # output is checked again at the retrieval boundary.
+        if self._unsafe_source_scope_restricted(notebook_id):
             return []
         if not self.settings.exact_lookup_enabled:
             return []
@@ -2300,7 +2393,14 @@ class CandidateRetrievalService(_RetrievalState):
         O(bounded)。"""
         from app.services.source_scope import source_scope_restricted
 
-        restricted = source_scope_restricted()
+        unsafe_scope_probe = getattr(
+            self, "_unsafe_source_scope_restricted", None
+        )
+        restricted = (
+            bool(unsafe_scope_probe(notebook_id))
+            if callable(unsafe_scope_probe)
+            else source_scope_restricted()
+        )
         if not restricted and self._federated_graph_is_large(notebook_id):
             self.event_log.emit({
                 "kind": "graph_walk_refused",
@@ -2391,8 +2491,6 @@ class CandidateRetrievalService(_RetrievalState):
         PPR 跨文档扩散的噪声由 ask_chunk 侧现成 rerank 免费压低。"""
         vector_chunks = self._gather_vector_chunks(notebook_id, sub_queries)
         kg_block, kg_id_map, kg_hits, kg_chunks = "", {}, [], []
-        from app.services.source_scope import source_scope_restricted
-
         overlay_on = self.settings.chunk_kg_overlay_enabled and (
             self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg(notebook_id))
         if overlay_on:
@@ -2405,7 +2503,8 @@ class CandidateRetrievalService(_RetrievalState):
         # 概念漫游(PPR)第 3 路:gated GRAPH_PPR_ENABLED;无 KG/无 reset → []。
         ppr_chunks = (
             self._ppr_retrieve(notebook_id, query)
-            if self.settings.graph_ppr_enabled and not source_scope_restricted()
+            if self.settings.graph_ppr_enabled
+            and not self._unsafe_source_scope_restricted(notebook_id)
             else []
         )
         from app.services.retrieval import merge_retrieval_supports

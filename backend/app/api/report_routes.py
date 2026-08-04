@@ -53,11 +53,13 @@ def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: s
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
-                         depth: int = 2) -> None:
+                         depth: int = 2, *, source_scope=None) -> None:
     """阶段2(生成)后台 job:用已确认的 outline 跑 generate → done。"""
     repo.report_execution.start_generate(
         notebook_id, rid, question, depth,
-        user_id=repo.current_user().id)
+        user_id=repo.current_user().id,
+        source_scope=source_scope,
+    )
 
 
 @router.post("/notebooks/{notebook_id}/reports",
@@ -96,7 +98,7 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
     else:
         _launch_plan_job(
             repo, notebook_id, rid, payload.question.strip(), payload.history,
-            payload.auto_generate, source_scope=scope_payload,
+            payload.auto_generate, source_scope=resolved_source_scope,
         )
     return {"report_id": rid, "status": "pending"}
 
@@ -161,7 +163,7 @@ def confirm_report_intent(notebook_id: str, report_id: str,
         raise user_error(409, "当前报告不再处于问题确认阶段")
     launch_kwargs = {"intent_contract": understanding}
     if understanding.get("source_scope") is not None:
-        launch_kwargs["source_scope"] = understanding["source_scope"]
+        launch_kwargs["source_scope"] = resolved_scope
     _launch_plan_job(
         repo,
         notebook_id,
@@ -332,6 +334,7 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
         raise HTTPException(status_code=409, detail="generate only from outline_ready")
     understanding = dict(cur.get("understanding") or {})
     persisted_scope = understanding.get("source_scope")
+    resolved_scope = None
     if persisted_scope is not None:
         try:
             notebook = repo.get_notebook(notebook_id)
@@ -348,7 +351,19 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
     depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
     if not repo.claim_report_generation(notebook_id, report_id):
         raise user_error(409, "当前报告不再处于大纲确认阶段")
-    _launch_generate_job(repo, notebook_id, report_id, cur["question"], depth)
+    if resolved_scope is None:
+        _launch_generate_job(
+            repo, notebook_id, report_id, cur["question"], depth
+        )
+    else:
+        _launch_generate_job(
+            repo,
+            notebook_id,
+            report_id,
+            cur["question"],
+            depth,
+            source_scope=resolved_scope,
+        )
     return {"status": "generating"}
 
 

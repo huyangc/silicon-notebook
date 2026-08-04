@@ -148,7 +148,8 @@ class ReportExecutionCoordinator:
         return True
 
     def start_generate(self, notebook_id: str, report_id: str, question: str,
-                       depth: int = 2, *, user_id: str = "") -> bool:
+                       depth: int = 2, *, user_id: str = "",
+                       source_scope=None) -> bool:
         """阶段2(生成)后台 job:用已确认的 outline 跑 generate → done。"""
         cancel = threading.Event()
         if not self.cancellations.register(report_id, cancel, replace=True):
@@ -156,13 +157,15 @@ class ReportExecutionCoordinator:
 
         def worker():
             try:
+                effective_scope = source_scope
                 try:
                     report = self.reports.get_report(notebook_id, report_id)
                     if report.get("status") == "cancelled" or cancel.is_set():
                         return
-                    source_scope = (report.get("understanding") or {}).get(
-                        "source_scope"
-                    )
+                    if effective_scope is None:
+                        effective_scope = (
+                            report.get("understanding") or {}
+                        ).get("source_scope")
                 except Exception as exc:
                     # The persisted understanding contract is the authority for
                     # generation.  A transient read failure must never erase a
@@ -181,7 +184,7 @@ class ReportExecutionCoordinator:
                 ):
                     from app.services.source_scope import source_scope_context
 
-                    with source_scope_context(notebook_id, source_scope):
+                    with source_scope_context(notebook_id, effective_scope):
                         self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
                             notebook_id, report_id, question, depth=depth)
             finally:

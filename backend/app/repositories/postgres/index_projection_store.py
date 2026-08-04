@@ -182,6 +182,24 @@ class IndexProjectionStore:
             return [r["id"] for r in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=%s", (notebook_id,)).fetchall()]
 
+    def chunk_sources_for_ids(
+        self, notebook_id: str, chunk_ids: Sequence[str]
+    ) -> Dict[str, str]:
+        """Return the row-aligned ANN source identity for a bounded id page."""
+        if not chunk_ids:
+            return {}
+        out: Dict[str, str] = {}
+        with self.connect() as db:
+            for batch in self.in_batches(chunk_ids):
+                placeholders = ",".join("%s" for _ in batch)
+                rows = db.execute(
+                    "SELECT id,source_id FROM chunks WHERE notebook_id=%s "
+                    f"AND id IN ({placeholders})",
+                    (notebook_id, *batch),
+                ).fetchall()
+                out.update((row["id"], row["source_id"]) for row in rows)
+        return out
+
     def visible_source_ids(
         self, notebook_id: str, source_ids: List[str]
     ) -> List[str]:
@@ -206,6 +224,16 @@ class IndexProjectionStore:
             rows = db.execute(
                 "SELECT id FROM sources WHERE notebook_id=%s "
                 "AND source_type NOT IN ('memory','knowhow') ORDER BY id",
+                (notebook_id,),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def all_hidden_source_ids(self, notebook_id: str) -> List[str]:
+        """Return hidden Memory/Knowhow participants in stable id order."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM sources WHERE notebook_id=%s "
+                "AND source_type IN ('memory','knowhow') ORDER BY id",
                 (notebook_id,),
             ).fetchall()
         return [row["id"] for row in rows]

@@ -771,6 +771,19 @@ class ReportEngine:
         )
         return service.build(notebook_id, result_scope=result_scope)
 
+    def _unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
+        from app.services.source_scope import source_scope_restricted
+
+        probe = getattr(
+            self.dependencies.retrieval,
+            "unsafe_source_scope_restricted",
+            None,
+        )
+        return (
+            bool(probe(notebook_id))
+            if callable(probe) else source_scope_restricted()
+        )
+
     def _build_corpus_map(self, notebook_id: str, question: str,
                           profile: Optional[dict] = None) -> str:
         """0-LLM 语料侦察:来源标题 + federated KG 命中 + PPR chunk 来源·路径。
@@ -779,7 +792,8 @@ class ReportEngine:
         parts: List[str] = []
         from app.services.source_scope import source_scope_restricted
 
-        if not source_scope_restricted():
+        unsafe_scope = self._unsafe_source_scope_restricted(notebook_id)
+        if not unsafe_scope:
             try:
                 active_profile = (
                     profile
@@ -797,7 +811,7 @@ class ReportEngine:
                     f"[{h.object_type}][{getattr(h,'tier','personal')}]" for h in kg))
         except Exception:
             pass
-        if not source_scope_restricted():
+        if not unsafe_scope:
             try:
                 chunks = deps.retrieval.ppr_retrieve(
                     notebook_id, question
@@ -855,11 +869,9 @@ class ReportEngine:
                 intent_contract, question
             )
             try:
-                from app.services.source_scope import source_scope_restricted
-
                 corpus_profile = (
                     {}
-                    if source_scope_restricted()
+                    if self._unsafe_source_scope_restricted(notebook_id)
                     else self._corpus_profile(
                         notebook_id,
                         result_scope=str(

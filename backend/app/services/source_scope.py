@@ -19,24 +19,41 @@ class ActiveSourceScope:
     notebook_id: str
     mode: str
     source_ids: frozenset[str]
+    narrowed: bool | None = None
+    hidden_source_ids: frozenset[str] = frozenset()
+
+    @property
+    def ceiling_active(self) -> bool:
+        """Whether active-notebook evidence is bounded by a frozen snapshot.
+
+        This is deliberately distinct from ``restricted``.  An API-resolved
+        include-list that happened to contain the whole visible universe is
+        not a narrowed run, so graph channels may stay enabled, but the frozen
+        list must still constrain source-partitioned candidate generation and
+        final evidence if sources change while the run is in flight.
+        """
+        return self.mode == "include" or bool(self.source_ids)
 
     @property
     def restricted(self) -> bool:
+        if self.narrowed is not None:
+            return self.narrowed
         # exclude [] is the UI/default representation of "all local sources"
-        # and must remain byte-for-byte compatible with the historical path.
-        return self.mode == "include" or bool(self.source_ids)
+        # and must remain byte-for-byte compatible with historical direct
+        # callers whose scope predates the server-computed narrowed bit.
+        return self.ceiling_active
 
     def allows(self, notebook_id: str, source_id: str) -> bool:
         # Mounted base libraries are independent participants and are never
         # governed by the active notebook's source checkboxes.
         if notebook_id and notebook_id != self.notebook_id:
             return True
-        if not self.restricted:
+        if not self.ceiling_active:
             return True
         if not source_id:
             return False
         if self.mode == "include":
-            return source_id in self.source_ids
+            return source_id in self.source_ids or source_id in self.hidden_source_ids
         return source_id not in self.source_ids
 
 
@@ -49,7 +66,14 @@ def _scope_dict(scope: Any) -> dict[str, Any] | None:
     if scope is None:
         return None
     if hasattr(scope, "model_dump"):
-        return scope.model_dump()
+        raw = scope.model_dump()
+        # Pydantic intentionally excludes server-only hidden ids from public
+        # serialization.  The live request context still needs the validated
+        # snapshot carried by the model object itself.
+        hidden = getattr(scope, "hidden_source_ids", None)
+        if hidden is not None:
+            raw["hidden_source_ids"] = list(hidden)
+        return raw
     return dict(scope)
 
 
@@ -63,6 +87,13 @@ def source_scope_context(notebook_id: str, scope: Any) -> Iterator[None]:
         notebook_id=notebook_id,
         mode=str(raw.get("mode") or "exclude"),
         source_ids=frozenset(str(value) for value in raw.get("source_ids") or []),
+        narrowed=(
+            bool(raw["narrowed"])
+            if raw.get("narrowed") is not None else None
+        ),
+        hidden_source_ids=frozenset(
+            str(value) for value in raw.get("hidden_source_ids") or []
+        ),
     )
     token = _CURRENT_SOURCE_SCOPE.set(current)
     try:
@@ -79,12 +110,21 @@ def current_source_scope_payload() -> dict[str, Any] | None:
     scope = current_source_scope()
     if scope is None:
         return None
-    return {"mode": scope.mode, "source_ids": sorted(scope.source_ids)}
+    return {
+        "mode": scope.mode,
+        "source_ids": sorted(scope.source_ids),
+        "narrowed": scope.narrowed,
+    }
 
 
 def source_scope_restricted() -> bool:
     scope = current_source_scope()
     return bool(scope and scope.restricted)
+
+
+def source_scope_ceiling_active() -> bool:
+    scope = current_source_scope()
+    return bool(scope and scope.ceiling_active)
 
 
 def scoped_conversation_history(history: str) -> str:
@@ -113,12 +153,16 @@ def scoped_allowed_source_ids(
         if explicit is not None else None
     )
     scope = current_source_scope()
-    if scope is None or not scope.restricted or notebook_id != scope.notebook_id:
+    if (
+        scope is None
+        or not scope.ceiling_active
+        or notebook_id != scope.notebook_id
+    ):
         return allowed
     if scope.mode == "include":
+        ceiling = scope.source_ids | scope.hidden_source_ids
         if allowed is None:
-            return tuple(sorted(scope.source_ids))
-        ceiling = scope.source_ids
+            return tuple(sorted(ceiling))
         return tuple(value for value in allowed if value in ceiling)
     if allowed is not None:
         return tuple(value for value in allowed if value not in scope.source_ids)
@@ -143,7 +187,7 @@ def filter_retrieval_items(
 ) -> list[Any]:
     scope = current_source_scope()
     values = list(items)
-    if scope is None or not scope.restricted:
+    if scope is None or not scope.ceiling_active:
         return values
     out: list[Any] = []
     for item in values:
@@ -182,7 +226,11 @@ def filter_retrieval_items(
 
 def evidence_json_allowed(notebook_id: str, raw: Any) -> bool:
     scope = current_source_scope()
-    if scope is None or not scope.restricted or notebook_id != scope.notebook_id:
+    if (
+        scope is None
+        or not scope.ceiling_active
+        or notebook_id != scope.notebook_id
+    ):
         return True
     if isinstance(raw, str):
         try:
@@ -190,3 +238,36 @@ def evidence_json_allowed(notebook_id: str, raw: Any) -> bool:
         except Exception:
             raw = []
     return bool(filter_evidence(notebook_id, raw or []))
+
+
+def source_scope_visible_universe_matches(
+    notebook_id: str,
+    current_visible_source_ids: Iterable[str],
+    current_hidden_source_ids: Iterable[str] | None = None,
+) -> bool:
+    """Check whether an all-selected graph run still sees frozen participants.
+
+    Narrowed runs are already unsafe for whole-graph channels.  Legacy scopes
+    without the server-computed bit keep their historical behavior.  For a
+    server-resolved all-selected include snapshot, any visible-source drift or
+    hidden-projection drift disables non-partitioned graph/PPR/relation/exact
+    channels before I/O. ``None`` keeps compatibility for bounded test doubles
+    that predate the hidden-participant probe; production supplies both sets.
+    """
+    scope = current_source_scope()
+    if (
+        scope is None
+        or notebook_id != scope.notebook_id
+        or scope.narrowed is None
+        or scope.narrowed
+        or scope.mode != "include"
+    ):
+        return True
+    visible_matches = set(
+        str(value) for value in current_visible_source_ids
+    ) == set(scope.source_ids)
+    if not visible_matches or current_hidden_source_ids is None:
+        return visible_matches
+    return set(str(value) for value in current_hidden_source_ids) == set(
+        scope.hidden_source_ids
+    )

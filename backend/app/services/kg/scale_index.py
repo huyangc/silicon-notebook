@@ -66,6 +66,9 @@ class ScaleIndex:
     viz_edges: list = None        # directed-deduped folded edges [[src,dst,edge_type],...]
     chunk_ann_labels: list = None   # chunk_id 列表(与 chunk_ann.bin 行对齐);无则 None
     chunk_ann_path: str = None      # chunk hnsw 文件路径;无则 None
+    chunk_ann_source_names: list = None  # source code → source_id
+    chunk_ann_source_codes: "np.ndarray" = None  # ANN row → source code
+    chunk_ann_source_counts: "np.ndarray" = None  # source code → row count
     relation_ann_labels: list = None   # relation_id 列表(与 relation_ann.bin 行对齐);无则 None
     relation_ann_path: str = None      # relation hnsw 文件路径;无则 None
     ann_handle: object = None        # 惰性缓存的 hnswlib KG ANN handle(不落盘)
@@ -170,6 +173,8 @@ def load_scale_index(out_dir: str):
 
     viz_ids = viz_adj = viz_deg = viz_types = viz_names = viz_edges = None
     chunk_ann_labels = chunk_ann_path = None
+    chunk_ann_source_names = None
+    chunk_ann_source_codes = chunk_ann_source_counts = None
     relation_ann_labels = relation_ann_path = None
     try:
         if manifest.get("has_viz"):
@@ -190,6 +195,62 @@ def load_scale_index(out_dir: str):
                 chunk_ann_labels = list(np.load(labpath, allow_pickle=True))
                 chunk_ann_path = os.path.join(out_dir, "chunk_ann.bin")
 
+        if manifest.get("has_chunk_ann_sources"):
+            names_path = os.path.join(out_dir, "chunk_ann_source_names.npy")
+            codes_path = os.path.join(out_dir, "chunk_ann_source_codes.npy")
+            counts_path = os.path.join(out_dir, "chunk_ann_source_counts.npy")
+            if not all(os.path.exists(path) for path in (
+                names_path, codes_path, counts_path
+            )):
+                return _unusable(out_dir, "chunk ANN 来源映射文件缺失")
+            names_array = np.load(names_path, allow_pickle=True)
+            codes_array = np.load(codes_path)
+            counts_array = np.load(counts_path)
+            if (
+                names_array.ndim != 1
+                or codes_array.ndim != 1
+                or counts_array.ndim != 1
+                or not np.issubdtype(codes_array.dtype, np.signedinteger)
+                or not np.issubdtype(counts_array.dtype, np.integer)
+                or any(
+                    not isinstance(value, (str, np.str_)) or not str(value)
+                    for value in names_array
+                )
+                or len({str(value) for value in names_array})
+                != len(names_array)
+            ):
+                return _unusable(out_dir, "chunk ANN 来源映射类型或维度非法")
+            chunk_ann_source_names = [str(value) for value in names_array]
+            chunk_ann_source_codes = np.asarray(codes_array, dtype=np.int64)
+            chunk_ann_source_counts = np.asarray(counts_array, dtype=np.int64)
+            if (
+                np.any(chunk_ann_source_codes < -1)
+                or (
+                    not chunk_ann_source_names
+                    and np.any(chunk_ann_source_codes >= 0)
+                )
+                or (
+                    chunk_ann_source_names
+                    and np.any(
+                        chunk_ann_source_codes
+                        >= len(chunk_ann_source_names)
+                    )
+                )
+            ):
+                return _unusable(out_dir, "chunk ANN 来源代码越界")
+            actual_counts = np.bincount(
+                chunk_ann_source_codes[chunk_ann_source_codes >= 0],
+                minlength=len(chunk_ann_source_names),
+            )
+            if (
+                np.any(chunk_ann_source_counts < 0)
+                or not np.array_equal(
+                    actual_counts.astype(np.int64, copy=False),
+                    chunk_ann_source_counts,
+                )
+            ):
+                return _unusable(out_dir, "chunk ANN 来源计数与行映射不一致")
+
         if manifest.get("has_relation_ann"):
             rlabpath = os.path.join(out_dir, "relation_ann_labels.npy")
             if os.path.exists(rlabpath):
@@ -209,6 +270,19 @@ def load_scale_index(out_dir: str):
         optional_checks.append((
             "manifest.n_chunk_ann 与 chunk_ann_labels.npy 行数",
             _manifest_count(manifest, "n_chunk_ann"), len(chunk_ann_labels)))
+    if chunk_ann_source_codes is not None:
+        optional_checks.extend([
+            (
+                "chunk_ann_source_codes.npy 与 chunk ANN 行数",
+                len(chunk_ann_labels or []),
+                len(chunk_ann_source_codes),
+            ),
+            (
+                "chunk_ann_source_counts.npy 与 source names 行数",
+                len(chunk_ann_source_names or []),
+                len(chunk_ann_source_counts),
+            ),
+        ])
     if relation_ann_labels is not None:
         optional_checks.append((
             "manifest.n_relation_ann 与 relation_ann_labels.npy 行数",
@@ -234,6 +308,9 @@ def load_scale_index(out_dir: str):
         viz_edges=viz_edges,
         chunk_ann_labels=chunk_ann_labels,
         chunk_ann_path=chunk_ann_path,
+        chunk_ann_source_names=chunk_ann_source_names,
+        chunk_ann_source_codes=chunk_ann_source_codes,
+        chunk_ann_source_counts=chunk_ann_source_counts,
         relation_ann_labels=relation_ann_labels,
         relation_ann_path=relation_ann_path,
     )
@@ -408,6 +485,9 @@ def save_scale_index(
     viz_payload: dict = None,
     chunk_ann_vectors=None,
     chunk_ann_labels: List[str] = None,
+    chunk_ann_source_names: List[str] = None,
+    chunk_ann_source_codes=None,
+    chunk_ann_source_counts=None,
     relation_ann_vectors=None,
     relation_ann_labels: List[str] = None,
     prebuilt_ann=None,
@@ -485,6 +565,28 @@ def save_scale_index(
                      chunk_ann_vectors, len(chunk_ann_labels), dim, ef_construction)
         np.save(os.path.join(out_dir, "chunk_ann_labels.npy"), np.asarray(chunk_ann_labels, dtype=object))
         manifest = {**manifest, "has_chunk_ann": True, "n_chunk_ann": len(chunk_ann_labels)}
+        if (
+            chunk_ann_source_names is not None
+            and chunk_ann_source_codes is not None
+            and chunk_ann_source_counts is not None
+        ):
+            source_codes = np.asarray(chunk_ann_source_codes, dtype=np.int32)
+            source_counts = np.asarray(chunk_ann_source_counts, dtype=np.int64)
+            if len(source_codes) != len(chunk_ann_labels):
+                raise ValueError("chunk ANN source codes must align with labels")
+            if len(source_counts) != len(chunk_ann_source_names):
+                raise ValueError("chunk ANN source counts must align with names")
+            np.save(
+                os.path.join(out_dir, "chunk_ann_source_names.npy"),
+                np.asarray(chunk_ann_source_names, dtype=object),
+            )
+            np.save(
+                os.path.join(out_dir, "chunk_ann_source_codes.npy"), source_codes
+            )
+            np.save(
+                os.path.join(out_dir, "chunk_ann_source_counts.npy"), source_counts
+            )
+            manifest = {**manifest, "has_chunk_ann_sources": True}
 
     # Relation-level ANN (mirrors chunk): pre-built index or rebuild from matrix.
     if relation_ann_labels:
@@ -514,6 +616,22 @@ def save_fold_ann(out_dir, index_name, labels_name, ann, labels) -> None:
     """Persist one fold ANN handle and its row-aligned object labels."""
     ann.save_index(os.path.join(out_dir, index_name))
     np.save(os.path.join(out_dir, labels_name), np.asarray(labels, dtype=object))
+
+
+def save_fold_chunk_sources(out_dir, names, codes, counts) -> None:
+    """Persist the compact chunk ANN source-filter sidecar during a fold."""
+    np.save(
+        os.path.join(out_dir, "chunk_ann_source_names.npy"),
+        np.asarray(names, dtype=object),
+    )
+    np.save(
+        os.path.join(out_dir, "chunk_ann_source_codes.npy"),
+        np.asarray(codes, dtype=np.int32),
+    )
+    np.save(
+        os.path.join(out_dir, "chunk_ann_source_counts.npy"),
+        np.asarray(counts, dtype=np.int64),
+    )
 
 
 def copy_fold_viz(live_dir, temporary_dir) -> None:

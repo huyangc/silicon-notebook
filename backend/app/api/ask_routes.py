@@ -54,18 +54,29 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
     """
     if scope is None:
         return None
-    valid = repo.visible_source_ids(notebook.id, scope.source_ids)
-    if valid != scope.source_ids:
+    universe = repo.all_visible_source_ids(notebook.id)
+    visible = set(universe)
+    if any(source_id not in visible for source_id in scope.source_ids):
         raise user_error(422, "检索范围包含不属于当前笔记本的来源")
     if scope.mode == "include":
         selected = list(scope.source_ids)
     else:
         excluded = set(scope.source_ids)
         selected = [
-            source_id for source_id in repo.all_visible_source_ids(notebook.id)
+            source_id for source_id in universe
             if source_id not in excluded
         ]
-    resolved = SourceScope(mode="include", source_ids=selected)
+    narrowed = set(selected) != visible
+    resolved = SourceScope(
+        mode="include",
+        source_ids=selected,
+        # Never trust a client-supplied value: narrowing is a relation between
+        # the validated selection and the server's current visible universe.
+        narrowed=narrowed,
+    )
+    resolved._hidden_source_ids = (
+        repo.all_hidden_source_ids(notebook.id) if not narrowed else []
+    )
     if not resolved.source_ids and not notebook.base_notebooks:
         raise user_error(409, "当前检索范围为空，请至少选择一个来源或挂载参考库")
     return resolved

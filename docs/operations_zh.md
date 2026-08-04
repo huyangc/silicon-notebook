@@ -590,6 +590,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 索引 KG 检索在 ANN 生成候选后仍必须保持有界。孤立节点排序降权只对每个候选执行带索引的 `EXISTS`，并且只返回已有连接的候选 id，绝不能拉取 hub 的完整邻边；canonical fold 只能通过 `cluster_fold_rows` 读取 scored id 的映射。并发推理子查询按 scale-index 实例和工件类型共享一次惰性 ANN 加载。这些优化不改变检索 id、score、阈值、PPR 行为或召回。
 
+当前 scale-index 全量构建与 delta fold 还会写入 `chunk_ann_source_names.npy`、`chunk_ann_source_codes.npy` 和 `chunk_ann_source_counts.npy`。这些紧凑、逐行对齐的文件让收窄来源的 chunk ANN 在 HNSW 进入 Top-K 前拒绝未选行。历史已发布索引仍可加载，但在该 notebook 重建或 fold 之前，收窄的 chunk/元素检索会使用有界来源内 FTS；若部署后立刻需要跨语言的限定来源语义召回，应重建对应 scale 索引。当 manifest 声明 `has_chunk_ann_sources=true` 却缺文件、行数不一致或来源代码越界时，整份工件判不可用，不能静默削弱来源边界。
+
 生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `ann_ms`、`hydrate_ms`、`fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
 
 ### 检索回放对照(`scripts/replay_retrieval.py`)

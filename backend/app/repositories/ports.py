@@ -819,6 +819,8 @@ class CatalogStorePort(Protocol):
 
 @runtime_checkable
 class SourceStorePort(Protocol):
+    def all_visible_source_ids(self, notebook_id: str) -> list[str]: ...
+    def all_hidden_source_ids(self, notebook_id: str) -> list[str]: ...
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]: ...
@@ -2341,6 +2343,10 @@ class IndexProjectionStorePort(Protocol):
         id_column: str,
         object_ids: Sequence[str] | None = None,
     ) -> Any: ...
+    def chunk_sources_for_ids(
+        self, notebook_id: str, chunk_ids: Sequence[str]
+    ) -> dict[str, str]: ...
+    def all_hidden_source_ids(self, notebook_id: str) -> list[str]: ...
 
 
 @runtime_checkable

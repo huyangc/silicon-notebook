@@ -4,7 +4,11 @@ from app.models.notebooks import NotebookSummary
 from app.api.ask_routes import _validate_source_scope
 from fastapi import HTTPException
 import pytest
-from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
+from app.services.retrieval import (
+    RetrievedChunk,
+    RetrievedElement,
+    RetrievedKnowledge,
+)
 from app.services.kg.follow_chain import ChainHop, FollowChainResult, InferredChain
 from app.services.retrieval_service import RetrievalService
 from app.services.source_scope import (
@@ -12,7 +16,9 @@ from app.services.source_scope import (
     scoped_allowed_source_ids,
     scoped_conversation_history,
     source_allowed,
+    source_scope_restricted,
     source_scope_context,
+    source_scope_visible_universe_matches,
 )
 from app.services.reasoning_retrieval import (
     ReasoningRetriever,
@@ -149,9 +155,10 @@ def test_follow_chain_replaces_hop_evidence_with_scoped_copy():
 
 
 class _ScopeRepo:
-    def __init__(self, visible: list[str], count: int):
+    def __init__(self, visible: list[str], count: int, hidden=None):
         self.visible = visible
         self.count = count
+        self.hidden = list(hidden or [])
 
     def visible_source_ids(self, _notebook_id, source_ids):
         return [source_id for source_id in source_ids if source_id in self.visible]
@@ -161,6 +168,9 @@ class _ScopeRepo:
 
     def all_visible_source_ids(self, _notebook_id):
         return list(self.visible)
+
+    def all_hidden_source_ids(self, _notebook_id):
+        return list(self.hidden)
 
 
 def _notebook(*, bases=None):
@@ -192,9 +202,96 @@ def test_exclusion_scope_is_frozen_to_an_explicit_allow_list():
     resolved = _validate_source_scope(
         _ScopeRepo(["s1", "s2", "s3"], 3),
         _notebook(),
-        SourceScope(mode="exclude", source_ids=["s2"]),
+        SourceScope(mode="exclude", source_ids=["s2"], narrowed=False),
     )
-    assert resolved == SourceScope(mode="include", source_ids=["s1", "s3"])
+    assert resolved == SourceScope(
+        mode="include", source_ids=["s1", "s3"], narrowed=True
+    )
+
+
+def test_all_selected_is_frozen_but_not_misclassified_as_narrowed():
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1"], 1, hidden=["hidden-memory", "hidden-knowhow"]),
+        _notebook(),
+        SourceScope(mode="exclude", source_ids=[], narrowed=True),
+    )
+
+    assert resolved.mode == "include"
+    assert resolved.source_ids == ["s1"]
+    assert resolved.narrowed is False
+    assert "hidden_source_ids" not in resolved.model_dump()
+    assert "hidden_source_ids" not in SourceScope.model_json_schema()["properties"]
+    with source_scope_context("nb", resolved):
+        assert scoped_conversation_history("prior answer") == "prior answer"
+        assert source_scope_restricted() is False
+        assert scoped_allowed_source_ids("nb") == (
+            "hidden-knowhow", "hidden-memory", "s1"
+        )
+        assert source_allowed("nb", "s1") is True
+        assert source_allowed("nb", "hidden-memory") is True
+        assert source_allowed("nb", "hidden-knowhow") is True
+        assert source_allowed("nb", "concurrently-added") is False
+        assert source_scope_visible_universe_matches(
+            "nb", ["s1"], ["hidden-memory", "hidden-knowhow"]
+        ) is True
+        assert source_scope_visible_universe_matches(
+            "nb", ["s1", "s2"], ["hidden-memory", "hidden-knowhow"]
+        ) is False
+        assert source_scope_visible_universe_matches(
+            "nb", ["s1"], ["hidden-memory", "hidden-knowhow", "new-hidden"]
+        ) is False
+
+
+def test_narrowed_scope_excludes_hidden_projection_sources():
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1", "s2"], 2, hidden=["hidden-memory"]),
+        _notebook(),
+        SourceScope(mode="include", source_ids=["s1"]),
+    )
+
+    with source_scope_context("nb", resolved):
+        assert source_scope_restricted() is True
+        assert source_scope_visible_universe_matches("nb", ["s1", "s2", "s3"]) is True
+        assert scoped_allowed_source_ids("nb") == ("s1",)
+        assert source_allowed("nb", "hidden-memory") is False
+
+
+def test_candidate_detects_hidden_participant_drift_through_source_store():
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    class _Sources:
+        visible = ["s1"]
+        hidden = ["hidden-memory"]
+
+        def all_visible_source_ids(self, _notebook_id):
+            return list(self.visible)
+
+        def all_hidden_source_ids(self, _notebook_id):
+            return list(self.hidden)
+
+    class _Candidates:
+        sources = _Sources()
+
+    scope = SourceScope(mode="include", source_ids=["s1"], narrowed=False)
+    scope._hidden_source_ids = ["hidden-memory"]
+    with source_scope_context("nb", scope):
+        assert CandidateRetrievalService._unsafe_source_scope_restricted(
+            _Candidates(), "nb"
+        ) is False
+        _Candidates.sources.hidden.append("new-hidden")
+        assert CandidateRetrievalService._unsafe_source_scope_restricted(
+            _Candidates(), "nb"
+        ) is True
+
+
+def test_explicit_include_of_the_whole_universe_is_not_narrowed():
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1", "s2"], 2),
+        _notebook(),
+        SourceScope(mode="include", source_ids=["s1", "s2"]),
+    )
+
+    assert resolved.narrowed is False
 
 
 def test_checkbox_ceiling_intersects_producer_allow_list_and_leaves_base_alone():
@@ -397,6 +494,81 @@ def test_checkbox_only_scope_disables_enumeration_and_ppr_before_io():
         if step.detail.get("reason") == "source_scope_unsafe_channels"
     ]
     assert unsafe
+
+
+def test_all_selected_single_source_recovers_raw_elements_before_reflect():
+    class _RawFallback(_ScopedRunRetrieval):
+        def federated_retrieve(self, *_args, **_kwargs):
+            return []
+
+        def retrieve_elements(self, *_args, **_kwargs):
+            return [RetrievedElement(
+                element_id="el-A",
+                source_id="A",
+                source_title="Manual A",
+                location_label="Commands",
+                element_type="paragraph",
+                text="command from A",
+                score=0.8,
+            )]
+
+        def retrieve_scored(self, *_args, **_kwargs):
+            return []
+
+    retrieval = _RawFallback()
+    retriever = ReasoningRetriever(
+        retrieval=retrieval,
+        model_clients=_ScopedRunModels(),
+        communities=_ScopedRunCommunities(),
+        settings=_ScopedRunSettings(),
+    )
+    retriever.plan = lambda *args, **kwargs: [SubQuery(query="plain question")]
+    retriever.reflect = lambda *args, **kwargs: ReflectDecision(
+        next_action="answer", sufficient=True
+    )
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"], narrowed=False)
+    ):
+        result = retriever.run("nb", "plain question")
+
+    assert [element.source_id for element in result.elements] == ["A"]
+    assert any(
+        step.detail.get("reason") == "initial_evidence_empty"
+        and step.detail.get("found") == 1
+        for step in result.trace
+    )
+
+
+def test_all_selected_universe_drift_disables_ppr_before_io():
+    class _Drifted(_ScopedRunRetrieval):
+        def unsafe_source_scope_restricted(self, _notebook_id):
+            return True
+
+    retrieval = _Drifted()
+    settings = _ScopedRunSettings()
+    settings.graph_ppr_enabled = True
+    retriever = ReasoningRetriever(
+        retrieval=retrieval,
+        model_clients=_ScopedRunModels(),
+        communities=_ScopedRunCommunities(),
+        settings=settings,
+    )
+    retriever.plan = lambda *args, **kwargs: [SubQuery(query="plain question")]
+    retriever.reflect = lambda *args, **kwargs: ReflectDecision(
+        next_action="answer", sufficient=True
+    )
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"], narrowed=False)
+    ):
+        result = retriever.run("nb", "plain question")
+
+    assert retrieval.ppr_calls == 0
+    assert any(
+        step.detail.get("reason") == "source_scope_unsafe_channels"
+        for step in result.trace
+    )
 
 def test_checkbox_scope_skips_per_action_unsafe_channels_with_zero_io():
     """逐动作的纵深防御:模型即使提交了受限 run 下不该出现的动作,也不能落成 I/O。

@@ -65,7 +65,7 @@ from app.services.prompts import (
     followup_rewrite_prompt,
 )
 from app.services.retrieval import RetrievedKnowledge, classify_evidence
-from app.services.source_scope import source_scope_restricted
+from app.services.source_scope import source_scope_context, source_scope_restricted
 
 # Matches both one provenance marker and the comma-group form models commonly
 # emit (`[k1, k3]`). A group binds only when every key exists in id_map.
@@ -76,6 +76,11 @@ _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
 # a real anchor, so no fabricated/malformed marker reaches the user. Kept
 # separate from _MARKER_GROUP_RE so strict anchor resolution is unchanged.
 _LOOSE_MARKER_GROUP_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
+
+_NO_RETRIEVAL_EVIDENCE_MESSAGE = (
+    "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，"
+    "但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。"
+)
 
 
 @dataclass
@@ -287,8 +292,6 @@ class AskService:
         raise UnknownAskMode — never a silent fall-through. on_trace only
         reaches streaming engines (mirrors the frozen route-runner split)."""
         from app.services.ask_modes import resolve_mode
-
-        from app.services.source_scope import source_scope_context
 
         spec = resolve_mode(getattr(payload, "mode", None))
         handler = getattr(self, spec.handler)
@@ -2603,9 +2606,7 @@ class AskService:
                     "本次答案合成未产出内容,请重试该问题。")
             else:
                 llm_mode = "deterministic"
-                conclusion = (
-                    "The notebook does not yet contain approved knowledge that matches "
-                    "this question. Upload and review sources to build coverage.")
+                conclusion = _NO_RETRIEVAL_EVIDENCE_MESSAGE
 
             # 抑制免责声明须是确定性规则,不是"有任何一张卡就消音"。四个条件
             # 全部成立才抑制,任一不成立就保留警告——方向是**宁可多警告**:
@@ -2753,6 +2754,14 @@ class AskService:
         from app.services.source_scope import scoped_conversation_history
 
         history = scoped_conversation_history(history)
+        unsafe_scope_probe = getattr(
+            self.retrieval, "unsafe_source_scope_restricted", None
+        )
+        unsafe_scope = (
+            bool(unsafe_scope_probe(notebook_id))
+            if callable(unsafe_scope_probe)
+            else source_scope_restricted()
+        )
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
@@ -2790,9 +2799,7 @@ class AskService:
                 if not memory_hits:
                     response = AskResponse(
                         answer_id="",
-                        conclusion="The notebook does not yet contain approved knowledge "
-                                   "that matches this question. Upload and review sources "
-                                   "to build coverage.",
+                        conclusion=_NO_RETRIEVAL_EVIDENCE_MESSAGE,
                         conversation_id=conversation_id, retrieval_query=question,
                         llm_mode="deterministic",
                     )
@@ -2841,14 +2848,14 @@ class AskService:
 
             # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
             # 别的文档相关 chunk 也召回,_answer_chunks 出 chunk 引用(跨多篇)。
-            if self.settings.graph_ppr_enabled and not source_scope_restricted():
+            if self.settings.graph_ppr_enabled and not unsafe_scope:
                 raise_if_cancelled(cancel_event)
                 ppr_chunks = self.retrieval.ppr_retrieve(notebook_id, question)
                 raise_if_cancelled(cancel_event)
                 if ppr_chunks:
                     from app.services.retrieval import RetrievedChunk, RetrievalSupport
                     reports = (
-                        [] if source_scope_restricted() else self.community_reports(
+                        [] if unsafe_scope else self.community_reports(
                             notebook_id
                         )[: self.settings.ppr_community_context_top_n]
                     )
@@ -2955,7 +2962,7 @@ class AskService:
             # 并发 graph_walk_refused 事件;顺带省掉 _graph_seed_fusion 的
             # expand_query LLM 调用。放在 PPR 分支之后:大库若有 scale 索引,
             # PPR 分支仍可正常出跨文档答案,不受此守卫影响。
-            if (not source_scope_restricted()
+            if (not unsafe_scope
                     and self.candidates.graph_is_large(notebook_id)):
                 self.event_log.emit({
                     "kind": "graph_walk_refused",
@@ -2980,7 +2987,7 @@ class AskService:
                     user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
                 return response
 
-            if source_scope_restricted():
+            if unsafe_scope:
                 # The persisted full graph has no source partition.  Even if
                 # out-of-scope neighbours are removed after traversal, they can
                 # still steer seed fusion/BFS.  A checkbox-scoped graph request

@@ -78,11 +78,14 @@ class RetrievalService:
 
     def follow_chain(self, *args, **kwargs):
         """沿受控可传递关系做查询期两跳组合 → FollowChainResult。"""
-        from app.services.source_scope import filter_evidence, source_scope_restricted
+        from app.services.source_scope import (
+            filter_evidence,
+            source_scope_ceiling_active,
+        )
 
         notebook_id = _notebook_id(args, kwargs)
         result = self.graph.follow_chain(*args, **kwargs)
-        if not source_scope_restricted():
+        if not source_scope_ceiling_active():
             return result
         result.nodes = filter_retrieval_items(notebook_id, "knowledge", result.nodes)
         allowed_nodes = {
@@ -112,11 +115,14 @@ class RetrievalService:
 
     def node_context(self, *args, **kwargs):
         """取某对象的邻域上下文。"""
-        from app.services.source_scope import filter_evidence, source_scope_restricted
+        from app.services.source_scope import (
+            filter_evidence,
+            source_scope_ceiling_active,
+        )
 
         row = self.graph.node_context(*args, **kwargs)
         notebook_id = _notebook_id(args, kwargs)
-        if not source_scope_restricted() or not isinstance(row, dict):
+        if not source_scope_ceiling_active() or not isinstance(row, dict):
             return row
         origin = str(row.get("notebook_id") or notebook_id)
         if origin != notebook_id:
@@ -214,6 +220,10 @@ class RetrievalService:
 
     def graph_is_large(self, notebook_id):
         return self.candidates._federated_graph_is_large(notebook_id)
+
+    def unsafe_source_scope_restricted(self, notebook_id: str) -> bool:
+        """True for a narrowed scope or an all-selected universe drift."""
+        return self.candidates._unsafe_source_scope_restricted(notebook_id)
 
     def fuse_graph_seeds(self, notebook_id, question, seeds, cancel_event=None):
         return self.candidates._graph_seed_fusion(

@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 from app.services.retrieval import score_chunks, RetrievedChunk
@@ -145,6 +146,73 @@ def test_retrieve_chunks_uses_ann_when_enabled(repo, monkeypatch):
             )
         }
     assert {c.chunk_id for c in scored} <= set(idx.chunk_ann_labels) | lexical_ids
+
+
+def test_source_scoped_ann_filters_before_topk(repo, monkeypatch):
+    """An excluded row may be the nearest vector but must not occupy Top-K."""
+    nb = repo.create_notebook(NotebookCreate(name="scoped ann"))
+    now = "2026-07-01T00:00:00"
+    query = "summarize this paper"
+    vector = repo._embed_query(query)
+    with repo._write() as db:
+        for source_id in ("selected", "excluded"):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (source_id, nb.id, source_id, "md", "ready", now, now),
+            )
+        for chunk_id, source_id in (
+            ("c-selected", "selected"),
+            ("c-excluded", "excluded"),
+        ):
+            db.execute(
+                "INSERT INTO chunks "
+                "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb.id, source_id, "untranslated body", "", "[]", now),
+            )
+            db.execute(
+                "INSERT INTO chunk_embeddings "
+                "(chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
+                (chunk_id, nb.id, json.dumps(vector), now),
+            )
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+
+    assert idx.chunk_ann_source_names is not None
+    assert len(idx.chunk_ann_source_codes) == len(idx.chunk_ann_labels)
+    monkeypatch.setattr(
+        repo._runtime.knowledge, "chunk_fts_search", lambda *_a, **_k: []
+    )
+    out = repo._retrieve_chunks_ann(
+        nb.id,
+        query,
+        vector,
+        idx,
+        recall=1,
+        allowed_source_ids=("selected",),
+    )
+
+    assert out is not None
+    assert [chunk.source_id for chunk in out[0]] == ["selected"]
+
+
+def test_source_scoped_ann_without_sidecar_requests_bounded_fts_fallback(repo):
+    legacy = SimpleNamespace(
+        chunk_ann_labels=["c1"],
+        manifest={"dim": 16},
+    )
+
+    assert repo._retrieve_chunks_ann(
+        "nb",
+        "query",
+        [0.25] * 16,
+        legacy,
+        recall=1,
+        allowed_source_ids=("selected",),
+    ) is None
 
 
 def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):

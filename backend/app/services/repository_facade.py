@@ -1524,6 +1524,10 @@ class RepositoryFacade:
         """Return the current notebook's complete user-visible source id set."""
         return self._runtime.index_projections.all_visible_source_ids(notebook_id)
 
+    def all_hidden_source_ids(self, notebook_id: str) -> List[str]:
+        """Return the current hidden Memory/Knowhow participant ids."""
+        return self._runtime.index_projections.all_hidden_source_ids(notebook_id)
+
     def visible_source_count(self, notebook_id: str) -> int:
         return self._runtime.source_store.visible_document_count(notebook_id)
 
@@ -2971,8 +2975,18 @@ class RepositoryFacade:
                                       recall, n_chunks):
         return self.retrieval.candidates._retrieve_chunks_fts_degraded(notebook_id, query, query_vector, recall, n_chunks)
 
-    def _retrieve_chunks_ann(self, notebook_id, query, query_vector, idx, recall):
-        return self.retrieval.candidates._retrieve_chunks_ann(notebook_id, query, query_vector, idx, recall)
+    def _retrieve_chunks_ann(
+        self, notebook_id, query, query_vector, idx, recall, *,
+        allowed_source_ids=None,
+    ):
+        if allowed_source_ids is None:
+            return self.retrieval.candidates._retrieve_chunks_ann(
+                notebook_id, query, query_vector, idx, recall
+            )
+        return self.retrieval.candidates._retrieve_chunks_ann(
+            notebook_id, query, query_vector, idx, recall,
+            allowed_source_ids=allowed_source_ids,
+        )
 
     def _hydrate_chunk_candidates(self, cand_ids):
         return self.retrieval.candidates._hydrate_chunk_candidates(cand_ids)
