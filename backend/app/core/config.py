@@ -374,6 +374,10 @@ class Settings(BaseSettings):
     relation_recall: int = Field(200, validation_alias="RELATION_RECALL")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, validation_alias="GRAPH_PPR_ENABLED")
+    # 来源子图内的独立稀疏 PPR；保持 shadow/default-off，和整库 PPR 分开回滚。
+    source_subgraph_ppr_enabled: bool = Field(
+        False, validation_alias="SOURCE_SUBGRAPH_PPR_ENABLED"
+    )
     # P0-C:seed pass PPR 与 plan LLM 并行(纯调度,结果逐位等价);False=原串行
     reasoning_ppr_prefetch: bool = Field(True, validation_alias="REASONING_PPR_PREFETCH")
     ppr_damping: float = Field(0.5, validation_alias="PPR_DAMPING")               # rx.pagerank alpha

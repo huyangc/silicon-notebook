@@ -80,6 +80,12 @@ requires a restart because the watched path itself is selected at startup.
   lower `EMBED_DIM` to shrink vectors — that discards every stored vector as wrong-dim.
 - **PDF fidelity** (optional) — a MinerU endpoint, see [PDF parsing with MinerU](./operations.md#pdf-parsing-with-mineru);
   leave `MINERU_MODE=off` for the local PyMuPDF4LLM layout/Markdown fallback.
+- **Selected-source PPR shadow gate** — `SOURCE_SUBGRAPH_PPR_ENABLED` controls only the
+  internal sparse-PPR producer over a frozen selected-source snapshot and defaults to
+  `false`. It is independent of `GRAPH_PPR_ENABLED`: switching it off leaves historical
+  whole-scope PPR, local graph primitives, direct retrieval, and the protected baseline
+  lane unchanged. The producer has no Ask/Deep Report consumer in this stage, so enabling
+  it alone does not change user-visible retrieval.
 
 `.env.example` is the authoritative, fully-commented list of non-service variables and
 secret slots; `model-services.example.toml` is the service/binding/capacity template.
