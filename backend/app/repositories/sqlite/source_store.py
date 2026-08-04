@@ -77,6 +77,45 @@ class SourceStore:
                 (notebook_id,),
             ).fetchall()]
 
+    def visible_source_scope_snapshot(
+        self, notebook_id: str, source_ids: Sequence[str]
+    ) -> tuple[list[str], int]:
+        """Validate selected ids and count the visible universe in one snapshot.
+
+        The returned id rows are bounded by ``source_ids``; the scalar count is
+        used only to distinguish a genuinely narrowed include-list from an
+        explicit all-selected snapshot.  The compact path uses one SQL
+        statement, so a concurrent mutation cannot produce a false
+        all-selected classification.
+        """
+        requested = list(dict.fromkeys(str(value) for value in source_ids if value))
+        with self.database.connect() as db:
+            if not requested:
+                total = int(db.execute(
+                    "SELECT COUNT(*) AS c FROM sources "
+                    f"WHERE notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+                    (notebook_id,),
+                ).fetchone()["c"])
+                return [], total
+            requested_json = json.dumps(requested, ensure_ascii=False)
+            rows = db.execute(
+                "WITH requested(id, ordinal) AS ("
+                "SELECT CAST(value AS TEXT), CAST(key AS INTEGER) FROM json_each(?)"
+                "), visible AS ("
+                "SELECT requested.id, requested.ordinal FROM requested "
+                "CROSS JOIN sources ON sources.id=requested.id "
+                f"WHERE sources.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+                "), stats(visible_count) AS ("
+                "SELECT COUNT(*) FROM sources WHERE notebook_id=? "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+                ") SELECT visible.id, stats.visible_count FROM stats "
+                "LEFT JOIN visible ON 1=1 ORDER BY visible.ordinal",
+                (requested_json, notebook_id, notebook_id),
+            ).fetchall()
+            visible = [str(row["id"]) for row in rows if row["id"] is not None]
+            total = int(rows[0]["visible_count"])
+        return visible, total
+
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
         """User-facing source list — excludes Memory-derived AND knowhow-table
         hidden synthetic rows (source_type IN ('memory', 'knowhow')): both are

@@ -45,3 +45,46 @@ test("all unchecked normalizes to an explicit empty include scope", () => {
     source_ids: [],
   });
 });
+
+test("a complete visible universe uses compact include when only one source remains", () => {
+  const selection = {
+    allSelected: true,
+    ids: new Set(["s1", "s2", "s3"]),
+  };
+  assert.deepEqual(sourceScopePayload(selection, 4, ["s1", "s2", "s3", "s4"]), {
+    mode: "include",
+    source_ids: ["s4"],
+  });
+});
+
+test("an explicit include remains a hard ceiling even with a complete client universe", () => {
+  const selection = {
+    allSelected: false,
+    ids: new Set(["s1", "s2", "s3"]),
+  };
+  assert.deepEqual(sourceScopePayload(selection, 4, ["s1", "s2", "s3", "s4"]), {
+    mode: "include",
+    source_ids: ["s1", "s2", "s3"],
+  });
+});
+
+test("an explicit include cannot widen when the server universe gains a source", () => {
+  const selection = {
+    allSelected: false,
+    ids: new Set(["s1", "s2", "s3"]),
+  };
+  const payload = sourceScopePayload(selection, 4, ["s1", "s2", "s3", "s4"]);
+  assert.deepEqual(payload, { mode: "include", source_ids: ["s1", "s2", "s3"] });
+  assert.equal(payload.source_ids.includes("s5"), false);
+});
+
+test("a paged universe preserves the known compact representation", () => {
+  const selection = {
+    allSelected: false,
+    ids: new Set(["s7"]),
+  };
+  assert.deepEqual(sourceScopePayload(selection, 10_000, ["s7"]), {
+    mode: "include",
+    source_ids: ["s7"],
+  });
+});
