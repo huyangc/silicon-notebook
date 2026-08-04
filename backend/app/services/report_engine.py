@@ -529,7 +529,6 @@ class ReportEngine:
             history,
             max_topics=self.settings.report_max_sections,
             purpose="deep report",
-            source_refs_enabled=False,
             cancel_event=self.cancel_event,
         )
         if not confirmation_mode:

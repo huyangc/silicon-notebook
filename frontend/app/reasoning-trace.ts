@@ -4,7 +4,6 @@ import { label } from "./vocabulary.ts";
 export const TRACE_STEP_LABELS: Record<string, string> = {
   start: "启动",
   intent: "理解",
-  source_scope: "范围",
   memory: "记忆",
   plan: "规划",
   retrieve: "检索",
@@ -55,7 +54,6 @@ const NEXT_ACTION: Record<string, string> = {
   follow_chain: "顺着推导链继续",
   exact_lookup: "按名称精确查找",
   update_outline: "整理大纲",
-  search_evidence: "按指定资料搜索证据",
 };
 
 export type ReasoningTraceSummary = {
@@ -99,20 +97,6 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
       parts.push(`可信度 ${percentage}%`);
     }
     return parts.join(" · ");
-  }
-  if (step.step_type === "source_scope") {
-    const sources = Array.isArray(detail.sources) ? detail.sources : [];
-    const names = sources.flatMap((source) => {
-      if (!source || typeof source !== "object") return [];
-      const row = source as Record<string, unknown>;
-      const title = typeof row.title === "string" ? row.title.trim() : "";
-      const fileName = typeof row.source_file_name === "string"
-        ? row.source_file_name.trim()
-        : "";
-      return title || fileName ? [title || fileName] : [];
-    });
-    if (names.length) return names.join("、");
-    return typeof detail.count === "number" ? `${detail.count} 个指定来源` : "";
   }
   if (step.step_type === "plan" && Array.isArray(detail.sub_queries)) {
     return `${detail.sub_queries.length} 个子查询`;

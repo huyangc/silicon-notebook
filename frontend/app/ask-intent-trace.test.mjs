@@ -87,28 +87,6 @@ test("待澄清那一步报歧义条数,让用户知道下面的卡片要填几�
 });
 
 
-test("指定来源的理解轨迹说明来源数量并等待范围确认", () => {
-  const scoped = contract({
-    source_scope: {
-      mode: "selected",
-      sources: [
-        { source_id: "secret-a", notebook_id: "nb", title: "Manual A", source_file_name: "a.pdf" },
-        { source_id: "secret-b", notebook_id: "nb", title: "Manual B", source_file_name: "b.pdf" },
-      ],
-    },
-    ambiguities: [{ id: "source_scope_confirmation", question: "确认范围？" }],
-  });
-  assert.equal(
-    intentUnderstoodStep(scoped, 10).summary,
-    "已理解问题，并识别出 2 个指定来源",
-  );
-  assert.equal(
-    intentClarifyStep(scoped, 10).summary,
-    "已识别 2 个指定来源，等待你确认检索范围",
-  );
-});
-
-
 test("用户定稿那一步刻意不带耗时(填表是人的时间,不是系统耗时)", () => {
   const step = intentConfirmedStep("最终问题", 2);
   assert.equal(step.duration_ms, undefined);

@@ -111,7 +111,6 @@ def test_report_prompts_contract():
     assert "executive summary" in su.lower()
     intent = query_intent_prompt(
         "原始问题", max_topics=4, purpose="deep report",
-        source_refs_enabled=False,
     )
     assert "before seeing any corpus" in intent and "原始问题" in intent
     assert "mandatory_topics" in REPORT_INTENT_SCHEMA_HINT
@@ -120,7 +119,7 @@ def test_report_prompts_contract():
     assert "source_refs" not in intent
     confirmed = query_intent_prompt(
         "已确认的问题", history_block="对象：PLL", purpose="deep report",
-        confirmation_mode=True, source_refs_enabled=False,
+        confirmation_mode=True,
     )
     assert "authoritative" in confirmed and "needs_clarification=false" in confirmed
 

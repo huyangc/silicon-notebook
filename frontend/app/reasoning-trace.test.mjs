@@ -168,29 +168,8 @@ test("next_action 不把状态机动作名直出给用户,而是显示中文人�
     getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "add_subquery" } }),
     "换个角度再查一遍",
   );
-  assert.equal(
-    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "search_evidence" } }),
-    "按指定资料搜索证据",
-  );
 });
 
-
-test("来源范围轨迹显示安全标题，不显示内部来源 ID", () => {
-  const step = {
-    step_type: "source_scope",
-    summary: "已确认检索范围：仅限 2 个来源",
-    detail: {
-      count: 2,
-      sources: [
-        { title: "Manual A", source_file_name: "a.pdf", source_id: "secret-a" },
-        { title: "", source_file_name: "b.pdf", source_id: "secret-b" },
-      ],
-    },
-  };
-  assert.equal(getReasoningTraceSummary([step], false).latestLabel, "范围");
-  assert.equal(getTraceStepDetail(step), "Manual A、b.pdf");
-  assert.doesNotMatch(getTraceStepDetail(step), /secret/);
-});
 
 test("未知 next_action 不显示,而不是显示原值", () => {
   assert.equal(
@@ -217,6 +196,8 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
   // enumerate 动作的一个参数值而不是第 11 个动作,所以那次没有改这张表。O1 的
   // update_outline(大纲便签)才是货真价实的第 11 个动作 id,这条随之补上——
   // 这条注释兑现了它自己曾经许下的诺言("后端加第 11 个值时这条会提醒补")。
+  // search_evidence 曾短暂作为第 12 个动作存在(模型判断来源那一版),随该特性整体
+  // 移除;它是这张表**减少**过的唯一一次,所以这里也留个记号:动作被删时同样要改这张表。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
     search_elements: "回原文里找细节", enumerate_elements: "列元素清单",
@@ -224,7 +205,6 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
     ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
     exact_lookup: "按名称精确查找", update_outline: "整理大纲",
-    search_evidence: "按指定资料搜索证据",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
