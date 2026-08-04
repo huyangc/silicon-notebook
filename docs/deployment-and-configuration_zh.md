@@ -81,6 +81,11 @@ cp model-services.example.toml .local/model-services.toml
   而没有 identity 匹配的伴生产物时返回 capability unavailable，绝不回退整图遍历。
   `SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` 限制请求期稀疏迭代，partition 发布复用既有
   `SOURCE_SUBGRAPH_MAX_*` 行数护栏。本阶段 Ask/深度报告仍未消费该通道。
+- **所选来源 rollout 质量门**——active mode 只能读取配对评测命令生成且验证通过、
+  不含正文的 attestation。摘要只做完整性检查，不是授权签名：输入与输出必须放在部署
+  自己控制的受信工件路径，并在 PR11 接入运行配置时钉住期望 corpus signature 与 model
+  contract。只有不会改变用户输出的 `shadow` 可以在没有批准 attestation 时运行。本 PR
+  只安装 decision service，尚不增加运行时设置或 Ask/深度报告 consumer。
 
 `.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
 服务、绑定与容量模板；[配置](#配置)按组列出常用项。

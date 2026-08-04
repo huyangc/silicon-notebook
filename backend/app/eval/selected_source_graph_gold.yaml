@@ -1,0 +1,49 @@
+- id: energ_aizer_single_pdagent
+  scenario: single_source
+  question: >-
+    只选择 PDAGENT-BENCH 时，为什么问答会提示“限定来源下已关闭无法安全隔离的图扩展通道”，
+    这个限制发生在检索链路的哪一层？
+  selected_source_aliases: [pdagent]
+  gold_evidence_ids: [pdagent-scope-validation, pdagent-graph-expansion]
+  gold_evidence_source_aliases: [pdagent, pdagent]
+  required_graph_actions: [expand_graph]
+  min_baseline_kg_candidates: 20
+
+- id: few_sources_compare_isolation
+  scenario: few_sources
+  question: >-
+    对比所选两篇文章的图检索隔离策略：候选生成、跨来源关系和末端引用校验分别如何处理？
+  selected_source_aliases: [paper-a, paper-b]
+  gold_evidence_ids: [few-candidate-ceiling, few-cross-relation, few-citation-check]
+  gold_evidence_source_aliases: [paper-a, paper-b, paper-b]
+  required_graph_actions: [expand_graph, follow_relation]
+
+- id: oversized_source_bounded_graph
+  scenario: oversized_source
+  question: >-
+    对单篇超大文章构建来源子图时，怎样在不扫描全库的前提下保持图扩展与 PPR 的召回？
+  selected_source_aliases: [oversized-paper]
+  gold_evidence_ids: [oversized-partition, oversized-bounded-ppr]
+  gold_evidence_source_aliases: [oversized-paper, oversized-paper]
+  required_graph_actions: [run_ppr]
+  min_selected_source_chunks: 10000
+
+- id: mounted_base_contradiction
+  scenario: mounted_base
+  question: >-
+    所选本地文章与挂载基座资料对同一结论冲突时，检索和回答应怎样保留来源层级并处理矛盾？
+  selected_source_aliases: [local-paper]
+  mounted_base_aliases: [base-reference]
+  gold_evidence_ids: [mounted-local-claim, mounted-base-claim]
+  gold_evidence_source_aliases: [local-paper, base-reference]
+  required_graph_actions: [expand_graph]
+  requires_mounted_base: true
+
+- id: cross_source_same_name
+  scenario: cross_source_same_name
+  question: >-
+    两篇所选文章都出现同名对象 Agent 时，如何避免把不同来源的实体和证据错误合并？
+  selected_source_aliases: [same-name-a, same-name-b]
+  gold_evidence_ids: [same-name-a-agent, same-name-b-agent]
+  gold_evidence_source_aliases: [same-name-a, same-name-b]
+  required_graph_actions: [expand_graph, disambiguate_source]

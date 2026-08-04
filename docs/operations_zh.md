@@ -619,6 +619,20 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败（`retrieval_query_embedding` 未绑定、notebook 不存在、或属主用户不存在）——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
 
+### 所选来源图质量门（`scripts/eval_selected_source_graph.py`）
+
+启用用户可见的所选来源图通道前，必须在同一份冻结 model/corpus/source contract 下，把强制 golden cases 分别以历史 baseline 和 graph-enrichment shadow 运行一次。将这份配对 observation JSON 放在部署自己控制的受信工件目录，然后运行：
+
+```bash
+PYTHONPATH=backend python scripts/eval_selected_source_graph.py \
+  /trusted/eval/paired.json \
+  --output /trusted/eval/selected-source-attestation.json
+```
+
+退出码 `0` 表示硬隔离/baseline 不变量、逐案例与汇总质量护栏及成本护栏全部通过；退出码 `2` 表示 rollout 被阻断，并逐项打印失败原因。输出 attestation 刻意不含问题、答案正文、evidence/citation/source id 或 excerpt。它的 SHA-256 摘要只检测意外修改，并不是签名或授权边界。输入和输出都应保存在受信位置、限制写权限，并在任何 active rollout 前钉住期望 corpus signature 与精确 model/sampling contract。`shadow` 不改变用户可见输出，因此不需要 attestation。
+
+`--golden` 只是诊断覆盖项。它的输出可以本地检查，但 production 激活只接受随当前版本发布的 canonical suite 摘要；削弱或替换案例不能产生可激活工件。
+
 ### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
 
 离线、非破坏性工具,用于把两个各自独立部署、但**共享同一个公共知识库**(同一个 base notebook id)的 silicon-notebook 实例合并成一个。保留哪侧的 base 由 `--keep-base` 指定(通常选更全的那侧)——运行时会先打印两侧 base 的统计(`sources`/`chunks`/`knowledge_objects` 计数)供核对;两侧其余(个人)notebook 原样全部并入,包括各自持有的参考库挂载边(`notebook_bases`)。源库的 `.db`/storage 文件只读,工具始终写出全新的 `--out` / `--out-storage`。两侧输入允许是旧 schema 版本——合并前会先各自迁移到最新(在私有临时副本上进行,不改动源文件)。多领域部署下一侧可能不止一个公共知识库:本工具不支持这种形态、也不会替你猜——若任一侧存在不止一个 `tier='base'` 的 notebook,会立即中止并点名是哪一侧、列出全部候选,而不是自作主张选一个。

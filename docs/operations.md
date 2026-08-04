@@ -713,6 +713,20 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 Exit codes are the verdict — safe to wire directly into CI or a script gate: `0` success (recording) or all questions match (`--compare`); `1` `--compare` found a mismatch (runs differ); `2` a precondition failed before any comparison happened (`retrieval_query_embedding` unbound, notebook not found, or owner not found) — the CLI **errors out immediately** rather than silently producing a misleading "zero recall" comparison from zero vectors.
 
+### Selected-source graph quality gate (`scripts/eval_selected_source_graph.py`)
+
+Before enabling a user-visible selected-source graph lane, record the mandatory golden cases twice under one frozen model/corpus/source contract: once with the historical baseline and once with graph enrichment in shadow. Store that paired observation JSON in a deployment-owned trusted artifact directory, then run:
+
+```bash
+PYTHONPATH=backend python scripts/eval_selected_source_graph.py \
+  /trusted/eval/paired.json \
+  --output /trusted/eval/selected-source-attestation.json
+```
+
+Exit `0` means every hard isolation/baseline invariant, per-case and aggregate quality rail, and cost rail passed; exit `2` means rollout is blocked and prints each failure. The output attestation deliberately excludes questions, answer text, evidence/citation/source ids, and excerpts. Its SHA-256 digest detects accidental mutation only—it is not a signature or an authorization boundary. Keep both input and output in a trusted location, restrict writers, and pin the expected corpus signature and exact model/sampling contract before any active rollout. `shadow` remains safe without an attestation because it cannot change user-visible output.
+
+`--golden` is a diagnostic-only override. Its output can be inspected locally, but production activation accepts only the canonical suite digest shipped with this release; weakening or replacing the cases cannot produce an activatable artifact.
+
 ### Merging two shared-base deployments (`scripts/merge_dbs.py`)
 
 Offline, non-destructive tool for consolidating two separately-deployed silicon-notebook instances that share exactly one common public knowledge base (same base notebook id) back into one. It keeps the fuller side's base — you pick with `--keep-base`, and the tool prints both sides' base stats (`sources`/`chunks`/`knowledge_objects` counts) up front so you can confirm the choice — while every other (personal) notebook from both sides is carried over untouched, including each one's own reference-library mounts (`notebook_bases`). Source `.db`/storage files are only read; the tool always writes new `--out` / `--out-storage` files. Either input may be on an older schema version — each is migrated to current (in a private temp copy) before merging. Multi-domain deployments can have more than one public knowledge base per side: this tool does not support that shape and refuses to guess — if either side has more than one `tier='base'` notebook, it aborts immediately, naming the side and every candidate, instead of picking one.

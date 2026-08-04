@@ -94,6 +94,14 @@ requires a restart because the watched path itself is selected at startup.
   whole-graph traversal. `SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` bounds request-time
   sparse passes; partition publication reuses the existing `SOURCE_SUBGRAPH_MAX_*`
   row rails. Ask/Deep Report still do not consume this lane in this stage.
+- **Selected-source rollout quality gate** — active modes are permitted only from a
+  verified, content-free attestation produced by the paired evaluation command. The
+  digest is an integrity check, not an authorization signature: keep the input and
+  output in a deployment-owned trusted artifact location, and pin the expected corpus
+  signature and model contract when PR11 wires runtime configuration. `shadow` remains
+  the only mode that may run without an approved attestation because it cannot alter
+  user-visible output. This PR installs the decision service but no runtime setting or
+  Ask/Report consumer yet.
 
 `.env.example` is the authoritative, fully-commented list of non-service variables and
 secret slots; `model-services.example.toml` is the service/binding/capacity template.
