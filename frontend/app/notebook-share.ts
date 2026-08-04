@@ -104,3 +104,7 @@ export const buildShareLink = (token: string, origin: string): string =>
 // 分享模式的中文文案:readonly→「只读共享」,其余(copy)→「可拷贝」。
 export const shareModeLabel = (mode: string): string =>
   mode === "readonly" ? "只读共享" : "可拷贝";
+
+// 分享链接复制的可见反馈。失败时链接仍在紧邻按钮的只读输入框中，可手动选择。
+export const shareLinkCopyToast = (copied: boolean): string =>
+  copied ? "分享链接已复制" : "复制失败，请手动选择上方链接";
