@@ -90,12 +90,16 @@ class SourceSubgraphRelation:
     target_object_id: str
     edge_type: str
     evidence: tuple[Mapping[str, Any], ...]
+    review_status: str = "pending"
 
 
 @dataclass(frozen=True)
 class SourceSubgraphChunk:
     chunk_id: str
     source_id: str
+    text: str
+    section_path: str
+    created_at: str
     element_ids: tuple[str, ...]
 
 
@@ -340,6 +344,9 @@ class SourceSubgraphService:
             SourceSubgraphChunk(
                 chunk_id=str(row["chunk_id"]),
                 source_id=str(row["source_id"]),
+                text=str(row.get("text") or ""),
+                section_path=str(row.get("section_path") or ""),
+                created_at=str(row.get("created_at") or ""),
                 element_ids=tuple(
                     dict.fromkeys(
                         str(v) for v in _json_list(row.get("element_ids")) if str(v)
@@ -480,6 +487,7 @@ class SourceSubgraphService:
                     target_object_id=target_object_id,
                     edge_type=edge_type,
                     evidence=_evidence(row.get("evidence"), source_id),
+                    review_status=str(row.get("review_status") or "pending"),
                 )
             )
         relations = tuple(relation_rows)

@@ -292,7 +292,7 @@ def source_subgraph_rows_on(
     result["chunks"] = bounded(
         "chunk",
         (
-            "SELECT id AS chunk_id,source_id,element_ids "
+            "SELECT id AS chunk_id,source_id,text,section_path,created_at,element_ids "
             + chunk_from
             + f"WHERE notebook_id={placeholder} AND source_id IN ({ph}) "
             + f"ORDER BY source_id{id_order},id{id_order} LIMIT {placeholder}"
@@ -303,7 +303,7 @@ def source_subgraph_rows_on(
     result["relations"] = bounded(
         "relation",
         "SELECT r.id AS relation_id,r.source_id,r.source_object_id,"
-        "r.target_object_id,r.edge_type,r.evidence "
+        "r.target_object_id,r.edge_type,r.evidence,r.review_status "
         "FROM knowledge_relations r JOIN knowledge_objects so "
         "ON so.id=r.source_object_id AND so.notebook_id=r.notebook_id "
         "JOIN knowledge_objects to2 ON to2.id=r.target_object_id "
