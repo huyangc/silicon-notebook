@@ -1,9 +1,10 @@
 """PostgreSQL 的开路计数进程缓存,gated on ``kg_mutation_seq``——镜像 sqlite 的
 ``knowledge_counts_cache`` 的 pending-source 两个变体(checkup H6 与开路 readiness 用)。
 
-为什么要缓存(codex 第4轮 P2):``_pending_source_count`` 是一次相关子查询全扫,前端进入
-notebook 会自动拉 checkup,大 postgres 库每次都付这个扫描太贵。sqlite 侧早已 seq-gated
-memo,postgres 之前直读——本模块补齐,兑现「体检廉价」契约。
+为什么要缓存(codex 第4轮 P2):``_pending_source_count`` 冷查询即使按 source 做
+有界索引探测,仍然与来源数成正比;前端进入 notebook 会自动拉 checkup,大库
+不应每次都付冷查询成本。sqlite 侧早已 seq-gated memo,postgres 之前直读——
+本模块补齐,兑现「体检廉价」契约。
 
 seq gate 自失效即正确(seq 变→缓存 miss);``invalidate()`` 不是正确性必需,只是安全阀,
 由 ``queries.invalidate_knowledge_counts`` 在「写已落、但其 seq bump 尚未提交」的边缘调用
@@ -35,27 +36,31 @@ def _mutation_seq(db: Any, notebook_id: str) -> int:
 def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
     # 判据与 postgres QueryStore 原 _pending_source_count 逐字一致(用 ordinal 排序:
     # postgres 无 rowid)。visible_only 排除 memory/knowhow 隐藏合成源。
+    #
+    # 不要把 latest KG run 的标量子查询放进 knowledge_objects 的 EXISTS 里。
+    # PostgreSQL 可能把它下沉到 KO 侧，使每条 KO 都重复读 status/error：
+    # 9.1M KO 的实库因此执行了约 27M 次 extraction_runs 索引探测。
+    # 三个 LATERAL ... LIMIT 1 刻意以当前 notebook 的 sources 为驱动：
+    # 每个 source 最多探测一个 element、一个最新 run 和一个 KO。
     visible_clause = (
         "AND s.source_type NOT IN ('memory','knowhow') " if visible_only else ""
     )
     row = db.execute(
-        "SELECT COUNT(*) AS c FROM sources s WHERE s.notebook_id=%s "
+        "SELECT COUNT(*) AS c FROM sources s "
+        "JOIN LATERAL (SELECT 1 AS found FROM source_elements e "
+        "WHERE e.source_id=s.id LIMIT 1) parsed ON TRUE "
+        "LEFT JOIN LATERAL (SELECT er.status,er.error_message "
+        "FROM extraction_runs er WHERE er.source_id=s.id AND er.run_type='kg' "
+        "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1) latest_kg ON TRUE "
+        "LEFT JOIN LATERAL (SELECT 1 AS found FROM knowledge_objects k "
+        "WHERE k.source_id=s.id AND k.source_id!='' LIMIT 1) source_kg ON TRUE "
+        "WHERE s.notebook_id=%s "
         + visible_clause
-        + "AND EXISTS(SELECT 1 FROM source_elements e WHERE e.source_id=s.id) "
-        "AND NOT EXISTS(SELECT 1 FROM knowledge_objects k "
-        "WHERE k.source_id=s.id AND k.source_id!='' AND COALESCE(("
-        "SELECT er.status FROM extraction_runs er "
-        "WHERE er.source_id=s.id AND er.run_type='kg' "
-        "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1"
-        "),'completed')='completed' AND NOT ("
-        "COALESCE((SELECT er.error_message FROM extraction_runs er "
-        "WHERE er.source_id=s.id AND er.run_type='kg' "
-        "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1),'') "
-        "~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR "
-        "strpos(COALESCE((SELECT er.error_message FROM extraction_runs er "
-        "WHERE er.source_id=s.id AND er.run_type='kg' "
-        "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1),''),"
-        "'retry_incomplete=1')>0))",
+        + "AND (source_kg.found IS NULL "
+        "OR COALESCE(latest_kg.status,'completed')!='completed' "
+        "OR COALESCE(latest_kg.error_message,'') "
+        "~ 'windows_failed=[1-9][0-9]*/[0-9]+' "
+        "OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0)",
         (notebook_id,),
     ).fetchone()
     return int(row["c"])
