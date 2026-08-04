@@ -827,7 +827,8 @@ def test_base_scope_survives_intent_ready_and_reaches_planning(client, monkeypat
     # universe = notebook.counts["sources"] = 0 (no local sources on this
     # fixture), selected = [] -> not narrowed.
     assert after_intent["understanding"]["source_scope"] == {
-        "mode": "include", "source_ids": [], "narrowed": False
+        "mode": "include", "source_ids": [], "narrowed": False,
+        "hidden_source_ids": [],
     }
 
     launched.clear()
@@ -948,7 +949,8 @@ def test_report_source_scope_freezes_visible_source_set_at_create_time(
     # "exclude nothing" against the 1 visible source at create time selects
     # that whole (then-current) universe -> not narrowed.
     assert after_create["source_scope"] == {
-        "mode": "include", "source_ids": [first_id], "narrowed": False
+        "mode": "include", "source_ids": [first_id], "narrowed": False,
+        "hidden_source_ids": [],
     }, "create 时必须把 exclude:[] 就地展开成当时可见来源的显式 include 快照,不能落 None"
 
     # 创建之后再上传一份来源 —— 已冻结的范围绝不能因此扩大。
@@ -973,11 +975,13 @@ def test_report_source_scope_freezes_visible_source_set_at_create_time(
     # genuinely covers less than the current universe -- narrowed flips to
     # True, mirroring the base-library case above.
     assert launched[-1][1]["source_scope"] == {
-        "mode": "include", "source_ids": [first_id], "narrowed": True
+        "mode": "include", "source_ids": [first_id], "narrowed": True,
+        "hidden_source_ids": [],
     }, "confirm 之后新上传的来源不得混进已冻结的范围"
     after_intent = repo.get_report(nb_id, rid)["understanding"]
     assert after_intent["source_scope"] == {
-        "mode": "include", "source_ids": [first_id], "narrowed": True
+        "mode": "include", "source_ids": [first_id], "narrowed": True,
+        "hidden_source_ids": [],
     }
 
 
@@ -1040,7 +1044,7 @@ def test_library_only_scope_never_becomes_restricted_across_persistence(
     assert upload.status_code == 200, upload.text
     from app.api.deps import repository as _repo_for_sources
 
-    assert _repo_for_sources().all_visible_source_ids(nb_id), "本地来源必须真的非空"
+    assert _repo_for_sources().scope_source_ids(nb_id)[0], "本地来源必须真的非空"
     rid = client.post(
         f"/api/notebooks/{nb_id}/reports",
         json={
@@ -1099,7 +1103,7 @@ def test_report_create_rejects_a_base_only_submission_on_a_library_only_notebook
     nb_id, _base_id, launched = _scoped_client(client, monkeypatch, with_base=True)
     from app.api.deps import repository
 
-    assert repository().all_visible_source_ids(nb_id) == [], "前提:零本地来源"
+    assert repository().scope_source_ids(nb_id)[0] == [], "前提:零本地来源"
 
     response = client.post(
         f"/api/notebooks/{nb_id}/reports",

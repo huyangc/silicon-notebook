@@ -93,10 +93,31 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
       zero visible sources): 0 before, 1 now. The only increase, and it is
       unavoidable: "did selecting nothing narrow anything?" is exactly the
       question the stale cached count answers wrongly.
+
+    codex #431 R9 (P1): the frozen ceiling covers the hidden Memory/Knowhow
+    projection sources too, but ONLY when this request narrowed nothing.
+    Separating "is a ceiling in force?" from "did the user narrow anything?"
+    (R7) made the ceiling apply to every browser request, and the snapshot it
+    freezes is the VISIBLE source set -- so hidden projection sources, which
+    have no checkbox and therefore can never appear in a submitted selection,
+    started failing ``allows()`` on the default "everything checked" request.
+    A Knowhow-only notebook then passed ``local_evidence_available`` and
+    retrieved nothing at all. The frozen hidden set restores their
+    participation without giving up the freeze: a source that appears AFTER
+    this snapshot -- visible or hidden -- is still outside the ceiling.
+
+    ``narrowed`` gates it, so the existing "收窄来源维度时隐藏 Memory/Knowhow
+    投影证据不参与" contract stays true by construction; the consumption side
+    (``ActiveSourceScope.allows``) needs no second condition and cannot drift
+    from this one.
+
+    Round trips are unchanged: ``scope_source_ids`` returns both partitions
+    from the single read that already answered the membership/universe
+    question, so the hot path is still 1.
     """
     if scope is None:
         return None
-    all_ids = repo.all_visible_source_ids(notebook.id)
+    all_ids, hidden_ids = repo.scope_source_ids(notebook.id)
     universe = set(all_ids)
     valid = [
         source_id for source_id in scope.source_ids if source_id in universe
@@ -114,9 +135,14 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
             source_id for source_id in all_ids if source_id not in excluded
         ]
     # Recomputed unconditionally: a client-supplied `narrowed` is never trusted.
+    narrowed = len(selected) < len(all_ids)
     return SourceScope(
         mode="include", source_ids=selected,
-        narrowed=len(selected) < len(all_ids),
+        narrowed=narrowed,
+        # Likewise recomputed, never taken from the request: a client-supplied
+        # list here would name sources the checkbox universe deliberately hides
+        # (another user's private Memory projection among them).
+        hidden_source_ids=[] if narrowed else list(hidden_ids),
     )
 
 
@@ -277,8 +303,8 @@ def _scope_receipt(
 
     Costs no round trip: every input rides on the ``NotebookSummary`` the
     caller already loaded for ``_require_ask_available``. ``counts["sources"]``
-    is ``visible_source_count`` -- ``all_visible_source_ids`` counted under an
-    identical predicate -- so ``selected`` and ``total`` are commensurable
+    is ``visible_source_count`` -- ``scope_source_ids``' visible half counted
+    under an identical predicate -- so ``selected`` and ``total`` are commensurable
     (see ``_require_non_empty_scope``).
 
     Deliberately keeps reading that cached count even though

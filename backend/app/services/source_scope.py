@@ -19,6 +19,25 @@ class ActiveSourceScope:
     notebook_id: str
     mode: str
     source_ids: frozenset[str]
+    # The hidden Memory/Knowhow projection sources this ceiling ALSO admits.
+    #
+    # ``source_ids`` is the user's checkbox selection, and the checkbox list
+    # only ever contains VISIBLE imported sources. Hidden projection sources
+    # therefore can never be in it -- yet before this field they were judged by
+    # it, so the moment ``source_ceiling`` became value-independent (R7) every
+    # browser request, including the default "everything checked" one, started
+    # denying them. A Knowhow-only notebook retrieved nothing at all.
+    #
+    # The API boundary fills this in ONLY for a run that narrowed nothing (see
+    # ``_validate_source_scope``), which is what keeps the deliberate
+    # "narrowing the source dimension excludes hidden Memory/Knowhow projection
+    # evidence" contract intact: on a narrowed run the set is empty and the
+    # membership test below is a no-op. Keeping the condition at the freeze
+    # point rather than repeating it here means the two can never disagree.
+    #
+    # Empty for direct service-layer construction, which keeps the pre-field
+    # behavior byte-for-byte.
+    hidden_source_ids: frozenset[str] = frozenset()
     # Base-library dimension (library-level scope): independent of the local
     # source ceiling above. ``base_mode``/``base_notebook_ids`` mirror
     # ``mode``/``source_ids`` in shape, but select whole mounted reference
@@ -156,7 +175,15 @@ class ActiveSourceScope:
         if not source_id:
             return False
         if self.mode == "include":
-            return source_id in self.source_ids
+            # Two frozensets, never a union built here: this runs once per
+            # candidate row. The checkbox selection is tested first because it
+            # is the answer for every ordinary imported source; the hidden set
+            # is empty on a narrowed run and small (one row per Knowhow table /
+            # confirmed Memory item) otherwise.
+            return (
+                source_id in self.source_ids
+                or source_id in self.hidden_source_ids
+            )
         return source_id not in self.source_ids
 
 
@@ -200,6 +227,13 @@ def source_scope_context(
         notebook_id=notebook_id,
         mode=str((raw or {}).get("mode") or "exclude"),
         source_ids=frozenset(str(value) for value in (raw or {}).get("source_ids") or []),
+        # Absent for scopes frozen before this field existed (a report's
+        # persisted ``understanding`` from an earlier release): an empty set
+        # then reproduces that release's behavior exactly, and the next
+        # ``_validate_source_scope`` on that report refills it.
+        hidden_source_ids=frozenset(
+            str(value) for value in (raw or {}).get("hidden_source_ids") or []
+        ),
         base_mode=str((base_raw or {}).get("mode") or "exclude"),
         base_notebook_ids=frozenset(
             str(value) for value in (base_raw or {}).get("notebook_ids") or []
@@ -243,6 +277,10 @@ def current_source_scope_payload() -> dict[str, Any] | None:
     ``_validate_source_scope``/``_validate_base_scope`` call, during which
     a reader would fall back to the pre-fix shape-based judgment -- exactly
     the PR#426 bug this field exists to close, reopened for one hop.
+
+    ``hidden_source_ids`` rides along for the same reason and over the same
+    hop: dropping it would leave that window's ceiling denying the notebook's
+    Knowhow/Memory projection evidence on a run that narrowed nothing.
     """
     scope = current_source_scope()
     if scope is None or not scope.source_provided:
@@ -251,6 +289,7 @@ def current_source_scope_payload() -> dict[str, Any] | None:
         "mode": scope.mode,
         "source_ids": sorted(scope.source_ids),
         "narrowed": scope.source_narrowed,
+        "hidden_source_ids": sorted(scope.hidden_source_ids),
     }
 
 
@@ -458,9 +497,16 @@ def scoped_allowed_source_ids(
     if not scope.source_ceiling or notebook_id != scope.notebook_id:
         return allowed
     if scope.mode == "include":
+        # THE pushdown list. It must agree with ``allows()`` exactly -- this is
+        # the same ceiling, applied before LIMIT instead of at the result
+        # boundary -- so the hidden Memory/Knowhow projection sources belong
+        # here too. Omitting them is what made a Knowhow-only notebook retrieve
+        # zero evidence: the projection's chunks were excluded inside SQL, long
+        # before any result-boundary filter could have been blamed.
+        # Built once per producer call, not once per row.
+        ceiling = scope.source_ids | scope.hidden_source_ids
         if allowed is None:
-            return tuple(sorted(scope.source_ids))
-        ceiling = scope.source_ids
+            return tuple(sorted(ceiling))
         return tuple(value for value in allowed if value in ceiling)
     if allowed is not None:
         return tuple(value for value in allowed if value not in scope.source_ids)

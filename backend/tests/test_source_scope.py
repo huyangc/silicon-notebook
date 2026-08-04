@@ -216,9 +216,13 @@ def test_follow_chain_replaces_hop_evidence_with_scoped_copy():
 
 
 class _ScopeRepo:
-    def __init__(self, visible: list[str], count: int):
+    def __init__(self, visible: list[str], count: int,
+                 hidden: "list[str] | None" = None):
         self.visible = visible
         self.count = count
+        # Hidden Memory/Knowhow projection sources — no checkbox, never in a
+        # submitted selection, and (on an un-narrowed run) inside the ceiling.
+        self.hidden = list(hidden or [])
 
     def visible_source_ids(self, _notebook_id, source_ids):
         return [source_id for source_id in source_ids if source_id in self.visible]
@@ -226,8 +230,8 @@ class _ScopeRepo:
     def visible_source_count(self, _notebook_id):
         return self.count
 
-    def all_visible_source_ids(self, _notebook_id):
-        return list(self.visible)
+    def scope_source_ids(self, _notebook_id):
+        return list(self.visible), list(self.hidden)
 
 
 def _notebook(*, bases=None):
@@ -700,7 +704,7 @@ def test_base_only_submission_on_a_library_only_notebook_is_409():
     才 ask_available 的笔记本,把每个参考库都取消勾选后仍然放行:Ask 白跑一轮
     零证据,报告更糟——落一行 + 照常调意图模型,而这个函数存在的理由正是拦住
     这笔开销。省略的那一维必须按**真实可见来源宇宙**判空(counts["sources"],
-    与 all_visible_source_ids 同一谓词、且随 summary 一起来,不多付往返)。
+    与 scope_source_ids 的可见那一半同一谓词、且随 summary 一起来,不多付往返)。
     """
     notebook = _notebook(bases=[_notebook_ref("b1")])
     assert notebook.counts.get("sources", 0) == 0       # 零本地来源
@@ -912,7 +916,8 @@ def test_base_only_scope_never_fabricates_a_local_scope_payload():
     with source_scope_context("nb", SourceScope(mode="include", source_ids=["s1"])):
         assert current_base_scope_payload() is None
         assert current_source_scope_payload() == {
-            "mode": "include", "source_ids": ["s1"], "narrowed": None
+            "mode": "include", "source_ids": ["s1"], "narrowed": None,
+            "hidden_source_ids": [],
         }
     # Both supplied -> both payloads round-trip.
     with source_scope_context(
@@ -920,7 +925,8 @@ def test_base_only_scope_never_fabricates_a_local_scope_payload():
         BaseNotebookScope(mode="exclude", notebook_ids=["b2"]),
     ):
         assert current_source_scope_payload() == {
-            "mode": "include", "source_ids": ["s1"], "narrowed": None
+            "mode": "include", "source_ids": ["s1"], "narrowed": None,
+            "hidden_source_ids": [],
         }
         assert current_base_scope_payload() == {
             "mode": "exclude", "notebook_ids": ["b2"], "narrowed": None
@@ -1788,8 +1794,8 @@ def test_sync_ask_route_carries_the_receipt_into_the_service(monkeypatch):
         def visible_source_ids(self, _notebook_id, source_ids):
             return list(source_ids)
 
-        def all_visible_source_ids(self, _notebook_id):
-            return ["s1", "s2"]
+        def scope_source_ids(self, _notebook_id):
+            return ["s1", "s2"], []
 
         def ask(self, _notebook_id, _payload):
             seen.append(current_retrieval_scope_receipt())
@@ -1979,3 +1985,122 @@ def test_full_library_selection_keeps_its_frozen_mount_ceiling():
     assert frozen.covers_notebook("b2") is False, (
         "创建后新挂载的参考库必须被冻结快照挡住"
     )
+
+
+# ---------------------------------------------------------------------------
+# codex #431 R9 P1:冻结上限必须覆盖隐藏 Memory/Knowhow 投影来源 —— 但只在**未收窄**时。
+#
+# R7 把「上限是否生效」与「是否收窄」拆开之后,上限对**每一个**浏览器请求都生效,
+# 而它冻结的快照只含**可见导入来源**:隐藏投影源没有复选框,永远进不了提交的选择,
+# 于是被这份列表判死。默认全选(用户什么都没收窄)因此丢掉整本库的 Knowhow/Memory
+# 证据 —— Knowhow-only 的库刚通过可用性检查,却一条证据都检索不到。
+#
+# 修法把它们冻结在**另一个**列表里,并且只在 narrowed=False 时填充:于是
+# 「收窄来源维度时隐藏投影证据不参与」这条既有契约按构造成立,消费侧无需第二个条件。
+# ---------------------------------------------------------------------------
+
+
+def test_full_selection_ceiling_admits_hidden_projection_sources():
+    """未收窄的全选:隐藏投影源**参与**,而冻结之后新增的来源仍被挡住。
+
+    两半必须在**同一个**冻结对象上同时成立 —— 只证明前半,「干脆不下推上限」也能
+    通过(那正是 R7 P1 修掉的洞);只证明后半,就是本条 P1 的病灶本身。
+    """
+    frozen = ActiveSourceScope(
+        notebook_id="nb",
+        mode="include",
+        source_ids=frozenset({"s1", "s2"}),
+        hidden_source_ids=frozenset({"src-knowhow", "src-memory"}),
+        source_narrowed=False,
+    )
+    assert frozen.restricted is False
+    assert frozen.source_ceiling is True, "全选仍然是一份冻结上限"
+    # 可见选择照常放行。
+    assert frozen.allows("nb", "s1") is True
+    # 隐藏投影源:没有复选框,不该被复选框列表判死。
+    assert frozen.allows("nb", "src-knowhow") is True
+    assert frozen.allows("nb", "src-memory") is True
+    # 冻结**之后**新上传的可见来源仍然被挡住 —— 上限存在的唯一理由。
+    assert frozen.allows("nb", "s3") is False, (
+        "校验后新上传的来源必须被冻结列表挡住"
+    )
+    # 下推给 SQL/FTS 的那份清单必须与 allows() 逐值一致:两者是同一道上限,
+    # 一个在 LIMIT 之前、一个在结果边界。只修其中一个,Knowhow 的格子仍会在
+    # SQL 里就被排除,结果边界根本没机会看到它。
+    with source_scope_context("nb", SourceScope(
+        mode="include", source_ids=["s1", "s2"], narrowed=False,
+        hidden_source_ids=["src-knowhow", "src-memory"],
+    )):
+        assert set(scoped_allowed_source_ids("nb")) == {
+            "s1", "s2", "src-knowhow", "src-memory"
+        }
+        # 显式 universe 也按同一份上限求交。
+        assert set(scoped_allowed_source_ids(
+            "nb", ["s1", "src-knowhow", "s3"]
+        )) == {"s1", "src-knowhow"}
+
+
+def test_boundary_freezes_hidden_projection_sources_only_when_not_narrowed():
+    """入口层:未收窄时把冻结时刻的隐藏投影源一并冻进上限;真收窄时一个都不给。
+
+    ``narrowed`` 由服务端按可见宇宙算,隐藏源不进分子也不进分母 —— 否则
+    「0 选 0 的 Knowhow-only 库」会因为多出来的隐藏源被算成扩大或收窄。
+    """
+    # (a) 浏览器默认「全选」表示法,库里另有两个隐藏投影源。
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1", "s2"], 2, hidden=["src-knowhow", "src-memory"]),
+        _notebook(),
+        SourceScope(mode="exclude", source_ids=[]),
+    )
+    assert resolved == SourceScope(
+        mode="include", source_ids=["s1", "s2"], narrowed=False,
+        hidden_source_ids=["src-knowhow", "src-memory"],
+    )
+    # (b) 零可见来源的 Knowhow-only 库:同一条默认表示法,同样不算收窄。
+    resolved = _validate_source_scope(
+        _ScopeRepo([], 0, hidden=["src-knowhow"]),
+        _notebook(),
+        SourceScope(mode="exclude", source_ids=[]),
+    )
+    assert resolved == SourceScope(
+        mode="include", source_ids=[], narrowed=False,
+        hidden_source_ids=["src-knowhow"],
+    )
+    # (c) 客户端伪造的 hidden_source_ids 必须被无条件覆盖 —— 它点名的是复选框
+    # 宇宙**刻意隐藏**的东西(别人的私有 Memory 投影就在其中)。
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1"], 1, hidden=["src-knowhow"]),
+        _notebook(),
+        SourceScope(
+            mode="exclude", source_ids=[],
+            hidden_source_ids=["src-someone-elses-memory"],
+        ),
+    )
+    assert resolved.hidden_source_ids == ["src-knowhow"]
+
+
+def test_narrowed_scope_still_excludes_hidden_projection_evidence():
+    """反向护栏(既有产品契约,本次不得改动):**真**收窄来源维度时,隐藏
+    Memory/Knowhow 投影证据不参与。
+
+    入口层不给这份清单,消费侧因此不需要第二个条件 —— 两处不可能各说各话。
+    """
+    resolved = _validate_source_scope(
+        _ScopeRepo(["s1", "s2"], 2, hidden=["src-knowhow", "src-memory"]),
+        _notebook(),
+        SourceScope(mode="include", source_ids=["s1"]),
+    )
+    assert resolved == SourceScope(
+        mode="include", source_ids=["s1"], narrowed=True,
+        hidden_source_ids=[],
+    )
+    with source_scope_context("nb", resolved):
+        assert source_scope_restricted() is True
+        assert source_allowed("nb", "s1") is True
+        assert source_allowed("nb", "src-knowhow") is False, (
+            "收窄来源维度时隐藏 Knowhow 投影证据不得参与"
+        )
+        assert source_allowed("nb", "src-memory") is False, (
+            "收窄来源维度时隐藏 Memory 投影证据不得参与"
+        )
+        assert set(scoped_allowed_source_ids("nb")) == {"s1"}

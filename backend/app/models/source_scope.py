@@ -42,8 +42,48 @@ class SourceScope(BaseModel):
     mode: Literal["include", "exclude"] = "exclude"
     source_ids: List[str] = Field(default_factory=list, max_length=10_000)
     narrowed: Optional[bool] = _NARROWED_FIELD
+    # The hidden Memory/Knowhow projection sources this run's frozen ceiling
+    # ALSO admits. A separate list, never folded into ``source_ids``, for three
+    # reasons that each break if they are merged:
+    #
+    #   * ``source_ids`` is a USER SELECTION -- every id in it is a checkbox the
+    #     user could tick. Hidden projection sources are infrastructure: they
+    #     carry no row in the source list and cannot be unchecked. The receipt
+    #     (``_scope_receipt``) counts ``source_ids`` against the notebook's
+    #     visible source count, so folding them in would print "53 of 5 来源".
+    #   * ``_validate_source_scope`` rejects (422) any submitted id outside the
+    #     visible universe. A report's frozen scope is re-validated at confirm
+    #     and at generate, so a merged list would fail its own re-validation --
+    #     and widening that membership check to accept hidden ids would let a
+    #     hand-crafted request name another user's private Memory projection.
+    #   * ``narrowed`` is measured against the visible universe only; a merged
+    #     list would make ``len(selected) < len(all_ids)`` incommensurable.
+    #
+    # Populated by the API boundary ONLY when the local dimension was not
+    # narrowed (see ``_validate_source_scope``), which is what keeps the
+    # existing "收窄来源维度时隐藏 Memory/Knowhow 投影证据不参与" contract true
+    # by construction rather than by a second consumption-side condition.
+    #
+    # Clients may send this field; the API boundary ALWAYS recomputes and
+    # overwrites it, exactly as it does for ``narrowed``.
+    #
+    # ``max_length`` deliberately matches ``source_ids``'s: both end up in the
+    # same frozen include list that every candidate producer pushes below its
+    # LIMIT, so they share one order of magnitude. It IS a new exposure at that
+    # scale (a notebook with more than 10,000 Knowhow tables + confirmed Memory
+    # items now fails the freeze where it previously ran unscoped), and that is
+    # the deliberate choice: truncating instead would silently drop some of the
+    # notebook's Knowhow/Memory evidence with no way for the user to see it,
+    # which is the exact failure class this field exists to remove.
+    hidden_source_ids: List[str] = Field(
+        default_factory=list,
+        max_length=10_000,
+        description="Server-computed: hidden Memory/Knowhow projection sources "
+                    "inside this run's frozen ceiling. Client-supplied values "
+                    "are ignored.",
+    )
 
-    @field_validator("source_ids")
+    @field_validator("source_ids", "hidden_source_ids")
     @classmethod
     def normalize_source_ids(cls, values: List[str]) -> List[str]:
         normalized = [str(value).strip() for value in values if str(value).strip()]

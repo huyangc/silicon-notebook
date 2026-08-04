@@ -8256,6 +8256,15 @@
         "SourceScope": {
           "description": "User-selected imported-source scope for one retrieval run.\n\n``include`` means only the listed active-notebook sources participate;\n``exclude`` means every visible active-notebook source except the listed\nones participates. Mounted base notebooks remain independent participants.\nOmitting this model from a request preserves the historical whole-scope\nbehavior for compatibility clients.",
           "properties": {
+            "hidden_source_ids": {
+              "description": "Server-computed: hidden Memory/Knowhow projection sources inside this run's frozen ceiling. Client-supplied values are ignored.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 10000,
+              "title": "Hidden Source Ids",
+              "type": "array"
+            },
             "mode": {
               "default": "exclude",
               "enum": [

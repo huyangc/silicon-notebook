@@ -200,19 +200,38 @@ class IndexProjectionStore:
                 visible.update(row["id"] for row in rows)
         return [source_id for source_id in source_ids if source_id in visible]
 
-    def all_visible_source_ids(self, notebook_id: str) -> List[str]:
-        """Return the complete imported-source id set in stable id order.
+    def scope_source_ids(self, notebook_id: str) -> "tuple[List[str], List[str]]":
+        """``(visible imported source ids, hidden projection source ids)``,
+        each in stable id order.
 
         Source checkbox exclusions are normalized to an explicit allow-list at
         the HTTP boundary.  That one bounded list then follows the background
         job, so later source additions cannot silently widen an in-flight run.
+
+        BOTH partitions come back from ONE query on purpose.  The freeze needs
+        the visible set (that is the checkbox universe, and the denominator
+        ``narrowed`` is measured against) and the hidden set (Memory/Knowhow
+        projection sources, which have no checkbox and must stay inside the
+        ceiling of a run that narrowed nothing).  Asking for them separately
+        would double the round trips on the hottest scope path — the browser's
+        default "everything checked" request — to answer one question about one
+        table.
         """
+        visible: List[str] = []
+        hidden: List[str] = []
         with self.connect() as db:
-            return [row["id"] for row in db.execute(
-                "SELECT id FROM sources WHERE notebook_id=? "
-                "AND source_type NOT IN ('memory','knowhow') ORDER BY id",
+            rows = db.execute(
+                "SELECT id, source_type FROM sources WHERE notebook_id=? "
+                "ORDER BY id",
                 (notebook_id,),
-            ).fetchall()]
+            ).fetchall()
+        for row in rows:
+            bucket = (
+                hidden if str(row["source_type"] or "") in ("memory", "knowhow")
+                else visible
+            )
+            bucket.append(row["id"])
+        return visible, hidden
 
     def notebook_owner(self, notebook_id: str) -> "str | None":
         with self.connect() as db:

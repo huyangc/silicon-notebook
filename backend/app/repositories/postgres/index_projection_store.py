@@ -200,15 +200,25 @@ class IndexProjectionStore:
                 visible.update(row["id"] for row in rows)
         return [source_id for source_id in source_ids if source_id in visible]
 
-    def all_visible_source_ids(self, notebook_id: str) -> List[str]:
-        """Return all user-visible imported source ids in stable id order."""
+    def scope_source_ids(self, notebook_id: str) -> "tuple[List[str], List[str]]":
+        """``(visible imported source ids, hidden projection source ids)``,
+        each in stable id order — see the SQLite adapter for why one query
+        returns both partitions."""
+        visible: List[str] = []
+        hidden: List[str] = []
         with self.connect() as db:
             rows = db.execute(
-                "SELECT id FROM sources WHERE notebook_id=%s "
-                "AND source_type NOT IN ('memory','knowhow') ORDER BY id",
+                "SELECT id, source_type FROM sources WHERE notebook_id=%s "
+                "ORDER BY id",
                 (notebook_id,),
             ).fetchall()
-        return [row["id"] for row in rows]
+        for row in rows:
+            bucket = (
+                hidden if str(row["source_type"] or "") in ("memory", "knowhow")
+                else visible
+            )
+            bucket.append(row["id"])
+        return visible, hidden
 
     def notebook_owner(self, notebook_id: str) -> "str | None":
         with self.connect() as db:

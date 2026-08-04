@@ -557,3 +557,91 @@ def test_kg_rebuild_never_extracts_hidden_knowhow_source(client, imported):
         ).fetchone()["c"] == 0
     kh_kos_after, _ = _knowhow_kg_ids(repo, hidden_source_id)
     assert kh_kos_after == kh_kos_before
+
+
+# ---------------------------------------------------------------------------
+# codex #431 R9 (P1) 端到端:Knowhow-only 笔记本在浏览器**默认全选**下,既要通过
+# 可用性检查,也要真的检索得到 Knowhow 证据。
+#
+# 这个 fixture 正是那个形态:零可见导入来源,全部内容都挂在隐藏投影源上。检索范围
+# 冻结的快照只含**可见**来源,而 R7 之后这份快照对每个浏览器请求都生效 —— 于是
+# `include:[]` 把整本库判死:`_require_ask_available` 放行,`_retrieve_chunks` 零命中。
+# 这条用例把「放行」和「真的检索到」钉在一起,单独钉任何一半都漏掉本条 P1。
+# ---------------------------------------------------------------------------
+
+
+def test_knowhow_only_notebook_default_full_selection_still_retrieves(client, imported):
+    from app.api.ask_routes import _require_ask_available
+    from app.models.source_scope import SourceScope
+    from app.services.source_scope import source_scope_context
+
+    repo = client._repo
+    nb = imported["nb"]
+    hidden_source_id = imported["hidden_source_id"]
+
+    notebook = repo.get_notebook(nb)
+    assert notebook.counts["sources"] == 0, "前提:零可见导入来源"
+    assert notebook.local_evidence_available is True, "前提:本地确实有得可搜"
+
+    # 浏览器**默认**发出的「全选」表示法 —— 用户没有做任何收窄。
+    resolved_source, resolved_base = _require_ask_available(
+        notebook, repo, SourceScope(mode="exclude", source_ids=[]), None
+    )
+    assert resolved_source is not None
+    assert resolved_source.narrowed is False, "全选不是收窄"
+    assert resolved_source.source_ids == [], "可见来源确实为空"
+    assert hidden_source_id in resolved_source.hidden_source_ids, (
+        "未收窄时隐藏投影源必须留在冻结上限内"
+    )
+
+    # …并且真的检索得到。这条走的是 ask_chunk 用的同一个候选生成原语,来源上限
+    # 在 LIMIT 之前就下推进 SQL —— 所以它证明的不是结果边界过滤,而是整条链。
+    with source_scope_context(nb, resolved_source, resolved_base):
+        scored, _ids, _mat = repo._retrieve_chunks(nb, UNIQUE_TERM)
+    assert scored, "默认全选下 Knowhow-only 笔记本必须仍能检索到证据"
+    hit = next((c for c in scored if UNIQUE_TERM in c.text), None)
+    assert hit is not None, [c.chunk_id for c in scored]
+    assert hit.source_id == hidden_source_id
+
+
+def test_knowhow_notebook_with_a_real_narrowing_drops_projection_evidence(
+    client, imported
+):
+    """反向护栏:同一个库,一旦来源维度**真被收窄**(两份可见来源里只勾一份),
+    隐藏 Knowhow 投影证据按既有产品契约不参与。
+
+    没有这一半,上面那条用「干脆不下推上限」也能通过 —— 而那正是 R7 P1 修掉的洞。
+    两份可见来源是必要的:1 选 1 不是收窄,1 选 0 会被 D12 判空范围 409。
+    """
+    from app.api.ask_routes import _require_ask_available
+    from app.models.source_scope import SourceScope
+    from app.services.source_scope import source_scope_context
+
+    repo = client._repo
+    nb = imported["nb"]
+    hidden_source_id = imported["hidden_source_id"]
+
+    # 直接落库,不走上传端点:上传会排一个后台解析/向量 job,进程退出时它还在飞。
+    for index in (1, 2):
+        repo._runtime.source_store.insert_source(
+            source_id=f"src-plain-{index}", notebook_id=nb, title=f"文档{index}",
+            source_type="pdf", status="active", parse_status="parsed",
+            file_name="", file_path="", file_size=0, file_hash="",
+            summary="", doc_type="",
+        )
+
+    resolved_source, resolved_base = _require_ask_available(
+        repo.get_notebook(nb), repo,
+        SourceScope(mode="include", source_ids=["src-plain-1"]), None,
+    )
+    assert resolved_source is not None
+    assert resolved_source.narrowed is True, "2 选 1 是真收窄"
+    assert resolved_source.hidden_source_ids == [], (
+        "真收窄时入口层不得把隐藏投影源冻进上限"
+    )
+
+    with source_scope_context(nb, resolved_source, resolved_base):
+        scored, _ids, _mat = repo._retrieve_chunks(nb, UNIQUE_TERM)
+    assert not [c for c in scored if c.source_id == hidden_source_id], (
+        "收窄来源维度时隐藏 Knowhow 投影证据不得参与"
+    )
