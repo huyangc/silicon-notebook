@@ -27,6 +27,7 @@ from pathlib import Path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+import diag_common  # noqa: E402 — stdlib sibling; database-target resolution
 import diag_slow  # noqa: E402 — stdlib sibling host diagnostic; reuse its helpers
 import diag_common  # noqa: E402 — bounded historical offline log reader
 
@@ -49,6 +50,10 @@ def _main(argv=None) -> int:
 
     print("=" * 70)
     print("== 打开延迟诊断(#245 落地后残余卡顿定位;只读 mode=ro)==")
+    target = diag_common.resolve_database_target(root)
+    if not target.is_sqlite:
+        print(target.skip_note("本诊断"))
+        return 0
     db_path = os.path.join(local_dir, "silicon_notebook.db")
     if not os.path.exists(db_path):
         print("(缺 SQLite database;用 --local 指定 local data directory)")

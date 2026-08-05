@@ -1484,6 +1484,55 @@ def test_compact_source_scope_snapshot_matches_sqlite_semantics(
     ) == (["src-compact-b", "src-compact-a"], 2)
 
 
+def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(
+    core_stores: CoreStores,
+):
+    """Run the jsonb preservation expression against PostgreSQL itself.
+
+    The `||` / `jsonb_build_object` merge cannot be validated by inspection, and
+    a stamp silently erased here is invisible until a finished report shows no
+    elapsed time.  The SQLite lane covers the same behavior in
+    ``test_report_api``.
+    """
+    from app.repositories.postgres.report_store import ReportStore
+
+    owner = core_stores.identity.create_user("r00456789", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Report timing"), owner.id
+    )
+    reports = ReportStore(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=lambda: NOW,
+        current_user_id=lambda: owner.id,
+    )
+    report_id = reports.create_report(notebook_id, "为什么?", 8)
+    reports.update_report(notebook_id, report_id, status="outline_ready")
+    assert reports.claim_report_generation(notebook_id, report_id) is True
+    started = reports.get_report(notebook_id, report_id)["generation_started_at"]
+    assert started
+
+    reports.update_report(
+        notebook_id, report_id, status="done",
+        understanding={"objective": "q", "credibility": {"anchor_count": 3}},
+    )
+
+    done = reports.get_report(notebook_id, report_id)
+    assert done["generation_started_at"] == started
+    assert done["understanding"]["objective"] == "q"
+    assert "_generation_started_at" not in done["understanding"]
+
+    # A report that never reached generation has no stamp to preserve, and the
+    # merge must not invent one.
+    second = reports.create_report(notebook_id, "另一个问题", 2)
+    reports.update_report(
+        notebook_id, second, status="done", understanding={"objective": "q2"},
+    )
+    never_claimed = reports.get_report(notebook_id, second)
+    assert never_claimed["generation_started_at"] == ""
+    assert never_claimed["understanding"] == {"objective": "q2"}
+
+
 def test_report_source_rows_executes_all_postgres_aggregates_and_matches_sqlite(
     core_stores: CoreStores,
 ):

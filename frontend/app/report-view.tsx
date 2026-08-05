@@ -803,6 +803,23 @@ function corpusUnavailableCopy(reason: string | undefined): string {
   return reason ? "资料基础统计未能完成，本次没有可用的资料统计。" : "";
 }
 
+/**
+ * 本次引用到的参考库资料**份数**（按来源去重，不是锚点数）。画像只统计当前笔记本，
+ * 而检索是跨挂载参考库的；不点明这一半，"基于 N 份资料"会被读成证据的全部。
+ * 与后端 `base_reference_source_count` 同口径。
+ */
+function baseReferenceSourceCount(
+  references: ReportDetailT["references"] | undefined,
+): number {
+  const seen = new Set<string>();
+  for (const reference of references || []) {
+    if (reference?.tier !== "base") continue;
+    const sourceId = String(reference.source_id || "").trim();
+    if (sourceId) seen.add(sourceId);
+  }
+  return seen.size;
+}
+
 export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
   const profile = report.understanding?.corpus_profile;
   const scope = report.understanding?.result_scope;
@@ -810,11 +827,12 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
   // means "there are statistics to show".
   const unavailableCopy = corpusUnavailableCopy(profile?.unavailable_reason);
   const measured = profile && !profile.unavailable_reason ? profile : undefined;
+  const baseSources = baseReferenceSourceCount(report.references);
   const disclosure = profile?.completeness_disclosure
     || ((scope === "complete" || scope === "aggregate" || scope === "hybrid")
       ? "本报告按相关性检索生成，未做完整枚举。"
       : "");
-  if (!profile && !disclosure) return null;
+  if (!profile && !disclosure && baseSources === 0) return null;
   const typeText = formatDistribution(measured?.type_distribution);
   const yearText = formatDistribution(measured?.year_distribution);
   const representativeTitles = (measured?.representatives || [])
@@ -832,6 +850,11 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
       </div>
       {unavailableCopy && (
         <p className="report-corpus-basis-unavailable">{unavailableCopy}</p>
+      )}
+      {baseSources > 0 && (
+        <p className="report-corpus-basis-unavailable">
+          另引用了 {baseSources} 份参考库资料，未计入上述统计。
+        </p>
       )}
       {measured && (
         <div className="report-corpus-basis-facts">

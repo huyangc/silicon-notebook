@@ -96,6 +96,33 @@ test("限定资料范围与统计失败在资料基础里读起来不是同一�
 });
 
 
+test("资料基础点明引用到的参考库资料，按来源去重而非按锚点", () => {
+  const { rerender } = render(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k1", label: "a", tier: "base", source_id: "src-b1" },
+        { key: "k2", label: "a", tier: "base", source_id: "src-b1" },
+        { key: "k3", label: "b", tier: "base", source_id: "src-b2" },
+        { key: "k4", label: "c", tier: "personal", source_id: "src-p1" },
+      ],
+    })} />,
+  );
+
+  expect(screen.getByLabelText("资料基础")).toHaveTextContent("4 份资料");
+  expect(screen.getByText("另引用了 2 份参考库资料，未计入上述统计。")).toBeVisible();
+
+  // 纯本地报告一个字都不该多说。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [{ key: "k1", label: "c", tier: "personal", source_id: "src-p1" }],
+    })} />,
+  );
+  expect(screen.queryByText(/参考库资料/)).toBeNull();
+});
+
+
 test("大纲确认将用户编辑的分析框架与章节一起提交", async () => {
   const user = userEvent.setup();
   const updateReportOutline = vi.fn().mockResolvedValue({ status: "ok", sections: 1 });

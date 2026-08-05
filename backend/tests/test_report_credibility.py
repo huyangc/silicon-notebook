@@ -10,6 +10,7 @@ from app.services.report_corpus_profile import (
     PROFILE_FAILED,
     PROFILE_SCOPE_RESTRICTED,
     ReportCorpusProfileService,
+    base_reference_source_count,
     corpus_profile_available,
     corpus_profile_reader_markdown,
     unavailable_profile,
@@ -158,6 +159,42 @@ def test_scoped_skip_and_aggregation_failure_read_as_different_things():
     legacy_copy = "\n".join(corpus_profile_reader_markdown({}))
     assert "资料基础统计未能完成" in legacy_copy
     assert "限定了检索的资料范围" not in legacy_copy
+
+
+def test_reader_disclosure_names_reference_library_material_it_cited():
+    """The profile counts one notebook; retrieval is federated over mounted bases.
+
+    Real data from a production report: profile total 4, yet 26 of 42 anchors
+    resolved to a mounted base.  "Based on the 4 visible sources" then reads as
+    the whole evidence basis, which is the ambiguity being removed here.
+    """
+    references = [
+        {"key": "k1", "tier": "base", "source_id": "src-b1"},
+        {"key": "k2", "tier": "base", "source_id": "src-b1"},   # 同一份资料的第二个锚点
+        {"key": "k3", "tier": "base", "source_id": "src-b2"},
+        {"key": "k4", "tier": "personal", "source_id": "src-p1"},
+        {"key": "k5", "source_id": "src-p2"},                   # 无 tier 视为本地
+    ]
+    assert base_reference_source_count(references) == 2
+
+    profile = {"total_sources": 4, "metadata_sources": 4, "unknown_year": 2}
+    markdown = "\n".join(
+        corpus_profile_reader_markdown(profile, base_reference_sources=2)
+    )
+    assert "当前笔记本可见的 4 份资料" in markdown
+    assert "引用了 2 份来自已挂载参考库的资料" in markdown
+
+    # No base citations → no extra sentence, so single-library reports read
+    # exactly as before.
+    local_only = "\n".join(corpus_profile_reader_markdown(profile))
+    assert "参考库" not in local_only
+
+    # The note must survive an unavailable profile too: a scoped run that cited
+    # a base library is precisely where the reader is most likely to miscount.
+    scoped = "\n".join(corpus_profile_reader_markdown(
+        unavailable_profile(PROFILE_SCOPE_RESTRICTED), base_reference_sources=3,
+    ))
+    assert "限定了检索的资料范围" in scoped and "3 份来自已挂载参考库" in scoped
 
 
 def test_unavailable_profile_is_never_treated_as_measured_statistics():

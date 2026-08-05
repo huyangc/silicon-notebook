@@ -156,3 +156,46 @@ def test_report_pseudonyms_are_stable_within_one_report_and_reset_between_report
         lambda: print(common.pseudonym("notebook", raw_notebook))
     ) == 0
     assert capsys.readouterr().out.splitlines() == ["notebook#1"]
+
+
+def test_database_target_follows_database_url_instead_of_assuming_sqlite(
+    tmp_path, monkeypatch
+):
+    """Diagnostics must not answer from a stale SQLite file on a PG deployment.
+
+    Every diag entry point used to open `.local/silicon_notebook.db`
+    unconditionally.  On PostgreSQL that file is stale or empty, so the tools
+    produced a confident, wrong diagnosis rather than refusing.
+    """
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    # No configuration at all → SQLite, matching the shipped default.
+    assert common.resolve_database_target(str(tmp_path)).is_sqlite
+
+    # .env is the deployment's own record; the service reads it the same way.
+    (tmp_path / ".env").write_text(
+        "# comment\nOTHER=1\nDATABASE_URL=postgresql://user:pw@host:5432/db\n",
+        encoding="utf-8",
+    )
+    target = common.resolve_database_target(str(tmp_path))
+    assert target.is_sqlite is False
+    assert target.backend == "postgres"
+    assert target.source == "dotenv"
+    # Never echo credentials or host back into a diagnostic report.
+    rendered = target.explain() + target.skip_note()
+    for secret in ("user", "pw", "host", "5432"):
+        assert secret not in rendered
+
+    # Process environment wins over .env, matching pydantic-settings.
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///./local.db")
+    env_target = common.resolve_database_target(str(tmp_path))
+    assert env_target.is_sqlite and env_target.source == "env"
+
+    # A quoted value and a later duplicate both resolve the way dotenv does.
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        'DATABASE_URL="sqlite:///./a.db"\nDATABASE_URL=postgresql://h/db\n',
+        encoding="utf-8",
+    )
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"

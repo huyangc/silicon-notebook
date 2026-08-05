@@ -2182,9 +2182,20 @@ def _main(argv=None) -> int:
         description="Collect bounded source-side-effect-free SQLite DFX metadata."
     )
     parser.add_argument("--db", default=".local/silicon_notebook.db")
+    # 显式 --db 是用户自己指点的文件,照办;缺省值则是一个关于部署形态的**假设**,
+    # 而 PostgreSQL 部署上那个假设会安静地答错。
+
     parser.add_argument("--notebook-id", default=None)
     parser.add_argument("--deadline-seconds", type=float, default=4.0)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if not _explicit_db_flag(sys.argv[1:] if argv is None else argv):
+        target = diag_common.resolve_database_target(os.getcwd())
+        if not target.is_sqlite:
+            sys.stdout.write(
+                f"{target.skip_note('本诊断')}\n"
+                "如确实要检查那个 SQLite 文件，显式传 --db。\n"
+            )
+            return 0
     evidence = collect_db_evidence(
         args.db,
         notebook_id=args.notebook_id,
@@ -2192,6 +2203,10 @@ def _main(argv=None) -> int:
     )
     sys.stdout.write(render_db_report(evidence))
     return 0
+
+
+def _explicit_db_flag(argv) -> bool:
+    return any(arg == "--db" or arg.startswith("--db=") for arg in argv or ())
 
 
 def main(argv=None) -> int:

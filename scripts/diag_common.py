@@ -436,6 +436,87 @@ def read_channel(log_dir: Path, channel: str, *, since_hours: Optional[float] = 
     )
 
 
+@dataclass(frozen=True)
+class DatabaseTarget:
+    """Which database the deployment actually serves from.
+
+    The diagnostics used to open ``.local/silicon_notebook.db`` unconditionally.
+    On a PostgreSQL deployment that file is stale or empty, so every query
+    silently answered from the wrong database — worse than refusing, because the
+    output looks like a real diagnosis.  Resolution mirrors the service: the
+    process environment wins over ``.env``, matching pydantic-settings.
+    """
+
+    backend: str                      # "sqlite" | "postgres" | "unknown"
+    sqlite_path: Optional[str] = None
+    url_scheme: str = ""              # 脱敏:只留 scheme,绝不带凭据/host
+    source: str = "default"           # "env" | "dotenv" | "default"
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.backend == "sqlite"
+
+    def explain(self) -> str:
+        if self.is_sqlite:
+            return f"SQLite（来源:{self.source}）"
+        if self.backend == "postgres":
+            return f"PostgreSQL（DATABASE_URL scheme={self.url_scheme}，来源:{self.source}）"
+        return f"未知后端（scheme={self.url_scheme or '?'}，来源:{self.source}）"
+
+    def skip_note(self, what: str = "本段") -> str:
+        return (
+            f"({what}目前只支持 SQLite;当前部署是 {self.explain()} — "
+            f"跳过而不是读取可能陈旧的 .local/silicon_notebook.db)"
+        )
+
+
+def _dotenv_database_url(root: str) -> Optional[str]:
+    path = Path(root) / ".env"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    value: Optional[str] = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, rest = line.partition("=")
+        if key.strip() != "DATABASE_URL":
+            continue
+        rest = rest.strip()
+        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
+            rest = rest[1:-1]
+        value = rest          # 后出现的覆盖先出现的,与 dotenv 一致
+    return value
+
+
+def resolve_database_target(root: str) -> DatabaseTarget:
+    """Resolve the serving database from DATABASE_URL, never by assumption."""
+    import os as _os
+
+    raw = _os.environ.get("DATABASE_URL")
+    source = "env"
+    if raw is None or not str(raw).strip():
+        raw = _dotenv_database_url(root)
+        source = "dotenv" if raw else "default"
+    url = str(raw or "").strip()
+    if not url:
+        return DatabaseTarget(backend="sqlite", source="default")
+    scheme = url.split("://", 1)[0].lower() if "://" in url else url.lower()
+    if scheme.startswith("sqlite"):
+        _, _, rest = url.partition("://")
+        path = rest.split("?", 1)[0]
+        # sqlite:///abs/path 与 sqlite:///relative 都落在这里;空串表示未指定。
+        return DatabaseTarget(
+            backend="sqlite", sqlite_path=path.lstrip("/") and path or None,
+            url_scheme=scheme, source=source,
+        )
+    if scheme.startswith("postgres"):
+        return DatabaseTarget(backend="postgres", url_scheme=scheme, source=source)
+    return DatabaseTarget(backend="unknown", url_scheme=scheme, source=source)
+
+
 def normalize_http_path(path: str) -> str:
     clean = str(path).split("?", 1)[0]
     parts = []

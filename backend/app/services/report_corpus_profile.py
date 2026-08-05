@@ -280,23 +280,56 @@ def corpus_profile_unavailable_copy(profile: dict[str, Any]) -> str:
     return "资料基础统计未能完成；正文仍按相关性检索生成，不能据此推断已覆盖全部资料。"
 
 
-def corpus_profile_reader_markdown(profile: dict[str, Any]) -> list[str]:
+def base_reference_source_count(references: Sequence[Any]) -> int:
+    """Distinct reference-library sources actually cited by this report.
+
+    Derived from references that are already assembled, so it costs no query.
+    It counts *sources*, not anchors: several anchors into one paper are one
+    piece of material, which is the unit the disclosure talks about.
+    """
+    seen: set[str] = set()
+    for reference in references or []:
+        row = reference if isinstance(reference, dict) else {}
+        if _text(row.get("tier")) != "base":
+            continue
+        source_id = _text(row.get("source_id"))
+        if source_id:
+            seen.add(source_id)
+    return len(seen)
+
+
+def corpus_profile_reader_markdown(
+    profile: dict[str, Any], *, base_reference_sources: int = 0,
+) -> list[str]:
+    # The profile counts the current notebook only, while retrieval is federated
+    # over mounted reference libraries.  Saying "based on the N visible sources"
+    # while most citations came from a library outside that N is the ambiguity
+    # this line exists to remove.
+    base_note = (
+        f"此外，正文还引用了 {base_reference_sources} 份来自已挂载参考库的资料；"
+        "参考库资料不计入上述统计。"
+        if base_reference_sources > 0 else ""
+    )
     if not corpus_profile_available(profile):
-        return [
+        lines = [
             "## 资料基础",
             "",
             corpus_profile_unavailable_copy(profile),
-            "",
         ]
+        if base_note:
+            lines.append(base_note)
+        return lines + [""]
     total = int(profile.get("total_sources") or 0)
     metadata = int(profile.get("metadata_sources") or 0)
     unknown_year = int(profile.get("unknown_year") or 0)
     lines = [
         "## 资料基础",
         "",
-        f"本报告基于当前可见的 {total} 份资料生成。其中 {metadata}/{total} 份具有已校验的论文元数据，"
+        f"本报告基于当前笔记本可见的 {total} 份资料生成。其中 {metadata}/{total} 份具有已校验的论文元数据，"
         f"{unknown_year} 份年份未知。完整来源身份未载入报告上下文，因此不提供伪精确的独立文档族总数。",
     ]
+    if base_note:
+        lines.append(base_note)
     duplicate_inflation = int(profile.get("identified_duplicate_lower_bound") or 0)
     if duplicate_inflation:
         lines.append(f"保守规则至少识别出 {duplicate_inflation} 份重复膨胀；哈希与标题重复组可能重叠，未识别重复也仍可能存在。")
