@@ -434,3 +434,44 @@ def test_readonly_uri_escapes_a_filename_that_carries_a_query(tmp_path, monkeypa
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://h/db")
     assert common.resolve_database_target(str(tmp_path)).sqlite_readonly_uri("/x") is None
+
+
+def test_dotenv_interpolation_matches_the_application(tmp_path, monkeypatch):
+    """`DATABASE_URL=${DB_KIND}://host/db` resolves for the app, so it must here.
+
+    Passing the literal `${DB_KIND}://…` to the URL parser yields `unknown` and
+    makes every guarded diagnostic skip on a perfectly healthy deployment.
+    """
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    (tmp_path / ".env").write_text(
+        "DB_KIND=postgresql\nDATABASE_URL=${DB_KIND}://host/db\n", encoding="utf-8"
+    )
+
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    # The plain spellings keep working through the same path.
+    (tmp_path / ".env").write_text(
+        "export DATABASE_URL='sqlite:///.local/x.db' # note\n", encoding="utf-8"
+    )
+    target = common.resolve_database_target(str(tmp_path))
+    assert target.is_sqlite and target.sqlite_path.endswith(".local/x.db")
+
+
+def test_dotenv_fallback_keeps_working_without_python_dotenv(tmp_path, monkeypatch):
+    """These scripts are stdlib-only, so the parser must degrade, not fail."""
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    monkeypatch.setattr(common, "_authoritative_dotenv_values", lambda _path: None)
+
+    (tmp_path / ".env").write_text(
+        "export database_url=postgresql://h/db # note\n", encoding="utf-8"
+    )
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    (tmp_path / ".env").write_text(
+        'DATABASE_URL="sqlite:///.local/x.db"\n', encoding="utf-8"
+    )
+    assert common.resolve_database_target(str(tmp_path)).sqlite_path.endswith(".local/x.db")

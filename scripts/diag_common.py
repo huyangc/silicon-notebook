@@ -500,7 +500,37 @@ class DatabaseTarget:
         return f"file:{_quote(path)}?mode=ro" if path else None
 
 
+def _authoritative_dotenv_values(path: Path) -> Optional[Dict[str, Any]]:
+    """Parse with python-dotenv itself when it is importable.
+
+    The application reads `.env` through pydantic-settings, i.e. python-dotenv,
+    which also expands `${VAR}` interpolation.  Re-implementing that here would
+    be a third mirror to drift against, so use the real parser whenever the
+    backend dependencies are installed — the usual case on a machine that runs
+    the service.  These scripts must stay stdlib-only, hence the fallback below
+    rather than a hard dependency.
+    """
+    try:
+        from dotenv import dotenv_values as _dotenv_values
+    except Exception:
+        return None
+    try:
+        return {
+            str(key): value for key, value in _dotenv_values(str(path)).items()
+            if key
+        }
+    except Exception:
+        return None
+
+
 def _dotenv_database_url(path: Path) -> Optional[str]:
+    values = _authoritative_dotenv_values(path)
+    if values is not None:
+        found: Optional[str] = None
+        for key in sorted(values):
+            if key.upper() == "DATABASE_URL":
+                found = values[key]
+        return None if found is None else str(found)
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
