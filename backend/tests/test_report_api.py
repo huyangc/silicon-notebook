@@ -63,6 +63,47 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 404
 
 
+def test_terminal_understanding_write_keeps_the_generation_start_stamp(client, monkeypatch):
+    """The engine's terminal write must not erase the store's own timing stamp.
+
+    `_generation_started_at` is written by `claim_report_generation`, but the
+    engine finishes by persisting its in-memory intent contract — which never
+    carries that key.  A plain column assignment therefore wiped it on exactly
+    the reports whose duration matters, and every finished report showed no
+    elapsed time at all.  The pre-existing coverage missed this because it never
+    passed `understanding` to `update_report`.
+    """
+    import app.api.report_routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?"}
+    ).json()["report_id"]
+
+    from app.api.deps import repository
+    repo = repository()
+    repo.update_report(nb["id"], rid, status="outline_ready")
+    assert repo.claim_report_generation(nb["id"], rid)
+    claimed = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    started = claimed["generation_started_at"]
+    assert started
+
+    # Exactly what the engine does on the terminal path: persist the intent
+    # contract plus credibility, with no knowledge of the private timing key.
+    repo.update_report(
+        nb["id"], rid, status="done", progress="完成",
+        understanding={"objective": "q", "credibility": {"anchor_count": 3}},
+    )
+
+    done = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert done["generation_started_at"] == started
+    assert done["understanding"]["objective"] == "q"
+    # The private key stays private: it is popped into its own field, never
+    # surfaced back inside the user-facing contract.
+    assert "_generation_started_at" not in done["understanding"]
+
+
 def test_report_create_rejects_blank_question_and_missing_nb(client, monkeypatch):
     import app.api.report_routes as routes_mod
     monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)

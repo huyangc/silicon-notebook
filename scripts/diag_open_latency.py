@@ -27,6 +27,7 @@ from pathlib import Path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+import diag_common  # noqa: E402 — stdlib sibling; database-target resolution
 import diag_slow  # noqa: E402 — stdlib sibling host diagnostic; reuse its helpers
 import diag_common  # noqa: E402 — bounded historical offline log reader
 
@@ -49,12 +50,21 @@ def _main(argv=None) -> int:
 
     print("=" * 70)
     print("== 打开延迟诊断(#245 落地后残余卡顿定位;只读 mode=ro)==")
-    db_path = os.path.join(local_dir, "silicon_notebook.db")
-    if not os.path.exists(db_path):
+    target = diag_common.resolve_database_target(root)
+    if not target.is_sqlite:
+        print(target.skip_note("本诊断"))
+        return 0
+    # 解析出的文件优先:确认后端是 SQLite 还不够,非默认路径下固定路径同样陈旧。
+    db_path = target.resolve_sqlite_file(local_dir)
+    if not db_path or not os.path.exists(db_path):
         print("(缺 SQLite database;用 --local 指定 local data directory)")
         return 0
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60)
+        # 文件名可能含 `?`(配置里的 query 是服务打开的那个名字的一部分),
+        # 裸拼会被 SQLite 当成 URI 参数,所以走统一的编码构造点。
+        conn = sqlite3.connect(
+            target.sqlite_readonly_uri(local_dir), uri=True, timeout=60
+        )
         conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         print("(DB 只读打开失败: sqlite_error)")

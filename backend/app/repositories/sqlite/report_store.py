@@ -55,9 +55,26 @@ class ReportStore:
                                ("references_json", references, True),
                                ("section_status_json", section_status, True),
                                ("understanding_json", understanding, True)):
-            if val is not None:
-                sets.append(f"{col} = ?")
-                args.append(json.dumps(val, ensure_ascii=False) if dump else val)
+            if val is None:
+                continue
+            if col == "understanding_json":
+                # `_generation_started_at` is written by `claim_report_generation`
+                # and belongs to the store, not to the caller's in-memory intent
+                # contract.  A plain assignment here erases it, which is exactly
+                # what happened on every terminal write: finished reports — the
+                # ones whose duration matters — could never show one.
+                sets.append(
+                    f"{col} = CASE WHEN json_extract({col},"
+                    f" '$._generation_started_at') IS NOT NULL"
+                    f" THEN json_set(?, '$._generation_started_at',"
+                    f" json_extract({col}, '$._generation_started_at'))"
+                    f" ELSE ? END"
+                )
+                payload = json.dumps(val, ensure_ascii=False)
+                args.extend([payload, payload])
+                continue
+            sets.append(f"{col} = ?")
+            args.append(json.dumps(val, ensure_ascii=False) if dump else val)
         args.extend([report_id, notebook_id])
         with self.database.write() as db:
             guard = "" if status == "cancelled" else " AND status <> 'cancelled'"

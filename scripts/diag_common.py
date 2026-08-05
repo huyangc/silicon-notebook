@@ -436,6 +436,262 @@ def read_channel(log_dir: Path, channel: str, *, since_hours: Optional[float] = 
     )
 
 
+@dataclass(frozen=True)
+class DatabaseTarget:
+    """Which database the deployment actually serves from.
+
+    The diagnostics used to open ``.local/silicon_notebook.db`` unconditionally.
+    On a PostgreSQL deployment that file is stale or empty, so every query
+    silently answered from the wrong database — worse than refusing, because the
+    output looks like a real diagnosis.  Resolution mirrors the service: the
+    process environment wins over ``.env``, matching pydantic-settings.
+    """
+
+    backend: str                      # "sqlite" | "postgres" | "unknown"
+    sqlite_path: Optional[str] = None
+    url_scheme: str = ""              # 脱敏:只留 scheme,绝不带凭据/host
+    source: str = "default"           # "env" | "dotenv" | "default"
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.backend == "sqlite"
+
+    def explain(self) -> str:
+        if self.is_sqlite:
+            return f"SQLite（来源:{self.source}）"
+        if self.backend == "postgres":
+            return f"PostgreSQL（DATABASE_URL scheme={self.url_scheme}，来源:{self.source}）"
+        return f"未知后端（scheme={self.url_scheme or '?'}，来源:{self.source}）"
+
+    def skip_note(self, what: str = "本段") -> str:
+        return (
+            f"({what}目前只支持 SQLite;当前部署是 {self.explain()} — "
+            f"跳过而不是读取可能陈旧的 .local/silicon_notebook.db)"
+        )
+
+    def resolve_sqlite_file(self, fallback_dir: str) -> Optional[str]:
+        """The SQLite file this deployment actually serves from.
+
+        Confirming the *backend* is not enough: a valid non-default URL such as
+        ``sqlite:///data/production.db`` still leaves the fixed
+        ``<local_dir>/silicon_notebook.db`` pointing at a stale file.  Falls
+        back to the conventional location only when the URL names no file.
+        """
+        import os as _os
+
+        if not self.is_sqlite:
+            return None
+        if self.sqlite_path:
+            return self.sqlite_path
+        return _os.path.join(fallback_dir, "silicon_notebook.db")
+
+    def sqlite_readonly_uri(self, fallback_dir: str) -> Optional[str]:
+        """The read-only URI for that file, safe to hand to ``sqlite3.connect``.
+
+        A configured query string is part of the filename the service opens, so
+        the resolved path can legitimately contain ``?``.  Interpolating it raw
+        into ``file:{path}?mode=ro`` makes SQLite parse that suffix as URI
+        parameters (``mode=ro?mode=ro``) instead of opening the literal file, so
+        the name has to be percent-encoded.  Sole construction point.
+        """
+        from urllib.parse import quote as _quote
+
+        path = self.resolve_sqlite_file(fallback_dir)
+        return f"file:{_quote(path)}?mode=ro" if path else None
+
+
+def _authoritative_dotenv_values(path: Path) -> Optional[Dict[str, Any]]:
+    """Parse with python-dotenv itself when it is importable.
+
+    The application reads `.env` through pydantic-settings, i.e. python-dotenv,
+    which also expands `${VAR}` interpolation.  Re-implementing that here would
+    be a third mirror to drift against, so use the real parser whenever the
+    backend dependencies are installed — the usual case on a machine that runs
+    the service.  These scripts must stay stdlib-only, hence the fallback below
+    rather than a hard dependency.
+    """
+    try:
+        from dotenv import dotenv_values as _dotenv_values
+    except Exception:
+        return None
+    try:
+        return {
+            str(key): value for key, value in _dotenv_values(str(path)).items()
+            if key
+        }
+    except Exception:
+        return None
+
+
+def _dotenv_database_url(path: Path) -> Optional[str]:
+    values = _authoritative_dotenv_values(path)
+    if values is not None:
+        found: Optional[str] = None
+        # File order, not sorted order: with case variants of the same key
+        # pydantic-settings takes the later declaration, while sorting would
+        # let the lowercase spelling win regardless of where it appears.
+        for key, value in values.items():
+            if key.upper() == "DATABASE_URL":
+                found = value
+        return None if found is None else str(found)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    value: Optional[str] = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, rest = line.partition("=")
+        key = key.strip()
+        # `export DATABASE_URL=...` is a supported form: the migration
+        # activation path writes it and the application's dotenv loader accepts
+        # it.  Missing the prefix here silently falls back to SQLite, which is
+        # exactly the stale-database misread this resolver exists to prevent.
+        if key.startswith("export ") or key.startswith("export\t"):
+            key = key[len("export"):].strip()
+        # The application's Settings uses `case_sensitive=False`, so
+        # `database_url=` is a live spelling too.
+        if key.upper() != "DATABASE_URL":
+            continue
+        value = _dotenv_value(rest)   # 后出现的覆盖先出现的,与 dotenv 一致
+    return value
+
+
+def _dotenv_value(raw: str) -> str:
+    """Unquote and strip an inline comment the way python-dotenv does.
+
+    ``DATABASE_URL=sqlite:///.local/prod.db # production`` is valid dotenv and
+    the application loads it without the trailing comment.  Keeping the comment
+    here turns the resolved path into a file that does not exist.  Inside
+    quotes a ``#`` is content, not a comment.
+    """
+    rest = raw.strip()
+    if rest[:1] in ('"', "'"):
+        quote = rest[0]
+        end = rest.find(quote, 1)
+        return rest[1:end] if end > 0 else rest[1:]
+    if rest.startswith("#"):
+        return ""
+    marker = rest.find(" #")
+    if marker >= 0:
+        rest = rest[:marker]
+    marker = rest.find("\t#")
+    if marker >= 0:
+        rest = rest[:marker]
+    return rest.strip()
+
+
+def _environ_case_insensitive(name: str) -> Optional[str]:
+    """Look up a process variable the way ``Settings(case_sensitive=False)`` does.
+
+    An exact hit wins; otherwise the first case-insensitive match in a stable
+    order, so two spellings in one environment resolve deterministically.
+    """
+    import os as _os
+
+    # pydantic-settings folds the environment into a lowercased mapping, so a
+    # later entry overwrites an earlier one regardless of spelling.  Giving the
+    # uppercase name priority would pick the other value when both exist.
+    wanted = name.lower()
+    found: Optional[str] = None
+    for key, value in _os.environ.items():
+        if key.lower() == wanted:
+            found = value
+    return found
+
+
+def _env_file_for(root: str) -> Optional[Path]:
+    """Mirror ``app.core.config``: the override wins, empty means read nothing."""
+    import os as _os
+
+    # Exact lookup on purpose: `app.core.config` reads this bootstrap variable
+    # with a plain `os.environ.get` before Settings exists, so its
+    # case-insensitivity does not apply.  Being more permissive here would
+    # resolve a different backend than the service actually uses.
+    override = _os.environ.get("SILICON_NOTEBOOK_ENV_FILE")
+    if override is None:
+        return Path(root) / ".env"
+    override = override.strip()
+    return Path(override) if override else None
+
+
+def _core_database_url_module():
+    """Load the isolated core URL parser without importing the app package.
+
+    Hand-mirroring this parsing is what kept diverging from the service: URL
+    queries, malformed DSNs, and scheme normalization each have a rule here
+    already.  `backend/app/core/database_url.py` deliberately has no package
+    imports, so the diagnostics can reuse the authority instead of guessing.
+    """
+    import importlib.util as _importlib_util
+
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "backend" / "app" / "core" / "database_url.py"
+    )
+    try:
+        spec = _importlib_util.spec_from_file_location(
+            "silicon_notebook_diag_database_url", path
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = _importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:      # 诊断不能因为加载失败而改口径
+        return None
+
+
+def resolve_database_target(root: str) -> DatabaseTarget:
+    """Resolve the serving database from DATABASE_URL, never by assumption."""
+    import os as _os
+
+    # Presence wins, not truthiness: `Settings` gives an explicitly present but
+    # blank DATABASE_URL precedence and rejects it, so the service cannot start.
+    # Falling through to .env or the SQLite default here would diagnose a
+    # configuration the service is not running on.
+    raw = _environ_case_insensitive("DATABASE_URL")
+    source = "env"
+    if raw is None:
+        env_file = _env_file_for(root)
+        raw = _dotenv_database_url(env_file) if env_file is not None else None
+        source = "dotenv" if raw is not None else "default"
+    if raw is None:
+        return DatabaseTarget(backend="sqlite", source="default")
+    url = str(raw).strip()
+    if not url:
+        return DatabaseTarget(backend="unknown", source=source)
+    core = _core_database_url_module()
+    if core is None:
+        return DatabaseTarget(backend="unknown", source=source)
+    try:
+        identity = core.database_identity(url)
+    except Exception:
+        # Malformed URLs are rejected by the service too.  Keep nothing from the
+        # raw value: a malformed DSN can carry credentials, and this output is
+        # meant to be pasted into a report.
+        return DatabaseTarget(backend="unknown", source=source)
+    if identity.scheme == "sqlite":
+        # `identity.database` keeps any query string, exactly as the service's
+        # `Settings.sqlite_path` does — diagnosing a different file than the one
+        # actually opened is the whole failure mode being fixed.
+        path = str(identity.database or "")
+        resolved = (
+            None if not path
+            else path if _os.path.isabs(path)
+            else _os.path.join(_os.path.abspath(root), path)
+        )
+        return DatabaseTarget(
+            backend="sqlite", sqlite_path=resolved,
+            url_scheme="sqlite", source=source,
+        )
+    return DatabaseTarget(
+        backend="postgres", url_scheme=identity.scheme, source=source
+    )
+
+
 def normalize_http_path(path: str) -> str:
     clean = str(path).split("?", 1)[0]
     parts = []

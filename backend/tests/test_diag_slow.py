@@ -80,3 +80,72 @@ def test_default_report_caps_all_sections(tmp_path, capsys, monkeypatch):
 
     assert len(output.encode("utf-8")) <= slow.DEFAULT_REPORT_OUTPUT_BYTES
     assert "output_truncated=True" in output
+
+
+def test_db_target_prefers_the_explicit_root_over_the_local_directory(
+    tmp_path, monkeypatch
+):
+    """`--root /repo --local /elsewhere` must resolve config from the root.
+
+    Deriving the root from `local_dir` only holds when .local sits inside the
+    repository.  With a custom `--local` the guess lands beside that directory,
+    finds no .env, defaults to SQLite, and every guarded section goes back to
+    reading a stale file on a PostgreSQL deployment.
+    """
+    slow = load_slow()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    # check.sh 全局设 SILICON_NOTEBOOK_ENV_FILE=""(不读任何 env 文件)以隔离
+    # 真实凭据;本用例要验证的正是 .env 读取,所以显式解除该隔离。
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".env").write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere" / "local"
+    elsewhere.mkdir(parents=True)
+
+    assert slow._db_target(str(elsewhere), str(repo)).backend == "postgres"
+    # Without the explicit root the custom directory really does resolve to
+    # nothing — which is why the root has to be threaded through.
+    assert slow._db_target(str(elsewhere)).is_sqlite
+
+    # The in-repo layouts keep working with no root passed.
+    for rel in (".local", "backend/.local"):
+        nested = repo / rel
+        nested.mkdir(parents=True, exist_ok=True)
+        assert slow._db_target(str(nested)).backend == "postgres"
+
+
+def test_artifacts_section_never_reports_the_stale_sqlite_file_on_postgres(
+    tmp_path, monkeypatch, capsys
+):
+    """Saying "skipping SQLite files" and then printing them is a contradiction.
+
+    The earlier fallback restored the fixed path when `resolve_sqlite_file()`
+    returned None, so a PostgreSQL deployment still saw that stale database's
+    size and its WAL warning right below the skip message.
+    """
+    slow = load_slow()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    repo = tmp_path / "repo"
+    (repo / ".local").mkdir(parents=True)
+    (repo / ".env").write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+    local_dir = repo / ".local"
+    # A leftover SQLite file from before the migration is exactly the trap.
+    (local_dir / "silicon_notebook.db").write_bytes(b"stale")
+    (local_dir / "silicon_notebook.db-wal").write_bytes(b"stale-wal")
+
+    slow.report_artifacts(str(local_dir), deep=False, root=str(repo))
+
+    out = capsys.readouterr().out
+    assert "跳过 SQLite 文件" in out
+    assert "silicon_notebook.db" not in out
+    assert "WAL" not in out
+
+    # On a real SQLite deployment the same section still reports the file.
+    (repo / ".env").write_text("DATABASE_URL=sqlite:///.local/silicon_notebook.db\n",
+                               encoding="utf-8")
+    slow.report_artifacts(str(local_dir), deep=False, root=str(repo))
+    sqlite_out = capsys.readouterr().out
+    assert "silicon_notebook.db" in sqlite_out
+    assert "跳过 SQLite 文件" not in sqlite_out

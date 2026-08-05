@@ -31,6 +31,7 @@ from app.services.report_corpus_profile import (
     PROFILE_FAILED,
     PROFILE_SCOPE_RESTRICTED,
     ReportCorpusProfileService,
+    base_reference_source_count,
     corpus_profile_available,
     corpus_profile_planner_block,
     corpus_profile_reader_markdown,
@@ -1731,6 +1732,30 @@ class ReportEngine:
         except Exception as exc:
             return None, "failed_validation", exc
 
+    def _emit_stage_timing(self, notebook_id: str, rid: str, stage: str,
+                           started: float, **extra: Any) -> None:
+        """Record one wall-clock stage so slow reports can be attributed.
+
+        Model latency is already recoverable from the LLM log, but retrieval is
+        not: a production report showed ~59 minutes of wall clock against ~27
+        minutes of parallel model time, and nothing in the record said where the
+        other half went.  Carries indices and durations only — never a section
+        title, question, or evidence text.
+        """
+        try:
+            self.dependencies.event_log.emit({
+                "kind": "report_stage_timing",
+                "notebook_id": notebook_id,
+                "report_id": rid,
+                "stage": stage,
+                "ms": int((time.monotonic() - started) * 1000),
+                **extra,
+            })
+        except Exception:
+            # Timing is diagnostics; it must never become a second failure
+            # channel for a report that is otherwise fine.
+            pass
+
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
         status = [{"title": s["title"], "phase": "排队", "step": 0} for s in outline]
@@ -1796,18 +1821,32 @@ class ReportEngine:
                 # 节」。每节至多 `_MAX_OUTLINE_UPDATES` 次,新增写入是有界的。
                 persist(force=step.step_type == "outline")
 
+            started = time.monotonic()
             try:
                 result = self._deep_dive(notebook_id, section, question, depth, on_step)
+                self._emit_stage_timing(
+                    notebook_id, rid, "retrieve", started, section_index=i,
+                )
                 with lock:
                     status[i]["phase"] = "待综合" if synthesis_on else "待撰写"
                 persist(force=True)
                 return result, None
             except AskCancelled:
+                # A cancelled stage is exactly the one worth attributing: the
+                # user gave up because it ran long.  Record before re-raising.
+                self._emit_stage_timing(
+                    notebook_id, rid, "retrieve", started, section_index=i,
+                    cancelled=True,
+                )
                 with lock:
                     status[i]["phase"] = "失败"
                 persist(force=True)
                 raise
             except Exception as exc:
+                self._emit_stage_timing(
+                    notebook_id, rid, "retrieve", started, section_index=i,
+                    failed=True,
+                )
                 with lock:
                     status[i]["phase"] = "失败"
                 persist(force=True)
@@ -1833,6 +1872,7 @@ class ReportEngine:
             with lock:
                 status[i]["phase"] = "撰写"
             persist(force=True)
+            drafting_started = time.monotonic()
             try:
                 draft_options: Dict[str, Any] = {}
                 if report_frame:
@@ -1849,6 +1889,10 @@ class ReportEngine:
                         "失败" if drafted.get("failed") else "完成"
                     )
             except AskCancelled:
+                self._emit_stage_timing(
+                    notebook_id, rid, "draft", drafting_started, section_index=i,
+                    cancelled=True,
+                )
                 with lock:
                     status[i]["phase"] = "失败"
                 persist(force=True)
@@ -1863,6 +1907,10 @@ class ReportEngine:
                 }
                 with lock:
                     status[i]["phase"] = "失败"
+            self._emit_stage_timing(
+                notebook_id, rid, "draft", drafting_started, section_index=i,
+                failed=bool(drafted.get("failed")),
+            )
             persist(force=True)
             return drafted
 
@@ -1910,8 +1958,20 @@ class ReportEngine:
                 if result is not None and error is None:
                     status[index]["phase"] = "整合全篇证据"
         persist(force=True)
-        outcome = self._synthesize_report_blueprint(
-            outline, results, question, report_frame
+        synthesis_started = time.monotonic()
+        try:
+            outcome = self._synthesize_report_blueprint(
+                outline, results, question, report_frame
+            )
+        except AskCancelled:
+            self._emit_stage_timing(
+                notebook_id, rid, "synthesis", synthesis_started,
+                sections=len(outline), cancelled=True,
+            )
+            raise
+        self._emit_stage_timing(
+            notebook_id, rid, "synthesis", synthesis_started,
+            sections=len(outline),
         )
         if isinstance(outcome, tuple) and len(outcome) == 3:
             blueprint, synthesis_status, synthesis_error = outcome
@@ -2164,6 +2224,23 @@ class ReportEngine:
                 "title", str(ctx.get("source_title") or "").strip()
             )
 
+        def _from_reference_library(ctx) -> bool:
+            """True when the cited source belongs to a mounted library.
+
+            Uses the owning notebook, which the citation lookup already carries:
+            `tier` describes the library's own kind, so a mounted notebook the
+            user owns reports "personal" and would be miscounted as local.
+            An unresolved owner falls back to the tier signal rather than
+            guessing that the evidence is local.
+            """
+            source_id = str(ctx.get("source_id") or "")
+            owner = str(
+                (citation_source_info.get(source_id) or {}).get("notebook_id", "")
+            ).strip()
+            if owner:
+                return owner != notebook_id
+            return str(ctx.get("tier") or "") == "base"
+
         def _source_file_name(ctx):
             source_id = str(ctx.get("source_id") or "")
             return (citation_source_info.get(source_id) or {}).get(
@@ -2244,6 +2321,10 @@ class ReportEngine:
                             "element_id": str(ctx.get("element_id") or ""),
                             "snippet": str(ctx.get("snippet") or ""),
                             "tier": str(ctx.get("tier") or "personal"),
+                            # Whether the evidence came from a mounted library,
+                            # decided by owning notebook rather than by tier: a
+                            # mounted notebook the user owns stays "personal".
+                            "from_reference_library": _from_reference_library(ctx),
                             "provenance": dict(ctx.get("provenance") or {}),
                         })
                     _gk = f"k{ref_pos[dk]}"
@@ -2366,7 +2447,12 @@ class ReportEngine:
         parts = [f"# 深度报告:{display_question or question}", ""]
         if summary:
             parts += ["## 执行摘要", "", summary, ""]
-        parts += corpus_profile_reader_markdown(corpus_profile)
+        parts += corpus_profile_reader_markdown(
+            corpus_profile,
+            # References are already assembled here, so the reference-library
+            # disclosure costs no query and reports what was actually cited.
+            base_reference_sources=base_reference_source_count(references),
+        )
         for si, s in enumerate(sections):
             if s.get("failed"):
                 parts += [f"## {s['title']}", "", f"（本节生成失败:{s.get('error','')}）", ""]

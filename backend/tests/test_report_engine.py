@@ -885,7 +885,9 @@ def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, mon
     assert "_synthesis_blueprint" not in sections[0]
     assert sections[0]["_synthesis_status"] == "failed_validation"
     assert ("report_synthesis", "report_summary") in notes
-    assert events[-1]["kind"] == "report_synthesis_failed"
+    # By kind, not by position: stage-timing events also land here, and the
+    # failure signal must not depend on being the last one emitted.
+    assert any(event["kind"] == "report_synthesis_failed" for event in events)
 
 
 def test_report_stages_use_their_independent_output_budgets(repo):
@@ -1558,6 +1560,75 @@ def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
     assert detail["understanding"]["corpus_profile"] == {
         "unavailable_reason": "scope_restricted"
     }
+
+
+def test_stage_timing_attributes_retrieval_synthesis_and_drafting(repo, monkeypatch):
+    """Wall clock must be attributable to a stage, not just to the model log.
+
+    A production report spent ~59 minutes of wall clock against ~27 minutes of
+    parallel model time; nothing recorded where the other half went.
+    """
+    eng = _mk_engine(repo, _OutlineLLM())
+    events = []
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
+    _record_retrieve_and_draft(eng, monkeypatch, [])
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+
+    eng._run_sections(
+        nb.id, rid,
+        [{"title": "A", "scope": "s"}, {"title": "B", "scope": "s"}],
+        "q", depth=2,
+    )
+
+    timings = [e for e in events if e.get("kind") == "report_stage_timing"]
+    by_stage = {}
+    for event in timings:
+        by_stage.setdefault(event["stage"], []).append(event)
+    assert len(by_stage["retrieve"]) == 2
+    assert len(by_stage["draft"]) == 2
+    assert len(by_stage["synthesis"]) == 1
+    assert all(isinstance(e["ms"], int) and e["ms"] >= 0 for e in timings)
+    assert all(e["report_id"] == rid and e["notebook_id"] == nb.id for e in timings)
+    assert sorted(e["section_index"] for e in by_stage["retrieve"]) == [0, 1]
+    # Diagnostics must not carry content: indices and durations only.
+    assert not any(
+        "A" in str(value) or "B" in str(value)
+        for event in timings for key, value in event.items()
+        if key not in {"kind", "stage"}
+    )
+
+
+def test_stage_timing_is_recorded_when_a_stage_is_cancelled(repo, monkeypatch):
+    """A cancelled stage is the one most worth attributing — the user gave up."""
+    from app.services.cancellation import AskCancelled
+
+    eng = _mk_engine(repo, _OutlineLLM())
+    events = []
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
+
+    def _cancel(*_args, **_kwargs):
+        raise AskCancelled()
+
+    monkeypatch.setattr(eng, "_deep_dive", _cancel)
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+
+    with pytest.raises(AskCancelled):
+        eng._run_sections(
+            nb.id, rid,
+            [{"title": "A", "scope": "s"}, {"title": "B", "scope": "s"}],
+            "q", depth=2,
+        )
+
+    timings = [e for e in events if e.get("kind") == "report_stage_timing"]
+    assert timings, "cancelled retrieval left no wall-clock attribution"
+    assert all(e["stage"] == "retrieve" for e in timings)
+    assert all(e["cancelled"] is True for e in timings)
 
 
 def test_corpus_map_re_probes_an_unavailable_profile_instead_of_formatting_it(

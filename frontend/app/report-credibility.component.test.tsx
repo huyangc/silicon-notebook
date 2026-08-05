@@ -96,6 +96,83 @@ test("限定资料范围与统计失败在资料基础里读起来不是同一�
 });
 
 
+test("资料基础点明引用到的参考库资料，按来源去重而非按锚点", () => {
+  const { rerender } = render(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k1", label: "a", tier: "base", source_id: "src-b1" },
+        { key: "k2", label: "a", tier: "base", source_id: "src-b1" },
+        { key: "k3", label: "b", tier: "base", source_id: "src-b2" },
+        { key: "k4", label: "c", tier: "personal", source_id: "src-p1" },
+      ],
+    })} />,
+  );
+
+  expect(screen.getByLabelText("资料基础")).toHaveTextContent("4 份资料");
+  expect(screen.getByText("另引用了 2 份参考库资料，未计入上述统计。")).toBeVisible();
+
+  // 参考库知识证据可以没有 source_id，后端用 family_key 兜底，前端必须同口径。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k1", label: "a", tier: "base", family_key: "source-title:a paper" },
+        { key: "k2", label: "a", tier: "base", family_key: "source-title:a paper" },
+        { key: "k3", label: "b", tier: "base", family_key: "source-title:another" },
+        // evidence:<锚点> 每条都不同，计入会把一份身份未知的资料数成好几份。
+        { key: "k4", label: "c", tier: "base", family_key: "evidence:anchor-1" },
+        { key: "k5", label: "d", tier: "base", family_key: "evidence:anchor-2" },
+      ],
+    })} />,
+  );
+  expect(screen.getByText("另引用了 2 份参考库资料，未计入上述统计。")).toBeVisible();
+
+  // 挂载自有 notebook 时 tier 仍是 personal，判据是归属标记而不是 tier。
+  // 两个方向分开断言：混在一起两种错误会互相抵消。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k1", label: "a", tier: "personal", from_reference_library: true,
+          source_id: "src-m1" },
+      ],
+    })} />,
+  );
+  expect(screen.getByText("另引用了 1 份参考库资料，未计入上述统计。")).toBeVisible();
+
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k2", label: "b", tier: "base", from_reference_library: false,
+          source_id: "src-local" },
+      ],
+    })} />,
+  );
+  expect(screen.queryByText(/参考库资料/)).toBeNull();
+
+  // 纯本地报告一个字都不该多说。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [{ key: "k1", label: "c", tier: "personal", source_id: "src-p1" }],
+    })} />,
+  );
+  expect(screen.queryByText(/参考库资料/)).toBeNull();
+
+  // 旧报告没有画像：卡片上方是空的，所以不能说「未计入上述统计」。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: {},
+      references: [{ key: "k1", label: "b", tier: "base", source_id: "src-b1" }],
+    })} />,
+  );
+  expect(screen.getByText("本报告引用了 1 份参考库资料。")).toBeVisible();
+  expect(screen.queryByText(/未计入上述统计/)).toBeNull();
+});
+
+
 test("大纲确认将用户编辑的分析框架与章节一起提交", async () => {
   const user = userEvent.setup();
   const updateReportOutline = vi.fn().mockResolvedValue({ status: "ok", sections: 1 });

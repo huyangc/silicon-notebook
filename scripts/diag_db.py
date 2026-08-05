@@ -2182,9 +2182,30 @@ def _main(argv=None) -> int:
         description="Collect bounded source-side-effect-free SQLite DFX metadata."
     )
     parser.add_argument("--db", default=".local/silicon_notebook.db")
+    # 显式 --db 是用户自己指点的文件,照办;缺省值则是一个关于部署形态的**假设**,
+    # 而 PostgreSQL 部署上那个假设会安静地答错。
+
     parser.add_argument("--notebook-id", default=None)
     parser.add_argument("--deadline-seconds", type=float, default=4.0)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if not _explicit_db_flag(sys.argv[1:] if argv is None else argv):
+        # Anchor on the repository that contains this script, not the cwd:
+        # invoked by absolute path from elsewhere, cwd is unrelated to the
+        # deployment and a PostgreSQL install would fall back to "default
+        # SQLite" — the stale-file misdiagnosis this guard exists to stop.
+        target = diag_common.resolve_database_target(str(_SCRIPT_DIR.parent))
+        if not target.is_sqlite:
+            sys.stdout.write(
+                f"{target.skip_note('本诊断')}\n"
+                "如确实要检查那个 SQLite 文件，显式传 --db。\n"
+            )
+            return 0
+        # 缺省值是「约定位置」,而 DATABASE_URL 可能指向别处;显式 --db 已在上面短路。
+        # 兜底目录也必须锚在仓库上:未配置 DATABASE_URL 时 resolve 不给路径,按
+        # cwd 取 `.local/` 会重新读到工作目录下那份陈旧库。
+        resolved = target.resolve_sqlite_file(str(_SCRIPT_DIR.parent / ".local"))
+        if resolved:
+            args.db = resolved
     evidence = collect_db_evidence(
         args.db,
         notebook_id=args.notebook_id,
@@ -2192,6 +2213,10 @@ def _main(argv=None) -> int:
     )
     sys.stdout.write(render_db_report(evidence))
     return 0
+
+
+def _explicit_db_flag(argv) -> bool:
+    return any(arg == "--db" or arg.startswith("--db=") for arg in argv or ())
 
 
 def main(argv=None) -> int:

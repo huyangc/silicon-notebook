@@ -205,6 +205,8 @@ export type ReportDetailT = ReportSummaryT & {
     element_id?: string;
     snippet?: string;
     tier?: string;
+    /** 证据是否来自已挂载参考库（按归属 notebook 判定，不是 tier）。 */
+    from_reference_library?: boolean;
     /** 同一可区分资料可能有多个锚点；仅用于统计，不改引用跳转。 */
     family_key?: string;
   }[];
@@ -796,6 +798,36 @@ function corpusUnavailableCopy(reason: string | undefined): string {
   return reason ? "资料基础统计未能完成，本次没有可用的资料统计。" : "";
 }
 
+/**
+ * 本次引用到的参考库资料**份数**（按来源去重，不是锚点数）。画像只统计当前笔记本，
+ * 而检索是跨挂载参考库的；不点明这一半，"基于 N 份资料"会被读成证据的全部。
+ * 与后端 `base_reference_source_count` 同口径。
+ */
+function baseReferenceSourceCount(
+  references: ReportDetailT["references"] | undefined,
+): number {
+  const seen = new Set<string>();
+  for (const reference of references || []) {
+    // 是否来自挂载库由**归属 notebook** 判定：用户挂载自己的另一个 notebook 时
+    // tier 仍是 "personal"，只看 tier 会把它的引用全漏掉。旧报告没有该字段，
+    // 回退到 tier 信号。
+    const mounted = reference?.from_reference_library !== undefined
+      ? Boolean(reference.from_reference_library)
+      : reference?.tier === "base";
+    if (!mounted) continue;
+    // 参考库的知识证据可以合法地没有 source_id（后端装配时用 family_key 兜底）。
+    // 但只有能标识**来源**的 key 才算数：装配的最后兜底 `evidence:<锚点>` 每条
+    // 引用都不同，计入它会把一份身份未知的资料数成好几份。
+    let key = String(reference.source_id || "").trim();
+    if (!key) {
+      const family = String(reference.family_key || "").trim();
+      key = family && !family.startsWith("evidence:") ? family : "";
+    }
+    if (key) seen.add(key);
+  }
+  return seen.size;
+}
+
 export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
   const profile = report.understanding?.corpus_profile;
   const scope = report.understanding?.result_scope;
@@ -803,11 +835,12 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
   // means "there are statistics to show".
   const unavailableCopy = corpusUnavailableCopy(profile?.unavailable_reason);
   const measured = profile && !profile.unavailable_reason ? profile : undefined;
+  const baseSources = baseReferenceSourceCount(report.references);
   const disclosure = profile?.completeness_disclosure
     || ((scope === "complete" || scope === "aggregate" || scope === "hybrid")
       ? "本报告按相关性检索生成，未做完整枚举。"
       : "");
-  if (!profile && !disclosure) return null;
+  if (!profile && !disclosure && baseSources === 0) return null;
   const typeText = formatDistribution(measured?.type_distribution);
   const yearText = formatDistribution(measured?.year_distribution);
   const representativeTitles = (measured?.representatives || [])
@@ -825,6 +858,15 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
       </div>
       {unavailableCopy && (
         <p className="report-corpus-basis-unavailable">{unavailableCopy}</p>
+      )}
+      {baseSources > 0 && (
+        <p className="report-corpus-basis-unavailable">
+          {measured
+            ? `另引用了 ${baseSources} 份参考库资料，未计入上述统计。`
+            /* 没有统计时不能说「未计入上述统计」——旧报告的卡片上方是空的，
+               那句话会指向一段并不存在的内容。 */
+            : `本报告引用了 ${baseSources} 份参考库资料。`}
+        </p>
       )}
       {measured && (
         <div className="report-corpus-basis-facts">
