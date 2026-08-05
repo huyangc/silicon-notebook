@@ -7,13 +7,14 @@ import pytest
 
 from app.repositories.postgres.maintenance import PostgresMaintenanceAdapter
 from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
+from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
 
 
 class _Artifacts:
     def __init__(self) -> None:
         self.main = {"version": [4, 2], "n_nodes": 17}
         self.partition = {
-            "format_version": 1,
+            "format_version": SOURCE_PARTITION_FORMAT_VERSION,
             "parent_version": [4, 2],
             "published_sources": 3,
             "unavailable_sources": 0,
@@ -58,6 +59,10 @@ def test_artifact_status_is_a_cheap_version_and_count_probe(adapter_index):
     }
 
     artifacts.partition["parent_version"] = [4, 1]
+    assert adapter.selected_source_graph_artifact_status("nb-1")["ready"] is False
+
+    artifacts.partition["parent_version"] = [4, 2]
+    artifacts.partition["format_version"] = SOURCE_PARTITION_FORMAT_VERSION + 1
     assert adapter.selected_source_graph_artifact_status("nb-1")["ready"] is False
 
 

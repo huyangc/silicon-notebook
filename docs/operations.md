@@ -724,7 +724,7 @@ PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
   --confirm-service-stopped
 ```
 
-The env file must already exist; this prevents a mistyped production path from silently selecting the local default database. The confirmation is an operator assertion; the script does not stop services. It always covers every notebook in the configured database and holds the central offline-maintenance lock for the database phase. Its execution state is:
+The env file must already exist; this prevents a mistyped production path from silently selecting the local default database. For this command it is the authoritative settings source: exported shell variables cannot redirect maintenance to a different database/storage root. The final atomic edit preserves the existing env file's mode, owner, group, and supported metadata; only a newly created receipt is forced to 0600. The confirmation is an operator assertion; the script does not stop services. It always covers every notebook in the configured database and holds the central offline-maintenance lock for the database phase. Its execution state is:
 
 1. Open the repository, apply pending schema migrations, and inventory notebooks.
 2. Resume each notebook's reverse source index from its durable page cursor. A current completed generation is skipped; KG generation drift fails closed and is restarted on the next attempt.

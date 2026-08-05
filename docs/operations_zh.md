@@ -630,7 +630,7 @@ PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
   --confirm-service-stopped
 ```
 
-env 文件必须已经存在，避免生产路径拼错后静默操作本地默认数据库。确认参数只是运维人员声明已经停服，脚本不会代替你停止服务。它固定覆盖当前数据库的全部 notebook，并在数据库阶段持有中央离线维护锁。执行态依次为：
+env 文件必须已经存在，避免生产路径拼错后静默操作本地默认数据库。对该命令而言，这个文件是权威 settings 来源，shell 已导出的变量不能把维护重定向到另一套数据库/存储目录。最终原子修改会保留既有 env 文件的 mode、owner、group 及系统支持的元数据；只有新建 receipt 被强制设为 0600。确认参数只是运维人员声明已经停服，脚本不会代替你停止服务。它固定覆盖当前数据库的全部 notebook，并在数据库阶段持有中央离线维护锁。执行态依次为：
 
 1. 打开 repository、应用待执行 schema migration、枚举全部 notebook。
 2. 按 notebook 持久页游标续跑来源反查索引；当前代次已完成则跳过，KG 代次漂移先失败关闭，下次按新代次重建。

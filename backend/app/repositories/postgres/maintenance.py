@@ -18,6 +18,7 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.ports import OfflineMaintenanceBusyError
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,与 sqlite maintenance 共用
+from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
 
 
 logger = logging.getLogger("silicon_notebook.postgres.maintenance")
@@ -1060,7 +1061,8 @@ class PostgresMaintenanceAdapter:
             ready = (
                 main_version == current_version
                 and parent_version == main_version
-                and int(partition.get("format_version", 0)) > 0
+                and partition.get("format_version")
+                == SOURCE_PARTITION_FORMAT_VERSION
             )
             return {
                 "ready": ready,

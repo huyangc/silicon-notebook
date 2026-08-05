@@ -30,6 +30,7 @@ from app.repositories.ports import VectorBatchEncoder
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.sqlite.knowhow_history_store import content_strings_in_payload
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
+from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
 from app.services.vector_index import decode_vector
 
 # (table, id_column) for every embeddings table maintenance tooling touches.
@@ -1008,7 +1009,8 @@ class SQLiteMaintenanceAdapter:
             ready = (
                 main_version == current_version
                 and parent_version == main_version
-                and int(partition.get("format_version", 0)) > 0
+                and partition.get("format_version")
+                == SOURCE_PARTITION_FORMAT_VERSION
             )
             return {
                 "ready": ready,

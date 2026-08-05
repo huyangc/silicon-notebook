@@ -47,6 +47,27 @@ def test_render_enabled_env_replaces_duplicates_and_preserves_unrelated_lines():
     assert "# SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=off" in rendered
 
 
+def test_settings_target_is_authoritative_env_file(monkeypatch, tmp_path):
+    module = _load_module()
+    file_database = tmp_path / "from-file.db"
+    process_database = tmp_path / "from-process.db"
+    file_storage = tmp_path / "from-file-storage"
+    process_storage = tmp_path / "from-process-storage"
+    env_file = tmp_path / "deployment.env"
+    env_file.write_text(
+        f"DATABASE_URL=sqlite:///{file_database}\n"
+        f"SILICON_NOTEBOOK_STORAGE_DIR={file_storage}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{process_database}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(process_storage))
+
+    settings = module._settings(env_file)
+
+    assert module.database_identity(settings.database_url).database == str(file_database)
+    assert settings.storage_dir == str(file_storage)
+
+
 class _Maintenance:
     def __init__(self, *, unavailable: int = 0) -> None:
         self.unavailable = unavailable
@@ -144,6 +165,8 @@ def test_run_preparation_updates_env_only_after_database_work(monkeypatch, tmp_p
     )
     env_file = tmp_path / ".env"
     env_file.write_text("UNRELATED=kept\n", encoding="utf-8")
+    env_file.chmod(0o640)
+    original_stat = env_file.stat()
     receipt_path = tmp_path / "receipt.json"
 
     result = module.run_preparation(
@@ -159,6 +182,12 @@ def test_run_preparation_updates_env_only_after_database_work(monkeypatch, tmp_p
     assert result["receipt_updated"] is True
     assert result["notebooks"]["nb-1"]["phase"] == "audited"
     assert "SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=shadow" in env_file.read_text()
+    updated_stat = env_file.stat()
+    assert updated_stat.st_mode & 0o777 == 0o640
+    assert (updated_stat.st_uid, updated_stat.st_gid) == (
+        original_stat.st_uid,
+        original_stat.st_gid,
+    )
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["status"] == "complete"
     assert receipt["failure_code"] == ""

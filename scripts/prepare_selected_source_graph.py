@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -52,12 +53,31 @@ class PreparationError(RuntimeError):
         self.code = code
 
 
+class _DeploymentFileSettings(Settings):
+    """Read this command's target only from init overrides and its env file."""
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        del settings_cls, env_settings, file_secret_settings
+        return init_settings, dotenv_settings
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def _atomic_write(
+    path: Path, text: str, *, preserve_existing_metadata: bool = False
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.stat() if preserve_existing_metadata and path.exists() else None
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=str(path.parent)
     )
@@ -67,7 +87,14 @@ def _atomic_write(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
+        if existing is None:
+            os.chmod(temporary, 0o600)
+        else:
+            # copystat preserves mode plus supported flags/xattrs; ownership is
+            # restored separately. Any failure happens before replace, leaving
+            # the deployment file untouched.
+            shutil.copystat(path, temporary, follow_symlinks=True)
+            os.chown(temporary, existing.st_uid, existing.st_gid)
         os.replace(temporary, path)
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -158,7 +185,11 @@ def _enable_env(path: Path) -> None:
         original = path.read_text(encoding="utf-8") if path.exists() else ""
     except (OSError, UnicodeDecodeError) as exc:
         raise PreparationError("env_read_failed") from exc
-    _atomic_write(path, render_enabled_env(original))
+    _atomic_write(
+        path,
+        render_enabled_env(original),
+        preserve_existing_metadata=True,
+    )
 
 
 def _visible_source_count(maintenance: Any, notebook_id: str) -> int:
@@ -202,7 +233,7 @@ def _audit_notebooks(settings: Settings, notebook_ids: Sequence[str]) -> dict[st
 
 
 def _settings(env_file: Path) -> Settings:
-    return Settings(
+    return _DeploymentFileSettings(
         _env_file=env_file if env_file.exists() else None,
         SOURCE_SUBGRAPH_PPR_ENABLED=True,
         SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=True,
