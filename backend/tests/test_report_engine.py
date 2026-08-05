@@ -750,39 +750,83 @@ def test_standard_report_adds_no_report_wide_model_call(repo, monkeypatch):
     assert "_synthesis_blueprint" not in sections[0]
 
 
-def test_standard_report_drafts_ready_section_before_slowest_retrieval(repo, monkeypatch):
+def _record_retrieve_and_draft(eng, monkeypatch, events, draft_kwargs=None):
     from types import SimpleNamespace
-    import threading
-
-    eng = _mk_engine(repo, _OutlineLLM())
-    allow_slow_retrieval = threading.Event()
-    events = []
 
     def _deep(_nb, section, *_args, **_kwargs):
-        if section["title"] == "B":
-            assert allow_slow_retrieval.wait(timeout=3)
         events.append(f"retrieve:{section['title']}")
         return SimpleNamespace(top_hits=[], elements=[], chunks=[])
 
-    def _draft(_nb, section, *_args, **_kwargs):
+    def _draft(_nb, section, *_args, **kwargs):
         events.append(f"draft:{section['title']}")
-        if section["title"] == "A":
-            allow_slow_retrieval.set()
+        if draft_kwargs is not None:
+            draft_kwargs.append(kwargs)
         return {"title": section["title"], "scope": "s", "markdown": "## x",
                 "grounded": False, "id_map": {}, "claims": [],
                 "claim_ledger_status": "missing"}
 
     monkeypatch.setattr(eng, "_deep_dive", _deep)
     monkeypatch.setattr(eng, "_draft_section", _draft)
+
+
+def test_multi_section_report_retrieves_everything_before_drafting_at_any_depth(
+    repo, monkeypatch
+):
+    """低档不再逐节流水线:综合读的是全篇证据,所以撰写必须等在检索屏障之后。
+
+    这条曾经断言相反的行为(标准档先写完 A 再检索 B)。取消低档流水线是明确的
+    产品决定:每份多节报告都换到「检索屏障 → 一次全篇综合 → 并行撰写」。
+    """
+    eng = _mk_engine(repo, _OutlineLLM())
+    events, draft_kwargs = [], []
+    _record_retrieve_and_draft(eng, monkeypatch, events, draft_kwargs)
     nb = _mk_nb(repo)
     rid = repo.create_report(nb.id, "q")
+
     sections = eng._run_sections(
         nb.id, rid,
         [{"title": "A", "scope": "s"}, {"title": "B", "scope": "s"}],
         "q", depth=2,
     )
+
     assert [section["title"] for section in sections] == ["A", "B"]
-    assert events.index("draft:A") < events.index("retrieve:B")
+    # depth=2 曾经完全不请求综合;现在章节数才是判据。
+    assert all(row["synthesis_requested"] is True for row in draft_kwargs)
+    last_retrieval = max(
+        index for index, event in enumerate(events)
+        if event.startswith("retrieve:")
+    )
+    first_draft = min(
+        index for index, event in enumerate(events) if event.startswith("draft:")
+    )
+    assert last_retrieval < first_draft
+
+
+def test_single_section_report_keeps_the_pipeline_and_skips_synthesis(
+    repo, monkeypatch
+):
+    """一节报告没有跨章节一致性可综合,所以它保留流水线、不付那次调用。"""
+    llm = _OutlineLLM()
+    llm.synthesis_calls = 0
+    original_chat_json = llm.chat_json
+
+    def _counting_chat_json(messages, schema_hint, **kwargs):
+        if "EVIDENCE SYNTHESIZER" in messages[-1]["content"]:
+            llm.synthesis_calls += 1
+        return original_chat_json(messages, schema_hint, **kwargs)
+
+    llm.chat_json = _counting_chat_json
+    eng = _mk_engine(repo, llm)
+    events, draft_kwargs = [], []
+    _record_retrieve_and_draft(eng, monkeypatch, events, draft_kwargs)
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+
+    eng._run_sections(nb.id, rid, [{"title": "A", "scope": "s"}], "q", depth=16)
+
+    assert llm.synthesis_calls == 0
+    assert draft_kwargs[0]["synthesis_requested"] is False
+    assert events == ["retrieve:A", "draft:A"]
 
 
 def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, monkeypatch):
@@ -831,7 +875,9 @@ def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, mon
     nb = _mk_nb(repo)
     rid = repo.create_report(nb.id, "q")
     sections = eng._run_sections(
-        nb.id, rid, [{"title": "A", "scope": "s", "sub_queries": ["A"]}],
+        nb.id, rid,
+        [{"title": "A", "scope": "s", "sub_queries": ["A"]},
+         {"title": "B", "scope": "s", "sub_queries": ["B"]}],
         "q", depth=8,
     )
     assert llm.synthesis_calls == 1
@@ -923,7 +969,9 @@ def test_detailed_report_without_evidence_discloses_skip_without_model_error(rep
     nb = _mk_nb(repo)
     rid = repo.create_report(nb.id, "q")
     sections = eng._run_sections(
-        nb.id, rid, [{"title": "A", "scope": "s"}], "q", depth=8
+        nb.id, rid,
+        [{"title": "A", "scope": "s"}, {"title": "B", "scope": "s"}],
+        "q", depth=8,
     )
     assert sections[0]["_synthesis_status"] == "skipped_no_evidence"
     assert notes == []
@@ -1450,7 +1498,9 @@ def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_
         "report_id": rid,
     }]
     detail = repo.get_report(nb.id, rid)
-    assert detail["understanding"]["corpus_profile"] == {}
+    assert detail["understanding"]["corpus_profile"] == {
+        "unavailable_reason": "failed"
+    }
 
 
 def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
@@ -1503,7 +1553,48 @@ def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
         eng.plan_outline(nb.id, rid, "用户原问题")
 
     detail = repo.get_report(nb.id, rid)
-    assert detail["understanding"]["corpus_profile"] == {}
+    # A deliberate skip must not be persisted as the failure state: both used to
+    # collapse into `{}` and the reader was told the statistics had broken.
+    assert detail["understanding"]["corpus_profile"] == {
+        "unavailable_reason": "scope_restricted"
+    }
+
+
+def test_corpus_map_re_probes_an_unavailable_profile_instead_of_formatting_it(
+    repo, monkeypatch
+):
+    """A cached unavailable marker must re-probe, exactly as a bare `{}` did.
+
+    The marker is a non-empty dict, so restoring the plain `or` chain makes it
+    truthy: planning would skip the re-probe and format the marker into a corpus
+    summary whose every count is 0 — measured statistics that never existed.
+    """
+    from app.services.report_corpus_profile import (
+        PROFILE_FAILED, unavailable_profile,
+    )
+    from app.services.report_engine import ReportEngine
+
+    nb = _mk_nb(repo)
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda *_a: [])
+    monkeypatch.setattr(
+        repo.retrieval, "ppr_retrieve", lambda *_a, **_k: []
+    )
+    probes = []
+
+    def _still_failing(*_args, **_kwargs):
+        probes.append(1)
+        raise RuntimeError("bad SQL")
+
+    monkeypatch.setattr(eng, "_corpus_profile", _still_failing)
+    eng._planning_corpus_profile = unavailable_profile(PROFILE_FAILED)
+
+    corpus_map = eng._build_corpus_map(nb.id, "用户原问题")
+
+    assert "资料基础" not in corpus_map
+    assert "可见来源 0 份" not in corpus_map
+    # A stale unavailable marker must still re-probe, exactly as `{}` used to.
+    assert probes == [1]
 
 
 def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):

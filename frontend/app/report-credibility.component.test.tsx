@@ -69,6 +69,33 @@ test("资料基础披露完整性限制，并兼容缺失 profile 的旧报告",
 });
 
 
+test("限定资料范围与统计失败在资料基础里读起来不是同一件事", () => {
+  const { rerender } = render(
+    <ReportCorpusBasis report={detail({
+      understanding: {
+        result_scope: "ranked",
+        corpus_profile: { unavailable_reason: "scope_restricted" },
+      },
+    })} />,
+  );
+
+  expect(screen.getByLabelText("资料基础")).toHaveTextContent("限定了检索的资料范围");
+  expect(screen.queryByText(/未能完成/)).toBeNull();
+
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: {
+        result_scope: "ranked",
+        corpus_profile: { unavailable_reason: "failed" },
+      },
+    })} />,
+  );
+
+  expect(screen.getByLabelText("资料基础")).toHaveTextContent("统计未能完成");
+  expect(screen.queryByText(/限定了检索的资料范围/)).toBeNull();
+});
+
+
 test("大纲确认将用户编辑的分析框架与章节一起提交", async () => {
   const user = userEvent.setup();
   const updateReportOutline = vi.fn().mockResolvedValue({ status: "ok", sections: 1 });
@@ -129,6 +156,41 @@ test("可信度回执明确显示全篇综合失败或跳过，并展示可用�
     })} />,
   );
   expect(screen.getByText(/已跳过全篇综合：可用资料不足/)).toBeVisible();
+});
+
+
+test("单节报告的未请求综合是预期的，多节报告的同一回执必须可见", () => {
+  // 章节数就是 `claim_ledgers_total`。一节没有跨章节一致性可综合，所以它的
+  // `not_requested` 不含信息；两节以上的同一回执说明本该发生的综合没发生。
+  const { rerender } = render(
+    <ReportCredibilitySummary report={detail({
+      depth: 16,
+      understanding: {
+        credibility: {
+          synthesis_status: "not_requested",
+          claim_ledgers_available: 0,
+          claim_ledgers_total: 1,
+        },
+      },
+    })} />,
+  );
+
+  expect(screen.queryByLabelText("报告可信度回执")).toBeNull();
+
+  rerender(
+    <ReportCredibilitySummary report={detail({
+      depth: 16,
+      understanding: {
+        credibility: {
+          synthesis_status: "not_requested",
+          claim_ledgers_available: 0,
+          claim_ledgers_total: 2,
+        },
+      },
+    })} />,
+  );
+
+  expect(screen.getByLabelText("报告可信度回执")).toHaveTextContent("未请求全篇综合");
 });
 
 

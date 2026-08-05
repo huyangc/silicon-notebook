@@ -28,9 +28,13 @@ from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.report_execution import REPORT_CANCELLATIONS
 from app.services.report_corpus_profile import (
+    PROFILE_FAILED,
+    PROFILE_SCOPE_RESTRICTED,
     ReportCorpusProfileService,
+    corpus_profile_available,
     corpus_profile_planner_block,
     corpus_profile_reader_markdown,
+    unavailable_profile,
 )
 from app.services.report_synthesis import (
     annotate_trend_evidence,
@@ -41,6 +45,7 @@ from app.services.report_synthesis import (
     normalize_claim_ledger,
     normalize_report_frame,
     normalize_synthesis_blueprint,
+    report_synthesis_requested,
     synthesis_evidence_payload,
 )
 
@@ -872,11 +877,20 @@ class ReportEngine:
         if not unsafe_scope:
             try:
                 active_profile = (
-                    profile
-                    or getattr(self, "_planning_corpus_profile", None)
-                    or self._corpus_profile(notebook_id)
+                    profile or getattr(self, "_planning_corpus_profile", None)
                 )
-                parts.append(corpus_profile_planner_block(active_profile))
+                # An unavailable marker is a non-empty dict and would no longer
+                # fall through a plain `or` chain, so re-probe explicitly —
+                # exactly what a bare `{}` used to do.  Without this the marker
+                # reaches the planner block, which renders every count as 0 and
+                # feeds a corpus summary that was never measured into planning.
+                if not corpus_profile_available(active_profile):
+                    active_profile = self._corpus_profile(notebook_id)
+                # Defensive: `_corpus_profile` either returns a built profile or
+                # raises, so this holds today.  It is a cheap invariant on a hook
+                # that subclasses and tests replace.
+                if corpus_profile_available(active_profile):
+                    parts.append(corpus_profile_planner_block(active_profile))
             except Exception:
                 pass
         try:
@@ -946,7 +960,10 @@ class ReportEngine:
             )
             try:
                 corpus_profile = (
-                    {}
+                    # A scoped run has no whole-collection profile to state, and
+                    # that is a deliberate skip rather than a failure.  Marking
+                    # it keeps the reader disclosure from blaming a breakage.
+                    unavailable_profile(PROFILE_SCOPE_RESTRICTED)
                     if self._unsafe_source_scope_restricted(notebook_id)
                     else self._corpus_profile(
                         notebook_id,
@@ -968,7 +985,7 @@ class ReportEngine:
                     })
                 except Exception:
                     pass
-                corpus_profile = {}
+                corpus_profile = unavailable_profile(PROFILE_FAILED)
             intent_contract = dict(intent_contract)
             intent_contract["corpus_profile"] = corpus_profile
             self._planning_corpus_profile = corpus_profile
@@ -1344,7 +1361,8 @@ class ReportEngine:
     # --- Stage C(单节):撰写 ---
     def _draft_section(self, notebook_id: str, section: dict, question: str, result,
                        depth=None, *, report_frame: Optional[dict] = None,
-                       synthesis: Optional[dict] = None) -> dict:
+                       synthesis: Optional[dict] = None,
+                       synthesis_requested: bool = False) -> dict:
         from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
         deps = self.dependencies
         # 撰写上下文的预算同样随研究深度走(codex PR#418 R1 P2-2):档位贯通此前只
@@ -1643,7 +1661,9 @@ class ReportEngine:
                 "claims": claims,
                 "claim_ledger_status": claim_ledger_status,
                 "synthesis_used": bool(localized_synthesis),
-                "synthesis_requested": bool(depth is not None and depth >= 8),
+                # Decided by the caller from the section count; this method sees
+                # one section and cannot evaluate a report-wide predicate.
+                "synthesis_requested": bool(synthesis_requested),
                 "intent_ids": list(section.get("intent_ids") or []),
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
@@ -1728,6 +1748,9 @@ class ReportEngine:
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
         status = [{"title": s["title"], "phase": "排队", "step": 0} for s in outline]
+        # One report-wide decision, read by every site below.  Depth no longer
+        # gates synthesis; it selects retrieval budgets only.
+        synthesis_on = report_synthesis_requested(len(outline))
         lock = threading.Lock()
         last = [0.0]
 
@@ -1790,7 +1813,7 @@ class ReportEngine:
             try:
                 result = self._deep_dive(notebook_id, section, question, depth, on_step)
                 with lock:
-                    status[i]["phase"] = "待综合" if depth >= 8 else "待撰写"
+                    status[i]["phase"] = "待综合" if synthesis_on else "待撰写"
                 persist(force=True)
                 return result, None
             except AskCancelled:
@@ -1818,7 +1841,7 @@ class ReportEngine:
                     "error": str(retrieval_error or "retrieval failed")[:300],
                     "id_map": {}, "attempted": [], "claims": [],
                     "claim_ledger_status": "missing", "synthesis_used": False,
-                    "synthesis_requested": bool(depth >= 8),
+                    "synthesis_requested": synthesis_on,
                 }
             raise_if_cancelled(self.cancel_event)
             with lock:
@@ -1832,7 +1855,8 @@ class ReportEngine:
                 if section_synthesis:
                     draft_options["synthesis"] = section_synthesis
                 drafted = self._draft_section(
-                    notebook_id, section, question, result, depth, **draft_options
+                    notebook_id, section, question, result, depth,
+                    synthesis_requested=synthesis_on, **draft_options
                 )
                 with lock:
                     status[i]["phase"] = (
@@ -1849,7 +1873,7 @@ class ReportEngine:
                     "markdown": "", "grounded": False, "failed": True,
                     "error": str(exc)[:300], "id_map": {}, "attempted": [],
                     "claims": [], "claim_ledger_status": "missing",
-                    "synthesis_used": False, "synthesis_requested": bool(depth >= 8),
+                    "synthesis_used": False, "synthesis_requested": synthesis_on,
                 }
                 with lock:
                     status[i]["phase"] = "失败"
@@ -1873,10 +1897,10 @@ class ReportEngine:
             ),
         )
 
-        # Standard tiers retain the retrieve→draft pipeline: a fast section is
-        # not held behind the slowest retrieval.  Detailed tiers intentionally
-        # use the report-wide evidence barrier below.
-        if depth < 8:
+        # Only a report that cannot have cross-section inconsistency keeps the
+        # retrieve→draft pipeline.  Every multi-section report now takes the
+        # barrier below, trading per-section streaming for one synthesis pass.
+        if not synthesis_on:
             def _pipeline_one(i, section):
                 return _draft_one(i, section, _retrieve_one(i, section), None)
 

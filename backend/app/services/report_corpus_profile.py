@@ -15,6 +15,31 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+# Why the profile is missing, when it is.  A scoped run deliberately skips the
+# whole-collection aggregate; an aggregation error is a real failure.  Both used
+# to persist as a bare ``{}``, so the reader was told "statistics failed" for
+# the deliberate case too.  The reason travels with the profile because the
+# report body is rendered once at generation time and frozen afterwards.
+PROFILE_SCOPE_RESTRICTED = "scope_restricted"
+PROFILE_FAILED = "failed"
+
+
+def unavailable_profile(reason: str) -> dict[str, Any]:
+    """Sole constructor for an unavailable profile; carries no statistics."""
+    return {"unavailable_reason": reason}
+
+
+def corpus_profile_available(profile: Any) -> bool:
+    """True only for a profile that actually holds aggregated statistics.
+
+    Guards every consumer: an unavailable marker is a non-empty dict, so a bare
+    truthiness check would render zeroed counts as if they were measured.
+    """
+    return bool(profile) and not _text(
+        (profile or {}).get("unavailable_reason")
+    )
+
+
 def _normal_title(value: Any) -> str:
     return " ".join(_text(value).casefold().split())
 
@@ -240,12 +265,27 @@ def corpus_profile_planner_block(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def corpus_profile_unavailable_copy(profile: dict[str, Any]) -> str:
+    """Reader copy for a missing profile, distinguishing intent from failure.
+
+    Legacy reports persisted a bare ``{}`` for both cases and cannot be told
+    apart now, so they keep the original failure wording rather than claiming a
+    restriction that may never have happened.
+    """
+    if _text((profile or {}).get("unavailable_reason")) == PROFILE_SCOPE_RESTRICTED:
+        return (
+            "本次报告限定了检索的资料范围，因此没有统计整个知识库的资料基础；"
+            "正文按相关性检索生成，也不能据此推断已覆盖所选资料的全部内容。"
+        )
+    return "资料基础统计未能完成；正文仍按相关性检索生成，不能据此推断已覆盖全部资料。"
+
+
 def corpus_profile_reader_markdown(profile: dict[str, Any]) -> list[str]:
-    if not profile:
+    if not corpus_profile_available(profile):
         return [
             "## 资料基础",
             "",
-            "资料基础统计未能完成；正文仍按相关性检索生成，不能据此推断已覆盖全部资料。",
+            corpus_profile_unavailable_copy(profile),
             "",
         ]
     total = int(profile.get("total_sources") or 0)

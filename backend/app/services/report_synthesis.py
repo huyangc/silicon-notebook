@@ -39,6 +39,22 @@ _STRONG_TREND = re.compile(
 )
 
 
+# Minimum sections for a report-wide synthesis to mean anything.  Cross-section
+# consistency is undefined for a single section, so that one case still skips.
+SYNTHESIS_MIN_SECTIONS = 2
+
+
+def report_synthesis_requested(section_count: int) -> bool:
+    """Sole decision point for running the one report-wide synthesis call.
+
+    This used to be `depth >= 8`, which tied synthesis to the detailed tiers.
+    Depth now selects retrieval budgets only: every tier takes the same
+    retrieve-all → synthesise once → draft in parallel path, so lower tiers no
+    longer stream section by section and pay one extra model call per report.
+    """
+    return int(section_count or 0) >= SYNTHESIS_MIN_SECTIONS
+
+
 def _text(value: object, chars: int) -> str:
     return str(value or "").strip()[:chars]
 

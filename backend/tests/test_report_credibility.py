@@ -6,7 +6,14 @@ import pytest
 
 from app.core.config import Settings
 from app.services.query_intent import confirmed_research_question
-from app.services.report_corpus_profile import ReportCorpusProfileService
+from app.services.report_corpus_profile import (
+    PROFILE_FAILED,
+    PROFILE_SCOPE_RESTRICTED,
+    ReportCorpusProfileService,
+    corpus_profile_available,
+    corpus_profile_reader_markdown,
+    unavailable_profile,
+)
 from app.services.report_engine import (
     audit_high_risk_assertions,
 )
@@ -132,6 +139,36 @@ def test_family_resolver_set_input_has_a_deterministic_truncation_window():
     )
     assert forward == reverse
     assert list(forward["family_by_source"]) == sorted(row["id"] for row in rows)[:1024]
+
+
+def test_scoped_skip_and_aggregation_failure_read_as_different_things():
+    """A scoped run skipped the aggregate on purpose; nothing broke."""
+    scoped = corpus_profile_reader_markdown(
+        unavailable_profile(PROFILE_SCOPE_RESTRICTED)
+    )
+    failed = corpus_profile_reader_markdown(unavailable_profile(PROFILE_FAILED))
+
+    assert "## 资料基础" in scoped and "## 资料基础" in failed
+    scoped_copy, failed_copy = "\n".join(scoped), "\n".join(failed)
+    assert "限定了检索的资料范围" in scoped_copy
+    assert "未能完成" not in scoped_copy
+    assert "资料基础统计未能完成" in failed_copy
+    # Legacy reports stored a bare `{}` and genuinely cannot be told apart, so
+    # they must not be relabelled as scoped after the fact.
+    legacy_copy = "\n".join(corpus_profile_reader_markdown({}))
+    assert "资料基础统计未能完成" in legacy_copy
+    assert "限定了检索的资料范围" not in legacy_copy
+
+
+def test_unavailable_profile_is_never_treated_as_measured_statistics():
+    """An unavailable marker is a non-empty dict; truthiness is not enough."""
+    assert corpus_profile_available({}) is False
+    assert corpus_profile_available(None) is False
+    assert corpus_profile_available(unavailable_profile(PROFILE_FAILED)) is False
+    assert corpus_profile_available(
+        unavailable_profile(PROFILE_SCOPE_RESTRICTED)
+    ) is False
+    assert corpus_profile_available({"total_sources": 3}) is True
 
 
 def test_high_risk_audit_requires_valid_same_sentence_anchor_and_exempts_marked_prose():
