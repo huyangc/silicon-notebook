@@ -3372,6 +3372,11 @@ class RepositoryFacade:
     def ask_job_detail(self, job_id: str) -> dict:
         return self._runtime.ask_state.ask_job_detail(job_id)
 
+    def ask_answer_detail(self, answer_id: str) -> "dict | None":
+        """按 answer_id 直查单条答案(一条主键查询,不加载整个会话)。见
+        ``AskStateStore.ask_answer_detail`` docstring。"""
+        return self._runtime.ask_state.ask_answer_detail(answer_id)
+
     def _cleanup_empty_conversation(self, conversation_id: str) -> None:
         """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
         return self._runtime.ask_state.cleanup_empty_conversation(conversation_id)

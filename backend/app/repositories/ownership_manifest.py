@@ -803,6 +803,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.approve_promotion', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.approve_promotion_as_reviewer', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_answer_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_chunk', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_graph', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_job_detail', kind='attribute', target='_runtime'),
@@ -1196,6 +1197,16 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/eval/inference.py', scope='<module>.run_inference', kind='attribute', target='ask'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='ask'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='ask'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='ask_answer_detail',
+        owner='AskStateStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_ask_detail', kind='attribute', target='ask_answer_detail'),
         ),
         patches=(
         ),
@@ -1822,7 +1833,6 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_ask_detail', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
@@ -1926,6 +1936,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._report_kg_build_already_running', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.ensure_notebook', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_backfill_source_facts', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_backfill_source_index', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg._finalize', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='get_notebook'),
@@ -2224,6 +2235,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/scripts/backfill_relation_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/gen_recall_gold.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._backfill_source_facts_for_notebook', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._backfill_source_index_for_notebook', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._backfill_table_to_blob', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._count_missing_chunk_vectors', kind='attribute', target='maintenance'),
@@ -2236,6 +2248,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_element_embeddings', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_node_embeddings', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_backfill_source_facts', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_backfill_source_index', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='maintenance'),

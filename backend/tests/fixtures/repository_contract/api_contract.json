@@ -1049,7 +1049,7 @@
           "type": "object"
         },
         "AskDetail": {
-          "description": "右栏「选中提问」详情:GET /admin/users/{user_id}/asks/{job_id} 的响应。\n\n``trace``/``answer`` 的形状由既有的 ask-intent-trace / AnswerView 渲染件\n消费,这里不重新声明(前端契约里两者都是 ``unknown``)。``asked_at``/\n``answered_at`` 的权威口径见 ``get_conversation``:前者取自\n``ask_jobs.asked_at``(经答案 payload 回传),后者取自 ``answers.created_at``\n(旧 payload 重开时从答案行回填)——两者都由 ``AskStateStore.get_conversation``\n统一处理,路由层不重新实现这套口径。",
+          "description": "右栏「选中提问」详情:GET /admin/users/{user_id}/asks/{job_id} 的响应。\n\n``trace``/``answer`` 的形状由既有的 ask-intent-trace / AnswerView 渲染件\n消费,这里不重新声明(前端契约里两者都是 ``unknown``)。``asked_at``/\n``answered_at`` 的权威口径:前者直接取自 ``ask_jobs.asked_at``(单行主键\n查询,``ask_job_detail``),后者取自 ``answers.created_at``(旧 payload 重\n开时从答案行回填)——由 ``AskStateStore.ask_answer_detail`` 按 answer_id\n单行直查处理,不经会话历史(``get_conversation`` 只用于会话页,详情端点\n刻意不复用它,避免读取量随会话轮次线性增长)。",
           "properties": {
             "answer": {
               "anyOf": [
@@ -9788,7 +9788,7 @@
       },
       "/api/admin/users/{user_id}/asks/{job_id}": {
         "get": {
-          "description": "右栏「选中提问」详情:完整问答 + 推理轨迹。自己或 admin 可查;job_id\n不属于该用户时 404。\n\n完全复用既有读取路径,不新写 SQL:ask_job_detail(job_id) 给出\nquestion/mode/status/trace/answer_id/error/notebook_id/conversation_id/\ncreated_by;有 conversation_id 时经 get_conversation 按 answer_id 匹配出\n对应 turn —— 它已经把 asked_at(浏览器提交时刻,ask_jobs.asked_at)与\nanswered_at(权威值 answers.created_at,旧 payload 从答案行回填)按红线\n口径处理好,这里不重新实现。job 仍在跑(尚无已保存 answer)时退回\nactive_job 的 asked_at;既未完成又不是当前活跃 job(如已失败/取消且\nconversation 早已收尾)则 asked_at/answered_at/answer 保持空——没有可靠\n数据来源时不编造。",
+          "description": "右栏「选中提问」详情:完整问答 + 推理轨迹。自己或 admin 可查;job_id\n不属于该用户时 404。\n\n``ask_job_detail(job_id)`` 是单行主键查询,给出\nquestion/mode/status/trace/answer_id/error/notebook_id/conversation_id/\ncreated_by/asked_at(浏览器提交时刻,ask_jobs.asked_at,job 无论终态如何\n都带这一列,不再依赖是否为「当前活跃 job」)。有 answer_id 时另按\nanswer_id 单行直查 ``ask_answer_detail``——**不**经 ``get_conversation``\n(那条路径会加载并校验整个会话的全部答案 payload,读取量随会话历史线性\n增长)。它已经把 answered_at(权威值 answers.created_at,旧 payload 从\n答案行回填)按红线口径处理好。没有 answer_id 或查不到对应答案行时\nanswered_at/answer 保持空——没有可靠数据来源时不编造。",
           "operationId": "get_admin_user_ask_detail_api_admin_users__user_id__asks__job_id__get",
           "parameters": [
             {
@@ -19115,6 +19115,7 @@
   "serialization": {
     "ask_job_detail": {
       "answer_id": "ans-api",
+      "asked_at": "",
       "conversation_id": "conv-api",
       "created_by": "user-local",
       "error": "",

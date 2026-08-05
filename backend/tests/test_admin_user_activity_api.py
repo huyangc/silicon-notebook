@@ -471,6 +471,131 @@ def test_ask_detail_unknown_job_404(client):
     assert resp.status_code == 404
 
 
+def test_ask_detail_does_not_load_full_conversation_history(client, monkeypatch):
+    """读取量确实有界:选中一条多轮会话里的答案,详情端点必须**不**调用
+    ``get_conversation``——那条路径会加载并 pydantic 校验该会话全部答案的
+    payload,读取量随会话历史线性增长(codex 第 2 轮评审 P2)。
+
+    直接给 ``RepositoryFacade.get_conversation`` 打桩抛错:新实现下这个桩永
+    远不会被触发,请求正常 200;旧实现(经 ``get_conversation`` 按 answer_id
+    线性扫)下桩必被触发,`client.get(...)` 会把 AssertionError 原样冒泡出来
+    ——这是能真报红的判据,不是「返回值对就算过」。
+    """
+    a = _auth(client, 21)
+    uid_a = _me(client, a)
+    nb_id = _create_notebook(client, a, "NB-bounded")
+    with _repo()._write() as db:
+        _insert_conversation(db, "conv-bounded", nb_id, uid_a, "2026-08-01T10:00:00")
+        for i in range(5):
+            _insert_answer(
+                db, f"ans-b{i}", nb_id, "conv-bounded", f"q{i}?",
+                {"conclusion": f"answer {i}", "answer": f"answer {i}"},
+                f"2026-08-01T10:0{i}:00",
+            )
+        _insert_ask_job(
+            db, "job-bounded", nb_id, uid_a, "2026-08-01T10:03:00",
+            conversation_id="conv-bounded", question="q3?", mode="chunk",
+            status="done", asked_at="2026-08-01T10:03:00+08:00",
+            answer_id="ans-b3",
+        )
+
+    from app.services.repository_facade import RepositoryFacade
+
+    def _must_not_be_called(self, conversation_id):
+        raise AssertionError(
+            "get_conversation must not be called by the ask-detail route — "
+            "it loads and validates every turn's payload in the conversation"
+        )
+
+    monkeypatch.setattr(RepositoryFacade, "get_conversation", _must_not_be_called)
+
+    resp = client.get(f"/api/admin/users/{uid_a}/asks/job-bounded", headers=a)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"]["conclusion"] == "answer 3"
+    assert body["asked_at"] == "2026-08-01T10:03:00+08:00"
+
+
+def test_ask_answer_detail_returns_only_the_requested_answer(client):
+    """仓储层直查:``ask_answer_detail`` 只接受 ``answer_id``(不接受
+    ``conversation_id``),且只返回该一条答案——不是把整个会话读回来再筛。"""
+    a = _auth(client, 24)
+    uid_a = _me(client, a)
+    nb_id = _create_notebook(client, a, "NB-direct")
+    with _repo()._write() as db:
+        _insert_conversation(db, "conv-direct", nb_id, uid_a, "2026-08-01T10:00:00")
+        _insert_answer(
+            db, "ans-direct-1", nb_id, "conv-direct", "q1?",
+            {"conclusion": "c1", "answer": "c1"}, "2026-08-01T10:00:00",
+        )
+        _insert_answer(
+            db, "ans-direct-2", nb_id, "conv-direct", "q2?",
+            {"conclusion": "c2", "answer": "c2"}, "2026-08-01T10:01:00",
+        )
+
+    import inspect
+    sig = inspect.signature(_repo().ask_answer_detail)
+    assert list(sig.parameters) == ["answer_id"], (
+        "ask_answer_detail must be a single-key lookup — a conversation_id "
+        "parameter would let callers widen it back into a full-history scan"
+    )
+
+    detail = _repo().ask_answer_detail("ans-direct-2")
+    assert detail is not None
+    assert detail["answer_id"] == "ans-direct-2"
+    assert detail["question"] == "q2?"
+    assert detail["payload"]["conclusion"] == "c2"
+    # 只返回被点名的那一条,不夹带同会话的其它答案。
+    assert "ans-direct-1" not in json.dumps(detail)
+
+    assert _repo().ask_answer_detail("does-not-exist") is None
+
+
+def test_ask_detail_failed_job_surfaces_asked_at_without_answer(client):
+    """已终态但从未产出答案的 job(失败/取消,且不是当前活跃 job)现在能拿到
+    真实的 ``asked_at``——旧实现下这类行只能靠「是不是当前 active_job」这条
+    窄路径回填,失败/取消的 job 从不满足它,asked_at 只能是空串。"""
+    a = _auth(client, 25)
+    uid_a = _me(client, a)
+    nb_id = _create_notebook(client, a, "NB-failed")
+    with _repo()._write() as db:
+        _insert_conversation(db, "conv-failed", nb_id, uid_a, "2026-08-01T11:00:00")
+        _insert_ask_job(
+            db, "job-failed", nb_id, uid_a, "2026-08-01T11:00:00",
+            conversation_id="conv-failed", question="broken?", mode="chunk",
+            status="failed", asked_at="2026-08-01T11:00:00+08:00",
+            answer_id="", error="boom",
+        )
+
+    resp = client.get(f"/api/admin/users/{uid_a}/asks/job-failed", headers=a)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert body["error"] == "boom"
+    assert body["asked_at"] == "2026-08-01T11:00:00+08:00"
+    assert body["answered_at"] == ""
+    assert body["answer"] is None
+
+
+def test_ask_answer_detail_backfills_answered_at_from_created_at(client):
+    """``answered_at`` 回填口径:payload 里没有该键时落
+    ``answers.created_at``(答案写入瞬间,权威值)。"""
+    a = _auth(client, 26)
+    uid_a = _me(client, a)
+    nb_id = _create_notebook(client, a, "NB-backfill")
+    with _repo()._write() as db:
+        _insert_conversation(db, "conv-backfill", nb_id, uid_a, "2026-08-01T12:00:00")
+        _insert_answer(
+            db, "ans-backfill", nb_id, "conv-backfill", "q?",
+            {"conclusion": "c", "answer": "c"},  # answered_at 缺省
+            "2026-08-01T12:00:05",
+        )
+
+    detail = _repo().ask_answer_detail("ans-backfill")
+    assert detail is not None
+    assert detail["payload"]["answered_at"] == "2026-08-01T12:00:05"
+
+
 # --- 部署开关 -------------------------------------------------------------
 
 def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatch):

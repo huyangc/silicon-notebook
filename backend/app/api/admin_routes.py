@@ -410,15 +410,15 @@ def get_admin_user_ask_detail(
     """右栏「选中提问」详情:完整问答 + 推理轨迹。自己或 admin 可查;job_id
     不属于该用户时 404。
 
-    完全复用既有读取路径,不新写 SQL:ask_job_detail(job_id) 给出
+    ``ask_job_detail(job_id)`` 是单行主键查询,给出
     question/mode/status/trace/answer_id/error/notebook_id/conversation_id/
-    created_by;有 conversation_id 时经 get_conversation 按 answer_id 匹配出
-    对应 turn —— 它已经把 asked_at(浏览器提交时刻,ask_jobs.asked_at)与
-    answered_at(权威值 answers.created_at,旧 payload 从答案行回填)按红线
-    口径处理好,这里不重新实现。job 仍在跑(尚无已保存 answer)时退回
-    active_job 的 asked_at;既未完成又不是当前活跃 job(如已失败/取消且
-    conversation 早已收尾)则 asked_at/answered_at/answer 保持空——没有可靠
-    数据来源时不编造。
+    created_by/asked_at(浏览器提交时刻,ask_jobs.asked_at,job 无论终态如何
+    都带这一列,不再依赖是否为「当前活跃 job」)。有 answer_id 时另按
+    answer_id 单行直查 ``ask_answer_detail``——**不**经 ``get_conversation``
+    (那条路径会加载并校验整个会话的全部答案 payload,读取量随会话历史线性
+    增长)。它已经把 answered_at(权威值 answers.created_at,旧 payload 从
+    答案行回填)按红线口径处理好。没有 answer_id 或查不到对应答案行时
+    answered_at/answer 保持空——没有可靠数据来源时不编造。
     """
     _require_activity_enabled()
     _require_self_or_admin(user, user_id)
@@ -430,27 +430,16 @@ def get_admin_user_ask_detail(
     if job["created_by"] != user_id:
         raise HTTPException(status_code=404, detail="ask job not found")
 
-    asked_at = ""
+    asked_at = job.get("asked_at") or ""
     answered_at = ""
     answer: "dict[str, Any] | None" = None
     conversation_id = job.get("conversation_id") or ""
     answer_id = job.get("answer_id") or ""
-    if conversation_id:
-        try:
-            conv = repo.get_conversation(conversation_id)
-        except KeyError:
-            conv = None
-        if conv is not None:
-            turn = next(
-                (t for t in conv.turns if answer_id and t.answer_id == answer_id),
-                None,
-            )
-            if turn is not None:
-                asked_at = turn.asked_at
-                answered_at = turn.response.answered_at
-                answer = turn.response.model_dump()
-            elif conv.active_job is not None and conv.active_job.job_id == job["job_id"]:
-                asked_at = conv.active_job.asked_at
+    if answer_id:
+        detail = repo.ask_answer_detail(answer_id)
+        if detail is not None:
+            answer = detail["payload"]
+            answered_at = str(detail["payload"].get("answered_at") or "")
 
     return AskDetail(
         job_id=job["job_id"],

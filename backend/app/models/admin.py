@@ -211,10 +211,11 @@ class AskDetail(BaseModel):
 
     ``trace``/``answer`` 的形状由既有的 ask-intent-trace / AnswerView 渲染件
     消费,这里不重新声明(前端契约里两者都是 ``unknown``)。``asked_at``/
-    ``answered_at`` 的权威口径见 ``get_conversation``:前者取自
-    ``ask_jobs.asked_at``(经答案 payload 回传),后者取自 ``answers.created_at``
-    (旧 payload 重开时从答案行回填)——两者都由 ``AskStateStore.get_conversation``
-    统一处理,路由层不重新实现这套口径。
+    ``answered_at`` 的权威口径:前者直接取自 ``ask_jobs.asked_at``(单行主键
+    查询,``ask_job_detail``),后者取自 ``answers.created_at``(旧 payload 重
+    开时从答案行回填)——由 ``AskStateStore.ask_answer_detail`` 按 answer_id
+    单行直查处理,不经会话历史(``get_conversation`` 只用于会话页,详情端点
+    刻意不复用它,避免读取量随会话轮次线性增长)。
     """
 
     job_id: str
