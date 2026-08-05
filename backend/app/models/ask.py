@@ -14,6 +14,7 @@ from app.core.ask_retrieval_policy import (
     ResultScope,
     RetrievalEffort,
 )
+from app.core.internal_observability import public_trace_steps
 
 from app.core.model_safety import (
     safe_model_display_name,
@@ -511,11 +512,6 @@ class AskResponse(BaseModel):
     retrieval_scope: Optional[RetrievalScopeReceipt] = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    # Content-free status of the selected-source graph lane. Absent on the
-    # historical whole-scope path so legacy responses remain byte-identical.
-    source_graph: Optional[Dict[str, Any]] = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
     kg_required: bool = False
     # 大库(not copyable)且完全无 scale 索引(从未建过)时 True:检索能力受限,
@@ -523,6 +519,13 @@ class AskResponse(BaseModel):
     # 徽章覆盖那种最终一致态)。
     index_required: bool = False
     model_errors: List[ModelError] = Field(default_factory=list)
+
+    @field_validator("reasoning_trace", mode="before")
+    @classmethod
+    def _hide_internal_trace_steps(cls, value: object) -> object:
+        if value is None:
+            return None
+        return public_trace_steps(value)
 
     @field_validator("result_sets", mode="before")
     @classmethod
@@ -588,6 +591,11 @@ class ActiveAskJob(BaseModel):
     asked_at: str = ""
     mode: str = ""
     trace: List[dict] = Field(default_factory=list)
+
+    @field_validator("trace", mode="before")
+    @classmethod
+    def _hide_internal_trace_steps(cls, value: object) -> object:
+        return public_trace_steps(value)
 
 
 class ConversationDetail(ConversationSummary):

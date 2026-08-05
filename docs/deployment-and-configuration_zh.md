@@ -72,12 +72,12 @@ cp model-services.example.toml .local/model-services.toml
 - **PDF 高保真**(可选)—— 一个 MinerU 端点，见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)；
   保持 `MINERU_MODE=off` 则走本地 PyMuPDF4LLM 版面/Markdown 兜底。
 - **所选来源 PPR shadow 开关**——`SOURCE_SUBGRAPH_PPR_ENABLED` 只控制冻结的所选来源
-  snapshot 内部稀疏 PPR producer，默认 `false`。它与 `GRAPH_PPR_ENABLED` 相互独立：
+  snapshot 内部稀疏 PPR producer，默认为不可见 Shadow 观测启用（`true`）。它与 `GRAPH_PPR_ENABLED` 相互独立：
   关闭它不会影响历史全范围 PPR、局部图原语、直接检索或受保护 baseline 通道。只有下述
   所选来源激活门运行在 shadow/active 时，它才会成为候选生产者。
 - **超大来源图伴生产物**——`SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED` 让 scale
   rebuild/fold 额外发布按来源直接寻址的 CSR 伴生产物；`SOURCE_PARTITIONED_PPR_ENABLED`
-  允许内部 shadow consumer 读取它。两者默认均为 `false`，并可独立回滚。只开 consumer
+  允许内部 shadow consumer 读取它。两者默认均为 `true`，并可独立回滚。只开 consumer
   而没有 identity 匹配的伴生产物时返回 capability unavailable，绝不回退整图遍历。
   `SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` 限制请求期稀疏迭代，partition 发布复用既有
   `SOURCE_SUBGRAPH_MAX_*` 行数护栏。Ask/深度报告只能通过共用激活门消费；伴生产物
@@ -85,8 +85,8 @@ cp model-services.example.toml .local/model-services.toml
 - **所选来源 rollout 质量门**——active mode 只能读取配对评测命令生成且验证通过、
   不含正文的 attestation。摘要只做完整性检查，不是授权签名：输入与输出必须放在部署
   自己控制的受信工件路径，并用 `SELECTED_SOURCE_GRAPH_EXPECTED_CORPUS_SIGNATURE` 与
-  `SELECTED_SOURCE_GRAPH_EXPECTED_MODEL_JSON` 钉住期望语料和模型。运行模式默认 `off`；
-  只有不改变用户输出的 `shadow` 可以没有批准 attestation。`allowlist`、稳定 hash
+  `SELECTED_SOURCE_GRAPH_EXPECTED_MODEL_JSON` 钉住期望语料和模型。运行模式默认为不可见 `shadow`；
+  它不进入公开 API payload、轨迹、stream 或 UI，也是唯一可以没有批准 attestation 的模式。`allowlist`、稳定 hash
   `rollout` 与 `on` 都从受信路径读取证明，任何不匹配 fail closed。Ask 与深度报告共用此门。
 
 `.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是

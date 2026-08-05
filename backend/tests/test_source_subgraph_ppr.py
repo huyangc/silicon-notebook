@@ -334,6 +334,7 @@ def test_repository_runtime_owns_scoped_ppr_service(repo):
     assert isinstance(repo._runtime.source_subgraph_ppr, SourceSubgraphPprService)
 
 
-def test_scoped_ppr_has_an_independent_default_off_rollback_gate():
+def test_scoped_ppr_has_an_independent_rollback_gate():
+    assert Settings(_env_file=None).source_subgraph_ppr_enabled is True
     settings = Settings(_env_file=None, SOURCE_SUBGRAPH_PPR_ENABLED=False)
     assert settings.source_subgraph_ppr_enabled is False

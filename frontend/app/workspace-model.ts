@@ -484,19 +484,6 @@ export type RetrievalScopeReceipt = {
   bases: { notebook_id: string; name: string; included: boolean }[];
 };
 
-export type SourceGraphStatus = {
-  state: "historical" | "off" | "shadow" | "active" | "degraded" | string;
-  reason: string;
-  selected_source_count: number;
-  node_count: number;
-  relation_count: number;
-  chunk_count: number;
-  enrichment_count: number;
-  cache_hit: boolean;
-  baseline_preserved: boolean;
-  degraded_reasons: string[];
-};
-
 export type AskResponse = {
   answer_id: string;
   asked_at?: string;
@@ -519,8 +506,6 @@ export type AskResponse = {
   retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
   /** 本轮实际获准的检索范围；后端只在确有收窄时下发，缺席即不渲染。 */
   retrieval_scope?: RetrievalScopeReceipt | null;
-  /** 本轮来源子图通道的无内容状态；全量历史路径缺席。 */
-  source_graph?: SourceGraphStatus | null;
   /**
    * complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。
    * kind 判别的 union（PR-2 T5/T6）：Knowhow 的整表批次（kind="knowhow"）与

@@ -51,6 +51,13 @@ ERR = json.dumps({
     "request": {"messages": [{"role": "user", "content": "boom"}]},
     "status": "error", "latency_ms": 5, "error": "RuntimeError: nope",
 })
+INTERNAL_GRAPH = json.dumps({
+    "ts": "2026-01-01T00:00:03",
+    "id": "event-internal-graph",
+    "kind": "selected_source_graph",
+    "state": "shadow",
+    "reason": "shadow",
+})
 
 
 def test_disabled_returns_404(tmp_path, monkeypatch):
@@ -90,6 +97,24 @@ def test_list_records_and_stats(tmp_path, monkeypatch):
     assert body["stats"]["total"] == 3
     assert body["newest_seq"] == err_seq
     assert sorted(body["stats"]["facets"]["kinds"]) == ["chat", "embed"]
+
+
+def test_selected_source_graph_internal_event_is_never_user_readable(
+    tmp_path, monkeypatch
+):
+    c = _make_client(
+        tmp_path,
+        monkeypatch,
+        lines=[INTERNAL_GRAPH],
+        channel="events",
+    )
+    body = c.get("/api/debug/logs/events").json()
+    assert body["records"] == []
+    assert body["stats"]["total"] == 0
+    assert body["newest_seq"] is None
+    assert c.get(
+        "/api/debug/logs/events/event-internal-graph?seq=0"
+    ).status_code == 404
 
 
 def test_filters_and_search(tmp_path, monkeypatch):

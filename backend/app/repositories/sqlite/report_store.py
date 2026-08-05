@@ -15,6 +15,7 @@ import re
 from typing import Callable, Iterator
 
 from app.repositories.sqlite.database import SqliteDatabase
+from app.core.internal_observability import public_report_sections
 
 
 class ReportStore:
@@ -125,7 +126,9 @@ class ReportStore:
              "section_count": len(json.loads(row["outline_json"] or "[]"))}
         if full:
             d.update(outline=json.loads(row["outline_json"] or "[]"),
-                     sections=json.loads(row["sections_json"] or "[]"),
+                     sections=public_report_sections(
+                         json.loads(row["sections_json"] or "[]")
+                     ),
                      gaps=json.loads(row["gaps_json"] or "[]"),
                      references=json.loads(row["references_json"] or "[]"),
                      section_status=json.loads(row["section_status_json"] or "[]"),

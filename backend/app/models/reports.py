@@ -1,7 +1,8 @@
 from typing import List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.core.internal_observability import public_report_sections
 from app.models.source_scope import BaseNotebookScope, SourceScope
 
 
@@ -65,3 +66,8 @@ class ReportDetail(ReportSummary):
     section_status: List[dict] = Field(default_factory=list)
     content_md: str = ""
     error: str = ""
+
+    @field_validator("sections", mode="before")
+    @classmethod
+    def _hide_internal_rollout_receipts(cls, value: object) -> object:
+        return public_report_sections(value)

@@ -82,14 +82,14 @@ requires a restart because the watched path itself is selected at startup.
   leave `MINERU_MODE=off` for the local PyMuPDF4LLM layout/Markdown fallback.
 - **Selected-source PPR shadow gate** — `SOURCE_SUBGRAPH_PPR_ENABLED` controls only the
   internal sparse-PPR producer over a frozen selected-source snapshot and defaults to
-  `false`. It is independent of `GRAPH_PPR_ENABLED`: switching it off leaves historical
+  `true` for invisible shadow observation. It is independent of `GRAPH_PPR_ENABLED`: switching it off leaves historical
   whole-scope PPR, local graph primitives, direct retrieval, and the protected baseline
   lane unchanged. It becomes a candidate producer only when the separate selected-source
   activation gate below runs in shadow or active mode.
 - **Large-source graph companions** — `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED`
   makes a scale rebuild/fold publish a separate source-addressable CSR companion;
   `SOURCE_PARTITIONED_PPR_ENABLED` permits its internal shadow consumer. Both default
-  to `false` and are independent rollback controls. Turning on the consumer without a
+  to `true` and are independent rollback controls. Turning on the consumer without a
   matching companion returns a capability-unavailable reason and never falls back to
   whole-graph traversal. `SOURCE_PARTITIONED_PPR_MAX_ITERATIONS` bounds request-time
   sparse passes; partition publication reuses the existing `SOURCE_SUBGRAPH_MAX_*`
@@ -101,7 +101,8 @@ requires a restart because the watched path itself is selected at startup.
   output in a deployment-owned trusted artifact location, and pin the expected corpus
   signature and model contract through `SELECTED_SOURCE_GRAPH_EXPECTED_CORPUS_SIGNATURE`
   and `SELECTED_SOURCE_GRAPH_EXPECTED_MODEL_JSON`. `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE`
-  defaults to `off`; `shadow` is the only mode that may run without an approved attestation.
+  defaults to invisible `shadow`, which never enters public API payloads, traces, streams,
+  or UI and is the only mode that may run without an approved attestation.
   `allowlist`, stable-hash `rollout`, and `on` additionally use the configured trusted
   attestation path and fail closed on any mismatch. Ask and Deep Report share this gate.
 

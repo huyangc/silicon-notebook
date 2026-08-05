@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
 from app.core.config import Settings
+from app.models.admin import AskDetail
+from app.models.ask import ActiveAskJob, AskResponse
+from app.models.reports import ReportDetail
+from app.models.schemas import NotebookCreate
 from app.services.ask_service import AskService
 from app.services.retrieval import RetrievedChunk, RetrievalSupport
 from app.services.retrieval_enrichment import BaselineProtectedEnrichmentService
@@ -8,6 +12,7 @@ from app.services.report_engine import ReportEngine
 from app.services.source_graph_activation import SelectedSourceGraphActivationService
 from app.services.source_graph_rollout import SourceGraphRolloutDecision
 from app.services.source_scope import source_scope_context
+from app.services.sqlite_repository import SQLiteRepository
 
 
 def _chunk(chunk_id: str, source_id: str) -> RetrievedChunk:
@@ -96,13 +101,86 @@ def test_quality_attestation_loader_keeps_digest_for_point_of_use_reverify(
     assert loaded == {"attestation_digest": "signed", "approved": True}
 
 
-def test_selected_source_graph_rollout_defaults_are_inert():
+def test_selected_source_graph_rollout_defaults_to_invisible_shadow():
     settings = Settings(_env_file=None)
 
-    assert settings.selected_source_graph_rollout_mode == "off"
+    assert settings.selected_source_graph_rollout_mode == "shadow"
+    assert settings.source_subgraph_ppr_enabled is True
+    assert settings.source_partitioned_graph_artifacts_enabled is True
+    assert settings.source_partitioned_ppr_enabled is True
     assert settings.selected_source_graph_attestation_path == ""
     assert settings.selected_source_graph_rollout_percent == 0.0
     assert settings.selected_source_graph_enrichment_tokens == 4000
+
+
+def test_selected_source_graph_rollout_state_is_not_part_of_public_ask_schema():
+    assert "source_graph" not in AskResponse.model_json_schema()["properties"]
+
+
+def test_legacy_selected_source_graph_state_is_scrubbed_at_public_model_boundaries():
+    internal_step = {
+        "step_type": "source_subgraph",
+        "summary": "来源子图：shadow",
+        "detail": {"state": "shadow"},
+    }
+    public_step = {"step_type": "retrieve", "summary": "retrieved"}
+    answer = AskResponse(
+        conclusion="ok",
+        reasoning_trace=[internal_step, public_step],
+    ).model_dump()
+    assert [step["step_type"] for step in answer["reasoning_trace"]] == ["retrieve"]
+
+    active = ActiveAskJob(
+        job_id="job", trace=[internal_step, public_step]
+    ).model_dump()
+    assert active["trace"] == [public_step]
+
+    admin = AskDetail(
+        job_id="job",
+        notebook_id="nb",
+        trace=[internal_step, public_step],
+        answer={
+            "conclusion": "ok",
+            "source_graph": {"state": "shadow"},
+            "reasoning_trace": [internal_step, public_step],
+        },
+    ).model_dump()
+    assert admin["trace"] == [public_step]
+    assert "source_graph" not in admin["answer"]
+    assert admin["answer"]["reasoning_trace"] == [public_step]
+
+    report = ReportDetail(
+        id="rep",
+        question="q",
+        status="done",
+        sections=[{
+            "title": "section",
+            "source_graph": {"state": "shadow"},
+        }],
+    ).model_dump()
+    assert report["sections"] == [{"title": "section"}]
+
+
+def test_legacy_report_source_graph_receipt_is_scrubbed_on_repository_read(tmp_path):
+    repo = SQLiteRepository(Settings(
+        _env_file=None,
+        DATABASE_URL=f"sqlite:///{tmp_path / 'legacy.db'}",
+        SILICON_NOTEBOOK_STORAGE_DIR=str(tmp_path / "storage"),
+    ))
+    notebook = repo.create_notebook(NotebookCreate(name="legacy report"))
+    report_id = repo.create_report(notebook.id, "q")
+    repo.update_report(
+        notebook.id,
+        report_id,
+        sections=[{
+            "title": "section",
+            "source_graph": {"state": "shadow"},
+        }],
+    )
+
+    detail = repo.get_report(notebook.id, report_id)
+
+    assert detail["sections"] == [{"title": "section"}]
 
 
 def test_whole_scope_is_byte_identical_and_does_no_snapshot_io():
@@ -571,6 +649,5 @@ def test_ask_and_report_consumers_keep_baseline_on_graph_io_failure(monkeypatch)
         report._activate_selected_source_graph("nb", result)
 
     assert result.chunks == baseline
-    assert result.source_graph_status.state == "degraded"
-    assert result.source_graph_status.reason == "source_titles_failed"
-    assert result.trace[-1].step_type == "source_subgraph"
+    assert not hasattr(result, "source_graph_status")
+    assert result.trace == []

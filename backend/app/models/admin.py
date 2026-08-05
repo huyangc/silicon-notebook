@@ -1,7 +1,8 @@
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.internal_observability import public_trace_steps, sanitize_answer_payload
 from app.models.common import Evidence
 
 
@@ -229,6 +230,16 @@ class AskDetail(BaseModel):
     error: str = ""
     trace: List[dict] = Field(default_factory=list)
     answer: Optional[Dict[str, Any]] = None
+
+    @field_validator("trace", mode="before")
+    @classmethod
+    def _hide_internal_trace_steps(cls, value: object) -> object:
+        return public_trace_steps(value)
+
+    @field_validator("answer", mode="before")
+    @classmethod
+    def _hide_internal_answer_fields(cls, value: object) -> object:
+        return sanitize_answer_payload(value)
 
 
 class CacheStats(BaseModel):

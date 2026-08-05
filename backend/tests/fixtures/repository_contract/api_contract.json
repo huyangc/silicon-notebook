@@ -1464,18 +1464,6 @@
                 }
               ]
             },
-            "source_graph": {
-              "anyOf": [
-                {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Source Graph"
-            },
             "top_relevance": {
               "default": 0.0,
               "title": "Top Relevance",

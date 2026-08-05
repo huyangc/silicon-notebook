@@ -955,7 +955,8 @@ export function ReasoningTracePanel({
   live?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const summary = getReasoningTraceSummary(steps, live);
+  const visibleSteps = steps.filter((step) => step.step_type !== "source_subgraph");
+  const summary = getReasoningTraceSummary(visibleSteps, live);
   return (
     <div className={`reasoning-trace-panel ${live ? "live" : ""} ${expanded ? "expanded" : "collapsed"}`}>
       <button
@@ -978,13 +979,13 @@ export function ReasoningTracePanel({
       </button>
       {expanded && (
         <ol className="reasoning-trace-list">
-          {steps.length === 0 ? (
+          {visibleSteps.length === 0 ? (
             <li className="reasoning-trace-empty">等待后端事件…</li>
-          ) : steps.map((step, index) => {
+          ) : visibleSteps.map((step, index) => {
             const detail = getTraceStepDetail(step);
             const hasTime = typeof step.duration_ms === "number";
             return (
-              <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
+              <li key={`${step.step_type}-${index}`} className={index === visibleSteps.length - 1 && live ? "active" : ""}>
                 <span>{label(TRACE_STEP_LABELS, step.step_type, "处理中")}</span>
                 <strong>{step.summary}</strong>
                 {(detail || hasTime) && (
@@ -1269,18 +1270,6 @@ export function AnswerView({
           </details>
         );
       })()}
-      {answer.source_graph && (
-        <div className={`source-graph-status source-graph-${answer.source_graph.state}`}>
-          <strong>来源子图</strong>
-          <span>{answer.source_graph.state === "active"
-            ? `已在所选 ${answer.source_graph.selected_source_count} 篇来源内扩展，补充 ${answer.source_graph.enrichment_count} 条证据`
-            : answer.source_graph.state === "shadow"
-              ? "正在影子评估，当前答案仍完全使用原检索结果"
-              : answer.source_graph.state === "degraded"
-                ? "本轮安全降级为原检索结果，未使用跨范围图扩展"
-                : "质量门尚未批准启用，当前答案使用原检索结果"}</span>
-        </div>
-      )}
       <AnswerMarkdown
         answer={answerText}
         anchors={answer.anchors}

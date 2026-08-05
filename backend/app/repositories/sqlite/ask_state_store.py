@@ -36,6 +36,10 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+from app.core.internal_observability import (
+    public_trace_steps,
+    sanitize_answer_payload,
+)
 from app.models.ask import (
     ActiveAskJob,
     AskRequest,
@@ -327,7 +331,7 @@ class AskStateStore:
                 trace.append(json.loads(r["step_json"]))
             except (TypeError, ValueError):
                 continue
-        return trace
+        return public_trace_steps(trace)
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:
@@ -359,7 +363,7 @@ class AskStateStore:
         if row is None:
             return None
         try:
-            payload = json.loads(row["payload"] or "{}")
+            payload = sanitize_answer_payload(json.loads(row["payload"] or "{}"))
         except (TypeError, ValueError):
             payload = {}
         payload["answered_at"] = str(payload.get("answered_at") or row["created_at"] or "")

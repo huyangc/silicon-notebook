@@ -526,17 +526,6 @@ class ReportEngine:
             return
         result.baseline_chunks = baseline
         result.chunks = list(activated.chunks)
-        result.source_graph_status = activated.status
-        if activated.status is not None:
-            from app.models.ask import TraceStep
-            result.trace.append(TraceStep(
-                step_type="source_subgraph",
-                summary=(
-                    f"来源子图：{activated.status.state}，"
-                    f"新增 {activated.status.enrichment_count} 条证据"
-                ),
-                detail=activated.status.public_dict(),
-            ))
 
     @classmethod
     def from_repository(cls, repository, settings, cancel_event: CancelEvent = None):
@@ -1667,9 +1656,6 @@ class ReportEngine:
                 "intent_ids": list(section.get("intent_ids") or []),
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
-        source_graph_status = getattr(result, "source_graph_status", None)
-        if source_graph_status is not None:
-            base["source_graph"] = source_graph_status.public_dict()
         if not markdown:
             try:
                 deps.model_errors.note_model_error(

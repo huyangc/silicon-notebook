@@ -552,5 +552,5 @@ def test_runtime_wiring_and_default_flags(repo, monkeypatch):
     monkeypatch.delenv("SOURCE_PARTITIONED_PPR_ENABLED")
     monkeypatch.delenv("SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED", raising=False)
     defaults = Settings(_env_file=None)
-    assert defaults.source_partitioned_graph_artifacts_enabled is False
-    assert defaults.source_partitioned_ppr_enabled is False
+    assert defaults.source_partitioned_graph_artifacts_enabled is True
+    assert defaults.source_partitioned_ppr_enabled is True

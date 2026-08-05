@@ -592,7 +592,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 当前 scale-index 全量构建与 delta fold 还会写入 `chunk_ann_source_names.npy`、`chunk_ann_source_codes.npy` 和 `chunk_ann_source_counts.npy`。这些紧凑、逐行对齐的文件让收窄来源的 chunk ANN 在 HNSW 进入 Top-K 前拒绝未选行。历史已发布索引仍可加载，但在该 notebook 重建或 fold 之前，收窄的 chunk/元素检索会使用有界来源内 FTS；若部署后立刻需要跨语言的限定来源语义召回，应重建对应 scale 索引。当 manifest 声明 `has_chunk_ann_sources=true` 却缺文件、行数不一致或来源代码越界时，整份工件判不可用，不能静默削弱来源边界。
 
-启用 `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true` 后，同一个离线 index 命令还会在主 scale 工件发布后重建 `<storage>/kg_index_partitions/<notebook-id>`。伴生产物通过临时目录原子换入，每个可见来源使用一个 SHA-256 直寻目录，校验每个 partition payload 的摘要，并绑定当前主 manifest version。伴生产物构建失败、越界或损坏不会影响既有 scale 索引，但 reader 会保持 unavailable；旧格式伴生产物必须重建。修复来源事实覆盖或按产品文档调整来源子图护栏后重新执行 index 命令；不要在不同 scale-index 代次间复制伴生产物根目录。可单独关闭 `SOURCE_PARTITIONED_PPR_ENABLED` 而保留文件。
+默认 `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`，所以同一个离线 index 命令还会在主 scale 工件发布后重建 `<storage>/kg_index_partitions/<notebook-id>`。伴生产物通过临时目录原子换入，每个可见来源使用一个 SHA-256 直寻目录，校验每个 partition payload 的摘要，并绑定当前主 manifest version。伴生产物构建失败、越界或损坏不会影响既有 scale 索引，但 reader 会保持 unavailable；旧格式伴生产物必须重建。修复来源事实覆盖或按产品文档调整来源子图护栏后重新执行 index 命令；不要在不同 scale-index 代次间复制伴生产物根目录。可单独关闭 `SOURCE_PARTITIONED_PPR_ENABLED` 而保留文件。
 
 生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `ann_ms`、`hydrate_ms`、`fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
 
@@ -633,7 +633,7 @@ PYTHONPATH=backend python scripts/eval_selected_source_graph.py \
 
 `--golden` 只是诊断覆盖项。它的输出可以本地检查，但 production 激活只接受随当前版本发布的 canonical suite 摘要；削弱或替换案例不能产生可激活工件。
 
-发布顺序：先启用 `SOURCE_SUBGRAPH_PPR_ENABLED`（超大来源先构建 partition 伴生产物，再开 `SOURCE_PARTITIONED_PPR_ENABLED`），把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE` 设为 `shadow`，检查无正文的 `selected_source_graph` 事件；canonical gate 通过后，配置受信 attestation 路径及精确 corpus/model pin，再依次走 `allowlist` 或稳定 hash `rollout`，最后才考虑 `on`。回滚只需把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=off`，会立即恢复历史 `B`，无需删除工件。不同 corpus signature 或 model contract 之间禁止复制 attestation。
+发布默认值已经启用 `SOURCE_SUBGRAPH_PPR_ENABLED`、partition 发布/读取，并把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE` 设为 `shadow`；该控制态只存在于运维内部 telemetry，用户可读日志与 UI 会过滤它。超大来源应先构建或刷新 partition 伴生产物，再判断 shadow 覆盖。canonical gate 通过后，配置受信 attestation 路径及精确 corpus/model pin，再依次走 `allowlist` 或稳定 hash `rollout`，最后才考虑 `on`。回滚只需把 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=off`，会立即恢复历史 `B`，无需删除工件。不同 corpus signature 或 model contract 之间禁止复制 attestation。
 
 ### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
 
