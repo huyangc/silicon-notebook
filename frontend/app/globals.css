@@ -3089,6 +3089,7 @@ button.chat-session-card {
 .report-corpus-basis-facts,
 .report-corpus-basis-distributions,
 .report-corpus-basis-representatives,
+.report-corpus-basis-unavailable,
 .report-corpus-basis-disclosure {
   color: #5e6a79;
   font-size: 12px;
@@ -3115,6 +3116,7 @@ button.chat-session-card {
 
 .report-corpus-basis-distributions dd,
 .report-corpus-basis-representatives,
+.report-corpus-basis-unavailable,
 .report-corpus-basis-disclosure {
   margin: 0;
   word-break: break-word;

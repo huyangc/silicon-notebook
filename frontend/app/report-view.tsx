@@ -127,6 +127,11 @@ export type ReportCorpusProfileT = {
   metadata_sources?: number;
   unknown_year?: number;
   completeness_disclosure?: string;
+  /**
+   * 只有缺统计时才出现。`scope_restricted` = 本次限定了资料范围所以有意不统计，
+   * `failed` = 聚合真的出错。历史报告两种情况都存成空对象，无法区分。
+   */
+  unavailable_reason?: string;
 };
 
 export type ReportFrameFacetT = {
@@ -727,17 +732,18 @@ export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) 
   const ledgersTotal = credibility.claim_ledgers_total;
   const showLedgers = typeof ledgersAvailable === "number" || typeof ledgersTotal === "number";
   if (!synthesisStatus && !showLedgers) return null;
-  // Standard/low-depth reports deliberately use the streaming path and never
-  // request a report-wide synthesis.  Rendering only "not requested" plus
-  // "0/N ledgers" on every such report is diagnostic noise, not a useful
-  // credibility receipt.  Keep old reports visible when depth is absent: their
-  // execution tier cannot be recovered safely from this payload.
-  const isExpectedLowDepthNoop = report.depth != null
-    && report.depth < 8
-    && synthesisStatus === "not_requested"
+  // Only silence receipts that are pure expected negatives.  `ledgersTotal` is
+  // the section count, and a single-section report has no cross-section
+  // consistency to synthesise, so its "not requested" carries no information.
+  // The depth arm is legacy-only: reports generated while synthesis was gated
+  // at depth >= 8 are expected no-ops too, and nothing in the payload dates a
+  // report.  New low-depth reports do request synthesis, so they surface a real
+  // status instead of reaching this branch.
+  const isExpectedNoop = synthesisStatus === "not_requested"
     && ledgersAvailable === 0
-    && typeof ledgersTotal === "number";
-  if (isExpectedLowDepthNoop) return null;
+    && typeof ledgersTotal === "number"
+    && (ledgersTotal < 2 || (report.depth != null && report.depth < 8));
+  if (isExpectedNoop) return null;
   const statusClass = synthesisStatus === "failed_model" || synthesisStatus === "failed_validation"
     ? "failed"
     : synthesisStatus === "skipped_no_evidence"
@@ -791,52 +797,71 @@ function citationAuditLabel(audit: ReportCitationAuditT | undefined): string | n
   return null;
 }
 
+/**
+ * 缺统计时的说明。后端把「有意跳过」与「统计出错」分开标记后，界面不能再对两者
+ * 说同一句话——限定资料范围的报告没有任何东西出错。历史报告缺标记，保持沉默而
+ * 不猜测原因（此时卡片仍会显示完整性披露）。
+ */
+function corpusUnavailableCopy(reason: string | undefined): string {
+  if (reason === "scope_restricted") {
+    return "本次报告限定了检索的资料范围，因此没有统计整个知识库的资料基础。";
+  }
+  return reason ? "资料基础统计未能完成，本次没有可用的资料统计。" : "";
+}
+
 export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
   const profile = report.understanding?.corpus_profile;
   const scope = report.understanding?.result_scope;
+  // An unavailable marker is a non-empty object, so presence alone no longer
+  // means "there are statistics to show".
+  const unavailableCopy = corpusUnavailableCopy(profile?.unavailable_reason);
+  const measured = profile && !profile.unavailable_reason ? profile : undefined;
   const disclosure = profile?.completeness_disclosure
     || ((scope === "complete" || scope === "aggregate" || scope === "hybrid")
       ? "本报告按相关性检索生成，未做完整枚举。"
       : "");
   if (!profile && !disclosure) return null;
-  const typeText = formatDistribution(profile?.type_distribution);
-  const yearText = formatDistribution(profile?.year_distribution);
-  const representativeTitles = (profile?.representatives || [])
+  const typeText = formatDistribution(measured?.type_distribution);
+  const yearText = formatDistribution(measured?.year_distribution);
+  const representativeTitles = (measured?.representatives || [])
     .map((item) => String(item.title || item.label || item.source_title || "").trim())
     .filter(Boolean);
-  const duplicateLowerBound = profile?.identified_duplicate_lower_bound
-    ?? profile?.duplicate_inflation;
+  const duplicateLowerBound = measured?.identified_duplicate_lower_bound
+    ?? measured?.duplicate_inflation;
   return (
     <section className="report-corpus-basis" aria-label="资料基础">
       <div className="report-corpus-basis-head">
         <h3>资料基础</h3>
-        {typeof profile?.total_sources === "number" && (
-          <span>{profile.total_sources} 份资料</span>
+        {typeof measured?.total_sources === "number" && (
+          <span>{measured.total_sources} 份资料</span>
         )}
       </div>
-      {profile && (
+      {unavailableCopy && (
+        <p className="report-corpus-basis-unavailable">{unavailableCopy}</p>
+      )}
+      {measured && (
         <div className="report-corpus-basis-facts">
-          {typeof (profile.independent_documents ?? profile.independent_families) === "number" && (
-            <span>可区分资料 {profile.independent_documents ?? profile.independent_families}</span>
+          {typeof (measured.independent_documents ?? measured.independent_families) === "number" && (
+            <span>可区分资料 {measured.independent_documents ?? measured.independent_families}</span>
           )}
-          {typeof (profile.displayed_sources ?? profile.representative_count) === "number" && typeof profile.total_sources === "number" && (
-            <span>代表资料 {profile.displayed_sources ?? profile.representative_count}/{profile.total_sources}</span>
+          {typeof (measured.displayed_sources ?? measured.representative_count) === "number" && typeof measured.total_sources === "number" && (
+            <span>代表资料 {measured.displayed_sources ?? measured.representative_count}/{measured.total_sources}</span>
           )}
-          {typeof profile.identity_uncertain_sources === "number" && profile.identity_uncertain_sources > 0 && (
-            <span>另有 {profile.identity_uncertain_sources} 份资料无法可靠合并</span>
+          {typeof measured.identity_uncertain_sources === "number" && measured.identity_uncertain_sources > 0 && (
+            <span>另有 {measured.identity_uncertain_sources} 份资料无法可靠合并</span>
           )}
           {typeof duplicateLowerBound === "number" && duplicateLowerBound > 0 && (
             <span>保守识别重复至少 {duplicateLowerBound} 份</span>
           )}
-          {percent(profile.metadata_coverage) && (
-            <span>资料识别信息完整度 {percent(profile.metadata_coverage)}</span>
+          {percent(measured.metadata_coverage) && (
+            <span>资料识别信息完整度 {percent(measured.metadata_coverage)}</span>
           )}
         </div>
       )}
       {(typeText || yearText) && (
         <dl className="report-corpus-basis-distributions">
           {typeText && <><dt>资料类型</dt><dd>{typeText}</dd></>}
-          {yearText && <><dt>时间分布</dt><dd>{yearText}{typeof profile?.unknown_year === "number" ? ` · 年份未知 ${profile.unknown_year}` : ""}</dd></>}
+          {yearText && <><dt>时间分布</dt><dd>{yearText}{typeof measured?.unknown_year === "number" ? ` · 年份未知 ${measured.unknown_year}` : ""}</dd></>}
         </dl>
       )}
       {representativeTitles.length > 0 && (

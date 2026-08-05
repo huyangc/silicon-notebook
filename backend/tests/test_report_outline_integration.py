@@ -1230,10 +1230,11 @@ def test_the_section_phase_shows_the_outline_progress(repo, monkeypatch):
         return ReasoningResult()
 
     monkeypatch.setattr(engine, "_deep_dive", _dive)
-    # 签名镜像真方法(含 PR#418 R1 P2-2 加的 depth):替身少一个参数就会把整节
-    # 打成「失败」,而这条用例断言的正是 phase 文案。
+    # 签名镜像真方法(含 PR#418 R1 P2-2 加的 depth,以及按章节数决定的
+    # synthesis_requested):替身少一个参数就会把整节打成「失败」,而这条用例
+    # 断言的正是 phase 文案。
     monkeypatch.setattr(engine, "_draft_section",
-                        lambda nb, section, q, result, depth=None: {
+                        lambda nb, section, q, result, depth=None, **_kwargs: {
                             "title": section["title"], "markdown": "x"})
     report_id = repo.create_report(notebook.id, "Q", depth=16)
     outline = [{"title": "有大纲的一节", "scope": "s", "sub_queries": ["q"]},
