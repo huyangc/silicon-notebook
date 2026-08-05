@@ -292,11 +292,17 @@ def base_reference_source_count(references: Sequence[Any]) -> int:
         row = reference if isinstance(reference, dict) else {}
         if _text(row.get("tier")) != "base":
             continue
-        # Base KG evidence can legitimately carry no source_id — the assembler
-        # already handles that case, which is what `family_key` is for.  Keying
-        # on source_id alone drops those citations and can disclose zero
-        # reference-library material while the bibliography clearly shows some.
-        key = _text(row.get("source_id")) or _text(row.get("family_key"))
+        # Base KG evidence can legitimately carry no source_id, so fall back to
+        # the assembled family key.  But only keys that identify a *source*
+        # count: the assembler's last resort is `evidence:<anchor>`, which
+        # differs per citation, so counting those would report several
+        # materials for one source whose identity is in fact unknown — the
+        # opposite of the rule that unidentified sources never inflate the
+        # distinguishable count.
+        key = _text(row.get("source_id"))
+        if not key:
+            family = _text(row.get("family_key"))
+            key = family if family and not family.startswith("evidence:") else ""
         if key:
             seen.add(key)
     return len(seen)

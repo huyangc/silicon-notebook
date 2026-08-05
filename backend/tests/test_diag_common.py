@@ -375,3 +375,29 @@ def test_env_file_override_uses_the_exact_bootstrap_lookup(tmp_path, monkeypatch
     monkeypatch.setenv("silicon_notebook_env_file", str(ignored))
     # The application ignores the lowercase spelling, so this must too.
     assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+
+def test_explicitly_blank_database_url_is_invalid_not_absent(tmp_path, monkeypatch):
+    """`Settings` gives a present-but-blank value precedence and rejects it.
+
+    Falling through to `.env` or the SQLite default would diagnose a
+    configuration the service is provably not running on.
+    """
+    common = load_common()
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    (tmp_path / ".env").write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+
+    for blank in ("", "   "):
+        monkeypatch.setenv("DATABASE_URL", blank)
+        target = common.resolve_database_target(str(tmp_path))
+        assert target.backend == "unknown", repr(blank)
+        assert target.resolve_sqlite_file("/tmp/x") is None, repr(blank)
+
+    # A blank value inside .env is equally invalid rather than "no config".
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    (tmp_path / ".env").write_text("DATABASE_URL=\n", encoding="utf-8")
+    assert common.resolve_database_target(str(tmp_path)).backend == "unknown"
+
+    # Truly absent still means the shipped SQLite default.
+    (tmp_path / ".env").write_text("OTHER=1\n", encoding="utf-8")
+    assert common.resolve_database_target(str(tmp_path)).is_sqlite

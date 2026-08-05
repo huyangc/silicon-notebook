@@ -182,8 +182,12 @@ def test_reader_disclosure_names_reference_library_material_it_cited():
     no_source_id = [
         {"key": "k1", "tier": "base", "family_key": "source-title:a paper"},
         {"key": "k2", "tier": "base", "family_key": "source-title:a paper"},
-        {"key": "k3", "tier": "base", "family_key": "evidence:xyz"},
-        {"key": "k4", "tier": "base"},                       # 两者都缺:无法计数
+        {"key": "k3", "tier": "base", "family_key": "source-title:another"},
+        # `evidence:<锚点>` 是装配的最后兜底,每条引用都不同。计入它会把一份身份
+        # 未知的资料数成好几份,与「身份未知不增加独立资料数」相悖。
+        {"key": "k4", "tier": "base", "family_key": "evidence:anchor-1"},
+        {"key": "k5", "tier": "base", "family_key": "evidence:anchor-2"},
+        {"key": "k6", "tier": "base"},                       # 两者都缺:无法计数
     ]
     assert base_reference_source_count(no_source_id) == 2
 

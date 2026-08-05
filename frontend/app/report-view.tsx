@@ -814,10 +814,14 @@ function baseReferenceSourceCount(
   const seen = new Set<string>();
   for (const reference of references || []) {
     if (reference?.tier !== "base") continue;
-    // 参考库的知识证据可以合法地没有 source_id（后端装配时正是用 family_key
-    // 兜底的）；只认 source_id 会把这些引用整条丢掉。
-    const key = String(reference.source_id || "").trim()
-      || String(reference.family_key || "").trim();
+    // 参考库的知识证据可以合法地没有 source_id（后端装配时用 family_key 兜底）。
+    // 但只有能标识**来源**的 key 才算数：装配的最后兜底 `evidence:<锚点>` 每条
+    // 引用都不同，计入它会把一份身份未知的资料数成好几份。
+    let key = String(reference.source_id || "").trim();
+    if (!key) {
+      const family = String(reference.family_key || "").trim();
+      key = family && !family.startsWith("evidence:") ? family : "";
+    }
     if (key) seen.add(key);
   }
   return seen.size;

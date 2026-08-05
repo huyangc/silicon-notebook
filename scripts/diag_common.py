@@ -600,15 +600,21 @@ def resolve_database_target(root: str) -> DatabaseTarget:
     """Resolve the serving database from DATABASE_URL, never by assumption."""
     import os as _os
 
+    # Presence wins, not truthiness: `Settings` gives an explicitly present but
+    # blank DATABASE_URL precedence and rejects it, so the service cannot start.
+    # Falling through to .env or the SQLite default here would diagnose a
+    # configuration the service is not running on.
     raw = _environ_case_insensitive("DATABASE_URL")
     source = "env"
-    if raw is None or not str(raw).strip():
+    if raw is None:
         env_file = _env_file_for(root)
         raw = _dotenv_database_url(env_file) if env_file is not None else None
-        source = "dotenv" if raw else "default"
-    url = str(raw or "").strip()
-    if not url:
+        source = "dotenv" if raw is not None else "default"
+    if raw is None:
         return DatabaseTarget(backend="sqlite", source="default")
+    url = str(raw).strip()
+    if not url:
+        return DatabaseTarget(backend="unknown", source=source)
     core = _core_database_url_module()
     if core is None:
         return DatabaseTarget(backend="unknown", source=source)

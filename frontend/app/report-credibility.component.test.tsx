@@ -119,7 +119,10 @@ test("资料基础点明引用到的参考库资料，按来源去重而非按�
       references: [
         { key: "k1", label: "a", tier: "base", family_key: "source-title:a paper" },
         { key: "k2", label: "a", tier: "base", family_key: "source-title:a paper" },
-        { key: "k3", label: "b", tier: "base", family_key: "evidence:xyz" },
+        { key: "k3", label: "b", tier: "base", family_key: "source-title:another" },
+        // evidence:<锚点> 每条都不同，计入会把一份身份未知的资料数成好几份。
+        { key: "k4", label: "c", tier: "base", family_key: "evidence:anchor-1" },
+        { key: "k5", label: "d", tier: "base", family_key: "evidence:anchor-2" },
       ],
     })} />,
   );
