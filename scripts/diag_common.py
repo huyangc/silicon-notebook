@@ -469,9 +469,24 @@ class DatabaseTarget:
             f"跳过而不是读取可能陈旧的 .local/silicon_notebook.db)"
         )
 
+    def resolve_sqlite_file(self, fallback_dir: str) -> Optional[str]:
+        """The SQLite file this deployment actually serves from.
 
-def _dotenv_database_url(root: str) -> Optional[str]:
-    path = Path(root) / ".env"
+        Confirming the *backend* is not enough: a valid non-default URL such as
+        ``sqlite:///data/production.db`` still leaves the fixed
+        ``<local_dir>/silicon_notebook.db`` pointing at a stale file.  Falls
+        back to the conventional location only when the URL names no file.
+        """
+        import os as _os
+
+        if not self.is_sqlite:
+            return None
+        if self.sqlite_path:
+            return self.sqlite_path
+        return _os.path.join(fallback_dir, "silicon_notebook.db")
+
+
+def _dotenv_database_url(path: Path) -> Optional[str]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -498,6 +513,36 @@ def _dotenv_database_url(root: str) -> Optional[str]:
     return value
 
 
+def _env_file_for(root: str) -> Optional[Path]:
+    """Mirror ``app.core.config``: the override wins, empty means read nothing."""
+    import os as _os
+
+    override = _os.environ.get("SILICON_NOTEBOOK_ENV_FILE")
+    if override is None:
+        return Path(root) / ".env"
+    override = override.strip()
+    return Path(override) if override else None
+
+
+def _sqlite_path_from_url(url: str, root: str) -> Optional[str]:
+    """Absolute on-disk path for a SQLite URL, or None when it names no file.
+
+    SQLAlchemy spelling: ``sqlite:///relative.db`` is relative and
+    ``sqlite:////absolute.db`` is absolute; ``sqlite://`` is in-memory.  A
+    relative path is resolved against the repository root, which is where the
+    documented commands are run from.
+    """
+    import os as _os
+
+    rest = url.partition("://")[2].split("?", 1)[0]
+    if not rest or rest == "/":
+        return None                       # 内存库:没有文件可看
+    path = rest[1:] if rest.startswith("/") else rest
+    if not path:
+        return None
+    return path if _os.path.isabs(path) else _os.path.join(_os.path.abspath(root), path)
+
+
 def resolve_database_target(root: str) -> DatabaseTarget:
     """Resolve the serving database from DATABASE_URL, never by assumption."""
     import os as _os
@@ -505,18 +550,16 @@ def resolve_database_target(root: str) -> DatabaseTarget:
     raw = _os.environ.get("DATABASE_URL")
     source = "env"
     if raw is None or not str(raw).strip():
-        raw = _dotenv_database_url(root)
+        env_file = _env_file_for(root)
+        raw = _dotenv_database_url(env_file) if env_file is not None else None
         source = "dotenv" if raw else "default"
     url = str(raw or "").strip()
     if not url:
         return DatabaseTarget(backend="sqlite", source="default")
     scheme = url.split("://", 1)[0].lower() if "://" in url else url.lower()
     if scheme.startswith("sqlite"):
-        _, _, rest = url.partition("://")
-        path = rest.split("?", 1)[0]
-        # sqlite:///abs/path 与 sqlite:///relative 都落在这里;空串表示未指定。
         return DatabaseTarget(
-            backend="sqlite", sqlite_path=path.lstrip("/") and path or None,
+            backend="sqlite", sqlite_path=_sqlite_path_from_url(url, root),
             url_scheme=scheme, source=source,
         )
     if scheme.startswith("postgres"):

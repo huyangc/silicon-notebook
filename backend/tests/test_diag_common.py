@@ -169,6 +169,9 @@ def test_database_target_follows_database_url_instead_of_assuming_sqlite(
     """
     common = load_common()
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    # check.sh 全局设 SILICON_NOTEBOOK_ENV_FILE=""(不读任何 env 文件)以隔离
+    # 真实凭据;本用例要验证的正是 .env 读取,所以显式解除该隔离。
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
 
     # No configuration at all → SQLite, matching the shipped default.
     assert common.resolve_database_target(str(tmp_path)).is_sqlite
@@ -210,6 +213,9 @@ def test_database_target_reads_the_exported_dotenv_form(tmp_path, monkeypatch):
     """
     common = load_common()
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    # check.sh 全局设 SILICON_NOTEBOOK_ENV_FILE=""(不读任何 env 文件)以隔离
+    # 真实凭据;本用例要验证的正是 .env 读取,所以显式解除该隔离。
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
 
     for line in (
         "export DATABASE_URL=postgresql://h/db",
@@ -225,3 +231,50 @@ def test_database_target_reads_the_exported_dotenv_form(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("exported_DATABASE_URL=postgresql://h/db\n",
                                    encoding="utf-8")
     assert common.resolve_database_target(str(tmp_path)).is_sqlite
+
+
+def test_database_target_honors_the_env_file_override(tmp_path, monkeypatch):
+    """`SILICON_NOTEBOOK_ENV_FILE` moves the file the application actually reads."""
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    (tmp_path / ".env").write_text("DATABASE_URL=sqlite:///./a.db\n", encoding="utf-8")
+    elsewhere = tmp_path / "custom.env"
+    elsewhere.write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+
+    monkeypatch.setenv("SILICON_NOTEBOOK_ENV_FILE", str(elsewhere))
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    # Empty override means "read no env file", exactly as app.core.config does.
+    monkeypatch.setenv("SILICON_NOTEBOOK_ENV_FILE", "")
+    assert common.resolve_database_target(str(tmp_path)).source == "default"
+
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE")
+    assert common.resolve_database_target(str(tmp_path)).sqlite_path.endswith("a.db")
+
+
+def test_sqlite_target_resolves_the_file_the_url_actually_names(tmp_path, monkeypatch):
+    """Confirming the backend is not enough — a non-default path must be used.
+
+    `sqlite:///data/production.db` with a fixed `<local_dir>/silicon_notebook.db`
+    reader still reports from a stale file.
+    """
+    common = load_common()
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///data/production.db")
+    target = common.resolve_database_target(str(tmp_path))
+    assert target.is_sqlite
+    assert target.sqlite_path == str(tmp_path / "data" / "production.db")
+    assert target.resolve_sqlite_file(str(tmp_path / "ignored")) == target.sqlite_path
+
+    monkeypatch.setenv("DATABASE_URL", "sqlite:////abs/production.db")
+    assert common.resolve_database_target(str(tmp_path)).sqlite_path == "/abs/production.db"
+
+    # In-memory names no file, so the conventional location remains the fallback.
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    memory = common.resolve_database_target(str(tmp_path))
+    assert memory.sqlite_path is None
+    assert memory.resolve_sqlite_file("/tmp/x") == "/tmp/x/silicon_notebook.db"
+
+    # A PostgreSQL deployment never yields a file to read.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://h/db")
+    assert common.resolve_database_target(str(tmp_path)).resolve_sqlite_file("/tmp/x") is None

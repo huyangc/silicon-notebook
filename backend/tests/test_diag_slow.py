@@ -94,6 +94,9 @@ def test_db_target_prefers_the_explicit_root_over_the_local_directory(
     """
     slow = load_slow()
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    # check.sh 全局设 SILICON_NOTEBOOK_ENV_FILE=""(不读任何 env 文件)以隔离
+    # 真实凭据;本用例要验证的正是 .env 读取,所以显式解除该隔离。
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".env").write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")

@@ -561,8 +561,10 @@ def report_scale_profile(local_dir, runtime_dim=0, root=None):
     if not target.is_sqlite:
         print(target.skip_note())
         return
-    db = os.path.join(local_dir, "silicon_notebook.db")
-    if not os.path.exists(db):
+    # 用 DATABASE_URL 解析出的那个文件,而不是固定路径:非默认 SQLite 路径下,
+    # 固定路径同样指向一份陈旧库。
+    db = target.resolve_sqlite_file(local_dir)
+    if not db or not os.path.exists(db):
         print("(缺 SQLite database)")
         return
     try:
@@ -713,8 +715,10 @@ def report_reasoning_ppr_audit(local_dir, root):
     if not target.is_sqlite:
         print(target.skip_note())
         return
-    db = os.path.join(local_dir, "silicon_notebook.db")
-    if not os.path.exists(db):
+    # 用 DATABASE_URL 解析出的那个文件,而不是固定路径:非默认 SQLite 路径下,
+    # 固定路径同样指向一份陈旧库。
+    db = target.resolve_sqlite_file(local_dir)
+    if not db or not os.path.exists(db):
         print("(缺 SQLite database)")
         return
     env = _read_env(root)
@@ -883,7 +887,9 @@ def report_artifacts(local_dir, deep, root=None):
         # 索引工件(scale index)与后端无关,继续报;只有 SQLite 文件那部分要收回。
         print(f"  (当前部署是 {target.explain()} — 跳过 SQLite 文件/向量迁移检查，"
               "下面的索引工件仍然有效)")
-    db = os.path.join(local_dir, "silicon_notebook.db")
+    db = target.resolve_sqlite_file(local_dir) or os.path.join(
+        local_dir, "silicon_notebook.db"
+    )
     for f in (db, db + "-wal", db + "-shm"):
         if os.path.exists(f):
             print(f"  {os.path.getsize(f)/1e9:8.2f} GB  {os.path.basename(f)}")
@@ -1025,8 +1031,10 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False, root=N
     if not target.is_sqlite:
         print(target.skip_note())
         return
-    db = os.path.join(local_dir, "silicon_notebook.db")
-    if not os.path.exists(db):
+    # 用 DATABASE_URL 解析出的那个文件,而不是固定路径:非默认 SQLite 路径下,
+    # 固定路径同样指向一份陈旧库。
+    db = target.resolve_sqlite_file(local_dir)
+    if not db or not os.path.exists(db):
         print("(缺 SQLite database)")
         return
     try:

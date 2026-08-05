@@ -54,8 +54,9 @@ def _main(argv=None) -> int:
     if not target.is_sqlite:
         print(target.skip_note("本诊断"))
         return 0
-    db_path = os.path.join(local_dir, "silicon_notebook.db")
-    if not os.path.exists(db_path):
+    # 解析出的文件优先:确认后端是 SQLite 还不够,非默认路径下固定路径同样陈旧。
+    db_path = target.resolve_sqlite_file(local_dir)
+    if not db_path or not os.path.exists(db_path):
         print("(缺 SQLite database;用 --local 指定 local data directory)")
         return 0
     try:

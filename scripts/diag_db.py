@@ -2196,6 +2196,10 @@ def _main(argv=None) -> int:
                 "如确实要检查那个 SQLite 文件，显式传 --db。\n"
             )
             return 0
+        # 缺省值是「约定位置」,而 DATABASE_URL 可能指向别处;显式 --db 已在上面短路。
+        resolved = target.resolve_sqlite_file(os.path.dirname(args.db) or ".")
+        if resolved:
+            args.db = resolved
     evidence = collect_db_evidence(
         args.db,
         notebook_id=args.notebook_id,
