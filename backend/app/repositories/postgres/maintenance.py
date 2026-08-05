@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import logging
 from pathlib import Path
 import threading
@@ -1041,6 +1042,39 @@ class PostgresMaintenanceAdapter:
 
     def has_scale_index(self, notebook_id: str) -> bool:
         return self._runtime.scale_artifacts.load(notebook_id) is not None
+
+    def selected_source_graph_artifact_status(
+        self, notebook_id: str
+    ) -> dict[str, object]:
+        """Cheap version/count probe; never opens ANN or partition payloads."""
+        runtime = self._runtime.scale_artifacts
+        store = runtime.artifacts
+        try:
+            current_version = runtime.version(notebook_id)
+            main = store.read_manifest(store.scale_dir(notebook_id)) or {}
+            partition = (
+                store.read_manifest(store.source_partition_dir(notebook_id)) or {}
+            )
+            main_version = main.get("version")
+            parent_version = partition.get("parent_version")
+            ready = (
+                main_version == current_version
+                and parent_version == main_version
+                and int(partition.get("format_version", 0)) > 0
+            )
+            return {
+                "ready": ready,
+                "n_nodes": int(main.get("n_nodes", 0)),
+                "published_sources": int(partition.get("published_sources", 0)),
+                "unavailable_sources": int(partition.get("unavailable_sources", 0)),
+            }
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return {
+                "ready": False,
+                "n_nodes": 0,
+                "published_sources": 0,
+                "unavailable_sources": 0,
+            }
 
     def begin_source_index_backfill(
         self, notebook_id: str, *, force: bool = False

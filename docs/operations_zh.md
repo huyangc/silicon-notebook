@@ -620,6 +620,27 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败（`retrieval_query_embedding` 未绑定、notebook 不存在、或属主用户不存在）——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
 
+### 一键准备所选来源 Shadow（`scripts/prepare_selected_source_graph.py`）
+
+已有部署先停止 API 和全部后台 writer，再从仓库根目录运行：
+
+```bash
+PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
+  --env-file /path/to/deployment.env \
+  --confirm-service-stopped
+```
+
+env 文件必须已经存在，避免生产路径拼错后静默操作本地默认数据库。确认参数只是运维人员声明已经停服，脚本不会代替你停止服务。它固定覆盖当前数据库的全部 notebook，并在数据库阶段持有中央离线维护锁。执行态依次为：
+
+1. 打开 repository、应用待执行 schema migration、枚举全部 notebook。
+2. 按 notebook 持久页游标续跑来源反查索引；当前代次已完成则跳过，KG 代次漂移先失败关闭，下次按新代次重建。
+3. 通过既有的来源/代次账本续跑 source-fact 投影；存在 busy、无代次、failed 或 incomplete 来源就阻断启用。
+4. 按当前 KG 版本和可见来源数复验主 scale manifest 与来源 partition root；当前完整产物直接跳过，否则调用普通有界 builder 重新发布并再次复验。
+5. 在维护锁仍持有时独立对账每个 notebook 的来源事实；receipt 只记录计数和稳定状态码。
+6. 关闭 repository 并释放锁；只有此后才原子把 env 文件改成 `SOURCE_SUBGRAPH_PPR_ENABLED=true`、`SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`、`SOURCE_PARTITIONED_PPR_ENABLED=true` 和 `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=shadow`。
+
+默认 0600 receipt 位于 `STORAGE_DIR/maintenance/selected-source-graph-deployment.json`。它只作无正文执行回执，权威状态仍是数据库账本与 artifact manifest。重复运行会重新验证全部状态、从已提交页面续跑、跳过当前有效工件；失败会写稳定 phase/code、保持四个 env 配置不变并非零退出。成功后重启部署，使其读取新 env。Shadow 不进入公开 API、轨迹、stream 或 UI，也不会改变检索结果。
+
 ### 所选来源图质量门（`scripts/eval_selected_source_graph.py`）
 
 启用用户可见的所选来源图通道前，必须在同一份冻结 model/corpus/source contract 下，把强制 golden cases 分别以历史 baseline 和 graph-enrichment shadow 运行一次。将这份配对 observation JSON 放在部署自己控制的受信工件目录，然后运行：

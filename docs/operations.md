@@ -714,6 +714,27 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 Exit codes are the verdict — safe to wire directly into CI or a script gate: `0` success (recording) or all questions match (`--compare`); `1` `--compare` found a mismatch (runs differ); `2` a precondition failed before any comparison happened (`retrieval_query_embedding` unbound, notebook not found, or owner not found) — the CLI **errors out immediately** rather than silently producing a misleading "zero recall" comparison from zero vectors.
 
+### One-shot selected-source shadow preparation (`scripts/prepare_selected_source_graph.py`)
+
+For an existing deployment, stop the API and every background writer, then run from the repository root:
+
+```bash
+PYTHONPATH=backend python scripts/prepare_selected_source_graph.py \
+  --env-file /path/to/deployment.env \
+  --confirm-service-stopped
+```
+
+The env file must already exist; this prevents a mistyped production path from silently selecting the local default database. The confirmation is an operator assertion; the script does not stop services. It always covers every notebook in the configured database and holds the central offline-maintenance lock for the database phase. Its execution state is:
+
+1. Open the repository, apply pending schema migrations, and inventory notebooks.
+2. Resume each notebook's reverse source index from its durable page cursor. A current completed generation is skipped; KG generation drift fails closed and is restarted on the next attempt.
+3. Resume source-fact projection through the existing per-source generation ledgers. Any busy, generation-less, failed, or incomplete source blocks activation.
+4. Revalidate the main scale manifest and source-partition root against the current KG version and visible-source count. A current complete companion is skipped; otherwise the ordinary bounded builder republishes it and the script revalidates the result.
+5. Independently reconcile source facts for every notebook while the maintenance lock is still held. Only counts and stable state codes enter the receipt.
+6. Close the repository and release its lock. Only then atomically update the env file to `SOURCE_SUBGRAPH_PPR_ENABLED=true`, `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`, `SOURCE_PARTITIONED_PPR_ENABLED=true`, and `SELECTED_SOURCE_GRAPH_ROLLOUT_MODE=shadow`.
+
+The default 0600 receipt is `STORAGE_DIR/maintenance/selected-source-graph-deployment.json`. It is informational and content-free; database ledgers and artifact manifests remain authoritative. Re-running the command revalidates everything, resumes committed pages, and skips current artifacts. A failure records a stable phase/code, leaves the four env assignments untouched, and exits nonzero. After success, restart the deployment so it reads the new env file. Shadow remains absent from public APIs, traces, streams, and UI, and cannot change retrieval results.
+
 ### Selected-source graph quality gate (`scripts/eval_selected_source_graph.py`)
 
 Before enabling a user-visible selected-source graph lane, record the mandatory golden cases twice under one frozen model/corpus/source contract: once with the historical baseline and once with graph enrichment in shadow. Store that paired observation JSON in a deployment-owned trusted artifact directory, then run:
