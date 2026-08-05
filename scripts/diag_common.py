@@ -527,9 +527,12 @@ def _dotenv_database_url(path: Path) -> Optional[str]:
     values = _authoritative_dotenv_values(path)
     if values is not None:
         found: Optional[str] = None
-        for key in sorted(values):
+        # File order, not sorted order: with case variants of the same key
+        # pydantic-settings takes the later declaration, while sorting would
+        # let the lowercase spelling win regardless of where it appears.
+        for key, value in values.items():
             if key.upper() == "DATABASE_URL":
-                found = values[key]
+                found = value
         return None if found is None else str(found)
     try:
         text = path.read_text(encoding="utf-8", errors="replace")

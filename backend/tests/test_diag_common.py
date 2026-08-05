@@ -475,3 +475,28 @@ def test_dotenv_fallback_keeps_working_without_python_dotenv(tmp_path, monkeypat
         'DATABASE_URL="sqlite:///.local/x.db"\n', encoding="utf-8"
     )
     assert common.resolve_database_target(str(tmp_path)).sqlite_path.endswith(".local/x.db")
+
+
+def test_duplicate_case_variants_follow_file_order(tmp_path, monkeypatch):
+    """The later declaration wins, as it does for pydantic-settings.
+
+    Sorting the parsed mapping would let `database_url` beat `DATABASE_URL`
+    regardless of position and classify a live PostgreSQL deployment as SQLite.
+    """
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+
+    (tmp_path / ".env").write_text(
+        "database_url=sqlite:///old.db\nDATABASE_URL=postgresql://host/db\n",
+        encoding="utf-8",
+    )
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    # ...and the other way round.
+    (tmp_path / ".env").write_text(
+        "DATABASE_URL=postgresql://host/db\ndatabase_url=sqlite:///new.db\n",
+        encoding="utf-8",
+    )
+    target = common.resolve_database_target(str(tmp_path))
+    assert target.is_sqlite and target.sqlite_path.endswith("new.db")
