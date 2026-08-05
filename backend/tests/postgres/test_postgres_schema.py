@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 19
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 20
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 19
-    assert migrator.migrate() == 19
-    assert migrator.current_version() == 19
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 19
+    assert migrator.migrate() == 20
+    assert migrator.migrate() == 20
+    assert migrator.current_version() == 20
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 20
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 19
+    assert migrator.migrate() == 20
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 19
+        assert PostgresMigrator(databases[1]).migrate() == 20
     finally:
         for database in databases:
             database.close()
@@ -185,9 +185,10 @@ def test_packaged_index_migration_phases_are_exact():
         (15, "source_element_type_index"),
         (16, "visible_source_identity_index"),
         (17, "command_catalog"),
-        (18, "source_local_facts"),
-        (19, "source_fact_backfills"),
-    ]
+            (18, "source_local_facts"),
+            (19, "source_fact_backfills"),
+            (20, "source_index_backfills"),
+        ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
         return [
@@ -321,6 +322,26 @@ def test_packaged_index_migration_phases_are_exact():
         "source_id, source_generation, projection_origin, global_object_id"
         in migrations[19].sql
     )
+    assert index_declarations(20) == [
+        (False, "idx_source_index_backfills_status"),
+    ]
+    assert "failure_code text COLLATE \"C\" NOT NULL DEFAULT ''" in migrations[20].sql
+    assert "status IN ('running','complete','failed')" in migrations[20].sql
+
+
+def test_source_index_running_timestamp_maps_to_postgres_null():
+    from app.migration.shadow.manifest import MANIFEST
+    from app.migration.shadow.transform import PostgresColumn, transform_sqlite_value
+
+    spec = next(
+        table for table in MANIFEST.tables
+        if table.name == "source_index_backfills"
+    )
+    column = PostgresColumn(
+        name="completed_at", data_type="timestamp with time zone", nullable=True
+    )
+
+    assert transform_sqlite_value(spec, column, "") is None
 
 
 def test_initial_migration_guards_utf8_before_business_ddl():

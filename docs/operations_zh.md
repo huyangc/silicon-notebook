@@ -509,6 +509,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --all-notebook
 # 主动回填「来源删除反查表」（幂等，不调用模型）
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-notebooks
+PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebook-id nb-xxxx --force
 
 # 补已解析论文源缺失的元数据（幂等；需绑定 `paper_metadata`，不调用 embedding）
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
@@ -524,7 +525,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 `backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表（`object_id, source_id`），供删除或重解析来源时定位受影响的 KG 对象。已回填的 notebook 直接走这张索引。未回填的 notebook 刻意**不会**在一次交互式删除/重解析里惰性回填整本库；按 keyset 分页的数据库原生 evidence 筛选只选出当前 source 的引用，请求既不在 Python 里反序列化每个对象，也不为无关对象写索引行。降级筛选仍可能扫描该 notebook 的旧 KG 行，因此大库应提前建索引，而不是反复依赖降级路径。
 
-显式命令仍是离线预建和修复方式。它不调用模型，且幂等、可中断重跑：每次按当前 evidence 以有界内存分批清空并重建所选 notebook 的索引行、打印进度，最后标记回填完成。用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整个数据库；若异常中断后怀疑反查表漂移，重跑即可修复。无论索引状态如何，在线删除都会先锁住 source 聚合行，再把每条受影响对象删除 SQL 限制在最多 500 个 id（这是 SQL 参数护栏，不承诺常数时延或后台任务），并用一次数据库往返取回、删除引用图片资产行，再 unlink 文件。界面上的来源行会立即进入“删除中”状态，并在请求结束前禁用删除操作；notebook 级删除墓碑还会拦住导航/列表的旧响应复活已删行。
+显式命令仍是离线预建和修复方式。它不调用模型，且幂等、可中断重跑。SQLite v42 / PostgreSQL v20 为每个 notebook 持久化一行 `source_index_backfills`：起始事务会跳过当前已完成标记、在相同 `kg_mutation_seq` 上续跑 running/failed 账本，或清掉旧索引并按新代次重建。每个有界 keyset 页面把 `knowledge_object_sources` 行与游标/计数原子提交，所以崩溃最多重做未提交页面，不会重做整本库。代次漂移只写稳定的 `kg_generation_changed`，保持快速路径标记为 false，并让下次运行按新代次重置；账本不含证据正文或异常文本。用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整个数据库；只有运维人员明确要丢弃当前已完成账本并修复/重建索引行时才加 `--force`。无论索引状态如何，在线删除都会先锁住 source 聚合行，再把每条受影响对象删除 SQL 限制在最多 500 个 id（这是 SQL 参数护栏，不承诺常数时延或后台任务），并用一次数据库往返取回、删除引用图片资产行，再 unlink 文件。界面上的来源行会立即进入“删除中”状态，并在请求结束前禁用删除操作；notebook 级删除墓碑还会拦住导航/列表的旧响应复活已删行。
 
 `metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按已完成源逐行打印（`[meta <done>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
 
@@ -582,7 +583,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（`metadata` / `backfill-source-index` / `backfill-source-facts`：有意重建已完成状态）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 

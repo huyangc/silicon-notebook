@@ -1190,48 +1190,78 @@ _SOURCE_FACT_BACKFILL_BATCH_SIZE = 500
 
 
 def _backfill_source_index_for_notebook(
-    repo: BatchIngestRepository, notebook_id: str
+    repo: BatchIngestRepository, notebook_id: str, *, force: bool = False
 ) -> dict[str, object]:
     """Proactively populate knowledge_object_sources for ONE notebook (P0-4).
 
-    Idempotent + restartable: clears any partial rows for this notebook first,
-    then re-derives them from knowledge_objects.evidence in batches (bounded
-    memory — never loads the whole notebook's evidence at once, unlike the
-    legacy scan this table replaces), and marks
-    unified_kg_state.source_index_backfilled=1 at the end so the online
-    _clear_source_extraction_state fast path activates immediately (no need to
-    wait for a source delete/reparse to trigger the first-use backfill)."""
+    Every page commits its evidence rows and cursor in one transaction. A
+    process restart resumes the last committed cursor; a KG generation change
+    fails closed and the next invocation starts a fresh rebuild."""
     mnt = repo.maintenance
-    total = mnt.clear_source_index(notebook_id)
-    if total == 0:
-        mnt.mark_source_index_backfilled(notebook_id)
-        print(f"  [source-index] {notebook_id}: 0/0 (无 knowledge_objects)", flush=True)
-        return {"notebook_id": notebook_id, "objects": 0, "rows": 0}
+    progress = mnt.begin_source_index_backfill(notebook_id, force=force)
+    total = int(progress["total_objects"])
+    resumed = bool(progress.get("resumed"))
+    if progress["status"] == "complete":
+        label = "已完成，跳过" if progress.get("already_complete") else "完成"
+        print(
+            f"  [source-index] {notebook_id}: {progress['objects_scanned']}/{total} ({label})",
+            flush=True,
+        )
+        return {
+            "notebook_id": notebook_id,
+            "objects": int(progress["objects_scanned"]),
+            "rows": int(progress["rows_written"]),
+            "resumed": resumed,
+            "already_complete": bool(progress.get("already_complete")),
+        }
 
-    processed = 0
-    rows_written = 0
-    last_id = ""
-    while True:
-        n_batch, wrote, last_id = mnt.backfill_source_index_batch(
-            notebook_id, last_id, _KOS_BACKFILL_BATCH_SIZE)
-        if n_batch == 0:
-            break
-        rows_written += wrote
-        processed += n_batch
-        print(f"  [source-index] {notebook_id}: {processed}/{total}", flush=True)
-        if n_batch < _KOS_BACKFILL_BATCH_SIZE:
-            break
-    mnt.mark_source_index_backfilled(notebook_id)
-    return {"notebook_id": notebook_id, "objects": processed, "rows": rows_written}
+    if resumed:
+        print(
+            f"  [source-index] {notebook_id}: 从 {progress['objects_scanned']}/{total} 续跑",
+            flush=True,
+        )
+    try:
+        while progress["status"] != "complete":
+            progress = mnt.resume_source_index_backfill_batch(
+                notebook_id, batch_size=_KOS_BACKFILL_BATCH_SIZE
+            )
+            if progress["status"] == "failed":
+                raise RuntimeError(
+                    str(
+                        progress.get("failure_code")
+                        or "source_index_backfill_failed"
+                    )
+                )
+            print(
+                f"  [source-index] {notebook_id}: {progress['objects_scanned']}/{total}",
+                flush=True,
+            )
+    except Exception as exc:
+        code = str(exc)
+        if code not in {"kg_generation_changed", "source_index_backfill_failed"}:
+            code = "source_index_backfill_failed"
+        mnt.mark_source_index_backfill_failed(notebook_id, code)
+        raise
+    return {
+        "notebook_id": notebook_id,
+        "objects": int(progress["objects_scanned"]),
+        "rows": int(progress["rows_written"]),
+        "resumed": resumed,
+        "already_complete": False,
+    }
 
 
-def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional[str],
-                              all_notebooks: bool = False) -> dict[str, object]:
+def run_backfill_source_index(
+    repo: BatchIngestRepository,
+    notebook_id: Optional[str],
+    all_notebooks: bool = False,
+    *,
+    force: bool = False,
+) -> dict[str, object]:
     """Proactive backfill CLI (P0-4 fast-follow): populate knowledge_object_sources
     ahead of the first source delete/reparse, so that operation is never the one
-    paying the legacy full-evidence-scan cost online. Purely additive/idempotent —
-    safe to re-run (each notebook's rows are cleared and rebuilt from the current
-    knowledge_objects.evidence, then re-marked backfilled)."""
+    paying the legacy full-evidence-scan cost online. Completed notebooks are
+    skipped; interrupted notebooks resume their last committed cursor."""
     if not notebook_id and not all_notebooks:
         raise ValueError("run_backfill_source_index: 需要 notebook_id 或 all_notebooks=True")
     if all_notebooks:
@@ -1241,7 +1271,10 @@ def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional
         targets = [notebook_id]
     print(f"backfill-source-index: scope={'全部 notebook (' + str(len(targets)) + ')' if all_notebooks else notebook_id}",
           flush=True)
-    results = [_backfill_source_index_for_notebook(repo, nb_id) for nb_id in targets]
+    results = [
+        _backfill_source_index_for_notebook(repo, nb_id, force=force)
+        for nb_id in targets
+    ]
     total_objects = sum(r["objects"] for r in results)
     total_rows = sum(r["rows"] for r in results)
     print(f"backfill-source-index done: notebooks={len(results)} objects={total_objects} rows={total_rows}",
@@ -1463,6 +1496,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "(默认拒绝,防静默产出无向量库)")
     p.add_argument("--force", action="store_true",
                    help="metadata phase: 已有元数据行的源也重抽；"
+                        "backfill-source-index phase: 强制重建来源反查索引；"
                         "backfill-source-facts phase: 删除该代次的旧回填投影并从头重建")
     p.add_argument("--pool-report-interval", type=int, default=15,
                    help="每 N 秒自报 producer/source 业务线程池占用;0 关闭。"
@@ -1505,6 +1539,7 @@ def _dispatch_main(
             repo,
             args.notebook_id,
             all_notebooks=args.all_notebooks,
+            force=args.force,
         )
         print(
             f"backfill-source-index done: {r} "

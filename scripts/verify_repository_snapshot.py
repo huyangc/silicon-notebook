@@ -2667,6 +2667,45 @@ MIGRATION_MANIFEST[(40, 41)] = {
     "views": {},
 }
 
+SOURCE_INDEX_BACKFILL_TABLES = {
+    "source_index_backfills":
+        "CREATE TABLE source_index_backfills (\n"
+        "                  notebook_id TEXT NOT NULL PRIMARY KEY\n"
+        "                    REFERENCES notebooks(id) ON DELETE CASCADE,\n"
+        "                  kg_mutation_seq INTEGER NOT NULL DEFAULT 0,\n"
+        "                  status TEXT NOT NULL DEFAULT 'running'\n"
+        "                    CHECK(status IN ('running','complete','failed')),\n"
+        "                  after_object_id TEXT NOT NULL DEFAULT '',\n"
+        "                  total_objects INTEGER NOT NULL DEFAULT 0,\n"
+        "                  objects_scanned INTEGER NOT NULL DEFAULT 0,\n"
+        "                  rows_written INTEGER NOT NULL DEFAULT 0,\n"
+        "                  failure_code TEXT NOT NULL DEFAULT '',\n"
+        "                  created_at TEXT NOT NULL,\n"
+        "                  updated_at TEXT NOT NULL,\n"
+        "                  completed_at TEXT NOT NULL DEFAULT ''\n"
+        "                )",
+}
+SOURCE_INDEX_BACKFILL_INDEXES = {
+    "idx_source_index_backfills_status":
+        "CREATE INDEX idx_source_index_backfills_status\n"
+        "                  ON source_index_backfills(status, notebook_id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 42, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SOURCE_INDEX_BACKFILL_TABLES},
+        "indexes": {**manifest["indexes"], **SOURCE_INDEX_BACKFILL_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(41, 42)] = {
+    "tables": SOURCE_INDEX_BACKFILL_TABLES,
+    "columns": {},
+    "indexes": SOURCE_INDEX_BACKFILL_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

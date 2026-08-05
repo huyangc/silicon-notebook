@@ -17,8 +17,8 @@ This document preserves the contributor-facing architecture summary, verificatio
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 41. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v41 and remains readable. Those migrations
+The current schema version is 42. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v42 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -103,6 +103,16 @@ Deep notebook copies remap facts, bindings, and terminal ledgers through one
 source-generation map and synthesize a copy-local completed KG run. The copy
 can therefore be audited or force-repaired without retaining the original
 notebook's operational extraction history.
+SQLite v42 adds `source_index_backfills`, the notebook-level execution ledger
+for rebuilding `knowledge_object_sources`. Each bounded keyset page writes its
+index rows and advances the cursor/counters in the same short transaction, so
+a process restart resumes the last committed page instead of clearing the
+notebook and starting again. The row is pinned to `kg_mutation_seq`; drift
+records the stable `kg_generation_changed` code and leaves the fast-path marker
+false, while the next invocation resets against the new generation. A current
+completed marker is normalized into a completed ledger without rewriting index
+rows. The ledger stores no evidence text or raw exception. PostgreSQL migration
+v20 is the paired schema.
 This remains a write-only preparation step; online Ask behavior is unchanged.
 
 Run it only while application/background writers are stopped:
@@ -121,12 +131,12 @@ is `--database-url`, and both audit paths are transaction/read-only. The audit
 exits nonzero while any visible source is missing, running, failed,
 incomplete, or fails an integrity reconciliation.
 
-PostgreSQL migration v19 is the paired
+PostgreSQL migration v20 is the paired
 business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
 schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 69-table epoch-1 manifest. It also includes
+logical-key guards across the exact 70-table epoch-1 manifest. It also includes
 run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
 batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
@@ -167,10 +177,10 @@ bundle may exceed the byte cap, and a same-key replacement that grows past the
 cap rolls back and defers when another actual bundle is already accepted. FK
 parents come only from the verified current source snapshot through a
 64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v19 graph has a branch-counted bound of exactly 9 row slots and no
+the fixed v20 graph has a branch-counted bound of exactly 9 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG19 catalog plans cover all
-93 unique surfaces using NULL; deterministic candidates scoped by indexable
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG20 catalog plans cover all
+94 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
 indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first

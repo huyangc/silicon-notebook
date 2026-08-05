@@ -117,7 +117,7 @@ The default-built large-source graph companion uses source-first bounded reads. 
 
 Selected-source graph activation is also protected by an offline paired quality gate. It compares baseline and shadow runs under the same frozen model, sampling, corpus, and source bindings; hard isolation or baseline-preservation failures, per-case quality regressions, and cost overruns produce a rejected content-free attestation. Ask and Deep Report share this activation seam: the default invisible `shadow` returns the historical baseline and is observable only through content-free internal events; an attested active rollout may only append source-local graph evidence after that baseline.
 
-Deleting a source immediately shows a deleting state, blocks duplicate clicks, and suppresses stale list responses. The backend locks the source before projection cleanup, uses the source reverse index when available, caps affected-object delete statements at 500 ids, and removes referenced image assets in one database round trip. Historical notebooks do not trigger a whole-notebook reverse-index rebuild inside the request; their keyset-paged database-native fallback may still scan legacy KG rows, so operators should prebuild or repair the index offline with `backfill-source-index` for large libraries.
+Deleting a source immediately shows a deleting state, blocks duplicate clicks, and suppresses stale list responses. The backend locks the source before projection cleanup, uses the source reverse index when available, caps affected-object delete statements at 500 ids, and removes referenced image assets in one database round trip. Historical notebooks do not trigger a whole-notebook reverse-index rebuild inside the request; their keyset-paged database-native fallback may still scan legacy KG rows, so operators should prebuild or repair the index offline with `backfill-source-index` for large libraries. That offline rebuild now persists a notebook-level cursor and counters: every bounded page commits atomically, restarts resume the last committed page, and a KG-generation change fails closed before a fresh rebuild.
 
 Detailed product behavior, retrieval semantics, MCP tools, and endpoint paths are documented in [Product and API reference](./docs/product-and-api.md).
 
@@ -156,7 +156,7 @@ alone starts nothing and never changes the active backend. Changing `DATABASE_UR
 
 While `DATABASE_URL` remains SQLite, the operator can run a guarded, one-way
 SQLite→PostgreSQL shadow: preflight binds and confirms both database identities, `start-forward`
-installs run-scoped capture/guards and copies a consistent 69-table baseline, and one supervised
+installs run-scoped capture/guards and copies a consistent 70-table baseline, and one supervised
 foreground worker continuously applies the retained SQLite change log. `status` exposes redacted
 lag/lease/poison state and `verify --level full` performs a barrier-aware consistency check. The
 worker uses an exclusive database-clock lease, retries transient PostgreSQL failures, stops on a

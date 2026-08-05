@@ -308,7 +308,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 19
+    assert migrator.migrate() == 20
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -329,7 +329,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "uq_clusters_notebook_type_member" in final_indexes
     assert "idx_source_elements_source_type" in final_indexes
     assert ledger_versions == [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
     ]
 
 
@@ -372,7 +372,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 19
+    assert migrator.migrate() == 20
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

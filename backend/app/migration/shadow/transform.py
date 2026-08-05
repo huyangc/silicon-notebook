@@ -24,6 +24,7 @@ _EMPTY_TIME_SENTINELS = frozenset(
         "knowledge_objects.last_reviewed",
         "merge_review_jobs.started_at",
         "merge_review_jobs.updated_at",
+        "source_index_backfills.completed_at",
         "unified_kg_state.last_rebuild_at",
     }
 )

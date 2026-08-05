@@ -137,6 +137,70 @@ def test_source_index_backfill_is_bounded_restartable_and_marks_only_at_end(
 
 
 @pytest.mark.postgres_integration
+def test_source_index_backfill_durable_cursor_resumes_and_guards_generation(
+    postgres_repository,
+):
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="durable source index")
+    ).id
+    _seed_source_and_objects(postgres_repository, notebook_id)
+    maintenance = postgres_repository.maintenance
+
+    started = maintenance.begin_source_index_backfill(notebook_id, force=True)
+    assert started["status"] == "running"
+    first = maintenance.resume_source_index_backfill_batch(notebook_id, batch_size=1)
+    assert first["objects_scanned"] == 1
+    assert first["status"] == "running"
+
+    resumed = maintenance.begin_source_index_backfill(notebook_id)
+    assert resumed["resumed"] is True
+    assert resumed["objects_scanned"] == 1
+    with postgres_repository._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_object_sources WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()["c"] == 1
+
+    with postgres_repository._runtime.database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET kg_mutation_seq=kg_mutation_seq+1,"
+            "source_index_backfilled=0 WHERE notebook_id=%s",
+            (notebook_id,),
+        )
+    failed = maintenance.resume_source_index_backfill_batch(notebook_id, batch_size=1)
+    assert failed["status"] == "failed"
+    assert failed["failure_code"] == "kg_generation_changed"
+
+    restarted = maintenance.begin_source_index_backfill(notebook_id)
+    assert restarted["status"] == "running"
+    assert restarted["objects_scanned"] == 0
+    assert restarted["resumed"] is False
+    page = maintenance.resume_source_index_backfill_batch(notebook_id, batch_size=1)
+    assert page["status"] == "running"
+    complete = maintenance.resume_source_index_backfill_batch(
+        notebook_id, batch_size=1
+    )
+    assert complete["status"] == "complete"
+    assert complete["objects_scanned"] == 2
+    with postgres_repository._runtime.database.connect() as db:
+        terminal = db.execute(
+            "SELECT status,completed_at FROM source_index_backfills "
+            "WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()
+        assert terminal["status"] == "complete"
+        assert terminal["completed_at"] is not None
+        assert db.execute(
+            "SELECT source_index_backfilled AS done FROM unified_kg_state "
+            "WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()["done"] == 1
+    skipped = maintenance.begin_source_index_backfill(notebook_id)
+    assert skipped["already_complete"] is True
+    assert skipped["objects_scanned"] == 2
+
+
+@pytest.mark.postgres_integration
 def test_source_fact_backfill_is_restartable_and_jsonb_safe(postgres_repository):
     notebook_id = postgres_repository.create_notebook(
         NotebookCreate(name="source facts")

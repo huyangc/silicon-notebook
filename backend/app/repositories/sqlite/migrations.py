@@ -26,7 +26,10 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # on source_elements for bounded, per-type collection enumeration.
 # v39 adds the command-catalog extraction job row (with its per-source
 # single-flight partial unique index) and its reviewable candidate rows.
-SCHEMA_VERSION = 41
+# v42 adds notebook-scoped durable progress for the source reverse-index
+# rebuild so a stopped deployment can resume after process loss without
+# clearing and rescanning already committed pages.
+SCHEMA_VERSION = 42
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2133,6 +2136,31 @@ class SqliteMigrator:
                     source_id, source_generation, projection_origin,
                     global_object_id
                   );
+                """
+            )
+
+    def _migration_42(self) -> None:
+        """Persist restartable source reverse-index rebuild progress."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS source_index_backfills (
+                  notebook_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  kg_mutation_seq INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL DEFAULT 'running'
+                    CHECK(status IN ('running','complete','failed')),
+                  after_object_id TEXT NOT NULL DEFAULT '',
+                  total_objects INTEGER NOT NULL DEFAULT 0,
+                  objects_scanned INTEGER NOT NULL DEFAULT 0,
+                  rows_written INTEGER NOT NULL DEFAULT 0,
+                  failure_code TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  completed_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_source_index_backfills_status
+                  ON source_index_backfills(status, notebook_id);
                 """
             )
 
