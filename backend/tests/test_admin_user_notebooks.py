@@ -123,9 +123,31 @@ def _auth_admin(client):
     return {"Authorization": f"Bearer {t}"}
 
 
-def test_user_notebooks_forbidden_for_regular(client):
-    b = _auth(client, "z00123456")
-    assert client.get("/api/admin/users/whoever/notebooks", headers=b).status_code == 403
+def test_user_notebooks_forbidden_for_other_regular_user(client):
+    """self-or-admin(P1-2,codex 评审第 1 轮):放宽后「读别人的」必须依旧拒绝。
+
+    此前这里断言的是 ``/admin/users/whoever/notebooks``(一个压根不存在的
+    user_id)返回 403——放宽成 self-or-admin 之后那条断言仍然为真,但不再是
+    真正要守的那条线:它测不出「a 能不能读到 b 的笔记本」。改成两个真实注册用户,
+    a 尝试读 b 的笔记本,才是本次改动唯一要挡住的路径。
+    """
+    a = _auth(client, "z00123456")
+    b = _auth(client, "z00654321")
+    uid_b = client.get("/api/me", headers=b).json()["id"]
+    assert client.get(f"/api/admin/users/{uid_b}/notebooks", headers=a).status_code == 403
+
+
+def test_user_notebooks_allowed_for_self(client):
+    """P1-2:普通用户读**自己的** user_id 必须 200——这是 P1-2 要修的那个 bug
+    本身(活动视图左栏复用这个端点展开自己的笔记本清单,此前「仅 admin」会让
+    普通用户看自己的活动时被 403 换成一整块权限错误页)。"""
+    a = _auth(client, "z00123456")
+    uid_a = client.get("/api/me", headers=a).json()["id"]
+    client.post("/api/notebooks", json={"name": "NB-Self"}, headers=a)
+    resp = client.get(f"/api/admin/users/{uid_a}/notebooks", headers=a)
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert any(r["name"] == "NB-Self" for r in rows)
 
 
 def test_user_notebooks_lists_for_admin(client):

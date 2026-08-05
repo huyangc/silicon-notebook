@@ -401,7 +401,12 @@ test("用户身份未就绪时渲染加载态，而不是「没有活动记录�
 
 // F5 的另一半:fetchMe 失败必须可见。此前它被 `.catch(() => undefined)` 整个吞掉,
 // 活动视图会**永远**声称这位用户没有任何活动,界面上不给任何提示。
-test("取不到当前用户时把错误上屏，不假装这位用户没有活动", () => {
+//
+// 「身份出错」是第三态,不是「确定了、就是空」:错误横幅之外绝不能再同屏出现
+// 「这位用户还没有建过笔记本」「这个范围里没有活动记录」——那会把「未知」说成
+// 「确定为空」(P2,codex 评审第 1 轮)。userId="" 时这两个组件各自的取数都提前
+// 返回,不加 identityErrored 就会落进它们各自的空结果分支。
+test("取不到当前用户时把错误上屏，不假装这位用户没有活动/没有笔记本", () => {
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
   mocks.fetchUserActivity.mockResolvedValue(page([]));
   render(
@@ -414,6 +419,8 @@ test("取不到当前用户时把错误上屏，不假装这位用户没有活�
   );
 
   expect(screen.getByText("当前用户信息加载失败，请刷新页面重试")).toBeInTheDocument();
+  expect(screen.queryByText("这位用户还没有建过笔记本")).not.toBeInTheDocument();
+  expect(screen.queryByText("这个范围里没有活动记录")).not.toBeInTheDocument();
 });
 
 

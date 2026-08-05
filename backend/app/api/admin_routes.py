@@ -252,9 +252,11 @@ def update_admin_user_upload_limit(
 
 @router.get("/admin/users/{user_id}/notebooks", response_model=List[AdminUserNotebook])
 def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_current_user)) -> List[AdminUserNotebook]:
-    """某用户名下笔记本详情。仅 admin。"""
-    if user.role != "admin":
-        raise user_error(403, "仅管理员可查看用户笔记本")
+    """某用户名下笔记本详情。自己或 admin 可查——该端点只返回
+    `notebooks WHERE created_by = user_id`,`user_id` 等于调用者自己时读的
+    就是自己的笔记本,本来就该放行；活动视图左栏正是复用它展开自己的
+    笔记本清单,「仅 admin」是历史遗留(该端点最初只服务 admin 总览页)。"""
+    _require_self_or_admin(user, user_id)
     return [
         AdminUserNotebook(**row)
         for row in admin_query_repository().list_user_notebooks(user_id)
@@ -270,26 +272,26 @@ def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_curr
 
 
 def _require_activity_enabled() -> None:
-    """活动视图与「模型调用」视图共用同一个部署开关(`DEBUG_LOGS_ENABLED`)。
+    """活动视图有自己独立的部署开关 `USER_ACTIVITY_VIEW_ENABLED`(默认开),
+    与管 `/api/debug/logs/...`(JSONL 日志文件读取)的 `DEBUG_LOGS_ENABLED`
+    是两件互不相关的事,不能共用一个判据。
 
-    不是照抄邻居的形式主义,而是补一个真实的暴露面缺口。设计稿 §5 的隐私论证
-    是「admin 今天已经能读别人的 llm.jsonl(里面就是完整 prompt 与答案原文),
-    所以活动流没有扩大暴露面」——那句话**只在开关打开时成立**。开关默认为
-    False,此时 /api/debug/logs/* 全部 404,而这三个端点若不设门,就成了一条
-    绕过该开关、把任意用户的提问原文与答案正文交给任何 admin 的新路径,
-    暴露面比论证的更宽。
-
-    两个视图同页(`/dev/logs`)且共享同一条范围条,用同一个开关也让「整页是否
-    可用」保持一个判据,不会出现半页 404 半页正常的割裂状态。
+    这三个端点管的是「活动视图能不能读到别人的提问原文与答案正文」——
+    `/dev/logs` 的「活动」是**默认** tab,若门控用默认关闭的
+    `DEBUG_LOGS_ENABLED`,普通部署一打开页面就 404,新特性等于不可用。
+    因此这里改用默认开启的独立开关;关闭的口子留给介意跨用户内容可见性
+    (自己或 admin 能读到别人的提问/答案原文)的部署。
     """
-    if not getattr(get_settings(), "debug_logs_enabled", False):
-        raise HTTPException(status_code=404, detail="debug logs disabled")
+    if not getattr(get_settings(), "user_activity_view_enabled", True):
+        raise HTTPException(status_code=404, detail="user activity view disabled")
 
 
 def _require_self_or_admin(user: UserProfile, user_id: str) -> None:
+    """自己或 admin 可查。现由 list_admin_user_notebooks 与三个活动端点共用,
+    文案因此保持通用而非只提「活动记录」。"""
     if user.id == user_id or user.role == "admin":
         return
-    raise user_error(403, "无权查看其他用户的活动记录")
+    raise user_error(403, "无权查看该用户的信息")
 
 
 def _activity_source_item(row: dict) -> ActivitySource:

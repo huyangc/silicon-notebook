@@ -9837,7 +9837,7 @@
       },
       "/api/admin/users/{user_id}/notebooks": {
         "get": {
-          "description": "某用户名下笔记本详情。仅 admin。",
+          "description": "某用户名下笔记本详情。自己或 admin 可查——该端点只返回\n`notebooks WHERE created_by = user_id`,`user_id` 等于调用者自己时读的\n就是自己的笔记本,本来就该放行；活动视图左栏正是复用它展开自己的\n笔记本清单,「仅 admin」是历史遗留(该端点最初只服务 admin 总览页)。",
           "operationId": "list_admin_user_notebooks_api_admin_users__user_id__notebooks_get",
           "parameters": [
             {

@@ -17,14 +17,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-def _make_client(tmp_path, monkeypatch, *, debug_logs: bool = True):
+def _make_client(tmp_path, monkeypatch, *, activity_view_enabled: bool | None = None):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
     monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
-    # 活动视图与「模型调用」视图共用这一个部署开关(见 admin_routes.
-    # _require_activity_enabled 的 docstring)。默认关闭,所以取数用例必须显式打开
-    # ——这不是夹具样板,而是让「关掉时到底还能不能读到别人的问答」成为一条可断言
-    # 的事实(见 test_activity_endpoints_404_when_debug_logs_disabled)。
-    monkeypatch.setenv("DEBUG_LOGS_ENABLED", "1" if debug_logs else "0")
+    # 活动视图有自己独立的部署开关 USER_ACTIVITY_VIEW_ENABLED(默认 true,见
+    # admin_routes._require_activity_enabled 的 docstring),与 DEBUG_LOGS_ENABLED
+    # 无关。绝大多数用例**刻意不显式设它**,让「不设置时这三个端点是否真的可用」
+    # 成为这些用例本身钉住的事实——变异验证:把 config.py 里的默认值改成 False,
+    # 这批用例会跟着报红,而不是只有下面显式关闭那一条。只有需要断言关闭态时才
+    # 传 activity_view_enabled=False(见 test_activity_endpoints_404_when_disabled)。
+    if activity_view_enabled is not None:
+        monkeypatch.setenv(
+            "USER_ACTIVITY_VIEW_ENABLED", "1" if activity_view_enabled else "0"
+        )
     from app.core.config import get_settings
     get_settings.cache_clear()
     from app.api import deps
@@ -468,13 +473,14 @@ def test_ask_detail_unknown_job_404(client):
 
 # --- 部署开关 -------------------------------------------------------------
 
-def test_activity_endpoints_404_when_debug_logs_disabled(tmp_path, monkeypatch):
-    """`DEBUG_LOGS_ENABLED=0` 时三个端点一律 404,和「模型调用」视图同一个判据。
+def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatch):
+    """`USER_ACTIVITY_VIEW_ENABLED=0` 时三个端点一律 404。
 
-    这条守的是设计稿 §5 隐私论证的**前提**。那句论证是「admin 今天已经能读别人的
-    llm.jsonl(里面就是完整 prompt 与答案原文),所以活动流没有扩大暴露面」——它只
-    在开关打开时成立。开关默认关闭,若这三个端点不设门,就多出一条绕过该开关、把
-    任意用户的提问原文与答案正文交给任何 admin 的路径,暴露面比论证的更宽。
+    该开关默认 **true**(活动是 `/dev/logs` 默认 tab,沿用默认关闭的
+    `DEBUG_LOGS_ENABLED` 会让普通部署一打开页面就 404),与 `DEBUG_LOGS_ENABLED`
+    相互独立——本用例显式关掉它来断言「关闭态」这一侧;「默认就该可用」这一侧由
+    本文件其余不显式设这个环境变量的用例统一钉住(见 `_make_client` 的注释与
+    子代理报告里的变异验证)。
 
     用 admin 身份查**自己**、且三个目标(笔记本、job)都**真实存在**,把「无权」和
     「找不到」两条路一起排除:唯一能让它 404 的只有开关。
@@ -483,7 +489,7 @@ def test_activity_endpoints_404_when_debug_logs_disabled(tmp_path, monkeypatch):
     因为「job 不存在」照样 404,断言就变成因错误的原因通过(变异验证实测:摘掉 asks
     那道门,用假 id 的版本仍然全绿)。
     """
-    client = _make_client(tmp_path, monkeypatch, debug_logs=False)
+    client = _make_client(tmp_path, monkeypatch, activity_view_enabled=False)
     admin = _auth_admin(client)
     uid = _me(client, admin)
     nb_id = _create_notebook(client, admin, "NB-gated")

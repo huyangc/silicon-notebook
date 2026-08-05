@@ -24,6 +24,7 @@ export function ActivityScopePanel({
   notebooks,
   loading,
   failure,
+  identityErrored,
   onRetryNotebooks,
   notebookId,
   onSelectNotebook,
@@ -39,6 +40,10 @@ export function ActivityScopePanel({
    *  必须分开渲染：一次 500 之后说「这位用户还没有建过笔记本」是一句假陈述，而
    *  它偏偏是管理员据以下结论的那一句。 */
   failure: string;
+  /** 用户身份本身取不到（fetchMe 失败，`userId` 因此解析不出）——与「加载中」
+   *  「确定了、就是空」都不同的第三态：既不能说没有笔记本，也不算失败态自己的
+   *  独立错误横幅（错误已经在页面顶部显示），单纯不下这个「空」的结论。 */
+  identityErrored?: boolean;
   onRetryNotebooks: () => void;
   notebookId: string;
   onSelectNotebook: (id: string) => void;
@@ -71,7 +76,7 @@ export function ActivityScopePanel({
             </button>
           </div>
         ) : null}
-        {!loading && !failure && notebooks.length === 0 ? (
+        {!loading && !failure && !identityErrored && notebooks.length === 0 ? (
           <div className="empty">这位用户还没有建过笔记本</div>
         ) : null}
         {notebooks.map((notebook) => {

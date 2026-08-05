@@ -343,6 +343,11 @@ export function ActivityView({
   // 身份未确定 = 加载态，绝不是「这位用户没有活动」。两栏都要跟着，否则左栏会先
   // 闪一句「这位用户还没有建过笔记本」。
   const pending = Boolean(userPending);
+  // 身份出错(fetchMe 失败)是第三态：既不是「加载中」也不是「确定了、就是空」。
+  // userId 此时必为空串（page.tsx 的 activityUserError 只在 activityUserId 为空
+  // 时才置值），左右两栏因此都在「无 userId」分支提前返回空结果——不加这个标志，
+  // 就会把「未知」渲染成「确定为空」，与顶部错误横幅同屏、自相矛盾。
+  const identityErrored = Boolean(userError);
 
   return (
     <>
@@ -352,6 +357,7 @@ export function ActivityView({
         <ActivityScopePanel
           expanded={expanded}
           failure={notebooksFailure}
+          identityErrored={identityErrored}
           loading={pending || notebooksLoading}
           notebookId={notebookId}
           notebooks={notebooks}
@@ -364,6 +370,7 @@ export function ActivityView({
         />
         <ActivityStream
           hasMore={hasMore}
+          identityErrored={identityErrored}
           items={items}
           loading={pending || loading}
           now={now}
