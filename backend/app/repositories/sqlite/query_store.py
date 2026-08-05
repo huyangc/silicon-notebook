@@ -8,6 +8,7 @@ from typing import Any
 from app.core.config import Settings, get_settings
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
+    SEARCH_HIT_CAP,
     NotebookSearchResponse,
     SearchHit,
 )
@@ -1057,7 +1058,7 @@ class QueryStore:
             if not needle:
                 return NotebookSearchResponse(query=query, hits=[])
             like = f"%{needle}%"
-            cap = 20
+            cap = SEARCH_HIT_CAP
             hits: list[SearchHit] = []
             for scope, value in (
                 ("Notebook", notebook["name"]),
@@ -1087,7 +1088,7 @@ class QueryStore:
                 "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(file_name) LIKE ?) "
                 "ORDER BY created_at ASC LIMIT ?",
                 (notebook_id, like, like, like, cap),
-            ).fetchall()
+            ).fetchall() if len(hits) < cap else ()
             for row in source_rows:
                 label = row["title"] or row["file_name"]
                 body = row["summary"] or row["file_name"] or row["title"]
@@ -1113,7 +1114,7 @@ class QueryStore:
                 "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?) "
                 "LIMIT ?",
                 (notebook_id, like, like, like, cap),
-            ).fetchall()
+            ).fetchall() if len(hits) < cap else ()
             for row in element_rows:
                 label = f"{row['source_title']} · {row['location_label']}"
                 hits.append(
@@ -1130,7 +1131,7 @@ class QueryStore:
                 "SELECT id, object_type, payload FROM knowledge_objects "
                 "WHERE notebook_id = ? AND status != 'deprecated' AND LOWER(payload) LIKE ? LIMIT ?",
                 (notebook_id, like, cap),
-            ).fetchall()
+            ).fetchall() if len(hits) < cap else ()
             for row in knowledge_rows:
                 payload = json.loads(row["payload"] or "{}")
                 label = OBJECT_TYPE_LABELS.get(row["object_type"], row["object_type"])
@@ -1148,7 +1149,7 @@ class QueryStore:
                         element_id="",
                     )
                 )
-        return NotebookSearchResponse(query=query, hits=hits[:20])
+        return NotebookSearchResponse(query=query, hits=hits[:SEARCH_HIT_CAP])
 
     def load_notebook_scale_facts(
         self, notebook_id: str

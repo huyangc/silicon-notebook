@@ -283,11 +283,16 @@ class KnowledgeStore:
     def sources_with_elements(db: sqlite3.Connection, notebook_id: str) -> set:
         """该 notebook 下已产出 source_elements(已成功 parse)的 source_id 集合。
         build_notebook_kg 用它把无 elements 的源(parse 未落地)排除出抽取 targets——
-        否则接地校验(build_records)没有 element 可绑,抽出的节点被整源丢弃、objects=0。"""
+        否则接地校验(build_records)没有 element 可绑,抽出的节点被整源丢弃、objects=0。
+
+        问的是「哪些来源有元素」,答案的规模是来源数;所以从 sources 驱动、每个来源
+        用 EXISTS 探一次索引即可,那次探测命中第一行就停。等价的 DISTINCT-over-JOIN
+        写法要先把该 notebook 的**每一行元素**都取出来再去重,代价随元素数增长——
+        千万级元素的库为了得到几千个 id 扫全部元素行。集合本身逐字相同。"""
         return {
             row["source_id"] for row in db.execute(
-                "SELECT DISTINCT e.source_id FROM source_elements e "
-                "JOIN sources s ON s.id = e.source_id WHERE s.notebook_id = ?",
+                "SELECT s.id AS source_id FROM sources s WHERE s.notebook_id = ? "
+                "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)",
                 (notebook_id,),
             ).fetchall()
         }

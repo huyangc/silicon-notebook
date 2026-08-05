@@ -25,11 +25,50 @@ import type {
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
-export const searchNotebook = (id: string, query: string) =>
+// The collection search box answers "which notebook contains X", so it calls
+// `searchNotebook` once per visible notebook — and one of those may be a
+// reference library with millions of knowledge objects.  Firing the whole fan-out
+// at once put every one of those queries in the connection pool simultaneously;
+// callers must bound their concurrency by this, and pass a signal so a superseded
+// keystroke's requests are actually abandoned rather than merely ignored.
+export const SEARCH_FANOUT_LIMIT = 4;
+
+export const searchNotebook = (id: string, query: string, signal?: AbortSignal) =>
   requestJson<{ hits: SearchHit[] }>(
     `/notebooks/${id}/search?q=${encodeURIComponent(query)}`,
-    options,
+    { ...options, signal },
   );
+
+/** Search every notebook for `query`, at most `SEARCH_FANOUT_LIMIT` at a time.
+ *
+ * The bound is the whole point: a worker pool draining a shared cursor, rather
+ * than `notebooks.map(...)`, which handed the connection pool one query per
+ * notebook at once.  `signal` reaches every call so aborting the fan-out stops
+ * the requests instead of merely discarding their answers.
+ *
+ * `search` is injected so the concurrency bound is testable without a network.
+ */
+export async function searchNotebooksBounded(
+  notebookIds: readonly string[],
+  query: string,
+  signal?: AbortSignal,
+  search: (
+    id: string, query: string, signal?: AbortSignal,
+  ) => Promise<{ hits: SearchHit[] }> = searchNotebook,
+): Promise<Record<string, SearchHit[]>> {
+  const hits: Record<string, SearchHit[]> = {};
+  let cursor = 0;
+  const drain = async () => {
+    while (cursor < notebookIds.length) {
+      const id = notebookIds[cursor++];
+      hits[id] = (await search(id, query, signal)).hits;
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SEARCH_FANOUT_LIMIT, notebookIds.length) }, drain),
+  );
+  return hits;
+}
 
 export const previewAskIntent = (
   notebookId: string,

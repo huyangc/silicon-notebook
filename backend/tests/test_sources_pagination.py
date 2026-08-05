@@ -1,5 +1,7 @@
 import pytest
 from app.core.config import Settings
+from app.models.ask import SEARCH_HIT_CAP
+from app.services.extraction_profiles import OBJECT_TYPE_LABELS
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.models.schemas import NotebookCreate
 
@@ -114,6 +116,95 @@ def test_search_notebook_sql_filtered(repo):
     resp_title = repo.search_notebook(nb.id, "bandgap")     # 命中 source title
     assert any(h.scope == "Source" for h in resp_title.hits)
     assert repo.search_notebook(nb.id, "").hits == []        # 空 query 短路
+
+
+def _search_tables_read(repo, action):
+    """`action()` 期间被读到的搜索腿表名集合。
+
+    SQLite 的线程本地连接会被复用,所以这里挂上的 trace 回调也覆盖服务内部自己
+    `connect()` 拿到的那条连接（与 test_collection_enumeration 的守卫同一手法）。
+    """
+    with repo._connect() as db:
+        statements: list[str] = []
+        db.set_trace_callback(statements.append)
+        try:
+            action()
+        finally:
+            db.set_trace_callback(None)
+    return {
+        table
+        for table in ("sources", "source_elements", "knowledge_objects")
+        if any(f"FROM {table}" in item for item in statements)
+    }
+
+
+def _seed_search_legs(repo, nb_id, source_count):
+    """`source_count` 个标题含 needle 的来源,外加同样命中的元素与知识对象各一。"""
+    now = _now()
+    with repo._write() as db:
+        for index in range(source_count):
+            src = f"src-leg-{index:03d}"
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (src, nb_id, f"needle source {index:03d}", "document", f"leg{index}.md",
+                 f"/tmp/leg{index}.md", 0, f"legh{index}", "", "", "extracted", now, now))
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+                "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (f"el-leg-{index:03d}", src, "paragraph", "p1", "needle element", "{}", now))
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,payload,evidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("ko-leg", nb_id, "concept", '{"name":"needle concept"}', "[]", now, now))
+
+
+def test_search_notebook_skips_later_legs_once_the_cap_is_full(repo):
+    """来源腿就填满 cap → 元素腿与知识对象腿一条查询都不发。
+
+    这两条腿打的是该 notebook 的 `source_elements` 与 `knowledge_objects`（生产上
+    的千万行表，且 `payload::text` / `se.text` 上都没有可用索引），而它们产出的
+    hit 全部落在 `hits[:SEARCH_HIT_CAP]` 之后、会被整段丢掉。所以跳过是逐字等价
+    的，不是近似——下面同时断言返回值本身没变。
+    """
+    nb = repo.create_notebook(NotebookCreate(name="collection"))
+    _seed_search_legs(repo, nb.id, SEARCH_HIT_CAP)
+
+    hits: list = []
+    tables = _search_tables_read(
+        repo, lambda: hits.extend(repo.search_notebook(nb.id, "needle").hits)
+    )
+
+    assert len(hits) == SEARCH_HIT_CAP
+    assert {hit.scope for hit in hits} == {"Source"}
+    assert "sources" in tables
+    assert "source_elements" not in tables
+    assert "knowledge_objects" not in tables
+
+
+def test_search_notebook_still_reads_later_legs_below_the_cap(repo):
+    """反向守卫：cap 没满时三条腿都要照常发。
+
+    没有这一半，把跳过条件写成恒真（或干脆删掉后面两条腿）也能让上面那个用例
+    通过，而元素/知识对象就再也搜不到了。
+    """
+    nb = repo.create_notebook(NotebookCreate(name="collection"))
+    _seed_search_legs(repo, nb.id, 1)
+
+    hits: list = []
+    tables = _search_tables_read(
+        repo, lambda: hits.extend(repo.search_notebook(nb.id, "needle").hits)
+    )
+
+    assert len(hits) < SEARCH_HIT_CAP
+    # 知识对象腿的 scope 是界面标签，读 OBJECT_TYPE_LABELS 而不是抄一份字面量：
+    # 那份对照表是前后端逐字一致的契约，测试里再拼一遍就会各自漂。
+    assert {hit.scope for hit in hits} == {
+        "Source", "Element", OBJECT_TYPE_LABELS["concept"],
+    }
+    assert tables == {"sources", "source_elements", "knowledge_objects"}
 
 
 def test_search_notebook_preserves_entity_order_and_filters_payload_keys(repo):

@@ -621,6 +621,19 @@ class NotebookSearchResponse(BaseModel):
     hits: List[SearchHit]
 
 
+# How many hits `GET /notebooks/{id}/search` returns, and — the same number, on
+# purpose — the per-leg SQL LIMIT each adapter uses.
+#
+# One definition rather than the two literals each adapter used to spell, because
+# the legs are ordered (Notebook/Domain → Source → Element → Knowledge) and the
+# response is truncated to this cap at the end.  That makes a leg whose turn comes
+# up with the cap already filled contribute nothing observable, so both adapters
+# skip its query outright.  The skip is only sound while the per-leg limit and the
+# response cap are the same value; splitting them back into separate literals
+# would let one drift and silently turn the skip into dropped hits.
+SEARCH_HIT_CAP = 20
+
+
 class KgSearchHit(BaseModel):
     object_id: str
     name: str

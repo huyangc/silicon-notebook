@@ -130,7 +130,7 @@ import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebook
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
-import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
+import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
@@ -1972,23 +1972,27 @@ export default function Home() {
       setSearchHits({});
       return;
     }
+    // 这个搜索框答的是「哪个笔记本里有 X」,所以对**每个**可见笔记本各发一次请求——
+    // 其中可能有百万级对象的参考库。旧写法一次性 map 出全部请求,并且只在前端用
+    // `cancelled` 忽略被取代那一轮的结果:请求本身还在服务端跑完、还占着连接池。
+    // 敲一个词就是 N × 击键次数 条查询在飞。两处界定:并发上限 + 真正 abort。
+    const controller = new AbortController();
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      Promise.all(
-        notebooks.map(async (notebook) => {
-          const response = await searchNotebook(notebook.id, searchQuery);
-          return [notebook.id, response.hits] as const;
-        })
+      searchNotebooksBounded(
+        notebooks.map((notebook) => notebook.id), searchQuery, controller.signal,
       )
-        .then((entries) => {
-          if (!cancelled) {
-            setSearchHits(Object.fromEntries(entries));
-          }
+        .then((hits) => {
+          if (!cancelled) setSearchHits(hits);
         })
-        .catch(reportError);
+        .catch((error) => {
+          // 中止是本组件自己发起的(输入又变了),不是故障——报出来只会是假告警。
+          if (!controller.signal.aborted) reportError(error);
+        });
     }, 250);
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearTimeout(timer);
     };
   }, [notebooks, searchQuery]);
