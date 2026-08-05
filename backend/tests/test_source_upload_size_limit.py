@@ -57,6 +57,7 @@ def test_authenticated_system_config_exposes_upload_guards(client):
     assert response.json() == {
         "source_upload_max_bytes": 1024 * 1024,
         "source_upload_max_files_per_batch": 20,
+        "user_activity_view_enabled": True,
     }
 
 

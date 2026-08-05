@@ -796,6 +796,30 @@ class RepositoryFacade:
     def list_user_notebooks(self, user_id: str) -> List[Dict[str, Any]]:
         return self._runtime.queries.list_user_notebooks(user_id)
 
+    def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool:
+        return self._runtime.queries.notebook_exists_for_owner(notebook_id, user_id)
+
+    def list_user_activity(
+        self,
+        user_id: str,
+        *,
+        notebook_id: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        before_ts: Optional[str] = None,
+        before_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        return self._runtime.queries.list_user_activity(
+            user_id,
+            notebook_id=notebook_id,
+            since=since,
+            until=until,
+            before_ts=before_ts,
+            before_id=before_id,
+            limit=limit,
+        )
+
     def load_notebook_scale_facts(self, notebook_id: str):
         return self._runtime.queries.load_notebook_scale_facts(notebook_id)
 
@@ -3347,6 +3371,11 @@ class RepositoryFacade:
 
     def ask_job_detail(self, job_id: str) -> dict:
         return self._runtime.ask_state.ask_job_detail(job_id)
+
+    def ask_answer_detail(self, answer_id: str) -> "dict | None":
+        """按 answer_id 直查单条答案(一条主键查询,不加载整个会话)。见
+        ``AskStateStore.ask_answer_detail`` docstring。"""
+        return self._runtime.ask_state.ask_answer_detail(answer_id)
 
     def _cleanup_empty_conversation(self, conversation_id: str) -> None:
         """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""

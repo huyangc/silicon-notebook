@@ -36,6 +36,10 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "the per-user limit catch reads only the forbidden control-flow sentinel",
   },
+  "dev/logs/activity/ActivityView.tsx|<module>.isForbidden|property|message": {
+    count: 1,
+    reason: "the activity view's shared predicate reads only the forbidden control-flow sentinel",
+  },
   "knowhow-cell-editor.tsx|<module>.KnowhowCellEditor|property|message": {
     count: 2,
     reason: "optimizer and reformatter error states are written through the humanization boundary",
@@ -70,6 +74,14 @@ const APPROVED_MESSAGE_READS = Object.freeze({
   },
 });
 const APPROVED_DIAGNOSTIC_READS = Object.freeze({
+  "dev/logs/activity/ActivityDetail.tsx|<module>.AskDetailPane|diagnostic|error": {
+    count: 1,
+    reason: "owner-only developer activity detail intentionally renders the raw ask failure",
+  },
+  // 来源解析诊断原文**不再**经过活动视图：那串异常可能带服务端绝对路径，而管理员
+  // 看的是别人的活动流（与 ScopedSourceDetail 同一条披露边界）。契约改成
+  // `parse_failed` 布尔之后，SourceDetailPane 与 toActivitySource 两条 error_message
+  // 读取一并消失，对应的豁免条目也随之删除——这份清单是精确计数的普查，留着会报红。
   "dev/logs/components/LogDetail.tsx|<module>.LogDetail|diagnostic|error": {
     count: 2,
     reason: "owner-only developer log detail intentionally renders raw records",

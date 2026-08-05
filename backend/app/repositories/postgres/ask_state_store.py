@@ -310,14 +310,41 @@ class AskStateStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "answer_id,error FROM ask_jobs WHERE id=%s", (job_id,)).fetchone()
+                "answer_id,error,asked_at FROM ask_jobs WHERE id=%s", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)
             trace = self.read_trace(db, job_id)
         return {"job_id": row["id"], "notebook_id": row["notebook_id"],
                 "conversation_id": row["conversation_id"], "created_by": row["created_by"],
                 "mode": row["mode"], "question": row["question"], "status": row["status"],
-                "trace": trace, "answer_id": row["answer_id"], "error": row["error"]}
+                "trace": trace, "answer_id": row["answer_id"], "error": row["error"],
+                "asked_at": row["asked_at"] or ""}
+
+    def ask_answer_detail(self, answer_id: str) -> "dict | None":
+        """按 answer_id 直查单条答案(一条主键查询,不加载会话其余轮次)。
+
+        取代旧路径「get_conversation(conversation_id) 再线性扫出匹配的
+        turn」——那条路径的读取量随会话历史线性增长。``answered_at`` 的回填
+        口径与 ``get_conversation`` 对单个 turn 的处理逐字一致：旧 payload
+        缺 ``answered_at`` 时从 ``answers.created_at``(权威写入瞬间)回填。
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT id, question, payload, created_at FROM answers WHERE id=%s",
+                (answer_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json_value(row["payload"], {})
+        payload["answered_at"] = str(
+            payload.get("answered_at") or iso_timestamp(row["created_at"])
+        )
+        return {
+            "answer_id": row["id"],
+            "question": row["question"],
+            "payload": payload,
+            "created_at": iso_timestamp(row["created_at"]),
+        }
 
     # ------------------------------------------------------------------
     # answers

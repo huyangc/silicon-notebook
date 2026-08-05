@@ -27,7 +27,7 @@ import { EffortPicker, type EffortOption } from "./effort-picker";
 import { quotedPhraseHint } from "./query-syntax";
 import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
 import { formatReportTiming } from "./report-time";
-import { label } from "./vocabulary";
+import { label, REPORT_DEPTH, REPORT_STATUS } from "./vocabulary";
 
 // ---------------------------------------------------------------------------
 // 类型(与 backend/app/models/schemas.py 的 ReportSummary/ReportDetail 对齐)
@@ -227,7 +227,10 @@ const isReportActive = (status: string) =>
 // 研究深度:五档命名,index 0→4 一一对应 DEPTHS(每节 reflect 步上限)。
 // 各档都算深入,区别在充分程度;后端 create_report 会 clamp 到 [1,16]。
 const DEPTHS = [1, 2, 4, 8, 16];
-const DEPTH_LABELS = ["概览", "标准", "深入", "详尽", "穷尽"];
+// 档名从 vocabulary.ts::REPORT_DEPTH 派生:那张按 depth 取值索引的表还要服务
+// 只拿得到 reports.depth 数值的消费方(dev/logs 活动流)。两处各写一份档名必然漂移,
+// 所以这里只保留「顺序」这一份本地信息,文字本身来自共享表。
+const DEPTH_LABELS = DEPTHS.map((value) => label(REPORT_DEPTH, String(value), "标准"));
 // 每档一句中性说明(不用快/聪明措辞),popover 里给选中档显示。
 const DEPTH_HINTS = [
   "最快出稿，覆盖主干要点",
@@ -249,17 +252,8 @@ type SectionPhaseIcon = "done" | "failed" | "active";
 const sectionPhaseIcon = (phase: string): SectionPhaseIcon =>
   phase === "完成" ? "done" : phase === "失败" ? "failed" : "active";
 
-const STATUS_LABELS: Record<string, string> = {
-  pending: "排队中",
-  planning: "规划中",
-  intent_ready: "待确认问题",
-  outline_ready: "待确认",
-  running: "生成中",
-  generating: "生成中",
-  done: "完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
+// 状态中文表已挪到 vocabulary.ts::REPORT_STATUS(跨模块单一真源,
+// dev/logs/activity/format.ts 同样消费它)。
 
 // 计划指定的导出方式:Blob → 临时 URL → 触发下载。
 function downloadMd(r: ReportDetailT) {
@@ -418,7 +412,7 @@ function ReportStatusBadge({ status, progress }: { status: string; progress: str
   return (
     <span className={`report-status ${status}`} title={progress || undefined}>
       {live && <span className="report-status-dot" aria-hidden />}
-      <span className="report-status-label">{label(STATUS_LABELS, status, "处理中")}</span>
+      <span className="report-status-label">{label(REPORT_STATUS, status, "处理中")}</span>
       {live && progress && <span className="report-status-progress">{progress}</span>}
     </span>
   );

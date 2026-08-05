@@ -1909,7 +1909,7 @@
       "target": "db.execute"
     },
     {
-      "count": 6,
+      "count": 7,
       "kind": "independent_sql",
       "path": "scripts/generate_repository_contract_fixtures.py",
       "reason": "disposable contract fixture databases",

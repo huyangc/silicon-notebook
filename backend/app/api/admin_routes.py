@@ -1,5 +1,5 @@
 import asyncio
-from typing import List
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -15,11 +15,16 @@ from app.api.deps import (
 from app.core.cache import CacheAdmin, make_cache_backend
 from app.core.config import get_settings
 from app.models.admin import (
+    ActivityAsk,
+    ActivityReport,
+    ActivityResponse,
+    ActivitySource,
     AdminUserNotebook,
     AdminUserRoleResult,
     AdminUserRoleUpdate,
     AdminUserUploadLimitResult,
     AdminUserUsage,
+    AskDetail,
     CacheEvictRequest,
     CacheEvictResult,
     CacheStats,
@@ -33,7 +38,9 @@ from app.models.admin import (
 )
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
+from app.models.sources import PaginatedSources
 from app.services.model_status import ModelStatusService
+from app.services.source_display import source_display_title
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
     SelfDemotionError,
@@ -245,13 +252,208 @@ def update_admin_user_upload_limit(
 
 @router.get("/admin/users/{user_id}/notebooks", response_model=List[AdminUserNotebook])
 def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_current_user)) -> List[AdminUserNotebook]:
-    """某用户名下笔记本详情。仅 admin。"""
-    if user.role != "admin":
-        raise user_error(403, "仅管理员可查看用户笔记本")
+    """某用户名下笔记本详情。自己或 admin 可查——该端点只返回
+    `notebooks WHERE created_by = user_id`,`user_id` 等于调用者自己时读的
+    就是自己的笔记本,本来就该放行；活动视图左栏正是复用它展开自己的
+    笔记本清单,「仅 admin」是历史遗留(该端点最初只服务 admin 总览页)。"""
+    _require_self_or_admin(user, user_id)
     return [
         AdminUserNotebook(**row)
         for row in admin_query_repository().list_user_notebooks(user_id)
     ]
+
+
+# --- 用户日志页多维度改版 · 「活动」视图(P1,仅 API 层) ----------------------
+#
+# 权限口径统一镜像 debug_logs._resolve_owner:user_id == 当前用户.id 放行
+# (普通用户看自己),否则要求 user.role == "admin"。三个端点共用这一条。
+# 真源见 docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md
+# §4.2。
+
+
+def _require_activity_enabled() -> None:
+    """活动视图有自己独立的部署开关 `USER_ACTIVITY_VIEW_ENABLED`(默认开),
+    与管 `/api/debug/logs/...`(JSONL 日志文件读取)的 `DEBUG_LOGS_ENABLED`
+    是两件互不相关的事,不能共用一个判据。
+
+    这三个端点管的是「活动视图能不能读到别人的提问原文与答案正文」——
+    `/dev/logs` 的「活动」是**默认** tab,若门控用默认关闭的
+    `DEBUG_LOGS_ENABLED`,普通部署一打开页面就 404,新特性等于不可用。
+    因此这里改用默认开启的独立开关;关闭的口子留给介意跨用户内容可见性
+    (自己或 admin 能读到别人的提问/答案原文)的部署。
+    """
+    if not getattr(get_settings(), "user_activity_view_enabled", True):
+        raise HTTPException(status_code=404, detail="user activity view disabled")
+
+
+def _require_self_or_admin(user: UserProfile, user_id: str) -> None:
+    """自己或 admin 可查。现由 list_admin_user_notebooks 与三个活动端点共用,
+    文案因此保持通用而非只提「活动记录」。"""
+    if user.id == user_id or user.role == "admin":
+        return
+    raise user_error(403, "无权查看该用户的信息")
+
+
+def _activity_source_item(row: dict) -> ActivitySource:
+    """把 list_user_activity 的原始 source 行(带 title/file_name/is_paper/
+    paper_title 四个原始列)合成出前端契约要的 display_title —— 论文标题优先,
+    唯一实现是 source_display_title(CLAUDE.md 红线:所有为用户命名来源的路径
+    共用同一份实现)。刻意保留 source_display_title 可能返回的空串,不在这里
+    造占位符,前端已按空串处理。"""
+    return ActivitySource(
+        id=row["id"],
+        notebook_id=row["notebook_id"],
+        created_at=row["created_at"],
+        display_title=source_display_title(row),
+        file_name=row.get("file_name") or "",
+        source_type=row.get("source_type") or "",
+        parse_status=row.get("parse_status") or "",
+        status=row.get("status") or "",
+        parse_failed=bool(row.get("parse_failed")),
+        extraction_warning=row.get("extraction_warning") or "",
+        parse_quality_warning=bool(row.get("parse_quality_warning")),
+        paper_meta_status=row.get("paper_meta_status") or "",
+    )
+
+
+def _activity_item_from_row(row: dict):
+    kind = row["type"]
+    if kind == "ask":
+        return ActivityAsk(**row)
+    if kind == "source":
+        return _activity_source_item(row)
+    if kind == "report":
+        return ActivityReport(**row)
+    raise AssertionError(f"unknown activity item type: {kind!r}")  # pragma: no cover
+
+
+@router.get("/admin/users/{user_id}/activity", response_model=ActivityResponse)
+def get_admin_user_activity(
+    user_id: str,
+    notebook_id: Optional[str] = Query(None),
+    since: Optional[str] = Query(None),
+    until: Optional[str] = Query(None),
+    before_ts: Optional[str] = Query(None),
+    before_id: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    user: UserProfile = Depends(get_current_user),
+) -> ActivityResponse:
+    """用户活动流:提问 / 来源 / 报告三类,时间倒序归并。自己或 admin 可查。"""
+    _require_activity_enabled()
+    _require_self_or_admin(user, user_id)
+    try:
+        raw = admin_query_repository().list_user_activity(
+            user_id,
+            notebook_id=notebook_id,
+            since=since,
+            until=until,
+            before_ts=before_ts,
+            before_id=before_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        # 时间参数畸形。两个 store 对此**都**抛 ValueError(见 app.core.activity_time
+        # 的契约:不静默忽略,悄悄丢掉一个 since 会返回比请求更宽的窗口)。这里必须接住
+        # 它:不接的话 `?since=not-a-date` 是一条 500(实测,且不带 X-User-Message),
+        # 前端只能显示「请重试」,然后无限重试一个永远不会成功的请求。
+        #
+        # 400 而不是 422:这是**查询参数**的取值不合法,FastAPI 的 422 留给它自己的
+        # 签名级校验,两者混在一起会让前端分不清「我发错了」和「服务端校验器改了」。
+        # 走 user_error 打 X-User-Message 头(红线:后端中文用户文案的唯一出口)。
+        raise user_error(400, "时间范围或翻页位置不是有效的时间，请重新选择日期") from exc
+    return ActivityResponse(
+        items=[_activity_item_from_row(row) for row in raw["items"]],
+        has_more=raw["has_more"],
+        next_cursor=raw["next_cursor"],
+    )
+
+
+def _notebook_owned_by_user(user_id: str, notebook_id: str) -> bool:
+    """口径:notebooks.created_by = user_id AND status != 'copying'。
+
+    ⚠ 刻意**不**走 list_user_notebooks:那是一次全量用量聚合(1 条 notebooks 查询 +
+    4 条覆盖该用户**全部**笔记本的 GROUP BY COUNT),只为判断一行的归属;而左栏每展开
+    一个笔记本就发一次。判据本身是一行的事,用 notebook_exists_for_owner 一条带主键的
+    SELECT 1 回答——那正是 list_user_activity 内部 owned 分支已经在用的同一条谓词
+    (见两个 query_store 的 `SELECT 1 FROM notebooks WHERE id=? AND created_by=?
+    AND status != 'copying'`),口径逐字相同,没有第二份拼写。
+    """
+    return admin_query_repository().notebook_exists_for_owner(notebook_id, user_id)
+
+
+@router.get(
+    "/admin/users/{user_id}/notebooks/{notebook_id}/sources",
+    response_model=PaginatedSources,
+)
+def get_admin_user_notebook_sources(
+    user_id: str,
+    notebook_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    user: UserProfile = Depends(get_current_user),
+) -> PaginatedSources:
+    """某用户某笔记本的来源清单(活动视图左栏展开用)。自己或 admin 可查;
+    notebook_id 不属于该用户时 404(不泄露存在性,不用 403)。"""
+    _require_activity_enabled()
+    _require_self_or_admin(user, user_id)
+    if not _notebook_owned_by_user(user_id, notebook_id):
+        raise HTTPException(status_code=404, detail="notebook not found")
+    return repository().list_sources_page(notebook_id, offset, limit)
+
+
+@router.get("/admin/users/{user_id}/asks/{job_id}", response_model=AskDetail)
+def get_admin_user_ask_detail(
+    user_id: str,
+    job_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> AskDetail:
+    """右栏「选中提问」详情:完整问答 + 推理轨迹。自己或 admin 可查;job_id
+    不属于该用户时 404。
+
+    ``ask_job_detail(job_id)`` 是单行主键查询,给出
+    question/mode/status/trace/answer_id/error/notebook_id/conversation_id/
+    created_by/asked_at(浏览器提交时刻,ask_jobs.asked_at,job 无论终态如何
+    都带这一列,不再依赖是否为「当前活跃 job」)。有 answer_id 时另按
+    answer_id 单行直查 ``ask_answer_detail``——**不**经 ``get_conversation``
+    (那条路径会加载并校验整个会话的全部答案 payload,读取量随会话历史线性
+    增长)。它已经把 answered_at(权威值 answers.created_at,旧 payload 从
+    答案行回填)按红线口径处理好。没有 answer_id 或查不到对应答案行时
+    answered_at/answer 保持空——没有可靠数据来源时不编造。
+    """
+    _require_activity_enabled()
+    _require_self_or_admin(user, user_id)
+    repo = repository()
+    try:
+        job = repo.ask_job_detail(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="ask job not found")
+    if job["created_by"] != user_id:
+        raise HTTPException(status_code=404, detail="ask job not found")
+
+    asked_at = job.get("asked_at") or ""
+    answered_at = ""
+    answer: "dict[str, Any] | None" = None
+    conversation_id = job.get("conversation_id") or ""
+    answer_id = job.get("answer_id") or ""
+    if answer_id:
+        detail = repo.ask_answer_detail(answer_id)
+        if detail is not None:
+            answer = detail["payload"]
+            answered_at = str(detail["payload"].get("answered_at") or "")
+
+    return AskDetail(
+        job_id=job["job_id"],
+        notebook_id=job["notebook_id"],
+        conversation_id=conversation_id,
+        question=job["question"],
+        mode=job["mode"],
+        status=job["status"],
+        asked_at=asked_at,
+        answered_at=answered_at,
+        error=job["error"],
+        trace=job["trace"],
+        answer=answer,
+    )
 
 
 @router.get("/admin/online")

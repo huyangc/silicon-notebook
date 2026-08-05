@@ -108,7 +108,10 @@ function KnowhowResultSetCard({
   onOpenKnowhowRow,
 }: {
   resultSet: KnowhowResultSet;
-  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  /** 可选（同 onOpenSource/onTestModel 的既有惯例）：不传时整列跳转按钮不渲染。
+   *  只读的排障视图（dev/logs 的「活动」）没有承接方，绝不能留一颗点了没反应的
+   *  按钮——那正是「界面上不会出现死控件」这条断言曾经不成立的地方。 */
+  onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const visibleLimit = STRUCTURED_ENUMERATION_LIMITS.initialVisibleRows;
@@ -140,7 +143,7 @@ function KnowhowResultSetCard({
             <tr>
               <th scope="col">行</th>
               {resultSet.columns.map((column) => <th key={column.id} scope="col">{column.name}</th>)}
-              <th scope="col" aria-label="操作" />
+              {onOpenKnowhowRow && <th scope="col" aria-label="操作" />}
             </tr>
           </thead>
           <tbody>
@@ -148,15 +151,17 @@ function KnowhowResultSetCard({
               <tr key={row.row_id}>
                 <th scope="row">{row.position + 1}</th>
                 {resultSet.columns.map((column) => <td key={column.id}>{row.cells[column.id] || "—"}</td>)}
-                <td>
-                  <button
-                    className="answer-knowhow-open"
-                    type="button"
-                    onClick={() => onOpenKnowhowRow(resultSet.table_id, row.row_id)}
-                  >
-                    在表格中查看
-                  </button>
-                </td>
+                {onOpenKnowhowRow && (
+                  <td>
+                    <button
+                      className="answer-knowhow-open"
+                      type="button"
+                      onClick={() => onOpenKnowhowRow(resultSet.table_id, row.row_id)}
+                    >
+                      在表格中查看
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -631,7 +636,8 @@ function KnowhowResultSets({
 }: {
   resultSets: (KnowhowResultSet | TypedCollectionResult)[] | undefined;
   batchCoverage: KnowhowBatchCoverage | undefined;
-  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  /** 可选：不传时清单卡不渲染跳转按钮（见 KnowhowResultSetCard 上的说明）。 */
+  onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   notebookId: string | null;
   notebookNames: Record<string, string>;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
@@ -751,9 +757,11 @@ function SelectedReferenceDetail({
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，供引用徽章把 notebook_id 解成人类可读的库名。 */
   notebookNames: Record<string, string>;
-  onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
-  /** Task 12（引用跳转）：命中 knowhow 格子的引用才出现「在表格中查看」按钮。 */
-  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  /** 可选：不传时「知识图谱」按钮整个不渲染（同 onOpenSource 的既有惯例）。 */
+  onOpenKnowledgeGraph?: (objectId?: string, sourceNotebookId?: string) => void;
+  /** Task 12（引用跳转）：命中 knowhow 格子的引用才出现「在表格中查看」按钮。
+   *  可选：不传时该按钮不渲染。 */
+  onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   const objectType = reference.anchor?.object_type || "";
@@ -811,7 +819,7 @@ function SelectedReferenceDetail({
             )}
           </span>
         )}
-        {!isSourceElementReference && (
+        {onOpenKnowledgeGraph && !isSourceElementReference && (
           <button
             type="button"
             onClick={() => onOpenKnowledgeGraph(
@@ -834,7 +842,7 @@ function SelectedReferenceDetail({
             {isRelationReference ? "关系证据不可定位" : "知识图谱"}
           </button>
         )}
-        {knowhowRef && (
+        {onOpenKnowhowRow && knowhowRef && (
           <button
             type="button"
             onClick={() => onOpenKnowhowRow(knowhowRef.tableId, knowhowRef.rowId)}
@@ -881,8 +889,8 @@ function CitationPopover({
   notebookNames: Record<string, string>;
   anchorRect: DOMRect;
   onClose: () => void;
-  onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
-  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  onOpenKnowledgeGraph?: (objectId?: string, sourceNotebookId?: string) => void;
+  onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -1119,11 +1127,16 @@ export function AnswerView({
 }: {
   answer: AskResponse;
   feedbackSent: string;
-  onFeedback: (rating: "useful" | "not_useful") => void;
-  onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
+  /** 交互回调一律可选，判据统一：**没有承接方就不渲染那颗按钮**（沿用
+   *  onOpenSource / onTestModel / onOpenModelStatus 的既有惯例）。绝不用 CSS
+   *  隐藏、也绝不传空实现——只读的排障视图（dev/logs 的「活动」）曾因为传 noop
+   *  而在界面上留下三颗点了没反应的启用态按钮。
+   *  回归门：frontend/app/answer-panel-readonly.component.test.tsx。 */
+  onFeedback?: (rating: "useful" | "not_useful") => void;
+  onOpenKnowledgeGraph?: (objectId?: string, sourceNotebookId?: string) => void;
   /** Task 12（引用跳转）：命中 knowhow 格子的引用点「在表格中查看」时调用，
    * page.tsx 据此打开 Knowhow 面板并定位到该表该行的抽屉。 */
-  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
   /** PR-2 T6：类型化元素清单条目「查看来源」/「在来源详情查看完整表格」跳转时
    * 调用，page.tsx 据此打开来源详情并高亮到该元素。可选——旧调用方/测试不传时
    * 清单卡的跳转按钮不渲染（同 onTestModel/onOpenModelStatus 的可选惯例）。 */
@@ -1132,10 +1145,10 @@ export function AnswerView({
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，逐 turn 复用同一份，供引用徽章标来源库名。 */
   notebookNames: Record<string, string>;
-  onBuildScaleIndex: (notebookId: string) => void;
+  onBuildScaleIndex?: (notebookId: string) => void;
   buildingScaleIndex: boolean;
   scaleIndexStatus?: Pick<ScaleIndexStatus, "exists" | "building" | "state"> | null;
-  onSaveMemory: (answerId: string) => void;
+  onSaveMemory?: (answerId: string) => void;
   memorySaved: boolean;
   onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
   onOpenModelStatus?: (serviceId: string) => void;
@@ -1182,15 +1195,19 @@ export function AnswerView({
         <div className="answer-index-degraded" title="内容较多时检索会走索引；尚未建立索引时结果会受限">
           <AlertTriangle size={14} aria-hidden="true" />
           <span>此笔记本内容较多，尚未建立索引，当前检索能力受限。</span>
-          <button
-            type="button"
-            className="mode-engine"
-            style={{ marginLeft: 6 }}
-            disabled={buildingScaleIndex && !scaleIndexQueued}
-            onClick={() => { if (notebookId) onBuildScaleIndex(notebookId); }}
-          >
-            {scaleIndexQueued ? "立即构建" : buildingScaleIndex ? "构建中…" : "构建索引"}
-          </button>
+          {/* 说明文字对只读视图仍然有价值（那正是要看的诊断），但没有承接方时
+              绝不留下这颗按钮。 */}
+          {onBuildScaleIndex && (
+            <button
+              type="button"
+              className="mode-engine"
+              style={{ marginLeft: 6 }}
+              disabled={buildingScaleIndex && !scaleIndexQueued}
+              onClick={() => { if (notebookId) onBuildScaleIndex(notebookId); }}
+            >
+              {scaleIndexQueued ? "立即构建" : buildingScaleIndex ? "构建中…" : "构建索引"}
+            </button>
+          )}
         </div>
       )}
       {(() => {
@@ -1296,46 +1313,54 @@ export function AnswerView({
           // 点击跳转后若不关闭这张卡片，它会一直浮在新打开的视图上方挡住内容
           // （真机 QA 反馈）。复用与 onClose 完全相同的收起路径
           // （setCitePopover(null)），不为此新开一套状态。
-          onOpenKnowledgeGraph={(objectId, sourceNotebookId) => {
+          onOpenKnowledgeGraph={onOpenKnowledgeGraph ? (objectId, sourceNotebookId) => {
             setCitePopover(null);
             onOpenKnowledgeGraph(objectId, sourceNotebookId);
-          }}
-          onOpenKnowhowRow={(tableId, rowId) => {
+          } : undefined}
+          onOpenKnowhowRow={onOpenKnowhowRow ? (tableId, rowId) => {
             setCitePopover(null);
             onOpenKnowhowRow(tableId, rowId);
-          }}
+          } : undefined}
           onOpenSource={onOpenSource ? (sourceId, elementId) => {
             setCitePopover(null);
             onOpenSource(sourceId, elementId);
           } : undefined}
         />
       )}
+      {/* 复制回答是自足动作（只读 DOM + 剪贴板），任何调用方都能承接，所以它不带
+          可选开关；保存记忆与反馈需要写回服务端，没有回调就不渲染。 */}
       <div className="answer-feedback">
-        <button
-          aria-label={memorySaved ? "已保存到记忆" : "保存到记忆"}
-          className={`answer-memory-save ${memorySaved ? "is-saved" : ""}`}
-          disabled={memorySaved}
-          onClick={() => onSaveMemory(answer.answer_id)}
-          title={memorySaved ? "已保存到记忆" : "保存到记忆"}
-          type="button"
-        >{memorySaved ? <Check size={15} /> : <BookmarkPlus size={15} />}<span>{memorySaved ? "已保存到记忆" : "保存到记忆"}</span></button>
+        {onSaveMemory && (
+          <button
+            aria-label={memorySaved ? "已保存到记忆" : "保存到记忆"}
+            className={`answer-memory-save ${memorySaved ? "is-saved" : ""}`}
+            disabled={memorySaved}
+            onClick={() => onSaveMemory(answer.answer_id)}
+            title={memorySaved ? "已保存到记忆" : "保存到记忆"}
+            type="button"
+          >{memorySaved ? <Check size={15} /> : <BookmarkPlus size={15} />}<span>{memorySaved ? "已保存到记忆" : "保存到记忆"}</span></button>
+        )}
         <div className="answer-feedback-actions">
-          <button
-            aria-label="有用"
-            className={`answer-action ${feedbackSent === "useful" ? "selected" : ""}`}
-            disabled={Boolean(feedbackSent)}
-            onClick={() => onFeedback("useful")}
-            title="有用"
-            type="button"
-          ><ThumbsUp size={16} /></button>
-          <button
-            aria-label="需改进"
-            className={`answer-action ${feedbackSent === "not_useful" ? "selected" : ""}`}
-            disabled={Boolean(feedbackSent)}
-            onClick={() => onFeedback("not_useful")}
-            title="需改进"
-            type="button"
-          ><ThumbsDown size={16} /></button>
+          {onFeedback && (
+            <button
+              aria-label="有用"
+              className={`answer-action ${feedbackSent === "useful" ? "selected" : ""}`}
+              disabled={Boolean(feedbackSent)}
+              onClick={() => onFeedback("useful")}
+              title="有用"
+              type="button"
+            ><ThumbsUp size={16} /></button>
+          )}
+          {onFeedback && (
+            <button
+              aria-label="需改进"
+              className={`answer-action ${feedbackSent === "not_useful" ? "selected" : ""}`}
+              disabled={Boolean(feedbackSent)}
+              onClick={() => onFeedback("not_useful")}
+              title="需改进"
+              type="button"
+            ><ThumbsDown size={16} /></button>
+          )}
           <button
             aria-label={copied ? "已复制" : "复制回答"}
             className={`answer-action ${copied ? "selected" : ""}`}

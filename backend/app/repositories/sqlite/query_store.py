@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -10,12 +11,23 @@ from app.models.ask import (
     NotebookSearchResponse,
     SearchHit,
 )
+from app.core.activity_time import (
+    UNRESOLVED_INSTANT_ISO,
+    cursor_instant_text,
+    parse_activity_instant,
+)
+from app.models.sources import (
+    extraction_warning_text,
+    has_pdf_python_fallback_warning,
+    paper_meta_status,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.identity_store import (
     _UPLOAD_LIMIT_DEFAULT_KEY,
     _resolve_global_default,
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
+from app.repositories.sqlite.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.notebook_scale import NotebookScaleFacts
@@ -32,6 +44,34 @@ def _snippet(text: str, needle: str) -> str:
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(clean) else ""
     return f"{prefix}{clean[start:end]}{suffix}"
+
+
+def _absolute_instant(column: str) -> str:
+    """SQLite 侧「绝对时刻」的比较形态,用在 ORDER BY / 范围 / 游标三处。
+
+    ``created_at`` 是文本列,而这些表里的值必然是**混合格式**:历史行是裸 naive
+    ("2026-07-17T15:19:42"),``seams.now`` 现在写的却带本机 UTC offset
+    ("2026-08-04T10:00:00.123456+08:00")。裸文本比较会把 ``+08:00`` 的 10:00
+    (=02:00Z)排在 ``+00:00`` 的 03:30 之前——顺序是反的,而 keyset 游标按这个错序
+    推进,翻页会跳行。``julianday()`` 把两种写法都折成同一根绝对时间轴(与
+    ``ask_state_store`` 的会话历史排序同一条判据)。
+
+    ``COALESCE(...)`` 兜住不可解析的历史脏值(``created_at`` 的 DDL 是
+    ``TEXT NOT NULL DEFAULT ''``,空串正是这类):``julianday()`` 对它返回 NULL,而
+    Python 归并键里混进 None 会直接 TypeError。兜底值刻意**不是** ``0.0`` 而是
+    ``julianday(UNRESOLVED_INSTANT_ISO)``:两者都把这类行排到最末,但只有后者写得成
+    ISO 串,游标才回传得回来(见 activity_time.UNRESOLVED_INSTANT_ISO 的说明——用
+    ``0.0`` 时 ``next_cursor`` 会原样发出一个解析不了的 ``''``,下一页直接抛 ValueError)。
+
+    ⚠ 性能:这是列上的函数,现有索引(``idx_sources_notebook_created`` 等)都用不上。
+    实测(10 万行 sources、SQLite 3.51)单笔记本 5.7ms vs 裸列 0.0ms。**但**换成裸列
+    并不能同时保住正确性:``created_at`` 是混合格式文本,裸文本序不是绝对时刻序。而且
+    实测「全部笔记本」那条默认路径(``notebook_id IN (...)``,n>1)裸列写法**同样**
+    落到 ``SCAN`` + 全量 TEMP B-TREE(18.6ms vs 本写法 20.1ms),换过去一分钱都不省。
+    两者可以兼得,但要的是一条**匹配这个表达式的索引**(SQLite 支持表达式索引,实测
+    planner 会用它消掉 TEMP B-TREE)——那是一次 schema 迁移,不在本轮缝隙整改范围内。
+    """
+    return f"COALESCE(julianday({column}), julianday('{UNRESOLVED_INSTANT_ISO}'))"
 
 
 class QueryStore:
@@ -470,11 +510,17 @@ class QueryStore:
             reports: dict[str, int] = {}
             if ids:
                 placeholders = ",".join("?" * len(ids))
+                # VISIBLE_SOURCE_TYPES_PREDICATE 不可省:它是「面向用户可见来源数」的
+                # 单一真源(见 source_store 里那条注释)。少了它,这个数会把 memory /
+                # knowhow 投影行一起算进去——存过一条 Memory 或建过一张 Knowhow 表的
+                # 用户,左栏表头写「来源 3」而展开的清单(list_sources_page,带谓词)
+                # 只有 1 条,同一屏自相矛盾。
                 sources = {
                     row["k"]: row["c"]
                     for row in db.execute(
                         f"SELECT notebook_id AS k, COUNT(*) AS c FROM sources "
-                        f"WHERE notebook_id IN ({placeholders}) GROUP BY notebook_id",
+                        f"WHERE notebook_id IN ({placeholders}) "
+                        f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY notebook_id",
                         ids,
                     ).fetchall()
                 }
@@ -495,12 +541,17 @@ class QueryStore:
                         [*ids, user_id],
                     ).fetchall()
                 }
+                # created_by = ? 同 questions 一条理由:list_user_activity 展开清单
+                # 也是按 created_by 收窄的 owner-only 报告(见该方法 report_rows 那条
+                # SQL)。少了它,共享笔记本里别的可写成员建的报告会被算进这个笔记本
+                # owner 的表头,而点开活动流却看不到对应条目——同一屏自相矛盾。
                 reports = {
                     row["k"]: row["c"]
                     for row in db.execute(
                         f"SELECT notebook_id AS k, COUNT(*) AS c FROM reports "
-                        f"WHERE notebook_id IN ({placeholders}) GROUP BY notebook_id",
-                        ids,
+                        f"WHERE notebook_id IN ({placeholders}) AND created_by = ? "
+                        f"GROUP BY notebook_id",
+                        [*ids, user_id],
                     ).fetchall()
                 }
         return [
@@ -517,6 +568,283 @@ class QueryStore:
             }
             for row in notebooks
         ]
+
+    def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool:
+        """这一行是不是这位用户自有的(非 copying)笔记本 —— **一行**的问题一行回答。
+
+        谓词与 list_user_activity 里的 owned 分支逐字相同,刻意不复用
+        list_user_notebooks:那是一次全量用量聚合(1 条 notebooks 查询 + 4 条覆盖该用户
+        全部笔记本的 GROUP BY COUNT),而调用方(来源清单端点)每展开一个笔记本就问一次。
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM notebooks WHERE id = ? AND created_by = ? "
+                "AND status != 'copying'",
+                (notebook_id, user_id),
+            ).fetchone()
+        return row is not None
+
+    def list_user_activity(
+        self,
+        user_id: str,
+        *,
+        notebook_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        before_ts: str | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Admin-only 用户活动流:ask_jobs / sources / reports 三类各自 keyset 分页,
+        在 Python 内按 (绝对时刻, id) 降序归并——不做三表 UNION(大库上 UNION ALL +
+        全局 ORDER BY 会退化成排序爆炸;三份各自有界 + 内存归并的边界可诚实回报「本页
+        覆盖到 HH:MM 为止」)。真源见
+        docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md §4.1。
+
+        排序键统一是 (绝对时刻 DESC, id DESC);ask_jobs 用 created_at 排序而不是
+        asked_at(后者是浏览器提交时刻、可能为空串,拿它当排序键会让游标不稳定,只作为
+        字段返回)。「绝对时刻」由 ``_absolute_instant`` 定义(``julianday()``,见那里
+        对混合 offset 的说明),SQL 的 ORDER BY / 范围 / 游标与 Python 归并键**用同一
+        个值**:它作为 ``sort_instant`` 列跟着行一起回来,Python 不再自己算一遍,也就不
+        可能与 SQL 口径分叉。复合游标谓词按 (绝对时刻, id) 的严格字典序比较,避免并列
+        时间戳下只比 ts 跳行。
+
+        三类都按**该用户自有的笔记本**收窄(owner-only),与 sources 侧同口径:共享库
+        里别人库中的行不进这份清单。设计稿 §5 的「合计包含共享库提交」只针对用量合计,
+        展开清单刻意是 owner-only。
+
+        ``since``/``until`` 是半开区间 [since, until);它与 ``before_ts`` 一起在方法
+        入口经 ``parse_activity_instant`` 归一成绝对时刻(**双后端共用同一份解析**),
+        再渲染成本后端的比较形态(交给 ``julianday()``)。畸形输入抛 ``ValueError``,
+        不静默忽略——见 ``app.core.activity_time`` 的契约。范围与游标同时生效(范围管
+        窗口、游标管翻页)。
+        """
+        limit = max(1, min(200, int(limit)))
+        fetch_limit = limit + 1
+        empty: dict[str, Any] = {"items": [], "has_more": False, "next_cursor": None}
+        cursor_active = before_ts is not None and before_id is not None
+        # 归一后的绝对时刻直接作为 julianday() 的入参:裸 naive 输入按 UTC 读,因而
+        # 历史行原样回传的游标 ts 与它自己那一行的 julianday 逐位相等(精确往返)。
+        since_arg = (
+            parse_activity_instant(since, field="since").isoformat()
+            if since is not None else None
+        )
+        until_arg = (
+            parse_activity_instant(until, field="until").isoformat()
+            if until is not None else None
+        )
+        before_arg = (
+            parse_activity_instant(before_ts, field="before_ts").isoformat()
+            if cursor_active else None
+        )
+
+        def _range_and_cursor_clause(prefix: str) -> tuple[str, list[Any]]:
+            instant = _absolute_instant(f"{prefix}created_at")
+            clause = ""
+            params: list[Any] = []
+            if since_arg is not None:
+                clause += f" AND {instant} >= julianday(?)"
+                params.append(since_arg)
+            if until_arg is not None:
+                clause += f" AND {instant} < julianday(?)"
+                params.append(until_arg)
+            if cursor_active:
+                clause += (
+                    f" AND ({instant} < julianday(?) OR "
+                    f"({instant} = julianday(?) AND {prefix}id < ?))"
+                )
+                params.extend([before_arg, before_arg, before_id])
+            return clause, params
+
+        with self.database.connect() as db:
+            if notebook_id is not None:
+                # 显式收窄到单个 notebook 时,必须先校验它属于该用户——不属于就返回
+                # 空结果(不抛异常、不泄露存在性),口径与 list_user_notebooks 一致。
+                owned = db.execute(
+                    "SELECT 1 FROM notebooks WHERE id = ? AND created_by = ? "
+                    "AND status != 'copying'",
+                    (notebook_id, user_id),
+                ).fetchone()
+                if owned is None:
+                    return empty
+                owned_notebook_ids = [notebook_id]
+            else:
+                owned_notebook_ids = [
+                    row["id"]
+                    for row in db.execute(
+                        "SELECT id FROM notebooks WHERE created_by = ? "
+                        "AND status != 'copying'",
+                        (user_id,),
+                    ).fetchall()
+                ]
+            if not owned_notebook_ids:
+                # 三类都按自有笔记本收窄,一个都没有就没有任何活动可列。
+                return empty
+            owned_placeholders = ",".join("?" for _ in owned_notebook_ids)
+
+            # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,同 sources)。
+            # notebook_id 已在上面解析成 owned_notebook_ids == [notebook_id],所以这
+            # 条 IN 同时兑现了「按库过滤」和「归属校验」两件事,不需要第二条谓词。
+            ask_params: list[Any] = [user_id, *owned_notebook_ids]
+            ask_range_clause, ask_range_params = _range_and_cursor_clause("")
+            ask_params.extend(ask_range_params)
+            ask_rows = db.execute(
+                "SELECT id, notebook_id, created_at, asked_at, conversation_id, "
+                "question, mode, status, answer_id, error, "
+                f"{_absolute_instant('created_at')} AS sort_instant FROM ask_jobs "
+                f"WHERE created_by = ? AND notebook_id IN ({owned_placeholders})"
+                f"{ask_range_clause} "
+                f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
+                [*ask_params, fetch_limit],
+            ).fetchall()
+
+            # 2. 来源:sources 没有 created_by 列,靠"该用户自己的笔记本 id"限定范围
+            # (与 list_user_notebooks 完全同口径)。必须带
+            # VISIBLE_SOURCE_TYPES_PREDICATE 排除隐藏合成源(memory 派生源按创建者
+            # 私有、knowhow 投影行同样非用户可见,漏掉这条谓词就会把别人的私有 Memory
+            # 摊开)。source_paper_meta 用 LEFT JOIN 一次性带出 is_paper/paper_title,
+            # 不为它多发一次查询——上层 source_display_title 需要这两个字段判断
+            # 是否显示论文标题。s.doc_type / s.error_message 一并带出仅用于 Python 侧
+            # 派生 paper_meta_status / parse_quality_warning,本身都不作为返回字段
+            # (error_message 是 str(exc) 原样落库、可能带服务端绝对路径,见下)。
+            source_params: list[Any] = list(owned_notebook_ids)
+            source_range_clause, source_range_params = _range_and_cursor_clause("s.")
+            source_params.extend(source_range_params)
+            source_rows = db.execute(
+                "SELECT s.id, s.notebook_id, s.created_at, s.title, s.file_name, "
+                "s.source_type, s.parse_status, s.status, s.error_message, "
+                "s.doc_type, m.is_paper, m.paper_title, "
+                f"{_absolute_instant('s.created_at')} AS sort_instant "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                f"WHERE s.notebook_id IN ({owned_placeholders}) "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}{source_range_clause} "
+                f"ORDER BY {_absolute_instant('s.created_at')} DESC, s.id DESC LIMIT ?",
+                [*source_params, fetch_limit],
+            ).fetchall()
+
+            # 2b. extraction_warning 是「最近一次 extraction_runs.error_message 里的
+            # windows_failed=N/T 标记」派生态,不是 sources 上的列——必须单独一条批量
+            # 查询(不是逐行 N+1),只对本页已取回的 source id 集合取一次。
+            latest_extraction_error: dict[str, str] = {}
+            source_ids_on_page = [row["id"] for row in source_rows]
+            if source_ids_on_page:
+                ph2 = ",".join("?" for _ in source_ids_on_page)
+                for r in db.execute(
+                    "SELECT source_id, error_message FROM extraction_runs "
+                    f"WHERE source_id IN ({ph2}) ORDER BY source_id, created_at DESC",
+                    source_ids_on_page,
+                ).fetchall():
+                    latest_extraction_error.setdefault(
+                        r["source_id"], r["error_message"] or ""
+                    )
+
+            # 3. 报告:与提问同口径(created_by + 自有笔记本)。understanding_json 一并
+            # 带出仅用于 Python 侧提取 generation_started_at(镜像 ReportStore.
+            # row_to_dict 同一个 "$._generation_started_at" 表达式,不发明第二套提取
+            # 写法),understanding_json 本身不作为返回字段。
+            report_params: list[Any] = [user_id, *owned_notebook_ids]
+            report_range_clause, report_range_params = _range_and_cursor_clause("")
+            report_params.extend(report_range_params)
+            report_rows = db.execute(
+                "SELECT id, notebook_id, created_at, updated_at, question, depth, "
+                "status, understanding_json, "
+                f"{_absolute_instant('created_at')} AS sort_instant FROM reports "
+                f"WHERE created_by = ? AND notebook_id IN ({owned_placeholders})"
+                f"{report_range_clause} "
+                f"ORDER BY {_absolute_instant('created_at')} DESC, id DESC LIMIT ?",
+                [*report_params, fetch_limit],
+            ).fetchall()
+
+        # 归并键与 SQL 逐位同源:(sort_instant, id) 就是 SQL 自己算出来的那两个值。
+        pool: list[tuple[float, str, dict[str, Any]]] = []
+        for row in ask_rows:
+            pool.append(
+                (row["sort_instant"], row["id"], {
+                    "type": "ask",
+                    "id": row["id"],
+                    "notebook_id": row["notebook_id"],
+                    "created_at": row["created_at"],
+                    "asked_at": row["asked_at"],
+                    "conversation_id": row["conversation_id"],
+                    "question": row["question"],
+                    "mode": row["mode"],
+                    "status": row["status"],
+                    "answer_id": row["answer_id"],
+                    "error": row["error"],
+                })
+            )
+        for row in source_rows:
+            pool.append(
+                (row["sort_instant"], row["id"], {
+                    "type": "source",
+                    "id": row["id"],
+                    "notebook_id": row["notebook_id"],
+                    "created_at": row["created_at"],
+                    "title": row["title"],
+                    "file_name": row["file_name"],
+                    "source_type": row["source_type"],
+                    "parse_status": row["parse_status"],
+                    "status": row["status"],
+                    # 刻意**不**返回 sources.error_message:它是 str(exc) 原样落库的
+                    # 异常串,可能带服务端绝对路径(FileNotFoundError: /…/storage/…),
+                    # 而这条流是给 admin 看**别人**的活动。安全事实按
+                    # ScopedSourceDetail 的既有做法换成 parse_failed 布尔,原始诊断
+                    # 一个字都不跨出这个库;质量事实另由 parse_quality_warning 承载。
+                    "parse_failed": row["parse_status"] == "failed",
+                    "is_paper": bool(row["is_paper"]),
+                    "paper_title": row["paper_title"] or "",
+                    "extraction_warning": extraction_warning_text(
+                        latest_extraction_error.get(row["id"])
+                    ),
+                    "parse_quality_warning": has_pdf_python_fallback_warning(
+                        row["error_message"]
+                    ),
+                    "paper_meta_status": paper_meta_status(
+                        row["is_paper"], row["source_type"], row["doc_type"],
+                        row["parse_status"],
+                    ),
+                })
+            )
+        for row in report_rows:
+            understanding = json.loads(row["understanding_json"] or "{}")
+            generation_started_at = str(
+                understanding.get("_generation_started_at", "") or ""
+            )
+            pool.append(
+                (row["sort_instant"], row["id"], {
+                    "type": "report",
+                    "id": row["id"],
+                    "notebook_id": row["notebook_id"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "question": row["question"],
+                    "depth": int(row["depth"]),
+                    "status": row["status"],
+                    "generation_started_at": generation_started_at,
+                })
+            )
+
+        pool.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        has_more = (
+            len(ask_rows) > limit
+            or len(source_rows) > limit
+            or len(report_rows) > limit
+            or len(pool) > limit
+        )
+        page = [entry[2] for entry in pool[:limit]]
+        next_cursor = None
+        if has_more and page:
+            last = page[-1]
+            # 游标 ts 走 cursor_instant_text:可解析就原样回传(julianday() 对它与对本行
+            # 的列值逐位相等,下一页的并列判据因此精确命中这一行);**不可解析**(空串
+            # 这类历史脏值)则回传哨兵——那正是该行在 _absolute_instant 里实际参与排序
+            # 的值。原样回传不可解析的串会让下一页在 parse_activity_instant 抛
+            # ValueError:游标必须只发自己解析得回来的值(见 activity_time 契约)。
+            next_cursor = {
+                "ts": cursor_instant_text(last["created_at"]),
+                "id": last["id"],
+            }
+        return {"items": page, "has_more": has_more, "next_cursor": next_cursor}
 
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
         with self.database.connect() as db:

@@ -658,6 +658,15 @@ class Settings(BaseSettings):
     # prompt/response text from private source material.
     debug_logs_enabled: bool = Field(False, validation_alias="DEBUG_LOGS_ENABLED")
 
+    # /dev/logs "Activity" view (default tab). Distinct from debug_logs_enabled:
+    # this gates the three admin activity endpoints (own/other users' asks,
+    # source lists, ask detail incl. full question/answer text), not JSONL log
+    # file reads. Defaults on because Activity is the default tab; deployments
+    # that care about cross-user question/answer visibility can opt out.
+    user_activity_view_enabled: bool = Field(
+        True, validation_alias="USER_ACTIVITY_VIEW_ENABLED"
+    )
+
     # PDF parsing via MinerU (decoupled from GPU). Modes:
     #   "off"  -> use local PyMuPDF4LLM (pypdf last resort; no GPU, offline)
     #   "http" -> call a remote MinerU service (mineru-api) at mineru_api_url

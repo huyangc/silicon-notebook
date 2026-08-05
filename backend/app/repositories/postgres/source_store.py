@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
@@ -13,12 +12,16 @@ from app.models.sources import (
     SourceDetail,
     SourceElement,
     SourceSummary,
+    extraction_warning_text,
     has_pdf_python_fallback_warning,
+    paper_meta_status,
 )
+from app.services.source_display import summary_display_title
 from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     execute_many,
+    iso_timestamp,
     json_value,
     jsonb,
     local_datetime,
@@ -1117,6 +1120,7 @@ class SourceStore:
             id=source_id,
             notebook_id=row["notebook_id"],
             title=row["title"],
+            display_title=summary_display_title(row, meta),
             type=row["source_type"],
             status=row["status"],
             summary=row["summary"],
@@ -1125,6 +1129,7 @@ class SourceStore:
             file_size=row["file_size"],
             file_hash=row["file_hash"],
             parse_status=row["parse_status"],
+            created_at=iso_timestamp(row["created_at"]),
             created_label=_created_label(row["created_at"]),
             doc_type=row.get("doc_type", ""),
             source_url=row.get("source_url", ""),
@@ -1183,15 +1188,9 @@ class SourceStore:
                 latest_error.setdefault(row["source_id"], row["error_message"] or "")
 
         def warning(source_id: str) -> str | None:
-            match = re.search(
-                r"windows_failed=(\d+)/(\d+)", latest_error.get(source_id, "")
-            )
-            if not match or int(match.group(1)) <= 0:
-                return None
-            return (
-                f"部分内容因网络问题未完成分析（{int(match.group(1))}/"
-                f"{int(match.group(2))} 段失败），建议重新上传或重试。"
-            )
+            # 派生规则只有一份(app.models.sources),这里只负责取到「最近一次抽取的
+            # error_message」这个输入。
+            return extraction_warning_text(latest_error.get(source_id, ""))
 
         output: list[SourceSummary] = []
         for row in rows:
@@ -1201,6 +1200,7 @@ class SourceStore:
                 id=source_id,
                 notebook_id=row["notebook_id"],
                 title=row["title"],
+                display_title=summary_display_title(row, meta),
                 type=row["source_type"],
                 status=row["status"],
                 summary=row["summary"],
@@ -1209,6 +1209,7 @@ class SourceStore:
                 file_size=row["file_size"],
                 file_hash=row["file_hash"],
                 parse_status=row["parse_status"],
+                created_at=iso_timestamp(row["created_at"]),
                 created_label=_created_label(row["created_at"]),
                 doc_type=row.get("doc_type", ""),
                 source_url=row.get("source_url", ""),
@@ -1231,13 +1232,7 @@ class SourceStore:
         ).fetchone()
         if run is None:
             return None
-        match = re.search(r"windows_failed=(\d+)/(\d+)", run["error_message"] or "")
-        if not match or int(match.group(1)) <= 0:
-            return None
-        return (
-            f"部分内容因网络问题未完成分析（{int(match.group(1))}/"
-            f"{int(match.group(2))} 段失败），建议重新上传或重试。"
-        )
+        return extraction_warning_text(run["error_message"])
 
     @staticmethod
     def meta_source_rows(
@@ -1333,15 +1328,14 @@ class SourceStore:
     def _paper_meta_status_for(
         row: Mapping[str, Any], meta: dict | None
     ) -> str | None:
-        if meta is not None:
-            return "has_meta" if meta.get("is_paper") else "not_paper"
-        if row.get("source_type", "") in ("memory", "knowhow"):
-            return None
-        if row.get("doc_type", "") not in ("", "academic_paper"):
-            return None
-        if row.get("parse_status", "") not in ("parsed", "extracting", "extracted"):
-            return None
-        return "missing"
+        """SQLite 孪生方法的对等实现:分类规则本身只有一份
+        (`app.models.sources.paper_meta_status`),这里只翻译入参。"""
+        return paper_meta_status(
+            None if meta is None else bool(meta.get("is_paper")),
+            row.get("source_type", ""),
+            row.get("doc_type", ""),
+            row.get("parse_status", ""),
+        )
 
     @staticmethod
     def paper_meta_model(meta: dict | None) -> PaperMeta | None:

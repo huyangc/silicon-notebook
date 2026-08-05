@@ -4169,6 +4169,9 @@ button.chat-session-card {
 .answer-feedback-actions {
   display: flex;
   gap: 6px;
+  /* 「保存到记忆」是可选控件（只读视图不渲染它）。两个孩子时 space-between 已经把
+     这一组推到右侧，auto margin 是空操作；只剩这一组时它保证仍然靠右。 */
+  margin-left: auto;
 }
 
 .answer-memory-save {

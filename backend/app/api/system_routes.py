@@ -62,9 +62,11 @@ def system_configuration(
     client behavior. Deployment environment names, paths, credentials, and
     unrelated Settings fields must never be reflected here.
     """
+    settings = get_settings()
     return SystemConfiguration(
-        source_upload_max_bytes=get_settings().source_upload_max_bytes,
+        source_upload_max_bytes=settings.source_upload_max_bytes,
         source_upload_max_files_per_batch=SOURCE_UPLOAD_MAX_FILES_PER_BATCH,
+        user_activity_view_enabled=settings.user_activity_view_enabled,
     )
 
 

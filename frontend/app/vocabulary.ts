@@ -15,6 +15,7 @@ export const TIER: Record<string, string> = {
 export const PARSE_STATUS: Record<string, string> = {
   uploaded: "已上传",
   queued: "排队中",
+  parsing: "解析中", // source_ingestion.py:929 真实会写入(置于 try 内首行)
   parsed: "已解析",
   extracting: "分析中",
   extracted: "已就绪",
@@ -94,6 +95,50 @@ export const PROMOTION_STATUS: Record<string, string> = {
   under_review: "审核中",
   approved: "已收录",
   rejected: "未采纳",
+};
+
+// reports.status 的取值集。真源=report_engine.py/report_execution.py 的
+// update_report(status=…) 调用点(done/failed/cancelled)+ report-view.tsx 的
+// 状态机注释(pending/planning/intent_ready/outline_ready/running/generating
+// 是各阶段的非终态)。report-view.tsx 与 dev/logs/activity/format.ts 共用这张表
+// ——前者本就 import 本模块的 label(),后者是新增消费方,不该各自维护一份、
+// 让「同一个 status 值在两处显示不同中文」这类漂移悄悄发生。
+export const REPORT_STATUS: Record<string, string> = {
+  pending: "排队中",
+  planning: "规划中",
+  intent_ready: "待确认问题",
+  outline_ready: "待确认",
+  running: "生成中",
+  generating: "生成中",
+  done: "完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+// reports.depth 的取值 → 「研究深度」档名。五档名与 EffortPicker 的档位表同名
+// (概览/标准/深入/详尽/穷尽),取值集是 report-view.tsx 的 DEPTHS=[1,2,4,8,16]。
+//
+// 为什么放在这里而不是留在 report-view.tsx:那边的 DEPTH_LABELS 是**按下标**的
+// 有序档位表(喂给滑块控件),而只拿到 reports.depth 数值的消费方(dev/logs 活动流)
+// 需要的是**按取值**反查。两种形状各写一份就会漂移,所以档名收敛到这张表,
+// report-view.tsx 的有序表由它派生。
+export const REPORT_DEPTH: Record<string, string> = {
+  "1": "概览",
+  "2": "标准",
+  "4": "深入",
+  "8": "详尽",
+  "16": "穷尽",
+};
+
+// ask_jobs.status 的取值集 {running, done, cancelled, failed}——真源见
+// backend/app/services/ask_execution.py 的 `_finish()` 落终态三选一,以及
+// backend/app/repositories/sqlite/ask_state_store.py 的初始态 'running'。
+// 措辞与上面 REPORT_STATUS 的同名状态对齐(完成/失败/已取消/生成中)。
+export const ASK_STATUS: Record<string, string> = {
+  running: "生成中",
+  done: "完成",
+  failed: "失败",
+  cancelled: "已取消",
 };
 
 /**
