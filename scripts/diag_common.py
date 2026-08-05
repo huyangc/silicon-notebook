@@ -504,7 +504,9 @@ def _dotenv_database_url(path: Path) -> Optional[str]:
         # exactly the stale-database misread this resolver exists to prevent.
         if key.startswith("export ") or key.startswith("export\t"):
             key = key[len("export"):].strip()
-        if key != "DATABASE_URL":
+        # The application's Settings uses `case_sensitive=False`, so
+        # `database_url=` is a live spelling too.
+        if key.upper() != "DATABASE_URL":
             continue
         rest = rest.strip()
         if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
@@ -513,11 +515,29 @@ def _dotenv_database_url(path: Path) -> Optional[str]:
     return value
 
 
+def _environ_case_insensitive(name: str) -> Optional[str]:
+    """Look up a process variable the way ``Settings(case_sensitive=False)`` does.
+
+    An exact hit wins; otherwise the first case-insensitive match in a stable
+    order, so two spellings in one environment resolve deterministically.
+    """
+    import os as _os
+
+    exact = _os.environ.get(name)
+    if exact is not None:
+        return exact
+    wanted = name.lower()
+    for key in sorted(_os.environ):
+        if key.lower() == wanted:
+            return _os.environ[key]
+    return None
+
+
 def _env_file_for(root: str) -> Optional[Path]:
     """Mirror ``app.core.config``: the override wins, empty means read nothing."""
     import os as _os
 
-    override = _os.environ.get("SILICON_NOTEBOOK_ENV_FILE")
+    override = _environ_case_insensitive("SILICON_NOTEBOOK_ENV_FILE")
     if override is None:
         return Path(root) / ".env"
     override = override.strip()
@@ -547,7 +567,7 @@ def resolve_database_target(root: str) -> DatabaseTarget:
     """Resolve the serving database from DATABASE_URL, never by assumption."""
     import os as _os
 
-    raw = _os.environ.get("DATABASE_URL")
+    raw = _environ_case_insensitive("DATABASE_URL")
     source = "env"
     if raw is None or not str(raw).strip():
         env_file = _env_file_for(root)

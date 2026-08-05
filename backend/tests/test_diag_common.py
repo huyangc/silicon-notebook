@@ -278,3 +278,33 @@ def test_sqlite_target_resolves_the_file_the_url_actually_names(tmp_path, monkey
     # A PostgreSQL deployment never yields a file to read.
     monkeypatch.setenv("DATABASE_URL", "postgresql://h/db")
     assert common.resolve_database_target(str(tmp_path)).resolve_sqlite_file("/tmp/x") is None
+
+
+def test_database_target_matches_the_application_case_insensitivity(
+    tmp_path, monkeypatch
+):
+    """`Settings(case_sensitive=False)` accepts `database_url=`, so this must too.
+
+    Ignoring the lowercase spelling defaults to SQLite and puts the diagnostics
+    back on a stale file while PostgreSQL is live.
+    """
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+
+    (tmp_path / ".env").write_text("database_url=postgresql://h/db\n", encoding="utf-8")
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    (tmp_path / ".env").write_text("Database_Url=postgresql://h/db\n", encoding="utf-8")
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    # The process environment follows the same rule.
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setenv("database_url", "postgresql://h/db")
+    target = common.resolve_database_target(str(tmp_path))
+    assert target.backend == "postgres" and target.source == "env"
+    monkeypatch.delenv("database_url")
+
+    # A different key that merely contains the name is still not a match.
+    (tmp_path / ".env").write_text("MY_DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+    assert common.resolve_database_target(str(tmp_path)).is_sqlite

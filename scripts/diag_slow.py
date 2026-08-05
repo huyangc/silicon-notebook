@@ -883,18 +883,18 @@ def report_reasoning_ppr_audit(local_dir, root):
 def report_artifacts(local_dir, deep, root=None):
     section("DB / 索引工件")
     target = _db_target(local_dir, root)
-    if not target.is_sqlite:
-        # 索引工件(scale index)与后端无关,继续报;只有 SQLite 文件那部分要收回。
+    # 索引工件(scale index)与后端无关,继续报;SQLite 文件那部分整段收回——说了
+    # 「跳过」却仍打印那个文件的体积和 WAL 警告,等于把陈旧库重新摆上来。
+    db = target.resolve_sqlite_file(local_dir)
+    if db is None:
         print(f"  (当前部署是 {target.explain()} — 跳过 SQLite 文件/向量迁移检查，"
               "下面的索引工件仍然有效)")
-    db = target.resolve_sqlite_file(local_dir) or os.path.join(
-        local_dir, "silicon_notebook.db"
-    )
-    for f in (db, db + "-wal", db + "-shm"):
-        if os.path.exists(f):
-            print(f"  {os.path.getsize(f)/1e9:8.2f} GB  {os.path.basename(f)}")
-    if os.path.exists(db + "-wal") and os.path.getsize(db + "-wal") > 1e9:
-        print("  ⚠ WAL > 1GB:有长期读快照挡住 checkpoint(常见=常驻服务长事务),重启服务后应回落")
+    else:
+        for f in (db, db + "-wal", db + "-shm"):
+            if os.path.exists(f):
+                print(f"  {os.path.getsize(f)/1e9:8.2f} GB  {os.path.basename(f)}")
+        if os.path.exists(db + "-wal") and os.path.getsize(db + "-wal") > 1e9:
+            print("  ⚠ WAL > 1GB:有长期读快照挡住 checkpoint(常见=常驻服务长事务),重启服务后应回落")
     idx_root = os.path.join(local_dir, "storage", "kg_index")
     for d in sorted(glob.glob(os.path.join(idx_root, "nb-*"))):
         m = os.path.join(d, "manifest.json")

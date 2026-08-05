@@ -113,3 +113,39 @@ def test_db_target_prefers_the_explicit_root_over_the_local_directory(
         nested = repo / rel
         nested.mkdir(parents=True, exist_ok=True)
         assert slow._db_target(str(nested)).backend == "postgres"
+
+
+def test_artifacts_section_never_reports_the_stale_sqlite_file_on_postgres(
+    tmp_path, monkeypatch, capsys
+):
+    """Saying "skipping SQLite files" and then printing them is a contradiction.
+
+    The earlier fallback restored the fixed path when `resolve_sqlite_file()`
+    returned None, so a PostgreSQL deployment still saw that stale database's
+    size and its WAL warning right below the skip message.
+    """
+    slow = load_slow()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    repo = tmp_path / "repo"
+    (repo / ".local").mkdir(parents=True)
+    (repo / ".env").write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+    local_dir = repo / ".local"
+    # A leftover SQLite file from before the migration is exactly the trap.
+    (local_dir / "silicon_notebook.db").write_bytes(b"stale")
+    (local_dir / "silicon_notebook.db-wal").write_bytes(b"stale-wal")
+
+    slow.report_artifacts(str(local_dir), deep=False, root=str(repo))
+
+    out = capsys.readouterr().out
+    assert "跳过 SQLite 文件" in out
+    assert "silicon_notebook.db" not in out
+    assert "WAL" not in out
+
+    # On a real SQLite deployment the same section still reports the file.
+    (repo / ".env").write_text("DATABASE_URL=sqlite:///.local/silicon_notebook.db\n",
+                               encoding="utf-8")
+    slow.report_artifacts(str(local_dir), deep=False, root=str(repo))
+    sqlite_out = capsys.readouterr().out
+    assert "silicon_notebook.db" in sqlite_out
+    assert "跳过 SQLite 文件" not in sqlite_out
