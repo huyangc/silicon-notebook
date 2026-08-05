@@ -308,3 +308,55 @@ def test_database_target_matches_the_application_case_insensitivity(
     # A different key that merely contains the name is still not a match.
     (tmp_path / ".env").write_text("MY_DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
     assert common.resolve_database_target(str(tmp_path)).is_sqlite
+
+
+def test_dotenv_values_drop_inline_comments_but_keep_quoted_hashes(
+    tmp_path, monkeypatch
+):
+    """`DATABASE_URL=sqlite:///x.db # note` is valid dotenv; the comment is not path."""
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+
+    (tmp_path / ".env").write_text(
+        "DATABASE_URL=sqlite:///.local/prod.db # production\n", encoding="utf-8"
+    )
+    target = common.resolve_database_target(str(tmp_path))
+    assert target.sqlite_path == str(tmp_path / ".local" / "prod.db")
+
+    (tmp_path / ".env").write_text(
+        'DATABASE_URL="sqlite:///.local/prod.db" # production\n', encoding="utf-8"
+    )
+    assert common.resolve_database_target(str(tmp_path)).sqlite_path == str(
+        tmp_path / ".local" / "prod.db"
+    )
+
+    # A `#` inside quotes belongs to the value.
+    (tmp_path / ".env").write_text(
+        'DATABASE_URL="postgresql://u:p#w@h/db"\n', encoding="utf-8"
+    )
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    # A URL fragment with no preceding space is not a comment either.
+    (tmp_path / ".env").write_text(
+        "DATABASE_URL=sqlite:///.local/a#b.db\n", encoding="utf-8"
+    )
+    assert common.resolve_database_target(str(tmp_path)).sqlite_path.endswith("a#b.db")
+
+
+def test_env_file_override_uses_the_exact_bootstrap_lookup(tmp_path, monkeypatch):
+    """`app.core.config` reads this one with a plain `os.environ.get`.
+
+    Honoring a lowercase spelling here would resolve a different backend than
+    the service actually uses.
+    """
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    (tmp_path / ".env").write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+    ignored = tmp_path / "ignored.env"
+    ignored.write_text("DATABASE_URL=sqlite:///./x.db\n", encoding="utf-8")
+
+    monkeypatch.setenv("silicon_notebook_env_file", str(ignored))
+    # The application ignores the lowercase spelling, so this must too.
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"

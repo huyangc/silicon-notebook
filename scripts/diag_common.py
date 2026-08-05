@@ -508,11 +508,32 @@ def _dotenv_database_url(path: Path) -> Optional[str]:
         # `database_url=` is a live spelling too.
         if key.upper() != "DATABASE_URL":
             continue
-        rest = rest.strip()
-        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
-            rest = rest[1:-1]
-        value = rest          # 后出现的覆盖先出现的,与 dotenv 一致
+        value = _dotenv_value(rest)   # 后出现的覆盖先出现的,与 dotenv 一致
     return value
+
+
+def _dotenv_value(raw: str) -> str:
+    """Unquote and strip an inline comment the way python-dotenv does.
+
+    ``DATABASE_URL=sqlite:///.local/prod.db # production`` is valid dotenv and
+    the application loads it without the trailing comment.  Keeping the comment
+    here turns the resolved path into a file that does not exist.  Inside
+    quotes a ``#`` is content, not a comment.
+    """
+    rest = raw.strip()
+    if rest[:1] in ('"', "'"):
+        quote = rest[0]
+        end = rest.find(quote, 1)
+        return rest[1:end] if end > 0 else rest[1:]
+    if rest.startswith("#"):
+        return ""
+    marker = rest.find(" #")
+    if marker >= 0:
+        rest = rest[:marker]
+    marker = rest.find("\t#")
+    if marker >= 0:
+        rest = rest[:marker]
+    return rest.strip()
 
 
 def _environ_case_insensitive(name: str) -> Optional[str]:
@@ -537,7 +558,11 @@ def _env_file_for(root: str) -> Optional[Path]:
     """Mirror ``app.core.config``: the override wins, empty means read nothing."""
     import os as _os
 
-    override = _environ_case_insensitive("SILICON_NOTEBOOK_ENV_FILE")
+    # Exact lookup on purpose: `app.core.config` reads this bootstrap variable
+    # with a plain `os.environ.get` before Settings exists, so its
+    # case-insensitivity does not apply.  Being more permissive here would
+    # resolve a different backend than the service actually uses.
+    override = _os.environ.get("SILICON_NOTEBOOK_ENV_FILE")
     if override is None:
         return Path(root) / ".env"
     override = override.strip()
