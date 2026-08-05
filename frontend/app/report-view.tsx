@@ -212,6 +212,8 @@ export type ReportDetailT = ReportSummaryT & {
     element_id?: string;
     snippet?: string;
     tier?: string;
+    /** 证据是否来自已挂载参考库（按归属 notebook 判定，不是 tier）。 */
+    from_reference_library?: boolean;
     /** 同一可区分资料可能有多个锚点；仅用于统计，不改引用跳转。 */
     family_key?: string;
   }[];
@@ -813,7 +815,13 @@ function baseReferenceSourceCount(
 ): number {
   const seen = new Set<string>();
   for (const reference of references || []) {
-    if (reference?.tier !== "base") continue;
+    // 是否来自挂载库由**归属 notebook** 判定：用户挂载自己的另一个 notebook 时
+    // tier 仍是 "personal"，只看 tier 会把它的引用全漏掉。旧报告没有该字段，
+    // 回退到 tier 信号。
+    const mounted = reference?.from_reference_library !== undefined
+      ? Boolean(reference.from_reference_library)
+      : reference?.tier === "base";
+    if (!mounted) continue;
     // 参考库的知识证据可以合法地没有 source_id（后端装配时用 family_key 兜底）。
     // 但只有能标识**来源**的 key 才算数：装配的最后兜底 `evidence:<锚点>` 每条
     // 引用都不同，计入它会把一份身份未知的资料数成好几份。

@@ -2189,7 +2189,11 @@ def _main(argv=None) -> int:
     parser.add_argument("--deadline-seconds", type=float, default=4.0)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if not _explicit_db_flag(sys.argv[1:] if argv is None else argv):
-        target = diag_common.resolve_database_target(os.getcwd())
+        # Anchor on the repository that contains this script, not the cwd:
+        # invoked by absolute path from elsewhere, cwd is unrelated to the
+        # deployment and a PostgreSQL install would fall back to "default
+        # SQLite" — the stale-file misdiagnosis this guard exists to stop.
+        target = diag_common.resolve_database_target(str(_SCRIPT_DIR.parent))
         if not target.is_sqlite:
             sys.stdout.write(
                 f"{target.skip_note('本诊断')}\n"

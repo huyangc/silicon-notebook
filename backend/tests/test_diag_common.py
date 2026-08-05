@@ -500,3 +500,32 @@ def test_duplicate_case_variants_follow_file_order(tmp_path, monkeypatch):
     )
     target = common.resolve_database_target(str(tmp_path))
     assert target.is_sqlite and target.sqlite_path.endswith("new.db")
+
+
+def test_diag_db_anchors_on_the_repository_not_the_cwd(tmp_path, monkeypatch, capsys):
+    """Invoked by absolute path from elsewhere, cwd says nothing about the deployment."""
+    import importlib.util as _util
+
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    spec = _util.spec_from_file_location("diag_db_root_probe", SCRIPTS / "diag_db.py")
+    module = _util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    unrelated = tmp_path / "elsewhere"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+
+    # The real repository .env decides; this run must not claim a SQLite default
+    # just because the working directory happens to hold no configuration.
+    resolved = module.diag_common.resolve_database_target(
+        str(module._SCRIPT_DIR.parent)
+    )
+    from_cwd = module.diag_common.resolve_database_target(str(unrelated))
+    assert from_cwd.source == "default"          # cwd 什么都不知道
+    assert resolved.source in {"env", "dotenv", "default"}
+    # 判据必须取自仓库那一份，而不是 cwd 那一份。
+    assert module._SCRIPT_DIR.parent != unrelated

@@ -168,6 +168,17 @@ def test_reader_disclosure_names_reference_library_material_it_cited():
     resolved to a mounted base.  "Based on the 4 visible sources" then reads as
     the whole evidence basis, which is the ambiguity being removed here.
     """
+    # 挂载自有 notebook 时 tier 仍是 "personal",所以判据是归属而不是 tier。
+    # 两个方向分开断言:混在一条里,两种错误会互相抵消、总数照样对。
+    assert base_reference_source_count([
+        {"key": "k1", "tier": "personal", "from_reference_library": True,
+         "source_id": "src-m1"},
+    ]) == 1
+    assert base_reference_source_count([
+        {"key": "k2", "tier": "base", "from_reference_library": False,
+         "source_id": "src-local"},
+    ]) == 0
+
     references = [
         {"key": "k1", "tier": "base", "source_id": "src-b1"},
         {"key": "k2", "tier": "base", "source_id": "src-b1"},   # 同一份资料的第二个锚点

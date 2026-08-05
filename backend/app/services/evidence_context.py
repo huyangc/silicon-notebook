@@ -142,7 +142,14 @@ class EvidenceContextService:
             title = source_display_title(row)
             file_name = str(row.get("file_name") or "").strip()
             if title or file_name:
-                result[source_id] = {"title": title, "file_name": file_name}
+                result[source_id] = {
+                    "title": title,
+                    "file_name": file_name,
+                    # Owning notebook, already in the same bounded read.  Tier
+                    # cannot stand in for "came from a mounted library": a
+                    # mounted notebook the user owns keeps tier="personal".
+                    "notebook_id": str(row.get("notebook_id") or ""),
+                }
         return result
 
     def collection_item_citations(

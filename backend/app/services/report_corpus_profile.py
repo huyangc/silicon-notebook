@@ -290,7 +290,13 @@ def base_reference_source_count(references: Sequence[Any]) -> int:
     seen: set[str] = set()
     for reference in references or []:
         row = reference if isinstance(reference, dict) else {}
-        if _text(row.get("tier")) != "base":
+        # `from_reference_library` is decided from the owning notebook.  Tier
+        # alone is wrong: a mounted notebook the user owns keeps tier
+        # "personal", so its citations would never be counted.  Legacy
+        # references predate the flag and fall back to the tier signal.
+        marker = row.get("from_reference_library")
+        mounted = bool(marker) if marker is not None else _text(row.get("tier")) == "base"
+        if not mounted:
             continue
         # Base KG evidence can legitimately carry no source_id, so fall back to
         # the assembled family key.  But only keys that identify a *source*

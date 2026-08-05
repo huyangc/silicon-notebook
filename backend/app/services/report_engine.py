@@ -2238,6 +2238,23 @@ class ReportEngine:
                 "title", str(ctx.get("source_title") or "").strip()
             )
 
+        def _from_reference_library(ctx) -> bool:
+            """True when the cited source belongs to a mounted library.
+
+            Uses the owning notebook, which the citation lookup already carries:
+            `tier` describes the library's own kind, so a mounted notebook the
+            user owns reports "personal" and would be miscounted as local.
+            An unresolved owner falls back to the tier signal rather than
+            guessing that the evidence is local.
+            """
+            source_id = str(ctx.get("source_id") or "")
+            owner = str(
+                (citation_source_info.get(source_id) or {}).get("notebook_id", "")
+            ).strip()
+            if owner:
+                return owner != notebook_id
+            return str(ctx.get("tier") or "") == "base"
+
         def _source_file_name(ctx):
             source_id = str(ctx.get("source_id") or "")
             return (citation_source_info.get(source_id) or {}).get(
@@ -2318,6 +2335,10 @@ class ReportEngine:
                             "element_id": str(ctx.get("element_id") or ""),
                             "snippet": str(ctx.get("snippet") or ""),
                             "tier": str(ctx.get("tier") or "personal"),
+                            # Whether the evidence came from a mounted library,
+                            # decided by owning notebook rather than by tier: a
+                            # mounted notebook the user owns stays "personal".
+                            "from_reference_library": _from_reference_library(ctx),
                             "provenance": dict(ctx.get("provenance") or {}),
                         })
                     _gk = f"k{ref_pos[dk]}"

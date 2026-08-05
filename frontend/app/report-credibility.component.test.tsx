@@ -128,6 +128,30 @@ test("资料基础点明引用到的参考库资料，按来源去重而非按�
   );
   expect(screen.getByText("另引用了 2 份参考库资料，未计入上述统计。")).toBeVisible();
 
+  // 挂载自有 notebook 时 tier 仍是 personal，判据是归属标记而不是 tier。
+  // 两个方向分开断言：混在一起两种错误会互相抵消。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k1", label: "a", tier: "personal", from_reference_library: true,
+          source_id: "src-m1" },
+      ],
+    })} />,
+  );
+  expect(screen.getByText("另引用了 1 份参考库资料，未计入上述统计。")).toBeVisible();
+
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k2", label: "b", tier: "base", from_reference_library: false,
+          source_id: "src-local" },
+      ],
+    })} />,
+  );
+  expect(screen.queryByText(/参考库资料/)).toBeNull();
+
   // 纯本地报告一个字都不该多说。
   rerender(
     <ReportCorpusBasis report={detail({
