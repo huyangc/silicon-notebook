@@ -10,6 +10,7 @@ import { LogList } from "./components/LogList";
 import { LogDetail } from "./components/LogDetail";
 import { fetchMe, type AuthUser } from "../../auth.ts";
 import { fetchAdminUsers, type AdminUserUsage } from "../../admin/usage/api.ts";
+import { fetchSystemConfiguration } from "../../system-api.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
 import { usernameForOwner } from "./owner";
@@ -84,6 +85,16 @@ export default function LogsPage() {
   const [date, setDate] = useState(TODAY_VALUE);
   const [days, setDays] = useState<string[]>([]);
   const [view, setView] = useState<LogsView>("activity");
+  // 部署开关 USER_ACTIVITY_VIEW_ENABLED 的前端镜像,经 /system/config 下发。默认
+  // true——与后端默认值、以及该字段缺失(旧后端)时的安全兜底一致,这样绝大多数
+  // 「开着」的部署在这次网络往返完成前不会有任何可见变化;只有明确取到 false
+  // 才隐藏「活动」tab,不会出现「先假设 false、取到 true 后再冒出来」的反向闪烁。
+  const [activityViewEnabled, setActivityViewEnabled] = useState(true);
+  // 渲染只认这个值:能力位关闭时把「活动」状态收敛成「模型调用」,即使 `view`
+  // state 本身(默认值,或历史 `?view=activity` 深链)还没被下面的归一 effect
+  // 改写过来——两者之间有一次网络往返的窗口,渲染不能在这段时间里露出一个三个
+  // 端点全 404 的视图。
+  const effectiveView: LogsView = view === "activity" && !activityViewEnabled ? "llm" : view;
 
   const filterParams = useMemo(
     () => ({ kind, status, model, q, owner, date }),
@@ -132,6 +143,27 @@ export default function LogsPage() {
     const v = params.get("view");
     if (v === "llm" || v === "activity") setView(v);
   }, []);
+
+  // /system/config 能力位:取不到就保持默认 true(见上面 activityViewEnabled 的
+  // 状态注释),不藏掉一个其实可用的视图。
+  useEffect(() => {
+    fetchSystemConfiguration()
+      .then((config) => setActivityViewEnabled(config.user_activity_view_enabled))
+      .catch(() => undefined);
+  }, []);
+
+  // 能力位关闭时把已经落进 state/URL 的 `view=activity`(初始默认值,或历史
+  // `?view=activity` 深链)归一成 `llm`——渲染已经用 effectiveView 挡住了内容,
+  // 这里补的是 URL 与 state 本身,好让「模型调用」侧按 view 门控的取数 effect
+  // 正常触发,也不留下一个手工分享出去会 404 的链接。
+  useEffect(() => {
+    if (activityViewEnabled || view !== "activity") return;
+    setView("llm");
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    params.set("view", "llm");
+    window.history.replaceState(null, "", `?${params.toString()}`);
+  }, [activityViewEnabled, view]);
 
   // current user + (admin-only) user list for the drill-down dropdown
   useEffect(() => {
@@ -484,7 +516,7 @@ export default function LogsPage() {
               下拉里没有今天，而空值又被「全部时间」占着，这位用户的当日活动
               **没有任何办法筛出来**；反过来，只有模型调用的那些天会出现在下拉里、
               选中后永远是空流。所以这里换成原生日期选择器，日历上的任何一天都能选。 */}
-        {view === "activity" ? (
+        {effectiveView === "activity" ? (
           <span className="logview-date-picker">
             <input
               aria-label="按日期筛选活动"
@@ -523,15 +555,19 @@ export default function LogsPage() {
 
       <div className="logview-views">
         <div className="logview-tabs">
+          {/* 能力位关闭时不渲染这个 tab——不只是禁用,压根不给一个会打三个 404
+              端点的入口。 */}
+          {activityViewEnabled ? (
+            <button
+              className={`logview-tab${effectiveView === "activity" ? " active" : ""}`}
+              onClick={() => selectView("activity")}
+              type="button"
+            >
+              活动
+            </button>
+          ) : null}
           <button
-            className={`logview-tab${view === "activity" ? " active" : ""}`}
-            onClick={() => selectView("activity")}
-            type="button"
-          >
-            活动
-          </button>
-          <button
-            className={`logview-tab${view === "llm" ? " active" : ""}`}
+            className={`logview-tab${effectiveView === "llm" ? " active" : ""}`}
             onClick={() => selectView("llm")}
             type="button"
           >
@@ -540,7 +576,7 @@ export default function LogsPage() {
         </div>
       </div>
 
-      {view === "activity" ? (
+      {effectiveView === "activity" ? (
         <ActivityView
           scopeKey={activityScopeKey}
           since={activityRange.since}

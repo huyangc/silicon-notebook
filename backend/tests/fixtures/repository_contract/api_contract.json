@@ -8829,11 +8829,16 @@
               "exclusiveMinimum": 0.0,
               "title": "Source Upload Max Files Per Batch",
               "type": "integer"
+            },
+            "user_activity_view_enabled": {
+              "title": "User Activity View Enabled",
+              "type": "boolean"
             }
           },
           "required": [
             "source_upload_max_bytes",
-            "source_upload_max_files_per_batch"
+            "source_upload_max_files_per_batch",
+            "user_activity_view_enabled"
           ],
           "title": "SystemConfiguration",
           "type": "object"

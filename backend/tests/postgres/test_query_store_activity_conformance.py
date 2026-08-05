@@ -476,6 +476,27 @@ def test_source_count_excludes_hidden_projection_sources(postgres_database, stor
     assert rows[0]["sources"] == 1
 
 
+def test_reports_count_matches_activity_stream_entries(postgres_database, store):
+    """与 SQLite 侧逐字同一条(P2-2,codex 第 3 轮):左栏「报告 N」必须与中栏活动流
+    真正展开的报告条目数一致——两者都必须按 created_by 收窄,否则共享笔记本里别的
+    可写成员建的报告会被计进 owner 的表头,点进去却在活动流里看不到对应条目。"""
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u1")
+        _insert_user(connection, "u2")
+        _insert_notebook(connection, "n1", "u1")
+        _insert_report(connection, "rep-mine", "n1", "u1", NOW)
+        _insert_report(connection, "rep-other-member", "n1", "u2", NOW)
+
+    rows = store.list_user_notebooks("u1")
+    reports_count = rows[0]["reports"]
+    assert reports_count == 1
+
+    activity = store.list_user_activity("u1", notebook_id="n1", limit=50)
+    report_ids = {item["id"] for item in activity["items"] if item["type"] == "report"}
+    assert report_ids == {"rep-mine"}
+    assert len(report_ids) == reports_count
+
+
 def test_browser_local_day_window_selects_that_local_day(postgres_database, store):
     """与 SQLite 侧逐字同一条(F1):选「浏览器本地日」要真的选中那一天的行。
 

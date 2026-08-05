@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   fetchRecords: vi.fn(),
   fetchMe: vi.fn(),
   fetchAdminUsers: vi.fn(),
+  fetchSystemConfiguration: vi.fn(),
   fetchUserActivity: vi.fn(),
   fetchUserAskDetail: vi.fn(),
   fetchUserNotebookSources: vi.fn(),
@@ -24,6 +25,9 @@ vi.mock("./api.ts", () => ({
   fetchRecords: mocks.fetchRecords,
 }));
 vi.mock("../../auth.ts", () => ({ fetchMe: mocks.fetchMe }));
+vi.mock("../../system-api.ts", () => ({
+  fetchSystemConfiguration: mocks.fetchSystemConfiguration,
+}));
 vi.mock("../../admin/usage/api.ts", () => ({
   FORBIDDEN_SENTINEL: "forbidden",
   fetchAdminUsers: mocks.fetchAdminUsers,
@@ -44,6 +48,11 @@ import LogsPage from "./page";
 function primeMocks(days: string[] = [], newestSeq: number | null = null) {
   mocks.fetchMe.mockResolvedValue({
     id: "user-1", email: "", display_name: "", role: "user", username: "a00123456",
+  });
+  mocks.fetchSystemConfiguration.mockResolvedValue({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    user_activity_view_enabled: true,
   });
   mocks.fetchChannels.mockResolvedValue({ channels: [{ name: "llm", count: 0 }] });
   mocks.fetchDays.mockResolvedValue({ channel: "llm", days });
@@ -278,4 +287,60 @@ test("切到「活动」后停止轮询模型调用日志，且不留下关不�
 
   await clickTab("模型调用");
   expect(screen.getByRole("checkbox")).not.toBeChecked();
+});
+
+
+// P2-1(codex 第 3 轮):USER_ACTIVITY_VIEW_ENABLED=false 时前端不该默认进一个
+// 三个端点全 404 的视图。能力位经 /system/config 下发,页面必须据此隐藏「活动」
+// tab 并把默认视图落回「模型调用」。
+test("能力位关闭时不渲染「活动」tab，默认视图落在「模型调用」", async () => {
+  primeMocks();
+  mocks.fetchSystemConfiguration.mockResolvedValue({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    user_activity_view_enabled: false,
+  });
+  render(<LogsPage />);
+
+  await waitFor(() => expect(mocks.fetchRecords).toHaveBeenCalled());
+  expect(screen.queryByRole("button", { name: "活动" })).toBeNull();
+  expect(screen.getByRole("button", { name: "模型调用" })).toHaveClass("active");
+  // 活动视图自己的三个端点一次都不该被打——不是「隐藏了 tab 但还是取了数」。
+  expect(mocks.fetchUserActivity).not.toHaveBeenCalled();
+  expect(mocks.fetchUserNotebooks).not.toHaveBeenCalled();
+});
+
+
+// 深链 `?view=activity` 是手工构造或历史书签,不能因为部署关掉了能力位就打开
+// 一个三个端点全 404 的视图——必须归一到「模型调用」，且改写回地址栏。
+test("能力位关闭时?view=activity深链被归一成模型调用视图", async () => {
+  window.history.replaceState(null, "", "/dev/logs?view=activity");
+  primeMocks();
+  mocks.fetchSystemConfiguration.mockResolvedValue({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    user_activity_view_enabled: false,
+  });
+  render(<LogsPage />);
+
+  await waitFor(() => expect(mocks.fetchRecords).toHaveBeenCalled());
+  expect(screen.queryByRole("button", { name: "活动" })).toBeNull();
+  expect(mocks.fetchUserActivity).not.toHaveBeenCalled();
+  await waitFor(() => {
+    expect(new URLSearchParams(window.location.search).get("view")).toBe("llm");
+  });
+});
+
+
+// 能力位缺失或取不到(旧后端、网络错误)时必须按 true 处理——「活动」tab 仍在,
+// 不能因为一次瞬时失败就藏掉一个其实可用的视图。system-api.test.mjs 已经钉住
+// fetchSystemConfiguration 自己对「字段缺失」的归一(defaults to true);这里补的
+// 是页面对「这次调用整个失败/挂起」的兜底路径,同一份默认 state 覆盖两种情形。
+test("拿不到能力位时按 true 处理，活动 tab 仍在", async () => {
+  primeMocks();
+  mocks.fetchSystemConfiguration.mockRejectedValue(new Error("network"));
+  render(<LogsPage />);
+
+  await waitFor(() => expect(mocks.fetchUserActivity).toHaveBeenCalled());
+  expect(screen.getByRole("button", { name: "活动" })).toHaveClass("active");
 });

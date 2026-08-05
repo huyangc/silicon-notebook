@@ -13,6 +13,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
     return new Response(JSON.stringify({
       source_upload_max_bytes: 50 * 1024 * 1024,
       source_upload_max_files_per_batch: 20,
+      user_activity_view_enabled: false,
     }), {
       status: 200,
     });
@@ -22,6 +23,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
     assert.deepEqual(await fetchSystemConfiguration(), {
       source_upload_max_bytes: 50 * 1024 * 1024,
       source_upload_max_files_per_batch: 20,
+      user_activity_view_enabled: false,
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -30,6 +32,23 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
 
   assert.match(calls[0].url, /\/api\/system\/config$/);
   assert.equal(calls[0].init.headers.get("Authorization"), "Bearer source-upload-token");
+});
+
+test("fetchSystemConfiguration defaults user_activity_view_enabled to true when the field is missing (old backend)", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    // user_activity_view_enabled 刻意不下发,模拟旧后端。
+  }), {
+    status: 200,
+  });
+  try {
+    const config = await fetchSystemConfiguration();
+    assert.equal(config.user_activity_view_enabled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("fetchSystemConfiguration rejects malformed or unsafe byte caps", async () => {

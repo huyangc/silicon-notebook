@@ -502,12 +502,17 @@ class QueryStore:
                         [*ids, user_id],
                     ).fetchall()
                 }
+                # created_by = %s 同 questions 一条理由(与 SQLite 侧逐字同一条):
+                # list_user_activity 展开清单也是按 created_by 收窄的 owner-only 报告。
+                # 少了它,共享笔记本里别的可写成员建的报告会被算进这个笔记本 owner 的
+                # 表头,而点开活动流却看不到对应条目——同一屏自相矛盾。
                 reports = {
                     row["k"]: row["c"]
                     for row in db.execute(
                         f"SELECT notebook_id AS k, COUNT(*) AS c FROM reports "
-                        f"WHERE notebook_id IN ({placeholders}) GROUP BY notebook_id",
-                        ids,
+                        f"WHERE notebook_id IN ({placeholders}) AND created_by = %s "
+                        f"GROUP BY notebook_id",
+                        [*ids, user_id],
                     ).fetchall()
                 }
         return [

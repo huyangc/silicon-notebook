@@ -24,6 +24,10 @@ export type SystemConfiguration = {
   source_upload_max_bytes: number;
   /** Fixed multipart resource guard published by the backend. */
   source_upload_max_files_per_batch: number;
+  /** /dev/logs 的能力位:后端 USER_ACTIVITY_VIEW_ENABLED 是否开启「活动」tab。
+   *  旧后端可能不下发这个字段——缺失或类型不对时按 `true` 处理(后端默认就是开
+   *  的,不该在新前端 + 旧后端组合下把一个其实可用的视图藏掉)。 */
+  user_activity_view_enabled: boolean;
 };
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
@@ -37,17 +41,22 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("系统上传配置格式无效");
   }
-  const limit = (value as Record<string, unknown>).source_upload_max_bytes;
-  const batchFiles = (value as Record<string, unknown>).source_upload_max_files_per_batch;
+  const record = value as Record<string, unknown>;
+  const limit = record.source_upload_max_bytes;
+  const batchFiles = record.source_upload_max_files_per_batch;
   if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0) {
     throw new TypeError("系统上传配置格式无效");
   }
   if (typeof batchFiles !== "number" || !Number.isSafeInteger(batchFiles) || batchFiles <= 0) {
     throw new TypeError("系统上传配置格式无效");
   }
+  // 缺失(旧后端)或类型不符一律按 true 处理——见上面字段注释,这是安全默认而非
+  // 校验失败,不走前两个字段那样的抛错路径。
+  const activityViewEnabled = record.user_activity_view_enabled;
   return {
     source_upload_max_bytes: limit,
     source_upload_max_files_per_batch: batchFiles,
+    user_activity_view_enabled: typeof activityViewEnabled === "boolean" ? activityViewEnabled : true,
   };
 }
 

@@ -22,8 +22,12 @@ def _seed(repo):
         for sid in ("s1", "s2"):
             db.execute("INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at)"
                        " VALUES (?,?,?,?,?,?)", (sid, "n1", sid, "md", now, now))
-        db.execute("INSERT INTO reports (id,notebook_id,question,created_at,updated_at)"
-                   " VALUES (?,?,?,?,?)", ("r1", "n1", "q?", now, now))
+        db.execute("INSERT INTO reports (id,notebook_id,question,created_by,created_at,updated_at)"
+                   " VALUES (?,?,?,?,?,?)", ("r1", "n1", "q?", "u1", now, now))
+        # 共享笔记本里另一位可写成员(u2)建的报告:表头必须**不**把它算进 owner(u1)
+        # 的计数(P2-2,codex 第 3 轮),否则「报告 N」与活动流展开的条目数对不上。
+        db.execute("INSERT INTO reports (id,notebook_id,question,created_by,created_at,updated_at)"
+                   " VALUES (?,?,?,?,?,?)", ("r2", "n1", "shared?", "u2", now, now))
         db.execute("INSERT INTO conversations (id,notebook_id,created_by,created_at,updated_at)"
                    " VALUES (?,?,?,?,?)", ("c1", "n1", "u1", now, now))
         db.execute("INSERT INTO conversations (id,notebook_id,created_by,created_at,updated_at)"
@@ -87,6 +91,7 @@ def test_list_user_notebooks_counts_and_excludes_copying(repo):
     assert set(by_id) == {"n1", "n2"}                 # copying n3 排除
     assert by_id["n1"]["name"] == "NB-n1"
     assert by_id["n1"]["sources"] == 2
+    # r2 由共享成员 u2 建,不计入 owner(u1)的报告数(P2-2)。
     assert by_id["n1"]["reports"] == 1
     assert by_id["n1"]["conversations"] == 2
     assert by_id["n1"]["questions"] == 2
@@ -95,6 +100,21 @@ def test_list_user_notebooks_counts_and_excludes_copying(repo):
     # 提问计入用户总览，但这里刻意不把 n1 伪装成 u2 拥有的笔记本。
     assert repo.list_user_notebooks("u2") == []
     assert repo.list_user_notebooks("nobody") == []
+
+
+def test_reports_count_matches_activity_stream_entries(repo):
+    """P2-2(codex 第 3 轮 P2):左栏「报告 N」必须与中栏活动流真正展开的报告条目数
+    一致——两者都必须按 created_by 收窄。此前 ``list_user_notebooks`` 的报告聚合
+    没有这条谓词(``questions`` 那条本来就有),于是共享笔记本里别的可写成员建的
+    报告被计进了 owner 的表头,点进去却在活动流里看不到对应条目。"""
+    _seed(repo)
+    rows = repo.list_user_notebooks("u1")
+    reports_count = {r["id"]: r["reports"] for r in rows}["n1"]
+
+    activity = repo.list_user_activity("u1", notebook_id="n1", limit=50)
+    report_ids = {item["id"] for item in activity["items"] if item["type"] == "report"}
+    assert report_ids == {"r1"}  # r2(u2 建的)不在这位用户自己的活动流里
+    assert len(report_ids) == reports_count
 
 
 from fastapi.testclient import TestClient
