@@ -1846,6 +1846,12 @@ class ReportEngine:
                 persist(force=True)
                 return result, None
             except AskCancelled:
+                # A cancelled stage is exactly the one worth attributing: the
+                # user gave up because it ran long.  Record before re-raising.
+                self._emit_stage_timing(
+                    notebook_id, rid, "retrieve", started, section_index=i,
+                    cancelled=True,
+                )
                 with lock:
                     status[i]["phase"] = "失败"
                 persist(force=True)
@@ -1897,6 +1903,10 @@ class ReportEngine:
                         "失败" if drafted.get("failed") else "完成"
                     )
             except AskCancelled:
+                self._emit_stage_timing(
+                    notebook_id, rid, "draft", drafting_started, section_index=i,
+                    cancelled=True,
+                )
                 with lock:
                     status[i]["phase"] = "失败"
                 persist(force=True)
@@ -1963,9 +1973,16 @@ class ReportEngine:
                     status[index]["phase"] = "整合全篇证据"
         persist(force=True)
         synthesis_started = time.monotonic()
-        outcome = self._synthesize_report_blueprint(
-            outline, results, question, report_frame
-        )
+        try:
+            outcome = self._synthesize_report_blueprint(
+                outline, results, question, report_frame
+            )
+        except AskCancelled:
+            self._emit_stage_timing(
+                notebook_id, rid, "synthesis", synthesis_started,
+                sections=len(outline), cancelled=True,
+            )
+            raise
         self._emit_stage_timing(
             notebook_id, rid, "synthesis", synthesis_started,
             sections=len(outline),

@@ -177,6 +177,16 @@ def test_reader_disclosure_names_reference_library_material_it_cited():
     ]
     assert base_reference_source_count(references) == 2
 
+    # 参考库的知识证据可以合法地没有 source_id(装配侧正是用 family_key 兜底的),
+    # 只认 source_id 会把这些引用整条丢掉、报出 0 份参考库资料。
+    no_source_id = [
+        {"key": "k1", "tier": "base", "family_key": "source-title:a paper"},
+        {"key": "k2", "tier": "base", "family_key": "source-title:a paper"},
+        {"key": "k3", "tier": "base", "family_key": "evidence:xyz"},
+        {"key": "k4", "tier": "base"},                       # 两者都缺:无法计数
+    ]
+    assert base_reference_source_count(no_source_id) == 2
+
     profile = {"total_sources": 4, "metadata_sources": 4, "unknown_year": 2}
     markdown = "\n".join(
         corpus_profile_reader_markdown(profile, base_reference_sources=2)

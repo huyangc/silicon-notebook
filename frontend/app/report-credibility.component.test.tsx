@@ -112,6 +112,19 @@ test("资料基础点明引用到的参考库资料，按来源去重而非按�
   expect(screen.getByLabelText("资料基础")).toHaveTextContent("4 份资料");
   expect(screen.getByText("另引用了 2 份参考库资料，未计入上述统计。")).toBeVisible();
 
+  // 参考库知识证据可以没有 source_id，后端用 family_key 兜底，前端必须同口径。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: { corpus_profile: { total_sources: 4 } },
+      references: [
+        { key: "k1", label: "a", tier: "base", family_key: "source-title:a paper" },
+        { key: "k2", label: "a", tier: "base", family_key: "source-title:a paper" },
+        { key: "k3", label: "b", tier: "base", family_key: "evidence:xyz" },
+      ],
+    })} />,
+  );
+  expect(screen.getByText("另引用了 2 份参考库资料，未计入上述统计。")).toBeVisible();
+
   // 纯本地报告一个字都不该多说。
   rerender(
     <ReportCorpusBasis report={detail({

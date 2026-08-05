@@ -814,8 +814,11 @@ function baseReferenceSourceCount(
   const seen = new Set<string>();
   for (const reference of references || []) {
     if (reference?.tier !== "base") continue;
-    const sourceId = String(reference.source_id || "").trim();
-    if (sourceId) seen.add(sourceId);
+    // 参考库的知识证据可以合法地没有 source_id（后端装配时正是用 family_key
+    // 兜底的）；只认 source_id 会把这些引用整条丢掉。
+    const key = String(reference.source_id || "").trim()
+      || String(reference.family_key || "").trim();
+    if (key) seen.add(key);
   }
   return seen.size;
 }

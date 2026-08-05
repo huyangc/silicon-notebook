@@ -1601,6 +1601,36 @@ def test_stage_timing_attributes_retrieval_synthesis_and_drafting(repo, monkeypa
     )
 
 
+def test_stage_timing_is_recorded_when_a_stage_is_cancelled(repo, monkeypatch):
+    """A cancelled stage is the one most worth attributing — the user gave up."""
+    from app.services.cancellation import AskCancelled
+
+    eng = _mk_engine(repo, _OutlineLLM())
+    events = []
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
+
+    def _cancel(*_args, **_kwargs):
+        raise AskCancelled()
+
+    monkeypatch.setattr(eng, "_deep_dive", _cancel)
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+
+    with pytest.raises(AskCancelled):
+        eng._run_sections(
+            nb.id, rid,
+            [{"title": "A", "scope": "s"}, {"title": "B", "scope": "s"}],
+            "q", depth=2,
+        )
+
+    timings = [e for e in events if e.get("kind") == "report_stage_timing"]
+    assert timings, "cancelled retrieval left no wall-clock attribution"
+    assert all(e["stage"] == "retrieve" for e in timings)
+    assert all(e["cancelled"] is True for e in timings)
+
+
 def test_corpus_map_re_probes_an_unavailable_profile_instead_of_formatting_it(
     repo, monkeypatch
 ):
