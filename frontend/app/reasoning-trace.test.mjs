@@ -72,24 +72,20 @@ test("follow_chain detail omits unavailable metrics and clamps trust percentages
   );
 });
 
-test("来源子图轨迹披露 active/shadow/off，且不使用旧的泛化关闭文案", () => {
-  const active = {
+test("历史回答中的来源子图内部步骤不向用户显示", () => {
+  const internal = {
     step_type: "source_subgraph",
-    summary: "来源子图：active，新增 4 条证据",
-    detail: { state: "active", selected_source_count: 1, enrichment_count: 4 },
+    summary: "来源子图：shadow，新增 4 条证据",
+    detail: { state: "shadow", selected_source_count: 1, enrichment_count: 4 },
   };
-  assert.equal(getReasoningTraceSummary([active], true).latestLabel, "来源子图");
-  assert.equal(getTraceStepDetail(active), "1 篇来源内 · 补充 4 条");
-  assert.equal(getTraceStepDetail({
-    step_type: "source_subgraph",
-    summary: "来源子图：shadow",
-    detail: { state: "shadow", selected_source_count: 2, enrichment_count: 3 },
-  }), "2 篇来源 · 影子评估");
-  assert.equal(getTraceStepDetail({
-    step_type: "source_subgraph",
-    summary: "来源子图：off",
-    detail: { state: "off" },
-  }), "保持原检索结果");
+  const retrieve = { step_type: "retrieve", summary: "检索完成", detail: { hits: 3 } };
+  const onlyInternal = getReasoningTraceSummary([internal], true);
+  assert.equal(onlyInternal.latestLabel, "");
+  assert.equal(onlyInternal.stepCountLabel, "0 步");
+  const mixed = getReasoningTraceSummary([retrieve, internal], false);
+  assert.equal(mixed.latestLabel, "检索");
+  assert.equal(mixed.latestSummary, "检索完成");
+  assert.equal(mixed.stepCountLabel, "1 步");
 });
 
 // memory/synthesis 是后来补进轨迹的两段:一段是私有记忆参与了作答,另一段是

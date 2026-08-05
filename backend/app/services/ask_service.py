@@ -1890,11 +1890,7 @@ class AskService:
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                 evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
                 citations=citations, llm_mode=llm_mode, conversation_id=conversation_id,
-                retrieval_query=retrieval_query, top_relevance=top_relevance,
-                source_graph=(
-                    source_graph_status.public_dict()
-                    if source_graph_status is not None else None
-                ))
+                retrieval_query=retrieval_query, top_relevance=top_relevance)
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
         response.mode = "chunk"
@@ -2350,18 +2346,6 @@ class AskService:
                     top_hits=top_hits,
                     max_results=self.settings.ppr_top_chunks,
                 )
-                if source_graph_status is not None:
-                    graph_step = TraceStep(
-                        step_type="source_subgraph",
-                        summary=(
-                            f"来源子图：{source_graph_status.state}，"
-                            f"新增 {source_graph_status.enrichment_count} 条证据"
-                        ),
-                        detail=source_graph_status.public_dict(),
-                    )
-                    trace.append(graph_step)
-                    if on_trace:
-                        on_trace(graph_step)
             except AskCancelled:
                 raise
             except Exception:
@@ -2965,10 +2949,6 @@ class AskService:
                 # 图谱」这件事没有因此变成假的:旗标继续如实上报,前端的建图提示
                 # 与答案并存。它只是不再是一道闸。
                 kg_required=no_usable_kg,
-                source_graph=(
-                    source_graph_status.public_dict()
-                    if source_graph_status is not None else None
-                ),
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)
@@ -3432,19 +3412,6 @@ class AskService:
                         detail={"chunks": len(src_chunks),
                                 "sources": len({c.source_id for c in src_chunks})})])
                 resp.mode = "graph"
-                if source_graph_status is not None:
-                    resp.source_graph = source_graph_status.public_dict()
-                    resp.reasoning_trace = [
-                        TraceStep(
-                            step_type="source_subgraph",
-                            summary=(
-                                f"来源子图：{source_graph_status.state}，"
-                                f"新增 {source_graph_status.enrichment_count} 条证据"
-                            ),
-                            detail=source_graph_status.public_dict(),
-                        ),
-                        *(resp.reasoning_trace or []),
-                    ]
                 resp.model_errors = [ModelError(**e) for e in _err_sink]
                 resp.answer_id = self._save_answer(
                     notebook_id, question, resp, conversation_id,
@@ -3544,26 +3511,12 @@ class AskService:
                 detail={**verify_result,
                         "authority_notes": verify_result.get("authority_notes", [])},
             )]
-            if source_graph_status is not None:
-                graph_trace.insert(0, TraceStep(
-                    step_type="source_subgraph",
-                    summary=(
-                        f"来源子图：{source_graph_status.state}，"
-                        f"新增 {source_graph_status.enrichment_count} 条证据"
-                    ),
-                    detail=source_graph_status.public_dict(),
-                ))
-
             response = AskResponse(
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                 evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
                 citations=self._memory_citations(anchors, memory_hits), llm_mode=llm_mode,
                 conversation_id=conversation_id, retrieval_query=question,
                 top_relevance=top_relevance, reasoning_trace=graph_trace,
-                source_graph=(
-                    source_graph_status.public_dict()
-                    if source_graph_status is not None else None
-                ),
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)

@@ -374,25 +374,25 @@ class Settings(BaseSettings):
     relation_recall: int = Field(200, validation_alias="RELATION_RECALL")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, validation_alias="GRAPH_PPR_ENABLED")
-    # 来源子图内的独立稀疏 PPR；保持 shadow/default-off，和整库 PPR 分开回滚。
+    # 来源子图内的独立稀疏 PPR；Shadow 默认运行但绝不改变用户结果。
     source_subgraph_ppr_enabled: bool = Field(
-        False, validation_alias="SOURCE_SUBGRAPH_PPR_ENABLED"
+        True, validation_alias="SOURCE_SUBGRAPH_PPR_ENABLED"
     )
-    # 超大单来源的 source-addressable scale companion 与其 shadow consumer
-    # 分开回滚；两者默认关闭，Ask/Report 本阶段仍无消费者。
+    # 超大单来源的 source-addressable scale companion 与其 invisible shadow
+    # consumer 分开回滚；默认构建与读取，但只服务内部激活层。
     source_partitioned_graph_artifacts_enabled: bool = Field(
-        False, validation_alias="SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED"
+        True, validation_alias="SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED"
     )
     source_partitioned_ppr_enabled: bool = Field(
-        False, validation_alias="SOURCE_PARTITIONED_PPR_ENABLED"
+        True, validation_alias="SOURCE_PARTITIONED_PPR_ENABLED"
     )
-    # User-visible selected-source graph enrichment is independently quality
-    # gated.  ``off`` is the safe default; shadow needs no attestation because
-    # it cannot alter evidence. Active modes require the deployment-owned
-    # content-free attestation plus exact corpus/model pins.
+    # Selected-source graph enrichment is independently quality gated. Shadow
+    # is the invisible safe default because it cannot alter returned evidence.
+    # Active modes require a content-free attestation plus exact corpus/model
+    # pins; rollout state never belongs in a public response.
     selected_source_graph_rollout_mode: Literal[
         "off", "shadow", "allowlist", "rollout", "on"
-    ] = Field("off", validation_alias="SELECTED_SOURCE_GRAPH_ROLLOUT_MODE")
+    ] = Field("shadow", validation_alias="SELECTED_SOURCE_GRAPH_ROLLOUT_MODE")
     selected_source_graph_attestation_path: str = Field(
         "", validation_alias="SELECTED_SOURCE_GRAPH_ATTESTATION_PATH"
     )

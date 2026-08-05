@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from app.core.config import Settings
+from app.models.ask import AskResponse
 from app.services.ask_service import AskService
 from app.services.retrieval import RetrievedChunk, RetrievalSupport
 from app.services.retrieval_enrichment import BaselineProtectedEnrichmentService
@@ -96,13 +97,20 @@ def test_quality_attestation_loader_keeps_digest_for_point_of_use_reverify(
     assert loaded == {"attestation_digest": "signed", "approved": True}
 
 
-def test_selected_source_graph_rollout_defaults_are_inert():
+def test_selected_source_graph_rollout_defaults_to_invisible_shadow():
     settings = Settings(_env_file=None)
 
-    assert settings.selected_source_graph_rollout_mode == "off"
+    assert settings.selected_source_graph_rollout_mode == "shadow"
+    assert settings.source_subgraph_ppr_enabled is True
+    assert settings.source_partitioned_graph_artifacts_enabled is True
+    assert settings.source_partitioned_ppr_enabled is True
     assert settings.selected_source_graph_attestation_path == ""
     assert settings.selected_source_graph_rollout_percent == 0.0
     assert settings.selected_source_graph_enrichment_tokens == 4000
+
+
+def test_selected_source_graph_rollout_state_is_not_part_of_public_ask_schema():
+    assert "source_graph" not in AskResponse.model_json_schema()["properties"]
 
 
 def test_whole_scope_is_byte_identical_and_does_no_snapshot_io():
@@ -571,6 +579,5 @@ def test_ask_and_report_consumers_keep_baseline_on_graph_io_failure(monkeypatch)
         report._activate_selected_source_graph("nb", result)
 
     assert result.chunks == baseline
-    assert result.source_graph_status.state == "degraded"
-    assert result.source_graph_status.reason == "source_titles_failed"
-    assert result.trace[-1].step_type == "source_subgraph"
+    assert not hasattr(result, "source_graph_status")
+    assert result.trace == []
