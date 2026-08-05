@@ -199,3 +199,29 @@ def test_database_target_follows_database_url_instead_of_assuming_sqlite(
         encoding="utf-8",
     )
     assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+
+def test_database_target_reads_the_exported_dotenv_form(tmp_path, monkeypatch):
+    """`export DATABASE_URL=...` is a supported form and must not fall back.
+
+    The migration activation path writes it and the application's dotenv loader
+    accepts it.  Treating `export DATABASE_URL` as the key name resolves to
+    SQLite, which is the exact stale-database misread this resolver prevents.
+    """
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    for line in (
+        "export DATABASE_URL=postgresql://h/db",
+        "export  DATABASE_URL=postgresql://h/db",
+        'export DATABASE_URL="postgresql://h/db"',
+    ):
+        (tmp_path / ".env").write_text(line + "\n", encoding="utf-8")
+        target = common.resolve_database_target(str(tmp_path))
+        assert target.backend == "postgres", line
+        assert target.is_sqlite is False, line
+
+    # A key that merely starts with the same letters is still not a match.
+    (tmp_path / ".env").write_text("exported_DATABASE_URL=postgresql://h/db\n",
+                                   encoding="utf-8")
+    assert common.resolve_database_target(str(tmp_path)).is_sqlite

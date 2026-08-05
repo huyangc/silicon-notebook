@@ -80,3 +80,33 @@ def test_default_report_caps_all_sections(tmp_path, capsys, monkeypatch):
 
     assert len(output.encode("utf-8")) <= slow.DEFAULT_REPORT_OUTPUT_BYTES
     assert "output_truncated=True" in output
+
+
+def test_db_target_prefers_the_explicit_root_over_the_local_directory(
+    tmp_path, monkeypatch
+):
+    """`--root /repo --local /elsewhere` must resolve config from the root.
+
+    Deriving the root from `local_dir` only holds when .local sits inside the
+    repository.  With a custom `--local` the guess lands beside that directory,
+    finds no .env, defaults to SQLite, and every guarded section goes back to
+    reading a stale file on a PostgreSQL deployment.
+    """
+    slow = load_slow()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".env").write_text("DATABASE_URL=postgresql://h/db\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere" / "local"
+    elsewhere.mkdir(parents=True)
+
+    assert slow._db_target(str(elsewhere), str(repo)).backend == "postgres"
+    # Without the explicit root the custom directory really does resolve to
+    # nothing — which is why the root has to be threaded through.
+    assert slow._db_target(str(elsewhere)).is_sqlite
+
+    # The in-repo layouts keep working with no root passed.
+    for rel in (".local", "backend/.local"):
+        nested = repo / rel
+        nested.mkdir(parents=True, exist_ok=True)
+        assert slow._db_target(str(nested)).backend == "postgres"

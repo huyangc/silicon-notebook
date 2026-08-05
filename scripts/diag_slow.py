@@ -527,22 +527,28 @@ def _sample_typeof(conn, table):
     return out  # [oldest, newest]
 
 
-def _db_target(local_dir):
-    """Which database the deployment serves from, derived from the repo root.
+def _db_target(local_dir, root=None):
+    """Which database the deployment serves from.
 
-    The .local directory sits at <root>/.local or <root>/backend/.local, so the
-    root is one or two levels up.  Diagnostics that can only speak SQLite must
-    ask this before opening a file: on a PostgreSQL deployment that file is
-    stale, and answering from it is a wrong diagnosis dressed as a real one.
+    Diagnostics that can only speak SQLite must ask this before opening a file:
+    on a PostgreSQL deployment that file is stale, and answering from it is a
+    wrong diagnosis dressed as a real one.
+
+    The caller's ``--root`` wins whenever it is known.  Deriving the root from
+    ``local_dir`` only works when .local sits under the repository; with an
+    explicit ``--local /somewhere/else`` that guess lands next to the custom
+    directory, finds no .env, and defaults straight back to SQLite.
     """
+    if root:
+        return diag_common.resolve_database_target(os.path.abspath(root))
     d = os.path.abspath(local_dir)
-    root = os.path.dirname(d)
-    if os.path.basename(root) == "backend":
-        root = os.path.dirname(root)
-    return diag_common.resolve_database_target(root)
+    derived = os.path.dirname(d)
+    if os.path.basename(derived) == "backend":
+        derived = os.path.dirname(derived)
+    return diag_common.resolve_database_target(derived)
 
 
-def report_scale_profile(local_dir, runtime_dim=0):
+def report_scale_profile(local_dir, runtime_dim=0, root=None):
     """per-notebook 规模画像 + scale 索引健康诊断(本段是「严格推理慢」的主证据):
     - 无索引的大库 → KG 对象检索走全量暴力(json 解析 55w payload+全量分词+GB 级矩阵)
     - 索引在但 delta 大 → KG 对象侧 delta 每次查询无条件暴力(chunk 侧默认关,对象侧没开关)
@@ -551,7 +557,7 @@ def report_scale_profile(local_dir, runtime_dim=0):
     只读、每查询都是聚合/LIMIT 1,秒级。"""
     _runtime_dim = runtime_dim
     section("per-notebook 规模画像 + scale 索引诊断")
-    target = _db_target(local_dir)
+    target = _db_target(local_dir, root)
     if not target.is_sqlite:
         print(target.skip_note())
         return
@@ -703,7 +709,7 @@ def report_reasoning_ppr_audit(local_dir, root):
     or has a shape that can still touch full active vectors.
     """
     section("strict reasoning / PPR 路径审计(只读,不跑 PPR)")
-    target = _db_target(local_dir)
+    target = _db_target(local_dir, root)
     if not target.is_sqlite:
         print(target.skip_note())
         return
@@ -870,9 +876,9 @@ def report_reasoning_ppr_audit(local_dir, root):
         conn.close()
 
 
-def report_artifacts(local_dir, deep):
+def report_artifacts(local_dir, deep, root=None):
     section("DB / 索引工件")
-    target = _db_target(local_dir)
+    target = _db_target(local_dir, root)
     if not target.is_sqlite:
         # 索引工件(scale index)与后端无关,继续报;只有 SQLite 文件那部分要收回。
         print(f"  (当前部署是 {target.explain()} — 跳过 SQLite 文件/向量迁移检查，"
@@ -1001,7 +1007,7 @@ def report_env(root):
 _USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
 
 
-def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
+def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False, root=None):
     """打开 / 看板 / 索引状态卡顿的逐条自证(仅 --deep,因本段会真跑几条 2M 级扫描)。
 
     这些计数在每次「打开 notebook」「点看板」「取索引状态」时被同步重算、且无缓存
@@ -1015,7 +1021,7 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
         print("(跳过:未加 --deep — 本段会执行几条 ~2M 行覆盖扫描,单核秒级)")
         return
     section("notebook 计数热路径(打开/看板/索引状态卡顿逐条自证)")
-    target = _db_target(local_dir)
+    target = _db_target(local_dir, root)
     if not target.is_sqlite:
         print(target.skip_note())
         return
@@ -1168,10 +1174,10 @@ def _main(argv=None):
         report_requests(local_dir, since, slow_ms)
         report_events(local_dir, since)
         report_llm(local_dir, since)
-        report_scale_profile(local_dir, runtime_dim=_read_env_int(root, "EMBED_RUNTIME_DIM"))
+        report_scale_profile(local_dir, runtime_dim=_read_env_int(root, "EMBED_RUNTIME_DIM"), root=root)
         report_reasoning_ppr_audit(local_dir, root)
-        report_artifacts(local_dir, args.deep)
-        report_notebook_count_hotpaths(local_dir, notebook_id=args.notebook, deep=args.deep)
+        report_artifacts(local_dir, args.deep, root=root)
+        report_notebook_count_hotpaths(local_dir, notebook_id=args.notebook, deep=args.deep, root=root)
         report_env(root)
         print("\n=== 完 — 把以上整段输出贴回即可 " + "=" * 40)
         return 0

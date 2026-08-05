@@ -482,7 +482,14 @@ def _dotenv_database_url(root: str) -> Optional[str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, rest = line.partition("=")
-        if key.strip() != "DATABASE_URL":
+        key = key.strip()
+        # `export DATABASE_URL=...` is a supported form: the migration
+        # activation path writes it and the application's dotenv loader accepts
+        # it.  Missing the prefix here silently falls back to SQLite, which is
+        # exactly the stale-database misread this resolver exists to prevent.
+        if key.startswith("export ") or key.startswith("export\t"):
+            key = key[len("export"):].strip()
+        if key != "DATABASE_URL":
             continue
         rest = rest.strip()
         if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
