@@ -269,11 +269,22 @@ def test_sqlite_target_resolves_the_file_the_url_actually_names(tmp_path, monkey
     monkeypatch.setenv("DATABASE_URL", "sqlite:////abs/production.db")
     assert common.resolve_database_target(str(tmp_path)).sqlite_path == "/abs/production.db"
 
-    # In-memory names no file, so the conventional location remains the fallback.
-    monkeypatch.setenv("DATABASE_URL", "sqlite://")
-    memory = common.resolve_database_target(str(tmp_path))
-    assert memory.sqlite_path is None
-    assert memory.resolve_sqlite_file("/tmp/x") == "/tmp/x/silicon_notebook.db"
+    # A query string belongs to the path the service opens, so it must survive.
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///.local/prod.db?mode=ro")
+    assert common.resolve_database_target(str(tmp_path)).sqlite_path == str(
+        tmp_path / ".local" / "prod.db?mode=ro"
+    )
+
+    # URLs the service itself rejects resolve to `unknown`, never to a guess.
+    for rejected in ("sqlite://", "sqlite:///.local/a#b.db", "postgresql:u:p@h/db"):
+        monkeypatch.setenv("DATABASE_URL", rejected)
+        target = common.resolve_database_target(str(tmp_path))
+        assert target.backend == "unknown", rejected
+        assert target.resolve_sqlite_file("/tmp/x") is None, rejected
+        # A malformed DSN can carry credentials; nothing of it may survive.
+        rendered = target.explain() + target.skip_note()
+        for secret in ("u:p", "p@h", "a#b"):
+            assert secret not in rendered, rejected
 
     # A PostgreSQL deployment never yields a file to read.
     monkeypatch.setenv("DATABASE_URL", "postgresql://h/db")
@@ -331,17 +342,21 @@ def test_dotenv_values_drop_inline_comments_but_keep_quoted_hashes(
         tmp_path / ".local" / "prod.db"
     )
 
-    # A `#` inside quotes belongs to the value.
+    # A `#` inside quotes belongs to the value rather than starting a comment.
+    # The service rejects a fragment, so the shared parser reports `unknown`
+    # instead of silently diagnosing a different database.
     (tmp_path / ".env").write_text(
         'DATABASE_URL="postgresql://u:p#w@h/db"\n', encoding="utf-8"
     )
-    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+    assert common.resolve_database_target(str(tmp_path)).backend == "unknown"
 
-    # A URL fragment with no preceding space is not a comment either.
+    # A quoted value with a genuine query string stays intact and stays valid.
     (tmp_path / ".env").write_text(
-        "DATABASE_URL=sqlite:///.local/a#b.db\n", encoding="utf-8"
+        'DATABASE_URL="sqlite:///.local/prod.db?mode=ro" # note\n', encoding="utf-8"
     )
-    assert common.resolve_database_target(str(tmp_path)).sqlite_path.endswith("a#b.db")
+    assert common.resolve_database_target(str(tmp_path)).sqlite_path.endswith(
+        "prod.db?mode=ro"
+    )
 
 
 def test_env_file_override_uses_the_exact_bootstrap_lookup(tmp_path, monkeypatch):

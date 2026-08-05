@@ -569,23 +569,31 @@ def _env_file_for(root: str) -> Optional[Path]:
     return Path(override) if override else None
 
 
-def _sqlite_path_from_url(url: str, root: str) -> Optional[str]:
-    """Absolute on-disk path for a SQLite URL, or None when it names no file.
+def _core_database_url_module():
+    """Load the isolated core URL parser without importing the app package.
 
-    SQLAlchemy spelling: ``sqlite:///relative.db`` is relative and
-    ``sqlite:////absolute.db`` is absolute; ``sqlite://`` is in-memory.  A
-    relative path is resolved against the repository root, which is where the
-    documented commands are run from.
+    Hand-mirroring this parsing is what kept diverging from the service: URL
+    queries, malformed DSNs, and scheme normalization each have a rule here
+    already.  `backend/app/core/database_url.py` deliberately has no package
+    imports, so the diagnostics can reuse the authority instead of guessing.
     """
-    import os as _os
+    import importlib.util as _importlib_util
 
-    rest = url.partition("://")[2].split("?", 1)[0]
-    if not rest or rest == "/":
-        return None                       # 内存库:没有文件可看
-    path = rest[1:] if rest.startswith("/") else rest
-    if not path:
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "backend" / "app" / "core" / "database_url.py"
+    )
+    try:
+        spec = _importlib_util.spec_from_file_location(
+            "silicon_notebook_diag_database_url", path
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = _importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:      # 诊断不能因为加载失败而改口径
         return None
-    return path if _os.path.isabs(path) else _os.path.join(_os.path.abspath(root), path)
 
 
 def resolve_database_target(root: str) -> DatabaseTarget:
@@ -601,15 +609,33 @@ def resolve_database_target(root: str) -> DatabaseTarget:
     url = str(raw or "").strip()
     if not url:
         return DatabaseTarget(backend="sqlite", source="default")
-    scheme = url.split("://", 1)[0].lower() if "://" in url else url.lower()
-    if scheme.startswith("sqlite"):
-        return DatabaseTarget(
-            backend="sqlite", sqlite_path=_sqlite_path_from_url(url, root),
-            url_scheme=scheme, source=source,
+    core = _core_database_url_module()
+    if core is None:
+        return DatabaseTarget(backend="unknown", source=source)
+    try:
+        identity = core.database_identity(url)
+    except Exception:
+        # Malformed URLs are rejected by the service too.  Keep nothing from the
+        # raw value: a malformed DSN can carry credentials, and this output is
+        # meant to be pasted into a report.
+        return DatabaseTarget(backend="unknown", source=source)
+    if identity.scheme == "sqlite":
+        # `identity.database` keeps any query string, exactly as the service's
+        # `Settings.sqlite_path` does — diagnosing a different file than the one
+        # actually opened is the whole failure mode being fixed.
+        path = str(identity.database or "")
+        resolved = (
+            None if not path
+            else path if _os.path.isabs(path)
+            else _os.path.join(_os.path.abspath(root), path)
         )
-    if scheme.startswith("postgres"):
-        return DatabaseTarget(backend="postgres", url_scheme=scheme, source=source)
-    return DatabaseTarget(backend="unknown", url_scheme=scheme, source=source)
+        return DatabaseTarget(
+            backend="sqlite", sqlite_path=resolved,
+            url_scheme="sqlite", source=source,
+        )
+    return DatabaseTarget(
+        backend="postgres", url_scheme=identity.scheme, source=source
+    )
 
 
 def normalize_http_path(path: str) -> str:
