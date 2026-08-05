@@ -567,8 +567,9 @@ def report_scale_profile(local_dir, runtime_dim=0, root=None):
     if not db or not os.path.exists(db):
         print("(缺 SQLite database)")
         return
+    db_uri = target.sqlite_readonly_uri(local_dir)
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        conn = sqlite3.connect(db_uri, uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         print("(DB 只读打开失败: sqlite_error)")
@@ -721,6 +722,7 @@ def report_reasoning_ppr_audit(local_dir, root):
     if not db or not os.path.exists(db):
         print("(缺 SQLite database)")
         return
+    db_uri = target.sqlite_readonly_uri(local_dir)
     env = _read_env(root)
     graph_ppr = _env_bool(env, "GRAPH_PPR_ENABLED", True)
     include_delta = _env_bool(env, "SCALE_SEARCH_INCLUDE_DELTA", False)
@@ -737,7 +739,7 @@ def report_reasoning_ppr_audit(local_dir, root):
         print("GRAPH_PPR_ENABLED=false: reasoning 不会进入 PPR seed pass。")
         return
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        conn = sqlite3.connect(db_uri, uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         print("(DB 只读打开失败: sqlite_error)")
@@ -925,10 +927,11 @@ def report_artifacts(local_dir, deep, root=None):
     if not deep:
         print("  (向量 BLOB 迁移进度检查是全表扫描,分钟级 — 需要时加 --deep)")
         return
-    if not target.is_sqlite:
+    db_uri = target.sqlite_readonly_uri(local_dir)
+    if not db_uri:
         return
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        conn = sqlite3.connect(db_uri, uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         for t in ("knowledge_embeddings", "chunk_embeddings",
                   "element_embeddings", "relation_embeddings"):
@@ -1037,8 +1040,9 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False, root=N
     if not db or not os.path.exists(db):
         print("(缺 SQLite database)")
         return
+    db_uri = target.sqlite_readonly_uri(local_dir)
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
+        conn = sqlite3.connect(db_uri, uri=True, timeout=60)
         conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         print("(DB 只读打开失败: sqlite_error)")

@@ -401,3 +401,36 @@ def test_explicitly_blank_database_url_is_invalid_not_absent(tmp_path, monkeypat
     # Truly absent still means the shipped SQLite default.
     (tmp_path / ".env").write_text("OTHER=1\n", encoding="utf-8")
     assert common.resolve_database_target(str(tmp_path)).is_sqlite
+
+
+def test_readonly_uri_escapes_a_filename_that_carries_a_query(tmp_path, monkeypatch):
+    """A configured query is part of the filename, so it must not become a URI arg.
+
+    `file:{path}?mode=ro` with a `?` already in the name makes SQLite parse
+    `mode=ro?mode=ro` and refuse to open the file at all.
+    """
+    common = load_common()
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///.local/prod.db?mode=ro")
+    target = common.resolve_database_target(str(tmp_path))
+
+    uri = target.sqlite_readonly_uri(str(tmp_path))
+    assert uri.endswith("?mode=ro")
+    assert "%3Fmode%3Dro" in uri          # 文件名里的那个 ? 被编码
+    assert uri.count("?") == 1            # 只剩参数分隔符那一个
+
+    # It must actually open the literal file that the service would open.
+    import sqlite3
+    real = tmp_path / ".local" / "prod.db?mode=ro"
+    real.parent.mkdir(parents=True)
+    sqlite3.connect(str(real)).close()
+    conn = sqlite3.connect(uri, uri=True)
+    conn.close()
+
+    # 普通路径不受影响。
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///.local/plain.db")
+    plain = common.resolve_database_target(str(tmp_path)).sqlite_readonly_uri(str(tmp_path))
+    assert plain.endswith(".local/plain.db?mode=ro")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://h/db")
+    assert common.resolve_database_target(str(tmp_path)).sqlite_readonly_uri("/x") is None

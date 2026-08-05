@@ -485,6 +485,20 @@ class DatabaseTarget:
             return self.sqlite_path
         return _os.path.join(fallback_dir, "silicon_notebook.db")
 
+    def sqlite_readonly_uri(self, fallback_dir: str) -> Optional[str]:
+        """The read-only URI for that file, safe to hand to ``sqlite3.connect``.
+
+        A configured query string is part of the filename the service opens, so
+        the resolved path can legitimately contain ``?``.  Interpolating it raw
+        into ``file:{path}?mode=ro`` makes SQLite parse that suffix as URI
+        parameters (``mode=ro?mode=ro``) instead of opening the literal file, so
+        the name has to be percent-encoded.  Sole construction point.
+        """
+        from urllib.parse import quote as _quote
+
+        path = self.resolve_sqlite_file(fallback_dir)
+        return f"file:{_quote(path)}?mode=ro" if path else None
+
 
 def _dotenv_database_url(path: Path) -> Optional[str]:
     try:

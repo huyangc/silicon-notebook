@@ -60,7 +60,11 @@ def _main(argv=None) -> int:
         print("(缺 SQLite database;用 --local 指定 local data directory)")
         return 0
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60)
+        # 文件名可能含 `?`(配置里的 query 是服务打开的那个名字的一部分),
+        # 裸拼会被 SQLite 当成 URI 参数,所以走统一的编码构造点。
+        conn = sqlite3.connect(
+            target.sqlite_readonly_uri(local_dir), uri=True, timeout=60
+        )
         conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         print("(DB 只读打开失败: sqlite_error)")
