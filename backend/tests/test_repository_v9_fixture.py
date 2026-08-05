@@ -111,8 +111,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # created_at, id) 的集合枚举索引、v38 用户可见来源身份索引，以及 v39
     # 命令目录抽取的 catalog_jobs / catalog_candidates 两张表，以及 v40
     # source-local fact / evidence-element binding 两张表，以及 v41 可恢复的
-    # source-fact backfill 状态表，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 41
+    # source-fact backfill 状态表，以及 v42 notebook 级来源反查索引回填
+    # 游标/计数账本，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 42
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

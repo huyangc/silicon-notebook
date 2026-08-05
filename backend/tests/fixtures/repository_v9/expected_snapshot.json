@@ -1553,6 +1553,11 @@
         "type": "index"
       },
       {
+        "name": "idx_source_index_backfills_status",
+        "sql_sha256": "5805a030bb7254423c24f81085dabe5005adfaf6cee354f5d8274ab6f3c980db",
+        "type": "index"
+      },
+      {
         "name": "idx_source_paper_meta_nb",
         "sql_sha256": "abb231c48578b560f95e890b45ae80a7ee5de30a54ecec7c42d88d316373f91c",
         "type": "index"
@@ -2018,6 +2023,11 @@
         "type": "table"
       },
       {
+        "name": "source_index_backfills",
+        "sql_sha256": "08d29d775eab00595f9542ef57ed2fd7111d65c2555c7942cf6158a36db4a599",
+        "type": "table"
+      },
+      {
         "name": "source_paper_meta",
         "sql_sha256": "ee65024db0a0e34acea8b46d808ea88dd67600f157bb78f8e624aca158207180",
         "type": "table"
@@ -2063,6 +2073,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 41
+    "user_version": 42
   }
 }

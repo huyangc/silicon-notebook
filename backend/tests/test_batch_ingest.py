@@ -2464,19 +2464,102 @@ def test_run_backfill_source_index_populates_reverse_index_and_marks(repo):
 
 
 def test_run_backfill_source_index_is_idempotent(repo):
-    """Re-running does not duplicate rows — each run clears-then-rebuilds this
-    notebook's slice of knowledge_object_sources."""
+    """Re-running skips a completed generation without rewriting its rows."""
     nb_id = bi.ensure_notebook(repo, None, "nb")
     _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a"])
 
-    bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
-    bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+    first = bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+    second = bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+
+    assert first["notebooks"][0]["already_complete"] is False
+    assert second["notebooks"][0]["already_complete"] is True
 
     with repo._connect() as db:
         count = db.execute(
             "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
             (nb_id,)).fetchone()["c"]
     assert count == 1
+
+
+def test_run_backfill_source_index_force_repairs_completed_generation(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a"])
+    bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,),
+        )
+
+    result = bi.run_backfill_source_index(
+        repo, nb_id, all_notebooks=False, force=True
+    )
+
+    assert result["notebooks"][0]["already_complete"] is False
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()["c"] == 1
+
+
+def test_run_backfill_source_index_resumes_committed_cursor(repo, monkeypatch):
+    monkeypatch.setattr(bi, "_KOS_BACKFILL_BATCH_SIZE", 2)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    for i in range(5):
+        _seed_node_with_evidence(repo, nb_id, f"ko-{i}", [f"src-{i}"])
+
+    started = repo.maintenance.begin_source_index_backfill(nb_id)
+    assert started["objects_scanned"] == 0
+    page = repo.maintenance.resume_source_index_backfill_batch(nb_id, batch_size=2)
+    assert page["objects_scanned"] == 2
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()["c"] == 2
+
+    resumed = repo.maintenance.begin_source_index_backfill(nb_id)
+    assert resumed["resumed"] is True
+    assert resumed["objects_scanned"] == 2
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()["c"] == 2
+
+    result = bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+    assert result["notebooks"][0]["resumed"] is True
+    assert result["objects"] == 5
+    assert result["rows"] == 5
+
+
+def test_source_index_backfill_generation_drift_fails_closed(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    for i in range(3):
+        _seed_node_with_evidence(repo, nb_id, f"ko-{i}", [f"src-{i}"])
+
+    repo.maintenance.begin_source_index_backfill(nb_id)
+    repo.maintenance.resume_source_index_backfill_batch(nb_id, batch_size=1)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state "
+            "(notebook_id,dirty,kg_mutation_seq,source_index_backfilled,updated_at) "
+            "VALUES (?,1,1,0,?) ON CONFLICT(notebook_id) DO UPDATE SET "
+            "kg_mutation_seq=kg_mutation_seq+1,source_index_backfilled=0,updated_at=excluded.updated_at",
+            (nb_id, "2026-01-02T00:00:00"),
+        )
+
+    failed = repo.maintenance.resume_source_index_backfill_batch(nb_id, batch_size=1)
+    assert failed["status"] == "failed"
+    assert failed["failure_code"] == "kg_generation_changed"
+    with repo._connect() as db:
+        assert not repo._source_index_backfilled(db, nb_id)
+
+    restarted = repo.maintenance.begin_source_index_backfill(nb_id)
+    assert restarted["status"] == "running"
+    assert restarted["objects_scanned"] == 0
+    assert restarted["resumed"] is False
 
 
 def test_clear_source_index_unpublishes_fast_path_until_backfill_finishes(repo):
@@ -2571,6 +2654,11 @@ def test_arg_parser_backfill_source_index_phase():
 
     args2 = bi.build_arg_parser().parse_args(["backfill-source-index", "--all-notebooks"])
     assert args2.all_notebooks is True
+
+    args3 = bi.build_arg_parser().parse_args(
+        ["backfill-source-index", "--notebook-id", "nb-x", "--force"]
+    )
+    assert args3.force is True
 
 
 # ── Task 6: CLI --fresh 贯通 ──────────────────────────────────────────────────

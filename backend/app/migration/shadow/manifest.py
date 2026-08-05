@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=41, postgres_version=19, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=42, postgres_version=20, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -555,6 +555,14 @@ _TABLES = (
         ("source_id",),
         ReplicationKeyKind.DECLARED_PK,
         74,
+        "timestamptz",
+    ),
+    # SQLite v42 / PostgreSQL v20: notebook-level reverse-index rebuild cursor.
+    _table(
+        "source_index_backfills",
+        ("notebook_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        75,
         "timestamptz",
     ),
 )

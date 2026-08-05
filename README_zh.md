@@ -117,7 +117,7 @@ bash scripts/check.sh
 
 所选来源图的激活还受离线配对质量门保护：baseline 与 shadow 必须使用完全相同的冻结模型、采样、语料与来源绑定；硬隔离或 baseline 保留失败、任一案例质量回退、成本越界都会生成不批准且不含正文的 attestation。问答与深度报告共用这条激活入口：默认 `shadow` 返回历史 baseline 并且不进入公开 API/轨迹/UI，只有通过 attestation 的 active rollout 才能在 baseline 之后追加来源内图证据。
 
-删除来源时，界面会立即显示“删除中”、阻止重复点击并屏蔽旧列表响应。后端会先锁住 source 再清理投影，在反查索引可用时直接使用索引，把受影响对象的删除 SQL 限制为每条最多 500 个 id，并用一次数据库往返取回、删除引用图片。历史 notebook 的交互式删除不会在请求内重建整本库的反查索引；按 keyset 分页的数据库原生降级仍可能扫描旧 KG 行，因此大库应由运维人员用 `backfill-source-index` 离线预建或修复。
+删除来源时，界面会立即显示“删除中”、阻止重复点击并屏蔽旧列表响应。后端会先锁住 source 再清理投影，在反查索引可用时直接使用索引，把受影响对象的删除 SQL 限制为每条最多 500 个 id，并用一次数据库往返取回、删除引用图片。历史 notebook 的交互式删除不会在请求内重建整本库的反查索引；按 keyset 分页的数据库原生降级仍可能扫描旧 KG 行，因此大库应由运维人员用 `backfill-source-index` 离线预建或修复。该离线重建现按 notebook 持久化游标与计数：每个有界页面原子提交，进程重启从最后已提交页面继续，KG 代次变化时先失败关闭再重新构建。
 
 详细产品行为、检索语义、MCP 工具和端点路径见[产品与 API 参考](./docs/product-and-api_zh.md)。
 
@@ -155,7 +155,7 @@ CLI 使用的 PostgreSQL 目标；单独设置它不会启动任何任务，也�
 
 在 `DATABASE_URL` 仍指向 SQLite 时，运维人员可以运行受保护的单向
 SQLite→PostgreSQL 影子同步：preflight 绑定并确认两端数据库身份，`start-forward` 安装
-run-scoped capture/guard 并复制一致的 69 表 baseline，随后由一个受监督的前台 worker
+run-scoped capture/guard 并复制一致的 70 表 baseline，随后由一个受监督的前台 worker
 持续应用 SQLite change log。`status` 提供脱敏的 lag/lease/poison 状态，
 `verify --level full` 执行 barrier-aware 一致性校验。worker 使用数据库时钟的排他 lease，
 对 PostgreSQL 瞬态失败重试，确定性 poison 会 fail-stop；清理策略至少保留已验证进度之后

@@ -1042,6 +1042,240 @@ class PostgresMaintenanceAdapter:
     def has_scale_index(self, notebook_id: str) -> bool:
         return self._runtime.scale_artifacts.load(notebook_id) is not None
 
+    def begin_source_index_backfill(
+        self, notebook_id: str, *, force: bool = False
+    ) -> dict[str, object]:
+        """Start or resume one notebook's durable reverse-index rebuild."""
+        now = normalize_timestamp(self._runtime.seams.now())
+        with self._runtime.database.write() as db:
+            state = db.execute(
+                "SELECT kg_mutation_seq,source_index_backfilled "
+                "FROM unified_kg_state WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchone()
+            mutation_seq = int(state["kg_mutation_seq"]) if state else 0
+            marker = bool(state and state["source_index_backfilled"])
+            progress = db.execute(
+                "SELECT * FROM source_index_backfills WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchone()
+
+            if marker and not force:
+                if (
+                    progress is not None
+                    and progress["status"] == "complete"
+                    and int(progress["kg_mutation_seq"]) == mutation_seq
+                ):
+                    return {
+                        "notebook_id": notebook_id,
+                        "status": "complete",
+                        "total_objects": int(progress["total_objects"]),
+                        "objects_scanned": int(progress["objects_scanned"]),
+                        "rows_written": int(progress["rows_written"]),
+                        "resumed": False,
+                        "already_complete": True,
+                    }
+                total = int(
+                    db.execute(
+                        "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s",
+                        (notebook_id,),
+                    ).fetchone()["c"]
+                )
+                rows_written = int(
+                    db.execute(
+                        "SELECT COUNT(*) AS c FROM knowledge_object_sources "
+                        "WHERE notebook_id=%s",
+                        (notebook_id,),
+                    ).fetchone()["c"]
+                )
+                db.execute(
+                    "INSERT INTO source_index_backfills "
+                    "(notebook_id,kg_mutation_seq,status,after_object_id,total_objects,"
+                    "objects_scanned,rows_written,failure_code,created_at,updated_at,completed_at) "
+                    "VALUES (%s,%s,'complete','',%s,%s,%s,'',%s,%s,%s) "
+                    "ON CONFLICT(notebook_id) DO UPDATE SET "
+                    "kg_mutation_seq=excluded.kg_mutation_seq,status='complete',"
+                    "after_object_id='',total_objects=excluded.total_objects,"
+                    "objects_scanned=excluded.objects_scanned,rows_written=excluded.rows_written,"
+                    "failure_code='',updated_at=excluded.updated_at,completed_at=excluded.completed_at",
+                    (notebook_id, mutation_seq, total, total, rows_written, now, now, now),
+                )
+                return {
+                    "notebook_id": notebook_id,
+                    "status": "complete",
+                    "total_objects": total,
+                    "objects_scanned": total,
+                    "rows_written": rows_written,
+                    "resumed": False,
+                    "already_complete": True,
+                }
+
+            if (
+                progress is not None
+                and int(progress["kg_mutation_seq"]) == mutation_seq
+                and progress["status"] in {"running", "failed"}
+                and not force
+            ):
+                db.execute(
+                    "UPDATE source_index_backfills SET status='running',failure_code='',"
+                    "updated_at=%s,completed_at=NULL WHERE notebook_id=%s",
+                    (now, notebook_id),
+                )
+                return {
+                    "notebook_id": notebook_id,
+                    "status": "running",
+                    "total_objects": int(progress["total_objects"]),
+                    "objects_scanned": int(progress["objects_scanned"]),
+                    "rows_written": int(progress["rows_written"]),
+                    "resumed": bool(progress["objects_scanned"]),
+                    "already_complete": False,
+                }
+
+            db.execute(
+                "DELETE FROM knowledge_object_sources WHERE notebook_id=%s",
+                (notebook_id,),
+            )
+            db.execute(
+                "UPDATE unified_kg_state SET source_index_backfilled=0,updated_at=%s "
+                "WHERE notebook_id=%s",
+                (now, notebook_id),
+            )
+            total = int(
+                db.execute(
+                    "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s",
+                    (notebook_id,),
+                ).fetchone()["c"]
+            )
+            status = "complete" if total == 0 else "running"
+            completed_at = now if total == 0 else None
+            db.execute(
+                "INSERT INTO source_index_backfills "
+                "(notebook_id,kg_mutation_seq,status,after_object_id,total_objects,"
+                "objects_scanned,rows_written,failure_code,created_at,updated_at,completed_at) "
+                "VALUES (%s,%s,%s,'',%s,0,0,'',%s,%s,%s) "
+                "ON CONFLICT(notebook_id) DO UPDATE SET "
+                "kg_mutation_seq=excluded.kg_mutation_seq,status=excluded.status,"
+                "after_object_id='',total_objects=excluded.total_objects,objects_scanned=0,"
+                "rows_written=0,failure_code='',created_at=excluded.created_at,"
+                "updated_at=excluded.updated_at,completed_at=excluded.completed_at",
+                (notebook_id, mutation_seq, status, total, now, now, completed_at),
+            )
+            if total == 0:
+                self._runtime.knowledge.mark_source_index_backfilled(db, notebook_id)
+            return {
+                "notebook_id": notebook_id,
+                "status": status,
+                "total_objects": total,
+                "objects_scanned": 0,
+                "rows_written": 0,
+                "resumed": False,
+                "already_complete": total == 0,
+            }
+
+    def resume_source_index_backfill_batch(
+        self, notebook_id: str, *, batch_size: int = 2000
+    ) -> dict[str, object]:
+        """Commit one cursor page and its reverse-index rows atomically."""
+        limit = max(1, min(int(batch_size), 10_000))
+        now = normalize_timestamp(self._runtime.seams.now())
+        with self._runtime.database.write() as db:
+            progress = db.execute(
+                "SELECT * FROM source_index_backfills WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchone()
+            if progress is None:
+                raise RuntimeError("source index backfill has not been initialized")
+            if progress["status"] == "complete":
+                return {
+                    "notebook_id": notebook_id,
+                    "status": "complete",
+                    "total_objects": int(progress["total_objects"]),
+                    "objects_scanned": int(progress["objects_scanned"]),
+                    "rows_written": int(progress["rows_written"]),
+                    "batch_objects": 0,
+                    "batch_rows": 0,
+                }
+            state = db.execute(
+                "SELECT kg_mutation_seq FROM unified_kg_state "
+                "WHERE notebook_id=%s FOR UPDATE",
+                (notebook_id,),
+            ).fetchone()
+            mutation_seq = int(state["kg_mutation_seq"]) if state else 0
+            if mutation_seq != int(progress["kg_mutation_seq"]):
+                db.execute(
+                    "UPDATE source_index_backfills SET status='failed',"
+                    "failure_code='kg_generation_changed',updated_at=%s "
+                    "WHERE notebook_id=%s",
+                    (now, notebook_id),
+                )
+                return {
+                    "notebook_id": notebook_id,
+                    "status": "failed",
+                    "failure_code": "kg_generation_changed",
+                    "total_objects": int(progress["total_objects"]),
+                    "objects_scanned": int(progress["objects_scanned"]),
+                    "rows_written": int(progress["rows_written"]),
+                    "batch_objects": 0,
+                    "batch_rows": 0,
+                }
+            batch = db.execute(
+                "SELECT id,evidence FROM knowledge_objects "
+                "WHERE notebook_id=%s AND id COLLATE \"C\">%s "
+                "ORDER BY id COLLATE \"C\" LIMIT %s",
+                (notebook_id, progress["after_object_id"], limit),
+            ).fetchall()
+            rows = [
+                (str(row["id"]), str(source_id), notebook_id)
+                for row in batch
+                for source_id in self._runtime.knowledge.source_ids_from_evidence(
+                    row["evidence"]
+                )
+            ]
+            if rows:
+                execute_many(
+                    db,
+                    "INSERT INTO knowledge_object_sources "
+                    "(object_id,source_id,notebook_id) VALUES (%s,%s,%s) "
+                    "ON CONFLICT DO NOTHING",
+                    rows,
+                )
+            scanned = int(progress["objects_scanned"]) + len(batch)
+            written = int(progress["rows_written"]) + len(rows)
+            done = not batch or scanned >= int(progress["total_objects"])
+            status = "complete" if done else "running"
+            cursor = str(batch[-1]["id"]) if batch else progress["after_object_id"]
+            db.execute(
+                "UPDATE source_index_backfills SET status=%s,after_object_id=%s,"
+                "objects_scanned=%s,rows_written=%s,failure_code='',updated_at=%s,"
+                "completed_at=%s WHERE notebook_id=%s",
+                (status, cursor, scanned, written, now, now if done else None, notebook_id),
+            )
+            if done:
+                self._runtime.knowledge.mark_source_index_backfilled(db, notebook_id)
+            return {
+                "notebook_id": notebook_id,
+                "status": status,
+                "total_objects": int(progress["total_objects"]),
+                "objects_scanned": scanned,
+                "rows_written": written,
+                "batch_objects": len(batch),
+                "batch_rows": len(rows),
+            }
+
+    def mark_source_index_backfill_failed(
+        self, notebook_id: str, failure_code: str
+    ) -> None:
+        code = failure_code if failure_code in {
+            "kg_generation_changed",
+            "source_index_backfill_failed",
+        } else "source_index_backfill_failed"
+        with self._runtime.database.write() as db:
+            db.execute(
+                "UPDATE source_index_backfills SET status='failed',failure_code=%s,"
+                "updated_at=%s WHERE notebook_id=%s AND status!='complete'",
+                (code, normalize_timestamp(self._runtime.seams.now()), notebook_id),
+            )
+
     def clear_source_index(self, notebook_id: str) -> int:
         with self._runtime.database.write() as db:
             db.execute(
