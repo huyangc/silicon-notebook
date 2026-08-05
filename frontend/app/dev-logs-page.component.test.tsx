@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   fetchUserAskDetail: vi.fn(),
   fetchUserNotebookSources: vi.fn(),
   fetchUserNotebooks: vi.fn(),
+  fetchSystemConfiguration: vi.fn(),
 }));
 
 vi.mock("./auth.ts", () => ({ fetchMe: mocks.fetchMe }));
@@ -33,6 +34,11 @@ vi.mock("./dev/logs/activity/api.ts", () => ({
   fetchUserActivity: mocks.fetchUserActivity,
   fetchUserAskDetail: mocks.fetchUserAskDetail,
   fetchUserNotebookSources: mocks.fetchUserNotebookSources,
+}));
+// 活动 tab 的可见性由 /system/config 下发的能力位决定;不拦这条请求的话它会走
+// 真实网络、失败后按「不可用」处理,于是这些用例里的「活动」tab 根本不渲染。
+vi.mock("./system-api.ts", () => ({
+  fetchSystemConfiguration: mocks.fetchSystemConfiguration,
 }));
 vi.mock("./admin/usage/notebooks.ts", () => ({
   fetchUserNotebooks: mocks.fetchUserNotebooks,
@@ -111,6 +117,11 @@ function deferred<T>() {
 beforeEach(() => {
   window.history.replaceState(null, "", "/dev/logs");
   mocks.fetchMe.mockResolvedValue({ id: "user-local", username: "admin", role: "admin" });
+  mocks.fetchSystemConfiguration.mockResolvedValue({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    user_activity_view_enabled: true,
+  });
   mocks.fetchAdminUsers.mockResolvedValue(users);
   mocks.fetchChannels.mockResolvedValue({ channels: [{ name: "llm", file: "llm.jsonl", exists: true }] });
   mocks.fetchDays.mockResolvedValue({ channel: "llm", days: [] });

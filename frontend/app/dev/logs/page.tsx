@@ -85,16 +85,24 @@ export default function LogsPage() {
   const [date, setDate] = useState(TODAY_VALUE);
   const [days, setDays] = useState<string[]>([]);
   const [view, setView] = useState<LogsView>("activity");
-  // 部署开关 USER_ACTIVITY_VIEW_ENABLED 的前端镜像,经 /system/config 下发。默认
-  // true——与后端默认值、以及该字段缺失(旧后端)时的安全兜底一致,这样绝大多数
-  // 「开着」的部署在这次网络往返完成前不会有任何可见变化;只有明确取到 false
-  // 才隐藏「活动」tab,不会出现「先假设 false、取到 true 后再冒出来」的反向闪烁。
-  const [activityViewEnabled, setActivityViewEnabled] = useState(true);
-  // 渲染只认这个值:能力位关闭时把「活动」状态收敛成「模型调用」,即使 `view`
-  // state 本身(默认值,或历史 `?view=activity` 深链)还没被下面的归一 effect
-  // 改写过来——两者之间有一次网络往返的窗口,渲染不能在这段时间里露出一个三个
-  // 端点全 404 的视图。
-  const effectiveView: LogsView = view === "activity" && !activityViewEnabled ? "llm" : view;
+  // 部署开关 USER_ACTIVITY_VIEW_ENABLED 的前端镜像,经 /system/config 下发。
+  // **三态**:null=还没问到,true/false=已确定。
+  //
+  // 不能拿 true 当初值。这个能力位与三个活动端点是同一次改动一起上线的,所以
+  // 「问不到」既可能是开关关着、也可能是后端根本没有这个特性(旧后端连
+  // /system/config 里的字段都没有)。先按 true 渲染就会在后一种情况下挂载活动
+  // 视图、打出三个 404,与开关显式关闭时的失败形态一模一样。
+  //
+  // 未知期的取舍:不挂载「活动」(所以它的三个端点一次都不会被提前打出去),但
+  // 「模型调用」照常立即渲染。刻意不给未知期加全页加载态——那会让「模型调用」
+  // 视图也多等一个往返,而它的红线是相对改版前**零回归**。代价是能力位开着的
+  // 部署会先显示「模型调用」、一个往返后「活动」tab 才出现并接管;
+  // /system/config 是一次很小的认证请求,窗口极短。
+  const [activityViewEnabled, setActivityViewEnabled] = useState<boolean | null>(null);
+  // 渲染只认这个值:能力位未确定或已确定为关时,「活动」都不成立(收敛成
+  // 「模型调用」),即使 `view` state 本身(默认值,或历史 `?view=activity` 深链)
+  // 还没被下面的归一 effect 改写过来。
+  const effectiveView: LogsView = view === "activity" && activityViewEnabled !== true ? "llm" : view;
 
   const filterParams = useMemo(
     () => ({ kind, status, model, q, owner, date }),
@@ -144,20 +152,24 @@ export default function LogsPage() {
     if (v === "llm" || v === "activity") setView(v);
   }, []);
 
-  // /system/config 能力位:取不到就保持默认 true(见上面 activityViewEnabled 的
-  // 状态注释),不藏掉一个其实可用的视图。
+  // /system/config 能力位。**失败也要落终态**(false):停在 null 会让页面永远卡在
+  // 未知期的加载态,而「问不出来」与「没有这个特性」在可用性上是同一件事——旧后端
+  // 既没有这个字段、也没有那三个端点。
   useEffect(() => {
     fetchSystemConfiguration()
       .then((config) => setActivityViewEnabled(config.user_activity_view_enabled))
-      .catch(() => undefined);
+      .catch(() => setActivityViewEnabled(false));
   }, []);
 
-  // 能力位关闭时把已经落进 state/URL 的 `view=activity`(初始默认值,或历史
+  // 确定为关之后,把已经落进 state/URL 的 `view=activity`(初始默认值,或历史
   // `?view=activity` 深链)归一成 `llm`——渲染已经用 effectiveView 挡住了内容,
   // 这里补的是 URL 与 state 本身,好让「模型调用」侧按 view 门控的取数 effect
   // 正常触发,也不留下一个手工分享出去会 404 的链接。
+  //
+  // 判据必须是 `=== false` 而不是 `!activityViewEnabled`:后者会把未知期的 null
+  // 也算进来,在还没问到结果时就改写用户的 URL。
   useEffect(() => {
-    if (activityViewEnabled || view !== "activity") return;
+    if (activityViewEnabled !== false || view !== "activity") return;
     setView("llm");
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);

@@ -336,11 +336,18 @@ test("能力位关闭时?view=activity深链被归一成模型调用视图", asy
 // 不能因为一次瞬时失败就藏掉一个其实可用的视图。system-api.test.mjs 已经钉住
 // fetchSystemConfiguration 自己对「字段缺失」的归一(defaults to true);这里补的
 // 是页面对「这次调用整个失败/挂起」的兜底路径,同一份默认 state 覆盖两种情形。
-test("拿不到能力位时按 true 处理，活动 tab 仍在", async () => {
+test("拿不到能力位时按不可用处理，不挂载活动视图", async () => {
+  // 「问不出来」与「没有这个特性」在可用性上是同一件事:能力位与三个活动端点
+  // 是同一次改动一起上线的,旧后端两样都没有。按 true 兜底会默认打开一个请求
+  // 全 404 的 tab —— 与开关显式关闭时的失败形态一字不差。
   primeMocks();
   mocks.fetchSystemConfiguration.mockRejectedValue(new Error("network"));
   render(<LogsPage />);
 
-  await waitFor(() => expect(mocks.fetchUserActivity).toHaveBeenCalled());
-  expect(screen.getByRole("button", { name: "活动" })).toHaveClass("active");
+  // 等「模型调用」侧真的取过数,证明页面已经渲染完、不是还停在挂载前——否则
+  // 下面两条断言会因为"什么都还没发生"而通过。
+  await waitFor(() => expect(mocks.fetchRecords).toHaveBeenCalled());
+  expect(mocks.fetchUserActivity).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "活动" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "模型调用" })).toHaveClass("active");
 });
