@@ -529,3 +529,23 @@ def test_diag_db_anchors_on_the_repository_not_the_cwd(tmp_path, monkeypatch, ca
     assert resolved.source in {"env", "dotenv", "default"}
     # 判据必须取自仓库那一份，而不是 cwd 那一份。
     assert module._SCRIPT_DIR.parent != unrelated
+
+
+def test_environment_case_collision_follows_insertion_order(tmp_path, monkeypatch):
+    """Both spellings can coexist on Unix; the later entry wins, as for Settings."""
+    common = load_common()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SILICON_NOTEBOOK_ENV_FILE", raising=False)
+
+    # Insert lowercase first, then uppercase: uppercase is the later entry.
+    monkeypatch.setenv("database_url", "sqlite:///./early.db")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://h/db")
+    assert common.resolve_database_target(str(tmp_path)).backend == "postgres"
+
+    # ...and the reverse order selects the SQLite value instead.
+    monkeypatch.delenv("database_url")
+    monkeypatch.delenv("DATABASE_URL")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://h/db")
+    monkeypatch.setenv("database_url", "sqlite:///./late.db")
+    target = common.resolve_database_target(str(tmp_path))
+    assert target.is_sqlite and target.sqlite_path.endswith("late.db")

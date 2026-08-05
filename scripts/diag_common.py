@@ -591,14 +591,15 @@ def _environ_case_insensitive(name: str) -> Optional[str]:
     """
     import os as _os
 
-    exact = _os.environ.get(name)
-    if exact is not None:
-        return exact
+    # pydantic-settings folds the environment into a lowercased mapping, so a
+    # later entry overwrites an earlier one regardless of spelling.  Giving the
+    # uppercase name priority would pick the other value when both exist.
     wanted = name.lower()
-    for key in sorted(_os.environ):
+    found: Optional[str] = None
+    for key, value in _os.environ.items():
         if key.lower() == wanted:
-            return _os.environ[key]
-    return None
+            found = value
+    return found
 
 
 def _env_file_for(root: str) -> Optional[Path]:

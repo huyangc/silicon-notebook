@@ -2201,7 +2201,9 @@ def _main(argv=None) -> int:
             )
             return 0
         # 缺省值是「约定位置」,而 DATABASE_URL 可能指向别处;显式 --db 已在上面短路。
-        resolved = target.resolve_sqlite_file(os.path.dirname(args.db) or ".")
+        # 兜底目录也必须锚在仓库上:未配置 DATABASE_URL 时 resolve 不给路径,按
+        # cwd 取 `.local/` 会重新读到工作目录下那份陈旧库。
+        resolved = target.resolve_sqlite_file(str(_SCRIPT_DIR.parent / ".local"))
         if resolved:
             args.db = resolved
     evidence = collect_db_evidence(
