@@ -328,6 +328,8 @@ KG 抽取必须在全局对象同一事务内发布不可变的来源事实和�
 
 统一激活层现已接入 Ask/Report 路径。`SelectedSourceGraphActivationService` 是 Ask `chunk`/`reasoning`/实验 `graph` 与深度报告唯一消费入口，只处理服务端冻结、真正收窄的本地 `include` scope；省略/全选（含单来源 notebook 全选唯一来源）在 snapshot I/O 前留在历史路径。历史 `B` 先完成，`G` 只用独立预算并追加在 `B` 后；默认不可见 shadow 恒返回 `B`，active 必须通过受信无正文 attestation 与精确 corpus/model pin，任何漂移、失败、越界或 baseline eviction 都返回 `B`。mounted base 保持独立 participant。Shadow/off/degraded/active 控制态只能进入无正文内部事件，禁止进入公开回答/报告字段、推理轨迹、stream 或 UI；浏览器还必须过滤历史已持久化的 `source_subgraph` 步骤。
 
+已有部署的 shadow 准备只由 `scripts/prepare_selected_source_graph.py` 编排。它是离线、全 notebook 状态机：要求显式停服确认，以指定且已存在的 env 文件为权威配置、不得被进程环境变量重定向，并持有中央维护锁；续跑持久来源反查索引与 source-fact 账本，按运行时精确格式低成本复验主/partition manifest、仅在失配时重建，最后独立审计全部目标。无正文 receipt 只作参考，每次运行都重新验证数据库/工件权威状态。全部检查成功且 repository 已关闭后，才原子把三个来源图 producer/artifact 开关设为 true、rollout mode 设为 shadow；更新必须保留原 env 的 owner/mode/group 及系统支持的元数据，0600 只用于新 receipt。任何失败都保持 env 文件不变。这个流程不得进入任何用户界面或公开响应。
+
 ## 五、`AGENTS.md` 章节索引
 
 无正文 `selected_source_graph` 事件仅供运维内部 telemetry；用户可读 debug 日志 API 必须在列表、统计、搜索、翻页和详情（包括按 seq 直接读取）统一过滤。

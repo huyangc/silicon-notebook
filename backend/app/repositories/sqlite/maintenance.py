@@ -30,6 +30,7 @@ from app.repositories.ports import VectorBatchEncoder
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.sqlite.knowhow_history_store import content_strings_in_payload
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
+from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
 from app.services.vector_index import decode_vector
 
 # (table, id_column) for every embeddings table maintenance tooling touches.
@@ -990,6 +991,40 @@ class SQLiteMaintenanceAdapter:
 
     def has_scale_index(self, notebook_id: str) -> bool:
         return self.load_scale_index(notebook_id) is not None
+
+    def selected_source_graph_artifact_status(
+        self, notebook_id: str
+    ) -> dict[str, object]:
+        """Cheap version/count probe; never opens ANN or partition payloads."""
+        runtime = self._runtime.scale_artifacts
+        store = runtime.artifacts
+        try:
+            current_version = runtime.version(notebook_id)
+            main = store.read_manifest(store.scale_dir(notebook_id)) or {}
+            partition = (
+                store.read_manifest(store.source_partition_dir(notebook_id)) or {}
+            )
+            main_version = main.get("version")
+            parent_version = partition.get("parent_version")
+            ready = (
+                main_version == current_version
+                and parent_version == main_version
+                and partition.get("format_version")
+                == SOURCE_PARTITION_FORMAT_VERSION
+            )
+            return {
+                "ready": ready,
+                "n_nodes": int(main.get("n_nodes", 0)),
+                "published_sources": int(partition.get("published_sources", 0)),
+                "unavailable_sources": int(partition.get("unavailable_sources", 0)),
+            }
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return {
+                "ready": False,
+                "n_nodes": 0,
+                "published_sources": 0,
+                "unavailable_sources": 0,
+            }
 
     def gold_knowledge_object_rows(self, notebook_id: str) -> list[dict]:
         with self._runtime.database.connect() as db:
