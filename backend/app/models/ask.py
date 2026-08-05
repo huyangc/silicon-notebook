@@ -14,6 +14,7 @@ from app.core.ask_retrieval_policy import (
     ResultScope,
     RetrievalEffort,
 )
+from app.core.internal_observability import public_trace_steps
 
 from app.core.model_safety import (
     safe_model_display_name,
@@ -519,6 +520,13 @@ class AskResponse(BaseModel):
     index_required: bool = False
     model_errors: List[ModelError] = Field(default_factory=list)
 
+    @field_validator("reasoning_trace", mode="before")
+    @classmethod
+    def _hide_internal_trace_steps(cls, value: object) -> object:
+        if value is None:
+            return None
+        return public_trace_steps(value)
+
     @field_validator("result_sets", mode="before")
     @classmethod
     def _default_legacy_result_kind(cls, value: object) -> object:
@@ -583,6 +591,11 @@ class ActiveAskJob(BaseModel):
     asked_at: str = ""
     mode: str = ""
     trace: List[dict] = Field(default_factory=list)
+
+    @field_validator("trace", mode="before")
+    @classmethod
+    def _hide_internal_trace_steps(cls, value: object) -> object:
+        return public_trace_steps(value)
 
 
 class ConversationDetail(ConversationSummary):

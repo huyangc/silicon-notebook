@@ -11,6 +11,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.core.internal_observability import public_report_sections
 
 
 class ReportStore:
@@ -139,7 +140,9 @@ class ReportStore:
              "section_count": len(json_value(row["outline_json"], []))}
         if full:
             d.update(outline=json_value(row["outline_json"], []),
-                     sections=json_value(row["sections_json"], []),
+                     sections=public_report_sections(
+                         json_value(row["sections_json"], [])
+                     ),
                      gaps=json_value(row["gaps_json"], []),
                      references=json_value(row["references_json"], []),
                      section_status=json_value(row["section_status_json"], []),

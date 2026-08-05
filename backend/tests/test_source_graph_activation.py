@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 
 from app.core.config import Settings
-from app.models.ask import AskResponse
+from app.models.admin import AskDetail
+from app.models.ask import ActiveAskJob, AskResponse
+from app.models.reports import ReportDetail
+from app.models.schemas import NotebookCreate
 from app.services.ask_service import AskService
 from app.services.retrieval import RetrievedChunk, RetrievalSupport
 from app.services.retrieval_enrichment import BaselineProtectedEnrichmentService
@@ -9,6 +12,7 @@ from app.services.report_engine import ReportEngine
 from app.services.source_graph_activation import SelectedSourceGraphActivationService
 from app.services.source_graph_rollout import SourceGraphRolloutDecision
 from app.services.source_scope import source_scope_context
+from app.services.sqlite_repository import SQLiteRepository
 
 
 def _chunk(chunk_id: str, source_id: str) -> RetrievedChunk:
@@ -111,6 +115,72 @@ def test_selected_source_graph_rollout_defaults_to_invisible_shadow():
 
 def test_selected_source_graph_rollout_state_is_not_part_of_public_ask_schema():
     assert "source_graph" not in AskResponse.model_json_schema()["properties"]
+
+
+def test_legacy_selected_source_graph_state_is_scrubbed_at_public_model_boundaries():
+    internal_step = {
+        "step_type": "source_subgraph",
+        "summary": "来源子图：shadow",
+        "detail": {"state": "shadow"},
+    }
+    public_step = {"step_type": "retrieve", "summary": "retrieved"}
+    answer = AskResponse(
+        conclusion="ok",
+        reasoning_trace=[internal_step, public_step],
+    ).model_dump()
+    assert [step["step_type"] for step in answer["reasoning_trace"]] == ["retrieve"]
+
+    active = ActiveAskJob(
+        job_id="job", trace=[internal_step, public_step]
+    ).model_dump()
+    assert active["trace"] == [public_step]
+
+    admin = AskDetail(
+        job_id="job",
+        notebook_id="nb",
+        trace=[internal_step, public_step],
+        answer={
+            "conclusion": "ok",
+            "source_graph": {"state": "shadow"},
+            "reasoning_trace": [internal_step, public_step],
+        },
+    ).model_dump()
+    assert admin["trace"] == [public_step]
+    assert "source_graph" not in admin["answer"]
+    assert admin["answer"]["reasoning_trace"] == [public_step]
+
+    report = ReportDetail(
+        id="rep",
+        question="q",
+        status="done",
+        sections=[{
+            "title": "section",
+            "source_graph": {"state": "shadow"},
+        }],
+    ).model_dump()
+    assert report["sections"] == [{"title": "section"}]
+
+
+def test_legacy_report_source_graph_receipt_is_scrubbed_on_repository_read(tmp_path):
+    repo = SQLiteRepository(Settings(
+        _env_file=None,
+        DATABASE_URL=f"sqlite:///{tmp_path / 'legacy.db'}",
+        SILICON_NOTEBOOK_STORAGE_DIR=str(tmp_path / "storage"),
+    ))
+    notebook = repo.create_notebook(NotebookCreate(name="legacy report"))
+    report_id = repo.create_report(notebook.id, "q")
+    repo.update_report(
+        notebook.id,
+        report_id,
+        sections=[{
+            "title": "section",
+            "source_graph": {"state": "shadow"},
+        }],
+    )
+
+    detail = repo.get_report(notebook.id, report_id)
+
+    assert detail["sections"] == [{"title": "section"}]
 
 
 def test_whole_scope_is_byte_identical_and_does_no_snapshot_io():

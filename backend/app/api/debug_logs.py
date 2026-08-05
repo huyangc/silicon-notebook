@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
 from app.core.event_logging import _ROOT_DIR, is_safe_owner
+from app.core.internal_observability import is_internal_event
 from app.models.identity import UserProfile
 from app.services import log_reader
 
@@ -119,8 +120,11 @@ def list_records(
     path, is_gzip = log_reader.resolve_day_path(_channel_dir(settings, target), channel, date)
     records, malformed, truncated = log_reader.load_day_window(
         path, is_gzip, since=since, before=before)
-    filtered = log_reader.filter_records(records, kind=kind, status=status, model=model, q=q)
-    stats = log_reader.compute_stats(records, filtered, malformed)
+    public_records = [record for record in records if not is_internal_event(record)]
+    filtered = log_reader.filter_records(
+        public_records, kind=kind, status=status, model=model, q=q
+    )
+    stats = log_reader.compute_stats(public_records, filtered, malformed)
     filtered_desc = sorted(filtered, key=lambda r: r.get("seq", -1), reverse=True)
     page, has_more = log_reader.paginate(filtered_desc, before=before, since=since, limit=limit)
     newest_seq = filtered_desc[0]["seq"] if filtered_desc else None
@@ -157,11 +161,18 @@ def get_record(
     # 明文文件:seq=字节偏移 → 直接 seek 单行 O(1),不受尾窗 32MB 限制(修早期记录误 404 + 免每次重载)
     if seq is not None and not is_gzip and path.exists():
         rec = log_reader.read_record_at(path, seq)
-        if rec is not None and rec.get("id") == record_id:
+        if (
+            rec is not None
+            and rec.get("id") == record_id
+            and not is_internal_event(rec)
+        ):
             return rec
     # 兜底(gz / 无 seq / seek 未命中):当天窗口内按 id 找(有界)
     records, _, _ = log_reader.load_day_window(path, is_gzip, since=None, before=None)
-    matches = [r for r in records if r.get("id") == record_id]
+    matches = [
+        r for r in records
+        if r.get("id") == record_id and not is_internal_event(r)
+    ]
     if not matches:
         raise HTTPException(status_code=404, detail=f"record not found: {record_id}")
     return matches[-1]

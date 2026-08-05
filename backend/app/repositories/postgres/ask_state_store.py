@@ -22,6 +22,10 @@ from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalize_timestamp,
 )
+from app.core.internal_observability import (
+    public_trace_steps,
+    sanitize_answer_payload,
+)
 from app.repositories.postgres.database import PostgresDatabase
 
 
@@ -304,7 +308,7 @@ class AskStateStore:
                     trace.append(value)
             except (TypeError, ValueError):
                 continue
-        return trace
+        return public_trace_steps(trace)
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:
@@ -335,7 +339,7 @@ class AskStateStore:
             ).fetchone()
         if row is None:
             return None
-        payload = json_value(row["payload"], {})
+        payload = sanitize_answer_payload(json_value(row["payload"], {}))
         payload["answered_at"] = str(
             payload.get("answered_at") or iso_timestamp(row["created_at"])
         )
