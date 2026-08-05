@@ -195,6 +195,10 @@ def test_reader_disclosure_names_reference_library_material_it_cited():
         unavailable_profile(PROFILE_SCOPE_RESTRICTED), base_reference_sources=3,
     ))
     assert "限定了检索的资料范围" in scoped and "3 份来自已挂载参考库" in scoped
+    # 没有统计可言时不能说「不计入上述统计」——那会指向一段并不存在的内容。
+    assert "不计入上述统计" not in scoped
+    legacy = "\n".join(corpus_profile_reader_markdown({}, base_reference_sources=1))
+    assert "1 份来自已挂载参考库" in legacy and "不计入上述统计" not in legacy
 
 
 def test_unavailable_profile_is_never_treated_as_measured_statistics():

@@ -305,20 +305,24 @@ def corpus_profile_reader_markdown(
     # over mounted reference libraries.  Saying "based on the N visible sources"
     # while most citations came from a library outside that N is the ambiguity
     # this line exists to remove.
-    base_note = (
-        f"此外，正文还引用了 {base_reference_sources} 份来自已挂载参考库的资料；"
-        "参考库资料不计入上述统计。"
-        if base_reference_sources > 0 else ""
-    )
     if not corpus_profile_available(profile):
         lines = [
             "## 资料基础",
             "",
             corpus_profile_unavailable_copy(profile),
         ]
-        if base_note:
-            lines.append(base_note)
+        if base_reference_sources > 0:
+            # 上面没有任何统计,所以不能说「不计入上述统计」——那会指向一段并
+            # 不存在的内容。独立陈述这个事实即可。
+            lines.append(
+                f"正文引用了 {base_reference_sources} 份来自已挂载参考库的资料。"
+            )
         return lines + [""]
+    base_note = (
+        f"此外，正文还引用了 {base_reference_sources} 份来自已挂载参考库的资料；"
+        "参考库资料不计入上述统计。"
+        if base_reference_sources > 0 else ""
+    )
     total = int(profile.get("total_sources") or 0)
     metadata = int(profile.get("metadata_sources") or 0)
     unknown_year = int(profile.get("unknown_year") or 0)

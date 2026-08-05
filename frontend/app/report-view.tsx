@@ -853,7 +853,11 @@ export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
       )}
       {baseSources > 0 && (
         <p className="report-corpus-basis-unavailable">
-          另引用了 {baseSources} 份参考库资料，未计入上述统计。
+          {measured
+            ? `另引用了 ${baseSources} 份参考库资料，未计入上述统计。`
+            /* 没有统计时不能说「未计入上述统计」——旧报告的卡片上方是空的，
+               那句话会指向一段并不存在的内容。 */
+            : `本报告引用了 ${baseSources} 份参考库资料。`}
         </p>
       )}
       {measured && (

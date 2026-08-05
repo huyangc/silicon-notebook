@@ -120,6 +120,16 @@ test("资料基础点明引用到的参考库资料，按来源去重而非按�
     })} />,
   );
   expect(screen.queryByText(/参考库资料/)).toBeNull();
+
+  // 旧报告没有画像：卡片上方是空的，所以不能说「未计入上述统计」。
+  rerender(
+    <ReportCorpusBasis report={detail({
+      understanding: {},
+      references: [{ key: "k1", label: "b", tier: "base", source_id: "src-b1" }],
+    })} />,
+  );
+  expect(screen.getByText("本报告引用了 1 份参考库资料。")).toBeVisible();
+  expect(screen.queryByText(/未计入上述统计/)).toBeNull();
 });
 
 
