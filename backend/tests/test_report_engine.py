@@ -1352,7 +1352,7 @@ def test_intent_coverage_probe_includes_confirmed_question_and_answers(repo, mon
     monkeypatch.setattr(
         eng,
         "_probe_queries",
-        lambda notebook_id, queries: observed.append(list(queries)) or {
+        lambda notebook_id, queries, max_queries=4: observed.append(list(queries)) or {
             "hits": 0, "base_hits": 0, "element_hits": 0, "source_hits": 0,
         },
     )
@@ -1453,7 +1453,7 @@ def test_plan_outline_freezes_intent_before_corpus_scout(repo, monkeypatch):
     )
     monkeypatch.setattr(
         eng, "_probe_intent_coverage",
-        lambda notebook_id, value: calls.append("intent_probe") or [{
+        lambda notebook_id, value, max_queries=4: calls.append("intent_probe") or [{
             "intent_id": "intent-1", "title": "原问题", "hits": 0,
             "base_hits": 0, "element_hits": 1, "source_hits": 1,
         }],
@@ -1469,7 +1469,7 @@ def test_plan_outline_freezes_intent_before_corpus_scout(repo, monkeypatch):
             "intent_ids": [],
         }],
     )
-    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *args: [])
+    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *args, **kwargs: [])
     monkeypatch.setattr(eng, "_judge_sufficiency", lambda question, sections, probe: sections)
     eng.plan_outline(nb.id, rid, "用户原问题")
     assert calls == ["intent", "intent_probe", "corpus", "storm"]
@@ -2055,3 +2055,207 @@ def test_from_repository_honors_explicit_settings_override(repo):
     assert engine.settings is custom
     assert engine.dependencies.settings is custom
     assert engine.dependencies.communities.sibling_min_bridge == custom.sibling_min_bridge
+
+
+# --- 大纲阶段提速四件套(探针 memo / 档位宽度 / 方向种子化 / 进度可见) ---------
+
+
+def test_probe_memo_dedupes_repeated_queries_within_one_planning_run(repo, monkeypatch):
+    """覆盖探针把同一条确认问题放在每个主题头部——memo 后同一查询只检索一次。
+
+    memo 只在 plan_outline 设置后生效;没有 memo 属性的裸调用保持逐次检索的
+    历史行为(变异守卫:把 memo 读写删掉,本测试的计数断言立刻红)。
+    """
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    calls = {"federated": [], "elements": []}
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, q: calls["federated"].append(q) or [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements",
+        lambda nb, q, limit=8: calls["elements"].append(q) or [],
+    )
+
+    # 无 memo(plan_outline 之外的裸调用):历史行为,逐次检索。
+    eng._probe_queries("nb", ["shared", "a"])
+    eng._probe_queries("nb", ["shared", "b"])
+    assert calls["federated"].count("shared") == 2
+
+    # 有 memo(plan_outline 会在探针前设置):重复查询只打一次。
+    calls["federated"].clear(); calls["elements"].clear()
+    eng._probe_retrieval_memo = {}
+    eng._probe_queries("nb", ["shared", "a"])
+    eng._probe_queries("nb", ["shared", "b"])
+    eng._probe_queries("nb", ["shared"])
+    assert calls["federated"] == ["shared", "a", "b"]
+    assert calls["elements"] == ["shared", "a", "b"]
+
+
+def test_probe_memo_does_not_cache_failures(repo, monkeypatch):
+    """失败不进 memo:瞬态错误保持逐探针重试,而不是被冻结成空结果。"""
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    attempts = []
+
+    def flaky(nb, q):
+        attempts.append(q)
+        if len(attempts) == 1:
+            raise RuntimeError("transient")
+        return []
+
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", flaky)
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements", lambda nb, q, limit=8: [],
+    )
+    eng._probe_retrieval_memo = {}
+    eng._probe_queries("nb", ["q"])   # 第一次:失败,吞掉,不缓存
+    eng._probe_queries("nb", ["q"])   # 第二次:必须真的重试
+    assert attempts == ["q", "q"]
+
+
+def test_probe_width_maps_report_depth_to_shared_tiers():
+    """探针宽度按 depth→档位映射;None(行上缺 depth)保持历史宽度 4。
+
+    数值契约(2/2/3/4/4)登记在 docs/product-and-api*.md;这里钉映射本身,
+    以及「宽度真的限制了探测的查询数」。
+    """
+    from app.services.report_engine import report_probe_query_width
+
+    assert report_probe_query_width(1) == 2      # overview
+    assert report_probe_query_width(2) == 2      # standard
+    assert report_probe_query_width(4) == 3      # deep
+    assert report_probe_query_width(8) == 4      # thorough
+    assert report_probe_query_width(16) == 4     # exhaustive
+    assert report_probe_query_width(None) == 4   # 历史行为
+
+
+def test_probe_queries_honors_max_queries(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    probed = []
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, q: probed.append(q) or [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements", lambda nb, q, limit=8: [],
+    )
+    eng._probe_queries("nb", ["q1", "q2", "q3", "q4"], max_queries=2)
+    assert probed == ["q1", "q2"]
+
+
+def test_deep_dive_seeds_confirmed_directions_and_skips_rerun(repo, monkeypatch):
+    """种子化两半都要钉:①大纲方向经 `intent_queries` 进 run(run 内因此跳过
+    plan LLM 调用——那是 reasoning_retrieval 已测的既有语义);②run 内已执行
+    (attempted 记账)的方向,run 后合并不再重复同一条 federated 检索,但元素
+    补取照旧(run 不按方向逐条取元素,那半不是重复)。run 内没执行到的方向
+    (低档步数装不下)KG 侧照常兜底执行。
+    """
+    from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+
+    captured = {}
+
+    def _run(self, notebook_id, question, **kwargs):
+        captured.update(kwargs)
+        result = ReasoningResult()
+        # run 声称自己执行了 q1(种子路径的正常账目);q2 没执行到。
+        result.attempted.append({"query": "q1", "new": 3, "tries": 1})
+        return result
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    federated, elements = [], []
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, q: federated.append(q) or [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements",
+        lambda nb, q, limit=8: elements.append(q) or [],
+    )
+
+    engine = _mk_engine(repo, _OutlineLLM())
+    engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["q1", "q2"]},
+        "Q", depth=3,
+    )
+
+    assert captured.get("intent_queries") == ["q1", "q2"], (
+        "大纲方向必须作为已确认种子进 run——否则每节多付一次 plan LLM 调用"
+    )
+    assert federated == ["q2"], "run 内已执行的 q1 不得在 run 后重复 federated"
+    assert elements == ["q1", "q2"], "元素补取不是重复,两个方向都要"
+
+
+def test_deep_dive_without_directions_leaves_planner_path(repo, monkeypatch):
+    """方向为空回落 planner 路径(intent_queries=None),与接入前行为一致。"""
+    from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+
+    captured = {}
+
+    def _run(self, notebook_id, question, **kwargs):
+        captured.update(kwargs)
+        return ReasoningResult()
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    engine = _mk_engine(repo, _OutlineLLM())
+    engine._deep_dive("nb", {"title": "t", "scope": "s"}, "Q", depth=3)
+    assert captured.get("intent_queries") is None
+
+
+def test_plan_outline_reports_sufficiency_progress(repo, monkeypatch):
+    """「多视角规划大纲中」与「大纲就绪」之间必须有充分性进度写。
+
+    这一段(STORM LLM + 每节探针)此前零进度写,大库上是好几分钟的表观卡死
+    (生产实测:updated_at 停在 STORM 开始那刻)。
+    """
+    from app.services.report_engine import ReportEngine
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "问题")
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    contract = {
+        "objective": "问题",
+        "mandatory_topics": [{
+            "id": "intent-1", "title": "T", "question": "问题",
+            "retrieval_queries": ["q"],
+        }],
+    }
+    monkeypatch.setattr(
+        eng, "_plan_intent_contract", lambda question, history: contract,
+    )
+    monkeypatch.setattr(
+        eng, "_probe_intent_coverage",
+        lambda notebook_id, value, max_queries=4: [],
+    )
+    monkeypatch.setattr(eng, "_build_corpus_map", lambda nb_id, q: "CORPUS")
+    monkeypatch.setattr(
+        eng, "_storm_outline",
+        lambda *args, **kwargs: [{
+            "title": "节", "scope": "s", "sub_queries": ["q"], "intent_ids": [],
+        }],
+    )
+    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        eng, "_judge_sufficiency", lambda question, sections, probe: sections,
+    )
+    progress_seq = []
+    real_update = eng.dependencies.reports.update_report
+
+    def recording_update(notebook_id, report_id, **kwargs):
+        if kwargs.get("progress"):
+            progress_seq.append(kwargs["progress"])
+        return real_update(notebook_id, report_id, **kwargs)
+
+    monkeypatch.setattr(eng.dependencies.reports, "update_report", recording_update)
+    eng.plan_outline(nb.id, rid, "问题")
+
+    assert "检查各节证据充分性" in progress_seq
+    assert progress_seq.index("多视角规划大纲中") < progress_seq.index(
+        "检查各节证据充分性"
+    )
+    assert progress_seq[-1].startswith("大纲就绪")
