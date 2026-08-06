@@ -1,9 +1,11 @@
 """Graph/PPR/follow-chain retrieval owner, composed without a facade."""
 from __future__ import annotations
 
+import heapq
 import json
+import math
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
@@ -14,6 +16,59 @@ from app.services.retrieval_candidates import _RetrievalState
 def _binary_text_key(value: str) -> bytes:
     """Locale-free identifier order shared with persisted graph artifacts."""
     return value.encode("utf-8", "surrogatepass")
+
+
+def _normalized_score_ranking(
+    scores: Iterable[Tuple[str, float]], *, limit: int | None = None
+) -> Tuple[List[Tuple[str, float]], int]:
+    """Return the legacy stable descending min-max ranking with bounded memory.
+
+    ``limit=None`` deliberately preserves the public ``scale_ppr`` diagnostic
+    surface.  Production hydration only needs ``ppr_top_chunks``; for that path a
+    min-heap retains the exact same first K rows, including input-order tie breaks,
+    while still visiting every score to preserve the legacy global min/max.
+    """
+    if limit is not None and limit <= 0:
+        return [], 0
+    raw: List[Tuple[str, float]] = []
+    heap: list[Tuple[float, int, str, int]] = []
+    lo = float("inf")
+    hi = float("-inf")
+    count = 0
+    for position, (chunk_id, value) in enumerate(scores):
+        score = float(value)
+        if not math.isfinite(score):
+            raise ValueError("non_finite_ppr_score")
+        count += 1
+        lo = min(lo, score)
+        hi = max(hi, score)
+        if limit is None:
+            raw.append((chunk_id, score))
+            continue
+        # Larger score wins; at an exact tie the earlier input position wins,
+        # matching Python's stable ``sort(..., reverse=True)`` used previously.
+        entry = (score, -position, chunk_id, position)
+        if len(heap) < limit:
+            heapq.heappush(heap, entry)
+        elif entry[:2] > heap[0][:2]:
+            heapq.heapreplace(heap, entry)
+    if count == 0:
+        return [], 0
+    if limit is None:
+        raw.sort(key=lambda item: item[1], reverse=True)
+        selected = raw
+    else:
+        selected = [
+            (chunk_id, score)
+            for score, _neg_position, chunk_id, position in sorted(
+                heap, key=lambda item: (-item[0], item[3])
+            )
+        ]
+    span = hi - lo
+    return [
+        (chunk_id, (score - lo) / span if span > 0 else 0.0)
+        for chunk_id, score in selected
+    ], count
 
 
 class GraphRetrievalService(_RetrievalState):
@@ -638,7 +693,9 @@ class GraphRetrievalService(_RetrievalState):
         return self._vector_cache.get(
             f"{notebook_id}:scale_combined", version, _load)
 
-    def _scale_ppr_impl(self, notebook_id: str, question: str) -> List[Tuple[str, float]]:
+    def _scale_ppr_impl(
+        self, notebook_id: str, question: str, *, max_results: int | None = None
+    ) -> List[Tuple[str, float]]:
         """规模化 PPR:base 有持久化 scale 索引时,用 ANN 取 base KG 种子(避免
         4GB 暴力 matmul)+ 把 active 增量 splice 进 base CSR 图 → personalized_ppr
         → chunk 排名。返回 [(chunk_id, 归一分 0..1), ...] 降序,与 run_ppr 同形。
@@ -801,28 +858,37 @@ class GraphRetrievalService(_RetrievalState):
         # 5. Chunk rankings: collect chunk node scores, min-max normalize into
         #    [0,1] (mirror run_ppr exactly), sort desc. chunk node key is the raw
         #    chunk_id, so it IS the downstream chunk-fetch id (no prefix to strip).
-        raw = []
-        for cid in combined_chunk_ids:
-            ci = combined_index.get(cid)
-            if ci is not None:
-                raw.append((cid, float(x[ci])))
-        if not raw:
+        try:
+            norm, chunks_considered = _normalized_score_ranking(
+                (
+                    (cid, float(x[ci]))
+                    for cid in combined_chunk_ids
+                    if (ci := combined_index.get(cid)) is not None
+                ),
+                limit=max_results,
+            )
+        except ValueError as exc:
+            if str(exc) != "non_finite_ppr_score":
+                raise
+            self.event_log.emit({
+                "kind": "scale_ppr_bailout",
+                "notebook_id": notebook_id,
+                "reason": "non_finite_chunk_score",
+            })
+            return []
+        if not norm:
             self.event_log.emit({
                 "kind": "scale_ppr_bailout",
                 "notebook_id": notebook_id,
                 "reason": "no_chunk_nodes",
             })
             return []
-        vals = [s for _, s in raw]
-        lo, hi = min(vals), max(vals)
-        span = hi - lo
-        norm = [(cid, (s - lo) / span if span > 0 else 0.0) for cid, s in raw]
-        norm.sort(key=lambda kv: kv[1], reverse=True)
         self.event_log.emit({
             "kind": "scale_ppr_done", "notebook_id": notebook_id,
             "iters": _ppr_stats.get("iters", -1),
             "ppr_ms": round((time.perf_counter() - t_ppr0) * 1000),
             "nodes": len(combined_ids), "seeds": ann_seeds + active_seeds + chunk_seeds,
+            "chunks_considered": chunks_considered,
             "chunks_ranked": len(norm),
         })
         return norm
@@ -842,7 +908,16 @@ class GraphRetrievalService(_RetrievalState):
         chunk 模式三路 mix、ask_graph PPR 分支)均已对 [] 容错降级。小库保留旧
         回退路径,字节不变。"""
         from app.services.kg.ppr import run_ppr
-        ranked = self.scale_ppr(notebook_id, question)
+        top_chunks = self.settings.ppr_top_chunks
+        ranked = self.scale_ppr(
+            notebook_id,
+            question,
+            # Preserve the historical zero/negative configuration behavior:
+            # scale PPR still succeeds and the legacy slice below decides the
+            # empty/negative-prefix result, rather than treating the setting as
+            # a scale failure and constructing the fallback graph.
+            max_results=top_chunks if top_chunks > 0 else None,
+        )
         if not ranked:
             if self._federated_graph_is_large(notebook_id):
                 self.event_log.emit({
@@ -858,7 +933,7 @@ class GraphRetrievalService(_RetrievalState):
             if not reset:
                 return []
             ranked = run_ppr(G, chunk_idx_to_id, reset, damping=self.settings.ppr_damping)
-        ranked = ranked[: self.settings.ppr_top_chunks]
+        ranked = ranked[:top_chunks]
         if not ranked:
             return []
 

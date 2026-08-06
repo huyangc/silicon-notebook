@@ -389,6 +389,44 @@ python scripts/migrate_sqlite_to_postgres.py \
 - 开发时反复切 URL 只是选择两条彼此独立的历史，任何一边都不会自动同步。不得对 PostgreSQL
   运行 SQLite-only maintenance，也不得在应用/后台 writer 仍在线时执行直连批处理写入。
 
+## PostgreSQL notebook-aware 词法索引
+
+PostgreSQL 词法 SQL 始终带 `notebook_id`，但旧的单表达式 trgm 索引无法在索引访问阶段利用
+这条边界。大共享表上的常见词会先形成全局 bitmap，直到 heap recheck 才丢掉绝大多数行。
+两条运维索引用 `btree_gin` 把 `notebook_id` 放到前缀：
+
+- `idx_knowledge_objects_nb_name_trgm`：对应有效 knowledge object 的 name 谓词；
+- `idx_chunks_nb_text_trgm`：对应 chunk text。
+
+从仓库根先只读检查，再在受控的低流量时段执行：
+
+```bash
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
+```
+
+数据库 URL 只从 `DATABASE_URL` 读取且不会打印。apply 使用专用连接取得 session advisory
+lock，安装/校验 `public.btree_gin`，逐条执行 `CREATE INDEX CONCURRENTLY`，使用短 lock timeout，
+并为建索引关闭 statement timeout。读写可继续，但构建仍可能消耗大量 CPU、I/O、临时/空闲磁盘、
+WAL 和副本带宽；先确认当前备份和磁盘容量，并独立监控：
+
+```sql
+SELECT pid, relid::regclass, index_relid::regclass, phase,
+       blocks_done, blocks_total, tuples_done, tuples_total
+FROM pg_stat_progress_create_index;
+```
+
+中断后可安全重跑：已完成且定义正确的索引会跳过；本工具留下的 invalid 工件会 concurrent drop
+后重建；仍需 extension/index 权限，遇到同名但定义不同的有效索引会 fail closed，不会覆盖。
+成功后再次运行只读检查，并对代表性的短/常见词、长/稀有词执行
+`EXPLAIN (ANALYZE, BUFFERS)`，确认 planner 选择新索引。
+
+默认保留旧全局 trgm 索引，作为性能回退安全网。只有两条新索引都验证成功，且已确认线上版本的
+相应词法查询全部带 notebook scope 后，运维方才可选择 `--apply --drop-legacy`；工具会先验证
+两条替代索引再删除，以降低 GIN 写放大，但这不是获得读路径收益的前提。重建或删除这些索引只会
+改变 planner 路径，不改 SQL 谓词、similarity 分数、候选 limit 或排序；PostgreSQL conformance
+测试必须证明检索结果逐项一致。
+
 ## 用 MinerU 解析 PDF
 
 PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 时才调用它，否则回退到本地 PyMuPDF4LLM 版面/Markdown 解析（pypdf 只作解析器报错后的最后兜底）。
@@ -590,6 +628,11 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 ### 大库检索热路径
 
 索引 KG 检索在 ANN 生成候选后仍必须保持有界。孤立节点排序降权只对每个候选执行带索引的 `EXISTS`，并且只返回已有连接的候选 id，绝不能拉取 hub 的完整邻边；canonical fold 只能通过 `cluster_fold_rows` 读取 scored id 的映射。并发推理子查询按 scale-index 实例和工件类型共享一次惰性 ANN 加载。这些优化不改变检索 id、score、阈值、PPR 行为或召回。
+
+增量 KG fusion 在已有可用 object ANN 时也不再读取所有既有 concept payload；该全量读取只保留在
+互斥的无 ANN brute-force/threshold 分支。Scale-index PPR 仍遍历算出同一全局 min/max 所需的每个
+分数，但生产 hydration 只保留配置的 stable Top-K，不再排序/物化全部 chunk 排名。tie 保持输入
+顺序，有限结果必须是无界诊断结果的精确前缀。
 
 当前 scale-index 全量构建与 delta fold 还会写入 `chunk_ann_source_names.npy`、`chunk_ann_source_codes.npy` 和 `chunk_ann_source_counts.npy`。这些紧凑、逐行对齐的文件让收窄来源的 chunk ANN 在 HNSW 进入 Top-K 前拒绝未选行。历史已发布索引仍可加载，但在该 notebook 重建或 fold 之前，收窄的 chunk/元素检索会使用有界来源内 FTS；若部署后立刻需要跨语言的限定来源语义召回，应重建对应 scale 索引。当 manifest 声明 `has_chunk_ann_sources=true` 却缺文件、行数不一致或来源代码越界时，整份工件判不可用，不能静默削弱来源边界。
 

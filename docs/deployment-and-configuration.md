@@ -272,6 +272,22 @@ let migration 0001 create it, or a DBA may preinstall it. An extension of that n
 another schema is rejected. PostgreSQL stores vectors as float32 `bytea`; pgvector is not
 required. Keep production at one backend worker (`--workers 1`).
 
+Large PostgreSQL databases should also install `btree_gin` in `public` and the two
+notebook-aware lexical indexes. The operator tool can create the extension when run as the
+database owner; it inspects by default and changes the database only with `--apply`:
+
+```bash
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
+```
+
+These indexes are intentionally an online operational rollout rather than a startup
+migration: building a GIN index over a multi-million-row live table can consume substantial
+CPU, I/O, temporary disk, and wall time. The application remains correct without them, but
+common lexical terms may scan global trigram matches before filtering by notebook and can
+hit the statement timeout. See the monitored rollout and rollback procedure in
+[Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
+
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
 the URL, start, and verify the empty/bootstrap state. For an existing SQLite source, the
 delivered forward-shadow CLI can build and continuously maintain a PostgreSQL shadow while

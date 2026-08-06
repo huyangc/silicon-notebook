@@ -1063,10 +1063,6 @@ class KnowledgeLifecycleService:
             rows = place_new_concepts(new_objs, cmap, canon_names,
                                       seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
             self.append_clusters(notebook_id, rows, object_type="concept")
-            with self._connect() as db:
-                ex = self.knowledge.incremental_object_rows(
-                    db, notebook_id, source_id, "concept", exclude_source=True
-                )
             # Tier2 桥接候选来源三分支(P1-3,perf audit):
             #   1) 有可用 kg ANN(即使版本漂移/stale,advisory 桥接可接受)→ ANN 近邻查询,
             #      任意规模可用,恢复大库(> max_entities)上一直被静默跳过的跨文档桥接。
@@ -1081,7 +1077,19 @@ class KnowledgeLifecycleService:
             if ann is not None:
                 cands = self._tier2_bridge_candidates_ann(
                     notebook_id, idx, ann, new_objs, cmap)
-            elif len(ex) <= self.settings.kg_incremental_tier2_max_entities:
+            else:
+                # The ANN branch never consumes the existing concept payloads:
+                # its labels/vectors already come from the persisted scale index.
+                # Keep this notebook-wide read behind the no-ANN branch so every
+                # extracted source in a large indexed library does not hydrate the
+                # same millions of concept rows before immediately discarding them.
+                # This only moves I/O; the brute-force/skipped branches below still
+                # receive the exact same ordered rows and make the same decision.
+                with self._connect() as db:
+                    ex = self.knowledge.incremental_object_rows(
+                        db, notebook_id, source_id, "concept", exclude_source=True
+                    )
+            if ann is None and len(ex) <= self.settings.kg_incremental_tier2_max_entities:
                 with self._connect() as db:
                     vrows = self.knowledge.embedding_rows(db, notebook_id)
                     pend = self.governance_store.merge_candidate_pairs(
@@ -1116,7 +1124,7 @@ class KnowledgeLifecycleService:
                 exclude |= {frozenset((r["canonical_a"], r["canonical_b"])) for r in pend}
                 from app.services.kg_merge import detect_bridge_candidates
                 cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, cmap, exclude)
-            else:
+            elif ann is None:
                 self.event_log.emit({
                     "kind": "tier2_skipped", "notebook_id": notebook_id,
                     "entities": len(ex), "reason": "no_index_over_threshold",
