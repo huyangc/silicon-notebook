@@ -56,6 +56,24 @@ class SourceScope(BaseModel):
         return list(dict.fromkeys(normalized))
 
 
+class ResolvedSourceScope(SourceScope):
+    """Server-owned frozen source ceiling.
+
+    The public ``SourceScope`` model caps a client's submitted id list to keep
+    pathological request bodies out.  An ``exclude`` submission is frozen at
+    the API boundary by expanding the server-read visible-source universe into
+    an explicit ``include`` snapshot.  That trusted snapshot may legitimately
+    exceed the client cap in a large notebook, so it uses this internal model
+    while retaining all normalization and private participant state.
+
+    Persisted report snapshots must also be read through this model: otherwise
+    intent confirmation or generation would reapply the client-input cap to
+    the server's own previously frozen list.
+    """
+
+    source_ids: List[str] = Field(default_factory=list)
+
+
 class BaseNotebookScope(BaseModel):
     """User-selected mounted-reference-library scope for one retrieval run.
 

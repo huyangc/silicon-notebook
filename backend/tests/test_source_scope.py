@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 
+from pydantic import ValidationError
+
 from app.models.common import Evidence
-from app.models.source_scope import SourceScope
+from app.models.source_scope import ResolvedSourceScope, SourceScope
 from app.models.notebooks import NotebookSummary
 from app.api.ask_routes import _require_ask_available, _validate_source_scope
 from fastapi import HTTPException
@@ -365,6 +367,34 @@ def test_all_selected_is_frozen_but_not_misclassified_as_narrowed():
         assert source_scope_visible_universe_matches(
             "nb", ["s1"], ["hidden-memory", "hidden-knowhow", "new-hidden"]
         ) is False
+
+
+def test_large_all_selected_snapshot_is_not_limited_by_client_request_cap():
+    source_ids = [f"s{index}" for index in range(10_001)]
+
+    # The compact browser submission remains safely below the public request
+    # cap, while the server-owned complement is allowed to reflect the real
+    # notebook size.
+    resolved = _validate_source_scope(
+        _ScopeRepo(source_ids, len(source_ids)),
+        _notebook(),
+        SourceScope(mode="exclude", source_ids=[]),
+    )
+
+    assert isinstance(resolved, ResolvedSourceScope)
+    assert resolved.mode == "include"
+    assert resolved.source_ids == source_ids
+    assert resolved.narrowed is False
+
+    # Deep reports persist this wire payload and parse it again at intent and
+    # generation gates; that trusted round-trip must not reapply the cap.
+    restored = ResolvedSourceScope.model_validate(resolved.model_dump())
+    assert restored.source_ids == source_ids
+
+    # The separate public request model still rejects a client that submits
+    # the same oversized list directly.
+    with pytest.raises(ValidationError):
+        SourceScope(mode="include", source_ids=source_ids)
 
 
 def test_narrowed_scope_excludes_hidden_projection_sources():
