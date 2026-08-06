@@ -82,7 +82,10 @@ test("空列表直接返回空结果，不发任何请求", async () => {
   assert.equal(state.calls.length, 0);
 });
 
-test("signal 传到每一次调用——否则上一轮请求 abort 不掉", async () => {
+test("signal 绝不传给底层请求——传了席位就会提前归还", async () => {
+  // 这条是反向的:signal 只当「发出前的闸」。一旦把它交给 fetch,abort 会让客户端
+  // promise 立刻 reject、finally 立刻还席位,而服务端那条 SQL 还在跑——席位就从
+  // 「服务端工作量」退化回「浏览器等待数」,下一条断言的不变式随之失效。
   const ids = Array.from({ length: 9 }, (_, index) => `nb-${index}`);
   const controller = new AbortController();
   const { state, search } = recordingSearch();
@@ -91,9 +94,40 @@ test("signal 传到每一次调用——否则上一轮请求 abort 不掉", asy
 
   assert.equal(state.calls.length, ids.length);
   assert.ok(
-    state.calls.every((call) => call.signal === controller.signal),
-    "有调用没收到 signal",
+    state.calls.every((call) => call.signal === undefined),
+    "signal 被传给了底层请求",
   );
+});
+
+test("席位度量的是服务端工作：abort 不会让已发出的请求提前交还席位", async () => {
+  // codex #460 R2 P1。取消 fetch 停不掉同步 route 里的阻塞 SQL,所以「已发出」的
+  // 那几条必须继续占着席位直到服务端应答;否则新一代立刻拿满 4 席,服务端就变成
+  // 8 条、12 条……一路把连接池打穿。
+  const ids = Array.from({ length: 10 }, (_, index) => `nb-${index}`);
+  const { state, search } = recordingSearch({ hold: true });
+  const controller = new AbortController();
+
+  // 排队中的任务会在 abort 后抛 AbortError，这一代注定 reject；立刻接住它，
+  // 否则 Node 会把它报成 unhandledRejection（真实调用方也是当场 .catch 的）。
+  const stale = searchNotebooksBounded(ids, "stale", controller.signal, search)
+    .catch(() => null);
+  await tick();
+  assert.equal(state.calls.length, SEARCH_FANOUT_LIMIT, "前置条件:席位已被占满");
+
+  controller.abort();
+  await tick();
+
+  const fresh = searchNotebooksBounded(ids, "fresh", undefined, search);
+  await tick();
+
+  assert.equal(
+    state.calls.length, SEARCH_FANOUT_LIMIT,
+    "新一代在旧请求仍在服务端执行时就拿到了席位",
+  );
+  assert.ok(state.peak <= SEARCH_FANOUT_LIMIT, "服务端并发越过了上限");
+
+  await settle(state, [stale, fresh]);
+  assert.ok(state.peak <= SEARCH_FANOUT_LIMIT, "收敛过程中也不许越过上限");
 });
 
 test("上限之外的笔记本要等前面的请求让出席位才开始", async () => {
