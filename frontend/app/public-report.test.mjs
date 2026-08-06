@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildPublicReportLink, publicReferencesByKey } from "./public-report.ts";
+import {
+  buildPublicReportLink,
+  publicCitationRefs,
+  publicReferenceNumber,
+} from "./public-report.ts";
 
 test("分享链接只带 token，不暴露 notebook / report id", () => {
   assert.equal(
@@ -17,13 +21,28 @@ test("分享链接只带 token，不暴露 notebook / report id", () => {
   assert.equal(buildPublicReportLink("   ", "https://host.example"), "");
 });
 
-test("引用按 key 建索引，跳过没有 key 的条目", () => {
-  const byKey = publicReferencesByKey([
+test("显示编号取自 key 的序号，不受公开投影过滤挤位影响", () => {
+  // 公开投影会丢掉既无标题又无摘录的条目，位置序号因此和正文标记对不上。
+  const references = [
+    { key: "k1", title: "甲", file_name: "", location: "", snippet: "" },
+    { key: "k7", title: "乙", file_name: "", location: "", snippet: "" },
+  ];
+  assert.equal(publicReferenceNumber(references[0], 0), 1);
+  assert.equal(publicReferenceNumber(references[1], 1), 7);
+  // key 不是 kN 形状才退回位置序号。
+  assert.equal(publicReferenceNumber({ key: "src-9" }, 4), 5);
+  assert.equal(publicReferenceNumber(undefined, 0), 1);
+});
+
+test("正文标记映射与清单共用同一套编号，没有 key 的条目不入映射", () => {
+  const refs = publicCitationRefs([
     { key: "k1", title: "甲", file_name: "", location: "", snippet: "" },
     { key: "", title: "无 key", file_name: "", location: "", snippet: "" },
-    { key: "k2", title: "乙", file_name: "", location: "", snippet: "" },
+    { key: "k7", title: "乙", file_name: "", location: "", snippet: "" },
   ]);
-  assert.deepEqual(Object.keys(byKey).sort(), ["k1", "k2"]);
-  assert.equal(byKey.k1.title, "甲");
-  assert.deepEqual(publicReferencesByKey(undefined), {});
+  assert.deepEqual(Object.keys(refs).sort(), ["k1", "k7"]);
+  // 显示形态与站内答案/报告逐字一致。
+  assert.equal(refs.k1.displayLabel, "[1]");
+  assert.equal(refs.k7.displayLabel, "[7]");
+  assert.deepEqual(publicCitationRefs(undefined), {});
 });
