@@ -1,9 +1,11 @@
+import inspect
 from types import SimpleNamespace
 
 import pytest
 
 from app.services.prompts import (
     REPORT_SYNTHESIS_SCHEMA_HINT,
+    report_section_prompt,
     report_synthesis_prompt,
 )
 from app.services.report_synthesis import (
@@ -189,15 +191,18 @@ def test_claim_ledger_binds_exact_statement_and_same_sentence_anchor():
         "conditions": [], "confidence": 0.8,
         "frame_assignments": {"mixer": "Attention"},
     }], markdown=f"## A\n\n{statement}", legal_anchor_keys={"k1"},
-        blueprint_claim_ids={"c1"}, frame=_frame())
+        frame=_frame())
     assert status == "available"
     assert claims[0]["statement_hash"]
 
+    # A single submitted row whose statement is not verbatim prose has
+    # nothing left to keep: the whole (non-empty) submission is invalid, not
+    # because grounding is section-level, but because zero rows survived.
     _, invalid = normalize_claim_ledger([{
         "claim_id": "c1", "statement": "Attention is one mixer.", "type": "fact",
         "entities": ["Attention"], "evidence_keys": ["k1"],
     }], markdown="Attention is one mixer. Elsewhere [k1].",
-        legal_anchor_keys={"k1"}, blueprint_claim_ids={"c1"}, frame=_frame())
+        legal_anchor_keys={"k1"}, frame=_frame())
     assert invalid == "invalid"
 
 
@@ -216,8 +221,7 @@ def test_one_illegal_frame_assignment_degrades_itself_not_the_whole_ledger():
         "frame_assignments": {"mixer": "Attention变体", "invented": "x"},
     }]
     claims, status = normalize_claim_ledger(
-        ledger, markdown=markdown, legal_anchor_keys={"k1"},
-        blueprint_claim_ids={"c1", "c2"}, frame=_frame())
+        ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=_frame())
 
     assert status == "available"
     assert [row["claim_id"] for row in claims] == ["c1", "c2"]
@@ -229,11 +233,11 @@ def test_one_illegal_frame_assignment_degrades_itself_not_the_whole_ledger():
     shapeless = [{**ledger[0], "frame_assignments": ["mixer"]}]
     assert normalize_claim_ledger(
         shapeless, markdown=markdown, legal_anchor_keys={"k1"},
-        blueprint_claim_ids={"c1"}, frame=_frame()) == (
+        frame=_frame()) == (
             [{**claims[0], "frame_assignments": {}}], "available")
     assert normalize_claim_ledger(
         ledger, markdown=markdown, legal_anchor_keys={"k1"},
-        blueprint_claim_ids={"c1", "c2"}, frame=None)[1] == "available"
+        frame=None)[1] == "available"
 
 
 def test_degraded_frame_tags_keep_trend_capping_and_conflict_detection_alive():
@@ -248,8 +252,7 @@ def test_degraded_frame_tags_keep_trend_capping_and_conflict_detection_alive():
         "claim_id": "c2", "statement": tagged, "type": "fact",
         "entities": ["Mamba"], "evidence_keys": ["k1"],
         "frame_assignments": {"mixer": "SSM"},
-    }], markdown=f"{trend}\n\n{tagged}", legal_anchor_keys={"k1"},
-        blueprint_claim_ids={"c1", "c2"}, frame=_frame())
+    }], markdown=f"{trend}\n\n{tagged}", legal_anchor_keys={"k1"}, frame=_frame())
     assert status == "available"
 
     audited = annotate_trend_evidence(
@@ -265,7 +268,7 @@ def test_degraded_frame_tags_keep_trend_capping_and_conflict_detection_alive():
         [{"claims": claims}, elsewhere], _frame())[0]
 
 
-def test_illegal_evidence_grounding_still_discards_the_whole_claim_ledger():
+def test_illegal_evidence_grounding_discards_only_that_row():
     grounded = "Attention is one mixer [k1]."
     invented_anchor = "SSM is another mixer [k9]."
     markdown = f"## A\n\n{grounded}\n\n{invented_anchor}"
@@ -280,12 +283,130 @@ def test_illegal_evidence_grounding_still_discards_the_whole_claim_ledger():
     }]
     assert normalize_claim_ledger(
         ledger, markdown=markdown, legal_anchor_keys={"k1", "k9"},
-        blueprint_claim_ids={"c1", "c2"}, frame=_frame())[1] == "available"
+        frame=_frame())[1] == "available"
     # k9 is emitted in its own sentence but is not a legal anchor of this
-    # section: evidence grounding stays atomic, tags do not.
+    # section: only that one row is dropped, the audit layer for the rest of
+    # the section (this is an audit over already-emitted prose, never a
+    # drafting input) keeps working.
+    claims, status = normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=_frame())
+    assert status == "partial"
+    assert [row["claim_id"] for row in claims] == ["c1"]
+
+
+def test_mixed_legal_and_illegal_rows_return_partial_not_all_or_nothing():
+    legal = "Attention is one mixer [k1]."
+    markdown = f"## A\n\n{legal}"
+    ledger = [{
+        "claim_id": "c1", "statement": legal, "type": "fact",
+        "evidence_keys": ["k1"],
+    }, {
+        # Not verbatim prose (missing the trailing "[k1]." emitted above).
+        "claim_id": "c2", "statement": "Attention is one mixer.", "type": "fact",
+        "evidence_keys": ["k1"],
+    }]
+    claims, status = normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert [row["claim_id"] for row in claims] == ["c1"]
+
+
+def test_all_rows_illegal_or_empty_submission_are_invalid_missing_stays_missing():
     assert normalize_claim_ledger(
-        ledger, markdown=markdown, legal_anchor_keys={"k1"},
-        blueprint_claim_ids={"c1", "c2"}, frame=_frame()) == ([], "invalid")
+        "not-a-list", markdown="x", legal_anchor_keys=set(), frame=None
+    ) == ([], "missing")
+
+    # Zero rows: nothing to audit either way, same as before this change.
+    assert normalize_claim_ledger(
+        [], markdown="x", legal_anchor_keys=set(), frame=None
+    ) == ([], "invalid")
+
+    all_illegal = [{
+        "claim_id": "c1", "statement": "never emitted anywhere", "type": "fact",
+        "evidence_keys": ["k1"],
+    }, {
+        "claim_id": "c2", "statement": "also never emitted", "type": "fact",
+        "evidence_keys": ["k1"],
+    }]
+    assert normalize_claim_ledger(
+        all_illegal, markdown="## A\nsomething else entirely",
+        legal_anchor_keys={"k1"}, frame=None,
+    ) == ([], "invalid")
+
+
+def test_blueprint_claim_ids_parameter_is_gone_and_new_ids_are_legal():
+    """A statement beyond any prior commitment is a legitimate new row.
+
+    The function used to require every claim_id to have been pre-declared by
+    a synthesis blueprint. That check is gone; pin the removal so it cannot
+    silently come back and discard legitimately new claims again.
+    """
+    assert "blueprint_claim_ids" not in inspect.signature(normalize_claim_ledger).parameters
+
+    statement = "This is prose the writer added beyond any commitment [k1]."
+    claims, status = normalize_claim_ledger([{
+        "claim_id": "brand-new-id", "statement": statement, "type": "fact",
+        "evidence_keys": ["k1"],
+    }], markdown=f"## A\n\n{statement}", legal_anchor_keys={"k1"}, frame=None)
+    assert status == "available"
+    assert claims[0]["claim_id"] == "brand-new-id"
+
+
+def test_over_limit_submission_truncates_to_first_24_rows_as_partial():
+    statements = [f"Claim number {index} holds [k1]." for index in range(1, 26)]
+    markdown = "## A\n\n" + "\n\n".join(statements)
+    ledger = [{
+        "claim_id": f"c{index}", "statement": statement, "type": "fact",
+        "evidence_keys": ["k1"],
+    } for index, statement in enumerate(statements, 1)]
+
+    claims, status = normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert len(claims) == 24
+    # The 25th row never even gets a look — it is dropped by truncation, not
+    # a row-level violation, so it must not drag down rows 1-24.
+    assert [row["claim_id"] for row in claims] == [f"c{index}" for index in range(1, 25)]
+
+
+def test_duplicate_claim_id_keeps_the_first_arriving_row():
+    first = "Attention is one mixer [k1]."
+    second = "SSM is another mixer [k1]."
+    markdown = f"## A\n\n{first}\n\n{second}"
+    ledger = [{
+        "claim_id": "dup", "statement": first, "type": "fact",
+        "evidence_keys": ["k1"],
+    }, {
+        "claim_id": "dup", "statement": second, "type": "fact",
+        "evidence_keys": ["k1"],
+    }]
+    claims, status = normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert len(claims) == 1
+    assert claims[0]["statement"] == first
+
+
+def test_comparison_without_conditions_drops_only_that_row():
+    fact = "Attention is one mixer [k1]."
+    comparison = "A is faster than B [k1]."
+    markdown = f"## A\n\n{fact}\n\n{comparison}"
+    ledger = [{
+        "claim_id": "c1", "statement": fact, "type": "fact",
+        "evidence_keys": ["k1"],
+    }, {
+        "claim_id": "c2", "statement": comparison, "type": "comparison",
+        "evidence_keys": ["k1"], "conditions": [],
+    }]
+    claims, status = normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert [row["claim_id"] for row in claims] == ["c1"]
+
+
+def test_report_section_prompt_teaches_fresh_ids_for_uncovered_statements():
+    prompt = report_section_prompt("T", "S", "Q", "CTX")
+    assert "fresh unique ids" in prompt
 
 
 def test_trend_confidence_is_capped_by_distinguishable_cited_documents():
