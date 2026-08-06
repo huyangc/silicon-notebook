@@ -40,6 +40,7 @@ from app.repositories.postgres.search import (
     chunk_candidate_rows_for_terms,
     chunk_exact_candidate_rows,
     deterministic_lexical_score_terms,
+    knn_index_cache_hint,
     knowledge_candidate_documents,
     knowledge_candidate_rows_for_terms,
 )
@@ -229,6 +230,11 @@ class KnowledgeStore:
     # 能力声明(镜像 SQLite 侧的 False):这个适配器的 fts_search 能兑现 KNN
     # 访问路径提示,所以服务层的规模判定值得跑。
     lexical_knn_capable = True
+
+    @staticmethod
+    def knn_index_cache_hint() -> "bool | None":
+        """探测缓存的零连接只读视图,供服务层在 sizing 之前短路(见 search.py)。"""
+        return knn_index_cache_hint()
 
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database

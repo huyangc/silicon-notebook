@@ -1136,6 +1136,8 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
             # branch silently never runs and every equality below passes
             # vacuously — the exact false-green a mutation run exposed.
             assert knn_name_index_available(connection) is True
+            from app.repositories.postgres.search import knn_index_cache_hint
+            assert knn_index_cache_hint() is True
             counting = _KnnCountingConnection(connection)
             legacy = knowledge_candidate_rows_for_terms(
                 counting, KNN_NOTEBOOK, terms, per_term_limit=3
@@ -1244,15 +1246,20 @@ def test_knn_hint_is_inert_without_a_conforming_index(search_harness):
     `test_knn_hint_travels_from_fts_search_to_the_adapter`.
     """
     from app.repositories.postgres.search import (
+        knn_index_cache_hint,
         knn_name_index_available,
         reset_knn_index_cache,
     )
 
     _seed_knn_staircase(search_harness)
     reset_knn_index_cache()
+    assert knn_index_cache_hint() is None, "未探测时 hint 必须是未知"
     try:
         with search_harness.database.connect() as connection:
             assert knn_name_index_available(connection) is False
+            # 未建索引部署的形状:首探把「无索引」落缓存,服务层 sizing 从此
+            # 零成本短路(codex #464 R2 P2)。
+            assert knn_index_cache_hint() is False
             baseline = knowledge_candidate_rows_for_terms(
                 connection, KNN_NOTEBOOK, ["thermal"], per_term_limit=3
             )

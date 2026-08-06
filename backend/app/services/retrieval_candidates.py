@@ -774,6 +774,13 @@ class CandidateRetrievalService(_RetrievalState):
             return False
         if allowed_source_ids is not None:
             return False
+        # 适配器探测缓存的零连接 hint:已证明「无索引」的 PG 部署同样在 sizing
+        # 之前短路——否则未建索引的部署每次未收窄探针都白付一条版本查询
+        # (codex #464 R2 P2)。None(未探测)与 True 都继续;缺方法的桩按未知收
+        # (fail open 到 sizing,那只是多一条小查询,不是错误)。
+        hint = getattr(self.knowledge, "knn_index_cache_hint", lambda: None)()
+        if hint is False:
+            return False
         try:
             size = self.notebook_copy_stats(notebook_id).get("size") or {}
             rows = int(size.get("nodes") or 0) + int(size.get("chunks") or 0)

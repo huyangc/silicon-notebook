@@ -53,6 +53,12 @@ class KnowledgeStore:
     # 「后端是什么」。
     lexical_knn_capable = False
 
+    @staticmethod
+    def knn_index_cache_hint() -> "bool | None":
+        """签名对等:FTS5 上永远不会有可用的 KNN 索引。能力位已把判定短路在
+        这之前,这个方法只为协议完整存在。"""
+        return False
+
     def __init__(self, database: SqliteDatabase, seams) -> None:
         self.database = database
         self.seams = seams
