@@ -418,7 +418,13 @@ def normalize_claim_ledger(
     value: object, *, markdown: str, legal_anchor_keys: set[str],
     blueprint_claim_ids: set[str] | None = None, frame: dict | None = None,
 ) -> tuple[list[dict], str]:
-    """Bind claims to exact emitted prose and same-sentence citation markers."""
+    """Bind claims to exact emitted prose and same-sentence citation markers.
+
+    Grounding is atomic: one claim whose statement is not verbatim prose, or
+    whose evidence key is illegal or absent from that same statement, discards
+    the section's whole ledger.  The optional organizational tags in
+    ``frame_assignments`` are degraded per entry instead — see below.
+    """
     if not isinstance(value, list):
         return [], "missing"
     if len(value) > CLAIM_LEDGER_MAX_CLAIMS:
@@ -451,17 +457,30 @@ def normalize_claim_ledger(
             raw.get("same_paper_baseline", False)
         ):
             return [], "invalid"
+        # `frame_assignments` is an organizational tag, not evidence grounding,
+        # so it degrades per entry: an unknown key, an off-vocabulary value, or
+        # a non-object payload loses that one tag, never the section's whole
+        # ledger — the discretion an evidence key never gets.  Discarding it
+        # would blind trend-confidence capping (`annotate_trend_evidence`) and
+        # exclusive-facet conflict detection (`exclusive_frame_conflicts`) for
+        # every other claim in the section, because the writer reworded one
+        # label (`Attention变体` for the declared `Attention`).  An off-vocabulary
+        # value is dropped rather than snapped to the nearest declared one — a
+        # reworded label may well denote something else, and a wrong tag is
+        # worse than a missing one.  Evidence keys above stay atomic: those bind
+        # prose to citations.
         assignments: dict[str, str] = {}
-        raw_assignments = raw.get("frame_assignments") or {}
-        if not isinstance(raw_assignments, dict):
-            return [], "invalid"
-        for facet_id, raw_value in raw_assignments.items():
-            facet_id = _text(facet_id, 80)
-            assigned = _text(raw_value, 120)
-            facet = facet_map.get(facet_id)
-            if not facet or (facet.get("values") and assigned not in facet["values"]):
-                return [], "invalid"
-            assignments[facet_id] = assigned
+        raw_assignments = raw.get("frame_assignments")
+        if isinstance(raw_assignments, dict):
+            for raw_facet_id, raw_value in raw_assignments.items():
+                facet_id = _text(raw_facet_id, 80)
+                assigned = _text(raw_value, 120)
+                facet = facet_map.get(facet_id)
+                if not facet or (
+                    facet.get("values") and assigned not in facet["values"]
+                ):
+                    continue
+                assignments[facet_id] = assigned
         seen.add(claim_id)
         out.append({
             "claim_id": claim_id,

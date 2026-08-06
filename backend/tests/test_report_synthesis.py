@@ -197,6 +197,93 @@ def test_claim_ledger_binds_exact_statement_and_same_sentence_anchor():
     assert invalid == "invalid"
 
 
+def test_one_illegal_frame_assignment_degrades_itself_not_the_whole_ledger():
+    kept = "Mamba uses an SSM mixer [k1]."
+    reworded = "Transformer 使用 Attention 变体 [k1]。"
+    markdown = f"## A\n\n{kept}\n\n{reworded}"
+    ledger = [{
+        "claim_id": "c1", "statement": kept, "type": "fact",
+        "entities": ["Mamba"], "evidence_keys": ["k1"],
+        "frame_assignments": {"mixer": "SSM"},
+    }, {
+        "claim_id": "c2", "statement": reworded, "type": "fact",
+        "entities": ["Transformer"], "evidence_keys": ["k1"],
+        # One declared value reworded, one facet key the frame never declared.
+        "frame_assignments": {"mixer": "Attention变体", "invented": "x"},
+    }]
+    claims, status = normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"},
+        blueprint_claim_ids={"c1", "c2"}, frame=_frame())
+
+    assert status == "available"
+    assert [row["claim_id"] for row in claims] == ["c1", "c2"]
+    assert claims[0]["frame_assignments"] == {"mixer": "SSM"}
+    assert claims[1]["frame_assignments"] == {}
+
+    # A non-object payload is the same class of shape miss, and a frame that
+    # declares no facets leaves the tag with no organizational meaning at all.
+    shapeless = [{**ledger[0], "frame_assignments": ["mixer"]}]
+    assert normalize_claim_ledger(
+        shapeless, markdown=markdown, legal_anchor_keys={"k1"},
+        blueprint_claim_ids={"c1"}, frame=_frame()) == (
+            [{**claims[0], "frame_assignments": {}}], "available")
+    assert normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"},
+        blueprint_claim_ids={"c1", "c2"}, frame=None)[1] == "available"
+
+
+def test_degraded_frame_tags_keep_trend_capping_and_conflict_detection_alive():
+    """The whole point of dropping one tag instead of the ledger."""
+    trend = "SSM 必将全面替代现有架构 [k1]。"
+    tagged = "Mamba is an SSM model [k1]."
+    claims, status = normalize_claim_ledger([{
+        "claim_id": "c1", "statement": trend, "type": "trend",
+        "entities": ["SSM"], "evidence_keys": ["k1"],
+        "frame_assignments": {"mixer": "SSM 系"},
+    }, {
+        "claim_id": "c2", "statement": tagged, "type": "fact",
+        "entities": ["Mamba"], "evidence_keys": ["k1"],
+        "frame_assignments": {"mixer": "SSM"},
+    }], markdown=f"{trend}\n\n{tagged}", legal_anchor_keys={"k1"},
+        blueprint_claim_ids={"c1", "c2"}, frame=_frame())
+    assert status == "available"
+
+    audited = annotate_trend_evidence(
+        claims, id_map={"k1": {"source_id": "s1"}}, family_by_source={"s1": "f1"},
+    )
+    assert audited[0]["trend_level"] == "research"
+    assert audited[0]["trend_wording_violation"] is True
+
+    elsewhere = {"claims": [{
+        "entities": ["Mamba"], "frame_assignments": {"mixer": "Attention"},
+    }]}
+    assert "冲突取值" in exclusive_frame_conflicts(
+        [{"claims": claims}, elsewhere], _frame())[0]
+
+
+def test_illegal_evidence_grounding_still_discards_the_whole_claim_ledger():
+    grounded = "Attention is one mixer [k1]."
+    invented_anchor = "SSM is another mixer [k9]."
+    markdown = f"## A\n\n{grounded}\n\n{invented_anchor}"
+    ledger = [{
+        "claim_id": "c1", "statement": grounded, "type": "fact",
+        "entities": ["Attention"], "evidence_keys": ["k1"],
+        "frame_assignments": {"mixer": "Attention"},
+    }, {
+        "claim_id": "c2", "statement": invented_anchor, "type": "fact",
+        "entities": ["SSM"], "evidence_keys": ["k9"],
+        "frame_assignments": {"mixer": "SSM"},
+    }]
+    assert normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1", "k9"},
+        blueprint_claim_ids={"c1", "c2"}, frame=_frame())[1] == "available"
+    # k9 is emitted in its own sentence but is not a legal anchor of this
+    # section: evidence grounding stays atomic, tags do not.
+    assert normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"},
+        blueprint_claim_ids={"c1", "c2"}, frame=_frame()) == ([], "invalid")
+
+
 def test_trend_confidence_is_capped_by_distinguishable_cited_documents():
     claim = {
         "claim_id": "trend-1", "statement": "该路线必将全面替代现有架构 [k1]。",
