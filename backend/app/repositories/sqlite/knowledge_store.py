@@ -46,6 +46,13 @@ def _completion_generation_is_current(
 
 
 class KnowledgeStore:
+    # KNN 访问路径提示在 FTS5 上永远无事可做:声明不具备,让服务层的
+    # `_lexical_knn_allowed` 在读取任何规模统计之前零成本短路——发行默认后端
+    # 不该为一个 PostgreSQL 专属特性每次检索付一条版本查询(codex #464 R1 P2)。
+    # 这是能力声明不是 dialect 分支:服务层问的是「绑定的适配器能不能」,不是
+    # 「后端是什么」。
+    lexical_knn_capable = False
+
     def __init__(self, database: SqliteDatabase, seams) -> None:
         self.database = database
         self.seams = seams

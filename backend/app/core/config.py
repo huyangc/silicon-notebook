@@ -558,7 +558,8 @@ class Settings(BaseSettings):
     # ——登记接受的取舍(2026-08-06 拍板:60× 收益优先;需要位稳定候选集的部署
     # 用本开关回滚)。只在 PostgreSQL 且存在精确匹配形状的 GiST 索引时生效
     # (运行时探测,缺索引静默走旧路径,所以默认开对未建索引的部署零行为差异);
-    # SQLite 忽略此开关。
+    # SQLite 适配器声明不具备该能力(lexical_knn_capable=False),判定在读取任何
+    # 规模统计之前零成本短路——发行默认后端不为 PG 专属特性付哪怕一条查询。
     postgres_lexical_knn_enabled: bool = Field(
         True, validation_alias="POSTGRES_LEXICAL_KNN_ENABLED")
     # KNN 路由的规模下限(nodes+chunks)。GiST 索引没有 notebook 键,KNN 走的是

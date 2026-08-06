@@ -226,6 +226,10 @@ def _completion_generation_is_current(
 
 
 class KnowledgeStore:
+    # 能力声明(镜像 SQLite 侧的 False):这个适配器的 fts_search 能兑现 KNN
+    # 访问路径提示,所以服务层的规模判定值得跑。
+    lexical_knn_capable = True
+
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database
         self.seams = seams
