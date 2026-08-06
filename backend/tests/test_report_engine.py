@@ -15,7 +15,7 @@ def test_report_settings_defaults():
     assert s.report_max_sections == 6
     assert not hasattr(s, "report_section_top_n")   # 已移除:逐节与 ask 统一走自适应预算
     assert s.report_section_chunk_budget == 20000
-    assert s.report_section_concurrency == 3
+    assert s.report_section_concurrency == 5
     assert s.report_generation_concurrency == 1
     assert not hasattr(s, "report_context_window_tokens")
     assert not hasattr(s, "report_summary_context_window_tokens")

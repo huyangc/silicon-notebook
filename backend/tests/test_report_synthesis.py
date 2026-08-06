@@ -2,6 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.prompts import (
+    REPORT_SYNTHESIS_SCHEMA_HINT,
+    report_synthesis_prompt,
+)
 from app.services.report_synthesis import (
     annotate_trend_evidence,
     blueprint_for_section,
@@ -256,3 +260,51 @@ def test_editor_context_includes_late_prose_and_claim_ledger():
     block = fair_editor_context([section], max_chars=8000)
     assert late in block
     assert "claim_ledger_status" in block
+
+
+def test_blueprint_narrows_id_value_composite_facet_to_legal_prefix():
+    payload = _blueprint()
+    payload["claims"][0]["facet_id"] = "mixer:attention"
+    normalized = normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=_frame(),
+    )
+    assert normalized is not None
+    assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == "mixer"
+
+
+def test_blueprint_narrows_fullwidth_colon_composite_facet_to_legal_prefix():
+    payload = _blueprint()
+    payload["claims"][0]["facet_id"] = "mixer：attention"
+    normalized = normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=_frame(),
+    )
+    assert normalized is not None
+    assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == "mixer"
+
+
+def test_blueprint_still_rejects_composite_facet_with_illegal_prefix():
+    payload = _blueprint()
+    payload["claims"][0]["facet_id"] = "capacity:foo"
+    assert normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=_frame(),
+    ) is None
+
+
+def test_blueprint_clears_composite_facet_when_frame_has_no_facets():
+    payload = _blueprint()
+    payload["claims"][0]["facet_id"] = "family:Transformer"
+    normalized = normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=None,
+    )
+    assert normalized is not None
+    assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == ""
+
+
+def test_synthesis_prompt_pins_facet_id_contract_and_schema_hint():
+    prompt = report_synthesis_prompt("Q", "intent", "{}", "evidence")
+    assert "never an `id:value` composite" in prompt
+    assert '"facet_id":""' in REPORT_SYNTHESIS_SCHEMA_HINT

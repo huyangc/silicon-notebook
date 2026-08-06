@@ -257,6 +257,20 @@ def normalize_synthesis_blueprint(
             evidence_keys = _strings(raw.get("evidence_keys"), 16, 160)
             counter = _strings(raw.get("counterevidence_keys"), 12, 160)
             facet_id = _text(raw.get("facet_id"), 80)
+            # Models waver between the bare facet id the frame lists and an
+            # `id:value` composite (value info belongs in statement/conditions).
+            # An `id:value` / `id：value` (full-width colon) form whose prefix is
+            # a legal facet id is deterministically narrowed to that prefix — the
+            # tag is organizational, not evidentiary, so a shape mismatch alone
+            # must not discard an otherwise grounded blueprint.  When the frame
+            # defines no facet vocabulary at all, a model-invented label carries
+            # no organizational meaning either, so it is cleared instead.
+            if facet_id and facet_id not in facet_ids:
+                prefix = re.split(r"[:：]", facet_id, maxsplit=1)[0].strip()
+                if prefix in facet_ids:
+                    facet_id = prefix
+                elif not facet_ids:
+                    facet_id = ""
             if (
                 not claim_id or claim_id in claim_ids or not statement
                 or claim_type not in _CLAIM_TYPES or owner not in section_ids
