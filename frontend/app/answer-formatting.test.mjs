@@ -66,6 +66,17 @@ test("numbers every anchor in a grouped k marker by first appearance", () => {
   assert.equal(renderTextWithReferenceNumbers(text, references), "推导依据 [1, 2]，补充 [3, 1]。");
 });
 
+test("binds Chinese bracket markers and Chinese-comma groups", () => {
+  const text = "先看【k1】，再看【k2，k1】。";
+  const references = buildAnswerReferences(text, anchors, []);
+
+  assert.deepEqual(
+    references.map((reference) => [reference.anchor?.key, reference.displayLabel]),
+    [["k1", "[1]"], ["k2", "[2]"]],
+  );
+  assert.equal(renderTextWithReferenceNumbers(text, references), "先看[1]，再看[2, 1]。");
+});
+
 test("fails a mixed known and unknown grouped k marker closed without partial binding", () => {
   const text = "已知 [k2001]，不可部分绑定 [k2001, k2999]。";
   const references = buildAnswerReferences(text, [

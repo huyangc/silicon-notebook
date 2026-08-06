@@ -26,6 +26,7 @@ from app.repositories.lexical_query import (
     exact_probe_terms,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.citation_markers import LOOSE_MARKER_RE
 from app.services.collection_catalog import (
     ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
 )
@@ -374,7 +375,7 @@ _OUTLINE_MAX_EVIDENCE = 8
 # 前端是对合并全文扫标记建引用表的——标题里的 `[k5001]` 要么显示成一个绑不上
 # 的裸引用,要么恰好撞上别节号段、绑到毫不相干的证据。单一定义点在这里:
 # trace 步、账目回喂与最终标题共用同一份解析产物,一处剥、处处干净。
-_OUTLINE_TITLE_MARKER_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
+_OUTLINE_TITLE_MARKER_RE = LOOSE_MARKER_RE
 # 每 run 最多几次 update_outline。大纲本身不带来证据,所以它的成本是「轮次」:
 # 无上限时一个偏爱整理的模型可以把整份步骤预算花在反复重排目录上。6 次足够
 # 「建 → 补 3 轮 → 收尾」,而 exhaustive 档的 50 步预算仍有绝大部分留给检索。

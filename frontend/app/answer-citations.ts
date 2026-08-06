@@ -1,6 +1,6 @@
 // answer-citations.ts
 //
-// remark 插件：把答案文本里的 [k\d+] 和数字引用标记替换为 `cite:<key>` 链接节点，
+// remark 插件：把答案文本里的 [k\d+] / 【k\d+】 和数字引用标记替换为 `cite:<key>` 链接节点，
 // 供 AnswerMarkdown 的自定义 <a> 组件渲染成可点击的引用徽章。
 //
 // ⚠️ 曾踩坑（PR #51 → 本次修复）：unified 的 attacher 必须是「接收 options →
@@ -24,8 +24,8 @@ export function remarkCitations(refsByKey: Record<string, AnswerReference>) {
   return (tree: Root) => {
     visit(tree, "text", (node: Text, index, parent) => {
       if (!parent || index === undefined) return;
-      // 复合引用统一:一到多个 k?\d+ 以逗号分隔。[k1] / [1] / [k6, k10] / [1, 2] 皆匹配。
-      const pattern = /\[((?:k?\d+\s*,\s*)*k?\d+)\]/g;
+      // 半角/中文括号和逗号采用同一绑定口径；未命中的整组仍原样保留。
+      const pattern = /(?:\[(?:k?\d+\s*[,，]\s*)*k?\d+\]|【(?:k?\d+\s*[,，]\s*)*k?\d+】)/g;
       const text = node.value;
       if (!pattern.test(text)) return;
 
@@ -37,9 +37,9 @@ export function remarkCitations(refsByKey: Record<string, AnswerReference>) {
       let match: RegExpExecArray | null;
 
       while ((match = pattern.exec(text)) !== null) {
-        const token = match[1];
+        const token = match[0].slice(1, -1);
         // 逗号分隔的复合引用(k 前缀或纯数字皆可)统一按逗号拆;单 key 拆出单元素。
-        const keys = token.split(",").map((part) => part.trim()).filter(Boolean);
+        const keys = token.split(/[,，]/).map((part) => part.trim()).filter(Boolean);
         const refs = keys.map((key) => refsByKey[key]);
 
         // 前面的纯文本

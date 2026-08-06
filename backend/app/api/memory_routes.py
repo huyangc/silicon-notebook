@@ -42,6 +42,7 @@ from app.models.admin import PromoteRequest, PromotionCandidate
 from app.repositories.ports import AskStateStorePort, MemoryRepository
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
 from app.services.knowledge_governance import PromotionTargetError
+from app.services.citation_markers import LOOSE_MARKER_RE
 from app.core.memory_inputs import MemoryInputError
 
 
@@ -54,10 +55,12 @@ _PROTECTED_MARKDOWN_RE = re.compile(
 
 
 def _clean_plain_answer(text: str) -> str:
+    cleaned = LOOSE_MARKER_RE.sub("", text)
     cleaned = re.sub(
-        r"\[k\d+\]|\[\d+(?:\s*,\s*\d+)+\]|(?<!\w)\[\d+\]",
+        r"(?:\[\d+(?:\s*[,，]\s*\d+)+\]|【\d+(?:\s*[,，]\s*\d+)+】)|"
+        r"(?<!\w)(?:\[\d+\]|【\d+】)",
         "",
-        text,
+        cleaned,
         flags=re.I,
     )
     cleaned = re.sub(r"[ \t]+([,.;:!?，。；：！？])", r"\1", cleaned)

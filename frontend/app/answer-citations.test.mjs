@@ -69,6 +69,16 @@ test("k 前缀复合引用 [k6, k10] 渲染为多个 cite 链接(报告 LLM 常�
   assert.match(html, />\[10\]</);
 });
 
+test("中文括号引用【k】及中文逗号复合形式渲染为 cite 链接", () => {
+  const refs = {
+    k1: { id: "r1", displayLabel: "[1]" },
+    k2: { id: "r2", displayLabel: "[2]" },
+  };
+  const html = render("结论【k1】，补充【k2，k1】。", refs);
+  assert.equal((html.match(/href="cite:k1"/g) ?? []).length, 2);
+  assert.match(html, /href="cite:k2"/);
+});
+
 test("k 前缀复合引用有未命中时保持原文", () => {
   const refs = { k6: { id: "r6", displayLabel: "[6]" } };
   const html = render("混入幻觉 [k6, k99] 不应半转换。", refs);

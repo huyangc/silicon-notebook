@@ -57,6 +57,7 @@ from app.models.knowledge import (
     KnowledgeRecord,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.model_work import ModelNotConfiguredError
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -69,13 +70,13 @@ from app.services.source_scope import source_scope_context, source_scope_restric
 
 # Matches both one provenance marker and the comma-group form models commonly
 # emit (`[k1, k3]`). A group binds only when every key exists in id_map.
-_MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
+_MARKER_GROUP_RE = MARKER_RE
 
 # Tolerant variant that ALSO matches malformed markers with internal whitespace
 # (e.g. `[ k1]`). Used only to scrub citation-shaped tokens that did NOT bind to
 # a real anchor, so no fabricated/malformed marker reaches the user. Kept
 # separate from _MARKER_GROUP_RE so strict anchor resolution is unchanged.
-_LOOSE_MARKER_GROUP_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
+_LOOSE_MARKER_GROUP_RE = LOOSE_MARKER_RE
 
 _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
     "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，"
@@ -136,7 +137,7 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
         spaced id with no anchor).
     Collapses the double space a removed mid-sentence marker would leave behind."""
     def _sub(m: re.Match) -> str:
-        keys = [part.strip() for part in m.group(0).strip("[]").split(",")]
+        keys = marker_keys(m.group(0))
         # Mixed known/unknown groups fail closed. Keeping only the known subset
         # would silently alter which premises the sentence claims to cite.
         return ("[" + ", ".join(keys) + "]"
@@ -173,7 +174,7 @@ def _keep_only_section_markers(answer: str, section_keys: set) -> str:
     留下空括号或多余逗号。
     """
     def _sub(match: re.Match) -> str:
-        keys = [part.strip() for part in match.group(0).strip("[]").split(",")]
+        keys = marker_keys(match.group(0))
         kept = [key for key in keys if key in section_keys]
         return ("[" + ", ".join(kept) + "]") if kept else ""
 

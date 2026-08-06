@@ -279,6 +279,17 @@ def test_high_risk_audit_detects_unit_numbers_joined_to_chinese_prose():
     assert audit["unsupported_samples"] == ["吞吐降低了30%。", "资料共收录128篇。"]
 
 
+def test_high_risk_audit_accepts_chinese_bracket_citations():
+    audit = audit_high_risk_assertions(
+        "吞吐提升 25%【k1】。容量增加 8GB【k2，k1】。",
+        {"k1": {"object_id": "x"}, "k2": {"object_id": "y"}},
+        max_unsupported_ratio=0.25,
+    )
+    assert audit["high_risk_assertions"] == 2
+    assert audit["supported"] == 2
+    assert audit["unsupported"] == 0
+
+
 def test_high_risk_audit_ignores_ordinals_and_operation_names():
     """序数与操作名不是数量断言(#425 复核 P2):「第3层」指称一个层的位置、
     「all-reduce」是通信原语的名字,都不该进高风险分母——那个分母直接决定

@@ -1032,8 +1032,11 @@ def test_a_marker_from_another_sections_namespace_is_scrubbed_before_joining(
     assert _frontend_bound_keys(response) == [first_section_key]
 
 
-def test_a_mixed_marker_group_keeps_only_this_sections_key(repo, monkeypatch):
-    """混合组 `[本节合法键, 别节键]` → 清洗成 `[本节合法键]`,并且**绑得上**。
+@pytest.mark.parametrize("localized", [False, True])
+def test_a_mixed_marker_group_keeps_only_this_sections_key(
+    repo, monkeypatch, localized,
+):
+    """半角/中文混合组都只保留本节合法键,规范成 `[本节合法键]` 并绑上。
 
     整组丢弃(graph 模式 `_strip_unbound_markers` 的口径)在这里是错的:号段互不相交
     是服务端造的事实,同组里那个合法键是服务端确确实实发给这一节、它也确确实实看见
@@ -1046,9 +1049,10 @@ def test_a_mixed_marker_group_keeps_only_this_sections_key(repo, monkeypatch):
     _stub_run(monkeypatch, _reasoning_result())
     alien = f"k{AskService._ELEMENT_KEY_BASE + 1}"                    # 第一节的号
     own = f"k{OUTLINE_SECTION_KEY_STRIDE + AskService._ELEMENT_KEY_BASE + 1}"
+    marker = f"【{own}，{alien}】" if localized else f"[{own}, {alien}]"
     llm = _CaptureAnswerLLM(answers=[
         {"answer": "第一节正文,不带任何引用。", "grounded": False},
-        {"answer": f"第二节正文[{own}, {alien}]", "grounded": True},
+        {"answer": f"第二节正文{marker}", "grounded": True},
     ])
     response = _ask(repo, notebook, llm)
 
