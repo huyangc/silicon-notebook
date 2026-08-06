@@ -325,6 +325,27 @@ def test_blueprint_facet_narrowing_pins_whitespace_and_edge_prefixes():
     ) is None
 
 
+def test_blueprint_facet_narrowing_prefers_longest_legal_prefix():
+    # A frame may declare a facet id that itself contains a separator; the
+    # longest declared prefix must win over a shorter accidental one.
+    frame = _frame()
+    frame["facets"].append({
+        "id": "model", "name": "模型", "values": [], "exclusive": False,
+    })
+    frame["facets"].append({
+        "id": "model:family", "name": "模型族", "values": [], "exclusive": False,
+    })
+    payload = _blueprint()
+    payload["claims"][0]["facet_id"] = "model:family:Transformer"
+    normalized = normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=frame,
+    )
+    assert normalized is not None
+    facet = blueprint_for_section(normalized, 0)["claims"][0]["facet_id"]
+    assert facet == "model:family"
+
+
 def test_synthesis_prompt_pins_facet_id_contract_and_schema_hint():
     prompt = report_synthesis_prompt("Q", "intent", "{}", "evidence")
     assert "never an `id:value` composite" in prompt

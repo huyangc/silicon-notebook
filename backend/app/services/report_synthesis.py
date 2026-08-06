@@ -273,11 +273,19 @@ def normalize_synthesis_blueprint(
             # defines no facet vocabulary at all, a model-invented label carries
             # no organizational meaning either, so it is cleared instead.
             if facet_id and facet_id not in facet_ids:
-                prefix = re.split(r"[:：]", facet_id, maxsplit=1)[0].strip()
-                if prefix in facet_ids:
-                    facet_id = prefix
-                elif not facet_ids:
-                    facet_id = ""
+                # A legal facet id may itself contain a separator, so split
+                # points are tried right-to-left: the longest declared prefix
+                # wins, never a shorter accidental one.
+                for index in range(len(facet_id) - 1, -1, -1):
+                    if facet_id[index] not in ":：":
+                        continue
+                    prefix = facet_id[:index].strip()
+                    if prefix in facet_ids:
+                        facet_id = prefix
+                        break
+                else:
+                    if not facet_ids:
+                        facet_id = ""
             if (
                 not claim_id or claim_id in claim_ids or not statement
                 or claim_type not in _CLAIM_TYPES or owner not in section_ids
