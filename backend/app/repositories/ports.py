@@ -1308,9 +1308,11 @@ class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
     # the sizing verdict (a version query per probe, five scale aggregates on a
     # cold cache) when it cannot.  SQLite declares False; PostgreSQL True.
     lexical_knn_capable: bool
-    # Connection-free read of the adapter's index-detection cache: False iff
-    # detection ran and proved no conforming index exists, letting the sizing
-    # verdict short-circuit on PostgreSQL deployments that never built one.
+    # Connection-free read of THIS store's last index-detection verdict: False
+    # iff a hinted probe through this instance proved no conforming index
+    # exists, letting the sizing verdict short-circuit on PostgreSQL
+    # deployments that never built one.  Instance-scoped on purpose — an
+    # absence verdict must never speak for a table another store serves.
     def knn_index_cache_hint(self) -> bool | None: ...
     def fts_search(self, db: object, notebook_id: str, q: str, k: int = 30, *, allowed_source_ids: Sequence[str] | None = None, corpus_langs: Sequence[str] | None = None, allow_knn: bool = False) -> list[dict[str, Any]]: ...
     def chunk_fts_search(self, db: object, notebook_id: str, q: str, k: int = 30, *, allowed_source_ids: Sequence[str] | None = None, corpus_langs: Sequence[str] | None = None) -> list[dict[str, Any]]: ...

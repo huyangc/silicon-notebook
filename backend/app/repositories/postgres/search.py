@@ -227,25 +227,13 @@ def reset_knn_index_cache() -> None:
     _KNN_INDEX_CACHE.clear()
 
 
-def knn_index_cache_hint() -> "bool | None":
-    """Connection-free read of the detection cache for the sizing gate.
-
-    `False` iff detection has run and found NO conforming index anywhere this
-    process looked — the service skips the sizing verdict (a version query per
-    probe) entirely, which is what makes the on-default free for PostgreSQL
-    deployments that never built the index (codex #464 round-2 P2).  `None`
-    (nothing probed yet) and `True` both mean "sizing is worth running".
-
-    The any-True rule is deliberate conservatism for multi-schema test
-    processes: a False entry from one disposable schema must not veto a probe
-    against another schema whose index simply has not been detected yet — the
-    worst case of answering non-False here is one sizing query, while a wrong
-    False would disable KNN with no path to recovery.  Production runs one
-    database, where the first real probe settles the hint for good.
-    """
-    if not _KNN_INDEX_CACHE:
-        return None
-    return any(_KNN_INDEX_CACHE.values())
+# The connection-free sizing-gate hint deliberately does NOT live here as a
+# module aggregate: an absence verdict must never speak for a table that was
+# not probed (codex #464 round-3 P2 — a process-wide "all False" would veto a
+# different schema's index before its first detection, permanently).  Each
+# PostgreSQL KnowledgeStore instance serves exactly one database handle, so
+# the hint is recorded on the STORE (see `KnowledgeStore.fts_search`) and this
+# module keeps only the per-(dbname, table oid) correctness cache above.
 
 
 def knn_name_index_available(connection) -> bool:
