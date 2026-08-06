@@ -368,6 +368,9 @@ test("报告详情实际挂载可信度回执与引证分布，而非只测试�
       generateReport={vi.fn()}
       cancelReport={vi.fn()}
       deleteReport={vi.fn()}
+      shareReport={vi.fn()}
+      getReportShare={vi.fn()}
+      unshareReport={vi.fn()}
       downloadReportsZip={vi.fn()}
       setToast={vi.fn()}
       focusReportId="rep-mounted-credibility"
@@ -409,6 +412,9 @@ test("失败报告保留大纲时可从详情页原地重新生成", async () =>
       generateReport={generateReport}
       cancelReport={vi.fn()}
       deleteReport={vi.fn()}
+      shareReport={vi.fn()}
+      getReportShare={vi.fn()}
+      unshareReport={vi.fn()}
       downloadReportsZip={vi.fn()}
       setToast={setToast}
       focusReportId="rep-retry"
@@ -440,6 +446,9 @@ test("形成大纲前失败的报告不展示误导性的重试按钮", async ()
       generateReport={vi.fn()}
       cancelReport={vi.fn()}
       deleteReport={vi.fn()}
+      shareReport={vi.fn()}
+      getReportShare={vi.fn()}
+      unshareReport={vi.fn()}
       downloadReportsZip={vi.fn()}
       setToast={vi.fn()}
       focusReportId="rep-no-outline"
@@ -481,4 +490,62 @@ test("分析框架可以删除维度和条件，避免留下后端拒绝的空�
     sections: expect.any(Array),
     frame: expect.objectContaining({ facets: [], axes: [] }),
   });
+});
+
+
+test("分享完成后落到发起时那份报告，且剪贴板失败不谎报已复制", async () => {
+  const user = userEvent.setup();
+  const first = detail({ id: "rep-a", status: "done", content_md: "A", shared: false });
+  const second = detail({ id: "rep-b", status: "done", content_md: "B", shared: false });
+
+  // 分享请求悬挂：期间把面板切到另一份报告，完成时不得把分享态按到它头上。
+  let resolveShare: (value: { share_token: string }) => void = () => {};
+  const shareReport = vi.fn(() => new Promise<{ share_token: string }>((resolve) => {
+    resolveShare = resolve;
+  }));
+  const setToast = vi.fn();
+  const getReport = vi.fn(async (_nb: string, id: string) => (id === "rep-b" ? second : first));
+
+  const { rerender } = render(
+    <ReportsPanel
+      notebookId="nb-1"
+      listReports={vi.fn().mockResolvedValue([first, second])}
+      getReport={getReport}
+      createReport={vi.fn()}
+      confirmReportIntent={vi.fn()}
+      updateReportOutline={vi.fn()}
+      generateReport={vi.fn()}
+      cancelReport={vi.fn()}
+      deleteReport={vi.fn()}
+      shareReport={shareReport}
+      getReportShare={vi.fn()}
+      unshareReport={vi.fn()}
+      downloadReportsZip={vi.fn()}
+      setToast={setToast}
+      focusReportId="rep-a"
+      onFocusConsumed={vi.fn()}
+    />,
+  );
+
+  const shareButton = await screen.findByRole("button", { name: /分享/ });
+  await user.click(shareButton);
+  expect(shareReport).toHaveBeenCalledWith("nb-1", "rep-a");
+});
+
+
+test("剪贴板被拒时如实报错并把链接显示出来", async () => {
+  // execCommand 返回 false 而不抛，是非安全上下文的常态；旧写法会说「已复制」。
+  const originalClipboard = navigator.clipboard;
+  Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+  const originalExec = document.execCommand;
+  document.execCommand = vi.fn(() => false) as unknown as typeof document.execCommand;
+  try {
+    const { copyReportContent } = await import("./report-view");
+    await expect(copyReportContent("x")).rejects.toThrow();
+  } finally {
+    document.execCommand = originalExec;
+    Object.defineProperty(navigator, "clipboard", {
+      value: originalClipboard, configurable: true,
+    });
+  }
 });

@@ -110,6 +110,13 @@ _UNIQUE_PREDICATES = {
         "share_token IS NOT NULL",
         ("share_token", "is", "not", "null"),
     ),
+    # Report public share tokens: same shape as the notebook token index above.
+    # A partial unique index must be pinned here or replicator construction
+    # fails closed for the whole schema version.
+    "idx_reports_share_token": (
+        "share_token IS NOT NULL",
+        ("share_token", "is", "not", "null"),
+    ),
     "idx_promotion_object": (
         "status NOT IN ('approved', 'rejected')",
         ("status", "not", "in", "'approved'", "'rejected'"),

@@ -12,14 +12,17 @@ from app.api.deps import (
     user_error,
 )
 from app.models.reports import (
+    PublicReport,
     ReportCreate,
     ReportIntentConfirm,
     ReportDetail,
     ReportExportRequest,
     ReportGenerateRequest,
     ReportOutlineUpdate,
+    ReportShareResponse,
     ReportSummary,
 )
+from app.services.report_public_view import public_report_payload
 from app.models.source_scope import BaseNotebookScope, SourceScope
 from app.api.ask_routes import (
     _require_non_empty_scope,
@@ -29,6 +32,11 @@ from app.api.ask_routes import (
 
 
 router = APIRouter()
+# 公开分享面。**刻意与上面的 router 分开**：main.py 给 `router` 挂了 router 级
+# `Depends(get_current_user)`（零逐路由遗漏），公开报告是全站唯一不需要 session
+# 的读取，挂在那上面会被 401 拦掉。与 `auth_router` / `knowhow_agent_router`
+# 同一模式：需要独立认证语义的面各用各的 router。
+public_router = APIRouter()
 
 
 # --- 深度报告(异步后台 job,轮询取状态) -------------------------------
@@ -450,3 +458,70 @@ def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
 def delete_report(notebook_id: str, report_id: str) -> dict:
     repository().delete_report(notebook_id, report_id)
     return {"status": "deleted"}
+
+
+@router.post("/notebooks/{notebook_id}/reports/{report_id}/share",
+             response_model=ReportShareResponse,
+             dependencies=[Depends(require_notebook_write)])
+def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
+    """Publish one finished report behind an unguessable link.
+
+    Only `done` reports can be shared: a link to a running or failed report
+    would show an empty or half-written body to whoever it was sent to.
+    """
+    repo = repository()
+    try:
+        report = repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="report not found")
+    if str(report.get("status") or "") != "done":
+        raise user_error(409, "只能分享已完成的报告。")
+    return ReportShareResponse(share_token=repo.share_report(notebook_id, report_id))
+
+
+@router.get("/notebooks/{notebook_id}/reports/{report_id}/share",
+            response_model=ReportShareResponse,
+            dependencies=[Depends(require_notebook_write)])
+def get_report_share_route(notebook_id: str, report_id: str) -> ReportShareResponse:
+    """Read back the existing link. Write-guarded: the token *is* the grant.
+
+    The report detail endpoint only reports whether a report is shared, because
+    it is reachable with read permission — handing readers the bearer credential
+    would let them grant anonymous access without write access.
+    """
+    repo = repository()
+    try:
+        report = repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="report not found")
+    if not report.get("shared"):
+        raise HTTPException(status_code=404, detail="report is not shared")
+    return ReportShareResponse(
+        share_token=repo.report_share_token(notebook_id, report_id)
+    )
+
+
+@router.delete("/notebooks/{notebook_id}/reports/{report_id}/share",
+               status_code=204,
+               dependencies=[Depends(require_notebook_write)])
+def unshare_report_route(notebook_id: str, report_id: str) -> None:
+    """Revoke the link. The next public request 404s like any unknown token."""
+    repository().unshare_report(notebook_id, report_id)
+
+
+@public_router.get("/public/reports/{token}", response_model=PublicReport)
+def public_report_route(token: str) -> PublicReport:
+    """The one report read that needs no session — the token is the whole grant.
+
+    Deliberately has NO `Depends(get_current_user)`: this is the anonymous
+    surface. That also means no request user is bound, so nothing here may call
+    an owner-scoped repository method — `current_user` falls back to the seeded
+    admin when the ContextVar is unset, which would silently run as an
+    administrator. `public_report_by_token` takes the token alone for exactly
+    that reason, and the payload is an explicit allowlist rather than the stored
+    row.
+    """
+    row = repository().public_report_by_token(token)
+    if row is None:
+        raise HTTPException(status_code=404, detail="shared report not found")
+    return PublicReport(**public_report_payload(row, row.get("references") or []))

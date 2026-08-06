@@ -2707,5 +2707,41 @@ MIGRATION_MANIFEST[(41, 42)] = {
 }
 
 
+# v43: per-report public share tokens.  Two nullable/defaulted columns on an
+# existing table plus one partial unique index over issued tokens only.
+REPORT_SHARE_COLUMNS = {
+    "reports": {
+        "share_token": ("share_token", "TEXT", 0, None, 0),
+        "shared_at": ("shared_at", "TEXT", 0, None, 0),
+    },
+}
+REPORT_SHARE_INDEXES = {
+    "idx_reports_share_token":
+        "CREATE UNIQUE INDEX idx_reports_share_token\n"
+        "                  ON reports(share_token) WHERE share_token IS NOT NULL",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 43, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "reports": {
+                **manifest["columns"].get("reports", {}),
+                **REPORT_SHARE_COLUMNS["reports"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **REPORT_SHARE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(42, 43)] = {
+    "tables": {},
+    "columns": REPORT_SHARE_COLUMNS,
+    "indexes": REPORT_SHARE_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

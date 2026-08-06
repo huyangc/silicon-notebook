@@ -3461,6 +3461,18 @@ class RepositoryFacade:
     def export_reports(self, notebook_id: str, report_ids: list) -> list:
         return self._runtime.report_store.export_reports(notebook_id, report_ids)
 
+    def share_report(self, notebook_id: str, report_id: str) -> str:
+        return self._runtime.report_store.share_report(notebook_id, report_id)
+
+    def unshare_report(self, notebook_id: str, report_id: str) -> None:
+        return self._runtime.report_store.unshare_report(notebook_id, report_id)
+
+    def report_share_token(self, notebook_id: str, report_id: str) -> str:
+        return self._runtime.report_store.report_share_token(notebook_id, report_id)
+
+    def public_report_by_token(self, token: str) -> dict | None:
+        return self._runtime.report_store.public_report_by_token(token)
+
     @property
     def report_execution(self):
         """Explicit deep-report execution coordinator (Task 25); routes'

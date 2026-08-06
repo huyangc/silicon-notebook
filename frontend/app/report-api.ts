@@ -1,4 +1,4 @@
-import { requestBlob, requestJson } from "./api-client.ts";
+import { requestBlob, requestJson, requestVoid } from "./api-client.ts";
 import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-view.tsx";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
@@ -49,6 +49,21 @@ export const cancelReport = (nb: string, id: string) =>
 
 export const deleteReport = (nb: string, id: string) =>
   requestJson<{ status: string }>(`/notebooks/${nb}/reports/${id}`, {
+    ...options,
+    method: "DELETE",
+  });
+
+export const shareReport = (nb: string, id: string) =>
+  requestJson<{ share_token: string }>(`/notebooks/${nb}/reports/${id}/share`, {
+    ...options,
+    method: "POST",
+  });
+
+export const getReportShare = (nb: string, id: string) =>
+  requestJson<{ share_token: string }>(`/notebooks/${nb}/reports/${id}/share`, options);
+
+export const unshareReport = (nb: string, id: string) =>
+  requestVoid(`/notebooks/${nb}/reports/${id}/share`, {
     ...options,
     method: "DELETE",
   });

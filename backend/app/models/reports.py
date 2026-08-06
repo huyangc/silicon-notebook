@@ -66,8 +66,42 @@ class ReportDetail(ReportSummary):
     section_status: List[dict] = Field(default_factory=list)
     content_md: str = ""
     error: str = ""
+    # 只说「有没有在分享」，**不给 token**。报告详情端点只要
+    # `require_notebook_read`,而 token 本身就是匿名访问凭据——放在这里等于让只读
+    # 成员绕过写权限把公开访问分发出去。凭据只从写权限的 `GET .../share` 出。
+    shared: bool = False
 
     @field_validator("sections", mode="before")
     @classmethod
     def _hide_internal_rollout_receipts(cls, value: object) -> object:
         return public_report_sections(value)
+
+
+class PublicReportReference(BaseModel):
+    """One citation as an anonymous reader sees it.
+
+    No `source_id` / `element_id` / `object_id`: a public link must not hand out
+    handles into the authenticated API. See `services/report_public_view.py`.
+    """
+
+    key: str = ""
+    title: str = ""
+    file_name: str = ""
+    location: str = ""
+    snippet: str = ""
+
+
+class PublicReport(BaseModel):
+    """A shared report, readable without a session."""
+
+    question: str = ""
+    content_md: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    references: List[PublicReportReference] = Field(default_factory=list)
+    reference_count: int = 0
+    truncated_references: bool = False
+
+
+class ReportShareResponse(BaseModel):
+    share_token: str

@@ -231,3 +231,31 @@ def test_historical_prose_reference_stays_allowed():
     """散文里引用旧名字是刻意保留的说明,不该被这道门误伤。"""
     source = 'def f():\n    """不像 ``..._v11_catalog`` 那样会过期。"""\n'
     assert not string_literal_violations(source, "postgres_catalog.py")
+
+
+def test_every_partial_unique_index_has_a_pinned_predicate():
+    """A new partial unique index must be pinned in `_UNIQUE_PREDICATES`.
+
+    `_build_unique_surfaces()` fails closed on an unpinned predicate, and it runs
+    at replicator construction — so forgetting the pin does not break one row, it
+    stops every forward-shadow run for that schema version from starting. Nothing
+    else exercises this path, so a migration could ship the breakage silently.
+    """
+    from app.migration.shadow.manifest import MANIFEST
+    from app.migration.shadow.replicator import (
+        _UNIQUE_PREDICATES,
+        _build_unique_surfaces,
+    )
+
+    # Construction is the assertion: it raises for any unpinned predicate.
+    surfaces = _build_unique_surfaces(MANIFEST)
+    assert surfaces
+
+    # Spell out the same requirement directly, so the failure names the index
+    # instead of only surfacing a generic "unpinned predicate" ValueError.
+    from app.migration.shadow.replicator import EXPECTED_OPERATIONAL_INDEXES
+
+    for name, index in EXPECTED_OPERATIONAL_INDEXES.items():
+        if index.unique and index.predicate_tokens:
+            assert name in _UNIQUE_PREDICATES, f"unpinned partial unique index: {name}"
+            assert _UNIQUE_PREDICATES[name][1] == index.predicate_tokens, name

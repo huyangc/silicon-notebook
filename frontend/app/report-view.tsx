@@ -13,7 +13,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Sparkles, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Share2, Sparkles, Square, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -24,6 +24,7 @@ import { remarkCitations } from "./answer-citations";
 import { computeSourceTierCounts, referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
+import { buildPublicReportLink } from "./public-report";
 import { quotedPhraseHint } from "./query-syntax";
 import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
 import { formatReportTiming } from "./report-time";
@@ -192,6 +193,8 @@ export type ReportDetailT = ReportSummaryT & {
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
   content_md: string;
+  /** 是否正在公开分享。**不含 token**——那是匿名访问凭据，只从写权限端点取。 */
+  shared?: boolean;
   references: {
     key: string;
     label: string;
@@ -262,7 +265,7 @@ function downloadMd(r: ReportDetailT) {
 }
 
 // 复制正文到剪贴板:优先 navigator.clipboard,回退到隐藏 textarea + execCommand。
-async function copyReportContent(text: string): Promise<void> {
+export async function copyReportContent(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
     return;
@@ -274,8 +277,11 @@ async function copyReportContent(text: string): Promise<void> {
   textarea.style.opacity = "0";
   document.body.appendChild(textarea);
   textarea.select();
-  document.execCommand("copy");
+  // execCommand 在被拒时**返回 false 而不抛异常**（非安全上下文、权限受限的
+  // 浏览器里很常见）。忽略它，调用方就会理直气壮地说「已复制」。
+  const copied = document.execCommand("copy");
   document.body.removeChild(textarea);
+  if (!copied) throw new Error("clipboard copy was rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,6 +1277,9 @@ export interface ReportsPanelProps {
   generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
+  shareReport: (nb: string, rid: string) => Promise<{ share_token: string }>;
+  getReportShare: (nb: string, rid: string) => Promise<{ share_token: string }>;
+  unshareReport: (nb: string, rid: string) => Promise<void>;
   downloadReportsZip: (nb: string, reportIds: string[]) => Promise<void>;
   setToast: (message: string) => void;
   /** 「待确认中心」深链:指定报告 id 后自动拉详情并打开大纲编辑器,消费后由父组件清空。 */
@@ -1291,6 +1300,9 @@ export function ReportsPanel({
   generateReport,
   cancelReport,
   deleteReport,
+  shareReport,
+  getReportShare,
+  unshareReport,
   downloadReportsZip,
   setToast,
   focusReportId,
@@ -1302,6 +1314,13 @@ export function ReportsPanel({
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
   const [copied, setCopied] = useState(false);
+  // 分享态只存布尔：token 是匿名访问凭据，不进只需 read 权限的详情响应，
+  // 需要链接时才向写权限端点要。
+  const [shared, setShared] = useState(false);
+  // 分享请求是异步的，而 `shared` 是面板级状态：完成时必须确认用户还停在发起
+  // 时那份报告上，否则会把上一份的分享态按到新打开的报告头上。
+  const activeIdRef = useRef<string>("");
+  const [shareBusy, setShareBusy] = useState(false);
   const [question, setQuestion] = useState("");
   const [depthIdx, setDepthIdx] = useState(1); // 默认「标准」(depth=2)
   const [creating, setCreating] = useState(false);
@@ -1489,6 +1508,71 @@ export function ReportsPanel({
     }
   }
 
+  // 分享态跟着详情走：切报告、轮询刷新都会带来新的 share_token，本地态必须
+  // 同步，否则会把上一份报告的链接显示在这一份上。
+  useEffect(() => {
+    activeIdRef.current = active?.id || "";
+    setShared(Boolean(active?.shared));
+  }, [active?.id, active?.shared]);
+
+  /**
+   * 发布/撤销公开链接。撤销即刻生效——公开页对已撤销 token 与从未存在的 token
+   * 给出同一个「链接不可用」，不区分两者。
+   */
+  async function toggleShare() {
+    if (!active || shareBusy) return;
+    const originId = active.id;
+    setShareBusy(true);
+    try {
+      if (shared) {
+        await unshareReport(notebookId, originId);
+        if (activeIdRef.current !== originId) return;
+        setShared(false);
+        setToast("已取消分享，原链接立即失效");
+      } else {
+        const { share_token: token } = await shareReport(notebookId, originId);
+        if (activeIdRef.current !== originId) return;
+        setShared(true);
+        announceShareLink(buildPublicReportLink(token, window.location.origin));
+      }
+    } catch (error) {
+      if (activeIdRef.current !== originId) return;
+      setToast(toUserMessage(error, "分享操作失败"));
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  /**
+   * 把链接送到用户手上：能进剪贴板就说已复制，进不去就把链接本身显示出来。
+   * 复制失败时仍说「已复制」是纯粹的谎报——非安全上下文里这恰恰是常态。
+   */
+  async function announceShareLink(link: string) {
+    try {
+      await copyReportContent(link);
+      setToast(`分享链接已复制：${link}`);
+    } catch {
+      setToast(`分享链接：${link}（自动复制失败，请手动复制）`);
+    }
+  }
+
+  /** 取回既有链接。token 只经写权限端点，不随详情下发。 */
+  async function copyShareLink() {
+    if (!active || shareBusy) return;
+    const originId = active.id;
+    setShareBusy(true);
+    try {
+      const { share_token: token } = await getReportShare(notebookId, originId);
+      if (activeIdRef.current !== originId) return;
+      announceShareLink(buildPublicReportLink(token, window.location.origin));
+    } catch (error) {
+      if (activeIdRef.current !== originId) return;
+      setToast(toUserMessage(error, "取回分享链接失败"));
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
   async function requestDelete() {
     if (!active || actionBusy) return;
     if (!confirmDelete) { setConfirmDelete(true); return; }
@@ -1612,6 +1696,29 @@ export function ReportsPanel({
             {active.content_md && (
               <button className="report-action" type="button" onClick={() => downloadMd(active)}>
                 <Download size={14} /> 下载 .md
+              </button>
+            )}
+            {!readOnly && active.status === "done" && (
+              <button
+                className="report-action"
+                type="button"
+                disabled={shareBusy}
+                onClick={() => void toggleShare()}
+              >
+                <Share2 size={14} />
+                {shareBusy
+                  ? (shared ? "撤销中…" : "生成链接中…")
+                  : (shared ? "取消分享" : "分享")}
+              </button>
+            )}
+            {!readOnly && shared && (
+              <button
+                className="report-action"
+                type="button"
+                disabled={shareBusy}
+                onClick={() => void copyShareLink()}
+              >
+                <Copy size={14} /> 复制链接
               </button>
             )}
             {!readOnly && (
