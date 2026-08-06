@@ -227,13 +227,15 @@ def reset_knn_index_cache() -> None:
     _KNN_INDEX_CACHE.clear()
 
 
-# The connection-free sizing-gate hint deliberately does NOT live here as a
-# module aggregate: an absence verdict must never speak for a table that was
-# not probed (codex #464 round-3 P2 — a process-wide "all False" would veto a
-# different schema's index before its first detection, permanently).  Each
-# PostgreSQL KnowledgeStore instance serves exactly one database handle, so
-# the hint is recorded on the STORE (see `KnowledgeStore.fts_search`) and this
-# module keeps only the per-(dbname, table oid) correctness cache above.
+# There is deliberately NO connection-free "absence hint" layered on this
+# cache for the service's sizing gate.  It was built and reverted: three
+# successive review rounds each found a real defect (a process-wide aggregate
+# vetoes unprobed tables permanently; an instance-recorded verdict persists
+# transient probe failures as absence; recording from the hinted call doubles
+# the catalog round trip on the hot path).  The cost it tried to remove is one
+# indexed single-row version query per unscoped probe — noise next to the
+# LATERALs that follow — and is registered as an accepted trade in
+# `_lexical_knn_allowed`.  Do not reintroduce a hint without solving all three.
 
 
 def knn_name_index_available(connection) -> bool:

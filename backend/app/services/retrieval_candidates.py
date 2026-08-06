@@ -774,13 +774,12 @@ class CandidateRetrievalService(_RetrievalState):
             return False
         if allowed_source_ids is not None:
             return False
-        # 适配器探测缓存的零连接 hint:已证明「无索引」的 PG 部署同样在 sizing
-        # 之前短路——否则未建索引的部署每次未收窄探针都白付一条版本查询
-        # (codex #464 R2 P2)。None(未探测)与 True 都继续;缺方法的桩按未知收
-        # (fail open 到 sizing,那只是多一条小查询,不是错误)。
-        hint = getattr(self.knowledge, "knn_index_cache_hint", lambda: None)()
-        if hint is False:
-            return False
+        # 登记接受的取舍:PostgreSQL 侧每次未收窄探针为 sizing 付一条已索引的
+        # 单行版本校验查询(亚毫秒,与其后的词法 LATERAL 相比是噪声;master 的
+        # 无 ANN 兜底分支本就无条件付它)。曾为消掉它做过零连接的探测缓存 hint,
+        # 连续三轮评审各暴露一个真缺陷(未探测表被进程级 absence 否决/瞬态探测
+        # 失败被固化/热路径双探测),按「简单正确 > 省一条小查询」撤回——见
+        # search.py 探测缓存旁的登记,别在这里重新引入。
         try:
             size = self.notebook_copy_stats(notebook_id).get("size") or {}
             rows = int(size.get("nodes") or 0) + int(size.get("chunks") or 0)

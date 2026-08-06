@@ -1215,8 +1215,6 @@ def test_knn_hint_travels_from_fts_search_to_the_adapter(search_harness):
             assert counting.knn_statements >= 1, (
                 "fts_search(allow_knn=True) 没有到达 KNN 语句——透传断线"
             )
-            # hinted 调用顺带把可用性记在店实例上,供 sizing 门零连接短路。
-            assert search_harness.knowledge.knn_index_cache_hint() is True
             # Scoped runs must stay on legacy even when hinted: the adapter
             # gate is the second defence behind the service verdict, and its
             # docstring claims it — so a statement-level assertion backs it.
@@ -1252,19 +1250,9 @@ def test_knn_hint_is_inert_without_a_conforming_index(search_harness):
 
     _seed_knn_staircase(search_harness)
     reset_knn_index_cache()
-    # hint 是实例作用域:absence 判定不能替未探测的表作答(codex #464 R3 P2)。
-    assert search_harness.knowledge.knn_index_cache_hint() is None, (
-        "本实例未探测时 hint 必须是未知"
-    )
     try:
         with search_harness.database.connect() as connection:
             assert knn_name_index_available(connection) is False
-            # 未建索引部署的形状:首个带 hint 的 fts_search 把「无索引」记在
-            # 店实例上,服务层 sizing 从此零成本短路(codex #464 R2 P2)。
-            search_harness.knowledge.fts_search(
-                connection, KNN_NOTEBOOK, "thermal", 12, allow_knn=True
-            )
-            assert search_harness.knowledge.knn_index_cache_hint() is False
             baseline = knowledge_candidate_rows_for_terms(
                 connection, KNN_NOTEBOOK, ["thermal"], per_term_limit=3
             )

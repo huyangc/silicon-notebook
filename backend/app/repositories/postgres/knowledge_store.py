@@ -40,7 +40,6 @@ from app.repositories.postgres.search import (
     chunk_candidate_rows_for_terms,
     chunk_exact_candidate_rows,
     deterministic_lexical_score_terms,
-    knn_name_index_available,
     knowledge_candidate_documents,
     knowledge_candidate_rows_for_terms,
 )
@@ -230,15 +229,6 @@ class KnowledgeStore:
     # 能力声明(镜像 SQLite 侧的 False):这个适配器的 fts_search 能兑现 KNN
     # 访问路径提示,所以服务层的规模判定值得跑。
     lexical_knn_capable = True
-
-    def knn_index_cache_hint(self) -> "bool | None":
-        """本实例最近一次索引探测的零连接只读视图,供服务层在 sizing 之前短路。
-
-        作用域刻意是**实例**而非进程:absence 判定不能替未探测的表作答
-        (codex #464 R3 P2)——一个 store 恰好服务一个数据库句柄,别的
-        schema/库由它们自己的 store 实例各自探测。未探测过 = None(sizing
-        照常跑,首次带 hint 的 fts_search 会记下判定)。"""
-        return getattr(self, "_knn_index_hint", None)
 
     def __init__(self, database: PostgresDatabase, seams) -> None:
         self.database = database
@@ -2160,23 +2150,14 @@ class KnowledgeStore:
         )
 
     # ------------------------------------------------------------------ FTS
+    @staticmethod
     def fts_search(
-        self, db, notebook_id: str, q: str, k: int = 30, *,
+        db, notebook_id: str, q: str, k: int = 30, *,
         allowed_source_ids: Sequence[str] | None = None,
         corpus_langs: Sequence[str] | None = None,
         allow_knn: bool = False,
     ) -> List[Dict]:
-        """Return deterministic lexical knowledge hits from trigram candidates.
-
-        Instance method (the one lexical entry that is): a hinted call records
-        the index-availability verdict on THIS store so `knn_index_cache_hint`
-        can short-circuit the sizing gate connection-free — scoped to the one
-        database this instance serves, never to unprobed tables (codex #464
-        R3 P2).  The detection call is the same per-(dbname, oid) cached probe
-        the candidate wrapper performs; recording it here costs nothing extra.
-        """
-        if allow_knn and allowed_source_ids is None:
-            self._knn_index_hint = knn_name_index_available(db)
+        """Return deterministic lexical knowledge hits from trigram candidates."""
         needle = (q or "").strip()
         return _lexical_candidate_union(
             db,

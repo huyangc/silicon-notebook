@@ -31,12 +31,12 @@ def repo(tmp_path, monkeypatch):
 
 
 def _verdict(repo, *, flag, rows, allowed_source_ids=None, stats_error=False,
-             capable=True, index_hint=None):
+             capable=True):
     """对判据组合直接求 `_lexical_knn_allowed` 的值。
 
-    fixture 是 SQLite 仓库,其适配器如实声明 `lexical_knn_capable = False` 且
-    hint 恒 False;这里默认在实例上覆盖成 True/None(未探测),好让其余判据
-    可测——`capable=False` / `index_hint=False` 那两档测的才是真实短路。
+    fixture 是 SQLite 仓库,其适配器如实声明 `lexical_knn_capable = False`;
+    这里默认在实例上覆盖成 True,好让其余判据可测——`capable=False` 那一档
+    测的才是 SQLite 部署的真实短路。
     """
     candidates = repo.retrieval.candidates
     real_stats = candidates.notebook_copy_stats
@@ -49,7 +49,6 @@ def _verdict(repo, *, flag, rows, allowed_source_ids=None, stats_error=False,
     candidates.notebook_copy_stats = fake_stats
     candidates.settings.postgres_lexical_knn_enabled = flag
     candidates.knowledge.lexical_knn_capable = capable
-    candidates.knowledge.knn_index_cache_hint = lambda: index_hint
     try:
         return candidates._lexical_knn_allowed(
             "nb-any", allowed_source_ids=allowed_source_ids
@@ -57,7 +56,6 @@ def _verdict(repo, *, flag, rows, allowed_source_ids=None, stats_error=False,
     finally:
         candidates.notebook_copy_stats = real_stats
         del candidates.knowledge.lexical_knn_capable
-        del candidates.knowledge.knn_index_cache_hint
 
 
 def test_verdict_requires_all_three_conditions(repo):
@@ -75,37 +73,6 @@ def test_verdict_requires_all_three_conditions(repo):
     assert _verdict(repo, flag=True, rows=threshold, stats_error=True) is False
     # 适配器声明不具备(SQLite 的真实声明)→ False,其余判据满足也不例外。
     assert _verdict(repo, flag=True, rows=threshold, capable=False) is False
-    # 探测缓存已证明无索引(未建索引的 PG 部署首探之后)→ False;
-    # True(已证明有)照常放行。
-    assert _verdict(repo, flag=True, rows=threshold, index_hint=False) is False
-    assert _verdict(repo, flag=True, rows=threshold, index_hint=True) is True
-
-
-def test_absent_index_hint_short_circuits_before_copy_stats(repo):
-    """hint=False 在 sizing 之前——未建索引 PG 部署的零成本靠这一条。
-
-    与能力位那条同一手法(计数器,不是会被 fail-closed except 吞掉的抛错):
-    探测缓存已证明无索引时,规模统计一次都不许读(codex #464 R2 P2)。
-    """
-    candidates = repo.retrieval.candidates
-    real_stats = candidates.notebook_copy_stats
-    calls: list[str] = []
-
-    def counting_stats(nb):
-        calls.append(nb)
-        return {"copyable": False, "size": {"nodes": 10**7, "chunks": 0}}
-
-    candidates.notebook_copy_stats = counting_stats
-    candidates.settings.postgres_lexical_knn_enabled = True
-    candidates.knowledge.lexical_knn_capable = True
-    candidates.knowledge.knn_index_cache_hint = lambda: False
-    try:
-        assert candidates._lexical_knn_allowed("nb-any") is False
-        assert calls == [], "探测缓存判无索引时不得读 notebook_copy_stats"
-    finally:
-        candidates.notebook_copy_stats = real_stats
-        del candidates.knowledge.lexical_knn_capable
-        del candidates.knowledge.knn_index_cache_hint
 
 
 def test_incapable_adapter_short_circuits_before_copy_stats(repo):

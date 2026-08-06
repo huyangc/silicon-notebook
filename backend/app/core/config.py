@@ -557,8 +557,8 @@ class Settings(BaseSettings):
     # 并列类内不是 run-to-run 稳定的(实测 'DAC' 有 285 行 sim=1.0 同名对象)
     # ——登记接受的取舍(2026-08-06 拍板:60× 收益优先;需要位稳定候选集的部署
     # 用本开关回滚)。只在 PostgreSQL 且存在精确匹配形状的 GiST 索引时生效
-    # (运行时探测,缺索引静默走旧路径;首探把「无索引」落进程缓存后,规模判定
-    # 也零成本短路,未建索引的 PG 部署稳态零新增查询);
+    # (运行时探测,缺索引静默走旧路径;PG 侧每次未收窄探针为规模判定付一条
+    # 已索引的单行版本查询——亚毫秒,登记接受,见 _lexical_knn_allowed);
     # SQLite 适配器声明不具备该能力(lexical_knn_capable=False),判定在读取任何
     # 规模统计之前零成本短路——发行默认后端不为 PG 专属特性付哪怕一条查询。
     postgres_lexical_knn_enabled: bool = Field(
