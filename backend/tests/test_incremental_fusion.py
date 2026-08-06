@@ -305,6 +305,19 @@ def test_tier2_ann_path_matches_oracle_when_over_threshold(repo, monkeypatch):
     for oid, name, vec in new_items:
         _seed_concept(repo, nb.id, oid, name, "src-B", vec, now)
 
+    knowledge = repo._runtime.knowledge_lifecycle.knowledge
+    original_rows = knowledge.incremental_object_rows
+    exclude_source_calls = []
+
+    def _rows_spy(db, notebook_id, source_id, object_type, *, exclude_source=False):
+        if exclude_source:
+            exclude_source_calls.append((notebook_id, source_id, object_type))
+        return original_rows(
+            db, notebook_id, source_id, object_type,
+            exclude_source=exclude_source,
+        )
+
+    monkeypatch.setattr(knowledge, "incremental_object_rows", _rows_spy)
     monkeypatch.setattr(repo.settings, "kg_incremental_tier2_max_entities", 0)
     repo.incremental_fuse_source(nb.id, "src-B")
 
@@ -319,6 +332,10 @@ def test_tier2_ann_path_matches_oracle_when_over_threshold(repo, monkeypatch):
     assert got_pairs   # sanity: the near-duplicate must actually surface >=1 candidate
     cmap = repo.cluster_map(nb.id)
     assert cmap["ko-new"] != cmap["ko-e1"]   # 未自动并簇(各自名种子簇)
+    # The ANN labels/vectors already represent the existing corpus. Hydrating all
+    # existing concept payloads here used to be pure discarded I/O, and at scale
+    # repeated once per extracted source.
+    assert exclude_source_calls == []
 
 
 def test_tier2_ann_path_type_filter_excludes_non_concept(repo, monkeypatch):

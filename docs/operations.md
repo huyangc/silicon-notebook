@@ -469,6 +469,52 @@ For a large source, throughput and reliability are dominated by a few levers:
   is kept synchronized. Never run SQLite-only maintenance against PostgreSQL, and never run a
   direct batch mutation while live application/background writers still use that database.
 
+## PostgreSQL notebook-aware lexical indexes
+
+PostgreSQL lexical retrieval always keeps `notebook_id` in the SQL predicate, but the legacy
+single-expression trigram indexes cannot use that boundary during index access. On a large
+shared table, a common term can therefore produce a global bitmap and discard almost all rows
+only after heap recheck. The two operational indexes prepend `notebook_id` with `btree_gin`:
+
+- `idx_knowledge_objects_nb_name_trgm` on the active knowledge-object name predicate;
+- `idx_chunks_nb_text_trgm` on chunk text.
+
+From the repository root, first inspect without changing the database, then apply during a
+controlled low-traffic window:
+
+```bash
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
+```
+
+The URL is read from `DATABASE_URL` and is never printed. The apply path takes a dedicated
+session advisory lock, installs/verifies `public.btree_gin`, builds one index at a time with
+`CREATE INDEX CONCURRENTLY`, uses a short lock timeout, and leaves its build statement timeout
+disabled. Reads and writes may continue, but the build can still consume substantial CPU, I/O,
+temporary/free disk, WAL, and replica bandwidth; take a current backup, check free space, and
+monitor it separately:
+
+```sql
+SELECT pid, relid::regclass, index_relid::regclass, phase,
+       blocks_done, blocks_total, tuples_done, tuples_total
+FROM pg_stat_progress_create_index;
+```
+
+An interrupted run is safe to rerun. A valid completed index is skipped; an invalid artifact
+owned by this tool is dropped concurrently and rebuilt. Extension/index privileges are still
+required, and a different existing index definition fails closed instead of being overwritten.
+After the command succeeds, rerun the inspect command and use `EXPLAIN (ANALYZE, BUFFERS)` on
+representative short/common and long/rare terms to confirm the new index is selected.
+
+By default, the legacy global trigram indexes remain as a rollback/performance safety net. Only
+after both new indexes are verified and the deployed application is confirmed to keep every
+corresponding lexical query notebook-scoped may an operator opt into
+`--apply --drop-legacy`; the tool verifies both replacements before dropping anything. This
+reduces GIN write amplification but is not required for the read-path gain. Recreating or
+dropping either index changes planner options only: the SQL predicates, similarity scores,
+candidate limits, and ordering are unchanged, so retrieval quality must remain byte-for-byte
+equivalent in the PostgreSQL conformance test.
+
 ## PDF parsing with MinerU
 
 PDF parsing is decoupled from the GPU. The backend never imports torch; it talks to MinerU only when configured, and otherwise uses the local PyMuPDF4LLM layout/Markdown fallback (pypdf is the final parser-error fallback).
@@ -683,6 +729,13 @@ Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workload
 ### Large-library retrieval hot path
 
 Indexed KG retrieval must remain bounded after ANN candidate generation. The isolated-node rank penalty probes each candidate with indexed `EXISTS` checks and returns only connected candidate ids; it never fetches a hub's complete adjacency list. Canonical folding reads mappings only for the scored ids through `cluster_fold_rows`. Concurrent reasoning subqueries share one lazy ANN load per scale-index instance and artifact kind. These optimizations preserve the retrieved ids, scores, thresholds, PPR behavior, and recall.
+
+Incremental KG fusion likewise does not fetch every existing concept payload when a usable
+object ANN is present; that full read remains only in the mutually exclusive no-ANN
+brute-force/threshold branches. Scale-index PPR still evaluates every score needed for the
+same global min/max normalization, but production hydration keeps only the configured stable
+Top-K instead of sorting/materializing the complete chunk ranking. Ties preserve input order,
+and the bounded sequence must be the exact prefix of the unbounded diagnostic result.
 
 Current scale-index builds and delta folds also write `chunk_ann_source_names.npy`, `chunk_ann_source_codes.npy`, and `chunk_ann_source_counts.npy`. These compact, row-aligned files let source-narrowed chunk ANN reject excluded rows inside HNSW before Top-K. Published older indexes remain loadable, but narrowed chunk/element retrieval uses bounded source-filtered FTS until that notebook is rebuilt or folded; rebuild the scale index after deploying this version when immediate cross-language scoped semantic recall is required. A missing file when `has_chunk_ann_sources=true`, a row-count mismatch, or an out-of-range code makes the artifact unusable rather than silently weakening the source boundary.
 

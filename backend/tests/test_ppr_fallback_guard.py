@@ -151,7 +151,11 @@ def test_large_notebook_refuses_rustworkx_fallback(repo, monkeypatch):
     """大库(copyable=False)+ scale_ppr 强制返回空 → _ppr_retrieve 绝不调用
     self._ppr_graph(spy 验证零调用),直接返回 [],并发 ppr_fallback_refused 事件。"""
     nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo.retrieval.graph, "scale_ppr", lambda notebook_id, question: [])
+    monkeypatch.setattr(
+        repo.retrieval.graph,
+        "scale_ppr",
+        lambda notebook_id, question, **_kwargs: [],
+    )
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats", lambda notebook_id: {"copyable": False, "size": {}})
 
     called = {"n": 0}
@@ -178,7 +182,11 @@ def test_small_notebook_keeps_legacy_fallback(repo, monkeypatch):
     """小库(copyable=True)+ scale_ppr 返回空 → 旧行为不变:调用 self._ppr_graph
     (spy 验证被调用),不发 ppr_fallback_refused 事件。"""
     nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo.retrieval.graph, "scale_ppr", lambda notebook_id, question: [])
+    monkeypatch.setattr(
+        repo.retrieval.graph,
+        "scale_ppr",
+        lambda notebook_id, question, **_kwargs: [],
+    )
     monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats", lambda notebook_id: {"copyable": True, "size": {}})
 
     called = {"n": 0}
@@ -205,7 +213,11 @@ def test_ppr_retrieve_success_path_emits_no_fallback_events(repo, monkeypatch):
     """scale_ppr 命中(非空)时,_ppr_retrieve 完全不走 fallback 分支 —— 无
     ppr_fallback_refused 事件,也不调用 _ppr_graph。"""
     nb = _seed_two_doc_moe(repo)
-    monkeypatch.setattr(repo.retrieval.graph, "scale_ppr", lambda notebook_id, question: [("cA", 1.0)])
+    monkeypatch.setattr(
+        repo.retrieval.graph,
+        "scale_ppr",
+        lambda notebook_id, question, **_kwargs: [("cA", 1.0)],
+    )
 
     called = {"n": 0}
     monkeypatch.setattr(repo.retrieval.graph, "_ppr_graph", lambda notebook_id: called.__setitem__("n", called["n"] + 1))
@@ -216,6 +228,34 @@ def test_ppr_retrieve_success_path_emits_no_fallback_events(repo, monkeypatch):
     assert called["n"] == 0
     assert [e for e in events if e.get("kind") == "ppr_fallback_refused"] == []
     assert [c.chunk_id for c in result] == ["cA"]
+
+
+@pytest.mark.parametrize(
+    ("configured_limit", "expected_ids"),
+    [(0, []), (-1, ["cA"])],
+)
+def test_nonpositive_ppr_limit_preserves_legacy_slice_without_fallback(
+    repo, monkeypatch, configured_limit, expected_ids,
+):
+    nb = _seed_two_doc_moe(repo)
+    calls = []
+
+    def scale_ppr(notebook_id, question, **kwargs):
+        calls.append(kwargs)
+        return [("cA", 1.0), ("cB", 0.5)]
+
+    monkeypatch.setattr(repo.settings, "ppr_top_chunks", configured_limit)
+    monkeypatch.setattr(repo.retrieval.graph, "scale_ppr", scale_ppr)
+    monkeypatch.setattr(
+        repo.retrieval.graph,
+        "_ppr_graph",
+        lambda _notebook_id: pytest.fail("must not enter fallback graph"),
+    )
+
+    result = repo.retrieval.graph._ppr_retrieve(nb.id, "Mixture of Experts")
+
+    assert calls == [{"max_results": None}]
+    assert [chunk.chunk_id for chunk in result] == expected_ids
 
 
 # ── Fix 2: scale_ppr bailout observability ──────────────────────────────────

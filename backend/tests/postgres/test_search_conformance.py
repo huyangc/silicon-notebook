@@ -499,6 +499,191 @@ def test_search_expression_indexes_match_catalog_and_are_planner_usable(postgres
     assert "idx_knowledge_objects_name_trgm" in plan
 
 
+@pytest.mark.xdist_group(name="postgres_retrieval_indexes")
+def test_notebook_aware_trigram_indexes_preserve_candidates_and_prune_in_index(
+    search_harness,
+):
+    from app.repositories.postgres.retrieval_indexes import (
+        install_retrieval_indexes,
+        ready_index_names,
+    )
+
+    def candidates():
+        with search_harness.database.connect() as connection:
+            objects = knowledge_candidate_rows_for_terms(
+                connection, "nb-search", ["thermal"], per_term_limit=20
+            )
+            chunks = chunk_candidate_rows_for_terms(
+                connection, "nb-search", ["thermal"], per_term_limit=20
+            )
+        return (
+            [(row["candidate_id"], row["term_rank"], row["candidate_similarity"])
+             for row in objects],
+            [(row["candidate_id"], row["term_rank"], row["candidate_similarity"])
+             for row in chunks],
+        )
+
+    before = candidates()
+    with search_harness.database.connect() as connection:
+        schema = connection.execute("SELECT current_schema() AS name").fetchone()["name"]
+    state = install_retrieval_indexes(
+        search_harness.database.settings.database_url,
+        schema=schema,
+    )
+    repeated_state = install_retrieval_indexes(
+        search_harness.database.settings.database_url,
+        schema=schema,
+    )
+    after = candidates()
+
+    assert after == before
+    assert ready_index_names(state) == {
+        "idx_knowledge_objects_nb_name_trgm",
+        "idx_chunks_nb_text_trgm",
+    }
+    assert ready_index_names(repeated_state) == ready_index_names(state)
+
+    # Planner usability is a separate assertion from result equivalence. Remove
+    # competing legacy/notebook-only indexes inside this disposable schema so a
+    # future opclass/expression drift cannot pass merely because another index was
+    # usable. Production planner choice is data-distribution dependent.
+    with search_harness.database.write() as connection:
+        for index_name in (
+            "idx_knowledge_objects_name_trgm",
+            "idx_knowledge_objects_nb_status",
+            "idx_knowledge_objects_nb_type_created",
+            "idx_knowledge_objects_nb_type_status",
+            "idx_knowledge_objects_nb_updated",
+            "idx_chunks_text_trgm",
+            "idx_chunks_nb",
+            "idx_chunks_nb_created",
+        ):
+            connection.execute(f'DROP INDEX IF EXISTS "{index_name}"')
+
+    with search_harness.database.connect() as connection:
+        connection.execute("SET LOCAL enable_seqscan=off")
+        object_plan = connection.execute(
+            "EXPLAIN SELECT id FROM knowledge_objects WHERE notebook_id=%s "
+            "AND status!='deprecated' AND (" + PAYLOAD_NAME_EXPRESSION
+            + " OPERATOR(public.%%) %s OR " + PAYLOAD_NAME_EXPRESSION
+            + " ILIKE %s)",
+            ("nb-search", "thermal", "%thermal%"),
+        ).fetchall()
+        chunk_plan = connection.execute(
+            "EXPLAIN SELECT id FROM chunks WHERE notebook_id=%s "
+            "AND (text OPERATOR(public.%%) %s OR text ILIKE %s)",
+            ("nb-search", "thermal", "%thermal%"),
+        ).fetchall()
+    assert "idx_knowledge_objects_nb_name_trgm" in "\n".join(
+        str(next(iter(row.values()))) for row in object_plan
+    )
+    assert "idx_chunks_nb_text_trgm" in "\n".join(
+        str(next(iter(row.values()))) for row in chunk_plan
+    )
+
+
+@pytest.mark.parametrize(
+    "unexpected_ddl",
+    [
+        "CREATE INDEX idx_knowledge_objects_nb_name_trgm "
+        "ON knowledge_objects USING gin (notebook_id public.text_ops, "
+        "(((payload->>'name') COLLATE \"POSIX\")) public.gin_trgm_ops) "
+        "WHERE status!='deprecated'",
+        "CREATE INDEX idx_knowledge_objects_nb_name_trgm "
+        "ON knowledge_objects USING gin (notebook_id public.text_ops, "
+        "(((payload->>'name') COLLATE \"C\")) public.gin_trgm_ops) "
+        "WHERE status!='deprecated' AND object_type='concept'",
+    ],
+)
+@pytest.mark.xdist_group(name="postgres_retrieval_indexes")
+def test_retrieval_index_installer_rejects_semantically_different_owned_name(
+    search_harness, unexpected_ddl,
+):
+    from app.repositories.postgres.retrieval_indexes import (
+        RetrievalIndexError,
+        inspect_retrieval_indexes,
+        install_retrieval_indexes,
+    )
+
+    with search_harness.database.connect() as connection:
+        schema = connection.execute("SELECT current_schema() AS name").fetchone()["name"]
+    install_retrieval_indexes(
+        search_harness.database.settings.database_url, schema=schema
+    )
+    with search_harness.database.write() as connection:
+        connection.execute("DROP INDEX idx_knowledge_objects_nb_name_trgm")
+        connection.execute(unexpected_ddl)
+
+    state = inspect_retrieval_indexes(
+        search_harness.database.settings.database_url, schema=schema
+    )
+    row = next(
+        item for item in state["indexes"]
+        if item["name"] == "idx_knowledge_objects_nb_name_trgm"
+    )
+    assert row["state"] == "unexpected"
+    with pytest.raises(
+        RetrievalIndexError,
+        match="unexpected_index_definition:idx_knowledge_objects_nb_name_trgm",
+    ):
+        install_retrieval_indexes(
+            search_harness.database.settings.database_url, schema=schema
+        )
+    # A same-named DBA definition is fail-closed, never repaired/dropped as if
+    # it were this tool's interrupted artifact.
+    with search_harness.database.connect() as connection:
+        assert connection.execute(
+            "SELECT to_regclass(%s) AS name",
+            (f'{schema}.idx_knowledge_objects_nb_name_trgm',),
+        ).fetchone()["name"] is not None
+
+
+@pytest.mark.xdist_group(name="postgres_retrieval_indexes")
+def test_drop_legacy_refuses_custom_definition_before_dropping_anything(
+    search_harness,
+):
+    from app.repositories.postgres.retrieval_indexes import (
+        RetrievalIndexError,
+        install_retrieval_indexes,
+    )
+
+    with search_harness.database.connect() as connection:
+        schema = connection.execute("SELECT current_schema() AS name").fetchone()["name"]
+    install_retrieval_indexes(
+        search_harness.database.settings.database_url, schema=schema
+    )
+    with search_harness.database.write() as connection:
+        connection.execute("DROP INDEX idx_chunks_text_trgm")
+        connection.execute(
+            "CREATE INDEX idx_chunks_text_trgm ON knowledge_objects USING gin "
+            "((((payload->>'name') COLLATE \"C\")) public.gin_trgm_ops)"
+        )
+
+    with pytest.raises(
+        RetrievalIndexError,
+        match="unexpected_legacy_index_definition:idx_chunks_text_trgm",
+    ):
+        install_retrieval_indexes(
+            search_harness.database.settings.database_url,
+            schema=schema,
+            drop_legacy=True,
+        )
+
+    with search_harness.database.connect() as connection:
+        names = {
+            row["indexname"]
+            for row in connection.execute(
+                "SELECT indexname FROM pg_indexes WHERE schemaname=%s "
+                "AND indexname=ANY(%s)",
+                (
+                    schema,
+                    ["idx_knowledge_objects_name_trgm", "idx_chunks_text_trgm"],
+                ),
+            ).fetchall()
+        }
+    assert names == {"idx_knowledge_objects_name_trgm", "idx_chunks_text_trgm"}
+
+
 # ------------------------------- exact-identifier fast path (PostgreSQL half)
 # The SQLite half of these lives in tests/test_exact_lookup.py. Both adapters
 # must agree, and only these can catch a PostgreSQL-only regression: the whole

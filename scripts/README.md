@@ -103,6 +103,23 @@ python scripts/migrate_sqlite_to_postgres.py \
 checkpoint),源库重新快照锚点与 schema/清单校验仍执行。CLI 原子替换配置并保存权限受限的回退副本,
 但不会自行停止或重启服务。
 
+### `build_postgres_retrieval_indexes.py` —— 在线建立 notebook-aware 词法索引
+
+默认只读检查 `knowledge_objects` / `chunks` 的复合 GIN 是否就绪；`--apply` 才会使用
+`CREATE INDEX CONCURRENTLY` 逐条建立。数据库 URL 从 `DATABASE_URL`（或
+`--database-url-env` 指定的环境变量）读取且不打印：
+
+```bash
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
+```
+
+工具可续跑，默认保留旧全局 trgm 索引；只有新索引全部验证后，显式
+`--apply --drop-legacy` 才会并发删除旧索引。大型活库执行前检查备份、空闲磁盘与副本容量，
+低流量窗口运行并监控 `pg_stat_progress_create_index`。完整安全步骤见
+`docs/operations_zh.md` 的「PostgreSQL notebook-aware 词法索引」。索引只改变 planner 候选裁剪，
+不改变检索谓词、打分或排序。
+
 ### `batch_ingest.py` —— SQLite / PostgreSQL 离线批处理
 
 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、

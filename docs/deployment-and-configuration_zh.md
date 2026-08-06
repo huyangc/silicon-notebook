@@ -233,6 +233,20 @@ PostgreSQL 必须使用 UTF-8，并把 `pg_trgm` 安装在 `public`。数据库 
 0001 创建，也可由 DBA 预装；同名扩展位于其他 schema 时会被拒绝。向量存为 float32
 `bytea`，不需要 pgvector。生产仍保持单 backend worker（`--workers 1`）。
 
+大型 PostgreSQL 数据库还应把 `btree_gin` 安装在 `public`，并建立两条 notebook-aware
+词法索引。以 database owner 运行时，运维工具可创建该扩展；默认只检查，只有 `--apply`
+才改数据库：
+
+```bash
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py
+PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
+```
+
+这些索引刻意采用在线运维发布，而不塞进启动 migration：在数百万行活表上建立 GIN
+会消耗显著 CPU、I/O、临时磁盘和时间。缺少索引时应用结果仍正确，但常见词可能先扫描
+全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
+[运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
+
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
 对于存量 SQLite，已交付的 forward-shadow CLI 可在 SQLite 继续 active 时建立并持续维护
 PostgreSQL 影子库。它要求 PostgreSQL 16、专用且可恢复的目标库、已验证的源/目标备份、
