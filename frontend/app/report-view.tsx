@@ -165,8 +165,10 @@ export type ReportCredibilityT = {
   top1_concentration?: number;
   /** 全篇综合的执行结果；旧报告缺失时不渲染状态。 */
   synthesis_status?: "not_requested" | "available" | "skipped_no_evidence" | "failed_model" | "failed_validation";
-  /** 有可用主张账本的章节数及本次报告总章节数。 */
+  /** 有可用主张账本的章节数（含部分账本）及本次报告总章节数。 */
   claim_ledgers_available?: number;
+  /** claim_ledgers_available 中账本被丢弃了部分条目的章节数。 */
+  claim_ledgers_partial?: number;
   claim_ledgers_total?: number;
 };
 
@@ -725,6 +727,7 @@ export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) 
   const synthesisStatus = credibility.synthesis_status;
   const ledgersAvailable = credibility.claim_ledgers_available;
   const ledgersTotal = credibility.claim_ledgers_total;
+  const ledgersPartial = credibility.claim_ledgers_partial;
   const showLedgers = typeof ledgersAvailable === "number" || typeof ledgersTotal === "number";
   if (!synthesisStatus && !showLedgers) return null;
   // Only silence receipts that are pure expected negatives.  `ledgersTotal` is
@@ -755,6 +758,9 @@ export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) 
         <p className="report-claim-ledgers">
           主张账本：{typeof ledgersAvailable === "number" ? ledgersAvailable : 0}
           {typeof ledgersTotal === "number" ? `/${ledgersTotal}` : ""} 节可用
+          {typeof ledgersPartial === "number" && ledgersPartial > 0
+            ? `（其中 ${ledgersPartial} 节为部分账本）`
+            : ""}
         </p>
       )}
     </section>

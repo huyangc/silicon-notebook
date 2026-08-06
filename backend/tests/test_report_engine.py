@@ -457,6 +457,29 @@ def test_assemble_keeps_unknown_sources_visible_and_uses_conservative_top1(repo,
     assert "上界为 92.9%" in md
 
 
+def test_assemble_credibility_counts_partial_ledgers_as_available_and_tracks_them(repo):
+    """A partial ledger still audited some rows, so it counts toward the usable
+    total alongside a fully `available` one; `claim_ledgers_partial` breaks out
+    how many of those usable ledgers had rows dropped."""
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": t, "scope": "s", "sub_queries": [t]} for t in ("A", "B", "C")]
+    sections = [
+        {"title": "A", "scope": "s", "markdown": "## A\nx", "grounded": False,
+         "id_map": {}, "attempted": [], "claim_ledger_status": "available"},
+        {"title": "B", "scope": "s", "markdown": "## B\nx", "grounded": False,
+         "id_map": {}, "attempted": [], "claim_ledger_status": "partial"},
+        {"title": "C", "scope": "s", "markdown": "## C\nx", "grounded": False,
+         "id_map": {}, "attempted": [], "claim_ledger_status": "missing"},
+    ]
+    rid = repo.create_report(nb.id, "q")
+    eng._assemble(nb.id, rid, "q", outline, sections)
+    credibility = repo.get_report(nb.id, rid)["understanding"]["credibility"]
+    assert credibility["claim_ledgers_available"] == 2
+    assert credibility["claim_ledgers_partial"] == 1
+    assert credibility["claim_ledgers_total"] == 3
+
+
 def test_assemble_multikey_fails_closed_if_any_key_is_unknown(repo):
     """任一本节未知 key 使整个复合 marker fail closed，且不产生部分 reference。"""
     nb = _mk_nb(repo)

@@ -236,6 +236,54 @@ test("可信度回执明确显示全篇综合失败或跳过，并展示可用�
 });
 
 
+test("部分主张账本在可用数上加括注，缺该字段或为零的旧报告不受影响", () => {
+  const { rerender } = render(
+    <ReportCredibilitySummary report={detail({
+      understanding: {
+        credibility: {
+          synthesis_status: "available",
+          claim_ledgers_available: 4,
+          claim_ledgers_partial: 2,
+          claim_ledgers_total: 5,
+        },
+      },
+    })} />,
+  );
+  expect(screen.getByText("主张账本：4/5 节可用（其中 2 节为部分账本）")).toBeVisible();
+
+  // claim_ledgers_partial 为 0：不加括注，措辞与历史一致。
+  rerender(
+    <ReportCredibilitySummary report={detail({
+      understanding: {
+        credibility: {
+          synthesis_status: "available",
+          claim_ledgers_available: 5,
+          claim_ledgers_partial: 0,
+          claim_ledgers_total: 5,
+        },
+      },
+    })} />,
+  );
+  expect(screen.getByText("主张账本：5/5 节可用")).toBeVisible();
+  expect(screen.queryByText(/部分账本/)).toBeNull();
+
+  // 旧报告没有 claim_ledgers_partial 字段：走旧文案，不能因缺字段而报错或误加括注。
+  rerender(
+    <ReportCredibilitySummary report={detail({
+      understanding: {
+        credibility: {
+          synthesis_status: "failed_validation",
+          claim_ledgers_available: 3,
+          claim_ledgers_total: 5,
+        },
+      },
+    })} />,
+  );
+  expect(screen.getByText("主张账本：3/5 节可用")).toBeVisible();
+  expect(screen.queryByText(/部分账本/)).toBeNull();
+});
+
+
 test("单节报告的未请求综合是预期的，多节报告的同一回执必须可见", () => {
   // 章节数就是 `claim_ledgers_total`。一节没有跨章节一致性可综合，所以它的
   // `not_requested` 不含信息；两节以上的同一回执说明本该发生的综合没发生。

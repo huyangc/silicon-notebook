@@ -1765,15 +1765,10 @@ class ReportEngine:
         ):
             evidence_level = "overview"
             citation_audit["downgrade_applied"] = True
-        blueprint_claim_ids = (
-            {str(row.get("id") or "") for row in localized_synthesis.get("claims") or []}
-            if localized_synthesis else None
-        )
         claims, claim_ledger_status = normalize_claim_ledger(
             raw_claims,
             markdown=markdown,
             legal_anchor_keys=set(id_map),
-            blueprint_claim_ids=blueprint_claim_ids,
             frame=report_frame,
         )
         claim_source_ids = {
@@ -2578,8 +2573,16 @@ class ReportEngine:
                 for section in sections
             ),
             "synthesis_status": synthesis_status,
+            # A partial ledger still has rows an auditor can trust, so it
+            # counts as usable alongside a fully-available one; the two are
+            # broken out separately below because a partial ledger disclosed
+            # some rows were dropped and that is worth surfacing on its own.
             "claim_ledgers_available": sum(
-                section.get("claim_ledger_status") == "available"
+                section.get("claim_ledger_status") in ("available", "partial")
+                for section in sections
+            ),
+            "claim_ledgers_partial": sum(
+                section.get("claim_ledger_status") == "partial"
                 for section in sections
             ),
             "claim_ledgers_total": len(sections),

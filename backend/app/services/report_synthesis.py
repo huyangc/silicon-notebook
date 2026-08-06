@@ -445,28 +445,52 @@ def _anchor_keys(text: str) -> set[str]:
 
 def normalize_claim_ledger(
     value: object, *, markdown: str, legal_anchor_keys: set[str],
-    blueprint_claim_ids: set[str] | None = None, frame: dict | None = None,
+    frame: dict | None = None,
 ) -> tuple[list[dict], str]:
     """Bind claims to exact emitted prose and same-sentence citation markers.
 
-    Grounding is atomic: one claim whose statement is not verbatim prose, or
-    whose evidence key is illegal or absent from that same statement, discards
-    the section's whole ledger.  The optional organizational tags in
-    ``frame_assignments`` are degraded per entry instead — see below.
+    This is an audit layer over prose the section has already emitted, not a
+    drafting input, so grounding is row-level rather than section-level: a
+    row whose statement is not verbatim prose, whose evidence key is illegal
+    or absent from that same statement, or that otherwise fails a check below
+    is dropped and the loop moves on — only that row is unaudited, the rest
+    of the ledger stands.  The safety argument for that is monotonicity, not
+    independence: ``annotate_trend_evidence`` reads each row on its own, but
+    ``exclusive_frame_conflicts`` aggregates across rows, so a dropped row
+    can hide a conflict its kept sibling would have surfaced.  What makes
+    this safe is that the old behavior was all-or-nothing — the kept row set
+    here is always a superset of what section-level discard kept, so every
+    cross-row consumer sees a detection surface that only grows.  A claim
+    id is legal the moment it names a statement actually present in the
+    section's prose; it need not have been pre-declared anywhere upstream —
+    a claim covering prose the writer added beyond any prior commitment is a
+    legitimate new row, not a violation.  Submissions longer than
+    ``CLAIM_LEDGER_MAX_CLAIMS`` are truncated to the first N rows before
+    row-level checks run, so an overflow row never drags down the rows ahead
+    of it. The optional organizational tags in ``frame_assignments`` are
+    degraded per entry instead of dropping the row — see below.
+
+    Returns ``(rows, status)``:
+    - ``"missing"``: ``value`` was not a list.
+    - ``"invalid"``: the list was empty, or every row was dropped — zero rows
+      leaves nothing to audit either way.
+    - ``"partial"``: some rows were kept and some were dropped or truncated
+      away.
+    - ``"available"``: every submitted row was kept, with no truncation.
     """
     if not isinstance(value, list):
         return [], "missing"
-    if len(value) > CLAIM_LEDGER_MAX_CLAIMS:
-        return [], "invalid"
+    truncated = len(value) > CLAIM_LEDGER_MAX_CLAIMS
+    rows = value[:CLAIM_LEDGER_MAX_CLAIMS]
     facet_map = {
         _text(row.get("id"), 80): row
         for row in ((frame or {}).get("facets") or []) if isinstance(row, dict)
     }
     out: list[dict] = []
     seen: set[str] = set()
-    for index, raw in enumerate(value, 1):
+    for index, raw in enumerate(rows, 1):
         if not isinstance(raw, dict):
-            return [], "invalid"
+            continue
         claim_id = _text(raw.get("claim_id"), 80) or f"claim-{index}"
         statement = _text(raw.get("statement"), 1600)
         claim_type = _text(raw.get("type"), 24).lower()
@@ -476,28 +500,25 @@ def normalize_claim_ledger(
             or claim_type not in _CLAIM_TYPES
             or any(key not in legal_anchor_keys for key in evidence_keys)
             or any(key not in _anchor_keys(statement) for key in evidence_keys)
-            or (blueprint_claim_ids is not None and claim_id not in blueprint_claim_ids)
         ):
-            return [], "invalid"
+            continue
         if claim_type in {"fact", "comparison", "trend"} and not evidence_keys:
-            return [], "invalid"
+            continue
         conditions = _strings(raw.get("conditions"), 8, 300)
         if claim_type == "comparison" and not conditions and not bool(
             raw.get("same_paper_baseline", False)
         ):
-            return [], "invalid"
+            continue
         # `frame_assignments` is an organizational tag, not evidence grounding,
-        # so it degrades per entry: an unknown key, an off-vocabulary value, or
-        # a non-object payload loses that one tag, never the section's whole
-        # ledger — the discretion an evidence key never gets.  Discarding it
-        # would blind trend-confidence capping (`annotate_trend_evidence`) and
-        # exclusive-facet conflict detection (`exclusive_frame_conflicts`) for
-        # every other claim in the section, because the writer reworded one
-        # label (`Attention变体` for the declared `Attention`).  An off-vocabulary
-        # value is dropped rather than snapped to the nearest declared one — a
-        # reworded label may well denote something else, and a wrong tag is
-        # worse than a missing one.  Evidence keys above stay atomic: those bind
-        # prose to citations.
+        # so it degrades below the row: an unknown key, an off-vocabulary
+        # value, or a non-object payload loses that one tag while the row it
+        # decorates survives — a writer rewording one label (`Attention变体`
+        # for the declared `Attention`) must not cost the claim itself.  An
+        # off-vocabulary value is dropped rather than snapped to the nearest
+        # declared one — a reworded label may well denote something else, and
+        # a wrong tag is worse than a missing one.  The grounding checks above
+        # are stricter: a bad statement or evidence key vetoes the whole row,
+        # because those bind prose to citations.
         assignments: dict[str, str] = {}
         raw_assignments = raw.get("frame_assignments")
         if isinstance(raw_assignments, dict):
@@ -523,6 +544,10 @@ def normalize_claim_ledger(
             "confidence": _confidence(raw.get("confidence", 0.0)),
             "frame_assignments": assignments,
         })
+    if not out:
+        return [], "invalid"
+    if truncated or len(out) < len(rows):
+        return out, "partial"
     return out, "available"
 
 
