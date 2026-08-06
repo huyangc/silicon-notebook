@@ -13,6 +13,7 @@ from app.core.activity_time import (
 from app.core.config import Settings
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
+    SEARCH_HIT_CAP,
     NotebookSearchResponse,
     SearchHit,
 )
@@ -1038,7 +1039,7 @@ class QueryStore:
                 raise KeyError(notebook_id)
             if not needle:
                 return NotebookSearchResponse(query=query, hits=[])
-            cap = 20
+            cap = SEARCH_HIT_CAP
             hits: list[SearchHit] = []
             for scope, value in (
                 ("Notebook", notebook["name"]),
@@ -1062,7 +1063,10 @@ class QueryStore:
             # would otherwise surface as a dead-end "Source" hit with no
             # coherent source view to jump to (citation-jump to the row detail
             # drawer is PR-2 scope, per the design spec).
-            source_rows = notebook_source_rows(db, notebook_id, needle, cap)
+            source_rows = (
+                notebook_source_rows(db, notebook_id, needle, cap)
+                if len(hits) < cap else ()
+            )
             for row in source_rows:
                 label = row["title"] or row["file_name"]
                 body = row["summary"] or row["file_name"] or row["title"]
@@ -1081,7 +1085,10 @@ class QueryStore:
             # scope="Element" hit either (a knowhow cell's own element would
             # otherwise show up here with the same dead-end-navigation issue
             # as the "Source" leg above).
-            element_rows = notebook_element_rows(db, notebook_id, needle, cap)
+            element_rows = (
+                notebook_element_rows(db, notebook_id, needle, cap)
+                if len(hits) < cap else ()
+            )
             for row in element_rows:
                 label = f"{row['source_title']} · {row['location_label']}"
                 hits.append(
@@ -1094,7 +1101,10 @@ class QueryStore:
                         element_id=row["id"],
                     )
                 )
-            knowledge_rows = notebook_knowledge_rows(db, notebook_id, needle, cap)
+            knowledge_rows = (
+                notebook_knowledge_rows(db, notebook_id, needle, cap)
+                if len(hits) < cap else ()
+            )
             for row in knowledge_rows:
                 payload = json_value(row["payload"], {})
                 label = OBJECT_TYPE_LABELS.get(row["object_type"], row["object_type"])
@@ -1112,7 +1122,7 @@ class QueryStore:
                         element_id="",
                     )
                 )
-        return NotebookSearchResponse(query=query, hits=hits[:20])
+        return NotebookSearchResponse(query=query, hits=hits[:SEARCH_HIT_CAP])
 
     def load_notebook_scale_facts(
         self, notebook_id: str
