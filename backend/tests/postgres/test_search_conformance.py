@@ -1284,7 +1284,61 @@ def test_knn_hint_is_inert_without_a_conforming_index(search_harness):
         reset_knn_index_cache()
         with search_harness.database.connect() as connection:
             assert knn_name_index_available(connection) is False
+
+        # A wrong-CASE json key is the false positive a case-folding
+        # normalizer would admit: `payload ->> 'Name'` reads a different key,
+        # so the planner can never use it for the query expression.  The
+        # comparison must preserve quoted literals exactly (codex #463 R1 P2).
+        with search_harness.database.write() as connection:
+            connection.execute(
+                "CREATE INDEX idx_knn_wrong_case ON knowledge_objects "
+                "USING gist ((((payload ->> 'Name') COLLATE \"C\")) "
+                "public.gist_trgm_ops) WHERE status != 'deprecated'"
+            )
+        reset_knn_index_cache()
+        with search_harness.database.connect() as connection:
+            assert knn_name_index_available(connection) is False
     finally:
+        reset_knn_index_cache()
+
+
+@pytest.mark.postgres_integration
+def test_knn_probe_failure_leaves_the_transaction_usable(search_harness):
+    """探针失败必须回答「不可用」且**不毒化事务**。
+
+    连接池是 autocommit=False:失败语句会把调用方的隐式事务置为 aborted,单纯
+    return False 兑现不了「回落 legacy」的承诺——下一条 legacy 语句直接抛
+    InFailedSqlTransaction,词法臂坍缩成 [](codex #463 R1 P2)。SAVEPOINT
+    括号是修法;这条测试用一个真实毒化探针证明 legacy 语句事后仍能跑。
+    """
+    from app.repositories.postgres import search as search_module
+    from app.repositories.postgres.search import (
+        knn_name_index_available,
+        reset_knn_index_cache,
+    )
+
+    _seed_knn_staircase(search_harness)
+    reset_knn_index_cache()
+
+    def poisoned_index_row(connection, table_oid):
+        # 真实地毒化事务:非法 SQL 让 PostgreSQL 把事务置 aborted,
+        # 而不是抛一个从未触库的 Python 异常。
+        return connection.execute("SELECT no_such_column FROM pg_index").fetchone()
+
+    real = search_module._knn_index_row
+    search_module._knn_index_row = poisoned_index_row
+    try:
+        with search_harness.database.connect() as connection:
+            assert knn_name_index_available(connection) is False
+            # 同一连接、同一事务:legacy 语句必须照常工作。
+            rows = knowledge_candidate_rows_for_terms(
+                connection, KNN_NOTEBOOK, ["thermal"], per_term_limit=3
+            )
+        assert [row["candidate_id"] for row in rows] == [
+            "ko-knn-00", "ko-knn-01", "ko-knn-02",
+        ]
+    finally:
+        search_module._knn_index_row = real
         reset_knn_index_cache()
 
 

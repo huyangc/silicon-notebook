@@ -245,28 +245,41 @@ def knn_name_index_available(connection) -> bool:
     appears in `pg_get_indexdef`'s key text, mirroring how
     `retrieval_indexes._matches_shape` checks it out-of-band).
     """
-    # A catalog-read failure must answer "not available", not propagate: the
-    # caller's fail-open `except` would collapse the whole lexical arm to []
-    # (and abort the surrounding transaction on the relation branch), while
-    # the legacy statement is a perfectly good answer.  The failure verdict is
-    # deliberately NOT cached — a transient error must not disable KNN for the
-    # process lifetime.
+    # A catalog-read failure must answer "not available", not propagate — AND
+    # it must leave the transaction usable.  The pool runs autocommit=False,
+    # so a failed probe statement would otherwise poison the caller's implicit
+    # transaction: returning False alone breaks the promised legacy fallback,
+    # whose very next statement raises InFailedSqlTransaction and collapses
+    # the lexical arm to [] (codex #463 round-1 P2).  Hence the SAVEPOINT
+    # bracket: a probe failure rolls back to it and the legacy statement runs
+    # on a clean state.  The failure verdict is deliberately NOT cached — a
+    # transient error must not disable KNN for the process lifetime.
+    try:
+        connection.execute("SAVEPOINT knn_index_probe")
+    except Exception:  # noqa: BLE001 — no savepoint, no probe: legacy exits
+        return False
     try:
         oid_row = connection.execute(
             "SELECT to_regclass('knowledge_objects')::oid AS oid"
         ).fetchone()
-    except Exception:  # noqa: BLE001 — legacy is always the safe exit
-        return False
-    if oid_row is None or oid_row["oid"] is None:
-        return False
-    key = (str(connection.info.dbname), int(oid_row["oid"]))
-    cached = _KNN_INDEX_CACHE.get(key)
-    if cached is not None:
-        return cached
-    try:
+        if oid_row is None or oid_row["oid"] is None:
+            return False
+        key = (str(connection.info.dbname), int(oid_row["oid"]))
+        cached = _KNN_INDEX_CACHE.get(key)
+        if cached is not None:
+            return cached
         row = _knn_index_row(connection, int(oid_row["oid"]))
     except Exception:  # noqa: BLE001 — legacy is always the safe exit
+        try:
+            connection.execute("ROLLBACK TO SAVEPOINT knn_index_probe")
+        except Exception:  # noqa: BLE001 — dead connection; nothing to salvage
+            pass
         return False
+    finally:
+        try:
+            connection.execute("RELEASE SAVEPOINT knn_index_probe")
+        except Exception:  # noqa: BLE001 — released by rollback path already
+            pass
     available = row is not None
     _KNN_INDEX_CACHE[key] = available
     return available
@@ -292,8 +305,7 @@ def _knn_index_row(connection, table_oid: int):
         "AND i.indcollation[0]=(SELECT c.oid FROM pg_collation c "
         "     JOIN pg_namespace n ON n.oid=c.collnamespace "
         "     WHERE n.nspname='pg_catalog' AND c.collname='C') "
-        "AND replace(replace(lower(pg_get_indexdef(i.indexrelid,1,true)),"
-        "     '::text',''),' ','') = %s "
+        "AND pg_get_indexdef(i.indexrelid,1,true) = %s "
         # pg_get_expr(pretty=true) renders the predicate WITHOUT outer parens
         # (verified against PG16: `status <> 'deprecated'::text`); accept the
         # parenthesised spelling too so a server-version drift fails open to
@@ -302,11 +314,16 @@ def _knn_index_row(connection, table_oid: int):
         "    IN ('','status <> ''deprecated''::text',"
         "        '(status <> ''deprecated''::text)') "
         "LIMIT 1",
-        # Verified against PG16: pg_get_indexdef(...,1,true) for this index
-        # yields `(payload ->> 'name'::text)`; lower + strip `::text`/spaces
-        # gives exactly this. Equality (not LIKE) so wrapped or concatenated
-        # expressions that merely CONTAIN the key text cannot false-positive.
-        (table_oid, "(payload->>'name')"),
+        # The key comparison is the deparser's EXACT rendering — no lower(),
+        # no whitespace stripping.  Case-folding or space-stripping would remap
+        # `payload ->> 'Name'` and `payload ->> 'na me'` onto this string even
+        # though the planner cannot use either index for the query expression
+        # (codex #463 round-1 P2): normalization must never reach inside a
+        # quoted literal, and the cheapest way to guarantee that is to do none.
+        # If a future PG major changes the deparser's spacing, detection fails
+        # CLOSED to legacy speed, and the conformance suite — which builds the
+        # canonical index on the real server — turns red at upgrade time.
+        (table_oid, "(payload ->> 'name'::text)"),
     ).fetchone()
 
 
