@@ -454,9 +454,13 @@ def normalize_claim_ledger(
     row whose statement is not verbatim prose, whose evidence key is illegal
     or absent from that same statement, or that otherwise fails a check below
     is dropped and the loop moves on — only that row is unaudited, the rest
-    of the ledger stands.  Nothing downstream joins claim rows to each other
-    (`annotate_trend_evidence` and `exclusive_frame_conflicts` both consume
-    rows independently), so a dropped row cannot poison a kept one.  A claim
+    of the ledger stands.  The safety argument for that is monotonicity, not
+    independence: ``annotate_trend_evidence`` reads each row on its own, but
+    ``exclusive_frame_conflicts`` aggregates across rows, so a dropped row
+    can hide a conflict its kept sibling would have surfaced.  What makes
+    this safe is that the old behavior was all-or-nothing — the kept row set
+    here is always a superset of what section-level discard kept, so every
+    cross-row consumer sees a detection surface that only grows.  A claim
     id is legal the moment it names a statement actually present in the
     section's prose; it need not have been pre-declared anywhere upstream —
     a claim covering prose the writer added beyond any prior commitment is a
@@ -472,7 +476,7 @@ def normalize_claim_ledger(
       leaves nothing to audit either way.
     - ``"partial"``: some rows were kept and some were dropped or truncated
       away.
-    - ``"available"``: every submitted row (after any truncation) was kept.
+    - ``"available"``: every submitted row was kept, with no truncation.
     """
     if not isinstance(value, list):
         return [], "missing"
@@ -506,17 +510,15 @@ def normalize_claim_ledger(
         ):
             continue
         # `frame_assignments` is an organizational tag, not evidence grounding,
-        # so it degrades per entry: an unknown key, an off-vocabulary value, or
-        # a non-object payload loses that one tag, never the section's whole
-        # ledger — the discretion an evidence key never gets.  Discarding it
-        # would blind trend-confidence capping (`annotate_trend_evidence`) and
-        # exclusive-facet conflict detection (`exclusive_frame_conflicts`) for
-        # every other claim in the section, because the writer reworded one
-        # label (`Attention变体` for the declared `Attention`).  An off-vocabulary
-        # value is dropped rather than snapped to the nearest declared one — a
-        # reworded label may well denote something else, and a wrong tag is
-        # worse than a missing one.  Evidence keys above stay atomic: those bind
-        # prose to citations.
+        # so it degrades below the row: an unknown key, an off-vocabulary
+        # value, or a non-object payload loses that one tag while the row it
+        # decorates survives — a writer rewording one label (`Attention变体`
+        # for the declared `Attention`) must not cost the claim itself.  An
+        # off-vocabulary value is dropped rather than snapped to the nearest
+        # declared one — a reworded label may well denote something else, and
+        # a wrong tag is worse than a missing one.  The grounding checks above
+        # are stricter: a bad statement or evidence key vetoes the whole row,
+        # because those bind prose to citations.
         assignments: dict[str, str] = {}
         raw_assignments = raw.get("frame_assignments")
         if isinstance(raw_assignments, dict):

@@ -316,7 +316,8 @@ def test_all_rows_illegal_or_empty_submission_are_invalid_missing_stays_missing(
         "not-a-list", markdown="x", legal_anchor_keys=set(), frame=None
     ) == ([], "missing")
 
-    # Zero rows: nothing to audit either way, same as before this change.
+    # Zero rows audit nothing.  Deliberate change: an empty submission used to
+    # count as "available", which inflated the receipt with vacuous ledgers.
     assert normalize_claim_ledger(
         [], markdown="x", legal_anchor_keys=set(), frame=None
     ) == ([], "invalid")
@@ -367,6 +368,68 @@ def test_over_limit_submission_truncates_to_first_24_rows_as_partial():
     # The 25th row never even gets a look — it is dropped by truncation, not
     # a row-level violation, so it must not drag down rows 1-24.
     assert [row["claim_id"] for row in claims] == [f"c{index}" for index in range(1, 25)]
+
+
+def test_truncated_window_with_zero_kept_rows_is_invalid_not_partial():
+    # Zero kept rows means zero auditable content no matter how it happened:
+    # the emptiness verdict outranks the truncation one.
+    ledger = [{
+        "claim_id": f"c{index}", "statement": "never emitted", "type": "fact",
+        "evidence_keys": ["k1"],
+    } for index in range(1, 26)]
+    assert normalize_claim_ledger(
+        ledger, markdown="## A\n\nOther prose [k1].",
+        legal_anchor_keys={"k1"}, frame=None,
+    ) == ([], "invalid")
+
+
+def test_non_dict_row_is_dropped_not_fatal():
+    legal = "Attention is one mixer [k1]."
+    claims, status = normalize_claim_ledger(
+        ["not-a-dict", {
+            "claim_id": "c1", "statement": legal, "type": "fact",
+            "evidence_keys": ["k1"],
+        }],
+        markdown=f"## A\n\n{legal}", legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert [row["claim_id"] for row in claims] == ["c1"]
+
+
+def test_evidence_less_fact_row_is_dropped_not_fatal():
+    legal = "Attention is one mixer [k1]."
+    bare = "Mamba is another mixer."
+    claims, status = normalize_claim_ledger(
+        [{
+            "claim_id": "c1", "statement": legal, "type": "fact",
+            "evidence_keys": ["k1"],
+        }, {
+            "claim_id": "c2", "statement": bare, "type": "fact",
+            "evidence_keys": [],
+        }],
+        markdown=f"## A\n\n{legal}\n\n{bare}",
+        legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert [row["claim_id"] for row in claims] == ["c1"]
+
+
+def test_dropped_row_does_not_reserve_its_claim_id():
+    # The model may emit a broken draft of a row and then the corrected one
+    # under the same id; the dropped draft must not make the good row a
+    # "duplicate".  Pins seen-id bookkeeping to kept rows only.
+    good = "Attention is one mixer [k1]."
+    claims, status = normalize_claim_ledger(
+        [{
+            # Missing the trailing "[k1]." → not verbatim → dropped.
+            "claim_id": "c3", "statement": "Attention is one mixer.",
+            "type": "fact", "evidence_keys": ["k1"],
+        }, {
+            "claim_id": "c3", "statement": good, "type": "fact",
+            "evidence_keys": ["k1"],
+        }],
+        markdown=f"## A\n\n{good}", legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert [row["claim_id"] for row in claims] == ["c3"]
+    assert claims[0]["statement"] == good
 
 
 def test_duplicate_claim_id_keeps_the_first_arriving_row():
