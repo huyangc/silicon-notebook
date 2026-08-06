@@ -1395,7 +1395,10 @@ def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q: "MAP")
     monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a,q: [])
     eng = ReportEngine.from_repository(repo, repo.settings)
-    rid = repo.create_report(nb.id, "why bandgap 1.2V")
+    # depth=4(deep 档):充分性 LLM 精修在该档运行——本测试钉的正是精修语义
+    # (「薄弱」覆盖确定性「缺失」)。overview/standard 跳过 LLM 半,由
+    # test_sufficiency_llm_skipped_at_low_tiers 另行钉住。
+    rid = repo.create_report(nb.id, "why bandgap 1.2V", depth=4)
     eng.plan_outline(nb.id, rid, "why bandgap 1.2V")
     d = repo.get_report(nb.id, rid)
     assert d["status"] == "outline_ready"
@@ -1470,7 +1473,7 @@ def test_plan_outline_freezes_intent_before_corpus_scout(repo, monkeypatch):
         }],
     )
     monkeypatch.setattr(eng, "_probe_sufficiency", lambda *args, **kwargs: [])
-    monkeypatch.setattr(eng, "_judge_sufficiency", lambda question, sections, probe: sections)
+    monkeypatch.setattr(eng, "_judge_sufficiency", lambda question, sections, probe, use_llm=True: sections)
     eng.plan_outline(nb.id, rid, "用户原问题")
     assert calls == ["intent", "intent_probe", "corpus", "storm"]
     outline = repo.get_report(nb.id, rid)["outline"]
@@ -1512,7 +1515,7 @@ def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_
         }],
     )
     monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args: [])
-    monkeypatch.setattr(eng, "_judge_sufficiency", lambda _q, sections, _p: sections)
+    monkeypatch.setattr(eng, "_judge_sufficiency", lambda _q, sections, _p, use_llm=True: sections)
 
     eng.plan_outline(nb.id, rid, "用户原问题")
 
@@ -1568,7 +1571,7 @@ def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
     )
     monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args: [])
     monkeypatch.setattr(
-        eng, "_judge_sufficiency", lambda _q, sections, _p: sections
+        eng, "_judge_sufficiency", lambda _q, sections, _p, use_llm=True: sections
     )
 
     with source_scope_context(
@@ -2179,16 +2182,20 @@ def test_deep_dive_seeds_confirmed_directions_and_skips_rerun(repo, monkeypatch)
     )
 
     engine = _mk_engine(repo, _OutlineLLM())
+    # q1 刻意带两端空白:种子在 trim 后进 run,run 记账的是 trim 形;合并循环
+    # 的比对必须同样 strip,否则跳过永假、每方向白付一次检索(规格评审 P3)。
     engine._deep_dive(
-        "nb", {"title": "t", "scope": "s", "sub_queries": ["q1", "q2"]},
+        "nb", {"title": "t", "scope": "s", "sub_queries": [" q1 ", "q2"]},
         "Q", depth=3,
     )
 
     assert captured.get("intent_queries") == ["q1", "q2"], (
         "大纲方向必须作为已确认种子进 run——否则每节多付一次 plan LLM 调用"
     )
-    assert federated == ["q2"], "run 内已执行的 q1 不得在 run 后重复 federated"
-    assert elements == ["q1", "q2"], "元素补取不是重复,两个方向都要"
+    assert federated == ["q2"], (
+        "run 内已执行的 q1(含带空白拼写)不得在 run 后重复 federated"
+    )
+    assert [q.strip() for q in elements] == ["q1", "q2"], "元素补取不是重复,两个方向都要"
 
 
 def test_deep_dive_without_directions_leaves_planner_path(repo, monkeypatch):
@@ -2239,11 +2246,17 @@ def test_plan_outline_reports_sufficiency_progress(repo, monkeypatch):
             "title": "节", "scope": "s", "sub_queries": ["q"], "intent_ids": [],
         }],
     )
-    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *args, **kwargs: [])
-    monkeypatch.setattr(
-        eng, "_judge_sufficiency", lambda question, sections, probe: sections,
-    )
     progress_seq = []
+    # 探针 stub 往同一条时间线里记 sentinel:进度写必须发生在探针**之前**,
+    # 否则它毫无意义(用户仍盯着上一条文案看完整个探针段)。只断言"字符串
+    # 出现过"扛不住移动变异——把写挪到探针之后照样绿(规格评审 P2-b 实测)。
+    monkeypatch.setattr(
+        eng, "_probe_sufficiency",
+        lambda *args, **kwargs: progress_seq.append("<sufficiency-probe-ran>") or [],
+    )
+    monkeypatch.setattr(
+        eng, "_judge_sufficiency", lambda question, sections, probe, use_llm=True: sections,
+    )
     real_update = eng.dependencies.reports.update_report
 
     def recording_update(notebook_id, report_id, **kwargs):
@@ -2258,4 +2271,117 @@ def test_plan_outline_reports_sufficiency_progress(repo, monkeypatch):
     assert progress_seq.index("多视角规划大纲中") < progress_seq.index(
         "检查各节证据充分性"
     )
+    assert progress_seq.index("检查各节证据充分性") < progress_seq.index(
+        "<sufficiency-probe-ran>"
+    ), "进度写必须先于充分性探针,挪到探针之后等于没写"
     assert progress_seq[-1].startswith("大纲就绪")
+
+
+def test_sufficiency_llm_skipped_at_low_tiers(repo, monkeypatch):
+    """overview/standard 只跑确定性半——LLM 客户端一次都不能被触碰。
+
+    Judge 的 LLM 半本就是 fail-open 的只降不升精修;低档跳过它 = 既有失败
+    路径语义 + 人工大纲确认门兜底。deep 及以上照跑(由
+    test_plan_outline_produces_enriched_outline_ready 用 depth=4 钉住)。
+    """
+    from app.services.report_engine import (
+        ReportEngine, report_sufficiency_llm_enabled,
+    )
+
+    # 映射本身:overview/standard 关,deep/thorough/exhaustive 开,None 保持历史。
+    assert report_sufficiency_llm_enabled(1) is False
+    assert report_sufficiency_llm_enabled(2) is False
+    assert report_sufficiency_llm_enabled(4) is True
+    assert report_sufficiency_llm_enabled(8) is True
+    assert report_sufficiency_llm_enabled(16) is True
+    assert report_sufficiency_llm_enabled(None) is True
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+
+    # 计数而不是抛错:Judge 的 LLM 半自带 fail-open `except Exception`,爆炸桩
+    # 的 AssertionError 会被它吞掉——「删掉 use_llm 早退」的变异下断言照样全绿
+    # (实测)。观察「调用发生了没有」才穿透 fail-open。
+    llm_calls: list = []
+
+    class _Counting:
+        def chat_json(self, *args, **kwargs):
+            llm_calls.append("chat_json")
+            return "{}"
+
+    monkeypatch.setattr(
+        eng.dependencies.model_clients, "chat",
+        lambda workload: llm_calls.append(workload) or _Counting(),
+    )
+    sections = [{"title": "T", "scope": "s", "sub_queries": ["q"]}]
+    probe = [{"title": "T", "hits": 5, "base_hits": 0, "element_hits": 4,
+              "source_hits": 3, "relevant_items": 4, "relevant_supports": 4,
+              "relevant_family_count": 3, "unknown_supports": 0,
+              "top_family_share": 0.5, "source_identity_uncertain": 0}]
+    out = eng._judge_sufficiency("Q", sections, probe, use_llm=False)
+    assert llm_calls == [], "use_llm=False 时不得触碰充分性模型"
+    # 确定性半照常:coverage 与充足/薄弱/缺失结论都在(界面消费的就是它们)。
+    assert out[0]["sufficiency"] == "充足"
+    assert out[0]["coverage"]["hits"] == 5
+    assert out[0]["action"] == "keep"
+
+
+def test_plan_outline_wires_probe_width_from_report_depth(repo, monkeypatch):
+    """接线守卫:`plan_outline` 必须把报告行的 depth 真的传成探针宽度。
+
+    映射函数与 `max_queries` 参数各有半边测试,但把两处
+    `max_queries=probe_width` 同时删掉,全部用例照绿——特性静默消失
+    (规格评审 P2-a 实测)。这里用真 `plan_outline` 数被探测的查询数:
+    depth=1(宽度 2)与 depth=16(宽度 4)必须探出不同的量。
+    """
+    from app.services.report_engine import ReportEngine
+
+    contract = {
+        "objective": "问题",
+        "mandatory_topics": [{
+            "id": "i1", "title": "T", "question": "topic-q",
+            "retrieval_queries": ["rq1", "rq2", "rq3"],
+        }],
+    }
+    storm_sections = [{
+        "title": "节", "scope": "s",
+        "sub_queries": ["s1", "s2", "s3", "s4"], "intent_ids": [],
+    }]
+
+    def probed_queries(depth):
+        nb = _mk_nb(repo)
+        rid = repo.create_report(nb.id, "问题", depth=depth)
+        eng = ReportEngine.from_repository(repo, repo.settings)
+        probed: list = []
+        monkeypatch.setattr(
+            repo.retrieval, "federated_retrieve",
+            lambda nb_id, q: probed.append(q) or [],
+        )
+        monkeypatch.setattr(
+            repo.retrieval, "retrieve_elements", lambda nb_id, q, limit=8: [],
+        )
+        monkeypatch.setattr(
+            eng, "_plan_intent_contract", lambda question, history: dict(contract),
+        )
+        monkeypatch.setattr(eng, "_build_corpus_map", lambda nb_id, q: "C")
+        monkeypatch.setattr(
+            eng, "_storm_outline",
+            lambda *args, **kwargs: [dict(s) for s in storm_sections],
+        )
+        monkeypatch.setattr(
+            eng, "_judge_sufficiency",
+            lambda question, sections, probe, use_llm=True: sections,
+        )
+        eng.plan_outline(nb.id, rid, "问题")
+        assert repo.get_report(nb.id, rid)["status"] == "outline_ready"
+        return probed
+
+    # 宽度 2:覆盖探针取每主题前 2 条(确认问题 + rq1),充分性取每节前 2 条。
+    narrow = probed_queries(1)
+    # 宽度 4:覆盖 4 条 + 充分性 4 条。
+    wide = probed_queries(16)
+    assert len(narrow) < len(wide), (
+        f"depth=1 探了 {len(narrow)} 条、depth=16 探了 {len(wide)} 条——"
+        "宽度没有随报告 depth 接线"
+    )
+    assert "rq2" not in narrow and "rq2" in wide
+    assert "s3" not in narrow and "s3" in wide

@@ -219,6 +219,22 @@ def report_probe_query_width(depth: Optional[int]) -> int:
     return _PROBE_QUERY_WIDTHS.get(report_retrieval_effort(int(depth)), 4)
 
 
+# 充分性 Judge 的 LLM 精修半只在这些档位运行。Judge 是两半结构:确定性判定
+# (0-LLM)先算出每节 coverage 与充足/薄弱/缺失兜底结论——大纲界面显示的就是
+# 这一半;LLM 只做「只降不升」的精修(充足必须有确定性天花板背书),且本就
+# fail-open(LLM 失败时确定性结论照常生效)。低档跳过 LLM 半 = 走的正是那条
+# 已在生产存在的 fail-open 路径,而后面紧跟人工大纲确认门兜底。每报告因此在
+# overview/standard 少一次 LLM 调用;deep 及以上保持原样。
+_SUFFICIENCY_LLM_EFFORTS = frozenset({"deep", "thorough", "exhaustive"})
+
+
+def report_sufficiency_llm_enabled(depth: Optional[int]) -> bool:
+    """``depth`` 为 None 保持历史行为(LLM 精修照跑)。"""
+    if depth is None:
+        return True
+    return report_retrieval_effort(int(depth)) in _SUFFICIENCY_LLM_EFFORTS
+
+
 # --- 方向合并后的最终选集上限(报告 PR-5,codex PR#418 R1 P2-1)------------
 
 def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> None:
@@ -994,15 +1010,16 @@ class ReportEngine:
             # 每次重复都是一次真实检索。memo 只活在这一次规划里,每次规划开头
             # 重置,不跨 run 保留语料快照。
             self._probe_retrieval_memo: Dict[tuple, list] = {}
-            # 探针宽度按报告档位缩放(数值契约在 docs/product-and-api*.md);
-            # 行上缺 depth(不应发生,create 恒写)按历史宽度 4 兜底。
+            # 探针宽度与充分性 LLM 精修都按报告档位缩放(数值契约在
+            # docs/product-and-api*.md);行上缺 depth(不应发生,create 恒写)
+            # 按历史行为兜底(宽度 4、LLM 精修照跑)。
             try:
                 report_row = reports.get_report(notebook_id, rid) or {}
-                probe_width = report_probe_query_width(
-                    int(report_row.get("depth") or 0) or None
-                )
+                planning_depth = int(report_row.get("depth") or 0) or None
             except Exception:
-                probe_width = report_probe_query_width(None)
+                planning_depth = None
+            probe_width = report_probe_query_width(planning_depth)
+            sufficiency_llm = report_sufficiency_llm_enabled(planning_depth)
             if intent_contract:
                 intent_contract = self._finalize_confirmed_intent(
                     dict(intent_contract)
@@ -1095,7 +1112,9 @@ class ReportEngine:
             probe = self._probe_sufficiency(
                 notebook_id, sections, max_queries=probe_width
             )
-            sections = self._judge_sufficiency(research_question, sections, probe)
+            sections = self._judge_sufficiency(
+                research_question, sections, probe, use_llm=sufficiency_llm
+            )
             reports.update_report(notebook_id, rid, outline=sections,
                                   status="outline_ready",
                                   progress=f"大纲就绪({len(sections)} 节),待确认")
@@ -1217,7 +1236,8 @@ class ReportEngine:
 
     def _judge_sufficiency(self, question, sections, probe, *,
                            result_scope: str = "ranked",
-                           completeness_required: bool = False) -> List[dict]:
+                           completeness_required: bool = False,
+                           use_llm: bool = True) -> List[dict]:
         from app.services.prompts import report_sufficiency_prompt, REPORT_SUFFICIENCY_SCHEMA_HINT
         by_title = {p["title"]: p for p in probe}
         result_scope = str(
@@ -1254,6 +1274,10 @@ class ReportEngine:
             s.setdefault("sufficiency", fallback)
             s.setdefault("gap_note", "")
             s.setdefault("action", "keep" if enough else "supplement" if thin else "external")
+        # 低档只跑确定性半:LLM 精修本就是 fail-open 的锦上添花(只降不升),
+        # 跳过它 = 走既有的失败路径语义,而人工大纲确认门紧随其后。
+        if not use_llm:
+            return sections
         try:
             block = "\n".join(
                 f"- {p['title']}: hits={p['hits']} base_hits={p['base_hits']} "
@@ -1373,12 +1397,15 @@ class ReportEngine:
         # run 的元素检索不按方向逐条来,per-direction 元素补取不是重复。低档
         # 步数装不下、run 内没执行到的方向,KG 侧照常在这里兜底执行(「确认后
         # 的检索方向必须实际执行」的合同由 attempted 判据两边共同兑现)。
+        # 两侧都 strip 再比:种子在上面 trim 过,STORM 侧的方向串可能带两端
+        # 空白——不 strip 的比对永假,跳过失效,9.1M 库上每方向白付一次检索
+        # (规格评审 P3 实测形态)。
         run_attempted = {
-            str(row.get("query") or "") for row in result.attempted
+            str(row.get("query") or "").strip() for row in result.attempted
         }
         for query in list(section.get("sub_queries") or [])[:4]:
             new_count = 0
-            if str(query) not in run_attempted:
+            if str(query).strip() not in run_attempted:
                 try:
                     hits = self.dependencies.retrieval.federated_retrieve(
                         notebook_id, str(query)
