@@ -201,6 +201,24 @@ def report_retrieval_limits(depth: Optional[int]) -> Optional[AskRetrievalLimits
     return ask_retrieval_limits(report_retrieval_effort(int(depth)))
 
 
+# 大纲阶段两类 0-LLM 探针(覆盖探针/充分性探针)的每主题·每节查询宽度,按报告
+# depth 映射到共享档位名。此前恒为 4、与档位无关——在 9.1M 对象的 base 库上,
+# 6 主题 + 6 节 × 4 条查询 ≈ 96 次真实检索,是大纲阶段(而非 LLM)的耗时大头。
+# 低档少探是低档语义的一部分(粗粒度接地换速度);exhaustive 一分不减。探针的
+# 产出只是喂给 STORM/Judge 的覆盖计数,不进正文证据。数值契约登记在
+# docs/product-and-api*.md「逐步推理档位与完整枚举」附近的报告条目。
+_PROBE_QUERY_WIDTHS = {
+    "overview": 2, "standard": 2, "deep": 3, "thorough": 4, "exhaustive": 4,
+}
+
+
+def report_probe_query_width(depth: Optional[int]) -> int:
+    """``depth`` 为 None(旧调用方/行上缺 depth)时保持历史宽度 4。"""
+    if depth is None:
+        return 4
+    return _PROBE_QUERY_WIDTHS.get(report_retrieval_effort(int(depth)), 4)
+
+
 # --- 方向合并后的最终选集上限(报告 PR-5,codex PR#418 R1 P2-1)------------
 
 def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> None:
@@ -700,18 +718,53 @@ class ReportEngine:
         )
         return service.resolve_families(source_ids)
 
-    def _probe_queries(self, notebook_id: str, queries: List[str]) -> dict:
+    def _probe_knowledge_hits(self, notebook_id: str, query: str) -> list:
+        """One coverage-probe KG retrieval, memoized per planning run.
+
+        `_probe_intent_coverage` puts the SAME confirmed question at the head
+        of every topic's query list, and topics/sections routinely share
+        retrieval queries — on a 9.1M-object base each repeat re-pays a full
+        federated retrieval for byte-identical results.  The memo lives on the
+        engine instance and only inside `plan_outline` (which resets it), so
+        two planning runs never see each other's corpus snapshots.  Failures
+        are deliberately NOT cached: a transient error keeps its historical
+        retry-per-probe behaviour instead of being frozen as an empty result.
+        """
+        memo = getattr(self, "_probe_retrieval_memo", None)
+        key = ("knowledge", notebook_id, str(query))
+        if memo is not None and key in memo:
+            return memo[key]
+        hits = list(self.dependencies.retrieval.federated_retrieve(
+            notebook_id, str(query)
+        ))
+        if memo is not None:
+            memo[key] = hits
+        return hits
+
+    def _probe_element_hits(self, notebook_id: str, query: str) -> list:
+        """Element twin of `_probe_knowledge_hits` — same memo, same rules."""
+        memo = getattr(self, "_probe_retrieval_memo", None)
+        key = ("element", notebook_id, str(query))
+        if memo is not None and key in memo:
+            return memo[key]
+        found = list(self.dependencies.retrieval.retrieve_elements(
+            notebook_id, str(query), limit=8
+        ))
+        if memo is not None:
+            memo[key] = found
+        return found
+
+    def _probe_queries(self, notebook_id: str, queries: List[str], *,
+                       max_queries: int = 4) -> dict:
         seen, base, elements, sources = set(), set(), set(), set()
         # One support unit is one distinct relevant KG object or source element.
         # Repeated retrieval of the same object through multiple sub-queries does
         # not inflate either relevant_items or a family's numerator.
         relevant_units: Dict[str, set[str]] = {}
 
-        for query in queries[:4]:
+        for query in queries[:max_queries]:
             try:
-                for hit in self.dependencies.retrieval.federated_retrieve(
-                    notebook_id, str(query)
-                ):
+                for hit in self._probe_knowledge_hits(notebook_id, str(query)):
                     unit = f"knowledge:{hit.object_id}"
                     seen.add(hit.object_id)
                     if getattr(hit, "tier", "") == "base":
@@ -730,9 +783,7 @@ class ReportEngine:
             except Exception:
                 pass
             try:
-                for element in self.dependencies.retrieval.retrieve_elements(
-                    notebook_id, str(query), limit=8
-                ):
+                for element in self._probe_element_hits(notebook_id, str(query)):
                     unit = f"element:{element.element_id}"
                     elements.add(element.element_id)
                     relevant = float(
@@ -810,7 +861,8 @@ class ReportEngine:
             "source_identity_uncertain": len(unidentified_source_ids),
         }
 
-    def _probe_intent_coverage(self, notebook_id: str, intent_contract: dict) -> List[dict]:
+    def _probe_intent_coverage(self, notebook_id: str, intent_contract: dict, *,
+                               max_queries: int = 4) -> List[dict]:
         out: List[dict] = []
         confirmed_question = self._confirmed_research_question(
             intent_contract,
@@ -825,6 +877,7 @@ class ReportEngine:
             counts = self._probe_queries(
                 notebook_id,
                 [query for query in queries if query],
+                max_queries=max_queries,
             )
             out.append({
                 "intent_id": topic["id"],
@@ -918,12 +971,14 @@ class ReportEngine:
             pass
         return ("\n\n".join(parts))[:6000] if parts else "(语料侦察无结果)"
 
-    def _probe_sufficiency(self, notebook_id: str, sections: List[dict]) -> List[dict]:
+    def _probe_sufficiency(self, notebook_id: str, sections: List[dict], *,
+                           max_queries: int = 4) -> List[dict]:
         """0-LLM objective signal over both KG objects and raw SourceElements."""
         out = []
         for s in sections:
             counts = self._probe_queries(
-                notebook_id, list(s.get("sub_queries") or [])
+                notebook_id, list(s.get("sub_queries") or []),
+                max_queries=max_queries,
             )
             out.append({"title": s.get("title", ""), **counts})
         return out
@@ -934,6 +989,20 @@ class ReportEngine:
         reports = self.dependencies.reports
         try:
             reports.update_report(notebook_id, rid, status="planning", progress="按已确认问题规划中")
+            # 探针检索 memo(本次规划 run 有效):覆盖探针把同一条确认问题放在
+            # 每个主题的查询头部,跨主题/跨节的检索方向也高频重复——9.1M 库上
+            # 每次重复都是一次真实检索。memo 只活在这一次规划里,每次规划开头
+            # 重置,不跨 run 保留语料快照。
+            self._probe_retrieval_memo: Dict[tuple, list] = {}
+            # 探针宽度按报告档位缩放(数值契约在 docs/product-and-api*.md);
+            # 行上缺 depth(不应发生,create 恒写)按历史宽度 4 兜底。
+            try:
+                report_row = reports.get_report(notebook_id, rid) or {}
+                probe_width = report_probe_query_width(
+                    int(report_row.get("depth") or 0) or None
+                )
+            except Exception:
+                probe_width = report_probe_query_width(None)
             if intent_contract:
                 intent_contract = self._finalize_confirmed_intent(
                     dict(intent_contract)
@@ -989,7 +1058,9 @@ class ReportEngine:
             reports.update_report(notebook_id, rid, understanding=intent_contract)
             raise_if_cancelled(self.cancel_event)
             reports.update_report(notebook_id, rid, progress="按用户问题检查证据覆盖")
-            intent_probe = self._probe_intent_coverage(notebook_id, intent_contract)
+            intent_probe = self._probe_intent_coverage(
+                notebook_id, intent_contract, max_queries=probe_width
+            )
             raise_if_cancelled(self.cancel_event)
             reports.update_report(notebook_id, rid, status="planning", progress="侦察语料中")
             corpus_map = self._build_corpus_map(notebook_id, research_question)
@@ -1013,8 +1084,17 @@ class ReportEngine:
             sections = self._bind_outline_to_intent(
                 sections, intent_contract, intent_probe
             )
-            # 充分性:探针(0 LLM)+ Judge(flash)
-            probe = self._probe_sufficiency(notebook_id, sections)
+            # 充分性:探针(0 LLM)+ Judge(flash)。进度写不可省:这一段夹在
+            # 「多视角规划大纲中」与「大纲就绪」之间,此前零进度写——STORM LLM
+            # + 每节探针在大库上是好几分钟,用户看到的就是卡死(生产实测:
+            # updated_at 停在 STORM 开始那刻,14 分钟"没动静"里一半是这段)。
+            raise_if_cancelled(self.cancel_event)
+            reports.update_report(
+                notebook_id, rid, progress="检查各节证据充分性"
+            )
+            probe = self._probe_sufficiency(
+                notebook_id, sections, max_queries=probe_width
+            )
             sections = self._judge_sufficiency(research_question, sections, probe)
             reports.update_report(notebook_id, rid, outline=sections,
                                   status="outline_ready",
@@ -1236,7 +1316,22 @@ class ReportEngine:
         # 自动激活大纲便签与弱支撑边回喂(`outline_wiring_active` 判的就是它)——
         # 报告引擎因此不 import 任何大纲内部件。集合枚举保持不可达:构造 retriever
         # 时不传 collection_catalog/collection_enumeration,wiring 判空自动关闭。
+        #
+        # `intent_queries`=本节已确认检索方向(STORM 带着语料侦察规划、经用户
+        # 大纲确认门审阅):run 采用它们作首轮种子并**跳过 plan LLM 调用**——
+        # 与 Ask 侧同一条原则("A reviewed intent contract is authoritative"),
+        # 此前报告侧把方向塞进 prompt 让 planner 重推一遍,再在 run 后防御性地
+        # 重新执行一遍方向,等于付一次 LLM 调用做重规划、然后花代码防着它的
+        # 输出。溢出首轮宽度的方向走 run 既有的补种账目;低档步数装不下的,由
+        # 下方 run 后合并兜底(它只对 run 内没执行到的方向补跑,见 attempted 判)。
+        # reflect 循环原样保留,证据驱动的补查能力不变。方向为空(理论上 STORM
+        # 产出必有 sub_queries)回落 planner 路径,行为与接入前一致。
         limits = report_retrieval_limits(depth)
+        directions = [
+            str(query).strip()
+            for query in (section.get("sub_queries") or [])
+            if str(query).strip()
+        ]
         result = ReasoningRetriever(
             retrieval=deps.retrieval,
             model_clients=deps.model_clients,
@@ -1244,7 +1339,7 @@ class ReportEngine:
             settings=self.settings,
             cancel_event=self.cancel_event,
         ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
-              limits=limits)
+              limits=limits, intent_queries=directions or None)
 
         # The outline's approved retrieval directions are execution requirements,
         # not merely prose hints to the reasoning planner.  Merge their bounded
@@ -1273,19 +1368,28 @@ class ReportEngine:
                           else self.settings.retrieval_top_n)
         direction_elements = (min(8, limits.answer_element_items)
                               if limits is not None else 8)
+        # run 内已把方向当种子执行过的(记在 attempted 账目里),KG 侧不再重复
+        # 同一条 federated 检索——那正是种子化要消掉的重复 I/O。元素侧照旧:
+        # run 的元素检索不按方向逐条来,per-direction 元素补取不是重复。低档
+        # 步数装不下、run 内没执行到的方向,KG 侧照常在这里兜底执行(「确认后
+        # 的检索方向必须实际执行」的合同由 attempted 判据两边共同兑现)。
+        run_attempted = {
+            str(row.get("query") or "") for row in result.attempted
+        }
         for query in list(section.get("sub_queries") or [])[:4]:
             new_count = 0
-            try:
-                hits = self.dependencies.retrieval.federated_retrieve(
-                    notebook_id, str(query)
-                )[:direction_take]
-                for hit in hits:
-                    if hit.object_id not in seen_objects:
-                        result.top_hits.append(hit)
-                        seen_objects.add(hit.object_id)
-                        new_count += 1
-            except Exception:
-                pass
+            if str(query) not in run_attempted:
+                try:
+                    hits = self.dependencies.retrieval.federated_retrieve(
+                        notebook_id, str(query)
+                    )[:direction_take]
+                    for hit in hits:
+                        if hit.object_id not in seen_objects:
+                            result.top_hits.append(hit)
+                            seen_objects.add(hit.object_id)
+                            new_count += 1
+                except Exception:
+                    pass
             try:
                 elements = self.dependencies.retrieval.retrieve_elements(
                     notebook_id, str(query), limit=direction_elements
