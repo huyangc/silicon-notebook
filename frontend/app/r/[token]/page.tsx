@@ -12,6 +12,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
+import { normalizeMathMarkdown } from "../../math-markdown";
 import {
   fetchPublicReport,
   publicReferencesByKey,
@@ -85,7 +86,10 @@ export default function PublicReportPage() {
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeKatex]}
         >
-          {report.content_md}
+          {/* 与已认证的报告视图同一套归一化：单行 $$…$$ 要当块级公式处理，
+              网关返回的转义 Markdown 层也要剥掉。少了它，同一份报告在分享页
+              和站内页会渲染成两个样子（长公式被当行内并裁掉）。 */}
+          {normalizeMathMarkdown(report.content_md)}
         </ReactMarkdown>
       </article>
 
