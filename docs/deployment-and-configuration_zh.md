@@ -602,7 +602,7 @@ MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
 REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
 REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000；仅对不带研究深度的调用方生效，见检索段的行为变化说明）
 REPORT_GENERATION_CONCURRENCY # 深度报告：每个后端进程同时准入的整篇报告数（默认 1；排队时不占数据库连接）
-REPORT_SECTION_CONCURRENCY   # 深度报告：每篇已准入报告的节级扇出（默认 3；还受模型容量和数据库连接池余量约束）
+REPORT_SECTION_CONCURRENCY   # 深度报告：每篇已准入报告的节级扇出（默认 5；还受模型容量和数据库连接池余量约束）
 REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 completion 上限（默认 65536）
 REPORT_SYNTHESIS_MAX_TOKENS  # 深度报告：全篇 JSON 蓝图 completion 上限（默认 102400）
 REPORT_SUMMARY_MAX_TOKENS    # 深度报告：最终只读终审 completion 上限（默认 102400）

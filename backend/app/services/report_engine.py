@@ -2068,9 +2068,11 @@ class ReportEngine:
             return drafted
 
         # The model service capacity is an upper bound, not a database fan-out
-        # target.  Reserve two pool slots for interactive reads/writes and cap
-        # one report independently so concurrent reports cannot multiply the
-        # service's model capacity into pool exhaustion.
+        # target.  This caps *section-level* fan-out only: each section's own
+        # sub-query fan-out can briefly borrow further pool connections, with
+        # waiters bounded by the pool acquire timeout — so the cap keeps
+        # concurrent reports from multiplying the service's model capacity
+        # into unbounded pool pressure, not a hard two-slot reservation.
         database_worker_cap = max(
             1, int(self.settings.postgres_pool_max_size) - 2
         )

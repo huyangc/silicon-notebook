@@ -228,7 +228,14 @@ def normalize_synthesis_blueprint(
     value: object, *, outline: Sequence[dict], legal_evidence_ids: set[str],
     frame: dict | None,
 ) -> dict | None:
-    """Validate a blueprint atomically; one illegal binding discards all of it."""
+    """Validate a blueprint atomically; one illegal binding discards all of it.
+
+    ``frame`` must be a normalized frame (``normalize_report_frame`` output) or
+    None: the facet vocabulary built below is compared verbatim against claim
+    tags, and since facet-tag handling branches on whether that vocabulary is
+    empty (clear the tag) or not (discard the blueprint), feeding a raw
+    un-normalized frame would silently flip that branch.
+    """
     try:
         if not isinstance(value, dict):
             return None
@@ -257,6 +264,28 @@ def normalize_synthesis_blueprint(
             evidence_keys = _strings(raw.get("evidence_keys"), 16, 160)
             counter = _strings(raw.get("counterevidence_keys"), 12, 160)
             facet_id = _text(raw.get("facet_id"), 80)
+            # Models waver between the bare facet id the frame lists and an
+            # `id:value` composite (value info belongs in statement/conditions).
+            # An `id:value` / `id：value` (full-width colon) form whose prefix is
+            # a legal facet id is deterministically narrowed to that prefix — the
+            # tag is organizational, not evidentiary, so a shape mismatch alone
+            # must not discard an otherwise grounded blueprint.  When the frame
+            # defines no facet vocabulary at all, a model-invented label carries
+            # no organizational meaning either, so it is cleared instead.
+            if facet_id and facet_id not in facet_ids:
+                # A legal facet id may itself contain a separator, so split
+                # points are tried right-to-left: the longest declared prefix
+                # wins, never a shorter accidental one.
+                for index in range(len(facet_id) - 1, -1, -1):
+                    if facet_id[index] not in ":：":
+                        continue
+                    prefix = facet_id[:index].strip()
+                    if prefix in facet_ids:
+                        facet_id = prefix
+                        break
+                else:
+                    if not facet_ids:
+                        facet_id = ""
             if (
                 not claim_id or claim_id in claim_ids or not statement
                 or claim_type not in _CLAIM_TYPES or owner not in section_ids

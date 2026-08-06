@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     # remain globally governed by the bound service scheduler; this lower gate
     # protects the database pool from many reports multiplying that capacity.
     report_section_concurrency: int = Field(
-        3, ge=1, validation_alias="REPORT_SECTION_CONCURRENCY")
+        5, ge=1, validation_alias="REPORT_SECTION_CONCURRENCY")
     # Whole-report jobs admitted per backend process.  Keep this separate from
     # model-service concurrency because each section performs database work
     # before and between model calls.
