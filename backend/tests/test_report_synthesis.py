@@ -304,7 +304,33 @@ def test_blueprint_clears_composite_facet_when_frame_has_no_facets():
     assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == ""
 
 
+def test_blueprint_facet_narrowing_pins_whitespace_and_edge_prefixes():
+    # Surrounding whitespace and a value-less colon still narrow to the
+    # declared prefix; an empty prefix stays on the conservative discard path.
+    for tag in ("mixer : attention", "mixer ：attention", "mixer:"):
+        payload = _blueprint()
+        payload["claims"][0]["facet_id"] = tag
+        normalized = normalize_synthesis_blueprint(
+            payload, outline=[{"title": "A"}],
+            legal_evidence_ids={"o1"}, frame=_frame(),
+        )
+        assert normalized is not None, tag
+        assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == "mixer", tag
+
+    payload = _blueprint()
+    payload["claims"][0]["facet_id"] = ":attention"
+    assert normalize_synthesis_blueprint(
+        payload, outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=_frame(),
+    ) is None
+
+
 def test_synthesis_prompt_pins_facet_id_contract_and_schema_hint():
     prompt = report_synthesis_prompt("Q", "intent", "{}", "evidence")
     assert "never an `id:value` composite" in prompt
+    # The composite counter-example must stay a placeholder: a plausible slug
+    # (`family:...`) in the only example slot invites the model to copy a bare
+    # illegal id, which lands on the atomic-discard path this contract exists
+    # to avoid.
+    assert "family:Transformer" not in prompt
     assert '"facet_id":""' in REPORT_SYNTHESIS_SCHEMA_HINT

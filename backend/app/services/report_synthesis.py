@@ -228,7 +228,14 @@ def normalize_synthesis_blueprint(
     value: object, *, outline: Sequence[dict], legal_evidence_ids: set[str],
     frame: dict | None,
 ) -> dict | None:
-    """Validate a blueprint atomically; one illegal binding discards all of it."""
+    """Validate a blueprint atomically; one illegal binding discards all of it.
+
+    ``frame`` must be a normalized frame (``normalize_report_frame`` output) or
+    None: the facet vocabulary built below is compared verbatim against claim
+    tags, and since facet-tag handling branches on whether that vocabulary is
+    empty (clear the tag) or not (discard the blueprint), feeding a raw
+    un-normalized frame would silently flip that branch.
+    """
     try:
         if not isinstance(value, dict):
             return None

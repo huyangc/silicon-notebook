@@ -1074,7 +1074,7 @@ def report_synthesis_prompt(question: str, intent_block: str, frame_block: str,
         "by analytical question, facet, and comparison condition — never by paper "
         "order. A claim's facet_id, when present, must be exactly one `id` from the "
         "frame's facets (bare id such as the frame lists — never an `id:value` "
-        "composite like `family:Transformer`; the value belongs in the statement or "
+        "composite like `<facet id>:<value>`; the value belongs in the statement or "
         "conditions). Leave facet_id empty when the frame is empty. The confirmed "
         "intent, frame, and section set are immutable: do not "
         "add, remove, rename, or reassign a mandatory section. Use only evidence_ids "
