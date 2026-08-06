@@ -765,8 +765,21 @@ class CandidateRetrievalService(_RetrievalState):
         """
         if not self.settings.postgres_lexical_knn_enabled:
             return False
+        # 能力声明先于规模判定:SQLite 适配器声明不具备(hint 在 FTS5 上无事可
+        # 做),这里就零成本短路——发行默认后端不为 PG 专属特性付版本查询/冷缓存
+        # 五条聚合(codex #464 R1 P2)。问的是「绑定的适配器能不能」而非后端是
+        # 什么,service 不判 dialect 的红线不破;缺声明的桩按不具备收(fail
+        # closed 到 legacy)。
+        if not getattr(self.knowledge, "lexical_knn_capable", False):
+            return False
         if allowed_source_ids is not None:
             return False
+        # 登记接受的取舍:PostgreSQL 侧每次未收窄探针为 sizing 付一条已索引的
+        # 单行版本校验查询(亚毫秒,与其后的词法 LATERAL 相比是噪声;master 的
+        # 无 ANN 兜底分支本就无条件付它)。曾为消掉它做过零连接的探测缓存 hint,
+        # 连续三轮评审各暴露一个真缺陷(未探测表被进程级 absence 否决/瞬态探测
+        # 失败被固化/热路径双探测),按「简单正确 > 省一条小查询」撤回——见
+        # search.py 探测缓存旁的登记,别在这里重新引入。
         try:
             size = self.notebook_copy_stats(notebook_id).get("size") or {}
             rows = int(size.get("nodes") or 0) + int(size.get("chunks") or 0)

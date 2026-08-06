@@ -431,7 +431,7 @@ FROM pg_stat_progress_create_index;
 
 上面的复合索引让**其他**库不再为巨型库买单，但救不了巨型库自己：`ORDER BY similarity` 仍要
 对全部 trigram 候选算完相似度才能截断（9.1M 对象库实测：常见短词单词项 7.4s，多词项问题直接
-超时、词法臂 fail-open 整条阵亡）。默认关的 `POSTGRES_LEXICAL_KNN_ENABLED` 让规模 ≥
+超时、词法臂 fail-open 整条阵亡）。默认开的 `POSTGRES_LEXICAL_KNN_ENABLED` 让规模 ≥
 `POSTGRES_LEXICAL_KNN_MIN_ROWS`（默认 50 万 nodes+chunks）的库的未收窄 run 改走 GiST `<->`
 扫描、到 LIMIT 即停（同库实测 123ms，60×）。这个下限是实质性的：GiST 索引没有 notebook 键，
 KNN 走的是**全库**距离序，只对在整张表里占主导份额的库划算——请把下限设在「除主导库外最大的
@@ -448,7 +448,7 @@ CREATE INDEX CONCURRENTLY idx_knowledge_objects_name_knn_gist ON knowledge_objec
   WHERE status != 'deprecated';
 ```
 
-随后设 `POSTGRES_LEXICAL_KNN_ENABLED=true` 并重启后端（可用性按进程探测一次、不再复测）。
+随后重启后端即可——开关默认开，建索引是唯一的启用步骤（可用性按进程探测一次、不再复测）。
 回滚顺序因此是硬性的：**先关开关并重启，之后才删索引**——开关还开着就删，进程缓存里的
 「可用」指向一个已消失的索引，每条 KNN 语句都退化成无索引的距离排序，直到进程重启。KNN 页
 取不满的词项会自动经旧语句重探，罕见词/仅 ILIKE 命中的结果与旧路径一致。

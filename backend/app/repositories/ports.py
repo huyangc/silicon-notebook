@@ -1303,6 +1303,11 @@ class EvidenceKnowledgeContextPort(Protocol):
 
 
 class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
+    # Capability declaration, not dialect branching: the service asks the bound
+    # adapter whether the KNN access-path hint can ever do anything, and skips
+    # the sizing verdict (a version query per probe, five scale aggregates on a
+    # cold cache) when it cannot.  SQLite declares False; PostgreSQL True.
+    lexical_knn_capable: bool
     def fts_search(self, db: object, notebook_id: str, q: str, k: int = 30, *, allowed_source_ids: Sequence[str] | None = None, corpus_langs: Sequence[str] | None = None, allow_knn: bool = False) -> list[dict[str, Any]]: ...
     def chunk_fts_search(self, db: object, notebook_id: str, q: str, k: int = 30, *, allowed_source_ids: Sequence[str] | None = None, corpus_langs: Sequence[str] | None = None) -> list[dict[str, Any]]: ...
     def chunk_exact_search(self, db: object, notebook_id: str, needle: str, k: int = 50) -> list[dict[str, Any]]: ...

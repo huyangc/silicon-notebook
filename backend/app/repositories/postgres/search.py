@@ -177,7 +177,8 @@ def chunk_candidate_rows(connection, notebook_id: str, query: str, limit: int):
 
 
 # ---------------------------------------------------------------------------
-# GiST KNN early-stop for the knowledge-object name probe (default-off flag).
+# GiST KNN early-stop for the knowledge-object name probe (default-on flag;
+# POSTGRES_LEXICAL_KNN_ENABLED=false is the rollback).
 #
 # The legacy LATERAL orders by `similarity(...) DESC` — form B: the LIMIT cannot
 # terminate early, so a common short term recomputes similarity for every
@@ -196,13 +197,15 @@ def chunk_candidate_rows(connection, notebook_id: str, query: str, limit: int):
 #
 # Within an equal-similarity tie class the two orders may pick different
 # members (measured: 285 rows named exactly "DAC" at similarity 1.0) — a
-# registered trade behind the default-off POSTGRES_LEXICAL_KNN_ENABLED flag.
-# The KNN inner scan carries NO tiebreak (adding one would defeat the early
-# stop), so within such a class the KNN path is not even run-to-run stable:
-# tie membership follows GiST traversal order, which shifts as the index is
-# written.  The outer re-sort keeps the OUTPUT ordering deterministic given
-# the set; the set itself is what may drift.  A recall A/B against the legacy
-# path must therefore sample repeatedly — a single paired run cannot separate
+# registered, accepted trade (owner decision 2026-08-06: the 60× win takes
+# precedence; POSTGRES_LEXICAL_KNN_ENABLED=false is the per-deployment
+# rollback for anyone needing bit-stable candidate sets).  The KNN inner scan
+# carries NO tiebreak (adding one would defeat the early stop), so within such
+# a class the KNN path is not even run-to-run stable: tie membership follows
+# GiST traversal order, which shifts as the index is written.  The outer
+# re-sort keeps the OUTPUT ordering deterministic given the set; the set
+# itself is what may drift.  A recall A/B against the legacy path must
+# therefore sample repeatedly — a single paired run cannot separate
 # access-path differences from same-path tie jitter.
 # ---------------------------------------------------------------------------
 
@@ -222,6 +225,17 @@ _KNN_INDEX_CACHE: dict[tuple[str, int], bool] = {}
 def reset_knn_index_cache() -> None:
     """Test seam: availability is otherwise cached for the process lifetime."""
     _KNN_INDEX_CACHE.clear()
+
+
+# There is deliberately NO connection-free "absence hint" layered on this
+# cache for the service's sizing gate.  It was built and reverted: three
+# successive review rounds each found a real defect (a process-wide aggregate
+# vetoes unprobed tables permanently; an instance-recorded verdict persists
+# transient probe failures as absence; recording from the hinted call doubles
+# the catalog round trip on the hot path).  The cost it tried to remove is one
+# indexed single-row version query per unscoped probe — noise next to the
+# LATERALs that follow — and is registered as an accepted trade in
+# `_lexical_knn_allowed`.  Do not reintroduce a hint without solving all three.
 
 
 def knn_name_index_available(connection) -> bool:

@@ -30,8 +30,14 @@ def repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings())
 
 
-def _verdict(repo, *, flag, rows, allowed_source_ids=None, stats_error=False):
-    """对四元组合直接求 `_lexical_knn_allowed` 的值。"""
+def _verdict(repo, *, flag, rows, allowed_source_ids=None, stats_error=False,
+             capable=True):
+    """对判据组合直接求 `_lexical_knn_allowed` 的值。
+
+    fixture 是 SQLite 仓库,其适配器如实声明 `lexical_knn_capable = False`;
+    这里默认在实例上覆盖成 True,好让其余判据可测——`capable=False` 那一档
+    测的才是 SQLite 部署的真实短路。
+    """
     candidates = repo.retrieval.candidates
     real_stats = candidates.notebook_copy_stats
 
@@ -42,12 +48,14 @@ def _verdict(repo, *, flag, rows, allowed_source_ids=None, stats_error=False):
 
     candidates.notebook_copy_stats = fake_stats
     candidates.settings.postgres_lexical_knn_enabled = flag
+    candidates.knowledge.lexical_knn_capable = capable
     try:
         return candidates._lexical_knn_allowed(
             "nb-any", allowed_source_ids=allowed_source_ids
         )
     finally:
         candidates.notebook_copy_stats = real_stats
+        del candidates.knowledge.lexical_knn_capable
 
 
 def test_verdict_requires_all_three_conditions(repo):
@@ -63,6 +71,36 @@ def test_verdict_requires_all_three_conditions(repo):
     assert _verdict(repo, flag=True, rows=threshold - 1) is False
     # 判定链上的异常按 False 收:legacy 永远是安全出口。
     assert _verdict(repo, flag=True, rows=threshold, stats_error=True) is False
+    # 适配器声明不具备(SQLite 的真实声明)→ False,其余判据满足也不例外。
+    assert _verdict(repo, flag=True, rows=threshold, capable=False) is False
+
+
+def test_incapable_adapter_short_circuits_before_copy_stats(repo):
+    """能力位在规模判定之前——默认开之后 SQLite 部署的零成本就靠这一条。
+
+    发行默认后端是 SQLite,flag 默认 True:没有这道短路,每次未收窄检索都要
+    白付一条版本查询、冷缓存时再加五条规模聚合,而 hint 在 FTS5 上永远无事
+    可做(codex #464 R1 P2)。exploding stats 证明 stats 根本没被触碰。
+    """
+    candidates = repo.retrieval.candidates
+    real_stats = candidates.notebook_copy_stats
+    calls: list[str] = []
+
+    def counting_stats(nb):
+        # 计数而不是抛错:判定函数的 fail-closed `except` 会把异常吞成
+        # False,抛错版在「能力检查被删」的变异下照样全绿(实测)。
+        calls.append(nb)
+        return {"copyable": False, "size": {"nodes": 10**7, "chunks": 0}}
+
+    candidates.notebook_copy_stats = counting_stats
+    candidates.settings.postgres_lexical_knn_enabled = True
+    try:
+        # 不覆盖能力位:SQLite 适配器自己的 False 声明就是被测对象。
+        assert candidates.knowledge.lexical_knn_capable is False
+        assert candidates._lexical_knn_allowed("nb-any") is False
+        assert calls == [], "适配器不具备时不得读 notebook_copy_stats"
+    finally:
+        candidates.notebook_copy_stats = real_stats
 
 
 def test_flag_off_short_circuits_before_copy_stats(repo):
