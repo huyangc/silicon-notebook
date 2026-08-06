@@ -111,6 +111,9 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("reports", None, "outline"),
     ("reports", None, "generate"),
     ("reports", None, "cancel"),
+    # 公开分享链接的发布/撤销。第三段之后是固定字面量，token 只出现在
+    # `/api/public/reports/{token}`（另一张模板表），不进这条路径。
+    ("reports", None, "share"),
     ("unified-kg",),
     ("unified-kg", "rebuild"),
     ("unified-kg", "status"),
@@ -164,6 +167,8 @@ _ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("api", "files", None),
     ("api", "search", None),
     ("api", "shared", None),
+    # 公开分享的报告：token 是全部授权，所以它按不透明 id 打码，路径本身可见。
+    ("api", "public", "reports", None),
     ("api", "sources", None),
     ("api", "sources", None, "elements-page"),
     ("api", "sources", None, "elements", None),

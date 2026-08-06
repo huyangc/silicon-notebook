@@ -70,6 +70,21 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return database, storage
 
 
+def _rollback_v43(db: sqlite3.Connection) -> None:
+    """Undo _migration_43 (per-report share tokens).
+
+    Every deployed-vNN fixture below is built by upgrading to the current
+    schema and rolling back exactly what each later migration added, so a new
+    migration has to be undone here too — otherwise its objects already exist
+    in the "before" snapshot and the verifier reports them as manifested
+    additions that never happened.  Index first: the column it covers cannot
+    be dropped while it exists.
+    """
+    db.execute("DROP INDEX idx_reports_share_token")
+    db.execute("ALTER TABLE reports DROP COLUMN shared_at")
+    db.execute("ALTER TABLE reports DROP COLUMN share_token")
+
+
 def _rollback_v34(db: sqlite3.Connection) -> None:
     """Remove the v34-v40 additions before forging an older deployment.
 
@@ -468,6 +483,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
         rollback.execute("DROP INDEX idx_sources_nb_parse_status_type")  # _migration_15
         rollback.execute("DROP INDEX idx_sources_memory_id")             # _migration_14
         rollback.execute("ALTER TABLE sources DROP COLUMN memory_id")    # _migration_14
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 13")
         rollback.commit()
     finally:
@@ -513,6 +529,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path):
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 20")
         rollback.commit()
     finally:
@@ -572,6 +589,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 21")
         rollback.commit()
     finally:
@@ -624,6 +642,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
         rollback.execute("DROP TABLE knowhow_milestones")
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 22")
         rollback.commit()
     finally:
@@ -681,6 +700,7 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
                 "2030-01-01T00:00:00+00:00",
             ),
         )
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 23")
 
     result = module.verify_snapshot(database, storage)
@@ -704,6 +724,7 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 32")
 
     result = module.verify_snapshot(database, storage)
@@ -723,6 +744,7 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
         _rollback_v34(rollback)
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 33")
 
     result = module.verify_snapshot(database, storage)
@@ -758,6 +780,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
         rollback.execute("DROP TABLE catalog_jobs")                     # _migration_39
         rollback.execute("DROP INDEX idx_sources_visible_identity")     # _migration_38
         rollback.execute("DROP INDEX idx_source_elements_source_type")  # _migration_37
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 36")
 
     result = module.verify_snapshot(database, storage)
@@ -812,6 +835,7 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")
         rollback.execute("DROP TABLE catalog_candidates")
         rollback.execute("DROP TABLE catalog_jobs")
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 38")
 
     result = module.verify_snapshot(database, storage)
@@ -836,6 +860,7 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
         rollback.execute("DROP INDEX idx_knowledge_source_facts_source_generation_global")
         rollback.execute("DROP TABLE knowledge_source_fact_elements")
         rollback.execute("DROP TABLE knowledge_source_facts")
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 39")
 
     result = module.verify_snapshot(database, storage)
@@ -863,6 +888,7 @@ def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
         rollback.execute(
             "ALTER TABLE knowledge_source_facts DROP COLUMN projection_origin"
         )
+        _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 40")
 
     result = module.verify_snapshot(database, storage)
@@ -881,6 +907,7 @@ def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v43(rollback)
         rollback.execute("DROP TABLE source_index_backfills")
         rollback.execute("PRAGMA user_version = 41")
 
@@ -962,6 +989,7 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
             "VALUES (?,?,?,?,?,?,?,?,?)",
             _V23_CLUSTER_ROWS,
         )
+        _rollback_v43(db)
         db.execute("PRAGMA user_version = 28")
         db.commit()
     finally:

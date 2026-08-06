@@ -29,7 +29,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v42 adds notebook-scoped durable progress for the source reverse-index
 # rebuild so a stopped deployment can resume after process loss without
 # clearing and rescanning already committed pages.
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2161,6 +2161,27 @@ class SqliteMigrator:
                 );
                 CREATE INDEX IF NOT EXISTS idx_source_index_backfills_status
                   ON source_index_backfills(status, notebook_id);
+                """
+            )
+
+    def _migration_43(self) -> None:
+        """Per-report public share tokens.
+
+        The token lives on the report rather than in a side table: it is one
+        nullable value with the same lifetime as its row, so a deleted report
+        takes its public link with it without a second cascade to maintain.
+        The partial unique index only covers issued tokens, so the unshared
+        majority costs nothing and NULLs never collide.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "reports", "share_token", "TEXT")
+            self.add_column_if_missing(
+                db, "reports", "shared_at", "TEXT NOT NULL DEFAULT ''"
+            )
+            db.executescript(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_share_token
+                  ON reports(share_token) WHERE share_token IS NOT NULL;
                 """
             )
 

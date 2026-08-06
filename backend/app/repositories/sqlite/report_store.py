@@ -150,6 +150,7 @@ class ReportStore:
                      references=json.loads(row["references_json"] or "[]"),
                      section_status=json.loads(row["section_status_json"] or "[]"),
                      understanding=understanding,
+                     share_token=str(row["share_token"] or ""),
                      content_md=row["content_md"])
         return d
 
@@ -172,6 +173,71 @@ class ReportStore:
         with self.database.write() as db:
             db.execute("DELETE FROM reports WHERE id = ? AND notebook_id = ?",
                        (report_id, notebook_id))
+
+    # --- Public share links ---------------------------------------------------
+    PUBLIC_FIELDS = (
+        "id", "question", "content_md", "created_at", "updated_at",
+        "references_json", "understanding_json",
+    )
+
+    def share_report(self, notebook_id: str, report_id: str) -> str:
+        """Issue (or return) the public token for one report.
+
+        Idempotent: re-sharing keeps the existing link so a URL already handed
+        out never silently starts 404ing.
+        """
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT share_token FROM reports WHERE id=? AND notebook_id=?",
+                (report_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(report_id)
+            existing = str(row["share_token"] or "")
+            if existing:
+                return existing
+            token = self.new_id("rshr")
+            db.execute(
+                "UPDATE reports SET share_token=?, shared_at=? "
+                "WHERE id=? AND notebook_id=?",
+                (token, self.now(), report_id, notebook_id),
+            )
+        return token
+
+    def unshare_report(self, notebook_id: str, report_id: str) -> None:
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE reports SET share_token=NULL, shared_at='' "
+                "WHERE id=? AND notebook_id=?",
+                (report_id, notebook_id),
+            )
+
+    def public_report_by_token(self, token: str) -> dict | None:
+        """Resolve one shared report by token alone — the only session-free read.
+
+        Deliberately selects an explicit column list rather than ``*``: this row
+        leaves the authenticated surface, so a column added later must be opted
+        in here rather than inherited.  Returns None for unknown/revoked tokens
+        so the caller cannot distinguish "never existed" from "unshared".
+        """
+        clean = str(token or "").strip()
+        if not clean:
+            return None
+        columns = ", ".join(self.PUBLIC_FIELDS)
+        with self.database.connect() as db:
+            row = db.execute(
+                f"SELECT {columns} FROM reports "
+                "WHERE share_token = ? AND status = 'done'",
+                (clean,),
+            ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        # Decode here so the caller never has to know the dialect: PostgreSQL
+        # returns jsonb as a list already, SQLite stores TEXT.
+        out["references"] = json.loads(out.pop("references_json", None) or "[]")
+        out.pop("understanding_json", None)
+        return out
 
     def _in_batches(self, ids) -> Iterator[list]:
         """把 id 列表切成 ≤IN_CHUNK 的批(去重保序)——镜像 facade `_in_batches`。"""

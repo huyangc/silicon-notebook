@@ -113,7 +113,7 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # source-local fact / evidence-element binding 两张表，以及 v41 可恢复的
     # source-fact backfill 状态表，以及 v42 notebook 级来源反查索引回填
     # 游标/计数账本，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 42
+    assert snapshot["schema"]["user_version"] == 43
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

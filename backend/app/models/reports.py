@@ -66,8 +66,41 @@ class ReportDetail(ReportSummary):
     section_status: List[dict] = Field(default_factory=list)
     content_md: str = ""
     error: str = ""
+    # 公开分享链接的 token（未分享为空）。同 notebook 的可写成员本就能发起分享，
+    # 所以这里不构成额外披露；免登录页的投影里没有它。
+    share_token: str = ""
 
     @field_validator("sections", mode="before")
     @classmethod
     def _hide_internal_rollout_receipts(cls, value: object) -> object:
         return public_report_sections(value)
+
+
+class PublicReportReference(BaseModel):
+    """One citation as an anonymous reader sees it.
+
+    No `source_id` / `element_id` / `object_id`: a public link must not hand out
+    handles into the authenticated API. See `services/report_public_view.py`.
+    """
+
+    key: str = ""
+    title: str = ""
+    file_name: str = ""
+    location: str = ""
+    snippet: str = ""
+
+
+class PublicReport(BaseModel):
+    """A shared report, readable without a session."""
+
+    question: str = ""
+    content_md: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    references: List[PublicReportReference] = Field(default_factory=list)
+    reference_count: int = 0
+    truncated_references: bool = False
+
+
+class ReportShareResponse(BaseModel):
+    share_token: str

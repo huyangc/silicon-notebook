@@ -21,6 +21,7 @@ from app.api.deps import (
     shutdown_repository_if_initialized,
 )
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
+from app.api.report_routes import public_router as public_report_router
 from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
 from app.api.routes import router
 from app.core import diagnostics_runtime as diagnostics
@@ -340,6 +341,9 @@ def create_app() -> FastAPI:
     app.include_router(
         router, prefix="/api", dependencies=[Depends(get_current_user)]
     )  # 其余全部需登录（router 级依赖：零逐路由遗漏）
+    # 公开分享的深度报告：唯一不需要 session 的读取，所以不能挂在上面那个带
+    # router 级 get_current_user 的 router 上。token 本身就是全部授权。
+    app.include_router(public_report_router, prefix="/api")
     app.include_router(debug_logs_router, prefix="/api")
     # Knowhow-tables agent surface (PR-2+3 Task 10): session OR Agent Bearer
     # token, NOT the blanket get_current_user router dependency above — an

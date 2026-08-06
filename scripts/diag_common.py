@@ -17,7 +17,9 @@ from typing import Any, Dict, Iterator, Optional, Tuple
 
 _DATED = re.compile(r"^(?P<channel>[a-z0-9_-]+)-(?P<day>\d{4}-\d{2}-\d{2})\.jsonl(?:\.gz)?$")
 _ID_SEGMENT = re.compile(r"^(?:nb|src|ko|conv|user|mem|report|job)-[A-Za-z0-9_-]+$")
-_TOKEN_SEGMENT = re.compile(r"^(?:shr|share|token|invite|session|auth|key)-[A-Za-z0-9_-]+$", re.I)
+_TOKEN_SEGMENT = re.compile(
+    r"^(?:shr|rshr|share|token|invite|session|auth|key)-[A-Za-z0-9_-]+$", re.I
+)
 _SENSITIVE_ROUTE_SEGMENTS = frozenset({
     "access", "apikey", "auth", "authorization", "invite", "invites", "key", "keys",
     "password", "reset", "session", "sessions", "share", "shared", "shares", "token", "tokens",
@@ -25,7 +27,8 @@ _SENSITIVE_ROUTE_SEGMENTS = frozenset({
 _STATIC_PATH_SEGMENTS = frozenset({
     "", "api", "analytics", "answer", "ask", "cancel", "cells", "conversations", "deep-report",
     "diagnostics", "download", "events", "export", "graph", "jobs", "knowledge", "memory", "mcp",
-    "notebooks", "preview", "reports", "search", "shared", "sources", "status", "stream", "tables",
+    "notebooks", "preview", "public", "reports", "search", "share", "shared", "sources",
+    "status", "stream", "tables",
 })
 _READ_CHUNK_BYTES = 64 * 1024
 _DEFAULT_MAX_INPUT_BYTES = 64 * 1024 * 1024

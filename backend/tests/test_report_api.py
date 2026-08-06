@@ -1072,3 +1072,102 @@ def test_library_only_report_scope_never_becomes_locally_restricted(
     from app.api.deps import repository
 
     monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+
+
+def test_public_report_share_link_is_anonymous_and_bounded(client, monkeypatch):
+    """A share link is readable without a session and discloses an allowlist.
+
+    The anonymous route binds no request user, so it must never reach an
+    owner-scoped repository method: `current_user` falls back to the seeded
+    admin when the ContextVar is unset.
+    """
+    import app.api.report_routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?"}
+    ).json()["report_id"]
+
+    # Unfinished reports cannot be shared: the link would show a half-written body.
+    assert client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/share"
+    ).status_code == 409
+
+    from app.api.deps import repository
+    repository().update_report(
+        nb["id"], rid, status="done", content_md="# 标题\n\n正文 [k1]",
+        references=[{
+            "key": "k1", "label": "文件.pdf", "source_title": "论文标题",
+            "source_file_name": "文件.pdf", "location_label": "第 3 页",
+            "snippet": "被引用的原文片段",
+            # None of these may cross to an anonymous reader.
+            "source_id": "src-secret", "element_id": "el-secret",
+            "object_id": "ko-secret", "family_key": "source:src-secret",
+        }],
+        understanding={"objective": "内部意图", "source_scope": {"source_ids": ["src-secret"]}},
+    )
+    token = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/share"
+    ).json()["share_token"]
+    assert token
+    # Idempotent: a link already handed out must not start 404ing.
+    assert client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/share"
+    ).json()["share_token"] == token
+
+    public = client.get(f"/api/public/reports/{token}")
+    assert public.status_code == 200
+    body = public.json()
+    assert body["content_md"] == "# 标题\n\n正文 [k1]"
+    assert body["references"][0]["title"] == "论文标题"
+    assert body["references"][0]["snippet"] == "被引用的原文片段"
+    assert body["references"][0]["location"] == "第 3 页"
+    # The allowlist holds: no internal handles, no intent contract.
+    serialized = public.text
+    for secret in ("src-secret", "el-secret", "ko-secret", "内部意图"):
+        assert secret not in serialized
+    assert "understanding" not in body and "notebook_id" not in body
+
+    # Revoking makes it indistinguishable from a token that never existed.
+    assert client.delete(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/share"
+    ).status_code == 204
+    assert client.get(f"/api/public/reports/{token}").status_code == 404
+    assert client.get("/api/public/reports/rshr-never-issued").status_code == 404
+
+
+def test_public_report_route_is_not_behind_the_router_level_session_guard():
+    """The public read must not sit under the blanket `get_current_user` router.
+
+    `main.py` mounts the main API router with a router-level
+    `Depends(get_current_user)` ("zero per-route omissions"). A public endpoint
+    declared on that router answers 401 to the very visitors it exists for —
+    and the auth-optional test fixture hides it, because there an absent token
+    silently resolves to the seeded admin. So assert the wiring itself.
+    """
+    from app.api.deps import get_current_user
+    from app.main import create_app
+
+    app = create_app()
+    public = [
+        route for route in app.routes
+        if getattr(route, "path", "") == "/api/public/reports/{token}"
+    ]
+    assert public, "public report route is not registered"
+    for route in public:
+        dependencies = [
+            dependency.call
+            for dependency in getattr(route, "dependant", None).dependencies
+        ] if getattr(route, "dependant", None) else []
+        assert get_current_user not in dependencies, (
+            "public report route inherited the session guard"
+        )
+
+    # The authenticated report routes must still carry a guard, so this test
+    # cannot pass by removing authentication everywhere.
+    guarded = [
+        route for route in app.routes
+        if getattr(route, "path", "") == "/api/notebooks/{notebook_id}/reports/{report_id}/share"
+    ]
+    assert guarded, "share route is not registered"

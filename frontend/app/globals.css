@@ -8969,3 +8969,77 @@ button.chat-session-card {
   .catalog-review-card { width: 96vw; }
   .catalog-item-section { max-width: 160px; }
 }
+
+/* --- 公开分享的报告页（唯一免登录界面，样式自成一体） --- */
+.public-report {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+.public-report-head h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  line-height: 1.35;
+}
+
+.public-report-note {
+  color: #5e6a79;
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.public-report-references {
+  margin-top: 28px;
+  border-top: 1px solid #dce5ef;
+  padding-top: 16px;
+}
+
+.public-report-references h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: #2c3a4d;
+}
+
+.public-report-references ol {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 12px;
+}
+
+.public-report-references li strong {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.public-report-locus {
+  color: #5e6a79;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.public-report-references small {
+  display: block;
+  color: #5e6a79;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.public-report-references blockquote {
+  margin: 6px 0 0;
+  padding: 8px 11px;
+  border-left: 3px solid #dce5ef;
+  background: #f7fafc;
+  color: #3f4b5b;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.public-report footer {
+  margin-top: 28px;
+  border-top: 1px dashed #dce3ec;
+  padding-top: 10px;
+}

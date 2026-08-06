@@ -13,7 +13,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Sparkles, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Share2, Sparkles, Square, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -24,6 +24,7 @@ import { remarkCitations } from "./answer-citations";
 import { computeSourceTierCounts, referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
+import { buildPublicReportLink } from "./public-report";
 import { quotedPhraseHint } from "./query-syntax";
 import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
 import { formatReportTiming } from "./report-time";
@@ -192,6 +193,8 @@ export type ReportDetailT = ReportSummaryT & {
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
   content_md: string;
+  /** 公开分享 token（未分享为空）。 */
+  share_token?: string;
   references: {
     key: string;
     label: string;
@@ -1271,6 +1274,8 @@ export interface ReportsPanelProps {
   generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
+  shareReport: (nb: string, rid: string) => Promise<{ share_token: string }>;
+  unshareReport: (nb: string, rid: string) => Promise<void>;
   downloadReportsZip: (nb: string, reportIds: string[]) => Promise<void>;
   setToast: (message: string) => void;
   /** 「待确认中心」深链:指定报告 id 后自动拉详情并打开大纲编辑器,消费后由父组件清空。 */
@@ -1291,6 +1296,8 @@ export function ReportsPanel({
   generateReport,
   cancelReport,
   deleteReport,
+  shareReport,
+  unshareReport,
   downloadReportsZip,
   setToast,
   focusReportId,
@@ -1302,6 +1309,9 @@ export function ReportsPanel({
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
   const [copied, setCopied] = useState(false);
+  // 分享态：token 为空即未分享。链接由 token 现算，不落额外状态。
+  const [shareToken, setShareToken] = useState("");
+  const [shareBusy, setShareBusy] = useState(false);
   const [question, setQuestion] = useState("");
   const [depthIdx, setDepthIdx] = useState(1); // 默认「标准」(depth=2)
   const [creating, setCreating] = useState(false);
@@ -1489,6 +1499,38 @@ export function ReportsPanel({
     }
   }
 
+  // 分享态跟着详情走：切报告、轮询刷新都会带来新的 share_token，本地态必须
+  // 同步，否则会把上一份报告的链接显示在这一份上。
+  useEffect(() => {
+    setShareToken(String(active?.share_token || ""));
+  }, [active?.id, active?.share_token]);
+
+  /**
+   * 发布/撤销公开链接。撤销即刻生效——公开页对已撤销 token 与从未存在的 token
+   * 给出同一个「链接不可用」，不区分两者。
+   */
+  async function toggleShare() {
+    if (!active || shareBusy) return;
+    setShareBusy(true);
+    try {
+      if (shareToken) {
+        await unshareReport(notebookId, active.id);
+        setShareToken("");
+        setToast("已取消分享，原链接立即失效");
+      } else {
+        const { share_token: token } = await shareReport(notebookId, active.id);
+        setShareToken(token);
+        const link = buildPublicReportLink(token, window.location.origin);
+        await copyReportContent(link).catch(() => undefined);
+        setToast(`分享链接已复制：${link}`);
+      }
+    } catch (error) {
+      setToast(toUserMessage(error, "分享操作失败"));
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
   async function requestDelete() {
     if (!active || actionBusy) return;
     if (!confirmDelete) { setConfirmDelete(true); return; }
@@ -1612,6 +1654,19 @@ export function ReportsPanel({
             {active.content_md && (
               <button className="report-action" type="button" onClick={() => downloadMd(active)}>
                 <Download size={14} /> 下载 .md
+              </button>
+            )}
+            {!readOnly && active.status === "done" && (
+              <button
+                className="report-action"
+                type="button"
+                disabled={shareBusy}
+                onClick={() => void toggleShare()}
+              >
+                <Share2 size={14} />
+                {shareBusy
+                  ? (shareToken ? "撤销中…" : "生成链接中…")
+                  : (shareToken ? "取消分享" : "分享")}
               </button>
             )}
             {!readOnly && (

@@ -214,10 +214,10 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v42. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v43. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=42,
-    postgres_version=20,
+    sqlite_version=43,
+    postgres_version=21,
 )

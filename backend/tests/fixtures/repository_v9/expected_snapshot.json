@@ -427,6 +427,7 @@
           "title": "Evidence"
         }
       ],
+      "share_token": "",
       "status": "done",
       "understanding": {},
       "updated_at": "<timestamp>"
@@ -928,6 +929,8 @@
             "title": "Evidence"
           }
         ],
+        "share_token": null,
+        "shared_at": "",
         "status": "done",
         "understanding_json": {},
         "updated_at": "<timestamp>"
@@ -1528,6 +1531,11 @@
         "type": "index"
       },
       {
+        "name": "idx_reports_share_token",
+        "sql_sha256": "64278badf18d72b29c679eb207ffb3f575f51adc5375cd1374cdbc30d14df780",
+        "type": "index"
+      },
+      {
         "name": "idx_source_authors_nb",
         "sql_sha256": "f7eb219af72748c765a4f359b426e46bc8338f76ed1f031e0766e50d5cd3dc73",
         "type": "index"
@@ -1999,7 +2007,7 @@
       },
       {
         "name": "reports",
-        "sql_sha256": "6166fabc5b737523d5056f429895128420851f5b4602237eca4e623b575cac5b",
+        "sql_sha256": "d16b990da86eabaa2d462f2c19742114685d4ff1576d06614d1c7356dc2e6160",
         "type": "table"
       },
       {
@@ -2073,6 +2081,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 42
+    "user_version": 43
   }
 }

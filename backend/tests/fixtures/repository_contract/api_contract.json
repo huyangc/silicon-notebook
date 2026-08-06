@@ -6871,6 +6871,82 @@
           "title": "PromotionRejectRequest",
           "type": "object"
         },
+        "PublicReport": {
+          "description": "A shared report, readable without a session.",
+          "properties": {
+            "content_md": {
+              "default": "",
+              "title": "Content Md",
+              "type": "string"
+            },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "question": {
+              "default": "",
+              "title": "Question",
+              "type": "string"
+            },
+            "reference_count": {
+              "default": 0,
+              "title": "Reference Count",
+              "type": "integer"
+            },
+            "references": {
+              "items": {
+                "$ref": "#/components/schemas/PublicReportReference"
+              },
+              "title": "References",
+              "type": "array"
+            },
+            "truncated_references": {
+              "default": false,
+              "title": "Truncated References",
+              "type": "boolean"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "title": "PublicReport",
+          "type": "object"
+        },
+        "PublicReportReference": {
+          "description": "One citation as an anonymous reader sees it.\n\nNo `source_id` / `element_id` / `object_id`: a public link must not hand out\nhandles into the authenticated API. See `services/report_public_view.py`.",
+          "properties": {
+            "file_name": {
+              "default": "",
+              "title": "File Name",
+              "type": "string"
+            },
+            "key": {
+              "default": "",
+              "title": "Key",
+              "type": "string"
+            },
+            "location": {
+              "default": "",
+              "title": "Location",
+              "type": "string"
+            },
+            "snippet": {
+              "default": "",
+              "title": "Snippet",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "title": "PublicReportReference",
+          "type": "object"
+        },
         "QueryIntentAmbiguity": {
           "properties": {
             "id": {
@@ -7335,6 +7411,11 @@
               "title": "Sections",
               "type": "array"
             },
+            "share_token": {
+              "default": "",
+              "title": "Share Token",
+              "type": "string"
+            },
             "status": {
               "title": "Status",
               "type": "string"
@@ -7435,6 +7516,19 @@
             }
           },
           "title": "ReportOutlineUpdate",
+          "type": "object"
+        },
+        "ReportShareResponse": {
+          "properties": {
+            "share_token": {
+              "title": "Share Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "share_token"
+          ],
+          "title": "ReportShareResponse",
           "type": "object"
         },
         "ReportSummary": {
@@ -16775,6 +16869,95 @@
           "summary": "Update Report Outline"
         }
       },
+      "/api/notebooks/{notebook_id}/reports/{report_id}/share": {
+        "delete": {
+          "description": "Revoke the link. The next public request 404s like any unknown token.",
+          "operationId": "unshare_report_route_api_notebooks__notebook_id__reports__report_id__share_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "report_id",
+              "required": true,
+              "schema": {
+                "title": "Report Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Unshare Report Route"
+        },
+        "post": {
+          "description": "Publish one finished report behind an unguessable link.\n\nOnly `done` reports can be shared: a link to a running or failed report\nwould show an empty or half-written body to whoever it was sent to.",
+          "operationId": "share_report_route_api_notebooks__notebook_id__reports__report_id__share_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "report_id",
+              "required": true,
+              "schema": {
+                "title": "Report Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReportShareResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Share Report Route"
+        }
+      },
       "/api/notebooks/{notebook_id}/scale-index/cancel": {
         "post": {
           "description": "取消检索索引:排队中→出队;构建中→拒绝(不可打断)。",
@@ -18721,6 +18904,46 @@
           "summary": "Reject Promotion"
         }
       },
+      "/api/public/reports/{token}": {
+        "get": {
+          "description": "The one report read that needs no session — the token is the whole grant.\n\nDeliberately has NO `Depends(get_current_user)`: this is the anonymous\nsurface. That also means no request user is bound, so nothing here may call\nan owner-scoped repository method — `current_user` falls back to the seeded\nadmin when the ContextVar is unset, which would silently run as an\nadministrator. `public_report_by_token` takes the token alone for exactly\nthat reason, and the payload is an explicit allowlist rather than the stored\nrow.",
+          "operationId": "public_report_route_api_public_reports__token__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token",
+              "required": true,
+              "schema": {
+                "title": "Token",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PublicReport"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Public Report Route"
+        }
+      },
       "/api/ready": {
         "get": {
           "description": "Anonymous readiness probe the frontend polls before showing the app.\nReports migration / warm-up progress; ``{\"ready\": true}`` once fully\nwarm. Never constructs the repository (reads the process readiness flag),\nso it answers instantly even while migration is still running.",
@@ -19341,6 +19564,7 @@
         }
       ],
       "sections": [],
+      "share_token": "",
       "status": "outline_ready",
       "understanding": {},
       "updated_at": "2024-01-02T03:04:05"
