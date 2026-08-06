@@ -61,10 +61,10 @@ export type MarkdownBlock =
   | { type: "unordered-list"; items: string[] }
   | { type: "ordered-list"; items: string[] };
 
-const ANCHOR_MARKER_GROUP_RE = /\[((?:k\d+\s*,\s*)*k\d+)\]/g;
+const ANCHOR_MARKER_GROUP_RE = /(?:\[(?:k\d+\s*[,，]\s*)*k\d+\]|【(?:k\d+\s*[,，]\s*)*k\d+】)/g;
 
-function anchorKeysFromMarker(markerBody: string): string[] {
-  return markerBody.split(",").map((part) => part.trim()).filter(Boolean);
+function anchorKeysFromMarker(marker: string): string[] {
+  return marker.slice(1, -1).split(/[,，]/).map((part) => part.trim()).filter(Boolean);
 }
 
 export function buildAnswerReferences(
@@ -77,7 +77,7 @@ export function buildAnswerReferences(
   const seen = new Set<string>();
 
   for (const match of answerText.matchAll(ANCHOR_MARKER_GROUP_RE)) {
-    const keys = anchorKeysFromMarker(match[1]);
+    const keys = anchorKeysFromMarker(match[0]);
     const matchedAnchors = keys.map((key) => anchorsByKey.get(key));
 
     // A grouped marker is one evidence claim. Never bind only its known subset:
@@ -148,8 +148,8 @@ export function referenceByCitationKey(references: AnswerReference[]): Record<st
 
 export function renderTextWithReferenceNumbers(text: string, references: AnswerReference[]): string {
   const byKey = referenceByAnchorKey(references);
-  return text.replace(ANCHOR_MARKER_GROUP_RE, (token, markerBody: string) => {
-    const keys = anchorKeysFromMarker(markerBody);
+  return text.replace(ANCHOR_MARKER_GROUP_RE, (token) => {
+    const keys = anchorKeysFromMarker(token);
     const matchedReferences = keys.map((key) => byKey[key]);
     if (matchedReferences.length === 0 || matchedReferences.some((reference) => !reference)) {
       return token;

@@ -26,6 +26,7 @@ from app.core.ask_retrieval_policy import (
 )
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.report_execution import REPORT_CANCELLATIONS
 from app.services.report_corpus_profile import (
     PROFILE_FAILED,
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
         ModelErrorSink, ReportRepository, ReportSourceQueryPort, RetrievalPort,
     )
 
-_MARKER = re.compile(r"\[(k\d+(?:\s*,\s*k\d+)*)\]")   # 节内 [k_i] 或 [k_i, k_j] 引用标记(全局重编号用)
+_MARKER = MARKER_RE  # 节内 [k_i]/【k_i】及复合引用标记（全局重编号用）
 _HIGH_RISK_NUMBER = re.compile(
     # Python's ``\w`` includes CJK, so a ``(?<!\w)`` guard silently misses
     # ordinary Chinese prose such as “降低了30%”.  Exclude only ASCII
@@ -136,7 +137,7 @@ def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
             markers = _MARKER.findall(sentence)
             is_supported = False
             if markers:
-                keys = [key.strip() for group in markers for key in group.split(",")]
+                keys = [key for group in markers for key in marker_keys(group)]
                 if keys and all(key in id_map for key in keys):
                     supported += 1
                     is_supported = True
@@ -2293,7 +2294,7 @@ class ReportEngine:
                 # 支持单 key [k1] 与逗号复合 [k1, k3](LLM 常不按 [k1][k3] 而吐逗号):
                 # 逐 key 重映射到全局、bracket 内去重;全未知则整段剥除(幻觉/未知 marker)。
                 # 复合 marker 是一个证据组：先完整验证，再产生任何全局编号副作用。
-                local_keys = [_raw.strip() for _raw in m.group(1).split(",")]
+                local_keys = marker_keys(m.group(0))
                 contexts = [_id_map.get(key) for key in local_keys]
                 if any(not ctx for ctx in contexts):
                     return ""

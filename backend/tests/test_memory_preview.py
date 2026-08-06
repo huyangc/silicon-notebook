@@ -49,6 +49,12 @@ def test_citation_cleanup_strips_adjacent_prose_markers_but_keeps_indexes():
     )
 
 
+def test_citation_cleanup_strips_chinese_bracket_markers():
+    from app.api.memory_routes import _clean_answer
+
+    assert _clean_answer("结论【k1】、证据【k2，k3】与编号【1，2】。") == "结论、证据与编号。"
+
+
 def test_preview_falls_back_deterministically_without_persisting(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'preview.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))

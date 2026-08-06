@@ -78,6 +78,8 @@ When the user creates a notebook:
 
 Inside a notebook:
 
+- Model evidence markers use one syntax contract across Ask and Deep Report: ASCII `[k1]` and localized `【k1】`, including grouped markers with ASCII or Chinese commas, resolve to the same clickable numbered citations. Ordinary grouped-marker binding remains all-or-nothing when any key is unknown. Section-by-section Ask keeps its existing isolation rule: before binding, it removes keys outside that section's server-assigned range while preserving valid keys from the current section.
+
 - Hide the global collection top bar.
 - Keep visible `silicon-notebook` differences with a more engineering-console feel rather than a direct NotebookLM copy.
 - Reset scroll to the top when switching into or back from the notebook workspace.

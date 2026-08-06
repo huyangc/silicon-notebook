@@ -371,6 +371,28 @@ def test_assemble_multikey_citation_renumbered(repo):
     assert "SrcA" in md and "SrcB" in md
 
 
+def test_assemble_chinese_bracket_citations_are_bound_and_renumbered(repo):
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _OutlineLLM())
+    outline = [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}]
+    sections = [{
+        "title": "A", "scope": "sa",
+        "markdown": "## A\n中文括号引用【k1，k3】。", "grounded": True,
+        "id_map": {
+            "k1": {"object_id": "c1", "object_type": "chunk", "name": "N1",
+                   "source_title": "SrcA", "location_label": "§1"},
+            "k3": {"object_id": "c3", "object_type": "chunk", "name": "N3",
+                   "source_title": "SrcB", "location_label": "§3"},
+        },
+        "attempted": [],
+    }]
+    rid = repo.create_report(nb.id, "q")
+    md, _gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
+    body = md.split("## 参考文献")[0]
+    assert "[k1, k2]" in body
+    assert len(references) == 2
+
+
 def test_assemble_keeps_unknown_sources_visible_and_uses_conservative_top1(repo, monkeypatch):
     """Unknown bibliography entries stay source-addressable, not silently merged.
 

@@ -4,6 +4,8 @@
 
 `silicon-notebook` is a source-grounded knowhow notebook for semiconductor engineering teams. It turns PDF, Markdown, DOCX, PPTX, CSV, and XLSX material into searchable source elements, structured knowledge, cited answers, private Memory, knowhow tables, and deep reports.
 
+Model evidence markers written as either `[k1]` or localized `【k1】` (including comma-separated groups) bind to the same clickable numbered citations in Ask and Deep Report.
+
 The current target is a local real-team beta: FastAPI with a selectable SQLite or PostgreSQL repository backend, plus Next.js on the frontend. The shipped-default SQLite quick start requires no Docker, GPU, database server, or local model server; selecting PostgreSQL requires an accessible PostgreSQL server. OpenAI-compatible chat, embedding, rerank, and MinerU services are optional URL-based integrations; deterministic fallbacks keep the core pipeline usable when they are not configured.
 
 ## Highlights

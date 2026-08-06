@@ -351,6 +351,19 @@ def test_evidence_context_numeric_group_anchors_match_master():
     assert [anchor.notebook_id for anchor in anchors] == ["", ""]
 
 
+def test_evidence_context_accepts_chinese_bracket_citation_markers():
+    evidence = {
+        "k1": {"object_id": "o1", "object_type": "claim", "name": "A"},
+        "k2": {"object_id": "o2", "object_type": "claim", "name": "B"},
+    }
+    anchors = _service().parse_anchors(
+        "中文括号【k1】与中文逗号复合引用【k2，k1】。", evidence
+    )
+    assert [(anchor.key, anchor.object_id) for anchor in anchors] == [
+        ("k1", "o1"), ("k2", "o2")
+    ]
+
+
 def test_evidence_context_parse_anchors_carries_notebook_id_when_present():
     """chunk_context/knowledge_context 填了 "notebook_id" 键时,parse_anchors
     必须原样透传到 AnswerAnchor,供 Task 14 的引用徽章库名映射消费。"""

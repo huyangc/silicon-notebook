@@ -18,11 +18,9 @@ from app.repositories.ports import (
 from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, est_tokens,
 )
+from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_scope import notebook_in_scope
-
-
-_MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
 
 
 def _knowhow_ref(element_row: Mapping[str, Any] | None) -> CitationKnowhowRef | None:
@@ -684,18 +682,18 @@ class EvidenceContextService:
     ) -> list[AnswerAnchor]:
         anchors: list[AnswerAnchor] = []
         seen: set[str] = set()
-        marker_groups = _MARKER_GROUP_RE.findall(answer or "")
+        marker_groups = MARKER_RE.findall(answer or "")
         cited_keys = list(dict.fromkeys(
             key
             for marker_group in marker_groups
-            for key in (part.strip() for part in marker_group.split(","))
+            for key in marker_keys(marker_group)
             if key in evidence_by_id
         ))
         citation_source_info = self.citation_source_info(
             str(evidence_by_id[key].get("source_id") or "") for key in cited_keys
         )
         for marker_group in marker_groups:
-            keys = [part.strip() for part in marker_group.split(",")]
+            keys = marker_keys(marker_group)
             if not keys or any(key not in evidence_by_id for key in keys):
                 continue
             for key in keys:
