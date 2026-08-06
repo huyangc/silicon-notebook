@@ -207,8 +207,12 @@ def report_retrieval_limits(depth: Optional[int]) -> Optional[AskRetrievalLimits
 # 低档少探是低档语义的一部分(粗粒度接地换速度);exhaustive 一分不减。探针的
 # 产出只是喂给 STORM/Judge 的覆盖计数,不进正文证据。数值契约登记在
 # docs/product-and-api*.md「逐步推理档位与完整枚举」附近的报告条目。
+# standard(默认档)刻意留 3 而不是 2:覆盖探针的查询表头恒是共享确认问题,
+# 宽度 2 = 每主题只剩 1 条主题专属探针,而充足判据(relevant>=3 且多族)对
+# 样本量敏感——默认档上用户可见的充分性结论会明显变保守(质量评审 P2-4)。
+# overview 是快速预览语义,取 2;数值契约在 docs/product-and-api*.md。
 _PROBE_QUERY_WIDTHS = {
-    "overview": 2, "standard": 2, "deep": 3, "thorough": 4, "exhaustive": 4,
+    "overview": 2, "standard": 3, "deep": 3, "thorough": 4, "exhaustive": 4,
 }
 
 
@@ -954,7 +958,9 @@ class ReportEngine:
             except Exception:
                 pass
         try:
-            kg = deps.retrieval.federated_retrieve(notebook_id, question)[: self._SCOUT_KG_N]
+            # 与覆盖探针表头是同一条确认问题——走同一份 memo,9.1M 库上省一次
+            # 全量检索(质量评审 P3-7);只切片不改写,共享引用安全。
+            kg = self._probe_knowledge_hits(notebook_id, question)[: self._SCOUT_KG_N]
             if kg:
                 parts.append("检索到的知识条目(name[type][tier]):\n" + "\n".join(
                     f"- {str(h.payload.get('name','')).strip()}"
@@ -1015,8 +1021,9 @@ class ReportEngine:
             # 按历史行为兜底(宽度 4、LLM 精修照跑)。
             try:
                 report_row = reports.get_report(notebook_id, rid) or {}
-                planning_depth = int(report_row.get("depth") or 0) or None
-            except Exception:
+                raw_depth = report_row.get("depth")
+                planning_depth = int(raw_depth) if raw_depth else None
+            except Exception:  # noqa: BLE001 — 行读失败按历史行为兜底,不炸规划
                 planning_depth = None
             probe_width = report_probe_query_width(planning_depth)
             sufficiency_llm = report_sufficiency_llm_enabled(planning_depth)
@@ -1123,6 +1130,10 @@ class ReportEngine:
         except Exception as exc:
             reports.update_report(notebook_id, rid, status="failed",
                                   error=str(exc)[:500], progress="规划失败")
+        finally:
+            # memo 只属于这一次规划:不清掉会让整份探针命中(KG+元素对象)挂在
+            # 引擎实例上活过整个 generate 阶段(质量评审 P3-6)。
+            self._probe_retrieval_memo = None
 
     def _storm_outline(self, notebook_id, question, history, corpus_map, *,
                        intent_contract=None, intent_probe=None) -> List[dict]:
@@ -1356,6 +1367,10 @@ class ReportEngine:
             for query in (section.get("sub_queries") or [])
             if str(query).strip()
         ]
+        # 种子首条恒为节复合问题(镜像 Ask:完整权威问题恒为第一条种子)——
+        # 只传裸方向会让 sec_question 从此不进任何一条 KG 检索,方向缺主语时
+        # (如「温度系数」对上「bandgap 基准源温漂」)整条主语召回消失
+        # (质量评审 P2-5);此前 planner 路径的产出恒含问题的带主语变体。
         result = ReasoningRetriever(
             retrieval=deps.retrieval,
             model_clients=deps.model_clients,
@@ -1363,7 +1378,9 @@ class ReportEngine:
             settings=self.settings,
             cancel_event=self.cancel_event,
         ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
-              limits=limits, intent_queries=directions or None)
+              limits=limits,
+              intent_queries=([sec_question, *directions]
+                              if directions else None))
 
         # The outline's approved retrieval directions are execution requirements,
         # not merely prose hints to the reasoning planner.  Merge their bounded
@@ -1400,8 +1417,12 @@ class ReportEngine:
         # 两侧都 strip 再比:种子在上面 trim 过,STORM 侧的方向串可能带两端
         # 空白——不 strip 的比对永假,跳过失效,9.1M 库上每方向白付一次检索
         # (规格评审 P3 实测形态)。
+        # 带 `failed` 标的尝试不算「已执行」:那是检索本身炸了(瞬态数据库故障
+        # 等),不是「检索过、空手而归」——不区分的话,一次瞬态失败就让该方向的
+        # KG 证据被静默永久丢弃,而接入前它由本兜底独立覆盖(质量评审 P2-3)。
         run_attempted = {
             str(row.get("query") or "").strip() for row in result.attempted
+            if not row.get("failed")
         }
         for query in list(section.get("sub_queries") or [])[:4]:
             new_count = 0

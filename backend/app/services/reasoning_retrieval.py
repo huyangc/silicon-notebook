@@ -2091,6 +2091,12 @@ class ReasoningRetriever:
             # 原顺序收集结果再依次 setdefault —— 故去重/确定性与串行版完全等价
             # (每个 object_id 保留按"子查询顺序 + 查询内顺序"的第一个版本)。
             # 单个子查询失败被吞掉(记空结果),不拖垮整个 run。
+            # `failed_search_queries`:检索本身抛异常(非「成功但零命中」)的查询
+            # 原文集合。并发 add/discard 都是同 GIL 原子操作,且每个 worker 只碰
+            # 自己那条查询的键,无竞态。终态账目据它给 attempted 行打稀疏
+            # `failed` 标(见 run 收尾)。
+            failed_search_queries: set = set()
+
             def _run_search(sq: SubQuery) -> List[RetrievedKnowledge]:
                 raise_if_cancelled(self.cancel_event)
                 try:
@@ -2098,12 +2104,20 @@ class ReasoningRetriever:
                         notebook_id, sq.query, sq.types, sq.prefer
                     )[:per_query_take]
                     raise_if_cancelled(self.cancel_event)
+                    # 成功清除失败标记:同一查询稍后重试成功,账目就不再说它失败。
+                    failed_search_queries.discard(sq.query)
                     return hits
                 except AskCancelled:
                     raise
                 except Exception:
                     if self.fail_closed:
                         raise
+                    # fail-open 吞掉异常,但账目必须能区分「检索过、空手而归」与
+                    # 「检索本身炸了」:attempted 记的是"发起过",报告的 run 后
+                    # 方向兜底以它为判据跳过重复——不打标,一次瞬态数据库故障
+                    # 就让该方向的 KG 证据被静默永久丢弃(此前由 run 后独立
+                    # 检索兜底覆盖)。
+                    failed_search_queries.add(sq.query)
                     return []
 
             # 子查询执行账目(初始 plan 与 add_subquery 后补都记):归一化键 → 账目。
@@ -3564,7 +3578,13 @@ class ReasoningRetriever:
             collection_map_text=collection_map_text, outline=outline,
             outline_evidence=outline_evidence,
             baseline_manifest=baseline_manifest,
-            attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
+            # `failed` 是**稀疏**键:只有检索本身抛过异常且未被后续成功清除的
+            # 查询才带它——常规行形状逐字不变(reflect 回喂/trace 消费方按具名
+            # 键取值,多余键中性)。报告的 run 后方向兜底据它把「检索炸了」与
+            # 「检索过」区分开,前者照常兜底重试。
+            attempted=[{"query": a.query, "new": a.new, "tries": a.tries,
+                        **({"failed": True}
+                           if a.query in failed_search_queries else {})}
                        for a in attempted.values()])
 
 

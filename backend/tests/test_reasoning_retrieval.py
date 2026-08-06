@@ -2762,3 +2762,43 @@ def test_run_ppr_seed_precedes_exact_seed_and_shares_chunk_dedup(rrepo):
     # 两通道去重后的并集,顺序即两个 seed 块各自 extend 的顺序:
     # PPR 的两段(重叠段 + 独占段)在前,精确查找真正新增的一段在后。
     assert [c.chunk_id for c in res.chunks] == ["ck-main", "ppr-only", "ck-args"]
+
+
+def test_attempted_marks_search_failures_sparsely(rrepo, monkeypatch):
+    """检索本身炸掉的种子在账目里带稀疏 `failed` 标;成功/零命中不带。
+
+    attempted 记的是「发起过」——报告的 run 后方向兜底以它为判据跳过重复,
+    不打标的话,一次瞬态数据库故障就让该方向的 KG 证据被静默永久丢弃
+    (质量评审 P2-3)。同一查询稍后重试成功则清除标记。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+    ))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+
+    def flaky_search(notebook_id, query, types=None, prefer="balanced"):
+        if query == "会炸的方向":
+            raise RuntimeError("transient database failure")
+        if query == "零命中方向":
+            return []
+        return [_mk_rk(f"{query}-0", f"{query}-0")]
+
+    monkeypatch.setattr(retriever, "search", flaky_search)
+    result = retriever.run(
+        nb.id,
+        "完整问题",
+        intent_queries=["完整问题", "会炸的方向", "零命中方向"],
+        limits=ask_retrieval_limits("deep"),
+    )
+
+    rows = {row["query"]: row for row in result.attempted}
+    assert rows["会炸的方向"].get("failed") is True
+    # 稀疏键:成功与「检索过、空手而归」都**不带** failed——零命中是合法结果,
+    # 打上标会让报告兜底把每个空方向都白跑一遍。
+    assert "failed" not in rows["完整问题"]
+    assert "failed" not in rows["零命中方向"]

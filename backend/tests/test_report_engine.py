@@ -1505,7 +1505,7 @@ def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_
         eng, "_corpus_profile",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad SQL")),
     )
-    monkeypatch.setattr(eng, "_probe_intent_coverage", lambda *_args: [])
+    monkeypatch.setattr(eng, "_probe_intent_coverage", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(eng, "_build_corpus_map", lambda *_args: "MAP")
     monkeypatch.setattr(
         eng, "_storm_outline",
@@ -1514,7 +1514,7 @@ def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_
             "intent_ids": ["intent-1"],
         }],
     )
-    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args: [])
+    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(eng, "_judge_sufficiency", lambda _q, sections, _p, use_llm=True: sections)
 
     eng.plan_outline(nb.id, rid, "用户原问题")
@@ -1525,6 +1525,10 @@ def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_
         "report_id": rid,
     }]
     detail = repo.get_report(nb.id, rid)
+    # 终态断言防守卫被掏空:此前探针桩不收新 kwarg 时,TypeError 被
+    # plan_outline 吞成 failed,而上面的断言全部在探针之前写入、照样通过
+    # ——本测试证明的 fail-open 语义实际根本没跑到(质量评审 P1-1 实测)。
+    assert detail["status"] == "outline_ready"
     assert detail["understanding"]["corpus_profile"] == {
         "unavailable_reason": "failed"
     }
@@ -1561,7 +1565,7 @@ def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
         ),
     )
     monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda *_args: [])
-    monkeypatch.setattr(eng, "_probe_intent_coverage", lambda *_args: [])
+    monkeypatch.setattr(eng, "_probe_intent_coverage", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         eng, "_storm_outline",
         lambda *_args, **_kwargs: [{
@@ -1569,7 +1573,7 @@ def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
             "intent_ids": ["intent-1"],
         }],
     )
-    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args: [])
+    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         eng, "_judge_sufficiency", lambda _q, sections, _p, use_llm=True: sections
     )
@@ -1580,6 +1584,10 @@ def test_scoped_report_skips_whole_corpus_profile_and_ppr(repo, monkeypatch):
         eng.plan_outline(nb.id, rid, "用户原问题")
 
     detail = repo.get_report(nb.id, rid)
+    # 终态断言防守卫被掏空:探针桩不收新 kwarg 时 plan_outline 早退成 failed,
+    # ppr_retrieve 的 AssertionError 哨兵永远不会再被触发,一条来源范围泄漏的
+    # 红线守卫变成空壳(质量评审 P1-1 实测)。
+    assert detail["status"] == "outline_ready"
     # A deliberate skip must not be persisted as the failure state: both used to
     # collapse into `{}` and the reader was told the statistics had broken.
     assert detail["understanding"]["corpus_profile"] == {
@@ -2128,8 +2136,10 @@ def test_probe_width_maps_report_depth_to_shared_tiers():
     """
     from app.services.report_engine import report_probe_query_width
 
-    assert report_probe_query_width(1) == 2      # overview
-    assert report_probe_query_width(2) == 2      # standard
+    assert report_probe_query_width(1) == 2      # overview(快速预览语义)
+    # standard 刻意是 3 不是 2:表头恒为共享确认问题,宽度 2 = 每主题只剩
+    # 1 条专属探针,默认档的用户可见充分性结论会明显变保守(质量评审 P2-4)。
+    assert report_probe_query_width(2) == 3      # standard
     assert report_probe_query_width(4) == 3      # deep
     assert report_probe_query_width(8) == 4      # thorough
     assert report_probe_query_width(16) == 4     # exhaustive
@@ -2165,9 +2175,14 @@ def test_deep_dive_seeds_confirmed_directions_and_skips_rerun(repo, monkeypatch)
 
     def _run(self, notebook_id, question, **kwargs):
         captured.update(kwargs)
+        captured["question"] = question
         result = ReasoningResult()
-        # run 声称自己执行了 q1(种子路径的正常账目);q2 没执行到。
+        # run 声称自己执行了 q1(种子路径的正常账目);q2 没执行到;
+        # q3 检索本身炸了(failed 标)——兜底必须把它当没执行过。
         result.attempted.append({"query": "q1", "new": 3, "tries": 1})
+        result.attempted.append(
+            {"query": "q3", "new": 0, "tries": 1, "failed": True}
+        )
         return result
 
     monkeypatch.setattr(ReasoningRetriever, "run", _run)
@@ -2185,17 +2200,27 @@ def test_deep_dive_seeds_confirmed_directions_and_skips_rerun(repo, monkeypatch)
     # q1 刻意带两端空白:种子在 trim 后进 run,run 记账的是 trim 形;合并循环
     # 的比对必须同样 strip,否则跳过永假、每方向白付一次检索(规格评审 P3)。
     engine._deep_dive(
-        "nb", {"title": "t", "scope": "s", "sub_queries": [" q1 ", "q2"]},
+        "nb", {"title": "t", "scope": "s", "sub_queries": [" q1 ", "q2", "q3"]},
         "Q", depth=3,
     )
 
-    assert captured.get("intent_queries") == ["q1", "q2"], (
+    seeds = captured.get("intent_queries") or []
+    # 首条种子恒为节复合问题(镜像 Ask:完整权威问题恒为第一条)——只传裸方向
+    # 会让 sec_question 从此不进任何 KG 检索,方向缺主语时整条主语召回消失
+    # (质量评审 P2-5)。
+    assert seeds and seeds[0] == captured.get("question"), (
+        "种子首条必须是节复合问题本身"
+    )
+    assert seeds[1:] == ["q1", "q2", "q3"], (
         "大纲方向必须作为已确认种子进 run——否则每节多付一次 plan LLM 调用"
     )
-    assert federated == ["q2"], (
-        "run 内已执行的 q1(含带空白拼写)不得在 run 后重复 federated"
+    assert federated == ["q2", "q3"], (
+        "run 内成功执行的 q1 不得重复 federated;q2 未执行、q3 检索失败"
+        "(failed 标)都必须兜底"
     )
-    assert [q.strip() for q in elements] == ["q1", "q2"], "元素补取不是重复,两个方向都要"
+    assert [q.strip() for q in elements] == ["q1", "q2", "q3"], (
+        "元素补取不是重复,全部方向都要"
+    )
 
 
 def test_deep_dive_without_directions_leaves_planner_path(repo, monkeypatch):
@@ -2335,16 +2360,23 @@ def test_plan_outline_wires_probe_width_from_report_depth(repo, monkeypatch):
     """
     from app.services.report_engine import ReportEngine
 
+    # 两个主题:确认问题按设计排在每个主题查询列表之首——plan_outline 必须
+    # 装配 memo,否则同一条确认问题被逐主题重复检索(质量评审 M1:删掉
+    # plan_outline 里的 memo 装配行,全部用例曾照绿)。
     contract = {
         "objective": "问题",
-        "mandatory_topics": [{
-            "id": "i1", "title": "T", "question": "topic-q",
-            "retrieval_queries": ["rq1", "rq2", "rq3"],
-        }],
+        "mandatory_topics": [
+            {"id": "i1", "title": "T", "question": "topic-q",
+             "retrieval_queries": ["rq1", "rq2", "rq3"]},
+            {"id": "i2", "title": "U", "question": "topic-u",
+             "retrieval_queries": ["ru1", "ru2", "ru3"]},
+        ],
     }
+    # 节绑定两个主题:未绑定的必答主题会被 _bind_outline_to_intent 强制补节
+    # (红线行为),补出的节又带主题检索词进充分性探针,污染本测试的计数。
     storm_sections = [{
         "title": "节", "scope": "s",
-        "sub_queries": ["s1", "s2", "s3", "s4"], "intent_ids": [],
+        "sub_queries": ["s1", "s2", "s3", "s4"], "intent_ids": ["i1", "i2"],
     }]
 
     def probed_queries(depth):
@@ -2385,3 +2417,10 @@ def test_plan_outline_wires_probe_width_from_report_depth(repo, monkeypatch):
     )
     assert "rq2" not in narrow and "rq2" in wide
     assert "s3" not in narrow and "s3" in wide
+    # memo 经 plan_outline 真实装配:确认问题在两个主题的查询头部各出现一次,
+    # 但只允许被真正检索一次。
+    confirmed = [q for q in wide if "问题" in q and q not in
+                 {"rq1", "rq2", "rq3", "ru1", "ru2", "ru3", "s1", "s2", "s3", "s4"}]
+    assert len(confirmed) == 1, (
+        f"确认问题被检索 {len(confirmed)} 次——plan_outline 没有装配探针 memo"
+    )
