@@ -521,7 +521,7 @@ The composite indexes above insulate every *other* notebook from a giant one, bu
 the giant notebook's own probes cheap: `ORDER BY similarity` still recomputes similarity for
 every trigram candidate before its LIMIT (measured on a 9.1M-object notebook: 7.4s for one
 common short term; a multi-term question times out and the lexical arm dies fail-open). The
-default-off `POSTGRES_LEXICAL_KNN_ENABLED` flag switches unscoped runs on notebooks at or
+default-on `POSTGRES_LEXICAL_KNN_ENABLED` flag switches unscoped runs on notebooks at or
 above `POSTGRES_LEXICAL_KNN_MIN_ROWS` (default 500,000 nodes+chunks) to a GiST `<->` scan
 that stops at the LIMIT (measured 123ms, 60×). The floor matters: the GiST index has no
 notebook key, so the KNN scan walks global distance order and only pays off for a notebook
@@ -539,7 +539,8 @@ CREATE INDEX CONCURRENTLY idx_knowledge_objects_name_knn_gist ON knowledge_objec
   WHERE status != 'deprecated';
 ```
 
-Then set `POSTGRES_LEXICAL_KNN_ENABLED=true` and restart the backend (availability is probed
+Then restart the backend — the flag defaults to on, so building the index is the only step
+(availability is probed
 once per process and never re-probed). Rollback order matters for the same reason: set the
 flag off and restart FIRST, and only then drop the index — dropping it under a live flag
 leaves the cached "available" verdict pointing at a vanished index, and every KNN statement

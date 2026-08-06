@@ -548,17 +548,19 @@ class Settings(BaseSettings):
     # 设 false 完全回到接入前(不过滤、零行为差异),用于探针误判某库时的临时恢复。
     lexical_language_gate_enabled: bool = Field(
         True, validation_alias="LEXICAL_LANGUAGE_GATE_ENABLED")
-    # PostgreSQL 大库 KG 名词法探针的 GiST KNN 早停(默认关)。现状 ORDER BY
-    # similarity 是形态 B:LIMIT 无法提前终止,常见短词要对全部 trgm 候选回表、
-    # 算相似度、排序(9.1M 行 base 实测 'DAC' 单词项 7.4s,多词项直接超时,整条
-    # 词法臂 fail-open 阵亡)。KNN(`<->` 距离序)按相似度序增量吐行、到 LIMIT 即停
-    # (同库实测 123ms,60×)。只改访问路径,分数仍是 similarity();等相似度并列类
-    # 内的成员选择可能与旧路径不同(实测 'DAC' 有 285 行 sim=1.0 同名对象,top-k
-    # 取哪 67 个两条路径各取一批)——这是登记过的取舍,也是默认关、需真机 A/B 后
-    # 才开的原因。只在 PostgreSQL 且存在匹配形状的 GiST 索引时生效(运行时探测,
-    # 缺索引静默走旧路径);SQLite 忽略此开关。
+    # PostgreSQL 大库 KG 名词法探针的 GiST KNN 早停(默认开;设 false 回滚)。
+    # 现状 ORDER BY similarity 是形态 B:LIMIT 无法提前终止,常见短词要对全部
+    # trgm 候选回表、算相似度、排序(9.1M 行 base 实测 'DAC' 单词项 7.4s,多词项
+    # 直接超时,整条词法臂 fail-open 阵亡)。KNN(`<->` 距离序)按相似度序增量
+    # 吐行、到 LIMIT 即停(同库实测 123ms,60×)。只改访问路径,分数仍是
+    # similarity();等相似度并列类内的成员选择可能与旧路径不同、且 KNN 自身在
+    # 并列类内不是 run-to-run 稳定的(实测 'DAC' 有 285 行 sim=1.0 同名对象)
+    # ——登记接受的取舍(2026-08-06 拍板:60× 收益优先;需要位稳定候选集的部署
+    # 用本开关回滚)。只在 PostgreSQL 且存在精确匹配形状的 GiST 索引时生效
+    # (运行时探测,缺索引静默走旧路径,所以默认开对未建索引的部署零行为差异);
+    # SQLite 忽略此开关。
     postgres_lexical_knn_enabled: bool = Field(
-        False, validation_alias="POSTGRES_LEXICAL_KNN_ENABLED")
+        True, validation_alias="POSTGRES_LEXICAL_KNN_ENABLED")
     # KNN 路由的规模下限(nodes+chunks)。GiST 索引没有 notebook 键,KNN 走的是
     # **全库**距离序、逐行按 notebook 过滤——只有目标库在整张表里占主导份额时才
     # 划算;小份额库要在别人的行里翻找自己的 67 条,反而丢掉它刚拿到的复合 GIN
