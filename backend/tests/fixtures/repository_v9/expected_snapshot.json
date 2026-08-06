@@ -427,7 +427,7 @@
           "title": "Evidence"
         }
       ],
-      "share_token": "",
+      "shared": false,
       "status": "done",
       "understanding": {},
       "updated_at": "<timestamp>"
@@ -930,7 +930,7 @@
           }
         ],
         "share_token": null,
-        "shared_at": "",
+        "shared_at": null,
         "status": "done",
         "understanding_json": {},
         "updated_at": "<timestamp>"
@@ -2007,7 +2007,7 @@
       },
       {
         "name": "reports",
-        "sql_sha256": "d16b990da86eabaa2d462f2c19742114685d4ff1576d06614d1c7356dc2e6160",
+        "sql_sha256": "5cb5a56615971133c133bdac2e3564c2b02caef477f88b30788e0da08b2fd588",
         "type": "table"
       },
       {

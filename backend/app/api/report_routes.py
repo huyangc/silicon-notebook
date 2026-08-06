@@ -479,6 +479,28 @@ def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
     return ReportShareResponse(share_token=repo.share_report(notebook_id, report_id))
 
 
+@router.get("/notebooks/{notebook_id}/reports/{report_id}/share",
+            response_model=ReportShareResponse,
+            dependencies=[Depends(require_notebook_write)])
+def get_report_share_route(notebook_id: str, report_id: str) -> ReportShareResponse:
+    """Read back the existing link. Write-guarded: the token *is* the grant.
+
+    The report detail endpoint only reports whether a report is shared, because
+    it is reachable with read permission — handing readers the bearer credential
+    would let them grant anonymous access without write access.
+    """
+    repo = repository()
+    try:
+        report = repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="report not found")
+    if not report.get("shared"):
+        raise HTTPException(status_code=404, detail="report is not shared")
+    return ReportShareResponse(
+        share_token=repo.report_share_token(notebook_id, report_id)
+    )
+
+
 @router.delete("/notebooks/{notebook_id}/reports/{report_id}/share",
                status_code=204,
                dependencies=[Depends(require_notebook_write)])

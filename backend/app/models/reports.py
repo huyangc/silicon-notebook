@@ -66,9 +66,10 @@ class ReportDetail(ReportSummary):
     section_status: List[dict] = Field(default_factory=list)
     content_md: str = ""
     error: str = ""
-    # 公开分享链接的 token（未分享为空）。同 notebook 的可写成员本就能发起分享，
-    # 所以这里不构成额外披露；免登录页的投影里没有它。
-    share_token: str = ""
+    # 只说「有没有在分享」，**不给 token**。报告详情端点只要
+    # `require_notebook_read`,而 token 本身就是匿名访问凭据——放在这里等于让只读
+    # 成员绕过写权限把公开访问分发出去。凭据只从写权限的 `GET .../share` 出。
+    shared: bool = False
 
     @field_validator("sections", mode="before")
     @classmethod

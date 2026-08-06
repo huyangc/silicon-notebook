@@ -3467,6 +3467,9 @@ class RepositoryFacade:
     def unshare_report(self, notebook_id: str, report_id: str) -> None:
         return self._runtime.report_store.unshare_report(notebook_id, report_id)
 
+    def report_share_token(self, notebook_id: str, report_id: str) -> str:
+        return self._runtime.report_store.report_share_token(notebook_id, report_id)
+
     def public_report_by_token(self, token: str) -> dict | None:
         return self._runtime.report_store.public_report_by_token(token)
 

@@ -2712,7 +2712,7 @@ MIGRATION_MANIFEST[(41, 42)] = {
 REPORT_SHARE_COLUMNS = {
     "reports": {
         "share_token": ("share_token", "TEXT", 0, None, 0),
-        "shared_at": ("shared_at", "TEXT", 1, "''", 0),
+        "shared_at": ("shared_at", "TEXT", 0, None, 0),
     },
 }
 REPORT_SHARE_INDEXES = {

@@ -1484,6 +1484,65 @@ def test_compact_source_scope_snapshot_matches_sqlite_semantics(
     ) == (["src-compact-b", "src-compact-a"], 2)
 
 
+def test_concurrent_share_issuance_converges_under_read_committed(
+    core_stores: CoreStores,
+):
+    """Two concurrent shares must converge on one token — the PostgreSQL race.
+
+    Under READ COMMITTED a read-then-write implementation lets both callers
+    observe NULL and then overwrite unconditionally: the later token wins, and
+    the link the first caller was already handed starts returning 404 despite
+    the endpoint's idempotency contract. SQLite cannot reproduce this (its
+    writer lock serialises the pair), so the guard has to live here.
+    """
+    import threading
+
+    from app.repositories.postgres.report_store import ReportStore
+
+    owner = core_stores.identity.create_user("r00778899", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Concurrent share"), owner.id
+    )
+    reports = ReportStore(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=lambda: NOW,
+        current_user_id=lambda: owner.id,
+    )
+    report_id = reports.create_report(notebook_id, "q", 2)
+
+    start = threading.Barrier(4)
+    issued: list[str] = []
+    failures: list[BaseException] = []
+    lock = threading.Lock()
+
+    def issue():
+        try:
+            start.wait(timeout=10)
+            token = reports.share_report(notebook_id, report_id)
+        except BaseException as error:          # noqa: BLE001 — surfaced below
+            with lock:
+                failures.append(error)
+            return
+        with lock:
+            issued.append(token)
+
+    threads = [threading.Thread(target=issue) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not failures, failures
+    assert len(issued) == 4
+    assert len(set(issued)) == 1, issued
+    # The winner is what is actually persisted, so every caller's link works.
+    assert reports.report_share_token(notebook_id, report_id) == issued[0]
+    assert reports.public_report_by_token(issued[0]) is None  # 未 done 不可读
+    reports.update_report(notebook_id, report_id, status="done")
+    assert reports.public_report_by_token(issued[0]) is not None
+
+
 def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(
     core_stores: CoreStores,
 ):

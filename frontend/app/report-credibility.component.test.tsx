@@ -369,6 +369,7 @@ test("报告详情实际挂载可信度回执与引证分布，而非只测试�
       cancelReport={vi.fn()}
       deleteReport={vi.fn()}
       shareReport={vi.fn()}
+      getReportShare={vi.fn()}
       unshareReport={vi.fn()}
       downloadReportsZip={vi.fn()}
       setToast={vi.fn()}
@@ -412,6 +413,7 @@ test("失败报告保留大纲时可从详情页原地重新生成", async () =>
       cancelReport={vi.fn()}
       deleteReport={vi.fn()}
       shareReport={vi.fn()}
+      getReportShare={vi.fn()}
       unshareReport={vi.fn()}
       downloadReportsZip={vi.fn()}
       setToast={setToast}
@@ -445,6 +447,7 @@ test("形成大纲前失败的报告不展示误导性的重试按钮", async ()
       cancelReport={vi.fn()}
       deleteReport={vi.fn()}
       shareReport={vi.fn()}
+      getReportShare={vi.fn()}
       unshareReport={vi.fn()}
       downloadReportsZip={vi.fn()}
       setToast={vi.fn()}

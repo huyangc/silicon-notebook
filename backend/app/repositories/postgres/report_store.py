@@ -10,6 +10,7 @@ from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalize_timestamp,
 )
+from app.core.capability_tokens import new_capability_token
 from app.repositories.postgres.database import PostgresDatabase
 from app.core.internal_observability import public_report_sections
 
@@ -162,7 +163,7 @@ class ReportStore:
                      references=json_value(row["references_json"], []),
                      section_status=json_value(row["section_status_json"], []),
                      understanding=understanding,
-                     share_token=str(row["share_token"] or ""),
+                     shared=bool(row["share_token"]),
                      content_md=row["content_md"])
         return d
 
@@ -199,23 +200,27 @@ class ReportStore:
         Idempotent: re-sharing keeps the existing link so a URL already handed
         out never silently starts 404ing.
         """
+        candidate = new_capability_token("rshr")
         with self.database.write() as db:
             row = db.execute(
-                "SELECT share_token FROM reports WHERE id=%s AND notebook_id=%s",
+                "SELECT id FROM reports WHERE id=%s AND notebook_id=%s",
                 (report_id, notebook_id),
             ).fetchone()
             if row is None:
                 raise KeyError(report_id)
-            existing = str(row["share_token"] or "")
-            if existing:
-                return existing
-            token = self.new_id("rshr")
-            db.execute(
-                "UPDATE reports SET share_token=%s, shared_at=%s "
-                "WHERE id=%s AND notebook_id=%s",
-                (token, normalize_timestamp(self.now()), report_id, notebook_id),
-            )
-        return token
+            # One conditional write instead of read-then-write.  Under
+            # READ COMMITTED two concurrent shares both observe NULL and would
+            # each overwrite unconditionally, so the later token wins and the
+            # first caller's link 404s despite the idempotency contract.  The
+            # second UPDATE blocks on the row, re-reads it, and COALESCE keeps
+            # the winner; RETURNING hands back what is actually persisted.
+            issued = db.execute(
+                "UPDATE reports SET share_token=COALESCE(share_token,%s), "
+                "shared_at=COALESCE(shared_at,%s) "
+                "WHERE id=%s AND notebook_id=%s RETURNING share_token",
+                (candidate, normalize_timestamp(self.now()), report_id, notebook_id),
+            ).fetchone()
+        return str(issued["share_token"])
 
     def unshare_report(self, notebook_id: str, report_id: str) -> None:
         with self.database.write() as db:
@@ -224,6 +229,20 @@ class ReportStore:
                 "WHERE id=%s AND notebook_id=%s",
                 (report_id, notebook_id),
             )
+
+    def report_share_token(self, notebook_id: str, report_id: str) -> str:
+        """The issued token, for the write-guarded read-back endpoint only.
+
+        Never fold this into the report detail projection: that endpoint is
+        reachable with read permission, and this value is an anonymous access
+        grant.
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT share_token FROM reports WHERE id=%s AND notebook_id=%s",
+                (report_id, notebook_id),
+            ).fetchone()
+        return str((row["share_token"] if row else "") or "")
 
     def public_report_by_token(self, token: str) -> dict | None:
         """Resolve one shared report by token alone — the only session-free read.

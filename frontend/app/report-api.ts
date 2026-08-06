@@ -59,6 +59,9 @@ export const shareReport = (nb: string, id: string) =>
     method: "POST",
   });
 
+export const getReportShare = (nb: string, id: string) =>
+  requestJson<{ share_token: string }>(`/notebooks/${nb}/reports/${id}/share`, options);
+
 export const unshareReport = (nb: string, id: string) =>
   requestVoid(`/notebooks/${nb}/reports/${id}/share`, {
     ...options,

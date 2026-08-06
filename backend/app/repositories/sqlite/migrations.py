@@ -2175,9 +2175,12 @@ class SqliteMigrator:
         """
         with self._connect() as db:
             self.add_column_if_missing(db, "reports", "share_token", "TEXT")
-            self.add_column_if_missing(
-                db, "reports", "shared_at", "TEXT NOT NULL DEFAULT ''"
-            )
+            # Nullable, not `NOT NULL DEFAULT ''`: PostgreSQL stores this as a
+            # nullable timestamptz, and the forward-shadow timestamp converter
+            # only maps *registered* empty sentinels to NULL.  An unregistered
+            # `''` would call `datetime.fromisoformat("")` on every unshared
+            # report — i.e. almost every row — and abort the migration.
+            self.add_column_if_missing(db, "reports", "shared_at", "TEXT")
             db.executescript(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_share_token

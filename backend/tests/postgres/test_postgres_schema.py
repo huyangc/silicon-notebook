@@ -185,12 +185,11 @@ def test_packaged_index_migration_phases_are_exact():
         (15, "source_element_type_index"),
         (16, "visible_source_identity_index"),
         (17, "command_catalog"),
-            (18, "source_local_facts"),
-            (19, "source_fact_backfills"),
-            (20, "source_index_backfills"),
+        (18, "source_local_facts"),
+        (19, "source_fact_backfills"),
+        (20, "source_index_backfills"),
         (21, "report_share_tokens"),
-            (21, "report_share_tokens"),
-        ]
+    ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
         return [

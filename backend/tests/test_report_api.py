@@ -1111,8 +1111,24 @@ def test_public_report_share_link_is_anonymous_and_bounded(client, monkeypatch):
         f"/api/notebooks/{nb['id']}/reports/{rid}/share"
     ).json()["share_token"]
     assert token
+    # A capability token, not a row id: `new_id` truncates a UUID to 32 bits,
+    # which is enumerable on an unauthenticated, unthrottled endpoint.
+    assert token.startswith("rshr-")
+    assert len(token) - len("rshr-") >= 40
     # Idempotent: a link already handed out must not start 404ing.
     assert client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/share"
+    ).json()["share_token"] == token
+
+    # The detail projection says *whether* it is shared and never carries the
+    # credential: that endpoint only requires read permission, so a reader would
+    # otherwise be able to hand out anonymous access without write access.
+    detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert detail["shared"] is True
+    assert "share_token" not in detail
+    assert token not in client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").text
+    # The token is readable only through the write-guarded endpoint.
+    assert client.get(
         f"/api/notebooks/{nb['id']}/reports/{rid}/share"
     ).json()["share_token"] == token
 
@@ -1135,6 +1151,11 @@ def test_public_report_share_link_is_anonymous_and_bounded(client, monkeypatch):
     ).status_code == 204
     assert client.get(f"/api/public/reports/{token}").status_code == 404
     assert client.get("/api/public/reports/rshr-never-issued").status_code == 404
+    # Unshared again: the detail flag flips back and the read-back 404s.
+    assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()["shared"] is False
+    assert client.get(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/share"
+    ).status_code == 404
 
 
 def test_public_report_route_is_not_behind_the_router_level_session_guard():
@@ -1171,3 +1192,116 @@ def test_public_report_route_is_not_behind_the_router_level_session_guard():
         if getattr(route, "path", "") == "/api/notebooks/{notebook_id}/reports/{report_id}/share"
     ]
     assert guarded, "share route is not registered"
+
+
+def test_capability_tokens_are_not_row_ids():
+    """A share token is an authorization grant, so it needs credential entropy.
+
+    `event_logging.new_id` truncates a UUID to eight hex characters — fine for a
+    primary key behind a UNIQUE constraint, but 32 bits is enumerable on an
+    unauthenticated endpoint with no rate limiting.
+    """
+    from app.core.capability_tokens import new_capability_token
+    from app.core.event_logging import new_id
+
+    assert len(new_id("rshr")) - len("rshr-") == 8      # 何以不能用它
+
+    tokens = {new_capability_token("rshr") for _ in range(500)}
+    assert len(tokens) == 500                            # 无碰撞
+    for token in tokens:
+        assert token.startswith("rshr-")
+        body = token[len("rshr-"):]
+        assert len(body) >= 40                           # ≥ 240 bits base64url
+        assert set(body) <= set(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        )
+
+
+def test_unshared_reports_store_null_not_an_empty_timestamp(client, monkeypatch):
+    """`shared_at` must be NULL when unshared, never `''`.
+
+    PostgreSQL types this column as a nullable `timestamptz`, and the forward
+    shadow's timestamp converter only maps *registered* empty sentinels to NULL.
+    An unregistered `''` would call `datetime.fromisoformat("")` for every
+    unshared report — nearly every row — and abort the migration.
+    """
+    import sqlite3
+
+    import app.api.report_routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "q"}
+    ).json()["report_id"]
+
+    from app.api.deps import repository
+    repo = repository()
+    path = repo._runtime.settings.sqlite_path
+    connection = sqlite3.connect(path)
+    try:
+        column = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(reports)")
+        }["shared_at"]
+        assert column[3] == 0, "shared_at must stay nullable"   # notnull
+        assert column[4] is None, "shared_at must not default to a sentinel"
+
+        def stored():
+            return connection.execute(
+                "SELECT shared_at FROM reports WHERE id=?", (rid,)
+            ).fetchone()[0]
+
+        assert stored() is None                                  # 新建即 NULL
+        repo.update_report(nb["id"], rid, status="done")
+        client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/share")
+        assert stored() is not None                              # 分享后有时刻
+        client.delete(f"/api/notebooks/{nb['id']}/reports/{rid}/share")
+        assert stored() is None                                  # 撤销回到 NULL
+    finally:
+        connection.close()
+
+
+def test_concurrent_share_calls_converge_on_one_token(client, monkeypatch):
+    """Two concurrent shares must hand back the same link.
+
+    NOTE: on SQLite this passes even with a read-then-write implementation,
+    because `database.write()` serialises writers. The race this guards is a
+    PostgreSQL READ COMMITTED one, and the mutation that actually proves the
+    conditional update lives in the G3 conformance lane
+    (`postgres/test_core_store_conformance.py`). Keep this one as the
+    contract-level statement that the API is idempotent on both backends.
+    """
+    import threading
+
+    import app.api.report_routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "q"}
+    ).json()["report_id"]
+    from app.api.deps import repository
+    repo = repository()
+    repo.update_report(nb["id"], rid, status="done")
+
+    start = threading.Barrier(4)
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def issue():
+        start.wait(timeout=5)
+        token = repo.share_report(nb["id"], rid)
+        with lock:
+            results.append(token)
+
+    threads = [threading.Thread(target=issue) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(results) == 4
+    assert len(set(results)) == 1, results
+    # And the surviving link is the one actually persisted.
+    assert repo.report_share_token(nb["id"], rid) == results[0]
+    assert client.get(f"/api/public/reports/{results[0]}").status_code == 200

@@ -193,8 +193,8 @@ export type ReportDetailT = ReportSummaryT & {
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
   content_md: string;
-  /** 公开分享 token（未分享为空）。 */
-  share_token?: string;
+  /** 是否正在公开分享。**不含 token**——那是匿名访问凭据，只从写权限端点取。 */
+  shared?: boolean;
   references: {
     key: string;
     label: string;
@@ -1275,6 +1275,7 @@ export interface ReportsPanelProps {
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
   shareReport: (nb: string, rid: string) => Promise<{ share_token: string }>;
+  getReportShare: (nb: string, rid: string) => Promise<{ share_token: string }>;
   unshareReport: (nb: string, rid: string) => Promise<void>;
   downloadReportsZip: (nb: string, reportIds: string[]) => Promise<void>;
   setToast: (message: string) => void;
@@ -1297,6 +1298,7 @@ export function ReportsPanel({
   cancelReport,
   deleteReport,
   shareReport,
+  getReportShare,
   unshareReport,
   downloadReportsZip,
   setToast,
@@ -1309,8 +1311,9 @@ export function ReportsPanel({
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
   const [copied, setCopied] = useState(false);
-  // 分享态：token 为空即未分享。链接由 token 现算，不落额外状态。
-  const [shareToken, setShareToken] = useState("");
+  // 分享态只存布尔：token 是匿名访问凭据，不进只需 read 权限的详情响应，
+  // 需要链接时才向写权限端点要。
+  const [shared, setShared] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [question, setQuestion] = useState("");
   const [depthIdx, setDepthIdx] = useState(1); // 默认「标准」(depth=2)
@@ -1502,8 +1505,8 @@ export function ReportsPanel({
   // 分享态跟着详情走：切报告、轮询刷新都会带来新的 share_token，本地态必须
   // 同步，否则会把上一份报告的链接显示在这一份上。
   useEffect(() => {
-    setShareToken(String(active?.share_token || ""));
-  }, [active?.id, active?.share_token]);
+    setShared(Boolean(active?.shared));
+  }, [active?.id, active?.shared]);
 
   /**
    * 发布/撤销公开链接。撤销即刻生效——公开页对已撤销 token 与从未存在的 token
@@ -1513,19 +1516,35 @@ export function ReportsPanel({
     if (!active || shareBusy) return;
     setShareBusy(true);
     try {
-      if (shareToken) {
+      if (shared) {
         await unshareReport(notebookId, active.id);
-        setShareToken("");
+        setShared(false);
         setToast("已取消分享，原链接立即失效");
       } else {
         const { share_token: token } = await shareReport(notebookId, active.id);
-        setShareToken(token);
+        setShared(true);
         const link = buildPublicReportLink(token, window.location.origin);
         await copyReportContent(link).catch(() => undefined);
         setToast(`分享链接已复制：${link}`);
       }
     } catch (error) {
       setToast(toUserMessage(error, "分享操作失败"));
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  /** 取回既有链接。token 只经写权限端点，不随详情下发。 */
+  async function copyShareLink() {
+    if (!active || shareBusy) return;
+    setShareBusy(true);
+    try {
+      const { share_token: token } = await getReportShare(notebookId, active.id);
+      const link = buildPublicReportLink(token, window.location.origin);
+      await copyReportContent(link).catch(() => undefined);
+      setToast(`分享链接已复制：${link}`);
+    } catch (error) {
+      setToast(toUserMessage(error, "取回分享链接失败"));
     } finally {
       setShareBusy(false);
     }
@@ -1665,8 +1684,18 @@ export function ReportsPanel({
               >
                 <Share2 size={14} />
                 {shareBusy
-                  ? (shareToken ? "撤销中…" : "生成链接中…")
-                  : (shareToken ? "取消分享" : "分享")}
+                  ? (shared ? "撤销中…" : "生成链接中…")
+                  : (shared ? "取消分享" : "分享")}
+              </button>
+            )}
+            {!readOnly && shared && (
+              <button
+                className="report-action"
+                type="button"
+                disabled={shareBusy}
+                onClick={() => void copyShareLink()}
+              >
+                <Copy size={14} /> 复制链接
               </button>
             )}
             {!readOnly && (

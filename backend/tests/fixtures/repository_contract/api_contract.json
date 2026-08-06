@@ -7411,10 +7411,10 @@
               "title": "Sections",
               "type": "array"
             },
-            "share_token": {
-              "default": "",
-              "title": "Share Token",
-              "type": "string"
+            "shared": {
+              "default": false,
+              "title": "Shared",
+              "type": "boolean"
             },
             "status": {
               "title": "Status",
@@ -16910,6 +16910,53 @@
           },
           "summary": "Unshare Report Route"
         },
+        "get": {
+          "description": "Read back the existing link. Write-guarded: the token *is* the grant.\n\nThe report detail endpoint only reports whether a report is shared, because\nit is reachable with read permission — handing readers the bearer credential\nwould let them grant anonymous access without write access.",
+          "operationId": "get_report_share_route_api_notebooks__notebook_id__reports__report_id__share_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "report_id",
+              "required": true,
+              "schema": {
+                "title": "Report Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ReportShareResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Report Share Route"
+        },
         "post": {
           "description": "Publish one finished report behind an unguessable link.\n\nOnly `done` reports can be shared: a link to a running or failed report\nwould show an empty or half-written body to whoever it was sent to.",
           "operationId": "share_report_route_api_notebooks__notebook_id__reports__report_id__share_post",
@@ -19564,7 +19611,7 @@
         }
       ],
       "sections": [],
-      "share_token": "",
+      "shared": false,
       "status": "outline_ready",
       "understanding": {},
       "updated_at": "2024-01-02T03:04:05"
