@@ -1,10 +1,16 @@
 """服务层的 KNN 路由判据（POSTGRES_LEXICAL_KNN_ENABLED）。
 
-判据集中在 `_lexical_object_hits` 一处：开关开着、run 未按来源收窄、且该库是
-「大库」（copyable=False，与自动建索引共用同一判定）。三者缺一即传
-`allow_knn=False`，SQL 逐字回到 legacy。这里用 SQLite 仓库 + 假 fts_search
-钉服务层判据本身——KNN SQL 的正确性由 PostgreSQL conformance 测试负责，
-这份测试只回答「hint 什么时候被给出」。
+判据集中在 `_lexical_knn_allowed` 一个可测的 helper 里：开关开、run 未按来源
+收窄、库的 nodes+chunks ≥ `POSTGRES_LEXICAL_KNN_MIN_ROWS`。三者缺一即 False，
+SQL 逐字回到 legacy。**必须直接测 helper 本身**——只经 `_lexical_object_hits`
+捕获 kwarg 的写法抓不住「删掉 scoped 排除」这类变异（受限分支本来就不转发该
+kwarg，缺省 False 让断言空转；评审实测过）。KNN SQL 的正确性由 PostgreSQL
+conformance 测试负责，这份测试只回答「hint 什么时候被给出、有没有真的传下去」。
+
+另一半同样不可省：helper 必须在调用方**打开连接之前**跑（它读
+`notebook_copy_stats`，那条链会自己开一条池化连接；持连接时嵌套获取会在报告
+多节并发下坐死连接池——`_lexical_object_hits` docstring 里整段警告的形态）。
+这里用调用顺序断言钉住。
 """
 from __future__ import annotations
 
@@ -24,50 +30,86 @@ def repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings())
 
 
-def _captured_hint(repo, notebook_id, *, flag, copyable, allowed_source_ids=None):
-    """跑一次 `_lexical_object_hits`,返回 fts_search 实际收到的 allow_knn。"""
+def _verdict(repo, *, flag, rows, allowed_source_ids=None, stats_error=False):
+    """对四元组合直接求 `_lexical_knn_allowed` 的值。"""
+    candidates = repo.retrieval.candidates
+    real_stats = candidates.notebook_copy_stats
+
+    def fake_stats(nb):
+        if stats_error:
+            raise RuntimeError("stats unavailable")
+        return {"copyable": rows <= 5000, "size": {"nodes": rows, "chunks": 0}}
+
+    candidates.notebook_copy_stats = fake_stats
+    candidates.settings.postgres_lexical_knn_enabled = flag
+    try:
+        return candidates._lexical_knn_allowed(
+            "nb-any", allowed_source_ids=allowed_source_ids
+        )
+    finally:
+        candidates.notebook_copy_stats = real_stats
+
+
+def test_verdict_requires_all_three_conditions(repo):
+    threshold = repo.retrieval.candidates.settings.postgres_lexical_knn_min_rows
+    # 全部满足 → True;逐个抽掉一个条件 → False。
+    assert _verdict(repo, flag=True, rows=threshold) is True
+    assert _verdict(repo, flag=False, rows=threshold) is False
+    assert _verdict(
+        repo, flag=True, rows=threshold, allowed_source_ids=["src-1"]
+    ) is False
+    # GiST 索引没有 notebook 键,KNN 是全库距离序:未达规模下限的库要在别人的
+    # 行里翻找自己的候选,反而丢掉复合 GIN 快路径——必须留在 legacy。
+    assert _verdict(repo, flag=True, rows=threshold - 1) is False
+    # 判定链上的异常按 False 收:legacy 永远是安全出口。
+    assert _verdict(repo, flag=True, rows=threshold, stats_error=True) is False
+
+
+def test_flag_off_short_circuits_before_copy_stats(repo):
+    """开关关着时零开销——copy_stats(会开连接、发 SELECT)绝不能被触碰。"""
+    candidates = repo.retrieval.candidates
+    real_stats = candidates.notebook_copy_stats
+
+    def exploding_stats(nb):
+        raise AssertionError("flag off 时不得读 notebook_copy_stats")
+
+    candidates.notebook_copy_stats = exploding_stats
+    candidates.settings.postgres_lexical_knn_enabled = False
+    try:
+        assert candidates._lexical_knn_allowed("nb-any") is False
+    finally:
+        candidates.notebook_copy_stats = real_stats
+
+
+def test_hits_helper_forwards_the_precomputed_verdict(repo):
+    """`_lexical_object_hits` 只转发、不自算——判定必须发生在连接之外。
+
+    两个断言合起来钉住这条:①helper 执行期间 copy_stats 不被调用(自算的
+    回归形态);②传入的 allow_knn 原样到达 fts_search。
+    """
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
     candidates = repo.retrieval.candidates
     captured: dict = {}
+    real_stats = candidates.notebook_copy_stats
 
-    def fake_fts_search(db, nb, query, k, **kwargs):
+    def exploding_stats(_nb):
+        raise AssertionError("_lexical_object_hits 内不得读 notebook_copy_stats")
+
+    def fake_fts_search(db, nb_id, query, k, **kwargs):
         captured.update(kwargs)
         return []
 
-    real_stats = candidates.notebook_copy_stats
+    candidates.notebook_copy_stats = exploding_stats
     candidates.knowledge.fts_search = fake_fts_search
-    candidates.notebook_copy_stats = lambda nb: {"copyable": copyable}
-    candidates.settings.postgres_lexical_knn_enabled = flag
     try:
         with repo._connect() as db:
             candidates._lexical_object_hits(
-                db, notebook_id, "thermal design", 12,
-                site="test", corpus_langs=None,
-                allowed_source_ids=allowed_source_ids,
+                db, nb.id, "thermal design", 12,
+                site="test", corpus_langs=None, allow_knn=True,
             )
     finally:
         candidates.notebook_copy_stats = real_stats
-    assert "allow_knn" in captured or allowed_source_ids is not None, (
-        "unscoped 调用必须显式携带 allow_knn，缺省依赖等于让路由静默失效"
-    )
-    return captured.get("allow_knn", False)
-
-
-def test_hint_requires_flag_and_large_notebook(repo):
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    assert _captured_hint(repo, nb.id, flag=True, copyable=False) is True
-    assert _captured_hint(repo, nb.id, flag=False, copyable=False) is False
-    # 小库（copyable）刚拿到复合 GIN 索引，现状已是最优；KNN 反而要在全局
-    # 距离序里翻找自己的行——路由必须把它们留在 legacy。
-    assert _captured_hint(repo, nb.id, flag=True, copyable=True) is False
-
-
-def test_scoped_runs_never_carry_the_hint(repo):
-    """按来源收窄的 run 是词法唯一候选来源,且 KNN 形状没有 scoped bench。"""
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    assert _captured_hint(
-        repo, nb.id, flag=True, copyable=False,
-        allowed_source_ids=["src-1"],
-    ) is False
+    assert captured.get("allow_knn") is True
 
 
 def test_sqlite_adapter_accepts_and_ignores_the_hint(repo):

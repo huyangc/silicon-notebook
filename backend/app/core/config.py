@@ -559,6 +559,14 @@ class Settings(BaseSettings):
     # 缺索引静默走旧路径);SQLite 忽略此开关。
     postgres_lexical_knn_enabled: bool = Field(
         False, validation_alias="POSTGRES_LEXICAL_KNN_ENABLED")
+    # KNN 路由的规模下限(nodes+chunks)。GiST 索引没有 notebook 键,KNN 走的是
+    # **全库**距离序、逐行按 notebook 过滤——只有目标库在整张表里占主导份额时才
+    # 划算;小份额库要在别人的行里翻找自己的 67 条,反而丢掉它刚拿到的复合 GIN
+    # 快路径。份额没有零查询的算法,用远高于 copyable 闸(5000)的绝对下限近似:
+    # 请把它设在「除主导库外最大的那个库」之上(实测部署:主导库 1.1e7,次大 2.7e4,
+    # 默认 5e5 干净分割)。低于下限 → legacy,SQL 逐字不变。
+    postgres_lexical_knn_min_rows: int = Field(
+        500_000, validation_alias="POSTGRES_LEXICAL_KNN_MIN_ROWS")
     chunk_mmr_k: int = Field(16, validation_alias="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, validation_alias="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, validation_alias="CHUNK_ANSWER_BUDGET_CHARS")

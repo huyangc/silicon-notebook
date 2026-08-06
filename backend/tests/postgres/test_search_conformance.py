@@ -1049,12 +1049,19 @@ def _seed_knn_staircase(harness) -> None:
             )
             for object_id, name in KNN_STAIRCASE
         ]
+        # The deprecated row must be provably EXCLUDED, which means its
+        # similarity has to place it INSIDE the narrow top-k if the status
+        # predicate were dropped: "thermals" scores ≈0.7 against "thermal" —
+        # rank #2, ahead of "thermal pad" — so a KNN statement missing
+        # `status!='deprecated'` shifts the full-page top-3 and the equality
+        # with legacy goes red.  (Its first spelling, "thermal deprecated
+        # twin", ranked #5 and a mutation run proved it invisible.)
         rows.append((
             "ko-knn-deprecated",
             KNN_NOTEBOOK,
             "claim",
             "deprecated",
-            json.dumps({"name": "thermal deprecated twin"}),
+            json.dumps({"name": "thermals"}),
             "[]",
             "source-search-a",
             NOW,
@@ -1149,12 +1156,33 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
             knn_wide = knowledge_candidate_rows_for_terms(
                 connection, KNN_NOTEBOOK, terms, per_term_limit=10, allow_knn=True
             )
+            # Reversed permutation: SHORT page at rank 0, FULL page at rank 1.
+            # The cross-phase `merged.sort` is what restores rank-ascending
+            # output when the top-up rows belong to the EARLIER rank; a
+            # mutation run proved the one-sided permutation cannot see its
+            # removal.
+            reversed_terms = ["grid", "thermal"]
+            legacy_reversed = knowledge_candidate_rows_for_terms(
+                connection, KNN_NOTEBOOK, reversed_terms, per_term_limit=3
+            )
+            knn_reversed = knowledge_candidate_rows_for_terms(
+                connection, KNN_NOTEBOOK, reversed_terms, per_term_limit=3,
+                allow_knn=True,
+            )
     finally:
         reset_knn_index_cache()
 
     assert _candidate_tuples(knn) == _candidate_tuples(legacy)
     assert _candidate_tuples(knn_wide) == _candidate_tuples(legacy_wide)
+    assert _candidate_tuples(knn_reversed) == _candidate_tuples(legacy_reversed)
     assert "ko-knn-04" in {row["candidate_id"] for row in knn_wide}
+    # The deprecated high-similarity twin must be OUT of every page: it ranks
+    # #2 by similarity, so a KNN statement missing `status!='deprecated'`
+    # cannot pass the narrow equality above.
+    assert "ko-knn-deprecated" not in {
+        row["candidate_id"] for rows in (knn, knn_wide, knn_reversed)
+        for row in rows
+    }
     # The staircase really is tie-free, or the equalities above prove nothing.
     similarities = [row["candidate_similarity"] for row in legacy_wide
                     if int(row["term_rank"]) == 0]
@@ -1162,11 +1190,58 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
 
 
 @pytest.mark.postgres_integration
+def test_knn_hint_travels_from_fts_search_to_the_adapter(search_harness):
+    """钉住跨层接线:`fts_search(allow_knn=True)` 必须一路到达 KNN 语句。
+
+    服务层有测试(hint 被算出并发出)、SQL 层有测试(适配器收到 hint 会走 KNN),
+    但 `fts_search → _lexical_candidate_union → candidate_rows_for_terms` 这根
+    中间线曾经一个断言都没有——把透传掐断,全部测试照样全绿,开关静默失效
+    (规格评审 mutE 实测)。这条测试就是那根线。
+    """
+    from app.repositories.postgres.search import reset_knn_index_cache
+
+    _seed_knn_staircase(search_harness)
+    _create_knn_index(search_harness)
+    try:
+        with search_harness.database.connect() as connection:
+            counting = _KnnCountingConnection(connection)
+            baseline = search_harness.knowledge.fts_search(
+                counting, KNN_NOTEBOOK, "thermal", 12
+            )
+            assert counting.knn_statements == 0, "缺省调用不得发 KNN SQL"
+            hinted = search_harness.knowledge.fts_search(
+                counting, KNN_NOTEBOOK, "thermal", 12, allow_knn=True
+            )
+            assert counting.knn_statements >= 1, (
+                "fts_search(allow_knn=True) 没有到达 KNN 语句——透传断线"
+            )
+            # Scoped runs must stay on legacy even when hinted: the adapter
+            # gate is the second defence behind the service verdict, and its
+            # docstring claims it — so a statement-level assertion backs it.
+            counting.knn_statements = 0
+            scoped = search_harness.knowledge.fts_search(
+                counting, KNN_NOTEBOOK, "thermal", 12,
+                allowed_source_ids=["source-search-a"], allow_knn=True,
+            )
+            assert counting.knn_statements == 0, (
+                "scoped 调用带着 hint 也不得发 KNN SQL"
+            )
+    finally:
+        reset_knn_index_cache()
+    assert [hit["object_id"] for hit in hinted] == [
+        hit["object_id"] for hit in baseline
+    ]
+    assert isinstance(scoped, list)
+
+
+@pytest.mark.postgres_integration
 def test_knn_hint_is_inert_without_a_conforming_index(search_harness):
     """allow_knn=True degrades to the legacy statement when no index matches.
 
-    Covers all three inert shapes: no GiST index at all, a GiST index on the
-    wrong expression, and the hint disabled — plus the scoped-run exclusion.
+    Covers the inert-detection shapes: no GiST index at all, a GiST index on
+    the wrong expression, and one missing `COLLATE "C"`.  The scoped-run
+    exclusion is asserted statement-level in
+    `test_knn_hint_travels_from_fts_search_to_the_adapter`.
     """
     from app.repositories.postgres.search import (
         knn_name_index_available,
@@ -1192,6 +1267,19 @@ def test_knn_hint_is_inert_without_a_conforming_index(search_harness):
                 "CREATE INDEX idx_knn_wrong_expr ON knowledge_objects "
                 "USING gist ((((payload ->> 'statement') COLLATE \"C\")) "
                 "public.gist_trgm_ops)"
+            )
+        reset_knn_index_cache()
+        with search_harness.database.connect() as connection:
+            assert knn_name_index_available(connection) is False
+
+        # The textbook spelling WITHOUT `COLLATE "C"` is the dangerous false
+        # positive: the planner refuses it against the C-collated query
+        # expression, so "available" would mean an unindexed distance sort per
+        # term — a silent perf regression, not an error.  Detection must say no.
+        with search_harness.database.write() as connection:
+            connection.execute(
+                "CREATE INDEX idx_knn_no_collate ON knowledge_objects "
+                "USING gist (((payload ->> 'name')) public.gist_trgm_ops)"
             )
         reset_knn_index_cache()
         with search_harness.database.connect() as connection:

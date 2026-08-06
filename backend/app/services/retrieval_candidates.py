@@ -743,6 +743,37 @@ class CandidateRetrievalService(_RetrievalState):
             })
         return out
 
+    def _lexical_knn_allowed(
+        self, notebook_id: str, allowed_source_ids=None
+    ) -> bool:
+        """KNN 路由判定——必须在调用方打开连接**之前**调用。
+
+        `notebook_copy_stats` 的版本信号会自己开一条池化连接;在
+        `with self._connect()` 里面算这个判定 = 嵌套获取,报告多节并发时会把
+        连接池坐死(`_lexical_object_hits` docstring 里整段警告的正是这个形态,
+        `_lexical_corpus_langs` 是同一约定的先例)。flag 关闭时第一行就短路,
+        零查询;开启时每次判定付一次 version-signal SELECT(memo 只挡后面的
+        facts 重算)——这是缓存版本检查的既有代价,不是新形态。
+
+        三个条件缺一即 False(SQL 逐字回到 legacy):
+        ① 开关开;② run 未按来源收窄——受限 run 的词法是唯一候选来源,且
+        scoped 形状无 bench;③ 库的 nodes+chunks ≥ `postgres_lexical_knn_min_rows`
+        ——GiST 索引没有 notebook 键,KNN 是**全库**距离序逐行过滤,只有主导
+        份额的库才划算;小份额库要在别人的行里翻找自己的 67 条,反而丢掉复合
+        GIN 快路径。判定链上的任何异常按 False 收(fail closed 到 legacy——
+        旧路径永远是安全出口)。
+        """
+        if not self.settings.postgres_lexical_knn_enabled:
+            return False
+        if allowed_source_ids is not None:
+            return False
+        try:
+            size = self.notebook_copy_stats(notebook_id).get("size") or {}
+            rows = int(size.get("nodes") or 0) + int(size.get("chunks") or 0)
+        except Exception:  # noqa: BLE001 — 判定失败必须留在 legacy
+            return False
+        return rows >= int(self.settings.postgres_lexical_knn_min_rows)
+
     def _lexical_object_hits(
         self,
         db: object,
@@ -753,6 +784,7 @@ class CandidateRetrievalService(_RetrievalState):
         site: str,
         corpus_langs,
         allowed_source_ids=None,
+        allow_knn: bool = False,
     ) -> list[dict]:
         """Fail-open bounded lexical object recall shared by KG and relations.
 
@@ -767,20 +799,12 @@ class CandidateRetrievalService(_RetrievalState):
         BEFORE it opens its connection, which is also what the chunk-side call
         sites have always done.
 
-        `allow_knn` 在这里集中计算而不是逐调用点各算一份:三个非受限调用点
-        (kg_ann_fts / kg_large_fallback_fts / relation_endpoint_fts)的判据
-        完全相同——开关开着、run 未按来源收窄、且该库是「大库」(copyable=False,
-        与自动建索引共用同一判据:小库刚拿到复合 GIN 索引,现状已是最优,KNN
-        对它们反而要在全局距离序里翻找自己的行)。受限 run 由
-        `allowed_source_ids is not None` 自动落回 legacy;SQLite 适配器收下
-        这个 kwarg 但忽略(纯 PG 访问路径提示)。`notebook_copy_stats` 是
-        KG-version 缓存的既有判定,不新增查询。
+        `allow_knn` 同理是**参数**而不是在这里计算:它的判定要读
+        `notebook_copy_stats`,而那条链(version_signal)会自己开一条池化连接——
+        在持连接时算它,就是上面整段警告的那个「嵌套获取坐死连接池」。调用方在
+        打开连接之前用 `_lexical_knn_allowed` 算好传进来(与 `corpus_langs`
+        同一形态、同一理由)。
         """
-        allow_knn = (
-            self.settings.postgres_lexical_knn_enabled
-            and allowed_source_ids is None
-            and not self.notebook_copy_stats(notebook_id)["copyable"]
-        )
         try:
             if allowed_source_ids is None:
                 return self.knowledge.fts_search(
@@ -803,16 +827,17 @@ class CandidateRetrievalService(_RetrievalState):
 
     def _relation_lexical_candidate_ids(
         self, db: object, notebook_id: str, query: str, recall: int,
-        *, corpus_langs,
+        *, corpus_langs, allow_knn: bool = False,
     ) -> list[str]:
         """Map lexical KG endpoint hits to a bounded relation candidate set.
 
-        Forwards `corpus_langs` for the same reason `_lexical_object_hits`
-        requires it: this helper also runs on a caller-owned connection.
+        Forwards `corpus_langs` and `allow_knn` for the same reason
+        `_lexical_object_hits` requires them: this helper also runs on a
+        caller-owned connection, so both verdicts are computed before it.
         """
         object_hits = self._lexical_object_hits(
             db, notebook_id, query, recall, site="relation_endpoint_fts",
-            corpus_langs=corpus_langs,
+            corpus_langs=corpus_langs, allow_knn=allow_knn,
         )
         if not object_hits:
             return []
@@ -960,7 +985,9 @@ class CandidateRetrievalService(_RetrievalState):
         # 语言探针必须在拿外层连接**之前**跑:冷缓存时它自己要开一条连接,
         # 在这条 `with` 里面探测 = 嵌套获取,并发时会把连接池坐死(见
         # `_lexical_object_hits` 的说明)。与三个 chunk 调用点同一形态。
+        # KNN 判定同一约定、同一理由(它要读 notebook_copy_stats 的版本信号)。
         corpus_langs = self._lexical_corpus_langs(notebook_id)
+        allow_knn = self._lexical_knn_allowed(notebook_id)
         with self._connect() as db:
             if not self.knowledge.relation_exists(db, notebook_id):
                 return []
@@ -978,7 +1005,7 @@ class CandidateRetrievalService(_RetrievalState):
                         notebook_id, query_vector, idx, self.settings.relation_recall)
                 lexical_ids = self._relation_lexical_candidate_ids(
                     db, notebook_id, query, self.settings.relation_recall,
-                    corpus_langs=corpus_langs,
+                    corpus_langs=corpus_langs, allow_knn=allow_knn,
                 )
                 candidate_ids = list(dict.fromkeys([*cand_sims, *lexical_ids]))
                 if candidate_ids:
@@ -1282,6 +1309,10 @@ class CandidateRetrievalService(_RetrievalState):
                 # source-scoped run.
                 corpus_langs = self._lexical_corpus_langs(
                     notebook_id, source_scoped=source_filter is not None)
+                # KNN 判定与语言探针同一约定:连接之前算(它读 copy-stats 的
+                # 版本信号,自己要开连接)。source_filter 显式传入,与上面同理。
+                allow_knn = self._lexical_knn_allowed(
+                    notebook_id, allowed_source_ids=source_filter)
                 with self._connect() as db:
                     lexical_hits = self._lexical_object_hits(
                         db,
@@ -1290,6 +1321,7 @@ class CandidateRetrievalService(_RetrievalState):
                         self.settings.chunk_recall,
                         site="kg_ann_fts",
                         corpus_langs=corpus_langs,
+                        allow_knn=allow_knn,
                     )
                 lexical_ids = [hit["object_id"] for hit in lexical_hits]
                 lexical_candidate_count = len(lexical_ids)
@@ -1305,6 +1337,8 @@ class CandidateRetrievalService(_RetrievalState):
             # 有界补充。FTS 空 → [](与 relation 侧冷矩阵守卫同一 fail-open 出口)。
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=source_filter is not None)
+            allow_knn = self._lexical_knn_allowed(
+                notebook_id, allowed_source_ids=source_filter)
             with self._connect() as db:
                 lex = self._lexical_object_hits(
                     db,
@@ -1313,6 +1347,7 @@ class CandidateRetrievalService(_RetrievalState):
                     self.settings.chunk_recall,
                     site="kg_large_fallback_fts",
                     corpus_langs=corpus_langs,
+                    allow_knn=allow_knn,
                 )
             self.event_log.emit({
                 "kind": "kg_bruteforce_refused", "notebook_id": notebook_id,

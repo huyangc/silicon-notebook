@@ -197,15 +197,25 @@ def chunk_candidate_rows(connection, notebook_id: str, query: str, limit: int):
 # Within an equal-similarity tie class the two orders may pick different
 # members (measured: 285 rows named exactly "DAC" at similarity 1.0) — a
 # registered trade behind the default-off POSTGRES_LEXICAL_KNN_ENABLED flag.
+# The KNN inner scan carries NO tiebreak (adding one would defeat the early
+# stop), so within such a class the KNN path is not even run-to-run stable:
+# tie membership follows GiST traversal order, which shifts as the index is
+# written.  The outer re-sort keeps the OUTPUT ordering deterministic given
+# the set; the set itself is what may drift.  A recall A/B against the legacy
+# path must therefore sample repeatedly — a single paired run cannot separate
+# access-path differences from same-path tie jitter.
 # ---------------------------------------------------------------------------
 
-# Availability is a physical-table property probed once per process: the flag
-# may be on while the operator has not (yet) built the index, and that must
-# degrade silently to the legacy statement rather than fail or, worse, run an
-# unindexed `ORDER BY <->` sort.  Keyed by (dbname, table oid): the oid pins
-# the exact physical table `to_regclass` resolved through the current
-# search_path, so conformance tests running many disposable schemas inside one
-# database cannot poison each other's verdicts.
+# Availability is a physical-table property.  The pg_index inspection runs once
+# per (dbname, table oid) for the process lifetime; what every call still pays
+# is one `to_regclass` round trip to resolve that key — the oid pins the exact
+# physical table the current search_path names, so conformance tests running
+# many disposable schemas inside one database cannot poison each other's
+# verdicts.  The flag may be on while the operator has not (yet) built the
+# index, and that must degrade silently to the legacy statement rather than
+# fail or, worse, run an unindexed `ORDER BY <->` sort.  The cache never
+# invalidates: dropping the index while the flag is on requires the documented
+# rollback order (flag off + restart first).
 _KNN_INDEX_CACHE: dict[tuple[str, int], bool] = {}
 
 
@@ -222,29 +232,68 @@ def knn_name_index_available(connection) -> bool:
     index), and rebuilding it to satisfy a naming convention would be pure
     waste.  Accepts both partial (`status != 'deprecated'` — the query always
     carries that predicate) and unconditional variants.
+
+    The shape check is EXACT, not a substring sniff, because a false positive
+    is a performance regression rather than an error: the KNN statement would
+    run with no usable index — an unindexed distance sort per term, roughly
+    legacy cost — while reporting nothing.  Two shapes a loose match admits and
+    the planner then refuses: a wrapped expression (`lower(payload->>'name')`
+    still CONTAINS the bare key text), and — the textbook spelling — the same
+    expression WITHOUT `COLLATE "C"`, which fails the planner's collation match
+    against the query's expression.  Hence key-definition equality plus an
+    explicit `indcollation` check against pg_catalog."C" (the collation never
+    appears in `pg_get_indexdef`'s key text, mirroring how
+    `retrieval_indexes._matches_shape` checks it out-of-band).
     """
-    oid_row = connection.execute(
-        "SELECT to_regclass('knowledge_objects')::oid AS oid"
-    ).fetchone()
+    # A catalog-read failure must answer "not available", not propagate: the
+    # caller's fail-open `except` would collapse the whole lexical arm to []
+    # (and abort the surrounding transaction on the relation branch), while
+    # the legacy statement is a perfectly good answer.  The failure verdict is
+    # deliberately NOT cached — a transient error must not disable KNN for the
+    # process lifetime.
+    try:
+        oid_row = connection.execute(
+            "SELECT to_regclass('knowledge_objects')::oid AS oid"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — legacy is always the safe exit
+        return False
     if oid_row is None or oid_row["oid"] is None:
         return False
     key = (str(connection.info.dbname), int(oid_row["oid"]))
     cached = _KNN_INDEX_CACHE.get(key)
     if cached is not None:
         return cached
-    row = connection.execute(
+    try:
+        row = _knn_index_row(connection, int(oid_row["oid"]))
+    except Exception:  # noqa: BLE001 — legacy is always the safe exit
+        return False
+    available = row is not None
+    _KNN_INDEX_CACHE[key] = available
+    return available
+
+
+def _knn_index_row(connection, table_oid: int):
+    return connection.execute(
         "SELECT 1 FROM pg_index i "
         "JOIN pg_class idx ON idx.oid=i.indexrelid "
         "JOIN pg_am am ON am.oid=idx.relam "
         "WHERE i.indrelid=%s::oid "
         "AND am.amname='gist' AND i.indisvalid AND i.indisready "
-        "AND NOT i.indisunique AND i.indnkeyatts=1 "
+        "AND NOT i.indisunique AND i.indnkeyatts=1 AND i.indnatts=1 "
         "AND (SELECT opc.opcname FROM unnest(i.indclass::oid[]) "
         "     WITH ORDINALITY op(oid,ord) "
         "     JOIN pg_opclass opc ON opc.oid=op.oid WHERE op.ord=1)"
         "    ='gist_trgm_ops' "
-        "AND replace(lower(pg_get_indexdef(i.indexrelid,1,true)),' ','') "
-        "    LIKE %s "
+        "AND (SELECT ons.nspname FROM unnest(i.indclass::oid[]) "
+        "     WITH ORDINALITY op(oid,ord) "
+        "     JOIN pg_opclass opc ON opc.oid=op.oid "
+        "     JOIN pg_namespace ons ON ons.oid=opc.opcnamespace WHERE op.ord=1)"
+        "    ='public' "
+        "AND i.indcollation[0]=(SELECT c.oid FROM pg_collation c "
+        "     JOIN pg_namespace n ON n.oid=c.collnamespace "
+        "     WHERE n.nspname='pg_catalog' AND c.collname='C') "
+        "AND replace(replace(lower(pg_get_indexdef(i.indexrelid,1,true)),"
+        "     '::text',''),' ','') = %s "
         # pg_get_expr(pretty=true) renders the predicate WITHOUT outer parens
         # (verified against PG16: `status <> 'deprecated'::text`); accept the
         # parenthesised spelling too so a server-version drift fails open to
@@ -253,11 +302,12 @@ def knn_name_index_available(connection) -> bool:
         "    IN ('','status <> ''deprecated''::text',"
         "        '(status <> ''deprecated''::text)') "
         "LIMIT 1",
-        (int(oid_row["oid"]), "%(payload->>'name'%"),
+        # Verified against PG16: pg_get_indexdef(...,1,true) for this index
+        # yields `(payload ->> 'name'::text)`; lower + strip `::text`/spaces
+        # gives exactly this. Equality (not LIKE) so wrapped or concatenated
+        # expressions that merely CONTAIN the key text cannot false-positive.
+        (table_oid, "(payload->>'name')"),
     ).fetchone()
-    available = row is not None
-    _KNN_INDEX_CACHE[key] = available
-    return available
 
 
 def _knn_candidate_rows_for_terms(
@@ -309,6 +359,14 @@ def _knowledge_rows_via_knn(
     # Phase 2: the short terms rerun the LEGACY statement and their rows are
     # replaced wholesale — legacy output is exactly what the flag-off path
     # would have produced for them, so no merge policy has to be invented.
+    #
+    # No COST guarantee rides on this: a short `%` page says nothing about the
+    # ILIKE arm's cardinality (a term like "test" can have a near-empty `%` arm
+    # yet six-figure ILIKE matches), so phase 2 simply costs whatever the
+    # flag-off path always cost for that term.  The overhead of the wasted KNN
+    # statement is bounded by an index scan of the `%` condition, and each
+    # phase runs under its own statement timeout — worst case the probe's wall
+    # clock doubles; it never exceeds legacy by more than the KNN scan itself.
     legacy_rows = _candidate_rows_for_terms(
         connection,
         table="knowledge_objects",
@@ -319,8 +377,11 @@ def _knowledge_rows_via_knn(
         per_term_limit=per_term_limit,
         live_only=True,
     )
-    rank_map = {index: rank for index, rank in enumerate(short_ranks)}
-    merged = [row for row in knn_rows if int(row["term_rank"]) not in set(short_ranks)]
+    rank_map = dict(enumerate(short_ranks))
+    short_rank_set = set(short_ranks)
+    merged = [
+        row for row in knn_rows if int(row["term_rank"]) not in short_rank_set
+    ]
     for row in legacy_rows:
         item = dict(row)
         item["term_rank"] = rank_map[int(row["term_rank"])]
