@@ -176,6 +176,164 @@ def chunk_candidate_rows(connection, notebook_id: str, query: str, limit: int):
     )
 
 
+# ---------------------------------------------------------------------------
+# GiST KNN early-stop for the knowledge-object name probe (default-off flag).
+#
+# The legacy LATERAL orders by `similarity(...) DESC` — form B: the LIMIT cannot
+# terminate early, so a common short term recomputes similarity for every
+# trigram candidate in the notebook before keeping 67 rows (9.1M-row base,
+# measured: 7.4s for one term, hard timeout across a multi-term question, the
+# whole lexical arm dying fail-open).  A GiST `<->` scan emits rows in
+# similarity order incrementally and stops at the LIMIT (measured 123ms, 60×).
+#
+# Two-phase, and the split is a proof rather than a heuristic: a row admitted
+# ONLY by the ILIKE arm has similarity below the `%` threshold, so whenever the
+# KNN page (which contains `%`-passing rows exclusively) comes back FULL, the
+# legacy top-k provably contains no ILIKE-only row and the pages agree up to
+# equal-similarity ties.  Only a SHORT page can be missing ILIKE-only rows, and
+# for exactly those terms the legacy statement is cheap (few trigram matches),
+# so phase 2 re-runs it for the short terms and replaces their rows wholesale.
+#
+# Within an equal-similarity tie class the two orders may pick different
+# members (measured: 285 rows named exactly "DAC" at similarity 1.0) — a
+# registered trade behind the default-off POSTGRES_LEXICAL_KNN_ENABLED flag.
+# ---------------------------------------------------------------------------
+
+# Availability is a physical-table property probed once per process: the flag
+# may be on while the operator has not (yet) built the index, and that must
+# degrade silently to the legacy statement rather than fail or, worse, run an
+# unindexed `ORDER BY <->` sort.  Keyed by (dbname, table oid): the oid pins
+# the exact physical table `to_regclass` resolved through the current
+# search_path, so conformance tests running many disposable schemas inside one
+# database cannot poison each other's verdicts.
+_KNN_INDEX_CACHE: dict[tuple[str, int], bool] = {}
+
+
+def reset_knn_index_cache() -> None:
+    """Test seam: availability is otherwise cached for the process lifetime."""
+    _KNN_INDEX_CACHE.clear()
+
+
+def knn_name_index_available(connection) -> bool:
+    """True iff a usable GiST trgm index covers the knowledge-object name.
+
+    Shape-based rather than name-based on purpose: the production index may
+    predate the feature under an operator-chosen name (the measured 2.5GB bench
+    index), and rebuilding it to satisfy a naming convention would be pure
+    waste.  Accepts both partial (`status != 'deprecated'` — the query always
+    carries that predicate) and unconditional variants.
+    """
+    oid_row = connection.execute(
+        "SELECT to_regclass('knowledge_objects')::oid AS oid"
+    ).fetchone()
+    if oid_row is None or oid_row["oid"] is None:
+        return False
+    key = (str(connection.info.dbname), int(oid_row["oid"]))
+    cached = _KNN_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    row = connection.execute(
+        "SELECT 1 FROM pg_index i "
+        "JOIN pg_class idx ON idx.oid=i.indexrelid "
+        "JOIN pg_am am ON am.oid=idx.relam "
+        "WHERE i.indrelid=%s::oid "
+        "AND am.amname='gist' AND i.indisvalid AND i.indisready "
+        "AND NOT i.indisunique AND i.indnkeyatts=1 "
+        "AND (SELECT opc.opcname FROM unnest(i.indclass::oid[]) "
+        "     WITH ORDINALITY op(oid,ord) "
+        "     JOIN pg_opclass opc ON opc.oid=op.oid WHERE op.ord=1)"
+        "    ='gist_trgm_ops' "
+        "AND replace(lower(pg_get_indexdef(i.indexrelid,1,true)),' ','') "
+        "    LIKE %s "
+        # pg_get_expr(pretty=true) renders the predicate WITHOUT outer parens
+        # (verified against PG16: `status <> 'deprecated'::text`); accept the
+        # parenthesised spelling too so a server-version drift fails open to
+        # "not available" only when the predicate genuinely differs.
+        "AND COALESCE(pg_get_expr(i.indpred,i.indrelid,true),'') "
+        "    IN ('','status <> ''deprecated''::text',"
+        "        '(status <> ''deprecated''::text)') "
+        "LIMIT 1",
+        (int(oid_row["oid"]), "%(payload->>'name'%"),
+    ).fetchone()
+    available = row is not None
+    _KNN_INDEX_CACHE[key] = available
+    return available
+
+
+def _knn_candidate_rows_for_terms(
+    connection, notebook_id: str, terms: list[str], per_term_limit: int
+):
+    """Phase 1: one KNN LATERAL per term, `%` arm only, early-stopping."""
+    term_values = ",".join("(%s,%s)" for _ in terms)
+    statement = (
+        f"WITH lexical_terms(term_rank,term) AS (VALUES {term_values}) "
+        "SELECT candidate.candidate_id,lexical_terms.term_rank,"
+        "candidate.candidate_similarity FROM lexical_terms "
+        "CROSS JOIN LATERAL ("
+        "SELECT id AS candidate_id,"
+        f"public.similarity({PAYLOAD_NAME_EXPRESSION},lexical_terms.term) "
+        "AS candidate_similarity FROM knowledge_objects "
+        "WHERE notebook_id=%s AND status!='deprecated' "
+        f"AND {PAYLOAD_NAME_EXPRESSION} OPERATOR(public.%%) lexical_terms.term "
+        f"ORDER BY {PAYLOAD_NAME_EXPRESSION} OPERATOR(public.<->) "
+        "lexical_terms.term LIMIT %s"
+        ") AS candidate ORDER BY lexical_terms.term_rank,"
+        "candidate.candidate_similarity DESC,candidate.candidate_id COLLATE \"C\""
+    )
+    params = [
+        value for term_rank, term in enumerate(terms)
+        for value in (term_rank, term)
+    ]
+    params.append(notebook_id)
+    params.append(int(per_term_limit))
+    return connection.execute(statement, params).fetchall()
+
+
+def _knowledge_rows_via_knn(
+    connection, notebook_id: str, terms: list[str], per_term_limit: int
+):
+    """Two-phase KNN probe returning the legacy row shape and ordering."""
+    knn_rows = _knn_candidate_rows_for_terms(
+        connection, notebook_id, terms, per_term_limit
+    )
+    counts: dict[int, int] = {}
+    for row in knn_rows:
+        rank = int(row["term_rank"])
+        counts[rank] = counts.get(rank, 0) + 1
+    short_ranks = [
+        rank for rank in range(len(terms))
+        if counts.get(rank, 0) < int(per_term_limit)
+    ]
+    if not short_ranks:
+        return knn_rows
+    # Phase 2: the short terms rerun the LEGACY statement and their rows are
+    # replaced wholesale — legacy output is exactly what the flag-off path
+    # would have produced for them, so no merge policy has to be invented.
+    legacy_rows = _candidate_rows_for_terms(
+        connection,
+        table="knowledge_objects",
+        id_column="id",
+        text_expression=PAYLOAD_NAME_EXPRESSION,
+        notebook_id=notebook_id,
+        terms=[terms[rank] for rank in short_ranks],
+        per_term_limit=per_term_limit,
+        live_only=True,
+    )
+    rank_map = {index: rank for index, rank in enumerate(short_ranks)}
+    merged = [row for row in knn_rows if int(row["term_rank"]) not in set(short_ranks)]
+    for row in legacy_rows:
+        item = dict(row)
+        item["term_rank"] = rank_map[int(row["term_rank"])]
+        merged.append(item)
+    # Restore the single-statement output ordering across both phases.
+    merged.sort(key=lambda row: (
+        int(row["term_rank"]),
+        -float(row["candidate_similarity"] or 0.0),
+        str(row["candidate_id"]),
+    ))
+    return merged
+
+
 def _candidate_rows_for_terms(
     connection,
     *,
@@ -256,8 +414,22 @@ def _candidate_rows_for_terms(
 
 def knowledge_candidate_rows_for_terms(
     connection, notebook_id: str, terms: list[str], per_term_limit: int,
-    allowed_source_ids: list[str] | None = None,
+    allowed_source_ids: list[str] | None = None, *, allow_knn: bool = False,
 ):
+    # `allow_knn` is a hint, not a command: it engages only when the run is
+    # unscoped (the source-scoped statement carries an EXISTS predicate the KNN
+    # shape has no bench for) and a conforming GiST index actually exists.
+    # Every other combination is the byte-identical legacy statement.
+    if (
+        allow_knn
+        and allowed_source_ids is None
+        and terms
+        and per_term_limit > 0
+        and knn_name_index_available(connection)
+    ):
+        return _knowledge_rows_via_knn(
+            connection, notebook_id, terms, per_term_limit
+        )
     return _candidate_rows_for_terms(
         connection,
         table="knowledge_objects",
@@ -273,8 +445,13 @@ def knowledge_candidate_rows_for_terms(
 
 def chunk_candidate_rows_for_terms(
     connection, notebook_id: str, terms: list[str], per_term_limit: int,
-    allowed_source_ids: list[str] | None = None,
+    allowed_source_ids: list[str] | None = None, *, allow_knn: bool = False,
 ):
+    # Accepted and deliberately ignored: whole-chunk text vs a short term is a
+    # different length regime (trigram signatures degrade, similarity ordering
+    # is near-noise) with no bench behind it yet.  Taking the kwarg keeps the
+    # two candidate producers signature-compatible for the shared union seam.
+    del allow_knn
     return _candidate_rows_for_terms(
         connection,
         table="chunks",

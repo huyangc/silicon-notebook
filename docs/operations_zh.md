@@ -427,6 +427,27 @@ FROM pg_stat_progress_create_index;
 改变 planner 路径，不改 SQL 谓词、similarity 分数、候选 limit 或排序；PostgreSQL conformance
 测试必须证明检索结果逐项一致。
 
+### 超大库的 KNN 早停（`POSTGRES_LEXICAL_KNN_ENABLED`）
+
+上面的复合索引让**其他**库不再为巨型库买单，但救不了巨型库自己：`ORDER BY similarity` 仍要
+对全部 trigram 候选算完相似度才能截断（9.1M 对象库实测：常见短词单词项 7.4s，多词项问题直接
+超时、词法臂 fail-open 整条阵亡）。默认关的 `POSTGRES_LEXICAL_KNN_ENABLED` 让大库的未收窄
+run 改走 GiST `<->` 扫描、到 LIMIT 即停（同库实测 123ms，60×）。分数仍是 `similarity()`；
+只有等相似度并列类内的成员选择可能不同，所以开启前应配真机召回 A/B。
+
+启用只需一条 additive 的 GiST 索引；可用性按**形状**探测，之前为 bench 建的同形索引直接
+生效，不需要为命名重建：
+
+```sql
+CREATE INDEX CONCURRENTLY idx_knowledge_objects_name_knn_gist ON knowledge_objects
+  USING gist ((((payload ->> 'name') COLLATE "C")) public.gist_trgm_ops(siglen=128))
+  WHERE status != 'deprecated';
+```
+
+随后设 `POSTGRES_LEXICAL_KNN_ENABLED=true` 并重启后端（可用性按进程探测一次）。回滚只需
+关开关——索引没有开关时是惰性的；确认开关已关后才删除索引。KNN 页取不满的词项会自动经
+旧语句重探，罕见词/仅 ILIKE 命中的结果与旧路径一致。
+
 ## 用 MinerU 解析 PDF
 
 PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 时才调用它，否则回退到本地 PyMuPDF4LLM 版面/Markdown 解析（pypdf 只作解析器报错后的最后兜底）。

@@ -548,6 +548,17 @@ class Settings(BaseSettings):
     # 设 false 完全回到接入前(不过滤、零行为差异),用于探针误判某库时的临时恢复。
     lexical_language_gate_enabled: bool = Field(
         True, validation_alias="LEXICAL_LANGUAGE_GATE_ENABLED")
+    # PostgreSQL 大库 KG 名词法探针的 GiST KNN 早停(默认关)。现状 ORDER BY
+    # similarity 是形态 B:LIMIT 无法提前终止,常见短词要对全部 trgm 候选回表、
+    # 算相似度、排序(9.1M 行 base 实测 'DAC' 单词项 7.4s,多词项直接超时,整条
+    # 词法臂 fail-open 阵亡)。KNN(`<->` 距离序)按相似度序增量吐行、到 LIMIT 即停
+    # (同库实测 123ms,60×)。只改访问路径,分数仍是 similarity();等相似度并列类
+    # 内的成员选择可能与旧路径不同(实测 'DAC' 有 285 行 sim=1.0 同名对象,top-k
+    # 取哪 67 个两条路径各取一批)——这是登记过的取舍,也是默认关、需真机 A/B 后
+    # 才开的原因。只在 PostgreSQL 且存在匹配形状的 GiST 索引时生效(运行时探测,
+    # 缺索引静默走旧路径);SQLite 忽略此开关。
+    postgres_lexical_knn_enabled: bool = Field(
+        False, validation_alias="POSTGRES_LEXICAL_KNN_ENABLED")
     chunk_mmr_k: int = Field(16, validation_alias="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, validation_alias="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, validation_alias="CHUNK_ANSWER_BUDGET_CHARS")

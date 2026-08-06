@@ -591,6 +591,7 @@ REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，upda
 REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）；深度报告每节深挖到达穷尽档时同样生效
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
 LEXICAL_LANGUAGE_GATE_ENABLED # 语料采样中没有任何 CJK 字符时，丢弃纯 CJK 的词法词项（默认 true；这些探针对该库保证零命中，却各买一次真实的 PostgreSQL LATERAL 探针——7,026 块的英文库实测：64 词项冷 29.7s / 3 词项暖 0.26s，返回同样的 26 行，未过滤形态在报告多节并发下会直接超时。绝不过滤用户引号短语与整句词项，不做拉丁方向，也不作用于选定来源的运行——那条路的词法臂是它唯一的候选来源。设 false 回到接入前逐字一致的行为，用于某库语言采样误判时的临时恢复）
+POSTGRES_LEXICAL_KNN_ENABLED # 大型 PostgreSQL 库上 KG 名词法探针的 GiST `<->` KNN 早停（默认 false；仅 PostgreSQL，SQLite 忽略）。需要一个形状匹配的 GiST trigram 索引（覆盖知识对象名表达式）——按形状而非名字探测，运维已建的同形索引直接生效；缺索引时旧语句原样运行。只对未按来源收窄、且非 copyable 的大库生效。分数仍是 `similarity()`；等相似度并列类内两条访问路径可能取不同成员（9.1M 行 base 实测：285 行同名 "DAC" 的 sim=1.0 类），因此默认关、待真机 A/B 后再开。同库实测：常见短词单词项 7.4s → 123ms（60×）。索引 DDL 与上线/回滚步骤见运维文档。
 CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）
 RERANK_MAX_DOCS              # 单次 rerank 文档上限，超出自动切 batch 并发（默认 500）

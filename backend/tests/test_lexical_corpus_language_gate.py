@@ -197,7 +197,7 @@ def test_postgres_union_probes_exactly_the_gated_terms():
     captured: list[list[str]] = []
 
     def _fake_rows_for_terms(db, notebook_id, terms, per_term_limit,
-                             allowed_source_ids=None):
+                             allowed_source_ids=None, *, allow_knn=False):
         captured.append(list(terms))
         return []
 

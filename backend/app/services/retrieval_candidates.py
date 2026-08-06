@@ -766,11 +766,26 @@ class CandidateRetrievalService(_RetrievalState):
         the pool instead of the statement timeout. Every caller therefore probes
         BEFORE it opens its connection, which is also what the chunk-side call
         sites have always done.
+
+        `allow_knn` 在这里集中计算而不是逐调用点各算一份:三个非受限调用点
+        (kg_ann_fts / kg_large_fallback_fts / relation_endpoint_fts)的判据
+        完全相同——开关开着、run 未按来源收窄、且该库是「大库」(copyable=False,
+        与自动建索引共用同一判据:小库刚拿到复合 GIN 索引,现状已是最优,KNN
+        对它们反而要在全局距离序里翻找自己的行)。受限 run 由
+        `allowed_source_ids is not None` 自动落回 legacy;SQLite 适配器收下
+        这个 kwarg 但忽略(纯 PG 访问路径提示)。`notebook_copy_stats` 是
+        KG-version 缓存的既有判定,不新增查询。
         """
+        allow_knn = (
+            self.settings.postgres_lexical_knn_enabled
+            and allowed_source_ids is None
+            and not self.notebook_copy_stats(notebook_id)["copyable"]
+        )
         try:
             if allowed_source_ids is None:
                 return self.knowledge.fts_search(
-                    db, notebook_id, query, k=recall, corpus_langs=corpus_langs
+                    db, notebook_id, query, k=recall, corpus_langs=corpus_langs,
+                    allow_knn=allow_knn,
                 )
             return self.knowledge.fts_search(
                 db, notebook_id, query, k=recall,
