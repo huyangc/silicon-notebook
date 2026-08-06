@@ -87,7 +87,12 @@ export default function PublicReportPage() {
   const citationRefs = publicCitationRefs(report.references);
   const openReference = (key: string) => {
     setSelectedKey(key);
-    document.getElementById(`ref-${key}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const target = document.getElementById(`ref-${key}`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    // 只滚动不移焦，键盘/读屏用户点完仍停在正文那个按钮上：视口走了，焦点没走，
+    // 摘录既不会被朗读也 Tab 不到。条目本身用 tabIndex={-1} 只接受程序化聚焦。
+    target.focus({ preventScroll: true });
   };
   const components = {
     a({ href, children }: { href?: string; children?: React.ReactNode }) {
@@ -170,6 +175,7 @@ export default function PublicReportPage() {
               <li
                 key={reference.key}
                 id={`ref-${reference.key}`}
+                tabIndex={-1}
                 className={selectedKey === reference.key ? "active" : undefined}
               >
                 <span className="public-report-refnum" aria-hidden="true">

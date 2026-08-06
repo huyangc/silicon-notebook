@@ -61,6 +61,8 @@ test("正文 [k] 标记渲染成可点编号，并跳到编号一致的引用出
 
   await user.click(chip);
   await waitFor(() => expect(container.querySelector("#ref-k7")).toHaveClass("active"));
+  // 只滚动不移焦时,键盘/读屏用户点完仍停在正文按钮上,摘录读不到也 Tab 不到。
+  expect(document.activeElement).toBe(container.querySelector("#ref-k7"));
 });
 
 test("宽表格与代码块走共用包装，才能在自己的内容块里横向滚动", async () => {
