@@ -28,10 +28,36 @@ const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 // The collection search box answers "which notebook contains X", so it calls
 // `searchNotebook` once per visible notebook — and one of those may be a
 // reference library with millions of knowledge objects.  Firing the whole fan-out
-// at once put every one of those queries in the connection pool simultaneously;
-// callers must bound their concurrency by this, and pass a signal so a superseded
-// keystroke's requests are actually abandoned rather than merely ignored.
+// at once put every one of those queries in the connection pool simultaneously.
 export const SEARCH_FANOUT_LIMIT = 4;
+
+// The permit pool is MODULE level, not per fan-out, and that is the whole point.
+// `AbortController.abort()` cancels the browser's fetch; it does NOT cancel the
+// work, because `search_notebook` is a synchronous FastAPI route doing blocking
+// SQL in a threadpool and never observes the disconnect.  So a per-call pool of
+// four still lets rapid typing stack four more live queries per keystroke
+// generation, against a connection pool of ten (codex #460 round-1 P1).  Sharing
+// the permits makes the bound hold across generations: four in flight, total,
+// no matter how many fan-outs are alive.
+let searchPermitsHeld = 0;
+const searchPermitWaiters: (() => void)[] = [];
+
+async function acquireSearchPermit(): Promise<void> {
+  if (searchPermitsHeld < SEARCH_FANOUT_LIMIT) {
+    searchPermitsHeld += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => searchPermitWaiters.push(resolve));
+  // The permit was handed over by `releaseSearchPermit`, which deliberately
+  // leaves the count alone: transferring rather than re-incrementing is what
+  // stops two waiters from both claiming the same freed slot.
+}
+
+function releaseSearchPermit(): void {
+  const next = searchPermitWaiters.shift();
+  if (next) next();
+  else searchPermitsHeld -= 1;
+}
 
 export const searchNotebook = (id: string, query: string, signal?: AbortSignal) =>
   requestJson<{ hits: SearchHit[] }>(
@@ -39,12 +65,14 @@ export const searchNotebook = (id: string, query: string, signal?: AbortSignal) 
     { ...options, signal },
   );
 
-/** Search every notebook for `query`, at most `SEARCH_FANOUT_LIMIT` at a time.
+/** Search every notebook for `query`, holding at most `SEARCH_FANOUT_LIMIT`
+ * searches in flight — counted across every live fan-out, not per call.
  *
- * The bound is the whole point: a worker pool draining a shared cursor, rather
- * than `notebooks.map(...)`, which handed the connection pool one query per
- * notebook at once.  `signal` reaches every call so aborting the fan-out stops
- * the requests instead of merely discarding their answers.
+ * Each notebook waits for a module-level permit before it issues anything, so a
+ * superseded generation cannot add its own four on top of the current one's.
+ * A generation whose signal has already aborted returns its permit without
+ * issuing a request at all, which is what lets a fresh fan-out take the slots
+ * back within a microtask instead of behind the old queue.
  *
  * `search` is injected so the concurrency bound is testable without a network.
  */
@@ -57,16 +85,18 @@ export async function searchNotebooksBounded(
   ) => Promise<{ hits: SearchHit[] }> = searchNotebook,
 ): Promise<Record<string, SearchHit[]>> {
   const hits: Record<string, SearchHit[]> = {};
-  let cursor = 0;
-  const drain = async () => {
-    while (cursor < notebookIds.length) {
-      const id = notebookIds[cursor++];
+  await Promise.all(notebookIds.map(async (id) => {
+    await acquireSearchPermit();
+    try {
+      // Re-checked AFTER the wait, not before it: the abort almost always lands
+      // while this task sits in the queue, and issuing then would spend a real
+      // query on a generation whose answer is already discarded.
+      signal?.throwIfAborted();
       hits[id] = (await search(id, query, signal)).hits;
+    } finally {
+      releaseSearchPermit();
     }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(SEARCH_FANOUT_LIMIT, notebookIds.length) }, drain),
-  );
+  }));
   return hits;
 }
 
