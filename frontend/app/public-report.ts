@@ -58,19 +58,42 @@ export async function fetchPublicReport(token: string): Promise<PublicReportT | 
 }
 
 /**
- * 引用按 key 建索引，供正文里的 `[k]` 标记查找。
+ * 一条引用对外显示的编号。
  *
- * 公开页的引用**不可点开原文** —— 后端根本没给 source_id/element_id。所以这里
- * 只提供标题/位置/摘录，正文标记渲染成不可点的角标而不是链接：一个点不动的
- * 链接比没有链接更让人困惑。
+ * 权威是 key 里的序号：后端在写 `content_md` 之前已经把正文标记全局重编号成
+ * `kN`，所以正文里写的就是 N。**不能**照搬站内视图的「位置序号」——公开投影会
+ * 丢掉既无标题又无摘录的条目（`report_public_view.public_report_payload`），
+ * 位置序号一旦被这道过滤挤位，正文的 [12] 就会指到清单里的第 11 条。
+ * 只有 key 不是 `kN` 形状时才退回位置序号。
  */
-export function publicReferencesByKey(
+export function publicReferenceNumber(
+  reference: PublicReportReferenceT | undefined,
+  index: number,
+): number {
+  const matched = String(reference?.key || "").trim().match(/^k(\d+)$/);
+  return matched ? Number(matched[1]) : index + 1;
+}
+
+/** remarkCitations 需要的最小引用形状（结构上兼容 AnswerReference）。 */
+export type PublicCitationRefT = { id: string; displayLabel: string };
+
+/**
+ * 正文 `[k]` 标记链接化所需的 key→显示编号映射。
+ *
+ * 与「引用出处」清单共用 `publicReferenceNumber`，两处编号因此不可能分叉；
+ * 显示形态 `[N]` 与站内答案/报告逐字一致（`answer-formatting` 的 displayLabel）。
+ */
+export function publicCitationRefs(
   references: PublicReportReferenceT[] | undefined,
-): Record<string, PublicReportReferenceT> {
-  const out: Record<string, PublicReportReferenceT> = {};
-  for (const reference of references || []) {
+): Record<string, PublicCitationRefT> {
+  const out: Record<string, PublicCitationRefT> = {};
+  (references || []).forEach((reference, index) => {
     const key = String(reference?.key || "").trim();
-    if (key) out[key] = reference;
-  }
+    if (!key) return;
+    out[key] = {
+      id: `public:${key}`,
+      displayLabel: `[${publicReferenceNumber(reference, index)}]`,
+    };
+  });
   return out;
 }

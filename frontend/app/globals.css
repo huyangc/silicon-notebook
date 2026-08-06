@@ -8972,15 +8972,48 @@ button.chat-session-card {
 
 /* --- 公开分享的报告页（唯一免登录界面，样式自成一体） --- */
 .public-report {
-  max-width: 860px;
+  max-width: 880px;
   margin: 0 auto;
-  padding: 32px 20px 64px;
+  padding: 40px 24px 72px;
+  display: grid;
+  gap: 20px;
+}
+
+.public-report-head {
+  display: grid;
+  gap: 7px;
+  padding: 0 2px;
+}
+
+.public-report-eyebrow {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
 }
 
 .public-report-head h1 {
-  margin: 0 0 6px;
-  font-size: 22px;
-  line-height: 1.35;
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.36;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.public-report-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 12px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.public-report-meta > span + span::before {
+  content: "·";
+  margin-right: 12px;
 }
 
 .public-report-note {
@@ -8990,56 +9023,171 @@ button.chat-session-card {
   margin: 0;
 }
 
+/* 分享页是纯阅读场景（常被打印/存 PDF），正文比站内面板宽松一档。
+   ⚠ `> *` 的 min-width:0 是宽内容的兜底出口:grid item 默认 min-width:auto,
+   一张没被 .answer-table-wrap 包住的宽表格会把整张卡片连同整页顶宽。表格现在
+   走 components 包装了,这条只负责剩下的意外(超长 URL、行内公式)。
+   overflow-wrap:正文的引用出处段落写的是原始上传文件名
+   (`MinerU_markdown_2407_2065…md`)——一个没有断点的长词,窄屏上不换行就顶出
+   卡片边框(实测溢出 81px)。 */
+.public-report .report-markdown {
+  gap: 14px;
+  padding: 30px 34px 34px;
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  overflow-wrap: anywhere;
+}
+
+.public-report .report-markdown > * {
+  min-width: 0;
+}
+
+.public-report .report-markdown p,
+.public-report .report-markdown ul,
+.public-report .report-markdown ol {
+  font-size: 15.5px;
+  line-height: 1.85;
+}
+
+/* 页头已有大标题;正文 h1(报告自带的标题行)降一级,避免两个巨标题对撞。 */
+.public-report .report-markdown h1 {
+  font-size: 20px;
+}
+
+.public-report .report-markdown img {
+  max-width: 100%;
+  height: auto;
+}
+
 .public-report-references {
-  margin-top: 28px;
-  border-top: 1px solid #dce5ef;
-  padding-top: 16px;
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 22px;
 }
 
 .public-report-references h2 {
-  margin: 0 0 10px;
-  font-size: 15px;
+  margin: 0;
+  font-size: 16px;
   color: #2c3a4d;
 }
 
 .public-report-references ol {
   margin: 0;
-  padding-left: 20px;
+  padding: 0;
+  list-style: none;
   display: grid;
-  gap: 12px;
+  gap: 10px;
+}
+
+.public-report-references li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  /* 正文编号跳过来时别贴着视口顶边。 */
+  scroll-margin: 24px 0;
+}
+
+.public-report-references li.active {
+  border-color: #111827;
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.13);
+}
+
+.public-report-refnum {
+  align-self: start;
+  padding: 1px 0;
+  border: 1px solid #b9c3d3;
+  border-radius: 999px;
+  background: #fff;
+  color: #263241;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.public-report-refbody {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 
 .public-report-references li strong {
   font-weight: 600;
+  font-size: 14px;
   word-break: break-word;
 }
 
 .public-report-locus {
   color: #5e6a79;
   font-size: 12px;
-  margin-left: 8px;
 }
 
 .public-report-references small {
-  display: block;
   color: #5e6a79;
   font-size: 12px;
-  margin-top: 2px;
+  word-break: break-word;
 }
 
 .public-report-references blockquote {
-  margin: 6px 0 0;
+  margin: 5px 0 0;
   padding: 8px 11px;
   border-left: 3px solid #dce5ef;
   background: #f7fafc;
   color: #3f4b5b;
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.65;
   word-break: break-word;
 }
 
-.public-report footer {
-  margin-top: 28px;
+.public-report-foot {
   border-top: 1px dashed #dce3ec;
-  padding-top: 10px;
+  padding-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .public-report {
+    padding: 24px 14px 48px;
+    gap: 16px;
+  }
+
+  .public-report-head h1 {
+    font-size: 21px;
+  }
+
+  .public-report .report-markdown {
+    padding: 18px 16px 22px;
+    border-radius: 12px;
+  }
+
+  .public-report .report-markdown p,
+  .public-report .report-markdown ul,
+  .public-report .report-markdown ol {
+    font-size: 15px;
+    line-height: 1.8;
+  }
+}
+
+/* 分享链接的常见去处是打印/存 PDF:去掉屏幕上的卡片外壳,并且不让一条引用
+   出处被分页切成两半。 */
+@media print {
+  .public-report {
+    max-width: none;
+    padding: 0;
+  }
+
+  .public-report .report-markdown {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0;
+  }
+
+  .public-report-references li {
+    break-inside: avoid;
+  }
 }

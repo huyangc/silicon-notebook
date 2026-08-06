@@ -110,7 +110,7 @@ Database-specific coverage now targets the direct PostgreSQL backend. Retired te
 4. Browse and govern extracted knowledge, inspect the full-screen graph, and mount public reference libraries when federation is needed.
 5. Save useful answers into private notebook-bound Memory, maintain structured knowhow tables, or generate a deep report.
 6. Share a notebook by link: small notebooks are copied; large notebooks are joined read-only. Live collaborative editing is not part of the beta.
-7. A finished deep report can additionally be published as a **sign-in-free** read-only page: the owner issues the link and can revoke it at any time. That page carries the body and the bibliography (title, location, excerpt) only — no source ids, and it cannot open the original material.
+7. A finished deep report can additionally be published as a **sign-in-free** read-only page: the owner issues the link and can revoke it at any time. That page carries the body and the citation list (title, location, excerpt) only — no source ids, and it cannot open the original material. The body renders through the same pipeline as the in-app view (formulas, tables, clickable citation numbers), and a number jumps to its excerpt on the same page.
 
 Inside a notebook, the workspace stays two-column: imported sources on the left and **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report) in the main area.
 
