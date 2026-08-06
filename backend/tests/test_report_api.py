@@ -882,6 +882,89 @@ def test_report_confirm_and_generate_reject_a_scope_emptied_since_create(
     assert repo.get_report(nb_id, rid)["status"] == "outline_ready", "不得认领 generating"
 
 
+def test_report_intent_and_generate_accept_large_server_frozen_scope(
+    client, monkeypatch
+):
+    """A report persists the server-expanded source ceiling between phases.
+
+    More than 10,000 ids would be rejected as a public request, but this value
+    is the server's own trusted snapshot.  Both later HTTP gates must restore
+    it with ``ResolvedSourceScope`` before re-freezing; switching either gate
+    back to the request model would turn this regression into a 409 again.
+    """
+    import app.api.report_routes as routes_mod
+    from app.api.deps import repository
+    from tests.model_testkit import bind_chat_client
+
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    plan_launches = []
+    generate_launches = []
+    nb_id, _, _ = _scoped_client(client, monkeypatch)
+    monkeypatch.setattr(
+        routes_mod,
+        "_launch_plan_job",
+        lambda *args, **kwargs: plan_launches.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        routes_mod,
+        "_launch_generate_job",
+        lambda *args, **kwargs: generate_launches.append((args, kwargs)),
+    )
+
+    created = client.post(
+        f"/api/notebooks/{nb_id}/reports", json={"question": "q?"}
+    )
+    assert created.status_code == 200
+    rid = created.json()["report_id"]
+    repo = repository()
+    source_ids = [f"s{index}" for index in range(10_001)]
+    understanding = {
+        "source_scope": {
+            "mode": "include",
+            "source_ids": source_ids,
+            "narrowed": False,
+        },
+        "resolved_question": "q?",
+        "ambiguities": [],
+        "needs_clarification": False,
+    }
+    repo.update_report(
+        nb_id, rid, status="intent_ready", understanding=understanding
+    )
+
+    # Isolate the persisted-model boundary under test from repository source
+    # ownership reads. The route must successfully parse the trusted snapshot
+    # before this helper receives it.
+    monkeypatch.setattr(
+        routes_mod, "_validate_source_scope", lambda _repo, _nb, scope: scope
+    )
+    confirmed = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/intent",
+        json={"resolved_question": "q?", "answers": []},
+    )
+    assert confirmed.status_code == 200
+    confirmed_scope = plan_launches[-1][1]["source_scope"]
+    assert len(confirmed_scope.source_ids) == 10_001
+
+    repo.update_report(
+        nb_id,
+        rid,
+        status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+    )
+
+    class _Configured:
+        configured = True
+
+    bind_chat_client(repo, "report_section", _Configured())
+    generated = client.post(
+        f"/api/notebooks/{nb_id}/reports/{rid}/generate", json={}
+    )
+    assert generated.status_code == 200
+    generated_scope = generate_launches[-1][1]["source_scope"]
+    assert len(generated_scope.source_ids) == 10_001
+
+
 def test_report_base_scope_freezes_mount_set_at_create_time(client, monkeypatch):
     """R6:报告的范围是**创建时定格、跨阶段持久化**的(create → confirm → generate)。
     `exclude:[]`——浏览器「全选参考库」的紧凑表示——必须在 create 时就把当时挂载的

@@ -21,6 +21,7 @@ from app.models.source_scope import (
     RetrievalScopeBaseReceipt,
     RetrievalScopeLocalReceipt,
     RetrievalScopeReceipt,
+    ResolvedSourceScope,
     SourceScope,
 )
 from app.models.ask import (
@@ -113,7 +114,10 @@ def _validate_source_scope(repo, notebook: NotebookSummary,
             if source_id not in excluded
         ]
         narrowed = bool(excluded)
-    resolved = SourceScope(
+    # ``selected`` is a trusted server snapshot, not the client's submitted
+    # list.  Large notebooks can legitimately exceed SourceScope's request
+    # ceiling when compact ``exclude`` is expanded into a frozen include-list.
+    resolved = ResolvedSourceScope(
         mode="include",
         source_ids=selected,
         # Never trust a client-supplied value: narrowing is a relation between

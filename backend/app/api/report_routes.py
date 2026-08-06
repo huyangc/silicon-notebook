@@ -23,7 +23,10 @@ from app.models.reports import (
     ReportSummary,
 )
 from app.services.report_public_view import public_report_payload
-from app.models.source_scope import BaseNotebookScope, SourceScope
+from app.models.source_scope import (
+    BaseNotebookScope,
+    ResolvedSourceScope,
+)
 from app.api.ask_routes import (
     _require_non_empty_scope,
     _validate_base_scope,
@@ -158,7 +161,8 @@ def confirm_report_intent(notebook_id: str, report_id: str,
             notebook = repo.get_notebook(notebook_id)
             if persisted_scope is not None:
                 resolved_scope = _validate_source_scope(
-                    repo, notebook, SourceScope.model_validate(persisted_scope)
+                    repo, notebook,
+                    ResolvedSourceScope.model_validate(persisted_scope),
                 )
                 understanding["source_scope"] = resolved_scope.model_dump()
             if persisted_base_scope is not None:
@@ -399,7 +403,8 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
             notebook = repo.get_notebook(notebook_id)
             if persisted_scope is not None:
                 resolved_scope = _validate_source_scope(
-                    repo, notebook, SourceScope.model_validate(persisted_scope)
+                    repo, notebook,
+                    ResolvedSourceScope.model_validate(persisted_scope),
                 )
                 if resolved_scope.model_dump() != persisted_scope:
                     understanding["source_scope"] = resolved_scope.model_dump()
