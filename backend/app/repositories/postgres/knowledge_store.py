@@ -69,12 +69,17 @@ def _lexical_candidate_union(
     text_field: str,
     allowed_source_ids: Sequence[str] | None = None,
     corpus_langs: Sequence[str] | None = None,
+    allow_knn: bool = False,
 ) -> list[dict]:
     """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query.
 
     Every surviving term costs one real LATERAL probe here, which is why the
     corpus gate matters far more on this backend than on SQLite: see
     `corpus_gated_recall_terms` for the measured 29.7s → 0.96s.
+
+    `allow_knn` rides the same seam as `corpus_langs`: a producer-side hint the
+    shared union logic forwards without interpreting.  The knowledge producer
+    may honour it (GiST `<->` early stop); the chunk producer ignores it.
     """
     terms = corpus_gated_recall_terms(query, corpus_langs)
     result_limit = max(0, int(k))
@@ -87,12 +92,13 @@ def _lexical_candidate_union(
     per_term_limit = max(1, (candidate_budget + len(terms) - 1) // len(terms))
     if allowed_source_ids is None:
         candidates = candidate_rows_for_terms(
-            db, notebook_id, terms, per_term_limit
+            db, notebook_id, terms, per_term_limit, allow_knn=allow_knn
         )
     else:
         candidates = candidate_rows_for_terms(
             db, notebook_id, terms, per_term_limit,
             list(dict.fromkeys(allowed_source_ids)),
+            allow_knn=allow_knn,
         )
     if not candidates:
         return []
@@ -2145,6 +2151,7 @@ class KnowledgeStore:
         db, notebook_id: str, q: str, k: int = 30, *,
         allowed_source_ids: Sequence[str] | None = None,
         corpus_langs: Sequence[str] | None = None,
+        allow_knn: bool = False,
     ) -> List[Dict]:
         """Return deterministic lexical knowledge hits from trigram candidates."""
         needle = (q or "").strip()
@@ -2159,6 +2166,7 @@ class KnowledgeStore:
             text_field="name",
             allowed_source_ids=allowed_source_ids,
             corpus_langs=corpus_langs,
+            allow_knn=allow_knn,
         )
 
     @staticmethod

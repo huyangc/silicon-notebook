@@ -556,6 +556,7 @@ def test_community_graph_excludes_rejected_bridges_on_postgres(
         relation_recall=10,
         kg_about_downweight_enabled=False,
         lexical_language_gate_enabled=True,
+        postgres_lexical_knn_enabled=False,
     )
     # The lexical arm and the corpus-language probe both report failures here.
     service.event_log = SimpleNamespace(emit=lambda _event: None)

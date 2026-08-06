@@ -515,6 +515,38 @@ dropping either index changes planner options only: the SQL predicates, similari
 candidate limits, and ordering are unchanged, so retrieval quality must remain byte-for-byte
 equivalent in the PostgreSQL conformance test.
 
+### KNN early stop for the largest notebooks (`POSTGRES_LEXICAL_KNN_ENABLED`)
+
+The composite indexes above insulate every *other* notebook from a giant one, but cannot make
+the giant notebook's own probes cheap: `ORDER BY similarity` still recomputes similarity for
+every trigram candidate before its LIMIT (measured on a 9.1M-object notebook: 7.4s for one
+common short term; a multi-term question times out and the lexical arm dies fail-open). The
+default-off `POSTGRES_LEXICAL_KNN_ENABLED` flag switches unscoped runs on notebooks at or
+above `POSTGRES_LEXICAL_KNN_MIN_ROWS` (default 500,000 nodes+chunks) to a GiST `<->` scan
+that stops at the LIMIT (measured 123ms, 60×). The floor matters: the GiST index has no
+notebook key, so the KNN scan walks global distance order and only pays off for a notebook
+that dominates the table — set the floor above your largest non-dominant notebook. Scores
+stay `similarity()`; within equal-similarity tie classes the selected members may differ from
+legacy and are not run-to-run stable (tie membership follows GiST traversal order), so a
+recall A/B must sample the same questions repeatedly rather than compare one paired run.
+
+Enablement needs one additive GiST index; availability is detected by SHAPE, so an index you
+already built for benching counts and nothing is renamed or rebuilt:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_knowledge_objects_name_knn_gist ON knowledge_objects
+  USING gist ((((payload ->> 'name') COLLATE "C")) public.gist_trgm_ops(siglen=128))
+  WHERE status != 'deprecated';
+```
+
+Then set `POSTGRES_LEXICAL_KNN_ENABLED=true` and restart the backend (availability is probed
+once per process and never re-probed). Rollback order matters for the same reason: set the
+flag off and restart FIRST, and only then drop the index — dropping it under a live flag
+leaves the cached "available" verdict pointing at a vanished index, and every KNN statement
+degrades to an unindexed distance sort until the process restarts. Terms whose KNN page comes
+back short are re-probed through the legacy statement automatically, so rare/ILIKE-only
+matches keep their legacy results.
+
 ## PDF parsing with MinerU
 
 PDF parsing is decoupled from the GPU. The backend never imports torch; it talks to MinerU only when configured, and otherwise uses the local PyMuPDF4LLM layout/Markdown fallback (pypdf is the final parser-error fallback).
