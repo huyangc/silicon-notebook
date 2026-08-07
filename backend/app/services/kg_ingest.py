@@ -74,10 +74,19 @@ _UNBOUND = object()
 
 class _QuoteBinder:
     """Per-source evidence index. Replaces `_bind_quote`'s O(quotes *
-    elements * text_len) scan -- the whole point of this class -- with one
-    O(total_normalized_text) build plus, per quote, O(memmem over the
-    concatenated text) for the exact phase and O(sum of matching posting
-    lists) for the fuzzy fallback, both independent of the element count E.
+    elements * text_len) Python-level rescan -- the whole point of this
+    class -- with a one-time O(total_normalized_text) build, plus per quote:
+    an O(len(joined text)) C-speed `str.find` for the exact phase (its cost
+    grows with the source's total text length, same as the build itself, but
+    it is a single C-speed scan, not a Python loop re-normalizing every
+    element), and for the fuzzy fallback, worst case O(candidates) <= O(E)
+    dict increments sourced from a prebuilt inverted index (C-speed dict
+    lookup-and-increment per candidate, not a Python-level re-tokenize-and-
+    intersect per element). What this rewrite eliminates is the Q*E
+    Python-level recomputation, not big-O independence from the element
+    count E -- see the differential tests in test_kg_ingest.py for the
+    equivalence proof exercised against fixtures; the *argument* for why it
+    holds is inline below, next to each piece it justifies.
 
     This exists because a 21,104-element source (a single large manual) made
     `build_records` burn 1690s+ of single-core CPU re-normalizing/
@@ -88,22 +97,25 @@ class _QuoteBinder:
 
     Semantics are pinned to `_bind_quote`: same thresholds (`len(q) < 3`,
     fuzzy overlap `>= 0.6`), same exact-before-fuzzy priority, same
-    first-element-wins tie-break for both phases. See test_kg_ingest.py's
-    differential suite for the equivalence proof exercised against fixtures;
-    the *argument* for why it holds is inline below, next to each piece it
-    justifies.
+    first-element-wins tie-break for both phases.
 
     Memory: `_joined` holds the normalized text of every element in this
-    source, concatenated once (source-document scale, not corpus scale);
-    `_token_sets`/`_postings` are the same order of magnitude. All of it is
-    local to one `build_records()` call -- built here, dropped when the
-    binder goes out of scope -- and does not grow with notebook/base size,
-    only with the size of the single source currently being ingested.
+    source, concatenated once -- the same order of magnitude as the
+    source's raw text (source-document scale, not corpus scale). The only
+    other structure retained past construction is `_postings` (the fuzzy
+    fallback's inverted index); it no longer keeps a full token SET per
+    element (`_token_sets` was removed -- see the counting rewrite in
+    `_bind_uncached`). Measured on a ~30MB source: binder resident memory
+    dropped from ~438MB (with `_token_sets` also retained) to ~99MB
+    (postings only) after this change. All of it is local to one
+    `build_records()` call -- built here, dropped when the binder goes out
+    of scope -- and does not grow with notebook/base size, only with the
+    size of the single source currently being ingested.
     """
 
     __slots__ = (
         "elements", "source_id", "source_title",
-        "_joined", "_offsets", "_token_sets", "_postings", "_memo",
+        "_joined", "_offsets", "_postings", "_memo",
     )
 
     def __init__(self, elements, source_id: str, source_title: str) -> None:
@@ -115,20 +127,46 @@ class _QuoteBinder:
         # how many quotes are later bound against this source (that
         # independence is the whole fix; test_kg_ingest.py pins it with a
         # counting-element guard). One local `text` feeds both `_norm` and
-        # `_tokens`, so this is actually 1 read, not the "<=2" the class
-        # docstring's contract allows for (2 would still satisfy the
-        # invariant the guard test checks: reads bounded by a constant, not
-        # by the number of quotes Q).
+        # `_tokens` below, so this is 1 read per element (a future change
+        # that reads `text` a second time here would still satisfy the
+        # regression guard, which only bounds reads by a small constant,
+        # not by the number of quotes Q).
+        #
+        # Memory-friendly construction order (measured -- see the class
+        # docstring's memory paragraph): normalize each element and
+        # immediately feed BOTH the offset table (this loop) and the
+        # postings index (below) from that single normalized/tokenized
+        # pass -- there is no second pass re-walking a materialized
+        # `norm_texts` list before offsets are known, and no per-element
+        # token SET is retained anywhere (the fuzzy fallback in
+        # `_bind_uncached` counts postings instead of intersecting stored
+        # token sets). `norm_texts` itself is only needed transiently, to
+        # be joined once below, and is dropped immediately after.
         norm_texts: List[str] = []
-        token_sets: List[set] = []
-        for el in elements:
+        offsets: List[int] = []
+        postings: dict = {}
+        pos = 0
+        for idx, el in enumerate(elements):
             text = el.text
-            norm_texts.append(_norm(text))
-            token_sets.append(_tokens(text))
-        self._token_sets = token_sets
+            nt = _norm(text)
+            norm_texts.append(nt)
+            offsets.append(pos)
+            pos += len(nt) + 1  # +1 for the "\n" joiner that follows
+
+            # Inverted index for the fuzzy fallback: token -> element
+            # indices containing it. Iterating `elements` in idx order here
+            # means every posting list comes out already ascending by
+            # index -- required below: the tie-break ("first index wins on
+            # equal overlap") must reproduce `_bind_quote`'s
+            # `for el in elements` scan with a strict `>` comparison, which
+            # keeps the first max it sees.
+            for t in _tokens(text):
+                postings.setdefault(t, []).append(idx)
+        self._offsets = offsets
+        self._postings = postings
 
         # Concatenate every element's normalized text with "\n" as the
-        # segment separator, and record each segment's start offset.
+        # segment separator, then drop the transient list.
         #
         # Equivalence argument (this is the load-bearing part -- MUT-5
         # exercises exactly this): `_norm` collapses every whitespace run
@@ -156,25 +194,8 @@ class _QuoteBinder:
         # (Any character `_norm` output can never contain would work here;
         # "\n" is simplest and already guaranteed absent by construction.
         # The separator choice is not otherwise load-bearing.)
-        offsets: List[int] = []
-        pos = 0
-        for nt in norm_texts:
-            offsets.append(pos)
-            pos += len(nt) + 1  # +1 for the "\n" joiner that follows
-        self._offsets = offsets
         self._joined = "\n".join(norm_texts)
-
-        # Inverted index for the fuzzy fallback: token -> element indices
-        # containing it, built by iterating `elements` in order so every
-        # posting list comes out already ascending by index. That ordering
-        # is required below: the tie-break ("first index wins on equal
-        # overlap") must reproduce `_bind_quote`'s `for el in elements` scan
-        # with a strict `>` comparison, which keeps the first max it sees.
-        postings: dict = {}
-        for idx, toks in enumerate(token_sets):
-            for t in toks:
-                postings.setdefault(t, []).append(idx)
-        self._postings = postings
+        del norm_texts
 
         self._memo: dict = {}
 
@@ -182,13 +203,18 @@ class _QuoteBinder:
         """Same contract as `_bind_quote(quote, self.elements, ...)`, memoized
         per raw (un-normalized) quote string -- models re-quote the same span
         across multiple nodes/steps/edges within one source routinely, and a
-        repeated raw quote always normalizes and binds the same way."""
+        repeated raw quote always normalizes and binds the same way.
+
+        Returns a fresh, independent dict on every call, cache hit or miss:
+        the memo keeps its own canonical dict per quote and callers get a
+        shallow copy of it, so two callers binding the same quote never end
+        up sharing (and accidentally mutating) the same evidence dict."""
         cached = self._memo.get(quote, _UNBOUND)
         if cached is not _UNBOUND:
-            return cached
+            return dict(cached) if cached is not None else None
         result = self._bind_uncached(quote)
         self._memo[quote] = result
-        return result
+        return dict(result) if result is not None else None
 
     def _bind_uncached(self, quote: str) -> dict | None:
         q = _norm(quote)
@@ -203,22 +229,40 @@ class _QuoteBinder:
         qt = _tokens(quote)
         if not qt:
             return None
-        # Candidates = union of postings for the query's own tokens, i.e.
-        # every element sharing >=1 token with `qt`. An element sharing ZERO
-        # tokens has ov == 0, which can never beat `_bind_quote`'s strict
-        # `ov > best_ov` starting from best_ov = 0.0 either -- so omitting
-        # zero-overlap elements from the candidate set (instead of visiting
-        # and rejecting them, as `_bind_quote` does) cannot change which
-        # element (if any) wins.
-        candidates: set = set()
+        # Tally, per candidate element, how many of the query's OWN tokens
+        # it shares -- `counts[cand]` ends up EXACTLY `len(qt & et)` for
+        # that element's token set `et`, without ever materializing `et`:
+        # every token `t` in `qt` contributes +1 to every element in
+        # `postings[t]`, i.e. every element whose token set contains `t`.
+        # Summed over all `t` in `qt`, that is
+        # `sum(1 for t in qt if t in et) == len(qt & et)`. Dividing by
+        # `len(qt)` below therefore reproduces `_bind_quote`'s
+        # `ov = len(qt & et) / len(qt)` exactly -- this replaces the
+        # per-candidate set intersection (both `_bind_quote`'s and this
+        # method's former `_token_sets`-based version) with cheap dict
+        # increments driven off the prebuilt postings.
+        #
+        # An element sharing ZERO tokens with `qt` never appears in any
+        # `postings[t]` for `t` in `qt`, so it never enters `counts` at
+        # all -- it has ov == 0, which can never beat `_bind_quote`'s
+        # strict `ov > best_ov` starting from `best_ov = 0.0` either, so
+        # omitting it (instead of visiting and rejecting it, as
+        # `_bind_quote` does) cannot change which element (if any) wins.
+        counts: dict = {}
         for t in qt:
-            candidates.update(self._postings.get(t, ()))
-        if not candidates:
+            for cand in self._postings.get(t, ()):
+                counts[cand] = counts.get(cand, 0) + 1
+        if not counts:
             return None
         best_idx, best_ov = None, 0.0
-        for cand in sorted(candidates):   # ascending index == `elements` order
-            et = self._token_sets[cand]
-            ov = len(qt & et) / len(qt)
+        # `sorted()` here is load-bearing, not cosmetic: `counts`' own
+        # insertion order follows the order `qt` (a `set` of strings) is
+        # iterated, which is NOT reliably ascending by element index --
+        # see test_quote_binder_fuzzy_tie_break_requires_sorted, which pins
+        # a concrete case where dropping this `sorted()` flips the winner
+        # of a tie to the wrong (higher-index) element.
+        for cand in sorted(counts):   # ascending index == `elements` order
+            ov = counts[cand] / len(qt)
             if ov > best_ov:               # strict >: first max wins on ties,
                 best_idx, best_ov = cand, ov  # i.e. lowest index, same as _bind_quote
         if best_idx is not None and best_ov >= 0.6:
@@ -244,7 +288,12 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
     Builds exactly one `_QuoteBinder` for `elements` (this function always
     runs once per source) and reuses it for every quote below -- node
     evidence, step evidence and edge evidence all share the same
-    precomputed index instead of each re-scanning `elements`."""
+    precomputed index instead of each re-scanning `elements`. An empty
+    graph short-circuits before that index is ever built: a zero-node graph
+    has no quotes to bind, so paying for `_QuoteBinder`'s O(total text)
+    construction would be pure waste."""
+    if not graph.nodes:
+        return [], []
     binder = _QuoteBinder(elements, source_id, source_title)
     kept: set = set()
     objects: List[dict] = []

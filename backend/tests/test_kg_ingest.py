@@ -1,4 +1,5 @@
 import concurrent.futures as cf
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -15,6 +16,24 @@ from app.services.kg.run_control import KgBuildAborted, KgBuildFailure
 def _el(i, text):
     return SourceElement(id=i, source_id="s1", element_type="paragraph",
                          location_label=f"p{i}", text=text)
+
+
+def _ordered_tokens(s: str):
+    """Deterministic stand-in for `kg_ingest._tokens` that preserves
+    first-occurrence order (same token content, no hash dependence) instead
+    of hash-randomized `set` iteration order. Used only to pin
+    dict-insertion order in
+    test_quote_binder_fuzzy_tie_break_requires_sorted below -- production
+    `_tokens` returns a `set`, whose iteration order for strings is subject
+    to PYTHONHASHSEED, which a plain fixture cannot control deterministically
+    across processes."""
+    seen: list = []
+    seen_set: set = set()
+    for tok in re.findall(r"\w+", (s or "").lower()):
+        if tok not in seen_set:
+            seen_set.add(tok)
+            seen.append(tok)
+    return seen
 
 
 def test_build_records_binds_and_drops():
@@ -36,6 +55,19 @@ def test_build_records_binds_and_drops():
     assert objects[0]["evidence"][0]["element_id"] == "e1"
     assert objects[0]["local_id"] == "C1"                        # carried for edge wiring
     assert relations == []                                       # edge dropped: C2 gone
+
+
+def test_build_records_zero_nodes_short_circuits_without_building_index():
+    """An empty graph must not pay for building `_QuoteBinder`'s index at
+    all -- pins both the behavior (empty outputs) and, via the
+    `_CountingElement` guard below, that `.text` is never read."""
+    g = KnowledgeGraph(doc_id="doc.md", doc_type="academic", nodes=[], edges=[])
+    elements = [_CountingElement("e0", "some paragraph text here")]
+    objects, relations = kg_ingest.build_records(
+        g, source_id="s1", source_title="Doc", elements=elements)
+    assert objects == []
+    assert relations == []
+    assert elements[0].text_reads == 0
 
 
 def test_bind_quote_fuzzy_fallback():
@@ -62,6 +94,19 @@ def test_bind_quote_fuzzy_not_exact():
     q = kg_ingest._norm("Engram memory architecture model")
     text_norm = kg_ingest._norm("Engram is a memory architecture")
     assert q not in text_norm, "precondition: quote must NOT be an exact substring"
+
+
+def test_norm_folds_whitespace_variants():
+    """Direct pin on `_norm`'s whitespace-collapsing semantics. The
+    differential fixtures elsewhere in this file are blind to a regression
+    IN `_norm` itself: both `_bind_quote` (reference) and `_QuoteBinder`
+    (new) call the exact same module-level `_norm`, so a change to `_norm`
+    passes every diff check trivially -- yet `_QuoteBinder.__init__`'s
+    "\\n"-separator equivalence argument depends entirely on `_norm` never
+    emitting "\\n"."""
+    assert kg_ingest._norm("a\nb") == "a b"
+    assert "\n" not in kg_ingest._norm("a\nb\rc\td")
+    assert kg_ingest._norm("a　b\xa0c") == "a b c"  # ideographic space / nbsp fold too
 
 
 class _CountingElement:
@@ -136,6 +181,20 @@ def test_quote_binder_boundary_span_is_not_falsely_exact_matched():
     assert binder.bind(quote) is None
 
 
+def test_quote_binder_literal_newline_in_quote_does_not_cross_boundary():
+    """Same boundary as above, but exercises `_norm(quote)` (inside
+    `_bind_uncached`) directly rather than `_norm(el.text)`: the RAW quote
+    itself contains a literal '\\n' at the position that would align with
+    the joined string's inter-segment separator. `_norm` must fold it to a
+    plain space just like it does for element text, so the normalized query
+    never contains '\\n' and can never coincidentally match the separator."""
+    els = [_el("e0", "Section one ends with alpha"),
+           _el("e1", "beta begins section two")]
+    quote = "alpha\nbeta"
+    binder = _diff_check(els, [quote])
+    assert binder.bind(quote) is None
+
+
 def test_quote_binder_matches_reference_fuzzy_tie_breaks_to_lowest_index():
     """Two elements tie at the maximum token overlap (1.0) after the exact
     phase fails (word order scrambled so no contiguous substring matches);
@@ -146,6 +205,50 @@ def test_quote_binder_matches_reference_fuzzy_tie_breaks_to_lowest_index():
            _el("e2", "completely different text")]
     binder = _diff_check(els, ["alpha bravo charlie"])
     assert binder.bind("alpha bravo charlie")["element_id"] == "e0"
+
+
+def test_quote_binder_fuzzy_tie_break_requires_sorted(monkeypatch):
+    """MUT-B guard: the fuzzy fallback's `counts` tally is a plain `dict`
+    built by walking `_tokens(quote)` -- in production a hash-randomized
+    `set` of strings, so raw dict-insertion order is NOT reliably ascending
+    by element index. Only the explicit `sorted(counts)` in
+    `_bind_uncached` reproduces `_bind_quote`'s tie-break (lowest index
+    wins, via its ordered `for el in elements` scan + strict `>`).
+
+    To make this deterministic regardless of PYTHONHASHSEED, `_tokens` is
+    monkeypatched to `_ordered_tokens` (same token content, first-occurrence
+    order, no hash dependence) for this test only. The quote is built
+    (verified empirically, see the task notes) so the query's OWN token
+    order feeds a token unique to element 10 into `counts` BEFORE any token
+    reaches element 3 -- raw dict-insertion order is therefore [10, 3, ...],
+    the reverse of ascending index order, even though both tie at the same
+    0.8 overlap. `sorted(counts)` must correct that back to element 3
+    winning (matching `_bind_quote`); deleting it makes element 10 win
+    instead."""
+    elements = [_el(f"e{i}", f"filler paragraph number {i} unrelated text")
+                for i in range(11)]
+    elements[3] = _el("e3", "sharedA sharedB sharedC onlyThree filler")
+    elements[10] = _el("e10", "onlyTen sharedA sharedB sharedC filler")
+    quote = "onlyTen sharedA sharedB sharedC onlyThree"
+
+    # Reference computed BEFORE patching, with the real `_tokens`:
+    # `_bind_quote` loops over `elements` (not tokens) and does its own
+    # `qt & et` set intersection, so its result is deterministic and
+    # correct regardless of `_tokens`' internal set iteration order --
+    # this just confirms the fixture really does tie at 0.8/0.8 with
+    # element 3 winning, independent of the monkeypatch below.
+    ref = kg_ingest._bind_quote(quote, elements, "s1", "Doc")
+    assert ref is not None and ref["element_id"] == "e3"
+
+    monkeypatch.setattr(kg_ingest, "_tokens", _ordered_tokens)
+    binder = kg_ingest._QuoteBinder(elements, "s1", "Doc")
+    result = binder.bind(quote)
+    assert result is not None
+    assert result["element_id"] == "e3", (
+        "lowest-index element (3) must win the 0.8/0.8 tie; if this now "
+        "resolves to e10, `sorted(counts)` was likely removed from the "
+        "fuzzy fallback"
+    )
 
 
 def test_quote_binder_matches_reference_overlap_threshold_boundary():
@@ -161,8 +264,15 @@ def test_quote_binder_matches_reference_overlap_threshold_boundary():
 
 
 def test_quote_binder_matches_reference_short_and_blank_inputs():
-    els = [_el("e0", ""), _el("e1", "   "), _el("e2", "alpha bravo charlie")]
-    _diff_check(els, ["ab", "a", "", "zzz", "alpha bravo charlie"])
+    # e3 contains "ab" as a literal substring of "tab": if the length guard
+    # were relaxed from `len(q) < 3` to `len(q) < 2`, the 2-char quote "ab"
+    # would skip the short-circuit and exact-match inside "tab", incorrectly
+    # binding. Without e3, "ab" could never match ANY element regardless of
+    # the threshold, so the boundary itself would go untested.
+    els = [_el("e0", ""), _el("e1", "   "), _el("e2", "alpha bravo charlie"),
+           _el("e3", "a small tab character here")]
+    binder = _diff_check(els, ["ab", "a", "", "zzz", "alpha bravo charlie"])
+    assert binder.bind("ab") is None
 
 
 def test_quote_binder_prefers_later_exact_match_over_earlier_fuzzy_candidate():
@@ -185,6 +295,69 @@ def test_quote_binder_memoizes_repeat_quote_lookups():
     second = binder.bind("alpha bravo charlie")
     assert first == second == kg_ingest._bind_quote(
         "alpha bravo charlie", els, "s1", "Doc")
+
+
+def test_quote_binder_memo_actually_skips_recomputation():
+    """The test above only compares repeated `bind()` results for equality,
+    which holds trivially even with ZERO caching (the same deterministic
+    input always produces the same output) -- it does not prove
+    `_bind_uncached` was only invoked once. Subclass `_QuoteBinder` to count
+    actual `_bind_uncached` invocations directly."""
+
+    class _CountingBinder(kg_ingest._QuoteBinder):
+        __slots__ = ("uncached_calls",)
+
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.uncached_calls = 0
+
+        def _bind_uncached(self, quote):
+            self.uncached_calls += 1
+            return super()._bind_uncached(quote)
+
+    els = [_el("e0", "alpha bravo delta echo"),
+           _el("e1", "unrelated filler text alpha bravo charlie right here")]
+    binder = _CountingBinder(els, "s1", "Doc")
+    for _ in range(5):
+        binder.bind("alpha bravo charlie")
+    assert binder.uncached_calls == 1, (
+        f"expected memoization to skip recomputation after the first bind, "
+        f"got {binder.uncached_calls} underlying calls for 5 repeat lookups"
+    )
+
+
+def test_quote_binder_memo_keyed_by_raw_quote_not_normalized():
+    """Memo keys must be the RAW (un-normalized) quote string. Two quotes
+    that normalize identically ("Reset  the device" / "Reset the device",
+    differing only in a doubled space) but are lexically distinct must each
+    get their own memo entry and their own `quoted_span` in the returned
+    evidence, not the first one's cached result -- keying the memo by
+    `_norm(quote)` instead of `quote` would make the SECOND lookup return
+    the FIRST quote's raw text in `quoted_span`."""
+    els = [_el("e0", "Reset the device before calibration.")]
+    binder = kg_ingest._QuoteBinder(els, "s1", "Doc")
+    r1 = binder.bind("Reset  the device")   # doubled space
+    r2 = binder.bind("Reset the device")    # single space; same normalized form
+    assert r1 is not None and r2 is not None
+    assert r1["quoted_span"] == "Reset  the device"
+    assert r2["quoted_span"] == "Reset the device"
+    assert r1["quoted_span"] != r2["quoted_span"]
+
+
+def test_quote_binder_bind_returns_independent_copies_not_shared_instance():
+    """Two nodes that quote the SAME span must never end up holding the
+    SAME dict instance: `bind()` must return a fresh copy on both the
+    cache-miss (first call) and cache-hit (subsequent calls) paths, so a
+    caller mutating one node's evidence dict cannot corrupt another node's
+    (or the memo's own canonical) copy."""
+    els = [_el("e0", "Alpha bravo charlie delta.")]
+    binder = kg_ingest._QuoteBinder(els, "s1", "Doc")
+    first = binder.bind("Alpha bravo charlie")
+    second = binder.bind("Alpha bravo charlie")
+    assert first == second
+    assert first is not second
+    first["quoted_span"] = "MUTATED"
+    assert second["quoted_span"] != "MUTATED"
 
 
 def test_quote_binder_reads_each_elements_text_at_most_twice_regardless_of_quote_count():
@@ -210,6 +383,59 @@ def test_quote_binder_reads_each_elements_text_at_most_twice_regardless_of_quote
         assert el.text_reads <= 2, (
             f"{el.id} had .text read {el.text_reads} times for Q={n_quotes} quotes "
             "-- expected a constant bounded by construction, not growth with Q"
+        )
+
+
+def test_build_records_builds_index_once_across_nodes_and_edges():
+    """T-B2 (move-mutation guard): pins that `build_records` builds exactly
+    ONE `_QuoteBinder` for the whole call, not one per node. A regression
+    that moves binder construction inside the `for node in graph.nodes`
+    loop would still pass every other test in this file (same final
+    bindings, same element/text values) but would multiply `.text` reads by
+    the node count. Uses 3 nodes (+ edges connecting them + one step per
+    node), all quoting elements that repeat across nodes/edges/steps, so a
+    per-node binder would push every element's `.text` read count above the
+    single-build bound."""
+    elements = [
+        _CountingElement("e0", "Alpha reset the device before calibration."),
+        _CountingElement("e1", "Beta improves the calibration flow overall."),
+        _CountingElement("e2", "Gamma finalizes the device calibration steps."),
+    ]
+    quotes = ["Alpha reset the device", "Beta improves the calibration flow",
+              "Gamma finalizes the device calibration steps"]
+    from app.services.kg.models import Step
+
+    nodes = [
+        Node(id=f"n{i}", type="Concept", name=f"Node {i}",
+             evidence=[Evidence(file="doc.md", char_start=0, char_end=5,
+                                line_start=1, line_end=1, quote=quotes[i])],
+             steps=[Step(name=f"step{i}",
+                         evidence=[Evidence(file="doc.md", char_start=0, char_end=5,
+                                            line_start=2, line_end=2,
+                                            quote=quotes[(i + 1) % 3])])])
+        for i in range(3)
+    ]
+    edges = [
+        Edge(id="e01", type="about", source_id="n0", target_id="n1",
+             evidence=[Evidence(file="doc.md", char_start=0, char_end=5,
+                                line_start=3, line_end=3, quote=quotes[0])]),
+        Edge(id="e12", type="about", source_id="n1", target_id="n2",
+             evidence=[Evidence(file="doc.md", char_start=0, char_end=5,
+                                line_start=3, line_end=3, quote=quotes[1])]),
+        Edge(id="e20", type="about", source_id="n2", target_id="n0",
+             evidence=[Evidence(file="doc.md", char_start=0, char_end=5,
+                                line_start=3, line_end=3, quote=quotes[2])]),
+    ]
+    g = KnowledgeGraph(doc_id="doc.md", doc_type="academic", nodes=nodes, edges=edges)
+    objects, relations = kg_ingest.build_records(
+        g, source_id="s1", source_title="Doc", elements=elements)
+    assert len(objects) == 3
+    assert len(relations) == 3
+    for el in elements:
+        assert el.text_reads <= 2, (
+            f"{el.id} had .text read {el.text_reads} times across "
+            f"{len(nodes)} nodes + {len(edges)} edges + 1 step/node -- "
+            "expected a single shared index build, not one per node/edge"
         )
 
 
