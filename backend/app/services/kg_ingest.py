@@ -3,6 +3,7 @@ The ONLY bridge between app.services.kg.* and the product. Extraction model is
 the product LLM (deepseek-v4-flash via OPENAI_COMPAT_*)."""
 from __future__ import annotations
 
+import bisect
 import concurrent.futures as cf
 import math
 import re
@@ -32,7 +33,17 @@ def _tokens(s: str) -> set:
 
 
 def _bind_quote(quote: str, elements, source_id: str, source_title: str) -> dict | None:
-    """Return product-Evidence fields for the element that best contains `quote`."""
+    """Return product-Evidence fields for the element that best contains `quote`.
+
+    O(E) per call: re-normalizes/re-tokenizes every element's `.text` from
+    scratch on every invocation. Kept verbatim (unused by production code,
+    which now goes through `_QuoteBinder` below) as the semantic reference
+    for `_QuoteBinder.bind` -- see the differential tests in
+    test_kg_ingest.py, which run both over the same fixtures and assert
+    byte-identical output. Do not change this function's behavior without
+    updating that reference relationship; do not delete it while those
+    tests still import it.
+    """
     q = _norm(quote)
     if len(q) < 3:
         return None
@@ -54,6 +65,167 @@ def _bind_quote(quote: str, elements, source_id: str, source_title: str) -> dict
     return None
 
 
+# Sentinel distinguishing "quote never looked up" from "looked up and the
+# answer was None" in `_QuoteBinder._memo` -- a quote that legitimately
+# fails to bind must still short-circuit on repeat lookups (models reuse the
+# same quote across nodes/steps/edges routinely) instead of recomputing.
+_UNBOUND = object()
+
+
+class _QuoteBinder:
+    """Per-source evidence index. Replaces `_bind_quote`'s O(quotes *
+    elements * text_len) scan -- the whole point of this class -- with one
+    O(total_normalized_text) build plus, per quote, O(memmem over the
+    concatenated text) for the exact phase and O(sum of matching posting
+    lists) for the fuzzy fallback, both independent of the element count E.
+
+    This exists because a 21,104-element source (a single large manual) made
+    `build_records` burn 1690s+ of single-core CPU re-normalizing/
+    re-tokenizing every element for every quote in every node, step and edge
+    -- production py-spy caught it live, and it was the only unindexed O(Q*E)
+    scan left in the KG ingest path once candidate retrieval elsewhere was
+    already indexed.
+
+    Semantics are pinned to `_bind_quote`: same thresholds (`len(q) < 3`,
+    fuzzy overlap `>= 0.6`), same exact-before-fuzzy priority, same
+    first-element-wins tie-break for both phases. See test_kg_ingest.py's
+    differential suite for the equivalence proof exercised against fixtures;
+    the *argument* for why it holds is inline below, next to each piece it
+    justifies.
+
+    Memory: `_joined` holds the normalized text of every element in this
+    source, concatenated once (source-document scale, not corpus scale);
+    `_token_sets`/`_postings` are the same order of magnitude. All of it is
+    local to one `build_records()` call -- built here, dropped when the
+    binder goes out of scope -- and does not grow with notebook/base size,
+    only with the size of the single source currently being ingested.
+    """
+
+    __slots__ = (
+        "elements", "source_id", "source_title",
+        "_joined", "_offsets", "_token_sets", "_postings", "_memo",
+    )
+
+    def __init__(self, elements, source_id: str, source_title: str) -> None:
+        self.elements = elements
+        self.source_id = source_id
+        self.source_title = source_title
+
+        # Each element's `.text` is read exactly ONCE here -- regardless of
+        # how many quotes are later bound against this source (that
+        # independence is the whole fix; test_kg_ingest.py pins it with a
+        # counting-element guard). One local `text` feeds both `_norm` and
+        # `_tokens`, so this is actually 1 read, not the "<=2" the class
+        # docstring's contract allows for (2 would still satisfy the
+        # invariant the guard test checks: reads bounded by a constant, not
+        # by the number of quotes Q).
+        norm_texts: List[str] = []
+        token_sets: List[set] = []
+        for el in elements:
+            text = el.text
+            norm_texts.append(_norm(text))
+            token_sets.append(_tokens(text))
+        self._token_sets = token_sets
+
+        # Concatenate every element's normalized text with "\n" as the
+        # segment separator, and record each segment's start offset.
+        #
+        # Equivalence argument (this is the load-bearing part -- MUT-5
+        # exercises exactly this): `_norm` collapses every whitespace run
+        # (including embedded newlines) down to a single ASCII space, so
+        # NEITHER a normalized element text NOR a normalized query `q` can
+        # ever contain "\n". A separator character guaranteed absent from
+        # both sides of the comparison cannot itself be matched by `q`, so:
+        #   1. No occurrence of `q` in the joined string can straddle a
+        #      separator -- the character of `q` aligned with that position
+        #      would have to be "\n", which never occurs in `q`. Every match
+        #      therefore lies wholly inside exactly one segment.
+        #   2. Segments appear in the joined string in the same order as
+        #      `elements`, at strictly increasing start offsets. So the
+        #      FIRST match position in the whole joined string is
+        #      necessarily inside the FIRST segment that contains `q` at
+        #      all -- any match in a later segment starts at a strictly
+        #      larger offset than any match in an earlier one.
+        # `str.find` returns exactly that first position, so mapping it back
+        # to a segment reproduces `_bind_quote`'s `for el in elements: if q
+        # in _norm(el.text): return ...` -- the first element (in list
+        # order) whose normalized text contains `q` -- exactly, regardless
+        # of where within that element the match falls (the old code never
+        # looked at position, only membership).
+        #
+        # (Any character `_norm` output can never contain would work here;
+        # "\n" is simplest and already guaranteed absent by construction.
+        # The separator choice is not otherwise load-bearing.)
+        offsets: List[int] = []
+        pos = 0
+        for nt in norm_texts:
+            offsets.append(pos)
+            pos += len(nt) + 1  # +1 for the "\n" joiner that follows
+        self._offsets = offsets
+        self._joined = "\n".join(norm_texts)
+
+        # Inverted index for the fuzzy fallback: token -> element indices
+        # containing it, built by iterating `elements` in order so every
+        # posting list comes out already ascending by index. That ordering
+        # is required below: the tie-break ("first index wins on equal
+        # overlap") must reproduce `_bind_quote`'s `for el in elements` scan
+        # with a strict `>` comparison, which keeps the first max it sees.
+        postings: dict = {}
+        for idx, toks in enumerate(token_sets):
+            for t in toks:
+                postings.setdefault(t, []).append(idx)
+        self._postings = postings
+
+        self._memo: dict = {}
+
+    def bind(self, quote: str) -> dict | None:
+        """Same contract as `_bind_quote(quote, self.elements, ...)`, memoized
+        per raw (un-normalized) quote string -- models re-quote the same span
+        across multiple nodes/steps/edges within one source routinely, and a
+        repeated raw quote always normalizes and binds the same way."""
+        cached = self._memo.get(quote, _UNBOUND)
+        if cached is not _UNBOUND:
+            return cached
+        result = self._bind_uncached(quote)
+        self._memo[quote] = result
+        return result
+
+    def _bind_uncached(self, quote: str) -> dict | None:
+        q = _norm(quote)
+        if len(q) < 3:
+            return None
+
+        idx = self._joined.find(q)
+        if idx != -1:
+            el_idx = bisect.bisect_right(self._offsets, idx) - 1
+            return _ev(self.elements[el_idx], quote, self.source_id, self.source_title)
+
+        qt = _tokens(quote)
+        if not qt:
+            return None
+        # Candidates = union of postings for the query's own tokens, i.e.
+        # every element sharing >=1 token with `qt`. An element sharing ZERO
+        # tokens has ov == 0, which can never beat `_bind_quote`'s strict
+        # `ov > best_ov` starting from best_ov = 0.0 either -- so omitting
+        # zero-overlap elements from the candidate set (instead of visiting
+        # and rejecting them, as `_bind_quote` does) cannot change which
+        # element (if any) wins.
+        candidates: set = set()
+        for t in qt:
+            candidates.update(self._postings.get(t, ()))
+        if not candidates:
+            return None
+        best_idx, best_ov = None, 0.0
+        for cand in sorted(candidates):   # ascending index == `elements` order
+            et = self._token_sets[cand]
+            ov = len(qt & et) / len(qt)
+            if ov > best_ov:               # strict >: first max wins on ties,
+                best_idx, best_ov = cand, ov  # i.e. lowest index, same as _bind_quote
+        if best_idx is not None and best_ov >= 0.6:
+            return _ev(self.elements[best_idx], quote, self.source_id, self.source_title)
+        return None
+
+
 def _ev(el, quote: str, source_id: str, source_title: str) -> dict:
     return {
         "source_id": source_id, "source_title": source_title, "element_id": el.id,
@@ -67,13 +239,19 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
     """KG graph -> (objects, relations) with product evidence bound to elements.
     Nodes whose evidence binds to no element are dropped; edges referencing a
     dropped node are dropped. Each object dict carries `local_id` (= KG node id)
-    so the caller can remap edges to DB ids after insert."""
+    so the caller can remap edges to DB ids after insert.
+
+    Builds exactly one `_QuoteBinder` for `elements` (this function always
+    runs once per source) and reuses it for every quote below -- node
+    evidence, step evidence and edge evidence all share the same
+    precomputed index instead of each re-scanning `elements`."""
+    binder = _QuoteBinder(elements, source_id, source_title)
     kept: set = set()
     objects: List[dict] = []
     for node in graph.nodes:
         bound = []
         for ev in node.evidence:
-            fields = _bind_quote(ev.quote, elements, source_id, source_title)
+            fields = binder.bind(ev.quote)
             if fields:
                 bound.append(fields)
         if not bound:
@@ -86,7 +264,7 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
             bound_steps = []
             for st in node.steps:
                 quote = st.evidence[0].quote if st.evidence else ""
-                fields = _bind_quote(quote, elements, source_id, source_title)
+                fields = binder.bind(quote)
                 if fields:
                     bound_steps.append({
                         "name": st.name,
@@ -111,7 +289,7 @@ def build_records(graph: KnowledgeGraph, source_id: str, source_title: str,
             # degrade to source-level quote evidence rather than being invented.
             edge_evidence = []
             for ev in edge.evidence:
-                bound = _bind_quote(ev.quote, elements, source_id, source_title)
+                bound = binder.bind(ev.quote)
                 if bound:
                     edge_evidence.append({"quote": ev.quote, **bound})
                 elif (ev.quote or "").strip():

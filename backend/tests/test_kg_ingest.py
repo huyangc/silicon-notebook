@@ -64,6 +64,191 @@ def test_bind_quote_fuzzy_not_exact():
     assert q not in text_norm, "precondition: quote must NOT be an exact substring"
 
 
+class _CountingElement:
+    """Minimal element stand-in whose `.text` counts every read. Used to pin
+    the "_QuoteBinder reads each element's text a bounded number of times,
+    independent of quote count Q" invariant (T3-3) -- a regression to
+    per-quote re-scanning is exactly the O(Q*E*len) blowup this rewrite
+    exists to kill, and it would only show up as this counter growing with Q,
+    not as any wrong answer."""
+
+    __slots__ = ("id", "element_type", "location_label", "_text", "text_reads")
+
+    def __init__(self, id_, text):
+        self.id = id_
+        self.element_type = "paragraph"
+        self.location_label = f"p{id_}"
+        self._text = text
+        self.text_reads = 0
+
+    @property
+    def text(self):
+        self.text_reads += 1
+        return self._text
+
+
+def _diff_check(elements, quotes, source_id="s1", source_title="Doc"):
+    """Assert `_QuoteBinder.bind` == `_bind_quote` for every quote, using a
+    single binder built once (as build_records does) so repeated quotes also
+    exercise the memo path."""
+    binder = kg_ingest._QuoteBinder(elements, source_id, source_title)
+    for q in quotes:
+        ref = kg_ingest._bind_quote(q, elements, source_id, source_title)
+        new = binder.bind(q)
+        assert new == ref, f"quote={q!r}: ref={ref!r} new={new!r}"
+    return binder
+
+
+def test_quote_binder_matches_reference_latin_first_match_wins():
+    """Two elements both contain the exact quote (case-sensitive) -- the
+    first one in list order must win, matching `_bind_quote`'s ordered scan."""
+    els = [_el("e0", "Zeta looked at Alpha bravo charlie carefully."),
+           _el("e1", "Alpha bravo charlie is also mentioned here.")]
+    binder = _diff_check(els, ["Alpha bravo charlie"])
+    assert binder.bind("Alpha bravo charlie")["element_id"] == "e0"
+
+
+def test_quote_binder_matches_reference_cjk_exact():
+    els = [_el("e0", "该电路使用电流镜结构"), _el("e1", "另一处提到电流镜设计")]
+    binder = _diff_check(els, ["电流镜结构"])
+    assert binder.bind("电流镜结构")["element_id"] == "e0"
+
+
+def test_quote_binder_matches_reference_mixed_language():
+    els = [_el("e0", "The circuit uses 电流镜 topology.")]
+    _diff_check(els, ["uses 电流镜 topology"])
+
+
+def test_quote_binder_boundary_span_is_not_falsely_exact_matched():
+    """A quote built from element A's tail + ' ' + element B's head must not
+    exact-match under either implementation: `_norm` never emits '\\n', so
+    `joined.find(q)` can only match within one segment, never across the
+    separator (see the equivalence argument in kg_ingest._QuoteBinder).
+    MUT-5 (separator ' ' instead of '\\n') makes this red because a literal
+    ' ' inside the quote can then bridge the two segments."""
+    els = [_el("e0", "Section one ends with alpha"),
+           _el("e1", "beta begins section two")]
+    quote = "alpha beta"
+    binder = _diff_check(els, [quote])
+    # Both elements share exactly 1/2 tokens with the quote (0.5 < 0.6), so
+    # neither phase should bind -- this also confirms the boundary wasn't
+    # smuggled through the fuzzy phase.
+    assert binder.bind(quote) is None
+
+
+def test_quote_binder_matches_reference_fuzzy_tie_breaks_to_lowest_index():
+    """Two elements tie at the maximum token overlap (1.0) after the exact
+    phase fails (word order scrambled so no contiguous substring matches);
+    the lower element index must win, matching `_bind_quote`'s strict `>`
+    scan order."""
+    els = [_el("e0", "charlie bravo alpha team"),
+           _el("e1", "bravo alpha charlie squad"),
+           _el("e2", "completely different text")]
+    binder = _diff_check(els, ["alpha bravo charlie"])
+    assert binder.bind("alpha bravo charlie")["element_id"] == "e0"
+
+
+def test_quote_binder_matches_reference_overlap_threshold_boundary():
+    """Overlap exactly 0.6 binds; 0.59 does not -- pins the fuzzy threshold."""
+    tokens = [f"tok{i}" for i in range(100)]
+    quote_100 = " ".join(tokens)
+    below = [_el("e0", " ".join(tokens[:59]))]     # 59/100 = 0.59 -> no bind
+    _diff_check(below, [quote_100])
+    assert kg_ingest._QuoteBinder(below, "s1", "Doc").bind(quote_100) is None
+    at_threshold = [_el("e0", " ".join(tokens[:60]))]  # 60/100 = 0.60 -> binds
+    _diff_check(at_threshold, [quote_100])
+    assert kg_ingest._QuoteBinder(at_threshold, "s1", "Doc").bind(quote_100) is not None
+
+
+def test_quote_binder_matches_reference_short_and_blank_inputs():
+    els = [_el("e0", ""), _el("e1", "   "), _el("e2", "alpha bravo charlie")]
+    _diff_check(els, ["ab", "a", "", "zzz", "alpha bravo charlie"])
+
+
+def test_quote_binder_prefers_later_exact_match_over_earlier_fuzzy_candidate():
+    """Element 0 would fuzzy-bind on its own (2/3 token overlap, above the
+    0.6 threshold) but element 1 has the literal exact substring -- the
+    exact phase runs first and must win, exactly as in `_bind_quote` where
+    the `for el in elements` exact-substring loop completes (and can return)
+    before the fuzzy loop ever starts."""
+    els = [_el("e0", "alpha bravo delta echo"),
+           _el("e1", "unrelated filler text alpha bravo charlie right here")]
+    binder = _diff_check(els, ["alpha bravo charlie"])
+    assert binder.bind("alpha bravo charlie")["element_id"] == "e1"
+
+
+def test_quote_binder_memoizes_repeat_quote_lookups():
+    els = [_el("e0", "alpha bravo delta echo"),
+           _el("e1", "unrelated filler text alpha bravo charlie right here")]
+    binder = kg_ingest._QuoteBinder(els, "s1", "Doc")
+    first = binder.bind("alpha bravo charlie")
+    second = binder.bind("alpha bravo charlie")
+    assert first == second == kg_ingest._bind_quote(
+        "alpha bravo charlie", els, "s1", "Doc")
+
+
+def test_quote_binder_reads_each_elements_text_at_most_twice_regardless_of_quote_count():
+    """T3-3 regression guard: `.text` must be read a bounded (<=2) number of
+    times per element at binder construction, independent of how many quotes
+    Q are later bound. A regression to per-quote re-normalization (the exact
+    O(Q*E*len) blowup this class exists to remove) would make this grow
+    linearly with Q; Q=50 here is chosen to be far larger than the bound so
+    any such regression is unmistakable."""
+    n_elements = 6
+    n_quotes = 50
+    elements = [
+        _CountingElement(f"e{i}", f"element number {i} says something unique here {i}")
+        for i in range(n_elements)
+    ]
+    binder = kg_ingest._QuoteBinder(elements, "s1", "Doc")
+    for i in range(n_quotes):
+        binder.bind(
+            f"element number {i % n_elements} says something unique here {i % n_elements}"
+        )
+        binder.bind(f"totally unrelated query text number {i}")
+    for el in elements:
+        assert el.text_reads <= 2, (
+            f"{el.id} had .text read {el.text_reads} times for Q={n_quotes} quotes "
+            "-- expected a constant bounded by construction, not growth with Q"
+        )
+
+
+def test_build_records_binds_node_steps_to_elements():
+    """T3-2: Procedure nodes bind each step's first evidence quote through the
+    same binder as node/edge evidence (build_records's node.steps branch,
+    otherwise untouched by any other test in this file)."""
+    from app.services.kg.models import Step
+
+    g = KnowledgeGraph(doc_id="doc.md", doc_type="academic",
+        nodes=[
+            Node(id="P1", type="Procedure", name="Calibration flow",
+                 evidence=[Evidence(file="doc.md", char_start=0, char_end=10,
+                                    line_start=1, line_end=1, quote="Calibration flow")],
+                 steps=[
+                     Step(name="Step one",
+                          evidence=[Evidence(file="doc.md", char_start=0, char_end=6,
+                                             line_start=2, line_end=2, quote="Reset the device")]),
+                     Step(name="Step two (unbound)",
+                          evidence=[Evidence(file="doc.md", char_start=0, char_end=6,
+                                             line_start=3, line_end=3, quote="zzz not present")]),
+                 ]),
+        ],
+        edges=[])
+    elements = [
+        _el("e1", "Calibration flow overview."),
+        _el("e2", "Reset the device before proceeding."),
+    ]
+    objects, _relations = kg_ingest.build_records(
+        g, source_id="s1", source_title="Doc", elements=elements)
+    assert len(objects) == 1
+    steps = objects[0]["payload"]["steps"]
+    # Only the bound step survives; the unbound one is silently dropped.
+    assert len(steps) == 1
+    assert steps[0]["name"] == "Step one"
+    assert steps[0]["element_id"] == "e2"
+    assert steps[0]["quote"] == "Reset the device"
+
+
 def test_build_records_binds_relation_quote_to_source_element():
     """Relation evidence keeps raw quote and gains element-level provenance."""
     quote_a = "Premise A is established"
