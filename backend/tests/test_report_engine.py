@@ -40,6 +40,22 @@ def test_report_settings_env(monkeypatch):
     assert s.report_summary_max_tokens == 33000
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (("REPORT_MAX_SECTIONS", "0"), ("REPORT_MAX_SUBQUERIES_PER_SECTION", "1")),
+)
+def test_report_outline_rails_reject_nonpositive_or_nonsensical_values(
+    monkeypatch, name, value,
+):
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
 # ---------------------------------------------------------------------------
 # Task 2: reports 表 + repo CRUD
 # ---------------------------------------------------------------------------

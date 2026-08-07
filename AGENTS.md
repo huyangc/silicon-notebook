@@ -21,6 +21,17 @@ Codex/Claude configuration, scope table, runnable official-client command, Memor
 gate, and revocation guidance synchronized with the product/API contract and
 `scripts/example_mcp_memory_client.py`.
 
+## Numeric Limits and Truncation
+
+Do not introduce result-changing literal slices or limits (for example
+`hits[:20]`) in production paths. Reuse an existing protocol constant when the
+number is invariant; use a validated `Settings` field when deployments may
+trade quality for cost. User-authored data must never be silently truncated:
+surface the shared rail in the frontend and reject over-limit API input. Keep
+embedding/model-input truncation on its existing single configuration source so
+online, batch, and backfill paths cannot diverge. Tests may use explicit numeric
+fixtures and are outside this production-code rule.
+
 ## Tracking Completed Spec Features
 
 `silicon_notebook_fangan.md` is the product spec; `fangan_done.md` records what has actually been implemented against it.

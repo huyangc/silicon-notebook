@@ -64,7 +64,9 @@ class SourceEmbeddingService:
         if not text:
             return
         try:
-            vector = embedder.embed_query(text[:2000])
+            vector = embedder.embed_query(
+                text[: self.settings.embed_truncate_chars]
+            )
         except Exception:
             return
         self.vectors.replace_knowledge_vectors(
@@ -168,9 +170,9 @@ class SourceEmbeddingService:
         所以只补缺失是安全的——不会碰到同源已有的向量。
 
         与 embed_source(正常路径)**逐字节同构**:同样跳过 text.strip() 为空的元素,
-        同样按 self.settings.embed_truncate_chars 截断原文。刻意不复用
-        embed_chunks_batch——它硬编码 text[:2000],默认值恰好相同所以现在看不出差别,
-        但一旦调大 EMBED_TRUNCATE_CHARS,补出来的向量就和主路径不同构、检索质量静默劣化。
+        同样按 self.settings.embed_truncate_chars 截断原文。所有元素、对象、
+        关系与 chunk 向量化路径共用这一真源,避免调整部署配置后不同
+        回填路径产生不同口径的向量。
 
         replace_element_vectors 的签名是 per-source(source_id, notebook_id, rows),
         故计算按 embed_batch_size 平铺并发、落库时按 source_id 分组逐组写。
@@ -257,7 +259,10 @@ class SourceEmbeddingService:
         for it in items:
             text = _payload_text(it["payload"]).strip()
             if text:
-                pending.append((it["_oid"], text[:2000]))
+                pending.append((
+                    it["_oid"],
+                    text[: self.settings.embed_truncate_chars],
+                ))
         if not pending:
             if progress:
                 progress(0, 0)
@@ -325,7 +330,14 @@ class SourceEmbeddingService:
         embedder = self.embedder(workload_id)
         if not getattr(embedder, "configured", True):
             return
-        pending = [(it["_rid"], it["text"][:2000]) for it in rel_items if it.get("text", "").strip()]
+        pending = [
+            (
+                it["_rid"],
+                it["text"][: self.settings.embed_truncate_chars],
+            )
+            for it in rel_items
+            if it.get("text", "").strip()
+        ]
         if not pending:
             return
         size = max(1, self.settings.embed_batch_size)
@@ -421,7 +433,10 @@ class SourceEmbeddingService:
         for it in items:
             text = (it["payload"].get("text") or "").strip()
             if text:
-                pending.append((it["_oid"], text[:2000]))
+                pending.append((
+                    it["_oid"],
+                    text[: self.settings.embed_truncate_chars],
+                ))
         if not pending:
             return
         size = max(1, self.settings.embed_batch_size)

@@ -31,6 +31,16 @@ _ENV_FILE = (
 # the value from /api/system/config so its staging behavior stays in lockstep.
 SOURCE_UPLOAD_MAX_FILES_PER_BATCH = 20
 
+# Canonical defaults also used by narrow compatibility adapters that are
+# intentionally duck-typed in offline tools. Normal application composition
+# always supplies ``Settings``; keeping these names here prevents those
+# adapters from reintroducing anonymous result-changing literals.
+DEFAULT_REASONING_PER_QUERY_LIMIT = 8
+DEFAULT_CHUNK_KG_NODE_SEED_TOP_N = 20
+DEFAULT_CHUNK_KG_RELATION_SEED_TOP_N = 10
+DEFAULT_CHUNK_KG_MAX_DEPTH = 1
+DEFAULT_CHUNK_KG_FAN_OUT = 8
+
 
 def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[str]]":
     """启动预检用:(期望的 .env 路径, 是否存在, 疑似改名残骸文件名列表)。
@@ -130,7 +140,32 @@ class Settings(BaseSettings):
     )
 
     # --- 深度报告(report_engine) ---
-    report_max_sections: int = Field(6, validation_alias="REPORT_MAX_SECTIONS")
+    report_max_sections: int = Field(
+        6, ge=1, validation_alias="REPORT_MAX_SECTIONS"
+    )
+    # One section may execute several independently approved retrieval
+    # directions.  This is both a prompt contract and an API/UI validation
+    # rail; user-authored directions over the cap are rejected rather than
+    # silently discarded by a literal ``[:4]``.
+    report_max_subqueries_per_section: int = Field(
+        4, ge=2, validation_alias="REPORT_MAX_SUBQUERIES_PER_SECTION"
+    )
+    # Corpus-blind planning probes and the small corpus-map scout are bounded
+    # separately from final drafting evidence.  They affect planning quality
+    # and database work, so keep them deployment-owned instead of burying
+    # result-changing slices in report_engine.py.
+    report_probe_element_limit: int = Field(
+        8, ge=1, validation_alias="REPORT_PROBE_ELEMENT_LIMIT"
+    )
+    report_scout_kg_limit: int = Field(
+        12, ge=1, validation_alias="REPORT_SCOUT_KG_LIMIT"
+    )
+    report_scout_chunk_limit: int = Field(
+        8, ge=1, validation_alias="REPORT_SCOUT_CHUNK_LIMIT"
+    )
+    report_scout_memory_limit: int = Field(
+        8, ge=1, validation_alias="REPORT_SCOUT_MEMORY_LIMIT"
+    )
     # (report_section_top_n 已移除:逐节深挖与 ask 统一走 effective_top_n 自适应预算,
     #  由 retrieval_top_n / REASONING_TOP_N_* 统一治理;不再有报告专属的 KG 预算旋钮。)
     report_section_chunk_budget: int = Field(
@@ -328,6 +363,28 @@ class Settings(BaseSettings):
     # 检索：top-N 知识对象。旧默认 12 是 6 月从 scored[:12] 魔数原样抬入、从未校准;
     # 提到 20 给简单/单方面题更多深度余量(对比题在此 floor 之上再按方面数自适应扩容)。
     retrieval_top_n: int = Field(20, validation_alias="RETRIEVAL_TOP_N")
+    # Legacy/no-effort callers still need an explicit per-query take. Normal
+    # browser Ask/report requests use the user-selected effort table instead.
+    reasoning_per_query_limit: int = Field(
+        DEFAULT_REASONING_PER_QUERY_LIMIT,
+        ge=1,
+        validation_alias="REASONING_PER_QUERY_LIMIT",
+    )
+    # Response projection and graph-walk budgets. These used to be unrelated
+    # literal slices/defaults in ask_service.py, which made retrieval tuning
+    # incomplete and hid the effective graph ceiling from deployments.
+    ask_related_knowledge_limit: int = Field(
+        12, ge=1, validation_alias="ASK_RELATED_KNOWLEDGE_LIMIT"
+    )
+    graph_seed_top_n: int = Field(
+        5, ge=1, validation_alias="GRAPH_SEED_TOP_N"
+    )
+    graph_max_depth: int = Field(
+        3, ge=1, validation_alias="GRAPH_MAX_DEPTH"
+    )
+    graph_max_fan_out: int = Field(
+        8, ge=1, validation_alias="GRAPH_MAX_FAN_OUT"
+    )
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
     retrieval_rrf_enabled: bool = Field(False, validation_alias="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, validation_alias="RETRIEVAL_RRF_K")
@@ -370,7 +427,8 @@ class Settings(BaseSettings):
     relation_seed_top_n: int = Field(8, validation_alias="RELATION_SEED_TOP_N")
     # P0-1/2: 关系候选池上限(有关系向量时,先按向量 sim 取 top-N 候选再 hydrate 文本
     # 做关键词+语义融合打分;镜像 chunk_recall 的"猛召回池"语义,非最终截断
-    # 的 relation_seed_top_n/_MIX_REL_SEEDS——池要显著大于两者才不伤召回)。
+    # 的 relation_seed_top_n/chunk_kg_relation_seed_top_n——池要显著大于
+    # 两者才不伤召回)。
     relation_recall: int = Field(200, validation_alias="RELATION_RECALL")
     # HippoRAG 式 PPR 跨文档检索(graph 模式;默认开)
     graph_ppr_enabled: bool = Field(True, validation_alias="GRAPH_PPR_ENABLED")
@@ -535,6 +593,15 @@ class Settings(BaseSettings):
     # 代价每 ask 多 1 次 LLM)。答题前对已装配证据按问题抽"相关要点"前置,聚焦答题。设 false 关。
     kg_query_refine_enabled: bool = Field(True, validation_alias="KG_QUERY_REFINE_ENABLED")
     query_refine_max_chars: int = Field(4000, validation_alias="QUERY_REFINE_MAX_CHARS")
+    query_refine_max_items: int = Field(
+        12, ge=1, validation_alias="QUERY_REFINE_MAX_ITEMS"
+    )
+    # Relationship lines appended to the citable evidence context are ranked
+    # by support. Their result-changing take belongs beside the other Ask
+    # retrieval budgets rather than in evidence_context.py as ``[:30]``.
+    ask_context_relation_limit: int = Field(
+        30, ge=1, validation_alias="ASK_CONTEXT_RELATION_LIMIT"
+    )
     # chunk-native 检索分块: chunk 目标字数 / 相邻重叠(P1 overlap 默认 0)。
     chunk_target_chars: int = Field(600, validation_alias="CHUNK_TARGET_CHARS")
     chunk_overlap_chars: int = Field(0, validation_alias="CHUNK_OVERLAP_CHARS")
@@ -598,6 +665,28 @@ class Settings(BaseSettings):
     kg_conflict_sim_threshold: float = Field(0.8, validation_alias="KG_CONFLICT_SIM_THRESHOLD")
     # chunk×graph mix: 叠加 KG 子图 block 和源 chunk 进候选池(默认开)。关闭后退化为纯 chunk 检索。
     chunk_kg_overlay_enabled: bool = Field(True, validation_alias="CHUNK_KG_OVERLAY_ENABLED")
+    # Candidate widths for the optional chunk×KG overlay. They are retrieval
+    # budgets (not protocol constants), and therefore must be named/tunable.
+    chunk_kg_node_seed_top_n: int = Field(
+        DEFAULT_CHUNK_KG_NODE_SEED_TOP_N,
+        ge=1,
+        validation_alias="CHUNK_KG_NODE_SEED_TOP_N",
+    )
+    chunk_kg_relation_seed_top_n: int = Field(
+        DEFAULT_CHUNK_KG_RELATION_SEED_TOP_N,
+        ge=1,
+        validation_alias="CHUNK_KG_RELATION_SEED_TOP_N",
+    )
+    chunk_kg_max_depth: int = Field(
+        DEFAULT_CHUNK_KG_MAX_DEPTH,
+        ge=1,
+        validation_alias="CHUNK_KG_MAX_DEPTH",
+    )
+    chunk_kg_fan_out: int = Field(
+        DEFAULT_CHUNK_KG_FAN_OUT,
+        ge=1,
+        validation_alias="CHUNK_KG_FAN_OUT",
+    )
     # Final mix selection reserves this many slots for graph-only chunks when
     # they clear the existing relevance floor.  It never enlarges the token
     # budget or changes the historical oversized-first-chunk exception.

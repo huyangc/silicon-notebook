@@ -26,7 +26,13 @@ import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { buildPublicReportLink } from "./public-report";
 import { quotedPhraseHint } from "./query-syntax";
-import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
+import {
+  DEFAULT_REPORT_MAX_SECTIONS,
+  DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
+  formatReportCoverage,
+  parseReportSubQueries,
+  type ReportCoverage,
+} from "./report-outline-model";
 import { formatReportTiming } from "./report-time";
 import { label, REPORT_DEPTH, REPORT_STATUS } from "./vocabulary";
 
@@ -1032,6 +1038,8 @@ export function OutlineEditor({
   generateReport,
   onGenerating,
   setToast,
+  maxSections = DEFAULT_REPORT_MAX_SECTIONS,
+  maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 }: {
   report: ReportDetailT;
   notebookId: string;
@@ -1043,6 +1051,8 @@ export function OutlineEditor({
   generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
   onGenerating: (detail: ReportDetailT) => void;
   setToast: (message: string) => void;
+  maxSections?: number;
+  maxSubqueriesPerSection?: number;
 }) {
   // 本地可编辑副本;仅当报告 id 变化时重新播种(避免打字被父层 state 覆盖)。
   const [sections, setSections] = useState<EditSection[]>(() => toEditSections(report.outline));
@@ -1079,6 +1089,11 @@ export function OutlineEditor({
   // 有效节 = 标题非空;后端要求 ≥1 有效节且每节带 sub_queries。新增的空节会带上占位
   // sub_query(用标题),保证 PATCH 校验通过并让生成阶段有检索种子。
   const validCount = sections.filter((s) => s.title.trim()).length;
+  const hasTooManySections = validCount > maxSections;
+  const hasTooManySubqueries = sections.some(
+    (section) => (section.sub_queries || []).filter((query) => query.trim()).length
+      > maxSubqueriesPerSection,
+  );
   const intentBindingCounts = new Map<string, number>();
   for (const section of sections) {
     for (const intentId of section.intent_ids || []) {
@@ -1088,6 +1103,14 @@ export function OutlineEditor({
 
   async function confirmGenerate() {
     if (busy) return;
+    if (hasTooManySections) {
+      setToast(`报告大纲最多可保留 ${maxSections} 个章节`);
+      return;
+    }
+    if (hasTooManySubqueries) {
+      setToast(`每个章节最多可保留 ${maxSubqueriesPerSection} 条检索方向`);
+      return;
+    }
     const cleaned = sections
       .filter((s) => s.title.trim())
       .map(({ _key, ...s }) => {
@@ -1122,9 +1145,14 @@ export function OutlineEditor({
       <div className="report-outline-editor-head">
         <div>
           <h3>确认研究大纲</h3>
-          <p>已先锁定用户问题，再按语料覆盖规划出 {sections.length} 个章节。可核对每节必答问题，修改标题、范围与检索方向后生成。</p>
+          <p>已先锁定用户问题，再按语料覆盖规划出 {sections.length} 个章节（最多 {maxSections} 个）。可核对每节必答问题，修改标题、范围与检索方向后生成。</p>
         </div>
-        <button className="report-action" type="button" onClick={addSection} disabled={busy}>
+        <button
+          className="report-action"
+          type="button"
+          onClick={addSection}
+          disabled={busy || sections.length >= maxSections}
+        >
           <Plus size={14} /> 新增章节
         </button>
       </div>
@@ -1204,14 +1232,28 @@ export function OutlineEditor({
                   </div>
                 )}
                 <label className="report-outline-query-field">
-                  <span>检索方向（每行一条）</span>
+                  <span>
+                    检索方向（每行一条）
+                    <small>最多 {maxSubqueriesPerSection} 条</small>
+                  </span>
                   <textarea
                     value={(s.sub_queries || []).join("\n")}
-                    rows={Math.max(2, Math.min(4, (s.sub_queries || []).length || 2))}
+                    rows={Math.max(
+                      2,
+                      Math.min(
+                        maxSubqueriesPerSection,
+                        (s.sub_queries || []).length || 2,
+                      ),
+                    )}
                     placeholder="输入本节需要执行的检索方向"
                     disabled={busy}
                     onChange={(e) => patchSection(s._key, { sub_queries: parseReportSubQueries(e.target.value) })}
                   />
+                  {(s.sub_queries || []).filter((query) => query.trim()).length > maxSubqueriesPerSection && (
+                    <small className="report-outline-field-error">
+                      已超出上限，请删减后再生成。
+                    </small>
+                  )}
                 </label>
                 {(suf || s.coverage || (s.perspectives && s.perspectives.length > 0)) && (
                   <div className="report-outline-badges">
@@ -1246,12 +1288,16 @@ export function OutlineEditor({
 
       <div className="report-outline-editor-foot">
         <span className="report-outline-editor-count">
-          {validCount > 0 ? `${validCount} 个有效章节` : "至少保留一个有标题的章节"}
+          {hasTooManySections
+            ? `已超出 ${maxSections} 个章节上限`
+            : validCount > 0
+              ? `${validCount} 个有效章节`
+              : "至少保留一个有标题的章节"}
         </span>
         <button
           className="button"
           type="button"
-          disabled={busy || validCount === 0}
+          disabled={busy || validCount === 0 || hasTooManySections || hasTooManySubqueries}
           onClick={() => void confirmGenerate()}
         >
           <Sparkles size={15} /> {busy ? "提交中…" : "生成完整报告"}
@@ -1294,6 +1340,8 @@ export interface ReportsPanelProps {
   readOnly?: boolean;
   creationDisabled?: boolean;
   creationDisabledReason?: string;
+  maxSections?: number;
+  maxSubqueriesPerSection?: number;
 }
 
 export function ReportsPanel({
@@ -1316,6 +1364,8 @@ export function ReportsPanel({
   readOnly = false,
   creationDisabled = false,
   creationDisabledReason = "",
+  maxSections = DEFAULT_REPORT_MAX_SECTIONS,
+  maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 }: ReportsPanelProps) {
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
@@ -1797,6 +1847,8 @@ export function ReportsPanel({
               listReports(notebookId).then(setReports).catch(() => {});
             }}
             setToast={setToast}
+            maxSections={maxSections}
+            maxSubqueriesPerSection={maxSubqueriesPerSection}
           />
         )}
         {active.status === "outline_ready" && readOnly && (

@@ -68,6 +68,9 @@ MODEL_SERVICES_CONFIG=
 
 `.env.example` 是非服务配置和密钥槽位的权威清单；`model-services.example.toml` 是服务、绑定和容量模板。远程访问、CORS、模型调度、认证、MinerU 配置和升级说明见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
+检索与模型输入上限使用具名合同，不在调用点散落数字切片。部署可调预算列在
+`.env.example`；深度报告的精确护栏与 API 行为见产品/API 参考。
+
 ### 运行
 
 ```bash

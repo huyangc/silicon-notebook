@@ -1024,7 +1024,10 @@ class AskService:
             rel = []
         if rel:
             focused = ("Focused relevant evidence (for this question):\n"
-                       + "\n".join(f"- {x}" for x in rel[:12])
+                       + "\n".join(
+                           f"- {x}" for x in
+                           rel[: self.settings.query_refine_max_items]
+                       )
                        + "\n\n")
             candidate = focused + context_block
             # Refinement is optional metadata.  Never evict already-budgeted,
@@ -2373,7 +2376,9 @@ class AskService:
                      "last_reviewed": getattr(item, "last_reviewed", ""),
                      "evidence": item.evidence},
                     registry.get(item.object_type)))
-            related_knowledge = related_knowledge[:12]
+            related_knowledge = related_knowledge[
+                : self.settings.ask_related_knowledge_limit
+            ]
 
             cited_element_ids = {ev.element_id for item in top_hits
                                  for ev in item.evidence if ev.element_id}
@@ -3255,10 +3260,13 @@ class AskService:
                         "tier": getattr(hit, "tier", "personal"),
                         "notebook_id": getattr(hit, "notebook_id", ""),
                     }, None, None)
-                    for hit in top_hits[:5]
+                    for hit in top_hits[: self.settings.graph_seed_top_n]
                 ]
             else:
-                base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
+                base_seeds = seed_ids if seed_ids else [
+                    h.object_id
+                    for h in top_hits[: self.settings.graph_seed_top_n]
+                ]
                 raise_if_cancelled(cancel_event)
                 use_seeds = self.candidates.fuse_graph_seeds(
                     notebook_id, question, base_seeds, cancel_event)
@@ -3275,8 +3283,8 @@ class AskService:
                     # from the result/render/verify by build_rx_graph + multihop_subgraph
                     # (kind="cluster" pass-through), so the LLM never cites a hub.
                     edge_types=DEFAULT_REASONING_EDGES | {"synonym"},
-                    max_depth=getattr(self.settings, "graph_max_depth", 3),
-                    max_fan_out=getattr(self.settings, "graph_max_fan_out", 8),
+                    max_depth=self.settings.graph_max_depth,
+                    max_fan_out=self.settings.graph_max_fan_out,
                 )
                 from app.services.source_scope import scoped_subgraph_nodes
 

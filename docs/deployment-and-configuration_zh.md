@@ -404,8 +404,13 @@ multipart 请求最多 20 个文件，避免可配置的单文件额度叠加成
 
 ```text
 RETRIEVAL_TOP_N         # 推理/报告合成证据预算下界（默认 20）
+REASONING_PER_QUERY_LIMIT # 不带检索档位的兼容调用每查询取数
 REASONING_TOP_N_PER_QUERY  # 自适应预算：每个方面（子查询，含社区兄弟）保底席位（默认 3）
 REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容（默认 36）
+ASK_RELATED_KNOWLEDGE_LIMIT # Ask 响应中展示的相关 KG 条目上限
+QUERY_REFINE_MAX_ITEMS / ASK_CONTEXT_RELATION_LIMIT # Ask 上下文中的精炼要点和排序关系条目上限
+GRAPH_SEED_TOP_N / GRAPH_MAX_DEPTH / GRAPH_MAX_FAN_OUT # graph 遍历候选护栏
+CHUNK_KG_NODE_SEED_TOP_N / CHUNK_KG_RELATION_SEED_TOP_N / CHUNK_KG_MAX_DEPTH / CHUNK_KG_FAN_OUT # chunk×KG overlay 护栏
 CHUNK_GRAPH_RESERVE        # 为已过相关度门槛的纯图路径 chunk 预留席位（默认 0；评测后可设 1）
 EXACT_LOOKUP_ENABLED       # 精确标识符通道：按 `set_db` 这类完整命令名整节取齐（默认 true）
 EXACT_LOOKUP_MAX_IDENTIFIERS       # 每个问题最多探测几个名称（默认 3）
@@ -600,6 +605,9 @@ MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
 MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
 MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
 REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
+REPORT_MAX_SUBQUERIES_PER_SECTION # 每节检索方向合同，API/UI 同步使用
+REPORT_PROBE_ELEMENT_LIMIT   # 规划与方向补检索的直接元素候选数
+REPORT_SCOUT_KG_LIMIT / REPORT_SCOUT_CHUNK_LIMIT / REPORT_SCOUT_MEMORY_LIMIT # 语料地图侦察宽度
 REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000；仅对不带研究深度的调用方生效，见检索段的行为变化说明）
 REPORT_GENERATION_CONCURRENCY # 深度报告：每个后端进程同时准入的整篇报告数（默认 1；排队时不占数据库连接）
 REPORT_SECTION_CONCURRENCY   # 深度报告：每篇已准入报告的节级扇出（默认 5；还受模型容量和数据库连接池余量约束）

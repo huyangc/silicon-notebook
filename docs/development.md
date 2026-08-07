@@ -4,6 +4,16 @@
 
 This document preserves the contributor-facing architecture summary, verification gate, workflow, test architecture, and documentation-maintenance contract. [AGENTS.md](../AGENTS.md) remains the full agent/developer contract and [architecture.md](../architecture.md) the detailed runtime architecture.
 
+## Numeric limits and truncation
+
+Production code must not hide result-changing literal slices or limits at a
+call site. Reuse a named protocol constant for invariant wire/storage bounds;
+use a validated `Settings` field for quality/cost budgets. A user-authored list
+is validated and rejected when over its shared backend/browser rail, never
+silently sliced. Embedding and other model-input truncation must use one
+configuration source across online, batch, and backfill paths. Explicit numeric
+fixtures in tests are outside this rule.
+
 ## Architecture Boundaries
 
 - Backend endpoint bodies live in domain FastAPI routers composed by `backend/app/api/routes.py`; the aggregate is composition-only and owns router order, not product handlers or compatibility exports. Boundary tests inspect endpoint ownership on the domain routers and verify the aggregate's composition declaration semantically; they do not assume `include_router()` flattens child routes, because newer FastAPI versions retain lazy included-router nodes. Domain Pydantic models live under `backend/app/models/`; `backend/app/models/schemas.py` is a legacy compatibility facade that re-exports the same model objects for old imports.

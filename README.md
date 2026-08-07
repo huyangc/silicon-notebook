@@ -68,6 +68,10 @@ MODEL_SERVICES_CONFIG=
 
 `.env.example` is the authoritative list of non-service settings and secret slots. `model-services.example.toml` is the service, binding, and capacity template. See [Deployment and configuration](./docs/deployment-and-configuration.md) for remote access, CORS, model scheduling, authentication, MinerU settings, and upgrade guidance.
 
+Retrieval and model-input ceilings are named contracts rather than call-site
+numeric slices. Deployment-owned budgets are listed in `.env.example`; exact
+Deep Report rails and API behavior live in the product/API reference.
+
 ### Run
 
 ```bash

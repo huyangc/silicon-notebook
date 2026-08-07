@@ -14,6 +14,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.core.ask_context import _ASK_EMBED_CACHE
+from app.core.config import (
+    DEFAULT_CHUNK_KG_FAN_OUT,
+    DEFAULT_CHUNK_KG_MAX_DEPTH,
+    DEFAULT_CHUNK_KG_NODE_SEED_TOP_N,
+    DEFAULT_CHUNK_KG_RELATION_SEED_TOP_N,
+)
 from app.models.common import Evidence
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
@@ -287,9 +293,6 @@ class CandidateRetrievalService(_RetrievalState):
     _CJK_RE = re.compile(r"[一-鿿]")
     _LATIN_RE = re.compile(r"[A-Za-z]")
     _IN_CHUNK = 900
-    _MIX_NODE_SEEDS = 20
-    _MIX_REL_SEEDS = 10
-    _MIX_FANOUT = 8
     _MIX_KG_KEY_BASE = 1000
 
     def __init__(
@@ -549,19 +552,22 @@ class CandidateRetrievalService(_RetrievalState):
         """查询 embedding(端点按原生维出向量)→ 运行时截断(EMBED_RUNTIME_DIM,
         与语料侧 build_matrix 共用 truncate_vec 同一口径)。查询/语料两侧维度
         不一致 = 静默零召回,是截断项目的头号风险 —— 勿在别处另行截断。
-        P1-A:ask 作用域内(_ASK_EMBED_CACHE 非 None)按 query[:2000] 复用同文本
+        P1-A:ask 作用域内(_ASK_EMBED_CACHE 非 None)按配置的 embedding 输入上限
+        复用同文本
         的截断后向量,砍 federated 双 tier/seed/quota 对同一问题的重复 RTT;
         失败不缓存(保留每次重试语义)。default None(非 ask 路径)行为不变。"""
         if not getattr(self.embedder, "configured", False):
             return None
         cache = _ASK_EMBED_CACHE.get()
-        key = query[:2000]
+        key = query[: self.settings.embed_truncate_chars]
         if cache is not None:
             hit = cache.get(key)
             if hit is not None:
                 return hit
         try:
-            vec = self.embedder.embed_query(query[:2000])
+            vec = self.embedder.embed_query(
+                query[: self.settings.embed_truncate_chars]
+            )
         except Exception as exc:
             self._note_model_error(
                 "embed",
@@ -2520,7 +2526,30 @@ class CandidateRetrievalService(_RetrievalState):
             })
             return "", {}, [], {}
         from app.services.kg.graph_reason import multihop_subgraph, render_subgraph_context
-        node_hits = self.federated_retrieve(notebook_id, query)[: self._MIX_NODE_SEEDS]
+        settings = getattr(self, "settings", None)
+        node_seed_top_n = getattr(
+            settings,
+            "chunk_kg_node_seed_top_n",
+            DEFAULT_CHUNK_KG_NODE_SEED_TOP_N,
+        )
+        relation_seed_top_n = getattr(
+            settings,
+            "chunk_kg_relation_seed_top_n",
+            DEFAULT_CHUNK_KG_RELATION_SEED_TOP_N,
+        )
+        max_depth = getattr(
+            settings,
+            "chunk_kg_max_depth",
+            DEFAULT_CHUNK_KG_MAX_DEPTH,
+        )
+        fan_out = getattr(
+            settings,
+            "chunk_kg_fan_out",
+            DEFAULT_CHUNK_KG_FAN_OUT,
+        )
+        node_hits = self.federated_retrieve(notebook_id, query)[
+            :node_seed_top_n
+        ]
         if restricted:
             # The whole federated graph is not source partitioned, but direct
             # federated KG search is: the active participant receives the
@@ -2542,7 +2571,9 @@ class CandidateRetrievalService(_RetrievalState):
                 subgraph, id_offset=id_offset
             )
             return block, id_map, node_hits, {}
-        rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[: self._MIX_REL_SEEDS]
+        rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[
+            :relation_seed_top_n
+        ]
         seeds = [h.object_id for h in node_hits]
         for r in rel_hits:
             seeds.extend((r.source_object_id, r.target_object_id))
@@ -2553,7 +2584,8 @@ class CandidateRetrievalService(_RetrievalState):
         if G is None or G.num_nodes() == 0:
             return "", {}, [], {}
         subgraph = multihop_subgraph(G, oid_to_idx, idx_to_oid, seed_ids=seeds,
-                                     edge_types=None, max_depth=1, max_fan_out=self._MIX_FANOUT)
+                                     edge_types=None, max_depth=max_depth,
+                                     max_fan_out=fan_out)
         from app.services.source_scope import scoped_subgraph_nodes
 
         # The federated graph is process-cached under a scope-blind key, so the

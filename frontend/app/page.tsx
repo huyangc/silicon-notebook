@@ -190,6 +190,10 @@ import { ChatQuestion } from "./chat-question";
 import { ChatAnswer } from "./chat-answer";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
+import {
+  DEFAULT_REPORT_MAX_SECTIONS,
+  DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
+} from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
@@ -832,6 +836,12 @@ export default function Home() {
   // only the short initial fetch window; the server remains the final 413 guard.
   const [sourceUploadMaxBytes, setSourceUploadMaxBytes] = useState<number | null>(null);
   const [sourceUploadMaxFilesPerBatch, setSourceUploadMaxFilesPerBatch] = useState<number | null>(null);
+  const [reportMaxSections, setReportMaxSections] = useState(
+    DEFAULT_REPORT_MAX_SECTIONS,
+  );
+  const [reportMaxSubqueriesPerSection, setReportMaxSubqueriesPerSection] = useState(
+    DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
+  );
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   // 上传在飞:multipart 传大 PDF 可能几十秒,期间「上传 N 个文件」必须禁用改文案。后端按
   // 内容哈希在同 notebook 内去重,重复提交不会建出重复来源,但会白传一遍并再跑一次解析。
@@ -1173,6 +1183,8 @@ export default function Home() {
         if (!cancelled) {
           setSourceUploadMaxBytes(config.source_upload_max_bytes);
           setSourceUploadMaxFilesPerBatch(config.source_upload_max_files_per_batch);
+          setReportMaxSections(config.report_max_sections);
+          setReportMaxSubqueriesPerSection(config.report_max_subqueries_per_section);
         }
       } catch {
         if (!cancelled) retryTimer = window.setTimeout(loadUploadLimit, 2000);
@@ -2662,6 +2674,10 @@ export default function Home() {
     if (systemConfiguration) {
       setSourceUploadMaxBytes(systemConfiguration.source_upload_max_bytes);
       setSourceUploadMaxFilesPerBatch(systemConfiguration.source_upload_max_files_per_batch);
+      setReportMaxSections(systemConfiguration.report_max_sections);
+      setReportMaxSubqueriesPerSection(
+        systemConfiguration.report_max_subqueries_per_section,
+      );
     }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
@@ -5879,6 +5895,8 @@ export default function Home() {
                     readOnly={!capabilities.canManageReports}
                     creationDisabled={sourceScopeBlocked}
                     creationDisabledReason="当前检索范围为空，请至少选择一个来源或参考库"
+                    maxSections={reportMaxSections}
+                    maxSubqueriesPerSection={reportMaxSubqueriesPerSection}
                   />
                 )}
 

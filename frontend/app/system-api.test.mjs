@@ -13,6 +13,8 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
     return new Response(JSON.stringify({
       source_upload_max_bytes: 50 * 1024 * 1024,
       source_upload_max_files_per_batch: 20,
+      report_max_sections: 7,
+      report_max_subqueries_per_section: 6,
       user_activity_view_enabled: false,
     }), {
       status: 200,
@@ -23,6 +25,8 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
     assert.deepEqual(await fetchSystemConfiguration(), {
       source_upload_max_bytes: 50 * 1024 * 1024,
       source_upload_max_files_per_batch: 20,
+      report_max_sections: 7,
+      report_max_subqueries_per_section: 6,
       user_activity_view_enabled: false,
     });
   } finally {
@@ -49,6 +53,8 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
   try {
     const config = await fetchSystemConfiguration();
     assert.equal(config.user_activity_view_enabled, false);
+    assert.equal(config.report_max_sections, 6);
+    assert.equal(config.report_max_subqueries_per_section, 4);
   } finally {
     globalThis.fetch = originalFetch;
   }

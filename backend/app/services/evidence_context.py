@@ -663,7 +663,15 @@ class EvidenceContextService:
                 remaining = budget - used
                 rendered: list[str] = []
                 relation_used = len(relation_prefix)
-                for source_key, edge_type, target_key, _nb, _source, _target, support in ranked[:30]:
+                for (
+                    source_key,
+                    edge_type,
+                    target_key,
+                    _nb,
+                    _source,
+                    _target,
+                    support,
+                ) in ranked[: self.settings.ask_context_relation_limit]:
                     suffix = f" (×{support}源)" if support >= 2 else ""
                     item = f"{source_key} -[{edge_type}]-> {target_key}{suffix}"
                     separator = 2 if rendered else 0

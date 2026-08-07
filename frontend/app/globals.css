@@ -2918,6 +2918,17 @@ button.chat-session-card {
   line-height: 1.45;
 }
 
+.report-outline-query-field > span small {
+  margin-left: 6px;
+  color: #7b8493;
+  font-weight: 500;
+}
+
+.report-outline-field-error {
+  color: var(--danger, #b42318);
+  font-weight: 600;
+}
+
 .report-outline-card-ops {
   display: inline-flex;
   align-items: center;

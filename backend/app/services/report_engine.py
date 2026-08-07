@@ -591,6 +591,7 @@ class ReportEngine:
             raw = client.chat_json(
                 [{"role": "user", "content": report_outline_prompt(
                     question, max_sections=self.settings.report_max_sections,
+                    max_subqueries=self.settings.report_max_subqueries_per_section,
                     history_block=history)}],
                 REPORT_OUTLINE_SCHEMA_HINT, cancel_event=self.cancel_event)
             data = json.loads(raw)
@@ -599,9 +600,13 @@ class ReportEngine:
                 title = str(s.get("title", "")).strip()
                 subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
                 if title and subs:
-                    sections.append({"title": title,
-                                     "scope": str(s.get("scope", "")).strip(),
-                                     "sub_queries": subs[:4]})
+                    sections.append({
+                        "title": title,
+                        "scope": str(s.get("scope", "")).strip(),
+                        "sub_queries": subs[
+                            : self.settings.report_max_subqueries_per_section
+                        ],
+                    })
             if sections:
                 return sections
         except AskCancelled:
@@ -612,8 +617,13 @@ class ReportEngine:
         from app.services.query_rewrite import expand_query
         ex = expand_query(self.dependencies.model_clients.chat("query_rewrite"),
                           question, history)
-        return [{"title": "分析", "scope": question,
-                 "sub_queries": [s.query for s in ex.sub_queries][:4] or [question]}]
+        return [{
+            "title": "分析",
+            "scope": question,
+            "sub_queries": [s.query for s in ex.sub_queries][
+                : self.settings.report_max_subqueries_per_section
+            ] or [question],
+        }]
 
     def _plan_intent_contract(self, question: str, history: str, *,
                               confirmation_mode: bool = False) -> dict:
@@ -768,7 +778,9 @@ class ReportEngine:
         if memo is not None and key in memo:
             return memo[key]
         found = list(self.dependencies.retrieval.retrieve_elements(
-            notebook_id, str(query), limit=8
+            notebook_id,
+            str(query),
+            limit=self.settings.report_probe_element_limit,
         ))
         if memo is not None:
             memo[key] = found
@@ -907,8 +919,6 @@ class ReportEngine:
         return out
 
     # --- Stage A(STORM):Corpus map 0-LLM 语料侦察 ---
-    _SCOUT_KG_N = 12
-    _SCOUT_CHUNK_N = 8
 
     def _corpus_profile(self, notebook_id: str, *, result_scope: str = "ranked") -> dict:
         service = self.dependencies.corpus_profile or ReportCorpusProfileService(
@@ -960,7 +970,9 @@ class ReportEngine:
         try:
             # 与覆盖探针表头是同一条确认问题——走同一份 memo,9.1M 库上省一次
             # 全量检索(质量评审 P3-7);只切片不改写,共享引用安全。
-            kg = self._probe_knowledge_hits(notebook_id, question)[: self._SCOUT_KG_N]
+            kg = self._probe_knowledge_hits(notebook_id, question)[
+                : self.settings.report_scout_kg_limit
+            ]
             if kg:
                 parts.append("检索到的知识条目(name[type][tier]):\n" + "\n".join(
                     f"- {str(h.payload.get('name','')).strip()}"
@@ -971,7 +983,7 @@ class ReportEngine:
             try:
                 chunks = deps.retrieval.ppr_retrieve(
                     notebook_id, question
-                )[: self._SCOUT_CHUNK_N]
+                )[: self.settings.report_scout_chunk_limit]
                 if chunks:
                     parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
                         f"- {c.source_title} · {c.section_path}" for c in chunks))
@@ -980,7 +992,10 @@ class ReportEngine:
         try:
             memories = (
                 deps.memory_retriever.notebook_memory_hits(
-                    self.user_id, notebook_id, question, 8
+                    self.user_id,
+                    notebook_id,
+                    question,
+                    self.settings.report_scout_memory_limit,
                 )
                 if deps.memory_retriever is not None and not source_scope_restricted()
                 else []
@@ -1142,6 +1157,7 @@ class ReportEngine:
             raw = self.dependencies.model_clients.chat("report_outline").chat_json(
                 [{"role": "user", "content": report_storm_outline_prompt(
                     question, corpus_map, max_sections=self.settings.report_max_sections,
+                    max_subqueries=self.settings.report_max_subqueries_per_section,
                     history_block=history,
                     intent_block=json.dumps(intent_contract or {}, ensure_ascii=False),
                     coverage_block=json.dumps(intent_probe or [], ensure_ascii=False),
@@ -1164,7 +1180,9 @@ class ReportEngine:
                 if title and subs:
                     section = {
                         "title": title, "scope": str(s.get("scope", "")).strip(),
-                        "sub_queries": subs[:4],
+                        "sub_queries": subs[
+                            : self.settings.report_max_subqueries_per_section
+                        ],
                         "intent_ids": [str(item).strip() for item in
                                        (s.get("intent_ids") or []) if str(item).strip()],
                         "perspectives": [str(p).strip() for p in (s.get("perspectives") or []) if str(p).strip()],
@@ -1205,7 +1223,9 @@ class ReportEngine:
             replacement = {
                 "title": topic["title"],
                 "scope": topic["question"],
-                "sub_queries": list(topic["retrieval_queries"])[:4] or [topic["question"]],
+                "sub_queries": list(topic["retrieval_queries"])[
+                    : self.settings.report_max_subqueries_per_section
+                ] or [topic["question"]],
                 "intent_ids": [topic["id"]],
                 "perspectives": ["用户明确要求"],
                 "tensions": [],
@@ -1226,7 +1246,7 @@ class ReportEngine:
                     out[target]["sub_queries"] = list(dict.fromkeys(
                         list(out[target].get("sub_queries") or [])
                         + list(topic["retrieval_queries"])
-                    ))[:4]
+                    ))[: self.settings.report_max_subqueries_per_section]
             covered.add(topic["id"])
 
         for section in out:
@@ -1407,8 +1427,14 @@ class ReportEngine:
         # 高档位的取数与 hydration 成本,截断只是把多拿的再扔掉。
         direction_take = (limits.ranked_per_query_take if limits is not None
                           else self.settings.retrieval_top_n)
-        direction_elements = (min(8, limits.answer_element_items)
-                              if limits is not None else 8)
+        direction_elements = (
+            min(
+                self.settings.report_probe_element_limit,
+                limits.answer_element_items,
+            )
+            if limits is not None
+            else self.settings.report_probe_element_limit
+        )
         # run 内已把方向当种子执行过的(记在 attempted 账目里),KG 侧不再重复
         # 同一条 federated 检索——那正是种子化要消掉的重复 I/O。元素侧照旧:
         # run 的元素检索不按方向逐条来,per-direction 元素补取不是重复。低档
@@ -1424,7 +1450,10 @@ class ReportEngine:
             str(row.get("query") or "").strip() for row in result.attempted
             if not row.get("failed")
         }
-        for query in list(section.get("sub_queries") or [])[:4]:
+        section_queries = list(section.get("sub_queries") or [])
+        for query in section_queries[
+            : self.settings.report_max_subqueries_per_section
+        ]:
             new_count = 0
             if str(query).strip() not in run_attempted:
                 try:

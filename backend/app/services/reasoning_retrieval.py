@@ -19,7 +19,7 @@ from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
     ask_retrieval_limits,
 )
-from app.core.config import Settings
+from app.core.config import DEFAULT_REASONING_PER_QUERY_LIMIT, Settings
 from app.models.ask import TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
@@ -76,7 +76,6 @@ PREFER_WEIGHTS = {
     "semantic": (0.2, 0.8),
     "balanced": (W_KEYWORD, W_SEMANTIC),
 }
-_PER_QUERY_LIMIT = 8
 # agent 主动 ppr_retrieve 的累计次数上限。写死常量(非 env 开关):reasoning_max_steps=50
 # 且每次 ppr_retrieve 都拉到新 chunk=算"有进展"→ stale 熔断不跳,无此上限一次推理可触发
 # 多达 50 次全图 PageRank。镜像 search_elements 的 reasoning_max_element_searches。
@@ -1910,7 +1909,12 @@ class ReasoningRetriever:
         )
         per_query_take = (
             limits.ranked_per_query_take
-            if limits is not None else _PER_QUERY_LIMIT
+            if limits is not None
+            else getattr(
+                self.settings,
+                "reasoning_per_query_limit",
+                DEFAULT_REASONING_PER_QUERY_LIMIT,
+            )
         )
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
