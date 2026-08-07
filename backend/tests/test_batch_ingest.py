@@ -3165,3 +3165,34 @@ def test_run_reparse_disables_incremental_fusion_during_run(repo, tmp_path, monk
 
     assert seen["fusion_during"] is False                        # 批量期关了 per-source 融合
     assert repo.settings.kg_incremental_fusion_enabled == orig   # 结束恢复原值
+
+
+@pytest.mark.parametrize(
+    "workers,requested,expected",
+    [
+        (8, None, 32),      # 并发度小 → 用固定下限
+        (32, None, 64),     # 并发度追平下限 → 按并发度派生,始终高于它
+        (64, None, 128),
+        (8, 9, 9),          # 显式取值只要高于并发度就原样采用
+        (8, 100, 100),
+    ],
+)
+def test_max_consecutive_model_failures_stays_above_source_concurrency(
+    workers, requested, expected
+):
+    resolved = bi._resolve_max_consecutive_model_failures(requested, workers)
+    assert resolved == expected
+    assert resolved > workers
+
+
+@pytest.mark.parametrize("workers,requested", [(32, 32), (8, 8), (8, 1)])
+def test_max_consecutive_model_failures_rejects_values_at_or_below_workers(
+    workers, requested
+):
+    """不满足关系就报错,不静默抬高——用户写下的数字被悄悄改掉比报错更坏。
+
+    阈值不高于并发度时,一次瞬时抖动会同时打中所有在飞来源、直接凑满"连续失败",
+    跳过模式等于没开(codex 第 1 轮 P2)。
+    """
+    with pytest.raises(ValueError, match="并发度"):
+        bi._resolve_max_consecutive_model_failures(requested, workers)
