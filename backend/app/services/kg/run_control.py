@@ -40,6 +40,7 @@ class KgExtractionRunControl:
         job_id: str,
         *,
         on_abort: Callable[[KgBuildFailure], None] | None = None,
+        parent: "KgExtractionRunControl | None" = None,
     ):
         self.job_id = job_id
         self._event = threading.Event()
@@ -47,15 +48,45 @@ class KgExtractionRunControl:
         self._failure: KgBuildFailure | None = None
         self._publishing = False
         self._on_abort = on_abort
+        self._parent = parent
+        # 子控制器注册表(仅 job 级持有)。父熔断必须唤醒每个在飞的子控制器,否则
+        # 子作用域里正在 wait_backoff 的窗口会睡满退避才发现整个任务已经停了。
+        # 由 release_child 在来源收尾时摘除,规模因此有界于来源级并发度。
+        self._children: set["KgExtractionRunControl"] = set()
+        self._children_lock = threading.Lock()
+
+    def child(self) -> "KgExtractionRunControl":
+        """派生一个**来源级**控制器:它的 abort 只掐自己这一路的在飞窗口,不熔断整个任务。
+
+        跳过模式(离线批量)用它把「模型不可用」的作用域从任务收窄到单个来源:该来源的
+        兄弟窗口照常被取消并排空(extract_graph 自己的 drain),其余来源不受影响。父控制器
+        仍然向下传导——Ctrl-C 与达到连续失败阈值后的升级熔断必须能穿透到每一个子作用域。
+        """
+        sub = KgExtractionRunControl(self.job_id, parent=self)
+        with self._children_lock:
+            if self._event.is_set():
+                # 已经熔断:子控制器出生即中止,别让它再发一次请求。
+                sub._event.set()
+            else:
+                self._children.add(sub)
+        return sub
+
+    def release_child(self, sub: "KgExtractionRunControl") -> None:
+        with self._children_lock:
+            self._children.discard(sub)
 
     @property
     def aborted(self) -> bool:
-        return self._event.is_set()
+        if self._event.is_set():
+            return True
+        return self._parent is not None and self._parent.aborted
 
     @property
     def failure(self) -> KgBuildFailure | None:
         with self._lock:
-            return self._failure
+            if self._failure is not None:
+                return self._failure
+        return self._parent.failure if self._parent is not None else None
 
     def abort(
         self, failure: KgBuildFailure, *, notify: bool = True
@@ -86,9 +117,20 @@ class KgExtractionRunControl:
                 self._event.set()
                 self._publishing = False
                 self._lock.notify_all()
+            # 熔断已发布后才唤醒子控制器:它们的 failure 属性回退到父的,先设事件
+            # 后设 failure 会让子作用域醒来时读到空 failure、当成没中止。
+            with self._children_lock:
+                children = list(self._children)
+                self._children.clear()
+            for sub in children:
+                sub._event.set()
         return failure
 
     def raise_if_aborted(self) -> None:
+        # 父(任务级)熔断优先:子作用域的跳过语义只对**自己**发起的中止成立,
+        # 任务级熔断必须原样穿透,否则 Ctrl-C / 升级熔断会被当成"跳过这一个源"。
+        if self._parent is not None:
+            self._parent.raise_if_aborted()
         with self._lock:
             while self._publishing and self._failure is None:
                 self._lock.wait()

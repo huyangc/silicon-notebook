@@ -262,7 +262,7 @@ def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
 
     def fake_build(
         nb, *, progress=None, target_limit=None, retry_partial=False,
-        finalize=None,
+        finalize=None, skip_policy=None,
     ):
         calls["fusion_flag_during"] = repo.settings.kg_incremental_fusion_enabled
         calls["build_nb"] = nb
@@ -1293,6 +1293,7 @@ def test_run_kg_plain_no_rebuild_without_llm_is_noop(repo, monkeypatch):
     assert bi.run_kg(repo, nb_id, no_rebuild=True) == {
         "extracted": 0,
         "failed": 0,
+        "model_skipped": 0,
         "partial_retried": 0,
         "partial_failed_preserved": 0,
         "clusters": 0,
