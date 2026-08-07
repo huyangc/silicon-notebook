@@ -640,7 +640,13 @@ maintenance is strictly offline: stop the API and every background writer, then 
 `--confirm-service-stopped`. The flag records an operator assertion; it does not stop services.
 A fail-fast database-wide advisory lock prevents overlapping maintenance CLIs. Source, durable and
 limited KG-target, metadata, re-extraction, vector, relation, and reverse-index drivers use bounded
-keyset pages. Online maintenance should
+keyset pages — including the `index` stage's whole-notebook embedding-matrix load, which reads a
+bounded page of vectors per statement instead of one unbounded `SELECT`. Large offline maintenance
+runs can still hit the online `POSTGRES_STATEMENT_TIMEOUT_SECONDS` default (`30`, sized for
+interactive requests) on the *other* long-running statements in these flows; set a larger value
+(e.g. `86400`) in the environment of the maintenance CLI process itself for a large database — the
+matrix load is no longer the pipeline's largest single statement, but the rest of the offline
+pipeline (and a paged matrix read on a slow disk) still runs under the same per-statement timeout. Online maintenance should
 continue through the application/API, and `--dry-run` opens no repository. `vectors-to-blob` is
 intentionally SQLite-only because PostgreSQL vectors are already `bytea`; PostgreSQL rejects it
 before opening a repository.

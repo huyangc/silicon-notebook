@@ -20,6 +20,17 @@ _EMBEDDING_ID_COLUMNS = {
     "chunk_embeddings": "chunk_id",
 }
 
+# Page size for vector_pages' whole-notebook keyset scan (consumed by
+# index_projection_store.embedding_matrix, object_ids=None). Deliberate parity
+# with the SQLite side's own `_MATRIX_FETCH_BATCH`
+# (app/repositories/sqlite/index_projection_store.py) — same offline
+# build/fold memory diet, same page-bounds-transient-BLOBs argument — but NOT
+# imported from there: adapters do not cross-import each other, so the two
+# constants are independently defined and must be kept numerically equal by
+# hand if either changes. See vector_pages' docstring for the three ways the
+# PostgreSQL pagination shape differs from SQLite's.
+_MATRIX_FETCH_BATCH = 10_000
+
 
 def _validated_vector(value: object, *, dimension: int | None) -> tuple[bytes, int]:
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -190,6 +201,99 @@ class EmbeddingStore:
             (notebook_id,),
         ).fetchall()
         return _compat_vector_rows(rows)
+
+    @staticmethod
+    def vector_pages(db, notebook_id: str, table: str, id_col: str,
+                      batch: int = _MATRIX_FETCH_BATCH):
+        """Keyset-paginated whole-notebook vector read, generator of (vid,
+        vector) pairs — the bounded replacement for the offline build/fold
+        pipeline's whole-notebook load (index_projection_store.embedding_matrix,
+        object_ids=None); `vector_rows` above stays the unbounded read for its
+        other consumer, the query-time vector cache in
+        retrieval_candidates._vector_matrix — bounded by SCENARIO, not by its
+        caller: that branch only runs where no ANN index exists, which the
+        copy-stats / warm-cache gates confine to small notebooks.
+
+        Mirrors the SQLite side's `_stream_rows`
+        (app/repositories/sqlite/index_projection_store.py) shape — each page
+        an independent, fully-exhausted statement, never one held cursor for
+        the whole scan — with three deliberate PostgreSQL differences, every
+        one load-bearing at 9M-row scale:
+          • Pagination key is the id column itself (`table`'s PK: object_id /
+            chunk_id / relation_id / element_id, `C` collation text) — NOT a
+            PostgreSQL analogue of SQLite rowid. PostgreSQL exposes no stable
+            physical-row-order handle to page over across statements (ctid
+            can change under VACUUM); the id column already is a stable,
+            indexed total order, so `ORDER BY {id} LIMIT batch` / next page
+            `AND {id} > last` is a plain PK index range scan — `notebook_id`
+            applies as a residual heap filter. For a notebook holding the
+            dominant share of the table (production: 99.1%) that filter is
+            near-free and each page stops at LIMIT. This is NOT equivalent to
+            SQLite's walk — there, `idx_{table}_nb` implicitly ends in rowid,
+            so `notebook_id=? AND rowid>?` is a zero-over-scan seek at every
+            share. Here, once a notebook's share drops below roughly
+            sqrt(total_rows × batch), the planner flips to `idx_{table}_nb`
+            plus a per-page top-N sort that re-reads the WHOLE notebook every
+            page; total work stays bounded by about one full PK traversal
+            (the flip only happens where the notebook is small), but it is a
+            real minority-share cost, accepted because scale builds target
+            dominant-share notebooks. If it ever matters, a `(notebook_id,
+            {id})` composite belongs in an offline CREATE INDEX CONCURRENTLY
+            maintenance path (the build_postgres_retrieval_indexes.py
+            precedent), not a transactional startup migration (schema is
+            currently v21).
+          • No de-dup / no `seen` set: SQLite's rowid pagination must
+            de-duplicate because `INSERT OR REPLACE` (the SQLite embedding
+            writer) deletes+reinserts a refreshed row at a LARGER rowid, so a
+            row refreshed mid-scan can re-surface in a later page under its
+            old AND new rowid. Here the page key IS the id column, and
+            `ON CONFLICT (id) DO UPDATE` (the PostgreSQL writer) updates the
+            row in place — the id never moves in keyset order, so id-keyset
+            pagination visits each id at most once by construction. Adding a
+            `seen` set anyway would cost ~1GB+ for a 9M-row text-id set —
+            spending the OOM-avoidance memory budget defending against a
+            hazard that cannot occur on this backend. Cross-page drift under
+            concurrent writes is tolerated, same ledger as SQLite: an id the
+            cursor already passed keeps its scan-time vector even if
+            re-embedded later (the refreshed vector is picked up by the next
+            fold/rebuild), and a row inserted below the cursor is invisible
+            this round; build_matrix's n_hint tolerates the row-count drift.
+          • Snapshot released between pages: each page's SELECT is issued and
+            fully fetched (execute + fetchall) before the next page's SELECT
+            is issued — no single statement or transaction holds a streaming
+            server-side cursor across the whole (potentially hours-long)
+            build. A long-held read keeps its MVCC snapshot (and the xmin
+            horizon) pinned for that whole duration, which blocks VACUUM from
+            reclaiming dead tuples under concurrent writes — the PostgreSQL
+            analogue of the SQLite side's WAL-checkpoint-blocking argument.
+        `batch` rows below the page size ends the scan (matches SQLite's
+        `len(page) < _MATRIX_FETCH_BATCH: break`); an id row's `vector`
+        column is unwrapped from bytea/memoryview to bytes by
+        `_compat_vector_rows` before it is yielded, same as every other
+        reader in this module."""
+        table_id, column_id = EmbeddingStore._table_identifiers(table, id_col)
+        last_vid = None
+        while True:
+            if last_vid is None:
+                statement = sql.SQL(
+                    "SELECT {} AS vid,vector FROM {} WHERE notebook_id=%s "
+                    "ORDER BY {} LIMIT %s"
+                ).format(column_id, table_id, column_id)
+                params = (notebook_id, batch)
+            else:
+                statement = sql.SQL(
+                    "SELECT {} AS vid,vector FROM {} WHERE notebook_id=%s AND {} > %s "
+                    "ORDER BY {} LIMIT %s"
+                ).format(column_id, table_id, column_id, column_id)
+                params = (notebook_id, last_vid, batch)
+            page = _compat_vector_rows(db.execute(statement, params).fetchall())
+            if not page:
+                break
+            for row in page:
+                yield row["vid"], row["vector"]
+            last_vid = page[-1]["vid"]
+            if len(page) < batch:
+                break
 
     @staticmethod
     def vector_rows_for_ids(db, notebook_id: str, table: str, id_col: str, ids):
