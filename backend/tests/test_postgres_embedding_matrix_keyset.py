@@ -3,7 +3,12 @@ pagination (index_projection_store.embedding_matrix's object_ids=None path,
 via embedding_store.EmbeddingStore.vector_pages).
 
 No live PostgreSQL connection is used or required — these are G1-tier unit
-tests. A fake connection records the rendered SQL text + params of every
+tests, so this file lives at the main test root, NOT under
+``backend/tests/postgres/`` (that directory is ignored by the G1/G2 lanes and
+its G3 lane selects by the ``postgres_integration`` marker; a markerless fake-db
+file there runs in zero gates — same placement rule as
+``test_postgres_knowledge_counts_cache.py``). A fake connection records the
+rendered SQL text + params of every
 `execute()` call and serves pages against an in-memory, id-sorted dataset, so
 the pagination SHAPE (not just the eventual (ids, matrix) values) is under
 test: an unbounded single-SELECT regression or a non-advancing keyset would
@@ -162,12 +167,15 @@ def test_vector_pages_empty_notebook_issues_one_page():
     assert "> %s" not in conn.calls[0][0]
 
 
-def test_matrix_fetch_batch_constant_is_10000():
-    """Parity pin with the SQLite side's own `_MATRIX_FETCH_BATCH`
-    (app/repositories/sqlite/index_projection_store.py) — the two constants
-    are independently defined (adapters do not cross-import) and must be
-    kept numerically equal by hand if either changes."""
-    assert _MATRIX_FETCH_BATCH == 10_000
+def test_matrix_fetch_batch_constant_matches_sqlite_side():
+    """Parity pin: the two `_MATRIX_FETCH_BATCH` constants are independently
+    defined (adapters do not cross-import; a TEST may import both sides) and
+    this assertion is what keeps them numerically equal — pinning only one
+    side's literal would let the other drift silently."""
+    from app.repositories.sqlite.index_projection_store import (
+        _MATRIX_FETCH_BATCH as sqlite_batch,
+    )
+    assert _MATRIX_FETCH_BATCH == sqlite_batch == 10_000
 
 
 # ───────────────────────────────── IndexProjectionStore.embedding_matrix ──

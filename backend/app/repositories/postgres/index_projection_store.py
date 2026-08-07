@@ -682,12 +682,16 @@ class IndexProjectionStore:
         index range scan; `notebook_id` applies as a residual heap filter.
         The offline build only ever runs for notebooks holding the dominant
         row share of the table (production: 99.1%), so that residual filter
-        costs nothing there; a minority-share notebook may over-scan per
-        page — the same accepted shape as the SQLite side's rowid walk +
-        notebook_id filter. A `(notebook_id, {id})` composite index would
-        remove the residual filter but is deliberately NOT added by this
-        change (would need a schema version bump — currently v20 — for a
-        scenario production does not exercise).
+        costs nothing there. Below roughly sqrt(total_rows × batch) of share
+        the planner instead re-reads the whole notebook through
+        `idx_{table}_nb` with a per-page top-N sort — total work stays
+        bounded by about one full PK traversal, but it is a real
+        minority-share cost, unlike SQLite whose `idx_{table}_nb` implicitly
+        ends in rowid and seeks at every share (details in
+        EmbeddingStore.vector_pages). A `(notebook_id, {id})` composite
+        index would remove it but is deliberately NOT added by this change;
+        if ever needed it ships via an offline CREATE INDEX CONCURRENTLY
+        maintenance path, not a startup migration (schema currently v21).
 
         A list = fold's bounded delta load, batched through the facade's
         IN-clause chunking with the connection held open across the

@@ -895,6 +895,15 @@ def test_postgres_vector_pages_keyset_pagination_matches_inserted_set(
     )
     assert ids == expected_ids
     assert matrix.shape[0] == len(rows)
+    # Row i must be id i's own vector (L2-normalized by build_matrix), not
+    # merely the right shape — an ids↔rows misalignment passes shape checks.
+    for row_index, vid in enumerate(ids):
+        expected = by_id[vid]
+        norm = float(np.linalg.norm(expected))
+        assert norm > 0.0
+        np.testing.assert_allclose(
+            matrix[row_index], expected / norm, rtol=1e-6
+        )
 
 
 @pytest.mark.postgres_integration

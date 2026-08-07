@@ -645,8 +645,8 @@ bounded page of vectors per statement instead of one unbounded `SELECT`. Large o
 runs can still hit the online `POSTGRES_STATEMENT_TIMEOUT_SECONDS` default (`30`, sized for
 interactive requests) on the *other* long-running statements in these flows; set a larger value
 (e.g. `86400`) in the environment of the maintenance CLI process itself for a large database — the
-matrix load no longer needs it, but the rest of the offline pipeline still runs under the same
-per-statement timeout. Online maintenance should
+matrix load is no longer the pipeline's largest single statement, but the rest of the offline
+pipeline (and a paged matrix read on a slow disk) still runs under the same per-statement timeout. Online maintenance should
 continue through the application/API, and `--dry-run` opens no repository. `vectors-to-blob` is
 intentionally SQLite-only because PostgreSQL vectors are already `bytea`; PostgreSQL rejects it
 before opening a repository.
