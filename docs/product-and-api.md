@@ -326,11 +326,16 @@ run over thousands of sources: a single flaky window kills a multi-hour batch.
 child of the run control, so only its own in-flight windows are cancelled and
 drained; it returns to the unanalyzed state (so simply re-running the same
 command retries exactly the skipped sources) and the task moves on. The backstop
-is kept: `--max-consecutive-model-failures` (default `32`) consecutive
-source-level model failures with no success in between escalate to the ordinary
-task-level circuit, publishing the same `stopping`/`kg_build_circuit_opened`. The
-threshold must stay above `--workers`, because one transient blip hits every
-in-flight source at once. That counter is task-scoped and survives target paging
+is kept: `--max-consecutive-model-failures` consecutive source-level model
+failures with no success in between escalate to the ordinary task-level circuit,
+publishing the same `stopping`/`kg_build_circuit_opened`. The threshold is
+**enforced** to stay above `--workers`, because one transient blip hits every
+in-flight source at once: omitting the flag derives `max(32, 2 × workers)`, and an
+explicit value at or below the worker count is rejected rather than silently
+raised. Skip mode deliberately does **not** cover the startup availability probe —
+a probe failure means the service is down right now, before the operator has
+invested anything, so failing fast is both cheaper and more honest than burning a
+retry budget per source only to trip the threshold anyway. That counter is task-scoped and survives target paging
 — extraction targets advance over 500-row raw-source pages, and a sparse
 notebook can yield one target per page, so a per-page counter would never reach
 the threshold. The flag is off by default and API-driven builds cannot set it;

@@ -1938,6 +1938,14 @@ class KnowledgeLifecycleService:
                 self.delete_notebook_kg(notebook_id)
             total_targets = int(job["total_sources"])
             if mode != "rebuild" and total_targets:
+                # 起始探测**刻意不受跳过模式影响**(codex 第 1 轮 P2,驳回)。它是"服务
+                # 现在活着吗"这一个问题的答案:探测失败即此刻服务不可用,而此时用户
+                # 还没有任何投入,停下来的代价是零、重跑的代价也是零。放行反而更坏——
+                # 跳过模式会对着一个已知挂掉的服务逐个来源白烧
+                # (KG_LLM_MAX_RETRIES+1)×超时,凑满连续阈值后照样死,只是多留下几十个
+                # 被标记跳过的来源。跳过模式要救的是"跑到一半的偶发波动",不是"开跑
+                # 时服务就是死的"。反向护栏:
+                # test_skip_mode_still_fails_fast_when_the_startup_probe_fails。
                 probe_kg_model(controlled_client)
             self.kg_build_jobs.set_stage(job_id, "extracting")
             result = {

@@ -1172,3 +1172,29 @@ def test_skip_mode_never_downgrades_a_job_level_abort_into_a_skip(
     assert saved["status"] == "failed"
     statuses = _source_statuses(repo, source_ids)
     assert "extracting" not in statuses.values()
+
+
+def test_skip_mode_still_fails_fast_when_the_startup_probe_fails(repo):
+    """反向护栏:起始探测失败仍然停掉整个任务,跳过模式**不**放行(codex 第 1 轮 P2 驳回)。
+
+    探测回答的是"服务现在活着吗"。失败即此刻不可用,而用户尚无任何投入——停下来
+    与重跑的代价都是零。放行反而更坏:会对着已知挂掉的服务逐个来源白烧超时,凑满
+    连续阈值后照样死,只是多留下几十个被标记跳过的来源。改动此行为请先改这条用例。
+    """
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient(fail_probe=True))
+    policy = ModelSkipPolicy(max_consecutive=32)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KgBuildAborted):
+        repo.build_notebook_kg(
+            notebook.id, job_id=job["id"], skip_policy=policy
+        )
+
+    assert policy.skipped == []
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "model_unavailable"
+    # 一个来源都没被动过:探测在抽取开始之前就把任务停住了。
+    assert set(_source_statuses(repo, source_ids).values()) == {"parsed"}
+    assert _kg_source_ids(repo, notebook.id) == set()

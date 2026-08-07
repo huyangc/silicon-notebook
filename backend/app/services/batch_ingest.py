@@ -68,11 +68,35 @@ _VECTOR_TABLES = (
 )
 _EMBED_PAGE_ROWS = 500
 
-# --skip-model-failures 的兜底阈值:连续这么多个来源都因模型不可用被跳过、中间没有
-# 任何一个成功时,判定服务真的挂了并升级为任务级熔断。默认值取得比来源级并发度
-# (KG_JOB_CONCURRENCY,典型 8~16)高一档:一次瞬时抖动会同时打中所有在飞来源,阈值
-# 若不高于并发度,单次波动就会误判成"服务已挂",跳过模式等于没开。
+# --skip-model-failures 的兜底阈值下限:连续这么多个来源都因模型不可用被跳过、中间
+# 没有任何一个成功时,判定服务真的挂了并升级为任务级熔断。
 _DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES = 32
+
+
+def _resolve_max_consecutive_model_failures(
+    requested: int | None, workers: int
+) -> int:
+    """阈值**必须**高于来源级并发度,这条关系要强制而不是只写在文档里。
+
+    一次瞬时抖动会同时打中所有在飞来源,所以阈值不高于并发度时,单次波动就凑满了
+    "连续失败",直接误判成"服务已挂"——跳过模式等于没开。固定默认 32 在
+    ``--workers 32`` 及以上时恰好破坏这条关系(codex 第 1 轮 P2),故未显式指定时按
+    并发度派生(取 2×workers 与下限的较大者);显式指定则**拒绝**不满足关系的取值,
+    不静默抬高——用户写下的数字被悄悄改掉比报错更坏。
+    """
+    floor = max(1, int(workers)) + 1
+    if requested is None:
+        return max(
+            _DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES, 2 * max(1, int(workers))
+        )
+    value = int(requested)
+    if value < floor:
+        raise ValueError(
+            f"--max-consecutive-model-failures 必须大于来源级并发度"
+            f"(当前 {workers}),否则一次瞬时抖动打中全部在飞来源就会误判"
+            f"服务已挂;给的是 {value},至少要 {floor}"
+        )
+    return value
 
 LogFn = Callable[[dict[str, object]], None]
 
@@ -163,6 +187,7 @@ class BatchIngestRepository(Protocol):
         target_limit: int | None = None,
         retry_partial: bool = False,
         finalize: Callable[[dict], dict | None] | None = None,
+        skip_policy: "ModelSkipPolicy | None" = None,
     ) -> KGBuildResult: ...
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: RebuildProgress | None = None,
@@ -584,8 +609,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
            report_interval: int = 15,
            retry_partial: bool = False,
            skip_model_failures: bool = False,
-           max_consecutive_model_failures: int =
-               _DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES) -> dict[str, int]:
+           max_consecutive_model_failures: int | None = None) -> dict[str, int]:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
     Model admission is owned by the system provider; this phase only submits
@@ -634,6 +658,20 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
         raise RuntimeError("kg_extract workload 未绑定系统模型服务")
 
     log = log or (lambda _e: None)
+    # 阈值校验必须在改动 repo.settings 之前:它会抛 ValueError,而 orig_fusion 的
+    # 还原挂在下面那个 try/finally 上,放在后面抛就会把 fusion 开关永久留在 False。
+    skip_policy = (
+        ModelSkipPolicy(
+            _resolve_max_consecutive_model_failures(
+                max_consecutive_model_failures,
+                # 权威并发度:CLI 的 --workers 在构造 repository 之前就写进了 settings,
+                # 所以这里读到的就是本进程实际的来源级并发度。
+                int(getattr(repo.settings, "kg_job_concurrency", 1) or 1),
+            )
+        )
+        if skip_model_failures
+        else None
+    )
     mnt = repo.maintenance
     orig_fusion = repo.settings.kg_incremental_fusion_enabled
     repo.settings.kg_incremental_fusion_enabled = False   # 批量期关 per-source 融合,收尾一次全量
@@ -646,11 +684,6 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
         "clusters": 0,
         "nodes_embedded": 0,
     }
-    skip_policy = (
-        ModelSkipPolicy(max_consecutive_model_failures)
-        if skip_model_failures
-        else None
-    )
     if skip_policy is not None:
         # 显式降级必须有告警(CLI 不静默降级):用户要能在日志开头看到本次跑的是
         # 「跳过模式」,否则结尾的 model_skipped 数字会被读成"数据有问题"。
@@ -1559,12 +1592,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "不再熔断整个任务；适合离线长跑扛模型偶发波动。"
                         "连续失败到 --max-consecutive-model-failures 仍会停止。"
                         "默认关闭(模型不可用即停止整次分析)。")
-    p.add_argument("--max-consecutive-model-failures", type=int,
-                   default=_DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES,
+    p.add_argument("--max-consecutive-model-failures", type=int, default=None,
                    help="仅配合 --skip-model-failures:连续这么多个来源都因模型问题失败"
-                        "且中间无一成功时判定服务已挂,升级为整任务停止"
-                        f"(默认 {_DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES};"
-                        "取值应高于 --workers,否则一次瞬时抖动打中全部在飞来源就会误判)。")
+                        "且中间无一成功时判定服务已挂,升级为整任务停止。"
+                        f"省略时按并发度派生 max({_DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES}, "
+                        "2×--workers);显式取值必须**大于** --workers,否则一次瞬时抖动"
+                        "打中全部在飞来源就会误判服务已挂(不满足即报错,不静默抬高)。")
     p.add_argument("--fresh", action="store_true",
                    help="清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑"
                         "(kg 与 all 阶段的收尾 rebuild 均适用;用于只换了 KG 模型/阈值、"
@@ -1728,11 +1761,7 @@ def _dispatch_main(
         fresh = getattr(args, "fresh", False)
         retry_partial = getattr(args, "retry_partial", False)
         skip_model_failures = getattr(args, "skip_model_failures", False)
-        max_consecutive = getattr(
-            args,
-            "max_consecutive_model_failures",
-            _DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES,
-        )
+        max_consecutive = getattr(args, "max_consecutive_model_failures", None)
         print(
             f"phase=kg limit={args.limit} no_rebuild={no_rebuild} "
             f"rebuild_only={rebuild_only} fresh={fresh} "
