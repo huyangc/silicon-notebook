@@ -663,22 +663,44 @@ class IndexProjectionStore:
         object_ids=None = whole-notebook load with a COUNT(*) n_hint so
         build_matrix preallocates (the frozen build-scale memory diet) —
         deliberately BYPASSES the query-time vector cache: a build's multi-GB
-        matrices must never become LRU entries. A list = fold's bounded delta
-        load, batched through the facade's IN-clause chunking with the
-        connection held open across the generator (frozen `_delta_vecs`
-        shape); an empty list returns ([], []). Both paths truncate through
-        build_matrix(runtime_dim=...) — the dim-consumption point moves here
-        UNCHANGED (漏消费点 = 静默零召回)."""
+        matrices must never become LRU entries. Rows are read through
+        `EmbeddingStore.vector_pages` in bounded keyset pages (`{id} > last
+        LIMIT _MATRIX_FETCH_BATCH`, embedding_store.py), each page an
+        independent fully-exhausted statement — the whole-table result set
+        is never `.fetchall()`'d in one call and no single statement holds a
+        streaming cursor across the whole scan. This mirrors the SQLite
+        side's `_stream_rows`
+        (app/repositories/sqlite/index_projection_store.py) at the same
+        8-9M-row scale — see `vector_pages`' docstring for the full memory /
+        de-dup / snapshot argument and the three points where the
+        PostgreSQL shape deliberately differs from SQLite's rowid pagination
+        (id-column keyset instead of rowid, no `seen` de-dup because
+        id-keyset cannot revisit an id, and MVCC-snapshot release instead of
+        WAL-checkpoint release).
+
+        Planner shape: `ORDER BY {id} LIMIT n` / `{id} > last` is a plain PK
+        index range scan; `notebook_id` applies as a residual heap filter.
+        The offline build only ever runs for notebooks holding the dominant
+        row share of the table (production: 99.1%), so that residual filter
+        costs nothing there; a minority-share notebook may over-scan per
+        page — the same accepted shape as the SQLite side's rowid walk +
+        notebook_id filter. A `(notebook_id, {id})` composite index would
+        remove the residual filter but is deliberately NOT added by this
+        change (would need a schema version bump — currently v20 — for a
+        scenario production does not exercise).
+
+        A list = fold's bounded delta load, batched through the facade's
+        IN-clause chunking with the connection held open across the
+        generator (frozen `_delta_vecs` shape); an empty list returns
+        ([], []). Both paths truncate through build_matrix(runtime_dim=...)
+        — the dim-consumption point stays here UNCHANGED (漏消费点 = 静默零召回)."""
         from app.services.vector_index import build_matrix, resolve_runtime_dim
         runtime_dim = resolve_runtime_dim(self.settings)
         if object_ids is None:
             with self.connect() as db:
                 n_hint = EmbeddingStore.version_row(db, notebook_id, table)["c"]
-                rows = EmbeddingStore.vector_rows(
-                    db, notebook_id, table, id_column
-                )
                 return build_matrix(
-                    ((r["vid"], r["vector"]) for r in rows),
+                    EmbeddingStore.vector_pages(db, notebook_id, table, id_column),
                     n_hint=n_hint, runtime_dim=runtime_dim)
         if not object_ids:
             return [], []

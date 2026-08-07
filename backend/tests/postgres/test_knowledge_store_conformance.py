@@ -844,6 +844,60 @@ def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
 
 
 @pytest.mark.postgres_integration
+def test_postgres_vector_pages_keyset_pagination_matches_inserted_set(
+    postgres_database,
+):
+    """T3#5 (real PostgreSQL): `EmbeddingStore.vector_pages` at a small,
+    explicit batch must walk several real keyset pages against a live
+    PostgreSQL `knowledge_embeddings` table and reproduce the full inserted
+    set — id order, no duplicates, byte-identical vectors — proving the
+    `sql.Identifier`-quoted `ORDER BY {id} LIMIT %s` / `{id} > %s` statements
+    are valid PostgreSQL, not just valid against the unit tests' fake
+    connection. `IndexProjectionStore.embedding_matrix`'s whole-notebook path
+    (production default batch, single page for this row count) must agree."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 21
+    _seed_catalog(postgres_database)
+    store = PostgresEmbeddingStore(write=postgres_database.write)
+    rows = [
+        (f"ko-vec-{i:03d}", np.asarray([float(i), float(i) + 0.5], dtype=np.float32))
+        for i in range(37)
+    ]
+    store.replace_knowledge_vectors("nb-personal", rows, created_at=NOW)
+
+    with postgres_database.connect() as connection:
+        paged = list(
+            PostgresEmbeddingStore.vector_pages(
+                connection, "nb-personal", "knowledge_embeddings", "object_id", batch=7
+            )
+        )
+
+    expected_ids = sorted(vid for vid, _ in rows)
+    assert [vid for vid, _ in paged] == expected_ids  # PK id-keyset order
+    assert len(paged) == len(rows)
+    assert len({vid for vid, _ in paged}) == len(rows)  # no id revisited
+    by_id = {vid: vec for vid, vec in rows}
+    for vid, raw in paged:
+        assert isinstance(raw, bytes)
+        np.testing.assert_array_equal(np.frombuffer(raw, dtype=np.float32), by_id[vid])
+
+    projections = PostgresIndexProjectionStore(
+        postgres_database.settings,
+        connect=postgres_database.connect,
+        in_batches=lambda ids: [list(ids)],
+        ent_chunk_map=None,
+        mention_extra_edges=None,
+        vector_matrix=None,
+    )
+    ids, matrix = projections.embedding_matrix(
+        "nb-personal", "knowledge_embeddings", "object_id"
+    )
+    assert ids == expected_ids
+    assert matrix.shape[0] == len(rows)
+
+
+@pytest.mark.postgres_integration
 def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
     postgres_database,
 ):
