@@ -913,7 +913,8 @@ def query_intent_prompt(question: str, max_topics: int = 6,
 
 
 def report_outline_prompt(question: str, max_sections: int = 6,
-                          history_block: str = "") -> str:
+                          history_block: str = "",
+                          max_subqueries: int = 4) -> str:
     history_section = (
         "Prior conversation (for context):\n" f"{history_block}\n\n"
         if history_block else "")
@@ -929,7 +930,7 @@ def report_outline_prompt(question: str, max_sections: int = 6,
         "- Do NOT include executive-summary / references / knowledge-gap "
         "sections — the system appends those automatically.\n"
         "- Each section: title (in the question's language), scope (one line, "
-        "what the section must establish), sub_queries (2-4 focused ENGLISH "
+        f"what the section must establish), sub_queries (2-{max_subqueries} focused ENGLISH "
         "retrieval queries for that section's evidence).\n\n"
         f"{history_section}"
         f"Question: {question}\n\n"
@@ -1128,9 +1129,11 @@ REPORT_STORM_SCHEMA_HINT = (
 
 
 def report_storm_outline_prompt(question: str, corpus_map: str,
-                                max_sections: int = 6, history_block: str = "",
+                                max_sections: int = 6,
+                                history_block: str = "",
                                 intent_block: str = "",
-                                coverage_block: str = "") -> str:
+                                coverage_block: str = "",
+                                max_subqueries: int = 4) -> str:
     history_section = (f"Prior conversation:\n{history_block}\n\n" if history_block else "")
     return (
         "You plan the OUTLINE of a deep, insightful technical report — NOT a shallow "
@@ -1169,7 +1172,7 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
         "other questions omit frame or return an empty object.\n"
         f"Produce 3-{max_sections} sections. Do NOT include executive-summary / "
         "references / knowledge-gap sections (auto-appended). Each section: title "
-        "(question's language), scope (one line), sub_queries (2-4 focused ENGLISH "
+        f"(question's language), scope (one line), sub_queries (2-{max_subqueries} focused ENGLISH "
         "retrieval queries), intent_ids (mandatory ids answered by the section), "
         "perspectives (which lenses it came from), tensions "
         "(one line each; which other section/lens it conflicts with, or []).\n\n"

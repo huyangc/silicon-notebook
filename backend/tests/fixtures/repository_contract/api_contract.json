@@ -8902,6 +8902,16 @@
           "additionalProperties": false,
           "description": "Non-sensitive, authenticated configuration required by the web client.",
           "properties": {
+            "report_max_sections": {
+              "exclusiveMinimum": 0.0,
+              "title": "Report Max Sections",
+              "type": "integer"
+            },
+            "report_max_subqueries_per_section": {
+              "exclusiveMinimum": 0.0,
+              "title": "Report Max Subqueries Per Section",
+              "type": "integer"
+            },
             "source_upload_max_bytes": {
               "exclusiveMinimum": 0.0,
               "title": "Source Upload Max Bytes",
@@ -8920,6 +8930,8 @@
           "required": [
             "source_upload_max_bytes",
             "source_upload_max_files_per_batch",
+            "report_max_sections",
+            "report_max_subqueries_per_section",
             "user_activity_view_enabled"
           ],
           "title": "SystemConfiguration",

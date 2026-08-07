@@ -301,16 +301,22 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
         if isinstance(item, dict) and item.get("id")
     }
     secs = []
-    for raw in payload.sections[: repo.settings.report_max_sections]:
+    for raw in payload.sections:
         if not isinstance(raw, dict):
             continue
         title = str(raw.get("title") or "").strip()
         raw_queries = raw.get("sub_queries") or []
         if not isinstance(raw_queries, list):
             continue
-        queries = [str(item).strip() for item in raw_queries if str(item).strip()][:4]
+        queries = [str(item).strip() for item in raw_queries if str(item).strip()]
         if not title or not queries:
             continue
+        if len(queries) > repo.settings.report_max_subqueries_per_section:
+            raise user_error(
+                422,
+                "每个章节最多可保留 "
+                f"{repo.settings.report_max_subqueries_per_section} 条检索方向",
+            )
         section = dict(raw)
         section.update(
             title=title,
@@ -349,6 +355,11 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
             # outrank the synchronized compatibility contract during assembly.
             section.pop("report_frame", None)
         secs.append(section)
+    if len(secs) > repo.settings.report_max_sections:
+        raise user_error(
+            422,
+            f"报告大纲最多可保留 {repo.settings.report_max_sections} 个章节",
+        )
     if not secs:
         raise HTTPException(status_code=422, detail="at least one valid section required")
     covered_intents = {

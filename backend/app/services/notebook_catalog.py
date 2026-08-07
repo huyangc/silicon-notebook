@@ -16,7 +16,7 @@ from app.models.notebooks import (
     NotebookTemplate,
     NotebookUpdate,
 )
-from app.models.ask import NotebookSearchResponse, SearchHit
+from app.models.ask import SEARCH_HIT_CAP, NotebookSearchResponse, SearchHit
 from app.core import diagnostics_runtime as diagnostics
 from app.core.query_syntax import strip_accepted_quote_markers
 from app.repositories.ports import (
@@ -32,6 +32,13 @@ from app.repositories.ports import (
 from app.repositories.source_files import delete_source_file as _delete_source_file
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
+
+
+# Search has one canonical total-hit contract in app.models.ask. Memory is an
+# additive search family and gets a smaller reserved candidate pool so it
+# cannot evict every source/element/KG match from that total.
+_MEMORY_SEARCH_HIT_CAP = 8
+_SEARCH_HIT_EXCERPT_CHARS = 400
 
 
 def _created_label(value: str) -> str:
@@ -492,13 +499,16 @@ class NotebookCatalogService:
         # letting a memory that merely scatters those words qualify as though
         # the user had never quoted anything. (codex #410 round-2 P2)
         memories = self.memory_retriever.notebook_memory_hits(
-            self._identity.current_user().id, notebook_id, query, 8
+            self._identity.current_user().id,
+            notebook_id,
+            query,
+            _MEMORY_SEARCH_HIT_CAP,
         )
         memory_hits = [SearchHit(
             scope="Memory",
             notebook_id=notebook_id,
             label=item.title,
-            text=item.text[:400],
+            text=item.text[:_SEARCH_HIT_EXCERPT_CHARS],
             source_id="",
             element_id="",
             memory_id=item.memory_id,
@@ -508,5 +518,8 @@ class NotebookCatalogService:
             return response
         return NotebookSearchResponse(
             query=response.query,
-            hits=[*response.hits[: max(0, 20 - len(memory_hits))], *memory_hits][:20],
+            hits=[
+                *response.hits[: max(0, SEARCH_HIT_CAP - len(memory_hits))],
+                *memory_hits,
+            ][:SEARCH_HIT_CAP],
         )

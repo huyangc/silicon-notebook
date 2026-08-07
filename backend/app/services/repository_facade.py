@@ -3161,10 +3161,6 @@ class RepositoryFacade:
     ) -> List[str]:
         return self.retrieval.candidates._graph_seed_fusion(notebook_id, question, base_seeds, cancel_event)
 
-    _MIX_NODE_SEEDS = 20
-    _MIX_REL_SEEDS = 10
-    _MIX_FANOUT = 8
-
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
         return self.retrieval.candidates._chunk_kg_overlay(notebook_id, query, hl, id_offset)
 

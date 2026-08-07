@@ -341,7 +341,7 @@ def test_intent_confirmation_requires_answers_then_resumes_planning(client, monk
     assert len(launched) == launched_after_claim
 
 
-def test_outline_patch_preserves_intent_catalog_and_bounds_sections(client, monkeypatch):
+def test_outline_patch_preserves_intent_catalog_at_section_limit(client, monkeypatch):
     import app.api.report_routes as R
     from app.api.deps import repository
 
@@ -366,9 +366,9 @@ def test_outline_patch_preserves_intent_catalog_and_bounds_sections(client, monk
                   "intent_contract": contract}],
     )
     submitted = [
-        {"title": f"S{i}", "scope": " s ", "sub_queries": [" q ", "q2", "q3", "q4", "q5"],
+        {"title": f"S{i}", "scope": " s ", "sub_queries": [" q ", "q2", "q3", "q4"],
          "intent_ids": ["intent-1" if i == 0 else "intent-2", "unknown"]}
-        for i in range(repository().settings.report_max_sections + 2)
+        for i in range(repository().settings.report_max_sections)
     ]
     response = client.patch(
         f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
@@ -382,6 +382,59 @@ def test_outline_patch_preserves_intent_catalog_and_bounds_sections(client, monk
     assert outline[0]["intent_questions"] == ["explain A"]
     assert all(section["intent_catalog"] == catalog for section in outline)
     assert all(section["intent_contract"] == contract for section in outline)
+
+
+def test_outline_patch_rejects_excess_sections(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "q"}
+    ).json()["report_id"]
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+    )
+    cap = repository().settings.report_max_sections
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": [
+            {"title": f"S{i}", "scope": "s", "sub_queries": [f"q{i}"]}
+            for i in range(cap + 1)
+        ]},
+    )
+    assert response.status_code == 422
+    assert str(cap) in response.json()["detail"]
+
+
+def test_outline_patch_rejects_excess_retrieval_directions(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "q"}
+    ).json()["report_id"]
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+    )
+    cap = repository().settings.report_max_subqueries_per_section
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": [{
+            "title": "A",
+            "scope": "s",
+            "sub_queries": [f"q{i}" for i in range(cap + 1)],
+        }]},
+    )
+    assert response.status_code == 422
+    assert str(cap) in response.json()["detail"]
 
 
 def test_outline_patch_persists_the_user_confirmed_report_frame(client, monkeypatch):

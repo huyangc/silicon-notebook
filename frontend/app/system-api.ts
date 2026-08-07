@@ -1,6 +1,10 @@
 import { performApiRequest, requestJson } from "./api-client.ts";
 import { logDiagnostic } from "./errors.ts";
 import type { Health } from "./workspace-model.ts";
+import {
+  DEFAULT_REPORT_MAX_SECTIONS,
+  DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
+} from "./report-outline-model.ts";
 
 export type ReadySnapshot = {
   ready: boolean;
@@ -24,6 +28,9 @@ export type SystemConfiguration = {
   source_upload_max_bytes: number;
   /** Fixed multipart resource guard published by the backend. */
   source_upload_max_files_per_batch: number;
+  /** Backend/API rail for editable retrieval directions in one report section. */
+  report_max_sections: number;
+  report_max_subqueries_per_section: number;
   /** /dev/logs 的能力位:后端 USER_ACTIVITY_VIEW_ENABLED 是否开启「活动」tab。
    *  旧后端可能不下发这个字段——缺失或类型不对时按 `true` 处理(后端默认就是开
    *  的,不该在新前端 + 旧后端组合下把一个其实可用的视图藏掉)。 */
@@ -44,12 +51,24 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   const record = value as Record<string, unknown>;
   const limit = record.source_upload_max_bytes;
   const batchFiles = record.source_upload_max_files_per_batch;
+  const reportSections = record.report_max_sections;
+  const reportSubqueries = record.report_max_subqueries_per_section;
   if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0) {
     throw new TypeError("系统上传配置格式无效");
   }
   if (typeof batchFiles !== "number" || !Number.isSafeInteger(batchFiles) || batchFiles <= 0) {
     throw new TypeError("系统上传配置格式无效");
   }
+  const reportMaxSections = (
+    typeof reportSections === "number"
+    && Number.isSafeInteger(reportSections)
+    && reportSections > 0
+  ) ? reportSections : DEFAULT_REPORT_MAX_SECTIONS;
+  const reportMaxSubqueries = (
+    typeof reportSubqueries === "number"
+    && Number.isSafeInteger(reportSubqueries)
+    && reportSubqueries > 0
+  ) ? reportSubqueries : DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION;
   // 缺失(旧后端)或类型不符一律按 **false** 处理:这是能力位不是配置项,所以是安全
   // 默认而非校验失败,不走前两个字段那样的抛错路径。
   //
@@ -61,6 +80,8 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   return {
     source_upload_max_bytes: limit,
     source_upload_max_files_per_batch: batchFiles,
+    report_max_sections: reportMaxSections,
+    report_max_subqueries_per_section: reportMaxSubqueries,
     user_activity_view_enabled: activityViewEnabled === true,
   };
 }

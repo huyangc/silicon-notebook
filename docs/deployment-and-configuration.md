@@ -476,8 +476,13 @@ stale tabs and direct API clients.
 
 ```text
 RETRIEVAL_TOP_N         # reasoning/report synthesis evidence-budget floor (default 20)
+REASONING_PER_QUERY_LIMIT # per-query take for compatibility callers without an effort profile
 REASONING_TOP_N_PER_QUERY  # adaptive budget: seats reserved per aspect/sub-query (default 3)
 REASONING_TOP_N_CAP        # adaptive budget cap; comparison Qs scale by #aspects (default 36)
+ASK_RELATED_KNOWLEDGE_LIMIT # related-KG records projected into an Ask response
+QUERY_REFINE_MAX_ITEMS / ASK_CONTEXT_RELATION_LIMIT # refined evidence bullets and ranked relationship lines admitted to Ask context
+GRAPH_SEED_TOP_N / GRAPH_MAX_DEPTH / GRAPH_MAX_FAN_OUT # graph-walk candidate rails
+CHUNK_KG_NODE_SEED_TOP_N / CHUNK_KG_RELATION_SEED_TOP_N / CHUNK_KG_MAX_DEPTH / CHUNK_KG_FAN_OUT # chunk×KG overlay rails
 CHUNK_GRAPH_RESERVE        # seats for graph-only chunks already above the relevance floor (default 0; set 1 after evaluation)
 EXACT_LOOKUP_ENABLED       # exact-identifier fast path: whole-section fetch for `set_db`-style names (default true)
 EXACT_LOOKUP_MAX_IDENTIFIERS       # names probed per question (default 3)
@@ -718,6 +723,9 @@ MAX_ENTITY_TOKENS            # mix KG entity-segment token budget (default 6000)
 MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 8000)
 MAX_TOTAL_TOKENS             # mix total context token budget (default 30000)
 REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
+REPORT_MAX_SUBQUERIES_PER_SECTION # per-section retrieval-direction contract mirrored by API/UI
+REPORT_PROBE_ELEMENT_LIMIT   # direct-element candidates used by planning and direction top-up
+REPORT_SCOUT_KG_LIMIT / REPORT_SCOUT_CHUNK_LIMIT / REPORT_SCOUT_MEMORY_LIMIT # corpus-map scout widths
 REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000; only for callers without a research depth — see the retrieval behaviour-change note)
 REPORT_GENERATION_CONCURRENCY # deep-report: whole reports admitted per backend process (default 1; queued reports hold no DB connection)
 REPORT_SECTION_CONCURRENCY   # deep-report: section fan-out per admitted report (default 5; also capped by model capacity and the DB-pool reserve)

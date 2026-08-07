@@ -4,6 +4,14 @@
 
 本文保留面向贡献者的架构摘要、验证门、工作流、测试架构和文档维护契约。完整 Agent/开发约束仍以 [AGENTS.md](../AGENTS.md) 为准，详细运行时架构以 [architecture.md](../architecture.md) 为准。
 
+## 数值上限与截断
+
+生产代码不得在调用点隐藏会改变结果的数字切片或上限。不可调的 wire/storage
+边界复用具名协议常量；可在质量/成本之间调整的预算放入带校验的 `Settings`。
+用户编辑的列表超过前后端共用护栏时必须明确校验/拒绝，不得静默切片。embedding
+等模型输入截断必须在线、批处理与回填路径共用同一配置真源。测试 fixture
+中的显式数字不在本规则范围内。
+
 ## 架构边界
 
 - 后端 endpoint body 位于由 `backend/app/api/routes.py` 组合的领域 FastAPI router；聚合层只负责 composition/order，不承载产品 handler，也不提供兼容导出。边界测试直接检查领域 router 的 endpoint 所有权，并以语义 AST 检查聚合组合声明；不要假设 `include_router()` 一定把子路由平铺，因为新版 FastAPI 会保留惰性的 included-router 节点。领域 Pydantic model 位于 `backend/app/models/`；`backend/app/models/schemas.py` 是旧导入的兼容 facade，re-export 同一批 model object。

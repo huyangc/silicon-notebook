@@ -5,6 +5,10 @@ export type ReportCoverage = {
   source_hits: number;
 };
 
+/** Compatibility default for an older backend without the browser config field. */
+export const DEFAULT_REPORT_MAX_SECTIONS = 6;
+export const DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION = 4;
+
 export function parseReportSubQueries(value: string): string[] {
   return value.split("\n");
 }

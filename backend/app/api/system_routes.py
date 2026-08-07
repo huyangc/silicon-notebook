@@ -66,6 +66,10 @@ def system_configuration(
     return SystemConfiguration(
         source_upload_max_bytes=settings.source_upload_max_bytes,
         source_upload_max_files_per_batch=SOURCE_UPLOAD_MAX_FILES_PER_BATCH,
+        report_max_sections=settings.report_max_sections,
+        report_max_subqueries_per_section=(
+            settings.report_max_subqueries_per_section
+        ),
         user_activity_view_enabled=settings.user_activity_view_enabled,
     )
 
