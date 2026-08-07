@@ -94,6 +94,40 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 
 _SOURCE_BUILD_PAGE_SIZE = 500
 
+
+class ModelSkipPolicy:
+    """离线跳过模式(`batch_ingest kg --skip-model-failures`)的**任务级**账目。
+
+    默认行为不变:模型不可用熔断整个任务。显式开启后,单个来源的模型失败只作用于
+    它自己的子控制器(见 ``KgExtractionRunControl.child``),该来源退回 ``parsed``
+    并记入 ``skipped``,任务继续跑后面的来源——偶发波动不再让上千个源的批量全灭。
+
+    连续失败阈值是**保留的兜底**:服务真的挂了时,继续跑就是每个源白烧
+    ``KG_LLM_MAX_RETRIES + 1`` 次超时。连续 ``max_consecutive`` 个来源都因模型问题
+    失败、中间没有任何一个成功时升级为原来的任务级熔断。
+
+    账目必须**跨页存活**:目标按 500 行原始来源分页,稀疏库每页可能只有一两个目标,
+    计数若按页重置,阈值永远达不到,兜底就形同虚设。故由 ``_run_notebook_kg_job``
+    建一份、各页 ``_extract_targets`` 共享。
+    """
+
+    def __init__(self, max_consecutive: int):
+        self.max_consecutive = max(1, int(max_consecutive))
+        self._lock = threading.Lock()
+        self._consecutive = 0
+        self.skipped: List[str] = []
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive = 0
+
+    def record_skip(self, source_id: str) -> bool:
+        """记一次来源级模型失败;返回 True 表示应升级为任务级熔断。"""
+        with self._lock:
+            self.skipped.append(source_id)
+            self._consecutive += 1
+            return self._consecutive >= self.max_consecutive
+
 # `rebuild_communities` 的默认层,也是仓库里**唯一**被写过的层(所有调用点都传 0)。
 # 它单独取个名字是因为那份**不分 level** 的共享账目整体归它独有:
 # `unified_kg_state.community_seq`、`kg_analysis_artifacts`、以及两张依赖板块划分的
@@ -1586,6 +1620,7 @@ class KnowledgeLifecycleService:
         controlled_client: TaskScopedKgClients,
         progress=None,
         on_abort=None,
+        skip_policy: "ModelSkipPolicy | None" = None,
     ) -> dict:
         import concurrent.futures as _cf
         from app.services.kg import scheduler as _kg_scheduler
@@ -1595,10 +1630,23 @@ class KnowledgeLifecycleService:
 
         partial_retried: List[str] = []
         partial_failed_preserved: List[str] = []
+        model_skipped: List[str] = []
 
         def _extract_one(source_id: str, preserve_existing: bool) -> bool:
             control.raise_if_aborted()
             self._set_source_status(source_id, "extracting")
+            # 跳过模式:本来源用自己的子控制器,模型不可用只掐这一路的在飞窗口。
+            # 关闭时逐位复用任务级控制器与它那份已解析的 client 缓存(零行为差异)。
+            source_control = (
+                control.child() if skip_policy is not None else control
+            )
+            source_clients = (
+                TaskScopedKgClients(
+                    self.model_clients, self.settings, source_control
+                )
+                if skip_policy is not None
+                else controlled_client
+            )
             try:
                 control.raise_if_aborted()
                 # doc_type 终态收口（与上传流水线 process_source 同一套）：run_extraction
@@ -1612,14 +1660,16 @@ class KnowledgeLifecycleService:
                     source_id,
                     lambda sid: self._run_extraction(
                         sid,
-                        kg_client=controlled_client,
+                        kg_client=source_clients,
                         preserve_existing_until_complete=preserve_existing,
                     ),
                 )
                 if preserve_existing:
                     partial_retried.append(source_id)
+                if skip_policy is not None:
+                    skip_policy.record_success()
                 return True
-            except KgBuildAborted:
+            except KgBuildAborted as exc:
                 self._set_source_status(
                     source_id,
                     "extracted" if preserve_existing else "parsed",
@@ -1627,7 +1677,17 @@ class KnowledgeLifecycleService:
                 )
                 if preserve_existing:
                     partial_failed_preserved.append(source_id)
-                raise
+                # 任务级熔断(Ctrl-C、探测失败、别的线程已升级)一律原样上抛;
+                # 只有本来源自己的子控制器发起的中止才允许降级成"跳过这一个"。
+                if skip_policy is None or control.aborted:
+                    raise
+                model_skipped.append(source_id)
+                if skip_policy.record_skip(source_id):
+                    # 连续失败到顶=服务真挂了,升级为原来的任务级熔断
+                    # (由它公布 stopping/circuit_opened,与关闭跳过模式时同一条路)。
+                    control.abort(exc.failure)
+                    raise
+                return False
             except (KeyboardInterrupt, SystemExit):
                 # 与上一支同一件事,只是中断继承 BaseException 接不到:不退回 'parsed'
                 # 这一篇来源就会一直显示「分析中」,直到后端重启才被兜底清理。
@@ -1651,6 +1711,11 @@ class KnowledgeLifecycleService:
                     "build_notebook_kg failed for %s", source_id
                 )
                 return False
+            finally:
+                if skip_policy is not None:
+                    # 注册表只为「父熔断要唤醒谁」存在,来源收尾即摘除,
+                    # 规模因此有界于来源级并发度而不是本次任务的来源总数。
+                    control.release_child(source_control)
 
         # 提交本身也在中断保护范围内(见下面的 try):大库要提交几十万个 job,这段窗口
         # 不短,中断落在这里时已提交的 worker 同样必须被取消并排空。故用增量填充的
@@ -1759,6 +1824,9 @@ class KnowledgeLifecycleService:
             "skipped_no_elements": skipped_no_elements,
             "partial_retried": sorted(partial_retried),
             "partial_failed_preserved": sorted(partial_failed_preserved),
+            # `failed` 的子集:因模型不可用被跳过(而非来源自身出错)的那些。
+            # 两份都给,调用方才分得清"这批到底是数据坏了还是服务抖了"。
+            "model_skipped": sorted(model_skipped),
         }
 
     def _run_success_side_effects(
@@ -1798,6 +1866,7 @@ class KnowledgeLifecycleService:
         target_limit: int | None = None,
         retry_partial: bool = False,
         finalize: Callable[[dict], dict | None] | None = None,
+        skip_policy: "ModelSkipPolicy | None" = None,
     ) -> dict:
         job = self.kg_build_jobs.get(job_id)
         if (
@@ -1878,6 +1947,7 @@ class KnowledgeLifecycleService:
                 "skipped_no_elements": [],
                 "partial_retried": [],
                 "partial_failed_preserved": [],
+                "model_skipped": [],
             }
             processed = 0
             for targets, skipped, skipped_no_elements in self._kg_target_batches(
@@ -1914,6 +1984,7 @@ class KnowledgeLifecycleService:
                     controlled_clients,
                     _page_progress if progress is not None else None,
                     _mark_stopping,
+                    skip_policy=skip_policy,
                 )
                 for key in result:
                     result[key].extend(page_result[key])
@@ -2070,6 +2141,7 @@ class KnowledgeLifecycleService:
         target_limit: int | None = None,
         retry_partial: bool = False,
         finalize: Callable[[dict], dict | None] | None = None,
+        skip_policy: "ModelSkipPolicy | None" = None,
     ) -> dict:
         if job_id is None:
             job_id = self.prepare_notebook_kg_job(
@@ -2087,6 +2159,7 @@ class KnowledgeLifecycleService:
                     target_limit=target_limit,
                     retry_partial=retry_partial,
                     finalize=finalize,
+                    skip_policy=skip_policy,
                 )
             except (KeyboardInterrupt, SystemExit):
                 self._settle_unentered_job(job_id, notebook_id)
@@ -2099,6 +2172,7 @@ class KnowledgeLifecycleService:
             target_limit=target_limit,
             retry_partial=retry_partial,
             finalize=finalize,
+            skip_policy=skip_policy,
         )
 
     def execute_notebook_kg_job(

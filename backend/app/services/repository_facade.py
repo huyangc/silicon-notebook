@@ -1652,9 +1652,13 @@ class RepositoryFacade:
         retry_partial: bool = False,
         finalize=None,
         job_id: str | None = None,
+        skip_policy=None,
     ) -> dict:
         """按需构建 KG — KnowledgeLifecycleService 拥有编排(Task 15,含
-        kg_building 单飞守卫、目标策略与 governance 冲突消解直连)。"""
+        kg_building 单飞守卫、目标策略与 governance 冲突消解直连)。
+
+        skip_policy 只由离线批量的显式跳过模式传入(见 ModelSkipPolicy);
+        API 路径一律省略,保持"模型不可用即熔断整个任务"的既有契约。"""
         return self._runtime.knowledge_lifecycle.build_notebook_kg(
             notebook_id,
             progress=progress,
@@ -1662,6 +1666,7 @@ class RepositoryFacade:
             retry_partial=retry_partial,
             finalize=finalize,
             job_id=job_id,
+            skip_policy=skip_policy,
         )
 
     def rebuild_notebook_kg(self, notebook_id: str) -> dict:

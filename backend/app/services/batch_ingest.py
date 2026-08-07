@@ -37,6 +37,7 @@ from app.core.request_context import (
 from app.models.notebooks import NotebookCreate, NotebookSummary
 from app.models.sources import SourceSummary
 from app.models.identity import UserProfile
+from app.services.knowledge_lifecycle import ModelSkipPolicy
 from app.services.repository import UploadedSourceFile
 from app.services.maintenance_cli import (
     MaintenanceCliError,
@@ -66,6 +67,12 @@ _VECTOR_TABLES = (
     ("relation_embeddings", "relation_id"),
 )
 _EMBED_PAGE_ROWS = 500
+
+# --skip-model-failures 的兜底阈值:连续这么多个来源都因模型不可用被跳过、中间没有
+# 任何一个成功时,判定服务真的挂了并升级为任务级熔断。默认值取得比来源级并发度
+# (KG_JOB_CONCURRENCY,典型 8~16)高一档:一次瞬时抖动会同时打中所有在飞来源,阈值
+# 若不高于并发度,单次波动就会误判成"服务已挂",跳过模式等于没开。
+_DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES = 32
 
 LogFn = Callable[[dict[str, object]], None]
 
@@ -552,11 +559,33 @@ def backfill_element_embeddings(
     return total
 
 
+def _report_model_skips(policy: ModelSkipPolicy | None) -> None:
+    """收尾报数:跳过模式下被模型问题跳过的来源。成功、升级熔断与中断三条路都要报——
+    「跳过了多少」是这个模式唯一的验收信息,只在成功路径打印等于中途死掉时全丢。
+    id 有界打印(前 20 个),上千个源的批量不该把终端刷成 id 列表。"""
+    if policy is None:
+        return
+    skipped = list(policy.skipped)
+    if not skipped:
+        print("跳过模式:本次没有来源因模型问题被跳过。", flush=True)
+        return
+    head = ", ".join(skipped[:20])
+    more = f" (+{len(skipped) - 20} 个)" if len(skipped) > 20 else ""
+    print(
+        f"跳过模式:{len(skipped)} 个来源因模型不可用被跳过,仍未分析;"
+        f"模型服务恢复后重跑本命令即自动重试。id: {head}{more}",
+        flush=True,
+    )
+
+
 def run_kg(repo: BatchIngestRepository, notebook_id: str,
            limit: int | None = None, log: LogFn | None = None,
            no_rebuild: bool = False, rebuild_only: bool = False, fresh: bool = False,
            report_interval: int = 15,
-           retry_partial: bool = False) -> dict[str, int]:
+           retry_partial: bool = False,
+           skip_model_failures: bool = False,
+           max_consecutive_model_failures: int =
+               _DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES) -> dict[str, int]:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
     Model admission is owned by the system provider; this phase only submits
@@ -571,6 +600,11 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                             门控挡回缓存簇数,--fresh 变假 no-op)。
       retry_partial=True — 正常补缺失 KG 时一并重试 latest run 的 failed_windows>0
                             来源；旧图保留到零失败窗口且非空的新图可事务替换为止。
+      skip_model_failures=True — 模型不可用时只跳过**当前来源**(退回 parsed,下次跑
+                            自动重试),不熔断整个任务。连续 max_consecutive_model_failures
+                            个来源都因模型问题失败且中间无一成功时,仍升级为原来的
+                            任务级熔断——服务真挂了继续跑只是每源白烧一轮超时。
+                            显式降级,默认关；开启时打印告警,结束时报跳过数。
 
     Scale-index 自动联:rebuild 后若 notebook 为 base tier 或已存在 scale index,则调
     repo.build_scale_index(notebook_id) 使索引与新簇同步。
@@ -579,6 +613,10 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
         raise ValueError("no_rebuild 和 rebuild_only 互斥,不能同时为 True")
     if retry_partial and rebuild_only:
         raise ValueError("retry_partial 和 rebuild_only 互斥,不能同时为 True")
+    if skip_model_failures and rebuild_only:
+        raise ValueError(
+            "skip_model_failures 和 rebuild_only 互斥,不能同时为 True"
+        )
     if not rebuild_only and not repo.configured("kg_extract"):
         # Preserve the historical extraction-only probe: plain --no-rebuild
         # without a model is a successful no-op.  Bounded/partial runs still
@@ -587,6 +625,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
             return {
                 "extracted": 0,
                 "failed": 0,
+                "model_skipped": 0,
                 "partial_retried": 0,
                 "partial_failed_preserved": 0,
                 "clusters": 0,
@@ -601,11 +640,31 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     res = {
         "extracted": 0,
         "failed": 0,
+        "model_skipped": 0,
         "partial_retried": 0,
         "partial_failed_preserved": 0,
         "clusters": 0,
         "nodes_embedded": 0,
     }
+    skip_policy = (
+        ModelSkipPolicy(max_consecutive_model_failures)
+        if skip_model_failures
+        else None
+    )
+    if skip_policy is not None:
+        # 显式降级必须有告警(CLI 不静默降级):用户要能在日志开头看到本次跑的是
+        # 「跳过模式」,否则结尾的 model_skipped 数字会被读成"数据有问题"。
+        print(
+            "⚠ 跳过模式已开启:模型不可用时跳过当前来源继续跑,"
+            f"连续 {skip_policy.max_consecutive} 个来源失败才停止;"
+            "被跳过的来源保持未分析状态,重跑本命令即自动重试。",
+            flush=True,
+        )
+        log({
+            "phase": "kg",
+            "status": "skip_model_failures_enabled",
+            "max_consecutive": skip_policy.max_consecutive,
+        })
     try:
         def _finalize(_result: dict) -> dict[str, int]:
             print("补 KG 节点向量…", flush=True)
@@ -666,11 +725,19 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                     target_limit=limit,
                     retry_partial=retry_partial,
                     finalize=(lambda _out: None) if no_rebuild else _finalize,
+                    skip_policy=skip_policy,
                 )
+            except BaseException:
+                # 升级熔断/中断也要把已跳过的账目报出来:否则一次 20 分钟的批量
+                # 只剩一个 traceback,用户看不出"跑到哪、丢了几个"。
+                _report_model_skips(skip_policy)
+                raise
             finally:
                 _restore_signals(saved_signals)
+        _report_model_skips(skip_policy)
         res["extracted"] = len(out["built"])
         res["failed"] = len(out["failed"])
+        res["model_skipped"] = len(out.get("model_skipped", []))
         res["partial_retried"] = len(out.get("partial_retried", []))
         res["partial_failed_preserved"] = len(
             out.get("partial_failed_preserved", [])
@@ -1487,6 +1554,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--retry-partial", action="store_true",
                    help="kg 阶段:一并重试最新抽取记录 windows_failed>0 且已有部分 KG 的来源；"
                         "失败或空结果保留旧图，零失败窗口且非空后才事务替换。")
+    p.add_argument("--skip-model-failures", action="store_true",
+                   help="kg 阶段:模型不可用时只跳过当前来源(退回未分析,重跑自动重试),"
+                        "不再熔断整个任务；适合离线长跑扛模型偶发波动。"
+                        "连续失败到 --max-consecutive-model-failures 仍会停止。"
+                        "默认关闭(模型不可用即停止整次分析)。")
+    p.add_argument("--max-consecutive-model-failures", type=int,
+                   default=_DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES,
+                   help="仅配合 --skip-model-failures:连续这么多个来源都因模型问题失败"
+                        "且中间无一成功时判定服务已挂,升级为整任务停止"
+                        f"(默认 {_DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES};"
+                        "取值应高于 --workers,否则一次瞬时抖动打中全部在飞来源就会误判)。")
     p.add_argument("--fresh", action="store_true",
                    help="清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑"
                         "(kg 与 all 阶段的收尾 rebuild 均适用;用于只换了 KG 模型/阈值、"
@@ -1649,10 +1727,17 @@ def _dispatch_main(
         rebuild_only = getattr(args, "rebuild_only", False)
         fresh = getattr(args, "fresh", False)
         retry_partial = getattr(args, "retry_partial", False)
+        skip_model_failures = getattr(args, "skip_model_failures", False)
+        max_consecutive = getattr(
+            args,
+            "max_consecutive_model_failures",
+            _DEFAULT_MAX_CONSECUTIVE_MODEL_FAILURES,
+        )
         print(
             f"phase=kg limit={args.limit} no_rebuild={no_rebuild} "
             f"rebuild_only={rebuild_only} fresh={fresh} "
-            f"retry_partial={retry_partial}",
+            f"retry_partial={retry_partial} "
+            f"skip_model_failures={skip_model_failures}",
             flush=True,
         )
         _t = time.perf_counter()
@@ -1666,6 +1751,8 @@ def _dispatch_main(
             fresh=fresh,
             report_interval=args.pool_report_interval,
             retry_partial=retry_partial,
+            skip_model_failures=skip_model_failures,
+            max_consecutive_model_failures=max_consecutive,
         )
         print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 

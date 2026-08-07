@@ -371,3 +371,74 @@ def test_kg_ingest_resolves_extract_refine_and_glean_before_window_submit(
         ("chat", "kg_refine"),
         ("chat", "kg_glean"),
     ]
+
+
+def test_child_abort_does_not_stop_the_job_or_its_siblings():
+    """来源级中止只掐自己这一路:兄弟来源与任务本身不受影响。"""
+    published = []
+    job = KgExtractionRunControl("job-1", on_abort=published.append)
+    first = job.child()
+    second = job.child()
+    failure = KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
+
+    first.abort(failure)
+
+    with pytest.raises(KgBuildAborted):
+        first.raise_if_aborted()
+    assert first.aborted is True
+    assert second.aborted is False
+    assert job.aborted is False
+    second.raise_if_aborted()
+    job.raise_if_aborted()
+    # 来源级中止绝不公布任务状态(不发 stopping / circuit_opened)。
+    assert published == []
+
+
+def test_job_abort_propagates_into_every_live_child():
+    """任务级熔断必须穿透子作用域:否则 Ctrl-C / 升级熔断会被当成"跳过这一个源"。"""
+    job = KgExtractionRunControl("job-1")
+    sub = job.child()
+    failure = KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
+
+    job.abort(failure)
+
+    assert sub.aborted is True
+    assert sub.failure is failure
+    with pytest.raises(KgBuildAborted) as raised:
+        sub.raise_if_aborted()
+    assert raised.value.failure is failure
+    # 事件也要被置上,否则子作用域里 wait_backoff 会睡满退避才发现任务已经停了。
+    waited = threading.Event()
+
+    def _wait():
+        try:
+            sub.wait_backoff(30)
+        except KgBuildAborted:
+            waited.set()
+
+    thread = threading.Thread(target=_wait)
+    thread.start()
+    thread.join(timeout=5)
+    assert waited.is_set()
+
+
+def test_child_created_after_the_job_aborted_is_born_aborted():
+    """熔断之后才派生的来源控制器不得再发一次请求。"""
+    job = KgExtractionRunControl("job-1")
+    failure = KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
+    job.abort(failure)
+
+    sub = job.child()
+
+    assert sub.aborted is True
+    with pytest.raises(KgBuildAborted):
+        sub.raise_if_aborted()
+
+
+def test_released_children_do_not_accumulate_on_the_job_control():
+    """注册表只为"父熔断唤醒谁"存在,来源收尾即摘除——否则上千个源会让它无界增长。"""
+    job = KgExtractionRunControl("job-1")
+    for _ in range(100):
+        sub = job.child()
+        job.release_child(sub)
+    assert job._children == set()

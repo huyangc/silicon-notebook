@@ -318,6 +318,25 @@ probe explicitly bypasses the LLM response cache and does not populate it, so a
 stale successful probe cannot authorize destructive rebuild work during a live
 outage.
 
+**Offline skip mode (opt-in, CLI only).** Stopping the whole task is the right
+default for an interactive build, but it is the wrong trade for an unattended
+run over thousands of sources: a single flaky window kills a multi-hour batch.
+`scripts/batch_ingest.py kg --skip-model-failures` narrows the blast radius of
+"model unavailable" from the task to **one source**. That source gets its own
+child of the run control, so only its own in-flight windows are cancelled and
+drained; it returns to the unanalyzed state (so simply re-running the same
+command retries exactly the skipped sources) and the task moves on. The backstop
+is kept: `--max-consecutive-model-failures` (default `32`) consecutive
+source-level model failures with no success in between escalate to the ordinary
+task-level circuit, publishing the same `stopping`/`kg_build_circuit_opened`. The
+threshold must stay above `--workers`, because one transient blip hits every
+in-flight source at once. That counter is task-scoped and survives target paging
+— extraction targets advance over 500-row raw-source pages, and a sparse
+notebook can yield one target per page, so a per-page counter would never reach
+the threshold. The flag is off by default and API-driven builds cannot set it;
+enabling it prints a warning, and the run reports how many sources were skipped
+(and their bounded ids) on success, on escalation, and on interrupt alike.
+
 Completed sources remain committed; an interrupted source does not persist a
 partial extraction: object/relation chunks for one source share one SQLite
 transaction, and a legacy leftover graph whose latest extraction run failed is

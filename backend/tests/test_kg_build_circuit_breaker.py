@@ -13,7 +13,12 @@ from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
 from app.services.embedding import FakeEmbedder
 from app.services.kg import scheduler as kg_scheduler
-from app.services.kg.run_control import KgBuildAborted
+from app.services.kg.run_control import (
+    MODEL_UNAVAILABLE_MESSAGE,
+    KgBuildAborted,
+    KgBuildFailure,
+)
+from app.services.knowledge_lifecycle import ModelSkipPolicy
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import (
     RecordingModelProvider,
@@ -370,7 +375,7 @@ def _interrupt_during_extraction(repo, monkeypatch, exc_type=KeyboardInterrupt):
 
     def _raise(
         notebook_id, targets, skipped, skipped_no_elements, job_id,
-        control, controlled_client, progress=None, on_abort=None,
+        control, controlled_client, progress=None, on_abort=None, **_kwargs,
     ):
         seen["control"] = control
         raise exc_type("interrupted")
@@ -1029,3 +1034,141 @@ def test_stopping_publication_failure_does_not_replace_model_failure(
     saved = repo._runtime.kg_build_jobs.get(job["id"])
     assert saved["status"] == "failed"
     assert saved["error_code"] == "model_unavailable"
+
+
+class _PerSourceFailingKgClient:
+    """按提示词内容决定失败的抽取 client：用来区分"某一篇的模型调用挂了"与"服务挂了"。"""
+
+    configured = True
+    model = "test-kg"
+
+    def __init__(self, failing_marker):
+        self.failing_marker = failing_marker
+        self.lock = threading.Lock()
+        self.source_calls = 0
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        rendered = "".join(message["content"] for message in messages)
+        if rendered.startswith('Return {"ok":true}'):
+            return '{"ok":true}'
+        with self.lock:
+            self.source_calls += 1
+        if self.failing_marker in rendered:
+            raise _ControlledKgClient._connection_error()
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "local_id": "engram",
+                        "type": "Concept",
+                        "name": "Engram",
+                        "ev": 0,
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+
+def test_skip_mode_skips_the_failing_source_and_builds_the_rest(repo):
+    """离线跳过模式:模型只在某一篇上不可用时,跳过它继续跑完其余来源。
+
+    默认(不传 skip_policy)仍是整任务熔断——由
+    test_model_outage_preserves_completed_source_and_stops_remaining 钉住。
+    """
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(
+        repo, "kg_extract", _PerSourceFailingKgClient("for source 1."),
+    )
+    policy = ModelSkipPolicy(max_consecutive=32)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    result = repo.build_notebook_kg(
+        notebook.id, job_id=job["id"], skip_policy=policy
+    )
+
+    assert result["model_skipped"] == [source_ids[1]]
+    assert policy.skipped == [source_ids[1]]
+    assert sorted(result["built"]) == [source_ids[0], source_ids[2]]
+    # model_skipped 是 failed 的子集:任务账目照旧把它算作一次未建成。
+    assert result["failed"] == [source_ids[1]]
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "succeeded"
+    statuses = _source_statuses(repo, source_ids)
+    assert "extracting" not in statuses.values()
+    # 被跳过的来源退回未分析状态 → 重跑本命令即自动重试它。
+    assert statuses[source_ids[1]] == "parsed"
+    assert _kg_source_ids(repo, notebook.id) == {
+        source_ids[0], source_ids[2],
+    }
+
+
+def test_skip_mode_still_stops_the_job_when_the_service_is_really_down(repo):
+    """兜底闸:连续失败到阈值仍走原来的任务级熔断,不会对着挂掉的服务跑完全库。"""
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(
+        repo, "kg_extract", _PerSourceFailingKgClient("Engram is"),
+    )
+    policy = ModelSkipPolicy(max_consecutive=2)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KgBuildAborted) as raised:
+        repo.build_notebook_kg(
+            notebook.id, job_id=job["id"], skip_policy=policy
+        )
+
+    assert raised.value.failure.code == "model_unavailable"
+    assert policy.skipped == source_ids[:2]
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["stage"] == "finished"
+    assert saved["error_code"] == "model_unavailable"
+    statuses = _source_statuses(repo, source_ids)
+    assert "extracting" not in statuses.values()
+    assert _kg_source_ids(repo, notebook.id) == set()
+
+
+class _JobAbortingKgClient:
+    """模拟"别的 worker 已经把任务级熔断拉起来了"：抽取时先熔断任务再抛模型错误。"""
+
+    configured = True
+    model = "test-kg"
+    control = None
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        rendered = "".join(message["content"] for message in messages)
+        if rendered.startswith('Return {"ok":true}'):
+            return '{"ok":true}'
+        self.control.abort(
+            KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE),
+            notify=False,
+        )
+        raise _ControlledKgClient._connection_error()
+
+
+def test_skip_mode_never_downgrades_a_job_level_abort_into_a_skip(
+    repo, monkeypatch
+):
+    """并发下另一个 worker 升级熔断/Ctrl-C 时,本来源的 KgBuildAborted 必须原样上抛。
+
+    没有 `control.aborted` 这道复核,任务级熔断会被当成"跳过这一个源"记账,
+    跳过模式下的任务就再也停不下来了。
+    """
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    client = _JobAbortingKgClient()
+    bind_chat_client(repo, "kg_extract", client)
+    _capture_run_control(repo, monkeypatch, client)
+    policy = ModelSkipPolicy(max_consecutive=32)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KgBuildAborted):
+        repo.build_notebook_kg(
+            notebook.id, job_id=job["id"], skip_policy=policy
+        )
+
+    # 阈值远未到(32),停下来的唯一原因只能是任务级熔断被原样传导。
+    assert policy.skipped == []
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    statuses = _source_statuses(repo, source_ids)
+    assert "extracting" not in statuses.values()
