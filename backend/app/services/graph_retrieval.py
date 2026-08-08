@@ -73,6 +73,13 @@ def _normalized_score_ranking(
 
 class GraphRetrievalService(_RetrievalState):
     _IN_CHUNK = 900
+    # 300 triples * 3 params/triple = 900 —— 与上面的单值 `_IN_CHUNK=900` 同一
+    # 数量级惯例。批量点查两个后端各有自己的悬崖:SQLite 的行值 IN 表达式树在
+    # 大约 N≈1000-10000(依编译选项而定)会撞 SQLITE_LIMIT_EXPR_DEPTH;
+    # PostgreSQL 的行值 IN 规划耗时对 N 近似二次增长,且在 N≈8000 附近会撞
+    # planner 的递归栈深度上限。300 远在两条悬崖之前,且仍比逐条查询(旧实现)
+    # 快至少两个数量级。
+    _RELATION_SUPPORT_IN_CHUNK = 300
     _PPR_RERANK_SCHEMA = '{"relevant_ids": ["..."]}'
 
     def federated_retrieve(self, *args, **kwargs):
@@ -1468,6 +1475,24 @@ class GraphRetrievalService(_RetrievalState):
         multi-participant fold ``EvidenceContextService._canonical`` uses for
         admitting hits). Returns a dict keyed by those exact raw triples —
         every input key is present in the output (duplicates collapse).
+
+        The fold two lines below is deliberately its OWN bounded
+        ``_candidate_cluster_map`` call, not a reuse of
+        ``EvidenceContextService.knowledge_context``'s ``participant_folds``
+        (computed earlier, once per participant, over the hit/priority id
+        set). Two independent reasons, both load-bearing — don't "optimize"
+        this into sharing that fold: (1) this method takes RAW triples and
+        must match the single-triple ``relation_support_count`` above
+        triple-for-triple in the differential tests
+        (``test_relation_support_counts_matches_single_triple_implementation``)
+        — accepting a pre-folded/shared structure would break that pinning;
+        (2) ``participant_folds`` is indexed by participant position
+        (reverse-scanned, "later participant wins"), a semantic specific to
+        admitting KNOWLEDGE HITS across a federation. Folding relation
+        endpoints is a single-notebook operation (the relation row's own
+        ``notebook_id``, never the full participant list — see above) and
+        leaking the participant-indexed shape into this method's signature
+        would couple two independently-varying concerns.
         """
         raw_triples = list(raw_triples)
         if not raw_triples:
@@ -1489,10 +1514,23 @@ class GraphRetrievalService(_RetrievalState):
             )
             canonical_by_raw[raw_triple] = canonical_triple
             lookup_triples.add(canonical_triple)
+        # sorted(), not list(): a bare ``set`` iterates in hash order, which is
+        # randomized per-process (``PYTHONHASHSEED``) for str keys. That would
+        # make the batch boundaries below — and therefore the exact SQL text
+        # issued to either backend — non-deterministic across runs for the
+        # SAME logical input, undermining the determinism T2
+        # (``in_network_relation_rows``'s ``DISTINCT`` dedup) already
+        # established one layer up. Sorting costs nothing observable (this
+        # list is at most a few hundred triples) and makes query batching
+        # reproducible.
+        ordered_lookup_triples = sorted(lookup_triples)
+        rows: list = []
         with self._connect() as database:
-            rows = self.unified_kg.relation_support_rows(
-                database, notebook_id, list(lookup_triples),
-            )
+            for offset in range(0, len(ordered_lookup_triples), self._RELATION_SUPPORT_IN_CHUNK):
+                batch = ordered_lookup_triples[offset:offset + self._RELATION_SUPPORT_IN_CHUNK]
+                rows.extend(self.unified_kg.relation_support_rows(
+                    database, notebook_id, batch,
+                ))
         support_by_canonical = {
             (row["canonical_src"], row["edge_type"], row["canonical_tgt"]):
             int(row["source_count"])

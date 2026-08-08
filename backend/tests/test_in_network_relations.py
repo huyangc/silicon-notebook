@@ -101,7 +101,7 @@ def test_in_network_relation_rows_deduplicates_cross_source_duplicate_edges(repo
     ])
     ids = _ids_by_name(repo, nb.id)
     a_id, b_id = ids["Claim Alpha"], ids["Claim Beta"]
-    with repo._connect() as db:
+    with repo._write() as db:
         db.execute(
             "INSERT INTO knowledge_relations "
             "(id, notebook_id, source_id, source_object_id, target_object_id, "

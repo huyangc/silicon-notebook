@@ -327,6 +327,69 @@ def test_answer_context_folds_boundedly_not_via_full_cluster_map(repo, monkeypat
             f"cluster_fold_rows must receive exactly the hit id set, got {batch}")
 
 
+def test_relation_support_lookup_folds_boundedly_and_never_scans_full_support_table(
+    repo, monkeypatch,
+):
+    """T1(B1 有界化,批 1)第二夹具 —— 与上面
+    ``test_answer_context_folds_boundedly_not_via_full_cluster_map`` 的「无关系」
+    夹具互补(那条刻意不建 A→B 的关系,只钉 T3 自己的折叠;这里刻意要建一条
+    真实关系边,让 relations 段真正跑到 relation_support_counts() →
+    relation_support_rows(),T1 自己的代码路径才会被真正触发)。回答装配全程
+    绝不允许调用整表 cluster_map_rows() 或 edge_support_rows()(旧逐条实现
+    relation_support_count 的两个全表扫描点),且 relations 行必须照常渲染、带
+    ×N源 support 后缀(support_count=2,两源折叠,见
+    test_rebuild_aggregates_cross_source_support)。
+
+    这是两条移动变异(评审第 2 轮)的反向验证目标 —— 把它们中任意一条实施到
+    代码上,这条测试都必须报红:
+    - MUT-C: relation_support_counts 内部把有界 ``_candidate_cluster_map``
+      换成整表 ``cluster_map(notebook_id)`` → 会触发 cluster_map_rows()。
+    - MUT-C2: 整个 relation_support_counts 换回逐条循环调用旧的
+      relation_support_count(内部经 _edge_support_map() 调
+      edge_support_rows()) → 会触发 edge_support_rows()。
+
+    ``_mk_nb_with_relations`` 内部的 ``rebuild_unified_kg`` 会把 viz 工件构建
+    路径(``scale_index_builder._derive_object_graph_lite``)顺带经
+    ``cluster_map(notebook_id)`` 预热进程内 ``:clustermap`` 缓存 —— 若不显式
+    失效它,MUT-C 会命中这份"恰好还新鲜"的缓存值、完全不再调
+    ``cluster_map_rows()``,让这条守卫失去意义(真机确认过这个假阴性)。T1 自
+    己要折叠的 ``_candidate_cluster_map``/``cluster_fold_rows`` 路径本身不经
+    过这份缓存,失效它不影响正确实现的行为。
+    """
+    nb = _mk_nb_with_relations(repo)   # A--kind_of-->B,两源折叠,support_count=2
+    cascode_id = _ids_by_name(repo, nb.id, "cascode")[0]
+    gain_id = _ids_by_name(repo, nb.id, "gain")[0]
+
+    graph = repo.retrieval.graph
+    repo._vector_cache.invalidate(f"{nb.id}:clustermap")
+
+    def _forbidden_cluster_map_rows(*args, **kwargs):
+        raise AssertionError(
+            "relation support lookup must not load the full cluster_map_rows table")
+
+    def _forbidden_edge_support_rows(*args, **kwargs):
+        raise AssertionError(
+            "relation support lookup must not load the full edge_support_rows table")
+
+    monkeypatch.setattr(graph.unified_kg, "cluster_map_rows", _forbidden_cluster_map_rows)
+    monkeypatch.setattr(graph.unified_kg, "edge_support_rows", _forbidden_edge_support_rows)
+
+    from app.services.retrieval import RetrievedKnowledge
+
+    hits = [
+        RetrievedKnowledge(object_id=cascode_id, object_type="concept",
+                            payload={"name": "cascode"}, evidence=[]),
+        RetrievedKnowledge(object_id=gain_id, object_type="concept",
+                            payload={"name": "gain"}, evidence=[]),
+    ]
+    block, _id_map = repo._answer_context(nb.id, hits)
+
+    assert "relations:" in block
+    assert "kind_of" in block
+    assert "(×2源)" in block, (
+        f"support_count=2 must render the ×N源 suffix, got: {block!r}")
+
+
 def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):
     """OOM audit P1-5: annotating edges must fold endpoints via the BOUNDED
     cluster_fold_rows (≤2·#edges ids), never the full 8M-entry cluster_map (which
@@ -349,3 +412,139 @@ def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):
 
     # bounded fold over EXACTLY the edges' endpoints — not the whole cluster_map
     assert set(fold_ids) == {"o-src", "o-tgt"}
+
+
+def test_relation_support_rows_returns_rows_in_ascending_canonical_order(repo):
+    """P3(评审 E2):relation_support_rows 的行序不应该靠 SQLite 恰好保留了
+    请求 triples 的字面顺序,或恰好保留了物理插入顺序——那两者都不是 SQL 标准
+    保证的东西,行值 IN 不带 ORDER BY 时行序未指定。显式
+    ``ORDER BY canonical_src, edge_type, canonical_tgt`` 是唯一按标准语义算
+    「有保证」的写法,即使这里的调用方(把行拼进一个无序 dict)其实不消费顺序。
+
+    夹具把插入顺序与查询顺序都反过来(先插字典序更大的 canonical_src、查询时
+    triples 列表同样逆序传入),断言返回是升序。**如实记录一个变异验证的负
+    结果**:在本仓库固定的 SQLite 3.51.0 上,删掉这条 ORDER BY 子句并不会让
+    这条测试报红——row-value IN 在这个查询形状下被规划成
+    ``LIST SUBQUERY``/``CREATE BLOOM FILTER`` 策略,经验上总是按索引(即
+    canonical_src 升序)的自然顺序吐行,与去掉 ORDER BY 前后一致,已用更大规模
+    (200k 行表、300 triples、随机插入与随机查询顺序)复现验证过、结论不随规模
+    变化。ORDER BY 仍然保留,因为它是唯一按 SQL 语义有保证的写法(不同 SQLite
+    版本/构建选项、不同数据分布都可能选择不同的执行计划),只是这条测试目前
+    没能力钉住它被删除——评审要求"删 ORDER BY 变异必须报红"这一条因此如实
+    报告为未达成,而不是伪造一个会通过的断言。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    triples = [
+        ("K-zzz", "kind_of", "K-zzz-tgt"),
+        ("K-mmm", "kind_of", "K-mmm-tgt"),
+        ("K-aaa", "kind_of", "K-aaa-tgt"),
+    ]
+    with repo._write() as db:
+        for canonical_src, edge_type, canonical_tgt in triples:
+            db.execute(
+                "INSERT INTO canonical_relations "
+                "(notebook_id, canonical_src, edge_type, canonical_tgt, "
+                " support_count, source_count, sample_relation_ids, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (nb.id, canonical_src, edge_type, canonical_tgt, 1, 1, "[]",
+                 "2024-01-01T00:00:00"),
+            )
+
+    graph = repo.retrieval.graph
+    with repo._connect() as db:
+        rows = graph.unified_kg.relation_support_rows(
+            db, nb.id, list(reversed(triples)),
+        )
+    assert [row["canonical_src"] for row in rows] == ["K-aaa", "K-mmm", "K-zzz"], (
+        f"expected ascending canonical_src order, got: "
+        f"{[r['canonical_src'] for r in rows]}")
+
+
+def test_relation_support_counts_batches_large_triple_lists():
+    """P3(评审 F4):批处理没有守卫等于没批处理——``relation_support_counts``
+    必须把超过 ``_RELATION_SUPPORT_IN_CHUNK``(=300)的 triples 列表拆成多次
+    ``relation_support_rows`` 调用,不能整批一次性塞进一条 SQL(见该常量处的
+    悬崖注释:SQLite 表达式树上限、PostgreSQL 规划耗时二次增长/栈深度上限)。
+
+    用一个不落地任何真实存储的假 ``unified_kg`` 直接测服务层的批处理循环本身
+    ——不依赖某个后端的报错行为(真报错要么在很大的 N 才炸,要么两个后端悬崖
+    位置不同),只记录每次调用收到的 triples 长度。301 个 triple 在 300/批下
+    必须落在 >=2 次调用里;删掉分批循环(整批一次性传入)会让这条测试报红。"""
+    from contextlib import nullcontext
+
+    from app.services.graph_retrieval import GraphRetrievalService
+
+    class _FakeDatabase:
+        def connect(self):
+            return nullcontext(object())
+
+    class _FakeUnifiedKg:
+        def __init__(self):
+            self.batch_sizes: list[int] = []
+
+        def cluster_fold_rows(self, db, notebook_id, ids):
+            return {}   # identity fold: canonical == raw for every id
+
+        def relation_support_rows(self, db, notebook_id, triples):
+            self.batch_sizes.append(len(triples))
+            return []
+
+    graph = GraphRetrievalService.__new__(GraphRetrievalService)
+    graph.database = _FakeDatabase()
+    graph.unified_kg = _FakeUnifiedKg()
+
+    triples = [(f"src-{i}", "kind_of", f"tgt-{i}") for i in range(301)]
+    result = graph.relation_support_counts("nb", triples)
+
+    assert len(result) == 301
+    assert all(support == 1 for support in result.values())   # every triple misses (fake returns no rows)
+    assert len(graph.unified_kg.batch_sizes) >= 2, (
+        f"301 triples at a 300-per-batch chunk size must issue >=2 "
+        f"relation_support_rows calls, got {graph.unified_kg.batch_sizes}")
+    assert sum(graph.unified_kg.batch_sizes) == 301, (
+        f"batches must partition (not duplicate or drop) the requested "
+        f"triples, got sizes {graph.unified_kg.batch_sizes}")
+    assert max(graph.unified_kg.batch_sizes) <= 300, (
+        f"no single batch may exceed the 300-triple chunk size, got "
+        f"{graph.unified_kg.batch_sizes}")
+
+
+def test_relation_support_rows_issues_row_value_in_not_or_chain():
+    """P3(评审 F5):行值 IN 是这条查询在生产规模下唯一被证实不退化成整表
+    扫描的写法(见 ``relation_support_rows`` docstring 里的复现数据:OR 链在
+    N≈30+ 分支、无 ANALYZE 时从「每分支一次 PK 索引 seek」退化成
+    ``SEARCH ... USING COVERING INDEX (notebook_id=?)``,即整个 notebook
+    分区扫描)。这个退化只在较大规模的表上才在 EXPLAIN QUERY PLAN 里可见——
+    小夹具下 SQLite 的 MULTI-INDEX OR 优化同样会走 PK 索引,两种写法在几行
+    数据的表上无法用 EXPLAIN 区分;为不引入大规模夹具拖慢/弱化这条守卫,这里
+    直接钉住适配器发出的 SQL **文本形状**:必须是单条
+    ``(canonical_src, edge_type, canonical_tgt) IN ((?,?,?),...)``,不能是
+    ``(canonical_src=? AND edge_type=? AND canonical_tgt=?) OR (...)`` 的
+    析取链——不需要真实连接,直接喂一个只记录调用参数的假 ``db``。把实现
+    改回 OR 链会让这条测试报红。"""
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    class _Cursor:
+        def fetchall(self):
+            return []
+
+    class _SqlCapture:
+        def __init__(self):
+            self.sql: str | None = None
+            self.params: list | None = None
+
+        def execute(self, sql, params):
+            self.sql = sql
+            self.params = params
+            return _Cursor()
+
+    capture = _SqlCapture()
+    UnifiedKgStore.relation_support_rows(
+        capture, "nb", [("K-a", "kind_of", "K-b"), ("K-c", "part_of", "K-d")],
+    )
+
+    assert capture.sql is not None, "relation_support_rows must call db.execute"
+    assert "IN (" in capture.sql, (
+        f"expected a row-value IN clause, got: {capture.sql}")
+    assert " OR " not in capture.sql, (
+        f"expected no OR-chain disjunction (the ~440x-slower form this "
+        f"replaced), got: {capture.sql}")

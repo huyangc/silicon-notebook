@@ -691,7 +691,16 @@ def test_postgres_relation_support_rows_point_lookup_matches_canonical_relations
     查询在 PostgreSQL 上必须只命中请求的 triples,并且必须真的走
     ``pk_canonical_relations`` 索引而不是全表扫描(EXPLAIN 断言)。夹具里两个
     canonical 边的 support_count 与 source_count 刻意不相等,让「取错列」这类
-    差错在真机上也可见。"""
+    差错在真机上也可见。
+
+    EXPLAIN 的 SQL 不再手抄——手抄件与适配器实际发出的语句可能悄悄分叉(比如
+    参数顺序、列表、占位符个数改了而这里忘了同步改),那样这条测试就只是在给
+    自己抄的另一句话做 EXPLAIN,证明不了适配器真正发出的语句用了索引。这里用
+    仓库里 ``test_postgres_kg_analysis_view_community_overview_...`` 已经用过
+    的同一种 spy 手法(用一个包一层的 ``connection.execute`` 替身记录语句),
+    捕获 ``relation_support_rows`` 内部真正发给数据库的 SQL 与参数,再对捕获到
+    的这一句原样跑 EXPLAIN——断言仍保持「用 pk_canonical_relations、非
+    Seq Scan」这一条与具体数据规模无关的不变量。"""
     unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
     canonical_rows = [
         ("nb-personal", "K-src-a", "kind_of", "K-tgt-a", 9, 3,
@@ -707,23 +716,31 @@ def test_postgres_relation_support_rows_point_lookup_matches_canonical_relations
         unified.replace_canonical_relations(connection, "nb-base", canonical_rows[2:], 1)
 
     with knowledge_harness.database.connect() as connection:
-        rows = unified.relation_support_rows(
-            connection, "nb-personal",
-            [("K-src-a", "kind_of", "K-tgt-a"), ("K-src-b", "part_of", "K-tgt-b"),
-             ("K-src-missing", "kind_of", "K-tgt-missing")],
-        )
-        assert unified.relation_support_rows(connection, "nb-personal", []) == []
+        captured: list[tuple[str, object]] = []
+        original_execute = connection.execute
 
+        def spying_execute(sql, params=None, **kwargs):
+            if "canonical_relations" in str(sql):
+                captured.append((str(sql), params))
+            return original_execute(sql, params, **kwargs)
+
+        connection.execute = spying_execute
+        try:
+            rows = unified.relation_support_rows(
+                connection, "nb-personal",
+                [("K-src-a", "kind_of", "K-tgt-a"), ("K-src-b", "part_of", "K-tgt-b"),
+                 ("K-src-missing", "kind_of", "K-tgt-missing")],
+            )
+            assert unified.relation_support_rows(connection, "nb-personal", []) == []
+        finally:
+            del connection.execute
+
+        assert captured, (
+            "relation_support_rows must issue at least one SELECT against "
+            "canonical_relations for the spy to capture")
+        captured_sql, captured_params = captured[0]
         explain_rows = connection.execute(
-            "EXPLAIN (COSTS OFF) SELECT canonical_src, edge_type, canonical_tgt, "
-            "source_count FROM canonical_relations WHERE notebook_id=%s "
-            "AND (canonical_src, edge_type, canonical_tgt) IN "
-            "((%s,%s,%s),(%s,%s,%s))",
-            (
-                "nb-personal",
-                "K-src-a", "kind_of", "K-tgt-a",
-                "K-src-b", "part_of", "K-tgt-b",
-            ),
+            f"EXPLAIN (COSTS OFF) {captured_sql}", captured_params
         ).fetchall()
 
     by_triple = {

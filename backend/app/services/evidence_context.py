@@ -507,10 +507,12 @@ class EvidenceContextService:
         # 库对象的关系行,会在 ``object_to_key`` 查不到 key 时被丢弃。收窄它需要改动
         # canonical 折叠/去重语义,超出本次修复范围。
         participants = self.notebooks.participant_notebook_ids(notebook_id)
-        # T3(B2 有界化):需要折叠的 id 集合 = 全部命中 object_id ∪
-        # priority_object_ids(有序去重)——这是这次装配唯一会经 ``_canonical()``
-        # 查找的 id 全集,提前一次算出,换掉过去每参与库整表拉 cluster_map()
-        # (scale 下可达 5M 条)。
+        # T3(B2 有界化):需要折叠的 id 集合 = hit ids(本函数内 ``_canonical()``
+        # 的全部调用点都只在这些 object_id 上查找)∪ priority_object_ids(防御性
+        # 超集——当前唯一生产调用方 report_engine.py 的 bound_ids 恒 ⊆ hit ids,
+        # 并入它眼下不会真的多折叠出任何新 id;这里仍按端口契约的上限计算,不
+        # 假设调用方今天这层不变量永远成立)。有序去重、提前一次算出,换掉过去
+        # 每参与库整表拉 cluster_map()(scale 下可达 5M 条)。
         needed_ids = list(dict.fromkeys(
             [hit.object_id for hit in hits]
             + [str(object_id) for object_id in (priority_object_ids or ()) if object_id]
@@ -668,9 +670,24 @@ class EvidenceContextService:
                     source_key, row["edge_type"], target_key,
                     row["notebook_id"], row["source_object_id"], row["target_object_id"],
                 ))
-            # T1(B1 有界化,批 1):按 notebook 分组,每组一次批量
-            # relation_support_counts,替换逐条 relation_support_count(每次都要
-            # 整表冷缓存 edge_support_map ~3.6GB@835 万行 + cluster_map 整表)。
+            # T1(B1 有界化,批 1):按每条关系行自己的 row["notebook_id"](挂载库
+            # 的真实归属,不是本函数参数 ``notebook_id`` 那个 active 库)分组,每组
+            # 一次批量 relation_support_counts,替换逐条 relation_support_count。
+            # 分组键必须是 nb_id——canonical_relations 是按各自库存的表,用
+            # active 的 id 去查一条挂载库的边只会 miss(退回默认 support=1,
+            # ×N源 后缀消失),见 test_evidence_context_relation_support_groups_
+            # by_relation_source_notebook 的反向验证。
+            #
+            # 旧路径即使暖态(``_edge_support_map`` 的整表 8.35M 行/3.6GB 结果
+            # 已被 ``_vector_cache`` 按 ``canonical_rel_seq`` 缓存,不重新扫描)
+            # 也不是 0 查询:``relation_support_count`` 每次调用仍要先各发一次
+            # ``state_row``(读取 ``canonical_rel_seq`` 判断缓存是否还新鲜)——
+            # 也就是「每条关系一次」查询,只是免了整表扫描那一次。新路径的查询
+            # 数:``knowledge_context`` 装配这一侧(上面的 ``needed_ids`` 折叠)
+            # 是每参与库 1 次有界 ``cluster_fold``;这里 T1 自己的部分是每个
+            # notebook 分组 ≤⌈N/300⌉ 次批量点查(row-value IN,PK 精确命中,见
+            # ``GraphRetrievalService.relation_support_counts``),同样不是 0
+            # 查询,但从「每条关系一次」降到「每 300 条关系一次」。
             triples_by_notebook: dict[str, list[tuple[str, str, str]]] = {}
             for _src_key, edge_type, _tgt_key, nb_id, source_object_id, target_object_id in survivors:
                 triples_by_notebook.setdefault(nb_id, []).append(
