@@ -96,6 +96,17 @@ class GraphRetrievalService(_RetrievalState):
     def cluster_map(self, notebook_id: str):
         return self._peer.cluster_map(notebook_id)
 
+    def cluster_fold(self, notebook_id: str, object_ids):
+        """Bounded canonical fold for exactly ``object_ids`` — never the full
+        per-notebook cluster map (B2 hot-path audit, 批 1). Delegates to the
+        same primitive candidate-hydration already uses
+        (``_RetrievalState._candidate_cluster_map`` → ``cluster_fold_rows``,
+        see its docstring): a member id missing from the result means "not a
+        clustered member", and callers fall back to the id itself — the same
+        ``dict.get(id, id)`` semantics ``cluster_map(notebook_id)`` gives over
+        the full table, just scoped to the ids the caller actually needs."""
+        return self._candidate_cluster_map(notebook_id, object_ids)
+
     def _edge_support_map(self, notebook_id: str) -> dict:
         with self._connect() as database:
             state = self.unified_kg.state_row(database, notebook_id)
@@ -1419,8 +1430,75 @@ class GraphRetrievalService(_RetrievalState):
         return out
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):
+        # 保留:唯一生产调用方(evidence_context.knowledge_context)已改用下面
+        # 的批量 relation_support_counts(B1 热点整改批 1)——逐条调用每次都要
+        # 整表冷缓存 _edge_support_map(生产 8.35M 行 canonical_relations,
+        # ~3.6GB dict)+ cluster_map(同样整表)。不删是因为它仍是这条语义的
+        # 唯一真源(批量实现按它的行为差分钉住,见 relation_support_counts
+        # docstring),且仍有测试双态实现着它。
         support = self._edge_support_map(notebook_id)
         clusters = self.cluster_map(notebook_id)
         hit = support.get((clusters.get(source_id, source_id), edge_type,
                            clusters.get(target_id, target_id)))
         return hit[1] if hit else 1
+
+    def relation_support_counts(self, notebook_id, raw_triples):
+        """Batched replacement for calling ``relation_support_count`` once
+        per triple. Semantic mapping against the single-triple
+        implementation above (must match it exactly on every input):
+
+            单条实现(每次调用都各自整表扫描)          批量实现的对应步骤
+            ------------------------------------      --------------------------------
+            self._edge_support_map(notebook_id)        一次 relation_support_rows() 定点
+              (整表冷缓存, 生产 8.35M 行~3.6GB)          查询(PK 精确匹配, 至多几十行)
+            self.cluster_map(notebook_id)               self._candidate_cluster_map(
+              .get(id, id)  (整表冷缓存)                   notebook_id, ids)  (有界 fold,
+                                                           同一张表、同一 .get(id, id) 回退)
+            hit[1] if hit else 1                        同一规则:命中返回 source_count
+                                                           (canonical_relations 的
+                                                           support/source 元组第二项),
+                                                           未命中返回 1
+
+        ``raw_triples``: iterable of ``(raw_src, edge_type, raw_tgt)`` — the
+        object ids exactly as they appear in the caller's relation rows,
+        BEFORE canonical folding (folding happens inside this method, scoped
+        to ``notebook_id`` — the single notebook the relation rows belong to,
+        never the full participant list; this mirrors the single-triple
+        implementation's ``self.cluster_map(notebook_id)``, not the reversed
+        multi-participant fold ``EvidenceContextService._canonical`` uses for
+        admitting hits). Returns a dict keyed by those exact raw triples —
+        every input key is present in the output (duplicates collapse).
+        """
+        raw_triples = list(raw_triples)
+        if not raw_triples:
+            return {}
+        ids: list = []
+        seen_ids: set = set()
+        for raw_src, _edge_type, raw_tgt in raw_triples:
+            for object_id in (raw_src, raw_tgt):
+                if object_id not in seen_ids:
+                    seen_ids.add(object_id)
+                    ids.append(object_id)
+        folded = self._candidate_cluster_map(notebook_id, ids)
+        canonical_by_raw: dict = {}
+        lookup_triples: set = set()
+        for raw_triple in raw_triples:
+            raw_src, edge_type, raw_tgt = raw_triple
+            canonical_triple = (
+                folded.get(raw_src, raw_src), edge_type, folded.get(raw_tgt, raw_tgt),
+            )
+            canonical_by_raw[raw_triple] = canonical_triple
+            lookup_triples.add(canonical_triple)
+        with self._connect() as database:
+            rows = self.unified_kg.relation_support_rows(
+                database, notebook_id, list(lookup_triples),
+            )
+        support_by_canonical = {
+            (row["canonical_src"], row["edge_type"], row["canonical_tgt"]):
+            int(row["source_count"])
+            for row in rows
+        }
+        return {
+            raw_triple: support_by_canonical.get(canonical_triple, 1)
+            for raw_triple, canonical_triple in canonical_by_raw.items()
+        }

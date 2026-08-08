@@ -643,6 +643,34 @@ class UnifiedKgStore:
             "FROM canonical_relations WHERE notebook_id=?", (notebook_id,))
 
     @staticmethod
+    def relation_support_rows(
+        db: sqlite3.Connection, notebook_id: str, triples: List[tuple],
+    ) -> List[sqlite3.Row]:
+        """Bounded point lookup by the ``canonical_relations`` primary key
+        ``(notebook_id, canonical_src, edge_type, canonical_tgt)`` — the
+        batched replacement for ``edge_support_rows``'s per-notebook full
+        table scan (see that method + ``graph_retrieval.relation_support_counts``
+        for the semantics this must match). SQLite has no reliable
+        row-value-``IN`` plan against a composite PK here, so this ORs one
+        three-column equality per triple; each branch still seeks the PK
+        index rather than scanning (confirmed via EXPLAIN QUERY PLAN — see
+        the batch-1 hot-path audit)."""
+        rows = [triple for triple in triples if triple]
+        if not rows:
+            return []
+        clauses = []
+        params: List[object] = [notebook_id]
+        for canonical_src, edge_type, canonical_tgt in rows:
+            clauses.append("(canonical_src=? AND edge_type=? AND canonical_tgt=?)")
+            params.extend([canonical_src, edge_type, canonical_tgt])
+        where = " OR ".join(clauses)
+        return db.execute(
+            f"SELECT canonical_src, edge_type, canonical_tgt, source_count "
+            f"FROM canonical_relations WHERE notebook_id=? AND ({where})",
+            params,
+        ).fetchall()
+
+    @staticmethod
     def weak_support_relation_rows(
         db: sqlite3.Connection,
         notebook_id: str,

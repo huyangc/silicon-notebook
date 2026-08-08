@@ -684,6 +684,99 @@ def test_weak_support_gap_probe_matches_the_sqlite_contract(knowledge_harness):
     assert "寄生电容(支撑1)" in kg_gap_note_segment(rows)[0]
 
 
+def test_postgres_relation_support_rows_point_lookup_matches_canonical_relations_pk(
+    knowledge_harness,
+):
+    """B1 有界化(批 1):``relation_support_rows`` 的 row-value ``IN`` 定点
+    查询在 PostgreSQL 上必须只命中请求的 triples,并且必须真的走
+    ``pk_canonical_relations`` 索引而不是全表扫描(EXPLAIN 断言)。夹具里两个
+    canonical 边的 support_count 与 source_count 刻意不相等,让「取错列」这类
+    差错在真机上也可见。"""
+    unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
+    canonical_rows = [
+        ("nb-personal", "K-src-a", "kind_of", "K-tgt-a", 9, 3,
+         json.dumps(["rel-a"]), NOW),
+        ("nb-personal", "K-src-b", "part_of", "K-tgt-b", 4, 2,
+         json.dumps(["rel-b"]), NOW),
+        # 干扰行:不同 notebook,同名 triple —— 定点查询必须按 notebook_id 隔离。
+        ("nb-base", "K-src-a", "kind_of", "K-tgt-a", 99, 99,
+         json.dumps(["rel-x"]), NOW),
+    ]
+    with knowledge_harness.database.write() as connection:
+        unified.replace_canonical_relations(connection, "nb-personal", canonical_rows[:2], 1)
+        unified.replace_canonical_relations(connection, "nb-base", canonical_rows[2:], 1)
+
+    with knowledge_harness.database.connect() as connection:
+        rows = unified.relation_support_rows(
+            connection, "nb-personal",
+            [("K-src-a", "kind_of", "K-tgt-a"), ("K-src-b", "part_of", "K-tgt-b"),
+             ("K-src-missing", "kind_of", "K-tgt-missing")],
+        )
+        assert unified.relation_support_rows(connection, "nb-personal", []) == []
+
+        explain_rows = connection.execute(
+            "EXPLAIN (COSTS OFF) SELECT canonical_src, edge_type, canonical_tgt, "
+            "source_count FROM canonical_relations WHERE notebook_id=%s "
+            "AND (canonical_src, edge_type, canonical_tgt) IN "
+            "((%s,%s,%s),(%s,%s,%s))",
+            (
+                "nb-personal",
+                "K-src-a", "kind_of", "K-tgt-a",
+                "K-src-b", "part_of", "K-tgt-b",
+            ),
+        ).fetchall()
+
+    by_triple = {
+        (row["canonical_src"], row["edge_type"], row["canonical_tgt"]):
+        int(row["source_count"])
+        for row in rows
+    }
+    assert by_triple == {
+        ("K-src-a", "kind_of", "K-tgt-a"): 3,
+        ("K-src-b", "part_of", "K-tgt-b"): 2,
+    }
+    plan_text = "\n".join(str(row["QUERY PLAN"]) for row in explain_rows)
+    assert "pk_canonical_relations" in plan_text, (
+        f"expected the composite PK index in the plan, got:\n{plan_text}")
+    assert "Seq Scan" not in plan_text, (
+        f"expected an index lookup, not a full table scan:\n{plan_text}")
+
+
+def test_postgres_in_network_relation_rows_dedupes_cross_source_duplicates(
+    knowledge_harness,
+):
+    """T2(批 1 热点整改)PostgreSQL parity:同一 (src,et,tgt) 若被两条不同
+    ``knowledge_relations`` 行贡献(镜像两个不同来源各自抽出同一条边),
+    ``in_network_relation_rows`` 必须用 ``DISTINCT`` 折叠成一行。"""
+    objects = [
+        (
+            object_id, "nb-personal", "claim", "approved",
+            json.dumps({"name": object_id}), "[]", "source-golden", NOW, NOW,
+        )
+        for object_id in ("ko-dup-src", "ko-dup-tgt")
+    ]
+    relations = [
+        (
+            relation_id, "nb-personal", "source-golden",
+            "ko-dup-src", "ko-dup-tgt", "supports", "[]", NOW,
+        )
+        for relation_id in ("rel-dup-1", "rel-dup-2")
+    ]
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, objects)
+        knowledge_harness.knowledge.insert_relation_chunk(connection, relations)
+
+    with knowledge_harness.database.connect() as connection:
+        rows = knowledge_harness.knowledge.in_network_relation_rows(
+            connection, "nb-personal", ["ko-dup-src", "ko-dup-tgt"],
+        )
+    assert len(rows) == 1, (
+        f"expected the duplicate (src,et,tgt) row to collapse via DISTINCT, got {rows}")
+    assert rows[0]["source_object_id"] == "ko-dup-src"
+    assert rows[0]["target_object_id"] == "ko-dup-tgt"
+    assert rows[0]["edge_type"] == "supports"
+
+
 def test_mount_order_and_equal_score_relation_federation_are_id_stable(
     knowledge_harness,
 ):

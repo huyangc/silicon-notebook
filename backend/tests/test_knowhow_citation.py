@@ -59,6 +59,9 @@ class _Knowledge:
     def cluster_map(self, notebook_id):
         return {}
 
+    def cluster_fold(self, notebook_id, object_ids):
+        return {}
+
     def node_context(self, notebook_id, object_id):
         return {}
 
@@ -67,6 +70,9 @@ class _Knowledge:
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):
         return 0
+
+    def relation_support_counts(self, notebook_id, triples):
+        return {triple: 0 for triple in triples}
 
 
 class _SpySources:

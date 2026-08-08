@@ -33,6 +33,11 @@ class _Knowledge:
     def cluster_map(self, notebook_id):
         return {}
 
+    def cluster_fold(self, notebook_id, object_ids):
+        # Mirrors the old cluster_map()'s empty-map default: every id misses
+        # and _canonical() falls back to the id itself.
+        return {}
+
     def node_context(self, notebook_id, object_id):
         return {
             "occurrences": [{
@@ -49,6 +54,9 @@ class _Knowledge:
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):
         return 1
+
+    def relation_support_counts(self, notebook_id, triples):
+        return {triple: 1 for triple in triples}
 
 
 def _service(*, source_metadata=None, elements=None):
@@ -511,10 +519,12 @@ def test_evidence_context_folds_clusters_without_merging_participant_maps():
     「后库优先」下两个 hit 同折 c-base、簇去重后只剩一条;若逆序被改回正序
     (m1→c-active),或折叠整个失效(m1→m1),都会输出两条而报红。"""
     class _SplitClusterKnowledge(_Knowledge):
-        def cluster_map(self, notebook_id):
-            if notebook_id == "active":
-                return {"m1": "c-active"}
-            return {"m1": "c-base", "m2": "c-base"}
+        def cluster_fold(self, notebook_id, object_ids):
+            table = (
+                {"m1": "c-active"} if notebook_id == "active"
+                else {"m1": "c-base", "m2": "c-base"}
+            )
+            return {oid: table[oid] for oid in object_ids if oid in table}
 
     service = EvidenceContextService(
         notebooks=_Notebooks(), sources=_Sources(),
@@ -535,3 +545,49 @@ def test_evidence_context_folds_clusters_without_merging_participant_maps():
         "m1/m2 在「后挂载库覆盖」语义下同折 c-base,第二个 hit 必须被簇去重,"
         f"实得 {list(evidence)}")
     assert evidence["k1"]["object_id"] == "m1"
+
+
+def test_evidence_context_knowledge_context_never_loads_full_cluster_map():
+    """T3(B2 有界化,批 1)守卫:knowledge_context 绝不再调用整表 cluster_map()
+    ——调用即报红,直接钉住「B2 热点」被拔掉这件事(MUT-4 的反向验证目标)。
+    cluster_fold() 收到的 ids 必须恰为本次装配需要折叠的集合(命中
+    object_id ∪ priority_object_ids),既不是空、也不是超出这个集合的「全库」
+    (MUT-5 的反向验证目标)。"""
+    class _CountingKnowledge(_Knowledge):
+        def __init__(self):
+            self.fold_calls: list[tuple[str, list[str]]] = []
+
+        def cluster_map(self, notebook_id):
+            raise AssertionError("knowledge_context must not call cluster_map()")
+
+        def cluster_fold(self, notebook_id, object_ids):
+            ids = list(object_ids)
+            self.fold_calls.append((notebook_id, ids))
+            return {}
+
+    knowledge = _CountingKnowledge()
+    service = EvidenceContextService(
+        notebooks=_Notebooks(), sources=_Sources(),
+        knowledge=knowledge, settings=Settings(),
+    )
+    hits = [
+        RetrievedKnowledge(
+            object_id="o1", object_type="concept", payload={"name": "First"},
+            evidence=[], tier="personal", notebook_id="active",
+        ),
+        RetrievedKnowledge(
+            object_id="o2", object_type="concept", payload={"name": "Second"},
+            evidence=[], tier="base", notebook_id="base",
+        ),
+    ]
+    service.knowledge_context("active", hits, priority_object_ids=["o3"])
+
+    # _Notebooks.participant_notebook_ids("active") == ["active", "base"]:
+    # one bounded fold call per participant, none of them the full table.
+    assert [notebook_id for notebook_id, _ids in knowledge.fold_calls] == ["active", "base"]
+    for _notebook_id, ids in knowledge.fold_calls:
+        assert ids, "cluster_fold must not be called with an empty id set"
+        assert set(ids) == {"o1", "o2", "o3"}, (
+            "cluster_fold must receive exactly the hit ∪ priority id set, "
+            f"got {sorted(ids)}"
+        )

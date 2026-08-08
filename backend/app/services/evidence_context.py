@@ -498,25 +498,35 @@ class EvidenceContextService:
         evidence_by_id: dict[str, dict[str, Any]] = {}
         seen_clusters: set[str] = set()
         # 刻意不按当前 base_scope 收窄 participants(仍是本 notebook 的全部参与库,
-        # 含被取消勾选的):下面每个参与库都要各查一次 cluster_map(),大库可达数百万
-        # 行,收窄能省掉被排除库那份查询/内存。之所以不做,是它只是成本问题、不是
-        # 内容泄漏问题——没有任何 canonical 簇的成员跨库,所以 in-scope 对象的 id
-        # 不可能出现在被排除库的 cluster_map 里,``_canonical()`` 对它的查找必然
+        # 含被取消勾选的)——T3(B2 有界化,批 1)之后,下面每个参与库对本次命中
+        # 集合各查一次有界 cluster_fold(),不再是整表 cluster_map()(大库可达数
+        # 百万行)。是否收窄仍然只是成本问题、不是内容泄漏问题(有界化不改变这一
+        # 点)——没有任何 canonical 簇的成员跨库,所以 in-scope 对象的 id 不可能
+        # 出现在被排除库的 cluster_fold 结果里,``_canonical()`` 对它的查找必然
         # miss;而 ``in_network_relations``(见本函数下方)取回的、两端解析到被排除
         # 库对象的关系行,会在 ``object_to_key`` 查不到 key 时被丢弃。收窄它需要改动
         # canonical 折叠/去重语义,超出本次修复范围。
         participants = self.notebooks.participant_notebook_ids(notebook_id)
-        # 逐 hit 在各参与库的缓存 map 里做有界查找,绝不把它们合并进新 dict:
-        # 合并是 O(全库) 的整表拷贝(scale 下 cluster map 可达 5M 条),而本函数
-        # 每次答案合成都会被调、按节合成还要按节数放大。逆序查找保持与原
-        # dict.update 逐库覆盖完全相同的「后挂载库优先」语义。
-        participant_maps = [
-            self.knowledge.cluster_map(participant) for participant in participants
+        # T3(B2 有界化):需要折叠的 id 集合 = 全部命中 object_id ∪
+        # priority_object_ids(有序去重)——这是这次装配唯一会经 ``_canonical()``
+        # 查找的 id 全集,提前一次算出,换掉过去每参与库整表拉 cluster_map()
+        # (scale 下可达 5M 条)。
+        needed_ids = list(dict.fromkeys(
+            [hit.object_id for hit in hits]
+            + [str(object_id) for object_id in (priority_object_ids or ()) if object_id]
+        ))
+        # 逐 hit 在各参与库的有界折叠结果里查找,绝不把它们合并进新 dict:合并
+        # 要把每个参与库的折叠结果都拼起来,而本函数每次答案合成都会被调、按节
+        # 合成还要按节数放大。逆序查找保持与原 dict.update 逐库覆盖完全相同的
+        # 「后挂载库优先」语义。
+        participant_folds = [
+            self.knowledge.cluster_fold(participant, needed_ids)
+            for participant in participants
         ]
 
         def _canonical(object_id: str) -> str:
-            for participant_map in reversed(participant_maps):
-                canonical = participant_map.get(object_id)
+            for participant_fold in reversed(participant_folds):
+                canonical = participant_fold.get(object_id)
                 if canonical is not None:
                     return canonical
             return object_id
@@ -643,7 +653,10 @@ class EvidenceContextService:
                 participants, list(object_to_key)
             )
             seen_relations: set[tuple[str, str, str]] = set()
-            ranked: list[tuple[str, str, str, str, str, str, int]] = []
+            # (source_key, edge_type, target_key, notebook_id, source_object_id,
+            #  target_object_id) — support count filled in below, in one batch
+            # per notebook group instead of one query per surviving row.
+            survivors: list[tuple[str, str, str, str, str, str]] = []
             for row in relation_rows:
                 source_key = object_to_key.get(row["source_object_id"])
                 target_key = object_to_key.get(row["target_object_id"])
@@ -651,12 +664,31 @@ class EvidenceContextService:
                 if not source_key or not target_key or source_key == target_key or identity in seen_relations:
                     continue
                 seen_relations.add(identity)
-                support = self.knowledge.relation_support_count(
-                    row["notebook_id"], row["source_object_id"], row["edge_type"],
-                    row["target_object_id"],
+                survivors.append((
+                    source_key, row["edge_type"], target_key,
+                    row["notebook_id"], row["source_object_id"], row["target_object_id"],
+                ))
+            # T1(B1 有界化,批 1):按 notebook 分组,每组一次批量
+            # relation_support_counts,替换逐条 relation_support_count(每次都要
+            # 整表冷缓存 edge_support_map ~3.6GB@835 万行 + cluster_map 整表)。
+            triples_by_notebook: dict[str, list[tuple[str, str, str]]] = {}
+            for _src_key, edge_type, _tgt_key, nb_id, source_object_id, target_object_id in survivors:
+                triples_by_notebook.setdefault(nb_id, []).append(
+                    (source_object_id, edge_type, target_object_id)
                 )
-                ranked.append((*identity, row["notebook_id"], row["source_object_id"],
-                               row["target_object_id"], support))
+            support_lookup: dict[tuple[str, str, str, str], int] = {}
+            for nb_id, triples in triples_by_notebook.items():
+                for triple, support in self.knowledge.relation_support_counts(
+                    nb_id, triples
+                ).items():
+                    support_lookup[(nb_id, *triple)] = support
+            ranked: list[tuple[str, str, str, str, str, str, int]] = []
+            for source_key, edge_type, target_key, nb_id, source_object_id, target_object_id in survivors:
+                support = support_lookup.get(
+                    (nb_id, source_object_id, edge_type, target_object_id), 1
+                )
+                ranked.append((source_key, edge_type, target_key, nb_id,
+                               source_object_id, target_object_id, support))
             ranked.sort(key=lambda row: row[-1], reverse=True)
             if ranked:
                 relation_prefix = "\nrelations: " if lines else "relations: "

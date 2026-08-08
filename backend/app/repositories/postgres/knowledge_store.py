@@ -975,19 +975,22 @@ class KnowledgeStore:
     @staticmethod
     def in_network_relation_rows(db: Any, notebook_id: str,
                                  object_ids):
+        """SQLite 侧同名方法的 parity 实现;T2(批 1 热点整改)的 ``DISTINCT``/
+        ``ORDER BY`` 理由见那侧 docstring——两侧逐字同一套语义。"""
         ids = list(object_ids)
         if len(ids) < 2:
             return []
         ph = ",".join("%s" for _ in ids)
         return db.execute(
-            f"SELECT r.source_object_id, r.target_object_id, r.edge_type, "
+            f"SELECT DISTINCT r.source_object_id, r.target_object_id, r.edge_type, "
             f"src.object_type AS source_type, tgt.object_type AS target_type "
             f"FROM knowledge_relations AS r "
             f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
             f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
             f"WHERE r.notebook_id=%s AND r.review_status!='rejected' "
             f"AND r.source_object_id IN ({ph}) "
-            f"AND r.target_object_id IN ({ph})",
+            f"AND r.target_object_id IN ({ph}) "
+            f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
             [notebook_id, *ids, *ids],
         ).fetchall()
 

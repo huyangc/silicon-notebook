@@ -1303,13 +1303,29 @@ class KnowledgeStorePort(Protocol):
 @runtime_checkable
 class EvidenceKnowledgeContextPort(Protocol):
     def cluster_map(self, notebook_id: str) -> dict[str, str]: ...
+    # 有界化(B2 热点整改批 1):knowledge_context 的 canonical 折叠只需要
+    # 本次装配命中的这一小撮 id,不需要整表 cluster_map()。member→canonical,
+    # 缺席的 member(非簇成员)不进返回 dict——调用方按
+    # ``fold.get(object_id, object_id)`` 回退原 id,与 cluster_map() 整表
+    # dict 的同一回退语义逐字等价(两者查的是同一张表,只是谓词范围不同)。
+    def cluster_fold(
+        self, notebook_id: str, object_ids: Sequence[str]
+    ) -> dict[str, str]: ...
     def node_context(self, notebook_id: str, object_id: str) -> dict[str, Any]: ...
     def in_network_relations(
         self, participant_ids: Sequence[str], object_ids: Sequence[str]
     ) -> list[dict[str, Any]]: ...
+    # 保留:唯一生产调用方已改用下面的批量 relation_support_counts(有界化
+    # B1 热点整改批 1)。逐条调用每次都要整表冷缓存 edge_support_map(8.35M
+    # 行~3.6GB)+ cluster_map(整表);批量版按 triples 定点查询。不删是因为
+    # 语义仍然是唯一真源(批量实现按它的 docstring 差分钉住),且仍有测试
+    # 双态实现着它。
     def relation_support_count(
         self, notebook_id: str, source_id: str, edge_type: str, target_id: str
     ) -> int: ...
+    def relation_support_counts(
+        self, notebook_id: str, triples: Sequence[tuple[str, str, str]]
+    ) -> dict[tuple[str, str, str], int]: ...
 
 
 class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
@@ -1420,6 +1436,21 @@ class UnifiedKgStorePort(Protocol):
     def mention_seed_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
     def relation_endpoint_name_rows(db: object, notebook_id: str, relation_ids: list[str]) -> list[Any]: ...
+    @staticmethod
+    def relation_support_rows(
+        db: object, notebook_id: str, triples: list[tuple[str, str, str]]
+    ) -> list[Any]:
+        """Bounded point lookup by ``canonical_relations``'s primary key
+        ``(notebook_id, canonical_src, edge_type, canonical_tgt)`` — the
+        batched replacement for calling ``edge_support_rows`` (a per-notebook
+        full-table scan, up to 8.35M rows in production) once per relation
+        via ``relation_support_count``. ``triples`` holds already-canonical
+        ``(canonical_src, edge_type, canonical_tgt)`` tuples, at most the
+        handful of distinct relation identities one answer assembly admits.
+        Returns rows with ``canonical_src, edge_type, canonical_tgt,
+        source_count``; empty ``triples`` returns ``[]`` without querying.
+        """
+        ...
     @staticmethod
     def replace_canonical_relations(db: object, notebook_id: str, rows: object, seq: int) -> None: ...
     @staticmethod

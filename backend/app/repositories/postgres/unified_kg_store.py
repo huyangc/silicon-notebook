@@ -672,6 +672,30 @@ class UnifiedKgStore:
             "FROM canonical_relations WHERE notebook_id=%s", (notebook_id,))
 
     @staticmethod
+    def relation_support_rows(
+        db: Any, notebook_id: str, triples: List[tuple],
+    ) -> List[dict]:
+        """SQLite ``relation_support_rows`` 的 parity 实现:同一 PK 定点查询,
+        PostgreSQL 用 row-value ``IN`` 代替 OR 链 —— planner 对
+        ``(a,b,c) IN ((...),(...))`` 就地展开成对 `pk_canonical_relations`
+        的多路索引探查(EXPLAIN 已确认,见批 1 热点整改的 T1)。语义与
+        SQLite 侧、与旧逐条 ``edge_support_rows`` 全表扫的等价性见那侧
+        docstring 与 ``graph_retrieval.relation_support_counts``。"""
+        rows = [triple for triple in triples if triple]
+        if not rows:
+            return []
+        placeholders = ",".join("(%s,%s,%s)" for _ in rows)
+        params: List[object] = [notebook_id]
+        for triple in rows:
+            params.extend(triple)
+        return db.execute(
+            f"SELECT canonical_src, edge_type, canonical_tgt, source_count "
+            f"FROM canonical_relations WHERE notebook_id=%s "
+            f"AND (canonical_src, edge_type, canonical_tgt) IN ({placeholders})",
+            params,
+        ).fetchall()
+
+    @staticmethod
     def weak_support_relation_rows(
         db: Any,
         notebook_id: str,

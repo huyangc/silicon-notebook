@@ -1,4 +1,6 @@
 
+import json
+
 import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
@@ -148,6 +150,181 @@ def test_annotation_does_not_stick_to_unified_cache(repo):
     cached = repo._unified_cache.get((nb.id, "object"))
     assert cached is not None
     assert all("support_count" not in e for e in cached["edges"])
+
+
+def _ids_by_name(repo, nb_id, name):
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?",
+            (nb_id,)).fetchall()
+    return [r["id"] for r in rows if json.loads(r["payload"])["name"] == name]
+
+
+def test_relation_support_counts_matches_single_triple_implementation(repo):
+    """T1(B1 有界化,批 1)差分钉:批量 relation_support_counts() 必须与保留的
+    单条 relation_support_count() 在同一夹具上逐 triple 相等——命中(两个不同
+    来源折到同一 canonical 边,support_count=2)→ source_count,canonical 折叠
+    与定点查询双双 miss 的陌生 id → 1(MUT-1/MUT-2 的反向验证目标)。"""
+    nb = _mk_nb_with_relations(repo)
+    cascode_ids = _ids_by_name(repo, nb.id, "cascode")
+    gain_ids = _ids_by_name(repo, nb.id, "gain")
+    assert len(cascode_ids) == 2 and len(gain_ids) == 2   # A1/A2, B1/B2
+
+    graph = repo.retrieval.graph
+    triples = [
+        (cascode_ids[0], "kind_of", gain_ids[0]),
+        (cascode_ids[1], "kind_of", gain_ids[1]),
+        ("no-such-object-src", "kind_of", "no-such-object-tgt"),
+    ]
+
+    batched = graph.relation_support_counts(nb.id, triples)
+    for triple in triples:
+        expected = graph.relation_support_count(nb.id, *triple)
+        assert batched[triple] == expected, (triple, batched[triple], expected)
+    # Both real triples fold to the same canonical edge (support_count=2 per
+    # test_rebuild_aggregates_cross_source_support); the unknown triple must
+    # default to 1, matching the single-triple implementation's `hit[1] if hit
+    # else 1`.
+    assert batched[triples[0]] == 2
+    assert batched[triples[1]] == 2
+    assert batched[triples[2]] == 1
+
+    # MUT-1 pin: support_count and source_count coincide (both 2) in the
+    # fixture above, so a mutation that reads support_count instead of
+    # source_count would slip past the assertions so far. Force them apart
+    # directly in canonical_relations and require the DISTINCT-source count.
+    # Also bump canonical_rel_seq so the single-triple implementation's cached
+    # `_edge_support_map` (keyed on that seq) sees the new row rather than
+    # replaying the value it already cached earlier in this test.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE canonical_relations SET support_count=99, source_count=7 "
+            "WHERE notebook_id=? AND canonical_src='K-cascode' AND canonical_tgt='K-gain'",
+            (nb.id,),
+        )
+        db.execute(
+            "UPDATE unified_kg_state SET canonical_rel_seq=canonical_rel_seq+1 "
+            "WHERE notebook_id=?", (nb.id,),
+        )
+    assert graph.relation_support_counts(nb.id, [triples[0]])[triples[0]] == 7
+    assert graph.relation_support_count(nb.id, *triples[0]) == 7
+
+
+def test_relation_support_counts_falls_back_to_raw_id_when_not_clustered(repo):
+    """T1 差分钉(MUT-3):canonical 折叠 miss(该 id 从未进入 concept_clusters,
+    比如它就是自己的 canonical 形态)时必须退回原 id 本身去做定点查询——与现
+    `clusters.get(source_id, source_id)` 逐字同语义。这个 notebook 从未
+    rebuild_unified_kg,concept_clusters 里没有任何行,所以两个 id 的折叠必然
+    全部 miss;canonical_relations 直接用它们的原始 id 造一行,只有回退成立
+    时才会命中。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _mk_src(repo, nb.id, "s1")
+    repo.store_kg(nb.id, "s1", [
+        {"local_id": "X", "object_type": "concept",
+         "payload": {"name": "solo-x", "section_path": "1"}, "evidence": []},
+        {"local_id": "Y", "object_type": "concept",
+         "payload": {"name": "solo-y", "section_path": "1"}, "evidence": []},
+    ], [
+        {"source_local_id": "X", "target_local_id": "Y", "edge_type": "kind_of", "evidence": []},
+    ])
+    x_id = _ids_by_name(repo, nb.id, "solo-x")[0]
+    y_id = _ids_by_name(repo, nb.id, "solo-y")[0]
+
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO canonical_relations "
+            "(notebook_id, canonical_src, edge_type, canonical_tgt, "
+            " support_count, source_count, sample_relation_ids, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (nb.id, x_id, "kind_of", y_id, 3, 3, "[]", "2024-01-01T00:00:00"),
+        )
+
+    graph = repo.retrieval.graph
+    triple = (x_id, "kind_of", y_id)
+    assert graph.relation_support_counts(nb.id, [triple])[triple] == 3
+    assert graph.relation_support_count(nb.id, *triple) == 3
+
+
+def test_relation_support_counts_groups_correctly_across_two_notebooks(repo):
+    """T1:evidence_context 按 row["notebook_id"] 分组、每组一次批量查询——两个
+    notebook 各自的 canonical_relations 互不干扰,不会把 A 库的 support 数错配
+    给 B 库同名 canonical 边。"""
+    nb1 = _mk_nb_with_relations(repo)   # support=2 (两源)
+    nb2 = repo.create_notebook(NotebookCreate(name="nb2"))
+    _mk_src(repo, nb2.id, "nb2-s1")
+    repo.store_kg(nb2.id, "nb2-s1", [
+        {"local_id": "A", "object_type": "concept",
+         "payload": {"name": "cascode", "section_path": "1"}, "evidence": []},
+        {"local_id": "B", "object_type": "concept",
+         "payload": {"name": "gain", "section_path": "1"}, "evidence": []},
+    ], [
+        {"source_local_id": "A", "target_local_id": "B", "edge_type": "kind_of", "evidence": []},
+    ])
+    repo.rebuild_unified_kg(nb2.id)   # single source -> support=1
+
+    graph = repo.retrieval.graph
+    nb1_triple = (_ids_by_name(repo, nb1.id, "cascode")[0], "kind_of",
+                  _ids_by_name(repo, nb1.id, "gain")[0])
+    nb2_triple = (_ids_by_name(repo, nb2.id, "cascode")[0], "kind_of",
+                  _ids_by_name(repo, nb2.id, "gain")[0])
+
+    assert graph.relation_support_counts(nb1.id, [nb1_triple])[nb1_triple] == 2
+    assert graph.relation_support_counts(nb2.id, [nb2_triple])[nb2_triple] == 1
+
+
+def test_answer_context_folds_boundedly_not_via_full_cluster_map(repo, monkeypatch):
+    """T3(B2 有界化,批 1)守卫,真实 SQLite 栈:knowledge_context 装配路径绝不
+    调用整表 cluster_map_rows(),且传给 cluster_fold_rows() 的 ids 恰为本次
+    命中集合(不是全库、不是空)——镜像
+    test_annotate_edge_support_folds_only_edge_endpoints 的 spy 手法
+    (MUT-4/MUT-5 的反向验证目标)。刻意不建 A→B 的关系:两个 hit 之间若有边,
+    relations 段会经 T1 的 relation_support_counts() 触发它*自己*的一次
+    (独立于本函数要测的 T3 装配折叠)cluster_fold_rows 调用,那次调用会拿真实
+    的关系端点 id 掩盖掉 T3 折叠被 MUT-5 打成空 ids 这件事——曾经在评审时真
+    的踩过这个假阳性,留字面注释存档。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "Claim Alpha", "section_path": "1"}, "evidence": []},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "Claim Beta", "section_path": "1"}, "evidence": []},
+    ], [])
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?",
+            (nb.id,)).fetchall()
+    ids_by_name = {json.loads(r["payload"])["name"]: r["id"] for r in rows}
+    a_id, b_id = ids_by_name["Claim Alpha"], ids_by_name["Claim Beta"]
+
+    graph = repo.retrieval.graph
+    fold_calls: list = []
+    real_fold_rows = graph.unified_kg.cluster_fold_rows
+
+    def spy_fold_rows(db, notebook_id, batch):
+        fold_calls.append((notebook_id, list(batch)))
+        return real_fold_rows(db, notebook_id, batch)
+
+    def _forbidden_cluster_map_rows(*args, **kwargs):
+        raise AssertionError(
+            "knowledge_context must not load the full cluster_map_rows table")
+
+    monkeypatch.setattr(graph.unified_kg, "cluster_fold_rows", spy_fold_rows)
+    monkeypatch.setattr(graph.unified_kg, "cluster_map_rows", _forbidden_cluster_map_rows)
+
+    from app.services.retrieval import RetrievedKnowledge
+
+    hits = [
+        RetrievedKnowledge(object_id=a_id, object_type="claim",
+                            payload={"name": "Claim Alpha"}, evidence=[]),
+        RetrievedKnowledge(object_id=b_id, object_type="claim",
+                            payload={"name": "Claim Beta"}, evidence=[]),
+    ]
+    repo._answer_context(nb.id, hits)
+
+    assert fold_calls, "cluster_fold_rows must be called at least once"
+    for _notebook_id, batch in fold_calls:
+        assert set(batch) == {a_id, b_id}, (
+            f"cluster_fold_rows must receive exactly the hit id set, got {batch}")
 
 
 def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):
