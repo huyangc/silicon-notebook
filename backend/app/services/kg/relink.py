@@ -41,8 +41,15 @@ def _norm(name: str) -> str:
 
 
 def _element_ids(node: Dict) -> set:
-    """读 element_ids 为 set(容忍 None / 任意 iterable)。"""
+    """读 element_ids 为 set(容忍 None / 任意 iterable)。
+
+    已经是 set 的输入按引用返回而不复制:唯一消费方只做只读交集,而整库
+    relink 路径本就把 element_ids 物化成了 set——再复制一份等于给受影响
+    source 的证据索引留第二份全量拷贝。
+    """
     raw = node.get("element_ids") or ()
+    if isinstance(raw, set):
+        return raw
     return set(raw)
 
 
@@ -135,11 +142,18 @@ def complete_isolated_edges(
         if sid in affected_sources:
             by_source.setdefault(sid, []).append(n)
 
-    elem_ids_by_node: Dict[str, set] = {
-        n["id"]: _element_ids(n)
-        for siblings in by_source.values()
-        for n in siblings
-    }
+    # element_ids 惰性 memo:只有真被 Rule-1 触碰的节点才求值(孤立节点无
+    # 证据时其 sibling 一个都不会被扫),且 _element_ids 对已是 set 的输入
+    # 返回引用——两者合起来避免为受影响 source 保留第二份全量证据索引。
+    _elem_cache: Dict[str, set] = {}
+
+    def _elems(node: Dict) -> set:
+        node_id = node["id"]
+        cached = _elem_cache.get(node_id)
+        if cached is None:
+            cached = _element_ids(node)
+            _elem_cache[node_id] = cached
+        return cached
 
     # rule-2 候选表:每受影响 source 下按(名长降序、id 兜底)排序的 concept
     # 列表,与触发 rule-2 的具体 N 无关,故按 source 只排一次;`m["id"] != n["id"]`
@@ -207,7 +221,7 @@ def complete_isolated_edges(
     # 集,等价于原先「逐 n 现查 connected」但省一次成员测试)。
     for n in isolated_nodes:
         emitted_for_n = 0
-        n_elems = elem_ids_by_node[n["id"]]
+        n_elems = _elems(n)
         siblings = by_source.get(n.get("source_id"), ())
 
         # --- Rule 1: 共享证据元素 ---
@@ -216,7 +230,7 @@ def complete_isolated_edges(
             for m in siblings:
                 if m["id"] == n["id"]:
                     continue
-                overlap = len(n_elems & elem_ids_by_node[m["id"]])
+                overlap = len(n_elems & _elems(m))
                 if overlap <= 0:
                     continue
                 if _shared_edge(n, m) is None:        # 无安全边类型 → 不作候选
