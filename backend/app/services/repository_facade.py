@@ -1111,7 +1111,7 @@ class RepositoryFacade:
         那批 id;`bool(...)` 与旧值逐字等价,故按布尔消费的调用方行为不变。"""
         return self._runtime.notebook_summaries.mounted_bases(notebook_id, db)
 
-    def _source_ids_from_evidence(self, evidence_json: Optional[str]) -> set:
+    def _source_ids_from_evidence(self, evidence_json: Optional[str | list]) -> set:
         """PURE parse of an evidence JSON TEXT value into its distinct
         source_ids — canonical body lives on KnowledgeStore (Task 13)."""
         return self._runtime.knowledge.source_ids_from_evidence(evidence_json)

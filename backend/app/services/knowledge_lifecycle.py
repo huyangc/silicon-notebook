@@ -214,7 +214,7 @@ class KnowledgeLifecycleService:
         bump_cluster_mutation_seq: Callable[[object, str], None],
         embed_objects_batch: Callable[..., None],
         embed_relations_batch: Callable[[str, List[dict]], None],
-        source_ids_from_evidence: Callable[[Optional[str]], set],
+        source_ids_from_evidence: Callable[[Optional[str | list]], set],
         set_source_status: Callable[..., None],
         run_extraction: Callable[..., None],
         model_clients: Any,
@@ -395,12 +395,23 @@ class KnowledgeLifecycleService:
                 )
             for i in range(0, len(objects), CHUNK):
                 chunk = objects[i:i + CHUNK]
+                # payload/evidence serialized once per object per chunk and shared
+                # by the object-insert row and (when this generation also
+                # publishes source-local facts) the fact row for the same
+                # object — never re-dumped for the second consumer. The reverse-
+                # index lookup below reads source ids off the still-live Python
+                # evidence list directly, no dumps-then-loads round trip.
+                serialized = [
+                    (json.dumps(o["payload"], ensure_ascii=False),
+                     json.dumps(o["evidence"], ensure_ascii=False))
+                    for o in chunk
+                ]
                 self.knowledge.insert_object_chunk(
                     db,
                     [(o["_oid"], notebook_id, o["object_type"], auto_status,
-                      json.dumps(o["payload"], ensure_ascii=False),
-                      json.dumps(o["evidence"], ensure_ascii=False),
-                      source_id or '', now, now) for o in chunk],
+                      payload_json, evidence_json,
+                      source_id or '', now, now)
+                     for o, (payload_json, evidence_json) in zip(chunk, serialized)],
                 )
                 fts_rows = [
                     (o["_oid"], notebook_id, o["payload"].get("name", ""))
@@ -414,9 +425,7 @@ class KnowledgeLifecycleService:
                 kos_rows = [
                     (o["_oid"], sid, notebook_id)
                     for o in chunk
-                    for sid in self._source_ids_from_evidence(
-                        json.dumps(o["evidence"], ensure_ascii=False)
-                    )
+                    for sid in self._source_ids_from_evidence(o["evidence"])
                 ]
                 if kos_rows:
                     self.knowledge.insert_object_source_rows(db, kos_rows)
@@ -425,11 +434,10 @@ class KnowledgeLifecycleService:
                         (
                             fact_ids[o["_oid"]], notebook_id, source_id or "", source_generation,
                             o["local_id"], o["_oid"], o["object_type"],
-                            json.dumps(o["payload"], ensure_ascii=False),
-                            json.dumps(o["evidence"], ensure_ascii=False),
+                            payload_json, evidence_json,
                             1, now, now,
                         )
-                        for o in chunk
+                        for o, (payload_json, evidence_json) in zip(chunk, serialized)
                         if o["_oid"] in fact_ids
                     ]
                     fact_element_rows = [
