@@ -9,7 +9,8 @@ per-operation phase matrix (tests/fixtures/repository_contract/
 mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
 
     store_kg               chunks; embeds; invalidate; dirty
-    relink_notebook_kg     transaction; invalidate; dirty (no-op when 0 added)
+    relink_notebook_kg     one transaction PER SOURCE; then invalidate; dirty
+                           once for the run (no-op when 0 added overall)
     set_edge_review        transaction; dirty; invalidate
     write_clusters         replace + cluster-seq bump in ONE transaction; invalidate
     append_clusters        append + bump in one transaction; invalidate when added

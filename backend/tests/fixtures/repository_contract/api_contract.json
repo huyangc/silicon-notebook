@@ -13786,7 +13786,7 @@
       },
       "/api/notebooks/{notebook_id}/kg/relink": {
         "post": {
-          "description": "Deterministic reconnection of isolated KG nodes (synchronous, no LLM).\nReturns {\"isolated_before\", \"edges_added\", \"isolated_after\"}.",
+          "description": "Deterministic reconnection of isolated KG nodes (background thread, no LLM).\n\nSame shape as build/rebuild above. It runs off the request thread because the\nwork is proportional to the notebook, not to the click: on a large graph the\nsynchronous version outlived PostgreSQL's statement timeout and pinned a\nrequest worker for the whole run. Single flight is per notebook (409), so a\nsecond click cannot queue a duplicate pass. No LLM gate — relink is\ndeterministic and must keep working on deployments with no model configured.",
           "operationId": "relink_kg_api_notebooks__notebook_id__kg_relink_post",
           "parameters": [
             {
@@ -13824,6 +13824,48 @@
             }
           },
           "summary": "Relink Kg"
+        }
+      },
+      "/api/notebooks/{notebook_id}/kg/relink/status": {
+        "get": {
+          "description": "Latest relink state for this notebook — the browser's completion signal.\n\n``status`` is one of running / succeeded / failed / idle; ``idle`` covers both\n\"never ran here\" and \"the process that ran it restarted\", so a bounded poll\nalways terminates. Counters are zero until a run finishes. No error text\ncrosses this boundary — diagnostics stay in the event log.",
+          "operationId": "relink_kg_status_api_notebooks__notebook_id__kg_relink_status_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Relink Kg Status Api Notebooks  Notebook Id  Kg Relink Status Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Relink Kg Status"
         }
       },
       "/api/notebooks/{notebook_id}/kg/search": {

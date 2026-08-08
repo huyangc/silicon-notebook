@@ -24,7 +24,7 @@ from app.models.kg import (
     UnifiedKgStatus,
 )
 from app.models.kg_analysis import KgAnalysisResponse, SourceProfilePageResponse
-from app.repositories.ports import KgBuildAlreadyRunning
+from app.repositories.ports import KgBuildAlreadyRunning, KgRelinkAlreadyRunning
 from app.services import background_jobs
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -132,14 +132,57 @@ def rebuild_kg(notebook_id: str) -> dict:
 
 @router.post("/notebooks/{notebook_id}/kg/relink", dependencies=[Depends(require_notebook_access)])
 def relink_kg(notebook_id: str) -> dict:
-    """Deterministic reconnection of isolated KG nodes (synchronous, no LLM).
-    Returns {"isolated_before", "edges_added", "isolated_after"}."""
+    """Deterministic reconnection of isolated KG nodes (background thread, no LLM).
+
+    Same shape as build/rebuild above. It runs off the request thread because the
+    work is proportional to the notebook, not to the click: on a large graph the
+    synchronous version outlived PostgreSQL's statement timeout and pinned a
+    request worker for the whole run. Single flight is per notebook (409), so a
+    second click cannot queue a duplicate pass. No LLM gate — relink is
+    deterministic and must keep working on deployments with no model configured.
+    """
     repo = repository()
     try:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    return repo.relink_notebook_kg(notebook_id)
+    try:
+        job = repo.start_notebook_relink(notebook_id)
+    except KgRelinkAlreadyRunning:
+        raise user_error(409, "当前笔记本正在补上关联，请等它完成")
+    try:
+        background_jobs.submit(
+            repo.run_notebook_relink_job,
+            notebook_id,
+            job["job_id"],
+            name=f"relinkkg-{notebook_id}",
+        )
+    except Exception:
+        repo.fail_notebook_relink_submission(notebook_id, job["job_id"])
+        raise
+    return {
+        "status": "relinking",
+        "notebook_id": notebook_id,
+        "job_id": job["job_id"],
+    }
+
+
+@router.get(
+    "/notebooks/{notebook_id}/kg/relink/status",
+    dependencies=[Depends(require_notebook_read)],
+)
+def relink_kg_status(notebook_id: str) -> dict:
+    """Latest relink state for this notebook — the browser's completion signal.
+
+    ``status`` is one of running / succeeded / failed / idle; ``idle`` covers both
+    "never ran here" and "the process that ran it restarted", so a bounded poll
+    always terminates. Counters are zero until a run finishes. No error text
+    crosses this boundary — diagnostics stay in the event log.
+    """
+    try:
+        return repository().notebook_relink_status(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 # ---------------------------------------------------------------------------

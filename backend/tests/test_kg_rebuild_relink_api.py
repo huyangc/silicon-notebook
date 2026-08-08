@@ -133,20 +133,29 @@ def test_relink_kg_404_unknown_notebook(client):
     assert r.status_code == 404
 
 
-def test_relink_kg_200_returns_stats(client, monkeypatch):
+def test_relink_kg_200_launches_background_and_returns_relinking(client, monkeypatch):
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
 
     from app.api import deps
+    from app.services import background_jobs
     real_repo = deps.repository()
-
-    expected = {"isolated_before": 3, "edges_added": 2, "isolated_after": 1}
-    real_repo.relink_notebook_kg = MagicMock(return_value=expected)
+    called = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, **kwargs: called.append((fn, args, kwargs)),
+    )
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 
     r = client.post(f"/api/notebooks/{nb}/kg/relink")
     assert r.status_code == 200
-    assert r.json() == expected
-    real_repo.relink_notebook_kg.assert_called_once_with(nb)
+    body = r.json()
+    assert body["status"] == "relinking"
+    assert body["notebook_id"] == nb
+    assert body["job_id"].startswith("rlj-")
+    # The click must not have done the work on the request thread.
+    assert len(called) == 1
+    assert called[0][1] == (nb, body["job_id"])
+    assert called[0][2]["name"] == f"relinkkg-{nb}"
 
 
 def test_relink_kg_no_llm_check(client, monkeypatch):
@@ -154,17 +163,98 @@ def test_relink_kg_no_llm_check(client, monkeypatch):
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
 
     from app.api import deps
+    from app.services import background_jobs
     real_repo = deps.repository()
 
     # Explicitly mark LLM as unconfigured
     bind_chat_client(real_repo, "kg_extract", MagicMock(configured=False))
-    real_repo.relink_notebook_kg = MagicMock(return_value={
-        "isolated_before": 0, "edges_added": 0, "isolated_after": 0
-    })
+    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 
     r = client.post(f"/api/notebooks/{nb}/kg/relink")
     assert r.status_code == 200   # must NOT return 409
+
+
+def test_relink_kg_second_click_returns_409_while_running(client, monkeypatch):
+    """Per-notebook single flight: the second click must not queue a duplicate."""
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    submitted = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda *a, **k: submitted.append(a),
+    )
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    first = client.post(f"/api/notebooks/{nb}/kg/relink")
+    second = client.post(f"/api/notebooks/{nb}/kg/relink")
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.headers.get("X-User-Message")     # 中文文案经 user_error 上屏
+    assert len(submitted) == 1
+
+    # A different notebook is a different slot.
+    other = client.post("/api/notebooks", json={"name": "nb2"}).json()["id"]
+    assert client.post(f"/api/notebooks/{other}/kg/relink").status_code == 200
+
+
+def test_relink_submission_failure_releases_the_claim(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+    no_raise_client = TestClient(client.app, raise_server_exceptions=False)
+
+    assert no_raise_client.post(f"/api/notebooks/{nb}/kg/relink").status_code == 500
+    # The slot must be free again, not stuck in `running` forever.
+    status = client.get(f"/api/notebooks/{nb}/kg/relink/status").json()
+    assert status["running"] is False
+    assert status["status"] == "failed"
+
+    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
+    assert client.post(f"/api/notebooks/{nb}/kg/relink").status_code == 200
+
+
+def test_relink_status_reports_idle_then_terminal_counts(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    idle = client.get(f"/api/notebooks/{nb}/kg/relink/status")
+    assert idle.status_code == 200
+    assert idle.json() == {
+        "job_id": "", "notebook_id": nb, "status": "idle", "running": False,
+        "isolated_before": 0, "edges_added": 0, "isolated_after": 0,
+    }
+
+    # Run the job body inline (submit is the only thing we stub out) so the
+    # terminal counters the browser polls for come from a real relink pass.
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, **kwargs: fn(*args),
+    )
+    started = client.post(f"/api/notebooks/{nb}/kg/relink").json()
+    done = client.get(f"/api/notebooks/{nb}/kg/relink/status").json()
+    assert done["job_id"] == started["job_id"]
+    assert done["status"] == "succeeded"
+    assert done["running"] is False
+
+
+def test_relink_status_404_unknown_notebook(client):
+    assert client.get("/api/notebooks/no-such/kg/relink/status").status_code == 404
 
 
 # ---------------------------------------------------------------------------

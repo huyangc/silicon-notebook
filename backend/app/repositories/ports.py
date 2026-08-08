@@ -112,6 +112,20 @@ class KgBuildAlreadyRunning(RuntimeError):
     """One notebook already has a durable running KG build job."""
 
 
+class KgRelinkAlreadyRunning(RuntimeError):
+    """One notebook already has an in-flight isolated-node relink pass.
+
+    In-process rather than durable on purpose: relink is a zero-model
+    deterministic tail, so it does not belong in ``kg_build_jobs`` (whose
+    user-facing consumers would narrate it as a source-by-source analysis) and
+    must not inherit that table's LLM-configured precondition.
+    """
+
+    def __init__(self, notebook_id: str) -> None:
+        super().__init__(notebook_id)
+        self.notebook_id = notebook_id
+
+
 class CatalogJobAlreadyRunning(RuntimeError):
     """One source already has a durable queued/running command-catalog job."""
 
@@ -518,6 +532,10 @@ class KnowledgeLifecycleRepository(Protocol):
     ) -> dict: ...
     def rebuild_notebook_kg(self, notebook_id: str) -> dict: ...
     def relink_notebook_kg(self, notebook_id: str) -> dict: ...
+    def start_notebook_relink(self, notebook_id: str) -> dict: ...
+    def notebook_relink_status(self, notebook_id: str) -> dict: ...
+    def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict: ...
+    def fail_notebook_relink_submission(self, notebook_id: str, job_id: str) -> None: ...
     def rebuild_unified_kg(self, notebook_id: str, progress: Callable[[str, int, int], None] | None = None, force: bool = False) -> int: ...
     def unified_kg_status(self, notebook_id: str) -> dict: ...
 
@@ -1244,6 +1262,25 @@ class KnowledgeStorePort(Protocol):
     def object_meta_rows_for_notebook(db: object, notebook_id: str, object_ids: object) -> list[Any]: ...
     @staticmethod
     def relink_rows(db: object, notebook_id: str) -> list[Any]: ...
+    @staticmethod
+    def relink_source_id_page(
+        db: object,
+        notebook_id: str,
+        after_source_id: str | None,
+        limit: int,
+    ) -> list[Any]: ...
+    @staticmethod
+    def relink_object_rows_for_source(
+        db: object, notebook_id: str, source_id: str
+    ) -> list[Any]: ...
+    @staticmethod
+    def relink_relation_rows_for_objects(
+        db: object, notebook_id: str, object_ids: object
+    ) -> list[Any]: ...
+    @staticmethod
+    def relink_source_is_live(
+        db: object, notebook_id: str, source_id: str
+    ) -> bool: ...
     @staticmethod
     def source_build_rows(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod

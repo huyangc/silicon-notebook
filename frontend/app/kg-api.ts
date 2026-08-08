@@ -1,4 +1,5 @@
 import { requestJson } from "./api-client.ts";
+import type { RelinkStatus } from "./kg-relink-status.ts";
 import type { ScaleIndexStatus } from "./scale-index.ts";
 import type {
   ConceptDetailResp,
@@ -50,11 +51,16 @@ export const rebuildKg = (nb: string) =>
     method: "POST",
   });
 
+// 「补上关联」现在是后台任务:POST 只认领任务槽并返回 job_id,真正的数字要等
+// relink/status 报出终态。绝不能拿这里的返回值假装拿到了统计。
 export const relinkKg = (nb: string) =>
-  requestJson<{ isolated_before: number; edges_added: number; isolated_after: number }>(
+  requestJson<KgBuildStartResponse>(
     `/notebooks/${nb}/kg/relink`,
     { ...options, method: "POST" },
   );
+
+export const fetchRelinkStatus = (nb: string) =>
+  requestJson<RelinkStatus>(`/notebooks/${nb}/kg/relink/status`, options);
 
 export const rebuildScaleIndex = (
   nb: string,

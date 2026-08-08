@@ -144,6 +144,18 @@ class KnowledgeStore:
 
     @staticmethod
     def relink_rows(db: sqlite3.Connection, notebook_id: str):
+        """Whole-notebook relink input — REFERENCE ONLY, never on a live path.
+
+        Three unbounded ``fetchall``s: every non-deprecated object WITH its
+        payload+evidence JSON, every relation, every source id. On the 9.1M-object
+        base that is ~6.8 GB hydrated into one request thread. Production relink
+        pages by source instead (``relink_source_id_page`` +
+        ``relink_object_rows_for_source`` + ``relink_relation_rows_for_objects``);
+        this method survives only as the differential test's oracle, which
+        recomputes the historical whole-graph answer to prove the paged one is
+        identical. `test_kg_relink_paged_equivalence` fails closed if any
+        production call site reappears.
+        """
         objects = db.execute(
             "SELECT id, object_type, source_id, payload, evidence FROM knowledge_objects "
             "WHERE notebook_id = ? AND status != 'deprecated'", (notebook_id,),
@@ -158,6 +170,124 @@ class KnowledgeStore:
             ).fetchall()
         }
         return objects, relations, valid_sources
+
+    @staticmethod
+    def relink_source_id_page(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        after_source_id: str | None,
+        limit: int,
+    ):
+        """One keyset page of the notebook's DISTINCT object source ids, ascending.
+
+        ``INDEXED BY`` is load-bearing, not decoration. Nothing in this repository
+        runs ``ANALYZE``, so deployed databases plan without statistics — and there
+        SQLite takes the ``notebook_id=?`` equality (``idx_knowledge_objects_nb_updated``)
+        and satisfies DISTINCT with ``USE TEMP B-TREE FOR DISTINCT``, which cannot
+        short-circuit on LIMIT: EVERY page re-reads every object row of the
+        notebook. Pinning ``idx_knowledge_objects_source_id(source_id, id)`` makes
+        the index order do the work, so a page stops as soon as it has its distinct
+        values and the keyset resumes where it stopped — the whole enumeration is
+        one index pass amortised across all pages. Measured on 200k objects with no
+        ANALYZE: hinted 12.1 ms, unhinted 28.4 ms, and the gap is per page, not per
+        run. (With ANALYZE both plans are fine, which is exactly why this must not
+        be left to the planner.)
+
+        The partition key is the raw stored ``source_id`` (NOT NULL DEFAULT ''),
+        never ``sources.id``: objects carry no foreign key, so legacy rows point at
+        deleted sources and freshly stored ones can carry ''. Driving the loop off
+        ``sources`` would silently drop those partitions and undercount isolation.
+        ``status`` is deliberately not filtered — the index does not carry it, and a
+        source whose objects are all deprecated merely yields an empty (no-op)
+        partition.
+        """
+        if after_source_id is None:
+            return db.execute(
+                "SELECT DISTINCT source_id FROM knowledge_objects "
+                "INDEXED BY idx_knowledge_objects_source_id "
+                "WHERE notebook_id = ? ORDER BY source_id LIMIT ?",
+                (notebook_id, max(1, int(limit))),
+            ).fetchall()
+        return db.execute(
+            "SELECT DISTINCT source_id FROM knowledge_objects "
+            "INDEXED BY idx_knowledge_objects_source_id "
+            "WHERE notebook_id = ? AND source_id > ? ORDER BY source_id LIMIT ?",
+            (notebook_id, after_source_id, max(1, int(limit))),
+        ).fetchall()
+
+    @staticmethod
+    def relink_object_rows_for_source(
+        db: sqlite3.Connection, notebook_id: str, source_id: str
+    ):
+        """Every non-deprecated object of ONE source, in historical row order.
+
+        ``ORDER BY rowid`` reproduces the intra-source order the whole-notebook
+        query returned, which matters because ``complete_isolated_edges`` walks
+        isolated nodes in input order under a per-node edge cap — a different order
+        can pick different (still valid) partners once that cap binds.
+        """
+        return db.execute(
+            "SELECT id, object_type, payload, evidence FROM knowledge_objects "
+            "WHERE notebook_id = ? AND source_id = ? AND status != 'deprecated' "
+            "ORDER BY rowid",
+            (notebook_id, source_id),
+        ).fetchall()
+
+    @staticmethod
+    def relink_relation_rows_for_objects(
+        db: sqlite3.Connection, notebook_id: str, object_ids
+    ):
+        """Relations with EITHER endpoint among ``object_ids`` (caller batches).
+
+        Two statements, not one ``OR``. On an un-ANALYZEd database — i.e. every
+        deployed one — EXPLAIN QUERY PLAN collapses the combined
+        ``source_object_id IN (...) OR target_object_id IN (...)`` form to
+        ``idx_knowledge_relations_nb_target_id (notebook_id=?)``: the endpoint bound
+        is dropped and every relation in the notebook is scanned, ONCE PER SOURCE.
+        Measured on 100k relations: split 0.05 ms, combined 11.2 ms. Split, each
+        side binds its own endpoint index. Rows may repeat across the two
+        statements; all consumers build sets.
+
+        Cross-source edges MUST come back here. A node whose only edge leaves the
+        source is connected, and a per-source view that could not see that edge would
+        re-link it as if isolated — the one way source partitioning could diverge from
+        the whole-graph answer.
+        """
+        ids = list(object_ids)
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        rows = list(db.execute(
+            f"SELECT source_object_id, target_object_id, edge_type "
+            f"FROM knowledge_relations WHERE notebook_id=? "
+            f"AND source_object_id IN ({ph})",
+            (notebook_id, *ids),
+        ).fetchall())
+        rows.extend(db.execute(
+            f"SELECT source_object_id, target_object_id, edge_type "
+            f"FROM knowledge_relations WHERE notebook_id=? "
+            f"AND target_object_id IN ({ph})",
+            (notebook_id, *ids),
+        ).fetchall())
+        return rows
+
+    @staticmethod
+    def relink_source_is_live(
+        db: sqlite3.Connection, notebook_id: str, source_id: str
+    ) -> bool:
+        """Does this partition key still name a row of the notebook's sources?
+
+        ``knowledge_relations.source_id`` has an FK to ``sources``; new relink rows
+        must store NULL when the object's source is gone (or ''), exactly as the
+        whole-notebook version did with its ``valid_sources`` set.
+        """
+        if not source_id:
+            return False
+        row = db.execute(
+            "SELECT 1 FROM sources WHERE id=? AND notebook_id=?",
+            (source_id, notebook_id),
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def incremental_object_rows(

@@ -55,7 +55,13 @@ LIFECYCLE_STORE_CALLS = {
         "neighbor_relation_rows",
         "notebook_tier_row",
         "object_meta_rows_for_notebook",
-        "relink_rows",
+        # `relink_rows` (whole-notebook) is deliberately ABSENT: the lifecycle
+        # service pages relink by source now, and this exact-set assertion is what
+        # makes a regression to the unbounded read fail closed.
+        "relink_object_rows_for_source",
+        "relink_relation_rows_for_objects",
+        "relink_source_id_page",
+        "relink_source_is_live",
         "source_build_state_page",
         "unified_graph_rows",
         "validate_source_fact_publish",
