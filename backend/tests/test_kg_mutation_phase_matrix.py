@@ -6,8 +6,13 @@ tests freeze the EXACT per-operation order matrix:
 
     store_kg               object chunks of 1000; relation chunks of 1000;
                            object embed; relation embed; invalidate; dirty
-    relink_notebook_kg     relation transaction; invalidate; dirty;
-                           no side effects when zero edges added
+    relink_notebook_kg     dirty rides EACH SOURCE's own relation transaction
+                           (mark_unified_kg_dirty_in_tx, committed atomically
+                           with that source's edge insert — a `finally`-keyed
+                           bump cannot survive a kill -9 between a source's
+                           commit and the run finishing); invalidate stays a
+                           single run-level `finally` call after every source;
+                           no side effects anywhere when zero edges added
     set_edge_review        relation transaction; dirty; invalidate
     write_clusters         replace + cluster-seq bump in ONE transaction; invalidate
     append_clusters        append + cluster-seq bump in one transaction;
@@ -707,12 +712,12 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
     _trace_transaction_connections(repo, monkeypatch, events)
     _delegating_store_spy(monkeypatch, runtime.knowledge, "insert_relation_chunk", events)
     monkeypatch.setattr(
-        runtime.kg_mutations, "invalidate_unified_cache",
-        lambda notebook_id: events.append(("invalidate", notebook_id)),
+        runtime.kg_mutations, "mark_unified_kg_dirty_in_tx",
+        lambda connection, notebook_id: events.append(("dirty", id(connection))),
     )
     monkeypatch.setattr(
-        runtime.kg_mutations, "mark_unified_kg_dirty",
-        lambda notebook_id: events.append(("dirty", notebook_id)),
+        runtime.kg_mutations, "invalidate_unified_cache",
+        lambda notebook_id: events.append(("invalidate", notebook_id)),
     )
 
     out = getattr(repo, "relink_notebook_kg")(notebook_id)
@@ -722,18 +727,21 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
     # discovered first (one query) and processed after the — here empty — source
     # keyset page, giving one work unit and one write. `relink_source_is_live` is
     # lazy: it only runs because this run actually has an edge to write. Reads all
-    # happen OUTSIDE the write transaction, and the cache/dirty side effects still
-    # land after the commit — the frozen phase contract, now per source.
+    # happen OUTSIDE the write transaction. The dirty bump now rides the SAME
+    # write transaction as the edge insert (P1 fix: a `finally`-keyed bump
+    # cannot survive a kill -9 landing right after this source's commit), so it
+    # lands BEFORE write.commit; invalidate stays the run-level `finally` call,
+    # after the commit.
     assert [event[0] for event in events] == [
         "relink_orphan_source_ids",
         "relink_source_page",
         "relink_object_rows_for_source",
         "relink_relation_rows_for_objects",
         "relink_source_is_live",
-        "write.begin", "insert_relation_chunk", "write.commit",
-        "invalidate", "dirty",
+        "write.begin", "insert_relation_chunk", "dirty", "write.commit",
+        "invalidate",
     ]
-    assert events[5][1] == events[6][1] == events[7][1]
+    assert events[5][1] == events[6][1] == events[7][1] == events[8][1]
     assert out["edges_added"] == 1
 
 

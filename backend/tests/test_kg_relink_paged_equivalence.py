@@ -439,6 +439,78 @@ def test_a_run_that_writes_nothing_publishes_no_signal(repo, monkeypatch):
     assert invalidated == []
 
 
+def test_relink_one_source_advances_the_signal_without_relink_notebook_kg_ever_running(
+    repo,
+):
+    """P1 fix: kg_mutation_seq must be durable per source, not deferred to
+    ``relink_notebook_kg``'s ``finally`` — a real kill -9 lands between a
+    source's own commit and that finally ever executing, and nothing in a
+    Python test can survive a hard process kill to assert on afterwards. The
+    property that survives it is testable directly, though: call
+    ``_relink_one_source`` on its own and NEVER call ``relink_notebook_kg`` at
+    all, so its ``finally`` block does not run — not even via a caught
+    exception. If the signal is still durable, it can only have been written
+    by ``_relink_one_source`` itself, atomically with its own edge insert.
+    """
+    nb, _ids = _build_multi_source_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    seq_before = _kg_mutation_seq(repo, nb)
+    written = {"edges": 0}
+
+    lifecycle._relink_one_source(nb, "src-a", written)
+
+    assert written["edges"] > 0, "fixture wrote no edges for src-a — test is vacuous"
+    assert _kg_mutation_seq(repo, nb) > seq_before
+
+
+def test_partial_failure_leaves_the_first_sources_signal_durable_before_the_run_finishes(
+    repo, monkeypatch,
+):
+    """Stronger than ``test_a_partial_run_still_publishes_the_change_signal``:
+    that test only observes the FINAL state, after the RuntimeError has
+    propagated all the way out through ``relink_notebook_kg``'s ``finally`` —
+    which cannot distinguish "the first source's own transaction already
+    published the signal" from "the finally published it on the way out,
+    because Python's exception handling ran it". This test captures the state
+    the instant the SECOND source is entered — strictly inside the `for` loop,
+    before the run has failed, before its `finally` has had any chance to run
+    — and pins that the first source's contribution is already durable by
+    then, with the second (about-to-fail) source having contributed nothing
+    yet.
+    """
+    nb, _ids = _build_multi_source_notebook(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original = lifecycle._relink_one_source
+    calls = {"n": 0}
+    observed_at_second_call: dict = {}
+
+    def _boom_after_the_first_source(notebook_id, source_id, written):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return original(notebook_id, source_id, written)
+        # About to process the SECOND (failing) partition. Snapshot right
+        # here, before doing anything else — this is what the first source's
+        # own transaction left behind, observed from strictly inside the
+        # still-running loop, nowhere near relink_notebook_kg's finally.
+        observed_at_second_call["seq"] = _kg_mutation_seq(repo, notebook_id)
+        observed_at_second_call["written_so_far"] = dict(written)
+        raise RuntimeError("this source's read blew up mid-notebook")
+
+    monkeypatch.setattr(
+        lifecycle, "_relink_one_source", _boom_after_the_first_source
+    )
+    seq_before = _kg_mutation_seq(repo, nb)
+
+    with pytest.raises(RuntimeError):
+        repo.relink_notebook_kg(nb)
+
+    assert calls["n"] == 2
+    assert observed_at_second_call["written_so_far"]["edges"] > 0, (
+        "first partition wrote no edge — fixture broken"
+    )
+    assert observed_at_second_call["seq"] > seq_before
+
+
 # ---------------------------------------------------------------------------
 # The one registered divergence: intra-source candidate order under the cap
 # ---------------------------------------------------------------------------

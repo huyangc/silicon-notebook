@@ -9,15 +9,20 @@ per-operation phase matrix (tests/fixtures/repository_contract/
 mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
 
     store_kg               chunks; embeds; invalidate; dirty
-    relink_notebook_kg     one transaction PER SOURCE; then invalidate; dirty
-                           once for the run — in a `finally`, keyed on "any edge
-                           has been committed so far", NOT on the run finishing.
-                           A pass that dies mid-notebook has already committed
-                           edges, and those must not escape kg_mutation_seq (the
-                           `_cluster_input_version` fallback COUNT does not count
-                           relations, so a missed bump makes 「刷新图谱」 short-
-                           circuit for that notebook forever). No-op only when
-                           zero edges were written.
+    relink_notebook_kg     the dirty bump rides EACH SOURCE's own write
+                           transaction (mark_unified_kg_dirty_in_tx, committed
+                           atomically with that source's edge insert) — a
+                           `finally`-keyed bump cannot survive a kill -9 landing
+                           between a source's commit and the run's finally, and
+                           those already-committed edges must not escape
+                           kg_mutation_seq (the `_cluster_input_version`
+                           fallback COUNT does not count relations, so a missed
+                           bump makes 「刷新图谱」 short-circuit for that
+                           notebook forever). invalidate stays a single
+                           run-level `finally` call, keyed on "any edge has
+                           been committed so far" (cheap in-process cache
+                           eviction — safe to defer/dedupe across sources).
+                           No-op anywhere when zero edges were written.
     set_edge_review        transaction; dirty; invalidate
     write_clusters         replace + cluster-seq bump in ONE transaction; invalidate
     append_clusters        append + bump in one transaction; invalidate when added
@@ -96,9 +101,21 @@ class KgMutationCoordinator:
         # since Task 13) references the table's own current value (+1), NOT
         # excluded, so an existing row increments rather than resets to the
         # inserted literal (1). First mutation -> seq 1.
-        now = self._now()
         with self._write() as db:
-            self.unified_store.mark_dirty(db, notebook_id, now)
+            self.mark_unified_kg_dirty_in_tx(db, notebook_id)
+
+    def mark_unified_kg_dirty_in_tx(self, connection: Any, notebook_id: str) -> None:
+        """Same effects as ``mark_unified_kg_dirty``, but riding a write
+        transaction the CALLER already holds open, rather than opening its
+        own.  Exists for one reason: ``relink_notebook_kg`` commits per
+        source, and a `finally`-keyed dirty bump cannot survive a kill -9
+        landing between a source's commit and the run's finally — the seq
+        advance has to be atomic with the edge insert it accompanies, or a
+        killed process can leave real edges in the database that never
+        escaped kg_mutation_seq (see the coordinator's module docstring for
+        why that permanently short-circuits 「刷新图谱」 for that notebook)."""
+        now = self._now()
+        self.unified_store.mark_dirty(connection, notebook_id, now)
         # Re-arm maybe_auto_index's once-set: the index this nb was previously
         # judged against (fresh/absent) is now stale by construction (KG just
         # changed), so the next write-path or read-path fallback call should

@@ -230,6 +230,7 @@ class KnowledgeLifecycleService:
         current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
+        mark_unified_kg_dirty_in_tx: Callable[[object, str], None],
         bump_cluster_mutation_seq: Callable[[object, str], None],
         embed_objects_batch: Callable[..., None],
         embed_relations_batch: Callable[[str, List[dict]], None],
@@ -286,6 +287,7 @@ class KnowledgeLifecycleService:
         self._current_user_id = current_user_id
         self._invalidate_unified_cache = invalidate_unified_cache
         self._mark_unified_kg_dirty = mark_unified_kg_dirty
+        self._mark_unified_kg_dirty_in_tx = mark_unified_kg_dirty_in_tx
         self._bump_cluster_mutation_seq = bump_cluster_mutation_seq
         self._embed_objects_batch = embed_objects_batch
         self._embed_relations_batch = embed_relations_batch
@@ -1011,11 +1013,16 @@ class KnowledgeLifecycleService:
         Returns {"isolated_before", "edges_added", "isolated_after"}."""
         self.get_notebook(notebook_id)  # KeyError if missing
         isolated_before = isolated_after = 0
-        # 「至今写过任何边」的账目,刻意是可变的、写完一个来源就立刻记账。写是逐来源
-        # 短事务提交的,所以一次中途失败也已经把边留在库里了——`kg_mutation_seq` 的合同
-        # 是「每一次变更都从这里过」,而 `_cluster_input_version` 的兜底 COUNT 不数
-        # relations,漏推这一下会让「刷新图谱」对这本库永久短路。因此下面的信号推送在
-        # `finally` 里,判据是这个账目而不是循环跑完没有。
+        # 「至今写过任何边」的账目,刻意是可变的、写完一个来源就立刻记账,供下面
+        # `finally` 判断要不要驱逐进程内缓存。**持久**的变更信号
+        # (`kg_mutation_seq`)不在这里推——`finally` 兜不住 kill -9:进程可能在某
+        # 来源的写事务提交后、`finally` 语句真正执行前就被 SIGKILL,那样已经落
+        # 库的边会永久躲开 `kg_mutation_seq`(`_cluster_input_version` 的兜底
+        # COUNT 不数 relations,漏推这一下让「刷新图谱」对这本库永久短路)。因此
+        # 持久信号改在 `_relink_one_source` 里、与该来源的边插入同一个写事务原子
+        # 提交(镜像 `write_clusters` 的 `_bump_cluster_mutation_seq(db, ...)`)。
+        # 这里的 `finally` 只负责进程内缓存驱逐——那是廉价、幂等的,晚一点/多做
+        # 一次都无所谓,不需要事务级原子性。
         written = {"edges": 0}
         try:
             for source_id in self._relink_source_partitions(notebook_id):
@@ -1030,9 +1037,10 @@ class KnowledgeLifecycleService:
                 # graph (and PPR/federated caches) pick up the new edges. Once for
                 # the run — the per-source writes are additive and no reader can
                 # observe a partially relinked graph as anything other than a graph
-                # with fewer relink edges.
+                # with fewer relink edges. The kg_mutation_seq bump already
+                # happened per-source (durably, in-transaction) — this is
+                # process-local cache eviction only.
                 self._invalidate_unified_cache(notebook_id)
-                self._mark_unified_kg_dirty(notebook_id)
         return {
             "isolated_before": isolated_before,
             "edges_added": written["edges"],
@@ -1181,6 +1189,15 @@ class KnowledgeLifecycleService:
             ]
             with self._write() as db:
                 self.knowledge.insert_relation_chunk(db, new_rows)
+                # Durable change signal, atomically with THIS source's edges —
+                # not deferred to the run's finally. A kill -9 landing right
+                # after this transaction's commit (before the run even reaches
+                # its finally) must not leave these edges invisible to
+                # kg_mutation_seq (see relink_notebook_kg's comment on the same
+                # hazard). Only reached when `pending` is non-empty, so a
+                # source with zero new edges never advances the seq — mirrors
+                # append_clusters' "no-op call manufactures no signal" rule.
+                self._mark_unified_kg_dirty_in_tx(db, notebook_id)
             # Committed — record it BEFORE anything else can raise, so the run's
             # cache-invalidation `finally` sees it even on a later failure.
             written["edges"] += len(new_rows)
