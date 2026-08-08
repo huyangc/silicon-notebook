@@ -324,8 +324,9 @@ class KnowledgeStore:
 
         See the SQLite twin: three unbounded ``fetchall``s (objects with their
         payload+evidence documents, all relations, all source ids). Production
-        relink pages by source; this survives as the differential test's oracle for
-        the historical whole-graph answer.
+        relink pages by source (``relink_source_page`` +
+        ``relink_orphan_source_ids``); this survives as the differential test's
+        oracle for the historical whole-graph answer.
         """
         objects = db.execute(
             "SELECT id, object_type, source_id, payload, evidence FROM knowledge_objects "
@@ -347,46 +348,89 @@ class KnowledgeStore:
         )
 
     @staticmethod
-    def relink_source_id_page(
+    def relink_source_page(
         db: Any,
         notebook_id: str,
-        after_source_id: str | None,
+        after_created_at: Any,
+        after_id: str,
         limit: int,
     ):
-        """One keyset page of the notebook's DISTINCT object source ids, ascending.
+        """One ``(created_at, id)`` keyset page of the notebook's OWN sources.
 
-        ``source_id`` is ``text COLLATE "C"`` and
-        ``idx_knowledge_objects_source_id(source_id, id)`` inherits that collation,
-        so this ordering is the repository's usual C-collation keyset and matches
-        the SQLite twin byte for byte. PostgreSQL has no ``INDEXED BY``; the planner
-        reaches the same index-only ``Unique`` over that index once ANALYZE has run
-        (the equivalent SQLite plan is pinned explicitly because its cost model
-        preferred a whole-notebook temp b-tree).
+        This is where the shape had to change. The obvious driver —
+        ``SELECT DISTINCT source_id FROM knowledge_objects WHERE notebook_id=%s
+        ORDER BY source_id`` — has no notebook-prefixed index to stand on here: the
+        only index leading with ``source_id`` is
+        ``idx_knowledge_objects_source_id``, which is ordered ACROSS notebooks, so
+        each page walks a stretch of other notebooks' objects and filters them out.
+        Measured on the shared base: the tail page removed ~1.2M neighbour rows,
+        183 ms warm — and every page pays it again, on a cold instance long enough
+        to trip the statement timeout. ``sources`` already has
+        ``idx_sources_notebook_created``, so this is the repository's ordinary
+        bounded source keyset (``s.id COLLATE "C"`` tie-break, exactly like
+        ``source_build_state_page``) and every page stays notebook-local.
 
-        The partition key is the raw stored ``source_id`` (NOT NULL DEFAULT ''), not
-        ``sources.id`` — objects carry no foreign key, so legacy rows may reference
-        deleted sources and must still form their own partition.
+        Hidden synthetic sources (``memory`` / ``knowhow`` projections) are
+        deliberately NOT excluded, unlike the build-target page — their rows own
+        knowledge objects, and skipping them would drop those partitions.
+
+        Pair with ``relink_orphan_source_ids``: objects have no foreign key to
+        ``sources``, so partitions keyed by ``''`` or by a deleted source have no
+        row here and must be discovered separately.
         """
-        if after_source_id is None:
-            return db.execute(
-                "SELECT DISTINCT source_id FROM knowledge_objects "
-                "WHERE notebook_id = %s ORDER BY source_id LIMIT %s",
-                (notebook_id, max(1, int(limit))),
-            ).fetchall()
         return db.execute(
-            "SELECT DISTINCT source_id FROM knowledge_objects "
-            "WHERE notebook_id = %s AND source_id > %s ORDER BY source_id LIMIT %s",
-            (notebook_id, after_source_id, max(1, int(limit))),
+            "SELECT id, created_at FROM sources WHERE notebook_id = %s "
+            "AND (%s::timestamptz IS NULL "
+            " OR (created_at, id COLLATE \"C\") > (%s, %s)) "
+            "ORDER BY created_at, id COLLATE \"C\" LIMIT %s",
+            (
+                notebook_id,
+                after_created_at,
+                after_created_at,
+                after_id,
+                max(1, int(limit)),
+            ),
+        ).fetchall()
+
+    @staticmethod
+    def relink_orphan_source_ids(db: Any, notebook_id: str):
+        """The object ``source_id`` values that name NO source of this notebook.
+
+        ``''`` plus every id left behind by a deleted source. Run ONCE per relink
+        pass, so that together with the ``sources`` keyset the two cover exactly the
+        distinct ``source_id`` values present in ``knowledge_objects`` — nothing
+        dropped, nothing visited twice.
+
+        **Cost, stated plainly:** one bounded pass over THIS notebook's objects
+        (``notebook_id`` equality, then an anti-join / correlated ``NOT EXISTS``
+        against ``sources``). One scan per relink RUN, not per page — which is the
+        whole point of moving the per-page work onto ``sources``. Acceptable for a
+        background pass.
+
+        The RESULT is bounded by deletions rather than by object count (one row per
+        distinct orphan id), so no limit is imposed: a cap here could only silently
+        drop partitions.
+        """
+        return db.execute(
+            "SELECT DISTINCT ko.source_id AS source_id FROM knowledge_objects ko "
+            "WHERE ko.notebook_id = %s AND (ko.source_id = '' OR NOT EXISTS("
+            " SELECT 1 FROM sources s "
+            " WHERE s.id = ko.source_id AND s.notebook_id = ko.notebook_id)) "
+            "ORDER BY ko.source_id",
+            (notebook_id,),
         ).fetchall()
 
     @staticmethod
     def relink_object_rows_for_source(db: Any, notebook_id: str, source_id: str):
-        """Every non-deprecated object of ONE source, in historical row order.
+        """Every non-deprecated object of ONE source, in insertion (ordinal) order.
 
         ``ordinal`` is the reviewed PostgreSQL counterpart of SQLite's ``rowid``
         (``POSTGRES_ROWID_ORDINAL_TABLES`` covers ``knowledge_objects``). The order
         is load-bearing: ``complete_isolated_edges`` walks isolated nodes in input
-        order under a per-node edge cap.
+        order under a per-node edge cap. It is a DELIBERATE pin rather than a
+        reproduction of the historical order — see the SQLite twin for why the old
+        unordered query's de facto ``updated_at`` order was a planner accident and
+        what the registered consequence is.
         """
         return _compat_rows(
             db.execute(

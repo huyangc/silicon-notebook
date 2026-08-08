@@ -694,7 +694,8 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
     )
     events = []
     for reader in (
-        "relink_source_id_page",
+        "relink_orphan_source_ids",
+        "relink_source_page",
         "relink_object_rows_for_source",
         "relink_relation_rows_for_objects",
         "relink_source_is_live",
@@ -716,19 +717,23 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
 
     out = getattr(repo, "relink_notebook_kg")(notebook_id)
 
-    # _seed_kg stores with source_id None, so every object lands in the single ''
-    # partition: one keyset page, one work unit, one write. Reads all happen
-    # OUTSIDE the write transaction, and the cache/dirty side effects still land
-    # after the commit — the frozen phase contract, now per source.
+    # _seed_kg stores with source_id None and creates no `sources` rows, so the
+    # notebook has exactly one partition — the orphan '' one. Orphans are
+    # discovered first (one query) and processed after the — here empty — source
+    # keyset page, giving one work unit and one write. `relink_source_is_live` is
+    # lazy: it only runs because this run actually has an edge to write. Reads all
+    # happen OUTSIDE the write transaction, and the cache/dirty side effects still
+    # land after the commit — the frozen phase contract, now per source.
     assert [event[0] for event in events] == [
-        "relink_source_id_page",
+        "relink_orphan_source_ids",
+        "relink_source_page",
         "relink_object_rows_for_source",
         "relink_relation_rows_for_objects",
         "relink_source_is_live",
         "write.begin", "insert_relation_chunk", "write.commit",
         "invalidate", "dirty",
     ]
-    assert events[4][1] == events[5][1] == events[6][1]
+    assert events[5][1] == events[6][1] == events[7][1]
     assert out["edges_added"] == 1
 
 

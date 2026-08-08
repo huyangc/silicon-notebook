@@ -1263,12 +1263,15 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def relink_rows(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
-    def relink_source_id_page(
+    def relink_source_page(
         db: object,
         notebook_id: str,
-        after_source_id: str | None,
+        after_created_at: object,
+        after_id: str,
         limit: int,
     ) -> list[Any]: ...
+    @staticmethod
+    def relink_orphan_source_ids(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
     def relink_object_rows_for_source(
         db: object, notebook_id: str, source_id: str

@@ -876,6 +876,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.export_reports', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.extract_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_notebook_kg_job_submission', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_notebook_relink_submission', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.find_duplicates', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.find_notebook_by_share_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.finish_ask_job', kind='attribute', target='_runtime'),
@@ -953,6 +954,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.notebook_copy_stats', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.notebook_exists_for_owner', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.notebook_owner', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.notebook_relink_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.paper_meta_backfill_progress', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.paper_meta_backfilling', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.parallelism', kind='attribute', target='_runtime'),
@@ -968,6 +970,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.propose_promotion', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.propose_schemas', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.prune_knowhow_history', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.public_report_by_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.rebuild_canonical_relations', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.rebuild_communities', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.rebuild_mention_bridge', kind='attribute', target='_runtime'),
@@ -986,6 +989,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.rename_knowhow_column', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.replace_notebook_bases', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.report_execution', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.report_share_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.report_source_identity_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.report_source_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.require_agent_access', kind='attribute', target='_runtime'),
@@ -998,6 +1002,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.review_queue', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.revoke_agent_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_merge_review_job', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_notebook_relink_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.scale_index_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.search_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.set_conflict_status', kind='attribute', target='_runtime'),
@@ -1009,6 +1014,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.set_merge_decision', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.set_notebook_personal', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.share_notebook', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.share_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.shared_by_me', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.shared_preview', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_asset_ids', kind='attribute', target='_runtime'),
@@ -1017,6 +1023,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_owner', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.sources_missing_paper_meta', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_ask_stream', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_notebook_relink', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.storage_dir', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.store_kg', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.submit_feedback', kind='attribute', target='_runtime'),
@@ -1026,6 +1033,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unified_graph', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unified_kg_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unshare_notebook', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unshare_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_agent_profile', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_knowhow_cell', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_knowhow_cells', kind='attribute', target='_runtime'),
@@ -1818,6 +1826,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='fail_notebook_relink_submission',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='fail_notebook_relink_submission'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='find_duplicates',
         owner='KnowledgeGovernanceService',
         kind='method',
@@ -1835,10 +1853,12 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_ask_detail_does_not_load_full_conversation_history', kind='patch', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_conversation'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_ask_detail_does_not_load_full_conversation_history', kind='patch', target='get_conversation'),
         ),
     ),
     SurfaceMember(
@@ -1968,6 +1988,8 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.confirm_report_intent', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.get_report', kind='attribute', target='get_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.get_report_share_route', kind='attribute', target='get_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.share_report_route', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.update_report_outline', kind='attribute', target='get_report'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_report'),
         ),
@@ -2409,6 +2431,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='notebook_relink_status',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg_status', kind='attribute', target='notebook_relink_status'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='parallelism',
         owner='ModelProvider',
         kind='method',
@@ -2555,6 +2587,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='public_report_by_token',
+        owner='ReportStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.public_report_route', kind='attribute', target='public_report_by_token'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='rebuild_unified_kg',
         owner='KnowledgeLifecycleService',
         kind='method',
@@ -2652,16 +2694,6 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
-        name='relink_notebook_kg',
-        owner='KnowledgeLifecycleService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='relink_notebook_kg'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
         name='rename_conversation',
         owner='AskStateStore',
         kind='method',
@@ -2699,6 +2731,16 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_generate_job', kind='attribute', target='report_execution'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_plan_job', kind='attribute', target='report_execution'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='report_share_token',
+        owner='ReportStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.get_report_share_route', kind='attribute', target='report_share_token'),
         ),
         patches=(
         ),
@@ -2864,6 +2906,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='run_notebook_relink_job',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='run_notebook_relink_job'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='scale_index_status',
         owner='ScaleArtifactRuntime',
         kind='method',
@@ -2968,6 +3020,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='share_report',
+        owner='ReportStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.share_report_route', kind='attribute', target='share_report'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='source_elements',
         owner='SourceStore',
         kind='method',
@@ -2995,6 +3057,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events', kind='attribute', target='start_ask_stream'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='start_notebook_relink',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='start_notebook_relink'),
         ),
         patches=(
         ),
@@ -3065,6 +3137,16 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.unified_kg_status', kind='attribute', target='unified_kg_status'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.select_notebook.load', kind='attribute', target='unified_kg_status'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='unified_kg_status'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='unshare_report',
+        owner='ReportStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.unshare_report_route', kind='attribute', target='unshare_report'),
         ),
         patches=(
         ),

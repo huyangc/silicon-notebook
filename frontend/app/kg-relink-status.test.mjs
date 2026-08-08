@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { relinkPollOutcome } from "./kg-relink-status.ts";
+import {
+  RELINK_POLL_MAX_ATTEMPTS,
+  RELINK_POLL_TIMED_OUT,
+  relinkBusyFor,
+  releaseRelinkClaim,
+  relinkPollOutcome,
+} from "./kg-relink-status.ts";
 
 const base = {
   job_id: "rlj-1",
@@ -71,5 +77,38 @@ test("终态文案里没有内部黑话", () => {
     for (const jargon of ["KG", "chunk", "relink", "job", "node", "边", "孤立节点"]) {
       assert.ok(!toast.includes(jargon), `界面文案不得出现「${jargon}」: ${toast}`);
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 忙碌位按笔记本作用域（切库不该互相干扰）
+// ---------------------------------------------------------------------------
+
+test("忙碌位只对正在补的那个库为真", () => {
+  assert.equal(relinkBusyFor("nb-a", "nb-a"), true);
+  // 切到 B：B 的按钮照常可点，A 的轮询在这里停下（切回 A 再接着轮）。
+  assert.equal(relinkBusyFor("nb-a", "nb-b"), false);
+  assert.equal(relinkBusyFor(null, "nb-a"), false);
+  // 两边都空不是「同一个库」——裸 `===` 会让没开库时按钮莫名变灰。
+  assert.equal(relinkBusyFor(null, null), false);
+});
+
+test("结算只清自己那一格：A 的迟到终态不得抹掉 B 刚置上的忙碌位", () => {
+  assert.equal(releaseRelinkClaim("nb-a", "nb-a"), null);
+  assert.equal(releaseRelinkClaim("nb-b", "nb-a"), "nb-b");
+  assert.equal(releaseRelinkClaim(null, "nb-a"), null);
+});
+
+test("轮询尝试上限是有界的，且超限回执中性（不说任务失败了）", () => {
+  assert.ok(Number.isInteger(RELINK_POLL_MAX_ATTEMPTS));
+  assert.ok(RELINK_POLL_MAX_ATTEMPTS > 0 && RELINK_POLL_MAX_ATTEMPTS <= 5000);
+  assert.equal(RELINK_POLL_TIMED_OUT.done, true, "超限必须解除忙碌位，否则按钮永久卡死");
+  assert.equal(RELINK_POLL_TIMED_OUT.refresh, true);
+  assert.ok(RELINK_POLL_TIMED_OUT.toast);
+  for (const word of ["失败", "错误", "job", "KG"]) {
+    assert.ok(
+      !RELINK_POLL_TIMED_OUT.toast.includes(word),
+      `超限只是「不等了」，任务可能仍在跑，文案不得出现「${word}」：${RELINK_POLL_TIMED_OUT.toast}`,
+    );
   }
 });

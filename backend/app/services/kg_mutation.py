@@ -10,7 +10,14 @@ mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
 
     store_kg               chunks; embeds; invalidate; dirty
     relink_notebook_kg     one transaction PER SOURCE; then invalidate; dirty
-                           once for the run (no-op when 0 added overall)
+                           once for the run — in a `finally`, keyed on "any edge
+                           has been committed so far", NOT on the run finishing.
+                           A pass that dies mid-notebook has already committed
+                           edges, and those must not escape kg_mutation_seq (the
+                           `_cluster_input_version` fallback COUNT does not count
+                           relations, so a missed bump makes 「刷新图谱」 short-
+                           circuit for that notebook forever). No-op only when
+                           zero edges were written.
     set_edge_review        transaction; dirty; invalidate
     write_clusters         replace + cluster-seq bump in ONE transaction; invalidate
     append_clusters        append + bump in one transaction; invalidate when added

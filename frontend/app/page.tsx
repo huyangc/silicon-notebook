@@ -135,7 +135,14 @@ import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledge
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import { prepareKgFocus } from "./kg-focus";
-import { relinkPollOutcome } from "./kg-relink-status";
+import {
+  RELINK_POLL_MAX_ATTEMPTS,
+  RELINK_POLL_TIMED_OUT,
+  relinkBusyFor,
+  releaseRelinkClaim,
+  relinkPollOutcome,
+  type RelinkPollOutcome,
+} from "./kg-relink-status";
 import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,
@@ -985,6 +992,10 @@ export default function Home() {
   const [kgExpandedNodes, setKgExpandedNodes] = useState<UnifiedConceptNode[]>([]);
   const [kgExpandedEdges, setKgExpandedEdges] = useState<UnifiedEdge[]>([]);
   const [kgLimit, setKgLimit] = useState(KG_RANGE_DEFAULT);
+  // 「补上关联」的轮询要按**当前**范围重拉,但范围换了不该重启轮询(那会重置尝试计数、
+  // 多跑一次立刻的请求),所以它经 ref 读而不进 effect 依赖。
+  const kgLimitRef = useRef(kgLimit);
+  kgLimitRef.current = kgLimit;
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
@@ -992,7 +1003,12 @@ export default function Home() {
   const [buildingKg, setBuildingKg] = useState(false);
   const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
   const [backfillingMeta, setBackfillingMeta] = useState(false);
-  const [relinkingKg, setRelinkingKg] = useState(false);
+  // 「补上关联」的忙碌位存的是**哪个笔记本**在补,不是一个裸布尔。任务是按笔记本单飞的
+  // 后台任务,用户完全可以点完 A 就切到 B——裸布尔会让 B 的按钮跟着变灰、让 A 的轮询在
+  // B 上重拉图谱并清掉 B 的展开节点,回到 A 又因为位已经被清而再也等不到那次刷新。
+  const [relinkingNotebookId, setRelinkingNotebookId] = useState<string | null>(null);
+  // 按钮消费的是「**当前这个库**在不在补」——切到别的库，那边的按钮照常可点。
+  const relinkingKg = relinkBusyFor(relinkingNotebookId, currentNotebookId);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   const scaleIndexDoneRequestRef = useRef(0);
@@ -4463,44 +4479,60 @@ export default function Home() {
   async function relinkFromKgView() {
     if (!currentNotebookId || relinkingKg) return;
     const nb = currentNotebookId;
-    setRelinkingKg(true);
+    setRelinkingNotebookId(nb);
     try {
       await relinkKg(nb);
       setToast("已开始补上关联；完成后会自动更新");
     } catch (err) {
       reportError(err);
-      if (activeNotebookIdRef.current === nb) setRelinkingKg(false);
+      // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
+      setRelinkingNotebookId((prev) => releaseRelinkClaim(prev, nb));
     }
   }
 
   // 补上关联的完成信号：有界轮询 relink/status，终态时解除忙碌位并**按当前范围**重拉
   // 图谱与状态（保留后台化之前的既有语义）。服务端把 idle 也当终态回报，所以进程重启
-  // 之后这条轮询会收工而不是空转到天荒地老。
+  // 之后这条轮询会收工而不是空转到天荒地老；进程还活着但任务卡住那一种由尝试上限兜底。
+  // 轮询只在「在补的那个库正是当前打开的库」时跑：切走就停（A 的忙碌位保留），切回来
+  // 再接着轮，绝不拿 A 的终态去刷 B 的图谱或清 B 的展开节点。
   useEffect(() => {
-    if (!relinkingKg || !currentNotebookId) return;
-    const nb = currentNotebookId;
+    if (!relinkBusyFor(relinkingNotebookId, currentNotebookId)) return;
+    const nb = currentNotebookId as string;
     let cancelled = false;
+    let attempts = 0;
+    const finish = (outcome: RelinkPollOutcome) => {
+      setRelinkingNotebookId((prev) => releaseRelinkClaim(prev, nb));
+      if (outcome.toast) setToast(outcome.toast);
+      if (!outcome.refresh) return;
+      void (async () => {
+        try {
+          const [g, status] = await Promise.all([
+            fetchUnifiedGraph(nb, kgLimitRef.current),
+            fetchUnifiedKgStatus(nb),
+          ]);
+          if (cancelled || activeNotebookIdRef.current !== nb) return;
+          setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setUnifiedKgStatus(status);
+          setVizBuilding(Boolean(g.viz_building));
+        } catch (err) { reportError(err); }
+      })();
+    };
     const poll = window.setInterval(async () => {
+      // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限永远
+      // 到不了，正好是上限要兜的那种卡死。
+      attempts += 1;
+      if (attempts > RELINK_POLL_MAX_ATTEMPTS) {
+        if (!cancelled && activeNotebookIdRef.current === nb) finish(RELINK_POLL_TIMED_OUT);
+        return;
+      }
       let outcome;
       try {
         outcome = relinkPollOutcome(await fetchRelinkStatus(nb));
       } catch { return; }          // 瞬时错误：继续轮询
       if (cancelled || activeNotebookIdRef.current !== nb || !outcome.done) return;
-      setRelinkingKg(false);
-      if (outcome.toast) setToast(outcome.toast);
-      if (!outcome.refresh) return;
-      try {
-        const [g, status] = await Promise.all([
-          fetchUnifiedGraph(nb, kgLimit),
-          fetchUnifiedKgStatus(nb),
-        ]);
-        if (cancelled || activeNotebookIdRef.current !== nb) return;
-        setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setUnifiedKgStatus(status);
-        setVizBuilding(Boolean(g.viz_building));
-      } catch (err) { reportError(err); }
+      finish(outcome);
     }, 3000);
     return () => { cancelled = true; window.clearInterval(poll); };
-  }, [relinkingKg, currentNotebookId, kgLimit]);
+  }, [relinkingNotebookId, currentNotebookId]);
 
   async function refreshUnifiedKg() {
     if (!currentNotebookId) return;
