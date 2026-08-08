@@ -643,6 +643,55 @@ class UnifiedKgStore:
             "FROM canonical_relations WHERE notebook_id=?", (notebook_id,))
 
     @staticmethod
+    def relation_support_rows(
+        db: sqlite3.Connection, notebook_id: str, triples: List[tuple],
+    ) -> List[sqlite3.Row]:
+        """Bounded point lookup by the ``canonical_relations`` primary key
+        ``(notebook_id, canonical_src, edge_type, canonical_tgt)`` — the
+        batched replacement for ``edge_support_rows``'s per-notebook full
+        table scan (see that method + ``graph_retrieval.relation_support_counts``
+        for the semantics this must match). Row-value ``IN`` — same form as
+        the PostgreSQL adapter — not an OR chain: measured on an un-ANALYZEd
+        database (this repo never runs ``ANALYZE`` against its production
+        SQLite databases), the OR-chain form's plan degrades from
+        per-branch PK seeks to ``SEARCH ... USING COVERING
+        INDEX (notebook_id=?)`` — a scan of the whole notebook partition —
+        once the branch count crosses roughly a few dozen; a production-scale
+        measurement on the batch-1 hot-path audit put that at 115ms vs. the
+        row-value form's 0.02ms (~440×) on the same table, and this repo's
+        own toy reproduction at 30 branches over 200k rows showed the same
+        qualitative flip (``EXPLAIN QUERY PLAN`` losing the composite-PK
+        seek). SQLite's query planner also starts mis-costing OR chains
+        somewhere around N≈2334 branches, and the OR chain's expression tree
+        can hit SQLite's parser node-count ceiling somewhere in the
+        N≈1000–10000 range depending on build flags — both reachable here
+        before the caller's own batching (see
+        ``GraphRetrievalService.relation_support_counts``) caps it. Row-value
+        IN instead walks the composite PK directly via one seek per tuple
+        (confirmed via ``EXPLAIN QUERY PLAN``: ``SEARCH ... USING INDEX
+        sqlite_autoindex_canonical_relations_1 (notebook_id=? AND
+        canonical_src=? AND edge_type=? AND canonical_tgt=?)``), independent
+        of ``sqlite_stat1`` / ``ANALYZE``. ``ORDER BY`` makes the row order
+        deterministic (ascending on the same three PK columns) regardless of
+        physical storage order or the caller's tuple order — the caller
+        builds an unordered ``dict`` from these rows so this is not required
+        for correctness, only for reproducible reads (tests, logs)."""
+        rows = [triple for triple in triples if triple]
+        if not rows:
+            return []
+        placeholders = ",".join("(?,?,?)" for _ in rows)
+        params: List[object] = [notebook_id]
+        for triple in rows:
+            params.extend(triple)
+        return db.execute(
+            f"SELECT canonical_src, edge_type, canonical_tgt, source_count "
+            f"FROM canonical_relations WHERE notebook_id=? "
+            f"AND (canonical_src, edge_type, canonical_tgt) IN ({placeholders}) "
+            f"ORDER BY canonical_src, edge_type, canonical_tgt",
+            params,
+        ).fetchall()
+
+    @staticmethod
     def weak_support_relation_rows(
         db: sqlite3.Connection,
         notebook_id: str,

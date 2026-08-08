@@ -764,19 +764,26 @@ class KnowledgeStore:
     @staticmethod
     def in_network_relation_rows(db: sqlite3.Connection, notebook_id: str,
                                  object_ids):
+        """T2(批 1 热点整改):``DISTINCT`` 下推同一 (src,et,tgt) 跨多个来源的
+        重复原始行——此前它们全部原样回传,靠 Python 侧 identity 去重循环兜底
+        (仍保留,防御性)。``ORDER BY`` 是把此前 planner 相关、无定义的行序钉成
+        确定行为:旧 SQL 没有 ORDER BY,支持数并列时 identity 去重"谁先到谁被
+        记入 seen_relations"的 tie 由存储顺序决定,双后端/同库两次运行都不必
+        一致;补上确定序让这类并列在跨后端/跨执行下稳定,不是语义变更。"""
         ids = list(object_ids)
         if len(ids) < 2:
             return []
         ph = ",".join("?" for _ in ids)
         return db.execute(
-            f"SELECT r.source_object_id, r.target_object_id, r.edge_type, "
+            f"SELECT DISTINCT r.source_object_id, r.target_object_id, r.edge_type, "
             f"src.object_type AS source_type, tgt.object_type AS target_type "
             f"FROM knowledge_relations AS r "
             f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
             f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
             f"WHERE r.notebook_id=? AND r.review_status!='rejected' "
             f"AND r.source_object_id IN ({ph}) "
-            f"AND r.target_object_id IN ({ph})",
+            f"AND r.target_object_id IN ({ph}) "
+            f"ORDER BY r.source_object_id, r.edge_type, r.target_object_id",
             [notebook_id, *ids, *ids],
         ).fetchall()
 

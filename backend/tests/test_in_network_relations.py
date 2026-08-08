@@ -81,3 +81,46 @@ def test_no_relations_line_when_edge_endpoint_not_in_context(repo):
     # only A is in context -> the A->B edge is NOT in-network
     block, _ = repo._answer_context(nb.id, [_hit(ids["Claim Alpha"], "Claim Alpha")])
     assert "relations:" not in block
+
+
+def test_in_network_relation_rows_deduplicates_cross_source_duplicate_edges(repo):
+    """T2(批 1 热点整改):同一 (source_object_id, edge_type, target_object_id)
+    若有两条 knowledge_relations 行(两个不同来源各自贡献一条),adapter 必须
+    只回传一行——DISTINCT 下推,不再靠 evidence_context 的 Python 侧 identity
+    去重循环独自兜底这份重复(MUT-6 的反向验证目标:去掉 DISTINCT 应让这条
+    断言失败)。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "Claim Alpha", "section_path": "1"}, "evidence": []},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "Claim Beta", "section_path": "1"}, "evidence": []},
+    ], [
+        {"source_local_id": "A", "target_local_id": "B",
+         "edge_type": "supports", "evidence": []},
+    ])
+    ids = _ids_by_name(repo, nb.id)
+    a_id, b_id = ids["Claim Alpha"], ids["Claim Beta"]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_relations "
+            "(id, notebook_id, source_id, source_object_id, target_object_id, "
+            " edge_type, created_at) VALUES (?,?,?,?,?,?,?)",
+            ("rel-dup-1", nb.id, None, a_id, b_id, "supports",
+             "2024-01-01T00:00:00"),
+        )
+    with repo._connect() as db:
+        rows = repo._runtime.knowledge.in_network_relation_rows(db, nb.id, [a_id, b_id])
+    assert len(rows) == 1, (
+        f"expected the duplicate (src,et,tgt) row to collapse via DISTINCT, got {rows}")
+
+    # End-to-end: the rendered block is unaffected either way (evidence_context's
+    # own seen_relations de-dup already hid this at the Python layer before T2;
+    # this asserts no regression, not the DISTINCT effect itself).
+    block, id_map = repo._answer_context(
+        nb.id, [_hit(a_id, "Claim Alpha"), _hit(b_id, "Claim Beta")],
+    )
+    keys = list(id_map.keys())
+    assert (f"{keys[0]} -[supports]-> {keys[1]}" in block
+            or f"{keys[1]} -[supports]-> {keys[0]}" in block)
+    assert block.count("-[supports]->") == 1

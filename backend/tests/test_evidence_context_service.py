@@ -33,6 +33,11 @@ class _Knowledge:
     def cluster_map(self, notebook_id):
         return {}
 
+    def cluster_fold(self, notebook_id, object_ids):
+        # Mirrors the old cluster_map()'s empty-map default: every id misses
+        # and _canonical() falls back to the id itself.
+        return {}
+
     def node_context(self, notebook_id, object_id):
         return {
             "occurrences": [{
@@ -49,6 +54,9 @@ class _Knowledge:
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):
         return 1
+
+    def relation_support_counts(self, notebook_id, triples):
+        return {triple: 1 for triple in triples}
 
 
 def _service(*, source_metadata=None, elements=None):
@@ -511,10 +519,12 @@ def test_evidence_context_folds_clusters_without_merging_participant_maps():
     「后库优先」下两个 hit 同折 c-base、簇去重后只剩一条;若逆序被改回正序
     (m1→c-active),或折叠整个失效(m1→m1),都会输出两条而报红。"""
     class _SplitClusterKnowledge(_Knowledge):
-        def cluster_map(self, notebook_id):
-            if notebook_id == "active":
-                return {"m1": "c-active"}
-            return {"m1": "c-base", "m2": "c-base"}
+        def cluster_fold(self, notebook_id, object_ids):
+            table = (
+                {"m1": "c-active"} if notebook_id == "active"
+                else {"m1": "c-base", "m2": "c-base"}
+            )
+            return {oid: table[oid] for oid in object_ids if oid in table}
 
     service = EvidenceContextService(
         notebooks=_Notebooks(), sources=_Sources(),
@@ -535,3 +545,105 @@ def test_evidence_context_folds_clusters_without_merging_participant_maps():
         "m1/m2 在「后挂载库覆盖」语义下同折 c-base,第二个 hit 必须被簇去重,"
         f"实得 {list(evidence)}")
     assert evidence["k1"]["object_id"] == "m1"
+
+
+def test_evidence_context_knowledge_context_never_loads_full_cluster_map():
+    """T3(B2 有界化,批 1)守卫:knowledge_context 绝不再调用整表 cluster_map()
+    ——调用即报红,直接钉住「B2 热点」被拔掉这件事(MUT-4 的反向验证目标)。
+    cluster_fold() 收到的 ids 必须恰为本次装配需要折叠的集合(命中
+    object_id ∪ priority_object_ids),既不是空、也不是超出这个集合的「全库」
+    (MUT-5 的反向验证目标)。本用例的 priority_object_ids=["o3"] 刻意不是
+    hits 的子集(o3 不在 hits 里),用来测契约的并集上限本身——生产唯一调用方
+    report_engine.py 今天传入的 bound_ids 恒 ⊆ hits(见 evidence_context.py
+    needed_ids 处的注释),但 knowledge_context 的实现不能依赖这条调用方今天
+    才成立的不变量。"""
+    class _CountingKnowledge(_Knowledge):
+        def __init__(self):
+            self.fold_calls: list[tuple[str, list[str]]] = []
+
+        def cluster_map(self, notebook_id):
+            raise AssertionError("knowledge_context must not call cluster_map()")
+
+        def cluster_fold(self, notebook_id, object_ids):
+            ids = list(object_ids)
+            self.fold_calls.append((notebook_id, ids))
+            return {}
+
+    knowledge = _CountingKnowledge()
+    service = EvidenceContextService(
+        notebooks=_Notebooks(), sources=_Sources(),
+        knowledge=knowledge, settings=Settings(),
+    )
+    hits = [
+        RetrievedKnowledge(
+            object_id="o1", object_type="concept", payload={"name": "First"},
+            evidence=[], tier="personal", notebook_id="active",
+        ),
+        RetrievedKnowledge(
+            object_id="o2", object_type="concept", payload={"name": "Second"},
+            evidence=[], tier="base", notebook_id="base",
+        ),
+    ]
+    service.knowledge_context("active", hits, priority_object_ids=["o3"])
+
+    # _Notebooks.participant_notebook_ids("active") == ["active", "base"]:
+    # one bounded fold call per participant, none of them the full table.
+    assert [notebook_id for notebook_id, _ids in knowledge.fold_calls] == ["active", "base"]
+    for _notebook_id, ids in knowledge.fold_calls:
+        assert ids, "cluster_fold must not be called with an empty id set"
+        assert set(ids) == {"o1", "o2", "o3"}, (
+            "cluster_fold must receive exactly the hit ∪ priority id set, "
+            f"got {sorted(ids)}"
+        )
+
+
+def test_evidence_context_relation_support_groups_by_relation_source_notebook():
+    """P2-1(评审 MUT-A 反向验证):relations 段必须按每条关系行自己的
+    ``row["notebook_id"]``(挂载库的真实归属)分组去查 relation_support_counts,
+    绝不能被换成调用方的 active notebook_id——真实 canonical_relations 是按各
+    自库存的表,用 active 的 id 去查一条挂载库贡献的边必然 miss(退回默认
+    support=1,×N源 后缀因此消失)。
+
+    这里用一个按 notebook_id 区分行为的假 Knowledge 端口来模拟这个真实语义:
+    关系行来自挂载库("base"),只有拿 "base" 去查才返回 support=2,拿别的 id
+    (比如误传进来的 active)去查一律回退默认值 1——与真实
+    ``graph_retrieval.relation_support_counts`` 命中/未命中的落地行为一致。
+
+    MUT-A 反向验证:把 evidence_context.py 里 ``self.knowledge
+    .relation_support_counts(nb_id, triples)`` 的第一个参数从 ``nb_id``(行自己
+    的归属)换成外层调用方的 ``notebook_id``(active),这条测试必须报红
+    ——挂载库关系在 active 库查不到,×N源 后缀会消失。"""
+    class _MultiNotebookKnowledge(_Knowledge):
+        def in_network_relations(self, participant_ids, object_ids):
+            return [{
+                "source_object_id": "o1", "edge_type": "supports",
+                "target_object_id": "o2", "notebook_id": "base",
+            }]
+
+        def relation_support_counts(self, notebook_id, triples):
+            # 镜像真实存储语义:canonical_relations 是按各自库存的表,拿错
+            # notebook_id 去查必然 miss、回退默认值 1(见
+            # graph_retrieval.relation_support_count 的 `hit[1] if hit else 1`)。
+            support = 2 if notebook_id == "base" else 1
+            return {triple: support for triple in triples}
+
+    service = EvidenceContextService(
+        notebooks=_Notebooks(), sources=_Sources(),
+        knowledge=_MultiNotebookKnowledge(), settings=Settings(),
+    )
+    hits = [
+        RetrievedKnowledge(
+            object_id="o1", object_type="concept", payload={"name": "First"},
+            evidence=[], tier="base", notebook_id="base",
+        ),
+        RetrievedKnowledge(
+            object_id="o2", object_type="concept", payload={"name": "Second"},
+            evidence=[], tier="base", notebook_id="base",
+        ),
+    ]
+    block, _evidence = service.knowledge_context("active", hits)
+    assert "relations:" in block
+    assert "(×2源)" in block, (
+        "relation support lookup must be grouped/queried by the relation "
+        f"row's OWN notebook_id (base), not the caller's active notebook; "
+        f"got: {block!r}")
