@@ -984,6 +984,7 @@ class RepositoryRuntime:
         get_notebook: Callable[[str], Any], current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
+        mark_unified_kg_dirty_in_tx: Callable[[Any, str], None],
         bump_cluster_mutation_seq: Callable[..., None],
         embed_objects_batch: Callable[..., None],
         embed_relations_batch: Callable[..., None],
@@ -1009,9 +1010,13 @@ class RepositoryRuntime:
         the facade's ``_connect``/``_write`` compatibility seats resolved per
         call (frozen transaction traces / failure injections keep observing
         every lifecycle commit boundary); ``invalidate_unified_cache`` /
-        ``mark_unified_kg_dirty`` / ``bump_cluster_mutation_seq`` are the
-        facade's Task-14 wrapper seats (the coordinator stays the single dirty
-        entry and repo-level patch seats stay effective); ``llm``/``kg_llm``
+        ``mark_unified_kg_dirty`` / ``mark_unified_kg_dirty_in_tx`` /
+        ``bump_cluster_mutation_seq`` are the facade's Task-14 wrapper seats
+        (the coordinator stays the single dirty entry and repo-level patch
+        seats stay effective — ``mark_unified_kg_dirty_in_tx`` is the
+        in-transaction twin ``relink_notebook_kg`` rides so the dirty bump
+        commits atomically with the per-source edge insert instead of a
+        `finally` a kill -9 could skip); ``llm``/``kg_llm``
         resolve the facade's frozen model-client properties per call (class-
         property monkeypatches keep working); the scale/viz callables are
         TEMPORARY Gate-6 adapters (scale-index load / ANN open / viz index /
@@ -1075,6 +1080,7 @@ class RepositoryRuntime:
             get_notebook=get_notebook, current_user_id=current_user_id,
             invalidate_unified_cache=invalidate_unified_cache,
             mark_unified_kg_dirty=mark_unified_kg_dirty,
+            mark_unified_kg_dirty_in_tx=mark_unified_kg_dirty_in_tx,
             bump_cluster_mutation_seq=bump_cluster_mutation_seq,
             embed_objects_batch=embed_objects_batch,
             embed_relations_batch=embed_relations_batch,

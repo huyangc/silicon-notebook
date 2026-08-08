@@ -49,28 +49,47 @@ export const RELINK_POLL_TIMED_OUT: RelinkPollOutcome = {
 /**
  * 忙碌位是否作用于**当前打开的**笔记本。
  *
- * 「补上关联」是按笔记本单飞的后台任务，忙碌位因此存的是「哪个库在补」而不是一个裸
- * 布尔。按钮的 disabled 与那条轮询共用这一条判据：切到别的库，那边的按钮照常可点，
- * 这边的轮询也停下来；切回来轮询自己接着跑。
+ * 「补上关联」是按笔记本单飞的后台任务，忙碌位因此存的是「哪些库在补」的一个集合，不是
+ * 一个裸布尔，也不是只能记一个库的裸字符串——用户可以点完 A 就切到 B 再点一次，两次
+ * 认领必须都活着（单值形态会让后一次覆盖前一次，A 的完成信号就此丢失，见
+ * releaseRelinkClaim 的同一条注释）。按钮的 disabled 与轮询 effect 共用这一条判据：只看
+ * 「当前这个库在不在集合里」，不在集合里的库照常可点、不轮询。
  */
 export function relinkBusyFor(
-  relinkingNotebookId: string | null,
+  relinkingNotebookIds: ReadonlySet<string>,
   currentNotebookId: string | null,
 ): boolean {
-  return relinkingNotebookId !== null && relinkingNotebookId === currentNotebookId;
+  return currentNotebookId !== null && relinkingNotebookIds.has(currentNotebookId);
+}
+
+/**
+ * 认领某个笔记本的忙碌位：只加自己那一格，其余库的认领原样保留。
+ */
+export function claimRelinkSlot(
+  previous: ReadonlySet<string>,
+  notebookId: string,
+): Set<string> {
+  if (previous.has(notebookId)) return previous as Set<string>;
+  const next = new Set(previous);
+  next.add(notebookId);
+  return next;
 }
 
 /**
  * 结算某个笔记本的忙碌位：只清自己那一格。
  *
  * 用户完全可以点完 A 就切到 B 再点一次——A 那条迟到的终态（或失败回执）绝不能把 B 刚
- * 置上的忙碌位一并抹掉，否则 B 的按钮立刻可点、轮询却已经被这一下清掉了。
+ * 置上的忙碌位一并抹掉，否则 B 的按钮立刻可点、轮询却已经被这一下清掉了。Set 语义天生
+ * 满足这一条：删除自己的键从不触碰其余键，不需要像单值形态那样先比较「是不是我」。
  */
 export function releaseRelinkClaim(
-  previous: string | null,
+  previous: ReadonlySet<string>,
   settled: string,
-): string | null {
-  return previous === settled ? null : previous;
+): Set<string> {
+  if (!previous.has(settled)) return previous as Set<string>;
+  const next = new Set(previous);
+  next.delete(settled);
+  return next;
 }
 
 /**

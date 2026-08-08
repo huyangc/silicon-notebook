@@ -548,9 +548,10 @@ class RepositoryFacade:
         # copies) plus the `_write` transaction seat (resolved per call, so
         # per-instance transaction traces / failure injections keep observing
         # the dirty bump's commit boundary). The `_invalidate_unified_cache` /
-        # `_mark_unified_kg_dirty` / `_bump_cluster_mutation_seq` wrappers
-        # below delegate to it — every mutation call site keeps funnelling
-        # through those wrappers, so the frozen phase matrix is unchanged.
+        # `_mark_unified_kg_dirty` / `_mark_unified_kg_dirty_in_tx` /
+        # `_bump_cluster_mutation_seq` wrappers below delegate to it — every
+        # mutation call site keeps funnelling through those wrappers, so the
+        # frozen phase matrix is unchanged.
         self._runtime.wire_kg_mutations(
             auto_index_checked=auto_index_checked,
             notebook_languages=self._notebook_langs_cache,
@@ -596,6 +597,9 @@ class RepositoryFacade:
             ),
             mark_unified_kg_dirty=lambda notebook_id: (
                 self._mark_unified_kg_dirty(notebook_id)
+            ),
+            mark_unified_kg_dirty_in_tx=lambda db, notebook_id: (
+                self._mark_unified_kg_dirty_in_tx(db, notebook_id)
             ),
             bump_cluster_mutation_seq=lambda db, notebook_id: (
                 self._bump_cluster_mutation_seq(db, notebook_id)
@@ -2284,6 +2288,15 @@ class RepositoryFacade:
         # place kg_mutation_seq advances — its write transaction rides the
         # facade `_write` seat, so begin/commit phase traces are unchanged.
         self._runtime.kg_mutations.mark_unified_kg_dirty(notebook_id)
+
+    def _mark_unified_kg_dirty_in_tx(self, db, notebook_id: str) -> None:
+        # In-transaction twin of `_mark_unified_kg_dirty`: rides a write
+        # transaction the CALLER already holds open (relink_notebook_kg's
+        # per-source commit) instead of opening its own — the dirty bump
+        # commits atomically with the edges it accompanies, so a kill -9
+        # between that commit and the run's finally cannot leave committed
+        # edges invisible to kg_mutation_seq.
+        self._runtime.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
 
     def _bump_cluster_mutation_seq(self, db, notebook_id: str) -> None:
         # Task 14: coordinator-owned in-transaction primitive (写簇+bump 同

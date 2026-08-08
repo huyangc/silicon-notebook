@@ -138,6 +138,7 @@ import { prepareKgFocus } from "./kg-focus";
 import {
   RELINK_POLL_MAX_ATTEMPTS,
   RELINK_POLL_TIMED_OUT,
+  claimRelinkSlot,
   relinkBusyFor,
   releaseRelinkClaim,
   relinkPollOutcome,
@@ -1003,12 +1004,13 @@ export default function Home() {
   const [buildingKg, setBuildingKg] = useState(false);
   const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
   const [backfillingMeta, setBackfillingMeta] = useState(false);
-  // 「补上关联」的忙碌位存的是**哪个笔记本**在补,不是一个裸布尔。任务是按笔记本单飞的
-  // 后台任务,用户完全可以点完 A 就切到 B——裸布尔会让 B 的按钮跟着变灰、让 A 的轮询在
-  // B 上重拉图谱并清掉 B 的展开节点,回到 A 又因为位已经被清而再也等不到那次刷新。
-  const [relinkingNotebookId, setRelinkingNotebookId] = useState<string | null>(null);
+  // 「补上关联」的忙碌位存的是**哪些笔记本**在补,是一个集合而不是一个裸布尔、也不是只能
+  // 记一个库的裸字符串。任务是按笔记本单飞的后台任务,用户完全可以点完 A 就切到 B 再点一
+  // 次——单值形态会让后一次认领覆盖前一次:A 的追踪被冲掉,回 A 不再显示忙碌、完成也不再
+  // 刷新,再点一次还会被服务端 409 误导成"没在跑"。集合让两次认领都活着,互不干扰。
+  const [relinkingNotebookIds, setRelinkingNotebookIds] = useState<Set<string>>(new Set());
   // 按钮消费的是「**当前这个库**在不在补」——切到别的库，那边的按钮照常可点。
-  const relinkingKg = relinkBusyFor(relinkingNotebookId, currentNotebookId);
+  const relinkingKg = relinkBusyFor(relinkingNotebookIds, currentNotebookId);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   const scaleIndexDoneRequestRef = useRef(0);
@@ -4479,14 +4481,14 @@ export default function Home() {
   async function relinkFromKgView() {
     if (!currentNotebookId || relinkingKg) return;
     const nb = currentNotebookId;
-    setRelinkingNotebookId(nb);
+    setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
     try {
       await relinkKg(nb);
       setToast("已开始补上关联；完成后会自动更新");
     } catch (err) {
       reportError(err);
       // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
-      setRelinkingNotebookId((prev) => releaseRelinkClaim(prev, nb));
+      setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
     }
   }
 
@@ -4494,14 +4496,16 @@ export default function Home() {
   // 图谱与状态（保留后台化之前的既有语义）。服务端把 idle 也当终态回报，所以进程重启
   // 之后这条轮询会收工而不是空转到天荒地老；进程还活着但任务卡住那一种由尝试上限兜底。
   // 轮询只在「在补的那个库正是当前打开的库」时跑：切走就停（A 的忙碌位保留），切回来
-  // 再接着轮，绝不拿 A 的终态去刷 B 的图谱或清 B 的展开节点。
+  // 再接着轮，绝不拿 A 的终态去刷 B 的图谱或清 B 的展开节点。多个库可以同时挂在
+  // relinkingNotebookIds 集合里——这条 effect 每次只为**当前**这一个开一条轮询,其余库
+  // 的认领原样留在集合里,不会被这里的收尾动到。
   useEffect(() => {
-    if (!relinkBusyFor(relinkingNotebookId, currentNotebookId)) return;
+    if (!relinkBusyFor(relinkingNotebookIds, currentNotebookId)) return;
     const nb = currentNotebookId as string;
     let cancelled = false;
     let attempts = 0;
     const finish = (outcome: RelinkPollOutcome) => {
-      setRelinkingNotebookId((prev) => releaseRelinkClaim(prev, nb));
+      setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
       if (outcome.toast) setToast(outcome.toast);
       if (!outcome.refresh) return;
       void (async () => {
@@ -4532,7 +4536,7 @@ export default function Home() {
       finish(outcome);
     }, 3000);
     return () => { cancelled = true; window.clearInterval(poll); };
-  }, [relinkingNotebookId, currentNotebookId]);
+  }, [relinkingNotebookIds, currentNotebookId]);
 
   async function refreshUnifiedKg() {
     if (!currentNotebookId) return;

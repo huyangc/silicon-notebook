@@ -10,9 +10,10 @@
 //      long-task-button-guard 只钉 disabled 存在,钉不到置位时机);
 //   ③ 完成信号真的存在——page.tsx 里有 fetchRelinkStatus + relinkPollOutcome 的消费点,
 //      否则忙碌位永远解除不掉,按钮会卡死;
-//   ④ 忙碌位与轮询都按**笔记本**判(经共享纯函数 relinkBusyFor / releaseRelinkClaim),
-//      并且轮询带尝试上限。裸布尔忙碌位在类型上完全合法、单测也照样绿,只有在「点完 A
-//      切到 B」时才现形——那正是评审里两份意见都点到的那一条。
+//   ④ 忙碌位与轮询都按**笔记本集合**判(经共享纯函数 relinkBusyFor / claimRelinkSlot /
+//      releaseRelinkClaim),并且轮询带尝试上限。裸布尔、乃至只能记一个库的裸字符串,
+//      忙碌位在类型上都完全合法、单测也照样绿,只有在「点完 A 切到 B 再点一次」时才
+//      现形——后一次认领会覆盖前一次,A 的完成信号从此收不到(codex R1 P2)。
 //
 // 覆盖边界(如实说明):本守卫认的是源码文本形态,不是运行时行为。轮询的时序、取消与
 // 切库竞态由 kg-relink-status.test.mjs 的纯函数用例 + 后端用例覆盖。
@@ -40,9 +41,9 @@ test("relinkFromKgView 在发请求之前就置忙碌位", async () => {
   const page = await parseModule("page.tsx");
   const body = findFunction(page, "relinkFromKgView").getText(page);
 
-  const busyAt = body.indexOf("setRelinkingNotebookId(nb)");
+  const busyAt = body.indexOf("setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb))");
   const postAt = body.indexOf("relinkKg(");
-  assert.ok(busyAt >= 0, "relinkFromKgView 必须置忙碌位(且记下是哪个库)");
+  assert.ok(busyAt >= 0, "relinkFromKgView 必须认领忙碌位(且记下是哪个库,走 claimRelinkSlot)");
   assert.ok(postAt >= 0, "relinkFromKgView 必须发起补上关联请求");
   assert.ok(
     busyAt < postAt,
@@ -50,26 +51,33 @@ test("relinkFromKgView 在发请求之前就置忙碌位", async () => {
   );
 });
 
-test("忙碌位是按笔记本作用域的,不是一个裸布尔", async () => {
+test("忙碌位是按笔记本作用域的一个集合,不是一个裸布尔或只记一个库的字符串", async () => {
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
 
-  // 状态本身存的是 id。`useState(false)` 那种形态在这里直接报红。
+  // 状态本身存的是 id 集合。`useState(false)` 或 `useState<string | null>(null)` 那种
+  // 只能记单个库的形态在这里直接报红——点完 A 切到 B 再点一次会覆盖 A 的认领。
   assert.ok(
-    /setRelinkingNotebookId\s*\]\s*=\s*useState<string \| null>\(null\)/.test(source),
-    "「补上关联」的忙碌位必须存正在补的笔记本 id,存布尔就会在切库时互相干扰",
+    /setRelinkingNotebookIds\s*\]\s*=\s*useState<Set<string>>\(new Set\(\)\)/.test(source),
+    "「补上关联」的忙碌位必须是正在补的笔记本 id 集合,单值形态会在"
+    + "「点完 A 切到 B 再点」时把 A 的认领覆盖掉",
   );
   // 判据与解除都走共享纯函数(kg-relink-status.test.mjs 单测了它们的每个分支),
-  // 手搓 `=== currentNotebookId` 也能对,但没有单测钉住那几个边角。
+  // 手搓 `.has(currentNotebookId)` 也能对,但没有单测钉住那几个边角。
   assert.ok(source.includes("relinkBusyFor("), "按钮/轮询的判据必须走 relinkBusyFor");
   assert.ok(
+    source.includes("claimRelinkSlot("),
+    "认领忙碌位必须走 claimRelinkSlot —— 手搓 `new Set(prev).add(nb)` 没有单测钉住"
+    + "「只加自己那一格」这条边角",
+  );
+  assert.ok(
     source.includes("releaseRelinkClaim("),
-    "解除忙碌位必须走 releaseRelinkClaim —— 直接 setRelinkingNotebookId(null) 会把"
+    "解除忙碌位必须走 releaseRelinkClaim —— 直接清空整个集合会把"
     + "用户刚在另一个库点起来的那次一并抹掉",
   );
   assert.ok(
-    !/setRelinkingNotebookId\(null\)/.test(source),
-    "无条件清空忙碌位就是上面那条要防的形态",
+    !/setRelinkingNotebookIds\(new Set\(\)\)/.test(source),
+    "无条件清空整个忙碌位集合就是上面那条要防的形态",
   );
 });
 
@@ -80,13 +88,13 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
   // 断言必须落在 effect **体内**:光看整份文件里出现过 RELINK_POLL_MAX_ATTEMPTS 拦不住
   // 「把上限那个分支整块删掉、import 还留着」——实测那样改守卫会假绿。
   const start = source.indexOf(
-    "if (!relinkBusyFor(relinkingNotebookId, currentNotebookId)) return;",
+    "if (!relinkBusyFor(relinkingNotebookIds, currentNotebookId)) return;",
   );
   assert.ok(start > 0, "找不到补上关联的轮询 effect(被改名或删除?守卫失效)");
-  const depsAt = source.indexOf("}, [relinkingNotebookId, currentNotebookId]);", start);
+  const depsAt = source.indexOf("}, [relinkingNotebookIds, currentNotebookId]);", start);
   assert.ok(
     depsAt > start && depsAt - start < 3000,
-    "轮询 effect 的依赖必须恰好是 [relinkingNotebookId, currentNotebookId]"
+    "轮询 effect 的依赖必须恰好是 [relinkingNotebookIds, currentNotebookId]"
     + "(kgLimit 进依赖会在换范围时重启轮询、重置尝试计数)",
   );
   const body = source.slice(start, depsAt);

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   RELINK_POLL_MAX_ATTEMPTS,
   RELINK_POLL_TIMED_OUT,
+  claimRelinkSlot,
   relinkBusyFor,
   releaseRelinkClaim,
   relinkPollOutcome,
@@ -81,22 +82,48 @@ test("终态文案里没有内部黑话", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 忙碌位按笔记本作用域（切库不该互相干扰）
+// 忙碌位按笔记本作用域（一个集合，多个库可以并发挂着，互不干扰）
 // ---------------------------------------------------------------------------
 
 test("忙碌位只对正在补的那个库为真", () => {
-  assert.equal(relinkBusyFor("nb-a", "nb-a"), true);
+  assert.equal(relinkBusyFor(new Set(["nb-a"]), "nb-a"), true);
   // 切到 B：B 的按钮照常可点，A 的轮询在这里停下（切回 A 再接着轮）。
-  assert.equal(relinkBusyFor("nb-a", "nb-b"), false);
-  assert.equal(relinkBusyFor(null, "nb-a"), false);
-  // 两边都空不是「同一个库」——裸 `===` 会让没开库时按钮莫名变灰。
-  assert.equal(relinkBusyFor(null, null), false);
+  assert.equal(relinkBusyFor(new Set(["nb-a"]), "nb-b"), false);
+  assert.equal(relinkBusyFor(new Set(), "nb-a"), false);
+  // 没开库时不该报忙——currentNotebookId 为 null 必须短路，不能落到 Set.has(null)。
+  assert.equal(relinkBusyFor(new Set(["nb-a"]), null), false);
+  assert.equal(relinkBusyFor(new Set(), null), false);
+});
+
+test("认领只加自己那一格：B 的认领不动 A 已经挂着的那一格", () => {
+  const onlyA = new Set(["nb-a"]);
+  const both = claimRelinkSlot(onlyA, "nb-b");
+  assert.deepEqual([...both].sort(), ["nb-a", "nb-b"]);
+  assert.deepEqual([...onlyA], ["nb-a"], "不得就地修改传入的集合");
+  // 重复认领同一个库是幂等的。
+  assert.deepEqual([...claimRelinkSlot(both, "nb-a")].sort(), ["nb-a", "nb-b"]);
 });
 
 test("结算只清自己那一格：A 的迟到终态不得抹掉 B 刚置上的忙碌位", () => {
-  assert.equal(releaseRelinkClaim("nb-a", "nb-a"), null);
-  assert.equal(releaseRelinkClaim("nb-b", "nb-a"), "nb-b");
-  assert.equal(releaseRelinkClaim(null, "nb-a"), null);
+  const both = new Set(["nb-a", "nb-b"]);
+  const afterA = releaseRelinkClaim(both, "nb-a");
+  assert.deepEqual([...afterA], ["nb-b"]);
+  assert.deepEqual([...both].sort(), ["nb-a", "nb-b"], "不得就地修改传入的集合");
+  assert.deepEqual([...releaseRelinkClaim(new Set(["nb-b"]), "nb-a")], ["nb-b"]);
+  assert.deepEqual([...releaseRelinkClaim(new Set(), "nb-a")], []);
+});
+
+test("两个库可以真的同时挂着：点完 A 再点 B，A 的认领必须还在", () => {
+  // 复现 P2 报的坏形态：单值状态下,起 B 的认领会覆盖 A 的,A 的完成信号从此收不到。
+  let claims = new Set();
+  claims = claimRelinkSlot(claims, "nb-a");
+  claims = claimRelinkSlot(claims, "nb-b");
+  assert.equal(relinkBusyFor(claims, "nb-a"), true, "起 B 之后 A 必须仍是忙碌的");
+  assert.equal(relinkBusyFor(claims, "nb-b"), true);
+  // A 先结算完成，B 的认领必须原样留着。
+  claims = releaseRelinkClaim(claims, "nb-a");
+  assert.equal(relinkBusyFor(claims, "nb-a"), false);
+  assert.equal(relinkBusyFor(claims, "nb-b"), true, "A 的结算不得连带清掉 B");
 });
 
 test("轮询尝试上限是有界的，且超限回执中性（不说任务失败了）", () => {
