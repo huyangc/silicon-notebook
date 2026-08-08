@@ -69,24 +69,32 @@ def _shared_edge(n: Dict, m: Dict) -> Tuple[str, str, str] | None:
     return None
 
 
-def _name_matches(concept_name: str, text: str) -> bool:
-    """概念名是否以**词边界**命中 text(大小写不敏感)+ 防误链护栏。
+def _name_pattern(concept_name: str) -> "re.Pattern[str] | None":
+    """概念名的词边界匹配 pattern,已通过防误链护栏则返回**已编译**对象,否则
+    None(护栏未过 → 该概念永不参与 rule-2,调用方按概念缓存本函数的结果,
+    每个概念名只归一 + 编译一次,不随参与比较的候选节点数重复)。
 
     护栏:归一后长度 ≥ 4;若为单 token 则要求 ≥ 6;命中通用停用表则拒。
     """
     norm = _norm(concept_name)
     if len(norm) < 4:
-        return False
+        return None
     if norm in _GENERIC_STOPLIST:
-        return False
+        return None
     if " " not in norm and len(norm) < 6:   # 单 token 需更长以防泛化误链
-        return False
+        return None
     # 词边界短语匹配:把概念名的 token 用 \W+ 连接,首尾加 \b。
     tokens = [re.escape(t) for t in norm.split(" ") if t]
     if not tokens:
-        return False
+        return None
     pattern = r"\b" + r"\W+".join(tokens) + r"\b"
-    return re.search(pattern, text or "", re.IGNORECASE) is not None
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _pair_key(a: str, b: str) -> Tuple[str, str]:
+    """无向对的规范表示(顺序无关,两端排序后取元组);同一对无论以哪个方向
+    到来都归一到同一个 key,供 existing-edge 去重按无向语义查找。"""
+    return (a, b) if a <= b else (b, a)
 
 
 def complete_isolated_edges(
@@ -102,16 +110,66 @@ def complete_isolated_edges(
 
     # degree: 出现在任一现存边(作为 src 或 tgt)的节点即非孤立。
     connected: set = set()
-    existing_pairs: set = set()        # 无向对,用于反向去重
+    existing_pairs: set = set()        # 无向对(_pair_key),用于反向去重
     for src, tgt in edges:
         connected.add(src)
         connected.add(tgt)
-        existing_pairs.add(frozenset((src, tgt)))
+        existing_pairs.add(_pair_key(src, tgt))
 
-    # 同源索引:source_id → 该源下的节点列表(候选只在源内找)。
+    isolated_nodes = [n for n in nodes if n["id"] not in connected]
+    if not isolated_nodes:
+        # 稳态零预计算:relink 在每次抽取成功后自动跑,「LLM 已把全部节点连
+        # 通、零孤立」是常态而非边缘形态——评审实测这条早退之前的「无条件三
+        # 份预计算」在零孤立输入下比这条早退慢 28× 且多吃 70% 内存。不算
+        # element_ids、不排序 rule-2 候选表、不编译 pattern,直接返回。
+        return []
+
+    # 只对「含至少一个孤立节点」的 source 做预计算——候选只在源内找,故只需
+    # 覆盖这些 source 的全部节点(Rule-1 要查孤立节点的所有同源 sibling 的
+    # element_ids;Rule-2 的候选表要覆盖同源全部 concept),未受影响 source
+    # 的节点连 _element_ids 都不调用。
+    affected_sources = {n.get("source_id") for n in isolated_nodes}
     by_source: Dict[str, List[Dict]] = {}
     for n in nodes:
-        by_source.setdefault(n.get("source_id"), []).append(n)
+        sid = n.get("source_id")
+        if sid in affected_sources:
+            by_source.setdefault(sid, []).append(n)
+
+    elem_ids_by_node: Dict[str, set] = {
+        n["id"]: _element_ids(n)
+        for siblings in by_source.values()
+        for n in siblings
+    }
+
+    # rule-2 候选表:每受影响 source 下按(名长降序、id 兜底)排序的 concept
+    # 列表,与触发 rule-2 的具体 N 无关,故按 source 只排一次;`m["id"] != n["id"]`
+    # 的自身排除挪到下面循环内对这份预排序表做过滤(过滤不改变相对顺序,
+    # 与先排除再排序等价)。
+    concept_cands_by_source: Dict[str, List[Dict]] = {
+        sid: sorted(
+            (m for m in siblings if m["object_type"] == "concept"),
+            key=lambda m: (-len(m.get("name") or ""), m["id"]),
+        )
+        for sid, siblings in by_source.items()
+    }
+
+    # rule-2 pattern:改成首次真正被拿去 .search() 时才编译并缓存(而不是像
+    # elem_ids/候选表那样对受影响 source 内全部 concept 无条件预算)——一个
+    # source 里的候选 concept 常远多于实际会被测试到的(N 一旦命中或到
+    # max_per_node 就 break),提前编译等于白付一次 re.compile。
+    #
+    # 不能写成 `concept_patterns.setdefault(mid, _name_pattern(name))`:
+    # setdefault 的第二个参数是**调用时立即求值**的,那样 _name_pattern(连带
+    # re.compile)仍会对每一对候选重新调用一次,只是多余的编译结果被静默丢
+    # 弃——不起到防抖作用,反而会让 test_name_pattern_compiled_once_per_
+    # concept_not_per_pair 那类"编译次数=概念数"的守卫失真。这里改用显式
+    # "先查是否已算过、没算过才调用" 达到同样的惰性 memo 语义。
+    concept_patterns: Dict[str, "re.Pattern[str] | None"] = {}
+
+    def _pattern_for(node_id: str, name: str) -> "re.Pattern[str] | None":
+        if node_id not in concept_patterns:
+            concept_patterns[node_id] = _name_pattern(name)
+        return concept_patterns[node_id]
 
     new_edges: List[Dict] = []
     emitted_keys: set = set()          # 新边自去重 (src,tgt,edge_type)
@@ -132,7 +190,7 @@ def complete_isolated_edges(
         key = (src, tgt, edge_type)
         if key in emitted_keys:
             return False
-        if frozenset((src, tgt)) in existing_pairs:   # 有向去重:反向已存在亦跳过
+        if _pair_key(src, tgt) in existing_pairs:   # 无向去重:反向已存在亦跳过
             return False
         emitted_keys.add(key)
         degree_added[src] = degree_added.get(src, 0) + 1
@@ -145,13 +203,11 @@ def complete_isolated_edges(
         })
         return True
 
-    # 孤立节点保持输入顺序处理,产出稳定。
-    for n in nodes:
-        if n["id"] in connected:
-            continue
-
+    # 孤立节点保持输入顺序处理,产出稳定(isolated_nodes 已是 nodes 的顺序子
+    # 集,等价于原先「逐 n 现查 connected」但省一次成员测试)。
+    for n in isolated_nodes:
         emitted_for_n = 0
-        n_elems = _element_ids(n)
+        n_elems = elem_ids_by_node[n["id"]]
         siblings = by_source.get(n.get("source_id"), ())
 
         # --- Rule 1: 共享证据元素 ---
@@ -160,14 +216,20 @@ def complete_isolated_edges(
             for m in siblings:
                 if m["id"] == n["id"]:
                     continue
-                overlap = len(n_elems & _element_ids(m))
+                overlap = len(n_elems & elem_ids_by_node[m["id"]])
                 if overlap <= 0:
                     continue
                 if _shared_edge(n, m) is None:        # 无安全边类型 → 不作候选
                     continue
                 candidates.append((
                     overlap,                          # 共享越多越优先
-                    1 if m["object_type"] == "concept" else 0,  # 再偏好 concept
+                    # 再偏好 concept——但该项在单一候选表内恒为常量:
+                    # _shared_edge 已把合法 m 类型限定死(N 为 claim/formula/
+                    # procedure 时唯一合法 m 是 concept;N 为 concept 时合法
+                    # m 只能是 claim/formula/procedure、永不是 concept),故
+                    # 同一个 N 的候选要么全 1 要么全 0,这项从不参与真实排
+                    # 序,保留只为键形状(4 元组)稳定。
+                    1 if m["object_type"] == "concept" else 0,
                     len(m.get("name") or ""),         # 再偏好更长名
                     m["id"],
                 ))
@@ -191,16 +253,17 @@ def complete_isolated_edges(
             and n["object_type"] in ("claim", "formula")
         ):
             text = n.get("name") or ""
-            # 概念名长者优先(更具体),稳定 tie-break 用 id。
-            concept_cands = sorted(
-                (m for m in siblings
-                 if m["id"] != n["id"] and m["object_type"] == "concept"),
-                key=lambda m: (-len(m.get("name") or ""), m["id"]),
+            # 概念名长者优先(更具体),稳定 tie-break 用 id;取预排序表按本节点
+            # 自身 id 过滤,过滤不改变剩余元素的相对顺序,与逐 N 现排等价。
+            concept_cands = (
+                m for m in concept_cands_by_source.get(n.get("source_id"), ())
+                if m["id"] != n["id"]
             )
             for m in concept_cands:
                 if _at_cap(n["id"]):
                     break
-                if _name_matches(m.get("name") or "", text):
+                pattern = _pattern_for(m["id"], m.get("name") or "")
+                if pattern is not None and pattern.search(text) is not None:
                     if _try_emit(n["id"], m["id"], _ABOUT, _BASIS_NAME):
                         emitted_for_n += 1
 

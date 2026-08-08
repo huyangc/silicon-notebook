@@ -1640,16 +1640,38 @@ class KnowledgeStore:
 
     # --------------------------------------------------------- provenance
     @staticmethod
-    def source_ids_from_evidence(evidence_json: Optional[str]) -> set:
+    def source_ids_from_evidence(evidence_json: str | list | None) -> set:
         """PURE: parse an evidence JSON TEXT column value into the set of distinct
         source_ids it references (Evidence.source_id is present on every item —
         confirmed in app/models/schemas.py; a merged object's evidence can span
         multiple sources, which is exactly why a per-object single source_id
-        column is insufficient and this reverse table exists)."""
-        try:
-            items = json.loads(evidence_json or "[]")
-        except json.JSONDecodeError:
-            items = []
+        column is insufficient and this reverse table exists). Accepts either
+        the serialized TEXT column value (DB-row / maintenance-scan shape) or
+        an already-parsed evidence list — a caller holding both the Python
+        object and its serialized form passes the list directly and skips the
+        redundant dumps-then-loads round trip (mirrors the Postgres adapter,
+        whose JSONB rows already arrive parsed).
+
+        Explicit whitelist, not a blanket `except`: list is the fast path;
+        str/bytes/None go through json.loads (only a malformed-JSON string
+        is swallowed into an empty result — that is a real "no evidence"
+        shape callers already tolerate); anything else (e.g. a tuple) is a
+        caller bug and must raise loudly rather than be silently treated as
+        "no source ids" — that used to hide behind a bare `except (...,
+        TypeError)` which caught both "not valid JSON" and "not a string at
+        all" the same way."""
+        if isinstance(evidence_json, list):
+            items = evidence_json
+        elif evidence_json is None or isinstance(evidence_json, (str, bytes)):
+            try:
+                items = json.loads(evidence_json or "[]")
+            except json.JSONDecodeError:
+                items = []
+        else:
+            raise TypeError(
+                "source_ids_from_evidence: expected list, str, bytes or None, "
+                f"got {type(evidence_json).__name__}"
+            )
         return {
             item.get("source_id")
             for item in items

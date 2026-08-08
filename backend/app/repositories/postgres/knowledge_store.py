@@ -1882,7 +1882,7 @@ class KnowledgeStore:
 
     # --------------------------------------------------------- provenance
     @staticmethod
-    def source_ids_from_evidence(evidence_json: Optional[str]) -> set:
+    def source_ids_from_evidence(evidence_json: Optional[str | list]) -> set:
         """PURE: parse an evidence JSON TEXT column value into the set of distinct
         source_ids it references (Evidence.source_id is present on every item —
         confirmed in app/models/schemas.py; a merged object's evidence can span
@@ -1890,11 +1890,21 @@ class KnowledgeStore:
         column is insufficient and this reverse table exists)."""
         if isinstance(evidence_json, list):
             items = evidence_json
-        else:
+        elif evidence_json is None or isinstance(evidence_json, (str, bytes)):
+            # Whitelist, mirrored on the SQLite side: only the two shapes this
+            # column legitimately takes (JSONB row already decoded to a list,
+            # or a JSON text value) are accepted.  Any other type raises
+            # loudly instead of degrading to an empty set — a silent empty
+            # set here means the reverse index quietly loses rows.
             try:
                 items = json.loads(evidence_json or "[]")
-            except (json.JSONDecodeError, TypeError):
+            except json.JSONDecodeError:
                 items = []
+        else:
+            raise TypeError(
+                f"evidence must be a JSON string or decoded list, "
+                f"got {type(evidence_json).__name__}"
+            )
         return {
             item.get("source_id")
             for item in items

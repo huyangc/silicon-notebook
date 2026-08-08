@@ -234,7 +234,7 @@ class SQLiteRepository(RepositoryFacade):
         return self.maintenance.backfill_relation_embeddings(notebook_id)
 
     @staticmethod
-    def _source_ids_from_evidence(evidence_json: Optional[str]) -> set:
+    def _source_ids_from_evidence(evidence_json: Optional[str | list]) -> set:
         return KnowledgeStore.source_ids_from_evidence(evidence_json)
 
     @staticmethod

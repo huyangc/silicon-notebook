@@ -2810,6 +2810,32 @@ def test_projection_membership_artifact_order_ignores_map_and_set_iteration():
     assert reverse_tgt.tolist() == [2, 3, 2, 3, 0, 0, 1, 1]
 
 
+def test_postgres_source_ids_from_evidence_list_shape_fast_path():
+    # Perf-audit 双评审修复批 item C4: the list-shape fast path (an
+    # already-parsed evidence list — JSONB rows arrive parsed on Postgres,
+    # so this is the common shape here, not the str/json.loads branch) must
+    # be accepted directly without going through json.loads, and must
+    # dedupe/ignore items the same way as the str-serialized path. Pure
+    # static method — no live database needed.
+    evidence = [
+        {"source_id": "s1"},
+        {"source_id": "s2"},
+        {"source_id": "s1"},
+        {"no_source_id": True},
+        "not-a-dict",
+    ]
+    assert PostgresKnowledgeStore.source_ids_from_evidence(evidence) == {"s1", "s2"}
+    assert PostgresKnowledgeStore.source_ids_from_evidence([]) == set()
+    assert PostgresKnowledgeStore.source_ids_from_evidence(None) == set()
+    # Whitelist parity with the SQLite side: any shape other than list /
+    # str / bytes / None must raise loudly, never degrade to an empty set —
+    # a swallowed TypeError here silently starves the reverse index.
+    with pytest.raises(TypeError):
+        PostgresKnowledgeStore.source_ids_from_evidence(({"source_id": "s1"},))
+    with pytest.raises(TypeError):
+        PostgresKnowledgeStore.source_ids_from_evidence(7)
+
+
 @pytest.mark.postgres_integration
 def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
     postgres_database,

@@ -210,3 +210,62 @@ def test_replacement_swaps_fact_generation_and_global_delete_does_not_erase_fact
             "SELECT COUNT(*) FROM knowledge_source_facts WHERE id=?", (facts[0]["id"],)
         ).fetchone()[0]
     assert remaining == 1
+
+
+def test_store_kg_serializes_payload_and_evidence_exactly_once_per_object(
+    tmp_path, monkeypatch
+):
+    """Perf-audit hot path: payload/evidence must be json.dumps'd exactly once
+    per object per chunk and REUSED for both the knowledge_objects insert row
+    and (when grounded) the source-local fact row — never re-dumped for the
+    second consumer. Mixing grounded and ungrounded objects in one call
+    proves the count doesn't scale with how many objects also take the fact
+    branch."""
+    from app.models.schemas import NotebookCreate
+    import app.services.knowledge_lifecycle as kl
+
+    repo = _repo(tmp_path, monkeypatch)
+    notebook_id = repo.create_notebook(NotebookCreate(name="facts")).id
+    _seed_source(repo, notebook_id, "src-a", "el-a")
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id, source_id, element_type, location_label, text, metadata, created_at) "
+            "VALUES (?, ?, 'paragraph', 'L2', 'grounded text 2', '{}', ?)",
+            ("el-b", "src-a", "2026-08-04T00:00:00+00:00"),
+        )
+    _begin(repo, notebook_id, "src-a", "run-a", "2026-08-04T00:00:01+00:00")
+
+    grounded = [_object("src-a", "el-a", "Fact1"), _object("src-a", "el-b", "Fact2")]
+    ungrounded = _object("src-a", "el-a", "Ungrounded")
+    ungrounded["evidence"] = []
+    objects = grounded + [ungrounded]
+
+    # Identity-based tracking (not value equality) so the count only reflects
+    # dumps of THESE objects' own payload/evidence — any incidental json.dumps
+    # elsewhere in the call (event logging, etc.) stays uncounted and
+    # unaffected, since the wrapper always still forwards to the real dumps.
+    tracked_ids = {id(o["payload"]) for o in objects} | {id(o["evidence"]) for o in objects}
+    calls = {"n": 0}
+    real_dumps = kl.json.dumps
+
+    def counting_dumps(obj, *args, **kwargs):
+        if id(obj) in tracked_ids:
+            calls["n"] += 1
+        return real_dumps(obj, *args, **kwargs)
+
+    monkeypatch.setattr(kl.json, "dumps", counting_dumps)
+
+    result = repo._runtime.knowledge_lifecycle.store_kg(
+        notebook_id, "src-a", objects, [], source_generation="run-a"
+    )
+    assert result == (3, 0)
+    with repo._runtime.database.connect() as db:
+        # Sanity: exactly the 2 grounded objects were promoted to facts —
+        # confirms the mixed grounded/ungrounded shape actually exercises
+        # both branches of the reuse (insert-only vs insert+fact).
+        assert db.execute(
+            "SELECT COUNT(*) FROM knowledge_source_facts"
+        ).fetchone()[0] == 2
+
+    assert calls["n"] == 2 * len(objects)
