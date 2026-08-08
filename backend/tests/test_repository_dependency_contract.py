@@ -59,9 +59,10 @@ LIFECYCLE_STORE_CALLS = {
         # service pages relink by source now, and this exact-set assertion is what
         # makes a regression to the unbounded read fail closed.
         "relink_object_rows_for_source",
+        "relink_orphan_source_ids",
         "relink_relation_rows_for_objects",
-        "relink_source_id_page",
         "relink_source_is_live",
+        "relink_source_page",
         "source_build_state_page",
         "unified_graph_rows",
         "validate_source_fact_publish",

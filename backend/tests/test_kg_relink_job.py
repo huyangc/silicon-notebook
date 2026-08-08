@@ -155,3 +155,105 @@ def test_auto_relink_success_emits_no_failure_event(repo, monkeypatch):
 
     assert result["relink"]["edges_added"] == 0
     assert [e for e in emitted if e.get("kind") == "kg_relink_failed"] == []
+
+
+def test_post_build_relink_claims_the_same_slot_and_releases_it(repo, monkeypatch):
+    """The build tail must go through the SAME per-notebook claim the endpoint
+    uses — otherwise a click landing while a build finishes starts a second full
+    read of every source."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+    seen_claims = []
+    monkeypatch.setattr(
+        lifecycle, "relink_notebook_kg",
+        lambda _nb: seen_claims.append(repo.notebook_relink_status(_nb)["status"])
+        or {"isolated_before": 0, "edges_added": 0, "isolated_after": 0},
+    )
+    result: dict = {}
+    lifecycle._run_success_side_effects(nb, result, enqueue_fold=False)
+
+    # The claim was held WHILE the pass ran (a claim taken after the fact would
+    # protect nothing) and released afterwards.
+    assert seen_claims == ["running"]
+    status = repo.notebook_relink_status(nb)
+    assert (status["status"], status["running"]) == ("succeeded", False)
+    repo.start_notebook_relink(nb)          # slot reusable
+
+
+def test_post_build_relink_skips_when_the_endpoint_already_holds_the_slot(
+    repo, monkeypatch,
+):
+    """Losing the claim is a SKIP, not a failure: whoever holds it is doing
+    exactly this work. Fail-open, and observable through a body-free event."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+    repo.start_notebook_relink(nb)          # e.g. the user clicked 「补上关联」
+    ran = []
+    monkeypatch.setattr(
+        lifecycle, "relink_notebook_kg",
+        lambda _nb: ran.append(_nb) or {"isolated_before": 0, "edges_added": 0,
+                                        "isolated_after": 0},
+    )
+    emitted = []
+    monkeypatch.setattr(lifecycle.event_log, "emit", lambda payload: emitted.append(payload))
+    result = {"built": ["s1"]}
+    lifecycle._run_success_side_effects(nb, result, enqueue_fold=False)
+
+    assert ran == [], "the build tail started a duplicate pass over the notebook"
+    assert "relink" not in result           # nothing to report, and no lie either
+    assert result["built"] == ["s1"]        # fail-open: the build still succeeded
+    assert {"kind": "kg_relink_skipped", "notebook_id": nb} in emitted
+    assert [e for e in emitted if e.get("kind") == "kg_relink_failed"] == []
+    # The other party's claim is untouched.
+    assert repo.notebook_relink_status(nb)["running"] is True
+
+
+# ---------------------------------------------------------------------------
+# failure reporting: ONE place, both entry points
+# ---------------------------------------------------------------------------
+
+def test_endpoint_job_failure_reports_through_the_same_place(repo, monkeypatch):
+    """The endpoint's background job fails silently unless it reports here — the
+    build tail's failure event would otherwise have no counterpart, and a click
+    that blew up would leave nothing in the event stream at all."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+    emitted = []
+    monkeypatch.setattr(lifecycle.event_log, "emit", lambda payload: emitted.append(payload))
+
+    def _boom(_notebook_id):
+        raise RuntimeError("relink blew up")
+
+    monkeypatch.setattr(lifecycle, "relink_notebook_kg", _boom)
+    job = repo.start_notebook_relink(nb)
+    with pytest.raises(RuntimeError):
+        repo.run_notebook_relink_job(nb, job["job_id"])
+
+    assert [e for e in emitted if e.get("kind") == "kg_relink_failed"] == [
+        {"kind": "kg_relink_failed", "notebook_id": nb}
+    ]
+    assert repo.notebook_relink_status(nb)["status"] == "failed"
+
+
+def test_an_interrupt_releases_the_slot_without_reporting_a_failed_pass(
+    repo, monkeypatch,
+):
+    """Ctrl-C is not a failure of the pass — the same distinction the durable
+    KG-build guard makes about never opening a circuit on a human interrupt. The
+    claim still has to be released."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+    emitted = []
+    monkeypatch.setattr(lifecycle.event_log, "emit", lambda payload: emitted.append(payload))
+
+    def _interrupted(_notebook_id):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lifecycle, "relink_notebook_kg", _interrupted)
+    job = repo.start_notebook_relink(nb)
+    with pytest.raises(KeyboardInterrupt):
+        repo.run_notebook_relink_job(nb, job["job_id"])
+
+    assert [e for e in emitted if e.get("kind") == "kg_relink_failed"] == []
+    assert repo.notebook_relink_status(nb)["running"] is False
+    repo.start_notebook_relink(nb)          # slot reusable

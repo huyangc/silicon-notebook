@@ -3077,6 +3077,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.fail_notebook_relink_submission",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.find_duplicates",
         "target": "_runtime"
       },
@@ -3539,6 +3545,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.notebook_relink_status",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.paper_meta_backfill_progress",
         "target": "_runtime"
       },
@@ -3624,6 +3636,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.prune_knowhow_history",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.public_report_by_token",
         "target": "_runtime"
       },
       {
@@ -3737,6 +3755,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.report_share_token",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.report_source_identity_rows",
         "target": "_runtime"
       },
@@ -3809,6 +3833,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.run_notebook_relink_job",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.scale_index_status",
         "target": "_runtime"
       },
@@ -3875,6 +3905,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.share_report",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.shared_by_me",
         "target": "_runtime"
       },
@@ -3918,6 +3954,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.start_ask_stream",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.start_notebook_relink",
         "target": "_runtime"
       },
       {
@@ -3972,6 +4014,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.unshare_notebook",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.unshare_report",
         "target": "_runtime"
       },
       {
@@ -4219,7 +4267,7 @@
     "owner": "KnowledgeStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(evidence_json: 'Optional[str]') -> 'set'"
+    "signature": "(evidence_json: 'Optional[str | list]') -> 'set'"
   },
   "_source_type_from_name": {
     "consumers": [
@@ -4680,7 +4728,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', *, progress=None, target_limit: 'int | None' = None, retry_partial: 'bool' = False, finalize=None, job_id: 'str | None' = None) -> 'dict'"
+    "signature": "(self, notebook_id: 'str', *, progress=None, target_limit: 'int | None' = None, retry_partial: 'bool' = False, finalize=None, job_id: 'str | None' = None, skip_policy=None) -> 'dict'"
   },
   "build_scale_index": {
     "consumers": [
@@ -5672,6 +5720,21 @@
     "scope": "facade",
     "signature": "(self, job_id: 'str') -> 'bool'"
   },
+  "fail_notebook_relink_submission": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.relink_kg",
+        "target": "fail_notebook_relink_submission"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'None'"
+  },
   "find_duplicates": {
     "consumers": [
       {
@@ -5708,6 +5771,12 @@
         "target": "get_conversation"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_ask_detail_does_not_load_full_conversation_history",
+        "target": "get_conversation"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>.check_kg_store_ask_and_conversations",
@@ -5722,7 +5791,16 @@
     ],
     "kind": "method",
     "owner": "AskStateStore",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "RepositoryFacade",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_admin_user_activity_api.py",
+        "scope": "<module>.test_ask_detail_does_not_load_full_conversation_history",
+        "target": "get_conversation"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, conversation_id: 'str') -> \"'ConversationDetail'\""
   },
@@ -6143,6 +6221,18 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.get_report",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.get_report_share_route",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.share_report_route",
         "target": "get_report"
       },
       {
@@ -7155,6 +7245,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> \"'tuple[str | None, str | None]'\""
   },
+  "notebook_relink_status": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.relink_kg_status",
+        "target": "notebook_relink_status"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
+  },
   "parallelism": {
     "consumers": [
       {
@@ -7510,6 +7615,21 @@
     "scope": "facade",
     "signature": "(self, table_id: 'str', before_iso: 'str') -> 'dict'"
   },
+  "public_report_by_token": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.public_report_route",
+        "target": "public_report_by_token"
+      }
+    ],
+    "kind": "method",
+    "owner": "ReportStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, token: 'str') -> 'dict | None'"
+  },
   "rebuild_unified_kg": {
     "consumers": [
       {
@@ -7855,21 +7975,6 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'List[dict]'"
   },
-  "relink_notebook_kg": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/kg_routes.py",
-        "scope": "<module>.relink_kg",
-        "target": "relink_notebook_kg"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowledgeLifecycleService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'dict'"
-  },
   "rename_conversation": {
     "consumers": [
       {
@@ -7941,6 +8046,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self)"
+  },
+  "report_share_token": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.get_report_share_route",
+        "target": "report_share_token"
+      }
+    ],
+    "kind": "method",
+    "owner": "ReportStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', report_id: 'str') -> 'str'"
   },
   "require_agent_access": {
     "consumers": [
@@ -8455,6 +8575,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', *, batch: 'int' = 100) -> 'dict'"
   },
+  "run_notebook_relink_job": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.relink_kg",
+        "target": "run_notebook_relink_job"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'dict'"
+  },
   "scale_index_status": {
     "consumers": [
       {
@@ -8680,6 +8815,21 @@
     "scope": "facade",
     "signature": "<instance attribute>"
   },
+  "share_report": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.share_report_route",
+        "target": "share_report"
+      }
+    ],
+    "kind": "method",
+    "owner": "ReportStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', report_id: 'str') -> 'str'"
+  },
   "source_elements": {
     "consumers": [
       {
@@ -8736,6 +8886,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', mode, *, user_id: 'str')"
+  },
+  "start_notebook_relink": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.relink_kg",
+        "target": "start_notebook_relink"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
   "storage_dir": {
     "consumers": [
@@ -8886,6 +9051,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
+  },
+  "unshare_report": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.unshare_report_route",
+        "target": "unshare_report"
+      }
+    ],
+    "kind": "method",
+    "owner": "ReportStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', report_id: 'str') -> 'None'"
   },
   "update_knowhow_cell": {
     "consumers": [

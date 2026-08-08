@@ -149,12 +149,12 @@ class KnowledgeStore:
         Three unbounded ``fetchall``s: every non-deprecated object WITH its
         payload+evidence JSON, every relation, every source id. On the 9.1M-object
         base that is ~6.8 GB hydrated into one request thread. Production relink
-        pages by source instead (``relink_source_id_page`` +
-        ``relink_object_rows_for_source`` + ``relink_relation_rows_for_objects``);
-        this method survives only as the differential test's oracle, which
-        recomputes the historical whole-graph answer to prove the paged one is
-        identical. `test_kg_relink_paged_equivalence` fails closed if any
-        production call site reappears.
+        pages by source instead (``relink_source_page`` +
+        ``relink_orphan_source_ids`` + ``relink_object_rows_for_source`` +
+        ``relink_relation_rows_for_objects``); this method survives only as the
+        differential test's oracle, which recomputes the historical whole-graph
+        answer to prove the paged one agrees. `test_kg_relink_paged_equivalence`
+        fails closed if any production call site reappears.
         """
         objects = db.execute(
             "SELECT id, object_type, source_id, payload, evidence FROM knowledge_objects "
@@ -172,59 +172,102 @@ class KnowledgeStore:
         return objects, relations, valid_sources
 
     @staticmethod
-    def relink_source_id_page(
+    def relink_source_page(
         db: sqlite3.Connection,
         notebook_id: str,
-        after_source_id: str | None,
+        after_created_at: str | None,
+        after_id: str,
         limit: int,
     ):
-        """One keyset page of the notebook's DISTINCT object source ids, ascending.
+        """One ``(created_at, id)`` keyset page of the notebook's OWN sources.
 
-        ``INDEXED BY`` is load-bearing, not decoration. Nothing in this repository
-        runs ``ANALYZE``, so deployed databases plan without statistics — and there
-        SQLite takes the ``notebook_id=?`` equality (``idx_knowledge_objects_nb_updated``)
-        and satisfies DISTINCT with ``USE TEMP B-TREE FOR DISTINCT``, which cannot
-        short-circuit on LIMIT: EVERY page re-reads every object row of the
-        notebook. Pinning ``idx_knowledge_objects_source_id(source_id, id)`` makes
-        the index order do the work, so a page stops as soon as it has its distinct
-        values and the keyset resumes where it stopped — the whole enumeration is
-        one index pass amortised across all pages. Measured on 200k objects with no
-        ANALYZE: hinted 12.1 ms, unhinted 28.4 ms, and the gap is per page, not per
-        run. (With ANALYZE both plans are fine, which is exactly why this must not
-        be left to the planner.)
+        The relink loop is driven off ``sources``, not off
+        ``SELECT DISTINCT source_id FROM knowledge_objects``. The DISTINCT form
+        reads well but has no notebook-prefixed index to stand on: the only index
+        that carries ``source_id`` first is ``idx_knowledge_objects_source_id``,
+        which is ordered ACROSS notebooks, so every page walks other notebooks'
+        objects and discards them (measured on the shared PostgreSQL base: the tail
+        page filtered ~1.2M neighbour rows, 183 ms warm — per page, and each page
+        pays it again). ``sources`` has ``idx_sources_notebook_created`` already, so
+        this is the repository's ordinary bounded source keyset — the same shape
+        ``source_build_state_page`` uses — and every page is notebook-local.
 
-        The partition key is the raw stored ``source_id`` (NOT NULL DEFAULT ''),
-        never ``sources.id``: objects carry no foreign key, so legacy rows point at
-        deleted sources and freshly stored ones can carry ''. Driving the loop off
-        ``sources`` would silently drop those partitions and undercount isolation.
-        ``status`` is deliberately not filtered — the index does not carry it, and a
-        source whose objects are all deprecated merely yields an empty (no-op)
+        Hidden synthetic sources (``memory`` / ``knowhow`` projections) are
+        deliberately NOT excluded here, unlike the build-target page: their rows own
+        knowledge objects too, and skipping them would drop those partitions from
+        the pass. Sources that own no objects merely yield an empty (no-op)
         partition.
+
+        The union with ``relink_orphan_source_ids`` is what makes the pair exact:
+        objects carry no foreign key to ``sources``, so an object's ``source_id``
+        may be ``''`` or name a deleted source, and those partitions have no row
+        here to be found by.
         """
-        if after_source_id is None:
-            return db.execute(
-                "SELECT DISTINCT source_id FROM knowledge_objects "
-                "INDEXED BY idx_knowledge_objects_source_id "
-                "WHERE notebook_id = ? ORDER BY source_id LIMIT ?",
-                (notebook_id, max(1, int(limit))),
-            ).fetchall()
         return db.execute(
-            "SELECT DISTINCT source_id FROM knowledge_objects "
-            "INDEXED BY idx_knowledge_objects_source_id "
-            "WHERE notebook_id = ? AND source_id > ? ORDER BY source_id LIMIT ?",
-            (notebook_id, after_source_id, max(1, int(limit))),
+            "SELECT id, created_at FROM sources WHERE notebook_id = ? "
+            "AND (? IS NULL OR (created_at, id) > (?, ?)) "
+            "ORDER BY created_at, id LIMIT ?",
+            (
+                notebook_id,
+                after_created_at,
+                after_created_at,
+                after_id,
+                max(1, int(limit)),
+            ),
+        ).fetchall()
+
+    @staticmethod
+    def relink_orphan_source_ids(db: sqlite3.Connection, notebook_id: str):
+        """The object ``source_id`` values that name NO source of this notebook.
+
+        ``''`` (objects stored without a source) plus every id left behind by a
+        deleted source. Run ONCE per relink pass, before the ``sources`` keyset, so
+        the two together cover exactly the distinct ``source_id`` values present in
+        ``knowledge_objects`` — no partition dropped, none visited twice.
+
+        **Cost, stated plainly:** this is one bounded pass over THIS notebook's
+        objects (``notebook_id=?`` equality on ``idx_knowledge_objects_nb_updated``,
+        DISTINCT via a temp b-tree, one indexed ``sources`` probe per row). It is
+        deliberately NOT hinted onto ``idx_knowledge_objects_source_id``: that index
+        is ordered across notebooks and pinning it would trade one notebook-local
+        scan for a whole-table one. On the 9.1M-object base that is a single scan
+        per relink run — acceptable for a background pass, and strictly cheaper than
+        the per-page cross-notebook filtering it replaces.
+
+        The RESULT is small and bounded by deletions, not by object count: one row
+        per distinct orphan source id (``''`` plus ids of deleted sources), so no
+        limit is imposed — a cap here could only silently drop partitions.
+        """
+        return db.execute(
+            "SELECT DISTINCT ko.source_id AS source_id FROM knowledge_objects ko "
+            "WHERE ko.notebook_id = ? AND (ko.source_id = '' OR NOT EXISTS("
+            " SELECT 1 FROM sources s "
+            " WHERE s.id = ko.source_id AND s.notebook_id = ko.notebook_id)) "
+            "ORDER BY ko.source_id",
+            (notebook_id,),
         ).fetchall()
 
     @staticmethod
     def relink_object_rows_for_source(
         db: sqlite3.Connection, notebook_id: str, source_id: str
     ):
-        """Every non-deprecated object of ONE source, in historical row order.
+        """Every non-deprecated object of ONE source, in insertion (rowid) order.
 
-        ``ORDER BY rowid`` reproduces the intra-source order the whole-notebook
-        query returned, which matters because ``complete_isolated_edges`` walks
-        isolated nodes in input order under a per-node edge cap — a different order
-        can pick different (still valid) partners once that cap binds.
+        The order matters: ``complete_isolated_edges`` walks isolated nodes in
+        input order under a per-node edge cap, so once that cap binds a different
+        order can pick different — still valid — partners.
+
+        ``ORDER BY rowid`` is a DELIBERATE pin, not a reproduction of what the
+        whole-notebook query did. That query carried no ``ORDER BY`` at all; SQLite
+        happened to satisfy it from ``idx_knowledge_objects_nb_updated``, so its de
+        facto order was ``updated_at``. That was a planner accident, not a contract
+        — an ``ANALYZE``, a new index or a different backend could change it
+        without notice — so the replacement states its order instead of inheriting
+        one. Consequence, registered and covered by the differential fixture: on a
+        notebook whose ``updated_at`` order disagrees with insertion order AND whose
+        per-node cap binds, the paged pass may bind an isolated node to a different
+        equally valid partner than the historical pass would have. Edge COUNTS and
+        isolation counts are unaffected.
         """
         return db.execute(
             "SELECT id, object_type, payload, evidence FROM knowledge_objects "

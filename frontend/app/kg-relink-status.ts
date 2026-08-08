@@ -30,6 +30,50 @@ export type RelinkPollOutcome = {
 const KEEP_POLLING: RelinkPollOutcome = { done: false, refresh: false, toast: null };
 
 /**
+ * 轮询的尝试上限(3 秒一次 ⇒ 约 30 分钟)。
+ *
+ * 后端只在**进程内**记这件事,所以「进程还活着但任务卡死」这一种是 idle 兜不住的:
+ * status 会一直如实回报 running,轮询就一直转。上限让按钮一定能解锁——用户只是要重新
+ * 点一次,而不是刷新整页。它不取消后台任务(那件事没有取消入口,也不该有:补上关联是
+ * 幂等的确定性动作),只是不再等了。
+ */
+export const RELINK_POLL_MAX_ATTEMPTS = 600;
+
+/** 等到上限仍未见终态时的收工回执(中性措辞:任务可能还在跑,别说它失败了)。 */
+export const RELINK_POLL_TIMED_OUT: RelinkPollOutcome = {
+  done: true,
+  refresh: true,
+  toast: "补上关联还在进行，稍后打开知识图谱即可看到结果",
+};
+
+/**
+ * 忙碌位是否作用于**当前打开的**笔记本。
+ *
+ * 「补上关联」是按笔记本单飞的后台任务，忙碌位因此存的是「哪个库在补」而不是一个裸
+ * 布尔。按钮的 disabled 与那条轮询共用这一条判据：切到别的库，那边的按钮照常可点，
+ * 这边的轮询也停下来；切回来轮询自己接着跑。
+ */
+export function relinkBusyFor(
+  relinkingNotebookId: string | null,
+  currentNotebookId: string | null,
+): boolean {
+  return relinkingNotebookId !== null && relinkingNotebookId === currentNotebookId;
+}
+
+/**
+ * 结算某个笔记本的忙碌位：只清自己那一格。
+ *
+ * 用户完全可以点完 A 就切到 B 再点一次——A 那条迟到的终态（或失败回执）绝不能把 B 刚
+ * 置上的忙碌位一并抹掉，否则 B 的按钮立刻可点、轮询却已经被这一下清掉了。
+ */
+export function releaseRelinkClaim(
+  previous: string | null,
+  settled: string,
+): string | null {
+  return previous === settled ? null : previous;
+}
+
+/**
  * 一次轮询回执 → 该做什么。
  *
  * `idle` 是**终态**而不是「还没开始」:服务端只在进程内记这件事,重启后就回 idle。把它
