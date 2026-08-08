@@ -425,6 +425,16 @@ def test_name_pattern_compiled_once_per_concept_not_per_pair(monkeypatch):
 #      sibling) pair (perf-audit hot path, same shape as the re.compile
 #      guard above) ----
 
+def test_element_ids_returns_set_input_by_reference_without_copy():
+    """已是 set 的 element_ids 必须按引用返回(消费方只读):整库 relink 路径
+    本就物化了 set,再复制一份=受影响 source 的证据索引第二份全量拷贝
+    (codex R1 P2)。"""
+    owned = {"e1", "e2"}
+    assert relink_mod._element_ids({"element_ids": owned}) is owned
+    materialized = relink_mod._element_ids({"element_ids": ["e1", "e1", "e2"]})
+    assert materialized == {"e1", "e2"}
+
+
 def test_element_ids_computed_once_per_node_not_per_pair(monkeypatch):
     calls = []
     real_element_ids = relink_mod._element_ids
