@@ -133,8 +133,9 @@ import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease,
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
-import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
+import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import { prepareKgFocus } from "./kg-focus";
+import { relinkPollOutcome } from "./kg-relink-status";
 import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,
@@ -1193,8 +1194,9 @@ export default function Home() {
     void loadUploadLimit();
     return () => { cancelled = true; window.clearTimeout(retryTimer); };
   }, [sourceModalOpen, sourceUploadMaxBytes, sourceUploadMaxFilesPerBatch]);
-  // Relink isolated nodes: additive/synchronous, no confirm needed.
-  // 补连孤立节点已移入知识图谱视图（relinkFromKgView，完成后按当前范围重拉）。
+  // Relink isolated nodes: additive/background, no confirm needed.
+  // 补连孤立节点已移入知识图谱视图（relinkFromKgView + 它下面那条 relink/status 轮询，
+  // 终态时按当前范围重拉）。
   // While a build runs, poll the notebook until kg_ready flips — the build can
   // take minutes, so the button reflects real progress instead of a fixed guess.
   // 面板(analytics/「索引与构建」看板)打开时让位给下方聚合轮询 effect 独占轮询——否则
@@ -4454,22 +4456,51 @@ export default function Home() {
     finally { setKgRangeBusy(false); }
   }
 
-  // KG 视图内补连孤立节点：同步返回，完成后按当前范围重拉图谱与状态。
+  // KG 视图内补连孤立节点：后台任务。POST 只认领任务槽（服务端按笔记本单飞，重复点回
+  // 409），真正的统计要等下面那条轮询读到终态才有——所以这里**不能**拿 POST 的返回值
+  // 编一个「已补上 N 条」出来。忙碌位在 await 之前就置上（长任务按钮红线），由轮询在
+  // 终态解除；POST 自己失败时当场解除，否则按钮会锁在一个根本没起来的任务上。
   async function relinkFromKgView() {
-    if (!currentNotebookId) return;
+    if (!currentNotebookId || relinkingKg) return;
+    const nb = currentNotebookId;
     setRelinkingKg(true);
     try {
-      const r = await relinkKg(currentNotebookId);
-      setToast(`已补上 ${r.edges_added} 条关联，还有 ${r.isolated_after} 项内容没建立关联`);
-      const [g, status] = await Promise.all([
-        fetchUnifiedGraph(currentNotebookId, kgLimit),
-        fetchUnifiedKgStatus(currentNotebookId),
-      ]);
-      setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setUnifiedKgStatus(status);
-      setVizBuilding(Boolean(g.viz_building));
-    } catch (err) { reportError(err); }
-    finally { setRelinkingKg(false); }
+      await relinkKg(nb);
+      setToast("已开始补上关联；完成后会自动更新");
+    } catch (err) {
+      reportError(err);
+      if (activeNotebookIdRef.current === nb) setRelinkingKg(false);
+    }
   }
+
+  // 补上关联的完成信号：有界轮询 relink/status，终态时解除忙碌位并**按当前范围**重拉
+  // 图谱与状态（保留后台化之前的既有语义）。服务端把 idle 也当终态回报，所以进程重启
+  // 之后这条轮询会收工而不是空转到天荒地老。
+  useEffect(() => {
+    if (!relinkingKg || !currentNotebookId) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      let outcome;
+      try {
+        outcome = relinkPollOutcome(await fetchRelinkStatus(nb));
+      } catch { return; }          // 瞬时错误：继续轮询
+      if (cancelled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+      setRelinkingKg(false);
+      if (outcome.toast) setToast(outcome.toast);
+      if (!outcome.refresh) return;
+      try {
+        const [g, status] = await Promise.all([
+          fetchUnifiedGraph(nb, kgLimit),
+          fetchUnifiedKgStatus(nb),
+        ]);
+        if (cancelled || activeNotebookIdRef.current !== nb) return;
+        setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setUnifiedKgStatus(status);
+        setVizBuilding(Boolean(g.viz_building));
+      } catch (err) { reportError(err); }
+    }, 3000);
+    return () => { cancelled = true; window.clearInterval(poll); };
+  }, [relinkingKg, currentNotebookId, kgLimit]);
 
   async function refreshUnifiedKg() {
     if (!currentNotebookId) return;
@@ -6998,8 +7029,10 @@ export default function Home() {
                             )}
                             {kg.ready && kg.pending_sources === 0 && (
                               <>
-                                {/* 补连是**同步等完**的(relinkFromKgView 里 await),而上面那个 busy
-                                    只看 KG 构建、不含 relinkingKg——所以这里必须自己带忙碌位。
+                                {/* 补连是**后台任务**:POST 立刻返回,忙碌位由 relink/status 的
+                                    轮询在终态解除(relinkFromKgView 与它下面那条 effect)。上面那个
+                                    busy 只看 KG 构建、不含 relinkingKg——所以这里必须自己带忙碌位,
+                                    否则「点完还能接着点」会一路点到服务端 409。
                                     与知识图谱视图侧栏的同一动作(disabled + 「补连中…」)保持一致。 */}
                                 <button
                                   type="button"

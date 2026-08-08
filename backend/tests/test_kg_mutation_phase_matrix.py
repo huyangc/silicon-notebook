@@ -693,6 +693,15 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
         }],
     )
     events = []
+    for reader in (
+        "relink_source_id_page",
+        "relink_object_rows_for_source",
+        "relink_relation_rows_for_objects",
+        "relink_source_is_live",
+    ):
+        _delegating_store_spy(monkeypatch, runtime.knowledge, reader, events)
+    # The whole-notebook reader is reference-only now; touching it here is the
+    # regression this ordering test would otherwise hide.
     _delegating_store_spy(monkeypatch, runtime.knowledge, "relink_rows", events)
     _trace_transaction_connections(repo, monkeypatch, events)
     _delegating_store_spy(monkeypatch, runtime.knowledge, "insert_relation_chunk", events)
@@ -707,11 +716,19 @@ def test_relink_store_spies_observe_read_projection_and_caller_write_connection(
 
     out = getattr(repo, "relink_notebook_kg")(notebook_id)
 
+    # _seed_kg stores with source_id None, so every object lands in the single ''
+    # partition: one keyset page, one work unit, one write. Reads all happen
+    # OUTSIDE the write transaction, and the cache/dirty side effects still land
+    # after the commit — the frozen phase contract, now per source.
     assert [event[0] for event in events] == [
-        "relink_rows", "write.begin", "insert_relation_chunk", "write.commit",
+        "relink_source_id_page",
+        "relink_object_rows_for_source",
+        "relink_relation_rows_for_objects",
+        "relink_source_is_live",
+        "write.begin", "insert_relation_chunk", "write.commit",
         "invalidate", "dirty",
     ]
-    assert events[1][1] == events[2][1] == events[3][1]
+    assert events[4][1] == events[5][1] == events[6][1]
     assert out["edges_added"] == 1
 
 

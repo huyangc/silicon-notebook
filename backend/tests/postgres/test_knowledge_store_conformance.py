@@ -4563,3 +4563,133 @@ def test_the_board_revalidation_blocks_a_concurrent_board_replacement(
                 executor.submit(delete_the_boards).result(timeout=30)
         # 对照组:share 锁随复核所在的那个事务结束而释放,同一条 DELETE 立刻成功。
         assert executor.submit(delete_the_boards).result(timeout=30) == "deleted"
+
+
+# ---------------------------------------------------------------------------
+# PR-B: the per-source relink readers (paged replacement for `relink_rows`)
+# ---------------------------------------------------------------------------
+
+def _relink_object_row(object_id: str, source_id: str, object_type: str,
+                       name: str, element_ids, status: str = "approved"):
+    evidence = [
+        {"source_id": source_id, "element_id": eid, "quoted_span": name,
+         "confidence": 1.0}
+        for eid in element_ids
+    ]
+    return (
+        object_id, "nb-personal", object_type, status,
+        json.dumps({"name": name}), json.dumps(evidence), source_id, NOW, NOW,
+    )
+
+
+def _seed_relink_fixture(knowledge_harness) -> None:
+    """Objects across four partitions: a live source, '' , an orphan source id,
+    and a second live source used for the cross-source edge."""
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,status,"
+            "parse_status,file_name,summary,created_at,updated_at) "
+            "VALUES (%s,%s,%s,'file','ready','ready',%s,%s,%s,%s)",
+            ("source-second", "nb-personal", "Second", "second.md", "", NOW, NOW),
+        )
+        knowledge_harness.knowledge.insert_object_chunk(connection, [
+            _relink_object_row("ko-rl-a1", "source-golden", "claim", "claim A", ["e1"]),
+            _relink_object_row("ko-rl-a2", "source-golden", "concept", "Engram", ["e1"]),
+            _relink_object_row("ko-rl-a3", "source-golden", "concept", "Dropped",
+                               ["e1"], status="deprecated"),
+            _relink_object_row("ko-rl-b1", "source-second", "concept", "Engram", ["e2"]),
+            _relink_object_row("ko-rl-blank", "", "claim", "no source claim", ["e3"]),
+            _relink_object_row("ko-rl-gone", "source-gone", "claim", "orphan", ["e4"]),
+        ])
+        knowledge_harness.knowledge.insert_relation_chunk(connection, [
+            # cross-source: a1 -> b1 (must be visible from BOTH partitions)
+            ("rel-rl-x", "nb-personal", "source-golden", "ko-rl-a1", "ko-rl-b1",
+             "about", json.dumps([]), NOW),
+        ])
+
+
+def test_relink_source_id_page_keysets_distinct_source_ids(knowledge_harness):
+    _seed_relink_fixture(knowledge_harness)
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        first = store.relink_source_id_page(connection, "nb-personal", None, 2)
+        assert [row["source_id"] for row in first] == ["", "source-golden"]
+        second = store.relink_source_id_page(
+            connection, "nb-personal", first[-1]["source_id"], 2
+        )
+        assert [row["source_id"] for row in second] == ["source-gone", "source-second"]
+        assert store.relink_source_id_page(
+            connection, "nb-personal", second[-1]["source_id"], 2
+        ) == []
+        # Another notebook's rows never leak into the enumeration.
+        assert store.relink_source_id_page(connection, "nb-base", None, 10) == []
+
+
+def test_relink_object_rows_for_source_matches_the_golden_shape(knowledge_harness):
+    _seed_relink_fixture(knowledge_harness)
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        rows = store.relink_object_rows_for_source(
+            connection, "nb-personal", "source-golden"
+        )
+    # Deprecated rows are excluded; order is insertion (ordinal) order; payload and
+    # evidence come back as the TEXT documents the service json.loads().
+    assert [row["id"] for row in rows] == ["ko-rl-a1", "ko-rl-a2"]
+    assert [row["object_type"] for row in rows] == ["claim", "concept"]
+    assert json.loads(rows[1]["payload"])["name"] == "Engram"
+    assert json.loads(rows[0]["evidence"])[0]["element_id"] == "e1"
+
+    with knowledge_harness.database.connect() as connection:
+        blank = store.relink_object_rows_for_source(connection, "nb-personal", "")
+        orphan = store.relink_object_rows_for_source(
+            connection, "nb-personal", "source-gone"
+        )
+        empty = store.relink_object_rows_for_source(
+            connection, "nb-personal", "source-nothing"
+        )
+    assert [row["id"] for row in blank] == ["ko-rl-blank"]
+    assert [row["id"] for row in orphan] == ["ko-rl-gone"]
+    assert empty == []
+
+
+def test_relink_relation_rows_return_both_directions_including_cross_source(
+    knowledge_harness,
+):
+    _seed_relink_fixture(knowledge_harness)
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        from_source_side = store.relink_relation_rows_for_objects(
+            connection, "nb-personal", ["ko-rl-a1", "ko-rl-a2"]
+        )
+        from_target_side = store.relink_relation_rows_for_objects(
+            connection, "nb-personal", ["ko-rl-b1"]
+        )
+        assert store.relink_relation_rows_for_objects(
+            connection, "nb-personal", []
+        ) == []
+    edge = ("ko-rl-a1", "ko-rl-b1", "about")
+    # The cross-source edge is visible from the source's partition...
+    assert edge in {
+        (r["source_object_id"], r["target_object_id"], r["edge_type"])
+        for r in from_source_side
+    }
+    # ...and from the target's partition, which is what keeps a node whose only
+    # edge leaves the source from being re-linked as isolated.
+    assert edge in {
+        (r["source_object_id"], r["target_object_id"], r["edge_type"])
+        for r in from_target_side
+    }
+
+
+def test_relink_source_is_live_matches_the_golden_valid_source_set(knowledge_harness):
+    _seed_relink_fixture(knowledge_harness)
+    store = knowledge_harness.knowledge
+    with knowledge_harness.database.connect() as connection:
+        assert store.relink_source_is_live(
+            connection, "nb-personal", "source-golden") is True
+        assert store.relink_source_is_live(
+            connection, "nb-personal", "source-gone") is False
+        assert store.relink_source_is_live(connection, "nb-personal", "") is False
+        # A source of another notebook is not this notebook's valid source.
+        assert store.relink_source_is_live(
+            connection, "nb-base", "source-golden") is False

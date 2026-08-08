@@ -37,6 +37,7 @@ _SAFE_JOB_PREFIXES = (
     ("report-plan-", "report-plan"),
     ("report-gen-", "report-gen"),
     ("rebuildkg-", "rebuildkg"),
+    ("relinkkg-", "relinkkg"),
     ("papermeta-", "papermeta"),
     ("buildkg-", "buildkg"),
 )

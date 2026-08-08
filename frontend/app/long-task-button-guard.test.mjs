@@ -32,7 +32,7 @@ import { CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary.ts";
 // 由多个条件或起来的入口,都必须把那个**在飞标志**的名字钉在这里。
 const LONG_TASK_BUTTONS = [
   { match: "runFix(", why: "体检修复 CTA(补齐向量/重新解析/分析新增):后端无单飞,重复点=重复排活" },
-  { match: "relinkFromKgView", why: "补上关联:同步等完,期间不能再点", requires: "relinkingKg" },
+  { match: "relinkFromKgView", why: "补上关联:后台任务,忙碌位由 relink/status 轮询解除,期间不能再点", requires: "relinkingKg" },
   { match: 'runScaleIndexOp("rebuild", bumpCheckupRepairPoll)', why: "H8 损坏态重建索引:该格常驻显示,不走「忙碌换取消」" },
   { match: "confirmUpload(", why: "上传:multipart 传大文件期间不能重复提交", requires: "uploadBusy" },
   { match: "reparseSource(", why: "来源重新解析:同步等完,大 PDF 可能数分钟" },

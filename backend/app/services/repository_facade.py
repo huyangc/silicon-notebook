@@ -1938,6 +1938,28 @@ class RepositoryFacade:
         owns the orchestration (Task 15); frozen-signature delegate."""
         return self._runtime.knowledge_lifecycle.relink_notebook_kg(notebook_id)
 
+    def start_notebook_relink(self, notebook_id: str) -> dict:
+        """Claim the notebook's relink slot (409 source) — Task-15 delegate."""
+        return self._runtime.knowledge_lifecycle.start_notebook_relink(notebook_id)
+
+    def notebook_relink_status(self, notebook_id: str) -> dict:
+        """Latest relink state for this notebook — Task-15 delegate."""
+        return self._runtime.knowledge_lifecycle.notebook_relink_status(notebook_id)
+
+    def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict:
+        """Background relink entry point — Task-15 delegate."""
+        return self._runtime.knowledge_lifecycle.run_notebook_relink_job(
+            notebook_id, job_id
+        )
+
+    def fail_notebook_relink_submission(
+        self, notebook_id: str, job_id: str
+    ) -> None:
+        """Release the relink claim when the worker never started — Task-15."""
+        return self._runtime.knowledge_lifecycle.fail_notebook_relink_submission(
+            notebook_id, job_id
+        )
+
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
         return self._runtime.knowledge_query.relations_for_notebook(notebook_id)
 

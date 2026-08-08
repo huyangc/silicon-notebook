@@ -49,6 +49,7 @@ from app.core.event_logging import EventLogger
 from app.repositories.ports import (
     GovernanceStorePort,
     KgBuildJobStorePort,
+    KgRelinkAlreadyRunning,
     KnowledgeStorePort,
     UnifiedKgStorePort,
 )
@@ -93,6 +94,20 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 )
 
 _SOURCE_BUILD_PAGE_SIZE = 500
+
+# relink 的两个有界化常数。页大小只影响「一次问数据库要多少个来源 id」——枚举总成本
+# 与页大小无关(keyset 单调前进 ⇒ 所有页合起来恰好是一次索引扫描),所以取小值即可。
+_RELINK_SOURCE_PAGE_SIZE = 200
+# 每条 IN 语句的对象 id 上限。relink 的关系读取按端点方向拆成两条语句,每条各带一份
+# id 列表,故单条语句的参数数就是这个值 +1,离 SQLite 的变量上限还很远。
+_RELINK_ID_BATCH_SIZE = 500
+
+
+def _in_relink_batches(ids: List[str]) -> Iterator[List[str]]:
+    """Split object ids into bounded IN batches (dedup, order preserved)."""
+    values = list(dict.fromkeys(ids))
+    for index in range(0, len(values), _RELINK_ID_BATCH_SIZE):
+        yield values[index:index + _RELINK_ID_BATCH_SIZE]
 
 
 class ModelSkipPolicy:
@@ -243,6 +258,17 @@ class KnowledgeLifecycleService:
         # `_kg_building`/`_kg_building_lock` 属性别名这里的同一对象。
         self.kg_building = kg_building
         self.kg_building_lock = threading.Lock()
+        # 补连孤立节点的**进程内**单飞与最近一次结果(每 notebook 一条,后写覆盖前写)。
+        # 刻意不复用 durable `kg_build_jobs`:那张表的单飞索引是 notebook 级的,接进去
+        # 等于让一次补连独占 KG 构建的名额,而它的消费方(kgBuildPresentation、待办
+        # 铃铛、index-status)会把补连读成「正在分析 0/0 项内容」「知识图谱分析完成」——
+        # 面向用户的文案会说谎;`prepare_notebook_kg_job` 还要求 kg_extract 已配置,而
+        # 补连是零模型的确定性动作,今天没配模型也能跑。生产固定 `--workers 1`,进程内
+        # 单飞与跨进程单飞在部署上等价;进程重启后条目自然消失,状态端点如实回报
+        # 「不在跑」而不是编一个进度。终态刻意保留(浏览器要在下一次轮询里读到统计),
+        # 所以条目数上界 = 本进程内点过「补上关联」的笔记本数,每条七个标量。
+        self.relink_jobs: Dict[str, dict] = {}
+        self.relink_lock = threading.Lock()
         # The facade's EXISTING cache objects, held BY IDENTITY (never
         # replacement copies) — the Task-14 coordinator evicts the same dict.
         self.unified_cache = unified_cache
@@ -940,7 +966,7 @@ class KnowledgeLifecycleService:
         """Backfill: reconnect degree-0 KG nodes in an EXISTING notebook.
 
         For legacy / pre-relink graphs (the inline path handles new extractions).
-        Loads non-deprecated objects (same node filter as knowledge_graph) with
+        Reads non-deprecated objects (same node filter as knowledge_graph) with
         their evidence element_ids, asks the deterministic relink core for new
         INTRA-SOURCE edges (nodes carry real source_id ⇒ cross-source never
         linked), and inserts them into knowledge_relations EXACTLY like store_kg
@@ -949,14 +975,81 @@ class KnowledgeLifecycleService:
         an edge is skipped if a row with the same
         (source_object_id, target_object_id, edge_type) already exists.
 
+        **Driven one source at a time.** Peak memory is one source, not one
+        notebook: the historical whole-graph shape hydrated every object's payload
+        and evidence JSON plus every relation into the calling thread (~6.8 GB on
+        the 9.1M-object base — PostgreSQL's statement timeout tripped first,
+        SQLite ground into the OOM killer). Why the split is answer-preserving,
+        edge for edge:
+
+        · ``complete_isolated_edges`` only ever proposes within one source
+          (``by_source`` buckets the candidates), so every structure it consults —
+          the emitted-key set, the per-node degree cap, the undirected
+          already-linked pair set — is confined to a single source. Partitioning on
+          exactly that key cannot make two partitions interact.
+        · Isolation is NOT partition-local, so the per-source relation read
+          deliberately fetches every edge ADJACENT to the partition's objects,
+          cross-source ones included. A node whose only edge leaves the source is
+          connected and must be skipped; a partition blind to that edge would
+          re-link it. This is the one way the decomposition could have diverged.
+        · ``isolated_before`` / ``isolated_after`` are plain counts over disjoint,
+          exhaustive partitions, so summing them reproduces the notebook totals.
+
         Returns {"isolated_before", "edges_added", "isolated_after"}."""
+        self.get_notebook(notebook_id)  # KeyError if missing
+        isolated_before = edges_added = isolated_after = 0
+        after_source_id: str | None = None
+        while True:
+            with self._connect() as db:
+                page = self.knowledge.relink_source_id_page(
+                    db, notebook_id, after_source_id, _RELINK_SOURCE_PAGE_SIZE
+                )
+            if not page:
+                break
+            for row in page:
+                source_id = row["source_id"] or ""
+                before, added, after = self._relink_one_source(
+                    notebook_id, source_id
+                )
+                isolated_before += before
+                edges_added += added
+                isolated_after += after
+            after_source_id = str(page[-1]["source_id"] or "")
+            if len(page) < _RELINK_SOURCE_PAGE_SIZE:
+                break
+
+        if edges_added:
+            # Match store_kg / delete_notebook_kg so the in-memory rustworkx graph
+            # (and PPR/federated caches) pick up the new edges. Once for the run,
+            # exactly as the whole-notebook version did — the per-source writes are
+            # additive and no reader can observe a partially relinked graph as
+            # anything other than a graph with fewer relink edges.
+            self._invalidate_unified_cache(notebook_id)
+            self._mark_unified_kg_dirty(notebook_id)
+        return {
+            "isolated_before": isolated_before,
+            "edges_added": edges_added,
+            "isolated_after": isolated_after,
+        }
+
+    def _relink_one_source(
+        self, notebook_id: str, source_id: str
+    ) -> Tuple[int, int, int]:
+        """One bounded relink work unit: read this source, write its new edges.
+
+        Returns ``(isolated_before, edges_added, isolated_after)`` for THIS source;
+        the caller sums them into the notebook totals.
+        """
         from app.services.kg.relink import complete_isolated_edges
 
-        self.get_notebook(notebook_id)  # KeyError if missing
         with self._connect() as db:
-            obj_rows, rel_rows, valid_src = self.knowledge.relink_rows(db, notebook_id)
+            obj_rows = self.knowledge.relink_object_rows_for_source(
+                db, notebook_id, source_id
+            )
+        if not obj_rows:
+            return (0, 0, 0)
 
-        nodes, src_by_id = [], {}
+        nodes = []
         for r in obj_rows:
             payload = json.loads(r["payload"] or "{}")
             evidence = json.loads(r["evidence"] or "[]")
@@ -965,26 +1058,37 @@ class KnowledgeLifecycleService:
                 for ev in evidence
                 if isinstance(ev, dict) and ev.get("element_id")
             }
-            src_by_id[r["id"]] = r["source_id"] or ""
             nodes.append({
                 "id": r["id"],
                 "object_type": r["object_type"],
                 "name": payload.get("name", ""),
-                "source_id": r["source_id"] or "",
+                "source_id": source_id,
                 "element_ids": element_ids,
             })
 
-        edges = [(r["source_object_id"], r["target_object_id"]) for r in rel_rows]
+        edges: List[Tuple[str, str]] = []
+        existing_triples: Set[Tuple[str, str, str]] = set()
+        object_ids = [n["id"] for n in nodes]
+        with self._connect() as db:
+            for batch in _in_relink_batches(object_ids):
+                for r in self.knowledge.relink_relation_rows_for_objects(
+                    db, notebook_id, batch
+                ):
+                    edges.append((r["source_object_id"], r["target_object_id"]))
+                    existing_triples.add((
+                        r["source_object_id"],
+                        r["target_object_id"],
+                        r["edge_type"],
+                    ))
+            source_is_live = self.knowledge.relink_source_is_live(
+                db, notebook_id, source_id
+            )
+
         connected = {oid for pair in edges for oid in pair}
         isolated_before = sum(1 for n in nodes if n["id"] not in connected)
 
         proposed = complete_isolated_edges(nodes, edges)
 
-        # Idempotency: skip any proposed edge already present (same triple).
-        existing_triples = {
-            (r["source_object_id"], r["target_object_id"], r["edge_type"])
-            for r in rel_rows
-        }
         now = self._now()
         new_rows = []
         for e in proposed:
@@ -992,10 +1096,10 @@ class KnowledgeLifecycleService:
             if triple in existing_triples:
                 continue
             existing_triples.add(triple)
-            src = src_by_id.get(e["source_object_id"], "")
             new_rows.append((
                 self._new_id("rel"), notebook_id,
-                src if src in valid_src else None,   # NULL if source gone (FK-safe)
+                # NULL if the source row is gone or the objects carry '' (FK-safe).
+                source_id if source_is_live else None,
                 e["source_object_id"], e["target_object_id"], e["edge_type"],
                 json.dumps([{"basis": e["basis"], "quote": ""}], ensure_ascii=False),
                 now,
@@ -1004,20 +1108,96 @@ class KnowledgeLifecycleService:
         if new_rows:
             with self._write() as db:
                 self.knowledge.insert_relation_chunk(db, new_rows)
-            # Match store_kg / delete_notebook_kg so the in-memory rustworkx graph
-            # (and PPR/federated caches) pick up the new edges.
-            self._invalidate_unified_cache(notebook_id)
-            self._mark_unified_kg_dirty(notebook_id)
 
         now_connected = connected | {
             oid for r in new_rows for oid in (r[3], r[4])
         }
         isolated_after = sum(1 for n in nodes if n["id"] not in now_connected)
-        return {
-            "isolated_before": isolated_before,
-            "edges_added": len(new_rows),
-            "isolated_after": isolated_after,
-        }
+        return (isolated_before, len(new_rows), isolated_after)
+
+    # --- relink background job (per-notebook single flight) -------------------
+
+    def start_notebook_relink(self, notebook_id: str) -> dict:
+        """Claim the notebook's relink slot; raise if one is already running.
+
+        Claiming happens BEFORE the worker thread starts (the route submits right
+        after), so two clicks racing on the same notebook cannot both get through:
+        the loser sees the claim the winner already published and gets 409.
+        """
+        self.get_notebook(notebook_id)  # KeyError if missing
+        with self.relink_lock:
+            current = self.relink_jobs.get(notebook_id)
+            if current is not None and current["status"] == "running":
+                raise KgRelinkAlreadyRunning(notebook_id)
+            job = {
+                "job_id": self._new_id("rlj"),
+                "notebook_id": notebook_id,
+                "status": "running",
+                "isolated_before": 0,
+                "edges_added": 0,
+                "isolated_after": 0,
+            }
+            self.relink_jobs[notebook_id] = job
+            return dict(job)
+
+    def notebook_relink_status(self, notebook_id: str) -> dict:
+        """Latest relink state for this notebook, or ``idle`` when none is known.
+
+        ``idle`` is the honest answer for both "never ran here" and "the process
+        that ran it restarted" — the browser stops its bounded poll and refreshes
+        rather than waiting on a job nobody is running.
+        """
+        self.get_notebook(notebook_id)  # KeyError if missing
+        with self.relink_lock:
+            job = self.relink_jobs.get(notebook_id)
+            if job is None:
+                return {
+                    "job_id": "",
+                    "notebook_id": notebook_id,
+                    "status": "idle",
+                    "running": False,
+                    "isolated_before": 0,
+                    "edges_added": 0,
+                    "isolated_after": 0,
+                }
+            return {**job, "running": job["status"] == "running"}
+
+    def _settle_notebook_relink(
+        self, notebook_id: str, job_id: str, status: str, stats: dict | None = None
+    ) -> None:
+        """Publish this job's terminal state — unless a newer job already owns the
+        slot (then the older worker must not clobber it)."""
+        with self.relink_lock:
+            job = self.relink_jobs.get(notebook_id)
+            if job is None or job["job_id"] != job_id:
+                return
+            job["status"] = status
+            if stats:
+                job["isolated_before"] = int(stats.get("isolated_before", 0))
+                job["edges_added"] = int(stats.get("edges_added", 0))
+                job["isolated_after"] = int(stats.get("isolated_after", 0))
+
+    def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict:
+        """Background entry point: relink, then settle the claim on EVERY path.
+
+        ``BaseException`` — not ``Exception``: KeyboardInterrupt / SystemExit
+        inherit from it, and a claim left in ``running`` would refuse every later
+        relink for the rest of the process's life (the same failure mode the
+        durable KG-build guard is documented against).
+        """
+        try:
+            stats = self.relink_notebook_kg(notebook_id)
+        except BaseException:
+            self._settle_notebook_relink(notebook_id, job_id, "failed")
+            raise
+        self._settle_notebook_relink(notebook_id, job_id, "succeeded", stats)
+        return stats
+
+    def fail_notebook_relink_submission(
+        self, notebook_id: str, job_id: str
+    ) -> None:
+        """Release the claim when the worker thread never started."""
+        self._settle_notebook_relink(notebook_id, job_id, "failed")
 
     # --- Concept-cluster writes ---------------------------------------------
 
@@ -1858,9 +2038,25 @@ class KnowledgeLifecycleService:
             try:
                 result["relink"] = self.relink_notebook_kg(notebook_id)
             except Exception:  # noqa: BLE001 - relink is fail-open here
+                # Still fail-open (a successful extraction must not be reported as
+                # failed because the deterministic tail could not run) — but no
+                # longer SILENT. The whole-notebook shape used to raise MemoryError
+                # here and get swallowed whole: the build reported success while the
+                # process was already dying, and nothing in the event log said so.
                 self.event_log.logger.exception(
                     "build_notebook_kg: relink failed for %s", notebook_id
                 )
+                try:
+                    # Body-free by contract: kind + notebook id only. The traceback
+                    # belongs in the log file, never in the event stream.
+                    self.event_log.emit({
+                        "kind": "kg_relink_failed",
+                        "notebook_id": notebook_id,
+                    })
+                except Exception:  # noqa: BLE001 - telemetry never breaks the build
+                    self.event_log.logger.exception(
+                        "failed to emit kg_relink_failed for %s", notebook_id
+                    )
         if enqueue_fold:
             self.scale_artifacts.maybe_enqueue_fold(notebook_id)
 

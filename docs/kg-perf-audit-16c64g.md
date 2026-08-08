@@ -25,7 +25,7 @@
 | P1-3 | 同上 :3897(Tier2 桥接) | `kg_incremental_tier2_max_entities=50000` → 49万库上 Tier2 **静默失能**(跨文档桥接不再发生,功能性回归非纯性能) | 用 scale index 的 hnsw 做桥接候选(替代全量向量加载),阈值语义显式化 |
 | P1-4 | `copy_notebook`:1440 | 全部 9 张表 fetchall+重插在**单个全局写锁事务**里 + 2 个全表 FTS 全删全建(:1559) | 分表分批事务(仿 store_kg CHUNK=1000);FTS 增量插入新 id;大库拷贝后台化 |
 | P1-5 | `_write_lock`:302(进程级全局写锁) | 所有 notebook 的写互相排队;长事务(rebuild/copy)期间全站写阻塞,40 线程池可被写等待耗尽 | per-notebook 写锁 |
-| P1-6 | `relink_notebook_kg`:3592(CLI kg 阶段必经 + `/kg/relink` 端点同步跑) | 全库对象+关系载入解析,即使本轮只新增几个来源;端点还占请求线程 | 按本轮新来源范围 relink(本就 intra-source);端点后台化 |
+| P1-6 ✅ | `relink_notebook_kg`:3592(CLI kg 阶段必经 + `/kg/relink` 端点同步跑) | 全库对象+关系载入解析,即使本轮只新增几个来源;端点还占请求线程 | **已修**:改按来源 keyset 分页驱动(峰值内存 = 单来源,不再是整库 payload+evidence),端点后台化并加笔记本级单飞 + `GET /kg/relink/status` 完成信号 |
 | P1-7 | `backfill_kg_embeddings` 脚本:57 + `backfill_node_embeddings`(batch_ingest.py:511) | 每轮全量载 payload 再 Python 差集,×80 轮 | 改 NOT EXISTS SQL 只取缺失行(同文件已有正确范例) |
 
 ## P2 — 卫生项(索引缺失/N+1/无界缓存/设计债)
