@@ -159,13 +159,20 @@ def complete_isolated_edges(
     # 列表,与触发 rule-2 的具体 N 无关,故按 source 只排一次;`m["id"] != n["id"]`
     # 的自身排除挪到下面循环内对这份预排序表做过滤(过滤不改变相对顺序,
     # 与先排除再排序等价)。
-    concept_cands_by_source: Dict[str, List[Dict]] = {
-        sid: sorted(
-            (m for m in siblings if m["object_type"] == "concept"),
-            key=lambda m: (-len(m.get("name") or ""), m["id"]),
-        )
-        for sid, siblings in by_source.items()
-    }
+    # 与 elem_ids 同理改惰性:受影响 source 里可能没有任何节点真走到 rule-2
+    # (孤立的全是 concept/procedure、enable_name_match=False、或 rule-1 已全部
+    # 接上),届时为它扫描+排序全部 concept 是纯白付(codex R2 P2)。
+    concept_cands_by_source: Dict[str, List[Dict]] = {}
+
+    def _cands_for(sid: str) -> List[Dict]:
+        cached = concept_cands_by_source.get(sid)
+        if cached is None:
+            cached = sorted(
+                (m for m in by_source.get(sid, ()) if m["object_type"] == "concept"),
+                key=lambda m: (-len(m.get("name") or ""), m["id"]),
+            )
+            concept_cands_by_source[sid] = cached
+        return cached
 
     # rule-2 pattern:改成首次真正被拿去 .search() 时才编译并缓存(而不是像
     # elem_ids/候选表那样对受影响 source 内全部 concept 无条件预算)——一个
@@ -270,7 +277,7 @@ def complete_isolated_edges(
             # 概念名长者优先(更具体),稳定 tie-break 用 id;取预排序表按本节点
             # 自身 id 过滤,过滤不改变剩余元素的相对顺序,与逐 N 现排等价。
             concept_cands = (
-                m for m in concept_cands_by_source.get(n.get("source_id"), ())
+                m for m in _cands_for(n.get("source_id"))
                 if m["id"] != n["id"]
             )
             for m in concept_cands:
