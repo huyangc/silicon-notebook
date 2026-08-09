@@ -398,6 +398,132 @@ def test_h4_h5_pass_active_lease_snapshot_to_counts(repo):
     assert seen["elem"] == {"src-embedding"}
 
 
+# ----------------------------------------- H4/H5 memo(审计批4)
+def _counting_service(repo, **overrides):
+    """记录 H4/H5 计数 seam 的每次调用(nb, 传进去的活跃租约快照)。"""
+    seen: list = []
+    svc = _service(
+        repo,
+        count_missing_chunk_vectors=(
+            lambda nb, exclude: seen.append(("chunk", nb, frozenset(exclude))) or 3
+        ),
+        count_missing_element_vectors=(
+            lambda nb, exclude: seen.append(("elem", nb, frozenset(exclude))) or 5
+        ),
+        **overrides,
+    )
+    return svc, seen
+
+
+def test_h45_counts_memoized_so_polling_stops_re_running_the_anti_joins(repo):
+    """看板打开 + 修复期间 ~8s 轮询,每次都要跑两条全表 anti-join(element 侧还要逐行
+    TRIM/btrim,PG 上强制读 TOAST)。体检是诊断面、不是检索热路径,故按
+    (活跃租约快照, TTL) memo。
+
+    变异锚点:把 ``_h45_missing_vector_counts`` 里的缓存命中分支删掉(每次直算)→
+    ``len(seen) == 2`` 红。"""
+    svc, seen = _counting_service(repo)
+    first = svc.run("nb-x")
+    second = svc.run("nb-x")
+    assert len(seen) == 2                        # 只有第一次真的查了(chunk + element 各一次)
+    assert _check(first, "H4").count == 3 and _check(first, "H5").count == 5
+    assert _check(second, "H4").count == 3 and _check(second, "H5").count == 5
+
+
+def test_h45_memo_is_scoped_per_notebook(repo):
+    """缓存按 notebook 分槽,别的库不会串到本库的计数上。"""
+    svc, seen = _counting_service(repo)
+    svc.run("nb-1")
+    svc.run("nb-2")
+    svc.run("nb-1")
+    assert [nb for (_k, nb, _a) in seen] == ["nb-1", "nb-1", "nb-2", "nb-2"]
+
+
+def test_h45_memo_key_includes_the_active_lease_snapshot(repo):
+    """⚠ 红线:**排除活跃租约的口径逐字不变**。缓存键含这次的租约快照,租约一变即失配、
+    必然重算——绝不会把某个源在途时算出的数在租约释放后继续端出去。
+
+    变异锚点:把缓存键里的 ``frozenset(active)`` 去掉(只按 notebook + TTL 缓存)→
+    第二次 run 会命中旧条目,``len(seen) == 4`` 红。"""
+    leases = [set()]
+    svc, seen = _counting_service(repo, active_source_ids=lambda: set(leases[0]))
+    svc.run("nb-x")
+    leases[0] = {"src-embedding"}
+    svc.run("nb-x")
+    assert len(seen) == 4                        # 租约变了 → 重算,没有复用
+    assert seen[0][2] == frozenset()
+    assert seen[2][2] == frozenset({"src-embedding"})
+
+
+def test_h45_memo_single_slot_so_a_finished_repair_is_visible_at_once(repo):
+    """单槽(每 notebook 只留最近一条)是刻意的:点「补齐向量」→ job 持源锁(租约变)→
+    job 结束(租约变回空)这条时间线上,中间那次已经把修复前 active=∅ 的旧条目覆盖掉了,
+    最后一次轮询必然重算、立刻看到降下来的计数。多槽缓存会在这里端出修复前的数、
+    把「补齐中…」的忙碌态多按住一个 TTL。
+
+    变异锚点:把单槽换成 ``dict[(nb, active_key)]`` 的多槽缓存 → 第三次 run 命中修复前的
+    条目,``len(seen) == 6`` 红。"""
+    leases = [set()]
+    svc, seen = _counting_service(repo, active_source_ids=lambda: set(leases[0]))
+    svc.run("nb-x")                              # 修复前:active=∅
+    leases[0] = {"src-a"}
+    svc.run("nb-x")                              # 补齐 job 持锁中
+    leases[0] = set()
+    svc.run("nb-x")                              # job 结束:必须重算,不得复用第一条
+    assert len(seen) == 6
+
+
+def test_h45_memo_expires_after_ttl(repo, monkeypatch):
+    """租约完全不动时(如离线 CLI 在别的进程里写向量)靠 TTL 兜底:至多陈旧
+    ``_H45_CACHE_TTL`` 秒。这是登记接受的口径——体检是诊断面。
+
+    变异锚点:去掉 TTL 判定(只比租约快照)→ 时钟推过 TTL 后仍命中,``len(seen) == 4`` 红。"""
+    import app.services.checkup as checkup_mod
+
+    clock = [1000.0]
+    monkeypatch.setattr(checkup_mod.time, "monotonic", lambda: clock[0])
+    svc, seen = _counting_service(repo)
+    svc.run("nb-x")
+    svc.run("nb-x")
+    assert len(seen) == 2                        # TTL 内命中
+    clock[0] += checkup_mod._H45_CACHE_TTL + 1
+    svc.run("nb-x")
+    assert len(seen) == 4                        # 超 TTL → 重算
+
+
+def test_h45_memo_is_lru_bounded(repo, monkeypatch):
+    """进程内缓存有界(同 H7/H8):超上界淘汰最久未访问的 notebook。"""
+    import app.services.checkup as checkup_mod
+
+    monkeypatch.setattr(checkup_mod, "_H45_CACHE_MAX", 2)
+    svc, seen = _counting_service(repo)
+    svc.run("nb-1")
+    svc.run("nb-2")
+    svc.run("nb-1")                              # 命中 → move_to_end,nb-1 成最近
+    assert [nb for (k, nb, _a) in seen if k == "chunk"] == ["nb-1", "nb-2"]
+    svc.run("nb-3")                              # 越界 → 淘汰最久未访问的 nb-2
+    svc.run("nb-2")                              # 已被淘汰 → 重算
+    assert [nb for (k, nb, _a) in seen if k == "chunk"] == [
+        "nb-1", "nb-2", "nb-3", "nb-2",
+    ]
+
+
+def test_h45_count_failure_is_not_cached(repo):
+    """计数抛错整体上抛(与改动前一致),缓存里不留半份结果——下次仍现算。"""
+    boom = [True]
+
+    def _chunk(nb, exclude):
+        if boom[0]:
+            raise RuntimeError("count boom")
+        return 0
+
+    svc = _service(repo, count_missing_chunk_vectors=_chunk)
+    with pytest.raises(RuntimeError, match="count boom"):
+        svc.run("nb-x")
+    boom[0] = False
+    assert _check(svc.run("nb-x"), "H4").count == 0   # 没被失败结论粘住
+
+
 # --------------------------------------------------------------------- H7
 def test_h7_hit_stale(repo):
     svc = _service(repo, scale_index_state=lambda nb: "stale")
@@ -719,3 +845,173 @@ def test_probe_detects_ann_entry_count_below_labels(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(scale_index_mod, "load_scale_index", lambda d: stub)
     assert probe_scale_index_integrity(str(scale_dir)) == 1
+
+
+# --------------------------------------------- backfill 分页(审计批4)
+def test_backfill_page_rows_is_a_multiple_of_embed_batch_size(repo):
+    """页大小必须是 ``embed_batch_size`` 的整数倍(至少一整批),**对任意配置成立**。
+
+    这是「embedder 调用次数与内容跟不分页时逐位相同」的机制性前提:embed_*_batch 把收到的
+    行按 embed_batch_size 切成一次次调用,页大小不是整数倍的话,每页末尾都会多出一个残批,
+    调用次数与每次的文本都会变。
+
+    ⚠ 必须扫**不整除**的 batch size:仓库默认 (500, 10) 恰好整除,只测默认值的话
+    ``return _BACKFILL_PAGE_ROWS`` 这个变异会静默通过。
+
+    变异锚点:``_backfill_page_rows`` 改成 ``return _BACKFILL_PAGE_ROWS`` → 32/64/700 三档红。"""
+    from app.api import source_routes
+
+    class _FakeSettings:
+        def __init__(self, size):
+            self.embed_batch_size = size
+
+    class _FakeRuntime:
+        def __init__(self, size):
+            self.settings = _FakeSettings(size)
+
+    class _FakeRepo:
+        def __init__(self, size):
+            self._runtime = _FakeRuntime(size)
+
+    for size in (1, 7, 10, 32, 64, 300, 700):
+        page = source_routes._backfill_page_rows(_FakeRepo(size))
+        assert page % size == 0, f"page {page} not a multiple of batch size {size}"
+        assert page >= size                      # 至少一整批,绝不退化成 0
+    # 真 repo 的实际配置同样成立(默认 500/10)。
+    real_size = repo._runtime.settings.embed_batch_size
+    assert source_routes._backfill_page_rows(repo) % real_size == 0
+
+
+def test_backfill_job_pages_within_the_source_lock(repo, monkeypatch):
+    """审计批4:锁内的读改走 keyset 分页版。无界的 ``missing_element_embedding_rows`` 会把
+    该源每一行的全文一次性读进内存(2 万元素的手册就是几百 MB),而这条命令的用途恰恰是修大库。
+
+    钉四件事:①生产路径**零次**调用无界 rows 版;②游标严格前进、每页 limit 就是页大小;
+    ③被处理的 element 集合与 rows 版逐一致(判据没变);④嵌入失败/不落库也照样收敛
+    (spy 不写向量,行仍缺向量,循环仍靠游标终止)。
+
+    变异锚点:把调用方换回 ``mnt.missing_element_embedding_rows(...)`` → 无界版的
+    AssertionError 直接把这条打红。"""
+    from app.api import source_routes
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=25)
+    mnt = repo.maintenance
+    # 参考集合:无界 rows 版判定的待补行(改动前生产路径读的就是它)。
+    reference = {r["id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=sid)}
+    assert len(reference) == 25
+
+    # 只配 element 侧,chunk 侧整段短路(不发现、不读页)。
+    monkeypatch.setattr(repo, "configured", lambda wid: wid == "source_element_embedding")
+    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)   # → 页 = 10 行(1 整批)
+
+    pages: list = []
+    real_page = mnt.missing_element_embedding_page
+
+    def spy_page(notebook_id, *, after_id="", limit=500, only_source_id=None):
+        rows = real_page(
+            notebook_id, after_id=after_id, limit=limit, only_source_id=only_source_id
+        )
+        pages.append((after_id, limit, only_source_id, [r["id"] for r in rows]))
+        return rows
+
+    monkeypatch.setattr(mnt, "missing_element_embedding_page", spy_page)
+    monkeypatch.setattr(
+        mnt, "missing_element_embedding_rows",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("生产路径不得再调无界 rows 版")
+        ),
+    )
+    embedded: list = []
+    monkeypatch.setattr(
+        mnt, "embed_elements_batch",
+        lambda notebook_id, items: embedded.append([it["element_id"] for it in items])
+        or len(items),
+    )
+    monkeypatch.setattr(mnt, "embed_chunks_batch", lambda notebook_id, items: None)
+
+    source_routes._backfill_vectors_job(repo, nb.id)
+
+    # ① 分页读:25 行 / 页 10 → 3 页(最后一页是短页,直接结束,不再多发一次空查询),
+    #    每一页都限定在本源上。
+    assert [len(ids) for (_a, _l, _s, ids) in pages] == [10, 10, 5]
+    assert all(only == sid for (_a, _l, only, _ids) in pages)
+    assert all(limit == 10 for (_a, limit, _s, _ids) in pages)
+    # ② 游标严格前进(不回头、不空转)。
+    cursors = [after for (after, _l, _s, _ids) in pages]
+    assert cursors[0] == "" and cursors == sorted(cursors) and len(set(cursors)) == len(cursors)
+    # ③ 处理到的行与 rows 版逐一致。
+    assert {eid for page in embedded for eid in page} == reference
+    # ④ 每页一次 embed 调用,页大小即批大小 → 调用切分与不分页时相同。
+    assert [len(page) for page in embedded] == [10, 10, 5]
+
+
+def test_backfill_job_pages_chunks_too(repo, monkeypatch):
+    """chunk 侧同款(与 element 侧对称):走分页版、不碰无界 rows 版。
+
+    这里刻意让行数**恰好是页大小的整数倍**(20 行 / 页 10):最后一页是满页,短页早退
+    走不了,必须靠下一次空查询终止。element 侧那条覆盖的是短页早退分支——两条合起来把
+    「短页 break」的两侧边界都钉住(off-by-one 会让其中一条挂死或漏行)。"""
+    from app.api import source_routes
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=0)
+    with repo._write() as db:
+        for i in range(20):
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) VALUES (?,?,?,?,?)",
+                (f"ch-{sid}-{i:04d}", nb.id, sid, f"chunk {i}", _NOW),
+            )
+    mnt = repo.maintenance
+    reference = {r["id"] for r in mnt.missing_chunk_embedding_rows(nb.id, only_source_id=sid)}
+    assert len(reference) == 20
+
+    monkeypatch.setattr(repo, "configured", lambda wid: wid == "chunk_embedding")
+    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)
+    monkeypatch.setattr(
+        mnt, "missing_chunk_embedding_rows",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("生产路径不得再调无界 rows 版")
+        ),
+    )
+    embedded: list = []
+    monkeypatch.setattr(
+        mnt, "embed_chunks_batch",
+        lambda notebook_id, items: embedded.append([it["_oid"] for it in items]),
+    )
+
+    source_routes._backfill_vectors_job(repo, nb.id)
+
+    assert [len(page) for page in embedded] == [10, 10]   # 满页×2,再一次空查询终止
+    assert {cid for page in embedded for cid in page} == reference
+
+
+def test_backfill_page_scoped_to_source_matches_unbounded_rows(repo):
+    """分页版的判据与无界 rows 版逐字一致——只是多了 keyset 窗口和 ORDER BY。
+    (隐藏合成源 memory/knowhow 的排除、TRIM 非空、NOT EXISTS 三条都在两边同款。)"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    a = _seed_source(repo, nb.id, source_type="document", parse_status="extracted", n_elements=7)
+    b = _seed_source(repo, nb.id, source_type="document", parse_status="extracted", n_elements=3)
+    _seed_source(repo, nb.id, source_type="knowhow", parse_status="extracted", n_elements=4)
+    _seed_source(repo, nb.id, source_type="memory", parse_status="extracted", n_elements=5)
+    mnt = repo.maintenance
+
+    def _drain(only_source_id):
+        seen, after = [], ""
+        while True:
+            rows = mnt.missing_element_embedding_page(
+                nb.id, after_id=after, limit=3, only_source_id=only_source_id
+            )
+            if not rows:
+                return seen
+            seen.extend(r["id"] for r in rows)
+            after = rows[-1]["id"]
+
+    assert set(_drain(a)) == {
+        r["id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=a)
+    }
+    assert set(_drain(b)) == {
+        r["id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=b)
+    }
+    # 不传 only_source_id 时仍是整库口径,且隐藏合成源照旧被排除。
+    assert set(_drain(None)) == {r["id"] for r in mnt.missing_element_embedding_rows(nb.id)}

@@ -424,6 +424,21 @@ def reparse_sources(
     return RepairScheduledResult(scheduled=scheduled)
 
 
+_BACKFILL_PAGE_ROWS = 500
+"""每源分页读取的目标行数(会向下取整到 embed_batch_size 的整数倍,见 _backfill_page_rows)。"""
+
+
+def _backfill_page_rows(repo) -> int:
+    """把 ``_BACKFILL_PAGE_ROWS`` 向下取整到 ``embed_batch_size`` 的整数倍(至少一整批)。
+
+    ⚠ 取整不是美学:``embed_chunks_batch`` / ``embed_elements_batch`` 都把收到的行按
+    ``embed_batch_size`` 切成一次次 embedder 调用。页大小若不是它的整数倍,每页末尾就会
+    多出一个不足整批的调用——**调用次数与每次调用的文本都会变**,而本次改动只许动 I/O
+    形状。取整之后,把各页的批边界拼起来与「一次性喂全部行」逐字相同。"""
+    size = max(1, int(repo._runtime.settings.embed_batch_size))
+    return max(size, (_BACKFILL_PAGE_ROWS // size) * size)
+
+
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
     """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。EMBED 未配则跳过。
 
@@ -435,7 +450,19 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
     reparse 换掉——彻底关掉「快照后才开始 reparse」的残留窗口。best-effort:一源失败不拦其余。
 
     源发现只用**轻量 DISTINCT source_id 查询**、且只查已配的 workload(codex 第2轮 P1:大库上
-    把每行全文物化进内存仅为收 source_id 会 GB 级/OOM,还会白扫未配的那侧)。"""
+    把每行全文物化进内存仅为收 source_id 会 GB 级/OOM,还会白扫未配的那侧)。
+
+    ⚠ 锁内的读改走 **keyset 分页版**(审计批4):无界的 ``missing_*_embedding_rows`` 会把该源
+    每一行的全文一次性读进内存(2 万元素的手册就是几百 MB,而这条命令的用途恰恰是修大库)。
+    分页只改 I/O 形状,写入的向量集合逐位不变:
+      - 判据(NOT EXISTS / TRIM 非空 / 排除 memory·knowhow)与 rows 版逐字一致,只加 keyset 窗口;
+      - 游标按 id 严格前进,每行**恰好被尝试一次**——与不分页时相同(嵌入失败的行两种写法都
+        是本轮跳过、下轮再补);
+      - 页大小是 ``embed_batch_size`` 的整数倍(见 ``_backfill_page_rows``),故 embedder 的
+        调用次数与每次的文本与不分页时逐字相同。
+    发现查询 ``missing_*_vector_source_ids`` 保持原样:它只投影 DISTINCT source_id、不物化正文,
+    其 btrim/TRIM 全表评估是**判据本身**(与 rows/count/page 三处逐字一致),没有索引可依托,
+    分页驱动也省不掉这一次扫描——登记为已知代价,不在本次改动范围。"""
     mnt = repo.maintenance
     ingestion = repo._runtime.source_ingestion
     chunk_ok = repo.configured("chunk_embedding")
@@ -449,26 +476,49 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
         sources |= set(mnt.missing_chunk_vector_source_ids(notebook_id))
     if elem_ok:
         sources |= set(mnt.missing_element_vector_source_ids(notebook_id))
+    page = _backfill_page_rows(repo)
     for source_id in sources:
         with ingestion.hold_source_chunk_lock(source_id):
             try:
                 if chunk_ok:
-                    rows = mnt.missing_chunk_embedding_rows(notebook_id, only_source_id=source_id)
-                    if rows:
+                    after = ""
+                    while True:
+                        rows = mnt.missing_chunk_embedding_page(
+                            notebook_id,
+                            after_id=after,
+                            limit=page,
+                            only_source_id=source_id,
+                        )
+                        if not rows:
+                            break
+                        after = str(rows[-1]["id"])   # 严格前进:已尝试过的行不再回头
                         mnt.embed_chunks_batch(
                             notebook_id,
                             [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows],
                         )
+                        if len(rows) < page:
+                            break     # 短页=已到尾,省掉一次纯为确认结束的空查询
             except Exception:  # noqa: BLE001 — 后台 job 自负错误,一源失败不拦其余
                 pass
             try:
                 if elem_ok:
-                    rows = mnt.missing_element_embedding_rows(notebook_id, only_source_id=source_id)
-                    if rows:
+                    after = ""
+                    while True:
+                        rows = mnt.missing_element_embedding_page(
+                            notebook_id,
+                            after_id=after,
+                            limit=page,
+                            only_source_id=source_id,
+                        )
+                        if not rows:
+                            break
+                        after = str(rows[-1]["id"])
                         mnt.embed_elements_batch(
                             notebook_id,
                             [{"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]} for r in rows],
                         )
+                        if len(rows) < page:
+                            break     # 短页=已到尾,省掉一次纯为确认结束的空查询
             except Exception:  # noqa: BLE001
                 pass
 

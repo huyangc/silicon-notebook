@@ -179,12 +179,16 @@ class UnifiedKgStore:
     def cluster_evidence_rows(
         db: Any, notebook_id: str, run_id: str, seeds,
     ):
+        """Evidence blobs for a set of cluster seeds, each tagged with the ``seed``
+        it came from (mirrors the SQLite projection). The concept-description
+        stage batches many canonicals' seeds into one call and regroups in
+        memory, which needs the seed on every row."""
         values = list(seeds)
         if not values:
             return []
         ph = ",".join("%s" for _ in values)
         return db.execute(
-            f"SELECT k.evidence::text AS evidence FROM knowledge_objects k "
+            f"SELECT s.seed AS seed, k.evidence::text AS evidence FROM knowledge_objects k "
             f"JOIN kg_cluster_scratch s ON s.object_id=k.id "
             f"WHERE s.notebook_id=%s AND s.run_id=%s AND s.seed IN ({ph})",
             (notebook_id, run_id, *values),

@@ -336,6 +336,94 @@ def _spy_invalidate(service, monkeypatch):
     return invalidated
 
 
+def test_embed_source_pages_before_mapping(tmp_path, monkeypatch):
+    """审计批4:``embed_source`` 是四个 embedder 里最后一个不分页的——它把整来源的
+    batch 一次性喂给 ``_map_embedding_batches``,21k 元素的来源 ≈670MB 向量同时驻留,
+    再乘上传并发。与三个 sibling 同款:页在**喂进去之前**切,每次 map 调用至多一页。
+
+    变异锚点(两个,删除式与移动式各一):
+      - 把分页循环改回 ``self._map_embedding_batches(_embed_only, batches, ...)`` 的一次性
+        形态 → ``max(calls) <= 2`` 红;
+      - 把 ``replace_element_vectors`` **移出**页循环(攒满再一次写)→ 映射仍是分页的、
+        上面那条照旧绿,但每页落库那条(``len(flushes) >= 3``)红——向量还是全量驻留了。"""
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")   # page = 2 batches
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(r, nb.id, 55)                  # 6 batches / page 2
+    _bind(r, "source_element_embedding", _RecordingEmbedder(dim=8))
+    calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
+    invalidated = _spy_invalidate(r._runtime.source_embedding, monkeypatch)
+    flushes: list = []
+    real_replace = r._runtime.embedding_store.replace_element_vectors
+
+    def spy_replace(source_id, notebook_id, rows, *, created_at):
+        flushes.append(len(rows))
+        return real_replace(source_id, notebook_id, rows, created_at=created_at)
+
+    monkeypatch.setattr(
+        r._runtime.embedding_store, "replace_element_vectors", spy_replace
+    )
+
+    r._embed_source(sid)
+
+    assert len(calls) >= 3                                            # paged, not one shot
+    assert max(calls) <= 2                                            # each map call ≤ one page
+    # 边算边写:每页落一次库,活着的向量被限制在一页之内(不是攒满整来源再写一次)。
+    assert len(flushes) >= 3 and max(flushes) <= 2 * 10               # ≤ 一页(2 批 × 10)
+    assert sum(flushes) == 55
+    assert _count(
+        r, "SELECT COUNT(*) FROM element_embeddings WHERE source_id=?", (sid,)
+    ) == 55                                                          # every vector still lands
+    assert (nb.id, "element_embeddings") in invalidated               # matrix cache dropped after paged re-embed
+
+
+def _embed_source_run(tmp_path, monkeypatch, *, commit_batches, n=55):
+    """跑一次 embed_source,回 (每次 embedder 调用收到的 texts, 落库的 (id, 向量字节))。"""
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES=commit_batches)
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(r, nb.id, n)
+    per_call: list = []
+
+    class _CallRecordingEmbedder(_RecordingEmbedder):
+        def embed_texts(self, texts):
+            per_call.append(list(texts))
+            return super().embed_texts(texts)
+
+    _bind(r, "source_element_embedding", _CallRecordingEmbedder(dim=8))
+    r._embed_source(sid)
+    with r._connect() as db:
+        stored = [
+            # source id 是随机的,只留 el-<sid>-<idx> 的序号部分,让两次跑法可比。
+            (row["element_id"].rsplit("-", 1)[-1], bytes(row["vector"]))
+            for row in db.execute(
+                "SELECT element_id, vector FROM element_embeddings "
+                "WHERE source_id=? ORDER BY element_id", (sid,)
+            ).fetchall()
+        ]
+    return per_call, stored
+
+
+def test_embed_source_paging_keeps_calls_and_vectors_bit_identical(tmp_path, monkeypatch):
+    """差分钉:分页只改 I/O 形状。一页装得下全部批(=分页前的行为)与切成很多页两种跑法,
+    **embedder 的调用序列(次数 + 每次的文本)** 与 **落库的向量字节** 必须逐位相同。
+
+    页大小以「批」计,所以页边界永远落在 ``embed_batch_size`` 的批边界上——这是调用内容
+    不变的机制性理由,不是巧合。
+
+    调用**之间**的先后按 batch 内容排序后比较:两种跑法都把一页内的批并发交给线程池,
+    到达顺序本来就由调度决定(分页前也是),不属于被钉的契约;被钉的是「哪些文本被切进
+    了哪一次调用」。"""
+    one_page, one_rows = _embed_source_run(
+        tmp_path / "a", monkeypatch, commit_batches="1000"
+    )
+    many_pages, many_rows = _embed_source_run(
+        tmp_path / "b", monkeypatch, commit_batches="1"
+    )
+    assert len(one_page) == 6 and len(many_pages) == 6      # 55 元素 / 每批 10 → 6 次调用,两种跑法一致
+    assert sorted(one_page) == sorted(many_pages)            # 每次调用的文本切分逐位相同
+    assert [eid for eid, _ in one_rows] == [eid for eid, _ in many_rows]
+    assert [vec for _, vec in one_rows] == [vec for _, vec in many_rows]
+
+
 def test_embed_objects_batch_pages_before_mapping(tmp_path, monkeypatch):
     r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")   # page = 2 batches
     nb = r.create_notebook(NotebookCreate(name="nb"))

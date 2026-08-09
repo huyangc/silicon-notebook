@@ -2026,10 +2026,20 @@ class BatchMaintenancePort(Protocol):
         error_message: str = "",
     ) -> None: ...
     def missing_chunk_embedding_page(
-        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        only_source_id: str | None = None,
     ) -> list[dict[str, object]]: ...
     def missing_element_embedding_page(
-        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        only_source_id: str | None = None,
     ) -> list[dict[str, object]]: ...
     def embed_chunks_batch(self, notebook_id: str, items: list[dict[str, object]]) -> None: ...
     def embed_elements_batch(self, notebook_id: str, items: list[dict[str, object]]) -> int: ...

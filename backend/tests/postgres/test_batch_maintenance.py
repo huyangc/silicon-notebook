@@ -521,6 +521,34 @@ def test_source_target_pages_use_c_keysets_and_preserve_retry_semantics(
             notebook_id, after_id=first_element[-1]["id"], limit=1
         )
     ] == ["el-src-a"]
+    # only_source_id(审计批4):交互式 backfill 在源的分块锁内按源分页读。作用域下推到
+    # SQL,与无界 rows 版的 only_source_id 口径逐一致(两后端同款)。
+    assert [
+        row["id"]
+        for row in maintenance.missing_chunk_embedding_page(
+            notebook_id, limit=50, only_source_id="src-a"
+        )
+    ] == ["ck-src-a"]
+    assert [
+        row["id"]
+        for row in maintenance.missing_element_embedding_page(
+            notebook_id, limit=50, only_source_id="src-a"
+        )
+    ] == ["el-src-a"]
+    assert maintenance.missing_element_embedding_page(
+        notebook_id, limit=50, only_source_id="src-nonexistent"
+    ) == []
+    assert {
+        row["id"]
+        for row in maintenance.missing_element_embedding_page(
+            notebook_id, limit=50, only_source_id="src-a"
+        )
+    } == {
+        row["id"]
+        for row in maintenance.missing_element_embedding_rows(
+            notebook_id, only_source_id="src-a"
+        )
+    }
     with pytest.raises(ValueError, match="positive"):
         maintenance.missing_chunk_embedding_page(notebook_id, limit=0)
 

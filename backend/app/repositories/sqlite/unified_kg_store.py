@@ -204,12 +204,17 @@ class UnifiedKgStore:
     def cluster_evidence_rows(
         db: sqlite3.Connection, notebook_id: str, run_id: str, seeds,
     ):
+        """Evidence blobs for a set of cluster seeds, each tagged with the ``seed``
+        it came from. The concept-description stage asks for MANY canonicals'
+        seeds in one call and regroups the rows in memory (one round trip per
+        ~300 canonicals instead of one per canonical), which is only possible
+        because the seed rides along in the projection."""
         values = list(seeds)
         if not values:
             return []
         ph = ",".join("?" for _ in values)
         return db.execute(
-            f"SELECT k.evidence AS evidence FROM knowledge_objects k "
+            f"SELECT s.seed AS seed, k.evidence AS evidence FROM knowledge_objects k "
             f"JOIN kg_cluster_scratch s ON s.object_id=k.id "
             f"WHERE s.notebook_id=? AND s.run_id=? AND s.seed IN ({ph})",
             (notebook_id, run_id, *values),

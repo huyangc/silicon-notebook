@@ -14,8 +14,9 @@
 代价模型(已在 master 核实,承 P1.5 可判定性核查):
 - H2/H3:直查(索引覆盖)+ 内存活跃租约的 Python 后置减法(在途解析/reparse 的源瞬时缺
   elements/chunks 属正常、非损坏)。
-- H4/H5:直连 COUNT——向量 embed 成功路径**不 bump kg_mutation_seq**,折进 seq-memo 会一直
-  报旧值,故每次直读(per-nb 索引查询,可接受)。
+- H4/H5:两条 anti-join COUNT,按 **(活跃租约快照, ≤30s TTL)** 做进程内单槽 memo(见
+  ``_h45_missing_vector_counts`` 的完整口径论证)。**不**能折进 kg_mutation_seq——向量 embed
+  成功路径不 bump 它,按 seq 记忆化会一直报旧值(修复完了计数也不降,比陈旧更糟)。
 - H6:已 memo 在 kg_mutation_seq 上(QueryStore.visible_pending_kg_source_count——排除
   memory/knowhow 合成源,与 H2/H3 及看板「知识图谱」行同口径),O(1)。
 - H7:读索引状态的 `state` 字段。按**廉价签名**(version_signal + manifest mtime + building/queued,
@@ -57,6 +58,11 @@ _H8_CACHE_TTL = 300.0
 # H7 memo 的有界化(同 H8:LRU、进程内、重启即空)。H7 不需 TTL:签名含 manifest mtime → 任何
 # 产物重写都失效,不像 H8 的 (exists,version) 身份会漏「探后被外部截断」而需 TTL 兜底。
 _H7_CACHE_MAX = 256
+# H4/H5 memo 的有界化(同 H7/H8:LRU、进程内、重启即空)。
+_H45_CACHE_MAX = 256
+# H4/H5 memo 的存活上限。体检是诊断面(不在检索热路径上),30s 陈旧可接受;取值远小于 H8 的
+# 300s,因为向量计数是用户点「补齐向量」后**盯着看**的那两个数。见 _h45_missing_vector_counts。
+_H45_CACHE_TTL = 30.0
 
 
 @dataclass(frozen=True)
@@ -198,6 +204,12 @@ class CheckupService:
         # 捕获,无粘滞);异常不缓存。move_to_end + popitem(last=False) LRU 有界化。重启即空。
         self._h7_cache: "OrderedDict[str, tuple[Any, int]]" = OrderedDict()
         self._h7_cache_lock = threading.Lock()
+        # 进程内 H4/H5 memo:nb -> (活跃租约快照, chunk 计数, element 计数, 取数时刻)。
+        # **每个 notebook 只有一个槽**(不是「按租约快照多槽」)——见
+        # _h45_missing_vector_counts 的口径论证:单槽让任何租约变动都覆盖掉旧条目,
+        # 补齐完成后不可能再命中修复前的那份计数。LRU 有界化,重启即空。
+        self._h45_cache: "OrderedDict[str, tuple[frozenset, int, int, float]]" = OrderedDict()
+        self._h45_cache_lock = threading.Lock()
 
     # ------------------------------------------------------------------ run
     def run(self, notebook_id: str) -> CheckupResult:
@@ -215,23 +227,14 @@ class CheckupService:
             # 对齐(评审:全集口径会把有 elements、却不走文档 KG 抽取的 knowhow 合成源算进
             # H6→与 KG 行「0 待分析」自相矛盾、healthy 恒 false 且点「分析新增」修不掉)。
             h6_count = int(self._queries.visible_pending_kg_source_count(db, notebook_id))
+        # H4/H5 也减活跃租约(codex):正在嵌入的源 chunk/element 已在、向量还没落,是
+        # 正常在途而非损坏——不排除会每次嵌入都误报缺向量、甚至触发并发 backfill 重复模型调用。
+        h4_count, h5_count = self._h45_missing_vector_counts(notebook_id, active)
         checks = [
             CheckupItem("H2", len(h2_hits), _sample(h2_hits), "reparse"),
             CheckupItem("H3", len(h3_hits), _sample(h3_hits), "reparse"),
-            # H4/H5 也减活跃租约(codex):正在嵌入的源 chunk/element 已在、向量还没落,是
-            # 正常在途而非损坏——不排除会每次嵌入都误报缺向量、甚至触发并发 backfill 重复模型调用。
-            CheckupItem(
-                "H4",
-                int(self._count_missing_chunk_vectors(notebook_id, active)),
-                [],
-                "backfill_vectors",
-            ),
-            CheckupItem(
-                "H5",
-                int(self._count_missing_element_vectors(notebook_id, active)),
-                [],
-                "backfill_vectors",
-            ),
+            CheckupItem("H4", h4_count, [], "backfill_vectors"),
+            CheckupItem("H5", h5_count, [], "backfill_vectors"),
             CheckupItem("H6", h6_count, [], "extract_kg"),
             CheckupItem("H7", self._h7_index_stale(notebook_id), [], "fold_index"),
             CheckupItem("H8", self._h8_index_integrity(notebook_id), [], "rebuild_index"),
@@ -243,6 +246,56 @@ class CheckupService:
             healthy=healthy,
             checks=checks,
         )
+
+    # ---------------------------------------------------------------- H4/H5
+    def _h45_missing_vector_counts(
+        self, notebook_id: str, active: "set[str]"
+    ) -> "tuple[int, int]":
+        """(缺 chunk 向量数, 缺 element 向量数),按 (活跃租约快照, TTL) memo。
+
+        **为什么需要 memo**:这两条都是全表 anti-join(element 侧还要对每行做 TRIM/btrim
+        非空判定,PG 上会强制读 TOAST)。看板打开就查一次,用户点「补齐向量」后前端进入
+        ~8s 轮询,大库上等于反复付整表扫描的钱——而这是**诊断面**,不是检索热路径。
+
+        **口径不变**(这条是红线,仓库里有先例教训):排除活跃租约的语义**逐字保留**——
+        缓存键**包含**这次的租约快照,`active` 一变即失配、必然重算。缓存存的永远是「用
+        这一份 active 算出来的那两个数」,绝不会把某个源在途时算出的数在租约释放后继续端
+        出去。计数 seam 本身(``count_missing_*_vectors(nb, exclude)``)一个字没动。
+
+        **为什么是 TTL 而不是单调失效键**:向量写入路径不 bump ``kg_mutation_seq``(见模块
+        docstring),``sources.updated_at`` 只被 element 换代推进、embedding 成功不推进——拿它
+        们当键会让补齐完成后计数**永远不降**,比陈旧更糟。库里没有第三个「向量写入即前进」
+        的廉价单调信号,且本次不许加迁移。故退化为 TTL,并把口径登记在这里:H4/H5 至多陈旧
+        ``_H45_CACHE_TTL`` 秒。
+
+        **单槽是关键**(不是「按 active 分多槽」):每个 notebook 只保留最近一次的
+        (active, counts)。任何一次租约变动都会覆盖掉上一条,于是「点补齐 → job 持源锁
+        (active 变) → job 结束(active 变回空)」这条时间线上,修复前那份 active=∅ 的旧条目
+        已经被中间那次覆盖掉了,最后一次轮询必然重算、立刻看到降下来的计数。多槽缓存会在
+        这里端出修复前的数、把「补齐中…」的忙碌态多按住一个 TTL。进程内的解析/摄取都在租约
+        下发生,所以真正只靠 TTL 兜底的只剩「别的进程(离线 CLI)在写向量」。
+
+        异常不缓存:任一计数抛错就整体上抛(与改动前一致),缓存里不留半份结果。"""
+        key = frozenset(active)
+        now = time.monotonic()
+        with self._h45_cache_lock:
+            cached = self._h45_cache.get(notebook_id)
+            if (
+                cached is not None
+                and cached[0] == key
+                and (now - cached[3]) < _H45_CACHE_TTL
+            ):
+                self._h45_cache.move_to_end(notebook_id)
+                return cached[1], cached[2]
+        # 查询放在锁外(整表 anti-join 可能很慢,不该把别的 notebook 的体检堵住)。
+        chunk_count = int(self._count_missing_chunk_vectors(notebook_id, active))
+        elem_count = int(self._count_missing_element_vectors(notebook_id, active))
+        with self._h45_cache_lock:
+            self._h45_cache[notebook_id] = (key, chunk_count, elem_count, now)
+            self._h45_cache.move_to_end(notebook_id)
+            while len(self._h45_cache) > _H45_CACHE_MAX:
+                self._h45_cache.popitem(last=False)
+        return chunk_count, elem_count
 
     # ------------------------------------------------------------ H7 / H8
     def _h7_index_stale(self, notebook_id: str) -> int:

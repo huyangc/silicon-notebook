@@ -3107,6 +3107,65 @@ def test_postgres_unified_kg_temp_search_and_checkpoint_json(postgres_database):
 
 
 @pytest.mark.postgres_integration
+def test_postgres_cluster_evidence_rows_tag_each_row_with_its_seed(postgres_database):
+    """审计批4:概念描述阶段按批取证据(一次 IN 覆盖 ~300 个 canonical),靠行上的
+    ``seed`` 把混着回来的行分组回各自的 canonical。两后端必须同款投影,否则同一份代码
+    在 PG 上会 KeyError / 全部串组。"""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 21
+    _seed_catalog(postgres_database)
+    with postgres_database.write() as connection:
+        for oid, seed, span in (
+            ("ko-seed-a1", "seed-a", "quote a1"),
+            ("ko-seed-a2", "seed-a", "quote a2"),
+            ("ko-seed-b1", "seed-b", "quote b1"),
+            ("ko-other-run", "seed-a", "quote from another run"),
+        ):
+            connection.execute(
+                "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
+                "payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (%s,'nb-personal','concept','approved',%s,%s,"
+                "'source-golden',%s,%s)",
+                (
+                    oid,
+                    json.dumps({"name": oid}),
+                    json.dumps([{"quoted_span": span}]),
+                    NOW,
+                    NOW,
+                ),
+            )
+        for oid, seed, run in (
+            ("ko-seed-a1", "seed-a", "run-1"),
+            ("ko-seed-a2", "seed-a", "run-1"),
+            ("ko-seed-b1", "seed-b", "run-1"),
+            ("ko-other-run", "seed-a", "run-2"),
+        ):
+            connection.execute(
+                "INSERT INTO kg_cluster_scratch(notebook_id,run_id,object_id,seed) "
+                "VALUES ('nb-personal',%s,%s,%s)",
+                (run, oid, seed),
+            )
+
+    with postgres_database.connect() as connection:
+        rows = PostgresUnifiedKgStore.cluster_evidence_rows(
+            connection, "nb-personal", "run-1", ["seed-a", "seed-b"]
+        )
+        by_seed: dict[str, set[str]] = {}
+        for row in rows:
+            for item in json.loads(row["evidence"]):
+                by_seed.setdefault(row["seed"], set()).add(item["quoted_span"])
+        # 一次 IN 问齐两个 seed,行按 seed 可分组;别的 run 的行不混进来。
+        assert by_seed == {
+            "seed-a": {"quote a1", "quote a2"},
+            "seed-b": {"quote b1"},
+        }
+        assert PostgresUnifiedKgStore.cluster_evidence_rows(
+            connection, "nb-personal", "run-1", []
+        ) == []
+
+
+@pytest.mark.postgres_integration
 def test_concurrent_equivalent_promotions_serialize_base_dedup(
     postgres_database,
     monkeypatch,
