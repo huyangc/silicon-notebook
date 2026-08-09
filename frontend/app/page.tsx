@@ -1735,6 +1735,10 @@ export default function Home() {
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [reviewAllRunning, currentNotebookId]);
   const [selectedKgNodeId, setSelectedKgNodeId] = useState<string | null>(null);
+  // 后台重建的终态重对账要读「此刻」的选中节点,而不是轮询 effect 绑定那一刻闭包
+  // 捕获的旧值(codex R6):镜像 kgLimitRef 的每次渲染赋值形态。
+  const selectedKgNodeIdRef = useRef<string | null>(null);
+  selectedKgNodeIdRef.current = selectedKgNodeId;
   const [pendingKgFocusId, setPendingKgFocusId] = useState<string | null>(null);
   const [conceptDetail, setConceptDetail] = useState<ConceptDetailResp | null>(null);
   const [nodeCtx, setNodeCtx] = useState<NodeContext | null>(null);
@@ -4693,9 +4697,15 @@ export default function Home() {
           // 已被折进另一个聚类、也可能压根消失，conceptDetail/nodeCtx 原样保留就会绑着
           // 一份不再对应任何可见节点的旧详情)。按新图 g.nodes 重新定位：找不到就两侧都
           // 清空；还在且仍是概念就用新图给出的 id 重新拉一次详情。
-          const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;
+          // codex R6:选中 id 必须从 ref 读此刻的值(effect 闭包里的 state 是轮询
+          // 开始那一刻的旧值,长重建期间用户可能已换选);详情取回后再校验一次选中
+          // 未变,变了就不发布(新选中的点击处理器自己会拉自己的详情)。
+          const currentSelection = selectedKgNodeIdRef.current;
+          const selected = currentSelection ? g.nodes.find((node) => node.id === currentSelection) : null;
           if (selected?.object_type === "concept") {
-            setConceptDetail(await fetchConceptDetail(nb, selected.id).catch(() => null));
+            const detail = await fetchConceptDetail(nb, selected.id).catch(() => null);
+            if (selectedKgNodeIdRef.current !== currentSelection) return;
+            setConceptDetail(detail);
           } else {
             setConceptDetail(null);
           }
