@@ -2308,6 +2308,22 @@ def test_probe_memo_does_not_cache_failures(repo, monkeypatch):
     assert attempts == ["q", "q"]
 
 
+def test_probe_queries_propagates_cancellation(repo, monkeypatch):
+    """Cancellation is control flow and must not degrade into an empty probe."""
+    from app.services.cancellation import AskCancelled
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    monkeypatch.setattr(
+        eng, "_probe_knowledge_hits",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AskCancelled()),
+    )
+    monkeypatch.setattr(eng, "_probe_element_hits", lambda *_args, **_kwargs: [])
+
+    with pytest.raises(AskCancelled):
+        eng._probe_queries("nb", ["q"])
+
+
 def test_probe_width_maps_report_depth_to_shared_tiers():
     """探针宽度按 depth→档位映射;None(行上缺 depth)保持历史宽度 4。
 
