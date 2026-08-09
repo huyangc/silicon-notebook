@@ -27,7 +27,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { findFunction, parseModule } from "./test/semantic-source.mjs";
+import { findFunction, jsxElements, parseModule } from "./test/semantic-source.mjs";
 
 // 后台化之后 POST 只回 {status, notebook_id, job_id};读到这些就是把结果接回了返回值。
 const RESULT_FIELDS = ["clusters", "cluster_count"];
@@ -448,4 +448,71 @@ test("finish 在刷新 IIFE 之前就检查待补发标记(命中标记的两条
     finishHead.includes("return;", settleAt),
     "命中待补发标记分支必须 return,不能继续往下跑进刷新 IIFE",
   );
+});
+
+test("codex R4 P2(A):打开/切换笔记本时,服务端仍在跑的重新合并任务恢复为本地忙碌位", async () => {
+  // 忙碌位是纯前端 state:页面刷新、或另一个会话/标签页发起的重新合并,本地的
+  // rebuildingNotebookIds 一开始什么都不知道——不认领就不会挂上面那条按笔记本忙碌位
+  // 建键的轮询 effect,长任务因此显示空闲、完成不刷新、按钮可点却只会撞服务端 409。
+  // 这条断言钉住「打开/切换笔记本时向服务端各查一次真相,running 就认领忙碌位」这条
+  // 接线,且只认领不释放——idle/终态可能是本地正处在 pendingRebuildNotebookIds 之类
+  // 的中间态,这条 effect 无权替它收尾。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf("fetchUnifiedKgRebuildStatus(nb).catch(() => null)");
+  assert.ok(start > 0, "找不到打开笔记本时的重新合并状态恢复(被删除或改名?守卫失效)");
+  const depsAt = source.indexOf("}, [currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到这条恢复 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  assert.ok(
+    /rebuild\s*&&\s*\(rebuild\.running\s*\|\|\s*rebuild\.status\s*===\s*"running"\)/.test(body),
+    "必须按 running/status===\"running\" 判定服务端的重新合并任务是否仍在跑",
+  );
+  assert.ok(
+    body.includes("setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb))"),
+    "running 时必须认领忙碌位(claimNotebookSlot),否则下面按忙碌位建键的轮询 effect"
+    + "不会挂载",
+  );
+  assert.ok(
+    !body.includes("releaseNotebookClaim"),
+    "这条 effect 只认领、不释放 —— idle/终态可能是本地正处在 pendingRebuildNotebookIds"
+    + "之类的中间态,它无权替本地状态收尾",
+  );
+});
+
+test("codex R4 P2(B):「重新合并」的早退与 disabled 认『任一忙碌位为真即忙』(含 relinkingKg)", async () => {
+  // 「重新合并」与「补上关联」共用服务端同一把按笔记本单飞锁:只看 kgRefreshBusy 时,
+  // 「补上关联」在跑期间点「重新合并」仍会发起请求,白撞一次 409。
+  const page = await parseModule("page.tsx");
+
+  const confirmBody = findFunction(page, "confirmRefreshUnifiedKg").getText(page);
+  assert.ok(
+    /if \(kgRefreshBusy \|\| relinkingKg \|\| buildingKg\) return;/.test(confirmBody),
+    "confirmRefreshUnifiedKg 的早退必须同时认 relinkingKg",
+  );
+
+  const refreshBody = findFunction(page, "refreshUnifiedKg").getText(page);
+  assert.ok(
+    refreshBody.includes("relinkingKg"),
+    "refreshUnifiedKg 的早退必须同时认 relinkingKg(与 confirmRefreshUnifiedKg 同口径,"
+    + "防止绕过确认弹窗直接调用时漏检)",
+  );
+
+  const buttons = jsxElements(page, "button").filter(
+    (el) => (el.bindings?.onClick ?? "").includes("confirmRefreshUnifiedKg"),
+  );
+  assert.ok(
+    buttons.length >= 2,
+    "「重新合并」按钮至少有知识图谱视图 + 看板两处,少了说明入口被删/改名(守卫失效)",
+  );
+  for (const button of buttons) {
+    const disabled = button.bindings?.disabled ?? "";
+    assert.ok(
+      disabled.includes("relinkingKg"),
+      `重新合并按钮 disabled=${disabled || "(未设置)"} 里没有 relinkingKg —— 「补上`
+      + "关联」在跑时这颗按钮仍可点,点了只会撞 409",
+    );
+  }
 });

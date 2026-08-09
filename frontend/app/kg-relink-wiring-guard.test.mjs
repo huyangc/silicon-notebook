@@ -20,7 +20,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { findFunction, parseModule } from "./test/semantic-source.mjs";
+import { findFunction, jsxElements, parseModule } from "./test/semantic-source.mjs";
 
 const STATS_FIELDS = ["edges_added", "isolated_after", "isolated_before"];
 
@@ -224,5 +224,68 @@ test("page.tsx 有补上关联的完成信号(否则忙碌位解除不掉)", asy
     !body.includes("finally"),
     "relinkFromKgView 里的 finally { setRelinkingKg(false) } 是同步语义的残留:"
     + "任务还在后台跑,按钮就已经放开了",
+  );
+});
+
+test("codex R4 P2(A):打开/切换笔记本时,服务端仍在跑的补上关联任务恢复为本地忙碌位", async () => {
+  // 与「重新合并」那半(kg-rebuild-wiring-guard.test.mjs)同一条效果里挂载:忙碌位是
+  // 纯前端 state,页面刷新、或另一个会话/标签页发起的补上关联,本地的
+  // relinkingNotebookIds 一开始什么都不知道——不认领就不会挂上面那条按笔记本忙碌位
+  // 建键的轮询 effect,长任务因此显示空闲、完成不刷新、按钮可点却只会撞服务端 409。
+  // 只认领不释放——idle/终态不动本地位。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf("fetchRelinkStatus(nb).catch(() => null)");
+  assert.ok(start > 0, "找不到打开笔记本时的补上关联状态恢复(被删除或改名?守卫失效)");
+  const depsAt = source.indexOf("}, [currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到这条恢复 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  assert.ok(
+    /relink\s*&&\s*\(relink\.running\s*\|\|\s*relink\.status\s*===\s*"running"\)/.test(body),
+    "必须按 running/status===\"running\" 判定服务端的补上关联任务是否仍在跑",
+  );
+  assert.ok(
+    body.includes("setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb))"),
+    "running 时必须认领忙碌位(claimRelinkSlot),否则下面按忙碌位建键的轮询 effect"
+    + "不会挂载",
+  );
+  assert.ok(
+    !body.includes("releaseRelinkClaim"),
+    "这条 effect 只认领、不释放 —— idle/终态可能是本地正处在别的中间态,它无权替本地"
+    + "状态收尾",
+  );
+});
+
+test("codex R4 P2(B):知识图谱视图侧栏「补上关联」的早退与 disabled 认『任一忙碌位为真即忙』(含 kgRefreshBusy)", async () => {
+  // 「补上关联」与「重新合并」共用服务端同一把按笔记本单飞锁:只看 relinkingKg 时,
+  // 「重新合并」在跑期间点「补上关联」仍会发起请求,白撞一次 409。
+  const page = await parseModule("page.tsx");
+
+  const body = findFunction(page, "relinkFromKgView").getText(page);
+  assert.ok(
+    body.includes("kgRefreshBusy"),
+    "relinkFromKgView 的早退必须同时认 kgRefreshBusy",
+  );
+
+  const buttons = jsxElements(page, "button").filter(
+    (el) => (el.bindings?.onClick ?? "").includes("relinkFromKgView"),
+  );
+  assert.ok(
+    buttons.length >= 2,
+    "「补上关联」按钮至少有知识图谱视图侧栏 + 看板两处,少了说明入口被删/改名(守卫失效)",
+  );
+  // 只钉知识图谱视图侧栏那一颗(title 是它独有的静态文案) —— 看板那颗仍是历史形态
+  // (disabled={relinkingKg}),不在本轮改动范围内。
+  const sidebarButton = buttons.find(
+    (el) => el.attributes?.title?.includes("为没建立关联的内容补上关联"),
+  );
+  assert.ok(sidebarButton, "找不到知识图谱视图侧栏的补上关联按钮(title 被改动?守卫失效)");
+  const disabled = sidebarButton.bindings?.disabled ?? "";
+  assert.ok(
+    disabled.includes("kgRefreshBusy"),
+    `补上关联按钮 disabled=${disabled || "(未设置)"} 里没有 kgRefreshBusy —— 「重新`
+    + "合并」在跑时这颗按钮仍可点,点了只会撞 409",
   );
 });
