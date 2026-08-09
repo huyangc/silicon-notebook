@@ -240,3 +240,110 @@ def test_progress_callback_invoked_per_work_item(repo):
     assert max(i for (_p, i, _n) in item_events) == work_n
     # i values are the 1..n sequence (order may vary due to concurrency)
     assert sorted(i for (_p, i, _n) in item_events) == list(range(1, work_n + 1))
+
+
+# --- 7. 证据取数批量化(审计批4) -------------------------------------------
+#
+# 逐条时代:每个多成员 canonical 一次 cluster_evidence_rows 往返,10⁵–10⁶ 次全部串行堵在
+# LLM 阶段之前。现在按 canonical 分批(≤_DESC_EVIDENCE_CID_BATCH 个 / ≤_DESC_EVIDENCE_SEED_BATCH
+# 个 seed)一次 IN 查回,按行上的 seed 分组回内存。这一组用例钉三件事:
+#   ① 往返次数真的降到 ⌈N/批⌉;
+#   ② 分组不串组——每个 canonical 的 prompt 只含它自己的引文(批量化唯一的新失败模式);
+#   ③ 切批保序、双上限都生效(work 顺序 = LLM 阶段输入,必须与逐条时代逐位一致)。
+
+class _PromptRecordingLLM(_DescLLM):
+    """在 _DescLLM 之上记下每次调用的完整 prompt,用于断言引文没有串组。"""
+
+    def __init__(self):
+        super().__init__()
+        self.prompt_by_name = {}
+
+    def chat_json(self, messages, schema):
+        raw = super().chat_json(messages, schema)
+        content = messages[0]["content"]
+        for line in content.splitlines():
+            if line.startswith("Concept: "):
+                with self._lock:
+                    self.prompt_by_name[line[len("Concept: "):].strip()] = content
+                break
+        return raw
+
+
+def _spy_cluster_evidence_rows(monkeypatch):
+    """统计 cluster_evidence_rows 的往返次数与每次问了多少 seed。"""
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    calls = []
+    real = UnifiedKgStore.cluster_evidence_rows
+
+    def spy(db, notebook_id, run_id, seeds):
+        values = list(seeds)
+        calls.append(len(values))
+        return real(db, notebook_id, run_id, values)
+
+    monkeypatch.setattr(UnifiedKgStore, "cluster_evidence_rows", staticmethod(spy))
+    return calls
+
+
+def test_concept_desc_evidence_is_fetched_in_one_batch(repo, monkeypatch):
+    """4 个多成员 canonical → **一次** cluster_evidence_rows 往返(远小于批上限),
+    且每个 canonical 仍拿到且只拿到自己的引文。
+
+    变异锚点:把批量循环改回「for cid in eligible: 一次 cluster_evidence_rows」的逐条
+    形态 → len(calls) 变成 4,断言红。"""
+    llm = _PromptRecordingLLM()
+    bind_chat_client(repo, "kg_concept_description", llm)
+    calls = _spy_cluster_evidence_rows(monkeypatch)
+
+    names = ["MOSFET", "cascode", "bandgap", "chopper"]
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, "s1", [
+        _concept_with_evidence(f"a{i}", n, f"{n}-span-first") for i, n in enumerate(names)
+    ], [])
+    repo.store_kg(nb.id, "s2", [
+        _concept_with_evidence(f"b{i}", n.lower(), f"{n}-span-second")
+        for i, n in enumerate(names)
+    ], [])
+    repo.rebuild_unified_kg(nb.id)
+
+    assert len(calls) == 1, f"expected one batched round trip, got {calls}"
+    assert calls[0] == 4          # 一次问齐 4 个 canonical 的 seed
+    assert llm.calls == 4         # LLM 调用次数一个没变(每个 canonical 一次)
+    # 分组正确:每份 prompt 只含本 concept 的两条引文,不含任何别的 concept 的。
+    for n in names:
+        prompt = llm.prompt_by_name[n]
+        assert f"{n}-span-first" in prompt and f"{n}-span-second" in prompt
+        for other in names:
+            if other != n:
+                assert f"{other}-span-" not in prompt, (
+                    f"{other} 的引文串进了 {n} 的 prompt"
+                )
+
+
+def test_desc_evidence_batches_preserve_order_and_honour_both_caps(monkeypatch):
+    """切批必须**保序**(work 顺序 = 喂给 LLM 阶段的输入,要与逐条时代逐位一致),
+    canonical 数与 seed 数两个上限都要生效,单个超大 canonical 独占一批。"""
+    from app.services import knowledge_lifecycle as kl
+
+    monkeypatch.setattr(kl, "_DESC_EVIDENCE_CID_BATCH", 3)
+    monkeypatch.setattr(kl, "_DESC_EVIDENCE_SEED_BATCH", 4)
+
+    # 每个 canonical 一个 seed:cid 上限(3)先到。
+    cids = [f"c{i}" for i in range(7)]
+    one_seed = {c: [f"{c}-s"] for c in cids}
+    batches = list(kl._desc_evidence_batches(cids, one_seed))
+    assert batches == [["c0", "c1", "c2"], ["c3", "c4", "c5"], ["c6"]]
+    assert [c for b in batches for c in b] == cids        # 保序、不丢不重
+
+    # 每个 canonical 两个 seed:seed 上限(4)先到,每批只装得下 2 个 canonical。
+    two_seeds = {c: [f"{c}-s1", f"{c}-s2"] for c in cids}
+    batches = list(kl._desc_evidence_batches(cids, two_seeds))
+    assert batches == [["c0", "c1"], ["c2", "c3"], ["c4", "c5"], ["c6"]]
+    assert [c for b in batches for c in b] == cids
+
+    # 自身 seed 数就超上限的 canonical 独占一批(= 逐条时代对它的原样行为),
+    # 且不会把它前后的 canonical 一起吞进来。
+    fat = {"c0": ["a"], "c1": [f"x{i}" for i in range(9)], "c2": ["b"]}
+    assert list(kl._desc_evidence_batches(["c0", "c1", "c2"], fat)) == [
+        ["c0"], ["c1"], ["c2"],
+    ]

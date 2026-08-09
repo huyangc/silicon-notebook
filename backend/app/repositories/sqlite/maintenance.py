@@ -643,7 +643,11 @@ class SQLiteMaintenanceAdapter:
     ) -> list[dict]:
         """``only_source_id`` 只取某源的 chunk——体检 backfill **持该源的分块锁、在锁内**逐源取
         缺失行再嵌(codex P1:element/chunk id 在 reparse 时复用,锁外读到的旧代行在替换后提交会
-        挂上永久陈旧向量;锁内读→嵌保证 reparse 的换血不会插进来)。CLI 盘点/补齐不传、口径不变。"""
+        挂上永久陈旧向量;锁内读→嵌保证 reparse 的换血不会插进来)。CLI 盘点/补齐不传、口径不变。
+
+        ⚠ **无界版,已无生产调用方**(审计批4):交互式 backfill 与离线 CLI 都改走
+        ``missing_chunk_embedding_page`` 的 keyset 分页。保留是因为它是分页版判据的参考
+        实现——测试拿它跟分页版做等价差分。新代码不要再调它。"""
         params: list = [notebook_id]
         clause = ""
         if only_source_id is not None:
@@ -672,7 +676,11 @@ class SQLiteMaintenanceAdapter:
         PY_WHITESPACE(= Python str.strip() 的全集),与 embed_source 的过滤逐字符一致。
         ``only_source_id`` 只取某源——体检 backfill **持该源的分块锁、在锁内**逐源取再嵌
         (codex P1:element id 在 reparse 时复用,锁外读到的旧代文本行在替换后提交会挂上永久
-        陈旧向量;锁内读→嵌保证 reparse 换血不会插进来)。CLI 不传、口径不变。"""
+        陈旧向量;锁内读→嵌保证 reparse 换血不会插进来)。CLI 不传、口径不变。
+
+        ⚠ **无界版,已无生产调用方**(审计批4):交互式 backfill 与离线 CLI 都改走
+        ``missing_element_embedding_page``。保留作分页版判据的参考实现(测试做等价差分),
+        新代码不要再调它。"""
         params: list = [notebook_id, PY_WHITESPACE]
         clause = ""
         if only_source_id is not None:
@@ -694,11 +702,29 @@ class SQLiteMaintenanceAdapter:
             ]
 
     def missing_chunk_embedding_page(
-        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """One stable keyset page for bounded offline vector repair."""
+        """One stable keyset page for bounded vector repair.
+
+        ``only_source_id`` scopes the page to one source — the interactive
+        backfill job holds that source's chunk lock and reads INSIDE the lock
+        (see ``missing_chunk_embedding_rows``), and it now reads page by page so
+        a 21k-element source no longer materialises every text at once. Judged
+        by exactly the same predicate as the unbounded rows version; only the
+        keyset window and the ORDER BY are added."""
         if limit <= 0:
             raise ValueError("limit must be positive")
+        params: list = [notebook_id, after_id]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND c.source_id=?"
+            params.append(only_source_id)
+        params.append(int(limit))
         with self._runtime.database.connect() as db:
             return [
                 dict(r)
@@ -706,17 +732,32 @@ class SQLiteMaintenanceAdapter:
                     "SELECT c.id, c.source_id, c.text FROM chunks c "
                     "WHERE c.notebook_id=? AND c.id>? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id) ORDER BY c.id LIMIT ?",
-                    (notebook_id, after_id, int(limit)),
+                    "WHERE e.chunk_id=c.id)" + clause + " ORDER BY c.id LIMIT ?",
+                    tuple(params),
                 ).fetchall()
             ]
 
     def missing_element_embedding_page(
-        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """One stable keyset page for bounded offline element-vector repair."""
+        """One stable keyset page for bounded element-vector repair.
+
+        ``only_source_id``: see ``missing_chunk_embedding_page`` — the interactive
+        backfill job pages inside the source's chunk lock instead of pulling the
+        whole source's element texts into memory."""
         if limit <= 0:
             raise ValueError("limit must be positive")
+        params: list = [notebook_id, after_id, PY_WHITESPACE]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND e.source_id=?"
+            params.append(only_source_id)
+        params.append(int(limit))
         with self._runtime.database.connect() as db:
             return [
                 dict(r)
@@ -727,8 +768,8 @@ class SQLiteMaintenanceAdapter:
                     "AND s.source_type NOT IN ('memory', 'knowhow') "
                     "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
-                    "WHERE v.element_id=e.id) ORDER BY e.id LIMIT ?",
-                    (notebook_id, after_id, PY_WHITESPACE, int(limit)),
+                    "WHERE v.element_id=e.id)" + clause + " ORDER BY e.id LIMIT ?",
+                    tuple(params),
                 ).fetchall()
             ]
 

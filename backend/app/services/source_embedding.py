@@ -144,21 +144,57 @@ class SourceEmbeddingService:
                 return []
             return [(el.id, vector) for el, vector in zip(els, vectors)]
 
-        rows = []
-        for part in self._map_embedding_batches(
-            _embed_only,
-            batches,
-            task_prefix="emb-el",
-            workload_id=workload_id,
-        ):
-            rows.extend(part)
-        now = self.now()
-        if rows:
-            self.vectors.replace_element_vectors(
-                source_id, notebook_id, rows, created_at=now
-            )
+        # Page BEFORE mapping — the same fix the three sibling batch embedders
+        # already carry (embed_elements_batch / embed_objects_batch /
+        # embed_chunks_batch / embed_relations_batch), and the reason is identical:
+        # _map_embedding_batches materialises a WHOLE call's results
+        # (list(pool.map(...)) waits for every future), so handing it every batch
+        # of the source at once holds every element vector of that source in
+        # memory simultaneously — ~670MB for a 21k-element source at 1024 dims,
+        # multiplied by the upload concurrency. Writing per page bounds live
+        # vectors to embed_commit_batches × embed_batch_size (500 rows ≈ 16MB at
+        # the defaults). Sources smaller than one page still take exactly one
+        # write transaction, byte-identical to the pre-paging behaviour.
+        #
+        # ⚠ page size is counted in BATCHES, so every page except the last holds
+        # a whole number of embed_batch_size batches — the embedder call
+        # boundaries (and therefore the texts of each call) are unchanged.
+        #
+        # replace_element_vectors is a per-row upsert on both backends
+        # (INSERT OR REPLACE / ON CONFLICT (element_id) DO UPDATE — no
+        # delete-all-for-source), so flushing page by page can never drop a page
+        # that already committed.
+        page_sz = max(1, self.settings.embed_commit_batches)
+        written = 0
+        try:
+            for pstart in range(0, len(batches), page_sz):
+                rows: list = []
+                for part in self._map_embedding_batches(
+                    _embed_only,
+                    batches[pstart:pstart + page_sz],
+                    task_prefix="emb-el",
+                    workload_id=workload_id,
+                ):
+                    rows.extend(part)
+                if rows:
+                    # Fresh timestamp per page (parity with the sibling batch
+                    # embedders); correctness against retrieval's
+                    # (COUNT(*), MAX(created_at)) matrix cache is guaranteed by
+                    # the _evict_matrix finally below, not by created_at moving.
+                    self.vectors.replace_element_vectors(
+                        source_id, notebook_id, rows, created_at=self.now()
+                    )
+                    written += len(rows)
+        finally:
+            # Now that the write spans several transactions, a matrix built
+            # between two page flushes must not survive: re-embedding an already
+            # embedded source leaves both COUNT(*) and MAX(created_at) unchanged
+            # within the same second, so the version key cannot see it. Evict in
+            # a finally so a mid-run failure still drops the pages that did
+            # commit. No-op when unwired (offline/test callers).
+            self._evict_matrix(notebook_id, "element_embeddings")
         self.event_log.logger.info(
-            "embedded %s/%s elements for source %s", len(rows), len(pending), source_id
+            "embedded %s/%s elements for source %s", written, len(pending), source_id
         )
 
     def embed_elements_batch(self, notebook_id: str, items: List[dict]) -> int:

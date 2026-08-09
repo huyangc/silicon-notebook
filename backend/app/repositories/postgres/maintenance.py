@@ -727,6 +727,9 @@ class PostgresMaintenanceAdapter:
     def missing_chunk_embedding_rows(
         self, notebook_id: str, only_source_id: "str | None" = None
     ) -> list[dict]:
+        """⚠ **无界版,已无生产调用方**(审计批4):交互式 backfill 与离线 CLI 都改走
+        ``missing_chunk_embedding_page``。保留作分页版判据的参考实现(测试做等价差分),
+        新代码不要再调它。判据与分页版逐字一致,只是没有 keyset 窗口。"""
         params: list = [notebook_id]
         clause = ""
         if only_source_id is not None:
@@ -743,11 +746,29 @@ class PostgresMaintenanceAdapter:
             ]
 
     def missing_chunk_embedding_page(
-        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """Return one stable keyset page without retaining a model-call lock."""
+        """Return one stable keyset page without retaining a model-call lock.
+
+        ``only_source_id`` scopes the page to one source — the interactive
+        backfill job holds that source's chunk lock and reads INSIDE the lock
+        (see ``missing_chunk_embedding_rows``), now page by page so a large
+        source no longer materialises every chunk text at once. The eligibility
+        predicate is unchanged; only the keyset window and the scope clause are
+        added (mirrors the SQLite adapter)."""
         if limit <= 0:
             raise ValueError("limit must be positive")
+        params: list = [notebook_id, after_id]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND c.source_id=%s"
+            params.append(only_source_id)
+        params.append(max(1, int(limit)))
         with self._runtime.database.connect() as db:
             return [
                 dict(row)
@@ -755,15 +776,18 @@ class PostgresMaintenanceAdapter:
                     "SELECT c.id,c.source_id,c.text FROM chunks c "
                     "WHERE c.notebook_id=%s AND c.id COLLATE \"C\">%s "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id) "
+                    "WHERE e.chunk_id=c.id)" + clause + " "
                     "ORDER BY c.id COLLATE \"C\" LIMIT %s",
-                    (notebook_id, after_id, max(1, int(limit))),
+                    tuple(params),
                 ).fetchall()
             ]
 
     def missing_element_embedding_rows(
         self, notebook_id: str, only_source_id: "str | None" = None
     ) -> list[dict]:
+        """⚠ **无界版,已无生产调用方**(审计批4):交互式 backfill 与离线 CLI 都改走
+        ``missing_element_embedding_page``。保留作分页版判据的参考实现(测试做等价差分),
+        新代码不要再调它。判据与分页版逐字一致,只是没有 keyset 窗口。"""
         params: list = [notebook_id, PY_WHITESPACE]
         clause = ""
         if only_source_id is not None:
@@ -784,11 +808,26 @@ class PostgresMaintenanceAdapter:
             ]
 
     def missing_element_embedding_page(
-        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """Return one bounded page of eligible, missing element vectors."""
+        """Return one bounded page of eligible, missing element vectors.
+
+        ``only_source_id``: see ``missing_chunk_embedding_page`` — the interactive
+        backfill job pages inside the source's chunk lock instead of pulling the
+        whole source's element texts into memory."""
         if limit <= 0:
             raise ValueError("limit must be positive")
+        params: list = [notebook_id, PY_WHITESPACE, after_id]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND e.source_id=%s"
+            params.append(only_source_id)
+        params.append(max(1, int(limit)))
         with self._runtime.database.connect() as db:
             return [
                 dict(row)
@@ -799,9 +838,9 @@ class PostgresMaintenanceAdapter:
                     "AND s.source_type NOT IN ('memory','knowhow') "
                     "AND btrim(e.text,%s)<>'' AND e.id COLLATE \"C\">%s "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
-                    "WHERE v.element_id=e.id) "
+                    "WHERE v.element_id=e.id)" + clause + " "
                     "ORDER BY e.id COLLATE \"C\" LIMIT %s",
-                    (notebook_id, PY_WHITESPACE, after_id, max(1, int(limit))),
+                    tuple(params),
                 ).fetchall()
             ]
 

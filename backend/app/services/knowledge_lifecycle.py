@@ -224,6 +224,36 @@ def _pair_key(a: str, b: str) -> str:
 
 
 _DESC_CKPT_FLUSH = 16   # 概念描述每完成多少个 flush 一次 checkpoint(被杀最多丢这么多)
+# 概念描述取证据时,一次 IN 查询覆盖多少个 canonical(审计批4)。原来每个多成员 canonical
+# 一次 cluster_evidence_rows 往返,10⁵–10⁶ 次全部串行堵在 LLM 阶段之前。
+_DESC_EVIDENCE_CID_BATCH = 300
+# 同一批的 seed 参数上限。SQLite 老构建的 SQLITE_MAX_VARIABLE_NUMBER 是 999,
+# 900 + (notebook_id, run_id) 两个参数仍在界内(与仓库 in_batches 的默认 900 同源)。
+# 单个 canonical 自己的 seed 数就超过它时**独占一批**——即逐条时代对该 canonical 的
+# 原样行为,不构成回退。
+_DESC_EVIDENCE_SEED_BATCH = 900
+
+
+def _desc_evidence_batches(cids: List[str], seeds_by_cid: Dict[str, List[str]]):
+    """把有序的 canonical id 列表切成批,**保序**、不跨批重排。
+
+    双上限:每批至多 ``_DESC_EVIDENCE_CID_BATCH`` 个 canonical,且 seed 参数至多
+    ``_DESC_EVIDENCE_SEED_BATCH`` 个。保序是硬要求——下游 ``work`` 列表(喂给 LLM 阶段
+    的输入)必须与逐条时代逐位一致,故批按输入序切、批内按输入序遍历。"""
+    batch: List[str] = []
+    seeds = 0
+    for cid in cids:
+        n = len(seeds_by_cid.get(cid, ()))
+        if batch and (
+            len(batch) >= _DESC_EVIDENCE_CID_BATCH
+            or seeds + n > _DESC_EVIDENCE_SEED_BATCH
+        ):
+            yield batch
+            batch, seeds = [], 0
+        batch.append(cid)
+        seeds += n
+    if batch:
+        yield batch
 
 
 def _canonical_scratch_row(
@@ -3703,40 +3733,70 @@ class KnowledgeLifecycleService:
                 # compute its input sig, and either reuse the cached description or
                 # queue an LLM job. DB access stays in the main thread.
                 work: List[tuple] = []
-                for cid, total in total_by_cid.items():
-                    if total < 2:
-                        continue   # only fuse cross-doc merged clusters (cost bound)
-                    cseeds = seeds_by_cid[cid]
-                    # Member evidence is fetched per canonical via the scratch join,
-                    # bounded by that canonical's member count (not the whole table).
+                # 只保留多成员(跨文档合并)的 canonical——与逐条时代的 `total < 2`
+                # 门同一个成本界,顺序沿 total_by_cid 的迭代序原样保留。
+                eligible = [
+                    cid for cid, total in total_by_cid.items() if total >= 2
+                ]
+                # ⚠ 证据取数**按批**(审计批4):逐条时代是「每个多成员 canonical 一次
+                # cluster_evidence_rows 往返」,10⁵–10⁶ 次串行 DB 往返全部堵在 LLM 阶段
+                # 之前。现在一次 IN 查回一整批 canonical 的 seed 证据行,按行上的 seed
+                # 分组回内存。
+                #
+                # 产物逐位不变的论证(两条):
+                #  ① 每个 canonical 的 quotes 经 `sorted(set(...))[:8]` 归一,与行的
+                #     返回顺序无关——批量查询把多个 canonical 的行混在一起返回也无所谓,
+                #     分组后各自排序去重的结果与逐条查询逐字相同。seed→canonical 是
+                #     函数关系(seeds_by_cid 由 seed_to_canonical 反转而来,一个 seed
+                #     只属于一个 canonical),故分组无歧义。
+                #  ② `work`(LLM 阶段的输入)的顺序沿 eligible 逐位保持:批按序切、
+                #     批内按序遍历,checkpoint / 跨 rebuild 复用的判定与写入顺序也因此
+                #     与逐条时代一字不差。LLM 调用本身一次没动。
+                #
+                # 内存仍有界:一次只驻留**一批**的证据行(≤300 canonical / ≤900 seed),
+                # 不是全库。
+                for cid_batch in _desc_evidence_batches(eligible, seeds_by_cid):
+                    seed_owner: Dict[str, str] = {}
+                    batch_seeds: List[str] = []
+                    for cid in cid_batch:
+                        for s in seeds_by_cid[cid]:
+                            seed_owner[s] = cid
+                            batch_seeds.append(s)
+                    quotes_by_cid: Dict[str, List[str]] = {c: [] for c in cid_batch}
                     with self._connect() as db:
                         erows = self.unified_kg.cluster_evidence_rows(
-                            db, notebook_id, run_id, cseeds
+                            db, notebook_id, run_id, batch_seeds
                         )
-                    quotes = []
                     for er in erows:
+                        owner = seed_owner.get(er["seed"])
+                        if owner is None:
+                            continue   # 本批没问过的 seed(理论上不会出现),不静默串组
+                        bucket = quotes_by_cid[owner]
                         for ev in json.loads(er["evidence"] or "[]"):
                             q = (ev.get("quoted_span") or "").strip()
                             if q:
-                                quotes.append(q)
-                    # DETERMINISTIC dedup+order so the sig (and prompt) is stable across
-                    # rebuilds — scratch row order is otherwise unsorted.
-                    quotes = sorted(set(quotes))[:8]
-                    if not quotes:
-                        continue
-                    name = sd["canonical_names"].get(cid, "")
-                    sig = _concept_desc_sig(name, quotes)
-                    ck = desc_ckpt.get(cid)
-                    if ck and ck.get("sig") == sig and ck.get("description"):
-                        desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
-                        desc_sig_by_cid[cid] = sig
-                        continue
-                    prev = old_desc.get(cid)
-                    if prev and prev[0] and prev[1] == sig:
-                        desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
-                        desc_sig_by_cid[cid] = sig
-                        continue
-                    work.append((cid, name, quotes, sig))
+                                bucket.append(q)
+                    del erows
+                    for cid in cid_batch:
+                        # DETERMINISTIC dedup+order so the sig (and prompt) is stable across
+                        # rebuilds — scratch row order is otherwise unsorted.
+                        quotes = sorted(set(quotes_by_cid[cid]))[:8]
+                        if not quotes:
+                            continue
+                        name = sd["canonical_names"].get(cid, "")
+                        sig = _concept_desc_sig(name, quotes)
+                        ck = desc_ckpt.get(cid)
+                        if ck and ck.get("sig") == sig and ck.get("description"):
+                            desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
+                            desc_sig_by_cid[cid] = sig
+                            continue
+                        prev = old_desc.get(cid)
+                        if prev and prev[0] and prev[1] == sig:
+                            desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
+                            desc_sig_by_cid[cid] = sig
+                            continue
+                        work.append((cid, name, quotes, sig))
+                    del quotes_by_cid
                 # PHASE 2 (parallel LLM): resolve the workload-bound scheduled
                 # client once before the raw worker pool. The pool width mirrors
                 # the physical service cap and the scheduler remains authoritative.
