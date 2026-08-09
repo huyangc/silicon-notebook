@@ -293,6 +293,44 @@ class QueryStore:
         ).fetchone()
         return int(row["count"])
 
+    @classmethod
+    def notebook_source_ids_among(
+        cls, db: sqlite3.Connection, notebook_id: str, source_ids
+    ) -> set:
+        """给定的 source id 里,**属于本 notebook** 的那一批(不存在的 id 自然落选)。
+
+        用途:把**进程全局**的活跃租约快照(``source_ingestion._active_sources``,跨所有
+        notebook 共用一个 dict)收窄成「本库的那几个」。CheckupService 的 H4/H5 memo 拿它当
+        缓存键——键若用全局快照,别的库上传一个文件就会把每个库的缓存都冲掉,而本库补齐 job
+        逐源推进时键每轮都变、命中率≈0。
+
+        代价:``active`` 是个位数~并发度量级的集合,这条按主键 ``sources.id`` 逐 id seek,
+        比「两条全表 anti-join」便宜几个数量级——它存在的意义就是让那两条别跑。
+        参数按 ``_SOURCE_COUNT_IN_CHUNK`` 分批,避开 SQLite 的绑定变量上限。
+
+        ⚠ ``notebook_id`` 的比较**刻意放在 Python 里**、不写进 WHERE:本仓库从不对生产库跑
+        ``ANALYZE``,``WHERE notebook_id=? AND id IN (...)`` 会被 planner 选成
+        ``idx_sources_notebook_file_hash (notebook_id=?)``,即扫遍该 notebook 的**每一行**
+        sources 去找这两三个 id(EXPLAIN 实测,谓词前后调换也一样);裸 ``id IN (...)`` 在有无
+        统计信息下都走 ``sqlite_autoindex_sources_1 (id=?)`` 主键 seek。判据完全等价——
+        比较的是同一列同一个值,只是求值位置从 SQL 挪到了调用方,而结果集本就被 ``ids``
+        的长度封死(不存在「读回一大堆再过滤」的风险)。两后端同款拼写。"""
+        ids = list(dict.fromkeys(sid for sid in source_ids if sid))
+        if not ids:
+            return set()
+        found: set = set()
+        for offset in range(0, len(ids), cls._SOURCE_COUNT_IN_CHUNK):
+            batch = ids[offset:offset + cls._SOURCE_COUNT_IN_CHUNK]
+            marks = ",".join("?" for _ in batch)
+            found.update(
+                row["id"] for row in db.execute(
+                    f"SELECT id, notebook_id FROM sources WHERE id IN ({marks})",
+                    tuple(batch),
+                ).fetchall()
+                if row["notebook_id"] == notebook_id
+            )
+        return found
+
     @staticmethod
     def sources_missing_chunks(db: sqlite3.Connection, notebook_id: str) -> set:
         """H3(缺分块)的 SQL 候选集:本 notebook 下**有 elements、却没有分块完成标记**

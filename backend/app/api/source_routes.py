@@ -433,10 +433,25 @@ def _backfill_page_rows(repo) -> int:
 
     ⚠ 取整不是美学:``embed_chunks_batch`` / ``embed_elements_batch`` 都把收到的行按
     ``embed_batch_size`` 切成一次次 embedder 调用。页大小若不是它的整数倍,每页末尾就会
-    多出一个不足整批的调用——**调用次数与每次调用的文本都会变**,而本次改动只许动 I/O
-    形状。取整之后,把各页的批边界拼起来与「一次性喂全部行」逐字相同。"""
+    多出一个不足整批的调用,**调用次数**就跟着变。取整之后 embedder 的调用次数与
+    「一次性喂全部行」逐字相同(``ceil(N / embed_batch_size)``)。
+
+    ⚠ 只说到这里为止:**每次调用的文本分组可能不同**。无界 rows 版按 planner 返回序切批,
+    分页/发现版按 id 升序切批,同一批里装的行因此可能不是同一撮。落库的向量集合与
+    embedder 的调用次数不受影响(每行的文本是它自己的,与同批邻居无关),这是刻意接受的
+    差异——把它写成「每次调用的文本逐字相同」是不对的。"""
     size = max(1, int(repo._runtime.settings.embed_batch_size))
     return max(size, (_BACKFILL_PAGE_ROWS // size) * size)
+
+
+def _hydrate_in_id_order(rows: list) -> list:
+    """把主键 hydrate 回来的行按 ``id`` 升序重排。
+
+    ``*_texts_by_ids`` 走 ``id IN (...)`` / ``id=ANY(...)``,SQL 对这类查询**不保证行序**
+    (SQLite 按主键 b-tree 序、PG 按它选中的访问路径),而发现查询是 ``ORDER BY id``。
+    不重排的话「哪几行进同一次 embedder 调用」会随后端和执行计划漂;重排之后页边界与
+    批内容确定、可复现,与 keyset 分页版逐字同序。"""
+    return sorted(rows, key=lambda r: str(r["id"]))
 
 
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
@@ -452,17 +467,23 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
     源发现只用**轻量 DISTINCT source_id 查询**、且只查已配的 workload(codex 第2轮 P1:大库上
     把每行全文物化进内存仅为收 source_id 会 GB 级/OOM,还会白扫未配的那侧)。
 
-    ⚠ 锁内的读改走 **keyset 分页版**(审计批4):无界的 ``missing_*_embedding_rows`` 会把该源
-    每一行的全文一次性读进内存(2 万元素的手册就是几百 MB,而这条命令的用途恰恰是修大库)。
-    分页只改 I/O 形状,写入的向量集合逐位不变:
-      - 判据(NOT EXISTS / TRIM 非空 / 排除 memory·knowhow)与 rows 版逐字一致,只加 keyset 窗口;
-      - 游标按 id 严格前进,每行**恰好被尝试一次**——与不分页时相同(嵌入失败的行两种写法都
-        是本轮跳过、下轮再补);
-      - 页大小是 ``embed_batch_size`` 的整数倍(见 ``_backfill_page_rows``),故 embedder 的
-        调用次数与每次的文本与不分页时逐字相同。
+    ⚠ 锁内是 **一次发现 + 按页主键 hydrate**(审计批4 + 其评审修订):
+      - 无界的 ``missing_*_embedding_rows`` 会把该源每一行的**全文**一次性读进内存(2 万
+        元素的手册就是几百 MB,而这条命令的用途恰恰是修大库)——所以正文必须按页取;
+      - 但按页**重跑发现查询**(``missing_*_embedding_page`` 的 keyset)更糟:本仓库从不对
+        生产库跑 ``ANALYZE``,``id > ?`` 在无统计信息时被选成整表主键区间扫、``source_id``
+        降级成残余过滤(EXPLAIN 实测),21k 行的源 = 43 页 × 43 次全扫;
+      - 故发现只跑**一次**、只投影 id(``missing_*_embedding_ids``,判据与 rows 版逐字一致,
+        几十字节 × 21k 的内存可忽略),正文再按页经 ``*_texts_by_ids`` 主键取回。扫描回到
+        一次,正文驻留仍按页有界。
+    写入的向量集合逐位不变:每行**恰好被尝试一次**(id 列表内不重复、按序消费),嵌入失败
+    的行仍是本轮跳过、下轮再补;页大小是 ``embed_batch_size`` 的整数倍(见
+    ``_backfill_page_rows``),故 embedder 调用次数与不分页时相同——**分组**可能不同,理由
+    见该函数 docstring。
+    hydrate 回来的行按发现序重排(``IN`` 不保证行序),保证页边界与批内容可复现。
     发现查询 ``missing_*_vector_source_ids`` 保持原样:它只投影 DISTINCT source_id、不物化正文,
-    其 btrim/TRIM 全表评估是**判据本身**(与 rows/count/page 三处逐字一致),没有索引可依托,
-    分页驱动也省不掉这一次扫描——登记为已知代价,不在本次改动范围。"""
+    其 btrim/TRIM 全表评估是**判据本身**(与 rows/count/page/ids 四处逐字一致),没有索引可
+    依托,也省不掉这一次扫描——登记为已知代价,不在本次改动范围。"""
     mnt = repo.maintenance
     ingestion = repo._runtime.source_ingestion
     chunk_ok = repo.configured("chunk_embedding")
@@ -470,7 +491,7 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
     if not (chunk_ok or elem_ok):
         return
     # 廉价定位「有缺失向量的源」:只取 DISTINCT source_id(不物化正文),且只查已配 workload。
-    # 真正补齐在锁内按 only_source_id 重读(读到的才是待嵌的行)。
+    # 真正补齐在锁内按 only_source_id 重新发现(发现到的才是待嵌的行)。
     sources: set[str] = set()
     if chunk_ok:
         sources |= set(mnt.missing_chunk_vector_source_ids(notebook_id))
@@ -481,44 +502,36 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
         with ingestion.hold_source_chunk_lock(source_id):
             try:
                 if chunk_ok:
-                    after = ""
-                    while True:
-                        rows = mnt.missing_chunk_embedding_page(
-                            notebook_id,
-                            after_id=after,
-                            limit=page,
-                            only_source_id=source_id,
+                    ids = mnt.missing_chunk_embedding_ids(
+                        notebook_id, only_source_id=source_id
+                    )
+                    for start in range(0, len(ids), page):
+                        rows = _hydrate_in_id_order(
+                            mnt.chunk_texts_by_ids(ids[start:start + page])
                         )
                         if not rows:
-                            break
-                        after = str(rows[-1]["id"])   # 严格前进:已尝试过的行不再回头
+                            continue
                         mnt.embed_chunks_batch(
                             notebook_id,
                             [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows],
                         )
-                        if len(rows) < page:
-                            break     # 短页=已到尾,省掉一次纯为确认结束的空查询
             except Exception:  # noqa: BLE001 — 后台 job 自负错误,一源失败不拦其余
                 pass
             try:
                 if elem_ok:
-                    after = ""
-                    while True:
-                        rows = mnt.missing_element_embedding_page(
-                            notebook_id,
-                            after_id=after,
-                            limit=page,
-                            only_source_id=source_id,
+                    ids = mnt.missing_element_embedding_ids(
+                        notebook_id, only_source_id=source_id
+                    )
+                    for start in range(0, len(ids), page):
+                        rows = _hydrate_in_id_order(
+                            mnt.element_texts_by_ids(ids[start:start + page])
                         )
                         if not rows:
-                            break
-                        after = str(rows[-1]["id"])
+                            continue
                         mnt.embed_elements_batch(
                             notebook_id,
                             [{"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]} for r in rows],
                         )
-                        if len(rows) < page:
-                            break     # 短页=已到尾,省掉一次纯为确认结束的空查询
             except Exception:  # noqa: BLE001
                 pass
 

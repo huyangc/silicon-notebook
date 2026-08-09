@@ -385,7 +385,11 @@ def test_backfill_job_embeds_under_per_source_lock(repo, monkeypatch):
 
 def test_h4_h5_pass_active_lease_snapshot_to_counts(repo):
     """H4/H5 把活跃租约快照传给计数 seam(codex:正在嵌入的源 chunk/element 已在、向量还没落,
-    是正常在途,不该算缺向量——由 count 的 exclude_source_ids 排除)。"""
+    是正常在途,不该算缺向量——由 count 的 exclude_source_ids 排除)。
+
+    ⚠ 红线:传进去的是**原样的进程全局快照**,一个字不动——即便里面有不属于本 notebook 的
+    源 id(收窄只作用在 memo 键上,见 _h45_missing_vector_counts)。变异锚点:把 run() 里
+    传给 seam 的 ``active`` 换成 ``local_active`` → 下面第二条断言红。"""
     seen: dict[str, set] = {}
     svc = _service(
         repo,
@@ -396,6 +400,17 @@ def test_h4_h5_pass_active_lease_snapshot_to_counts(repo):
     svc.run("nb-x")
     assert seen["chunk"] == {"src-embedding"}
     assert seen["elem"] == {"src-embedding"}
+    # 别库(或根本不存在)的租约 id 照样原样进 exclude:排除口径不因收窄而变窄。
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    svc2 = _service(
+        repo,
+        count_missing_chunk_vectors=lambda nb_, exclude: seen.__setitem__("chunk2", set(exclude)) or 0,
+        count_missing_element_vectors=lambda nb_, exclude: seen.__setitem__("elem2", set(exclude)) or 0,
+        active_source_ids=lambda: {"src-elsewhere"},
+    )
+    svc2.run(nb.id)
+    assert seen["chunk2"] == {"src-elsewhere"}
+    assert seen["elem2"] == {"src-elsewhere"}
 
 
 # ----------------------------------------- H4/H5 memo(审计批4)
@@ -440,42 +455,98 @@ def test_h45_memo_is_scoped_per_notebook(repo):
 
 
 def test_h45_memo_key_includes_the_active_lease_snapshot(repo):
-    """⚠ 红线:**排除活跃租约的口径逐字不变**。缓存键含这次的租约快照,租约一变即失配、
-    必然重算——绝不会把某个源在途时算出的数在租约释放后继续端出去。
+    """⚠ 红线:**排除活跃租约的口径逐字不变**。缓存键含**本库**这次的租约快照,本库租约一变
+    即失配、必然重算——绝不会把某个源在途时算出的数在租约释放后继续端出去。
 
-    变异锚点:把缓存键里的 ``frozenset(active)`` 去掉(只按 notebook + TTL 缓存)→
+    变异锚点:把缓存键里的 ``frozenset(local_active)`` 去掉(只按 notebook + TTL 缓存)→
     第二次 run 会命中旧条目,``len(seen) == 4`` 红。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
     leases = [set()]
     svc, seen = _counting_service(repo, active_source_ids=lambda: set(leases[0]))
-    svc.run("nb-x")
-    leases[0] = {"src-embedding"}
-    svc.run("nb-x")
+    svc.run(nb.id)
+    leases[0] = {sid}
+    svc.run(nb.id)
     assert len(seen) == 4                        # 租约变了 → 重算,没有复用
     assert seen[0][2] == frozenset()
-    assert seen[2][2] == frozenset({"src-embedding"})
+    assert seen[2][2] == frozenset({sid})
+
+
+def test_h45_memo_key_ignores_leases_owned_by_other_notebooks(repo):
+    """⚠ 评审 P1:缓存键是**本库**的租约子集,不是进程全局快照。别的库在上传/解析(全局
+    ``_active_sources`` 里多出它的源)时,本库的体检必须照常命中缓存——否则「任一别库有活动
+    就把每个库的缓存都冲掉」,而本库状态一点没变。
+
+    变异锚点:把 run() 里的 ``notebook_source_ids_among`` 收窄去掉(键直接用全局 ``active``)
+    → 第二次 run 失配重算,``len(seen) == 2`` 红。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    other = repo.create_notebook(NotebookCreate(name="other"))
+    other_sid = _seed_source(repo, other.id, parse_status="extracted", n_elements=1)
+    leases = [set()]
+    svc, seen = _counting_service(repo, active_source_ids=lambda: set(leases[0]))
+    svc.run(nb.id)
+    leases[0] = {other_sid}                      # 别的库开始解析/嵌入
+    svc.run(nb.id)
+    assert len(seen) == 2                        # 本库仍命中缓存:别库活动不冲本库
+    # 但它确实被原样传给了计数 seam(排除口径不动),只是没进键。
+    assert seen[0][2] == frozenset()
 
 
 def test_h45_memo_single_slot_so_a_finished_repair_is_visible_at_once(repo):
     """单槽(每 notebook 只留最近一条)是刻意的:点「补齐向量」→ job 持源锁(租约变)→
-    job 结束(租约变回空)这条时间线上,中间那次已经把修复前 active=∅ 的旧条目覆盖掉了,
-    最后一次轮询必然重算、立刻看到降下来的计数。多槽缓存会在这里端出修复前的数、
+    job 结束(租约变回空)这条时间线上,中间那次已经把修复前 local_active=∅ 的旧条目覆盖
+    掉了,最后一次轮询必然重算、立刻看到降下来的计数。多槽缓存会在这里端出修复前的数、
     把「补齐中…」的忙碌态多按住一个 TTL。
 
     变异锚点:把单槽换成 ``dict[(nb, active_key)]`` 的多槽缓存 → 第三次 run 命中修复前的
     条目,``len(seen) == 6`` 红。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
     leases = [set()]
     svc, seen = _counting_service(repo, active_source_ids=lambda: set(leases[0]))
-    svc.run("nb-x")                              # 修复前:active=∅
-    leases[0] = {"src-a"}
-    svc.run("nb-x")                              # 补齐 job 持锁中
+    svc.run(nb.id)                               # 修复前:active=∅
+    leases[0] = {sid}
+    svc.run(nb.id)                               # 补齐 job 持锁中
     leases[0] = set()
-    svc.run("nb-x")                              # job 结束:必须重算,不得复用第一条
+    svc.run(nb.id)                               # job 结束:必须重算,不得复用第一条
     assert len(seen) == 6
 
 
+def test_notebook_source_ids_among_narrows_to_this_notebook(repo):
+    """H4/H5 memo 键用的收窄查询:只留属于本 notebook 的 id,别库的与不存在的都落选。
+    空输入不发查询、直接返回空集。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    other = repo.create_notebook(NotebookCreate(name="other"))
+    mine = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
+    mine2 = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
+    theirs = _seed_source(repo, other.id, parse_status="extracted", n_elements=1)
+    q = repo._runtime.queries
+    with repo._runtime.database.connect() as db:
+        assert q.notebook_source_ids_among(db, nb.id, set()) == set()
+        assert q.notebook_source_ids_among(db, nb.id, {mine}) == {mine}
+        assert q.notebook_source_ids_among(
+            db, nb.id, {mine, mine2, theirs, "src-nope"}
+        ) == {mine, mine2}
+        assert q.notebook_source_ids_among(db, other.id, {mine, theirs}) == {theirs}
+
+
+def test_notebook_source_ids_among_batches_large_id_lists(repo):
+    """参数分批(SQLite 绑定变量上限):id 数远超一批时仍返回完整结果、不炸。"""
+    import app.repositories.sqlite.query_store as qs_mod
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    real = {_seed_source(repo, nb.id, parse_status="extracted") for _ in range(5)}
+    padding = {f"src-absent-{i:05d}" for i in range(1200)}
+    q = repo._runtime.queries
+    assert qs_mod.QueryStore._SOURCE_COUNT_IN_CHUNK < len(real | padding)
+    with repo._runtime.database.connect() as db:
+        assert q.notebook_source_ids_among(db, nb.id, real | padding) == real
+
+
 def test_h45_memo_expires_after_ttl(repo, monkeypatch):
-    """租约完全不动时(如离线 CLI 在别的进程里写向量)靠 TTL 兜底:至多陈旧
-    ``_H45_CACHE_TTL`` 秒。这是登记接受的口径——体检是诊断面。
+    """租约完全不动时(如离线 CLI 在别的进程里写向量)靠 TTL 兜底:H4/H5 **至多陈旧
+    ``_H45_CACHE_TTL`` 秒(30s)**。这是登记接受的口径(体检是诊断面),已写进
+    AGENTS.md / CLAUDE.md 的长任务按钮条与 docs/product-and-api*.md 的端点条目。
 
     变异锚点:去掉 TTL 判定(只比租约快照)→ 时钟推过 TTL 后仍命中,``len(seen) == 4`` 红。"""
     import app.services.checkup as checkup_mod
@@ -851,9 +922,9 @@ def test_probe_detects_ann_entry_count_below_labels(tmp_path, monkeypatch):
 def test_backfill_page_rows_is_a_multiple_of_embed_batch_size(repo):
     """页大小必须是 ``embed_batch_size`` 的整数倍(至少一整批),**对任意配置成立**。
 
-    这是「embedder 调用次数与内容跟不分页时逐位相同」的机制性前提:embed_*_batch 把收到的
+    这是「embedder **调用次数**跟不分页时逐位相同」的机制性前提:embed_*_batch 把收到的
     行按 embed_batch_size 切成一次次调用,页大小不是整数倍的话,每页末尾都会多出一个残批,
-    调用次数与每次的文本都会变。
+    调用次数就会变(每次调用装哪几行则本就可能不同,见 ``_backfill_page_rows`` docstring)。
 
     ⚠ 必须扫**不整除**的 batch size:仓库默认 (500, 10) 恰好整除,只测默认值的话
     ``return _BACKFILL_PAGE_ROWS`` 这个变异会静默通过。
@@ -882,16 +953,19 @@ def test_backfill_page_rows_is_a_multiple_of_embed_batch_size(repo):
     assert source_routes._backfill_page_rows(repo) % real_size == 0
 
 
-def test_backfill_job_pages_within_the_source_lock(repo, monkeypatch):
-    """审计批4:锁内的读改走 keyset 分页版。无界的 ``missing_element_embedding_rows`` 会把
-    该源每一行的全文一次性读进内存(2 万元素的手册就是几百 MB),而这条命令的用途恰恰是修大库。
+def test_backfill_job_discovers_once_then_hydrates_by_page(repo, monkeypatch):
+    """审计批4评审修订:锁内是**一次发现 + 按页主键 hydrate**,不是每页重跑发现查询。
 
-    钉四件事:①生产路径**零次**调用无界 rows 版;②游标严格前进、每页 limit 就是页大小;
-    ③被处理的 element 集合与 rows 版逐一致(判据没变);④嵌入失败/不落库也照样收敛
-    (spy 不写向量,行仍缺向量,循环仍靠游标终止)。
+    为什么不能每页重发现:本仓库从不对生产库跑 ``ANALYZE``,``missing_*_embedding_page``
+    的 ``id > ?`` 在无统计信息时被 planner 选成整表主键区间扫、``source_id`` 降级成残余
+    过滤(EXPLAIN 实测),21k 行的源 = 43 页 × 43 次全扫。
 
-    变异锚点:把调用方换回 ``mnt.missing_element_embedding_rows(...)`` → 无界版的
-    AssertionError 直接把这条打红。"""
+    钉五件事:①**每个源恰好一次**发现查询(单次扫描守卫);②生产路径**零次**调用无界
+    rows 版与 keyset page 版;③正文按页取、每页不超过页大小(驻留有界);④被处理的
+    element 集合与 rows 版逐一致(判据没变);⑤每页一次 embed 调用、页大小即批大小
+    (embedder 调用切分不变)。
+
+    变异锚点:把发现改回每页一次 ``missing_element_embedding_page`` → ①②同时红。"""
     from app.api import source_routes
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -901,27 +975,34 @@ def test_backfill_job_pages_within_the_source_lock(repo, monkeypatch):
     reference = {r["id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=sid)}
     assert len(reference) == 25
 
-    # 只配 element 侧,chunk 侧整段短路(不发现、不读页)。
+    # 只配 element 侧,chunk 侧整段短路(不发现、不 hydrate)。
     monkeypatch.setattr(repo, "configured", lambda wid: wid == "source_element_embedding")
     monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)   # → 页 = 10 行(1 整批)
 
-    pages: list = []
-    real_page = mnt.missing_element_embedding_page
+    discoveries: list = []
+    hydrations: list = []
+    real_ids = mnt.missing_element_embedding_ids
+    real_hydrate = mnt.element_texts_by_ids
 
-    def spy_page(notebook_id, *, after_id="", limit=500, only_source_id=None):
-        rows = real_page(
-            notebook_id, after_id=after_id, limit=limit, only_source_id=only_source_id
-        )
-        pages.append((after_id, limit, only_source_id, [r["id"] for r in rows]))
+    def spy_ids(notebook_id, *, only_source_id=None):
+        ids = real_ids(notebook_id, only_source_id=only_source_id)
+        discoveries.append((notebook_id, only_source_id, list(ids)))
+        return ids
+
+    def spy_hydrate(ids):
+        rows = real_hydrate(ids)
+        hydrations.append(list(ids))
         return rows
 
-    monkeypatch.setattr(mnt, "missing_element_embedding_page", spy_page)
-    monkeypatch.setattr(
-        mnt, "missing_element_embedding_rows",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("生产路径不得再调无界 rows 版")
-        ),
-    )
+    monkeypatch.setattr(mnt, "missing_element_embedding_ids", spy_ids)
+    monkeypatch.setattr(mnt, "element_texts_by_ids", spy_hydrate)
+    for banned in ("missing_element_embedding_rows", "missing_element_embedding_page"):
+        monkeypatch.setattr(
+            mnt, banned,
+            lambda *a, _n=banned, **k: (_ for _ in ()).throw(
+                AssertionError(f"生产路径不得再调 {_n}")
+            ),
+        )
     embedded: list = []
     monkeypatch.setattr(
         mnt, "embed_elements_batch",
@@ -932,26 +1013,24 @@ def test_backfill_job_pages_within_the_source_lock(repo, monkeypatch):
 
     source_routes._backfill_vectors_job(repo, nb.id)
 
-    # ① 分页读:25 行 / 页 10 → 3 页(最后一页是短页,直接结束,不再多发一次空查询),
-    #    每一页都限定在本源上。
-    assert [len(ids) for (_a, _l, _s, ids) in pages] == [10, 10, 5]
-    assert all(only == sid for (_a, _l, only, _ids) in pages)
-    assert all(limit == 10 for (_a, limit, _s, _ids) in pages)
-    # ② 游标严格前进(不回头、不空转)。
-    cursors = [after for (after, _l, _s, _ids) in pages]
-    assert cursors[0] == "" and cursors == sorted(cursors) and len(set(cursors)) == len(cursors)
-    # ③ 处理到的行与 rows 版逐一致。
+    # ① 单次扫描:该源只发现了一次,且限定在本源上。
+    assert len(discoveries) == 1
+    assert discoveries[0][1] == sid
+    assert set(discoveries[0][2]) == reference
+    assert discoveries[0][2] == sorted(discoveries[0][2])       # 发现序 = id 升序
+    # ③ 正文按页取:25 行 / 页 10 → 3 次 hydrate,每次 ≤ 页大小,合起来不重不漏。
+    assert [len(page) for page in hydrations] == [10, 10, 5]
+    assert [i for page in hydrations for i in page] == discoveries[0][2]
+    # ④⑤ 处理到的行与 rows 版逐一致;每页一次 embed 调用,页大小即批大小。
     assert {eid for page in embedded for eid in page} == reference
-    # ④ 每页一次 embed 调用,页大小即批大小 → 调用切分与不分页时相同。
     assert [len(page) for page in embedded] == [10, 10, 5]
 
 
-def test_backfill_job_pages_chunks_too(repo, monkeypatch):
-    """chunk 侧同款(与 element 侧对称):走分页版、不碰无界 rows 版。
+def test_backfill_job_discovers_chunks_once_too(repo, monkeypatch):
+    """chunk 侧同款(与 element 侧对称):一次发现 + 按页 hydrate,不碰 rows/page 版。
 
-    这里刻意让行数**恰好是页大小的整数倍**(20 行 / 页 10):最后一页是满页,短页早退
-    走不了,必须靠下一次空查询终止。element 侧那条覆盖的是短页早退分支——两条合起来把
-    「短页 break」的两侧边界都钉住(off-by-one 会让其中一条挂死或漏行)。"""
+    这里刻意让行数**恰好是页大小的整数倍**(20 行 / 页 10):切页算术的两侧边界(整除 /
+    有余数)由两条一起钉住,off-by-one 会让其中一条漏行或多发一次空 hydrate。"""
     from app.api import source_routes
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -968,12 +1047,22 @@ def test_backfill_job_pages_chunks_too(repo, monkeypatch):
 
     monkeypatch.setattr(repo, "configured", lambda wid: wid == "chunk_embedding")
     monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)
-    monkeypatch.setattr(
-        mnt, "missing_chunk_embedding_rows",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("生产路径不得再调无界 rows 版")
-        ),
-    )
+    discoveries: list = []
+    real_ids = mnt.missing_chunk_embedding_ids
+
+    def spy_ids(notebook_id, *, only_source_id=None):
+        ids = real_ids(notebook_id, only_source_id=only_source_id)
+        discoveries.append(only_source_id)
+        return ids
+
+    monkeypatch.setattr(mnt, "missing_chunk_embedding_ids", spy_ids)
+    for banned in ("missing_chunk_embedding_rows", "missing_chunk_embedding_page"):
+        monkeypatch.setattr(
+            mnt, banned,
+            lambda *a, _n=banned, **k: (_ for _ in ()).throw(
+                AssertionError(f"生产路径不得再调 {_n}")
+            ),
+        )
     embedded: list = []
     monkeypatch.setattr(
         mnt, "embed_chunks_batch",
@@ -982,36 +1071,134 @@ def test_backfill_job_pages_chunks_too(repo, monkeypatch):
 
     source_routes._backfill_vectors_job(repo, nb.id)
 
-    assert [len(page) for page in embedded] == [10, 10]   # 满页×2,再一次空查询终止
+    assert discoveries == [sid]                          # 一次发现,不是每页一次
+    assert [len(page) for page in embedded] == [10, 10]   # 整除:两满页,没有多余的空页
     assert {cid for page in embedded for cid in page} == reference
 
 
-def test_backfill_page_scoped_to_source_matches_unbounded_rows(repo):
-    """分页版的判据与无界 rows 版逐字一致——只是多了 keyset 窗口和 ORDER BY。
-    (隐藏合成源 memory/knowhow 的排除、TRIM 非空、NOT EXISTS 三条都在两边同款。)"""
+def test_backfill_job_discovers_once_per_source(repo, monkeypatch):
+    """多个源时,发现查询是**每源一次**(而不是每页一次):单次扫描守卫的规模侧。"""
+    from app.api import source_routes
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sids = [
+        _seed_source(repo, nb.id, parse_status="extracted", n_elements=25)
+        for _ in range(3)
+    ]
+    mnt = repo.maintenance
+    monkeypatch.setattr(repo, "configured", lambda wid: wid == "source_element_embedding")
+    monkeypatch.setattr(source_routes, "_BACKFILL_PAGE_ROWS", 10)
+    seen: list = []
+    real_ids = mnt.missing_element_embedding_ids
+
+    def spy_ids(notebook_id, *, only_source_id=None):
+        seen.append(only_source_id)
+        return real_ids(notebook_id, only_source_id=only_source_id)
+
+    monkeypatch.setattr(mnt, "missing_element_embedding_ids", spy_ids)
+    monkeypatch.setattr(mnt, "embed_elements_batch", lambda notebook_id, items: len(items))
+    monkeypatch.setattr(mnt, "embed_chunks_batch", lambda notebook_id, items: None)
+
+    source_routes._backfill_vectors_job(repo, nb.id)
+
+    assert sorted(seen) == sorted(sids)      # 每个源恰好一次,不多不少
+    assert len(seen) == len(set(seen))
+
+
+def test_backfill_hydration_is_re_sorted_into_discovery_order(repo):
+    """``id IN (...)`` 不保证行序,而发现查询是 ``ORDER BY id``——hydrate 回来必须按 id
+    重排,否则「哪几行进同一次 embedder 调用」会随后端/执行计划漂。
+
+    变异锚点:把 ``_hydrate_in_id_order`` 改成 ``return rows`` → 本条红。"""
+    from app.api import source_routes
+
+    shuffled = [
+        {"id": "el-3", "source_id": "s", "text": "c"},
+        {"id": "el-1", "source_id": "s", "text": "a"},
+        {"id": "el-2", "source_id": "s", "text": "b"},
+    ]
+    assert [r["id"] for r in source_routes._hydrate_in_id_order(shuffled)] == [
+        "el-1", "el-2", "el-3",
+    ]
+    assert source_routes._hydrate_in_id_order([]) == []
+
+
+def test_missing_embedding_ids_match_the_unbounded_rows_predicate(repo):
+    """单次发现版的判据与无界 rows 版**逐字一致**——只是把投影换成 id 并加了 ORDER BY。
+    (隐藏合成源 memory/knowhow 的排除、TRIM 非空、NOT EXISTS 三条都在两边同款。)
+
+    变异锚点:发现 SQL 里去掉 ``source_type NOT IN ('memory','knowhow')`` 或 TRIM 非空 →
+    本条红。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     a = _seed_source(repo, nb.id, source_type="document", parse_status="extracted", n_elements=7)
     b = _seed_source(repo, nb.id, source_type="document", parse_status="extracted", n_elements=3)
     _seed_source(repo, nb.id, source_type="knowhow", parse_status="extracted", n_elements=4)
     _seed_source(repo, nb.id, source_type="memory", parse_status="extracted", n_elements=5)
+    with repo._write() as db:      # 纯空白文本的 element:两侧都必须排除
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"el-{a}-blank", a, "paragraph", "p", "   \n\t ", "{}", _NOW),
+        )
+        for i in range(4):
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) VALUES (?,?,?,?,?)",
+                (f"ch-{b}-{i:04d}", nb.id, b, f"chunk {i}", _NOW),
+            )
     mnt = repo.maintenance
 
-    def _drain(only_source_id):
-        seen, after = [], ""
-        while True:
-            rows = mnt.missing_element_embedding_page(
-                nb.id, after_id=after, limit=3, only_source_id=only_source_id
-            )
-            if not rows:
-                return seen
-            seen.extend(r["id"] for r in rows)
-            after = rows[-1]["id"]
+    for only in (a, b, None):
+        elem_ids = mnt.missing_element_embedding_ids(nb.id, only_source_id=only)
+        assert set(elem_ids) == {
+            r["id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=only)
+        }
+        assert elem_ids == sorted(elem_ids)          # 升序,页边界确定
+        chunk_ids = mnt.missing_chunk_embedding_ids(nb.id, only_source_id=only)
+        assert set(chunk_ids) == {
+            r["id"] for r in mnt.missing_chunk_embedding_rows(nb.id, only_source_id=only)
+        }
+        assert chunk_ids == sorted(chunk_ids)
 
-    assert set(_drain(a)) == {
-        r["id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=a)
-    }
-    assert set(_drain(b)) == {
-        r["id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=b)
-    }
-    # 不传 only_source_id 时仍是整库口径,且隐藏合成源照旧被排除。
-    assert set(_drain(None)) == {r["id"] for r in mnt.missing_element_embedding_rows(nb.id)}
+
+def test_texts_by_ids_hydrate_only_what_was_asked_for(repo):
+    """主键 hydrate:只取给定 id 的正文,空输入不发查询;缺 id(并发删除)静默少一行。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=3)
+    with repo._write() as db:
+        for i in range(2):
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) VALUES (?,?,?,?,?)",
+                (f"ch-{a}-{i:04d}", nb.id, a, f"chunk {i}", _NOW),
+            )
+    mnt = repo.maintenance
+    assert mnt.element_texts_by_ids([]) == []
+    assert mnt.chunk_texts_by_ids([]) == []
+    elem_ids = mnt.missing_element_embedding_ids(nb.id, only_source_id=a)
+    rows = mnt.element_texts_by_ids(elem_ids[:2] + ["el-does-not-exist"])
+    assert {r["id"] for r in rows} == set(elem_ids[:2])
+    assert all(r["source_id"] == a and r["text"] for r in rows)
+    chunk_rows = mnt.chunk_texts_by_ids([f"ch-{a}-0000"])
+    assert [r["id"] for r in chunk_rows] == [f"ch-{a}-0000"]
+    assert chunk_rows[0]["text"] == "chunk 0"
+
+
+def test_texts_by_ids_batches_large_id_lists(repo):
+    """按 id hydrate 的参数分批(SQLite 绑定变量上限):id 数超过一批仍取回完整结果。"""
+    from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=0)
+    n = SQLiteMaintenanceAdapter._EMBEDDING_ID_IN_CHUNK + 5
+    with repo._write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"el-{a}-{i:05d}", a, "paragraph", "p", f"text {i}", "{}", _NOW),
+            )
+    mnt = repo.maintenance
+    ids = mnt.missing_element_embedding_ids(nb.id, only_source_id=a)
+    assert len(ids) == n
+    assert {r["id"] for r in mnt.element_texts_by_ids(ids)} == set(ids)

@@ -207,8 +207,17 @@ class UnifiedKgStore:
         """Evidence blobs for a set of cluster seeds, each tagged with the ``seed``
         it came from. The concept-description stage asks for MANY canonicals'
         seeds in one call and regroups the rows in memory (one round trip per
-        ~300 canonicals instead of one per canonical), which is only possible
-        because the seed rides along in the projection."""
+        batch instead of one per canonical), which is only possible because the
+        seed rides along in the projection.
+
+        ⚠ Registered follow-up (a migration, deliberately not in this batch):
+        ``idx_kg_cluster_scratch_nb_run`` is ``(notebook_id, run_id)`` with **no
+        ``seed`` key**, so ``seed IN (...)`` is a residual filter over every
+        scratch row of the run — each batch costs O(scratch), and batching only
+        cut the number of those scans, not their width. Extending the index to
+        ``(notebook_id, run_id, seed)`` (both backends, appended as a new
+        ``_migration_N`` + SCHEMA_VERSION bump) would turn it into one seek per
+        seed; the same note is on the PostgreSQL twin."""
         values = list(seeds)
         if not values:
             return []
