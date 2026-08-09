@@ -820,6 +820,11 @@ class ReportEngine:
         def _safe(loader, query):
             try:
                 return loader(notebook_id, query)
+            except AskCancelled:
+                # Cancellation is control flow, not a best-effort probe miss.
+                # Swallowing it can let low-depth planning persist an outline
+                # after the caller has already cancelled the report.
+                raise
             except Exception:
                 return []
 
