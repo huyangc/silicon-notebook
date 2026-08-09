@@ -1033,6 +1033,8 @@ class ReportEngine:
                 parts.append("检索到的知识条目(name[type][tier]):\n" + "\n".join(
                     f"- {str(h.payload.get('name','')).strip()}"
                     f"[{h.object_type}][{getattr(h,'tier','personal')}]" for h in kg))
+        except AskCancelled:
+            raise
         except Exception:
             pass
         if not unsafe_scope:
@@ -1044,6 +1046,8 @@ class ReportEngine:
                 if chunks:
                     parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
                         f"- {c.source_title} · {c.section_path}" for c in chunks))
+            except AskCancelled:
+                raise
             except Exception:
                 pass
         try:
@@ -1586,6 +1590,8 @@ class ReportEngine:
                             result.top_hits.append(hit)
                             seen_objects.add(hit.object_id)
                             new_count += 1
+                except AskCancelled:
+                    raise
                 except Exception:
                     pass
             try:
@@ -1598,6 +1604,8 @@ class ReportEngine:
                         result.elements.append(element)
                         seen_elements.add(element.element_id)
                         new_count += 1
+            except AskCancelled:
+                raise
             except Exception:
                 pass
             if not any(str(row.get("query") or "") == str(query)
