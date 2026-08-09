@@ -4974,7 +4974,21 @@ export default function Home() {
             return; // 已切库/effect 已收尾:标记与忙碌位都留给下次重挂的 effect 接着轮
           }
           reportError(err);
-          // 非 409 的补发失败:落到下面的正常释放,标记仍不消费,留给下次终态再试。
+          // codex R14:非 409 失败(网络错误/5xx 等瞬时故障)不能落到下面的正常释放——
+          // 唯一还能再调 settleOrRetryRebuild 的只有这条轮询 effect 的终态收尾,忙碌位
+          // 在这里一旦释放,已经落库的合并决定就再也没有人会去补发它了,只能等用户自己
+          // 想起来手动点「重新合并」(旧注释"标记仍不消费,留给下次终态再试"是一句兑现不了
+          // 的承诺——没有忙碌位,压根不会再有"下次终态")。修法与上面的 409 分支同型:
+          // 标记与忙碌位原样保留、重启轮询,让下一 tick 再试一次补发。attempts 依旧不在
+          // 这里复位(只有补发真正成功才复位)——共享的轮询尝试上限兜住占槽/网络双重
+          // 卡死的场景:耗尽后下一次 settleOrRetryRebuild 会经上面的 attempts 校验落进
+          // else-if 分支,走既有释放 + 手动提示路径,不会无限重试。
+          if (!cancelled && activeNotebookIdRef.current === nb) {
+            settled = false;
+            startPolling();
+            return;
+          }
+          return; // 已切库/effect 已收尾:标记与忙碌位都留给下次重挂的 effect 接着轮
         } finally {
           submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
         }
@@ -5205,6 +5219,16 @@ export default function Home() {
   // 标记,由 rebuild 轮询的终态收尾消费:那次占槽任务结束后自动补发一次
   // rebuildUnifiedKg,不需要用户自己记得再点。落决定本身失败才是真失败，忙碌位当场
   // 清掉。
+  //
+  // codex P2-1(边界登记,非缺陷):这份自动补发是**客户端 best-effort 承诺**，标记只活在
+  // 这个标签页的内存里。作用域=标签页保持打开,或占槽任务仍在跑、图谱仍 dirty 时重载/
+  // 重开页面(那种情况下上面 [currentNotebookId] 那条恢复 effect 会从服务端状态重建
+  // 标记)。若重载/重开发生在占槽任务已经收工**之后**——标记已经连同其余前端 state 一起
+  // 丢了,没有任何东西会去补发这条已经落库的决定,直到用户自己想起来手动点一次
+  // 「重新合并」;既有的「待重建」dirty 标签就是这个缺口的持久信号,不需要额外 UI。补上
+  // 这个缺口需要服务端持久重试队列(而不是纯前端标记)——已登记为后续独立立项,本次刻意
+  // 不做(超出这一批的范围,且值不值得为这条边界换一套持久化基础设施还需要真实发生频率
+  // 的数据支撑)。
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
     if (!currentNotebookId || decidingMerge) return;
     const nb = currentNotebookId;
