@@ -57,10 +57,49 @@ test("refreshUnifiedKg 在发请求之前就置忙碌位", async () => {
     busyAt < postAt,
     "忙碌位必须在 await 之前置上,否则请求在飞的那段窗口按钮还能连点",
   );
+  // codex R9 之前这里直接断言 refreshUnifiedKg 里完全不出现 `finally`——当时唯一可能
+  // 出现的写法就是 `finally { setKgRefreshBusy(false) }`,同步语义的残留:任务还在
+  // 后台跑,按钮就已经放开了。R9 引入了一个合法的 `finally`(清理提交期标记
+  // submittingMaintenanceRef,见下一条测试),所以这里改成更精确的断言:finally 块
+  // 可以存在,但绝不能在里面同步释放忙碌位。
+  const finallyAt = body.indexOf("finally {");
+  if (finallyAt >= 0) {
+    const finallyBody = body.slice(finallyAt);
+    assert.ok(
+      !finallyBody.includes("setRebuildingNotebookIds"),
+      "refreshUnifiedKg 的 finally 块不能同步释放忙碌位(setRebuildingNotebookIds):"
+      + "那是同步语义的残留,任务还在后台跑,按钮就已经放开了",
+    );
+  }
+});
+
+test("codex R9:refreshUnifiedKg 提交期(POST 还没落地)标记在 submittingMaintenanceRef,finally 里清理", async () => {
+  // POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端**旧的** idle 并当终态收工——随后
+  // POST 才成功,没人再轮询,任务完成不会刷新。修法是在 await POST 之前标记「正在提交」,
+  // 轮询 tick 撞到 idle 时如果自己的库还在这个标记里就不能当真终态,标记必须在 finally
+  // 里清理(不管成功/非 409 失败/409 领养,都不能让标记永久卡住)。
+  const page = await parseModule("page.tsx");
+  const body = findFunction(page, "refreshUnifiedKg").getText(page);
+
+  const addAt = body.indexOf("submittingMaintenanceRef.current.add(nb);");
+  const postAt = body.indexOf("rebuildUnifiedKg(");
+  assert.ok(addAt >= 0, "refreshUnifiedKg 必须在提交前标记 submittingMaintenanceRef");
   assert.ok(
-    !body.includes("finally"),
-    "refreshUnifiedKg 里的 finally { setKgRefreshBusy(false) } 是同步语义的残留:"
-    + "任务还在后台跑,按钮就已经放开了",
+    addAt < postAt,
+    "标记必须在 await rebuildUnifiedKg 之前置上,否则 POST 在飞期间轮询读到的陈旧 idle"
+    + "不会被这个标记拦住",
+  );
+
+  const finallyAt = body.indexOf("finally {");
+  assert.ok(
+    finallyAt >= 0,
+    "refreshUnifiedKg 必须有 finally 块清理提交期标记,否则某条失败路径会让标记"
+    + "永久卡住、轮询永远认为提交还在飞",
+  );
+  const deleteAt = body.indexOf("submittingMaintenanceRef.current.delete(nb);", finallyAt);
+  assert.ok(
+    deleteAt > finallyAt,
+    "finally 块必须清理提交期标记(submittingMaintenanceRef.current.delete(nb))",
   );
 });
 
@@ -100,9 +139,11 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
     // 撞槽自动补发),又提到 5300(codex R2 P1:409 补发不再提前消费标记,改成「保留标记 +
     // 保留忙碌位 + 重启轮询,attempts 不因重试复位」,settleOrRetryRebuild 因此又长了一截),
     // 再提到 7200(codex R5 两条 P2:pollTick 加代际捕获/校验 + finish 的刷新 IIFE 里加
-    // 选中概念重对账,两处都在这段区间内)——阈值只是防「查找到很远之后一个不相干的收尾
-    // 数组」的护栏,不是精确长度断言,跟着真实需要一起调没有问题。
-    depsAt > start && depsAt - start < 7200,
+    // 选中概念重对账,两处都在这段区间内),再提到 8200(codex R9:settleOrRetryRebuild 的
+    // 补发 POST 与 pollTick 都加了 submittingMaintenanceRef 提交期标记的 add/finally-
+    // delete,两处都在这段区间内)——阈值只是防「查找到很远之后一个不相干的收尾数组」的
+    // 护栏,不是精确长度断言,跟着真实需要一起调没有问题。
+    depsAt > start && depsAt - start < 8200,
     "轮询 effect 的依赖必须恰好是 [rebuildingNotebookIds, currentNotebookId]"
     + "(kgLimit 进依赖会在换范围时重启轮询、重置尝试计数)",
   );
@@ -226,6 +267,52 @@ test("终态观测后先停轮询(settled+clearInterval)再收尾,防止刷新/�
   }
 });
 
+test("codex R9:pollTick 撞到 idle 且提交还在飞(submittingMaintenanceRef)时不当真终态", async () => {
+  // POST(含 settleOrRetryRebuild 的补发)比首个 tick 慢时,轮询会先读到服务端**旧的**
+  // idle——如果这里当真终态收工,随后 POST 才成功,就再也没有人会去轮询这次真正的任务,
+  // 完成也不会刷新。修法是:idle 终态额外检查 submittingMaintenanceRef 是否还标记着
+  // 这个库,标记着就继续轮询、不 settle。这条断言钉住:①判据必须落在正常终态分支里、
+  // settled=true 之前;②判据必须同时检查 status.status === "idle" 与
+  // submittingMaintenanceRef.current.has(nb)(不能只检查其中一个)。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到轮询 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  const pollAt = body.indexOf("function pollTick()");
+  assert.ok(pollAt >= 0, "找不到轮询 tick(被改名或改回内联 setInterval 回调?守卫失效)");
+  const pollBody = body.slice(pollAt);
+
+  const outcomeDeclAt = pollBody.indexOf("let outcome;");
+  assert.ok(outcomeDeclAt >= 0, "找不到正常终态分支的 `let outcome;`");
+  const finishAt = pollBody.indexOf("finish(outcome)", outcomeDeclAt);
+  assert.ok(finishAt >= 0, "找不到正常终态分支的 finish(outcome) 调用点");
+  const guardWindow = pollBody.slice(outcomeDeclAt, finishAt);
+
+  assert.ok(
+    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(nb\)/.test(
+      guardWindow,
+    ),
+    "正常终态分支必须检查 `status.status === \"idle\" && submittingMaintenanceRef"
+    + ".current.has(nb)`——只查其中一个都不对(只查 idle 会拦住所有真终态,只查"
+    + "submitting 会在 running 时也误判)",
+  );
+  const idleCheckAt = guardWindow.search(
+    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(nb\)/,
+  );
+  const settledTrueAt = guardWindow.lastIndexOf("settled = true;");
+  assert.ok(
+    settledTrueAt >= 0 && idleCheckAt >= 0 && idleCheckAt < settledTrueAt,
+    "idle+提交中的判据必须在 settled = true 之前生效,否则轮询已经先收工了",
+  );
+});
+
 test("codex R5 P2(A):pollTick 捕获代际,迟到的上一代际响应必须被丢弃而不是穿过 settled 守卫", async () => {
   // status 请求慢于 3s 轮询间隔时,同一个 interval 会连续派发多个 pollTick——前一个还
   // 没等到响应,后一个已经发出去了。补发重试(settleOrRetryRebuild 成功分支)会复位
@@ -299,16 +386,37 @@ test("codex R5 P2(A):pollTick 捕获代际,迟到的上一代际响应必须被�
   );
 });
 
-test("codex R8:重新合并 POST 撞 409 必须领养服务端任务而不是当失败清位", async () => {
+test("codex R9:重新合并 POST 撞 409 不再提前 release,决定权整个交给 adoptRunningMaintenance", async () => {
+  // codex R8 只钉住了「409 必须领养」;R9 发现旧写法在领养前先 release 自己的忙碌位
+  // (`setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb)); void
+  // adoptRunningMaintenance(nb);`)——领养探测本身也可能瞬时失败,一旦失败就返回 false,
+  // 而这个提前 release 已经把位清掉了;即便探测成功查到确实还是「重新合并」自己在跑
+  // (同种),提前清掉的位也没有任何东西会把它补回来(adoptRunningMaintenance 当时的
+  // 实现只会"认领",不会"撤销")。R9 把决定权整个交给 adoptRunningMaintenance(它现在
+  // 按服务端真相双向归位),409 分支因此不该再自己动忙碌位,且必须 await 而不是 void
+  // fire-and-forget(等它把归位做完,提交期标记才能在 finally 里正确清理)。
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
   const fnAt = source.indexOf("async function refreshUnifiedKg()");
-  const catchAt = source.indexOf("} catch (err) {", fnAt);
-  const endAt = source.indexOf("\n  }", catchAt);
-  const body = source.slice(catchAt, endAt);
-  assert.ok(body.includes("httpErrorStatus(err) === 409"), "409 必须被单独识别");
-  assert.ok(body.includes("void adoptRunningMaintenance(nb);"),
-    "409 分支必须领养服务端正在跑的维护任务(另一标签页发起的也要接管轮询)");
+  assert.ok(fnAt > 0, "找不到 refreshUnifiedKg");
+  const four09At = source.indexOf("if (httpErrorStatus(err) === 409) {", fnAt);
+  assert.ok(four09At > 0, "找不到 409 分支(被改名或删除?守卫失效)");
+  const four09EndAt = source.indexOf("\n      }", four09At);
+  assert.ok(four09EndAt > four09At, "找不到 409 分支的收尾");
+  const branch = source.slice(four09At, four09EndAt);
+
+  assert.ok(branch.includes("httpErrorStatus(err) === 409"), "409 必须被单独识别");
+  assert.ok(
+    branch.includes("await adoptRunningMaintenance(nb);"),
+    "409 分支必须 await 领养服务端正在跑的维护任务(另一标签页发起的也要接管轮询)——"
+    + "不能是 void fire-and-forget,否则提交期标记会在归位完成前就被 finally 清理",
+  );
+  assert.ok(
+    !branch.includes("releaseNotebookClaim"),
+    "409 分支不能提前 release 自己的忙碌位:决定权整个交给 adoptRunningMaintenance,"
+    + "它按服务端真相双向归位(同种保留、异种释放、探测失败原样不动),调用方不需要"
+    + "(也无法在不重复探测的前提下)自己再判断一次",
+  );
 });
 
 test("codex R7:手动重建 POST 成功必须消费残留的待补发标记", async () => {
@@ -483,6 +591,23 @@ test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正
     /setToast\("[^"]*手动点击[^"]*"\)/.test(retryBody),
     "尝试上限耗尽必须显式提示用户手动重试「重新合并」,不能悄悄丢弃这条还没兑现的"
     + "合并决定——用户不会无缘无故知道要再点一次",
+  );
+
+  // codex R9:补发也是一次真正的 POST 提交,同样会撞「POST 比首个 tick 慢」的陈旧 idle
+  // 竞态,必须统一包上 submittingMaintenanceRef(理由与 refreshUnifiedKg 相同)。
+  const submitAddAt = retryBody.indexOf("submittingMaintenanceRef.current.add(nb);");
+  assert.ok(
+    submitAddAt >= 0 && submitAddAt < retryPostAt,
+    "补发也必须在 await rebuildUnifiedKg 之前标记 submittingMaintenanceRef",
+  );
+  const submitFinallyAt = retryBody.indexOf("finally {", submitAddAt);
+  const submitDeleteAt = retryBody.indexOf(
+    "submittingMaintenanceRef.current.delete(nb);",
+    submitFinallyAt,
+  );
+  assert.ok(
+    submitFinallyAt > submitAddAt && submitDeleteAt > submitFinallyAt,
+    "补发标记必须在 finally 里清理,不管成功/409 重试/非 409 失败都不能让标记永久卡住",
   );
 });
 
@@ -670,4 +795,57 @@ test("codex R4 P2(B):「重新合并」的早退与 disabled 认『任一忙碌�
       + "关联」在跑时这颗按钮仍可点,点了只会撞 409",
     );
   }
+});
+
+test("codex R9:adoptRunningMaintenance 两个探测任一失败即返回 unknown,不再 per-request 吞成 null", async () => {
+  // 与 kg-relink-wiring-guard.test.mjs 里同名测试断言同一个共享函数(它只定义一次,同时
+  // 服务于「补上关联」与「重新合并」两条 409 领养路径)——两侧各留一份,防止只改了其中一个
+  // 调用点就误以为函数本身也已经修好。旧写法 `fetchXxx(nb).catch(() => null)` 把"这次
+  // 探测确实失败"和"探测成功查到没在跑"混成同一个 null——网络抖动导致的假阴性会被当成
+  // "两个都不在跑"。改成 Promise.allSettled 后必须显式区分:任一探测 rejected 就整体判
+  // "unknown"、不碰任何忙碌位状态。
+  const page = await parseModule("page.tsx");
+  const body = findFunction(page, "adoptRunningMaintenance").getText(page);
+
+  assert.ok(
+    body.includes("Promise.allSettled(["),
+    "两个探测必须用 Promise.allSettled,不能各自 `.catch(() => null)` 把失败悄悄吞成 null",
+  );
+  assert.ok(
+    !body.includes(".catch(() => null)"),
+    "探测不能再逐个 catch 成 null——那会让『探测失败』和『探测成功查到没在跑』变成"
+    + "同一个值,调用方分不清竞态已消散还是网络抖动",
+  );
+  const rejectedAt = body.indexOf(
+    'rebuildResult.status === "rejected" || relinkResult.status === "rejected"',
+  );
+  assert.ok(rejectedAt >= 0, "必须显式检查两个探测各自的 rejected 状态");
+  const unknownAt = body.indexOf('return "unknown";', rejectedAt);
+  assert.ok(
+    unknownAt > rejectedAt && unknownAt - rejectedAt < 100,
+    "任一探测 rejected 必须立刻返回 \"unknown\",且这个 return 要紧跟在判断之后"
+    + "(不能先动过忙碌位再判断失败)",
+  );
+  const firstMutationAt = Math.min(
+    ...["setRebuildingNotebookIds", "setRelinkingNotebookIds"]
+      .map((needle) => body.indexOf(needle))
+      .filter((idx) => idx >= 0),
+  );
+  assert.ok(
+    firstMutationAt > unknownAt,
+    "两个忙碌位的 set 调用必须都在 \"unknown\" 提前返回之后——rejected 时不能先动过"
+    + "任何一个忙碌位再返回",
+  );
+  // 两个探测都成功时必须按服务端真相双向归位:确认在跑就认领、确认没在跑就释放——
+  // 这是唯一能同时满足「adopted 时若领养的是另一种任务,自己那种没在跑的位要释放」
+  // 与「同种在跑,位已经在,原样保留」的写法。只有 claim(旧 R8 形态)会让「adopted 但
+  // 是另一种任务」这一支永远无法释放调用方自己的忙碌位。
+  assert.ok(
+    /rebuildRunning\s*\?\s*claimNotebookSlot\(prev, nb\)\s*:\s*releaseNotebookClaim\(prev, nb\)/.test(body),
+    "rebuild 忙碌位必须双向归位(running→claim,否则→release),不能只 claim 不 release",
+  );
+  assert.ok(
+    /relinkRunning\s*\?\s*claimRelinkSlot\(prev, nb\)\s*:\s*releaseRelinkClaim\(prev, nb\)/.test(body),
+    "relink 忙碌位必须双向归位(running→claim,否则→release),不能只 claim 不 release",
+  );
 });
