@@ -503,7 +503,7 @@ test("codex R5 P2(B):新图替换旧图之后必须重对账当前选中的概�
   );
 });
 
-test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正成功后消费;再 409 保留标记+忙碌位+续轮询,不复位 attempts)", async () => {
+test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正成功后消费;409/非 409 均保留标记+忙碌位+续轮询,不复位 attempts)", async () => {
   // codex R2 P1:上一版(codex R1 P2)在发补发请求**之前**就无条件消费掉待补发标记——
   // 补发撞 409(占槽的另一个任务,比如「补上关联」,还没跑完;rebuild status 对它恒回
   // idle 终态)时,标记已经被提前吃掉、忙碌位却按原样释放,这条决定就再也没有人会去
@@ -514,6 +514,10 @@ test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正
   //      tick 再试,而不是放弃;
   //   ③ attempts 不能因这类 409 重试复位——只有补发真正成功才复位,否则共享的轮询
   //      尝试上限(约 30 分钟)对这整段等待会失效,占槽任务卡死时会无限重试。
+  // codex R14 补充第④件事:非 409 的瞬时失败(网络错误/5xx 等)不能再落到"正常释放"——
+  // 那条路径当时是唯一能再触发 settleOrRetryRebuild 的忙碌位,释放掉就等于让已经落库
+  // 的合并决定永久搁浅。非 409 分支必须与②同型:保留标记+忙碌位、重启轮询,同样受
+  // attempts 上限兜底。
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
 
@@ -591,11 +595,37 @@ test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正
     + "超限放弃)复位都会让轮询尝试上限失去意义",
   );
 
+  // codex R14:非 409 补发失败(网络错误/5xx 等瞬时故障)不再落到下面的共享释放——那条
+  // 释放代码仍然存在(下面这条断言只验证它还在,是"无待补发标记"与"attempts 耗尽"两条
+  // 路径共用的收尾),但非 409 catch 分支自己必须在 finally 之前就 return,与 409 分支
+  // 同型:标记与忙碌位原样保留、重启轮询等下一 tick 再试,不能穿过去把位释放掉——唯一
+  // 还能再调 settleOrRetryRebuild 的只有这条轮询 effect 的终态收尾,忙碌位一旦这里
+  // 释放,已经落库的合并决定就再也没有人会去补发它。
   const finalReleaseAt = retryBody.indexOf(
     "setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));",
     catchAt,
   );
-  assert.ok(finalReleaseAt > catchAt, "非 409 失败之后必须落到正常释放,否则忙碌位会永远卡住");
+  assert.ok(
+    finalReleaseAt > catchAt,
+    "共享的正常释放代码必须仍然存在(供无待补发标记 / attempts 耗尽两条路径收尾用)",
+  );
+
+  const catchFinallyAt = catchBody.indexOf("finally {");
+  assert.ok(catchFinallyAt > reportErrAt, "找不到 catch 块与 finally 块的边界");
+  const nonFour09Block = catchBody.slice(reportErrAt, catchFinallyAt);
+  assert.ok(
+    !nonFour09Block.includes("setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));"),
+    "非 409 补发失败(codex R14)不能在 catch 内直接释放忙碌位——必须像 409 分支一样"
+    + "保留标记与忙碌位、重启轮询,而不是搁浅已经落库的合并决定",
+  );
+  assert.ok(
+    /if \(!cancelled && activeNotebookIdRef\.current === nb\) \{\s*settled = false;\s*startPolling\(\);\s*return;\s*\}\s*return;/.test(
+      nonFour09Block,
+    ),
+    "非 409 补发失败(codex R14)必须与 409 分支同型:notebook 仍是当前活动库时"
+    + "settled=false 并 startPolling() 续轮询,已切库/effect 已收尾时原样 return"
+    + "(标记与忙碌位都留给下次重挂的 effect)",
+  );
 
   assert.ok(
     retryBody.includes("else if (hasPendingRebuild)"),
