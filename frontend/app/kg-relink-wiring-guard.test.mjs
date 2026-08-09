@@ -147,6 +147,68 @@ test("终态先刷新、刷新完成后才释放忙碌位（不是反过来）",
   );
 });
 
+test("终态观测后先停轮询(settled+clearInterval)再收尾,防止刷新耗时跨 tick 时被重复触发", async () => {
+  // codex R1 P2:interval 在 finish() 收尾期间仍然继续运行——如果刷新(三个真实 fetch)
+  // 耗时超过一个 3s 周期,下一 tick 会再读到同一个终态、再调一次 finish(),让图谱重拉
+  // 并发跑两份。修法是终态一旦观测到就立刻(同步)停轮询:settled 标志 + clearInterval
+  // 都必须在 finish(...) 调用**之前**完成,且每个 tick 开头都要检查 settled,拦住
+  // clearInterval 真正生效前已经排队的迟到 tick。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!relinkBusyFor(relinkingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到补上关联的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [relinkingNotebookIds, currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到轮询 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  assert.ok(
+    body.includes("let settled = false;"),
+    "轮询必须有 settled 标志,防止终态之后已经排队的下一 tick 重复触发 finish",
+  );
+
+  const pollAt = body.indexOf("window.setInterval(async () => {");
+  assert.ok(pollAt >= 0, "找不到轮询的 setInterval 回调");
+  const pollBody = body.slice(pollAt);
+
+  assert.ok(
+    /async \(\) => \{\s*if \(settled\) return;/.test(pollBody),
+    "轮询回调必须在最开头检查 settled,拦住 clearInterval 生效前已经排队的迟到 tick",
+  );
+
+  // 两处 finish 调用(超限收工 + 正常终态收工)都必须先 settled = true 再
+  // window.clearInterval(poll),再调 finish —— 顺序钉死,防止半吊子修复(只加了
+  // settled 变量却没有真正在调用 finish 之前置位/停轮询)。两个分支必须各自**独立**
+  // 圈出窗口再局部查找:如果两处都用同一个 pollBody 从头找 lastIndexOf,把 finish(outcome)
+  // 挪到 settled=true/clearInterval **之前**(把改对的顺序又改回错的)时,断言会误读到
+  // 超限分支里那份无关的 settled=true 而放行——这不是假设,是实测踩过的坑。
+  const timeoutBranchAt = pollBody.indexOf("if (attempts > RELINK_POLL_MAX_ATTEMPTS) {");
+  const outcomeDeclAt = pollBody.indexOf("let outcome;");
+  assert.ok(
+    timeoutBranchAt >= 0 && outcomeDeclAt > timeoutBranchAt,
+    "找不到超限分支与正常终态分支之间的边界(let outcome;)",
+  );
+  const branches = [
+    ["超限", pollBody.slice(timeoutBranchAt, outcomeDeclAt), "finish(RELINK_POLL_TIMED_OUT)"],
+    ["正常终态", pollBody.slice(outcomeDeclAt), "finish(outcome)"],
+  ];
+  for (const [label, window, finishText] of branches) {
+    const finishAt = window.indexOf(finishText);
+    assert.ok(finishAt >= 0, `找不到${label}分支的 finish 调用点`);
+    const before = window.slice(0, finishAt);
+    assert.ok(
+      before.includes("settled = true;"),
+      `${label}分支调用 finish 之前必须先 settled = true`,
+    );
+    assert.ok(
+      before.includes("window.clearInterval(poll);"),
+      `${label}分支调用 finish 之前必须先 clearInterval 停轮询`,
+    );
+  }
+});
+
 test("page.tsx 有补上关联的完成信号(否则忙碌位解除不掉)", async () => {
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
