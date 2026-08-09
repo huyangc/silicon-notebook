@@ -4656,14 +4656,24 @@ export default function Home() {
     };
     // decideMerge 撞 409 时会在 pendingRebuildNotebookIds 给这个库留一个「待补发」标记：
     // 那条决定已经落库,但占槽的是另一个任务,没能触发一次能看见它的重新合并。这里在
-    // 终态收尾时消费掉标记、补发一次——成功就**不释放忙碌位**,复位轮询状态继续追这
-    // 次新任务;补发又撞 409(或其它失败)就放弃、按原样释放(decideMerge 落 409 时已
-    // 经 toast 过一次,这里不重复提示,防止无限重试)。
+    // 终态收尾时尝试补发一次——但标记只在补发 POST **真正成功后**才消费(codex R2 P1:
+    // 旧代码在发请求前就无条件消费掉标记,补发再撞 409 时——占槽的另一个任务,比如
+    // 「补上关联」,还没跑完,rebuild status 对它恒回 idle 终态——标记已经被提前吃掉、
+    // 忙碌位却按原样释放,这条决定就再也没有人会去补发它,直到用户自己想起来手动点
+    // 「重新合并」)。补发成功就**不释放忙碌位**,复位轮询状态继续追这次新任务;补发
+    // 撞 409 则保留标记 + 保留忙碌位 + 重启轮询——下一 tick rebuild status 对占槽者
+    // 依旧回 idle,等效于每 3s 重试一次补发,直到占槽任务收工、槽空、POST 真正成功。
+    // attempts 刻意不因这类重试复位(只在补发成功后复位):共享的轮询尝试上限(约 30
+    // 分钟)就是整段等待的界,防止占槽任务本身卡死时无限重试——上限耗尽走既有释放
+    // 路径,只是把 toast 换成提示用户手动重试(decideMerge 落 409 时已经 toast 过一次,
+    // 这里的提示只在自动补发彻底放弃时才出现,不会重复刷屏)。
     async function settleOrRetryRebuild() {
-      if (pendingRebuildNotebookIdsRef.current.has(nb)) {
-        setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+      const hasPendingRebuild = pendingRebuildNotebookIdsRef.current.has(nb);
+      if (hasPendingRebuild && attempts <= REBUILD_POLL_MAX_ATTEMPTS) {
         try {
           await rebuildUnifiedKg(nb);
+          // 补发真正成功才消费标记——见上方函数注释。
+          setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
           if (!cancelled && activeNotebookIdRef.current === nb) {
             attempts = 0;
             settled = false;
@@ -4672,9 +4682,22 @@ export default function Home() {
           }
           return; // 已切库/effect 已收尾:忙碌位留给下次重挂的 effect 接着轮
         } catch (err) {
-          if (httpErrorStatus(err) !== 409) reportError(err);
-          // 放弃补发,落到下面的正常释放
+          if (httpErrorStatus(err) === 409) {
+            // 占槽任务还没结束:标记与忙碌位原样保留、重启轮询等它收工再重试。
+            if (!cancelled && activeNotebookIdRef.current === nb) {
+              settled = false;
+              startPolling();
+              return;
+            }
+            return; // 已切库/effect 已收尾:标记与忙碌位都留给下次重挂的 effect 接着轮
+          }
+          reportError(err);
+          // 非 409 的补发失败:落到下面的正常释放,标记仍不消费,留给下次终态再试。
         }
+      } else if (hasPendingRebuild) {
+        // 轮询尝试上限已耗尽,这条合并决定始终没能触发一次看得见它的重新合并:不再
+        // 自动重试,提示用户手动点一次。
+        setToast("重新合并长时间未能自动完成，请稍后手动点击「重新合并」");
       }
       setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
     }

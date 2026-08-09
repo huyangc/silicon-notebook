@@ -96,10 +96,12 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
   assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
   const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
   assert.ok(
-    // 上限从 3000 提到 4500:codex R1 两条 P2(终态先 settle 再刷新 + decideMerge 409
-    // 撞槽自动补发)都加在这个 effect 体内,body 因此比之前长——阈值只是防「查找到很远
-    // 之后一个不相干的收尾数组」的护栏,不是精确长度断言,跟着真实需要一起调没有问题。
-    depsAt > start && depsAt - start < 4500,
+    // 上限从 3000 提到 4500(codex R1 两条 P2:终态先 settle 再刷新 + decideMerge 409
+    // 撞槽自动补发),又提到 5300(codex R2 P1:409 补发不再提前消费标记,改成「保留标记 +
+    // 保留忙碌位 + 重启轮询,attempts 不因重试复位」,settleOrRetryRebuild 因此又长了一截)
+    // ——阈值只是防「查找到很远之后一个不相干的收尾数组」的护栏,不是精确长度断言,跟着
+    // 真实需要一起调没有问题。
+    depsAt > start && depsAt - start < 5300,
     "轮询 effect 的依赖必须恰好是 [rebuildingNotebookIds, currentNotebookId]"
     + "(kgLimit 进依赖会在换范围时重启轮询、重置尝试计数)",
   );
@@ -223,13 +225,17 @@ test("终态观测后先停轮询(settled+clearInterval)再收尾,防止刷新/�
   }
 });
 
-test("rebuild 轮询终态消费待补发标记、补发一次 rebuildUnifiedKg(成功保留忙碌位续轮询,再 409 才放弃)", async () => {
-  // codex R1 P2:decideMerge 撞 409 只保留旧 toast、不做任何补发时,占槽任务(可能在
-  // 决定落库**之前**就已经捕获输入版本)跑完发布的是旧聚类——决定被记录了,但图谱可能
-  // 永远看不见它,除非用户自己想起来再点一次「重新合并」。这条测试钉住消费端:必须先
-  // 判断标记存在、再消费掉标记(否则每次终态都会再补发一次)、再补发请求;补发成功且
-  // 仍在同一个库要重启轮询追新任务而不是就此放手;补发再撞 409(或其它失败)必须放弃
-  // 重试、落到正常释放,不能无限循环补发。
+test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正成功后消费;再 409 保留标记+忙碌位+续轮询,不复位 attempts)", async () => {
+  // codex R2 P1:上一版(codex R1 P2)在发补发请求**之前**就无条件消费掉待补发标记——
+  // 补发撞 409(占槽的另一个任务,比如「补上关联」,还没跑完;rebuild status 对它恒回
+  // idle 终态)时,标记已经被提前吃掉、忙碌位却按原样释放,这条决定就再也没有人会去
+  // 补发它,直到用户自己想起来手动点「重新合并」。这条测试钉住修复后的三件事:
+  //   ① 标记只在补发 POST **真正成功后**才消费(顺序必须是先判断标记存在、再补发
+  //      请求、补发成功后才消费标记——不是"先消费再补发");
+  //   ② 补发撞 409 必须保留标记 + 保留忙碌位(不落到正常释放) + 重启轮询,让下一
+  //      tick 再试,而不是放弃;
+  //   ③ attempts 不能因这类 409 重试复位——只有补发真正成功才复位,否则共享的轮询
+  //      尝试上限(约 30 分钟)对这整段等待会失效,占槽任务卡死时会无限重试。
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
 
@@ -247,38 +253,82 @@ test("rebuild 轮询终态消费待补发标记、补发一次 rebuildUnifiedKg(
   const hasMarkerAt = retryBody.indexOf("pendingRebuildNotebookIdsRef.current.has(nb)");
   assert.ok(hasMarkerAt >= 0, "必须先检查待补发标记是否存在,不能无条件补发");
 
+  assert.ok(
+    retryBody.includes("attempts <= REBUILD_POLL_MAX_ATTEMPTS"),
+    "补发前必须检查轮询尝试上限尚未耗尽,否则超限之后仍会不停重试",
+  );
+
+  const retryPostAt = retryBody.indexOf("rebuildUnifiedKg(nb)");
+  assert.ok(retryPostAt > hasMarkerAt, "必须先判断标记存在,再发补发请求");
+
   const consumeAt = retryBody.indexOf(
     "setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb))",
   );
-  const retryPostAt = retryBody.indexOf("rebuildUnifiedKg(nb)");
   assert.ok(
     consumeAt >= 0,
-    "消费标记必须真的清掉它(releaseNotebookClaim),否则每次终态都会再补发一次",
+    "消费标记必须真的清掉它(releaseNotebookClaim),否则标记会永久卡在待补发状态",
   );
   assert.ok(
-    hasMarkerAt < consumeAt && consumeAt < retryPostAt,
-    "顺序必须是:先判断标记存在,再消费掉标记,再补发请求",
+    retryPostAt < consumeAt,
+    "顺序必须是:先 await 补发请求,补发真正成功后才消费标记——不能像旧代码那样在"
+    + "发请求前就无条件消费(那样补发一旦撞 409,标记已经被提前吃掉,占槽任务收工后"
+    + "就再没有人会补发这条决定,变异①要拦的正是这种写法)",
   );
 
-  const successAt = retryBody.indexOf("startPolling();");
+  const successAt = retryBody.indexOf("startPolling();", consumeAt);
   assert.ok(successAt >= 0, "补发成功必须重启轮询(startPolling)追这次新任务,不能就此撒手不管");
   assert.ok(
-    retryPostAt < successAt,
-    "必须先 await 补发请求,再重启轮询——不能在请求还没定型时就当作已经成功",
+    consumeAt < successAt,
+    "必须先消费标记,再重启轮询——顺序颠倒说明重启轮询的不是成功分支",
   );
 
   const catchAt = retryBody.indexOf("catch (err) {");
   assert.ok(catchAt > successAt, "找不到补发失败的 catch 分支");
   const catchBody = retryBody.slice(catchAt);
+  const four09At = catchBody.indexOf("if (httpErrorStatus(err) === 409) {");
   assert.ok(
-    catchBody.includes("httpErrorStatus(err) !== 409"),
-    "补发再撞 409 必须识别出来并放弃重试,不能无限循环补发",
+    four09At >= 0,
+    "补发失败必须显式识别 409(占槽任务还没结束),不能只用 !== 409 一刀切放弃重试",
   );
+  const reportErrAt = catchBody.indexOf("reportError(err);");
+  assert.ok(reportErrAt > four09At, "非 409 的补发失败仍要上报,不能整个 catch 都吞掉");
+  const four09Block = catchBody.slice(four09At, reportErrAt);
+  assert.ok(
+    four09Block.includes("startPolling();"),
+    "409(占槽任务还没结束)必须重启轮询、让下一 tick 再试补发——不能就此放弃",
+  );
+  assert.ok(
+    !four09Block.includes("setPendingRebuildNotebookIds"),
+    "409 分支不能消费标记——标记必须原样保留到占槽任务收工、补发真正成功的那一刻",
+  );
+  assert.ok(
+    !four09Block.includes("attempts = 0"),
+    "409 重试不能复位 attempts(变异②):复位会让共享的轮询尝试上限(约 30 分钟)对"
+    + "这整段等待失效,占槽任务本身卡死时会无限重试而永远解锁不了忙碌位",
+  );
+  assert.strictEqual(
+    (retryBody.match(/attempts = 0;/g) || []).length,
+    1,
+    "attempts 全函数只能有一处复位——补发真正成功那一支,任何其它分支(含 409 重试、"
+    + "超限放弃)复位都会让轮询尝试上限失去意义",
+  );
+
   const finalReleaseAt = retryBody.indexOf(
     "setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));",
     catchAt,
   );
-  assert.ok(finalReleaseAt > catchAt, "放弃补发之后必须落到正常释放,否则忙碌位会永远卡住");
+  assert.ok(finalReleaseAt > catchAt, "非 409 失败之后必须落到正常释放,否则忙碌位会永远卡住");
+
+  assert.ok(
+    retryBody.includes("else if (hasPendingRebuild)"),
+    "轮询尝试上限耗尽、标记仍未补发成功时,必须走一条独立分支收尾(而不是悄悄和"
+    + "无标记的场景共用同一条路径)",
+  );
+  assert.ok(
+    /setToast\("[^"]*手动点击[^"]*"\)/.test(retryBody),
+    "尝试上限耗尽必须显式提示用户手动重试「重新合并」,不能悄悄丢弃这条还没兑现的"
+    + "合并决定——用户不会无缘无故知道要再点一次",
+  );
 });
 
 test("page.tsx 有重新合并的完成信号(否则忙碌位解除不掉)", async () => {
