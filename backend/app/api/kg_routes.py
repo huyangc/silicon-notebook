@@ -214,9 +214,15 @@ def rebuild_unified_kg(notebook_id: str) -> dict:
     answer in milliseconds, but a real recluster streams seed representatives over
     the whole graph — minutes to hours on a base-tier library, well past
     PostgreSQL's statement timeout, with a request worker pinned for the duration.
-    No LLM gate: clustering is deterministic and must keep working with no model
-    configured. Single flight is shared with relink (409, see
-    `_kg_maintenance_busy`), so neither pass can publish over the other's inputs.
+    No LLM PRECONDITION gate — unlike kg/build, this endpoint does not require a
+    model to be configured and keeps working without one. That is not the same as
+    the pass being purely deterministic: when `kg_merge_review` and/or
+    `kg_concept_description` ARE configured, `rebuild_unified_kg` calls them as a
+    fail-open enhancement (candidate-pair adjudication, canonical description
+    generation) — an unexpected failure there is swallowed and the rebuild still
+    proceeds, but a configured model genuinely gets called. Single flight is
+    shared with relink (409, see `_kg_maintenance_busy`), so neither pass can
+    publish over the other's inputs.
     The old synchronous `{"clusters": N}` is gone — the count now arrives from
     `unified-kg/rebuild/status` once the pass actually finishes.
     """

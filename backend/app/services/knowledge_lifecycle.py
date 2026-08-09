@@ -1414,8 +1414,9 @@ class KnowledgeLifecycleService:
 
         ``BaseException`` — not ``Exception``: KeyboardInterrupt / SystemExit
         inherit from it, and a claim left in ``running`` would refuse every later
-        relink for the rest of the process's life (the same failure mode the
-        durable KG-build guard is documented against).
+        relink AND every later 「重新合并」 rebuild (they share the slot) for the
+        rest of the process's life (the same failure mode the durable KG-build
+        guard is documented against).
 
         Both entry points (the endpoint's background job and the post-build tail)
         come through here, so this is also the ONE place that reports a failed pass:
@@ -2540,12 +2541,26 @@ class KnowledgeLifecycleService:
         """Deterministic relink tail of a successful build — fail-open, observable,
         and under the SAME per-notebook single flight the endpoint claims.
 
-        The claim is not decoration. `POST /kg/relink` and this tail run the same
-        pass over the same notebook; without a shared claim a click that lands while
-        a build is finishing starts a second full read of every source, and only the
-        idempotency triple stops it from writing the edges twice — after both have
-        already paid. Losing the claim is therefore a SKIP, not a failure: whoever
-        holds it is doing exactly this work.
+        The claim is not decoration, but what it protects against differs by who
+        else holds it:
+
+        · A CONCURRENT RELINK (`POST /kg/relink`, or another build's tail) runs the
+          SAME pass over the same notebook; without a shared claim a click landing
+          while a build is finishing would start a second full read of every
+          source, and only the idempotency triple would stop it from writing the
+          edges twice — after both have already paid. Losing the claim here is a
+          true SKIP: whoever holds it is doing exactly this work, nothing is lost.
+        · A CONCURRENT 「重新合并」 REBUILD does DIFFERENT work — it rewrites
+          `concept_clusters` and the community partition, it does not append the
+          edges this tail exists to add. Losing the claim here is a deliberately
+          accepted fail-open DROP, not "someone else is already doing this for
+          me": this build's isolated-node connections simply do not happen this
+          round and stay unconnected until a manual relink (or a later build's
+          tail, if it wins the slot) runs. The two passes share the slot anyway
+          because a concurrent write would have one publish over inputs the other
+          is still consuming (the same reason `KgMaintenanceAlreadyRunning` exists
+          at all) — sharing the slot is about write safety, not about the two
+          passes being interchangeable.
 
         Fail-open is kept (a successful extraction must not be reported as failed
         because the deterministic tail could not run) but no longer SILENT — the
@@ -2558,18 +2573,21 @@ class KnowledgeLifecycleService:
         """
         try:
             job = self.start_notebook_relink(notebook_id)
-        except KgMaintenanceAlreadyRunning:
-            # Also covers "a 「重新合并」 pass owns the shared slot": that pass
-            # rewrites the very clusters this tail's edges feed, so skipping is
-            # right for the same reason it is right for a concurrent relink.
+        except KgMaintenanceAlreadyRunning as exc:
+            # `exc.holder` is "relink" or "rebuild" — see the two cases in the
+            # docstring above. Surfaced on the event so an operator (or a future
+            # debugging session) does not have to guess which of the two
+            # fundamentally different skip reasons actually fired.
             self.event_log.logger.info(
-                "build_notebook_kg: KG maintenance already running for %s, skipped",
-                notebook_id,
+                "build_notebook_kg: KG maintenance already running (holder=%s) for %s, skipped",
+                exc.holder, notebook_id,
             )
-            # Body-free by contract: kind + notebook id only.
+            # Body-free by contract: kind + notebook id + a stable enum string,
+            # no free text.
             self.event_log.emit({
                 "kind": "kg_relink_skipped",
                 "notebook_id": notebook_id,
+                "holder": exc.holder,
             })
             return
         except Exception:  # noqa: BLE001 - relink is fail-open here
@@ -4398,9 +4416,13 @@ class KnowledgeLifecycleService:
         ⚠ **补账本路径的板块划分读自写事务之外,发布前必须复核**(codex 第 16 轮 P2)。
         这条路径的 `kept_rows` 来自 `community_rows_for_summary`(事务外),而随后的
         `_compute_kg_analysis` 在生产上是分钟级的 —— 那段窗口里另一次 `force=True` 的
-        重建可以把整套板块换掉:本方法没有任何单飞守卫,`POST /notebooks/{id}/
-        unified-kg/rebuild` 直接调它,`scripts/recluster_kg.py` 与 `batch_ingest` 还从
-        **别的进程**调。所以发布事务里、写产物之前要问一句「我算的那套划分还在吗」
+        重建可以把整套板块换掉:**本方法自己没有任何单飞守卫**。`POST /notebooks/{id}/
+        unified-kg/rebuild` 如今是后台化的 `run_unified_kg_rebuild_job` 的一步,那条链路
+        已经在共享的 per-notebook KG 维护槽下(`KgMaintenanceAlreadyRunning`,见
+        `run_unified_kg_rebuild_job`),两次点击不会真的并发跑到这里——但离线的
+        `backend/app/scripts/recluster_kg.py`(`force=True`)不经过那个槽,直接调
+        `rebuild_unified_kg` → `rebuild_communities`,任何跨进程/跨部署运维触发的重跑
+        同样绕得开。所以发布事务里、写产物之前要问一句「我算的那套划分还在吗」
         (`board_partition_still_holds`,查一行足矣 —— `replace_communities` 是整表
         删再插、id 128 bit 新铸),不在就**整份放弃发布**、发
         `kg_analysis_backfill_discarded`,靠既有的账本闸下一次重来。
@@ -4696,9 +4718,11 @@ class KnowledgeLifecycleService:
                     # 那一档需要:它的 `kept_rows` 是**写事务之外**从库里读回来的,而随后
                     # 的 `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级
                     # 的,窗口很宽。期间另一次 `force=True` 的重建完全可以把整套板块换掉
-                    # —— `POST /notebooks/{id}/unified-kg/rebuild` 没有任何单飞守卫,
-                    # `scripts/recluster_kg.py` 与 `batch_ingest` 还从**别的进程**调同一条
-                    # 路径。不复核就会写出指向已不存在板块 id 的 `kg_community_edges` /
+                    # —— 本方法自己没有单飞守卫;`POST /notebooks/{id}/unified-kg/rebuild`
+                    # 如今经共享的 per-notebook KG 维护槽串行化,但离线
+                    # `backend/app/scripts/recluster_kg.py`(`force=True`)不经过那个槽,
+                    # 跨进程/跨部署运维触发的重跑同样能撞上同一条路径。不复核就会写出
+                    # 指向已不存在板块 id 的 `kg_community_edges` /
                     # `kg_source_profiles`,而它们的账本盖着「与当前一致」的戳 —— 比缺失
                     # 更糟,缺失至少是诚实的。
                     #
