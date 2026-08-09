@@ -1152,6 +1152,31 @@ def test_build_corpus_map_grounds_on_corpus(repo, monkeypatch):
     assert len(m) <= 4000
 
 
+@pytest.mark.parametrize("cancelled_channel", ["knowledge", "ppr"])
+def test_build_corpus_map_propagates_retrieval_cancellation(
+    repo, monkeypatch, cancelled_channel,
+):
+    from app.services.cancellation import AskCancelled
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    monkeypatch.setattr(eng, "_probe_knowledge_hits", lambda *_args: [])
+    monkeypatch.setattr(repo.retrieval, "ppr_retrieve", lambda *_args: [])
+    if cancelled_channel == "knowledge":
+        monkeypatch.setattr(
+            eng, "_probe_knowledge_hits",
+            lambda *_args: (_ for _ in ()).throw(AskCancelled()),
+        )
+    else:
+        monkeypatch.setattr(
+            repo.retrieval, "ppr_retrieve",
+            lambda *_args: (_ for _ in ()).throw(AskCancelled()),
+        )
+
+    with pytest.raises(AskCancelled):
+        eng._build_corpus_map("nb", "q", profile={})
+
+
 # ---------------------------------------------------------------------------
 # Task 2(STORM): 多视角预写作大纲 prompt(接地 + 张力 + MECE)
 # ---------------------------------------------------------------------------
@@ -2417,6 +2442,38 @@ def test_deep_dive_seeds_confirmed_directions_and_skips_rerun(repo, monkeypatch)
     assert [q.strip() for q in elements] == ["q1", "q2", "q3"], (
         "元素补取不是重复,全部方向都要"
     )
+
+
+@pytest.mark.parametrize("cancelled_channel", ["knowledge", "element"])
+def test_deep_dive_direction_retrieval_propagates_cancellation(
+    repo, monkeypatch, cancelled_channel,
+):
+    from app.services.cancellation import AskCancelled
+    from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+
+    def _run(*_args, **_kwargs):
+        result = ReasoningResult()
+        if cancelled_channel == "element":
+            result.attempted.append({"query": "q", "new": 0, "tries": 1})
+        return result
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda *_args: [])
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements", lambda *_args, **_kwargs: [])
+    target = (
+        "federated_retrieve" if cancelled_channel == "knowledge"
+        else "retrieve_elements"
+    )
+    monkeypatch.setattr(
+        repo.retrieval, target,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AskCancelled()),
+    )
+
+    with pytest.raises(AskCancelled):
+        _mk_engine(repo, _OutlineLLM())._deep_dive(
+            "nb", {"title": "t", "scope": "s", "sub_queries": ["q"]},
+            "Q", depth=3,
+        )
 
 
 def test_deep_dive_without_directions_leaves_planner_path(repo, monkeypatch):
