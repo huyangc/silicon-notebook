@@ -4535,6 +4535,26 @@ export default function Home() {
   // codex R4 P2(B):「重新合并」与「补上关联」共用服务端同一把按笔记本单飞锁，早退必须
   // 认「任一忙碌位为真即忙」（relinkingKg || kgRefreshBusy）——只看自己那一位会在对方
   // 占槽期间仍然发出请求，白撞一次 409。
+  // codex R8:POST 撞 409 说明服务端确有一个维护任务在跑(可能是另一个标签页/会话
+  // 在「一次性状态探测之后、这次点击之前」发起的)。把它当提交失败清掉本地位,轮询就
+  // 永远不会领养那个任务——按钮回到可点、图谱在任务完成后保持陈旧。正确动作是查两个
+  // 状态、领养正在跑的那一个;两个都不在跑(竞态已消散)才如实清位。
+  async function adoptRunningMaintenance(nb: string) {
+    try {
+      const [rebuild, relink] = await Promise.all([
+        fetchUnifiedKgRebuildStatus(nb).catch(() => null),
+        fetchRelinkStatus(nb).catch(() => null),
+      ]);
+      const rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
+      const relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
+      if (rebuildRunning) setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
+      if (relinkRunning) setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
+      return rebuildRunning || relinkRunning;
+    } catch {
+      return false;
+    }
+  }
+
   async function relinkFromKgView() {
     if (!currentNotebookId || relinkingKg || kgRefreshBusy) return;
     const nb = currentNotebookId;
@@ -4543,6 +4563,12 @@ export default function Home() {
       await relinkKg(nb);
       setToast("已开始补上关联；完成后会自动更新");
     } catch (err) {
+      // 409=服务端确有任务在跑(可能另一标签页发起)——领养它而不是当失败清位。
+      if (httpErrorStatus(err) === 409) {
+        setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
+        void adoptRunningMaintenance(nb);
+        return;
+      }
       reportError(err);
       // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
       setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
@@ -4639,6 +4665,12 @@ export default function Home() {
       setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
       setToast("已开始重新合并；完成后会自动更新");
     } catch (err) {
+      // 409=服务端确有任务在跑(可能另一标签页发起)——领养它而不是当失败清位。
+      if (httpErrorStatus(err) === 409) {
+        setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+        void adoptRunningMaintenance(nb);
+        return;
+      }
       reportError(err);
       // 只清自己那一格：这期间用户可能已经切库并在别的库点了重新合并。
       setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));

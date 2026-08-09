@@ -289,3 +289,15 @@ test("codex R4 P2(B):知识图谱视图侧栏「补上关联」的早退与 disa
     + "合并」在跑时这颗按钮仍可点,点了只会撞 409",
   );
 });
+
+test("codex R8:补上关联 POST 撞 409 必须领养服务端任务而不是当失败清位", async () => {
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+  const fnAt = source.indexOf("async function relinkFromKgView()");
+  const catchAt = source.indexOf("} catch (err) {", fnAt);
+  const endAt = source.indexOf("\n  }", catchAt);
+  const body = source.slice(catchAt, endAt);
+  assert.ok(body.includes("httpErrorStatus(err) === 409"), "409 必须被单独识别");
+  assert.ok(body.includes("void adoptRunningMaintenance(nb);"),
+    "409 分支必须领养服务端正在跑的维护任务(另一标签页发起的也要接管轮询)");
+});
