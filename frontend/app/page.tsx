@@ -1035,6 +1035,12 @@ export default function Home() {
   // 置上，消费点必须经 ref 读最新值,不能用效果创建时捕获的那份。
   const pendingRebuildNotebookIdsRef = useRef(pendingRebuildNotebookIds);
   pendingRebuildNotebookIdsRef.current = pendingRebuildNotebookIds;
+  // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端**旧的** idle 并当终态
+  // 收工——随后 POST 才成功,没有人再轮询,任务完成不会刷新。这个集合记「正在提交(POST
+  // 还没落地)的库」,两条轮询 tick 撞到 idle 终态时如果自己的库还在这个集合里,那就是
+  // 提交还在飞、服务端还没看到新任务,不能当真终态收工。模块级 Set,直接 mutate——不是
+  // state,不触发渲染(只在轮询 tick 的同步分支里读一次性瞬时状态,不需要驱动 UI)。
+  const submittingMaintenanceRef = useRef<Set<string>>(new Set());
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   const scaleIndexDoneRequestRef = useRef(0);
@@ -4539,39 +4545,64 @@ export default function Home() {
   // 在「一次性状态探测之后、这次点击之前」发起的)。把它当提交失败清掉本地位,轮询就
   // 永远不会领养那个任务——按钮回到可点、图谱在任务完成后保持陈旧。正确动作是查两个
   // 状态、领养正在跑的那一个;两个都不在跑(竞态已消散)才如实清位。
-  async function adoptRunningMaintenance(nb: string) {
-    try {
-      const [rebuild, relink] = await Promise.all([
-        fetchUnifiedKgRebuildStatus(nb).catch(() => null),
-        fetchRelinkStatus(nb).catch(() => null),
-      ]);
-      const rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
-      const relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
-      if (rebuildRunning) setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
-      if (relinkRunning) setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
-      return rebuildRunning || relinkRunning;
-    } catch {
-      return false;
+  // codex R9:上一版逐个 `.catch(() => null)` 把"这次探测确实失败"和"探测成功查到没在
+  // 跑"混成同一个 null——网络抖动导致的假阴性会被当成"两个都不在跑",于是调用方把自己的
+  // 忙碌位当竞态已消散清掉,而服务端那个任务其实还在跑、没人再轮询。改用 Promise.allSettled
+  // 把两次探测的失败与成功分开看:任一探测失败就返回 "unknown"、不触碰任何忙碌位(调用方
+  // 保留自己的位,交给自己那条轮询继续查——瞬时错误自愈,真 idle 时轮询终态会正常释放并
+  // 刷新)。两次探测都成功时按服务端真相**双向**重算两个忙碌位:确认在跑就认领、确认没在
+  // 跑就释放——这是唯一能同时满足「adopted 时若领养的是另一种任务,自己那种没在跑的位要
+  // 释放」与「同种在跑,位已经在,原样保留」的写法:调用方不需要（也无法在不重复探测的前提
+  // 下）单独分辨"是不是自己那一种"，函数内部按两条服务端真相各自归位就已经是正确结果。
+  async function adoptRunningMaintenance(
+    nb: string,
+  ): Promise<"adopted" | "idle" | "unknown"> {
+    const [rebuildResult, relinkResult] = await Promise.allSettled([
+      fetchUnifiedKgRebuildStatus(nb),
+      fetchRelinkStatus(nb),
+    ]);
+    if (rebuildResult.status === "rejected" || relinkResult.status === "rejected") {
+      return "unknown";
     }
+    const rebuild = rebuildResult.value;
+    const relink = relinkResult.value;
+    const rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
+    const relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
+    setRebuildingNotebookIds((prev) => (
+      rebuildRunning ? claimNotebookSlot(prev, nb) : releaseNotebookClaim(prev, nb)
+    ));
+    setRelinkingNotebookIds((prev) => (
+      relinkRunning ? claimRelinkSlot(prev, nb) : releaseRelinkClaim(prev, nb)
+    ));
+    return rebuildRunning || relinkRunning ? "adopted" : "idle";
   }
 
   async function relinkFromKgView() {
     if (!currentNotebookId || relinkingKg || kgRefreshBusy) return;
     const nb = currentNotebookId;
     setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
+    // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
+    // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
+    // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
+    submittingMaintenanceRef.current.add(nb);
     try {
       await relinkKg(nb);
       setToast("已开始补上关联；完成后会自动更新");
     } catch (err) {
-      // 409=服务端确有任务在跑(可能另一标签页发起)——领养它而不是当失败清位。
+      // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
+      // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「补上关联」自己(同种),
+      // 提前清掉的位没有任何东西会把它补回来(adoptRunningMaintenance 当时只会"认领"，不
+      // 会撤销)。改成先不动、把决定权整个交给 adoptRunningMaintenance:它按服务端真相
+      // 双向归位,同种保留、异种释放、探测失败原样不动,调用方这里不需要再自己判断一次。
       if (httpErrorStatus(err) === 409) {
-        setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
-        void adoptRunningMaintenance(nb);
+        await adoptRunningMaintenance(nb);
         return;
       }
       reportError(err);
       // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
       setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
+    } finally {
+      submittingMaintenanceRef.current.delete(nb);
     }
   }
 
@@ -4635,10 +4666,17 @@ export default function Home() {
         return;
       }
       let outcome;
+      let status;
       try {
-        outcome = relinkPollOutcome(await fetchRelinkStatus(nb));
+        status = await fetchRelinkStatus(nb);
       } catch { return; }          // 瞬时错误：继续轮询
+      outcome = relinkPollOutcome(status);
       if (cancelled || settled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+      // codex R9:POST 比首个 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工——随后
+      // POST 才成功,没人再轮询,任务完成不刷新。idle 且提交还在飞(submittingMaintenanceRef
+      // 记着这个库)时不能当真终态,继续等下一个 tick;提交落地后服务端会回真实
+      // running/succeeded/failed。
+      if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;
       settled = true;
       window.clearInterval(poll);
       finish(outcome);
@@ -4657,6 +4695,10 @@ export default function Home() {
     if (!currentNotebookId || kgRefreshBusy || relinkingKg) return;
     const nb = currentNotebookId;
     setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
+    // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
+    // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
+    // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
+    submittingMaintenanceRef.current.add(nb);
     try {
       await rebuildUnifiedKg(nb);
       // codex R7:手动重建真的起来了,就消费掉可能残留的待补发标记——否则这次
@@ -4665,15 +4707,20 @@ export default function Home() {
       setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
       setToast("已开始重新合并；完成后会自动更新");
     } catch (err) {
-      // 409=服务端确有任务在跑(可能另一标签页发起)——领养它而不是当失败清位。
+      // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
+      // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「重新合并」自己(同种),
+      // 提前清掉的位没有任何东西会把它补回来。改成先不动、把决定权整个交给
+      // adoptRunningMaintenance:它按服务端真相双向归位,同种保留、异种释放、探测失败
+      // 原样不动,调用方这里不需要再自己判断一次。
       if (httpErrorStatus(err) === 409) {
-        setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-        void adoptRunningMaintenance(nb);
+        await adoptRunningMaintenance(nb);
         return;
       }
       reportError(err);
       // 只清自己那一格：这期间用户可能已经切库并在别的库点了重新合并。
       setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+    } finally {
+      submittingMaintenanceRef.current.delete(nb);
     }
   }
 
@@ -4768,6 +4815,9 @@ export default function Home() {
     async function settleOrRetryRebuild() {
       const hasPendingRebuild = pendingRebuildNotebookIdsRef.current.has(nb);
       if (hasPendingRebuild && attempts <= REBUILD_POLL_MAX_ATTEMPTS) {
+        // codex R9:这次补发也是一次真正的 POST 提交,同样会撞「POST 比首个 tick 慢」的
+        // 陈旧 idle 竞态——统一包上 submittingMaintenanceRef,原因同 refreshUnifiedKg。
+        submittingMaintenanceRef.current.add(nb);
         try {
           await rebuildUnifiedKg(nb);
           // 补发真正成功才消费标记——见上方函数注释。
@@ -4791,6 +4841,8 @@ export default function Home() {
           }
           reportError(err);
           // 非 409 的补发失败:落到下面的正常释放,标记仍不消费,留给下次终态再试。
+        } finally {
+          submittingMaintenanceRef.current.delete(nb);
         }
       } else if (hasPendingRebuild) {
         // 轮询尝试上限已耗尽,这条合并决定始终没能触发一次看得见它的重新合并:不再
@@ -4829,9 +4881,11 @@ export default function Home() {
           return;
         }
         let outcome;
+        let status;
         try {
-          outcome = rebuildPollOutcome(await fetchUnifiedKgRebuildStatus(nb));
+          status = await fetchUnifiedKgRebuildStatus(nb);
         } catch { return; }          // 瞬时错误：继续轮询
+        outcome = rebuildPollOutcome(status);
         if (
           cancelled
           || settled
@@ -4839,6 +4893,11 @@ export default function Home() {
           || generation !== myGeneration
           || !outcome.done
         ) return;
+        // codex R9:POST(含 settleOrRetryRebuild 的补发)比首个 tick 慢时,轮询会先读到
+        // 服务端旧的 idle 并当终态收工——随后 POST 才成功,没人再轮询,任务完成不刷新。
+        // idle 且提交还在飞(submittingMaintenanceRef 记着这个库)时不能当真终态,继续等
+        // 下一个 tick;提交落地后服务端会回真实 running/succeeded/failed。
+        if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;
         settled = true;
         window.clearInterval(poll);
         finish(outcome);
