@@ -299,6 +299,21 @@ test("codex R5 P2(A):pollTick 捕获代际,迟到的上一代际响应必须被�
   );
 });
 
+test("codex R7:手动重建 POST 成功必须消费残留的待补发标记", async () => {
+  // 自动补发放弃后标记刻意保留;但用户手动点「重新合并」且 POST 成功时,这次重建
+  // 已覆盖那条决定——不消费标记,终态会跳过刷新并再白发一次可能数小时的重建。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+  const fnAt = source.indexOf("async function refreshUnifiedKg()");
+  assert.ok(fnAt > 0, "找不到 refreshUnifiedKg");
+  const tryAt = source.indexOf("await rebuildUnifiedKg(nb);", fnAt);
+  const toastAt = source.indexOf("setToast(", tryAt);
+  const consumeAt = source.indexOf(
+    "setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));", tryAt);
+  assert.ok(tryAt > 0 && consumeAt > tryAt && consumeAt < toastAt,
+    "POST 成功后、toast 之前必须消费本库的待补发标记");
+});
+
 test("codex R5 P2(B):新图替换旧图之后必须重对账当前选中的概念(conceptDetail/nodeCtx)", async () => {
   // 旧同步流程(后台化之前的 refreshUnifiedKg)在 rebuild 成功、图谱重拉之后,会把当前
   // 选中的概念节点在**新图**里重查:还在就用新图给出的 id 重新拉一次详情,不在就把
