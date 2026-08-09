@@ -299,6 +299,18 @@ test("codex R5 P2(A):pollTick 捕获代际,迟到的上一代际响应必须被�
   );
 });
 
+test("codex R8:重新合并 POST 撞 409 必须领养服务端任务而不是当失败清位", async () => {
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+  const fnAt = source.indexOf("async function refreshUnifiedKg()");
+  const catchAt = source.indexOf("} catch (err) {", fnAt);
+  const endAt = source.indexOf("\n  }", catchAt);
+  const body = source.slice(catchAt, endAt);
+  assert.ok(body.includes("httpErrorStatus(err) === 409"), "409 必须被单独识别");
+  assert.ok(body.includes("void adoptRunningMaintenance(nb);"),
+    "409 分支必须领养服务端正在跑的维护任务(另一标签页发起的也要接管轮询)");
+});
+
 test("codex R7:手动重建 POST 成功必须消费残留的待补发标记", async () => {
   // 自动补发放弃后标记刻意保留;但用户手动点「重新合并」且 POST 成功时,这次重建
   // 已覆盖那条决定——不消费标记,终态会跳过刷新并再白发一次可能数小时的重建。
