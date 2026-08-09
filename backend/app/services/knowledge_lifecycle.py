@@ -51,7 +51,7 @@ from app.core.event_logging import EventLogger
 from app.repositories.ports import (
     GovernanceStorePort,
     KgBuildJobStorePort,
-    KgRelinkAlreadyRunning,
+    KgMaintenanceAlreadyRunning,
     KnowledgeStorePort,
     UnifiedKgStorePort,
 )
@@ -357,17 +357,22 @@ class KnowledgeLifecycleService:
         # `_kg_building`/`_kg_building_lock` 属性别名这里的同一对象。
         self.kg_building = kg_building
         self.kg_building_lock = threading.Lock()
-        # 补连孤立节点的**进程内**单飞与最近一次结果(每 notebook 一条,后写覆盖前写)。
+        # 零模型 KG 维护任务的**进程内**单飞与最近一次结果(每 notebook 一条,后写覆盖
+        # 前写)。「补上关联」与「重新合并」共用**同一格**:重新合并会整表重写
+        # concept_clusters 并重铸板块划分,而补连往同一张图上追加边——两者并发不是多花
+        # 一份钱,是一方在另一方还在读的输入上发布结果。条目里的 `kind` 说明这一格现在
+        # 归谁,409 才能点名用户真正要等的那个动作;两个状态视图各自只认自己那种 kind,
+        # 别人的任务一律如实回 idle,浏览器的有界轮询因此不会挂在另一件事上。
         # 刻意不复用 durable `kg_build_jobs`:那张表的单飞索引是 notebook 级的,接进去
-        # 等于让一次补连独占 KG 构建的名额,而它的消费方(kgBuildPresentation、待办
-        # 铃铛、index-status)会把补连读成「正在分析 0/0 项内容」「知识图谱分析完成」——
+        # 等于让一次维护独占 KG 构建的名额,而它的消费方(kgBuildPresentation、待办
+        # 铃铛、index-status)会把它读成「正在分析 0/0 项内容」「知识图谱分析完成」——
         # 面向用户的文案会说谎;`prepare_notebook_kg_job` 还要求 kg_extract 已配置,而
-        # 补连是零模型的确定性动作,今天没配模型也能跑。生产固定 `--workers 1`,进程内
+        # 这两件都是零模型的确定性动作,今天没配模型也能跑。生产固定 `--workers 1`,进程内
         # 单飞与跨进程单飞在部署上等价;进程重启后条目自然消失,状态端点如实回报
         # 「不在跑」而不是编一个进度。终态刻意保留(浏览器要在下一次轮询里读到统计),
-        # 所以条目数上界 = 本进程内点过「补上关联」的笔记本数,每条七个标量。
-        self.relink_jobs: Dict[str, dict] = {}
-        self.relink_lock = threading.Lock()
+        # 所以条目数上界 = 本进程内点过这两个动作的笔记本数,每条不超过八个标量。
+        self.kg_maintenance_jobs: Dict[str, dict] = {}
+        self.kg_maintenance_lock = threading.Lock()
         # The facade's EXISTING cache objects, held BY IDENTITY (never
         # replacement copies) — the Task-14 coordinator evicts the same dict.
         self.unified_cache = unified_cache
@@ -1302,67 +1307,107 @@ class KnowledgeLifecycleService:
         isolated_after = sum(1 for n in nodes if n["id"] not in now_connected)
         return (isolated_before, isolated_after)
 
-    # --- relink background job (per-notebook single flight) -------------------
+    # --- zero-model KG maintenance jobs (ONE per-notebook single flight) ------
+    #
+    # Relink and the unified rebuild share this slot; see
+    # `KgMaintenanceAlreadyRunning` and the registry's comment in __init__ for why
+    # (they write the same derived tables). The three primitives below are the
+    # only place that touches the registry — the two public triples are thin
+    # kind-specific wrappers over them, so "claimed before the worker starts",
+    # "settle unless a newer job owns the slot" and "idle when nobody is running"
+    # cannot drift apart between the two actions.
 
-    def start_notebook_relink(self, notebook_id: str) -> dict:
-        """Claim the notebook's relink slot; raise if one is already running.
+    def _claim_kg_maintenance(
+        self, notebook_id: str, kind: str, id_prefix: str, counters: Dict[str, int]
+    ) -> dict:
+        """Claim the notebook's maintenance slot; raise if one is already running.
 
         Claiming happens BEFORE the worker thread starts (the route submits right
         after), so two clicks racing on the same notebook cannot both get through:
         the loser sees the claim the winner already published and gets 409.
         """
         self.get_notebook(notebook_id)  # KeyError if missing
-        with self.relink_lock:
-            current = self.relink_jobs.get(notebook_id)
+        with self.kg_maintenance_lock:
+            current = self.kg_maintenance_jobs.get(notebook_id)
             if current is not None and current["status"] == "running":
-                raise KgRelinkAlreadyRunning(notebook_id)
+                raise KgMaintenanceAlreadyRunning(notebook_id, current["kind"])
             job = {
-                "job_id": self._new_id("rlj"),
+                "job_id": self._new_id(id_prefix),
                 "notebook_id": notebook_id,
+                "kind": kind,
                 "status": "running",
-                "isolated_before": 0,
-                "edges_added": 0,
-                "isolated_after": 0,
+                **counters,
             }
-            self.relink_jobs[notebook_id] = job
+            self.kg_maintenance_jobs[notebook_id] = job
             return dict(job)
 
-    def notebook_relink_status(self, notebook_id: str) -> dict:
-        """Latest relink state for this notebook, or ``idle`` when none is known.
+    def _kg_maintenance_status(
+        self, notebook_id: str, kind: str, counters: Dict[str, int]
+    ) -> dict:
+        """Latest state of THIS kind of pass, or ``idle`` when none is known.
 
-        ``idle`` is the honest answer for both "never ran here" and "the process
-        that ran it restarted" — the browser stops its bounded poll and refreshes
-        rather than waiting on a job nobody is running.
+        ``idle`` is the honest answer for "never ran here", "the process that ran
+        it restarted", AND "the slot is held by the other kind of pass" — the
+        browser stops its bounded poll and refreshes rather than waiting on a job
+        it did not start. `kind` never crosses this boundary: the wire shape is
+        this action's own counters, so neither poll can read the other's numbers.
         """
         self.get_notebook(notebook_id)  # KeyError if missing
-        with self.relink_lock:
-            job = self.relink_jobs.get(notebook_id)
-            if job is None:
+        with self.kg_maintenance_lock:
+            job = self.kg_maintenance_jobs.get(notebook_id)
+            if job is None or job["kind"] != kind:
                 return {
                     "job_id": "",
                     "notebook_id": notebook_id,
                     "status": "idle",
                     "running": False,
-                    "isolated_before": 0,
-                    "edges_added": 0,
-                    "isolated_after": 0,
+                    **counters,
                 }
-            return {**job, "running": job["status"] == "running"}
+            return {
+                "job_id": job["job_id"],
+                "notebook_id": job["notebook_id"],
+                "status": job["status"],
+                "running": job["status"] == "running",
+                **{name: job[name] for name in counters},
+            }
 
-    def _settle_notebook_relink(
+    def _settle_kg_maintenance(
         self, notebook_id: str, job_id: str, status: str, stats: dict | None = None
     ) -> None:
         """Publish this job's terminal state — unless a newer job already owns the
-        slot (then the older worker must not clobber it)."""
-        with self.relink_lock:
-            job = self.relink_jobs.get(notebook_id)
+        slot (then the older worker must not clobber it). Only the counters this
+        job already declared at claim time are updated, so a stats dict from the
+        wrong kind of pass cannot graft foreign keys onto the entry."""
+        with self.kg_maintenance_lock:
+            job = self.kg_maintenance_jobs.get(notebook_id)
             if job is None or job["job_id"] != job_id:
                 return
             job["status"] = status
             if stats:
-                job["isolated_before"] = int(stats.get("isolated_before", 0))
-                job["edges_added"] = int(stats.get("edges_added", 0))
-                job["isolated_after"] = int(stats.get("isolated_after", 0))
+                for name in job:
+                    if name in ("job_id", "notebook_id", "kind", "status"):
+                        continue
+                    if name in stats:
+                        job[name] = int(stats[name])
+
+    _RELINK_COUNTERS = {"isolated_before": 0, "edges_added": 0, "isolated_after": 0}
+
+    def start_notebook_relink(self, notebook_id: str) -> dict:
+        """Claim the shared maintenance slot for a relink pass (409 source)."""
+        return self._claim_kg_maintenance(
+            notebook_id, "relink", "rlj", dict(self._RELINK_COUNTERS)
+        )
+
+    def notebook_relink_status(self, notebook_id: str) -> dict:
+        """Latest relink state for this notebook, or ``idle`` when none is known."""
+        return self._kg_maintenance_status(
+            notebook_id, "relink", dict(self._RELINK_COUNTERS)
+        )
+
+    def _settle_notebook_relink(
+        self, notebook_id: str, job_id: str, status: str, stats: dict | None = None
+    ) -> None:
+        self._settle_kg_maintenance(notebook_id, job_id, status, stats)
 
     def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict:
         """Background entry point: relink, then settle the claim on EVERY path.
@@ -1402,6 +1447,65 @@ class KnowledgeLifecycleService:
     ) -> None:
         """Release the claim when the worker thread never started."""
         self._settle_notebook_relink(notebook_id, job_id, "failed")
+
+    # --- unified rebuild background job (same slot as relink) ----------------
+
+    _REBUILD_COUNTERS = {"clusters": 0}
+
+    def start_unified_kg_rebuild(self, notebook_id: str) -> dict:
+        """Claim the shared maintenance slot for a 「重新合并」 pass (409 source)."""
+        return self._claim_kg_maintenance(
+            notebook_id, "rebuild", "ukj", dict(self._REBUILD_COUNTERS)
+        )
+
+    def unified_kg_rebuild_status(self, notebook_id: str) -> dict:
+        """Latest rebuild state for this notebook, or ``idle`` when none is known."""
+        return self._kg_maintenance_status(
+            notebook_id, "rebuild", dict(self._REBUILD_COUNTERS)
+        )
+
+    def run_unified_kg_rebuild_job(self, notebook_id: str, job_id: str) -> int:
+        """Background entry point: rebuild, then settle the claim on EVERY path.
+
+        The pass itself is `rebuild_unified_kg(force=False)` called verbatim —
+        this PR moved WHERE it runs, not what it does. `force=False` keeps the
+        content-version skip gate: an unchanged notebook returns the cached count
+        in milliseconds, and only a real content change pays for a recluster.
+        Forced full recluster (changed clustering SETTINGS) stays with the explicit
+        CLI (`scripts/recluster_kg.py`), which the version gate cannot see.
+
+        ``BaseException`` — not ``Exception``: KeyboardInterrupt / SystemExit
+        inherit from it, and a claim left in ``running`` would refuse every later
+        rebuild AND every later relink (they share the slot) for the rest of the
+        process's life. An interrupt still releases the claim but is NOT reported
+        as a failure of the pass — same distinction relink makes.
+        """
+        try:
+            clusters = int(self.rebuild_unified_kg(notebook_id, force=False))
+        except Exception:
+            self._settle_kg_maintenance(notebook_id, job_id, "failed")
+            self.event_log.logger.exception(
+                "rebuild_unified_kg failed for %s", notebook_id
+            )
+            # Body-free by contract: kind + notebook id only.
+            self.event_log.emit({
+                "kind": "unified_kg_rebuild_failed",
+                "notebook_id": notebook_id,
+            })
+            raise
+        except BaseException:
+            self._settle_kg_maintenance(notebook_id, job_id, "failed")
+            raise
+        self._settle_kg_maintenance(
+            notebook_id, job_id, "succeeded", {"clusters": clusters}
+        )
+        return clusters
+
+    def fail_unified_kg_rebuild_submission(
+        self, notebook_id: str, job_id: str
+    ) -> None:
+        """Release the claim when the worker thread never started."""
+        self._settle_kg_maintenance(notebook_id, job_id, "failed")
 
     # --- Concept-cluster writes ---------------------------------------------
 
@@ -2454,9 +2558,12 @@ class KnowledgeLifecycleService:
         """
         try:
             job = self.start_notebook_relink(notebook_id)
-        except KgRelinkAlreadyRunning:
+        except KgMaintenanceAlreadyRunning:
+            # Also covers "a 「重新合并」 pass owns the shared slot": that pass
+            # rewrites the very clusters this tail's edges feed, so skipping is
+            # right for the same reason it is right for a concurrent relink.
             self.event_log.logger.info(
-                "build_notebook_kg: relink already running for %s, skipped",
+                "build_notebook_kg: KG maintenance already running for %s, skipped",
                 notebook_id,
             )
             # Body-free by contract: kind + notebook id only.

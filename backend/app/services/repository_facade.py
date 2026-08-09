@@ -2411,6 +2411,28 @@ class RepositoryFacade:
         return self._runtime.knowledge_lifecycle.rebuild_unified_kg(
             notebook_id, progress, force, fresh
         )
+    def start_unified_kg_rebuild(self, notebook_id: str) -> dict:
+        """Claim the shared KG-maintenance slot for a rebuild (409 source)."""
+        return self._runtime.knowledge_lifecycle.start_unified_kg_rebuild(notebook_id)
+
+    def unified_kg_rebuild_status(self, notebook_id: str) -> dict:
+        """Latest unified-rebuild state for this notebook."""
+        return self._runtime.knowledge_lifecycle.unified_kg_rebuild_status(notebook_id)
+
+    def run_unified_kg_rebuild_job(self, notebook_id: str, job_id: str) -> int:
+        """Background unified-rebuild entry point."""
+        return self._runtime.knowledge_lifecycle.run_unified_kg_rebuild_job(
+            notebook_id, job_id
+        )
+
+    def fail_unified_kg_rebuild_submission(
+        self, notebook_id: str, job_id: str
+    ) -> None:
+        """Release the rebuild claim when the worker never started."""
+        return self._runtime.knowledge_lifecycle.fail_unified_kg_rebuild_submission(
+            notebook_id, job_id
+        )
+
     def rebuild_canonical_relations(self, notebook_id: str, force: bool = False) -> int:
         """canonical_relations 全量重写(seq 闸) — KnowledgeLifecycleService owns
         the orchestration (Task 15); frozen-signature delegate."""

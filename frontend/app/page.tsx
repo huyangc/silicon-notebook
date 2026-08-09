@@ -124,7 +124,7 @@ import { fetchMe, logoutUser, type AuthUser } from "./auth";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
-import { logDiagnostic, toUserMessage } from "./errors.ts";
+import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
@@ -133,8 +133,17 @@ import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease,
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
-import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
+import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import { prepareKgFocus } from "./kg-focus";
+import {
+  REBUILD_POLL_MAX_ATTEMPTS,
+  REBUILD_POLL_TIMED_OUT,
+  busyForNotebook,
+  claimNotebookSlot,
+  rebuildPollOutcome,
+  releaseNotebookClaim,
+  type RebuildPollOutcome,
+} from "./kg-rebuild-status";
 import {
   RELINK_POLL_MAX_ATTEMPTS,
   RELINK_POLL_TIMED_OUT,
@@ -999,7 +1008,11 @@ export default function Home() {
   kgLimitRef.current = kgLimit;
   const [pendingMerges, setPendingMerges] = useState<PendingMerge[]>([]);
   const [unifiedKgStatus, setUnifiedKgStatus] = useState<UnifiedKgStatus | null>(null);
-  const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
+  // 「重新合并」的忙碌位与「补上关联」同形:后台任务、按笔记本单飞,所以存的是**哪些库
+  // 在重新合并**的一个集合(理由见 notebook-busy-set.ts)。派生成布尔只是为了让既有的
+  // kgRefreshBusy 消费点(两颗按钮、状态标签、看板轮询依赖)一个字都不用改——判据仍是
+  // 「当前这个库在不在集合里」。
+  const [rebuildingNotebookIds, setRebuildingNotebookIds] = useState<Set<string>>(new Set());
   const [kgRangeBusy, setKgRangeBusy] = useState(false);
   const [buildingKg, setBuildingKg] = useState(false);
   const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
@@ -1011,6 +1024,7 @@ export default function Home() {
   const [relinkingNotebookIds, setRelinkingNotebookIds] = useState<Set<string>>(new Set());
   // 按钮消费的是「**当前这个库**在不在补」——切到别的库，那边的按钮照常可点。
   const relinkingKg = relinkBusyFor(relinkingNotebookIds, currentNotebookId);
+  const kgRefreshBusy = busyForNotebook(rebuildingNotebookIds, currentNotebookId);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   const scaleIndexDoneRequestRef = useRef(0);
@@ -4538,21 +4552,70 @@ export default function Home() {
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [relinkingNotebookIds, currentNotebookId]);
 
+  // 「重新合并」：后台任务。POST 只认领任务槽（服务端与「补上关联」共用同一把按笔记本
+  // 的单飞锁，重复点或另一件在跑都回 409），聚类数要等下面那条轮询读到终态才有——所以
+  // 这里**不能**拿 POST 的返回值编一个「共 N 组概念」出来。忙碌位在 await 之前就置上
+  // （长任务按钮红线），由轮询在终态解除；POST 自己失败时当场解除，否则按钮会锁在一个
+  // 根本没起来的任务上。
   async function refreshUnifiedKg() {
-    if (!currentNotebookId) return;
-    setKgRefreshBusy(true);
+    if (!currentNotebookId || kgRefreshBusy) return;
+    const nb = currentNotebookId;
+    setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
     try {
-      await rebuildUnifiedKg(currentNotebookId);
-      const [g, pend, status] = await Promise.all([
-        fetchUnifiedGraph(currentNotebookId, kgLimit),
-        fetchPendingMerges(currentNotebookId),
-        fetchUnifiedKgStatus(currentNotebookId),
-      ]);
-      setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setPendingMerges(pend); setUnifiedKgStatus(status);
-      setVizBuilding(Boolean(g.viz_building));
-    } catch (err) { reportError(err); }
-    finally { setKgRefreshBusy(false); }
+      await rebuildUnifiedKg(nb);
+      setToast("已开始重新合并；完成后会自动更新");
+    } catch (err) {
+      reportError(err);
+      // 只清自己那一格：这期间用户可能已经切库并在别的库点了重新合并。
+      setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+    }
   }
+
+  // 重新合并的完成信号：有界轮询 unified-kg/rebuild/status，终态时解除忙碌位并**按当前
+  // 范围**重拉图谱、待确认合并与概念合并状态（保留后台化之前的既有语义）。服务端把 idle
+  // 也当终态回报，所以进程重启之后这条轮询会收工而不是空转到天荒地老；进程还活着但任务
+  // 卡住那一种由尝试上限兜底。轮询只在「在重新合并的那个库正是当前打开的库」时跑：切走
+  // 就停（A 的忙碌位保留），切回来再接着轮，绝不拿 A 的终态去刷 B 的图谱。
+  useEffect(() => {
+    if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;
+    const nb = currentNotebookId as string;
+    let cancelled = false;
+    let attempts = 0;
+    const finish = (outcome: RebuildPollOutcome) => {
+      setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+      if (outcome.toast) setToast(outcome.toast);
+      if (!outcome.refresh) return;
+      void (async () => {
+        try {
+          const [g, pend, status] = await Promise.all([
+            fetchUnifiedGraph(nb, kgLimitRef.current),
+            fetchPendingMerges(nb),
+            fetchUnifiedKgStatus(nb),
+          ]);
+          if (cancelled || activeNotebookIdRef.current !== nb) return;
+          setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]);
+          setPendingMerges(pend); setUnifiedKgStatus(status);
+          setVizBuilding(Boolean(g.viz_building));
+        } catch (err) { reportError(err); }
+      })();
+    };
+    const poll = window.setInterval(async () => {
+      // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限永远
+      // 到不了，正好是上限要兜的那种卡死。
+      attempts += 1;
+      if (attempts > REBUILD_POLL_MAX_ATTEMPTS) {
+        if (!cancelled && activeNotebookIdRef.current === nb) finish(REBUILD_POLL_TIMED_OUT);
+        return;
+      }
+      let outcome;
+      try {
+        outcome = rebuildPollOutcome(await fetchUnifiedKgRebuildStatus(nb));
+      } catch { return; }          // 瞬时错误：继续轮询
+      if (cancelled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+      finish(outcome);
+    }, 3000);
+    return () => { cancelled = true; window.clearInterval(poll); };
+  }, [rebuildingNotebookIds, currentNotebookId]);
 
   // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
   function confirmRefreshUnifiedKg() {
@@ -4663,19 +4726,33 @@ export default function Home() {
     try { setNodeCtx(await fetchNodeContext(currentNotebookId, contextObjectId, resolvedNodeNotebookId)); } catch { /* node context best-effort */ }
   }
 
+  // 落一条合并决定，然后**启动**一次重新合并让图谱跟上这条决定。
+  //
+  // 后台化之后这一步不再等它跑完：POST 立刻回来，图谱与待确认列表由上面那条
+  // rebuild/status 轮询在终态重拉（所以这里的忙碌位也要走同一个集合，否则轮询 effect
+  // 根本不会开）。409 = 已经有一次重新合并/补上关联在跑：那不是失败，忙碌位要**保留**，
+  // 轮询照常等那次的终态。落决定本身失败才是真失败，忙碌位当场清掉。
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
     if (!currentNotebookId || decidingMerge) return;
+    const nb = currentNotebookId;
     setDecidingMerge({ id: candidate.id, confirm });
     try {
-      if (confirm) await confirmMerge(currentNotebookId, candidate.id);
-      else await rejectMerge(currentNotebookId, candidate.id);
+      if (confirm) await confirmMerge(nb, candidate.id);
+      else await rejectMerge(nb, candidate.id);
       setPendingMerges((items) => withoutDecidedMerge(items, candidate));
-      await rebuildUnifiedKg(currentNotebookId);
-      const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId, kgLimit), fetchPendingMerges(currentNotebookId)]);
-      setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]);
+      setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
+      try {
+        await rebuildUnifiedKg(nb);
+      } catch (err) {
+        if (httpErrorStatus(err) !== 409) {
+          setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+          throw err;
+        }
+      }
+      const pend = await fetchPendingMerges(nb);
       setPendingMerges(withoutDecidedMerge(pend, candidate));
-      const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;
-      if (selected?.object_type === "concept") setConceptDetail(await fetchConceptDetail(currentNotebookId, selected.id).catch(() => null));
+      const selected = selectedKgNodeId ? uGraphMerged?.nodes.find((node) => node.id === selectedKgNodeId) : null;
+      if (selected?.object_type === "concept") setConceptDetail(await fetchConceptDetail(nb, selected.id).catch(() => null));
       else setConceptDetail(null);
       if (!selected) setNodeCtx(null);
     } catch (err) { reportError(err); }

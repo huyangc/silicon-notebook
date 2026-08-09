@@ -169,9 +169,11 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._in_batches', kind='attribute', target='_IN_CHUNK'),
             ConsumerSite(path='backend/tests/test_in_batching.py', scope='<module>.test_delta_sites_equivalent_when_batched', kind='patch', target='_IN_CHUNK'),
+            ConsumerSite(path='backend/tests/test_incremental_fuse_bounded.py', scope='<module>.test_insert_clusters_batches_member_probe', kind='patch', target='_IN_CHUNK'),
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_in_batching.py', scope='<module>.test_delta_sites_equivalent_when_batched', kind='patch', target='_IN_CHUNK'),
+            ConsumerSite(path='backend/tests/test_incremental_fuse_bounded.py', scope='<module>.test_insert_clusters_batches_member_probe', kind='patch', target='_IN_CHUNK'),
         ),
     ),
     SurfaceMember(
@@ -429,6 +431,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='_mark_unified_kg_dirty_in_tx',
+        owner='KgMutationCoordinator',
+        kind='private_wrapper',
+        consumers=(
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='_mark_unified_kg_dirty_in_tx'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='_migrator',
         owner='SqliteDatabase',
         kind='instance_attribute',
@@ -618,6 +630,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_page_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.build_projector', kind='attribute', target='_runtime'),
@@ -696,6 +709,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._knowledge_type_counts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._mark_source_index_backfilled', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._mark_unified_kg_dirty', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._mark_unified_kg_dirty_in_tx', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._maybe_enqueue_scale_fold', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._merge_evidence_lists', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._mounted_bases', kind='attribute', target='_runtime'),
@@ -877,6 +891,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.extract_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_notebook_kg_job_submission', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_notebook_relink_submission', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.fail_unified_kg_rebuild_submission', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.find_duplicates', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.find_notebook_by_share_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.finish_ask_job', kind='attribute', target='_runtime'),
@@ -1003,6 +1018,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.revoke_agent_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_merge_review_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_notebook_relink_job', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.run_unified_kg_rebuild_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.scale_index_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.search_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.set_conflict_status', kind='attribute', target='_runtime'),
@@ -1024,6 +1040,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.sources_missing_paper_meta', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_ask_stream', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_notebook_relink', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.start_unified_kg_rebuild', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.storage_dir', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.store_kg', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.submit_feedback', kind='attribute', target='_runtime'),
@@ -1031,6 +1048,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.transfer_memories', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.trigger_scale_index_rebuild', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unified_graph', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unified_kg_rebuild_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unified_kg_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unshare_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unshare_report', kind='attribute', target='_runtime'),
@@ -1490,11 +1508,17 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_node_embeddings', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='configured'),
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_chunks_once_too', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_once_per_source', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_once_then_hydrates_by_page', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='configured'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='configured'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_chunks_once_too', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_once_per_source', kind='patch', target='configured'),
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_discovers_once_then_hydrates_by_page', kind='patch', target='configured'),
             ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
         ),
     ),
@@ -1836,6 +1860,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='fail_unified_kg_rebuild_submission',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='fail_unified_kg_rebuild_submission'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='find_duplicates',
         owner='KnowledgeGovernanceService',
         kind='method',
@@ -1944,6 +1978,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.run_preview', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='get_notebook'),
@@ -2601,7 +2636,6 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/app/scripts/recluster_kg.py', scope='<module>.main', kind='attribute', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg._finalize', kind='attribute', target='rebuild_unified_kg'),
@@ -2916,6 +2950,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='run_unified_kg_rebuild_job',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='run_unified_kg_rebuild_job'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='scale_index_status',
         owner='ScaleArtifactRuntime',
         kind='method',
@@ -3072,6 +3116,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='start_unified_kg_rebuild',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='start_unified_kg_rebuild'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='storage_dir',
         owner='RepositoryRuntime.storage_dir',
         kind='mutable_property',
@@ -3125,6 +3179,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.get_unified_kg', kind='attribute', target='unified_graph'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='unified_kg_rebuild_status',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.unified_kg_rebuild_status', kind='attribute', target='unified_kg_rebuild_status'),
         ),
         patches=(
         ),

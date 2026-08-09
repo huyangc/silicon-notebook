@@ -372,6 +372,12 @@
         "path": "backend/tests/test_in_batching.py",
         "scope": "<module>.test_delta_sites_equivalent_when_batched",
         "target": "_IN_CHUNK"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_incremental_fuse_bounded.py",
+        "scope": "<module>.test_insert_clusters_batches_member_probe",
+        "target": "_IN_CHUNK"
       }
     ],
     "kind": "constant",
@@ -383,6 +389,14 @@
         "kind": "patch",
         "path": "backend/tests/test_in_batching.py",
         "scope": "<module>.test_delta_sites_equivalent_when_batched",
+        "target": "_IN_CHUNK"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "kind": "patch",
+        "path": "backend/tests/test_incremental_fuse_bounded.py",
+        "scope": "<module>.test_insert_clusters_batches_member_probe",
         "target": "_IN_CHUNK"
       }
     ],
@@ -1025,6 +1039,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'None'"
   },
+  "_mark_unified_kg_dirty_in_tx": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.__init__.<lambda>",
+        "target": "_mark_unified_kg_dirty_in_tx"
+      }
+    ],
+    "kind": "private_wrapper",
+    "owner": "KgMutationCoordinator",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, db, notebook_id: 'str') -> 'None'"
+  },
   "_migrator": {
     "consumers": [
       {
@@ -1529,6 +1558,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_page_rows",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>._backfill_vectors_job",
         "target": "_runtime"
       },
@@ -1992,6 +2027,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._mark_unified_kg_dirty",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade._mark_unified_kg_dirty_in_tx",
         "target": "_runtime"
       },
       {
@@ -3083,6 +3124,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.fail_unified_kg_rebuild_submission",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.find_duplicates",
         "target": "_runtime"
       },
@@ -3839,6 +3886,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.run_unified_kg_rebuild_job",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.scale_index_status",
         "target": "_runtime"
       },
@@ -3965,6 +4018,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.start_unified_kg_rebuild",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.storage_dir",
         "target": "_runtime"
       },
@@ -4002,6 +4061,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.unified_graph",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.unified_kg_rebuild_status",
         "target": "_runtime"
       },
       {
@@ -5074,6 +5139,24 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_discovers_chunks_once_too",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_discovers_once_per_source",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_discovers_once_then_hydrates_by_page",
+        "target": "configured"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_embeds_under_per_source_lock",
         "target": "configured"
       },
@@ -5093,6 +5176,30 @@
     "kind": "method",
     "owner": "ModelProvider",
     "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_discovers_chunks_once_too",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_discovers_once_per_source",
+        "target": "configured"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_discovers_once_then_hydrates_by_page",
+        "target": "configured"
+      },
       {
         "base": "repo",
         "compatibility": "test-only",
@@ -5735,6 +5842,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'None'"
   },
+  "fail_unified_kg_rebuild_submission": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.rebuild_unified_kg",
+        "target": "fail_unified_kg_rebuild_submission"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'None'"
+  },
   "find_duplicates": {
     "consumers": [
       {
@@ -6047,6 +6169,12 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.rebuild_unified_kg",
         "target": "get_notebook"
       },
       {
@@ -7634,12 +7762,6 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/kg_routes.py",
-        "scope": "<module>.rebuild_unified_kg",
-        "target": "rebuild_unified_kg"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/scripts/recluster_kg.py",
         "scope": "<module>.main",
         "target": "rebuild_unified_kg"
@@ -8590,6 +8712,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'dict'"
   },
+  "run_unified_kg_rebuild_job": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.rebuild_unified_kg",
+        "target": "run_unified_kg_rebuild_job"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'int'"
+  },
   "scale_index_status": {
     "consumers": [
       {
@@ -8902,6 +9039,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
+  "start_unified_kg_rebuild": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.rebuild_unified_kg",
+        "target": "start_unified_kg_rebuild"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
+  },
   "storage_dir": {
     "consumers": [
       {
@@ -9024,6 +9176,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', level: 'str' = 'concept', limit: 'Optional[int]' = None) -> 'dict'"
+  },
+  "unified_kg_rebuild_status": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.unified_kg_rebuild_status",
+        "target": "unified_kg_rebuild_status"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
   "unified_kg_status": {
     "consumers": [

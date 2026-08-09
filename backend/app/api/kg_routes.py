@@ -24,7 +24,7 @@ from app.models.kg import (
     UnifiedKgStatus,
 )
 from app.models.kg_analysis import KgAnalysisResponse, SourceProfilePageResponse
-from app.repositories.ports import KgBuildAlreadyRunning, KgRelinkAlreadyRunning
+from app.repositories.ports import KgBuildAlreadyRunning, KgMaintenanceAlreadyRunning
 from app.services import background_jobs
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -35,6 +35,20 @@ from app.services.knowledge_contracts import (
 
 
 router = APIRouter()
+
+
+# 「补上关联」与「重新合并」共用一个 per-notebook 单飞槽(两者都重写派生的聚类/板块
+# 产物,见 KgMaintenanceAlreadyRunning)。409 必须点名**真正占着槽**的那个动作,否则
+# 用户会盯着自己没点过的按钮等——所以文案按 holder 分支,而不是按被拒的那个端点写死。
+# 用词与按钮上的界面词逐字一致;三条都是中文字面量而不是查一张表,好让
+# test_user_error 的 AST 守卫能直接看见它们(动态实参那条路要登记进 allowlist,
+# 为省三行重复而换来一条豁免不划算)。
+def _kg_maintenance_busy(exc: KgMaintenanceAlreadyRunning) -> HTTPException:
+    if exc.holder == "rebuild":
+        return user_error(409, "当前笔记本正在重新合并，请等它完成")
+    if exc.holder == "relink":
+        return user_error(409, "当前笔记本正在补上关联，请等它完成")
+    return user_error(409, "当前笔记本正在整理知识图谱，请等它完成")
 
 
 @router.get(
@@ -148,8 +162,8 @@ def relink_kg(notebook_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Notebook not found")
     try:
         job = repo.start_notebook_relink(notebook_id)
-    except KgRelinkAlreadyRunning:
-        raise user_error(409, "当前笔记本正在补上关联，请等它完成")
+    except KgMaintenanceAlreadyRunning as exc:
+        raise _kg_maintenance_busy(exc)
     try:
         background_jobs.submit(
             repo.run_notebook_relink_job,
@@ -192,12 +206,65 @@ def relink_kg_status(notebook_id: str) -> dict:
 
 @router.post("/notebooks/{notebook_id}/unified-kg/rebuild", dependencies=[Depends(require_notebook_access)])
 def rebuild_unified_kg(notebook_id: str) -> dict:
+    """「重新合并」(background thread). Same shape as kg/relink above.
+
+    It runs off the request thread for the same reason relink does: the work is
+    proportional to the notebook, not to the click. The version gate (force=False,
+    applied inside `run_unified_kg_rebuild_job`) still makes an unchanged notebook
+    answer in milliseconds, but a real recluster streams seed representatives over
+    the whole graph — minutes to hours on a base-tier library, well past
+    PostgreSQL's statement timeout, with a request worker pinned for the duration.
+    No LLM gate: clustering is deterministic and must keep working with no model
+    configured. Single flight is shared with relink (409, see
+    `_kg_maintenance_busy`), so neither pass can publish over the other's inputs.
+    The old synchronous `{"clusters": N}` is gone — the count now arrives from
+    `unified-kg/rebuild/status` once the pass actually finishes.
+    """
+    repo = repository()
     try:
-        # 刷新图谱:走版本门控(force=False)——输入未变则跳过重聚类,只增量重建社区
-        # (纯图/无 LLM/秒级);有新内容才重聚。强制全量重聚(如改了聚类设置)用
-        # scripts/recluster_kg.py。这兑现「判断:只需重建社区就跳过其他动作」。
-        clusters = repository().rebuild_unified_kg(notebook_id, force=False)
-        return {"clusters": clusters}
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        job = repo.start_unified_kg_rebuild(notebook_id)
+    except KgMaintenanceAlreadyRunning as exc:
+        raise _kg_maintenance_busy(exc)
+    try:
+        background_jobs.submit(
+            repo.run_unified_kg_rebuild_job,
+            notebook_id,
+            job["job_id"],
+            name=f"unifiedkg-{notebook_id}",
+        )
+    except Exception:
+        repo.fail_unified_kg_rebuild_submission(notebook_id, job["job_id"])
+        raise
+    return {
+        "status": "rebuilding",
+        "notebook_id": notebook_id,
+        "job_id": job["job_id"],
+    }
+
+
+@router.get(
+    "/notebooks/{notebook_id}/unified-kg/rebuild/status",
+    dependencies=[Depends(require_notebook_read)],
+)
+def unified_kg_rebuild_status(notebook_id: str) -> dict:
+    """Latest 「重新合并」 state for this notebook — the browser's completion signal.
+
+    Mirrors kg/relink/status: ``status`` is running / succeeded / failed / idle,
+    where ``idle`` covers "never ran here", "the process that ran it restarted"
+    AND "the shared slot is held by a relink pass", so a bounded poll always
+    terminates. ``clusters`` is zero until a run finishes. No error text crosses
+    this boundary — diagnostics stay in the event log.
+
+    Deliberately separate from `unified-kg/status`: that one reports the derived
+    state of the graph (dirty / last_rebuild_at / viz artefacts) and its
+    ``building`` flag is about the visualization artefact, not this pass.
+    """
+    try:
+        return repository().unified_kg_rebuild_status(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
