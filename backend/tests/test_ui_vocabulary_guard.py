@@ -14,7 +14,7 @@ schema / deprecated 全没进黑名单),而守卫退出码仍是 0。所以这�
      (第二轮 review 阻塞 2——作用域跟信任边界走,不跟目录走)。
 
 「兜底即原值」(`MAP[x] ?? x`)那条检查已改用 TypeScript AST 并搬去
-`frontend/app/raw-enum-fallback.test.mjs`,正反样例在那边;这里只留两条断言钉住
+`frontend/tests/guards/raw-enum-fallback.test.mjs`,正反样例在那边;这里只留两条断言钉住
 「搬走了、没丢、也没退回正则」。
 """
 from __future__ import annotations
@@ -248,20 +248,23 @@ def test_正则字面量里的引号不会把代码拖进渲染文本(tmp_path):
 # `f()[x] ?? x`)和误报(`ALIASES[v] ?? v` 这种纯内部归一化)。误报补不掉——它与
 # 真正的渲染查表**语法形状完全一致**,只有上下文能区分,而正则没有上下文。改用
 # TypeScript AST 后,实现只能落在 JS 侧,故整体搬去
-# frontend/app/raw-enum-fallback.test.mjs(npm run test 递归收集 → 仍是
+# frontend/tests/guards/raw-enum-fallback.test.mjs(npm run test 递归收集 → 仍是
 # scripts/check.sh 的硬门)。正反样例连同那五条探针都在那边。
 # --------------------------------------------------------------------------
 
 
 def test_兜底即原值检查已搬去前端且仍挂在硬门上():
     """搬家最容易出的事故是「搬走了但没接上」——两边都不跑,还都是绿的。"""
-    mjs = _ROOT / "frontend" / "app" / "raw-enum-fallback.test.mjs"
+    mjs = (
+        _ROOT / "frontend" / "tests" / "guards"
+        / "raw-enum-fallback.test.mjs"
+    )
     assert mjs.exists(), f"{mjs} 不见了:兜底即原值检查搬走后没落地"
     # npm run test 组合纯逻辑与组件交互两条 lane；raw-enum guard 属于前者。
     pkg = json.loads(
         (_ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
     )
-    assert "find app" in pkg["scripts"]["test:node"], (
+    assert "find tests/unit tests/guards" in pkg["scripts"]["test:node"], (
         "前端测试收集方式变了,新守卫可能没被 check.sh 跑到"
     )
     assert "test:node" in pkg["scripts"]["test"]

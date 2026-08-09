@@ -45,3 +45,10 @@ def test_federated_and_ppr_delegate(tmp_path):
             == [h.object_id for h in repo.federated_retrieve(nb, "运算放大器")])
     assert ([c for c in repo.retrieval.ppr_retrieve(nb, "运算放大器")]
             == [c for c in repo._ppr_retrieve(nb, "运算放大器")])
+
+
+def test_runtime_retrieval_publicly_hydrates_chunk_candidates(tmp_path):
+    repo, _nb = _repo_with_kg(tmp_path)
+    rows, ids, _matrix = repo.retrieval.hydrate_chunk_candidates([])
+    assert rows == []
+    assert ids == []

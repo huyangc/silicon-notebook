@@ -40,6 +40,8 @@ DEFAULT_CHUNK_KG_NODE_SEED_TOP_N = 20
 DEFAULT_CHUNK_KG_RELATION_SEED_TOP_N = 10
 DEFAULT_CHUNK_KG_MAX_DEPTH = 1
 DEFAULT_CHUNK_KG_FAN_OUT = 8
+DEFAULT_REPORT_RETRIEVAL_FANOUT = 8
+DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY = 2
 
 
 def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[str]]":
@@ -175,6 +177,22 @@ class Settings(BaseSettings):
     # protects the database pool from many reports multiplying that capacity.
     report_section_concurrency: int = Field(
         5, ge=1, validation_alias="REPORT_SECTION_CONCURRENCY")
+    # One report-wide leaf-I/O budget shared by every section worker, its
+    # initial subqueries and PPR prefetch.  Orchestrators never hold this slot.
+    report_retrieval_fanout: int = Field(
+        DEFAULT_REPORT_RETRIEVAL_FANOUT,
+        ge=1,
+        validation_alias="REPORT_RETRIEVAL_FANOUT",
+    )
+    # A probe query has exactly two independent retrieval channels (KG and raw
+    # elements).  Deployments may serialize them, but cannot create more work
+    # than those two leaves.
+    report_probe_channel_concurrency: int = Field(
+        DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY,
+        ge=1,
+        le=2,
+        validation_alias="REPORT_PROBE_CHANNEL_CONCURRENCY",
+    )
     # Whole-report jobs admitted per backend process.  Keep this separate from
     # model-service concurrency because each section performs database work
     # before and between model calls.
@@ -204,6 +222,23 @@ class Settings(BaseSettings):
     report_high_risk_downgrade_enabled: bool = Field(
         False,
         validation_alias="REPORT_HIGH_RISK_DOWNGRADE_ENABLED",
+    )
+    # Report sufficiency heuristics.  These defaults are the historical inline
+    # policy; exposing them here centralizes later eval-driven calibration.
+    report_sufficiency_min_relevant_items: int = Field(
+        3, ge=1, validation_alias="REPORT_SUFFICIENCY_MIN_RELEVANT_ITEMS"
+    )
+    report_sufficiency_min_families: int = Field(
+        2, ge=1, validation_alias="REPORT_SUFFICIENCY_MIN_FAMILIES"
+    )
+    report_sufficiency_complete_min_families: int = Field(
+        3, ge=1, validation_alias="REPORT_SUFFICIENCY_COMPLETE_MIN_FAMILIES"
+    )
+    report_sufficiency_max_top_family_share: float = Field(
+        0.8,
+        ge=0.0,
+        le=1.0,
+        validation_alias="REPORT_SUFFICIENCY_MAX_TOP_FAMILY_SHARE",
     )
     # 节间并行度复用 kg_job_concurrency(节深挖无耦合;尊重全局限流退避)。
 
@@ -553,6 +588,24 @@ class Settings(BaseSettings):
     reasoning_max_steps: int = Field(50, validation_alias="REASONING_MAX_STEPS")
     # 推理模式 Plan 输出子查询数上限。
     reasoning_max_subqueries: int = Field(5, validation_alias="REASONING_MAX_SUBQUERIES")
+    # Agent action/cross-library expansion rails.  Defaults preserve the
+    # historical module constants exactly; the centralized policy reads these
+    # once per run so a deployment cannot drift between branches.
+    reasoning_max_ppr_retrieves: int = Field(
+        3, ge=0, validation_alias="REASONING_MAX_PPR_RETRIEVES"
+    )
+    reasoning_max_exact_lookups: int = Field(
+        3, ge=0, validation_alias="REASONING_MAX_EXACT_LOOKUPS"
+    )
+    reasoning_max_follow_chain_actions: int = Field(
+        3, ge=0, validation_alias="REASONING_MAX_FOLLOW_CHAIN_ACTIONS"
+    )
+    reasoning_community_peers_cap_factor: int = Field(
+        2, ge=1, validation_alias="REASONING_COMMUNITY_PEERS_CAP_FACTOR"
+    )
+    reasoning_max_outline_updates: int = Field(
+        6, ge=1, validation_alias="REASONING_MAX_OUTLINE_UPDATES"
+    )
     # 复合问题最终排序: 开启后按子查询配额 round-robin 选 top-N(避免整串全局排序让
     # 信息量大的一方通吃); 关闭则回退全局重排。单子查询时自动等价全局。
     reasoning_quota_enabled: bool = Field(True, validation_alias="REASONING_QUOTA_ENABLED")

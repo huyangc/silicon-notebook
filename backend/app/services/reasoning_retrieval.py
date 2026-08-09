@@ -35,7 +35,22 @@ from app.services.collection_enumeration import (
 )
 from app.services.prompts import reflect_prompt, reflect_schema_hint
 from app.services.retrieval import (
-    RetrievedChunk, RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
+    RetrievedChunk, RetrievedElement, RetrievedKnowledge,
+)
+from app.services.retrieval_run import retrieval_fanout_slot
+from app.services.reports.policy import (
+    DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR,
+    DEFAULT_REASONING_MAX_EXACT_LOOKUPS,
+    DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS,
+    DEFAULT_REASONING_MAX_OUTLINE_UPDATES,
+    DEFAULT_REASONING_MAX_PPR_RETRIEVES,
+    OUTLINE_EVIDENCE_KEY_CHARS,
+    OUTLINE_ID_CHARS,
+    OUTLINE_MAX_EVIDENCE,
+    OUTLINE_MAX_SECTIONS,
+    OUTLINE_TITLE_CHARS,
+    REASONING_PREFER_WEIGHTS,
+    reasoning_action_policy,
 )
 
 if TYPE_CHECKING:
@@ -71,24 +86,21 @@ class _ReasoningRetrieverFactory(Protocol):
     ) -> object: ...
 
 KG_TYPES = ("claim", "formula", "procedure", "concept")
-PREFER_WEIGHTS = {
-    "keyword": (0.7, 0.3),
-    "semantic": (0.2, 0.8),
-    "balanced": (W_KEYWORD, W_SEMANTIC),
-}
-# agent 主动 ppr_retrieve 的累计次数上限。写死常量(非 env 开关):reasoning_max_steps=50
+PREFER_WEIGHTS = dict(REASONING_PREFER_WEIGHTS)
+# agent 主动 ppr_retrieve 的历史默认累计次数上限；运行时统一从 Settings policy 读取。
+# reasoning_max_steps=50
 # 且每次 ppr_retrieve 都拉到新 chunk=算"有进展"→ stale 熔断不跳,无此上限一次推理可触发
 # 多达 50 次全图 PageRank。镜像 search_elements 的 reasoning_max_element_searches。
 # 注:run() 初检索后的 seed pass 不计入此上限(它是保证基线、非 agent 动作)。
-_MAX_PPR_RETRIEVES = 3
+_MAX_PPR_RETRIEVES = DEFAULT_REASONING_MAX_PPR_RETRIEVES
 # follow_chain 每次最多形成少量两跳路径，但 agent 若不断换起点仍可能把关系
-# evidence 上下文撑爆；与 PPR 动作同样设内部硬上限，不增加环境变量。
-_MAX_FOLLOW_CHAIN_ACTIONS = 3
-# agent 主动 exact_lookup 的累计次数上限(镜像 _MAX_PPR_RETRIEVES 的常量与用法):
+# evidence 上下文撑爆；与 PPR 动作同样保留一个可部署校准的有界上限。
+_MAX_FOLLOW_CHAIN_ACTIONS = DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS
+# agent 主动 exact_lookup 的历史默认累计次数上限(镜像 PPR 的用法):
 # 每次精确查找都整节取齐,必然带来"新证据"→ stale 熔断不跳,无此上限一次推理可以把
 # 整本手册按节搬进上下文。注:run() 初检索后的 seed pass 不计入此上限(它是保证
 # 基线、非 agent 动作),与 PPR seed pass 的记账口径一致。
-_MAX_EXACT_LOOKUPS = 3
+_MAX_EXACT_LOOKUPS = DEFAULT_REASONING_MAX_EXACT_LOOKUPS
 # 模型给的名称去包裹标点用。刻意不含 `_`/`-`/`.`——它们是标识符的组成部分,而
 # identifier_terms 的正则两端都要求 alnum,首尾的分隔符本就进不了匹配。
 _EXACT_TERM_WRAPPERS = " \t\r\n\"'`“”‘’「」『』《》()（）[]【】<>,，。:：;；!！?？"
@@ -106,7 +118,7 @@ _NOT_A_NAME_NOTE = (
 # 线性增长在这里被截住。用相对 topk 的倍数而非写死绝对值,是为了这条帽在
 # 任何 COMMUNITY_PEERS_TOPK 配置下都满足「单库场景不受影响」(单库最多贡献
 # topk 个,topk × 2 ≥ topk 恒成立)。
-_COMMUNITY_PEERS_CAP_FACTOR = 2
+_COMMUNITY_PEERS_CAP_FACTOR = DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR
 
 # Reflect 循环中,当上一步检索动作未带来任何新证据时,附加到候选摘要里的提示。
 # 目的:让模型"知道"重复检索已无收益,从而自主决定直接作答(而非被强制收尾),
@@ -364,11 +376,11 @@ OUTLINE_ACTION = "update_outline"
 #   * 每节 8 个证据 key —— 一节的支撑证据,不是一个证据池。
 # id/parent 32 字符是**模型自己起的**短句柄的宽度;证据 key 48 字符则必须容得下
 # 真实代理 id(`prefix-` + 32 位 uuid hex ≈ 35 字符),截短会让合法绑定对不上。
-_OUTLINE_MAX_SECTIONS = 12
-_OUTLINE_TITLE_CHARS = 60
-_OUTLINE_ID_CHARS = 32
-_OUTLINE_EVIDENCE_KEY_CHARS = 48
-_OUTLINE_MAX_EVIDENCE = 8
+_OUTLINE_MAX_SECTIONS = OUTLINE_MAX_SECTIONS
+_OUTLINE_TITLE_CHARS = OUTLINE_TITLE_CHARS
+_OUTLINE_ID_CHARS = OUTLINE_ID_CHARS
+_OUTLINE_EVIDENCE_KEY_CHARS = OUTLINE_EVIDENCE_KEY_CHARS
+_OUTLINE_MAX_EVIDENCE = OUTLINE_MAX_EVIDENCE
 # 标题里的引用形标记(`[k12]`/`[k12, k13]`)在解析入口剥掉(codex r6):证据引用
 # 属于 evidence 字段,标题只是文案。放它留到 `## 标题` 进最终 Markdown 的话,
 # 前端是对合并全文扫标记建引用表的——标题里的 `[k5001]` 要么显示成一个绑不上
@@ -378,7 +390,7 @@ _OUTLINE_TITLE_MARKER_RE = LOOSE_MARKER_RE
 # 每 run 最多几次 update_outline。大纲本身不带来证据,所以它的成本是「轮次」:
 # 无上限时一个偏爱整理的模型可以把整份步骤预算花在反复重排目录上。6 次足够
 # 「建 → 补 3 轮 → 收尾」,而 exhaustive 档的 50 步预算仍有绝大部分留给检索。
-_MAX_OUTLINE_UPDATES = 6
+_MAX_OUTLINE_UPDATES = DEFAULT_REASONING_MAX_OUTLINE_UPDATES
 # pending 最坏由 6 次常规提交 + 1 次专用纠错各贡献 8 个不同 key。完整状态留在
 # 服务端/终态 trace,每轮 prompt 只展示前 8 个,所以提示预算不随批次数增长。
 _OUTLINE_MAX_PENDING_EVIDENCE = _OUTLINE_MAX_EVIDENCE * (
@@ -633,6 +645,8 @@ def carry_outline_overflow(
     submitted: List[OutlineSection],
     merged: List[OutlineSection],
     current: Dict[str, List[str]],
+    *,
+    max_pending_evidence: int = _OUTLINE_MAX_PENDING_EVIDENCE,
 ) -> Dict[str, List[str]]:
     """把未接纳 key 当作持久服务端状态,而不是一次性诊断。
 
@@ -652,7 +666,7 @@ def carry_outline_overflow(
             if key in accepted or key in removed or key in keys:
                 continue
             keys.append(key)
-        if len(keys) > _OUTLINE_MAX_PENDING_EVIDENCE:
+        if len(keys) > max_pending_evidence:
             # 解析层每次最多 8 key、状态机最多 6 次常规更新 + 1 次专用纠错;
             # 超过只能说明这两个结构上限被改坏。响亮失败胜过截断 pending 再静默丢 key。
             raise AssertionError("outline pending evidence bound exceeded")
@@ -1488,11 +1502,13 @@ class ReasoningRetriever:
 
     def search(self, notebook_id, query, types=None, prefer="balanced"):
         wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
+        with retrieval_fanout_slot():
+            retrieved = self.retrieval.federated_retrieve(
+                notebook_id, query, types=types, w_keyword=wk, w_semantic=ws
+            )
         hits = self._filter_candidates(
             "knowledge",
-            self.retrieval.federated_retrieve(
-                notebook_id, query, types=types, w_keyword=wk, w_semantic=ws
-            ),
+            retrieved,
         )
         # P1-B: 留存本次查询的全量打分(轻量 (relevance,score) map,含未进 collected
         # 的候选)。收尾 _quota_rerank 直接复用——一次 run 内图只读、打分确定,
@@ -1511,27 +1527,34 @@ class ReasoningRetriever:
         return hits
 
     def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
+        with retrieval_fanout_slot():
+            retrieved = self.retrieval.retrieve_neighbors(
+                notebook_id, object_id, edge_type, direction
+            )
         return self._filter_candidates(
             "knowledge",
-            self.retrieval.retrieve_neighbors(
-                notebook_id, object_id, edge_type, direction
-            ),
+            retrieved,
         )
 
     def get(self, notebook_id, object_id):
         try:
-            return self.retrieval.node_context(notebook_id, object_id)
+            with retrieval_fanout_slot():
+                return self.retrieval.node_context(notebook_id, object_id)
         except KeyError:
             return {}
 
     def search_elements(self, notebook_id, query):
+        with retrieval_fanout_slot():
+            retrieved = self.retrieval.retrieve_elements(notebook_id, query)
         return self._filter_candidates(
-            "element", self.retrieval.retrieve_elements(notebook_id, query)
+            "element", retrieved
         )
 
     def ppr_retrieve(self, notebook_id, query):
+        with retrieval_fanout_slot():
+            retrieved = self.retrieval.ppr_retrieve(notebook_id, query)
         return self._filter_candidates(
-            "chunk", self.retrieval.ppr_retrieve(notebook_id, query)
+            "chunk", retrieved
         )
 
     def exact_lookup(self, notebook_id, query):
@@ -1540,9 +1563,9 @@ class ReasoningRetriever:
         走 `_filter_candidates` 与 PPR/element 同一条策略边界:knowhow 智能补全
         用它剔除私有 Memory 与当前表自身投影,新通道不能绕过。
         """
-        return self._filter_candidates(
-            "chunk", self.retrieval.exact_lookup_chunks(notebook_id, query)
-        )
+        with retrieval_fanout_slot():
+            retrieved = self.retrieval.exact_lookup_chunks(notebook_id, query)
+        return self._filter_candidates("chunk", retrieved)
 
     def _exact_lookup_terms(self, text: str, *, honor_quotes: bool = True) -> List[str]:
         """本轮实际会被探测的名称(供轨迹如实记账)。
@@ -1565,9 +1588,10 @@ class ReasoningRetriever:
 
     def follow_chain(self, notebook_id, start_object_id, edge_type=None,
                      target_object_id="", direction="out"):
-        result = self.retrieval.follow_chain(
-            notebook_id, start_object_id, edge_type=edge_type,
-            target_object_id=target_object_id, direction=direction)
+        with retrieval_fanout_slot():
+            result = self.retrieval.follow_chain(
+                notebook_id, start_object_id, edge_type=edge_type,
+                target_object_id=target_object_id, direction=direction)
         result.inferences = self._filter_candidates("chain", result.inferences)
         result.nodes = self._filter_candidates("knowledge", result.nodes)
         return result
@@ -1897,6 +1921,8 @@ class ReasoningRetriever:
             limits: Optional[AskRetrievalLimits] = None):
         raise_if_cancelled(self.cancel_event)
         self._per_query_scored.clear()
+        action_policy = reasoning_action_policy(self.settings)
+        max_outline_updates = action_policy.max_outline_updates
         # top_n:显式传入(报告管线每节独立预算)直通;None=合成时按最终方面数
         # (used_queries,含 expand_community 兄弟)自适应解析 —— 见 effective_top_n。
         # max_steps 覆盖 settings.reasoning_max_steps(报告滑块封顶 reflect 轮数);None=沿用全局。
@@ -2236,7 +2262,11 @@ class ReasoningRetriever:
             # ppr_future.result() 本身抛异常,这里都无条件关闭线程池且只关一次;
             # 异常(如有)由 try 块原样向外传播,finally 不吞、不重抛。
             if ppr_pool is not None:
-                ppr_pool.shutdown(wait=False)
+                if ppr_future is not None:
+                    ppr_future.cancel()
+                # A running DB/graph leaf cannot be force-cancelled safely.
+                # Join it so no run emits final stats before its last I/O ends.
+                ppr_pool.shutdown(wait=True, cancel_futures=True)
 
         # 复合问题最终配额排序用: 记录所有用过的子查询(保序去重)。
         used_queries = list(dict.fromkeys(s.query for s in subqueries))
@@ -2371,9 +2401,10 @@ class ReasoningRetriever:
                 return 0
             kg_gap_probed_seeds.update(object_ids)
             try:
-                probed = self.retrieval.weak_support_relations(
-                    notebook_id, object_ids
-                )
+                with retrieval_fanout_slot():
+                    probed = self.retrieval.weak_support_relations(
+                        notebook_id, object_ids
+                    )
             except AskCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 — 见上:提示不是必需品
@@ -2416,18 +2447,18 @@ class ReasoningRetriever:
             """
             nonlocal outline, outline_updates, outline_overflow
             nonlocal outline_cap_repair_used
-            consume_regular_update = outline_updates < _MAX_OUTLINE_UPDATES
+            consume_regular_update = outline_updates < max_outline_updates
             same_structure = tuple(
                 (s.id, s.title, s.parent) for s in decision.outline_sections
             ) == tuple((s.id, s.title, s.parent) for s in outline)
             if overflow_repair:
-                if outline_updates >= _MAX_OUTLINE_UPDATES:
+                if outline_updates >= max_outline_updates:
                     if outline_cap_repair_used:
                         record(TraceStep(
                             step_type="skip",
                             summary=(
                                 f"跳过整理大纲(已达本轮整理次数上限 "
-                                f"{_MAX_OUTLINE_UPDATES};溢出纠错机会也已用完)"
+                                f"{max_outline_updates};溢出纠错机会也已用完)"
                             ),
                             detail={"reason": "outline_budget",
                                     "updates": outline_updates,
@@ -2447,13 +2478,13 @@ class ReasoningRetriever:
                                 "updates": outline_updates,
                                 "sections": len(outline)}))
                     return
-            elif outline_updates >= _MAX_OUTLINE_UPDATES:
+            elif outline_updates >= max_outline_updates:
                 # 措辞按「该给什么」写:普通额度与专用纠错资格是两本账。
                 record(TraceStep(
                     step_type="skip",
                     summary=(
                         f"跳过整理大纲(已达本轮整理次数上限 "
-                        f"{_MAX_OUTLINE_UPDATES};大纲就按现在这份定稿,"
+                        f"{max_outline_updates};大纲就按现在这份定稿,"
                         "请改用检索动作补齐空节,或直接作答)"),
                     detail={"reason": "outline_budget",
                             "updates": outline_updates,
@@ -2482,6 +2513,7 @@ class ReasoningRetriever:
             )
             overflow = carry_outline_overflow(
                 outline_overflow, decision.outline_sections, bound, overflow,
+                max_pending_evidence=action_policy.max_pending_outline_evidence,
             )
             # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面状态
             # 初始化处的理由),所以这里既不加分也不清零。
@@ -2628,7 +2660,7 @@ class ReasoningRetriever:
             kg_gap_segment, kg_gap_shown = kg_gap_note_segment(
                 kg_gap_pending, repair_only=terminal_overflow_repair)
             outline_note = _outline_note(
-                outline, _MAX_OUTLINE_UPDATES - outline_updates,
+                outline, max_outline_updates - outline_updates,
                 outline_overflow,
                 overflow_repair_available=not outline_cap_repair_used,
                 repair_only=terminal_overflow_repair,
@@ -2688,7 +2720,7 @@ class ReasoningRetriever:
                              detail=reflect_detail))
             overflow_repair_submission = terminal_overflow_repair or (
                 bool(outline_overflow)
-                and outline_updates >= _MAX_OUTLINE_UPDATES
+                and outline_updates >= max_outline_updates
                 and not outline_cap_repair_used
             )
             if terminal_overflow_repair:
@@ -3163,9 +3195,10 @@ class ReasoningRetriever:
                     record(TraceStep(step_type="skip",
                                      summary="跳过概念漫游(未启用)",
                                      detail={"reason": "ppr_disabled"}))
-                elif ppr_searches >= _MAX_PPR_RETRIEVES:
+                elif ppr_searches >= action_policy.max_ppr_retrieves:
                     record(TraceStep(step_type="skip",
-                                     summary=f"跳过概念漫游(已达次数上限 {_MAX_PPR_RETRIEVES})",
+                                     summary=("跳过概念漫游(已达次数上限 "
+                                              f"{action_policy.max_ppr_retrieves})"),
                                      detail={"reason": "ppr_retrieve_cap"}))
                 else:
                     ppr_searches += 1
@@ -3240,13 +3273,15 @@ class ReasoningRetriever:
                                      summary=f"跳过重复的按名称精确查找:{term}",
                                      detail={"reason": "duplicate_exact_lookup",
                                              "term": term, "terms": probed}))
-                elif exact_lookups >= _MAX_EXACT_LOOKUPS:
+                elif exact_lookups >= action_policy.max_exact_lookups:
                     feed_exact_lookup_skip(
                         _norm_query(term), [term],
-                        f"「{term}」已达按名称精确查找次数上限（{_MAX_EXACT_LOOKUPS}）")
+                        f"「{term}」已达按名称精确查找次数上限（"
+                        f"{action_policy.max_exact_lookups}）")
                     record(TraceStep(
                         step_type="skip",
-                        summary=f"跳过按名称精确查找(已达次数上限 {_MAX_EXACT_LOOKUPS})",
+                        summary=("跳过按名称精确查找(已达次数上限 "
+                                 f"{action_policy.max_exact_lookups})"),
                         detail={"reason": "exact_lookup_cap", "term": term}))
                 else:
                     exact_lookups += 1
@@ -3295,10 +3330,11 @@ class ReasoningRetriever:
                         step_type="skip", summary="跳过重复 follow_chain",
                         detail={"reason": "duplicate_follow_chain",
                                 "start_object_id": decision.chain_start_object_id}))
-                elif follow_chain_searches >= _MAX_FOLLOW_CHAIN_ACTIONS:
+                elif follow_chain_searches >= action_policy.max_follow_chain_actions:
                     record(TraceStep(
                         step_type="skip",
-                        summary=f"跳过 follow_chain(已达次数上限 {_MAX_FOLLOW_CHAIN_ACTIONS})",
+                        summary=("跳过 follow_chain(已达次数上限 "
+                                 f"{action_policy.max_follow_chain_actions})"),
                         detail={"reason": "follow_chain_cap"}))
                 else:
                     follow_chain_done.add(action_key)
@@ -3410,7 +3446,10 @@ class ReasoningRetriever:
                     # 总量帽(见 _COMMUNITY_PEERS_CAP_FACTOR 注释):合并各库结果后才截断,
                     # 取自 mounted_base_ids 的确定性遍历顺序(MOUNT_ORDER)+ list.append 的
                     # 插入序,不依赖 dict/set 遍历顺序,同样的输入总是截出同样的前 N 个。
-                    peers_cap = self.settings.community_peers_topk * _COMMUNITY_PEERS_CAP_FACTOR
+                    peers_cap = (
+                        self.settings.community_peers_topk
+                        * action_policy.community_peers_cap_factor
+                    )
                     if len(peers) > peers_cap:
                         peers = peers[:peers_cap]
                     added, names = 0, []
@@ -3531,7 +3570,10 @@ class ReasoningRetriever:
             )
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
-            rescored = self.retrieval.retrieve_scored(notebook_id, question)
+            with retrieval_fanout_slot():
+                rescored = self.retrieval.retrieve_scored(
+                    notebook_id, question
+                )
             scored_map = {
                 h.object_id: h
                 for h in self._filter_candidates(

@@ -1,4 +1,7 @@
+import threading
 from types import SimpleNamespace
+
+import pytest
 
 from app.core.config import Settings
 from app.models.admin import AskDetail
@@ -224,6 +227,51 @@ def test_all_selected_participant_drift_is_visible_but_does_no_snapshot_io():
     assert events.rows[-1]["reason"] == "scope_drift"
 
 
+def test_all_selected_drift_callback_uses_leaf_gate_and_propagates_cancel():
+    from app.services.cancellation import AskCancelled
+    from app.services.retrieval_run import retrieval_fanout_slot, retrieval_run
+
+    baseline = [_chunk("b", "a")]
+    service, _events = _service(
+        snapshot=None, ppr=SimpleNamespace(hits=())
+    )
+    calls = []
+
+    with retrieval_run(
+        run_kind="report_generation", fanout_limit=1
+    ) as state, source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": False}
+    ):
+        result = service.run(
+            "nb",
+            baseline,
+            unsafe_scope_drift=lambda: calls.append("probe") or False,
+            leaf_io=retrieval_fanout_slot,
+        )
+
+    assert result.status.state == "historical"
+    assert calls == ["probe"]
+    assert state.fanout_acquires == 1
+
+    cancel_event = threading.Event()
+    cancel_event.set()
+    calls.clear()
+    with pytest.raises(AskCancelled), retrieval_run(
+        run_kind="report_generation",
+        fanout_limit=1,
+        cancel_event=cancel_event,
+    ), source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": False}
+    ):
+        service.run(
+            "nb",
+            baseline,
+            unsafe_scope_drift=lambda: calls.append("cancelled-probe") or False,
+            leaf_io=retrieval_fanout_slot,
+        )
+    assert calls == []
+
+
 def test_active_lane_appends_graph_chunks_after_baseline(monkeypatch):
     baseline = [_chunk("b", "a")]
     graph_chunk = SimpleNamespace(
@@ -262,6 +310,51 @@ def test_active_lane_appends_graph_chunks_after_baseline(monkeypatch):
     assert result.status.post_scope_drop_count == 0
     assert events.rows[-1]["scope_hash"] == "scope"
     assert "text" not in events.rows[-1]
+
+
+def test_report_activation_routes_each_graph_leaf_through_retrieval_run(monkeypatch):
+    from app.services.retrieval_run import retrieval_run
+
+    baseline = [_chunk("b", "a")]
+    graph_chunk = SimpleNamespace(
+        chunk_id="g", source_id="a", section_path="G", text="graph",
+        element_ids=("eg",),
+    )
+    ppr = SimpleNamespace(
+        hits=(SimpleNamespace(
+            chunk=graph_chunk,
+            score=0.9,
+            support=RetrievalSupport("ppr", "ppr", "", 0.9),
+        ),),
+        cache_hit=False,
+        capability=SimpleNamespace(enabled=True, reason=""),
+    )
+    service, _events = _service(snapshot=_snapshot(graph_chunk), ppr=ppr)
+    _enable_active(service, monkeypatch)
+    report = object.__new__(ReportEngine)
+    report.dependencies = SimpleNamespace(
+        selected_source_graph=service,
+        source_query=SimpleNamespace(source_titles=lambda _ids: {"a": "A"}),
+        selected_graph_hydrate=lambda _ids: (),
+        scale_version=lambda _nb: "v",
+        retrieval=SimpleNamespace(
+            unsafe_source_scope_restricted=lambda _nb: True
+        ),
+    )
+    report.settings = SimpleNamespace(ppr_top_chunks=20)
+    result = SimpleNamespace(chunks=list(baseline), top_hits=())
+
+    with retrieval_run(
+        run_kind="report_generation", fanout_limit=1
+    ) as state, source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        report._activate_selected_source_graph("nb", result)
+
+    # snapshot, source-title read and online PPR are separate leaves.  The
+    # activation orchestrator itself never owns a slot around service.run().
+    assert state.fanout_acquires == 3
+    assert [chunk.chunk_id for chunk in result.chunks] == ["b", "g"]
 
 
 def test_post_scope_candidate_discards_entire_enrichment_lane(monkeypatch):
@@ -424,6 +517,8 @@ def test_graph_failure_discards_successful_ppr_lane(monkeypatch):
 
 
 def test_partition_failure_and_hydration_failure_return_baseline(monkeypatch):
+    from app.services.retrieval_run import retrieval_fanout_slot, retrieval_run
+
     baseline = [_chunk("b", "a")]
     ppr = SimpleNamespace(
         hits=(), cache_hit=False,
@@ -470,7 +565,9 @@ def test_partition_failure_and_hydration_failure_return_baseline(monkeypatch):
     assert failed_hydration.chunks == tuple(baseline)
     assert failed_hydration.status.reason == "source_partition_artifact_load_failed"
 
-    with source_scope_context(
+    with retrieval_run(
+        run_kind="report_generation", fanout_limit=1
+    ) as state, source_scope_context(
         "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
     ):
         recovered = service.run(
@@ -478,11 +575,14 @@ def test_partition_failure_and_hydration_failure_return_baseline(monkeypatch):
             baseline,
             parent_version="v",
             hydrate_chunk_ids=lambda _ids: [_chunk("g", "a")],
+            leaf_io=retrieval_fanout_slot,
         )
 
     assert [chunk.chunk_id for chunk in recovered.chunks] == ["b", "g"]
     assert recovered.status.state == "active"
     assert "ppr_node_limit_exceeded" in recovered.status.degraded_reasons
+    # snapshot, online PPR capability probe, partitioned PPR and hydration.
+    assert state.fanout_acquires == 4
 
 
 def test_partition_mixed_missing_or_out_of_scope_hydration_discards_all_g(

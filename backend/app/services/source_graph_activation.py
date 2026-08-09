@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from app.services.cancellation import AskCancelled
 from app.services.retrieval import RetrievedChunk, RetrievalSupport
 from app.services.source_graph_rollout import (
     decide_source_graph_rollout,
@@ -224,15 +226,22 @@ class SelectedSourceGraphActivationService:
         parent_version: Any | Callable[[], Any] = None,
         max_results: int = 20,
         unsafe_scope_drift: bool | Callable[[], bool] = False,
+        leaf_io: Callable[[], Any] | None = None,
     ) -> ActivatedSourceGraphResult:
         baseline = tuple(baseline_chunks)
+        leaf_slot = leaf_io or nullcontext
         scope = current_source_scope()
         try:
-            scope_drifted = bool(
-                unsafe_scope_drift()
-                if callable(unsafe_scope_drift)
-                else unsafe_scope_drift
-            ) if scope is not None and not scope.restricted else False
+            if scope is not None and not scope.restricted:
+                if callable(unsafe_scope_drift):
+                    with leaf_slot():
+                        scope_drifted = bool(unsafe_scope_drift())
+                else:
+                    scope_drifted = bool(unsafe_scope_drift)
+            else:
+                scope_drifted = False
+        except AskCancelled:
+            raise
         except Exception:
             return self.fail_closed(
                 notebook_id, baseline, "scope_drift_probe_failed",
@@ -273,7 +282,10 @@ class SelectedSourceGraphActivationService:
 
         started = time.perf_counter()
         try:
-            snapshot = self._snapshots.snapshot(notebook_id, source_ids)
+            with leaf_slot():
+                snapshot = self._snapshots.snapshot(notebook_id, source_ids)
+        except AskCancelled:
+            raise
         except Exception:
             status = SourceGraphStatus(
                 "degraded", "snapshot_failed", selected_source_count=len(source_ids)
@@ -290,7 +302,13 @@ class SelectedSourceGraphActivationService:
             return ActivatedSourceGraphResult(baseline, baseline, (), status)
 
         try:
-            titles = dict(source_titles(list(source_ids))) if source_titles else {}
+            if source_titles:
+                with leaf_slot():
+                    titles = dict(source_titles(list(source_ids)))
+            else:
+                titles = {}
+        except AskCancelled:
+            raise
         except Exception:
             return self.fail_closed(
                 notebook_id, baseline, "source_titles_failed",
@@ -302,12 +320,13 @@ class SelectedSourceGraphActivationService:
         ppr_unavailable_reason = "ppr_unavailable"
         ppr_started = time.perf_counter()
         try:
-            ppr = self._online_ppr.retrieve(
-                snapshot,
-                object_seeds=object_seeds,
-                chunk_seeds=chunk_seeds,
-                max_results=max_results,
-            )
+            with leaf_slot():
+                ppr = self._online_ppr.retrieve(
+                    snapshot,
+                    object_seeds=object_seeds,
+                    chunk_seeds=chunk_seeds,
+                    max_results=max_results,
+                )
             online_ppr_available = bool(ppr.capability.enabled)
             if online_ppr_available:
                 for hit in ppr.hits:
@@ -322,6 +341,8 @@ class SelectedSourceGraphActivationService:
                     ppr.capability.reason or "ppr_unavailable"
                 )
                 degraded.append(ppr_unavailable_reason)
+        except AskCancelled:
+            raise
         except Exception:
             return self.fail_closed(
                 notebook_id, baseline, "ppr_run_failed",
@@ -334,13 +355,14 @@ class SelectedSourceGraphActivationService:
         neighbor_ids: set[str] = set()
         if object_seeds and online_ppr_available:
             try:
-                expanded = self._primitives.expand_graph(
-                    snapshot,
-                    list(object_seeds),
-                    max_depth=2,
-                    max_fan_out=8,
-                    max_nodes=80,
-                )
+                with leaf_slot():
+                    expanded = self._primitives.expand_graph(
+                        snapshot,
+                        list(object_seeds),
+                        max_depth=2,
+                        max_fan_out=8,
+                        max_nodes=80,
+                    )
                 if not expanded.capability.enabled:
                     return self.fail_closed(
                         notebook_id,
@@ -352,6 +374,8 @@ class SelectedSourceGraphActivationService:
                         ppr_ms=round((time.perf_counter() - ppr_started) * 1000),
                     )
                 neighbor_ids = {node.object_id for node in expanded.nodes}
+            except AskCancelled:
+                raise
             except Exception:
                 return self.fail_closed(
                     notebook_id, baseline, "graph_expand_failed",
@@ -380,17 +404,20 @@ class SelectedSourceGraphActivationService:
                     degraded_reasons=degraded,
                 )
             try:
-                resolved_parent_version = (
-                    parent_version() if callable(parent_version) else parent_version
-                )
-                partitioned = self._partitioned_ppr.retrieve(
-                    notebook_id,
-                    source_ids,
-                    parent_version=resolved_parent_version,
-                    object_seeds=object_seeds,
-                    chunk_seeds=chunk_seeds,
-                    max_results=max_results,
-                )
+                if callable(parent_version):
+                    with leaf_slot():
+                        resolved_parent_version = parent_version()
+                else:
+                    resolved_parent_version = parent_version
+                with leaf_slot():
+                    partitioned = self._partitioned_ppr.retrieve(
+                        notebook_id,
+                        source_ids,
+                        parent_version=resolved_parent_version,
+                        object_seeds=object_seeds,
+                        chunk_seeds=chunk_seeds,
+                        max_results=max_results,
+                    )
                 if not partitioned.capability.enabled:
                     return self.fail_closed(
                         notebook_id,
@@ -410,9 +437,10 @@ class SelectedSourceGraphActivationService:
                     requested_chunk_ids = {
                         str(hit.chunk_id) for hit in partition_hits
                     }
-                    hydrated_rows = tuple(hydrate_chunk_ids(
-                        [hit.chunk_id for hit in partition_hits]
-                    ))
+                    with leaf_slot():
+                        hydrated_rows = tuple(hydrate_chunk_ids(
+                            [hit.chunk_id for hit in partition_hits]
+                        ))
                     hydrated = {chunk.chunk_id: chunk for chunk in hydrated_rows}
                     allowed_sources = set(source_ids)
                     hydration_mismatch = (
@@ -448,6 +476,8 @@ class SelectedSourceGraphActivationService:
                         chunk.relevance = hit.score
                         chunk.retrieval_supports = (hit.support,)
                         candidates[chunk.chunk_id] = chunk
+            except AskCancelled:
+                raise
             except Exception:
                 return self.fail_closed(
                     notebook_id, baseline, "source_partition_artifact_load_failed",

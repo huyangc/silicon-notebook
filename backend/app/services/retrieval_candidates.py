@@ -44,6 +44,10 @@ from app.services.retrieval import (
     score_knowledge,
     type_weight,
 )
+from app.services.retrieval_run import (
+    current_retrieval_run,
+    memoized_query_embedding,
+)
 from app.services.source_display import source_display_title
 
 
@@ -558,16 +562,29 @@ class CandidateRetrievalService(_RetrievalState):
         失败不缓存(保留每次重试语义)。default None(非 ask 路径)行为不变。"""
         if not getattr(self.embedder, "configured", False):
             return None
-        cache = _ASK_EMBED_CACHE.get()
         key = query[: self.settings.embed_truncate_chars]
-        if cache is not None:
-            hit = cache.get(key)
-            if hit is not None:
-                return hit
+
+        def _compute() -> Optional[List[float]]:
+            vec = self.embedder.embed_query(key)
+            from app.services.vector_index import resolve_runtime_dim, truncate_vec
+            rd = resolve_runtime_dim(self.settings)
+            if rd and vec is not None and len(vec) > rd:
+                import numpy as np
+                vec = truncate_vec(np.asarray(vec, dtype=np.float32), rd).tolist()
+            return vec
+
         try:
-            vec = self.embedder.embed_query(
-                query[: self.settings.embed_truncate_chars]
-            )
+            # The retrieval-run state is thread-safe and single-flight.  Keep
+            # the old Ask ContextVar as a compatibility fallback for direct
+            # service/test callers that have not entered the common run yet.
+            if current_retrieval_run() is not None:
+                return memoized_query_embedding(key, _compute)
+            cache = _ASK_EMBED_CACHE.get()
+            if cache is not None:
+                hit = cache.get(key)
+                if hit is not None:
+                    return hit
+            vec = _compute()
         except Exception as exc:
             self._note_model_error(
                 "embed",
@@ -575,11 +592,6 @@ class CandidateRetrievalService(_RetrievalState):
                 workload_id="retrieval_query_embedding",
             )
             return None
-        from app.services.vector_index import resolve_runtime_dim, truncate_vec
-        rd = resolve_runtime_dim(self.settings)
-        if rd and vec is not None and len(vec) > rd:
-            import numpy as np
-            vec = truncate_vec(np.asarray(vec, dtype=np.float32), rd).tolist()
         if cache is not None and vec is not None:
             cache[key] = vec
         return vec
@@ -2162,7 +2174,7 @@ class CandidateRetrievalService(_RetrievalState):
             for chunk in scored
         })
         return scored, ids, mat
-    def _hydrate_chunk_candidates(self, cand_ids):
+    def hydrate_chunk_candidates(self, cand_ids):
         """按候选 id 有界取数:chunk 文本行 + 归一化向量矩阵。候选界定之后的
         hydrate,ANN 路径与大库 FTS 降级路径共用,绝不全表。返回 (chunks, ids, mat)。
         cand_ids 随 delta⊕词法补召回可无界增长——按 _in_batches 分批,防超 SQLite
@@ -2182,6 +2194,11 @@ class CandidateRetrievalService(_RetrievalState):
         } for r in rows]
         ids, mat = build_matrix((r["vid"], r["vector"]) for r in vrows)
         return chunks, ids, mat
+
+    # Compatibility for internal subclasses and older tests.  Composition
+    # boundaries use the public RetrievalPort method above.
+    def _hydrate_chunk_candidates(self, cand_ids):
+        return self.hydrate_chunk_candidates(cand_ids)
     def _retrieve_chunks_multi(self, notebook_id, sub_queries):
         """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。
         ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""

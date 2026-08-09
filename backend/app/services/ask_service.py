@@ -371,6 +371,7 @@ class AskService:
         raise UnknownAskMode — never a silent fall-through. on_trace only
         reaches streaming engines (mirrors the frozen route-runner split)."""
         from app.services.ask_modes import resolve_mode
+        from app.services.retrieval_run import retrieval_run
 
         spec = resolve_mode(getattr(payload, "mode", None))
         handler = getattr(self, spec.handler)
@@ -379,11 +380,23 @@ class AskService:
             getattr(payload, "source_scope", None),
             getattr(payload, "base_scope", None),
         ):
-            if spec.streaming:
-                return handler(notebook_id, payload, user_id=user_id,
-                               job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
-            return handler(notebook_id, payload, user_id=user_id,
-                           job_id=job_id, cancel_event=cancel_event)
+            # All Ask modes now share the same request-local query-embedding
+            # memo.  Ask keeps its historical internal concurrency: the
+            # report-only database fan-out gate is deliberately absent here.
+            with retrieval_run(
+                run_kind=f"ask_{spec.id}",
+                event_log=getattr(self, "event_log", None),
+                correlation_id=job_id,
+            ):
+                if spec.streaming:
+                    return handler(
+                        notebook_id, payload, user_id=user_id, job_id=job_id,
+                        on_trace=on_trace, cancel_event=cancel_event,
+                    )
+                return handler(
+                    notebook_id, payload, user_id=user_id, job_id=job_id,
+                    cancel_event=cancel_event,
+                )
 
     def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """Run the synchronous Ask surface through the durable job lifecycle.

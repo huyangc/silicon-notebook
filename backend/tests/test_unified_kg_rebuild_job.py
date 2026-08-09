@@ -210,6 +210,7 @@ _JOB_PLUMBING = (
     "_settle_kg_maintenance",
     "kg_maintenance_jobs",
     "kg_maintenance_lock",
+    "kg_maintenance",
     "start_unified_kg_rebuild",
     "background_jobs",
 )
@@ -243,8 +244,44 @@ def test_rebuild_unified_kg_body_knows_nothing_about_the_job_slot():
         f"rebuild_unified_kg 的函数体里出现了任务槽管道 {offenders} —— "
         "后台化只该改『在哪儿跑』,不该改这一遍怎么跑"
     )
-    # And the wrapper is the one that owns the plumbing (so the guard above is not
-    # vacuously green because the whole thing was deleted).
+    # The compatibility wrapper is now a one-hop delegate to the dedicated job
+    # collaborator; the algorithm itself remains outside that plumbing.
     wrapper = _lifecycle_function_source("run_unified_kg_rebuild_job")
-    assert "_settle_kg_maintenance" in wrapper
-    assert "self.rebuild_unified_kg(notebook_id, force=False)" in wrapper
+    assert "self.kg_maintenance.run_unified_kg_rebuild_job" in wrapper
+    assert "self.rebuild_unified_kg" not in wrapper
+
+
+def test_lifecycle_public_maintenance_surface_is_one_hop(repo, monkeypatch):
+    """Facade/API compatibility stays on lifecycle while orchestration ownership
+    lives in KgMaintenanceJobs. Each public wrapper must preserve arguments and
+    return values without adding a second policy path."""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    collaborator = lifecycle.kg_maintenance
+    calls = []
+
+    cases = (
+        ("start_notebook_relink", ("nb",), {"started": "relink"}),
+        ("notebook_relink_status", ("nb",), {"status": "idle"}),
+        ("run_notebook_relink_job", ("nb", "rlj-1"), {"edges_added": 2}),
+        ("fail_notebook_relink_submission", ("nb", "rlj-1"), None),
+        ("start_unified_kg_rebuild", ("nb",), {"started": "rebuild"}),
+        ("unified_kg_rebuild_status", ("nb",), {"status": "idle"}),
+        ("run_unified_kg_rebuild_job", ("nb", "ukj-1"), 3),
+        ("fail_unified_kg_rebuild_submission", ("nb", "ukj-1"), None),
+    )
+    for name, args, expected in cases:
+        def _delegate(*actual, _name=name, _expected=expected):
+            calls.append((_name, actual))
+            return _expected
+
+        monkeypatch.setattr(collaborator, name, _delegate)
+        assert getattr(lifecycle, name)(*args) == expected
+
+    assert calls == [(name, args) for name, args, _expected in cases]
+
+
+def test_lifecycle_private_registry_aliases_keep_identity(repo):
+    lifecycle = repo._runtime.knowledge_lifecycle
+
+    assert lifecycle.kg_maintenance_jobs is lifecycle.kg_maintenance.jobs
+    assert lifecycle.kg_maintenance_lock is lifecycle.kg_maintenance.lock

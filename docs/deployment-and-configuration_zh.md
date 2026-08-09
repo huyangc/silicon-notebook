@@ -331,6 +331,10 @@ Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_ag
 需要此功能时必须把两者都绑定到兼容的 chat 服务；任一未绑定或任一阶段 provider 失败时都不返回建议，
 应用不会静默退成同表补全，也绝不伪造离线结果。
 
+深度报告把规划质量与长正文 workload 分开：仓库示例中 `report_outline` 绑定 reasoning 服务，
+长正文 `report_section` 与大型结构化终审 `report_summary` 绑定非思考型 general 服务。部署可覆盖，
+但所选 provider/model 必须能在配置的 completion 预算内输出普通 content，不得把预算全部消耗于隐藏 reasoning。
+
 调度策略固定在代码中：
 
 - 每个物理服务最多同时运行 `max_concurrency` 个调用；不同服务拥有独立槽位；
@@ -611,12 +615,16 @@ REPORT_SCOUT_KG_LIMIT / REPORT_SCOUT_CHUNK_LIMIT / REPORT_SCOUT_MEMORY_LIMIT # �
 REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000；仅对不带研究深度的调用方生效，见检索段的行为变化说明）
 REPORT_GENERATION_CONCURRENCY # 深度报告：每个后端进程同时准入的整篇报告数（默认 1；排队时不占数据库连接）
 REPORT_SECTION_CONCURRENCY   # 深度报告：每篇已准入报告的节级扇出（默认 5；还受模型容量和数据库连接池余量约束）
+REPORT_RETRIEVAL_FANOUT      # 深度报告：规划/生成 run 共用的叶子 KG/chunk/element/PPR I/O 扇出（默认 8）
+REPORT_PROBE_CHANNEL_CONCURRENCY # 规划探针：独立 KG/原文元素通道的并行度（1..2，默认 2）
+REPORT_SUFFICIENCY_MIN_RELEVANT_ITEMS / REPORT_SUFFICIENCY_MIN_FAMILIES / REPORT_SUFFICIENCY_COMPLETE_MIN_FAMILIES / REPORT_SUFFICIENCY_MAX_TOP_FAMILY_SHARE # 集中的报告充分性规则；默认保持历史判定，精确护栏见 product-and-api
 REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 completion 上限（默认 65536）
 REPORT_SYNTHESIS_MAX_TOKENS  # 深度报告：全篇 JSON 蓝图 completion 上限（默认 102400）
 REPORT_SUMMARY_MAX_TOKENS    # 深度报告：最终只读终审 completion 上限（默认 102400）
 REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）
 REPORT_HIGH_RISK_DOWNGRADE_ENABLED # 深度报告高风险引证审计超阈值时是否把 grounded 章节封顶为 overview（默认 false；关闭时披露仍运行）
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # 深度报告高风险引证审计阈值；数值契约只在 docs/product-and-api_zh.md 维护
+REASONING_MAX_PPR_RETRIEVES / REASONING_MAX_EXACT_LOOKUPS / REASONING_MAX_FOLLOW_CHAIN_ACTIONS / REASONING_COMMUNITY_PEERS_CAP_FACTOR / REASONING_MAX_OUTLINE_UPDATES # 集中的 reasoning 动作/扩展护栏；默认保持历史行为，精确护栏见 product-and-api
 ```
 
 三个 `REPORT_*_MAX_TOKENS` 是 completion 上限，不是总上下文声明，也不会预占输出。

@@ -87,9 +87,9 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 - `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供十一个工具（七个 Memory/context 与四个 knowhow）的 scoped Streamable HTTP 面；`deps.py` 承载访问控制依赖。
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
 - `backend/app/services/model_registry.py` 持有稳定 workload 目录并加载部署 TOML；`model_provider.py` 是进程级模型访问组合根，按 workload 解析物理服务并复用每服务唯一的 `ServiceScheduler`；`model_scheduler.py` 与 `model_circuit_breaker.py` 持有容量、公平队列、截止时间与熔断状态。业务 service、repository、batch、探测路径都只能请求 workload adapter，不得直接构造/暴露 raw chat、embedding 或 rerank client。底层 HTTP 只存在于架构测试明确许可的 transport 边界。
-- `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
-- `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、Knowhow 稳定游标枚举、mode 注册和 reasoning 迭代；`core/ask_retrieval_policy.py` 集中声明五档预算与完整枚举安全线。`collection_catalog.py`（零 LLM、索引辅助的集合地图，含来源元素按类型计数、KG 对象按类型计数与用户可见来源数的有界缓存/派生）与 `collection_enumeration.py`（对地图同一物理源集合做稳定游标遍历的枚举执行器）为 reasoning 的 `enumerate_elements`/`enumerate_kg_objects` reflect 动作及其 `collection="sources"` 参数值供数；两者与地图注入、reflect prompt、schema 分支、allowed_actions 共用同一个 `REASONING_ENUM_TOOLS_ENABLED`（默认 true）总闸。
-- `report_engine.py` 负责两阶段深度报告；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
+- `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑；`kg/maintenance_jobs.py` 独立拥有 relink/rebuild 的共享单飞槽和后台任务编排，算法仍归 `KnowledgeLifecycleService`。
+- `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、Knowhow 稳定游标枚举、mode 注册和 reasoning 迭代；`core/ask_retrieval_policy.py` 集中声明五档预算与完整枚举安全线，`services/reports/policy.py` 集中深度报告充分性和 reasoning 动作线。`services/retrieval_run.py` 用 request/report-stage 级 ContextVar 状态在 worker 间共享 query embedding single-flight 和叶子 I/O 扇出闸，不跨请求、规划或生成阶段；报告等待槽位时感知取消，并在真正发起 leaf I/O 前复查。`collection_catalog.py`（零 LLM、索引辅助的集合地图，含来源元素按类型计数、KG 对象按类型计数与用户可见来源数的有界缓存/派生）与 `collection_enumeration.py`（对地图同一物理源集合做稳定游标遍历的枚举执行器）为 reasoning 的 `enumerate_elements`/`enumerate_kg_objects` reflect 动作及其 `collection="sources"` 参数值供数；两者与地图注入、reflect prompt、schema 分支、allowed_actions 共用同一个 `REASONING_ENUM_TOOLS_ENABLED`（默认 true）总闸。
+- `report_engine.py` 保留两阶段深度报告的公共编排入口；`services/reports/policy.py` 和 `observability.py` 分别拥有规则与无内容分段事件；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
 - `memory_service.py` 与 `memory_retrieval.py` 负责 owner/notebook 隔离的生命周期、revision/provenance、两个检索平面、Agent token policy 与 confirmed-only 正式投影；Memory 不写入 source/chunk/KG 表。
 - `parsers.py`、`structural_markdown.py` 与 `mineru_client.py` 负责 PDF、Markdown、DOCX、PPTX、CSV、XLSX 等来源的结构化解析；FastAPI 进程不直接加载 torch 或 MinerU 模型。
 
@@ -102,6 +102,8 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 - `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 - `frontend/app/api-client.ts` is the shared transport，负责 base URL、认证 header、JSON/empty/Blob、trusted error、网络失败与 AbortSignal mechanics；七个 domain API module 仍拥有 endpoint path、body、response type 与产品策略。
+- `frontend/features/kg-maintenance` 拥有 KG 维护 API 与轮询/忙碌状态纯逻辑，`page.tsx` 只编排这个 feature。
+- `frontend/tests/{unit,component,guards}` 是测试入口的唯一位置，`frontend/test-support` 保存 setup 和语义源码 adapter；位置守卫禁止测试回流到 `app`/`features`。
 
 notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab。外层另有当前用户的总 Memory 页面，notebook 卡片数量可深链到局部 Memory tab。全屏 Knowledge Graph 和看板是独立顶栏动作；图谱 Schema（知识对象类型/字段管理，仅管理员）已移入知识图谱视图头部的「图谱 Schema」按钮，不再是独立顶栏动作。「分析」菜单本身只含晋升队列（admin）、tier 切换（admin）与边审查队列。当前没有文章研究、思维导图、信息图或派生规则入口，也没有固定 Studio 右栏。
 
@@ -391,12 +393,12 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 | Identity | `backend/app/repositories/sqlite/identity_store.py` | 用户、session、管理员用量与 v24 用户模型配置清理兼容；不再提供运行时个人模型配置；`sqlite_identity.py` 为兼容 shim。 |
 | 系统模型服务 | `backend/app/services/model_registry.py`、`model_provider.py`、`model_scheduler.py`、`model_circuit_breaker.py` + model-service status/admin routes | 部署 TOML 绑定 workload；provider 独占 adapter 解析，scheduler 按物理服务独占容量/队列/熔断；状态只读脱敏，admin 探测显式执行，support id 关联维护日志。 |
 | Sharing | `backend/app/services/notebook_sharing.py` + `backend/app/repositories/sqlite/sharing_store.py` | share token、reader 权限、深拷贝与补偿/恢复；`sqlite_notebook_sharing.py` 为兼容 shim。 |
-| KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；所有消费者共享 usable relation 规则。 |
-| Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py`、`collection_catalog.py`、`collection_enumeration.py`、`core/ask_retrieval_policy.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding、tier 次序与集合完整性保持分离；mode registry 是 mode 真源，effort policy 是档位与枚举阈值真源；collection_catalog/collection_enumeration 是集合地图与元素/KG 对象枚举执行器的唯一实现，共用 `REASONING_ENUM_TOOLS_ENABLED` 总闸。 |
-| Reports | `backend/app/services/report_engine.py` | 两阶段后台 job，保持 outline 审阅、取消与 section progress 语义。 |
+| KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；`maintenance_jobs.py` 拥有 relink/rebuild 任务编排，算法仍归 lifecycle。 |
+| Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py`、`retrieval_run.py`、`collection_catalog.py`、`collection_enumeration.py`、`core/ask_retrieval_policy.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding、tier 次序与集合完整性保持分离；mode registry 是 mode 真源，effort policy 是档位与枚举阈值真源；retrieval run 是单轮 embedding 复用与报告叶子扇出的边界。 |
+| Reports | `backend/app/services/report_engine.py` + `backend/app/services/reports/` | 两阶段后台 job，保持 outline 审阅、取消与 section progress 语义；policy 与无内容观测从编排器分离。 |
 | Memory / MCP | `memory_service.py`、`memory_retrieval.py`、`memory_store.py`、`memory_routes.py`、`mcp_server.py` | owner+notebook 隔离；Agent candidate 与 confirmed-only 正式投影分离；token/scope/allowlist 每次调用重校验。 |
 | Knowhow 表 | `backend/app/services/knowhow/`（`projection.py`、`api.py`、`grid_parser.py`、`textops.py`、`assets.py`）+ `repositories/sqlite/knowhow_store.py` + `api/knowhow_agent_routes.py` | 5+1 表 schema 域；唯一零 LLM KG 写入方；变更统一走 `ProjectionScheduler`；代码附件与检索/KG 严格隔离；会话与 Agent 面共享服务核心。 |
-| Frontend workspace | `frontend/app/page.tsx` 加共享 model/panel/helper 与七个 domain API module | `page.tsx` 负责编排；`api-client.ts` 统一 HTTP mechanics，domain API module 保留产品 policy；共享类型、答案面板和 KG 标记不能复制回巨型组件。 |
+| Frontend workspace | `frontend/app/page.tsx`、`frontend/features/`、`frontend/tests/`、`frontend/test-support/` | `page.tsx` 负责编排，feature 纵切片拥有生产策略；测试与 production 物理分离并由 guard 强制。 |
 
 Repository 侧的 persistence 与业务编排已按上表分层完成；应用边界已完成 router、model facade 与 shared transport 的领域分工。当前主要耦合点是 `page.tsx` 仍承担大量 workspace 异步状态，以及 FastAPI lifespan/application lifecycle composition 尚未独立；后续整改继续以现有 facade 和测试为保护层逐域迁移。
 

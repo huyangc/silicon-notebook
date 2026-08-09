@@ -37,6 +37,31 @@ def test_reasoning_settings_knobs():
     s = Settings()
     assert s.reasoning_max_steps == 50
     assert s.reasoning_max_subqueries == 5
+    assert s.reasoning_max_ppr_retrieves == 3
+    assert s.reasoning_max_exact_lookups == 3
+    assert s.reasoning_max_follow_chain_actions == 3
+    assert s.reasoning_community_peers_cap_factor == 2
+    assert s.reasoning_max_outline_updates == 6
+
+
+def test_reasoning_action_policy_settings_env(monkeypatch):
+    from app.core.config import Settings
+    from app.services.reports.policy import reasoning_action_policy
+
+    monkeypatch.setenv("REASONING_MAX_PPR_RETRIEVES", "1")
+    monkeypatch.setenv("REASONING_MAX_EXACT_LOOKUPS", "2")
+    monkeypatch.setenv("REASONING_MAX_FOLLOW_CHAIN_ACTIONS", "4")
+    monkeypatch.setenv("REASONING_COMMUNITY_PEERS_CAP_FACTOR", "3")
+    monkeypatch.setenv("REASONING_MAX_OUTLINE_UPDATES", "5")
+    policy = reasoning_action_policy(Settings(_env_file=None))
+    assert (
+        policy.max_ppr_retrieves,
+        policy.max_exact_lookups,
+        policy.max_follow_chain_actions,
+        policy.community_peers_cap_factor,
+        policy.max_outline_updates,
+        policy.max_pending_outline_evidence,
+    ) == (1, 2, 4, 3, 5, 48)
 
 
 def test_adaptive_top_n_settings_defaults():

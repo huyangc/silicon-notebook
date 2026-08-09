@@ -8,6 +8,7 @@ Two properties beyond the API smoke tests in test_kg_rebuild_relink_api.py:
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 import threading
 
 import pytest
@@ -80,6 +81,33 @@ def test_claim_is_released_on_base_exception(repo):
     assert status["running"] is False
     assert status["status"] == "failed"
     repo.start_notebook_relink(nb)     # slot reusable
+
+
+def test_job_collaborator_preserves_the_callers_context(repo, monkeypatch):
+    """The background scheduler supplies a copied Context; the collaborator must
+    execute the late-bound algorithm callback inside that same Context rather
+    than introducing a context-losing thread or construction-time binding."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+    marker: ContextVar[str] = ContextVar("kg_maintenance_marker")
+    token = marker.set("request-owner")
+    try:
+        monkeypatch.setattr(
+            lifecycle,
+            "relink_notebook_kg",
+            lambda _notebook_id: {
+                "isolated_before": 0,
+                "edges_added": 0,
+                "isolated_after": 0,
+                "marker": marker.get(),
+            },
+        )
+        job = repo.start_notebook_relink(nb)
+        result = repo.run_notebook_relink_job(nb, job["job_id"])
+    finally:
+        marker.reset(token)
+
+    assert result["marker"] == "request-owner"
 
 
 def test_a_stale_worker_does_not_clobber_a_newer_claim(repo):

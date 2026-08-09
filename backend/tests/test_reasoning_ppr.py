@@ -159,6 +159,38 @@ def test_ppr_retrieve_action_caps_at_max(repo, monkeypatch):
     assert len(caps) >= 1              # 第 4 次被 cap
 
 
+def test_ppr_retrieve_action_uses_deployment_policy(repo, monkeypatch):
+    """The centralized setting must govern runtime actions, not only exist."""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_doc_moe(repo)
+    monkeypatch.setattr(repo.settings, "reasoning_stale_limit", 99)
+    monkeypatch.setattr(repo.settings, "reasoning_max_ppr_retrieves", 1)
+    bind_chat_client(repo, "reasoning_agent", _ScriptedReflectLLM(
+        reflects=[
+            {"next_action": "ppr_retrieve", "ppr_query": "q1"},
+            {"next_action": "ppr_retrieve", "ppr_query": "q2"},
+            {"next_action": "answer", "sufficient": True},
+        ]
+    ))
+
+    result = ReasoningRetriever.from_repository(repo, repo.settings).run(
+        nb.id, "对比题"
+    )
+
+    ppr_actions = [
+        step for step in result.trace
+        if step.step_type == "ppr" and step.detail.get("phase") == "action"
+    ]
+    caps = [
+        step for step in result.trace
+        if step.step_type == "skip"
+        and step.detail.get("reason") == "ppr_retrieve_cap"
+    ]
+    assert len(ppr_actions) == 1
+    assert caps
+
+
 def test_ppr_retrieve_action_skipped_when_flag_off(repo, monkeypatch):
     """flag 关 → 即便 agent 显式选 ppr_retrieve 也被 skip(ppr_disabled),不跑 PPR。
     honors GRAPH_PPR_ENABLED 作为 reasoning 的 PPR 总开关(off=零 PageRank)。"""
