@@ -98,10 +98,11 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
   assert.ok(
     // 上限从 3000 提到 4500(codex R1 两条 P2:终态先 settle 再刷新 + decideMerge 409
     // 撞槽自动补发),又提到 5300(codex R2 P1:409 补发不再提前消费标记,改成「保留标记 +
-    // 保留忙碌位 + 重启轮询,attempts 不因重试复位」,settleOrRetryRebuild 因此又长了一截)
-    // ——阈值只是防「查找到很远之后一个不相干的收尾数组」的护栏,不是精确长度断言,跟着
-    // 真实需要一起调没有问题。
-    depsAt > start && depsAt - start < 5300,
+    // 保留忙碌位 + 重启轮询,attempts 不因重试复位」,settleOrRetryRebuild 因此又长了一截),
+    // 再提到 7200(codex R5 两条 P2:pollTick 加代际捕获/校验 + finish 的刷新 IIFE 里加
+    // 选中概念重对账,两处都在这段区间内)——阈值只是防「查找到很远之后一个不相干的收尾
+    // 数组」的护栏,不是精确长度断言,跟着真实需要一起调没有问题。
+    depsAt > start && depsAt - start < 7200,
     "轮询 effect 的依赖必须恰好是 [rebuildingNotebookIds, currentNotebookId]"
     + "(kgLimit 进依赖会在换范围时重启轮询、重置尝试计数)",
   );
@@ -223,6 +224,127 @@ test("终态观测后先停轮询(settled+clearInterval)再收尾,防止刷新/�
       `${label}分支调用 finish 之前必须先 clearInterval 停轮询`,
     );
   }
+});
+
+test("codex R5 P2(A):pollTick 捕获代际,迟到的上一代际响应必须被丢弃而不是穿过 settled 守卫", async () => {
+  // status 请求慢于 3s 轮询间隔时,同一个 interval 会连续派发多个 pollTick——前一个还
+  // 没等到响应,后一个已经发出去了。补发重试(settleOrRetryRebuild 成功分支)会复位
+  // settled 并调 startPolling() 开一轮新的代际;此时如果一个属于**上一代际**、迟迟才
+  // 回来的响应命中终态,它看到的 settled 已经被新代际复位成 false,若没有代际校验就会
+  // 照样穿过守卫——提前 clearInterval(此刻 poll 已经指向新代际的 interval id,等于把
+  // 新代际也停了)、提前触发刷新、提前释放忙碌位,而真正对应新代际的那次 rebuild 还在
+  // 后端跑。这里钉住:①每一代 startPolling 都要自增 generation;②pollTick 必须在
+  // await 之前(与 settled 检查同一个同步段内)捕获当时的 generation;③响应回来后的
+  // 收工守卫必须比对 generation === myGeneration,不匹配就丢弃,不能提前 clearInterval/
+  // settled=true/finish。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到轮询 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  const pollAt = body.indexOf("function pollTick()");
+  assert.ok(pollAt >= 0, "找不到轮询 tick(被改名或改回内联 setInterval 回调?守卫失效)");
+  // 代际计数必须声明在 pollTick 之前(同一个闭包作用域,且 pollTick/startPolling 都要
+  // 读写它)。
+  const genDeclAt = body.indexOf("let generation = 0;");
+  assert.ok(
+    genDeclAt >= 0 && genDeclAt < pollAt,
+    "必须在 pollTick 之前声明 `let generation = 0;`(代际计数器)",
+  );
+
+  const pollBody = body.slice(pollAt);
+
+  assert.ok(
+    /function pollTick\(\) \{\s*void \(async \(\) => \{\s*if \(settled\) return;\s*(?:\/\/[^\n]*\n\s*)*const myGeneration = generation;/.test(pollBody),
+    "pollTick 必须在 settled 检查之后、await 之前(同一个同步段内)捕获"
+    + "`const myGeneration = generation;`——挪到 await 之后捕获就晚了,读到的已经是"
+    + "响应回来那一刻的代际,起不到区分『发起时属于哪一代』的作用",
+  );
+
+  const outcomeDeclAt = pollBody.indexOf("let outcome;");
+  assert.ok(outcomeDeclAt >= 0, "找不到正常终态分支的 `let outcome;`");
+  const finishAt = pollBody.indexOf("finish(outcome)", outcomeDeclAt);
+  assert.ok(finishAt >= 0, "找不到正常终态分支的 finish(outcome) 调用点");
+  const guardWindow = pollBody.slice(outcomeDeclAt, finishAt);
+  assert.ok(
+    /generation\s*!==\s*myGeneration/.test(guardWindow),
+    "正常终态分支调用 finish 之前的收工守卫必须校验 `generation !== myGeneration`——"
+    + "不校验,补发重试复位 settled 之后,上一代际迟到的响应会直接把当前代际的轮询"
+    + "掐断并触发一次属于上一代际的收尾",
+  );
+  // 校验必须在 settled=true / clearInterval 之前生效(即在同一个 if 守卫里,而不是
+  // 事后才检查)——就近查找 settled = true 出现的位置必须晚于代际校验所在的 if 语句。
+  const settledTrueAt = guardWindow.lastIndexOf("settled = true;");
+  const genCheckAt = guardWindow.search(/generation\s*!==\s*myGeneration/);
+  assert.ok(
+    settledTrueAt >= 0 && genCheckAt >= 0 && genCheckAt < settledTrueAt,
+    "代际校验必须在收工守卫的 if 条件里,先于 settled = true 生效",
+  );
+
+  const startPollAt = body.indexOf("function startPolling() {");
+  assert.ok(startPollAt >= 0, "找不到 startPolling(被改名或删除?守卫失效)");
+  const setIntervalAt = body.indexOf("poll = window.setInterval(pollTick, 3000);", startPollAt);
+  assert.ok(setIntervalAt >= 0, "startPolling 必须真的起一个新 interval");
+  const startPollBody = body.slice(startPollAt, setIntervalAt);
+  assert.ok(
+    startPollBody.includes("generation += 1;"),
+    "startPolling 每次被调用(含补发重试成功后的重启)都必须自增 generation——不自增,"
+    + "补发前后两轮轮询共享同一个代际号,代际校验形同虚设",
+  );
+});
+
+test("codex R5 P2(B):新图替换旧图之后必须重对账当前选中的概念(conceptDetail/nodeCtx)", async () => {
+  // 旧同步流程(后台化之前的 refreshUnifiedKg)在 rebuild 成功、图谱重拉之后,会把当前
+  // 选中的概念节点在**新图**里重查:还在就用新图给出的 id 重新拉一次详情,不在就把
+  // conceptDetail/nodeCtx 一起清空。后台化拆出终态刷新之后这段重对账被漏掉了——
+  // conceptDetail 会继续绑着一份不再对应任何可见节点的旧详情(节点可能已被合并进另一
+  // 个聚类、也可能整个消失)。这里钉住:重对账必须发生在**这次真正拿到的新图 g**上
+  // (不能偷懒用组件里可能还没更新的 uGraphMerged 状态),且在同一段被
+  // activeNotebookIdRef 守卫住的代码路径里。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到轮询 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  const iifeAt = body.indexOf("void (async () => {");
+  assert.ok(iifeAt >= 0, "找不到 finish 的刷新 IIFE");
+  const vizAt = body.indexOf("setVizBuilding(Boolean(g.viz_building));", iifeAt);
+  assert.ok(vizAt >= 0, "找不到刷新 IIFE 里的 setVizBuilding 调用");
+  const catchAt = body.indexOf("} catch (err) { reportError(err); }", vizAt);
+  assert.ok(catchAt > vizAt, "找不到刷新 IIFE 的 catch 分支边界");
+  const reconcile = body.slice(vizAt, catchAt);
+
+  assert.ok(
+    reconcile.includes(
+      "const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;",
+    ),
+    "必须按**这次真正拿到的新图** g.nodes 重新定位选中节点——不能用组件状态"
+    + "(uGraphMerged 之类)代替,那份状态在这一刻还没被这次刷新更新",
+  );
+  assert.ok(
+    reconcile.includes('setConceptDetail(await fetchConceptDetail(nb, selected.id).catch(() => null));'),
+    "选中节点若仍是概念,必须用新图给出的 id 重新拉一次概念详情",
+  );
+  assert.ok(
+    reconcile.includes("setConceptDetail(null);"),
+    "选中节点不是概念(或已不存在)时必须清空 conceptDetail,不能留着旧图的详情",
+  );
+  assert.ok(
+    reconcile.includes("if (!selected) setNodeCtx(null);"),
+    "选中节点在新图里已经找不到时必须连 nodeCtx 一起清空",
+  );
 });
 
 test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正成功后消费;再 409 保留标记+忙碌位+续轮询,不复位 attempts)", async () => {
