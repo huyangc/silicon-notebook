@@ -217,11 +217,12 @@ test("终态观测后先停轮询(settled+clearInterval)再收尾,防止刷新�
 test("codex R9:轮询 tick 撞到 idle 且提交还在飞(submittingMaintenanceRef)时不当真终态", async () => {
   // POST 比首个 tick 慢时,轮询会先读到服务端**旧的** idle——如果这里当真终态收工,
   // 随后 POST 才成功,就再也没有人会去轮询这次真正的任务,完成也不会刷新。修法是:
-  // idle 终态额外检查 submittingMaintenanceRef 是否还标记着这个库,标记着就继续轮询、
+  // idle 终态额外检查 submittingMaintenanceRef 是否还标记着这个键,标记着就继续轮询、
   // 不 settle。这条断言钉住:①判据必须落在正常终态分支里、settled=true 之前;②判据
-  // 必须同时检查 status.status === "idle" 与 submittingMaintenanceRef.current.has(nb)
-  // (不能只检查其中一个——只查 idle 会拦住所有真终态,只查 submitting 会在 running 时
-  // 也误判)。
+  // 必须同时检查 status.status === "idle" 与
+  // submittingMaintenanceRef.current.has(`${nb}:relink`)(不能只检查其中一个——只查
+  // idle 会拦住所有真终态,只查 submitting 会在 running 时也误判);codex R12:键必须
+  // 按 kind 分开,不能是裸 nb。
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
 
@@ -244,15 +245,16 @@ test("codex R9:轮询 tick 撞到 idle 且提交还在飞(submittingMaintenanceR
   const guardWindow = pollBody.slice(outcomeDeclAt, finishAt);
 
   assert.ok(
-    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(nb\)/.test(
+    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(`\$\{nb\}:relink`\)/.test(
       guardWindow,
     ),
     "正常终态分支必须检查 `status.status === \"idle\" && submittingMaintenanceRef"
-    + ".current.has(nb)`——只查其中一个都不对(只查 idle 会拦住所有真终态,只查"
-    + "submitting 会在 running 时也误判)",
+    + ".current.has(`${nb}:relink`)`——只查其中一个都不对(只查 idle 会拦住所有真终态,"
+    + "只查 submitting 会在 running 时也误判);codex R12:键必须按 kind 分开,不能是"
+    + "裸 nb(否则会被同库一次不相干的 rebuild 提交拖住)",
   );
   const idleCheckAt = guardWindow.search(
-    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(nb\)/,
+    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(`\$\{nb\}:relink`\)/,
   );
   const settledTrueAt = guardWindow.lastIndexOf("settled = true;");
   assert.ok(
@@ -295,9 +297,14 @@ test("codex R9:relinkFromKgView 提交期(POST 还没落地)标记在 submitting
   const page = await parseModule("page.tsx");
   const body = findFunction(page, "relinkFromKgView").getText(page);
 
-  const addAt = body.indexOf("submittingMaintenanceRef.current.add(nb);");
+  const addAt = body.indexOf("submittingMaintenanceRef.current.add(`${nb}:relink`);");
   const postAt = body.indexOf("relinkKg(");
-  assert.ok(addAt >= 0, "relinkFromKgView 必须在提交前标记 submittingMaintenanceRef");
+  assert.ok(
+    addAt >= 0,
+    "relinkFromKgView 必须在提交前标记 submittingMaintenanceRef(键必须按 kind 分开,"
+    + "`${nb}:relink`——codex R12:同库的 rebuild 提交若与这次窗口重叠,不能共用裸 nb"
+    + "键互相冲掉对方的保护)",
+  );
   assert.ok(
     addAt < postAt,
     "标记必须在 await relinkKg 之前置上,否则 POST 在飞期间轮询读到的陈旧 idle"
@@ -310,10 +317,13 @@ test("codex R9:relinkFromKgView 提交期(POST 还没落地)标记在 submitting
     "relinkFromKgView 必须有 finally 块清理提交期标记,否则某条失败路径会让标记"
     + "永久卡住、轮询永远认为提交还在飞",
   );
-  const deleteAt = body.indexOf("submittingMaintenanceRef.current.delete(nb);", finallyAt);
+  const deleteAt = body.indexOf(
+    "submittingMaintenanceRef.current.delete(`${nb}:relink`);",
+    finallyAt,
+  );
   assert.ok(
     deleteAt > finallyAt,
-    "finally 块必须清理提交期标记(submittingMaintenanceRef.current.delete(nb))",
+    "finally 块必须清理提交期标记(submittingMaintenanceRef.current.delete(`${nb}:relink`))",
   );
 });
 
@@ -511,13 +521,15 @@ test("codex R11:轮询正常终态分支必须无条件拒收提交期终态、�
   const guardWindow = pollBody.slice(outcomeDeclAt, finishAt);
 
   // 提交期(POST 还没落地)必须无条件继续轮询,不止 idle 一种终态——同库再次点击时,
-  // 服务端在这次 POST 落地前仍可能如实回显上一个任务的 succeeded/failed。
+  // 服务端在这次 POST 落地前仍可能如实回显上一个任务的 succeeded/failed。codex R12:
+  // 键必须按 kind 分开查`${nb}:relink`,不能是裸 nb(否则会被同库一次不相干的 rebuild
+  // 提交拖住)。
   const idleSubmittingAt = guardWindow.indexOf(
-    'if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;',
+    'if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:relink`)) return;',
   );
   assert.ok(idleSubmittingAt >= 0, "找不到 codex R9 的 idle+提交中判据(被删改?守卫失效)");
   const broadSubmittingAt = guardWindow.indexOf(
-    "if (submittingMaintenanceRef.current.has(nb)) return;",
+    "if (submittingMaintenanceRef.current.has(`${nb}:relink`)) return;",
     idleSubmittingAt,
   );
   assert.ok(
