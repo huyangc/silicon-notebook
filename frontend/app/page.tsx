@@ -4688,6 +4688,18 @@ export default function Home() {
           setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]);
           setPendingMerges(pend); setUnifiedKgStatus(status);
           setVizBuilding(Boolean(g.viz_building));
+          // codex R5 P2(B):新图替换旧图之后必须重对账当前选中的概念——镜像后台化之前
+          // refreshUnifiedKg 同步版收尾时的这段重查(旧图里选中的节点，重新合并之后可能
+          // 已被折进另一个聚类、也可能压根消失，conceptDetail/nodeCtx 原样保留就会绑着
+          // 一份不再对应任何可见节点的旧详情)。按新图 g.nodes 重新定位：找不到就两侧都
+          // 清空；还在且仍是概念就用新图给出的 id 重新拉一次详情。
+          const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;
+          if (selected?.object_type === "concept") {
+            setConceptDetail(await fetchConceptDetail(nb, selected.id).catch(() => null));
+          } else {
+            setConceptDetail(null);
+          }
+          if (!selected) setNodeCtx(null);
         } catch (err) { reportError(err); }
         finally {
           await settleOrRetryRebuild();
@@ -4741,9 +4753,24 @@ export default function Home() {
       }
       setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
     }
+    // codex R5 P2(A):status 请求慢于 3s 轮询间隔时,同一个 interval 会连续派发多个
+    // pollTick——前一个还没等到响应,后一个已经发出去了,多份 fetchUnifiedKgRebuildStatus
+    // 并飞。补发重试(settleOrRetryRebuild 成功分支)会复位 settled 并调 startPolling()
+    // 开一轮新的代际;此时如果一个属于**上一代际**、迟迟才回来的响应命中终态,它看到的
+    // settled 已经被新代际复位成 false,会照样穿过下面的守卫——提前 clearInterval(此刻
+    // poll 已经指向新代际的 interval id,这一下等于把新代际也停了)、提前触发刷新、提前
+    // 释放忙碌位,而真正对应新代际的那次 rebuild 还在后端跑。修法是给每一代轮询发一个
+    // 代际号:startPolling 时自增 generation,每个 pollTick 在起飞那一刻(await 之前,
+    // 与 interval 触发同一个同步段内)捕获当时的 generation;响应回来后先比对
+    // generation === myGeneration 再决定是否收工——不匹配就是上一代际的迟到响应,直接
+    // 丢弃,把轮询完整地交给当前代际。
+    let generation = 0;
     function pollTick() {
       void (async () => {
         if (settled) return;
+        // 与上面的 settled 检查同一个同步段内捕获,等价于「在 interval 触发的那一刻」
+        // 捕获——分派之后、await 之前没有任何代码能让 generation 变化。
+        const myGeneration = generation;
         // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限
         // 永远到不了，正好是上限要兜的那种卡死。
         attempts += 1;
@@ -4759,13 +4786,20 @@ export default function Home() {
         try {
           outcome = rebuildPollOutcome(await fetchUnifiedKgRebuildStatus(nb));
         } catch { return; }          // 瞬时错误：继续轮询
-        if (cancelled || settled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+        if (
+          cancelled
+          || settled
+          || activeNotebookIdRef.current !== nb
+          || generation !== myGeneration
+          || !outcome.done
+        ) return;
         settled = true;
         window.clearInterval(poll);
         finish(outcome);
       })();
     }
     function startPolling() {
+      generation += 1;
       poll = window.setInterval(pollTick, 3000);
     }
     startPolling();
