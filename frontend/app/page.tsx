@@ -4633,6 +4633,10 @@ export default function Home() {
     setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
     try {
       await rebuildUnifiedKg(nb);
+      // codex R7:手动重建真的起来了,就消费掉可能残留的待补发标记——否则这次
+      // 重建的终态会被当成「还有决定没兑现」,先跳过刷新再白发一次可能数小时的
+      // 重建。手动这一次已经覆盖了那条决定(重建读取的是此刻的全部已决定对)。
+      setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
       setToast("已开始重新合并；完成后会自动更新");
     } catch (err) {
       reportError(err);
