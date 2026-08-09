@@ -152,9 +152,12 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
     // delete,两处都在这段区间内),再提到 9200(codex R11:三处 rebuild POST 成功都要
     // 记下 job_id、settleOrRetryRebuild 的最终释放要清掉 expectation、pollTick 的正常
     // 终态分支加了「提交期不止 idle 不可信」与「job_id 必须配对」两层判据,四处都在这段
+    // 区间内),再提到 11000(codex R13:job_id 不匹配不再无限拒收——pollTick 拆出「观测到
+    // running 归零 mismatchStreak」的独立分支,job_id 配对判据改成「连续不匹配达阈值才
+    // 收工,否则清零计数」,startPolling 每次开新代际也归零 mismatchStreak,三处都在这段
     // 区间内)——阈值只是防「查找到很远之后一个不相干的收尾数组」的护栏,不是精确长度
     // 断言,跟着真实需要一起调没有问题。
-    depsAt > start && depsAt - start < 9200,
+    depsAt > start && depsAt - start < 11000,
     "轮询 effect 的依赖必须恰好是 [rebuildingNotebookIds, currentNotebookId]"
     + "(kgLimit 进依赖会在换范围时重启轮询、重置尝试计数)",
   );
@@ -1146,20 +1149,150 @@ test("codex R11:pollTick 正常终态分支必须无条件拒收提交期终态�
     expectedAt > broadSubmittingAt,
     "必须读出这次追踪期望的 job_id(expectedMaintenanceJobRef),否则无法按 job_id 配对",
   );
-  const mismatchAt = guardWindow.indexOf(
-    "if (expectedRebuildJobId && status.job_id !== expectedRebuildJobId) return;",
+
+  // codex R13:job_id 不匹配不再无限拒收——同一个 tick 只累计一次,连续达到
+  // MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK 才真收工,否则继续轮询;匹配的终态照样把
+  // 计数清零(见后续两条测试钉住「删掉 streak 收工分支 = 回到无限拒收」「阈值改 1 =
+  // R11 竞态回归」「新代际重置 mismatchStreak」三处)。
+  const mismatchDeclAt = guardWindow.indexOf(
+    "const rebuildJobMismatch = Boolean(",
     expectedAt,
   );
   assert.ok(
-    mismatchAt > expectedAt,
-    "存在 expectation 时,status.job_id 必须与它一致才能继续接受终态——不一致必须"
-    + "return 继续轮询(变异:删掉这行判据必须让本条断言报红)",
+    mismatchDeclAt > expectedAt,
+    "必须算出这次终态是否与 expectation 不匹配(rebuildJobMismatch),否则无法按"
+    + "job_id 配对",
+  );
+  const incrementAt = guardWindow.indexOf("mismatchStreak += 1;", mismatchDeclAt);
+  assert.ok(
+    incrementAt > mismatchDeclAt,
+    "不匹配时必须累加 mismatchStreak(变异:删掉这行,streak 永远是 0,退化成"
+    + "『每次不匹配都当场收工』——单次陈旧响应就会误收工,这正是 R11 要防的竞态)",
+  );
+  const settleGateAt = guardWindow.indexOf(
+    "if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;",
+    incrementAt,
+  );
+  assert.ok(
+    settleGateAt > incrementAt,
+    "未达阈值必须继续轮询(return),不能让单次不匹配就直接收工(变异:删掉这行判据"
+    + "必须让本条断言报红——那正是把「连续两次才收工」退化回「一次不匹配就收工」的"
+    + "R11 竞态回归)",
+  );
+  const mismatchResetAt = guardWindow.indexOf("mismatchStreak = 0;", settleGateAt);
+  assert.ok(
+    mismatchResetAt > settleGateAt,
+    "匹配的终态(else 分支)必须把连续不匹配计数清零,不能让上一轮的残留计数带进下一次"
+    + "追踪",
   );
 
   const settledTrueAt = guardWindow.lastIndexOf("settled = true;");
   assert.ok(
-    settledTrueAt >= 0 && mismatchAt < settledTrueAt,
+    settledTrueAt >= 0 && mismatchResetAt < settledTrueAt,
     "job_id 配对判据必须在 settled = true 之前生效,否则轮询已经先收工了",
+  );
+});
+
+test("codex R13:mismatchStreak 阈值锁定为 2(变异:改成 1 = 单次陈旧响应即收工,R11 竞态回归)", async () => {
+  // 论证(与文件顶部 MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK 常量注释同一份):expectation
+  // 只在 POST **返回之后**才写进 expectedMaintenanceJobRef,写入那一刻服务端权威状态
+  // 必然已经是这次追踪的任务;此后唯一还能读到旧 job_id/旧 idle 的途径只剩"更早发出、
+  // 此刻才姗姗来迟的响应"——而轮询串行执行,连续第二次观测必然发生在第一次响应已解析
+  // 之后,不可能仍是那个在飞的旧响应。两次即可确证,阈值因此必须是 2,不能退化成 1
+  // (退化成 1 就是"单次不匹配即当真收工",与 R11 要修的竞态是同一件事)。这条断言与
+  // kg-relink-wiring-guard.test.mjs 的同名断言共同覆盖同一个共享常量、同一个源文件。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  assert.ok(
+    source.includes("const MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK = 2;"),
+    "阈值常量必须字面等于 2——改成 1(或任何非 2 的值)都必须让本条断言报红",
+  );
+  const usageCount = (
+    source.match(/mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK\) return;/g) || []
+  ).length;
+  assert.strictEqual(
+    usageCount,
+    2,
+    "必须恰好两处轮询(relink + rebuild)都直接用"
+    + "`mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK` 做收工判据,不能带偏移量",
+  );
+});
+
+test("codex R13:pollTick 观测到 running 时立即归零 mismatchStreak,不进入 job_id 配对判据", async () => {
+  // 设计:running 状态本身不校验 job_id(服务端只要这个库上有任务在跑就回 running),
+  // 所以观测到它就该把连续不匹配计数清零重新开始累计——否则一次瞬时的"终态不匹配"和
+  // 一次"服务端仍在跑"交替出现时,streak 会被跨越多个 tick 错误地累加到阈值。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  const body = source.slice(start, depsAt);
+
+  const pollAt = body.indexOf("function pollTick()");
+  assert.ok(pollAt >= 0, "找不到轮询 tick(被改名或改回内联 setInterval 回调?守卫失效)");
+  const pollBody = body.slice(pollAt);
+
+  const outcomeAssignAt = pollBody.indexOf("outcome = rebuildPollOutcome(status);");
+  assert.ok(outcomeAssignAt >= 0, "找不到 outcome 赋值(被改名或删除?守卫失效)");
+  const notDoneAt = pollBody.indexOf("if (!outcome.done) {", outcomeAssignAt);
+  assert.ok(
+    notDoneAt > outcomeAssignAt,
+    "outcome.done 的判断必须拆成独立分支(不能再和 cancelled/settled/"
+    + "activeNotebookIdRef/generation 揉进同一个组合条件里)——mismatchStreak 的清零"
+    + "动作需要一个能挂 running 语义的落脚点",
+  );
+  const idleSubmittingAt = pollBody.indexOf(
+    'if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;',
+    notDoneAt,
+  );
+  assert.ok(idleSubmittingAt > notDoneAt, "找不到紧随其后的 codex R9 判据");
+  const notDoneBranch = pollBody.slice(notDoneAt, idleSubmittingAt);
+
+  assert.ok(
+    /mismatchStreak\s*=\s*0;/.test(notDoneBranch),
+    "running 分支必须把 mismatchStreak 归零(变异:删掉这行会让 running/不匹配交替"
+    + "出现时计数被错误地跨 tick 累加)",
+  );
+  assert.ok(
+    /\breturn;/.test(notDoneBranch),
+    "running 分支必须 return 继续轮询,不能落到下面的 job_id 配对判据",
+  );
+});
+
+test("codex R13:startPolling 每次开启新代际都归零 mismatchStreak(与 generation 同步重置)", async () => {
+  // 补发重试(settleOrRetryRebuild 的成功分支)会带着一个**新** job_id 复位 settled 并调
+  // startPolling() 重启轮询——上一代际遗留的 mismatchStreak 对新代际毫无意义(新
+  // expectation 已经指向新 job_id),必须与 generation 一起重置,否则新代际里只需要
+  // 再观测到 MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK - 1 次不匹配就会被提前收工。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  const body = source.slice(start, depsAt);
+
+  const startPollAt = body.indexOf("function startPolling() {");
+  assert.ok(startPollAt >= 0, "找不到 startPolling(被改名或删除?守卫失效)");
+  const setIntervalAt = body.indexOf("poll = window.setInterval(pollTick, 3000);", startPollAt);
+  assert.ok(setIntervalAt >= 0, "startPolling 必须真的起一个新 interval");
+  const startPollBody = body.slice(startPollAt, setIntervalAt);
+
+  assert.ok(
+    startPollBody.includes("generation += 1;"),
+    "找不到 generation 自增(被删改?见 codex R5 的同名断言)",
+  );
+  assert.ok(
+    startPollBody.includes("mismatchStreak = 0;"),
+    "startPolling 必须同时归零 mismatchStreak(变异:删掉这行,补发重试成功后新代际会"
+    + "带着上一代际的残留计数起步,可能只需一次不匹配就被提前收工)",
   );
 });
 
