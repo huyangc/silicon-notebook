@@ -7315,7 +7315,7 @@ export default function Home() {
                                 <button
                                   type="button"
                                   className="index-cta"
-                                  disabled={relinkingKg}
+                                  disabled={relinkingKg || kgRefreshBusy}
                                   onClick={relinkFromKgView}
                                 >
                                   {relinkingKg ? "补连中…" : "补上关联"}
