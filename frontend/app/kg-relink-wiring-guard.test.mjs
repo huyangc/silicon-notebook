@@ -115,6 +115,38 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
   );
 });
 
+test("终态先刷新、刷新完成后才释放忙碌位（不是反过来）", async () => {
+  // 双 opus 评审 P1(#478 同型 bug 的第二处):release 若在刷新之前置,会改
+  // relinkingNotebookIds → 触发这条 effect 的 cleanup → 把这次刷新自己的 cancelled
+  // 闭包置 true → 三个真实 fetch 回来时 setState 被自己的 cleanup 丢弃。jsdom 实测
+  // fetch 耗时 ≥5ms 时恒 CANCELLED,生产网络请求远超 5ms,图谱因此永远刷不出来。
+  // 断言按**源码顺序**钉:release 调用必须落在 finish 内那个 `void (async () => {...})()`
+  // IIFE 的 `await Promise.all([...])` 之后,而不是之前。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!relinkBusyFor(relinkingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到补上关联的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [relinkingNotebookIds, currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到轮询 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  const iifeAt = body.indexOf("void (async () => {");
+  assert.ok(iifeAt >= 0, "finish 的刷新必须包在一个 void (async () => {...})() IIFE 里");
+  const asyncBody = body.slice(iifeAt);
+  const awaitAt = asyncBody.indexOf("await Promise.all([");
+  const releaseAt = asyncBody.indexOf("releaseRelinkClaim(prev, nb)");
+  assert.ok(awaitAt >= 0, "刷新必须 await 真实的 fetchUnifiedGraph/fetchUnifiedKgStatus");
+  assert.ok(releaseAt >= 0, "刷新完成后必须释放忙碌位(否则按钮永远卡在忙碌态)");
+  assert.ok(
+    awaitAt < releaseAt,
+    "release 必须在 await 刷新之后 —— 提前 release 会让 effect 的 cleanup 把这次刷新"
+    + "自己的 setState 当成『已取消』丢掉(#478 同型 bug)",
+  );
+});
+
 test("page.tsx 有补上关联的完成信号(否则忙碌位解除不掉)", async () => {
   const page = await parseModule("page.tsx");
   const source = page.getFullText();

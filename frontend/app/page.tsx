@@ -4518,20 +4518,32 @@ export default function Home() {
     const nb = currentNotebookId as string;
     let cancelled = false;
     let attempts = 0;
+    // 终态必须**先刷新、刷新完成后再释放忙碌位**——反过来做（release 在前）会自己
+    // 取消自己:release 改了 relinkingNotebookIds,这条 effect 的依赖跟着变,React 立刻
+    // 跑 cleanup 把这条闭包的 cancelled 置 true,随后三个真实 fetch 回来时守卫直接把
+    // setState 整段丢掉（jsdom 实测 fetch ≥5ms 恒 CANCELLED；生产网络请求远超 5ms，
+    // 图谱/状态因此永远刷不出来，「已重新合并」toast 弹了但画布纹丝不动，#478 同型 bug）。
+    // 刷新期间按钮多 disabled 一会——正确且无害。守卫也从局部 cancelled 改成
+    // activeNotebookIdRef：cleanup 只该取消**轮询**本身，不该取消这次已经在飞的终态刷新。
     const finish = (outcome: RelinkPollOutcome) => {
-      setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
       if (outcome.toast) setToast(outcome.toast);
-      if (!outcome.refresh) return;
+      if (!outcome.refresh) {
+        setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
+        return;
+      }
       void (async () => {
         try {
           const [g, status] = await Promise.all([
             fetchUnifiedGraph(nb, kgLimitRef.current),
             fetchUnifiedKgStatus(nb),
           ]);
-          if (cancelled || activeNotebookIdRef.current !== nb) return;
+          if (activeNotebookIdRef.current !== nb) return;
           setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]); setUnifiedKgStatus(status);
           setVizBuilding(Boolean(g.viz_building));
         } catch (err) { reportError(err); }
+        finally {
+          setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
+        }
       })();
     };
     const poll = window.setInterval(async () => {
@@ -4581,10 +4593,19 @@ export default function Home() {
     const nb = currentNotebookId as string;
     let cancelled = false;
     let attempts = 0;
+    // 终态必须**先刷新、刷新完成后再释放忙碌位**——反过来做（release 在前）会自己
+    // 取消自己:release 改了 rebuildingNotebookIds,这条 effect 的依赖跟着变,React 立刻
+    // 跑 cleanup 把这条闭包的 cancelled 置 true,随后三个真实 fetch 回来时守卫直接把
+    // setState 整段丢掉（jsdom 实测 fetch ≥5ms 恒 CANCELLED；生产网络请求远超 5ms，
+    // 图谱/待确认合并/状态因此永远刷不出来，「已重新合并」toast 弹了但画布纹丝不动）。
+    // 刷新期间按钮多 disabled 一会——正确且无害。守卫也从局部 cancelled 改成
+    // activeNotebookIdRef：cleanup 只该取消**轮询**本身，不该取消这次已经在飞的终态刷新。
     const finish = (outcome: RebuildPollOutcome) => {
-      setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
       if (outcome.toast) setToast(outcome.toast);
-      if (!outcome.refresh) return;
+      if (!outcome.refresh) {
+        setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+        return;
+      }
       void (async () => {
         try {
           const [g, pend, status] = await Promise.all([
@@ -4592,11 +4613,14 @@ export default function Home() {
             fetchPendingMerges(nb),
             fetchUnifiedKgStatus(nb),
           ]);
-          if (cancelled || activeNotebookIdRef.current !== nb) return;
+          if (activeNotebookIdRef.current !== nb) return;
           setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]);
           setPendingMerges(pend); setUnifiedKgStatus(status);
           setVizBuilding(Boolean(g.viz_building));
         } catch (err) { reportError(err); }
+        finally {
+          setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+        }
       })();
     };
     const poll = window.setInterval(async () => {
@@ -4730,8 +4754,12 @@ export default function Home() {
   //
   // 后台化之后这一步不再等它跑完：POST 立刻回来，图谱与待确认列表由上面那条
   // rebuild/status 轮询在终态重拉（所以这里的忙碌位也要走同一个集合，否则轮询 effect
-  // 根本不会开）。409 = 已经有一次重新合并/补上关联在跑：那不是失败，忙碌位要**保留**，
-  // 轮询照常等那次的终态。落决定本身失败才是真失败，忙碌位当场清掉。
+  // 根本不会开）。409 = 共槽已经有一次重新合并/补上关联在跑：决定本身已经落库，不是
+  // 失败，忙碌位要**保留**。但「轮询照常等那次的终态」只在占槽的是重新合并时成立——
+  // 占槽的若是补上关联，rebuild/status 对它如实回 idle（两个状态视图只认自己的 kind），
+  // 轮询几乎立刻收工并刷新一次，那次刷新拿到的仍是这条决定生效前的图，所以这里必须
+  // 显式 toast 告知用户「决定已记录，图还没跟上，等那件任务完成后要再点一次重新合并」；
+  // 落决定本身失败才是真失败，忙碌位当场清掉。
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
     if (!currentNotebookId || decidingMerge) return;
     const nb = currentNotebookId;
@@ -4748,6 +4776,7 @@ export default function Home() {
           setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
           throw err;
         }
+        setToast("合并已记录；当前有其他整理任务运行中，完成后请再点「重新合并」更新图谱");
       }
       const pend = await fetchPendingMerges(nb);
       setPendingMerges(withoutDecidedMerge(pend, candidate));

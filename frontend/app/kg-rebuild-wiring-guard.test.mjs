@@ -121,6 +121,42 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
   );
 });
 
+test("终态先刷新、刷新完成后才释放忙碌位（不是反过来）", async () => {
+  // 双 opus 评审 P1(#478 同型 bug):release 若在刷新之前置,会改
+  // rebuildingNotebookIds → 触发这条 effect 的 cleanup → 把这次刷新自己的 cancelled
+  // 闭包置 true → 三个真实 fetch(图谱/待确认合并/状态)回来时 setState 被自己的
+  // cleanup 丢弃。jsdom 实测 fetch 耗时 ≥5ms 时恒 CANCELLED,生产网络请求远超 5ms,
+  // 图谱因此永远刷不出来,「已重新合并」toast 弹了但画布纹丝不动。
+  // 断言按**源码顺序**钉:release 调用必须落在 finish 内那个 `void (async () => {...})()`
+  // IIFE 的 `await Promise.all([...])` 之后,而不是之前。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到轮询 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  const iifeAt = body.indexOf("void (async () => {");
+  assert.ok(iifeAt >= 0, "finish 的刷新必须包在一个 void (async () => {...})() IIFE 里");
+  const asyncBody = body.slice(iifeAt);
+  const awaitAt = asyncBody.indexOf("await Promise.all([");
+  const releaseAt = asyncBody.indexOf("releaseNotebookClaim(prev, nb)");
+  assert.ok(
+    awaitAt >= 0,
+    "刷新必须 await 真实的 fetchUnifiedGraph/fetchPendingMerges/fetchUnifiedKgStatus",
+  );
+  assert.ok(releaseAt >= 0, "刷新完成后必须释放忙碌位(否则按钮永远卡在忙碌态)");
+  assert.ok(
+    awaitAt < releaseAt,
+    "release 必须在 await 刷新之后 —— 提前 release 会让 effect 的 cleanup 把这次刷新"
+    + "自己的 setState 当成『已取消』丢掉(#478 同型 bug)",
+  );
+});
+
 test("page.tsx 有重新合并的完成信号(否则忙碌位解除不掉)", async () => {
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
@@ -152,5 +188,23 @@ test("decideMerge 启动的重新合并也挂在同一个忙碌位集合上", as
     !body.includes("fetchUnifiedGraph("),
     "decideMerge 不该在 POST 之后立刻重拉图谱 —— 后台化之后那时候重建还没跑完,"
     + "拉回来的是决定之前的图;重拉由轮询在终态做",
+  );
+});
+
+test("decideMerge 的 409 分支不静默：必须显式提示用户", async () => {
+  // 双 opus 评审 P2-1:409 = 共槽已经有一次重新合并/补上关联在跑,决定本身已经落库,
+  // 但没能立刻触发重新合并去更新图谱——如果占槽的是「补上关联」,rebuild/status 对它
+  // 如实回 idle,轮询几乎立刻收工并刷新一次,那次刷新拿到的仍是决定生效前的图。此前这
+  // 条分支什么都不说,用户点了「合并」/「分开」却看不到任何反馈,会以为点击没有反应。
+  const page = await parseModule("page.tsx");
+  const body = findFunction(page, "decideMerge").getText(page);
+
+  const throwAt = body.indexOf("throw err;");
+  const pendAt = body.indexOf("fetchPendingMerges(nb)");
+  assert.ok(throwAt >= 0 && pendAt > throwAt, "找不到 decideMerge 的 409 分支边界");
+  const branch = body.slice(throwAt, pendAt);
+  assert.ok(
+    branch.includes("setToast("),
+    "409(共槽任务在跑)必须显式 toast 告知用户『决定已记录,图还没跟上』,不能悄悄不说话",
   );
 });

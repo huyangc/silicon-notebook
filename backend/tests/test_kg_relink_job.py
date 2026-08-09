@@ -180,11 +180,12 @@ def test_post_build_relink_claims_the_same_slot_and_releases_it(repo, monkeypatc
     repo.start_notebook_relink(nb)          # slot reusable
 
 
-def test_post_build_relink_skips_when_the_endpoint_already_holds_the_slot(
+def test_post_build_relink_skips_when_a_concurrent_relink_holds_the_slot(
     repo, monkeypatch,
 ):
-    """Losing the claim is a SKIP, not a failure: whoever holds it is doing
-    exactly this work. Fail-open, and observable through a body-free event."""
+    """Losing the claim to a CONCURRENT RELINK is a true SKIP: whoever holds it
+    is doing exactly this work, nothing is lost. Fail-open, and observable
+    through a body-free event that names the holder."""
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     lifecycle = repo._runtime.knowledge_lifecycle
     repo.start_notebook_relink(nb)          # e.g. the user clicked 「补上关联」
@@ -202,10 +203,42 @@ def test_post_build_relink_skips_when_the_endpoint_already_holds_the_slot(
     assert ran == [], "the build tail started a duplicate pass over the notebook"
     assert "relink" not in result           # nothing to report, and no lie either
     assert result["built"] == ["s1"]        # fail-open: the build still succeeded
-    assert {"kind": "kg_relink_skipped", "notebook_id": nb} in emitted
+    assert {"kind": "kg_relink_skipped", "notebook_id": nb, "holder": "relink"} in emitted
     assert [e for e in emitted if e.get("kind") == "kg_relink_failed"] == []
     # The other party's claim is untouched.
     assert repo.notebook_relink_status(nb)["running"] is True
+
+
+def test_post_build_relink_skips_when_a_concurrent_rebuild_holds_the_slot(
+    repo, monkeypatch,
+):
+    """Losing the claim to a CONCURRENT 「重新合并」 REBUILD is a DIFFERENT case
+    from the relink-vs-relink one above: a rebuild does not append the edges
+    this tail exists to add, so the drop is a deliberately accepted fail-open
+    loss (this build's isolated-node connections simply do not happen this
+    round), not "someone else is already doing this for me". The event's
+    `holder` field is what lets an operator tell the two skip reasons apart."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    lifecycle = repo._runtime.knowledge_lifecycle
+    repo.start_unified_kg_rebuild(nb)       # e.g. the user clicked 「重新合并」
+    ran = []
+    monkeypatch.setattr(
+        lifecycle, "relink_notebook_kg",
+        lambda _nb: ran.append(_nb) or {"isolated_before": 0, "edges_added": 0,
+                                        "isolated_after": 0},
+    )
+    emitted = []
+    monkeypatch.setattr(lifecycle.event_log, "emit", lambda payload: emitted.append(payload))
+    result = {"built": ["s1"]}
+    lifecycle._run_success_side_effects(nb, result, enqueue_fold=False)
+
+    assert ran == [], "the build tail started a duplicate pass over the notebook"
+    assert "relink" not in result           # nothing to report, and no lie either
+    assert result["built"] == ["s1"]        # fail-open: the build still succeeded
+    assert {"kind": "kg_relink_skipped", "notebook_id": nb, "holder": "rebuild"} in emitted
+    assert [e for e in emitted if e.get("kind") == "kg_relink_failed"] == []
+    # The other party's claim is untouched.
+    assert repo.unified_kg_rebuild_status(nb)["running"] is True
 
 
 # ---------------------------------------------------------------------------
