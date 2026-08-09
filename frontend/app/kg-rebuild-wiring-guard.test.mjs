@@ -155,9 +155,9 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
     // 区间内),再提到 11000(codex R13:job_id 不匹配不再无限拒收——pollTick 拆出「观测到
     // running 归零 mismatchStreak」的独立分支,job_id 配对判据改成「连续不匹配达阈值才
     // 收工,否则清零计数」,startPolling 每次开新代际也归零 mismatchStreak,三处都在这段
-    // 区间内)——阈值只是防「查找到很远之后一个不相干的收尾数组」的护栏,不是精确长度
+    // 区间内),再提到 11800(codex R15:同代际 in-flight 串行化守卫与注释)——阈值只是防「查找到很远之后一个不相干的收尾数组」的护栏,不是精确长度
     // 断言,跟着真实需要一起调没有问题。
-    depsAt > start && depsAt - start < 11000,
+    depsAt > start && depsAt - start < 11800,
     "轮询 effect 的依赖必须恰好是 [rebuildingNotebookIds, currentNotebookId]"
     + "(kgLimit 进依赖会在换范围时重启轮询、重置尝试计数)",
   );
@@ -246,7 +246,7 @@ test("终态观测后先停轮询(settled+clearInterval)再收尾,防止刷新/�
   const pollBody = body.slice(pollAt);
 
   assert.ok(
-    /function pollTick\(\) \{\s*void \(async \(\) => \{\s*if \(settled\) return;/.test(pollBody),
+    /function pollTick\(\) \{\s*void \(async \(\) => \{\s*if \(settled \|\| inFlight\) return;/.test(pollBody),
     "轮询 tick 必须在最开头检查 settled,拦住 clearInterval 生效前已经排队的迟到 tick",
   );
 
@@ -363,7 +363,7 @@ test("codex R5 P2(A):pollTick 捕获代际,迟到的上一代际响应必须被�
   const pollBody = body.slice(pollAt);
 
   assert.ok(
-    /function pollTick\(\) \{\s*void \(async \(\) => \{\s*if \(settled\) return;\s*(?:\/\/[^\n]*\n\s*)*const myGeneration = generation;/.test(pollBody),
+    /function pollTick\(\) \{\s*void \(async \(\) => \{\s*if \(settled \|\| inFlight\) return;\s*(?:\/\/[^\n]*\n\s*)*const myGeneration = generation;/.test(pollBody),
     "pollTick 必须在 settled 检查之后、await 之前(同一个同步段内)捕获"
     + "`const myGeneration = generation;`——挪到 await 之后捕获就晚了,读到的已经是"
     + "响应回来那一刻的代际,起不到区分『发起时属于哪一代』的作用",
@@ -729,6 +729,24 @@ test("decideMerge 撞 409 时置位待补发标记(供 rebuild 轮询终态自�
     "409 分支必须置位待补发标记 —— 不置位,占槽任务结束后没有人会去补发这条决定,"
     + "图谱会永久停在这条决定生效之前",
   );
+});
+
+test("codex R15:轮询一次只允许一个在飞状态请求(inFlight 串行化)", async () => {
+  // 同代际内 setInterval 不等上一次响应——两个都发于补发 POST 完成前的陈旧响应可以
+  // 各自 +1 mismatchStreak 把阈值 2 打穿。streak 的论证依赖串行化。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  const body = source.slice(start, depsAt);
+  assert.ok(body.includes("let inFlight = false;"), "rebuild 轮询必须有 inFlight 标志");
+  const fetchAt = body.indexOf("status = await fetchUnifiedKgRebuildStatus(nb);");
+  const setAt = body.lastIndexOf("inFlight = true;", fetchAt);
+  const clearAt = body.indexOf("finally { inFlight = false; }", fetchAt);
+  assert.ok(setAt >= 0 && fetchAt > setAt && clearAt > fetchAt,
+    "fetch 必须被 inFlight = true / finally 清除包住(请求串行化)");
 });
 
 test("codex R10:decideMerge 的 POST 提交期同样标记 submittingMaintenanceRef,finally 里清理"
