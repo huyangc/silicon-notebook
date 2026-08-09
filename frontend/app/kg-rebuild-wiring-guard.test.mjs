@@ -328,15 +328,21 @@ test("codex R5 P2(B):新图替换旧图之后必须重对账当前选中的概�
 
   assert.ok(
     reconcile.includes(
-      "const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;",
+      "const currentSelection = selectedKgNodeIdRef.current;",
     ),
     "必须按**这次真正拿到的新图** g.nodes 重新定位选中节点——不能用组件状态"
     + "(uGraphMerged 之类)代替,那份状态在这一刻还没被这次刷新更新",
   );
   assert.ok(
-    reconcile.includes('setConceptDetail(await fetchConceptDetail(nb, selected.id).catch(() => null));'),
+    reconcile.includes('const detail = await fetchConceptDetail(nb, selected.id).catch(() => null);'),
     "选中节点若仍是概念,必须用新图给出的 id 重新拉一次概念详情",
   );
+  // codex R6:详情取回后必须复验选中未变,变了不发布(新选中的点击处理器自己拉详情)。
+  const refetchAt = reconcile.indexOf('const detail = await fetchConceptDetail');
+  const publishAt = reconcile.indexOf('setConceptDetail(detail);');
+  const recheckAt = reconcile.indexOf('if (selectedKgNodeIdRef.current !== currentSelection) return;');
+  assert.ok(refetchAt >= 0 && recheckAt > refetchAt && publishAt > recheckAt,
+    "详情发布前必须先复验选中未变(取回→复验→发布的顺序)");
   assert.ok(
     reconcile.includes("setConceptDetail(null);"),
     "选中节点不是概念(或已不存在)时必须清空 conceptDetail,不能留着旧图的详情",
