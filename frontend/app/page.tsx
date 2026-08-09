@@ -4744,8 +4744,13 @@ export default function Home() {
         }
       })();
     };
+    // codex R15:setInterval 不等上一次请求返回——慢响应下同代际会有多个在飞请求,
+    // 两个「都发于 POST 完成前」的陈旧响应可以各自 +1 mismatchStreak,把阈值 2 打穿。
+    // streak 论证(「第二次观察必然发于第一次解析之后」)依赖串行化,这里补上:一次只允许
+    // 一个在飞状态请求,上一个没回来就跳过本 tick(attempts 照常累计,上限语义不变)。
+    let inFlight = false;
     const poll = window.setInterval(async () => {
-      if (settled) return;
+      if (settled || inFlight) return;
       // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限永远
       // 到不了，正好是上限要兜的那种卡死。
       attempts += 1;
@@ -4759,9 +4764,11 @@ export default function Home() {
       }
       let outcome;
       let status;
+      inFlight = true;
       try {
         status = await fetchRelinkStatus(nb);
       } catch { return; }          // 瞬时错误：继续轮询
+      finally { inFlight = false; }
       outcome = relinkPollOutcome(status);
       if (cancelled || settled || activeNotebookIdRef.current !== nb) return;
       if (!outcome.done) {
@@ -5015,9 +5022,13 @@ export default function Home() {
     // generation === myGeneration 再决定是否收工——不匹配就是上一代际的迟到响应,直接
     // 丢弃,把轮询完整地交给当前代际。
     let generation = 0;
+    // codex R15:代际号防的是「跨代际」迟到响应;同一代际内 setInterval 也不等上一次
+    // 请求返回——两个都发于补发 POST 完成前的陈旧响应可以各自 +1 mismatchStreak,把
+    // 阈值 2 打穿。streak 论证依赖串行化:一次只允许一个在飞状态请求。
+    let inFlight = false;
     function pollTick() {
       void (async () => {
-        if (settled) return;
+        if (settled || inFlight) return;
         // 与上面的 settled 检查同一个同步段内捕获,等价于「在 interval 触发的那一刻」
         // 捕获——分派之后、await 之前没有任何代码能让 generation 变化。
         const myGeneration = generation;
@@ -5034,9 +5045,11 @@ export default function Home() {
         }
         let outcome;
         let status;
+        inFlight = true;
         try {
           status = await fetchUnifiedKgRebuildStatus(nb);
         } catch { return; }          // 瞬时错误：继续轮询
+        finally { inFlight = false; }
         outcome = rebuildPollOutcome(status);
         if (
           cancelled

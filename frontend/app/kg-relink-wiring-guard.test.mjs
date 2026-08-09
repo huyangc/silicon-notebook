@@ -182,7 +182,7 @@ test("终态观测后先停轮询(settled+clearInterval)再收尾,防止刷新�
   const pollBody = body.slice(pollAt);
 
   assert.ok(
-    /async \(\) => \{\s*if \(settled\) return;/.test(pollBody),
+    /async \(\) => \{\s*if \(settled \|\| inFlight\) return;/.test(pollBody),
     "轮询回调必须在最开头检查 settled,拦住 clearInterval 生效前已经排队的迟到 tick",
   );
 
@@ -712,4 +712,21 @@ test("codex R11:finish 的两条释放路径都清掉 expectedMaintenanceJobRef 
     "刷新 IIFE 的 finally 释放忙碌位之前必须先清掉 expectedMaintenanceJobRef 对应键——"
     + "两条释放路径(不刷新 / 刷新后)都必须清,漏一条就会让这张表随笔记本无限攒旧键",
   );
+});
+
+test("codex R15:补上关联轮询一次只允许一个在飞状态请求(inFlight 串行化)", async () => {
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+  const start = source.indexOf(
+    "if (!relinkBusyFor(relinkingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到补上关联的轮询 effect");
+  const depsAt = source.indexOf("}, [relinkingNotebookIds, currentNotebookId]);", start);
+  const body = source.slice(start, depsAt);
+  assert.ok(body.includes("let inFlight = false;"), "relink 轮询必须有 inFlight 标志");
+  const fetchAt = body.indexOf("status = await fetchRelinkStatus(nb);");
+  const setAt = body.lastIndexOf("inFlight = true;", fetchAt);
+  const clearAt = body.indexOf("finally { inFlight = false; }", fetchAt);
+  assert.ok(setAt >= 0 && fetchAt > setAt && clearAt > fetchAt,
+    "fetch 必须被 inFlight = true / finally 清除包住(请求串行化)");
 });
