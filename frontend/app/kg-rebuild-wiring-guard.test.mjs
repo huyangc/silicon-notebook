@@ -958,97 +958,21 @@ test("codex R4 P2(A):打开/切换笔记本时,服务端仍在跑的重新合并
   );
 });
 
-test("codex R10:恢复 effect 把 fetchUnifiedKgStatus 并进同一次探测,任一维护任务 running"
-  + "且 unified 图 dirty 时重新认领待补发标记(重载后重建待补发意图)", async () => {
-  // pendingRebuildNotebookIds(decideMerge 撞 409 时留下的「待补发」标记)是纯前端
-  // state:重载页面/关掉标签页会把它连同其余 state 一起丢掉——但那条合并决定已经落库,
-  // 没有任何东西会在占槽任务收工后去补发一次能看见它的重新合并,只能等用户自己想起来
-  // 手动点。这里钉住:恢复 effect 必须把 fetchUnifiedKgStatus 并进同一次 Promise.all
-  // 探测,且只有在「任一维护任务仍在跑」与「unified 图已经 dirty」同时成立时才重新
-  // 认领待补发标记——不能无条件认领(没有任务在跑或图并不 dirty 时,认领只会制造一次
-  // 无意义的自动重建)。
+test("codex R17:恢复 effect 不得从 dirty 推断待补发(推翻 R10 的重载恢复)", async () => {
+  // relink 每写一条边就推进 kg_mutation_seq(它是 _cluster_input_version 的一部分),
+  // 普通补连期间重载 dirty 恒真——按 dirty 认领待补发会在 relink 收工后自动发起一次
+  // 用户没请求过的、可能数小时的全量重聚。恢复 effect 只许恢复忙碌位追踪,绝不许
+  // 认领 pendingRebuildNotebookIds。
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
-
-  const start = source.indexOf("fetchUnifiedKgRebuildStatus(nb).catch(() => null)");
-  assert.ok(start > 0, "找不到打开笔记本时的重新合并状态恢复(被删除或改名?守卫失效)");
-  const depsAt = source.indexOf("}, [currentNotebookId]);", start);
-  assert.ok(depsAt > start, "找不到这条恢复 effect 的收尾依赖数组");
-  const body = source.slice(start, depsAt);
-
-  assert.ok(
-    body.includes("fetchUnifiedKgStatus(nb).catch(() => null)"),
-    "恢复 effect 必须把 fetchUnifiedKgStatus 并进同一次 Promise.all 探测(与既有的两个"
-    + "status 探测处同一批发出,不能另开一次请求)",
-  );
-
-  const guardAt = body.indexOf(
-    "if ((rebuildRunning || relinkRunning) && status?.dirty) {",
-  );
-  assert.ok(
-    guardAt >= 0,
-    "判据必须同时检查『任一维护任务仍在跑』(rebuildRunning || relinkRunning)与"
-    + "『unified 图已经 dirty』(status?.dirty)——变异①:删掉 dirty 条件、变成无条件"
-    + "认领,必须让这条断言报红",
-  );
-
-  const claimPendingAt = body.indexOf(
-    "setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));",
-    guardAt,
-  );
-  assert.ok(
-    claimPendingAt > guardAt && claimPendingAt - guardAt < 200,
-    "命中判据必须紧接着重新认领 pendingRebuildNotebookIds——变异②:把整段 if 块删掉,"
-    + "必须让这条断言报红(找不到判据之后的认领调用)",
-  );
-});
-
-test("codex R12:恢复 effect 命中待补发判据时必须同时认领 rebuildingNotebookIds"
-  + "(否则待补发标记没有轮询 effect 会去消费)", async () => {
-  // 待补发标记(pendingRebuildNotebookIds)只有 rebuild 轮询 effect 的终态收尾
-  // (settleOrRetryRebuild)会消费——那条 effect 只在 rebuildingNotebookIds 里认领了这个
-  // 库时才会挂载(依赖数组是 [rebuildingNotebookIds, currentNotebookId])。重载时若命中
-  // 的是 relinkRunning 为真、rebuildRunning 为假这一支(重载那一刻实际在跑的是「补上
-  // 关联」而非「重新合并」),旧代码只认领了 relinkingNotebookIds——rebuild 轮询 effect
-  // 根本不会挂载,待补发标记因此永远悬空:relink 轮询的终态只会刷新图谱,不认识、也不
-  // 消费这个标记,那条已经落库的合并决定永远等不到自动补发。修法是命中判据的分支无条件
-  // 同时认领 rebuildingNotebookIds——rebuildRunning 已为真时 claimNotebookSlot 是幂等
-  // no-op(见 notebook-busy-set.ts:已认领时原样返回同一个 Set),不会产生副作用;认领
-  // 之后走既有机器闭环:rebuild 轮询挂载 → status 对占槽的「补上关联」如实回 idle
-  // (两个状态视图只认自己的 kind)→ 待补发命中 → settleOrRetryRebuild 试补发 → 撞 409
-  // (relink 还没收工)→ 保留标记与忙碌位、重启轮询继续等 → relink 释放槽后再次 idle →
-  // 补发终于 POST 成功 → 消费标记、追踪新任务直到终态刷新。
-  const page = await parseModule("page.tsx");
-  const source = page.getFullText();
-
-  const start = source.indexOf("fetchUnifiedKgRebuildStatus(nb).catch(() => null)");
-  assert.ok(start > 0, "找不到打开笔记本时的重新合并状态恢复(被删除或改名?守卫失效)");
-  const depsAt = source.indexOf("}, [currentNotebookId]);", start);
-  assert.ok(depsAt > start, "找不到这条恢复 effect 的收尾依赖数组");
-  const body = source.slice(start, depsAt);
-
-  const guardAt = body.indexOf(
-    "if ((rebuildRunning || relinkRunning) && status?.dirty) {",
-  );
-  assert.ok(guardAt >= 0, "找不到待补发认领的判据(被改名或删除?守卫失效)");
-  const guardEndAt = body.indexOf("\n      }", guardAt);
-  assert.ok(guardEndAt > guardAt, "找不到判据分支的收尾 `}`");
-  const guardBlock = body.slice(guardAt, guardEndAt);
-
-  const claimPendingAt = guardBlock.indexOf(
-    "setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));",
-  );
-  assert.ok(claimPendingAt >= 0, "找不到待补发标记的重新认领(被上面那条测试钉住,这里只是定位)");
-
-  const claimRebuildAt = guardBlock.lastIndexOf(
-    "setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));",
-  );
-  assert.ok(
-    claimRebuildAt > claimPendingAt,
-    "命中待补发判据的分支必须同时认领 rebuildingNotebookIds(在认领待补发标记之后)——"
-    + "变异(删除):把这一行整个删掉,必须让这条断言报红,因为 rebuild 轮询 effect"
-    + "不会挂载、待补发标记会永久悬空",
-  );
+  const start = source.indexOf("const relinkRunning = Boolean(relink && ");
+  assert.ok(start > 0, "找不到恢复 effect");
+  const end = source.indexOf("}, [currentNotebookId]);", start);
+  const body = source.slice(start, end);
+  assert.ok(!body.includes("setPendingRebuildNotebookIds"),
+    "恢复 effect 不得认领待补发标记(R17:dirty 不是决定级信号)");
+  assert.ok(body.includes("if (rebuildRunning) {") && body.includes("if (relinkRunning) {"),
+    "恢复 effect 仍须恢复两类忙碌位追踪");
 });
 
 test("codex R12:submittingMaintenanceRef 的键必须按 kind 分开,不能有裸 nb 键残留", async () => {

@@ -1398,8 +1398,7 @@ export default function Home() {
     Promise.all([
       fetchUnifiedKgRebuildStatus(nb).catch(() => null),
       fetchRelinkStatus(nb).catch(() => null),
-      fetchUnifiedKgStatus(nb).catch(() => null),
-    ]).then(([rebuild, relink, status]) => {
+    ]).then(([rebuild, relink]) => {
       if (cancelled) return;
       const rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
       const relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
@@ -1409,31 +1408,13 @@ export default function Home() {
       if (relinkRunning) {
         setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
       }
-      // codex R10:pendingRebuildNotebookIds(decideMerge 撞 409 时留下的「待补发」标记)
-      // 是纯前端 state,重载页面或关掉标签页会把它连同其余 state 一起丢掉——但那条合并
-      // 决定已经落库,没有任何东西会在占槽任务收工后去补发一次能看见它的重新合并,只能
-      // 等用户自己想起来手动点。这里在恢复忙碌位的同一次探测里顺带查一次 unified 状态:
-      // 只要有维护任务仍在跑(说明当时可能正是占槽方)、且 unified 图已经 dirty(有变更
-      // 还没被一次重新合并吸收),就重新认领待补发标记——下面按忙碌位建键的 rebuild
-      // 轮询 effect 会在这次任务收尾时按既有语义自动补发一次 rebuildUnifiedKg。
-      // 安全性:这是「宁可多补发一次」的保守认领,不是精确复原——重载前 dirty 也可能来自
-      // 与这条决定无关的其它变更,补发因此可能是多余的一次。代价被版本闸兜住:输入未变的
-      // rebuildUnifiedKg 会在服务端毫秒级识别并原地收工(不是一次完整重算),宁可多一次
-      // 空转,也不让一条已经记录的决定永久悬空、图谱停在决定生效之前。
-      if ((rebuildRunning || relinkRunning) && status?.dirty) {
-        setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
-        // codex R12:待补发标记只有 rebuild 轮询 effect 的终态收尾(settleOrRetryRebuild)
-        // 会消费——那条 effect 只在 rebuildingNotebookIds 里认领了这个库时才会挂载。
-        // relinkRunning 为真、rebuildRunning 为假的这一支(重载时其实是「补上关联」在
-        // 占槽)此前只认领了 relinkingNotebookIds,rebuild 轮询根本不会挂载,待补发标记
-        // 因此永远悬空——relink 轮询终态时只会刷新图谱,不认识、也不消费这个标记。这里
-        // 无条件同时认领 rebuildingNotebookIds(rebuildRunning 已为真时是幂等的 no-op)。
-        // 认领后走既有机器闭环:rebuild 轮询挂载→status 对占槽的「补上关联」如实回
-        // idle(两个状态视图只认自己的 kind)→待补发命中→settleOrRetryRebuild 试补发
-        // POST→撞 409(relink 还没收工)→保留标记与忙碌位、重启轮询继续等→relink 释放
-        // 槽后再次 idle→补发终于 POST 成功→消费标记、追踪新任务直到终态刷新。
-        setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
-      }
+      // codex R17(推翻 R10 的重载恢复推断):不能从「dirty && 有维护任务在跑」推断
+      // 「有待补发的合并决定」——relink 自己每写一条边就推进 kg_mutation_seq,而它是
+      // _cluster_input_version 的一部分,所以普通补连期间重载页面,dirty 恒为真;按它
+      // 认领待补发会在 relink 收工后自动发起一次**用户没有请求过的**重新合并,且因为
+      // 输入版本确实变了,那不是毫秒级空转而是可能数小时的全量重聚(还可能带 LLM 调用)。
+      // 已记录而未兑现的合并决定,重载后的兜底是既有「待重建」标签+手动点击(契约文档
+      // 已登记该边界);跨重载的自动补发需要服务端持久的决定级信号,列为后续独立立项。
     });
     return () => { cancelled = true; };
   }, [currentNotebookId]);
