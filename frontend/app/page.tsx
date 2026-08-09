@@ -1025,6 +1025,16 @@ export default function Home() {
   // 按钮消费的是「**当前这个库**在不在补」——切到别的库，那边的按钮照常可点。
   const relinkingKg = relinkBusyFor(relinkingNotebookIds, currentNotebookId);
   const kgRefreshBusy = busyForNotebook(rebuildingNotebookIds, currentNotebookId);
+  // decideMerge 落一条合并决定时若撞上 409(共槽已有整理任务在跑)：决定本身已经落库，
+  // 但没能触发一次能看见它的重新合并。这里记一个「待补发」标记——与忙碌位同数据结构
+  // 风格(按笔记本的一个集合,只加/只清自己那一格,复用同一套 claimNotebookSlot /
+  // releaseNotebookClaim)，由下面「重新合并」轮询的终态收尾消费：占槽任务结束后自动
+  // 补发一次 rebuildUnifiedKg，让图谱真正跟上这条决定。
+  const [pendingRebuildNotebookIds, setPendingRebuildNotebookIds] = useState<Set<string>>(new Set());
+  // 轮询 effect 的闭包在挂载时就固定了；标记可能在 effect 已经在跑之后才被 decideMerge
+  // 置上，消费点必须经 ref 读最新值,不能用效果创建时捕获的那份。
+  const pendingRebuildNotebookIdsRef = useRef(pendingRebuildNotebookIds);
+  pendingRebuildNotebookIdsRef.current = pendingRebuildNotebookIds;
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   const scaleIndexDoneRequestRef = useRef(0);
@@ -4518,6 +4528,12 @@ export default function Home() {
     const nb = currentNotebookId as string;
     let cancelled = false;
     let attempts = 0;
+    // 终态一旦观测到必须**先停轮询、再刷新**：interval 还在跑,若刷新耗时超过一个
+    // 3s 周期,下一 tick 会再读到同一个终态、再调一次 finish(),让图谱重拉并发跑两份
+    // (codex R1 P2)。settled 在两处 finish 调用点之前都同步置位并 clearInterval,
+    // 拦住这条重入路径；每次 tick 开头也检查它,拦住 clearInterval 生效前已经排队的
+    // 迟到 tick。
+    let settled = false;
     // 终态必须**先刷新、刷新完成后再释放忙碌位**——反过来做（release 在前）会自己
     // 取消自己:release 改了 relinkingNotebookIds,这条 effect 的依赖跟着变,React 立刻
     // 跑 cleanup 把这条闭包的 cancelled 置 true,随后三个真实 fetch 回来时守卫直接把
@@ -4547,18 +4563,25 @@ export default function Home() {
       })();
     };
     const poll = window.setInterval(async () => {
+      if (settled) return;
       // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限永远
       // 到不了，正好是上限要兜的那种卡死。
       attempts += 1;
       if (attempts > RELINK_POLL_MAX_ATTEMPTS) {
-        if (!cancelled && activeNotebookIdRef.current === nb) finish(RELINK_POLL_TIMED_OUT);
+        if (!cancelled && activeNotebookIdRef.current === nb) {
+          settled = true;
+          window.clearInterval(poll);
+          finish(RELINK_POLL_TIMED_OUT);
+        }
         return;
       }
       let outcome;
       try {
         outcome = relinkPollOutcome(await fetchRelinkStatus(nb));
       } catch { return; }          // 瞬时错误：继续轮询
-      if (cancelled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+      if (cancelled || settled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+      settled = true;
+      window.clearInterval(poll);
       finish(outcome);
     }, 3000);
     return () => { cancelled = true; window.clearInterval(poll); };
@@ -4593,6 +4616,14 @@ export default function Home() {
     const nb = currentNotebookId as string;
     let cancelled = false;
     let attempts = 0;
+    // 终态一旦观测到必须**先停轮询、再刷新(或补发重试)**：interval 还在跑,若那之后
+    // 的异步工作耗时超过一个 3s 周期,下一 tick 会再读到同一个终态、再调一次 finish(),
+    // 让图谱重拉(乃至下面的补发重试)并发跑两份(codex R1 P2)。settled 在每个 finish
+    // 调用点之前都同步置位并 clearInterval,拦住这条重入路径；每次 tick 开头也检查它,
+    // 拦住 clearInterval 生效前已经排队的迟到 tick。补发重试成功后会复位它、经
+    // startPolling 重新起一轮轮询追新任务。
+    let settled = false;
+    let poll = 0;
     // 终态必须**先刷新、刷新完成后再释放忙碌位**——反过来做（release 在前）会自己
     // 取消自己:release 改了 rebuildingNotebookIds,这条 effect 的依赖跟着变,React 立刻
     // 跑 cleanup 把这条闭包的 cancelled 置 true,随后三个真实 fetch 回来时守卫直接把
@@ -4603,7 +4634,7 @@ export default function Home() {
     const finish = (outcome: RebuildPollOutcome) => {
       if (outcome.toast) setToast(outcome.toast);
       if (!outcome.refresh) {
-        setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+        void settleOrRetryRebuild();
         return;
       }
       void (async () => {
@@ -4619,25 +4650,62 @@ export default function Home() {
           setVizBuilding(Boolean(g.viz_building));
         } catch (err) { reportError(err); }
         finally {
-          setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+          await settleOrRetryRebuild();
         }
       })();
     };
-    const poll = window.setInterval(async () => {
-      // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限永远
-      // 到不了，正好是上限要兜的那种卡死。
-      attempts += 1;
-      if (attempts > REBUILD_POLL_MAX_ATTEMPTS) {
-        if (!cancelled && activeNotebookIdRef.current === nb) finish(REBUILD_POLL_TIMED_OUT);
-        return;
+    // decideMerge 撞 409 时会在 pendingRebuildNotebookIds 给这个库留一个「待补发」标记：
+    // 那条决定已经落库,但占槽的是另一个任务,没能触发一次能看见它的重新合并。这里在
+    // 终态收尾时消费掉标记、补发一次——成功就**不释放忙碌位**,复位轮询状态继续追这
+    // 次新任务;补发又撞 409(或其它失败)就放弃、按原样释放(decideMerge 落 409 时已
+    // 经 toast 过一次,这里不重复提示,防止无限重试)。
+    async function settleOrRetryRebuild() {
+      if (pendingRebuildNotebookIdsRef.current.has(nb)) {
+        setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+        try {
+          await rebuildUnifiedKg(nb);
+          if (!cancelled && activeNotebookIdRef.current === nb) {
+            attempts = 0;
+            settled = false;
+            startPolling();
+            return;
+          }
+          return; // 已切库/effect 已收尾:忙碌位留给下次重挂的 effect 接着轮
+        } catch (err) {
+          if (httpErrorStatus(err) !== 409) reportError(err);
+          // 放弃补发,落到下面的正常释放
+        }
       }
-      let outcome;
-      try {
-        outcome = rebuildPollOutcome(await fetchUnifiedKgRebuildStatus(nb));
-      } catch { return; }          // 瞬时错误：继续轮询
-      if (cancelled || activeNotebookIdRef.current !== nb || !outcome.done) return;
-      finish(outcome);
-    }, 3000);
+      setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+    }
+    function pollTick() {
+      void (async () => {
+        if (settled) return;
+        // 计数放在发请求之前：瞬时错误也算一次尝试，否则一个持续报错的后端会让上限
+        // 永远到不了，正好是上限要兜的那种卡死。
+        attempts += 1;
+        if (attempts > REBUILD_POLL_MAX_ATTEMPTS) {
+          if (!cancelled && activeNotebookIdRef.current === nb) {
+            settled = true;
+            window.clearInterval(poll);
+            finish(REBUILD_POLL_TIMED_OUT);
+          }
+          return;
+        }
+        let outcome;
+        try {
+          outcome = rebuildPollOutcome(await fetchUnifiedKgRebuildStatus(nb));
+        } catch { return; }          // 瞬时错误：继续轮询
+        if (cancelled || settled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+        settled = true;
+        window.clearInterval(poll);
+        finish(outcome);
+      })();
+    }
+    function startPolling() {
+      poll = window.setInterval(pollTick, 3000);
+    }
+    startPolling();
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [rebuildingNotebookIds, currentNotebookId]);
 
@@ -4755,11 +4823,14 @@ export default function Home() {
   // 后台化之后这一步不再等它跑完：POST 立刻回来，图谱与待确认列表由上面那条
   // rebuild/status 轮询在终态重拉（所以这里的忙碌位也要走同一个集合，否则轮询 effect
   // 根本不会开）。409 = 共槽已经有一次重新合并/补上关联在跑：决定本身已经落库，不是
-  // 失败，忙碌位要**保留**。但「轮询照常等那次的终态」只在占槽的是重新合并时成立——
-  // 占槽的若是补上关联，rebuild/status 对它如实回 idle（两个状态视图只认自己的 kind），
-  // 轮询几乎立刻收工并刷新一次，那次刷新拿到的仍是这条决定生效前的图，所以这里必须
-  // 显式 toast 告知用户「决定已记录，图还没跟上，等那件任务完成后要再点一次重新合并」；
-  // 落决定本身失败才是真失败，忙碌位当场清掉。
+  // 失败，忙碌位要**保留**。但那次占槽任务(重新合并或补上关联,谁先跑起来的都可能)
+  // 未必会让图谱看见这条决定——它可能在决定落库**之前**就已经捕获了输入版本与
+  // decided pairs,跑完发布的还是旧聚类;占槽的若是补上关联,rebuild/status 对它如实
+  // 回 idle(两个状态视图只认自己的 kind),轮询几乎立刻收工并刷新一次,拿到的同样是
+  // 决定生效前的图。所以这里在 pendingRebuildNotebookIds 给这个库留一个「待补发」
+  // 标记,由 rebuild 轮询的终态收尾消费:那次占槽任务结束后自动补发一次
+  // rebuildUnifiedKg,不需要用户自己记得再点。落决定本身失败才是真失败，忙碌位当场
+  // 清掉。
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
     if (!currentNotebookId || decidingMerge) return;
     const nb = currentNotebookId;
@@ -4776,7 +4847,8 @@ export default function Home() {
           setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
           throw err;
         }
-        setToast("合并已记录；当前有其他整理任务运行中，完成后请再点「重新合并」更新图谱");
+        setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
+        setToast("合并已记录，将在当前任务完成后自动重新合并");
       }
       const pend = await fetchPendingMerges(nb);
       setPendingMerges(withoutDecidedMerge(pend, candidate));
