@@ -299,6 +299,38 @@ import {
 import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
 const SOURCE_ELEMENT_PAGE_SIZE = 40;
+// codex R13:「补上关联」/「重新合并」两条轮询按 job_id 配对(codex R11)防住了陈旧终态
+// 被误当真——但按「不匹配就无限拒收」实现时,有两种场景会让这次追踪**永远**等不到匹配
+// 的终态:①后端重启(expectedMaintenanceJobRef 只在浏览器内存,重启后服务端记着的
+// job_id 已经不存在,status 查询只会回显 idle 或别的任务);②共享的按笔记本单飞维护槽
+// 被另一次提交/领养认领(服务端此后只如实回显最新占槽的那个 job_id,这次追踪的 job_id
+// 再也不会出现)。两种场景下轮询都会一路拒收到约 30 分钟的尝试上限才靠超时兜底——按钮
+// 锁死、图谱不刷。
+//
+// 修法:job_id 不匹配的终态不再无限拒收,而是按**连续观测次数**收敛。轮询 tick 里维护
+// 一个局部 mismatchStreak:同一个 tick 只要观测到「终态但 job_id 不匹配」就
+// mismatchStreak += 1;连续达到这个阈值就当作已经可以确证专属这次追踪的匹配终态不会
+// 再出现,直接按终态收工(settle+刷新+清 expectation——这次追踪已不可观测,刷新是安全
+// 且必要的:图可能已经变了)。观测到 running,或观测到匹配的终态,都会把计数清零——
+// 只有**连续**不匹配才累计,中间夹一次 running/匹配就从头数。
+//
+// 为什么连续两次就能确证,而不是像 R11 之前那样第一次不匹配就当真(那正是 R11 要修的
+// 竞态本身)？expectation 只在 POST **返回之后**才写进 expectedMaintenanceJobRef——写入
+// 那一刻,服务端早已经在提交任务槽之后才回的包,所以 expectation 一旦存在,服务端此刻
+// 的权威状态必然就是这次追踪的任务。此后唯一还能读到「旧 job_id / 旧 idle」的途径,只
+// 剩一种:一个更早发出、此刻才姗姗来迟的响应。而轮询在同一个 tick 序列里**串行**执行
+// ——下一次真正发出的请求,一定发生在上一次响应已经被 await 解析**之后**(每个 tick
+// 开头都先检查 settled,不会有两个 tick 的请求同时在飞、乱序回来)。换句话说:连续观测
+// 到的第二次不匹配,不可能仍是"POST 返回前"在飞的旧响应——它必然是 POST 已经返回之后、
+// 服务端此刻状态确实不是这次追踪的任务的真实回显。两次即可确证,把等待收敛到 ≤2 个
+// tick(约 6 秒),不必再靠约 30 分钟的尝试上限兜底。
+//
+// 与既有两套机制的分工(缺一不可,谁也不能顶替谁):submittingMaintenanceRef 防的是
+// POST **还没返回**那段窗口(此时还没有新 job_id 可比,提交期无条件继续轮询,不进入
+// mismatchStreak 计数);generation(仅 rebuild 侧)防的是补发重试跨代际的乱序响应。
+// mismatchStreak 防的是"POST 已经返回、expectation 已经写好,但这个 job_id 从此再也
+// 不会出现"这种死等——三层各管一段窗口,合起来才是完整的时序覆盖。
+const MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK = 2;
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -4683,6 +4715,10 @@ export default function Home() {
     // 图谱/状态因此永远刷不出来，「已重新合并」toast 弹了但画布纹丝不动，#478 同型 bug）。
     // 刷新期间按钮多 disabled 一会——正确且无害。守卫也从局部 cancelled 改成
     // activeNotebookIdRef：cleanup 只该取消**轮询**本身，不该取消这次已经在飞的终态刷新。
+    // codex R13:job_id 连续不匹配次数(完整论证见文件顶部 MAINTENANCE_JOB_MISMATCH_
+    // SETTLE_STREAK 常量注释)。观测到 running 或匹配的终态都会清零,只有连续不匹配才
+    // 累计到阈值。
+    let mismatchStreak = 0;
     const finish = (outcome: RelinkPollOutcome) => {
       if (outcome.toast) setToast(outcome.toast);
       if (!outcome.refresh) {
@@ -4727,7 +4763,13 @@ export default function Home() {
         status = await fetchRelinkStatus(nb);
       } catch { return; }          // 瞬时错误：继续轮询
       outcome = relinkPollOutcome(status);
-      if (cancelled || settled || activeNotebookIdRef.current !== nb || !outcome.done) return;
+      if (cancelled || settled || activeNotebookIdRef.current !== nb) return;
+      if (!outcome.done) {
+        // codex R13:观测到 running 说明服务端确认这个库上有任务在跑——running 不
+        // 校验 job_id,只要还在跑就把连续不匹配计数归零,重新从 0 开始累计。
+        mismatchStreak = 0;
+        return;
+      }
       // codex R9:POST 比首个 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工——随后
       // POST 才成功,没人再轮询,任务完成不刷新。idle 且提交还在飞(submittingMaintenanceRef
       // 记着这个键)时不能当真终态,继续等下一个 tick;提交落地后服务端会回真实
@@ -4735,15 +4777,26 @@ export default function Home() {
       // 一次 rebuild 提交在飞,不该被那次不相干的提交拖住这条 relink 轮询。
       if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:relink`)) return;
       // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST 落地前,仍可能
-      // 如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都不可信。
+      // 如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都不可信,且提交
+      // 期无条件继续轮询,不进入下面的 mismatchStreak 计数。
       if (submittingMaintenanceRef.current.has(`${nb}:relink`)) return;
       // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才是
       // 这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养占用)
-      // 一律视为陈旧,继续轮询等真正对应这次追踪的终态出现。没有走过本页 POST 的追踪
-      // (409 领养、打开笔记本时从服务端恢复)从未写过这张表,天然保留"接受任意终态"
-      // 的历史行为。
+      // 一律视为陈旧。没有走过本页 POST 的追踪(409 领养、打开笔记本时从服务端恢复)
+      // 从未写过这张表,天然保留"接受任意终态"的历史行为(expectedRelinkJobId 为空,
+      // relinkJobMismatch 恒为 false,直接收工)。codex R13:不匹配不再无限拒收——连续
+      // 达到 MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK 次才真收工,完整论证见文件顶部
+      // 该常量的注释。
       const expectedRelinkJobId = expectedMaintenanceJobRef.current.get(`${nb}:relink`);
-      if (expectedRelinkJobId && status.job_id !== expectedRelinkJobId) return;
+      const relinkJobMismatch = Boolean(
+        expectedRelinkJobId && status.job_id !== expectedRelinkJobId,
+      );
+      if (relinkJobMismatch) {
+        mismatchStreak += 1;
+        if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
+      } else {
+        mismatchStreak = 0;
+      }
       settled = true;
       window.clearInterval(poll);
       finish(outcome);
@@ -4814,6 +4867,10 @@ export default function Home() {
     // startPolling 重新起一轮轮询追新任务。
     let settled = false;
     let poll = 0;
+    // codex R13:job_id 连续不匹配次数(完整论证见文件顶部 MAINTENANCE_JOB_MISMATCH_
+    // SETTLE_STREAK 常量注释)。观测到 running 或匹配的终态都会清零,只有连续不匹配才
+    // 累计到阈值;每次 startPolling() 开启新代际也会归零(与 generation 同步重置)。
+    let mismatchStreak = 0;
     // 终态必须**先刷新、刷新完成后再释放忙碌位**——反过来做（release 在前）会自己
     // 取消自己:release 改了 rebuildingNotebookIds,这条 effect 的依赖跟着变,React 立刻
     // 跑 cleanup 把这条闭包的 cancelled 置 true,随后三个真实 fetch 回来时守卫直接把
@@ -4972,8 +5029,13 @@ export default function Home() {
           || settled
           || activeNotebookIdRef.current !== nb
           || generation !== myGeneration
-          || !outcome.done
         ) return;
+        if (!outcome.done) {
+          // codex R13:观测到 running 说明服务端确认这个库上有任务在跑——running 不
+          // 校验 job_id,只要还在跑就把连续不匹配计数归零,重新从 0 开始累计。
+          mismatchStreak = 0;
+          return;
+        }
         // codex R9:POST(含 settleOrRetryRebuild 的补发)比首个 tick 慢时,轮询会先读到
         // 服务端旧的 idle 并当终态收工——随后 POST 才成功,没人再轮询,任务完成不刷新。
         // idle 且提交还在飞(submittingMaintenanceRef 记着这个键)时不能当真终态,继续等
@@ -4983,15 +5045,26 @@ export default function Home() {
         if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;
         // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST(含补发)落地
         // 前,仍可能如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都
-        // 不可信,不止 idle 这一种终态。
+        // 不可信,不止 idle 这一种终态,且提交期无条件继续轮询,不进入下面的
+        // mismatchStreak 计数。
         if (submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;
         // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才
         // 是这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养
-        // 占用)一律视为陈旧,继续轮询等真正对应这次追踪的终态出现。没有走过本页 POST
-        // 的追踪(409 领养、打开笔记本时从服务端恢复)从未写过这张表,天然保留"接受
-        // 任意终态"的历史行为。
+        // 占用)一律视为陈旧。没有走过本页 POST 的追踪(409 领养、打开笔记本时从服务端
+        // 恢复)从未写过这张表,天然保留"接受任意终态"的历史行为(expectedRebuildJobId
+        // 为空,rebuildJobMismatch 恒为 false,直接收工)。codex R13:不匹配不再无限
+        // 拒收——连续达到 MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK 次才真收工,完整论证
+        // 见文件顶部该常量的注释。
         const expectedRebuildJobId = expectedMaintenanceJobRef.current.get(`${nb}:rebuild`);
-        if (expectedRebuildJobId && status.job_id !== expectedRebuildJobId) return;
+        const rebuildJobMismatch = Boolean(
+          expectedRebuildJobId && status.job_id !== expectedRebuildJobId,
+        );
+        if (rebuildJobMismatch) {
+          mismatchStreak += 1;
+          if (mismatchStreak < MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK) return;
+        } else {
+          mismatchStreak = 0;
+        }
         settled = true;
         window.clearInterval(poll);
         finish(outcome);
@@ -4999,6 +5072,10 @@ export default function Home() {
     }
     function startPolling() {
       generation += 1;
+      // codex R13:每次开启新代际都归零连续不匹配计数——补发重试(settleOrRetryRebuild
+      // 的成功分支)会带着一个**新** job_id 复位 settled 并调这里重启轮询,上一代际
+      // 遗留的 mismatchStreak 对这一代毫无意义,必须与 generation 一起重置。
+      mismatchStreak = 0;
       poll = window.setInterval(pollTick, 3000);
     }
     startPolling();
