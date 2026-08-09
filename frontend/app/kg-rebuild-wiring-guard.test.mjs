@@ -141,9 +141,12 @@ test("轮询有尝试上限,且不把 kgLimit 塞进依赖里", async () => {
     // 再提到 7200(codex R5 两条 P2:pollTick 加代际捕获/校验 + finish 的刷新 IIFE 里加
     // 选中概念重对账,两处都在这段区间内),再提到 8200(codex R9:settleOrRetryRebuild 的
     // 补发 POST 与 pollTick 都加了 submittingMaintenanceRef 提交期标记的 add/finally-
-    // delete,两处都在这段区间内)——阈值只是防「查找到很远之后一个不相干的收尾数组」的
-    // 护栏,不是精确长度断言,跟着真实需要一起调没有问题。
-    depsAt > start && depsAt - start < 8200,
+    // delete,两处都在这段区间内),再提到 9200(codex R11:三处 rebuild POST 成功都要
+    // 记下 job_id、settleOrRetryRebuild 的最终释放要清掉 expectation、pollTick 的正常
+    // 终态分支加了「提交期不止 idle 不可信」与「job_id 必须配对」两层判据,四处都在这段
+    // 区间内)——阈值只是防「查找到很远之后一个不相干的收尾数组」的护栏,不是精确长度
+    // 断言,跟着真实需要一起调没有问题。
+    depsAt > start && depsAt - start < 9200,
     "轮询 effect 的依赖必须恰好是 [rebuildingNotebookIds, currentNotebookId]"
     + "(kgLimit 进依赖会在换范围时重启轮询、重置尝试计数)",
   );
@@ -925,5 +928,175 @@ test("codex R9:adoptRunningMaintenance 两个探测任一失败即返回 unknown
   assert.ok(
     /relinkRunning\s*\?\s*claimRelinkSlot\(prev, nb\)\s*:\s*releaseRelinkClaim\(prev, nb\)/.test(body),
     "relink 忙碌位必须双向归位(running→claim,否则→release),不能只 claim 不 release",
+  );
+});
+
+// codex R11:submittingMaintenanceRef 只压制了提交期的陈旧 idle——同库再次点击时,服务端
+// 共享的维护槽在这次 POST 落地**前**仍会如实回显**上一个任务**的 succeeded/failed(不止
+// idle);POST 落地之后也可能有一次陈旧终态(槽被另一次提交/领养挪走)抢在真正对应这次
+// 追踪的终态之前被读到。修法是按 job_id 配对:三处 rebuild POST(refreshUnifiedKg、
+// decideMerge、settleOrRetryRebuild 的补发)成功后都要把响应里的 job_id 记进
+// expectedMaintenanceJobRef,轮询终态只在 status.job_id 与它一致时才接受。下面五条钉住
+// 这套机制的接线,与上面 codex R9 的 idle+submitting 检查互补而非取代。
+
+test("codex R11:refreshUnifiedKg 的 POST 成功后记下 job_id,供轮询终态按 job_id 配对", async () => {
+  const page = await parseModule("page.tsx");
+  const body = findFunction(page, "refreshUnifiedKg").getText(page);
+
+  const startedAt = body.indexOf("const started = await rebuildUnifiedKg(nb);");
+  assert.ok(startedAt >= 0, "refreshUnifiedKg 必须接住 POST 的返回值(拿 job_id)");
+  const setAt = body.indexOf(
+    "expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);",
+    startedAt,
+  );
+  assert.ok(
+    setAt > startedAt,
+    "POST 成功后必须把 job_id 记进 expectedMaintenanceJobRef(键 `${nb}:rebuild`),"
+    + "否则轮询终态无法按 job_id 配对、陈旧终态照样会被当真(变异:删掉这行判据必须让"
+    + "本条断言报红)",
+  );
+});
+
+test("codex R11:decideMerge 落决定后启动的 rebuildUnifiedKg POST 成功同样记下 job_id", async () => {
+  const page = await parseModule("page.tsx");
+  const body = findFunction(page, "decideMerge").getText(page);
+
+  const startedAt = body.indexOf("const started = await rebuildUnifiedKg(nb);");
+  assert.ok(startedAt >= 0, "decideMerge 必须接住 POST 的返回值(拿 job_id)");
+  const setAt = body.indexOf(
+    "expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);",
+    startedAt,
+  );
+  assert.ok(
+    setAt > startedAt,
+    "POST 成功后必须把 job_id 记进 expectedMaintenanceJobRef,否则这条决定生效后的"
+    + "终态可能被一次陈旧的 succeeded/failed 抢先吞掉",
+  );
+});
+
+test("codex R11:settleOrRetryRebuild 的补发 POST 成功后用新 job_id 覆盖 expectation", async () => {
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  const body = source.slice(start, depsAt);
+
+  const retryAt = body.indexOf("async function settleOrRetryRebuild()");
+  assert.ok(retryAt >= 0, "找不到待补发消费点(settleOrRetryRebuild 被改名或删除?守卫失效)");
+  const retryBody = body.slice(retryAt);
+
+  const startedAt = retryBody.indexOf("const started = await rebuildUnifiedKg(nb);");
+  assert.ok(startedAt >= 0, "补发也必须接住 POST 的返回值(拿新的 job_id)");
+  const setAt = retryBody.indexOf(
+    "expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);",
+    startedAt,
+  );
+  assert.ok(
+    setAt > startedAt,
+    "补发成功后必须用**新** job_id 覆盖 expectedMaintenanceJobRef——不覆盖,轮询会继续"
+    + "按上一个(已经终结)的 job_id 配对,永远等不到这次补发任务的终态",
+  );
+  const consumeAt = retryBody.indexOf(
+    "setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb))",
+  );
+  assert.ok(
+    setAt < consumeAt,
+    "job_id 必须先记下、再消费待补发标记——与另两处 POST 记 job_id 的顺序保持一致",
+  );
+});
+
+test("codex R11:pollTick 正常终态分支必须无条件拒收提交期终态、并按 job_id 配对", async () => {
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  const body = source.slice(start, depsAt);
+
+  const pollAt = body.indexOf("function pollTick()");
+  assert.ok(pollAt >= 0, "找不到轮询 tick(被改名或改回内联 setInterval 回调?守卫失效)");
+  const pollBody = body.slice(pollAt);
+
+  const outcomeDeclAt = pollBody.indexOf("let outcome;");
+  assert.ok(outcomeDeclAt >= 0, "找不到正常终态分支的 `let outcome;`");
+  const finishAt = pollBody.indexOf("finish(outcome)", outcomeDeclAt);
+  assert.ok(finishAt >= 0, "找不到正常终态分支的 finish(outcome) 调用点");
+  const guardWindow = pollBody.slice(outcomeDeclAt, finishAt);
+
+  // 提交期(POST 还没落地)必须无条件继续轮询,不止 idle 一种终态——同库再次点击时,
+  // 服务端在这次 POST 落地前仍可能如实回显上一个任务的 succeeded/failed。
+  const idleSubmittingAt = guardWindow.indexOf(
+    'if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;',
+  );
+  assert.ok(idleSubmittingAt >= 0, "找不到 codex R9 的 idle+提交中判据(被删改?守卫失效)");
+  const broadSubmittingAt = guardWindow.indexOf(
+    "if (submittingMaintenanceRef.current.has(nb)) return;",
+    idleSubmittingAt,
+  );
+  assert.ok(
+    broadSubmittingAt > idleSubmittingAt,
+    "必须在 idle+提交中判据之后再加一条无条件的提交期判据(不看 status.status)——"
+    + "否则提交期读到上一个任务的 succeeded/failed(不是 idle)时会被误判成这次任务的"
+    + "完成",
+  );
+
+  const expectedAt = guardWindow.indexOf(
+    "const expectedRebuildJobId = expectedMaintenanceJobRef.current.get(`${nb}:rebuild`);",
+    broadSubmittingAt,
+  );
+  assert.ok(
+    expectedAt > broadSubmittingAt,
+    "必须读出这次追踪期望的 job_id(expectedMaintenanceJobRef),否则无法按 job_id 配对",
+  );
+  const mismatchAt = guardWindow.indexOf(
+    "if (expectedRebuildJobId && status.job_id !== expectedRebuildJobId) return;",
+    expectedAt,
+  );
+  assert.ok(
+    mismatchAt > expectedAt,
+    "存在 expectation 时,status.job_id 必须与它一致才能继续接受终态——不一致必须"
+    + "return 继续轮询(变异:删掉这行判据必须让本条断言报红)",
+  );
+
+  const settledTrueAt = guardWindow.lastIndexOf("settled = true;");
+  assert.ok(
+    settledTrueAt >= 0 && mismatchAt < settledTrueAt,
+    "job_id 配对判据必须在 settled = true 之前生效,否则轮询已经先收工了",
+  );
+});
+
+test("codex R11:settleOrRetryRebuild 最终释放忙碌位时清掉 expectedMaintenanceJobRef 对应键", async () => {
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  const body = source.slice(start, depsAt);
+
+  const retryAt = body.indexOf("async function settleOrRetryRebuild()");
+  assert.ok(retryAt >= 0, "找不到待补发消费点(settleOrRetryRebuild 被改名或删除?守卫失效)");
+  const retryBody = body.slice(retryAt);
+
+  const releaseAt = retryBody.lastIndexOf(
+    "setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));",
+  );
+  assert.ok(releaseAt >= 0, "找不到最终释放忙碌位的调用");
+  const deleteAt = retryBody.lastIndexOf(
+    "expectedMaintenanceJobRef.current.delete(`${nb}:rebuild`);",
+  );
+  assert.ok(
+    deleteAt >= 0 && deleteAt < releaseAt && releaseAt - deleteAt < 100,
+    "最终释放忙碌位之前必须清掉这个库在 expectedMaintenanceJobRef 里的 expectation——"
+    + "补发成功重启轮询的分支不会走到这里(已经 return),不会误清刚为新任务设下的期望值",
   );
 });
