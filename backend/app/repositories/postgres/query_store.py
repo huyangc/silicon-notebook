@@ -272,6 +272,25 @@ class QueryStore:
         return knowledge_counts_cache.visible_pending_source_count(db, notebook_id)
 
     @staticmethod
+    def notebook_source_ids_among(db: Any, notebook_id: str, source_ids) -> set:
+        """给定 source id 里属于本 notebook 的那一批——sqlite ``notebook_source_ids_among``
+        的镜像(判据逐字一致:主键 id 命中 + ``notebook_id`` 等值,后者同样在调用侧比较,
+        见 sqlite 版 docstring 里「为什么不写进 WHERE」的 EXPLAIN 证据;两后端保持同一拼写,
+        免得同一个判据在两个适配器上长成两种查询)。CheckupService 用它把进程全局的活跃租约
+        快照收窄成本库子集当 H4/H5 的 memo 键。``=ANY(%s)`` 一个绑定参数装下整张 id 表,
+        故这里不需要分批。"""
+        values = list(dict.fromkeys(value for value in source_ids if value))
+        if not values:
+            return set()
+        return {
+            row["id"] for row in db.execute(
+                "SELECT id, notebook_id FROM sources WHERE id=ANY(%s)",
+                (values,),
+            ).fetchall()
+            if row["notebook_id"] == notebook_id
+        }
+
+    @staticmethod
     def sources_missing_chunks(db: Any, notebook_id: str) -> set:
         """H3(缺分块)候选集的 postgres 镜像——判据与 sqlite QueryStore.sources_missing_chunks
         逐字一致(有 elements、chunked_at IS NULL、排除 memory/knowhow 隐藏合成源);减活跃租约

@@ -182,7 +182,12 @@ class UnifiedKgStore:
         """Evidence blobs for a set of cluster seeds, each tagged with the ``seed``
         it came from (mirrors the SQLite projection). The concept-description
         stage batches many canonicals' seeds into one call and regroups in
-        memory, which needs the seed on every row."""
+        memory, which needs the seed on every row.
+
+        ⚠ Registered follow-up (a migration, deliberately not in this batch):
+        ``idx_kg_cluster_scratch_nb_run`` is ``(notebook_id, run_id)`` with no
+        ``seed`` key, so ``seed = ANY`` stays a residual filter over the run's
+        whole scratch table — see the SQLite twin for the full note."""
         values = list(seeds)
         if not values:
             return []

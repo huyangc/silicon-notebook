@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 import threading
 import time
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from app.repositories.postgres._store_utils import (
     execute_many,
@@ -745,6 +745,93 @@ class PostgresMaintenanceAdapter:
                 ).fetchall()
             ]
 
+    def missing_chunk_embedding_ids(
+        self, notebook_id: str, *, only_source_id: "str | None" = None
+    ) -> list[str]:
+        """Ids of chunks missing a vector, ascending — the interactive backfill's
+        **single** discovery query (mirrors the SQLite adapter; see its docstring
+        for the un-ANALYZEd plan that made per-page keyset discovery 43x more
+        expensive than one scan). Predicate identical to
+        ``missing_chunk_embedding_rows``; only the projection changes."""
+        params: list = [notebook_id]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND c.source_id=%s"
+            params.append(only_source_id)
+        with self._runtime.database.connect() as db:
+            return [
+                row["id"]
+                for row in db.execute(
+                    "SELECT c.id FROM chunks c WHERE c.notebook_id=%s "
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
+                    "WHERE e.chunk_id=c.id)" + clause
+                    + " ORDER BY c.id COLLATE \"C\"",
+                    tuple(params),
+                ).fetchall()
+            ]
+
+    def missing_element_embedding_ids(
+        self, notebook_id: str, *, only_source_id: "str | None" = None
+    ) -> list[str]:
+        """Ids of eligible elements missing a vector, ascending. Predicate identical
+        to ``missing_element_embedding_rows`` (notebook, memory/knowhow exclusion,
+        ``btrim`` non-empty, NOT EXISTS, optional source); only the projection
+        changes. See ``missing_chunk_embedding_ids``."""
+        params: list = [notebook_id, PY_WHITESPACE]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND e.source_id=%s"
+            params.append(only_source_id)
+        with self._runtime.database.connect() as db:
+            return [
+                row["id"]
+                for row in db.execute(
+                    "SELECT e.id FROM source_elements e "
+                    "JOIN sources s ON s.id=e.source_id "
+                    "WHERE s.notebook_id=%s "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND btrim(e.text, %s) != '' "
+                    "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
+                    "WHERE v.element_id=e.id)" + clause
+                    + " ORDER BY e.id COLLATE \"C\"",
+                    tuple(params),
+                ).fetchall()
+            ]
+
+    def chunk_texts_by_ids(self, ids: "Sequence[str]") -> list[dict]:
+        """``{"id","source_id","text"}`` by primary key — pure hydration, the
+        predicate is NOT re-evaluated (the ids come from
+        ``missing_chunk_embedding_ids`` inside the same source lock). Deliberately
+        carries no notebook/source clause so the plan stays a primary-key lookup;
+        ``=ANY(%s)`` takes the whole page in one bound parameter. Row order is
+        unspecified — the caller re-orders by the discovery order."""
+        values = list(ids)
+        if not values:
+            return []
+        with self._runtime.database.connect() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT id, source_id, text FROM chunks WHERE id=ANY(%s)",
+                    (values,),
+                ).fetchall()
+            ]
+
+    def element_texts_by_ids(self, ids: "Sequence[str]") -> list[dict]:
+        """``{"id","source_id","text"}`` by primary key; see ``chunk_texts_by_ids``
+        (same contract, same primary-key lookup)."""
+        values = list(ids)
+        if not values:
+            return []
+        with self._runtime.database.connect() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT id, source_id, text FROM source_elements WHERE id=ANY(%s)",
+                    (values,),
+                ).fetchall()
+            ]
+
     def missing_chunk_embedding_page(
         self,
         notebook_id: str,
@@ -753,14 +840,14 @@ class PostgresMaintenanceAdapter:
         limit: int = 500,
         only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """Return one stable keyset page without retaining a model-call lock.
+        """Return one stable keyset page without retaining a model-call lock. The
+        eligibility predicate is unchanged from the rows version; only the keyset
+        window is added. Drained page by page by the offline CLI.
 
-        ``only_source_id`` scopes the page to one source — the interactive
-        backfill job holds that source's chunk lock and reads INSIDE the lock
-        (see ``missing_chunk_embedding_rows``), now page by page so a large
-        source no longer materialises every chunk text at once. The eligibility
-        predicate is unchanged; only the keyset window and the scope clause are
-        added (mirrors the SQLite adapter)."""
+        ⚠ ``only_source_id`` has **no production caller** — the interactive
+        backfill moved to ``missing_chunk_embedding_ids`` + ``chunk_texts_by_ids``
+        (one discovery scan instead of one per page). Kept as the differential
+        reference the equivalence tests drive; do not wire it back."""
         if limit <= 0:
             raise ValueError("limit must be positive")
         params: list = [notebook_id, after_id]
@@ -815,11 +902,9 @@ class PostgresMaintenanceAdapter:
         limit: int = 500,
         only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """Return one bounded page of eligible, missing element vectors.
-
-        ``only_source_id``: see ``missing_chunk_embedding_page`` — the interactive
-        backfill job pages inside the source's chunk lock instead of pulling the
-        whole source's element texts into memory."""
+        """Return one bounded page of eligible, missing element vectors; drained by
+        the offline CLI. ``only_source_id`` has no production caller — see
+        ``missing_chunk_embedding_page``."""
         if limit <= 0:
             raise ValueError("limit must be positive")
         params: list = [notebook_id, PY_WHITESPACE, after_id]

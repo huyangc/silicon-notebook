@@ -320,7 +320,12 @@ def test_concept_desc_evidence_is_fetched_in_one_batch(repo, monkeypatch):
                 )
 
 
-def test_desc_evidence_batches_preserve_order_and_honour_both_caps(monkeypatch):
+def _flat_totals(seeds_by_cid, per_cid=1):
+    """每个 canonical 的总成员数(第三条上限的输入)。默认 1,让前两条上限单独可测。"""
+    return {c: per_cid for c in seeds_by_cid}
+
+
+def test_desc_evidence_batches_preserve_order_and_honour_all_caps(monkeypatch):
     """切批必须**保序**(work 顺序 = 喂给 LLM 阶段的输入,要与逐条时代逐位一致),
     canonical 数与 seed 数两个上限都要生效,单个超大 canonical 独占一批。"""
     from app.services import knowledge_lifecycle as kl
@@ -331,19 +336,61 @@ def test_desc_evidence_batches_preserve_order_and_honour_both_caps(monkeypatch):
     # 每个 canonical 一个 seed:cid 上限(3)先到。
     cids = [f"c{i}" for i in range(7)]
     one_seed = {c: [f"{c}-s"] for c in cids}
-    batches = list(kl._desc_evidence_batches(cids, one_seed))
+    batches = list(kl._desc_evidence_batches(cids, one_seed, _flat_totals(one_seed)))
     assert batches == [["c0", "c1", "c2"], ["c3", "c4", "c5"], ["c6"]]
     assert [c for b in batches for c in b] == cids        # 保序、不丢不重
 
     # 每个 canonical 两个 seed:seed 上限(4)先到,每批只装得下 2 个 canonical。
     two_seeds = {c: [f"{c}-s1", f"{c}-s2"] for c in cids}
-    batches = list(kl._desc_evidence_batches(cids, two_seeds))
+    batches = list(kl._desc_evidence_batches(cids, two_seeds, _flat_totals(two_seeds)))
     assert batches == [["c0", "c1"], ["c2", "c3"], ["c4", "c5"], ["c6"]]
     assert [c for b in batches for c in b] == cids
 
     # 自身 seed 数就超上限的 canonical 独占一批(= 逐条时代对它的原样行为),
     # 且不会把它前后的 canonical 一起吞进来。
     fat = {"c0": ["a"], "c1": [f"x{i}" for i in range(9)], "c2": ["b"]}
-    assert list(kl._desc_evidence_batches(["c0", "c1", "c2"], fat)) == [
+    assert list(kl._desc_evidence_batches(["c0", "c1", "c2"], fat, _flat_totals(fat))) == [
         ["c0"], ["c1"], ["c2"],
     ]
+
+
+def test_desc_evidence_batches_cap_the_rows_the_batch_will_fetch(monkeypatch):
+    """⚠ 第三条上限(评审):前两条只数**参数**(往返数、绑定变量),数不出「一个 hub
+    canonical 有上千成员」。cluster_evidence_rows 每个成员返一行整份 evidence JSON,所以
+    「300 个 canonical / 900 个 seed」的一批照样能拉回几十万行——载荷必须自己有上限。
+
+    变异锚点:删掉 ``rows + r > _DESC_EVIDENCE_ROW_BATCH`` 这一支(或把
+    ``_DESC_EVIDENCE_ROW_BATCH`` 调到无穷大)→ 本条红。"""
+    from app.services import knowledge_lifecycle as kl
+
+    # 把前两条上限调到不会先触发,单独测第三条。
+    monkeypatch.setattr(kl, "_DESC_EVIDENCE_CID_BATCH", 1000)
+    monkeypatch.setattr(kl, "_DESC_EVIDENCE_SEED_BATCH", 100000)
+    monkeypatch.setattr(kl, "_DESC_EVIDENCE_ROW_BATCH", 100)
+
+    cids = [f"c{i}" for i in range(5)]
+    seeds = {c: [f"{c}-s"] for c in cids}         # 每个只有 1 个 seed → 前两条永不触发
+    totals = {c: 40 for c in cids}                # 但每个带 40 个成员 → 每批至多 2 个
+    batches = list(kl._desc_evidence_batches(cids, seeds, totals))
+    assert batches == [["c0", "c1"], ["c2", "c3"], ["c4"]]
+    assert [c for b in batches for c in b] == cids            # 保序、不丢不重
+    assert all(sum(totals[c] for c in b) <= 100 for b in batches)
+
+    # 单个 canonical 自己就超行上限时独占一批(= 逐条时代对它的原样行为),
+    # 且不会把前后的 canonical 一起吞进来。
+    hub_totals = {"c0": 10, "c1": 900, "c2": 10}
+    hub_seeds = {c: [f"{c}-s"] for c in hub_totals}
+    assert list(
+        kl._desc_evidence_batches(["c0", "c1", "c2"], hub_seeds, hub_totals)
+    ) == [["c0"], ["c1"], ["c2"]]
+
+
+def test_desc_evidence_batches_require_complete_lookup_tables():
+    """两张表都**直取**(不 ``.get`` 兜底):缺键说明上游算错了,应当响亮失败——兜底成 0 会
+    被当成「0 个 seed / 0 行」悄悄放大批容量。调用方下一行就是 ``seeds_by_cid[cid]``。"""
+    from app.services import knowledge_lifecycle as kl
+
+    with pytest.raises(KeyError):
+        list(kl._desc_evidence_batches(["c0"], {}, {"c0": 1}))
+    with pytest.raises(KeyError):
+        list(kl._desc_evidence_batches(["c0"], {"c0": ["s"]}, {}))

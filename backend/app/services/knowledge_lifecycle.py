@@ -232,26 +232,52 @@ _DESC_EVIDENCE_CID_BATCH = 300
 # 单个 canonical 自己的 seed 数就超过它时**独占一批**——即逐条时代对该 canonical 的
 # 原样行为,不构成回退。
 _DESC_EVIDENCE_SEED_BATCH = 900
+# 同一批**取回的证据行数**上限(评审:上面两条都只约束**参数个数**,管不住载荷)。
+# cluster_evidence_rows 每个 scratch 成员返一行、行里带整份 evidence JSON,所以一批的驻留
+# 由 Σ 成员数决定而不是 Σ seed 数:300 个 hub canonical 各带上千成员就是几十万行 evidence
+# JSON 同时在内存里(实测量级几百 MB)。20000 行按每行 ~1–2KB evidence 估约 20–40MB,与
+# 「一次只驻留一批」的承诺相称。取值只是内存预算,不影响产物。
+_DESC_EVIDENCE_ROW_BATCH = 20000
 
 
-def _desc_evidence_batches(cids: List[str], seeds_by_cid: Dict[str, List[str]]):
+def _desc_evidence_batches(
+    cids: List[str],
+    seeds_by_cid: Dict[str, List[str]],
+    total_by_cid: Dict[str, int],
+):
     """把有序的 canonical id 列表切成批,**保序**、不跨批重排。
 
-    双上限:每批至多 ``_DESC_EVIDENCE_CID_BATCH`` 个 canonical,且 seed 参数至多
-    ``_DESC_EVIDENCE_SEED_BATCH`` 个。保序是硬要求——下游 ``work`` 列表(喂给 LLM 阶段
-    的输入)必须与逐条时代逐位一致,故批按输入序切、批内按输入序遍历。"""
+    三条上限,任一触顶即切批:
+    - 每批至多 ``_DESC_EVIDENCE_CID_BATCH`` 个 canonical(往返数);
+    - seed 参数至多 ``_DESC_EVIDENCE_SEED_BATCH`` 个(**绑定变量**上限);
+    - 预计取回的证据行至多 ``_DESC_EVIDENCE_ROW_BATCH`` 行(**载荷**上限——前两条都只数
+      参数,数不出「一个 hub canonical 有上千成员」这件事)。行数用 ``total_by_cid``
+      (Σ members_count,正是 cluster_evidence_rows 会返的行数)估。
+
+    单个 canonical 自己就超过某条上限时**独占一批**——即逐条时代对它的原样行为,不构成
+    回退(三条上限的处理一致)。保序是硬要求:下游 ``work`` 列表(喂给 LLM 阶段的输入)
+    必须与逐条时代逐位一致,故批按输入序切、批内按输入序遍历。
+
+    前提(故两张表都**直取**、不用 ``.get`` 兜底):``seeds_by_cid`` 与 ``total_by_cid`` 由
+    同一个 ``seed_to_canonical`` 循环建起,键集合恒等;``cids`` 是它们键集合的子集。缺键
+    说明上游算错了,应当响亮失败——兜底成 0 会被当作「0 个 seed / 0 行」悄悄放大批容量,
+    而调用方下一行就是 ``seeds_by_cid[cid]``,兜底也只是把 KeyError 推迟三行。"""
     batch: List[str] = []
     seeds = 0
+    rows = 0
     for cid in cids:
-        n = len(seeds_by_cid.get(cid, ()))
+        n = len(seeds_by_cid[cid])
+        r = int(total_by_cid[cid])
         if batch and (
             len(batch) >= _DESC_EVIDENCE_CID_BATCH
             or seeds + n > _DESC_EVIDENCE_SEED_BATCH
+            or rows + r > _DESC_EVIDENCE_ROW_BATCH
         ):
             yield batch
-            batch, seeds = [], 0
+            batch, seeds, rows = [], 0, 0
         batch.append(cid)
         seeds += n
+        rows += r
     if batch:
         yield batch
 
@@ -3753,9 +3779,14 @@ class KnowledgeLifecycleService:
                 #     批内按序遍历,checkpoint / 跨 rebuild 复用的判定与写入顺序也因此
                 #     与逐条时代一字不差。LLM 调用本身一次没动。
                 #
-                # 内存仍有界:一次只驻留**一批**的证据行(≤300 canonical / ≤900 seed),
-                # 不是全库。
-                for cid_batch in _desc_evidence_batches(eligible, seeds_by_cid):
+                # 内存仍有界:一次只驻留**一批**的证据行,不是全库。三条上限里
+                # ≤300 canonical / ≤900 seed 管的是**参数个数**(往返数与绑定变量上限),
+                # 真正管住**载荷**的是第三条 ≤``_DESC_EVIDENCE_ROW_BATCH`` 行——
+                # cluster_evidence_rows 每个成员返一行整份 evidence JSON,300 个 hub
+                # canonical 各带上千成员照样能拉回几十万行。见 _desc_evidence_batches。
+                for cid_batch in _desc_evidence_batches(
+                    eligible, seeds_by_cid, total_by_cid
+                ):
                     seed_owner: Dict[str, str] = {}
                     batch_seeds: List[str] = []
                     for cid in cid_batch:

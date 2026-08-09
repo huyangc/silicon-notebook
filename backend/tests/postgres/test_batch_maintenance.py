@@ -552,6 +552,50 @@ def test_source_target_pages_use_c_keysets_and_preserve_retry_semantics(
     with pytest.raises(ValueError, match="positive"):
         maintenance.missing_chunk_embedding_page(notebook_id, limit=0)
 
+    # 单次发现 + 按 id hydrate(审计批4 评审修订):交互式 backfill 在源的分块锁内**只发现
+    # 一次**、正文再按页经主键取回。判据与无界 rows 版逐字一致,只把投影换成 id 并按 id 升序。
+    assert maintenance.missing_chunk_embedding_ids(notebook_id) == ["ck-src-B", "ck-src-a"]
+    assert maintenance.missing_element_embedding_ids(notebook_id) == ["el-src-B", "el-src-a"]
+    for only in ("src-a", "src-B", None):
+        assert set(
+            maintenance.missing_chunk_embedding_ids(notebook_id, only_source_id=only)
+        ) == {
+            row["id"]
+            for row in maintenance.missing_chunk_embedding_rows(
+                notebook_id, only_source_id=only
+            )
+        }
+        assert set(
+            maintenance.missing_element_embedding_ids(notebook_id, only_source_id=only)
+        ) == {
+            row["id"]
+            for row in maintenance.missing_element_embedding_rows(
+                notebook_id, only_source_id=only
+            )
+        }
+    assert maintenance.missing_element_embedding_ids(
+        notebook_id, only_source_id="src-nonexistent"
+    ) == []
+    assert maintenance.chunk_texts_by_ids([]) == []
+    assert maintenance.element_texts_by_ids([]) == []
+    hydrated = maintenance.chunk_texts_by_ids(["ck-src-a", "ck-nope"])
+    assert [row["id"] for row in hydrated] == ["ck-src-a"]
+    assert hydrated[0]["source_id"] == "src-a" and hydrated[0]["text"]
+    hydrated_el = maintenance.element_texts_by_ids(["el-src-a", "el-nope"])
+    assert [row["id"] for row in hydrated_el] == ["el-src-a"]
+    assert hydrated_el[0]["source_id"] == "src-a" and hydrated_el[0]["text"]
+
+    # 体检 H4/H5 memo 键用的租约收窄查询(postgres 镜像):只留属于本 notebook 的 id。
+    queries = postgres_repository._runtime.queries
+    with postgres_repository._runtime.database.connect() as db:
+        assert queries.notebook_source_ids_among(db, notebook_id, set()) == set()
+        assert queries.notebook_source_ids_among(
+            db, notebook_id, {"src-a", "src-z", "src-absent"}
+        ) == {"src-a", "src-z"}
+        assert queries.notebook_source_ids_among(
+            db, "nb-does-not-exist", {"src-a"}
+        ) == set()
+
     first = maintenance.kg_target_source_rows_page(
         notebook_id, limit=1, retry_partial=False
     )

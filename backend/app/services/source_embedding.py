@@ -144,7 +144,7 @@ class SourceEmbeddingService:
                 return []
             return [(el.id, vector) for el, vector in zip(els, vectors)]
 
-        # Page BEFORE mapping — the same fix the three sibling batch embedders
+        # Page BEFORE mapping — the same fix the four sibling batch embedders
         # already carry (embed_elements_batch / embed_objects_batch /
         # embed_chunks_batch / embed_relations_batch), and the reason is identical:
         # _map_embedding_batches materialises a WHOLE call's results
@@ -192,6 +192,14 @@ class SourceEmbeddingService:
             # within the same second, so the version key cannot see it. Evict in
             # a finally so a mid-run failure still drops the pages that did
             # commit. No-op when unwired (offline/test callers).
+            #
+            # ⚠ Only THREE of the four siblings evict (objects / chunks /
+            # relations) and embed_elements_batch deliberately does not — that
+            # one only ever ADDS rows that were missing, so COUNT(*) moves and
+            # the (COUNT, MAX(created_at)) version key invalidates by itself.
+            # embed_source is the re-embed path: the rows already exist, COUNT
+            # does not move, and within the same second neither does MAX — which
+            # is exactly why paging its write forced this eviction.
             self._evict_matrix(notebook_id, "element_embeddings")
         self.event_log.logger.info(
             "embedded %s/%s elements for source %s", written, len(pending), source_id
@@ -201,7 +209,9 @@ class SourceEmbeddingService:
         """按 element 补向量(只嵌给定的行,不整源重嵌),返回真正落库的行数。
 
         ``items``: ``[{"element_id": str, "source_id": str, "text": str}, ...]``
-        (缺向量的 element 由 maintenance.missing_element_embedding_rows 查出)。
+        (缺向量的 element 由 maintenance 查出:交互式体检 backfill 走
+        ``missing_element_embedding_ids`` + ``element_texts_by_ids``,离线 CLI 走
+        ``missing_element_embedding_page``;判据三处逐字一致)。
         element_embeddings 主键是 element_id、写入走 INSERT OR REPLACE 纯 upsert,
         所以只补缺失是安全的——不会碰到同源已有的向量。
 

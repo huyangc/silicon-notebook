@@ -701,6 +701,117 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             ]
 
+    # 单次发现 + 按 id hydrate 的一批参数上限(SQLite 老构建 SQLITE_MAX_VARIABLE_NUMBER=999)。
+    _EMBEDDING_ID_IN_CHUNK = 900
+
+    def missing_chunk_embedding_ids(
+        self, notebook_id: str, *, only_source_id: "str | None" = None
+    ) -> list[str]:
+        """缺 chunk 向量的 **id 列表**(只投影 id,按 id 升序)——交互式 backfill 的**单次**
+        发现查询(审计批4修订)。
+
+        为什么不是 keyset 分页:本仓库**从不**对生产库跑 ``ANALYZE``,而
+        ``missing_chunk_embedding_page`` 的 ``c.id > ?`` 在无统计信息时会被 planner 选成
+        ``sqlite_autoindex_chunks_1 (id>?)`` 的**整表主键区间扫**、把 ``source_id`` 降级成残余
+        过滤(EXPLAIN 实测)——于是「一个 21k 行的大源」= 43 页 × 43 次整表扫。改成一次发现
+        之后,扫描回到**一次**(与切页之前逐字同一条判据、同一个代价),正文驻留仍由调用方
+        按页 hydrate 保持有界:id 是几十字节,21k 个 id 的内存可忽略。
+
+        判据与 ``missing_chunk_embedding_rows`` **逐字一致**(notebook + NOT EXISTS
+        chunk_embeddings + 可选 source),只把投影换成 id 并加 ``ORDER BY``:
+        - ``ORDER BY c.id`` 让调用方的 hydrate 页边界确定、可复现(与分页版同序);
+        - 已登记的代价:无 ``ANALYZE`` 时本条走 ``idx_chunks_nb (notebook_id=?)``、即每个源
+          一次 notebook 级索引扫(ANALYZE 过的库走 ``idx_chunks_source`` 逐源 seek)。这与
+          切页**之前**的 rows 版是同一个计划,不是本次引入的代价。"""
+        params: list = [notebook_id]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND c.source_id=?"
+            params.append(only_source_id)
+        with self._runtime.database.connect() as db:
+            return [
+                r["id"]
+                for r in db.execute(
+                    "SELECT c.id FROM chunks c WHERE c.notebook_id=? "
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
+                    "WHERE e.chunk_id=c.id)" + clause + " ORDER BY c.id",
+                    tuple(params),
+                ).fetchall()
+            ]
+
+    def missing_element_embedding_ids(
+        self, notebook_id: str, *, only_source_id: "str | None" = None
+    ) -> list[str]:
+        """缺 element 向量(且文本非空白)的 **id 列表**,按 id 升序——element 侧的单次发现
+        查询。判据与 ``missing_element_embedding_rows`` 逐字一致(notebook + 排除
+        memory/knowhow 合成源 + ``TRIM(text, PY_WHITESPACE) != ''`` + NOT EXISTS + 可选
+        source),只把投影换成 id 并加 ``ORDER BY``。理由见
+        ``missing_chunk_embedding_ids``。"""
+        params: list = [notebook_id, PY_WHITESPACE]
+        clause = ""
+        if only_source_id is not None:
+            clause = " AND e.source_id=?"
+            params.append(only_source_id)
+        with self._runtime.database.connect() as db:
+            return [
+                r["id"]
+                for r in db.execute(
+                    "SELECT e.id FROM source_elements e "
+                    "JOIN sources s ON s.id=e.source_id "
+                    "WHERE s.notebook_id=? "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND TRIM(e.text, ?) != '' "
+                    "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
+                    "WHERE v.element_id=e.id)" + clause + " ORDER BY e.id",
+                    tuple(params),
+                ).fetchall()
+            ]
+
+    def chunk_texts_by_ids(self, ids: Sequence[str]) -> list[dict]:
+        """按 id 取回 chunk 的 ``{"id","source_id","text"}``——**纯主键 hydrate,不重判判据**。
+
+        id 由同一把源分块锁内的 ``missing_chunk_embedding_ids`` 产出(notebook / source /
+        NOT EXISTS 都已判过),这里只把正文取回来。**刻意不带 notebook/source 谓词**:
+        EXPLAIN 实测,``notebook_id=? AND id IN (...)`` 在无 ``ANALYZE`` 的库上会被 planner
+        选成 ``idx_chunks_nb`` 的整 notebook 扫,而裸 ``id IN (...)`` 在有无统计信息下都是
+        ``sqlite_autoindex_chunks_1 (id=?)`` 的主键 seek。行序不做保证(``IN`` 无序),
+        调用方按发现序自行重排。"""
+        values = list(ids)
+        if not values:
+            return []
+        out: list[dict] = []
+        with self._runtime.database.connect() as db:
+            for offset in range(0, len(values), self._EMBEDDING_ID_IN_CHUNK):
+                batch = values[offset:offset + self._EMBEDDING_ID_IN_CHUNK]
+                marks = ",".join("?" for _ in batch)
+                out.extend(
+                    dict(r) for r in db.execute(
+                        f"SELECT id, source_id, text FROM chunks WHERE id IN ({marks})",
+                        tuple(batch),
+                    ).fetchall()
+                )
+        return out
+
+    def element_texts_by_ids(self, ids: Sequence[str]) -> list[dict]:
+        """按 id 取回 element 的 ``{"id","source_id","text"}``——纯主键 hydrate,判据不重判;
+        见 ``chunk_texts_by_ids``(同款理由、同款主键 seek)。"""
+        values = list(ids)
+        if not values:
+            return []
+        out: list[dict] = []
+        with self._runtime.database.connect() as db:
+            for offset in range(0, len(values), self._EMBEDDING_ID_IN_CHUNK):
+                batch = values[offset:offset + self._EMBEDDING_ID_IN_CHUNK]
+                marks = ",".join("?" for _ in batch)
+                out.extend(
+                    dict(r) for r in db.execute(
+                        f"SELECT id, source_id, text FROM source_elements "
+                        f"WHERE id IN ({marks})",
+                        tuple(batch),
+                    ).fetchall()
+                )
+        return out
+
     def missing_chunk_embedding_page(
         self,
         notebook_id: str,
@@ -709,14 +820,18 @@ class SQLiteMaintenanceAdapter:
         limit: int = 500,
         only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """One stable keyset page for bounded vector repair.
+        """One stable keyset page for bounded vector repair. Judged by exactly the
+        same predicate as the unbounded rows version; only the keyset window and
+        the ORDER BY are added. The offline CLI (``batch_ingest``) drains a whole
+        notebook through this, one page at a time.
 
-        ``only_source_id`` scopes the page to one source — the interactive
-        backfill job holds that source's chunk lock and reads INSIDE the lock
-        (see ``missing_chunk_embedding_rows``), and it now reads page by page so
-        a 21k-element source no longer materialises every text at once. Judged
-        by exactly the same predicate as the unbounded rows version; only the
-        keyset window and the ORDER BY are added."""
+        ⚠ ``only_source_id`` has **no production caller**: the interactive
+        backfill used it for one batch and moved to
+        ``missing_chunk_embedding_ids`` + ``chunk_texts_by_ids`` because
+        ``c.id > ?`` costs a whole-table primary-key range scan **per page** on
+        an un-ANALYZEd database (see that method). It stays as the differential
+        reference the equivalence test drives; do not wire it back into a
+        per-source loop."""
         if limit <= 0:
             raise ValueError("limit must be positive")
         params: list = [notebook_id, after_id]
@@ -745,11 +860,10 @@ class SQLiteMaintenanceAdapter:
         limit: int = 500,
         only_source_id: "str | None" = None,
     ) -> list[dict]:
-        """One stable keyset page for bounded element-vector repair.
-
-        ``only_source_id``: see ``missing_chunk_embedding_page`` — the interactive
-        backfill job pages inside the source's chunk lock instead of pulling the
-        whole source's element texts into memory."""
+        """One stable keyset page for bounded element-vector repair; drained by the
+        offline CLI. ``only_source_id`` has no production caller — see
+        ``missing_chunk_embedding_page`` for why the interactive backfill moved to
+        single-scan discovery plus primary-key hydration."""
         if limit <= 0:
             raise ValueError("limit must be positive")
         params: list = [notebook_id, after_id, PY_WHITESPACE]
