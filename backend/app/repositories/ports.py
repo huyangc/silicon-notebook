@@ -115,7 +115,7 @@ class KgBuildAlreadyRunning(RuntimeError):
 class KgMaintenanceAlreadyRunning(RuntimeError):
     """One notebook already has an in-flight KG maintenance pass.
 
-    ONE slot covers both zero-model maintenance passes — isolated-node relink and
+    ONE slot covers both no-LLM-precondition maintenance passes — isolated-node relink and
     the unified concept rebuild — because they are not independent: a rebuild
     rewrites ``concept_clusters`` and the community partition wholesale while
     relink appends edges to the very graph that clustering reads. Letting them
@@ -125,7 +125,7 @@ class KgMaintenanceAlreadyRunning(RuntimeError):
     two status views each report only their own kind and answer ``idle``
     otherwise, so neither poll can be parked on the other's job.
 
-    In-process rather than durable on purpose: both passes are zero-model
+    In-process rather than durable on purpose: neither pass has an LLM precondition
     deterministic work, so they do not belong in ``kg_build_jobs`` (whose
     user-facing consumers would narrate them as a source-by-source analysis) and
     must not inherit that table's LLM-configured precondition.
