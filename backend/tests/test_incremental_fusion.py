@@ -19,11 +19,10 @@ def repo(tmp_path, monkeypatch):
 def test_place_new_concepts_name_seed(repo):
     from app.services.kg_merge import place_new_concepts, _norm
     cid_existing = "K-" + _norm("Mixture-of-Experts (MoE)")
-    existing_cmap = {"obj-old": cid_existing}
     existing_names = {cid_existing: "Mixture-of-Experts"}
     new = [{"object_id": "obj-new", "name": "Mixture-of-Experts (MoE)"},
            {"object_id": "obj-x", "name": "Quantization"}]
-    rows = place_new_concepts(new, existing_cmap, existing_names,
+    rows = place_new_concepts(new, existing_names,
                               seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
     by_oid = {r["member_object_id"]: r for r in rows}
     assert by_oid["obj-new"]["canonical_id"] == cid_existing          # 命中已有簇
@@ -590,9 +589,12 @@ def test_tier2_ann_early_stop_below_threshold_bounds_knn_calls(repo, monkeypatch
     real_ann = repo._open_scale_ann(idx, "kg")
     assert real_ann is not None
     proxy = _CountingAnn(real_ann)
-    cmap = repo.cluster_map(nb.id)
     new_objs = [{"object_id": "ko-new", "name": "MoE Gating"}]
-    cands = repo._tier2_bridge_candidates_ann(nb.id, idx, proxy, new_objs, cmap)
+    # PR-C:第 5 个参数是调用方在 append **之前**冻结的「本批新对象各自的
+    # canonical」(缺失记 "")。这里直接调方法、没有走 append,所以本源新对象本就
+    # 没有簇行,冻结值就是空串。
+    cands = repo._tier2_bridge_candidates_ann(
+        nb.id, idx, proxy, new_objs, {"ko-new": ""})
 
     # n_labels = 33 > initial k = 20, tail of the first window is a far claim
     # (sim ~0.1 < lo) -> early stop after exactly ONE knn round, no doubling.
@@ -627,9 +629,9 @@ def test_tier2_ann_symbol_only_new_concept_never_bare_K(repo):
     assert idx is not None and idx.ann_labels
     ann = repo._open_scale_ann(idx, "kg")
     assert ann is not None
-    cmap = repo.cluster_map(nb.id)
     new_objs = [{"object_id": "ko-sym", "name": "→"}]
-    cands = repo._tier2_bridge_candidates_ann(nb.id, idx, ann, new_objs, cmap)
+    cands = repo._tier2_bridge_candidates_ann(
+        nb.id, idx, ann, new_objs, {"ko-sym": ""})
 
     # 向量桥接照常发生(两者很近)……
     assert cands, "expected a bridge candidate — vectors are near"
@@ -715,18 +717,28 @@ def test_incremental_merge_pair_reads_delegate_on_caller_connections(repo, monke
     monkeypatch.setattr(runtime.database, "connect", traced_connect)
     calls = []
     store = runtime.governance
-    original = store.merge_candidate_pairs
+    original = store.merge_candidate_pairs_for_canonicals
 
-    def wrapped(db, notebook_id, statuses):
+    def wrapped(db, notebook_id, statuses, canonical_ids):
         assert isinstance(db, sqlite3.Connection) and id(db) in opened
-        calls.append((notebook_id, tuple(statuses), id(db)))
-        return original(db, notebook_id, statuses)
+        calls.append((notebook_id, tuple(statuses), id(db), list(canonical_ids)))
+        return original(db, notebook_id, statuses, canonical_ids)
 
-    monkeypatch.setattr(store, "merge_candidate_pairs", wrapped)
+    monkeypatch.setattr(store, "merge_candidate_pairs_for_canonicals", wrapped)
+
+    def reject_full_scan(*_args, **_kwargs):
+        raise AssertionError(
+            "fusion must read merge candidates bounded by this source's canonical ids"
+        )
+
+    monkeypatch.setattr(store, "merge_candidate_pairs", reject_full_scan)
 
     getattr(repo, "incremental_fuse_source")(nb.id, "src-B")
 
-    assert [statuses for _nb, statuses, _db in calls] == [
+    assert [statuses for _nb, statuses, _db, _ids in calls] == [
         ("pending",), ("confirmed", "rejected", "deferred"),
     ]
-    assert all(notebook_id == nb.id for notebook_id, _statuses, _db in calls)
+    assert all(notebook_id == nb.id for notebook_id, _statuses, _db, _ids in calls)
+    # PR-C:两次读都以本源新概念的桥接 canonical id 为界,不是整本库的候选对。
+    want_ids = ["K-" + _norm("MoE Gating")]
+    assert [ids for _nb, _statuses, _db, ids in calls] == [want_ids, want_ids]

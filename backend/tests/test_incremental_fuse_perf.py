@@ -323,10 +323,29 @@ def test_cluster_map_invalidates_on_same_second_rename_via_explicit_invalidation
 
 # ── incremental_fuse_source: single shared load per fuse call ──────────────
 
-def test_incremental_fuse_source_loads_cluster_map_once(repo, monkeypatch):
-    """incremental_fuse_source has two call sites for cluster_map (Tier1 concept
-    pass + non-concept claim/formula/procedure pass). The whole fuse must trigger
-    exactly one loader run (cache hit for the second site), not two full scans."""
+def test_incremental_fuse_source_loads_cluster_map_once_in_the_bruteforce_branch(
+    repo, monkeypatch
+):
+    """PR-C: this fixture has no scale index, so the fuse takes the no-ANN
+    brute-force bridge branch — the one place that DELIBERATELY still does one
+    whole-notebook range read of the cluster map.
+
+    Why that exemption is the right call (measured, not assumed): the branch is
+    already gated by `kg_incremental_tier2_max_entities` (50k default), and at
+    that ceiling the "bounded" form is 56 batched IN statements = 56 scans of the
+    notebook's index segment, roughly 20x the cost of the single range read. The
+    same branch also reads every embedding row in the notebook, so the range read
+    adds no order of magnitude. Numbers and the full argument are registered at
+    the ex_cmap site in knowledge_lifecycle.incremental_fuse_source.
+
+    What DID get bounded is the ANN branch (production's shape once a library has
+    an index), plus place_new_concepts losing its cluster_map argument entirely.
+    The zero-full-scan guard for that path lives in
+    tests/test_incremental_fuse_bounded.py::test_ann_fusion_issues_no_unbounded_cluster_reads.
+
+    Exactly ONE is also load-bearing in the other direction: this used to be one
+    shared `cluster_map()` load for the whole call, and a regression that re-adds
+    a second consumer (or reverts the ANN branch) shows up here as 2+."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     now = _now()
     with repo._write() as db:
@@ -359,7 +378,7 @@ def test_incremental_fuse_source_loads_cluster_map_once(repo, monkeypatch):
                     "src-B", now, now))
     calls = _loader_spy(repo, monkeypatch)
     repo.incremental_fuse_source(nb.id, "src-B")
-    assert calls["n"] == 1   # single shared load across the whole fuse call
+    assert calls["n"] == 1   # exactly the brute-force branch's single range read
 
 
 def test_incremental_fuse_source_result_matches_oracle(repo):

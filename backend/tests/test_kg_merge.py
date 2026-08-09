@@ -483,7 +483,7 @@ def test_place_new_concepts_empty_seed_unique():
     from app.services.kg_merge import place_new_concepts, _norm
     rows = place_new_concepts(
         [{"object_id": "n1", "name": "→"}, {"object_id": "n2", "name": "☆"}],
-        {}, {}, seed_fn=lambda o: _norm(o.get("name", "")))
+        {}, seed_fn=lambda o: _norm(o.get("name", "")))
     cids = {r["canonical_id"] for r in rows}
     assert len(cids) == 2 and "K-" not in cids
 

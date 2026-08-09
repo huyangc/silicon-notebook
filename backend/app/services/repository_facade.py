@@ -2061,12 +2061,18 @@ class RepositoryFacade:
             notebook_id, source_id
         )
 
-    def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann, new_objs: list,
-                                     cluster_map_: Dict[str, str]) -> list:
+    def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann,
+                                     new_objs: list,
+                                     frozen_canonical: Dict[str, str]) -> list:
         """ANN-backed Tier2 bridge candidate detection — KnowledgeLifecycleService
-        owns the body (Task 15); frozen-signature delegate."""
+        owns the body (Task 15); frozen-signature delegate.
+
+        PR-C:整表 ``cluster_map_`` 形参换成了 ``frozen_canonical`` —— ANN 命中的
+        canonical 折叠改走有界 ``cluster_fold_rows``,但**本批新对象**那几个 id 的
+        取值必须由调用方在 ``append_clusters`` 之前冻结好交进来(合同与理由见服务端
+        方法的 docstring)。"""
         return self._runtime.knowledge_lifecycle._tier2_bridge_candidates_ann(
-            notebook_id, idx, ann, new_objs, cluster_map_
+            notebook_id, idx, ann, new_objs, frozen_canonical
         )
     def cluster_map(self, notebook_id: str) -> Dict[str, str]:
         """Cached {member_object_id: canonical_id} — RetrievalCandidateService owns
