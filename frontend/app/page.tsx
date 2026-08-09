@@ -4660,33 +4660,54 @@ export default function Home() {
     if (!currentNotebookId || relinkingKg || kgRefreshBusy) return;
     const nb = currentNotebookId;
     setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
-    // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
-    // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
-    // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
-    // codex R12:键按 kind 分开(`${nb}:relink`)——同库的 rebuild 提交若与这次窗口重叠,
-    // 不能共用一个键互相冲掉对方的保护。
-    submittingMaintenanceRef.current.add(`${nb}:relink`);
-    try {
-      const started = await relinkKg(nb);
-      // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
-      // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
-      expectedMaintenanceJobRef.current.set(`${nb}:relink`, started.job_id);
-      setToast("已开始补上关联；完成后会自动更新");
-    } catch (err) {
-      // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
-      // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「补上关联」自己(同种),
-      // 提前清掉的位没有任何东西会把它补回来(adoptRunningMaintenance 当时只会"认领"，不
-      // 会撤销)。改成先不动、把决定权整个交给 adoptRunningMaintenance:它按服务端真相
-      // 双向归位,同种保留、异种释放、探测失败原样不动,调用方这里不需要再自己判断一次。
-      if (httpErrorStatus(err) === 409) {
-        await adoptRunningMaintenance(nb);
+    // codex R16:409 之后领养判 idle 只证明"服务端此刻确认没有任务在跑",不证明"用户这次
+    // 点击已经生效"——占槽任务完全可能恰好在领养的两次探测 await 期间收尾:槽已空,但这次
+    // 点击对应的 POST 从没有真正发出去过。旧写法在 idle 时直接 return,UI 也不会再刷新,
+    // 等于用户点了一次却什么都没发生。改成有界重试一次:槽刚空出来,立刻重发这次本该发出
+    // 的 POST,大概率成功;仍然 409+idle 才是真正反常的双重竞态(两次独立探测窗口内又冒出
+    // 第三个任务),这时才兜底提示用户、如实释放自己的位。
+    for (const attempt of [0, 1]) {
+      // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
+      // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
+      // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
+      // codex R12:键按 kind 分开(`${nb}:relink`)——同库的 rebuild 提交若与这次窗口重叠,
+      // 不能共用一个键互相冲掉对方的保护。codex R16:重试的第二次尝试同样要重新标记——
+      // 每次尝试各自是一段独立的提交期,不能只标记第一次就假设第二次也被覆盖。
+      submittingMaintenanceRef.current.add(`${nb}:relink`);
+      try {
+        const started = await relinkKg(nb);
+        // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
+        // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
+        expectedMaintenanceJobRef.current.set(`${nb}:relink`, started.job_id);
+        setToast("已开始补上关联；完成后会自动更新");
         return;
+      } catch (err) {
+        // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
+        // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「补上关联」自己(同种),
+        // 提前清掉的位没有任何东西会把它补回来(adoptRunningMaintenance 当时只会"认领"，不
+        // 会撤销)。改成先不动、把决定权交给 adoptRunningMaintenance:它按服务端真相双向
+        // 归位,同种保留、异种释放、探测失败原样不动。
+        if (httpErrorStatus(err) === 409) {
+          const verdict = await adoptRunningMaintenance(nb);
+          // codex R16:adopted(领养到了确实在跑的任务,同种或异种)与 unknown(探测本身
+          // 失败,不碰任何忙碌位)都沿用既有语义直接收工,调用方不需要(也无法在不重复
+          // 探测的前提下)自己再判断一次——只有 idle(占槽任务在探测期间恰好收尾,服务端
+          // 此刻真的没有任何任务在跑)才需要这里新增的重试判断。
+          if (verdict !== "idle") return;
+          if (attempt === 0) continue;
+          // 第二次仍是 409+idle:两次独立探测窗口内又冒出第三个任务,是真正反常的竞态,
+          // 不再重试——如实释放自己的位并提示用户手动再点一次。
+          setToast("当前有其他整理任务刚结束，请再点一次");
+          setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
+          return;
+        }
+        reportError(err);
+        // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
+        setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
+        return;
+      } finally {
+        submittingMaintenanceRef.current.delete(`${nb}:relink`);
       }
-      reportError(err);
-      // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
-      setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
-    } finally {
-      submittingMaintenanceRef.current.delete(`${nb}:relink`);
     }
   }
 
@@ -4822,37 +4843,59 @@ export default function Home() {
     if (!currentNotebookId || kgRefreshBusy || relinkingKg) return;
     const nb = currentNotebookId;
     setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
-    // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
-    // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
-    // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
-    // codex R12:键按 kind 分开(`${nb}:rebuild`)——同库的 relink 提交若与这次窗口重叠,
-    // 不能共用一个键互相冲掉对方的保护。
-    submittingMaintenanceRef.current.add(`${nb}:rebuild`);
-    try {
-      const started = await rebuildUnifiedKg(nb);
-      // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
-      // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
-      expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
-      // codex R7:手动重建真的起来了,就消费掉可能残留的待补发标记——否则这次
-      // 重建的终态会被当成「还有决定没兑现」,先跳过刷新再白发一次可能数小时的
-      // 重建。手动这一次已经覆盖了那条决定(重建读取的是此刻的全部已决定对)。
-      setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-      setToast("已开始重新合并；完成后会自动更新");
-    } catch (err) {
-      // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
-      // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「重新合并」自己(同种),
-      // 提前清掉的位没有任何东西会把它补回来。改成先不动、把决定权整个交给
-      // adoptRunningMaintenance:它按服务端真相双向归位,同种保留、异种释放、探测失败
-      // 原样不动,调用方这里不需要再自己判断一次。
-      if (httpErrorStatus(err) === 409) {
-        await adoptRunningMaintenance(nb);
+    // codex R16:见 relinkFromKgView 同名注释——409 之后领养判 idle 只证明"服务端此刻
+    // 确认没有任务在跑",不证明"用户这次点击已经生效"——占槽任务完全可能恰好在领养的两次
+    // 探测 await 期间收尾:槽已空,但这次点击对应的 POST 从没有真正发出去过。旧写法在
+    // idle 时直接 return,UI 也不会再刷新,等于用户点了一次却什么都没发生。改成有界重试
+    // 一次:槽刚空出来,立刻重发这次本该发出的 POST,大概率成功;仍然 409+idle 才是真正
+    // 反常的双重竞态(两次独立探测窗口内又冒出第三个任务),这时才兜底提示用户、如实释放
+    // 自己的位。
+    for (const attempt of [0, 1]) {
+      // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
+      // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
+      // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
+      // codex R12:键按 kind 分开(`${nb}:rebuild`)——同库的 relink 提交若与这次窗口重叠,
+      // 不能共用一个键互相冲掉对方的保护。codex R16:重试的第二次尝试同样要重新标记——
+      // 每次尝试各自是一段独立的提交期,不能只标记第一次就假设第二次也被覆盖。
+      submittingMaintenanceRef.current.add(`${nb}:rebuild`);
+      try {
+        const started = await rebuildUnifiedKg(nb);
+        // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
+        // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
+        expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
+        // codex R7:手动重建真的起来了,就消费掉可能残留的待补发标记——否则这次
+        // 重建的终态会被当成「还有决定没兑现」,先跳过刷新再白发一次可能数小时的
+        // 重建。手动这一次已经覆盖了那条决定(重建读取的是此刻的全部已决定对)。
+        setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+        setToast("已开始重新合并；完成后会自动更新");
         return;
+      } catch (err) {
+        // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
+        // 位——旧代码先清位、后领养的窗口里,若服务端确认的其实还是「重新合并」自己(同种),
+        // 提前清掉的位没有任何东西会把它补回来。改成先不动、把决定权交给
+        // adoptRunningMaintenance:它按服务端真相双向归位,同种保留、异种释放、探测失败
+        // 原样不动。
+        if (httpErrorStatus(err) === 409) {
+          const verdict = await adoptRunningMaintenance(nb);
+          // codex R16:adopted(领养到了确实在跑的任务,同种或异种)与 unknown(探测本身
+          // 失败,不碰任何忙碌位)都沿用既有语义直接收工,调用方不需要(也无法在不重复
+          // 探测的前提下)自己再判断一次——只有 idle(占槽任务在探测期间恰好收尾,服务端
+          // 此刻真的没有任何任务在跑)才需要这里新增的重试判断。
+          if (verdict !== "idle") return;
+          if (attempt === 0) continue;
+          // 第二次仍是 409+idle:两次独立探测窗口内又冒出第三个任务,是真正反常的竞态,
+          // 不再重试——如实释放自己的位并提示用户手动再点一次。
+          setToast("当前有其他整理任务刚结束，请再点一次");
+          setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+          return;
+        }
+        reportError(err);
+        // 只清自己那一格：这期间用户可能已经切库并在别的库点了重新合并。
+        setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
+        return;
+      } finally {
+        submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
       }
-      reportError(err);
-      // 只清自己那一格：这期间用户可能已经切库并在别的库点了重新合并。
-      setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
-    } finally {
-      submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
     }
   }
 

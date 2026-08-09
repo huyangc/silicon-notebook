@@ -401,7 +401,7 @@ test("codex R5 P2(A):pollTick 捕获代际,迟到的上一代际响应必须被�
   );
 });
 
-test("codex R9:重新合并 POST 撞 409 不再提前 release,决定权整个交给 adoptRunningMaintenance", async () => {
+test("codex R9/R16:重新合并 POST 撞 409 必须 await 领养、adopted/unknown 不提前 release", async () => {
   // codex R8 只钉住了「409 必须领养」;R9 发现旧写法在领养前先 release 自己的忙碌位
   // (`setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb)); void
   // adoptRunningMaintenance(nb);`)——领养探测本身也可能瞬时失败,一旦失败就返回 false,
@@ -410,27 +410,114 @@ test("codex R9:重新合并 POST 撞 409 不再提前 release,决定权整个交
   // 实现只会"认领",不会"撤销")。R9 把决定权整个交给 adoptRunningMaintenance(它现在
   // 按服务端真相双向归位),409 分支因此不该再自己动忙碌位,且必须 await 而不是 void
   // fire-and-forget(等它把归位做完,提交期标记才能在 finally 里正确清理)。
+  //
+  // codex R16 发现"决定权整个交给 adoptRunningMaintenance"这条假设在 idle 这一种结果上
+  // 不成立:idle 只证明服务端此刻确认没有任务在跑,不证明用户这次点击已经生效——占槽
+  // 任务完全可能恰好在领养的两次探测 await 期间收尾。R16 把 409 分支拆成两半:
+  // adopted/unknown 仍然沿用 R9 的旧语义(领养返回后立即 return,不碰忙碌位);idle 则由
+  // 调用方接管有界重试(见下一条测试)。这条测试因此收窄断言范围:只钉住"领养返回、判定
+  // 不是 idle 之前不能碰忙碌位"这一半,idle 分支自己的重试/release 语义交给下一条测试。
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
   const fnAt = source.indexOf("async function refreshUnifiedKg()");
   assert.ok(fnAt > 0, "找不到 refreshUnifiedKg");
   const four09At = source.indexOf("if (httpErrorStatus(err) === 409) {", fnAt);
   assert.ok(four09At > 0, "找不到 409 分支(被改名或删除?守卫失效)");
-  const four09EndAt = source.indexOf("\n      }", four09At);
+  // codex R16:409 分支现在嵌在一层 for 循环里,比 R9 时代多一级缩进(8 空格而非 6)。
+  const four09EndAt = source.indexOf("\n        }", four09At);
   assert.ok(four09EndAt > four09At, "找不到 409 分支的收尾");
   const branch = source.slice(four09At, four09EndAt);
 
   assert.ok(branch.includes("httpErrorStatus(err) === 409"), "409 必须被单独识别");
+  const adoptAt = branch.indexOf("const verdict = await adoptRunningMaintenance(nb);");
   assert.ok(
-    branch.includes("await adoptRunningMaintenance(nb);"),
-    "409 分支必须 await 领养服务端正在跑的维护任务(另一标签页发起的也要接管轮询)——"
-    + "不能是 void fire-and-forget,否则提交期标记会在归位完成前就被 finally 清理",
+    adoptAt >= 0,
+    "409 分支必须 await 领养服务端正在跑的维护任务(另一标签页发起的也要接管轮询)并接住"
+    + "返回的 verdict——不能是 void fire-and-forget 或丢弃返回值(codex R16 的 idle 重试"
+    + "判断需要它)",
+  );
+
+  const notIdleReturnAt = branch.indexOf('if (verdict !== "idle") return;', adoptAt);
+  assert.ok(
+    notIdleReturnAt > adoptAt,
+    "领养返回后必须先判断 verdict !== \"idle\" 就直接 return——adopted(确有任务在跑,"
+    + "同种或异种)与 unknown(探测本身失败)都不该继续往下走进重试/release 分支",
   );
   assert.ok(
-    !branch.includes("releaseNotebookClaim"),
-    "409 分支不能提前 release 自己的忙碌位:决定权整个交给 adoptRunningMaintenance,"
-    + "它按服务端真相双向归位(同种保留、异种释放、探测失败原样不动),调用方不需要"
-    + "(也无法在不重复探测的前提下)自己再判断一次",
+    !branch.slice(adoptAt, notIdleReturnAt).includes("Claim"),
+    "领养返回到判定『不是 idle』之前不能提前动任何忙碌位(releaseNotebookClaim 之类)——"
+    + "adopted/unknown 的决定权整个交给 adoptRunningMaintenance,它已经按服务端真相"
+    + "双向归位过了,调用方不需要(也无法在不重复探测的前提下)自己再判断一次",
+  );
+});
+
+test("codex R16:重新合并 409+idle 时有界重试一次,仍是 409+idle 才如实释放并提示用户", async () => {
+  // idle=占槽任务在两次领养探测的 await 期间恰好收尾——不是"竞态已消散、什么都没发生",
+  // 是"用户这次点击对应的 POST 从没有真正发出去过"。原写法在这里直接 return,UI 也不会
+  // 再刷新,等于用户点了一次却什么都没发生。R16 改成有界重试一次:槽刚空出来,立刻重发
+  // 这次本该发出的 POST,大概率成功;仍然 409+idle 才是真正反常的双重竞态(两次独立探测
+  // 窗口内又冒出第三个任务),这时才兜底提示并如实释放自己的位——不能无界重试,也不能
+  // 一遇到 idle 就直接放弃。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+  const fnAt = source.indexOf("async function refreshUnifiedKg()");
+  assert.ok(fnAt > 0, "找不到 refreshUnifiedKg");
+  const four09At = source.indexOf("if (httpErrorStatus(err) === 409) {", fnAt);
+  assert.ok(four09At > 0, "找不到 409 分支(被改名或删除?守卫失效)");
+  const four09EndAt = source.indexOf("\n        }", four09At);
+  assert.ok(four09EndAt > four09At, "找不到 409 分支的收尾");
+  const branch = source.slice(four09At, four09EndAt);
+
+  const notIdleReturnAt = branch.indexOf('if (verdict !== "idle") return;');
+  assert.ok(notIdleReturnAt >= 0, "找不到上一条测试钉住的 verdict !== \"idle\" 判据");
+
+  const continueAt = branch.indexOf("if (attempt === 0) continue;", notIdleReturnAt);
+  assert.ok(
+    continueAt > notIdleReturnAt,
+    "verdict === \"idle\" 时,第一次尝试(attempt === 0)必须 continue 重试,不能直接"
+    + "return——变异:把 continue 改成 return(或删掉这个分支)必须让本条断言报红,那正是"
+    + "『idle 不重试直接 return』的回归",
+  );
+
+  const releaseAt = branch.indexOf("releaseNotebookClaim(prev, nb)", continueAt);
+  assert.ok(
+    releaseAt > continueAt,
+    "只有越过 continue(即第二次尝试仍是 409+idle)才能走到释放忙碌位这一步——不能在"
+    + "第一次 idle 就把位释放掉",
+  );
+  const toastAt = branch.indexOf('setToast("当前有其他整理任务刚结束', continueAt);
+  assert.ok(
+    toastAt > continueAt && toastAt < releaseAt,
+    "第二次仍 409+idle 必须显式 toast 提示用户手动再点一次,不能悄悄把位释放掉就完事——"
+    + "用户不会无缘无故知道自己那次点击其实什么都没做",
+  );
+});
+
+test("codex R16:refreshUnifiedKg 的整段提交逻辑必须包在恰好两次的有界重试循环里", async () => {
+  // 单独钉住循环本身的存在与形状——上面两条测试只验证 409 分支内部的分支顺序,不足以
+  // 拦住"把整个 for 循环删掉、退回单次尝试"这种变异(那样 409+idle 时 continue 语句会
+  // 直接消失,函数退化回 R9 的旧行为)。
+  const page = await parseModule("page.tsx");
+  const body = findFunction(page, "refreshUnifiedKg").getText(page);
+
+  const loopAt = body.indexOf("for (const attempt of [0, 1]) {");
+  assert.ok(
+    loopAt >= 0,
+    "refreshUnifiedKg 必须用 `for (const attempt of [0, 1])` 包住整段提交逻辑(恰好"
+    + "尝试 2 次)——变异:删掉这个循环、退回单次 try/catch,必须让本条断言报红",
+  );
+  const claimAt = body.indexOf("setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));");
+  assert.ok(
+    claimAt >= 0 && claimAt < loopAt,
+    "认领忙碌位必须在循环之外只做一次——重试的是 POST 提交,不是忙碌位认领",
+  );
+  const postAt = body.indexOf("rebuildUnifiedKg(", loopAt);
+  assert.ok(postAt > loopAt, "POST 必须落在循环体内,不能挪到循环外只执行一次");
+  const continueAt = body.indexOf("continue;", loopAt);
+  assert.ok(
+    continueAt > postAt,
+    "循环体内必须存在 continue(重试第二次尝试),否则这个 for 循环只是一个恰好执行一次"
+    + "的摆设",
   );
 });
 
