@@ -95,8 +95,8 @@ function delayedFetch(delayMs: number) {
   );
 }
 
-test("release 在刷新之前：终态刷新被自己触发的 cleanup 取消（20ms 延迟下必现）", async () => {
-  const fetchGraph = delayedFetch(20);
+test("release 在刷新之前：终态刷新被自己触发的 cleanup 取消（60ms 延迟下必现）", async () => {
+  const fetchGraph = delayedFetch(60);
   render(<FinishRaceHarness mode="release-before-refresh" fetchGraph={fetchGraph} />);
 
   // 忙碌位应声解除（release 在最开始就跑了）。
@@ -107,8 +107,8 @@ test("release 在刷新之前：终态刷新被自己触发的 cleanup 取消（
   expect(fetchGraph).toHaveBeenCalledTimes(1);
 });
 
-test("release 在刷新之后：终态结果被正确应用，随后才解除忙碌位（20ms 延迟下同样成立）", async () => {
-  const fetchGraph = delayedFetch(20);
+test("release 在刷新之后：终态结果被正确应用，随后才解除忙碌位（60ms 延迟下同样成立）", async () => {
+  const fetchGraph = delayedFetch(60);
   render(<FinishRaceHarness mode="release-after-refresh" fetchGraph={fetchGraph} />);
 
   await waitFor(() => expect(screen.getByTestId("graph").textContent).toBe("fresh"));
