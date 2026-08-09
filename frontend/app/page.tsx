@@ -1041,6 +1041,19 @@ export default function Home() {
   // 提交还在飞、服务端还没看到新任务,不能当真终态收工。模块级 Set,直接 mutate——不是
   // state,不触发渲染(只在轮询 tick 的同步分支里读一次性瞬时状态,不需要驱动 UI)。
   const submittingMaintenanceRef = useRef<Set<string>>(new Set());
+  // codex R11:submittingMaintenanceRef 只压制了提交期的陈旧 idle——同库再次点击时,
+  // 服务端共享的维护槽在这次 POST 落地**前**仍会如实回显**上一个任务**的
+  // succeeded/failed(不止 idle);POST 落地、finally 摘掉提交标记之后,也可能有一次
+  // 陈旧终态(槽被另一次提交/领养挪走)在真正对应这次追踪的终态之前先被读到。唯一站得
+  // 住的判据是按 job_id 配对:POST 成功后把响应里的 job_id 记在这里(键
+  // `${nb}:rebuild` / `${nb}:relink`),轮询终态只在 status.job_id 与这里记的一致时
+  // 才接受(succeeded/failed/idle 一视同仁)——不一致就是陈旧终态,继续轮询。没有走过
+  // 本页 POST 的追踪(409 领养、打开笔记本时从服务端恢复的忙碌位)从不写这张表,天然
+  // 保留"接受任意终态"的历史行为。settle/释放(含尝试上限耗尽)时清掉对应键。与
+  // submittingMaintenanceRef 分工不同、缺一不可:submitting 防的是 POST **还没**返回
+  // 那段窗口(此时还没有新 job_id 可比),expectation 防的是 POST **已经**返回之后的
+  // 错配。模块级 Map,直接 mutate——不是 state,不触发渲染。
+  const expectedMaintenanceJobRef = useRef<Map<string, string>>(new Map());
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
   const scaleIndexDoneRequestRef = useRef(0);
@@ -4603,7 +4616,10 @@ export default function Home() {
     // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
     submittingMaintenanceRef.current.add(nb);
     try {
-      await relinkKg(nb);
+      const started = await relinkKg(nb);
+      // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
+      // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
+      expectedMaintenanceJobRef.current.set(`${nb}:relink`, started.job_id);
       setToast("已开始补上关联；完成后会自动更新");
     } catch (err) {
       // 409=服务端确有任务在跑(可能另一标签页发起)。codex R9:不再提前 release 自己的
@@ -4651,6 +4667,9 @@ export default function Home() {
     const finish = (outcome: RelinkPollOutcome) => {
       if (outcome.toast) setToast(outcome.toast);
       if (!outcome.refresh) {
+        // codex R11:释放忙碌位的同时清掉这次追踪的期望 job_id——留着不清不算错(下次
+        // 提交会覆盖它),但清掉能避免这张表随通知本无限攒旧键。
+        expectedMaintenanceJobRef.current.delete(`${nb}:relink`);
         setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
         return;
       }
@@ -4665,6 +4684,7 @@ export default function Home() {
           setVizBuilding(Boolean(g.viz_building));
         } catch (err) { reportError(err); }
         finally {
+          expectedMaintenanceJobRef.current.delete(`${nb}:relink`);
           setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
         }
       })();
@@ -4694,6 +4714,16 @@ export default function Home() {
       // 记着这个库)时不能当真终态,继续等下一个 tick;提交落地后服务端会回真实
       // running/succeeded/failed。
       if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;
+      // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST 落地前,仍可能
+      // 如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都不可信。
+      if (submittingMaintenanceRef.current.has(nb)) return;
+      // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才是
+      // 这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养占用)
+      // 一律视为陈旧,继续轮询等真正对应这次追踪的终态出现。没有走过本页 POST 的追踪
+      // (409 领养、打开笔记本时从服务端恢复)从未写过这张表,天然保留"接受任意终态"
+      // 的历史行为。
+      const expectedRelinkJobId = expectedMaintenanceJobRef.current.get(`${nb}:relink`);
+      if (expectedRelinkJobId && status.job_id !== expectedRelinkJobId) return;
       settled = true;
       window.clearInterval(poll);
       finish(outcome);
@@ -4717,7 +4747,10 @@ export default function Home() {
     // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
     submittingMaintenanceRef.current.add(nb);
     try {
-      await rebuildUnifiedKg(nb);
+      const started = await rebuildUnifiedKg(nb);
+      // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
+      // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
+      expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
       // codex R7:手动重建真的起来了,就消费掉可能残留的待补发标记——否则这次
       // 重建的终态会被当成「还有决定没兑现」,先跳过刷新再白发一次可能数小时的
       // 重建。手动这一次已经覆盖了那条决定(重建读取的是此刻的全部已决定对)。
@@ -4836,7 +4869,10 @@ export default function Home() {
         // 陈旧 idle 竞态——统一包上 submittingMaintenanceRef,原因同 refreshUnifiedKg。
         submittingMaintenanceRef.current.add(nb);
         try {
-          await rebuildUnifiedKg(nb);
+          const started = await rebuildUnifiedKg(nb);
+          // codex R11:补发同样是一次真正的 POST 提交,拿到的是一个**新** job_id——
+          // 记下它,轮询终态必须等 status.job_id 与它一致才接受这次追踪的完成。
+          expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
           // 补发真正成功才消费标记——见上方函数注释。
           setPendingRebuildNotebookIds((prev) => releaseNotebookClaim(prev, nb));
           if (!cancelled && activeNotebookIdRef.current === nb) {
@@ -4866,6 +4902,10 @@ export default function Home() {
         // 自动重试,提示用户手动点一次。
         setToast("重新合并长时间未能自动完成，请稍后手动点击「重新合并」");
       }
+      // codex R11:释放忙碌位的同时清掉这次追踪的期望 job_id——留着不清不算错(下次
+      // 提交会覆盖它),但清掉能避免这张表随笔记本无限攒旧键。补发成功重启轮询的
+      // 分支不会走到这里(已经 return),因此不会误清刚刚为新任务设下的期望值。
+      expectedMaintenanceJobRef.current.delete(`${nb}:rebuild`);
       setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
     }
     // codex R5 P2(A):status 请求慢于 3s 轮询间隔时,同一个 interval 会连续派发多个
@@ -4915,6 +4955,17 @@ export default function Home() {
         // idle 且提交还在飞(submittingMaintenanceRef 记着这个库)时不能当真终态,继续等
         // 下一个 tick;提交落地后服务端会回真实 running/succeeded/failed。
         if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;
+        // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST(含补发)落地
+        // 前,仍可能如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都
+        // 不可信,不止 idle 这一种终态。
+        if (submittingMaintenanceRef.current.has(nb)) return;
+        // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才
+        // 是这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养
+        // 占用)一律视为陈旧,继续轮询等真正对应这次追踪的终态出现。没有走过本页 POST
+        // 的追踪(409 领养、打开笔记本时从服务端恢复)从未写过这张表,天然保留"接受
+        // 任意终态"的历史行为。
+        const expectedRebuildJobId = expectedMaintenanceJobRef.current.get(`${nb}:rebuild`);
+        if (expectedRebuildJobId && status.job_id !== expectedRebuildJobId) return;
         settled = true;
         window.clearInterval(poll);
         finish(outcome);
@@ -5067,7 +5118,10 @@ export default function Home() {
       // 永久卡住),与另两处提交期标记同一形态。
       submittingMaintenanceRef.current.add(nb);
       try {
-        await rebuildUnifiedKg(nb);
+        const started = await rebuildUnifiedKg(nb);
+        // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
+        // 与它一致才接受,防止服务端共享维护槽在这次 POST 落地前后如实回显别的任务。
+        expectedMaintenanceJobRef.current.set(`${nb}:rebuild`, started.job_id);
       } catch (err) {
         if (httpErrorStatus(err) !== 409) {
           setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
