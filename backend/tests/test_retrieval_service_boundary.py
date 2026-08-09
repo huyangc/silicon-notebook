@@ -14,6 +14,9 @@ class _Candidates:
     def retrieve_scored(self, *args, **kwargs):
         return []
 
+    def hydrate_chunk_candidates(self, candidate_ids):
+        return ([{"chunk_id": value} for value in candidate_ids], [], None)
+
 
 class _Graph:
     pass
@@ -36,6 +39,15 @@ def test_retrieval_service_does_not_call_facade_private_retrieval():
         candidates=_Candidates(), graph=_Graph(), community_queries=lambda: object()
     )
     assert service.retrieve_scored("nb", "query") == []
+
+
+def test_retrieval_service_publicly_forwards_chunk_hydration():
+    service = RetrievalService(
+        candidates=_Candidates(), graph=_Graph(), community_queries=lambda: object()
+    )
+    rows, ids, matrix = service.hydrate_chunk_candidates(["c1"])
+    assert rows == [{"chunk_id": "c1"}]
+    assert ids == [] and matrix is None
 
 
 def test_retrieval_service_source_has_no_sqlite_repository_import():

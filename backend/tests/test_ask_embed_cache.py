@@ -74,3 +74,14 @@ def test_failure_not_cached(repo_factory):
     finally:
         sr._ASK_EMBED_CACHE.reset(tok)
     assert len(emb.calls) == 2
+
+
+def test_common_retrieval_run_memo_is_used_by_candidate_embedding(repo_factory):
+    from app.services.retrieval_run import retrieval_run
+
+    repo, emb = _mk_repo(repo_factory)
+    with retrieval_run(run_kind="report_planning") as state:
+        assert repo._embed_query("q1") == repo._embed_query("q1")
+    assert len(emb.calls) == 1
+    assert state.embedding_requests == 1
+    assert state.embedding_hits == 1

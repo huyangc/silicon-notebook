@@ -16,6 +16,8 @@ def test_report_settings_defaults():
     assert not hasattr(s, "report_section_top_n")   # 已移除:逐节与 ask 统一走自适应预算
     assert s.report_section_chunk_budget == 20000
     assert s.report_section_concurrency == 5
+    assert s.report_retrieval_fanout == 8
+    assert s.report_probe_channel_concurrency == 2
     assert s.report_generation_concurrency == 1
     assert not hasattr(s, "report_context_window_tokens")
     assert not hasattr(s, "report_summary_context_window_tokens")
@@ -23,6 +25,10 @@ def test_report_settings_defaults():
     assert s.report_synthesis_max_tokens == 102400
     assert s.report_summary_max_tokens == 102400
     assert s.report_allow_parametric is True
+    assert s.report_sufficiency_min_relevant_items == 3
+    assert s.report_sufficiency_min_families == 2
+    assert s.report_sufficiency_complete_min_families == 3
+    assert s.report_sufficiency_max_top_family_share == 0.8
 
 
 def test_report_settings_env(monkeypatch):
@@ -32,12 +38,24 @@ def test_report_settings_env(monkeypatch):
     monkeypatch.setenv("REPORT_SECTION_MAX_TOKENS", "70000")
     monkeypatch.setenv("REPORT_SYNTHESIS_MAX_TOKENS", "71000")
     monkeypatch.setenv("REPORT_SUMMARY_MAX_TOKENS", "33000")
+    monkeypatch.setenv("REPORT_RETRIEVAL_FANOUT", "7")
+    monkeypatch.setenv("REPORT_PROBE_CHANNEL_CONCURRENCY", "1")
+    monkeypatch.setenv("REPORT_SUFFICIENCY_MIN_RELEVANT_ITEMS", "5")
+    monkeypatch.setenv("REPORT_SUFFICIENCY_MIN_FAMILIES", "3")
+    monkeypatch.setenv("REPORT_SUFFICIENCY_COMPLETE_MIN_FAMILIES", "4")
+    monkeypatch.setenv("REPORT_SUFFICIENCY_MAX_TOP_FAMILY_SHARE", "0.65")
     s = Settings(_env_file=None)
     assert s.report_max_sections == 4
     assert s.report_allow_parametric is False
     assert s.report_section_max_tokens == 70000
     assert s.report_synthesis_max_tokens == 71000
     assert s.report_summary_max_tokens == 33000
+    assert s.report_retrieval_fanout == 7
+    assert s.report_probe_channel_concurrency == 1
+    assert s.report_sufficiency_min_relevant_items == 5
+    assert s.report_sufficiency_min_families == 3
+    assert s.report_sufficiency_complete_min_families == 4
+    assert s.report_sufficiency_max_top_family_share == 0.65
 
 
 @pytest.mark.parametrize(
@@ -1558,11 +1576,42 @@ def test_plan_outline_records_corpus_profile_failure_instead_of_silently_hiding_
 
     eng.plan_outline(nb.id, rid, "用户原问题")
 
-    assert events == [{
+    failures = [
+        event for event in events
+        if event.get("kind") == "report_corpus_profile_failed"
+    ]
+    assert failures == [{
         "kind": "report_corpus_profile_failed",
         "notebook_id": nb.id,
         "report_id": rid,
     }]
+    new_events = [
+        event for event in events
+        if event.get("kind") in {"report_stage_timing", "retrieval_run_stats"}
+    ]
+    planning_stages = {
+        event["stage"] for event in new_events
+        if event.get("kind") == "report_stage_timing"
+    }
+    assert {
+        "planning_intent",
+        "planning_corpus_profile",
+        "planning_intent_probe",
+        "planning_corpus_map",
+        "planning_outline_model",
+        "planning_sufficiency_probe",
+        "planning_sufficiency_judge",
+    } <= planning_stages
+    assert any(
+        event.get("kind") == "retrieval_run_stats"
+        and event.get("run_kind") == "report_planning"
+        and event.get("correlation_id") == rid
+        for event in new_events
+    )
+    assert all("notebook_id" not in event for event in new_events)
+    serialized = json.dumps(new_events, ensure_ascii=False)
+    assert "用户原问题" not in serialized
+    assert nb.id not in serialized
     detail = repo.get_report(nb.id, rid)
     # 终态断言防守卫被掏空:此前探针桩不收新 kwarg 时,TypeError 被
     # plan_outline 吞成 failed,而上面的断言全部在探针之前写入、照样通过
@@ -1663,7 +1712,7 @@ def test_stage_timing_attributes_retrieval_synthesis_and_drafting(repo, monkeypa
     assert len(by_stage["draft"]) == 2
     assert len(by_stage["synthesis"]) == 1
     assert all(isinstance(e["ms"], int) and e["ms"] >= 0 for e in timings)
-    assert all(e["report_id"] == rid and e["notebook_id"] == nb.id for e in timings)
+    assert all(e["report_id"] == rid and "notebook_id" not in e for e in timings)
     assert sorted(e["section_index"] for e in by_stage["retrieve"]) == [0, 1]
     # Diagnostics must not carry content: indices and durations only.
     assert not any(
@@ -1671,6 +1720,52 @@ def test_stage_timing_attributes_retrieval_synthesis_and_drafting(repo, monkeypa
         for event in timings for key, value in event.items()
         if key not in {"kind", "stage"}
     )
+
+
+def test_stage_timing_does_not_echo_an_unregistered_stage():
+    import time
+
+    from app.services.reports.observability import emit_stage_timing
+
+    events = []
+
+    class _Log:
+        def emit(self, event):
+            events.append(event)
+
+    emit_stage_timing(
+        _Log(), report_id="rep-safe", stage="SECRET-USER-CONTENT",
+        started=time.monotonic(),
+    )
+    assert events[0]["stage"] == "unknown"
+    assert "SECRET-USER-CONTENT" not in json.dumps(events[0])
+
+
+def test_planning_stage_timing_classifies_cancellation():
+    from app.services.cancellation import AskCancelled
+    from app.services.reports.observability import observe_stage
+
+    events = []
+
+    class _Log:
+        def emit(self, event):
+            events.append(event)
+
+    with pytest.raises(AskCancelled):
+        with observe_stage(
+            _Log(), report_id="rep-safe", stage="planning_corpus_map"
+        ):
+            raise AskCancelled()
+
+    assert len(events) == 1
+    assert events[0] == {
+        "kind": "report_stage_timing",
+        "report_id": "rep-safe",
+        "stage": "planning_corpus_map",
+        "ms": events[0]["ms"],
+        "cancelled": True,
+    }
+    assert isinstance(events[0]["ms"], int)
 
 
 def test_stage_timing_is_recorded_when_a_stage_is_cancelled(repo, monkeypatch):
@@ -1865,7 +1960,7 @@ def test_run_backcompat_plans_then_generates(repo, monkeypatch):
     assert calls==["plan","gen"]
 
 
-def test_draft_section_empty_content_marks_failed_and_observable(repo):
+def test_draft_section_empty_content_marks_failed_and_observable(repo, monkeypatch):
     # 思考型模型偶发 content 空 → chat_json "{}" → markdown 空。修复前本节在 _assemble
     # 里静默消失;现应有界重试→仍空则标 failed(渲染「本节生成失败」note)+ 补 model_error。
     from app.services.reasoning_retrieval import ReasoningResult
@@ -1883,15 +1978,41 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo):
     eng = _mk_engine(repo, stub)
     nb = _mk_nb(repo)
     notes = []
+    events = []
+    monkeypatch.setattr(eng.dependencies.event_log, "emit", events.append)
     # spy 可观测(Task 25:引擎经 ModelErrorSink 端口 = runtime 的模型 provider)
     repo._runtime.models.note_model_error = (
         lambda stage, error, *, workload_id: notes.append((stage, workload_id))
     )
-    out = eng._draft_section(nb.id, {"title": "T", "scope": "S"}, "q", ReasoningResult())
+    out = eng._draft_section(
+        nb.id,
+        {"title": "SECRET-TITLE", "scope": "SECRET-SCOPE"},
+        "SECRET-QUESTION",
+        ReasoningResult(),
+        report_id="rep-safe-id",
+        section_index=3,
+    )
     assert stub.calls == 2                                   # 空 markdown 触发重试
     assert out["markdown"] == ""
     assert out.get("failed") is True and out.get("error")   # 不再静默:标 failed→渲染 note
     assert ("report_section", "report_section") in notes   # 精确工作负载可观测
+    attempts = [
+        event for event in events
+        if event.get("kind") == "report_section_attempt"
+    ]
+    assert [(event["attempt"], event["status"]) for event in attempts] == [
+        (1, "empty"), (2, "empty"),
+    ]
+    assert all(
+        event["report_id"] == "rep-safe-id"
+        and event["section_index"] == 3
+        and isinstance(event["ms"], int)
+        and not ({"notebook_id", "source_id", "query", "title", "text"} & set(event))
+        for event in attempts
+    )
+    serialized = json.dumps(attempts, ensure_ascii=False)
+    assert "SECRET-TITLE" not in serialized
+    assert "SECRET-QUESTION" not in serialized
 
 
 def test_report_section_uses_direct_element_and_recomputes_grounding(repo):
@@ -2008,7 +2129,7 @@ def test_report_section_does_not_read_memory_under_selected_source_scope(repo):
     assert out["markdown"]
 
 
-def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo):
+def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo, monkeypatch):
     class _EditorLLM:
         configured = True
 
@@ -2025,6 +2146,8 @@ def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo):
 
     nb = _mk_nb(repo)
     eng = _mk_engine(repo, _EditorLLM())
+    events = []
+    monkeypatch.setattr(eng.dependencies.event_log, "emit", events.append)
     catalog = [
         {"id": "intent-1", "title": "机理", "question": "解释机理",
          "retrieval_queries": ["mechanism"]},
@@ -2049,6 +2172,16 @@ def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo):
     assert "只概括已有正文" in md
     assert "必答主题「边界」回答不完整:缺少边界条件" in gaps
     assert "范围与证据局限" in md
+    editor_timings = [
+        event for event in events
+        if event.get("kind") == "report_stage_timing"
+        and event.get("stage") == "final_editor"
+    ]
+    assert len(editor_timings) == 1
+    assert editor_timings[0]["report_id"] == rid
+    assert editor_timings[0]["failed"] is False
+    assert editor_timings[0]["cancelled"] is False
+    assert "notebook_id" not in editor_timings[0]
 
 
 def test_report_section_queue_failure_stays_a_failed_section(repo):
@@ -2142,6 +2275,14 @@ def test_probe_memo_dedupes_repeated_queries_within_one_planning_run(repo, monke
     eng._probe_queries("nb", ["shared"])
     assert calls["federated"] == ["shared", "a", "b"]
     assert calls["elements"] == ["shared", "a", "b"]
+
+    # A single parallel probe batch also preserves the old serial memo's
+    # duplicate-query behavior instead of racing two identical leaves.
+    calls["federated"].clear(); calls["elements"].clear()
+    eng._probe_retrieval_memo = {}
+    eng._probe_queries("nb", ["duplicate", "duplicate"])
+    assert calls["federated"] == ["duplicate"]
+    assert calls["elements"] == ["duplicate"]
 
 
 def test_probe_memo_does_not_cache_failures(repo, monkeypatch):
@@ -2387,6 +2528,27 @@ def test_sufficiency_llm_skipped_at_low_tiers(repo, monkeypatch):
     assert out[0]["sufficiency"] == "充足"
     assert out[0]["coverage"]["hits"] == 5
     assert out[0]["action"] == "keep"
+
+
+def test_sufficiency_runtime_uses_centralized_policy(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    monkeypatch.setattr(
+        repo.settings, "report_sufficiency_min_relevant_items", 5
+    )
+    sections = [{"title": "T", "scope": "s", "sub_queries": ["q"]}]
+    probe = [{
+        "title": "T", "hits": 5, "base_hits": 0, "element_hits": 4,
+        "source_hits": 3, "relevant_items": 4, "relevant_supports": 4,
+        "relevant_family_count": 3, "unknown_supports": 0,
+        "top_family_share": 0.5, "source_identity_uncertain": 0,
+    }]
+
+    out = eng._judge_sufficiency("Q", sections, probe, use_llm=False)
+
+    assert out[0]["sufficiency"] == "薄弱"
+    assert out[0]["action"] == "supplement"
 
 
 def test_plan_outline_wires_probe_width_from_report_depth(repo, monkeypatch):

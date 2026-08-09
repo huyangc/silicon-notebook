@@ -362,6 +362,10 @@ class RetrievalService:
     def embed_query(self, query):
         return self.candidates._embed_query(query)
 
+    def hydrate_chunk_candidates(self, candidate_ids):
+        """Hydrate a bounded candidate-id set through the public port."""
+        return self.candidates.hydrate_chunk_candidates(candidate_ids)
+
     def edge_support_map(self, notebook_id):
         return self.graph._edge_support_map(notebook_id)
 

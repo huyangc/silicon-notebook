@@ -4,12 +4,13 @@
 Scope follows the **trust boundary, not the directory**. Two sources of copy reach
 a user's screen, and both are scanned:
 
-  1. frontend/app *.ts/*.tsx *rendered text* — string literals plus JSX text nodes.
+  1. frontend/app and frontend/features *.ts/*.tsx *rendered text* — string
+     literals plus JSX text nodes.
   2. backend `user_error(status, "…")` messages — `api/deps.py` marks exactly these
      4xx `detail` strings with `X-User-Message: 1`, and `frontend/app/errors.ts` is
      deny-by-default: a marked detail is shown to the user **verbatim**. Marking a
      string is therefore a promise that it is user copy, so it inherits the copy
-     rules. Scoping this guard to `frontend/app` is what let 「基准库」and 「晋升队列」
+     rules. Scoping this guard to `frontend/app` alone is what let 「基准库」and 「晋升队列」
      ship inside marked 403s while the guard stayed green.
 
   Bare `HTTPException(detail=str(exc))` is deliberately **not** scanned: it is never
@@ -42,7 +43,7 @@ Also intentionally NOT blacklisted: 知识图谱, 索引 (user-dictionary words;
 jargon modifiers CSR/ANN/暴力检索 and the abbreviation KG are).
 
 The companion check — raw enum fallback (`MAP[x] ?? x`, `label(m, x, x)`) — lives in
-`frontend/app/raw-enum-fallback.test.mjs`, not here. It needs the *context* of the
+`frontend/tests/guards/raw-enum-fallback.test.mjs`, not here. It needs the *context* of the
 expression to tell a rendered lookup from internal normalisation, which means a real
 TypeScript AST; doing that from Python would mean spawning node and dragging
 `frontend/node_modules` in as a prerequisite for this otherwise dependency-free
@@ -58,7 +59,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APP = ROOT / "frontend" / "app"
+FRONTEND_PRODUCTION_DIRS = (
+    ROOT / "frontend" / "app",
+    ROOT / "frontend" / "features",
+)
 BACKEND_APP = ROOT / "backend" / "app"
 
 # 后端「这段文案会原样上屏」的唯一标记函数(app/api/deps.py)。
@@ -342,11 +346,15 @@ def _rel(path: Path) -> str:
 
 def main() -> int:
     files = sorted(
-        p for p in APP.rglob("*")
-        if p.suffix in (".ts", ".tsx") and ".test." not in p.name and not p.name.endswith(".d.mts")
+        p
+        for directory in FRONTEND_PRODUCTION_DIRS
+        for p in directory.rglob("*")
+        if p.suffix in (".ts", ".tsx")
+        and ".test." not in p.name
+        and not p.name.endswith(".d.mts")
     )
     if not files:
-        print("check_ui_vocabulary: no frontend/app sources found", file=sys.stderr)
+        print("check_ui_vocabulary: no frontend production sources found", file=sys.stderr)
         return 1
     violations: list[str] = []
     for path in files:
@@ -387,7 +395,7 @@ def main() -> int:
         )
         return 1
     print(
-        f"UI vocabulary contract OK: scanned {len(files)} frontend/app files + "
+        f"UI vocabulary contract OK: scanned {len(files)} frontend production files + "
         f"{marked_sites} backend {USER_ERROR}() messages "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )

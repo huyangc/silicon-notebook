@@ -133,7 +133,7 @@ import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease,
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
-import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
+import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import { prepareKgFocus } from "./kg-focus";
 import {
   REBUILD_POLL_MAX_ATTEMPTS,
@@ -143,7 +143,7 @@ import {
   rebuildPollOutcome,
   releaseNotebookClaim,
   type RebuildPollOutcome,
-} from "./kg-rebuild-status";
+} from "../features/kg-maintenance/kg-rebuild-status";
 import {
   RELINK_POLL_MAX_ATTEMPTS,
   RELINK_POLL_TIMED_OUT,
@@ -152,7 +152,7 @@ import {
   releaseRelinkClaim,
   relinkPollOutcome,
   type RelinkPollOutcome,
-} from "./kg-relink-status";
+} from "../features/kg-maintenance/kg-relink-status";
 import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,

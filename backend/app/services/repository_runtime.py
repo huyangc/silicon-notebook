@@ -1193,7 +1193,7 @@ class RepositoryRuntime:
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
                     hydrate_selected_graph_chunk_rows(
-                        retrieval_port._hydrate_chunk_candidates(ids)[0]
+                        retrieval_port.hydrate_chunk_candidates(ids)[0]
                     )
                 ),
             )
@@ -1283,7 +1283,7 @@ class RepositoryRuntime:
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
                     hydrate_selected_graph_chunk_rows(
-                        retrieval._hydrate_chunk_candidates(ids)[0]
+                        retrieval.hydrate_chunk_candidates(ids)[0]
                     )
                 ),
             )

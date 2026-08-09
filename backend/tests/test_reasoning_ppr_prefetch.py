@@ -141,6 +141,47 @@ def test_prefetch_pool_shutdown_when_plan_raises():
     assert ppr_pool._shutdown is True
 
 
+def test_plan_failure_waits_for_an_already_running_prefetch_leaf():
+    """A run must not return while its copied retrieval context still does I/O."""
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    plan_failed = threading.Event()
+    errors = []
+    repo, retriever = _mk()
+
+    def _blocking_ppr(_notebook_id, _question):
+        entered.set()
+        assert release.wait(timeout=2)
+        finished.set()
+        return []
+
+    def _boom(_question, history=""):
+        assert entered.wait(timeout=2)
+        plan_failed.set()
+        raise RuntimeError("plan failed")
+
+    repo.retrieval.ppr_retrieve = _blocking_ppr
+    retriever.plan = _boom
+
+    def _run():
+        try:
+            retriever.run("nb1", "问题")
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    worker = threading.Thread(target=_run)
+    worker.start()
+    assert plan_failed.wait(timeout=2)
+    worker.join(timeout=0.1)
+    assert worker.is_alive(), "run returned before its PPR leaf was joined"
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert finished.is_set()
+    assert errors == ["plan failed"]
+
+
 def test_prefetch_pool_shutdown_when_ppr_future_raises():
     """异常安全:plan/初检索都正常走到 seed pass,但后台 ppr_retrieve 本身抛错时,
     ppr_future.result() 在 seed pass 处重抛——异常必须原样传出 run(),且线程池

@@ -386,6 +386,13 @@ chat services when this feature is wanted. Leaving either unbound, or a provider
 failure in either stage, yields no suggestion; the application never silently
 falls back to table-only or fabricates an offline completion.
 
+Deep Report separates workload shape from planning quality: the checked-in
+example binds `report_outline` to the reasoning service, while the long-body
+`report_section` and large structured final-editor `report_summary` workloads
+use the non-reasoning general service. Deployments may override these bindings,
+but the selected provider/model must emit ordinary content within the configured
+completion budget rather than consuming it entirely as hidden reasoning.
+
 Scheduling policy is fixed in code:
 
 - at most `max_concurrency` calls run for one physical service, while different
@@ -729,12 +736,16 @@ REPORT_SCOUT_KG_LIMIT / REPORT_SCOUT_CHUNK_LIMIT / REPORT_SCOUT_MEMORY_LIMIT # c
 REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000; only for callers without a research depth — see the retrieval behaviour-change note)
 REPORT_GENERATION_CONCURRENCY # deep-report: whole reports admitted per backend process (default 1; queued reports hold no DB connection)
 REPORT_SECTION_CONCURRENCY   # deep-report: section fan-out per admitted report (default 5; also capped by model capacity and the DB-pool reserve)
+REPORT_RETRIEVAL_FANOUT      # deep-report: one shared leaf KG/chunk/element/PPR I/O fan-out per planning/generation run (default 8)
+REPORT_PROBE_CHANNEL_CONCURRENCY # planning probes: concurrent independent KG/raw-element channels (1..2, default 2)
+REPORT_SUFFICIENCY_MIN_RELEVANT_ITEMS / REPORT_SUFFICIENCY_MIN_FAMILIES / REPORT_SUFFICIENCY_COMPLETE_MIN_FAMILIES / REPORT_SUFFICIENCY_MAX_TOP_FAMILY_SHARE # centralized report sufficiency policy; defaults preserve historical judgments, exact rails in product-and-api
 REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting completion cap (default 65536)
 REPORT_SYNTHESIS_MAX_TOKENS  # deep-report: report-wide JSON blueprint completion cap (default 102400)
 REPORT_SUMMARY_MAX_TOKENS    # deep-report: final read-only editor completion cap (default 102400)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
 REPORT_HIGH_RISK_DOWNGRADE_ENABLED # deep-report citation audit may cap a grounded section at overview when its unsupported ratio exceeds the contract threshold (default false; disclosure still runs when false)
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # deep-report high-risk citation-audit threshold; the numeric contract is owned by docs/product-and-api.md
+REASONING_MAX_PPR_RETRIEVES / REASONING_MAX_EXACT_LOOKUPS / REASONING_MAX_FOLLOW_CHAIN_ACTIONS / REASONING_COMMUNITY_PEERS_CAP_FACTOR / REASONING_MAX_OUTLINE_UPDATES # centralized reasoning action/expansion rails; defaults preserve historical behavior, exact rails in product-and-api
 ```
 
 The three `REPORT_*_MAX_TOKENS` values are completion ceilings, not total-context

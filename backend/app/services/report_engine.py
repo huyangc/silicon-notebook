@@ -24,6 +24,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 from app.core.ask_retrieval_policy import (
     AskRetrievalLimits, RetrievalEffort, ask_retrieval_limits,
 )
+from app.core.config import (
+    DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY,
+    DEFAULT_REPORT_RETRIEVAL_FANOUT,
+)
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import MARKER_RE, marker_keys
@@ -50,6 +54,13 @@ from app.services.report_synthesis import (
     report_synthesis_requested,
     synthesis_evidence_payload,
 )
+from app.services.reports.observability import (
+    emit_section_attempt,
+    emit_stage_timing,
+    observe_stage,
+)
+from app.services.reports.policy import report_sufficiency_policy
+from app.services.retrieval_run import retrieval_fanout_slot, retrieval_run
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -555,7 +566,10 @@ class ReportEngine:
                         lambda _nb: False,
                     )(notebook_id)
                 ),
+                leaf_io=retrieval_fanout_slot,
             )
+        except AskCancelled:
+            raise
         except Exception:
             # Report retrieval has already frozen B.  Graph/version/scope I/O
             # may only degrade the optional enrichment lane.
@@ -764,9 +778,10 @@ class ReportEngine:
         key = ("knowledge", notebook_id, str(query))
         if memo is not None and key in memo:
             return memo[key]
-        hits = list(self.dependencies.retrieval.federated_retrieve(
-            notebook_id, str(query)
-        ))
+        with retrieval_fanout_slot():
+            hits = list(self.dependencies.retrieval.federated_retrieve(
+                notebook_id, str(query)
+            ))
         if memo is not None:
             memo[key] = hits
         return hits
@@ -777,11 +792,12 @@ class ReportEngine:
         key = ("element", notebook_id, str(query))
         if memo is not None and key in memo:
             return memo[key]
-        found = list(self.dependencies.retrieval.retrieve_elements(
-            notebook_id,
-            str(query),
-            limit=self.settings.report_probe_element_limit,
-        ))
+        with retrieval_fanout_slot():
+            found = list(self.dependencies.retrieval.retrieve_elements(
+                notebook_id,
+                str(query),
+                limit=self.settings.report_probe_element_limit,
+            ))
         if memo is not None:
             memo[key] = found
         return found
@@ -794,44 +810,79 @@ class ReportEngine:
         # not inflate either relevant_items or a family's numerator.
         relevant_units: Dict[str, set[str]] = {}
 
-        for query in queries[:max_queries]:
+        # Preserve the historical first-N window, then dedupe in input order.
+        # The serial memo made repeats free; concurrent duplicate submissions
+        # could race its plain dict and repay both expensive retrieval calls.
+        bounded_queries = list(dict.fromkeys(
+            str(query) for query in queries[:max_queries]
+        ))
+
+        def _safe(loader, query):
             try:
-                for hit in self._probe_knowledge_hits(notebook_id, str(query)):
-                    unit = f"knowledge:{hit.object_id}"
-                    seen.add(hit.object_id)
-                    if getattr(hit, "tier", "") == "base":
-                        base.add(hit.object_id)
-                    relevant = float(
-                        getattr(hit, "relevance", 0.0) or 0.0
-                    ) >= float(self.settings.evidence_tau_low)
-                    unit_sources = {
-                        str(getattr(evidence, "source_id", "") or "")
-                        for evidence in (getattr(hit, "evidence", None) or [])
-                        if str(getattr(evidence, "source_id", "") or "")
-                    }
-                    sources.update(unit_sources)
-                    if relevant:
-                        relevant_units.setdefault(unit, set()).update(unit_sources)
+                return loader(notebook_id, query)
             except Exception:
-                pass
-            try:
-                for element in self._probe_element_hits(notebook_id, str(query)):
-                    unit = f"element:{element.element_id}"
-                    elements.add(element.element_id)
-                    relevant = float(
-                        getattr(element, "score", 0.0) or 0.0
-                    ) >= float(
-                        self.settings.evidence_tau_low
+                return []
+
+        # KG and SourceElement are independent leaf channels.  The executor
+        # never holds a retrieval slot itself; each loader acquires the shared
+        # report-run gate immediately around its own I/O.
+        channel_workers = min(
+            2,
+            max(1, int(getattr(
+                self.settings,
+                "report_probe_channel_concurrency",
+                DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY,
+            ))),
+        )
+        query_results = []
+        if bounded_queries:
+            with ThreadPoolExecutor(max_workers=channel_workers) as pool:
+                futures = []
+                for query in bounded_queries:
+                    kg_future = pool.submit(
+                        contextvars.copy_context().run,
+                        _safe, self._probe_knowledge_hits, query,
                     )
-                    source_id = str(element.source_id or "")
-                    if source_id:
-                        sources.add(source_id)
-                    if relevant:
-                        relevant_units.setdefault(unit, set()).update(
-                            [source_id] if source_id else []
-                        )
-            except Exception:
-                pass
+                    element_future = pool.submit(
+                        contextvars.copy_context().run,
+                        _safe, self._probe_element_hits, query,
+                    )
+                    futures.append((kg_future, element_future))
+                query_results = [
+                    (kg_future.result(), element_future.result())
+                    for kg_future, element_future in futures
+                ]
+
+        for knowledge_hits, element_hits in query_results:
+            for hit in knowledge_hits:
+                unit = f"knowledge:{hit.object_id}"
+                seen.add(hit.object_id)
+                if getattr(hit, "tier", "") == "base":
+                    base.add(hit.object_id)
+                relevant = float(
+                    getattr(hit, "relevance", 0.0) or 0.0
+                ) >= float(self.settings.evidence_tau_low)
+                unit_sources = {
+                    str(getattr(evidence, "source_id", "") or "")
+                    for evidence in (getattr(hit, "evidence", None) or [])
+                    if str(getattr(evidence, "source_id", "") or "")
+                }
+                sources.update(unit_sources)
+                if relevant:
+                    relevant_units.setdefault(unit, set()).update(unit_sources)
+            for element in element_hits:
+                unit = f"element:{element.element_id}"
+                elements.add(element.element_id)
+                relevant = float(
+                    getattr(element, "score", 0.0) or 0.0
+                ) >= float(self.settings.evidence_tau_low)
+                source_id = str(element.source_id or "")
+                if source_id:
+                    sources.add(source_id)
+                if relevant:
+                    relevant_units.setdefault(unit, set()).update(
+                        [source_id] if source_id else []
+                    )
         relevant_source_ids = sorted({
             source_id for unit_sources in relevant_units.values()
             for source_id in unit_sources
@@ -981,9 +1032,10 @@ class ReportEngine:
             pass
         if not unsafe_scope:
             try:
-                chunks = deps.retrieval.ppr_retrieve(
-                    notebook_id, question
-                )[: self.settings.report_scout_chunk_limit]
+                with retrieval_fanout_slot():
+                    chunks = deps.retrieval.ppr_retrieve(
+                        notebook_id, question
+                    )[: self.settings.report_scout_chunk_limit]
                 if chunks:
                     parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
                         f"- {c.source_title} · {c.section_path}" for c in chunks))
@@ -1023,6 +1075,25 @@ class ReportEngine:
     # --- Stage A 编排:intent → intent probe → map → STORM → Judge → outline_ready ---
     def plan_outline(self, notebook_id, rid, question, history="",
                      intent_contract=None) -> None:
+        """Run planning in an isolated memo/fan-out scope."""
+        with retrieval_run(
+            run_kind="report_planning",
+            event_log=self.dependencies.event_log,
+            fanout_limit=int(getattr(
+                self.settings,
+                "report_retrieval_fanout",
+                DEFAULT_REPORT_RETRIEVAL_FANOUT,
+            )),
+            correlation_id=rid,
+            cancel_event=self.cancel_event,
+        ):
+            return self._plan_outline_run(
+                notebook_id, rid, question, history,
+                intent_contract=intent_contract,
+            )
+
+    def _plan_outline_run(self, notebook_id, rid, question, history="",
+                          intent_contract=None) -> None:
         reports = self.dependencies.reports
         try:
             reports.update_report(notebook_id, rid, status="planning", progress="按已确认问题规划中")
@@ -1042,49 +1113,59 @@ class ReportEngine:
                 planning_depth = None
             probe_width = report_probe_query_width(planning_depth)
             sufficiency_llm = report_sufficiency_llm_enabled(planning_depth)
-            if intent_contract:
-                intent_contract = self._finalize_confirmed_intent(
-                    dict(intent_contract)
-                )
-            else:
-                intent_contract = (
-                    self._plan_intent_contract(
-                        question, history, confirmation_mode=True
+            with observe_stage(
+                self.dependencies.event_log,
+                report_id=rid,
+                stage="planning_intent",
+            ):
+                if intent_contract:
+                    intent_contract = self._finalize_confirmed_intent(
+                        dict(intent_contract)
                     )
-                    if history
-                    else self._plan_intent_contract(question, history)
-                )
+                else:
+                    intent_contract = (
+                        self._plan_intent_contract(
+                            question, history, confirmation_mode=True
+                        )
+                        if history
+                        else self._plan_intent_contract(question, history)
+                    )
             research_question = self._confirmed_research_question(
                 intent_contract, question
             )
-            try:
-                corpus_profile = (
-                    # A scoped run has no whole-collection profile to state, and
-                    # that is a deliberate skip rather than a failure.  Marking
-                    # it keeps the reader disclosure from blaming a breakage.
-                    unavailable_profile(PROFILE_SCOPE_RESTRICTED)
-                    if self._unsafe_source_scope_restricted(notebook_id)
-                    else self._corpus_profile(
-                        notebook_id,
-                        result_scope=str(
-                            intent_contract.get("result_scope") or "ranked"
-                        ),
-                    )
-                )
-            except Exception:
-                # Profiling is additive governance.  A malformed row/projection
-                # must not make the report fail, but its absence must be
-                # observable: the reader disclosure already renders the empty
-                # profile as unavailable, and operations receives a safe event.
+            with observe_stage(
+                self.dependencies.event_log,
+                report_id=rid,
+                stage="planning_corpus_profile",
+            ):
                 try:
-                    self.dependencies.event_log.emit({
-                        "kind": "report_corpus_profile_failed",
-                        "notebook_id": notebook_id,
-                        "report_id": rid,
-                    })
+                    corpus_profile = (
+                        # A scoped run has no whole-collection profile to state, and
+                        # that is a deliberate skip rather than a failure.  Marking
+                        # it keeps the reader disclosure from blaming a breakage.
+                        unavailable_profile(PROFILE_SCOPE_RESTRICTED)
+                        if self._unsafe_source_scope_restricted(notebook_id)
+                        else self._corpus_profile(
+                            notebook_id,
+                            result_scope=str(
+                                intent_contract.get("result_scope") or "ranked"
+                            ),
+                        )
+                    )
                 except Exception:
-                    pass
-                corpus_profile = unavailable_profile(PROFILE_FAILED)
+                    # Profiling is additive governance.  A malformed row/projection
+                    # must not make the report fail, but its absence must be
+                    # observable: the reader disclosure already renders the empty
+                    # profile as unavailable, and operations receives a safe event.
+                    try:
+                        self.dependencies.event_log.emit({
+                            "kind": "report_corpus_profile_failed",
+                            "notebook_id": notebook_id,
+                            "report_id": rid,
+                        })
+                    except Exception:
+                        pass
+                    corpus_profile = unavailable_profile(PROFILE_FAILED)
             intent_contract = dict(intent_contract)
             intent_contract["corpus_profile"] = corpus_profile
             self._planning_corpus_profile = corpus_profile
@@ -1097,18 +1178,36 @@ class ReportEngine:
             reports.update_report(notebook_id, rid, understanding=intent_contract)
             raise_if_cancelled(self.cancel_event)
             reports.update_report(notebook_id, rid, progress="按用户问题检查证据覆盖")
-            intent_probe = self._probe_intent_coverage(
-                notebook_id, intent_contract, max_queries=probe_width
-            )
+            with observe_stage(
+                self.dependencies.event_log,
+                report_id=rid,
+                stage="planning_intent_probe",
+                topics=len(self._intent_catalog(intent_contract)),
+            ):
+                intent_probe = self._probe_intent_coverage(
+                    notebook_id, intent_contract, max_queries=probe_width
+                )
             raise_if_cancelled(self.cancel_event)
             reports.update_report(notebook_id, rid, status="planning", progress="侦察语料中")
-            corpus_map = self._build_corpus_map(notebook_id, research_question)
+            with observe_stage(
+                self.dependencies.event_log,
+                report_id=rid,
+                stage="planning_corpus_map",
+            ):
+                corpus_map = self._build_corpus_map(
+                    notebook_id, research_question
+                )
             raise_if_cancelled(self.cancel_event)
             reports.update_report(notebook_id, rid, progress="多视角规划大纲中")
-            sections = self._storm_outline(
-                notebook_id, research_question, history, corpus_map,
-                intent_contract=intent_contract, intent_probe=intent_probe,
-            )
+            with observe_stage(
+                self.dependencies.event_log,
+                report_id=rid,
+                stage="planning_outline_model",
+            ):
+                sections = self._storm_outline(
+                    notebook_id, research_question, history, corpus_map,
+                    intent_contract=intent_contract, intent_probe=intent_probe,
+                )
             report_frame = next(
                 (dict(section.get("report_frame") or {}) for section in sections
                  if section.get("report_frame")),
@@ -1131,12 +1230,24 @@ class ReportEngine:
             reports.update_report(
                 notebook_id, rid, progress="检查各节证据充分性"
             )
-            probe = self._probe_sufficiency(
-                notebook_id, sections, max_queries=probe_width
-            )
-            sections = self._judge_sufficiency(
-                research_question, sections, probe, use_llm=sufficiency_llm
-            )
+            with observe_stage(
+                self.dependencies.event_log,
+                report_id=rid,
+                stage="planning_sufficiency_probe",
+                sections=len(sections),
+            ):
+                probe = self._probe_sufficiency(
+                    notebook_id, sections, max_queries=probe_width
+                )
+            with observe_stage(
+                self.dependencies.event_log,
+                report_id=rid,
+                stage="planning_sufficiency_judge",
+                sections=len(sections),
+            ):
+                sections = self._judge_sufficiency(
+                    research_question, sections, probe, use_llm=sufficiency_llm
+                )
             reports.update_report(notebook_id, rid, outline=sections,
                                   status="outline_ready",
                                   progress=f"大纲就绪({len(sections)} 节),待确认")
@@ -1278,6 +1389,7 @@ class ReportEngine:
             getattr(self, "_planning_completeness_required", completeness_required)
         )
         deterministic_by_title: Dict[str, str] = {}
+        sufficiency_policy = report_sufficiency_policy(self.settings)
         # Fail-open judge fallback, but fail-closed evidence semantics: volume of
         # graph objects alone is never sufficient.  Require relevant items from
         # multiple independently identifiable document families and reject a
@@ -1288,9 +1400,12 @@ class ReportEngine:
             relevant = int(h.get("relevant_items", 0))
             families = int(h.get("relevant_family_count", 0))
             top_share = float(h.get("top_family_share", 1.0) or 1.0)
-            required_families = 3 if completeness_required else 2
-            enough = relevant >= 3 and families >= required_families and top_share <= 0.8
-            thin = relevant > 0 and families > 0
+            enough, thin = sufficiency_policy.classify(
+                relevant_items=relevant,
+                family_count=families,
+                top_family_share=top_share,
+                completeness_required=completeness_required,
+            )
             fallback = "充足" if enough else "薄弱" if thin else "缺失"
             deterministic_by_title[s["title"]] = fallback
             s["coverage"] = {
@@ -1457,9 +1572,10 @@ class ReportEngine:
             new_count = 0
             if str(query).strip() not in run_attempted:
                 try:
-                    hits = self.dependencies.retrieval.federated_retrieve(
-                        notebook_id, str(query)
-                    )[:direction_take]
+                    with retrieval_fanout_slot():
+                        hits = self.dependencies.retrieval.federated_retrieve(
+                            notebook_id, str(query)
+                        )[:direction_take]
                     for hit in hits:
                         if hit.object_id not in seen_objects:
                             result.top_hits.append(hit)
@@ -1468,9 +1584,10 @@ class ReportEngine:
                 except Exception:
                     pass
             try:
-                elements = self.dependencies.retrieval.retrieve_elements(
-                    notebook_id, str(query), limit=direction_elements
-                )
+                with retrieval_fanout_slot():
+                    elements = self.dependencies.retrieval.retrieve_elements(
+                        notebook_id, str(query), limit=direction_elements
+                    )
                 for element in elements:
                     if element.element_id not in seen_elements:
                         result.elements.append(element)
@@ -1534,7 +1651,8 @@ class ReportEngine:
     def _draft_section(self, notebook_id: str, section: dict, question: str, result,
                        depth=None, *, report_frame: Optional[dict] = None,
                        synthesis: Optional[dict] = None,
-                       synthesis_requested: bool = False) -> dict:
+                       synthesis_requested: bool = False,
+                       report_id: str = "", section_index: int = -1) -> dict:
         from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
         deps = self.dependencies
         # 撰写上下文的预算同样随研究深度走(codex PR#418 R1 P2-2):档位贯通此前只
@@ -1743,7 +1861,9 @@ class ReportEngine:
         # note,不再静默)+ emit model_error(report_engine 原先零可观测)。报告章节会使用
         # 独立的 report_section_max_tokens 上限，但思考型模型仍可能把该预算耗在 reasoning 上。
         markdown, llm_grounded, raw_claims = "", False, None
-        for _ in range(2):
+        for attempt in range(1, 3):
+            attempt_started = time.monotonic()
+            attempt_status = "error"
             try:
                 raw = client.chat_json(
                     [{"role": "user", "content": report_section_prompt(
@@ -1765,10 +1885,23 @@ class ReportEngine:
                     markdown = str(data.get("markdown", "")).strip()
                     llm_grounded = bool(data.get("grounded", False))
                     raw_claims = data.get("claims")
+                attempt_status = "success" if markdown else "empty"
             except AskCancelled:
+                attempt_status = "cancelled"
                 raise
             except Exception:
                 markdown, llm_grounded = "", False
+                attempt_status = "error"
+            finally:
+                if report_id and section_index >= 0:
+                    emit_section_attempt(
+                        deps.event_log,
+                        report_id=report_id,
+                        section_index=section_index,
+                        attempt=attempt,
+                        status=attempt_status,
+                        started=attempt_started,
+                    )
             if markdown:
                 break
         anchors = deps.evidence_context.parse_anchors(markdown, id_map) if markdown else []
@@ -1919,19 +2052,15 @@ class ReportEngine:
         other half went.  Carries indices and durations only — never a section
         title, question, or evidence text.
         """
-        try:
-            self.dependencies.event_log.emit({
-                "kind": "report_stage_timing",
-                "notebook_id": notebook_id,
-                "report_id": rid,
-                "stage": stage,
-                "ms": int((time.monotonic() - started) * 1000),
-                **extra,
-            })
-        except Exception:
-            # Timing is diagnostics; it must never become a second failure
-            # channel for a report that is otherwise fine.
-            pass
+        # ``notebook_id`` stays in the compatibility signature because callers
+        # already pass it, but the content-free event deliberately omits it.
+        emit_stage_timing(
+            self.dependencies.event_log,
+            report_id=rid,
+            stage=stage,
+            started=started,
+            **extra,
+        )
 
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
@@ -2059,7 +2188,10 @@ class ReportEngine:
                     draft_options["synthesis"] = section_synthesis
                 drafted = self._draft_section(
                     notebook_id, section, question, result, depth,
-                    synthesis_requested=synthesis_on, **draft_options
+                    synthesis_requested=synthesis_on,
+                    report_id=rid,
+                    section_index=i,
+                    **draft_options,
                 )
                 with lock:
                     status[i]["phase"] = (
@@ -2197,6 +2329,21 @@ class ReportEngine:
 
     # --- 入口:Stage B/C/D(生成阶段)——读 outline_json → 深挖 → 汇总 → done ---
     def generate(self, notebook_id, rid, question, depth: int = 2) -> None:
+        """Run generation in a fresh scope, independent from planning."""
+        with retrieval_run(
+            run_kind="report_generation",
+            event_log=self.dependencies.event_log,
+            fanout_limit=int(getattr(
+                self.settings,
+                "report_retrieval_fanout",
+                DEFAULT_REPORT_RETRIEVAL_FANOUT,
+            )),
+            correlation_id=rid,
+            cancel_event=self.cancel_event,
+        ):
+            return self._generate_run(notebook_id, rid, question, depth)
+
+    def _generate_run(self, notebook_id, rid, question, depth: int = 2) -> None:
         reports = self.dependencies.reports
         try:
             d = reports.get_report(notebook_id, rid)
@@ -2335,6 +2482,9 @@ class ReportEngine:
             and not section.get("failed")
             for section in sections
         )
+        final_editor_started = time.monotonic()
+        final_editor_failed = False
+        final_editor_cancelled = False
         try:
             if not has_successful_body:
                 raise ValueError("no successful report section to summarize")
@@ -2367,9 +2517,19 @@ class ReportEngine:
                 if str(item).strip()
             ][:8]
         except AskCancelled:
+            final_editor_cancelled = True
             raise
         except Exception:
-            pass
+            final_editor_failed = True
+        finally:
+            self._emit_stage_timing(
+                notebook_id,
+                rid,
+                "final_editor",
+                final_editor_started,
+                failed=final_editor_failed,
+                cancelled=final_editor_cancelled,
+            )
 
         # --- 全局引用重编号(按具体证据锚点去重,不再把同源不同元素折叠) ---
         references: List[dict] = []

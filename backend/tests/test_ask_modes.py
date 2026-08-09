@@ -69,6 +69,10 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
 
     service = AskService.__new__(AskService)   # dispatch 不触任何端口
     calls = {}
+    events = []
+    service.event_log = type(
+        "_Log", (), {"emit": lambda _self, event: events.append(event)}
+    )()
 
     def make(mid):
         def handler(notebook_id, payload, *, user_id,
@@ -81,8 +85,12 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
     for mid in ("ask_chunk", "ask_reasoning", "ask_graph"):
         monkeypatch.setattr(service, mid, make(mid), raising=False)
 
-    assert service.ask("nb", AskRequest(question="q"), user_id="u1").conclusion == "ask_chunk"
+    assert service.ask(
+        "nb", AskRequest(question="q"), user_id="u1", job_id="job-safe-id"
+    ).conclusion == "ask_chunk"
     assert calls["hit"] == ("ask_chunk", "u1")
+    assert events[0]["kind"] == "retrieval_run_stats"
+    assert events[0]["correlation_id"] == "job-safe-id"
     assert service.ask("nb", AskRequest(question="q", mode="graph"), user_id="u1").conclusion == "ask_graph"
     assert service.ask("nb", AskRequest(question="q", mode="reasoning"), user_id="u1").conclusion == "ask_reasoning"
     # 退役 id 映射与 facade 完全一致(保旧会话/书签不 422)
