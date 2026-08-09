@@ -682,6 +682,39 @@ test("decideMerge 撞 409 时置位待补发标记(供 rebuild 轮询终态自�
   );
 });
 
+test("codex R10:decideMerge 的 POST 提交期同样标记 submittingMaintenanceRef,finally 里清理"
+  + "(三处 POST——refreshUnifiedKg/settleOrRetryRebuild 的补发/decideMerge——全包)", async () => {
+  // decideMerge 落决定后启动的这次 rebuildUnifiedKg 同样会撞「POST 比首个 3s 轮询 tick
+  // 慢」的陈旧 idle 竞态:轮询先读到服务端旧的 idle 并当终态收工,随后这次 POST 才成功,
+  // 没人再轮询,这条决定生效不会被看见。此前只有 refreshUnifiedKg 与
+  // settleOrRetryRebuild 的补发包了这层标记,decideMerge 自己发起的那次漏了。
+  const page = await parseModule("page.tsx");
+  const body = findFunction(page, "decideMerge").getText(page);
+
+  const addAt = body.indexOf("submittingMaintenanceRef.current.add(nb);");
+  const postAt = body.indexOf("rebuildUnifiedKg(");
+  assert.ok(addAt >= 0, "decideMerge 必须在提交前标记 submittingMaintenanceRef");
+  assert.ok(postAt >= 0, "decideMerge 必须启动一次重新合并");
+  assert.ok(
+    addAt < postAt,
+    "标记必须在 await rebuildUnifiedKg 之前置上,否则 POST 在飞期间轮询读到的陈旧 idle"
+    + "不会被这个标记拦住",
+  );
+
+  const finallyAt = body.indexOf("finally {", postAt);
+  assert.ok(
+    finallyAt >= 0,
+    "decideMerge 必须有 finally 块清理提交期标记,否则某条失败路径(含 409 领养走的"
+    + "常规分支)会让标记永久卡住、轮询永远认为提交还在飞",
+  );
+  const deleteAt = body.indexOf("submittingMaintenanceRef.current.delete(nb);", finallyAt);
+  assert.ok(
+    deleteAt >= 0 && deleteAt - finallyAt < 60,
+    "finally 块必须紧接着清理提交期标记(submittingMaintenanceRef.current.delete(nb)),"
+    + "不能是外层 `finally { setDecidingMerge(null); }` 那个不相干的 finally",
+  );
+});
+
 test("finish 在刷新 IIFE 之前就检查待补发标记(命中标记的两条路都跳过本轮 Promise.all 刷新)", async () => {
   // codex R3 P2:relink 占槽期间,rebuild status 每个 3s tick 都回终态 idle
   // (refresh:true)。旧顺序是"先 Promise.all 整图刷新、finally 里才试补发"——标记
@@ -759,6 +792,51 @@ test("codex R4 P2(A):打开/切换笔记本时,服务端仍在跑的重新合并
     !body.includes("releaseNotebookClaim"),
     "这条 effect 只认领、不释放 —— idle/终态可能是本地正处在 pendingRebuildNotebookIds"
     + "之类的中间态,它无权替本地状态收尾",
+  );
+});
+
+test("codex R10:恢复 effect 把 fetchUnifiedKgStatus 并进同一次探测,任一维护任务 running"
+  + "且 unified 图 dirty 时重新认领待补发标记(重载后重建待补发意图)", async () => {
+  // pendingRebuildNotebookIds(decideMerge 撞 409 时留下的「待补发」标记)是纯前端
+  // state:重载页面/关掉标签页会把它连同其余 state 一起丢掉——但那条合并决定已经落库,
+  // 没有任何东西会在占槽任务收工后去补发一次能看见它的重新合并,只能等用户自己想起来
+  // 手动点。这里钉住:恢复 effect 必须把 fetchUnifiedKgStatus 并进同一次 Promise.all
+  // 探测,且只有在「任一维护任务仍在跑」与「unified 图已经 dirty」同时成立时才重新
+  // 认领待补发标记——不能无条件认领(没有任务在跑或图并不 dirty 时,认领只会制造一次
+  // 无意义的自动重建)。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf("fetchUnifiedKgRebuildStatus(nb).catch(() => null)");
+  assert.ok(start > 0, "找不到打开笔记本时的重新合并状态恢复(被删除或改名?守卫失效)");
+  const depsAt = source.indexOf("}, [currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到这条恢复 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  assert.ok(
+    body.includes("fetchUnifiedKgStatus(nb).catch(() => null)"),
+    "恢复 effect 必须把 fetchUnifiedKgStatus 并进同一次 Promise.all 探测(与既有的两个"
+    + "status 探测处同一批发出,不能另开一次请求)",
+  );
+
+  const guardAt = body.indexOf(
+    "if ((rebuildRunning || relinkRunning) && status?.dirty) {",
+  );
+  assert.ok(
+    guardAt >= 0,
+    "判据必须同时检查『任一维护任务仍在跑』(rebuildRunning || relinkRunning)与"
+    + "『unified 图已经 dirty』(status?.dirty)——变异①:删掉 dirty 条件、变成无条件"
+    + "认领,必须让这条断言报红",
+  );
+
+  const claimPendingAt = body.indexOf(
+    "setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));",
+    guardAt,
+  );
+  assert.ok(
+    claimPendingAt > guardAt && claimPendingAt - guardAt < 200,
+    "命中判据必须紧接着重新认领 pendingRebuildNotebookIds——变异②:把整段 if 块删掉,"
+    + "必须让这条断言报红(找不到判据之后的认领调用)",
   );
 });
 

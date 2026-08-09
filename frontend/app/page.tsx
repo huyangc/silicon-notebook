@@ -1347,13 +1347,30 @@ export default function Home() {
     Promise.all([
       fetchUnifiedKgRebuildStatus(nb).catch(() => null),
       fetchRelinkStatus(nb).catch(() => null),
-    ]).then(([rebuild, relink]) => {
+      fetchUnifiedKgStatus(nb).catch(() => null),
+    ]).then(([rebuild, relink, status]) => {
       if (cancelled) return;
-      if (rebuild && (rebuild.running || rebuild.status === "running")) {
+      const rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
+      const relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
+      if (rebuildRunning) {
         setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
       }
-      if (relink && (relink.running || relink.status === "running")) {
+      if (relinkRunning) {
         setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
+      }
+      // codex R10:pendingRebuildNotebookIds(decideMerge 撞 409 时留下的「待补发」标记)
+      // 是纯前端 state,重载页面或关掉标签页会把它连同其余 state 一起丢掉——但那条合并
+      // 决定已经落库,没有任何东西会在占槽任务收工后去补发一次能看见它的重新合并,只能
+      // 等用户自己想起来手动点。这里在恢复忙碌位的同一次探测里顺带查一次 unified 状态:
+      // 只要有维护任务仍在跑(说明当时可能正是占槽方)、且 unified 图已经 dirty(有变更
+      // 还没被一次重新合并吸收),就重新认领待补发标记——下面按忙碌位建键的 rebuild
+      // 轮询 effect 会在这次任务收尾时按既有语义自动补发一次 rebuildUnifiedKg。
+      // 安全性:这是「宁可多补发一次」的保守认领,不是精确复原——重载前 dirty 也可能来自
+      // 与这条决定无关的其它变更,补发因此可能是多余的一次。代价被版本闸兜住:输入未变的
+      // rebuildUnifiedKg 会在服务端毫秒级识别并原地收工(不是一次完整重算),宁可多一次
+      // 空转,也不让一条已经记录的决定永久悬空、图谱停在决定生效之前。
+      if ((rebuildRunning || relinkRunning) && status?.dirty) {
+        setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
       }
     });
     return () => { cancelled = true; };
@@ -5043,6 +5060,12 @@ export default function Home() {
       else await rejectMerge(nb, candidate.id);
       setPendingMerges((items) => withoutDecidedMerge(items, candidate));
       setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
+      // codex R10:这次 POST 与 refreshUnifiedKg/settleOrRetryRebuild 的补发同样会撞
+      // 「POST 比首个 3s 轮询 tick 慢」的陈旧 idle 竞态——轮询会先读到服务端旧的 idle
+      // 并当终态收工,随后这次 POST 才成功,没人再轮询,决定生效不会被看见。统一包上
+      // submittingMaintenanceRef,finally 里清理(不管成功/409/非 409 失败都不能让标记
+      // 永久卡住),与另两处提交期标记同一形态。
+      submittingMaintenanceRef.current.add(nb);
       try {
         await rebuildUnifiedKg(nb);
       } catch (err) {
@@ -5052,6 +5075,8 @@ export default function Home() {
         }
         setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
         setToast("合并已记录，将在当前任务完成后自动重新合并");
+      } finally {
+        submittingMaintenanceRef.current.delete(nb);
       }
       const pend = await fetchPendingMerges(nb);
       setPendingMerges(withoutDecidedMerge(pend, candidate));
