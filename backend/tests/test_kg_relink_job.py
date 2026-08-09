@@ -14,7 +14,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
-from app.repositories.ports import KgRelinkAlreadyRunning
+from app.repositories.ports import KgMaintenanceAlreadyRunning
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -50,7 +50,7 @@ def test_concurrent_second_start_is_rejected_while_the_first_runs(repo):
     try:
         assert entered.wait(timeout=10)
         assert repo.notebook_relink_status(nb)["running"] is True
-        with pytest.raises(KgRelinkAlreadyRunning):
+        with pytest.raises(KgMaintenanceAlreadyRunning):
             repo.start_notebook_relink(nb)
     finally:
         release.set()
@@ -103,7 +103,7 @@ def test_relink_single_flight_is_per_notebook(repo):
     second = repo.create_notebook(NotebookCreate(name="b")).id
     repo.start_notebook_relink(first)
     repo.start_notebook_relink(second)      # must not raise
-    with pytest.raises(KgRelinkAlreadyRunning):
+    with pytest.raises(KgMaintenanceAlreadyRunning):
         repo.start_notebook_relink(first)
 
 

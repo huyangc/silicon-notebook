@@ -258,6 +258,169 @@ def test_relink_status_404_unknown_notebook(client):
 
 
 # ---------------------------------------------------------------------------
+# POST /notebooks/{id}/unified-kg/rebuild  (「重新合并」, PR-E)
+# ---------------------------------------------------------------------------
+
+def test_unified_rebuild_404_unknown_notebook(client):
+    assert client.post("/api/notebooks/no-such/unified-kg/rebuild").status_code == 404
+
+
+def test_unified_rebuild_200_launches_background_and_returns_rebuilding(
+    client, monkeypatch
+):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    called = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, **kwargs: called.append((fn, args, kwargs)),
+    )
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    r = client.post(f"/api/notebooks/{nb}/unified-kg/rebuild")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "rebuilding"
+    assert body["notebook_id"] == nb
+    assert body["job_id"].startswith("ukj-")
+    # The old synchronous `{"clusters": N}` must be gone: a count returned before
+    # the pass ran would be a lie the browser then renders.
+    assert "clusters" not in body
+    # The click must not have done the work on the request thread.
+    assert len(called) == 1
+    assert called[0][1] == (nb, body["job_id"])
+    assert called[0][2]["name"] == f"unifiedkg-{nb}"
+
+
+def test_unified_rebuild_no_llm_check(client, monkeypatch):
+    """Clustering is deterministic — it must succeed with no LLM configured."""
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    bind_chat_client(real_repo, "kg_extract", MagicMock(configured=False))
+    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    assert client.post(f"/api/notebooks/{nb}/unified-kg/rebuild").status_code == 200
+
+
+def test_unified_rebuild_second_click_returns_409_while_running(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    submitted = []
+    monkeypatch.setattr(
+        background_jobs, "submit", lambda *a, **k: submitted.append(a),
+    )
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    first = client.post(f"/api/notebooks/{nb}/unified-kg/rebuild")
+    second = client.post(f"/api/notebooks/{nb}/unified-kg/rebuild")
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.headers.get("X-User-Message")     # 中文文案经 user_error 上屏
+    assert "重新合并" in second.json()["detail"]
+    assert len(submitted) == 1
+
+    other = client.post("/api/notebooks", json={"name": "nb2"}).json()["id"]
+    assert client.post(f"/api/notebooks/{other}/unified-kg/rebuild").status_code == 200
+
+
+def test_relink_and_rebuild_409_each_other_and_name_the_real_holder(
+    client, monkeypatch
+):
+    """One shared slot: both passes rewrite the clusters/communities. The 409 must
+    name the action actually running, or the user waits on the wrong button."""
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    assert client.post(f"/api/notebooks/{nb}/kg/relink").status_code == 200
+    blocked = client.post(f"/api/notebooks/{nb}/unified-kg/rebuild")
+    assert blocked.status_code == 409
+    assert "补上关联" in blocked.json()["detail"]
+
+    # Release the relink claim, then prove the block works the other way too.
+    real_repo.fail_notebook_relink_submission(
+        nb, client.get(f"/api/notebooks/{nb}/kg/relink/status").json()["job_id"]
+    )
+    assert client.post(f"/api/notebooks/{nb}/unified-kg/rebuild").status_code == 200
+    blocked = client.post(f"/api/notebooks/{nb}/kg/relink")
+    assert blocked.status_code == 409
+    assert "重新合并" in blocked.json()["detail"]
+
+
+def test_unified_rebuild_submission_failure_releases_the_claim(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+    no_raise_client = TestClient(client.app, raise_server_exceptions=False)
+
+    assert no_raise_client.post(
+        f"/api/notebooks/{nb}/unified-kg/rebuild"
+    ).status_code == 500
+    status = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/status").json()
+    assert status["running"] is False
+    assert status["status"] == "failed"
+
+    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
+    assert client.post(f"/api/notebooks/{nb}/unified-kg/rebuild").status_code == 200
+
+
+def test_unified_rebuild_status_reports_idle_then_terminal_count(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    idle = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/status")
+    assert idle.status_code == 200
+    assert idle.json() == {
+        "job_id": "", "notebook_id": nb, "status": "idle", "running": False,
+        "clusters": 0,
+    }
+
+    # Run the job body inline (submit is the only thing stubbed out) so the
+    # terminal counter the browser polls for comes from a real rebuild pass.
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, **kwargs: fn(*args),
+    )
+    started = client.post(f"/api/notebooks/{nb}/unified-kg/rebuild").json()
+    done = client.get(f"/api/notebooks/{nb}/unified-kg/rebuild/status").json()
+    assert done["job_id"] == started["job_id"]
+    assert done["status"] == "succeeded"
+    assert done["running"] is False
+
+
+def test_unified_rebuild_status_404_unknown_notebook(client):
+    assert client.get(
+        "/api/notebooks/no-such/unified-kg/rebuild/status"
+    ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Repo unit test: rebuild_notebook_kg calls delete then build
 # ---------------------------------------------------------------------------
 

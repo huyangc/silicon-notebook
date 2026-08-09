@@ -18654,6 +18654,7 @@
       },
       "/api/notebooks/{notebook_id}/unified-kg/rebuild": {
         "post": {
+          "description": "「重新合并」(background thread). Same shape as kg/relink above.\n\nIt runs off the request thread for the same reason relink does: the work is\nproportional to the notebook, not to the click. The version gate (force=False,\napplied inside `run_unified_kg_rebuild_job`) still makes an unchanged notebook\nanswer in milliseconds, but a real recluster streams seed representatives over\nthe whole graph — minutes to hours on a base-tier library, well past\nPostgreSQL's statement timeout, with a request worker pinned for the duration.\nNo LLM gate: clustering is deterministic and must keep working with no model\nconfigured. Single flight is shared with relink (409, see\n`_kg_maintenance_busy`), so neither pass can publish over the other's inputs.\nThe old synchronous `{\"clusters\": N}` is gone — the count now arrives from\n`unified-kg/rebuild/status` once the pass actually finishes.",
           "operationId": "rebuild_unified_kg_api_notebooks__notebook_id__unified_kg_rebuild_post",
           "parameters": [
             {
@@ -18691,6 +18692,48 @@
             }
           },
           "summary": "Rebuild Unified Kg"
+        }
+      },
+      "/api/notebooks/{notebook_id}/unified-kg/rebuild/status": {
+        "get": {
+          "description": "Latest 「重新合并」 state for this notebook — the browser's completion signal.\n\nMirrors kg/relink/status: ``status`` is running / succeeded / failed / idle,\nwhere ``idle`` covers \"never ran here\", \"the process that ran it restarted\"\nAND \"the shared slot is held by a relink pass\", so a bounded poll always\nterminates. ``clusters`` is zero until a run finishes. No error text crosses\nthis boundary — diagnostics stay in the event log.\n\nDeliberately separate from `unified-kg/status`: that one reports the derived\nstate of the graph (dirty / last_rebuild_at / viz artefacts) and its\n``building`` flag is about the visualization artefact, not this pass.",
+          "operationId": "unified_kg_rebuild_status_api_notebooks__notebook_id__unified_kg_rebuild_status_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Unified Kg Rebuild Status Api Notebooks  Notebook Id  Unified Kg Rebuild Status Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Unified Kg Rebuild Status"
         }
       },
       "/api/notebooks/{notebook_id}/unified-kg/status": {

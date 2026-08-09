@@ -1,4 +1,5 @@
 import { requestJson } from "./api-client.ts";
+import type { UnifiedKgRebuildStatus } from "./kg-rebuild-status.ts";
 import type { RelinkStatus } from "./kg-relink-status.ts";
 import type { ScaleIndexStatus } from "./scale-index.ts";
 import type {
@@ -33,11 +34,19 @@ export type IndexStatus = {
   scale_index: ScaleIndexStatus;
 };
 
+// 「重新合并」现在是后台任务:POST 只认领任务槽并返回 job_id,聚类数要等
+// unified-kg/rebuild/status 报出终态。绝不能拿这里的返回值假装拿到了结果。
 export const rebuildUnifiedKg = (nb: string) =>
-  requestJson<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, {
+  requestJson<KgBuildStartResponse>(`/notebooks/${nb}/unified-kg/rebuild`, {
     ...options,
     method: "POST",
   });
+
+export const fetchUnifiedKgRebuildStatus = (nb: string) =>
+  requestJson<UnifiedKgRebuildStatus>(
+    `/notebooks/${nb}/unified-kg/rebuild/status`,
+    options,
+  );
 
 export const buildKg = (nb: string) =>
   requestJson<KgBuildStartResponse>(`/notebooks/${nb}/kg/build`, {

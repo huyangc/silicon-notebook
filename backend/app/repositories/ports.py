@@ -112,18 +112,32 @@ class KgBuildAlreadyRunning(RuntimeError):
     """One notebook already has a durable running KG build job."""
 
 
-class KgRelinkAlreadyRunning(RuntimeError):
-    """One notebook already has an in-flight isolated-node relink pass.
+class KgMaintenanceAlreadyRunning(RuntimeError):
+    """One notebook already has an in-flight KG maintenance pass.
 
-    In-process rather than durable on purpose: relink is a zero-model
-    deterministic tail, so it does not belong in ``kg_build_jobs`` (whose
-    user-facing consumers would narrate it as a source-by-source analysis) and
+    ONE slot covers both zero-model maintenance passes — isolated-node relink and
+    the unified concept rebuild — because they are not independent: a rebuild
+    rewrites ``concept_clusters`` and the community partition wholesale while
+    relink appends edges to the very graph that clustering reads. Letting them
+    overlap does not just double the cost, it lets one pass publish over inputs
+    the other is still consuming. ``holder`` says which kind currently owns the
+    slot so the 409 can name the action the user actually has to wait for; the
+    two status views each report only their own kind and answer ``idle``
+    otherwise, so neither poll can be parked on the other's job.
+
+    In-process rather than durable on purpose: both passes are zero-model
+    deterministic work, so they do not belong in ``kg_build_jobs`` (whose
+    user-facing consumers would narrate them as a source-by-source analysis) and
     must not inherit that table's LLM-configured precondition.
     """
 
-    def __init__(self, notebook_id: str) -> None:
+    def __init__(self, notebook_id: str, holder: str) -> None:
         super().__init__(notebook_id)
         self.notebook_id = notebook_id
+        # "relink" | "rebuild" — the kind of pass currently holding the slot.
+        # Required, not defaulted: a default would let a future raise site tell
+        # the user to wait on an action that is not the one running.
+        self.holder = holder
 
 
 class CatalogJobAlreadyRunning(RuntimeError):
@@ -537,6 +551,10 @@ class KnowledgeLifecycleRepository(Protocol):
     def run_notebook_relink_job(self, notebook_id: str, job_id: str) -> dict: ...
     def fail_notebook_relink_submission(self, notebook_id: str, job_id: str) -> None: ...
     def rebuild_unified_kg(self, notebook_id: str, progress: Callable[[str, int, int], None] | None = None, force: bool = False) -> int: ...
+    def start_unified_kg_rebuild(self, notebook_id: str) -> dict: ...
+    def unified_kg_rebuild_status(self, notebook_id: str) -> dict: ...
+    def run_unified_kg_rebuild_job(self, notebook_id: str, job_id: str) -> int: ...
+    def fail_unified_kg_rebuild_submission(self, notebook_id: str, job_id: str) -> None: ...
     def unified_kg_status(self, notebook_id: str) -> dict: ...
 
 
