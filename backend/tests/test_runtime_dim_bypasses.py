@@ -178,12 +178,21 @@ def test_tier2_ann_guard_compares_runtime_dim_and_truncates_query(repo):
     _insert_ko(repo, nb.id, "ex1", "Bandgap Voltage Reference")   # 命中侧须 alive
     _insert_ko(repo, nb.id, "new1", "Precision Voltage Source")
     _insert_kvec(repo, nb.id, "new1", repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["precision"])[0])
+    # PR-C:命中侧的 canonical 由方法自己按命中 id 定点折叠(不再由调用方喂一份
+    # 整表 cluster_map),所以命中对象必须真有簇行。
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,canonical_description,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("cc-ex1", nb.id, "K-bandgapvoltagereference", "ex1",
+             "Bandgap Voltage Reference", "concept", "", NOW))
 
     idx = _FakeIdx(dim=16, labels=["ex1"])
     ann = _FakeAnn()
     out = repo._tier2_bridge_candidates_ann(
         nb.id, idx, ann, [{"object_id": "new1", "name": "Precision Voltage Source"}],
-        {"ex1": "K-bandgapvoltagereference"})
+        {"new1": ""})
 
     assert ann.query_dims and set(ann.query_dims) == {16}   # 查询已截断到运行时维
     assert out, "运行时维 ANN 下 Tier2 应产出候选而非被守卫静默拦下"

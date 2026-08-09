@@ -162,6 +162,44 @@ class GovernanceStore:
         raise ValueError(f"unsupported lifecycle merge statuses: {values!r}")
 
     @staticmethod
+    def merge_candidate_pairs_for_canonicals(
+        db: sqlite3.Connection, notebook_id: str, statuses, canonical_ids
+    ):
+        """``merge_candidate_pairs`` 的有界形态:只回**至少一端**落在
+        ``canonical_ids`` 里的那些对(PR-C)。
+
+        调用方(增量融合的 Tier2 桥接)拿这份结果只做一件事:判 ``frozenset((a,b))
+        in exclude``,而被判的每一对都恒含本次新对象的某个 canonical id。因此把行
+        限制到「一端命中」是这个消费方的**超集**,判定结果逐位一致;省下的是把整
+        本库的候选对搬进 Python frozenset 集合。
+
+        ``canonical_ids`` 必须已由调用方分批(``concept_merge_candidates`` 上只有
+        ``idx_candidates_nb_status``,canonical_a/b 无索引,两种写法都是 notebook
+        切片内的残余过滤;写成一条 OR 是为了**只扫一遍**而不是两遍)。"""
+        # statuses 校验在**空 id 早退之前**:调用方分批,空批是完全正常的输入,
+        # 若先早退,一个拼错的 statuses 就只在「恰好这一批非空」时才炸 —— 与
+        # `merge_candidate_pairs` 的 deny-by-default 口径分叉。
+        values = tuple(statuses)
+        if values == ("pending",):
+            status_sql = "status='pending'"
+        elif values == ("confirmed", "rejected", "deferred"):
+            status_sql = "status IN ('confirmed','rejected','deferred')"
+        elif values == ("confirmed", "rejected", "deferred", "pending"):
+            status_sql = "status IN ('confirmed','rejected','deferred','pending')"
+        else:
+            raise ValueError(f"unsupported lifecycle merge statuses: {values!r}")
+        ids = list(dict.fromkeys(canonical_ids))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT canonical_a, canonical_b FROM concept_merge_candidates "
+            f"WHERE notebook_id=? AND {status_sql} "
+            f"AND (canonical_a IN ({placeholders}) OR canonical_b IN ({placeholders}))",
+            [notebook_id, *ids, *ids],
+        ).fetchall()
+
+    @staticmethod
     def valid_object_ids(db: sqlite3.Connection, object_ids):
         return KnowledgeStore.valid_object_ids(db, object_ids)
 
@@ -218,12 +256,22 @@ class GovernanceStore:
         """Insert cluster member rows, skipping member ids already present in
         the (notebook, type) slice — the append_clusters idempotency contract.
         After delete_clusters in the same transaction the existing set is
-        empty, so the write_clusters path inserts every row unchanged."""
+        empty, so the write_clusters path inserts every row unchanged.
+
+        PR-C 有界化:去重探测只查**本次要插入的** member id,不再把整个
+        ``(notebook, object_type)`` 切片读进内存——那一读发生在写事务内(此处
+        已 ``BEGIN IMMEDIATE``),9.1M 成员的库上等于把全局写锁按住整整一次全表
+        扫描。逐位一致的理由是纯集合论:下面的循环只问 ``r["member_object_id"]
+        in existing``,而被问到的 id 恰好就是 ``rows`` 里的那些,故把 ``existing``
+        限制到 ``rows`` 的 id 集合不改变任何一次判定,``added`` 与写入的行也逐位
+        不变。分批走 ``uq_clusters_notebook_type_member(notebook_id,
+        object_type, member_object_id)`` 这条唯一索引 —— 前两列等值 + 第三列
+        IN,是精确 seek 而不是残余过滤。"""
         if not connection.in_transaction:
             connection.execute("BEGIN IMMEDIATE")
-        existing = {r["member_object_id"] for r in connection.execute(
-            "SELECT member_object_id FROM concept_clusters WHERE notebook_id=? AND object_type=?",
-            (notebook_id, object_type)).fetchall()}
+        existing = self._existing_cluster_members(
+            connection, notebook_id, object_type, rows
+        )
         added = 0
         for r in rows:
             if r["member_object_id"] in existing:
@@ -237,6 +285,27 @@ class GovernanceStore:
             existing.add(r["member_object_id"])
             added += 1
         return added
+
+    def _existing_cluster_members(
+        self,
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        rows: List[dict],
+    ) -> set:
+        """本次 ``rows`` 的 member id 中,已经在该切片里的那些(有界 IN,分批)。"""
+        member_ids = list(dict.fromkeys(r["member_object_id"] for r in rows))
+        size = max(1, int(self.seams.in_chunk_size()))
+        found = set()
+        for offset in range(0, len(member_ids), size):
+            batch = member_ids[offset:offset + size]
+            placeholders = ",".join("?" for _ in batch)
+            found.update(r["member_object_id"] for r in connection.execute(
+                f"SELECT member_object_id FROM concept_clusters "
+                f"WHERE notebook_id=? AND object_type=? "
+                f"AND member_object_id IN ({placeholders})",
+                [notebook_id, object_type, *batch]).fetchall())
+        return found
 
     # --------------------------------------------------------------- merge
     def insert_merge_candidate(

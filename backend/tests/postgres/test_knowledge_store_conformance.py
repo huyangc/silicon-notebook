@@ -1529,6 +1529,92 @@ def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     assert dict(row) == {"status": "running", "total": 1, "done": 0, "error": ""}
 
 
+def test_cluster_append_member_probe_is_bounded_and_batched(knowledge_harness):
+    """PR-C:去重探测只查本次要插入的 member id,并按 seams 的批量上限分批。
+
+    双后端同义 —— SQLite 侧的对应用例是
+    ``tests/test_incremental_fuse_bounded.py::test_insert_clusters_batches_member_probe``。
+    """
+    store = knowledge_harness.governance
+    probes = []
+
+    class Recorder:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, params=None):
+            sql = " ".join(str(query).split())
+            if sql.startswith("SELECT member_object_id FROM concept_clusters"):
+                probes.append((sql, list(params or [])))
+            return self.connection.execute(query, params)
+
+    # 行数必须**超过** harness 的 in_chunk_size(=100),否则「分批」这半个断言
+    # 是空的:一批装得下就永远只观察到一条语句(评审 P2)。
+    chunk = int(store.seams.in_chunk_size())
+    total = chunk * 2 + 7
+    rows = [{"canonical_id": f"canonical-bounded-{index}",
+             "member_object_id": f"ko-bounded-{index}",
+             "canonical_name": f"name-{index}"} for index in range(total)]
+    with knowledge_harness.database.write() as connection:
+        added = store.insert_clusters(
+            Recorder(connection), "nb-personal", "concept", rows, NOW)
+
+    assert added == total
+    assert probes, "the dedup probe must still run"
+    for sql, params in probes:
+        # 有界:必须带 IN,且参数只有 notebook/type + 本次的 member id。
+        assert " IN (" in sql
+        assert params[0] == "nb-personal" and params[1] == "concept"
+        assert set(params[2:]) <= {row["member_object_id"] for row in rows}
+    probed = [value for _sql, params in probes for value in params[2:]]
+    assert sorted(probed) == sorted(row["member_object_id"] for row in rows)
+    # 分批:每条语句的 id 数不超过上限,且确实拆成了三条(100/100/7)。
+    assert [len(params) - 2 for _sql, params in probes] == [chunk, chunk, 7]
+
+
+def test_merge_candidate_pairs_for_canonicals_is_bounded_by_either_endpoint(
+    knowledge_harness,
+):
+    """PR-C 新增的有界读:只回**至少一端**命中给定 canonical id 的候选对。"""
+    store = knowledge_harness.governance
+    with knowledge_harness.database.write() as connection:
+        for index, (a, b, status) in enumerate((
+            ("K-mine", "K-other", "pending"),
+            ("K-far-a", "K-mine", "pending"),          # 命中 canonical_b 一侧
+            ("K-unrelated-a", "K-unrelated-b", "pending"),
+            ("K-mine", "K-decided", "confirmed"),      # 状态不符
+        )):
+            connection.execute(
+                "INSERT INTO concept_merge_candidates "
+                "(id,notebook_id,canonical_a,canonical_b,score,status,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (f"cm-bounded-{index}", "nb-personal", a, b, 0.9, status, NOW, NOW))
+
+    with knowledge_harness.database.connect() as connection:
+        rows = store.merge_candidate_pairs_for_canonicals(
+            connection, "nb-personal", ("pending",), ["K-mine"])
+        empty = store.merge_candidate_pairs_for_canonicals(
+            connection, "nb-personal", ("pending",), [])
+        decided = store.merge_candidate_pairs_for_canonicals(
+            connection, "nb-personal", ("confirmed", "rejected", "deferred"), ["K-mine"])
+
+    assert sorted((r["canonical_a"], r["canonical_b"]) for r in rows) == [
+        ("K-far-a", "K-mine"), ("K-mine", "K-other")]
+    assert empty == []
+    assert [(r["canonical_a"], r["canonical_b"]) for r in decided] == [
+        ("K-mine", "K-decided")]
+    # deny-by-default:非法 statuses 必须**在**空 id 早退之前就炸,否则调用方分批
+    # 时一个拼错的 statuses 只在「恰好这一批非空」才报错(评审 P3)。
+    for canonical_ids in (["K-mine"], []):
+        with pytest.raises(ValueError):
+            with knowledge_harness.database.connect() as connection:
+                store.merge_candidate_pairs_for_canonicals(
+                    connection, "nb-personal", ("bogus",), canonical_ids)
+
+
 def test_cluster_append_dedupes_repeated_member_within_one_input(
     knowledge_harness,
 ):

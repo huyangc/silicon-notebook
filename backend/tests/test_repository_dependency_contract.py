@@ -74,7 +74,12 @@ LIFECYCLE_STORE_CALLS = {
         "insert_clusters",
         "insert_merge_candidate",
         "insert_pending_merge_rows",
-        "merge_candidate_pairs",
+        # `merge_candidate_pairs` (whole-notebook) is deliberately ABSENT: the
+        # incremental fusion path reads merge candidates bounded by this source's
+        # own bridge canonical ids now (PR-C), and this exact-set assertion is
+        # what makes a regression to the unbounded read fail closed — mirroring
+        # the `relink_rows` note above.
+        "merge_candidate_pairs_for_canonicals",
         "sweep_orphan_clusters",
         "valid_object_ids",
     },
@@ -92,6 +97,12 @@ LIFECYCLE_STORE_CALLS = {
         "cluster_evidence_rows",
         "cluster_fold_rows",
         "cluster_input_facts",
+        # `cluster_map_rows`(整表范围读)是**刻意保留**的一处,不是遗漏:增量融合
+        # 里无 ANN 的暴力桥接分支要折叠被 `kg_incremental_tier2_max_entities` 界住
+        # 的整批既有 concept,定点分批实测比一次范围读慢约 20×(数字与论证登记在
+        # `incremental_fuse_source` 的 ex_cmap 处)。有界化的是 ANN 分支,走上面那条
+        # `cluster_fold_rows`。
+        "cluster_map_rows",
         "communities_count",
         "discard_board_dependent_kg_analysis_artifacts",
         "community_graph_rows",

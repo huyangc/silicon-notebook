@@ -42,7 +42,9 @@ import re
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple,
+)
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
@@ -112,6 +114,42 @@ def _in_relink_batches(ids: List[str]) -> Iterator[List[str]]:
     values = list(dict.fromkeys(ids))
     for index in range(0, len(values), _RELINK_ID_BATCH_SIZE):
         yield values[index:index + _RELINK_ID_BATCH_SIZE]
+
+
+# 增量融合(PR-C 有界化)每条 IN 语句的 id 上限。两个值不同,因为两条查询的形状不同:
+#
+# · 桥接候选排除集把同一份 id 列表**用两次**(canonical_a IN … OR canonical_b IN …),
+#   单条语句的参数数是这个值的两倍 +1;PG 的 IN 列表规划耗时对 N 超线性,故取 300 ——
+#   与 knowledge_context 有界化(PR#476)同一条保守惯例。
+# · canonical 折叠走既有的 `cluster_fold_rows`,单列 IN,沿用仓库既有的 900
+#   (`_IN_CHUNK` / `_candidate_cluster_map` 已按这个值发同一条语句)。在这条查询上
+#   **批越大越好**:SQLite 不 ANALYZE 时 planner 选 `idx_clusters_nb` 而不是
+#   `idx_clusters_member`,每条语句都要扫一遍该 notebook 的索引段(实测 40 万行库
+#   42.7ms/条,加 `INDEXED BY idx_clusters_member` 则 0.52ms/条),所以分得越碎越亏;
+#   PG 侧两种批量都走 idx_clusters_member 的 bitmap 扫(实测 0.44ms/300 id)。
+#
+# ⚠权衡的**另一侧**(评审 P2,与上面那条互为反面,别只读一半):既然每批 = 一次
+# 该 notebook 的索引段扫描,定点折叠的总成本就随**批数**线性涨,只在「要折叠的
+# id 数 ≪ 库规模」时才赢过一次范围读。ANN 分支永远在这一侧(每次融合只折叠几十个
+# 命中 = 1 批);而无 ANN 的暴力分支要折叠的是被 `kg_incremental_tier2_max_entities`
+# (默认 5 万)界住的**整批既有 concept**,拆成 56 批比一次范围读慢约 20×,方向
+# 是反的。所以那一支已撤回范围读 —— 实测数字与完整论证登记在
+# `incremental_fuse_source` 里 ex_cmap 处,此处不重复。
+#
+# PG 侧还有一条与批量大小无关、但同属这个权衡的观察:当**单个 notebook 在
+# concept_clusters 里占主导份额**时,planner 对 IN 列表的选择率估计会接近全表,
+# 于是把这条查询翻成 Seq Scan;这也是 canonical id 那一档取 300 而非 900 的另一半
+# 理由(列表越短,估出来的选择率越低,越留在索引侧)。
+_FUSE_ID_BATCH_SIZE = 300
+_FUSE_FOLD_BATCH_SIZE = 900
+
+
+def _in_fuse_batches(ids: Iterable[str],
+                     size: int = _FUSE_ID_BATCH_SIZE) -> Iterator[List[str]]:
+    """Split ids into bounded IN batches (dedup, order preserved)."""
+    values = list(dict.fromkeys(ids))
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
 
 
 class ModelSkipPolicy:
@@ -1370,30 +1408,69 @@ class KnowledgeLifecycleService:
             if swept > 0:
                 self._bump_cluster_mutation_seq(db, notebook_id)
         from app.services.kg_merge import place_new_concepts, _norm
-        # P1-2: one shared cluster_map load for the whole fuse call (Tier1/Tier2
-        # concept pass below + the non-concept claim/formula/procedure pass at the
-        # end). cluster_map is cache-hit-cheap after the first call within this
-        # method (concept_clusters isn't invalidated until _invalidate_unified_cache
-        # at the very end), so this is defensive rather than a correctness
-        # requirement — but it also means we never pay the cache-lookup+version-probe
-        # overhead twice. Reusing the pre-Tier1-append snapshot for the non-concept
-        # pass is safe: canonical ids are namespaced by type-specific prefixes
-        # (K-/KL-/KF-/KP-), so place_new_concepts' collision check for claims/
-        # formulas/procedures never depends on concepts Tier1 just appended.
-        cmap = self.cluster_map(notebook_id)
+        # PR-C 有界化:这里曾经 `cmap = self.cluster_map(notebook_id)` —— 整表物化
+        # {member_object_id: canonical_id}(生产 9.1M 行 ≈2GB dict),而且每次融合的
+        # append 都推进 cluster_mutation_seq、当场作废版本缓存,于是下一个来源再付
+        # 一遍(fold 路径按 delta 来源循环调本方法 = O(D×全库))。三个消费方各自的
+        # 结论**不同**,逐个登记:
+        #   · place_new_concepts:cmap 参数**可证冗余**,已删(证明在它的 docstring)。
+        #   · _tier2_bridge_candidates_ann:ANN 命中 id → `cluster_fold_rows` 定点,
+        #     每次融合只折叠几十个命中。这是唯一真正有界化的一处,也是生产大库
+        #     实际走的那一支。
+        #   · 无 ANN 的暴力分支:**撤回**有界化,仍读一次整表范围(见下面 ex_cmap
+        #     处的登记)—— 它要折叠的是被 max_entities 界住的整批既有 concept,
+        #     定点反而慢 20×。
+        # 版本缓存 `cluster_map()` 三处都不再用:它会把这份 dict 留在进程里,而这里
+        # 用完即弃;何况每次 append 都会当场作废它,缓存本就不成立。
         with self._connect() as db:
             new = self.knowledge.incremental_object_rows(
                 db, notebook_id, source_id, "concept"
             )
-            cn = self.governance_store.incremental_cluster_rows(
-                db, notebook_id, "concept"
+            new_objs = [{"object_id": r["id"],
+                         "name": json.loads(r["payload"] or "{}").get("name", "")}
+                        for r in new]
+            # 本源没有新 concept 时,canon 名录一个字都用不上 —— 旧代码无条件先扫
+            # 一遍再丢掉。读仍留在**同一个连接**里,快照口径与旧实现逐位一致。
+            cn = (
+                self.governance_store.incremental_cluster_rows(
+                    db, notebook_id, "concept"
+                )
+                if new_objs else []
             )
-        new_objs = [{"object_id": r["id"],
-                     "name": json.loads(r["payload"] or "{}").get("name", "")} for r in new]
         if new_objs:
+            # ⚠登记:这一读**无法**安全收窄,刻意保留该 (notebook, object_type)
+            # 切片的 DISTINCT 扫描。place_new_concepts 对它有两个消费:①按候选 cid
+            # 定点取簇名(有界);②整份 values() 喂 build_acronym_alias_map —— 后者
+            # 要在既有簇名里找出形如「Full (ACR)」的定义,把新来的裸缩写 "ACR" 并进
+            # Full 的簇。
+            # 不能收窄的理由是**别名表的键不可点查**:它是 _norm(括号内 token),既不是
+            # canonical_id 也不是 canonical_name 的任何前缀/子串位置固定的形态,反查
+            # 等于枚举「首字母缩写等于 s」的所有 Full。真要下推,只能对每个新概念种子
+            # 发一条 `canonical_name LIKE '%(csa)%'` —— canonical_name 上没有可用索引,
+            # 那是**每来源 N 条**无索引扫描去换掉**一条**切片扫描,方向反了。
+            # (曾经这里写的理由是「LIKE 看原始列值会漏掉全角括号（ＣＳＡ）」,那是错的:
+            #  build_acronym_alias_map 的正则跑在**原始** name 上、不经 NFKC,实测
+            #  'Compressed Sparse Attention（ＣＳＡ）' 今天就产出空别名表,压根进不来。
+            #  收窄的真实障碍是上面那条,与全角无关。)
+            # 已收窄的是**触发次数**:仅在本源确有该类型新对象时才读(上面的条件),
+            # 非 concept 类型同理(见下)。
             canon_names = {r["canonical_id"]: r["canonical_name"] for r in cn}
-            rows = place_new_concepts(new_objs, cmap, canon_names,
+            rows = place_new_concepts(new_objs, canon_names,
                                       seed_fn=lambda o: _norm(o["name"]), id_prefix="K-")
+            # ⚠折叠时刻必须冻结在 append **之前**(双评审同条 P1)。master 在方法
+            # 开头读一次整表 cluster_map,所以本源刚抽出的新 concept 在那份快照里
+            # **没有簇行** → Tier2 的 ANN 命中里凡是同源新对象都被
+            # `if not other_cid: continue` 跳掉 = 「新↔新」桥接推迟到下一次索引
+            # 重建(_tier2_bridge_candidates_ann docstring 的原话)。若改成 append
+            # 之后再定点查,新对象已经有簇行了,就会凭空多产一批「新↔新」候选灌进
+            # 「待确认合并」人审队列 —— 那正是仓库专门治理过的方向。
+            # 这里在 append 前把这批 id 折叠一次并预置进 Tier2 的 memo:append 只
+            # **新增**本源的 member 行、不改任何既有行(insert_clusters 跳过已存在
+            # 的 member),所以「预置这批 + 之后只对既有对象定点查」与 master 的
+            # pre-append 快照逐位一致。re-fuse(同一来源第二次融合)时这批 id 已经
+            # 有簇行,冻结下来的是**命中值**而不是缺失 —— master 第二次融合确实会
+            # 看见它们并产出这类对,所以不能一律记成 miss。
+            frozen_canonical = self._freeze_new_object_canonicals(notebook_id, new_objs)
             self.append_clusters(notebook_id, rows, object_type="concept")
             # Tier2 桥接候选来源三分支(P1-3,perf audit):
             #   1) 有可用 kg ANN(即使版本漂移/stale,advisory 桥接可接受)→ ANN 近邻查询,
@@ -1408,7 +1485,7 @@ class KnowledgeLifecycleService:
             cands: list = []
             if ann is not None:
                 cands = self._tier2_bridge_candidates_ann(
-                    notebook_id, idx, ann, new_objs, cmap)
+                    notebook_id, idx, ann, new_objs, frozen_canonical)
             else:
                 # The ANN branch never consumes the existing concept payloads:
                 # its labels/vectors already come from the persisted scale index.
@@ -1422,10 +1499,13 @@ class KnowledgeLifecycleService:
                         db, notebook_id, source_id, "concept", exclude_source=True
                     )
             if ann is None and len(ex) <= self.settings.kg_incremental_tier2_max_entities:
+                # PR-C:桥接候选对恒含本次新对象的某个 canonical id(见
+                # _bridge_canonical_ids),故 pending/已决两份排除集都按这些 id 有界取。
+                my_cids = self._bridge_canonical_ids(new_objs)
                 with self._connect() as db:
                     vrows = self.knowledge.embedding_rows(db, notebook_id)
-                    pend = self.governance_store.merge_candidate_pairs(
-                        db, notebook_id, ("pending",)
+                    pend = self._bridge_exclude_rows(
+                        db, notebook_id, ("pending",), my_cids
                     )
                 # 按 settings.embed_dim 过滤(同 rebuild_unified_kg:丢弃旧 embedder 的异维向量)。
                 # 运行时截断旁路(计划 §1.2 旁路 2):两步分离、顺序不可反 ——
@@ -1449,13 +1529,32 @@ class KnowledgeLifecycleService:
                 # 直接查(含 deferred),而非 decided_pairs()(仅 confirmed/rejected)——否则
                 # deferred 概念对会在新源桥接时被重新入队,违背「deferred 不回流」。
                 with self._connect() as _db:
-                    _decided = self.governance_store.merge_candidate_pairs(
-                        _db, notebook_id, ("confirmed", "rejected", "deferred")
+                    _decided = self._bridge_exclude_rows(
+                        _db, notebook_id, ("confirmed", "rejected", "deferred"),
+                        my_cids,
                     )
+                    # ⚠这一支刻意**不**做有界折叠(评审 P2,已撤回)。这是本 PR 里
+                    # 「有界化」唯一一处被实测否掉的消费方,数字登记在这里,别处只引用:
+                    # 本分支的准入闸 `kg_incremental_tier2_max_entities`(默认 5 万)
+                    # 已经把 existing_items 的规模界住,而 SQLite 无 ANALYZE 时
+                    # `member_object_id IN (…)` 退化成 idx_clusters_nb 上的残余过滤
+                    # (登记在 _fold_canonical_ids),于是 5 万 id 拆 900/批 = 56 次
+                    # 索引段扫描。两次独立实测同向:评审树 301.5ms vs 一次范围读
+                    # 14.8ms(20.4×);本机 35 万行 concept_clusters 上 266ms vs
+                    # 15.1ms(17.6×)。有界化在这里是净负。同一支本来就要
+                    # `embedding_rows(notebook)` 全表读向量,这条范围读没有引入新的
+                    # 数量级。
+                    # 走 store 原语而**不**走版本缓存的 `self.cluster_map()`:后者会把
+                    # 这份 dict 留在进程里(9.1M 行 ≈2GB),这里用完即弃;顺带也收窄了
+                    # P2-4 的竞态窗口(与 _decided 同一个连接、同一时刻取)。
+                    # 时刻:这一读在 append 之后,但 existing_items 来自
+                    # `exclude_source=True`,恒不含本源新对象,而 append 只新增本源
+                    # member 行 —— 被 `.get()` 的每个键的值都与 append 前相同。
+                    ex_cmap = self.unified_kg.cluster_map_rows(_db, notebook_id)
                 exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
                 exclude |= {frozenset((r["canonical_a"], r["canonical_b"])) for r in pend}
                 from app.services.kg_merge import detect_bridge_candidates
-                cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, cmap, exclude)
+                cands = detect_bridge_candidates(new_objs, new_vecs, existing_items, vecs, ex_cmap, exclude)
             elif ann is None:
                 self.event_log.emit({
                     "kind": "tier2_skipped", "notebook_id": notebook_id,
@@ -1476,21 +1575,108 @@ class KnowledgeLifecycleService:
                 trows = self.knowledge.incremental_object_rows(
                     db, notebook_id, source_id, t
                 )
-                tcn = self.governance_store.incremental_cluster_rows(
-                    db, notebook_id, t
+                tnew = [{"object_id": r["id"], "payload": json.loads(r["payload"] or "{}"),
+                         "name": json.loads(r["payload"] or "{}").get("name", "")}
+                        for r in trows]
+                # 本源没有该类型的新对象时(常态:大多数来源只产 concept+claim),
+                # 旧代码仍会为 claim/formula/procedure 各扫一遍整个类型切片再丢掉。
+                # 读仍在同一连接内,快照口径与旧实现逐位一致。
+                tcn = (
+                    self.governance_store.incremental_cluster_rows(db, notebook_id, t)
+                    if tnew else []
                 )
-            tnew = [{"object_id": r["id"], "payload": json.loads(r["payload"] or "{}"),
-                     "name": json.loads(r["payload"] or "{}").get("name", "")} for r in trows]
             if not tnew:
                 continue
+            # ⚠同上登记:acronym 别名表要整份既有簇名,不可点查(见 concept 分支注释)。
             tcanon = {r["canonical_id"]: r["canonical_name"] for r in tcn}
-            trows_w = place_new_concepts(tnew, cmap, tcanon,
+            trows_w = place_new_concepts(tnew, tcanon,
                                          seed_fn=lambda o, _s=sfn: _s(o), id_prefix=prefix)
             self.append_clusters(notebook_id, trows_w, object_type=t)
         self._invalidate_unified_cache(notebook_id)
 
-    def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann, new_objs: list,
-                                     cluster_map_: Dict[str, str]) -> list:
+    @staticmethod
+    def _bridge_canonical_ids(new_objs: list) -> List[str]:
+        """本次新对象在 Tier2 桥接里用的 canonical id(``my_cid``)。
+
+        必须与 ``kg_merge.detect_bridge_candidates`` 和
+        ``_tier2_bridge_candidates_ann`` 内联的那条式子**逐字**同构 ——
+        ``"K-" + seed_or_unique(_norm(name), object_id)``。注意它刻意**不**过
+        ``_seed_with_alias``:桥接侧从来不做 acronym 别名重定向(与
+        ``place_new_concepts`` 的既有差异,本 PR 不改)。这些 id 是排除集查询的
+        有界键——凡是会被判 ``frozenset((a, b)) in exclude`` 的对,``a``/``b``
+        必有一个出自这里。"""
+        from app.services.kg_merge import _norm, seed_or_unique
+
+        return list(dict.fromkeys(
+            "K-" + seed_or_unique(_norm(o.get("name", "")), o["object_id"])
+            for o in new_objs
+        ))
+
+    def _freeze_new_object_canonicals(
+        self, notebook_id: str, new_objs: list
+    ) -> Dict[str, str]:
+        """本源新对象在 **append 之前**各自的 canonical(没有簇行的记 ``""``)。
+
+        这是 Tier2 折叠的时刻锚点,合同见 ``incremental_fuse_source`` 里的登记:
+        master 的整表 ``cluster_map`` 读在任何 append 之前,所以这批 id 在 Tier2
+        眼里要么缺失(首次融合)、要么是上一轮融合留下的值(re-fuse)。调用方必须在
+        ``append_clusters`` **之前**调本方法,并把结果整份交给
+        ``_tier2_bridge_candidates_ann`` 当 memo 种子 —— 那之后的定点查询就只会落在
+        既有对象上,而 append 不改既有对象的任何一行。
+
+        ``""`` 是刻意的负记录而不是不放键:消费侧判的是 ``if not other_cid``,
+        对 ``None``/``""`` 结果相同,而放键能保证 memo 认为它「已解出」、不会在
+        append 之后再去查一次(查到的就是错的那一份)。
+
+        成本:``ceil(len(new_objs) / _FUSE_FOLD_BATCH_SIZE)`` 条语句,单来源的新
+        concept 数常态是几十到几百,即 1 条。"""
+        frozen: Dict[str, str] = {o["object_id"]: "" for o in new_objs}
+        if not frozen:
+            return frozen
+        with self._connect() as db:
+            frozen.update(self._fold_canonical_ids(db, notebook_id, list(frozen)))
+        return frozen
+
+    def _bridge_exclude_rows(self, db, notebook_id: str, statuses, canonical_ids):
+        """有界读取排除用的候选对(至少一端命中 ``canonical_ids``),分批。"""
+        out: list = []
+        for batch in _in_fuse_batches(canonical_ids):
+            out.extend(self.governance_store.merge_candidate_pairs_for_canonicals(
+                db, notebook_id, statuses, batch
+            ))
+        return out
+
+    def _fold_canonical_ids(
+        self, db, notebook_id: str, object_ids: Iterable[str]
+    ) -> Dict[str, str]:
+        """``{member_object_id: canonical_id}``,**只**为传进来的这些 id(分批)。
+
+        与整表 ``cluster_map`` 在每个被查到的键上逐位相同(同一张表、同一个
+        notebook 谓词、同一列),差别只在没被查的键不返回——而调用方对那些键本来
+        就只会 ``.get()`` 出 ``None``。
+
+        ⚠已登记的残余代价(不在本 PR 修):``cluster_fold_rows`` 的
+        ``WHERE notebook_id=? AND member_object_id IN (…)`` 在**没有 ANALYZE 的
+        SQLite** 上被 planner 选进 ``idx_clusters_nb``,member 谓词退化成残余过滤,
+        于是每条语句仍要扫一遍该 notebook 的索引段(实测 40 万行单库:42.7ms/条;
+        改用 ``INDEXED BY idx_clusters_member`` 是 0.52ms/条,82×)。PostgreSQL 有
+        统计信息,同一条语句走 ``idx_clusters_member`` 的 bitmap 扫(实测
+        0.44ms/300 id),不受影响。这里刻意**不**顺手加 ``INDEXED BY``:那会改掉
+        一条被检索侧共用的原语的**返回行序**,而 ``retrieval_candidates`` 的
+        ``cluster_names.setdefault(canonical_id, name)`` 是按行序取首个名字的
+        (同一 canonical_id 下 canonical_name 并不保证一致),属本 PR 之外的可观察
+        变化 —— 也不加索引迁移。即便如此,本方法相对旧的整表 ``cluster_map`` 仍是
+        净胜:不再把 900 万行搬进 Python、不再建 2GB dict、不再每次融合作废版本缓存。
+        """
+        folded: Dict[str, str] = {}
+        for batch in _in_fuse_batches(object_ids, _FUSE_FOLD_BATCH_SIZE):
+            for row in self.unified_kg.cluster_fold_rows(db, notebook_id, batch):
+                folded[row["member_object_id"]] = row["canonical_id"]
+        return folded
+
+    def _tier2_bridge_candidates_ann(self, notebook_id: str, idx, ann,
+                                     new_objs: list,
+                                     frozen_canonical: Dict[str, str]) -> list:
         """ANN-backed Tier2 bridge candidate detection (P1-3, perf audit).
 
         Same candidate-set semantics as `kg_merge.detect_bridge_candidates`
@@ -1521,6 +1707,20 @@ class KnowledgeLifecycleService:
         concurrent read-only queries against one index handle, so calling this
         from extraction job worker threads (where incremental_fuse_source runs)
         needs no extra locking.
+
+        PR-C 有界化:此方法曾收一份整表 ``cluster_map``,只为 ``.get(nid)`` 折叠
+        ANN 命中的那几十个节点。现在按命中 id 走既有有界原语 ``cluster_fold_rows``
+        并在本次调用内 memo(同一份命中在 k 翻倍重查、以及跨新对象之间会重复出现,
+        memo 让每个 id 至多查一次;存活位与折叠共用同一个连接块)。排除集同理:
+        每一对被判的候选都含本次的 ``my_cid``,故按 ``_bridge_canonical_ids``
+        有界取。
+
+        ``frozen_canonical`` 是**调用合同**,不是可选优化:它必须是
+        ``_freeze_new_object_canonicals`` 在 ``append_clusters`` **之前**为本批
+        ``new_objs`` 的每个 id 取到的 canonical(缺失记 ``""``),整份作为 memo 的
+        初值。上面那段说的「新↔新推迟到下一次重建」只有在这个前提下才成立 ——
+        没有它,append 刚写进去的簇行会让同源新对象在这里彼此配对,凭空产出一批
+        人审候选。
         """
         import numpy as np
         from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
@@ -1537,8 +1737,9 @@ class KnowledgeLifecycleService:
             new_rows = self.knowledge.embedding_rows_for_objects(
                 db, notebook_id, [o["object_id"] for o in new_objs]
             )
-            _decided = self.governance_store.merge_candidate_pairs(
-                db, notebook_id, ("confirmed", "rejected", "deferred", "pending")
+            _decided = self._bridge_exclude_rows(
+                db, notebook_id, ("confirmed", "rejected", "deferred", "pending"),
+                self._bridge_canonical_ids(new_objs),
             )
         exclude = {frozenset((r["canonical_a"], r["canonical_b"])) for r in _decided}
         new_vecs = {}
@@ -1580,15 +1781,41 @@ class KnowledgeLifecycleService:
         # consume an eligible slot — matching the legacy pool, where deprecated
         # rows never entered the ranking at all.
         status_alive: Dict[str, bool] = {}
+        # PR-C:替代整表 cluster_map 的按命中折叠。负结果也 memo("" 表示这个 id
+        # 没有簇行),因为 `if not other_cid` 对 None 和 "" 判定相同 —— 与旧的
+        # `cluster_map_.get(nid)` 逐位等价,且不会对同一个缺失 id 反复发查询。
+        # 初值 = 调用方在 append **之前**冻结的那一份(见 docstring 的调用合同):
+        # 本源新对象的取值就此定死,后面的定点查询只会落在既有对象上。
+        canonical_of: Dict[str, str] = dict(frozen_canonical)
 
-        def _check_alive(ids: list) -> None:
-            unknown = [i for i in ids if i not in status_alive]
-            if not unknown:
+        def _resolve_hits(raw_ids: list, self_oid: str) -> None:
+            """补齐本轮命中的存活位与 canonical 折叠 —— 共用**一个**连接块。
+
+            两者是同一批命中的两个属性,顺序不可换(要先知道谁活着才知道折叠谁),
+            但没有理由各开一次连接:每轮 knn 都要多付一次连接获取(评审 P3)。
+            折叠只问「能走到那一步」的命中:下面的循环在 ``cluster:``/自身/非存活
+            三道过滤之后才读 ``canonical_of``,先过一遍免得为已经出局的 id 白发
+            查询(有专门的守卫盯这条纯成本性质)。"""
+            probes = [i for i in raw_ids if not i.startswith("cluster:")]
+            unknown_alive = [i for i in probes if i not in status_alive]
+
+            def _pending_fold() -> List[str]:
+                return [i for i in probes
+                        if i != self_oid and i not in canonical_of
+                        and status_alive.get(i, False)]
+
+            if not unknown_alive and not _pending_fold():
                 return
             with self._connect() as db:
-                alive = self.governance_store.valid_object_ids(db, unknown)
-            for i in unknown:
-                status_alive[i] = i in alive
+                if unknown_alive:
+                    alive = self.governance_store.valid_object_ids(db, unknown_alive)
+                    for i in unknown_alive:
+                        status_alive[i] = i in alive
+                need = _pending_fold()
+                if need:
+                    folded = self._fold_canonical_ids(db, notebook_id, need)
+                    for i in need:
+                        canonical_of[i] = folded.get(i, "")
 
         for oid, qvec in new_vecs.items():
             from app.services.kg_merge import _norm, seed_or_unique
@@ -1610,7 +1837,7 @@ class KnowledgeLifecycleService:
                     break
                 hits = sorted(zip(labels[0], distances[0]), key=lambda ld: ld[1])
                 raw_ids = [idx.ann_labels[int(lab)] for lab, _ in hits]
-                _check_alive([nid for nid in raw_ids if not nid.startswith("cluster:")])
+                _resolve_hits(raw_ids, oid)
                 eligible = []
                 for nid, (_lab, dist) in zip(raw_ids, hits):
                     if len(eligible) >= topk:
@@ -1628,7 +1855,7 @@ class KnowledgeLifecycleService:
                     # canonical ids are always "K-"-prefixed (never "KL-"/"KF-"/
                     # "KP-" — claim/formula/procedure), so this string check is
                     # exact and needs no extra DB lookup per hit.
-                    other_cid = cluster_map_.get(nid)
+                    other_cid = canonical_of.get(nid)
                     if not other_cid or not other_cid.startswith("K-"):
                         continue
                     eligible.append((nid, other_cid, max(0.0, 1.0 - float(dist))))

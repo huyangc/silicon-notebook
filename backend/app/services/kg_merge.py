@@ -505,13 +505,47 @@ def detect_bridge_candidates(new_items, new_vectors, existing_items, existing_ve
     return out
 
 
-def place_new_concepts(new_objects, existing_cluster_map, existing_canon_names,
+def place_new_concepts(new_objects, existing_canon_names,
                        *, seed_fn, id_prefix="K-"):
     """Tier-1 名种子放置:每个新对象按 seed_fn → canonical_id 追加到已有簇或建新簇。
     不重排任何已有对象(已有 canonical_id 不变 → 无簇分布漂移)。
-    existing_cluster_map: {existing_object_id: canonical_id};existing_canon_names: {canonical_id: name}。
-    返回 [{canonical_id, member_object_id, canonical_name}]。"""
-    existing_cids = set(existing_cluster_map.values())
+    existing_canon_names: {canonical_id: canonical_name}(本 object_type 的既有簇)。
+    返回 [{canonical_id, member_object_id, canonical_name}]。
+
+    此函数**不再收 cluster_map**(PR-C 有界化)。旧签名多收一份
+    ``existing_cluster_map``({member_object_id: canonical_id},全库全类型),
+    只用来算 ``existing_cids = set(values())`` 并守 ``... if cid in existing_cids
+    else name``。那个守卫在任何满足 ``keys(existing_canon_names) ⊆
+    values(existing_cluster_map)`` 的输入上都是**恒等的**,逐位一致证明分三支:
+
+      A. cid ∈ keys(canon_names) ⟹ cid ∈ existing_cids(前提的子集关系),
+         旧 = ``canon_names[cid]``,新 = ``canon_names[cid]``。
+      B. cid ∉ keys(canon_names) 但 ∈ existing_cids,旧 = ``.get(cid, name)``
+         = name(键不在),新 = name。
+      C. cid ∉ existing_cids ⟹ 由前提 cid ∉ keys(canon_names),旧 = name(短路),
+         新 = ``.get(cid, name)`` = name。
+
+    三支都相等,故 ``.get(cid, name)`` 单独就等价于旧的两段式表达式。生产上前提成立:
+    两份数据读自同一张 ``concept_clusters``,cluster_map 不按 object_type 过滤而
+    canon_names 只取本类型切片,每个本类型 canonical_id 至少有一行成员 → 必是
+    cluster_map 的一个 value。
+
+    两处已知的、能让前提在**单次调用内**不成立的情形,都不改变结论:
+
+      · 同一个 member_object_id 同时挂在两个 object_type 的簇下 —— cluster_map 的
+        dict 推导会丢掉先出现的那条 canonical_id。member 是 knowledge_objects 的
+        行 id、每行恰有一个 object_type,且融合入口已先扫掉悬空成员行,所以这只
+        可能来自数据损坏。
+      · 两份数据并非同一个快照 —— master 的 cmap 走**版本缓存** ``cluster_map()``,
+        而 canon_names 是当场从库里读的切片,并发写入下两者本就可能错开一个代次。
+        也就是说前提在旧实现里同样只是「几乎总成立」。新写法在这种错开下取的是
+        **更一致的那一侧**(只信当场读到的 canon_names),旧写法则会因为陈旧 cmap
+        里缺一个 cid 而把已有簇名丢掉、改写成新对象自己的 name。
+
+    仍留的全库依赖:``existing_canon_names.values()`` 要整份喂
+    ``build_acronym_alias_map``(下面一行)——见 knowledge_lifecycle
+    ``incremental_fuse_source`` 里的登记说明,那一读**无法**安全收窄。
+    """
     # Acronym aliasing: redirect bare-acronym seeds onto an expansion's seed when
     # an "Expansion (ACR)" name is present among the new objects or existing
     # canonical names. Keeps a standalone "ACR" landing in the expansion cluster.
@@ -522,9 +556,8 @@ def place_new_concepts(new_objects, existing_cluster_map, existing_canon_names,
         name = o.get("name", "")
         seed = seed_or_unique(_seed_with_alias(o, seed_fn, alias_map), o["object_id"])
         cid = f"{id_prefix}{seed}"
-        canon_name = existing_canon_names.get(cid, name) if cid in existing_cids else name
         rows.append({"canonical_id": cid, "member_object_id": o["object_id"],
-                     "canonical_name": canon_name})
+                     "canonical_name": existing_canon_names.get(cid, name)})
     return rows
 
 
