@@ -1326,6 +1326,32 @@ export default function Home() {
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [currentNotebookId]);
+  // codex R4 P2(A):「重新合并」「补上关联」都是共槽后台任务,忙碌位是纯前端 state——
+  // 页面刷新、或另一个会话/标签页发起的任务,这里的两个 Set 一开始什么都不知道。不认领
+  // 就不会挂上下面两条按笔记本忙碌位建键的轮询 effect,长任务因此显示空闲、完成不刷新、
+  // 按钮可点却只会撞服务端 409。切换/打开笔记本时各查一次服务端真相,running 就认领
+  // 对应忙碌位,交给下面那两条已经按 [rebuildingNotebookIds/relinkingNotebookIds,
+  // currentNotebookId] 建键的轮询 effect 自然接管(忙碌位一变它们就会重新挂载)。
+  // idle/终态**不**释放本地位——那可能是本地正处在 pendingRebuildNotebookIds 之类的
+  // 中间态,这条 effect 无权替它收尾,只做「认领」这一件事。
+  useEffect(() => {
+    const nb = currentNotebookId;
+    if (!nb) return;
+    let cancelled = false;
+    Promise.all([
+      fetchUnifiedKgRebuildStatus(nb).catch(() => null),
+      fetchRelinkStatus(nb).catch(() => null),
+    ]).then(([rebuild, relink]) => {
+      if (cancelled) return;
+      if (rebuild && (rebuild.running || rebuild.status === "running")) {
+        setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
+      }
+      if (relink && (relink.running || relink.status === "running")) {
+        setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [currentNotebookId]);
   // Mirror the buildingKg poll: while a scale-index rebuild runs, poll status every 6s
   // until building flips false, with a 20min safety cap so the button never spins forever.
   // 同上:面板打开时让位给聚合轮询 effect(见其完工检测),避免与 /scale-index/status 重复轮询。
@@ -4502,8 +4528,11 @@ export default function Home() {
   // 409），真正的统计要等下面那条轮询读到终态才有——所以这里**不能**拿 POST 的返回值
   // 编一个「已补上 N 条」出来。忙碌位在 await 之前就置上（长任务按钮红线），由轮询在
   // 终态解除；POST 自己失败时当场解除，否则按钮会锁在一个根本没起来的任务上。
+  // codex R4 P2(B):「重新合并」与「补上关联」共用服务端同一把按笔记本单飞锁，早退必须
+  // 认「任一忙碌位为真即忙」（relinkingKg || kgRefreshBusy）——只看自己那一位会在对方
+  // 占槽期间仍然发出请求，白撞一次 409。
   async function relinkFromKgView() {
-    if (!currentNotebookId || relinkingKg) return;
+    if (!currentNotebookId || relinkingKg || kgRefreshBusy) return;
     const nb = currentNotebookId;
     setRelinkingNotebookIds((prev) => claimRelinkSlot(prev, nb));
     try {
@@ -4592,8 +4621,10 @@ export default function Home() {
   // 这里**不能**拿 POST 的返回值编一个「共 N 组概念」出来。忙碌位在 await 之前就置上
   // （长任务按钮红线），由轮询在终态解除；POST 自己失败时当场解除，否则按钮会锁在一个
   // 根本没起来的任务上。
+  // codex R4 P2(B):早退必须认「任一忙碌位为真即忙」（kgRefreshBusy || relinkingKg）——
+  // 「补上关联」在跑时占的是同一把服务端锁，只看自己那一位仍会发出请求、白撞一次 409。
   async function refreshUnifiedKg() {
-    if (!currentNotebookId || kgRefreshBusy) return;
+    if (!currentNotebookId || kgRefreshBusy || relinkingKg) return;
     const nb = currentNotebookId;
     setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
     try {
@@ -4742,8 +4773,9 @@ export default function Home() {
   }, [rebuildingNotebookIds, currentNotebookId]);
 
   // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
+  // codex R4 P2(B):同样认「任一忙碌位为真即忙」，与 refreshUnifiedKg 的早退同口径。
   function confirmRefreshUnifiedKg() {
-    if (kgRefreshBusy || buildingKg) return;
+    if (kgRefreshBusy || relinkingKg || buildingKg) return;
     confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新分析来源）。后台进行，完成后自动更新。", () => refreshUnifiedKg());
   }
 
@@ -7315,7 +7347,18 @@ export default function Home() {
                         </div>
                         {!busy && !isReader && (
                           <div className="index-ctas">
-                            <button type="button" className={`index-cta${uk.dirty ? " primary" : ""}`} onClick={confirmRefreshUnifiedKg}>重新合并</button>
+                            {/* codex R4 P2(B):这一格自己的 busy 只看 uk.building/kgRefreshBusy
+                                （概念合并自身的状态标签/色调不该被「补上关联」污染），但共用同一把
+                                服务端单飞锁的「补上关联」在跑时，这颗按钮仍需同口径禁用，否则点了
+                                只会撞 409。 */}
+                            <button
+                              type="button"
+                              className={`index-cta${uk.dirty ? " primary" : ""}`}
+                              disabled={relinkingKg}
+                              onClick={confirmRefreshUnifiedKg}
+                            >
+                              重新合并
+                            </button>
                           </div>
                         )}
                       </div>
@@ -7545,10 +7588,13 @@ export default function Home() {
               <div className="kg-rail-section">
                 <h3>图谱处理</h3>
                 <div className="kg-action-stack">
+                  {/* codex R4 P2(B):「重新合并」与「补上关联」共用服务端同一把按笔记本
+                      单飞锁，disabled 必须认「任一忙碌位为真即忙」——否则占槽的那一件事
+                      在跑时，另一颗按钮仍可点，点了也只会撞 409。各自的进行态文案不变。 */}
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={relinkingKg || buildingKg}
+                    disabled={relinkingKg || kgRefreshBusy || buildingKg}
                     title="为没建立关联的内容补上关联（快速、确定性，不覆盖现有图）"
                     onClick={relinkFromKgView}
                   >
@@ -7557,7 +7603,7 @@ export default function Home() {
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={kgRefreshBusy || buildingKg}
+                    disabled={kgRefreshBusy || relinkingKg || buildingKg}
                     title="对现有概念重新聚类 / 跨文档合并并刷新（不重新分析来源，会先确认）"
                     onClick={confirmRefreshUnifiedKg}
                   >
