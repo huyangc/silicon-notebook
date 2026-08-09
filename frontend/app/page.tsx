@@ -4608,12 +4608,17 @@ export default function Home() {
   // codex R9:上一版逐个 `.catch(() => null)` 把"这次探测确实失败"和"探测成功查到没在
   // 跑"混成同一个 null——网络抖动导致的假阴性会被当成"两个都不在跑",于是调用方把自己的
   // 忙碌位当竞态已消散清掉,而服务端那个任务其实还在跑、没人再轮询。改用 Promise.allSettled
-  // 把两次探测的失败与成功分开看:任一探测失败就返回 "unknown"、不触碰任何忙碌位(调用方
-  // 保留自己的位,交给自己那条轮询继续查——瞬时错误自愈,真 idle 时轮询终态会正常释放并
-  // 刷新)。两次探测都成功时按服务端真相**双向**重算两个忙碌位:确认在跑就认领、确认没在
-  // 跑就释放——这是唯一能同时满足「adopted 时若领养的是另一种任务,自己那种没在跑的位要
-  // 释放」与「同种在跑,位已经在,原样保留」的写法:调用方不需要（也无法在不重复探测的前提
-  // 下）单独分辨"是不是自己那一种"，函数内部按两条服务端真相各自归位就已经是正确结果。
+  // 把两次探测的失败与成功分开看。
+  // codex R18:R9~R17 的写法是"任一探测 rejected 就整体判 unknown、不碰任何忙碌位"——两个
+  // 探测都活着时没问题,但只要其中一个偶发失败,另一个探测明明已经确认**对面** kind 在跑,
+  // 也会被这条整体短路拖累成"什么都不领养":调用方保留自己那一位,而自己这种在服务端视图
+  // 里其实一直是 idle,轮询永远等不到需要观察的终态——真任务完成也不会刷新。改成**逐 kind
+  // 独立处置**:每个探测只对自己那个 kind 的忙碌位负责——fulfilled 且 running 才 claim,
+  // fulfilled 且非 running 才 release;rejected 的那一侧忙碌位原样不动(信息不足,交给
+  // 调用方自己的轮询继续查,瞬时错误自愈)。verdict 由两侧观察共同决定:任一侧观察到
+  // running 就是 "adopted"(哪怕另一侧探测失败,那一侧的忙碌位也已经按上面的规则原样
+  // 保留,不需要靠 verdict 补救);否则只要还有一侧探测失败就是 "unknown"(调用方据此
+  // 保留自己的位、不做进一步判断);两侧都成功且都没在跑才是 "idle"。
   async function adoptRunningMaintenance(
     nb: string,
   ): Promise<"adopted" | "idle" | "unknown"> {
@@ -4621,20 +4626,27 @@ export default function Home() {
       fetchUnifiedKgRebuildStatus(nb),
       fetchRelinkStatus(nb),
     ]);
+    let rebuildRunning = false;
+    if (rebuildResult.status === "fulfilled") {
+      const rebuild = rebuildResult.value;
+      rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
+      setRebuildingNotebookIds((prev) => (
+        rebuildRunning ? claimNotebookSlot(prev, nb) : releaseNotebookClaim(prev, nb)
+      ));
+    }
+    let relinkRunning = false;
+    if (relinkResult.status === "fulfilled") {
+      const relink = relinkResult.value;
+      relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
+      setRelinkingNotebookIds((prev) => (
+        relinkRunning ? claimRelinkSlot(prev, nb) : releaseRelinkClaim(prev, nb)
+      ));
+    }
+    if (rebuildRunning || relinkRunning) return "adopted";
     if (rebuildResult.status === "rejected" || relinkResult.status === "rejected") {
       return "unknown";
     }
-    const rebuild = rebuildResult.value;
-    const relink = relinkResult.value;
-    const rebuildRunning = Boolean(rebuild && (rebuild.running || rebuild.status === "running"));
-    const relinkRunning = Boolean(relink && (relink.running || relink.status === "running"));
-    setRebuildingNotebookIds((prev) => (
-      rebuildRunning ? claimNotebookSlot(prev, nb) : releaseNotebookClaim(prev, nb)
-    ));
-    setRelinkingNotebookIds((prev) => (
-      relinkRunning ? claimRelinkSlot(prev, nb) : releaseRelinkClaim(prev, nb)
-    ));
-    return rebuildRunning || relinkRunning ? "adopted" : "idle";
+    return "idle";
   }
 
   async function relinkFromKgView() {

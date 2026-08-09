@@ -1029,13 +1029,18 @@ test("codex R4 P2(B):「重新合并」的早退与 disabled 认『任一忙碌�
   }
 });
 
-test("codex R9:adoptRunningMaintenance 两个探测任一失败即返回 unknown,不再 per-request 吞成 null", async () => {
+test("codex R9/R18:adoptRunningMaintenance 按探测结果逐 kind 独立处置忙碌位", async () => {
   // 与 kg-relink-wiring-guard.test.mjs 里同名测试断言同一个共享函数(它只定义一次,同时
   // 服务于「补上关联」与「重新合并」两条 409 领养路径)——两侧各留一份,防止只改了其中一个
-  // 调用点就误以为函数本身也已经修好。旧写法 `fetchXxx(nb).catch(() => null)` 把"这次
-  // 探测确实失败"和"探测成功查到没在跑"混成同一个 null——网络抖动导致的假阴性会被当成
-  // "两个都不在跑"。改成 Promise.allSettled 后必须显式区分:任一探测 rejected 就整体判
-  // "unknown"、不碰任何忙碌位状态。
+  // 调用点就误以为函数本身也已经修好。
+  // R9:旧写法 `fetchXxx(nb).catch(() => null)` 把"这次探测确实失败"和"探测成功查到没在
+  // 跑"混成同一个 null——网络抖动导致的假阴性会被当成"两个都不在跑"。改成
+  // Promise.allSettled 把两次探测的失败与成功分开看。
+  // R18:R9~R17 在此基础上又把"任一探测 rejected"整体短路成 "unknown"、两个忙碌位都不碰
+  // ——这会连累"另一侧探测明明成功、且已经确认对面 kind 在跑"的信息一起被丢弃:调用方
+  // 保留自己的位,而自己这种在服务端视图里其实一直是 idle,轮询永远等不到终态、真任务
+  // 完成也不会刷新。改成逐 kind 独立处置:每个探测只对自己那个 kind 的忙碌位负责,
+  // rejected 的那一侧原样不动、不影响另一侧的 claim/release。
   const page = await parseModule("page.tsx");
   const body = findFunction(page, "adoptRunningMaintenance").getText(page);
 
@@ -1048,26 +1053,76 @@ test("codex R9:adoptRunningMaintenance 两个探测任一失败即返回 unknown
     "探测不能再逐个 catch 成 null——那会让『探测失败』和『探测成功查到没在跑』变成"
     + "同一个值,调用方分不清竞态已消散还是网络抖动",
   );
-  const rejectedAt = body.indexOf(
+
+  // codex R18:rebuild/relink 各自的忙碌位 set 调用必须只出现一次,且必须落在自己那段
+  // `xxxResult.status === "fulfilled"` 判断块内部——rejected 时这段代码根本不会被执行到,
+  // 忙碌位因此原样保留,不受另一侧探测结果牵连。
+  const rebuildFulfilledAt = body.indexOf('rebuildResult.status === "fulfilled"');
+  assert.ok(rebuildFulfilledAt >= 0, "必须显式检查 rebuild 探测的 fulfilled 状态");
+  const relinkFulfilledAt = body.indexOf('relinkResult.status === "fulfilled"');
+  assert.ok(relinkFulfilledAt >= 0, "必须显式检查 relink 探测的 fulfilled 状态");
+  assert.ok(
+    relinkFulfilledAt > rebuildFulfilledAt,
+    "两段 fulfilled 判断必须按 rebuild→relink 顺序各自独立出现(两段 if 块,不是共用一个"
+    + "条件短路成 unknown)",
+  );
+
+  // codex R18:光比较线性文本位置无法分辨"调用还留在 if 块内"与"调用被挪到 if 块外、但
+  // 紧跟在块后面、数值上仍排在下一个锚点之前"这两种情况——纯粹的移动变异不改变相对顺序,
+  // 会让只做范围比较的断言蒙混过关。必须额外确认 set 调用发生在 if 块**自己的收尾 `}`**
+  // 之前:用 4 空格缩进的 `\n    }\n` 定位该块自己的收尾(块内 arrow function 的收尾是
+  // `));`,不是裸 `}` 单独占一行,不会被误当成 if 块的收尾)。
+  const rebuildSetIdx = [...body.matchAll(/setRebuildingNotebookIds\(/g)].map((m) => m.index);
+  assert.equal(rebuildSetIdx.length, 1, "rebuild 忙碌位只能有一处 set 调用");
+  assert.ok(
+    rebuildSetIdx[0] > rebuildFulfilledAt && rebuildSetIdx[0] < relinkFulfilledAt,
+    "rebuild 忙碌位的 set 调用必须落在 rebuild 的 fulfilled 判断与 relink 的 fulfilled"
+    + "判断之间",
+  );
+  const rebuildBlockCloseAt = body.indexOf("\n    }\n", rebuildFulfilledAt);
+  assert.ok(rebuildBlockCloseAt > rebuildFulfilledAt, "找不到 rebuild fulfilled 判断块自己的收尾 `}`");
+  assert.ok(
+    rebuildSetIdx[0] < rebuildBlockCloseAt,
+    "rebuild 忙碌位的 set 调用必须在 if 块自己收尾的 `}` 之前(真的嵌在块内),不能被挪到"
+    + "块外、只靠恰好仍排在 relink 判断之前蒙混过关——rebuild 探测 rejected 时不会执行到"
+    + "块内代码,忙碌位因此原样不动(变异:把 set 调用挪出 if 块、放在块后面必须让本条"
+    + "断言报红)",
+  );
+
+  const adoptedAt = body.indexOf('if (rebuildRunning || relinkRunning) return "adopted";');
+  assert.ok(adoptedAt > relinkFulfilledAt, "必须在两段 fulfilled 判断都处理完之后才计算 verdict");
+  const relinkSetIdx = [...body.matchAll(/setRelinkingNotebookIds\(/g)].map((m) => m.index);
+  assert.equal(relinkSetIdx.length, 1, "relink 忙碌位只能有一处 set 调用");
+  assert.ok(
+    relinkSetIdx[0] > relinkFulfilledAt && relinkSetIdx[0] < adoptedAt,
+    "relink 忙碌位的 set 调用必须落在 relink 的 fulfilled 判断与 verdict 计算之间",
+  );
+  const relinkBlockCloseAt = body.indexOf("\n    }\n", relinkFulfilledAt);
+  assert.ok(relinkBlockCloseAt > relinkFulfilledAt, "找不到 relink fulfilled 判断块自己的收尾 `}`");
+  assert.ok(
+    relinkSetIdx[0] < relinkBlockCloseAt,
+    "relink 忙碌位的 set 调用必须在 if 块自己收尾的 `}` 之前(真的嵌在块内),不能被挪到"
+    + "块外、只靠恰好仍排在 verdict 计算之前蒙混过关——relink 探测 rejected 时不会执行到"
+    + "块内代码,忙碌位因此原样不动(变异:把 set 调用挪出 if 块、放在块后面必须让本条"
+    + "断言报红)",
+  );
+
+  // codex R18:verdict 必须先看"任一侧观察到 running"再看"任一侧探测失败"——这样即使
+  // 另一侧探测 rejected,只要有一侧确认在跑就必须判 adopted,不能被 rejected 短路成
+  // unknown(变异:把 R9~R17 的"任一 rejected 立刻 return unknown"整体短路挪回最前面,
+  // 必须让下面这条 adoptedAt < rejectedUnknownAt 的断言报红)。
+  const rejectedUnknownAt = body.indexOf(
     'rebuildResult.status === "rejected" || relinkResult.status === "rejected"',
   );
-  assert.ok(rejectedAt >= 0, "必须显式检查两个探测各自的 rejected 状态");
-  const unknownAt = body.indexOf('return "unknown";', rejectedAt);
   assert.ok(
-    unknownAt > rejectedAt && unknownAt - rejectedAt < 100,
-    "任一探测 rejected 必须立刻返回 \"unknown\",且这个 return 要紧跟在判断之后"
-    + "(不能先动过忙碌位再判断失败)",
+    rejectedUnknownAt > adoptedAt,
+    "adopted(任一侧观察到 running)必须先于 rejected/unknown 判断,不能被整体短路抢跑",
   );
-  const firstMutationAt = Math.min(
-    ...["setRebuildingNotebookIds", "setRelinkingNotebookIds"]
-      .map((needle) => body.indexOf(needle))
-      .filter((idx) => idx >= 0),
-  );
-  assert.ok(
-    firstMutationAt > unknownAt,
-    "两个忙碌位的 set 调用必须都在 \"unknown\" 提前返回之后——rejected 时不能先动过"
-    + "任何一个忙碌位再返回",
-  );
+  const unknownAt = body.indexOf('return "unknown";', rejectedUnknownAt);
+  assert.ok(unknownAt > rejectedUnknownAt, "必须显式返回 unknown");
+  const idleAt = body.indexOf('return "idle";', unknownAt);
+  assert.ok(idleAt > unknownAt, "两侧都 fulfilled 且都没在跑才是 idle,必须排在最后");
+
   // 两个探测都成功时必须按服务端真相双向归位:确认在跑就认领、确认没在跑就释放——
   // 这是唯一能同时满足「adopted 时若领养的是另一种任务,自己那种没在跑的位要释放」
   // 与「同种在跑,位已经在,原样保留」的写法。只有 claim(旧 R8 形态)会让「adopted 但
