@@ -81,9 +81,14 @@ test("codex R9:refreshUnifiedKg 提交期(POST 还没落地)标记在 submitting
   const page = await parseModule("page.tsx");
   const body = findFunction(page, "refreshUnifiedKg").getText(page);
 
-  const addAt = body.indexOf("submittingMaintenanceRef.current.add(nb);");
+  const addAt = body.indexOf("submittingMaintenanceRef.current.add(`${nb}:rebuild`);");
   const postAt = body.indexOf("rebuildUnifiedKg(");
-  assert.ok(addAt >= 0, "refreshUnifiedKg 必须在提交前标记 submittingMaintenanceRef");
+  assert.ok(
+    addAt >= 0,
+    "refreshUnifiedKg 必须在提交前标记 submittingMaintenanceRef(键必须按 kind 分开,"
+    + "`${nb}:rebuild`——codex R12:同库的 relink 提交若与这次窗口重叠,不能共用裸 nb 键"
+    + "互相冲掉对方的保护)",
+  );
   assert.ok(
     addAt < postAt,
     "标记必须在 await rebuildUnifiedKg 之前置上,否则 POST 在飞期间轮询读到的陈旧 idle"
@@ -96,10 +101,13 @@ test("codex R9:refreshUnifiedKg 提交期(POST 还没落地)标记在 submitting
     "refreshUnifiedKg 必须有 finally 块清理提交期标记,否则某条失败路径会让标记"
     + "永久卡住、轮询永远认为提交还在飞",
   );
-  const deleteAt = body.indexOf("submittingMaintenanceRef.current.delete(nb);", finallyAt);
+  const deleteAt = body.indexOf(
+    "submittingMaintenanceRef.current.delete(`${nb}:rebuild`);",
+    finallyAt,
+  );
   assert.ok(
     deleteAt > finallyAt,
-    "finally 块必须清理提交期标记(submittingMaintenanceRef.current.delete(nb))",
+    "finally 块必须清理提交期标记(submittingMaintenanceRef.current.delete(`${nb}:rebuild`))",
   );
 });
 
@@ -276,7 +284,8 @@ test("codex R9:pollTick 撞到 idle 且提交还在飞(submittingMaintenanceRef)
   // 完成也不会刷新。修法是:idle 终态额外检查 submittingMaintenanceRef 是否还标记着
   // 这个库,标记着就继续轮询、不 settle。这条断言钉住:①判据必须落在正常终态分支里、
   // settled=true 之前;②判据必须同时检查 status.status === "idle" 与
-  // submittingMaintenanceRef.current.has(nb)(不能只检查其中一个)。
+  // submittingMaintenanceRef.current.has(`${nb}:rebuild`)(不能只检查其中一个)。
+  // codex R12:键必须按 kind 分开,不能是裸 nb。
   const page = await parseModule("page.tsx");
   const source = page.getFullText();
 
@@ -299,15 +308,15 @@ test("codex R9:pollTick 撞到 idle 且提交还在飞(submittingMaintenanceRef)
   const guardWindow = pollBody.slice(outcomeDeclAt, finishAt);
 
   assert.ok(
-    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(nb\)/.test(
+    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(`\$\{nb\}:rebuild`\)/.test(
       guardWindow,
     ),
     "正常终态分支必须检查 `status.status === \"idle\" && submittingMaintenanceRef"
-    + ".current.has(nb)`——只查其中一个都不对(只查 idle 会拦住所有真终态,只查"
-    + "submitting 会在 running 时也误判)",
+    + ".current.has(`${nb}:rebuild`)`——只查其中一个都不对(只查 idle 会拦住所有真终态,"
+    + "只查 submitting 会在 running 时也误判)",
   );
   const idleCheckAt = guardWindow.search(
-    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(nb\)/,
+    /status\.status\s*===\s*"idle"\s*&&\s*submittingMaintenanceRef\.current\.has\(`\$\{nb\}:rebuild`\)/,
   );
   const settledTrueAt = guardWindow.lastIndexOf("settled = true;");
   assert.ok(
@@ -597,15 +606,19 @@ test("rebuild 轮询终态尝试补发 rebuildUnifiedKg(标记只在补发真正
   );
 
   // codex R9:补发也是一次真正的 POST 提交,同样会撞「POST 比首个 tick 慢」的陈旧 idle
-  // 竞态,必须统一包上 submittingMaintenanceRef(理由与 refreshUnifiedKg 相同)。
-  const submitAddAt = retryBody.indexOf("submittingMaintenanceRef.current.add(nb);");
+  // 竞态,必须统一包上 submittingMaintenanceRef(理由与 refreshUnifiedKg 相同)。codex
+  // R12:键必须按 kind 分开(`${nb}:rebuild`)。
+  const submitAddAt = retryBody.indexOf(
+    "submittingMaintenanceRef.current.add(`${nb}:rebuild`);",
+  );
   assert.ok(
     submitAddAt >= 0 && submitAddAt < retryPostAt,
-    "补发也必须在 await rebuildUnifiedKg 之前标记 submittingMaintenanceRef",
+    "补发也必须在 await rebuildUnifiedKg 之前标记 submittingMaintenanceRef(键"
+    + "`${nb}:rebuild`)",
   );
   const submitFinallyAt = retryBody.indexOf("finally {", submitAddAt);
   const submitDeleteAt = retryBody.indexOf(
-    "submittingMaintenanceRef.current.delete(nb);",
+    "submittingMaintenanceRef.current.delete(`${nb}:rebuild`);",
     submitFinallyAt,
   );
   assert.ok(
@@ -694,9 +707,14 @@ test("codex R10:decideMerge 的 POST 提交期同样标记 submittingMaintenance
   const page = await parseModule("page.tsx");
   const body = findFunction(page, "decideMerge").getText(page);
 
-  const addAt = body.indexOf("submittingMaintenanceRef.current.add(nb);");
+  const addAt = body.indexOf("submittingMaintenanceRef.current.add(`${nb}:rebuild`);");
   const postAt = body.indexOf("rebuildUnifiedKg(");
-  assert.ok(addAt >= 0, "decideMerge 必须在提交前标记 submittingMaintenanceRef");
+  assert.ok(
+    addAt >= 0,
+    "decideMerge 必须在提交前标记 submittingMaintenanceRef(键必须按 kind 分开,"
+    + "`${nb}:rebuild`——codex R12:同库若有一次 relink POST 还没返回,两次提交的保护"
+    + "窗口重叠,不能共用裸 nb 键互相冲掉对方的保护)",
+  );
   assert.ok(postAt >= 0, "decideMerge 必须启动一次重新合并");
   assert.ok(
     addAt < postAt,
@@ -710,11 +728,15 @@ test("codex R10:decideMerge 的 POST 提交期同样标记 submittingMaintenance
     "decideMerge 必须有 finally 块清理提交期标记,否则某条失败路径(含 409 领养走的"
     + "常规分支)会让标记永久卡住、轮询永远认为提交还在飞",
   );
-  const deleteAt = body.indexOf("submittingMaintenanceRef.current.delete(nb);", finallyAt);
+  const deleteAt = body.indexOf(
+    "submittingMaintenanceRef.current.delete(`${nb}:rebuild`);",
+    finallyAt,
+  );
   assert.ok(
     deleteAt >= 0 && deleteAt - finallyAt < 60,
-    "finally 块必须紧接着清理提交期标记(submittingMaintenanceRef.current.delete(nb)),"
-    + "不能是外层 `finally { setDecidingMerge(null); }` 那个不相干的 finally",
+    "finally 块必须紧接着清理提交期标记"
+    + "(submittingMaintenanceRef.current.delete(`${nb}:rebuild`)),不能是外层"
+    + "`finally { setDecidingMerge(null); }` 那个不相干的 finally",
   );
 });
 
@@ -840,6 +862,73 @@ test("codex R10:恢复 effect 把 fetchUnifiedKgStatus 并进同一次探测,任
     claimPendingAt > guardAt && claimPendingAt - guardAt < 200,
     "命中判据必须紧接着重新认领 pendingRebuildNotebookIds——变异②:把整段 if 块删掉,"
     + "必须让这条断言报红(找不到判据之后的认领调用)",
+  );
+});
+
+test("codex R12:恢复 effect 命中待补发判据时必须同时认领 rebuildingNotebookIds"
+  + "(否则待补发标记没有轮询 effect 会去消费)", async () => {
+  // 待补发标记(pendingRebuildNotebookIds)只有 rebuild 轮询 effect 的终态收尾
+  // (settleOrRetryRebuild)会消费——那条 effect 只在 rebuildingNotebookIds 里认领了这个
+  // 库时才会挂载(依赖数组是 [rebuildingNotebookIds, currentNotebookId])。重载时若命中
+  // 的是 relinkRunning 为真、rebuildRunning 为假这一支(重载那一刻实际在跑的是「补上
+  // 关联」而非「重新合并」),旧代码只认领了 relinkingNotebookIds——rebuild 轮询 effect
+  // 根本不会挂载,待补发标记因此永远悬空:relink 轮询的终态只会刷新图谱,不认识、也不
+  // 消费这个标记,那条已经落库的合并决定永远等不到自动补发。修法是命中判据的分支无条件
+  // 同时认领 rebuildingNotebookIds——rebuildRunning 已为真时 claimNotebookSlot 是幂等
+  // no-op(见 notebook-busy-set.ts:已认领时原样返回同一个 Set),不会产生副作用;认领
+  // 之后走既有机器闭环:rebuild 轮询挂载 → status 对占槽的「补上关联」如实回 idle
+  // (两个状态视图只认自己的 kind)→ 待补发命中 → settleOrRetryRebuild 试补发 → 撞 409
+  // (relink 还没收工)→ 保留标记与忙碌位、重启轮询继续等 → relink 释放槽后再次 idle →
+  // 补发终于 POST 成功 → 消费标记、追踪新任务直到终态刷新。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf("fetchUnifiedKgRebuildStatus(nb).catch(() => null)");
+  assert.ok(start > 0, "找不到打开笔记本时的重新合并状态恢复(被删除或改名?守卫失效)");
+  const depsAt = source.indexOf("}, [currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到这条恢复 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  const guardAt = body.indexOf(
+    "if ((rebuildRunning || relinkRunning) && status?.dirty) {",
+  );
+  assert.ok(guardAt >= 0, "找不到待补发认领的判据(被改名或删除?守卫失效)");
+  const guardEndAt = body.indexOf("\n      }", guardAt);
+  assert.ok(guardEndAt > guardAt, "找不到判据分支的收尾 `}`");
+  const guardBlock = body.slice(guardAt, guardEndAt);
+
+  const claimPendingAt = guardBlock.indexOf(
+    "setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));",
+  );
+  assert.ok(claimPendingAt >= 0, "找不到待补发标记的重新认领(被上面那条测试钉住,这里只是定位)");
+
+  const claimRebuildAt = guardBlock.lastIndexOf(
+    "setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));",
+  );
+  assert.ok(
+    claimRebuildAt > claimPendingAt,
+    "命中待补发判据的分支必须同时认领 rebuildingNotebookIds(在认领待补发标记之后)——"
+    + "变异(删除):把这一行整个删掉,必须让这条断言报红,因为 rebuild 轮询 effect"
+    + "不会挂载、待补发标记会永久悬空",
+  );
+});
+
+test("codex R12:submittingMaintenanceRef 的键必须按 kind 分开,不能有裸 nb 键残留", async () => {
+  // 同一个库的 relink 与 rebuild 提交窗口可以重叠(relink POST 还没返回时,用户确认
+  // 合并触发的是 rebuild POST)。旧代码统一用裸 nb 当键:先落地的那次 POST 在自己的
+  // finally 里删掉这唯一的条目,另一次仍在飞的提交就此失去保护——轮询可能把服务端的
+  // 陈旧 idle 当真终态提前收工。修法是键按 kind 分开(`${nb}:relink` / `${nb}:rebuild`,
+  // 与 expectedMaintenanceJobRef 同风格)。这条断言扫描整份文件,拦住任何一处
+  // add/delete/has 退回裸 nb 键的回归——不管发生在四个调用点(relinkFromKgView/
+  // refreshUnifiedKg/settleOrRetryRebuild/decideMerge)与两条轮询 tick 里的哪一处。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  assert.ok(
+    !/submittingMaintenanceRef\.current\.(?:add|delete|has)\(nb\)/.test(source),
+    "submittingMaintenanceRef 不能再有裸 `(nb)` 键的 add/delete/has 调用——必须是"
+    + "带 kind 后缀的模板字符串键,如 `(\\`${nb}:relink\\`)` 或 `(\\`${nb}:rebuild\\`)`"
+    + "(变异:把任一处改回裸 nb 键,必须让这条断言报红)",
   );
 });
 
@@ -1031,13 +1120,15 @@ test("codex R11:pollTick 正常终态分支必须无条件拒收提交期终态�
   const guardWindow = pollBody.slice(outcomeDeclAt, finishAt);
 
   // 提交期(POST 还没落地)必须无条件继续轮询,不止 idle 一种终态——同库再次点击时,
-  // 服务端在这次 POST 落地前仍可能如实回显上一个任务的 succeeded/failed。
+  // 服务端在这次 POST 落地前仍可能如实回显上一个任务的 succeeded/failed。codex R12:
+  // 键必须按 kind 分开查`${nb}:rebuild`,不能是裸 nb(否则会被同库一次不相干的 relink
+  // 提交拖住)。
   const idleSubmittingAt = guardWindow.indexOf(
-    'if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;',
+    'if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;',
   );
   assert.ok(idleSubmittingAt >= 0, "找不到 codex R9 的 idle+提交中判据(被删改?守卫失效)");
   const broadSubmittingAt = guardWindow.indexOf(
-    "if (submittingMaintenanceRef.current.has(nb)) return;",
+    "if (submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;",
     idleSubmittingAt,
   );
   assert.ok(

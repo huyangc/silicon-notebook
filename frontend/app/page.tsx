@@ -1037,9 +1037,15 @@ export default function Home() {
   pendingRebuildNotebookIdsRef.current = pendingRebuildNotebookIds;
   // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端**旧的** idle 并当终态
   // 收工——随后 POST 才成功,没有人再轮询,任务完成不会刷新。这个集合记「正在提交(POST
-  // 还没落地)的库」,两条轮询 tick 撞到 idle 终态时如果自己的库还在这个集合里,那就是
-  // 提交还在飞、服务端还没看到新任务,不能当真终态收工。模块级 Set,直接 mutate——不是
-  // state,不触发渲染(只在轮询 tick 的同步分支里读一次性瞬时状态,不需要驱动 UI)。
+  // 还没落地)的任务」,两条轮询 tick 撞到 idle 终态时如果自己这次追踪的键还在这个集合
+  // 里,那就是提交还在飞、服务端还没看到新任务,不能当真终态收工。模块级 Set,直接
+  // mutate——不是 state,不触发渲染(只在轮询 tick 的同步分支里读一次性瞬时状态,不需要
+  // 驱动 UI)。
+  // codex R12:键必须按 kind 分开(`${nb}:relink` / `${nb}:rebuild`,与
+  // expectedMaintenanceJobRef 同风格)——同一个库的 relink 与 rebuild 提交窗口可以
+  // 重叠(relink POST 还没返回时,用户确认合并触发的是 rebuild POST):旧代码只用裸 nb
+  // 当键,先落地的那次 POST 在自己的 finally 里删掉这唯一的条目,另一次仍在飞的提交就此
+  // 失去保护,轮询可能把服务端的陈旧 idle 当真终态提前收工。
   const submittingMaintenanceRef = useRef<Set<string>>(new Set());
   // codex R11:submittingMaintenanceRef 只压制了提交期的陈旧 idle——同库再次点击时,
   // 服务端共享的维护槽在这次 POST 落地**前**仍会如实回显**上一个任务**的
@@ -1384,6 +1390,17 @@ export default function Home() {
       // 空转,也不让一条已经记录的决定永久悬空、图谱停在决定生效之前。
       if ((rebuildRunning || relinkRunning) && status?.dirty) {
         setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
+        // codex R12:待补发标记只有 rebuild 轮询 effect 的终态收尾(settleOrRetryRebuild)
+        // 会消费——那条 effect 只在 rebuildingNotebookIds 里认领了这个库时才会挂载。
+        // relinkRunning 为真、rebuildRunning 为假的这一支(重载时其实是「补上关联」在
+        // 占槽)此前只认领了 relinkingNotebookIds,rebuild 轮询根本不会挂载,待补发标记
+        // 因此永远悬空——relink 轮询终态时只会刷新图谱,不认识、也不消费这个标记。这里
+        // 无条件同时认领 rebuildingNotebookIds(rebuildRunning 已为真时是幂等的 no-op)。
+        // 认领后走既有机器闭环:rebuild 轮询挂载→status 对占槽的「补上关联」如实回
+        // idle(两个状态视图只认自己的 kind)→待补发命中→settleOrRetryRebuild 试补发
+        // POST→撞 409(relink 还没收工)→保留标记与忙碌位、重启轮询继续等→relink 释放
+        // 槽后再次 idle→补发终于 POST 成功→消费标记、追踪新任务直到终态刷新。
+        setRebuildingNotebookIds((prev) => claimNotebookSlot(prev, nb));
       }
     });
     return () => { cancelled = true; };
@@ -4614,7 +4631,9 @@ export default function Home() {
     // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
     // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
     // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
-    submittingMaintenanceRef.current.add(nb);
+    // codex R12:键按 kind 分开(`${nb}:relink`)——同库的 rebuild 提交若与这次窗口重叠,
+    // 不能共用一个键互相冲掉对方的保护。
+    submittingMaintenanceRef.current.add(`${nb}:relink`);
     try {
       const started = await relinkKg(nb);
       // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
@@ -4635,7 +4654,7 @@ export default function Home() {
       // 只清自己那一格：这期间用户可能已经切库并在别的库点了补上关联。
       setRelinkingNotebookIds((prev) => releaseRelinkClaim(prev, nb));
     } finally {
-      submittingMaintenanceRef.current.delete(nb);
+      submittingMaintenanceRef.current.delete(`${nb}:relink`);
     }
   }
 
@@ -4711,12 +4730,13 @@ export default function Home() {
       if (cancelled || settled || activeNotebookIdRef.current !== nb || !outcome.done) return;
       // codex R9:POST 比首个 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工——随后
       // POST 才成功,没人再轮询,任务完成不刷新。idle 且提交还在飞(submittingMaintenanceRef
-      // 记着这个库)时不能当真终态,继续等下一个 tick;提交落地后服务端会回真实
-      // running/succeeded/failed。
-      if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;
+      // 记着这个键)时不能当真终态,继续等下一个 tick;提交落地后服务端会回真实
+      // running/succeeded/failed。codex R12:键按 kind 分开查`${nb}:relink`——同库若还有
+      // 一次 rebuild 提交在飞,不该被那次不相干的提交拖住这条 relink 轮询。
+      if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:relink`)) return;
       // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST 落地前,仍可能
       // 如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都不可信。
-      if (submittingMaintenanceRef.current.has(nb)) return;
+      if (submittingMaintenanceRef.current.has(`${nb}:relink`)) return;
       // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才是
       // 这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养占用)
       // 一律视为陈旧,继续轮询等真正对应这次追踪的终态出现。没有走过本页 POST 的追踪
@@ -4745,7 +4765,9 @@ export default function Home() {
     // codex R9:POST 比首个 3s 轮询 tick 慢时,轮询会先读到服务端旧的 idle 并当终态收工,
     // 随后 POST 才成功——没人再轮询,任务完成不会刷新。提交期整段(含 409 时的领养探测)
     // 都标记在 submittingMaintenanceRef 里,轮询 tick 撞到 idle 时会认这个标记继续等。
-    submittingMaintenanceRef.current.add(nb);
+    // codex R12:键按 kind 分开(`${nb}:rebuild`)——同库的 relink 提交若与这次窗口重叠,
+    // 不能共用一个键互相冲掉对方的保护。
+    submittingMaintenanceRef.current.add(`${nb}:rebuild`);
     try {
       const started = await rebuildUnifiedKg(nb);
       // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
@@ -4770,7 +4792,7 @@ export default function Home() {
       // 只清自己那一格：这期间用户可能已经切库并在别的库点了重新合并。
       setRebuildingNotebookIds((prev) => releaseNotebookClaim(prev, nb));
     } finally {
-      submittingMaintenanceRef.current.delete(nb);
+      submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
     }
   }
 
@@ -4867,7 +4889,9 @@ export default function Home() {
       if (hasPendingRebuild && attempts <= REBUILD_POLL_MAX_ATTEMPTS) {
         // codex R9:这次补发也是一次真正的 POST 提交,同样会撞「POST 比首个 tick 慢」的
         // 陈旧 idle 竞态——统一包上 submittingMaintenanceRef,原因同 refreshUnifiedKg。
-        submittingMaintenanceRef.current.add(nb);
+        // codex R12:键按 kind 分开(`${nb}:rebuild`),同库若有一次 relink 提交在飞不受
+        // 影响。
+        submittingMaintenanceRef.current.add(`${nb}:rebuild`);
         try {
           const started = await rebuildUnifiedKg(nb);
           // codex R11:补发同样是一次真正的 POST 提交,拿到的是一个**新** job_id——
@@ -4895,7 +4919,7 @@ export default function Home() {
           reportError(err);
           // 非 409 的补发失败:落到下面的正常释放,标记仍不消费,留给下次终态再试。
         } finally {
-          submittingMaintenanceRef.current.delete(nb);
+          submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
         }
       } else if (hasPendingRebuild) {
         // 轮询尝试上限已耗尽,这条合并决定始终没能触发一次看得见它的重新合并:不再
@@ -4952,13 +4976,15 @@ export default function Home() {
         ) return;
         // codex R9:POST(含 settleOrRetryRebuild 的补发)比首个 tick 慢时,轮询会先读到
         // 服务端旧的 idle 并当终态收工——随后 POST 才成功,没人再轮询,任务完成不刷新。
-        // idle 且提交还在飞(submittingMaintenanceRef 记着这个库)时不能当真终态,继续等
-        // 下一个 tick;提交落地后服务端会回真实 running/succeeded/failed。
-        if (status.status === "idle" && submittingMaintenanceRef.current.has(nb)) return;
+        // idle 且提交还在飞(submittingMaintenanceRef 记着这个键)时不能当真终态,继续等
+        // 下一个 tick;提交落地后服务端会回真实 running/succeeded/failed。codex R12:键
+        // 按 kind 分开查`${nb}:rebuild`——同库若还有一次 relink 提交在飞,不该被那次不
+        // 相干的提交拖住这条 rebuild 轮询。
+        if (status.status === "idle" && submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;
         // codex R11:提交期不止 idle 会陈旧——服务端共享维护槽在这次 POST(含补发)落地
         // 前,仍可能如实回显上一个任务的 succeeded/failed(不止 idle)。提交期整段都
         // 不可信,不止 idle 这一种终态。
-        if (submittingMaintenanceRef.current.has(nb)) return;
+        if (submittingMaintenanceRef.current.has(`${nb}:rebuild`)) return;
         // codex R11:POST 落地之后,只有 status.job_id 与这次提交拿到的 job_id 一致才
         // 是这次追踪的终态——不一致(仍是上一个任务的残留,或槽已被另一次提交/领养
         // 占用)一律视为陈旧,继续轮询等真正对应这次追踪的终态出现。没有走过本页 POST
@@ -5116,7 +5142,11 @@ export default function Home() {
       // 并当终态收工,随后这次 POST 才成功,没人再轮询,决定生效不会被看见。统一包上
       // submittingMaintenanceRef,finally 里清理(不管成功/409/非 409 失败都不能让标记
       // 永久卡住),与另两处提交期标记同一形态。
-      submittingMaintenanceRef.current.add(nb);
+      // codex R12:键按 kind 分开(`${nb}:rebuild`)——同库若有一次 relink POST 还没返回
+      // (用户在它落地前就确认了合并、触发这次 rebuild POST),两次提交的保护窗口重叠;
+      // 旧代码共用裸 nb 键时,先落地的那次在自己的 finally 里把唯一条目删掉,仍在飞的
+      // 另一次就此失去保护。
+      submittingMaintenanceRef.current.add(`${nb}:rebuild`);
       try {
         const started = await rebuildUnifiedKg(nb);
         // codex R11:记下这次 POST 真正拿到的 job_id——轮询终态必须等 status.job_id
@@ -5130,7 +5160,7 @@ export default function Home() {
         setPendingRebuildNotebookIds((prev) => claimNotebookSlot(prev, nb));
         setToast("合并已记录，将在当前任务完成后自动重新合并");
       } finally {
-        submittingMaintenanceRef.current.delete(nb);
+        submittingMaintenanceRef.current.delete(`${nb}:rebuild`);
       }
       const pend = await fetchPendingMerges(nb);
       setPendingMerges(withoutDecidedMerge(pend, candidate));
