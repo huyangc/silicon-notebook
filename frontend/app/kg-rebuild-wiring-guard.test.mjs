@@ -401,3 +401,51 @@ test("decideMerge 撞 409 时置位待补发标记(供 rebuild 轮询终态自�
     + "图谱会永久停在这条决定生效之前",
   );
 });
+
+test("finish 在刷新 IIFE 之前就检查待补发标记(命中标记的两条路都跳过本轮 Promise.all 刷新)", async () => {
+  // codex R3 P2:relink 占槽期间,rebuild status 每个 3s tick 都回终态 idle
+  // (refresh:true)。旧顺序是"先 Promise.all 整图刷新、finally 里才试补发"——标记
+  // 已经在等的场景下,这份刷新每次都白跑:补发多半立刻撞 409(占槽任务还没收工),
+  // 下一 tick 还会再刷新一次,最多陪跑到 REBUILD_POLL_MAX_ATTEMPTS(600)次,慢的
+  // 图读取还会推迟真正的补发。修法是把"有没有待补发标记"的判断挪到刷新 IIFE 之前:
+  // 命中标记就直接交给 settleOrRetryRebuild 决定(补发成功→续轮询新任务;再撞 409→
+  // 续轮询等槽),两条路都不碰 Promise.all;只有真的没有标记的终态才进刷新 IIFE。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+
+  const start = source.indexOf(
+    "if (!busyForNotebook(rebuildingNotebookIds, currentNotebookId)) return;",
+  );
+  assert.ok(start > 0, "找不到重新合并的轮询 effect(被改名或删除?守卫失效)");
+  const depsAt = source.indexOf("}, [rebuildingNotebookIds, currentNotebookId]);", start);
+  assert.ok(depsAt > start, "找不到轮询 effect 的收尾依赖数组");
+  const body = source.slice(start, depsAt);
+
+  const finishAt = body.indexOf("const finish = (outcome: RebuildPollOutcome) => {");
+  assert.ok(finishAt >= 0, "找不到 finish 定义(被改名?守卫失效)");
+  const iifeAt = body.indexOf("void (async () => {", finishAt);
+  assert.ok(iifeAt > finishAt, "找不到刷新 IIFE(fetchUnifiedGraph 所在的 void async IIFE)");
+  // 只在 finish 开头到刷新 IIFE 起点这一段里找——刻意不整段 body 搜索,否则
+  // settleOrRetryRebuild 内部自己的标记检查会把断言悄悄喂绿。
+  const finishHead = body.slice(finishAt, iifeAt);
+
+  const pendingCheckAt = finishHead.indexOf(
+    "pendingRebuildNotebookIdsRef.current.has(nb)",
+  );
+  assert.ok(
+    pendingCheckAt >= 0,
+    "finish 必须在刷新 IIFE 之前检查待补发标记 —— 不检查,relink 占槽期间每个 3s tick"
+    + "的终态路径都会先跑一次 Promise.all 整图刷新才尝试补发,慢的图读取还会推迟真正的补发",
+  );
+
+  const settleAt = finishHead.indexOf("void settleOrRetryRebuild();", pendingCheckAt);
+  assert.ok(
+    settleAt > pendingCheckAt,
+    "命中待补发标记(或 !outcome.refresh)必须直接交给 settleOrRetryRebuild 决定,"
+    + "不能在两者之间插入任何刷新逻辑",
+  );
+  assert.ok(
+    finishHead.includes("return;", settleAt),
+    "命中待补发标记分支必须 return,不能继续往下跑进刷新 IIFE",
+  );
+});

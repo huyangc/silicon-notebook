@@ -4633,7 +4633,16 @@ export default function Home() {
     // activeNotebookIdRef：cleanup 只该取消**轮询**本身，不该取消这次已经在飞的终态刷新。
     const finish = (outcome: RebuildPollOutcome) => {
       if (outcome.toast) setToast(outcome.toast);
-      if (!outcome.refresh) {
+      // 待补发标记优先于刷新(codex R3 P2)：relink 占槽期间,rebuild status 每个 3s
+      // tick 都回终态 idle(refresh:true)——旧顺序是"先 Promise.all 整图刷新、
+      // finally 里才试补发",标记已经在等的场景下这份刷新纯属浪费:补发多半立刻撞
+      // 409(占槽任务还没收工),下一 tick 还会再刷新一次,最多陪跑到 REBUILD_POLL_
+      // MAX_ATTEMPTS,慢的图读取还会推迟真正的补发。这里把标记检查提到刷新 IIFE
+      // 之前:命中标记就直接交给 settleOrRetryRebuild 决定(补发成功→续轮询新任务;
+      // 再撞 409→续轮询等槽),两条路都跳过本轮刷新——旧那次真 rebuild 的成功结果
+      // 延后到补发的那次 rebuild 终态一并刷新,这是刻意接受的取舍。只有真的没有
+      // 待补发标记的终态才走下面的刷新+释放。
+      if (!outcome.refresh || pendingRebuildNotebookIdsRef.current.has(nb)) {
         void settleOrRetryRebuild();
         return;
       }
