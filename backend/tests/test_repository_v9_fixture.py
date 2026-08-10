@@ -112,9 +112,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 命令目录抽取的 catalog_jobs / catalog_candidates 两张表，以及 v40
     # source-local fact / evidence-element binding 两张表，以及 v41 可恢复的
     # source-fact backfill 状态表，v42 notebook 级来源反查索引回填
-    # 游标/计数账本，v43 报告公开分享，以及 v44 生成问题
-    # 影子索引，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 44
+    # 游标/计数账本，v43 报告公开分享的 share_token/shared_at 列，v44 生成问题
+    # 影子索引，以及 v45 user_profiles.ui_mode 界面模式偏好列，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 45
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

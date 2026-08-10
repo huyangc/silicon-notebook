@@ -12,6 +12,9 @@ export const createReport = (
   depth: number,
   sourceScope?: SourceScopePayload,
   baseScope?: BaseScopePayload,
+  // 自动模式：问题清晰(无阻断歧义)时服务端自动确认意图 + 自动接受默认大纲直接
+  // 生成；有歧义仍停在 intent_ready，前端照常显示补充问题信息卡。高级模式恒 false。
+  autoGenerate?: boolean,
 ) =>
   requestJson<{ report_id: string }>(`/notebooks/${nb}/reports`, {
     ...options,
@@ -21,6 +24,7 @@ export const createReport = (
       depth,
       source_scope: sourceScope,
       base_scope: baseScope,
+      auto_generate: Boolean(autoGenerate),
     }),
   });
 

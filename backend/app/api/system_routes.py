@@ -8,13 +8,14 @@ from fastapi.responses import StreamingResponse
 from app.api.deps import (
     admin_query_repository,
     get_current_user,
+    identity_repository,
     model_service_binding_summary,
     model_status_service,
     notebook_catalog_repository,
     repository,
 )
 from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
-from app.models.identity import UserProfile
+from app.models.identity import UiModeUpdate, UserProfile
 from app.models.model_services import ModelServicesStatus
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
@@ -54,6 +55,16 @@ def get_system_model_services_status(
 @router.get("/me", response_model=UserProfile)
 def me(user: UserProfile = Depends(get_current_user)) -> UserProfile:
     return user
+
+
+@router.patch("/me/ui-mode", response_model=UserProfile)
+def update_my_ui_mode(
+    payload: UiModeUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> UserProfile:
+    """自助切换界面模式偏好("auto"|"advanced")；只写调用者自己的 user_profiles
+    行，不做 admin 校验。合法值由 pydantic Literal 在到达这里之前已经拒绝。"""
+    return identity_repository().set_user_ui_mode(user.id, payload.ui_mode)
 
 
 @router.get("/system/config", response_model=SystemConfiguration)

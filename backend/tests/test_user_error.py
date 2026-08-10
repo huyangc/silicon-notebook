@@ -212,6 +212,27 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "诊断通道。真实响应由 test_knowhow_api.py 的解析失败、属性按行提示与列数不一致"
         "用例覆盖，均断言 X-User-Message。"
     ),
+    "app/api/report_routes.py::confirm_report_intent": (
+        "detail 只能来自 `ReportIntentConfirmationError.message`，而该异常只在"
+        "`app/services/reports/intent_confirmation.py` 的两个中文模块常量上抛出："
+        "`MISSING_ANSWERS_MESSAGE`（请先回答所有必填澄清问题）与"
+        "`EMPTY_QUESTION_MESSAGE`（确认后的研究问题不能为空）。文案收在那里是因为"
+        "自动直通（auto_generate）与人工确认端点共用同一份确定性冻结逻辑，抄两遍"
+        "必然走样；异常原文既不含用户输入也不含内部黑话。真实响应由"
+        "test_report_api.py::"
+        "test_intent_confirmation_requires_answers_then_resumes_planning 与"
+        "test_report_intent_confirmation_rejects_a_blank_resolved_question 覆盖，"
+        "均断言逐字 detail。"
+    ),
+    "app/api/report_routes.py::update_report_outline": (
+        "两处动态 detail 都是本函数内的纯中文模板 f-string，只插入部署配置派生的"
+        "整数护栏：「报告大纲最多可保留 N 个章节」（report_max_sections）与"
+        "「每个章节最多可保留 N 条检索方向」（report_max_subqueries_per_section）；"
+        "同函数其余 user_error 文案都是中文字面量。真实响应由 test_report_api.py::"
+        "test_outline_patch_rejects_excess_sections 与"
+        "test_outline_patch_rejects_excess_retrieval_directions 覆盖"
+        "（断言 422 + detail 含上限数字）。"
+    ),
     "app/api/catalog_routes.py::start_command_catalog": (
         "三处 detail：本文件顶部维护的中文常量 `_ALREADY_RUNNING_MESSAGE`"
         "（该来源已有识别任务在跑）、`catalog_job.MODEL_UNAVAILABLE_MESSAGE`"

@@ -23,6 +23,10 @@ from app.models.reports import (
     ReportSummary,
 )
 from app.services.report_public_view import public_report_payload
+from app.services.reports.intent_confirmation import (
+    ReportIntentConfirmationError,
+    confirmed_understanding,
+)
 from app.models.source_scope import (
     BaseNotebookScope,
     ResolvedSourceScope,
@@ -178,39 +182,20 @@ def confirm_report_intent(notebook_id: str, report_id: str,
         # selected library unmounted), so the emptiness check must run again
         # here -- this is the last gate before planning is claimed and launched.
         _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
-    ambiguities = {
-        str(row.get("id") or ""): row
-        for row in (understanding.get("ambiguities") or [])
-        if isinstance(row, dict) and row.get("id")
-    }
-    submitted = {
-        row.id.strip(): row.answer.strip()
-        for row in payload.answers
-        if row.id.strip() and row.answer.strip() and row.id.strip() in ambiguities
-    }
-    missing = [
-        row for ambiguity_id, row in ambiguities.items()
-        if row.get("required") is not False and not submitted.get(ambiguity_id)
-    ]
-    if missing:
-        raise user_error(422, "请先回答所有必填澄清问题")
-
-    resolved_question = payload.resolved_question.strip()
-    if not resolved_question:
-        raise user_error(422, "确认后的研究问题不能为空")
-    answer_rows = [
-        {
-            "id": ambiguity_id,
-            "question": str(ambiguities[ambiguity_id].get("question") or ""),
-            "answer": answer,
-        }
-        for ambiguity_id, answer in submitted.items()
-    ]
-    understanding["confirmed_input"] = {
-        "resolved_question": resolved_question,
-        "answers": answer_rows,
-    }
-    understanding["confirmed"] = True
+    # Shared with the automatic direct-run confirmation: one implementation of
+    # "freeze exactly what the owner reviewed", so both paths claim the same
+    # contract.  Only the rejection transport differs (422 here, fail-open
+    # there).
+    try:
+        understanding = confirmed_understanding(
+            understanding,
+            resolved_question=payload.resolved_question,
+            answers=[
+                {"id": row.id, "answer": row.answer} for row in payload.answers
+            ],
+        )
+    except ReportIntentConfirmationError as exc:
+        raise user_error(422, exc.message)
     if not repo.claim_report_intent(notebook_id, report_id, understanding):
         raise user_error(409, "当前报告不再处于问题确认阶段")
     launch_kwargs = {"intent_contract": understanding}

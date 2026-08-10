@@ -1441,3 +1441,133 @@ def test_concurrent_share_calls_converge_on_one_token(client, monkeypatch):
     # And the surviving link is the one actually persisted.
     assert repo.report_share_token(nb["id"], rid) == results[0]
     assert client.get(f"/api/public/reports/{results[0]}").status_code == 200
+
+
+def test_auto_generate_flag_reaches_create_and_survives_manual_confirmation(
+    client, monkeypatch,
+):
+    """auto_generate 是持久 flag:创建时传入,确认后从 understanding 读回。
+
+    歧义停过一次的报告,人工确认意图后大纲阶段仍须自动直通(第 6 个位置参数就是
+    引擎的 ``auto_generate``)。
+    """
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    launched = []
+    monkeypatch.setattr(
+        R, "_launch_plan_job",
+        lambda *args, **kwargs: launched.append((args, kwargs)),
+    )
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports",
+        json={"question": "分析一下这个问题", "auto_generate": True},
+    ).json()["report_id"]
+    assert launched[-1][0][5] is True, "创建时未把 auto_generate 传给规划 job"
+
+    repository().update_report(
+        nb["id"], rid, status="intent_ready",
+        understanding={
+            "objective": "分析一下这个问题",
+            "resolved_question": "分析这个问题",
+            "auto_generate_requested": True,
+            "ambiguities": [{
+                "id": "ambiguity-input",
+                "question": "具体研究对象是什么？",
+                "required": True,
+                "options": [],
+            }],
+            "needs_clarification": True,
+            "confirmed": False,
+        },
+    )
+    confirmed = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/intent",
+        json={
+            "resolved_question": "分析 PLL 环路稳定性",
+            "answers": [{"id": "ambiguity-input", "answer": "电荷泵 PLL"}],
+        },
+    )
+    assert confirmed.status_code == 200
+    assert launched[-1][0][5] is True, "人工确认后 flag 丢失,大纲不会自动直通"
+    assert launched[-1][1]["intent_contract"]["auto_generate_requested"] is True
+
+
+def test_manual_confirmation_without_the_flag_stays_at_the_outline_gate(
+    client, monkeypatch,
+):
+    """默认(高级)模式逐位不变:确认意图后 auto_generate 仍为 False。"""
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    launched = []
+    monkeypatch.setattr(
+        R, "_launch_plan_job",
+        lambda *args, **kwargs: launched.append((args, kwargs)),
+    )
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "分析 PLL 稳定性"},
+    ).json()["report_id"]
+    assert launched[-1][0][5] is False
+
+    repository().update_report(
+        nb["id"], rid, status="intent_ready",
+        understanding={
+            "objective": "分析 PLL 稳定性",
+            "resolved_question": "分析 PLL 环路稳定性",
+            "auto_generate_requested": False,
+            "ambiguities": [],
+            "needs_clarification": False,
+            "confirmed": False,
+        },
+    )
+    confirmed = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/intent",
+        json={"resolved_question": "分析 PLL 环路稳定性", "answers": []},
+    )
+    assert confirmed.status_code == 200
+    assert launched[-1][0][5] is False
+
+
+def test_report_intent_confirmation_rejects_a_blank_resolved_question(
+    client, monkeypatch,
+):
+    """空研究问题走共享冻结逻辑的 422,并且绝不认领 planning。"""
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    launched = []
+    monkeypatch.setattr(
+        R, "_launch_plan_job",
+        lambda *args, **kwargs: launched.append(args),
+    )
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "分析 PLL 稳定性"},
+    ).json()["report_id"]
+    repository().update_report(
+        nb["id"], rid, status="intent_ready",
+        understanding={
+            "objective": "分析 PLL 稳定性",
+            "resolved_question": "分析 PLL 环路稳定性",
+            "ambiguities": [],
+            "needs_clarification": False,
+            "confirmed": False,
+        },
+    )
+    launched.clear()
+
+    blank = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/intent",
+        json={"resolved_question": "   ", "answers": []},
+    )
+    assert blank.status_code == 422
+    assert blank.json()["detail"] == "确认后的研究问题不能为空"
+    assert blank.headers.get("X-User-Message") == "1"
+    assert launched == []
+    assert repository().get_report(nb["id"], rid)["status"] == "intent_ready"

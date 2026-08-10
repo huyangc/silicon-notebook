@@ -120,7 +120,8 @@ import {
   reconcileConversationCleanup,
   runOwnedConversationCleanup,
 } from "./conversation-cleanup";
-import { fetchMe, logoutUser, type AuthUser } from "./auth";
+import { fetchMe, logoutUser, updateUiMode, type AuthUser } from "./auth";
+import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
@@ -798,6 +799,9 @@ export default function Home() {
   const [readySnapshot, setReadySnapshot] = useState<ReadySnapshot | null>(null);
   const [readyRetry, setReadyRetry] = useState(0);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  // 自动/高级界面模式的唯一判据——所有隐藏/显示分支与请求侧 scope 强制都读这
+  // 一个值(ui-mode.ts)，不散落第二份布尔。未登录/字段缺失时归一成 "auto"。
+  const uiMode: UiMode = normalizeUiMode(currentUser?.ui_mode);
   const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<Health | null>(null);
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
@@ -978,6 +982,15 @@ export default function Home() {
   const [askRetrievalEffort, setAskRetrievalEffort] = useState<AskRetrievalEffortId>(
     DEFAULT_ASK_RETRIEVAL_EFFORT,
   );
+  // 自动模式下深入分析固定走「逐步推理」。点击 Tab 时已用 defaultModeForGroup
+  // ("strict")==="reasoning" 兑现；这条效应补上反向路径——用户在高级模式下切到
+  // 「关联追溯」，随后(不刷新页面)把开关拨回自动模式，UI 隐藏了切换按钮，但
+  // state 仍停在 graph，必须显式收回，否则发出去的仍是 graph 请求。
+  useEffect(() => {
+    if (uiMode === "auto" && askMode === "graph") {
+      setAskMode("reasoning");
+    }
+  }, [uiMode, askMode]);
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
   const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
@@ -2371,8 +2384,27 @@ export default function Home() {
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
   // 硬约束:后端判定该库无任何可检索证据时,锁死对话框(输入/发送/快捷提问),占位改为
   // 引导文案。判据单一真源见 ask-availability(读后端 ask_available)。
+  //
+  // 自动模式隐藏了来源/参考库勾选框，但 sourceScopeSelection / baseScopeSelection
+  // 这两份 state 仍可能留着用户此前在高级模式下收窄过的选择（切回自动模式不清空，
+  // 免得再切回高级模式时白白丢失偏好）。因此**所有**读取范围的地方——计数、空判、
+  // 提交给后端的 payload——一律经这两个 effective 值，不直接读原始 state：自动模式
+  // 下它们恒等于「全选」，与隐藏掉的勾选框在视觉上应该表达的状态一致，也保证发出
+  // 的请求不会静默沿用一份用户已经看不到、改不了的收窄状态。
+  // useMemo 而不是直接调用 default*ScopeSelection()：那两个纯函数每次都返回一个
+  // 新对象字面量（`{ allSelected: true, ids: new Set() }`），自动模式下若不缓存，
+  // 每次渲染都会产出一个新引用，把下游依赖它做 identity 比较的 useMemo（例如
+  // selectedBaseNotebookIds）逐帧打穿、白白重算。
+  const effectiveSourceScopeSelection = useMemo(
+    () => (isAdvanced(uiMode) ? sourceScopeSelection : defaultSourceScopeSelection()),
+    [uiMode, sourceScopeSelection],
+  );
+  const effectiveBaseScopeSelection = useMemo(
+    () => (isAdvanced(uiMode) ? baseScopeSelection : defaultBaseScopeSelection()),
+    [uiMode, baseScopeSelection],
+  );
   const selectedLocalSourceCount = selectedSourceCount(
-    sourceScopeSelection,
+    effectiveSourceScopeSelection,
     notebookSourceTotal,
   );
   // 挂载的参考库。owner 与只读访客都能从 NotebookSummary 拿到这一份（notebook-bases.ts
@@ -2389,8 +2421,8 @@ export default function Home() {
   // 本轮真正参与检索的参考库 id。计数由它派生 —— 「勾了几个」与「勾了哪几个」出自
   // 同一次求值,不可能各说各的(严格推理的可用性判定读的正是这一份)。
   const selectedBaseNotebookIds = useMemo(
-    () => selectedBaseIds(baseScopeSelection, mountedBaseIds),
-    [baseScopeSelection, mountedBaseIds],
+    () => selectedBaseIds(effectiveBaseScopeSelection, mountedBaseIds),
+    [effectiveBaseScopeSelection, mountedBaseIds],
   );
   const selectedBaseNotebookCount = selectedBaseNotebookIds.length;
   // 真机事故（本次改动的起因）：勾定单篇文章提问，16 条引用全部来自那个 84 篇论文的
@@ -2409,11 +2441,29 @@ export default function Home() {
     && selectedBaseNotebookCount === 0
   );
   const askBlocked = isAskBlocked(currentNotebook) || sourceScopeBlocked;
+  // 自动模式下被硬锁时，文档还在解析中是最常见的原因——直接说清楚还剩几篇，
+  // 免得用户以为要去手动配置什么。有其他兜底文案（范围为空/无来源）时优先级更高。
+  //
+  // 这个数只能在 sources 代表「笔记本全部可见来源」时才可信：搜索框非空或分页未
+  // 加载全部来源时，当前这份 sources 只是子集/某一页，按它数出来的 0 不能说明
+  // 真的没有来源在处理——那会把「用户正在搜索」误判成「没有处理中的文档」。
+  const pendingSourceCount = sourceQuery.trim() === "" && sources.length === notebookSourceTotal
+    ? sources.filter((source) => !["extracted", "failed"].includes(source.parse_status)).length
+    : null;
+  // 自动模式没有勾选框可选——sourceScopeBlocked 在自动模式下恒等于「本地与参考库
+  // 证据全空」（effective 选择恒为全选，为空只能是笔记本本身零来源零挂载库），所以
+  // 那句面向勾选框的兜底文案在自动模式下答非所问，改落到「添加来源」口径。
   const askPlaceholderText = sourceScopeBlocked
-    ? "请至少选择一个来源或参考库，再开始对话"
-    : askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
+    ? (isAdvanced(uiMode)
+      ? "请至少选择一个来源或参考库，再开始对话"
+      : "请先添加来源，再开始对话")
+    : askBlocked
+      ? (isAdvanced(uiMode)
+        ? "请先添加来源或挂载参考库，再开始对话"
+        : autoModeAskPlaceholder(pendingSourceCount, "请先添加来源或挂载参考库，再开始对话"))
+      : askHint;
   const currentSourceScope = sourceScopePayload(
-    sourceScopeSelection,
+    effectiveSourceScopeSelection,
     notebookSourceTotal,
     sourceQuery.trim() === "" && sources.length === notebookSourceTotal
       ? sources.map((source) => source.id)
@@ -2426,7 +2476,7 @@ export default function Home() {
   //
   // 代价为零：空快照冻结后 selected 与全集都是 0 ⇒ narrowed 为假 ⇒ 不进限定模式、
   // 不关任何通道、不产生回执，未挂库笔记本的行为逐位不变。
-  const currentBaseScope = baseScopePayload(baseScopeSelection, mountedBaseIds);
+  const currentBaseScope = baseScopePayload(effectiveBaseScopeSelection, mountedBaseIds);
   // 工具条与输入框上方是同一句话的两处显示；共用这**一个**计算结果，不各写各的
   // 字面量 —— 两处分叉在结构上因此不可能发生。
   const retrievalScopeText = retrievalScopeSummary(
@@ -3687,7 +3737,8 @@ export default function Home() {
     const q = nextQuestion.trim();
     if (!q) return;
     if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
-      setToast(sourceScopeBlocked
+      // 自动模式没有勾选框——范围为空只能是笔记本本身无证据，落「添加来源」口径。
+      setToast(sourceScopeBlocked && isAdvanced(uiMode)
         ? "当前检索范围为空，请至少选择一个来源或参考库。"
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
@@ -3818,7 +3869,8 @@ export default function Home() {
     if (!q) return false;
     // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
     if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
-      setToast(sourceScopeBlocked
+      // 自动模式没有勾选框——范围为空只能是笔记本本身无证据，落「添加来源」口径。
+      setToast(sourceScopeBlocked && isAdvanced(uiMode)
         ? "当前检索范围为空，请至少选择一个来源或参考库。"
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return false;
@@ -3859,7 +3911,9 @@ export default function Home() {
         asked_at: askedAt,
         conversation_id: conversationId ?? undefined,
         mode: selectedMode,
-        retrieval_effort: askRetrievalEffort,
+        // 自动模式下控件不渲染，state 却可能还留着高级模式下选过的档位——发请求
+        // 时强制回默认档，不能沿用一份用户已经看不到、改不了的选择。
+        retrieval_effort: isAdvanced(uiMode) ? askRetrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT,
         source_scope: currentSourceScope,
         // ⚠ 必须留在**顶层**。挪进下面那个条件展开里，字段还在、值也没变，但非
         // reasoning 模式（intent 为 undefined）下整个 base_scope 消失，参考库静默
@@ -5615,6 +5669,20 @@ export default function Home() {
     setStatusText(toUserMessage(error, "服务出了点问题，请稍后重试"));
   }
 
+  // 头像菜单「高级模式」开关：调 PATCH /me/ui-mode 切换，成功后用返回的完整用户
+  // 档案覆盖本地态(normalizeUiMode 已在 auth.ts 里做过，这里不必再判)；失败保持
+  // 原态不切、走既有 toast 错误通道——绝不能让界面显示的开关态与服务端不一致。
+  async function handleToggleAdvancedMode() {
+    if (!currentUser) return;
+    const next: UiMode = isAdvanced(uiMode) ? "auto" : "advanced";
+    try {
+      const updated = await updateUiMode(next);
+      setCurrentUser(updated);
+    } catch (error) {
+      setToast(toUserMessage(error, "切换界面模式没成功，请稍后重试"));
+    }
+  }
+
   async function handleLogout() {
     workspaceEpochRef.current += 1;
     sourcePageRequestRef.current += 1;
@@ -5818,7 +5886,9 @@ export default function Home() {
             initials={accountBadge}
             memoryActive={outerView === "memory"}
             showAdminUsage={canSeeAdminUsage(currentUser.role)}
+            advancedMode={isAdvanced(uiMode)}
             onOpenMemory={showGlobalMemory}
+            onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}
             onLogout={() => handleLogout().catch(reportError)}
           />
         </div>
@@ -6234,28 +6304,35 @@ export default function Home() {
                   >
                     检索范围 · {retrievalScopeText}
                   </span>
-                  <button
-                    type="button"
-                    disabled={askInFlight || (notebookSourceTotal === 0 && !hasMountedBase)}
-                    onClick={() => {
-                      setSourceScopeSelection(defaultSourceScopeSelection());
-                      setBaseScopeSelection(defaultBaseScopeSelection());
-                    }}
-                  >全选</button>
-                  {/* 「全选」/「清空」必须一并管参考库 —— 只清本库来源就是本次事故的
-                      翻版：用户以为范围空了，参考库还在整份参与检索。 */}
-                  <button
-                    type="button"
-                    disabled={askInFlight || (
-                      selectedLocalSourceCount === 0 && selectedBaseNotebookCount === 0
-                    )}
-                    onClick={() => {
-                      setSourceScopeSelection({ allSelected: false, ids: new Set() });
-                      setBaseScopeSelection({ allSelected: false, ids: new Set() });
-                    }}
-                  >清空</button>
+                  {/* 自动模式固定全选、不给这两个按钮：勾选/清空的操作面就是要隐藏的
+                      那部分「配置」。范围计数文案仍显示（effective 值恒为全选，与隐藏掉
+                      的勾选框视觉上一致），只是没有交互入口。 */}
+                  {isAdvanced(uiMode) && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={askInFlight || (notebookSourceTotal === 0 && !hasMountedBase)}
+                        onClick={() => {
+                          setSourceScopeSelection(defaultSourceScopeSelection());
+                          setBaseScopeSelection(defaultBaseScopeSelection());
+                        }}
+                      >全选</button>
+                      {/* 「全选」/「清空」必须一并管参考库 —— 只清本库来源就是本次事故的
+                          翻版：用户以为范围空了，参考库还在整份参与检索。 */}
+                      <button
+                        type="button"
+                        disabled={askInFlight || (
+                          selectedLocalSourceCount === 0 && selectedBaseNotebookCount === 0
+                        )}
+                        onClick={() => {
+                          setSourceScopeSelection({ allSelected: false, ids: new Set() });
+                          setBaseScopeSelection({ allSelected: false, ids: new Set() });
+                        }}
+                      >清空</button>
+                    </>
+                  )}
                 </div>
-                {hasMountedBase && (
+                {hasMountedBase && isAdvanced(uiMode) && (
                   <section className="scope-group" aria-label="参考库检索范围">
                     <h3 className="scope-group-title">参考库</h3>
                     <div className="base-scope-list">
@@ -6325,26 +6402,28 @@ export default function Home() {
                       return (
                       <div
                         key={source.id}
-                        className={`source-row compact-source-row${deletingSource ? " source-row--deleting" : ""}`}
+                        className={`source-row compact-source-row${isAdvanced(uiMode) ? "" : " source-row--no-select"}${deletingSource ? " source-row--deleting" : ""}`}
                         title={source.title}
                         aria-busy={deletingSource || undefined}
                       >
-                        <label
-                          className="source-scope-check"
-                          title={sourceIsSelected(sourceScopeSelection, source.id)
-                            ? "此来源会参与问答与深度报告检索"
-                            : "此来源不会参与问答与深度报告检索"}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={sourceIsSelected(sourceScopeSelection, source.id)}
-                            disabled={deletingSource || askInFlight}
-                            aria-label={`检索来源：${source.title}`}
-                            onChange={() => setSourceScopeSelection((previous) => (
-                              toggleSourceSelection(previous, source.id)
-                            ))}
-                          />
-                        </label>
+                        {isAdvanced(uiMode) && (
+                          <label
+                            className="source-scope-check"
+                            title={sourceIsSelected(sourceScopeSelection, source.id)
+                              ? "此来源会参与问答与深度报告检索"
+                              : "此来源不会参与问答与深度报告检索"}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={sourceIsSelected(sourceScopeSelection, source.id)}
+                              disabled={deletingSource || askInFlight}
+                              aria-label={`检索来源：${source.title}`}
+                              onChange={() => setSourceScopeSelection((previous) => (
+                                toggleSourceSelection(previous, source.id)
+                              ))}
+                            />
+                          </label>
+                        )}
                         <button
                           className="source-row-main"
                           disabled={deletingSource}
@@ -6632,7 +6711,12 @@ export default function Home() {
                     getReport={getReport}
                     createReport={(nb, reportQuestion, depth) => createReport(
                       nb, reportQuestion, depth, currentSourceScope, currentBaseScope,
+                      // 高级模式恒 false（沿用既有的手动确认/大纲编辑流程）；自动模式下
+                      // 问题清晰时服务端自动确认意图 + 自动接受默认大纲直接生成，有歧义
+                      // 仍停在 intent_ready，前端照常显示补充问题信息卡。
+                      !isAdvanced(uiMode),
                     )}
+                    uiMode={uiMode}
                     confirmReportIntent={confirmReportIntent}
                     updateReportOutline={updateReportOutline}
                     generateReport={generateReport}
@@ -6647,7 +6731,9 @@ export default function Home() {
                     onFocusConsumed={() => setPendingReportFocusId(null)}
                     readOnly={!capabilities.canManageReports}
                     creationDisabled={sourceScopeBlocked}
-                    creationDisabledReason="当前检索范围为空，请至少选择一个来源或参考库"
+                    creationDisabledReason={isAdvanced(uiMode)
+                      ? "当前检索范围为空，请至少选择一个来源或参考库"
+                      : "请先添加来源，再开始生成报告"}
                     maxSections={reportMaxSections}
                     maxSubqueriesPerSection={reportMaxSubqueriesPerSection}
                   />
@@ -6707,7 +6793,9 @@ export default function Home() {
                         {g.label}
                       </button>
                     ))}
-                    {groupOf(askMode) === "strict" && (
+                    {/* 自动模式下深入分析固定走「逐步推理」，引擎子切换与检索档位这两个
+                        配置面整个不渲染（不是禁用——禁用还是把控件摆在那儿）。 */}
+                    {isAdvanced(uiMode) && groupOf(askMode) === "strict" && (
                       <span className="mode-engines">
                         {modesInGroup("strict").map((m) => (
                           <button
@@ -6723,7 +6811,7 @@ export default function Home() {
                         ))}
                       </span>
                     )}
-                    {askMode === "reasoning" && (
+                    {isAdvanced(uiMode) && askMode === "reasoning" && (
                       <span className="ask-retrieval-effort">
                         {/* 与深度报告的「研究深度」共用 EffortPicker：同一套档名理应是同一个控件。
                             popover 只给该档一句说明，不再铺开每档的阈值数字。 */}

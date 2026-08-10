@@ -24,6 +24,7 @@
 - 检索候选保留语义、词法、PPR、KG 来源和社区等全部生产者来源；chunk/图混合选择可在不扩大回答预算的前提下，为纯图路径证据预留有界席位。
 - 前端生产模块位于 `frontend/app` 与 `frontend/features`，测试和测试支撑位于 `frontend/tests` 与 `frontend/test-support`。Ask 与深度报告共用 request-scoped 检索运行时，复用 query embedding、限制报告叶子检索扇出，并记录不含用户内容的分段观测。
 - KG 抽取在全局融合前持久化不可变的来源代次事实与规范化证据元素绑定；所选来源 snapshot 及按来源 scale 伴生产物只读取获授权图行，使大库里只选一篇/几篇的成本不随整库图增长。Ask 与深度报告共用质量门控激活层：历史证据 `B` 先完整产出，图证据 `G` 使用独立预算，只有受信 attestation 批准后才追加在 `B` 后。默认运行完全不可见的 `shadow`：不改变答案、公开响应、推理轨迹或 UI，只保留无正文内部事件。scope 漂移、伴生产物不可用、图失败或 baseline eviction 都 fail closed 回 `B`。全范围/全选请求（包括只有一篇来源且选中它）保持字节等价的历史路径。已有部署可离线运行一次可续跑的 `scripts/prepare_selected_source_graph.py`，为全部 notebook 完成迁移、回填、审计并发布当前伴生产物；所有检查成功后，脚本才原子写入部署 env 文件中的四个 shadow 配置。
+- 界面默认是**自动模式**——上传即可提问、一键生成深度报告，只有问题真的存在歧义时才需要你补充；从头像菜单开启**高级模式**可解锁上文的检索档位、研究深度和来源/参考库范围等完整配置。详见[产品与 API 参考](./docs/product-and-api_zh.md#界面模式自动高级)。
 
 完整产品行为和端点契约见[产品与 API 参考](./docs/product-and-api_zh.md)。
 

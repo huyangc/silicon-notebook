@@ -26,6 +26,7 @@ import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { buildPublicReportLink } from "./public-report";
 import { quotedPhraseHint } from "./query-syntax";
+import { isAdvanced, type UiMode } from "./ui-mode.ts";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
@@ -1342,6 +1343,12 @@ export interface ReportsPanelProps {
   creationDisabledReason?: string;
   maxSections?: number;
   maxSubqueriesPerSection?: number;
+  /**
+   * 自动/高级界面模式。auto 下不渲染「研究深度」档位控件，创建请求固定用默认档
+   * （DEPTHS[1]="标准"）——不读 depthIdx state，避免沿用一份用户已经看不到、
+   * 改不了的高级模式遗留选择。缺省按 "advanced" 兜底，保持既有调用点行为不变。
+   */
+  uiMode?: UiMode;
 }
 
 export function ReportsPanel({
@@ -1366,6 +1373,7 @@ export function ReportsPanel({
   creationDisabledReason = "",
   maxSections = DEFAULT_REPORT_MAX_SECTIONS,
   maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
+  uiMode = "advanced",
 }: ReportsPanelProps) {
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
@@ -1496,9 +1504,17 @@ export function ReportsPanel({
     if (!q || creating || creationDisabled) return;
     setCreating(true);
     try {
-      await createReport(notebookId, q, DEPTHS[depthIdx]);
+      // 自动模式下档位控件不渲染，depthIdx 可能还停在用户切回自动模式前在高级
+      // 模式下选过的值——固定回默认档「标准」，不沿用一份用户看不到、改不了的选择。
+      await createReport(notebookId, q, isAdvanced(uiMode) ? DEPTHS[depthIdx] : DEPTHS[1]);
       setQuestion("");
-      setToast("正在理解研究问题，完成后请先确认或补充关键信息");
+      // 高级模式沿用既有的手动确认/大纲编辑流程；自动模式下问题清晰时服务端会
+      // 自动确认意图并接受默认大纲直接生成，只有存在阻断性歧义才停下来等用户
+      // 补充——文案不能预设「一定要你来确认」，那对自动模式下多数会直接跑完的
+      // 报告是一句不成立的承诺。
+      setToast(isAdvanced(uiMode)
+        ? "正在理解研究问题，完成后请先确认或补充关键信息"
+        : "正在理解研究问题；若存在需要补充的关键信息会先请你确认，否则将自动完成大纲并生成报告");
       setReports(await listReports(notebookId));
     } catch (error) {
       surfaceError(error);
@@ -1956,14 +1972,16 @@ export function ReportsPanel({
               ?? "后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页"}
           </span>
           <div className="report-compose-controls">
-            <EffortPicker
-              chipLabel="深度"
-              title="研究深度"
-              options={DEPTH_OPTIONS}
-              value={String(depthIdx)}
-              onChange={(id) => setDepthIdx(Number(id))}
-              disabled={creating || creationDisabled}
-            />
+            {isAdvanced(uiMode) && (
+              <EffortPicker
+                chipLabel="深度"
+                title="研究深度"
+                options={DEPTH_OPTIONS}
+                value={String(depthIdx)}
+                onChange={(id) => setDepthIdx(Number(id))}
+                disabled={creating || creationDisabled}
+              />
+            )}
             <button
               className="button"
               type="button"

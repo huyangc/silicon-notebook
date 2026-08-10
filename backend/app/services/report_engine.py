@@ -54,6 +54,7 @@ from app.services.report_synthesis import (
     report_synthesis_requested,
     synthesis_evidence_payload,
 )
+from app.services.reports.intent_confirmation import confirmed_understanding
 from app.services.reports.observability import (
     emit_section_attempt,
     emit_stage_timing,
@@ -663,8 +664,16 @@ class ReportEngine:
 
     def prepare_intent(self, notebook_id: str, rid: str, question: str,
                        history: str = "", *, auto_generate: bool = False,
-                       source_scope=None, base_scope=None) -> None:
-        """Understand the request without touching notebook or mounted-base corpus."""
+                       source_scope=None, base_scope=None) -> dict | None:
+        """Understand the request without touching notebook or mounted-base corpus.
+
+        Returns the contract dict that was just persisted as ``understanding``
+        for the ``intent_ready`` write, or ``None`` when the run was cancelled
+        or failed before reaching that state. The direct-run auto-confirm path
+        (`_auto_confirm_intent`) consumes this return value instead of reading
+        the report back from the store — the dict handed back here is byte
+        -for-byte what was just written.
+        """
         reports = self.dependencies.reports
         try:
             reports.update_report(
@@ -706,15 +715,18 @@ class ReportEngine:
                 progress=progress,
                 understanding=contract,
             )
+            return contract
         except AskCancelled:
             reports.update_report(
                 notebook_id, rid, status="cancelled", progress="已取消"
             )
+            return None
         except Exception as exc:
             reports.update_report(
                 notebook_id, rid, status="failed",
                 error=str(exc)[:500], progress="问题理解失败",
             )
+            return None
 
     @staticmethod
     def _intent_catalog(intent_contract: dict) -> List[dict]:
@@ -2451,19 +2463,118 @@ class ReportEngine:
             reports.update_report(notebook_id, rid, status="failed",
                                   error=str(exc)[:500], progress="失败")
 
+    def _auto_confirm_intent(self, notebook_id: str, rid: str,
+                             contract: dict | None) -> dict | None:
+        """Confirm a *clear* intent for a direct-run report, or fail open.
+
+        This is the automatic half of ``POST .../reports/{id}/intent``: same
+        deterministic freeze (``confirmed_understanding``), same atomic
+        ``intent_ready → planning`` claim, no second model call.  It runs inside
+        the worker that just published ``intent_ready``, so no poller is needed.
+
+        ``contract`` is exactly what ``prepare_intent`` just persisted as
+        ``understanding`` for that write (or ``None`` when ``prepare_intent``
+        didn't reach ``intent_ready`` — cancelled/failed). It is deliberately
+        NOT re-read from the store with a primary-key ``get_report``:
+        ``prepare_intent`` ran synchronously in this same worker a moment ago,
+        so the dict handed back is byte-for-byte what is in the row, and the
+        real state guard is ``claim_report_intent``'s atomic
+        ``intent_ready → planning`` CAS below — a preceding read would only pay
+        a round trip without adding a check the CAS doesn't already make.
+
+        Returns the claimed contract, or ``None`` when the report must stay put:
+        a blocking ambiguity still needs the owner, the flag was never
+        requested, prepare_intent itself didn't reach intent_ready
+        (cancelled/failed), the row moved on (the owner confirmed by hand and
+        won the claim, or cancelled the report in the same window), or
+        anything at all went wrong.  Every one of those leaves a perfectly
+        usable report waiting at the manual gate, which is why this never
+        raises and never marks the report failed.
+
+        The scope emptiness gate the endpoint re-runs is deliberately absent:
+        that re-check exists because an owner may sit at ``intent_ready`` for
+        days while sources are deleted.  Here the create endpoint validated the
+        very same frozen scope seconds ago, in the request that started this
+        worker, and the engine holds no notebook port to re-check with.  This
+        is a deliberate, registered divergence from the manual endpoint: an API
+        client that sets ``auto_generate`` by hand with a narrowed scope, where
+        sources get deleted in the brief window between create and this direct
+        -run confirmation, gets a low-evidence report that continues with the
+        now-stale ids instead of the 422 the manual confirm endpoint would
+        raise on the same race.
+        """
+        reports = self.dependencies.reports
+        if contract is None:
+            return None
+        if not contract.get("auto_generate_requested"):
+            return None
+        if contract.get("needs_clarification"):
+            # The owner must answer first; the report is meant to wait.
+            return None
+        reason = "error"
+        try:
+            frozen = confirmed_understanding(
+                contract,
+                # The wording the owner would have seen pre-filled in the
+                # confirmation box.  Passing it unchanged also keeps
+                # finalize_query_intent's "wording was edited" branch closed, so
+                # the deterministic result scope survives.
+                resolved_question=str(contract.get("resolved_question") or ""),
+                answers=(),
+            )
+            claimed = reports.claim_report_intent(notebook_id, rid, frozen)
+        except Exception:  # noqa: BLE001 — fail open to the manual gate
+            claimed = False
+        else:
+            if claimed:
+                return frozen
+            # The claim lost the race. Two distinct reasons collapse into the
+            # same rowcount==0 signal: the owner confirmed by hand and won, or
+            # the owner cancelled the report in the same window. Telling them
+            # apart changes what an operator should read into the skip event,
+            # so this is the one supplemental read worth paying for — a rare
+            # race path, not the common case this function optimizes for.
+            reason = "claim_lost"
+            try:
+                latest = reports.get_report(notebook_id, rid)
+                if str(latest.get("status") or "") == "cancelled":
+                    reason = "cancelled"
+            except Exception:
+                pass
+        try:
+            self.dependencies.event_log.emit({
+                "kind": "report_intent_auto_confirm_skipped",
+                "notebook_id": notebook_id,
+                "report_id": rid,
+                "reason": reason,
+            })
+        except Exception:
+            pass
+        return None
+
     # --- 编排:规划(→outline_ready)+(auto_generate 时)生成,保留一键直出 ---
     def run(self, notebook_id, rid, question, history="", depth: int = 2,
             auto_generate: bool = False, intent_contract=None,
             require_intent_review: bool = False, source_scope=None,
             base_scope=None) -> None:
         if require_intent_review and intent_contract is None:
-            self.prepare_intent(
+            prepared_contract = self.prepare_intent(
                 notebook_id, rid, question, history,
                 auto_generate=auto_generate,
                 source_scope=source_scope,
                 base_scope=base_scope,
             )
-            return
+            if not auto_generate:
+                return
+            intent_contract = self._auto_confirm_intent(
+                notebook_id, rid, prepared_contract,
+            )
+            if intent_contract is None:
+                return
+            # Mirror the confirmation endpoint exactly: from here the reviewed
+            # contract is the authoritative input and the raw conversation
+            # history is dropped — it only ever fed corpus-blind understanding.
+            history = ""
         self.plan_outline(
             notebook_id, rid, question, history,
             intent_contract=intent_contract,

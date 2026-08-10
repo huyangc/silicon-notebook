@@ -29,7 +29,9 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v42 adds notebook-scoped durable progress for the source reverse-index
 # rebuild so a stopped deployment can resume after process loss without
 # clearing and rescanning already committed pages.
-SCHEMA_VERSION = 44
+# v45 adds user_profiles.ui_mode (nullable; application layer defaults NULL
+# to "auto") for the per-user auto/advanced interface mode preference.
+SCHEMA_VERSION = 45
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2210,6 +2212,18 @@ class SqliteMigrator:
                   ON chunk_questions(source_id, id);
                 """
             )
+
+    def _migration_45(self) -> None:
+        """User-level interface mode preference ("auto" | "advanced").
+
+        Nullable column on user_profiles (same pattern as v28's
+        upload_document_limit): NULL means "no explicit choice yet", and the
+        application layer (identity store read path) falls back to "auto"
+        rather than this migration writing a default into every existing
+        row.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "user_profiles", "ui_mode", "TEXT")
 
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
