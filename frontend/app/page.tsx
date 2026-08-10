@@ -3229,19 +3229,7 @@ export default function Home() {
         added.push(file);
       }
     }
-    // 累积追加（按 name+reason 去重）：弹窗开着期间的警告不能被下一次「全合法」的
-    // 添加静默清掉（codex #485 R1 P2）；只有「知道了」/清空/关闭/上传成功才清。
-    if (skipped.length > 0) {
-      setStagedSkipped((previous) => {
-        const combined = [...previous];
-        for (const item of skipped) {
-          if (!combined.some((existing) => existing.name === item.name && existing.reason === item.reason)) {
-            combined.push(item);
-          }
-        }
-        return combined;
-      });
-    }
+    appendStagedSkipped(skipped);
     if (added.length === 0) return;
     setStagedFiles(merged);
     setStagedDocTypes(mergedTypes);
@@ -3256,6 +3244,21 @@ export default function Home() {
   // 拖放必须由我们接管：不 preventDefault 的话文件会落在铺满拖放区的原生
   // <input type=file accept=…> 上，浏览器按 accept **静默**过滤不支持的文件——
   // stageIncomingFiles 根本收不到它们，用户也就得不到任何「已跳过」提示。
+  // 累积追加（按 name+reason 去重）：弹窗开着期间的警告不能被下一次「全合法」的
+  // 添加静默清掉（codex #485 R1 P2）；只有「知道了」/清空/关闭/上传成功才清。
+  function appendStagedSkipped(entries: SkippedStagedFile[]) {
+    if (entries.length === 0) return;
+    setStagedSkipped((previous) => {
+      const combined = [...previous];
+      for (const item of entries) {
+        if (!combined.some((existing) => existing.name === item.name && existing.reason === item.reason)) {
+          combined.push(item);
+        }
+      }
+      return combined;
+    });
+  }
+
   // preventDefault 必须**无条件**先做（含禁用态）：不取消默认行为，落在页面上的
   // drop 会让浏览器直接导航打开该文件，整批已暂存文件随页面一起丢掉。是否入列
   // 由禁用判断在取消默认行为**之后**决定（codex #485 R1 P1）。
@@ -3265,8 +3268,15 @@ export default function Home() {
   function handleStageDrop(event: ReactDragEvent<HTMLElement>) {
     event.preventDefault();
     setDropZoneDragActive(false);
-    if (sourceFilePickerDisabled) return;
-    stageIncomingFiles(Array.from(event.dataTransfer?.files ?? []));
+    const dropped = Array.from(event.dataTransfer?.files ?? []);
+    if (sourceFilePickerDisabled) {
+      // 禁用态（容量满/批次满/配置加载中）下拖入的文件不入列，但必须在「已跳过」
+      // 列表逐条留痕（codex #485 R2 P2），不能无声消失。
+      const reason = sourceFilePickerHint ?? "当前无法添加文件";
+      appendStagedSkipped(dropped.map((file) => ({ name: file.name, reason })));
+      return;
+    }
+    stageIncomingFiles(dropped);
   }
 
   // 读文本类文件前 8KB → 批量调 /detect-doc-types → 回填仍为空（未手动选）的类型。
