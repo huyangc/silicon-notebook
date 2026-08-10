@@ -251,12 +251,13 @@ class IdentityStore:
 
     def set_user_ui_mode(self, user_id: str, ui_mode: str) -> UserProfile:
         """自助设置调用者自己的界面模式偏好("auto"|"advanced")；无 admin 校验。
-        user_profiles 的 id 是确定性派生的 f"profile-{user_id}"(全部创建路径一致，见
-        bundle.py 注册流程与本文件的 create 分支)且是主键，所以可以直接对 id 做
-        INSERT ... ON CONFLICT DO UPDATE 原子 upsert，不必先 UPDATE 再按 rowcount==0
-        探测着补 INSERT——那种两步写法在并发下有一条竞态窗口:两个请求都 UPDATE 到
-        rowcount==0 后各自尝试 INSERT，后者撞主键失败。SQLite 侧因为有全局写锁把
-        整个方法串行化，不存在这条竞态，因此保留原实现不变。"""
+        ⚠不能只按派生 id 做 upsert:种子管理员的 profile 行是 `profile-local`
+        而非 f"profile-{user_id}" 形状(seed 路径早于派生约定)，按 id 冲突会给同一个
+        user_id 插出第二行,后续 `WHERE user_id=%s` 的读取无确定性排序,偏好看起来
+        会"回退"(codex R1 P1)。因此先按 user_id UPDATE(覆盖种子行与派生行两种形状)，
+        缺行(理论上不会发生——create_user/_seed 必建)再补 INSERT;补插保留
+        ON CONFLICT (id) DO UPDATE,吞掉「两个并发请求都 UPDATE 到 0 行后同时补插」
+        的竞态。SQLite 侧本就按 user_id UPDATE 且有全局写锁串行化，保持不变。"""
         if ui_mode not in {"auto", "advanced"}:
             raise ValueError("invalid ui_mode")
         now = utc_now()
@@ -265,13 +266,19 @@ class IdentityStore:
             if user is None:
                 raise KeyError(user_id)
             profile = db.execute(
-                "INSERT INTO user_profiles "
-                "(id,user_id,memory_mode,domain_focus,ui_mode,created_at,updated_at) "
-                "VALUES (%s,%s,'manual',%s,%s,%s,%s) "
-                "ON CONFLICT (id) DO UPDATE SET ui_mode=EXCLUDED.ui_mode,updated_at=EXCLUDED.updated_at "
-                "RETURNING *",
-                (f"profile-{user_id}", user_id, jsonb([]), ui_mode, now, now),
+                "UPDATE user_profiles SET ui_mode=%s,updated_at=%s "
+                "WHERE user_id=%s RETURNING *",
+                (ui_mode, now, user_id),
             ).fetchone()
+            if profile is None:
+                profile = db.execute(
+                    "INSERT INTO user_profiles "
+                    "(id,user_id,memory_mode,domain_focus,ui_mode,created_at,updated_at) "
+                    "VALUES (%s,%s,'manual',%s,%s,%s,%s) "
+                    "ON CONFLICT (id) DO UPDATE SET ui_mode=EXCLUDED.ui_mode,updated_at=EXCLUDED.updated_at "
+                    "RETURNING *",
+                    (f"profile-{user_id}", user_id, jsonb([]), ui_mode, now, now),
+                ).fetchone()
             return self._user_profile(user, profile)
 
     def _global_default_from(self, db) -> int:
