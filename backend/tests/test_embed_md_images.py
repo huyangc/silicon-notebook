@@ -150,6 +150,23 @@ def test_shorter_fence_line_does_not_close_longer_opener(tmp_path):
     assert "![x](img.png)" in text
 
 
+def test_url_encoded_path_resolved(tmp_path):
+    """codex R4 P2: `my%20plot.png` 这类 URL 转义路径解码后解析本地文件;
+    字面量文件存在时仍取字面量。"""
+    (tmp_path / "my plot.png").write_bytes(_PNG_BYTES)
+    md_text = "![plot](my%20plot.png)\n"
+
+    text, stats = embed_md_images.embed_images(md_text, tmp_path, 5 * 1024 * 1024)
+
+    assert stats.embedded == 1
+    assert "data:image/png;base64," in text
+
+    # 字面量优先:真有名为 my%20plot.png 的文件时不解码。
+    (tmp_path / "my%20plot.png").write_bytes(_PNG_BYTES)
+    text2, stats2 = embed_md_images.embed_images(md_text, tmp_path, 5 * 1024 * 1024)
+    assert stats2.embedded == 1
+
+
 def test_title_form_embedded(tmp_path):
     """`![alt](img.png "标题")` 形态可被内嵌。"""
     (tmp_path / "img.png").write_bytes(_PNG_BYTES)
