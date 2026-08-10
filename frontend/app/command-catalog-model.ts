@@ -171,7 +171,13 @@ export type CatalogPreviewCopy = {
  */
 export function catalogPreviewCopy(preview: CommandCatalogPreview): CatalogPreviewCopy {
   const { estimated_windows: windows, estimated_calls: calls, sampled, skipped_windows_in_prefix: skipped } = preview;
-  const cost = `将通读全文（约 ${windows} 段），预计约 ${calls} 次模型调用。`;
+  // 段数在 `sampled` 两侧是**两种量**,措辞必须跟着变。前缀覆盖全文时它是后端
+  // 真跑分段得到的**精确值**;前缀不够时它退回「已读部分的分段数」与「全文字符
+  // 数 ÷ 每段预算」两个**下界**里的大者——元素装不满一段留下的空隙、以及候选
+  // 过密时的拆段,都只会让真实段数更多。所以那一侧写「至少约」:写成「约」会
+  // 把一个下界读成估计值,而这个数只会往上跑。
+  const scale = sampled ? "至少约" : "约";
+  const cost = `将通读全文（${scale} ${windows} 段），预计约 ${calls} 次模型调用。`;
   // skipped 是「零成本跳过闸」挡下的段数(没有可认领的命令名、也没有参数形状的
   // 部分,由确定性判据识别,不发模型调用)——它是「为什么调用数远小于段数」唯一
   // 的解释项,没有它,一份大部分是叙述性文字的手册会读成漏算。

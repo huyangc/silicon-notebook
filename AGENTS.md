@@ -453,10 +453,33 @@ confirmed or dismissed the row; that case must degrade to appending a second row
 (v1's behaviour, visible in the queue) and register the new row, never drop this
 window's parameters.
 
+**The write-back takes the catalog lock.** `_persist_window` runs "update +
+False-degrade append + `flushed` registry update" as one critical section under
+the same `("catalog", notebook_id)` mutex `apply`/`dismiss` hold. `apply` is a
+read-then-write across two stores — it reads a candidate's payload, renders it
+into knowhow cells, appends them, and only then marks the candidate `applied` —
+so a merge landing between its read and its write leaves the knowhow table
+holding pre-merge parameters while the row marked `applied` holds merged ones,
+two disagreeing records of what was confirmed. `dismiss` breaks the other way,
+taking the row out of `candidate` state after the update already succeeded, so
+the continuation window's parameters vanish with no degraded row to show. The
+run thread takes the catalog lock and NEVER the source write barrier (the one
+order that would close a cycle), and the window's model calls happen in
+`_process_window` before the section is entered, so a reviewer never waits on a
+provider. An in-process mutex is authoritative because the deployment is pinned
+to `--workers 1`.
+
 **Cost preview is bounded and honest.** `preview` makes zero model calls. The
-window count is arithmetic over `source_text_stats` (one SQL aggregate returning
-element count and total characters) — reading the document to count them is the
-failure a cost preview must not have. The CALL count needs text, so it is
+window count is NOT plain arithmetic: `⌈total characters ÷ WINDOW_CHARS⌉`
+under-counts both the budget an element that did not fit leaves unspent (three
+7,000-character elements are three windows, not two) and the density split, and
+both only add windows, so it is a floor. When the bounded prefix covered the
+whole document the count is what the real packer produced over it (exact, and
+free — the prefix is read anyway); when the prefix ran out it is the larger of
+that partial packing and the `source_text_stats` arithmetic (one SQL aggregate
+returning element count and total characters), reported as an explicit lower
+bound that the UI words "at least". Reading the whole document to count them
+exactly is the failure a cost preview must not have. The CALL count needs text, so it is
 measured exactly over the bounded `preview_elements` prefix, advancing the relay
 exactly as `run` does (otherwise the preview's gate answers differently from the
 run's on the multi-window table the relay exists for), and every window past the

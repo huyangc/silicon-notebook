@@ -772,12 +772,23 @@ class CommandCatalogService:
         """Estimate, with zero model calls, what extracting this source would
         cost — two reads, each bounded a different way.
 
-        **How many windows** comes from ``source_text_stats``: windows are
-        packed by CHARACTER count, so the count is arithmetic on the source's
-        total text, and asking SQL for that total is one aggregate that
-        transmits two integers. Reading the whole document into Python to
-        count them would be the failure a cost preview must not have — a
-        preview that performs the scan it is estimating.
+        **How many windows** has two answers, because character arithmetic
+        alone is not one. ``⌈total characters ÷ WINDOW_CHARS⌉`` under-counts
+        twice over: elements go into a window WHOLE, so the gap left by one
+        that did not fit is real budget nobody spends (three 7,000-character
+        elements are three windows, not two), and a window naming more
+        commands than one candidate list holds is split again. Both only ever
+        ADD windows, so the arithmetic is a floor and never a count.
+
+        So: when the bounded prefix turned out to BE the whole document, the
+        window count is the number the real packer produced over it —
+        **exact**, and free, because the prefix was already read and packed to
+        estimate the calls. When the prefix ran out, the answer is the larger
+        of that partial packing and the arithmetic floor, both of which are
+        lower bounds, and it is reported as an explicit **lower bound**
+        (`sampled` says so, and the UI says "at least"). Reading the whole
+        document to count them exactly would be the failure a cost preview
+        must not have — a preview that performs the scan it is estimating.
 
         **How many CALLS** cannot be arithmetic: it depends on the
         zero-model-call gate (a prose window is free) and on each window's
@@ -804,12 +815,21 @@ class CommandCatalogService:
         """
         source = self._require_parsed(notebook_id, source_id)
         _element_count, total_chars = self.catalog.source_text_stats(source_id)
-        estimated_windows = -(-max(0, int(total_chars)) // WINDOW_CHARS)
         rows, clipped = self.catalog.preview_elements(
             source_id, limit=PREVIEW_ELEMENT_LIMIT, text_chars=PREVIEW_ELEMENT_CHARS
         )
         sampled = clipped or len(rows) >= PREVIEW_ELEMENT_LIMIT
         prefix = extraction_windows(rows)
+        # Exact when the prefix is the whole document; otherwise the best floor
+        # available from two independent lower bounds — the windows the packer
+        # really produced over the prefix (whose elements are clipped, so the
+        # real document packs into at least as many) and the character
+        # arithmetic over the full text.
+        estimated_windows = (
+            max(len(prefix), -(-max(0, int(total_chars)) // WINDOW_CHARS))
+            if sampled
+            else len(prefix)
+        )
         prefix_calls = 0
         skipped = 0
         carry: list[str] = []
@@ -1018,6 +1038,10 @@ class CommandCatalogService:
         * ``start``'s stale sweep (``_reject_if_pending_candidates``) takes the
           catalog lock and deliberately NOT the barrier, so it can never hold
           the catalog lock and wait for a barrier.
+        * the extraction worker's per-window write-back (``_persist_window``)
+          takes the catalog lock and NOT the barrier, for the same reason —
+          and its critical section holds no model call, so a reviewer's
+          confirm never queues behind a provider.
         * ``apply``/``dismiss`` are the only holders of both, and both take
           them in the order above.
 
@@ -1718,16 +1742,11 @@ class CommandCatalogService:
             work = self._process_window(
                 client, job, window, own, carry, position, cancel, flushed
             )
-            # Before the insert, so a revision that could not land becomes one
-            # more row in the very batch this window is about to write.
-            self._settle_updates(job, window, work, position)
+            self._persist_window(job, window, work, position, flushed)
             position += len(work.rows)
             total_calls += work.calls
             total_slices += work.slices
             total_slice_failures += work.slice_failures
-            if work.rows:
-                self.catalog.add_candidates(work.rows)
-                self._register_flushed(job["id"], flushed, work)
             outcome = window_outcome(
                 window,
                 work.candidates,
@@ -1793,6 +1812,58 @@ class CommandCatalogService:
             "args_uncovered": stats.args_uncovered,
             "calls": total_calls,
         }
+
+    def _persist_window(
+        self,
+        job: Mapping[str, Any],
+        window: ExtractionWindow,
+        work: _WindowWork,
+        position: int,
+        flushed: dict[str, _FlushedCandidate],
+    ) -> None:
+        """Everything one window WRITES, under the notebook's catalog lock.
+
+        The three steps are one critical section because a reviewer's confirm
+        interleaving with them corrupts a row silently. ``apply`` is a
+        read-then-write across two stores — it reads a candidate's payload,
+        renders it into knowhow cells, appends those rows, and only then marks
+        the candidate ``applied`` — and this run thread's cross-window merge
+        rewrites exactly that payload. Landing between apply's read and its
+        write leaves the knowhow table holding the pre-merge parameters while
+        the candidate row that is marked ``applied`` holds the merged ones:
+        two disagreeing records of "what was confirmed", neither of them
+        wrong-looking on its own. ``dismiss`` breaks the other way — it can
+        take the row out of ``candidate`` state AFTER this update already
+        succeeded, so the continuation window's parameters are swallowed with
+        no degraded row appended and nothing in the queue to show for them.
+        Both are closed by taking the mutex those two already hold.
+
+        Scope is deliberate at both ends. The window's MODEL CALLS happen in
+        ``_process_window``, before this is entered, so a reviewer never waits
+        on a model. And the False-degrade append plus the ``flushed`` registry
+        update are INSIDE, not merely adjacent: the degrade decision is a
+        direct consequence of what the update saw, and a registry pointing at
+        a row a concurrent apply has since taken away would send the next
+        window's merge at a row that is no longer reviewable.
+
+        **Lock order.** This thread takes the per-notebook catalog lock and
+        NOTHING else — never the source write barrier, which is the one order
+        that could close a cycle (see ``_target_lock_key`` for the exhaustive
+        panorama; ``apply``/``dismiss`` remain the only holders of both, always
+        barrier-outside). Nothing here re-enters the catalog lock either, so it
+        stays non-reentrant.
+
+        An in-process mutex is the authority because the deployment is pinned
+        to ``--workers 1`` — the same premise ``_apply_lock`` and the whole
+        apply path already rest on.
+        """
+        with self._apply_lock(self._target_lock_key(job["notebook_id"])):
+            # Before the insert, so a revision that could not land becomes one
+            # more row in the very batch this window is about to write.
+            self._settle_updates(job, window, work, position)
+            if work.rows:
+                self.catalog.add_candidates(work.rows)
+                self._register_flushed(job["id"], flushed, work)
 
     def _settle_updates(
         self,

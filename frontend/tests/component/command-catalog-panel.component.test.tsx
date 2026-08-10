@@ -183,7 +183,8 @@ test("发起前先弹成本预告：约数 + 采样口径 + 跳过闸提示，�
   expect(startCommandCatalog).not.toHaveBeenCalled();
   const [request] = confirmed;
   expect(request.title).toBe("识别命令目录");
-  expect(request.body).toContain("将通读全文（约 12 段），预计约 18 次模型调用。");
+  // 这份夹具是 `sampled: true`，段数因此是下界而不是估计值 —— 文案跟着写「至少约」。
+  expect(request.body).toContain("将通读全文（至少约 12 段），预计约 18 次模型调用。");
   expect(request.body).toContain("其中纯叙述部分不消耗调用。");
   expect(request.body).toContain("次数只按前 4000 个元素估算，实际可能更多");
   expect(request.sections).toEqual([]);
@@ -346,6 +347,9 @@ test("v2 不做形状检测，入口从不因为文档形状被禁用；未采�
   expect(confirmed[0].body).toContain("预计约 18 次模型调用");
   expect(confirmed[0].body).not.toContain("实际可能更多");
   expect(confirmed[0].body).not.toContain("纯叙述部分");
+  // 未采样时前缀就是全文，段数是后端真跑分段的精确值 —— 不写「至少约」。
+  expect(confirmed[0].body).toContain("将通读全文（约 12 段）");
+  expect(confirmed[0].body).not.toContain("至少约");
 });
 
 // 这个用例走假时钟(要驱动轮询),所以刻意只用 fireEvent + act:userEvent 自带延时、

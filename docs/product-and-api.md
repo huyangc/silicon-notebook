@@ -638,12 +638,21 @@ rejections. Examples are shown in the review panel under a note saying they are
 model-generated and not checked against the source.
 
 **Cost preview.** `.../command-catalog/preview` returns two numbers with **zero
-model calls**, each bounded a different way. **How many segments** is arithmetic
-on the source's total text: one SQL aggregate returns the element count and the
-total character count (two integers on the wire), and since segments are packed
-by character count, `estimated_windows = ⌈total characters ÷ WINDOW_CHARS⌉` — a
-preview that performed the scan it is estimating would defeat its own purpose.
-**How many calls** cannot be arithmetic: it depends on the zero-model-call gate
+model calls**, each bounded a different way. **How many segments** cannot be
+answered by arithmetic alone: `⌈total characters ÷ WINDOW_CHARS⌉` under-counts
+twice over, because an element goes into a segment WHOLE (so one that does not
+fit leaves the rest of that segment's budget unspent — three 7,000-character
+elements are three segments, and the arithmetic says two) and because a segment
+too dense for one candidate list is split again. Both only ever ADD segments, so
+the arithmetic is a floor rather than a count. So when the bounded prefix turns
+out to cover the whole document (`sampled=false`), `estimated_windows` is the
+number the real packer produced over it — **exact**, and free, since the prefix
+is read anyway for the call estimate. When the prefix runs out it is the larger
+of that partial packing and `⌈total characters ÷ WINDOW_CHARS⌉` (one SQL
+aggregate returning the element count and the total character count), reported
+as an **explicit lower bound** — the UI words it "at least about N segments".
+Reading the whole document to count them exactly is the failure a cost preview
+must not have. **How many calls** cannot be arithmetic either: it depends on the zero-model-call gate
 (a prose segment is free) and on each segment's parameter count (a hundred-flag
 segment is several slices), and both need the text. Those are measured exactly
 over a bounded prefix — including the relay, since a segment's gate reads the
@@ -745,7 +754,7 @@ never happened and charge the user for a whole re-extraction.
 Endpoints (all scoped to a source of the notebook in the path; reads need
 notebook read, writes need owner):
 
-- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — cost estimate: `estimated_windows` (segments, from the source's total character count), `estimated_calls`, `skipped_windows_in_prefix`, plus `sampled` when the bounded read hit its cap; `409` with a user-readable message when the source is not parsed yet or its parse failed
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — cost estimate: `estimated_windows` (exact, from the real packing, when the prefix covered the whole document; an explicit lower bound when `sampled`), `estimated_calls`, `skipped_windows_in_prefix`, plus `sampled` when the bounded read hit its cap; `409` with a user-readable message when the source is not parsed yet or its parse failed
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog` — start extraction; `409` with a user-readable message when this source already has an active job (fetch it from `.../job`), the extraction model is unconfigured, the source is not parsed yet or its parse failed, or the previous run still has unreviewed candidates (confirm or dismiss them first). Candidates already expired by a reparse do not block: they are swept and the run proceeds
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` — the source's latest job: `status` plus `progress` (`sections_total`, `sections_done` — names kept, counting segments — `entries`, `rejected`, `uncovered`, `pending_candidates`) and, on failure, `failure_reason`. The internal `diagnostic` column is deliberately not exposed
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` — `cancelling` (the worker stops at its next slice boundary, or as soon as an in-flight model call notices the cancellation — it does not wait for that call to return), `cancelled` (no worker in this process; the row is settled directly), or `not_running`
