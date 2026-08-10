@@ -195,9 +195,10 @@ export function queuedScheduleHint(s: ScaleIndexStatus, now: Date): string {
     const start = new Date(s.offpeak_next_start_at);
     if (!Number.isNaN(start.getTime())) {
       if (start.getTime() <= now.getTime()) {
-        // 时刻已过(排队等待超过状态轮询窗口、快照未刷新):窗口大概率已开启,
-        // 不再展示一个已经兑现不了的「预计 … 后开始」假承诺(codex R1 P2)。
-        parts.push("已进入空闲时段，即将开始");
+        // 时刻已过(排队等待超过状态轮询窗口、快照未刷新):此刻可能已在窗口内,
+        // 也可能整个窗口都已结束(比如 07:00 看 02:00–06:00 的旧快照)——两种都
+        // 无法从过期快照分辨,所以既不承诺「预计 … 后开始」也不谎称「即将开始」,
+        // 直接省略窗口分段、落回中性文案(codex R1/R2 两条 P2)。
       } else {
         const dayLabel = sameLocalDate(start, now) ? "今天" : "明天";
         const hh = String(start.getHours()).padStart(2, "0");
