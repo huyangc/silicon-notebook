@@ -172,6 +172,69 @@ def test_multi_query_aggregation_keeps_historical_collision_order(
     assert [chunk.chunk_id for chunk in selected] == ["a", "b"]
 
 
+def test_multi_query_direct_collision_replaces_question_only_canonical():
+    from app.services.ask_service import _merge_multi_direct_chunk_hits
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    question_only = RetrievedChunk(
+        chunk_id="collision",
+        source_id="s",
+        source_title="s",
+        section_path="",
+        text="collision",
+        relevance=0.99,
+        retrieval_supports=(
+            RetrievalSupport(
+                "generated_question", "chunk", "collision", 0.99
+            ),
+        ),
+    )
+    lexical = RetrievedChunk(
+        chunk_id="collision",
+        source_id="s",
+        source_title="s",
+        section_path="",
+        text="collision",
+        relevance=0.2,
+        retrieval_supports=(
+            RetrievalSupport("lexical", "chunk", "collision", 0.2),
+        ),
+    )
+    before = RetrievedChunk(
+        chunk_id="before",
+        source_id="s",
+        source_title="s",
+        section_path="",
+        text="before",
+        relevance=0.2,
+        retrieval_supports=(
+            RetrievalSupport("lexical", "chunk", "before", 0.2),
+        ),
+    )
+    collected = {"collision": question_only}
+
+    _merge_multi_direct_chunk_hits(collected, [before, lexical])
+
+    assert list(collected) == ["before", "collision"]
+    assert collected["collision"] is lexical
+    assert {support.origin for support in lexical.retrieval_supports} == {
+        "generated_question",
+        "lexical",
+    }
+    assert [support.origin for support in question_only.retrieval_supports] == [
+        "generated_question"
+    ]
+    selected, _counts = quota_fuse_baseline_first(
+        collected,
+        [
+            {"collision": question_only},
+            {"before": before, "collision": lexical},
+        ],
+        2,
+    )
+    assert selected == [before, lexical]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. 策略分发互斥:四组 (overlay_on × len(sub_queries)) 各恰好一路
 # ═══════════════════════════════════════════════════════════════════════════

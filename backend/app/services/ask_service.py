@@ -65,7 +65,12 @@ from app.services.prompts import (
     answer_prompt,
     followup_rewrite_prompt,
 )
-from app.services.retrieval import RetrievedKnowledge, classify_evidence
+from app.services.retrieval import (
+    RetrievedKnowledge,
+    classify_evidence,
+    is_generated_question_only_chunk,
+    merge_retrieval_supports,
+)
 from app.services.source_scope import source_scope_context, source_scope_restricted
 
 # Matches both one provenance marker and the comma-group form models commonly
@@ -82,6 +87,38 @@ _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
     "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，"
     "但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。"
 )
+
+
+def _merge_multi_direct_chunk_hits(collected: dict, direct_hits) -> None:
+    """Fold historical direct hits into a multi-query candidate mapping.
+
+    A question-only row may have the higher optional score, but it must never
+    remain the canonical object once a historical keyword/exact producer finds
+    that chunk.  Keeping the direct object also leaves the old question-only
+    per-query row untouched, so quota fusion cannot use its optional score to
+    reorder the baseline.  Collisions between historical producers retain the
+    previous best-relevance behavior while preserving every provenance.
+    """
+    for candidate in direct_hits:
+        current = collected.get(candidate.chunk_id)
+        if current is None:
+            collected[candidate.chunk_id] = candidate
+            continue
+        supports = merge_retrieval_supports(
+            current.retrieval_supports, candidate.retrieval_supports
+        )
+        if is_generated_question_only_chunk(current):
+            # Reinsert at this direct producer's position.  Assigning over the
+            # old key would retain the optional row's earlier dict position and
+            # change stable tie ordering versus a feature-off direct stream.
+            collected.pop(candidate.chunk_id)
+            candidate.retrieval_supports = supports
+            collected[candidate.chunk_id] = candidate
+        elif candidate.relevance > current.relevance:
+            candidate.retrieval_supports = supports
+            collected[candidate.chunk_id] = candidate
+        else:
+            current.retrieval_supports = supports
 
 
 @dataclass
@@ -1750,19 +1787,13 @@ class AskService:
                 # ∪ bilingual-keyword chunk hits: merge into collected (best relevance)
                 # and add as an extra per_query group so quota_fuse can surface them.
                 if kw_hits:
-                    for c in kw_hits:
-                        cur = collected.get(c.chunk_id)
-                        if cur is None or c.relevance > cur.relevance:
-                            collected[c.chunk_id] = c
+                    _merge_multi_direct_chunk_hits(collected, kw_hits)
                     per_query = per_query + [{c.chunk_id: c for c in kw_hits}]
                 # ∪ exact-identifier whole-section hits, treated identically:
                 # its own per_query group is what gives quota_fuse a reason to
                 # surface a section chunk whose standalone relevance is low.
                 if exact_hits:
-                    for c in exact_hits:
-                        cur = collected.get(c.chunk_id)
-                        if cur is None or c.relevance > cur.relevance:
-                            collected[c.chunk_id] = c
+                    _merge_multi_direct_chunk_hits(collected, exact_hits)
                     per_query = per_query + [{c.chunk_id: c for c in exact_hits}]
                 baseline_chunk_candidates, _supplemental_candidates = (
                     partition_generated_question_chunks(list(collected.values()))
