@@ -53,6 +53,41 @@ def _report_llm_ready(repo) -> bool:
     return repo._runtime.models.configured("report_outline")
 
 
+def _report_scope_recheck(repo, notebook_id: str, understanding: dict) -> bool:
+    """Mirror ``confirm_report_intent``'s scope revalidation as a boolean gate.
+
+    The automatic direct-run confirmation (engine ``_auto_confirm_intent``)
+    cannot import these api-layer validators without inverting the layering,
+    so the create endpoint hands it this check as a callable (codex R2 P2).
+    Same three steps as the manual endpoint — re-freeze the persisted local
+    scope, re-freeze the base-library scope, re-run the two-dimension
+    emptiness gate — but the rejection transport is a plain ``False``: the
+    caller leaves the report at the manual confirmation gate, where the owner
+    then sees the endpoint's own 422/409 wording on their next attempt."""
+    persisted_scope = understanding.get("source_scope")
+    persisted_base_scope = understanding.get("base_scope")
+    if persisted_scope is None and persisted_base_scope is None:
+        return True
+    try:
+        notebook = repo.get_notebook(notebook_id)
+        resolved_scope = None
+        resolved_base_scope = None
+        if persisted_scope is not None:
+            resolved_scope = _validate_source_scope(
+                repo, notebook,
+                ResolvedSourceScope.model_validate(persisted_scope),
+            )
+        if persisted_base_scope is not None:
+            resolved_base_scope = _validate_base_scope(
+                notebook,
+                BaseNotebookScope.model_validate(persisted_base_scope),
+            )
+        _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
+    except Exception:  # noqa: BLE001 — any rejection means "stay at the gate"
+        return False
+    return True
+
+
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
                      auto_generate: bool = False, intent_contract=None,
                      source_scope=None, base_scope=None) -> None:
@@ -69,7 +104,12 @@ def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: s
         user_id=repo.current_user().id,
         intent_contract=intent_contract,
         source_scope=source_scope,
-        base_scope=base_scope)
+        base_scope=base_scope,
+        scope_reconfirm=(
+            lambda understanding: _report_scope_recheck(
+                repo, notebook_id, understanding
+            )
+        ))
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
