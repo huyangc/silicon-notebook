@@ -118,6 +118,8 @@ Database-specific coverage now targets the direct PostgreSQL backend. Retired te
 6. Share a notebook by link: small notebooks are copied; large notebooks are joined read-only. Live collaborative editing is not part of the beta.
 7. A finished deep report can additionally be published as a **sign-in-free** read-only page: the owner issues the link and can revoke it at any time. That page carries the body and the citation list (title, location, excerpt) only — no source ids, and it cannot open the original material. The body renders through the same pipeline as the in-app view (formulas, tables, clickable citation numbers), and a number jumps to its excerpt on the same page.
 
+A markdown source that references local image files (e.g. exported notes with `![alt](img.png)`) can be prepared beforehand with the standalone `scripts/embed_md_images.py notes.md` helper, which inlines each local image as a base64 data URI so the ingestion pipeline can decode and store it as a source asset without depending on the original file path.
+
 Inside a notebook, the workspace stays two-column: imported sources on the left and **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report) in the main area.
 
 The source-import dialog reads a sanitized parser capability registry from the backend and shows the automatic order, supported formats, execution boundary, availability, and safe unavailable reason for self-hosted MinerU, MinerU public cloud, and the built-in fallback. Routing remains automatic: a configured self-hosted MinerU path is never silently replaced by the public cloud path, and upload validation uses the same registry projection as the browser.

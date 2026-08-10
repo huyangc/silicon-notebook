@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import html as html_module
 import math
 import os
@@ -11,6 +13,7 @@ from typing import Any, Dict, List
 from xml.etree import ElementTree
 
 from app.models.sources import SourceElement
+from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.parser_registry import PARSER_ENGINES, builtin_parser_id
 
 
@@ -89,7 +92,7 @@ def parse_source_file(
 ) -> List[SourceElement]:
     parser_id = builtin_parser_id(file_name)
     if parser_id == "markdown":
-        return parse_markdown(source_id, Path(file_path))
+        return parse_markdown(source_id, Path(file_path), persist_image=persist_image)
     if parser_id == "docx":
         return parse_docx(source_id, Path(file_path), file_name, mineru_client, persist_image)
     if parser_id == "pptx":
@@ -443,10 +446,56 @@ def mineru_workbook_output_accepted(path: Path, elements: List[SourceElement]) -
     return _mineru_workbook_reconcile(path, elements)[0]
 
 
-def parse_markdown_text(source_id: str, text: str) -> List[SourceElement]:
+def _persist_markdown_data_uri(src: str, persist_image: Any, ordinal: int) -> str:
+    """解析 `data:<mime>;base64,<payload>` 并按 MinerU 同款契约持久化。
+
+    任何一步不合规（无 persist_image、非 base64 编码、mime 不在白名单、解码
+    失败、persist 本身失败）都返回空串——图片问题绝不阻塞文本解析。单图字节
+    上限/每源张数上限由 persist_image 闭包内置护栏负责，这里不新增数字上限。
+    """
+    if persist_image is None:
+        return ""
+    if "," not in src:
+        return ""
+    header, _, payload = src.partition(",")
+    if not payload:
+        return ""
+    header_body = header[len("data:"):]
+    parts = header_body.split(";")
+    mime = (parts[0] or "").strip().lower()
+    if "base64" not in [p.strip().lower() for p in parts[1:]]:
+        return ""
+    if mime not in ALLOWED_MIME_EXTENSIONS:
+        return ""
+    # Decode happens before persist_image's own byte-size guard runs, so a
+    # single oversized data URI is fully decoded in memory first — accepted
+    # here rather than pre-checking encoded length: the upload path already
+    # has SOURCE_UPLOAD_MAX_MB as an outer bound, the offline batch_ingest
+    # path is operator-controlled input, and the allocation is transient
+    # (freed once persist_image returns or this function returns "").
+    try:
+        img_bytes = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return ""
+    ext = ALLOWED_MIME_EXTENSIONS[mime]
+    try:
+        asset_id = persist_image(img_bytes, f"md-img-{ordinal}.{ext}")
+    except Exception:
+        return ""  # 抽图/写盘失败绝不影响文本产出
+    return asset_id or ""
+
+
+def parse_markdown_text(
+    source_id: str, text: str, persist_image: Any = None
+) -> List[SourceElement]:
     """parse_markdown 的无文件版本：直接解析给定 markdown 文本（Memory 派生源等
     没有磁盘文件的调用方复用）。逐字复用 parse_markdown 原先内嵌的 parse_blocks
-    调用与元素装配逻辑，仅将「从文件读文本」换成「拿到手的文本」。"""
+    调用与元素装配逻辑，仅将「从文件读文本」换成「拿到手的文本」。
+
+    `persist_image(img_bytes, img_name) -> Optional[str]` 镜像 MinerU 路径的
+    persist 闭包，用于把 data URI 内嵌的图片落盘为资产；省略时 data URI 被剥
+    离而不入库（图片不可用，但文本解析不受影响）。
+    """
     from app.services.structural_markdown import parse_blocks
 
     blocks = parse_blocks(text)
@@ -474,21 +523,48 @@ def parse_markdown_text(source_id: str, text: str) -> List[SourceElement]:
             # Preserve that renderable representation while Block.text remains
             # the compact retrieval/embedding form.
             metadata["table_html"] = block.raw.strip()
+        element_text = block.text
         if block.type == "image":
-            metadata.update(block.metadata)
+            caption = block.text.strip()
+            if caption:
+                metadata["caption"] = caption
+            src = block.metadata.get("src", "")
+            asset_id = ""
+            if isinstance(src, str) and src.startswith("data:"):
+                # data URI 绝不进 metadata（任何键都不行）：只尝试持久化。
+                asset_id = _persist_markdown_data_uri(src, persist_image, ordinal)
+                if asset_id:
+                    metadata["asset_id"] = asset_id
+            else:
+                metadata["src"] = src
+            if not caption and not asset_id:
+                continue  # 既不可显示又不可检索的占位行没有价值
+            element_text = caption or f"Markdown 图 {ordinal}"
         elements.append(
             _element(
                 source_id,
                 block.type,
                 f"Markdown {block.type} {ordinal}",
-                block.text,
+                element_text,
                 metadata,
             )
         )
-    if elements:
+    if blocks:
+        # A discarded (uncaptioned, unpersisted) data-URI image can leave
+        # `elements` empty while `blocks` is not; return the (possibly empty)
+        # element list rather than falling through to the raw-text fallback,
+        # which would otherwise dump the giant base64 payload into an element.
         return elements
     # No structured blocks (e.g. blank input): same blank-line paragraph
-    # fallback as parse_plain_text, minus the file read.
+    # fallback as parse_plain_text, minus the file read. The raw text is
+    # sanitized first: a document whose only content is alt-less rejected-mime
+    # data-URI image literals inside containers `parse_blocks` drops entirely
+    # (e.g. a lone `- ![](data:image/svg+xml;base64,...)` list item) reaches
+    # this branch, and splitting the unsanitized original would dump the
+    # base64 payload into a paragraph element.
+    from app.services.structural_markdown import strip_data_uri_image_literals
+
+    text = strip_data_uri_image_literals(text)
     chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", text) if chunk.strip()]
     return [
         _element(
@@ -502,9 +578,13 @@ def parse_markdown_text(source_id: str, text: str) -> List[SourceElement]:
     ]
 
 
-def parse_markdown(source_id: str, path: Path) -> List[SourceElement]:
+def parse_markdown(
+    source_id: str, path: Path, persist_image: Any = None
+) -> List[SourceElement]:
     return parse_markdown_text(
-        source_id, path.read_text(encoding="utf-8", errors="replace")
+        source_id,
+        path.read_text(encoding="utf-8", errors="replace"),
+        persist_image=persist_image,
     )
 
 

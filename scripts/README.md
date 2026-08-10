@@ -237,6 +237,7 @@ report/object/chunk id、标题、问题、正文、文件名、路径、异常�
 | 脚本 | 用途 |
 |------|------|
 | `smoke_backend.py` | 后端 hermetic 冒烟(sqlite 持久化 / KG 抽取边界 / 检索 / 文章 / 反馈);被 `check.sh` 调用 |
+| `embed_md_images.py` | 把 markdown 引用的本地图片文件就地内嵌成 base64 data URI,产出可直接上传的自包含单文件(与摄取端 `MINERU_MAX_IMAGE_BYTES` 默认一致的 5MB 单图上限、四种 MIME 白名单) |
 | `denoise_reextract_nb.py` | 去噪重抽一个 notebook(**需先停后端**,单写者) |
 | `reextract_notebook.py` | 重抽一个 notebook 的所有 source |
 | `compare_kg_dbs.py` | 对比去噪前后的 KG,评估成效 |

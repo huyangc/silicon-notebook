@@ -24,6 +24,9 @@ class SourceElementQ(BaseModel):
     char_start: int
     char_end: int
     text: str  # verbatim slice of source_file[char_start:char_end]
+    # image 元素例外：text 是结构化 caption，跨度被收缩到 caption 长度
+    # (see parse_elements below)，因此不再等于 source_file 里那段原文
+    # 切片——它只用于 make_windows() 的打包定位，不是可还原的原文。
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -68,7 +71,29 @@ def parse_elements(
     for b in blocks:
         if not (lo <= b.line_start <= hi):
             continue
-        raw = text[b.char_start:b.char_end]
+        char_end = b.char_end
+        if b.type == "image":
+            # Structured caption only — never the raw markdown slice. For a
+            # `data:image/...;base64,...` src the raw slice is the entire
+            # base64 payload, which would otherwise get sliced into dozens of
+            # KG extraction windows for a single image (修1). Blocks without
+            # a caption produce no KG parse element at all.
+            raw = b.text
+            # Shrink the element's span to just the caption length. The raw
+            # markdown span (b.char_start..b.char_end) still covers the full
+            # `![caption](data:...)` literal — for a large embedded image
+            # that's hundreds of KB, and make_windows() packs purely by char
+            # span, so an unshrunk span still gets sliced into dozens of
+            # windows that each re-run kg_extract on the same short caption
+            # (修：windowing 侧残留). The packer turns the O(payload/n) span
+            # into O(1): at most one extra window boundary, at the gap this
+            # shrink leaves behind. Cost: when the caption is shorter than
+            # the pack overlap, this element can end up packed into two
+            # adjacent windows instead of one (an observed, accepted
+            # trade-off — not "never adds windows").
+            char_end = min(b.char_end, b.char_start + len(raw))
+        else:
+            raw = text[b.char_start:b.char_end]
         if not raw.strip():
             continue
         counter += 1
@@ -77,7 +102,7 @@ def parse_elements(
             type=_QTYPE_MAP.get(b.type, "paragraph"),
             file=source_file,
             line_start=b.line_start, line_end=b.line_end,
-            char_start=b.char_start, char_end=b.char_end,
+            char_start=b.char_start, char_end=char_end,
             text=raw,
         ))
     return elements

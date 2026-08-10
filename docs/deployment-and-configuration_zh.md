@@ -707,6 +707,10 @@ URL 来源会先下载已经过安全校验的公开 PDF。降级成功的来源
 只收到安全的 `parse_quality_warning`，之后可重新解析；只有 PyMuPDF4LLM 自身缺失或
 报错时才使用 pypdf 作最后兜底。
 
+`MINERU_RETURN_IMAGES` / `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`
+同样作用于 Markdown 来源里的 `data:image/...;base64,...` 内嵌图片：这三项是所有
+来源图片持久化的统一护栏，不只管 MinerU 解析出的文档。
+
 **日志：**
 
 ```text

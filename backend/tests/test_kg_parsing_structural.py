@@ -39,3 +39,27 @@ def test_char_spans_round_trip():
     els = parse_elements(MD, "doc.md", None)
     for e in els:
         assert e.char_start <= e.char_end <= len(MD)
+
+
+# --- data-URI image elements never carry raw base64 into KG windows (修1) --
+
+PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def test_captioned_data_uri_image_element_uses_caption_not_raw_slice():
+    text = f"![a wiring diagram](data:image/png;base64,{PNG_B64})\n"
+    els = parse_elements(text, "doc.md", None)
+    imgs = [e for e in els if e.type == "figure_caption"]
+    assert len(imgs) == 1
+    assert imgs[0].text == "a wiring diagram"
+    assert "base64" not in imgs[0].text
+
+
+def test_uncaptioned_data_uri_image_produces_no_kg_element():
+    text = f"![](data:image/png;base64,{PNG_B64})\n"
+    els = parse_elements(text, "doc.md", None)
+    assert not [e for e in els if e.type == "figure_caption"]
+    assert all("base64" not in e.text for e in els)
