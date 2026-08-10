@@ -5177,6 +5177,16 @@ export default function Home() {
     confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新分析来源）。后台进行，完成后自动更新。", () => refreshUnifiedKg());
   }
 
+  // 图谱分析页的动作与「重新合并」复用同一条后台任务，只把用户目标说成报告生成，
+  // 避免让人自己猜“尚未生成”的五份数据究竟由哪个维护动作产出。
+  function confirmGenerateKgAnalysis() {
+    if (kgRefreshBusy || relinkingKg || buildingKg) return;
+    confirmIndexAction(
+      "生成或更新图谱分析？\n\n将重算跨文档概念合并、主题板块和质量统计（不重新分析来源）。后台进行，完成后分析页会自动刷新。",
+      () => refreshUnifiedKg(),
+    );
+  }
+
   async function reviewPendingMerges() {
     if (!currentNotebookId) return;
     setKgReviewBusy(true);
@@ -8351,7 +8361,14 @@ export default function Home() {
             </aside>
           </div>
           {kgAnalysisOpen && currentNotebookId && (
-            <KgAnalysisView notebookId={currentNotebookId} onClose={() => setKgAnalysisOpen(false)} />
+            <KgAnalysisView
+              notebookId={currentNotebookId}
+              canAnalyze={!isReader}
+              analysisRunning={kgRefreshBusy}
+              analysisBlocked={relinkingKg || buildingKg}
+              onAnalyze={confirmGenerateKgAnalysis}
+              onClose={() => setKgAnalysisOpen(false)}
+            />
           )}
         </section>
       )}

@@ -125,8 +125,40 @@ function report(overrides: Partial<KgAnalysisReport> = {}): KgAnalysisReport {
     },
     artifacts: [
       histogramArtifact(),
-      artifact("largest_clusters"),
-      artifact("relation_provenance"),
+      artifact("largest_clusters", {
+        units: { limit: "clusters", members: "cluster_member_rows" },
+        payload: {
+          object_type: "concept",
+          limit: 20,
+          truncated: false,
+          clusters: [
+            { canonical_id: "cluster-1", canonical_name: "时序收敛", members: 18 },
+            { canonical_id: "cluster-2", canonical_name: "保持时间", members: 9 },
+          ],
+        },
+      }),
+      artifact("relation_provenance", {
+        units: {
+          counted: "relation_rows",
+          relink: "relation_rows",
+          total_rows: "relation_rows",
+          rejected: "relation_rows",
+          endpoint_unusable: "relation_rows",
+        },
+        payload: {
+          counted: 100,
+          relink: 30,
+          total_rows: 106,
+          buckets: {
+            "relink:shared-element": 20,
+            "relink:name-match": 10,
+            "relink:other": 0,
+            "tagged:other": 15,
+            untagged: 55,
+          },
+          excluded: { rejected: 2, endpoint_unusable: 4 },
+        },
+      }),
       artifact("community_edges", {
         freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true, built_at_cluster_seq: 5, cluster_seq_behind: 2 },
         payload: {
@@ -300,6 +332,123 @@ test("五份数据恒定列出，缺席的那份也在清单里而不是少一�
   const { container } = renderView();
   await screen.findByRole("heading", { name: "本报告用到的数据", level: 3 });
   expect(container.querySelectorAll(".kg-analysis-ledger-row").length).toBe(5);
+});
+
+test("先把技术状态翻译成结论，并解释状态颜色和更新方式", async () => {
+  renderView();
+  await screen.findByRole("heading", { name: "先看结论", level: 3 });
+
+  const readout = blockByTitle("先看结论");
+  expect(within(readout).getByText("先更新，再判断")).toBeInTheDocument();
+  expect(within(readout).getByText(/概念条目从 9,400 条收敛为 6,487 个/)).toBeInTheDocument();
+  expect(within(readout).getByText(/当前分为 1,217 个主题板块/)).toBeInTheDocument();
+  expect(within(readout).getByText(/当前最先值得复核的是“光遗传学质粒手册”/)).toBeInTheDocument();
+  expect(within(readout).getByText(/红色：数字不可信/)).toBeInTheDocument();
+  expect(within(readout).getByText(/黄色：旧版本/)).toBeInTheDocument();
+  expect(within(readout).getByText(/不会重新分析来源/)).toBeInTheDocument();
+});
+
+test("合并代次无法验证不谎报成旧版本，也不诱导用户反复更新", async () => {
+  const current = report();
+  vi.mocked(fetchKgAnalysis).mockResolvedValueOnce(report({
+    state: {
+      ...current.state,
+      kg_mutation_seq: 128,
+      cluster_mutation_seq: 7,
+      community_seq: 128,
+      dirty: false,
+    },
+    artifacts: current.artifacts.map((item) => (
+      item.kind === "community_edges"
+        ? artifact("community_edges", {
+            freshness: {
+              basis: "community_snapshot",
+              built_at_seq: 128,
+              seq_behind: 0,
+              stale: null,
+              built_at_cluster_seq: null,
+              cluster_seq_behind: null,
+            },
+            payload: item.payload,
+          })
+        : artifact(item.kind, {
+            freshness: {
+              ...item.freshness,
+              built_at_seq: 128,
+              seq_behind: 0,
+              stale: false,
+              built_at_cluster_seq: item.freshness.built_at_cluster_seq === null ? null : 7,
+              cluster_seq_behind: item.freshness.built_at_cluster_seq === null ? null : 0,
+            },
+            units: item.units,
+            payload: item.payload,
+          })
+    )),
+  }));
+
+  renderView();
+  const readout = await screen.findByRole("heading", { name: "先看结论", level: 3 });
+  const block = readout.closest(".kg-analysis-block") as HTMLElement;
+  expect(within(block).getByText("可用，但有一项无法验证")).toBeInTheDocument();
+  expect(within(block).getByText(/这不代表数据已经陈旧/)).toBeInTheDocument();
+  expect(within(block).queryByText("先更新，再判断")).not.toBeInTheDocument();
+});
+
+test("账本不只报生成状态，还解释用途并展示最大合并组与关联形成方式", async () => {
+  renderView();
+  await screen.findByRole("heading", { name: "本报告用到的数据", level: 3 });
+
+  const ledger = blockByTitle("本报告用到的数据");
+  expect(within(ledger).getByText(/用于排查过度合并/)).toBeInTheDocument();
+  expect(within(ledger).getByText(/用于判断关联覆盖方式/)).toBeInTheDocument();
+
+  const clusters = blockByTitle("需要复核的大型合并组");
+  expect(within(clusters).getByText("时序收敛")).toBeInTheDocument();
+  expect(within(clusters).getByText("18 合并前的成员")).toBeInTheDocument();
+
+  const provenance = blockByTitle("关联是怎样形成的");
+  expect(within(provenance).getByRole("row", { name: /共享出处自动补连 20 20.0%/ })).toBeInTheDocument();
+  expect(within(provenance).getByText(/自动补连占 30.0%/)).toBeInTheDocument();
+});
+
+test("可编辑成员能从分析页生成或更新；后台完成后自动重取报告", async () => {
+  const onAnalyze = vi.fn();
+  const view = render(
+    <KgAnalysisView
+      notebookId="nb-1"
+      canAnalyze
+      analysisRunning={false}
+      onAnalyze={onAnalyze}
+      onClose={() => undefined}
+    />,
+  );
+  await screen.findByRole("heading", { name: "先看结论", level: 3 });
+
+  fireEvent.click(screen.getByRole("button", { name: "更新分析" }));
+  expect(onAnalyze).toHaveBeenCalledTimes(1);
+
+  const reportCalls = vi.mocked(fetchKgAnalysis).mock.calls.length;
+  view.rerender(
+    <KgAnalysisView
+      notebookId="nb-1"
+      canAnalyze
+      analysisRunning
+      onAnalyze={onAnalyze}
+      onClose={() => undefined}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "正在生成…" })).toBeDisabled();
+
+  view.rerender(
+    <KgAnalysisView
+      notebookId="nb-1"
+      canAnalyze
+      analysisRunning={false}
+      onAnalyze={onAnalyze}
+      onClose={() => undefined}
+    />,
+  );
+  expect(vi.mocked(fetchKgAnalysis).mock.calls.length).toBeGreaterThan(reportCalls);
 });
 
 // ------------------------------------------------------------------ 单位渲染
@@ -519,6 +668,18 @@ test("切换排序回到第一页，并按新顺序取数", async () => {
     offset: 0,
     order: "connected",
   });
+});
+
+test("切换来源表排序后，结论区仍保留固定的稀疏来源复核候选", async () => {
+  renderView();
+  await screen.findByText(/当前最先值得复核的是“光遗传学质粒手册”/);
+
+  const sourcesBlock = blockByTitle("关联稀疏的来源");
+  fireEvent.click(within(sourcesBlock).getByRole("button", { name: "关联最紧密的在前" }));
+
+  const readout = blockByTitle("先看结论");
+  expect(within(readout).getByText(/当前最先值得复核的是“光遗传学质粒手册”/)).toBeInTheDocument();
+  expect(within(readout).queryByText("等待来源画像")).not.toBeInTheDocument();
 });
 
 // 切排序 / 翻页时请求在飞、屏上还是**上一次**的行。此时任何「跟着控件走」的标注都会把
