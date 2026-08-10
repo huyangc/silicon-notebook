@@ -53,6 +53,7 @@ import base64
 import mimetypes
 import re
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Dict, Match, Tuple
 
@@ -97,10 +98,24 @@ class _Stats:
 
 
 def _resolve_target_path(target: str, base_dir: Path) -> Path:
-    p = Path(target)
-    if p.is_absolute():
-        return p
-    return (base_dir / p).resolve()
+    """target -> 本地文件路径。字面量优先；不存在且含 % 转义时再试 URL 解码
+    （`figures/my%20plot.png` 这类导出笔记的常见写法解码成 `my plot.png`），
+    字面量文件真叫 `my%20plot.png` 时仍取字面量。"""
+    def _resolve(t: str) -> Path:
+        p = Path(t)
+        if p.is_absolute():
+            return p
+        return (base_dir / p).resolve()
+
+    literal = _resolve(target)
+    if literal.is_file() or "%" not in target:
+        return literal
+    decoded = urllib.parse.unquote(target)
+    if decoded != target:
+        candidate = _resolve(decoded)
+        if candidate.is_file():
+            return candidate
+    return literal
 
 
 def _embed_one(match: Match[str], base_dir: Path, max_bytes: int, stats: _Stats) -> str:

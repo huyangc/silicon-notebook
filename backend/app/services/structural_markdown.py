@@ -46,12 +46,29 @@ def _unescape_md_brackets(alt: str) -> str:
     return alt.replace("\\[", "[").replace("\\]", "]")
 
 
-# Destination-only sweep, independent of alt syntax (codex R3 P2): an alt the
+# Image-anchored fallback sweep (codex R3 P2, narrowed in R4 P2): an alt the
 # literal matcher cannot parse (nested brackets `![a [nested] alt](data:...)`,
-# arbitrary depth) would otherwise carry the full base64 payload through. Any
-# `](data:...)` remnant collapses to `]` — the payload is gone, the alt text
-# survives with its markdown punctuation.
-_DATA_URI_DESTINATION = re.compile(r"\]\(\s*(?i:data):[^)]*\)")
+# arbitrary depth) would otherwise carry the full base64 payload through.
+# Anchoring on `![` keeps ordinary user-authored data LINKS
+# (`[ordinary](data:text/plain;base64,...)`) and bare `](data:...)` fragments
+# untouched — sanitization only ever targets image syntax. The non-greedy alt
+# excludes parens so a preceding complete image (`![a](x) and ![b](data:...)`)
+# cannot be swallowed into the alt; an image alt that itself contains parens
+# AND a data destination stays unmatched (registered pathological boundary).
+_DATA_URI_IMAGE_FALLBACK = re.compile(r"!\[([^()]*?)\]\(\s*(?i:data):[^)]*\)")
+
+
+def contains_data_uri_image_literal(text: str) -> bool:
+    """原文里是否存在（任一形态的）data URI 图片字面量。
+
+    供 `kg/parsing.parse_elements` 判定：容器块（段落/列表/表格/标题）的
+    verbatim 切片带着这种字面量时，无法同时满足「载荷不进 KG 窗口」与
+    「证据跨度切原文即元素文本」两条契约，只能跳过该块。
+    """
+    return bool(
+        _DATA_URI_IMAGE_LITERAL.search(text)
+        or _DATA_URI_IMAGE_FALLBACK.search(text)
+    )
 
 
 def strip_data_uri_image_literals(text: str) -> str:
@@ -60,12 +77,15 @@ def strip_data_uri_image_literals(text: str) -> str:
     `_inline_text`、`_html_to_text` 与 `parsers.parse_markdown_text` 的裸文本
     兜底共用这一个收口：任何要把 markdown 原文当纯文本吐出的路径都必须先过
     它，保证 base64 载荷不进元素文本。对不含字面量的文本是 no-op。两段式：
-    先按完整字面量剥成纯 alt，剩余无法解析 alt 的形态再按目标端兜底清扫。
+    先按完整字面量剥成纯 alt，alt 无法解析（嵌套方括号）的形态再按带 `![`
+    锚点的兜底正则剥；普通链接的 `](data:...)` 不受影响。
     """
     text = _DATA_URI_IMAGE_LITERAL.sub(
         lambda m: _unescape_md_brackets(m.group(1)), text
     )
-    return _DATA_URI_DESTINATION.sub("]", text)
+    return _DATA_URI_IMAGE_FALLBACK.sub(
+        lambda m: _unescape_md_brackets(m.group(1)), text
+    )
 
 
 @dataclass

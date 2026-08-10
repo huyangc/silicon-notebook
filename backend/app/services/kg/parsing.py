@@ -62,7 +62,10 @@ _QTYPE_MAP = {
 def parse_elements(
     text: str, source_file: str, line_range: Optional[List[int]] = None
 ) -> List[SourceElementQ]:
-    from app.services.structural_markdown import parse_blocks
+    from app.services.structural_markdown import (
+        contains_data_uri_image_literal,
+        parse_blocks,
+    )
 
     blocks = parse_blocks(text)
     lo, hi = (line_range or [1, len(text.split("\n"))])
@@ -108,6 +111,15 @@ def parse_elements(
             char_end = idx + len(raw)
         else:
             raw = text[b.char_start:b.char_end]
+            # codex R4 P1: 容器块（段落/列表/表格/标题/代码块）的 verbatim 切片
+            # 若带着 data URI 图片字面量（混排、嵌套、被拒 mime 都会留在原文
+            # 里），载荷会整段进 KG 窗口；而换成 parse_blocks 的已消毒文本又
+            # 会破坏「证据跨度切原文即元素文本」契约（消毒文本不是连续切片、
+            # 无法定位）。两条契约不可兼得时跳过该块——其正文仍经 parsers.py
+            # 的 element/chunk 通道（消毒后、不带偏移）参与检索，只是不参与
+            # KG 抽取。已登记的取舍。
+            if contains_data_uri_image_literal(raw):
+                continue
         if not raw.strip():
             continue
         counter += 1

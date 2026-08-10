@@ -186,6 +186,18 @@ def test_uppercase_data_scheme_raw_fallback_strip():
     assert strip_data_uri_image_literals(raw) == "alt"
 
 
+def test_ordinary_data_link_preserved_verbatim():
+    """codex R4 P2: 清扫只针对图片语法——普通链接 `[x](data:...)` 是用户正文,
+    目标端不得被摘除。"""
+    md = "See [ordinary](data:text/plain;base64,AAAA) and x](data:secret) too.\n"
+    blocks = parse_blocks(md)
+    paras = [b for b in blocks if b.type == "paragraph"]
+    assert len(paras) == 1
+    # markdown-it 拒绝 data:text/plain 链接,字面量整体留在文本里——必须原样。
+    assert "[ordinary](data:text/plain;base64,AAAA)" in paras[0].text
+    assert "x](data:secret)" in paras[0].text
+
+
 def test_nested_bracket_alt_data_uri_destination_swept():
     """codex R3 P2: alt 含嵌套方括号时字面量正则不匹配——目标端兜底清扫必须
     单独把 `](data:...)` 收掉, base64 不得进任何 block 文本。"""

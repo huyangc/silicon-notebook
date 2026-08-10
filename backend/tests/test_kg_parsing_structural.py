@@ -61,6 +61,31 @@ def test_captioned_data_uri_image_element_uses_caption_not_raw_slice():
     assert text[imgs[0].char_start:imgs[0].char_end] == "a wiring diagram"
 
 
+def test_container_block_with_data_uri_payload_skipped_from_kg():
+    """codex R4 P1: 混排/列表/被拒 mime 的 data URI 字面量留在容器块的 verbatim
+    切片里, 载荷会整段进 KG 窗口; 换消毒文本又破坏证据跨度契约——只能跳过该
+    块(正文仍经 chunk 通道检索)。周边正常块不受影响。"""
+    payload = "A" * 50_000
+    text = (
+        "# Title\n\n"
+        "Normal prose paragraph.\n\n"
+        f"Mixed prose ![fig](data:image/svg+xml;base64,{payload}) more prose.\n\n"
+        f"- item with ![x](data:image/png;base64,{payload})\n\n"
+        "Closing paragraph.\n"
+    )
+    els = parse_elements(text, "doc.md", None)
+    assert all("base64" not in e.text for e in els)
+    texts = [e.text for e in els]
+    assert any("Normal prose paragraph." in t for t in texts)
+    assert any("Closing paragraph." in t for t in texts)
+    assert not any("Mixed prose" in t for t in texts)
+    assert not any("item with" in t for t in texts)
+    # 存活元素的跨度切原文必须与自身 text 一致(证据契约不因跳过而放松)。
+    for e in els:
+        if e.type != "heading":
+            assert text[e.char_start:e.char_end] == e.text
+
+
 def test_normalized_caption_without_truthful_span_skips_kg_element():
     """codex R3 P2: 图注被 markdown-it 归一化(NUL → U+FFFD)后在原文里找不到
     逐字位置时, 不得伪造前缀跨度当证据——直接不产出该 KG 元素(图注仍经
