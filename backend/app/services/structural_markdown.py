@@ -35,8 +35,11 @@ _ANCHOR_ID = re.compile(r'<a\s+id="([^"]*)"', re.IGNORECASE)
 # `![a[x]](data:...)` is pathological and fails open to the old behavior).
 # The scheme is matched case-insensitively: URI schemes are, and markdown-it
 # accepts `DATA:`/`Data:` variants.
+# The destination accepts both plain and CommonMark angle-bracket forms
+# (`](data:...)` and `](<data:...>)`, codex R5 P1) — markdown-it rejects
+# unsupported mimes in either spelling and leaves the literal in text.
 _DATA_URI_IMAGE_LITERAL = re.compile(
-    r"!\[((?:[^\[\]]|\](?!\())*)\]\(\s*(?i:data):[^)]*\)"
+    r"!\[((?:[^\[\]]|\](?!\())*)\]\(\s*<?\s*(?i:data):[^)>]*>?\s*\)"
 )
 
 
@@ -55,7 +58,9 @@ def _unescape_md_brackets(alt: str) -> str:
 # excludes parens so a preceding complete image (`![a](x) and ![b](data:...)`)
 # cannot be swallowed into the alt; an image alt that itself contains parens
 # AND a data destination stays unmatched (registered pathological boundary).
-_DATA_URI_IMAGE_FALLBACK = re.compile(r"!\[([^()]*?)\]\(\s*(?i:data):[^)]*\)")
+_DATA_URI_IMAGE_FALLBACK = re.compile(
+    r"!\[([^()]*?)\]\(\s*<?\s*(?i:data):[^)>]*>?\s*\)"
+)
 
 
 def contains_data_uri_image_literal(text: str) -> bool:

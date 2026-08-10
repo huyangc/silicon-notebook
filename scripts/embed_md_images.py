@@ -79,6 +79,9 @@ _IMG_RE = re.compile(
 # 不能当围栏开启符(否则缩进代码块里的 ``` 字面量会让扫描器误入围栏态, 吞掉
 # 其后所有真实图片引用)。
 _FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
+# blockquote 容器前缀(`> `, 可嵌套 `> > `): 围栏识别前剥掉, 让引用块内的
+# fenced 代码示例同样受"围栏内不改写"保护。
+_BLOCKQUOTE_PREFIX_RE = re.compile(r'^ {0,3}(?:> ?)+')
 
 
 class _Stats:
@@ -184,10 +187,15 @@ def embed_images(text: str, base_dir: Path, max_bytes: int) -> Tuple[str, _Stats
     fence_open = None
 
     for line in text.splitlines(keepends=True):
-        fence_match = _FENCE_RE.match(line)
+        # blockquote 里的围栏行带 `>` 前缀(`> ```），先剥掉容器前缀再识别，
+        # 否则引用块内的代码示例会被当正文改写。围栏状态不区分引用深度
+        # (跨深度混用围栏的形态按 docstring 登记为边界)。
+        fence_line = _BLOCKQUOTE_PREFIX_RE.sub("", line, count=1)
+        fence_match = _FENCE_RE.match(fence_line)
         if fence_match:
             marker = fence_match.group(1)
-            rest = line[fence_match.end():]
+            # 注意从 fence_line(已剥引用前缀)取尾部, 用原始 line 会错位。
+            rest = fence_line[fence_match.end():]
             if fence_open is None:
                 fence_open = (marker[0], len(marker))
                 out_lines.append(line)
