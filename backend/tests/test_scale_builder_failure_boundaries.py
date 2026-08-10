@@ -337,6 +337,7 @@ def test_builder_stage_callback_order_and_failure_isolation(repo):
         "chunk_matrix",
         "relation_matrix",
         "viz_arrays",
+        "source_partitions",
         "persist",
         "total",
     ]

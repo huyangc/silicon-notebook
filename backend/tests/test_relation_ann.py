@@ -208,7 +208,8 @@ def test_build_scale_index_emits_relation_matrix_stage(repo, monkeypatch):
     manifest = repo.build_scale_index(nb.id)
 
     expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
-                       "chunk_matrix", "relation_matrix", "viz_arrays", "persist"}
+                       "chunk_matrix", "relation_matrix", "viz_arrays",
+                       "source_partitions", "persist"}
     returned_build_ms = manifest["build_ms"]
     assert set(returned_build_ms.keys()) == expected_stages | {"total"}
 
