@@ -1014,6 +1014,7 @@
         "id": "<profile-id-1>",
         "memory_mode": "manual",
         "model_settings": {},
+        "ui_mode": null,
         "updated_at": "<timestamp>",
         "upload_document_limit": null,
         "user_id": "<user-id-1>"
@@ -1028,6 +1029,7 @@
         "id": "<profile-id-2>",
         "memory_mode": "manual",
         "model_settings": {},
+        "ui_mode": null,
         "updated_at": "<timestamp>",
         "upload_document_limit": null,
         "user_id": "<user-id-2>"
@@ -1038,6 +1040,7 @@
         "id": "<profile-id-3>",
         "memory_mode": "manual",
         "model_settings": {},
+        "ui_mode": null,
         "updated_at": "<timestamp>",
         "upload_document_limit": null,
         "user_id": "<user-id-3>"
@@ -2074,7 +2077,7 @@
       },
       {
         "name": "user_profiles",
-        "sql_sha256": "f3c1e9abbbcdacde6818ca3e117f766ba5879392c4a54cf8e9afba4a6f726600",
+        "sql_sha256": "0573b86d37207fd121753a45979793bac292c697fc7f79923e903bfebb329d0e",
         "type": "table"
       },
       {
@@ -2098,6 +2101,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 44
+    "user_version": 45
   }
 }

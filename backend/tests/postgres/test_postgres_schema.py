@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 22
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 23
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 22
-    assert migrator.migrate() == 22
-    assert migrator.current_version() == 22
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 22
+    assert migrator.migrate() == 23
+    assert migrator.migrate() == 23
+    assert migrator.current_version() == 23
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 23
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 22
+    assert migrator.migrate() == 23
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 22
+        assert PostgresMigrator(databases[1]).migrate() == 23
     finally:
         for database in databases:
             database.close()
@@ -190,6 +190,7 @@ def test_packaged_index_migration_phases_are_exact():
         (20, "source_index_backfills"),
         (21, "report_share_tokens"),
         (22, "chunk_questions"),
+        (23, "user_profiles_ui_mode"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:

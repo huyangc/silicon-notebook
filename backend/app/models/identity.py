@@ -11,6 +11,13 @@ class UserProfile(BaseModel):
     username: str = ""
     memory_mode: str = "manual"
     domain_focus: List[str] = Field(default_factory=list)
+    ui_mode: str = "auto"
+
+
+class UiModeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ui_mode: Literal["auto", "advanced"]
 
 
 class AgentProfile(BaseModel):

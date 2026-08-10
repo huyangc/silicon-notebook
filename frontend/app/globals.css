@@ -5046,6 +5046,10 @@ button.chat-session-card {
   margin-top: 2px;
 }
 
+/* item 数与 track 数必须同步（自动模式少一个勾选格）：默认 3 track 对应勾选框 +
+   主按钮 + 操作区三个 grid item；自动模式隐藏勾选框只剩两个 item 时必须叠加
+   .source-row--no-select（见下），否则第三个 item 落进第一条 max-content track，
+   长标题把该列撑宽、把删除/打开按钮顶出可视区。 */
 .source-row {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr) max-content;
@@ -5057,6 +5061,10 @@ button.chat-session-card {
   border-radius: 10px;
   padding: 0 6px 0 10px;
   background: transparent;
+}
+
+.source-row--no-select {
+  grid-template-columns: minmax(0, 1fr) max-content;
 }
 
 .source-scope-toolbar {
@@ -8801,6 +8809,22 @@ button.chat-session-card {
 .user-logout:focus-visible {
   outline: 2px solid rgba(31, 94, 255, 0.28);
   outline-offset: 2px;
+}
+/* 「高级模式」开关项：右侧状态徽标，开启时整行轻亮起，与其余菜单项（含私有记忆）
+   的默认外观保持同一套间距/圆角，只多一个状态标签。 */
+.user-menu-state {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: #98a2b3;
+}
+.user-menu-toggle.active {
+  background: #eef2ff;
+  color: #1f2a44;
+}
+.user-menu-toggle.active .user-menu-state {
+  color: #3b4ee0;
 }
 
 /* Pagination */

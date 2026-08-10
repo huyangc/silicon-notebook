@@ -2795,5 +2795,34 @@ MIGRATION_MANIFEST[(43, 44)] = {
 }
 
 
+# v45: per-user interface mode preference ("auto" | "advanced"). One nullable
+# column on an existing table, no new indexes/tables.
+UI_MODE_COLUMNS = {
+    "user_profiles": {
+        "ui_mode": ("ui_mode", "TEXT", 0, None, 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 45, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "user_profiles": {
+                **manifest["columns"].get("user_profiles", {}),
+                **UI_MODE_COLUMNS["user_profiles"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(44, 45)] = {
+    "tables": {},
+    "columns": UI_MODE_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

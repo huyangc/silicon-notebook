@@ -70,6 +70,18 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return database, storage
 
 
+def _rollback_v45(db: sqlite3.Connection) -> None:
+    """Undo _migration_45 (user_profiles.ui_mode interface-mode preference).
+
+    Same rationale as _rollback_v43: every deployed-vNN fixture below forges
+    an older schema by upgrading to current then rolling back everything
+    later migrations added, so a new migration needs its own undo too.
+    Rollback runs newest-first, so this precedes _rollback_v43 — which also
+    carries the v44 question-index undo inline — at every call site.
+    """
+    db.execute("ALTER TABLE user_profiles DROP COLUMN ui_mode")
+
+
 def _rollback_v43(db: sqlite3.Connection) -> None:
     """Undo _migration_43 (per-report share tokens).
 
@@ -487,6 +499,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
         rollback.execute("DROP INDEX idx_sources_nb_parse_status_type")  # _migration_15
         rollback.execute("DROP INDEX idx_sources_memory_id")             # _migration_14
         rollback.execute("ALTER TABLE sources DROP COLUMN memory_id")    # _migration_14
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 13")
         rollback.commit()
@@ -533,6 +546,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path):
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 20")
         rollback.commit()
@@ -593,6 +607,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 21")
         rollback.commit()
@@ -646,6 +661,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
         rollback.execute("DROP TABLE knowhow_milestones")
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 22")
         rollback.commit()
@@ -704,6 +720,7 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
                 "2030-01-01T00:00:00+00:00",
             ),
         )
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 23")
 
@@ -728,6 +745,7 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 32")
 
@@ -748,6 +766,7 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
         _rollback_v34(rollback)
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 33")
 
@@ -784,6 +803,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
         rollback.execute("DROP TABLE catalog_jobs")                     # _migration_39
         rollback.execute("DROP INDEX idx_sources_visible_identity")     # _migration_38
         rollback.execute("DROP INDEX idx_source_elements_source_type")  # _migration_37
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 36")
 
@@ -839,6 +859,7 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")
         rollback.execute("DROP TABLE catalog_candidates")
         rollback.execute("DROP TABLE catalog_jobs")
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 38")
 
@@ -864,6 +885,7 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
         rollback.execute("DROP INDEX idx_knowledge_source_facts_source_generation_global")
         rollback.execute("DROP TABLE knowledge_source_fact_elements")
         rollback.execute("DROP TABLE knowledge_source_facts")
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 39")
 
@@ -892,6 +914,7 @@ def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
         rollback.execute(
             "ALTER TABLE knowledge_source_facts DROP COLUMN projection_origin"
         )
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("PRAGMA user_version = 40")
 
@@ -911,6 +934,7 @@ def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v45(rollback)
         _rollback_v43(rollback)
         rollback.execute("DROP TABLE source_index_backfills")
         rollback.execute("PRAGMA user_version = 41")
@@ -993,6 +1017,7 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
             "VALUES (?,?,?,?,?,?,?,?,?)",
             _V23_CLUSTER_ROWS,
         )
+        _rollback_v45(db)
         _rollback_v43(db)
         db.execute("PRAGMA user_version = 28")
         db.commit()

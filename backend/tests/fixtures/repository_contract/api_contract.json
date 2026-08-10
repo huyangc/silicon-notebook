@@ -9271,6 +9271,24 @@
           "title": "TypedCollectionResult",
           "type": "object"
         },
+        "UiModeUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "ui_mode": {
+              "enum": [
+                "auto",
+                "advanced"
+              ],
+              "title": "Ui Mode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "ui_mode"
+          ],
+          "title": "UiModeUpdate",
+          "type": "object"
+        },
         "UnifiedKgStatus": {
           "properties": {
             "clusters": {
@@ -9560,6 +9578,11 @@
             },
             "role": {
               "title": "Role",
+              "type": "string"
+            },
+            "ui_mode": {
+              "default": "auto",
+              "title": "Ui Mode",
               "type": "string"
             },
             "username": {
@@ -11742,6 +11765,45 @@
             }
           },
           "summary": "Me Pending Stream"
+        }
+      },
+      "/api/me/ui-mode": {
+        "patch": {
+          "description": "自助切换界面模式偏好(\"auto\"|\"advanced\")；只写调用者自己的 user_profiles\n行，不做 admin 校验。合法值由 pydantic Literal 在到达这里之前已经拒绝。",
+          "operationId": "update_my_ui_mode_api_me_ui_mode_patch",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UiModeUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UserProfile"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update My Ui Mode"
         }
       },
       "/api/memories": {

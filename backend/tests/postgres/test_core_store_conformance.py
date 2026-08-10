@@ -75,7 +75,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 22
+    assert PostgresMigrator(postgres_database).migrate() == 23
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -200,6 +200,64 @@ def test_identity_username_password_and_session_semantics(core_stores: CoreStore
     assert store.resolve_session(token).id == created.id
     store.delete_session(token)
     assert store.resolve_session(token) is None
+
+
+def test_set_user_ui_mode_round_trips_and_survives_a_missing_profile_row(
+    core_stores: CoreStores,
+):
+    # codex 双评审 P2:set_user_ui_mode 从「UPDATE→rowcount==0→补 INSERT」两步写法
+    # 改成原子 INSERT ... ON CONFLICT (id) DO UPDATE。这里既验证正常 round-trip，
+    # 也验证「profile 行缺失」这条 upsert 唯一要防的路径——手工删掉该行模拟历史
+    # 数据缺口/并发下的极端情形，调用仍必须成功且读回正确值,不能因为 UPDATE 分支
+    # 撞不到行就整体失败。
+    store = core_stores.identity
+    user = store.create_user("b00123456", "correct horse battery staple")
+
+    updated = store.set_user_ui_mode(user.id, "advanced")
+    assert updated.ui_mode == "advanced"
+    fetched = _fetch_one(
+        core_stores,
+        "SELECT ui_mode FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert fetched["ui_mode"] == "advanced"
+
+    updated_again = store.set_user_ui_mode(user.id, "auto")
+    assert updated_again.ui_mode == "auto"
+    fetched_again = _fetch_one(
+        core_stores,
+        "SELECT ui_mode FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert fetched_again["ui_mode"] == "auto"
+
+    # 只应有一行 —— upsert 走 id 冲突,不会在缺失/重复写入间产生第二条 profile 行。
+    row_count = _fetch_one(
+        core_stores,
+        "SELECT COUNT(*) AS n FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert row_count["n"] == 1
+
+    _write_sql(
+        core_stores,
+        "DELETE FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert _fetch_one(
+        core_stores,
+        "SELECT 1 FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    ) is None
+
+    recreated = store.set_user_ui_mode(user.id, "advanced")
+    assert recreated.ui_mode == "advanced"
+    fetched_recreated = _fetch_one(
+        core_stores,
+        "SELECT ui_mode FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert fetched_recreated["ui_mode"] == "advanced"
 
 
 def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):
@@ -327,7 +385,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 22
+    assert PostgresMigrator(postgres_database).migrate() == 23
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -405,7 +463,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 22
+    assert PostgresMigrator(postgres_database).migrate() == 23
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -470,7 +528,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 22
+    assert PostgresMigrator(postgres_database).migrate() == 23
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

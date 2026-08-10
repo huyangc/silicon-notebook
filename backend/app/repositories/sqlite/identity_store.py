@@ -78,6 +78,9 @@ class IdentityStore:
 
     @staticmethod
     def _user_profile(user, profile) -> UserProfile:
+        ui_mode = "auto"
+        if profile is not None and "ui_mode" in profile.keys() and profile["ui_mode"]:
+            ui_mode = profile["ui_mode"]
         return UserProfile(
             id=user["id"],
             email=user["email"],
@@ -86,6 +89,7 @@ class IdentityStore:
             username=user["username"] if "username" in user.keys() else "",
             memory_mode=profile["memory_mode"] if profile else "manual",
             domain_focus=json.loads(profile["domain_focus"]) if profile else [],
+            ui_mode=ui_mode,
         )
 
     def create_user(self, username: str, password: str) -> UserProfile:
@@ -246,6 +250,36 @@ class IdentityStore:
                 "username": target["username"] or target["id"],
                 "role": role,
             }
+
+    def set_user_ui_mode(self, user_id: str, ui_mode: str) -> UserProfile:
+        """自助设置调用者自己的界面模式偏好("auto"|"advanced")；无 admin 校验(照
+        request 里的 user.id 写自己那行)。镜像 create_user 的 profile 写路径:
+        user_profiles 没有 user_id 的 UNIQUE 约束,不能用 INSERT ... ON CONFLICT,
+        先 UPDATE、rowcount==0(缺 profile 行,理论上不会发生——create_user/_seed
+        必建)再补 INSERT,与 set_user_document_limit_override 的「缺行响亮失败」
+        不同:这里是自助写自己的偏好,缺行应当自愈而不是 404。"""
+        if ui_mode not in {"auto", "advanced"}:
+            raise ValueError("invalid ui_mode")
+        now = _now()
+        with self.database.write() as db:
+            user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if user is None:
+                raise KeyError(user_id)
+            cursor = db.execute(
+                "UPDATE user_profiles SET ui_mode = ?, updated_at = ? WHERE user_id = ?",
+                (ui_mode, now, user_id),
+            )
+            if cursor.rowcount == 0:
+                db.execute(
+                    "INSERT INTO user_profiles "
+                    "(id, user_id, memory_mode, domain_focus, ui_mode, created_at, updated_at) "
+                    "VALUES (?, ?, 'manual', '[]', ?, ?, ?)",
+                    (f"profile-{user_id}", user_id, ui_mode, now, now),
+                )
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return self._user_profile(user, profile)
 
     # ---- 每笔记本文档数量上限:配额解析 ----
     def _global_default_from(self, db) -> int:

@@ -2824,3 +2824,292 @@ def test_plan_outline_wires_probe_width_from_report_depth(repo, monkeypatch):
     assert len(confirmed) == 1, (
         f"确认问题被检索 {len(confirmed)} 次——plan_outline 没有装配探针 memo"
     )
+
+
+# ---------------------------------------------------------------------------
+# auto_generate 直通:清晰问题自动确认意图 + 自动接受默认大纲
+# ---------------------------------------------------------------------------
+
+class _AutoRunLLM(_OutlineLLM):
+    """在 _OutlineLLM 之上补一个可控的问题理解回复。"""
+
+    def __init__(self, ambiguities=None):
+        super().__init__()
+        self.intent_calls = 0
+        self.outline_calls = 0
+        self._ambiguities = list(ambiguities or [])
+
+    def chat_json(self, messages, schema_hint, **kw):
+        content = messages[-1]["content"]
+        if "before seeing any corpus" in content:
+            self.intent_calls += 1
+            return json.dumps({
+                "normalized_question": "PLL 环路稳定性的机理与设计约束是什么？",
+                "intent_type": "explain",
+                "entities": ["PLL"],
+                "mandatory_topics": [{
+                    "title": "环路稳定性",
+                    "question": "PLL 环路稳定性的机理与设计约束是什么？",
+                    "retrieval_queries": ["PLL loop stability"],
+                }],
+                "confidence": 0.9,
+                "needs_clarification": bool(self._ambiguities),
+                "ambiguities": self._ambiguities,
+            })
+        if "OUTLINE" in content:
+            self.outline_calls += 1
+        return super().chat_json(messages, schema_hint, **kw)
+
+
+def _stub_auto_run_corpus(eng, repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self, n, q: "MAP")
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a, q: [])
+    monkeypatch.setattr(
+        eng, "_deep_dive",
+        lambda nb_id, section, question, depth=None, on_step=None: ReasoningResult(),
+    )
+
+
+def test_auto_generate_confirms_a_clear_intent_and_runs_straight_through(
+    repo, monkeypatch,
+):
+    """清晰问题 + auto_generate:无任何 confirm/generate 调用即跑到 done。"""
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True)
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "done", detail.get("error")
+    understanding = detail["understanding"]
+    assert understanding["confirmed"] is True
+    assert understanding["needs_clarification"] is False
+    # 确认是提交而不是第二次解释:问题理解模型只被调用一次。
+    assert llm.intent_calls == 1
+    # 自动确认沿用模型已产出、用户本会看到的那个最终问题。
+    assert understanding["resolved_question"].startswith("PLL")
+    assert detail["content_md"].startswith("#")
+
+
+def test_auto_generate_waits_for_blocking_ambiguity_then_flows_after_confirm(
+    repo, monkeypatch,
+):
+    """有必答歧义:停在 intent_ready;人工确认后大纲阶段仍自动直通到生成。"""
+    from app.services.reports.intent_confirmation import confirmed_understanding
+
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM(ambiguities=[{
+        "question": "具体研究对象是什么？",
+        "reason": "缺少对象",
+        "required": True,
+        "options": [],
+    }])
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True)
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "intent_ready"
+    assert detail["understanding"]["needs_clarification"] is True
+    assert detail["understanding"]["confirmed"] is False
+    assert llm.outline_calls == 0, "阻断性歧义下不得进入规划"
+
+    # 人工确认(镜像 confirm_report_intent 端点):flag 仍在 understanding 里。
+    understanding = confirmed_understanding(
+        detail["understanding"],
+        resolved_question="分析 PLL 环路稳定性",
+        answers=[{"id": "ambiguity-1", "answer": "电荷泵 PLL"}],
+    )
+    assert understanding["auto_generate_requested"] is True
+    assert repo.claim_report_intent(nb.id, rid, understanding)
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "",
+            auto_generate=bool(understanding.get("auto_generate_requested")),
+            intent_contract=understanding)
+
+    after = repo.get_report(nb.id, rid)
+    assert after["status"] == "done", after.get("error")
+
+
+def test_auto_intent_confirmation_yields_to_a_racing_manual_claim(
+    repo, monkeypatch,
+):
+    """用户在自动认领前手点确认 → rowcount 0:不抛错、不破坏状态、不重复规划。"""
+    import app.services.report_engine as engine_mod
+
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+
+    real_freeze = engine_mod.confirmed_understanding
+    raced: list = []
+
+    def _racing_freeze(understanding, **kwargs):
+        frozen = real_freeze(understanding, **kwargs)
+        if not raced:                       # 只抢一次:读之后、自动认领之前
+            raced.append(True)
+            manual = dict(frozen)
+            manual["confirmed_input"] = {
+                "resolved_question": "用户自己确认的问题", "answers": [],
+            }
+            assert repo.claim_report_intent(nb.id, rid, manual)
+        return frozen
+
+    monkeypatch.setattr(engine_mod, "confirmed_understanding", _racing_freeze)
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True)
+
+    detail = repo.get_report(nb.id, rid)
+    assert raced, "竞态桩未生效"
+    # 手动认领的结果原样保留,自动侧既不覆盖也不推进。
+    assert detail["status"] == "planning"
+    assert detail["understanding"]["confirmed_input"]["resolved_question"] == (
+        "用户自己确认的问题"
+    )
+    assert llm.outline_calls == 0 and not llm.section_calls
+
+
+def test_auto_intent_confirmation_skip_event_reports_claim_lost_when_a_human_wins(
+    repo, monkeypatch,
+):
+    """人工在自动认领前抢先确认时,skip 事件必须记 reason='claim_lost'。"""
+    import app.services.report_engine as engine_mod
+
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+
+    events: list = []
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
+
+    real_freeze = engine_mod.confirmed_understanding
+    raced: list = []
+
+    def _racing_freeze(understanding, **kwargs):
+        frozen = real_freeze(understanding, **kwargs)
+        if not raced:
+            raced.append(True)
+            manual = dict(frozen)
+            manual["confirmed_input"] = {
+                "resolved_question": "用户自己确认的问题", "answers": [],
+            }
+            assert repo.claim_report_intent(nb.id, rid, manual)
+        return frozen
+
+    monkeypatch.setattr(engine_mod, "confirmed_understanding", _racing_freeze)
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True)
+
+    skipped = [e for e in events if e.get("kind") == "report_intent_auto_confirm_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "claim_lost"
+    assert repo.get_report(nb.id, rid)["status"] == "planning"
+
+
+def test_auto_intent_confirmation_skip_event_reports_cancelled_when_report_is_cancelled_mid_race(
+    repo, monkeypatch,
+):
+    """认领前报告被(用户)取消时,罕见竞态读必须把 skip 事件的 reason 改判成
+    'cancelled',而不是笼统的 'claim_lost' —— 两者对运维排查的含义不同:前者是
+    正常的人工抢跑,后者说明报告已经不在了,重试/告警的意义也不同。"""
+    import app.services.report_engine as engine_mod
+
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+
+    events: list = []
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
+
+    real_freeze = engine_mod.confirmed_understanding
+    raced: list = []
+
+    def _racing_freeze(understanding, **kwargs):
+        frozen = real_freeze(understanding, **kwargs)
+        if not raced:
+            raced.append(True)
+            repo.update_report(nb.id, rid, status="cancelled", progress="已取消")
+        return frozen
+
+    monkeypatch.setattr(engine_mod, "confirmed_understanding", _racing_freeze)
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True)
+
+    skipped = [e for e in events if e.get("kind") == "report_intent_auto_confirm_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "cancelled"
+    # 取消状态原样保留 —— 自动侧发现赢不了这场竞态后不得覆盖它。
+    assert repo.get_report(nb.id, rid)["status"] == "cancelled"
+
+
+def test_auto_intent_confirmation_failure_leaves_the_manual_gate_usable(
+    repo, monkeypatch,
+):
+    """自动推进中途异常 → 留在 intent_ready,用户仍可手动走完。"""
+    import app.services.report_engine as engine_mod
+    from app.services.reports.intent_confirmation import confirmed_understanding
+
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(engine_mod, "confirmed_understanding", _boom)
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True)
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "intent_ready"      # 不得打成 failed
+    assert detail["understanding"]["confirmed"] is False
+    assert llm.outline_calls == 0
+
+    monkeypatch.undo()
+    understanding = confirmed_understanding(
+        detail["understanding"], resolved_question="分析 PLL 环路稳定性",
+    )
+    assert repo.claim_report_intent(nb.id, rid, understanding)
+    assert repo.get_report(nb.id, rid)["status"] == "planning"
+
+
+def test_auto_generate_off_still_stops_at_intent_ready(repo, monkeypatch):
+    """高级模式(默认)逐位不变:停在 intent_ready,且不记录直通意图。"""
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", require_intent_review=True)
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "intent_ready"
+    assert detail["understanding"]["auto_generate_requested"] is False
+    assert detail["understanding"]["confirmed"] is False
+    assert llm.outline_calls == 0

@@ -4,6 +4,7 @@ import {
   Bookmark,
   ChevronDown,
   LogOut,
+  SlidersHorizontal,
 } from "lucide-react";
 
 
@@ -13,7 +14,10 @@ type AccountMenuProps = {
   initials: string;
   memoryActive: boolean;
   showAdminUsage: boolean;
+  /** 当前是否为高级模式；开关渲染其开/关态，点击调用 onToggleAdvancedMode。 */
+  advancedMode: boolean;
   onOpenMemory: () => void;
+  onToggleAdvancedMode: () => void;
   onLogout: () => void | Promise<void>;
 };
 
@@ -24,7 +28,9 @@ export function AccountMenu({
   initials,
   memoryActive,
   showAdminUsage,
+  advancedMode,
   onOpenMemory,
+  onToggleAdvancedMode,
   onLogout,
 }: AccountMenuProps) {
   const [open, setOpen] = useState(false);
@@ -98,6 +104,21 @@ export function AccountMenu({
           >
             <Bookmark size={16} />
             <span>私有记忆</span>
+          </button>
+          <button
+            className={`user-logout user-menu-toggle ${advancedMode ? "active" : ""}`}
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={advancedMode}
+            title="高级模式会显示引擎切换、检索档位、研究深度与来源范围勾选等完整配置项"
+            onClick={() => {
+              setOpen(false);
+              onToggleAdvancedMode();
+            }}
+          >
+            <SlidersHorizontal size={16} />
+            <span>高级模式</span>
+            <span className="user-menu-state">{advancedMode ? "已开启" : "已关闭"}</span>
           </button>
           {showAdminUsage && (
             <a
