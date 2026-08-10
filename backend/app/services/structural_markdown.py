@@ -26,7 +26,24 @@ _ANCHOR_ID = re.compile(r'<a\s+id="([^"]*)"', re.IGNORECASE)
 # and `_inline_text`'s `sub()` call catches every other position — mixed
 # paragraph text, list items, headings, table cells — where the literal
 # survives as an ordinary `text` child instead.
-_DATA_URI_IMAGE_LITERAL = re.compile(r"!\[([^\]]*)\]\(\s*data:[^)]*\)")
+# Alt-text matching must tolerate a `]` inside the alt: markdown-it has
+# already UNESCAPED `\]` to `]` by the time the rejected literal reaches a
+# text child (`![foo\]bar](data:...)` survives as `![foo]bar](data:...)`),
+# and the raw-text fallback sees the escaped form. So the alt group accepts
+# any run of non-bracket chars plus `]` not immediately followed by `(` —
+# it stops only at the real `](` delimiter. `[` stays disallowed (a nested
+# `![a[x]](data:...)` is pathological and fails open to the old behavior).
+# The scheme is matched case-insensitively: URI schemes are, and markdown-it
+# accepts `DATA:`/`Data:` variants.
+_DATA_URI_IMAGE_LITERAL = re.compile(
+    r"!\[((?:[^\[\]]|\](?!\())*)\]\(\s*(?i:data):[^)]*\)"
+)
+
+
+def _unescape_md_brackets(alt: str) -> str:
+    """还原 alt 里的 `\\[`/`\\]` 转义——markdown-it 的 token 化路径给出的是
+    解转义后的 alt，剥离路径（raw 文本仍带转义）对齐同一表现。"""
+    return alt.replace("\\[", "[").replace("\\]", "]")
 
 
 def strip_data_uri_image_literals(text: str) -> str:
@@ -36,7 +53,9 @@ def strip_data_uri_image_literals(text: str) -> str:
     收口：任何要把 markdown 原文当纯文本吐出的路径都必须先过它，保证 base64
     载荷不进元素文本。对不含字面量的文本是 no-op。
     """
-    return _DATA_URI_IMAGE_LITERAL.sub(lambda m: m.group(1), text)
+    return _DATA_URI_IMAGE_LITERAL.sub(
+        lambda m: _unescape_md_brackets(m.group(1)), text
+    )
 
 
 @dataclass
@@ -262,7 +281,9 @@ def parse_blocks(text: str) -> List[Block]:
             if img is not None:
                 caption = (img.content or "").strip()
                 src = img.attrs.get("src", "") if hasattr(img, "attrs") else ""
-                if caption or src.startswith("data:"):
+                # URI schemes are case-insensitive and markdown-it accepts
+                # `DATA:`/`Data:` image sources — match them all here.
+                if caption or src[:5].lower() == "data:":
                     emit(Block(type="image", text=caption, raw=text[cs:ce],
                                char_start=cs, char_end=ce, line_start=ls, line_end=le,
                                section_path=section_path(), metadata={"src": src}))
@@ -276,7 +297,7 @@ def parse_blocks(text: str) -> List[Block]:
                 # paragraph) does not match this `fullmatch` — it falls
                 # through to `_inline_text(inline)` below, whose `sub()` call
                 # strips the literal to alt text there instead (修1).
-                alt = literal_m.group(1).strip()
+                alt = _unescape_md_brackets(literal_m.group(1)).strip()
                 if alt:
                     emit(Block(type="paragraph", text=alt, raw=text[cs:ce],
                                char_start=cs, char_end=ce, line_start=ls, line_end=le,

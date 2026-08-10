@@ -94,6 +94,25 @@ def test_fenced_code_block_not_rewritten(tmp_path):
     assert "![y](data:image/png;base64," in text
 
 
+def test_indented_code_backticks_do_not_open_fence(tmp_path):
+    """codex R1 P2: 缩进 ≥4 空格的 ``` 是缩进代码块内容不是围栏开启符
+    (CommonMark 围栏最多 3 个前导空格)——误判会吞掉其后的真实图片引用。"""
+    (tmp_path / "img.png").write_bytes(_PNG_BYTES)
+    md_text = (
+        "before\n"
+        "\n"
+        "    ```\n"
+        "\n"
+        "![y](img.png)\n"
+    )
+
+    text, stats = embed_md_images.embed_images(md_text, tmp_path, 5 * 1024 * 1024)
+
+    assert stats.embedded == 1
+    assert "![y](data:image/png;base64," in text
+    assert "    ```\n" in text
+
+
 def test_title_form_embedded(tmp_path):
     """`![alt](img.png "标题")` 形态可被内嵌。"""
     (tmp_path / "img.png").write_bytes(_PNG_BYTES)

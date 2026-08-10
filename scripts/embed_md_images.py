@@ -74,7 +74,10 @@ _IMG_RE = re.compile(
     r'\((?!<)([^()\s]+)(?:\s+"(?:\\.|[^"\\])*")?\)'
 )
 
-_FENCE_RE = re.compile(r'^(`{3,}|~{3,})')
+# CommonMark 允许围栏行最多 3 个前导空格；缩进 ≥4 空格的行属于缩进代码块内容,
+# 不能当围栏开启符(否则缩进代码块里的 ``` 字面量会让扫描器误入围栏态, 吞掉
+# 其后所有真实图片引用)。
+_FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
 
 
 class _Stats:
@@ -162,8 +165,7 @@ def embed_images(text: str, base_dir: Path, max_bytes: int) -> Tuple[str, _Stats
     fence_marker = None  # None = 不在围栏内; 否则记录围栏字符('`' 或 '~')
 
     for line in text.splitlines(keepends=True):
-        stripped = line.lstrip()
-        fence_match = _FENCE_RE.match(stripped)
+        fence_match = _FENCE_RE.match(line)
         if fence_match:
             marker_char = fence_match.group(1)[0]
             if fence_marker is None:

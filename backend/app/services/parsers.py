@@ -530,7 +530,10 @@ def parse_markdown_text(
                 metadata["caption"] = caption
             src = block.metadata.get("src", "")
             asset_id = ""
-            if isinstance(src, str) and src.startswith("data:"):
+            # Scheme match is case-insensitive: markdown-it tokenizes
+            # `DATA:image/png;base64,...` as an image, and a case-sensitive
+            # check here would dump the whole base64 URI into metadata["src"].
+            if isinstance(src, str) and src[:5].lower() == "data:":
                 # data URI 绝不进 metadata（任何键都不行）：只尝试持久化。
                 asset_id = _persist_markdown_data_uri(src, persist_image, ordinal)
                 if asset_id:

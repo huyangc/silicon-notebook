@@ -224,6 +224,22 @@ def test_bare_data_uri_document_parses_to_empty_list():
         assert "base64" not in json.dumps(e.metadata)
 
 
+def test_uppercase_data_scheme_persists_and_never_enters_metadata():
+    """codex R1 P2: markdown-it 接受 `DATA:image/png;base64,...` 为图片，
+    分支判断必须大小写不敏感——否则整条 base64 URI 落进 metadata["src"]。"""
+    text = f"![cap](DATA:image/png;base64,{PNG_B64})\n"
+    persist = _fake_persist(returns="asset-upper")
+    els = parse_markdown_text("s1", text, persist_image=persist)
+    imgs = [e for e in els if e.element_type == "image"]
+    assert len(imgs) == 1
+    assert imgs[0].metadata.get("asset_id") == "asset-upper"
+    assert "src" not in imgs[0].metadata
+    for e in els:
+        assert "base64" not in e.text
+        assert "base64" not in json.dumps(e.metadata)
+    assert len(persist.calls) == 1
+
+
 def test_lone_rejected_mime_list_item_fallback_never_leaks_base64():
     """整份文档只有「无 alt + 白名单外 mime 的 data URI 列表项」时：
     `_inline_text` 剥空 → 空文本列表项被 parse_blocks 丢弃 → blocks 为空 →

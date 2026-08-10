@@ -147,6 +147,45 @@ def test_list_item_data_uri_literal_stripped_keeps_alt():
     assert "base64" not in items[0].text
 
 
+def test_escaped_bracket_alt_data_uri_literal_still_stripped():
+    """codex R1 P1: alt 含 `\\]` 转义的合法图片写法。markdown-it 会把文本里的
+    `\\]` 解转义成裸 `]`（`![foo\\]bar](data:...` 存活为 `![foo]bar](data:...`），
+    剥离正则必须容忍 alt 内的 `]`，否则整条 base64 泄进段落文本。"""
+    md = f"![foo\\]bar](data:image/svg+xml;base64,{_SVG_B64})\n"
+    blocks = parse_blocks(md)
+    assert all("base64" not in b.text for b in blocks)
+    paras = [b for b in blocks if b.type == "paragraph"]
+    assert len(paras) == 1
+    assert paras[0].text == "foo]bar"
+
+
+def test_escaped_bracket_alt_in_list_item_stripped():
+    md = f"- before ![foo\\]bar](data:image/svg+xml;base64,{_SVG_B64}) after\n"
+    blocks = parse_blocks(md)
+    items = [b for b in blocks if b.type == "list_item"]
+    assert len(items) == 1
+    assert "base64" not in items[0].text
+    assert "foo]bar" in items[0].text
+
+
+def test_uppercase_data_scheme_uncaptioned_image_still_emitted():
+    """codex R1 P2: URI scheme 大小写不敏感——`DATA:image/png` 会被 markdown-it
+    token 化成 image，发射条件必须同样认它，否则无 alt 的大写 scheme 图片在
+    structural 层就被丢弃。"""
+    blocks = parse_blocks("![](DATA:image/png;base64,iVBORw0KGgo=)\n")
+    imgs = [b for b in blocks if b.type == "image"]
+    assert len(imgs) == 1
+    assert imgs[0].metadata.get("src", "")[:5].lower() == "data:"
+
+
+def test_uppercase_data_scheme_raw_fallback_strip():
+    """裸文本兜底共用的 strip 也必须认大写 scheme。"""
+    from app.services.structural_markdown import strip_data_uri_image_literals
+
+    raw = f"![alt](DATA:image/svg+xml;base64,{_SVG_B64})"
+    assert strip_data_uri_image_literals(raw) == "alt"
+
+
 def test_heading_data_uri_literal_stripped_to_alt():
     blocks = parse_blocks(f"# ![alt text](data:image/svg+xml;base64,{_SVG_B64})\n")
     heads = [b for b in blocks if b.type == "heading"]
