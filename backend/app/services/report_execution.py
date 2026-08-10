@@ -126,7 +126,8 @@ class ReportExecutionCoordinator:
     def start_plan(self, notebook_id: str, report_id: str, question: str,
                    history: str = "", auto_generate: bool = False, *,
                    user_id: str = "", intent_contract=None,
-                   source_scope=None, base_scope=None) -> bool:
+                   source_scope=None, base_scope=None,
+                   scope_reconfirm=None) -> bool:
         """Run pre-retrieval understanding or resume with a confirmed contract."""
         cancel = threading.Event()
         # A previous phase publishes intent_ready/outline_ready immediately
@@ -167,7 +168,8 @@ class ReportExecutionCoordinator:
                             engine.run(
                                 notebook_id, report_id, question, history, depth=depth,
                                 auto_generate=auto_generate,
-                                require_intent_review=True)
+                                require_intent_review=True,
+                                scope_reconfirm=scope_reconfirm)
                         else:
                             engine.run(
                                 notebook_id, report_id, question, history, depth=depth,

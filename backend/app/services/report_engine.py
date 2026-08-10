@@ -2464,7 +2464,8 @@ class ReportEngine:
                                   error=str(exc)[:500], progress="失败")
 
     def _auto_confirm_intent(self, notebook_id: str, rid: str,
-                             contract: dict | None) -> dict | None:
+                             contract: dict | None, *,
+                             scope_reconfirm=None) -> dict | None:
         """Confirm a *clear* intent for a direct-run report, or fail open.
 
         This is the automatic half of ``POST .../reports/{id}/intent``: same
@@ -2491,17 +2492,18 @@ class ReportEngine:
         usable report waiting at the manual gate, which is why this never
         raises and never marks the report failed.
 
-        The scope emptiness gate the endpoint re-runs is deliberately absent:
-        that re-check exists because an owner may sit at ``intent_ready`` for
-        days while sources are deleted.  Here the create endpoint validated the
-        very same frozen scope seconds ago, in the request that started this
-        worker, and the engine holds no notebook port to re-check with.  This
-        is a deliberate, registered divergence from the manual endpoint: an API
-        client that sets ``auto_generate`` by hand with a narrowed scope, where
-        sources get deleted in the brief window between create and this direct
-        -run confirmation, gets a low-evidence report that continues with the
-        now-stale ids instead of the 422 the manual confirm endpoint would
-        raise on the same race.
+        ``scope_reconfirm`` carries the manual endpoint's scope revalidation
+        into this path (codex R2 P2): the engine holds no notebook port, so the
+        api layer (which owns ``_validate_source_scope``/``_validate_base_scope``
+        /``_require_non_empty_scope``) hands the same three-step check down as a
+        ``(understanding) -> bool`` callable, closed over the repository.  A
+        scoped contract (either dimension persisted) is only auto-confirmed
+        when that check passes; a failed/absent/raising check leaves the report
+        at the manual gate with a ``scope_invalid`` skip event — where the
+        owner's next manual confirmation surfaces the endpoint's own 422/409
+        wording for the same drift (sources deleted / libraries unmounted while
+        intent understanding was running).  An unscoped contract skips the
+        check entirely, mirroring the endpoint's own conditional.
         """
         reports = self.dependencies.reports
         if contract is None:
@@ -2511,6 +2513,30 @@ class ReportEngine:
         if contract.get("needs_clarification"):
             # The owner must answer first; the report is meant to wait.
             return None
+        if (
+            contract.get("source_scope") is not None
+            or contract.get("base_scope") is not None
+        ):
+            # 与人工确认端点同一道范围重验(经 api 层注入的回调):意图理解跑着的
+            # 这段时间里来源可能被删、参考库可能被卸载。重验不过(或没有可用的
+            # 重验回调)一律留在人工门——保守方向,绝不带着失效范围继续规划。
+            try:
+                scope_usable = bool(
+                    scope_reconfirm is not None and scope_reconfirm(contract)
+                )
+            except Exception:  # noqa: BLE001 — fail open to the manual gate
+                scope_usable = False
+            if not scope_usable:
+                try:
+                    self.dependencies.event_log.emit({
+                        "kind": "report_intent_auto_confirm_skipped",
+                        "notebook_id": notebook_id,
+                        "report_id": rid,
+                        "reason": "scope_invalid",
+                    })
+                except Exception:
+                    pass
+                return None
         reason = "error"
         try:
             frozen = confirmed_understanding(
@@ -2556,7 +2582,7 @@ class ReportEngine:
     def run(self, notebook_id, rid, question, history="", depth: int = 2,
             auto_generate: bool = False, intent_contract=None,
             require_intent_review: bool = False, source_scope=None,
-            base_scope=None) -> None:
+            base_scope=None, scope_reconfirm=None) -> None:
         if require_intent_review and intent_contract is None:
             prepared_contract = self.prepare_intent(
                 notebook_id, rid, question, history,
@@ -2568,6 +2594,7 @@ class ReportEngine:
                 return
             intent_contract = self._auto_confirm_intent(
                 notebook_id, rid, prepared_contract,
+                scope_reconfirm=scope_reconfirm,
             )
             if intent_contract is None:
                 return

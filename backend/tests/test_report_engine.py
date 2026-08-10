@@ -2898,6 +2898,65 @@ def test_auto_generate_confirms_a_clear_intent_and_runs_straight_through(
     assert detail["content_md"].startswith("#")
 
 
+def test_auto_confirm_revalidates_a_scoped_report_before_claiming(
+    repo, monkeypatch,
+):
+    """带范围的直通报告在自动确认前必须过与人工端点同一道范围重验(codex R2 P2)：
+    重验回调判否 → 留在 intent_ready 并发 scope_invalid 事件;判可 → 照常直通。"""
+    scope = {"mode": "include", "source_ids": ["src-alive"], "narrowed": True}
+
+    # 重验不过:留在人工门。
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+    seen: list[dict] = []
+    events: list[dict] = []
+    monkeypatch.setattr(eng.dependencies.event_log, "emit", events.append)
+
+    def deny(understanding):
+        seen.append(understanding)
+        return False
+
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True, source_scope=scope,
+            scope_reconfirm=deny)
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "intent_ready"
+    assert len(seen) == 1 and seen[0].get("source_scope") == scope
+    skips = [e for e in events
+             if e.get("kind") == "report_intent_auto_confirm_skipped"]
+    assert skips and skips[-1]["reason"] == "scope_invalid"
+
+    # 重验通过:照常直通到 done。
+    nb2 = _mk_nb(repo)
+    llm2 = _AutoRunLLM()
+    eng2 = _mk_engine(repo, llm2)
+    _stub_auto_run_corpus(eng2, repo, monkeypatch)
+    rid2 = repo.create_report(nb2.id, "分析 PLL 稳定性")
+    eng2.run(nb2.id, rid2, "分析 PLL 稳定性", "", auto_generate=True,
+             require_intent_review=True, source_scope=scope,
+             scope_reconfirm=lambda understanding: True)
+    assert repo.get_report(nb2.id, rid2)["status"] == "done"
+
+
+def test_auto_confirm_scoped_without_reconfirm_callable_stays_at_the_gate(
+    repo, monkeypatch,
+):
+    """带范围但没有重验回调(旧接线/直接调用):保守留在人工门,不得带着一份
+    无法复核的冻结范围继续规划;无范围的合同则完全不需要重验、照常直通。"""
+    nb = _mk_nb(repo)
+    llm = _AutoRunLLM()
+    eng = _mk_engine(repo, llm)
+    _stub_auto_run_corpus(eng, repo, monkeypatch)
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+    eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
+            require_intent_review=True,
+            source_scope={"mode": "include", "source_ids": ["s1"], "narrowed": True})
+    assert repo.get_report(nb.id, rid)["status"] == "intent_ready"
+
+
 def test_auto_generate_waits_for_blocking_ambiguity_then_flows_after_confirm(
     repo, monkeypatch,
 ):
