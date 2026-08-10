@@ -198,6 +198,18 @@ class Settings(BaseSettings):
     # before and between model calls.
     report_generation_concurrency: int = Field(
         1, ge=1, validation_alias="REPORT_GENERATION_CONCURRENCY")
+    # 后台**重活** job(KG 分析/重建、补上关联、统一图重建、冲突检测、合并预审)
+    # 在一个后端进程内的并发上限。每一类各自已有单飞或去重闸,但它们**互相之间**
+    # 此前没有闸:同一时刻多个笔记本各排一个重活,数据库与模型扇出会成倍叠加。闸在
+    # worker 线程内获取,submit 仍立即返回,请求线程不等待。用户交互路径(ask-*)与
+    # 已有整篇准入闸的 report-* 不进此闸。
+    background_maintenance_concurrency: int = Field(
+        4, ge=1, validation_alias="BACKGROUND_MAINTENANCE_CONCURRENCY")
+    # 后台**轻活** job(论文元数据补抽、命令目录识别、knowhow 投影与孤儿资产清扫)
+    # 的独立并发上限。刻意与重活分池:轻活是秒级的单表/单来源工作,合用一个池时几个
+    # 小时级重建就能把「用户点一下就该出结果」的格子投影饿死到几十分钟后。
+    background_light_job_concurrency: int = Field(
+        4, ge=1, validation_alias="BACKGROUND_LIGHT_JOB_CONCURRENCY")
     report_section_max_tokens: int = Field(
         65536, ge=1, validation_alias="REPORT_SECTION_MAX_TOKENS")
     # Detailed tiers emit one report-wide, evidence-keyed JSON blueprint before
@@ -624,6 +636,19 @@ class Settings(BaseSettings):
     reasoning_max_outline_updates: int = Field(
         6, ge=1, validation_alias="REASONING_MAX_OUTLINE_UPDATES"
     )
+    # 单次 expand_graph 每个方向(出边/入边)展开的 1-hop 邻居上限。没有它,一个
+    # 病态枢纽节点(百万边)会让 `neighbor_ids` 无 LIMIT 全取、再整批 hydrate
+    # 其 knowledge_objects 行——请求内存与耗时随该节点度数线性膨胀。默认取在
+    # 只有病态枢纽才会触发的量级;触发时不静默,轨迹与 reflect 回喂都要披露。
+    #
+    # 已登记不修的残余:`edge_type` 与 `review_status` 都**不在**排序索引
+    # `(notebook_id, source/target_object_id, id)` 里,是 LIMIT 之前的残余过滤。
+    # 因此指定了一个**稀有** edge_type 时,数据库仍会沿该节点的邻接扫到底才凑不满
+    # 这一页——返回行数照样有界(内存/hydrate 不受影响),但扫描量退回该节点的度数。
+    # 修它要给每个 edge_type 建索引,收益只在「枢纽 + 稀有边类型」这一个交集上。
+    reasoning_neighbor_expand_limit: int = Field(
+        1000, gt=0, validation_alias="REASONING_NEIGHBOR_EXPAND_LIMIT"
+    )
     # 复合问题最终排序: 开启后按子查询配额 round-robin 选 top-N(避免整串全局排序让
     # 信息量大的一方通吃); 关闭则回退全局重排。单子查询时自动等价全局。
     reasoning_quota_enabled: bool = Field(True, validation_alias="REASONING_QUOTA_ENABLED")
@@ -734,6 +759,30 @@ class Settings(BaseSettings):
     kg_conflict_auto_apply_threshold: float = Field(0.95, validation_alias="KG_CONFLICT_AUTO_APPLY_THRESHOLD")
     # 语义候选阈值: 端点对象 embedding 余弦 ≥ 此值才作为 semantic 冲突候选(高=更稀疏)。
     kg_conflict_sim_threshold: float = Field(0.8, validation_alias="KG_CONFLICT_SIM_THRESHOLD")
+    # 语义策略的规模分派阈值: 同类型组内节点数 ≤ 此值走原逐对暴力余弦(逐位保持既有
+    # 行为); 超过则改 hnswlib cosine ANN 近邻(近似召回,登记接受的行为差异——阈值以下
+    # 一字不差,阈值以上的库在改造前根本跑不完 O(N²))。
+    # 512 不是 2000: C(512,2)≈13 万次 1024 维点积尚在秒级,而 C(2000,2)≈200 万次
+    # 是分钟级的纯 Python 二次方窗口——数百节点的典型库仍整段走精确分支。
+    kg_conflict_semantic_bruteforce_max: int = Field(
+        512, gt=0, validation_alias="KG_CONFLICT_SEMANTIC_BRUTEFORCE_MAX"
+    )
+    # ANN 分支每个节点取的近邻数(不含自身)。
+    kg_conflict_semantic_ann_k: int = Field(
+        10, gt=0, validation_alias="KG_CONFLICT_SEMANTIC_ANN_K"
+    )
+    # 进入 LLM 裁决的候选总上限;按信号类(边策略 / 节点策略)各分一半配额,某类
+    # 用不满的额度让给另一类,类内保留检测器产出序。纯前缀截断会让一个 hub 产生的
+    # shared_head 边候选吃光预算、判别类候选整类消失。分类截断数进返回值与事件日志。
+    kg_conflict_max_candidates: int = Field(
+        800, gt=0, validation_alias="KG_CONFLICT_MAX_CANDIDATES"
+    )
+    # 规模准入: 活跃知识对象数超过此值时拒绝触发冲突检测(409/建图末尾跳过),不把
+    # 超大库放进注定跑不完的后台任务。内存依据: 向量以一整块 (N, dim) float32 装载,
+    # 20 万 × 1024 维 ≈ 0.8 GB;判别索引每个对象只留 (组号, 余量哈希) 整数对。
+    kg_conflict_max_objects: int = Field(
+        200000, gt=0, validation_alias="KG_CONFLICT_MAX_OBJECTS"
+    )
     # chunk×graph mix: 叠加 KG 子图 block 和源 chunk 进候选池(默认开)。关闭后退化为纯 chunk 检索。
     chunk_kg_overlay_enabled: bool = Field(True, validation_alias="CHUNK_KG_OVERLAY_ENABLED")
     # Candidate widths for the optional chunk×KG overlay. They are retrieval

@@ -157,7 +157,6 @@ class KnowledgeGovernanceService:
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
         model_clients: Any,
-        relations_for_notebook: Callable[[str], List[dict]],
         edge_centrality_map: Callable[[str], Dict[str, float]],
         embed_knowledge: Callable[[str, str, dict], None],
         knowledge_objects: Callable[..., List[dict]],
@@ -178,7 +177,9 @@ class KnowledgeGovernanceService:
         self._invalidate_unified_cache = invalidate_unified_cache
         self._mark_unified_kg_dirty = mark_unified_kg_dirty
         self.model_clients = model_clients
-        self._relations_for_notebook = relations_for_notebook
+        # No ``relations_for_notebook`` seat: the one consumer (conflict
+        # detection) reads the thin ``conflict_relation_rows`` projection from
+        # the governance store instead of the full-row compatibility reader.
         self._edge_centrality_map = edge_centrality_map
         self._embed_knowledge = embed_knowledge
         self._knowledge_objects = knowledge_objects
@@ -616,13 +617,24 @@ class KnowledgeGovernanceService:
                 "detected": 0,
                 "auto_applied": 0,
                 "queued": 0,
+                "truncated": 0,
+                "truncated_edge": 0,
+                "truncated_node": 0,
                 "skipped_llm": True,
             }
 
         # 2. Load objects + relations
+        # Both reads are detection-shaped: no evidence bodies (they are fetched
+        # by id for the surviving candidates only, in step 5) and no relation
+        # ``source_id``.  Detection never looks at either, and hauling every
+        # object's and every edge's quoted spans through this scan is what made
+        # the pass unrunnable on a large notebook.
         with self._connect() as db:
             obj_rows, vec_rows, nb_row = (
                 self.governance_store.conflict_resolution_rows(db, notebook_id)
+            )
+            relations = self.governance_store.conflict_relation_rows(
+                db, notebook_id
             )
 
         # Build objects list in detect_conflict_candidates format
@@ -634,13 +646,10 @@ class KnowledgeGovernanceService:
                 "id": row["id"],
                 "object_type": row["object_type"],
                 "payload": payload,
-                "evidence": json.loads(row["evidence"] or "[]"),
                 "status": row["status"],
             }
             objects.append(obj)
             object_map[row["id"]] = obj
-
-        relations = self._relations_for_notebook(notebook_id)
 
         # Build name lookup for edge-text rendering: object_id → name
         obj_name_map: dict = {
@@ -648,18 +657,26 @@ class KnowledgeGovernanceService:
             for obj in objects
         }
 
-        # 3. Build embeddings dict; log + skip on any error
+        # 3. Build the embedding matrix; log + skip on any error
         # 运行时截断旁路(计划 §1.2,conflict 同步接线):此处原先连存储维过滤都
         # 没有 —— conflict_detect._cosine_sim 虽已改混维零容忍,这里仍须①先按
         # 存储原生维过滤(异维残留出局)②通过后截断到运行时空间,保证语义策略
         # 收到的向量同维可比(而非靠下游把混维对静默判 0 丢召回)。
-        embeddings: dict | None = None
+        # 表示是一整块 (N, dim) float32 —— 每条向量 `.tolist()` 成 Python float
+        # 列表的旧写法在 1024 维下每条约 8 KB(列表对象+指针数组+装箱 float),
+        # 15 万对象就是 5 GB;同一批数据作矩阵是 N×dim×4 字节(约 0.6 GB),
+        # 且预分配一次、逐行写入,不留下同量级的中间列表。
+        embeddings = None
         if vec_rows:
             try:
+                import numpy as np
+
+                from app.services.kg.conflict_detect import EmbeddingMatrix
                 from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
                 _dim = self.settings.embed_dim
                 _rd = resolve_runtime_dim(self.settings)
-                embeddings = {}
+                matrix = None
+                row_by_id: dict = {}
                 for r in vec_rows:
                     if not r["vector"]:
                         continue
@@ -668,7 +685,19 @@ class KnowledgeGovernanceService:
                         continue
                     if _rd:
                         arr = truncate_vec(arr, _rd)
-                    embeddings[r["object_id"]] = arr.tolist()
+                    if matrix is None:
+                        matrix = np.empty(
+                            (len(vec_rows), int(arr.size)), dtype=np.float32
+                        )
+                    elif int(arr.size) != matrix.shape[1]:
+                        continue
+                    row = len(row_by_id)
+                    matrix[row] = arr
+                    row_by_id[r["object_id"]] = row
+                if matrix is not None and row_by_id:
+                    embeddings = EmbeddingMatrix(
+                        matrix[:len(row_by_id)], row_by_id
+                    )
             except Exception:  # noqa: BLE001
                 self.event_log.logger.debug(
                     "resolve_notebook_conflicts: failed to load embeddings for %s; "
@@ -681,11 +710,23 @@ class KnowledgeGovernanceService:
         from app.services.kg.conflict_detect import detect_conflict_candidates
         notebook_tier = (nb_row["tier"] if nb_row else "personal")
 
+        def _note_ann_failure(group_size: int) -> None:
+            self.event_log.emit({
+                "kind": "kg_conflict_semantic_ann_failed",
+                "notebook_id": notebook_id,
+                "group_size": int(group_size),
+            })
+
         candidates = detect_conflict_candidates(
             objects,
             relations,
             embeddings=embeddings,
             sim_threshold=self.settings.kg_conflict_sim_threshold,
+            semantic_bruteforce_max=(
+                self.settings.kg_conflict_semantic_bruteforce_max
+            ),
+            semantic_ann_k=self.settings.kg_conflict_semantic_ann_k,
+            on_semantic_ann_failure=_note_ann_failure,
         )
 
         if not candidates:
@@ -693,12 +734,39 @@ class KnowledgeGovernanceService:
                 "detected": 0,
                 "auto_applied": 0,
                 "queued": 0,
+                "truncated": 0,
+                "truncated_edge": 0,
+                "truncated_node": 0,
                 "skipped_llm": False,
             }
+
+        # 4b. Cap what reaches adjudication.  Every candidate costs one LLM call,
+        # so an unbounded detector output is an unbounded model bill on a large
+        # notebook.  Truncation follows the detector's own emission order and is
+        # disclosed (return value + a counts-only event) rather than silent.
+        detected_total = len(candidates)
+        candidates, truncated_by_kind = self._apply_candidate_quota(
+            candidates, self.settings.kg_conflict_max_candidates
+        )
+        truncated = sum(truncated_by_kind.values())
+        if truncated:
+            self.event_log.emit({
+                "kind": "kg_conflict_candidates_truncated",
+                "notebook_id": notebook_id,
+                "detected": detected_total,
+                "kept": len(candidates),
+                "truncated": truncated,
+                "truncated_edge": truncated_by_kind["edge"],
+                "truncated_node": truncated_by_kind["node"],
+            })
 
         # 5. Materialise T3 input items
         # Build relation lookup: rel_id → relation dict
         rel_map: dict = {r["id"]: r for r in relations}
+
+        # Evidence is read here, by id, for the surviving candidates only — the
+        # notebook-wide scans in step 2 deliberately left it behind.
+        self._hydrate_conflict_evidence(candidates, object_map, rel_map)
 
         items = []
         for cand in candidates:
@@ -847,11 +915,106 @@ class KnowledgeGovernanceService:
                 queued += 1
 
         return {
+            # ``detected`` stays "what was adjudicated" (auto_applied + queued);
+            # ``truncated`` carries what the cap dropped before adjudication.
             "detected": len(candidates),
             "auto_applied": auto_applied,
             "queued": queued,
+            "truncated": truncated,
+            "truncated_edge": truncated_by_kind["edge"],
+            "truncated_node": truncated_by_kind["node"],
             "skipped_llm": False,
         }
+
+    @staticmethod
+    def _apply_candidate_quota(
+        candidates: List[dict], cap: int
+    ) -> "tuple[List[dict], dict]":
+        """Cut candidates to ``cap`` with a per-signal-class quota.
+
+        A flat prefix cut is not neutral: the detector emits every edge-shaped
+        candidate (strategies 1/2) before the first node-shaped one, and one
+        notebook with a heavily linked hub can produce thousands of
+        ``shared_head`` pairs.  Prefix truncation then spends the entire budget
+        on that one strategy and the nmos/pmos-style discriminative candidates —
+        the ones this feature exists for — vanish as a class.
+
+        So each class gets half the budget; whatever a class does not use is
+        handed to the other. Within a class the detector's emission order is
+        preserved, and the merged output keeps the detector's global order so
+        downstream ``zip(candidates, verdicts)`` still lines up.
+        """
+        by_kind = {"edge": 0, "node": 0}
+        for candidate in candidates:
+            by_kind["edge" if candidate["kind"] == "edge" else "node"] += 1
+
+        half = cap // 2
+        quota = {
+            "edge": min(by_kind["edge"], half),
+            "node": min(by_kind["node"], cap - min(by_kind["edge"], half)),
+        }
+        # Hand any slack the node class left over back to the edge class.
+        quota["edge"] = min(by_kind["edge"], cap - quota["node"])
+
+        taken = {"edge": 0, "node": 0}
+        kept: List[dict] = []
+        for candidate in candidates:
+            kind = "edge" if candidate["kind"] == "edge" else "node"
+            if taken[kind] < quota[kind]:
+                taken[kind] += 1
+                kept.append(candidate)
+        return kept, {
+            "edge": by_kind["edge"] - taken["edge"],
+            "node": by_kind["node"] - taken["node"],
+        }
+
+    _CONFLICT_EVIDENCE_ID_BATCH = 500
+
+    def _hydrate_conflict_evidence(
+        self, candidates: List[dict], object_map: dict, rel_map: dict
+    ) -> None:
+        """Attach evidence to exactly the objects/relations the candidates cite.
+
+        Bounded by construction: at most ``2 × kg_conflict_max_candidates`` ids,
+        read in batches so the ``IN`` list never grows into a giant parameter
+        list (same 500-id convention the bulk KG deletes use).
+        """
+        object_ids: set = set()
+        relation_ids: set = set()
+        for candidate in candidates:
+            refs = (candidate["left_ref"], candidate["right_ref"])
+            if candidate["kind"] == "edge":
+                relation_ids.update(refs)
+            else:
+                object_ids.update(refs)
+        object_ids &= set(object_map)
+        relation_ids &= set(rel_map)
+        if not object_ids and not relation_ids:
+            return
+
+        batch = self._CONFLICT_EVIDENCE_ID_BATCH
+
+        def _batches(ids: set) -> list:
+            ordered = sorted(ids)
+            return [
+                ordered[start:start + batch]
+                for start in range(0, len(ordered), batch)
+            ]
+
+        with self._connect() as db:
+            for chunk in _batches(object_ids):
+                for row in self.knowledge.object_evidence_rows(db, chunk):
+                    target = object_map.get(row["id"])
+                    if target is not None:
+                        target["evidence"] = json.loads(row["evidence"] or "[]")
+            for chunk in _batches(relation_ids):
+                rows = self.governance_store.conflict_relation_evidence_rows(
+                    db, chunk
+                )
+                for row in rows:
+                    target = rel_map.get(row["id"])
+                    if target is not None:
+                        target["evidence"] = json.loads(row["evidence"] or "[]")
 
     # ------------------------------------------------------------------
     # Merge review (LLM adjudication) + background drain job

@@ -476,28 +476,36 @@ def test_checkbox_ceiling_intersects_producer_allow_list_and_leaves_base_alone()
 
 
 def _call_line(func, callee: str) -> int:
-    """按 AST 定位一次真实调用的行号。
+    """按 AST 源序遍历定位一次真实调用的先后位置（返回遍历下标）。
 
     刻意不做 `source.index(name)` 那种文本查找:那样连 docstring 和注释里的
     同名字样都算数,于是「把真实调用挪到后面、同时在函数开头的注释里提到它」
     就能骗过顺序断言。这两个函数的 docstring 正好就在上方,不是臆想的场景。
+    位置用 NodeVisitor 的源序遍历下标而非行号表达——测试架构策略禁止把行号
+    当作身份/顺序断言的载体（line-number-identity），遍历序对语句体同样保序。
     """
     import ast
     import inspect
     import textwrap
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
-    lines = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and (
-            getattr(node.func, "attr", None) == callee
-            or getattr(node.func, "id", None) == callee
-        )
-    ]
-    assert lines, f"未找到对 {callee} 的调用"
-    return min(lines)
+    matches: list[int] = []
+    counter = [0]
+
+    class _Calls(ast.NodeVisitor):
+        def visit_Call(self, node: "ast.Call") -> None:
+            index = counter[0]
+            counter[0] += 1
+            if (
+                getattr(node.func, "attr", None) == callee
+                or getattr(node.func, "id", None) == callee
+            ):
+                matches.append(index)
+            self.generic_visit(node)
+
+    _Calls().visit(tree)
+    assert matches, f"未找到对 {callee} 的调用"
+    return min(matches)
 
 
 def test_reasoning_submission_is_validated_before_a_durable_job_exists():
@@ -573,6 +581,7 @@ class _ScopedRunSettings:
     reasoning_max_subqueries = 3
     reasoning_stale_limit = 10
     reasoning_max_element_searches = 2
+    reasoning_neighbor_expand_limit = 1000
     reasoning_quota_enabled = False
     graph_ppr_enabled = False
     reasoning_ppr_prefetch = False

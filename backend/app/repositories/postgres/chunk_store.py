@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Sequence
 
+from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.ports import ChunkWrite
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -16,6 +17,13 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.search import chunk_section_rows
 from app.services.vector_index import encode_vector
+
+
+# Bounded fan-out for the element -> chunk point lookup. Deliberately a local
+# constant with the same value as the SQLite adapter's: adapters never import
+# one another, and a fixed batch keeps the statement shape stable no matter how
+# many evidence elements one query hit.
+CHUNK_ELEMENT_LOOKUP_BATCH = 500
 
 
 def _compat_element_ids(row: dict) -> dict:
@@ -202,6 +210,11 @@ class ChunkStore:
             self._insert_fts_rows(
                 connection, [(row[0], row[1], row[3]) for row in rows]
             )
+            # element -> chunk reverse rows, same transaction as the chunk rows
+            # they describe. The old rows are already gone: chunk_elements has
+            # ``REFERENCES chunks(id) ON DELETE CASCADE``, so the DELETE above
+            # took them with it.
+            self._insert_chunk_element_rows(connection, notebook_id, chunks)
             if mark_chunked_at is not None:
                 connection.execute(
                     "UPDATE sources SET chunked_at=%s WHERE id=%s",
@@ -211,6 +224,59 @@ class ChunkStore:
     def _insert_fts_rows(self, connection, rows: list) -> None:
         # PostgreSQL's GIN/trigram indexes update with chunks themselves.
         del connection, rows
+
+    @staticmethod
+    def chunk_element_rows(
+        notebook_id: str, chunks: Sequence[ChunkWrite]
+    ) -> list[tuple[str, str, str]]:
+        """``(notebook_id, element_id, chunk_id)`` reverse rows for these writes.
+
+        Shaping (including de-duplication within the batch) is the shared,
+        backend-neutral helper the offline backfill also uses, so a chunk
+        written online and the same chunk projected offline produce byte-for-byte
+        identical rows."""
+        return reverse_rows_for_writes(
+            notebook_id, [(chunk.id, list(chunk.element_ids)) for chunk in chunks]
+        )
+
+    def _insert_chunk_element_rows(
+        self, connection, notebook_id: str, chunks: Sequence[ChunkWrite]
+    ) -> None:
+        rows = self.chunk_element_rows(notebook_id, chunks)
+        if rows:
+            execute_many(
+                connection,
+                "INSERT INTO chunk_elements (notebook_id,element_id,chunk_id) "
+                "VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                rows,
+            )
+
+    @staticmethod
+    def chunks_for_element_ids(
+        connection, notebook_id: str, element_ids: Sequence[str]
+    ):
+        """``(element_id, chunk_id)`` rows for these elements, in chunk order.
+
+        The fast half of the element -> chunk reverse lookup: an indexed seek
+        on the ``(notebook_id, element_id, chunk_id)`` primary key instead of a
+        whole-notebook chunk scan with per-row JSON decoding.
+
+        ``ORDER BY c.ordinal`` is the PostgreSQL counterpart of SQLite's
+        ``rowid`` insertion order (see POSTGRES_ROWID_ORDINAL_TABLES)."""
+        ids = list(dict.fromkeys(e for e in element_ids if e))
+        rows: list = []
+        for offset in range(0, len(ids), CHUNK_ELEMENT_LOOKUP_BATCH):
+            batch = ids[offset : offset + CHUNK_ELEMENT_LOOKUP_BATCH]
+            rows.extend(
+                connection.execute(
+                    "SELECT ce.element_id AS element_id, ce.chunk_id AS chunk_id "
+                    "FROM chunk_elements ce JOIN chunks c ON c.id = ce.chunk_id "
+                    "WHERE ce.notebook_id=%s AND ce.element_id=ANY(%s) "
+                    "ORDER BY c.ordinal",
+                    (notebook_id, batch),
+                ).fetchall()
+            )
+        return rows
 
     def rows_by_id_prefix(self, connection, source_id: str, id_prefix: str) -> list:
         return connection.execute(
@@ -258,6 +324,10 @@ class ChunkStore:
         self._insert_fts_rows(
             connection, [(row[0], row[1], row[3]) for row in values]
         )
+        # The projector's precise ``delete_by_ids`` already dropped the prior
+        # rows for these chunks via the chunks cascade; add the new ones in the
+        # same transaction so the reverse index never lags its chunk rows.
+        self._insert_chunk_element_rows(connection, notebook_id, rows)
 
     def source_chunks(self, source_id: str) -> list[dict]:
         with self.database.connect() as connection:

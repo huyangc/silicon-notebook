@@ -13,6 +13,45 @@ from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
 
 
+#: Rows per batched hnswlib ``knn_query`` in the cross-layer synonym bridge.
+#: An EXECUTION batch size, not a result cap — every active vector is still
+#: queried and every surviving neighbour still becomes an edge; only the number
+#: of C-extension round trips changes (one per block instead of one per vector),
+#: which is 3-4 orders of magnitude fewer at scale.
+#: The block size bounds only the per-call query SLICE and the returned
+#: label/distance arrays; the full active matrix is still materialized up front
+#: by ``_vector_matrix`` (pre-existing behavior, unchanged here).
+#: Registered trade-off: batched queries run on hnswlib's DEFAULT thread pool.
+#: We deliberately do NOT ``set_num_threads(1)`` — the index handle is shared
+#: (memoized on the ScaleIndex) and that setting would spill onto every other
+#: consumer of the same handle. This path runs once per cache-version miss
+#: (cold combined-graph load), not per query, so the pool is acceptable here.
+_XBRIDGE_QUERY_BLOCK = 4096
+
+
+def _xbridge_similarities(dists) -> "np.ndarray":
+    """一块 knn_query 距离矩阵 -> 相似度矩阵，逐位复刻历史逐行版的
+    ``max(0.0, 1.0 - float(dist))``。
+
+    两处细节都是等价性要求，不是风格：
+
+    1. **先转 float64 再做减法**。逐行版的 ``float(_dist)`` 把 float32 距离精确
+       提升到双精度，随后 ``1.0 - d`` 在双精度里算。若直接让 numpy 从 float32
+       数组减 python 标量 1.0，NEP50 下结果仍是 float32——单精度舍入可能翻转
+       边界上的 ``>= threshold`` 判定（实测 d=1e-7 时双精度得 0.9999999，单精度
+       得 0.99999988；d=0.17 时 0.83 vs 0.82999998）。
+    2. **NaN 归零**。python 的 ``max(0.0, nan)`` 返回 0.0（``nan > 0.0`` 为假，
+       取首参），而 ``np.maximum(nan, 0.0)`` 返回 nan。阈值 <= 0 的部署下这个
+       差异会让 NaN 距离凭空产出一条 NaN 权重的桥边，故显式补回旧语义。
+    """
+    import numpy as np
+
+    sims = 1.0 - np.asarray(dists, dtype=np.float64)
+    sims = np.where(np.isnan(sims), 0.0, sims)
+    np.maximum(sims, 0.0, out=sims)
+    return sims
+
+
 def _binary_text_key(value: str) -> bytes:
     """Locale-free identifier order shared with persisted graph artifacts."""
     return value.encode("utf-8", "surrogatepass")
@@ -553,12 +592,23 @@ class GraphRetrievalService(_RetrievalState):
             if _ann is None:
                 continue
             _ann.set_ef(max(_syn_k + 1, 50))
-            for _ai, _a_id in enumerate(_a_ids):
-                _avec = _a_mat_arr[_ai]
+            _k = min(_syn_k, len(_bidx.ann_labels))
+            for _start in range(0, len(_a_ids), _XBRIDGE_QUERY_BLOCK):
+                _end = min(_start + _XBRIDGE_QUERY_BLOCK, len(_a_ids))
                 try:
-                    _k = min(_syn_k, len(_bidx.ann_labels))
-                    _labs, _dists = _ann.knn_query(_avec, k=_k)
+                    _labs, _dists = _ann.knn_query(
+                        _a_mat_arr[_start:_end], k=_k)
                 except Exception as _exc:  # noqa: BLE001 — fail-open
+                    # Observability difference vs the historical per-row loop
+                    # (registered, deliberate): one bad query now drops the
+                    # bridges of a whole block (<= _XBRIDGE_QUERY_BLOCK rows)
+                    # instead of a single row, and reports one model error
+                    # instead of one per row.  Under THIS repository's usage of
+                    # hnswlib — no mark_deleted anywhere, and k clamped by
+                    # len(ann_labels) above — a knn_query error can only hold
+                    # for the whole index (dim mismatch / corrupt handle), never
+                    # for one vector, so a failing block would have failed
+                    # row-by-row too.
                     self._note_model_error(
                         "scale_ppr_xbridge_query",
                         "",
@@ -566,14 +616,26 @@ class GraphRetrievalService(_RetrievalState):
                         service="embedding",
                     )
                     continue
-                for _lab, _dist in zip(_labs[0], _dists[0]):
-                    _base_nid = _bidx.ann_labels[int(_lab)]
+                # Similarity arithmetic lives in _xbridge_similarities so the
+                # float64-before-subtraction and NaN-to-zero rules that make it
+                # bit-for-bit equal to the old `max(0.0, 1.0 - float(dist))`
+                # are testable without a real ANN index (see its docstring).
+                _labs = np.asarray(_labs)
+                _sims = _xbridge_similarities(_dists)
+                # np.nonzero yields row-major order, so walking the survivors
+                # reproduces the per-row loop's emission order exactly
+                # (row order × neighbour order).  Filtering on the threshold
+                # before the exact-id check is order-preserving: both are pure
+                # `continue` filters in the old loop.
+                _rows, _cols = np.nonzero(_sims >= _syn_thr)
+                for _r, _c in zip(_rows.tolist(), _cols.tolist()):
+                    _a_id = _a_ids[_start + _r]
+                    _base_nid = _bidx.ann_labels[int(_labs[_r, _c])]
                     if _base_nid == _a_id:
                         continue  # exact-id: already unified by splice_active
-                    _sim = max(0.0, 1.0 - float(_dist))
-                    if _sim >= _syn_thr:
-                        _bridge_edges.append((_a_id, _base_nid, _sim))
-                        _bridge_edges.append((_base_nid, _a_id, _sim))
+                    _sim = float(_sims[_r, _c])
+                    _bridge_edges.append((_a_id, _base_nid, _sim))
+                    _bridge_edges.append((_base_nid, _a_id, _sim))
         if _bridge_edges:
             active_edges = list(active_edges) + _bridge_edges
         return active_edges
@@ -662,10 +724,16 @@ class GraphRetrievalService(_RetrievalState):
                 if 0 <= int(i) < len(first.node_ids)
             }
             for bid, idx in base_indexes[1:]:
-                # reconstruct this base's edges from its CSR and splice as "active"-style
-                extra_ids, extra_A = si.splice_active(
-                    combined_ids, combined_A, list(idx.node_ids),
-                    si.csr_to_edges(idx.node_ids, idx.transition))
+                # Splice this base's CSR straight in (coordinate remap in numpy).
+                # Historically this went through csr_to_edges + splice_active,
+                # i.e. it materialized one Python tuple per nnz (millions at
+                # scale) only for splice_active to hash both endpoints back into
+                # indexes.  splice_csr is bit-for-bit equivalent to that pair —
+                # see its docstring for the three-step argument, and
+                # test_scale_combined_splice_equivalence.py for the oracle test
+                # that pins it against a copy of the old loop.
+                extra_ids, extra_A = si.splice_csr(
+                    combined_ids, combined_A, list(idx.node_ids), idx.transition)
                 combined_ids, combined_A = extra_ids, extra_A
                 for i, nid in enumerate(idx.node_ids):
                     combined_idf_map.setdefault(nid, float(idx.idf[i]))
@@ -1286,6 +1354,31 @@ class GraphRetrievalService(_RetrievalState):
             return out
 
         return self._vector_cache.get(f"{notebook_id}:elemchunk", version, _load)
+
+    def _elem_chunks_scoped(
+        self, db, notebook_id: str, elem_ids: list
+    ) -> Dict[str, list]:
+        """{element_id: [chunk_id, ...]} for THESE elements only.
+
+        Two paths, and the fork is the persisted ``chunk_elements_indexed``
+        marker (one indexed single-row read):
+
+        - backfilled notebook: an indexed point lookup on the ``chunk_elements``
+          reverse index, bounded by the handful of evidence elements this query
+          actually hit;
+        - not yet backfilled: the legacy version-cached whole-notebook
+          ``_elem_chunk_map``, byte-for-byte unchanged.
+
+        Both return per-element chunk lists in chunk insertion order, so the
+        caller's first-seen ordering is unaffected by which path ran.
+        """
+        if not self.knowledge.chunk_elements_indexed(db, notebook_id):
+            return self._elem_chunk_map(notebook_id)
+        scoped: Dict[str, list] = {}
+        for row in self.chunks.chunks_for_element_ids(db, notebook_id, elem_ids):
+            scoped.setdefault(row["element_id"], []).append(row["chunk_id"])
+        return scoped
+
     def _kg_source_chunks(
         self, notebook_id: str, object_ids: list, *, support_by_object=None
     ) -> list:
@@ -1297,10 +1390,15 @@ class GraphRetrievalService(_RetrievalState):
         不再对 chunks 表做全量扫描 + 逐行 json.loads + 集合交。
 
         输出序 = 确定性 first-seen 序:按 object_ids 顺序 → 各对象 evidence 内
-        element 顺序 → _elem_chunk_map 内 chunk 列表序(即 chunks 扫描序)。
+        element 顺序 → 该 element 的 chunk 列表序。
         消费方 ask_graph 的 BFS 兜底路径无 rerank,顺序直接决定
         truncate_by_tokens 的截断存活集和引用编号,所以序必须确定(旧实现的
-        「chunks 全表扫描序」依赖表物理序,本就不是契约)。"""
+        「chunks 全表扫描序」依赖表物理序,本就不是契约)。
+
+        批 5:element→chunk 反查改由 ``_elem_chunks_scoped`` 按标记分叉——已回填
+        的 notebook 走 ``chunk_elements`` 有界点查(SQLite ``ORDER BY rowid`` /
+        PostgreSQL ``ORDER BY ordinal``,即插入序),未回填的仍走原全量缓存,
+        逐字不变。"""
         from app.services.retrieval import (
             RetrievedChunk, RetrievalSupport, merge_retrieval_supports,
         )
@@ -1321,7 +1419,7 @@ class GraphRetrievalService(_RetrievalState):
                         elem_ids.append(el)
             if not elem_ids:
                 return []
-            elem_map = self._elem_chunk_map(notebook_id)
+            elem_map = self._elem_chunks_scoped(db, notebook_id, elem_ids)
             chunk_ids: list = []
             seen_cid = set()
             chunk_support_objects: Dict[str, list[str]] = {}

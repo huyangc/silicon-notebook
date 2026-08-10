@@ -1443,6 +1443,112 @@ def run_backfill_source_index(
     return {"notebooks": results, "objects": total_objects, "rows": total_rows}
 
 
+_CHUNK_ELEMENT_BACKFILL_BATCH_SIZE = 2000
+
+
+def _backfill_chunk_elements_for_notebook(
+    repo: BatchIngestRepository, notebook_id: str, *, force: bool = False
+) -> dict[str, object]:
+    """Project chunks.element_ids into chunk_elements for ONE notebook.
+
+    Explicit offline operation only — never reachable from an interactive
+    request (it rewrites the notebook's whole reverse index). Every page
+    commits its reverse rows and cursor in one transaction, so a process
+    restart resumes the last committed cursor; a KG generation change fails
+    closed and the next invocation starts a fresh rebuild."""
+    mnt = repo.maintenance
+    progress = mnt.begin_chunk_element_backfill(notebook_id, force=force)
+    total = int(progress["total_chunks"])
+    resumed = bool(progress.get("resumed"))
+    if progress["status"] == "complete":
+        label = "已完成，跳过" if progress.get("already_complete") else "完成"
+        print(
+            f"  [chunk-elements] {notebook_id}: "
+            f"{progress['chunks_scanned']}/{total} ({label})",
+            flush=True,
+        )
+        return {
+            "notebook_id": notebook_id,
+            "chunks": int(progress["chunks_scanned"]),
+            "rows": int(progress["rows_written"]),
+            "resumed": resumed,
+            "already_complete": bool(progress.get("already_complete")),
+        }
+
+    if resumed:
+        print(
+            f"  [chunk-elements] {notebook_id}: 从 {progress['chunks_scanned']}/{total} 续跑",
+            flush=True,
+        )
+    try:
+        while progress["status"] != "complete":
+            progress = mnt.resume_chunk_element_backfill_batch(
+                notebook_id, batch_size=_CHUNK_ELEMENT_BACKFILL_BATCH_SIZE
+            )
+            if progress["status"] == "failed":
+                raise RuntimeError(
+                    str(
+                        progress.get("failure_code")
+                        or "chunk_element_backfill_failed"
+                    )
+                )
+            print(
+                f"  [chunk-elements] {notebook_id}: {progress['chunks_scanned']}/{total}",
+                flush=True,
+            )
+    except Exception as exc:
+        code = str(exc)
+        if code not in {"kg_generation_changed", "chunk_element_backfill_failed"}:
+            code = "chunk_element_backfill_failed"
+        mnt.mark_chunk_element_backfill_failed(notebook_id, code)
+        raise
+    return {
+        "notebook_id": notebook_id,
+        "chunks": int(progress["chunks_scanned"]),
+        "rows": int(progress["rows_written"]),
+        "resumed": resumed,
+        "already_complete": False,
+    }
+
+
+def run_backfill_chunk_elements(
+    repo: BatchIngestRepository,
+    notebook_id: Optional[str],
+    all_notebooks: bool = False,
+    *,
+    force: bool = False,
+) -> dict[str, object]:
+    """Offline element -> chunk reverse-index build (批 5).
+
+    Until a notebook is backfilled, the per-query element -> chunk lookup keeps
+    scanning every chunk row of that notebook once per index generation.
+    Completed notebooks are skipped; interrupted ones resume their last
+    committed cursor."""
+    if not notebook_id and not all_notebooks:
+        raise ValueError("run_backfill_chunk_elements: 需要 notebook_id 或 all_notebooks=True")
+    if all_notebooks:
+        targets = repo.maintenance.all_notebook_ids()
+    else:
+        repo.get_notebook(notebook_id)  # KeyError if missing
+        targets = [notebook_id]
+    scope = (
+        f"全部 notebook ({len(targets)})" if all_notebooks else notebook_id
+    )
+    print(f"backfill-chunk-elements: scope={scope}", flush=True)
+    results = [
+        _backfill_chunk_elements_for_notebook(repo, nb_id, force=force)
+        for nb_id in targets
+    ]
+    total_chunks = sum(r["chunks"] for r in results)
+    total_rows = sum(r["rows"] for r in results)
+    print(
+        f"backfill-chunk-elements done: notebooks={len(results)} "
+        f"chunks={total_chunks} rows={total_rows}",
+        flush=True,
+    )
+    return {"notebooks": results, "chunks": total_chunks, "rows": total_rows}
+
+
 def _backfill_source_facts_for_notebook(
     repo: BatchIngestRepository, notebook_id: str, *, force: bool = False
 ) -> dict[str, object]:
@@ -1671,11 +1777,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
                                       "backfill-source-index", "backfill-source-facts",
+                                      "backfill-chunk-elements",
                                       "metadata", "question-index", "reparse"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--all-notebooks", action="store_true",
-                   help="vectors-to-blob / backfill-source-index / backfill-source-facts 专用:作用于全库全部 notebook,忽略 --notebook-id")
+                   help="vectors-to-blob / backfill-source-index / backfill-source-facts / "
+                        "backfill-chunk-elements 专用:作用于全库全部 notebook,忽略 --notebook-id")
     p.add_argument("--notebook-name", default=None,
                    help="新建 notebook 名(ingest/all 新建库时必填;不再默认用目录名)")
     p.add_argument("--owner", default=None,
@@ -1718,6 +1826,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="metadata phase: 已有元数据行的源也重抽；"
                         "question-index phase: 已有问题索引的 chunk 也重新生成；"
                         "backfill-source-index phase: 强制重建来源反查索引；"
+                        "backfill-chunk-elements phase: 强制重建元素反查索引；"
                         "backfill-source-facts phase: 删除该代次的旧回填投影并从头重建")
     p.add_argument("--pool-report-interval", type=int, default=15,
                    help="每 N 秒自报 producer/source 业务线程池占用;0 关闭。"
@@ -1764,6 +1873,23 @@ def _dispatch_main(
         )
         print(
             f"backfill-source-index done: {r} "
+            f"({time.perf_counter() - _t:.1f}s)",
+            flush=True,
+        )
+        return 0
+
+    if args.phase == "backfill-chunk-elements":
+        # 纯 SQL 派生索引重建(chunks.element_ids → chunk_elements),不需要
+        # EMBED 就绪,也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
+        _t = time.perf_counter()
+        r = run_backfill_chunk_elements(
+            repo,
+            args.notebook_id,
+            all_notebooks=args.all_notebooks,
+            force=args.force,
+        )
+        print(
+            f"backfill-chunk-elements done: {r} "
             f"({time.perf_counter() - _t:.1f}s)",
             flush=True,
         )
@@ -2073,8 +2199,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: vectors-to-blob 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
         return 2
 
-    if args.phase == "backfill-source-index" and not args.notebook_id and not args.all_notebooks:
-        print("error: backfill-source-index 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
+    if (
+        args.phase in {"backfill-source-index", "backfill-chunk-elements"}
+        and not args.notebook_id
+        and not args.all_notebooks
+    ):
+        print(f"error: {args.phase} 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
         return 2
 
     if args.phase == "backfill-source-facts" and not args.notebook_id and not args.all_notebooks:

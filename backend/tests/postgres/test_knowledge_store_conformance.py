@@ -1168,14 +1168,78 @@ def test_postgres_retrieve_neighbors_consumes_repository_rows(postgres_database)
     service = CandidateRetrievalService.__new__(CandidateRetrievalService)
     service._connect = postgres_database.connect
     service.knowledge = store
-    hits = service._retrieve_neighbors(
+    service.settings = SimpleNamespace(reasoning_neighbor_expand_limit=1000)
+    expansion = service._retrieve_neighbors(
         "nb-personal", "ko-neighbor-source", edge_type="derived_from"
     )
+    hits = expansion.hits
 
+    assert expansion.truncated is False
     assert [hit.object_id for hit in hits] == ["ko-neighbor-target"]
     assert hits[0].payload == {"name": "target node"}
     assert hits[0].evidence[0].source_id == "source-golden"
     assert hits[0].last_reviewed == ""
+
+
+def test_neighbor_ids_limit_bounds_rows_on_postgres(knowledge_harness):
+    """`limit` 在 PostgreSQL 侧同义:按 r.id 定序取前 N 行,不传则全量。
+
+    两个后端的 `neighbor_ids` 必须给出同一组有界语义,否则同一个枢纽节点的
+    展开会随适配器分叉。"""
+    objects = [
+        (
+            object_id,
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": object_id}),
+            json.dumps(_evidence()),
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for object_id in (
+            "ko-bounded-hub",
+            "ko-bounded-n1",
+            "ko-bounded-n2",
+            "ko-bounded-n3",
+        )
+    ]
+    relations = [
+        (
+            f"rel-bounded-{index}",
+            "nb-personal",
+            "source-golden",
+            "ko-bounded-hub",
+            target,
+            "derived_from",
+            json.dumps(_evidence()),
+            NOW,
+        )
+        for index, target in enumerate(
+            ("ko-bounded-n1", "ko-bounded-n2", "ko-bounded-n3")
+        )
+    ]
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, objects)
+        knowledge_harness.knowledge.insert_relation_chunk(connection, relations)
+
+    with knowledge_harness.database.connect() as connection:
+        unbounded = knowledge_harness.knowledge.neighbor_ids(
+            connection, "nb-personal", "ko-bounded-hub",
+            endpoint="source_object_id",
+        )
+        bounded = knowledge_harness.knowledge.neighbor_ids(
+            connection, "nb-personal", "ko-bounded-hub",
+            endpoint="source_object_id", limit=2,
+        )
+    assert len(unbounded) == 3
+    assert len(bounded) == 2
+    # 序也要钉:`ORDER BY r.id` 决定的是「截掉的是哪两条」。只断条数的话,一个
+    # 按任意序返回的实现同样绿,而那正是「每次展开拿到的邻居都不一样」的形态。
+    # rel-bounded-0/1/2 依次指向 n1/n2/n3,故 id 序前两条恒为 n1、n2。
+    assert [row["target_object_id"] for row in bounded] == [
+        "ko-bounded-n1", "ko-bounded-n2"]
 
 
 def test_retrieve_neighbors_excludes_rejected_relations_on_postgres(
@@ -1218,12 +1282,13 @@ def test_retrieve_neighbors_excludes_rejected_relations_on_postgres(
     service = CandidateRetrievalService.__new__(CandidateRetrievalService)
     service._connect = knowledge_harness.database.connect
     service.knowledge = knowledge_harness.knowledge
+    service.settings = SimpleNamespace(reasoning_neighbor_expand_limit=1000)
 
     assert service._retrieve_neighbors(
         "nb-personal",
         "ko-rejected-neighbor-source",
         edge_type="derived_from",
-    ) == []
+    ).hits == []
 
 
 def test_relation_connected_probe_returns_only_candidate_ids_on_postgres(
@@ -5006,3 +5071,106 @@ def test_relink_source_is_live_matches_the_golden_valid_source_set(knowledge_har
         # A source of another notebook is not this notebook's valid source.
         assert store.relink_source_is_live(
             connection, "nb-base", "source-golden") is False
+
+
+# ---------------------------------------------------------------------------
+# Conflict detection's three reads (batch 1: bounded conflict detection)
+# ---------------------------------------------------------------------------
+
+def _seed_conflict_fixture(harness) -> None:
+    with harness.database.write() as connection:
+        for object_id, object_type, name, status in (
+            ("ko-cf-nmos", "concept", "nmos device", "approved"),
+            ("ko-cf-pmos", "Concept", "pmos device", "approved"),
+            ("ko-cf-gone", "concept", "retired device", "deprecated"),
+            ("ko-cf-form", "formula", "V = IR", "approved"),
+        ):
+            connection.execute(
+                "INSERT INTO knowledge_objects"
+                "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+                " created_at,updated_at) "
+                "VALUES (%s,'nb-personal',%s,%s,%s::jsonb,%s::jsonb,'source-golden',"
+                "%s,%s)",
+                (
+                    object_id, object_type, status,
+                    json.dumps({"name": name}),
+                    json.dumps([{"quoted_span": f"{name} 证据", "element_id": "e1"}]),
+                    NOW, NOW,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
+                "VALUES (%s,'nb-personal',%s,%s)",
+                (
+                    object_id,
+                    np.ones(4, dtype=np.float32).tobytes(),
+                    NOW,
+                ),
+            )
+        connection.execute(
+            "INSERT INTO knowledge_relations"
+            "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,"
+            " evidence,created_at,review_status) "
+            "VALUES ('rel-cf-1','nb-personal','source-golden','ko-cf-nmos',"
+            "'ko-cf-pmos','contrasts_with',%s::jsonb,%s,'rejected')",
+            (json.dumps([{"quote": "nmos 与 pmos 相反"}]), NOW),
+        )
+
+
+def test_postgres_conflict_resolution_rows_drops_evidence_and_filters_vectors(
+    knowledge_harness,
+):
+    _seed_conflict_fixture(knowledge_harness)
+    store = knowledge_harness.governance
+    with knowledge_harness.database.connect() as connection:
+        objects, vectors, notebook = store.conflict_resolution_rows(
+            connection, "nb-personal"
+        )
+
+    # Objects: no evidence column at all (it is read by id for candidates only),
+    # and deprecated objects stay excluded.
+    assert objects, "fixture must produce objects"
+    assert all("evidence" not in row for row in objects)
+    assert {row["id"] for row in objects} == {
+        "ko-cf-nmos", "ko-cf-pmos", "ko-cf-form"
+    }
+    assert json.loads(objects[0]["payload"])  # payload still arrives as JSON text
+
+    # Vectors: only the types the semantic strategy can look at, case-folded,
+    # and never the deprecated object's.
+    assert {row["object_id"] for row in vectors} == {"ko-cf-nmos", "ko-cf-pmos"}
+    assert all(isinstance(row["vector"], bytes) for row in vectors)
+    assert notebook["tier"] == "personal"
+
+
+def test_postgres_conflict_relation_rows_are_thin_and_unfiltered(knowledge_harness):
+    _seed_conflict_fixture(knowledge_harness)
+    store = knowledge_harness.governance
+    with knowledge_harness.database.connect() as connection:
+        rows = store.conflict_relation_rows(connection, "nb-personal")
+
+    assert len(rows) == 1
+    row = rows[0]
+    # A rejected relation is still returned: detection has never filtered by
+    # review_status and must keep not filtering.
+    assert row == {
+        "id": "rel-cf-1",
+        "source_object_id": "ko-cf-nmos",
+        "target_object_id": "ko-cf-pmos",
+        "edge_type": "contrasts_with",
+    }
+
+
+def test_postgres_conflict_relation_evidence_rows_read_by_id(knowledge_harness):
+    _seed_conflict_fixture(knowledge_harness)
+    store = knowledge_harness.governance
+    with knowledge_harness.database.connect() as connection:
+        assert store.conflict_relation_evidence_rows(connection, []) == []
+        rows = store.conflict_relation_evidence_rows(
+            connection, ["rel-cf-1", "rel-cf-missing"]
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "rel-cf-1"
+    # Evidence arrives as JSON text, matching what the caller json.loads()es.
+    assert json.loads(rows[0]["evidence"])[0]["quote"] == "nmos 与 pmos 相反"

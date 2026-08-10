@@ -29,6 +29,7 @@ from app.services.retrieval import (
     W_KEYWORD,
     W_SEMANTIC,
     GapRelationRow,
+    NeighborExpansion,
     RetrievedElement,
     RetrievedKnowledge,
     RetrievedRelation,
@@ -1688,21 +1689,42 @@ class CandidateRetrievalService(_RetrievalState):
         return hits[:limit]
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
-                            direction: str = "both") -> List[RetrievedKnowledge]:
+                            direction: str = "both") -> NeighborExpansion:
         """1-hop graph neighbours of `object_id` as RetrievedKnowledge with
         placeholder relevance=0 (final relevance unified by run() via the
         original question). Honours edge_type filter; direction out=object as
-        source, in=as target, both=either."""
+        source, in=as target, both=either.
+
+        每个方向最多取 `REASONING_NEIGHBOR_EXPAND_LIMIT` 条边(多取一行做哨兵
+        判定截断),hydrate 因此按 ≤2×limit 有界:病态枢纽节点(百万边)此前会把
+        自己的全部邻接边取回、再整批 hydrate 对应 knowledge_objects 行。截断与否
+        随结果返回(`NeighborExpansion.truncated`),由调用方披露,不静默。"""
         # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
         # instead of loading every notebook edge: O(neighbours), not O(E).
         neighbour_ids: set = set()
+        truncated = False
+        limit = max(1, int(self.settings.reasoning_neighbor_expand_limit))
         from app.services.kg.edge_schema import is_queryable_edge_pair
+
+        def _bounded(rows) -> list:
+            # 哨兵行(limit+1)只用于判定,不参与结果:让「恰好 limit 条」与
+            # 「多于 limit 条」可区分,否则满额的正常节点会被误报成截断。
+            nonlocal truncated
+            rows = list(rows)
+            if len(rows) > limit:
+                truncated = True
+                return rows[:limit]
+            return rows
+
         with self._connect() as db:
             if direction in ("out", "both"):
                 neighbour_ids.update(
-                    r["target_object_id"] for r in self.knowledge.neighbor_ids(
-                        db, notebook_id, object_id,
-                        endpoint="source_object_id", edge_type=edge_type,
+                    r["target_object_id"] for r in _bounded(
+                        self.knowledge.neighbor_ids(
+                            db, notebook_id, object_id,
+                            endpoint="source_object_id", edge_type=edge_type,
+                            limit=limit + 1,
+                        )
                     )
                     if is_queryable_edge_pair(
                         r["edge_type"], r["source_type"], r["target_type"]
@@ -1710,16 +1732,19 @@ class CandidateRetrievalService(_RetrievalState):
                 )
             if direction in ("in", "both"):
                 neighbour_ids.update(
-                    r["source_object_id"] for r in self.knowledge.neighbor_ids(
-                        db, notebook_id, object_id,
-                        endpoint="target_object_id", edge_type=edge_type,
+                    r["source_object_id"] for r in _bounded(
+                        self.knowledge.neighbor_ids(
+                            db, notebook_id, object_id,
+                            endpoint="target_object_id", edge_type=edge_type,
+                            limit=limit + 1,
+                        )
                     )
                     if is_queryable_edge_pair(
                         r["edge_type"], r["source_type"], r["target_type"]
                     )
                 )
             if not neighbour_ids:
-                return []
+                return NeighborExpansion([], truncated)
             rows = self.knowledge.usable_object_rows_on(
                 db, neighbour_ids, USABLE_STATUSES,
             )
@@ -1733,7 +1758,7 @@ class CandidateRetrievalService(_RetrievalState):
                 score=0.0, relevance=0.0, status=row["status"], owner=row["owner"],
                 last_reviewed=row["last_reviewed"] if "last_reviewed" in keys else "",
             ))
-        return out
+        return NeighborExpansion(out, truncated)
     def _retrieve_elements(self, notebook_id: str, query: str,
                            limit: int = 8, *,
                            allowed_source_ids=None) -> List[RetrievedElement]:
@@ -3016,12 +3041,16 @@ class CandidateRetrievalService(_RetrievalState):
     def federated_retrieve_elements(self, *args, **kwargs):
         return self._federated_retrieve_elements_impl(*args, **kwargs)
 
-    def retrieve_neighbors(self, *args, **kwargs):
+    def retrieve_neighbors(self, *args, **kwargs) -> NeighborExpansion:
         from app.services.source_scope import filter_retrieval_items
 
         notebook_id = str(args[0] if args else kwargs.get("notebook_id", ""))
-        return filter_retrieval_items(
-            notebook_id, "knowledge", self._retrieve_neighbors(*args, **kwargs)
+        # 来源范围过滤只作用于命中行;截断标志是「读取侧还有多少没看」的事实,
+        # 与过滤掉多少行无关,原样传下去。
+        expansion = self._retrieve_neighbors(*args, **kwargs)
+        return NeighborExpansion(
+            filter_retrieval_items(notebook_id, "knowledge", expansion.hits),
+            expansion.truncated,
         )
 
     def retrieve_elements(self, *args, **kwargs):

@@ -14,19 +14,26 @@ from typing import Optional
 import numpy as np
 import scipy.sparse as sp
 
-from app.services.kg.scale_index import decode_viz_edges, encode_viz_edges
+from app.services.kg.scale_index import (
+    VizArraysMixin,
+    VizEdgeSet,
+    viz_edge_npz_arrays,
+    viz_edge_set_from_npz,
+    viz_edge_set_from_payload,
+)
 
 
 @dataclass
-class VizIndex:
+class VizIndex(VizArraysMixin):
     """折叠 viz 图。属性名与 ScaleIndex 的 viz_* 对齐,so unified_graph 的有界分派与
-    kg_neighbors 可鸭子类型地消费任一来源(base 库的 ScaleIndex 或本轻量索引)。"""
+    kg_neighbors 可鸭子类型地消费任一来源(base 库的 ScaleIndex 或本轻量索引)。
+    派生索引(viz_node_index / viz_deg_order)也由同一个 mixin 提供,两侧同义。"""
     viz_ids: list
     viz_adj: "sp.csr_matrix"
     viz_deg: "np.ndarray"
     viz_types: list
     viz_names: list
-    viz_edges: list
+    viz_edges: "VizEdgeSet"
     manifest: dict
 
 
@@ -44,7 +51,13 @@ def arrays_from_graph(full: dict):
     undirected_rows = []
     undirected_columns = []
     seen = set()
-    edge_list = []
+    # 直接产出紧凑列(端点下标 + edge_type 码),不再中转字符串三元组 list——
+    # 千万边的 base 库上那份 list 既是构建期的内存峰值,也曾整份常驻 LRU。
+    edge_src: list = []
+    edge_dst: list = []
+    edge_code: list = []
+    edge_types: list = []
+    edge_type_slots: dict = {}
     for edge in edges:
         source = edge["source_object_id"]
         target = edge["target_object_id"]
@@ -52,7 +65,15 @@ def arrays_from_graph(full: dict):
         target_index = index.get(target)
         if source_index is None or target_index is None:
             continue
-        edge_list.append([source, target, edge["edge_type"]])
+        edge_type = edge["edge_type"]
+        slot = edge_type_slots.get(edge_type)
+        if slot is None:
+            slot = len(edge_types)
+            edge_type_slots[edge_type] = slot
+            edge_types.append(edge_type)
+        edge_src.append(source_index)
+        edge_dst.append(target_index)
+        edge_code.append(slot)
         degree[source_index] += 1
         degree[target_index] += 1
         if source_index != target_index:
@@ -74,13 +95,18 @@ def arrays_from_graph(full: dict):
         )
     else:
         viz_adj = sp.csr_matrix((count, count), dtype=np.int8)
+    edge_set = VizEdgeSet.from_columns(
+        edge_src, edge_dst, edge_code, edge_types, count
+    )
     return (
         viz_ids,
         viz_adj,
         degree.astype(np.int32),
         viz_types,
         viz_names,
-        {"edges": edge_list},
+        # viz_payload 的形状不变({"edges": ...}),只是 edges 现在是紧凑边集。
+        # len() 仍是边数,故 n_viz_edges 的既有算法逐字不变。
+        {"edges": edge_set},
     )
 
 
@@ -94,7 +120,7 @@ def save_viz_index(out_dir: str, *, viz_ids, viz_adj, viz_deg, viz_types,
         viz_deg=np.asarray(viz_deg, dtype=np.int32),
         viz_types=np.asarray(viz_types, dtype=object),
         viz_names=np.asarray(viz_names, dtype=object),
-        viz_edges=encode_viz_edges((viz_payload or {}).get("edges", [])),
+        **viz_edge_npz_arrays(viz_edge_set_from_payload(viz_payload, viz_ids)),
     )
     sp.save_npz(os.path.join(out_dir, "viz_adj.npz"), viz_adj.tocsr())
     with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
@@ -116,7 +142,7 @@ def load_viz_index(out_dir: str) -> Optional[VizIndex]:
         viz_deg = z["viz_deg"]
         viz_types = list(z["viz_types"])
         viz_names = list(z["viz_names"])
-        viz_edges = decode_viz_edges(z["viz_edges"])
+        viz_edges = viz_edge_set_from_npz(z, viz_ids)
     viz_adj = sp.load_npz(viz_adj_path)
     return VizIndex(viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
                     viz_types=viz_types, viz_names=viz_names,

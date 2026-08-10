@@ -27,6 +27,7 @@ from typing import (
     FrozenSet,
     List,
     Literal,
+    NamedTuple,
     Optional,
     Sequence,
     Set,
@@ -91,6 +92,18 @@ class RetrievedRelation:
     notebook_id: str = ""
     tier: str = "personal"
     review_status: str = "pending"
+
+
+class NeighborExpansion(NamedTuple):
+    """一次 1-hop 邻居展开的结果 + 「是否因预算被截断」。
+
+    截断标志跟着结果走而不是记在调用链外的状态里:唯一的消费者(reasoning 的
+    `expand_graph`)必须能把它披露给用户与模型——「这个节点还有更多邻居没展开」
+    与「这个节点就这些邻居」是两件事,静默合并会让模型以为已经看全了。
+    """
+
+    hits: List[RetrievedKnowledge]
+    truncated: bool = False
 
 
 @dataclass(frozen=True)

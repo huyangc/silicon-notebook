@@ -1055,7 +1055,6 @@ class RepositoryRuntime:
             invalidate_unified_cache=invalidate_unified_cache,
             mark_unified_kg_dirty=mark_unified_kg_dirty,
             model_clients=self.models,
-            relations_for_notebook=relations_for_notebook,
             edge_centrality_map=edge_centrality_map,
             embed_knowledge=embed_knowledge,
             knowledge_objects=knowledge_objects,

@@ -35,7 +35,7 @@ from app.services.collection_enumeration import (
 )
 from app.services.prompts import reflect_prompt, reflect_schema_hint
 from app.services.retrieval import (
-    RetrievedChunk, RetrievedElement, RetrievedKnowledge,
+    NeighborExpansion, RetrievedChunk, RetrievedElement, RetrievedKnowledge,
 )
 from app.services.retrieval_run import retrieval_fanout_slot
 from app.services.reports.policy import (
@@ -1065,6 +1065,9 @@ _INTENT_DIRECTION_LABEL_WIDEN_CHARS = (120, 240)
 # 披露步 detail 与 reflect 回喂里最多逐条列出几个未执行方向(其余只给总数)。
 # 未执行方向数上界是 16(契约的必答主题上限),但一屏列 16 条谁也读不完。
 _INTENT_PENDING_DISCLOSE = 8
+# 回喂 reflect 时最多逐个点名几个「邻居被上限截断」的节点(其余只给总数)。
+# 节点名可能不短,而这段提示的作用是让模型改换动作,不是列清单。
+_NEIGHBOR_TRUNCATION_DISCLOSE = 5
 
 
 def intent_direction_label(query: str, max_chars: int = _INTENT_DIRECTION_LABEL_CHARS) -> str:
@@ -1526,14 +1529,19 @@ class ReasoningRetriever:
                 h.object_id: (h.relevance, h.score) for h in hits}
         return hits
 
-    def neighbors(self, notebook_id, object_id, edge_type=None, direction="both"):
+    def neighbors(self, notebook_id, object_id, edge_type=None,
+                  direction="both") -> NeighborExpansion:
+        """1-hop 邻居 + 「本次展开是否被每方向上限截断」。
+
+        截断标志随结果返回而不是就地丢弃:`expand_graph` 要把它写进轨迹并回喂
+        reflect,否则模型看到的是「这个节点只有这些邻居」的假事实。"""
         with retrieval_fanout_slot():
-            retrieved = self.retrieval.retrieve_neighbors(
+            expansion = self.retrieval.retrieve_neighbors(
                 notebook_id, object_id, edge_type, direction
             )
-        return self._filter_candidates(
-            "knowledge",
-            retrieved,
+        return NeighborExpansion(
+            self._filter_candidates("knowledge", expansion.hits),
+            expansion.truncated,
         )
 
     def get(self, notebook_id, object_id):
@@ -1955,6 +1963,13 @@ class ReasoningRetriever:
         # 已经探测过的名称不会被 agent 再花一轮请求一遍。
         exact_lookup_log: List[_ExactLookupAttempt] = []
         exact_terms_done: set = set()
+        # 邻居展开被上限截断的节点账目:object_id → 展示名。按 object_id 去重
+        # (`visited` 已保证同一节点每 run 只展开一次,这里再显式去重是让账目
+        # 自己的口径独立成立)。空 dict = 本 run 没有任何节点触发截断,回喂与
+        # 轨迹都零变化。
+        neighbor_truncated: Dict[str, str] = {}
+        neighbor_expand_limit = max(
+            1, int(self.settings.reasoning_neighbor_expand_limit))
         # 类型化集合枚举:一个 run 一个预算池、一份续跑账目。
         # 预算池**跨两类动作共用**(元素与知识对象各记一份是把「一次问答最多列
         # 多少条」拆成两个数,用户与运维都无从解释;成本也确实是共用的——两边都
@@ -2587,6 +2602,28 @@ class ReasoningRetriever:
                     f"{str(collected[o].payload.get('name', o)) if o in collected else o}"
                     for o in visited)
                 summary = f"{summary}\n\n（已展开过的节点，勿重复 expand_graph 请求它们: {vis}）"
+            # 邻居被上限截断的节点回喂 reflect(镜像上面几份账目):轨迹只对用户
+            # 可见,模型看不到就会把「只展开了前 N 个」当成「这个节点只有这些
+            # 邻居」,据此下结论。措辞要给出下一步该做什么——重复 expand_graph
+            # 只会命中 visited 判重、拿不到更多邻居。展示条数有界。
+            if neighbor_truncated:
+                # 节点名走与已确认方向简称同一条截长范式:节点名来自 payload,
+                # 可能是一整句话,原样重放会每轮顶掉半屏回喂预算。
+                shown = [
+                    intent_direction_label(name)
+                    for name in list(neighbor_truncated.values())[
+                        :_NEIGHBOR_TRUNCATION_DISCLOSE]
+                ]
+                names = "、".join(f"「{n}」" for n in shown)
+                summary = (
+                    f"{summary}\n\n（以下节点的关系数超过单次展开的每方向上限"
+                    f"{neighbor_expand_limit},只展开了其中一部分邻居: {names}"
+                    + (f" 等 {len(neighbor_truncated)} 个"
+                       if len(neighbor_truncated) > _NEIGHBOR_TRUNCATION_DISCLOSE
+                       else "")
+                    + "。它们周边未展开的证据请改用针对性的 add_subquery 或"
+                      "search_elements 定向检索;重复 expand_graph 请求同一节点"
+                      "不会给出更多邻居。）")
             # 已执行过的子查询账目回喂 reflect(镜像 visited 回喂,治"反复补充同
             # 一条子查询"):模型据此区分"没查过"与"查过但没捞到";账目含尝试次数,
             # 重复被跳过时 prompt 仍变化 → 不再是不动点,LLM 缓存不会逐字重放决策。
@@ -2817,8 +2854,10 @@ class ReasoningRetriever:
                     # NB: expand/neighbors use the ACTIVE notebook_id only. A base-tier hit's
                     # neighbors live in the base notebook, so deep cross-tier graph walks are
                     # graph mode's job (_federated_rx_graph), not reasoning mode (P4 spec §F).
-                    neigh = self.neighbors(notebook_id, oid,
-                                           decision.expand_edge_type, decision.expand_direction)
+                    expansion = self.neighbors(
+                        notebook_id, oid,
+                        decision.expand_edge_type, decision.expand_direction)
+                    neigh = expansion.hits
                     raise_if_cancelled(self.cancel_event)
                     for h in neigh:
                         collected.setdefault(h.object_id, h)
@@ -2831,11 +2870,24 @@ class ReasoningRetriever:
                         ctx = self.get(notebook_id, oid)
                         node_name = str(ctx.get("name", "")).strip() if ctx else ""
                     node_name = node_name or oid
+                    expand_detail = {"object_id": oid, "name": node_name,
+                                     "edge_type": decision.expand_edge_type,
+                                     "found": len(neigh)}
+                    if expansion.truncated:
+                        # 只在真截断的步上加这两个键(detail 逐键不变的冻结基线
+                        # 口径:无条件写 False 会让每一条 expand 步的 detail 都
+                        # 变形)。同时进账目回喂 reflect——轨迹只给人看,模型看
+                        # 不到就会以为这个节点的邻居已经看全了。
+                        expand_detail["neighbor_truncated"] = True
+                        expand_detail["neighbor_limit"] = neighbor_expand_limit
+                        neighbor_truncated.setdefault(oid, node_name)
                     record(TraceStep(step_type="expand",
-                                     summary=f"顺关系深挖「{node_name}」,得到 {len(neigh)} 个邻居",
-                                     detail={"object_id": oid, "name": node_name,
-                                             "edge_type": decision.expand_edge_type,
-                                             "found": len(neigh)}))
+                                     summary=(
+                                         f"顺关系深挖「{node_name}」,得到 {len(neigh)} 个邻居"
+                                         + ("(该节点邻居过多,只展开了一部分)"
+                                            if expansion.truncated else "")
+                                     ),
+                                     detail=expand_detail))
             elif decision.next_action == "add_subquery":
                 if not decision.new_sub_query:
                     record(TraceStep(step_type="skip",

@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=45, postgres_version=23, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=46, postgres_version=24, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -576,6 +576,24 @@ _TABLES = (
         76,
         "bytea+timestamptz",
         blob_columns=("vector",),
+    ),
+    # SQLite v46 / PostgreSQL v24: element -> chunk reverse index and its
+    # notebook-level backfill cursor. The reverse rows hang off `chunks`
+    # (rank 51) and the ledger off `notebooks` (rank 15), so both parents rank
+    # lower and the appended ranks stay FK-consistent.
+    _table(
+        "chunk_elements",
+        ("notebook_id", "element_id", "chunk_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        77,
+        "identity",
+    ),
+    _table(
+        "chunk_element_backfills",
+        ("notebook_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        78,
+        "timestamptz",
     ),
 )
 

@@ -6,7 +6,9 @@ from typing import Callable
 
 from psycopg import sql
 
+from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
 from app.repositories.postgres._store_utils import (
+    execute_many,
     json_value,
     jsonb,
     normalize_timestamp_row,
@@ -221,6 +223,36 @@ class KnowhowTransferStore:
 
             # PostgreSQL lexical indexes derive directly from ``chunks.text``;
             # no side-table maintenance is required during transfer.
+            #
+            # chunk_elements DOES need it, on both backends and for the same
+            # reason the SQLite side spells out for chunks_fts: it is a
+            # hand-maintained derived table (the normal path is
+            # ChunkStore._insert_chunk_element_rows), and copied chunk rows
+            # never reach that call — the reprojection scheduled after
+            # copy_table sees `old_specs == new_specs` for every copy and skips
+            # the only write paths. If the target notebook has been backfilled
+            # (chunk_elements_indexed = 1) the read path is the point lookup,
+            # so missing rows fail silently instead of loudly, with no
+            # self-healing path. Where it has not, these rows are simply
+            # correct forward maintenance.
+            chunk_rows = payload.get("chunks") or []
+            for target_notebook_id in {row["notebook_id"] for row in chunk_rows}:
+                reverse = chunk_element_reverse_rows(
+                    target_notebook_id,
+                    [
+                        row
+                        for row in chunk_rows
+                        if row["notebook_id"] == target_notebook_id
+                    ],
+                )
+                if reverse:
+                    execute_many(
+                        db,
+                        "INSERT INTO chunk_elements "
+                        "(notebook_id,element_id,chunk_id) VALUES (%s,%s,%s) "
+                        "ON CONFLICT DO NOTHING",
+                        reverse,
+                    )
 
             # 提交前校验：落库计数须等于源表快照计数（不一致 → 抛错 → 回滚，不留半份副本）
             def count(sql: str) -> int:

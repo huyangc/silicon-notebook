@@ -359,3 +359,107 @@ class TestRejectEndpoint:
 
         assert r.status_code == 404
         assert repo.get_conflict_candidate(victim_nb, cid)["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Admission gates on POST .../kg/conflicts/resolve (single flight + size)
+# ---------------------------------------------------------------------------
+
+class TestResolveAdmission:
+    def test_second_click_is_409_while_the_first_run_holds_the_slot(
+        self, tmp_path, monkeypatch
+    ):
+        _env(tmp_path, monkeypatch)
+        repo = _make_repo(monkeypatch)
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
+        tc = _client(repo, monkeypatch)
+        nb = repo.create_notebook(NotebookCreate(name="single-flight"))
+
+        # Keep the claim held: never submit the worker, so the slot stays busy.
+        import app.services.background_jobs as jobs
+        monkeypatch.setattr(jobs, "submit", lambda *a, **k: None)
+
+        first = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
+        assert first.status_code == 200
+        job_id = first.json()["job_id"]
+
+        second = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
+        assert second.status_code == 409
+        assert second.headers.get("X-User-Message") == "1"
+
+        # Settling the first job frees the slot again.
+        repo._runtime.knowledge_lifecycle.kg_conflict_jobs.settle(
+            nb.id, job_id, "succeeded"
+        )
+        third = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
+        assert third.status_code == 200
+
+    def test_conflict_slot_is_independent_of_relink_and_rebuild(
+        self, tmp_path, monkeypatch
+    ):
+        _env(tmp_path, monkeypatch)
+        repo = _make_repo(monkeypatch)
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
+        tc = _client(repo, monkeypatch)
+        nb = repo.create_notebook(NotebookCreate(name="separate-slot"))
+
+        import app.services.background_jobs as jobs
+        monkeypatch.setattr(jobs, "submit", lambda *a, **k: None)
+
+        repo.start_notebook_relink(nb.id)  # holds the relink/rebuild slot
+        assert tc.post(
+            f"/api/notebooks/{nb.id}/kg/conflicts/resolve"
+        ).status_code == 200
+
+    def test_oversized_notebook_is_refused_before_any_work(
+        self, tmp_path, monkeypatch
+    ):
+        _env(tmp_path, monkeypatch)
+        repo = _make_repo(monkeypatch)
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
+        tc = _client(repo, monkeypatch)
+        nb = repo.create_notebook(NotebookCreate(name="too-big"))
+        repo.store_kg(nb.id, None, [
+            {"local_id": "A", "object_type": "claim",
+             "payload": {"name": "Claim A"}, "evidence": []},
+            {"local_id": "B", "object_type": "claim",
+             "payload": {"name": "Claim B"}, "evidence": []},
+        ], [])
+
+        submitted: list = []
+        import app.services.background_jobs as jobs
+        monkeypatch.setattr(
+            jobs, "submit", lambda *a, **k: submitted.append(a)
+        )
+        monkeypatch.setattr(repo.settings, "kg_conflict_max_objects", 1)
+
+        response = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
+        assert response.status_code == 409
+        assert response.headers.get("X-User-Message") == "1"
+        assert submitted == []
+        # Refused, not merely blocked: the slot must be left free.
+        monkeypatch.setattr(repo.settings, "kg_conflict_max_objects", 200000)
+        assert tc.post(
+            f"/api/notebooks/{nb.id}/kg/conflicts/resolve"
+        ).status_code == 200
+
+    def test_failed_submission_releases_the_slot(self, tmp_path, monkeypatch):
+        _env(tmp_path, monkeypatch)
+        repo = _make_repo(monkeypatch)
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
+        tc = _client(repo, monkeypatch)
+        nb = repo.create_notebook(NotebookCreate(name="submit-boom"))
+
+        import app.services.background_jobs as jobs
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("thread pool exhausted")
+
+        monkeypatch.setattr(jobs, "submit", _boom)
+        with pytest.raises(RuntimeError):
+            tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
+
+        monkeypatch.setattr(jobs, "submit", lambda *a, **k: None)
+        assert tc.post(
+            f"/api/notebooks/{nb.id}/kg/conflicts/resolve"
+        ).status_code == 200

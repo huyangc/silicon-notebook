@@ -834,14 +834,24 @@ class GovernanceStore:
     def conflict_resolution_rows(
         connection: Any, notebook_id: str
     ) -> "tuple[List[dict], List[dict], dict | None]":
+        """Detection-shaped read: no evidence bodies, vectors filtered in SQL.
+
+        Mirrors the SQLite statement exactly (see its docstring for why evidence
+        moved to a bounded by-id read and why the embedding join case-folds
+        ``object_type``).
+        """
         objects = connection.execute(
-            "SELECT id, object_type, payload, evidence, status "
+            "SELECT id, object_type, payload, status "
             "FROM knowledge_objects "
             "WHERE notebook_id=%s AND status != 'deprecated'",
             (notebook_id,),
         ).fetchall()
         vectors = connection.execute(
-            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=%s",
+            "SELECT e.object_id AS object_id, e.vector AS vector "
+            "FROM knowledge_embeddings e "
+            "JOIN knowledge_objects o ON o.id = e.object_id "
+            "WHERE e.notebook_id=%s AND o.status != 'deprecated' "
+            "AND lower(o.object_type) IN ('concept','claim')",
             (notebook_id,),
         ).fetchall()
         notebook = connection.execute(
@@ -850,7 +860,7 @@ class GovernanceStore:
         return (
             _compat_rows(
                 objects,
-                json_columns=(("payload", {}), ("evidence", [])),
+                json_columns=(("payload", {}),),
             ),
             [
                 {**dict(row), "vector": bytes(row["vector"])}
@@ -858,6 +868,38 @@ class GovernanceStore:
             ],
             notebook,
         )
+
+    @staticmethod
+    def conflict_relation_rows(
+        connection: Any, notebook_id: str
+    ) -> "List[dict]":
+        """Thin relation projection for conflict detection.
+
+        Only the columns detection reads: no evidence bodies (fetched by id
+        for surviving candidates) and no ``review_status`` — detection has
+        never filtered rejected relations and must keep not filtering them.
+        """
+        rows = connection.execute(
+            "SELECT id, source_object_id, target_object_id, edge_type "
+            "FROM knowledge_relations WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def conflict_relation_evidence_rows(
+        connection: Any, relation_ids
+    ) -> "List[dict]":
+        """Bounded by-id evidence read for the surviving edge candidates."""
+        ids = list(relation_ids)
+        if not ids:
+            return []
+        placeholders = ",".join("%s" for _ in ids)
+        rows = connection.execute(
+            f"SELECT id, evidence FROM knowledge_relations WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        return _compat_rows(rows, json_columns=(("evidence", []),))
 
     @staticmethod
     def promotion_candidate_identity(

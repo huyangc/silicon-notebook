@@ -1,9 +1,15 @@
-"""In-process orchestration for zero-model KG maintenance jobs.
+"""In-process orchestration for per-notebook KG maintenance jobs.
 
-Relink and unified rebuild mutate the same derived graph products, so they share
-one per-notebook slot.  This collaborator owns only claim/status/settlement and
-worker-entry orchestration; the relink and rebuild algorithms stay owned by the
-knowledge lifecycle service and are injected as late-bound callables.
+One INSTANCE owns one per-notebook slot; which job kinds contend for that slot is
+decided by which callables the instance is wired with.  Relink and unified
+rebuild share one instance because they mutate the same derived graph products.
+Conflict detection gets its OWN instance: it writes the conflict review queue,
+not those products, so making it wait behind a rebuild (or vice versa) would be
+an invented, unhelpful exclusion — it only needs single-flight against itself.
+
+This collaborator owns only claim/status/settlement and worker-entry
+orchestration; the algorithms stay owned by the knowledge lifecycle / governance
+services and are injected as late-bound callables.
 """
 from __future__ import annotations
 
@@ -15,7 +21,7 @@ from app.repositories.ports import KgMaintenanceAlreadyRunning
 
 
 class KgMaintenanceJobs:
-    """Coordinate relink/rebuild jobs without owning either graph algorithm."""
+    """Coordinate one per-notebook maintenance slot without owning any algorithm."""
 
     RELINK_COUNTERS = {
         "isolated_before": 0,
@@ -23,6 +29,14 @@ class KgMaintenanceJobs:
         "isolated_after": 0,
     }
     REBUILD_COUNTERS = {"clusters": 0}
+    # No "truncated" counter: nothing polls this job's counters (conflict
+    # detection has no status endpoint), and the truncation figures are already
+    # carried by the run's return value and its counts-only event.
+    CONFLICT_COUNTERS = {
+        "detected": 0,
+        "auto_applied": 0,
+        "queued": 0,
+    }
 
     def __init__(
         self,
@@ -30,14 +44,19 @@ class KgMaintenanceJobs:
         event_log: EventLogger,
         get_notebook: Callable[[str], object],
         new_id: Callable[[str], str],
-        relink_notebook_kg: Callable[[str], dict],
-        rebuild_unified_kg: Callable[[str], int],
+        relink_notebook_kg: Callable[[str], dict] | None = None,
+        rebuild_unified_kg: Callable[[str], int] | None = None,
+        resolve_notebook_conflicts: Callable[[str], dict] | None = None,
     ) -> None:
+        # The algorithm callables are per-instance and optional: an instance is
+        # wired only with the kinds that must share its slot, and calling a job
+        # entry it was not wired with is a programming error, not a runtime mode.
         self.event_log = event_log
         self.get_notebook = get_notebook
         self._new_id = new_id
         self._relink_notebook_kg = relink_notebook_kg
         self._rebuild_unified_kg = rebuild_unified_kg
+        self._resolve_notebook_conflicts = resolve_notebook_conflicts
 
         # Terminal entries remain available for the browser's next bounded poll.
         # Both kinds intentionally share this registry and lock. This stays
@@ -175,6 +194,38 @@ class KgMaintenanceJobs:
         return clusters
 
     def fail_unified_kg_rebuild_submission(
+        self, notebook_id: str, job_id: str
+    ) -> None:
+        self.settle(notebook_id, job_id, "failed")
+
+    # --- conflict detection (its OWN instance's slot — see module docstring) --
+
+    def start_conflict_resolution(self, notebook_id: str) -> dict:
+        return self.claim(
+            notebook_id, "conflict", "cfj", dict(self.CONFLICT_COUNTERS)
+        )
+
+    def run_conflict_resolution_job(self, notebook_id: str, job_id: str) -> dict:
+        """Run conflict resolution and settle on every exit, incl. ``BaseException``."""
+        try:
+            stats = self._resolve_notebook_conflicts(notebook_id)
+        except Exception:
+            self.settle(notebook_id, job_id, "failed")
+            self.event_log.logger.exception(
+                "resolve_notebook_conflicts failed for %s", notebook_id
+            )
+            self.event_log.emit({
+                "kind": "kg_conflict_resolution_failed",
+                "notebook_id": notebook_id,
+            })
+            raise
+        except BaseException:
+            self.settle(notebook_id, job_id, "failed")
+            raise
+        self.settle(notebook_id, job_id, "succeeded", stats)
+        return stats
+
+    def fail_conflict_resolution_submission(
         self, notebook_id: str, job_id: str
     ) -> None:
         self.settle(notebook_id, job_id, "failed")

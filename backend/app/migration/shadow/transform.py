@@ -20,6 +20,7 @@ _EMPTY_TIME_SENTINELS = frozenset(
         "ask_jobs.created_at",
         "ask_jobs.updated_at",
         "ask_trace_steps.created_at",
+        "chunk_element_backfills.completed_at",
         "kg_build_jobs.finished_at",
         "knowledge_objects.last_reviewed",
         "merge_review_jobs.started_at",

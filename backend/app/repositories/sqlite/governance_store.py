@@ -700,20 +700,65 @@ class GovernanceStore:
     def conflict_resolution_rows(
         connection: sqlite3.Connection, notebook_id: str
     ) -> "tuple[List[sqlite3.Row], List[sqlite3.Row], sqlite3.Row | None]":
+        """Detection-shaped read: no evidence bodies, vectors filtered in SQL.
+
+        Evidence is needed for at most the two sides of each surviving candidate,
+        so it is fetched by id afterwards (``object_evidence_rows`` /
+        ``conflict_relation_evidence_rows``) instead of hauling every object's
+        quoted spans through this scan.  The embedding join mirrors the semantic
+        strategy's own filter (Concept/Claim, non-deprecated) so the vectors that
+        strategy can never look at are not decoded either — ``lower()`` because
+        legacy rows may carry capitalised types.
+        """
         objects = connection.execute(
-            "SELECT id, object_type, payload, evidence, status "
+            "SELECT id, object_type, payload, status "
             "FROM knowledge_objects "
             "WHERE notebook_id=? AND status != 'deprecated'",
             (notebook_id,),
         ).fetchall()
         vectors = connection.execute(
-            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            "SELECT e.object_id AS object_id, e.vector AS vector "
+            "FROM knowledge_embeddings e "
+            "JOIN knowledge_objects o ON o.id = e.object_id "
+            "WHERE e.notebook_id=? AND o.status != 'deprecated' "
+            "AND lower(o.object_type) IN ('concept','claim')",
             (notebook_id,),
         ).fetchall()
         notebook = connection.execute(
             "SELECT tier FROM notebooks WHERE id=?", (notebook_id,)
         ).fetchone()
         return objects, vectors, notebook
+
+    @staticmethod
+    def conflict_relation_rows(
+        connection: sqlite3.Connection, notebook_id: str
+    ) -> "List[dict]":
+        """Thin relation projection for conflict detection.
+
+        Only the columns detection reads: no evidence bodies (fetched by id
+        for surviving candidates) and no ``review_status`` — detection has
+        never filtered rejected relations and must keep not filtering them.
+        """
+        rows = connection.execute(
+            "SELECT id, source_object_id, target_object_id, edge_type "
+            "FROM knowledge_relations WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def conflict_relation_evidence_rows(
+        connection: sqlite3.Connection, relation_ids
+    ) -> "List[sqlite3.Row]":
+        """Bounded by-id evidence read for the surviving edge candidates."""
+        ids = list(relation_ids)
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        return connection.execute(
+            f"SELECT id, evidence FROM knowledge_relations WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
 
     @staticmethod
     def promotion_candidate_identity(

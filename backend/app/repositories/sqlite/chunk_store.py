@@ -4,10 +4,17 @@ import json
 import sqlite3
 from typing import Sequence
 
+from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.vector_index import encode_vector
+
+
+# Bounded IN(...) fan-out for the element -> chunk point lookup. SQLite's
+# default SQLITE_MAX_VARIABLE_NUMBER is far higher, but a fixed batch keeps the
+# statement shape stable no matter how many evidence elements one query hit.
+CHUNK_ELEMENT_LOOKUP_BATCH = 500
 
 
 class ChunkStore:
@@ -179,6 +186,12 @@ class ChunkStore:
                 "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                 "VALUES (?,?,?,?,?,?,?)", rows)
             self._insert_fts_rows(db, [(r[0], r[1], r[3]) for r in rows])
+            # element -> chunk reverse rows, same transaction as the chunk rows
+            # they describe. The old rows are already gone: chunk_elements has
+            # ``REFERENCES chunks(id) ON DELETE CASCADE`` and every connection
+            # runs with ``PRAGMA foreign_keys = ON`` (SqliteDatabase), so the
+            # DELETE above took them with it — exactly like chunk_embeddings.
+            self._insert_chunk_element_rows(db, notebook_id, chunks)
             if mark_chunked_at is not None:
                 db.execute(
                     "UPDATE sources SET chunked_at = ? WHERE id = ?",
@@ -188,6 +201,65 @@ class ChunkStore:
         connection.executemany(
             "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
             rows)
+
+    @staticmethod
+    def chunk_element_rows(
+        notebook_id: str, chunks: Sequence[ChunkWrite]
+    ) -> list[tuple[str, str, str]]:
+        """``(notebook_id, element_id, chunk_id)`` reverse rows for these writes.
+
+        Shaping (including de-duplication within the batch) is the shared,
+        backend-neutral helper the offline backfill also uses, so a chunk
+        written online and the same chunk projected offline produce byte-for-byte
+        identical rows."""
+        return reverse_rows_for_writes(
+            notebook_id, [(chunk.id, list(chunk.element_ids)) for chunk in chunks]
+        )
+
+    def _insert_chunk_element_rows(
+        self,
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        chunks: Sequence[ChunkWrite],
+    ) -> None:
+        rows = self.chunk_element_rows(notebook_id, chunks)
+        if rows:
+            connection.executemany(
+                "INSERT OR IGNORE INTO chunk_elements "
+                "(notebook_id,element_id,chunk_id) VALUES (?,?,?)", rows)
+
+    @staticmethod
+    def chunks_for_element_ids(
+        db: sqlite3.Connection, notebook_id: str, element_ids: Sequence[str]
+    ):
+        """``(element_id, chunk_id)`` rows for these elements, in chunk order.
+
+        The fast half of the element -> chunk reverse lookup: an indexed seek
+        on the ``(notebook_id, element_id, chunk_id)`` primary key instead of a
+        whole-notebook chunk scan with per-row ``json.loads``.
+
+        ``ORDER BY c.rowid`` is insertion order, which is what the legacy
+        whole-table scan happened to produce. That order was never a contract
+        (see ``_kg_source_chunks``), but the consumer's truncation is
+        order-sensitive, so the replacement must at least be deterministic —
+        chunk ids are random surrogates, so ordering by id would shuffle.
+        Batching is by element id, so every row for one element stays inside a
+        single ordered statement."""
+        ids = list(dict.fromkeys(e for e in element_ids if e))
+        rows: list = []
+        for offset in range(0, len(ids), CHUNK_ELEMENT_LOOKUP_BATCH):
+            batch = ids[offset : offset + CHUNK_ELEMENT_LOOKUP_BATCH]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(
+                db.execute(
+                    f"SELECT ce.element_id AS element_id, ce.chunk_id AS chunk_id "
+                    f"FROM chunk_elements ce JOIN chunks c ON c.id = ce.chunk_id "
+                    f"WHERE ce.notebook_id = ? AND ce.element_id IN ({placeholders}) "
+                    f"ORDER BY c.rowid",
+                    (notebook_id, *batch),
+                ).fetchall()
+            )
+        return rows
 
     # ------------------------------------------------- knowhow projection
     # (Task 5, knowhow-tables PR-1): the deterministic projector diffs and
@@ -249,6 +321,10 @@ class ChunkStore:
             "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
             "VALUES (?,?,?,?,?,?,?)", values)
         self._insert_fts_rows(connection, [(v[0], v[1], v[3]) for v in values])
+        # The projector's precise ``delete_by_ids`` already dropped the prior
+        # rows for these chunks via the chunks cascade; add the new ones in the
+        # same transaction so the reverse index never lags its chunk rows.
+        self._insert_chunk_element_rows(connection, notebook_id, rows)
 
     def source_chunks(self, source_id: str) -> list:
         with self.database.connect() as db:

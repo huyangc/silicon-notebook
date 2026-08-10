@@ -32,8 +32,8 @@ def test_retrieve_scored_delegates_to_repo(tmp_path):
 def test_neighbors_elements_node_context_delegate(tmp_path):
     repo, nb = _repo_with_kg(tmp_path)
     oid = repo._retrieve_scored(nb, "运算放大器")[0].object_id
-    assert ([h.object_id for h in repo.retrieval.retrieve_neighbors(nb, oid)]
-            == [h.object_id for h in repo._retrieve_neighbors(nb, oid)])
+    assert ([h.object_id for h in repo.retrieval.retrieve_neighbors(nb, oid).hits]
+            == [h.object_id for h in repo._retrieve_neighbors(nb, oid).hits])
     assert (repo.retrieval.retrieve_elements(nb, "运算放大器")
             == repo._retrieve_elements(nb, "运算放大器"))
     assert repo.retrieval.node_context(nb, oid) == repo.node_context(nb, oid)

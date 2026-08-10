@@ -990,6 +990,7 @@
     "unified_kg_state": [
       {
         "canonical_rel_seq": -1,
+        "chunk_elements_indexed": 0,
         "cluster_count": 0,
         "cluster_input_version": "fixture-cluster-v1",
         "cluster_mutation_seq": 1,
@@ -1163,6 +1164,16 @@
       {
         "name": "idx_catalog_jobs_source_created",
         "sql_sha256": "475f528dafb5a1705ea8a02c79a805c8e494b18da43aadd0e36014bd309dc7ca",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunk_element_backfills_status",
+        "sql_sha256": "e014d5934fa92e9d22778f35c017fa9c20abfc4b62562a31b11a121fb1345725",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunk_elements_chunk",
+        "sql_sha256": "fe3ece0d79e8e781636de303664359b9402ea9d886d7607aae93540c2ce32520",
         "type": "index"
       },
       {
@@ -1691,6 +1702,16 @@
         "type": "table"
       },
       {
+        "name": "chunk_element_backfills",
+        "sql_sha256": "e4070ef35d1afe0d7607b8f0aad028133f898ffb18243faa097875edd7f642bd",
+        "type": "table"
+      },
+      {
+        "name": "chunk_elements",
+        "sql_sha256": "e0960eb1513ab6f64c28bf9b75cf75bf4fc4fd73437c36ec1f6882961c4ddf50",
+        "type": "table"
+      },
+      {
         "name": "chunk_embeddings",
         "sql_sha256": "ecc28ea792bf4078408e8973082923250c9a257ba026cdc30c14ef02db391867",
         "type": "table"
@@ -2072,7 +2093,7 @@
       },
       {
         "name": "unified_kg_state",
-        "sql_sha256": "92f537ee8b95c98cc5a2de23dd74ac1e1b88f97a63f6f16782ae3355ab5f9383",
+        "sql_sha256": "228fb5d8c9227c8e05a0f6a255c0ff280f7f5451dc17a69391346f200c96844b",
         "type": "table"
       },
       {

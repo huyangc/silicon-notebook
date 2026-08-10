@@ -160,7 +160,7 @@ def test_save_viz_and_load_viz_roundtrip(store):
     assert manifest["n_viz_nodes"] == 2
     viz = store.load_viz("nb-viz")
     assert list(viz.viz_ids) == ["a", "b"]
-    assert viz.viz_edges == [["a", "b", "relates"]]
+    assert list(viz.viz_edges.rows(viz.viz_ids)) == [["a", "b", "relates"]]
     assert viz.manifest["version"] == ["v", 2]
 
 

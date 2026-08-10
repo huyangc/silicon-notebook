@@ -229,6 +229,8 @@ def test_reflect_prompt_forbids_claiming_full_retrieval():
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
+from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.retrieval import NeighborExpansion
 from app.models.schemas import NotebookCreate
 
 
@@ -279,7 +281,9 @@ def test_retrieve_neighbors_follows_edges(rrepo):
     nb = _seed_two_nodes(rrepo)
     claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
                  if h.object_type == "claim")
-    neigh = rrepo._retrieve_neighbors(nb.id, claim.object_id)
+    expansion = rrepo._retrieve_neighbors(nb.id, claim.object_id)
+    assert expansion.truncated is False
+    neigh = expansion.hits
     assert any(n.object_type == "procedure" for n in neigh)
     # 邻居 relevance/score 为占位 0,最终由 run() 用原问题统一重打分(见 Task 8)
     assert all(n.relevance == 0.0 and n.score == 0.0 for n in neigh)
@@ -289,7 +293,99 @@ def test_retrieve_neighbors_edge_type_filter(rrepo):
     nb = _seed_two_nodes(rrepo)
     claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
                  if h.object_type == "claim")
-    assert rrepo._retrieve_neighbors(nb.id, claim.object_id, edge_type="nonexistent") == []
+    assert rrepo._retrieve_neighbors(
+        nb.id, claim.object_id, edge_type="nonexistent").hits == []
+
+
+def _seed_hub(repo, fan_out: int = 4):
+    """一个中心节点 + fan_out 个出边邻居(用于邻居展开上限的边界断言)。"""
+    nb = repo.create_notebook(NotebookCreate(name="hub"))
+    objects = [{"local_id": "H", "object_type": "claim",
+                "payload": {"name": "枢纽节点"}, "evidence": []}]
+    relations = []
+    for i in range(fan_out):
+        objects.append({"local_id": f"N{i}", "object_type": "procedure",
+                        "payload": {"name": f"邻居{i}"}, "evidence": []})
+        relations.append({"source_local_id": "H", "target_local_id": f"N{i}",
+                          "edge_type": "depends_on", "evidence": []})
+    repo.store_kg(nb.id, None, objects, relations)
+    hub = next(h for h in repo._retrieve_scored(nb.id, "枢纽节点")
+               if h.payload.get("name") == "枢纽节点")
+    return nb, hub.object_id
+
+
+def test_retrieve_neighbors_bounds_each_direction_and_reports_truncation(rrepo):
+    """病态枢纽节点的邻居展开必须按上限有界,并如实报告被截断。"""
+    nb, hub = _seed_hub(rrepo, fan_out=4)
+    rrepo.settings.reasoning_neighbor_expand_limit = 2
+    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+    assert expansion.truncated is True
+    assert len(expansion.hits) == 2
+
+
+def test_retrieve_neighbors_at_exactly_the_limit_is_not_truncated(rrepo):
+    """恰好 limit 条邻居不算截断——哨兵行(limit+1)存在就是为了区分这两种。"""
+    nb, hub = _seed_hub(rrepo, fan_out=2)
+    rrepo.settings.reasoning_neighbor_expand_limit = 2
+    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+    assert expansion.truncated is False
+    assert len(expansion.hits) == 2
+
+
+def test_neighbor_ids_without_limit_keeps_historical_unbounded_behaviour(rrepo):
+    """limit=None 是其余调用方的既有口径:不加 ORDER BY/LIMIT,全量返回。"""
+    nb, hub = _seed_hub(rrepo, fan_out=4)
+    knowledge = rrepo.retrieval.candidates.knowledge
+    with rrepo._connect() as db:
+        rows = knowledge.neighbor_ids(
+            db, nb.id, hub, endpoint="source_object_id")
+        bounded = knowledge.neighbor_ids(
+            db, nb.id, hub, endpoint="source_object_id", limit=3)
+    assert len(rows) == 4
+    assert len(bounded) == 3
+
+
+def test_expand_path_pushes_the_bound_into_the_store_query(rrepo, monkeypatch):
+    """上限必须真的到达 SQL,而不是取回全部再在 Python 里切。
+
+    只断言 `truncated`/`len(hits)` 兜不住这条:在 Python 侧切片同样能让那两个
+    断言变绿,而本特性要救的正是「先把百万邻接边取回内存」那一步。这里用 spy
+    钉住两件事——每方向都带 `limit == 上限+1` 的哨兵,且数据库**实际返回**的行
+    数不超过哨兵值。
+    """
+    nb, hub = _seed_hub(rrepo, fan_out=6)
+    rrepo.settings.reasoning_neighbor_expand_limit = 2
+    knowledge = rrepo.retrieval.candidates.knowledge
+    original = knowledge.neighbor_ids
+    calls = []
+
+    def spy(db, notebook_id, object_id, *, endpoint, edge_type=None, limit=None):
+        rows = original(db, notebook_id, object_id, endpoint=endpoint,
+                        edge_type=edge_type, limit=limit)
+        calls.append((endpoint, limit, len(rows)))
+        return rows
+
+    monkeypatch.setattr(knowledge, "neighbor_ids", spy)
+    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+
+    assert [endpoint for endpoint, _, _ in calls] == [
+        "source_object_id", "target_object_id"]
+    assert [limit for _, limit, _ in calls] == [3, 3]       # 上限 2 + 哨兵 1
+    assert all(returned <= 3 for _, _, returned in calls)   # SQL 真的截了
+    assert expansion.truncated is True
+
+
+def test_usable_object_rows_on_chunks_the_in_list(rrepo):
+    """IN 列表分片:一条平铺的 IN 会在老 SQLite 构建上撞变量数上限。"""
+    nb, hub = _seed_hub(rrepo, fan_out=3)
+    knowledge = rrepo.retrieval.candidates.knowledge
+    with rrepo._connect() as db:
+        neighbours = [row["target_object_id"] for row in knowledge.neighbor_ids(
+            db, nb.id, hub, endpoint="source_object_id")]
+        rows = knowledge.usable_object_rows_on(
+            db, neighbours, USABLE_STATUSES, batch_size=1)
+    # 每片一条语句,结果与不分片时等价(顺序按片拼接)。
+    assert {row["id"] for row in rows} == set(neighbours)
 
 
 def test_retrieve_elements_degrades_gracefully(rrepo):
@@ -305,7 +401,7 @@ def test_toolbox_delegates_to_repo(rrepo):
     hits = rr.search(nb.id, "RTL到GDSII流程", types=["claim"], prefer="keyword")
     assert all(h.object_type == "claim" for h in hits)
     claim = hits[0]
-    neigh = rr.neighbors(nb.id, claim.object_id)
+    neigh = rr.neighbors(nb.id, claim.object_id).hits
     assert any(n.object_type == "procedure" for n in neigh)
     ctx = rr.get(nb.id, claim.object_id)
     assert ctx.get("object_type") == "claim"
@@ -899,8 +995,10 @@ def test_run_stale_breaker_on_repeated_visited_expand(rrepo, monkeypatch):
     rrepo.settings.reasoning_stale_limit = 3
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": [_mk_rk("A", "nodeA")])
-    monkeypatch.setattr(ReasoningRetriever, "neighbors",
-                        lambda self, n, oid, edge_type=None, direction="both": [_mk_rk("B", "nodeB")])
+    monkeypatch.setattr(
+        ReasoningRetriever, "neighbors",
+        lambda self, n, oid, edge_type=None, direction="both": NeighborExpansion(
+            [_mk_rk("B", "nodeB")]))
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "q"}]},
         reflects=[{"next_action": "expand_graph", "expand": {"object_id": "A"}}] * 40))
@@ -951,7 +1049,8 @@ def test_run_does_not_break_while_progressing(rrepo, monkeypatch):
 
     def fake_neighbors(self, n, oid, edge_type=None, direction="both"):
         seq["n"] += 1
-        return [_mk_rk(f"nb{seq['n']}", f"nb{seq['n']}")]   # 每轮全新邻居
+        # 每轮全新邻居
+        return NeighborExpansion([_mk_rk(f"nb{seq['n']}", f"nb{seq['n']}")])
 
     monkeypatch.setattr(ReasoningRetriever, "neighbors", fake_neighbors)
     reflects = [{"next_action": "expand_graph", "expand": {"object_id": f"x{i}"}}
@@ -971,8 +1070,10 @@ def test_run_feeds_visited_nodes_to_reflect(rrepo, monkeypatch):
     rrepo.settings.reasoning_stale_limit = 10  # 调高避免熔断先于断言触发
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": [_mk_rk("A", "nodeA")])
-    monkeypatch.setattr(ReasoningRetriever, "neighbors",
-                        lambda self, n, oid, edge_type=None, direction="both": [_mk_rk("B", "nodeB")])
+    monkeypatch.setattr(
+        ReasoningRetriever, "neighbors",
+        lambda self, n, oid, edge_type=None, direction="both": NeighborExpansion(
+            [_mk_rk("B", "nodeB")]))
     prompts = []
 
     class _RecLLM:
@@ -994,6 +1095,62 @@ def test_run_feeds_visited_nodes_to_reflect(rrepo, monkeypatch):
     # 第1轮 expand A 后, 第2轮 reflect 输入应带"已展开/已访问"节点提示, 含节点标识
     assert "nodeA" in prompts[1] or "A" in prompts[1]
     assert ("已展开" in prompts[1] or "已访问" in prompts[1] or "visited" in prompts[1].lower())
+
+
+def _run_expand_once(rrepo, monkeypatch, *, truncated: bool):
+    """跑一轮 expand_graph → answer,返回 (trace, 第二轮 reflect 的输入 prompt)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_stale_limit = 10
+    monkeypatch.setattr(
+        ReasoningRetriever, "search",
+        lambda self, n, q, types=None, prefer="balanced": [_mk_rk("A", "nodeA")])
+    monkeypatch.setattr(
+        ReasoningRetriever, "neighbors",
+        lambda self, n, oid, edge_type=None, direction="both": NeighborExpansion(
+            [_mk_rk("B", "nodeB")], truncated))
+    prompts = []
+
+    class _RecLLM:
+        configured = True
+
+        def __init__(self):
+            self._r = [{"next_action": "expand_graph", "expand": {"object_id": "A"}},
+                       {"next_action": "answer", "sufficient": True}]
+
+        def chat_json(self, messages, schema_hint, **kw):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "q"}]})
+            prompts.append(messages[-1]["content"])
+            return json.dumps(
+                self._r.pop(0) if self._r
+                else {"next_action": "answer", "sufficient": True})
+
+    bind_chat_client(rrepo, "reasoning_agent", _RecLLM())
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
+    return res.trace, prompts
+
+
+def test_run_discloses_neighbor_truncation_in_trace_and_reflect(rrepo, monkeypatch):
+    """邻居被上限截断必须两处都可见:轨迹 detail 给用户,回喂账目给模型。
+    模型看不到就会把「只展开了前 N 个」当成「这个节点只有这些邻居」。"""
+    rrepo.settings.reasoning_neighbor_expand_limit = 7
+    trace, prompts = _run_expand_once(rrepo, monkeypatch, truncated=True)
+    expand = [t for t in trace if t.step_type == "expand"]
+    assert expand and expand[0].detail["neighbor_truncated"] is True
+    assert expand[0].detail["neighbor_limit"] == 7
+    assert len(prompts) >= 2
+    assert "超过单次展开的每方向上限7" in prompts[1]
+
+
+def test_run_omits_neighbor_truncation_keys_when_not_truncated(rrepo, monkeypatch):
+    """未截断的 expand 步 detail 逐键不变(不得无条件写 False),回喂也零变化。"""
+    trace, prompts = _run_expand_once(rrepo, monkeypatch, truncated=False)
+    expand = [t for t in trace if t.step_type == "expand"]
+    assert expand
+    assert "neighbor_truncated" not in expand[0].detail
+    assert "neighbor_limit" not in expand[0].detail
+    assert all("超过单次展开的每方向上限" not in p for p in prompts)
 
 
 def _rk(oid, rel, otype="claim"):

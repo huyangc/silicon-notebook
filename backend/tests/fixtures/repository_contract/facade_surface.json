@@ -2896,6 +2896,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.conflict_resolution_admitted",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.conversation_owner",
         "target": "_runtime"
       },
@@ -3107,6 +3113,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.extract_source",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.fail_conflict_resolution_submission",
         "target": "_runtime"
       },
       {
@@ -3874,6 +3886,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.run_conflict_resolution_job",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.run_merge_review_job",
         "target": "_runtime"
       },
@@ -4007,6 +4025,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.start_ask_stream",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.start_conflict_resolution",
         "target": "_runtime"
       },
       {
@@ -5242,6 +5266,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', candidate_id: 'str') -> 'None'"
   },
+  "conflict_resolution_admitted": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.resolve_conflicts",
+        "target": "conflict_resolution_admitted"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'bool'"
+  },
   "create_knowhow_milestone": {
     "consumers": [
       {
@@ -5805,6 +5844,21 @@
     ],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'None'"
+  },
+  "fail_conflict_resolution_submission": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.resolve_conflicts",
+        "target": "fail_conflict_resolution_submission"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'None'"
   },
   "fail_notebook_kg_job_submission": {
     "consumers": [
@@ -8241,21 +8295,6 @@
     "scope": "module",
     "signature": "(token: 'RequestUserToken') -> 'None'"
   },
-  "resolve_notebook_conflicts": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/kg_routes.py",
-        "scope": "<module>.resolve_conflicts",
-        "target": "resolve_notebook_conflicts"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowledgeGovernanceService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'dict'"
-  },
   "resolve_session": {
     "consumers": [
       {
@@ -8682,6 +8721,21 @@
     "scope": "facade",
     "signature": "<instance attribute>"
   },
+  "run_conflict_resolution_job": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.resolve_conflicts",
+        "target": "run_conflict_resolution_job"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str') -> 'dict'"
+  },
   "run_merge_review_job": {
     "consumers": [
       {
@@ -9023,6 +9077,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', mode, *, user_id: 'str')"
+  },
+  "start_conflict_resolution": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.resolve_conflicts",
+        "target": "start_conflict_resolution"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
   "start_notebook_relink": {
     "consumers": [
