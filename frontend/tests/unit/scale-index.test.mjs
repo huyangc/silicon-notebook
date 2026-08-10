@@ -7,6 +7,7 @@ import {
   latestScaleIndexDoneKey,
   latestScaleIndexDoneForNotebook,
   queuedScaleIndexImmediateOp,
+  queuedScheduleHint,
   scaleIndexOpConfirm,
   shouldRefreshScaleIndexFromDone,
   shouldShowIndexRequiredBanner,
@@ -199,4 +200,123 @@ test("build 确认文案:引用当前模式名、无退休名、保留关键含�
   assert.match(build, /建立/);
   assert.ok(!build.includes("增量"), "build 确认文案不该出现增量语义");
   assert.match(build, /后台/);   // 异步不阻塞
+});
+
+// ---- queuedScheduleHint: 排队态透明化(位次/空闲窗口/上次耗时) ----
+
+test("queuedScheduleHint: 全字段齐 → 队列长度前缀 + 今天窗口 + 耗时", () => {
+  const now = new Date(2026, 7, 11, 9, 0);
+  const start = new Date(2026, 7, 11, 12, 0); // 同一本地日
+  const hint = queuedScheduleHint({
+    ...base,
+    exists: true,
+    queue_position: 2,
+    queue_length: 5,
+    offpeak_in_window: false,
+    offpeak_next_start_at: start.toISOString(),
+    last_build_ms: 125000, // 125s ≈ 2 分钟
+  }, now);
+  assert.match(hint, /已排队（共 5 项）/);
+  assert.match(hint, /预计今天 12:00 后开始/);
+  assert.match(hint, /上次构建约 2 分钟/);
+  // 两段(窗口+耗时)用「；」连接
+  assert.equal(hint.split("；").length, 2);
+});
+
+test("queuedScheduleHint: 旧后端缺全部新字段 → 回退默认文案", () => {
+  const hint = queuedScheduleHint({ ...base, exists: true }, new Date());
+  assert.equal(hint, "已排队，将在服务器空闲时构建；完成后自动更新");
+});
+
+test("queuedScheduleHint: offpeak_in_window=true → 「即将开始」分支，忽略 next_start_at", () => {
+  const hint = queuedScheduleHint({
+    ...base,
+    exists: true,
+    offpeak_in_window: true,
+    offpeak_next_start_at: "2026-08-11T10:00:00Z",
+  }, new Date());
+  assert.match(hint, /已进入空闲时段，即将开始/);
+  assert.ok(!hint.includes("预计"), "offpeak_in_window 为真时不应再显示下一次窗口");
+});
+
+test("queuedScheduleHint: queue_length >= 2 → 前缀带队列项数，不含位次措辞", () => {
+  const hint = queuedScheduleHint({ ...base, exists: true, queue_position: 1, queue_length: 3 }, new Date());
+  assert.match(hint, /已排队（共 3 项）/);
+  assert.ok(!hint.includes("排在第"), "排队文案不该再声称位次(空闲窗口开启后队列项并发启动,位次是假串行语义)");
+});
+
+test("queuedScheduleHint: queue_length 为 1 或缺失 → 不带项数后缀", () => {
+  const single = queuedScheduleHint({ ...base, exists: true, queue_position: 1, queue_length: 1 }, new Date());
+  assert.ok(!single.includes("共"), "队列仅一项时不该出现「共 N 项」");
+  assert.ok(single.startsWith("已排队，"), single);
+
+  const missing = queuedScheduleHint({ ...base, exists: true, queue_position: 1 }, new Date());
+  assert.ok(!missing.includes("共 "), "queue_length 缺失时不该输出「共 N 项」");
+});
+
+test("queuedScheduleHint: 下一空闲窗口在本地明天 → 「明天」", () => {
+  const now = new Date(2026, 7, 11, 23, 0);
+  const start = new Date(2026, 7, 12, 1, 15); // 跨本地日
+  const hint = queuedScheduleHint({ ...base, exists: true, offpeak_next_start_at: start.toISOString() }, now);
+  assert.match(hint, /预计明天 01:15 后开始/);
+});
+
+test("queuedScheduleHint: offpeak_next_start_at 为非法 ISO → 该分段省略，不抛异常", () => {
+  const now = new Date(2026, 7, 11, 9, 0);
+  const hint = queuedScheduleHint({
+    ...base,
+    exists: true,
+    queue_length: 3,
+    offpeak_in_window: false,
+    offpeak_next_start_at: "not-a-real-timestamp",
+    last_build_ms: 45000,
+  }, now);
+  assert.ok(!hint.includes("预计"), "非法 ISO 时不该输出窗口分段");
+  assert.match(hint, /已排队（共 3 项）/);
+  assert.match(hint, /上次构建约 1 分钟内/);
+});
+
+test("queuedScheduleHint: queue_length 缺失 → 不输出「共 N 项」（脏数据/旧后端兼容）", () => {
+  const now = new Date(2026, 7, 11, 9, 0);
+  const start = new Date(2026, 7, 11, 12, 0);
+  const hint = queuedScheduleHint({
+    ...base,
+    exists: true,
+    queue_position: 1,
+    offpeak_next_start_at: start.toISOString(),
+  }, now);
+  assert.ok(!hint.includes("共 "), "queue_length 缺失时不该出现「共 N 项」");
+  assert.match(hint, /预计今天 12:00 后开始/);
+});
+
+test("queuedScheduleHint: 上次构建耗时三档格式化", () => {
+  const now = new Date();
+  assert.match(
+    queuedScheduleHint({ ...base, exists: true, last_build_ms: 45000 }, now),
+    /上次构建约 1 分钟内/,
+  );
+  assert.match(
+    queuedScheduleHint({ ...base, exists: true, last_build_ms: 1500000 }, now), // 25 分钟
+    /上次构建约 25 分钟/,
+  );
+  assert.match(
+    queuedScheduleHint({ ...base, exists: true, last_build_ms: 5400000 }, now), // 90 分钟 = 1 小时 30 分
+    /上次构建约 1 小时 30 分/,
+  );
+});
+
+test("queuedScheduleHint: 数值档位/内部术语不上屏", () => {
+  const now = new Date(2026, 7, 11, 9, 0);
+  const start = new Date(2026, 7, 11, 12, 0);
+  const hint = queuedScheduleHint({
+    ...base,
+    exists: true,
+    queue_position: 1,
+    queue_length: 4,
+    offpeak_next_start_at: start.toISOString(),
+    last_build_ms: 5400000,
+  }, now);
+  for (const banned of ["manifest", "chunk", "KG", "canonical", "tier", "projection"]) {
+    assert.ok(!hint.toLowerCase().includes(banned.toLowerCase()), `内部术语「${banned}」不该上屏: ${hint}`);
+  }
 });

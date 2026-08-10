@@ -535,7 +535,7 @@ class RepositoryFacade:
                 repository_ref
             )._notify_index_done(notebook_id),
         )
-        scale_idle_queue: dict = {}   # {notebook_id: mode} 待低峰重建
+        scale_idle_queue: dict = {}   # {notebook_id: (mode, queued_at_iso)} 待低峰重建
         scale_scheduler_started = False
         # 大库自动建索引(maybe_auto_index)的 O(1) once-set:notebook_id 一旦被评估
         # (无论「已入队/建成」还是「判定不需要」)即加入,读路径兜底靠它避免每查询都

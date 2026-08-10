@@ -464,6 +464,16 @@ class ScaleIndexBuilder:
                 self.projections.source_ids(notebook_id)
             ),
             "built_at": self.now(),
+            # Wall clock from entry to this manifest being assembled. This is a
+            # deliberate approximation (hence "约" in user-facing copy): it
+            # excludes the subsequent persist I/O (cannot include the duration
+            # of writing the very manifest it would be embedded in) and also
+            # excludes the source-partition artifact rebuild that runs after
+            # this manifest is saved (see below, guarded by
+            # source_partitioned_graph_artifacts_enabled). Named distinctly
+            # from ``build_ms`` below (per-stage timings dict) — they differ
+            # by one letter and are easy to confuse.
+            "total_build_ms": round((time.perf_counter() - build_started) * 1000),
             "build_ms": dict(timings),
         }
         persist_started = time.perf_counter()
@@ -570,6 +580,7 @@ class ScaleIndexBuilder:
         }
 
     def fold(self, notebook_id: str, assume_locked: bool = False) -> dict:
+        fold_started = time.perf_counter()
         idx = self.load_scale(notebook_id)
         if idx is None:
             return self.build(notebook_id)
@@ -770,6 +781,13 @@ class ScaleIndexBuilder:
                         self.projections.total_chunk_count(notebook_id)
                     ),
                     "n_ann": len(ann_labels),
+                    # Wall clock from entry to this manifest being assembled —
+                    # mirrors build()'s total_build_ms (see there for why it
+                    # excludes both the manifest write itself and the
+                    # subsequent source-partition artifact rebuild).
+                    "total_build_ms": round(
+                        (time.perf_counter() - fold_started) * 1000
+                    ),
                 }
             )
             scale_index_module.save_fold_manifest(str(temporary), manifest)

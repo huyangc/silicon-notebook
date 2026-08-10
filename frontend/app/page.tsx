@@ -87,7 +87,7 @@ import {
   type NotebookRef,
 } from "./notebook-bases";
 import {
-  describeScaleIndex, latestScaleIndexDoneKey, queuedScaleIndexImmediateOp, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
+  describeScaleIndex, latestScaleIndexDoneKey, queuedScaleIndexImmediateOp, queuedScheduleHint, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
   type ScaleIndexOp, type ScaleIndexStatus,
 } from "./scale-index";
 import {
@@ -6191,6 +6191,7 @@ export default function Home() {
                       tabIndex={clickable ? 0 : undefined}
                       title={clickable
                         ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : v.primaryOp === "rebuild" ? "点击全量重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                        : v.state === "queued" ? queuedScheduleHint(s, new Date())
                         : (s.eligible ? "" : "内容较少，暂不需要检索索引（直接搜索已够快）")}
                       onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
                       onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}
@@ -7863,7 +7864,7 @@ export default function Home() {
                     const color = v.tone === "warn" ? "var(--color-warn, #b97a00)" : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
                     const desc = v.tone === "muted" ? "内容较少，直接搜索已够快，无需索引"
                       : v.state === "building" ? "后台进行，完成后自动更新"
-                      : v.state === "queued" ? "已排队，将在服务器空闲时构建；完成后自动更新"
+                      : v.state === "queued" ? queuedScheduleHint(s, new Date())
                       : v.state === "stale" ? "新增内容未纳入索引，暂不参与检索与推理"
                       : v.state === "indexed" ? "已建成且为最新"
                       : `为本笔记本的内容建立快速查找结构，加速语义检索与${strictLabel}`;
@@ -8132,6 +8133,7 @@ export default function Home() {
                           tabIndex={clickable ? 0 : undefined}
                           title={clickable
                             ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : v.primaryOp === "rebuild" ? "点击全量重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
+                            : v.state === "queued" ? queuedScheduleHint(s, new Date())
                             : (s.eligible ? "" : "内容较少，暂不需要检索索引（直接搜索已够快）")}
                           onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
                           onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}

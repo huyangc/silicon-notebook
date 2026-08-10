@@ -14,6 +14,62 @@ import weakref
 from typing import Any, Callable, Optional
 
 
+def _utc_now_iso() -> str:
+    """UTC ISO8601 stamp for idle-queue entries — style aligned with the
+    manifest ``built_at`` stamp (``isoformat(timespec="microseconds")``), but
+    fixed to UTC so the frontend renders it in the browser's local timezone
+    rather than the server's."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="microseconds"
+    )
+
+
+def offpeak_window_state(
+    now: datetime.datetime, start_hour: int, end_hour: int
+) -> tuple[bool, Optional[datetime.datetime]]:
+    """Single source of truth for the off-peak window judgement.
+
+    ``now`` must be a timezone-aware local time (callers pass
+    ``datetime.datetime.now().astimezone()``). The in-window predicate is
+    logically identical to the inline check this replaces in
+    ``_process_idle_queue`` (``start_hour == end_hour`` is deliberately
+    always out-of-window). When out of window, returns the next local
+    datetime at which the window opens (today's ``start_hour`` if that is
+    still ahead of ``now``, otherwise tomorrow's).
+
+    Out-of-range ``start_hour``/``end_hour`` (not in ``0..23``) fail open to
+    ``(False, None)`` rather than raising: this feeds the ``/scale-index/status``
+    read path, and a misconfigured deployment env var must not turn a status
+    poll into a 500 — it should just look like "not currently queued for an
+    off-peak window" (the pre-transparency behaviour was silently never
+    draining the idle queue, which this matches). ``start_hour == end_hour``
+    is the same "always out of window" case as above, but is reported as
+    ``(False, None)`` too — a window that never opens has no meaningful next
+    start time to promise the caller.
+
+    This function works in whatever fixed UTC-offset ``now.tzinfo`` carries
+    (deployments target a single fixed local offset) and does not observe
+    daylight-saving transitions; that is a deliberate simplification, not a
+    bug, for a deployment target without DST.
+    """
+    if not (0 <= start_hour <= 23) or not (0 <= end_hour <= 23):
+        return False, None
+    if start_hour == end_hour:
+        return False, None
+    hour = now.hour
+    in_window = (
+        start_hour <= hour < end_hour
+        if start_hour <= end_hour
+        else hour >= start_hour or hour < end_hour
+    )
+    if in_window:
+        return True, None
+    candidate = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        candidate = candidate + datetime.timedelta(days=1)
+    return False, candidate
+
+
 class ScaleArtifactRuntime:
     def __init__(
         self,
@@ -565,6 +621,21 @@ class ScaleArtifactRuntime:
             notebook_id in self.idle_queue,
         )
 
+    def _queue_snapshot(self, notebook_id: str) -> tuple[int, int, str]:
+        """1-based queue position, queue length and this entry's queued_at,
+        all read under one lock acquisition so they describe the same
+        instant (fail-open to position 0 if the entry raced out)."""
+        with self.building_lock:
+            ids = list(self.idle_queue)
+            entry = self.idle_queue.get(notebook_id)
+        length = len(ids)
+        try:
+            position = ids.index(notebook_id) + 1
+        except ValueError:
+            position = 0
+        queued_at = entry[1] if entry is not None else ""
+        return position, length, queued_at
+
     def status(self, notebook_id: str) -> dict:
         # status() consumes ONLY the notebook's tier; read it with a cheap PK
         # query instead of rebuilding the full NotebookSummary (from_row's 5
@@ -602,6 +673,42 @@ class ScaleArtifactRuntime:
             result["state"] = "building"
         elif notebook_id in self.idle_queue:
             result["state"] = "queued"
+            position, length, queued_at = self._queue_snapshot(notebook_id)
+            in_window, next_start = offpeak_window_state(
+                datetime.datetime.now().astimezone(),
+                self.settings.scale_index_offpeak_start_hour,
+                self.settings.scale_index_offpeak_end_hour,
+            )
+            result.update(
+                {
+                    "queue_position": position,
+                    "queue_length": length,
+                    "queued_at": queued_at,
+                    "offpeak_in_window": in_window,
+                    "offpeak_next_start_at": (
+                        next_start.astimezone(datetime.timezone.utc).isoformat(
+                            timespec="microseconds"
+                        )
+                        if next_start is not None
+                        else ""
+                    ),
+                }
+            )
+            if exists:
+                # 排队更新的库(fold/rebuild 排在低峰)磁盘上已有上一版 manifest ——
+                # 排队态恰是最需要「上次构建耗时」的地方,读取失败按现有损坏兜底口径
+                # 处理(fail-open,字段缺省 0/空,由下面的公共默认块补上)。
+                try:
+                    prior_manifest = self.artifacts.read_manifest(out_dir)
+                except Exception:  # noqa: BLE001 — 同上面损坏 manifest 的兜底口径
+                    prior_manifest = None
+                if prior_manifest is not None:
+                    result["last_built_at"] = str(
+                        prior_manifest.get("built_at", "")
+                    )
+                    result["last_build_ms"] = int(
+                        prior_manifest.get("total_build_ms", 0)
+                    )
         elif not exists:
             result["state"] = (
                 "suggested"
@@ -639,6 +746,7 @@ class ScaleArtifactRuntime:
                 {
                     "stale": bool(version_stale or delta_over or dim_stale),
                     "last_built_at": str(manifest.get("built_at", "")),
+                    "last_build_ms": int(manifest.get("total_build_ms", 0)),
                     "manifest_dim": int(manifest.get("dim", 0)),
                     "runtime_dim": int(runtime_dim),
                     "n_nodes": int(manifest.get("n_nodes", 0)),
@@ -649,17 +757,20 @@ class ScaleArtifactRuntime:
                 }
             )
             return result
-        result.update(
-            {
-                "stale": False,
-                "last_built_at": "",
-                "n_nodes": 0,
-                "n_chunks": 0,
-                "n_ann": 0,
-                "n_chunk_ann": 0,
-                "has_chunk_ann": False,
-            }
-        )
+        # setdefault (not update): the queued branch above may already have
+        # populated last_built_at/last_build_ms from a prior on-disk manifest
+        # — this shared tail must not clobber that with the unindexed defaults.
+        for key, default in (
+            ("stale", False),
+            ("last_built_at", ""),
+            ("last_build_ms", 0),
+            ("n_nodes", 0),
+            ("n_chunks", 0),
+            ("n_ann", 0),
+            ("n_chunk_ann", 0),
+            ("has_chunk_ann", False),
+        ):
+            result.setdefault(key, default)
         return result
 
     def index_status(self, notebook_id: str) -> dict:
@@ -740,17 +851,17 @@ class ScaleArtifactRuntime:
         building.  Likewise, an already-running build keeps its queued
         follow-up because this call did not actually start a replacement.
         """
-        removed_idle_mode = None
+        removed_idle_entry = None
         with self.building_lock:
             if notebook_id in self.building:
                 return False
             if claim_idle:
-                removed_idle_mode = self.idle_queue.pop(notebook_id, None)
-                if removed_idle_mode is None:
+                removed_idle_entry = self.idle_queue.pop(notebook_id, None)
+                if removed_idle_entry is None:
                     return False
-                mode = removed_idle_mode
+                mode = removed_idle_entry[0]
             elif supersede_idle:
-                removed_idle_mode = self.idle_queue.pop(notebook_id, None)
+                removed_idle_entry = self.idle_queue.pop(notebook_id, None)
             self.building.add(notebook_id)
         # building 已登记后推一次待办快照,「索引构建中」项才会立刻出现在已连接
         # 的铃铛里;此前只有 notify_index_done 会刷新,运行期间要重连才看得到。
@@ -789,20 +900,17 @@ class ScaleArtifactRuntime:
                 # Starting the immediate worker failed before it could do any
                 # work.  Restore the displaced off-peak request unless a newer
                 # request was queued in the meantime.
-                if removed_idle_mode is not None:
-                    self.idle_queue.setdefault(notebook_id, removed_idle_mode)
+                if removed_idle_entry is not None:
+                    self.idle_queue.setdefault(notebook_id, removed_idle_entry)
             raise
         return True
 
     def _process_idle_queue(self, force: bool = False) -> None:
         if not force:
-            hour = datetime.datetime.now().hour
-            lower = self.settings.scale_index_offpeak_start_hour
-            upper = self.settings.scale_index_offpeak_end_hour
-            in_window = (
-                lower <= hour < upper
-                if lower <= upper
-                else hour >= lower or hour < upper
+            in_window, _next_start = offpeak_window_state(
+                datetime.datetime.now().astimezone(),
+                self.settings.scale_index_offpeak_start_hour,
+                self.settings.scale_index_offpeak_end_hour,
             )
             if not in_window:
                 return
@@ -860,7 +968,7 @@ class ScaleArtifactRuntime:
             )
         if when == "idle":
             with self.building_lock:
-                self.idle_queue[notebook_id] = mode
+                self.idle_queue[notebook_id] = (mode, _utc_now_iso())
             self._ensure_scheduler()
             return {"status": "queued", "notebook_id": notebook_id}
         started = self._run_scale_op(

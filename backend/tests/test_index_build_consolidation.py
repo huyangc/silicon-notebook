@@ -154,7 +154,7 @@ def test_cancel_dequeues_queued(repo):
     nb = repo.create_notebook(NotebookCreate(name="q"))
     # 手动放入空闲队列(镜像 trigger_scale_index_rebuild(when=idle) 的效果)
     with repo._scale_building_lock:
-        repo._scale_idle_queue[nb.id] = "auto"
+        repo._scale_idle_queue[nb.id] = ("auto", "2026-01-01T00:00:00.000000+00:00")
     assert repo.scale_index_status(nb.id)["state"] == "queued"
     out = repo.cancel_scale_index(nb.id)
     assert out["cancelled"] is True
@@ -185,7 +185,7 @@ def test_dequeue_returns_bool(repo):
     nb = repo.create_notebook(NotebookCreate(name="d"))
     assert repo._dequeue_scale_idle(nb.id) is False   # 不存在
     with repo._scale_building_lock:
-        repo._scale_idle_queue[nb.id] = "auto"
+        repo._scale_idle_queue[nb.id] = ("auto", "2026-01-01T00:00:00.000000+00:00")
     assert repo._dequeue_scale_idle(nb.id) is True     # 移除
     assert repo._dequeue_scale_idle(nb.id) is False    # 再移除幂等
 

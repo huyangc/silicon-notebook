@@ -1,6 +1,7 @@
 """Task 20: scale/viz cache, version and scheduling state has one owner."""
 from __future__ import annotations
 
+import datetime
 import gc
 import threading
 import time
@@ -12,6 +13,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
+from app.services.scale_artifact_runtime import offpeak_window_state
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -405,7 +407,8 @@ def test_manual_now_supersedes_existing_idle_queue_atomically(repo, monkeypatch)
     )
 
     assert scale.trigger(notebook.id, when="idle", mode="auto")["status"] == "queued"
-    assert scale.idle_queue[notebook.id] == "auto"
+    assert scale.idle_queue[notebook.id][0] == "auto"
+    assert scale.idle_queue[notebook.id][1]  # queued_at stamp is non-empty
 
     result = scale.trigger(notebook.id, when="now", mode="full")
 
@@ -417,7 +420,7 @@ def test_manual_now_supersedes_existing_idle_queue_atomically(repo, monkeypatch)
 
     # A genuinely newer follow-up remains queued behind the claimed build.
     assert scale.trigger(notebook.id, when="idle", mode="fold")["status"] == "queued"
-    assert scale.idle_queue[notebook.id] == "fold"
+    assert scale.idle_queue[notebook.id][0] == "fold"
     assert scale.status(notebook.id)["state"] == "building"
 
 
@@ -427,7 +430,7 @@ def test_manual_now_restores_displaced_idle_request_if_worker_cannot_start(
     """A thread-launch failure must not silently lose the older safe fallback."""
     notebook = _seed(repo)
     scale = repo._runtime.scale_artifacts
-    scale.idle_queue[notebook.id] = "fold"
+    scale.idle_queue[notebook.id] = ("fold", "2026-01-01T00:00:00.000000+00:00")
     monkeypatch.setattr(
         scale,
         "_start_daemon",
@@ -438,7 +441,7 @@ def test_manual_now_restores_displaced_idle_request_if_worker_cannot_start(
         scale._run_scale_op(notebook.id, "full", supersede_idle=True)
 
     assert notebook.id not in scale.building
-    assert scale.idle_queue[notebook.id] == "fold"
+    assert scale.idle_queue[notebook.id] == ("fold", "2026-01-01T00:00:00.000000+00:00")
 
 
 def test_idle_tick_keeps_follow_up_for_notebook_that_is_still_building(
@@ -448,7 +451,7 @@ def test_idle_tick_keeps_follow_up_for_notebook_that_is_still_building(
     notebook = _seed(repo)
     scale = repo._runtime.scale_artifacts
     scale.building.add(notebook.id)
-    scale.idle_queue[notebook.id] = "fold"
+    scale.idle_queue[notebook.id] = ("fold", "2026-01-01T00:00:00.000000+00:00")
     launched = []
     monkeypatch.setattr(
         scale,
@@ -458,7 +461,7 @@ def test_idle_tick_keeps_follow_up_for_notebook_that_is_still_building(
 
     scale._process_idle_queue(force=True)
 
-    assert scale.idle_queue[notebook.id] == "fold"
+    assert scale.idle_queue[notebook.id] == ("fold", "2026-01-01T00:00:00.000000+00:00")
     assert launched == []
 
 
@@ -469,8 +472,8 @@ def test_idle_tick_restores_failed_item_and_continues_with_remaining_queue(
     first = _seed(repo)
     second = _seed(repo)
     scale = repo._runtime.scale_artifacts
-    scale.idle_queue[first.id] = "fold"
-    scale.idle_queue[second.id] = "full"
+    scale.idle_queue[first.id] = ("fold", "2026-01-01T00:00:00.000000+00:00")
+    scale.idle_queue[second.id] = ("full", "2026-01-01T00:00:01.000000+00:00")
     launched = []
 
     def start(name, target):
@@ -482,7 +485,7 @@ def test_idle_tick_restores_failed_item_and_continues_with_remaining_queue(
 
     scale._process_idle_queue(force=True)
 
-    assert scale.idle_queue[first.id] == "fold"
+    assert scale.idle_queue[first.id] == ("fold", "2026-01-01T00:00:00.000000+00:00")
     assert first.id not in scale.building
     assert second.id not in scale.idle_queue
     assert second.id in scale.building
@@ -560,3 +563,183 @@ def test_t4deleg_unified_last_rebuild_at_delegate(repo, monkeypatch):
     )
     mode = scale._resolve_mode(notebook.id, "fold")
     assert calls and calls[0] == notebook.id and mode == "full"  # MUT
+
+
+# ---------------------------------------------------------------------------
+# Indexing-queue transparency: offpeak_window_state (pure function) and the
+# status() queue_position/queue_length/queued_at/last_build_ms fields it feeds.
+# ---------------------------------------------------------------------------
+
+
+def test_offpeak_window_state_normal_range_in_and_out():
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    in_window, next_start = offpeak_window_state(
+        datetime.datetime(2026, 8, 11, 3, 30, tzinfo=tz), 2, 6
+    )
+    assert in_window is True
+    assert next_start is None
+
+    in_window, next_start = offpeak_window_state(
+        datetime.datetime(2026, 8, 11, 10, 0, tzinfo=tz), 2, 6
+    )
+    assert in_window is False
+    assert next_start == datetime.datetime(2026, 8, 12, 2, 0, tzinfo=tz)
+
+
+def test_offpeak_window_state_start_hour_inclusive_end_hour_exclusive():
+    tz = datetime.timezone.utc
+    in_window, next_start = offpeak_window_state(
+        datetime.datetime(2026, 8, 11, 2, 0, tzinfo=tz), 2, 6
+    )
+    assert in_window is True
+    assert next_start is None
+
+    # end_hour is exclusive: exactly at the boundary is already out of window,
+    # and the next window is tomorrow's start_hour (today's has passed).
+    in_window, next_start = offpeak_window_state(
+        datetime.datetime(2026, 8, 11, 6, 0, tzinfo=tz), 2, 6
+    )
+    assert in_window is False
+    assert next_start == datetime.datetime(2026, 8, 12, 2, 0, tzinfo=tz)
+
+
+def test_offpeak_window_state_wraps_midnight():
+    tz = datetime.timezone.utc
+    in_window, _next_start = offpeak_window_state(
+        datetime.datetime(2026, 8, 11, 23, 0, tzinfo=tz), 22, 6
+    )
+    assert in_window is True
+    in_window, _next_start = offpeak_window_state(
+        datetime.datetime(2026, 8, 11, 3, 0, tzinfo=tz), 22, 6
+    )
+    assert in_window is True
+    in_window, next_start = offpeak_window_state(
+        datetime.datetime(2026, 8, 11, 12, 0, tzinfo=tz), 22, 6
+    )
+    assert in_window is False
+    assert next_start == datetime.datetime(2026, 8, 11, 22, 0, tzinfo=tz)
+
+
+def test_offpeak_window_state_equal_hours_is_always_out_of_window():
+    # start_hour == end_hour is a window that never opens: fail-open to
+    # (False, None) rather than promising a next start time that will never
+    # actually arrive (there is no meaningful "today's start_hour").
+    tz = datetime.timezone.utc
+    for hour in (0, 2, 12, 23):
+        in_window, next_start = offpeak_window_state(
+            datetime.datetime(2026, 8, 11, hour, 0, tzinfo=tz), 4, 4
+        )
+        assert in_window is False
+        assert next_start is None
+
+
+def test_offpeak_window_state_out_of_range_hours_fail_open():
+    # A misconfigured deployment env var must not turn a /scale-index/status
+    # poll into a 500 — out-of-range hours fail open just like start==end.
+    tz = datetime.timezone.utc
+    now = datetime.datetime(2026, 8, 11, 12, 0, tzinfo=tz)
+    for start_hour, end_hour in ((24, 6), (2, 24), (-1, 6), (2, -1), (24, -1)):
+        in_window, next_start = offpeak_window_state(now, start_hour, end_hour)
+        assert in_window is False
+        assert next_start is None
+
+
+def test_status_reports_queue_position_length_and_queued_at(repo, monkeypatch):
+    first = _seed(repo)
+    second = _seed(repo)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id IN (?, ?)", (first.id, second.id))
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+    monkeypatch.setattr(scale, "_start_daemon", lambda name, target: None)
+
+    scale.trigger(first.id, when="idle", mode="auto")
+    scale.trigger(second.id, when="idle", mode="fold")
+
+    first_status = scale.status(first.id)
+    assert first_status["state"] == "queued"
+    assert first_status["queue_position"] == 1
+    assert first_status["queue_length"] == 2
+    assert first_status["queued_at"]
+    assert isinstance(first_status["offpeak_in_window"], bool)
+
+    second_status = scale.status(second.id)
+    assert second_status["state"] == "queued"
+    assert second_status["queue_position"] == 2
+    assert second_status["queue_length"] == 2
+
+    # when=now 抢占 first(supersede_idle pops it off the queue) — second's
+    # position must move up to 1 / queue length shrinks to 1.
+    scale.trigger(first.id, when="now", mode="full")
+    assert first.id not in scale.idle_queue
+    second_status_after = scale.status(second.id)
+    assert second_status_after["queue_position"] == 1
+    assert second_status_after["queue_length"] == 1
+
+
+def test_status_queued_offpeak_next_start_at_is_tz_aware_utc(repo, monkeypatch):
+    # The frontend renders offpeak_next_start_at in the browser's local
+    # timezone: the wire value must be UTC and carry tzinfo, never a naive
+    # local timestamp, or every deployment off UTC would render the wrong
+    # clock time.
+    notebook = _seed(repo)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+    monkeypatch.setattr(scale, "_start_daemon", lambda name, target: None)
+    # Deterministically out-of-window regardless of wall-clock time at test
+    # run: a 1-hour window starting 2 hours from "now" can never contain the
+    # current hour.
+    now_hour = datetime.datetime.now().astimezone().hour
+    start_hour = (now_hour + 2) % 24
+    end_hour = (start_hour + 1) % 24
+    monkeypatch.setattr(scale.settings, "scale_index_offpeak_start_hour", start_hour)
+    monkeypatch.setattr(scale.settings, "scale_index_offpeak_end_hour", end_hour)
+
+    scale.trigger(notebook.id, when="idle", mode="auto")
+    status = scale.status(notebook.id)
+    assert status["state"] == "queued"
+    assert status["offpeak_in_window"] is False
+
+    next_start_at = status["offpeak_next_start_at"]
+    assert next_start_at
+    parsed = datetime.datetime.fromisoformat(next_start_at)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == datetime.timedelta(0)
+
+
+def test_status_queued_surfaces_last_build_ms_from_disk_manifest(repo, monkeypatch):
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    manifest = repo.build_scale_index(notebook.id)
+    assert manifest["total_build_ms"] >= 0
+
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+    scale.idle_queue[notebook.id] = ("fold", "2026-01-01T00:00:00.000000+00:00")
+
+    status = scale.status(notebook.id)
+    assert status["state"] == "queued"
+    assert status["last_build_ms"] == manifest["total_build_ms"]
+    assert status["last_built_at"] == manifest["built_at"]
+
+
+def test_status_queued_legacy_manifest_without_total_build_ms_defaults_zero(
+    repo, monkeypatch
+):
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    repo.build_scale_index(notebook.id)
+
+    # A manifest predating this feature has no total_build_ms key at all.
+    monkeypatch.setattr(
+        scale.artifacts,
+        "read_manifest",
+        lambda out_dir: {"built_at": "2020-01-01T00:00:00", "version": []},
+    )
+    scale.idle_queue[notebook.id] = ("fold", "2026-01-01T00:00:00.000000+00:00")
+
+    status = scale.status(notebook.id)
+    assert status["state"] == "queued"
+    assert status["last_build_ms"] == 0
+    assert status["last_built_at"] == "2020-01-01T00:00:00"

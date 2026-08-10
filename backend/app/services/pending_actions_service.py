@@ -40,13 +40,15 @@ class PendingActionsService:
                 if state in ("stale", "suggested", "building", "queued"):
                     item: dict[str, Any] = {
                         "type": "index",
-                        "state": "building" if state == "queued" else state,
+                        "state": state,
                         "notebook_id": notebook_id,
                         "notebook_name": projection["notebook_names"].get(notebook_id, ""),
                     }
                     total = status.get("total_chunks") or 0
                     delta = status.get("delta_chunks") or 0
-                    if state in ("building", "queued") and total:
+                    # queued 不是构建进度——(total-delta)/total 会误导排队中的库
+                    # 显示出一个虚假的完成百分比。
+                    if state == "building" and total:
                         item["progress"] = round(100.0 * max(0, total - delta) / total)
                     items.append(item)
 
