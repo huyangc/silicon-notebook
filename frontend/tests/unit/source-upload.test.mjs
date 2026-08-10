@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  classifyStagedFiles,
   compactStagedFileName,
   summarizeUpload,
   uploadDocTypeFields,
@@ -281,4 +282,66 @@ test("summarizeUpload: 折叠取后出现的同 id 快照（第 2 个文件在�
   ]);
   assert.deepEqual(outcome.sources.map((s) => s.doc_type), ["textbook"], "留最新快照");
   assert.equal(outcome.added.length, 1, "仍是本次真正新建的一条");
+});
+
+// ------------------------------------------- classifyStagedFiles：入列前逐文件分类
+
+const CLASSIFY_OPTS = {
+  supportedExtensions: ["pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm"],
+  legacyOfficeExtensions: ["doc", "ppt", "xls"],
+  maxBytes: 1024,
+  supportedHint: "PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm) / Markdown / CSV",
+};
+
+test("classifyStagedFiles: 不支持的类型逐条给出原因，可上传的保序进 accepted", () => {
+  const files = [
+    { name: "a.pdf", size: 10 },
+    { name: "b.txt", size: 10 },
+    { name: "c.md", size: 10 },
+    { name: "d", size: 10 }, // 无扩展名（拖入文件夹时的典型形态）
+  ];
+  const { accepted, skipped } = classifyStagedFiles(files, CLASSIFY_OPTS);
+  assert.deepEqual(accepted.map((f) => f.name), ["a.pdf", "c.md"]);
+  assert.deepEqual(skipped.map((f) => f.name), ["b.txt", "d"]);
+  for (const item of skipped) {
+    assert.match(item.reason, /不支持的文件类型/);
+    assert.match(item.reason, /PDF \/ Word/, "原因里要有支持列表，用户才知道该给什么");
+  }
+});
+
+test("classifyStagedFiles: 旧版 Office 给「另存为」引导而非笼统的类型不支持", () => {
+  const { accepted, skipped } = classifyStagedFiles(
+    [{ name: "legacy.doc", size: 10 }, { name: "deck.ppt", size: 10 }],
+    CLASSIFY_OPTS,
+  );
+  assert.deepEqual(accepted, []);
+  for (const item of skipped) assert.match(item.reason, /另存为 \.docx \/ \.pptx \/ \.xlsx/);
+});
+
+test("classifyStagedFiles: 超过单文件上限的给出带上限的原因，等于上限可上传", () => {
+  const { accepted, skipped } = classifyStagedFiles(
+    [{ name: "fits.pdf", size: 1024 }, { name: "big.pdf", size: 1025 }],
+    CLASSIFY_OPTS,
+  );
+  assert.deepEqual(accepted.map((f) => f.name), ["fits.pdf"]);
+  assert.deepEqual(skipped.map((f) => f.name), ["big.pdf"]);
+  assert.match(skipped[0].reason, /超过单个文件上限（1 KB）/);
+});
+
+test("classifyStagedFiles: maxBytes 未到达（null）时不做大小预判，交给服务端权威 413", () => {
+  const { accepted, skipped } = classifyStagedFiles(
+    [{ name: "big.pdf", size: 10 ** 9 }],
+    { ...CLASSIFY_OPTS, maxBytes: null },
+  );
+  assert.deepEqual(accepted.map((f) => f.name), ["big.pdf"]);
+  assert.deepEqual(skipped, []);
+});
+
+test("classifyStagedFiles: 扩展名大小写不敏感", () => {
+  const { accepted, skipped } = classifyStagedFiles(
+    [{ name: "UPPER.PDF", size: 10 }],
+    CLASSIFY_OPTS,
+  );
+  assert.deepEqual(accepted.map((f) => f.name), ["UPPER.PDF"]);
+  assert.deepEqual(skipped, []);
 });

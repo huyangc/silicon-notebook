@@ -6402,6 +6402,62 @@ button.chat-session-card {
   cursor: pointer;
 }
 
+.drop-zone.is-dragover {
+  border-color: #4058ff;
+  background: #eef0ff;
+}
+
+/* 添加文件时被跳过的文件（类型不支持/超大小/超批量）：弹窗内持久展示，不能只靠
+   2.2s 即逝的 toast——那正是「批量上传时不支持的文档静默消失」的来源之一。 */
+.source-modal-card > .staged-skipped {
+  flex: 0 0 auto;
+}
+
+.staged-skipped {
+  margin: -10px 24px 16px;
+  padding: 10px 14px;
+  border: 1px solid #ecd3ab;
+  background: #fff9f0;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.staged-skipped-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.staged-skipped-rows {
+  max-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.staged-skipped-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+}
+
+.staged-skipped-name {
+  word-break: break-all;
+}
+
+.staged-skipped-reason {
+  color: var(--danger, #c0392b);
+  text-align: right;
+}
+
 .drop-zone strong {
   font-size: 20px;
 }
