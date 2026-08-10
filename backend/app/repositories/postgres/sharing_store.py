@@ -69,6 +69,7 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
     ),
     ("chunk_embeddings", "SELECT * FROM chunk_embeddings WHERE notebook_id=%s"),
+    ("chunk_questions", "SELECT * FROM chunk_questions WHERE notebook_id=%s"),
     (
         "element_embeddings",
         "SELECT e.* FROM element_embeddings e JOIN sources s ON s.id=e.source_id "
@@ -105,6 +106,7 @@ _COPY_VALIDATED_TABLES = (
     ("source_paper_meta", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("source_authors", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("chunks", ""),
+    ("chunk_questions", ""),
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_facts", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_fact_elements", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),

@@ -54,13 +54,30 @@ def test_authenticated_system_config_exposes_upload_guards(client):
 
     response = client.get("/api/system/config", headers=_auth(client))
     assert response.status_code == 200, response.text
-    assert response.json() == {
+    payload = response.json()
+    assert {
+        key: payload[key]
+        for key in (
+            "source_upload_max_bytes",
+            "source_upload_max_files_per_batch",
+            "report_max_sections",
+            "report_max_subqueries_per_section",
+            "user_activity_view_enabled",
+        )
+    } == {
         "source_upload_max_bytes": 1024 * 1024,
         "source_upload_max_files_per_batch": 20,
         "report_max_sections": 6,
         "report_max_subqueries_per_section": 4,
         "user_activity_view_enabled": True,
     }
+    assert payload["supported_source_extensions"] == [
+        "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm"
+    ]
+    assert [row["id"] for row in payload["parser_engines"]] == [
+        "mineru_self_hosted", "mineru_cloud", "builtin"
+    ]
+    assert all("api" not in row and "token" not in row for row in payload["parser_engines"])
 
 
 def test_source_multipart_auth_runs_before_the_bounded_body_parser(client):

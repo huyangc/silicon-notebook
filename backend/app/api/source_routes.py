@@ -37,6 +37,7 @@ from app.services import background_jobs
 from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.parser_registry import SUPPORTED_SOURCE_SUFFIXES
 
 
 router = APIRouter()
@@ -44,8 +45,6 @@ router = APIRouter()
 # 批量重解析一次最多受理的源数(去重后)。体检命中样本本就 ≤20;给宽松上限只为挡住
 # 「重复 id/超大列表灌满无界执行器队列」(codex),不是产品限制。
 _REPARSE_MAX = 200
-
-SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 
 _SOURCE_UPLOAD_OPENAPI = {
     "requestBody": {

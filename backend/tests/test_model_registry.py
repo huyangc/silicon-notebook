@@ -25,6 +25,7 @@ _EXPECTED_WORKLOADS = {
     "source_summary": ("chat", "background", "来源摘要"),
     "notebook_metadata": ("chat", "background", "笔记本信息提取"),
     "paper_metadata": ("chat", "background", "论文元数据提取"),
+    "chunk_question_generation": ("chat", "background", "分块问题生成"),
     "kg_extract": ("chat", "background", "知识抽取"),
     "kg_refine": ("chat", "background", "知识细化"),
     "kg_glean": ("chat", "background", "知识补充抽取"),

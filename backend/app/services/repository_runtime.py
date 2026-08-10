@@ -52,6 +52,7 @@ from app.services.schema_registry import SchemaRegistryService
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
+from app.services.chunk_question_index import ChunkQuestionIndexService
 from app.services.source_graph_primitives import SourceGraphPrimitives
 from app.services.source_subgraph import SourceSubgraphService
 from app.services.source_subgraph_ppr import SourceSubgraphPprService
@@ -160,6 +161,13 @@ class RepositoryRuntime:
         )
         self.source_store = bundle.sources
         self.chunk_store = bundle.chunks
+        self.chunk_question_index = ChunkQuestionIndexService(
+            settings=self.settings,
+            chunks=self.chunk_store,
+            models=self.models,
+            event_log=self.event_log,
+            now=self.seams.now,
+        )
         # Task 25: reports-table row persistence is seam-free (the shared
         # database boundary + the id/clock seams + identity's current_user),
         # so the runtime owns and constructs it eagerly.  The process-global

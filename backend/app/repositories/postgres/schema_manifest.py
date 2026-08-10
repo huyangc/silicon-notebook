@@ -28,7 +28,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the current SQLite v42 / PostgreSQL v20
+# Every ordinary application table in the current SQLite v44 / PostgreSQL v22
 # compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
 # the migration ledger/shadow control tables are adapter-internal. Import and
 # shadow preflight use this reverse-totality list to reject unrelated/live
@@ -46,6 +46,7 @@ POSTGRES_BUSINESS_TABLES = (
     "catalog_candidates",
     "catalog_jobs",
     "chunk_embeddings",
+    "chunk_questions",
     "chunks",
     "communities",
     "community_members",
@@ -179,6 +180,7 @@ POSTGRES_JSON_COLUMNS = frozenset(
 POSTGRES_BYTEA_COLUMNS = frozenset(
     {
         "chunk_embeddings.vector",
+        "chunk_questions.vector",
         "element_embeddings.vector",
         "knowledge_embeddings.vector",
         "memory_embeddings.vector",
@@ -214,10 +216,10 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v43. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v44. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=43,
-    postgres_version=21,
+    sqlite_version=44,
+    postgres_version=22,
 )

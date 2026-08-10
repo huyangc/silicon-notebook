@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from xml.etree import ElementTree
 
 from app.models.sources import SourceElement
+from app.services.parser_registry import builtin_parser_id
 
 
 def parse_source_file(
@@ -16,18 +17,18 @@ def parse_source_file(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    suffix = Path(file_name).suffix.lower()
-    if suffix in {".md", ".markdown"}:
+    parser_id = builtin_parser_id(file_name)
+    if parser_id == "markdown":
         return parse_markdown(source_id, Path(file_path))
-    if suffix == ".docx":
+    if parser_id == "docx":
         return parse_docx(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if suffix == ".pptx":
+    if parser_id == "pptx":
         return parse_pptx(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if suffix == ".pdf":
+    if parser_id == "pdf":
         return parse_pdf(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if suffix == ".csv":
+    if parser_id == "csv":
         return parse_csv(source_id, Path(file_path))
-    if suffix in {".xlsx", ".xlsm"}:
+    if parser_id == "xlsx":
         return parse_xlsx(source_id, Path(file_path))
     return parse_plain_text(source_id, Path(file_path), "text")
 

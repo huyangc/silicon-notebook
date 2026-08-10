@@ -1091,6 +1091,31 @@ class SourceStorePort(Protocol):
 
 @runtime_checkable
 class ChunkStorePort(Protocol):
+    def question_index_chunk_page(
+        self,
+        notebook_id: str,
+        *,
+        after_id: str,
+        limit: int,
+        include_existing: bool,
+    ) -> list[dict[str, Any]]: ...
+    def replace_chunk_questions(
+        self,
+        chunk_id: str,
+        notebook_id: str,
+        source_id: str,
+        rows: Sequence[tuple[str, str, Any]],
+        *,
+        created_at: str,
+    ) -> None: ...
+    def question_index_rows(
+        self,
+        notebook_id: str,
+        *,
+        allowed_source_ids: Sequence[str] | None,
+        limit: int,
+    ) -> list[dict[str, Any]]: ...
+    def question_index_stats(self, notebook_id: str) -> dict[str, int]: ...
     @staticmethod
     def language_probe_rows(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
@@ -2001,6 +2026,14 @@ class BatchMaintenancePort(Protocol):
         self, notebook_id: str
     ) -> UserProfile | None: ...
     def all_notebook_ids(self) -> list[str]: ...
+    def build_chunk_question_index(
+        self,
+        notebook_id: str,
+        *,
+        workers: int,
+        force: bool = False,
+        progress: Callable[[dict[str, int]], None] | None = None,
+    ) -> dict[str, int]: ...
     def source_id_by_hash(self, notebook_id: str, digest: str) -> str | None: ...
     def source_ids_page(
         self, notebook_id: str, *, after_id: str = "", limit: int = 500

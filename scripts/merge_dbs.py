@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=42) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=44) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
@@ -28,6 +28,7 @@ NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 # -> merge_core 整体中止并删 out_db(fail-loud, 不会静默损坏)。
 NOTEBOOK_SCOPED_TABLES = [
     "sources", "source_authors", "source_paper_meta", "chunks", "chunk_embeddings",
+    "chunk_questions",
     "element_embeddings", "knowledge_objects", "knowledge_embeddings",
     "knowledge_relations", "knowledge_object_sources", "knowledge_source_facts",
     "knowledge_source_fact_elements", "knowledge_source_fact_backfills",

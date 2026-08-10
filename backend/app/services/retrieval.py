@@ -777,7 +777,9 @@ class RetrievalSupport:
     known; PPR intentionally leaves it empty rather than inventing a relation.
     """
 
-    origin: Literal["semantic", "lexical", "kg_source", "ppr", "relation"]
+    origin: Literal[
+        "semantic", "lexical", "generated_question", "kg_source", "ppr", "relation"
+    ]
     support_kind: Literal["chunk", "object", "relation", "ppr"]
     support_id: str = ""
     score: Optional[float] = None
@@ -899,6 +901,32 @@ def exact_section_reserve_rule(
     return ReserveRule(reserve=reserve, holds=_member, admits=_member)
 
 
+def is_generated_question_only_chunk(chunk: "RetrievedChunk") -> bool:
+    """Whether a chunk exists only because the optional question index hit it.
+
+    A collision with any historical channel is deliberately *not* supplemental:
+    support union keeps that chunk in the baseline pool, so enabling the index
+    cannot demote a candidate semantic/lexical/KG retrieval already found.
+    """
+    supports = tuple(chunk.retrieval_supports or ())
+    return bool(supports) and all(
+        support.origin == "generated_question" for support in supports
+    )
+
+
+def partition_generated_question_chunks(
+    chunks: Sequence["RetrievedChunk"],
+) -> tuple[List["RetrievedChunk"], List["RetrievedChunk"]]:
+    """Split historical candidates from question-index-only supplements."""
+    baseline: List["RetrievedChunk"] = []
+    supplemental: List["RetrievedChunk"] = []
+    for chunk in chunks:
+        (supplemental if is_generated_question_only_chunk(chunk) else baseline).append(
+            chunk
+        )
+    return baseline, supplemental
+
+
 def select_with_reserves(
     ranked: Sequence["RetrievedChunk"],
     max_tokens: int,
@@ -992,6 +1020,35 @@ def select_with_reserves(
             selected_ids.add(candidate.chunk_id)
             rescued.add(candidate.chunk_id)
             inserted += 1
+    return selected
+
+
+def select_with_reserves_baseline_first(
+    ranked: Sequence["RetrievedChunk"],
+    max_tokens: int,
+    rules: Sequence[ReserveRule],
+) -> List["RetrievedChunk"]:
+    """Run historical token/reserve selection first, then spend leftovers.
+
+    Generated-question retrieval is an optional low-recall supplement.  Its
+    candidates therefore never enter the historical reserve competition and
+    can neither evict nor reorder a candidate the same request would select
+    with the feature disabled.
+    """
+    baseline, supplemental = partition_generated_question_chunks(ranked)
+    if not baseline:
+        return select_with_reserves(supplemental, max_tokens, rules)
+
+    selected = select_with_reserves(baseline, max_tokens, rules)
+    used = sum(est_tokens(chunk.text) for chunk in selected)
+    if used >= max_tokens:
+        return selected
+    for candidate in supplemental:
+        candidate_tokens = est_tokens(candidate.text)
+        if used + candidate_tokens > max_tokens:
+            continue
+        selected.append(candidate)
+        used += candidate_tokens
     return selected
 
 
@@ -1114,3 +1171,44 @@ def quota_fuse(collected, per_query, top_n, relevance=lambda h: h.relevance):
             break
     counts = [sources.count(i) for i in range(len(queues))]
     return result, counts
+
+
+def quota_fuse_baseline_first(
+    collected, per_query, top_n, relevance=lambda h: h.relevance
+):
+    """Preserve historical quota-fuse output; fill only unused seats.
+
+    Question-index-only candidates remain grouped by their originating query,
+    but are considered only after the complete baseline round-robin result.
+    """
+    baseline = {
+        oid: item for oid, item in collected.items()
+        if not is_generated_question_only_chunk(item)
+    }
+    supplemental = {
+        oid: item for oid, item in collected.items()
+        if is_generated_question_only_chunk(item)
+    }
+    baseline_per_query = [
+        {
+            oid: item for oid, item in rows.items()
+            if oid in baseline and not is_generated_question_only_chunk(item)
+        }
+        for rows in per_query
+    ]
+    selected, counts = quota_fuse(
+        baseline, baseline_per_query, top_n, relevance=relevance
+    )
+    remaining = max(0, top_n - len(selected))
+    if not remaining or not supplemental:
+        return selected, counts
+    supplemental_per_query = [
+        {oid: item for oid, item in rows.items() if oid in supplemental}
+        for rows in per_query
+    ]
+    extra, extra_counts = quota_fuse(
+        supplemental, supplemental_per_query, remaining, relevance=relevance
+    )
+    return selected + extra, [
+        count + extra_counts[index] for index, count in enumerate(counts)
+    ]

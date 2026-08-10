@@ -3196,3 +3196,38 @@ def test_max_consecutive_model_failures_rejects_values_at_or_below_workers(
     """
     with pytest.raises(ValueError, match="并发度"):
         bi._resolve_max_consecutive_model_failures(requested, workers)
+
+
+def test_question_index_cli_requires_explicit_opt_in(capsys):
+    fake = SimpleNamespace(
+        settings=Settings(generated_question_index_mode="off"),
+    )
+    args = SimpleNamespace(notebook_id="nb", force=False)
+
+    assert bi.run_question_index(fake, args, workers=1) == 2
+    assert "GENERATED_QUESTION_INDEX_MODE=off" in capsys.readouterr().err
+
+
+def test_question_index_cli_uses_maintenance_port(capsys):
+    calls = []
+    maintenance = SimpleNamespace(
+        build_chunk_question_index=lambda notebook_id, **kwargs: (
+            calls.append((notebook_id, kwargs))
+            or {"chunks_seen": 2, "questions_stored": 4, "failed": 0}
+        )
+    )
+    fake = SimpleNamespace(
+        settings=Settings(generated_question_index_mode="shadow"),
+        configured=lambda workload: workload in {
+            "chunk_question_generation", "chunk_embedding"
+        },
+        get_notebook=lambda notebook_id: SimpleNamespace(id=notebook_id),
+        maintenance=maintenance,
+    )
+    args = SimpleNamespace(notebook_id="nb", force=True)
+
+    assert bi.run_question_index(fake, args, workers=3) == 0
+    assert calls[0][0] == "nb"
+    assert calls[0][1]["workers"] == 3
+    assert calls[0][1]["force"] is True
+    assert "question-index done" in capsys.readouterr().out

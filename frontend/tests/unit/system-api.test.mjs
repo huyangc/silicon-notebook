@@ -13,6 +13,18 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
     return new Response(JSON.stringify({
       source_upload_max_bytes: 50 * 1024 * 1024,
       source_upload_max_files_per_batch: 20,
+      supported_source_extensions: ["pdf", "md"],
+      parser_engines: [{
+        id: "builtin",
+        priority: 3,
+        execution: "local",
+        file_extensions: ["pdf", "md"],
+        capabilities: ["structured_text", "headings"],
+        supports_url: false,
+        fallback: true,
+        available: true,
+        unavailable_reason: null,
+      }],
       report_max_sections: 7,
       report_max_subqueries_per_section: 6,
       user_activity_view_enabled: false,
@@ -25,6 +37,18 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
     assert.deepEqual(await fetchSystemConfiguration(), {
       source_upload_max_bytes: 50 * 1024 * 1024,
       source_upload_max_files_per_batch: 20,
+      supported_source_extensions: ["pdf", "md"],
+      parser_engines: [{
+        id: "builtin",
+        priority: 3,
+        execution: "local",
+        file_extensions: ["pdf", "md"],
+        capabilities: ["structured_text", "headings"],
+        supports_url: false,
+        fallback: true,
+        available: true,
+        unavailable_reason: null,
+      }],
       report_max_sections: 7,
       report_max_subqueries_per_section: 6,
       user_activity_view_enabled: false,
@@ -55,6 +79,10 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
     assert.equal(config.user_activity_view_enabled, false);
     assert.equal(config.report_max_sections, 6);
     assert.equal(config.report_max_subqueries_per_section, 4);
+    assert.deepEqual(config.supported_source_extensions, [
+      "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm",
+    ]);
+    assert.deepEqual(config.parser_engines, []);
   } finally {
     globalThis.fetch = originalFetch;
   }

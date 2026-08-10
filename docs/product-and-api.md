@@ -46,7 +46,7 @@ SQLite remains the shipped default, while PostgreSQL 16 is also a supported dire
 The outer page is a notebook collection/library (KG-native pipeline):
 
 1. Click `＋ 新建` — the app creates an `Untitled notebook` and enters it immediately (no dialog).
-2. Upload PDF, Markdown, DOCX, PPTX, CSV, or XLSX sources (multipart).
+2. Upload PDF, Markdown, DOCX, PPTX, CSV, or XLSX sources (multipart). The authenticated system configuration returns one sanitized parser-capability registry used by both upload validation and the import UI. The UI shows ordered self-hosted MinerU → MinerU public cloud → built-in fallback capabilities, execution boundary, deployment availability, and a fixed safe unavailable reason; endpoints, paths, credentials, and raw errors never leave the server. Selection remains automatic, and a configured self-hosted path is never silently replaced by public cloud.
 3. Backend (async background job): structured Markdown parse → chunking + embeddings — chunk-native Q&A is ready as soon as the source finishes processing.
 4. **KG extraction is conditional** (see [KG extraction trigger](#kg-extraction-trigger)): on ingest it runs only when the notebook already has a KG, or when `KG_AUTO_EXTRACT=true`. `KG_JOB_CONCURRENCY` controls concurrent source jobs; every extraction model call is admitted by the system model scheduler for the service bound to the `kg_extract` workload, so the service's TOML `max_concurrency` remains the only model-capacity limit. The new source is then incrementally fused into the unified KG.
 5. Knowledge objects are stored in `knowledge_objects` + `knowledge_relations` with element-level evidence bindings.
@@ -537,6 +537,14 @@ notebook read, writes need owner):
 | **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |
 | **`graph`** | strict | yes | Single-pass Personalized-PageRank propagation across the cross-document knowledge graph. |
 | **`reasoning`** | strict | yes | Agentic, iterative plan → retrieve → reflect → answer (streams a live trace). |
+
+### Optional generated-question recall supplement
+
+`GENERATED_QUESTION_INDEX_MODE` is a deployment-only rollout with values `off` (default), `shadow`, or `on`. It is not a user retrieval-scope control. Operators first run `scripts/batch_ingest.py question-index --notebook-id ...`; every accepted generated question gets its own embedding row but addresses one immutable original chunk. Generated text is never evidence, never enters citations, and is not returned to the browser. Reparse/delete cascades it; notebook deep-copy and SQLite→PostgreSQL migration remap or preserve it with the original chunk.
+
+The online path runs only when baseline chunk recall returns fewer than `GENERATED_QUESTION_TRIGGER_HITS` (default `5`, minimum `1`). It reads at most `GENERATED_QUESTION_MAX_SCAN_ROWS + 1` rows (default scan cap `10,000`, minimum `1`); crossing the cap skips this supplement rather than performing an unbounded scan. It ranks at most `GENERATED_QUESTION_RECALL × GENERATED_QUESTION_QUESTIONS_PER_CHUNK` question rows, then retains at most `GENERATED_QUESTION_RECALL` original chunks (defaults `40` and `3`; recall minimum `1`, questions per chunk range `1..8`). The existing source ceiling is applied in SQL before that bounded read. `shadow` executes this comparison and emits counts-only internal telemetry but returns the exact baseline tuple. Only `on` may append matching original chunks, and it does not evict or reorder baseline hits. `off` incurs no table read or extra embedding call.
+
+The offline builder requires chat workload `chunk_question_generation` and embedding workload `chunk_embedding`. A per-chunk completion timestamp makes successful empty model output idempotent; per-chunk failures remain unmarked and retryable. `--force` intentionally regenerates already completed chunks. Because the first implementation uses a bounded matrix scan rather than a separate ANN artifact, libraries above the scan cap remain baseline-only; rollout must start in `shadow` and use its content-free hit/add/skip counts for A/B evaluation before `on`.
 
 ### Ids vs. display names
 

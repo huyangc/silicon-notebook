@@ -90,6 +90,7 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
     ),
     ("chunk_embeddings", "SELECT * FROM chunk_embeddings WHERE notebook_id = ?"),
+    ("chunk_questions", "SELECT * FROM chunk_questions WHERE notebook_id = ?"),
     (
         # element_embeddings still excludes knowhow: the projector's
         # _write_elements never embeds an element (only chunks get vectors),
@@ -149,6 +150,7 @@ _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     ("source_paper_meta", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("source_authors", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("chunks", ""),
+    ("chunk_questions", ""),
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_facts", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_source_fact_elements", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),

@@ -21,17 +21,22 @@ class _PeakEmbedder:
     configured = True
     dim = 8
 
-    def __init__(self, fail_substr=None):
+    def __init__(self, fail_substr=None, *, rendezvous=None):
         self.fail_substr = fail_substr
         self.active = 0
         self.maximum = 0
         self.lock = threading.Lock()
+        self.rendezvous = (
+            threading.Barrier(rendezvous) if rendezvous is not None else None
+        )
 
     def embed_texts(self, texts):
         with self.lock:
             self.active += 1
             self.maximum = max(self.maximum, self.active)
         try:
+            if self.rendezvous is not None:
+                self.rendezvous.wait(timeout=2)
             time.sleep(0.03)
             if self.fail_substr and any(self.fail_substr in text for text in texts):
                 raise RuntimeError("batch failed")
@@ -115,7 +120,7 @@ def test_all_source_batches_share_bound_service_peak(repo_factory):
 
 
 def test_source_failed_batch_isolated_under_scheduler(repo_factory):
-    raw = _PeakEmbedder(fail_substr="number 15")
+    raw = _PeakEmbedder(fail_substr="number 15", rendezvous=3)
     repo = repo_factory(raw, maximum=3)
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     source_id = _insert_source_with_elements(repo, notebook.id, 30)

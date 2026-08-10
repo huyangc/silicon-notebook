@@ -326,6 +326,10 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
 
+可选生成问题索引使用后台 chat workload `chunk_question_generation` 与既有
+`chunk_embedding` workload；执行离线 `question-index` 前必须同时绑定。rollout mode
+保持关闭就是零成本默认；语义和全部数值护栏只在[产品与 API 参考](./product-and-api_zh.md#可选生成问题召回补充)登记。
+
 Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_agent` 对当前 notebook 与当前有效
 挂载参考库的联邦证据做规划和反思检索，`knowhow_complete` 再把这些证据与同表参考合成为结构化建议。
 需要此功能时必须把两者都绑定到兼容的 chat 服务；任一未绑定或任一阶段 provider 失败时都不返回建议，
@@ -673,6 +677,23 @@ MINERU_RETURN_IMAGES    # 是否保留 PDF/DOCX/PPTX 文档中的内嵌图片（
 MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出丢弃）
 MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
 ```
+
+解析路由由后端唯一注册表声明，并经登录后的系统配置响应投影。顺序固定为：优先已配置的
+自托管 MinerU；只有没有自托管路径时才允许公共云；内置解析器保留为按格式兜底。浏览器只会
+收到能力、执行边界、可用状态与固定原因枚举，绝不收到 endpoint 或凭证。
+
+**生成问题 rollout（可选检索补充）：**
+
+```text
+GENERATED_QUESTION_INDEX_MODE
+GENERATED_QUESTION_QUESTIONS_PER_CHUNK
+GENERATED_QUESTION_TRIGGER_HITS
+GENERATED_QUESTION_RECALL
+GENERATED_QUESTION_MAX_SCAN_ROWS
+```
+
+除非运维人员明确在构建/评估该索引，否则 mode 保持 `off`。先用 `shadow` 做只含计数的 A/B，
+再考虑 `on`；精确默认值与边界见产品合同，离线命令见运维文档。
 
 `MINERU_MAX_RETRIES` 由自建 `MINERU_MODE=http` 适配器与 mineru.net 云端请求共用，
 覆盖 URL 提交/轮询/结果下载以及签名文件上传。默认按 1 秒、2 秒做有界指数退避，

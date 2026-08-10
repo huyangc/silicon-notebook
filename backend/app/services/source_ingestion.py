@@ -47,6 +47,7 @@ from app.services.paper_meta import (
     paper_meta_prompt,
     verify_paper_meta,
 )
+from app.services.parser_registry import engine_supports_file
 from app.services.parsers import mineru_content_list_to_elements
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
@@ -982,7 +983,11 @@ class SourceIngestionService:
             else:
                 mineru_client = self.mineru_client()
                 cloud_client = self.mineru_cloud_client()
-                if not mineru_client.configured and cloud_client.configured:
+                if (
+                    not mineru_client.configured
+                    and cloud_client.configured
+                    and engine_supports_file("mineru_cloud", source.file_name)
+                ):
                     # 本地 http/cli 未配置 + 云端已配 → 上传文件走云端(对称 URL 分支)；
                     # 云端任一步失败 → 回落本地 Python PDF 解析，摄取不中断。
                     try:

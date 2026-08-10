@@ -65,7 +65,12 @@ from app.services.prompts import (
     answer_prompt,
     followup_rewrite_prompt,
 )
-from app.services.retrieval import RetrievedKnowledge, classify_evidence
+from app.services.retrieval import (
+    RetrievedKnowledge,
+    classify_evidence,
+    is_generated_question_only_chunk,
+    merge_retrieval_supports,
+)
 from app.services.source_scope import source_scope_context, source_scope_restricted
 
 # Matches both one provenance marker and the comma-group form models commonly
@@ -82,6 +87,75 @@ _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
     "当前检索没有找到足以支撑回答的来源证据。资料可能已经导入，"
     "但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。"
 )
+
+
+def _merge_multi_direct_chunk_hits(collected: dict, direct_hits) -> None:
+    """Fold historical direct hits into a multi-query candidate mapping.
+
+    A question-only row may have the higher optional score, but it must never
+    remain the canonical object once a historical keyword/exact producer finds
+    that chunk.  Keeping the direct object also leaves the old question-only
+    per-query row untouched, so quota fusion cannot use its optional score to
+    reorder the baseline.  Collisions between historical producers retain the
+    previous best-relevance behavior while preserving every provenance.
+    """
+    for candidate in direct_hits:
+        current = collected.get(candidate.chunk_id)
+        if current is None:
+            collected[candidate.chunk_id] = candidate
+            continue
+        supports = merge_retrieval_supports(
+            current.retrieval_supports, candidate.retrieval_supports
+        )
+        if is_generated_question_only_chunk(current):
+            # Reinsert at this direct producer's position.  Assigning over the
+            # old key would retain the optional row's earlier dict position and
+            # change stable tie ordering versus a feature-off direct stream.
+            collected.pop(candidate.chunk_id)
+            candidate.retrieval_supports = supports
+            collected[candidate.chunk_id] = candidate
+        elif candidate.relevance > current.relevance:
+            candidate.retrieval_supports = supports
+            collected[candidate.chunk_id] = candidate
+        else:
+            current.retrieval_supports = supports
+
+
+def _merge_direct_chunk_hits(candidates: list, direct_hits) -> list:
+    """Fold keyword/exact hits into a list without retaining question scores.
+
+    The historical single/mix union keeps the existing object on collision.
+    That remains the rule for every historical candidate.  A question-only
+    object is different: once a direct producer finds the same chunk, the
+    direct object must become canonical (including its historical relevance)
+    and occupy the position where that direct stream first produced it.  This
+    makes feature-on selection identical to feature-off selection while still
+    preserving the optional provenance marker.
+    """
+    if not direct_hits:
+        return candidates
+    by_id = {candidate.chunk_id: candidate for candidate in candidates}
+    out = list(candidates)
+    for candidate in direct_hits:
+        current = by_id.get(candidate.chunk_id)
+        if current is None:
+            out.append(candidate)
+            by_id[candidate.chunk_id] = candidate
+            continue
+        supports = merge_retrieval_supports(
+            current.retrieval_supports, candidate.retrieval_supports
+        )
+        if is_generated_question_only_chunk(current):
+            out.remove(current)
+            candidate.retrieval_supports = supports
+            out.append(candidate)
+            by_id[candidate.chunk_id] = candidate
+        else:
+            # Preserve the old list-union contract: the existing historical
+            # semantic/lexical object stays canonical even when a later direct
+            # producer reports a larger score.
+            current.retrieval_supports = supports
+    return out
 
 
 @dataclass
@@ -1616,7 +1690,11 @@ class AskService:
                 )
             _t = time.perf_counter()
             from app.services.query_rewrite import expand_query
-            from app.services.retrieval import quota_fuse, est_tokens
+            from app.services.retrieval import (
+                est_tokens,
+                partition_generated_question_chunks,
+                quota_fuse_baseline_first,
+            )
             ex = None
             raise_if_cancelled(cancel_event)
             if self.settings.query_rewrite_enabled:
@@ -1679,22 +1757,39 @@ class AskService:
                 candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = (
                     self.candidates.mixed_chunk_candidates(
                         notebook_id, retrieval_query, hl, sub_queries))
-                # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
-                candidates = self.candidates.merge_chunk_candidates(candidates, kw_hits)
-                # ∪ exact-identifier whole-section hits (same dedup contract)
-                candidates = self.candidates.merge_chunk_candidates(candidates, exact_hits)
+                # Direct historical producers replace a question-only
+                # canonical row on collision, so the optional score/position
+                # cannot influence rerank tie order or token truncation.
+                candidates = _merge_direct_chunk_hits(candidates, kw_hits)
+                candidates = _merge_direct_chunk_hits(candidates, exact_hits)
                 raise_if_cancelled(cancel_event)
+                baseline_candidates, supplemental_candidates = (
+                    partition_generated_question_chunks(candidates)
+                )
                 rerank_client = self.model_clients.rerank("retrieval_rerank")
                 order = rerank_client.rerank(
-                    retrieval_query, [c.text for c in candidates],
+                    retrieval_query, [c.text for c in baseline_candidates],
                     on_error=lambda e: self.model_errors.note_model_error(
                         "rerank",
                         e,
                         workload_id="retrieval_rerank",
                     ))
                 raise_if_cancelled(cancel_event)
-                ranked = [candidates[i] for i in order]
-                baseline_chunk_candidates = list(ranked)
+                ranked = [baseline_candidates[i] for i in order]
+                if supplemental_candidates:
+                    supplemental_order = rerank_client.rerank(
+                        retrieval_query,
+                        [c.text for c in supplemental_candidates],
+                        on_error=lambda e: self.model_errors.note_model_error(
+                            "rerank",
+                            e,
+                            workload_id="retrieval_rerank",
+                        ),
+                    )
+                    ranked.extend(
+                        supplemental_candidates[i] for i in supplemental_order
+                    )
+                baseline_chunk_candidates = list(baseline_candidates)
                 kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
                 untruncated_kg_block = kg_block
                 kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
@@ -1703,7 +1798,7 @@ class AskService:
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
                 from app.services.retrieval import (
                     exact_section_reserve_rule, graph_reserve_rule,
-                    select_with_reserves,
+                    select_with_reserves_baseline_first,
                 )
 
                 # Two floors inside ONE budget. The reranker is a general
@@ -1714,7 +1809,7 @@ class AskService:
                 # evicts what the other is holding; a reserve set to 0 is fully
                 # inert, so `chunk_graph_reserve` keeps its historical
                 # behaviour byte-for-byte.
-                selected = select_with_reserves(ranked, chunk_budget, (
+                selected = select_with_reserves_baseline_first(ranked, chunk_budget, (
                     graph_reserve_rule(max(0, self.settings.chunk_graph_reserve)),
                     exact_section_reserve_rule(
                         max(0, self.settings.exact_section_reserve), exact_ids),
@@ -1730,33 +1825,35 @@ class AskService:
                 # ∪ bilingual-keyword chunk hits: merge into collected (best relevance)
                 # and add as an extra per_query group so quota_fuse can surface them.
                 if kw_hits:
-                    for c in kw_hits:
-                        cur = collected.get(c.chunk_id)
-                        if cur is None or c.relevance > cur.relevance:
-                            collected[c.chunk_id] = c
+                    _merge_multi_direct_chunk_hits(collected, kw_hits)
                     per_query = per_query + [{c.chunk_id: c for c in kw_hits}]
                 # ∪ exact-identifier whole-section hits, treated identically:
                 # its own per_query group is what gives quota_fuse a reason to
                 # surface a section chunk whose standalone relevance is low.
                 if exact_hits:
-                    for c in exact_hits:
-                        cur = collected.get(c.chunk_id)
-                        if cur is None or c.relevance > cur.relevance:
-                            collected[c.chunk_id] = c
+                    _merge_multi_direct_chunk_hits(collected, exact_hits)
                     per_query = per_query + [{c.chunk_id: c for c in exact_hits}]
-                baseline_chunk_candidates = list(collected.values())
-                selected, _counts = quota_fuse(collected, per_query, plan.fuse_k,
-                                               relevance=lambda c: c.relevance)
+                baseline_chunk_candidates, _supplemental_candidates = (
+                    partition_generated_question_chunks(list(collected.values()))
+                )
+                selected, _counts = quota_fuse_baseline_first(
+                    collected,
+                    per_query,
+                    plan.fuse_k,
+                    relevance=lambda c: c.relevance,
+                )
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
                 baseline_kg_truncated = False
                 scored, ids, mat = self.candidates.retrieve_chunk_candidates(
                     notebook_id, sub_queries[0])
-                # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
-                scored = self.candidates.merge_chunk_candidates(scored, kw_hits)
-                # ∪ exact-identifier whole-section hits (same dedup contract)
-                scored = self.candidates.merge_chunk_candidates(scored, exact_hits)
-                baseline_chunk_candidates = list(scored)
+                # Match feature-off MMR input when a direct producer collides
+                # with a question-only supplement.
+                scored = _merge_direct_chunk_hits(scored, kw_hits)
+                scored = _merge_direct_chunk_hits(scored, exact_hits)
+                baseline_chunk_candidates, _supplemental_candidates = (
+                    partition_generated_question_chunks(scored)
+                )
                 raise_if_cancelled(cancel_event)
                 selected = self.candidates.select_chunk_candidates(
                     scored, ids, mat, plan.mmr_k, plan.mmr_lambda)

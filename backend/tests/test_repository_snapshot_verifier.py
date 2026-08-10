@@ -80,6 +80,10 @@ def _rollback_v43(db: sqlite3.Connection) -> None:
     additions that never happened.  Index first: the column it covers cannot
     be dropped while it exists.
     """
+    # The helper is called by every forged pre-current deployment. Undo the
+    # latest additive question-index migration before the historical v43 hop.
+    db.execute("DROP TABLE chunk_questions")
+    db.execute("ALTER TABLE chunks DROP COLUMN question_indexed_at")
     db.execute("DROP INDEX idx_reports_share_token")
     db.execute("ALTER TABLE reports DROP COLUMN shared_at")
     db.execute("ALTER TABLE reports DROP COLUMN share_token")

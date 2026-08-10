@@ -9,6 +9,7 @@ from app.services.retrieval import (
     merge_retrieval_supports,
     select_with_graph_reserve,
     select_with_reserves,
+    select_with_reserves_baseline_first,
     truncate_by_tokens,
 )
 
@@ -45,6 +46,25 @@ def test_direct_and_graph_support_is_not_graph_only():
         RetrievalSupport("ppr", "ppr", "", 0.7),
     )
     assert not is_graph_only_chunk(chunk)
+
+
+def test_question_collision_preserves_graph_only_reserve_eligibility():
+    graph = _chunk(
+        "graph-question-collision", 2,
+        RetrievalSupport("ppr", "ppr", "", 0.7),
+        RetrievalSupport(
+            "generated_question", "chunk", "graph-question-collision", 0.9
+        ),
+    )
+
+    assert is_graph_only_chunk(graph)
+    ranked = [
+        _chunk("direct-1", 2, RetrievalSupport("semantic", "chunk", "direct-1", 0.9)),
+        _chunk("direct-2", 2, RetrievalSupport("lexical", "chunk", "direct-2", 0.8)),
+        graph,
+    ]
+    selected = select_with_graph_reserve(ranked, max_tokens=4, reserve=1)
+    assert [chunk.chunk_id for chunk in selected] == ["direct-1", graph.chunk_id]
 
 
 def test_graph_reserve_evicts_lowest_direct_without_exceeding_budget():
@@ -205,6 +225,23 @@ def test_exact_reserve_is_bounded_by_its_setting():
         exact_section_reserve_rule(1, {"exact-1", "exact-2", "exact-3"}),
     ))
     assert [chunk.chunk_id for chunk in selected] == ["direct", "exact-1"]
+
+
+def test_question_supplement_uses_only_mix_budget_left_after_baseline():
+    baseline = _chunk(
+        "baseline", 3,
+        RetrievalSupport("semantic", "chunk", "baseline", 0.2),
+    )
+    supplemental = _chunk(
+        "supplement", 3,
+        RetrievalSupport(
+            "generated_question", "chunk", "supplement", 0.99
+        ),
+    )
+
+    assert [chunk.chunk_id for chunk in select_with_reserves_baseline_first(
+        [supplemental, baseline], 3, ()
+    )] == ["baseline"]
 
 
 def test_naturally_selected_quota_holder_of_another_rule_is_not_evicted():

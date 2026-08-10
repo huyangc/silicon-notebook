@@ -5,7 +5,7 @@ from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 from app.models.schemas import AskRequest
-from app.services.retrieval import RetrievedChunk
+from app.services.retrieval import RetrievalSupport, RetrievedChunk
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_rerank_client
 from tests.model_testkit import bind_chat_client
@@ -58,6 +58,57 @@ def test_mix_retrieve_handles_multiple_vector_subqueries(repo):
         nb.id, "cascode", "", ["cascode", "output resistance"])
     assert cand
     assert all(isinstance(c, RetrievedChunk) for c in cand)
+
+
+def test_mix_round_robin_finishes_historical_streams_before_question_supplement(
+    repo, monkeypatch
+):
+    def chunk(chunk_id, origin):
+        return RetrievedChunk(
+            chunk_id=chunk_id,
+            source_id="s",
+            source_title="s",
+            section_path="",
+            text=chunk_id,
+            relevance=0.8,
+            retrieval_supports=(
+                RetrievalSupport(origin, "chunk", chunk_id, 0.8),
+            ),
+        )
+
+    vector = [
+        chunk("vector-1", "semantic"),
+        chunk("question-only", "generated_question"),
+        chunk("vector-2", "semantic"),
+    ]
+    kg = [chunk("kg-1", "kg_source"), chunk("kg-2", "kg_source")]
+    ppr = [chunk("ppr-1", "ppr"), chunk("ppr-2", "ppr")]
+    candidates = repo.retrieval.candidates
+    monkeypatch.setattr(candidates, "_gather_vector_chunks", lambda *args: vector)
+    monkeypatch.setattr(candidates, "_notebook_has_kg", lambda _notebook_id: True)
+    monkeypatch.setattr(candidates, "_chunk_kg_overlay", lambda *args, **kwargs: (
+        "", {"k1001": {"object_id": "object-1"}}, [], {}
+    ))
+    monkeypatch.setattr(candidates, "_kg_source_chunks", lambda *args, **kwargs: kg)
+    monkeypatch.setattr(candidates, "_ppr_retrieve", lambda *args, **kwargs: ppr)
+    monkeypatch.setattr(
+        candidates, "_unsafe_source_scope_restricted", lambda _notebook_id: False
+    )
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
+
+    merged, _block, _id_map, _hits, _ppr_count = candidates._mix_retrieve(
+        "nb", "query", "", ["q1", "q2"]
+    )
+
+    assert [chunk.chunk_id for chunk in merged] == [
+        "vector-1",
+        "kg-1",
+        "ppr-1",
+        "vector-2",
+        "kg-2",
+        "ppr-2",
+        "question-only",
+    ]
 
 
 class _AnswerLLM:
