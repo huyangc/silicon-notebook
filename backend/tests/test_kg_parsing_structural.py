@@ -56,6 +56,9 @@ def test_captioned_data_uri_image_element_uses_caption_not_raw_slice():
     assert len(imgs) == 1
     assert imgs[0].text == "a wiring diagram"
     assert "base64" not in imgs[0].text
+    # codex R2 P2: 证据跨度必须真实——char span 切原文得到的就是图注本身,
+    # 而不是 `![a wiri` 这样的字面量前缀(证据匹配按这对偏移消费)。
+    assert text[imgs[0].char_start:imgs[0].char_end] == "a wiring diagram"
 
 
 def test_uncaptioned_data_uri_image_produces_no_kg_element():

@@ -71,6 +71,7 @@ def parse_elements(
     for b in blocks:
         if not (lo <= b.line_start <= hi):
             continue
+        char_start = b.char_start
         char_end = b.char_end
         if b.type == "image":
             # Structured caption only — never the raw markdown slice. For a
@@ -79,19 +80,30 @@ def parse_elements(
             # KG extraction windows for a single image (修1). Blocks without
             # a caption produce no KG parse element at all.
             raw = b.text
-            # Shrink the element's span to just the caption length. The raw
-            # markdown span (b.char_start..b.char_end) still covers the full
+            # Shrink the element's span to just the caption. The raw markdown
+            # span (b.char_start..b.char_end) still covers the full
             # `![caption](data:...)` literal — for a large embedded image
             # that's hundreds of KB, and make_windows() packs purely by char
-            # span, so an unshrunk span still gets sliced into dozens of
-            # windows that each re-run kg_extract on the same short caption
-            # (修：windowing 侧残留). The packer turns the O(payload/n) span
-            # into O(1): at most one extra window boundary, at the gap this
-            # shrink leaves behind. Cost: when the caption is shorter than
-            # the pack overlap, this element can end up packed into two
-            # adjacent windows instead of one (an observed, accepted
-            # trade-off — not "never adds windows").
-            char_end = min(b.char_end, b.char_start + len(raw))
+            # span, so an unshrunk span would be sliced into dozens of windows
+            # that each re-run kg_extract on the same short caption. The
+            # shrink turns that O(payload/n) into O(1): at most one extra
+            # window boundary at the gap it leaves behind (caption shorter
+            # than the pack overlap may land in two adjacent windows — an
+            # observed, accepted trade-off).
+            #
+            # Evidence spans must stay truthful (`_ev()` persists
+            # char_start/char_end as the grounded source range), so locate
+            # the caption's REAL position inside the literal instead of
+            # blindly keeping the `![...` prefix. Only when the caption text
+            # does not appear verbatim in the source (escaped brackets like
+            # `\]` were unescaped during parsing) fall back to the
+            # prefix-length span, which is then packing-only.
+            idx = text.find(raw, b.char_start, b.char_end) if raw else -1
+            if idx >= 0:
+                char_start = idx
+                char_end = idx + len(raw)
+            else:
+                char_end = min(b.char_end, b.char_start + len(raw))
         else:
             raw = text[b.char_start:b.char_end]
         if not raw.strip():
@@ -102,7 +114,7 @@ def parse_elements(
             type=_QTYPE_MAP.get(b.type, "paragraph"),
             file=source_file,
             line_start=b.line_start, line_end=b.line_end,
-            char_start=b.char_start, char_end=char_end,
+            char_start=char_start, char_end=char_end,
             text=raw,
         ))
     return elements

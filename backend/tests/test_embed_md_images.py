@@ -113,6 +113,43 @@ def test_indented_code_backticks_do_not_open_fence(tmp_path):
     assert "    ```\n" in text
 
 
+def test_info_string_line_inside_fence_does_not_close_it(tmp_path):
+    """codex R2 P2: 围栏内的 ```python 字面量带 info 文本, 不是合法 CommonMark
+    闭合符——不能让扫描器提前退出围栏态去改写围栏内的代码示例。"""
+    (tmp_path / "img.png").write_bytes(_PNG_BYTES)
+    # 同长度围栏:开启 ``` 后一行 ```python 与开启符等长但带 info 文本,
+    # 只有「无 info 才算闭合」这半条守卫能挡住它(长度守卫另测)。
+    md_text = (
+        "```\n"
+        "```python\n"
+        "![x](img.png)\n"
+        "```\n"
+        "![y](img.png)\n"
+    )
+
+    text, stats = embed_md_images.embed_images(md_text, tmp_path, 5 * 1024 * 1024)
+
+    assert stats.embedded == 1
+    assert "![x](img.png)" in text
+    assert "![y](data:image/png;base64," in text
+
+
+def test_shorter_fence_line_does_not_close_longer_opener(tmp_path):
+    """CommonMark: 闭合围栏长度不得短于开启围栏。"""
+    (tmp_path / "img.png").write_bytes(_PNG_BYTES)
+    md_text = (
+        "````\n"
+        "```\n"
+        "![x](img.png)\n"
+        "````\n"
+    )
+
+    text, stats = embed_md_images.embed_images(md_text, tmp_path, 5 * 1024 * 1024)
+
+    assert stats.embedded == 0
+    assert "![x](img.png)" in text
+
+
 def test_title_form_embedded(tmp_path):
     """`![alt](img.png "标题")` 形态可被内嵌。"""
     (tmp_path / "img.png").write_bytes(_PNG_BYTES)

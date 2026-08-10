@@ -162,20 +162,29 @@ def embed_images(text: str, base_dir: Path, max_bytes: int) -> Tuple[str, _Stats
     """按行扫描 text, 跳过 fenced 代码块, 其余行内改写图片引用为 data URI。"""
     stats = _Stats()
     out_lines = []
-    fence_marker = None  # None = 不在围栏内; 否则记录围栏字符('`' 或 '~')
+    # None = 不在围栏内; 否则记录 (围栏字符, 开启长度)。CommonMark 的闭合围栏
+    # 必须同字符、长度不短于开启围栏、且除尾随空白外不得有 info 文本——围栏内
+    # 一行 ```python 字面量不是合法闭合符, 不能让扫描器提前退出围栏态(否则
+    # 其后的代码示例会被当正文改写)。
+    fence_open = None
 
     for line in text.splitlines(keepends=True):
         fence_match = _FENCE_RE.match(line)
         if fence_match:
-            marker_char = fence_match.group(1)[0]
-            if fence_marker is None:
-                fence_marker = marker_char
-            elif fence_marker == marker_char:
-                fence_marker = None
+            marker = fence_match.group(1)
+            rest = line[fence_match.end():]
+            if fence_open is None:
+                fence_open = (marker[0], len(marker))
+                out_lines.append(line)
+                continue
+            if (marker[0] == fence_open[0]
+                    and len(marker) >= fence_open[1]
+                    and not rest.strip()):
+                fence_open = None
             out_lines.append(line)
             continue
 
-        if fence_marker is not None:
+        if fence_open is not None:
             out_lines.append(line)
             continue
 
