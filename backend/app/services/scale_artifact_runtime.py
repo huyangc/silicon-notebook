@@ -968,7 +968,15 @@ class ScaleArtifactRuntime:
             )
         if when == "idle":
             with self.building_lock:
-                self.idle_queue[notebook_id] = (mode, _utc_now_iso())
+                # 重复排队(常见于连续加来源触发 maybe_enqueue_fold)只更新 mode,
+                # 保留首次入队时刻:dict 对既有 key 赋值不改插入序,位次锚定在首次
+                # 入队,时间戳必须与它同锚点,否则「入队序位次 + 刷新的时间戳」自相
+                # 矛盾(codex R3 P2)。
+                prior = self.idle_queue.get(notebook_id)
+                self.idle_queue[notebook_id] = (
+                    mode,
+                    prior[1] if prior is not None else _utc_now_iso(),
+                )
             self._ensure_scheduler()
             return {"status": "queued", "notebook_id": notebook_id}
         started = self._run_scale_op(
