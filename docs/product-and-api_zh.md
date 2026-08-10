@@ -619,7 +619,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | 上限 | 数值 |
 | --- | ---: |
 | Frame facets / 每 facet values / axes | 8 / 12 / 8 |
-| Blueprint 共享定义 / 主张 | 24 / 96 |
+| Blueprint 共享定义 / 主张 | 24 / 60 |
 | 每节 writer ledger 主张 | 24 |
 | 综合证据字符数 | 36,000 |
 | 终审输入字符数 | 24,000 |
