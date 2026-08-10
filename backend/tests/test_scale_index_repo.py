@@ -609,9 +609,10 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
 
     manifest = repo.build_scale_index(nb.id)
 
-    # Returned manifest: 9 keys (8 stages + total)
+    # Returned manifest: 10 keys (9 stages + total)
     expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
-                       "chunk_matrix", "relation_matrix", "viz_arrays", "persist"}
+                       "chunk_matrix", "relation_matrix", "viz_arrays",
+                       "source_partitions", "persist"}
     assert "build_ms" in manifest
     returned_build_ms = manifest["build_ms"]
     assert set(returned_build_ms.keys()) == expected_stages | {"total"}
@@ -627,16 +628,19 @@ def test_build_scale_index_emits_stage_timings(repo, monkeypatch):
     assert "version" in manifest
 
     # Disk manifest.json: only the pre-persist stages (persist/total unknown
-    # until after the file itself is written).
+    # until after the file itself is written; source_partitions runs after the
+    # manifest file is saved, so it is equally absent on disk).
     d = os.path.join(repo.settings.storage_dir, "kg_index", nb.id)
     with open(os.path.join(d, "manifest.json")) as fh:
         disk_manifest = json.load(fh)
-    assert set(disk_manifest["build_ms"].keys()) == expected_stages - {"persist"}
+    assert set(disk_manifest["build_ms"].keys()) == (
+        expected_stages - {"persist", "source_partitions"}
+    )
 
-    # Events: 10 scale_index_build events (9 stages + total), each with
+    # Events: 11 scale_index_build events (10 stages + total), each with
     # notebook_id/stage/latency_ms.
     scale_events = [e for e in events if e.get("kind") == "scale_index_build"]
-    assert len(scale_events) == 10
+    assert len(scale_events) == 11
     stages_seen = {e["stage"] for e in scale_events}
     assert stages_seen == expected_stages | {"total"}
     for e in scale_events:
@@ -662,8 +666,9 @@ def test_build_scale_index_on_stage_callback(repo):
     manifest = repo.build_scale_index(nb.id, on_stage=lambda stage, ms: calls.append((stage, ms)))
 
     expected_stages = {"kg_matrix", "ann_build", "synonym", "gather", "transition",
-                       "chunk_matrix", "relation_matrix", "viz_arrays", "persist", "total"}
-    assert len(calls) == 10
+                       "chunk_matrix", "relation_matrix", "viz_arrays",
+                       "source_partitions", "persist", "total"}
+    assert len(calls) == 11
     assert {c[0] for c in calls} == expected_stages
     assert calls[-2][0] == "persist"
     assert calls[-1][0] == "total"

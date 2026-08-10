@@ -206,6 +206,13 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_upload_batch_above_fixed_file_count_guard_is_rejected_before_orchestration 覆盖"
         "(断言 413 + X-User-Message 头 + detail 含上限数字)。"
     ),
+    "app/api/report_routes.py::update_report_outline": (
+        "两处动态 detail 均为纯中文上限模板 f-string，各只插入一个部署配置整数："
+        "「每个章节最多可保留 N 条检索方向」(Settings.report_max_subqueries_per_section) 与"
+        "「报告大纲最多可保留 N 个章节」(Settings.report_max_sections)——无内部黑话、"
+        "无异常原文。真实响应由 tests/test_report_api.py 的 outline PATCH 422 用例覆盖"
+        "(断言 detail 含上限数字)。"
+    ),
     "app/api/knowhow_routes.py::_knowhow_import_user_error": (
         "detail 只能来自 GridParseError 或 KnowhowImportValidationError 的 user_message；"
         "两个异常类型只接受导入层维护的固定中文可操作文案，其他 ValueError 仍走未标记的"
