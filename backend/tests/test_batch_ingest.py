@@ -85,6 +85,57 @@ def test_iter_files_filters_and_sorts(tmp_path):
     assert len([n for n in names if n.endswith(".md")]) == 3
 
 
+def test_discover_files_matches_iter_files_and_groups_excluded(tmp_path):
+    d = _make_md_dir(tmp_path, n=2)
+    (d / "sub" / "raw.docx").write_bytes(b"docx")
+    (d / "noext").write_text("no extension", encoding="utf-8")
+    files, excluded = bi.discover_files(d)
+    assert files == bi.iter_files(d)          # 受支持文件列表与 iter_files 逐位相同
+    assert set(excluded) == {".txt", ".docx", "(无扩展名)"}
+    assert excluded[".txt"] == {"count": 1, "examples": ["ignore.txt"]}
+    assert excluded[".docx"]["count"] == 1
+    assert excluded[".docx"]["examples"] == [str(Path("sub") / "raw.docx")]
+    assert excluded["(无扩展名)"]["examples"] == ["noext"]
+
+
+def test_discover_files_bounds_examples_but_counts_all(tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    n = bi._EXCLUDED_EXAMPLES_PER_EXT + 3
+    for i in range(n):
+        (d / f"f{i:02d}.txt").write_text("x", encoding="utf-8")
+    _, excluded = bi.discover_files(d)
+    assert excluded[".txt"]["count"] == n
+    assert excluded[".txt"]["examples"] == [
+        f"f{i:02d}.txt" for i in range(bi._EXCLUDED_EXAMPLES_PER_EXT)
+    ]
+
+
+def test_report_excluded_files_prints_and_logs(capsys):
+    entries = []
+    bi.report_excluded_files(
+        {
+            ".txt": {"count": 7, "examples": ["a.txt", "b.txt"]},
+            ".docx": {"count": 1, "examples": ["c.docx"]},
+        },
+        log=entries.append,
+    )
+    out = capsys.readouterr().out
+    assert "[warn]" in out and "8 个文件" in out
+    assert ".txt: 7" in out and "(+5 more)" in out
+    assert ".docx: 1" in out and "(+0 more)" not in out
+    assert entries == [{
+        "phase": "excluded_files",
+        "total": 8,
+        "by_ext": {".docx": 1, ".txt": 7},
+    }]
+
+
+def test_report_excluded_files_silent_when_empty(capsys):
+    bi.report_excluded_files({}, log=None)
+    assert capsys.readouterr().out == ""
+
+
 def test_ensure_notebook_default_owner_is_admin(repo):
     nb_id = bi.ensure_notebook(repo, None, "nb")   # owner defaults to the admin user
     with repo._connect() as db:

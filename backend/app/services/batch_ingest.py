@@ -327,11 +327,71 @@ class _PoolReporter:
 
 def iter_files(root: Path, exts: Optional[set] = None) -> List[Path]:
     """递归收集 root 下受支持的文件,按路径稳定排序(保证可恢复遍历顺序)。"""
+    return discover_files(root, exts)[0]
+
+
+# 被排除文件汇总里每个扩展名分组保留的示例文件名条数(纯展示上限,不影响摄取行为)。
+_EXCLUDED_EXAMPLES_PER_EXT = 5
+# 无扩展名文件在汇总里的分组键。
+_NO_EXT_KEY = "(无扩展名)"
+
+
+def discover_files(
+    root: Path, exts: Optional[set] = None
+) -> tuple[List[Path], dict[str, dict]]:
+    """单次遍历 root:返回 (受支持文件列表, 被排除文件汇总)。
+
+    受支持文件列表与 iter_files 逐位相同(按路径稳定排序)。被排除文件汇总按小写
+    扩展名分组:{ext: {"count": 总数, "examples": [有界的相对路径示例]}}——扩展名
+    不在 allowed 里的文件此前不进 uploaded/skipped/failed 任何计数,操作者无从知道
+    有文件被丢下(与 UI 侧批量上传的同类修复对应的 CLI 形态);这份汇总只用于可见
+    报告,不改变摄取行为。
+    """
     allowed = {e.lower() for e in (exts or SUPPORTED_EXTS)}
-    return sorted(
-        p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in allowed
+    supported: List[Path] = []
+    excluded: dict[str, dict] = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        suffix = p.suffix.lower()
+        if suffix in allowed:
+            supported.append(p)
+            continue
+        group = excluded.setdefault(suffix or _NO_EXT_KEY, {"count": 0, "examples": []})
+        group["count"] += 1
+        if len(group["examples"]) < _EXCLUDED_EXAMPLES_PER_EXT:
+            group["examples"].append(str(p.relative_to(root)))
+    return supported, excluded
+
+
+def report_excluded_files(
+    excluded: dict[str, dict], *, log: LogFn | None = None
+) -> None:
+    """把 discover_files 的被排除文件汇总打印成可见告警(可选写入 manifest 日志)。
+
+    只输出、不改变任何摄取行为;没有被排除文件时完全静默。
+    """
+    if not excluded:
+        return
+    total = sum(g["count"] for g in excluded.values())
+    print(
+        f"[warn] 目录里有 {total} 个文件因扩展名不受支持被跳过"
+        f"(不进入 uploaded/skipped/failed 计数;支持: "
+        f"{', '.join(sorted(SUPPORTED_EXTS))}):",
+        flush=True,
     )
+    for ext in sorted(excluded):
+        group = excluded[ext]
+        names = ", ".join(group["examples"])
+        more = group["count"] - len(group["examples"])
+        tail = f" (+{more} more)" if more > 0 else ""
+        print(f"  {ext}: {group['count']} — 例: {names}{tail}", flush=True)
+    if log:
+        log({
+            "phase": "excluded_files",
+            "total": total,
+            "by_ext": {ext: g["count"] for ext, g in sorted(excluded.items())},
+        })
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -1783,12 +1843,14 @@ def _dispatch_main(
         return 0
 
     if args.phase == "all":
+        files, excluded = discover_files(args.input_dir)
+        report_excluded_files(excluded, log=log)
         print("phase=all (pipelined)", flush=True)
         _t = time.perf_counter()
         r = run_all(
             repo,
             notebook_id,
-            iter_files(args.input_dir),
+            files,
             log=log,
             report_interval=args.pool_report_interval,
             fresh=getattr(args, "fresh", False),
@@ -1797,7 +1859,8 @@ def _dispatch_main(
         return 0
 
     if args.phase == "ingest":
-        files = iter_files(args.input_dir)
+        files, excluded = discover_files(args.input_dir)
+        report_excluded_files(excluded, log=log)
         print(f"phase=ingest files={len(files)}", flush=True)
         _t = time.perf_counter()
         c = run_ingest(
@@ -2034,7 +2097,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
     if args.dry_run:
-        files = iter_files(args.input_dir) if args.input_dir else []
+        files, excluded = (
+            discover_files(args.input_dir) if args.input_dir else ([], {})
+        )
+        report_excluded_files(excluded)
         print(f"[dry-run] {len(files)} files under {args.input_dir}", flush=True)
         for p in files[:20]:
             print(f"  {p}", flush=True)
