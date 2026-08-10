@@ -988,6 +988,11 @@ class ScaleArtifactRuntime:
                     prior[1] if prior is not None else _utc_now_iso(),
                 )
             self._ensure_scheduler()
+            # 入列也要推一次待办快照(镜像 _run_scale_op 对 building 的处理):
+            # 已连接的铃铛靠 SSE 增量,不推的话「已排队」要等重连才出现(codex R5 P2)。
+            from app.services.pending_bus import publish_snapshot
+
+            publish_snapshot(self._resolve_index_owner(notebook_id))
             return {"status": "queued", "notebook_id": notebook_id}
         started = self._run_scale_op(
             notebook_id,
@@ -1014,6 +1019,12 @@ class ScaleArtifactRuntime:
                 "state": self.status(notebook_id)["state"],
                 "reason": "building_not_interruptible",
             }
+        if removed:
+            # 出列同样推快照,否则铃铛里的「已排队」要等下一次无关快照才消失
+            # (与入列的 publish 对称,codex R5 P2 的同类面)。
+            from app.services.pending_bus import publish_snapshot
+
+            publish_snapshot(self._resolve_index_owner(notebook_id))
         return {
             "cancelled": bool(removed),
             "state": self.status(notebook_id)["state"],

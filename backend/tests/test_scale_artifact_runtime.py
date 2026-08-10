@@ -442,6 +442,31 @@ def test_requeue_updates_mode_but_keeps_first_queued_at(repo, monkeypatch):
     assert scale.idle_queue[notebook.id] == ("fold", first_stamp)  # mode 新、时刻不变
 
 
+def test_enqueue_and_cancel_publish_pending_snapshot(repo, monkeypatch):
+    """入列/出列都要推待办快照:已连接的铃铛靠 SSE 增量,不推的话「已排队」的
+    出现与消失都要等重连或无关快照(codex R5 P2)。not_queued 的取消不推。"""
+    import app.services.pending_bus as pending_bus
+
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+    published = []
+    monkeypatch.setattr(
+        pending_bus, "publish_snapshot", lambda owner: published.append(owner)
+    )
+
+    assert scale.trigger(notebook.id, when="idle", mode="auto")["status"] == "queued"
+    assert len(published) == 1
+
+    assert scale.cancel(notebook.id)["cancelled"] is True
+    assert len(published) == 2
+
+    assert scale.cancel(notebook.id)["cancelled"] is False  # not_queued
+    assert len(published) == 2  # 无状态变化不推
+
+
 def test_queue_position_survives_restore_reorder(repo):
     """worker 启动失败的恢复路径会 pop 后 setdefault 回队列——dict 插入序因此把
     该项挪到末尾,但位次按首次入队时刻排序推导,不随 dict 序漂移(codex R4 P2)。"""
