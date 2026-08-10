@@ -6421,13 +6421,13 @@ button.chat-session-card {
 
 /* 添加文件时被跳过的文件（类型不支持/超大小/超批量）：弹窗内持久展示，不能只靠
    2.2s 即逝的 toast——那正是「批量上传时不支持的文档静默消失」的来源之一。
-   面板可收缩（flex 0 1 auto）：弹窗卡片 overflow:hidden，矮视口下不可收缩的面板会把
-   下方操作按钮顶出裁剪区（codex #485 R1 P2）。但收缩必须有**下限**：min-height: 0 会让
-   面板在待上传列表很长时被按比例压到只剩标题行，文件名一行都看不见——「已跳过 1 个
-   文件」却不知道是哪个（真机踩中）。下限 = 头行 + 内边距 + 至少一条完整的文件名行。 */
+   面板不参与收缩：任何写死的收缩下限都装不下自身固定内容（「知道了」按钮 42px +
+   内边距 + 间距 + 行区下限 ≈114px，窄屏头部换行还会更高——codex #487 R2 P2），而参与
+   收缩配 min-height:0 又会在待上传列表很长时把文件名行压到不可见（#485 后真机踩中）。
+   面板高度天然有界（行区内部滚动封顶 96px），矮视口的空间腾挪由拖放区先让 +
+   待上传列表下限 + 整卡滚动兜底承担，见上方「收缩顺位」注释。 */
 .source-modal-card > .staged-skipped {
-  flex: 0 1 auto;
-  min-height: 92px;
+  flex: 0 0 auto;
 }
 
 .staged-skipped {
@@ -6452,9 +6452,8 @@ button.chat-session-card {
 }
 
 .staged-skipped-rows {
-  flex: 0 1 auto;
-  /* 行区下限:任何收缩程度下至少一条文件名（长原因换行约两行）完整可见,其余靠滚动 */
-  min-height: 44px;
+  flex: 0 0 auto;
+  /* 行区上限:面板高度因此天然有界,条目多时内部滚动 */
   max-height: 96px;
   overflow-y: auto;
   display: flex;
