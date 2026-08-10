@@ -68,6 +68,17 @@ _KG_GAP_PROBE_LIMIT = 24
 # 是防御性的第二道:IN 列表的长度必须由服务端说了算,不能由上游的一个笔误决定。
 _KG_GAP_MAX_SEEDS = 96
 
+_GENERATED_QUESTION_QUERY_EVENT_FIELDS = frozenset({
+    "kind",
+    "mode",
+    "status",
+    "baseline_hits",
+    "scan_limit",
+    "question_rows",
+    "matched_chunks",
+    "added_chunks",
+})
+
 
 def _first_relation_sample(raw: object) -> str:
     """`canonical_relations.sample_relation_ids` 的第一条样本关系 id。
@@ -1939,7 +1950,10 @@ class CandidateRetrievalService(_RetrievalState):
     def _emit_generated_question_query_event(self, event: dict) -> None:
         """Question-index observability is itself fail-open and content-free."""
         try:
-            self.event_log.emit(event)
+            self.event_log.emit({
+                key: value for key, value in event.items()
+                if key in _GENERATED_QUESTION_QUERY_EVENT_FIELDS
+            })
         except Exception:  # noqa: BLE001 — telemetry never changes retrieval
             return
 

@@ -223,7 +223,6 @@ class ChunkQuestionIndexService:
         counts["indexed_questions"] = stats["questions"]
         self.event_log.emit({
             "kind": "chunk_question_index_build",
-            "notebook_id": notebook_id,
             **counts,
         })
         return counts

@@ -139,6 +139,7 @@ def test_offline_builder_stores_stable_question_rows_and_counts():
     ]
     assert all(row[0].startswith("cq-") for row in stored[3])
     assert events.rows[-1]["kind"] == "chunk_question_index_build"
+    assert "notebook_id" not in events.rows[-1]
 
 
 @pytest.mark.parametrize(
@@ -391,6 +392,35 @@ def test_question_index_event_failure_is_ignored(repo, monkeypatch):
     assert candidates._generated_question_supplement(
         "nb", "question", baseline
     ) is baseline
+
+
+def test_question_index_query_event_is_content_free(repo, monkeypatch):
+    candidates = repo.retrieval.candidates
+    events = []
+    monkeypatch.setattr(candidates.event_log, "emit", events.append)
+
+    candidates._emit_generated_question_query_event({
+        "kind": "chunk_question_index_query",
+        "notebook_id": "nb-secret",
+        "source_id": "source-secret",
+        "query": "user-authored secret",
+        "mode": "shadow",
+        "status": "evaluated",
+        "baseline_hits": 2,
+        "question_rows": 3,
+        "matched_chunks": 1,
+        "added_chunks": 1,
+    })
+
+    assert events == [{
+        "kind": "chunk_question_index_query",
+        "mode": "shadow",
+        "status": "evaluated",
+        "baseline_hits": 2,
+        "question_rows": 3,
+        "matched_chunks": 1,
+        "added_chunks": 1,
+    }]
 
 
 def test_bounded_element_retrieval_spends_capacity_on_baseline_first(
