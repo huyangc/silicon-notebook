@@ -180,6 +180,7 @@ POSTGRES_JSON_COLUMNS = frozenset(
 POSTGRES_BYTEA_COLUMNS = frozenset(
     {
         "chunk_embeddings.vector",
+        "chunk_questions.vector",
         "element_embeddings.vector",
         "knowledge_embeddings.vector",
         "memory_embeddings.vector",

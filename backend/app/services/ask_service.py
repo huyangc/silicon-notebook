@@ -121,6 +121,43 @@ def _merge_multi_direct_chunk_hits(collected: dict, direct_hits) -> None:
             current.retrieval_supports = supports
 
 
+def _merge_direct_chunk_hits(candidates: list, direct_hits) -> list:
+    """Fold keyword/exact hits into a list without retaining question scores.
+
+    The historical single/mix union keeps the existing object on collision.
+    That remains the rule for every historical candidate.  A question-only
+    object is different: once a direct producer finds the same chunk, the
+    direct object must become canonical (including its historical relevance)
+    and occupy the position where that direct stream first produced it.  This
+    makes feature-on selection identical to feature-off selection while still
+    preserving the optional provenance marker.
+    """
+    if not direct_hits:
+        return candidates
+    by_id = {candidate.chunk_id: candidate for candidate in candidates}
+    out = list(candidates)
+    for candidate in direct_hits:
+        current = by_id.get(candidate.chunk_id)
+        if current is None:
+            out.append(candidate)
+            by_id[candidate.chunk_id] = candidate
+            continue
+        supports = merge_retrieval_supports(
+            current.retrieval_supports, candidate.retrieval_supports
+        )
+        if is_generated_question_only_chunk(current):
+            out.remove(current)
+            candidate.retrieval_supports = supports
+            out.append(candidate)
+            by_id[candidate.chunk_id] = candidate
+        else:
+            # Preserve the old list-union contract: the existing historical
+            # semantic/lexical object stays canonical even when a later direct
+            # producer reports a larger score.
+            current.retrieval_supports = supports
+    return out
+
+
 @dataclass
 class _SectionedSynthesis:
     """按节合成成功后的整篇产物(设计文档 §3.1)。
@@ -1720,10 +1757,11 @@ class AskService:
                 candidates, kg_block, kg_id_map, kg_hits, concept_walk_n = (
                     self.candidates.mixed_chunk_candidates(
                         notebook_id, retrieval_query, hl, sub_queries))
-                # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
-                candidates = self.candidates.merge_chunk_candidates(candidates, kw_hits)
-                # ∪ exact-identifier whole-section hits (same dedup contract)
-                candidates = self.candidates.merge_chunk_candidates(candidates, exact_hits)
+                # Direct historical producers replace a question-only
+                # canonical row on collision, so the optional score/position
+                # cannot influence rerank tie order or token truncation.
+                candidates = _merge_direct_chunk_hits(candidates, kw_hits)
+                candidates = _merge_direct_chunk_hits(candidates, exact_hits)
                 raise_if_cancelled(cancel_event)
                 baseline_candidates, supplemental_candidates = (
                     partition_generated_question_chunks(candidates)
@@ -1809,10 +1847,10 @@ class AskService:
                 baseline_kg_truncated = False
                 scored, ids, mat = self.candidates.retrieve_chunk_candidates(
                     notebook_id, sub_queries[0])
-                # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
-                scored = self.candidates.merge_chunk_candidates(scored, kw_hits)
-                # ∪ exact-identifier whole-section hits (same dedup contract)
-                scored = self.candidates.merge_chunk_candidates(scored, exact_hits)
+                # Match feature-off MMR input when a direct producer collides
+                # with a question-only supplement.
+                scored = _merge_direct_chunk_hits(scored, kw_hits)
+                scored = _merge_direct_chunk_hits(scored, exact_hits)
                 baseline_chunk_candidates, _supplemental_candidates = (
                     partition_generated_question_chunks(scored)
                 )
