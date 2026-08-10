@@ -30,23 +30,38 @@ def validate_generated_questions(
     maximum: int,
     max_chars: int,
 ) -> list[str]:
+    _valid, questions = _parse_generated_questions(
+        raw, maximum=maximum, max_chars=max_chars
+    )
+    return questions
+
+
+def _parse_generated_questions(
+    raw: str,
+    *,
+    maximum: int,
+    max_chars: int,
+) -> tuple[bool, list[str]]:
+    """Return schema validity separately from a valid empty question list."""
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError):
-        return []
+        return False, []
     values = payload.get("questions") if isinstance(payload, dict) else None
     if not isinstance(values, list):
-        return []
+        return False, []
+    if any(not isinstance(value, str) for value in values):
+        return False, []
     seen: set[str] = set()
     accepted: list[str] = []
     for value in values:
-        question = " ".join(str(value).split()).strip()
+        question = " ".join(value.split()).strip()
         folded = question.casefold()
         if not question or len(question) > max_chars or folded in seen:
             continue
         seen.add(folded)
         accepted.append(question)
-    return list(itertools.islice(accepted, maximum))
+    return True, list(itertools.islice(accepted, maximum))
 
 
 class ChunkQuestionIndexService:
@@ -97,11 +112,13 @@ class ChunkQuestionIndexService:
             }],
             _QUESTION_SCHEMA_HINT,
         )
-        questions = validate_generated_questions(
+        valid, questions = _parse_generated_questions(
             raw,
             maximum=self.settings.generated_question_questions_per_chunk,
             max_chars=self.settings.embed_truncate_chars,
         )
+        if not valid:
+            raise ValueError("question generation returned an invalid schema")
         if not questions:
             self.chunks.replace_chunk_questions(
                 str(row["chunk_id"]),

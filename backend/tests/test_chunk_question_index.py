@@ -27,6 +27,16 @@ class _Chat:
         })
 
 
+class _InvalidSchemaChat:
+    configured = True
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def chat_json(self, _messages, _schema_hint):
+        return json.dumps(self.payload)
+
+
 class _Models:
     def __init__(self):
         self.chat_client = _Chat()
@@ -129,6 +139,33 @@ def test_offline_builder_stores_stable_question_rows_and_counts():
     ]
     assert all(row[0].startswith("cq-") for row in stored[3])
     assert events.rows[-1]["kind"] == "chunk_question_index_build"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"questions": "not-a-list"},
+        {"questions": [None]},
+        {"questions": [{"text": "not-a-string"}]},
+    ],
+)
+def test_offline_builder_leaves_schema_invalid_generation_retryable(payload):
+    chunks = _Chunks()
+    models = _Models()
+    models.chat_client = _InvalidSchemaChat(payload)
+    service = ChunkQuestionIndexService(
+        settings=Settings(generated_question_index_mode="shadow"),
+        chunks=chunks,
+        models=models,
+        event_log=_Events(),
+        now=lambda: "2026-08-10T00:00:00+00:00",
+    )
+
+    counts = service.build_notebook("nb", workers=1)
+
+    assert counts["failed"] == 1
+    assert counts["empty"] == 0
+    assert chunks.replacements == []
 
 
 def test_offline_builder_is_disabled_by_default():
@@ -354,3 +391,118 @@ def test_question_index_event_failure_is_ignored(repo, monkeypatch):
     assert candidates._generated_question_supplement(
         "nb", "question", baseline
     ) is baseline
+
+
+def test_bounded_element_retrieval_spends_capacity_on_baseline_first(
+    repo, monkeypatch
+):
+    candidates = repo.retrieval.candidates
+    rows = {
+        "element-shared": {
+            "element_id": "element-shared",
+            "source_id": "source-baseline",
+            "location_label": "p1",
+            "element_type": "paragraph",
+            "text": "shared baseline evidence",
+        },
+        "element-unique": {
+            "element_id": "element-unique",
+            "source_id": "source-supplement",
+            "location_label": "p2",
+            "element_type": "paragraph",
+            "text": "shared unique supplemental evidence",
+        },
+    }
+    monkeypatch.setattr(
+        candidates.sources,
+        "evidence_elements",
+        lambda element_ids: {
+            element_id: rows[element_id] for element_id in element_ids
+        },
+    )
+    monkeypatch.setattr(
+        candidates.sources,
+        "source_metadata",
+        lambda source_ids: {
+            source_id: {"title": source_id} for source_id in source_ids
+        },
+    )
+    baseline = RetrievedChunk(
+        chunk_id="chunk-baseline",
+        source_id="source-baseline",
+        source_title="Baseline",
+        section_path="",
+        text="baseline",
+        element_ids=["element-shared"],
+        relevance=0.2,
+        retrieval_supports=(
+            RetrievalSupport("semantic", "chunk", "chunk-baseline", 0.2),
+        ),
+    )
+    supplement = RetrievedChunk(
+        chunk_id="chunk-supplement",
+        source_id="source-supplement",
+        source_title="Supplement",
+        section_path="",
+        text="supplement",
+        element_ids=["element-shared", "element-unique"],
+        relevance=0.99,
+        retrieval_supports=(
+            RetrievalSupport(
+                "generated_question", "chunk", "chunk-supplement", 0.99
+            ),
+        ),
+    )
+
+    elements = candidates._retrieve_elements_from_chunks(
+        "shared", [supplement, baseline], limit=2
+    )
+
+    assert [item.element_id for item in elements] == [
+        "element-shared",
+        "element-unique",
+    ]
+
+
+def test_bounded_element_retrieval_shares_one_hydration_cap(repo, monkeypatch):
+    candidates = repo.retrieval.candidates
+    hydrated_batches = []
+    monkeypatch.setattr(
+        candidates.sources,
+        "evidence_elements",
+        lambda element_ids: hydrated_batches.append(list(element_ids)) or {},
+    )
+    monkeypatch.setattr(
+        candidates.sources, "source_metadata", lambda _source_ids: {}
+    )
+    baseline = RetrievedChunk(
+        chunk_id="chunk-baseline",
+        source_id="source-baseline",
+        source_title="Baseline",
+        section_path="",
+        text="baseline",
+        element_ids=[f"element-baseline-{index}" for index in range(64)],
+        relevance=0.2,
+        retrieval_supports=(
+            RetrievalSupport("semantic", "chunk", "chunk-baseline", 0.2),
+        ),
+    )
+    supplement = RetrievedChunk(
+        chunk_id="chunk-supplement",
+        source_id="source-supplement",
+        source_title="Supplement",
+        section_path="",
+        text="supplement",
+        element_ids=[f"element-supplement-{index}" for index in range(64)],
+        relevance=0.99,
+        retrieval_supports=(
+            RetrievalSupport(
+                "generated_question", "chunk", "chunk-supplement", 0.99
+            ),
+        ),
+    )
+
+    assert candidates._retrieve_elements_from_chunks(
+        "shared", [supplement, baseline], limit=8
+    ) == []
+    assert sum(len(batch) for batch in hydrated_batches) == 64

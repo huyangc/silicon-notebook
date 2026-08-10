@@ -40,6 +40,7 @@ from app.services.retrieval import (
     ensure_procedure_quota,
     is_process_query,
     keyword_basis,
+    partition_generated_question_chunks,
     rrf_fuse,
     score_elements,
     score_knowledge,
@@ -1777,84 +1778,115 @@ class CandidateRetrievalService(_RetrievalState):
         """
         if limit <= 0 or not chunks:
             return []
-        ordered = sorted(
-            chunks,
-            key=lambda chunk: (
-                -float(getattr(chunk, "relevance", 0.0)
-                       or getattr(chunk, "score", 0.0) or 0.0),
-                str(getattr(chunk, "chunk_id", "")),
-            ),
-        )
+        baseline, supplemental = partition_generated_question_chunks(chunks)
         cap = min(64, max(limit, limit * 8))
-        selected: list[str] = []
-        coarse_scores: dict[str, float] = {}
-        position = 0
-        while len(selected) < cap:
-            added = False
-            for chunk in ordered:
-                element_ids = list(getattr(chunk, "element_ids", None) or [])
-                if position >= len(element_ids):
-                    continue
-                element_id = str(element_ids[position] or "")
-                if not element_id or element_id in coarse_scores:
-                    continue
-                coarse_scores[element_id] = float(
-                    getattr(chunk, "relevance", 0.0)
-                    or getattr(chunk, "score", 0.0) or 0.0
-                )
-                selected.append(element_id)
-                added = True
-                if len(selected) >= cap:
-                    break
-            if not added:
-                break
-            position += 1
-        if not selected:
-            return []
 
-        hydrated = self.sources.evidence_elements(selected)
-        source_ids = [
-            str(row.get("source_id") or "") for row in hydrated.values()
-            if row.get("source_id")
-        ]
-        metadata = self.sources.source_metadata(source_ids)
-        candidates = []
-        for element_id in selected:
-            row = hydrated.get(element_id)
-            if not row:
-                continue
-            source_id = str(row.get("source_id") or "")
-            candidates.append({
-                "element_id": element_id,
-                "source_id": source_id,
-                # Same naming rule as the citation cards these elements end up
-                # on (``source_display.source_display_title``).
-                "source_title": source_display_title(
-                    metadata.get(source_id) or {}
+        def _candidate_ids(partition, budget, excluded=()):
+            ordered = sorted(
+                partition,
+                key=lambda chunk: (
+                    -float(getattr(chunk, "relevance", 0.0)
+                           or getattr(chunk, "score", 0.0) or 0.0),
+                    str(getattr(chunk, "chunk_id", "")),
                 ),
-                "location_label": str(row.get("location_label") or ""),
-                "element_type": str(row.get("element_type") or ""),
-                "text": str(row.get("text") or ""),
-            })
-        lexical = score_elements(query, candidates, limit=limit)
-        seen = {item.element_id for item in lexical}
-        by_id = {row["element_id"]: row for row in candidates}
-        for element_id in selected:
-            if len(lexical) >= limit:
-                break
-            if element_id in seen or element_id not in by_id:
-                continue
-            row = by_id[element_id]
-            lexical.append(RetrievedElement(
-                element_id=element_id,
-                source_id=row["source_id"],
-                source_title=row["source_title"],
-                location_label=row["location_label"],
-                element_type=row["element_type"],
-                text=row["text"],
-                score=coarse_scores.get(element_id, 0.0),
-            ))
-        return lexical
+            )
+            selected: list[str] = []
+            coarse_scores: dict[str, float] = {}
+            unavailable = set(excluded)
+            position = 0
+            while len(selected) < budget:
+                added = False
+                for chunk in ordered:
+                    element_ids = [
+                        str(element_id or "")
+                        for element_id in (
+                            getattr(chunk, "element_ids", None) or []
+                        )
+                        if str(element_id or "") not in unavailable
+                    ]
+                    if position >= len(element_ids):
+                        continue
+                    element_id = element_ids[position]
+                    if not element_id or element_id in coarse_scores:
+                        continue
+                    coarse_scores[element_id] = float(
+                        getattr(chunk, "relevance", 0.0)
+                        or getattr(chunk, "score", 0.0) or 0.0
+                    )
+                    selected.append(element_id)
+                    added = True
+                    if len(selected) >= budget:
+                        break
+                if not added:
+                    break
+                position += 1
+            return selected, coarse_scores
+
+        def _hydrate_and_rank(selected, coarse_scores, output_limit):
+            if not selected or output_limit <= 0:
+                return []
+            hydrated = self.sources.evidence_elements(selected)
+            source_ids = [
+                str(row.get("source_id") or "") for row in hydrated.values()
+                if row.get("source_id")
+            ]
+            metadata = self.sources.source_metadata(source_ids)
+            candidates = []
+            for element_id in selected:
+                row = hydrated.get(element_id)
+                if not row:
+                    continue
+                source_id = str(row.get("source_id") or "")
+                candidates.append({
+                    "element_id": element_id,
+                    "source_id": source_id,
+                    # Same naming rule as the citation cards these elements end
+                    # up on (``source_display.source_display_title``).
+                    "source_title": source_display_title(
+                        metadata.get(source_id) or {}
+                    ),
+                    "location_label": str(row.get("location_label") or ""),
+                    "element_type": str(row.get("element_type") or ""),
+                    "text": str(row.get("text") or ""),
+                })
+            lexical = score_elements(
+                query, candidates, limit=output_limit
+            )
+            seen = {item.element_id for item in lexical}
+            by_id = {row["element_id"]: row for row in candidates}
+            for element_id in selected:
+                if len(lexical) >= output_limit:
+                    break
+                if element_id in seen or element_id not in by_id:
+                    continue
+                row = by_id[element_id]
+                lexical.append(RetrievedElement(
+                    element_id=element_id,
+                    source_id=row["source_id"],
+                    source_title=row["source_title"],
+                    location_label=row["location_label"],
+                    element_type=row["element_type"],
+                    text=row["text"],
+                    score=coarse_scores.get(element_id, 0.0),
+                ))
+            return lexical
+
+        primary = baseline or supplemental
+        selected_ids, coarse_scores = _candidate_ids(primary, cap)
+        result = _hydrate_and_rank(selected_ids, coarse_scores, limit)
+        if not baseline or not supplemental or len(result) >= limit:
+            return result
+
+        remaining_hydration = cap - len(selected_ids)
+        if remaining_hydration <= 0:
+            return result
+        addition_ids, addition_scores = _candidate_ids(
+            supplemental, remaining_hydration, selected_ids
+        )
+        additions = _hydrate_and_rank(
+            addition_ids, addition_scores, limit - len(result)
+        )
+        return [*result, *additions]
     def _retrieve_chunks(
         self, notebook_id: str, query: str, recall: int = 0, *,
         allowed_source_ids=None,
