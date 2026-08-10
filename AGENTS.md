@@ -356,7 +356,26 @@ one longer than the entire budget is cut into consecutive pieces that land in
 adjacent windows, each carrying that element's id. v1's "drop what does not fit"
 was silent data loss — measured, a 120-parameter table vanished whole and left a
 section that was nothing but its own heading, reporting a 0.0 veto ratio because
-nothing was left to fail. A window's own label is its FIRST heading; a window
+nothing was left to fail. **A cut inside an element backs up to the nearest
+whitespace** (newline preferred, within `SPLIT_BOUNDARY_LOOKBACK_CHARS`; cut at
+the budget when there is none): no command name and no flag contains whitespace,
+so a whitespace cut cannot split a token, while `global_pl` + `acement` is a
+candidate in neither window and deletes that command outright.
+
+**A window too DENSE for one candidate list is split, never truncated.** Windows
+do not overlap and are never revisited, so truncating at `MAX_CANDIDATES` means
+the 33rd command is asked about nowhere, in this run or any other, with no
+rejection, ratio or report line to show it (an entry can only be *wrong* about a
+name it was served) — the same class of silent loss as v1's discard branch.
+`extraction_windows` therefore packs first and then splits any window whose
+candidate count exceeds the cap, roughly in half at an element boundary (inside
+the element, at the same token-safe cut, when the window holds only one),
+recursing to `WINDOW_SPLIT_FLOOR_CHARS`. Below that floor a window still over
+the cap is an INDEX of command names, where every piece would still overflow and
+each would cost a call; truncation is kept there and **disclosed** —
+`ExtractionWindow.candidates_overflowed` → `WindowOutcome` → the run ledger, and
+onto `catalog_job_finished` when non-zero (0 on every ordinary document, so the
+field's presence is the signal). A window's own label is its FIRST heading; a window
 with none inherits the previous window's LAST one (inheriting the first would
 label `set_e`'s continuation table `set_a`). `_catalog_cells` degrades the
 ordinal form (`window N`) to the source name alone in the 出处 column: that
@@ -419,7 +438,16 @@ later window merge into the row an earlier one wrote — args dedupe by name wit
 first-writer-wins, `syntax`/`description` fill blanks only, anchors union within
 `MAX_ANCHOR_ELEMENTS`, and the excerpt stays the first window's. The merge is
 expressed as a SEED of this window's accumulator, so every bound keeps counting
-from where it was instead of restarting per window. `update_candidate_payload`
+from where it was instead of restarting per window. `suspect_related` merges
+with AND, so any window documenting the command properly clears the mark — but a
+RELAYED entry (`ValidatedEntry.relayed`) gets no vote: its clean flag is the
+relay's exemption rather than a finding (a continuation window has no heading
+and no usage line and is not being asked), and folding it in erases the earlier
+window's warning on exactly the shape the relay exists to produce, i.e. every
+time. The test is THIS window's own evidence (the name verbatim in a heading or
+a usage line), not membership of the relayed list, so a relayed name that does
+carry direct evidence here still clears the mark; a first write is unaffected.
+`update_candidate_payload`
 writes only `candidate`-state rows and returns False when a reviewer has already
 confirmed or dismissed the row; that case must degrade to appending a second row
 (v1's behaviour, visible in the queue) and register the new row, never drop this

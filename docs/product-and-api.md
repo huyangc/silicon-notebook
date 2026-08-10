@@ -445,6 +445,12 @@ in document order into bounded **segments** (windows in the code, at most
 `WINDOW_CHARS` characters each). An element goes into the current segment whole
 and starts the next one if it does not fit; an element longer than a whole
 segment's budget is cut into consecutive pieces that land in adjacent segments.
+That cut backs up to the nearest whitespace (a newline for preference, within
+`SPLIT_BOUNDARY_LOOKBACK_CHARS`): neither a command name nor a flag contains
+whitespace, so a cut that lands on one cannot split `global_placement` into
+`global_pl` + `acement` — which would leave the name in neither segment, a
+candidate in neither, and the command gone. A run with no whitespace to find
+(a compressed blob, a minified line) is cut at the budget, best effort.
 **Nothing is discarded** — v1's "drop what does not fit" truncation is gone
 (measured, a 120-parameter table vanished whole and left a section that was
 nothing but its own heading, reporting a 0.0 veto ratio because there was no
@@ -463,7 +469,27 @@ prose), and identifiers in inline code. The identifier shape rule is unchanged
 `MAX_CANDIDATES`, raised from v1's, because a segment is a slab of the document
 rather than one command's section — several commands routinely share one, and a
 list that truncates before the last of them vetoes a real command out of
-existence. A command's documentation also routinely outlives the segment it
+existence.
+
+**Over the cap the segment is split, not the list.** Segments do not overlap and
+are never revisited, so a truncated list is not "the 33rd command is asked about
+later" — it is asked about nowhere, in this run or any other, and nothing
+downstream can see it go (an entry can only be *wrong* about a name it was
+served). Packing is therefore two passes: pack to the character budget, then
+split any segment whose candidate count exceeds `MAX_CANDIDATES` roughly in half
+at an element boundary (inside the element, at the same token-safe cut, when the
+segment holds only one), recursing until every piece fits. The pieces are
+ordinary segments, no character crosses a boundary, and the only cost is one
+more model call. Recursion stops at `WINDOW_SPLIT_FLOOR_CHARS`: a segment that
+small still naming more commands than the cap is not documentation whose
+commands got crowded out, it is an *index of names* (a "see also" block, a
+whole-tool command table), where every piece would still overflow and each would
+cost its own call. Truncation returns there — and is **disclosed**: the dropped
+count rides on each window as `candidates_overflowed`, totals into the run
+ledger, and rides the `catalog_job_finished` event when non-zero. It is 0 on
+every ordinary document, so the field's presence is itself the signal.
+
+A command's documentation also routinely outlives the segment it
 starts in: a 120-parameter table spans several, and every segment after the
 first holds parameters with no command name anywhere in them. So the list
 **relays**: a segment hands its own candidates forward, or, when it has none of
@@ -473,7 +499,17 @@ claimed in a continuation segment — list membership is still checked, and only
 the "appears verbatim in this segment" half is waived, because that name was
 scanned verbatim out of the segment it came from, so the relay carries a witness
 rather than a guess. `syntax`, parameter names and `default` must still ground
-in **this** segment. **Registered trade-off:** a segment's candidate list holds
+in **this** segment. **A relayed entry cannot clear a suspect mark.** The
+cross-segment merge folds "possibly only mentioned" with AND, so any segment
+that documents the command properly clears it — but an entry claiming through
+the relay gets no vote: its clean flag is the relay's exemption, not a finding
+(a continuation segment has no heading and no usage line and is not being asked
+whether the command is documented there), and folding it in would erase the
+earlier segment's warning on exactly the shape the relay exists to produce, i.e.
+every time. The test is **this segment's own evidence** (the name appearing
+verbatim in a heading or a usage line), not membership of the relayed list: a
+relayed name that does carry direct evidence here clears the mark as usual.
+**Registered trade-off:** a segment's candidate list holds
 every command-shaped name the segment *mentions*, not only the one it documents,
 so the relay can hand forward a merely cross-referenced name and an orphaned
 parameter table can be keyed onto it. The name is real, the parameter is real,
@@ -723,6 +759,8 @@ Numeric limits (registered only here; each has a like-named constant in the code
 |-------|----------|-------|
 | Per-segment character budget | `WINDOW_CHARS` | 12,000 |
 | Candidate list per segment | `MAX_CANDIDATES` | 32 (v1: 16; the relayed list shares the cap) |
+| Density-split recursion floor | `WINDOW_SPLIT_FLOOR_CHARS` | 750 (`WINDOW_CHARS / 16`; still over the cap there → truncate and disclose) |
+| Token-safe cut lookback | `SPLIT_BOUNDARY_LOOKBACK_CHARS` | 200 (back up to whitespace/newline; cut at the budget when there is none) |
 | Parameters per slice | `SLICE_PARAM_LIMIT` | 20 |
 | Model calls per slice | `MAX_CALLS_PER_SLICE` | 11 (both remedies included, `1 + 2·(1 + 2·2)`) |
 | Rejection records per row | `MAX_WINDOW_REJECTIONS` | 24 (overflow counted, never silently dropped) |

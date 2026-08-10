@@ -1041,6 +1041,92 @@ def test_one_window_documenting_several_commands_is_one_call_and_several_rows(
     ]
 
 
+def test_a_window_documenting_more_commands_than_one_list_holds_loses_none(
+    repo,
+):
+    """Forty commands sharing one window, end to end — none of them dropped.
+
+    The candidate list caps at `MAX_CANDIDATES`, and windows never overlap, so
+    truncating that list is not "the rest are served later": under the cap the
+    thirty-third command onwards was never in any prompt, in this run or any
+    other, and nothing downstream could see it go (an entry can only be WRONG
+    about a name it was offered). The window is split instead, which costs one
+    extra call and loses nothing.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 40, per_window=False)
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=100)
+    assert {row["command_name"] for row in page["items"]} == {
+        f"set_thing_{index}" for index in range(40)
+    }
+    # Split, not truncated: no prompt over-served, and nothing was left over.
+    assert result["windows_total"] > 1
+    assert result["candidates_overflowed"] == 0
+    assert all(
+        len(_candidates_of(prompt)) <= MAX_CANDIDATES for prompt in client.calls
+    )
+
+
+def test_the_names_an_unsplittable_index_could_not_serve_are_reported(repo):
+    """Where the split stops (a bare index of names, under the floor), the
+    truncation comes back — and the run has to say so.
+
+    It is the one loss with no other trace: the model is never asked about
+    those names, so there is no rejection, no ratio movement and no report
+    line. A count on the run ledger and on the finished event is the whole
+    remedy, and it is worth more than the silence it replaces.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "命令索引",
+        _numbered("s1", [
+            {
+                "element_type": "code_block",
+                "text": "\n".join(f"cmd_{index:02d} -d" for index in range(40)),
+                "section_path": "",
+            }
+        ]),
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    events: list[dict] = []
+    service.event_log.emit = events.append  # type: ignore[assignment]
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert result["windows_total"] == 1
+    assert result["candidates_overflowed"] == 40 - MAX_CANDIDATES
+    finished = [
+        event for event in events if event.get("kind") == "catalog_job_finished"
+    ]
+    assert finished[-1]["candidates_overflowed"] == 40 - MAX_CANDIDATES
+
+
+def test_an_ordinary_run_reports_no_overflow_at_all(repo):
+    """The counterweight: the field is absent from the event on every ordinary
+    document, so its PRESENCE is the signal a reader can act on."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 3)
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    events: list[dict] = []
+    service.event_log.emit = events.append  # type: ignore[assignment]
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert result["candidates_overflowed"] == 0
+    finished = [
+        event for event in events if event.get("kind") == "catalog_job_finished"
+    ]
+    assert "candidates_overflowed" not in finished[-1]
+
+
 def test_a_prose_window_costs_no_model_call_and_still_advances_progress(repo):
     """The zero-model-call gate, and the progress-bar half of it.
 
@@ -1166,6 +1252,128 @@ def test_a_later_windows_rejected_entry_never_merges_into_the_earlier_row(repo):
     assert [row["command_name"] for row in rejected["items"]] == [
         "totally_other_command", "totally_other_command"
     ]
+
+
+def _mention_then(source_id: str, *, documented: bool) -> list[dict]:
+    """Window 0 only MENTIONS `set_thing_0`; window 1 either continues it or
+    documents it properly.
+
+    Window 0 is the shape `suspect_related` exists for: the name is in the
+    text (inline code, so it is claimable) but in no heading and no usage
+    line, which is what "possibly a cross-reference rather than the command
+    this section documents" looks like.
+
+    `documented=False` makes window 1 a continuation — a parameter table with
+    no name of its own, claimable only through the relay. `documented=True`
+    makes it the command's real section, heading and usage line included.
+    """
+    elements = _window_elements(
+        source_id, 0,
+        "背景说明",
+        "The `set_thing_0` command is described in the vendor handbook.\n\n"
+        "- `-density` the density option",
+        "背景说明",
+    )
+    if documented:
+        elements.extend(
+            _window_elements(
+                source_id, len(elements), "set_thing_0",
+                "set_thing_0 -site value\n\n- `-site` the site option",
+                "set_thing_0",
+            )
+        )
+        return elements
+    elements.extend(
+        _window_elements(
+            source_id, len(elements),
+            "- `-site` the site option", "", "", first_type="paragraph",
+        )
+    )
+    return elements
+
+
+def _no_syntax_reply(prompt: str, _call: int) -> str:
+    """Answer for whichever name the prompt served, claiming no syntax.
+
+    The fixtures above stage windows that mention or continue a command
+    without a usage line to ground a syntax against, so a model inventing one
+    would only add a `not_contiguous` rejection to every assertion here.
+    """
+    name = (_candidates_of(prompt) or _carried_of(prompt))[0]
+    return json.dumps(
+        {
+            "entries": [
+                {
+                    "command_name": name,
+                    "description": "does a thing",
+                    "args": [
+                        {
+                            "name": param,
+                            "required": False,
+                            "desc": "",
+                            "default": "",
+                        }
+                        for param in _requested_params(prompt)
+                    ],
+                    "examples": [],
+                }
+            ]
+        }
+    )
+
+
+def test_a_continuation_window_cannot_clear_an_earlier_suspect_mark(repo):
+    """The merge folds `suspect_related` with AND, so any window that
+    documents the command properly clears the mark. A RELAYED entry is not
+    such a window.
+
+    Its clean flag is the relay's exemption, not a finding: the continuation
+    window holds a parameter table, no heading and no usage line, and it is
+    not being asked whether the command is documented there. Letting that
+    False win would erase the warning on exactly the shape the relay exists to
+    produce — i.e. on every long options table in the book.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "只是提及", _mention_then("s1", documented=False)
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_no_syntax_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
+    payload = page["items"][0]["payload"]
+    # The continuation really did merge — this is one row, holding both
+    # windows' parameters…
+    assert [arg["name"] for arg in payload["args"]] == ["-density", "-site"]
+    # …and it did NOT wash out the warning window 0 earned.
+    assert payload["suspect_related"] is True
+
+
+def test_a_later_window_that_documents_the_command_does_clear_the_mark(repo):
+    """The other half, or the fix would just be "never clear it".
+
+    A window with the command's own heading and usage line judged it on the
+    merits, and its clean result is a finding — so the AND still does what it
+    was written for.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "先提及后正文",
+        _mention_then("s1", documented=True),
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_no_syntax_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
+    payload = page["items"][0]["payload"]
+    assert [arg["name"] for arg in payload["args"]] == ["-density", "-site"]
+    assert payload["suspect_related"] is False
 
 
 def test_a_candidate_row_from_a_headingless_document_gets_an_ordinal_label(repo):

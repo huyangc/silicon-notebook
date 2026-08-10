@@ -32,9 +32,12 @@ never offered at all, and no downstream check can recover a command that was
 never in a prompt. So the geometry is now trivial and lossless: the document is
 packed, in document order, into `WINDOW_CHARS` windows with nothing dropped and
 nothing overlapping, and the model is asked which commands each window
-documents. What survived the change untouched is the part C0 measured as
-working — the grounding machinery below, which decides what of the model's
-answer is the manual's own words.
+documents. A window that turns out to document more commands than one candidate
+list can carry is SPLIT rather than truncated, for the same reason: windows are
+never revisited, so a truncated list is not a command served later, it is a
+command served nowhere. What survived the change untouched is the part C0
+measured as working — the grounding machinery below, which decides what of the
+model's answer is the manual's own words.
 
 Calibration. The thresholds are measured, not guessed — a C0 spike ran real
 OpenROAD command references (Apache-2.0) through the production model:
@@ -90,6 +93,35 @@ WINDOW_CHARS = 12_000
 # several commands routinely share one, and a list that truncates before the
 # last of them is a list that vetoes a real command out of existence.
 MAX_CANDIDATES = 32
+# When a window offers MORE names than that, the answer is to make the window
+# smaller, not to cut the list. Windows do not overlap, so a truncated list is
+# not "the 33rd command is served later" — it is served NOWHERE, in this run or
+# any other, which is the same permanent, silent loss v1's discard branch had.
+# Splitting is free of that: the pieces are real windows, every character still
+# lands in exactly one of them, and each piece offers its own (shorter) list.
+#
+# The floor is where splitting stops being worth it. A window this small that
+# STILL names more than 32 commands is not documentation whose commands got
+# crowded out, it is a name list — an index page, a "see also" block, a summary
+# table of every command in the tool. Splitting one of those buys nothing (each
+# piece is still a name list) and costs a model call per piece, so the list is
+# truncated there instead and the cut is DISCLOSED
+# (`ExtractionWindow.candidates_overflowed`) rather than swallowed.
+# WINDOW_CHARS // 16: at 750 characters, 33 names leaves ~22 characters per
+# command, which no real command reference fits into.
+WINDOW_SPLIT_FLOOR_CHARS = WINDOW_CHARS // 16
+# How far back a split point may travel to land on whitespace. A cut is placed
+# at a character budget, and a budget lands wherever it lands — including the
+# middle of `global_placement` or of `-density`, which produces two windows
+# neither of which contains the token, so the name is not a candidate in either
+# and no grounding check can ever match it. Neither a command name nor a flag
+# contains whitespace, so backing up to the nearest whitespace (a newline for
+# preference — it keeps a table row or a usage line whole) is enough to
+# guarantee every token lands complete in exactly one piece. Bounded, and
+# best-effort: a 200-character run with no whitespace in it at all (a base64
+# blob, a minified line) is cut where the budget said, because there is no
+# boundary to find and refusing to cut would break the budget instead.
+SPLIT_BOUNDARY_LOOKBACK_CHARS = 200
 # C0: ~100 parameters overruns the output budget. 20 keeps a slice's answer
 # comfortably inside it with room for syntax/description/examples on slice 0.
 SLICE_PARAM_LIMIT = 20
@@ -194,12 +226,24 @@ class ExtractionWindow:
     takes part in no decision: it is a best-effort breadcrumb, and a window
     boundary falls wherever the character budget put it, not where a section
     starts.
+
+    `candidates_overflowed` is how many candidate names this window has BEYOND
+    what its list can carry — normally 0, because `extraction_windows` splits a
+    window that offers too many rather than truncating it. It is non-zero only
+    for a window that reached `WINDOW_SPLIT_FLOOR_CHARS` and is still that
+    dense (a bare index of command names), where truncating is the deliberate
+    choice. It exists because that truncation is the one remaining place a
+    command can be dropped without any downstream trace: an entry can only be
+    wrong about a name it was served, so a name that was never served produces
+    no rejection, no ratio movement and no report line. Carried to the job
+    layer's run ledger so the number is at least visible.
     """
 
     ordinal: int
     elements: tuple[WindowElement, ...]
     text: str
     provenance: str = ""
+    candidates_overflowed: int = 0
 
     @property
     def element_ids(self) -> tuple[str, ...]:
@@ -266,6 +310,19 @@ class ValidatedEntry:
     job layer validates each element of that list through `validate_entry`
     separately, so one bad entry vetoes itself and nothing else.
 
+    `relayed` says this entry's `suspect_related=False` was granted by the
+    RELAY rather than earned in this window: the command is claimable here only
+    because `carry_candidates` handed the name over, and this window holds no
+    heading and no usage line for it. It exists for the cross-window merge. A
+    command's parameters routinely span windows, so the same command produces
+    one entry per window and the merge folds them into one row; `suspect` is
+    merged with AND (any window that documents the command properly clears the
+    mark), and a relayed entry's False is not evidence of that — it is the
+    absence of evidence. Merging it with AND would let a continuation window
+    holding nothing but a parameter table erase the warning the window that
+    actually mentioned the command in passing had earned. The job layer
+    therefore lets only a NON-relayed entry clear the mark.
+
     `anchor_element_ids` is reserved: `description` / `examples` are prose and
     cannot be checked verbatim, so the job layer binds them to element ids
     instead. Leaving the seat empty here keeps that a schema decision rather
@@ -278,6 +335,7 @@ class ValidatedEntry:
     args: tuple[ValidatedArg, ...] = ()
     examples: tuple[str, ...] = ()
     suspect_related: bool = False
+    relayed: bool = False
     anchor_element_ids: tuple[str, ...] = ()
 
 
@@ -363,6 +421,10 @@ class WindowOutcome:
     args_kept: int = 0
     uncovered_args: tuple[str, ...] = ()
     args_uncovered: int = 0
+    # Straight from the window (see `ExtractionWindow.candidates_overflowed`).
+    # Carried on the outcome so the run ledger can total it without holding on
+    # to the windows themselves.
+    candidates_overflowed: int = 0
 
 
 @dataclass(frozen=True)
@@ -615,75 +677,82 @@ def _piece(element: WindowElement, text: str) -> WindowElement:
     )
 
 
-def extraction_windows(
-    rows: Sequence[Mapping[str, Any]],
+def _split_point(
+    text: str,
+    target: int,
     *,
-    max_chars: int = WINDOW_CHARS,
-) -> list[ExtractionWindow]:
-    """Pack one source's ordered elements into bounded windows. Nothing is lost.
+    lookback: int = SPLIT_BOUNDARY_LOOKBACK_CHARS,
+) -> int:
+    """Where to cut `text` near `target` so the cut lands between tokens.
 
-    Input is exactly what `source_elements_for_chunking` returns
-    (`id`, `element_type`, `text`, `section_path`), so the job layer reuses the
-    fetch it already has.
+    Returns an index in ``[1, target]`` (or ``len(text)`` when the whole string
+    fits), so the caller always makes progress and never loses a character:
+    the piece before the cut and the piece after it concatenate back to `text`
+    exactly, whitespace included.
+
+    A cut at a raw character budget is the one boundary that can destroy a name
+    outright. `global_placement` split as `global_pl` + `acement` is in neither
+    piece, so it is a candidate in neither window; every entry claiming it is
+    vetoed `not_in_candidates` in one and `not_in_text` in the other, and the
+    command is simply gone. The same cut through `-density` loses a parameter
+    the same way. Since no command name and no flag contains whitespace, a cut
+    that lands on whitespace cannot fall inside one — so this walks BACKWARDS
+    from the target to the nearest whitespace, newlines first because a
+    newline is also a table row's or a usage line's own boundary.
+
+    Backwards, never forwards: the target is a budget the caller has already
+    committed to (a window's `max_chars`), and moving the cut past it would
+    overrun the budget the model call is sized by. Bounded by `lookback`, and
+    best-effort past it — a 200-character run with no whitespace at all (a
+    base64 blob, a minified line) is cut at the target, because there is no
+    boundary to find and refusing to cut breaks the budget instead.
+    """
+    if target >= len(text):
+        return len(text)
+    target = max(1, target)
+    floor = max(1, target - max(0, int(lookback)))
+    # `rfind` over [floor - 1, target): a newline at i means a cut at i + 1,
+    # which keeps the newline itself in the left piece.
+    newline = text.rfind(_ELEMENT_JOIN, floor - 1, target)
+    if newline >= 0:
+        return newline + 1
+    for index in range(target - 1, floor - 2, -1):
+        if text[index].isspace():
+            return index + 1
+    return target
+
+
+def _pack(
+    elements: Sequence[WindowElement], limit: int
+) -> list[list[WindowElement]]:
+    """Group ordered elements into `limit`-sized runs. Nothing is lost.
 
     Two rules, and no third:
 
-    * an element goes into the current window whole; if it does not fit, the
-      window is closed and it starts the next one. Keeping elements whole is
-      what makes `window.text` a faithful rendering of `window.elements` —
-      a table cut in half mid-row grounds worse than the same table in the
-      next window;
-    * an element longer than the whole budget is cut into consecutive pieces,
-      each carrying the element's own id. This is the only place a boundary
-      falls inside an element, and it exists because the alternative — v1's
-      "drop what does not fit" — is silent data loss: measured, a
-      120-parameter table vanished whole and left a section that was nothing
-      but its own heading, with a command-reject ratio of 0.0 because there
-      was no longer anything left to fail.
-
-    So every character of every element lands in exactly one window, in
-    document order. Where the caller needs to prove that, `element_ids` says
-    which boundaries are continuations (window i's last id == window i+1's
-    first id) and which are element joins.
+    * an element goes into the current group whole; if it does not fit, the
+      group is closed and it starts the next one. Keeping elements whole is
+      what makes a window's text a faithful rendering of its elements — a
+      table cut in half mid-row grounds worse than the same table in the next
+      window;
+    * an element longer than the whole budget is cut into consecutive pieces
+      (at a token-safe boundary, see `_split_point`), each carrying the
+      element's own id. This is the only place a boundary falls inside an
+      element, and it exists because the alternative — v1's "drop what does
+      not fit" — is silent data loss: measured, a 120-parameter table vanished
+      whole and left a section that was nothing but its own heading, with a
+      command-reject ratio of 0.0 because there was no longer anything left to
+      fail.
     """
-    limit = max(1, int(max_chars))
-    elements = _window_elements(rows)
-
-    windows: list[ExtractionWindow] = []
+    groups: list[list[WindowElement]] = []
     pieces: list[WindowElement] = []
     used = 0
-    carried = ""  # last heading seen, at or before the window being filled
 
     def flush() -> None:
-        nonlocal pieces, used, carried
-        if not pieces:
-            return
-        headings = [
-            item.section_path
-            for item in pieces
-            if item.element_type == "heading" and item.section_path
-        ]
-        # This window's own label is its FIRST heading — that is the section
-        # the window opens in, and it is what a reviewer looking at the row
-        # expects to see. What is handed to the NEXT window is the LAST one:
-        # a window that opens under `set_a` and ends under `set_e` leaves the
-        # document positioned in `set_e`, so labelling the continuation
-        # `set_a` (which taking the first heading again would do) points a
-        # reviewer at a section several commands back. Both halves matter and
-        # they are different questions, which is why they read different ends
-        # of the same list.
-        provenance = headings[0] if headings else carried
-        windows.append(
-            ExtractionWindow(
-                ordinal=len(windows),
-                elements=tuple(pieces),
-                text=_ELEMENT_JOIN.join(item.text for item in pieces),
-                provenance=provenance,
-            )
-        )
-        carried = headings[-1] if headings else carried
-        pieces = []
-        used = 0
+        nonlocal pieces, used
+        if pieces:
+            groups.append(pieces)
+            pieces = []
+            used = 0
 
     for element in elements:
         remaining = element.text
@@ -699,20 +768,209 @@ def extraction_windows(
                 used += separator + len(remaining)
                 break
             if pieces:
-                # It may still fit in a window of its own — or it may not, in
-                # which case the next pass starts an empty window and splits.
-                # Either way the current window is done.
+                # It may still fit in a group of its own — or it may not, in
+                # which case the next pass starts an empty group and splits.
+                # Either way the current group is done.
                 flush()
                 continue
-            # An empty window that still cannot hold it: this element is longer
+            # An empty group that still cannot hold it: this element is longer
             # than the entire budget, so it is cut here and continues into the
-            # next window.
-            pieces.append(_piece(element, remaining[:limit]))
-            used += limit
-            remaining = remaining[limit:]
+            # next group.
+            cut = _split_point(remaining, limit)
+            pieces.append(_piece(element, remaining[:cut]))
+            used += cut
+            remaining = remaining[cut:]
             flush()
     flush()
+    return groups
+
+
+def _group_chars(pieces: Sequence[WindowElement]) -> int:
+    """The character length of the window these pieces would become."""
+    if not pieces:
+        return 0
+    return sum(len(piece.text) for piece in pieces) + len(_ELEMENT_JOIN) * (
+        len(pieces) - 1
+    )
+
+
+def _dense_overflow(pieces: Sequence[WindowElement], bound: int) -> int:
+    """How many candidate names this group has beyond `bound` (0 when it fits).
+
+    Two scans rather than one, and only ever one on the ordinary window: the
+    BOUNDED scan is the one the caller pays for anyway, it short-circuits the
+    moment it fills the list, and a list that comes back short is proof there
+    is no overflow to count. Only a window that saturated the list is scanned
+    again without a bound — which is exactly the window whose true count is
+    the question.
+    """
+    if bound <= 0:
+        return 0
+    if len(_scan_candidates(pieces, bound)) < bound:
+        return 0
+    return max(0, len(_scan_candidates(pieces, None)) - bound)
+
+
+def _halve(
+    pieces: Sequence[WindowElement],
+) -> tuple[list[WindowElement], list[WindowElement]]:
+    """Cut one group roughly in half, at the best boundary it has.
+
+    Element boundaries first — the group is split at whichever one leaves the
+    two halves closest to equal, so an over-dense window becomes two windows of
+    whole elements. A group of ONE element has no such boundary and is cut
+    inside it, at a token-safe character split.
+
+    Returns an empty right half when there is nothing left to cut (a
+    single-character element), which is the caller's signal to stop.
+    """
+    if len(pieces) > 1:
+        total = _group_chars(pieces)
+        used = 0
+        best_index = 1
+        best_delta: float | None = None
+        for index in range(1, len(pieces)):
+            used += len(pieces[index - 1].text) + (
+                len(_ELEMENT_JOIN) if index > 1 else 0
+            )
+            delta = abs(used - total / 2)
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_index = index
+        return list(pieces[:best_index]), list(pieces[best_index:])
+    element = pieces[0]
+    cut = _split_point(element.text, len(element.text) // 2)
+    if cut <= 0 or cut >= len(element.text):
+        return list(pieces), []
+    return (
+        [_piece(element, element.text[:cut])],
+        [_piece(element, element.text[cut:])],
+    )
+
+
+def _split_dense_groups(
+    groups: Sequence[Sequence[WindowElement]], *, bound: int, floor: int
+) -> list[tuple[list[WindowElement], int]]:
+    """Split every group that offers more candidate names than `bound`.
+
+    The alternative — truncating the list, which is what the list's own `limit`
+    does — is a permanent, silent loss of every command past the cut. Windows
+    do not overlap and are not revisited, so the 33rd command of a window is
+    not "served later": it is served nowhere, in this run or any other, and no
+    downstream check can see it go. That is the same failure mode as v1's
+    discard branch, one layer up: a name that is never served produces no
+    rejection, no ratio movement and no report line.
+
+    Splitting has none of that cost. The pieces are ordinary windows, every
+    character still lands in exactly one of them (`_halve` only moves a
+    boundary), and each piece offers its own shorter list. It buys the extra
+    model call the split window now needs, which is the correct trade for a
+    command that would otherwise not be extractable at all.
+
+    Recursion stops at `floor`: below it a window that still names more than
+    `bound` commands is a name list rather than documentation (see
+    `WINDOW_SPLIT_FLOOR_CHARS`), and the residual overflow is returned
+    alongside the group so the job layer can report it.
+
+    Iterative, not recursive, and deliberately: the depth is provably small
+    (every split strictly shrinks both halves), but "provably small" on a
+    pathological document is not a reason to put an unbounded document shape
+    on the interpreter's C stack.
+    """
+    out: list[tuple[list[WindowElement], int]] = []
+    for group in groups:
+        pending: list[list[WindowElement]] = [list(group)]
+        while pending:
+            current = pending.pop()
+            overflow = _dense_overflow(current, bound)
+            if not overflow or _group_chars(current) <= floor:
+                out.append((current, overflow))
+                continue
+            left, right = _halve(current)
+            if not left or not right:
+                out.append((current, overflow))
+                continue
+            # LIFO, so the left half (and everything it splits into) is
+            # emitted before the right one: document order is the whole
+            # contract of this layer.
+            pending.append(right)
+            pending.append(left)
+    return out
+
+
+def _label(
+    groups: Sequence[tuple[Sequence[WindowElement], int]]
+) -> list[ExtractionWindow]:
+    """Turn packed groups into numbered windows with inherited breadcrumbs.
+
+    Runs after splitting, never before: a window's ordinal and the heading it
+    inherits are properties of the final sequence, and numbering a group that
+    is about to become two would leave gaps or duplicates in both.
+    """
+    windows: list[ExtractionWindow] = []
+    carried = ""  # last heading seen, at or before the window being labelled
+    for pieces, overflow in groups:
+        headings = [
+            item.section_path
+            for item in pieces
+            if item.element_type == "heading" and item.section_path
+        ]
+        # This window's own label is its FIRST heading — that is the section
+        # the window opens in, and it is what a reviewer looking at the row
+        # expects to see. What is handed to the NEXT window is the LAST one:
+        # a window that opens under `set_a` and ends under `set_e` leaves the
+        # document positioned in `set_e`, so labelling the continuation
+        # `set_a` (which taking the first heading again would do) points a
+        # reviewer at a section several commands back. Both halves matter and
+        # they are different questions, which is why they read different ends
+        # of the same list.
+        windows.append(
+            ExtractionWindow(
+                ordinal=len(windows),
+                elements=tuple(pieces),
+                text=_ELEMENT_JOIN.join(item.text for item in pieces),
+                provenance=headings[0] if headings else carried,
+                candidates_overflowed=overflow,
+            )
+        )
+        carried = headings[-1] if headings else carried
     return windows
+
+
+def extraction_windows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    max_chars: int = WINDOW_CHARS,
+    max_candidates: int = MAX_CANDIDATES,
+    split_floor: int = WINDOW_SPLIT_FLOOR_CHARS,
+) -> list[ExtractionWindow]:
+    """Pack one source's ordered elements into bounded windows. Nothing is lost.
+
+    Input is exactly what `source_elements_for_chunking` returns
+    (`id`, `element_type`, `text`, `section_path`), so the job layer reuses the
+    fetch it already has.
+
+    Three passes, each with one job: pack to the character budget (`_pack`),
+    split whatever is too DENSE for one candidate list to carry
+    (`_split_dense_groups`), then number and label the result (`_label`). Only
+    the first two move a boundary and neither ever moves a character across
+    one, so every character of every element lands in exactly one window, in
+    document order. Where the caller needs to prove that, `element_ids` says
+    which boundaries are continuations (window i's last id == window i+1's
+    first id) and which are element joins.
+
+    `max_candidates` is the same bound `window_candidates` truncates at, passed
+    here because that truncation is what the second pass exists to avoid — see
+    `_split_dense_groups`.
+    """
+    limit = max(1, int(max_chars))
+    return _label(
+        _split_dense_groups(
+            _pack(_window_elements(rows), limit),
+            bound=max(0, int(max_candidates)),
+            floor=max(1, int(split_floor)),
+        )
+    )
 
 
 # ============================================================= 2. candidates
@@ -737,32 +995,52 @@ def window_candidates(
     capped. Being slightly over-inclusive is safe — every candidate still has
     to survive the verbatim text check in `validate_entry` — while missing a
     real name costs that whole command.
+
+    Truncation here is a last resort, not the primary defence: a window whose
+    names do not fit is SPLIT by `extraction_windows` before it ever reaches
+    this function, precisely because a truncated list drops a real command with
+    no downstream trace. What still truncates is the pathological case the
+    splitter's floor stops at, and that residue is counted on the window
+    (`candidates_overflowed`).
     """
-    bound = max(0, int(limit))
+    return _scan_candidates(window.elements, max(0, int(limit)))
+
+
+def _scan_candidates(
+    elements: Sequence[WindowElement], bound: int | None
+) -> list[str]:
+    """`window_candidates`' scan, over raw pieces and with an optional bound.
+
+    Split out for two callers with different questions. `window_candidates`
+    asks "what may be claimed here", which is a bounded list because the list
+    rides in a prompt. `_dense_overflow` asks "how many are there", which
+    cannot be answered by a list that stops counting at the bound — and it
+    asks it about a group of pieces that is not a window yet.
+    """
     ordered: dict[str, None] = {}
 
     def add(term: str) -> bool:
         """Record `term`; return whether there is still room for another."""
         if term and term not in ordered:
             ordered[term] = None
-        return len(ordered) < bound
+        return bound is None or len(ordered) < bound
 
-    if not bound:
+    if bound is not None and bound <= 0:
         return []
-    for element in window.elements:
+    for element in elements:
         if element.element_type != "heading":
             continue
         for term in _identifiers(element.text):
             if not add(term):
                 return list(ordered)
     for code_first in (True, False):
-        for element in window.elements:
+        for element in elements:
             if (element.element_type in _CODE_TYPES) is not code_first:
                 continue
             for term in _usage_identifiers(element.text):
                 if not add(term):
                     return list(ordered)
-    for element in window.elements:
+    for element in elements:
         for match in _INLINE_CODE_RE.finditer(element.text):
             for term in _identifiers(match.group(1)):
                 if not add(term):
@@ -1233,13 +1511,17 @@ def validate_entry(
     rejections: list[Rejection] = []
 
     name = str(payload.get("command_name") or "").strip()
+    # Computed once and unconditionally, because two different questions read
+    # it: the veto below (which the relay may waive) and `relayed` further
+    # down (which asks whether the waiver was what carried the claim).
+    present = bool(name) and _token_present(name, text)
     if not name:
         rejections.append(_reject(text, "command_name", "", "empty"))
     elif name not in allowed:
         rejections.append(
             _reject(text, "command_name", name, "not_in_candidates")
         )
-    elif name not in relayed and not _token_present(name, text):
+    elif name not in relayed and not present:
         rejections.append(_reject(text, "command_name", name, "not_in_text"))
     if rejections:
         return ValidationResult(
@@ -1325,9 +1607,17 @@ def validate_entry(
         for element in window.elements
         if element.element_type == "heading"
     )
-    suspect = name not in relayed and not (
-        _token_present(name, heading_haystack) or name in _usage_identifiers(text)
-    )
+    # `direct` is this window's OWN evidence that it documents the command
+    # rather than merely mentioning it. `suspect` is unchanged: no direct
+    # evidence and no relay to excuse its absence.
+    direct = _token_present(name, heading_haystack) or name in _usage_identifiers(text)
+    suspect = name not in relayed and not direct
+    # And `relayed` is the difference between the two: a claim standing on the
+    # relay alone. Its `suspect_related=False` is an exemption, not a finding,
+    # so the cross-window merge must not read it as one — see `ValidatedEntry`.
+    # Note that a carried name WITH direct evidence here is not relayed: it
+    # earned the clean mark in this window and may clear an earlier warning.
+    relayed_claim = name in relayed and not direct
     examples, examples_rejections = _coerce_examples(payload.get("examples"), text)
     rejections.extend(examples_rejections)
     return ValidationResult(
@@ -1339,6 +1629,7 @@ def validate_entry(
             args=tuple(args),
             examples=examples,
             suspect_related=suspect,
+            relayed=relayed_claim,
         ),
         rejections=tuple(rejections),
         stats=ValidationStats(
@@ -1423,6 +1714,7 @@ def window_outcome(
         args_kept=args_kept,
         uncovered_args=missing[:MAX_WINDOW_REJECTIONS],
         args_uncovered=len(missing),
+        candidates_overflowed=window.candidates_overflowed,
     )
 
 
