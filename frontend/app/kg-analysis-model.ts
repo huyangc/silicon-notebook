@@ -34,6 +34,15 @@ export const ARTIFACT_LABEL: Record<string, string> = {
   source_profiles: "来源板块画像",
 };
 
+/** 每份预计算数据在报告里回答什么问题。 */
+export const ARTIFACT_PURPOSE: Record<string, string> = {
+  cluster_size_histogram: "回答各类知识被合并了多少，用于对象构成与收敛率。",
+  largest_clusters: "列出成员最多的概念合并组，用于排查过度合并。",
+  relation_provenance: "说明关联由原始内容还是自动补连产生，用于判断关联覆盖方式。",
+  community_edges: "统计主题板块之间的关联，用于判断主题边界与孤立程度。",
+  source_profiles: "比较每个来源与主体板块的连接，用于发现疑似偏题或关联不足的来源。",
+};
+
 /**
  * 单位代号 → 界面词。
  *
@@ -261,6 +270,91 @@ export type ConvergenceTable = {
   emptyClusters: number;
   emptyClusterMemberRows: number;
 };
+
+export type LargestClusterRow = {
+  id: string;
+  name: string;
+  members: number;
+};
+
+export type LargestClusters = {
+  rows: LargestClusterRow[];
+  limit: number;
+  truncated: boolean;
+};
+
+/** 最大概念合并组榜单。名称是用户内容，允许原样展示。 */
+export function largestClusters(payload: Record<string, unknown> | null): LargestClusters {
+  return {
+    rows: listAt(payload, "clusters").map((item) => ({
+      id: stringAt(item, "canonical_id"),
+      name: stringAt(item, "canonical_name"),
+      members: numberAt(item, "members"),
+    })),
+    limit: numberAt(payload, "limit"),
+    truncated: boolAt(payload, "truncated"),
+  };
+}
+
+const RELATION_BASIS_LABEL: Record<string, string> = {
+  "relink:shared-element": "共享出处自动补连",
+  "relink:name-match": "同名对象自动补连",
+  "relink:other": "其它规则自动补连",
+  "tagged:other": "带出处标记的关联",
+  untagged: "未标注生成方式的关联",
+};
+
+export type RelationProvenanceRow = {
+  key: string;
+  label: string;
+  count: number;
+  share: number | null;
+};
+
+export type RelationProvenance = {
+  rows: RelationProvenanceRow[];
+  counted: number;
+  relink: number;
+  relinkShare: number | null;
+  totalRows: number;
+  rejected: number;
+  endpointUnusable: number;
+};
+
+/** 关联生成方式。它描述覆盖结构，不把某一种来源武断地判为更高质量。 */
+export function relationProvenance(payload: Record<string, unknown> | null): RelationProvenance {
+  const counted = numberAt(payload, "counted");
+  const relink = numberAt(payload, "relink");
+  const buckets = payload && typeof payload.buckets === "object" && payload.buckets
+    ? payload.buckets as Record<string, unknown>
+    : {};
+  const excluded = payload && typeof payload.excluded === "object" && payload.excluded
+    ? payload.excluded as Record<string, unknown>
+    : {};
+  const rows = Object.keys(RELATION_BASIS_LABEL).map((key) => {
+    const raw = buckets[key];
+    const count = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+    return {
+      key,
+      label: label(RELATION_BASIS_LABEL, key, "其它关联"),
+      count,
+      share: counted > 0 ? count / counted : null,
+    };
+  });
+  const rejected = typeof excluded.rejected === "number" ? excluded.rejected : 0;
+  const endpointUnusable = typeof excluded.endpoint_unusable === "number"
+    ? excluded.endpoint_unusable
+    : 0;
+  return {
+    rows,
+    counted,
+    relink,
+    relinkShare: counted > 0 ? relink / counted : null,
+    totalRows: numberAt(payload, "total_rows"),
+    rejected,
+    endpointUnusable,
+  };
+}
 
 const OTHER_GROUP_LABEL = "其他类型";
 
@@ -568,4 +662,8 @@ export function reportHeadline(report: KgAnalysisReport): ReportHeadline {
 /** 一份产物的界面名;后端新增了 kind 而这里没跟上时退到中性词,不把代号上屏。 */
 export function artifactLabel(kind: string): string {
   return label(ARTIFACT_LABEL, kind, "报告数据");
+}
+
+export function artifactPurpose(kind: string): string {
+  return label(ARTIFACT_PURPOSE, kind, "提供这份报告所需的一项统计口径。");
 }
