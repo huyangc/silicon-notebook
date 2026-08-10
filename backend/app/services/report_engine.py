@@ -2513,6 +2513,8 @@ class ReportEngine:
         if contract.get("needs_clarification"):
             # The owner must answer first; the report is meant to wait.
             return None
+        resolved_scope = None
+        resolved_base_scope = None
         if (
             contract.get("source_scope") is not None
             or contract.get("base_scope") is not None
@@ -2520,13 +2522,16 @@ class ReportEngine:
             # 与人工确认端点同一道范围重验(经 api 层注入的回调):意图理解跑着的
             # 这段时间里来源可能被删、参考库可能被卸载。重验不过(或没有可用的
             # 重验回调)一律留在人工门——保守方向,绝不带着失效范围继续规划。
+            # 重验产出的**刷新冻结必须被采用**而不是只当布尔闸(codex R4 P2):
+            # 期间新增来源/挂库会让重冻结翻出 narrowed=true,全库通道准入读的正是
+            # 这一位;丢弃刷新结果、按旧合同认领,就与人工确认持久化的内容分叉。
+            refreshed = None
             try:
-                scope_usable = bool(
-                    scope_reconfirm is not None and scope_reconfirm(contract)
-                )
+                if scope_reconfirm is not None:
+                    refreshed = scope_reconfirm(contract)
             except Exception:  # noqa: BLE001 — fail open to the manual gate
-                scope_usable = False
-            if not scope_usable:
+                refreshed = None
+            if not refreshed:
                 try:
                     self.dependencies.event_log.emit({
                         "kind": "report_intent_auto_confirm_skipped",
@@ -2537,6 +2542,9 @@ class ReportEngine:
                 except Exception:
                     pass
                 return None
+            contract = dict(refreshed.get("understanding") or contract)
+            resolved_scope = refreshed.get("source_scope")
+            resolved_base_scope = refreshed.get("base_scope")
         reason = "error"
         try:
             frozen = confirmed_understanding(
@@ -2553,7 +2561,7 @@ class ReportEngine:
             claimed = False
         else:
             if claimed:
-                return frozen
+                return frozen, resolved_scope, resolved_base_scope
             # The claim lost the race. Two distinct reasons collapse into the
             # same rowcount==0 signal: the owner confirmed by hand and won, or
             # the owner cancelled the report in the same window. Telling them
@@ -2592,16 +2600,35 @@ class ReportEngine:
             )
             if not auto_generate:
                 return
-            intent_contract = self._auto_confirm_intent(
+            confirmed = self._auto_confirm_intent(
                 notebook_id, rid, prepared_contract,
                 scope_reconfirm=scope_reconfirm,
             )
-            if intent_contract is None:
+            if confirmed is None:
                 return
+            intent_contract, refreshed_scope, refreshed_base_scope = confirmed
             # Mirror the confirmation endpoint exactly: from here the reviewed
             # contract is the authoritative input and the raw conversation
             # history is dropped — it only ever fed corpus-blind understanding.
             history = ""
+            if refreshed_scope is not None or refreshed_base_scope is not None:
+                # 重验刷新过冻结范围:镜像人工确认端点的重新拉起——后续规划/生成
+                # 在**刷新后**的范围上下文里跑,而不是创建时进 worker 的旧上下文
+                # (codex R4 P2)。对象态保留隐藏参与者快照,与 launch_kwargs 同义。
+                from app.services.source_scope import source_scope_context
+
+                with source_scope_context(
+                    notebook_id, refreshed_scope, refreshed_base_scope
+                ):
+                    self.plan_outline(
+                        notebook_id, rid, question, history,
+                        intent_contract=intent_contract,
+                    )
+                    if self.dependencies.reports.claim_report_generation(
+                        notebook_id, rid
+                    ):
+                        self.generate(notebook_id, rid, question, depth)
+                return
         self.plan_outline(
             notebook_id, rid, question, history,
             intent_contract=intent_contract,

@@ -53,23 +53,36 @@ def _report_llm_ready(repo) -> bool:
     return repo._runtime.models.configured("report_outline")
 
 
-def _report_scope_recheck(repo, notebook_id: str, understanding: dict) -> bool:
-    """Mirror ``confirm_report_intent``'s scope revalidation as a boolean gate.
+def _report_scope_recheck(repo, notebook_id: str, understanding: dict):
+    """Mirror ``confirm_report_intent``'s scope revalidation for the auto path.
 
     The automatic direct-run confirmation (engine ``_auto_confirm_intent``)
     cannot import these api-layer validators without inverting the layering,
     so the create endpoint hands it this check as a callable (codex R2 P2).
     Same three steps as the manual endpoint — re-freeze the persisted local
     scope, re-freeze the base-library scope, re-run the two-dimension
-    emptiness gate — but the rejection transport is a plain ``False``: the
-    caller leaves the report at the manual confirmation gate, where the owner
-    then sees the endpoint's own 422/409 wording on their next attempt."""
+    emptiness gate.  The refreshed freeze must be ADOPTED, not just judged
+    (codex R4 P2): sources/libraries added while intent understanding ran can
+    flip ``narrowed`` on the re-freeze, and downstream whole-scope channel
+    admission reads exactly that flag, so returning a bare "still fine" while
+    claiming the stale contract would diverge from what manual confirmation
+    persists.  Returns ``None`` to reject (caller stays at the manual gate,
+    where the owner sees the endpoint's own 422/409 wording next attempt), or
+    a dict with the updated ``understanding`` plus the resolved scope OBJECTS
+    — the objects carry the hidden-participant snapshot/private attrs that a
+    ``model_dump`` round-trip would lose, and the engine re-enters the scope
+    context with them exactly like the manual endpoint's relaunch does."""
     persisted_scope = understanding.get("source_scope")
     persisted_base_scope = understanding.get("base_scope")
     if persisted_scope is None and persisted_base_scope is None:
-        return True
+        return {
+            "understanding": understanding,
+            "source_scope": None,
+            "base_scope": None,
+        }
     try:
         notebook = repo.get_notebook(notebook_id)
+        updated = dict(understanding)
         resolved_scope = None
         resolved_base_scope = None
         if persisted_scope is not None:
@@ -77,15 +90,21 @@ def _report_scope_recheck(repo, notebook_id: str, understanding: dict) -> bool:
                 repo, notebook,
                 ResolvedSourceScope.model_validate(persisted_scope),
             )
+            updated["source_scope"] = resolved_scope.model_dump()
         if persisted_base_scope is not None:
             resolved_base_scope = _validate_base_scope(
                 notebook,
                 BaseNotebookScope.model_validate(persisted_base_scope),
             )
+            updated["base_scope"] = resolved_base_scope.model_dump()
         _require_non_empty_scope(notebook, resolved_scope, resolved_base_scope)
     except Exception:  # noqa: BLE001 — any rejection means "stay at the gate"
-        return False
-    return True
+        return None
+    return {
+        "understanding": updated,
+        "source_scope": resolved_scope,
+        "base_scope": resolved_base_scope,
+    }
 
 
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
