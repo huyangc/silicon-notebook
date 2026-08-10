@@ -239,6 +239,19 @@ test("queuedScheduleHint: offpeak_in_window=true → 「即将开始」分支，
   assert.ok(!hint.includes("预计"), "offpeak_in_window 为真时不应再显示下一次窗口");
 });
 
+test("queuedScheduleHint: next_start_at 已过期 → 降级为「即将开始」，不再显示过期的预计时刻 (codex R1 P2)", () => {
+  const now = new Date(2026, 7, 11, 9, 0);
+  const start = new Date(2026, 7, 11, 2, 0); // 已过去 7 小时(状态快照未刷新)
+  const hint = queuedScheduleHint({
+    ...base,
+    exists: true,
+    offpeak_in_window: false,
+    offpeak_next_start_at: start.toISOString(),
+  }, now);
+  assert.match(hint, /已进入空闲时段，即将开始/);
+  assert.ok(!hint.includes("预计"), "过期时刻不能继续当成未来承诺展示");
+});
+
 test("queuedScheduleHint: queue_length >= 2 → 前缀带队列项数，不含位次措辞", () => {
   const hint = queuedScheduleHint({ ...base, exists: true, queue_position: 1, queue_length: 3 }, new Date());
   assert.match(hint, /已排队（共 3 项）/);

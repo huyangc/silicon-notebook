@@ -194,10 +194,16 @@ export function queuedScheduleHint(s: ScaleIndexStatus, now: Date): string {
   } else if (s.offpeak_next_start_at) {
     const start = new Date(s.offpeak_next_start_at);
     if (!Number.isNaN(start.getTime())) {
-      const dayLabel = sameLocalDate(start, now) ? "今天" : "明天";
-      const hh = String(start.getHours()).padStart(2, "0");
-      const mm = String(start.getMinutes()).padStart(2, "0");
-      parts.push(`预计${dayLabel} ${hh}:${mm} 后开始`);
+      if (start.getTime() <= now.getTime()) {
+        // 时刻已过(排队等待超过状态轮询窗口、快照未刷新):窗口大概率已开启,
+        // 不再展示一个已经兑现不了的「预计 … 后开始」假承诺(codex R1 P2)。
+        parts.push("已进入空闲时段，即将开始");
+      } else {
+        const dayLabel = sameLocalDate(start, now) ? "今天" : "明天";
+        const hh = String(start.getHours()).padStart(2, "0");
+        const mm = String(start.getMinutes()).padStart(2, "0");
+        parts.push(`预计${dayLabel} ${hh}:${mm} 后开始`);
+      }
     }
   }
   if ((s.last_build_ms ?? 0) > 0) {
