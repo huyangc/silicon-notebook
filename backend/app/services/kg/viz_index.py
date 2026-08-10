@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -17,10 +18,13 @@ import scipy.sparse as sp
 from app.services.kg.scale_index import (
     VizArraysMixin,
     VizEdgeSet,
+    viz_edge_count_is_authoritative,
     viz_edge_npz_arrays,
     viz_edge_set_from_npz,
     viz_edge_set_from_payload,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -128,8 +132,27 @@ def save_viz_index(out_dir: str, *, viz_ids, viz_adj, viz_deg, viz_types,
     return manifest
 
 
+def _declared_edge_count(manifest: dict):
+    """manifest 声称的边数;缺键或不是整数 → None(该项不参与校验)。
+
+    与 scale_index 的 `_manifest_count` 同一口径(bool 不算整数):
+    older-index-stays-valid,没写过这个键的老产物一律放行。"""
+    value = (manifest or {}).get("n_viz_edges")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 def load_viz_index(out_dir: str) -> Optional[VizIndex]:
-    """加载持久化 VizIndex。manifest 或数组文件缺失 → None。"""
+    """加载持久化 VizIndex。manifest 或数组文件缺失 → None。
+
+    读回的边数还要与 manifest 的 `n_viz_edges` 对账(与 load_scale_index 同一套
+    权威判据 `viz_edge_count_is_authoritative`:紧凑键与「一个边键都没有」都对
+    账,旧 JSON 边键豁免)。少了这一步,一份被裁过/半截写入的 viz.npz 会被当成
+    健康产物返回——viz_probe 照报 manifest 的边数,图请求静默缺边,而且因为
+    manifest 的 version/cluster_seq 仍是新鲜的,**永远不会**触发重建。失配按本
+    函数既有的「产物不可用」出口(返回 None)处理,让调用方走重建——残缺产物本
+    来就该重建,这正是期望行为。"""
     mpath = os.path.join(out_dir, "manifest.json")
     viz_npz = os.path.join(out_dir, "viz.npz")
     viz_adj_path = os.path.join(out_dir, "viz_adj.npz")
@@ -143,6 +166,20 @@ def load_viz_index(out_dir: str) -> Optional[VizIndex]:
         viz_types = list(z["viz_types"])
         viz_names = list(z["viz_names"])
         viz_edges = viz_edge_set_from_npz(z, viz_ids)
+        viz_edges_authoritative = viz_edge_count_is_authoritative(z)
+    declared_edges = _declared_edge_count(manifest)
+    if (
+        viz_edges_authoritative
+        and declared_edges is not None
+        and declared_edges != len(viz_edges)
+    ):
+        # 只记计数,不带任何正文/id。
+        _logger.warning(
+            "viz index at %s is unusable: manifest.n_viz_edges 与 viz.npz 边数"
+            "不一致(期望 %d,实际 %d)",
+            out_dir, declared_edges, len(viz_edges),
+        )
+        return None
     viz_adj = sp.load_npz(viz_adj_path)
     return VizIndex(viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
                     viz_types=viz_types, viz_names=viz_names,
