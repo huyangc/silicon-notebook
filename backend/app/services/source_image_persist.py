@@ -31,7 +31,8 @@ def make_persist_image_factory(
                 return None
             try:
                 asset = asset_service_provider().save_source_image(
-                    notebook_id, source_id, img_name, mime, img_bytes, created_by)
+                    notebook_id, source_id, img_name, mime, img_bytes, created_by,
+                    max_bytes=settings.mineru_max_image_bytes)
             except (AssetValidationError, RuntimeError, OSError):
                 return None
             state["n"] += 1

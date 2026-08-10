@@ -46,18 +46,26 @@ class AssetValidationError(ValueError):
     """
 
 
-def validate_asset(mime: str, size: int) -> None:
+def validate_asset(mime: str, size: int, max_bytes: int | None = None) -> None:
     """Raise ``AssetValidationError`` if `mime`/`size` fail upload rules.
 
     Called before anything is written to the store or disk, so a rejected
     upload leaves zero trace (no orphan DB row, no orphan file).
+
+    ``max_bytes`` overrides the default pasted-image ceiling: source-image
+    persistence is governed by the deployment's ``MINERU_MAX_IMAGE_BYTES``
+    (which may legitimately exceed 10MB), and a fixed lower cap here would
+    silently drop assets the documented setting promises to allow.
     """
     if mime not in ALLOWED_MIME_EXTENSIONS:
         raise AssetValidationError(
             "图片类型不支持，仅支持 PNG/JPEG/GIF/WebP 格式"
         )
-    if size > MAX_ASSET_BYTES:
-        raise AssetValidationError("图片过大，最大支持 10MB")
+    limit = MAX_ASSET_BYTES if max_bytes is None else max_bytes
+    if size > limit:
+        raise AssetValidationError(
+            f"图片过大，最大支持 {max(1, limit // (1024 * 1024))}MB"
+        )
 
 
 class AssetService:
@@ -109,11 +117,14 @@ class AssetService:
     def save_source_image(
         self, notebook_id: str, source_id: str, filename: str,
         mime: str, data: bytes, created_by: str,
+        max_bytes: int | None = None,
     ) -> dict:
         """存 MinerU 从来源抽出的内嵌图片：与 save() 同款校验+落盘，但带 source_id
         关联，供来源视图渲染与按源级联清理。护栏(大小/张数)由调用方(persist_image
-        工厂)先行把关，这里仍做 mime/尺寸兜底校验，绝不放行不合规写盘。"""
-        validate_asset(mime, len(data))
+        工厂)先行把关，这里仍做 mime/尺寸兜底校验，绝不放行不合规写盘；
+        ``max_bytes`` 由调用方传部署的来源图片上限(codex R6：否则配置超过
+        10MB 时被默认粘贴图上限静默压住)。"""
+        validate_asset(mime, len(data), max_bytes=max_bytes)
         asset_id = self._repo.insert_notebook_asset(
             notebook_id, safe_filename(filename or "image"), mime, len(data),
             created_by, source_id=source_id,
