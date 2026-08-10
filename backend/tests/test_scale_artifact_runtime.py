@@ -424,6 +424,24 @@ def test_manual_now_supersedes_existing_idle_queue_atomically(repo, monkeypatch)
     assert scale.status(notebook.id)["state"] == "building"
 
 
+def test_requeue_updates_mode_but_keeps_first_queued_at(repo, monkeypatch):
+    """重复排队(连续加来源触发 maybe_enqueue_fold 的常态)只更新 mode,保留首次
+    入队时刻:dict 对既有 key 赋值不改插入序,位次锚定首次入队,时间戳必须与它
+    同锚点,否则「入队序位次 + 刷新的时间戳」自相矛盾(codex R3 P2)。"""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+    monkeypatch.setattr(scale, "_ensure_scheduler", lambda: None)
+
+    assert scale.trigger(notebook.id, when="idle", mode="auto")["status"] == "queued"
+    first_stamp = scale.idle_queue[notebook.id][1]
+    assert first_stamp
+
+    assert scale.trigger(notebook.id, when="idle", mode="fold")["status"] == "queued"
+    assert scale.idle_queue[notebook.id] == ("fold", first_stamp)  # mode 新、时刻不变
+
+
 def test_manual_now_restores_displaced_idle_request_if_worker_cannot_start(
     repo, monkeypatch
 ):
