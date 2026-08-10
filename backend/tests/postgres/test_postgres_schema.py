@@ -55,7 +55,7 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
     assert migrator.migrate() == 21
     assert migrator.migrate() == 21
     assert migrator.current_version() == 21
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 21
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 22
 
 
 @pytest.mark.postgres_integration
@@ -189,6 +189,7 @@ def test_packaged_index_migration_phases_are_exact():
         (19, "source_fact_backfills"),
         (20, "source_index_backfills"),
         (21, "report_share_tokens"),
+        (22, "chunk_questions"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:

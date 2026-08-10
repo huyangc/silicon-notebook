@@ -9,6 +9,7 @@ from app.services.retrieval import (
     merge_retrieval_supports,
     select_with_graph_reserve,
     select_with_reserves,
+    select_with_reserves_baseline_first,
     truncate_by_tokens,
 )
 
@@ -205,6 +206,23 @@ def test_exact_reserve_is_bounded_by_its_setting():
         exact_section_reserve_rule(1, {"exact-1", "exact-2", "exact-3"}),
     ))
     assert [chunk.chunk_id for chunk in selected] == ["direct", "exact-1"]
+
+
+def test_question_supplement_uses_only_mix_budget_left_after_baseline():
+    baseline = _chunk(
+        "baseline", 3,
+        RetrievalSupport("semantic", "chunk", "baseline", 0.2),
+    )
+    supplemental = _chunk(
+        "supplement", 3,
+        RetrievalSupport(
+            "generated_question", "chunk", "supplement", 0.99
+        ),
+    )
+
+    assert [chunk.chunk_id for chunk in select_with_reserves_baseline_first(
+        [supplemental, baseline], 3, ()
+    )] == ["baseline"]
 
 
 def test_naturally_selected_quota_holder_of_another_rule_is_not_evicted():

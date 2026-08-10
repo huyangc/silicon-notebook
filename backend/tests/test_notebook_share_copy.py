@@ -947,7 +947,6 @@ def test_copy_notebook_carries_paper_metadata(repo):
 
     new_source_id = _rows(repo, "sources", new.id)[0]["id"]
     assert new_source_id != orig_source_id
-
     copied_meta = repo.get_paper_meta(new_source_id)
     assert copied_meta is not None
     assert copied_meta["paper_title"] == "Gate Sizing Under Variability"
@@ -995,3 +994,28 @@ def test_copy_notebook_carries_paper_metadata(repo):
             (orig_source_id,),
         ).fetchall()]
     assert orig_author_ids == [f"{orig_source_id}:auth:000", f"{orig_source_id}:auth:001"]
+
+
+def test_copy_notebook_remaps_generated_questions_to_original_chunk(repo):
+    src = _seed_full_notebook(repo)
+    original_chunk = _rows(repo, "chunks", src)[0]
+    original_source = _rows(repo, "sources", src)[0]
+    repo._runtime.chunk_store.replace_chunk_questions(
+        original_chunk["id"],
+        src,
+        original_source["id"],
+        (("cq-original", "Which timing constraint applies?", [0.25] * 8),),
+        created_at=_now(),
+    )
+
+    _mk_user(repo, "user-question-copy")
+    copied = repo.copy_notebook(src, new_owner_id="user-question-copy")
+
+    copied_question = _rows(repo, "chunk_questions", copied.id)[0]
+    copied_chunk = _rows(repo, "chunks", copied.id)[0]
+    copied_source = _rows(repo, "sources", copied.id)[0]
+    assert copied_question["id"] != "cq-original"
+    assert copied_question["question"] == "Which timing constraint applies?"
+    assert copied_question["chunk_id"] == copied_chunk["id"]
+    assert copied_question["source_id"] == copied_source["id"]
+    assert copied_chunk["question_indexed_at"]

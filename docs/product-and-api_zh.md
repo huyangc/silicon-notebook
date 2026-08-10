@@ -46,7 +46,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 外层页面为 notebook 集合页（KG-native 管线）：
 
 1. 点击「＋ 新建」——系统立即创建 `Untitled notebook` 并进入，无弹窗。
-2. 上传 PDF、Markdown、DOCX、PPTX、CSV 或 XLSX 来源（multipart）。
+2. 上传 PDF、Markdown、DOCX、PPTX、CSV 或 XLSX 来源（multipart）。登录后的系统配置返回一份脱敏解析能力注册表，上传校验与导入界面共同使用；界面展示自托管 MinerU → MinerU 公共云 → 内置兜底的顺序、能力、执行边界、部署可用状态和固定安全的不可用原因，服务端 endpoint、路径、凭证与原始异常绝不下发。选择始终自动完成，已配置的自托管路径绝不会被静默替换成公共云。
 3. 后端（异步后台作业）：结构化 Markdown 解析 → 分块 + 向量化——源处理完即可做 chunk-native 问答。
 4. **KG 抽取按需触发**（见下方「KG 抽取触发」）：摄取期仅当该 notebook 已有 KG、或 `KG_AUTO_EXTRACT=true` 时才抽。`KG_JOB_CONCURRENCY` 只控制并行来源任务；每次抽取模型调用都由 `kg_extract` workload 所绑定服务的系统调度器准入，因此服务 TOML 中的 `max_concurrency` 始终是唯一模型容量上限。抽完的新源随后增量融入统一 KG。
 5. 知识对象写入 `knowledge_objects` + `knowledge_relations`，并绑定元素级 evidence。
@@ -440,6 +440,14 @@ worker。每个分片一次模型调用，一个分片是一条命令的一批�
 | **`chunk`**（默认） | general | 否 | chunk-native 通用问答：大召回 → 选择 → 长上下文综合 → 引用绑回源 chunk。 |
 | **`graph`** | strict | 是 | 对跨文档知识图谱做单趟个性化 PageRank（PPR）传播。 |
 | **`reasoning`** | strict | 是 | agentic 迭代 plan → retrieve → reflect → answer（流式输出实时轨迹）。 |
+
+### 可选生成问题召回补充
+
+`GENERATED_QUESTION_INDEX_MODE` 是部署级 rollout，取值为 `off`（默认）、`shadow` 或 `on`，不是用户检索范围开关。运维人员先执行 `scripts/batch_ingest.py question-index --notebook-id ...`；每个通过校验的生成问题独立落一行向量，但只寻址一个不可变原 chunk。生成文本绝不作为 evidence、绝不进入引用，也不返回浏览器。重解析/删除通过外键级联清理；notebook 深拷贝和 SQLite→PostgreSQL 迁移会随原 chunk 重映射或保真复制。
+
+在线路径仅在 chunk 基线命中少于 `GENERATED_QUESTION_TRIGGER_HITS` 时运行（默认 `5`，最小 `1`）。它最多读取 `GENERATED_QUESTION_MAX_SCAN_ROWS + 1` 行（扫描上限默认 `10,000`，最小 `1`）；超过上限就跳过补充，绝不无界扫描。排序最多覆盖 `GENERATED_QUESTION_RECALL × GENERATED_QUESTION_QUESTIONS_PER_CHUNK` 个问题行，随后最多保留 `GENERATED_QUESTION_RECALL` 个原 chunk（默认分别为 `40` 与 `3`；recall 最小 `1`，每 chunk 问题数范围 `1..8`）。既有来源硬上限会在该有界读取前直接进入 SQL。`shadow` 会执行对比并发出只含计数的内部 telemetry，但返回完全相同的 baseline tuple；只有 `on` 才能在基线后追加命中的原 chunk，不能驱逐或重排基线命中。`off` 不读表，也不新增 query embedding 调用。
+
+离线构建要求 chat workload `chunk_question_generation` 与 embedding workload `chunk_embedding`。每个 chunk 的完成时间会把模型成功返回空列表也记成已处理，保证幂等；单 chunk 失败不盖完成标记，后续可重试。`--force` 明确表示重生成已完成 chunk。首版使用有界矩阵扫描而非独立 ANN 工件，因此超过扫描上限的大库保持纯 baseline；rollout 必须先用 `shadow` 的无正文命中/新增/跳过计数做 A/B，再考虑切 `on`。
 
 ### id 与显示名
 

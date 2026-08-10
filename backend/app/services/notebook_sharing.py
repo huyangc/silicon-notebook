@@ -585,6 +585,17 @@ class NotebookCopyService:
                 "knowledge_relations", relations_out, chunk_size=chunk_size
             )
 
+            chunk_questions_out = []
+            for data in snapshot["chunk_questions"]:
+                data["id"] = remapped_id(data["id"])
+                data["chunk_id"] = chunk_map[data["chunk_id"]]
+                data["notebook_id"] = new_id
+                data["source_id"] = source_map[data["source_id"]]
+                chunk_questions_out.append(data)
+            self._store.insert_copy_rows(
+                "chunk_questions", chunk_questions_out, chunk_size=chunk_size
+            )
+
             chunk_embeddings_out = []
             for data in snapshot["chunk_embeddings"]:
                 data["chunk_id"] = chunk_map[data["chunk_id"]]

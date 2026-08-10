@@ -118,6 +118,8 @@ bash scripts/check.sh
 
 笔记本内部保持两列布局：左侧是用户导入的来源，主区域依次为**问答**、**知识库**、**记忆**和**深度报告**。
 
+来源导入弹窗从后端读取脱敏的解析能力注册表，展示自托管 MinerU、MinerU 公共云与内置兜底的自动顺序、支持格式、执行边界、可用状态和安全的不可用原因。路由始终自动完成：已配置的自托管 MinerU 绝不会被静默替换成公共云，浏览器上传校验与后端使用同一份注册表投影。
+
 每个导入来源都有一个由问答与新建深度报告共用的检索范围复选框。可见来源默认全选；该选择是当前 notebook 的检索硬上限，也是决定检索范围的唯一依据——模型既不提议也不收窄或扩大它。选中当前全集（包括单篇 notebook）继续使用正常图扩展/推理路径，并快照当时已有的隐藏 Memory/Knowhow 参与者；确实排除来源才启用收窄安全规则并排除这些隐藏投影。快照冻结可分区候选和结果；可见来源或隐藏参与者漂移时，无法安全隔离的整图通道会被跳过。收窄且已有索引时，来源谓词在语义 Top-K 之前生效，hydrate 后再复核；旧索引缺少紧凑来源映射时暂时降级为有界来源内词法检索，重建或增量折叠后恢复。已挂载的参考库是同一份检索范围的第二个、互相独立的维度：每个参考库**整库**一个复选框，同样默认全选，于是「限定到自己那一篇」的提问不再被借来的 84 篇论文库淹没。两个维度绝不合并——取消某个参考库的勾选只收窄跨库检索，绝不会关掉当前笔记本自己的图扩展、PPR 或私有 Memory。全部清空来源后本地范围为空；全部取消勾选参考库后库范围为空；两者同时为空时，问答与新建报告会被拒绝。
 
 默认构建的超大来源图伴生产物只通过 source-first 有界读取构建。reader 会校验 partition 内容；只选一篇时直接复用该来源落盘的稀疏图，选择多篇时才执行有界稀疏组合，并且绝不回退整库图。
@@ -193,7 +195,7 @@ Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有�
 - importer 要求目标 PostgreSQL 是空的且使用 UTF-8；目标 URL 只从 `POSTGRES_MIGRATION_URL` 读取，不放在 CLI 参数中。它用 SQLite backup API 获取包含已提交 WAL 的在线一致快照，只在工作副本上升级到配对 schema，按有界 batch 流式 `COPY`，保留 ordinal，把旧 JSON 向量转换成 float32 `bytea`，逐表做内容 checksum，并逐表提交 + 记录 checkpoint，中断（崩溃、远程连接断开、重启）后从最后完成的表续跑而非整体重来；finalize（ordinal reseed、重建索引、`ANALYZE`）是幂等的。SQLite-only 的 shadow control/change-log 表会被明确排除并记录在 receipt 中。可为大目标传入会话级批量装载调优（`--maintenance-work-mem`、`--max-parallel-index-workers`）。默认 preview/apply 不会修改 `DATABASE_URL`，也不会复制 `.local/storage`。
 - 在线迁移只能算演练快照：快照之后继续写入 SQLite 的数据不会被同步。对已经停服的本地部署，显式 `--activate-env ... --confirm-service-stopped` 会重新生成 SQLite 一致快照，并按无凭据 receipt 重算 PostgreSQL 全表 checksum；全部一致后才原子替换 `.env`，把旧 SQLite URL 保存在惰性的 `SHADOW_DATABASE_URL`，并创建权限受限的回退副本。CLI 不会自行停止或重启服务。随后以 `--workers 1` 启动，并在放流量前检查 `/api/ready`、登录、数量、搜索、代表性读取和一次 canary 写入。
 - 切回 SQLite 不会回放 PostgreSQL-only 写入。无损回滚要求切换后尚无新写入，或已经完成并验证双向外部对账迁移。
-- `scripts/batch_ingest.py` 的 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index` 和显式离线的 `backfill-source-facts` 同时支持 SQLite 与 PostgreSQL。后者无模型调用、可恢复地投影历史来源事实，显式区分在线事实与历史投影，并在运维失败重试后保留真实不完整原因；无法证明来源归属的旧数据保持可见的 incomplete，`scripts/audit_source_facts.py` 会独立对账 KG 代次/版本/数量，同时只报告计数与有界 source id。PostgreSQL 直连维护只允许离线执行：先停止 API/后台 writer，再显式传 `--confirm-service-stopped`；该参数只是运维确认，不会替你停服务。数据库级 advisory lock 会阻止两个 PostgreSQL 维护 CLI 重叠。`vectors-to-blob` 仍仅适用于 SQLite，因为 PostgreSQL 向量已经是 `bytea`。所有 `kg` 抽取形态（包括 `--limit`、`--retry-partial`）都复用页面“分析”的持久 notebook job；批处理的末尾聚类/索引完成后 job 才成功。页面“继续分析”和 CLI `kg --retry-partial` 都会安全修复 partial，旧图保留到“零失败窗口且非空”的新图成功提交。 离线长跑可加 `kg --skip-model-failures`：模型不可用时只跳过当前来源（退回未分析，重跑自动重试）而不熔断整个任务，连续 `--max-consecutive-model-failures` 个来源失败仍会停止（省略则按 `max(32, 2 × workers)` 派生；显式给出不高于 `--workers` 的取值直接报错）；起始可用性探测刻意不在覆盖范围内——服务开跑时就是死的，直接快速失败；默认关闭，开启时打印告警并在结束时报出被跳过的来源数。
+- `scripts/batch_ingest.py` 的 `ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`question-index`、`reparse`、`backfill-source-index` 和显式离线的 `backfill-source-facts` 同时支持 SQLite 与 PostgreSQL。`question-index` 是显式 opt-in：为原 chunk 生成并独立向量化搜索问题，要求开启 rollout mode 并绑定 `chunk_question_generation` / `chunk_embedding`，生成文本绝不成为引用证据。来源事实命令无模型调用、可恢复地投影历史来源事实，显式区分在线事实与历史投影，并在运维失败重试后保留真实不完整原因；无法证明来源归属的旧数据保持可见的 incomplete，`scripts/audit_source_facts.py` 会独立对账 KG 代次/版本/数量，同时只报告计数与有界 source id。PostgreSQL 直连维护只允许离线执行：先停止 API/后台 writer，再显式传 `--confirm-service-stopped`；该参数只是运维确认，不会替你停服务。数据库级 advisory lock 会阻止两个 PostgreSQL 维护 CLI 重叠。`vectors-to-blob` 仍仅适用于 SQLite，因为 PostgreSQL 向量已经是 `bytea`。所有 `kg` 抽取形态（包括 `--limit`、`--retry-partial`）都复用页面“分析”的持久 notebook job；批处理的末尾聚类/索引完成后 job 才成功。页面“继续分析”和 CLI `kg --retry-partial` 都会安全修复 partial，旧图保留到“零失败窗口且非空”的新图成功提交。 离线长跑可加 `kg --skip-model-failures`：模型不可用时只跳过当前来源（退回未分析，重跑自动重试）而不熔断整个任务，连续 `--max-consecutive-model-failures` 个来源失败仍会停止（省略则按 `max(32, 2 × workers)` 派生；显式给出不高于 `--workers` 的取值直接报错）；起始可用性探测刻意不在覆盖范围内——服务开跑时就是死的，直接快速失败；默认关闭，开启时打印告警并在结束时报出被跳过的来源数。
 
 preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；按步骤执行的清单见[迁移 runbook](./docs/postgres-migration-runbook.md)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
@@ -225,6 +227,7 @@ preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正�
 - 公式、图片和复杂扫描 PDF 的最高保真解析需要 MinerU；`MINERU_MODE=off` 使用本地 PyMuPDF4LLM 版面/Markdown 降级解析（pypdf 仅作最后兜底）。远端 MinerU HTTP 调用默认对瞬态失败额外重试 2 次（共最多 3 次；`MINERU_MAX_RETRIES`）。URL 云解析最终失败时，后端会下载 PDF 并用本地解析完成；来源界面会提示可能的质量损失，并提供重新解析/删除操作。
 - 知识抽取和模型回答需要绑定对应 workload；离线模式不会合成知识。
 - 图谱问答仍为 opt-in/实验能力，默认模式是 `chunk`。
+- 生成问题召回由部署者显式开启且默认关闭；`shadow` 只记录不含正文的对比计数、不改变结果，只有明确的 `on` 才可在 chunk 低召回时补入原 chunk。
 - Memory 只能由用户主动选择保存，并且仅创建者可见。
 - 分享是复制或只读成员，不是实时协同编辑。
 - Web/网络来源搜索仍是禁用的未来入口。

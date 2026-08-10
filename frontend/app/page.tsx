@@ -125,7 +125,7 @@ import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
 import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
-import { fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ReadySnapshot } from "./system-api";
+import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
@@ -213,6 +213,7 @@ import {
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 } from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
+import { ParserCapabilityPanel } from "./parser-capability-panel";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
@@ -334,15 +335,9 @@ const MAINTENANCE_JOB_MISMATCH_SETTLE_STREAK = 2;
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
-// 上传支持的扩展名（单一事实来源）：accept 串、stageFiles 校验、标题/文本剥扩展名都从此派生。
-// 需与后端 backend/app/api/routes.py 的 SUPPORTED_SOURCE_SUFFIXES 保持一致。
-const SUPPORTED_SOURCE_EXTENSIONS: string[] = [
-  "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm",
-];
-const SUPPORTED_SOURCE_ACCEPT = SUPPORTED_SOURCE_EXTENSIONS.map((ext) => `.${ext}`).join(",");
-const SUPPORTED_SOURCE_EXT_GROUP = SUPPORTED_SOURCE_EXTENSIONS.join("|");
-// 面向用户的支持列表描述（弹窗内「已跳过」原因与拖拽区提示共用，避免文案漂移）。
-const SUPPORTED_SOURCE_USER_HINT = "PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm) / Markdown / CSV";
+// 标题清理需要在系统配置返回前可用，因此使用与后端注册表配套的兼容默认值；上传
+// 校验、accept 与可见格式列表则使用 /system/config 下发的权威注册表投影。
+const SUPPORTED_SOURCE_EXT_GROUP = DEFAULT_SUPPORTED_SOURCE_EXTENSIONS.join("|");
 // 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。
 const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt", "xls"];
 
@@ -880,6 +875,18 @@ export default function Home() {
   // only the short initial fetch window; the server remains the final 413 guard.
   const [sourceUploadMaxBytes, setSourceUploadMaxBytes] = useState<number | null>(null);
   const [sourceUploadMaxFilesPerBatch, setSourceUploadMaxFilesPerBatch] = useState<number | null>(null);
+  const [supportedSourceExtensions, setSupportedSourceExtensions] = useState<string[]>(
+    DEFAULT_SUPPORTED_SOURCE_EXTENSIONS,
+  );
+  const [parserEngines, setParserEngines] = useState<ParserEngineCapability[]>([]);
+  const supportedSourceAccept = useMemo(
+    () => supportedSourceExtensions.map((ext) => `.${ext}`).join(","),
+    [supportedSourceExtensions],
+  );
+  const supportedSourceUserHint = useMemo(
+    () => supportedSourceExtensions.map((ext) => ext.toUpperCase()).join(" / "),
+    [supportedSourceExtensions],
+  );
   const [reportMaxSections, setReportMaxSections] = useState(
     DEFAULT_REPORT_MAX_SECTIONS,
   );
@@ -1282,6 +1289,8 @@ export default function Home() {
         if (!cancelled) {
           setSourceUploadMaxBytes(config.source_upload_max_bytes);
           setSourceUploadMaxFilesPerBatch(config.source_upload_max_files_per_batch);
+          setSupportedSourceExtensions(config.supported_source_extensions);
+          setParserEngines(config.parser_engines);
           setReportMaxSections(config.report_max_sections);
           setReportMaxSubqueriesPerSection(config.report_max_subqueries_per_section);
         }
@@ -2813,6 +2822,8 @@ export default function Home() {
     if (systemConfiguration) {
       setSourceUploadMaxBytes(systemConfiguration.source_upload_max_bytes);
       setSourceUploadMaxFilesPerBatch(systemConfiguration.source_upload_max_files_per_batch);
+      setSupportedSourceExtensions(systemConfiguration.supported_source_extensions);
+      setParserEngines(systemConfiguration.parser_engines);
       setReportMaxSections(systemConfiguration.report_max_sections);
       setReportMaxSubqueriesPerSection(
         systemConfiguration.report_max_subqueries_per_section,
@@ -3201,10 +3212,10 @@ export default function Home() {
   function stageIncomingFiles(all: File[]) {
     if (all.length === 0) return;
     const { accepted: picked, skipped } = classifyStagedFiles(all, {
-      supportedExtensions: SUPPORTED_SOURCE_EXTENSIONS,
+      supportedExtensions: supportedSourceExtensions,
       legacyOfficeExtensions: LEGACY_OFFICE_EXTENSIONS,
       maxBytes: sourceUploadMaxBytes,
-      supportedHint: SUPPORTED_SOURCE_USER_HINT,
+      supportedHint: supportedSourceUserHint,
     });
     // 追加而非覆盖（"继续添加文件"语义）；按 name+size 去重，避免重复入列。
     const merged = [...stagedFiles];
@@ -7024,6 +7035,7 @@ export default function Home() {
                 )}
               </div>
             )}
+            <ParserCapabilityPanel engines={parserEngines} />
             <label
               className={`drop-zone${sourceFilePickerDisabled ? " is-disabled" : ""}${dropZoneDragActive ? " is-dragover" : ""}`}
               title={sourceFilePickerHint}
@@ -7032,10 +7044,10 @@ export default function Home() {
               onDragLeave={() => setDropZoneDragActive(false)}
               onDrop={handleStageDrop}
             >
-              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
+              <input type="file" multiple accept={supportedSourceAccept} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "或拖放文件"}</strong>
-              <small>{sourceUploadConfigLoading ? "正在读取上传限制…" : `支持 ${SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。`}</small>
+              <small>{sourceUploadConfigLoading ? "正在读取上传限制…" : `支持 ${supportedSourceUserHint}。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。`}</small>
             </label>
             {stagedSkipped.length > 0 && (
               <div className="staged-skipped" role="alert">
@@ -7061,7 +7073,7 @@ export default function Home() {
                 onDrop={handleStageDrop}
               >
                 <Upload size={18} strokeWidth={2.5} /> 上传文件
-                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
+                <input type="file" multiple accept={supportedSourceAccept} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
               </label>
               <button
                 type="button"
@@ -7397,6 +7409,9 @@ export default function Home() {
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
                 <span className="tag">{sourceElementsTotal || sourceDetail.element_count} 个元素</span>
               </div>
+              {!sourceDetailBaseId && (
+                <ParserCapabilityPanel engines={parserEngines} compact />
+              )}
               {sourceDetail.paper_meta_status === "has_meta" && sourceDetail.paper_meta && (
                 <div className="source-detail-paper">
                   {sourceDetail.paper_meta.title && (

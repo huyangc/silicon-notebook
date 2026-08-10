@@ -263,8 +263,17 @@ class RetrievalService:
         return self.candidates._union_chunk_candidates(base, extra)
 
     def select_chunk_candidates(self, scored, ids, matrix, k, lambda_):
-        return self.candidates._mmr_select_chunks(
-            scored, ids, matrix, k, lambda_
+        from app.services.retrieval import partition_generated_question_chunks
+
+        baseline, supplemental = partition_generated_question_chunks(scored)
+        selected = self.candidates._mmr_select_chunks(
+            baseline, ids, matrix, k, lambda_
+        )
+        remaining = max(0, k - len(selected))
+        if not remaining or not supplemental:
+            return selected
+        return selected + self.candidates._mmr_select_chunks(
+            supplemental, ids, matrix, remaining, lambda_
         )
 
     def has_kg(self, notebook_id):

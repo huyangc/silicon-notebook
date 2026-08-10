@@ -122,7 +122,7 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 
 ### `batch_ingest.py` —— SQLite / PostgreSQL 离线批处理
 
-`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、
+`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`question-index`、`reparse`、
 `backfill-source-index` 会通过统一 factory 使用 `DATABASE_URL` 选中的正式后端。
 PostgreSQL 必须先停 API 与全部后台 writer，再给命令追加
 `--confirm-service-stopped`；该参数不会替你停服务。所有生产维护 wrapper 使用同一
@@ -131,6 +131,10 @@ preflight + database-wide advisory lock，锁竞争会以状态码 2 退出。`-
 
 ```bash
 PYTHONPATH=backend python scripts/batch_ingest.py index \
+  --notebook-id nb-xxxx --confirm-service-stopped
+
+# GENERATED_QUESTION_INDEX_MODE=shadow|on，且模型 TOML 已绑定两个 workload 后执行
+PYTHONPATH=backend python scripts/batch_ingest.py question-index \
   --notebook-id nb-xxxx --confirm-service-stopped
 ```
 

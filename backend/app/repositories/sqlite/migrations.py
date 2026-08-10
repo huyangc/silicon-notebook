@@ -29,7 +29,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v42 adds notebook-scoped durable progress for the source reverse-index
 # rebuild so a stopped deployment can resume after process loss without
 # clearing and rescanning already committed pages.
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2185,6 +2185,29 @@ class SqliteMigrator:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_share_token
                   ON reports(share_token) WHERE share_token IS NOT NULL;
+                """
+            )
+
+    def _migration_44(self) -> None:
+        """Optional generated-question vectors bound to original chunks."""
+        with self._connect() as db:
+            self.add_column_if_missing(db, "chunks", "question_indexed_at", "TEXT")
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS chunk_questions (
+                  id TEXT PRIMARY KEY,
+                  chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  question TEXT NOT NULL,
+                  vector BLOB NOT NULL,
+                  created_at TEXT NOT NULL,
+                  UNIQUE(chunk_id, question)
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunk_questions_nb
+                  ON chunk_questions(notebook_id, id);
+                CREATE INDEX IF NOT EXISTS idx_chunk_questions_source
+                  ON chunk_questions(source_id, id);
                 """
             )
 

@@ -1616,7 +1616,11 @@ class AskService:
                 )
             _t = time.perf_counter()
             from app.services.query_rewrite import expand_query
-            from app.services.retrieval import quota_fuse, est_tokens
+            from app.services.retrieval import (
+                est_tokens,
+                partition_generated_question_chunks,
+                quota_fuse_baseline_first,
+            )
             ex = None
             raise_if_cancelled(cancel_event)
             if self.settings.query_rewrite_enabled:
@@ -1684,17 +1688,33 @@ class AskService:
                 # ∪ exact-identifier whole-section hits (same dedup contract)
                 candidates = self.candidates.merge_chunk_candidates(candidates, exact_hits)
                 raise_if_cancelled(cancel_event)
+                baseline_candidates, supplemental_candidates = (
+                    partition_generated_question_chunks(candidates)
+                )
                 rerank_client = self.model_clients.rerank("retrieval_rerank")
                 order = rerank_client.rerank(
-                    retrieval_query, [c.text for c in candidates],
+                    retrieval_query, [c.text for c in baseline_candidates],
                     on_error=lambda e: self.model_errors.note_model_error(
                         "rerank",
                         e,
                         workload_id="retrieval_rerank",
                     ))
                 raise_if_cancelled(cancel_event)
-                ranked = [candidates[i] for i in order]
-                baseline_chunk_candidates = list(ranked)
+                ranked = [baseline_candidates[i] for i in order]
+                if supplemental_candidates:
+                    supplemental_order = rerank_client.rerank(
+                        retrieval_query,
+                        [c.text for c in supplemental_candidates],
+                        on_error=lambda e: self.model_errors.note_model_error(
+                            "rerank",
+                            e,
+                            workload_id="retrieval_rerank",
+                        ),
+                    )
+                    ranked.extend(
+                        supplemental_candidates[i] for i in supplemental_order
+                    )
+                baseline_chunk_candidates = list(baseline_candidates)
                 kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
                 untruncated_kg_block = kg_block
                 kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
@@ -1703,7 +1723,7 @@ class AskService:
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
                 from app.services.retrieval import (
                     exact_section_reserve_rule, graph_reserve_rule,
-                    select_with_reserves,
+                    select_with_reserves_baseline_first,
                 )
 
                 # Two floors inside ONE budget. The reranker is a general
@@ -1714,7 +1734,7 @@ class AskService:
                 # evicts what the other is holding; a reserve set to 0 is fully
                 # inert, so `chunk_graph_reserve` keeps its historical
                 # behaviour byte-for-byte.
-                selected = select_with_reserves(ranked, chunk_budget, (
+                selected = select_with_reserves_baseline_first(ranked, chunk_budget, (
                     graph_reserve_rule(max(0, self.settings.chunk_graph_reserve)),
                     exact_section_reserve_rule(
                         max(0, self.settings.exact_section_reserve), exact_ids),
@@ -1744,9 +1764,15 @@ class AskService:
                         if cur is None or c.relevance > cur.relevance:
                             collected[c.chunk_id] = c
                     per_query = per_query + [{c.chunk_id: c for c in exact_hits}]
-                baseline_chunk_candidates = list(collected.values())
-                selected, _counts = quota_fuse(collected, per_query, plan.fuse_k,
-                                               relevance=lambda c: c.relevance)
+                baseline_chunk_candidates, _supplemental_candidates = (
+                    partition_generated_question_chunks(list(collected.values()))
+                )
+                selected, _counts = quota_fuse_baseline_first(
+                    collected,
+                    per_query,
+                    plan.fuse_k,
+                    relevance=lambda c: c.relevance,
+                )
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
             else:
                 baseline_kg_truncated = False
@@ -1756,7 +1782,9 @@ class AskService:
                 scored = self.candidates.merge_chunk_candidates(scored, kw_hits)
                 # ∪ exact-identifier whole-section hits (same dedup contract)
                 scored = self.candidates.merge_chunk_candidates(scored, exact_hits)
-                baseline_chunk_candidates = list(scored)
+                baseline_chunk_candidates, _supplemental_candidates = (
+                    partition_generated_question_chunks(scored)
+                )
                 raise_if_cancelled(cancel_event)
                 selected = self.candidates.select_chunk_candidates(
                     scored, ids, mat, plan.mmr_k, plan.mmr_lambda)

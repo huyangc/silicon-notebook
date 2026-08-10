@@ -4,8 +4,9 @@
 // 的**外层 label** 必须显式带 onDragOver + onDrop（preventDefault 后走
 // stageIncomingFiles，让被跳过的文件进弹窗内的持久「已跳过」列表）。
 //
-// 判据是语义的（AST 上「绑定 SUPPORTED_SOURCE_ACCEPT 的 input 的外围 label 元素
-// 属性集」），不做文本/位置查询——static-source-policy 禁止测试直接读生产源码。
+// 判据是语义的（AST 上「绑定后端解析注册表派生的
+// supportedSourceAccept 的 input 的外围 label 元素属性集」），不做文本/位置
+// 查询——static-source-policy 禁止测试直接读生产源码。
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -32,7 +33,7 @@ function bindsSourceAccept(node, sourceFile) {
       initializer
       && ts.isJsxExpression(initializer)
       && initializer.expression
-      && initializer.expression.getText(sourceFile) === "SUPPORTED_SOURCE_ACCEPT",
+      && initializer.expression.getText(sourceFile) === "supportedSourceAccept",
     );
   }
   return false;
@@ -63,7 +64,7 @@ test("来源上传的每个 file input 外层 label 都显式接管拖放", asyn
 
   assert.ok(
     inputs.length >= 2,
-    `page.tsx 里应至少有 2 个绑定 SUPPORTED_SOURCE_ACCEPT 的来源文件 input，实际 ${inputs.length}`,
+    `page.tsx 里应至少有 2 个绑定 supportedSourceAccept 的来源文件 input，实际 ${inputs.length}`,
   );
   for (const { enclosingLabel } of inputs) {
     assert.ok(enclosingLabel, "来源文件 input 应位于 <label> 内");

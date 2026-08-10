@@ -104,6 +104,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 7. 文档解析与元素级 Evidence
 
+- **解析能力注册表与全栈可见性（§6.2，2026-08-10）**：后端以单一注册表描述自托管 MinerU、MinerU 公共云和内置解析器的顺序、支持格式、执行边界、可用性与固定不可用原因；上传准入、后端分派与来源导入 UI 共用其投影。路由保持自动，已配置自托管 MinerU 失败时不会静默外发到公共云；对外配置不暴露 endpoint、凭据、路径或原始异常。
 - `SourceElement`（id / source_id / element_type / location_label / text / metadata）+ `source_elements` 表。
 - parser：Markdown（heading/paragraph/list_item）、DOCX（paragraph/table_row）、PPTX、PDF、plain text fallback。
 - **PPTX 升级为元素级**：按 shape / text box 逐个产出 `slide_text` 元素，并解析 `ppt/notesSlides/*.xml` speaker notes 为 `speaker_notes` 元素。
@@ -120,6 +121,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 9. 检索：关键词 + 向量混合
 
+- **生成问题影子索引（§6.5 / §11，2026-08-10）**：新增部署级 `off/shadow/on` 模式，默认 `off` 零额外成本；显式离线 `question-index` 阶段经 `chunk_question_generation` 为原 chunk 生成问题，并用 `chunk_embedding` 独立向量化。在线只在 chunk 低召回时、于冻结来源上限内执行有界补召回；超过扫描上限直接回退 baseline。`shadow` 仅记录无正文对比计数且逐字返回 baseline，`on` 也只在 baseline 后追加原 chunk，不驱逐或重排已有结果。生成问题永不作为引用证据；迁移、级联删除/重解析、notebook 深复制及空结果幂等约束已有回归覆盖。
 - Notebook 内搜索 API：`GET /api/notebooks/{notebook_id}/search?q=`，覆盖 notebook metadata、source metadata、source element 与 knowledge object payload。
 - **新增 `backend/app/services/retrieval.py`**：
   - `element_embeddings(element_id, source_id, vector)` 存 JSON 向量；解析后对每个 element 调 `llm_client.embed()` 写入（未配置 embedding 则跳过）。

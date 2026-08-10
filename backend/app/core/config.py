@@ -424,6 +424,24 @@ class Settings(BaseSettings):
     retrieval_rrf_enabled: bool = Field(False, validation_alias="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, validation_alias="RETRIEVAL_RRF_K")
     chunk_ann_enabled: bool = Field(True, validation_alias="CHUNK_ANN_ENABLED")  # 有索引的库 chunk 检索走 ANN 核⊕delta(默认开:大库全量暴力不可扩展;小库无 scale 索引→_scale_index 返 None→自然回退暴力,零影响)。ANN 是语义候选,纯关键词命中缺口待 chunk 侧 FTS(词法∪语义)补;可用 CHUNK_ANN_ENABLED=false 关
+    # Optional LLM-generated question index. ``shadow`` computes bounded
+    # low-recall candidates and records counts but cannot change results;
+    # only explicit ``on`` merges them. Default off keeps model cost opt-in.
+    generated_question_index_mode: Literal["off", "shadow", "on"] = Field(
+        "off", validation_alias="GENERATED_QUESTION_INDEX_MODE"
+    )
+    generated_question_questions_per_chunk: int = Field(
+        3, ge=1, le=8, validation_alias="GENERATED_QUESTION_QUESTIONS_PER_CHUNK"
+    )
+    generated_question_trigger_hits: int = Field(
+        5, ge=1, validation_alias="GENERATED_QUESTION_TRIGGER_HITS"
+    )
+    generated_question_recall: int = Field(
+        40, ge=1, validation_alias="GENERATED_QUESTION_RECALL"
+    )
+    generated_question_max_scan_rows: int = Field(
+        10_000, ge=1, validation_alias="GENERATED_QUESTION_MAX_SCAN_ROWS"
+    )
     index_suggest_chunk_threshold: int = Field(2000, validation_alias="INDEX_SUGGEST_CHUNK_THRESHOLD")  # 未索引库总 chunk 超此 → 建议建索引
     index_stale_delta_threshold: int = Field(500, validation_alias="INDEX_STALE_DELTA_THRESHOLD")        # 已索引库 delta chunk 超此 → 建议重建
     scale_index_offpeak_start_hour: int = Field(2, validation_alias="SCALE_INDEX_OFFPEAK_START_HOUR")    # 低峰窗口起(含)

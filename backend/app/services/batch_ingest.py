@@ -67,6 +67,7 @@ _VECTOR_TABLES = (
     ("relation_embeddings", "relation_id"),
 )
 _EMBED_PAGE_ROWS = 500
+_QUESTION_PROGRESS_INTERVAL = 25
 
 # --skip-model-failures 的兜底阈值下限:连续这么多个来源都因模型不可用被跳过、中间
 # 没有任何一个成功时,判定服务真的挂了并升级为任务级熔断。
@@ -1538,6 +1539,54 @@ def run_metadata(repo, args, workers: int | None = None) -> int:
     return 0
 
 
+def run_question_index(
+    repo: BatchIngestRepository,
+    args: argparse.Namespace,
+    workers: int,
+) -> int:
+    """Offline opt-in build of generated questions pointing to original chunks."""
+    if not args.notebook_id:
+        print("error: question-index 需要 --notebook-id。", file=sys.stderr)
+        return 2
+    if repo.settings.generated_question_index_mode == "off":
+        print(
+            "error: GENERATED_QUESTION_INDEX_MODE=off；先显式设为 shadow（A/B）或 on。",
+            file=sys.stderr,
+        )
+        return 2
+    missing = [
+        workload
+        for workload in ("chunk_question_generation", "chunk_embedding")
+        if not repo.configured(workload)
+    ]
+    if missing:
+        print(
+            "error: question-index 缺少模型 workload 绑定：" + ", ".join(missing),
+            file=sys.stderr,
+        )
+        return 2
+    repo.get_notebook(args.notebook_id)
+
+    def _progress(counts: dict[str, int]) -> None:
+        seen = counts["chunks_seen"]
+        if seen % _QUESTION_PROGRESS_INTERVAL == 0:
+            print(
+                "[question-index] "
+                f"chunks={seen} stored={counts['chunks_stored']} "
+                f"questions={counts['questions_stored']} failed={counts['failed']}",
+                flush=True,
+            )
+
+    result = repo.maintenance.build_chunk_question_index(
+        args.notebook_id,
+        workers=max(1, int(workers)),
+        force=bool(args.force),
+        progress=_progress,
+    )
+    print(f"[question-index done] {json.dumps(result, ensure_ascii=False)}", flush=True)
+    return 1 if result["failed"] else 0
+
+
 def _make_logger(manifest_path: Optional[Path]) -> LogFn:
     if manifest_path is None:
         return lambda _e: None
@@ -1562,7 +1611,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
                                       "backfill-source-index", "backfill-source-facts",
-                                      "metadata", "reparse"])
+                                      "metadata", "question-index", "reparse"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--all-notebooks", action="store_true",
@@ -1607,6 +1656,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "(默认拒绝,防静默产出无向量库)")
     p.add_argument("--force", action="store_true",
                    help="metadata phase: 已有元数据行的源也重抽；"
+                        "question-index phase: 已有问题索引的 chunk 也重新生成；"
                         "backfill-source-index phase: 强制重建来源反查索引；"
                         "backfill-source-facts phase: 删除该代次的旧回填投影并从头重建")
     p.add_argument("--pool-report-interval", type=int, default=15,
@@ -1680,6 +1730,13 @@ def _dispatch_main(
             flush=True,
         )
         return run_metadata(repo, args, effective.workers)
+
+    if args.phase == "question-index":
+        print(
+            f"concurrency: source={effective.workers}({effective.workers_source})",
+            flush=True,
+        )
+        return run_question_index(repo, args, effective.workers)
 
     # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
     allow_no_embed = args.allow_no_embed and args.phase != "embed"

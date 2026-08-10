@@ -378,6 +378,12 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
+The optional generated-question index uses background chat workload
+`chunk_question_generation` plus the existing `chunk_embedding` workload. Bind both
+before running the offline `question-index` phase. Leaving the rollout mode off is the
+zero-cost default; deployment rollout semantics and all numeric rails live in the
+[Product and API reference](./product-and-api.md#optional-generated-question-recall-supplement).
+
 Knowhow row completion uses two interactive chat workloads: `reasoning_agent`
 plans and reflects over federated evidence from the active notebook and its
 valid mounted reference libraries, then `knowhow_complete` turns that evidence
@@ -801,6 +807,26 @@ MINERU_RETURN_IMAGES    # retain embedded images from PDF/DOCX/PPTX documents (d
 MINERU_MAX_IMAGE_BYTES  # max size per embedded image (default 5MB; larger images are dropped)
 MINERU_MAX_IMAGES_PER_SOURCE # max embedded images per source (default 200)
 ```
+
+Parser routing is declared by one backend registry and projected through the authenticated
+system-configuration response. It always prefers a configured self-hosted MinerU path,
+then permits public cloud only when no self-hosted path is configured, and retains the
+built-in parser as the format-specific fallback. The browser receives only capability,
+execution-boundary, availability, and fixed reason enums—never endpoints or credentials.
+
+**Generated-question rollout (optional retrieval supplement):**
+
+```text
+GENERATED_QUESTION_INDEX_MODE
+GENERATED_QUESTION_QUESTIONS_PER_CHUNK
+GENERATED_QUESTION_TRIGGER_HITS
+GENERATED_QUESTION_RECALL
+GENERATED_QUESTION_MAX_SCAN_ROWS
+```
+
+Keep the mode `off` unless an operator is deliberately building/evaluating this index.
+Use `shadow` for counts-only A/B before `on`; see the product contract for exact defaults
+and bounds and Operations for the offline command.
 
 `MINERU_MAX_RETRIES` is shared by the self-hosted `MINERU_MODE=http` adapter and
 mineru.net cloud requests, including URL submission/poll/result download and signed

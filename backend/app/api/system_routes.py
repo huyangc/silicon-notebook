@@ -20,6 +20,10 @@ from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
 from app.models.system import SystemConfiguration
 from app.services.model_status import ModelStatusService
+from app.services.parser_registry import (
+    SUPPORTED_SOURCE_EXTENSIONS,
+    parser_engine_capabilities,
+)
 from app.services.pending_bus import pending_bus
 
 
@@ -66,6 +70,8 @@ def system_configuration(
     return SystemConfiguration(
         source_upload_max_bytes=settings.source_upload_max_bytes,
         source_upload_max_files_per_batch=SOURCE_UPLOAD_MAX_FILES_PER_BATCH,
+        supported_source_extensions=list(SUPPORTED_SOURCE_EXTENSIONS),
+        parser_engines=parser_engine_capabilities(settings),
         report_max_sections=settings.report_max_sections,
         report_max_subqueries_per_section=(
             settings.report_max_subqueries_per_section

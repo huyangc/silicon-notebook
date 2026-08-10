@@ -15,6 +15,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.search import chunk_section_rows
+from app.services.vector_index import encode_vector
 
 
 def _compat_element_ids(row: dict) -> dict:
@@ -29,6 +30,104 @@ class ChunkStore:
 
     def __init__(self, database: PostgresDatabase) -> None:
         self.database = database
+
+    def question_index_chunk_page(
+        self,
+        notebook_id: str,
+        *,
+        after_id: str,
+        limit: int,
+        include_existing: bool,
+    ) -> list[dict]:
+        existing = "" if include_existing else "AND c.question_indexed_at IS NULL "
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT c.id AS chunk_id,c.source_id,c.text,c.section_path "
+                "FROM chunks c WHERE c.notebook_id=%s AND c.id>%s "
+                f"{existing}ORDER BY c.id COLLATE \"C\" LIMIT %s",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_chunk_questions(
+        self,
+        chunk_id: str,
+        notebook_id: str,
+        source_id: str,
+        rows: Sequence[tuple[str, str, object]],
+        *,
+        created_at: str,
+    ) -> None:
+        created = normalize_timestamp(created_at)
+        encoded = [
+            (question_id, chunk_id, notebook_id, source_id, question,
+             encode_vector(vector), created)
+            for question_id, question, vector in rows
+        ]
+        with self.database.write() as connection:
+            connection.execute(
+                "DELETE FROM chunk_questions WHERE chunk_id=%s", (chunk_id,)
+            )
+            execute_many(
+                connection,
+                "INSERT INTO chunk_questions "
+                "(id,chunk_id,notebook_id,source_id,question,vector,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                encoded,
+            )
+            connection.execute(
+                "UPDATE chunks SET question_indexed_at=%s WHERE id=%s",
+                (created, chunk_id),
+            )
+
+    def question_index_rows(
+        self,
+        notebook_id: str,
+        *,
+        allowed_source_ids: Sequence[str] | None,
+        limit: int,
+    ) -> list[dict]:
+        params: list[object] = [notebook_id]
+        source_clause = ""
+        if allowed_source_ids is not None:
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
+                return []
+            source_clause = f"AND source_id IN ({placeholders(source_ids)}) "
+            params.extend(source_ids)
+        params.append(int(limit))
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,chunk_id,source_id,vector FROM chunk_questions "
+                "WHERE notebook_id=%s " + source_clause
+                + "ORDER BY id COLLATE \"C\" LIMIT %s",
+                params,
+            ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            if isinstance(item.get("vector"), memoryview):
+                item["vector"] = item["vector"].tobytes()
+            output.append(item)
+        return output
+
+    def question_index_stats(self, notebook_id: str) -> dict[str, int]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM chunk_questions WHERE notebook_id=%s) "
+                "AS questions,"
+                "(SELECT COUNT(*) FROM chunks WHERE notebook_id=%s "
+                "AND question_indexed_at IS NOT NULL) AS chunks,"
+                "(SELECT COUNT(DISTINCT chunk_id) FROM chunk_questions "
+                "WHERE notebook_id=%s) AS question_chunks",
+                (notebook_id, notebook_id, notebook_id),
+            ).fetchone()
+        return {
+            "questions": int(row["questions"]),
+            "chunks": int(row["chunks"]),
+            "question_chunks": int(row["question_chunks"]),
+        }
 
     @staticmethod
     def ids_for_sources(connection, notebook_id: str, source_ids: Sequence[str]):

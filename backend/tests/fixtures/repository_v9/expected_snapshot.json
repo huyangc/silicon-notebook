@@ -674,6 +674,7 @@
         ],
         "id": "<chunk-id-1>",
         "notebook_id": "<nb-id-1>",
+        "question_indexed_at": null,
         "section_path": "§1 Gain",
         "source_id": "<src-id-1>",
         "text": "A source-degenerated stage stabilizes voltage gain."
@@ -685,6 +686,7 @@
         ],
         "id": "<chunk-id-2>",
         "notebook_id": "<nb-id-1>",
+        "question_indexed_at": null,
         "section_path": "§2 Formula",
         "source_id": "<src-id-1>",
         "text": "A_v = -g_m R_D / (1 + g_m R_S)"
@@ -1163,6 +1165,16 @@
       {
         "name": "idx_chunk_embeddings_nb",
         "sql_sha256": "886fffe3b799daf910469c1e9668e2a64f961c8349533e35e62fa5b32e039b3f",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunk_questions_nb",
+        "sql_sha256": "921cacc4e7c0231e56a7b3b0ad97128d89e81b37218527297db1db3c1e178933",
+        "type": "index"
+      },
+      {
+        "name": "idx_chunk_questions_source",
+        "sql_sha256": "aad0a855480e068442743318d9db423bb818167449ddb9687918f064281db107",
         "type": "index"
       },
       {
@@ -1681,8 +1693,13 @@
         "type": "table"
       },
       {
+        "name": "chunk_questions",
+        "sql_sha256": "275a0a2d0245ddf29bd22469d1a7869b83ef5f26d61b744c0f041454ce9d5df1",
+        "type": "table"
+      },
+      {
         "name": "chunks",
-        "sql_sha256": "96d5720ecccff9c489b9b99f9d04ad59f0ebb95f57677c7b7cb5e4f3caa5f08b",
+        "sql_sha256": "1ec86c13d63be576037a05f6455da95a2395f1e4e3bee02996c687490e411c01",
         "type": "table"
       },
       {
@@ -2081,6 +2098,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 43
+    "user_version": 44
   }
 }

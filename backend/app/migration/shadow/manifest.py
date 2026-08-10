@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=43, postgres_version=21, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=44, postgres_version=22, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -77,6 +77,7 @@ _SQLITE_NULL_GUARD_KEYS = frozenset(
         "catalog_candidates.id",
         "catalog_jobs.id",
         "chunk_embeddings.chunk_id",
+        "chunk_questions.id",
         "chunks.id",
         "communities.id",
         "concept_clusters.id",
@@ -564,6 +565,17 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         75,
         "timestamptz",
+    ),
+    # Optional generated-question vectors remain derived data, but an active
+    # forward-shadow cutover must preserve the running database exactly.  An
+    # operator can still choose to rebuild them later with the offline phase.
+    _table(
+        "chunk_questions",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        76,
+        "bytea+timestamptz",
+        blob_columns=("vector",),
     ),
 )
 

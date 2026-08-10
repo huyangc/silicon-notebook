@@ -8,6 +8,7 @@ by their owning stores.
 from __future__ import annotations
 
 import json
+import itertools
 import re
 import time
 from dataclasses import dataclass
@@ -1858,6 +1859,199 @@ class CandidateRetrievalService(_RetrievalState):
         self, notebook_id: str, query: str, recall: int = 0, *,
         allowed_source_ids=None,
     ):
+        baseline = self._retrieve_chunks_baseline(
+            notebook_id,
+            query,
+            recall,
+            allowed_source_ids=allowed_source_ids,
+        )
+        return self._generated_question_supplement(
+            notebook_id,
+            query,
+            baseline,
+            allowed_source_ids=allowed_source_ids,
+        )
+
+    def _generated_question_supplement(
+        self,
+        notebook_id: str,
+        query: str,
+        baseline,
+        *,
+        allowed_source_ids=None,
+    ):
+        """Bounded low-recall supplement; shadow mode cannot alter results."""
+        mode = self.settings.generated_question_index_mode
+        scored, _ids, _matrix = baseline
+        if mode == "off" or len(scored) >= self.settings.generated_question_trigger_hits:
+            return baseline
+
+        try:
+            return self._generated_question_supplement_optional(
+                notebook_id,
+                query,
+                baseline,
+                mode=mode,
+                allowed_source_ids=allowed_source_ids,
+            )
+        except Exception:  # noqa: BLE001 — optional recall must preserve baseline
+            self._emit_generated_question_query_event({
+                "kind": "chunk_question_index_query",
+                "notebook_id": notebook_id,
+                "mode": mode,
+                "status": "failed_open",
+                "baseline_hits": len(scored),
+            })
+            return baseline
+
+    def _emit_generated_question_query_event(self, event: dict) -> None:
+        """Question-index observability is itself fail-open and content-free."""
+        try:
+            self.event_log.emit(event)
+        except Exception:  # noqa: BLE001 — telemetry never changes retrieval
+            return
+
+    def _generated_question_supplement_optional(
+        self,
+        notebook_id: str,
+        query: str,
+        baseline,
+        *,
+        mode: str,
+        allowed_source_ids=None,
+    ):
+        """Evaluate the optional index behind one all-or-nothing boundary."""
+        scored, _ids, _matrix = baseline
+
+        from app.services.source_scope import scoped_allowed_source_ids
+        from app.services.retrieval import (
+            RetrievalSupport,
+            add_chunk_supports,
+            score_chunks,
+        )
+        from app.services.vector_index import build_matrix, top_k_sims
+
+        allowed = scoped_allowed_source_ids(notebook_id, allowed_source_ids)
+        scan_limit = self.settings.generated_question_max_scan_rows
+        rows = self.chunks.question_index_rows(
+            notebook_id,
+            allowed_source_ids=allowed,
+            limit=scan_limit + 1,
+        )
+        if len(rows) > scan_limit:
+            self._emit_generated_question_query_event({
+                "kind": "chunk_question_index_query",
+                "notebook_id": notebook_id,
+                "mode": mode,
+                "status": "skipped_scan_limit",
+                "baseline_hits": len(scored),
+                "scan_limit": scan_limit,
+            })
+            return baseline
+        if not rows:
+            self._emit_generated_question_query_event({
+                "kind": "chunk_question_index_query",
+                "notebook_id": notebook_id,
+                "mode": mode,
+                "status": "evaluated",
+                "baseline_hits": len(scored),
+                "question_rows": 0,
+                "matched_chunks": 0,
+                "added_chunks": 0,
+            })
+            return baseline
+        query_vector = self._embed_query(query)
+        question_ids, question_matrix = build_matrix(
+            (row["id"], row["vector"]) for row in rows
+        )
+        question_take = (
+            self.settings.generated_question_recall
+            * self.settings.generated_question_questions_per_chunk
+        )
+        nearest = top_k_sims(
+            query_vector, question_ids, question_matrix, question_take
+        )
+        row_by_id = {str(row["id"]): row for row in rows}
+        best_by_chunk: dict[str, float] = {}
+        for question_id, similarity in nearest:
+            row = row_by_id.get(question_id)
+            if row is None:
+                continue
+            chunk_id = str(row["chunk_id"])
+            best_by_chunk[chunk_id] = max(
+                similarity, best_by_chunk.get(chunk_id, float("-inf"))
+            )
+        selected_chunk_ids = [
+            chunk_id
+            for chunk_id, _score in itertools.islice(
+                sorted(best_by_chunk.items(), key=lambda item: item[1], reverse=True),
+                self.settings.generated_question_recall,
+            )
+        ]
+        if not selected_chunk_ids:
+            self._emit_generated_question_query_event({
+                "kind": "chunk_question_index_query",
+                "notebook_id": notebook_id,
+                "mode": mode,
+                "status": "evaluated",
+                "baseline_hits": len(scored),
+                "question_rows": len(rows),
+                "matched_chunks": 0,
+                "added_chunks": 0,
+            })
+            return baseline
+        chunks, _supp_ids, _supp_matrix = self._hydrate_chunk_candidates(
+            selected_chunk_ids
+        )
+        supplemental = score_chunks(
+            query,
+            chunks,
+            query_vector,
+            best_by_chunk,
+            limit=self.settings.generated_question_recall,
+        )
+        add_chunk_supports(supplemental, {
+            chunk.chunk_id: [RetrievalSupport(
+                "generated_question",
+                "chunk",
+                chunk.chunk_id,
+                best_by_chunk.get(chunk.chunk_id),
+            )]
+            for chunk in supplemental
+        })
+        baseline_ids = {chunk.chunk_id for chunk in scored}
+        added = sum(chunk.chunk_id not in baseline_ids for chunk in supplemental)
+        self._emit_generated_question_query_event({
+            "kind": "chunk_question_index_query",
+            "notebook_id": notebook_id,
+            "mode": mode,
+            "status": "evaluated",
+            "baseline_hits": len(scored),
+            "question_rows": len(rows),
+            "matched_chunks": len(supplemental),
+            "added_chunks": added,
+        })
+        if mode == "shadow" or not supplemental:
+            return baseline
+        merged_chunk_ids = list(dict.fromkeys([
+            *(chunk.chunk_id for chunk in scored),
+            *(chunk.chunk_id for chunk in supplemental),
+        ]))
+        merged_ids, merged_matrix = [], None
+        if merged_chunk_ids:
+            _rows, merged_ids, merged_matrix = self._hydrate_chunk_candidates(
+                merged_chunk_ids
+            )
+        # Support union mutates a baseline collision.  Keep it after every
+        # fallible optional read/build step so the outer fail-open can return
+        # the exact untouched baseline tuple on error.
+        merged = self._union_chunk_candidates(scored, supplemental)
+        return merged, merged_ids, merged_matrix
+
+    def _retrieve_chunks_baseline(
+        self, notebook_id: str, query: str, recall: int = 0, *,
+        allowed_source_ids=None,
+    ):
         """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
         (matrix 行已 L2 归一化, 点积即余弦)。"""
         from app.services.source_scope import scoped_allowed_source_ids
@@ -2203,7 +2397,10 @@ class CandidateRetrievalService(_RetrievalState):
         """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。
         ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""
         from concurrent.futures import ThreadPoolExecutor
-        from app.services.retrieval import merge_retrieval_supports
+        from app.services.retrieval import (
+            merge_retrieval_supports,
+            partition_generated_question_chunks,
+        )
 
         import contextvars as _cv
         tasks = [(q, _cv.copy_context()) for q in sub_queries]
@@ -2218,10 +2415,18 @@ class CandidateRetrievalService(_RetrievalState):
         if sub_queries:
             with ThreadPoolExecutor(max_workers=min(len(sub_queries), 8)) as ex:
                 results = list(ex.map(_one, tasks))
-        per_query, collected, ids, mat = [], {}, [], None
+        per_query, collected, supplemental_rows, ids, mat = [], {}, [], [], None
         for scored, qids, qmat in results:
             per_query.append({c.chunk_id: c for c in scored})
-            for c in scored:
+            baseline_rows, query_supplemental = partition_generated_question_chunks(
+                scored
+            )
+            supplemental_rows.extend(query_supplemental)
+            # Aggregate every historical query result before considering any
+            # optional supplement.  Otherwise a high-scoring question-only row
+            # from an early query can take the dict position/representative of a
+            # semantic hit found by a later query and change feature-off order.
+            for c in baseline_rows:
                 cur = collected.get(c.chunk_id)
                 if cur is None:
                     collected[c.chunk_id] = c
@@ -2236,6 +2441,17 @@ class CandidateRetrievalService(_RetrievalState):
                         cur.retrieval_supports = supports
             if mat is None and len(qids):
                 ids, mat = qids, qmat
+        for c in supplemental_rows:
+            cur = collected.get(c.chunk_id)
+            if cur is None:
+                collected[c.chunk_id] = c
+                continue
+            # A historical representative always wins a collision.  The
+            # generated-question support remains useful provenance but cannot
+            # replace its relevance or insertion position.
+            cur.retrieval_supports = merge_retrieval_supports(
+                cur.retrieval_supports, c.retrieval_supports
+            )
         return collected, per_query, ids, mat
     def _keyword_chunk_candidates(self, notebook_id: str, keywords: str,
                                   recall: int = 0):
@@ -2654,6 +2870,11 @@ class CandidateRetrievalService(_RetrievalState):
         round-robin 并池去重。返回 (candidates, kg_block, kg_id_map, kg_hits, ppr_count)。
         PPR 跨文档扩散的噪声由 ask_chunk 侧现成 rerank 免费压低。"""
         vector_chunks = self._gather_vector_chunks(notebook_id, sub_queries)
+        from app.services.retrieval import partition_generated_question_chunks
+
+        vector_chunks, question_supplements = partition_generated_question_chunks(
+            vector_chunks
+        )
         kg_block, kg_id_map, kg_hits, kg_chunks = "", {}, [], []
         overlay_on = self.settings.chunk_kg_overlay_enabled and (
             self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg(notebook_id))
@@ -2688,6 +2909,19 @@ class CandidateRetrievalService(_RetrievalState):
                 seen.add(chunk.chunk_id)
                 by_id[chunk.chunk_id] = chunk
                 merged.append(chunk)
+        # Complete the historical vector/KG/PPR round-robin before optional
+        # question-only chunks enter the pool.  A collision only enriches the
+        # historical candidate's provenance; it never changes its position.
+        for chunk in question_supplements:
+            if chunk.chunk_id in seen:
+                existing = by_id[chunk.chunk_id]
+                existing.retrieval_supports = merge_retrieval_supports(
+                    existing.retrieval_supports, chunk.retrieval_supports
+                )
+                continue
+            seen.add(chunk.chunk_id)
+            by_id[chunk.chunk_id] = chunk
+            merged.append(chunk)
         return merged, kg_block, kg_id_map, kg_hits, len(ppr_chunks)
     def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:
         """一次读齐 chunk 检索路径的 flag/knob，产出不可变快照（W2.2）。见 ChunkRetrievalPlan。

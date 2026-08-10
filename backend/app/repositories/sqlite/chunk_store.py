@@ -7,6 +7,7 @@ from typing import Sequence
 from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
+from app.services.vector_index import encode_vector
 
 
 class ChunkStore:
@@ -16,6 +17,94 @@ class ChunkStore:
 
     def __init__(self, database: SqliteDatabase) -> None:
         self.database = database
+
+    def question_index_chunk_page(
+        self,
+        notebook_id: str,
+        *,
+        after_id: str,
+        limit: int,
+        include_existing: bool,
+    ) -> list[dict]:
+        existing = "" if include_existing else "AND c.question_indexed_at IS NULL "
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT c.id AS chunk_id,c.source_id,c.text,c.section_path "
+                "FROM chunks c WHERE c.notebook_id=? AND c.id>? "
+                f"{existing}ORDER BY c.id LIMIT ?",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_chunk_questions(
+        self,
+        chunk_id: str,
+        notebook_id: str,
+        source_id: str,
+        rows: Sequence[tuple[str, str, object]],
+        *,
+        created_at: str,
+    ) -> None:
+        encoded = [
+            (question_id, chunk_id, notebook_id, source_id, question,
+             encode_vector(vector), created_at)
+            for question_id, question, vector in rows
+        ]
+        with self.database.write() as db:
+            db.execute("DELETE FROM chunk_questions WHERE chunk_id=?", (chunk_id,))
+            db.executemany(
+                "INSERT INTO chunk_questions "
+                "(id,chunk_id,notebook_id,source_id,question,vector,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                encoded,
+            )
+            db.execute(
+                "UPDATE chunks SET question_indexed_at=? WHERE id=?",
+                (created_at, chunk_id),
+            )
+
+    def question_index_rows(
+        self,
+        notebook_id: str,
+        *,
+        allowed_source_ids: Sequence[str] | None,
+        limit: int,
+    ) -> list[dict]:
+        params: list[object] = [notebook_id]
+        source_clause = ""
+        if allowed_source_ids is not None:
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
+                return []
+            placeholders = ",".join("?" for _ in source_ids)
+            source_clause = f"AND source_id IN ({placeholders}) "
+            params.extend(source_ids)
+        params.append(int(limit))
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id,chunk_id,source_id,vector FROM chunk_questions "
+                "WHERE notebook_id=? " + source_clause + "ORDER BY id LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def question_index_stats(self, notebook_id: str) -> dict[str, int]:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM chunk_questions WHERE notebook_id=?) "
+                "AS questions,"
+                "(SELECT COUNT(*) FROM chunks WHERE notebook_id=? "
+                "AND question_indexed_at IS NOT NULL) AS chunks,"
+                "(SELECT COUNT(DISTINCT chunk_id) FROM chunk_questions "
+                "WHERE notebook_id=?) AS question_chunks",
+                (notebook_id, notebook_id, notebook_id),
+            ).fetchone()
+        return {
+            "questions": int(row["questions"]),
+            "chunks": int(row["chunks"]),
+            "question_chunks": int(row["question_chunks"]),
+        }
 
     @staticmethod
     def ids_for_sources(db, notebook_id: str, source_ids: Sequence[str]):

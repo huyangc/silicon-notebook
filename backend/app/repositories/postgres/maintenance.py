@@ -74,6 +74,14 @@ class PostgresMaintenanceAdapter:
                 except Exception:  # pragma: no cover - broken sessions self-release
                     logger.warning("offline PostgreSQL maintenance unlock failed")
 
+    def build_chunk_question_index(
+        self, notebook_id: str, *, workers: int, force: bool = False,
+        progress=None,
+    ) -> dict[str, int]:
+        return self._runtime.chunk_question_index.build_notebook(
+            notebook_id, workers=workers, force=force, progress=progress
+        )
+
     # -- backend-neutral batch maintenance ----------------------------------
 
     def resolve_owner_profile(self, owner: Optional[str]):

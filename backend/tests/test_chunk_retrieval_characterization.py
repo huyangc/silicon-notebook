@@ -17,6 +17,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
+from app.services.retrieval import RetrievalSupport, RetrievedChunk
 from app.services.sqlite_repository import SQLiteRepository, _now
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_rerank_client
@@ -101,6 +102,74 @@ def _enable_overlay(repo, nb_id):
                         "location_label": "1", "quoted_span": "moe", "confidence": 1.0}]}],
         [])
     assert repo._notebook_has_kg(nb_id) is True
+
+
+def test_question_supplement_cannot_evict_single_query_mmr_baseline(repo):
+    baseline = RetrievedChunk(
+        chunk_id="baseline", source_id="s", source_title="s", section_path="",
+        text="baseline", relevance=0.2,
+        retrieval_supports=(
+            RetrievalSupport("semantic", "chunk", "baseline", 0.2),
+        ),
+    )
+    supplemental = RetrievedChunk(
+        chunk_id="supplement", source_id="s", source_title="s", section_path="",
+        text="supplement", relevance=0.99,
+        retrieval_supports=(
+            RetrievalSupport("generated_question", "chunk", "supplement", 0.99),
+        ),
+    )
+
+    selected = repo.retrieval.select_chunk_candidates(
+        [supplemental, baseline], [], None, 1, 0.7
+    )
+
+    assert [chunk.chunk_id for chunk in selected] == ["baseline"]
+
+
+def test_multi_query_aggregation_keeps_historical_collision_order(
+    repo, monkeypatch
+):
+    def chunk(chunk_id, relevance, origin):
+        return RetrievedChunk(
+            chunk_id=chunk_id,
+            source_id="s",
+            source_title="s",
+            section_path="",
+            text=chunk_id,
+            relevance=relevance,
+            retrieval_supports=(
+                RetrievalSupport(origin, "chunk", chunk_id, relevance),
+            ),
+        )
+
+    semantic_a = chunk("a", 0.8, "semantic")
+    generated_b = chunk("b", 0.99, "generated_question")
+    semantic_b = chunk("b", 0.5, "semantic")
+    results = {
+        "q1": ([generated_b, semantic_a], [], None),
+        "q2": ([semantic_b], [], None),
+    }
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_retrieve_chunks",
+        lambda _notebook_id, query: results[query],
+    )
+
+    collected, per_query, _ids, _matrix = (
+        repo.retrieval.candidates._retrieve_chunks_multi("nb", ["q1", "q2"])
+    )
+
+    assert list(collected) == ["a", "b"]
+    assert collected["b"] is semantic_b
+    assert {support.origin for support in semantic_b.retrieval_supports} == {
+        "semantic",
+        "generated_question",
+    }
+    from app.services.retrieval import quota_fuse_baseline_first
+
+    selected, _counts = quota_fuse_baseline_first(collected, per_query, 2)
+    assert [chunk.chunk_id for chunk in selected] == ["a", "b"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

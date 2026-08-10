@@ -82,6 +82,14 @@ class SQLiteMaintenanceAdapter:
         """SQLite already serializes writes through its database write lock."""
         return nullcontext()
 
+    def build_chunk_question_index(
+        self, notebook_id: str, *, workers: int, force: bool = False,
+        progress=None,
+    ) -> dict[str, int]:
+        return self._runtime.chunk_question_index.build_notebook(
+            notebook_id, workers=workers, force=force, progress=progress
+        )
+
     # -- SQLiteMaintenancePort ------------------------------------------------
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:

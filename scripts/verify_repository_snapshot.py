@@ -2743,5 +2743,57 @@ MIGRATION_MANIFEST[(42, 43)] = {
 }
 
 
+# v44: optional generated-question vectors. The generated question is an
+# address into its original chunk, never evidence; a nullable timestamp on the
+# chunk records successful processing even when the model returned no question.
+CHUNK_QUESTION_TABLES = {
+    "chunk_questions": """CREATE TABLE chunk_questions (
+                  id TEXT PRIMARY KEY,
+                  chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  question TEXT NOT NULL,
+                  vector BLOB NOT NULL,
+                  created_at TEXT NOT NULL,
+                  UNIQUE(chunk_id, question)
+                )""",
+}
+CHUNK_QUESTION_COLUMNS = {
+    "chunks": {
+        "question_indexed_at": ("question_indexed_at", "TEXT", 0, None, 0),
+    },
+}
+CHUNK_QUESTION_INDEXES = {
+    "idx_chunk_questions_nb":
+        "CREATE INDEX idx_chunk_questions_nb\n"
+        "                  ON chunk_questions(notebook_id, id)",
+    "idx_chunk_questions_source":
+        "CREATE INDEX idx_chunk_questions_source\n"
+        "                  ON chunk_questions(source_id, id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 44, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **CHUNK_QUESTION_TABLES},
+        "columns": {
+            **manifest["columns"],
+            "chunks": {
+                **manifest["columns"].get("chunks", {}),
+                **CHUNK_QUESTION_COLUMNS["chunks"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **CHUNK_QUESTION_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(43, 44)] = {
+    "tables": CHUNK_QUESTION_TABLES,
+    "columns": CHUNK_QUESTION_COLUMNS,
+    "indexes": CHUNK_QUESTION_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
