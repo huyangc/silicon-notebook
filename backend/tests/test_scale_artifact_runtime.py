@@ -442,6 +442,26 @@ def test_requeue_updates_mode_but_keeps_first_queued_at(repo, monkeypatch):
     assert scale.idle_queue[notebook.id] == ("fold", first_stamp)  # mode 新、时刻不变
 
 
+def test_queue_position_survives_restore_reorder(repo):
+    """worker 启动失败的恢复路径会 pop 后 setdefault 回队列——dict 插入序因此把
+    该项挪到末尾,但位次按首次入队时刻排序推导,不随 dict 序漂移(codex R4 P2)。"""
+    first = _seed(repo)
+    second = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    scale.idle_queue[first.id] = ("fold", "2026-01-01T00:00:00.000000+00:00")
+    scale.idle_queue[second.id] = ("full", "2026-01-01T00:00:01.000000+00:00")
+
+    # 模拟恢复:first 被 pop 后重插,dict 插入序变成 [second, first]。
+    entry = scale.idle_queue.pop(first.id)
+    scale.idle_queue.setdefault(first.id, entry)
+    assert list(scale.idle_queue) == [second.id, first.id]
+
+    position, length, queued_at = scale._queue_snapshot(first.id)
+    assert (position, length) == (1, 2)  # 仍按首次入队时刻排第 1
+    assert queued_at == "2026-01-01T00:00:00.000000+00:00"
+    assert scale._queue_snapshot(second.id)[0] == 2
+
+
 def test_manual_now_restores_displaced_idle_request_if_worker_cannot_start(
     repo, monkeypatch
 ):

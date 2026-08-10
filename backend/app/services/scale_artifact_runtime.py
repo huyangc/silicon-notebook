@@ -624,16 +624,26 @@ class ScaleArtifactRuntime:
     def _queue_snapshot(self, notebook_id: str) -> tuple[int, int, str]:
         """1-based queue position, queue length and this entry's queued_at,
         all read under one lock acquisition so they describe the same
-        instant (fail-open to position 0 if the entry raced out)."""
+        instant (fail-open to position 0 if the entry raced out).
+
+        Position is derived by sorting on the first-enqueue timestamp (tie
+        broken by notebook id), NOT on dict insertion order: the worker-start
+        failure path pops an entry and ``setdefault``-restores it at the end
+        of the dict, which would silently move an insertion-order position
+        while ``queued_at`` stayed anchored to the first enqueue (codex R4
+        P2). Timestamps are uniform UTC ISO strings, so lexicographic order
+        is chronological order."""
         with self.building_lock:
-            ids = list(self.idle_queue)
-            entry = self.idle_queue.get(notebook_id)
-        length = len(ids)
-        try:
-            position = ids.index(notebook_id) + 1
-        except ValueError:
-            position = 0
-        queued_at = entry[1] if entry is not None else ""
+            entries = list(self.idle_queue.items())
+        length = len(entries)
+        ordered = sorted(entries, key=lambda item: (item[1][1], item[0]))
+        position = 0
+        queued_at = ""
+        for index, (entry_id, entry) in enumerate(ordered):
+            if entry_id == notebook_id:
+                position = index + 1
+                queued_at = entry[1]
+                break
         return position, length, queued_at
 
     def status(self, notebook_id: str) -> dict:
