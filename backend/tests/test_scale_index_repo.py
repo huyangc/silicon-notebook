@@ -897,6 +897,10 @@ def test_fold_scale_index_delta(repo, legacy_sidecar):
     # 版本新鲜(fold 更新了 manifest version)→ _scale_index 不带 allow_stale 仍返回
     idx = repo._scale_index(nb.id)
     assert idx is not None
+    # fold 路径写入的 manifest 键是 total_build_ms(不是 build_ms —— 那是分阶段耗时
+    # dict,两者只差一个字母),读点(scale_artifact_runtime.status)消费的就是这个键。
+    assert isinstance(idx.manifest.get("total_build_ms"), int)
+    assert idx.manifest["total_build_ms"] >= 0
     # ann 含新对象、chunk_ann 含新 chunk
     assert "o2" in set(idx.ann_labels)
     assert idx.chunk_ann_labels is not None and "c2" in set(idx.chunk_ann_labels)

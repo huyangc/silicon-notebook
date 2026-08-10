@@ -53,6 +53,12 @@ class ScaleIndexStatus(BaseModel):
     has_unindexed_content: bool = False
     delta_searchable: bool = False
     last_built_at: str = ""
+    queue_position: int = 0
+    queue_length: int = 0
+    queued_at: str = ""
+    offpeak_in_window: bool = False
+    offpeak_next_start_at: str = ""
+    last_build_ms: int = 0
 
 
 class RebuildScaleIndexRequest(BaseModel):

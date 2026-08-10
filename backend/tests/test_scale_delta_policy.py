@@ -112,7 +112,7 @@ def test_auto_fold_enqueues_when_indexed(repo, monkeypatch):
     assert nb.id not in repo._scale_idle_queue
     repo._maybe_enqueue_scale_fold(nb.id)
     assert nb.id in repo._scale_idle_queue
-    assert repo._scale_idle_queue[nb.id] == "fold"
+    assert repo._scale_idle_queue[nb.id][0] == "fold"
 
 
 def test_auto_fold_no_index_does_not_enqueue(repo, monkeypatch):

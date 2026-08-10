@@ -7771,6 +7771,11 @@
               "title": "Has Unindexed Content",
               "type": "boolean"
             },
+            "last_build_ms": {
+              "default": 0,
+              "title": "Last Build Ms",
+              "type": "integer"
+            },
             "last_built_at": {
               "default": "",
               "title": "Last Built At",
@@ -7795,6 +7800,31 @@
               "default": 0,
               "title": "N Nodes",
               "type": "integer"
+            },
+            "offpeak_in_window": {
+              "default": false,
+              "title": "Offpeak In Window",
+              "type": "boolean"
+            },
+            "offpeak_next_start_at": {
+              "default": "",
+              "title": "Offpeak Next Start At",
+              "type": "string"
+            },
+            "queue_length": {
+              "default": 0,
+              "title": "Queue Length",
+              "type": "integer"
+            },
+            "queue_position": {
+              "default": 0,
+              "title": "Queue Position",
+              "type": "integer"
+            },
+            "queued_at": {
+              "default": "",
+              "title": "Queued At",
+              "type": "string"
             },
             "stale": {
               "title": "Stale",

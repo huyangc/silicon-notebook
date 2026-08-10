@@ -21,6 +21,13 @@ export type ScaleIndexStatus = {
   has_unindexed_content?: boolean;
   delta_searchable?: boolean;
   last_built_at?: string;
+  // 排队态透明化(空闲时段自动构建):均为可选,兼容缺这些字段的旧后端。
+  queue_position?: number;
+  queue_length?: number;
+  queued_at?: string;
+  offpeak_in_window?: boolean;
+  offpeak_next_start_at?: string;
+  last_build_ms?: number;
   n_nodes: number;
   n_chunks: number;
   n_ann: number;
@@ -155,6 +162,52 @@ export function queuedScaleIndexImmediateOp(s: ScaleIndexStatus): ScaleIndexOp {
   return (s.has_unindexed_content ?? (s.unindexed_sources ?? 0) > 0)
     ? "update"
     : "rebuild";
+}
+
+function sameLocalDate(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+}
+
+// 上次构建耗时的档位文案:<1min→「1 分钟内」;<1h→按分钟;否则按「H 小时 M 分」。
+function formatBuildDuration(ms: number): string {
+  const seconds = ms / 1000;
+  if (seconds < 60) return "1 分钟内";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return `${hours} 小时 ${remMinutes} 分`;
+}
+
+// 排队态说明 —— 看板卡片、来源栏内联徽章共用。按可得字段逐段拼接空闲窗口开始
+// 时刻/上次构建耗时;三段全缺(旧后端未下发新字段)时保留原有默认文案,优雅降级。
+//
+// ⚠「排在第 N 位」是假串行语义:低峰窗口一开,_process_idle_queue 对队列每一项
+// 并发启动构建,位次不代表等待顺序 —— 因此这里只报队列长度(有意义时),不报位次。
+// queue_position 字段仍保留在类型里(后端仍下发、也许有别的用途),文案不消费它。
+export function queuedScheduleHint(s: ScaleIndexStatus, now: Date): string {
+  const parts: string[] = [];
+  if (s.offpeak_in_window) {
+    parts.push("已进入空闲时段，即将开始");
+  } else if (s.offpeak_next_start_at) {
+    const start = new Date(s.offpeak_next_start_at);
+    if (!Number.isNaN(start.getTime())) {
+      const dayLabel = sameLocalDate(start, now) ? "今天" : "明天";
+      const hh = String(start.getHours()).padStart(2, "0");
+      const mm = String(start.getMinutes()).padStart(2, "0");
+      parts.push(`预计${dayLabel} ${hh}:${mm} 后开始`);
+    }
+  }
+  if ((s.last_build_ms ?? 0) > 0) {
+    parts.push(`上次构建约 ${formatBuildDuration(s.last_build_ms!)}`);
+  }
+  const prefix = (s.queue_length ?? 0) >= 2 ? `已排队（共 ${s.queue_length} 项）` : "已排队";
+  if (parts.length === 0) {
+    return `${prefix}，将在服务器空闲时构建；完成后自动更新`;
+  }
+  return `${prefix}，${parts.join("；")}`;
 }
 
 // 每个动作的确认文案 —— 描述具体精确,并诚实说明 update 会在何种条件下自动转全量。

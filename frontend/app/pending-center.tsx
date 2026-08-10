@@ -246,6 +246,7 @@ export function PendingBell(props: {
       return `${it.notebook_name} · 论文信息补全中 · ${p?.done ?? 0}/${p?.total ?? 0}`;
     }
     const s = it.state === "building" ? (it.progress != null ? `索引构建中(${it.progress}%)` : "索引构建中")
+      : it.state === "queued" ? "索引已排队，将在空闲时段构建"
       : it.state === "suggested" ? "建议建立索引" : "建议重建索引";
     return `${it.notebook_name} · ${s}`;
   };

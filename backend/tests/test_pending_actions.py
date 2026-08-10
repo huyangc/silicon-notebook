@@ -126,6 +126,39 @@ def test_pending_actions_index_building_not_counted(repo, monkeypatch):
     assert out["count"] == 0
 
 
+def test_pending_actions_index_queued_state_passthrough_no_progress(repo, monkeypatch):
+    """queued 不再被伪装成 building —— 排队态没有构建进度这种误导字段
+    (total-delta)/total 是构建进度,不是排队进度)。"""
+    nb = _seed_user_nb(repo, "user-a")
+    monkeypatch.setattr(
+        repo.__dict__["_runtime"].scale_artifacts,
+        "status",
+        lambda notebook_id: {"state": "queued", "total_chunks": 100, "delta_chunks": 40},
+    )
+    out = repo.pending_actions("user-a")
+    idx_items = [it for it in out["items"] if it["type"] == "index"]
+    assert len(idx_items) == 1
+    assert idx_items[0]["state"] == "queued"
+    assert "progress" not in idx_items[0]
+    assert out["count"] == 0  # queued 一直不计入 count(既有口径不变)
+
+
+def test_pending_actions_index_building_still_has_progress(repo, monkeypatch):
+    """building 仍要有构建进度(只有 queued 被排除在进度计算之外)。"""
+    nb = _seed_user_nb(repo, "user-a")
+    monkeypatch.setattr(
+        repo.__dict__["_runtime"].scale_artifacts,
+        "status",
+        lambda notebook_id: {"state": "building", "total_chunks": 100, "delta_chunks": 40},
+    )
+    out = repo.pending_actions("user-a")
+    idx_items = [it for it in out["items"] if it["type"] == "index"]
+    assert len(idx_items) == 1
+    assert idx_items[0]["state"] == "building"
+    assert idx_items[0]["progress"] == 60
+    assert out["count"] == 0
+
+
 def test_pending_actions_index_unindexed_not_surfaced(repo):
     """真实未建索引的全新 notebook(state=unindexed)不应出现在待办里
     (unindexed 不是"待确认",只是"从未建过";suggested/stale 才是)。"""
