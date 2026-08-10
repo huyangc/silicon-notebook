@@ -49,8 +49,7 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import (
-    Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence,
-    Tuple, Union,
+    Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union,
 )
 
 import numpy as np
@@ -83,6 +82,12 @@ _DEFAULT_SEMANTIC_ANN_K = 10
 # shared_head / shared_tail strategies.  Exactly 10 groups are taken; pairs are
 # emitted from these representatives only (C(10,2)=45 max per group-key).
 _MAX_GROUP_REPS = 10
+
+# Sparsity cap on emitted semantic pairs, and the bound on how many distinct
+# pairs the ANN branch will collect before it stops scanning neighbour rows.
+# The collection bound only has to stay comfortably above what can be emitted.
+_MAX_SEM_PAIRS = 500
+_MAX_ANN_PAIR_COLLECTION = _MAX_SEM_PAIRS * 4
 
 # Object types whose node-level conflict checks are meaningful.
 # Stored lowercase in production (kg_ingest stores node.type.lower()); kept as
@@ -304,20 +309,13 @@ def _semantic_ann_pairs(
     ann_k: int,
     *,
     on_failure: Optional[Callable[[int], None]] = None,
-) -> Optional[Iterator[Tuple[int, int]]]:
+) -> Optional[List[Tuple[int, int]]]:
     """Approximate the brute-force cosine pass with an hnswlib cosine index.
 
-    Returns an ITERATOR of ascending ``(i, j)`` index pairs (positions within
-    ``type_nodes``) whose cosine similarity is ``>= sim_threshold``, or ``None``
-    when the ANN pass could not run — the caller then skips the semantic
-    strategy for this group rather than falling back to the quadratic scan.
-
-    Streaming, not a materialised list: at 150k nodes × k=10 the qualifying set
-    can reach tens of millions of tuples (hundreds of MB) while the caller stops
-    after ``_MAX_SEM_PAIRS``.  Deduplication rides the ordering instead of a set:
-    a pair is emitted only from the side whose ``type_nodes`` position is
-    smaller, so each unordered pair can be produced exactly once and the natural
-    row order is already ``(i, j)`` ascending.
+    Returns ascending ``(i, j)`` index pairs (positions within ``type_nodes``)
+    whose cosine similarity is ``>= sim_threshold``, or ``None`` when the ANN
+    pass could not run — the caller then skips the semantic strategy for this
+    group rather than falling back to the quadratic scan.
 
     **Registered behaviour difference**: this is approximate recall.  It only
     engages above ``kg_conflict_semantic_bruteforce_max`` (groups at or below
@@ -339,7 +337,7 @@ def _semantic_ann_pairs(
 
         count = len(indexed)
         if count < 2:
-            return iter(())
+            return []
 
         matrix = table.matrix[rows]
         dim = int(matrix.shape[1])
@@ -364,22 +362,57 @@ def _semantic_ann_pairs(
                 _log.debug("semantic ANN failure sink raised", exc_info=True)
         return None
 
-    return _stream_ann_pairs(labels, distances, indexed, sim_threshold)
+    return _collect_ann_pairs(labels, distances, indexed, sim_threshold)
 
 
-def _stream_ann_pairs(
+def _collect_ann_pairs(
     labels, distances, indexed: List[int], sim_threshold: float
-) -> Iterator[Tuple[int, int]]:
-    """Yield ``(i, j)`` ascending from an already-computed neighbour query."""
+) -> List[Tuple[int, int]]:
+    """Collect ``(i, j)`` ascending from an already-computed neighbour query.
+
+    **Both directions are read.** kNN membership is not symmetric: B's neighbour
+    list can contain A while A's does not contain B (A simply has k closer
+    neighbours). An earlier version deduplicated by emitting a pair only from the
+    lower-positioned side, which silently dropped every qualifying pair that only
+    the higher-positioned node reported — a recall hole wider than the
+    approximation this strategy actually declares. So every row contributes its
+    qualifying partners as a canonical ``(min, max)`` pair and a set does the
+    deduplication.
+
+    The set is what needs bounding, so collection stops at
+    ``_MAX_ANN_PAIR_COLLECTION``: the caller emits at most ``_MAX_SEM_PAIRS``
+    anyway, and four times that keeps the retained set — and the sort over it —
+    trivial (a few thousand tuples) while still refusing to materialise the
+    ``count × k`` result set that made this pass a hundreds-of-MB allocation.
+    Stopping early is inside the ANN approximation already disclosed for this
+    branch.
+    """
+    pairs: set = set()
+    truncated = False
     for row, position in enumerate(indexed):
-        partners = sorted(
-            indexed[int(label)]
-            for label, distance in zip(labels[row], distances[row])
-            if int(label) != row and 1.0 - float(distance) >= sim_threshold
-            and indexed[int(label)] > position
+        for label, distance in zip(labels[row], distances[row]):
+            other = int(label)
+            if other == row:
+                continue
+            if 1.0 - float(distance) < sim_threshold:
+                continue
+            partner = indexed[other]
+            pair = (position, partner) if position < partner else (partner, position)
+            if pair in pairs:
+                continue
+            if len(pairs) >= _MAX_ANN_PAIR_COLLECTION:
+                truncated = True
+                break
+            pairs.add(pair)
+        if truncated:
+            break
+    if truncated:
+        _log.debug(
+            "semantic ANN collection cap reached (%d); remaining neighbour "
+            "rows were not scanned",
+            _MAX_ANN_PAIR_COLLECTION,
         )
-        for partner in partners:
-            yield position, partner
+    return sorted(pairs)
 
 
 def detect_conflict_candidates(
@@ -604,7 +637,8 @@ def detect_conflict_candidates(
     # hnswlib cosine ANN pass — approximate recall, registered as an accepted
     # difference, and the only way those graphs finish at all.
     if embeddings is not None:
-        _MAX_SEM_PAIRS = 500  # sparsity cap for semantic pass
+        # _MAX_SEM_PAIRS (sparsity cap) lives at module level: the ANN branch's
+        # collection bound is derived from it.
         sem_count = 0
         vectors = _as_embedding_matrix(embeddings)
 

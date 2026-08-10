@@ -56,6 +56,15 @@ from app.services.source_display import source_display_title
 
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
+# 邻居展开(`_retrieve_neighbors`)的行读取放大系数。`REASONING_NEIGHBOR_EXPAND_LIMIT`
+# 约束的是**唯一合格邻居数**,而 SQL 的 LIMIT 只会数**关系行**——两者之间隔着
+# 「同一对端点的多条重复/佐证关系」与「被 `is_queryable_edge_pair` 判掉的行」。
+# 按行截断会让这些行吃掉预算,展开数远少于配置值。因此读取界放大到
+# `(limit+1) × 4`(仓库既有的「有界过扫描」做法,见集合枚举的 `max_rows × 4`):
+# 读取仍是索引序、仍然有界,只是把重复与不可查边的消耗吸收掉。放大系数不做成
+# 部署变量:它是实现细节(取决于抽取产生多少重复边),不是用户该调的预算。
+_NEIGHBOR_ROW_OVERSCAN = 4
+
 # --------------------------------------- KG 弱支撑边探测(设计文档 §3.3)
 # 「支撑薄弱」= 这条 canonical 边只有 1-2 篇**文档**撑着(`source_count`),不是
 # 「只有 1-2 条原始关系」(`support_count`)。综述类问题里它恰好是最该补证的方向,
@@ -1695,54 +1704,72 @@ class CandidateRetrievalService(_RetrievalState):
         original question). Honours edge_type filter; direction out=object as
         source, in=as target, both=either.
 
-        每个方向最多取 `REASONING_NEIGHBOR_EXPAND_LIMIT` 条边(多取一行做哨兵
-        判定截断),hydrate 因此按 ≤2×limit 有界:病态枢纽节点(百万边)此前会把
-        自己的全部邻接边取回、再整批 hydrate 对应 knowledge_objects 行。截断与否
-        随结果返回(`NeighborExpansion.truncated`),由调用方披露,不静默。"""
+        预算的单位是**唯一合格邻居**(每方向至多
+        `REASONING_NEIGHBOR_EXPAND_LIMIT` 个),不是关系行:一个邻居常有多条重复/
+        佐证关系,还有一部分行会被 `is_queryable_edge_pair` 判为不可查。按行截断
+        会让这些行吃掉预算——展开数远少于配置值,而靠后的合法邻居被整个略过,且
+        `visited` 禁止重复展开、这一轮丢掉就再也捡不回来。
+
+        SQL 侧仍是有界读取,只是读取界放到 `(limit+1) × _NEIGHBOR_ROW_OVERSCAN`
+        (仓库既有的「有界过扫描」先例,见集合枚举的 `max_rows × 4`)。hydrate 仍按
+        ≤2×limit 有界:病态枢纽节点(百万边)此前会把自己的全部邻接边取回、再整批
+        hydrate 对应 knowledge_objects 行。截断与否随结果返回
+        (`NeighborExpansion.truncated`),由调用方披露,不静默。"""
         # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
         # instead of loading every notebook edge: O(neighbours), not O(E).
         neighbour_ids: set = set()
         truncated = False
         limit = max(1, int(self.settings.reasoning_neighbor_expand_limit))
+        read_cap = (limit + 1) * _NEIGHBOR_ROW_OVERSCAN
         from app.services.kg.edge_schema import is_queryable_edge_pair
 
-        def _bounded(rows) -> list:
-            # 哨兵行(limit+1)只用于判定,不参与结果:让「恰好 limit 条」与
-            # 「多于 limit 条」可区分,否则满额的正常节点会被误报成截断。
+        def _bounded_neighbours(rows, endpoint_key: str) -> List[str]:
+            """按索引序过滤 + 去重,取前 `limit` 个唯一合格邻居。
+
+            两种情况都判截断,且语义都并进同一条披露:
+              * 出现第 `limit+1` 个唯一合格邻居 —— 确定还有;
+              * 读满了过扫描窗口 —— 可能还有(窗口外没看过,不能假装看全了)。
+            """
             nonlocal truncated
             rows = list(rows)
-            if len(rows) > limit:
+            if len(rows) >= read_cap:
                 truncated = True
-                return rows[:limit]
-            return rows
+            picked: List[str] = []
+            seen: set = set()
+            for row in rows:
+                if not is_queryable_edge_pair(
+                    row["edge_type"], row["source_type"], row["target_type"]
+                ):
+                    continue
+                neighbour = row[endpoint_key]
+                if neighbour in seen:
+                    continue
+                if len(picked) >= limit:
+                    truncated = True
+                    break
+                seen.add(neighbour)
+                picked.append(neighbour)
+            return picked
 
         with self._connect() as db:
             if direction in ("out", "both"):
-                neighbour_ids.update(
-                    r["target_object_id"] for r in _bounded(
-                        self.knowledge.neighbor_ids(
-                            db, notebook_id, object_id,
-                            endpoint="source_object_id", edge_type=edge_type,
-                            limit=limit + 1,
-                        )
-                    )
-                    if is_queryable_edge_pair(
-                        r["edge_type"], r["source_type"], r["target_type"]
-                    )
-                )
+                neighbour_ids.update(_bounded_neighbours(
+                    self.knowledge.neighbor_ids(
+                        db, notebook_id, object_id,
+                        endpoint="source_object_id", edge_type=edge_type,
+                        limit=read_cap,
+                    ),
+                    "target_object_id",
+                ))
             if direction in ("in", "both"):
-                neighbour_ids.update(
-                    r["source_object_id"] for r in _bounded(
-                        self.knowledge.neighbor_ids(
-                            db, notebook_id, object_id,
-                            endpoint="target_object_id", edge_type=edge_type,
-                            limit=limit + 1,
-                        )
-                    )
-                    if is_queryable_edge_pair(
-                        r["edge_type"], r["source_type"], r["target_type"]
-                    )
-                )
+                neighbour_ids.update(_bounded_neighbours(
+                    self.knowledge.neighbor_ids(
+                        db, notebook_id, object_id,
+                        endpoint="target_object_id", edge_type=edge_type,
+                        limit=read_cap,
+                    ),
+                    "source_object_id",
+                ))
             if not neighbour_ids:
                 return NeighborExpansion([], truncated)
             rows = self.knowledge.usable_object_rows_on(
