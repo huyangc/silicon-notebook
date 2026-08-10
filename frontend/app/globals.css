@@ -6408,9 +6408,12 @@ button.chat-session-card {
 }
 
 /* 添加文件时被跳过的文件（类型不支持/超大小/超批量）：弹窗内持久展示，不能只靠
-   2.2s 即逝的 toast——那正是「批量上传时不支持的文档静默消失」的来源之一。 */
+   2.2s 即逝的 toast——那正是「批量上传时不支持的文档静默消失」的来源之一。
+   面板必须可收缩（flex 0 1 auto + min-height 0）：弹窗卡片 overflow:hidden，矮视口
+   下不可收缩的面板会把下方操作按钮顶出裁剪区（codex #485 R1 P2）。 */
 .source-modal-card > .staged-skipped {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
 }
 
 .staged-skipped {
@@ -6425,6 +6428,7 @@ button.chat-session-card {
 }
 
 .staged-skipped-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -6434,7 +6438,9 @@ button.chat-session-card {
 }
 
 .staged-skipped-rows {
-  max-height: 140px;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 96px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -6442,6 +6448,7 @@ button.chat-session-card {
 }
 
 .staged-skipped-row {
+  flex: 0 0 auto;   /* 行自身不被滚动容器压扁，超出的靠滚动 */
   display: flex;
   align-items: baseline;
   justify-content: space-between;

@@ -3229,8 +3229,19 @@ export default function Home() {
         added.push(file);
       }
     }
-    // 每次添加操作整体替换：列表始终反映最近一次操作的结果，不累积陈旧条目。
-    setStagedSkipped(skipped);
+    // 累积追加（按 name+reason 去重）：弹窗开着期间的警告不能被下一次「全合法」的
+    // 添加静默清掉（codex #485 R1 P2）；只有「知道了」/清空/关闭/上传成功才清。
+    if (skipped.length > 0) {
+      setStagedSkipped((previous) => {
+        const combined = [...previous];
+        for (const item of skipped) {
+          if (!combined.some((existing) => existing.name === item.name && existing.reason === item.reason)) {
+            combined.push(item);
+          }
+        }
+        return combined;
+      });
+    }
     if (added.length === 0) return;
     setStagedFiles(merged);
     setStagedDocTypes(mergedTypes);
@@ -3245,14 +3256,16 @@ export default function Home() {
   // 拖放必须由我们接管：不 preventDefault 的话文件会落在铺满拖放区的原生
   // <input type=file accept=…> 上，浏览器按 accept **静默**过滤不支持的文件——
   // stageIncomingFiles 根本收不到它们，用户也就得不到任何「已跳过」提示。
+  // preventDefault 必须**无条件**先做（含禁用态）：不取消默认行为，落在页面上的
+  // drop 会让浏览器直接导航打开该文件，整批已暂存文件随页面一起丢掉。是否入列
+  // 由禁用判断在取消默认行为**之后**决定（codex #485 R1 P1）。
   function handleStageDragOver(event: ReactDragEvent<HTMLElement>) {
-    if (sourceFilePickerDisabled) return;
     event.preventDefault();
   }
   function handleStageDrop(event: ReactDragEvent<HTMLElement>) {
+    event.preventDefault();
     setDropZoneDragActive(false);
     if (sourceFilePickerDisabled) return;
-    event.preventDefault();
     stageIncomingFiles(Array.from(event.dataTransfer?.files ?? []));
   }
 
