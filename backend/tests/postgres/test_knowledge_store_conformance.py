@@ -1242,6 +1242,65 @@ def test_neighbor_ids_limit_bounds_rows_on_postgres(knowledge_harness):
         "ko-bounded-n1", "ko-bounded-n2"]
 
 
+def test_neighbor_ids_pushes_status_eligibility_before_the_limit_on_postgres(
+    knowledge_harness,
+):
+    """`usable_statuses` 在 PostgreSQL 侧同样落在 LIMIT 之前,只筛**邻居那一侧**。
+
+    事后按 status 丢弃时,指向 deprecated 对象的关系会白占有界读取窗口,行序
+    靠后的可用邻居被整个漏掉。锚点自身的状态不参与这条谓词。
+    """
+    objects = [
+        (
+            object_id,
+            "nb-personal",
+            "claim",
+            status,
+            json.dumps({"name": object_id}),
+            json.dumps(_evidence()),
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for object_id, status in (
+            ("ko-status-hub", "approved"),
+            ("ko-status-dead", "deprecated"),
+            ("ko-status-live", "approved"),
+        )
+    ]
+    relations = [
+        (
+            f"rel-status-{index}",
+            "nb-personal",
+            "source-golden",
+            "ko-status-hub",
+            target,
+            "derived_from",
+            json.dumps(_evidence()),
+            NOW,
+        )
+        # 不可用的那个排在前面:按 id 序它先进读取窗口。
+        for index, target in enumerate(("ko-status-dead", "ko-status-live"))
+    ]
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, objects)
+        knowledge_harness.knowledge.insert_relation_chunk(connection, relations)
+
+    with knowledge_harness.database.connect() as connection:
+        unfiltered = knowledge_harness.knowledge.neighbor_ids(
+            connection, "nb-personal", "ko-status-hub",
+            endpoint="source_object_id", limit=1,
+        )
+        filtered = knowledge_harness.knowledge.neighbor_ids(
+            connection, "nb-personal", "ko-status-hub",
+            endpoint="source_object_id", limit=1,
+            usable_statuses=("approved", "reviewed"),
+        )
+    # 不传谓词时,那一格读取窗口被 deprecated 邻居占掉(正是要修的形态)。
+    assert [row["target_object_id"] for row in unfiltered] == ["ko-status-dead"]
+    assert [row["target_object_id"] for row in filtered] == ["ko-status-live"]
+
+
 def test_retrieve_neighbors_excludes_rejected_relations_on_postgres(
     knowledge_harness,
 ):

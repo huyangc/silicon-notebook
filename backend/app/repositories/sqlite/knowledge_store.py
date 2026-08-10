@@ -793,16 +793,33 @@ class KnowledgeStore:
 
     @staticmethod
     def neighbor_ids(db: sqlite3.Connection, notebook_id: str, object_id: str,
-                     *, endpoint: str, edge_type=None, limit: int | None = None):
+                     *, endpoint: str, edge_type=None, limit: int | None = None,
+                     usable_statuses: Sequence[str] | None = None):
         # `limit` 非 None 时按 `r.id` 定序取前 N 行:排序键是
         # `idx_knowledge_relations_nb_source_id`/`_nb_target_id`
         # `(notebook_id, source/target_object_id, id)` 的第三列,前两列都是等值
         # 谓词,索引本身即给出该序 → 有界读取不引入排序开销。limit=None 逐位保持
         # 历史行为(其余调用方不受影响)。
+        #
+        # `usable_statuses` 非空时对**邻居那一侧**的别名加 status 谓词——它必须
+        # 落在 LIMIT **之前**:事后再按 status 丢弃,等于让 deprecated 之类的对象
+        # 白占有界读取窗口,行序靠后的可用邻居被整个漏掉(可用邻居明明存在却可能
+        # 返回很少甚至零)。这条查询本就 JOIN 了 src/tgt 两张 knowledge_objects,
+        # 加谓词零额外成本。None/空 → SQL 逐字回到历史形状。
         if endpoint not in {"source_object_id", "target_object_id"}:
             raise ValueError("invalid relation endpoint")
         edge_clause = " AND edge_type=?" if edge_type else ""
         params = [notebook_id, object_id] + ([edge_type] if edge_type else [])
+        status_clause = ""
+        if usable_statuses:
+            # endpoint 指的是**锚点**那一端,邻居在另一端。
+            neighbour_alias = (
+                "tgt" if endpoint == "source_object_id" else "src"
+            )
+            statuses = list(usable_statuses)
+            ph = ",".join("?" for _ in statuses)
+            status_clause = f" AND {neighbour_alias}.status IN ({ph})"
+            params.extend(statuses)
         bound_clause = ""
         if limit is not None:
             bound_clause = " ORDER BY r.id LIMIT ?"
@@ -814,7 +831,8 @@ class KnowledgeStore:
             "JOIN knowledge_objects AS src ON src.id=r.source_object_id "
             "JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
             f"WHERE r.notebook_id=? AND r.{endpoint}=? "
-            f"AND r.review_status!='rejected'{edge_clause}{bound_clause}", params,
+            f"AND r.review_status!='rejected'{edge_clause}{status_clause}"
+            f"{bound_clause}", params,
         ).fetchall()
 
     def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
