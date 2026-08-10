@@ -246,6 +246,43 @@ class TestSemanticDispatch:
         pairs = _semantic_pairs(candidates)
         assert 0 < len(pairs) <= 500
 
+    def test_asymmetric_knn_membership_still_yields_the_pair(self):
+        """B's neighbour list may contain A while A's does not contain B.
+
+        kNN membership is not symmetric — A can simply have k closer neighbours.
+        Collecting from one side only (emit where the partner sits higher) drops
+        every such pair, which is a recall hole, not the declared approximation.
+        Fake neighbour arrays make the asymmetry exact rather than hoped-for.
+        """
+        indexed = [0, 1, 2]
+        # Row 0 (position 0) reports only itself and node 2; row 1 (position 1)
+        # reports node 0 — so the pair (0, 1) exists ONLY in the higher row.
+        labels = [[0, 2], [1, 0], [2, 0]]
+        distances = [[0.0, 0.02], [0.0, 0.02], [0.0, 0.02]]
+
+        pairs = conflict_detect._collect_ann_pairs(
+            labels, distances, indexed, sim_threshold=0.9
+        )
+
+        assert (0, 1) in pairs, "a pair only the higher-positioned row saw was lost"
+        assert (0, 2) in pairs
+        assert pairs == sorted(pairs)
+
+    def test_collection_is_bounded_and_deduplicated(self):
+        count = 200
+        indexed = list(range(count))
+        labels = [[other for other in range(count)] for _ in range(count)]
+        distances = [[0.0] * count for _ in range(count)]
+
+        pairs = conflict_detect._collect_ann_pairs(
+            labels, distances, indexed, sim_threshold=0.5
+        )
+
+        # C(200,2) = 19 900 qualifying pairs; the bound is what stops the set.
+        assert len(pairs) == conflict_detect._MAX_ANN_PAIR_COLLECTION
+        assert len(set(pairs)) == len(pairs)
+        assert all(left < right for left, right in pairs)
+
     def test_ann_helper_is_fail_open(self):
         """A broken ANN pass returns None (⇒ group skipped), it never raises."""
         objects, _ = _semantic_corpus()

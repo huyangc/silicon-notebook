@@ -350,11 +350,14 @@ def test_expand_path_pushes_the_bound_into_the_store_query(rrepo, monkeypatch):
 
     只断言 `truncated`/`len(hits)` 兜不住这条:在 Python 侧切片同样能让那两个
     断言变绿,而本特性要救的正是「先把百万邻接边取回内存」那一步。这里用 spy
-    钉住两件事——每方向都带 `limit == 上限+1` 的哨兵,且数据库**实际返回**的行
-    数不超过哨兵值。
+    钉住两件事——每方向都带 `(上限+1) × _NEIGHBOR_ROW_OVERSCAN` 的读取界,且
+    数据库**实际返回**的行数不超过它。
     """
+    from app.services.retrieval_candidates import _NEIGHBOR_ROW_OVERSCAN
+
     nb, hub = _seed_hub(rrepo, fan_out=6)
     rrepo.settings.reasoning_neighbor_expand_limit = 2
+    read_cap = (2 + 1) * _NEIGHBOR_ROW_OVERSCAN
     knowledge = rrepo.retrieval.candidates.knowledge
     original = knowledge.neighbor_ids
     calls = []
@@ -370,9 +373,72 @@ def test_expand_path_pushes_the_bound_into_the_store_query(rrepo, monkeypatch):
 
     assert [endpoint for endpoint, _, _ in calls] == [
         "source_object_id", "target_object_id"]
-    assert [limit for _, limit, _ in calls] == [3, 3]       # 上限 2 + 哨兵 1
-    assert all(returned <= 3 for _, _, returned in calls)   # SQL 真的截了
+    assert [limit for _, limit, _ in calls] == [read_cap, read_cap]
+    assert all(returned <= read_cap for _, _, returned in calls)  # SQL 真的截了
     assert expansion.truncated is True
+    assert len(expansion.hits) == 2      # 产出界仍是配置的上限
+
+
+def _seed_hub_with_duplicate_relations(repo):
+    """枢纽节点 + 4 个唯一邻居,但前面几行是同一个邻居的重复关系与不可查边。
+
+    关系 id 显式给定,让 `ORDER BY r.id` 的行序**确定**——`store_kg` 生成的是
+    随机 id,行序随机的用例证明不了「靠后的合法邻居没被略过」。
+    """
+    nb = repo.create_notebook(NotebookCreate(name="dup-hub"))
+    objects = [{"local_id": "H", "object_type": "claim",
+                "payload": {"name": "枢纽节点"}, "evidence": []}]
+    for index in range(4):
+        objects.append({"local_id": f"N{index}", "object_type": "concept",
+                        "payload": {"name": f"邻居{index}"}, "evidence": []})
+    repo.store_kg(nb.id, None, objects, [])
+
+    ids = {}
+    with repo._connect() as db:
+        for row in db.execute(
+            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?",
+            (nb.id,),
+        ):
+            ids[json.loads(row["payload"])["name"]] = row["id"]
+    hub = ids["枢纽节点"]
+    # 行序(按 id):邻居0 的三条重复关系 + 一条不可查边(claim→concept 上的
+    # part_of 不在契约里),然后才是邻居1/2/3 各一条。旧的「按行截断」在
+    # limit=3 时只读 4 行,全部落在邻居0 与那条废边上 → 只展开 1 个邻居。
+    relations = [
+        ("rel-01", hub, ids["邻居0"], "defines"),
+        ("rel-02", hub, ids["邻居0"], "about"),
+        ("rel-03", hub, ids["邻居0"], "depends_on"),
+        ("rel-04", hub, ids["邻居0"], "part_of"),      # 不可查:被过扫描吸收
+        ("rel-05", hub, ids["邻居1"], "defines"),
+        ("rel-06", hub, ids["邻居2"], "defines"),
+        ("rel-07", hub, ids["邻居3"], "defines"),
+    ]
+    knowledge = repo.retrieval.candidates.knowledge
+    with repo._connect() as db:
+        knowledge.insert_relation_chunk(db, [
+            (rel_id, nb.id, None, source, target, edge_type, "[]",
+             "2026-01-01T00:00:00+00:00")
+            for rel_id, source, target, edge_type in relations
+        ])
+    return nb, hub
+
+
+def test_duplicate_and_unqueryable_relations_do_not_eat_the_neighbour_budget(
+    rrepo,
+):
+    """预算的单位是唯一合格邻居,不是关系行。
+
+    重复/佐证关系与不可查边都会消耗关系行;按行截断时它们把预算吃光,展开数
+    远少于配置值,而靠后的合法邻居被整个略过——`visited` 又禁止重复展开,这一
+    轮丢掉就再也捡不回来。
+    """
+    nb, hub = _seed_hub_with_duplicate_relations(rrepo)
+    rrepo.settings.reasoning_neighbor_expand_limit = 3
+    expansion = rrepo._retrieve_neighbors(nb.id, hub)
+
+    names = sorted(hit.payload["name"] for hit in expansion.hits)
+    assert names == ["邻居0", "邻居1", "邻居2"]   # 取满 3 个唯一邻居
+    assert expansion.truncated is True            # 第 4 个唯一邻居仍在外面
 
 
 def test_usable_object_rows_on_chunks_the_in_list(rrepo):
