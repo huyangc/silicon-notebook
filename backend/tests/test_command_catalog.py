@@ -28,7 +28,9 @@ from app.services.command_catalog import (
     MAX_CANDIDATES,
     MAX_WINDOW_REJECTIONS,
     SLICE_PARAM_LIMIT,
+    SPLIT_BOUNDARY_LOOKBACK_CHARS,
     WINDOW_CHARS,
+    WINDOW_SPLIT_FLOOR_CHARS,
     ExtractionWindow,
     WindowElement,
     carry_candidates,
@@ -161,6 +163,34 @@ def _elements(*specs, source_id="src-manual"):
     ]
 
 
+def _dense_rows(count, *, description="A" * 80):
+    """`count` commands in one document, each a usage line plus a paragraph.
+
+    Sized so the whole thing fits one `WINDOW_CHARS` window on the character
+    budget alone — which is exactly the shape that used to serve only the
+    first `MAX_CANDIDATES` of them and lose the rest for good.
+    """
+    specs = []
+    for index in range(count):
+        specs.append(
+            ("code_block", "", f"command_{index:03d} -flag_{index:03d} value")
+        )
+        specs.append(("paragraph", "", f"{description} number {index:03d}."))
+    return _elements(*specs)
+
+
+def _name_index_rows(count):
+    """A bare index of `count` command names, under the split floor.
+
+    The pathological density the splitter deliberately stops at: no
+    documentation to divide, just names, so every piece of it would still
+    over-serve and each piece would cost its own model call.
+    """
+    return _elements(
+        ("code_block", "", "\n".join(f"cmd_{index:02d} -d" for index in range(count)))
+    )
+
+
 GPL_PATH = "Global Placement > Commands > Global Placement"
 GPL_OPTIONS_PATH = f"{GPL_PATH} > Options"
 FLOPS_PATH = "Global Placement > Commands > Cluster Flops"
@@ -224,6 +254,20 @@ def flops_window():
     windows = extraction_windows(_flops_elements())
     assert len(windows) == 1
     return windows[0]
+
+
+def _pack_only(rows, **kwargs):
+    """The character-budget packing alone, with the density split turned off.
+
+    A bound of zero means "no list to overflow", so the second pass never
+    fires and this is what the packer alone produces. Used to state a
+    fixture's PRECONDITION ("this is one window on size alone, so what follows
+    is about density") rather than to assert behaviour.
+    """
+    return [
+        window.text
+        for window in extraction_windows(rows, max_candidates=0, **kwargs)
+    ]
 
 
 def _expected_text(rows):
@@ -321,6 +365,76 @@ def test_oversized_element_is_split_across_windows_and_keeps_its_id():
     assert "".join(window.text for window in windows[1:]) == "z" * 250
 
 
+def test_a_split_inside_an_element_lands_between_tokens():
+    """A cut at the raw character budget is the one boundary that can destroy
+    a name outright.
+
+    `global_placement` cut into `global_pl` + `acement` is in NEITHER window,
+    so it is a candidate in neither, every entry claiming it is vetoed in both,
+    and the command is gone — with no rejection or ratio anywhere to show it,
+    because a name that was never served can never be answered wrongly. Backing
+    the cut up to the nearest whitespace closes that: no command name and no
+    flag contains whitespace, so a cut that lands on one cannot be inside
+    either.
+    """
+    body = (
+        "a" * 90
+        + " global_placement -density 0.7\n"
+        + "b" * 80
+        + " cluster_flops -tray_weight 2\n"
+    )
+    rows = _elements(("code_block", "", body))
+    # The precondition this test exists for: the naive cut at the budget has a
+    # name character on both sides of it, i.e. it falls INSIDE a token.
+    assert body[99].isalnum() and body[100].isalnum()
+
+    windows = extraction_windows(rows, max_chars=100)
+
+    assert _rebuild(windows) == _expected_text(rows)
+    # Every token lands complete in exactly one window — never half in each.
+    for token in ("global_placement", "-density", "cluster_flops", "-tray_weight"):
+        holders = [window for window in windows if token in window.text]
+        assert len(holders) == 1, token
+    # And a token that survived whole is a token the scanners can still see:
+    # the window that got `global_placement` opens on its usage line, so the
+    # command is claimable there. Under a raw cut that window opens on
+    # `acement -density 0.7` and offers nothing at all.
+    assert "global_placement" in [
+        name for window in windows for name in window_candidates(window)
+    ]
+    assert "-density" in [
+        name for window in windows for name in parameter_names(window.text)
+    ]
+
+
+def test_a_split_with_no_boundary_within_reach_falls_at_the_budget():
+    """Best effort, not a promise. A long run with no whitespace in it at all
+    (a base64 blob, a minified line) has no boundary to find, and refusing to
+    cut would break the budget the model call is sized by instead."""
+    rows = _elements(("paragraph", "", "z" * 250))
+
+    windows = extraction_windows(rows, max_chars=100)
+
+    assert [len(window.text) for window in windows] == [100, 100, 50]
+    assert _rebuild(windows) == _expected_text(rows)
+
+
+def test_the_search_for_a_boundary_is_bounded():
+    """The lookback is a bound, not a scan to the start of the element: a
+    whitespace character further back than `SPLIT_BOUNDARY_LOOKBACK_CHARS`
+    must not drag the cut — and the window it would leave behind — back with
+    it."""
+    budget = 1_000
+    # One space, right at the start, then nothing but token characters.
+    rows = _elements(("paragraph", "", "q " + "z" * 1_500))
+    assert budget - SPLIT_BOUNDARY_LOOKBACK_CHARS > 2
+
+    windows = extraction_windows(rows, max_chars=budget)
+
+    assert len(windows[0].text) == budget
+    assert _rebuild(windows) == _expected_text(rows)
+
+
 @pytest.mark.parametrize(
     "rows, max_chars",
     [
@@ -351,6 +465,24 @@ def test_oversized_element_is_split_across_windows_and_keeps_its_id():
                 ("paragraph", "", ""),
             ),
             100,
+        ),
+        # Dense enough that the SECOND pass fires — the split that keeps a
+        # candidate list from truncating moves boundaries too, and it must
+        # lose no more than the first pass does. Element-boundary split…
+        (_dense_rows(40), WINDOW_CHARS),
+        # …and the same pass forced to cut INSIDE one element, because the
+        # whole document is one code block.
+        (
+            _elements(
+                (
+                    "code_block",
+                    "",
+                    "\n".join(
+                        f"command_{index:03d} -flag value" for index in range(60)
+                    ),
+                )
+            ),
+            WINDOW_CHARS,
         ),
     ],
 )
@@ -530,6 +662,93 @@ def test_candidate_list_is_capped():
 
     assert len(window_candidates(window)) == MAX_CANDIDATES
     assert len(window_candidates(window, limit=3)) == 3
+
+
+def test_a_window_naming_more_commands_than_the_list_holds_is_split():
+    """Truncating the list is a PERMANENT loss, so the window is split instead.
+
+    Windows do not overlap and are never revisited, so a name cut off the
+    thirty-third position is not served later — it is served nowhere, in this
+    run or any other, and nothing downstream can see it go (an entry can only
+    be wrong about a name it was offered). Splitting costs one more model call
+    and loses nothing: the pieces are ordinary windows and every character
+    still lands in exactly one of them.
+    """
+    rows = _dense_rows(40)
+    # One window on the character budget alone — the split is about DENSITY.
+    assert len(_pack_only(rows)) == 1
+
+    windows = extraction_windows(rows)
+
+    assert len(windows) > 1
+    assert all(
+        len(window_candidates(window)) <= MAX_CANDIDATES for window in windows
+    )
+    assert all(window.candidates_overflowed == 0 for window in windows)
+    # Every one of the forty is claimable somewhere. That is the property; the
+    # number of windows it takes is not.
+    offered = {name for window in windows for name in window_candidates(window)}
+    assert {f"command_{index:03d}" for index in range(40)} <= offered
+    assert _rebuild(windows) == _expected_text(rows)
+
+
+def test_a_single_element_too_dense_to_serve_is_split_inside_itself():
+    """A document that is one big code block has no element boundary to split
+    on, so the split falls inside the element — at a token-safe point, like
+    every other in-element cut."""
+    rows = _elements(
+        (
+            "code_block",
+            "",
+            "\n".join(f"command_{index:03d} -flag value" for index in range(60)),
+        )
+    )
+
+    windows = extraction_windows(rows)
+
+    assert len(windows) > 1
+    assert all(
+        len(window_candidates(window)) <= MAX_CANDIDATES for window in windows
+    )
+    offered = {name for window in windows for name in window_candidates(window)}
+    assert {f"command_{index:03d}" for index in range(60)} <= offered
+    assert _rebuild(windows) == _expected_text(rows)
+
+
+def test_a_name_index_below_the_floor_truncates_and_counts_what_it_dropped():
+    """Where splitting stops being worth it, and what is owed when it does.
+
+    Below `WINDOW_SPLIT_FLOOR_CHARS` a window that still names more commands
+    than the list can carry is not documentation whose commands got crowded
+    out — it is a bare index of names (a "see also" block, a summary table).
+    Splitting one buys nothing (each piece is still an index) and costs a model
+    call per piece. So the list truncates there, and the residue is DISCLOSED:
+    it is the one remaining place a command is dropped without any downstream
+    trace at all.
+    """
+    rows = _name_index_rows(40)
+    assert len(_pack_only(rows)[0]) <= WINDOW_SPLIT_FLOOR_CHARS
+
+    windows = extraction_windows(rows)
+
+    assert len(windows) == 1
+    assert len(window_candidates(windows[0])) == MAX_CANDIDATES
+    assert windows[0].candidates_overflowed == 40 - MAX_CANDIDATES
+
+
+def test_the_dropped_names_reach_the_window_ledger(flops_window):
+    """`candidates_overflowed` is only useful if it travels: the job layer
+    reads outcomes, not windows."""
+    dense = extraction_windows(_name_index_rows(40))[0]
+
+    assert window_outcome(dense, window_candidates(dense), []).candidates_overflowed == (
+        40 - MAX_CANDIDATES
+    )
+    # …and stays 0 on every ordinary window, so a non-zero value in a job
+    # report means what it says.
+    assert window_outcome(
+        flops_window, window_candidates(flops_window), []
+    ).candidates_overflowed == 0
 
 
 def test_prose_sentences_do_not_become_candidates():
@@ -1228,6 +1447,74 @@ def test_a_relayed_claim_is_not_flagged_suspect():
     )
 
     assert result.entry.suspect_related is False
+
+
+def test_a_relayed_claim_says_so_because_its_clean_mark_is_an_exemption():
+    """…and BECAUSE it is not flagged suspect, it has to say it was relayed.
+
+    `suspect_related=False` on a continuation window is the absence of
+    evidence, not evidence of absence: the window has no heading and no usage
+    line for the command, it simply is not being asked to. The cross-window
+    merge folds this flag with AND, so without the marker one parameter table
+    would silently clear the warning an earlier window earned.
+    """
+    window = _window("| `-tray_weight` | Tray weight, default value is 32.0. |")
+
+    result = validate_entry(
+        {"command_name": "cluster_flops"}, window, [], carried=["cluster_flops"]
+    )
+
+    assert result.entry.relayed is True
+
+
+def test_a_claim_with_this_windows_own_evidence_is_not_relayed():
+    """The marker is about EVIDENCE, not about the relay's membership list.
+
+    A window that names the command in its heading has judged it on its own
+    merits, and a clean mark it earned that way is a finding the merge should
+    honour — even though the relay would also have let the claim through.
+    """
+    window = _window(
+        "cluster_flops [-tray_weight tray_weight]", heading="cluster_flops"
+    )
+
+    result = validate_entry(
+        {"command_name": "cluster_flops"},
+        window,
+        ["cluster_flops"],
+        carried=["cluster_flops"],
+    )
+
+    assert result.entry.suspect_related is False
+    assert result.entry.relayed is False
+
+
+def test_a_carried_name_mentioned_only_in_prose_here_is_still_relayed():
+    """The in-between shape: the name IS in this window's text, but only in
+    passing — no heading, no usage line. Nothing was judged, so nothing was
+    cleared, and the merge must not read the exemption as a finding."""
+    window = _window(
+        "See cluster_flops for the tray options used by this command."
+    )
+
+    result = validate_entry(
+        {"command_name": "cluster_flops"},
+        window,
+        [],
+        carried=["cluster_flops"],
+    )
+
+    assert result.accepted is True
+    assert result.entry.suspect_related is False
+    assert result.entry.relayed is True
+
+
+def test_an_ordinary_entry_is_never_marked_relayed(flops_window):
+    result = validate_entry(
+        _flops_entry(), flops_window, window_candidates(flops_window)
+    )
+
+    assert result.entry.relayed is False
 
 
 def test_command_name_outside_the_candidate_list_vetoes_the_entry(flops_window):

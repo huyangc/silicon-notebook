@@ -1510,6 +1510,15 @@ class CommandCatalogService:
 
         try:
             result = self._run_windows(job, cancel)
+            # Command names this document held that no prompt could carry (see
+            # `_run_windows`). Reported only when non-zero: it is 0 on every
+            # ordinary document, so its mere presence on the event is the
+            # signal, and the ordinary event shape stays exactly as it was.
+            overflow = (
+                {"candidates_overflowed": result["candidates_overflowed"]}
+                if result["candidates_overflowed"]
+                else {}
+            )
             if _nothing_extracted(result):
                 # Paid for calls, produced no row of any kind. Settled
                 # `failed` rather than `succeeded` for the same reason the
@@ -1524,6 +1533,7 @@ class CommandCatalogService:
                     self.catalog.get_job(job_id),
                     latency_ms=latency_ms(),
                     model_calls=result["calls"],
+                    **overflow,
                 )
                 return {**result, "job_id": job_id, "nothing_extracted": True}
             self.catalog.finish_job(job_id, "succeeded")
@@ -1532,6 +1542,7 @@ class CommandCatalogService:
                 self.catalog.get_job(job_id),
                 latency_ms=latency_ms(),
                 model_calls=result["calls"],
+                **overflow,
             )
             return {**result, "job_id": job_id}
         except CatalogCancelled:
@@ -1657,6 +1668,15 @@ class CommandCatalogService:
         windows_skipped = 0
         candidate_rows = 0
         rejected_rows = 0
+        # Candidate names `extraction_windows` could not fit even after
+        # splitting — normally 0 (see `WINDOW_SPLIT_FLOOR_CHARS`). Accumulated
+        # over EVERY window, not just the ones that made a call, so the number
+        # never depends on the skip gate: this counts what was never offered to
+        # a model, which is the one loss no rejection, ratio or report line
+        # downstream can show.
+        candidates_overflowed = sum(
+            window.candidates_overflowed for window in windows
+        )
         for window in windows:
             # The cheap check first, unconditionally: an owner cancel must be
             # honoured on a skipped window too, and the in-process event costs
@@ -1753,6 +1773,10 @@ class CommandCatalogService:
             "windows": stats.windows,
             "windows_skipped": windows_skipped,
             "windows_total": len(windows),
+            # Names this document offered that no prompt could carry. See the
+            # accumulator above; `run` also puts it on the finished event when
+            # it is non-zero, which is the only place an operator can see it.
+            "candidates_overflowed": candidates_overflowed,
             "entries_seen": stats.entries_seen,
             # Rows this run put in front of a reviewer, of either kind. They
             # are what `_nothing_extracted` reads: a run with either is a run
@@ -2270,7 +2294,21 @@ class CommandCatalogService:
             clipped = _clip(str(example), MODEL_EXAMPLE_CHARS)
             if clipped not in current["examples"]:
                 current["examples"].append(clipped)
-        current["suspect_related"] = current["suspect_related"] and entry.suspect_related
+        # AND, so any window that documents the command properly clears the
+        # "possibly only mentioned" mark — but ONLY a window that actually
+        # produced that evidence gets a vote. A RELAYED entry's
+        # `suspect_related=False` is the relay's exemption, not a finding (see
+        # `ValidatedEntry.relayed`): a continuation window holding nothing but
+        # a parameter table has no heading and no usage line for the command,
+        # so folding its False in with AND would erase the warning the window
+        # that merely mentioned the command had earned — and erase it on
+        # exactly the shape the relay exists to produce, i.e. always. First
+        # writes are unaffected: the seed above takes this entry's own value
+        # whatever it is, because there is no earlier finding to protect.
+        if not entry.relayed:
+            current["suspect_related"] = (
+                current["suspect_related"] and entry.suspect_related
+            )
         _extend_rejections(current, _rejection_records(result))
 
     @staticmethod
