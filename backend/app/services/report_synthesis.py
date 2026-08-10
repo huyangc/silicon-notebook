@@ -224,17 +224,75 @@ def synthesis_evidence_payload(
     return sections, legal
 
 
+def _facet_key(value: object) -> str:
+    """Fold one facet spelling into a comparison key."""
+    return str(value or "").strip().casefold()
+
+
+def _facet_tag_lookup(frame: dict | None) -> dict[str, str]:
+    """Map every unambiguous facet spelling back to the facet id that owns it.
+
+    Ids are laid down first and never overwritten, so a facet id always wins
+    over another facet's name or value that folds to the same key.  A spelling
+    two different facets could claim is dropped rather than guessed at: an
+    arbitrary pick would silently file a claim under the wrong dimension, which
+    is worse than carrying no organizational tag at all.
+    """
+    facets = [
+        row for row in ((frame or {}).get("facets") or []) if isinstance(row, dict)
+    ]
+    lookup: dict[str, str] = {}
+    ambiguous: set[str] = set()
+
+    def _record(key: str, facet_id: str) -> None:
+        if not key or key in ambiguous:
+            return
+        owner = lookup.get(key)
+        if owner is None:
+            lookup[key] = facet_id
+        elif owner != facet_id:
+            del lookup[key]
+            ambiguous.add(key)
+
+    for row in facets:
+        facet_id = _text(row.get("id"), 80)
+        if facet_id:
+            _record(_facet_key(facet_id), facet_id)
+    id_spellings = set(lookup) | ambiguous
+    for row in facets:
+        facet_id = _text(row.get("id"), 80)
+        if not facet_id:
+            continue
+        values = row.get("values")
+        spellings = [row.get("name")]
+        if isinstance(values, list):
+            spellings.extend(values)
+        for spelling in spellings:
+            key = _facet_key(spelling)
+            if key not in id_spellings:
+                _record(key, facet_id)
+    return lookup
+
+
 def normalize_synthesis_blueprint(
     value: object, *, outline: Sequence[dict], legal_evidence_ids: set[str],
     frame: dict | None,
 ) -> dict | None:
-    """Validate a blueprint atomically; one illegal binding discards all of it.
+    """Validate a blueprint; one illegal evidence binding discards all of it.
+
+    Atomicity covers evidence bindings, claim ownership and structure — the
+    parts a section writer treats as load-bearing.  The facet tag is not one of
+    them: it is organizational context with no code consumer, so it is first
+    repaired deterministically (composite-prefix narrowing, then a unique
+    lookup across facet ids / names / declared values, case-insensitively) and
+    only cleared per claim when no repair applies.  A production report was
+    discarded whole because the model tagged claims with a facet *value*
+    instead of its id; a label mismatch must not cost a grounded blueprint.
 
     ``frame`` must be a normalized frame (``normalize_report_frame`` output) or
     None: the facet vocabulary built below is compared verbatim against claim
-    tags, and since facet-tag handling branches on whether that vocabulary is
-    empty (clear the tag) or not (discard the blueprint), feeding a raw
-    un-normalized frame would silently flip that branch.
+    tags, so a raw un-normalized frame would silently change which spellings
+    resolve and which ones get cleared.
     """
     try:
         if not isinstance(value, dict):
@@ -250,6 +308,9 @@ def normalize_synthesis_blueprint(
             _text(row.get("id"), 80) for row in ((frame or {}).get("facets") or [])
             if isinstance(row, dict)
         }
+        facet_lookup = _facet_tag_lookup(frame)
+        facets_repaired = 0
+        facets_cleared = 0
 
         claims: list[dict] = []
         claim_ids: set[str] = set()
@@ -264,33 +325,49 @@ def normalize_synthesis_blueprint(
             evidence_keys = _strings(raw.get("evidence_keys"), 16, 160)
             counter = _strings(raw.get("counterevidence_keys"), 12, 160)
             facet_id = _text(raw.get("facet_id"), 80)
-            # Models waver between the bare facet id the frame lists and an
-            # `id:value` composite (value info belongs in statement/conditions).
-            # An `id:value` / `id：value` (full-width colon) form whose prefix is
-            # a legal facet id is deterministically narrowed to that prefix — the
-            # tag is organizational, not evidentiary, so a shape mismatch alone
-            # must not discard an otherwise grounded blueprint.  When the frame
-            # defines no facet vocabulary at all, a model-invented label carries
-            # no organizational meaning either, so it is cleared instead.
+            # Models waver between the bare facet id the frame lists, an
+            # `id:value` composite (value info belongs in statement/conditions),
+            # and the facet's name or one of its declared values.  The tag is
+            # organizational, not evidentiary, so a label mismatch is repaired
+            # rather than fatal, in a fixed ladder:
+            #   1. exact declared id (or already empty) — keep verbatim;
+            #   2. `id:value` / `id：value` (full-width colon) whose prefix is a
+            #      declared id — narrow to that prefix;
+            #   3. the whole tag resolved through the spelling lookup, which
+            #      covers a facet name, a declared value and case variants;
+            #   4. the same colon split, resolved through that lookup, which
+            #      covers the `name:value` composite;
+            #   5. nothing matched — clear this claim's tag and keep the rest.
             if facet_id and facet_id not in facet_ids:
                 # A legal facet id may itself contain a separator, so split
                 # points are tried right-to-left: the longest declared prefix
                 # wins, never a shorter accidental one.
+                resolved = ""
                 for index in range(len(facet_id) - 1, -1, -1):
                     if facet_id[index] not in ":：":
                         continue
                     prefix = facet_id[:index].strip()
                     if prefix in facet_ids:
-                        facet_id = prefix
+                        resolved = prefix
                         break
+                if not resolved:
+                    resolved = facet_lookup.get(_facet_key(facet_id), "")
+                if not resolved:
+                    for index in range(len(facet_id) - 1, -1, -1):
+                        if facet_id[index] not in ":：":
+                            continue
+                        resolved = facet_lookup.get(_facet_key(facet_id[:index]), "")
+                        if resolved:
+                            break
+                facet_id = resolved
+                if resolved:
+                    facets_repaired += 1
                 else:
-                    if not facet_ids:
-                        facet_id = ""
+                    facets_cleared += 1
             if (
                 not claim_id or claim_id in claim_ids or not statement
                 or claim_type not in _CLAIM_TYPES or owner not in section_ids
                 or any(key not in legal_evidence_ids for key in evidence_keys + counter)
-                or (facet_id and facet_id not in facet_ids)
             ):
                 return None
             if claim_type in {"fact", "comparison", "trend"} and not evidence_keys:
@@ -358,13 +435,20 @@ def normalize_synthesis_blueprint(
                     "term": term, "definition": definition,
                     "evidence_keys": keys,
                 })
-        return {
+        blueprint = {
             "version": 1,
             "central_answer": _text(value.get("central_answer"), 1600),
             "shared_definitions": definitions,
             "claims": claims,
             "sections": sections,
         }
+        if facets_repaired or facets_cleared:
+            # Private hand-off for observation only; the caller pops it before
+            # the blueprint reaches any model context.
+            blueprint["_facet_tag_stats"] = {
+                "repaired": facets_repaired, "cleared": facets_cleared,
+            }
+        return blueprint
     except (TypeError, ValueError):
         return None
 

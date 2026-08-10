@@ -1070,7 +1070,17 @@ REPORT_SYNTHESIS_SCHEMA_HINT = (
 
 
 def report_synthesis_prompt(question: str, intent_block: str, frame_block: str,
-                            evidence_block: str) -> str:
+                            evidence_block: str,
+                            facet_ids: Sequence[str] = ()) -> str:
+    facet_ids_sentence = ""
+    if facet_ids:
+        ids_joined = " | ".join(f"`{fid}`" for fid in facet_ids)
+        facet_ids_sentence = (
+            f"The frame's legal facet ids are exactly: {ids_joined} . Copy one id "
+            "verbatim into facet_id or leave it empty; a facet's human-readable name "
+            "and its declared values are NOT facet ids and must never appear in "
+            "facet_id. "
+        )
     return (
         "Act as the report-wide EVIDENCE SYNTHESIZER before any prose is written. "
         "Create one coherent argument across all confirmed sections. Organize claims "
@@ -1078,7 +1088,9 @@ def report_synthesis_prompt(question: str, intent_block: str, frame_block: str,
         "order. A claim's facet_id, when present, must be exactly one `id` from the "
         "frame's facets (bare id such as the frame lists — never an `id:value` "
         "composite like `<facet id>:<value>`; the value belongs in the statement or "
-        "conditions). Leave facet_id empty when the frame is empty. The confirmed "
+        "conditions). Leave facet_id empty when the frame is empty. "
+        f"{facet_ids_sentence}"
+        "The confirmed "
         "intent, frame, and section set are immutable: do not "
         "add, remove, rename, or reassign a mandatory section. Use only evidence_ids "
         "present in the supplied evidence. Every fact/comparison/trend claim needs "

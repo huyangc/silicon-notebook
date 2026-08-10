@@ -2030,6 +2030,10 @@ class ReportEngine:
                     json.dumps(intent_contract, ensure_ascii=False),
                     json.dumps(report_frame or {}, ensure_ascii=False),
                     json.dumps(evidence_sections, ensure_ascii=False),
+                    facet_ids=[
+                        row["id"] for row in (report_frame or {}).get("facets") or []
+                        if isinstance(row, dict) and row.get("id")
+                    ],
                     )}],
                     REPORT_SYNTHESIS_SCHEMA_HINT,
                     cancel_event=self.cancel_event,
@@ -2305,6 +2309,25 @@ class ReportEngine:
             blueprint = outcome
             synthesis_status = "available" if blueprint else "failed_validation"
             synthesis_error = None
+        # Facet-tag repair counts ride out on the blueprint dict and must be
+        # stripped here: the whole dict is handed to section drafting and to the
+        # final editor context, so an internal counter left in place would leak
+        # into model prompts.
+        tag_stats = (
+            blueprint.pop("_facet_tag_stats", None)
+            if isinstance(blueprint, dict) else None
+        )
+        if tag_stats:
+            try:
+                self.dependencies.event_log.emit({
+                    "kind": "report_synthesis_facet_tags",
+                    "notebook_id": notebook_id,
+                    "report_id": rid,
+                    "repaired": int(tag_stats.get("repaired", 0)),
+                    "cleared": int(tag_stats.get("cleared", 0)),
+                })
+            except Exception:
+                pass
         if synthesis_status in {"failed_model", "failed_validation"}:
             error = synthesis_error or RuntimeError(
                 f"report synthesis ended with {synthesis_status}"
