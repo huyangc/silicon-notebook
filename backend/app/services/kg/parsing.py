@@ -93,17 +93,19 @@ def parse_elements(
             #
             # Evidence spans must stay truthful (`_ev()` persists
             # char_start/char_end as the grounded source range), so locate
-            # the caption's REAL position inside the literal instead of
-            # blindly keeping the `![...` prefix. Only when the caption text
-            # does not appear verbatim in the source (escaped brackets like
-            # `\]` were unescaped during parsing) fall back to the
-            # prefix-length span, which is then packing-only.
+            # the caption's REAL position inside the literal. When the
+            # caption does not appear verbatim in the source (markdown-it
+            # normalized it: `\]` unescaped, NUL → U+FFFD, ...), there is no
+            # truthful span to record — skip the KG element entirely rather
+            # than manufacture a prefix span whose slice would ground
+            # evidence to `![fo`-style noise (codex R3 P2). The caption still
+            # reaches retrieval through the parsers.py element/chunk path,
+            # which does not carry char offsets.
             idx = text.find(raw, b.char_start, b.char_end) if raw else -1
-            if idx >= 0:
-                char_start = idx
-                char_end = idx + len(raw)
-            else:
-                char_end = min(b.char_end, b.char_start + len(raw))
+            if idx < 0:
+                continue
+            char_start = idx
+            char_end = idx + len(raw)
         else:
             raw = text[b.char_start:b.char_end]
         if not raw.strip():

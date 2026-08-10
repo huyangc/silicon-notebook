@@ -186,6 +186,16 @@ def test_uppercase_data_scheme_raw_fallback_strip():
     assert strip_data_uri_image_literals(raw) == "alt"
 
 
+def test_nested_bracket_alt_data_uri_destination_swept():
+    """codex R3 P2: alt 含嵌套方括号时字面量正则不匹配——目标端兜底清扫必须
+    单独把 `](data:...)` 收掉, base64 不得进任何 block 文本。"""
+    md = f"![a [nested] alt](data:image/svg+xml;base64,{_SVG_B64})\n"
+    blocks = parse_blocks(md)
+    assert blocks
+    assert all("base64" not in b.text for b in blocks)
+    assert any("a [nested] alt" in b.text for b in blocks)
+
+
 def test_html_block_data_uri_literal_sanitized():
     """codex R2 P1: markdown-it 对 html_block 内部不做 token 化——`<details>` 里的
     `![alt](data:...)` 字面量(白名单 mime 也一样)会原样穿过 `_html_to_text`
