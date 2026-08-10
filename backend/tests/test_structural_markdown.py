@@ -186,6 +186,43 @@ def test_uppercase_data_scheme_raw_fallback_strip():
     assert strip_data_uri_image_literals(raw) == "alt"
 
 
+def test_angle_bracket_data_uri_destination_stripped():
+    """codex R5 P1: CommonMark 尖括号目标形态 `![alt](<data:...>)`——被拒 mime
+    时字面量留在文本里, 两个清扫正则都必须认这个拼写。"""
+    md = f"![alt](<data:image/svg+xml;base64,{_SVG_B64}>)\n"
+    blocks = parse_blocks(md)
+    assert blocks
+    assert all("base64" not in b.text for b in blocks)
+    assert any(b.text == "alt" for b in blocks)
+
+
+def test_angle_bracket_data_uri_in_list_item_stripped():
+    md = f"- see ![alt](<data:image/svg+xml;base64,{_SVG_B64}>) here\n"
+    blocks = parse_blocks(md)
+    items = [b for b in blocks if b.type == "list_item"]
+    assert len(items) == 1
+    assert "base64" not in items[0].text
+    assert "see alt here" in items[0].text
+
+
+def test_angle_bracket_with_paren_alt_stripped_by_literal_regex():
+    """alt 带圆括号时只有精确正则能命中(fallback 排除圆括号)——钉住精确正则
+    自己的尖括号支持。"""
+    md = f"![see (fig)](<data:image/svg+xml;base64,{_SVG_B64}>)\n"
+    blocks = parse_blocks(md)
+    assert all("base64" not in b.text for b in blocks)
+    assert any("see (fig)" in b.text for b in blocks)
+
+
+def test_angle_bracket_with_nested_alt_stripped_by_fallback_regex():
+    """alt 带嵌套方括号时只有 fallback 正则能命中(精确正则不认 `[`)——钉住
+    fallback 自己的尖括号支持。"""
+    md = f"![a [nested] alt](<data:image/svg+xml;base64,{_SVG_B64}>)\n"
+    blocks = parse_blocks(md)
+    assert all("base64" not in b.text for b in blocks)
+    assert any("a [nested] alt" in b.text for b in blocks)
+
+
 def test_ordinary_data_link_preserved_verbatim():
     """codex R4 P2: 清扫只针对图片语法——普通链接 `[x](data:...)` 是用户正文,
     目标端不得被摘除。"""
