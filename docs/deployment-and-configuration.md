@@ -846,6 +846,11 @@ validated public PDF first. A successful fallback remains `extracted`, exposes o
 safe `parse_quality_warning` to clients, and can be reparsed later; pypdf is used only
 if PyMuPDF4LLM itself is unavailable or errors.
 
+`MINERU_RETURN_IMAGES` / `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE` also
+govern `data:image/...;base64,...` embedded images in Markdown sources — these three
+settings are the single guardrail for persisting any source's images, not only ones
+parsed by MinerU.
+
 **Logging:**
 
 ```text

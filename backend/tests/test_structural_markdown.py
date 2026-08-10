@@ -1,4 +1,12 @@
+import base64
+
 from app.services.structural_markdown import parse_blocks
+
+# `<svg></svg>` base64-encoded — a mime markdown-it-py's validateLink rejects
+# outright (only data:image/(gif|png|jpeg|webp) tokenize as `image`), so the
+# whole `![alt](data:...)` literal falls through as plain inline text unless
+# `_inline_text`'s sub() strips it (修1).
+_SVG_B64 = base64.b64encode(b"<svg></svg>").decode()
 
 SAMPLE = """# Top Title
 
@@ -111,3 +119,87 @@ def test_orphan_anchor_attached_to_next_block():
     assert all("<a id=" not in b.text for b in blocks)
     para = [b for b in blocks if b.type == "paragraph"][0]
     assert para.anchor_id == "z"
+
+
+# --- 修1: rejected-mime data-URI literal stripped inside _inline_text -------
+# (list_item / heading / table cell / mixed-paragraph text — everywhere the
+# paragraph-only fullmatch branch in parse_blocks does not reach).
+
+
+def test_list_item_data_uri_literal_stripped_no_alt():
+    # Alt-less: stripping leaves empty text, so — same as any empty list item
+    # — no block is emitted at all (existing `if txt:` guard, unrelated to
+    # this fix). Anchoring on a document with other content sidesteps the
+    # unrelated `if blocks:` raw-text fallback boundary in parse_markdown_text
+    # (a document consisting *solely* of this list item is a known, unfixed
+    # residual gap — see task report).
+    md = f"Intro paragraph.\n\n- ![](data:image/svg+xml;base64,{_SVG_B64})\n"
+    blocks = parse_blocks(md)
+    assert all("base64" not in b.text for b in blocks)
+    assert [b for b in blocks if b.type == "list_item"] == []
+
+
+def test_list_item_data_uri_literal_stripped_keeps_alt():
+    blocks = parse_blocks(f"- ![a schematic](data:image/svg+xml;base64,{_SVG_B64})\n")
+    items = [b for b in blocks if b.type == "list_item"]
+    assert len(items) == 1
+    assert items[0].text == "a schematic"
+    assert "base64" not in items[0].text
+
+
+def test_heading_data_uri_literal_stripped_to_alt():
+    blocks = parse_blocks(f"# ![alt text](data:image/svg+xml;base64,{_SVG_B64})\n")
+    heads = [b for b in blocks if b.type == "heading"]
+    assert len(heads) == 1
+    assert heads[0].text == "alt text"
+    assert "base64" not in heads[0].text
+
+
+def test_table_cell_data_uri_literal_stripped():
+    md = (
+        "| Col |\n"
+        "| --- |\n"
+        f"| ![a schematic](data:image/svg+xml;base64,{_SVG_B64}) |\n"
+    )
+    blocks = parse_blocks(md)
+    tables = [b for b in blocks if b.type == "table"]
+    assert len(tables) == 1
+    assert "base64" not in tables[0].text
+    assert "a schematic" in tables[0].text
+
+
+def test_mixed_paragraph_data_uri_literal_stripped_keeps_surrounding_text():
+    md = f"Before text ![a schematic](data:image/svg+xml;base64,{_SVG_B64}) after text\n"
+    blocks = parse_blocks(md)
+    paras = [b for b in blocks if b.type == "paragraph"]
+    assert len(paras) == 1
+    assert "base64" not in paras[0].text
+    assert "Before text" in paras[0].text
+    assert "after text" in paras[0].text
+    assert "a schematic" in paras[0].text
+
+
+def test_mixed_paragraph_data_uri_literal_stripped_no_alt():
+    md = f"Before text ![](data:image/svg+xml;base64,{_SVG_B64}) after text\n"
+    blocks = parse_blocks(md)
+    paras = [b for b in blocks if b.type == "paragraph"]
+    assert len(paras) == 1
+    assert "base64" not in paras[0].text
+    assert "Before text" in paras[0].text
+    assert "after text" in paras[0].text
+
+
+def test_allowlisted_mime_image_in_paragraph_still_becomes_image_block():
+    # Regression: png (allowlisted mime) tokenizes as a real `image` child
+    # regardless of this fix; unaffected by the `_inline_text` sub() no-op.
+    blocks = parse_blocks("![A waveform](images/wave.png)\n")
+    imgs = [b for b in blocks if b.type == "image"]
+    assert len(imgs) == 1
+    assert imgs[0].text == "A waveform"
+
+
+def test_plain_text_without_data_uri_unaffected():
+    blocks = parse_blocks("- Just a normal bullet with no images at all\n")
+    items = [b for b in blocks if b.type == "list_item"]
+    assert len(items) == 1
+    assert items[0].text == "Just a normal bullet with no images at all"

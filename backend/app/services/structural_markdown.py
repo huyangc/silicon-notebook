@@ -15,6 +15,29 @@ from markdown_it import MarkdownIt
 _ANCHOR_ONLY = re.compile(r'^\s*(?:<a\s+id="[^"]*"\s*>\s*</a>\s*)+$', re.IGNORECASE)
 _ANCHOR_ID = re.compile(r'<a\s+id="([^"]*)"', re.IGNORECASE)
 
+# markdown-it-py's validateLink only allows `data:image/(gif|png|jpeg|webp)`;
+# any other mime (svg+xml, bmp, avif, ...) fails link validation and the
+# image never tokenizes as an `image` child — the whole `![alt](data:...)`
+# literal (base64 payload and all) falls through as plain inline text
+# instead. Two consumers strip it down to just the alt text before it can
+# reach chunking/embedding/KG: the paragraph_open handler below fullmatches
+# it to special-case a paragraph whose *entire* inline content is exactly
+# one such literal (emits a dedicated `image` Block instead of a paragraph),
+# and `_inline_text`'s `sub()` call catches every other position — mixed
+# paragraph text, list items, headings, table cells — where the literal
+# survives as an ordinary `text` child instead.
+_DATA_URI_IMAGE_LITERAL = re.compile(r"!\[([^\]]*)\]\(\s*data:[^)]*\)")
+
+
+def strip_data_uri_image_literals(text: str) -> str:
+    """把 `![alt](data:...)` 图片字面量剥成 alt 文本（空 alt 剥成空串）。
+
+    `_inline_text` 与 `parsers.parse_markdown_text` 的裸文本兜底共用这一个
+    收口：任何要把 markdown 原文当纯文本吐出的路径都必须先过它，保证 base64
+    载荷不进元素文本。对不含字面量的文本是 no-op。
+    """
+    return _DATA_URI_IMAGE_LITERAL.sub(lambda m: m.group(1), text)
+
 
 @dataclass
 class Block:
@@ -61,7 +84,15 @@ def _inline_text(tok) -> str:
     parts: List[str] = []
     for c in tok.children:
         if c.type == "text":
-            parts.append(c.content)
+            # A rejected-mime data-URI image literal (see module docstring
+            # comment above `_DATA_URI_IMAGE_LITERAL`) never tokenizes as an
+            # `image` child — it survives as plain `text` content, base64 and
+            # all. Strip it down to just the alt text (empty alt -> empty
+            # string) wherever it shows up: list items, headings, table
+            # cells, and paragraph text mixed with other prose all route
+            # through this loop. This is a no-op for text that doesn't
+            # contain such a literal (修1).
+            parts.append(strip_data_uri_image_literals(c.content))
         elif c.type == "code_inline":
             parts.append(c.content)
         elif c.type == "image":
@@ -231,10 +262,37 @@ def parse_blocks(text: str) -> List[Block]:
             if img is not None:
                 caption = (img.content or "").strip()
                 src = img.attrs.get("src", "") if hasattr(img, "attrs") else ""
-                if caption:
+                if caption or src.startswith("data:"):
                     emit(Block(type="image", text=caption, raw=text[cs:ce],
                                char_start=cs, char_end=ce, line_start=ls, line_end=le,
                                section_path=section_path(), metadata={"src": src}))
+                i += 3
+                continue
+            literal_m = _DATA_URI_IMAGE_LITERAL.fullmatch(raw_inline.strip())
+            if literal_m is not None:
+                # A data-URI image markdown-it rejected outright (disallowed
+                # mime): keep only the alt text, if any; drop the base64
+                # entirely. Mixed content (literal + other text in the same
+                # paragraph) does not match this `fullmatch` — it falls
+                # through to `_inline_text(inline)` below, whose `sub()` call
+                # strips the literal to alt text there instead (修1).
+                alt = literal_m.group(1).strip()
+                if alt:
+                    emit(Block(type="paragraph", text=alt, raw=text[cs:ce],
+                               char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                               section_path=section_path()))
+                else:
+                    # No alt to keep — but a *document* consisting solely of
+                    # this literal must not leave `blocks` empty, or the
+                    # parse_markdown_text `if blocks:` fallback (修3) falls
+                    # through to raw-text splitting and dumps the base64
+                    # right back in. Emit an empty-caption image Block: the
+                    # existing image-branch filters (parsers.py `if not
+                    # caption and not asset_id: continue`; kg/parsing.py 修1)
+                    # already turn this into zero downstream elements.
+                    emit(Block(type="image", text="", raw=text[cs:ce],
+                               char_start=cs, char_end=ce, line_start=ls, line_end=le,
+                               section_path=section_path()))
                 i += 3
                 continue
             txt = _inline_text(inline)

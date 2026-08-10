@@ -118,6 +118,24 @@ def test_build_chunks_consumes_section_path_breadcrumb_from_metadata(repo):
     assert "Manual" not in chunk_rows[idx]["text"]
 
 
+def test_build_chunks_carries_metadata_caption_for_image_elements(repo):
+    """source_elements_for_chunking 把 metadata.caption 投影出来供 build_chunks
+    判定(image/figure 元素仅在无图注时跳过);带图注的 markdown 图片元素必须真的
+    进检索 chunk，而不是被 _SKIP_TYPES 悄悄吞掉(钉住真正的投影方，而不是
+    test_caption_reaches_chunking 手搓的扁平 dict)。"""
+    nb, sid = _seed_source_with_elements(repo, rows=[
+        ("image", "a plot of x vs y", json.dumps({"caption": "a plot of x vs y"})),
+    ])
+
+    repo._build_chunks_for_source(sid)
+
+    with repo._connect() as db:
+        chunk_rows = db.execute(
+            "SELECT text FROM chunks WHERE source_id=? ORDER BY id", (sid,)
+        ).fetchall()
+    assert any("a plot of x vs y" in row["text"] for row in chunk_rows)
+
+
 def test_build_chunks_id_minting_rides_module_seam(repo, monkeypatch):
     nb, sid = _seed_source_with_elements(repo, ["a" * 300])
     minted = []
