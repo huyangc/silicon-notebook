@@ -46,7 +46,7 @@ class _Engine:
 
     def run(self, notebook_id, rid, question, history="", depth=2,
             auto_generate=False, require_intent_review=False,
-            intent_contract=None):
+            intent_contract=None, scope_reconfirm=None):
         if self.boom:
             raise RuntimeError("engine down")
         self.run_calls.append((notebook_id, rid, question, history, depth,
