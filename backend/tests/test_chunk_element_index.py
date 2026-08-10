@@ -2,7 +2,7 @@
 
 三段合同,分别对应三组用例:
 
-1. **迁移**——全新库建到 v44、已部署 v43 库补建(不改旧迁移);
+1. **迁移**——全新库建到 v46、已部署 v45 库补建(不改旧迁移);
 2. **写路径前向维护**——``replace_source_chunks`` 与 knowhow 投影的
    ``insert_rows``/``delete_by_ids`` 在同一写事务内维护反查行,重解析后旧行
    随 chunk 的 FK 级联消失;
@@ -77,8 +77,8 @@ def test_fresh_database_creates_the_reverse_index_at_current_version(repo, tmp_p
         assert "chunk_elements_indexed" in columns
 
 
-def test_deployed_v43_database_gains_the_reverse_index_on_open(repo, tmp_path):
-    """已部署库补建:回滚到 v43 再开一次,v44 必须补上它自己那几件。"""
+def test_deployed_v45_database_gains_the_reverse_index_on_open(repo, tmp_path):
+    """已部署库补建:回滚到 v45 再开一次,v46 必须补上它自己那几件。"""
     database = tmp_path / "t.db"
     repo.close_local()
     with sqlite3.connect(database) as rollback:
@@ -87,7 +87,7 @@ def test_deployed_v43_database_gains_the_reverse_index_on_open(repo, tmp_path):
         rollback.execute(
             "ALTER TABLE unified_kg_state DROP COLUMN chunk_elements_indexed"
         )
-        rollback.execute("PRAGMA user_version = 43")
+        rollback.execute("PRAGMA user_version = 45")
 
     reopened = SQLiteRepository(Settings(_env_file=None))
     try:

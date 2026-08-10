@@ -216,9 +216,9 @@ bundle may exceed the byte cap, and a same-key replacement that grows past the
 cap rolls back and defers when another actual bundle is already accepted. FK
 parents come only from the verified current source snapshot through a
 64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v23 graph has a branch-counted bound of exactly 9 row slots and no
+the fixed v24 graph has a branch-counted bound of exactly 9 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG23 catalog plans cover all
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG24 catalog plans cover all
 99 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
