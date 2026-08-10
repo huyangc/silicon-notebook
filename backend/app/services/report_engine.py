@@ -2319,9 +2319,11 @@ class ReportEngine:
         )
         if tag_stats:
             try:
+                # Counts plus opaque report identity only — the documented
+                # contract deliberately omits notebook identity, mirroring
+                # report_stage_timing rather than report_synthesis_failed.
                 self.dependencies.event_log.emit({
                     "kind": "report_synthesis_facet_tags",
-                    "notebook_id": notebook_id,
                     "report_id": rid,
                     "repaired": int(tag_stats.get("repaired", 0)),
                     "cleared": int(tag_stats.get("cleared", 0)),

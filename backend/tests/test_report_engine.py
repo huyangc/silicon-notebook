@@ -1024,7 +1024,7 @@ def test_facet_tag_repairs_are_observed_and_stripped_before_model_context(
         if event["kind"] == "report_synthesis_facet_tags"
     ]
     assert tagged == [{
-        "kind": "report_synthesis_facet_tags", "notebook_id": nb.id,
+        "kind": "report_synthesis_facet_tags",
         "report_id": rid, "repaired": 2, "cleared": 1,
     }]
     # The stored blueprint feeds fair_editor_context, which serializes it
