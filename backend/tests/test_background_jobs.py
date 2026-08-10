@@ -326,3 +326,306 @@ def test_failed_job_log_uses_safe_operation_instead_of_raw_entity_id(caplog):
     assert not thread.is_alive()
     assert "background job failed: report-gen" in caplog.text
     assert "report-private123" not in caplog.text
+
+
+# --- 后台 job 的进程级并发闸(重活池 / 轻活池) ----------------------------
+
+
+HEAVY_JOB_NAMES = (
+    "buildkg-nb-a",
+    "rebuildkg-nb-a",
+    "relinkkg-nb-a",
+    "unifiedkg-nb-a",
+    "conflictresolve-nb-a",
+    "mergereview-nb-a",
+)
+LIGHT_JOB_NAMES = (
+    "papermeta-nb-a",
+    "catalog-source-a",
+    "knowhow-project-t1",
+    "knowhow-legacy-reproject-t1",
+    "knowhow-asset-sweep:nb-a",
+)
+UNGATED_JOB_NAMES = ("ask-chunk", "ask-reasoning", "ask-graph",
+                     "report-plan-r1", "report-gen-r1")
+
+
+@pytest.fixture
+def gate_capacity(monkeypatch):
+    """把两个池的容量固定成 1(可调),并保证闸按当前配置重建。"""
+    from app.core import config as config_module
+
+    def _configure(heavy: int = 1, light: int = 1) -> None:
+        settings = config_module.get_settings()
+        monkeypatch.setattr(
+            settings, "background_maintenance_concurrency", heavy, raising=False)
+        monkeypatch.setattr(
+            settings, "background_light_job_concurrency", light, raising=False)
+        background_jobs._reset_maintenance_gate_for_tests()
+
+    _configure()
+    return _configure
+
+
+def _occupy_one_slot(name: str):
+    """提交一个占住槽不放的 job,返回 (thread, 放行事件)。"""
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked() -> None:
+        started.set()
+        assert release.wait(timeout=5)
+
+    thread = background_jobs.submit(blocked, name=name)
+    assert started.wait(timeout=5)
+    return thread, release
+
+
+def test_gated_categories_are_a_subset_of_the_safe_prefix_table(gate_capacity):
+    """进闸类别必须全部来自 `_SAFE_JOB_PREFIXES`——否则前缀判定永远匹配不到它,
+    闸看着配好了却一个 job 都拦不住(纯拼写错误就能让整个特性静默失效)。"""
+    known = {operation for _, operation in background_jobs._SAFE_JOB_PREFIXES}
+    assert background_jobs._MAINTENANCE_OPERATIONS <= known
+    # 两个池互斥,且并起来正好是进闸集合(没有孤儿类别)。
+    heavy = background_jobs._HEAVY_MAINTENANCE_OPERATIONS
+    light = background_jobs._LIGHT_MAINTENANCE_OPERATIONS
+    assert not (heavy & light)
+    assert heavy | light == background_jobs._MAINTENANCE_OPERATIONS
+    # 交互路径与报告刻意在闸外。
+    assert not ({"report-plan", "report-gen"} & background_jobs._MAINTENANCE_OPERATIONS)
+    assert not (background_jobs._SAFE_ASK_JOB_NAMES
+                & background_jobs._MAINTENANCE_OPERATIONS)
+
+
+@pytest.mark.parametrize("name", HEAVY_JOB_NAMES + LIGHT_JOB_NAMES)
+def test_each_gated_category_serializes_at_capacity_one(gate_capacity, name):
+    """容量=1 时同池两个 job 串行:第二个必须等第一个结束才开始。
+
+    顺序用 event 证明(不是 sleep):负向断言「第一个占槽期间第二个没开始」,
+    正向断言「实际执行顺序就是提交顺序」——只有负向的话,一个从不执行第二个
+    job 的实现也能骗过它。
+    """
+    order = []
+    order_lock = threading.Lock()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    def first() -> None:
+        with order_lock:
+            order.append("first")
+        first_started.set()
+        assert release_first.wait(timeout=5)
+
+    def second() -> None:
+        with order_lock:
+            order.append("second")
+        second_started.set()
+
+    t1 = background_jobs.submit(first, name=name)
+    assert first_started.wait(timeout=5)
+    t2 = background_jobs.submit(second, name=name)
+    assert not second_started.wait(timeout=0.2)   # 闸真的挡住了它
+
+    release_first.set()
+    assert second_started.wait(timeout=5)
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert order == ["first", "second"]
+    assert not t1.is_alive() and not t2.is_alive()
+
+
+@pytest.mark.parametrize("light_name", LIGHT_JOB_NAMES)
+def test_light_jobs_are_not_starved_by_a_saturated_heavy_pool(
+    gate_capacity, light_name
+):
+    """两个池独立:重活池占满时秒级轻活仍立即执行(合池就会被饿死)。"""
+    heavy, release = _occupy_one_slot("buildkg-nb-a")
+    ran = threading.Event()
+    light = background_jobs.submit(ran.set, name=light_name)
+    assert ran.wait(timeout=5)
+
+    release.set()
+    heavy.join(timeout=5)
+    light.join(timeout=5)
+
+
+@pytest.mark.parametrize("heavy_name", HEAVY_JOB_NAMES)
+def test_heavy_jobs_are_not_blocked_by_a_saturated_light_pool(
+    gate_capacity, heavy_name
+):
+    """反方向同理:轻活池占满不得挡住重活(证明两把闸不是同一个对象)。"""
+    light, release = _occupy_one_slot("knowhow-project-t1")
+    ran = threading.Event()
+    heavy = background_jobs.submit(ran.set, name=heavy_name)
+    assert ran.wait(timeout=5)
+
+    release.set()
+    light.join(timeout=5)
+    heavy.join(timeout=5)
+
+
+@pytest.mark.parametrize("name", UNGATED_JOB_NAMES)
+def test_interactive_and_report_jobs_are_never_gated(gate_capacity, name):
+    """ask-*(用户在线等)与 report-*(已有整篇准入闸)不进任何一个池。"""
+    heavy, release_heavy = _occupy_one_slot("buildkg-nb-a")
+    light, release_light = _occupy_one_slot("knowhow-project-t1")
+
+    ran = threading.Event()
+    ungated = background_jobs.submit(ran.set, name=name)
+    assert ran.wait(timeout=5)
+
+    release_heavy.set()
+    release_light.set()
+    heavy.join(timeout=5)
+    light.join(timeout=5)
+    ungated.join(timeout=5)
+
+
+def test_maintenance_slot_is_released_when_the_job_raises(gate_capacity):
+    """异常路径必须释放槽位,否则一次失败就永久少一个槽。"""
+    boom_done = threading.Event()
+
+    def boom() -> None:
+        boom_done.set()
+        raise RuntimeError("expected maintenance failure")
+
+    failing = background_jobs.submit(boom, name="relinkkg-nb-a")
+    assert boom_done.wait(timeout=5)
+    failing.join(timeout=5)
+
+    ran = threading.Event()
+    following = background_jobs.submit(ran.set, name="unifiedkg-nb-a")
+    assert ran.wait(timeout=5)
+    following.join(timeout=5)
+
+
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
+def test_maintenance_slot_is_released_when_the_job_raises_base_exception(
+    gate_capacity,
+):
+    """BaseException(如 SystemExit)同样要释放:`except Exception` 接不到它们。"""
+    exiting_done = threading.Event()
+
+    def exiting() -> None:
+        exiting_done.set()
+        raise SystemExit(1)
+
+    exiting_thread = background_jobs.submit(exiting, name="mergereview-nb-a")
+    assert exiting_done.wait(timeout=5)
+    exiting_thread.join(timeout=5)
+
+    ran = threading.Event()
+    following = background_jobs.submit(ran.set, name="buildkg-nb-b")
+    assert ran.wait(timeout=5)
+    following.join(timeout=5)
+
+
+def test_capacity_admits_configured_number_of_jobs_per_pool(gate_capacity):
+    """容量=2 时恰好两个同池 job 可并发,第三个必须等待(闸读的是部署配置值)。"""
+    gate_capacity(heavy=2, light=1)
+    barrier = threading.Barrier(3, timeout=5)
+    order = []
+    order_lock = threading.Lock()
+    third_started = threading.Event()
+    release = threading.Event()
+
+    def occupy() -> None:
+        with order_lock:
+            order.append("occupy")
+        barrier.wait()
+        assert release.wait(timeout=5)
+
+    def third() -> None:
+        with order_lock:
+            order.append("third")
+        third_started.set()
+
+    a = background_jobs.submit(occupy, name="buildkg-nb-a")
+    b = background_jobs.submit(occupy, name="rebuildkg-nb-b")
+    barrier.wait()   # 两个 job 与本线程一起到齐 → 它们确实同时在跑
+
+    c = background_jobs.submit(third, name="relinkkg-nb-c")
+    assert not third_started.wait(timeout=0.2)
+
+    release.set()
+    assert third_started.wait(timeout=5)
+    for thread in (a, b, c):
+        thread.join(timeout=5)
+    assert order == ["occupy", "occupy", "third"]
+
+
+def test_unnamed_job_is_never_gated_by_callable_name(gate_capacity):
+    """准入只看显式 name:一个恰好叫 buildkg 的函数不得因此进闸。"""
+    occupying, release = _occupy_one_slot("buildkg-nb-a")
+    ran = threading.Event()
+
+    def buildkg() -> None:
+        ran.set()
+
+    unnamed = background_jobs.submit(buildkg)
+    assert ran.wait(timeout=5)
+
+    release.set()
+    occupying.join(timeout=5)
+    unnamed.join(timeout=5)
+
+
+def test_queued_job_is_disclosed_in_logs_without_ids(gate_capacity, monkeypatch,
+                                                     caplog):
+    """排队久了要在日志里说清楚:库里的状态在排队期间仍是 running/queued,
+    日志是运维分辨「还没开始跑」与「跑着但很慢」的唯一手段。只带池名/类别名/
+    秒数——绝不带 notebook/source id。"""
+    monkeypatch.setattr(background_jobs, "_QUEUE_WARN_SECONDS", 0.05)
+    occupying, release = _occupy_one_slot("buildkg-nb-private123")
+
+    ran = threading.Event()
+    with caplog.at_level(logging.INFO, logger="silicon_notebook.jobs"):
+        queued = background_jobs.submit(ran.set, name="rebuildkg-nb-private456")
+        assert not ran.wait(timeout=0.3)          # 确实在排队(已越过阈值)
+        release.set()
+        assert ran.wait(timeout=5)
+        occupying.join(timeout=5)
+        queued.join(timeout=5)
+
+    assert "background job still queued" in caplog.text
+    assert "operation=rebuildkg" in caplog.text
+    assert "background job started after queueing" in caplog.text
+    assert "private123" not in caplog.text
+    assert "private456" not in caplog.text
+
+
+def test_job_that_runs_without_queueing_logs_nothing(gate_capacity, caplog):
+    """没排队就不该有排队日志(闸不能给每个 job 都加一行噪音)。"""
+    ran = threading.Event()
+    with caplog.at_level(logging.INFO, logger="silicon_notebook.jobs"):
+        thread = background_jobs.submit(ran.set, name="buildkg-nb-a")
+        assert ran.wait(timeout=5)
+        thread.join(timeout=5)
+    assert "queued" not in caplog.text
+
+
+def test_queued_job_is_not_reported_as_an_active_job(gate_capacity, tmp_path):
+    """排队必须发生在 `diagnostics.job_scope` 之外:等槽的 job 不是「在跑的
+    job」,算进 active_jobs 会让运维看到一个永远在忙、实际零 I/O 的任务。"""
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        occupying, release = _occupy_one_slot("buildkg-nb-a")
+
+        ran = threading.Event()
+        queued = background_jobs.submit(ran.set, name="rebuildkg-nb-b")
+        assert not ran.wait(timeout=0.2)
+        # 占槽的那个在跑 → 恰好一个 active job;排队的那个不在其中。
+        assert len(runtime.snapshot()["active_jobs"]) == 1
+
+        release.set()
+        assert ran.wait(timeout=5)
+        occupying.join(timeout=5)
+        queued.join(timeout=5)

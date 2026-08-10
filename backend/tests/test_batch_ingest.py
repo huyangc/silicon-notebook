@@ -2713,6 +2713,81 @@ def test_arg_parser_backfill_source_index_phase():
     assert args3.force is True
 
 
+# --- backfill-chunk-elements CLI (批 5 element→chunk 反查索引) --------------
+
+
+def _seed_chunk_with_elements(repo, notebook_id, chunk_id, element_ids,
+                              source_id="src-ce"):
+    now = "2026-08-10T00:00:00+00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (source_id, notebook_id, "t", "md", "ready", now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            (chunk_id, notebook_id, source_id, chunk_id, "",
+             json.dumps(list(element_ids)), now),
+        )
+
+
+def test_run_backfill_chunk_elements_paginates_in_batches(repo, monkeypatch):
+    """Bounded-memory backfill: with a tiny batch size a notebook with more
+    chunks than one page is still fully covered (keyset id > cursor neither
+    skips nor duplicates rows)."""
+    monkeypatch.setattr(bi, "_CHUNK_ELEMENT_BACKFILL_BATCH_SIZE", 2)
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    for i in range(5):
+        _seed_chunk_with_elements(repo, nb_id, f"c-{i}", [f"e-{i}"])
+
+    out = bi.run_backfill_chunk_elements(repo, nb_id, all_notebooks=False)
+    assert out["chunks"] == 5
+    assert out["rows"] == 5
+    with repo._connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) c FROM chunk_elements WHERE notebook_id=?",
+            (nb_id,)).fetchone()["c"]
+    assert count == 5
+
+
+def test_main_backfill_chunk_elements_requires_notebook_or_all(repo, capsys):
+    rc = bi.main(["backfill-chunk-elements"])
+    assert rc == 2
+    assert "backfill-chunk-elements" in capsys.readouterr().err
+
+
+def test_main_backfill_chunk_elements_end_to_end(repo, capsys):
+    """Pure SQL derivation from existing chunk rows — must work even when
+    EMBED_* is unset, like backfill-source-index."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_chunk_with_elements(repo, nb_id, "c-1", ["e-1"])
+
+    rc = bi.main(["backfill-chunk-elements", "--notebook-id", nb_id])
+    assert rc == 0
+    assert "backfill-chunk-elements done" in capsys.readouterr().out
+    assert repo.maintenance.chunk_elements_indexed(nb_id) is True
+
+
+def test_arg_parser_backfill_chunk_elements_phase():
+    args = bi.build_arg_parser().parse_args(
+        ["backfill-chunk-elements", "--notebook-id", "nb-x"]
+    )
+    assert args.phase == "backfill-chunk-elements"
+    assert args.all_notebooks is False
+
+    args2 = bi.build_arg_parser().parse_args(
+        ["backfill-chunk-elements", "--all-notebooks"]
+    )
+    assert args2.all_notebooks is True
+
+    args3 = bi.build_arg_parser().parse_args(
+        ["backfill-chunk-elements", "--notebook-id", "nb-x", "--force"]
+    )
+    assert args3.force is True
+
+
 # ── Task 6: CLI --fresh 贯通 ──────────────────────────────────────────────────
 
 def test_kg_fresh_flag_clears_checkpoint(repo, monkeypatch):

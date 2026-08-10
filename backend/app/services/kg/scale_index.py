@@ -26,7 +26,11 @@ def encode_viz_edges(edges) -> "np.ndarray":
     上限约 512Mi 字符(``(2**31-1)//4``);超大 base 图的边 JSON 会溢出并触发
     ``TypeError: string too large to store inside array``。改存 uint8 一维数组:
     元素数走 ``npy_intp``(64 位),且 numpy 以 ``force_zip64`` 写 npz 条目,
-    彻底绕开这个 2^31 上限。与 decode_viz_edges 成对使用。"""
+    彻底绕开这个 2^31 上限。与 decode_viz_edges 成对使用。
+
+    **生产写入端已不再使用本函数**:现在落的是 ``viz_edge_*`` 紧凑数组(见
+    VizEdgeSet)。保留它只为构造旧格式产物的测试,以及与 decode_viz_edges 配对
+    说明那条兼容读路径。"""
     payload = json.dumps(edges or []).encode("utf-8")
     return np.frombuffer(payload, dtype=np.uint8)
 
@@ -36,7 +40,10 @@ def decode_viz_edges(raw) -> list:
 
     新格式:encode_viz_edges 写的 uint8 一维字节数组 → 解码 UTF-8 再 json。
     旧格式:历史 ``json.dumps(...)`` 存成的 0-d unicode 标量 → 直接 ``str()``。
-    老索引不重建也能继续加载(与 has_chunk_ann 的 older-index-stays-valid 同性质)。"""
+    老索引不重建也能继续加载(与 has_chunk_ann 的 older-index-stays-valid 同性质)。
+
+    本函数只服务**旧格式**产物:现在的写入端落的是 ``viz_edge_*`` 紧凑数组
+    (见 VizEdgeSet)。保留它是为了让盘上已有的 viz.npz 不重建也能加载。"""
     arr = np.asarray(raw)
     if arr.dtype == np.uint8:
         text = arr.tobytes().decode("utf-8")
@@ -45,8 +52,274 @@ def decode_viz_edges(raw) -> list:
     return json.loads(text)
 
 
+_VIZ_EDGE_SRC_KEY = "viz_edge_src"
+_VIZ_EDGE_LEGACY_KEY = "viz_edges"
+
+
+def _viz_code_dtype(n_types: int):
+    """edge_type 码的最窄整型。内置 12 种边 + 管理员扩展类型都远在 uint16 内,
+    但绝不硬编码上限——表撑破 uint16 就自动升 uint32。"""
+    return np.uint16 if n_types <= np.iinfo(np.uint16).max else np.uint32
+
+
 @dataclass
-class ScaleIndex:
+class VizEdgeSet:
+    """折叠 viz 图的有向边集,紧凑列式表示。
+
+    历史表示是 ``list[[src_id, dst_id, edge_type], ...]``:每条边三个 Python 对象
+    加一个 list,在千万边的 base 库上是几个 GB 的常驻堆,而且**每次**
+    unified_graph/kg_neighbors 请求都要整表 Python 循环一遍。这里改成三条并列
+    数组:端点存 ``viz_ids`` 下标(int32),edge_type 存**逐文件**去重字符串表的
+    下标(内置 12 种边不硬编码,管理员扩展类型照样进表)。
+
+    派生索引惰性构建并缓存:``by_src()`` 一次 O(E log E) 的 numpy 排序换来
+    ``edge_type_at`` 的 O(deg) 查询。并发首次访问最多重复算一次同样的结果
+    (幂等,写的是同一个值),因此不加锁。
+    """
+
+    src: "np.ndarray"        # int32,viz_ids 下标
+    dst: "np.ndarray"        # int32,viz_ids 下标
+    code: "np.ndarray"       # uint16/uint32,type_table 下标
+    type_table: list         # 逐文件唯一的 edge_type 值(保持原值,不强转 str)
+    n_nodes: int             # viz_ids 长度(by_src 的 indptr 长度依赖它)
+
+    # dataclass 字段之外的惰性缓存(无注解 → 不是字段,不进 __init__/__eq__)。
+    _by_src_cache = None
+
+    def __len__(self) -> int:
+        return int(self.src.shape[0])
+
+    def rows(self, viz_ids):
+        """惰性还原成历史的 ``[src_id, dst_id, edge_type]`` 三元组序列(原边序)。
+
+        只给需要字符串形态的少数出口用(测试/诊断);热路径一律直接吃数组。"""
+        table = self.type_table
+        src, dst, code = self.src, self.dst, self.code
+        for i in range(len(self)):
+            yield [viz_ids[int(src[i])], viz_ids[int(dst[i])],
+                   table[int(code[i])]]
+
+    def by_src(self):
+        """(order, indptr):order 是按 src **稳定**排序的边下标置换,indptr 是
+        逐节点的分段边界。稳定性是语义的一部分——段内保持原边序,
+        ``edge_type_at`` 才能复现「同一 (s,t) 取最后一条」的字典覆盖语义。"""
+        cache = self.__dict__.get("_by_src_cache")
+        if cache is None:
+            order = np.argsort(self.src, kind="stable")
+            indptr = np.zeros(int(self.n_nodes) + 1, dtype=np.int64)
+            if len(self):
+                counts = np.bincount(self.src, minlength=int(self.n_nodes))
+                indptr[1:] = np.cumsum(counts[: int(self.n_nodes)])
+            cache = (order, indptr)
+            self._by_src_cache = cache
+        return cache
+
+    def edge_type_at(self, s_idx, t_idx, default=None):
+        """有向边 (s_idx → t_idx) 的 edge_type;没有这条边返回 ``default``。
+
+        同一 (s,t) 有多条边时取**最后一条**——与历史
+        ``for s, t, et in edges: et_map[(s, t)] = et`` 的逐边覆盖逐位一致。
+
+        ``default`` 让调用方能把「没有这条边」与「有这条边但 edge_type 恰是
+        None/空」区分开(历史实现靠 ``(s, t) in et_map`` 区分)。"""
+        if s_idx is None or t_idx is None or not len(self):
+            return default
+        s_idx = int(s_idx)
+        if not (0 <= s_idx < int(self.n_nodes)):
+            return default
+        order, indptr = self.by_src()
+        lo, hi = int(indptr[s_idx]), int(indptr[s_idx + 1])
+        if lo >= hi:
+            return default
+        segment = order[lo:hi]
+        hits = np.nonzero(self.dst[segment] == int(t_idx))[0]
+        if hits.size == 0:
+            return default
+        return self.type_table[int(self.code[int(segment[int(hits[-1])])])]
+
+    @classmethod
+    def from_columns(cls, src, dst, code, type_table, n_nodes: int) -> "VizEdgeSet":
+        """从**已经是下标**的三列构建(构建期路径)。只负责选最窄的码宽,不做
+        越界过滤——调用方(arrays_from_graph)按 viz_ids 现场解析的下标本就合法。"""
+        table = list(type_table)
+        return cls(
+            src=np.asarray(src, dtype=np.int32),
+            dst=np.asarray(dst, dtype=np.int32),
+            code=np.asarray(code, dtype=_viz_code_dtype(len(table))),
+            type_table=table,
+            n_nodes=int(n_nodes),
+        )
+
+    @classmethod
+    def empty(cls, n_nodes: int) -> "VizEdgeSet":
+        return cls(
+            src=np.zeros(0, dtype=np.int32),
+            dst=np.zeros(0, dtype=np.int32),
+            code=np.zeros(0, dtype=np.uint16),
+            type_table=[],
+            n_nodes=int(n_nodes),
+        )
+
+    @classmethod
+    def from_rows(cls, rows, viz_ids) -> "VizEdgeSet":
+        """从历史三元组列表构建(旧 viz.npz 的加载路径 + 传 list 的调用方)。
+
+        端点不在 viz_ids 里的行被丢弃:``arrays_from_graph`` 本就保证端点 ⊆
+        viz_ids,而消费侧的 ``s in keep`` 过滤对这类行也一律为假,丢弃与保留在
+        输出上等价(只影响 total_edges 这一个计数,且仅对 v9 之前那种连三元组
+        形状都不是的远古产物)。"""
+        node_index = {node_id: i for i, node_id in enumerate(viz_ids)}
+        src: list = []
+        dst: list = []
+        code: list = []
+        table: list = []
+        seen: dict = {}
+        dropped = 0
+        for row in rows or []:
+            if not isinstance(row, (list, tuple)) or len(row) < 3:
+                dropped += 1
+                continue
+            source_index = node_index.get(row[0])
+            target_index = node_index.get(row[1])
+            if source_index is None or target_index is None:
+                dropped += 1
+                continue
+            edge_type = row[2]
+            slot = seen.get(edge_type)
+            if slot is None:
+                slot = len(table)
+                seen[edge_type] = slot
+                table.append(edge_type)
+            src.append(source_index)
+            dst.append(target_index)
+            code.append(slot)
+        if dropped:
+            _logger.debug("viz edge rows dropped during decode: %d", dropped)
+        return cls.from_columns(src, dst, code, table, len(viz_ids))
+
+    @classmethod
+    def from_arrays(cls, src, dst, code, type_table, n_nodes: int) -> "VizEdgeSet":
+        """从落盘的紧凑数组构建。三条数组长度必须一致(不一致说明那次写入不
+        完整 → raise,由 load 侧统一判「产物不可信」);越界端点/类型码按行丢弃
+        并记 warning(只计数,无正文),丢行本身还会被 load 侧的
+        ``n_viz_edges`` 对账逮住,不至于安静地少掉边。"""
+        src = np.asarray(src).ravel()
+        dst = np.asarray(dst).ravel()
+        code = np.asarray(code).ravel()
+        if not (len(src) == len(dst) == len(code)):
+            raise ValueError("viz edge arrays must be equal length")
+        table = list(type_table)
+        src = src.astype(np.int32, copy=False)
+        dst = dst.astype(np.int32, copy=False)
+        n_nodes = int(n_nodes)
+        valid = (
+            (src >= 0) & (src < n_nodes)
+            & (dst >= 0) & (dst < n_nodes)
+            & (code >= 0) & (code < len(table))
+        )
+        if len(src) and not bool(valid.all()):
+            # warning, not debug: 紧凑数组是本进程自己写的,越界只可能来自半截
+            # 写入或被改坏的产物——那是运维要看见的事。只记计数,不带任何正文。
+            _logger.warning(
+                "viz edge rows dropped as out of range: %d",
+                int(len(src) - int(valid.sum())),
+            )
+            src, dst, code = src[valid], dst[valid], code[valid]
+        return cls(src=src, dst=dst,
+                   code=code.astype(_viz_code_dtype(len(table)), copy=False),
+                   type_table=table, n_nodes=n_nodes)
+
+
+def viz_edge_set_from_payload(viz_payload, viz_ids) -> VizEdgeSet:
+    """把写入端的 ``viz_payload["edges"]`` 归一成 VizEdgeSet。
+
+    构建器现在直接产出 VizEdgeSet;历史/测试调用方传三元组 list 也照收。
+
+    边集的 ``n_nodes`` 必须与这次要落盘的 ``viz_ids`` 等长——端点存的是下标,
+    对不上就是把边接到了另一份节点表上。响亮失败,绝不落一份自洽性已破的产物。"""
+    edges = (viz_payload or {}).get("edges")
+    if isinstance(edges, VizEdgeSet):
+        if edges.n_nodes != len(viz_ids):
+            raise ValueError(
+                "viz edge set node count does not match viz_ids "
+                f"({edges.n_nodes} != {len(viz_ids)})"
+            )
+        return edges
+    return VizEdgeSet.from_rows(edges or [], viz_ids)
+
+
+def viz_edge_count_is_authoritative(z) -> bool:
+    """读回的边数能否拿去跟 manifest 的 ``n_viz_edges`` 对账。
+
+    - 紧凑键:**能**。数组是这套代码自己写的,少一条就是产物坏了。
+    - 一个边键都没有:**也能**。没有任何写入端产出过这种形状(零边图落的是
+      长度为 0 的紧凑数组,旧写入端落的是 ``viz_edges``),所以它只可能是被裁
+      过/半截写入——绝不能静默当成「这图本来就没有边」。
+    - 旧 JSON 边键:**不能**。``from_rows`` 对远古形状的边行有合法丢弃(v9 之前
+      的 dict 形状),老索引不能因此被判损坏(older-index-stays-valid)。"""
+    files = set(getattr(z, "files", ()) or ())
+    return _VIZ_EDGE_SRC_KEY in files or _VIZ_EDGE_LEGACY_KEY not in files
+
+
+def viz_edge_npz_arrays(edge_set: VizEdgeSet) -> dict:
+    """VizEdgeSet → np.savez 的关键字参数(紧凑键)。"""
+    return {
+        "viz_edge_src": np.asarray(edge_set.src, dtype=np.int32),
+        "viz_edge_dst": np.asarray(edge_set.dst, dtype=np.int32),
+        "viz_edge_code": np.asarray(edge_set.code),
+        "viz_edge_types": np.asarray(edge_set.type_table, dtype=object),
+    }
+
+
+def viz_edge_set_from_npz(z, viz_ids) -> VizEdgeSet:
+    """从 viz.npz 读回边集。紧凑键优先;只有旧 ``viz_edges`` JSON 键时一次性转
+    成紧凑数组后释放中间 list(不常驻);两者都没有 → 空边集。"""
+    files = set(getattr(z, "files", ()) or ())
+    if _VIZ_EDGE_SRC_KEY in files:
+        return VizEdgeSet.from_arrays(
+            z["viz_edge_src"], z["viz_edge_dst"], z["viz_edge_code"],
+            list(z["viz_edge_types"]), len(viz_ids),
+        )
+    if _VIZ_EDGE_LEGACY_KEY in files:
+        return VizEdgeSet.from_rows(
+            decode_viz_edges(z[_VIZ_EDGE_LEGACY_KEY]), viz_ids)
+    return VizEdgeSet.empty(len(viz_ids))
+
+
+class VizArraysMixin:
+    """ScaleIndex / VizIndex 共享的 viz 惰性派生索引。
+
+    两个 dataclass 的 viz_* 字段是鸭子类型对等的(unified_graph 的有界分派与
+    kg_neighbors 消费任一来源),这些派生索引因此也必须在两侧同义。惰性 +
+    缓存:不看 KG 视图的部署一分钱不付,看的部署只付一次。"""
+
+    def viz_node_index(self) -> dict:
+        """id → viz_ids 下标。重复 id 取**最后**一次出现(与历史
+        ``{n: v for n, v in zip(ids, ...)}`` 的后写覆盖一致)。"""
+        cache = self.__dict__.get("_viz_node_index_cache")
+        if cache is None:
+            cache = {node_id: i for i, node_id in enumerate(self.viz_ids or [])}
+            self._viz_node_index_cache = cache
+        return cache
+
+    def viz_deg_order(self) -> "np.ndarray":
+        """度数降序的节点下标(**稳定**,并列保持 viz_ids 原序)——与历史
+        ``sorted(range(n), key=lambda i: -int(deg[i]))`` 逐位等价。"""
+        cache = self.__dict__.get("_viz_deg_order_cache")
+        if cache is None:
+            deg = self.viz_deg
+            if deg is None:
+                cache = np.zeros(0, dtype=np.int64)
+            else:
+                cache = np.argsort(
+                    -np.asarray(deg, dtype=np.int64), kind="stable"
+                )
+            self._viz_deg_order_cache = cache
+        return cache
+
+
+@dataclass
+class ScaleIndex(VizArraysMixin):
     node_ids: list
     node_index: dict
     transition: "sp.csr_matrix"
@@ -63,7 +336,7 @@ class ScaleIndex:
     viz_deg: "np.ndarray" = None  # int32 degree (viz_adj.getnnz(axis=1))
     viz_types: list = None        # object_type per folded node
     viz_names: list = None        # display name per folded node (hydration-free)
-    viz_edges: list = None        # directed-deduped folded edges [[src,dst,edge_type],...]
+    viz_edges: "VizEdgeSet" = None  # directed-deduped folded edges (compact columnar)
     chunk_ann_labels: list = None   # chunk_id 列表(与 chunk_ann.bin 行对齐);无则 None
     chunk_ann_path: str = None      # chunk hnsw 文件路径;无则 None
     chunk_ann_source_names: list = None  # source code → source_id
@@ -172,6 +445,7 @@ def load_scale_index(out_dir: str):
         return _unusable(out_dir, detail)
 
     viz_ids = viz_adj = viz_deg = viz_types = viz_names = viz_edges = None
+    viz_edges_authoritative = False
     chunk_ann_labels = chunk_ann_path = None
     chunk_ann_source_names = None
     chunk_ann_source_codes = chunk_ann_source_counts = None
@@ -186,7 +460,8 @@ def load_scale_index(out_dir: str):
                     viz_deg = z["viz_deg"]
                     viz_types = list(z["viz_types"])
                     viz_names = list(z["viz_names"])
-                    viz_edges = decode_viz_edges(z["viz_edges"])
+                    viz_edges = viz_edge_set_from_npz(z, viz_ids)
+                    viz_edges_authoritative = viz_edge_count_is_authoritative(z)
                 viz_adj = sp.load_npz(viz_adj_path)
 
         if manifest.get("has_chunk_ann"):
@@ -266,6 +541,15 @@ def load_scale_index(out_dir: str):
         optional_checks.append((
             "manifest.n_viz_nodes 与 viz.npz 节点数",
             _manifest_count(manifest, "n_viz_nodes"), len(viz_ids)))
+    if viz_edges is not None and viz_edges_authoritative:
+        # 只对紧凑键对账:数组是这套代码自己写的,manifest 说有 N 条就必须读回
+        # N 条。缺键(半截写入/被裁过的产物)会让 viz_edge_set_from_npz 安静地
+        # 给出空边集,整个 KG 视图退化成「只有点没有边」而无人察觉——这一条把
+        # 它变成响亮的「索引不可信」。旧 JSON 键路径**不**对账:from_rows 对远
+        # 古形状的边行有合法丢弃,老索引不能因此被判损坏。
+        optional_checks.append((
+            "manifest.n_viz_edges 与 viz.npz 边数",
+            _manifest_count(manifest, "n_viz_edges"), len(viz_edges)))
     if chunk_ann_labels is not None:
         optional_checks.append((
             "manifest.n_chunk_ann 与 chunk_ann_labels.npy 行数",
@@ -538,7 +822,9 @@ def save_scale_index(
             viz_deg=np.asarray(viz_deg, dtype=np.int32),
             viz_types=np.asarray(viz_types, dtype=object),
             viz_names=np.asarray(viz_names, dtype=object),
-            viz_edges=encode_viz_edges((viz_payload or {}).get("edges", [])),
+            **viz_edge_npz_arrays(
+                viz_edge_set_from_payload(viz_payload, viz_ids)
+            ),
         )
         sp.save_npz(os.path.join(out_dir, "viz_adj.npz"), viz_adj.tocsr())
         manifest = {**manifest, "has_viz": True}
@@ -655,9 +941,94 @@ def csr_to_edges(
     """Reconstruct an edge list (src, dst, 1.0) from a column-stochastic CSR
     transition matrix.  Mirrors the base-edge reconstruction inside splice_active.
     A[target_row, source_col] → edge source->target = node_ids[col]->node_ids[row].
+
+    NOT on the hot path any more: the multi-base combined-graph loop that used
+    to feed its output into splice_active now calls ``splice_csr`` (which does
+    the same coordinate mapping in numpy, without one Python tuple per nnz).
+    Kept as the readable reference decoding — and as the oracle the splice_csr
+    equivalence tests compare against.
     """
     coo = transition.tocoo()
     return [(node_ids[i], node_ids[j], 1.0) for i, j in zip(coo.col, coo.row)]
+
+
+def _column_stochastic(
+    n: int,
+    src: "np.ndarray",
+    tgt: "np.ndarray",
+    w: "np.ndarray",
+) -> "sp.csr_matrix":
+    """(src, tgt, w) 索引三元组 -> 列随机 CSR A（A[j,i]=i->j 按 i 出度归一）。
+
+    splice_active / splice_csr 共用的收尾算术,逐位复刻 splice_active 的历史实现
+    （COO 重复坐标由 scipy 累加,零列除数 clamp 到 1.0,右乘 diags 归一）。抽出来
+    只为让两个 splice 入口不出现第二份写法——数值行为一个字都没改。
+    """
+    if src.size == 0:
+        return sp.csr_matrix((n, n), dtype=np.float64)
+    M = sp.csr_matrix((w, (tgt, src)), shape=(n, n), dtype=np.float64)
+    colsum = np.asarray(M.sum(axis=0)).ravel()
+    colsum[colsum == 0] = 1.0
+    D = sp.diags(1.0 / colsum)
+    return (M @ D).tocsr()
+
+
+def splice_csr(
+    base_ids: List[str],
+    base_transition: "sp.csr_matrix",
+    extra_ids: List[str],
+    extra_transition: "sp.csr_matrix",
+) -> Tuple[List[str], "sp.csr_matrix"]:
+    """CSR⊕CSR 版的 splice：把另一份**已建好的**转移阵并进 base，按 id 合一。
+
+    ⚠ 两侧的边权都**重置为 1.0**、只取稀疏结构——转移阵已列归一,权重信息本就
+    有损,这是 splice_active 对 base 侧的既有约定,这里对 extra 侧同样成立。要保
+    留权重的调用方请走 ``splice_active`` 的三元组入口。
+
+    与 ``splice_active(base_ids, base_A, extra_ids,
+    csr_to_edges(extra_ids, extra_transition))`` **逐位等价**,但不物化那份长度
+    等于 extra nnz 的 Python tuple 列表、也不为每条边做两次 dict 查找：extra 的
+    COO 坐标经一次 numpy 花式索引直接 remap 到 combined 下标空间。多参考库组合
+    图（_scale_combined_graph）逐库拼接时,extra 是整座 base 图,nnz 可达百万级,
+    tuple 往返本身就是主要成本。
+
+    等价性论证（三步都是逐位的,不是"数值上接近"）：
+    1. id 去重序：``base_ids + [e for e in extra_ids if e not in base_set]``,
+       与 splice_active 对 active_ids 的写法逐字相同;
+    2. extra 边解码：csr_to_edges 产出 ``(extra_ids[col], extra_ids[row], 1.0)``,
+       splice_active 随后用 ``index.get(...)`` 把两端映回 combined 下标——等于
+       ``remap[col] / remap[row]``,其中 ``remap[i] = index[extra_ids[i]]``（本函数
+       预先算好的映射数组）。extra_ids 全部在 combined_ids 里,故不可能出现
+       splice_active 里那条 ``-1`` 悬空丢弃分支;extra_ids 内部若有重复 id,
+       ``index`` 这个 dict 推导是后写覆盖,两边读到的都是**最后一次出现**的下标
+       ——两条路径共用同一个 dict,等价性不受影响;
+    3. 收尾：base 边（src=col,tgt=row,权 1.0）在前、extra 边在后拼接,喂给同一个
+       ``_column_stochastic``——与 splice_active 的拼接顺序和算术完全相同,连 COO
+       重复坐标的累加顺序都一样。
+    """
+    base_set = set(base_ids)
+    combined_ids = list(base_ids) + [e for e in extra_ids if e not in base_set]
+    index = {nid: i for i, nid in enumerate(combined_ids)}
+    n = len(combined_ids)
+    base_coo = base_transition.tocoo()
+    # base 结构还原（与 splice_active 同一语义）：source=col, target=row, 权 1.0。
+    # combined 前 len(base_ids) 项与 base 对齐,下标可直接复用。
+    base_src = base_coo.col.astype(np.int64)
+    base_tgt = base_coo.row.astype(np.int64)
+    extra_coo = extra_transition.tocoo()
+    if extra_coo.nnz:
+        # 旧下标 -> combined 下标的映射数组;逐边 Python 循环换成一次花式索引。
+        remap = np.fromiter(
+            (index[nid] for nid in extra_ids),
+            dtype=np.int64,
+            count=len(extra_ids),
+        )
+        src = np.concatenate([base_src, remap[extra_coo.col.astype(np.int64)]])
+        tgt = np.concatenate([base_tgt, remap[extra_coo.row.astype(np.int64)]])
+    else:
+        src, tgt = base_src, base_tgt
+    w = np.ones(src.size, dtype=np.float64)
+    return combined_ids, _column_stochastic(n, src, tgt, w)
 
 
 def splice_active(
@@ -691,13 +1062,7 @@ def splice_active(
         w = np.concatenate([base_w, a_w[keep]])
     else:
         src, tgt, w = base_src, base_tgt, base_w
-    if src.size == 0:
-        return combined_ids, sp.csr_matrix((n, n), dtype=np.float64)
-    M = sp.csr_matrix((w, (tgt, src)), shape=(n, n), dtype=np.float64)
-    colsum = np.asarray(M.sum(axis=0)).ravel()
-    colsum[colsum == 0] = 1.0
-    D = sp.diags(1.0 / colsum)
-    return combined_ids, (M @ D).tocsr()
+    return combined_ids, _column_stochastic(n, src, tgt, w)
 
 
 def fold_arrays(base_node_ids, base_transition, base_idf, base_chunk_index,
@@ -752,9 +1117,15 @@ def viz_core(viz: dict, limit: int) -> dict:
 
 
 def viz_neighbors(viz: dict, node_id: str, cap: int = 50) -> dict:
-    """折叠图中 node_id 的 1-hop 邻域(≤cap),返回 {nodes,edges}。未知 id → 空。"""
+    """折叠图中 node_id 的 1-hop 邻域(≤cap),返回 {nodes,edges}。未知 id → 空。
+
+    ``viz["viz_node_index"]`` 是调用方缓存好的 id→下标映射(ScaleIndex/VizIndex
+    的 ``viz_node_index()``)。缺这个键时自建——保持纯函数、向后兼容,只是每次
+    调用重付一次 O(N)。"""
     ids, adj, deg, types = viz["viz_ids"], viz["viz_adj"], viz["viz_deg"], viz["viz_types"]
-    index = {nid: i for i, nid in enumerate(ids)}
+    index = viz.get("viz_node_index")
+    if index is None:
+        index = {nid: i for i, nid in enumerate(ids)}
     i = index.get(node_id)
     if i is None:
         return {"nodes": [], "edges": []}

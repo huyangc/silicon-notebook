@@ -133,6 +133,7 @@ from app.services.schema_registry import SchemaRegistryService
 from app.services.retrieval_candidates import CandidateRetrievalService
 from app.services.retrieval_service import RetrievalService
 from app.services.retrieval import (
+    NeighborExpansion,
     RetrievedKnowledge,
     RetrievedElement,
     W_KEYWORD,
@@ -1964,6 +1965,37 @@ class RepositoryFacade:
             notebook_id, job_id
         )
 
+    def conflict_resolution_admitted(self, notebook_id: str) -> bool:
+        """Size admission for conflict detection — shared by endpoint and build tail."""
+        return self._runtime.knowledge_lifecycle.conflict_resolution_admitted(
+            notebook_id
+        )
+
+    def start_conflict_resolution(self, notebook_id: str) -> dict:
+        """Claim the notebook's conflict-detection slot (409 source).
+
+        A slot of its own, separate from relink/rebuild — see
+        ``KgMaintenanceJobs``' module docstring.
+        """
+        return self._runtime.knowledge_lifecycle.start_conflict_resolution(
+            notebook_id
+        )
+
+    def run_conflict_resolution_job(self, notebook_id: str, job_id: str) -> dict:
+        """Background conflict-detection entry point (settles on every exit)."""
+        return self._runtime.knowledge_lifecycle.run_conflict_resolution_job(
+            notebook_id, job_id
+        )
+
+    def fail_conflict_resolution_submission(
+        self, notebook_id: str, job_id: str
+    ) -> None:
+        """Release the conflict claim when the worker never started."""
+        return (
+            self._runtime.knowledge_lifecycle
+            .fail_conflict_resolution_submission(notebook_id, job_id)
+        )
+
     def relations_for_notebook(self, notebook_id: str) -> List[dict]:
         return self._runtime.knowledge_query.relations_for_notebook(notebook_id)
 
@@ -3045,7 +3077,7 @@ class RepositoryFacade:
 
     def _retrieve_neighbors(self, notebook_id: str, object_id: str,
                             edge_type: Optional[str] = None,
-                            direction: str = "both") -> List[RetrievedKnowledge]:
+                            direction: str = "both") -> NeighborExpansion:
         return self.retrieval.candidates.retrieve_neighbors(notebook_id, object_id, edge_type, direction)
 
     def _follow_chain(

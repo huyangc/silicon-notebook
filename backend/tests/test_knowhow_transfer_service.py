@@ -1,3 +1,4 @@
+import json
 import time
 import pytest
 from app.core.config import Settings
@@ -980,3 +981,40 @@ def _drain_projection_scheduler(repo):
             if not scheduler._running and not scheduler._timers:
                 return
         time.sleep(0.05)
+
+
+def test_copy_table_carries_the_element_chunk_reverse_rows(repo):
+    """批 5:拷贝进来的 chunk 必须带上 chunk_elements 反查行。
+
+    与同事务补 chunks_fts 是同一条理由:``chunk_elements`` 也是手工维护的派生表,
+    而拷贝出来的 chunk 走不到 ``ChunkStore._insert_chunk_element_rows``——copy_table
+    之后调度的重投影对每个副本 chunk 都满足 ``old_specs == new_specs`` 而直接跳过。
+    差别在后果:目标 notebook 若已回填,读路径就是点查,漏行不会报错、只会静默查不到。
+    """
+    src_nb, dst_nb = _nb(repo, "src-ce"), _nb(repo, "dst-ce")
+    src_tid = _table_with_row(repo, src_nb)
+    _project(repo, src_tid)
+
+    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, creator_id="user-x")
+    assert new_tid
+
+    with repo._connect() as db:
+        chunk_rows = db.execute(
+            "SELECT id, element_ids FROM chunks WHERE notebook_id=?", (dst_nb,)
+        ).fetchall()
+        reverse = {
+            (row["element_id"], row["chunk_id"])
+            for row in db.execute(
+                "SELECT element_id, chunk_id FROM chunk_elements WHERE notebook_id=?",
+                (dst_nb,),
+            ).fetchall()
+        }
+
+    assert chunk_rows, "拷贝应带来至少一个 chunk,否则本用例证明不了任何事"
+    expected = {
+        (element_id, row["id"])
+        for row in chunk_rows
+        for element_id in json.loads(row["element_ids"] or "[]")
+    }
+    assert expected
+    assert reverse == expected

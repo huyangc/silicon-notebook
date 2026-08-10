@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
+from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
 from app.repositories.sqlite import knowhow_fingerprint
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
@@ -267,6 +268,24 @@ class KnowhowTransferStore:
                         for c in chunk_rows
                     ],
                 )
+                # chunk_elements 同理，且理由逐字相同：它也是「无触发器、手工
+                # 维护」的派生表（正常路径靠 ChunkStore._insert_chunk_element_rows），
+                # 而拷贝出来的 chunk 同样走不到那行。差别只在后果：目标 notebook
+                # 若已回填（chunk_elements_indexed=1），读路径就走点查——漏掉这批
+                # 反查行不会报错，只会让副本格子的证据反查静默查不到，且同样没有
+                # 自愈路径。目标未回填时这些行是无害的前向维护。
+                # 每行 notebook_id 取自 chunk 行自身（与 FTS 那段同一口径）。
+                for target_notebook_id in {c["notebook_id"] for c in chunk_rows}:
+                    reverse = chunk_element_reverse_rows(
+                        target_notebook_id,
+                        [c for c in chunk_rows if c["notebook_id"] == target_notebook_id],
+                    )
+                    if reverse:
+                        db.executemany(
+                            "INSERT OR IGNORE INTO chunk_elements "
+                            "(notebook_id,element_id,chunk_id) VALUES (?,?,?)",
+                            reverse,
+                        )
 
             # 提交前校验：落库计数须等于源表快照计数（不一致 → 抛错 → 回滚，不留半份副本）
             def count(sql: str) -> int:

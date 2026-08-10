@@ -1499,9 +1499,37 @@ def test_knowhow_transfer_fingerprint_and_code_isolation_match_golden(content_ha
             for code in source["cell_code"]
         ],
         "assets": [],
-        "source": None,
+        # A hidden projection source plus one chunk: copied chunk rows never
+        # reach ChunkStore._insert_chunk_element_rows (the reprojection
+        # scheduled after copy_table short-circuits on `old_specs ==
+        # new_specs`), so insert_transfer must carry the chunk_elements reverse
+        # rows itself. Without a chunk here that whole branch runs empty and
+        # proves nothing.
+        "source": {
+            "id": "src-transfer-copy",
+            "notebook_id": "nb-content",
+            "title": "knowhow projection",
+            "source_type": "knowhow",
+            "status": "ready",
+            "parse_status": "parsed",
+            "created_at": NOW,
+            "updated_at": NOW,
+        },
         "elements": [],
-        "chunks": [],
+        "chunks": [
+            {
+                "id": "chunk-transfer-copy-1",
+                "notebook_id": "nb-content",
+                "source_id": "src-transfer-copy",
+                "text": "Visible knowledge",
+                "section_path": "",
+                # The duplicate is deliberate: the composite primary key would
+                # reject a repeat mid-batch if the shaping helper did not
+                # de-duplicate.
+                "element_ids": ["el-transfer-a", "el-transfer-b", "el-transfer-a"],
+                "created_at": NOW,
+            }
+        ],
         "chunk_embeddings": [],
     }
     content_harness.transfer.insert_transfer(
@@ -1510,6 +1538,16 @@ def test_knowhow_transfer_fingerprint_and_code_isolation_match_golden(content_ha
     )
     copied = content_harness.knowhow.get_knowhow_table("khtbl-transfer-copy")
     assert copied["rows"][0]["cells"]["khcol-transfer-procedure"] == "Visible knowledge"
+    with content_harness.database.connect() as connection:
+        reverse = connection.execute(
+            "SELECT element_id,chunk_id FROM chunk_elements WHERE notebook_id=%s "
+            "ORDER BY element_id COLLATE \"C\"",
+            ("nb-content",),
+        ).fetchall()
+    assert [(row["element_id"], row["chunk_id"]) for row in reverse] == [
+        ("el-transfer-a", "chunk-transfer-copy-1"),
+        ("el-transfer-b", "chunk-transfer-copy-1"),
+    ]
     fingerprint = content_harness.transfer.table_fingerprint("khtbl-transfer-copy")
     assert fingerprint
     content_harness.knowhow.rename_knowhow_column(

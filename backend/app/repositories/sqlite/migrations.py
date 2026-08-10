@@ -31,7 +31,10 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # clearing and rescanning already committed pages.
 # v45 adds user_profiles.ui_mode (nullable; application layer defaults NULL
 # to "auto") for the per-user auto/advanced interface mode preference.
-SCHEMA_VERSION = 45
+# v46 adds the element→chunk reverse index (chunk_elements), its restartable
+# offline backfill ledger (chunk_element_backfills) and the per-notebook
+# chunk_elements_indexed marker that forks the read path.
+SCHEMA_VERSION = 46
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2224,6 +2227,65 @@ class SqliteMigrator:
         """
         with self._connect() as db:
             self.add_column_if_missing(db, "user_profiles", "ui_mode", "TEXT")
+
+    def _migration_46(self) -> None:
+        """element→chunk reverse index (+ its restartable backfill ledger).
+
+        ``chunks.element_ids`` is the forward direction; answering "which
+        chunks contain this element" previously meant scanning every chunk row
+        of the notebook and ``json.loads``-ing each one.  The reverse rows make
+        that an indexed point lookup for the per-query consumer.
+
+        The composite primary key IS the covering index for the
+        ``(notebook_id, element_id)`` seek; the extra ``chunk_id`` index only
+        serves the ``ON DELETE CASCADE`` from ``chunks`` (source delete /
+        reparse / knowhow cell rewrite all delete chunk rows and must not turn
+        into a table scan of this side table).
+
+        Migration only creates the empty tables.  Existing rows are projected
+        by the explicit offline ``backfill-chunk-elements`` CLI — never inside
+        a request — exactly like ``source_index_backfills``.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS chunk_elements (
+                  notebook_id TEXT NOT NULL,
+                  element_id TEXT NOT NULL,
+                  chunk_id TEXT NOT NULL
+                    REFERENCES chunks(id) ON DELETE CASCADE,
+                  PRIMARY KEY (notebook_id, element_id, chunk_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunk_elements_chunk
+                  ON chunk_elements(chunk_id);
+                CREATE TABLE IF NOT EXISTS chunk_element_backfills (
+                  notebook_id TEXT NOT NULL PRIMARY KEY
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  kg_mutation_seq INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL DEFAULT 'running'
+                    CHECK(status IN ('running','complete','failed')),
+                  after_chunk_id TEXT NOT NULL DEFAULT '',
+                  total_chunks INTEGER NOT NULL DEFAULT 0,
+                  chunks_scanned INTEGER NOT NULL DEFAULT 0,
+                  rows_written INTEGER NOT NULL DEFAULT 0,
+                  failure_code TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  completed_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunk_element_backfills_status
+                  ON chunk_element_backfills(status, notebook_id);
+                """
+            )
+            # chunk_elements_indexed: 0/1 marker — once set, the element→chunk
+            # reverse lookup trusts chunk_elements for this notebook and skips
+            # the legacy whole-notebook chunk scan.  Additive; pre-existing DBs
+            # start at 0 (never backfilled) and keep the legacy behaviour
+            # byte-for-byte until the offline CLI flips it.
+            self.add_column_if_missing(
+                db, "unified_kg_state", "chunk_elements_indexed",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
 
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

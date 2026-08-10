@@ -553,8 +553,14 @@ class ScaleArtifactRuntime:
                 "viz_nodes": int(
                     manifest.get("n_viz_nodes", len(scale.viz_ids))
                 ),
+                # Fallback for a manifest written before n_viz_edges existed:
+                # len() over the compact edge set is the same edge count the old
+                # list-of-triples gave (VizEdgeSet defines __len__).
                 "viz_edges": int(
-                    manifest.get("n_viz_edges", len(scale.viz_edges or []))
+                    manifest.get(
+                        "n_viz_edges",
+                        len(scale.viz_edges) if scale.viz_edges is not None else 0,
+                    )
                 ),
                 "viz_stale": False,
             }

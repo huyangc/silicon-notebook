@@ -428,17 +428,46 @@ def resolve_conflicts(notebook_id: str) -> dict:
 
     Mirrors kg/build: 409 if LLM not configured, 404 if notebook missing,
     otherwise starts a daemon thread and returns immediately.
+
+    Two admission gates sit in front of that thread. Single flight is per
+    notebook (its own slot, not relink/rebuild's), so a second click cannot
+    enqueue a duplicate pass over the same graph. Size admission refuses
+    notebooks whose active object count exceeds ``KG_CONFLICT_MAX_OBJECTS``:
+    detection is superlinear in the graph and every surviving candidate costs an
+    LLM call, so accepting such a notebook would only mean a background job that
+    never finishes and a bill that keeps growing. The post-build conflict tail
+    shares both gates through the same methods, so neither can be reached around.
     """
     repo = repository()
     if not repo._runtime.models.configured("kg_conflict_review"):
         raise HTTPException(status_code=409, detail="LLM not configured")
     try:
         repo.get_notebook(notebook_id)
+        admitted = repo.conflict_resolution_admitted(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    background_jobs.submit(repo.resolve_notebook_conflicts, notebook_id,
-                           name=f"conflictresolve-{notebook_id}", notify_pending=True)
-    return {"status": "resolving", "notebook_id": notebook_id}
+    if not admitted:
+        raise user_error(409, "当前笔记本知识对象过多，暂不支持自动冲突检测")
+    try:
+        job = repo.start_conflict_resolution(notebook_id)
+    except KgMaintenanceAlreadyRunning:
+        raise user_error(409, "当前笔记本正在检测知识冲突，请等它完成")
+    try:
+        background_jobs.submit(
+            repo.run_conflict_resolution_job,
+            notebook_id,
+            job["job_id"],
+            name=f"conflictresolve-{notebook_id}",
+            notify_pending=True,
+        )
+    except Exception:
+        repo.fail_conflict_resolution_submission(notebook_id, job["job_id"])
+        raise
+    return {
+        "status": "resolving",
+        "notebook_id": notebook_id,
+        "job_id": job["job_id"],
+    }
 
 
 @router.get("/notebooks/{notebook_id}/kg/conflicts/pending", dependencies=[Depends(require_notebook_read)])

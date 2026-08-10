@@ -141,6 +141,20 @@ def _reset_pending_bus():
 
 
 @pytest.fixture(autouse=True)
+def _reset_background_job_gates():
+    """后台并发闸是进程级单例,容量在首次用到时按当时的 Settings 定死。
+
+    同一个 xdist worker 里,只要有测试改过 `BACKGROUND_*_CONCURRENCY`(或只是
+    先跑了一个维护类 job),那份容量就会被后跑的测试继承——串味方向还不固定,
+    取决于 xdist 的分配顺序。统一在这里前后各清一次。
+    """
+    from app.services import background_jobs
+    background_jobs._reset_maintenance_gate_for_tests()
+    yield
+    background_jobs._reset_maintenance_gate_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _mark_service_ready():
     """The readiness gate 503s every app route until startup warm-up flips ready.
     Tests drive the app via TestClient WITHOUT the lifespan (which is what runs

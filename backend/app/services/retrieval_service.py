@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from app.services.retrieval import NeighborExpansion
 from app.services.source_scope import filter_retrieval_items
 
 
@@ -46,11 +47,15 @@ class RetrievalService:
             self.candidates.retrieve_scored(*args, **kwargs),
         )
 
-    def retrieve_neighbors(self, *args, **kwargs):
-        """沿 knowledge_relations 取某对象的 1-hop 邻居 → List[RetrievedKnowledge]。"""
-        return filter_retrieval_items(
-            _notebook_id(args, kwargs), "knowledge",
-            self.candidates.retrieve_neighbors(*args, **kwargs),
+    def retrieve_neighbors(self, *args, **kwargs) -> NeighborExpansion:
+        """沿 knowledge_relations 取某对象的 1-hop 邻居 → NeighborExpansion
+        (命中 + 是否因每方向邻居上限被截断,截断由调用方披露)。"""
+        expansion = self.candidates.retrieve_neighbors(*args, **kwargs)
+        return NeighborExpansion(
+            filter_retrieval_items(
+                _notebook_id(args, kwargs), "knowledge", expansion.hits,
+            ),
+            expansion.truncated,
         )
 
     def retrieve_elements(self, *args, **kwargs):

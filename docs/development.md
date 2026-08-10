@@ -28,8 +28,8 @@ fixtures in tests are outside this rule.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 45. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v45 and remains readable. Those migrations
+The current schema version is 46. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v46 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -133,6 +133,26 @@ schema. SQLite v45 adds the nullable `user_profiles.ui_mode` column backing the
 per-user interface mode preference (`auto` default / `advanced`); readers fall
 back to `auto` when the column or profile row is absent. PostgreSQL migration
 v23 is the paired schema.
+SQLite v46 adds `chunk_elements`, the element -> chunk reverse index, its
+notebook-level execution ledger `chunk_element_backfills`, and the
+`unified_kg_state.chunk_elements_indexed` marker that forks the read path.
+`chunks.element_ids` stores the forward direction, so the per-query "which
+chunks contain this evidence element" lookup used to scan every chunk row of
+the notebook and JSON-decode each one per index generation; the composite
+primary key `(notebook_id, element_id, chunk_id)` turns that into a bounded
+point lookup, and the extra `chunk_id` index exists only to serve the cascade
+from `chunks`. Every chunk write path a live notebook can reach maintains the reverse rows
+inside the same write transaction as the chunk rows, and source
+delete/reparse/knowhow cell rewrite removes them through that cascade. Whole-
+notebook deep copy is the one registered exemption: it does not copy
+`unified_kg_state`, so a copy's marker is always absent and it reads through
+the legacy scan. The migration creates empty
+tables only; historical rows are projected exclusively by the explicit offline
+`backfill-chunk-elements` phase, whose ledger has the same shape and the same
+`kg_generation_changed` fail-closed rule as `source_index_backfills` and stores
+no chunk text or raw exception. Notebooks whose marker is still false keep the
+legacy whole-notebook scan byte-for-byte. PostgreSQL migration v24 is the
+paired schema.
 
 Run it only while application/background writers are stopped:
 
@@ -155,7 +175,7 @@ business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
 schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 71-table epoch-1 manifest. It also includes
+logical-key guards across the exact 73-table epoch-1 manifest. It also includes
 run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
 batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
@@ -199,7 +219,7 @@ parents come only from the verified current source snapshot through a
 the fixed v23 graph has a branch-counted bound of exactly 9 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
 SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG23 catalog plans cover all
-97 unique surfaces using NULL; deterministic candidates scoped by indexable
+99 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
 indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first

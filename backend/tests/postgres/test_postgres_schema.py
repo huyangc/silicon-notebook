@@ -191,6 +191,7 @@ def test_packaged_index_migration_phases_are_exact():
         (21, "report_share_tokens"),
         (22, "chunk_questions"),
         (23, "user_profiles_ui_mode"),
+        (24, "chunk_elements"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -330,6 +331,35 @@ def test_packaged_index_migration_phases_are_exact():
     ]
     assert "failure_code text COLLATE \"C\" NOT NULL DEFAULT ''" in migrations[20].sql
     assert "status IN ('running','complete','failed')" in migrations[20].sql
+
+    # Migration 22 mirrors SQLite v44's optional generated-question index.
+    assert index_declarations(22) == [
+        (False, "idx_chunk_questions_nb"),
+        (False, "idx_chunk_questions_source"),
+    ]
+
+    # Migration 23 is the nullable user_profiles.ui_mode column: no index.
+    assert index_declarations(23) == []
+
+    # Migration 24 mirrors SQLite v46's element -> chunk reverse index. The
+    # composite primary key IS the (notebook_id, element_id) seek index, so the
+    # only declared index is the one serving the cascade from chunks — plus the
+    # backfill ledger's status lookup.
+    assert index_declarations(24) == [
+        (False, "idx_chunk_elements_chunk"),
+        (False, "idx_chunk_element_backfills_status"),
+    ]
+    assert (
+        "PRIMARY KEY (notebook_id, element_id, chunk_id)" in migrations[24].sql
+    )
+    assert "REFERENCES chunks(id) ON UPDATE NO ACTION ON DELETE CASCADE" in (
+        migrations[24].sql
+    )
+    assert "status IN ('running','complete','failed')" in migrations[24].sql
+    assert (
+        "ADD COLUMN chunk_elements_indexed bigint NOT NULL DEFAULT 0"
+        in migrations[24].sql
+    )
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():

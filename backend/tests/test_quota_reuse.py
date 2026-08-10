@@ -16,6 +16,7 @@ class _StubSettings:
     reasoning_max_subqueries = 3
     reasoning_stale_limit = 3
     reasoning_max_element_searches = 2
+    reasoning_neighbor_expand_limit = 1000
     reasoning_quota_enabled = True
     reasoning_quota_reuse_enabled = True
     graph_ppr_enabled = False

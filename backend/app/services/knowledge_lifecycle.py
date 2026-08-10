@@ -411,6 +411,18 @@ class KnowledgeLifecycleService:
         # operational probes that inspect the shared registry by identity.
         self.kg_maintenance_jobs = self.kg_maintenance.jobs
         self.kg_maintenance_lock = self.kg_maintenance.lock
+        # Conflict detection gets its OWN slot rather than joining relink/rebuild:
+        # those two share one because they rewrite the same derived cluster and
+        # community products, which conflict detection does not touch — it writes
+        # the conflict review queue.  Sharing would only invent a wait.
+        self.kg_conflict_jobs = KgMaintenanceJobs(
+            event_log=event_log,
+            get_notebook=get_notebook,
+            new_id=new_id,
+            resolve_notebook_conflicts=lambda notebook_id: (
+                self.governance.resolve_notebook_conflicts(notebook_id)
+            ),
+        )
 
     # ------------------------------------------------------------------
     # KG deletion / store / relink / cluster writes / incremental fusion
@@ -1365,6 +1377,77 @@ class KnowledgeLifecycleService:
         self, notebook_id: str, job_id: str
     ) -> None:
         return self.kg_maintenance.fail_unified_kg_rebuild_submission(
+            notebook_id, job_id
+        )
+
+    # --- conflict detection background job (its own slot) -------------------
+
+    def conflict_resolution_admitted(self, notebook_id: str) -> bool:
+        """Size admission for conflict detection — ONE predicate, both entries.
+
+        The endpoint and the post-build tail must agree: a notebook the endpoint
+        refuses as too large cannot be admitted through the build tail instead,
+        or the gate is decoration. Both therefore call this, and it is the only
+        place the object count is taken.
+        """
+        with self._connect() as db:
+            count = self.knowledge.active_object_count(db, notebook_id)
+        return count <= self.settings.kg_conflict_max_objects
+
+    def _resolve_conflicts_after_build(self, notebook_id: str) -> None:
+        """Conflict-detection tail of a successful build — same gates as the endpoint.
+
+        Calling the governance service directly here used to bypass BOTH the
+        single-flight slot and the size admission: a build finishing while a
+        user-triggered detection was running started a second full pass over the
+        same graph, and a notebook the endpoint refuses ran anyway. Fail-open in
+        every direction — a build must not fail because its optional conflict
+        tail was skipped.
+        """
+        if not self.conflict_resolution_admitted(notebook_id):
+            self.event_log.emit({
+                "kind": "kg_conflict_resolution_skipped",
+                "notebook_id": notebook_id,
+                "reason": "too_many_objects",
+            })
+            return
+        try:
+            job = self.kg_conflict_jobs.start_conflict_resolution(notebook_id)
+        except KgMaintenanceAlreadyRunning:
+            self.event_log.logger.debug(
+                "build_notebook_kg: conflict resolution already running for %s",
+                notebook_id,
+            )
+            self.event_log.emit({
+                "kind": "kg_conflict_resolution_skipped",
+                "notebook_id": notebook_id,
+                "reason": "already_running",
+            })
+            return
+        try:
+            # Settlement, the failure event and the exception log all live in
+            # run_conflict_resolution_job; this only keeps the build alive.
+            self.kg_conflict_jobs.run_conflict_resolution_job(
+                notebook_id, job["job_id"]
+            )
+        except Exception:  # noqa: BLE001 - the conflict tail is fail-open
+            self.event_log.logger.debug(
+                "build_notebook_kg: conflict resolution failed for %s",
+                notebook_id,
+            )
+
+    def start_conflict_resolution(self, notebook_id: str) -> dict:
+        return self.kg_conflict_jobs.start_conflict_resolution(notebook_id)
+
+    def run_conflict_resolution_job(self, notebook_id: str, job_id: str) -> dict:
+        return self.kg_conflict_jobs.run_conflict_resolution_job(
+            notebook_id, job_id
+        )
+
+    def fail_conflict_resolution_submission(
+        self, notebook_id: str, job_id: str
+    ) -> None:
+        return self.kg_conflict_jobs.fail_conflict_resolution_submission(
             notebook_id, job_id
         )
 
@@ -2385,13 +2468,7 @@ class KnowledgeLifecycleService:
                 "unified-KG dirty mark failed for %s", notebook_id
             )
         if self.settings.kg_conflict_resolution_enabled:
-            try:
-                self.governance.resolve_notebook_conflicts(notebook_id)
-            except Exception:  # noqa: BLE001 - governance is fail-open here
-                self.event_log.logger.exception(
-                    "build_notebook_kg: conflict resolution failed for %s",
-                    notebook_id,
-                )
+            self._resolve_conflicts_after_build(notebook_id)
         if getattr(self.settings, "kg_relink_enabled", True):
             self._relink_after_build(notebook_id, result)
         if enqueue_fold:
@@ -2952,9 +3029,44 @@ class KnowledgeLifecycleService:
 
     def _viz_dict(self, idx):
         """Pack a ScaleIndex's persisted viz arrays into the dict shape the pure
-        viz_neighbors function expects (1-hop topology over the folded graph)."""
+        viz_neighbors function expects (1-hop topology over the folded graph).
+
+        The id→position map rides along from the index's own lazy cache so a
+        neighbour click stops rebuilding it over every folded node."""
         return {"viz_ids": idx.viz_ids, "viz_adj": idx.viz_adj,
-                "viz_deg": idx.viz_deg, "viz_types": idx.viz_types}
+                "viz_deg": idx.viz_deg, "viz_types": idx.viz_types,
+                "viz_node_index": idx.viz_node_index()}
+
+    def _viz_label_maps(self, idx, node_positions):
+        """(name_by_id, type_by_id) restricted to the folded nodes at
+        `node_positions` — the ones this response will actually render.
+
+        Semantics are identical to the previous full `zip(viz_ids, viz_names)`
+        dicts: a position past the end of a short names/types array contributes
+        no entry, so `_viz_node`'s `.get(fid, "")` still yields "". Only the
+        width changed (kept nodes instead of every node).
+
+        Addressed by POSITION, not id, on purpose: the bounded core already
+        holds the kept positions, and resolving them through `viz_node_index()`
+        would build — and then permanently cache on an LRU-resident index — a
+        full id→position dict for every folded node just to re-find rows we had
+        already located. The neighbour path passes positions it looked up from
+        that map for other reasons (edge orientation), so it pays nothing extra."""
+        ids = idx.viz_ids or []
+        names = idx.viz_names or []
+        types = idx.viz_types or []
+        name_by_id = {}
+        type_by_id = {}
+        for position in node_positions:
+            position = int(position)
+            if not (0 <= position < len(ids)):
+                continue
+            node_id = ids[position]
+            if position < len(names):
+                name_by_id[node_id] = names[position]
+            if position < len(types):
+                type_by_id[node_id] = types[position]
+        return name_by_id, type_by_id
 
     def _viz_node(self, idx, fid, name_by_id, type_by_id):
         """One folded node in the unified_graph shape {id,object_type,payload:{name}}.
@@ -2969,33 +3081,53 @@ class KnowledgeLifecycleService:
 
         Selection mirrors limit_graph_by_degree EXACTLY: stable sort by degree desc
         preserving viz_ids order (which equals _unified_graph_full's node order),
-        keep the first `limit`, then keep edges whose both endpoints survive."""
+        keep the first `limit`, then keep edges whose both endpoints survive.
+
+        Both halves are vectorised over the compact viz arrays: the degree order
+        is the index's cached stable argsort (== Python's stable sorted by -deg),
+        and edge survival is a boolean membership mask over the edge endpoint
+        columns, whose np.nonzero preserves the original edge order."""
         import numpy as np
-        ids, deg = idx.viz_ids, idx.viz_deg
-        names = idx.viz_names or []
-        types = idx.viz_types or []
-        name_by_id = {n: nm for n, nm in zip(ids, names)}
-        type_by_id = {n: t for n, t in zip(ids, types)}
+        ids = idx.viz_ids or []
         total_nodes = len(ids)
-        edges_all = idx.viz_edges or []
+        edge_set = idx.viz_edges
+        total_edges = len(edge_set) if edge_set is not None else 0
 
         if limit is None or limit >= total_nodes:
-            keep_ids = list(ids)
+            keep_positions = np.arange(total_nodes)
         else:
-            # stable: Python's sorted is stable; deg desc with original-index tiebreak
-            order = sorted(range(total_nodes), key=lambda i: -int(deg[i]))
-            keep_ids = [ids[i] for i in order[:limit]]
-        keep = set(keep_ids)
+            # Same slice semantics as the old `order[:limit]` over a Python list,
+            # including a negative `limit` (drops from the tail).
+            keep_positions = idx.viz_deg_order()[:limit]
 
-        nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in ids if fid in keep]
-        kept_edges = [{"source_object_id": s, "target_object_id": t, "edge_type": et}
-                      for s, t, et in edges_all if s in keep and t in keep]
+        member = np.zeros(total_nodes, dtype=bool)
+        member[keep_positions] = True
+        kept_order = np.nonzero(member)[0]          # viz_ids order, as before
+        keep_ids = [ids[int(i)] for i in kept_order]
+        # Positions, not ids: this path must never build the index-wide
+        # id→position map (see _viz_label_maps).
+        name_by_id, type_by_id = self._viz_label_maps(idx, kept_order)
+
+        nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in keep_ids]
+        kept_edges = []
+        if total_edges:
+            selected = np.nonzero(member[edge_set.src] & member[edge_set.dst])[0]
+            table = edge_set.type_table
+            src, dst, code = edge_set.src, edge_set.dst, edge_set.code
+            kept_edges = [
+                {
+                    "source_object_id": ids[int(src[i])],
+                    "target_object_id": ids[int(dst[i])],
+                    "edge_type": table[int(code[i])],
+                }
+                for i in selected.tolist()
+            ]
         kept_edges = self._annotate_edge_support(notebook_id, kept_edges)
         return {
             "nodes": nodes,
             "edges": kept_edges,
             "total_nodes": total_nodes,
-            "total_edges": len(edges_all),
+            "total_edges": total_edges,
             "truncated": len(nodes) < total_nodes,
         }
 
@@ -3079,26 +3211,48 @@ class KnowledgeLifecycleService:
         if idx is not None and getattr(idx, "viz_ids", None) is not None:
             from app.services.kg.scale_index import viz_neighbors
             nb = viz_neighbors(self._viz_dict(idx), focus_id, cap)
-            name_by_id = {n: nm for n, nm in zip(idx.viz_ids, idx.viz_names or [])}
-            type_by_id = {n: t for n, t in zip(idx.viz_ids, idx.viz_types or [])}
             nbr_ids = {n["id"] for n in nb["nodes"]}
+            # This path needs the id→position map anyway (edge orientation
+            # below), so resolving ≤cap+1 labels through it costs nothing extra.
+            positions = idx.viz_node_index()
+            name_by_id, type_by_id = self._viz_label_maps(
+                idx, [positions[fid] for fid in nbr_ids if fid in positions]
+            )
             nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in nbr_ids]
             # viz_neighbors exposes an undirected adjacency as focus -> neighbour,
             # but the rendered relation is directed. Recover the persisted
             # orientation so opening a target reached by an incoming edge does
             # not manufacture a second, reversed relation in the overlay.
-            et_map = {}
-            for s, t, et in (idx.viz_edges or []):
-                et_map[(s, t)] = et
+            # The lookup is an O(deg) probe into the edge set's cached by-source
+            # index; it used to rebuild a full (s,t)→edge_type dict per click.
+            # Multi-edge (s,t) still resolves to the LAST persisted edge, exactly
+            # as the overwriting dict did. `positions` was resolved above.
+            edge_set = idx.viz_edges
+            # Sentinel, not None: "no such edge" must stay distinguishable from
+            # "edge exists and its edge_type is falsy", which `(s,t) in et_map`
+            # gave for free.
+            absent = object()
+
+            def _edge_type(source_id, target_id):
+                if edge_set is None:
+                    return absent
+                return edge_set.edge_type_at(
+                    positions.get(source_id), positions.get(target_id),
+                    default=absent,
+                )
+
             edges = []
             for e in nb["edges"]:
                 s, t = e["source"], e["target"]
-                if (s, t) in et_map:
-                    edge_s, edge_t, et = s, t, et_map[(s, t)]
-                elif (t, s) in et_map:
-                    edge_s, edge_t, et = t, s, et_map[(t, s)]
+                et = _edge_type(s, t)
+                if et is not absent:
+                    edge_s, edge_t = s, t
                 else:
-                    edge_s, edge_t, et = s, t, "related"
+                    reversed_et = _edge_type(t, s)
+                    if reversed_et is not absent:
+                        edge_s, edge_t, et = t, s, reversed_et
+                    else:
+                        edge_s, edge_t, et = s, t, "related"
                 edges.append({"source_object_id": edge_s, "target_object_id": edge_t,
                               "edge_type": et})
             edges = self._annotate_edge_support(notebook_id, edges)

@@ -541,7 +541,7 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 
 可移植 phase 还包括 `question-index`；它与下列 phase 一样按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。
 
-`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
+`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
 
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
 先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
@@ -577,6 +577,11 @@ PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebo
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-notebooks
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebook-id nb-xxxx --force
 
+# 主动回填「元素→chunk 反查表」（幂等，不调用模型）
+PYTHONPATH=backend python scripts/batch_ingest.py backfill-chunk-elements --notebook-id nb-xxxx
+PYTHONPATH=backend python scripts/batch_ingest.py backfill-chunk-elements --all-notebooks
+PYTHONPATH=backend python scripts/batch_ingest.py backfill-chunk-elements --notebook-id nb-xxxx --force
+
 # 补已解析论文源缺失的元数据（幂等；需绑定 `paper_metadata`，不调用 embedding）
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx --force
@@ -596,6 +601,12 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 `backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表（`object_id, source_id`），供删除或重解析来源时定位受影响的 KG 对象。已回填的 notebook 直接走这张索引。未回填的 notebook 刻意**不会**在一次交互式删除/重解析里惰性回填整本库；按 keyset 分页的数据库原生 evidence 筛选只选出当前 source 的引用，请求既不在 Python 里反序列化每个对象，也不为无关对象写索引行。降级筛选仍可能扫描该 notebook 的旧 KG 行，因此大库应提前建索引，而不是反复依赖降级路径。
 
 显式命令仍是离线预建和修复方式。它不调用模型，且幂等、可中断重跑。SQLite v42 / PostgreSQL v20 为每个 notebook 持久化一行 `source_index_backfills`：起始事务会跳过当前已完成标记、在相同 `kg_mutation_seq` 上续跑 running/failed 账本，或清掉旧索引并按新代次重建。每个有界 keyset 页面把 `knowledge_object_sources` 行与游标/计数原子提交，所以崩溃最多重做未提交页面，不会重做整本库。代次漂移只写稳定的 `kg_generation_changed`，保持快速路径标记为 false，并让下次运行按新代次重置；账本不含证据正文或异常文本。用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整个数据库；只有运维人员明确要丢弃当前已完成账本并修复/重建索引行时才加 `--force`。无论索引状态如何，在线删除都会先锁住 source 聚合行，再把每条受影响对象删除 SQL 限制在最多 500 个 id（这是 SQL 参数护栏，不承诺常数时延或后台任务），并用一次数据库往返取回、删除引用图片资产行，再 unlink 文件。界面上的来源行会立即进入“删除中”状态，并在请求结束前禁用删除操作；notebook 级删除墓碑还会拦住导航/列表的旧响应复活已删行。
+
+`backfill-chunk-elements` 子命令填充 `chunk_elements` 元素→chunk 反查表。`chunks.element_ids` 存的是正向关系，所以「哪些 chunk 含这个证据元素」过去要按索引代次扫一遍该 notebook 的全部 chunk 行并逐行解 JSON；回填之后它变成一次有界点查，规模只跟本次查询真正命中的那几个证据元素有关。未回填的 notebook 逐字保持旧的整库扫描路径、结果不变，所以这个命令是可选但推荐给大库的。
+
+与 `backfill-source-index` 一样，它是**显式离线**操作（绝不从交互请求触发），不调用模型，幂等、可中断重跑。SQLite v44 / PostgreSQL v22 为每个 notebook 持久化一行 `chunk_element_backfills`：起始事务会跳过当前已完成标记、在相同 `kg_mutation_seq` 上续跑 running/failed 账本，或清掉旧行并按新代次重建。每个有界 keyset 页面把反查行与游标/计数原子提交，崩溃最多重做未提交页面。代次漂移只写稳定的 `kg_generation_changed`，保持 `chunk_elements_indexed` 快速路径标记为 false，并让下次运行按新代次重置；账本不含 chunk 正文或异常文本。新写入无需回填：活库够得着的每条 chunk 写路径都在同一个事务里维护反查行，删除来源、重新解析、改写 knowhow 格子都经 chunks 的外键级联带走它们。（整本深拷贝豁免：它不复制 `unified_kg_state`，副本恒走旧全量路径。）用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整库；只有要丢弃当前已完成账本并重建行时才加 `--force`。
+
+**已登记的代价**：反查表按 (chunk, element) 一对一行，因此严格大于 chunks 表——每个 chunk 平均带 N 个元素 id 就产出约 N 行。这些行由 `chunks` 的外键级联带走，于是删除来源、重新解析比以前更重：交互式删除的那个事务现在还要级联这张侧表（有 `chunk_id` 索引，因此是逐 chunk 的有界索引删除，不是全表扫描）。大库应预期删除/重解析的事务规模与磁盘占用按比例上升。读侧收益是每次问答兑现的，这是相应的写侧价格。
 
 `metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按已完成源逐行打印（`[meta <done>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
 
@@ -656,7 +667,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-source-facts`：有意重建已完成状态）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index` / `backfill-chunk-elements`）、`--force`（`metadata` / `question-index` / `backfill-source-index` / `backfill-chunk-elements` / `backfill-source-facts`：有意重建已完成状态）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量；`question-index` 要求单个 notebook、显式 rollout mode 与两个生成问题模型绑定。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract`、`paper_metadata` 和可选的 `chunk_question_generation`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 

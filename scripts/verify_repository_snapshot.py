@@ -2824,5 +2824,74 @@ MIGRATION_MANIFEST[(44, 45)] = {
 }
 
 
+# v46: element -> chunk reverse index, its restartable offline backfill ledger,
+# and the per-notebook marker that forks the read path.  Migration only creates
+# the empty tables; historical rows are projected by the explicit offline
+# `backfill-chunk-elements` CLI.
+CHUNK_ELEMENT_TABLES = {
+    "chunk_elements":
+        "CREATE TABLE chunk_elements (\n"
+        "                  notebook_id TEXT NOT NULL,\n"
+        "                  element_id TEXT NOT NULL,\n"
+        "                  chunk_id TEXT NOT NULL\n"
+        "                    REFERENCES chunks(id) ON DELETE CASCADE,\n"
+        "                  PRIMARY KEY (notebook_id, element_id, chunk_id)\n"
+        "                )",
+    "chunk_element_backfills":
+        "CREATE TABLE chunk_element_backfills (\n"
+        "                  notebook_id TEXT NOT NULL PRIMARY KEY\n"
+        "                    REFERENCES notebooks(id) ON DELETE CASCADE,\n"
+        "                  kg_mutation_seq INTEGER NOT NULL DEFAULT 0,\n"
+        "                  status TEXT NOT NULL DEFAULT 'running'\n"
+        "                    CHECK(status IN ('running','complete','failed')),\n"
+        "                  after_chunk_id TEXT NOT NULL DEFAULT '',\n"
+        "                  total_chunks INTEGER NOT NULL DEFAULT 0,\n"
+        "                  chunks_scanned INTEGER NOT NULL DEFAULT 0,\n"
+        "                  rows_written INTEGER NOT NULL DEFAULT 0,\n"
+        "                  failure_code TEXT NOT NULL DEFAULT '',\n"
+        "                  created_at TEXT NOT NULL,\n"
+        "                  updated_at TEXT NOT NULL,\n"
+        "                  completed_at TEXT NOT NULL DEFAULT ''\n"
+        "                )",
+}
+CHUNK_ELEMENT_INDEXES = {
+    "idx_chunk_elements_chunk":
+        "CREATE INDEX idx_chunk_elements_chunk\n"
+        "                  ON chunk_elements(chunk_id)",
+    "idx_chunk_element_backfills_status":
+        "CREATE INDEX idx_chunk_element_backfills_status\n"
+        "                  ON chunk_element_backfills(status, notebook_id)",
+}
+CHUNK_ELEMENT_COLUMNS = {
+    "unified_kg_state": {
+        "chunk_elements_indexed": (
+            "chunk_elements_indexed", "INTEGER", 1, "0", 0
+        ),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 46, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **CHUNK_ELEMENT_TABLES},
+        "columns": {
+            **manifest["columns"],
+            "unified_kg_state": {
+                **manifest["columns"].get("unified_kg_state", {}),
+                **CHUNK_ELEMENT_COLUMNS["unified_kg_state"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **CHUNK_ELEMENT_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(45, 46)] = {
+    "tables": CHUNK_ELEMENT_TABLES,
+    "columns": CHUNK_ELEMENT_COLUMNS,
+    "indexes": CHUNK_ELEMENT_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -136,6 +136,154 @@ def test_source_index_backfill_is_bounded_restartable_and_marks_only_at_end(
         ).fetchone()["done"] == 1
 
 
+def _seed_chunks_with_elements(repository, notebook_id: str) -> None:
+    runtime = repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO chunks "
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES ('zz',%s,'src-a','zz','',%s,%s)",
+            (notebook_id, jsonb(["e1"]), now),
+        )
+        db.execute(
+            "INSERT INTO chunks "
+            "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES ('aa',%s,'src-a','aa','',%s,%s)",
+            (notebook_id, jsonb(["e1", "e2"]), now),
+        )
+
+
+@pytest.mark.postgres_integration
+def test_chunk_element_backfill_durable_cursor_resumes_and_guards_generation(
+    postgres_repository,
+):
+    """PostgreSQL 侧与 SQLite 的 chunk_elements 回填逐条对等。
+
+    额外钉住两件只有真库能证的:``ORDER BY c.ordinal`` 复刻 SQLite 的 rowid 插入序
+    (fixture 故意让 id 序与插入序相反),以及生成列 ``chunk_elements_indexed``
+    只在最后一页才翻真。"""
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="durable chunk elements")
+    ).id
+    _seed_source_and_objects(postgres_repository, notebook_id)
+    _seed_chunks_with_elements(postgres_repository, notebook_id)
+    maintenance = postgres_repository.maintenance
+
+    started = maintenance.begin_chunk_element_backfill(notebook_id, force=True)
+    assert started["status"] == "running"
+    assert started["total_chunks"] == 2
+
+    first = maintenance.resume_chunk_element_backfill_batch(notebook_id, batch_size=1)
+    assert first["status"] == "running"
+    assert first["chunks_scanned"] == 1
+    assert maintenance.chunk_elements_indexed(notebook_id) is False
+
+    resumed = maintenance.begin_chunk_element_backfill(notebook_id)
+    assert resumed["resumed"] is True
+    assert resumed["chunks_scanned"] == 1
+
+    with postgres_repository._runtime.database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET kg_mutation_seq=kg_mutation_seq+1 "
+            "WHERE notebook_id=%s",
+            (notebook_id,),
+        )
+    failed = maintenance.resume_chunk_element_backfill_batch(notebook_id, batch_size=1)
+    assert failed["status"] == "failed"
+    assert failed["failure_code"] == "kg_generation_changed"
+    assert maintenance.chunk_elements_indexed(notebook_id) is False
+
+    restarted = maintenance.begin_chunk_element_backfill(notebook_id)
+    assert restarted["status"] == "running"
+    assert restarted["chunks_scanned"] == 0
+    with postgres_repository._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM chunk_elements WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()["c"] == 0
+
+    # Completion is "the cursor came back empty", never a scanned/total
+    # comparison (total_chunks is frozen at begin() while writes continue), so
+    # the two data pages are always followed by one empty page.
+    assert maintenance.resume_chunk_element_backfill_batch(
+        notebook_id, batch_size=1
+    )["status"] == "running"
+    assert maintenance.resume_chunk_element_backfill_batch(
+        notebook_id, batch_size=1
+    )["status"] == "running"
+    assert maintenance.chunk_elements_indexed(notebook_id) is False
+    complete = maintenance.resume_chunk_element_backfill_batch(
+        notebook_id, batch_size=1
+    )
+    assert complete["status"] == "complete"
+    assert complete["batch_chunks"] == 0
+    assert complete["chunks_scanned"] == 2
+    assert complete["rows_written"] == 3
+    assert maintenance.chunk_elements_indexed(notebook_id) is True
+
+    with postgres_repository._runtime.database.connect() as db:
+        terminal = db.execute(
+            "SELECT status,completed_at FROM chunk_element_backfills "
+            "WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()
+        assert terminal["status"] == "complete"
+        assert terminal["completed_at"] is not None
+        # Insertion order (ordinal), not id order: 'zz' was inserted first.
+        rows = postgres_repository._runtime.chunk_store.chunks_for_element_ids(
+            db, notebook_id, ["e1"]
+        )
+        assert [row["chunk_id"] for row in rows] == ["zz", "aa"]
+
+    skipped = maintenance.begin_chunk_element_backfill(notebook_id)
+    assert skipped["already_complete"] is True
+    assert skipped["chunks_scanned"] == 2
+
+
+@pytest.mark.postgres_integration
+def test_chunk_elements_follow_the_chunk_write_transaction(postgres_repository):
+    """写路径前向维护 + chunks 级联删除,与 SQLite 侧逐条对等。"""
+    from app.repositories.ports import ChunkWrite
+
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="chunk element writes")
+    ).id
+    _seed_source_and_objects(postgres_repository, notebook_id)
+    store = postgres_repository._runtime.chunk_store
+    now = normalize_timestamp(postgres_repository._runtime.seams.now())
+
+    store.replace_source_chunks(
+        "src-a",
+        notebook_id,
+        [ChunkWrite(id="c1", text="a", section_path="", element_ids=["e1", "e1"])],
+        created_at=now,
+    )
+    with postgres_repository._runtime.database.connect() as db:
+        assert [
+            (row["element_id"], row["chunk_id"])
+            for row in db.execute(
+                "SELECT element_id,chunk_id FROM chunk_elements WHERE notebook_id=%s",
+                (notebook_id,),
+            ).fetchall()
+        ] == [("e1", "c1")]
+
+    store.replace_source_chunks(
+        "src-a",
+        notebook_id,
+        [ChunkWrite(id="c2", text="b", section_path="", element_ids=["e2"])],
+        created_at=now,
+    )
+    with postgres_repository._runtime.database.connect() as db:
+        assert [
+            (row["element_id"], row["chunk_id"])
+            for row in db.execute(
+                "SELECT element_id,chunk_id FROM chunk_elements WHERE notebook_id=%s",
+                (notebook_id,),
+            ).fetchall()
+        ] == [("e2", "c2")]
+
+
 @pytest.mark.postgres_integration
 def test_source_index_backfill_durable_cursor_resumes_and_guards_generation(
     postgres_repository,

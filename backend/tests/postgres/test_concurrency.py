@@ -1337,7 +1337,6 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
         invalidate_unified_cache=lambda _notebook_id: None,
         mark_unified_kg_dirty=lambda _notebook_id: None,
         model_clients=None,
-        relations_for_notebook=lambda _notebook_id: [],
         edge_centrality_map=lambda _notebook_id: {},
         embed_knowledge=lambda *_args: None,
         knowledge_objects=lambda *_args, **_kwargs: [],

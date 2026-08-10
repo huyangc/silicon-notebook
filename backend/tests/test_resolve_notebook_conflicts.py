@@ -690,3 +690,289 @@ def test_edge_evidence_quote_reaches_llm_prompt(repo):
         "_edge_source may still be reading 'quoted_span' instead of 'quote'.\n"
         f"Recorded prompts (first 800 chars):\n{all_prompts[:800]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: candidate cap — adjudication is bounded and the drop is disclosed
+# ---------------------------------------------------------------------------
+
+class CountingLLM(FakeLLM):
+    """FakeLLM that also counts how many adjudication calls it received."""
+
+    def __init__(self):
+        super().__init__([])
+        self.call_count = 0
+
+    def chat_json(self, messages, schema_hint=None, **kwargs) -> str:
+        self.call_count += 1
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def _seed_many_discriminative_claims(repo: SQLiteRepository, pairs: int):
+    """Seed ``pairs`` nmos/pmos claim pairs — one discriminative candidate each."""
+    nb = repo.create_notebook(NotebookCreate(name="many-conflicts"))
+    nodes = []
+    for index in range(pairs):
+        for token in ("nmos", "pmos"):
+            nodes.append({
+                "local_id": f"{token}{index}",
+                "object_type": "claim",
+                "payload": {"name": f"{token} device {index}"},
+                "evidence": [{"quoted_span": f"{token} {index}.", "element_id": ""}],
+            })
+    repo.store_kg(nb.id, None, nodes, [])
+    return nb.id
+
+
+def test_candidate_cap_bounds_llm_calls_and_reports_truncation(repo):
+    nb_id = _seed_many_discriminative_claims(repo, pairs=12)
+    llm = CountingLLM()
+    bind_chat_client(repo, "kg_conflict_review", llm)
+    repo.settings.kg_conflict_max_candidates = 5
+
+    result = repo.resolve_notebook_conflicts(nb_id)
+
+    assert result["detected"] == 5
+    assert result["truncated"] > 0, "fixture must exceed the cap"
+    assert result["auto_applied"] + result["queued"] == 5
+    assert llm.call_count == 5, "the cap must bound adjudication, not just the report"
+    assert len(repo.pending_conflicts(nb_id)) == 5
+
+
+def test_truncation_count_accounts_for_every_detected_candidate(repo):
+    """detected + truncated must equal what an uncapped run would have found."""
+    nb_id = _seed_many_discriminative_claims(repo, pairs=12)
+    bind_chat_client(repo, "kg_conflict_review", CountingLLM())
+
+    repo.settings.kg_conflict_max_candidates = 100000
+    uncapped = repo.resolve_notebook_conflicts(nb_id)
+    assert uncapped["truncated"] == 0
+
+    nb_id2 = _seed_many_discriminative_claims(repo, pairs=12)
+    repo.settings.kg_conflict_max_candidates = 5
+    capped = repo.resolve_notebook_conflicts(nb_id2)
+
+    assert capped["detected"] + capped["truncated"] == uncapped["detected"]
+
+
+def test_no_truncation_reports_zero(repo):
+    nb_id = _seed_many_discriminative_claims(repo, pairs=3)
+    llm = CountingLLM()
+    bind_chat_client(repo, "kg_conflict_review", llm)
+    repo.settings.kg_conflict_max_candidates = 800
+
+    result = repo.resolve_notebook_conflicts(nb_id)
+
+    assert result["truncated"] == 0
+    assert result["detected"] >= 3
+    assert result["detected"] == llm.call_count
+
+
+def test_evidence_is_read_only_for_surviving_candidates(repo, monkeypatch):
+    """Evidence hydration must be by-id and bounded by the cap, not notebook-wide."""
+    nb_id = _seed_many_discriminative_claims(repo, pairs=10)
+    bind_chat_client(repo, "kg_conflict_review", CountingLLM())
+    repo.settings.kg_conflict_max_candidates = 2
+
+    governance = repo._runtime.knowledge_governance
+    seen_ids: list = []
+    real = governance.knowledge.object_evidence_rows
+
+    def _recording(db, object_ids):
+        ids = list(object_ids)
+        seen_ids.extend(ids)
+        return real(db, ids)
+
+    monkeypatch.setattr(governance.knowledge, "object_evidence_rows", _recording)
+    result = repo.resolve_notebook_conflicts(nb_id)
+
+    assert result["detected"] == 2
+    # 20 objects exist; only the 2 surviving candidates' 4 sides may be read.
+    assert 0 < len(seen_ids) <= 4, seen_ids
+
+
+def test_node_evidence_still_reaches_the_prompt_after_the_thin_read(repo):
+    """The slimmed notebook-wide read must not cost the adjudicator its evidence."""
+    nb = repo.create_notebook(NotebookCreate(name="node-evidence"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "N", "object_type": "claim",
+         "payload": {"name": "nmos device"},
+         "evidence": [{"quoted_span": "DISTINCTIVE_NODE_QUOTE_N", "element_id": ""}]},
+        {"local_id": "P", "object_type": "claim",
+         "payload": {"name": "pmos device"},
+         "evidence": [{"quoted_span": "DISTINCTIVE_NODE_QUOTE_P", "element_id": ""}]},
+    ], [])
+
+    llm = PromptRecordingLLM()
+    bind_chat_client(repo, "kg_conflict_review", llm)
+
+    repo.resolve_notebook_conflicts(nb.id)
+
+    prompts = "\n".join(llm.recorded_prompts)
+    assert "DISTINCTIVE_NODE_QUOTE_N" in prompts
+    assert "DISTINCTIVE_NODE_QUOTE_P" in prompts
+
+
+# ---------------------------------------------------------------------------
+# Test: the cap is a per-class quota, not a prefix cut
+# ---------------------------------------------------------------------------
+
+def _seed_edge_flood_and_discriminative_nodes(
+    repo: SQLiteRepository, hub_edges: int, node_pairs: int
+):
+    """One hub emitting many shared_head edge candidates + nmos/pmos node pairs.
+
+    This is the shape that made a prefix cut lose a whole strategy: the detector
+    emits every edge candidate before the first node candidate.
+    """
+    nb = repo.create_notebook(NotebookCreate(name="edge-flood"))
+    nodes = [{
+        "local_id": "HUB", "object_type": "concept",
+        "payload": {"name": "hub"},
+        "evidence": [{"quoted_span": "hub.", "element_id": ""}],
+    }]
+    relations = []
+    for index in range(hub_edges):
+        nodes.append({
+            "local_id": f"T{index}", "object_type": "concept",
+            "payload": {"name": f"tail {index}"},
+            "evidence": [{"quoted_span": f"tail {index}.", "element_id": ""}],
+        })
+        relations.append({
+            "source_local_id": "HUB", "target_local_id": f"T{index}",
+            "edge_type": "part_of",
+            "evidence": [{"quote": f"hub part {index}"}],
+        })
+    for index in range(node_pairs):
+        for token in ("nmos", "pmos"):
+            nodes.append({
+                "local_id": f"{token}{index}", "object_type": "claim",
+                "payload": {"name": f"{token} device {index}"},
+                "evidence": [{"quoted_span": f"{token} {index}.", "element_id": ""}],
+            })
+    repo.store_kg(nb.id, None, nodes, relations)
+    return nb.id
+
+
+def test_cap_reserves_a_share_for_node_candidates(repo):
+    """An edge flood must not evict the discriminative candidates as a class."""
+    nb_id = _seed_edge_flood_and_discriminative_nodes(
+        repo, hub_edges=12, node_pairs=8
+    )
+    bind_chat_client(repo, "kg_conflict_review", CountingLLM())
+    repo.settings.kg_conflict_max_candidates = 8
+
+    result = repo.resolve_notebook_conflicts(nb_id)
+    pending = repo.pending_conflicts(nb_id)
+
+    assert result["detected"] == 8
+    kinds = [row["kind"] for row in pending]
+    assert kinds.count("edge") == 4
+    assert kinds.count("node") == 4
+    assert result["truncated_edge"] > 0 and result["truncated_node"] > 0
+    assert result["truncated"] == result["truncated_edge"] + result["truncated_node"]
+
+
+def _quota_candidates(edges: int, nodes: int) -> list[dict]:
+    return (
+        [{"kind": "edge", "left_ref": f"e{i}", "right_ref": "x", "signal": "shared_head"}
+         for i in range(edges)]
+        + [{"kind": "node", "left_ref": f"n{i}", "right_ref": "y", "signal": "discriminative"}
+           for i in range(nodes)]
+    )
+
+
+def test_quota_helper_preserves_detector_order_within_each_class():
+    from app.services.knowledge_governance import KnowledgeGovernanceService
+
+    kept, dropped = KnowledgeGovernanceService._apply_candidate_quota(
+        _quota_candidates(edges=10, nodes=10), 6
+    )
+
+    assert [c["left_ref"] for c in kept] == ["e0", "e1", "e2", "n0", "n1", "n2"]
+    assert dropped == {"edge": 7, "node": 7}
+
+
+@pytest.mark.parametrize(
+    "edges,nodes,cap,expected_edges,expected_nodes",
+    [
+        (10, 1, 6, 5, 1),     # node class short → edge takes the slack
+        (1, 10, 6, 1, 5),     # edge class short → node takes the slack
+        (2, 3, 100, 2, 3),    # cap above supply → nothing is dropped
+        (10, 10, 5, 2, 3),    # odd cap: the halves may not both round up
+    ],
+)
+def test_quota_helper_hands_unused_budget_to_the_other_class(
+    edges, nodes, cap, expected_edges, expected_nodes
+):
+    """A class that cannot fill its half must not waste the budget."""
+    from app.services.knowledge_governance import KnowledgeGovernanceService
+
+    kept, dropped = KnowledgeGovernanceService._apply_candidate_quota(
+        _quota_candidates(edges, nodes), cap
+    )
+    kinds = [c["kind"] for c in kept]
+
+    assert kinds.count("edge") == expected_edges
+    assert kinds.count("node") == expected_nodes
+    assert len(kept) == min(cap, edges + nodes)
+    assert dropped == {
+        "edge": edges - expected_edges, "node": nodes - expected_nodes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test: disclosure events carry counts only
+# ---------------------------------------------------------------------------
+
+def test_truncation_event_shape_is_counts_only(repo, monkeypatch):
+    nb_id = _seed_many_discriminative_claims(repo, pairs=12)
+    bind_chat_client(repo, "kg_conflict_review", CountingLLM())
+    repo.settings.kg_conflict_max_candidates = 5
+    events: list = []
+    monkeypatch.setattr(
+        repo._runtime.knowledge_governance.event_log, "emit",
+        lambda event: events.append(event),
+    )
+
+    repo.resolve_notebook_conflicts(nb_id)
+
+    truncations = [e for e in events if e["kind"] == "kg_conflict_candidates_truncated"]
+    assert len(truncations) == 1
+    event = truncations[0]
+    assert set(event) == {
+        "kind", "notebook_id", "detected", "kept", "truncated",
+        "truncated_edge", "truncated_node",
+    }
+    assert event["notebook_id"] == nb_id
+    assert all(
+        isinstance(event[key], int)
+        for key in ("detected", "kept", "truncated", "truncated_edge", "truncated_node")
+    )
+
+
+def test_semantic_ann_failure_event_shape_is_counts_only(repo, monkeypatch):
+    import app.services.kg.conflict_detect as cd
+
+    nb_id = _seed_many_discriminative_claims(repo, pairs=3)
+    bind_chat_client(repo, "kg_conflict_review", CountingLLM())
+    repo.settings.kg_conflict_semantic_bruteforce_max = 1
+    monkeypatch.setattr(
+        cd, "_semantic_ann_pairs",
+        lambda nodes, vectors, threshold, k, on_failure=None: (
+            on_failure(len(nodes)) or None
+        ),
+    )
+    events: list = []
+    monkeypatch.setattr(
+        repo._runtime.knowledge_governance.event_log, "emit",
+        lambda event: events.append(event),
+    )
+
+    repo.resolve_notebook_conflicts(nb_id)
+
+    failures = [e for e in events if e["kind"] == "kg_conflict_semantic_ann_failed"]
+    assert failures, "the ANN failure must be observable, not just logged"
+    assert set(failures[0]) == {"kind", "notebook_id", "group_size"}
+    assert failures[0]["notebook_id"] == nb_id
+    assert isinstance(failures[0]["group_size"], int)

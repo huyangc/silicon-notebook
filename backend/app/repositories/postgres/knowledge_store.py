@@ -961,7 +961,11 @@ class KnowledgeStore:
 
     @staticmethod
     def neighbor_ids(db: Any, notebook_id: str, object_id: str,
-                     *, endpoint: str, edge_type=None):
+                     *, endpoint: str, edge_type=None, limit: int | None = None):
+        # `limit` 非 None 时按 `r.id` 定序取前 N 行:排序键是
+        # `idx_knowledge_relations_nb_source_id`/`_nb_target_id`
+        # `(notebook_id, source/target_object_id, id)` 的第三列,前两列都是等值
+        # 谓词,索引本身即给出该序。limit=None 逐位保持历史行为。
         if endpoint not in {"source_object_id", "target_object_id"}:
             raise ValueError("invalid relation endpoint")
         statement = sql.SQL(
@@ -975,6 +979,9 @@ class KnowledgeStore:
         if edge_type:
             statement += sql.SQL(" AND edge_type=%s")
         params = [notebook_id, object_id] + ([edge_type] if edge_type else [])
+        if limit is not None:
+            statement += sql.SQL(" ORDER BY r.id LIMIT %s")
+            params.append(int(limit))
         return db.execute(statement, params).fetchall()
 
     def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
@@ -985,17 +992,24 @@ class KnowledgeStore:
         return [dict(row) for row in rows if row["notebook_id"] == notebook_id]
 
     @staticmethod
-    def usable_object_rows_on(db: Any, object_ids, statuses):
+    def usable_object_rows_on(db: Any, object_ids, statuses,
+                              *, batch_size: int = 500):
+        # 与 SQLite 侧同一分片口径(两个后端的行为必须同义)。PostgreSQL 的参数
+        # 上限高得多,但一条 20 万参数的 IN 同样不是这条路该发的语句。
         ids = list(object_ids)
         if not ids:
             return []
-        ph = ",".join("%s" for _ in ids)
         status_ph = ",".join("%s" for _ in statuses)
-        rows = db.execute(
-            f"SELECT * FROM knowledge_objects WHERE id IN ({ph}) "
-            f"AND status IN ({status_ph})", [*ids, *statuses],
-        ).fetchall()
-        return _compat_rows(rows, payload=True, evidence=True)
+        out: list = []
+        for offset in range(0, len(ids), batch_size):
+            batch = ids[offset:offset + batch_size]
+            ph = ",".join("%s" for _ in batch)
+            rows = db.execute(
+                f"SELECT * FROM knowledge_objects WHERE id IN ({ph}) "
+                f"AND status IN ({status_ph})", [*batch, *statuses],
+            ).fetchall()
+            out.extend(_compat_rows(rows, payload=True, evidence=True))
+        return out
 
     @staticmethod
     def graph_version_rows(db: Any, notebook_id: str):
@@ -2126,6 +2140,32 @@ class KnowledgeStore:
             VALUES (%s, 0, 0, 1, %s)
             ON CONFLICT(notebook_id) DO UPDATE SET
               source_index_backfilled=1,
+              updated_at=excluded.updated_at
+            """,
+            (notebook_id, normalize_timestamp(now)),
+        )
+
+    @staticmethod
+    def chunk_elements_indexed(db: Any, notebook_id: str) -> bool:
+        """Has this notebook's element -> chunk reverse index been backfilled?
+
+        One indexed single-row read on ``unified_kg_state`` — the same shape
+        (and cost) as ``source_index_backfilled``. False keeps the legacy
+        whole-notebook chunk scan, byte-for-byte."""
+        row = db.execute(
+            "SELECT chunk_elements_indexed FROM unified_kg_state WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row and row["chunk_elements_indexed"])
+
+    def mark_chunk_elements_indexed(self, db: Any, notebook_id: str) -> None:
+        now = self.seams.now()
+        db.execute(
+            """
+            INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, chunk_elements_indexed, updated_at)
+            VALUES (%s, 0, 0, 1, %s)
+            ON CONFLICT(notebook_id) DO UPDATE SET
+              chunk_elements_indexed=1,
               updated_at=excluded.updated_at
             """,
             (notebook_id, normalize_timestamp(now)),

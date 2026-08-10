@@ -793,11 +793,20 @@ class KnowledgeStore:
 
     @staticmethod
     def neighbor_ids(db: sqlite3.Connection, notebook_id: str, object_id: str,
-                     *, endpoint: str, edge_type=None):
+                     *, endpoint: str, edge_type=None, limit: int | None = None):
+        # `limit` 非 None 时按 `r.id` 定序取前 N 行:排序键是
+        # `idx_knowledge_relations_nb_source_id`/`_nb_target_id`
+        # `(notebook_id, source/target_object_id, id)` 的第三列,前两列都是等值
+        # 谓词,索引本身即给出该序 → 有界读取不引入排序开销。limit=None 逐位保持
+        # 历史行为(其余调用方不受影响)。
         if endpoint not in {"source_object_id", "target_object_id"}:
             raise ValueError("invalid relation endpoint")
         edge_clause = " AND edge_type=?" if edge_type else ""
         params = [notebook_id, object_id] + ([edge_type] if edge_type else [])
+        bound_clause = ""
+        if limit is not None:
+            bound_clause = " ORDER BY r.id LIMIT ?"
+            params.append(int(limit))
         return db.execute(
             "SELECT r.source_object_id,r.target_object_id,r.edge_type,"
             "src.object_type AS source_type,tgt.object_type AS target_type "
@@ -805,7 +814,7 @@ class KnowledgeStore:
             "JOIN knowledge_objects AS src ON src.id=r.source_object_id "
             "JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
             f"WHERE r.notebook_id=? AND r.{endpoint}=? "
-            f"AND r.review_status!='rejected'{edge_clause}", params,
+            f"AND r.review_status!='rejected'{edge_clause}{bound_clause}", params,
         ).fetchall()
 
     def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
@@ -816,16 +825,24 @@ class KnowledgeStore:
         return [dict(row) for row in rows if row["notebook_id"] == notebook_id]
 
     @staticmethod
-    def usable_object_rows_on(db: sqlite3.Connection, object_ids, statuses):
+    def usable_object_rows_on(db: sqlite3.Connection, object_ids, statuses,
+                              *, batch_size: int = 500):
+        # 分片 IN(仓库既有做法,见 `relation_context_rows`):调用方传进来的 id 数
+        # 由各自的上限决定,而 `SQLITE_MAX_VARIABLE_NUMBER` 在老构建上低到 999——
+        # 一条平铺的 IN 会在最需要它的那种库上直接抛错。
         ids = list(object_ids)
         if not ids:
             return []
-        ph = ",".join("?" for _ in ids)
         status_ph = ",".join("?" for _ in statuses)
-        return db.execute(
-            f"SELECT * FROM knowledge_objects WHERE id IN ({ph}) "
-            f"AND status IN ({status_ph})", [*ids, *statuses],
-        ).fetchall()
+        rows = []
+        for offset in range(0, len(ids), batch_size):
+            batch = ids[offset:offset + batch_size]
+            ph = ",".join("?" for _ in batch)
+            rows.extend(db.execute(
+                f"SELECT * FROM knowledge_objects WHERE id IN ({ph}) "
+                f"AND status IN ({status_ph})", [*batch, *statuses],
+            ).fetchall())
+        return rows
 
     @staticmethod
     def graph_version_rows(db: sqlite3.Connection, notebook_id: str):
@@ -1915,6 +1932,34 @@ class KnowledgeStore:
             VALUES (?, 0, 0, 1, ?)
             ON CONFLICT(notebook_id) DO UPDATE SET
               source_index_backfilled=1,
+              updated_at=excluded.updated_at
+            """,
+            (notebook_id, now),
+        )
+
+    @staticmethod
+    def chunk_elements_indexed(db: sqlite3.Connection, notebook_id: str) -> bool:
+        """Has this notebook's element -> chunk reverse index been backfilled?
+
+        One indexed single-row read on ``unified_kg_state`` — the same shape
+        (and cost) as ``source_index_backfilled``. False keeps the legacy
+        whole-notebook chunk scan, byte-for-byte."""
+        row = db.execute(
+            "SELECT chunk_elements_indexed FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row and row["chunk_elements_indexed"])
+
+    def mark_chunk_elements_indexed(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> None:
+        now = self.seams.now()
+        db.execute(
+            """
+            INSERT INTO unified_kg_state (notebook_id, dirty, kg_mutation_seq, chunk_elements_indexed, updated_at)
+            VALUES (?, 0, 0, 1, ?)
+            ON CONFLICT(notebook_id) DO UPDATE SET
+              chunk_elements_indexed=1,
               updated_at=excluded.updated_at
             """,
             (notebook_id, now),
