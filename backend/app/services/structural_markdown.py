@@ -46,16 +46,26 @@ def _unescape_md_brackets(alt: str) -> str:
     return alt.replace("\\[", "[").replace("\\]", "]")
 
 
+# Destination-only sweep, independent of alt syntax (codex R3 P2): an alt the
+# literal matcher cannot parse (nested brackets `![a [nested] alt](data:...)`,
+# arbitrary depth) would otherwise carry the full base64 payload through. Any
+# `](data:...)` remnant collapses to `]` — the payload is gone, the alt text
+# survives with its markdown punctuation.
+_DATA_URI_DESTINATION = re.compile(r"\]\(\s*(?i:data):[^)]*\)")
+
+
 def strip_data_uri_image_literals(text: str) -> str:
     """把 `![alt](data:...)` 图片字面量剥成 alt 文本（空 alt 剥成空串）。
 
-    `_inline_text` 与 `parsers.parse_markdown_text` 的裸文本兜底共用这一个
-    收口：任何要把 markdown 原文当纯文本吐出的路径都必须先过它，保证 base64
-    载荷不进元素文本。对不含字面量的文本是 no-op。
+    `_inline_text`、`_html_to_text` 与 `parsers.parse_markdown_text` 的裸文本
+    兜底共用这一个收口：任何要把 markdown 原文当纯文本吐出的路径都必须先过
+    它，保证 base64 载荷不进元素文本。对不含字面量的文本是 no-op。两段式：
+    先按完整字面量剥成纯 alt，剩余无法解析 alt 的形态再按目标端兜底清扫。
     """
-    return _DATA_URI_IMAGE_LITERAL.sub(
+    text = _DATA_URI_IMAGE_LITERAL.sub(
         lambda m: _unescape_md_brackets(m.group(1)), text
     )
+    return _DATA_URI_DESTINATION.sub("]", text)
 
 
 @dataclass
