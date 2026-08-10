@@ -7772,6 +7772,112 @@ button.chat-session-card {
   background: #fbfcff;
 }
 
+.kg-analysis-readout {
+  background: linear-gradient(145deg, #f7fbff 0%, #fff 62%);
+  border-color: #cfe0f5;
+}
+
+.kg-analysis-readout-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.kg-analysis-readout-head h3 {
+  margin: 0 0 3px;
+  font-size: 15px;
+}
+
+.kg-analysis-run-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  border-color: #1f67b1;
+  background: #1f67b1;
+  color: #fff;
+}
+
+.kg-analysis-insight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kg-analysis-insight {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #e3e9f2;
+  border-left: 3px solid #8ca5c2;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.kg-analysis-insight > span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.kg-analysis-insight > strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13.5px;
+}
+
+.kg-analysis-insight > p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.kg-analysis-insight--ok { border-left-color: #2f855a; }
+.kg-analysis-insight--warn { border-left-color: #c58a11; }
+.kg-analysis-insight--danger { border-left-color: #c2413b; }
+.kg-analysis-insight--neutral { border-left-color: #94a3b8; }
+
+.kg-analysis-status-guide {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e7edf5;
+  color: #596579;
+  font-size: 11.5px;
+}
+
+.kg-analysis-status-guide > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.kg-analysis-guide-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.kg-analysis-guide-dot.is-danger { background: #c2413b; }
+.kg-analysis-guide-dot.is-warn { background: #c58a11; }
+.kg-analysis-guide-dot.is-neutral { background: #94a3b8; }
+.kg-analysis-guide-dot.is-ok { background: #2f855a; }
+
+.kg-analysis-action-note {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+
 .kg-analysis-block-head {
   display: flex;
   flex-direction: column;
@@ -7907,7 +8013,7 @@ button.chat-session-card {
 
 .kg-analysis-ledger-row {
   display: grid;
-  grid-template-columns: minmax(120px, 160px) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(230px, 1fr) minmax(250px, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 6px 8px;
@@ -7917,11 +8023,56 @@ button.chat-session-card {
 }
 
 .kg-analysis-ledger-name {
-  font-size: 12.5px;
-  font-weight: 650;
+  min-width: 0;
+}
+
+.kg-analysis-ledger-name strong {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.kg-analysis-ledger-name small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.kg-analysis-large-clusters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 12px;
+}
+
+.kg-analysis-large-clusters li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #eef1f6;
+  font-size: 12px;
+}
+
+.kg-analysis-large-clusters li > span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kg-analysis-large-clusters li > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
 }
 
 .kg-analysis-bar {
@@ -8187,6 +8338,16 @@ button.chat-session-card {
   .kg-analysis-board-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 2px;
+  }
+
+  .kg-analysis-readout-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .kg-analysis-insight-grid,
+  .kg-analysis-large-clusters {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   /* 窄屏图例:四个子元素**全部显式定位**。
