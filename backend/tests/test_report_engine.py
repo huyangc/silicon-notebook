@@ -969,6 +969,71 @@ def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, mon
     assert any(event["kind"] == "report_synthesis_failed" for event in events)
 
 
+def test_facet_tag_repairs_are_observed_and_stripped_before_model_context(
+    repo, monkeypatch,
+):
+    """Repair counts are internal: observable, never part of a model prompt."""
+    from types import SimpleNamespace
+
+    eng = _mk_engine(repo, _OutlineLLM())
+    events = []
+    monkeypatch.setattr(
+        eng.dependencies.event_log, "emit", lambda event: events.append(event)
+    )
+    monkeypatch.setattr(
+        eng, "_deep_dive",
+        lambda *args, **kwargs: SimpleNamespace(top_hits=[], elements=[], chunks=[]),
+    )
+    blueprint = {
+        "version": 1, "central_answer": "one argument",
+        "shared_definitions": [],
+        "claims": [{
+            "id": "c1", "statement": "s", "type": "general", "facet_id": "mixer",
+            "evidence_keys": [], "counterevidence_keys": [], "conditions": [],
+            "owner_section_id": "section-1",
+        }],
+        "sections": [
+            {"section_id": f"section-{index}", "thesis": "t",
+             "claim_ids": ["c1"] if index == 1 else [],
+             "must_contrast": [], "handoff": "", "do_not_repeat": []}
+            for index in (1, 2)
+        ],
+        "_facet_tag_stats": {"repaired": 2, "cleared": 1},
+    }
+    monkeypatch.setattr(
+        eng, "_synthesize_report_blueprint",
+        lambda *args, **kwargs: (blueprint, "available", None),
+    )
+    def _draft(_nb, section, *_args, **kwargs):
+        return {"title": section["title"], "scope": "s", "markdown": "## x",
+                "grounded": False, "id_map": {}, "claims": [],
+                "claim_ledger_status": "missing"}
+
+    monkeypatch.setattr(eng, "_draft_section", _draft)
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    sections = eng._run_sections(
+        nb.id, rid,
+        [{"title": "A", "scope": "s", "sub_queries": ["A"]},
+         {"title": "B", "scope": "s", "sub_queries": ["B"]}],
+        "q", depth=8,
+    )
+
+    tagged = [
+        event for event in events
+        if event["kind"] == "report_synthesis_facet_tags"
+    ]
+    assert tagged == [{
+        "kind": "report_synthesis_facet_tags",
+        "report_id": rid, "repaired": 2, "cleared": 1,
+    }]
+    # The stored blueprint feeds fair_editor_context, which serializes it
+    # wholesale into the editor prompt — that is the one real leak surface.
+    # Drafting needs no assertion: blueprint_for_section rebuilds a
+    # whitelisted dict, so a private key cannot reach section writers.
+    assert "_facet_tag_stats" not in sections[0]["_synthesis_blueprint"]
+
+
 def test_report_stages_use_their_independent_output_budgets(repo):
     from types import SimpleNamespace
     from app.services.reasoning_retrieval import ReasoningResult
@@ -1025,6 +1090,67 @@ def test_report_stages_use_their_independent_output_budgets(repo):
     )
 
     assert [budget for _prompt, budget in client.calls] == [65536, 102400, 102400]
+
+
+def test_synthesize_blueprint_passes_frame_facet_ids_to_synthesis_prompt(repo):
+    """接线守卫:漏传 facet_ids 就该让这条测试变红(见变异验证)。"""
+    from types import SimpleNamespace
+    from app.services.report_synthesis import normalize_report_frame
+
+    class _FacetProbeClient:
+        configured = True
+
+        def __init__(self):
+            self.settings = repo.settings
+            self.calls = []
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            content = messages[-1]["content"]
+            self.calls.append(content)
+            if "EVIDENCE SYNTHESIZER" in content:
+                return json.dumps({
+                    "central_answer": "a", "shared_definitions": [],
+                    "claims": [],
+                    "sections": [{
+                        "section_id": "section-1", "thesis": "t",
+                        "claim_ids": [], "must_contrast": [], "handoff": "",
+                        "do_not_repeat": [],
+                    }],
+                })
+            return json.dumps({"summary": "s", "coverage": [], "contradictions": []})
+
+    client = _FacetProbeClient()
+    _bind_report_llm(repo, client)
+    eng = _mk_engine(repo, client)
+    outline = [{"title": "A", "scope": "s", "sub_queries": ["A"]}]
+    hit = SimpleNamespace(
+        object_id="o1", object_type="Claim", relevance=0.9,
+        payload={"name": "n", "definition": "e"},
+    )
+    results = [SimpleNamespace(top_hits=[hit], elements=[], chunks=[])]
+
+    frame = normalize_report_frame({
+        "subject_kind": "模型实例",
+        "facets": [{
+            "id": "mixer", "name": "序列建模机制",
+            "values": ["Attention"], "exclusive": True,
+        }],
+    })
+    blueprint, status, error = eng._synthesize_report_blueprint(
+        outline, results, "q", frame,
+    )
+    assert blueprint and status == "available" and error is None
+    synthesis_prompt = next(c for c in client.calls if "EVIDENCE SYNTHESIZER" in c)
+    assert "legal facet ids are exactly" in synthesis_prompt
+    assert "`mixer`" in synthesis_prompt
+
+    client.calls.clear()
+    blueprint2, status2, error2 = eng._synthesize_report_blueprint(
+        outline, results, "q", None,
+    )
+    assert blueprint2 and status2 == "available" and error2 is None
+    synthesis_prompt2 = next(c for c in client.calls if "EVIDENCE SYNTHESIZER" in c)
+    assert "legal facet ids" not in synthesis_prompt2
 
 
 def test_detailed_report_without_evidence_discloses_skip_without_model_error(repo, monkeypatch):

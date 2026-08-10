@@ -555,13 +555,18 @@ def test_blueprint_narrows_fullwidth_colon_composite_facet_to_legal_prefix():
     assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == "mixer"
 
 
-def test_blueprint_still_rejects_composite_facet_with_illegal_prefix():
+def test_blueprint_clears_unrepairable_facet_instead_of_discarding():
+    # The tag is organizational and has no code consumer, so a label the frame
+    # cannot explain costs that one claim its tag — never the whole blueprint.
     payload = _blueprint()
     payload["claims"][0]["facet_id"] = "capacity:foo"
-    assert normalize_synthesis_blueprint(
+    normalized = normalize_synthesis_blueprint(
         payload, outline=[{"title": "A"}],
         legal_evidence_ids={"o1"}, frame=_frame(),
-    ) is None
+    )
+    assert normalized is not None
+    assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == ""
+    assert normalized["_facet_tag_stats"] == {"repaired": 0, "cleared": 1}
 
 
 def test_blueprint_clears_composite_facet_when_frame_has_no_facets():
@@ -577,7 +582,8 @@ def test_blueprint_clears_composite_facet_when_frame_has_no_facets():
 
 def test_blueprint_facet_narrowing_pins_whitespace_and_edge_prefixes():
     # Surrounding whitespace and a value-less colon still narrow to the
-    # declared prefix; an empty prefix stays on the conservative discard path.
+    # declared prefix.  An empty prefix has nothing to narrow to and there is
+    # deliberately no colon-*suffix* lookup, so the tag is cleared instead.
     for tag in ("mixer : attention", "mixer ：attention", "mixer:"):
         payload = _blueprint()
         payload["claims"][0]["facet_id"] = tag
@@ -590,10 +596,13 @@ def test_blueprint_facet_narrowing_pins_whitespace_and_edge_prefixes():
 
     payload = _blueprint()
     payload["claims"][0]["facet_id"] = ":attention"
-    assert normalize_synthesis_blueprint(
+    normalized = normalize_synthesis_blueprint(
         payload, outline=[{"title": "A"}],
         legal_evidence_ids={"o1"}, frame=_frame(),
-    ) is None
+    )
+    assert normalized is not None
+    assert blueprint_for_section(normalized, 0)["claims"][0]["facet_id"] == ""
+    assert normalized["_facet_tag_stats"] == {"repaired": 0, "cleared": 1}
 
 
 def test_blueprint_facet_narrowing_prefers_longest_legal_prefix():
@@ -617,6 +626,84 @@ def test_blueprint_facet_narrowing_prefers_longest_legal_prefix():
     assert facet == "model:family"
 
 
+def _blueprint_with_facet_tags(tags):
+    payload = _blueprint()
+    template = payload["claims"][0]
+    payload["claims"] = []
+    payload["sections"][0]["claim_ids"] = []
+    for index, tag in enumerate(tags, 1):
+        claim = dict(template, id=f"c{index}", facet_id=tag)
+        payload["claims"].append(claim)
+        payload["sections"][0]["claim_ids"].append(claim["id"])
+    return payload
+
+
+def _normalized_facet_tags(tags, frame):
+    normalized = normalize_synthesis_blueprint(
+        _blueprint_with_facet_tags(tags), outline=[{"title": "A"}],
+        legal_evidence_ids={"o1"}, frame=frame,
+    )
+    assert normalized is not None
+    return normalized, [claim["facet_id"] for claim in normalized["claims"]]
+
+
+def test_blueprint_repairs_facet_values_written_as_ids():
+    # Production regression: the model tagged claims with the facet's declared
+    # values instead of its id, and the whole blueprint was discarded.
+    frame = normalize_report_frame({
+        "subject_kind": "转换器",
+        "facets": [{
+            "id": "converter_direction", "name": "转换方向",
+            "values": ["ADC", "DAC"], "exclusive": True,
+        }],
+    })
+    normalized, facets = _normalized_facet_tags(["ADC", "DAC"], frame)
+    assert facets == ["converter_direction", "converter_direction"]
+    assert normalized["_facet_tag_stats"] == {"repaired": 2, "cleared": 0}
+
+
+def test_blueprint_repairs_facet_value_name_and_case_variants():
+    for tag in ("attention", "序列建模机制", "MIXER", "序列建模机制:Attention"):
+        normalized, facets = _normalized_facet_tags([tag], _frame())
+        assert facets == ["mixer"], tag
+        assert normalized["_facet_tag_stats"] == {"repaired": 1, "cleared": 0}, tag
+
+
+def test_blueprint_clears_a_value_two_facets_could_claim():
+    # Guessing an owner would file the claim under the wrong dimension, which
+    # is worse than carrying no organizational tag.  Three facets share the
+    # spelling on purpose: once a key is ambiguous it must stay dropped, not
+    # be revived under whichever facet happens to declare it last.
+    frame = _frame()
+    frame["facets"][0]["values"] = ["Attention", "Hybrid"]
+    frame["facets"].append({
+        "id": "capacity", "name": "容量", "values": ["Hybrid", "Dense"],
+        "exclusive": False,
+    })
+    frame["facets"].append({
+        "id": "routing", "name": "路由", "values": ["Hybrid"],
+        "exclusive": False,
+    })
+    normalized, facets = _normalized_facet_tags(["Hybrid"], frame)
+    assert facets == [""]
+    assert normalized["_facet_tag_stats"] == {"repaired": 0, "cleared": 1}
+
+
+def test_blueprint_facet_lookup_prefers_a_declared_id_over_another_facet_value():
+    frame = _frame()
+    frame["facets"].append({
+        "id": "attention", "name": "注意力开关", "values": [], "exclusive": False,
+    })
+    _normalized, facets = _normalized_facet_tags(["Attention"], frame)
+    assert facets == ["attention"]
+
+
+def test_blueprint_omits_facet_stats_when_every_tag_is_already_legal():
+    normalized, facets = _normalized_facet_tags(["mixer", ""], _frame())
+    assert facets == ["mixer", ""]
+    assert "_facet_tag_stats" not in normalized
+
+
 def test_synthesis_prompt_pins_facet_id_contract_and_schema_hint():
     prompt = report_synthesis_prompt("Q", "intent", "{}", "evidence")
     assert "never an `id:value` composite" in prompt
@@ -626,3 +713,23 @@ def test_synthesis_prompt_pins_facet_id_contract_and_schema_hint():
     # to avoid.
     assert "family:Transformer" not in prompt
     assert '"facet_id":""' in REPORT_SYNTHESIS_SCHEMA_HINT
+    # Without facet_ids, the prompt must not gain the legal-ids sentence.
+    assert "legal facet ids" not in prompt
+
+
+def test_synthesis_prompt_lists_legal_facet_ids_when_provided():
+    prompt = report_synthesis_prompt(
+        "Q", "intent", "{}", "evidence", facet_ids=("mixer", "capacity"),
+    )
+    assert "legal facet ids are exactly" in prompt
+    assert "`mixer`" in prompt
+    assert "`capacity`" in prompt
+    # The enumeration must sit inside the facet_id contract paragraph, not
+    # drift behind the evidence block or the trailing schema hint where it
+    # would no longer modify the instruction it exists to sharpen.
+    assert prompt.index("legal facet ids are exactly") < prompt.index(
+        "The confirmed intent"
+    )
+    # Same discard-path reasoning as above: no plausible value slug in this
+    # sentence either.
+    assert "family:Transformer" not in prompt
