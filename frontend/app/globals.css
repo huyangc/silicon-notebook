@@ -5884,16 +5884,27 @@ button.chat-session-card {
 }
 
 .source-modal-card {
-  /* 卡片限高在视口内并纵向布局，避免文件多时整卡超出视口、底部上传按钮被裁掉 */
+  /* 卡片限高在视口内并纵向布局，避免文件多时整卡超出视口、底部上传按钮被裁掉。
+     纵向 auto 是极矮视口的兜底：各区收缩到各自下限后仍放不下时整卡滚动，
+     任何控件（含吸底上传按钮）都保持可达，绝不被 overflow 裁成不可点。 */
   max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .source-modal-card > .source-modal-header,
-.source-modal-card > .drop-zone,
 .source-modal-card > .source-action-row {
   flex: 0 0 auto;
+}
+
+/* 高度吃紧时的收缩顺位:拖放区第一个让（shrink 权重最高,常态 230px 压到 110px
+   仍是完全可用的点击/拖放目标）,其次「已跳过」面板与待上传列表各自收到下限,
+   再不够由卡片整体滚动兜底——上传按钮永远不为「显示一条跳过原因」让路
+   (codex #487 R1 P1)。 */
+.source-modal-card > .drop-zone {
+  flex: 0 4 230px;
+  min-height: 110px;
 }
 
 .source-action-row {
@@ -6063,10 +6074,11 @@ button.chat-session-card {
 }
 
 .source-modal-card > .source-detail-body {
-  /* 由 flex 接管高度（覆盖公共 max-height），文件列表在剩余空间内滚动 */
+  /* 由 flex 接管高度（覆盖公共 max-height），文件列表在剩余空间内滚动；
+     下限保住约两行文件 + 吸底上传按钮，不被其他区块挤到不可用 */
   flex: 1 1 auto;
   max-height: none;
-  min-height: 0;
+  min-height: 140px;
 }
 
 .source-modal-card .tag-row {
