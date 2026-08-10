@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -128,7 +128,7 @@ import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
-import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize } from "./source-upload.ts";
+import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
@@ -341,16 +341,10 @@ const SUPPORTED_SOURCE_EXTENSIONS: string[] = [
 ];
 const SUPPORTED_SOURCE_ACCEPT = SUPPORTED_SOURCE_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 const SUPPORTED_SOURCE_EXT_GROUP = SUPPORTED_SOURCE_EXTENSIONS.join("|");
-// 面向用户的支持列表描述（拒绝 toast 与拖拽区提示共用，避免文案漂移）。
+// 面向用户的支持列表描述（弹窗内「已跳过」原因与拖拽区提示共用，避免文案漂移）。
 const SUPPORTED_SOURCE_USER_HINT = "PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm) / Markdown / CSV";
 // 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。
 const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt", "xls"];
-
-function fileExtension(name: string): string {
-  const dot = name.lastIndexOf(".");
-  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
-}
-
 
 // 图谱边类型 → 中文。取值真源:prompts.py 列出的 edge_type 词表(supports /
 // depends_on / contrasts_with / about / defines / used_in / composed_of / mixed,
@@ -893,6 +887,11 @@ export default function Home() {
     DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   );
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  // 最近一次「添加文件」里被跳过的文件（类型不支持/超大小/超批量），在弹窗内持久展示。
+  // 不能只发 toast：它 2.2 秒即逝，批量选文件时用户根本来不及看清哪些没进列表。
+  const [stagedSkipped, setStagedSkipped] = useState<SkippedStagedFile[]>([]);
+  // 拖放悬停高亮（仅大拖放区）。
+  const [dropZoneDragActive, setDropZoneDragActive] = useState(false);
   // 上传在飞:multipart 传大 PDF 可能几十秒,期间「上传 N 个文件」必须禁用改文案。后端按
   // 内容哈希在同 notebook 内去重,重复提交不会建出重复来源,但会白传一遍并再跑一次解析。
   const [uploadBusy, setUploadBusy] = useState(false);
@@ -2834,6 +2833,7 @@ export default function Home() {
     await openNotebook(notebook.id);
     setStagedFiles([]);
     setStagedDocTypes([]);
+    setStagedSkipped([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(true);
   }
@@ -2845,6 +2845,7 @@ export default function Home() {
     await openNotebook(notebook.id);
     setStagedFiles([]);
     setStagedDocTypes([]);
+    setStagedSkipped([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(true);
   }
@@ -3192,45 +3193,34 @@ export default function Home() {
   function stageFiles(event: ChangeEvent<HTMLInputElement>) {
     const all = Array.from(event.target.files || []);
     event.target.value = "";
-    const supported = all.filter((file) => SUPPORTED_SOURCE_EXTENSIONS.includes(fileExtension(file.name)));
-    const rejected = all.filter((file) => !SUPPORTED_SOURCE_EXTENSIONS.includes(fileExtension(file.name)));
-    const { accepted: picked, rejected: oversized } = splitFilesByUploadSize(
-      supported,
-      sourceUploadMaxBytes,
-    );
-    const notices: string[] = [];
-    if (rejected.length > 0) {
-      const names = rejected.map((file) => file.name).join("、");
-      const hasLegacy = rejected.some((file) => LEGACY_OFFICE_EXTENSIONS.includes(fileExtension(file.name)));
-      const hint = hasLegacy
-        ? "旧版 Office 格式请另存为 .docx / .pptx / .xlsx"
-        : `支持：${SUPPORTED_SOURCE_USER_HINT}`;
-      notices.push(`已跳过不支持的文件：${names}。${hint}`);
-    }
-    if (oversized.length > 0 && sourceUploadMaxBytes !== null) {
-      const names = oversized.map((file) => file.name).join("、");
-      const limit = sourceUploadSizeLabel(sourceUploadMaxBytes);
-      notices.push(
-        `已跳过超过单文件上限（${limit}）的文件：${names}。请选择不超过 ${limit} 的文件，或联系管理员调整上限。`,
-      );
-    }
-    if (notices.length > 0) setToast(notices.join("；"));
-    if (picked.length === 0) {
-      return;
-    }
+    stageIncomingFiles(all);
+  }
+
+  // 选择器与拖放共用的入列逻辑。被跳过的文件（类型不支持/超大小/超批量）写进
+  // stagedSkipped 在弹窗内持久展示，绝不静默丢弃。
+  function stageIncomingFiles(all: File[]) {
+    if (all.length === 0) return;
+    const { accepted: picked, skipped } = classifyStagedFiles(all, {
+      supportedExtensions: SUPPORTED_SOURCE_EXTENSIONS,
+      legacyOfficeExtensions: LEGACY_OFFICE_EXTENSIONS,
+      maxBytes: sourceUploadMaxBytes,
+      supportedHint: SUPPORTED_SOURCE_USER_HINT,
+    });
     // 追加而非覆盖（"继续添加文件"语义）；按 name+size 去重，避免重复入列。
     const merged = [...stagedFiles];
     const mergedTypes = [...stagedDocTypes];
     const mergedTouched = [...stagedDocTypeTouched];
     const added: File[] = [];
-    const batchOverflow: File[] = [];
     for (const file of picked) {
       if (!merged.some((existing) => existing.name === file.name && existing.size === file.size)) {
         if (
           sourceUploadMaxFilesPerBatch !== null
           && merged.length >= sourceUploadMaxFilesPerBatch
         ) {
-          batchOverflow.push(file);
+          skipped.push({
+            name: file.name,
+            reason: `超出单次上传上限（${sourceUploadMaxFilesPerBatch} 个），请先上传当前批次再继续添加`,
+          });
           continue;
         }
         merged.push(file);
@@ -3239,12 +3229,9 @@ export default function Home() {
         added.push(file);
       }
     }
-    if (batchOverflow.length > 0 && sourceUploadMaxFilesPerBatch !== null) {
-      notices.push(
-        `单次最多上传 ${sourceUploadMaxFilesPerBatch} 个文件，已跳过其余 ${batchOverflow.length} 个。请先上传当前批次，再继续添加。`,
-      );
-      setToast(notices.join("；"));
-    }
+    // 每次添加操作整体替换：列表始终反映最近一次操作的结果，不累积陈旧条目。
+    setStagedSkipped(skipped);
+    if (added.length === 0) return;
     setStagedFiles(merged);
     setStagedDocTypes(mergedTypes);
     // 同步入 ref：紧接着的 detectStagedTypes 是异步的，它 resolve 时读 ref 决定回填哪些项；
@@ -3253,6 +3240,20 @@ export default function Home() {
     setSourceModalOpen(true);
     // 对新增的文本类文件做内容检测，预填类型下拉（异步，不阻塞 UI；用户仍可改）。
     void detectStagedTypes(added, merged);
+  }
+
+  // 拖放必须由我们接管：不 preventDefault 的话文件会落在铺满拖放区的原生
+  // <input type=file accept=…> 上，浏览器按 accept **静默**过滤不支持的文件——
+  // stageIncomingFiles 根本收不到它们，用户也就得不到任何「已跳过」提示。
+  function handleStageDragOver(event: ReactDragEvent<HTMLElement>) {
+    if (sourceFilePickerDisabled) return;
+    event.preventDefault();
+  }
+  function handleStageDrop(event: ReactDragEvent<HTMLElement>) {
+    setDropZoneDragActive(false);
+    if (sourceFilePickerDisabled) return;
+    event.preventDefault();
+    stageIncomingFiles(Array.from(event.dataTransfer?.files ?? []));
   }
 
   // 读文本类文件前 8KB → 批量调 /detect-doc-types → 回填仍为空（未手动选）的类型。
@@ -3361,6 +3362,7 @@ export default function Home() {
     reloadCheckup(currentNotebookId);  // 新源可能立即/后续成 H2–H6:刷新体检铃铛(codex 第5轮 P2)
     setStagedFiles([]);
     setStagedDocTypes([]);
+    setStagedSkipped([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(false);
     setToast(outcome.toast);
@@ -6987,7 +6989,7 @@ export default function Home() {
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
-              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
+              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
             {docCapacity.show && (
               <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
@@ -6999,14 +7001,42 @@ export default function Home() {
                 )}
               </div>
             )}
-            <label className={`drop-zone${sourceFilePickerDisabled ? " is-disabled" : ""}`} title={sourceFilePickerHint}>
+            <label
+              className={`drop-zone${sourceFilePickerDisabled ? " is-disabled" : ""}${dropZoneDragActive ? " is-dragover" : ""}`}
+              title={sourceFilePickerHint}
+              onDragOver={handleStageDragOver}
+              onDragEnter={() => { if (!sourceFilePickerDisabled) setDropZoneDragActive(true); }}
+              onDragLeave={() => setDropZoneDragActive(false)}
+              onDrop={handleStageDrop}
+            >
               <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "或拖放文件"}</strong>
               <small>{sourceUploadConfigLoading ? "正在读取上传限制…" : `支持 ${SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。`}</small>
             </label>
+            {stagedSkipped.length > 0 && (
+              <div className="staged-skipped" role="alert">
+                <div className="staged-skipped-head">
+                  <span>已跳过 {stagedSkipped.length} 个文件（不会上传）</span>
+                  <button type="button" className="sort-button" onClick={() => setStagedSkipped([])}>知道了</button>
+                </div>
+                <div className="staged-skipped-rows">
+                  {stagedSkipped.map((item, index) => (
+                    <div className="staged-skipped-row" key={`${item.name}-${index}`}>
+                      <span className="staged-skipped-name" title={item.name}>{compactStagedFileName(item.name)}</span>
+                      <small className="staged-skipped-reason">{item.reason}</small>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="source-action-row">
-              <label className={`source-action-button${sourceFilePickerDisabled ? " is-disabled" : ""}`} title={sourceFilePickerHint}>
+              <label
+                className={`source-action-button${sourceFilePickerDisabled ? " is-disabled" : ""}`}
+                title={sourceFilePickerHint}
+                onDragOver={handleStageDragOver}
+                onDrop={handleStageDrop}
+              >
                 <Upload size={18} strokeWidth={2.5} /> 上传文件
                 <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
               </label>
@@ -7096,7 +7126,7 @@ export default function Home() {
                     aria-describedby={stagedUploadBlockedReason ? "staged-upload-blocked-reason" : undefined}
                     onClick={() => confirmUpload().catch(reportError)}
                   >{uploadBusy ? "上传中…" : `上传 ${stagedFiles.length} 个文件`}</button>
-                  <button className="sort-button" disabled={uploadBusy} onClick={() => { setStagedFiles([]); setStagedDocTypes([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
+                  <button className="sort-button" disabled={uploadBusy} onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
                 </div>
               </div>
             )}

@@ -13,7 +13,7 @@
 - 由部署者统一管理 OpenAI-compatible chat、embedding 与 rerank 服务；workload 绑定及每服务 `max_concurrency` 集中写入一个 TOML
 - 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
 - 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
-- 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（经共享 KG job scheduler 异步执行）。添加来源弹窗会从中间压缩过长的待上传文件名，保留末尾/扩展名并通过悬停显示全名；有效文档上限判定会计入整个暂存批次，批次大于剩余名额时在提交前直接禁用上传，并说明剩余名额、超出数量和处理办法。
+- 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（经共享 KG job scheduler 异步执行）。添加来源弹窗会从中间压缩过长的待上传文件名，保留末尾/扩展名并通过悬停显示全名；拖放与文件选择共用同一套入列校验——拖放由前端显式接管而不交给浏览器按 `accept` 静默过滤，入列时被跳过的文件（类型不支持——旧版 Office 另给「另存为」引导、超过单文件大小上限、超出单次批量上限）在弹窗内逐条持久列出文件名与原因，不允许只靠短暂 toast；有效文档上限判定会计入整个暂存批次，批次大于剩余名额时在提交前直接禁用上传，并说明剩余名额、超出数量和处理办法。
 - **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
 - PDF/DOCX/PPTX 走 MinerU（公式/表格/版面、内嵌图片）；PDF 本机降级走 PyMuPDF4LLM 版面感知 Markdown（pypdf 仅最后兜底）
 - MinerU 抽取的内嵌图片在来源正文内联展示；图注与文字保持可搜索

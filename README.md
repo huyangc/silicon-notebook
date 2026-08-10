@@ -110,7 +110,7 @@ Database-specific coverage now targets the direct PostgreSQL backend. Retired te
 ## Product flow
 
 1. Create a notebook. The app immediately opens an `Untitled notebook`; it does not ask for metadata first.
-2. Import source files. The dialog shortens long staged filenames, keeps action-area breathing room, rejects a file above the deployment's per-file size cap before upload, enforces the 20-file request guard, and disables over-quota batches with an actionable reason; parsing then creates structured source elements and searchable chunks.
+2. Import source files. The dialog shortens long staged filenames, keeps action-area breathing room, rejects a file above the deployment's per-file size cap before upload, enforces the 20-file request guard, and disables over-quota batches with an actionable reason; drag-drop is handled explicitly, and files skipped at staging time (unsupported type, size, or batch cap) are listed inside the dialog with per-file reasons instead of disappearing silently. Parsing then creates structured source elements and searchable chunks.
 3. Ask questions immediately through chunk-native retrieval. Build a KG on demand, or enable automatic extraction for every upload.
 4. Browse and govern extracted knowledge, inspect the full-screen graph, and mount public reference libraries when federation is needed.
 5. Save useful answers into private notebook-bound Memory, maintain structured knowhow tables, or generate a deep report.

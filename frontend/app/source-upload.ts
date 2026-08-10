@@ -32,6 +32,57 @@ export function splitFilesByUploadSize<T extends SizedSourceFile>(
   };
 }
 
+export type SkippedStagedFile = { name: string; reason: string };
+
+function stagedFileExtension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** 入列前的逐文件分类：可上传的进 accepted，其余逐条给出**面向用户的跳过原因**。
+ *
+ *  选择器与拖放两条路径共用。拖放拿到的 DataTransfer 列表不经 accept 过滤，而原生
+ *  file input 会按 accept **静默**丢弃不支持的文件——所以拖放必须由我们自己接管并走
+ *  这里，跳过的每个文件才有一条用户看得见的原因（否则就是「批量上传时不支持的文档
+ *  无声消失」）。maxBytes 语义与 splitFilesByUploadSize 一致：null/非法 = 配置未到，
+ *  不做客户端大小预判，交给服务端权威 413。 */
+export function classifyStagedFiles<T extends SizedSourceFile>(
+  files: readonly T[],
+  opts: {
+    supportedExtensions: readonly string[];
+    legacyOfficeExtensions: readonly string[];
+    maxBytes: number | null;
+    supportedHint: string;
+  },
+): { accepted: T[]; skipped: SkippedStagedFile[] } {
+  const sizeCap = opts.maxBytes !== null && Number.isSafeInteger(opts.maxBytes) && opts.maxBytes > 0
+    ? opts.maxBytes
+    : null;
+  const accepted: T[] = [];
+  const skipped: SkippedStagedFile[] = [];
+  for (const file of files) {
+    const ext = stagedFileExtension(file.name);
+    if (!opts.supportedExtensions.includes(ext)) {
+      skipped.push({
+        name: file.name,
+        reason: opts.legacyOfficeExtensions.includes(ext)
+          ? "旧版 Office 格式不支持，请另存为 .docx / .pptx / .xlsx 后重新上传"
+          : `不支持的文件类型（支持：${opts.supportedHint}）`,
+      });
+      continue;
+    }
+    if (sizeCap !== null && file.size > sizeCap) {
+      skipped.push({
+        name: file.name,
+        reason: `超过单个文件上限（${sourceUploadSizeLabel(sizeCap)}）`,
+      });
+      continue;
+    }
+    accepted.push(file);
+  }
+  return { accepted, skipped };
+}
+
 /** Compact a long staged filename without hiding its extension or final words.
  *
  * CSS ellipsis still protects very narrow windows, while this deterministic
