@@ -5884,15 +5884,17 @@ button.chat-session-card {
 }
 
 .source-modal-card {
-  /* 卡片限高在视口内并纵向布局，避免文件多时整卡超出视口、底部上传按钮被裁掉 */
+  /* 卡片限高在视口内并纵向布局，避免文件多时整卡超出视口、底部上传按钮被裁掉。
+     纵向 auto 是极矮视口的兜底：各区收缩到各自下限后仍放不下时整卡滚动，
+     任何控件（含吸底上传按钮）都保持可达，绝不被 overflow 裁成不可点。 */
   max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .source-modal-card > .source-modal-header,
 .source-modal-card > .parser-capability-panel,
-.source-modal-card > .drop-zone,
 .source-modal-card > .source-action-row {
   flex: 0 0 auto;
 }
@@ -5982,6 +5984,15 @@ button.chat-session-card {
 
 .parser-capability-panel.is-compact .parser-capability-row {
   grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr) auto;
+}
+
+/* 高度吃紧时的收缩顺位:拖放区第一个让（shrink 权重最高,常态 230px 压到 110px
+   仍是完全可用的点击/拖放目标）,其次「已跳过」面板与待上传列表各自收到下限,
+   再不够由卡片整体滚动兜底——上传按钮永远不为「显示一条跳过原因」让路
+   (codex #487 R1 P1)。 */
+.source-modal-card > .drop-zone {
+  flex: 0 4 230px;
+  min-height: 110px;
 }
 
 .source-action-row {
@@ -6151,10 +6162,11 @@ button.chat-session-card {
 }
 
 .source-modal-card > .source-detail-body {
-  /* 由 flex 接管高度（覆盖公共 max-height），文件列表在剩余空间内滚动 */
+  /* 由 flex 接管高度（覆盖公共 max-height），文件列表在剩余空间内滚动；
+     下限保住约两行文件 + 吸底上传按钮，不被其他区块挤到不可用 */
   flex: 1 1 auto;
   max-height: none;
-  min-height: 0;
+  min-height: 140px;
 }
 
 .source-modal-card .tag-row {
@@ -6518,11 +6530,13 @@ button.chat-session-card {
 
 /* 添加文件时被跳过的文件（类型不支持/超大小/超批量）：弹窗内持久展示，不能只靠
    2.2s 即逝的 toast——那正是「批量上传时不支持的文档静默消失」的来源之一。
-   面板必须可收缩（flex 0 1 auto + min-height 0）：弹窗卡片 overflow:hidden，矮视口
-   下不可收缩的面板会把下方操作按钮顶出裁剪区（codex #485 R1 P2）。 */
+   面板不参与收缩：任何写死的收缩下限都装不下自身固定内容（「知道了」按钮 42px +
+   内边距 + 间距 + 行区下限 ≈114px，窄屏头部换行还会更高——codex #487 R2 P2），而参与
+   收缩配 min-height:0 又会在待上传列表很长时把文件名行压到不可见（#485 后真机踩中）。
+   面板高度天然有界（行区内部滚动封顶 96px），矮视口的空间腾挪由拖放区先让 +
+   待上传列表下限 + 整卡滚动兜底承担，见上方「收缩顺位」注释。 */
 .source-modal-card > .staged-skipped {
-  flex: 0 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
 }
 
 .staged-skipped {
@@ -6547,8 +6561,8 @@ button.chat-session-card {
 }
 
 .staged-skipped-rows {
-  flex: 0 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
+  /* 行区上限:面板高度因此天然有界,条目多时内部滚动 */
   max-height: 96px;
   overflow-y: auto;
   display: flex;
