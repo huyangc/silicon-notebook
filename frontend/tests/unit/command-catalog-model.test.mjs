@@ -16,6 +16,7 @@ import {
   catalogPendingReviewNote,
   catalogPreviewCopy,
   catalogProgressText,
+  catalogSectionLabel,
   catalogStatusLine,
   dismissReasonText,
   isCatalogBusy,
@@ -50,23 +51,12 @@ function preview(overrides = {}) {
   return {
     source_id: "src-1",
     source_title: "工具手册",
-    estimated_sections: 12,
+    estimated_windows: 12,
     estimated_calls: 18,
+    skipped_windows_in_prefix: 0,
     sampled: false,
     element_limit: 4000,
     ...overrides,
-    signal: {
-      total_sections: 20,
-      identifier_headings: 14,
-      syntax_sections: 11,
-      flag_sections: 9,
-      command_shaped_sections: 12,
-      command_ratio: 0.6,
-      flag_ratio: 0.45,
-      is_manual: true,
-      reason: "manual",
-      ...(overrides.signal ?? {}),
-    },
   };
 }
 
@@ -97,38 +87,12 @@ test("未知状态保守判成「还没结束」，不把「点完还能接着�
 
 // ------------------------------------------------------------------- 进度文案
 
-test("进度文案在总节数未知时说「准备中」，不报 0/0", () => {
+test("进度文案在总段数未知时说「准备中」，不报 0/0", () => {
   assert.equal(catalogProgressText(job({ progress: { sections_total: 0 } })), "准备中…");
   assert.equal(
     catalogProgressText(job({ progress: { sections_total: 12, sections_done: 3, entries: 5 } })),
-    "已处理 3/12 节 · 已识别 5 条",
+    "已处理 3/12 段 · 已识别 5 条",
   );
-});
-
-test("因过长截断的节数在 >0 时附进行中进度行，字段缺席/为 0 时不渲染", () => {
-  const truncated = catalogProgressText(job({
-    progress: { sections_total: 12, sections_done: 3, entries: 5, truncated_sections: 2 },
-  }));
-  assert.equal(truncated, "已处理 3/12 节 · 已识别 5 条 · 2 节因过长仅识别了开头部分");
-  // 缺席(旧后端还没长出这一列)与显式 0 都不该渲染任何截断提示。
-  assert.equal(
-    catalogProgressText(job({ progress: { sections_total: 12, sections_done: 3, entries: 5 } })),
-    "已处理 3/12 节 · 已识别 5 条",
-  );
-  assert.equal(
-    catalogProgressText(job({
-      progress: { sections_total: 12, sections_done: 3, entries: 5, truncated_sections: 0 },
-    })),
-    "已处理 3/12 节 · 已识别 5 条",
-  );
-});
-
-test("因过长截断的节数在 >0 时也附进已落终态的成功摘要行", () => {
-  const line = catalogStatusLine(job({
-    status: "succeeded",
-    progress: { sections_total: 8, entries: 20, truncated_sections: 3 },
-  }));
-  assert.equal(line.text, "已识别 20 条命令 · 3 节因过长仅识别了开头部分");
 });
 
 test("失败展示后端文案原文，为空才退到兜底", () => {
@@ -161,7 +125,7 @@ test("成功摘要同时报出未通过与未覆盖，零值不占位", () => {
   const full = catalogStatusLine(
     job({ status: "succeeded", progress: { sections_total: 8, entries: 20, rejected: 3, uncovered: 2 } }),
   );
-  assert.equal(full.text, "已识别 20 条命令 · 3 条未通过 · 2 节未覆盖");
+  assert.equal(full.text, "已识别 20 条命令 · 3 条未通过 · 2 段未覆盖");
   const clean = catalogStatusLine(
     job({ status: "succeeded", progress: { sections_total: 8, entries: 20 } }),
   );
@@ -178,40 +142,40 @@ test("入口按钮只在成功后改成「查看识别结果」", () => {
 
 // ------------------------------------------------------------------- 成本预告
 
-test("成本预告写成约数，非手册形状仍可发起但要先说清楚", () => {
-  const manual = catalogPreviewCopy(preview());
-  assert.match(manual.body, /检测到约 12 个命令节，预计 18 次模型调用。/);
-  assert.ok(!manual.body.includes("未检测到"));
-  assert.equal(manual.confirmLabel, "开始识别");
-
-  const notManual = catalogPreviewCopy(preview({ signal: { is_manual: false, reason: "command_ratio_below_threshold" } }));
-  assert.match(notManual.body, /未检测到明显的命令手册结构/);
-  // 提示归提示:入口不禁用，文案里仍然给出成本，让人自己判断。
-  assert.match(notManual.body, /预计 18 次模型调用/);
+test("成本预告写成约数，说明会通读全文并给出预计调用数", () => {
+  const copy = catalogPreviewCopy(preview());
+  assert.match(copy.body, /将通读全文（约 12 段），预计约 18 次模型调用。/);
+  assert.equal(copy.confirmLabel, "开始识别");
+  assert.deepEqual(copy.sections, []);
 });
 
-test("采样到顶时必须明说只按前一段估算——那句「预计 M 次」否则是守不住的承诺", () => {
+test("零成本跳过闸挡下的段数 >0 时附一句纯叙述部分不消耗调用的提示，为 0 时不渲染", () => {
+  const withSkips = catalogPreviewCopy(preview({ skipped_windows_in_prefix: 5 }));
+  assert.match(withSkips.body, /其中纯叙述部分不消耗调用。/);
+  const noSkips = catalogPreviewCopy(preview({ skipped_windows_in_prefix: 0 }));
+  assert.ok(!noSkips.body.includes("纯叙述部分"));
+});
+
+test("采样到顶时必须明说只按前一段估算——那句「预计约 M 次」否则是守不住的承诺", () => {
   const sampled = catalogPreviewCopy(preview({ sampled: true, element_limit: 4000 }));
-  assert.match(sampled.body, /只按前 4000 个元素估算，实际可能更多/);
+  assert.match(sampled.body, /次数只按前 4000 个元素估算，实际可能更多/);
   assert.ok(!catalogPreviewCopy(preview({ sampled: false })).body.includes("实际可能更多"));
 });
 
-test("形状线索把计数摆出来，而不是只给一个是/否", () => {
-  const [[title, values]] = catalogPreviewCopy(preview()).sections;
-  assert.equal(title, "形状线索");
-  assert.deepEqual(
-    values,
-    ["命令样式的段落 12/20（含语法/参数子段）", "含语法说明 11", "含参数说明 9"],
-  );
+// --------------------------------------------------------------------- 候选出处
+
+test("有继承面包屑的候选出处原样显示", () => {
+  assert.equal(catalogSectionLabel("第 3 章 > set_db"), "第 3 章 > set_db");
 });
 
-test("形状线索的“段落”块口径与主句“命令节”分组口径显式区分，不读成同一个数", () => {
-  // 主句的分组口径(estimated_sections)与线索行的块口径(command_shaped_sections)
-  // 故意取不同值 —— 两者本来就是不同来源的两个数，措辞必须让读者看得出这一点。
-  const copy = catalogPreviewCopy(preview({ estimated_sections: 7 }));
-  assert.match(copy.body, /检测到约 7 个命令节/);
-  const [[, values]] = copy.sections;
-  assert.match(values[0], /命令样式的段落 12\/20（含语法\/参数子段）/);
+test("后端内部占位标签换成带序号的中文说法，不把裸英文漏给用户", () => {
+  assert.equal(catalogSectionLabel("window 3"), "第 3 段");
+  assert.equal(catalogSectionLabel("window 12"), "第 12 段");
+  assert.ok(!catalogSectionLabel("window 3").includes("window"));
+});
+
+test("空串原样传回，由调用方按既有兜底渲染", () => {
+  assert.equal(catalogSectionLabel(""), "");
 });
 
 // ------------------------------------------------------------------- 未通过原因
@@ -223,7 +187,7 @@ test("未通过原因翻成中文，且带上原文里的那个值", () => {
   );
   assert.equal(
     rejectionText("command_name", "not_in_candidates", "set_db"),
-    "命令名「set_db」：这一节没有记录这条命令",
+    "命令名「set_db」：这一段没有记录这条命令",
   );
   assert.equal(rejectionText("slice", "model_response_unusable", ""), "整段：模型返回无法解析");
 });

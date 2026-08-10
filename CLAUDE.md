@@ -83,34 +83,74 @@
 - **集合枚举工具**：三要素合同——① 输出有界（游标翻页，命中 `enum_*` 预算即停）；② coverage 由执行器计算，前端徽章直读 `TypedCollectionCoverage`（`returned_total`/`total`/`complete`/`truncated_reason`/`overflow_semantics`），绝不采信模型自报「已全部」；③ 作用域走既有挂载谓词（active notebook + 有效挂载库），与 Ask 联邦同口径。**清单永不含私有 Memory**：确认 Memory 是 owner 私有的（其他通道都按 owner 隔离），而清单按 participant 作用域取数、没有 owner 过滤，共享库里会被别的成员整份读走。排除是**无条件**的（单人库同口径），且**计数与行同一谓词**——元素侧在 `source_change_signal_rows` 里排 `source_type='memory'`（那条查询同时是计划/信号/计数的唯一来源，三处自动一致；三个信号列不在任何索引上，谓词是纯残余过滤），KG 侧靠每参与库一次有界 `memory_source_ids` 在既有过扫描里过滤行、并用 `knowledge_type_count_rows_for_sources` 按同一批 id 从分母里减掉（只过滤行不减分母 = returned≠total = 把完整清单永久判成 `concurrent_change`）；显式 `source_id` 那条绕开计划的路径自己再挡一次。看板计数（`notebook_catalog`）刻意**不**跟着改——它答的是「库里有多少知识」。Knowhow 投影源仍在清单内。集合地图（`[Collections in scope] ...`，≤600 字符）每 run 建一次，注入 plan/reflect 上下文，让模型先看计数再决定值不值得全量列；同一份地图还必须随 `ReasoningResult` 带出、包成带固定表头的服务端小块（无 `[k]`，整块 ≤800 字符）装进**答案合成**上下文最前，并进入合成触发条件——reflect 教模型「太大就别枚举、直接报数」，那个数必须真的到得了写答案的模型手里，否则「大集合 + 零其它证据」时合成压根不跑。行/页/**载荷**三个池全部是 run 级：每次动作只发剩余额度，执行器按 `payload_chars` 回传真实消耗，一轮里的多次枚举累计不得超过 `structured_payload_chars`。载荷闸收**两次**、量两种东西：执行器按紧凑 dataclass 计费（拦「读得比该请求允许产出的多」），`typed_collection_results` 再按 `model_dump_json()` 的真实 wire 形状计费（拦「传/存得比声明的多」——联合体两臂的默认字段 + result 元数据让 wire 明显更宽），并**先预留**每份 result 的信封（那是「被裁过」的披露载体）；裁到的那份降级为 `complete=False`/`truncated_reason="payload"`/`returned_total=实际送达条数`，合成预览必须按 `delivered_outcomes` 的送达视图渲染，否则 prompt 会列出卡片没有的行、块头还写着 complete。合成预览的 `inline_rows` 是 run 级共享额度，必须**分配**而非先到先得（先按 `max(1, inline_rows // n)` 保底，余量按序贪心补），否则第一份清单吃光额度、多集合问题只按一张卡作答。KG 对象翻页是不带状态谓词的纯 keyset 读（索引不含 `status`，写进 SQL 就是无界残余过滤），执行器读回后用同一份 `USABLE_STATUSES` 过滤，每次动作最多过扫描 `max_rows × 4` 原始行，触顶发 `truncated_reason="budget"` 的诚实 partial 并让游标越过已扫的不可用区段（保证续跑推进）。`replace_elements` 必须在**同一写事务**里推进 `sources.updated_at`（双后端同修），让变更信号与元素换代原子同步——首解析 under-count 窗口由此根治，不再是「已登记的低报」。每次动作的页查询数有**强制**上界（元素 `max_rows + max_pages`；知识对象 `参与库数 + max_pages + 原始行过扫描上限`），越界抛 `EnumerationInvariantError` 并 fail-open 成一次 skip；刻意不给分片首页计费（会重新打破宽而薄语料的 complete 可达性）。收尾稳定性复检必须**重新解析参与库集合**（同一个 `resolve_participants` / `mount_sql.py` 谓词入口），集合不等即不稳定，指纹/seq 也用收尾解析出的集合算——只按开场那份 id 列表重算，挂载/卸载参考库这类变化根本看不见。限定单一来源按**标题**（`enumerate.source_title`）表达并由服务端有界精确解析，零命中/多命中一律 skip，计划超过解析上限时直接拒绝解析（不从前缀断言唯一），绝不扩成全库枚举。工具不依赖图谱：无图早退只在作用域**同时**没有任何可枚举集合（元素/知识对象/**来源**三类全为零）时才触发，放行后 `kg_required` 仍如实为 `True`。来源数**计入**这道闸——纯散文库（有文档、零元素、零知识对象）恰是来源清单的主力场景，挡住它等于把闸拆掉、让「库里有哪几篇」拿回一句非答案；零源库因此仍然早退。**来源清单**（`enumerate.collection="sources"`，**不是**第 11 个动作 id：给出它就忽略 enumerate 的其他参数，字段只识别 `"sources"`、其他值落回按动作 id 分派；代价是反思步「下一步意图」仍显示「列元素清单」，真正发生的那步由 enumerate 步 summary 说清）列的是**用户可见来源**那一批——计划 = `source_change_signal_rows` 里 `user_visible` 为真的那些（可见性由各适配器在 SQL 里对 `list_sources`/`visible_document_count` 共用的可见谓词求值、作为**投影列**随行返回：不新造第三份拼写，也不另开查询——`source_type` 无索引，独立的「哪些被隐藏」查询只能整表扫，且就紧跟在 signal 查询之后），地图行尾 `| sources: N` 与清单分母出自同一个 helper（纯算术、零新扫描）；遍历顺序 = 来源页签的 `(created_at, id)`（两侧 `list_sources`/`list_sources_page` 也必须带 `id` 次键——并列 `created_at` 下缺次键会与目录分叉、让「前 N 篇」在页签与模型手上是不同的 N 篇；PG 本来就带。排序键随 signal 行同一次访问回来，双后端各自归一化，PG 侧先转 UTC 再 isoformat（`timestamptz` 的 offset 跨 DST 不是常量）；**指纹只吃前两个字段**，创建时间不进摘要，否则上线即让 L1/L2 全量失效一次；元素侧顺序仍按 `source_id` 不动——它的游标是 `(source_id, element_id)` keyset）；每份文档计一行，整份清单是**一个**分片（首个 hydration 窗口免费）；条目 = 显示名（论文标题优先）+ 文档类型界面词（`extraction_profiles.PROFILES`，未识别就留空、绝不吐 `academic_paper`）+ 已存摘要摘录，wire 上复用元素臂字段（`location_label` 装类型、`text` 装摘要、`element_type` 留空）。schema 里 `collection` 显示为**空缺省**（写成唯一值会让照抄模板的模型在列公式时也带上它、被静默改道），取值只在动作说明里并写明「会覆盖动作本身」。收尾除作用域指纹外还对**整条链已发出**的文档做一次有界批量复读、比对 (显示名, doc_type) 摘要（账目挂游标、仅内存、不进用户面 coverage），不等即 `concurrent_change`——论文元数据回填不碰 `updated_at`，指纹看不见它；摘要字段刻意不进该键（它的写者同语句就推 `updated_at`）。**账目回喂对它有一条定向豁免**：只有来源清单的链在账目行后附有界标题清单（≤20 条/每条 ≤60 字符/合计 ≤800 字符，超出写 `(+N more)`，分母只数有显示名的条目），因为 prompt 教的「按标题逐篇深挖」离了标题就断链；元素/知识对象清单的账目仍一个字正文都不带，摘要也不回喂。**范围指示语只在 prompt 层接地**：`prompts.SCOPE_DEIXIS_GROUNDING` 一段共用文本进意图契约 + 两份规划拼写 + reflect，教模型把「当前notebook/这个库/知识图谱/KG」解析成范围后**剥掉**、不带进任何子查询/关键词/`exact_term`，但问题本身要原样留；刻意不做确定性词表剥离（那是被否决的词法路由，且会误伤真在讲知识图谱的文档）。总闸 `REASONING_ENUM_TOOLS_ENABLED`（默认 true）由 `reasoning_retrieval.enumeration_wiring_active()` 单点判定（地图注入 / prompt / schema 分支 / allowed_actions / 早退放行五处共用）：关闭即两个动作与来源清单参数一并不提供、地图也不注入、早退恢复，零额外查询，完全回到接入前。
 - **清单出处与答案归因**：每个送达的元素/KG 清单条目至多携带一条仍存活的有界 `Citation`（KG 取首个有效 evidence element）；跨库证据必须由服务端在 active notebook 的 participant 集内解析，浏览器只经 active-notebook 代理端点打开原文，绝不直连参考库成员端点。真正进入合成预览的条目使用隔离的 `k5001+` 命名空间和反向映射；只有答案实际绑定的这些锚点才能为清单内容归因，且仅带存活 `source_id`/`element_id` 的绑定键可把确定性枚举行判为 grounded。枚举答案一个锚点都没绑时，不得拿无关 ranked citations 冒充清单来源。
 - **问答集合清单默认折叠**：集合枚举结果卡始终显示覆盖率徽章、清单名称与可选的单一来源范围，但条目内容默认收起；用户主动打开后才渲染按来源分组的元素、知识对象或文档清单。打开后继续沿用前 20 条预览与独立的「展开全部已加载内容」控制。部分结果/合成预览披露放在折叠内容内，卡片关闭时不得提前挂载图片条目。
-- **命令目录抽取（方案 C）**：面向工具手册的 opt-in 结构化摄取，纯函数层在
+- **命令目录抽取（方案 C·v2 全文档窗口）**：面向工具手册的 opt-in 结构化摄取，纯函数层在
 `backend/app/services/command_catalog.py`，job/持久化/API 在
-`backend/app/services/catalog_job.py`。五条不可省：①**成本闸**——`preview` 零模型调用、
-只读有界前缀（元素条数与每条字节都在 SQL 里截），触顶必须回报 `sampled`，绝不为了估算
-先把要估的那次扫描做一遍；②**单飞与终态**——`catalog_jobs` 的条件唯一索引覆盖
+`backend/app/services/catalog_job.py`。**规则分节已整体删除**（`command_sections` /
+`detect_manual_shape` / 形状信号 / 截断概念一并退役），改为整篇按序打包成窗口。
+不可省的条目：①**窗口几何零丢弃**——整篇文档按文档序打包成至多 `WINDOW_CHARS` 的窗口，
+元素整放、单元素超预算按字符切进相邻窗口，**没有任何内容被丢弃**（v1「超预算整个丢掉」
+是静默数据丢失：实测一张 120 参数表整张消失，只剩一个光秃秃的标题，否决率还报 0.0，
+因为已经没有东西可以失败）。窗口标签取窗内**第一个** heading，无 heading 时继承上一窗的
+**最后一个**（继承第一个会把 `set_e` 的续表标成 `set_a`）；候选行是 `window N` 形状的
+内部标签时，`_catalog_cells` 的「出处」列**只写来源名**——那个标签会被人长期保存在知识表里，
+在那个语境里什么也没说。**分片视图恒为整窗全文**：v1 的 head+参数行裁剪在「一个分片＝
+一条命令的小节」时对，在「一个分片＝一份文档切片」时是系统性遮蔽（几十个候选只有首个在
+视图里），多分片窗口每片重复携带整窗是刻意接受的代价；②**跳过闸公式**——
+`needs_model ⟺ own 非空 或 (flag 非空 且 carried 非空)`，四形态：own 非空→调用；
+own 空+flag+carried→调用（接力续窗，大命令文档的主体）；own 空+flag+无 carried→跳过
+（无名可认领，接地保证产出必为空）；own 空+无 flag→跳过，**不看 carry**（接力一旦开始就
+再也不空，凭它开闸＝按页付整本书的钱）。跳过窗不发调用、不做 liveness 探针、不发
+`catalog_section_done`（散文 PDF 有数千个），但必须 `record_section` 推进进度（分母算它、
+分子不算它的进度条永远走不完），carry 也**必须**照常穿过它；③**候选接力**——
+`carry(i) = candidates(i-1)`，`candidates(i-1)` 为空时继承 `carry(i-1)`，遇新候选即重置；
+接力名可在续窗认领，**只**免除「逐字出现在本窗」（名单成员资格、`syntax`/参数/`default`
+的本窗接地照旧——名单是构造性接地，接力带的是见证不是猜测）。⚠**已登记取舍**：窗口候选是
+这窗**提到**的所有命令形状名字，接力可能把孤立参数表键到只被顺带提到的命令上，没有任何
+接地规则拦得住，靠人工审阅兜底——别为它加「只接力用法行调用过的名字」这类收窄，那会连
+接力本来要救的普通情形一起丢掉。own 为空时 prompt **不得**渲染 `- (none)` 候选段再把
+carried 放补充段（那是在叫模型回空，等于对续窗关掉整个特性），carried 就是主认领名单；
+④**成本闸**——`preview` 零模型调用：窗口数是 `source_text_stats` 聚合出的全文字符数除以
+`WINDOW_CHARS` 的算术（绝不为了估算先把要估的那次扫描做一遍），调用数只在有界前缀里
+真跑分窗+跳过闸+分片精确测量（**接力必须一起推进**，否则前缀里的闸与真跑答得不一样），
+前缀外每窗按 1 次计，触顶必须回报 `sampled`，并用 `skipped_windows_in_prefix` 解释
+「为什么调用数远小于窗口数」；⑤**单飞与终态**——`catalog_jobs` 的条件唯一索引覆盖
 `queued` **与** `running`（行先写、线程后起，漏 queued 就会在那个窗口排出第二个写同一份
 候选的 worker），每条退出路径（含 `BaseException`）都必须落终态，启动兜底同样要收
-queued；③**接地校验不可绕，且每一批参数只按它自己那批判**——命令名必须在服务端候选清单里且
-逐字出现（整条否决），参数名必须带原始前导短横，`syntax` 必须是原文连续拷贝，`default`
-找不到就清空；被拦条目连同原因**一起入表**（`state='rejected'`），那是一次零产出抽取唯一
-可解释的证据。同一条命令的参数全写在同一段原文里，所以接地校验分不出「这是不是本批的」：
+queued；⑥**接地校验不可绕，且每一批参数只按它自己那批判**——命令名必须在服务端候选清单里且
+逐字出现（整条否决；接力名只免后半条），参数名必须带原始前导短横，`syntax` 必须是原文连续拷贝，
+`default` 找不到就清空；被拦条目连同原因**一起入表**（`state='rejected'`），那是一次零产出抽取唯一
+可解释的证据。同一窗的参数全写在同一段原文里，所以接地校验分不出「这是不是本批的」：
 `validate_entry` 必须同时收下本批的 `param_names`，批外的一律拒（`arg_outside_slice`），
 本批问了却没回来的记进账（`arg_not_returned`）。两半都不可省——没有归属，答别批的回复
 会连内容寻址缓存一起通过（那个缓存唯一的准入票就是同一个 `validate_entry`），整个 TTL 都
 被投毒；没有覆盖账目，`args_keep_ratio` 的分母是「模型愿意答多少」，二十个参数答一个是
 100%。分母因此是 `args_seen + args_uncovered`。空指派（无 flag 的命令）表示不设约束而不是
-「什么都不许返回」——位置参数正是这类小节记的东西，提示词的无 flag 分支必须**主动问**
+「什么都不许返回」——位置参数正是这类窗口记的东西，提示词的无 flag 分支必须**主动问**
 （`parameter_names` 是 flag 扫描器，`set_dont_use lib_cells` 因此拿到空指派；那一支命令模型
 返回 `args: []` 就等于系统性丢掉整类命令的参数元数据）。这类命令没有可服务的清单，把关
-全靠接地：名字仍须逐字在本节原文，覆盖账目恒空（没指派就没有未覆盖），而模型一旦作答，
-该节就照常计入 args 轴；④**三轴熔断**——满 10 节后命令名否决率
->20%、args 保留率 <50%（闸是「这一轮问过东西」即 `args_seen + args_uncovered > 0`，不是
-`args_seen > 0`，否则真正无 flag 的手册会在第十节被误杀）、或「完全没给出可用回答的分片
-占比 >20%」任一成立即判 failed 并给用户可读理由，绝不静默交付近空目录。第三轴不可省：
-一个什么都不返回的模型让命令名比率保持无害，而它拖低的 args 比率报的是症状（「参数丢了」）
-不是病因（「这个端点在返垃圾」）；多轴同时成立时报最具体的那个（不可用回答解释得了差的
-args 比率，反过来不成立）；
-⑤**apply 保守合并**——目标表不存在则建（「命令目录：<来源标题>」，命令/语法/参数/说明/
+全靠接地：名字仍须逐字在本窗原文，覆盖账目恒空（没指派就没有未覆盖），而模型一旦作答，
+该窗就照常计入 args 轴；⑦**多条目回答合同**——顶层 `{"entries": [...]}`，一窗记录几条命令就
+返回几条（一个窗口是文档切片不是单命令小节）；`entries: []` **合法**（这一窗真没有命令），
+缺 `entries` 或它不是列表才按不可用回答走二分补救；清单里的非对象项转成**可见的被拦行**
+（`_payload_entries` 给 `None`，`validate_entry` 照常产出 rejected），不留静默缺口。
+内容寻址缓存的准入比这一层**更严**（空/零接地的 entries 一律不入缓存）：拒它只是一次
+cache miss，收它是把「这窗什么都没有」冻结整个 TTL；⑧**跨窗合并一命令一行**——run 级
+`flushed` 注册表把后续窗口的结果并回前面已写的那一行（args 按名去重 first-writer-wins、
+`syntax`/说明只补空、anchors 在 `MAX_ANCHOR_ELEMENTS` 内取并集、excerpt 保留首窗）；
+`update_candidate_payload` 只改 `candidate` 态的行，返回 False（已被 apply/dismiss 挪走）时
+**降级为追加一行**而不是静默丢参数——重复行审阅者看得见，丢失看不见；⑨**三轴熔断**——满
+`MIN_WINDOWS_BEFORE_ALERT` 个**实际发过调用**的窗口（跳过窗不进样本）后，命令名否决率超
+`COMMAND_REJECT_ALERT_RATIO`、args 保留率低于 `ARGS_KEEP_ALERT_RATIO`（闸是「这一轮问过
+东西」即 `args_seen + args_uncovered > 0`，不是 `args_seen > 0`，否则真正无 flag 的手册会被
+误杀）、或不可用回答分片占比超 `SLICE_FAILURE_ALERT_RATIO`，任一成立即判 failed 并给用户
+可读理由，绝不静默交付近空目录。第三轴不可省：一个什么都不返回的模型让命令名比率保持无害，
+而它拖低的 args 比率报的是症状（「参数丢了」）不是病因（「这个端点在返垃圾」）；多轴同时
+成立时报最具体的那个（不可用回答解释得了差的 args 比率，反过来不成立）。合法 `entries: []`
+**不算**不可用回答（否则散文密集手册被误杀）。⑨b**全空产出不得假 succeeded**——发过 ≥1 次
+调用、`entries_seen == 0`、候选行与被拦行皆零时落 `failed` 并给 `NOTHING_EXTRACTED_MESSAGE`
+（走 `user_error()` 同款出处规则）；有被拦行仍 succeeded（用户能自己判断），全跳过的 run 也
+仍 succeeded（压根没调用模型）。这是对**已跑完**的 run 的判决，刻意不做成第四根熔断轴；
+⑩**apply 保守合并**——目标表不存在则建（「命令目录：<来源标题>」，命令/语法/参数/说明/
 示例/出处，「命令」为行标题列），存在只**新增**表里没有的命令；同名一律不改行、只回报
 conflict（分不出「陈旧行」与「人工订正过的行」，覆盖是本特性唯一不可逆的破坏），落库全部
 走 knowhow 既有服务层因而自带 record_change。列按**名字**寻址而不是按位置——目标表有实时
@@ -122,12 +162,12 @@ conflict（分不出「陈旧行」与「人工订正过的行」，覆盖是本
 接地在两次 apply 之间把上传名换成论文标题。按来源取锁同样不行——两个派生标题相同的不同来源
 解析到同一张表，而来源写栅栏是 per source、挡不住它们。`applied_table_id` 只用于锁内的目标解析，
 绝不当锁键。锁序:来源写栅栏在外、目录锁在内，完整枚举在 `_target_lock_key` 的 docstring 里。
-粗粒度的代价（同库不同来源的确认会串行）是刻意接受的:每个写者都有界、不调模型、由人点击触发。⑥**模型自撰字段在合并处
+粗粒度的代价（同库不同来源的确认会串行）是刻意接受的:每个写者都有界、不调模型、由人点击触发。⑪**模型自撰字段在合并处
 封顶**——说明/示例/每个参数的 desc 都是接地校验刻意不查的，`_merge_entry` 是它们到库之间
 唯一的收口；参数 desc 需要两道闸（每条 `MODEL_ARG_DESC_CHARS`、整行 `MODEL_ARG_DESC_TOTAL_CHARS`,
 一行的条数等于命令的参数个数），总量截断从尾部截并把条数记进 `reject_info.desc_overflow`
 （与统计拦截记录条数的 `overflow` 分开两个键，合在一起两个数都读不出来）。
-效率合同=每节调用数=分片数；唯一例外是共用同一套二分机制的两条有界补救（回答不可用、
+效率合同=每个**发过调用**的窗口的调用数=它的分片数（跳过窗为零）；唯一例外是共用同一套二分机制的两条有界补救（回答不可用、
 或覆盖率过低且回答偏短——`SLICE_COVERAGE_RETRY_RATIO` / `MIN_ASSIGNED_FOR_COVERAGE_RETRY`，
 只在 depth 0 触发，因而 `MAX_CALLS_PER_SLICE` 不变；回答条数与指派一样多只是答错了的不重问，
 问得更少救不了它），单个分片最多 `MAX_CALLS_PER_SLICE` 次，失败分片一律记成 rejected 行。模型通道复用
@@ -138,11 +178,11 @@ conflict（分不出「陈旧行」与「人工订正过的行」，覆盖是本
 分类，绝不能按异常类：scheduled adapter 把一切重抛成 `ModelInvocationError`，它是
 `MalformedModelResponse` 的**兄弟类**，`except MalformedModelResponse` 只会匹配测试 double、
 在生产上永不命中（整轮会在第一次截断时直接 failed）。瞬态 provider 错误（限流/5xx/鉴权）
-显式不走二分，直接冒泡判 failed，绝不能被吞成「这一节本来就没有命令」。
+显式不走二分，直接冒泡判 failed，绝不能被吞成「这一窗本来就没有命令」。
 ⚠`catalog_candidates.job_id` **刻意不加外键**：加了 `catalog_jobs` 就不是叶表，而
 `idx_catalog_jobs_one_active` 是 source_id 单列面（source_id 又是外键列、NOT NULL），
 正向 shadow 会整个 PG24 catalog 判为不可停车。
-⑦**解析前提与来源代次绑定**——`preview`/`start` 都要求 `parse_status ∈
+⑫**解析前提与来源代次绑定**——`preview`/`start` 都要求 `parse_status ∈
 {parsed, extracting, extracted}`（仓库既有白名单，后两档是解析之后的 KG 抽取阶段），
 否则 409（未解析完/解析失败两套文案）；`catalog_jobs.source_generation` 记下创建时刻的
 **来源代次**＝`MAX(source_elements.created_at)`（`replace_elements` 把整批新元素写成同一个
@@ -156,6 +196,11 @@ conflict（分不出「陈旧行」与「人工订正过的行」，覆盖是本
 前端 `CommandCatalogReview` 的每次 apply/dismiss（含失败路径）都必须经 `onReviewed` 回调让
 `CommandCatalogSection` 重读一次 `.../job`：弹窗在 page 根层、卡片在来源详情里，两者只剩
 page.tsx 这一条接线，不重读则「重新识别」会一直被卡片手里那份旧 `pending_candidates` 挡着。
+前端界面词一律说「段」（预告「将通读全文（约 N 段）…」、进度「已处理 N/M 段」）；后端的
+`window N` 是**内部标签**，必须经 `command-catalog-model.ts` 的 `catalogSectionLabel()` 转成
+「第 N 段」，不得原样上屏。数值上限（窗口字符、候选上限、每片参数数、每片调用上限、拦截/
+出处条数、熔断样本与三轴阈值，以及已退役的 v1 分片视图/开头摘录上限）只登记在
+`docs/product-and-api*.md`。
 - **完整枚举免责的抑制规则**：`completeness_unavailable` 的前置警告只在**四条同时成立**时抑制——`result_scope != "aggregate"`、意图合同的 `constraints`/`excluded_topics`/`assumptions` 全为空、至少一张清单卡 `returned_total > 0`、且该卡 `complete=True`。方向是宁可多警告：清单卡的 coverage 只证明「某个物理集合被完整走了一遍」，证明不了它就是用户要的那个子集；这里刻意不做语义匹配（无确定性判据）。
 - **完整语义与 prompt 硬预算补充**：确认时按最终编辑措辞与权威澄清答案重算 scope；结构化执行器只处理整表物理行/方法清单、直接物理行/记录计数及其 hybrid。“多少种”等去重/种类计数、条件筛选、group-by 没有确定性计划时回退并披露不支持完整。轻量 catalog 最多返回 8 个表描述，不读取格、代码附件或健康大字段，并在截窗前优先纳入显式点名表。响应分开 per-table、batch、synthesis coverage：枚举 200/200 而模型预览 100/200 时写“枚举完整、分析部分”，8 表截断不污染已耗尽单表。KG 对象/关系、confirmed Memory、查询期链共享 KG 字符硬预算；结构化预览、chunk、direct element 共享原文硬预算；最终证据块不超过两者之和。
 - **大纲便签与按节合成**（借鉴 DualGraph，PR-3）：仅 `exhaustive`（穷尽）档且 `REASONING_OUTLINE_ENABLED`（默认 true）开启时，reflect 循环新增 `update_outline` 动作（第 11 个动作 id；章节结构全量替换，同一稳定节 id 的合法证据与旧绑定 union，遗漏不删，`remove_evidence` 才显式撤销；8 键满额时旧键优先、未接纳新键进入下一轮账目）。合法 key = 存活候选池 ∩（run 内候选摘要曾实际展示的 key ∪ 当前大纲已持有 key），既不会因窗口滑动丢旧绑定，也不接受从未展示的中段 id；pending 不冻结普通额度内的结构更新，只有 sufficient/stale 的预算内终态纠错与第 6 次后的单次资格才是同结构纯换键，`max_steps` 绝不因纠错增加，stale 事实先落 trace。终态仍未接纳的 key 写入可见 trace。非法键静默丢弃，空节记入回喂账目供模型定向补检索；大纲修订对 stale 熔断中性（纯整理不算进展，真正的检索动作仍照常清零）；一次畸形提交跳过并保留上一份大纲，绝不清空。循环结束时若按候选池解析后仍有 ≥2 节能装配出证据、且该 run 未产出集合清单/结构化整表枚举（清单 run 保持单次合成——清单预览与覆盖披露只进单次路径的合成上下文，节化会拿 ranked 样本写散文而让完整清单闲置），则按节合成——每节只喂该节绑定证据的上下文切片（集合地图/枚举预览/私有 Memory/查询期推导链不进切片，留在回退路径），号段偏移保证跨节不相交，锚点按各节自己的 id_map 解析后再合并（写出别节号段只可能是幻觉，直接丢弃）；每节用自己的切片与锚点通过 `classify_evidence`，逐节记录落 synthesis detail 的 `section_grounded` 列表（不是整篇 flag），全部有据照旧，否则只把全局结果封顶 `overview`，零节精确 grounded 也不强制改成 `inferred`。任一节合成失败即整体回退单次合成，且回退成功后不留假 model_error 横幅；按节被绕过（不足 2 节或清单 run）时大纲披露不消失——规划跑过就在收尾 synthesis detail 带出 `outline_skipped` 等键。模型写进节标题的引用形 `[k]` 标记在解析入口剥除。trace 新增 `outline` 步类型（前端标签「大纲」）与每节一条的合成进度步（收尾步在引用数后披露略过节/依据不足节）；关闭态/低档位与接入前逐字一致。v1 不进 `AskResponse`。数值上限（节数/层数/每节绑定数/每 run 调用次数）只作为契约写在 `docs/product-and-api.md`/`_zh.md`「大纲便签与按节合成」一节，这里不重复。真源见 `docs/reasoning-enumeration-tools-design.md` §3.1。服务端弱支撑边回喂（PR-4，`REASONING_OUTLINE_KG_GAP_ENABLED` 默认开，叠在上面这把总闸之上）：每次**被接受**的 `update_outline` 之后，按本次新绑定证据的 canonical 邻域有界探测 `canonical_relations`（判据 `source_count` 而非原始关系行数、经主键前缀+`idx_clusters_member` 解析显示名、run 级 `kg_gap_probed_seeds` 防重复探测、异常 fail-open 记 skip 步），把「支撑薄弱」的关系提示追加进大纲便签供模型用既有动作定向补检索；终态纠错轮不渲染也不消费该段。数值上限只在 `docs/product-and-api*.md` 契约段维护，真源见设计文档 §3.3。**大纲采用引导**（设计文档 §3.1.1，真机采用率 0/3 才加的）：闸开着、当前大纲**为空**、本 run 引导额度未用尽，且有一条服务端手上现成的结构性理由（本 run 已把来源清单枚举到 `state == "complete"` 且条数达下限，或已确认检索方向数达同一下限；方向数取 `run()` 现成方向清单长度减一，不重新解析契约）时，在几份账目之后、集合地图之前追加一行确定性引导，措辞含现状+具体条数+「判断不需要就忽略」的出口。两条理由同时成立用清单那条；没列完的清单一律不算（半份目录建出的大纲缺节而模型不自知）。零新增查询/模型调用/动作 id；与便签的互斥判据写在 `_outline_nudge_note` 自己的「sections 非空即返回空串」里，不是调用点的 `else`；只有真发出的那一轮给既有 reflect 步 detail 加 `outline_nudged: true`（无条件写 `False` 会破坏「detail 逐键不变」的冻结基线口径）。数值上限（每 run 引导轮数、触发下限）只在 `docs/product-and-api*.md` 契约段维护。同批：`_answer_with_retry` 的**重试成功不留假报警**——进入时记 `mark = len(sink)`（sink 取 `_ASK_MODEL_ERRORS.get()`，为 `None` 则不摘），重试成功时只丢 `sink[mark:]` 里 `workload_id == "ask_answer"` 的那几条（按身份而非位置过滤——今天 `synth()` 内部不记别的报警，但给证据精炼补一条就会让位置式截断在「首次即成功」时把它一起删掉）；两次都失败一条不摘（含终态 empty-content 的 `RuntimeError`，「检索到却答不出」必须可见），`mark` 之前其它 workload 的报警一律不动，取消路径不受影响，`events.jsonl` 始终记全。按节合成那处的区间删除保持闭上界 `outline_err_mark:fallback_err_mark`，不得改成开区间。深度报告穷尽档的逐节深挖同样启用大纲便签与弱支撑边回喂（PR-5）：报告自己的 depth 五档（1/2/4/8/16）映射到本条同一批检索档位名（阈值判定，中间值落更低档），每节 `max_steps` 仍用报告自己的 depth 值而非档位表的步数上限；深挖整理出的子大纲只折成有界「发现的结构」块，作为 `###` 组织建议附进该节撰写 prompt，绝不回写用户确认过的 `reports.outline_json`。档位同样管到检索之后的两段：按方向补检索的合并结果按该档 `ranked_final_cap`/`answer_element_items` 重新截断（相关度降序，大纲绑定对象豁免），节撰写上下文用 `kg_context_chars` 与**共享**的 `chunk_context_chars`（原文段吃 chunk 剩余额度、条数封顶 `answer_element_items`）而不是 `ANSWER_CONTEXT_BUDGET_CHARS`/`REPORT_SECTION_CHUNK_BUDGET` 定值外加一份 1/3 元素额度；大纲绑定对象的优先额度必须在**一次** `knowledge_context` 调用内完成（`priority_object_ids`/`priority_budget_chars`），拆成两次会丢掉所有跨两半的 `relations:` 边——只在 `run()` 里兑现的档位会被消费它输出的那两段原样送回去。真源见 `docs/reasoning-enumeration-tools-design.md` §3.4。**大纲阶段与深挖的调用/检索削减**：档位同样缩放大纲阶段两类 0-LLM 探针（覆盖/充分性）的每主题·每节查询宽度（数值只登记在 `docs/product-and-api*.md`；行上缺 depth 保持历史宽度），探针产出只喂 STORM/Judge 的覆盖计数、不进正文证据；同一次规划 run 内重复探针查询经 run 级 memo 只检索一次（memo 不跨 run、失败不缓存——瞬态错误保持逐探针重试）；「多视角规划大纲中」与「大纲就绪」之间必须有「检查各节证据充分性」进度写（STORM+探针段此前零进度写，大库上是分钟级表观卡死）；充分性 Judge 的 LLM 精修半只在 deep 及以上档运行，overview/standard 只跑确定性半（界面消费的 coverage 与结论都来自它，且与 Judge 既有 fail-open 产出逐字一致——LLM 半只降不升）。每节深挖把**节复合问题作为第一条种子**（镜像 Ask：完整权威问题恒为首条）、随后接该节已确认检索方向,经 `intent_queries` 进 run——已审阅方向是权威，不让第二个模型重规划（与 Ask 同一原则），每节因此省一次 plan LLM 调用；run 内**成功**执行的方向（attempted 记账且无稀疏 `failed` 标——检索炸了 ≠ 检索过）run 后合并**不再重复** federated 检索，元素补取照旧（run 不按方向逐条取元素），run 步数装不下或检索失败的方向仍由 run 后合并兜底——「确认后的检索方向必须实际执行」由 attempted 判据两边共同兑现；低档探针宽度带来的更保守充分性结论已在契约文档登记。

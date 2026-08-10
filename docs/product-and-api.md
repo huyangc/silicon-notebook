@@ -433,30 +433,96 @@ the start endpoint require `parse_status` to be in the repository-wide
 KG-extraction stages that happen after the elements have landed), and return a
 `409` with a user-readable message otherwise: wait for parsing to finish, or, on
 a failed parse, reparse or re-upload. A cost preview over a source with no
-elements yet reports "about 0 command sections", which reads as "this document
+elements yet reports "about 0 segments", which reads as "this document
 has nothing to extract"; starting a run against one records a fraction of a
 manual as a complete extraction.
 
-**Cost preview.** `.../command-catalog/preview` reports shape-detection counts
-(identifier-named headings, usage-line sections, flag-dense sections) plus the
-number of sections and model calls an extraction would cost, with **zero model
-calls**. It reads only a bounded prefix of the source, so when
-`sampled` is `true` the numbers are a lower bound from the document's head, not
-a census — a preview that scanned the document it is estimating would defeat its
-own purpose. `is_manual` is a threshold verdict offered as a default; the counts
-are what a person should decide on.
+**The whole document is read; nothing is pre-selected by rule.** v1 picked out
+"command sections" by rule and sent only those to the model. Measured, the
+picking was not accurate — what it missed was never read, and what it picked
+wrongly was paid for. There is no shape judgement left: the document is packed
+in document order into bounded **segments** (windows in the code, at most
+`WINDOW_CHARS` characters each). An element goes into the current segment whole
+and starts the next one if it does not fit; an element longer than a whole
+segment's budget is cut into consecutive pieces that land in adjacent segments.
+**Nothing is discarded** — v1's "drop what does not fit" truncation is gone
+(measured, a 120-parameter table vanished whole and left a section that was
+nothing but its own heading, reporting a 0.0 veto ratio because there was no
+longer anything left to fail). A segment's provenance label is its **first**
+heading; a segment with no heading of its own inherits the previous segment's
+**last** one — a segment that opens under `set_a` and ends under `set_e` leaves
+the document positioned in `set_e`, and labelling its continuation `set_a`
+would point a reviewer several commands back.
+
+**Each segment's candidate list, and why it relays across segments.** The names
+a segment's entries may claim come from three scans: identifiers in the
+segment's headings, the leading token of usage lines (code blocks ahead of
+prose), and identifiers in inline code. The identifier shape rule is unchanged
+(`_`/`.` separators pass; a hyphen-only name must carry a digit). The list is a
+**constraint**, not a menu: a name off it vetoes the whole entry. Its cap is
+`MAX_CANDIDATES`, raised from v1's, because a segment is a slab of the document
+rather than one command's section — several commands routinely share one, and a
+list that truncates before the last of them vetoes a real command out of
+existence. A command's documentation also routinely outlives the segment it
+starts in: a 120-parameter table spans several, and every segment after the
+first holds parameters with no command name anywhere in them. So the list
+**relays**: a segment hands its own candidates forward, or, when it has none of
+its own, passes on what it received; a segment that names something resets the
+chain (a new command's heading is the old command's end). A relayed name may be
+claimed in a continuation segment — list membership is still checked, and only
+the "appears verbatim in this segment" half is waived, because that name was
+scanned verbatim out of the segment it came from, so the relay carries a witness
+rather than a guess. `syntax`, parameter names and `default` must still ground
+in **this** segment. **Registered trade-off:** a segment's candidate list holds
+every command-shaped name the segment *mentions*, not only the one it documents,
+so the relay can hand forward a merely cross-referenced name and an orphaned
+parameter table can be keyed onto it. The name is real, the parameter is real,
+both are in the document, and no grounding rule can catch it — human review is
+the backstop for this one.
+
+**The zero-model-call gate.** Whether a segment costs a call at all is
+deterministic: a call happens when the segment **has candidates of its own**, or
+when it **has flag-shaped parameters and received a relayed name**. Three cost
+consequences, by shape: a page of prose following a command is skipped for free
+(a relay alone does not open the gate — the relay never empties once a command
+has been seen, so charging on it bills every prose page of the book for the one
+sentence of description it might hold); an orphaned parameter table with no
+relay, like one that opens the document, is also free (there is no claimable
+name at all, and grounding guarantees the output would be empty); and a
+continuation table that really does follow its command is paid for, which is
+what the relay exists for. A skipped segment makes no call, runs no liveness
+probe and emits no `catalog_section_done` event (a mostly-prose PDF has
+thousands of them) but is still counted off the progress bar — a denominator
+that counts it and a numerator that does not never finishes — and the relay
+still passes through it.
 
 **Extraction.** One background job per source, guarded by a partial unique index
 covering `queued` and `running` — the row is written before the worker starts,
 so a duplicate request in that window is rejected rather than scheduling a
-second writer. One model call per slice, where a slice is one command's worth of
-parameters (a large parameter table overruns the output budget in one call, so
-slicing is mandatory rather than an optimisation). There is no second-opinion
+second writer. One model call per segment to begin with; a segment whose
+flag-shaped parameters exceed `SLICE_PARAM_LIMIT` is split into slices, one call
+each (a large parameter table overruns the output budget in one call, so slicing
+is mandatory rather than an optimisation). **Every slice sees the whole
+segment.** v1's narrow per-slice view (a head excerpt plus the lines holding
+that batch's parameters) was correct when a slice was one command's section; now
+that a slice is a chunk of a multi-command slab, the same clipping becomes
+systematic blindness — thirty candidates with only the first one in view. The
+cost is that a multi-slice segment repeats its whole text per call (at most
+`WINDOW_CHARS` characters), accepted deliberately. There is no second-opinion
 pass and no refinement pass.
 
+**The answer is a list of entries.** The reply is `{"entries": [...]}` — one
+entry per command the segment documents, rather than one command per call.
+`entries: []` is a **legal** answer (a segment that really documents none) and
+does not count as "nothing usable": a prose-heavy manual must not be killed by
+the breaker for it. Only a missing `entries`, or one that is not a list at all,
+is treated as unusable and triggers the halving remedy. A non-object item inside
+the list becomes a **visible rejected row** rather than a silent gap.
+
 **Grounding, and why entries get rejected.** Every extracted entry is checked
-against the section's own text before it is stored: the command name must be on
-the server-supplied candidate list *and* appear verbatim; every parameter name
+against the segment's own text before it is stored: the command name must be on
+the server-supplied candidate list *and* appear verbatim (a relayed name is
+exempt from the second half only); every parameter name
 must appear in its original form (a `-density` documented with its dash is
 rejected when the answer drops it); `syntax` must be a
 contiguous copy of a usage line; a `default` that is not in the text is cleared.
@@ -465,19 +531,19 @@ rejected entries are stored too**, with the reason and a bounded look at the
 text they were searched for in — when a run produces little, those rows are the
 only way to tell "the model went wrong" from "this source is not a manual".
 
-**Commands without flags still get their arguments.** A section with no `-flag`
-anywhere is not a section without parameters: a **positional** argument
+**Commands without flags still get their arguments.** A segment with no `-flag`
+anywhere is not a segment without parameters: a **positional** argument
 (`set_dont_use lib_cells`) is how a one-line command is usually documented. No
 parameter list can be served for those, so the ask is different (copy the
 positional arguments off the usage line, and return none only when there really
 are none) while the grounding is identical — the name has to be verbatim in the
-section text, and an invented one is rejected and stored like any other.
+segment text, and an invented one is rejected and stored like any other.
 
 **Each slice is judged against its own assignment.** A slice asks for a
 specific list of parameters, and its answer is held to that list in both
 directions. A parameter that grounds perfectly but was never asked for belongs
-to another slice and is dropped (every parameter of one command lives in the
-same section text, so grounding alone cannot tell them apart); a parameter that
+to another slice and is dropped (all of a segment's parameters live in the
+same segment text, so grounding alone cannot tell them apart); a parameter that
 was asked for and never came back is recorded on the row as missing. Both show
 up in the review panel next to that command. The second one is also what keeps
 the keep-rate honest: its denominator is what the run was asked for, not what
@@ -488,16 +554,44 @@ gets, since it is the same complaint — while an answer that returned as many
 parameters as it was assigned and simply got them wrong is not re-asked, since
 asking for fewer cannot help.
 
-**Circuit breaker.** After ten sections the run fails, with a user-readable
+**One command, one row, across segments.** When a parameter table crosses a
+segment boundary, or a later part of the manual (SEE ALSO, an examples chapter)
+names the same command again, one command produces an accepted entry in several
+segments. The catalog still holds one row per command: a later segment merges
+back into the row an earlier one already wrote — arguments dedupe by name with
+the **first writer winning**, `syntax` and the description only fill blanks,
+provenance elements union within their cap, and the excerpt stays the **first**
+segment's (the place the command is introduced is the useful one). The one
+exception is a row a person has already acted on: a confirmed or dismissed row
+is never rewritten, and this segment's parameters are **appended as a second
+row** instead — a duplicate a reviewer can see and skip beats a silent loss,
+since the parameters this segment found exist nowhere else.
+
+**Circuit breaker.** After ten segments that **actually made a call** (skipped
+segments are not part of the sample) the run fails, with a user-readable
 reason, if any of three things is true: a command-name veto rate above 20%, an
 argument keep-rate below 50%, or more than 20% of slices producing nothing
 usable at all. Three axes rather than one because each is blind to the others:
 an entry can name the right command and still invent every parameter, and a
 model that answers nothing at all is reported as its own cause rather than as a
 missing-parameter symptom — that run would otherwise pay for the whole manual
-and report success with an empty catalog. A transient provider failure (rate
-limit, upstream error) is not treated as an extraction result at all: it fails
-the job instead of being recorded as "this section had no commands".
+and report success with an empty catalog. A legal `entries: []` is **not**
+counted as unusable; only an unparseable reply is. A transient provider failure
+(rate limit, upstream error) is not treated as an extraction result at all: it
+fails the job instead of being recorded as "this segment had no commands".
+
+**A run that produced literally nothing is not a success.** When a run **made**
+at least one model call, the model never even attempted an entry, and both the
+candidate and rejected row counts are zero, the job settles as `failed` with a
+user-readable reason ("no commands were recognised; this source may not be a
+command manual, or its commands may be written in a way the rules do not
+match"). Every other empty-ish outcome stays a success: a run with rejected rows
+has already shown the user *why* nothing was kept, and a run whose every segment
+was skipped never called a model at all (a source that is simply not a manual,
+correctly costing nothing). This is a verdict on a run that has already
+finished, so it is deliberately not a fourth breaker axis — the breaker aborts
+mid-run on a ratio, while this cannot be evaluated until the last segment is
+done.
 
 **Model-authored fields are bounded and labelled.** `description`, `examples`
 and each parameter's own description are the fields grounding deliberately does
@@ -506,6 +600,39 @@ is written — per field, and, for parameter descriptions, per row as well, with
 the number of descriptions the row budget cut reported alongside the other
 rejections. Examples are shown in the review panel under a note saying they are
 model-generated and not checked against the source.
+
+**Cost preview.** `.../command-catalog/preview` returns two numbers with **zero
+model calls**, each bounded a different way. **How many segments** is arithmetic
+on the source's total text: one SQL aggregate returns the element count and the
+total character count (two integers on the wire), and since segments are packed
+by character count, `estimated_windows = ⌈total characters ÷ WINDOW_CHARS⌉` — a
+preview that performed the scan it is estimating would defeat its own purpose.
+**How many calls** cannot be arithmetic: it depends on the zero-model-call gate
+(a prose segment is free) and on each segment's parameter count (a hundred-flag
+segment is several slices), and both need the text. Those are measured exactly
+over a bounded prefix — including the relay, since a segment's gate reads the
+previous segment's candidates, and dropping it would make the preview's gate
+answer differently from the run's — and every segment past the prefix is charged
+the minimum of one call. `sampled` is `true` when the prefix ran out, so the
+numbers are a floor; both of the prefix's bounds set it, and **per-element
+truncation** is the one that actually distorts the estimate (clipping an options
+table drops parameter names, which drops slices).
+`skipped_windows_in_prefix` is how many segments in the prefix the gate skipped
+— the only explanation for why the call count is far below the segment count,
+without which a mostly-prose manual reading "about 40 segments / about 3 calls"
+looks like a miscount. v1's `signal` (shape detection), `is_manual` and
+`estimated_sections` retired along with rule-based sectioning, deliberately
+**without** compatibility aliases: v2 has no "command section" to count, and a
+field pinned at 0 reads as "this document has no commands" more easily than a
+missing one does.
+
+**Two progress field names kept, their meaning changed.**
+`sections_total`/`sections_done` now count **segments** (skipped ones included);
+the database column names stay, because renaming them would need a migration and
+break the existing observability surface for nothing. `truncated_sections` is
+gone from the transport layer: v2 has no truncation (an oversized element is cut
+across adjacent segments), and a field pinned at 0 only makes the interface
+render a warning that can never happen.
 
 **Confirmation and merge.** Candidates are unconfirmed until a person applies
 them. Apply creates a knowhow table named `命令目录：<source title>` with fixed
@@ -532,6 +659,15 @@ column is refused rather than written to. One `all_pending` call confirms at mos
 a page and reports the rest in `pending_remaining`. Writes go through the
 ordinary knowhow service layer, so the table's change history records them like
 any other edit.
+
+The 出处 column carries the source name followed by the breadcrumb from the
+document. When a segment has no breadcrumb to inherit, the column holds the
+source name **alone**: the candidate row's internal ordinal label (which the
+review panel renders as 「第 N 段」) names a boundary the character budget put
+somewhere in the document, and a person keeps this cell, reads it months later
+and sees it in a graph, where that says nothing. A real breadcrumb
+(`Global Placement > Commands`) is kept — that one genuinely says where in the
+document the command lives.
 
 Every exit path settles the job row, including `Ctrl-C`/`SIGTERM`; a row left
 `queued`/`running` would hold that source's guard until the next backend
@@ -573,13 +709,33 @@ never happened and charge the user for a whole re-extraction.
 Endpoints (all scoped to a source of the notebook in the path; reads need
 notebook read, writes need owner):
 
-- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — shape signal + cost estimate, `sampled` when the bounded read hit its cap; `409` with a user-readable message when the source is not parsed yet or its parse failed
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — cost estimate: `estimated_windows` (segments, from the source's total character count), `estimated_calls`, `skipped_windows_in_prefix`, plus `sampled` when the bounded read hit its cap; `409` with a user-readable message when the source is not parsed yet or its parse failed
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog` — start extraction; `409` with a user-readable message when this source already has an active job (fetch it from `.../job`), the extraction model is unconfigured, the source is not parsed yet or its parse failed, or the previous run still has unreviewed candidates (confirm or dismiss them first). Candidates already expired by a reparse do not block: they are swept and the run proceeds
-- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` — the source's latest job: `status` plus `progress` (`sections_total`, `sections_done`, `entries`, `rejected`, `uncovered`, `truncated_sections`, `pending_candidates`) and, on failure, `failure_reason`. The internal `diagnostic` column is deliberately not exposed
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` — the source's latest job: `status` plus `progress` (`sections_total`, `sections_done` — names kept, counting segments — `entries`, `rejected`, `uncovered`, `pending_candidates`) and, on failure, `failure_reason`. The internal `diagnostic` column is deliberately not exposed
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` — `cancelling` (the worker stops at its next slice boundary, or as soon as an in-flight model call notices the cancellation — it does not wait for that call to return), `cancelled` (no worker in this process; the row is settled directly), or `not_running`
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/candidates` — keyset page (`job_id?`, `state=candidate|rejected|applied|dismissed`, `cursor`, `limit`), plus per-state `counts`. `next_cursor` is the last row's `position`, not an offset: applying candidates changes their state, and an offset would skip or repeat rows. A `dismissed` candidate carries `dismiss_reason`: `conflict_existing_row` (apply found an existing row), `user_dismissed` (dismissed explicitly), or `source_reparsed` (the source was reparsed and the whole run expired)
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` — body `{candidate_ids}` **xor** `{all_pending: true}` — sending both is a user-readable `422` (the two used to silently resolve to `all_pending`, a wider write than a caller who also listed explicit ids asked for); returns `table_id`, `created`, `applied`, `rows_added`, `conflicts` and `pending_remaining` (one call confirms at most a page). `409` with a user-readable message when the source was reparsed after this run, which also expires the job's remaining candidates; a reparse still IN FLIGHT (elements not swapped yet) is a second, differently worded `409` that expires nothing — a parse can fail before the swap, leaving those candidates valid
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` — body `{candidate_ids}` **xor** `{all_pending: true}`, same selection contract (including the `422` on both fields together) and page cap as apply; marks the selected `candidate`-state rows `dismissed` (reason `user_dismissed`) without touching any knowhow table; returns `dismissed` (the ids actually moved) and `pending_remaining`. Both reparse `409`s behave as they do on apply (the completed one expires the whole run, the in-flight one expires nothing)
+
+Numeric limits (registered only here; each has a like-named constant in the code):
+
+| Limit | Constant | Value |
+|-------|----------|-------|
+| Per-segment character budget | `WINDOW_CHARS` | 12,000 |
+| Candidate list per segment | `MAX_CANDIDATES` | 32 (v1: 16; the relayed list shares the cap) |
+| Parameters per slice | `SLICE_PARAM_LIMIT` | 20 |
+| Model calls per slice | `MAX_CALLS_PER_SLICE` | 11 (both remedies included, `1 + 2·(1 + 2·2)`) |
+| Rejection records per row | `MAX_WINDOW_REJECTIONS` | 24 (overflow counted, never silently dropped) |
+| Provenance elements per row | `MAX_ANCHOR_ELEMENTS` | 12 (also the cap on the cross-segment union) |
+| Breaker sample floor | `MIN_WINDOWS_BEFORE_ALERT` | 10 segments that **actually made a call** |
+| Breaker thresholds | `COMMAND_REJECT_ALERT_RATIO` / `ARGS_KEEP_ALERT_RATIO` / `SLICE_FAILURE_ALERT_RATIO` | >20% / <50% / >20% |
+| Preview's bounded prefix | `PREVIEW_ELEMENT_LIMIT` / `PREVIEW_ELEMENT_CHARS` | 2,000 elements / 1,200 characters each |
+| Model-authored fields | `MODEL_DESCRIPTION_CHARS` / `MODEL_EXAMPLE_CHARS` / `MAX_MODEL_EXAMPLES` | 1,000 / 500 / 8 |
+| Argument descriptions, two bounds | `MODEL_ARG_DESC_CHARS` / `MODEL_ARG_DESC_TOTAL_CHARS` | 400 each / 8,000 per row |
+
+Retired: v1's 4,000-character per-slice view and 600-character head excerpt
+(`MAX_SLICE_WINDOW_CHARS` / `OVERVIEW_HEAD_CHARS`) — a slice's view is now the
+whole segment; see "Extraction" above.
 
 ## Retrieval modes (Ask)
 

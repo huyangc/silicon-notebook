@@ -4,7 +4,7 @@
 //
 // · **入口是来源详情里的一张卡片,不是标题栏的图标按钮。** 这个入口要同时承载三种
 //   长期状态(未识别 / 识别中+进度 / 已识别+摘要)、一条可能很长的失败文案和一颗取消
-//   按钮。图标按钮只画得下一个字形加一句 title,「已处理 3/12 节 · 已识别 5 条」无处
+//   按钮。图标按钮只画得下一个字形加一句 title,「已处理 3/12 段 · 已识别 5 条」无处
 //   可放。卡片放在来源元信息那排标签下面 —— 「这份来源能做什么」本来就读在那里。
 //
 // · **成本预告用调用方的确认弹窗(page.tsx 的 infoModal),不自造。** 那个弹窗已经是
@@ -42,6 +42,7 @@ import {
   catalogOverflowNote,
   catalogPendingReviewNote,
   catalogPreviewCopy,
+  catalogSectionLabel,
   catalogStatusLine,
   dismissReasonText,
   isCatalogBusy,
@@ -52,7 +53,7 @@ import {
 import { FloatingModalCard } from "./floating-modal-card";
 import { toUserMessage } from "./errors.ts";
 
-/** 识别任务的轮询间隔。任务是分片跑的,进度以「节」为粒度,4s 足够跟上。 */
+/** 识别任务的轮询间隔。任务是分片跑的,进度以「段」(窗口)为粒度,4s 足够跟上。 */
 const POLL_MS = 4000;
 
 /**
@@ -839,14 +840,14 @@ export function CommandCatalogReview({
                       <span className="catalog-item-name" title={item.command_name}>
                         {item.command_name || "未命名条目"}
                       </span>
-                      <span className="tag catalog-item-section" title={item.section_path}>
-                        {item.section_path || "未标注出处"}
+                      <span className="tag catalog-item-section" title={catalogSectionLabel(item.section_path)}>
+                        {catalogSectionLabel(item.section_path) || "未标注出处"}
                       </span>
                       {tab === "candidate" && (
                         <span className="tag">参数 {item.args.length}</span>
                       )}
                       {item.suspect_related && (
-                        <span className="tag catalog-item-suspect" title="这一节提到了这条命令，但标题与用法行里没有它，可能只是被提及">
+                        <span className="tag catalog-item-suspect" title="这一段提到了这条命令，但标题与用法行里没有它，可能只是被提及">
                           疑似仅被提及
                         </span>
                       )}

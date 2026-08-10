@@ -744,7 +744,9 @@ class CatalogStorePort(Protocol):
     over ``(job_id, state, position)``; ``candidates_by_ids`` and
     ``pending_candidates`` take explicit caps; ``preview_elements`` clips both
     the row count and each row's text so a cost preview can never turn into a
-    full-source scan."""
+    full-source scan; ``source_text_stats`` is bounded the other way — it
+    scans every row of one source, but returns only two integers, never any
+    element text."""
 
     def create_job(
         self,
@@ -810,6 +812,32 @@ class CatalogStorePort(Protocol):
         diagnostic: str = "",
     ) -> bool: ...
     def add_candidates(self, rows: Sequence[Mapping[str, Any]]) -> None: ...
+    def update_candidate_payload(
+        self,
+        candidate_id: str,
+        payload: Mapping[str, Any],
+        reject_info: Mapping[str, Any],
+    ) -> bool:
+        """Overwrite ONE still-unreviewed candidate's payload and reject_info.
+
+        v2's cross-window merge is the only writer. A command's documentation
+        routinely spans several extraction windows (a long options table, or a
+        second mention in an EXAMPLES chapter), and the catalog holds one row
+        per command — so the row written when the command was first seen is
+        revised in place as later windows add parameters to it, rather than a
+        second row being appended for the same name.
+
+        Deliberately narrow. It touches ``payload``/``reject_info`` and nothing
+        else: ``position`` is the keyset cursor the review page pages on,
+        ``state`` is the review lifecycle, and ``command_name``/``section_path``
+        identify the row — a merge revises what is KNOWN about a command, never
+        which command it is or where the reviewer finds it. It is also scoped to
+        ``state='candidate'``, so a row a person already confirmed or skipped
+        mid-run is left exactly as they saw it (the knowhow row it produced was
+        written from the old payload and would not be revised by a later write
+        here anyway); ``False`` says the row was not there to revise.
+        """
+        ...
     def list_candidates(
         self, job_id: str, *, state: str, cursor: int, limit: int
     ) -> list[dict]: ...
@@ -875,6 +903,22 @@ class CatalogStorePort(Protocol):
     def preview_elements(
         self, source_id: str, *, limit: int, text_chars: int
     ) -> tuple[list[dict], bool]: ...
+    def source_text_stats(self, source_id: str) -> tuple[int, int]:
+        """``(element_count, total_chars)`` over ALL of one source's elements —
+        the same row universe ``preview_elements`` reads (``WHERE
+        source_id=?``, no other predicate), just aggregated in SQL instead of
+        clipped and returned.
+
+        Feeds the v2 cost preview's ``estimated_windows`` (windows are packed
+        by character count, so the window count is a function of the source's
+        TOTAL text, not the bounded prefix ``preview_elements`` is willing to
+        hydrate). One indexed, bounded scan per call — ``COUNT(*)`` and
+        ``SUM(LENGTH(text))`` over a single source's rows, computed entirely
+        in SQL — and it transmits zero element text back to Python, unlike
+        ``preview_elements`` which exists precisely to avoid that for its own
+        (smaller, row-capped) read.
+        """
+        ...
 
 
 @runtime_checkable

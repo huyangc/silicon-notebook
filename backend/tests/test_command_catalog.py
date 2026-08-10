@@ -1,4 +1,4 @@
-"""Command-manual catalog extraction, the pure layer.
+"""Command-manual catalog extraction, the pure layer (v2: windows).
 
 The fixtures are real command reference sections from the OpenROAD project
 documentation (Apache-2.0), trimmed to the parts the assertions need. Using the
@@ -13,6 +13,12 @@ Elements are written out directly rather than parsed from markdown, in the
 spirit of test_exact_lookup's seeded chunks: the dicts here are exactly what
 `source_elements_for_chunking` hands the production caller, so a failure points
 at this module rather than at the markdown parser.
+
+v2 replaced rule-based sectioning with lossless windowing, so the grouping and
+shape-detection suites are gone. Everything below the geometry — grounding,
+attribution, coverage, the ledger — is unchanged code and its cases are carried
+over deliberately: those assertions are the regression asset, and the only
+thing that moved under them is which object carries the text.
 """
 from __future__ import annotations
 
@@ -20,21 +26,21 @@ import pytest
 
 from app.services.command_catalog import (
     MAX_CANDIDATES,
-    MAX_SECTION_REJECTIONS,
-    MAX_SLICE_WINDOW_CHARS,
+    MAX_WINDOW_REJECTIONS,
     SLICE_PARAM_LIMIT,
-    CommandSection,
-    SectionElement,
-    SectionMeta,
+    WINDOW_CHARS,
+    ExtractionWindow,
+    WindowElement,
+    carry_candidates,
     catalog_stats,
-    command_candidates,
-    command_sections,
-    detect_manual_shape,
     extraction_slices,
+    extraction_windows,
     normalize_syntax,
     parameter_names,
-    section_outcome,
     validate_entry,
+    window_candidates,
+    window_needs_model,
+    window_outcome,
 )
 from app.services.parsers import parse_markdown_text
 
@@ -105,7 +111,7 @@ GPL_OPTIONS = (
     "default value is `0`. |"
 )
 
-# OpenROAD `gpl` — a second command, so grouping has a sibling to separate.
+# OpenROAD `gpl` — a second command, so a window has more than one to offer.
 CLUSTER_FLOPS_INTRO = "This command does flop clustering based on parameters."
 
 CLUSTER_FLOPS_SYNTAX = r"""cluster_flops
@@ -172,735 +178,329 @@ def _gpl_elements():
 
 
 def _flops_elements():
+    # A different source_id, so ids stay unique when the two are concatenated
+    # into one document — window packing reads ids, and two elements sharing
+    # one would make the continuation/join boundary unreadable.
     return _elements(
         ("heading", FLOPS_PATH, "Cluster Flops"),
         ("paragraph", FLOPS_PATH, CLUSTER_FLOPS_INTRO),
         ("code_block", FLOPS_PATH, CLUSTER_FLOPS_SYNTAX),
         ("heading", FLOPS_OPTIONS_PATH, "Options"),
         ("table", FLOPS_OPTIONS_PATH, CLUSTER_FLOPS_OPTIONS),
+        source_id="src-flops",
     )
 
 
-def _section(text, *, title="Cluster Flops", path=FLOPS_PATH, hint="cluster_flops"):
-    """A hand-made section, for validation tests that need no grouping."""
-    return CommandSection(
-        title=title,
-        section_path=path,
-        shape="syntax_block",
-        command_hint=hint,
-        elements=(SectionElement(id="el-0001", element_type="paragraph", text=text),),
-        text=text,
+def _window(text, *, heading="", provenance="", ordinal=0):
+    """A hand-made window, for tests that need no packing.
+
+    `heading` is a real heading ELEMENT rather than a label, because that is
+    what `validate_entry`'s `suspect_related` reads — `provenance` is display
+    only and must never reach a decision.
+    """
+    elements = []
+    if heading:
+        elements.append(
+            WindowElement(
+                id="el-head",
+                element_type="heading",
+                text=heading,
+                section_path=provenance or heading,
+            )
+        )
+    elements.append(
+        WindowElement(id="el-0001", element_type="paragraph", text=text)
+    )
+    return ExtractionWindow(
+        ordinal=ordinal,
+        elements=tuple(elements),
+        text="\n".join(element.text for element in elements),
+        provenance=provenance or heading,
     )
 
 
 @pytest.fixture
-def flops_section():
-    sections = command_sections(_flops_elements())
-    assert len(sections) == 1
-    return sections[0]
+def flops_window():
+    windows = extraction_windows(_flops_elements())
+    assert len(windows) == 1
+    return windows[0]
 
 
-# ------------------------------------------------------------ 1. shape signal
-def _manual_metas():
-    """Seven real OpenROAD sections, as a caller would sample them."""
-    return [
-        SectionMeta("Global Placement", f"{GPL_INTRO}\n{GPL_SYNTAX}"),
-        SectionMeta("Options", GPL_OPTIONS),
-        SectionMeta(
-            "Cluster Flops",
-            f"{CLUSTER_FLOPS_INTRO}\n{CLUSTER_FLOPS_SYNTAX}",
+def _expected_text(rows):
+    """What the whole element stream reads as, joined the way windows join."""
+    return "\n".join(
+        str(row["text"]).strip() for row in rows if str(row["text"]).strip()
+    )
+
+
+def _rebuild(windows):
+    """Concatenate window texts back into the original stream's text.
+
+    Every window boundary is one of two things, and `element_ids` says which:
+    a CONTINUATION of one oversized element cut in two (the previous window's
+    last contributing element is this window's first), or an ELEMENT JOIN — the
+    single newline `extraction_windows` puts between two elements, which lands
+    at a window boundary instead of inside a window's text. Reconstructing with
+    that rule makes "nothing is lost" an exact string equality rather than a
+    whitespace-insensitive comparison, which would also pass if a boundary had
+    eaten a real character or duplicated one.
+    """
+    if not windows:
+        return ""
+    parts = [windows[0].text]
+    for previous, current in zip(windows, windows[1:]):
+        continuation = previous.element_ids[-1] == current.element_ids[0]
+        parts.append("" if continuation else "\n")
+        parts.append(current.text)
+    return "".join(parts)
+
+
+# ----------------------------------------------------------- 1. window packing
+def test_document_packs_into_ordered_windows():
+    windows = extraction_windows(_gpl_elements() + _flops_elements())
+
+    assert [window.ordinal for window in windows] == list(range(len(windows)))
+    # Small enough to share one window, which is the ordinary case and the
+    # reason `window_candidates` has to offer more than one command.
+    assert len(windows) == 1
+    assert len(windows[0].element_ids) == 10
+
+
+def test_window_text_is_exactly_its_own_elements(flops_window):
+    """A grounding check that searched text the model never saw — or missed
+    text it did — would pass hallucinations, so the two must agree."""
+    assert flops_window.text == "\n".join(
+        element.text for element in flops_window.elements
+    )
+
+
+def test_windows_respect_the_character_budget():
+    rows = _gpl_elements() + _flops_elements()
+
+    windows = extraction_windows(rows, max_chars=500)
+
+    assert len(windows) > 1
+    assert all(len(window.text) <= 500 for window in windows)
+
+
+def test_elements_that_fit_are_never_cut_in_half():
+    """"Whole element or next window" is the packing rule: a table split
+    mid-row grounds worse than the same table one window later."""
+    rows = _elements(
+        ("paragraph", "", "a" * 60),
+        ("paragraph", "", "b" * 60),
+        ("paragraph", "", "c" * 60),
+    )
+
+    windows = extraction_windows(rows, max_chars=100)
+
+    # Three windows of one whole element each — never 60+40 / 20+60 / 60.
+    assert [window.text for window in windows] == ["a" * 60, "b" * 60, "c" * 60]
+    assert [len(window.element_ids) for window in windows] == [1, 1, 1]
+
+
+def test_oversized_element_is_split_across_windows_and_keeps_its_id():
+    """v1 dropped an over-budget element whole. Measured, that turned a
+    120-parameter table into 36 characters of heading text and a
+    command-reject ratio of 0.0 — the failure had nothing left to show up in.
+    Splitting is the fix, and each piece keeps the element's own id so a
+    citation anchor still points at something a person can open."""
+    rows = _elements(
+        ("heading", "M > Big", "big_command options"),
+        ("table", "M > Big", "z" * 250),
+    )
+
+    windows = extraction_windows(rows, max_chars=100)
+
+    assert [window.element_ids for window in windows] == [
+        ("el-src-manual-0001",),
+        ("el-src-manual-0002",),
+        ("el-src-manual-0002",),
+        ("el-src-manual-0002",),
+    ]
+    assert "".join(window.text for window in windows[1:]) == "z" * 250
+
+
+@pytest.mark.parametrize(
+    "rows, max_chars",
+    [
+        # Nothing at all.
+        ([], 100),
+        # Everything in one window.
+        (_gpl_elements() + _flops_elements(), WINDOW_CHARS),
+        # A budget that forces boundaries between elements.
+        (_gpl_elements() + _flops_elements(), 500),
+        # A budget smaller than every single element: every boundary is a cut.
+        (_gpl_elements() + _flops_elements(), 40),
+        # The degenerate budget.
+        (_gpl_elements(), 1),
+        # An element that is exactly the budget, flanked by others.
+        (
+            _elements(
+                ("paragraph", "", "a" * 30),
+                ("paragraph", "", "b" * 100),
+                ("paragraph", "", "c" * 30),
+            ),
+            100,
         ),
-        SectionMeta("Options", CLUSTER_FLOPS_OPTIONS),
-        SectionMeta(
-            "Set Don't Use",
-            f"{SET_DONT_USE_INTRO}\n{SET_DONT_USE_SYNTAX}",
+        # Blank elements interleaved — they carry no characters to lose.
+        (
+            _elements(
+                ("paragraph", "", "   "),
+                ("paragraph", "", "kept text"),
+                ("paragraph", "", ""),
+            ),
+            100,
         ),
-        SectionMeta(
-            "Placement Clusters",
-            "This command defines instances placed as a single cluster.\n"
-            + PLACEMENT_CLUSTER_SYNTAX,
-        ),
-        SectionMeta(
-            "Remove Fillers",
-            "This command removes filler cells.\nremove_fillers",
-        ),
-        SectionMeta("License", "BSD 3-Clause License."),
-    ]
+    ],
+)
+def test_windowing_loses_and_duplicates_nothing(rows, max_chars):
+    """The invariant the whole geometry change rests on.
 
-
-# A paper's appendix numbering, which is what the numbering filter actually
-# buys: bare `2.1` is already excluded upstream by the ASCII-letter rule, while
-# `A.1.2` has a letter, a dot and five characters and so clears every other
-# gate. Eight of them, all command-shaped without the filter, so the fixture
-# demonstrates the product consequence — a survey classified as a manual — and
-# not merely a counter moving.
-PAPER_METAS = [
-    SectionMeta("A.1.2 Notation",
-                "Table A.1 lists the symbols used throughout the paper."),
-    SectionMeta("B.2.1 Hyperparameters",
-                "We train for three epochs with a small learning rate."),
-    SectionMeta("C.3.4 Proofs",
-                "The proof follows from the convexity of the objective."),
-    SectionMeta("D.1.5 Datasets",
-                "We evaluate on three public question answering datasets."),
-    SectionMeta("E.2.1 Ablations",
-                "Removing the reranker reduces recall by four points."),
-    SectionMeta("F.4.2 Limitations",
-                "Our approach assumes documents fit the context window."),
-    SectionMeta("G.1.3 Broader Impact",
-                "We discuss deployment considerations for practitioners."),
-    SectionMeta("H.2.6 Reproducibility",
-                "Code and configurations are released with the paper."),
-]
-
-
-def test_openroad_sections_read_as_a_command_manual():
-    signal = detect_manual_shape(_manual_metas())
-
-    # Five command-shaped sections out of eight — the two `Options`
-    # sub-sections and the licence do not count, which is the point: the
-    # signal estimates *commands*, not "pages that mention a flag".
-    assert signal.command_shaped_sections == 5
-    assert signal.syntax_sections == 5
-    assert signal.is_manual is True
-    assert signal.reason == "manual"
-
-
-def test_numbered_paper_headings_are_not_read_as_command_names():
-    """A survey's `A.1.2 Notation` is numbering, not a command.
-
-    Every one of these headings clears the ASCII-letter, minimum-length and
-    dotted-separator gates, so without the numbering filter all eight count as
-    identifier-named and a paper is offered command extraction.
+    v1's packer had a discard branch, and silent loss there was invisible
+    downstream: an entry can only be wrong about text it was shown, so text
+    that was never shown produces no rejection, no ratio movement and no
+    report line. This asserts the property directly, over shapes that exercise
+    every branch of the packer — whole-element placement, "does not fit, open
+    a new window", and "does not fit anywhere, cut it".
     """
-    signal = detect_manual_shape(PAPER_METAS)
+    windows = extraction_windows(rows, max_chars=max_chars)
 
-    assert signal.identifier_headings == 0
-    assert signal.command_shaped_sections == 0
-    assert signal.is_manual is False
-    assert signal.reason == "too_few_command_sections"
+    assert _rebuild(windows) == _expected_text(rows)
 
 
-def test_prose_source_without_commands_is_not_a_manual():
-    metas = [
-        SectionMeta(f"Chapter {index}",
-                    "Placement algorithms trade wirelength against timing.")
-        for index in range(1, 13)
-    ]
-
-    signal = detect_manual_shape(metas)
-
-    assert signal.is_manual is False
-    assert signal.command_shaped_sections == 0
-
-
-def test_flag_density_is_reported_but_never_votes():
-    """Flag-dense prose is evidence for a person, not a verdict.
-
-    An `Options` table is flag-dense and is not a command; counting it would
-    score one command twice and let any page of shell examples through.
-    """
-    metas = [
-        SectionMeta(f"Tips {index}",
-                    "Pass -verbose to see more.\nUse -jobs 8 for speed.\n"
-                    "Add -color always when piping.")
-        for index in range(1, 9)
-    ]
-
-    signal = detect_manual_shape(metas)
-
-    assert signal.flag_sections == 8
-    assert signal.flag_ratio == 1.0
-    assert signal.command_shaped_sections == 0
-    assert signal.is_manual is False
-
-
-def test_empty_input_is_reported_rather_than_guessed():
-    signal = detect_manual_shape([])
-
-    assert signal.total_sections == 0
-    assert signal.is_manual is False
-    assert signal.reason == "no_sections"
-
-
-# Dotted-only headings (no underscore) clear every gate a real underscore-
-# joined command name clears — ASCII letter, minimum length, dotted
-# separator — but real commands are never spelled this way. Eight repeats
-# used to be enough to read as a manual on strength alone (P2-1).
-FILENAME_METAS = [
-    SectionMeta(name, f"See {name} for the full configuration reference.")
-    for name in [
-        "README.md",
-        "config.yaml",
-        "config.yaml",
-        "settings.json",
-        "docker-compose.yaml",
-        "config.yaml",
-        "package.json",
-        "tsconfig.json",
-    ]
-]
-
-
-def test_dotted_filename_headings_alone_do_not_read_as_a_manual():
-    """`README.md` / `config.yaml` headings, repeated, used to score
-    `is_manual=True` on strength alone — a dotted-only heading is *weak*
-    identifier evidence, not the strong (underscore-joined) kind a real
-    `### set_db` heading carries, and here there is no corroborating syntax
-    line or parameter table anywhere in the source either."""
-    signal = detect_manual_shape(FILENAME_METAS)
-
-    assert signal.identifier_headings == 8
-    assert signal.command_shaped_sections == 8
-    assert signal.is_manual is False
-    assert signal.reason == "weak_identifier_headings_only"
-
-
-def test_strong_identifier_headings_still_read_as_a_manual():
-    """Underscore-joined headings are strong evidence on their own,
-    corroborating evidence or not — a real `### set_db`-shaped manual must
-    not regress just because the weak (dotted-only) path got stricter."""
-    metas = [
-        SectionMeta(name, f"Documentation for {name}.")
-        for name in [
-            "set_db", "get_db", "add_to_db", "remove_from_db", "list_db_entries",
-        ]
-    ]
-
-    signal = detect_manual_shape(metas)
-
-    assert signal.identifier_headings == 5
-    assert signal.is_manual is True
-    assert signal.reason == "manual"
-
-
-def test_section_meta_accepts_tuples_and_mappings():
-    tuples = detect_manual_shape(
-        [("Global Placement", f"{GPL_INTRO}\n{GPL_SYNTAX}")]
-    )
-    mappings = detect_manual_shape(
-        # An extraneous `section_path` key (e.g. a raw chunk-store row) is
-        # tolerated, not read — `detect_manual_shape` counts sections, it
-        # never groups them.
-        [{"section_path": GPL_PATH, "heading_text": "Global Placement",
-          "text_sample": f"{GPL_INTRO}\n{GPL_SYNTAX}"}]
-    )
-
-    assert tuples.syntax_sections == 1
-    assert mappings.syntax_sections == 1
-
-
-# --------------------------------------------------------------- 2. grouping
-def test_title_bodied_section_owns_its_options_subsection():
-    """`### Global Placement` + `#### Options` is one command, not two."""
-    sections = command_sections(_gpl_elements())
-
-    assert len(sections) == 1
-    section = sections[0]
-    assert section.title == "Global Placement"
-    assert section.command_hint == "global_placement"
-    assert section.shape == "syntax_block"
-    # The parameter table is inside the section it documents — the whole
-    # reason this grouping exists.
-    assert "-tray_weight" not in section.text
-    assert "`-density`" in section.text
-    assert len(section.element_ids) == 5
-
-
-def test_sibling_command_opens_its_own_section():
-    sections = command_sections(_gpl_elements() + _flops_elements())
-
-    assert [section.command_hint for section in sections] == [
-        "global_placement",
-        "cluster_flops",
-    ]
-    assert "cluster_flops" not in sections[0].text
-    assert "global_placement" not in sections[1].text
-
-
-def test_front_matter_before_the_first_command_is_dropped():
-    elements = _elements(
-        ("heading", "Global Placement", "Global Placement"),
-        ("paragraph", "Global Placement", "The gpl module performs placement."),
-        ("heading", "Global Placement > Commands", "Commands"),
-    ) + _gpl_elements()
-
-    sections = command_sections(elements)
-
-    assert len(sections) == 1
-    assert "The gpl module performs placement." not in sections[0].text
-
-
-def test_trailing_chapter_does_not_join_the_last_command():
-    """`## License` is shallower than the command — it closes the section."""
-    elements = _gpl_elements() + _elements(
-        ("heading", "Global Placement > License", "License"),
-        ("paragraph", "Global Placement > License", "BSD 3-Clause License."),
-    )
-
-    sections = command_sections(elements)
-
-    assert len(sections) == 1
-    assert "BSD 3-Clause" not in sections[0].text
-
-
-def test_sibling_subsection_keeps_its_parameter_table():
-    """A manual that nests unevenly still keeps the table with the command.
-
-    Measured on OpenROAD `rsz`: `replace_arith_modules` is documented under an
-    `####` heading whose `#### Options` table is a *sibling*, not a child. A
-    descendant-only rule drops that table on the floor.
-    """
-    base = "Gate Resizer > Commands > Optimizing Arithmetic Modules"
-    elements = _elements(
-        ("heading", f"{base} > Requirements", "Requirements"),
-        ("paragraph", f"{base} > Requirements", "Hierarchically linked design."),
-        ("code_block", f"{base} > Requirements",
-         "replace_arith_modules\n    [-path_count num_critical_paths]"),
-        ("heading", f"{base} > Options", "Options"),
-        ("table", f"{base} > Options",
-         "| `-path_count` | Number of critical paths. Default is `1000`. |"),
-    )
-
-    sections = command_sections(elements)
-
-    assert len(sections) == 1
-    assert sections[0].command_hint == "replace_arith_modules"
-    assert "-path_count" in sections[0].text
-
-
-def test_cross_reference_prose_does_not_fork_a_section():
-    """`#### SEE ALSO` holding a bare command name is not a command section.
-
-    Prose is weak evidence and loses to a sibling; a code block would not.
-    """
-    base = "Gate Resizer > Commands > Optimizing Arithmetic Modules"
-    elements = _elements(
-        ("heading", f"{base} > Requirements", "Requirements"),
-        ("code_block", f"{base} > Requirements", "replace_arith_modules"),
-        ("heading", f"{base} > SEE ALSO", "SEE ALSO"),
-        ("paragraph", f"{base} > SEE ALSO", "replace_hier_module"),
-    )
-
-    sections = command_sections(elements)
-
-    assert len(sections) == 1
-    assert sections[0].command_hint == "replace_arith_modules"
-
-
-def test_one_line_command_with_a_positional_argument_is_found():
-    """`set_dont_use lib_cells` — no flags, no bracket list, still a command.
-
-    Omitting this shape is not a corner case: it lost five real commands in
-    one OpenROAD module.
-    """
-    path = "Gate Resizer > Commands > Set Don't Use"
-    elements = _elements(
-        ("heading", path, "Set Don't Use"),
-        ("paragraph", path, SET_DONT_USE_INTRO),
-        ("code_block", path, SET_DONT_USE_SYNTAX),
-    )
-
-    sections = command_sections(elements)
-
-    assert [section.command_hint for section in sections] == ["set_dont_use"]
-
-
-def test_prose_sentence_opening_with_an_identifier_is_not_a_usage_line():
-    path = "Guide > Notes"
-    elements = _elements(
-        ("heading", path, "Notes"),
-        ("paragraph", path, "global_placement performs the placement step."),
-        ("paragraph", path, "Fig.2 shows the resulting layout."),
-    )
-
-    assert command_sections(elements) == []
-
-
-def test_flag_bearing_sentences_are_not_usage_lines():
-    """B2's exact repro shape: a flag inside a sentence must not let the
-    flag-carrying branch skip the same sentence-punctuation and snake_case
-    guards the positional-argument branch already has to pass.
-
-    Four failing shapes, two mechanisms: `Fig.2 shows the -density sweep.`
-    and `config.yaml lists the -density defaults` are dotted, not snake_case
-    (rejected regardless of punctuation — `config.yaml`'s sentence
-    deliberately has no trailing period, so only that guard can catch it);
-    `global_placement accepts -density values.` and its Chinese-punctuation
-    twin are snake_case but end in a sentence (English and Chinese
-    respectively — "(中英文句读)"). Eight sections' worth of any of these
-    used to be enough to make a paper with no commands read as a manual.
-    """
-    path = "Guide > Notes"
-    elements = _elements(
-        ("heading", path, "Notes"),
-        ("paragraph", path, "Fig.2 shows the -density sweep."),
-        ("paragraph", path, "global_placement accepts -density values."),
-        ("paragraph", path, "global_placement 会读取 -density 参数。"),
-        ("paragraph", path, "config.yaml lists the -density defaults"),
-    )
-
-    assert command_sections(elements) == []
-
-
-def test_flag_carrying_usage_line_is_still_recognised():
-    """The real shape the flag branch exists for must survive the reorder."""
-    path = "Global Placement > Commands > Global Placement"
-    elements = _elements(
-        ("heading", path, "Global Placement"),
-        ("code_block", path, "get_global_placement_uniform_density -pad_left"),
-    )
-
-    sections = command_sections(elements)
-
-    assert [section.command_hint for section in sections] == [
-        "get_global_placement_uniform_density"
-    ]
-
-
-def test_element_stream_without_breadcrumbs_groups_by_heading_order():
-    """The MinerU shape: headings, no section paths, no code_block type."""
-    elements = _elements(
-        ("heading", "", "Global Placement"),
-        ("paragraph", "", GPL_INTRO),
-        ("paragraph", "", "global_placement [-timing_driven] [-density target_density]"),
-        ("heading", "", "Options"),
-        ("paragraph", "", "-timing_driven | Enable timing-driven mode."),
-        ("heading", "", "Cluster Flops"),
+def test_blank_elements_are_not_windowed():
+    """No characters, nothing to ground against, nothing to cite — dropping
+    them is not a content loss, and keeping them would put empty lines and
+    dangling anchors in every prompt."""
+    rows = _elements(
+        ("paragraph", "", "   "),
         ("paragraph", "", "cluster_flops [-tray_weight tray_weight]"),
     )
 
-    sections = command_sections(elements)
+    windows = extraction_windows(rows)
 
-    assert [section.command_hint for section in sections] == [
-        "global_placement",
-        "cluster_flops",
-    ]
-    # Without breadcrumbs the Options block cannot be tested for descent, so
-    # the plain "fold into the previous command" rule applies.
-    assert "Enable timing-driven mode" in sections[0].text
+    assert len(windows) == 1
+    assert windows[0].element_ids == ("el-src-manual-0002",)
 
 
-def test_examples_repeating_the_command_do_not_fork_a_section():
-    elements = _elements(
-        ("heading", "", "Global Placement"),
-        ("code_block", "", GPL_SYNTAX),
-        ("heading", "", "Examples"),
-        ("code_block", "", "global_placement -density 0.6"),
-    )
-
-    sections = command_sections(elements)
-
-    assert len(sections) == 1
-    assert "0.6" in sections[0].text
+def test_empty_stream_yields_no_windows():
+    assert extraction_windows([]) == []
 
 
-def test_descendant_subsection_citing_another_command_does_not_fork_a_section():
-    """A nested subsection whose code block cites a DIFFERENT command must
-    lose to the descendant guard even though the evidence is code (`from_code`
-    does not gate descent). The existing regression for this `_classify`
-    branch (`test_examples_repeating_the_command_do_not_fork_a_section`) only
-    covers the *same*-command case, caught by the earlier
-    `usage == current.command_hint` check alone — this is the other half."""
-    base = "Gate Resizer > Commands > Optimizing Arithmetic Modules > Requirements"
-    elements = _elements(
-        ("heading", base, "Requirements"),
-        ("code_block", base,
-         "replace_arith_modules\n    [-path_count num_critical_paths]"),
-        ("heading", f"{base} > Notes", "Notes"),
-        ("code_block", f"{base} > Notes", "report_timing -digits 3"),
-    )
-
-    sections = command_sections(elements)
-
-    assert len(sections) == 1
-    assert sections[0].command_hint == "replace_arith_modules"
-    assert "report_timing" in sections[0].text
-
-
-def test_usage_evidence_prefers_a_later_code_block_over_earlier_prose():
-    """Measured on OpenROAD `rsz`: the section documenting
-    `replace_arith_modules` opens with prose citing `link_design top -hier`
-    (a cross-reference to a *different*, hierarchy-related command), and the
-    code block naming the actual documented command comes after it in
-    document order. Reading elements in document order would pick the wrong
-    name; `_usage_evidence` runs a dedicated code-only pass first instead."""
-    base = "Gate Resizer > Commands > Optimizing Arithmetic Modules > Requirements"
-    elements = _elements(
-        ("heading", base, "Requirements"),
-        ("paragraph", base,
-         "Hierarchically linked design. The design needs to be linked to "
-         "preserve hierarchical boundaries. For example,"),
-        ("paragraph", base, "link_design top -hier"),
-        ("code_block", base,
-         "replace_arith_modules\n    [-path_count num_critical_paths]"),
-    )
-
-    sections = command_sections(elements)
-
-    assert len(sections) == 1
-    assert sections[0].command_hint == "replace_arith_modules"
-
-
-# OpenROAD `rsz`'s real `## Example scripts` appendix (P2-2): top-level, no
-# sibling/descendant relationship to any command, and its first code line
-# cites `read_sdc` — a command rsz's own manual never documents anywhere
-# else. Trimmed to the shape the bug needs; text copied verbatim from rsz.md.
-RSZ_ARITH_BASE = "Gate Resizer > Commands > Optimizing Arithmetic Modules"
-RSZ_ARITH_REQUIREMENTS = f"{RSZ_ARITH_BASE} > Requirements for Arithmetic Module Swap"
-RSZ_ARITH_SYNTAX = (
-    "replace_arith_modules \n"
-    "    [-path_count num_critical_paths]\n"
-    "    [-slack_threshold float]\n"
-    "    [-target setup | hold | power | area]"
-)
-RSZ_ARITH_OPTIONS = (
-    "| Switch Name | Description |\n"
-    "| ----------- | ---------- |\n"
-    "| `-path_count` | Number of critical paths to analyze. Default `1000`. |\n"
-    "| `-slack_threshold` | Slack threshold. Default `0.0`. |\n"
-    "| `-target` | Optimization target. Default `setup`. |"
-)
-RSZ_EXAMPLE_SCRIPT = (
-    "read_sdc gcd.sdc\n\n"
-    "set_wire_rc -layer metal2\n\n"
-    "set_dont_use {CLKBUF_* AOI211_X1 OAI211_X1}\n\n"
-    "buffer_ports\n"
-    "repair_design -max_wire_length 100\n"
-    "repair_tie_fanout LOGIC0_X1/Z\n"
-    "repair_tie_fanout LOGIC1_X1/Z\n"
-    "#clock tree synthesis...\n"
-    "repair_timing"
-)
-
-
-def test_rsz_example_scripts_section_does_not_open_a_read_sdc_command():
-    """Real rsz shape: `## Example scripts` cites `read_sdc`, undocumented
-    anywhere in rsz's own manual. Without the source-level fix this section
-    opens its own `read_sdc` command and passes every grounding check —
-    fixing it downstream in C1b could not tell it apart from a real one."""
-    elements = _elements(
-        ("heading", RSZ_ARITH_BASE, "Optimizing Arithmetic Modules"),
-        ("paragraph", RSZ_ARITH_BASE,
-         "The `replace_arith_modules` command optimizes design performance "
-         "by intelligently swapping hierarchical arithmetic modules."),
-        ("heading", RSZ_ARITH_REQUIREMENTS,
-         "Requirements for Arithmetic Module Swap"),
-        ("code_block", RSZ_ARITH_REQUIREMENTS, RSZ_ARITH_SYNTAX),
-        ("heading", f"{RSZ_ARITH_BASE} > Options", "Options"),
-        ("table", f"{RSZ_ARITH_BASE} > Options", RSZ_ARITH_OPTIONS),
-        ("heading", f"{RSZ_ARITH_BASE} > SEE ALSO", "SEE ALSO"),
-        ("paragraph", f"{RSZ_ARITH_BASE} > SEE ALSO", "replace_hier_module"),
-        ("heading", "Gate Resizer > Example scripts", "Example scripts"),
-        ("paragraph", "Gate Resizer > Example scripts",
-         "A typical `resizer` command file (after a design and Liberty "
-         "libraries have been read) is shown below."),
-        ("code_block", "Gate Resizer > Example scripts", RSZ_EXAMPLE_SCRIPT),
-    )
-
-    sections = command_sections(elements)
-
-    assert [section.command_hint for section in sections] == [
-        "replace_arith_modules"
-    ]
-    # Folded, not dropped: the example's own text lands on the preceding
-    # command's evidence rather than vanishing.
-    assert "read_sdc gcd.sdc" in sections[0].text
-
-
-# OpenROAD `cts`'s real `## Example scripts` appendix: re-invokes
-# `clock_tree_synthesis`, already documented above it, purely as a usage
-# illustration. Without the fix this opens a *duplicate*
-# `clock_tree_synthesis` section.
-CTS_PATH = "Clock Tree Synthesis > Commands > Clock Tree Synthesis"
-CTS_SYNTAX = (
-    "clock_tree_synthesis\n"
-    "    [-root_buf root_buf]\n"
-    "    [-buf_list buf_list]\n"
-    "    [-wire_unit wire_unit]"
-)
-RESET_CTS_PATH = "Clock Tree Synthesis > Commands > Reset CTS configuration"
-RESET_CTS_INTRO = (
-    "This command is used to reset the configuration of CTS. The flags "
-    "determine which configurations will be reset to their default values."
-)
-RESET_CTS_SYNTAX = (
-    "reset_cts_config\n    [-apply_ndr]\n    [-root_buf]\n    [-wire_unit]"
-)
-CTS_EXAMPLE_SCRIPT = (
-    'clock_tree_synthesis -root_buf "BUF_X4" \\\n'
-    '                     -buf_list "BUF_X4" \\\n'
-    '                     -wire_unit 20\n'
-    'report_cts "file.txt"'
-)
-
-
-def test_cts_example_scripts_section_does_not_duplicate_an_earlier_command():
-    elements = _elements(
-        ("heading", CTS_PATH, "Clock Tree Synthesis"),
-        ("code_block", CTS_PATH, CTS_SYNTAX),
-        ("heading", RESET_CTS_PATH, "Reset CTS configuration"),
-        ("paragraph", RESET_CTS_PATH, RESET_CTS_INTRO),
-        ("code_block", RESET_CTS_PATH, RESET_CTS_SYNTAX),
-        ("heading", "Clock Tree Synthesis > Useful Developer Commands",
-         "Useful Developer Commands"),
-        ("table", "Clock Tree Synthesis > Useful Developer Commands",
-         "| Command Name | Description |\n| ----- | ----- |\n"
-         "| `clock_tree_synthesis_debug` | Option to plot the CTS to GUI. |"),
-        ("heading", "Clock Tree Synthesis > Example scripts",
-         "Example scripts"),
-        ("code_block", "Clock Tree Synthesis > Example scripts",
-         CTS_EXAMPLE_SCRIPT),
-    )
-
-    sections = command_sections(elements)
-
-    assert [section.command_hint for section in sections] == [
-        "clock_tree_synthesis",
-        "reset_cts_config",
-    ]
-
-
-def test_section_text_is_bounded_and_the_loss_is_accounted():
-    elements = _elements(
+def test_provenance_follows_the_last_heading_and_is_inherited():
+    rows = _elements(
         ("heading", GPL_PATH, "Global Placement"),
-        ("code_block", GPL_PATH, GPL_SYNTAX),
-        ("paragraph", GPL_PATH, "x" * 5_000),
-        ("paragraph", GPL_PATH, "y" * 5_000),
+        ("paragraph", GPL_PATH, "a" * 90),
+        ("paragraph", GPL_PATH, "b" * 90),
+        ("heading", FLOPS_PATH, "Cluster Flops"),
+        ("paragraph", FLOPS_PATH, "c" * 90),
     )
 
-    # Heading plus syntax block fit; the two 5000-char paragraphs do not.
-    sections = command_sections(elements, max_chars=2_000)
-    section = sections[0]
+    windows = extraction_windows(rows, max_chars=100)
 
-    assert len(section.text) <= 2_000
-    assert section.truncation.applied is True
-    assert section.truncation.dropped_elements == 2
-    assert section.truncation.original_chars > 10_000
-    # Elements and text describe the same content: a grounding check that
-    # searched text the model never saw would pass hallucinations.
-    assert len(section.elements) == len(section.element_ids) == 2
-    assert section.text == "\n".join(item.text for item in section.elements)
-    assert section.truncation.kept_chars == len(section.text)
-
-
-def test_single_oversized_element_is_clipped_rather_than_dropped():
-    """"No text at all" is a worse answer than "the first N characters"."""
-    sections = command_sections(
-        _elements(("heading", "", "set_db options"), ("paragraph", "", "q" * 500)),
-        max_chars=10,
-    )
-
-    assert sections and sections[0].command_hint == "set_db"
-    assert sections[0].text == "set_db opt"
-    assert sections[0].truncation.applied is True
-    assert sections[0].truncation.dropped_elements == 1
-
-
-def test_oversized_table_element_is_truncated_in_bounds_not_dropped():
-    """B1's exact repro: heading + a single over-budget table element used to
-    make the WHOLE table vanish, not just its tail — `not kept` only ever
-    fires on the very first element, and the heading is always that first
-    element, so the table (the first *real* content) took the whole-block
-    drop instead of being clipped. Measured: a 120-parameter section came out
-    as 36 characters of heading text, 1/120 args kept, and a command-reject
-    ratio of 0.0 that never saw the failure because there was nothing left to
-    see it in."""
-    rows = "\n".join(
-        f"| `-param_{index:03d}` | Description for parameter number "
-        f"{index:03d}, controlling one aspect of the big command's "
-        f"behavior. Default is `{index}`. |"
-        for index in range(120)
-    )
-    elements = _elements(
-        ("heading", "", "big_command options"),
-        ("table", "", rows),
-    )
-
-    sections = command_sections(elements, max_chars=12_000)
-
-    assert len(sections) == 1
-    section = sections[0]
-    assert section.truncation.applied is True
-    # The table's own prefix survives — not just the heading.
-    assert "-param_000" in section.text
-    assert len(section.text) <= 12_000
-    # Truncation must not starve the circuit breaker of its own evidence:
-    # enough parameters survive that slicing still produces multiple slices.
-    slices = extraction_slices(section)
-    assert len(slices) >= 2
-
-
-def test_truncation_accounting_survives_the_full_extraction_chain():
-    """e2e, real markdown all the way through: parse_markdown_text ->
-    command_sections -> extraction_slices -> validate_entry ->
-    section_outcome. B1's fix has to hold at every layer, not just inside
-    `_pack` in isolation — an answer covering all 120 parameters must ground
-    exactly as many as actually survived truncation, not zero and not all
-    120."""
-    rows = "\n".join(
-        f"| `-param_{index:03d}` | Description for parameter number "
-        f"{index:03d}, controlling one aspect of the big command's tuning "
-        f"behavior in fine detail across many designs. Default is "
-        f"`{index}`. |"
-        for index in range(120)
-    )
-    markdown = (
-        "## big_command options\n\n"
-        "| Switch Name | Description |\n"
-        "| ----- | ----- |\n"
-        f"{rows}\n"
-    )
-    raw_elements = parse_markdown_text("src-e2e", markdown)
-    elements = [
-        {
-            "id": element.id,
-            "element_type": element.element_type,
-            "text": element.text,
-            "section_path": element.metadata.get("section_path", ""),
-        }
-        for element in raw_elements
+    assert [window.provenance for window in windows] == [
+        # The heading's own breadcrumb…
+        GPL_PATH,
+        # …inherited by every window that carries its body…
+        GPL_PATH,
+        GPL_PATH,
+        # …until the next heading arrives.
+        FLOPS_PATH,
+        FLOPS_PATH,
     ]
 
-    sections = command_sections(elements)
-    assert len(sections) == 1
-    section = sections[0]
-    assert section.truncation.applied is True
 
-    surviving_names = parameter_names(section.text)
-    assert SLICE_PARAM_LIMIT < len(surviving_names) < 120
+def test_a_continuation_inherits_the_previous_windows_LAST_heading():
+    """A window that holds several headings labels ITSELF with the first and
+    hands the LAST one forward.
 
-    slices = extraction_slices(section)
-    assert len(slices) >= 2
+    Both halves are the same question asked about different positions: the
+    window opens in `set_a`, so that is what it is called; it ENDS in `set_e`,
+    so a continuation of it is in `set_e`. Inheriting the first heading again
+    (which "the window's own label" naively does) labels the continuation of a
+    `set_e` options table `set_a` — pointing a reviewer several commands back,
+    at a command whose parameters those are not.
+    """
+    rows = _elements(
+        ("heading", "M > set_a", "set_a"),
+        ("paragraph", "M > set_a", "set_a -one value"),
+        ("heading", "M > set_e", "set_e"),
+        ("paragraph", "M > set_e", "set_e -two value"),
+        # A continuation with no heading of its own: the options table.
+        ("table", "", "| `-three` | the third option |"),
+    )
 
-    # A model answering for all 120 parameters the *original* table held —
-    # only the ones whose lines actually survived truncation can ground.
-    entry = {
-        "command_name": "big_command",
-        "args": [{"name": f"-param_{index:03d}"} for index in range(120)],
-    }
-    result = validate_entry(entry, section, ["big_command"])
-    outcome = section_outcome(section, ["big_command"], [result])
+    windows = extraction_windows(rows, max_chars=45)
 
-    assert outcome.args_seen == 120
-    assert outcome.args_kept == len(surviving_names)
-    assert 0 < outcome.args_kept < 120
-
-
-def test_empty_stream_yields_nothing():
-    assert command_sections([]) == []
-
-
-# ------------------------------------------------------------- 3. candidates
-def test_candidates_lead_with_the_documented_command(flops_section):
-    candidates = command_candidates(flops_section)
-
-    assert candidates[0] == "cluster_flops"
+    assert [window.provenance for window in windows] == [
+        # Two headings in the first window: it is called by the first…
+        "M > set_a",
+        # …and its continuation, which has no heading of its own, is called by
+        # the LAST heading the previous window held.
+        "M > set_e",
+    ]
 
 
-def test_flag_names_never_become_candidates(flops_section):
-    """A syntax block's flags would crowd the real name off a 16-slot list."""
-    candidates = command_candidates(flops_section)
+def test_provenance_falls_back_to_the_title_without_breadcrumbs():
+    """The MinerU shape: headings, no section paths."""
+    rows = _elements(
+        ("heading", "", "Cluster Flops"),
+        ("paragraph", "", CLUSTER_FLOPS_INTRO),
+    )
+
+    assert extraction_windows(rows)[0].provenance == "Cluster Flops"
+
+
+def test_document_without_any_heading_has_empty_provenance():
+    rows = _elements(("paragraph", "", CLUSTER_FLOPS_INTRO))
+
+    assert extraction_windows(rows)[0].provenance == ""
+
+
+# ------------------------------------------------------------- 2. candidates
+def test_candidates_offer_every_command_the_window_documents():
+    """The reason `MAX_CANDIDATES` grew: a window is a slab of the document,
+    not one command's section, so several commands routinely share one and all
+    of them must be legally claimable."""
+    window = extraction_windows(_gpl_elements() + _flops_elements())[0]
+
+    candidates = window_candidates(window)
+
+    assert "global_placement" in candidates
+    assert "cluster_flops" in candidates
+
+
+def test_heading_identifiers_lead_the_candidate_list():
+    rows = _elements(
+        ("heading", "Manual > set_db", "set_db"),
+        ("code_block", "Manual > set_db", "report_timing -digits 3"),
+    )
+
+    window = extraction_windows(rows)[0]
+
+    assert window_candidates(window)[0] == "set_db"
+
+
+def test_code_block_usage_lines_outrank_prose():
+    """Measured on OpenROAD `rsz`: the section documenting
+    `replace_arith_modules` opens with prose citing `link_design top -hier` (a
+    cross-reference to a different command), and the code block naming the
+    documented command comes after it in document order. Plain document order
+    puts the wrong name first, where truncation is most likely to spare it."""
+    rows = _elements(
+        ("paragraph", "", "link_design top -hier"),
+        ("code_block", "", "replace_arith_modules\n    [-path_count paths]"),
+    )
+
+    window = extraction_windows(rows)[0]
+
+    assert window_candidates(window) == ["replace_arith_modules", "link_design"]
+
+
+def test_flag_names_never_become_candidates(flops_window):
+    """A syntax block's flags would crowd the real names off the list."""
+    candidates = window_candidates(flops_window)
 
     assert "tray_weight" not in candidates
     assert "-tray_weight" not in candidates
@@ -908,9 +508,9 @@ def test_flag_names_never_become_candidates(flops_section):
 
 
 def test_inline_code_identifiers_are_offered():
-    section = command_sections(_gpl_elements())[0]
+    window = extraction_windows(_gpl_elements())[0]
 
-    candidates = command_candidates(section)
+    candidates = window_candidates(window)
 
     assert "global_placement" in candidates
     # Named only in the prose, via inline code.
@@ -919,16 +519,276 @@ def test_inline_code_identifiers_are_offered():
 
 
 def test_candidate_list_is_capped():
-    text = "\n".join(f"command_{index} -flag" for index in range(40))
-    section = _section(text, hint="command_0")
+    """32, not v1's 16: with one command per section 16 was ample, and with a
+    12k slab of a reference manual it silently vetoes whatever is documented
+    after the sixteenth name."""
+    assert MAX_CANDIDATES == 32
+    rows = _elements(
+        ("code_block", "", "\n".join(f"command_{index} -flag" for index in range(40)))
+    )
+    window = extraction_windows(rows)[0]
 
-    assert len(command_candidates(section)) == MAX_CANDIDATES
-    assert len(command_candidates(section, limit=3)) == 3
+    assert len(window_candidates(window)) == MAX_CANDIDATES
+    assert len(window_candidates(window, limit=3)) == 3
+
+
+def test_prose_sentences_do_not_become_candidates():
+    """A flag inside a sentence must not let the flag-carrying branch skip the
+    sentence-punctuation and snake_case guards: every name those guards let
+    through is a name a hallucinated entry could then legally claim.
+
+    Four failing shapes, two mechanisms: `Fig.2 shows the -density sweep.`
+    and `config.yaml lists the -density defaults` are dotted, not snake_case
+    (rejected regardless of punctuation — `config.yaml`'s sentence
+    deliberately has no trailing period, so only that guard can catch it);
+    `global_placement accepts -density values.` and its Chinese-punctuation
+    twin are snake_case but end in a sentence (English and Chinese
+    respectively — "(中英文句读)").
+    """
+    rows = _elements(
+        ("paragraph", "", "Fig.2 shows the -density sweep."),
+        ("paragraph", "", "global_placement accepts -density values."),
+        ("paragraph", "", "global_placement 会读取 -density 参数。"),
+        ("paragraph", "", "config.yaml lists the -density defaults"),
+        ("paragraph", "", "global_placement performs the placement step."),
+    )
+
+    window = extraction_windows(rows)[0]
+
+    assert window_candidates(window) == []
+
+
+def test_numbered_headings_are_not_offered_as_commands():
+    """A survey's `A.1.2 Notation` clears the ASCII-letter, minimum-length and
+    dotted-separator gates; only the numbering filter keeps a paper's appendix
+    out of the candidate list."""
+    rows = _elements(
+        ("heading", "", "A.1.2 Notation"),
+        ("heading", "", "B.2.1 Hyperparameters"),
+        ("paragraph", "", "Table A.1 lists the symbols used in the paper."),
+    )
+
+    window = extraction_windows(rows)[0]
+
+    assert window_candidates(window) == []
+
+
+def test_one_line_command_with_a_positional_argument_is_offered():
+    """`set_dont_use lib_cells` — no flags, no bracket list, still a command.
+
+    Omitting this shape is not a corner case: it lost five real commands in
+    one OpenROAD module.
+    """
+    rows = _elements(
+        ("heading", "", "Set Don't Use"),
+        ("paragraph", "", SET_DONT_USE_INTRO),
+        ("code_block", "", SET_DONT_USE_SYNTAX),
+    )
+
+    window = extraction_windows(rows)[0]
+
+    assert "set_dont_use" in window_candidates(window)
+
+
+# ------------------------------------------------------ 2b. candidate relay
+def _carry_chain(windows):
+    """The relay as the job layer runs it: one `carry_candidates` per window."""
+    chain = []
+    carry: list[str] = []
+    for window in windows:
+        chain.append(list(carry))
+        carry = carry_candidates(window_candidates(window), carry)
+    return chain
+
+
+def test_carry_hands_the_previous_windows_own_candidates_forward():
+    assert carry_candidates(["cluster_flops"], []) == ["cluster_flops"]
+
+
+def test_carry_passes_through_a_window_that_names_nothing():
+    """The case the relay exists for: a multi-window parameter table names no
+    command in any window after the first, so a relay that stopped at the first
+    nameless window would stop exactly where it was needed."""
+    carry = carry_candidates(["big_command"], [])
+
+    # Three nameless windows in a row — the table just keeps going.
+    for _ in range(3):
+        carry = carry_candidates([], carry)
+        assert carry == ["big_command"]
+
+
+def test_carry_resets_when_a_window_names_something_new():
+    """A new command's heading is the old command's end. Without the reset,
+    the manual's first command stays claimable on its last page, and every
+    stray parameter in the book can be keyed to it."""
+    carry = carry_candidates([], ["big_command"])
+    assert carry == ["big_command"]
+
+    carry = carry_candidates(["other_command"], carry)
+
+    assert carry == ["other_command"]
+    assert "big_command" not in carry
+
+
+def test_carry_truncation_keeps_the_nearest_windows_names():
+    """`limit` is the same prompt-borne constraint the candidate list is capped
+    by, and the names that just went out of view are the better evidence."""
+    own = [f"command_{index}" for index in range(40)]
+
+    carried = carry_candidates(own, ["long_ago_command"])
+
+    assert carried == own[:MAX_CANDIDATES]
+    assert "long_ago_command" not in carried
+    assert carry_candidates(own, [], limit=3) == own[:3]
+
+
+def test_carry_chain_runs_across_a_real_document():
+    rows = _elements(
+        ("heading", "M > set_db", "set_db"),
+        ("code_block", "M > set_db", "set_db -name value"),
+        ("table", "M > set_db", "| `-name` | The property name. |"),
+        ("table", "M > set_db", "| `-value` | The property value. |"),
+    )
+    # Heading + usage line, then one window per table row.
+    windows = extraction_windows(rows, max_chars=40)
+    assert len(windows) == 3
+
+    chain = _carry_chain(windows)
+
+    # Nothing to relay into the first window…
+    assert chain[0] == []
+    # …and `set_db` reaches every window after the one that named it.
+    assert all("set_db" in carried for carried in chain[1:])
+
+
+# ------------------------------------------------------------- 3. skip gate
+def test_prose_window_needs_no_model_call():
+    """The deterministic cost gate that replaces v1's sectioning: no
+    claimable name and no flag means the grounded output is provably empty,
+    so the call is pure spend. A manual's introduction, its licence and any
+    paper bound into the same PDF go by free."""
+    rows = _elements(
+        ("heading", "", "Introduction"),
+        ("paragraph", "", "Placement algorithms trade wirelength against timing."),
+        ("paragraph", "", "This chapter motivates the approach and its history."),
+    )
+
+    window = extraction_windows(rows)[0]
+
+    assert window_candidates(window) == []
+    assert parameter_names(window.text) == []
+    assert window_needs_model(window) is False
+
+
+def test_window_with_a_claimable_command_needs_a_call(flops_window):
+    assert window_needs_model(flops_window) is True
+
+
+def test_parameter_table_with_a_relayed_name_needs_a_call():
+    """The half that is easy to drop and expensive to lose: a parameter table
+    whose command heading fell in the PREVIOUS window has no candidate name of
+    its own, and it is exactly what the cross-window merge exists to fold onto
+    the command it belongs to. Gating on candidates alone would throw away
+    half of every large command."""
+    rows = _elements(("table", "", GPL_OPTIONS))
+
+    window = extraction_windows(rows)[0]
+
+    assert window_candidates(window) == []
+    assert parameter_names(window.text)
+    assert window_needs_model(window, ["global_placement"]) is True
+
+
+def test_parameter_table_with_nothing_to_claim_is_skipped():
+    """The other half of the same shape, and the one the earlier "any of the
+    three" rule got wrong: parameters with NO claimable name — a table opening
+    the document, or one whose relay an intervening command already reset —
+    can produce nothing. Every entry a model returned would name something off
+    the served list, and the served list is empty, so grounding vetoes all of
+    it before the call is even made."""
+    rows = _elements(("table", "", GPL_OPTIONS))
+
+    window = extraction_windows(rows)[0]
+
+    assert parameter_names(window.text)
+    assert window_needs_model(window) is False
+    assert window_needs_model(window, []) is False
+
+
+def test_numbering_only_window_is_skipped():
+    rows = _elements(
+        ("heading", "", "A.1.2 Notation"),
+        ("paragraph", "", "Table A.1 lists the symbols used in the paper."),
+    )
+
+    assert window_needs_model(extraction_windows(rows)[0]) is False
+
+
+def test_a_relay_alone_does_not_keep_the_gate_open_over_prose():
+    """A relay is a NAME, not evidence there is anything to extract.
+
+    The relay never empties once a command has been seen, so "any relay keeps
+    the gate open" bills a call for every prose page in the rest of the book —
+    a manual is mostly prose, and the second half of it costs full price for
+    windows that document nothing. The cost of that rule is the occasional
+    worked example or prose description of a continuing command; the cost of
+    keeping it is the whole document.
+    """
+    rows = _elements(
+        ("paragraph", "", "The command reads the design and reports slack."),
+    )
+    window = extraction_windows(rows)[0]
+
+    assert parameter_names(window.text) == []
+    assert window_needs_model(window) is False
+    assert window_needs_model(window, ["big_command"]) is False
+
+
+def test_the_gate_is_the_two_condition_formula_in_all_four_shapes():
+    """`needs_model ⟺ own or (flags and carried)`, enumerated.
+
+    Each row is a different real shape, and three of the four are cases an
+    "any of the three signals" rule gets wrong in one direction or the other.
+    """
+    named = extraction_windows(
+        _elements(("code_block", "", "cluster_flops -tray_weight 32"))
+    )[0]
+    flagged = extraction_windows(_elements(("table", "", GPL_OPTIONS)))[0]
+    prose = extraction_windows(
+        _elements(("paragraph", "", "The command reads the design."))
+    )[0]
+
+    assert window_candidates(named) and parameter_names(named.text)
+    assert not window_candidates(flagged) and parameter_names(flagged.text)
+    assert not window_candidates(prose) and not parameter_names(prose.text)
+
+    # own non-empty -> call, whatever the relay holds.
+    assert window_needs_model(named, []) is True
+    assert window_needs_model(named, ["other_command"]) is True
+    # own empty + flags + relay -> call (a continuation window).
+    assert window_needs_model(flagged, ["big_command"]) is True
+    # own empty + flags + no relay -> skip (nothing claimable).
+    assert window_needs_model(flagged, []) is False
+    # own empty + no flags -> skip, relay or not (prose).
+    assert window_needs_model(prose, ["big_command"]) is False
+    assert window_needs_model(prose, []) is False
+
+
+def test_the_gate_accepts_a_precomputed_candidate_list():
+    """The job layer needs the window's own candidates anyway (for the prompt
+    and to advance the relay), and re-scanning a 12k window per window is
+    measurable on a long manual. Passing them must not change the answer."""
+    window = extraction_windows(_flops_elements())[0]
+    own = window_candidates(window)
+
+    assert window_needs_model(window, own=own) is True
+    assert window_needs_model(window, own=[]) is False
+    assert window_needs_model(window, ["relayed_command"], own=[]) is True
 
 
 # ---------------------------------------------------------------- 4. slicing
-def test_small_command_is_one_slice_carrying_the_overview(flops_section):
-    slices = extraction_slices(flops_section)
+def test_small_window_is_one_slice_carrying_the_overview(flops_window):
+    slices = extraction_slices(flops_window)
 
     assert len(slices) == 1
     assert slices[0].include_overview is True
@@ -941,25 +801,25 @@ def test_small_command_is_one_slice_carrying_the_overview(flops_section):
     )
 
 
-def test_command_without_parameters_still_gets_a_slice():
-    section = _section(PLACEMENT_CLUSTER_SYNTAX, hint="placement_cluster")
+def test_window_without_parameters_still_gets_a_slice():
+    window = _window(PLACEMENT_CLUSTER_SYNTAX)
 
-    slices = extraction_slices(section)
+    slices = extraction_slices(window)
 
     assert len(slices) == 1
     assert slices[0].param_names == ()
     assert slices[0].include_overview is True
 
 
-def test_hundred_parameter_section_splits_into_at_least_five_slices():
+def test_hundred_parameter_window_splits_into_at_least_five_slices():
     """C0 measured a ~100-parameter section hitting `finish_reason=length`
     and then returning empty content on retry — silent loss, not an error."""
     body = "big_command\n" + "\n".join(
         f"    [-param_{index:02d} value_{index:02d}]" for index in range(100)
     )
-    section = _section(body, hint="big_command")
+    window = _window(body)
 
-    slices = extraction_slices(section)
+    slices = extraction_slices(window)
 
     assert len(slices) >= 5
     assert all(len(item.param_names) <= SLICE_PARAM_LIMIT for item in slices)
@@ -971,64 +831,120 @@ def test_hundred_parameter_section_splits_into_at_least_five_slices():
     assert all(item.total == len(slices) for item in slices)
 
 
-def test_slice_parameter_subsets_partition_the_parameter_list():
+def test_slice_parameter_subsets_partition_the_windows_parameter_list():
     body = "big_command\n" + "\n".join(
         f"    [-param_{index:02d} value_{index:02d}]" for index in range(100)
     )
-    section = _section(body, hint="big_command")
+    window = _window(body)
 
-    slices = extraction_slices(section)
+    slices = extraction_slices(window)
     flattened = [name for item in slices for name in item.param_names]
 
-    assert flattened == parameter_names(section.text)
+    assert flattened == parameter_names(window.text)
     assert len(flattened) == len(set(flattened)) == 100
 
 
-def test_real_large_section_engages_slicing():
-    section = command_sections(_gpl_elements())[0]
+def test_a_multi_command_window_assigns_every_command_s_flags():
+    """The assignment is the WINDOW's flag list, not one command's — the model
+    keys each parameter to the entry it belongs to, and attribution stays
+    exact because `validate_entry` checks against this same list."""
+    window = extraction_windows(_gpl_elements() + _flops_elements())[0]
 
-    slices = extraction_slices(section)
+    assigned = [name for item in extraction_slices(window) for name in item.param_names]
+
+    assert "-density" in assigned  # global_placement's
+    assert "-tray_weight" in assigned  # cluster_flops'
+
+
+def test_real_large_window_engages_slicing():
+    window = extraction_windows(_gpl_elements())[0]
+
+    slices = extraction_slices(window)
 
     assert len(slices) >= 2
     assert "-density" in slices[0].param_names
 
 
-def test_text_window_narrows_each_slice_far_below_the_full_section():
-    """C1b's per-slice prompt window: each slice's own view of the source
-    should be far smaller than the whole section, and no two slices' windows
-    should collapse to the same thing — a later slice's window must reflect
-    ITS OWN parameters, not just repeat slice 0's."""
+def test_every_slice_sees_the_whole_window():
+    """Each slice's prompt view is the WHOLE window, not a narrowed one.
+
+    The narrowed view (an overview head plus the lines mentioning this slice's
+    own parameters) was right for v1, where a slice was one command's section,
+    and is systematically wrong for v2, where it is a chunk of a multi-command
+    slab: the head holds the FIRST command and everything after it is asked
+    about but never shown. `test_every_served_candidate_is_visible_in_the_view`
+    below is the property that matters; this pins the mechanism.
+    """
     body = "big_command\n" + "\n".join(
         f"    [-param_{index:02d} value_{index:02d}]" for index in range(100)
     )
-    section = _section(body, hint="big_command")
+    window = _window(body)
 
-    slices = extraction_slices(section)
-    windows = [item.text_window for item in slices]
+    slices = extraction_slices(window)
 
-    assert len(windows) >= 5
-    assert len(set(windows)) == len(windows)
-    assert all(window for window in windows)
-    assert all(len(window) < len(section.text) for window in windows)
-    assert all(len(window) <= MAX_SLICE_WINDOW_CHARS for window in windows)
-    # Each slice's window carries its OWN parameters, not another slice's.
+    assert len(slices) >= 5
+    assert all(item.text_window == window.text for item in slices)
+    # Every slice can still see every parameter — including the ones assigned
+    # to its siblings, which is what makes attribution the ASSIGNMENT's job
+    # rather than the view's.
     for item in slices:
-        for name in item.param_names:
+        for name in parameter_names(window.text):
             assert name in item.text_window
 
 
-def test_first_slice_window_carries_the_overview_and_syntax_block(flops_section):
-    slices = extraction_slices(flops_section)
+@pytest.mark.parametrize("candidate_count", [30, 40])
+def test_every_served_candidate_is_visible_in_the_view(candidate_count):
+    """The guard the narrowed view failed, in both shapes that broke it.
+
+    A name in the candidate list is a name the prompt invites the model to
+    claim, and `validate_entry` then demands it appear verbatim in the window.
+    A view that does not show it therefore leaves exactly two outcomes: the
+    model says nothing about that command, or it fabricates and is vetoed.
+    Either way the command is lost, and nothing downstream can tell — a
+    command that was never really offered produces no rejection and no ledger
+    line.
+
+    Both shapes are measured failures of the 600-char head + parameter-lines
+    view: a window of `candidate_count` flagless commands (empty assignment,
+    so the view was the head and nothing else — only the first two or three
+    commands visible), and a window whose commands DO carry flags (the
+    parameter lines came back, but the command names above them did not).
+    """
+    flagless = _elements(
+        *(
+            ("code_block", "", f"command_{index:02d} operand_{index:02d}")
+            for index in range(candidate_count)
+        )
+    )
+    flagged = _elements(
+        *(
+            ("code_block", "", f"command_{index:02d} -flag_{index:02d} value")
+            for index in range(candidate_count)
+        )
+    )
+
+    for rows in (flagless, flagged):
+        window = extraction_windows(rows)[0]
+        served = window_candidates(window)
+        assert served, "fixture must actually serve candidates"
+
+        for item in extraction_slices(window):
+            for name in served:
+                assert name in item.text_window
+
+
+def test_first_slice_view_carries_the_overview_and_syntax_block(flops_window):
+    slices = extraction_slices(flops_window)
 
     assert len(slices) == 1
     assert slices[0].text_window
     assert "cluster_flops" in slices[0].text_window
 
 
-def test_command_without_parameters_still_gets_a_nonempty_window():
-    section = _section(PLACEMENT_CLUSTER_SYNTAX, hint="placement_cluster")
+def test_window_without_parameters_still_gets_a_nonempty_view():
+    window = _window(PLACEMENT_CLUSTER_SYNTAX)
 
-    slices = extraction_slices(section)
+    slices = extraction_slices(window)
 
     assert slices[0].text_window
 
@@ -1068,12 +984,12 @@ def _flops_entry(**overrides):
     return entry
 
 
-def test_every_real_parameter_survives_validation(flops_section):
+def test_every_real_parameter_survives_validation(flops_window):
     """Zero false kills on a genuine entry — the precondition for the veto
     being worth having at all."""
-    candidates = command_candidates(flops_section)
+    candidates = window_candidates(flops_window)
 
-    result = validate_entry(_flops_entry(), flops_section, candidates)
+    result = validate_entry(_flops_entry(), flops_window, candidates)
 
     assert result.accepted is True
     assert result.rejections == ()
@@ -1088,13 +1004,38 @@ def test_every_real_parameter_survives_validation(flops_section):
     assert result.entry.suspect_related is False
 
 
-def test_invented_parameter_is_rejected_with_a_complete_record(flops_section):
+def test_each_entry_in_a_windows_reply_is_judged_on_its_own():
+    """A window's reply lists every command it documents, so one hallucinated
+    entry must veto itself and leave its neighbours untouched — the multi-entry
+    shape must not turn one bad command name into a lost window."""
+    window = extraction_windows(_gpl_elements() + _flops_elements())[0]
+    candidates = window_candidates(window)
+
+    good = validate_entry(_flops_entry(), window, candidates)
+    invented = validate_entry(
+        {"command_name": "detailed_placement", "args": []}, window, candidates
+    )
+    other = validate_entry(
+        {"command_name": "global_placement",
+         "args": [{"name": "-density", "default": "0.7"}]},
+        window,
+        candidates,
+    )
+
+    assert [result.accepted for result in (good, invented, other)] == [
+        True, False, True
+    ]
+    assert invented.rejections[0].reason == "not_in_candidates"
+    assert [arg.name for arg in other.entry.args] == ["-density"]
+
+
+def test_invented_parameter_is_rejected_with_a_complete_record(flops_window):
     entry = _flops_entry()
     entry["args"] = entry["args"] + [
         {"name": "-tray_capacity", "desc": "Invented.", "default": ""}
     ]
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.accepted is True
     assert [arg.name for arg in result.entry.args] == [
@@ -1110,7 +1051,7 @@ def test_invented_parameter_is_rejected_with_a_complete_record(flops_section):
 
 
 def test_dropped_dash_is_rejected_even_though_the_bare_word_appears(
-    flops_section,
+    flops_window,
 ):
     """C0's measured infidelity: the prompt asks for `-tray_weight`, the model
     answers `tray_weight`, and the manual's own prose contains the bare word —
@@ -1119,7 +1060,7 @@ def test_dropped_dash_is_rejected_even_though_the_bare_word_appears(
         args=[{"name": "tray_weight", "desc": "Tray weight.", "default": ""}]
     )
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.entry.args == ()
     assert [(item.value, item.reason) for item in result.rejections] == [
@@ -1130,24 +1071,23 @@ def test_dropped_dash_is_rejected_even_though_the_bare_word_appears(
 def test_positional_argument_without_a_dash_is_kept():
     """The dash test is evidence-based, not shape-based: a command that really
     does take a positional argument must not be gutted."""
-    section = _section(SET_DONT_USE_SYNTAX, title="Set Don't Use",
-                       hint="set_dont_use")
+    window = _window(SET_DONT_USE_SYNTAX, heading="Set Don't Use")
     entry = {
         "command_name": "set_dont_use",
         "args": [{"name": "lib_cells", "desc": "Cells to exclude."}],
     }
 
-    result = validate_entry(entry, section, ["set_dont_use"])
+    result = validate_entry(entry, window, ["set_dont_use"])
 
     assert [arg.name for arg in result.entry.args] == ["lib_cells"]
     assert result.rejections == ()
 
 
-def test_the_attribution_exemption_is_scoped_to_an_empty_assignment(flops_section):
-    """R4 P1's reverse guard, pinned in one place because the two halves are
-    one rule: an EMPTY assignment exempts a returned name from attribution (a
-    flagless command's positional argument was never on any list, and C1b's
-    prompt now asks for it outright), while a NON-EMPTY assignment must keep
+def test_the_attribution_exemption_is_scoped_to_an_empty_assignment(flops_window):
+    """The reverse guard, pinned in one place because the two halves are one
+    rule: an EMPTY assignment exempts a returned name from attribution (a
+    flagless command's positional argument was never on any list, and the
+    prompt asks for it outright), while a NON-EMPTY assignment must keep
     rejecting a name that belongs to another slice.
 
     Both directions in one test on purpose: the fix for the first is a
@@ -1155,8 +1095,7 @@ def test_the_attribution_exemption_is_scoped_to_an_empty_assignment(flops_sectio
     assignment and ...` -> `if not reason and ...`), and a test that only
     proved the exemption would go green on that mutation.
     """
-    flagless = _section(SET_DONT_USE_SYNTAX, title="Set Don't Use",
-                        hint="set_dont_use")
+    flagless = _window(SET_DONT_USE_SYNTAX, heading="Set Don't Use")
     positional = {
         "command_name": "set_dont_use",
         "args": [{"name": "lib_cells", "desc": "Cells to exclude."}],
@@ -1167,8 +1106,8 @@ def test_the_attribution_exemption_is_scoped_to_an_empty_assignment(flops_sectio
     assert [arg.name for arg in exempt.entry.args] == ["lib_cells"]
     assert exempt.rejections == ()
 
-    # Same section text, same grounding — only the assignment differs. Every
-    # name below is verbatim in `flops_section`, so nothing but attribution can
+    # Same window text, same grounding — only the assignment differs. Every
+    # name below is verbatim in `flops_window`, so nothing but attribution can
     # reject them.
     off_assignment = _flops_entry(
         args=[
@@ -1179,8 +1118,8 @@ def test_the_attribution_exemption_is_scoped_to_an_empty_assignment(flops_sectio
 
     constrained = validate_entry(
         off_assignment,
-        flops_section,
-        command_candidates(flops_section),
+        flops_window,
+        window_candidates(flops_window),
         assigned=("-tray_weight",),
     )
 
@@ -1197,10 +1136,10 @@ def test_near_miss_command_name_is_vetoed():
     list plus verbatim check exists to stop, and substring containment accepts
     it silently.
     """
-    section = _section("set_db -name value sets a database property.",
-                       title="set_db", hint="set_db")
+    window = _window("set_db -name value sets a database property.",
+                     heading="set_db")
 
-    result = validate_entry({"command_name": "set_d"}, section,
+    result = validate_entry({"command_name": "set_d"}, window,
                             ["set_d", "set_db"])
 
     assert result.accepted is False
@@ -1211,11 +1150,91 @@ def test_near_miss_command_name_is_vetoed():
     assert result.stats.command_rejected is True
 
 
-def test_command_name_outside_the_candidate_list_vetoes_the_entry(flops_section):
+def test_relayed_name_may_be_claimed_without_appearing_in_this_window():
+    """The relay's whole point: a continuation window holds parameters and no
+    command name at all, so the verbatim check — which is right for every other
+    claim — is the one thing standing between the model and the options table
+    it was shown. The witness still exists; it is one window back."""
+    window = _window("| `-tray_weight` | Tray weight, default value is 32.0. |")
+    entry = {
+        "command_name": "cluster_flops",
+        "args": [{"name": "-tray_weight", "default": "32.0"}],
+    }
+
+    vetoed = validate_entry(entry, window, [])
+    relayed = validate_entry(entry, window, [], carried=["cluster_flops"])
+
+    assert vetoed.accepted is False
+    assert vetoed.rejections[0].reason == "not_in_candidates"
+    assert relayed.accepted is True
+    assert [arg.name for arg in relayed.entry.args] == ["-tray_weight"]
+    assert relayed.rejections == ()
+
+
+def test_a_relay_never_lets_an_invented_name_through():
+    """List membership does not relax with the relay — it is still the only
+    veto that matters, and the model can still only pick from names some window
+    actually contained."""
+    window = _window("| `-tray_weight` | Tray weight, default value is 32.0. |")
+
+    result = validate_entry(
+        {"command_name": "detailed_placement"},
+        window,
+        [],
+        carried=["cluster_flops"],
+    )
+
+    assert result.accepted is False
+    assert result.rejections[0].reason == "not_in_candidates"
+
+
+def test_a_relayed_claim_still_grounds_its_own_body_in_this_window():
+    """The exemption is scoped to the NAME. Parameters, defaults and syntax are
+    what this window is being asked about, and a relay that let those through
+    unchecked would turn every continuation window into a free-text channel."""
+    window = _window("| `-tray_weight` | Tray weight, default value is 32.0. |")
+    entry = {
+        "command_name": "cluster_flops",
+        "syntax": "cluster_flops [-tray_weight tray_weight]",
+        "args": [
+            {"name": "-tray_weight", "default": "64.0"},
+            {"name": "-invented_flag"},
+        ],
+    }
+
+    result = validate_entry(entry, window, [], carried=["cluster_flops"])
+
+    assert result.accepted is True
+    # Syntax lives in the window that named the command, not this one: cleared,
+    # never fatal.
+    assert result.entry.syntax == ""
+    assert [(arg.name, arg.default) for arg in result.entry.args] == [
+        ("-tray_weight", "")
+    ]
+    assert sorted(item.reason for item in result.rejections) == [
+        "not_contiguous", "not_in_text", "not_in_text",
+    ]
+
+
+def test_a_relayed_claim_is_not_flagged_suspect():
+    """`suspect_related` means "possibly a MENTIONED command rather than the
+    documented one". A continuation window mentions nothing — it is still
+    documenting the same command — so flagging it would put a warning on
+    exactly the entries the relay exists to produce."""
+    window = _window("| `-tray_weight` | Tray weight, default value is 32.0. |")
+
+    result = validate_entry(
+        {"command_name": "cluster_flops"}, window, [], carried=["cluster_flops"]
+    )
+
+    assert result.entry.suspect_related is False
+
+
+def test_command_name_outside_the_candidate_list_vetoes_the_entry(flops_window):
     result = validate_entry(
         _flops_entry(command_name="detailed_placement"),
-        flops_section,
-        command_candidates(flops_section),
+        flops_window,
+        window_candidates(flops_window),
     )
 
     assert result.accepted is False
@@ -1226,15 +1245,15 @@ def test_command_name_outside_the_candidate_list_vetoes_the_entry(flops_section)
     assert result.stats.args_seen == 0
 
 
-def test_missing_command_name_vetoes_the_entry(flops_section):
-    result = validate_entry({"syntax": "cluster_flops"}, flops_section,
-                            command_candidates(flops_section))
+def test_missing_command_name_vetoes_the_entry(flops_window):
+    result = validate_entry({"syntax": "cluster_flops"}, flops_window,
+                            window_candidates(flops_window))
 
     assert result.accepted is False
     assert result.rejections[0].reason == "empty"
 
 
-def test_line_wrapped_syntax_normalises_and_passes(flops_section):
+def test_line_wrapped_syntax_normalises_and_passes(flops_window):
     """The manual wraps with backslashes; the model answers on one line."""
     flat = (
         "cluster_flops [-tray_weight tray_weight] [-timing_weight timing_weight] "
@@ -1243,7 +1262,7 @@ def test_line_wrapped_syntax_normalises_and_passes(flops_section):
     )
 
     result = validate_entry(
-        _flops_entry(syntax=flat), flops_section, command_candidates(flops_section)
+        _flops_entry(syntax=flat), flops_window, window_candidates(flops_window)
     )
 
     assert result.stats.syntax_kept is True
@@ -1251,13 +1270,13 @@ def test_line_wrapped_syntax_normalises_and_passes(flops_section):
     assert not [item for item in result.rejections if item.field == "syntax"]
 
 
-def test_syntax_that_is_not_in_the_section_is_cleared_but_not_fatal(
-    flops_section,
+def test_syntax_that_is_not_in_the_window_is_cleared_but_not_fatal(
+    flops_window,
 ):
     result = validate_entry(
         _flops_entry(syntax="cluster_flops [-tray_capacity capacity]"),
-        flops_section,
-        command_candidates(flops_section),
+        flops_window,
+        window_candidates(flops_window),
     )
 
     assert result.accepted is True
@@ -1270,13 +1289,13 @@ def test_syntax_that_is_not_in_the_section_is_cleared_but_not_fatal(
 
 
 def test_ungrounded_default_is_cleared_while_the_parameter_survives(
-    flops_section,
+    flops_window,
 ):
     entry = _flops_entry(
         args=[{"name": "-tray_weight", "desc": "Tray weight.", "default": "64.0"}]
     )
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert [(arg.name, arg.default) for arg in result.entry.args] == [
         ("-tray_weight", "")
@@ -1287,16 +1306,16 @@ def test_ungrounded_default_is_cleared_while_the_parameter_survives(
 
 
 def test_default_digit_is_rejected_though_the_longer_number_contains_it(
-    flops_section,
+    flops_window,
 ):
-    """B3: the manual states "default value is 500"; a hallucinated "5"
-    must not ground just because it is a bare substring of 500 — the bug a
-    plain `in` check had."""
+    """The manual states "default value is 500"; a hallucinated "5" must not
+    ground just because it is a bare substring of 500 — the bug a plain `in`
+    check had."""
     entry = _flops_entry(
         args=[{"name": "-max_split_size", "desc": "Split.", "default": "5"}]
     )
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert [(arg.name, arg.default) for arg in result.entry.args] == [
         ("-max_split_size", "")
@@ -1304,12 +1323,12 @@ def test_default_digit_is_rejected_though_the_longer_number_contains_it(
     assert [item.field for item in result.rejections] == ["default"]
 
 
-def test_default_matching_the_full_number_still_grounds(flops_section):
+def test_default_matching_the_full_number_still_grounds(flops_window):
     entry = _flops_entry(
         args=[{"name": "-max_split_size", "desc": "Split.", "default": "500"}]
     )
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert [(arg.name, arg.default) for arg in result.entry.args] == [
         ("-max_split_size", "500")
@@ -1318,18 +1337,17 @@ def test_default_matching_the_full_number_still_grounds(flops_section):
 
 
 def test_decimal_default_grounds_at_its_own_token_boundaries():
-    """"0.5" must ground when the section text genuinely says `0.5`."""
-    section = _section(
+    """"0.5" must ground when the window text genuinely says `0.5`."""
+    window = _window(
         "cluster_flops [-density density]\n"
-        "`-density` default value is `0.5`.",
-        hint="cluster_flops",
+        "`-density` default value is `0.5`."
     )
     entry = {
         "command_name": "cluster_flops",
         "args": [{"name": "-density", "default": "0.5"}],
     }
 
-    result = validate_entry(entry, section, ["cluster_flops"])
+    result = validate_entry(entry, window, ["cluster_flops"])
 
     assert [(arg.name, arg.default) for arg in result.entry.args] == [
         ("-density", "0.5")
@@ -1340,33 +1358,48 @@ def test_decimal_default_grounds_at_its_own_token_boundaries():
 def test_command_named_only_in_prose_is_flagged_suspect_not_rejected():
     """Grounded, but possibly a *mentioned* command rather than the documented
     one. A veto here would drop correct entries."""
-    section = _section(
+    window = _window(
         "This section explains placement. See also repair_design for timing.",
-        title="Placement Notes",
-        path="Manual > Placement Notes",
-        hint="",
+        heading="Placement Notes",
+        provenance="Manual > Placement Notes",
     )
 
-    result = validate_entry({"command_name": "repair_design"}, section,
+    result = validate_entry({"command_name": "repair_design"}, window,
                             ["repair_design"])
 
     assert result.accepted is True
     assert result.entry.suspect_related is True
 
 
+def test_suspect_reads_the_windows_own_headings_not_its_provenance():
+    """`provenance` is a display label inherited from an earlier window, so a
+    command that only appears there is NOT documented in this window's text —
+    letting the label answer "is it in a heading" would launder a
+    cross-reference into a documented command."""
+    inherited = _window(
+        "See also repair_design for timing.",
+        provenance="Manual > repair_design",
+    )
+
+    result = validate_entry({"command_name": "repair_design"}, inherited,
+                            ["repair_design"])
+
+    assert result.entry.suspect_related is True
+
+
 def test_description_and_examples_pass_through_with_an_anchor_seat(
-    flops_section,
+    flops_window,
 ):
-    result = validate_entry(_flops_entry(), flops_section,
-                            command_candidates(flops_section))
+    result = validate_entry(_flops_entry(), flops_window,
+                            window_candidates(flops_window))
 
     assert result.entry.description == "Clusters flops into multi-bit trays."
     assert result.entry.examples == ("cluster_flops -tray_weight 32.0",)
     assert result.entry.anchor_element_ids == ()
 
 
-# ------------------------------------------- 5b. field-type coercion (P2 fix)
-def test_required_string_false_is_coerced_not_truthy(flops_section):
+# ------------------------------------------------ 5b. field-type coercion
+def test_required_string_false_is_coerced_not_truthy(flops_window):
     """The reported bug: `bool("false")` is `True`, so a model that quotes its
     booleans (`"required": "false"`) would previously flip every such
     parameter to required. Coercion must go by MEANING, not by truthiness."""
@@ -1374,24 +1407,24 @@ def test_required_string_false_is_coerced_not_truthy(flops_section):
         args=[{"name": "-tray_weight", "desc": "Tray weight.", "required": "false"}]
     )
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.entry.args[0].required is False
     assert result.rejections == ()
 
 
-def test_required_string_true_is_coerced(flops_section):
+def test_required_string_true_is_coerced(flops_window):
     entry = _flops_entry(
         args=[{"name": "-tray_weight", "desc": "Tray weight.", "required": "TRUE"}]
     )
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.entry.args[0].required is True
     assert result.rejections == ()
 
 
-def test_required_non_boolean_value_degrades_and_is_reported(flops_section):
+def test_required_non_boolean_value_degrades_and_is_reported(flops_window):
     """A shape that is neither a bool nor a recognisable true/false string
     (a bare number, here) cannot be trusted either way, so it degrades to
     `False` — the same "cleared, never fatal" treatment `default` gets — and
@@ -1400,7 +1433,7 @@ def test_required_non_boolean_value_degrades_and_is_reported(flops_section):
         args=[{"name": "-tray_weight", "desc": "Tray weight.", "required": 1}]
     )
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.accepted is True
     assert result.entry.args[0].required is False
@@ -1409,14 +1442,14 @@ def test_required_non_boolean_value_degrades_and_is_reported(flops_section):
     assert rejection.reason == "not_boolean"
 
 
-def test_args_field_returned_as_an_object_is_not_iterated_as_keys(flops_section):
+def test_args_field_returned_as_an_object_is_not_iterated_as_keys(flops_window):
     """A model returning `args` as an object rather than a list used to be
     walked with a bare `for`, which iterates a dict's KEYS — plain strings
     that then failed the `isinstance(..., Mapping)` check and vanished with
     no record. The whole field must instead be treated as malformed."""
     entry = _flops_entry(args={"name": "-tray_weight", "required": False})
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.accepted is True
     assert result.entry.args == ()
@@ -1425,10 +1458,10 @@ def test_args_field_returned_as_an_object_is_not_iterated_as_keys(flops_section)
     assert rejection.reason == "model_response_unusable"
 
 
-def test_args_list_item_that_is_not_an_object_is_dropped_and_reported(flops_section):
+def test_args_list_item_that_is_not_an_object_is_dropped_and_reported(flops_window):
     entry = _flops_entry(args=["-tray_weight"])
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.accepted is True
     assert result.entry.args == ()
@@ -1436,7 +1469,7 @@ def test_args_list_item_that_is_not_an_object_is_dropped_and_reported(flops_sect
     assert rejection.reason == "not_object"
 
 
-def test_examples_string_scalar_is_coerced_to_a_single_element_list(flops_section):
+def test_examples_string_scalar_is_coerced_to_a_single_element_list(flops_window):
     """A model answering "one example" with a bare string instead of a
     one-element list got the wrapper wrong, not the content — coalescing is
     the reasonable read, not a rejection-worthy failure. Iterating the raw
@@ -1444,16 +1477,16 @@ def test_examples_string_scalar_is_coerced_to_a_single_element_list(flops_sectio
     one-character "examples" instead."""
     entry = _flops_entry(examples="cluster_flops -tray_weight 32.0")
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.entry.examples == ("cluster_flops -tray_weight 32.0",)
     assert result.rejections == ()
 
 
-def test_examples_non_string_item_is_dropped_and_reported(flops_section):
+def test_examples_non_string_item_is_dropped_and_reported(flops_window):
     entry = _flops_entry(examples=["cluster_flops -tray_weight 32.0", 5])
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.entry.examples == ("cluster_flops -tray_weight 32.0",)
     rejection = next(item for item in result.rejections if item.field == "examples")
@@ -1461,20 +1494,20 @@ def test_examples_non_string_item_is_dropped_and_reported(flops_section):
     assert rejection.value == "5"
 
 
-def test_examples_non_list_non_string_field_is_dropped_and_reported(flops_section):
+def test_examples_non_list_non_string_field_is_dropped_and_reported(flops_window):
     entry = _flops_entry(examples={"one": "cluster_flops -tray_weight 32.0"})
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     assert result.entry.examples == ()
     rejection = next(item for item in result.rejections if item.field == "examples")
     assert rejection.reason == "not_list"
 
 
-def test_rejection_diagnostics_stay_bounded(flops_section):
+def test_rejection_diagnostics_stay_bounded(flops_window):
     entry = _flops_entry(args=[{"name": "-" + "x" * 400, "desc": ""}])
 
-    result = validate_entry(entry, flops_section, command_candidates(flops_section))
+    result = validate_entry(entry, flops_window, window_candidates(flops_window))
 
     rejection = result.rejections[0]
     assert len(rejection.value) <= 120
@@ -1482,11 +1515,11 @@ def test_rejection_diagnostics_stay_bounded(flops_section):
 
 
 def test_rejection_window_centers_on_a_real_hit_in_long_text():
-    """`_window`'s hit branch (a near-miss, like C0's dropped-dash case) must
-    centre on where the value was actually found in a genuinely long section,
-    not just return the section's head — the miss branch is already covered
-    by `test_rejection_diagnostics_stay_bounded`, whose invented value is
-    never in the text at all."""
+    """`_reject_window`'s hit branch (a near-miss, like C0's dropped-dash
+    case) must centre on where the value was actually found in a genuinely
+    long window, not just return the window's head — the miss branch is
+    already covered by `test_rejection_diagnostics_stay_bounded`, whose
+    invented value is never in the text at all."""
     padding_before = "Unrelated padding text. " * 20
     padding_after = " More unrelated trailing text." * 20
     text = (
@@ -1494,19 +1527,19 @@ def test_rejection_window_centers_on_a_real_hit_in_long_text():
         "cluster_flops [-tray_weight tray_weight]"
         f"{padding_after}"
     )
-    section = _section(text, hint="cluster_flops")
+    window = _window(text)
     entry = {
         "command_name": "cluster_flops",
         "args": [{"name": "tray_weight", "desc": "Tray weight."}],
     }
 
-    result = validate_entry(entry, section, ["cluster_flops"])
+    result = validate_entry(entry, window, ["cluster_flops"])
 
     rejection = next(item for item in result.rejections if item.field == "arg")
     assert rejection.reason == "dash_stripped"
     assert len(text) > 400
     assert len(rejection.window) <= 200
-    # Centred on the hit, not the head of a 400+-char section.
+    # Centred on the hit, not the head of a 400+-char window.
     assert rejection.window != text[:200]
     assert "tray_weight" in rejection.window
 
@@ -1517,79 +1550,91 @@ def test_normalize_syntax_erases_continuations_and_collapses_space():
 
 
 # ----------------------------------------------------------------- 6. ledger
-def test_outcome_lists_the_candidates_nothing_was_extracted_for(flops_section):
-    candidates = command_candidates(flops_section)
-    result = validate_entry(_flops_entry(), flops_section, candidates)
+def test_outcome_lists_the_candidates_nothing_was_extracted_for(flops_window):
+    candidates = window_candidates(flops_window)
+    result = validate_entry(_flops_entry(), flops_window, candidates)
 
-    outcome = section_outcome(flops_section, candidates, [result])
+    outcome = window_outcome(flops_window, candidates, [result])
 
     assert outcome.accepted_names == ("cluster_flops",)
     assert "cluster_flops" not in outcome.uncovered_candidates
     assert outcome.entries_seen == 1
     assert outcome.command_rejects == 0
     assert outcome.args_seen == outcome.args_kept == 5
-    assert outcome.section_path == FLOPS_PATH
+    assert outcome.ordinal == 0
+    assert outcome.provenance == FLOPS_PATH
 
 
-def test_outcome_reports_uncovered_candidates(flops_section):
+def test_outcome_reports_uncovered_candidates(flops_window):
     candidates = ["cluster_flops", "detailed_placement"]
-    result = validate_entry(_flops_entry(), flops_section, candidates)
+    result = validate_entry(_flops_entry(), flops_window, candidates)
 
-    outcome = section_outcome(flops_section, candidates, [result])
+    outcome = window_outcome(flops_window, candidates, [result])
 
     assert outcome.uncovered_candidates == ("detailed_placement",)
 
 
-def test_section_outcome_caps_rejections_and_counts_the_overflow(flops_section):
-    """B4: a pathological entry (or a model that never stops inventing
+def test_outcome_folds_uncovered_assignments_into_the_ledger(flops_window):
+    candidates = window_candidates(flops_window)
+    result = validate_entry(_flops_entry(), flops_window, candidates)
+
+    outcome = window_outcome(
+        flops_window, candidates, [result], uncovered_args=["-never_answered"]
+    )
+
+    assert outcome.args_uncovered == 1
+    assert outcome.uncovered_args == ("-never_answered",)
+    assert [item.reason for item in outcome.rejections] == ["arg_not_returned"]
+
+
+def test_window_outcome_caps_rejections_and_counts_the_overflow(flops_window):
+    """A pathological entry (or a model that never stops inventing
     parameters) must not let a job report inherit an unbounded rejection
     list through its own failure records — the ledger caps it and counts
     what got cut rather than silently reading as "everything else was
     clean"."""
-    candidates = command_candidates(flops_section)
+    candidates = window_candidates(flops_window)
     entry = _flops_entry(
         args=[{"name": f"-invented_{index}", "desc": ""} for index in range(30)]
     )
 
-    result = validate_entry(entry, flops_section, candidates)
+    result = validate_entry(entry, flops_window, candidates)
     assert len(result.rejections) == 30  # per-entry validation stays uncapped
 
-    outcome = section_outcome(flops_section, candidates, [result])
+    outcome = window_outcome(flops_window, candidates, [result])
 
-    assert len(outcome.rejections) == MAX_SECTION_REJECTIONS
-    assert outcome.rejections_overflow == 30 - MAX_SECTION_REJECTIONS
+    assert len(outcome.rejections) == MAX_WINDOW_REJECTIONS
+    assert outcome.rejections_overflow == 30 - MAX_WINDOW_REJECTIONS
 
 
-def test_catalog_stats_publish_the_command_reject_ratio(flops_section):
-    candidates = command_candidates(flops_section)
-    good = validate_entry(_flops_entry(), flops_section, candidates)
+def test_catalog_stats_publish_the_command_reject_ratio(flops_window):
+    candidates = window_candidates(flops_window)
+    good = validate_entry(_flops_entry(), flops_window, candidates)
     bad = validate_entry(
-        _flops_entry(command_name="detailed_placement"), flops_section, candidates
+        _flops_entry(command_name="detailed_placement"), flops_window, candidates
     )
-    outcome = section_outcome(flops_section, candidates, [good, bad, bad])
+    outcome = window_outcome(flops_window, candidates, [good, bad, bad])
 
     stats = catalog_stats([outcome])
 
-    assert stats.sections == 1
+    assert stats.windows == 1
     assert stats.entries_seen == 3
     assert stats.command_rejects == 2
     assert stats.command_reject_ratio == pytest.approx(0.6667, abs=1e-4)
-    assert stats.truncated_sections == 0
 
 
-def test_catalog_stats_publish_the_args_keep_ratio(flops_section):
-    """B4: C1b's circuit breaker needs an args axis alongside the
-    command-name reject ratio — an entry can pick the right command name and
-    still invent every parameter, and a veto-rate-only breaker would miss
-    that entirely."""
-    candidates = command_candidates(flops_section)
-    good = validate_entry(_flops_entry(), flops_section, candidates)
+def test_catalog_stats_publish_the_args_keep_ratio(flops_window):
+    """The circuit breaker needs an args axis alongside the command-name
+    reject ratio — an entry can pick the right command name and still invent
+    every parameter, and a veto-rate-only breaker would miss that entirely."""
+    candidates = window_candidates(flops_window)
+    good = validate_entry(_flops_entry(), flops_window, candidates)
     entry = _flops_entry()
     entry["args"] = entry["args"] + [
         {"name": "-tray_capacity", "desc": "Invented.", "default": ""}
     ]
-    partial = validate_entry(entry, flops_section, candidates)
-    outcome = section_outcome(flops_section, candidates, [good, partial])
+    partial = validate_entry(entry, flops_window, candidates)
+    outcome = window_outcome(flops_window, candidates, [good, partial])
 
     stats = catalog_stats([outcome])
 
@@ -1598,9 +1643,171 @@ def test_catalog_stats_publish_the_args_keep_ratio(flops_section):
     assert stats.args_keep_ratio == pytest.approx(10 / 11, abs=1e-4)
 
 
+def test_catalog_stats_count_the_windows_they_were_given(flops_window):
+    """Skipped windows never reach the ledger, so neither ratio is diluted by
+    the prose chapters the cost gate went past."""
+    candidates = window_candidates(flops_window)
+    result = validate_entry(_flops_entry(), flops_window, candidates)
+
+    stats = catalog_stats(
+        [window_outcome(flops_window, candidates, [result]) for _ in range(3)]
+    )
+
+    assert stats.windows == 3
+
+
 def test_catalog_stats_on_nothing_do_not_divide_by_zero():
     stats = catalog_stats([])
 
     assert stats.entries_seen == 0
     assert stats.args_keep_ratio == 0.0
     assert stats.command_reject_ratio == 0.0
+
+
+# --------------------------------------------------------------------- 7. e2e
+def test_a_huge_parameter_table_survives_the_whole_chain():
+    """e2e, real markdown all the way through: parse_markdown_text ->
+    extraction_windows -> window_candidates -> validate_entry -> window_outcome.
+
+    This is v1's exact failure, inverted. There, a 120-parameter table overran
+    one section's budget and the whole element was dropped — the section came
+    out as its own heading plus a syntax block, 1/120 args kept, and a
+    command-reject ratio of 0.0 that never saw the failure because there was
+    nothing left to see it in. Here the table is split across windows instead
+    and every character of it is still in a prompt.
+
+    It also pins the shape the cross-window merge exists for: the command's own
+    window grounds all 120 parameters, and the table's windows carry parameters
+    with no claimable name of their own — which is why the skip gate must ask
+    about flags as well as candidates.
+    """
+    syntax = "big_command\n" + "\n".join(
+        f"    [-param_{index:03d} value_{index:03d}]" for index in range(120)
+    )
+    rows = "\n".join(
+        f"| `-param_{index:03d}` | Description for parameter number "
+        f"{index:03d}, controlling one aspect of the big command's tuning "
+        f"behavior in fine detail across many designs. Default is "
+        f"`{index}`. |"
+        for index in range(120)
+    )
+    markdown = (
+        "## big_command\n\n"
+        f"```\n{syntax}\n```\n\n"
+        "| Switch Name | Description |\n"
+        "| ----- | ----- |\n"
+        f"{rows}\n"
+    )
+    # Ids come from the store, not the parser (`parse_markdown_text` leaves
+    # them blank until the rows are persisted), so they are supplied here the
+    # way `source_elements_for_chunking` would return them.
+    elements = [
+        {
+            "id": f"el-e2e-{index:04d}",
+            "element_type": element.element_type,
+            "text": element.text,
+            "section_path": element.metadata.get("section_path", ""),
+        }
+        for index, element in enumerate(parse_markdown_text("src-e2e", markdown), 1)
+    ]
+
+    windows = extraction_windows(elements)
+    assert len(windows) > 1
+    assert _rebuild(windows) == _expected_text(elements)
+
+    # The command's own window: a model answering for all 120 parameters
+    # grounds all 120, which is precisely what v1 lost.
+    named = windows[0]
+    candidates = window_candidates(named)
+    assert "big_command" in candidates
+    entry = {
+        "command_name": "big_command",
+        "args": [{"name": f"-param_{index:03d}"} for index in range(120)],
+    }
+    result = validate_entry(entry, named, candidates)
+    outcome = window_outcome(named, candidates, [result])
+
+    assert result.accepted is True
+    assert outcome.args_seen == outcome.args_kept == 120
+
+    # The table's windows: no claimable name of their own. Without the relay
+    # this is where the extraction ended — the model had nothing it could
+    # legally claim, so the whole options table came back empty.
+    chain = _carry_chain(windows)
+    for index, window in enumerate(windows[1:], 1):
+        assert window_candidates(window) == []
+        assert parameter_names(window.text)
+        assert window_needs_model(window, chain[index]) is True
+        assert extraction_slices(window)
+        # Relayed from window 0, and still relayed after passing THROUGH
+        # window 1, which named nothing either.
+        assert chain[index] == ["big_command"]
+
+        relayed = validate_entry(entry, window, [], carried=chain[index])
+        assert relayed.accepted is True
+        assert relayed.entry.suspect_related is False
+        # Only the parameters this window actually holds ground here.
+        held = set(parameter_names(window.text))
+        assert {arg.name for arg in relayed.entry.args} == held
+        assert 0 < len(held) < 120
+
+
+def test_a_new_command_ends_the_previous_ones_relay():
+    """The reset half, end to end: two commands in one document, each with a
+    multi-window table. The second command's heading must stop the first one's
+    relay, or every parameter in the book stays claimable by the first."""
+    def manual(name, params):
+        rows = "\n".join(
+            f"| `-{name}_{index:02d}` | Description for parameter {index:02d} "
+            f"of {name}, padded so the table spans several windows. |"
+            for index in range(params)
+        )
+        return (
+            f"## {name}\n\n"
+            f"```\n{name} [-{name}_00 value]\n```\n\n"
+            f"| Switch Name | Description |\n| ----- | ----- |\n{rows}\n"
+        )
+
+    elements = [
+        {
+            "id": f"el-reset-{index:04d}",
+            "element_type": element.element_type,
+            "text": element.text,
+            "section_path": element.metadata.get("section_path", ""),
+        }
+        for index, element in enumerate(
+            parse_markdown_text(
+                "src-reset", manual("first_command", 80) + manual("second_command", 80)
+            ),
+            1,
+        )
+    ]
+
+    windows = extraction_windows(elements, max_chars=1_500)
+    assert _rebuild(windows) == _expected_text(elements)
+    chain = _carry_chain(windows)
+
+    relayed_names = [
+        name for carried in chain for name in carried
+    ]
+    assert "first_command" in relayed_names
+    assert "second_command" in relayed_names
+
+    # Once the second command has been named, the first is no longer claimable
+    # anywhere after it — the relay reset, it did not accumulate.
+    second_named = next(
+        index
+        for index, window in enumerate(windows)
+        if "second_command" in window_candidates(window)
+    )
+    assert all(
+        "first_command" not in carried for carried in chain[second_named + 1:]
+    )
+    assert any("first_command" in carried for carried in chain[:second_named + 1])
+
+    # And the veto follows the relay: the first command cannot be claimed in
+    # the second command's continuation windows.
+    tail = windows[second_named + 1]
+    assert validate_entry(
+        {"command_name": "first_command"}, tail, [], carried=chain[second_named + 1]
+    ).accepted is False

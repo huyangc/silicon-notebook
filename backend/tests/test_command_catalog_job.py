@@ -8,8 +8,9 @@
 2. **终态纪律** —— 正常、取消、熔断、`BaseException` 四条退出路径都必须把行落成终态。
    `KeyboardInterrupt`/`SystemExit` 继承 `BaseException`,`except Exception` 接不到;
    行留在 queued/running 就会把这个来源永久挡在守卫上,而离线进程无权自清。
-3. **熔断双轴** —— 处理 ≥10 节后,命令名整条否决率 >20% 或 args 保留率 <50% 就
-   必须把 job 判失败并给用户可读理由,绝不静默产出近空目录。
+3. **熔断双轴** —— 处理 ≥10 个**实际发过调用的窗口**后,命令名整条否决率 >20% 或
+   args 保留率 <50% 就必须把 job 判失败并给用户可读理由,绝不静默产出近空目录。
+   跳过的窗口不进这个样本:一份大部分是散文的手册不该因为「散文很多」被判失败。
 4. **length/空 content 两条重试** —— 前者二分再问,后者重试一次后记账;两者都不许
    把「模型没给出可用回答」吞成「这一节本来就没有命令」。
 5. **apply 的保守合并** —— 同名命令一律不改行,只回报 conflict。覆盖用户手工编辑
@@ -18,13 +19,29 @@
 三条变异(熔断阈值恒不触发 / 删掉 BaseException 兜底 / 删掉 conflict 保护)都实测
 过会让对应用例报红,记录在本任务的交付报告里。
 
+v2(全文档窗口抽取)改动的几何 —— 规则分节退役,整篇按字符切成 `WINDOW_CHARS`
+窗口,一次回答列举窗口里的**所有**命令。本文件因此多钉四条:
+
+A. **跳过窗零调用、但照常推进进度** —— 没有可认领命令名、也没有 flag 的窗口不发
+   模型调用;它仍必须计入 `sections_total` 并 `sections_done` 加一,否则进度条永远
+   走不完(或者分母在撒谎)。
+B. **跨窗合并一命令一行** —— 参数表跨窗口边界时,后一个窗口**改写**前一个窗口写下
+   的那一行,而不是给同一个命令再追加一行;被拦下的条目永远只追加。
+C. **`entries: []` 是合法回答** —— 「这段文本里没有命令」不是「模型没给出可用回答」,
+   不进熔断的第三轴;而**缺少 `entries` 列表**的回答仍按 malformed 处置。
+D. **接力(carry)** —— 续窗没有自己的命令名,只能认领上一窗传下来的名字;prompt 必须
+   把两份名单分开列,否则模型无从把孤立的参数键到正确的命令上。
+
+除 A 的「跳过窗也推进 carry」一条外(见 `_run_windows` 里的注释:按构造不可观测),
+上述每条都做过删除+移动变异验证,记录在交付报告里。
+
 C1b 双评审修复补充覆盖(同样都做过变异验证,见交付报告):
 
 6. **飞行中取消不判 failed** —— 一次模型调用中途被取消(`AskCancelled`)必须落
    `cancelled`,不能掠过归类掉进 `except Exception` 判成「请稍后重试」。
-7. **preview 形状信号吃全文** —— `detect_manual_shape` 必须看到文档全部节,不能被
-   喂 `command_sections()` 自己分组后的子集(那会让 `total_sections` 恒等于命令节数、
-   比率闸永远读不到否决空间)。
+7. **preview 的两个数字来源不同** —— 窗口数是对来源**全文字符数**的算术(一次 SQL
+   聚合,不读正文),调用数只能在有界前缀里精确测量、前缀之外每窗按 1 次计。
+   (v1 的形状检测 `detect_manual_shape` 随规则分节一起退役。)
 8. **apply 目标解析按 job 记住的 table_id** —— 表被改名后,同一个 job 的第二次
    apply 仍必须写回第一次落过的那张表,而不是按标题重新查找。
 9. **apply 存在性检查有界** —— 不整表 hydrate 目标表,只按本页候选命令名做一次
@@ -151,8 +168,10 @@ from app.services.catalog_job import (
     pending_candidates_message,
 )
 from app.services.command_catalog import (
-    MAX_SECTION_REJECTIONS,
-    MIN_SECTIONS_BEFORE_ALERT,
+    MAX_CANDIDATES,
+    MAX_WINDOW_REJECTIONS,
+    MIN_WINDOWS_BEFORE_ALERT,
+    WINDOW_CHARS,
 )
 from app.services.knowhow import api as knowhow_api
 from app.services.model_work import ModelProviderError
@@ -176,25 +195,156 @@ def repo(tmp_path, monkeypatch):
     return instance
 
 
-def _manual_elements(source_id: str, commands: int, *, params: int = 3) -> list[dict]:
+# Filler that is prose and nothing else: no `_`/`.`-joined identifier, no
+# flag-shaped token, no sentence punctuation an identifier scanner could latch
+# onto. Its only job is to occupy characters, because v2's geometry is
+# character-driven — "one command per window" is a statement about SIZE now,
+# not about headings.
+_WINDOW_FILLER_UNIT = "filler prose for window sizing "
+
+
+def _filler(size: int) -> str:
+    repeats = size // len(_WINDOW_FILLER_UNIT) + 1
+    return (_WINDOW_FILLER_UNIT * repeats)[:size]
+
+
+# One filler paragraph per window by default. Element COUNT is what costs
+# real time in this file — every element is re-scanned by `window_candidates`
+# (twice per window: once by the run loop, once by the gate) and inserted
+# row-by-row — so fixtures pay for small elements only where small elements are
+# the point, which is `preview` (it clips each element at
+# `PREVIEW_ELEMENT_CHARS`, so one 12k paragraph would make every preview test
+# `sampled=True` and its prefix analysis measure nothing).
+_BIG_CHUNK = WINDOW_CHARS
+_PREVIEW_CHUNK = 900
+
+
+def _pad_to_window(texts: list[str], *, chunk: int = _BIG_CHUNK) -> list[str]:
+    """Append filler PARAGRAPHS until `texts` fill exactly one window.
+
+    Two properties, and both are load-bearing:
+
+    * **exactly** one window. The packer is greedy, so a window left even 15
+      characters short pulls the NEXT command's heading into it — and a fixture
+      that says "12 commands" then quietly produces windows serving two
+      candidate names each reads like a packing bug when it is a fixture bug.
+    * **many small elements** rather than one huge one. `preview` clips each
+      element at `PREVIEW_ELEMENT_CHARS` (1200), so a fixture that fills a
+      window with a single 12k paragraph is `sampled=True` for every preview
+      test and its prefix analysis measures nothing. Real manuals are made of
+      ordinary-sized paragraphs; so is this.
+    """
+    padded = list(texts)
+    total = sum(len(text) for text in padded) + max(0, len(padded) - 1)
+    while WINDOW_CHARS - total > 1:
+        size = min(max(1, chunk), WINDOW_CHARS - total - 1)
+        padded.append(_filler(size))
+        total += 1 + size
+    if WINDOW_CHARS - total == 1:
+        padded[-1] = padded[-1] + "x"
+    return padded
+
+
+def _window_elements(
+    source_id: str,
+    offset: int,
+    heading: str,
+    body: str,
+    section_path: str,
+    *,
+    first_type: str = "heading",
+    chunk: int = _BIG_CHUNK,
+) -> list[dict]:
+    """One command's (or one prose section's) elements, filling one window.
+
+    `first_type="paragraph"` builds a window with no heading at all — a
+    continuation window, which is what most of a long options table looks
+    like. `chunk` trades element COUNT against element SIZE: the default keeps
+    every element under `PREVIEW_ELEMENT_CHARS` (so preview tests see unclipped
+    text), while a large chunk keeps the element count under
+    `MAX_ANCHOR_ELEMENTS` (so anchor-union assertions have room to observe
+    anything).
+    """
+    texts = _pad_to_window([heading, body], chunk=chunk)
+    return [
+        {
+            "id": f"el-{source_id}-{offset + index + 1:04d}",
+            "element_type": first_type if index == 0 else "paragraph",
+            "text": text,
+            "section_path": section_path,
+        }
+        for index, text in enumerate(texts)
+    ]
+
+
+def _relay_manual(source_id: str) -> list[dict]:
+    """One command documented across THREE windows.
+
+    Window 0 is the command itself (heading, usage line, `-density`). Windows
+    1 and 2 are continuations: prose and more parameters, with no heading, no
+    usage line and the command's name nowhere in them. Neither can claim
+    anything without the relay, and between them they hold most of what the
+    command's documentation actually says — which is what a long options table
+    looks like on a real manual.
+
+    Three contributing windows rather than two, deliberately: with only two,
+    the merge would still produce the right row if the registry forgot to carry
+    the MERGED accumulator forward (window 2 would seed from window 0 and add
+    its own). The third window is what makes that mistake visible.
+    """
+    name = "set_thing_0"
+    elements = _window_elements(
+        source_id, 0, name,
+        f"{name} -density value\n\n- `-density` the density option",
+        name,
+    )
+    elements.extend(
+        _window_elements(
+            source_id, len(elements),
+            "这是一段普通的说明文字", "- `-site` the site option", "",
+            first_type="paragraph",
+        )
+    )
+    continuation = "\n".join(
+        f"- `-{flag}` the {flag} option" for flag in _FLAGS[1:4]
+    )
+    elements.extend(
+        _window_elements(
+            source_id, len(elements), continuation, "", "",
+            first_type="paragraph",
+        )
+    )
+    return elements
+
+
+def _manual_elements(
+    source_id: str,
+    commands: int,
+    *,
+    params: int = 3,
+    per_window: bool = True,
+    chunk: int = _BIG_CHUNK,
+) -> list[dict]:
     """A command-reference shaped source: one identifier heading per command,
     each carrying a usage line and a flag-bearing parameter list.
 
     Element ids are zero-padded and strictly increasing because the real
     element reader orders ``BY id`` and relies on that being insertion order
     (see ``ChunkStore.source_elements_for_chunking``). A fixture that numbers
-    them any other way silently reorders the document — a body sorting before
-    its own heading folds it into the PREVIOUS command's section, which reads
-    like a grouping bug rather than a fixture bug.
+    them any other way silently reorders the document.
+
+    `per_window=True` (the default) pads each command to fill one whole window,
+    so this fixture keeps meaning what it used to mean under v1: N commands
+    produce N model calls, each prompt serves exactly one candidate name, and
+    the job's `sections_*` columns count N. `per_window=False` is the OTHER v2
+    shape — several commands sharing one window, one call answering for all of
+    them — and the tests that are about that say so explicitly.
 
     `params=0` means a genuinely FLAGLESS manual: no parameter list AND no flag
     on the usage line. The usage line used to carry `-density` even at
     `params=0`, which made "flagless" a fiction — `parameter_names` reads the
-    whole section text, so those commands were assigned one parameter each and
+    whole window text, so those commands were assigned one parameter each and
     a model answering `args: []` was under-extracting, not answering correctly.
-    That distinction only became observable once the args axis started counting
-    assigned-but-unanswered parameters (R2 fix 1); before it, the fixture's
-    quiet extra flag was invisible in both directions.
     """
     elements: list[dict] = []
     for index in range(commands):
@@ -203,6 +353,14 @@ def _manual_elements(source_id: str, commands: int, *, params: int = 3) -> list[
             f"- `-{flag}` the {flag} option" for flag in _FLAGS[:params]
         )
         usage = f"{name} -{_FLAGS[0]} value" if params else f"{name} value"
+        body = f"{usage}\n\n{flags}"
+        if per_window:
+            elements.extend(
+                _window_elements(
+                    source_id, len(elements), name, body, name, chunk=chunk
+                )
+            )
+            continue
         elements.append(
             {
                 "id": f"el-{source_id}-{len(elements) + 1:04d}",
@@ -215,7 +373,7 @@ def _manual_elements(source_id: str, commands: int, *, params: int = 3) -> list[
             {
                 "id": f"el-{source_id}-{len(elements) + 1:04d}",
                 "element_type": "paragraph",
-                "text": f"{usage}\n\n{flags}",
+                "text": body,
                 "section_path": name,
             }
         )
@@ -280,37 +438,41 @@ def _numbered(source_id: str, raw: list[dict]) -> list[dict]:
     ]
 
 
-def _prose_and_commands(source_id: str, *, prose: int, commands: int) -> list[dict]:
-    """`prose` plain (non-command-shaped) sections, followed by `commands`
-    real command sections — for proving `detect_manual_shape` sees the WHOLE
-    document's section count (`prose + commands`), not just the subset
-    `command_sections()` would have grouped into commands."""
-    raw: list[dict] = []
-    for index in range(prose):
+def _prose_windows_then_commands(
+    source_id: str, *, prose_windows: int, commands: int,
+    chunk: int = _PREVIEW_CHUNK,
+) -> list[dict]:
+    """`prose_windows` windows of pure prose, then `commands` command windows.
+
+    Prose first and commands after, deliberately: the relay
+    (`carry_candidates`) hands a window's candidate names forward, so a prose
+    window that FOLLOWS a command is legitimately still worth a call (it may
+    hold that command's worked example). A prose window with nothing before it
+    is the unambiguous case the zero-model-call gate exists for, and it is the
+    one this fixture stages.
+
+    Each prose window is padded to fill exactly one window for the same reason
+    the command fixture is: v2's geometry is character-driven, so "one window"
+    is a size, not a heading.
+    """
+    elements: list[dict] = []
+    for index in range(prose_windows):
         title = f"背景第{index}节"
-        raw.append(
-            {"element_type": "heading", "text": title, "section_path": title}
-        )
-        raw.append(
-            {
-                "element_type": "paragraph",
-                "text": "这是一段普通的说明文字，不涉及任何命令，仅用于充数。",
-                "section_path": title,
-            }
+        elements.extend(
+            _window_elements(
+                source_id, len(elements), title, "这是一段普通的说明文字", title,
+                chunk=chunk,
+            )
         )
     for index in range(commands):
         name = f"set_thing_{index}"
-        raw.append(
-            {"element_type": "heading", "text": name, "section_path": name}
+        body = f"{name} -density value\n\n- `-density` the density option"
+        elements.extend(
+            _window_elements(
+                source_id, len(elements), name, body, name, chunk=chunk
+            )
         )
-        raw.append(
-            {
-                "element_type": "paragraph",
-                "text": f"{name} -density value\n\n- `-density` the density option",
-                "section_path": name,
-            }
-        )
-    return _numbered(source_id, raw)
+    return elements
 
 
 def _large_param_manual(source_id: str, *, param_count: int) -> list[dict]:
@@ -362,39 +524,136 @@ def _positional_manual(source_id: str) -> list[dict]:
 
 class _Client:
     """A stub extraction model. ``answer`` maps a slice's requested command
-    name to the reply; anything it returns is fed through the real grounding."""
+    name to the reply; anything it returns is fed through the real grounding.
+
+    **The one-entry shorthand.** v2's wire shape is `{"entries": [ ... ]}`, but
+    the overwhelming majority of these tests are about ONE command's grounding
+    (a dropped dash, a default that is not in the text, a cap on model prose),
+    and rewriting sixty of them to wrap their single object in a list would
+    have added noise to every one of them without testing anything new. So a
+    reply that parses as a JSON object WITHOUT an `entries` key is wrapped into
+    a one-entry list here, at the double.
+
+    That convenience is exactly as dangerous as it sounds for the tests that
+    are about the SHAPE ITSELF — a reply missing `entries` must be treated as
+    malformed by production — so those pass ``wrap=False`` and speak the raw
+    wire shape. Anything that is not a JSON object at all (a truncated string,
+    prose) is passed through untouched in both modes; wrapping it would destroy
+    the very failure the test is staging.
+    """
 
     configured = True
     settings = None  # no ``settings`` -> cap_kwargs/response_validator stay off
 
-    def __init__(self, answer):
+    def __init__(self, answer, *, wrap: bool = True):
         self.answer = answer
+        self.wrap = wrap
         self.calls: list[str] = []
 
     def chat_json(self, messages, schema_hint, **kwargs):
         prompt = messages[0]["content"]
         self.calls.append(prompt)
-        return self.answer(prompt, len(self.calls))
+        raw = self.answer(prompt, len(self.calls))
+        if not self.wrap:
+            return raw
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(parsed, dict) or "entries" in parsed:
+            return raw
+        return json.dumps({"entries": [parsed]})
+
+
+def _prompt_block(prompt: str, header: str) -> list[str]:
+    """The `- name` bullets under `header`, up to the first line that is not
+    one. Used to read back what the prompt actually SERVED, rather than
+    assuming it."""
+    names: list[str] = []
+    started = False
+    for line in prompt.splitlines():
+        if not started:
+            started = line.startswith(header)
+            continue
+        if line.startswith("- "):
+            names.append(line[2:].strip())
+        elif names:
+            break
+    return names
+
+
+def _candidates_of(prompt: str) -> list[str]:
+    return [
+        name
+        for name in _prompt_block(prompt, "Choose each command name from this list")
+        if name != "(none)"
+    ]
+
+
+def _carried_of(prompt: str) -> list[str]:
+    return _prompt_block(
+        prompt, "Commands possibly continuing from earlier text"
+    )
 
 
 def _command_of(prompt: str) -> str:
-    for line in prompt.splitlines():
-        if line.startswith("- set_thing_"):
-            return line[2:].strip()
-    return ""
+    """The first command name the prompt's OWN candidate block serves.
+
+    Still exact for `per_window=True` fixtures (one candidate per window), and
+    deliberately reads the own-candidates block rather than any `- set_thing_`
+    line: the relay block lists names too, and a reply claiming one of those
+    would be testing something else entirely.
+    """
+    own = _candidates_of(prompt)
+    return own[0] if own else ""
+
+
+def _entry_for(name: str) -> dict:
+    return {
+        "command_name": name,
+        "syntax": f"{name} -density value",
+        "description": "does a thing",
+        "args": [
+            {"name": f"-{flag}", "required": False, "desc": "", "default": ""}
+            for flag in _FLAGS[:3]
+        ],
+        "examples": [f"{name} -density 0.6"],
+    }
+
+
+def _relay_reply(prompt: str, _call: int) -> str:
+    """Answer for whichever name the prompt served — own candidate, or relayed.
+
+    Deliberately returns `syntax`/`description` only when the name is the
+    window's OWN: a continuation window has no usage line, so a model claiming
+    one there would be inventing it, and the merge's first-writer-wins is what
+    has to preserve the real one.
+    """
+    own = _candidates_of(prompt)
+    carried = _carried_of(prompt)
+    name = (own or carried)[0]
+    entry = {
+        "command_name": name,
+        "syntax": f"{name} -density value" if own else "",
+        "description": "does a thing" if own else "",
+        "args": [
+            {"name": param, "required": False, "desc": "", "default": ""}
+            for param in _requested_params(prompt)
+        ],
+        "examples": [],
+    }
+    return json.dumps({"entries": [entry]})
 
 
 def _good_reply(prompt: str, _call: int) -> str:
-    name = _command_of(prompt)
+    """One entry per command the prompt served — the v2 answer shape.
+
+    On a `per_window=True` fixture that is one entry, exactly as v1's reply
+    was; on a shared window it is the whole list, which is the behaviour that
+    replaced sectioning.
+    """
     return json.dumps(
-        {
-            "command_name": name,
-            "syntax": f"{name} -density value",
-            "description": "does a thing",
-            "args": [{"name": f"-{flag}", "required": False, "desc": "", "default": ""}
-                     for flag in _FLAGS[:3]],
-            "examples": [f"{name} -density 0.6"],
-        }
+        {"entries": [_entry_for(name) for name in _candidates_of(prompt)]}
     )
 
 
@@ -573,7 +832,7 @@ def test_reject_info_is_bounded_across_a_multi_slice_commands_slices(repo):
     (20); if every slice invents its whole assignment, `_merge_entry`'s
     cross-slice accumulator would otherwise grow to 200 rejection records for
     ONE row. Both the in-memory accumulator and the final write must cap at
-    `MAX_SECTION_REJECTIONS` and report the true overflow count rather than
+    `MAX_WINDOW_REJECTIONS` and report the true overflow count rather than
     silently dropping it.
 
     Each slice contributes TWO ledgers' worth of records after R2 fix 1 — the
@@ -616,9 +875,9 @@ def test_reject_info_is_bounded_across_a_multi_slice_commands_slices(repo):
     page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
     assert len(page["items"]) == 1
     reject_info = page["items"][0]["reject_info"]
-    assert len(reject_info["fields"]) <= MAX_SECTION_REJECTIONS
-    assert len(reject_info["fields"]) == MAX_SECTION_REJECTIONS
-    assert reject_info["overflow"] == 400 - MAX_SECTION_REJECTIONS
+    assert len(reject_info["fields"]) <= MAX_WINDOW_REJECTIONS
+    assert len(reject_info["fields"]) == MAX_WINDOW_REJECTIONS
+    assert reject_info["overflow"] == 400 - MAX_WINDOW_REJECTIONS
     # 10 slices × 20 invented names = 200 rejections; 10 slices × 20 assigned
     # parameters nothing answered for = 200 more.
     assert {entry["reason"] for entry in reject_info["fields"]} <= {
@@ -751,6 +1010,784 @@ def test_model_authored_argument_descriptions_are_capped_per_arg_and_per_row(rep
     # default and lose only the prose — and the count of them is reported.
     assert descriptions[per_row:] == [""] * 10
     assert row["reject_info"]["desc_overflow"] == 10
+
+
+# ------------------------------------------------------------ v2: the geometry
+def test_one_window_documenting_several_commands_is_one_call_and_several_rows(
+    repo,
+):
+    """The change sectioning was replaced BY. Three commands small enough to
+    share one window are one model call answering with three entries, and the
+    catalog still holds one row per command."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 3, per_window=False)
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert result["windows_total"] == 1
+    assert len(client.calls) == 1
+    assert _candidates_of(client.calls[0]) == [
+        "set_thing_0", "set_thing_1", "set_thing_2"
+    ]
+    settled = service.catalog.get_job(job["id"])
+    assert settled["sections_total"] == 1
+    assert settled["entries"] == 3
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [row["command_name"] for row in page["items"]] == [
+        "set_thing_0", "set_thing_1", "set_thing_2"
+    ]
+
+
+def test_a_prose_window_costs_no_model_call_and_still_advances_progress(repo):
+    """The zero-model-call gate, and the progress-bar half of it.
+
+    Two prose windows and one command window: one call, but THREE windows ticked
+    off. A denominator of 3 with a numerator that stops at 1 is a progress bar
+    that never finishes, and a denominator of 1 is a cost estimate that lied.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "散文加命令",
+        _prose_windows_then_commands("s1", prose_windows=2, commands=1),
+    )
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert len(client.calls) == 1
+    assert result["windows_total"] == 3
+    assert result["windows_skipped"] == 2
+    assert result["windows"] == 1  # windows that actually made a call
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["sections_total"] == 3
+    assert settled["sections_done"] == 3
+    assert settled["entries"] == 1
+
+
+def test_the_relay_reaches_a_continuation_window_past_intervening_prose(repo):
+    """A command, a prose window, then a window that is nothing but more
+    parameters — no heading, no usage line, no command name anywhere in it.
+
+    Without the relay that third window can claim nothing at all and its whole
+    parameter table is lost, which on a real manual is most of a large
+    command's documentation.
+
+    The middle window is NOT skipped, and that is the relay's own documented
+    cost rather than an oversight: a window following a command may well be
+    that command's worked example or prose description, so a non-empty relay
+    keeps the gate open. `window_needs_model`'s docstring owns that trade-off;
+    this test pins that the run really behaves that way, which is also why the
+    skip-gate tests stage their prose BEFORE any command.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(repo, notebook.id, "s1", "接力手册", _relay_manual("s1"))
+    client = _Client(_relay_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert result["windows_total"] == 3
+    assert result["windows_skipped"] == 0
+    assert len(client.calls) == 3
+    # The continuation window serves NO name of its own, and the relayed one
+    # instead — which is the only reason its parameters can be attributed.
+    assert _candidates_of(client.calls[2]) == []
+    assert _carried_of(client.calls[2]) == ["set_thing_0"]
+    assert service.catalog.get_job(job["id"])["status"] == "succeeded"
+
+
+def test_a_command_split_across_windows_lands_in_one_row(repo):
+    """One command, one row — even when its parameters arrive two windows
+    apart. The second window revises the first window's row instead of
+    appending a second row for the same name."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(repo, notebook.id, "s1", "接力手册", _relay_manual("s1"))
+    bind_chat_client(repo, "kg_extract", _Client(_relay_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
+    payload = page["items"][0]["payload"]
+    # The union of both windows' parameters, in first-seen order.
+    assert [arg["name"] for arg in payload["args"]] == [
+        "-density", "-site", "-pad_left", "-pad_right", "-layer"
+    ]
+    # First writer wins for the overview fields: only the first window had a
+    # usage line to ground a syntax against, and the second must not blank it.
+    assert payload["syntax"] == "set_thing_0 -density value"
+    assert payload["description"] == "does a thing"
+    # Anchors are the union of the windows the command was documented in,
+    # still bounded; the excerpt stays the FIRST window's.
+    assert len(payload["anchors"]) <= 12
+    assert len(set(payload["anchors"])) > 1
+    assert payload["excerpt"].startswith("set_thing_0")
+    # The job's own entry tally counts ROWS added to the review queue, so a
+    # merge must not inflate it.
+    assert service.catalog.get_job(job["id"])["entries"] == 1
+
+
+def test_a_later_windows_rejected_entry_never_merges_into_the_earlier_row(repo):
+    """Only `candidate` rows merge. A rejected entry is appended, always — a
+    grounding failure two windows later must not be able to rewrite the row a
+    reviewer is already looking at."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(repo, notebook.id, "s1", "接力手册", _relay_manual("s1"))
+
+    def first_good_then_hallucinated(prompt, call):
+        if call == 1:
+            return _relay_reply(prompt, call)
+        return json.dumps(
+            {"entries": [{"command_name": "totally_other_command", "args": []}]}
+        )
+
+    bind_chat_client(repo, "kg_extract", _Client(first_good_then_hallucinated))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
+    # Untouched by the second window: still exactly what window 0 grounded.
+    assert [arg["name"] for arg in page["items"][0]["payload"]["args"]] == ["-density"]
+    rejected = service.candidates_page(
+        job["id"], state="rejected", cursor=0, limit=50
+    )
+    # One per hallucinating window (the prose window and the continuation
+    # window), appended — never folded into the row that already exists.
+    assert [row["command_name"] for row in rejected["items"]] == [
+        "totally_other_command", "totally_other_command"
+    ]
+
+
+def test_a_candidate_row_from_a_headingless_document_gets_an_ordinal_label(repo):
+    """`section_path` is a provenance LABEL, and a window boundary falls where
+    the character budget put it — so a document with no heading anywhere has no
+    breadcrumb to inherit and the row carries the window's ordinal instead of an
+    empty string. (How that reaches the review panel is the frontend's call;
+    this only pins that the column is never blank.)"""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "无标题手册",
+        _numbered("s1", [
+            {
+                "element_type": "paragraph",
+                "text": "set_thing_0 -density value\n\n- `-density` the option",
+                "section_path": "",
+            }
+        ]),
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=10)
+    assert page["items"][0]["command_name"] == "set_thing_0"
+    assert page["items"][0]["section_path"] == "window 1"
+
+
+def test_an_empty_entries_list_is_a_legal_answer_not_an_unusable_slice(repo):
+    """`entries: []` means "this text documents no command", which is the
+    honest answer for a window of prose that only got sent because a relayed
+    name kept the gate open. It must not count toward the breaker's
+    unusable-response axis — a prose-heavy manual would otherwise be killed for
+    a model doing exactly as it was told."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    # A FLAGLESS manual, deliberately: with an assignment in hand, answering
+    # `entries: []` twelve windows running is a model ignoring what it was
+    # asked for, and the args axis is supposed to fire on exactly that (see
+    # `test_the_args_axis_counts_what_was_asked_for_not_only_what_came_back`).
+    # The claim here is narrower and is the one that matters for prose-heavy
+    # manuals: an empty list is never an UNUSABLE response.
+    _add_manual(repo, notebook.id, "s1", MIN_WINDOWS_BEFORE_ALERT + 2, params=0)
+
+    def one_command_then_nothing(prompt, call):
+        # The first window names its command; every window after it answers
+        # honestly that it documents none. One real entry is what keeps this
+        # test about the unusable AXIS rather than about the wholly-empty run
+        # (`test_a_run_that_produces_nothing_at_all_is_not_a_success`).
+        if call == 1:
+            return json.dumps(
+                {"entries": [{"command_name": _command_of(prompt), "args": []}]}
+            )
+        return json.dumps({"entries": []})
+
+    bind_chat_client(
+        repo,
+        "kg_extract",
+        # `wrap=False`: this test is about the WIRE shape, so the double must
+        # not be allowed to reshape it.
+        _Client(one_command_then_nothing, wrap=False),
+    )
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["entries"] == 1
+    # The claim: eleven `entries: []` answers produced no slice-failure rows
+    # and did not open the breaker's unusable axis.
+    assert settled["rejected"] == 0
+    assert settled["sections_done"] == MIN_WINDOWS_BEFORE_ALERT + 2
+
+
+def test_a_reply_without_an_entries_list_is_malformed_not_an_empty_answer(repo):
+    """The other half of the same contract: a reply that never produced an
+    `entries` LIST has not answered the question, and gets the malformed
+    remedy (retry, then a recorded slice failure) rather than being read as
+    "no commands here"."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    client = _Client(
+        lambda prompt, call: json.dumps({"command_name": "set_thing_0"}),
+        wrap=False,
+    )
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["entries"] == 0
+    assert settled["rejected"] == 1
+    page = service.candidates_page(job["id"], state="rejected", cursor=0, limit=50)
+    assert page["items"][0]["reject_info"]["fields"][0]["reason"] == (
+        "model_response_unusable"
+    )
+
+
+def test_skipped_windows_do_not_count_toward_the_breakers_sample(repo):
+    """`MIN_WINDOWS_BEFORE_ALERT` counts windows that actually made a CALL.
+
+    Nine command windows all rejecting, plus five prose windows that cost
+    nothing: fourteen windows, but only nine ratios' worth of evidence. Letting
+    the skipped ones fill the sample would fire the breaker on a document whose
+    only sin is being mostly prose.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "散文加命令",
+        _prose_windows_then_commands(
+            "s1", prose_windows=5, commands=MIN_WINDOWS_BEFORE_ALERT - 1
+        ),
+    )
+    bind_chat_client(
+        repo,
+        "kg_extract",
+        _Client(lambda prompt, call: json.dumps(
+            {"command_name": "not_a_documented_command", "args": []}
+        )),
+    )
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert result["windows"] == MIN_WINDOWS_BEFORE_ALERT - 1
+    assert result["windows_skipped"] == 5
+    assert settled["sections_done"] == MIN_WINDOWS_BEFORE_ALERT + 4
+
+
+# ------------------------------------------- T2b: the two-condition cost gate
+def _commands_then_prose(
+    source_id: str, *, commands: int, prose_windows: int,
+    chunk: int = _BIG_CHUNK,
+) -> list[dict]:
+    """The mirror of `_prose_windows_then_commands`: commands FIRST.
+
+    This is the order the "any relay keeps the gate open" rule billed for. The
+    relay never empties once a command has been seen, so every prose window
+    after the manual's first command inherited a claimable name and was sent —
+    on a real manual that is most of the book, paid for one window at a time.
+    """
+    elements: list[dict] = []
+    for index in range(commands):
+        name = f"set_thing_{index}"
+        body = f"{name} -density value\n\n- `-density` the density option"
+        elements.extend(
+            _window_elements(
+                source_id, len(elements), name, body, name, chunk=chunk
+            )
+        )
+    for index in range(prose_windows):
+        title = f"背景第{index}节"
+        elements.extend(
+            _window_elements(
+                source_id, len(elements), title, "这是一段普通的说明文字", title,
+                chunk=chunk,
+            )
+        )
+    return elements
+
+
+def test_prose_after_a_command_is_not_billed_for_the_rest_of_the_book(repo):
+    """The half the earlier gate got wrong, and the expensive half.
+
+    A relay is a NAME, not evidence there is anything in this window to
+    extract, and it never empties once a command has been seen — so "carried
+    keeps the gate open" charges a model call for every prose page after the
+    manual's first command. The measured cost of the old rule is the whole
+    back half of a document; its measured benefit is the occasional worked
+    example. Prose windows AFTER a command are the shape that isolates it —
+    the skip-gate tests that stage prose FIRST pass under either rule.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "命令加散文",
+        _commands_then_prose("s1", commands=1, prose_windows=3),
+    )
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert len(client.calls) == 1
+    assert result["windows_total"] == 4
+    assert result["windows_skipped"] == 3
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["sections_done"] == 4
+    assert settled["entries"] == 1
+
+
+def test_parameters_with_nothing_to_claim_cost_nothing_but_a_continuation_pays(
+    repo,
+):
+    """Both flag-bearing shapes in one document, because the gate tells them
+    apart by the RELAY and nothing else.
+
+    Window 0 is an options table that opens the document: flags, but no name
+    anywhere before it, so nothing a model returned could survive grounding —
+    the served list would be empty and `validate_entry` vetoes every name off
+    it. Window 1 documents a command. Window 2 is that command's table
+    continuing past the boundary: the same flag-only shape, and now worth
+    every cent, because the relay gives the model a name to key it onto.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    # Each of the three has to fill a window of its OWN — the packer is greedy,
+    # so an orphan table left short of a full window simply swallows the
+    # command's heading and the shape under test never occurs.
+    orphan = _window_elements(
+        "s1", 0, "| `-orphan_flag` | belongs to nobody |", "", "",
+        first_type="paragraph",
+    )
+    command = _window_elements(
+        "s1", len(orphan), "set_thing_0",
+        "set_thing_0 -density value\n\n- `-density` the density option",
+        "set_thing_0",
+    )
+    continuation = _window_elements(
+        "s1", len(orphan) + len(command),
+        "- `-pad_left` the pad_left option", "", "",
+        first_type="paragraph",
+    )
+    _add_elements(
+        repo, notebook.id, "s1", "孤儿表加命令", orphan + command + continuation
+    )
+    client = _Client(_relay_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert result["windows_total"] == 3
+    # The opening table skipped, the command and its continuation billed.
+    assert result["windows_skipped"] == 1
+    assert len(client.calls) == 2
+    assert _candidates_of(client.calls[0]) == ["set_thing_0"]
+    # The continuation claims the relayed name — the case the gate must keep.
+    assert _candidates_of(client.calls[1]) == []
+    assert _carried_of(client.calls[1]) == ["set_thing_0"]
+
+
+def test_a_skipped_window_neither_probes_the_job_row_nor_emits_an_event(repo):
+    """A skipped window spends nothing and does nothing, so it must not pay
+    for observing itself.
+
+    The liveness probe exists to stop paying a model for a job whose row a
+    cascade deleted, and `catalog_section_done` reports work that happened;
+    on a skip there is neither. A mostly-prose PDF has thousands of these
+    windows, and probe + event + `record_section` is three database round
+    trips each where one is enough. `record_section` is the one that stays:
+    the progress bar the frontend polls reads the job ROW, not the event
+    stream.
+
+    Asserted as a SHAPE (no event at all for a skipped window) and as a
+    SCALING property (five times the prose costs no more probes than one),
+    since the absolute probe count is an implementation detail and the growth
+    is not.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    for source_id, prose in (("s1", 1), ("s2", 5)):
+        _add_elements(
+            repo, notebook.id, source_id, "散文加命令",
+            _prose_windows_then_commands(
+                source_id, prose_windows=prose, commands=1, chunk=_BIG_CHUNK
+            ),
+        )
+    service = _service(repo)
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+
+    def run_counting(source_id: str) -> tuple[int, list[dict]]:
+        probes = 0
+        events: list[dict] = []
+        real_get_job = service.catalog.get_job
+        real_emit = service.event_log.emit
+
+        def counting_get_job(job_id):
+            nonlocal probes
+            probes += 1
+            return real_get_job(job_id)
+
+        service.catalog.get_job = counting_get_job  # type: ignore[assignment]
+        service.event_log.emit = events.append  # type: ignore[assignment]
+        try:
+            job = service.start(notebook.id, source_id)
+            service.run(job["id"])
+        finally:
+            service.catalog.get_job = real_get_job  # type: ignore[assignment]
+            service.event_log.emit = real_emit  # type: ignore[assignment]
+        return probes, events
+
+    one_probe_count, one_events = run_counting("s1")
+    five_probe_count, five_events = run_counting("s2")
+
+    def section_events(events):
+        return [
+            event for event in events
+            if event.get("kind") == "catalog_section_done"
+        ]
+
+    # One event per window that actually made a call, in both runs — the
+    # skipped windows contribute none, however many of them there are.
+    assert len(section_events(one_events)) == 1
+    assert len(section_events(five_events)) == 1
+    assert five_probe_count == one_probe_count
+    # …while the progress bar still counts every window.
+    assert service.catalog.latest_job("s2")["sections_done"] == 6
+
+
+def test_a_cancel_still_stops_a_run_inside_a_stretch_of_skipped_windows(repo):
+    """Dropping the liveness probe from the skip path must not drop the
+    CANCEL check with it: the in-process event is free to read and an owner
+    who pressed stop is entitled to have the run end, even in the middle of a
+    hundred prose windows that are individually costing nothing."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "散文加命令",
+        _prose_windows_then_commands(
+            "s1", prose_windows=4, commands=1, chunk=_BIG_CHUNK
+        ),
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service._cancels[job["id"]].set()
+
+    result = service.run(job["id"])
+
+    assert result == {"job_id": job["id"], "cancelled": True}
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "cancelled"
+    # Stopped on the FIRST window, not after walking every prose window.
+    assert settled["sections_done"] == 0
+
+
+# ------------------------------------------- T2b: the whole-window slice view
+def _source_text_of(prompt: str) -> str:
+    """What the prompt actually SHOWED the model, read back off the prompt.
+
+    Everything between the `<<<` / `>>>` fence, so this reads the same string
+    the model does — not `window.text`, which is what makes the assertion
+    below a statement about the prompt rather than about the fixture.
+    """
+    body = prompt.split("<<<\n", 1)[1]
+    return body.rsplit("\n>>>", 1)[0]
+
+
+def test_every_command_the_prompt_offers_is_in_the_text_the_prompt_shows(repo):
+    """The guard for the narrowed per-slice view, at the seam that matters.
+
+    A name in the candidate list is a name the prompt invites the model to
+    claim and `validate_entry` then demands verbatim in the window. Serving a
+    name without showing where it lives leaves two outcomes — silence, or a
+    fabrication that gets vetoed — and neither leaves a trace: a command that
+    was never really offered produces no rejection and no ledger line, so the
+    run looks clean while a third of the manual quietly does not exist.
+
+    Thirty FLAGLESS commands in one window is the shape that made it visible:
+    with no flag-shaped parameter anywhere, the old view was a 600-character
+    head and nothing else, so roughly the first eighteen names were shown and
+    the other twelve were offered into the dark.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 30, params=0, per_window=False)
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    assert client.calls, "the fixture must have produced a call"
+    for prompt in client.calls:
+        served = _candidates_of(prompt)
+        assert len(served) >= 30
+        shown = _source_text_of(prompt)
+        for name in served:
+            assert name in shown, f"{name} was offered but never shown"
+
+
+# ------------------------------------------ T2b: the carried-only prompt shape
+def test_a_window_with_its_own_candidates_lists_the_relay_separately(repo):
+    """Two commands, one window each: the second window has a candidate of its
+    own AND a relay, and the two must stay in separate blocks — the relay's
+    whole value is telling the model which names are in the "documented
+    earlier, continuing here" position."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    second = client.calls[1]
+    assert _candidates_of(second) == ["set_thing_1"]
+    assert _carried_of(second) == ["set_thing_0"]
+    assert "(none)" not in second
+
+
+def test_a_carried_only_window_serves_the_relay_as_the_claim_list(repo):
+    """When the window names nothing itself, the relay IS the list of names
+    that may be claimed, and it is rendered as such.
+
+    The two-block form would print 「choose a name from this list: - (none)」
+    above the relay block — an instruction to return nothing, handed to a model
+    whose actual job on this window is to attribute an orphaned parameter table
+    to the command in the block below. Continuation windows are most of every
+    large command's documentation, so that reads as a wording detail and
+    behaves as switching the feature off for them.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(repo, notebook.id, "s1", "接力手册", _relay_manual("s1"))
+    client = _Client(_relay_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    continuation = client.calls[2]
+    assert _candidates_of(continuation) == []
+    assert _carried_of(continuation) == ["set_thing_0"]
+    # No empty claim list anywhere in the prompt…
+    assert "(none)" not in continuation
+    # …and the relay block says outright that choosing from it is the task.
+    assert "choose each command name from this list" in continuation
+    # The relayed name really does land on the row it belongs to.
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
+
+
+# ------------------------------------- T2b: a run that produced nothing fails
+def test_a_run_that_produces_nothing_at_all_is_not_a_success(repo):
+    """`succeeded` next to an empty review panel asserts "this document
+    documents no commands", and a run that paid for calls and got back not one
+    attempted entry has no evidence for that claim. The honest terminal state
+    is `failed`, with copy that says what to check."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    client = _Client(lambda prompt, call: json.dumps({"entries": []}), wrap=False)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert len(client.calls) == 2
+    assert result["nothing_extracted"] is True
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "failed"
+    assert settled["failure_reason"] == catalog_job.NOTHING_EXTRACTED_MESSAGE
+    assert settled["diagnostic"] == "nothing_extracted"
+
+
+def test_a_run_with_only_rejected_rows_still_succeeds(repo):
+    """The boundary. Rejected rows ARE the answer to "why is the catalog
+    empty" — a reviewer opens the 「已拦截」 tab and sees the command names the
+    model claimed and the reason each was vetoed. A run that produced them
+    delivered something, so it is not the silent-empty failure above."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    bind_chat_client(
+        repo,
+        "kg_extract",
+        _Client(lambda prompt, call: json.dumps(
+            {"command_name": "not_a_documented_command", "args": []}
+        )),
+    )
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert "nothing_extracted" not in result
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["entries"] == 0
+    assert settled["rejected"] == 2
+
+
+def test_a_run_that_skipped_every_window_still_succeeds(repo):
+    """The other boundary, and the one that would break the cost gate's own
+    success case: a source that is simply not a command manual never asks a
+    model anything. Nothing was extracted because nothing was spent, which is
+    the gate working, not a failure."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "纯散文",
+        _prose_windows_then_commands(
+            "s1", prose_windows=3, commands=0, chunk=_BIG_CHUNK
+        ),
+    )
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert client.calls == []
+    assert result["windows"] == 0
+    assert result["windows_skipped"] == 3
+    assert "nothing_extracted" not in result
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["sections_done"] == 3
+
+
+# ------------------ T2b: a revision the reviewer already overtook, and blame
+def test_a_merge_onto_an_already_reviewed_row_appends_instead_of_vanishing(repo):
+    """`update_candidate_payload` writes only rows still awaiting review, so a
+    continuation window's merge can be refused: between the window that wrote
+    the row and the one revising it, a reviewer can have confirmed or skipped
+    it, and both are terminal. Overwriting either would rewrite something a
+    person already acted on.
+
+    The parameters that window found exist nowhere else, so the fallback is
+    v1's own behaviour — append a second row for the command, visible in the
+    review queue. A duplicate a person can see and skip beats a silent loss.
+
+    The registry then has to point at the NEW row, which the third window is
+    what proves: without it, window 2 keeps retrying the same refused update
+    and its parameters vanish too.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(repo, notebook.id, "s1", "接力手册", _relay_manual("s1"))
+    service = _service(repo)
+
+    def reviewed_after_the_first_window(prompt, call):
+        if call == 2:
+            # The reviewer skipped window 0's row between the two windows.
+            with repo._write() as db:
+                db.execute(
+                    "UPDATE catalog_candidates SET state='dismissed' "
+                    "WHERE state='candidate'"
+                )
+        return _relay_reply(prompt, call)
+
+    bind_chat_client(repo, "kg_extract", _Client(reviewed_after_the_first_window))
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    # Exactly ONE live row — window 2 merged into window 1's replacement
+    # rather than appending a third.
+    assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
+    args = [arg["name"] for arg in page["items"][0]["payload"]["args"]]
+    # Seeded from what the dismissed row held, plus both later windows'.
+    assert args == ["-density", "-site", "-pad_left", "-pad_right", "-layer"]
+    dismissed = service.candidates_page(
+        job["id"], state="dismissed", cursor=0, limit=50
+    )
+    assert [row["command_name"] for row in dismissed["items"]] == ["set_thing_0"]
+
+
+def test_an_unanswered_parameter_is_blamed_on_the_only_command_in_the_window(
+    repo,
+):
+    """One accepted command means no ambiguity: the parameter it was asked
+    about and never returned is a gap in ITS row, and that is where a reviewer
+    should see it."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1, per_window=False)
+
+    def names_only(prompt, _call):
+        return json.dumps(
+            {"entries": [
+                {"command_name": name, "args": []}
+                for name in _candidates_of(prompt)
+            ]}
+        )
+
+    bind_chat_client(repo, "kg_extract", _Client(names_only, wrap=False))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    assert result["args_uncovered"] == 3
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    reasons = [
+        field["reason"] for field in page["items"][0]["reject_info"]["fields"]
+    ]
+    assert reasons == ["arg_not_returned"] * 3
+
+
+def test_a_multi_command_window_does_not_blame_every_command_for_one_gap(repo):
+    """With several commands in the window the assignment is the WINDOW's
+    whole flag list, so an unanswered parameter says a parameter went missing,
+    not WHICH command lost it — the model keys parameters onto entries, and a
+    parameter nobody returned was keyed onto nothing.
+
+    Writing the note onto each accepted command (as this used to) marks up
+    commands that answered everything they were asked for: the reviewer reads
+    「missing -density」 on a command that never took it. The window-level
+    ledger records the fact regardless, so declining to name a culprit loses
+    nothing.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2, per_window=False)
+
+    def names_only(prompt, _call):
+        return json.dumps(
+            {"entries": [
+                {"command_name": name, "args": []}
+                for name in _candidates_of(prompt)
+            ]}
+        )
+
+    bind_chat_client(repo, "kg_extract", _Client(names_only, wrap=False))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [row["command_name"] for row in page["items"]] == [
+        "set_thing_0", "set_thing_1"
+    ]
+    for row in page["items"]:
+        assert row["reject_info"].get("fields", []) == []
+    # …and the run's own ledger still knows the parameters went unanswered.
+    assert result["args_uncovered"] == 3
 
 
 # --------------------------------------------------- flagless commands (R4 P1)
@@ -888,13 +1925,23 @@ def test_the_cache_gate_refuses_a_flagless_slices_malformed_args_object(repo):
     assert callable(validator)
 
     def reply(args_field) -> str:
-        return json.dumps({"command_name": "set_dont_use", "args": args_field})
+        # The real wire shape, spelled out: the validator is handed raw model
+        # content, never the `_Client` double's one-entry shorthand.
+        return json.dumps(
+            {"entries": [{"command_name": "set_dont_use", "args": args_field}]}
+        )
 
     # The correct flagless answer (no parameters at all) still admits.
     assert validator(reply([])) is True
     # A structurally malformed `args` must not be indistinguishable from that
     # correct empty answer.
     assert validator(reply({"name": "lib_cells"})) is False
+    # v2 shape checks, at the same seam: a reply that is not an entries LIST
+    # has not answered the question that was asked, and an entries list that
+    # grounds nothing must not be frozen for the cache TTL.
+    assert validator(json.dumps({"command_name": "set_dont_use"})) is False
+    assert validator(json.dumps({"entries": []})) is False
+    assert validator(json.dumps({"entries": ["set_dont_use"]})) is False
 
 
 # ------------------------------------------------------- slice assignment (R2)
@@ -1203,13 +2250,19 @@ def test_the_cache_gate_refuses_a_reply_about_another_slices_parameters(repo):
     assert callable(first_slice)
 
     def reply(names: list[str]) -> str:
+        # Raw wire shape — the validator never sees the double's shorthand.
         return json.dumps(
             {
-                "command_name": "set_thing_0",
-                "args": [
-                    {"name": name, "required": False, "desc": "", "default": ""}
-                    for name in names
-                ],
+                "entries": [
+                    {
+                        "command_name": "set_thing_0",
+                        "args": [
+                            {"name": name, "required": False, "desc": "",
+                             "default": ""}
+                            for name in names
+                        ],
+                    }
+                ]
             }
         )
 
@@ -1257,7 +2310,7 @@ def test_a_settings_bearing_client_receives_the_cache_admission_validator(repo):
     # document is refused — which is what keeps a laxer-era cached value from
     # being served on a later hit.
     assert validator(_good_reply(client.calls[-1], 1)) is True
-    assert validator(json.dumps({"command_name": "nope", "args": []})) is False
+    assert validator(json.dumps({"entries": [{"command_name": "nope", "args": []}]})) is False
     assert validator("not json") is False
     assert service.catalog.get_job(job["id"])["status"] == "succeeded"
 
@@ -1393,10 +2446,23 @@ def test_a_slice_that_never_answers_stays_within_its_call_bound(repo):
 
 
 def _requested_params(prompt: str) -> list[str]:
+    """The slice's assignment, read back off the prompt.
+
+    Matched by PREFIX rather than by the whole line: v2 appends "keying each
+    one onto the command it belongs to" (a window can document several
+    commands), and a fixture that silently returns `[]` when that sentence
+    changes would make every assignment-shaped test pass by answering nothing.
+    """
     lines = prompt.splitlines()
-    try:
-        start = lines.index("Extract ONLY these parameters, and nothing else:")
-    except ValueError:
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("Extract ONLY these parameters")
+        ),
+        -1,
+    )
+    if start < 0:
         return []
     out = []
     for line in lines[start + 1:]:
@@ -1431,7 +2497,7 @@ def test_empty_content_is_retried_once_then_recorded_as_a_failed_slice(repo):
 # -------------------------------------------------------------- circuit breaker
 def test_circuit_opens_on_the_command_name_axis(repo):
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", MIN_SECTIONS_BEFORE_ALERT + 2)
+    _add_manual(repo, notebook.id, "s1", MIN_WINDOWS_BEFORE_ALERT + 2)
     bind_chat_client(
         repo,
         "kg_extract",
@@ -1448,14 +2514,14 @@ def test_circuit_opens_on_the_command_name_axis(repo):
     assert settled["failure_reason"] == CIRCUIT_OPEN_MESSAGE
     assert json.loads(settled["diagnostic"])["axis"] == "command_name"
     # Stopped AT the threshold rather than running the whole manual.
-    assert settled["sections_done"] == MIN_SECTIONS_BEFORE_ALERT
+    assert settled["sections_done"] == MIN_WINDOWS_BEFORE_ALERT
 
 
 def test_circuit_opens_on_the_args_axis_even_with_clean_command_names(repo):
     """The second axis is not redundant: every command name is right here and
     every parameter is invented, which the name axis cannot see."""
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", MIN_SECTIONS_BEFORE_ALERT + 2)
+    _add_manual(repo, notebook.id, "s1", MIN_WINDOWS_BEFORE_ALERT + 2)
 
     def right_name_invented_args(prompt, _call):
         return json.dumps(
@@ -1493,7 +2559,7 @@ def test_circuit_opens_when_the_model_never_returns_anything_usable(repo):
     then reports `succeeded` with an empty catalog.
     """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", MIN_SECTIONS_BEFORE_ALERT + 5)
+    _add_manual(repo, notebook.id, "s1", MIN_WINDOWS_BEFORE_ALERT + 5)
     client = _Client(lambda prompt, call: "not json at all")
     bind_chat_client(repo, "kg_extract", client)
     service = _service(repo)
@@ -1505,7 +2571,7 @@ def test_circuit_opens_when_the_model_never_returns_anything_usable(repo):
     assert settled["failure_reason"] == CIRCUIT_OPEN_MESSAGE
     assert json.loads(settled["diagnostic"])["axis"] == "unusable_response"
     # Stopped AT the threshold instead of paying for the whole manual.
-    assert settled["sections_done"] == MIN_SECTIONS_BEFORE_ALERT
+    assert settled["sections_done"] == MIN_WINDOWS_BEFORE_ALERT
 
 
 def test_the_args_axis_counts_what_was_asked_for_not_only_what_came_back(repo):
@@ -1518,7 +2584,7 @@ def test_the_args_axis_counts_what_was_asked_for_not_only_what_came_back(repo):
     (12 sections of 1/6) must open the breaker on the args axis.
     """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", MIN_SECTIONS_BEFORE_ALERT + 2, params=6)
+    _add_manual(repo, notebook.id, "s1", MIN_WINDOWS_BEFORE_ALERT + 2, params=6)
 
     def one_correct_arg(prompt, _call):
         return json.dumps(
@@ -1554,7 +2620,7 @@ def test_a_flagless_manual_does_not_trip_the_args_axis(repo):
     ratio of 0.0 when nothing was seen, so without it a manual of flagless
     commands would fail on its tenth clean section."""
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", MIN_SECTIONS_BEFORE_ALERT + 2, params=0)
+    _add_manual(repo, notebook.id, "s1", MIN_WINDOWS_BEFORE_ALERT + 2, params=0)
 
     def no_args(prompt, _call):
         return json.dumps(
@@ -1573,7 +2639,7 @@ def test_a_flagless_manual_does_not_trip_the_args_axis(repo):
     service.run(job["id"])
     settled = service.catalog.get_job(job["id"])
     assert settled["status"] == "succeeded"
-    assert settled["entries"] == MIN_SECTIONS_BEFORE_ALERT + 2
+    assert settled["entries"] == MIN_WINDOWS_BEFORE_ALERT + 2
 
 
 def test_a_slice_half_rescued_by_halving_does_not_count_as_a_slice_failure(repo):
@@ -1587,7 +2653,7 @@ def test_a_slice_half_rescued_by_halving_does_not_count_as_a_slice_failure(repo)
     failure and the breaker would trip at the tenth section; under the fixed
     semantics it must not trip at all."""
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", MIN_SECTIONS_BEFORE_ALERT + 2, params=4)
+    _add_manual(repo, notebook.id, "s1", MIN_WINDOWS_BEFORE_ALERT + 2, params=4)
     good_half = {"-density", "-pad_left"}
     whole_slice = {"-density", "-pad_left", "-pad_right", "-layer"}
 
@@ -1620,10 +2686,10 @@ def test_a_slice_half_rescued_by_halving_does_not_count_as_a_slice_failure(repo)
     service.run(job["id"])
     settled = service.catalog.get_job(job["id"])
     assert settled["status"] == "succeeded"
-    assert settled["entries"] == MIN_SECTIONS_BEFORE_ALERT + 2
+    assert settled["entries"] == MIN_WINDOWS_BEFORE_ALERT + 2
 
     page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
-    assert len(page["items"]) == MIN_SECTIONS_BEFORE_ALERT + 2
+    assert len(page["items"]) == MIN_WINDOWS_BEFORE_ALERT + 2
     for row in page["items"]:
         assert {arg["name"] for arg in row["payload"]["args"]} == good_half
 
@@ -1802,67 +2868,91 @@ def test_service_methods_reject_a_source_from_another_notebook(repo):
 
 
 # --------------------------------------------------------------------- preview
-def test_preview_is_bounded_and_declares_when_it_sampled(repo, monkeypatch):
+def test_preview_counts_windows_from_the_sources_total_text(repo):
+    """`estimated_windows` is arithmetic over the source's whole text, so it
+    must be right for a document far larger than the prefix the preview reads.
+
+    Six commands, each padded to fill exactly one window, is six windows — and
+    the preview has to say six without reading six windows' worth of text.
+    """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", 6)
-    service = _service(repo)
-    preview = service.preview(notebook.id, "s1")
-    assert preview.estimated_sections == 6
+    _add_manual(repo, notebook.id, "s1", 6, chunk=_PREVIEW_CHUNK)
+    preview = _service(repo).preview(notebook.id, "s1")
+    assert preview.estimated_windows == 6
     assert preview.estimated_calls == 6
-    assert preview.signal["command_shaped_sections"] == 6
-    assert preview.signal["total_sections"] == 6
-    # OpenROAD-manual shape (six clean identifier headings, no prose) still
-    # reads as a manual after B2's fix — this is the non-regression half of
-    # that fix; the discriminating half is the mixed-shape test below.
-    assert preview.signal["is_manual"] is True
+    assert preview.skipped_windows_in_prefix == 0
     assert preview.sampled is False
+
+
+def test_preview_of_an_empty_source_estimates_nothing(repo):
+    """Zero characters is zero windows — not one. A source with no elements
+    must not be quoted a price."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(repo, notebook.id, "s1", "空来源", [])
+    preview = _service(repo).preview(notebook.id, "s1")
+    assert preview.estimated_windows == 0
+    assert preview.estimated_calls == 0
+    assert preview.skipped_windows_in_prefix == 0
+
+
+def test_preview_reports_the_windows_the_cost_gate_would_skip(repo):
+    """The number that explains a cheap estimate on a big document.
+
+    Two prose windows and one command window: only the command window is worth
+    a call, and `skipped_windows_in_prefix` is what keeps "3 windows, 1 call"
+    from reading as a miscount.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "散文加命令",
+        _prose_windows_then_commands("s1", prose_windows=2, commands=1),
+    )
+    preview = _service(repo).preview(notebook.id, "s1")
+    assert preview.estimated_windows == 3
+    assert preview.skipped_windows_in_prefix == 2
+    assert preview.estimated_calls == 1
+    assert preview.sampled is False
+
+
+def test_preview_declares_sampled_and_charges_unread_windows_one_call_each(
+    repo, monkeypatch
+):
+    """The row cap and the per-element clip are two different bounds, and both
+    feed `sampled`. Past the prefix the gate cannot be evaluated at all, so
+    every unread window is charged the MINIMUM of one call — never zero, which
+    is the one direction a cost estimate must not err in."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 6, chunk=_PREVIEW_CHUNK)
+    service = _service(repo)
+    assert service.preview(notebook.id, "s1").sampled is False
 
     monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 4)
     clipped = service.preview(notebook.id, "s1")
     assert clipped.sampled is True
-    assert clipped.estimated_sections < 6
+    # The window count is unaffected: it comes from the SQL aggregate, not
+    # from the prefix.
+    assert clipped.estimated_windows == 6
+    assert clipped.estimated_calls == 6
 
 
-def test_preview_shape_signal_sees_every_section_not_just_command_sections(repo):
-    """B2: `detect_manual_shape` used to be fed `command_sections()`'s own
-    output — that function already GROUPS blocks under a command heading and
-    DROPS everything that never joins one, so `total_sections` came out
-    trivially equal to `command_shaped_sections` and `command_ratio` was
-    always 1.0. A prose document with a handful of real commands buried in it
-    (206 total sections, only 6 of them commands) must score `is_manual=False`
-    and report the TRUE section count — not the post-grouping subset."""
+def test_preview_still_declares_sampled_when_only_an_element_was_clipped(
+    repo, monkeypatch
+):
+    """Per-element clipping distorts harder than the row cap: a clipped options
+    table loses parameter names, which loses slices, so the estimate comes back
+    too low. If only the row cap fed `sampled`, that estimate would be
+    presented as a census."""
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_elements(
-        repo, notebook.id, "s1", "混合文档",
-        _prose_and_commands("s1", prose=200, commands=6),
-    )
-    service = _service(repo)
-    preview = service.preview(notebook.id, "s1")
-    assert preview.signal["total_sections"] == 206
-    assert preview.signal["command_shaped_sections"] == 6
-    assert preview.signal["is_manual"] is False
-    # estimated_* still comes from command_sections() — "how many commands
-    # would be extracted" is exactly what a cost estimate needs, unaffected
-    # by this fix.
-    assert preview.estimated_sections == 6
-
-
-def test_preview_declares_sampled_when_an_element_was_clipped(repo, monkeypatch):
-    """Row cap and per-element clipping are two different bounds, and the
-    second distorts harder: a clipped options table loses parameter names,
-    which loses slices, so the estimate comes back several times too low. If
-    only the row cap fed `sampled`, that estimate would be presented as a
-    census."""
-    notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _add_manual(repo, notebook.id, "s1", 2, params=6)
+    _add_manual(repo, notebook.id, "s1", 2, params=6, chunk=_PREVIEW_CHUNK)
     service = _service(repo)
     assert service.preview(notebook.id, "s1").sampled is False
 
     monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_CHARS", 20)
     clipped = service.preview(notebook.id, "s1")
     assert clipped.sampled is True
-    # The row cap was never reached — only the character bound bit.
-    assert clipped.estimated_sections <= 2
+    # The row cap was never reached — only the character bound bit — and the
+    # window count still comes from the untruncated SQL total.
+    assert clipped.estimated_windows == 2
 
 
 def test_candidates_are_never_dropped_when_a_section_exceeds_one_insert_batch(repo):
@@ -1887,30 +2977,6 @@ def test_candidates_are_never_dropped_when_a_section_exceeds_one_insert_batch(re
         for index in range(oversized)
     ])
     assert store.candidate_counts(job["id"])["candidate"] == oversized
-
-
-def test_truncated_sections_is_counted_and_reaches_the_job_row(repo):
-    """C1a already computes `SectionOutcome.truncation.applied`; this only
-    checks C1b actually PLUMBS it through `record_section` into the job row
-    (and from there, `CommandCatalogJob.of()` into the API response — see the
-    API test) rather than leaving it computed and unused."""
-    from app.services.command_catalog import MAX_SECTION_CHARS
-
-    notebook = repo.create_notebook(NotebookCreate(name="n"))
-    name = "set_thing_0"
-    oversized_paragraph = f"{name} -density value\n\n" + "x" * (MAX_SECTION_CHARS + 500)
-    raw = [
-        {"element_type": "heading", "text": name, "section_path": name},
-        {"element_type": "paragraph", "text": oversized_paragraph, "section_path": name},
-    ]
-    _add_elements(repo, notebook.id, "s1", "超长手册", _numbered("s1", raw))
-    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
-    service = _service(repo)
-    job = service.start(notebook.id, "s1")
-    service.run(job["id"])
-    settled = service.catalog.get_job(job["id"])
-    assert settled["status"] == "succeeded"
-    assert settled["truncated_sections"] == 1
 
 
 def test_cancel_reports_the_row_not_the_branch_it_took(repo):
@@ -2065,6 +3131,100 @@ def test_apply_creates_the_table_and_records_a_change_entry(repo):
     assert again["rows_added"] == 0
     assert again["created"] is False
     assert again["table_id"] == result["table_id"]
+
+
+def _provenance_cells(repo, table_id) -> list[str]:
+    table = repo.get_knowhow_table(table_id)
+    column = next(
+        item["id"] for item in table["columns"] if item["name"] == "出处"
+    )
+    return [row["cells"][column] for row in table["rows"]]
+
+
+def test_the_applied_provenance_keeps_a_breadcrumb_and_drops_the_ordinal(repo):
+    """The 「出处」 column is where the candidate row's INTERNAL label stops
+    being internal.
+
+    On the review panel that label is transient and the frontend translates the
+    ordinal form; here it is written into a knowhow table, where a person keeps
+    it, reads it months later and sees it in the graph. `window 3` says nothing
+    there — it names a boundary the character budget put somewhere in a
+    document, in a word that is not even the product's vocabulary — so the
+    ordinal form degrades to the source name alone. A real breadcrumb is kept:
+    that one genuinely says where in the document the command lives.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    # A heading-bearing manual (breadcrumb) and a heading-less one (ordinal).
+    _add_manual(repo, notebook.id, "s1", 1)
+    _add_elements(
+        repo, notebook.id, "s2", "无标题手册",
+        _numbered("s2", [
+            {
+                "element_type": "paragraph",
+                "text": "set_thing_0 -density value\n\n- `-density` the option",
+                "section_path": "",
+            }
+        ]),
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+
+    applied = {}
+    for source_id in ("s1", "s2"):
+        job = service.start(notebook.id, source_id)
+        service.run(job["id"])
+        applied[source_id] = service.apply(
+            notebook.id, source_id, job["id"], all_pending=True, actor="tester"
+        )
+    with_heading, without = applied["s1"], applied["s2"]
+
+    assert _provenance_cells(repo, with_heading["table_id"]) == [
+        "OpenROAD 手册 · set_thing_0"
+    ]
+    # The row still carries the internal label for the review panel…
+    page = service.candidates_page(
+        service.catalog.latest_job("s2")["id"],
+        state="applied", cursor=0, limit=10,
+    )
+    assert page["items"][0]["section_path"] == "window 1"
+    # …and the knowhow cell a person keeps does not.
+    assert _provenance_cells(repo, without["table_id"]) == ["无标题手册"]
+
+
+def test_a_real_breadcrumb_that_merely_starts_like_the_ordinal_label_survives(
+    repo,
+):
+    """The match is anchored, deliberately. A manual whose own section is
+    called 「window 3 configuration」 has a real breadcrumb that happens to
+    open with the same two words, and dropping it would lose provenance the
+    reader wants. Only a label that is EXACTLY the internal form is it."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "窗口手册",
+        _numbered("s1", [
+            {
+                "element_type": "heading",
+                "text": "window 3 configuration",
+                "section_path": "window 3 configuration",
+            },
+            {
+                "element_type": "paragraph",
+                "text": "set_thing_0 -density value\n\n- `-density` the option",
+                "section_path": "window 3 configuration",
+            },
+        ]),
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+    applied = service.apply(
+        notebook.id, "s1", job["id"], all_pending=True, actor="tester"
+    )
+
+    assert _provenance_cells(repo, applied["table_id"]) == [
+        "窗口手册 · window 3 configuration"
+    ]
 
 
 # R13 (codex PR #412 评审第 13 轮 P2) 修复补充覆盖:目标表名/提要标题改走
@@ -4045,18 +5205,24 @@ def test_api_preview_start_job_candidates_and_apply(http):
 
     preview = client.get(f"{base}/preview")
     assert preview.status_code == 200
-    assert preview.json()["estimated_calls"] == 2
-    assert preview.json()["signal"]["is_manual"] is False  # only two sections
+    body = preview.json()
+    assert body["estimated_windows"] == 2
+    assert body["estimated_calls"] == 2
+    assert body["skipped_windows_in_prefix"] == 0
+    # v1's shape signal retired with sectioning, and so did the count of
+    # "command sections" — no compatibility alias, so a stale client fails
+    # loudly instead of reading a field that is permanently 0.
+    assert "signal" not in body
+    assert "estimated_sections" not in body
 
     bind_chat_client(repo, "kg_extract", _Client(_good_reply))
     started = client.post(base)
     assert started.status_code == 200, started.text
     job_id = started.json()["job"]["id"]
-    # `truncated_sections` is C1a's own count, surfaced through so the review
-    # UI can eventually say "N sections were cut for length"; present in the
-    # API response from the moment a job starts, not just once a section has
-    # actually been truncated.
-    assert "truncated_sections" in started.json()["job"]["progress"]
+    # v2 has no truncation concept, so the field is gone from the transport
+    # layer rather than transmitted as a permanent 0 the UI would render a
+    # never-fires warning from.
+    assert "truncated_sections" not in started.json()["job"]["progress"]
     assert "diagnostic" not in started.json()["job"]
 
     # The route owns the run (a background daemon thread); never drive it a
@@ -4506,7 +5672,7 @@ def test_api_candidates_transmit_desc_overflow(http):
 
 def test_api_candidates_transmit_rejections_overflow(http):
     """Same gap, the other overflow axis: `reject_info["overflow"]` (per-row
-    field-rejection ledger) was capped and reported at `MAX_SECTION_REJECTIONS`
+    field-rejection ledger) was capped and reported at `MAX_WINDOW_REJECTIONS`
     by the store (see `test_reject_info_is_bounded_across_a_multi_slice_
     commands_slices` above) but dropped by the response model before this
     fix. Same 200-parameter every-arg-invented shape, driven through HTTP."""
@@ -4544,7 +5710,7 @@ def test_api_candidates_transmit_rejections_overflow(http):
     page = client.get(f"{base}/candidates", params={"job_id": job["id"], "state": "candidate"})
     assert page.status_code == 200, page.text
     row = page.json()["items"][0]
-    assert row["rejections_overflow"] == 400 - MAX_SECTION_REJECTIONS
+    assert row["rejections_overflow"] == 400 - MAX_WINDOW_REJECTIONS
     assert row["desc_overflow"] == 0
 
 
