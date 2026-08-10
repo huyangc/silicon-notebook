@@ -604,7 +604,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 `backfill-chunk-elements` 子命令填充 `chunk_elements` 元素→chunk 反查表。`chunks.element_ids` 存的是正向关系，所以「哪些 chunk 含这个证据元素」过去要按索引代次扫一遍该 notebook 的全部 chunk 行并逐行解 JSON；回填之后它变成一次有界点查，规模只跟本次查询真正命中的那几个证据元素有关。未回填的 notebook 逐字保持旧的整库扫描路径、结果不变，所以这个命令是可选但推荐给大库的。
 
-与 `backfill-source-index` 一样，它是**显式离线**操作（绝不从交互请求触发），不调用模型，幂等、可中断重跑。SQLite v44 / PostgreSQL v22 为每个 notebook 持久化一行 `chunk_element_backfills`：起始事务会跳过当前已完成标记、在相同 `kg_mutation_seq` 上续跑 running/failed 账本，或清掉旧行并按新代次重建。每个有界 keyset 页面把反查行与游标/计数原子提交，崩溃最多重做未提交页面。代次漂移只写稳定的 `kg_generation_changed`，保持 `chunk_elements_indexed` 快速路径标记为 false，并让下次运行按新代次重置；账本不含 chunk 正文或异常文本。新写入无需回填：活库够得着的每条 chunk 写路径都在同一个事务里维护反查行，删除来源、重新解析、改写 knowhow 格子都经 chunks 的外键级联带走它们。（整本深拷贝豁免：它不复制 `unified_kg_state`，副本恒走旧全量路径。）用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整库；只有要丢弃当前已完成账本并重建行时才加 `--force`。
+与 `backfill-source-index` 一样，它是**显式离线**操作（绝不从交互请求触发），不调用模型，幂等、可中断重跑。SQLite v46 / PostgreSQL v24 为每个 notebook 持久化一行 `chunk_element_backfills`：起始事务会跳过当前已完成标记、在相同 `kg_mutation_seq` 上续跑 running/failed 账本，或清掉旧行并按新代次重建。每个有界 keyset 页面把反查行与游标/计数原子提交，崩溃最多重做未提交页面。代次漂移只写稳定的 `kg_generation_changed`，保持 `chunk_elements_indexed` 快速路径标记为 false，并让下次运行按新代次重置；账本不含 chunk 正文或异常文本。新写入无需回填：活库够得着的每条 chunk 写路径都在同一个事务里维护反查行，删除来源、重新解析、改写 knowhow 格子都经 chunks 的外键级联带走它们。（整本深拷贝豁免：它不复制 `unified_kg_state`，副本恒走旧全量路径。）用 `--notebook-id` 限定单个 notebook，或用 `--all-notebooks` 覆盖整库；只有要丢弃当前已完成账本并重建行时才加 `--force`。
 
 **已登记的代价**：反查表按 (chunk, element) 一对一行，因此严格大于 chunks 表——每个 chunk 平均带 N 个元素 id 就产出约 N 行。这些行由 `chunks` 的外键级联带走，于是删除来源、重新解析比以前更重：交互式删除的那个事务现在还要级联这张侧表（有 `chunk_id` 索引，因此是逐 chunk 的有界索引删除，不是全表扫描）。大库应预期删除/重解析的事务规模与磁盘占用按比例上升。读侧收益是每次问答兑现的，这是相应的写侧价格。
 

@@ -399,7 +399,7 @@ class NotebookCopyService:
                     self._seams.remap_json_ids(element_ids, json_maps)["element_ids"]
                 )
                 chunks_out.append(data)
-            # chunk_elements（element→chunk 反查表，v44）刻意**不**随深拷贝复制：
+            # chunk_elements（element→chunk 反查表，v46）刻意**不**随深拷贝复制：
             # unified_kg_state 不在 _COPY_SNAPSHOT_QUERIES 的表集合内，所以副本
             # 的 chunk_elements_indexed 恒缺失（读作 0），读路径走 legacy 全量
             # 扫描——反查行缺席是正确且自洽的。
@@ -408,6 +408,9 @@ class NotebookCopyService:
             # 否则副本继承一个为真的标记而反查表是空的，点查路径会静默返回空
             # 证据——不报错、无自愈路径。knowhow 单表 copy_table 的目标是**已存在**
             # 的 notebook，所以那条路不能豁免，见 knowhow_transfer_store。
+            # 与同为派生表的 chunk_questions（本方法下方确实复制）非对称，理由
+            # 就在这里：那张表自描述（有行即可用），而 chunk_elements 的可用性
+            # 由一个**不随拷贝走**的标记声明，所以「不拷贝」才是自洽的那一侧。
             self._store.insert_copy_rows("chunks", chunks_out, chunk_size=chunk_size)
 
             objects_out = []

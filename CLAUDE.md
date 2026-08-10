@@ -140,7 +140,7 @@ conflict（分不出「陈旧行」与「人工订正过的行」，覆盖是本
 显式不走二分，直接冒泡判 failed，绝不能被吞成「这一节本来就没有命令」。
 ⚠`catalog_candidates.job_id` **刻意不加外键**：加了 `catalog_jobs` 就不是叶表，而
 `idx_catalog_jobs_one_active` 是 source_id 单列面（source_id 又是外键列、NOT NULL），
-正向 shadow 会整个 PG23 catalog 判为不可停车。
+正向 shadow 会整个 PG24 catalog 判为不可停车。
 ⑦**解析前提与来源代次绑定**——`preview`/`start` 都要求 `parse_status ∈
 {parsed, extracting, extracted}`（仓库既有白名单，后两档是解析之后的 KG 抽取阶段），
 否则 409（未解析完/解析失败两套文案）；`catalog_jobs.source_generation` 记下创建时刻的
