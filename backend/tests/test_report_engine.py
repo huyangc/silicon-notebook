@@ -2917,7 +2917,7 @@ def test_auto_confirm_revalidates_a_scoped_report_before_claiming(
 
     def deny(understanding):
         seen.append(understanding)
-        return False
+        return None
 
     eng.run(nb.id, rid, "分析 PLL 稳定性", "", auto_generate=True,
             require_intent_review=True, source_scope=scope,
@@ -2929,7 +2929,37 @@ def test_auto_confirm_revalidates_a_scoped_report_before_claiming(
              if e.get("kind") == "report_intent_auto_confirm_skipped"]
     assert skips and skips[-1]["reason"] == "scope_invalid"
 
-    # 重验通过:照常直通到 done。
+    # 重验通过:照常直通到 done,且**刷新后的冻结被采用**——重冻结翻出的
+    # narrowed=true 必须落进认领的 understanding(codex R4 P2),后续阶段也要在
+    # 刷新后的范围上下文里跑(监听 source_scope_context 的实参)。
+    import app.services.source_scope as source_scope_module
+    from contextlib import contextmanager
+
+    entered: list[tuple] = []
+    real_ctx = source_scope_module.source_scope_context
+
+    @contextmanager
+    def recording_ctx(nb_id, scope_arg, base_arg):
+        entered.append((nb_id, scope_arg, base_arg))
+        with real_ctx(nb_id, scope_arg, base_arg):
+            yield
+
+    monkeypatch.setattr(
+        source_scope_module, "source_scope_context", recording_ctx
+    )
+    # 用可被 scope 上下文正常消费的真实形状,同时保留对象同一性可断言。
+    refreshed_scope_obj = {**scope, "narrowed": True}
+
+    def allow(understanding):
+        return {
+            "understanding": {
+                **understanding,
+                "source_scope": {**scope, "narrowed": True},
+            },
+            "source_scope": refreshed_scope_obj,
+            "base_scope": None,
+        }
+
     nb2 = _mk_nb(repo)
     llm2 = _AutoRunLLM()
     eng2 = _mk_engine(repo, llm2)
@@ -2937,8 +2967,14 @@ def test_auto_confirm_revalidates_a_scoped_report_before_claiming(
     rid2 = repo.create_report(nb2.id, "分析 PLL 稳定性")
     eng2.run(nb2.id, rid2, "分析 PLL 稳定性", "", auto_generate=True,
              require_intent_review=True, source_scope=scope,
-             scope_reconfirm=lambda understanding: True)
-    assert repo.get_report(nb2.id, rid2)["status"] == "done"
+             scope_reconfirm=allow)
+    detail2 = repo.get_report(nb2.id, rid2)
+    assert detail2["status"] == "done", detail2.get("error")
+    assert detail2["understanding"]["source_scope"]["narrowed"] is True
+    assert any(
+        entry[0] == nb2.id and entry[1] is refreshed_scope_obj
+        for entry in entered
+    ), "规划/生成必须在重验刷新后的范围上下文里跑"
 
 
 def test_auto_confirm_scoped_without_reconfirm_callable_stays_at_the_gate(
