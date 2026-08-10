@@ -162,6 +162,17 @@ test("采样到顶时必须明说只按前一段估算——那句「预计约 M
   assert.ok(!catalogPreviewCopy(preview({ sampled: false })).body.includes("实际可能更多"));
 });
 
+test("采样到顶时段数是下界，写「至少约」；前缀覆盖全文时是精确值，写「约」", () => {
+  // 后端在 sampled 侧返回的是「已读部分的分段数」与「全文字符数 ÷ 每段预算」
+  // 里的大者——元素装不满一段留下的空隙、候选过密时的拆段，都只会让真实段数
+  // 更多。写成「约」会把一个只往上跑的下界读成估计值。
+  const sampled = catalogPreviewCopy(preview({ sampled: true }));
+  assert.match(sampled.body, /将通读全文（至少约 12 段）/);
+  const exact = catalogPreviewCopy(preview({ sampled: false }));
+  assert.match(exact.body, /将通读全文（约 12 段）/);
+  assert.ok(!exact.body.includes("至少约"));
+});
+
 // --------------------------------------------------------------------- 候选出处
 
 test("有继承面包屑的候选出处原样显示", () => {

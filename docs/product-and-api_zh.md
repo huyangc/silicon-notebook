@@ -496,9 +496,14 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 附一句「示例为模型生成，未经原文校验」。
 
 **成本预告。** `.../command-catalog/preview` **零模型调用**给出两个数，各自的有界方式不同。
-**多少段**是对来源全文字符数的算术：一次 SQL 聚合拿回元素条数与总字符数（只传两个整数），
-段按字符打包，所以 `estimated_windows = ⌈全文字符 ÷ WINDOW_CHARS⌉`——把要估算的那次扫描
-先做一遍的成本预告没有意义。**多少次调用**没法靠算术：它取决于跳过闸（散文段免费）和每段的
+**多少段**光靠算术答不了：`⌈全文字符 ÷ WINDOW_CHARS⌉` 会低报两次——元素整个放进一段，
+放不下时留在那段里的预算空隙没人花（三个 7,000 字符的元素是 3 段，算术说 2 段），而候选
+过密的段还会再被拆开。两者都只会让段数**更多**，所以算术是**下界**不是计数。因此：有界前缀
+恰好覆盖了全文时（`sampled=false`），`estimated_windows` 取前缀真跑分段得到的段数，是
+**精确值**，而且不额外花钱（前缀本来就要读来估调用数）；前缀到顶时取「前缀分出的段数」与
+「一次 SQL 聚合算出的 `⌈全文字符 ÷ WINDOW_CHARS⌉`」两个下界里的**大者**，并作为**显式下界**
+报出（界面文案写「至少约 N 段」）。为了数准而把要估算的那次全文扫描先做一遍，正是成本预告
+不该有的失败。**多少次调用**同样没法靠算术：它取决于跳过闸（散文段免费）和每段的
 参数条数（上百个 flag 的段要分好几片），两者都得读正文，所以只在有界前缀里精确测量（连接力
 一起推进，否则前缀里的闸会和真跑时答得不一样），前缀之外的每一段按最少 1 次计。`sampled=true`
 表示前缀到顶了、这些数字是下界；两条边界都会置位它，其中**逐条截断**才是真正会扭曲估算的
@@ -563,7 +568,7 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 端点（都作用在路径里那个笔记本自己的来源上；读取需要笔记本读权限，写入需要 owner）：
 
-- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` —— 成本预告：`estimated_windows`（全文字符算出的段数）、`estimated_calls`、`skipped_windows_in_prefix`，有界读取触顶时带 `sampled`；来源尚未解析完或解析失败时返回带用户可读文案的 `409`
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` —— 成本预告：`estimated_windows`（前缀覆盖全文时是真跑分段的精确值，`sampled=true` 时是显式下界）、`estimated_calls`、`skipped_windows_in_prefix`，有界读取触顶时带 `sampled`；来源尚未解析完或解析失败时返回带用户可读文案的 `409`
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog` —— 发起抽取；该来源已有活跃任务（既有任务从 `.../job` 取）、抽取模型未配置、来源尚未解析完或解析失败、或上一轮还有候选没审阅完（需先确认或跳过）时返回带用户可读文案的 `409`。上一轮的候选若已因来源被重新解析而过期，则不拦，改为整批清掉再放行
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` —— 该来源最近一次任务：`status` 与 `progress`（`sections_total`、`sections_done`——两个列名保留、计的是段数，`entries`、`rejected`、`uncovered`、`pending_candidates`），失败时带 `failure_reason`。内部诊断列 `diagnostic` 刻意不进响应
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` —— `cancelling`（worker 会在下一个分片边界停，飞行中的一次模型调用被取消时也会停，不必等到那次调用返回）、`cancelled`（本进程没有在跑它，直接落终态）或 `not_running`

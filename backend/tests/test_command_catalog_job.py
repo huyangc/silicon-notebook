@@ -1809,6 +1809,209 @@ def test_a_carried_only_window_serves_the_relay_as_the_claim_list(repo):
     assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
 
 
+# --------------------------- R2: the write-back races a reviewer's confirm
+def _merge_writeback(service, job, row, extra_arg: str):
+    """The run thread's cross-window merge for `row`, as one unit of work.
+
+    Exactly the shape `_process_window` hands `_persist_window`: one
+    `_PendingUpdate` naming the row an earlier window wrote, carrying the
+    payload with this window's parameter merged in. Driving the seam directly
+    rather than timing a second `run()` is what makes the interleaving below
+    deterministic — the race is in the write-back, not in the model loop.
+    """
+    payload = dict(row["payload"])
+    payload["args"] = list(payload["args"]) + [
+        {"name": extra_arg, "required": False, "desc": "", "default": ""}
+    ]
+    entry = {**payload, "rejections": [], "rejections_overflow": 0,
+             "desc_chars": 0, "desc_overflow": 0,
+             "anchors": list(payload.get("anchors") or []),
+             "excerpt": payload.get("excerpt", "")}
+    work = catalog_job._WindowWork(
+        updates=[
+            catalog_job._PendingUpdate(
+                candidate_id=row["id"],
+                command_name=row["command_name"],
+                entry=entry,
+                payload=payload,
+                reject_info={},
+            )
+        ]
+    )
+    window = catalog_job.ExtractionWindow(
+        ordinal=1, elements=(), text="", provenance="续窗"
+    )
+    return work, window
+
+
+class _SettledSignal:
+    """"The run thread has gone as far as it can without the lock."
+
+    Two different events mean that, one per world, and the reviewer thread
+    needs to wait for whichever happens — so both set the SAME flag:
+
+    * with the fix, the run thread PARKS on the catalog lock the reviewer is
+      holding (observed here by trying the lock non-blockingly first);
+    * without it, the run thread never touches the lock and instead completes
+      its `update_candidate_payload`.
+
+    That is what keeps the test free of both a sleep and a timeout-shaped
+    pass: in each world one signal arrives promptly, and the reviewer thread
+    waits on a condition rather than on a clock.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.settled = threading.Event()
+
+    def __enter__(self):
+        if not self.inner.acquire(blocking=False):
+            self.settled.set()
+            self.inner.acquire()
+        return self
+
+    def __exit__(self, *_exc):
+        self.inner.release()
+        return False
+
+
+def _stage_writeback_race(repo, hook_attr: str):
+    """Set up "a reviewer is mid-confirm while the run thread merges".
+
+    Returns everything both threads need. The reviewer's store call named by
+    `hook_attr` is wrapped so it blocks until the run thread has settled —
+    which is AFTER apply has read the candidate payload it is about to render
+    into knowhow, and BEFORE it writes it.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    service, job = _run_ok(repo, notebook.id, "s1", 1)
+    row = service.candidates_page(
+        job["id"], state="candidate", cursor=0, limit=10
+    )["items"][0]
+
+    observed = _SettledSignal(service._apply_lock(service._target_lock_key(notebook.id)))
+    service._apply_lock = lambda key: observed  # type: ignore[assignment]
+    real_update = service.catalog.update_candidate_payload
+
+    def settling_update(*args, **kwargs):
+        result = real_update(*args, **kwargs)
+        observed.settled.set()
+        return result
+
+    service.catalog.update_candidate_payload = settling_update  # type: ignore[assignment]
+
+    target = service.knowhow if hook_attr.startswith("append_") else service.catalog
+    real_hook = getattr(target, hook_attr)
+    reached = threading.Event()
+
+    def hooked(*args, **kwargs):
+        reached.set()
+        assert observed.settled.wait(10), "run thread never settled"
+        return real_hook(*args, **kwargs)
+
+    setattr(target, hook_attr, hooked)
+    return notebook, service, job, row, reached
+
+
+def test_a_merge_write_back_cannot_land_inside_a_confirm(repo):
+    """`apply` is a read-then-write across two stores; the merge rewrites the
+    very payload it read.
+
+    Landing between apply's read and its knowhow write leaves the table
+    holding the pre-merge parameters while the candidate row marked `applied`
+    holds the merged ones — two disagreeing records of what was confirmed,
+    and neither looks wrong on its own. The run thread therefore takes the
+    same per-notebook catalog lock apply holds.
+    """
+    notebook, service, job, row, reached = _stage_writeback_race(
+        repo, "append_knowhow_rows_skipping_existing_anchors"
+    )
+    work, window = _merge_writeback(service, job, row, "-site")
+    applied: list[dict] = []
+    confirm = threading.Thread(
+        target=lambda: applied.append(
+            service.apply(
+                notebook.id, "s1", job["id"], all_pending=True, actor="tester"
+            )
+        )
+    )
+    confirm.start()
+    assert reached.wait(10), "apply never reached its knowhow write"
+
+    # Only now does the run thread try to revise the row apply is holding.
+    service._persist_window(job, window, work, 100, {})
+    confirm.join(10)
+    assert not confirm.is_alive()
+
+    table = repo.get_knowhow_table(applied[0]["table_id"])
+    anchor, params = table["columns"][0]["id"], table["columns"][2]["id"]
+    written = {
+        item["cells"][anchor]: item["cells"][params] for item in table["rows"]
+    }
+    stored = {
+        item["command_name"]: item
+        for item in service.candidates_page(
+            job["id"], state="applied", cursor=0, limit=10
+        )["items"]
+    }
+    # The consistency the lock buys, whichever thread won: the knowhow row a
+    # person now reads says exactly what the candidate row marked `applied`
+    # says. (Which of the two payloads that is depends on the order, and both
+    # orders are legitimate — a torn pair is not.)
+    for name, applied_row in stored.items():
+        assert written[name] == catalog_job._catalog_cells(
+            name, applied_row["payload"], "OpenROAD 手册",
+            applied_row["section_path"],
+        )["参数"]
+    # And the parameters this window found are not lost either way: they are
+    # in the applied row, or in a fresh candidate row the merge degraded to.
+    pending = service.candidates_page(
+        job["id"], state="candidate", cursor=0, limit=10
+    )["items"]
+    assert any(
+        "-site" in item["cells"][params] for item in table["rows"]
+    ) or any("-site" in str(item["payload"]["args"]) for item in pending)
+
+
+def test_a_merge_write_back_racing_a_dismiss_leaves_a_visible_row(repo):
+    """The other direction. `dismiss` takes the row out of `candidate` state,
+    and a merge that landed just before it would be swallowed whole — the
+    update succeeds, so no degraded row is appended, and the continuation
+    window's parameters exist nowhere a reviewer can see. Under the shared
+    lock the two orders are the only possibilities, and both are visible.
+    """
+    notebook, service, job, row, reached = _stage_writeback_race(
+        repo, "mark_candidates_dismissed"
+    )
+    work, window = _merge_writeback(service, job, row, "-site")
+    done: list[dict] = []
+    drop = threading.Thread(
+        target=lambda: done.append(
+            service.dismiss(notebook.id, "s1", job["id"], all_pending=True)
+        )
+    )
+    drop.start()
+    assert reached.wait(10), "dismiss never reached its state write"
+
+    service._persist_window(job, window, work, 100, {})
+    drop.join(10)
+    assert not drop.is_alive()
+
+    dismissed = service.candidates_page(
+        job["id"], state="dismissed", cursor=0, limit=10
+    )["items"]
+    pending = service.candidates_page(
+        job["id"], state="candidate", cursor=0, limit=10
+    )["items"]
+    # Dismiss won the lock first, so the update matched no `candidate` row and
+    # degraded to a fresh one — the merged parameters stay reviewable instead
+    # of being swallowed by the dismissal.
+    assert [item["command_name"] for item in dismissed] == ["set_thing_0"]
+    assert [item["command_name"] for item in pending] == ["set_thing_0"]
+    assert "-site" in str(pending[0]["payload"]["args"])
+
+
 # ------------------------------------- T2b: a run that produced nothing fails
 def test_a_run_that_produces_nothing_at_all_is_not_a_success(repo):
     """`succeeded` next to an empty review panel asserts "this document
@@ -3077,11 +3280,12 @@ def test_service_methods_reject_a_source_from_another_notebook(repo):
 
 # --------------------------------------------------------------------- preview
 def test_preview_counts_windows_from_the_sources_total_text(repo):
-    """`estimated_windows` is arithmetic over the source's whole text, so it
-    must be right for a document far larger than the prefix the preview reads.
+    """Six commands, each padded to fill exactly one window, is six windows.
 
-    Six commands, each padded to fill exactly one window, is six windows — and
-    the preview has to say six without reading six windows' worth of text.
+    The ordinary shape: the bounded prefix covers the whole document, so the
+    count is what the real packer produced over it and `sampled` is false. The
+    SQL aggregate is still what bounds the work — it is the only thing read
+    for a document the prefix does NOT cover (see the sampled cases below).
     """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
     _add_manual(repo, notebook.id, "s1", 6, chunk=_PREVIEW_CHUNK)
@@ -3090,6 +3294,77 @@ def test_preview_counts_windows_from_the_sources_total_text(repo):
     assert preview.estimated_calls == 6
     assert preview.skipped_windows_in_prefix == 0
     assert preview.sampled is False
+
+
+def _big_element_source(repo, notebook_id, source_id, count, *, size=7_000):
+    """`count` elements, each over half a window — so each needs its own.
+
+    The shape character arithmetic gets wrong: an element goes into a window
+    WHOLE, so one that does not fit leaves the rest of that window's budget
+    unspent, and the real window count runs ahead of `total ÷ WINDOW_CHARS`.
+    """
+    return _add_elements(
+        repo, notebook_id, source_id, "大段手册",
+        _numbered(source_id, [
+            {
+                "element_type": "paragraph",
+                "text": _filler(size),
+                "section_path": "",
+            }
+            for _ in range(count)
+        ]),
+    )
+
+
+def test_preview_counts_the_windows_element_boundaries_actually_produce(
+    repo, monkeypatch
+):
+    """Three 7,000-character elements are three windows; `⌈21,000 / 12,000⌉`
+    says two.
+
+    Character arithmetic is a floor rather than a count — element gaps and the
+    density split only ever ADD windows — so when the bounded prefix turns out
+    to be the whole document, the preview reports what the real packer
+    produced over it instead of the arithmetic.
+    """
+    # Large enough that these elements are not clipped, so the prefix really
+    # is the whole document and `sampled` stays false.
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_CHARS", 8_000)
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _big_element_source(repo, notebook.id, "s1", 3)
+
+    preview = _service(repo).preview(notebook.id, "s1")
+
+    assert preview.sampled is False
+    assert preview.estimated_windows == 3
+    # Prose: the cost gate skips all three, which is why the call count can
+    # legitimately be far below the window count.
+    assert preview.skipped_windows_in_prefix == 3
+    assert preview.estimated_calls == 0
+
+
+def test_preview_past_its_prefix_is_a_declared_floor(repo, monkeypatch):
+    """When the prefix runs out, both available numbers are lower bounds and
+    the larger of them is reported as one.
+
+    Four elements that really pack into four windows, with only three read:
+    the honest answer is "at least 3", not a census. `sampled` is what carries
+    that to the UI, which words it as "at least".
+    """
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_CHARS", 8_000)
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _big_element_source(repo, notebook.id, "s1", 4)
+
+    preview = _service(repo).preview(notebook.id, "s1")
+
+    assert preview.sampled is True
+    # 3 from the partial packing, 3 from ⌈28,000 / 12,000⌉ — and the truth is
+    # 4. A floor, and reported as one.
+    assert preview.estimated_windows == 3
+    assert len(catalog_job.extraction_windows(
+        _big_element_source(repo, notebook.id, "s2", 4)
+    )) == 4
 
 
 def test_preview_of_an_empty_source_estimates_nothing(repo):
@@ -3137,8 +3412,9 @@ def test_preview_declares_sampled_and_charges_unread_windows_one_call_each(
     monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 4)
     clipped = service.preview(notebook.id, "s1")
     assert clipped.sampled is True
-    # The window count is unaffected: it comes from the SQL aggregate, not
-    # from the prefix.
+    # The window count is unaffected: past the prefix the count falls back to
+    # the character arithmetic over the source's whole text, which for this
+    # gap-free fixture is the same six.
     assert clipped.estimated_windows == 6
     assert clipped.estimated_calls == 6
 
@@ -3159,7 +3435,8 @@ def test_preview_still_declares_sampled_when_only_an_element_was_clipped(
     clipped = service.preview(notebook.id, "s1")
     assert clipped.sampled is True
     # The row cap was never reached — only the character bound bit — and the
-    # window count still comes from the untruncated SQL total.
+    # clipped prefix packs into fewer windows than the document has, so the
+    # floor falls back to the untruncated SQL total.
     assert clipped.estimated_windows == 2
 
 
