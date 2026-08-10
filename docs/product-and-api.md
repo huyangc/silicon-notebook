@@ -716,7 +716,7 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 | Bound | Value |
 | --- | ---: |
 | Frame facets / values per facet / axes | 8 / 12 / 8 |
-| Blueprint shared definitions / claims | 24 / 96 |
+| Blueprint shared definitions / claims | 24 / 60 |
 | Writer ledger claims per section | 24 |
 | Synthesis evidence characters | 36,000 |
 | Final-editor input characters | 24,000 |
