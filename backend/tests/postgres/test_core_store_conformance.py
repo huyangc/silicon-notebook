@@ -205,11 +205,10 @@ def test_identity_username_password_and_session_semantics(core_stores: CoreStore
 def test_set_user_ui_mode_round_trips_and_survives_a_missing_profile_row(
     core_stores: CoreStores,
 ):
-    # codex 双评审 P2:set_user_ui_mode 从「UPDATE→rowcount==0→补 INSERT」两步写法
-    # 改成原子 INSERT ... ON CONFLICT (id) DO UPDATE。这里既验证正常 round-trip，
-    # 也验证「profile 行缺失」这条 upsert 唯一要防的路径——手工删掉该行模拟历史
-    # 数据缺口/并发下的极端情形，调用仍必须成功且读回正确值,不能因为 UPDATE 分支
-    # 撞不到行就整体失败。
+    # codex 双评审:set_user_ui_mode 先按 user_id UPDATE(兼容种子形状的 profile id)，
+    # 缺行才走带 ON CONFLICT (id) 的补 INSERT(吞并发双补插竞态)。这里既验证正常
+    # round-trip,也验证「profile 行缺失」这条补插路径——手工删掉该行模拟历史数据
+    # 缺口,调用仍必须成功且读回正确值,不能因为 UPDATE 分支撞不到行就整体失败。
     store = core_stores.identity
     user = store.create_user("b00123456", "correct horse battery staple")
 
@@ -258,6 +257,40 @@ def test_set_user_ui_mode_round_trips_and_survives_a_missing_profile_row(
         (user.id,),
     )
     assert fetched_recreated["ui_mode"] == "advanced"
+
+
+def test_set_user_ui_mode_updates_a_non_derived_profile_row_in_place(
+    core_stores: CoreStores,
+):
+    """种子管理员的 profile 行 id 是 `profile-local`,不是 f"profile-{user_id}" 的
+    派生形状(seed 早于派生约定)。按 id 冲突的 upsert 撞不到它,会给同一 user_id
+    插出第二行,随后 `WHERE user_id=%s` 的读取无确定性排序,偏好看似回退
+    (codex R1 P1)。钉住:非派生 id 的既有行必须被原地 UPDATE,行数恒为 1。"""
+    store = core_stores.identity
+    user = store.create_user("c00123456", "correct horse battery staple")
+    # 把该用户的 profile 行改造成种子形状:非派生 id。
+    _write_sql(
+        core_stores,
+        "UPDATE user_profiles SET id=%s WHERE user_id=%s",
+        ("profile-seeded-shape", user.id),
+    )
+
+    updated = store.set_user_ui_mode(user.id, "advanced")
+    assert updated.ui_mode == "advanced"
+    rows = _fetch_one(
+        core_stores,
+        "SELECT COUNT(*) AS n, MAX(ui_mode) AS mode FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert rows["n"] == 1  # 原地更新,绝不因 id 形状不同插出第二行
+    assert rows["mode"] == "advanced"
+    # 行 id 保持种子形状不变 —— 说明走的是 UPDATE 而不是删旧插新。
+    kept = _fetch_one(
+        core_stores,
+        "SELECT id FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    assert kept["id"] == "profile-seeded-shape"
 
 
 def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):

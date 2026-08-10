@@ -272,3 +272,34 @@ test("ReportsPanel 的 createReport 包装里 auto_generate 实参必须是 !isA
       + `确认流程，自动模式问题清晰时才自动确认+接受默认大纲直接生成：${autoGenerateArgument}`,
   );
 });
+
+test("runAsk 的 submitMode 必须在提交汇聚点按 isAdvanced 收敛 graph（不能只靠被动 effect）", () => {
+  // codex R1 P2：把 graph 收回 reasoning 的 useEffect 在 render 之后才跑；用户从
+  // 高级模式拨回自动后抢先提交，state 残留的 graph 仍会被发出去。与 scope/档位同一
+  // 原则：被隐藏的控件由请求侧强制默认值。钉住 submitMode 初始化式的三个语义要素。
+  const initializer = initializerOf("submitMode");
+  const text = initializer.getText(page);
+  assert.ok(text.includes("isAdvanced("), `submitMode 初始化式必须按 isAdvanced 分叉：${text}`);
+  assert.ok(text.includes('"graph"'), `submitMode 初始化式必须识别 graph 残留：${text}`);
+  assert.ok(text.includes('"reasoning"'), `submitMode 初始化式必须收敛到 reasoning：${text}`);
+
+  // 移动变异防线：光有 submitMode 定义不够，executeAsk 的模式实参不许再直接用
+  // askMode（否则定义成了摆设）。全文件扫 executeAsk(...) 调用，第二实参不得是
+  // 裸 askMode 标识符。
+  const offenders = [];
+  function visitCalls(node) {
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "executeAsk"
+      && node.arguments.length >= 2
+      && ts.isIdentifier(node.arguments[1])
+      && node.arguments[1].text === "askMode"
+    ) {
+      offenders.push(node.getText(page));
+    }
+    ts.forEachChild(node, visitCalls);
+  }
+  visitCalls(page);
+  assert.deepEqual(offenders, [], "executeAsk 的模式实参不得绕过 submitMode 直接用 askMode");
+});

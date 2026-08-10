@@ -3743,13 +3743,19 @@ export default function Home() {
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
-    if (requiresKg(askMode) && !kgAvailable) {
+    // 自动模式的引擎收敛必须在提交汇聚点强制:把 graph 收回 reasoning 的被动
+    // effect 在 render 之后才跑,用户从高级模式拨回自动后抢先提交,state 里残留的
+    // graph 仍会被发出去(codex R1 P2)。与 scope/检索档位同一原则——被隐藏的控件
+    // 由请求侧强制默认值,不依赖 state 已经收敛。
+    const submitMode: AskModeId =
+      !isAdvanced(uiMode) && askMode === "graph" ? "reasoning" : askMode;
+    if (requiresKg(submitMode) && !kgAvailable) {
       setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;
     }
     const askedAt = new Date().toISOString();
-    if (askMode !== "reasoning") {
-      await executeAsk(q, askMode, undefined, [], askedAt);
+    if (submitMode !== "reasoning") {
+      await executeAsk(q, submitMode, undefined, [], askedAt);
       return;
     }
 
