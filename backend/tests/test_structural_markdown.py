@@ -186,6 +186,28 @@ def test_uppercase_data_scheme_raw_fallback_strip():
     assert strip_data_uri_image_literals(raw) == "alt"
 
 
+def test_html_block_data_uri_literal_sanitized():
+    """codex R2 P1: markdown-it 对 html_block 内部不做 token 化——`<details>` 里的
+    `![alt](data:...)` 字面量(白名单 mime 也一样)会原样穿过 `_html_to_text`
+    进元素文本。消毒收口必须覆盖 html 路径。"""
+    md = (
+        "<details>\n"
+        "<summary>figs</summary>\n"
+        f"![a diagram](data:image/png;base64,{_SVG_B64})\n"
+        "</details>\n"
+    )
+    blocks = parse_blocks(md)
+    assert blocks, "details html block should still emit"
+    assert all("base64" not in b.text for b in blocks)
+    assert any("a diagram" in b.text for b in blocks)
+
+
+def test_html_block_generic_container_data_uri_sanitized():
+    md = f"<div>\n![x](data:image/svg+xml;base64,{_SVG_B64})\n</div>\n"
+    blocks = parse_blocks(md)
+    assert all("base64" not in b.text for b in blocks)
+
+
 def test_heading_data_uri_literal_stripped_to_alt():
     blocks = parse_blocks(f"# ![alt text](data:image/svg+xml;base64,{_SVG_B64})\n")
     heads = [b for b in blocks if b.type == "heading"]

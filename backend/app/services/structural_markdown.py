@@ -146,11 +146,18 @@ def _table_text(tokens, i: int) -> str:
 
 
 def _html_to_text(html: str) -> str:
-    """HTML 片段 -> 可读文本：单元格用 ' | ' 连接、行用 ' ; ' 连接、去标签。"""
+    """HTML 片段 -> 可读文本：单元格用 ' | ' 连接、行用 ' ; ' 连接、去标签。
+
+    markdown-it 对 html_block 内部不做 token 化，`<details>`/`<table>` 里的
+    `![alt](data:...)` 字面量（不论 mime 是否在白名单）都会原样留在文本里，
+    所以这里是 html 路径的消毒收口——与 `_inline_text`/裸文本兜底同一契约：
+    base64 载荷绝不进元素文本。`<img src="data:...">` 形态无需另行处理，
+    去标签正则已把整个标签（含属性里的载荷）删掉。
+    """
     s = re.sub(r"(?i)</t[dh]>", " | ", html)
     s = re.sub(r"(?i)</tr>", " ; ", s)
     s = re.sub(r"<[^>]+>", " ", s)
-    return " ".join(s.split()).strip(" |;")
+    return strip_data_uri_image_literals(" ".join(s.split()).strip(" |;"))
 
 
 def parse_blocks(text: str) -> List[Block]:
