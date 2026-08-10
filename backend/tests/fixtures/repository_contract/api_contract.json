@@ -2365,7 +2365,6 @@
                 "rejected": 0,
                 "sections_done": 0,
                 "sections_total": 0,
-                "truncated_sections": 0,
                 "uncovered": 0
               }
             },
@@ -2409,6 +2408,7 @@
           "type": "object"
         },
         "CommandCatalogPreview": {
+          "description": "成本预告(v2)。\n\n`estimated_windows` 是「整篇按字符切成多少个窗口」——窗口按字符打包,所以它是\n对来源全文字符数的算术,不是抽样估计。`estimated_calls` 才需要读正文(跳过闸\n与每窗分片数都要看文本),所以它只在有界前缀里精确测量、前缀之外每窗按 1 次\n计;`sampled=true` 表示前缀到顶了、真实成本更高。\n\n`skipped_windows_in_prefix` 是前缀内被零模型调用闸(没有可认领的命令名、也没有\nflag 形状参数)挡下的窗口数——它是「为什么调用数远小于窗口数」唯一的解释项,\n少了它,一份大部分是散文的手册看到 `估计 3 次调用 / 40 个窗口` 会读成漏算。\n\nv1 的 `signal`(形状检测)与 `estimated_sections` 已随规则分节一起退役,刻意\n**不**保留兼容别名:v2 没有「命令节」这个东西可数,留一个恒为 0 的字段比删掉\n更容易被读成「这份文档没有命令」。",
           "properties": {
             "element_limit": {
               "default": 0,
@@ -2420,9 +2420,9 @@
               "title": "Estimated Calls",
               "type": "integer"
             },
-            "estimated_sections": {
+            "estimated_windows": {
               "default": 0,
-              "title": "Estimated Sections",
+              "title": "Estimated Windows",
               "type": "integer"
             },
             "sampled": {
@@ -2430,19 +2430,10 @@
               "title": "Sampled",
               "type": "boolean"
             },
-            "signal": {
-              "$ref": "#/components/schemas/CommandCatalogSignal",
-              "default": {
-                "command_ratio": 0.0,
-                "command_shaped_sections": 0,
-                "flag_ratio": 0.0,
-                "flag_sections": 0,
-                "identifier_headings": 0,
-                "is_manual": false,
-                "reason": "no_sections",
-                "syntax_sections": 0,
-                "total_sections": 0
-              }
+            "skipped_windows_in_prefix": {
+              "default": 0,
+              "title": "Skipped Windows In Prefix",
+              "type": "integer"
             },
             "source_id": {
               "title": "Source Id",
@@ -2461,6 +2452,7 @@
           "type": "object"
         },
         "CommandCatalogProgress": {
+          "description": "任务进度。\n\n`sections_total`/`sections_done` 的**列名保留、语义变成窗口计数**(v2 按字符\n窗口而不是规则分节切文档);改名要加迁移、还会断掉既有观测面,两样都换不来\n任何东西。跳过的窗口同样计入 total 并照常 done,否则进度条走不完。\n\nv1 的 `truncated_sections` 已删:v2 没有截断这回事——超长元素被切成连续几段\n落进相邻窗口,没有任何内容被丢弃。数据库列仍在(不加迁移)且恒为 0,但一个\n恒为 0 的传输字段只会让前端一直渲染一句永远不会发生的告警。",
           "properties": {
             "entries": {
               "default": 0,
@@ -2485,11 +2477,6 @@
             "sections_total": {
               "default": 0,
               "title": "Sections Total",
-              "type": "integer"
-            },
-            "truncated_sections": {
-              "default": 0,
-              "title": "Truncated Sections",
               "type": "integer"
             },
             "uncovered": {
@@ -2526,58 +2513,6 @@
             }
           },
           "title": "CommandCatalogRejection",
-          "type": "object"
-        },
-        "CommandCatalogSignal": {
-          "description": "形状检测的计数证据 + 一个从不单独成立的阈值判断。\n\n`is_manual` 只是让调用方有个默认值;计数才是重点——「找到约 N 个命令段落」交给\n人来判断,是对一个启发式唯一诚实的用法。",
-          "properties": {
-            "command_ratio": {
-              "default": 0.0,
-              "title": "Command Ratio",
-              "type": "number"
-            },
-            "command_shaped_sections": {
-              "default": 0,
-              "title": "Command Shaped Sections",
-              "type": "integer"
-            },
-            "flag_ratio": {
-              "default": 0.0,
-              "title": "Flag Ratio",
-              "type": "number"
-            },
-            "flag_sections": {
-              "default": 0,
-              "title": "Flag Sections",
-              "type": "integer"
-            },
-            "identifier_headings": {
-              "default": 0,
-              "title": "Identifier Headings",
-              "type": "integer"
-            },
-            "is_manual": {
-              "default": false,
-              "title": "Is Manual",
-              "type": "boolean"
-            },
-            "reason": {
-              "default": "no_sections",
-              "title": "Reason",
-              "type": "string"
-            },
-            "syntax_sections": {
-              "default": 0,
-              "title": "Syntax Sections",
-              "type": "integer"
-            },
-            "total_sections": {
-              "default": 0,
-              "title": "Total Sections",
-              "type": "integer"
-            }
-          },
-          "title": "CommandCatalogSignal",
           "type": "object"
         },
         "CommandCatalogStartResponse": {
@@ -18281,7 +18216,7 @@
       },
       "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/preview": {
         "get": {
-          "description": "零模型调用的形状检测 + 成本预告(有界读取,数字是下界)。\n\nR8:来源还没解析完(或解析失败)时同样 409。一份对着还没有元素的来源做的成本\n预告会报出「约 0 个命令节」,读起来像「这份文档没什么可抽的」而不是「过一会\n儿再来」——成本预告唯一不能出的错就是这个方向。",
+          "description": "零模型调用的成本预告(窗口数是算术、调用数在有界前缀内精确测量)。\n\nR8:来源还没解析完(或解析失败)时同样 409。一份对着还没有元素的来源做的成本\n预告会报出「约 0 个窗口」,读起来像「这份文档没什么可抽的」而不是「过一会\n儿再来」——成本预告唯一不能出的错就是这个方向。",
           "operationId": "command_catalog_preview_api_notebooks__notebook_id__sources__source_id__command_catalog_preview_get",
           "parameters": [
             {

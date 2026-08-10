@@ -52,23 +52,19 @@ export function isCatalogBusy(starting: boolean, job: CommandCatalogJob | null):
 
 // ---------------------------------------------------------------- 进度/摘要
 
-/** 因过长被截断、只识别了开头部分的节数提示。为 0 时不渲染任何提示。 */
-function catalogTruncationNote(progress: CommandCatalogProgress): string {
-  const truncated = progress.truncated_sections;
-  return truncated > 0 ? `${truncated} 节因过长仅识别了开头部分` : "";
-}
-
 /**
- * 识别进行中的一行进度。sections_total 为 0 表示任务已建、还没算出总节数
+ * 识别进行中的一行进度。sections_total 为 0 表示任务已建、还没算出总窗口数
  * (queued 或刚 running),这时报 0/0 会让人以为卡住了,改说「准备中…」。
+ *
+ * 口径:v2 按字符窗口(而非规则分节)切文档,`sections_total`/`sections_done`
+ * 两个字段名不变(数据库列不改名),但计的是窗口数;界面词统一说「段」而不是
+ * 「节」,避免带出内部「分节」的旧概念。v2 没有截断这回事(超长元素被切成
+ * 连续几段落进相邻窗口,不丢内容),所以这里不再附带任何截断提示。
  */
 export function catalogProgressText(job: CommandCatalogJob): string {
   const { sections_total: total, sections_done: done, entries } = job.progress;
   if (total <= 0) return "准备中…";
-  const parts = [`已处理 ${done}/${total} 节 · 已识别 ${entries} 条`];
-  const truncationNote = catalogTruncationNote(job.progress);
-  if (truncationNote) parts.push(truncationNote);
-  return parts.join(" · ");
+  return `已处理 ${done}/${total} 段 · 已识别 ${entries} 条`;
 }
 
 export type CatalogStatusLine = {
@@ -111,9 +107,7 @@ export function catalogStatusLine(job: CommandCatalogJob | null): CatalogStatusL
   }
   const parts = [`已识别 ${entries} 条命令`];
   if (rejected > 0) parts.push(`${rejected} 条未通过`);
-  if (uncovered > 0) parts.push(`${uncovered} 节未覆盖`);
-  const truncationNote = catalogTruncationNote(job.progress);
-  if (truncationNote) parts.push(truncationNote);
+  if (uncovered > 0) parts.push(`${uncovered} 段未覆盖`);
   return { text: parts.join(" · "), tone: "info" };
 }
 
@@ -165,38 +159,52 @@ export type CatalogPreviewCopy = {
 };
 
 /**
- * 成本预告确认弹窗的文案。
+ * 成本预告确认弹窗的文案(v2:全文档窗口抽取,不再有形状检测)。
  *
- * 三条硬约束:
+ * 两条硬约束:
  *  1. 数字一律写成**约数**。preview 只读了一段有界前缀,真实成本只会更高不会更低。
  *  2. `sampled` 时必须明说只看了前多少条,否则那句「预计 M 次」是个守不住的承诺。
- *  3. 非手册形状**不禁用入口**,只换提示语 —— 形状检测是启发式,凭它替用户否决
- *     一次识别是越权;把计数摆出来让人自己判断才是诚实用法。
+ *
+ * v1 靠规则分节的形状检测(是否像命令手册)决定要不要提示——v2 不再对文档形状
+ * 下判断:整篇都会被通读,纯叙述的部分由零成本跳过闸自动掠过、不产生调用,
+ * 用户不需要一个「像不像手册」的猜测来决定要不要点开始。
  */
 export function catalogPreviewCopy(preview: CommandCatalogPreview): CatalogPreviewCopy {
-  const { estimated_sections: sections, estimated_calls: calls, sampled, signal } = preview;
-  const cost = `检测到约 ${sections} 个命令节，预计 ${calls} 次模型调用。`;
+  const { estimated_windows: windows, estimated_calls: calls, sampled, skipped_windows_in_prefix: skipped } = preview;
+  const cost = `将通读全文（约 ${windows} 段），预计约 ${calls} 次模型调用。`;
+  // skipped 是「零成本跳过闸」挡下的段数(没有可认领的命令名、也没有参数形状的
+  // 部分,由确定性判据识别,不发模型调用)——它是「为什么调用数远小于段数」唯一
+  // 的解释项,没有它,一份大部分是叙述性文字的手册会读成漏算。
+  const skipNote = skipped > 0 ? `其中纯叙述部分不消耗调用。` : "";
   const sampledNote = sampled
-    ? `成本只按前 ${preview.element_limit} 个元素估算，实际可能更多。`
+    ? `次数只按前 ${preview.element_limit} 个元素估算，实际可能更多。`
     : "";
-  const shapeNote = signal.is_manual
-    ? ""
-    : "未检测到明显的命令手册结构，识别结果可能很少或为空。";
   return {
     title: "识别命令目录",
-    body: [shapeNote, cost, sampledNote].filter(Boolean).join(""),
-    sections: [
-      // 这里的分子分母是**块口径**(每个语法/参数子段各算一块),与主句「检测到约
-      // N 个命令节」的**分组口径**(同一命令的子段合并计数)不是同一个数,写法必须
-      // 显式区分,否则同一张卡上两句话像是在互相矛盾。
-      ["形状线索", [
-        `命令样式的段落 ${signal.command_shaped_sections}/${signal.total_sections}（含语法/参数子段）`,
-        `含语法说明 ${signal.syntax_sections}`,
-        `含参数说明 ${signal.flag_sections}`,
-      ]],
-    ],
+    body: [cost, skipNote, sampledNote].filter(Boolean).join(""),
+    sections: [],
     confirmLabel: "开始识别",
   };
+}
+
+// -------------------------------------------------------------------- 候选出处
+
+// 后端内部占位标签(`app/services/catalog_job.py` 的 `_window_label()`):窗口
+// 没有可继承的面包屑时,`section_path` 落回 `window {ordinal+1}`(1 起序号)。
+// 这不是 UI 文案——裸英文单词既会被界面词守卫拦下,也会把内部实现细节漏给用户。
+const INTERNAL_WINDOW_LABEL = /^window (\d+)$/;
+
+/**
+ * 候选行 `section_path` 列的展示文案。
+ *
+ * 有继承的面包屑(原文标题路径)时原样显示;退化成后端内部占位标签时,换成
+ * 同样带位置信息的中文说法——直接说「未标注出处」会丢掉窗口序号这个仅有的
+ * 线索,而原样显示英文标签既漏内部实现、也过不了界面词守卫。空串原样传回,
+ * 调用方按既有「未标注出处」兜底渲染(与该列此前的空值处理一致)。
+ */
+export function catalogSectionLabel(sectionPath: string): string {
+  const match = INTERNAL_WINDOW_LABEL.exec(sectionPath);
+  return match ? `第 ${match[1]} 段` : sectionPath;
 }
 
 // ---------------------------------------------------------------- 未通过原因
@@ -215,7 +223,7 @@ const REJECT_FIELD: Record<string, string> = {
 // 这条该不该留,而不是模型的内部状态。
 const REJECT_REASON: Record<string, string> = {
   empty: "模型没有给出这个值",
-  not_in_candidates: "这一节没有记录这条命令",
+  not_in_candidates: "这一段没有记录这条命令",
   not_in_text: "原文里找不到这个写法",
   dash_stripped: "少了前面的短横（原文写作 -xxx）",
   not_contiguous: "与原文不连续",

@@ -1,12 +1,32 @@
 """Command-catalog extraction: the job, the model calls, and the apply step.
 
 This is stage C1b of Plan C. ``app/services/command_catalog.py`` (C1a) decides
-everything that can be decided without IO — is this a manual, which elements
-belong to which command, which names may an entry claim, how is one command
-split across calls, and what survives grounding. This module is the part that
-touches the world: it reads a source's elements, drives one model call per
-slice, writes the reviewable candidate rows, and — on an explicit human
-confirmation — lands the confirmed rows in a knowhow table.
+everything that can be decided without IO — how a document is packed into
+model-sized windows, which names an entry from a window may claim, whether a
+window is worth a call at all, how one window is split across calls, and what
+survives grounding. This module is the part that touches the world: it reads a
+source's elements, drives one model call per slice, writes the reviewable
+candidate rows, and — on an explicit human confirmation — lands the confirmed
+rows in a knowhow table.
+
+**v2 geometry, in one paragraph, because it changes what every counter below
+means.** v1 asked layout rules which elements formed one command's section and
+showed the model only those; a command whose section the rules never opened was
+never offered at all. v2 packs the whole document, in order, into
+``WINDOW_CHARS`` windows with nothing dropped, and asks each window which
+commands it documents — so one reply now carries a LIST of entries, one command
+can span several windows (``carry_candidates`` relays the name, and this module
+merges the later window's parameters into the row the first one wrote), and a
+window with nothing claimable — or nothing to extract — costs nothing because
+it is never sent (``window_needs_model``). The ``sections_*`` columns and the
+``catalog_section_done`` event keep their names — they count windows now — for
+the ordinary reason: renaming them is a migration and an observability break,
+and neither buys anything. The two do NOT count the same thing any more,
+deliberately: the COLUMNS count every window (they are the progress bar's
+numerator and denominator, and a skipped window is still a window that is
+done), while the EVENT is only emitted for windows that actually made a call.
+A mostly-prose PDF has thousands of skipped windows and an event per no-op
+would be the bulk of this run's observability for none of its work.
 
 Four properties are load-bearing and every change here has to preserve them.
 
@@ -42,6 +62,7 @@ pure waste.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -59,22 +80,23 @@ from app.services.cancellation import AskCancelled, CancelEvent
 from app.services.command_catalog import (
     ARGS_KEEP_ALERT_RATIO,
     COMMAND_REJECT_ALERT_RATIO,
-    MAX_SECTION_REJECTIONS,
-    MIN_SECTIONS_BEFORE_ALERT,
+    MAX_WINDOW_REJECTIONS,
+    MIN_WINDOWS_BEFORE_ALERT,
+    WINDOW_CHARS,
     AssignmentCoverage,
-    CommandSection,
     ExtractionSlice,
-    SectionOutcome,
+    ExtractionWindow,
     ValidationResult,
+    WindowOutcome,
     assignment_coverage,
+    carry_candidates,
     catalog_stats,
-    command_candidates,
-    command_sections,
-    detect_manual_shape,
     extraction_slices,
-    section_metas,
-    section_outcome,
+    extraction_windows,
     validate_entry,
+    window_candidates,
+    window_needs_model,
+    window_outcome,
 )
 from app.services.kg.json_utils import safe_json
 from app.services.model_work import ModelProviderError
@@ -148,7 +170,7 @@ CANDIDATE_EXCERPT_CHARS = 400
 # field, nothing else caps how much of either a model may write. A candidate
 # row is written to the DB and rendered in the review UI on every accepted
 # entry, so these bounds are the backstop against a misbehaving model turning
-# one section into an unbounded row.
+# one window into an unbounded row.
 MODEL_DESCRIPTION_CHARS = 1000
 MODEL_EXAMPLE_CHARS = 500
 MAX_MODEL_EXAMPLES = 8
@@ -187,16 +209,36 @@ CATALOG_TABLE_COLUMNS = (
     {"name": "出处", "role": "attribute"},
 )
 
+# A LIST, because a window is a slab of the document rather than one command's
+# section: the model is asked to enumerate every command the window documents,
+# and `entries: []` is a legal answer (this window documents none) rather than a
+# failure. See `_call` for where the shape is enforced and `_prompt` for how it
+# is asked for.
 _SCHEMA_HINT = (
-    '{"command_name": "string", "syntax": "string", "description": "string", '
-    '"args": [{"name": "string", "required": true, "desc": "string", '
-    '"default": "string"}], "examples": ["string"]}'
+    '{"entries": [{"command_name": "string", "syntax": "string", '
+    '"description": "string", "args": [{"name": "string", "required": true, '
+    '"desc": "string", "default": "string"}], "examples": ["string"]}]}'
 )
 
 # User-readable copy. Everything a route hands to `user_error()` comes from
 # here, and everything else this module records is diagnostic-only.
 CIRCUIT_OPEN_MESSAGE = (
     "校验拦截率异常，疑似文档格式与识别规则不兼容；本次命令识别已停止，未生成命令目录。"
+)
+# A run that paid for model calls and produced literally nothing — no
+# candidate, no rejected row, not one entry the model even attempted. That is
+# NOT a success with an empty result: `succeeded` next to an empty review
+# panel reads as "this document has no commands", which is a claim this
+# feature has no evidence for. Every other empty-ish outcome stays
+# `succeeded`, because each of them leaves the user something to look at: a
+# run with rejected rows shows WHY nothing was kept, and a run that skipped
+# every window never called a model at all (a source that is simply not a
+# manual, correctly costing nothing). Same provenance rule as every other
+# constant here — the route hands this to `user_error()`, so it is curated
+# copy and says what to do next.
+NOTHING_EXTRACTED_MESSAGE = (
+    "没有识别出任何命令；这份来源可能不是命令手册，或命令的写法与识别规则不符，"
+    "请确认来源内容后再试。"
 )
 INTERNAL_FAILURE_MESSAGE = "命令目录识别失败，请稍后重试。"
 # R6 P1 修正:旧文案「已生成的候选已保留，可重新发起识别」承诺了一件拦截逻辑
@@ -403,11 +445,26 @@ class CatalogSourceBusy(RuntimeError):
 
 @dataclass(frozen=True)
 class CatalogPreview:
+    """What extracting this source would cost, in v2's own units.
+
+    ``estimated_windows`` is arithmetic on the source's total character count
+    (windows are packed by characters), so it is exact up to element boundaries
+    and the join separators — a lower bound, like every other number here.
+    ``skipped_windows_in_prefix`` is what the zero-model-call gate
+    (``window_needs_model``) rejected inside the bounded prefix this preview
+    actually read: it is the number that explains why ``estimated_calls`` can
+    be well under ``estimated_windows`` on a document that is mostly prose.
+
+    v1's ``signal``/``estimated_sections`` are gone rather than kept as
+    aliases: shape detection retired with sectioning, and a count of "command
+    sections" is not a thing v2 can compute or would mean anything by.
+    """
+
     source_id: str
     source_title: str
-    signal: dict
-    estimated_sections: int
+    estimated_windows: int
     estimated_calls: int
+    skipped_windows_in_prefix: int
     sampled: bool
     element_limit: int
 
@@ -421,16 +478,62 @@ class _SliceOutcome:
 
 
 @dataclass
-class _SectionWork:
+class _FlushedCandidate:
+    """A candidate row this run already wrote, kept so a LATER window can add
+    to it instead of appending a second row for the same command.
+
+    ``entry`` is the same accumulator shape ``_merge_entry`` builds (see it):
+    the merged syntax/description/args/examples plus the bounded ledgers and
+    the anchors/excerpt. Holding it is what makes the cross-window merge
+    first-writer-wins across windows for free — the next window seeds its own
+    accumulator from this and merges into it, so the union is computed by the
+    same code path a multi-slice command inside ONE window already uses.
+
+    Bounded by the number of distinct commands in the document, and each entry
+    is bounded by the same per-row caps that bound the DB row it mirrors.
+    """
+
+    id: str
+    entry: dict
+
+
+@dataclass
+class _PendingUpdate:
+    """A command an earlier window already wrote a row for, re-rendered with
+    this window's contribution merged in.
+
+    Carries the merge accumulator (``entry``) alongside the stored shapes
+    because the update can FAIL — the row may have been applied or dismissed
+    by a reviewer since it was written — and the fallback for that is to append
+    a fresh row, which needs the accumulator to register in the run's
+    ``flushed`` registry exactly like a first-time write does.
+    """
+
+    candidate_id: str
+    command_name: str
+    entry: dict
+    payload: dict
+    reject_info: dict
+
+
+@dataclass
+class _WindowWork:
     rows: list[dict] = field(default_factory=list)
+    # Commands ALREADY written by an earlier window: revised in place rather
+    # than appended a second time (see `_PendingUpdate`).
+    updates: list[_PendingUpdate] = field(default_factory=list)
+    # (position, command_name, accumulator) for commands written for the FIRST
+    # time here. The row ids are assigned by the store, so `run` reads them
+    # back by position after the insert and registers them for later windows.
+    new_entries: list[tuple[int, str, dict]] = field(default_factory=list)
     results: list[ValidationResult] = field(default_factory=list)
     candidates: tuple[str, ...] = ()
     slices: int = 0
     slice_failures: int = 0
     calls: int = 0
-    # Assigned parameters no slice of this section ever answered for. Bounded
-    # by the section's own parameter list (itself bounded by
-    # `MAX_SECTION_CHARS`), and capped again when it reaches `SectionOutcome`.
+    # Assigned parameters no slice of this window ever answered for. Bounded
+    # by the window's own parameter list (itself bounded by `WINDOW_CHARS`),
+    # and capped again when it reaches `WindowOutcome`.
     uncovered_args: list[str] = field(default_factory=list)
 
 
@@ -457,13 +560,13 @@ def _reject_info(
     *,
     desc_overflow: int = 0,
 ) -> dict:
-    """A candidate row's `reject_info`, bounded at `MAX_SECTION_REJECTIONS`.
+    """A candidate row's `reject_info`, bounded at `MAX_WINDOW_REJECTIONS`.
 
     `overflow` is the count of records that got cut, carried alongside rather
-    than silently dropped — mirroring `SectionOutcome.rejections_overflow` in
+    than silently dropped — mirroring `WindowOutcome.rejections_overflow` in
     `command_catalog.py`. Both write sites (a single slice's own rejections,
     and `_merge_entry`'s cross-slice accumulator) already hand this at most
-    `MAX_SECTION_REJECTIONS` items; the cap here is the last line of defence
+    `MAX_WINDOW_REJECTIONS` items; the cap here is the last line of defence
     for whichever one changes first.
 
     `desc_overflow` is a SEPARATE key rather than more of `overflow`, and
@@ -473,7 +576,7 @@ def _reject_info(
     number that answers neither question. Omitted when zero, like `overflow`.
     """
     all_fields = list(fields)
-    kept = all_fields[:MAX_SECTION_REJECTIONS]
+    kept = all_fields[:MAX_WINDOW_REJECTIONS]
     total_overflow = max(0, overflow) + (len(all_fields) - len(kept))
     info: dict[str, Any] = {"fields": kept}
     if total_overflow:
@@ -481,6 +584,88 @@ def _reject_info(
     if desc_overflow > 0:
         info["desc_overflow"] = int(desc_overflow)
     return info
+
+
+_ORDINAL_LABEL_RE = re.compile(r"^window \d+$")
+
+
+def _window_label(window: ExtractionWindow) -> str:
+    """The candidate row's `section_path` column for a window.
+
+    The window's inherited breadcrumb when it has one, and an ordinal label
+    otherwise. This is an INTERNAL provenance label on a stored row, not UI
+    copy: the review panel decides how to present it (T4), and the vocabulary
+    guard's user-facing surface is that panel's, not this column's. A window
+    boundary falls where the character budget put it, so this is a
+    best-effort breadcrumb by construction — it takes part in no decision.
+    """
+    return window.provenance or f"window {window.ordinal + 1}"
+
+
+def _seed_accumulator(
+    record: "_FlushedCandidate | None",
+    suspect_related: bool,
+    anchors: Sequence[str],
+    excerpt: str,
+) -> dict:
+    """A fresh merge accumulator — or a COPY of what an earlier window already
+    wrote for this command, so the cross-window merge is the same code path as
+    the cross-slice one (see `CommandCatalogService._merge_entry`).
+
+    A copy rather than the record's own dict: nothing may mutate the registry's
+    view of a persisted row until the revised payload is actually handed to the
+    store, and the caller replaces the record wholesale when it is.
+    """
+    if record is None:
+        return {
+            "syntax": "",
+            "description": "",
+            "args": [],
+            "examples": [],
+            "suspect_related": suspect_related,
+            "rejections": [],
+            "rejections_overflow": 0,
+            "desc_chars": 0,
+            "desc_overflow": 0,
+            "anchors": list(anchors),
+            "excerpt": excerpt,
+        }
+    previous = record.entry
+    return {
+        "syntax": previous["syntax"],
+        "description": previous["description"],
+        "args": [dict(arg) for arg in previous["args"]],
+        "examples": list(previous["examples"]),
+        "suspect_related": previous["suspect_related"],
+        "rejections": [dict(item) for item in previous["rejections"]],
+        "rejections_overflow": previous["rejections_overflow"],
+        "desc_chars": previous["desc_chars"],
+        "desc_overflow": previous["desc_overflow"],
+        "anchors": list(
+            dict.fromkeys(list(previous["anchors"]) + list(anchors))
+        )[:MAX_ANCHOR_ELEMENTS],
+        "excerpt": previous["excerpt"],
+    }
+
+
+def _candidate_payload(entry: Mapping[str, Any]) -> dict:
+    """A merge accumulator rendered as the candidate row's stored payload.
+
+    One function because there are now two writers — the insert of a brand-new
+    command's row and the revision of one an earlier window wrote — and a
+    revision that assembled the payload differently from the insert would make
+    a merged row a different SHAPE from an unmerged one for every reader
+    downstream (`CommandCatalogCandidate.of`, `_catalog_cells`).
+    """
+    return {
+        "syntax": entry["syntax"],
+        "description": entry["description"],
+        "args": entry["args"],
+        "examples": entry["examples"],
+        "anchors": entry["anchors"],
+        "excerpt": entry["excerpt"],
+        "suspect_related": entry["suspect_related"],
+    }
 
 
 def _extend_rejections(
@@ -493,7 +678,7 @@ def _extend_rejections(
     and the parameters it was assigned and never answered — and the cap has to
     be shared between them, not applied twice to two independent budgets.
     """
-    room = max(0, MAX_SECTION_REJECTIONS - len(entry["rejections"]))
+    room = max(0, MAX_WINDOW_REJECTIONS - len(entry["rejections"]))
     items = list(records)
     entry["rejections"].extend(items[:room])
     entry["rejections_overflow"] += max(0, len(items) - room)
@@ -584,60 +769,71 @@ class CommandCatalogService:
 
     # ---------------------------------------------------------------- preview
     def preview(self, notebook_id: str, source_id: str) -> CatalogPreview:
-        """Estimate, with zero model calls and a bounded read, what extracting
-        this source would cost.
+        """Estimate, with zero model calls, what extracting this source would
+        cost — two reads, each bounded a different way.
 
-        Both the row count and each row's text are clipped in SQL (see
-        ``CatalogStorePort.preview_elements``), and ``sampled`` is true if
-        EITHER bound bit. The numbers are then a lower bound rather than a
-        census: a manual whose parameter tables sit past a cap really does cost
-        more than this says, and pretending otherwise would be the one failure
-        mode a cost preview must not have.
+        **How many windows** comes from ``source_text_stats``: windows are
+        packed by CHARACTER count, so the count is arithmetic on the source's
+        total text, and asking SQL for that total is one aggregate that
+        transmits two integers. Reading the whole document into Python to
+        count them would be the failure a cost preview must not have — a
+        preview that performs the scan it is estimating.
+
+        **How many CALLS** cannot be arithmetic: it depends on the
+        zero-model-call gate (a prose window is free) and on each window's
+        parameter count (a 100-flag window is several slices). Both need the
+        text, so they are measured exactly over the bounded PREFIX
+        ``preview_elements`` returns — including the relay, since a window's
+        gate reads the previous window's candidates — and every window past
+        that prefix is charged the minimum of one call. ``sampled`` says the
+        prefix ran out, so the reader knows the number is a floor.
+
+        Both of ``preview_elements``' bounds feed ``sampled``, not just the row
+        cap. Per-element truncation is the one that actually distorts the
+        estimate: clipping an options table drops parameter names, which drops
+        slices, so a manual whose option tables run past
+        ``PREVIEW_ELEMENT_CHARS`` can easily cost several times the reported
+        call count.
 
         R8: the parse-status precondition is checked HERE as well as in
         ``start``. A cost preview over a source that has not been parsed yet is
         not merely useless, it is misleading in the one direction this estimate
         must never be wrong in — it reads whatever prefix of elements happens to
-        exist (usually none) and reports "约 0 个命令节", which reads as "this
+        exist (usually none) and reports "约 0 个窗口", which reads as "this
         document has nothing to extract" rather than "come back in a minute".
         """
         source = self._require_parsed(notebook_id, source_id)
+        _element_count, total_chars = self.catalog.source_text_stats(source_id)
+        estimated_windows = -(-max(0, int(total_chars)) // WINDOW_CHARS)
         rows, clipped = self.catalog.preview_elements(
             source_id, limit=PREVIEW_ELEMENT_LIMIT, text_chars=PREVIEW_ELEMENT_CHARS
         )
-        # BOTH bounds feed `sampled`, not just the row cap. Per-element
-        # truncation is the one that actually distorts the estimate: clipping an
-        # options table drops parameter names, which drops slices, so a manual
-        # whose option tables run past PREVIEW_ELEMENT_CHARS can easily cost
-        # several times the reported call count. Reporting `sampled=False` there
-        # would be a promise this cannot keep.
         sampled = clipped or len(rows) >= PREVIEW_ELEMENT_LIMIT
-        sections = command_sections(rows)
-        # `section_metas`, NOT `command_sections()`'s own output: the latter
-        # already GROUPED blocks under a command heading and dropped every
-        # block that never joined one, so feeding it back in would make
-        # `total_sections` trivially equal `command_shaped_sections` and the
-        # ratio gate would never have anything left to reject. `estimated_*`
-        # below still comes from `sections` — that number IS "how many
-        # commands would be extracted", which is what a cost estimate needs.
-        signal = detect_manual_shape(section_metas(rows))
-        estimated_calls = sum(len(extraction_slices(section)) for section in sections)
+        prefix = extraction_windows(rows)
+        prefix_calls = 0
+        skipped = 0
+        carry: list[str] = []
+        for window in prefix:
+            own = window_candidates(window)
+            if window_needs_model(window, carry, own=own):
+                prefix_calls += len(extraction_slices(window))
+            else:
+                skipped += 1
+            # The relay is advanced for skipped windows too — exactly as `run`
+            # does. Dropping it here would make the preview's own gate answer
+            # differently from the run's on the very case the relay exists for
+            # (a multi-window parameter table).
+            carry = carry_candidates(own, carry)
         return CatalogPreview(
             source_id=source_id,
             source_title=self._canonical_source_title(source),
-            signal={
-                "total_sections": signal.total_sections,
-                "identifier_headings": signal.identifier_headings,
-                "syntax_sections": signal.syntax_sections,
-                "flag_sections": signal.flag_sections,
-                "command_shaped_sections": signal.command_shaped_sections,
-                "command_ratio": signal.command_ratio,
-                "flag_ratio": signal.flag_ratio,
-                "is_manual": signal.is_manual,
-                "reason": signal.reason,
-            },
-            estimated_sections=len(sections),
-            estimated_calls=estimated_calls,
+            estimated_windows=estimated_windows,
+            # One call minimum for every window the prefix did not reach: the
+            # gate cannot be evaluated on text this preview never read, and
+            # guessing it would be free is the direction a cost estimate must
+            # not err in.
+            estimated_calls=prefix_calls + max(0, estimated_windows - len(prefix)),
+            skipped_windows_in_prefix=skipped,
             sampled=sampled,
             element_limit=PREVIEW_ELEMENT_LIMIT,
         )
@@ -1313,7 +1509,23 @@ class CommandCatalogService:
             return round((time.perf_counter() - started) * 1000)
 
         try:
-            result = self._run_sections(job, cancel)
+            result = self._run_windows(job, cancel)
+            if _nothing_extracted(result):
+                # Paid for calls, produced no row of any kind. Settled
+                # `failed` rather than `succeeded` for the same reason the
+                # breaker exists: an empty review panel under a green status
+                # asserts "this document documents no commands", and this run
+                # has no evidence for that. See `NOTHING_EXTRACTED_MESSAGE`.
+                self._settle(
+                    job_id, "failed", NOTHING_EXTRACTED_MESSAGE, "nothing_extracted"
+                )
+                self._emit(
+                    "catalog_job_finished",
+                    self.catalog.get_job(job_id),
+                    latency_ms=latency_ms(),
+                    model_calls=result["calls"],
+                )
+                return {**result, "job_id": job_id, "nothing_extracted": True}
             self.catalog.finish_job(job_id, "succeeded")
             self._emit(
                 "catalog_job_finished",
@@ -1379,7 +1591,7 @@ class CommandCatalogService:
         finally:
             self._discard_cancel(job_id)
 
-    def _run_sections(self, job: Mapping[str, Any], cancel: CancelEvent) -> dict:
+    def _run_windows(self, job: Mapping[str, Any], cancel: CancelEvent) -> dict:
         if not self.catalog.start_job(job["id"], 0):
             # Claim the row BEFORE paying for the read. A job cancelled while it
             # sat in the queue should cost nothing, and the read below is the
@@ -1403,7 +1615,7 @@ class CommandCatalogService:
         # `start_job` claiming the row is not itself a cancellation check: a
         # cancel that lands in the instant between `cancel()` setting the
         # event and this thread reaching here is otherwise invisible until
-        # the FIRST per-slice check inside `_process_section` — by which
+        # the FIRST per-slice check inside `_process_window` — by which
         # point the whole-source read right below has already run for
         # nothing, for a job that was cancelled before it did any real work.
         # Combined with the liveness probe for the same reason: see
@@ -1411,50 +1623,115 @@ class CommandCatalogService:
         self._raise_if_stopped(job["id"], cancel)
         # One whole source's elements, deliberately: this is the exact fetch
         # chunking already performs for every source that is ingested, and C1a
-        # is built to consume its rows unchanged. Sectioning needs document
-        # order and heading boundaries across the whole file, so a keyset page
-        # would have to be reassembled into the same list anyway. The per-run
-        # memory ceiling is one source's element text — the same ceiling
-        # `build_chunks_for_source` already accepts — and each resulting section
-        # is then clipped to `MAX_SECTION_CHARS` before any model sees it.
+        # is built to consume its rows unchanged. Packing needs document order
+        # across the whole file, so a keyset page would have to be reassembled
+        # into the same list anyway. The per-run memory ceiling is one source's
+        # element text — the same ceiling `build_chunks_for_source` already
+        # accepts — and each window is bounded at `WINDOW_CHARS` before any
+        # model sees it.
         elements = self.chunks.source_elements_for_chunking(job["source_id"])
-        sections = command_sections(elements)
-        del elements  # sections own clipped copies; drop the full-source list
-        # The section total is only knowable after sectioning, so it lands in a
+        windows = extraction_windows(elements)
+        del elements  # windows own their own copies; drop the full-source list
+        # The window total is only knowable after packing, so it lands in a
         # second write. `set_section_total` is `running`-scoped, so a cancel
         # that arrived during the read simply leaves it at 0 and the loop's
         # first cancellation check ends the run.
-        self.catalog.set_section_total(job["id"], len(sections))
+        #
+        # SKIPPED windows are counted in the total, and each one still calls
+        # `record_section` below. The progress bar's denominator is "windows in
+        # this document", so leaving them out would leave a run at 12/40 when
+        # it is finished, and counting them without ticking them off is the
+        # same lie from the other side.
+        self.catalog.set_section_total(job["id"], len(windows))
         client = self._client()
-        outcomes: list[SectionOutcome] = []
+        outcomes: list[WindowOutcome] = []
+        # Commands already written by an earlier window of THIS run, so a
+        # continuation window revises that row instead of appending a second
+        # one for the same name. Bounded by the document's command count.
+        flushed: dict[str, _FlushedCandidate] = {}
+        carry: list[str] = []
         position = 0
         total_calls = 0
         total_slices = 0
         total_slice_failures = 0
-        for section in sections:
+        windows_skipped = 0
+        candidate_rows = 0
+        rejected_rows = 0
+        for window in windows:
+            # The cheap check first, unconditionally: an owner cancel must be
+            # honoured on a skipped window too, and the in-process event costs
+            # nothing to read. The DB liveness probe is deliberately NOT here
+            # — see the skip branch.
+            raise_if_catalog_cancelled(cancel)
+            own = window_candidates(window)
+            if not window_needs_model(window, carry, own=own):
+                # The zero-model-call gate. No claimable name, or nothing that
+                # looks like something to extract: every entry a model could
+                # return would be vetoed by name, so the call's grounded output
+                # is provably empty. The window is still ticked off the
+                # progress bar (a denominator that counts it and a numerator
+                # that does not is a bar that never finishes), and the relay is
+                # still advanced.
+                #
+                # That last one is an INVARIANT, not a behaviour: `carry` is
+                # defined as a pure function of the previous window, and this
+                # branch keeps it that way. Under the current gate it is also
+                # load-bearing rather than merely tidy — a prose window between
+                # a command and its continuation IS skipped now, and dropping
+                # this line would strand every table on the far side of one.
+                #
+                # No liveness probe and no `catalog_section_done` event on this
+                # path, deliberately. Both exist to protect model SPEND (stop
+                # paying for a job whose row a cascade deleted) or to report
+                # work that happened; a skipped window spends nothing and does
+                # nothing, while a mostly-prose PDF has thousands of them — the
+                # probe and the event would triple this run's database traffic
+                # to observe a no-op. `record_section` stays: the progress bar
+                # the frontend polls reads the job ROW, not the event stream.
+                windows_skipped += 1
+                self.catalog.record_section(
+                    job["id"], entries=0, rejected=0, uncovered=0
+                )
+                carry = carry_candidates(own, carry)
+                continue
             self._raise_if_stopped(job["id"], cancel)
-            work = self._process_section(client, job, section, position, cancel)
+            work = self._process_window(
+                client, job, window, own, carry, position, cancel, flushed
+            )
+            # Before the insert, so a revision that could not land becomes one
+            # more row in the very batch this window is about to write.
+            self._settle_updates(job, window, work, position)
             position += len(work.rows)
             total_calls += work.calls
             total_slices += work.slices
             total_slice_failures += work.slice_failures
             if work.rows:
                 self.catalog.add_candidates(work.rows)
-            outcome = section_outcome(
-                section,
+                self._register_flushed(job["id"], flushed, work)
+            outcome = window_outcome(
+                window,
                 work.candidates,
                 work.results,
                 uncovered_args=work.uncovered_args,
             )
             outcomes.append(outcome)
-            accepted = len(outcome.accepted_names)
+            # `entries` counts what this window ADDED to the review queue, not
+            # every accepted entry: a continuation window that merged its
+            # parameters into an earlier window's row created no new candidate,
+            # and counting it would make the job's `entries` column disagree
+            # with the number of rows a reviewer is shown.
+            accepted = len(work.new_entries)
             rejected = outcome.command_rejects + work.slice_failures
+            candidate_rows += accepted
+            rejected_rows += rejected
             self.catalog.record_section(
                 job["id"],
                 entries=accepted,
                 rejected=rejected,
                 uncovered=len(outcome.uncovered_candidates),
-                truncated=1 if outcome.truncation.applied else 0,
+                # v2 has no truncation concept — `extraction_windows` splits an
+                # oversized element across windows rather than dropping it. The
+                # column stays (dropping it would be a migration) and stays 0.
             )
             self._emit(
                 "catalog_section_done",
@@ -1466,10 +1743,22 @@ class CommandCatalogService:
                 slices=total_slices,
                 slice_failures=total_slice_failures,
             )
+            carry = carry_candidates(own, carry)
         stats = catalog_stats(outcomes)
         return {
-            "sections": stats.sections,
+            # `windows` is windows that actually made a call — the same sample
+            # the breaker's ratios are computed over. `windows_skipped` and
+            # `windows_total` are reported next to it so the pair cannot be
+            # mistaken for each other.
+            "windows": stats.windows,
+            "windows_skipped": windows_skipped,
+            "windows_total": len(windows),
             "entries_seen": stats.entries_seen,
+            # Rows this run put in front of a reviewer, of either kind. They
+            # are what `_nothing_extracted` reads: a run with either is a run
+            # with something to look at, whatever the ratios say.
+            "candidate_rows": candidate_rows,
+            "rejected_rows": rejected_rows,
             "command_rejects": stats.command_rejects,
             "args_seen": stats.args_seen,
             "args_kept": stats.args_kept,
@@ -1481,9 +1770,115 @@ class CommandCatalogService:
             "calls": total_calls,
         }
 
+    def _settle_updates(
+        self,
+        job: Mapping[str, Any],
+        window: ExtractionWindow,
+        work: _WindowWork,
+        position: int,
+    ) -> None:
+        """Revise the rows earlier windows wrote — and append a fresh row for
+        any revision the store refused.
+
+        ``update_candidate_payload`` writes only rows still in ``candidate``
+        state, and returns ``False`` when it matched none. That is not an
+        error: between the window that wrote the row and this one, a reviewer
+        can have confirmed it into the knowhow table or dismissed it, and both
+        are terminal. Overwriting either would rewrite something a person
+        already acted on.
+
+        So the merge degrades to what v1 always did — a second row for the same
+        command, visible in the review queue — rather than dropping this
+        window's parameters on the floor. A duplicate a reviewer can see and
+        skip is a far better failure than a silent loss: the parameters this
+        window found exist nowhere else, and the row that would have held them
+        is out of reach.
+
+        The new row is registered like any other first-time write (it goes into
+        ``new_entries``), so the run's registry now points at the row that is
+        actually live and a THIRD window merges into that one instead of
+        retrying the same refused update.
+
+        Positions continue past the rows this window already built, which keeps
+        ``position`` monotonic for the whole run and lets ``_register_flushed``
+        read every row of this batch back with one keyset scan.
+        """
+        if not work.updates:
+            return
+        next_position = position + len(work.rows)
+        for update in work.updates:
+            if self.catalog.update_candidate_payload(
+                update.candidate_id, update.payload, update.reject_info
+            ):
+                continue
+            next_position += 1
+            work.rows.append(
+                self._row(
+                    job,
+                    position=next_position,
+                    window=window,
+                    command_name=update.command_name,
+                    payload=update.payload,
+                    state="candidate",
+                    reject_info=update.reject_info,
+                )
+            )
+            work.new_entries.append(
+                (next_position, update.command_name, update.entry)
+            )
+
+    def _register_flushed(
+        self,
+        job_id: str,
+        flushed: dict[str, _FlushedCandidate],
+        work: _WindowWork,
+    ) -> None:
+        """Learn the store-assigned ids of the candidate rows just inserted, so
+        a LATER window can revise them instead of appending a second row for
+        the same command.
+
+        `add_candidates` assigns ids inside the store (they are minted there,
+        like every other surrogate id in this codebase) and returns nothing, so
+        the ids come back through one bounded keyset read on the index the
+        review page already uses — `position > (the lowest position this window
+        just wrote) - 1`, limited to the number of rows expected. `position` is
+        the join key rather than `command_name` because it is the column that
+        index orders by and the one this module assigned itself; a name join
+        would have to assume the store wrote back exactly what it was handed.
+
+        Rows that do not come back are simply not registered: the merge is an
+        optimisation over "one row per command", and the fallback — a later
+        window appending its own row for that command — is the v1 behaviour,
+        visible in the review queue rather than lost. Never a raise: a run must
+        not fail because a bookkeeping read came up short.
+        """
+        if not work.new_entries:
+            return
+        wanted = {
+            int(position): (name, entry)
+            for position, name, entry in work.new_entries
+        }
+        cursor = min(wanted) - 1
+        while wanted:
+            rows = self.catalog.list_candidates(
+                job_id,
+                state="candidate",
+                cursor=cursor,
+                limit=min(len(wanted), CATALOG_MAX_CANDIDATE_PAGE),
+            )
+            if not rows:
+                return
+            for row in rows:
+                cursor = int(row["position"])
+                hit = wanted.pop(cursor, None)
+                if hit is None:
+                    continue
+                name, entry = hit
+                flushed[name] = _FlushedCandidate(id=str(row["id"]), entry=entry)
+
     def _check_circuit(
         self,
-        outcomes: Sequence[SectionOutcome],
+        outcomes: Sequence[WindowOutcome],
         *,
         slices: int,
         slice_failures: int,
@@ -1499,15 +1894,15 @@ class CommandCatalogService:
         real guard rather than defensive noise — ``catalog_stats`` reports
         ``args_keep_ratio`` as 0.0 when the denominator is empty, and without
         it a manual of genuinely flagless commands would trip the breaker on
-        its tenth clean section. (Flagless no longer implies an empty
+        its tenth clean window. (Flagless no longer implies an empty
         denominator: since `_prompt`'s no-flag branch asks for positional
-        arguments, such a section contributes ``args_seen`` whenever the model
+        arguments, such a window contributes ``args_seen`` whenever the model
         answers one, and the axis then judges those names by grounding like any
-        other. The guard still matters for the sections that really do take no
+        other. The guard still matters for the windows that really do take no
         arguments at all.) Reading ``args_seen`` alone would NOT do: a
         model that answers nothing at all for 20 assigned parameters leaves
         ``args_seen`` at 0 and would sail past this axis while its assignment
-        vanished section after section.
+        vanished window after window.
 
         The third axis reads slices that produced NO parseable answer at all,
         and it exists because the other two cannot name that failure even now
@@ -1517,9 +1912,9 @@ class CommandCatalogService:
         reports the SYMPTOM ("parameters went missing") instead of the CAUSE
         ("the endpoint is returning garbage"). Without it, a deployment pointed
         at an incompatible model endpoint runs the entire manual — every
-        section, every halving retry — and reports `succeeded` with an empty
+        window, every halving retry — and reports `succeeded` with an empty
         catalog. That is precisely the silent-empty outcome this breaker exists
-        to prevent, so it must be a breaker axis rather than a per-section note.
+        to prevent, so it must be a breaker axis rather than a per-window note.
 
         Which one is REPORTED when several fire is a diagnosis question, not a
         severity one, and the order below is most-specific-first: an unusable
@@ -1529,7 +1924,7 @@ class CommandCatalogService:
         so the old order never had to choose.)
         """
         stats = catalog_stats(outcomes)
-        if stats.sections < MIN_SECTIONS_BEFORE_ALERT:
+        if stats.windows < MIN_WINDOWS_BEFORE_ALERT:
             return
         name_axis = stats.command_reject_ratio > COMMAND_REJECT_ALERT_RATIO
         args_asked = stats.args_seen + stats.args_uncovered
@@ -1550,7 +1945,7 @@ class CommandCatalogService:
                     "slices": slices,
                     "slice_failures": slice_failures,
                     "slice_failure_ratio": unusable_ratio,
-                    "sections": stats.sections,
+                    "windows": stats.windows,
                     "entries_seen": stats.entries_seen,
                     "command_rejects": stats.command_rejects,
                     "command_reject_ratio": stats.command_reject_ratio,
@@ -1558,9 +1953,14 @@ class CommandCatalogService:
                     "args_kept": stats.args_kept,
                     "args_uncovered": stats.args_uncovered,
                     "args_keep_ratio": stats.args_keep_ratio,
+                    # The window ORDINAL, not its provenance label: a manual's
+                    # headings ARE its command names, and this diagnostic is
+                    # written to `catalog_jobs.diagnostic`. An ordinal locates
+                    # the window in the document just as well without putting
+                    # document content in a diagnostics column.
                     "samples": [
                         {
-                            "section_path": outcome.section_path,
+                            "window": outcome.ordinal,
                             "reasons": sorted(
                                 {r.reason for r in outcome.rejections}
                             ),
@@ -1572,26 +1972,51 @@ class CommandCatalogService:
             )[:4000]
         )
 
-    # ------------------------------------------------------------- one section
-    def _process_section(
+    # -------------------------------------------------------------- one window
+    def _process_window(
         self,
         client: Any,
         job: Mapping[str, Any],
-        section: CommandSection,
+        window: ExtractionWindow,
+        candidates: Sequence[str],
+        carried: Sequence[str],
         position: int,
         cancel: CancelEvent,
-    ) -> _SectionWork:
-        candidates = command_candidates(section)
-        work = _SectionWork(candidates=tuple(candidates))
+        flushed: Mapping[str, _FlushedCandidate],
+    ) -> _WindowWork:
+        """Everything one window costs and produces, with no store writes.
+
+        The window's OWN candidate list and the relayed one stay separate all
+        the way down — the prompt lists them under different headings, and
+        `validate_entry` takes `carried` as its own argument so a relayed name
+        is exempt from the verbatim check while `window_outcome`'s
+        uncovered-candidate ledger keeps meaning "names THIS window offered".
+
+        Commands already written by an earlier window (`flushed`) do not get a
+        second row: their accumulator is seeded from what that row already
+        holds, this window merges into it, and the caller revises the row in
+        place. Everything else — rejected rows, coverage bookkeeping, position
+        monotonicity — is v1's, unchanged.
+        """
+        work = _WindowWork(candidates=tuple(candidates))
         merged: dict[str, dict] = {}
-        anchors = list(section.element_ids)[:MAX_ANCHOR_ELEMENTS]
-        excerpt = _clip(section.text, CANDIDATE_EXCERPT_CHARS)
+        anchors = list(window.element_ids)[:MAX_ANCHOR_ELEMENTS]
+        excerpt = _clip(window.text, CANDIDATE_EXCERPT_CHARS)
         next_position = position
-        for extraction in extraction_slices(section):
+        # Parameters assigned somewhere in this window that no slice ever
+        # answered for, collected across ALL slices and settled once the window
+        # is done — see the settlement below for why attribution has to wait
+        # until the whole window's accepted set is known. Bounded like every
+        # other ledger here, with the cut counted rather than dropped: the list
+        # would otherwise grow with the window's slice count while only the
+        # first `MAX_WINDOW_REJECTIONS` of it can ever be written.
+        unanswered: list[dict] = []
+        unanswered_total = 0
+        for extraction in extraction_slices(window):
             self._raise_if_stopped(job["id"], cancel)
             work.slices += 1
-            payloads, calls, failed = self._extract_slice(
-                client, section, candidates, extraction, cancel, job["id"]
+            entries, calls, failed = self._extract_slice(
+                client, window, candidates, carried, extraction, cancel, job["id"]
             )
             work.calls += calls
             if failed:
@@ -1601,7 +2026,7 @@ class CommandCatalogService:
                     self._row(
                         job,
                         position=next_position,
-                        section=section,
+                        window=window,
                         command_name="",
                         payload={"excerpt": excerpt, "anchors": anchors},
                         state="rejected",
@@ -1619,22 +2044,30 @@ class CommandCatalogService:
                         },
                     )
                 )
-            accepted_here: list[str] = []
-            for payload in payloads:
+            for entry in entries:
                 # `extraction.param_names` — the ORIGINAL slice's assignment,
-                # not whichever half a payload came back from. A halving is an
+                # not whichever half an entry came back from. A halving is an
                 # internal remedy and its halves partition this same list, so
                 # holding one half's answer to the other half's names would
                 # reject data the slice was legitimately asked for. Answering
                 # a DIFFERENT slice's parameters is still caught: those names
                 # are not in this list either.
                 result = validate_entry(
-                    payload, section, candidates, assigned=extraction.param_names
+                    entry,
+                    window,
+                    candidates,
+                    assigned=extraction.param_names,
+                    carried=carried,
                 )
                 work.results.append(result)
                 if result.accepted and result.entry is not None:
-                    self._merge_entry(merged, result)
-                    accepted_here.append(result.entry.command_name)
+                    self._merge_entry(
+                        merged,
+                        result,
+                        flushed=flushed,
+                        anchors=anchors,
+                        excerpt=excerpt,
+                    )
                     continue
                 next_position += 1
                 claimed = ""
@@ -1646,7 +2079,7 @@ class CommandCatalogService:
                     self._row(
                         job,
                         position=next_position,
-                        section=section,
+                        window=window,
                         command_name=claimed,
                         payload={"excerpt": excerpt, "anchors": anchors},
                         state="rejected",
@@ -1654,13 +2087,15 @@ class CommandCatalogService:
                     )
                 )
             # Coverage is a property of the SLICE, so it is settled once here
-            # over everything the slice answered — not inside the payload loop,
+            # over everything the slice answered — not inside the entry loop,
             # where a halved slice would count each half as having ignored the
-            # other's parameters. A slice that failed outright still lands here
-            # with an empty payload list, which is exactly right: its whole
-            # assignment went unanswered and the ledger must say so.
+            # other's parameters, and a multi-command window would count each
+            # entry as having ignored the other entries' parameters. A slice
+            # that failed outright still lands here with an empty entry list,
+            # which is exactly right: its whole assignment went unanswered and
+            # the ledger must say so.
             uncovered = assignment_coverage(
-                payloads, extraction.param_names
+                entries, extraction.param_names
             ).uncovered
             if uncovered:
                 work.uncovered_args.extend(uncovered)
@@ -1671,43 +2106,88 @@ class CommandCatalogService:
                         "reason": "arg_not_returned",
                         "window": "",
                     }
-                    for name in uncovered[:MAX_SECTION_REJECTIONS]
+                    for name in uncovered[:MAX_WINDOW_REJECTIONS]
                 ]
-                for name in dict.fromkeys(accepted_here):
-                    _extend_rejections(merged[name], records)
+                unanswered_total += len(records)
+                room = max(0, MAX_WINDOW_REJECTIONS - len(unanswered))
+                unanswered.extend(records[:room])
+        # Who to blame for an unanswered parameter, decided once per window.
+        #
+        # The window's assignment is the window's WHOLE flag list, so an
+        # unanswered `-density` says a parameter went missing, not WHICH
+        # command lost it — the model keys parameters onto entries and a
+        # parameter nobody returned was keyed onto nothing. With exactly one
+        # accepted command in the window there is no ambiguity and the note
+        # belongs on its row, where a reviewer sees the gap next to the command
+        # it is a gap in. With several, every attribution is a guess, and
+        # writing the same note onto each of them (as this used to) marks up
+        # commands that answered everything they were asked for — the reviewer
+        # reads "this command is missing -density" on a command that never had
+        # it. The window-level ledger (`WindowOutcome.uncovered_args`, fed by
+        # `work.uncovered_args` above) records the fact either way, so nothing
+        # is lost by declining to name a culprit.
+        if unanswered_total and len(merged) == 1:
+            sole = next(iter(merged.values()))
+            _extend_rejections(sole, unanswered)
+            # What the bounded collection above already dropped. `_extend_
+            # rejections` counts only what IT could not fit, so without this
+            # the reported overflow would understate the loss by everything
+            # trimmed before it ever saw the list.
+            sole["rejections_overflow"] += unanswered_total - len(unanswered)
         for name, entry in merged.items():
+            payload = _candidate_payload(entry)
+            reject_info = _reject_info(
+                entry["rejections"],
+                entry["rejections_overflow"],
+                desc_overflow=entry["desc_overflow"],
+            )
+            record = flushed.get(name)
+            if record is not None:
+                # An earlier window already wrote this command's row. Revise it
+                # — never a second row for one command, which is the catalog's
+                # standing shape contract. (`_settle_updates` is what happens
+                # when the store refuses because a reviewer already acted on
+                # that row.)
+                work.updates.append(
+                    _PendingUpdate(
+                        candidate_id=record.id,
+                        command_name=name,
+                        entry=entry,
+                        payload=payload,
+                        reject_info=reject_info,
+                    )
+                )
+                # The registry has to carry the MERGED accumulator forward, not
+                # the one it was seeded from: a command spanning three windows
+                # would otherwise have window 3 merge onto window 1's state and
+                # silently drop window 2's parameters.
+                record.entry = entry
+                continue
             next_position += 1
             work.rows.append(
                 self._row(
                     job,
                     position=next_position,
-                    section=section,
+                    window=window,
                     command_name=name,
-                    payload={
-                        "syntax": entry["syntax"],
-                        "description": entry["description"],
-                        "args": entry["args"],
-                        "examples": entry["examples"],
-                        "anchors": anchors,
-                        "excerpt": excerpt,
-                        "suspect_related": entry["suspect_related"],
-                    },
+                    payload=payload,
                     state="candidate",
-                    reject_info=_reject_info(
-                        entry["rejections"],
-                        entry["rejections_overflow"],
-                        desc_overflow=entry["desc_overflow"],
-                    ),
+                    reject_info=reject_info,
                 )
             )
+            work.new_entries.append((next_position, name, entry))
         return work
 
     @staticmethod
     def _merge_entry(
         merged: dict[str, dict],
         result: ValidationResult,
+        *,
+        flushed: Mapping[str, _FlushedCandidate],
+        anchors: Sequence[str],
+        excerpt: str,
     ) -> None:
-        """Fold one slice's accepted entry into that command's single row.
+        """Fold one accepted entry into that command's single row.
 
         A multi-slice command produces one accepted entry per slice, all naming
         the same command; the catalog holds ONE row per command, so the args
@@ -1717,6 +2197,22 @@ class CommandCatalogService:
         outside its assignment; WITHIN one slice it is the ordinary case, since
         a halved slice re-asks for parameters its first answer may already have
         covered (see `_extract_slice`).
+
+        v2 adds a second axis with no new merge rule: a command whose
+        documentation crosses a WINDOW boundary is merged by SEEDING this
+        window's accumulator from the row an earlier window already wrote
+        (`flushed`). First-writer-wins then means the earlier window's syntax
+        and description survive, its parameters are already in the dedupe set,
+        and every bound (examples, rejections, the description budget) keeps
+        counting from where it was rather than restarting per window — which is
+        the whole reason the merge is expressed as a seed rather than as a
+        second, cross-window merge function.
+
+        `anchors` are UNIONED across windows (bounded by `MAX_ANCHOR_ELEMENTS`)
+        because a command really is evidenced by elements from each window it
+        spans. `excerpt` is the FIRST window's and stays that way: it is a look
+        at where the command is documented, and the place it is introduced is
+        the useful one.
 
         `description`/`examples`/`args[].desc` are capped HERE, not later: they
         are the fields `validate_entry` deliberately never grounds (prose
@@ -1730,20 +2226,15 @@ class CommandCatalogService:
         """
         entry = result.entry
         assert entry is not None
-        current = merged.setdefault(
-            entry.command_name,
-            {
-                "syntax": "",
-                "description": "",
-                "args": [],
-                "examples": [],
-                "suspect_related": entry.suspect_related,
-                "rejections": [],
-                "rejections_overflow": 0,
-                "desc_chars": 0,
-                "desc_overflow": 0,
-            },
-        )
+        current = merged.get(entry.command_name)
+        if current is None:
+            current = _seed_accumulator(
+                flushed.get(entry.command_name),
+                entry.suspect_related,
+                anchors,
+                excerpt,
+            )
+            merged[entry.command_name] = current
         if entry.syntax and not current["syntax"]:
             current["syntax"] = entry.syntax
         if entry.description and not current["description"]:
@@ -1787,7 +2278,7 @@ class CommandCatalogService:
         job: Mapping[str, Any],
         *,
         position: int,
-        section: CommandSection,
+        window: ExtractionWindow,
         command_name: str,
         payload: Mapping[str, Any],
         state: str,
@@ -1798,7 +2289,7 @@ class CommandCatalogService:
             "notebook_id": job["notebook_id"],
             "source_id": job["source_id"],
             "position": position,
-            "section_path": section.section_path or section.title,
+            "section_path": _window_label(window),
             "command_name": command_name,
             "payload": dict(payload),
             "state": state,
@@ -1814,14 +2305,15 @@ class CommandCatalogService:
     def _extract_slice(
         self,
         client: Any,
-        section: CommandSection,
+        window: ExtractionWindow,
         candidates: Sequence[str],
+        carried: Sequence[str],
         extraction: ExtractionSlice,
         cancel: CancelEvent,
         job_id: str,
         depth: int = 0,
-    ) -> tuple[list[Mapping[str, Any]], int, bool]:
-        """One slice's payloads, the calls it cost, and whether it failed.
+    ) -> tuple[list[Mapping[str, Any] | None], int, bool]:
+        """One slice's ENTRIES, the calls it cost, and whether it failed.
 
         Three remedies, all bounded, and all keyed on what this seam can
         actually observe.
@@ -1854,9 +2346,8 @@ class CommandCatalogService:
 
         The halves reuse the parent's ``text_window`` unchanged. That is
         deliberate, not laziness: the window is already bounded
-        (``MAX_SLICE_WINDOW_CHARS``) and the failure being treated is on the
-        OUTPUT side, so narrowing the input would trade a real context loss for
-        no gain.
+        (``WINDOW_CHARS``) and the failure being treated is on the OUTPUT side,
+        so narrowing the input would trade a real context loss for no gain.
 
         The returned ``failed`` is defined as "this slice produced NO usable
         payload at all", not "something along the way went wrong" — so after a
@@ -1887,54 +2378,70 @@ class CommandCatalogService:
         args by name so a parameter answered twice still lands once, and never
         discarding an answer already paid for is this module's standing rule.
         """
-        outcome = self._call(client, section, candidates, extraction, cancel, job_id)
+        outcome = self._call(
+            client, window, candidates, carried, extraction, cancel, job_id
+        )
         calls = 1
         if outcome.payload is not None:
-            payloads = [outcome.payload]
+            entries = _payload_entries(outcome.payload)
             if depth == 0:
-                coverage = assignment_coverage(payloads, extraction.param_names)
+                coverage = assignment_coverage(entries, extraction.param_names)
                 if _coverage_retry_warranted(coverage):
-                    recovered, extra_calls = self._halve_and_ask(
-                        client, section, candidates, extraction, cancel, job_id, depth
+                    recovered, extra_calls, _usable = self._halve_and_ask(
+                        client, window, candidates, carried, extraction,
+                        cancel, job_id, depth,
                     )
-                    payloads.extend(recovered)
+                    entries.extend(recovered)
                     calls += extra_calls
-            return payloads, calls, False
+            return entries, calls, False
         if (
             outcome.kind == "malformed"
             and depth < MAX_SLICE_SPLIT_DEPTH
             and len(extraction.param_names) > 1
         ):
-            payloads, half_calls = self._halve_and_ask(
-                client, section, candidates, extraction, cancel, job_id, depth
+            entries, half_calls, usable = self._halve_and_ask(
+                client, window, candidates, carried, extraction, cancel,
+                job_id, depth,
             )
             calls += half_calls
             # NOT the OR of each half's own `failed` — see the docstring: one
             # successful half means this slice, as a whole, produced usable
-            # output.
-            return payloads, calls, not payloads
-        retry = self._call(client, section, candidates, extraction, cancel, job_id)
+            # output. And NOT `not entries` either, which is the v2 trap: a
+            # half that answered `entries: []` answered CORRECTLY (this text
+            # documents no command), so emptiness is not failure. `usable`
+            # carries the distinction the entry list cannot.
+            return entries, calls, not usable
+        retry = self._call(
+            client, window, candidates, carried, extraction, cancel, job_id
+        )
         calls += 1
         if retry.payload is not None:
-            return [retry.payload], calls, False
+            return _payload_entries(retry.payload), calls, False
         return [], calls, True
 
     def _halve_and_ask(
         self,
         client: Any,
-        section: CommandSection,
+        window: ExtractionWindow,
         candidates: Sequence[str],
+        carried: Sequence[str],
         extraction: ExtractionSlice,
         cancel: CancelEvent,
         job_id: str,
         depth: int,
-    ) -> tuple[list[Mapping[str, Any]], int]:
+    ) -> tuple[list[Mapping[str, Any] | None], int, bool]:
         """Split this slice's assignment in two and ask for each half.
 
         Shared by both callers so the split — and the fact that only the FIRST
         half inherits the overview responsibility — has one definition. The
         halves reuse the parent's ``text_window`` unchanged (see the caller's
         docstring: the failure being treated is on the output side).
+
+        The third return value is "at least one half produced a USABLE answer",
+        which the entry list itself cannot express: both halves answering
+        `entries: []` is a legal, complete answer that returns no entries at
+        all, and reading emptiness as failure would charge the breaker's
+        unusable-response axis for a model doing exactly as told.
         """
         middle = len(extraction.param_names) // 2
         halves = (
@@ -1945,21 +2452,25 @@ class CommandCatalogService:
                 include_overview=False,
             ),
         )
-        payloads: list[Mapping[str, Any]] = []
+        entries: list[Mapping[str, Any] | None] = []
         calls = 0
+        usable = False
         for half in halves:
-            half_payloads, half_calls, _half_failed = self._extract_slice(
-                client, section, candidates, half, cancel, job_id, depth + 1
+            half_entries, half_calls, half_failed = self._extract_slice(
+                client, window, candidates, carried, half, cancel, job_id,
+                depth + 1,
             )
-            payloads.extend(half_payloads)
+            entries.extend(half_entries)
             calls += half_calls
-        return payloads, calls
+            usable = usable or not half_failed
+        return entries, calls, usable
 
     def _call(
         self,
         client: Any,
-        section: CommandSection,
+        window: ExtractionWindow,
         candidates: Sequence[str],
+        carried: Sequence[str],
         extraction: ExtractionSlice,
         cancel: CancelEvent,
         job_id: str,
@@ -1967,7 +2478,7 @@ class CommandCatalogService:
         # The liveness probe here is what makes the guarantee actually cover
         # "every model call": `_extract_slice`'s halving and coverage-retry
         # branches call `_call` directly, recursing through `_halve_and_ask`
-        # without ever returning to `_process_section`'s per-slice loop — so
+        # without ever returning to `_process_window`'s per-slice loop — so
         # THIS is the one choke point every `chat_json` call, including every
         # retry, is guaranteed to pass through. See `_raise_if_stopped`.
         self._raise_if_stopped(job_id, cancel)
@@ -1980,12 +2491,19 @@ class CommandCatalogService:
             # Gated on `settings` exactly like the KG extractors are, so the
             # hand-rolled doubles that accept neither kwarg keep working.
             kwargs["response_validator"] = _entry_validator(
-                section, candidates, extraction
+                window, candidates, carried, extraction
             )
             kwargs["cancel_event"] = cancel
         try:
             raw = client.chat_json(
-                [{"role": "user", "content": _prompt(section, candidates, extraction)}],
+                [
+                    {
+                        "role": "user",
+                        "content": _prompt(
+                            window, candidates, carried, extraction
+                        ),
+                    }
+                ],
                 _SCHEMA_HINT,
                 **kwargs,
             )
@@ -2022,7 +2540,7 @@ class CommandCatalogService:
             # transient provider failure (rate limit, upstream 5xx, auth) is NOT
             # a too-long answer: the raw client already retried it with backoff,
             # asking for fewer parameters cannot help, and quietly turning an
-            # outage into "this section had no commands" is the silent-empty
+            # outage into "this window had no commands" is the silent-empty
             # failure this module exists to prevent. Those propagate and fail
             # the job with a terminal state a person can see.
             if getattr(exc, "code", "") != "malformed_response":
@@ -2038,6 +2556,15 @@ class CommandCatalogService:
             return _SliceOutcome(kind="empty")
         data = safe_json(raw)
         if not data:
+            return _SliceOutcome(kind="malformed")
+        if not isinstance(data.get("entries"), list):
+            # The v2 shape check, and it belongs HERE rather than downstream:
+            # a reply without an `entries` LIST has not answered the question
+            # that was asked, which is the same observation a truncated reply
+            # makes, so it gets the same remedy (halve and re-ask). An EMPTY
+            # list is not this case — that is a complete answer meaning "this
+            # text documents no command", and it flows through as a payload
+            # with zero entries.
             return _SliceOutcome(kind="malformed")
         return _SliceOutcome(payload=data)
 
@@ -2694,6 +3221,38 @@ class CommandCatalogService:
         return candidate_table_id, columns, title
 
 
+def _nothing_extracted(result: Mapping[str, Any]) -> bool:
+    """Whether this run spent model calls and produced literally nothing.
+
+    Four conditions, and each one excludes an outcome that is legitimately
+    empty:
+
+    * ``windows >= 1`` — at least one window actually made a call. A run whose
+      every window was skipped by the cost gate never asked a model anything;
+      it is a source that is not a manual, correctly costing nothing, and
+      failing it would fail the gate's own success case.
+    * ``entries_seen == 0`` — the model never even ATTEMPTED an entry. One
+      attempt that grounding then vetoed is a different run: it produced a
+      rejected row explaining itself.
+    * ``candidate_rows == 0`` and ``rejected_rows == 0`` — nothing reached the
+      review panel by either route. The second is the one worth spelling out:
+      a run where every slice came back unusable writes rejected rows, and
+      those ARE the answer ("the model returned garbage, here is where"), so it
+      stays a success as far as this check is concerned. The breaker's
+      unusable-response axis is what judges that run, on its own threshold.
+
+    Deliberately not a fourth breaker axis: the breaker aborts a run mid-way on
+    a ratio, while this is a verdict on a run that already finished, needs no
+    threshold, and cannot be evaluated until the last window is done.
+    """
+    return (
+        int(result.get("windows") or 0) >= 1
+        and int(result.get("entries_seen") or 0) == 0
+        and int(result.get("candidate_rows") or 0) == 0
+        and int(result.get("rejected_rows") or 0) == 0
+    )
+
+
 def raise_if_catalog_cancelled(cancel: CancelEvent) -> None:
     if cancel is not None and cancel.is_set():
         raise CatalogCancelled()
@@ -2722,35 +3281,69 @@ def _coverage_retry_warranted(coverage: AssignmentCoverage) -> bool:
     )
 
 
+def _payload_entries(
+    payload: Mapping[str, Any]
+) -> list[Mapping[str, Any] | None]:
+    """One reply's entry list, with every non-object item turned into ``None``.
+
+    ``_call`` has already proven ``entries`` is a list; this only normalises
+    what is INSIDE it. ``None`` rather than "dropped" is the deliberate part:
+    ``validate_entry(None, ...)`` produces an ordinary rejected result, so a
+    model that answers `entries: ["set_db"]` leaves a visible rejected row
+    instead of a silent gap, and ``assignment_coverage`` already documents
+    ``Sequence[Mapping | None]`` as its input shape.
+    """
+    return [
+        item if isinstance(item, Mapping) else None
+        for item in payload.get("entries") or ()
+    ]
+
+
 def _entry_validator(
-    section: CommandSection,
+    window: ExtractionWindow,
     candidates: Sequence[str],
+    carried: Sequence[str],
     extraction: ExtractionSlice,
 ) -> Callable[[str], bool]:
     """Cache-admission gate judged by running the DOWNSTREAM grounding itself.
 
     Same reasoning as the KG extractors' own gates: "is this reply usable" IS
     the consumption logic, and every shape approximation of it leaks. A reply
-    that parses but names a command this section does not document, or that
+    that parses but names a command this window does not document, or that
     invents every parameter it was asked for, produces nothing downstream —
     freezing that nothing for the cache TTL is the poisoning case this closes.
 
-    The second clause is the args axis: when the slice asked for specific
-    parameters, at least one OF THOSE has to survive grounding. "Of those" is
-    load-bearing and is why the assignment is handed to `validate_entry` here
-    too: a reply that answers a DIFFERENT slice's parameters grounds perfectly
-    against the section text, so without attribution it would clear this gate
-    and be frozen into the content-addressed cache for the full TTL — served
-    back on every later hit of a prompt it never actually answered.
-    `validate_entry` rejects those as `arg_outside_slice`, which leaves
-    `args_kept` at 0 and closes the gate. A slice with no parameters (a
-    flagless command, or a later slice whose whole assignment was rejected
-    upstream) is exempt, because zero kept args is then the correct answer
-    rather than a failure. That exemption still holds now that the no-flag
-    branch of `_prompt` asks for positional arguments: plenty of flagless
-    commands (`report_dont_use`) genuinely take none, and an empty `args` from
-    one of those is a correct, cacheable answer — the invented-argument case is
-    caught where it always was, by grounding, not by counting.
+    v2 judges a LIST of entries, and the clauses are per list rather than per
+    entry: at least one entry has to survive grounding, and — when the slice
+    asked for specific parameters — at least one assigned parameter has to
+    survive somewhere across them. Per-entry would be wrong in both directions;
+    a window legitimately documents several commands and one hallucinated
+    neighbour must not veto a good reply, while a reply whose every entry is
+    hallucinated must not be admitted because one of them was well-formed.
+
+    An entries list that is EMPTY or that grounds nothing is refused. That is
+    deliberately stricter than "it is a legal answer": `entries: []` really is
+    legal downstream (`_extract_slice` treats it as a complete answer, and the
+    breaker's unusable axis does not count it), but the cost of refusing it
+    HERE is one cache miss, while the cost of admitting it is freezing "this
+    window has nothing" for the full TTL on the strength of one lazy turn. The
+    two judgements differ on purpose, and only in the conservative direction.
+
+    "Of those" in the args clause is load-bearing and is why the assignment is
+    handed to `validate_entry` here too: a reply that answers a DIFFERENT
+    slice's parameters grounds perfectly against the window text, so without
+    attribution it would clear this gate and be frozen into the
+    content-addressed cache for the full TTL — served back on every later hit
+    of a prompt it never actually answered. `validate_entry` rejects those as
+    `arg_outside_slice`, which leaves `args_kept` at 0 and closes the gate. A
+    slice with no parameters (a flagless command, or a later slice whose whole
+    assignment was rejected upstream) is exempt, because zero kept args is then
+    the correct answer rather than a failure. That exemption still holds now
+    that the no-flag branch of `_prompt` asks for positional arguments: plenty
+    of flagless commands (`report_dont_use`) genuinely take none, and an empty
+    `args` from one of those is a correct, cacheable answer — the
+    invented-argument case is caught where it always was, by grounding, not by
+    counting.
 
     A structural check on `args` runs BEFORE any of that, and deliberately
     does not delegate to `validate_entry`'s own (non-fatal) handling of the
@@ -2763,21 +3356,39 @@ def _entry_validator(
     list) would sail through both this gate's clauses and freeze into the
     cache for the full TTL. Rejecting on shape alone, before grounding even
     runs, closes that gap without touching `validate_entry`'s own leniency.
+    A non-object ENTRY is refused the same way and for the same reason: the
+    run path turns it into a visible rejected row (`_payload_entries`), which
+    is the right treatment for one bad answer and the wrong thing to freeze.
     """
 
     def validator(content: str) -> bool:
         payload = safe_json(content)
         if not payload or "error" in payload:
             return False
-        raw_args = payload.get("args")
-        if raw_args is not None and not isinstance(raw_args, list):
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
             return False
-        result = validate_entry(
-            payload, section, candidates, assigned=extraction.param_names
-        )
-        if not result.accepted:
+        accepted = 0
+        args_kept = 0
+        for item in entries:
+            if not isinstance(item, Mapping):
+                return False
+            raw_args = item.get("args")
+            if raw_args is not None and not isinstance(raw_args, list):
+                return False
+            result = validate_entry(
+                item,
+                window,
+                candidates,
+                assigned=extraction.param_names,
+                carried=carried,
+            )
+            if result.accepted:
+                accepted += 1
+                args_kept += result.stats.args_kept
+        if not accepted:
             return False
-        if extraction.param_names and result.stats.args_kept < 1:
+        if extraction.param_names and args_kept < 1:
             return False
         return True
 
@@ -2785,22 +3396,49 @@ def _entry_validator(
 
 
 def _prompt(
-    section: CommandSection,
+    window: ExtractionWindow,
     candidates: Sequence[str],
+    carried: Sequence[str],
     extraction: ExtractionSlice,
 ) -> str:
     """The one prompt this feature has.
 
+    v2 asks for EVERY command the window documents, because a window is a slab
+    of the document rather than one command's section: the reply is a list, and
+    an empty list is a legal answer (a prose window that slipped past the gate
+    because it carries a relayed name really does document nothing new).
+
     The served candidate list is a constraint, not a menu: C0 measured 5/5
     command-name accuracy with a list, and `validate_entry` vetoes any name off
-    it. The parameter list is the slice's assignment, spelled with its original
+    it. The RELAYED list is printed as its own block rather than merged into
+    the first, and that separation is the point of the block: the model has to
+    be able to key an orphaned parameter table onto a command whose name is one
+    window back, and it can only do that if it is told which names are in that
+    position. Merging the two lists would serve the same names while hiding the
+    one fact that makes them useful.
+
+    When the window has NO candidates of its own, though, the relay is not a
+    supplementary block — it is the entire list of names that may be claimed,
+    and it is rendered as such. The two-block form would print
+    「choose a name from this list: - (none)」 above it, which is an instruction
+    to return nothing, addressed to a model whose actual job here is to
+    attribute an orphaned parameter table to the command in the block below.
+    Continuation windows are most of every large command's documentation, so
+    that reads as a small wording detail and behaves as switching the feature
+    off for them.
+
+    The parameter list is the slice's assignment, spelled with its original
     leading dash because dropping that dash is the single most common
     infidelity C0 saw — and one a naive containment check would not catch,
-    since the manual's own text does contain the bare word.
+    since the manual's own text does contain the bare word. The assignment is
+    the WINDOW's flag list, so a multi-command window's parameters arrive as
+    one list and the model keys each onto the entry it belongs to;
+    `validate_entry` then holds every returned name to that same list, so
+    attribution stays exact without the prompt having to partition it.
 
     The two parameter branches are NOT "ask" and "do not ask". An empty
     assignment only means `parameter_names` found no flag-shaped name in the
-    section, and `parameter_names` is a FLAG scanner — a command documented as
+    window, and `parameter_names` is a FLAG scanner — a command documented as
     `set_dont_use lib_cells` has a real parameter that regex can never produce.
     Ordering the model to return `args: []` there (as this prompt used to) threw
     away the argument metadata of an entire command class that every layer
@@ -2809,65 +3447,112 @@ def _prompt(
     evidence-based so a bare `lib_cells` grounds. So the no-flag branch asks for
     positional arguments instead — with no list to copy from, since there is
     none to serve; grounding, not an assignment, is what keeps that honest
-    (`_check_arg_name` still requires the name verbatim in the section text).
+    (`_check_arg_name` still requires the name verbatim in the window text).
 
     What that does to the ledger, in one place because three readers care:
     `args_seen`/`args_kept` count these answers like any other (the keep ratio
     stays "of what came back, how much was really in the manual"), while
     `assignment_coverage` contributes nothing — with no assignment there is
-    nothing that can go unanswered. So a flagless section can now make the
+    nothing that can go unanswered. So a flagless window can now make the
     breaker's args axis live, and what it measures there is exactly right: a
     positional argument copied from the usage line keeps the ratio at 1.0, and
-    a run inventing them section after section is a run worth stopping.
+    a run inventing them window after window is a run worth stopping.
     """
-    candidate_block = "\n".join(f"- {name}" for name in candidates) or "- (none)"
+    if candidates:
+        names_block = (
+            "Choose each command name from this list, copied character for "
+            "character:\n"
+            + "\n".join(f"- {name}" for name in candidates)
+            + "\n"
+        )
+        if carried:
+            names_block += (
+                "\nCommands possibly continuing from earlier text — parameters "
+                "in this text may belong to them, and their own name may not "
+                "appear here at all:\n"
+                + "\n".join(f"- {name}" for name in carried)
+                + "\n"
+            )
+    elif carried:
+        # The relay IS the list. See the docstring: `- (none)` above a relay
+        # block tells the model to answer nothing on exactly the windows the
+        # relay exists to rescue.
+        names_block = (
+            "Commands possibly continuing from earlier text — this excerpt "
+            "continues their documentation, so choose each command name from "
+            "this list, copied character for character; their own name may not "
+            "appear here at all:\n"
+            + "\n".join(f"- {name}" for name in carried)
+            + "\n"
+        )
+    else:
+        # Unreachable from `run`: `window_needs_model` requires a claimable
+        # name, so a window with neither list never becomes a call. Kept so
+        # this function is total for a caller that builds a prompt by hand.
+        names_block = (
+            "Choose each command name from this list, copied character for "
+            "character:\n- (none)\n"
+        )
     if extraction.param_names:
         params = "\n".join(f"- {name}" for name in extraction.param_names)
         params_block = (
-            "\nExtract ONLY these parameters, and nothing else:\n"
+            "\nExtract ONLY these parameters, and nothing else, keying each one "
+            "onto the command it belongs to:\n"
             f"{params}\n"
             "Copy each name character for character, including any leading dash.\n"
         )
     else:
         params_block = (
-            "\nThis section documents no flag-shaped parameters (`-name`), so "
-            "there is no assigned list. The command may still take POSITIONAL "
+            "\nThis text documents no flag-shaped parameters (`-name`), so "
+            "there is no assigned list. A command may still take POSITIONAL "
             "arguments: return those, taking each name from the usage line that "
             "invokes the command — `set_dont_use lib_cells` takes one argument, "
             "named `lib_cells`. Copy each name character for character from the "
-            "source text below, and return `args`: [] when the command really "
+            "source text below, and return `args`: [] for a command that really "
             "takes none.\n"
         )
     if extraction.include_overview:
         overview_block = (
-            "Also return `syntax` (a contiguous copy of one usage line from the "
-            "source text), `description` (one or two sentences), and `examples` "
-            "(verbatim example invocations, at most three).\n"
+            "For each entry also return `syntax` (a contiguous copy of one usage "
+            "line from the source text), `description` (one or two sentences), "
+            "and `examples` (verbatim example invocations, at most three).\n"
         )
     else:
         overview_block = (
             "Return `syntax`, `description` and `examples` as empty — another "
             "call already covers them. Only `command_name` and `args` matter here.\n"
         )
-    return f"""Catalogue ONE command from this command-reference section.
+    return f"""Catalogue EVERY command documented in this excerpt of a command reference.
 
-Choose the command name from this list, copied character for character:
-{candidate_block}
-{params_block}{overview_block}
+{names_block}{params_block}{overview_block}
 Rules:
-- Never invent. Every `name`, every `default` and the `syntax` line must appear
-  in the source text below exactly as written; if you cannot find it, leave the
-  field empty rather than guessing.
+- Return one entry per command the text below documents, and `entries`: [] when
+  it documents none. Never repeat a command in two entries.
+- Never invent. Every `command_name`, every `name`, every `default` and each
+  `syntax` line must appear in the source text below exactly as written (a name
+  listed above as possibly continuing from earlier text is the one exception —
+  that name may be claimed without appearing here); if you cannot find it,
+  leave the field empty rather than guessing.
 - Do not translate, expand or tidy any identifier.
 - `required` is true only when the source text says the parameter is required.
 
 Return JSON only, matching: {_SCHEMA_HINT}
 
-Source text (section: {section.section_path or section.title}):
+Source text (window {window.ordinal + 1}{_provenance_suffix(window)}):
 <<<
-{extraction.text_window or section.text}
+{extraction.text_window}
 >>>
 """
+
+
+def _provenance_suffix(window: ExtractionWindow) -> str:
+    """`", <breadcrumb>"` for the source-text label, or `""`.
+
+    Best effort by construction — a window boundary falls where the character
+    budget put it, not where a section starts — so it is offered as extra
+    orientation and never as a claim about what the window contains.
+    """
+    return f", {window.provenance}" if window.provenance else ""
 
 
 def _catalog_cells(
@@ -2886,6 +3571,22 @@ def _catalog_cells(
     Everything here is Markdown because a knowhow cell is Markdown; the syntax
     and example blocks are fenced so a shell line survives verbatim instead of
     being reflowed as prose.
+
+    The 「出处」 column is where the candidate row's INTERNAL provenance label
+    stops being internal. On the review panel that label is transient and the
+    frontend translates the ordinal form (`window 3`) into readable copy; here
+    it is written into a knowhow table, where a person keeps it, reads it
+    months later and sees it in a graph. `window 3` means nothing in that
+    context — it names a boundary the character budget put somewhere in a
+    document, using a word that is not even the product's own vocabulary — so
+    the ordinal form degrades to the source name alone. A real breadcrumb
+    (`Global Placement > Commands`) is kept: that one genuinely says where in
+    the document the command lives.
+
+    The match is anchored, deliberately: a manual whose own section is called
+    「window 3 configuration」 has a real breadcrumb that happens to start with
+    the same two words, and dropping it would lose provenance the reader wants.
+    Only a label that is EXACTLY the internal form is the internal form.
     """
     syntax = str(payload.get("syntax") or "").strip()
     description = str(payload.get("description") or "").strip()
@@ -2913,7 +3614,10 @@ def _catalog_cells(
         for item in examples
         if str(item).strip()
     ]
-    provenance = " · ".join(part for part in (source_title, section_path) if part)
+    label = str(section_path or "").strip()
+    if _ORDINAL_LABEL_RE.match(label):
+        label = ""
+    provenance = " · ".join(part for part in (source_title, label) if part)
     return {
         CATALOG_COMMAND_COLUMN: command_name,
         "语法": f"```\n{syntax}\n```" if syntax else "",
@@ -2953,6 +3657,7 @@ __all__ = [
     "MODEL_DESCRIPTION_CHARS",
     "MODEL_EXAMPLE_CHARS",
     "MODEL_UNAVAILABLE_MESSAGE",
+    "NOTHING_EXTRACTED_MESSAGE",
     "PARSED_SOURCE_STATUSES",
     "SLICE_COVERAGE_RETRY_RATIO",
     "SLICE_FAILURE_ALERT_RATIO",

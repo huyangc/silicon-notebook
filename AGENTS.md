@@ -345,15 +345,100 @@ text. This phase is write-only and must not change online Ask retrieval.
 
 Command-manual ingestion is opt-in per source. The pure layer is
 `backend/app/services/command_catalog.py`; the job, model calls, persistence and
-apply step are `backend/app/services/catalog_job.py`. Five properties are
-load-bearing.
+apply step are `backend/app/services/catalog_job.py`. Rule-based sectioning is
+**gone** (`command_sections`, `detect_manual_shape`, the shape signal and the
+whole truncation concept retired with it): v2 packs the whole document into
+ordered windows. The properties below are load-bearing.
 
-**Cost preview is bounded and honest.** `preview` makes zero model calls and
-reads only a bounded prefix of the source, with both the row count and each
-row's text clipped in SQL. Hitting the cap must be reported as `sampled`; a
-preview that scans the document it is estimating defeats its own purpose, and
-silently presenting a partial count as a census is the one failure mode it must
-not have.
+**Window geometry loses nothing.** `extraction_windows` packs a source's ordered
+elements into windows of at most `WINDOW_CHARS`: an element goes in whole, and
+one longer than the entire budget is cut into consecutive pieces that land in
+adjacent windows, each carrying that element's id. v1's "drop what does not fit"
+was silent data loss — measured, a 120-parameter table vanished whole and left a
+section that was nothing but its own heading, reporting a 0.0 veto ratio because
+nothing was left to fail. A window's own label is its FIRST heading; a window
+with none inherits the previous window's LAST one (inheriting the first would
+label `set_e`'s continuation table `set_a`). `_catalog_cells` degrades the
+ordinal form (`window N`) to the source name alone in the 出处 column: that
+label names a boundary the character budget put somewhere, and a knowhow cell is
+kept and re-read for months. A real breadcrumb is preserved, matched anchored so
+a manual whose own section is called "window 3 configuration" keeps it.
+
+**Every slice sees the whole window.** `ExtractionSlice.text_window` is always
+`window.text`. v1's head-plus-parameter-lines view was correct when a slice was
+one command's section; once a slice is a chunk of a multi-command slab the same
+clipping is systematic blindness (dozens of candidates with only the first in
+view). Repeating the whole window per slice is the accepted cost. `slice`
+partitioning of the WINDOW's flag list stays disjoint/complete/in document
+order, and the model keys each returned parameter onto the entry it belongs to.
+
+**The zero-model-call gate is the cost floor.** `window_needs_model` is
+`own or (flags and carried)`. Four shapes: own non-empty → call; own empty with
+flags and a relay → call (the continuation window the relay exists for); own
+empty with flags and no relay → skip (no claimable name, so grounding guarantees
+an empty result); own empty with no flags → skip **regardless of the relay** —
+the relay never empties once a command has been seen, so opening the gate on it
+alone bills every prose page of the book. A skipped window makes no call, runs
+no liveness probe and emits no `catalog_section_done` (a mostly-prose PDF has
+thousands), but must still `record_section` so the progress bar terminates, and
+the relay must still advance through it — `carry` is defined as a pure function
+of the previous window and this gate must not feed it.
+
+**Candidate relay.** `carry(i) = candidates(i-1)`, inheriting `carry(i-1)` when
+`candidates(i-1)` is empty, capped at `MAX_CANDIDATES` with the nearer window's
+names preferred, and reset by any window that names something. A relayed name
+may be claimed in a continuation window: list membership is still enforced and
+only the "appears verbatim in this window" half is waived, because the candidate
+list is constructive — every name on it was scanned verbatim out of the window
+it came from — while `syntax`, parameter names and `default` must still ground
+in this window. `MAX_CANDIDATES` was raised from v1's value because a window is
+a document slab rather than one command's section, and a list truncating before
+the last of several commands vetoes a real command out of existence.
+**Registered trade-off: cross-command mis-attribution stays possible.** A
+window's candidate list holds every command-shaped name the window *mentions*,
+so a relay can carry forward a merely cross-referenced name and an orphaned
+parameter table can be filed under it; no grounding rule can catch that, and
+human review is the backstop. Do not "fix" it by relaying only names a usage
+line invoked or only names from headings — both drop the ordinary case the relay
+exists for. When a window has no candidates of its own, the prompt must render
+the relayed list AS the claim list; printing `- (none)` above it as a
+supplementary block instructs the model to return nothing on exactly the windows
+the relay rescues.
+
+**The reply is a list of entries.** The top level is `{"entries": [...]}`;
+`entries: []` is a legal answer and is NOT counted as an unusable response
+(only a missing or non-list `entries` is, and it takes the halving remedy). A
+non-object item becomes a visible rejected row via `_payload_entries` rather
+than a silent gap. The content-addressed cache's admission gate is deliberately
+stricter than the run path: an empty or wholly ungrounded entries list is
+refused, because refusing costs one cache miss while admitting freezes "this
+window has nothing" for the whole TTL.
+
+**One command, one row, across windows.** A run-level `flushed` registry lets a
+later window merge into the row an earlier one wrote — args dedupe by name with
+first-writer-wins, `syntax`/`description` fill blanks only, anchors union within
+`MAX_ANCHOR_ELEMENTS`, and the excerpt stays the first window's. The merge is
+expressed as a SEED of this window's accumulator, so every bound keeps counting
+from where it was instead of restarting per window. `update_candidate_payload`
+writes only `candidate`-state rows and returns False when a reviewer has already
+confirmed or dismissed the row; that case must degrade to appending a second row
+(v1's behaviour, visible in the queue) and register the new row, never drop this
+window's parameters.
+
+**Cost preview is bounded and honest.** `preview` makes zero model calls. The
+window count is arithmetic over `source_text_stats` (one SQL aggregate returning
+element count and total characters) — reading the document to count them is the
+failure a cost preview must not have. The CALL count needs text, so it is
+measured exactly over the bounded `preview_elements` prefix, advancing the relay
+exactly as `run` does (otherwise the preview's gate answers differently from the
+run's on the multi-window table the relay exists for), and every window past the
+prefix is charged one call. Both prefix bounds set `sampled`, per-element
+truncation being the one that actually distorts the estimate;
+`skipped_windows_in_prefix` is the only explanation for a call count far below
+the window count. `signal`/`is_manual`/`estimated_sections`/`truncated_sections`
+are removed from the transport layer without compatibility aliases.
+`sections_total`/`sections_done` keep their column names and now count windows,
+skipped ones included.
 
 **Single flight and terminal state.** `catalog_jobs` carries a partial unique
 index over `queued` AND `running`. The row is written before the worker thread
@@ -366,19 +451,25 @@ as a `running` one.
 
 **Grounding is not optional.** An entry's command name must be on the
 server-supplied candidate list and appear verbatim at token boundaries (failing
-either vetoes the whole entry); every parameter name must appear in its original
-form including its leading dash; `syntax` must be a contiguous copy of source
-text; a `default` that is not in the text is cleared. Rejected entries are
+either vetoes the whole entry; a relayed name is exempt from the verbatim half
+only, never from list membership); every parameter name must appear in its
+original form including its leading dash; `syntax` must be a contiguous copy of
+the WINDOW's text; a `default` that is not in the text is cleared. Grounding
+always searches `window.text` in full — the same text the model was shown, since
+validating against text it never saw would let a hallucination pass because it
+happens to appear in the part that was cut. Rejected entries are
 persisted with their reasons and a bounded text window — for a run that produces
 little, those rows are the only evidence distinguishing a bad model from a
 source that is not a manual.
 
-**A slice's answer is judged against its own assignment.** Every parameter of a
-command lives in the same section text, so grounding alone cannot tell one
+**A slice's answer is judged against its own assignment.** Every parameter in a
+window lives in the same window text, so grounding alone cannot tell one
 slice's parameters from another's: `validate_entry` also takes the slice's
 `param_names` and rejects anything outside it (`arg_outside_slice`), and the
 job records the assigned parameters nothing answered for (`arg_not_returned`)
-on that section's ledger and on the command's own candidate row. Both halves
+on that window's ledger, and on the command's own candidate row when the window
+accepted exactly one command (with several accepted, the miss belongs to no
+single one of them and stays on the window ledger). Both halves
 are required. Without attribution, a reply about another slice grounds
 perfectly and is admitted — including into the content-addressed cache, whose
 sole admission ticket is that same `validate_entry` call, so a wrong-slice
@@ -388,13 +479,13 @@ answering 1 of 20 assigned parameters scores 100%. The denominator is therefore
 `args_seen + args_uncovered`, and the axis gate below is "was anything asked
 for", never `args_seen > 0`. An empty assignment (a flagless command) means
 unconstrained, not "nothing may be returned" — positional arguments are exactly
-what such a section documents, and the prompt's no-flag branch must ASK for
+what such a window documents, and the prompt's no-flag branch must ASK for
 them (`parameter_names` is a flag scanner, so `set_dont_use lib_cells` yields no
 assignment; ordering `args: []` there loses that whole class of argument
 metadata). No list can be served for those, so grounding alone keeps them
-honest: the name must still be verbatim in the section text, coverage
+honest: the name must still be verbatim in the window text, coverage
 contributes nothing (nothing was assigned, so nothing can be missing), and such
-a section does count toward the args axis once the model answers.
+a window does count toward the args axis once the model answers.
 
 A slice that comes back covering less than `SLICE_COVERAGE_RETRY_RATIO` of an
 assignment of at least `MIN_ASSIGNED_FOR_COVERAGE_RETRY` parameters is halved
@@ -406,13 +497,25 @@ for half as many buys a second wrong answer at full price. It fires at depth 0
 only, which is what keeps `MAX_CALLS_PER_SLICE` unchanged — the two remedies are
 mutually exclusive at a given depth and both cost `1 + 2·f(1)`.
 
-**Three-axis circuit breaker.** After `MIN_SECTIONS_BEFORE_ALERT` sections, a
+**Three-axis circuit breaker.** After `MIN_WINDOWS_BEFORE_ALERT` windows that
+ACTUALLY made a call (skipped windows are not part of the sample), a
 command-name veto ratio above `COMMAND_REJECT_ALERT_RATIO` or an args-keep ratio
 below `ARGS_KEEP_ALERT_RATIO` fails the job with a user-readable
 `failure_reason`. The args axis is gated on `args_seen + args_uncovered > 0`:
 the published ratio is 0.0 when nothing was asked for, so an ungated check would
-fail a manual of genuinely flagless commands on its tenth clean section. Never
+fail a manual of genuinely flagless commands on its tenth clean window. Never
 finish a mostly-rejecting run with a plausible-looking near-empty catalog.
+
+**A run that produced literally nothing must not settle `succeeded`.** When at
+least one window made a call, `entries_seen` is 0, and both the candidate and
+rejected row counts are 0, `_nothing_extracted` settles the job `failed` with
+`NOTHING_EXTRACTED_MESSAGE` (curated copy, same provenance rule as every other
+user-facing string here). Every other empty-ish outcome stays `succeeded`: a run
+with rejected rows has shown WHY nothing was kept, and a run whose every window
+was skipped never called a model at all — failing that one would fail the cost
+gate's own success case. This is deliberately not a fourth breaker axis: the
+breaker aborts mid-run on a ratio, while this is a verdict on a finished run,
+needs no threshold, and cannot be evaluated before the last window.
 
 **Model-authored fields are bounded where they are merged.** `description`,
 `examples` and each parameter's `desc` are the fields grounding deliberately
@@ -447,7 +550,9 @@ overwriting is this feature's only irreversible damage. All writes go through
 the existing knowhow service layer, so change history is recorded like any other
 edit.
 
-Cost contract: one planned model call per extraction slice, no second-opinion or
+Cost contract: one planned model call per extraction slice — so one per window
+that passed the gate, plus one more for each additional parameter batch, and
+zero for a skipped window — with no second-opinion or
 refinement pass. The only extra calls are two bounded remedies that share one
 mechanism — halve the slice's parameter list and ask again — triggered by an
 unusable reply or by the coverage gate above, capped so a slice costs at most
@@ -465,10 +570,12 @@ exception class: the scheduled adapter re-raises everything as
 class-based `except` matches only a test double and never production. Transient
 provider failures (rate limit, upstream 5xx, auth) are explicitly not the
 halving case — they propagate and fail the job rather than being recorded as
-"this section had no commands".
+"this window had no commands".
 
 The circuit breaker therefore reads three axes, not two: command-name veto rate,
-args-keep rate, and the share of slices that produced nothing usable. The third
+args-keep rate, and the share of slices that produced nothing usable — where a
+legal `entries: []` is NOT unusable, or a prose-heavy manual would trip the
+breaker for answering honestly. The third
 is not optional even though the args axis now counts unanswered assignments: a
 slice that returns nothing leaves the name ratio innocuous, and the args ratio
 it does drag down names the symptom ("parameters went missing") rather than the
@@ -506,8 +613,16 @@ renders at the page root and the card inside the source detail, so page.tsx is
 the only wire between them and a card holding a stale `pending_candidates` keeps
 "重新识别" disabled forever.
 
+The user-facing vocabulary is 段, never "window": the preview reads
+「将通读全文（约 N 段）…」 and progress reads 「已处理 N/M 段」. `window N` is an
+internal label and must pass through `command-catalog-model.ts`'s
+`catalogSectionLabel()` (rendering 「第 N 段」) before it reaches a user.
+
 The extraction workload reuses `kg_extract`; no new workload configuration
-surface is introduced.
+surface is introduced. Numeric rails — window budget, candidate cap, parameters
+per slice, calls per slice, rejection/anchor caps, breaker sample floor and
+ratios, and the retired v1 slice-view/head-excerpt caps — live only in
+`docs/product-and-api.md` and `docs/product-and-api_zh.md`.
 
 ### Typed Collection Citation Contract
 

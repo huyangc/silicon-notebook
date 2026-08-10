@@ -277,6 +277,23 @@ class CatalogStore:
                     values[start:start + CATALOG_MAX_CANDIDATE_BATCH],
                 )
 
+    def update_candidate_payload(
+        self,
+        candidate_id: str,
+        payload: Mapping[str, Any],
+        reject_info: Mapping[str, Any],
+    ) -> bool:
+        """Revise one still-`candidate` row's payload — see the SQLite mirror
+        (and the port) for why this exists and why it touches two columns only.
+        """
+        with self.database.write() as connection:
+            cursor = connection.execute(
+                "UPDATE catalog_candidates SET payload=%s,reject_info=%s "
+                "WHERE id=%s AND state='candidate'",
+                (jsonb(dict(payload)), jsonb(dict(reject_info)), str(candidate_id)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
     def list_candidates(
         self, job_id: str, *, state: str, cursor: int, limit: int
     ) -> list[dict]:
@@ -434,6 +451,22 @@ class CatalogStore:
                 }
             )
         return output, clipped
+
+    def source_text_stats(self, source_id: str) -> tuple[int, int]:
+        """``(element_count, total_chars)`` — see the SQLite mirror for the
+        full rationale (same row universe as ``preview_elements``, i.e.
+        ``WHERE source_id=%s`` with no other predicate, aggregated entirely
+        in SQL)."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS element_count, "
+                "COALESCE(SUM(LENGTH(text)),0) AS total_chars "
+                "FROM source_elements WHERE source_id=%s",
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            return 0, 0
+        return int(row["element_count"] or 0), int(row["total_chars"] or 0)
 
 
 __all__ = ["CatalogJobAlreadyRunning", "CatalogStore"]

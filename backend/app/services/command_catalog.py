@@ -1,4 +1,4 @@
-"""Command-manual catalog extraction — the pure layer (Plan C, stage C1a).
+"""Command-manual catalog extraction — the pure layer (Plan C, v2).
 
 A tool's *command reference* is the shape ordinary ingestion handles worst. The
 600-char chunker splits `set_db` into description / Arguments / Examples, the
@@ -8,18 +8,33 @@ Plan C ingests those manuals as structured entries instead — name, syntax,
 arguments, defaults — and this module is everything in that pipeline that can
 be decided without a database, a model call or a job:
 
-    detect_manual_shape   is this source a command manual at all?
-    command_sections      which elements belong to which command?
-    command_candidates    which names may an entry legally claim?
-    extraction_slices     how is one command split across model calls?
+    extraction_windows    how is a document cut into model-sized pieces?
+    window_candidates     which names does this window itself put on offer?
+    carry_candidates      which names does the previous window hand forward?
+    window_needs_model    is this window worth a model call at all?
+    extraction_slices     how is one window split across model calls?
     validate_entry        which parts of a model's answer survive grounding?
     assignment_coverage   how much of a slice's assignment came back at all?
-    section_outcome       what does the job report about this section?
+    window_outcome        what does the job report about this window?
 
 Every one of them is a pure function over data the caller already holds, so
-C1b (job + persistence) and C1c (UI) can be written and tested against them
-without touching a model. The layering mirrors `chunking.py` / `exact_lookup.py`:
-no IO here, ever.
+the job + persistence layer (`catalog_job.py`) and the UI can be written and
+tested against them without touching a model. The layering mirrors
+`chunking.py` / `exact_lookup.py`: no IO here, ever.
+
+**Why windows and not sections.** v1 decided, with layout rules alone, which
+elements formed one command's section, and showed the model only those. Two
+things were wrong with that, and only one of them was fixable. First, measured
+on real manuals the grouping was simply inaccurate. Second — the structural
+half — a rule that decides what the model is *allowed to see* fails closed: a
+command whose section the rules never opened was not extracted badly, it was
+never offered at all, and no downstream check can recover a command that was
+never in a prompt. So the geometry is now trivial and lossless: the document is
+packed, in document order, into `WINDOW_CHARS` windows with nothing dropped and
+nothing overlapping, and the model is asked which commands each window
+documents. What survived the change untouched is the part C0 measured as
+working — the grounding machinery below, which decides what of the model's
+answer is the manual's own words.
 
 Calibration. The thresholds are measured, not guessed — a C0 spike ran real
 OpenROAD command references (Apache-2.0) through the production model:
@@ -38,51 +53,48 @@ OpenROAD command references (Apache-2.0) through the production model:
 
 Nothing in this module decides policy. Anomaly detection (a command-name veto
 rate above `COMMAND_REJECT_ALERT_RATIO` means the model or the source went
-wrong) is *reported* here as a ratio and *acted on* by C1b.
+wrong) is *reported* here as a ratio and *acted on* by the job layer.
 
-Contract for C1b: every model call built from an `ExtractionSlice` MUST pass
-`response_validator` to `chat_json` (`app/services/model_provider.py`). That
-argument is not optional plumbing — it is the sole admission ticket into the
-content-addressed cache (gating BOTH whether a cached reply may be served and
-whether this call's own reply may be written), the same gating the KG
+Contract for the job layer: every model call built from an `ExtractionSlice`
+MUST pass `response_validator` to `chat_json` (`app/services/model_provider.py`).
+That argument is not optional plumbing — it is the sole admission ticket into
+the content-addressed cache (gating BOTH whether a cached reply may be served
+and whether this call's own reply may be written), the same gating the KG
 extractors (`app/services/kg/extract.py`) already rely on. It has nothing to
-do with retrying a malformed reply — that remedy is C1b's own halving logic in
-`catalog_job.py`, entirely local to that module. Skip `response_validator` and
-a slice is not just uncached — every retry of that slice silently repays the
-full model cost with no caching benefit at all.
+do with retrying a malformed reply — that remedy is the job layer's own halving
+logic in `catalog_job.py`, entirely local to that module. Skip
+`response_validator` and a slice is not just uncached — every retry of that
+slice silently repays the full model cost with no caching benefit at all.
 """
 from __future__ import annotations
 
 import re
 import string
-from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Collection, Mapping, Sequence
 
 from app.repositories.lexical_query import exact_probe_terms
 
 
 # --------------------------------------------------------------------- bounds
-# One section's text as the model will see it. Also the haystack every
-# grounding check searches: validating against text the model was never shown
-# would let a hallucination pass because it happens to appear in the part that
-# was cut.
-MAX_SECTION_CHARS = 12_000
+# One window's text as the model will see it. Also the haystack every grounding
+# check searches: validating against text the model was never shown would let a
+# hallucination pass because it happens to appear in the part that was cut.
+# Carried over unchanged from v1's per-section budget — the number was sized
+# against the model's input/output budget, which the geometry change does not
+# move.
+WINDOW_CHARS = 12_000
 # The candidate list rides in the prompt, so it is a constraint as much as a
-# menu: every extra name weakens the one veto this layer has.
-MAX_CANDIDATES = 16
+# menu: every extra name weakens the one veto this layer has. 32, not v1's 16:
+# a window is a slab of the document rather than one command's section, so
+# several commands routinely share one, and a list that truncates before the
+# last of them is a list that vetoes a real command out of existence.
+MAX_CANDIDATES = 32
 # C0: ~100 parameters overruns the output budget. 20 keeps a slice's answer
 # comfortably inside it with room for syntax/description/examples on slice 0.
 SLICE_PARAM_LIMIT = 20
-# "Enough command-shaped sections, and enough of the document" — a five-command
-# appendix inside a 300-section paper is not a manual.
-MIN_COMMAND_SECTIONS = 5
-MIN_COMMAND_RATIO = 0.15
-# A section needs this many flag-bearing lines before it counts as carrying a
-# parameter table (reported as corroborating evidence, not as a verdict).
-MIN_FLAG_LINES = 3
-# Bounded scans. Sections are already capped at MAX_SECTION_CHARS; these keep
-# the per-section work constant rather than proportional to a pathological
-# paste.
+# Bounded scans. Windows are already capped at WINDOW_CHARS; these keep the
+# per-window work constant rather than proportional to a pathological paste.
 MAX_SCAN_LINES = 200
 # Mirrors `lexical_query.identifier_terms`'s own length floor. Not imported:
 # that constant is a private literal (`len(value) < 4`) inside a function
@@ -95,33 +107,23 @@ MIN_IDENTIFIER_CHARS = 4
 # usage line rather than a sentence (`set_dont_use lib_cells`).
 MAX_USAGE_ARG_TOKENS = 4
 # Diagnostics carried on a rejection, bounded so a job report cannot inherit a
-# section's full text through its own failure records.
+# window's full text through its own failure records.
 REJECT_WINDOW_CHARS = 200
 MAX_REJECT_VALUE_CHARS = 120
-# A section's rejection ledger is bounded too — a pathological entry (or a
+# A window's rejection ledger is bounded too — a pathological entry (or a
 # model that never stops inventing parameters) must not let a job report
 # inherit an unbounded list through its own failure records. Overflow is
 # counted, never silently dropped.
-MAX_SECTION_REJECTIONS = 24
-# C1b's circuit breaker reads this; this module only publishes the ratio. A
-# veto rate alone can miss a bad run — an entry can pick the right command
-# name and still invent every parameter — so the breaker reads both axes:
-# reject-ratio above this ratio, OR args-keep-ratio (below) below its own,
-# and only once MIN_SECTIONS_BEFORE_ALERT sections give the ratios a sample
+MAX_WINDOW_REJECTIONS = 24
+# The job layer's circuit breaker reads this; this module only publishes the
+# ratio. A veto rate alone can miss a bad run — an entry can pick the right
+# command name and still invent every parameter — so the breaker reads both
+# axes: reject-ratio above this ratio, OR args-keep-ratio (below) below its
+# own, and only once MIN_WINDOWS_BEFORE_ALERT windows give the ratios a sample
 # worth trusting.
 COMMAND_REJECT_ALERT_RATIO = 0.20
 ARGS_KEEP_ALERT_RATIO = 0.50
-MIN_SECTIONS_BEFORE_ALERT = 10
-# C1b's per-slice prompt window: the relevant original-text lines for that
-# slice's own parameters, plus a short overview head — bounded well under
-# MAX_SECTION_CHARS because a multi-slice command's later slices should not
-# each re-carry the whole section every other slice already carries.
-MAX_SLICE_WINDOW_CHARS = 4000
-OVERVIEW_HEAD_CHARS = 600
-# The strong/weak split `detect_manual_shape` draws on identifier-named
-# headings: a dotted-only heading needs this many *strong* (underscore-joined)
-# siblings before it counts toward `is_manual` on its own.
-STRONG_IDENTIFIER_HEADING_MIN = 3
+MIN_WINDOWS_BEFORE_ALERT = 10
 
 
 # --------------------------------------------------------------------- shapes
@@ -141,125 +143,103 @@ _ARGUMENT_TOKEN_RE = re.compile(r"[_*\[\]<>{}|/]|[0-9]")
 # Sentence punctuation never terminates a usage line.
 _SENTENCE_TAIL = ".,:;!?，。；：、"
 # Fenced/structured code, as the markdown parser labels it. MinerU labels
-# nothing this way, which is exactly why code evidence is a *preference* below
-# rather than a requirement.
+# nothing this way, which is exactly why code evidence is a *preference* in
+# `window_candidates` rather than a requirement.
 _CODE_TYPES = frozenset({"code_block", "code"})
-# A manual's own worked-examples appendix, by title rather than shape: every
-# other rule here reads a usage line as command evidence, and a section named
-# this way is genuinely command-shaped — measured on OpenROAD `rsz`, whose
-# `## Example scripts` cites `read_sdc` (a command rsz's manual never
-# documents anywhere else) purely as a usage illustration, and on `cts`,
-# whose own `## Example scripts` re-cites `clock_tree_synthesis` (already
-# documented above it) the same way. Case-insensitive; matched against the
-# whole (stripped) heading text, not a substring.
-_EXAMPLE_HEADING_WORDS = frozenset({
-    "example", "examples", "example scripts", "sample", "samples",
-})
 # One segment of a document's numbering: `2`, `A`, `S1`, `iv`-ish.
 _NUMBERING_SEGMENT_RE = re.compile(r"[A-Za-z]?[0-9]+|[A-Za-z]")
 # Token boundary for every grounding check. `-` belongs to the token: without
 # it, a model that answered `density` would be "found" inside the manual's
 # `-density`, which is precisely the dash infidelity C0 measured.
 _BOUNDARY_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+# Elements are joined by a newline when a window's text is assembled. It is a
+# separator, not content: `set_db` and the `Arguments` heading under it must
+# not run together on one line, or every line-oriented scan below (usage
+# lines, flag lines, a slice's own parameter lines) reads one long line.
+_ELEMENT_JOIN = "\n"
 
 
 # =========================================================== data definitions
 @dataclass(frozen=True)
-class SectionElement:
-    """One source element, reduced to what this layer reads.
+class WindowElement:
+    """One source element (or one piece of an oversized one), reduced to what
+    this layer reads.
 
     Deliberately the same field names `source_elements_for_chunking` already
-    returns, so C1b feeds this module the rows it already fetches for chunking.
+    returns, so the job layer feeds this module the rows it already fetches for
+    chunking. `text` is the piece that landed in *this* window, not necessarily
+    the element's whole text: an element larger than `WINDOW_CHARS` is split
+    across consecutive windows and each piece keeps the element's own id, so a
+    citation anchor still points at the element a person can open.
     """
 
     id: str
     element_type: str
     text: str
+    section_path: str = ""
 
 
 @dataclass(frozen=True)
-class SectionTruncation:
-    """What the `MAX_SECTION_CHARS` budget cost this section, in the open."""
-
-    applied: bool = False
-    original_chars: int = 0
-    kept_chars: int = 0
-    dropped_elements: int = 0
-
-
-@dataclass(frozen=True)
-class CommandSection:
-    """One command's slice of a document.
+class ExtractionWindow:
+    """One model call's slab of the document.
 
     `text` is the authority: it is what a prompt shows the model and what every
-    grounding check searches, and it holds only the elements listed in
-    `elements` (the heading among them — a section whose command name appears
-    solely in its own heading is a normal manual shape, and vetoing it would be
-    a false kill).
+    grounding check searches, and it holds exactly the pieces listed in
+    `elements` — `text == "\\n".join(e.text for e in elements)` is an invariant,
+    because a grounding check that searched text the model never saw would pass
+    hallucinations.
+
+    `provenance` is a display label only (the candidate row's section column),
+    inherited from the last heading at or before this window. It deliberately
+    takes part in no decision: it is a best-effort breadcrumb, and a window
+    boundary falls wherever the character budget put it, not where a section
+    starts.
     """
 
-    title: str
-    section_path: str
-    shape: str  # "identifier_heading" | "syntax_block"
-    command_hint: str  # the identifier that established the shape; a section
-    # only ever exists because `_classify` returned a non-empty one
-    elements: tuple[SectionElement, ...]
+    ordinal: int
+    elements: tuple[WindowElement, ...]
     text: str
-    truncation: SectionTruncation = SectionTruncation()
+    provenance: str = ""
 
     @property
     def element_ids(self) -> tuple[str, ...]:
-        return tuple(element.id for element in self.elements)
+        """Contributing element ids, in appearance order, deduplicated.
 
-
-@dataclass(frozen=True)
-class SectionMeta:
-    """The cheap per-section view `detect_manual_shape` runs on.
-
-    Callers assemble it from chunks or elements — whichever they already have —
-    because shape detection must be answerable before any per-command work is
-    scheduled. No breadcrumb here: `detect_manual_shape` counts sections, it
-    does not group them, so it never reads one.
-    """
-
-    heading_text: str = ""
-    text_sample: str = ""
-
-
-@dataclass(frozen=True)
-class ManualShapeSignal:
-    """Counted evidence, plus a threshold verdict that never stands alone.
-
-    `is_manual` exists so a caller can default sensibly, but the counts are the
-    point: C1b and the UI show "found about N command sections" and let a person
-    decide, which is the only honest thing to do with a heuristic.
-    """
-
-    total_sections: int = 0
-    identifier_headings: int = 0
-    syntax_sections: int = 0
-    flag_sections: int = 0
-    command_shaped_sections: int = 0
-    command_ratio: float = 0.0
-    flag_ratio: float = 0.0
-    is_manual: bool = False
-    reason: str = "no_sections"
+        Deduplication is defensive rather than load-bearing: the packer never
+        puts two pieces of one element in the same window (a split always ends
+        the window it overflowed). It costs nothing and it keeps the anchor
+        list honest if that ever changes.
+        """
+        return tuple(dict.fromkeys(element.id for element in self.elements))
 
 
 @dataclass(frozen=True)
 class ExtractionSlice:
-    """One model call's worth of a command.
+    """One model call's worth of a window.
 
-    Pure data: C1b turns `param_names` into "extract ONLY these parameters",
-    `include_overview` into "also give me syntax / description / examples",
-    and `text_window` into the prompt's own view of the source (bounded by
-    `MAX_SLICE_WINDOW_CHARS`) — the overview head plus this slice's own
-    parameter lines, not the whole section every other slice already carries.
+    Pure data: the job layer turns `param_names` into "extract ONLY these
+    parameters", `include_overview` into "also give me syntax / description /
+    examples", and `text_window` into the prompt's own view of the source —
+    which is the WHOLE window, always.
 
-    `text_window` is a prompt-sizing convenience only. `validate_entry` never
-    reads it: grounding always searches `section.text`, the full text the
-    section actually holds, so a later slice's answer is never held to a
-    narrower — or laxer — standard than an earlier one's.
+    That last one used to be a narrower view (a short overview head plus the
+    lines mentioning this slice's own parameters, capped at 4000 characters),
+    and the narrowing was correct for v1 and systematically wrong for v2. v1's
+    unit was one command's section, so a head-plus-parameter-lines view held
+    the command's name, its syntax block and the parameters being asked about
+    — everything a slice could legitimately answer with. v2's unit is a 12k
+    slab of a document that routinely documents thirty commands, and the same
+    head shows only the FIRST of them: every later command's name is served in
+    the candidate list, asked about by the prompt, and then hidden from the
+    text the model is given, which is the one failure this whole module is
+    built to avoid (a name that is offered but not shown produces either
+    nothing or a fabrication). Carrying the whole window per slice costs at
+    most `WINDOW_CHARS` characters per call on a multi-slice window, and that
+    cost is accepted deliberately.
+
+    `text_window` therefore no longer narrows anything, and `validate_entry`
+    still never reads it: grounding always searches `window.text` directly, so
+    the two cannot drift apart even if a caller builds a slice by hand.
     """
 
     index: int
@@ -281,10 +261,15 @@ class ValidatedArg:
 class ValidatedEntry:
     """The part of a model's answer that survived grounding.
 
+    One entry is one command. A window's reply carries a LIST of these, because
+    a window is a slab of the document rather than one command's section — the
+    job layer validates each element of that list through `validate_entry`
+    separately, so one bad entry vetoes itself and nothing else.
+
     `anchor_element_ids` is reserved: `description` / `examples` are prose and
-    cannot be checked verbatim, so C1b will bind them to element ids instead.
-    Leaving the seat empty here keeps that a schema decision rather than a
-    later shape change.
+    cannot be checked verbatim, so the job layer binds them to element ids
+    instead. Leaving the seat empty here keeps that a schema decision rather
+    than a later shape change.
     """
 
     command_name: str
@@ -349,10 +334,10 @@ class ValidationResult:
 
 
 @dataclass(frozen=True)
-class SectionOutcome:
-    """The per-section ledger a C1b job report renders directly.
+class WindowOutcome:
+    """The per-window ledger a job report renders directly.
 
-    `rejections` is capped at `MAX_SECTION_REJECTIONS` — a pathological entry
+    `rejections` is capped at `MAX_WINDOW_REJECTIONS` — a pathological entry
     (or a model that never stops inventing parameters) must not let a job
     report inherit an unbounded list through its own failure records.
     `rejections_overflow` counts what got cut, so the cap never reads as
@@ -360,19 +345,18 @@ class SectionOutcome:
     counting".
 
     `uncovered_args` is the same idea one level down: the parameters this
-    section's slices were ASSIGNED and never got an answer for. It is bounded
+    window's slices were ASSIGNED and never got an answer for. It is bounded
     like `rejections` is, with the true total in `args_uncovered` — which is
     also what keeps `args_keep_ratio` honest (see `catalog_stats`).
     """
 
-    section_path: str
-    title: str
+    ordinal: int
+    provenance: str = ""
     candidates: tuple[str, ...] = ()
     accepted_names: tuple[str, ...] = ()
     uncovered_candidates: tuple[str, ...] = ()
     rejections: tuple[Rejection, ...] = ()
     rejections_overflow: int = 0
-    truncation: SectionTruncation = SectionTruncation()
     entries_seen: int = 0
     command_rejects: int = 0
     args_seen: int = 0
@@ -383,19 +367,20 @@ class SectionOutcome:
 
 @dataclass(frozen=True)
 class CatalogStats:
-    """Run-level totals. The ratios are published; the verdict belongs to C1b.
+    """Run-level totals. The ratios are published; the verdict belongs to the
+    job layer.
 
     Two independent axes, because either alone can miss a bad run: an entry
     can pick the right command name (a clean `command_reject_ratio`) and
     still invent every parameter, and a run that mostly rejects args can
-    still be picking legitimate command names. C1b's circuit breaker should
+    still be picking legitimate command names. The circuit breaker should
     read both — command-name veto rate above `COMMAND_REJECT_ALERT_RATIO`
     (0.20) OR args-keep rate below `ARGS_KEEP_ALERT_RATIO` (0.50) — and only
-    once `MIN_SECTIONS_BEFORE_ALERT` (10) sections have been processed, since
+    once `MIN_WINDOWS_BEFORE_ALERT` (10) windows have been processed, since
     neither ratio means anything on a sample of one or two.
     """
 
-    sections: int = 0
+    windows: int = 0
     entries_seen: int = 0
     command_rejects: int = 0
     command_reject_ratio: float = 0.0
@@ -403,7 +388,6 @@ class CatalogStats:
     args_kept: int = 0
     args_uncovered: int = 0
     args_keep_ratio: float = 0.0
-    truncated_sections: int = 0
 
 
 # ================================================================= primitives
@@ -413,7 +397,7 @@ def _is_numbering(term: str) -> bool:
     The wide identifier regex cannot tell them apart, and papers are full of
     them: `A.1.2 Notation` yields `A.1.2`, which has an ASCII letter, a dot and
     five characters, so every other gate lets it through and a survey paper
-    starts looking like a command manual.
+    starts offering command candidates.
 
     A term is numbering when it splits into two or more segments, contains a
     digit, and *every* segment is either a bare number, a number with one
@@ -421,7 +405,7 @@ def _is_numbering(term: str) -> bool:
     `set_db` and `config.yaml` out; the per-segment test is what keeps `GPT-4`
     in (`GPT` is neither). `v1-2` is classified as numbering and that is
     accepted: no command is named that, and erring toward "not a command" is
-    the safe direction for both the shape signal and the candidate list.
+    the safe direction for a list whose whole job is to be a veto.
     """
     segments = [seg for seg in _SEPARATOR_RE.split(term) if seg]
     if len(segments) < 2 or not _DIGIT_RE.search(term):
@@ -448,8 +432,8 @@ def _identifiers(text: str) -> list[str]:
 
     Flags are stripped *before* the scan rather than filtered after: the
     identifier regex sees `-timing_driven` as the bare name `timing_driven`, so
-    an untreated syntax block would hand thirty parameter names to a
-    16-slot candidate list and crowd out the one name that matters.
+    an untreated syntax block would hand thirty parameter names to the
+    candidate list and crowd out the names that matter.
     """
     stripped = _FLAG_RE.sub(" ", text or "")
     return [
@@ -478,13 +462,12 @@ def _usage_identifier(line: str) -> str:
     two checks have to run *before* the flag-carrying form is accepted, not
     after: a naive `has a flag -> accept` short-circuit lets `Fig.2 shows the
     -density sweep.` and `global_placement accepts -density values.` both
-    read as usage lines the moment either sentence happens to mention a flag
-    — eight sentences like that is enough to make a paper with no commands at
-    all read as a manual (`detect_manual_shape`'s only cost gate is this
-    function returning ""). Positional arguments get one more condition on
-    top (few, placeholder-shaped tokens): `global_placement performs the
-    placement` still needs to fail there too, since it has neither a flag nor
-    a placeholder-shaped rest.
+    read as usage lines the moment either sentence happens to mention a flag,
+    and every one of those is a candidate name a hallucinated entry could then
+    legally claim. Positional arguments get one more condition on top (few,
+    placeholder-shaped tokens): `global_placement performs the placement`
+    still needs to fail there too, since it has neither a flag nor a
+    placeholder-shaped rest.
 
     Trailing continuation backslashes are ignored so `set_db \\` still reads as
     a bare invocation.
@@ -581,480 +564,205 @@ def parameter_names(text: str) -> list[str]:
     return list(found)
 
 
-# ========================================================= 1. shape detection
-def _as_meta(item: Any) -> SectionMeta:
-    """Accept the dataclass, a 2-tuple, or a mapping — callers differ.
+# =================================================================== 1. windows
+def _breadcrumb(raw: Mapping[str, Any], title: str) -> str:
+    """A heading's display path: its `" > "` breadcrumb, or its own title.
 
-    A mapping may carry extra keys (a `source_elements_for_chunking` row's own
-    `section_path`, say) — they are simply not read, the same tolerance a real
-    caller assembling this from chunks already needs.
+    The fallback is `build_chunks`' own: markdown parsing stores a full path on
+    every heading, MinerU stores none, and a bare title is the honest
+    degradation rather than a second code path.
     """
-    if isinstance(item, SectionMeta):
-        return item
-    if isinstance(item, Mapping):
-        return SectionMeta(
-            heading_text=str(item.get("heading_text") or item.get("title") or ""),
-            text_sample=str(item.get("text_sample") or item.get("text") or ""),
-        )
-    values = list(item) + ["", ""]
-    return SectionMeta(
-        heading_text=str(values[0] or ""),
-        text_sample=str(values[1] or ""),
-    )
+    crumbs = [
+        seg.strip()
+        for seg in str(raw.get("section_path") or "").split(" > ")
+        if seg.strip()
+    ]
+    return " > ".join(crumbs) or title
 
 
-def detect_manual_shape(sections_meta: Sequence[Any]) -> ManualShapeSignal:
-    """Estimate, with zero model calls, whether a source is a command manual.
+def _window_elements(rows: Sequence[Mapping[str, Any]]) -> list[WindowElement]:
+    """Normalise the caller's rows, in document order.
 
-    Three independent signals are counted:
-
-    * **identifier-named headings** — `### set_db`. The strongest shape, and
-      the one that needs the numbering filter: without it a paper's
-      `A.1.2 Notation` headings read as command names and a survey is offered
-      command extraction.
-    * **usage-line sections** — a plain heading (`### Global Placement`) whose
-      body opens a code block with `global_placement`. Measured on OpenROAD:
-      this is the *majority* shape, so a detector that only looked at headings
-      would score a real manual at zero.
-    * **flag-dense sections** — parameter tables.
-
-    The verdict uses the first two only. Flag density is reported because it is
-    genuinely informative to a person, but it must not vote: an `Options`
-    sub-section is flag-dense and is not a command, so counting it would score
-    one command twice and let any page of shell examples pass.
-
-    Identifier headings are not all equal evidence, though. `_is_command_identifier`
-    accepts both underscore-joined names (`set_db`) and dot-joined ones
-    (`README.md`, `config.yaml`) — real commands are never dotted-only, but a
-    filename repeated as a heading eight times clears every other gate (ASCII
-    letter, minimum length, dotted separator) exactly like a real command name
-    would. So underscore-joined headings are the *strong* signal and dotted-only
-    headings are the *weak* one, and `is_manual` requires either enough strong
-    signal on its own (`STRONG_IDENTIFIER_HEADING_MIN`) or a weak signal backed
-    by the same corroborating evidence a syntax-line section already needs
-    (`syntax_sections` or `flag_sections` present somewhere in the source) —
-    never a stack of filenames alone.
+    Elements whose text is blank are dropped, and that is not a content loss:
+    they contribute no characters to any window and nothing in this module can
+    ground against, count or cite them. Everything else is kept — the packer
+    below has no discard branch at all.
     """
-    metas = [_as_meta(item) for item in sections_meta or ()]
-    total = len(metas)
-    if not total:
-        return ManualShapeSignal()
-
-    identifier_headings = 0
-    strong_identifier_headings = 0
-    syntax_sections = 0
-    flag_sections = 0
-    for meta in metas:
-        heading_ids = _identifiers(meta.heading_text)
-        if heading_ids:
-            identifier_headings += 1
-            if any("_" in term for term in heading_ids):
-                strong_identifier_headings += 1
-        elif _usage_identifiers(meta.text_sample):
-            syntax_sections += 1
-        flag_lines = 0
-        for index, line in enumerate((meta.text_sample or "").splitlines()):
-            if index >= MAX_SCAN_LINES:
-                break
-            if _FLAG_RE.search(line):
-                flag_lines += 1
-        if flag_lines >= MIN_FLAG_LINES:
-            flag_sections += 1
-
-    command_shaped = identifier_headings + syntax_sections
-    ratio = command_shaped / total
-    weak_identifier_headings_only = (
-        identifier_headings > 0
-        and strong_identifier_headings < STRONG_IDENTIFIER_HEADING_MIN
-        and syntax_sections == 0
-        and flag_sections == 0
-    )
-    if command_shaped < MIN_COMMAND_SECTIONS:
-        reason = "too_few_command_sections"
-    elif ratio < MIN_COMMAND_RATIO:
-        reason = "command_ratio_below_threshold"
-    elif weak_identifier_headings_only:
-        reason = "weak_identifier_headings_only"
-    else:
-        reason = "manual"
-    return ManualShapeSignal(
-        total_sections=total,
-        identifier_headings=identifier_headings,
-        syntax_sections=syntax_sections,
-        flag_sections=flag_sections,
-        command_shaped_sections=command_shaped,
-        command_ratio=round(ratio, 4),
-        flag_ratio=round(flag_sections / total, 4),
-        is_manual=reason == "manual",
-        reason=reason,
-    )
-
-
-# ========================================================== 2. section groups
-@dataclass
-class _Block:
-    """A heading and everything under it, before command grouping."""
-
-    title: str = ""
-    section_path: str = ""
-    elements: list[SectionElement] = field(default_factory=list)
-
-    @property
-    def text(self) -> str:
-        return "\n".join(element.text for element in self.elements)
-
-
-@dataclass
-class _Draft:
-    title: str
-    section_path: str
-    shape: str
-    command_hint: str
-    elements: list[SectionElement]
-    closed: bool = False
-
-
-def _blocks(elements: Sequence[Mapping[str, Any]]) -> list[_Block]:
-    """Split the element stream on headings — `build_chunks`' own boundary.
-
-    The breadcrumb fallback is `build_chunks`' too: markdown parsing stores a
-    full `" > "` path on every heading, MinerU stores none, and a bare title is
-    the honest degradation rather than a second code path.
-    """
-    blocks: list[_Block] = []
-    current = _Block()
-    for raw in elements or ():
-        etype = str(raw.get("element_type") or raw.get("type") or "").lower()
+    elements: list[WindowElement] = []
+    for raw in rows or ():
         text = str(raw.get("text") or "").strip()
-        item = SectionElement(
-            id=str(raw.get("id") or ""), element_type=etype, text=text
-        )
-        if etype == "heading":
-            if current.elements:
-                blocks.append(current)
-            crumbs = [
-                seg.strip()
-                for seg in str(raw.get("section_path") or "").split(" > ")
-                if seg.strip()
-            ]
-            current = _Block(
-                title=text,
-                section_path=" > ".join(crumbs) or text,
-                elements=[item],
-            )
-            continue
         if not text:
             continue
-        current.elements.append(item)
-    if current.elements:
-        blocks.append(current)
-    return blocks
+        etype = str(raw.get("element_type") or raw.get("type") or "").lower()
+        elements.append(
+            WindowElement(
+                id=str(raw.get("id") or ""),
+                element_type=etype,
+                text=text,
+                section_path=_breadcrumb(raw, text) if etype == "heading" else "",
+            )
+        )
+    return elements
 
 
-def section_metas(elements: Sequence[Mapping[str, Any]]) -> list[SectionMeta]:
-    """Every heading-delimited block's shape signal — the whole document, not
-    just the subset that ends up grouped into a command section.
-
-    C1b's ``preview`` used to feed `detect_manual_shape` the OUTPUT of
-    `command_sections()` instead of this: that function already GROUPS blocks
-    under a command heading and drops everything that never joins one, so its
-    section count is, by construction, the same number as
-    `command_shaped_sections`. Fed that, `command_ratio` is trivially 1.0 on
-    every source that has even one recognisable command, and the ratio
-    gate / `flag_ratio` / a five-command appendix inside a 300-section paper —
-    the whole reason those signals exist — never has anything left to reject,
-    because the denominator was silently made equal to the numerator.
-
-    This is `_blocks()` alone, deliberately short of `_classify`/grouping:
-    shape detection has to see the document's real section count BEFORE any
-    per-command work is scheduled, exactly like a caller assembling
-    `SectionMeta` straight from `source_elements_for_chunking` rows would.
-    """
-    return [
-        SectionMeta(heading_text=block.title, text_sample=block.text)
-        for block in _blocks(elements)
-    ]
-
-
-def _is_descendant(child: str, parent: str) -> bool:
-    """Breadcrumb containment. Meaningless — and false — without breadcrumbs."""
-    return bool(child and parent and child.startswith(parent + " > "))
-
-
-def _breadcrumb_parent(path: str) -> str:
-    return path.rsplit(" > ", 1)[0] if " > " in (path or "") else ""
-
-
-def _is_sibling(one: str, other: str) -> bool:
-    """Same breadcrumb parent, both nested. Requires real breadcrumbs."""
-    parent = _breadcrumb_parent(one)
-    return bool(parent) and parent == _breadcrumb_parent(other)
-
-
-def _is_example_heading(title: str) -> bool:
-    """Whether `title` names a worked-examples appendix rather than a command.
-
-    A name-based carve-out, deliberately, not a shape one: `_EXAMPLE_HEADING_WORDS`
-    names the whole (case-folded, whitespace-trimmed) heading, so `README.md` and
-    a real `### set_db` heading are untouched.
-    """
-    return (title or "").strip().casefold() in _EXAMPLE_HEADING_WORDS
-
-
-def _usage_evidence(block: _Block) -> tuple[str, bool]:
-    """The command this block invokes, and whether a code block said so.
-
-    Code blocks outrank prose, which is what the spec's "the first code block's
-    first line" means once it is generalised past markdown. Measured: a section
-    documenting `replace_arith_modules` opens with prose containing
-    `link_design top -hier`, and reading in document order picks the
-    cross-referenced command instead of the documented one.
-
-    The flag is the *strength* of the evidence, and callers weigh it: MinerU
-    labels nothing as code, so a PDF manual's evidence is always weak and the
-    weak-evidence guards degrade to the plain "fold into the previous command"
-    rule rather than to a second code path.
-    """
-    for element in block.elements:
-        if element.element_type in _CODE_TYPES:
-            found = _usage_identifiers(element.text)
-            if found:
-                return found[0], True
-    for element in block.elements:
-        if element.element_type in _CODE_TYPES:
-            continue
-        found = _usage_identifiers(element.text)
-        if found:
-            return found[0], False
-    return "", False
-
-
-def _classify(block: _Block, current: _Draft | None) -> tuple[str, str]:
-    """Decide whether `block` opens a new command. Returns (shape, hint).
-
-    Guards scale with how strongly the block claims to be a command:
-
-    * an **identifier-named heading** naming a command other than the current
-      one always opens a section, however deeply nested — a heading that spells
-      a different command *is* a different command;
-    * a **code-block usage line** opens a section unless it repeats the current
-      command or sits inside it. `#### Examples` holding
-      `global_placement -density 0.6` is caught by either half;
-    * a **prose usage line** additionally loses to a sibling. `#### SEE ALSO`
-      whose entire body is the word `replace_hier_module` is a cross-reference,
-      not a command section, and it is a sibling of the `#### Options` and
-      `#### EXAMPLES` blocks that belong to the command above it. Siblings must
-      not gate the code-block case: every command in a manual is a sibling of
-      every other, so that guard there would fold a whole manual into one
-      section.
-    * a **worked-examples appendix** (`_is_example_heading`) is the final
-      backstop, checked only once the guards above have already failed to
-      settle it. Measured on OpenROAD `rsz`: `## Example scripts` is a
-      top-level sibling of nothing in particular — neither descendant nor
-      sibling of whatever command was last documented — and its code block
-      cites `read_sdc`, a command `rsz` never documents. Checking title last
-      (not first) keeps a *nested* `#### Examples` citing another command
-      caught by the descendant/sibling guards above, exactly like `#### SEE
-      ALSO` is; this backstop only fires for the shape those guards cannot
-      reach at all.
-    """
-    heading_ids = _identifiers(block.title)
-    if heading_ids:
-        if current is None or heading_ids[0] != current.command_hint:
-            return "identifier_heading", heading_ids[0]
-        return "", ""
-    usage, from_code = _usage_evidence(block)
-    if not usage:
-        return "", ""
-    if current is not None:
-        if usage == current.command_hint:
-            return "", ""
-        if _is_descendant(block.section_path, current.section_path):
-            return "", ""
-        if not from_code and _is_sibling(block.section_path, current.section_path):
-            return "", ""
-    if _is_example_heading(block.title):
-        return "", ""
-    return "syntax_block", usage
-
-
-def _pack(
-    elements: Sequence[SectionElement], max_chars: int
-) -> tuple[list[SectionElement], str, SectionTruncation]:
-    """Concatenate under a hard character budget, accounting for the loss.
-
-    Elements are kept whole so `text` and `elements` describe the same content
-    — with one exception: an element that arrives with no real content kept
-    yet (the heading is the only thing in `kept` so far, or `kept` is still
-    empty) is clipped in place rather than dropped whole.
-
-    The naive version of this test was `not kept`, which only ever fires on
-    the very first element. A heading is *always* that first element, so
-    every real section had already made `kept` non-empty by the time its
-    first substantial element (a 12000-char parameter table, say) blew the
-    budget — and that element took the whole-block drop below, leaving a
-    section that is nothing but its own heading. Measured: a 120-parameter
-    section came out of this as 36 characters of heading text, 1/120 args
-    kept, and a command-reject ratio of 0.0 — the circuit breaker never saw
-    the failure because there was nothing left to see it in. Testing "is
-    `kept` still heading-only" instead of "is `kept` still empty" is what
-    keeps that table's first N characters instead of losing the section.
-    """
-    limit = max(0, int(max_chars))
-    original = len("\n".join(element.text for element in elements))
-    kept: list[SectionElement] = []
-    used = 0
-    dropped = 0
-    for index, element in enumerate(elements):
-        extra = len(element.text) + (1 if kept else 0)
-        if used + extra <= limit:
-            kept.append(element)
-            used += extra
-            continue
-        no_real_content_yet = all(item.element_type == "heading" for item in kept)
-        if no_real_content_yet and limit > 0:
-            room = max(0, limit - used - (1 if kept else 0))
-            kept.append(replace(element, text=element.text[:room]))
-            dropped = len(elements) - index - 1
-        else:
-            dropped = len(elements) - index
-        break
-    text = "\n".join(element.text for element in kept)
-    return kept, text, SectionTruncation(
-        applied=len(text) < original,
-        original_chars=original,
-        kept_chars=len(text),
-        dropped_elements=dropped,
+def _piece(element: WindowElement, text: str) -> WindowElement:
+    """One piece of `element`, keeping its identity (id, type, breadcrumb)."""
+    return WindowElement(
+        id=element.id,
+        element_type=element.element_type,
+        text=text,
+        section_path=element.section_path,
     )
 
 
-def command_sections(
-    elements: Sequence[Mapping[str, Any]],
+def extraction_windows(
+    rows: Sequence[Mapping[str, Any]],
     *,
-    max_chars: int = MAX_SECTION_CHARS,
-) -> list[CommandSection]:
-    """Group one source's ordered elements into per-command sections.
+    max_chars: int = WINDOW_CHARS,
+) -> list[ExtractionWindow]:
+    """Pack one source's ordered elements into bounded windows. Nothing is lost.
 
     Input is exactly what `source_elements_for_chunking` returns
-    (`id`, `element_type`, `text`, `section_path`), so C1b reuses the fetch it
-    already has.
+    (`id`, `element_type`, `text`, `section_path`), so the job layer reuses the
+    fetch it already has.
 
-    Grouping folds sub-sections onto the nearest command heading — the same
-    insight as `exact_lookup._group_path`, where `set_db`, `set_db > Arguments`
-    and `set_db > Examples` are three breadcrumbs and one command. Two details
-    beyond the plain "fold everything into the previous command":
+    Two rules, and no third:
 
-    * content before the first command section is **dropped**. A document
-      title, a table of contents and an introduction belong to no command, and
-      attaching them to the first one would poison its extraction.
-    * with breadcrumbs available, a non-command block joins the current section
-      only if it is a descendant or a sibling; anything else closes the
-      section. Descendants are the ordinary `### set_db` / `#### Options`
-      shape. Siblings matter because manuals nest unevenly — one OpenROAD
-      command is documented under an `####` heading whose parameter table lives
-      in an `####` sibling, and a descendant-only rule drops that table
-      entirely. Everything shallower still closes the section, so a manual's
-      trailing `## Limitations`, `## Authors` and `## License` do not land
-      inside the last command. Without breadcrumbs (MinerU) neither test can
-      fire, so the plain "fold into the previous command" rule applies and the
-      character budget bounds the damage.
-    * a worked-examples appendix (`_is_example_heading`) folds into whatever
-      command is still open, bypassing the descendant/sibling depth check
-      entirely — `## Example scripts` sits at document top level while the
-      command it should attach to may be nested several headings deep, so the
-      ordinary depth test would close the section instead of feeding it this
-      trailing evidence. It still respects a section that already closed:
-      Examples after a `## License`-shaped chapter drop like anything else
-      would.
+    * an element goes into the current window whole; if it does not fit, the
+      window is closed and it starts the next one. Keeping elements whole is
+      what makes `window.text` a faithful rendering of `window.elements` —
+      a table cut in half mid-row grounds worse than the same table in the
+      next window;
+    * an element longer than the whole budget is cut into consecutive pieces,
+      each carrying the element's own id. This is the only place a boundary
+      falls inside an element, and it exists because the alternative — v1's
+      "drop what does not fit" — is silent data loss: measured, a
+      120-parameter table vanished whole and left a section that was nothing
+      but its own heading, with a command-reject ratio of 0.0 because there
+      was no longer anything left to fail.
+
+    So every character of every element lands in exactly one window, in
+    document order. Where the caller needs to prove that, `element_ids` says
+    which boundaries are continuations (window i's last id == window i+1's
+    first id) and which are element joins.
     """
-    drafts: list[_Draft] = []
-    for block in _blocks(elements):
-        current = drafts[-1] if drafts else None
-        shape, hint = _classify(block, current)
-        if shape:
-            drafts.append(
-                _Draft(
-                    title=block.title,
-                    section_path=block.section_path,
-                    shape=shape,
-                    command_hint=hint,
-                    elements=list(block.elements),
-                )
-            )
-            continue
-        if current is None or current.closed:
-            continue
-        if _is_example_heading(block.title):
-            current.elements.extend(block.elements)
-            continue
-        if _breadcrumb_parent(block.section_path) and _breadcrumb_parent(
-            current.section_path
-        ):
-            if not (
-                _is_descendant(block.section_path, current.section_path)
-                or _is_sibling(block.section_path, current.section_path)
-            ):
-                current.closed = True
-                continue
-        current.elements.extend(block.elements)
+    limit = max(1, int(max_chars))
+    elements = _window_elements(rows)
 
-    sections: list[CommandSection] = []
-    for draft in drafts:
-        kept, text, truncation = _pack(draft.elements, max_chars)
-        sections.append(
-            CommandSection(
-                title=draft.title,
-                section_path=draft.section_path,
-                shape=draft.shape,
-                command_hint=draft.command_hint,
-                elements=tuple(kept),
-                text=text,
-                truncation=truncation,
+    windows: list[ExtractionWindow] = []
+    pieces: list[WindowElement] = []
+    used = 0
+    carried = ""  # last heading seen, at or before the window being filled
+
+    def flush() -> None:
+        nonlocal pieces, used, carried
+        if not pieces:
+            return
+        headings = [
+            item.section_path
+            for item in pieces
+            if item.element_type == "heading" and item.section_path
+        ]
+        # This window's own label is its FIRST heading — that is the section
+        # the window opens in, and it is what a reviewer looking at the row
+        # expects to see. What is handed to the NEXT window is the LAST one:
+        # a window that opens under `set_a` and ends under `set_e` leaves the
+        # document positioned in `set_e`, so labelling the continuation
+        # `set_a` (which taking the first heading again would do) points a
+        # reviewer at a section several commands back. Both halves matter and
+        # they are different questions, which is why they read different ends
+        # of the same list.
+        provenance = headings[0] if headings else carried
+        windows.append(
+            ExtractionWindow(
+                ordinal=len(windows),
+                elements=tuple(pieces),
+                text=_ELEMENT_JOIN.join(item.text for item in pieces),
+                provenance=provenance,
             )
         )
-    return sections
+        carried = headings[-1] if headings else carried
+        pieces = []
+        used = 0
+
+    for element in elements:
+        remaining = element.text
+        while remaining:
+            separator = len(_ELEMENT_JOIN) if pieces else 0
+            room = limit - used - separator
+            if len(remaining) <= room:
+                pieces.append(
+                    element
+                    if remaining == element.text
+                    else _piece(element, remaining)
+                )
+                used += separator + len(remaining)
+                break
+            if pieces:
+                # It may still fit in a window of its own — or it may not, in
+                # which case the next pass starts an empty window and splits.
+                # Either way the current window is done.
+                flush()
+                continue
+            # An empty window that still cannot hold it: this element is longer
+            # than the entire budget, so it is cut here and continues into the
+            # next window.
+            pieces.append(_piece(element, remaining[:limit]))
+            used += limit
+            remaining = remaining[limit:]
+            flush()
+    flush()
+    return windows
 
 
-# ============================================================= 3. candidates
-def command_candidates(
-    section: CommandSection, *, limit: int = MAX_CANDIDATES
+# ============================================================= 2. candidates
+def window_candidates(
+    window: ExtractionWindow, *, limit: int = MAX_CANDIDATES
 ) -> list[str]:
-    """The names an entry from this section may legally claim.
+    """The names an entry from this window may legally claim.
 
-    Ordered by how much the source commits to each: the identifier that made
-    this a command section, then its heading, then usage lines, then inline
-    code. The order matters because the list is truncated — C0 measured 5/5
-    command-name accuracy with a served list, and that only holds while the
-    right name is on it.
+    Ordered by how much the source commits to each: headings first, then usage
+    lines (code blocks ahead of prose), then inline code. The order matters
+    because the list is truncated — C0 measured 5/5 command-name accuracy with
+    a served list, and that only holds while the right names are on it.
+
+    Code blocks outrank prose for a measured reason: a section documenting
+    `replace_arith_modules` opens with prose containing `link_design top
+    -hier`, so reading strictly in document order puts a cross-referenced
+    command ahead of the documented one. MinerU labels nothing as code, so on a
+    PDF manual both passes see the same elements and the order degrades to
+    document order rather than to a second code path.
 
     Flags are excluded (see `_identifiers`); the list is deduplicated and
     capped. Being slightly over-inclusive is safe — every candidate still has
-    to survive the verbatim text check in `validate_entry` — while missing the
-    real name costs the whole entry.
+    to survive the verbatim text check in `validate_entry` — while missing a
+    real name costs that whole command.
     """
     bound = max(0, int(limit))
     ordered: dict[str, None] = {}
 
     def add(term: str) -> bool:
+        """Record `term`; return whether there is still room for another."""
         if term and term not in ordered:
             ordered[term] = None
         return len(ordered) < bound
 
     if not bound:
         return []
-    if not add(section.command_hint):
-        return list(ordered)
-    for term in _identifiers(section.title):
-        if not add(term):
-            return list(ordered)
+    for element in window.elements:
+        if element.element_type != "heading":
+            continue
+        for term in _identifiers(element.text):
+            if not add(term):
+                return list(ordered)
     for code_first in (True, False):
-        for element in section.elements:
+        for element in window.elements:
             if (element.element_type in _CODE_TYPES) is not code_first:
                 continue
             for term in _usage_identifiers(element.text):
                 if not add(term):
                     return list(ordered)
-    for element in section.elements:
+    for element in window.elements:
         for match in _INLINE_CODE_RE.finditer(element.text):
             for term in _identifiers(match.group(1)):
                 if not add(term):
@@ -1062,52 +770,140 @@ def command_candidates(
     return list(ordered)
 
 
-# ================================================================= 4. slicing
-def _extraction_window(
-    section_text: str, names: Sequence[str], *, limit: int = MAX_SLICE_WINDOW_CHARS
-) -> str:
-    """One slice's own view of the source: the overview head plus every line
-    mentioning `names`, bounded to `limit` characters.
+def carry_candidates(
+    prev_candidates: Sequence[str],
+    prev_carry: Sequence[str],
+    *,
+    limit: int = MAX_CANDIDATES,
+) -> list[str]:
+    """The names the previous window hands forward to the next one.
 
-    The overview head (`OVERVIEW_HEAD_CHARS`, document order) is what makes
-    slice 0's window "overview head + syntax block" without any special
-    casing — the heading, intro prose and syntax block are ordinarily the
-    first thing a command section holds. Later slices carry the same head for
-    command-name context, plus their own parameter lines pulled from wherever
-    in the section those actually live (an Options table, usually, far past
-    the head). This is a prompt-sizing view only: `validate_entry` always
-    grounds against `section.text` in full, never this window.
+    A command's documentation routinely outlives the window it starts in: a
+    120-parameter options table is several windows long, and every window after
+    the first holds parameters with no command name anywhere in them. Those
+    windows have no candidate of their own, so without a relay the model has
+    nothing it may legally claim and the window is provably empty — measured,
+    that is most of every large command's parameter list.
+
+    The chain is deliberately short-memoried::
+
+        carry(0)  = ()
+        carry(i)  = candidates(i-1)  or  carry(i-1) if candidates(i-1) is empty
+
+    so it passes THROUGH windows that name nothing (a multi-window table) and
+    RESETS at the next window that names something (a new command's heading is
+    the old command's end). Without the reset a manual's first command would
+    stay claimable on its last page; without the pass-through the relay would
+    stop at the first table window, which is the very case it exists for.
+
+    Truncation prefers the nearer window's names: `limit` is the same
+    prompt-borne constraint `window_candidates` is capped by, and the names
+    that just went out of view are better evidence than the ones that left
+    several windows ago. (The two sources are mutually exclusive under the rule
+    above, so the ordering is a statement of precedence rather than a
+    tie-break that fires today.)
+
+    Grounding is not weakened by this. Every name here was scanned verbatim out
+    of the window it came from — the candidate list is constructive, not
+    declarative — so the relay carries a witness rather than a guess, and the
+    model still cannot produce a name that no window ever contained.
+
+    **Registered trade-off: mis-attribution ACROSS commands stays possible.**
+    A window's candidate list is every command-shaped name the window mentions,
+    not just the one it documents — inline code cross-references neighbours all
+    the time — so a relay can hand forward a name the previous window merely
+    MENTIONED, and an orphaned parameter table can then be keyed onto it. The
+    result is a parameter filed under the wrong command, and no grounding rule
+    can catch it: the name is real, the parameter is real, and both are in the
+    document. Accepted rather than closed, because every closure considered
+    (relay only the name a usage line invoked, relay only from a heading) also
+    drops the ordinary case the relay exists for, and the review step is where
+    a person sees the row before it lands.
     """
-    head = (section_text or "")[:OVERVIEW_HEAD_CHARS]
-    if not names:
-        return head[:limit]
-    lines = (section_text or "").splitlines()
-    relevant = "\n".join(
-        line for line in lines if any(_token_present(name, line) for name in names)
-    )
-    window = f"{head}\n{relevant}" if relevant else head
-    return window[:limit]
+    own = [str(name) for name in prev_candidates or () if name]
+    inherited = [] if own else [str(name) for name in prev_carry or () if name]
+    ordered = dict.fromkeys(own + inherited)
+    return list(ordered)[:max(0, int(limit))]
 
 
+def window_needs_model(
+    window: ExtractionWindow,
+    carried: Collection[str] = (),
+    *,
+    own: Sequence[str] | None = None,
+) -> bool:
+    """Whether this window is worth a model call at all.
+
+    The deterministic, zero-model-call cost gate that replaces v1's sectioning.
+    Two conditions, both necessary, in one sentence: a call happens when the
+    window has **a name that may legally be claimed** AND **evidence there is
+    something to extract**.
+
+        needs_model  ⟺  own  or  (flags and carried)
+
+    Four shapes, which is the whole rule:
+
+    * **own non-empty** → call. The ordinary case: this window itself names a
+      command, so it can document one.
+    * **own empty, flags present, carried non-empty** → call. A continuation
+      window: the parameter table of a command named one or more windows back
+      (see `carry_candidates`). This is the case the relay exists for and it is
+      most of every large command's documentation.
+    * **own empty, flags present, carried empty** → skip. Parameters with no
+      claimable name anywhere — a table that opens the document, or one whose
+      relay an intervening command already reset. Grounding guarantees the
+      output is empty (`validate_entry` vetoes every name off the served list,
+      and the served list is empty), so the call is provably pure spend.
+    * **own empty, flags absent** → skip, WHATEVER the relay holds. Prose. The
+      relay alone used to keep the gate open here, on the theory that a
+      continuation window's prose is sometimes the command's own description;
+      measured against a real manual that theory bills every prose page of the
+      book, because the relay never empties once a command has been seen. The
+      description is worth having and it is not worth a call per page.
+
+    `carry` still passes THROUGH a skipped window (`carry_candidates` is a pure
+    function of the previous window and this gate does not feed it), so a
+    command's name survives an intervening prose page and reaches the table on
+    the far side of it.
+
+    `own` is the window's own candidate list, accepted pre-computed because
+    the job layer needs it anyway (for the prompt and for advancing the relay)
+    and scanning a 12k window twice per window is measurable on a long manual.
+    Passing it is an optimisation only — omit it and this computes the same
+    list itself.
+    """
+    names = window_candidates(window) if own is None else own
+    if names:
+        return True
+    return bool(carried) and bool(parameter_names(window.text))
+
+
+# ================================================================= 3. slicing
 def extraction_slices(
-    section: CommandSection, *, params_per_slice: int = SLICE_PARAM_LIMIT
+    window: ExtractionWindow, *, params_per_slice: int = SLICE_PARAM_LIMIT
 ) -> list[ExtractionSlice]:
-    """Split one command across as many model calls as its parameters need.
+    """Split one window across as many model calls as its parameters need.
 
     Mandatory, not an optimisation: C0 watched a ~100-parameter section hit
     `finish_reason=length` and then return empty content on retry, i.e. the
     failure mode is silent data loss, not a visible error.
 
-    A command with no parameters still gets one slice — `remove_fillers` has
+    A window with no parameters still gets one slice — `remove_fillers` has
     syntax and a description worth extracting. Slice 0 always carries the
-    overview responsibility (syntax / description / examples) so those are
-    asked for exactly once; later slices ask only for their parameter subset.
-    The subsets partition the parameter list: disjoint, complete, in document
-    order. Each slice's `text_window` is `_extraction_window`'s bounded view of
-    the section for exactly that slice — see `ExtractionSlice` for why it never
-    substitutes for `section.text` at grounding time.
+    overview responsibility (syntax / description / examples per entry) so
+    those are asked for exactly once; later slices ask only for their parameter
+    subset. The subsets partition the window's parameter list: disjoint,
+    complete, in document order. Every slice's `text_window` is the WHOLE
+    window — see `ExtractionSlice` for why a narrower per-slice view, correct
+    when a slice was one command's section, became systematic blindness once a
+    slice became a chunk of a multi-command slab.
+
+    The assignment is the WINDOW's flag list, not one command's: a window may
+    document several commands, and the model keys each returned parameter to
+    the entry it belongs to. Attribution stays exact anyway, because
+    `validate_entry` checks a returned name against this same assignment.
     """
-    names = parameter_names(section.text)
+    names = parameter_names(window.text)
     size = max(1, int(params_per_slice))
     if len(names) <= size:
         return [
@@ -1116,7 +912,7 @@ def extraction_slices(
                 total=1,
                 param_names=tuple(names),
                 include_overview=True,
-                text_window=_extraction_window(section.text, names),
+                text_window=window.text,
             )
         ]
     groups = [names[start:start + size] for start in range(0, len(names), size)]
@@ -1126,20 +922,20 @@ def extraction_slices(
             total=len(groups),
             param_names=tuple(group),
             include_overview=index == 0,
-            text_window=_extraction_window(section.text, group),
+            text_window=window.text,
         )
         for index, group in enumerate(groups)
     ]
 
 
-# =============================================================== 5. grounding
-def _window(text: str, value: str) -> str:
+# =============================================================== 4. grounding
+def _reject_window(text: str, value: str) -> str:
     """A bounded look at where the value was searched for — diagnostics only.
 
     Best effort by design: for a value that is not in the text there is no
     match to centre on, so a case-insensitive, dash-insensitive probe locates
     the near miss when there is one (which is exactly the interesting case:
-    `density` vs `-density`) and the head of the section stands in when there
+    `density` vs `-density`) and the head of the window stands in when there
     is not.
     """
     probe = (value or "").lstrip("-")
@@ -1155,7 +951,7 @@ def _reject(text: str, field_name: str, value: str, reason: str) -> Rejection:
         field=field_name,
         value=value[:MAX_REJECT_VALUE_CHARS],
         reason=reason,
-        window=_window(text, value),
+        window=_reject_window(text, value),
     )
 
 
@@ -1164,13 +960,13 @@ def _check_arg_name(raw: str, text: str) -> str:
 
     The dash test is conditional on evidence rather than on shape. Demanding
     that every parameter start with `-` would be wrong — plenty of commands
-    take positional arguments — but a bare `density` while the section itself
+    take positional arguments — but a bare `density` while the window itself
     writes `-density` is not a positional argument, it is the dropped dash C0
     measured.
 
     A verbatim text check on its own cannot catch it, which is why this test
     exists as a separate rule: the bare word is genuinely present in the
-    section, both in prose and as the placeholder in `[-density
+    window, both in prose and as the placeholder in `[-density
     target_density]`, so `not_in_text` would never fire and the stripped name
     would be accepted. The order of the two tests below decides only which
     reason gets reported when both apply; `dash_stripped` goes first because it
@@ -1284,13 +1080,14 @@ def assignment_coverage(
     """How much of `assigned` the given raw model payloads addressed at all.
 
     Takes a LIST of payloads, not one, because a slice may answer across
-    several calls (C1b halves a slice whose answer overran the output budget)
-    and the assignment is covered by their union — computing this per payload
-    would report each half as having ignored the other half's parameters.
+    several calls (the job layer halves a slice whose answer overran the output
+    budget) and because one call now answers with several entries — a window's
+    assignment is covered by the union of all of them. Computing this per
+    payload would report each half, or each entry, as having ignored the rest.
 
     An empty assignment yields an empty ledger, and that is a statement rather
     than a degenerate case: nothing was asked for, so nothing can be missing.
-    It is what keeps a flagless command's positional arguments (which C1b's
+    It is what keeps a flagless command's positional arguments (which the
     prompt asks for WITHOUT an assignment, since no list can be derived for
     them) from being charged as unanswered — those are judged by grounding
     alone, never by coverage.
@@ -1318,12 +1115,30 @@ def assignment_coverage(
 
 def validate_entry(
     entry: Mapping[str, Any] | None,
-    section: CommandSection,
+    window: ExtractionWindow,
     candidates: Sequence[str],
     *,
     assigned: Sequence[str] | None = None,
+    carried: Collection[str] = (),
 ) -> ValidationResult:
-    """Ground one extracted entry against the section text, field by field.
+    """Ground ONE extracted entry against the window text, field by field.
+
+    One call per entry: a window's reply lists every command it documents, and
+    each is judged alone, so a hallucinated entry vetoes itself and leaves its
+    neighbours untouched.
+
+    `carried` is the relay from `carry_candidates`, and this function takes the
+    UNION of it and `candidates` as the served list itself rather than asking
+    the caller to merge them. Deliberate: the two facts a carried name needs —
+    "it may be claimed" and "it need not appear in this window" — would
+    otherwise live in two arguments that a caller can desynchronise, and each
+    half alone fails silently in the direction that looks like a clean run.
+    Merge but forget to pass `carried` and every continuation entry is vetoed
+    `not_in_text`; pass `carried` but forget to merge and every one is vetoed
+    `not_in_candidates`. Both read as "the model found nothing", which is
+    exactly the outcome the relay exists to prevent. Keeping `candidates` as
+    the window's OWN list also leaves `window_outcome`'s uncovered-candidate
+    ledger meaning what it says.
 
     Four layers, with deliberately different severities — a manual is worth
     extracting only if what comes back is the manual's own words, but a
@@ -1331,13 +1146,21 @@ def validate_entry(
     keeping:
 
     * **command_name** — the only whole-entry veto. It must be on the served
-      candidate list *and* appear verbatim at token boundaries. Failing either
-      means the entry is about a command this section does not document, and
-      nothing else in it can be trusted.
-    * **command_name not in the heading or any usage line** — grounded, but
-      possibly a *mentioned* command rather than the documented one. Recorded
+      list *and* appear verbatim at token boundaries. Failing either means the
+      entry is about a command this window does not document, and nothing else
+      in it can be trusted. A CARRIED name is exempt from the verbatim half and
+      from that half only: it was scanned verbatim out of the window that
+      handed it over, so the witness exists — it is simply one window back. The
+      list-membership half never relaxes, so a fabricated name is still vetoed
+      whatever the relay holds.
+    * **command_name not in a heading or any usage line** — grounded, but
+      possibly a *mentioned* command rather than a documented one. Recorded
       as `suspect_related` on the entry; a veto here would drop correct entries
-      from manuals that name the command only in prose.
+      from manuals that name the command only in prose. A carried claim is not
+      suspect on this basis: a continuation window is not *mentioning* the
+      command, it is still documenting it, and flagging every relayed entry
+      would put a warning on precisely the entries the relay exists to
+      produce.
     * **args** — the field itself must be a JSON list (a model that returns an
       object or a string here has not answered per-parameter at all — see the
       shape guard below); within it, each name is grounded in its original
@@ -1363,7 +1186,7 @@ def validate_entry(
 
     `assigned` is the slice's parameter list. Passing it turns on attribution:
     a name that grounds perfectly but was never asked for is another slice's
-    parameter (or a scan of the whole section), and accepting it makes the
+    parameter (or a scan of the whole window), and accepting it makes the
     per-slice ledger meaningless — a model answering one slice's assignment
     with another's would show a clean keep ratio while its own assignment
     silently vanished. The check runs AFTER `_check_arg_name` on purpose: a
@@ -1371,11 +1194,11 @@ def validate_entry(
     `arg_outside_slice` just because the stripped form is not in the list.
 
     An EMPTY (or omitted) assignment means "unconstrained", not "nothing may be
-    returned". A flagless command's slice carries no parameter names, and
+    returned". A flagless command's window carries no parameter names, and
     positional arguments (`set_dont_use lib_cells`) are exactly what such a
-    section documents; vetoing them would delete a real capability to enforce a
-    rule about a list that does not exist. This mirrors the same exemption
-    C1b's cache-admission validator already makes, and C1b's prompt now asks
+    window documents; vetoing them would delete a real capability to enforce a
+    rule about a list that does not exist. This mirrors the same exemption the
+    job layer's cache-admission validator already makes, and its prompt asks
     for those arguments outright in its no-flag branch — so the exemption is
     load-bearing, not merely permissive. The exemption is also strictly scoped
     to the empty case: with an assignment in hand, an unassigned name is still
@@ -1383,18 +1206,29 @@ def validate_entry(
     other slice from it is the infidelity this check was added for.
 
     `description` is passed through unchecked: prose cannot be matched
-    verbatim, and binding it to element anchors is C1b's job (see
+    verbatim, and binding it to element anchors is the job layer's job (see
     `ValidatedEntry.anchor_element_ids`). `examples` is prose too and is never
     grounded against `text`, but its outer shape (list vs. scalar vs. anything
     else) IS checked — see `_coerce_examples` — because the failure mode there
     is not "wrong content" but "wrong container", which grounding could never
     have caught anyway.
 
-    Everything is searched in `section.text` — the text the model was shown.
+    Everything else is searched in `window.text` — the text the model was
+    shown, in full. Never a slice's `text_window`, even though the two hold the
+    same string today: grounding must not be able to drift with a prompt-sizing
+    field a caller can set by hand, and the invariant it needs ("this is what
+    the window actually holds") is only true of `window.text`. That includes a
+    carried claim's own body: `syntax`, every parameter and every default must
+    still ground HERE, because those are what this window is being asked about
+    (a continuation window has no usage line, so its `syntax` simply comes back
+    empty — cleared, never fatal).
     """
-    text = section.text
+    text = window.text
     payload: Mapping[str, Any] = entry or {}
-    allowed = tuple(str(name) for name in candidates or ())
+    relayed = tuple(str(name) for name in carried or ())
+    allowed = tuple(
+        dict.fromkeys(tuple(str(name) for name in candidates or ()) + relayed)
+    )
     assignment = tuple(str(name) for name in assigned or ())
     rejections: list[Rejection] = []
 
@@ -1405,7 +1239,7 @@ def validate_entry(
         rejections.append(
             _reject(text, "command_name", name, "not_in_candidates")
         )
-    elif not _token_present(name, text):
+    elif name not in relayed and not _token_present(name, text):
         rejections.append(_reject(text, "command_name", name, "not_in_text"))
     if rejections:
         return ValidationResult(
@@ -1483,8 +1317,15 @@ def validate_entry(
         rejections.append(_reject(text, "syntax", syntax, "not_contiguous"))
         syntax = ""
 
-    heading_haystack = f"{section.title}\n{section.section_path}"
-    suspect = not (
+    # The window's own headings, not its `provenance`: provenance is a display
+    # label inherited from a previous window, and a command "named in the
+    # heading" must mean a heading whose text this window actually holds.
+    heading_haystack = "\n".join(
+        element.text
+        for element in window.elements
+        if element.element_type == "heading"
+    )
+    suspect = name not in relayed and not (
         _token_present(name, heading_haystack) or name in _usage_identifiers(text)
     )
     examples, examples_rejections = _coerce_examples(payload.get("examples"), text)
@@ -1512,29 +1353,32 @@ def validate_entry(
     )
 
 
-# ================================================================ 6. outcomes
-def section_outcome(
-    section: CommandSection,
+# ================================================================ 5. outcomes
+def window_outcome(
+    window: ExtractionWindow,
     candidates: Sequence[str],
     results: Sequence[ValidationResult],
     *,
     uncovered_args: Sequence[str] = (),
-) -> SectionOutcome:
-    """The per-section ledger, including what was *not* extracted.
+) -> WindowOutcome:
+    """The per-window ledger, including what was *not* extracted.
 
-    Uncovered candidates are the point of keeping the list: a manual section
-    that served four plausible names and produced one entry is exactly the
-    thing a person should look at, and no amount of per-entry validation
-    surfaces it.
+    Uncovered candidates are the point of keeping the list: a window that
+    served four plausible names and produced one entry is exactly the thing a
+    person should look at, and no amount of per-entry validation surfaces it.
+    (A candidate is legitimately uncovered more often here than in v1 — inline
+    code cites commands documented elsewhere in the document — so this is a
+    ledger line, never a verdict.)
 
     `uncovered_args` is the parameter-level version of the same idea, and it
     arrives from the caller rather than being derived from `results` for a
     structural reason: coverage is a property of a SLICE (its assignment vs
     the union of everything its calls answered), while a `ValidationResult` is
-    a property of one payload. Deriving it here would count each half of a
-    halved slice as having ignored the other half's parameters. Each name is
-    also folded into the rejection ledger — after the real rejections, so a
-    long uncovered list can never push a grounding failure out of the report.
+    a property of one entry. Deriving it here would count each entry — and each
+    half of a halved slice — as having ignored every parameter the others
+    answered. Each name is also folded into the rejection ledger — after the
+    real rejections, so a long uncovered list can never push a grounding
+    failure out of the report.
     """
     served = tuple(str(name) for name in candidates or ())
     missing = tuple(str(name) for name in uncovered_args or ())
@@ -1548,7 +1392,7 @@ def section_outcome(
     for result in results or ():
         entries_seen += 1
         for rejection in result.rejections:
-            if len(rejections) < MAX_SECTION_REJECTIONS:
+            if len(rejections) < MAX_WINDOW_REJECTIONS:
                 rejections.append(rejection)
             else:
                 rejections_overflow += 1
@@ -1559,13 +1403,13 @@ def section_outcome(
         if result.accepted and result.entry is not None:
             accepted[result.entry.command_name] = None
     for name in missing:
-        if len(rejections) < MAX_SECTION_REJECTIONS:
-            rejections.append(_reject(section.text, "arg", name, "arg_not_returned"))
+        if len(rejections) < MAX_WINDOW_REJECTIONS:
+            rejections.append(_reject(window.text, "arg", name, "arg_not_returned"))
         else:
             rejections_overflow += 1
-    return SectionOutcome(
-        section_path=section.section_path,
-        title=section.title,
+    return WindowOutcome(
+        ordinal=window.ordinal,
+        provenance=window.provenance,
         candidates=served,
         accepted_names=tuple(accepted),
         uncovered_candidates=tuple(
@@ -1573,18 +1417,17 @@ def section_outcome(
         ),
         rejections=tuple(rejections),
         rejections_overflow=rejections_overflow,
-        truncation=section.truncation,
         entries_seen=entries_seen,
         command_rejects=command_rejects,
         args_seen=args_seen,
         args_kept=args_kept,
-        uncovered_args=missing[:MAX_SECTION_REJECTIONS],
+        uncovered_args=missing[:MAX_WINDOW_REJECTIONS],
         args_uncovered=len(missing),
     )
 
 
-def catalog_stats(outcomes: Sequence[SectionOutcome]) -> CatalogStats:
-    """Run-level totals for C1b's circuit breaker.
+def catalog_stats(outcomes: Sequence[WindowOutcome]) -> CatalogStats:
+    """Run-level totals for the job layer's circuit breaker.
 
     The ratio is published, the threshold constant is published, and the
     decision is not made here: "abort the job" is a policy that needs the job's
@@ -1596,6 +1439,10 @@ def catalog_stats(outcomes: Sequence[SectionOutcome]) -> CatalogStats:
     and 1/20 on what it was asked for. Only the second number can tell that run
     apart from a clean one, and a keep ratio that a model can raise by
     answering LESS is worse than no ratio at all.
+
+    `windows` counts the outcomes it was given, which is the job layer's own
+    "windows that actually made a call" — a window skipped by
+    `window_needs_model` produced no entries and must not dilute either ratio.
     """
     rows = list(outcomes or ())
     entries_seen = sum(row.entries_seen for row in rows)
@@ -1605,7 +1452,7 @@ def catalog_stats(outcomes: Sequence[SectionOutcome]) -> CatalogStats:
     args_uncovered = sum(row.args_uncovered for row in rows)
     args_asked = args_seen + args_uncovered
     return CatalogStats(
-        sections=len(rows),
+        windows=len(rows),
         entries_seen=entries_seen,
         command_rejects=command_rejects,
         command_reject_ratio=(
@@ -1615,5 +1462,4 @@ def catalog_stats(outcomes: Sequence[SectionOutcome]) -> CatalogStats:
         args_kept=args_kept,
         args_uncovered=args_uncovered,
         args_keep_ratio=(round(args_kept / args_asked, 4) if args_asked else 0.0),
-        truncated_sections=sum(1 for row in rows if row.truncation.applied),
     )

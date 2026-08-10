@@ -36,30 +36,24 @@ export const CATALOG_APPLY_MAX = 100;
 export const CATALOG_PAGE_SIZE = 25;
 
 /**
- * 形状检测的计数证据 + 一个从不单独成立的阈值判断。
+ * 成本预告(v2:全文档窗口抽取)。
  *
- * `is_manual` 只是个默认值,计数才是重点 —— 界面把「找到约 N 个命令节」摆给人看、
- * 由人决定值不值得花这笔钱,是对一个启发式唯一诚实的用法。所以 `is_manual=false`
- * 时入口**仍然可用**,只是确认文案换成提示。
+ * `estimated_windows` 是「整篇按字符切成多少个窗口」——窗口按字符打包,所以它是
+ * 对来源全文字符数的算术,不是抽样估计。`estimated_calls` 才需要读正文(零成本
+ * 跳过闸与每窗分片数都要看文本),所以它只在有界前缀里精确测量、前缀之外每窗
+ * 按 1 次计;`sampled=true` 表示前缀到顶了、真实成本更高。`skipped_windows_in_
+ * prefix` 是前缀内被零模型调用闸(没有可认领的命令名、也没有 flag 形状参数)挡下
+ * 的窗口数——它是「为什么调用数远小于窗口数」唯一的解释项。
+ *
+ * v1 的 `signal`(形状检测)与 `estimated_sections` 已随规则分节一起退役,与后端
+ * 同步不留兼容别名。
  */
-export type CommandCatalogSignal = {
-  total_sections: number;
-  identifier_headings: number;
-  syntax_sections: number;
-  flag_sections: number;
-  command_shaped_sections: number;
-  command_ratio: number;
-  flag_ratio: number;
-  is_manual: boolean;
-  reason: string;
-};
-
 export type CommandCatalogPreview = {
   source_id: string;
   source_title: string;
-  signal: CommandCatalogSignal;
-  estimated_sections: number;
+  estimated_windows: number;
   estimated_calls: number;
+  skipped_windows_in_prefix: number;
   sampled: boolean;
   element_limit: number;
 };
@@ -70,8 +64,6 @@ export type CommandCatalogProgress = {
   entries: number;
   rejected: number;
   uncovered: number;
-  /** 因过长被截断、只识别了开头部分的节数(与 backend CommandCatalogProgress 逐字对齐)。 */
-  truncated_sections: number;
   /**
    * 这个任务的候选里还有多少条是 `state='candidate'`(待审阅、还没确认或跳过)。
    * `entries` 是抽取期写一次就不再变的计数,答不了这个问题——确认/跳过之后
@@ -118,6 +110,12 @@ export type CommandCatalogRejection = {
 export type CommandCatalogCandidate = {
   id: string;
   position: number;
+  /**
+   * 窗口出处(v2)。有继承的面包屑时是原文标题路径;窗口没有可继承的面包屑时是
+   * 后端内部占位标签 `window N`(1 起序号)——那不是 UI 文案,展示层必须经
+   * `command-catalog-model.ts` 的 `catalogSectionLabel()` 转成中性说法,不得
+   * 原样吐给用户。
+   */
   section_path: string;
   command_name: string;
   state: string;

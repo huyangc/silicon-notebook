@@ -61,7 +61,6 @@ function job(overrides: JobOverrides = {}): CommandCatalogJob {
       entries: 0,
       rejected: 0,
       uncovered: 0,
-      truncated_sections: 0,
       pending_candidates: 0,
       ...(overrides.progress ?? {}),
     },
@@ -93,21 +92,11 @@ function candidate(overrides: Partial<CommandCatalogCandidate> = {}): CommandCat
 const preview = {
   source_id: "src-1",
   source_title: "工具手册",
-  estimated_sections: 12,
+  estimated_windows: 12,
   estimated_calls: 18,
+  skipped_windows_in_prefix: 3,
   sampled: true,
   element_limit: 4000,
-  signal: {
-    total_sections: 20,
-    identifier_headings: 14,
-    syntax_sections: 11,
-    flag_sections: 9,
-    command_shaped_sections: 12,
-    command_ratio: 0.6,
-    flag_ratio: 0.45,
-    is_manual: true,
-    reason: "manual",
-  },
 };
 
 let confirmed: CatalogConfirmRequest[] = [];
@@ -178,7 +167,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("发起前先弹成本预告：约数 + 采样口径 + 形状线索，确认才真的开始", async () => {
+test("发起前先弹成本预告：约数 + 采样口径 + 跳过闸提示，确认才真的开始", async () => {
   const user = userEvent.setup();
   vi.mocked(startCommandCatalog).mockResolvedValue({
     status: "started",
@@ -194,9 +183,10 @@ test("发起前先弹成本预告：约数 + 采样口径 + 形状线索，确�
   expect(startCommandCatalog).not.toHaveBeenCalled();
   const [request] = confirmed;
   expect(request.title).toBe("识别命令目录");
-  expect(request.body).toContain("检测到约 12 个命令节，预计 18 次模型调用。");
-  expect(request.body).toContain("只按前 4000 个元素估算，实际可能更多");
-  expect(request.sections[0][1]).toContain("命令样式的段落 12/20（含语法/参数子段）");
+  expect(request.body).toContain("将通读全文（约 12 段），预计约 18 次模型调用。");
+  expect(request.body).toContain("其中纯叙述部分不消耗调用。");
+  expect(request.body).toContain("次数只按前 4000 个元素估算，实际可能更多");
+  expect(request.sections).toEqual([]);
   expect(request.confirmLabel).toBe("开始识别");
 
   await act(async () => { request.onConfirm(); });
@@ -339,12 +329,12 @@ test("换来源后 A 的启动响应迟到，不作废 B 正在飞的首拉（�
   expect(screen.queryByRole("button", { name: "识别命令目录" })).not.toBeInTheDocument();
 });
 
-test("非手册形状不禁用入口，只在确认文案里先说清楚", async () => {
+test("v2 不做形状检测，入口从不因为文档形状被禁用；未采样时不提示采样口径", async () => {
   const user = userEvent.setup();
   vi.mocked(fetchCommandCatalogPreview).mockResolvedValue({
     ...preview,
     sampled: false,
-    signal: { ...preview.signal, is_manual: false, reason: "command_ratio_below_threshold" },
+    skipped_windows_in_prefix: 0,
   });
   mount();
 
@@ -353,8 +343,9 @@ test("非手册形状不禁用入口，只在确认文案里先说清楚", async
   await user.click(start);
 
   await waitFor(() => expect(confirmed).toHaveLength(1));
-  expect(confirmed[0].body).toContain("未检测到明显的命令手册结构");
-  expect(confirmed[0].body).toContain("预计 18 次模型调用");
+  expect(confirmed[0].body).toContain("预计约 18 次模型调用");
+  expect(confirmed[0].body).not.toContain("实际可能更多");
+  expect(confirmed[0].body).not.toContain("纯叙述部分");
 });
 
 // 这个用例走假时钟(要驱动轮询),所以刻意只用 fireEvent + act:userEvent 自带延时、
@@ -376,7 +367,7 @@ test("确认后按钮立刻禁用并换成「识别中…」，落终态才解�
 
   const busy = screen.getByRole("button", { name: "识别中…" });
   expect(busy).toBeDisabled();
-  expect(screen.getByText("已处理 3/12 节 · 已识别 5 条")).toBeInTheDocument();
+  expect(screen.getByText("已处理 3/12 段 · 已识别 5 条")).toBeInTheDocument();
   // 取消也是长任务按钮:点下去到 worker 真的停之间不能再点。
   expect(screen.getByRole("button", { name: "取消" })).toBeEnabled();
 
@@ -414,7 +405,7 @@ test("轮询窗口过期后不再兜底放开按钮：取消入口与「识别�
   expect(screen.getByRole("button", { name: "识别中…" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "取消" })).toBeEnabled();
   // 已经拿到的进度不擦掉 —— 只是不再刷新。
-  expect(screen.getByText("已处理 2/8 节 · 已识别 1 条")).toBeInTheDocument();
+  expect(screen.getByText("已处理 2/8 段 · 已识别 1 条")).toBeInTheDocument();
   // 不再兜底猜测，而是老实说清「自动刷新停了」并给一颗手动刷新入口。
   expect(screen.getByText(/已停止自动刷新/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled();
@@ -513,7 +504,7 @@ test("重开来源时后台仍在跑的任务会重新把按钮锁住（不是�
 
   const busy = await screen.findByRole("button", { name: "识别中…" });
   expect(busy).toBeDisabled();
-  expect(screen.getByText("已处理 2/8 节 · 已识别 1 条")).toBeInTheDocument();
+  expect(screen.getByText("已处理 2/8 段 · 已识别 1 条")).toBeInTheDocument();
 });
 
 test("重复发起的 409 只带文案不带任务，前端自己把在跑的那个捡回来", async () => {
@@ -534,7 +525,7 @@ test("重复发起的 409 只带文案不带任务，前端自己把在跑的那
 
   // 后端文案原样上屏(它带 X-User-Message，出处可信)，同时界面接上真实进度。
   expect(await screen.findByText("该来源已有命令目录任务正在运行，请等待或先取消。")).toBeInTheDocument();
-  expect(await screen.findByText("已处理 4/9 节 · 已识别 6 条")).toBeInTheDocument();
+  expect(await screen.findByText("已处理 4/9 段 · 已识别 6 条")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "识别中…" })).toBeDisabled();
 });
 

@@ -31,41 +31,49 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 
 
-class CommandCatalogSignal(BaseModel):
-    """形状检测的计数证据 + 一个从不单独成立的阈值判断。
+class CommandCatalogPreview(BaseModel):
+    """成本预告(v2)。
 
-    `is_manual` 只是让调用方有个默认值;计数才是重点——「找到约 N 个命令段落」交给
-    人来判断,是对一个启发式唯一诚实的用法。
+    `estimated_windows` 是「整篇按字符切成多少个窗口」——窗口按字符打包,所以它是
+    对来源全文字符数的算术,不是抽样估计。`estimated_calls` 才需要读正文(跳过闸
+    与每窗分片数都要看文本),所以它只在有界前缀里精确测量、前缀之外每窗按 1 次
+    计;`sampled=true` 表示前缀到顶了、真实成本更高。
+
+    `skipped_windows_in_prefix` 是前缀内被零模型调用闸(没有可认领的命令名、也没有
+    flag 形状参数)挡下的窗口数——它是「为什么调用数远小于窗口数」唯一的解释项,
+    少了它,一份大部分是散文的手册看到 `估计 3 次调用 / 40 个窗口` 会读成漏算。
+
+    v1 的 `signal`(形状检测)与 `estimated_sections` 已随规则分节一起退役,刻意
+    **不**保留兼容别名:v2 没有「命令节」这个东西可数,留一个恒为 0 的字段比删掉
+    更容易被读成「这份文档没有命令」。
     """
 
-    total_sections: int = 0
-    identifier_headings: int = 0
-    syntax_sections: int = 0
-    flag_sections: int = 0
-    command_shaped_sections: int = 0
-    command_ratio: float = 0.0
-    flag_ratio: float = 0.0
-    is_manual: bool = False
-    reason: str = "no_sections"
-
-
-class CommandCatalogPreview(BaseModel):
     source_id: str
     source_title: str = ""
-    signal: CommandCatalogSignal = CommandCatalogSignal()
-    estimated_sections: int = 0
+    estimated_windows: int = 0
     estimated_calls: int = 0
+    skipped_windows_in_prefix: int = 0
     sampled: bool = False
     element_limit: int = 0
 
 
 class CommandCatalogProgress(BaseModel):
+    """任务进度。
+
+    `sections_total`/`sections_done` 的**列名保留、语义变成窗口计数**(v2 按字符
+    窗口而不是规则分节切文档);改名要加迁移、还会断掉既有观测面,两样都换不来
+    任何东西。跳过的窗口同样计入 total 并照常 done,否则进度条走不完。
+
+    v1 的 `truncated_sections` 已删:v2 没有截断这回事——超长元素被切成连续几段
+    落进相邻窗口,没有任何内容被丢弃。数据库列仍在(不加迁移)且恒为 0,但一个
+    恒为 0 的传输字段只会让前端一直渲染一句永远不会发生的告警。
+    """
+
     sections_total: int = 0
     sections_done: int = 0
     entries: int = 0
     rejected: int = 0
     uncovered: int = 0
-    truncated_sections: int = 0
     # How many of this job's candidates are still `state='candidate'`
     # (unreviewed). NOT derivable from the columns above — `entries` is a
     # write-once extraction-time tally that never moves once `apply`/`cancel`
@@ -102,7 +110,6 @@ class CommandCatalogJob(BaseModel):
                 entries=int(row.get("entries") or 0),
                 rejected=int(row.get("rejected") or 0),
                 uncovered=int(row.get("uncovered") or 0),
-                truncated_sections=int(row.get("truncated_sections") or 0),
                 pending_candidates=max(0, int(pending_candidates)),
             ),
             failure_reason=str(row.get("failure_reason") or ""),
@@ -169,7 +176,7 @@ class CommandCatalogCandidate(BaseModel):
     # `reject_info["overflow"]`/`["desc_overflow"]`(`catalog_job.py` 的
     # `_reject_info()`)此前落了库却在这里被丢弃——审阅面板因此没有任何办法
     # 知道「拦截记录被截了」这件事本身。两个都是有界记账,不是装饰:前者数
-    # 超过 `MAX_SECTION_REJECTIONS` 未能进 `rejections` 的记录,后者数因
+    # 超过 `MAX_WINDOW_REJECTIONS` 未能进 `rejections` 的记录,后者数因
     # `MODEL_ARG_DESC_TOTAL_CHARS` 聚合预算被截短的参数说明段数,两者互不相关
     # (同一处 docstring 的理由),所以是两个字段而不是合并成一个。
     rejections_overflow: int = 0
@@ -315,6 +322,5 @@ __all__ = [
     "CommandCatalogPreview",
     "CommandCatalogProgress",
     "CommandCatalogRejection",
-    "CommandCatalogSignal",
     "CommandCatalogStartResponse",
 ]

@@ -247,6 +247,74 @@ def test_mark_candidates_dismissed_converges_pending_past_a_conflicting_page(
     ) == 0
 
 
+def test_update_candidate_payload_revises_only_unreviewed_rows_on_postgres(
+    catalog_harness,
+):
+    """方案 C v2's cross-window merge primitive against real PostgreSQL SQL.
+
+    Behaviour is exhaustively covered on the SQLite side (identical service
+    layer, ``tests/test_catalog_store.py`` plus the job-level merge tests);
+    this proves the PostgreSQL statement itself — ``jsonb`` parameters instead
+    of JSON text — makes the same three promises: it revises the two payload
+    columns, it leaves identity/ordering/lifecycle alone, and it refuses a row
+    that has already left ``candidate`` state.
+    """
+    harness = catalog_harness
+    job = harness.catalog.create_job(
+        harness.notebook_id, harness.source_id, "user-catalog"
+    )
+    harness.catalog.add_candidates(
+        [
+            {
+                "job_id": job["id"],
+                "notebook_id": harness.notebook_id,
+                "source_id": harness.source_id,
+                "position": index + 1,
+                "section_path": "window 1",
+                "command_name": f"cmd_{index}",
+                "payload": {"args": [{"name": "-a"}], "excerpt": "first"},
+                "state": "candidate",
+                "reject_info": {"fields": []},
+            }
+            for index in range(2)
+        ]
+    )
+    rows = harness.catalog.pending_candidates(job["id"], limit=10)
+    first, second = rows[0], rows[1]
+
+    assert harness.catalog.update_candidate_payload(
+        first["id"],
+        {"args": [{"name": "-a"}, {"name": "-b"}], "excerpt": "first"},
+        {"fields": [{"field": "arg", "value": "-c", "reason": "not_in_text"}]},
+    ) is True
+    revised = harness.catalog.list_candidates(
+        job["id"], state="candidate", cursor=0, limit=10
+    )[0]
+    assert [arg["name"] for arg in revised["payload"]["args"]] == ["-a", "-b"]
+    assert revised["reject_info"]["fields"][0]["value"] == "-c"
+    assert revised["id"] == first["id"]
+    assert revised["position"] == first["position"]
+    assert revised["state"] == "candidate"
+    assert revised["command_name"] == first["command_name"]
+    # The sibling row is untouched — the UPDATE is by primary key, not by job.
+    assert harness.catalog.list_candidates(
+        job["id"], state="candidate", cursor=first["position"], limit=10
+    )[0]["payload"]["args"] == [{"name": "-a"}]
+
+    # Already reviewed: refused, and the row keeps exactly what the reviewer
+    # saw.
+    assert harness.catalog.mark_candidates_applied(job["id"], [second["id"]]) == 1
+    assert harness.catalog.update_candidate_payload(
+        second["id"], {"args": []}, {}
+    ) is False
+    applied = harness.catalog.list_candidates(
+        job["id"], state="applied", cursor=0, limit=10
+    )[0]
+    assert applied["payload"]["args"] == [{"name": "-a"}]
+
+    assert harness.catalog.update_candidate_payload("cnd-nope", {}, {}) is False
+
+
 def test_source_element_generation_and_complete_set_expiry_on_postgres(
     catalog_harness,
 ):
@@ -335,6 +403,93 @@ def test_source_element_generation_and_complete_set_expiry_on_postgres(
     assert harness.catalog.expire_pending_candidates(
         job["id"], reject_info={"reason": "source_reparsed"}
     ) == 0
+
+
+def test_source_text_stats_reads_the_same_row_universe_as_preview_elements(
+    catalog_harness,
+):
+    """方案 C v2's ``source_text_stats`` against real PostgreSQL SQL.
+
+    Genuinely backend-specific here: the aggregate's ``ORDER BY``-free
+    ``SELECT COUNT(*), COALESCE(SUM(LENGTH(text)),0) ... WHERE source_id=%s``
+    has to behave the same as SQLite's ``length()``-based version even though
+    PostgreSQL's ``LENGTH(text)`` is a different builtin. Row universe parity
+    with ``preview_elements`` (``WHERE source_id=%s``, no other predicate) is
+    proven directly: an unbounded ``preview_elements`` read returns exactly
+    the ids ``source_text_stats`` counted, and the aggregate is NOT bounded by
+    ``preview_elements``' own row ``limit`` or its per-row ``text_chars``
+    clip."""
+    harness = catalog_harness
+    mark = "%s"
+
+    # Empty source -> (0, 0), same as an empty preview_elements read.
+    assert harness.catalog.source_text_stats(harness.source_id) == (0, 0)
+    rows, clipped = harness.catalog.preview_elements(
+        harness.source_id, limit=10, text_chars=100
+    )
+    assert rows == []
+    assert clipped is False
+
+    other_source = "src-catalog-stats-other"
+    with harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+            "created_at,updated_at) "
+            f"VALUES ({','.join([mark] * 8)})",
+            (other_source, harness.notebook_id, "另一份手册", "markdown", "extracted",
+             "extracted", NOW, NOW),
+        )
+        texts = [
+            "set_thing -density value",
+            "b" * 9000,
+            "中文测试字符统计",
+            "",
+        ]
+        for index, text in enumerate(texts):
+            connection.execute(
+                "INSERT INTO source_elements"
+                "(id,source_id,element_type,location_label,text,metadata,created_at)"
+                f" VALUES ({','.join([mark] * 7)})",
+                (f"stats-el-{index}", harness.source_id, "paragraph", "p1", text,
+                 "{}", NOW),
+            )
+        connection.execute(
+            "INSERT INTO source_elements"
+            "(id,source_id,element_type,location_label,text,metadata,created_at)"
+            f" VALUES ({','.join([mark] * 7)})",
+            ("stats-el-other", other_source, "paragraph", "p1", "unrelated",
+             "{}", NOW),
+        )
+
+    element_count, total_chars = harness.catalog.source_text_stats(harness.source_id)
+    assert element_count == len(texts)
+    assert total_chars == sum(len(t) for t in texts)
+    # A different source's elements never leak into either aggregate or count.
+    assert harness.catalog.source_text_stats(other_source) == (1, len("unrelated"))
+
+    # Same row universe as preview_elements: an unbounded read's ids are
+    # exactly what source_text_stats counted.
+    all_rows, _ = harness.catalog.preview_elements(
+        harness.source_id, limit=100, text_chars=100_000
+    )
+    assert {row["id"] for row in all_rows} == {f"stats-el-{i}" for i in range(4)}
+
+    # preview_elements' own row limit does not bound the aggregate.
+    limited_rows, _ = harness.catalog.preview_elements(
+        harness.source_id, limit=1, text_chars=100_000
+    )
+    assert len(limited_rows) == 1
+    assert harness.catalog.source_text_stats(harness.source_id)[0] == 4
+
+    # preview_elements' per-row text clip does not bound the char sum: the
+    # long element is clipped in the preview read but counted in full here.
+    clipped_rows, clipped_flag = harness.catalog.preview_elements(
+        harness.source_id, limit=10, text_chars=10
+    )
+    assert clipped_flag is True
+    assert harness.catalog.source_text_stats(harness.source_id) == (
+        len(texts), sum(len(t) for t in texts)
+    )
 
 
 def test_knowhow_table_columns_never_hydrates_rows_and_raises_on_a_missing_table(

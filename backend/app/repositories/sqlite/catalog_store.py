@@ -305,6 +305,32 @@ class CatalogStore:
                     statement, values[start:start + CATALOG_MAX_CANDIDATE_BATCH]
                 )
 
+    def update_candidate_payload(
+        self,
+        candidate_id: str,
+        payload: Mapping[str, Any],
+        reject_info: Mapping[str, Any],
+    ) -> bool:
+        """Revise one still-`candidate` row's payload — see the port for why
+        this exists (v2's cross-window merge) and why it is this narrow.
+
+        Two columns, by primary key, guarded on `state='candidate'`. No
+        `updated_at`: `catalog_candidates` has no such column (only
+        `created_at`), and adding one would be a migration this feature is
+        explicitly not taking.
+        """
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE catalog_candidates SET payload=?, reject_info=? "
+                "WHERE id=? AND state='candidate'",
+                (
+                    json.dumps(dict(payload), ensure_ascii=False),
+                    json.dumps(dict(reject_info), ensure_ascii=False),
+                    str(candidate_id),
+                ),
+            )
+        return int(cursor.rowcount or 0) == 1
+
     def list_candidates(
         self, job_id: str, *, state: str, cursor: int, limit: int
     ) -> list[dict]:
@@ -504,6 +530,30 @@ class CatalogStore:
                 }
             )
         return out, clipped
+
+    def source_text_stats(self, source_id: str) -> tuple[int, int]:
+        """``(element_count, total_chars)`` over the SAME row universe
+        ``preview_elements`` reads — ``WHERE source_id=?``, no other
+        predicate — aggregated in SQL so no element text ever reaches Python.
+
+        Feeds the v2 preview's ``estimated_windows`` (windows are packed by
+        character count over the source's full text, not the bounded prefix
+        ``preview_elements`` hydrates). One indexed, bounded scan: SQLite
+        still has to visit every row of the source to sum ``LENGTH(text)``,
+        but it is a single aggregate query with zero row/byte materialization
+        back to the caller — the same "bounded scan, zero transmission"
+        contract ``preview_elements`` documents for its own read.
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS element_count, "
+                "COALESCE(SUM(LENGTH(text)),0) AS total_chars "
+                "FROM source_elements WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            return 0, 0
+        return int(row["element_count"] or 0), int(row["total_chars"] or 0)
 
 
 __all__ = ["CatalogJobAlreadyRunning", "CatalogStore"]

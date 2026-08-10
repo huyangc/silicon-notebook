@@ -132,10 +132,10 @@ def _owned_source(notebook_id: str, source_id: str):
 def command_catalog_preview(
     notebook_id: str, source_id: str
 ) -> CommandCatalogPreview:
-    """零模型调用的形状检测 + 成本预告(有界读取,数字是下界)。
+    """零模型调用的成本预告(窗口数是算术、调用数在有界前缀内精确测量)。
 
     R8:来源还没解析完(或解析失败)时同样 409。一份对着还没有元素的来源做的成本
-    预告会报出「约 0 个命令节」,读起来像「这份文档没什么可抽的」而不是「过一会
+    预告会报出「约 0 个窗口」,读起来像「这份文档没什么可抽的」而不是「过一会
     儿再来」——成本预告唯一不能出的错就是这个方向。
     """
     _owned_source(notebook_id, source_id)
@@ -146,9 +146,9 @@ def command_catalog_preview(
     return CommandCatalogPreview(
         source_id=preview.source_id,
         source_title=preview.source_title,
-        signal=preview.signal,
-        estimated_sections=preview.estimated_sections,
+        estimated_windows=preview.estimated_windows,
         estimated_calls=preview.estimated_calls,
+        skipped_windows_in_prefix=preview.skipped_windows_in_prefix,
         sampled=preview.sampled,
         element_limit=preview.element_limit,
     )
