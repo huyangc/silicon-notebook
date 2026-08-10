@@ -156,6 +156,55 @@ def test_scale_index_does_not_reconcile_legacy_json_edge_key(tmp_path):
     assert list(idx.viz_edges.rows(idx.viz_ids)) == viz_payload["edges"]
 
 
+def _save_standalone_viz(tmp_path, *, n_viz_edges, name="nb-1"):
+    viz_ids, adj, viz_deg, viz_types, viz_names, viz_payload = _arrays()
+    out = str(tmp_path / "kg_viz" / name)
+    vi.save_viz_index(out, viz_ids=viz_ids, viz_adj=adj, viz_deg=viz_deg,
+                      viz_types=viz_types, viz_names=viz_names,
+                      viz_payload=viz_payload,
+                      manifest={"version": ["v", 1], "n_viz_nodes": 3,
+                                "n_viz_edges": n_viz_edges})
+    return out
+
+
+def test_standalone_viz_reconciles_edge_count_with_manifest(tmp_path):
+    """独立 viz 产物与 scale-embedded 的一样要对账。
+
+    不对账时,一份被裁过的 viz.npz 会被当健康产物返回:viz_probe 照报 manifest
+    的边数、图请求静默缺边,而 manifest 的 version/cluster_seq 仍新鲜 → 永远
+    不触发重建。失配走该 loader 既有的「不可用」出口(None),调用方据此重建。"""
+    assert vi.load_viz_index(_save_standalone_viz(tmp_path, n_viz_edges=2)) is not None
+
+    lying = _save_standalone_viz(tmp_path, n_viz_edges=3, name="lying")
+    assert vi.load_viz_index(lying) is None
+
+    stripped = _save_standalone_viz(tmp_path, n_viz_edges=2, name="stripped")
+    viz_npz = os.path.join(stripped, "viz.npz")
+    with np.load(viz_npz, allow_pickle=True) as z:
+        kept = {k: z[k] for k in z.files if not k.startswith("viz_edge_")}
+    np.savez(viz_npz, **kept)
+    assert vi.load_viz_index(stripped) is None
+
+
+def test_standalone_viz_does_not_reconcile_legacy_json_edge_key(tmp_path):
+    """旧 JSON 边键豁免;manifest 没写过 n_viz_edges 的老产物同样放行。"""
+    _, _, _, _, _, viz_payload = _arrays()
+    legacy = _save_standalone_viz(tmp_path, n_viz_edges=99, name="legacy")
+    viz_npz = os.path.join(legacy, "viz.npz")
+    with np.load(viz_npz, allow_pickle=True) as z:
+        kept = {k: z[k] for k in z.files if not k.startswith("viz_edge_")}
+    np.savez(viz_npz, **kept, viz_edges=si.encode_viz_edges(viz_payload["edges"]))
+    idx = vi.load_viz_index(legacy)
+    assert idx is not None
+    assert list(idx.viz_edges.rows(idx.viz_ids)) == viz_payload["edges"]
+
+    countless = _save_standalone_viz(tmp_path, n_viz_edges=2, name="countless")
+    mpath = os.path.join(countless, "manifest.json")
+    with open(mpath, "w") as fh:
+        json.dump({"version": ["v", 1], "n_viz_nodes": 3}, fh)
+    assert vi.load_viz_index(countless) is not None
+
+
 def test_save_rejects_an_edge_set_built_against_a_different_node_table(tmp_path):
     """端点存的是下标;边集的 n_nodes 与要落盘的 viz_ids 对不上就是接错了节点表。"""
     viz_ids, adj, viz_deg, viz_types, viz_names, _ = _arrays()
