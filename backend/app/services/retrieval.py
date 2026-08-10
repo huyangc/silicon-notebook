@@ -829,7 +829,7 @@ def add_chunk_supports(
 def is_graph_only_chunk(chunk: "RetrievedChunk") -> bool:
     origins = {support.origin for support in chunk.retrieval_supports}
     return bool(origins & {"kg_source", "ppr", "relation"}) and not bool(
-        origins & {"semantic", "lexical", "generated_question"}
+        origins & {"semantic", "lexical"}
     )
 
 

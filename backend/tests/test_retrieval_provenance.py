@@ -48,6 +48,25 @@ def test_direct_and_graph_support_is_not_graph_only():
     assert not is_graph_only_chunk(chunk)
 
 
+def test_question_collision_preserves_graph_only_reserve_eligibility():
+    graph = _chunk(
+        "graph-question-collision", 2,
+        RetrievalSupport("ppr", "ppr", "", 0.7),
+        RetrievalSupport(
+            "generated_question", "chunk", "graph-question-collision", 0.9
+        ),
+    )
+
+    assert is_graph_only_chunk(graph)
+    ranked = [
+        _chunk("direct-1", 2, RetrievalSupport("semantic", "chunk", "direct-1", 0.9)),
+        _chunk("direct-2", 2, RetrievalSupport("lexical", "chunk", "direct-2", 0.8)),
+        graph,
+    ]
+    selected = select_with_graph_reserve(ranked, max_tokens=4, reserve=1)
+    assert [chunk.chunk_id for chunk in selected] == ["direct-1", graph.chunk_id]
+
+
 def test_graph_reserve_evicts_lowest_direct_without_exceeding_budget():
     ranked = [
         _chunk("direct-1", 3, RetrievalSupport("semantic", "chunk", "direct-1", 0.9)),
