@@ -1710,8 +1710,14 @@ class CandidateRetrievalService(_RetrievalState):
         会让这些行吃掉预算——展开数远少于配置值,而靠后的合法邻居被整个略过,且
         `visited` 禁止重复展开、这一轮丢掉就再也捡不回来。
 
+        对象状态的合格性(`USABLE_STATUSES`)同样**下推到 SQL、落在 LIMIT 之前**:
+        事后再丢弃 deprecated 之类的对象,等于让它们白占有界读取窗口,行序靠后的
+        可用邻居被整个漏掉——相对旧的无界行为那是回归。该查询本就 JOIN 了 src/tgt
+        两张 knowledge_objects,加谓词零额外成本。
+
         SQL 侧仍是有界读取,只是读取界放到 `(limit+1) × _NEIGHBOR_ROW_OVERSCAN`
-        (仓库既有的「有界过扫描」先例,见集合枚举的 `max_rows × 4`)。hydrate 仍按
+        (仓库既有的「有界过扫描」先例,见集合枚举的 `max_rows × 4`)——过扫描仍要
+        吸收重复关系与 `is_queryable_edge_pair` 这层 Python 侧过滤。hydrate 仍按
         ≤2×limit 有界:病态枢纽节点(百万边)此前会把自己的全部邻接边取回、再整批
         hydrate 对应 knowledge_objects 行。截断与否随结果返回
         (`NeighborExpansion.truncated`),由调用方披露,不静默。"""
@@ -1757,7 +1763,7 @@ class CandidateRetrievalService(_RetrievalState):
                     self.knowledge.neighbor_ids(
                         db, notebook_id, object_id,
                         endpoint="source_object_id", edge_type=edge_type,
-                        limit=read_cap,
+                        limit=read_cap, usable_statuses=USABLE_STATUSES,
                     ),
                     "target_object_id",
                 ))
@@ -1766,12 +1772,14 @@ class CandidateRetrievalService(_RetrievalState):
                     self.knowledge.neighbor_ids(
                         db, notebook_id, object_id,
                         endpoint="target_object_id", edge_type=edge_type,
-                        limit=read_cap,
+                        limit=read_cap, usable_statuses=USABLE_STATUSES,
                     ),
                     "source_object_id",
                 ))
             if not neighbour_ids:
                 return NeighborExpansion([], truncated)
+            # 保留(幂等的防御性过滤):status 已在 SQL 侧下推,这一层只在两处口径
+            # 万一分叉时兜底,绝不是本轮筛选的主力。
             rows = self.knowledge.usable_object_rows_on(
                 db, neighbour_ids, USABLE_STATUSES,
             )

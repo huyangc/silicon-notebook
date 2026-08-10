@@ -961,11 +961,16 @@ class KnowledgeStore:
 
     @staticmethod
     def neighbor_ids(db: Any, notebook_id: str, object_id: str,
-                     *, endpoint: str, edge_type=None, limit: int | None = None):
+                     *, endpoint: str, edge_type=None, limit: int | None = None,
+                     usable_statuses: Sequence[str] | None = None):
         # `limit` 非 None 时按 `r.id` 定序取前 N 行:排序键是
         # `idx_knowledge_relations_nb_source_id`/`_nb_target_id`
         # `(notebook_id, source/target_object_id, id)` 的第三列,前两列都是等值
         # 谓词,索引本身即给出该序。limit=None 逐位保持历史行为。
+        #
+        # `usable_statuses` 非空时对**邻居那一侧**的别名加 status 谓词,且必须落在
+        # LIMIT **之前**(理由与 SQLite 侧同:事后过滤等于让不可用对象白占有界读取
+        # 窗口)。两个后端必须给出同一组语义。None/空 → SQL 逐字回到历史形状。
         if endpoint not in {"source_object_id", "target_object_id"}:
             raise ValueError("invalid relation endpoint")
         statement = sql.SQL(
@@ -979,6 +984,15 @@ class KnowledgeStore:
         if edge_type:
             statement += sql.SQL(" AND edge_type=%s")
         params = [notebook_id, object_id] + ([edge_type] if edge_type else [])
+        if usable_statuses:
+            # endpoint 指的是**锚点**那一端,邻居在另一端。
+            neighbour_alias = "tgt" if endpoint == "source_object_id" else "src"
+            statuses = list(usable_statuses)
+            statement += sql.SQL(" AND {}.status IN ({})").format(
+                sql.Identifier(neighbour_alias),
+                sql.SQL(",").join(sql.Placeholder() for _ in statuses),
+            )
+            params.extend(statuses)
         if limit is not None:
             statement += sql.SQL(" ORDER BY r.id LIMIT %s")
             params.append(int(limit))
