@@ -3,23 +3,24 @@
 # repo fixture 与 app 共享同一 tmp DB（autouse conftest 清 repository() lru_cache）。
 import pytest
 from fastapi.testclient import TestClient
-from app.core.config import Settings
-from app.services.sqlite_repository import SQLiteRepository
 
 COLUMNS = [{"name": "违例类型", "role": "anchor"}, {"name": "现象识别", "role": "procedure"}]
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    return SQLiteRepository(Settings())
-
-@pytest.fixture
-def client(repo):
     from app.main import app
     return TestClient(app)
+
+@pytest.fixture
+def repo(client):
+    # Share the API's exact cached repository, not merely its SQLite path.  The
+    # latter leaves route-owned projection timers invisible to test teardown.
+    from app.api.deps import repository
+    return repository()
 
 def _login(client, username, password="pw123456"):
     client.post("/api/auth/register", json={"username": username, "password": password})
@@ -66,12 +67,8 @@ def test_move_source_cleanup_failure_returns_409_with_new_table_id(client, repo,
     None，走的正是"只删源"这条无条件必经路径——round 3 P1-1 把原来 repo.
     delete_knowhow_table 那次无条件删除换成了这个原子条件删除，故障注入点
     随之搬到这里，参见 backend/app/services/knowhow/transfer.py 的 move_table)。
-    在类上 patch（而非 `repo._runtime.knowhow_transfer_store` 实例）：这条用例
-    走 HTTP（client 触发 app 自己的请求处理路径），app 的依赖注入通过
-    app/api/deps.py 的 `@lru_cache def repository()` 解析仓库实例，与这里
-    `repo` 夹具直接构造的 SQLiteRepository(Settings()) 是两个不同的 Python
-    对象（只是共享同一个 tmp DB 文件）——patch 实例只会打中 `repo` 自己，
-    request 处理走的是另一个对象，必须 patch 类本身才能两边都命中。
+    在类上 patch，以验证所有同类 store 实例都遵循相同失败边界，而不是把
+    断言偶然绑在当前 fixture 的单个对象上。
     断言：状态码 409 + 结构化 code + new_table_id 在目标侧可解析 + 源表原封
     不动地还在——"重复不丢失"必须被诚实地捅给调用方，而不是悄悄吞掉。"""
     from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
@@ -272,35 +269,3 @@ def test_table_from_another_notebook_is_404(client, repo):
     )
     assert resp.status_code == 404, resp.text
     assert repo.get_knowhow_table(tid_in_b)["notebook_id"] == nb_b
-
-
-# ---------------------------------------------------------------------------
-# 测试间调度器排水（同 test_knowhow_transfer_service.py 尾部同名 fixture 的
-# 理由）：经路由 copy/move 同样会调度 0.5s 防抖重投影，不 settle 即结束的
-# 测试会把投影线程溢出到同 worker 后续测试，间歇性打破
-# test_get_scheduler_entry_does_not_pin_repo。收尾取消未点火 Timer 并等收敛。
-import time as _drain_time
-
-import pytest as _pytest_drain
-
-
-@_pytest_drain.fixture(autouse=True)
-def _drain_projection_scheduler(repo):
-    yield
-    from app.services.knowhow import api as _kh_api
-
-    scheduler = _kh_api._SCHEDULERS.get(repo)
-    if scheduler is None:
-        return
-    with scheduler._lock:
-        pending = list(scheduler._timers.values())
-        scheduler._timers.clear()
-        scheduler._rerun.clear()
-    for timer in pending:
-        timer.cancel()
-    deadline = _drain_time.time() + 8.0
-    while _drain_time.time() < deadline:
-        with scheduler._lock:
-            if not scheduler._running and not scheduler._timers:
-                return
-        _drain_time.sleep(0.05)

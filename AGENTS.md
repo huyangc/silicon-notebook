@@ -720,7 +720,7 @@ If any dependency is missing, install `backend/requirements.txt` into the active
 
 Chat, embedding, and rerank services are deployment-owned. `MODEL_SERVICES_CONFIG` points to a TOML file whose `[services]` entries declare protocol, endpoint, model, `api_key_env`, the physical service's sole capacity setting `max_concurrency`, and an optional chat-only fixed `top_p`; `[bindings]` maps every stable workload id from `model_registry.py` to a compatible service. A configured `top_p` overrides per-call defaults and must be included in the effective request/cache identity. Secrets live only in `.env` variables referenced by `api_key_env`. Do not restore role-specific endpoint/model/key variables or any user-owned model setting.
 
-The process watches a non-empty `MODEL_SERVICES_CONFIG` and hot-reloads changed TOML. Publish only a fully validated registry: invalid, missing, or half-written replacements keep the last valid configuration and emit a bounded credential-safe diagnostic. New calls resolve the new binding/runtime generation; already-submitted work completes on its original generation. Model status reads the live registry rather than retaining the startup snapshot. Do not make business services cache a raw physical client or bypass this reload boundary.
+The process watches a non-empty `MODEL_SERVICES_CONFIG` and hot-reloads changed TOML. The watcher must observe the same changed file signature twice before validation and atomic publish, so an in-place truncate/write save cannot publish a syntactically valid empty midpoint; explicit forced reload remains immediate. Invalid, missing, or half-written replacements keep the last valid configuration, and stable invalid versions emit a bounded credential-safe diagnostic. New calls resolve the new binding/runtime generation; already-submitted work completes on its original generation. Model status reads the live registry rather than retaining the startup snapshot. Do not make business services cache a raw physical client or bypass this reload boundary.
 
 `RuntimeModelProvider` is the process-owned access boundary. Business code requests a stable workload adapter from it; the provider resolves workload → physical service, submits through that service's one `ServiceScheduler`, then and only then invokes the reviewed raw transport. No application service, repository, batch phase, probe, or compatibility property may construct or expose a raw chat/embed/rerank client, call a provider transport directly, or introduce a second semaphore/executor as a nominal global cap.
 
@@ -779,9 +779,10 @@ checks, and frontend tests plus the typechecking production build. Node's test
 runner and Vitest are each capped at four workers so they do not oversubscribe
 the backend critical path. `next build` must keep TypeScript errors fatal
 (`ignoreBuildErrors` stays unset), and level 1 must not run the same
-`tsc --noEmit` immediately before that build. The level-1 backend lane excludes only
-the `slow` real-index/performance marker, the `architecture_contract` repository-wide
-semantic source scans, and the separately authoritative PostgreSQL tree. Run
+`tsc --noEmit` immediately before that build. The level-1 backend lane excludes
+the `slow` real-index/performance marker, the `graph_index_contract` cold graph/index
+contracts, the `architecture_contract` repository-wide semantic source scans, and the
+separately authoritative PostgreSQL tree. Run
 `scripts/check_extended.sh` for level 2: it reuses level 1 and adds the exact
 backend complement. `.github/workflows/daily-extended.yml` runs level 2 once
 daily at 18:17 UTC (02:17 Asia/Shanghai) and on manual dispatch; ordinary PRs
@@ -818,6 +819,7 @@ The Apple Silicon warm gate hard target is at most 60 seconds; CI lane timings a
 assertion for every host.
 
 Test-speed optimizations must preserve the same assertions and production defaults. The level-1 standard and level-2 extended backend marker expressions must remain exact complements, and PostgreSQL remains owned by `scripts/check_postgres.sh`; no committed test may become unreachable. Repository-wide syntax/contract discovery should parse each production file at most once per pytest process; tests of cache/container policy should use the policy object directly instead of constructing unrelated database/index artifacts; and lifecycle scripts may expose private `_SCRIPT_TEST_*` timing controls for tests while their unset production polling and timeout values remain unchanged. The autouse isolation fixture derives unique paths from each worker's existing pytest base temp rather than requesting a fresh `tmp_path` directory for every test. Concurrency tests use events/barriers for positive ordering and fairness assertions rather than depending on fixed sleeps or thread wake-up order; real-process lifecycle modules use dedicated xdist groups.
+Tests that start delayed process-global work must also cancel pending work and wait for active work to quiesce in shared teardown before repository/database fixtures close; file-local cleanup is insufficient when an HTTP route and the test can resolve different repository objects. A barrier is valid only when every submitted participant belongs to that one rendezvous generation; when work is queued in waves, drive the synchronous subject from a controller thread and release it with events after observing the intended capacity.
 Size-independent boundary branches may lower only the test-local threshold while separately asserting the shipped production floor. Tests that inspect multiple views of one immutable artifact share a single real build, and arithmetic/observability-only branch tests use the smallest owned seam instead of rebuilding that artifact; adjacent integration coverage must still build, open, and query the real artifact.
 
 ### GitHub Actions CI

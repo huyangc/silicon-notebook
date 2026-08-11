@@ -62,11 +62,14 @@ response-cache key. Omit the field for the historical per-call behavior. `top_p`
 on embedding and rerank services.
 
 The backend watches a non-empty model-services TOML and normally applies a changed file
-within about one second. Reload is validation-gated and atomic: a valid complete registry
-becomes the source for new calls, while already-submitted calls finish on their original
-service generation. A missing, half-written, or invalid replacement never clears the live
-configuration; the backend keeps the last valid registry and emits one credential-safe
-diagnostic for that file version. Correct and save the file again to trigger another attempt.
+within about two seconds. The watcher first requires the same changed file signature on two
+consecutive observations, then validates and atomically publishes it; this prevents an
+in-place truncate/write save from publishing its syntactically valid empty midpoint. A valid
+complete registry becomes the source for new calls, while already-submitted calls finish on
+their original service generation. A missing, half-written, or invalid replacement never
+clears the live configuration; the backend keeps the last valid registry and emits a
+credential-safe diagnostic for a stable invalid file version. An explicit forced reload still
+validates immediately. Correct and save the file again to trigger another watcher attempt.
 Changes to `.env` secrets alone are not watched; restart the backend, or save the TOML again,
 after changing a referenced secret. Removing `MODEL_SERVICES_CONFIG` from `.env` also still
 requires a restart because the watched path itself is selected at startup.

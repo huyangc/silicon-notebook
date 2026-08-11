@@ -557,41 +557,27 @@ def test_clear_empties_everything(tmp_path):
     assert len(c) == 0 and c.volume() == 0
 
 
-def test_differential_against_diskcache(tmp_path):
-    """与 diskcache 对照验证 **KV 语义**：put/get/覆盖/落空判定。
+def test_differential_against_reference_mapping(tmp_path):
+    """用内存映射逐步对照 put/get/覆盖/落空语义。
 
-    刻意用极大的 size_limit 让两边都不触发淘汰。**不要**把淘汰纳入对比：
-    diskcache 的 `volume()` 计的是 SQLite 文件物理页数（含 schema/WAL/freelist），
-    本实现计的是逻辑内容字节，两者量纲不同，无法互为 oracle；且 diskcache 默认
-    `disk_min_file_size=32KB`，小于该值的条目走内联存储、`size` 记账为 0，其
-    LRU-by-size 判据根本不被触发。实测把淘汰纳入对比会得到 23~37 处分歧且随 seed
-    漂移（seed 42→37、7→29、99→23），而仅比 KV 语义时 4 个 seed 全部归零。
-
-    淘汰行为由本文件其余测试独立覆盖——我们本就不认同 diskcache 的裁剪
-    语义（`cull_limit` 按固定条数剔除而非删到刚好达标），它不该充当淘汰的标准答案。
-
-    diskcache 仅作开发期参照实现，不是生产依赖——未安装即跳过。
+    容量和淘汰由本文件其余边界测试覆盖；这个随机序列只验证基础 KV 状态机，
+    因而不需要一个 CI 中未声明、长期导致整套门禁固定 skip 的外部 oracle。
     """
-    diskcache = pytest.importorskip("diskcache")
     import random
 
     rng = random.Random(42)
     no_evict = 10**9
     a = _mk(tmp_path, size_limit=no_evict, refresh_window=0)
-    b = diskcache.Cache(
-        str(tmp_path / "dc"), size_limit=no_evict,
-        eviction_policy="least-recently-used", cull_limit=1,
-    )
+    reference: dict[str, str] = {}
     mismatch = 0
     for _ in range(400):
         key = f"k{rng.randint(0, 25)}"
         if rng.random() < 0.4:
             value = "v" * rng.randint(5_000, 15_000)
             a.put(key, value)
-            b.set(key, value)
+            reference[key] = value
         else:
-            ra, rb = a.get(key), b.get(key)
+            ra, rb = a.get(key), reference.get(key)
             if (ra is None) != (rb is None) or (ra is not None and ra != rb):
                 mismatch += 1
-    b.close()
     assert mismatch == 0, f"与参照实现有 {mismatch} 处 KV 语义分歧"

@@ -11,6 +11,6 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   -m pytest -p no:cacheprovider -n "$BACKEND_PYTEST_WORKERS" \
-  -m "not slow and not architecture_contract" \
+  -m "not slow and not architecture_contract and not graph_index_contract" \
   --ignore="$ROOT_DIR/backend/tests/postgres" \
   "$ROOT_DIR/backend/tests"

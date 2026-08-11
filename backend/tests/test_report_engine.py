@@ -715,24 +715,43 @@ def test_run_sections_concurrency_caps_model_parallelism_for_database(repo, monk
         else original_parallelism(workload_id),
     )
     eng = _mk_engine(repo, _OutlineLLM())
+    # Make the database fan-out ceiling explicit.  The production default is
+    # intentionally larger and may change independently of this three-party
+    # rendezvous; leaving it implicit once created a fourth worker that waited
+    # alone for the barrier timeout while the test happened to stay green.
+    monkeypatch.setattr(eng.settings, "postgres_pool_max_size", 5)
     seen = {"max": 0, "cur": 0}
     import threading as _t
     lk = _t.Lock()
-    # 三个 worker 到齐才放行，确定性观测默认数据库扇出上限。
-    barrier = _t.Barrier(3, timeout=5)
+    saturated = _t.Event()
+    release = _t.Event()
     from app.services.reasoning_retrieval import ReasoningResult
     def _dd(nb_id, section, question, depth=None, on_step=None):
         with lk:
-            seen["cur"] += 1; seen["max"] = max(seen["max"], seen["cur"])
+            seen["cur"] += 1
+            seen["max"] = max(seen["max"], seen["cur"])
+            if seen["cur"] == 3:
+                saturated.set()
         try:
-            barrier.wait()
+            assert release.wait(timeout=5)
             return ReasoningResult()
         finally:
             with lk: seen["cur"] -= 1
     monkeypatch.setattr(eng, "_deep_dive", _dd)
     nb = _mk_nb(repo); rid = repo.create_report(nb.id, "q")
     outline = [{"title": f"S{i}", "scope": "s", "sub_queries": ["q"]} for i in range(4)]
-    eng._run_sections(nb.id, rid, outline, "q", depth=2)
+    # Drive the synchronous orchestrator from a controller thread so the test
+    # can release the first wave after it has observed the exact cap.  A cyclic
+    # barrier strands the fourth section in a second generation and turns this
+    # assertion into a five-second timeout-dependent pass.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as controller:
+        future = controller.submit(
+            eng._run_sections, nb.id, rid, outline, "q", 2
+        )
+        assert saturated.wait(timeout=5)
+        release.set()
+        future.result(timeout=5)
     assert seen["max"] == 3
 
 

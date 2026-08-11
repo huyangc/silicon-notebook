@@ -18,9 +18,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.config import Settings
 from app.services.knowhow.api import ProjectionScheduler
-from app.services.sqlite_repository import SQLiteRepository
 
 
 @pytest.fixture
@@ -29,7 +27,11 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    return SQLiteRepository(Settings())
+    # Use the exact cached repository resolved by the API.  A second repository
+    # pointed at the same SQLite file races route-owned projection timers and
+    # has produced intermittent FK failures under CI load.
+    from app.api.deps import repository
+    return repository()
 
 
 def _client(tmp_path, monkeypatch):

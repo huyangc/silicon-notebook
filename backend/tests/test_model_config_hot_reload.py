@@ -30,7 +30,11 @@ class _EventLog:
 
     def emit(self, event: dict) -> None:
         self.events.append(event)
-        if event.get("kind") == "model_config_reload" and event.get("status") == "ok":
+        if (
+            event.get("kind") == "model_config_reload"
+            and event.get("status") == "ok"
+            and event.get("service_count") == 1
+        ):
             self.reloaded.set()
 
 
@@ -107,6 +111,38 @@ def test_background_hot_reload_reroutes_an_existing_workload_adapter(
         provider.close()
 
     assert delegates and all(delegate.closed for delegate in delegates)
+
+
+def test_watcher_waits_for_a_stable_file_signature_before_publish(
+    monkeypatch, tmp_path
+):
+    """A truncate-then-write update must never publish its empty midpoint."""
+    monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
+    path = tmp_path / "model-services.toml"
+    path.write_text(
+        _config(service_id="first", model="model-one", top_p=1.0),
+        encoding="utf-8",
+    )
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, model_services_config=str(path)),
+        _EventLog(),
+        chat_factory=lambda service: _ChatDelegate(service, []),
+    )
+    try:
+        path.write_text("", encoding="utf-8")
+        assert provider.reload_if_changed() is False
+        assert provider.chat("ask_answer").model == "model-one"
+
+        path.write_text(
+            _config(service_id="second", model="model-two", top_p=0.95),
+            encoding="utf-8",
+        )
+        assert provider.reload_if_changed() is False
+        assert provider.chat("ask_answer").model == "model-one"
+        assert provider.reload_if_changed() is True
+        assert provider.chat("ask_answer").model == "model-two"
+    finally:
+        provider.close()
 
 
 def test_invalid_hot_reload_keeps_last_valid_registry(monkeypatch, tmp_path):
