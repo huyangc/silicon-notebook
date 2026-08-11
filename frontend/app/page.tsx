@@ -6200,10 +6200,27 @@ export default function Home() {
                         if (res.queued === 0) {
                           setBackfillingMeta(false);
                           setToast("论文信息已是最新，无需补全");
-                          // 显示门数据已漂移(按钮显示着但确无活可干):刷新单库快照,
-                          // 让 paper_meta_missing=false 当场收起按钮。守住「没切库」即可。
+                          // 显示门数据已漂移(按钮显示着但确无活可干):单库快照与可见
+                          // 来源页**都**要刷——showPaperMetaBackfill 取两者并集,别的
+                          // 标签页补完时本页 sources 里陈旧的 paper_meta_status=
+                          // "missing" 行会压过 paper_meta_missing=false,只刷快照按钮
+                          // 收不起来(codex R1 P2)。翻页/搜索/切库守卫与上方补全完成
+                          // 轮询同一套(refs + workspaceEpoch)。
                           getNotebook(currentNotebookId).then((refreshed) => {
                             setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
+                          }).catch(() => {});
+                          const nb = currentNotebookId;
+                          const workspaceEpoch = workspaceEpochRef.current;
+                          loadSourcesPage(nb, {
+                            page: sourcesPageRef.current,
+                            q: sourceQueryRef.current,
+                            guard: () => workspaceRequestIsCurrent(
+                              false,
+                              workspaceEpoch,
+                              workspaceEpochRef.current,
+                              nb,
+                              activeNotebookIdRef.current,
+                            ),
                           }).catch(() => {});
                         } else {
                           setToast(`已提交 ${res.queued} 篇论文的信息补全`);
