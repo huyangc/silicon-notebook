@@ -2,10 +2,11 @@ import asyncio
 import json
 from typing import List
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
+    _bearer_token,
     admin_query_repository,
     get_current_user,
     identity_repository,
@@ -13,9 +14,14 @@ from app.api.deps import (
     model_status_service,
     notebook_catalog_repository,
     repository,
+    user_error,
 )
 from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
-from app.models.identity import UiModeUpdate, UserProfile
+from app.models.identity import PasswordChangeRequest, UiModeUpdate, UserProfile
+from app.repositories.identity_errors import (
+    BuiltinAdminPasswordError,
+    PasswordMismatchError,
+)
 from app.models.model_services import ModelServicesStatus
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
@@ -65,6 +71,30 @@ def update_my_ui_mode(
     """自助切换界面模式偏好("auto"|"advanced")；只写调用者自己的 user_profiles
     行，不做 admin 校验。合法值由 pydantic Literal 在到达这里之前已经拒绝。"""
     return identity_repository().set_user_ui_mode(user.id, payload.ui_mode)
+
+
+@router.patch("/me/password", status_code=204)
+def update_my_password(
+    payload: PasswordChangeRequest,
+    request: Request,
+    user: UserProfile = Depends(get_current_user),
+) -> None:
+    """自助修改密码：校验当前密码后更新，并吊销本用户其他会话（保留当前会话）。
+    空白新密码在这里就地拒绝，store 里的 ValueError 只是防御——不再宽 catch
+    ValueError，避免把 verify 阶段的意外错误(如损坏的 salt)误报成「新密码不能为空」。"""
+    if not payload.new_password.strip():
+        raise user_error(400, "新密码不能为空")
+    token = _bearer_token(request)
+    try:
+        identity_repository().change_user_password(
+            user.id, payload.old_password, payload.new_password, keep_token=token or None
+        )
+    except BuiltinAdminPasswordError:
+        raise user_error(409, "内置管理员密码由部署配置决定，请修改环境变量后重启生效")
+    except PasswordMismatchError:
+        raise user_error(400, "当前密码不正确")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="User not found")
 
 
 @router.get("/system/config", response_model=SystemConfiguration)

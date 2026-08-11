@@ -10,6 +10,8 @@ from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
+    BuiltinAdminPasswordError,
+    PasswordMismatchError,
     SelfDemotionError,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -92,7 +94,9 @@ class IdentityStore:
             ui_mode=ui_mode,
         )
 
-    def create_user(self, username: str, password: str) -> UserProfile:
+    def _create_user_in_txn(self, db, username: str, password: str) -> UserProfile:
+        """在调用方已打开的写事务内建用户+profile。供 create_user 与
+        register_user_with_session 共用,后者要求「建用户+发首个会话」原子。"""
         from app.services.auth_utils import hash_password, is_valid_username, normalize_username
 
         if not is_valid_username(username):
@@ -102,28 +106,52 @@ class IdentityStore:
         now = _now()
         pw_hash, pw_salt, pw_iters = hash_password(password)
         email = f"{norm}@users.silicon-notebook.local"
+        exists = db.execute(
+            "SELECT 1 FROM users WHERE username = ?", (norm,)
+        ).fetchone()
+        if exists:
+            raise ValueError("username already exists")
+        db.execute(
+            "INSERT INTO users (id, email, display_name, role, status, username, "
+            "password_hash, password_salt, password_iterations, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
+            (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
+        )
+        db.execute(
+            "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
+            "VALUES (?, ?, 'manual', '[]', ?, ?)",
+            (f"profile-{user_id}", user_id, now, now),
+        )
+        user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        profile = db.execute(
+            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return self._user_profile(user, profile)
+
+    def _insert_session_in_txn(self, db, user_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = _now()
+        db.execute(
+            "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (token, user_id, now, _session_expiry(), now),
+        )
+        return token
+
+    def create_user(self, username: str, password: str) -> UserProfile:
         with self.database.write() as db:
-            exists = db.execute(
-                "SELECT 1 FROM users WHERE username = ?", (norm,)
-            ).fetchone()
-            if exists:
-                raise ValueError("username already exists")
-            db.execute(
-                "INSERT INTO users (id, email, display_name, role, status, username, "
-                "password_hash, password_salt, password_iterations, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
-                (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
-            )
-            db.execute(
-                "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
-                "VALUES (?, ?, 'manual', '[]', ?, ?)",
-                (f"profile-{user_id}", user_id, now, now),
-            )
-            user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            profile = db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
-            ).fetchone()
-            return self._user_profile(user, profile)
+            return self._create_user_in_txn(db, username, password)
+
+    def register_user_with_session(
+        self, username: str, password: str
+    ) -> tuple[UserProfile, str]:
+        """注册+发首个会话在同一写事务(codex R2 P2):拆开的 create_user +
+        create_session 会让管理员重置恰好落在两次提交之间——重置的 DELETE 扫不到
+        任何会话,注册随后插入的会话带着已被重置的密码活下来。原子化后重置只能
+        排在整个注册之前(目标不存在,404)或之后(会话已在,吊销扫得到)。"""
+        with self.database.write() as db:
+            profile = self._create_user_in_txn(db, username, password)
+            return (profile, self._insert_session_in_txn(db, profile.id))
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         from app.services.auth_utils import normalize_username, verify_password
@@ -147,16 +175,40 @@ class IdentityStore:
             ).fetchone()
             return self._user_profile(user, profile)
 
-    def create_session(self, user_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = _now()
+    def login_with_password(
+        self, username: str, password: str
+    ) -> "tuple[UserProfile, str] | None":
+        """密码登录:验证与建会话在**同一写事务**内完成(codex R1 P1)。拆开的
+        authenticate_user + create_session 与改密/重置存在竞态——旧密码在吊销
+        DELETE 提交前完成验证、之后再插会话,该会话就带着已作废的密码活下来。
+        同一写事务让登录与改密在同一把写锁上串行:登录排在改密前,它插的会话
+        会被改密事务的 DELETE 带走;排在后,旧密码直接验证失败。verify 的
+        PBKDF2(~30ms)因此进了写锁——登录低频,原子性优先(与改密同一取舍)。"""
+        from app.services.auth_utils import normalize_username, verify_password
+
+        norm = normalize_username(username)
         with self.database.write() as db:
-            db.execute(
-                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (token, user_id, now, _session_expiry(), now),
-            )
-        return token
+            self.database.begin_immediate(db)
+            user = db.execute(
+                "SELECT * FROM users WHERE username = ?", (norm,)
+            ).fetchone()
+            if user is None:
+                return None
+            if not verify_password(
+                password,
+                user["password_hash"],
+                user["password_salt"],
+                user["password_iterations"],
+            ):
+                return None
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)
+            ).fetchone()
+            return (self._user_profile(user, profile), self._insert_session_in_txn(db, user["id"]))
+
+    def create_session(self, user_id: str) -> str:
+        with self.database.write() as db:
+            return self._insert_session_in_txn(db, user_id)
 
     def resolve_session(self, token: str) -> UserProfile | None:
         if not token:
@@ -280,6 +332,96 @@ class IdentityStore:
                 "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
             ).fetchone()
             return self._user_profile(user, profile)
+
+    def change_user_password(
+        self,
+        user_id: str,
+        old_password: str,
+        new_password: str,
+        *,
+        keep_token: "str | None" = None,
+    ) -> None:
+        """自助改密:校验调用者自己提供的旧密码后写入新密码,并吊销该用户除
+        `keep_token`(默认当前请求所带的会话)之外的全部会话——防止旧密码泄露的
+        场景下,攻击者持有的旧会话在改密后继续有效。吊销范围只有浏览器会话
+        (auth_sessions);Agent 长期凭据(agent_access_tokens)刻意不动,改密不该
+        打断已授权的外部集成。内置管理员(user-local)拒绝:它的密码每次启动都被
+        seed 按 settings.admin_password 重写,在线改了也会在下次重启被静默回滚。"""
+        from app.services.auth_utils import hash_password, verify_password
+
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        # 新密码哈希不依赖事务内状态,提前算好少持约一半写锁时间;旧密码 verify
+        # 必须留在事务内(要读当前行 + 原子的「校验-写入」),这 ~30ms 的 PBKDF2
+        # 持锁是刻意取舍——改密低频,原子性优先。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            row = db.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(user_id)
+            if not verify_password(
+                old_password,
+                row["password_hash"],
+                row["password_salt"],
+                row["password_iterations"],
+            ):
+                raise PasswordMismatchError("wrong password")
+            now = _now()
+            db.execute(
+                "UPDATE users SET password_hash = ?, password_salt = ?, "
+                "password_iterations = ?, updated_at = ? WHERE id = ?",
+                (pw_hash, pw_salt, pw_iters, now, user_id),
+            )
+            db.execute(
+                "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
+                (user_id, keep_token or ""),
+            )
+
+    def admin_reset_user_password(
+        self, actor_id: str, user_id: str, new_password: str
+    ) -> dict[str, str]:
+        """管理员重置某用户密码;目标用户的浏览器会话(auth_sessions)全部吊销,
+        须用新密码重新登录(Agent 长期凭据 agent_access_tokens 刻意不动)。
+        授权在写事务内按 actor 现时角色复检(镜像 set_user_role)。内置管理员
+        (user-local)拒绝——理由同 change_user_password。"""
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        from app.services.auth_utils import hash_password
+
+        # 与 change_user_password 同理:哈希提前算,少持写锁。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            actor = db.execute(
+                "SELECT role FROM users WHERE id = ?", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id, username FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            now = _now()
+            db.execute(
+                "UPDATE users SET password_hash = ?, password_salt = ?, "
+                "password_iterations = ?, updated_at = ? WHERE id = ?",
+                (pw_hash, pw_salt, pw_iters, now, user_id),
+            )
+            db.execute(
+                "DELETE FROM auth_sessions WHERE user_id = ?", (user_id,)
+            )
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+            }
 
     # ---- 每笔记本文档数量上限:配额解析 ----
     def _global_default_from(self, db) -> int:

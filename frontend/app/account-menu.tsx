@@ -3,6 +3,7 @@ import {
   BarChart3,
   Bookmark,
   ChevronDown,
+  KeyRound,
   LogOut,
   SlidersHorizontal,
 } from "lucide-react";
@@ -14,10 +15,13 @@ type AccountMenuProps = {
   initials: string;
   memoryActive: boolean;
   showAdminUsage: boolean;
+  /** 内置管理员(密码由部署配置派生)不显示「修改密码」入口——后端对它一律 409。 */
+  canChangePassword: boolean;
   /** 当前是否为高级模式；开关渲染其开/关态，点击调用 onToggleAdvancedMode。 */
   advancedMode: boolean;
   onOpenMemory: () => void;
   onToggleAdvancedMode: () => void;
+  onChangePassword: () => void;
   onLogout: () => void | Promise<void>;
 };
 
@@ -28,9 +32,11 @@ export function AccountMenu({
   initials,
   memoryActive,
   showAdminUsage,
+  canChangePassword,
   advancedMode,
   onOpenMemory,
   onToggleAdvancedMode,
+  onChangePassword,
   onLogout,
 }: AccountMenuProps) {
   const [open, setOpen] = useState(false);
@@ -120,6 +126,20 @@ export function AccountMenu({
             <span>高级模式</span>
             <span className="user-menu-state">{advancedMode ? "已开启" : "已关闭"}</span>
           </button>
+          {canChangePassword && (
+            <button
+              className="user-logout"
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onChangePassword();
+              }}
+            >
+              <KeyRound size={16} />
+              <span>修改密码</span>
+            </button>
+          )}
           {showAdminUsage && (
             <a
               className="user-logout"

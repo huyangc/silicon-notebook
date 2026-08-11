@@ -1,9 +1,10 @@
 import asyncio
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.deps import (
+    _bearer_token,
     admin_query_repository,
     get_current_user,
     model_status_service,
@@ -19,6 +20,8 @@ from app.models.admin import (
     ActivityReport,
     ActivityResponse,
     ActivitySource,
+    AdminPasswordResetRequest,
+    AdminPasswordResetResult,
     AdminUserNotebook,
     AdminUserRoleResult,
     AdminUserRoleUpdate,
@@ -43,6 +46,7 @@ from app.services.model_status import ModelStatusService
 from app.services.source_display import source_display_title
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
+    BuiltinAdminPasswordError,
     SelfDemotionError,
 )
 from app.services.pending_bus import pending_bus
@@ -188,6 +192,37 @@ def update_admin_user_role(
     except SelfDemotionError:
         raise user_error(409, "不能撤销当前账户的管理员权限")
     return AdminUserRoleResult(**result)
+
+
+@router.post(
+    "/admin/users/{user_id}/reset-password", response_model=AdminPasswordResetResult
+)
+def reset_admin_user_password(
+    user_id: str,
+    payload: AdminPasswordResetRequest,
+    request: Request,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminPasswordResetResult:
+    """管理员重置某用户密码；目标用户的浏览器会话全部吊销，需用新密码重新登录。
+    auth_optional 部署的匿名回退(无 token 即视作种子管理员)不放行——改密是
+    锁死型操作，当事人无法自救，必须由真实登录的管理员会话发起。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可重置用户密码")
+    if not _bearer_token(request):
+        raise user_error(403, "请先登录管理员账户再重置用户密码")
+    if not payload.new_password.strip():
+        raise user_error(400, "新密码不能为空")
+    try:
+        result = identity_repository().admin_reset_user_password(
+            user.id, user_id, payload.new_password
+        )
+    except BuiltinAdminPasswordError:
+        raise user_error(409, "内置管理员密码由部署配置决定，请修改环境变量后重启生效")
+    except PermissionError:
+        raise user_error(403, "仅管理员可重置用户密码")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="User not found")
+    return AdminPasswordResetResult(**result)
 
 
 @router.get(

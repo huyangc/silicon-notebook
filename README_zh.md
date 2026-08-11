@@ -79,7 +79,7 @@ MODEL_SERVICES_CONFIG=
 npm run dev
 ```
 
-浏览器打开 <http://127.0.0.1:3000>。全新数据库会创建内置 `admin` 账号，本地默认密码为 `admin`；绑定到非回环地址时必须配置非默认的 `SILICON_NOTEBOOK_ADMIN_PASSWORD`。
+浏览器打开 <http://127.0.0.1:3000>。全新数据库会创建内置 `admin` 账号，本地默认密码为 `admin`；绑定到非回环地址时必须配置非默认的 `SILICON_NOTEBOOK_ADMIN_PASSWORD`。用户可在头像菜单自助修改密码，管理员可在用户使用总览重置用户密码（内置 `admin` 的密码仍由环境变量决定）。
 
 启动会迁移当前选中的数据存储。默认值是 `DATABASE_URL=sqlite:///.local/silicon_notebook.db`；已准备好的 PostgreSQL 16 数据库可改用 `DATABASE_URL=postgresql://user:password@host:5432/database`。
 

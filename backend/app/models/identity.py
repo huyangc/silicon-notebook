@@ -97,3 +97,10 @@ class AuthRequest(BaseModel):
 class AuthResult(BaseModel):
     token: str
     user: UserProfile
+
+
+class PasswordChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    old_password: str
+    new_password: str

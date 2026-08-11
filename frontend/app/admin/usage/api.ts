@@ -89,6 +89,21 @@ export async function updateAdminUserUploadLimit(
   return res.json();
 }
 
+export type AdminPasswordReset = { id: string; username: string };
+
+// 管理员重置目标用户的密码。镜像 updateAdminUserRole 的 403 哨兵分流 + 人话层
+// 错误处理;成功后目标用户全部会话被吊销,需用新密码重新登录(仅后端行为,
+// 这里不做额外处理)。
+export async function resetAdminUserPassword(userId: string, newPassword: string): Promise<AdminPasswordReset> {
+  const res = await performApiRequest(
+    `/admin/users/${encodeURIComponent(userId)}/reset-password`,
+    { tag: "admin", method: "POST", body: JSON.stringify({ new_password: newPassword }) },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  return res.json();
+}
+
 export async function fetchUploadLimitDefault(): Promise<number> {
   const res = await performApiRequest("/admin/settings/upload-limit-default", { tag: "admin" });
   if (res.status === 403) await throwForbiddenSentinel(res);

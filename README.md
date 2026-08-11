@@ -80,7 +80,7 @@ Deep Report rails and API behavior live in the product/API reference.
 npm run dev
 ```
 
-Open <http://127.0.0.1:3000>. A fresh database creates the built-in `admin` account; the local default password is `admin`. Binding to a non-loopback address requires a non-default `SILICON_NOTEBOOK_ADMIN_PASSWORD`.
+Open <http://127.0.0.1:3000>. A fresh database creates the built-in `admin` account; the local default password is `admin`. Binding to a non-loopback address requires a non-default `SILICON_NOTEBOOK_ADMIN_PASSWORD`. Users change their own password from the avatar menu; administrators reset a user's password from the user-usage page (the built-in `admin` password stays environment-derived).
 
 Startup migrates the selected datastore. The default is `DATABASE_URL=sqlite:///.local/silicon_notebook.db`; a provisioned PostgreSQL 16 database may instead use `DATABASE_URL=postgresql://user:password@host:5432/database`.
 

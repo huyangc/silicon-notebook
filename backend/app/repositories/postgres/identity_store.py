@@ -12,6 +12,8 @@ from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
+    BuiltinAdminPasswordError,
+    PasswordMismatchError,
     SelfDemotionError,
 )
 from app.repositories.postgres._store_utils import (
@@ -78,7 +80,10 @@ class IdentityStore:
             ui_mode=ui_mode,
         )
 
-    def create_user(self, username: str, password: str) -> UserProfile:
+    def _create_user_in_txn(self, connection, username: str, password: str):
+        """在调用方已打开的写事务内建用户+profile,返回 (user_row, profile_row)。
+        供 create_user 与 register_user_with_session 共用。UniqueViolation 的
+        翻译留在公开方法(异常在 execute 时抛出,穿过本 helper 上抛)。"""
         from app.services.auth_utils import hash_password, is_valid_username, normalize_username
 
         if not is_valid_username(username):
@@ -87,36 +92,67 @@ class IdentityStore:
         user_id = f"user-{uuid4().hex}"
         now = utc_now()
         password_hash, password_salt, iterations = hash_password(password)
+        user = connection.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,role,status,username,password_hash,password_salt,"
+            "password_iterations,created_at,updated_at) "
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s) RETURNING *",
+            (
+                user_id,
+                f"{normalized}@users.silicon-notebook.local",
+                normalized,
+                normalized,
+                password_hash,
+                password_salt,
+                iterations,
+                now,
+                now,
+            ),
+        ).fetchone()
+        profile = connection.execute(
+            "INSERT INTO user_profiles "
+            "(id,user_id,memory_mode,domain_focus,created_at,updated_at) "
+            "VALUES (%s,%s,'manual',%s,%s,%s) RETURNING *",
+            (f"profile-{user_id}", user_id, jsonb([]), now, now),
+        ).fetchone()
+        return user, profile
+
+    def _insert_session_in_txn(self, connection, user_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = utc_now()
+        connection.execute(
+            "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (token, user_id, now, now + timedelta(days=30), now),
+        )
+        return token
+
+    def create_user(self, username: str, password: str) -> UserProfile:
         try:
             with self.database.write() as connection:
-                user = connection.execute(
-                    "INSERT INTO users "
-                    "(id,email,display_name,role,status,username,password_hash,password_salt,"
-                    "password_iterations,created_at,updated_at) "
-                    "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s) RETURNING *",
-                    (
-                        user_id,
-                        f"{normalized}@users.silicon-notebook.local",
-                        normalized,
-                        normalized,
-                        password_hash,
-                        password_salt,
-                        iterations,
-                        now,
-                        now,
-                    ),
-                ).fetchone()
-                profile = connection.execute(
-                    "INSERT INTO user_profiles "
-                    "(id,user_id,memory_mode,domain_focus,created_at,updated_at) "
-                    "VALUES (%s,%s,'manual',%s,%s,%s) RETURNING *",
-                    (f"profile-{user_id}", user_id, jsonb([]), now, now),
-                ).fetchone()
+                user, profile = self._create_user_in_txn(connection, username, password)
         except errors.UniqueViolation as exc:
             if exc.diag.constraint_name in {"idx_users_username", "uq_users_email"}:
                 raise ValueError("username already exists") from exc
             raise
         return self._user_profile(user, profile)
+
+    def register_user_with_session(
+        self, username: str, password: str
+    ) -> tuple[UserProfile, str]:
+        """注册+发首个会话在同一写事务(codex R2 P2):拆开的 create_user +
+        create_session 会让管理员重置恰好落在两次提交之间——重置的 DELETE 扫不到
+        任何会话,注册随后插入的会话带着已被重置的密码活下来。语义与 SQLite 侧
+        逐字一致。"""
+        try:
+            with self.database.write() as connection:
+                user, profile = self._create_user_in_txn(connection, username, password)
+                token = self._insert_session_in_txn(connection, user["id"])
+        except errors.UniqueViolation as exc:
+            if exc.diag.constraint_name in {"idx_users_username", "uq_users_email"}:
+                raise ValueError("username already exists") from exc
+            raise
+        return (self._user_profile(user, profile), token)
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         from app.services.auth_utils import normalize_username, verify_password
@@ -137,16 +173,37 @@ class IdentityStore:
             ).fetchone()
         return self._user_profile(user, profile)
 
+    def login_with_password(
+        self, username: str, password: str
+    ) -> "tuple[UserProfile, str] | None":
+        """密码登录:验证与建会话在同一写事务内、对 users 行 FOR UPDATE(codex
+        R1 P1)。改密/重置同样先 FOR UPDATE 该行,两者因此在行锁上串行——登录
+        排在改密前,插的会话会被改密的 DELETE 带走;排在后,旧密码直接失败。
+        语义与 SQLite 侧逐字一致。"""
+        from app.services.auth_utils import normalize_username, verify_password
+
+        with self.database.write() as db:
+            user = db.execute(
+                "SELECT * FROM users WHERE username=%s FOR UPDATE",
+                (normalize_username(username),),
+            ).fetchone()
+            if user is None:
+                return None
+            if not verify_password(
+                password,
+                user["password_hash"],
+                user["password_salt"],
+                user["password_iterations"],
+            ):
+                return None
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id=%s", (user["id"],)
+            ).fetchone()
+            return (self._user_profile(user, profile), self._insert_session_in_txn(db, user["id"]))
+
     def create_session(self, user_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = utc_now()
         with self.database.write() as connection:
-            connection.execute(
-                "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
-                "VALUES (%s,%s,%s,%s,%s)",
-                (token, user_id, now, now + timedelta(days=30), now),
-            )
-        return token
+            return self._insert_session_in_txn(connection, user_id)
 
     def resolve_session(self, token: str) -> UserProfile | None:
         if not token:
@@ -219,19 +276,30 @@ class IdentityStore:
                     labels[row["id"]] = username or display_name or row["id"]
         return labels
 
+    def _lock_actor_and_target(self, db, actor_id: str, user_id: str):
+        """管理员对目标用户的写路径统一按 id 序一次锁齐 actor/target 两行
+        (codex R2/R3):逐行 FOR UPDATE 的「先 actor 后 target」在两个管理员
+        互相操作、或同一管理员的两条不同 admin 路径并发时,会以相反顺序等待
+        对方持有的行而死锁。ORDER BY id 让所有 admin 变更(角色/文档上限/
+        密码重置)共用同一加锁顺序;actor==target 时 IN 去重命中同一行。
+        actor 缺失或非 admin → PermissionError;返回 (actor_row, target_row|None),
+        目标缺失由调用方按各自语义处理(通常 KeyError → 404)。"""
+        rows = db.execute(
+            "SELECT id,username,role FROM users WHERE id IN (%s,%s) "
+            "ORDER BY id FOR UPDATE",
+            (actor_id, user_id),
+        ).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        actor = by_id.get(actor_id)
+        if actor is None or actor["role"] != "admin":
+            raise PermissionError("admin role required")
+        return actor, by_id.get(user_id)
+
     def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]:
         if role not in {"admin", "user"}:
             raise ValueError("invalid role")
         with self.database.write() as db:
-            actor = db.execute(
-                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
-            ).fetchone()
-            if actor is None or actor["role"] != "admin":
-                raise PermissionError("admin role required")
-            target = db.execute(
-                "SELECT id,username,role FROM users WHERE id=%s FOR UPDATE",
-                (user_id,),
-            ).fetchone()
+            _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
             if target is None:
                 raise KeyError(user_id)
             if role == "user" and user_id == "user-local":
@@ -280,6 +348,78 @@ class IdentityStore:
                     (f"profile-{user_id}", user_id, jsonb([]), ui_mode, now, now),
                 ).fetchone()
             return self._user_profile(user, profile)
+
+    def change_user_password(
+        self,
+        user_id: str,
+        old_password: str,
+        new_password: str,
+        *,
+        keep_token: "str | None" = None,
+    ) -> None:
+        """自助改密:校验调用者自己提供的旧密码后写入新密码,并吊销该用户除
+        `keep_token`(默认当前请求所带的会话)之外的全部会话。吊销范围只有浏览器
+        会话(auth_sessions),Agent 长期凭据刻意不动;内置管理员(user-local)拒绝
+        ——它的密码每次启动都被 seed 重写,语义与 SQLite 侧逐字一致。"""
+        from app.services.auth_utils import hash_password, verify_password
+
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        # 新密码哈希不依赖事务内状态,提前算好缩短持锁时间(镜像 SQLite 侧)。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT * FROM users WHERE id=%s FOR UPDATE", (user_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(user_id)
+            if not verify_password(
+                old_password,
+                row["password_hash"],
+                row["password_salt"],
+                row["password_iterations"],
+            ):
+                raise PasswordMismatchError("wrong password")
+            db.execute(
+                "UPDATE users SET password_hash=%s,password_salt=%s,"
+                "password_iterations=%s,updated_at=%s WHERE id=%s",
+                (pw_hash, pw_salt, pw_iters, utc_now(), user_id),
+            )
+            db.execute(
+                "DELETE FROM auth_sessions WHERE user_id=%s AND token!=%s",
+                (user_id, keep_token or ""),
+            )
+
+    def admin_reset_user_password(
+        self, actor_id: str, user_id: str, new_password: str
+    ) -> dict[str, str]:
+        """管理员重置某用户密码;目标用户的浏览器会话(auth_sessions)全部吊销,
+        须用新密码重新登录(Agent 长期凭据刻意不动)。授权在写事务内按 actor
+        现时角色复检(镜像 set_user_role);内置管理员(user-local)拒绝。"""
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        from app.services.auth_utils import hash_password
+
+        # 镜像 change_user_password:哈希提前算,缩短持锁时间。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
+            if target is None:
+                raise KeyError(user_id)
+            db.execute(
+                "UPDATE users SET password_hash=%s,password_salt=%s,"
+                "password_iterations=%s,updated_at=%s WHERE id=%s",
+                (pw_hash, pw_salt, pw_iters, utc_now(), user_id),
+            )
+            db.execute("DELETE FROM auth_sessions WHERE user_id=%s", (user_id,))
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+            }
 
     def _global_default_from(self, db) -> int:
         row = db.execute(
@@ -348,14 +488,7 @@ class IdentityStore:
         if value is not None and not _DOCUMENT_LIMIT_MIN <= value <= _DOCUMENT_LIMIT_MAX:
             raise ValueError("document limit out of range")
         with self.database.write() as db:
-            actor = db.execute(
-                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
-            ).fetchone()
-            if actor is None or actor["role"] != "admin":
-                raise PermissionError("admin role required")
-            target = db.execute(
-                "SELECT id,username FROM users WHERE id=%s FOR UPDATE", (user_id,)
-            ).fetchone()
+            _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
             if target is None:
                 raise KeyError(user_id)
             cursor = db.execute(

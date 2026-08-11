@@ -107,6 +107,27 @@ test("降级解析提示提供显式重新解析与删除操作", () => {
 });
 
 
+// 评审 P2:「修改密码」的两截接线(菜单回调打开 + 条件渲染弹窗)各自被删都不会
+// 让任何组件测试报红——组件测试只测 AccountMenu / PasswordChangeModal 自身。
+// 这条把 page.tsx 的接线钉住:回调绑定、内置管理员隐藏入口的谓词、弹窗恰好
+// 渲染一次且 onClose 关掉同一个 state。
+test("修改密码弹窗在 page 接线:菜单回调打开、内置管理员隐藏、onClose 复位", () => {
+  assert.deepEqual(
+    importsFrom(page, "./password-change-modal").map((item) => item.imported),
+    ["PasswordChangeModal"],
+  );
+  const modals = jsxElements(page, "PasswordChangeModal");
+  assert.equal(modals.length, 1);
+  assert.deepEqual(modals[0].bindings, {
+    onClose: "() => setPasswordModalOpen(false)",
+  });
+  const menus = jsxElements(page, "AccountMenu");
+  assert.equal(menus.length, 1);
+  assert.equal(menus[0].bindings.onChangePassword, "() => setPasswordModalOpen(true)");
+  assert.equal(menus[0].bindings.canChangePassword, 'currentUser.id !== "user-local"');
+});
+
+
 test("source detail uses the dedicated draggable window shell", () => {
   assert.deepEqual(
     importsFrom(page, "./source-detail-window").map((item) => item.imported),

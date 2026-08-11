@@ -10,6 +10,7 @@ import {
   fetchOnlineIds,
   fetchUploadLimitDefault,
   FORBIDDEN_SENTINEL,
+  resetAdminUserPassword,
   updateAdminUserRole,
   updateAdminUserUploadLimit,
   updateUploadLimitDefault,
@@ -256,6 +257,10 @@ export default function AdminUsagePage() {
   const [limitInput, setLimitInput] = useState("");
   const [limitPendingId, setLimitPendingId] = useState("");
   const [limitNotice, setLimitNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
+  const [resettingId, setResettingId] = useState("");
+  const [resetInput, setResetInput] = useState("");
+  const [resetPendingId, setResetPendingId] = useState("");
+  const [resetNotice, setResetNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
   const [sortKey, setSortKey] = useState<AdminUserSortKey>("created_at");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [page, setPage] = useState(1);
@@ -419,10 +424,41 @@ export default function AdminUsagePage() {
     void submitLimitChange(target, parsed);
   }
 
+  // 镜像 submitRoleChange 的哨兵分流 + 人话层错误;成功后目标用户全部会话被
+  // 吊销(纯后端行为,这里只负责收起编辑态并给出提示)。
+  async function submitResetPassword(target: AdminUserUsage) {
+    if (!resetInput.trim()) {
+      setResetNotice({ kind: "error", message: "请输入新密码" });
+      return;
+    }
+    setResetPendingId(target.id);
+    setResetNotice(null);
+    try {
+      const updated = await resetAdminUserPassword(target.id, resetInput);
+      setResettingId("");
+      setResetInput("");
+      setResetNotice({
+        kind: "ok",
+        message: `已重置 ${updated.username} 的密码，该用户需用新密码重新登录`,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === FORBIDDEN_SENTINEL) {
+        setState({ kind: "forbidden" });
+        return;
+      }
+      setResetNotice({ kind: "error", message: toUserMessage(error, "密码重置失败，请稍后重试") });
+    } finally {
+      setResetPendingId("");
+    }
+  }
+
   function resetRowInteractions() {
     setExpanded(null);
     setConfirmingRole(null);
     setEditingLimitId("");
+    setResettingId("");
+    // 收起编辑态时同步清掉已输入的明文新密码,别让凭据在 state 里过夜。
+    setResetInput("");
   }
 
   function changeSort(nextKey: AdminUserSortKey) {
@@ -492,6 +528,11 @@ export default function AdminUsagePage() {
           {limitNotice.message}
         </div>
       )}
+      {resetNotice && (
+        <div className={`usage-role-notice usage-role-notice-${resetNotice.kind}`} role="status">
+          {resetNotice.message}
+        </div>
+      )}
       <div className="usage-table-wrap">
         <table className="usage-table">
           <thead>
@@ -507,6 +548,7 @@ export default function AdminUsagePage() {
               <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <th>日志</th>
               <SortableHeader label="文档上限" sortKey="upload_limit" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <th>密码</th>
               <th>权限管理</th>
             </tr>
           </thead>
@@ -566,6 +608,46 @@ export default function AdminUsagePage() {
                       />
                     )}
                   </td>
+                  <td className="usage-limit-cell">
+                    {u.id === "user-local" ? (
+                      <span className="usage-role-locked" title="内置管理员密码由部署配置决定">受保护</span>
+                    ) : u.id === currentUserId ? (
+                      <span className="usage-role-locked" title="请在主界面头像菜单中修改自己的密码">本人</span>
+                    ) : resettingId === u.id ? (
+                      <span className="usage-limit-edit">
+                        <input
+                          className="usage-limit-input"
+                          type="password"
+                          autoComplete="new-password"
+                          value={resetInput}
+                          disabled={resetPendingId === u.id}
+                          aria-label={`${u.username} 的新密码`}
+                          onChange={(event) => setResetInput(event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="usage-role-button usage-role-button-confirm"
+                          disabled={resetPendingId === u.id}
+                          onClick={() => void submitResetPassword(u)}
+                        >
+                          {resetPendingId === u.id ? "重置中…" : "确认重置"}
+                        </button>
+                        <button
+                          type="button"
+                          className="usage-role-button"
+                          disabled={resetPendingId === u.id}
+                          onClick={() => { setResettingId(""); setResetInput(""); }}
+                        >取消</button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="usage-role-button"
+                        disabled={Boolean(resetPendingId) || Boolean(resettingId)}
+                        onClick={() => { setResettingId(u.id); setResetInput(""); setResetNotice(null); }}
+                      >重置密码</button>
+                    )}
+                  </td>
                   <td>
                     {!u.role_mutable ? (
                       <span className="usage-role-locked">
@@ -605,7 +687,7 @@ export default function AdminUsagePage() {
                 </tr>
                 {isOpen && (
                   <tr className="usage-subrow">
-                    <td colSpan={12}>
+                    <td colSpan={13}>
                       {entry === "loading" && (
                         <div className="usage-subtable-status">加载中…</div>
                       )}

@@ -6632,6 +6632,25 @@ button.chat-session-card {
   background: #ba2d2d;
 }
 
+/* 修改密码弹窗:表单本身复用 .edit-form(状态提示条作为其网格子项渲染),这里
+   只补配色(镜像 .transfer-error 的错误配色 + .usage-role-notice-ok 的成功配色)。 */
+.password-change-status {
+  margin: 0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.password-change-status.error {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+.password-change-status.success {
+  border: 1px solid #b7e4c7;
+  background: #f0fdf7;
+  color: var(--green);
+}
+
 .info-body {
   display: flex;
   flex-wrap: wrap;

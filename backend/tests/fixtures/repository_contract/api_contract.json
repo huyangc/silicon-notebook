@@ -337,6 +337,38 @@
           "title": "AddUrlSourcesResult",
           "type": "object"
         },
+        "AdminPasswordResetRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "new_password": {
+              "title": "New Password",
+              "type": "string"
+            }
+          },
+          "required": [
+            "new_password"
+          ],
+          "title": "AdminPasswordResetRequest",
+          "type": "object"
+        },
+        "AdminPasswordResetResult": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username"
+          ],
+          "title": "AdminPasswordResetResult",
+          "type": "object"
+        },
         "AdminUserNotebook": {
           "properties": {
             "conversations": {
@@ -6766,6 +6798,25 @@
           "title": "ParserEngineCapability",
           "type": "object"
         },
+        "PasswordChangeRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "new_password": {
+              "title": "New Password",
+              "type": "string"
+            },
+            "old_password": {
+              "title": "Old Password",
+              "type": "string"
+            }
+          },
+          "required": [
+            "old_password",
+            "new_password"
+          ],
+          "title": "PasswordChangeRequest",
+          "type": "object"
+        },
         "PromoteRequest": {
           "description": "POST .../promote 的可选请求体(知识对象晋升 + Memory 晋升共用)。挂载了\n多个公共知识库时必须显式指定 target_base_id,否则服务层拒绝(400)。",
           "properties": {
@@ -10162,6 +10213,56 @@
           "summary": "Get Admin User Notebook Sources"
         }
       },
+      "/api/admin/users/{user_id}/reset-password": {
+        "post": {
+          "description": "管理员重置某用户密码；目标用户的浏览器会话全部吊销，需用新密码重新登录。\nauth_optional 部署的匿名回退(无 token 即视作种子管理员)不放行——改密是\n锁死型操作，当事人无法自救，必须由真实登录的管理员会话发起。",
+          "operationId": "reset_admin_user_password_api_admin_users__user_id__reset_password_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPasswordResetRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminPasswordResetResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reset Admin User Password"
+        }
+      },
       "/api/admin/users/{user_id}/role": {
         "patch": {
           "description": "Grant or revoke administrator access. Existing sessions observe it next request.",
@@ -10927,6 +11028,7 @@
       },
       "/api/auth/login": {
         "post": {
+          "description": "验证与建会话必须走同一个 store 方法(单写事务):拆成 authenticate_user +\ncreate_session 会与改密/重置的会话吊销竞态,让旧密码登录的会话逃过吊销。",
           "operationId": "login_api_auth_login_post",
           "requestBody": {
             "content": {
@@ -11708,6 +11810,38 @@
             }
           },
           "summary": "Me"
+        }
+      },
+      "/api/me/password": {
+        "patch": {
+          "description": "自助修改密码：校验当前密码后更新，并吊销本用户其他会话（保留当前会话）。\n空白新密码在这里就地拒绝，store 里的 ValueError 只是防御——不再宽 catch\nValueError，避免把 verify 阶段的意外错误(如损坏的 salt)误报成「新密码不能为空」。",
+          "operationId": "update_my_password_api_me_password_patch",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasswordChangeRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update My Password"
         }
       },
       "/api/me/pending-actions": {
