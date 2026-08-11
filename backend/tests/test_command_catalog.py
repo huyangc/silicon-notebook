@@ -780,6 +780,52 @@ def test_the_dropped_names_reach_the_window_ledger(flops_window):
     ).candidates_overflowed == 0
 
 
+def _long_element(*, prose_lines, tail):
+    """One element of `prose_lines` non-command lines followed by `tail`.
+
+    A single element is the point: v1's 200-line scan cap applied per TEXT, so
+    one flattened options table or one long code block was enough to push a
+    real command past it. The prose lines carry no `_`/`.`-joined leading
+    token, so nothing before the tail can be mistaken for a usage line.
+    """
+    prose = "\n".join(
+        f"just some ordinary prose on line {index}" for index in range(prose_lines)
+    )
+    return _elements(("code_block", "", f"{prose}\n{tail}"))
+
+
+def test_a_command_documented_past_line_200_is_still_offered():
+    """v1 capped the usage-line scan at 200 lines per text. In v2 that cap was
+    a silent, permanent loss: a window is a slab of a document rather than one
+    command's section, one element can be 300 lines of flattened table, and a
+    name the scan never reaches is never served — so it can never be claimed,
+    and it produces no rejection, no ratio movement and no report line to show
+    it went missing. The character budget is the real bound; the line cap only
+    ever subtracted from it."""
+    rows = _long_element(prose_lines=250, tail="late_command -flag value")
+    window = extraction_windows(rows)[0]
+    # The command really is past the old cut, in one element.
+    assert window.text.count("\n") > 200
+
+    assert window_candidates(window) == ["late_command"]
+
+
+def test_the_density_split_sees_the_commands_past_line_200_too():
+    """The cap did not just hide names from the prompt — it hid them from
+    `_dense_overflow`, so the window that should have been SPLIT to make room
+    for them was not split either. Both halves of that failure are one fix."""
+    tail = "\n".join(f"command_{index:03d} -flag value" for index in range(40))
+    rows = _long_element(prose_lines=210, tail=tail)
+
+    windows = extraction_windows(rows)
+
+    assert len(windows) > 1
+    offered = {name for window in windows for name in window_candidates(window)}
+    assert {f"command_{index:03d}" for index in range(40)} <= offered
+    assert all(window.candidates_overflowed == 0 for window in windows)
+    assert _rebuild(windows) == _expected_text(rows)
+
+
 def test_prose_sentences_do_not_become_candidates():
     """A flag inside a sentence must not let the flag-carrying branch skip the
     sentence-punctuation and snake_case guards: every name those guards let

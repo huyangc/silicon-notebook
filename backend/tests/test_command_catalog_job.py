@@ -1041,6 +1041,44 @@ def test_one_window_documenting_several_commands_is_one_call_and_several_rows(
     ]
 
 
+def test_a_command_documented_past_line_200_is_extracted_end_to_end(repo):
+    """v1's 200-line scan cap, end to end.
+
+    One element of 250 prose lines followed by the command — the shape a
+    flattened options table or a long code block produces routinely. Under the
+    cap the name never reached the candidate list, so the prompt never offered
+    it, so the model could not legally claim it and grounding would have
+    vetoed it if it had: a command silently absent from the catalog, with no
+    rejected row and no ratio movement to say so.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    prose = "\n".join(
+        f"just some ordinary prose on line {index}" for index in range(250)
+    )
+    _add_elements(
+        repo, notebook.id, "s1", "长表手册",
+        _numbered("s1", [
+            {
+                "element_type": "code_block",
+                "text": f"{prose}\nlate_command -density value",
+                "section_path": "",
+            }
+        ]),
+    )
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    assert _candidates_of(client.calls[0]) == ["late_command"]
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=10)
+    assert [row["command_name"] for row in page["items"]] == ["late_command"]
+    assert [arg["name"] for arg in page["items"][0]["payload"]["args"]] == [
+        "-density"
+    ]
+
+
 def test_a_window_documenting_more_commands_than_one_list_holds_loses_none(
     repo,
 ):

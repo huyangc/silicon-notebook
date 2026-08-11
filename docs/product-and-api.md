@@ -464,7 +464,12 @@ would point a reviewer several commands back.
 a segment's entries may claim come from three scans: identifiers in the
 segment's headings, the leading token of usage lines (code blocks ahead of
 prose), and identifiers in inline code. The identifier shape rule is unchanged
-(`_`/`.` separators pass; a hyphen-only name must carry a digit). The list is a
+(`_`/`.` separators pass; a hyphen-only name must carry a digit). The scans read
+EVERY line of the segment, with no line cap: the segment is already bounded by
+characters, one element can be a 300-line flattened options table, and a line
+the scan never reaches hides the command documented there from the list and
+from the density split alike — a name that is never served can never be claimed
+and leaves no rejection or ratio movement behind. The list is a
 **constraint**, not a menu: a name off it vetoes the whole entry. Its cap is
 `MAX_CANDIDATES`, raised from v1's, because a segment is a slab of the document
 rather than one command's section — several commands routinely share one, and a

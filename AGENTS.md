@@ -417,6 +417,14 @@ builds its `catalog_job_finished` payload through `_emit_finished`, which skips
 the event when the row is gone — reading the row back inline inside an `except`
 clause turns a settled outcome into an uncaught `KeyError`.
 
+**The candidate scans read every line.** v1's `MAX_SCAN_LINES = 200` is gone: a
+window is bounded by `WINDOW_CHARS` already, and one element can be a 300-line
+flattened options table, so the cap only hid the commands documented past it
+from `window_candidates` — hence from `_dense_overflow`, hence from the split
+meant to keep them claimable. A name that is never served cannot be claimed and
+leaves no rejection, ratio movement or report line, which is the exact silent
+loss the v2 geometry exists to remove.
+
 **Candidate relay.** `carry(i) = candidates(i-1)`, inheriting `carry(i-1)` when
 `candidates(i-1)` is empty, capped at `MAX_CANDIDATES` with the nearer window's
 names preferred, and reset by any window that names something. A relayed name
