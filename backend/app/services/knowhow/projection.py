@@ -502,6 +502,23 @@ class KnowhowProjector:
                 ):
                     target_exists = False
                 else:
+                    # Same transaction, BEFORE the objects go: strip the
+                    # concept_clusters membership of exactly the objects this
+                    # reprojection DROPS (a deleted column/row/renamed cell).
+                    # KO ids are stable content hashes, so everything in
+                    # `object_rows` is about to be written straight back and
+                    # keeps its membership untouched — a blind wipe would
+                    # de-cluster live objects, which is why the delete path's
+                    # own cleanup is not reused here. With this in place the
+                    # repository has no path left that leaves a dangling
+                    # membership row, so `incremental_fuse_source`'s sweep is a
+                    # pure per-process legacy backstop (and multi-worker safe:
+                    # nothing depends on an in-process signal reaching another
+                    # worker).
+                    self.knowledge.prune_cluster_rows_for_source(
+                        db, notebook_id, source_id,
+                        keep_object_ids=[row[0] for row in object_rows],
+                    )
                     self.knowledge.delete_relations_by_source(db, source_id)
                     self.knowledge.delete_objects_by_source(db, source_id)
                     if object_rows:
@@ -841,6 +858,11 @@ class KnowhowProjector:
         with self.database.write() as db:
             self.database.begin_guarded_write(db)
             if self.sources.source_exists_for_update_tx(db, hidden_source_id):
+                # Teardown: nothing is reinserted, so every membership row of
+                # this source's objects goes with them, in this transaction.
+                self.knowledge.prune_cluster_rows_for_source(
+                    db, notebook_id, hidden_source_id
+                )
                 self.knowledge.delete_relations_by_source(db, hidden_source_id)
                 self.knowledge.delete_objects_by_source(db, hidden_source_id)
                 self.sources.replace_elements(db, hidden_source_id, [], created_at=now)

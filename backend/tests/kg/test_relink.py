@@ -532,3 +532,150 @@ def test_pair_key_is_undirected_and_order_independent():
     assert _pair_key("x1", "x1") == ("x1", "x1")
     # distinct pairs never collide via the min/max normalization.
     assert _pair_key("a", "b") != _pair_key("a", "c")
+
+
+# ---- Rule-1 证据倒排(生产热点整改批 E):候选生成不得再逐 sibling 求交集 ----
+
+
+class _CountingSet(set):
+    """``element_ids`` 的探针:记录一次 ``self & other``。
+
+    Rule-1 的旧实现对每个孤立节点 N 求 ``len(n_elems & _elems(m))``——每个
+    同源 sibling 一次,即 O(I×S) 次集合交集。倒排实现改成只走 N 自己那几个
+    element 的桶,一次交集都不做。``_element_ids`` 对已是 set 的输入按引用
+    返回(见上面的 by-reference 测试),所以这个子类会原样进到热路径里。
+    """
+
+    intersections: list = []
+
+    def __and__(self, other):           # noqa: D105 — probe
+        type(self).intersections.append(1)
+        return set.__and__(self, other)
+
+    def __rand__(self, other):          # noqa: D105 — probe
+        type(self).intersections.append(1)
+        return set.__and__(self, other)
+
+
+def _sparse_source(n_isolated: int, n_siblings: int):
+    """一个稀疏大 source:``n_siblings`` 个 concept 各持一个**互不相同**的
+    element,``n_isolated`` 个孤立 claim 各只与其中一个 concept 共享证据。
+
+    旧实现在这里要做 n_isolated × n_siblings 次集合交集,而真正有重叠的对只有
+    n_isolated 个——这正是倒排要消掉的那一段。"""
+    nodes = [
+        _node(f"k{i:04d}", "concept", f"concept name {i:04d}", element_ids={f"E{i:04d}"})
+        for i in range(n_siblings)
+    ]
+    # ⚠ 不能走 _node():它会 `set(element_ids)` 把探针拷成普通 set,`&` 就再也
+    # 记不到了(第一版变异验证正是因此打空)。
+    nodes += [
+        {
+            "id": f"c{j:04d}", "object_type": "claim",
+            "name": f"claim body {j:04d}", "source_id": "S1",
+            "element_ids": _CountingSet({f"E{j:04d}"}),
+        }
+        for j in range(n_isolated)
+    ]
+    return nodes
+
+
+def test_rule1_candidate_build_does_no_pairwise_set_intersection():
+    _CountingSet.intersections = []
+    nodes = _sparse_source(n_isolated=200, n_siblings=2000)
+
+    out = complete_isolated_edges(nodes, edges=[])
+
+    # 每个孤立 claim 恰好接上它自己的那个 concept。
+    assert len(out) == 200
+    assert all(e["basis"] == "relink:shared-element" for e in out)
+    # 倒排:一次 `n_elems & _elems(m)` 都不做。逐 sibling 求交集的旧形态会在
+    # 这里累计 200×2000 次。
+    assert _CountingSet.intersections == []
+
+
+def test_rule1_inverted_index_matches_naive_intersection_on_a_sparse_source():
+    """倒排候选表与「逐 sibling 求交集」的朴素实现逐位等价(含排序与 cap)。"""
+    nodes = _sparse_source(n_isolated=40, n_siblings=300)
+    # 再撒几个多重重叠的 concept,让 overlap 排序键真正参与比较。
+    nodes += [
+        _node("kx", "concept", "cross cutting concept", element_ids={f"E{j:04d}" for j in range(6)}),
+        _node("ky", "concept", "cross cutting concept two", element_ids={f"E{j:04d}" for j in range(3)}),
+    ]
+
+    def naive(nodes_in, max_per_node=3):
+        from app.services.kg.relink import _shared_edge
+        by_id = {n["id"]: n for n in nodes_in}
+        by_source = {}
+        for n in nodes_in:
+            by_source.setdefault(n["source_id"], []).append(n)
+        emitted, degree, keys = [], {}, set()
+
+        def at_cap(i):
+            return degree.get(i, 0) >= max_per_node
+
+        for n in nodes_in:
+            n_elems = set(n["element_ids"])
+            if not n_elems:
+                continue
+            cands = []
+            for m in by_source[n["source_id"]]:
+                if m["id"] == n["id"]:
+                    continue
+                overlap = len(n_elems & set(m["element_ids"]))
+                if overlap <= 0 or _shared_edge(n, m) is None:
+                    continue
+                cands.append((overlap, 1 if m["object_type"] == "concept" else 0,
+                              len(m.get("name") or ""), m["id"]))
+            cands.sort(key=lambda c: (-c[0], -c[1], -c[2], c[3]))
+            for _s, _c, _l, mid in cands:
+                if at_cap(n["id"]):
+                    break
+                edge = _shared_edge(n, by_id[mid])
+                if edge is None or edge[0] == edge[1]:
+                    continue
+                if at_cap(edge[0]) or at_cap(edge[1]) or edge in keys:
+                    continue
+                keys.add(edge)
+                degree[edge[0]] = degree.get(edge[0], 0) + 1
+                degree[edge[1]] = degree.get(edge[1], 0) + 1
+                emitted.append({
+                    "source_object_id": edge[0], "target_object_id": edge[1],
+                    "edge_type": edge[2], "basis": "relink:shared-element",
+                })
+        return emitted
+
+    for cap in (1, 2, 3):
+        live = [
+            e for e in complete_isolated_edges(
+                nodes, edges=[], max_per_node=cap, enable_name_match=False
+            )
+        ]
+        assert live == naive(nodes, max_per_node=cap)
+        assert live  # sanity: the fixture really produces rule-1 edges
+
+
+def test_rule1_inverted_index_is_built_lazily_per_affected_source(monkeypatch):
+    """有孤立节点但**没有一个带证据**时,倒排索引一次都不该建——建索引要对
+    受影响 source 的全部节点求 _element_ids,那正是旧实现在同一条件下也不付
+    的代价(Rule-1 的 `if n_elems` 早退)。"""
+    elem_calls = []
+    real_element_ids = relink_mod._element_ids
+
+    def counting_element_ids(node):
+        elem_calls.append(node["id"])
+        return real_element_ids(node)
+
+    monkeypatch.setattr(relink_mod, "_element_ids", counting_element_ids)
+
+    nodes = [
+        _node("c1", "claim", "Gain rises with open-loop gain", element_ids=()),
+        _node("k1", "concept", "open-loop gain", element_ids={"E1"}),
+        _node("k2", "concept", "phase margin", element_ids={"E2"}),
+    ]
+    # k1/k2 已互连 → 唯一的孤立节点是 c1,而它没有证据。
+    out = complete_isolated_edges(nodes, edges=[("k1", "k2")])
+    # rule-2 仍然接上(名字出现在 claim 文本里),但 rule-1 的倒排没建过。
+    assert [e["basis"] for e in out] == ["relink:name-match"]
+    # 只有孤立节点自己的 element_ids 被求值;k1/k2 从未进过任何桶。
+    assert elem_calls == ["c1"], elem_calls

@@ -41,8 +41,12 @@ LIFECYCLE_STORE_CALLS = {
         "completion_pending_states",
         "completion_validate_scope",
         "clear_source_graph_state",
+        # `embedding_rows`(整个 notebook 的全类型向量)是**刻意缺席**的:增量融合
+        # 的无 ANN 桥接分支只消费 concept 向量,读取已收窄成下面这条,这个精确集合
+        # 断言就是让「退回全类型读」失败关闭 —— 与 `relink_rows` / `cluster_map_rows`
+        # 两条同款登记。
+        "concept_embedding_rows",
         "delete_notebook_graph_rows",
-        "embedding_rows",
         "embedding_rows_for_objects",
         "fts_search",
         "incremental_object_rows",

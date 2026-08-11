@@ -324,3 +324,42 @@ def test_randomized_multi_source_mixed_rules_matches_oracle():
         out = _assert_matches_oracle(nodes, existing_edges, max_per_node=cap)
         assert out  # sanity: the random corpus actually produces relink edges
     _assert_matches_oracle(nodes, existing_edges, enable_name_match=False)
+
+
+def test_sparse_wide_source_inverted_index_matches_oracle():
+    """生产热点整改批 E:Rule-1 的候选生成从「逐 sibling 求交集」换成
+    element_id 倒排。形态选得刻意稀疏——同源 sibling 很多、真正有共享证据的
+    对很少——正是倒排要消掉 O(I×S) 的那种输入;冻结 oracle 仍逐对求交集,所以
+    这条断言证明的是**数值等价**(overlap 计数、排序 tie、cap 交互)而不是成本。
+    """
+    rng = random.Random(20260810)
+    nodes: List[Dict] = []
+    for i in range(400):
+        nodes.append(_node(f"k{i:04d}", "concept", f"concept name {i:04d}",
+                           element_ids={f"E{i:04d}"}))
+    # 少量跨多个 element 的 concept:让 overlap 真正大于 1、参与排序比较。
+    for i in range(8):
+        nodes.append(_node(
+            f"kx{i}", "concept", f"cross cutting concept {i}",
+            element_ids={f"E{j:04d}" for j in rng.sample(range(400), 12)},
+        ))
+    for j in range(120):
+        nodes.append(_node(
+            f"c{j:04d}", "claim", f"claim body {j:04d} mentions concept name {j:04d}",
+            element_ids={f"E{j:04d}"} | {
+                f"E{k:04d}" for k in rng.sample(range(400), rng.randint(0, 3))
+            },
+        ))
+    for j in range(10):
+        nodes.append(_node(f"p{j}", "procedure", f"procedure {j}",
+                           element_ids={f"E{j:04d}"}))
+    # 另一个 source 的节点必须完全不参与(倒排是 per-source 的)。
+    nodes.append(_node("other1", "claim", "other source claim", source_id="S2",
+                       element_ids={"E0000"}))
+    nodes.append(_node("other2", "concept", "other source concept", source_id="S2",
+                       element_ids={"E0000"}))
+
+    for cap in (1, 2, 3, 5):
+        out = _assert_matches_oracle(nodes, [], max_per_node=cap)
+        assert out
+    _assert_matches_oracle(nodes, [], enable_name_match=False)

@@ -197,6 +197,24 @@ def _legacy_seams(repo, monkeypatch):
 
     monkeypatch.setattr(kg_merge, "place_new_concepts", legacy_place)
 
+    # ⑤ 向量读取(P1 轮批 D):打回 master 的 `embedding_rows` —— 整个 notebook 的
+    #    **全类型**向量。无 ANN 暴力分支只按 concept 的 object_id 取值,所以这条
+    #    seam 打回后产出必须逐位不变。
+    #
+    #    ⚠ 判别力取决于**夹具**:只有当库里存在「非 concept 或 deprecated 的
+    #    带向量对象」时,legacy 臂与收窄臂读回的行集才真的不同,这条差分才在说
+    #    「多读的那些行确实没被用上」。凡是要给这个接缝提供 oracle 的用例都必须
+    #    带上那种对象 —— `test_differential_bruteforce_bridge_branch` 与
+    #    `test_differential_skipped_branch_over_max_entities` 已经带了,由
+    #    `test_legacy_vector_seam_actually_reads_more_rows` 正面钉住。
+    def legacy_embedding_rows(db, notebook_id):
+        return db.execute(
+            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            (notebook_id,)).fetchall()
+
+    monkeypatch.setattr(service.knowledge, "concept_embedding_rows",
+                        legacy_embedding_rows)
+
 
 def _run_differential(make_repo, monkeypatch, objects, clusters, candidates=(), *,
                       fuse_source="src-B", before=None, settings=None):
@@ -288,8 +306,21 @@ def test_differential_non_concept_types(make_repo, monkeypatch):
     assert types == {"claim", "formula", "procedure"}
 
 
+def _deprecate(object_id):
+    """`_run_differential` 的 before 钩子:把一个对象打成 deprecated。"""
+    def _before(repository, notebook_id):
+        with repository._write() as db:
+            db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?",
+                       (object_id,))
+    return _before
+
+
 def test_differential_bruteforce_bridge_branch(make_repo, monkeypatch):
-    """无 ANN 且实体数 ≤ max_entities → 暴力余弦分支,含既有 pending/已决排除集。"""
+    """无 ANN 且实体数 ≤ max_entities → 暴力余弦分支,含既有 pending/已决排除集。
+
+    夹具**刻意**带上一条有向量的 claim 与一个有向量的 deprecated concept:接缝 ⑤
+    (向量读打回全类型全表)只有在库里存在这类对象时,两臂读回的行集才真的不同,
+    这条差分才是「多读的那些行确实没被用上」的 oracle 而不是空转。"""
     from app.services.kg_merge import _norm
 
     near = [0.99] + [0.0] * (DIM - 1)
@@ -298,11 +329,17 @@ def test_differential_bruteforce_bridge_branch(make_repo, monkeypatch):
         make_repo, monkeypatch,
         objects=[("ko-old", "concept", "Expert Routing", "src-A", None, other),
                  ("ko-old2", "concept", "Gating Network", "src-A", None, near),
+                 # 被收窄挡在门外的两类,都给上与 ko-new 高度相似的向量:一旦
+                 # 某个消费方真的用了它们,产出会立刻分叉。
+                 ("kl-old", "claim", "routing halves the KV cache", "src-A", None, near),
+                 ("ko-dead", "concept", "Retired Router", "src-A", None, near),
                  ("ko-new", "concept", "MoE Gating", "src-B", None, near)],
         clusters=[("K-" + _norm("Expert Routing"), "ko-old", "Expert Routing", "concept"),
-                  ("K-" + _norm("Gating Network"), "ko-old2", "Gating Network", "concept")],
+                  ("K-" + _norm("Gating Network"), "ko-old2", "Gating Network", "concept"),
+                  ("K-" + _norm("Retired Router"), "ko-dead", "Retired Router", "concept")],
         candidates=[(*sorted(("K-" + _norm("MoE Gating"), "K-" + _norm("Gating Network"))),
-                     "rejected")])
+                     "rejected")],
+        before=_deprecate("ko-dead"))
     assert legacy == bounded
     pairs = {(a, b) for a, b, _score, _status in bounded["candidates"]}
     # 已决那一对不得复活,另一对必须入队 —— 两条都由排除集的有界读决定。
@@ -904,3 +941,476 @@ def test_insert_clusters_batches_member_probe(repo, monkeypatch):
     probes = [sql for sql in log
               if sql.startswith("SELECT member_object_id FROM concept_clusters")]
     assert [sql.count("?") for sql in probes] == [7, 7, 4]   # 5+5+2 ids, +2 fixed
+
+
+# ── P1 轮批 D:orphan 簇的**生产者清零** + 纯遗留残渣兜底 ────────────────────
+#
+# master 在 `incremental_fuse_source` 开头无条件跑一次**全库** anti-join
+# (`member_object_id NOT IN (SELECT id FROM knowledge_objects …)`),而本方法每成
+# 功抽取一个来源就被调一次、fold 还按 delta 来源循环调 —— 千万级对象的库上等于
+# O(delta × 全库)。
+#
+# 最终形状是把**生产者**清零,而不是给消费端加聪明的闸(闸走过两个被否的版本,
+# 都在下面各有一条守卫):
+#   ① 来源删除/重解析/replace_source → `_delete_object_id_batch` 同事务按
+#      (notebook_id, member_object_id) 清簇行;
+#   ② knowhow 重投影/删表 → `prune_cluster_rows_for_source` 同事务只清**差集**;
+#   ③ 整库重建 → `delete_notebook_graph_rows` 整表清空。
+# 于是这里剩下的唯一职责是清历史残渣:每进程每 notebook 一次。
+
+_SWEEP_SQL_FRAGMENT = "member_object_id NOT IN (SELECT id FROM knowledge_objects"
+
+
+def _sweeps(log):
+    return len([sql for sql in log if _SWEEP_SQL_FRAGMENT in sql])
+
+
+def _cluster_members(repo, notebook_id):
+    with repo._connect() as db:
+        return {r["member_object_id"] for r in db.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id=?",
+            (notebook_id,))}
+
+
+def _insert_orphan_cluster_row(repo, notebook_id, member="ko-vanished"):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,canonical_description,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"cc-orphan-{member}", notebook_id, "K-vanished", member,
+             "Vanished", "concept", "", NOW))
+    return member
+
+
+@pytest.fixture
+def fresh_process():
+    """每条用例都从「全新进程」出发(兜底闸是进程内状态)。"""
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    lifecycle_module._ORPHAN_SWEEP_DONE.clear()
+    yield lifecycle_module._ORPHAN_SWEEP_DONE
+    lifecycle_module._ORPHAN_SWEEP_DONE.clear()
+
+
+def test_upload_hot_path_never_reopens_the_orphan_sweep(
+        repo, monkeypatch, fresh_process):
+    """回归守卫(评审实测打回的第一版):`store_kg` → 融合重复三次,全库 anti-join
+    只在冷进程第一次跑。
+
+    第一版的闸判据是 `kg_mutation_seq`,而 `store_kg` 收尾无条件 bump 它 ——
+    于是「代次变了」在上传主热路径上恒成立,三次上传三次全表反连接。"""
+    notebook = repo.create_notebook(NotebookCreate(name="upload-hot"))
+    _seed_busy_notebook(repo, notebook.id)
+    log = _sql_log(repo, monkeypatch)
+
+    for round_index in range(3):
+        repo.store_kg(notebook.id, f"src-up{round_index}", [
+            {"local_id": f"c{round_index}", "object_type": "concept",
+             "payload": {"name": f"Uploaded Concept {round_index}"},
+             "evidence": []}], [])
+        repo.incremental_fuse_source(notebook.id, f"src-up{round_index}")
+
+    assert _sweeps(log) == 1
+
+
+def test_orphan_sweep_is_once_per_process_per_notebook(
+        repo, monkeypatch, fresh_process):
+    """兜底闸的完整语义:冷进程每本库扫一次,之后不再扫;进程重启后再扫一次。"""
+    first = repo.create_notebook(NotebookCreate(name="sweep-a"))
+    # 第二本库刻意留空:`_seed_busy_notebook` 的对象 id 是写死的,而
+    # knowledge_objects.id 是**全局**主键,两本库塞同一批 id 会撞 UNIQUE。闸的
+    # 按库语义与库里有没有对象无关。
+    second = repo.create_notebook(NotebookCreate(name="sweep-b"))
+    _seed_busy_notebook(repo, first.id)
+    log = _sql_log(repo, monkeypatch)
+
+    repo.incremental_fuse_source(first.id, "src-B")
+    assert _sweeps(log) == 1
+    repo.incremental_fuse_source(first.id, "src-B")
+    assert _sweeps(log) == 1                 # 同库第二次:跳过
+    repo.incremental_fuse_source(second.id, "src-B")
+    assert _sweeps(log) == 2                 # 闸是**按库**的,不是全局一次
+
+    fresh_process.clear()                    # 进程重启
+    repo.incremental_fuse_source(first.id, "src-B")
+    assert _sweeps(log) == 3                 # 兜底不失效
+
+
+def test_orphan_sweep_is_not_suppressed_across_workers(
+        repo, monkeypatch, fresh_process):
+    """codex P1 的守卫:多 worker 下不得出现「A 产生、B 收不到信号因而永久压制」。
+
+    被否的 tick 版本里,knowhow 的删除只推进**本进程**的信号,另一个 worker 的
+    记账停在旧世代 → 它永远跳过清扫。这里用两份独立的进程内状态模拟两个 worker:
+    worker B 已经扫过一次(记账已落),此时 worker A 做一次 knowhow 差集删除 ——
+    断言簇行已经在**那次删除自己的事务**里没了,B 扫不扫都无所谓。"""
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    notebook = repo.create_notebook(NotebookCreate(name="two-workers"))
+    _seed_busy_notebook(repo, notebook.id)
+    store = repo._runtime.knowledge_lifecycle.knowledge
+
+    # worker B:先融合一次,记账落下 → 它此后不会再扫这本库。
+    repo.incremental_fuse_source(notebook.id, "src-B")
+    worker_b_state = set(lifecycle_module._ORPHAN_SWEEP_DONE)
+    assert notebook.id in worker_b_state
+
+    # worker A(独立进程,自己的状态)做一次 knowhow 重投影:留下 ko-old0,丢掉
+    # ko-old1。差集清理在同一事务内完成,不依赖任何跨进程信号。
+    with repo._write() as db:
+        store.prune_cluster_rows_for_source(
+            db, notebook.id, "src-A", keep_object_ids=["ko-old0"])
+
+    members = _cluster_members(repo, notebook.id)
+    assert "ko-old0" in members                    # 活对象保留
+    assert "ko-old1" not in members                # 差集当场清掉
+
+    # worker B 再融合:它照样跳过 sweep —— 而库里已经没有悬空行,压制无害。
+    log = _sql_log(repo, monkeypatch)
+    repo.incremental_fuse_source(notebook.id, "src-B")
+    assert _sweeps(log) == 0
+    assert lifecycle_module._ORPHAN_SWEEP_DONE == worker_b_state
+
+
+def test_orphan_sweep_mark_is_recorded_only_after_the_commit(
+        repo, monkeypatch, fresh_process):
+    """P2:记账必须在**提交之后**。sweep 事务失败 → 不记 → 下次重扫。"""
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-rollback"))
+    _seed_busy_notebook(repo, notebook.id)
+    service = repo._runtime.knowledge_lifecycle
+    store = repo._runtime.governance
+    original = store.sweep_orphan_clusters
+    boom = {"armed": True}
+
+    def exploding_sweep(db, notebook_id):
+        if boom["armed"]:
+            boom["armed"] = False
+            raise RuntimeError("sweep transaction failed")
+        return original(db, notebook_id)
+
+    monkeypatch.setattr(store, "sweep_orphan_clusters", exploding_sweep)
+    with pytest.raises(RuntimeError, match="sweep transaction failed"):
+        service.incremental_fuse_source(notebook.id, "src-B")
+    assert notebook.id not in lifecycle_module._ORPHAN_SWEEP_DONE
+
+    log = _sql_log(repo, monkeypatch)
+    repo.incremental_fuse_source(notebook.id, "src-B")
+    assert _sweeps(log) == 1                 # 回滚过 → 这次必须补扫
+
+
+def test_orphan_sweep_gate_takes_no_write_lock_when_it_skips(
+        repo, monkeypatch, fresh_process):
+    """P2:闸本身是纯内存判断 —— 跳过时既不读库也不开写事务。
+
+    fold 循环按 delta 来源调 D 次,每次白拿一遍进程写锁正是 PR#320 写锁饿死的
+    同一形状。"""
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-nolock"))
+    _seed_busy_notebook(repo, notebook.id)
+    repo.incremental_fuse_source(notebook.id, "src-B")   # 先让冷进程那次扫完
+
+    writes = []
+    database = repo._runtime.database
+    original_write = database.write
+    from contextlib import contextmanager
+
+    @contextmanager
+    def counting_write(**kwargs):
+        writes.append(1)
+        with original_write(**kwargs) as connection:
+            yield connection
+
+    monkeypatch.setattr(database, "write", counting_write)
+    repo.incremental_fuse_source(notebook.id, "src-C-empty")
+    # 本源没有任何新对象 → 除被跳过的 sweep 外,融合路径本身不写任何东西。
+    assert writes == []
+
+
+def test_orphan_sweep_done_set_clears_when_it_overflows(fresh_process):
+    """P2:进程内集合的有界淘汰分支必须真的被走到,且淘汰方向安全(清空 → 读不到
+    记录 → 多扫一次,绝不漏扫)。"""
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    done = lifecycle_module._ORPHAN_SWEEP_DONE
+    limit = lifecycle_module._ORPHAN_SWEEP_DONE_MAX
+    done.update(f"nb-{index}" for index in range(limit))
+    assert len(done) == limit
+    # 生产里由 incremental_fuse_source 写入;这里复现那三行的淘汰语义。
+    with lifecycle_module._ORPHAN_SWEEP_DONE_LOCK:
+        if len(done) >= limit:
+            done.clear()
+        done.add("nb-new")
+    assert done == {"nb-new"}
+
+
+def test_legacy_orphan_residue_is_swept_by_a_fresh_process(repo, fresh_process):
+    """端到端:改造之前留在库里的历史残渣,由新进程的第一次融合清掉。"""
+    notebook = repo.create_notebook(NotebookCreate(name="sweep-residue"))
+    _seed_busy_notebook(repo, notebook.id)
+    orphan = _insert_orphan_cluster_row(repo, notebook.id)
+    assert orphan in _cluster_members(repo, notebook.id)
+
+    repo.incremental_fuse_source(notebook.id, "src-B")
+    assert orphan not in _cluster_members(repo, notebook.id)
+
+
+# ── 生产者侧:三条删除路径各自的事务内清理 ──────────────────────────────────
+
+def test_object_deletion_drops_its_cluster_rows_in_the_same_transaction(repo):
+    """① 来源删除/重解析/replace_source:删除路径自己清干净,不留账给融合。
+
+    这里**一次融合都不跑** —— master 下这些成员行会一直悬空到某次
+    `incremental_fuse_source` 的全库 anti-join 才被清掉。"""
+    notebook = repo.create_notebook(NotebookCreate(name="delete-clean"))
+    _seed_busy_notebook(repo, notebook.id)
+    store = repo._runtime.knowledge_lifecycle.knowledge
+    before = _cluster_members(repo, notebook.id)
+    assert {"ko-old0", "kl-old0"} <= before
+
+    with repo._write() as db:
+        store.clear_source_graph_state(db, "src-A", notebook.id)
+
+    # src-A 的成员行一条不剩,且清理只针对被删对象 —— 本夹具里 src-A 的对象就是
+    # 全部有簇行的对象,所以剩余集合恰好为空。
+    after = _cluster_members(repo, notebook.id)
+    assert after == set()
+    assert before  # 反向:确实有东西可删(否则上一条是空断言)
+
+
+def test_precise_cluster_cleanup_is_scoped_to_the_deleting_notebook(repo):
+    """精确清理必须带 notebook 谓词:与它替代的 sweep 逐字同形,不靠「对象 id 是
+    全局主键」这类远端事实。别的 notebook 里同名 member 的行不得被牵连。"""
+    first = repo.create_notebook(NotebookCreate(name="own"))
+    other = repo.create_notebook(NotebookCreate(name="other"))
+    _seed_busy_notebook(repo, first.id)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,canonical_description,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("cc-other-collide", other.id, "K-collide", "ko-old0",
+             "Collide", "concept", "", NOW))
+
+    store = repo._runtime.knowledge_lifecycle.knowledge
+    with repo._write() as db:
+        store.clear_source_graph_state(db, "src-A", first.id)
+
+    assert _cluster_members(repo, first.id) == set()
+    assert _cluster_members(repo, other.id) == {"ko-old0"}   # 邻居不受牵连
+
+
+def test_reprojection_prunes_only_the_dropped_objects(repo):
+    """② knowhow 重投影:只清**差集**,同 id 重插的活对象一行不碰。
+
+    KO id 是内容稳定 hash,所以「删了再插」里绝大多数对象会原样回来 —— 盲删全部
+    成员行会把它们从簇里踢出去(那正是 `_delete_object_id_batch` 的清理刻意不被
+    复用在这条路上的原因)。"""
+    notebook = repo.create_notebook(NotebookCreate(name="reproject"))
+    _seed_busy_notebook(repo, notebook.id)
+    store = repo._runtime.knowledge_lifecycle.knowledge
+    keep = ["ko-old0", "ko-old1", "kl-old0"]
+
+    with repo._write() as db:
+        pruned = store.prune_cluster_rows_for_source(
+            db, notebook.id, "src-A", keep_object_ids=keep)
+
+    members = _cluster_members(repo, notebook.id)
+    assert set(keep) <= members                    # 活对象保留
+    assert not [m for m in members if m.startswith(("ko-old", "kl-old"))
+                and m not in keep]                 # 差集清光
+    assert pruned == 13                            # 12 concept + 4 claim - 3 keep
+
+
+def test_teardown_prunes_every_object_of_the_source(repo):
+    """② 删表路径:没有重插,该源全部对象的成员行都走。"""
+    notebook = repo.create_notebook(NotebookCreate(name="teardown"))
+    _seed_busy_notebook(repo, notebook.id)
+    store = repo._runtime.knowledge_lifecycle.knowledge
+
+    with repo._write() as db:
+        pruned = store.prune_cluster_rows_for_source(db, notebook.id, "src-A")
+
+    assert pruned == 16
+    assert _cluster_members(repo, notebook.id) == set()
+
+
+def test_reprojection_prune_is_scoped_to_the_notebook(repo):
+    """差集清理同样带 notebook 谓词。"""
+    first = repo.create_notebook(NotebookCreate(name="prune-own"))
+    other = repo.create_notebook(NotebookCreate(name="prune-other"))
+    _seed_busy_notebook(repo, first.id)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,"
+            "canonical_name,object_type,canonical_description,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("cc-other-prune", other.id, "K-collide", "ko-old0",
+             "Collide", "concept", "", NOW))
+
+    store = repo._runtime.knowledge_lifecycle.knowledge
+    with repo._write() as db:
+        store.prune_cluster_rows_for_source(db, first.id, "src-A")
+
+    assert _cluster_members(repo, first.id) == set()
+    assert _cluster_members(repo, other.id) == {"ko-old0"}
+
+
+def test_orphan_producing_paths_are_exhaustively_registered():
+    """闸的正确性建立在「全仓零 orphan 生产者」上,这条把那个穷举钉死。
+
+    豁免清单**必须为空**:每一条删 `knowledge_objects` 的路径都要在自己的写事务里
+    清掉簇行(或整表清空)。新增一条 DELETE、或给 `delete_objects_by_source*` 接上
+    一个不做差集清理的服务层调用点,这条就红。"""
+    import ast
+    import re
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[1]
+
+    # ① 两个后端各恰好四条 DELETE FROM knowledge_objects,且每条所在的函数都必须
+    #    同时删 concept_clusters —— 除了 knowhow 那两条:它们的清理由服务层在同一
+    #    写事务里经 prune_cluster_rows_for_source 完成(见 ② ③)。
+    KNOWHOW_DELETES = {"delete_objects_by_source", "delete_objects_by_source_and_row"}
+    WHOLE_TABLE_WIPES = {"delete_notebook_graph_rows"}
+    for adapter in ("sqlite", "postgres"):
+        path = backend / "app" / "repositories" / adapter / "knowledge_store.py"
+        source = path.read_text(encoding="utf-8")
+        assert source.count("DELETE FROM knowledge_objects") == 4, adapter
+        tree = ast.parse(source, filename=str(path))
+        unguarded = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = ast.get_source_segment(source, node) or ""
+            if "DELETE FROM knowledge_objects" not in body:
+                continue
+            if node.name in KNOWHOW_DELETES:
+                continue
+            if node.name in WHOLE_TABLE_WIPES:
+                # 整库重建:整表清空 concept_clusters。SQLite 在函数体里循环表名
+                # 字面量,PostgreSQL 走模块级 `_GRAPH_RESET_TABLES` —— 两种写法
+                # 都单独断言过(见下面 ①'),这里只要求它确实是那两种之一。
+                assert ("concept_clusters" in body
+                        or "_GRAPH_RESET_TABLES" in body), f"{adapter}:{node.name}"
+                continue
+            if "concept_clusters" not in body:
+                unguarded.append(f"{adapter}:{node.name}")
+        assert unguarded == [], unguarded
+
+    # ①' 整库重建那条的两种写法各自点名 concept_clusters(PG 的表名在模块级常量
+    #     里,函数体文本看不见它)。
+    from app.repositories.postgres import knowledge_store as pg_knowledge_store
+
+    assert "concept_clusters" in pg_knowledge_store._GRAPH_RESET_TABLES
+    sqlite_source = (backend / "app" / "repositories" / "sqlite"
+                     / "knowledge_store.py").read_text(encoding="utf-8")
+    assert 'for table in (\n            "concept_clusters"' in sqlite_source
+
+    # ② `delete_objects_by_source*` 在生产代码里只有 knowhow 投影这一个**调用**点。
+    call_re = re.compile(r"\.delete_objects_by_source(_and_row)?\(")
+    services = backend / "app" / "services"
+    callers = {
+        path.relative_to(backend).as_posix()
+        for path in services.rglob("*.py")
+        if call_re.search(path.read_text(encoding="utf-8"))
+    }
+    assert callers == {"app/services/knowhow/projection.py"}, callers
+
+    # ③ 那个文件里,每个删对象的函数都必须在同一函数体内调
+    #    `prune_cluster_rows_for_source`。**豁免清单为空** —— 漏一处就是又出现了
+    #    一个 orphan 生产者,而进程本地的兜底闸对跨 worker 的生产者是压制不住的。
+    projection = services / "knowhow" / "projection.py"
+    tree = ast.parse(projection.read_text(encoding="utf-8"), filename=str(projection))
+    deleting, pruning = set(), set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names = {
+            inner.func.attr if isinstance(inner.func, ast.Attribute) else
+            getattr(inner.func, "id", "")
+            for inner in ast.walk(node) if isinstance(inner, ast.Call)
+        }
+        if names & KNOWHOW_DELETES:
+            deleting.add(node.name)
+            if "prune_cluster_rows_for_source" in names:
+                pruning.add(node.name)
+    assert deleting, "projection.py 里没找到删除调用点,守卫可能已经失配"
+    assert deleting == pruning, sorted(deleting - pruning)
+
+    # ④ 兜底闸不得再依赖任何跨进程信号(被 codex 判 P1 的 tick 版本已整体移除)。
+    assert not (services / "orphan_cluster_signal.py").exists()
+
+
+def test_bruteforce_bridge_reads_only_concept_vectors(repo, monkeypatch):
+    """无 ANN 暴力分支的向量读收窄到 concept:它唯一的消费方
+    (`detect_bridge_candidates`)只按 concept 的 object_id 取值,claim 向量
+    (生产上占对象数的大头)以前是解码、验维、截断之后原样丢掉。"""
+    from app.services.kg_merge import _norm
+
+    def _vec(first):
+        return [first] + [0.0] * (DIM - 1)
+
+    notebook = repo.create_notebook(NotebookCreate(name="vec-scope"))
+    _seed(repo, notebook.id,
+          objects=[("ko-old", "concept", "Expert Routing", "src-A", None, _vec(1.0)),
+                   # 带向量的 claim:收窄前它会被读回来,收窄后不该出现。
+                   ("kl-old", "claim", "an old claim about routing", "src-A", None,
+                    _vec(0.5)),
+                   ("ko-dead", "concept", "Retired Concept", "src-A",
+                    None, _vec(0.7)),
+                   ("ko-new", "concept", "MoE Gating", "src-B", None, _vec(0.99))],
+          clusters=[("K-" + _norm("Expert Routing"), "ko-old", "Expert Routing",
+                     "concept")])
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?",
+                   ("ko-dead",))
+
+    seen = []
+    store = repo._runtime.knowledge_lifecycle.knowledge
+    original = store.concept_embedding_rows
+
+    def spy(db, notebook_id):
+        rows = original(db, notebook_id)
+        seen.extend(row["object_id"] for row in rows)
+        return rows
+
+    monkeypatch.setattr(store, "concept_embedding_rows", spy)
+    repo.incremental_fuse_source(notebook.id, "src-B")
+
+    assert seen                                  # 真的走到了暴力分支
+    # 谓词与 `incremental_object_rows(..., 'concept')` 逐字相同:非 concept 与
+    # deprecated 都不进来,消费方读得到的键一个不少。
+    assert set(seen) == {"ko-old", "ko-new"}
+
+
+def test_legacy_vector_seam_actually_reads_more_rows(repo, monkeypatch):
+    """正面钉住接缝 ⑤ 的判别力:同一份夹具下,legacy 全类型读回的行**严格多于**
+    收窄读。缺了这条,差分用例可能在两臂读回同一份行的夹具上空转,绿得毫无意义。"""
+    from app.services.kg_merge import _norm
+
+    def _vec(first):
+        return [first] + [0.0] * (DIM - 1)
+
+    notebook = repo.create_notebook(NotebookCreate(name="seam-power"))
+    _seed(repo, notebook.id,
+          objects=[("ko-old", "concept", "Expert Routing", "src-A", None, _vec(1.0)),
+                   ("kl-old", "claim", "an old claim", "src-A", None, _vec(0.5)),
+                   ("ko-dead", "concept", "Retired", "src-A", None, _vec(0.7)),
+                   ("ko-new", "concept", "MoE Gating", "src-B", None, _vec(0.99))],
+          clusters=[("K-" + _norm("Expert Routing"), "ko-old", "Expert Routing",
+                     "concept")])
+    with repo._write() as db:
+        db.execute("UPDATE knowledge_objects SET status='deprecated' WHERE id=?",
+                   ("ko-dead",))
+
+    store = repo._runtime.knowledge_lifecycle.knowledge
+    with repo._connect() as db:
+        narrowed = {row["object_id"] for row in
+                    store.concept_embedding_rows(db, notebook.id)}
+        legacy = {row["object_id"] for row in db.execute(
+            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            (notebook.id,))}
+    assert narrowed < legacy                      # 真子集,不是相等
+    assert legacy - narrowed == {"kl-old", "ko-dead"}

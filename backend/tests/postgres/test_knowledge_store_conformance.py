@@ -2082,11 +2082,18 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
         def execute(self, query, params=None):
             sql = " ".join(str(query).split())
             cursor = self.connection.execute(query, params)
+            # Match the dedup CORPUS read by its WHERE shape, not by its
+            # projection: the corpus read no longer selects `evidence` (P1 批 B
+            # — the matched row's evidence is re-read by primary key afterwards,
+            # while this transaction still holds its FOR UPDATE lock).  Gating
+            # here therefore holds the promotion open across exactly that
+            # re-read window, with the concurrent merge already blocked on the
+            # lock — which is what makes the union assertion below a guard for
+            # the narrowed read and not just for the lock.
             if (
                 "FROM knowledge_objects WHERE notebook_id=%s" in sql
                 and "object_type=%s" in sql
                 and "status IN" in sql
-                and "evidence" in sql
             ):
                 return GateFetchall(cursor, "FOR UPDATE" in sql)
             return cursor
@@ -5233,3 +5240,298 @@ def test_postgres_conflict_relation_evidence_rows_read_by_id(knowledge_harness):
     assert rows[0]["id"] == "rel-cf-1"
     # Evidence arrives as JSON text, matching what the caller json.loads()es.
     assert json.loads(rows[0]["evidence"])[0]["quote"] == "nmos 与 pmos 相反"
+
+
+# --------------------------------------------------------------------------
+# P1 批 A — review_queue_rows 读取瘦身(PostgreSQL 侧必须真的执行一遍新 SQL)
+# --------------------------------------------------------------------------
+
+def _seed_review_queue_fixture(harness) -> None:
+    with harness.database.write() as connection:
+        for object_id, object_type in (
+            ("ko-rq-src", "Claim"),
+            ("ko-rq-tgt", "Concept"),
+            ("ko-rq-rejected-only", "Concept"),
+            ("ko-rq-isolated-1", "Concept"),
+            ("ko-rq-isolated-2", "Formula"),
+        ):
+            connection.execute(
+                "INSERT INTO knowledge_objects"
+                "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+                " created_at,updated_at) "
+                "VALUES (%s,'nb-personal',%s,'approved',%s::jsonb,'[]'::jsonb,"
+                "'source-golden',%s,%s)",
+                (object_id, object_type, json.dumps({"name": object_id}), NOW, NOW),
+            )
+        for rel_id, target, review_status, evidence in (
+            ("rel-rq-live", "ko-rq-tgt", "pending", [{"quote": "anchored quote"}]),
+            ("rel-rq-rejected", "ko-rq-rejected-only", "rejected",
+             [{"quote": "rejected quote"}]),
+        ):
+            connection.execute(
+                "INSERT INTO knowledge_relations"
+                "(id,notebook_id,source_id,source_object_id,target_object_id,"
+                " edge_type,evidence,created_at,review_status) "
+                "VALUES (%s,'nb-personal','source-golden','ko-rq-src',%s,'defines',"
+                "%s::jsonb,%s,%s)",
+                (rel_id, target, json.dumps(evidence), NOW, review_status),
+            )
+
+
+def test_postgres_review_queue_rows_reads_only_live_endpoint_objects(
+    knowledge_harness,
+):
+    _seed_review_queue_fixture(knowledge_harness)
+    store = knowledge_harness.governance
+    with knowledge_harness.database.connect() as connection:
+        relations, objects = store.review_queue_rows(connection, "nb-personal")
+
+    assert [row["id"] for row in relations] == ["rel-rq-live"]
+    # Objects are narrowed to the endpoints of the NON-rejected relations only:
+    # isolated objects and the rejected edge's exclusive endpoint stay unread.
+    assert {row["id"] for row in objects} == {"ko-rq-src", "ko-rq-tgt"}
+    assert len(objects) == 2, "endpoints must not be duplicated across batches"
+    assert json.loads(objects[0]["payload"])  # payload still arrives as JSON text
+
+
+def test_postgres_review_queue_rows_drops_evidence_for_an_anchor_flag(
+    knowledge_harness,
+):
+    _seed_review_queue_fixture(knowledge_harness)
+    store = knowledge_harness.governance
+    with knowledge_harness.database.connect() as connection:
+        relations, _objects = store.review_queue_rows(connection, "nb-personal")
+
+    assert relations
+    for row in relations:
+        assert "evidence" not in row
+        assert row["has_anchor"] is True
+
+
+@pytest.mark.parametrize(
+    "evidence_json",
+    [
+        "[]",
+        '[{"file": "f"}]',
+        '[{"quote": ""}]',
+        '[{"quote": "   "}]',
+        '[{"quote": "\\n\\t"}]',
+        '[{"quote": "\\u3000"}]',
+        '[{"quote": "\\u00a0"}]',
+        '[{"quote": "x"}]',
+        '[{"quote": "\\u3000x\\u3000"}]',
+        '[{"quote": ""}, {"quote": "y"}]',
+        '["not an object"]',
+        "[123]",
+        '[{"quote": null}]',
+        '{"quote": "x"}',
+        "null",
+    ],
+)
+def test_postgres_review_queue_anchor_pushdown_matches_python(
+    knowledge_harness, evidence_json
+):
+    """The jsonb predicate must agree with `evidence_anchor_score` shape for
+    shape — including the whitespace forms a bare `btrim()` would get wrong and
+    the malformed shapes the Python function scores 0.0 (or, for a non-string
+    quote, would have raised on: SQL scores those 0.0, a registered robustness
+    improvement over a 500)."""
+    from app.services.kg.edge_trust import evidence_anchor_score
+
+    _seed_review_queue_fixture(knowledge_harness)
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "UPDATE knowledge_relations SET evidence=%s::jsonb WHERE id=%s",
+            (evidence_json, "rel-rq-live"),
+        )
+    store = knowledge_harness.governance
+    with knowledge_harness.database.connect() as connection:
+        relations, _objects = store.review_queue_rows(connection, "nb-personal")
+
+    decoded = json.loads(evidence_json)
+    try:
+        expected = evidence_anchor_score({"evidence": decoded})
+    except AttributeError:  # non-string quote — old path raised, SQL says 0.0
+        expected = 0.0
+    assert relations[0]["has_anchor"] is (expected == 1.0)
+
+
+def test_postgres_review_queue_rows_paginates_endpoint_lookup(
+    knowledge_harness, monkeypatch
+):
+    import app.repositories.postgres.governance_store as gs
+
+    monkeypatch.setattr(gs, "_REVIEW_ENDPOINT_LOOKUP_BATCH", 1)
+    _seed_review_queue_fixture(knowledge_harness)
+    with knowledge_harness.database.connect() as connection:
+        _relations, objects = knowledge_harness.governance.review_queue_rows(
+            connection, "nb-personal"
+        )
+    ids = [row["id"] for row in objects]
+    assert sorted(ids) == ["ko-rq-src", "ko-rq-tgt"]
+    assert len(ids) == len(set(ids))
+
+
+# --------------------------------------------------------------------------
+# P1 批 D — orphan 簇的精确清理 + 无 ANN 桥接的 concept 向量收窄
+# (两条 SQL 在 PostgreSQL 上此前**从未执行过**:`clear_source_graph_state` 与
+#  `embedding_rows` 都没有 conformance 覆盖,新写的 ANY(%s) 删除与 JOIN 收窄
+#  必须在这条 lane 上真跑一遍,而不是只在 SQLite 上绿。)
+# --------------------------------------------------------------------------
+
+def _seed_batch_d_objects(harness, rows) -> None:
+    """rows: [(object_id, object_type, status, vector|None)]"""
+    with harness.database.write() as connection:
+        for object_id, object_type, status, vector in rows:
+            connection.execute(
+                "INSERT INTO knowledge_objects"
+                "(id,notebook_id,object_type,status,payload,evidence,source_id,"
+                " created_at,updated_at) "
+                "VALUES (%s,'nb-personal',%s,%s,%s::jsonb,'[]'::jsonb,"
+                "'source-golden',%s,%s)",
+                (object_id, object_type, status,
+                 json.dumps({"name": object_id}), NOW, NOW),
+            )
+            connection.execute(
+                "INSERT INTO concept_clusters"
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+                " object_type,canonical_description,created_at) "
+                "VALUES (%s,'nb-personal',%s,%s,%s,%s,'',%s)",
+                (f"cc-{object_id}", f"K-{object_id}", object_id, object_id,
+                 object_type, NOW),
+            )
+            if vector is not None:
+                connection.execute(
+                    "INSERT INTO knowledge_embeddings"
+                    "(object_id,notebook_id,vector,created_at) "
+                    "VALUES (%s,'nb-personal',%s,%s)",
+                    (object_id, encode_vector(np.asarray(vector, dtype="float32")),
+                     NOW),
+                )
+
+
+def test_clear_source_graph_state_drops_cluster_membership_rows(knowledge_harness):
+    """删除路径的精确清理:`notebook_id = %s AND member_object_id = ANY(%s)` 与
+    对象在同一事务里落地,且 notebook 谓词真的把邻库的同名 member 挡在外面。
+
+    此前只有增量融合开头那次**全库** anti-join 会清掉它们(每成功抽取一个来源
+    付一次)。这里一次融合都不跑。"""
+    store = knowledge_harness.knowledge
+    _seed_batch_d_objects(knowledge_harness, [
+        ("ko-batch-d-a", "concept", "approved", None),
+        ("ko-batch-d-b", "claim", "approved", None),
+    ])
+    # 邻库里一条 member id 同名的簇行:notebook 谓词失效就会被一起删掉。
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO concept_clusters"
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+            " object_type,canonical_description,created_at) "
+            "VALUES ('cc-neighbour','nb-base','K-neighbour','ko-batch-d-a',"
+            "'Neighbour','concept','',%s)",
+            (NOW,),
+        )
+    with knowledge_harness.database.connect() as connection:
+        before = connection.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id='nb-personal'"
+        ).fetchall()
+    assert {row["member_object_id"] for row in before} == {
+        "ko-batch-d-a", "ko-batch-d-b"}
+
+    with knowledge_harness.database.write() as connection:
+        store.clear_source_graph_state(connection, "source-golden", "nb-personal")
+
+    with knowledge_harness.database.connect() as connection:
+        after = connection.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id='nb-personal'"
+        ).fetchall()
+        objects = connection.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id='nb-personal'"
+        ).fetchall()
+        neighbour = connection.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id='nb-base'"
+        ).fetchall()
+    assert after == []
+    assert objects == []
+    assert [row["member_object_id"] for row in neighbour] == ["ko-batch-d-a"]
+
+
+def test_concept_embedding_rows_narrows_to_live_concepts(knowledge_harness):
+    """无 ANN 桥接分支的向量读:只回 live concept 的向量。
+
+    谓词与 `incremental_object_rows(..., 'concept')` 逐字相同(该分支唯一的向量
+    消费方只按 concept 的 object_id 取值),所以 claim/formula 与 deprecated 的
+    向量此前是解码、验维、截断之后原样丢掉。"""
+    store = knowledge_harness.knowledge
+    _seed_batch_d_objects(knowledge_harness, [
+        ("ko-vec-concept", "concept", "approved", [1.0, 0.0]),
+        ("ko-vec-deprecated", "concept", "deprecated", [0.0, 1.0]),
+        ("ko-vec-claim", "claim", "approved", [0.5, 0.5]),
+        ("ko-vec-formula", "formula", "approved", [0.25, 0.75]),
+    ])
+    with knowledge_harness.database.connect() as connection:
+        rows = store.concept_embedding_rows(connection, "nb-personal")
+    assert {row["object_id"] for row in rows} == {"ko-vec-concept"}
+    # 向量本身照常可解码(收窄只动 WHERE,不动投影语义)。
+    assert bytes(rows[0]["vector"])
+
+
+def test_prune_cluster_rows_for_source_spares_the_reinserted_objects(knowledge_harness):
+    """knowhow 重投影的差集清理:活对象(同 id 重插)的成员行一行不碰,只有这次
+    重投影真正丢掉的对象失去成员关系。notebook 谓词同样必须生效。
+
+    这条 SQL 在 PostgreSQL 上此前从未执行过 —— knowhow 投影路径没有 conformance
+    覆盖,新写的 `member_object_id = ANY(%s)` 差集删除必须在这条 lane 上真跑。"""
+    store = knowledge_harness.knowledge
+    _seed_batch_d_objects(knowledge_harness, [
+        ("ko-prune-keep", "concept", "approved", None),
+        ("ko-prune-drop", "concept", "approved", None),
+        ("ko-prune-drop2", "claim", "approved", None),
+    ])
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO concept_clusters"
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+            " object_type,canonical_description,created_at) "
+            "VALUES ('cc-prune-neighbour','nb-base','K-neighbour','ko-prune-drop',"
+            "'Neighbour','concept','',%s)",
+            (NOW,),
+        )
+        pruned = store.prune_cluster_rows_for_source(
+            connection, "nb-personal", "source-golden",
+            keep_object_ids=["ko-prune-keep"],
+        )
+
+    with knowledge_harness.database.connect() as connection:
+        own = {row["member_object_id"] for row in connection.execute(
+            "SELECT member_object_id FROM concept_clusters "
+            "WHERE notebook_id='nb-personal'").fetchall()}
+        neighbour = {row["member_object_id"] for row in connection.execute(
+            "SELECT member_object_id FROM concept_clusters "
+            "WHERE notebook_id='nb-base'").fetchall()}
+        objects = {row["id"] for row in connection.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id='nb-personal'"
+        ).fetchall()}
+    assert pruned == 2
+    assert own == {"ko-prune-keep"}
+    assert neighbour == {"ko-prune-drop"}          # 邻库不受牵连
+    # 差集清理**不动对象本身**(对象由紧随其后的 delete_objects_by_source 处理)。
+    assert objects == {"ko-prune-keep", "ko-prune-drop", "ko-prune-drop2"}
+
+
+def test_prune_cluster_rows_for_source_wipes_all_on_teardown(knowledge_harness):
+    """删表路径:没有重插 → 该源全部对象的成员行都走。"""
+    store = knowledge_harness.knowledge
+    _seed_batch_d_objects(knowledge_harness, [
+        ("ko-teardown-a", "concept", "approved", None),
+        ("ko-teardown-b", "claim", "approved", None),
+    ])
+    with knowledge_harness.database.write() as connection:
+        pruned = store.prune_cluster_rows_for_source(
+            connection, "nb-personal", "source-golden")
+    with knowledge_harness.database.connect() as connection:
+        remaining = connection.execute(
+            "SELECT member_object_id FROM concept_clusters "
+            "WHERE notebook_id='nb-personal'").fetchall()
+    assert pruned == 2
+    assert remaining == []

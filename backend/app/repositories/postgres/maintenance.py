@@ -16,6 +16,11 @@ from app.repositories.postgres._store_utils import (
     sqlite_compatible_row,
 )
 from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
+from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite maintenance 共用
+    asset_ref_tokens,
+    collect_change_payload_tokens,
+    keepers_among,
+)
 from app.repositories.ports import OfflineMaintenanceBusyError
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,与 sqlite maintenance 共用
@@ -31,6 +36,9 @@ logger = logging.getLogger("silicon_notebook.postgres.maintenance")
 # lock. The dedicated session remains open for the lock's whole lifetime.
 _OFFLINE_MAINTENANCE_LOCK_KEY = 0x53494C49434F4E
 _EMBEDDING_PAGE_SIZE = 500
+# Rows consumed per fetch while streaming the orphan-asset keeper scan. Twin of
+# the SQLite adapter's constant; see ``_surviving_asset_refs``.
+_ASSET_SCAN_FETCH_ROWS = 200
 
 
 class PostgresMaintenanceAdapter:
@@ -559,6 +567,92 @@ class PostgresMaintenanceAdapter:
                 locked.append(str(row["id"]))
         return tuple(locked)
 
+    def _live_cell_ref_tokens(self, db, notebook_id: str) -> set:
+        """``asset://`` tokens in this notebook's LIVE cell content.
+
+        Backend twin of ``SQLiteMaintenanceAdapter._live_cell_ref_tokens``. The
+        ``LIKE`` narrows on the CONSTANT ``'%asset://%'`` instead of one pattern
+        per asset. Rows are consumed in bounded fetches; psycopg keeps the result
+        set client-side, so this bounds the resident PYTHON objects rather than
+        the libpq buffer — the accumulated token set is all that survives.
+        """
+        tokens: set = set()
+        with db.cursor() as cursor:
+            cursor.execute(
+                "SELECT c.content_md AS content_md FROM knowhow_cells c "
+                "JOIN knowhow_rows r ON r.id=c.row_id "
+                "JOIN knowhow_tables t ON t.id=r.table_id "
+                "WHERE t.notebook_id=%s AND c.content_md LIKE '%%asset://%%'",
+                (notebook_id,),
+            )
+            while True:
+                rows = cursor.fetchmany(_ASSET_SCAN_FETCH_ROWS)
+                if not rows:
+                    break
+                for row in rows:
+                    tokens.update(asset_ref_tokens(row["content_md"]))
+        return tokens
+
+    def _history_ref_tokens(self, db, notebook_id: str) -> set:
+        """``asset://`` tokens in this notebook's ``knowhow_changes`` history.
+
+        **Scanning this at all is a correctness fix, not an optimisation**: this
+        adapter only ever scanned LIVE cells, so an asset whose last surviving
+        reference sat in HISTORY was deleted here and kept on SQLite. Reverting
+        to that version then rendered a permanently broken image — half the
+        point of keeping history. The two backends now share one predicate and
+        one corpus. The registered cost is that PostgreSQL now retains assets it
+        used to reclaim (the same "once referenced, effectively never reclaimed
+        until 清理历史" behaviour SQLite has always had).
+
+        Coarse pre-filter, exact Python match afterwards — a ``payload_json``
+        substring hit is a cheap SUPERSET of what counts (it can false-POSITIVE
+        inside an excluded ``code_text``, never false-NEGATIVE).
+        """
+        tokens: set = set()
+        with db.cursor() as cursor:
+            cursor.execute(
+                "SELECT ch.kind AS kind, ch.payload_json AS payload_json "
+                "FROM knowhow_changes ch "
+                "JOIN knowhow_tables t2 ON t2.id=ch.table_id "
+                "WHERE t2.notebook_id=%s AND ch.payload_json LIKE '%%asset://%%'",
+                (notebook_id,),
+            )
+            while True:
+                rows = cursor.fetchmany(_ASSET_SCAN_FETCH_ROWS)
+                if not rows:
+                    break
+                for row in rows:
+                    collect_change_payload_tokens(
+                        row["kind"], row["payload_json"], tokens
+                    )
+        return tokens
+
+    def _surviving_asset_refs(self, db, notebook_id: str, asset_ids) -> set:
+        """Which of ``asset_ids`` still have a surviving reference.
+
+        Backend twin of ``SQLiteMaintenanceAdapter._surviving_asset_refs``; see
+        that docstring for the single-predicate argument, the keeper boundary,
+        and ``keepers_among``'s prefix restatement of the retired per-asset
+        ``LIKE``.
+
+        The history pass is SKIPPED when the live cells alone already account
+        for every candidate — the single-pass form of the retired predicate's
+        own early return. History tokens can only ever ADD keepers, so once
+        every candidate is already kept there is nothing left for them to
+        change, and the "few assets, long history" shape stops re-parsing the
+        whole change log on every sweep.
+        """
+        candidates = set(asset_ids)
+        if not candidates:
+            return set()
+        tokens = self._live_cell_ref_tokens(db, notebook_id)
+        kept = keepers_among(candidates, tokens)
+        if kept == candidates:
+            return kept
+        tokens |= self._history_ref_tokens(db, notebook_id)
+        return keepers_among(candidates, tokens)
+
     def sweep_orphan_assets(
         self,
         notebook_id: str,
@@ -571,6 +665,11 @@ class PostgresMaintenanceAdapter:
         Source-derived assets are deliberately excluded: they are owned by the
         source/reparse lifecycle, not knowhow-cell Markdown. Candidate files are
         derived only beneath ``storage/assets/<notebook>/<asset>.*``.
+
+        Keeper determination rides ``_surviving_asset_refs`` — one streamed
+        pass covering LIVE cell content AND ``knowhow_changes`` history, the
+        same corpus SQLite has always used (see that method for the registered
+        behaviour change).
         """
         with self._runtime.database.connect() as db:
             assets = db.execute(
@@ -578,17 +677,10 @@ class PostgresMaintenanceAdapter:
                 "WHERE notebook_id=%s AND source_id IS NULL",
                 (notebook_id,),
             ).fetchall()
+            asset_ids = [row["id"] for row in assets]
+            kept = self._surviving_asset_refs(db, notebook_id, asset_ids)
             unreferenced = [
-                row["id"]
-                for row in assets
-                if db.execute(
-                    "SELECT 1 FROM knowhow_cells c "
-                    "JOIN knowhow_rows r ON r.id=c.row_id "
-                    "JOIN knowhow_tables t ON t.id=r.table_id "
-                    "WHERE t.notebook_id=%s AND c.content_md LIKE %s LIMIT 1",
-                    (notebook_id, f"%asset://{row['id']}%"),
-                ).fetchone()
-                is None
+                asset_id for asset_id in asset_ids if asset_id not in kept
             ]
             with self._orphan_marks_lock:
                 marked_notebooks = {key[0] for key in self._orphan_first_seen}
@@ -648,18 +740,14 @@ class PostgresMaintenanceAdapter:
             locked_candidates = self._lock_candidate_assets(
                 db, notebook_id, candidates
             )
+            # Same single predicate as the classification read, re-run inside
+            # the write transaction AFTER every candidate lock is held — one
+            # pass for the whole candidate set rather than one per candidate.
+            still_kept = self._surviving_asset_refs(
+                db, notebook_id, locked_candidates
+            )
             for asset_id in locked_candidates:
-                still_unreferenced = (
-                    db.execute(
-                        "SELECT 1 FROM knowhow_cells c "
-                        "JOIN knowhow_rows r ON r.id=c.row_id "
-                        "JOIN knowhow_tables t ON t.id=r.table_id "
-                        "WHERE t.notebook_id=%s AND c.content_md LIKE %s LIMIT 1",
-                        (notebook_id, f"%asset://{asset_id}%"),
-                    ).fetchone()
-                    is None
-                )
-                if not still_unreferenced:
+                if asset_id in still_kept:
                     with self._orphan_marks_lock:
                         self._orphan_first_seen.pop((notebook_id, asset_id), None)
                     continue

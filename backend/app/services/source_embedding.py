@@ -9,6 +9,15 @@ from app.repositories.ports import ChunkStorePort, EmbeddingStorePort, SourceSto
 from app.services.retrieval import _payload_text
 
 
+# Rows per keyset read page in ``embed_source``'s whole-source walk. A protocol
+# boundary, not a tunable budget: it changes NOTHING about which elements are
+# embedded, in what order, or in what batches (see the boundary note in
+# ``embed_source``) — only how many element rows (text included) are resident at
+# once while the walk advances. Deliberately larger than one embed batch so a
+# page read is amortised across several provider calls.
+_ELEMENT_READ_PAGE = 2000
+
+
 class SourceEmbeddingService:
     """Vector COMPUTE orchestration for elements / KG objects / KG relations /
     chunks: ThreadPoolExecutor batching.  The producer pool is derived from
@@ -121,16 +130,9 @@ class SourceEmbeddingService:
             return
         source = self.sources.get_source(source_id)
         notebook_id = source.notebook_id
-        elements = self.sources.source_elements(source_id)
-        pending = [el for el in elements if el.text.strip()]
-        if not pending:
-            return
 
         trunc = self.settings.embed_truncate_chars
         size = max(1, self.settings.embed_batch_size)
-        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
-
-        self._warm_up(embedder)
 
         def _embed_only(els: list) -> list:
             texts = [el.text[:trunc] for el in els]
@@ -164,27 +166,102 @@ class SourceEmbeddingService:
         # (INSERT OR REPLACE / ON CONFLICT (element_id) DO UPDATE — no
         # delete-all-for-source), so flushing page by page can never drop a page
         # that already committed.
+        #
+        # ⚠ The READ is paged too (生产热点整改批 E). `source_elements()`
+        # materialised the WHOLE source — every element row INCLUDING its full
+        # text — before a single vector was computed, so the last unbounded
+        # allocation of this path sat in front of all the bounding above. The
+        # keyset walk (`source_elements_after`) hands back one
+        # _ELEMENT_READ_PAGE-sized page at a time in the SAME global order
+        # `source_elements()` used, and `carry` only ever holds the elements not
+        # yet flushed.
+        #
+        # Batch and page boundaries stay BIT-IDENTICAL to the pre-paging read:
+        # `carry` releases work only in whole `size * page_sz` blocks, so every
+        # batch is exactly the `pending[i:i+size]` slice it always was and every
+        # full page holds exactly `page_sz` of them; the tail (< one page) is
+        # flushed once at the end, same as the old last page. The read page size
+        # is therefore free to differ from either — it never moves a boundary.
+        #
+        # ⚠ What the paged read DOES give up is the single-statement snapshot:
+        # the walk spans several reads, so a concurrent `replace_elements` could
+        # in principle be observed half-old/half-new. That is bounded by the
+        # SAME two things it always was, not by this loop: (a) a source's
+        # elements are only ever replaced behind that source's write fence, and
+        # (b) `replace_element_vectors` is a per-element upsert keyed on
+        # element_id, and `replace_elements` cascades the old element rows away,
+        # so a vector for a retired element cannot survive its element. The
+        # authority for "this source's vectors are current" was never this
+        # read's atomicity — it is the re-embed the ingest pipeline runs after
+        # the replacement commits.
         page_sz = max(1, self.settings.embed_commit_batches)
+        per_page = size * page_sz
         written = 0
+        total_pending = 0
+        saw_pending = False
+        carry: list = []
+
+        def _flush(page_batches: list) -> int:
+            rows: list = []
+            for part in self._map_embedding_batches(
+                _embed_only,
+                page_batches,
+                task_prefix="emb-el",
+                workload_id=workload_id,
+            ):
+                rows.extend(part)
+            if rows:
+                # Fresh timestamp per page (parity with the sibling batch
+                # embedders); correctness against retrieval's
+                # (COUNT(*), MAX(created_at)) matrix cache is guaranteed by
+                # the _evict_matrix finally below, not by created_at moving.
+                self.vectors.replace_element_vectors(
+                    source_id, notebook_id, rows, created_at=self.now()
+                )
+            return len(rows)
+
+        after: "tuple[Any, str] | None" = None
         try:
-            for pstart in range(0, len(batches), page_sz):
-                rows: list = []
-                for part in self._map_embedding_batches(
-                    _embed_only,
-                    batches[pstart:pstart + page_sz],
-                    task_prefix="emb-el",
-                    workload_id=workload_id,
-                ):
-                    rows.extend(part)
-                if rows:
-                    # Fresh timestamp per page (parity with the sibling batch
-                    # embedders); correctness against retrieval's
-                    # (COUNT(*), MAX(created_at)) matrix cache is guaranteed by
-                    # the _evict_matrix finally below, not by created_at moving.
-                    self.vectors.replace_element_vectors(
-                        source_id, notebook_id, rows, created_at=self.now()
+            while True:
+                previous = after
+                page, after = self.sources.source_elements_after(
+                    source_id, after, _ELEMENT_READ_PAGE
+                )
+                # A cursor that does not strictly advance means the walk would
+                # re-read the same page forever, re-embedding it and never
+                # terminating — a silent hang inside a background ingest, the
+                # worst possible failure mode. Fail loudly instead. (Not a
+                # data-integrity check: `replace_element_vectors` is an upsert,
+                # so a repeated page would be harmless in isolation; the
+                # non-termination is the whole problem.)
+                if after is not None and after == previous:
+                    raise RuntimeError(
+                        "source_elements_after cursor did not advance for "
+                        f"source {source_id}"
                     )
-                    written += len(rows)
+                for element in page:
+                    if element.text.strip():
+                        carry.append(element)
+                        total_pending += 1
+                if carry and not saw_pending:
+                    saw_pending = True
+                    # Same single, single-threaded warm-up the unpaged read did
+                    # — just deferred to the first element that actually needs
+                    # embedding, so a source with nothing to embed still never
+                    # touches the provider.
+                    self._warm_up(embedder)
+                while len(carry) >= per_page:
+                    block, carry = carry[:per_page], carry[per_page:]
+                    written += _flush(
+                        [block[i:i + size] for i in range(0, per_page, size)]
+                    )
+                if after is None:
+                    break
+            if carry:
+                written += _flush(
+                    [carry[i:i + size] for i in range(0, len(carry), size)]
+                )
+                carry = []
         finally:
             # Now that the write spans several transactions, a matrix built
             # between two page flushes must not survive: re-embedding an already
@@ -200,10 +277,19 @@ class SourceEmbeddingService:
             # embed_source is the re-embed path: the rows already exist, COUNT
             # does not move, and within the same second neither does MAX — which
             # is exactly why paging its write forced this eviction.
-            self._evict_matrix(notebook_id, "element_embeddings")
-        self.event_log.logger.info(
-            "embedded %s/%s elements for source %s", written, len(pending), source_id
-        )
+            #
+            # ⚠ `saw_pending` reproduces the pre-paging `if not pending: return`
+            # early exit exactly: a source with no embeddable element never
+            # warmed up, never evicted and never logged. Unlike then, that fact
+            # is only known after the last read page, so it is a flag rather
+            # than a return.
+            if saw_pending:
+                self._evict_matrix(notebook_id, "element_embeddings")
+        if saw_pending:
+            self.event_log.logger.info(
+                "embedded %s/%s elements for source %s",
+                written, total_pending, source_id,
+            )
 
     def embed_elements_batch(self, notebook_id: str, items: List[dict]) -> int:
         """按 element 补向量(只嵌给定的行,不整源重嵌),返回真正落库的行数。

@@ -153,6 +153,42 @@ def _in_fuse_batches(ids: Iterable[str],
         yield values[index:index + size]
 
 
+# 单条 claim 参与 concept_comentions 两两组合的 canonical 数上限;**超过即整条
+# claim 放弃组合**(不截断)。协议边界性质的稀疏化参数,与 `_MAX_GROUP_REPS` 同类:
+# 具名常量,不进 Settings。
+#
+# 为什么需要它:`rebuild_mention_bridge` 的别名 DF 双门(`mention_alias_df_floor` /
+# `mention_alias_df_cap`)约束的是「单个**别名**能命中多少 claim」,**不**约束
+# 「单条 **claim** 能命中多少 canonical」——后者恰是组合爆炸那一维:一条枚举式
+# claim("A、B、C … 均可用于 X")命中 h 个 canonical 就产出 C(h,2) 对,h 无上限时
+# 这是审计点名的 O(h²)。16 给出 C(16,2)=120 对/claim 的硬顶。
+#
+# 为什么是「整条跳过」而不是「按 canonical id 字典序取前 16」(评审 P2):字典序
+# 前缀对命名系统有偏置 —— canonical id 由 `_norm(概念名)` 派生,中文概念在
+# ASCII 之后,一条中英混排的巨型 claim 会系统性地只保留英文那一半的桥接对。而
+# 「同时提到 17 个以上概念」的枚举式 claim 本身就是**弱**桥接信号(它没说明任何
+# 两个概念的具体关系),整条放弃既无偏置又更简单,还省掉一次排序。
+#
+# 只作用于**组合**这一步:`mention_edges`(每 claim×命中 canonical 一行,线性)
+# 仍逐条保留 —— 那是检索侧真正消费的产物,而共提对只是桥接信号。跳过条数经
+# 结构化事件上报(对齐隔壁 DF 门的 `mention_alias_df_dropped`)。
+_MENTION_MAX_CANONS_PER_CLAIM = 16
+
+# 增量融合开头那次 orphan 簇 anti-join 的**进程内**兜底闸(完整论证见
+# `incremental_fuse_source`):本进程已经为哪些 notebook 扫过一次历史残渣。
+#
+# 语义刻意是「每进程每 notebook 至多一次」而不是任何跨进程的变更信号 —— 全仓已无
+# orphan 生产者(三条删除路径都在自己的写事务里清簇行),所以这里要发现的只有改造
+# 之前留下的静态残渣,扫一次即净。多 worker 部署下每个 worker 各扫一次,不存在
+# 「A 产生、B 收不到信号因而被永久压制」的路径(那正是 tick 版本被 codex 判 P1 的
+# 原因)。进程重启后集合为空 → 再扫一次,兜底不失效。
+_ORPHAN_SWEEP_DONE: Set[str] = set()
+_ORPHAN_SWEEP_DONE_LOCK = threading.Lock()
+# 有界:多租户进程里 notebook 数无上限,记满就整体丢弃重来(下一轮各扫一次,
+# 与冷启动同代价),不引入 LRU 复杂度。
+_ORPHAN_SWEEP_DONE_MAX = 512
+
+
 class ModelSkipPolicy:
     """离线跳过模式(`batch_ingest kg --skip-model-failures`)的**任务级**账目。
 
@@ -1503,14 +1539,51 @@ class KnowledgeLifecycleService:
         # 清理 re-extraction 留下的 orphan 簇行(member 指向已删 knowledge_objects):重抽取删旧
         # ko- 以新 id 重建,旧簇成员行悬空。消费方(build_ppr_graph/unified_graph)虽已过滤,
         # 仍清以防表无界增长 + unified_kg_status 的 canonical 计数虚高。id 是 PK,子查询走索引。
-        with self._write() as db:
-            swept = self.governance_store.sweep_orphan_clusters(db, notebook_id)
-            # P0-A: only bump if this orphan-sweep actually deleted rows — the
-            # later append_clusters calls in this method self-bump on their own
-            # additions, so this guards just the DELETE branch (no double-count,
-            # no fake signal on a no-op sweep).
-            if swept > 0:
-                self._bump_cluster_mutation_seq(db, notebook_id)
+        #
+        # ⚠这条 anti-join 是**全库**扫描,而本方法**每成功抽取一个来源就跑一次**
+        # (source_ingestion 的抽取收尾 + scale_index_builder 的增量 fold 逐源调用),
+        # 千万级对象的库上等于每次上传白付一次全表反连接。P1 轮把它降为**纯遗留残渣
+        # 兜底**,靠的是先把 orphan 的**生产者**清零(而不是给消费端加聪明的闸):
+        #
+        #   ① `KnowledgeStore.clear_source_graph_state` 的每个删除批次在**同一写
+        #      事务**里按 `(notebook_id, member_object_id)`(走 `idx_clusters_member`)
+        #      删掉对应簇行 —— 来源删除、重新解析、`store_kg(replace_source=True)`。
+        #   ② knowhow 投影的 delete-and-reinsert 走
+        #      `prune_cluster_rows_for_source(keep_object_ids=本次要重插的 id)`:
+        #      只清**差集**(被这次重投影真正丢掉的对象),活对象一行不碰。
+        #   ③ `delete_notebook_graph_rows` 本来就整表清空 `concept_clusters`。
+        #
+        # 于是全仓**零 orphan 生产者**(由 `test_orphan_producing_paths_are_
+        # exhaustively_registered` 的枚举守卫钉住,豁免清单为空),这里剩下的唯一
+        # 职责是清掉**改造之前**留在库里的历史残渣 —— 每进程每 notebook 扫一次就够。
+        #
+        # ⚠ 闸不能是任何「跨进程的变更信号」。走过两个被否的版本,都登记在这里:
+        #   · `kg_mutation_seq` 相等闸:`store_kg` 收尾无条件 bump 它,而本方法恰跟在
+        #     抽取之后跑,上传主热路径上闸恒开(评审实测 3 次上传 3 次全库反连接)。
+        #   · 进程内「疑似 orphan」tick:多 worker 部署下,worker A 的 knowhow 投影
+        #     只推 A 的本地信号,worker B 的记账永远停在旧世代 → B 的清扫被**永久
+        #     压制**,劣于改造前的无条件扫(codex P1)。
+        # 现在的闸是纯进程本地的「至多一次」,而它之所以无害,正是因为生产者已清零:
+        # 每个 worker 各扫一次历史残渣,之后没有任何新残渣需要谁去发现。
+        #
+        # 判据是**纯内存**的,所以跳过时既不读库也不开写事务(fold 循环 D 次白拿
+        # 进程写锁是 PR#320 写锁饿死的同一形状);只有真要扫时才 `_write()`。记账
+        # 放在事务**提交之后** —— 回滚了就不记,下次重扫(安全方向)。
+        with _ORPHAN_SWEEP_DONE_LOCK:
+            already_swept = notebook_id in _ORPHAN_SWEEP_DONE
+        if not already_swept:
+            with self._write() as db:
+                swept = self.governance_store.sweep_orphan_clusters(db, notebook_id)
+                # P0-A: only bump if this orphan-sweep actually deleted rows — the
+                # later append_clusters calls in this method self-bump on their own
+                # additions, so this guards just the DELETE branch (no double-count,
+                # no fake signal on a no-op sweep).
+                if swept > 0:
+                    self._bump_cluster_mutation_seq(db, notebook_id)
+            with _ORPHAN_SWEEP_DONE_LOCK:
+                if len(_ORPHAN_SWEEP_DONE) >= _ORPHAN_SWEEP_DONE_MAX:
+                    _ORPHAN_SWEEP_DONE.clear()
+                _ORPHAN_SWEEP_DONE.add(notebook_id)
         from app.services.kg_merge import place_new_concepts, _norm
         # PR-C 有界化:这里曾经 `cmap = self.cluster_map(notebook_id)` —— 整表物化
         # {member_object_id: canonical_id}(生产 9.1M 行 ≈2GB dict),而且每次融合的
@@ -1607,7 +1680,13 @@ class KnowledgeLifecycleService:
                 # _bridge_canonical_ids),故 pending/已决两份排除集都按这些 id 有界取。
                 my_cids = self._bridge_canonical_ids(new_objs)
                 with self._connect() as db:
-                    vrows = self.knowledge.embedding_rows(db, notebook_id)
+                    # 只读 concept 向量:本分支唯一的向量消费方
+                    # `detect_bridge_candidates` 只按 `new_objs` / `existing_items`
+                    # 的 object_id 取值,两者都是 `incremental_object_rows(...,
+                    # 'concept')` 的结果,所以 claim/formula/procedure 的向量从来
+                    # 只是被解码、验维、截断然后丢掉(claim 占对象数的大头)。
+                    # 谓词与那两条读逐字相同 → 存活的键、进而本分支的输出不变。
+                    vrows = self.knowledge.concept_embedding_rows(db, notebook_id)
                     pend = self._bridge_exclude_rows(
                         db, notebook_id, ("pending",), my_cids
                     )
@@ -1646,8 +1725,8 @@ class KnowledgeLifecycleService:
                     # 索引段扫描。两次独立实测同向:评审树 301.5ms vs 一次范围读
                     # 14.8ms(20.4×);本机 35 万行 concept_clusters 上 266ms vs
                     # 15.1ms(17.6×)。有界化在这里是净负。同一支本来就要
-                    # `embedding_rows(notebook)` 全表读向量,这条范围读没有引入新的
-                    # 数量级。
+                    # `concept_embedding_rows(notebook)` 范围读向量,这条范围读没有
+                    # 引入新的数量级。
                     # 走 store 原语而**不**走版本缓存的 `self.cluster_map()`:后者会把
                     # 这份 dict 留在进程里(9.1M 行 ≈2GB),这里用完即弃;顺带也收窄了
                     # P2-4 的竞态窗口(与 _decided 同一个连接、同一时刻取)。
@@ -4231,7 +4310,9 @@ class KnowledgeLifecycleService:
         每别名 phrase MATCH 召回
         候选 → 统一 alnum-lookaround 边界(boundary_hit)后校验 → DF 双门(命中
         claim 数超 max(floor, cap×claims)的泛词整体丢弃 + 事件计数)→ 聚合
-        claim→{canonical} 全量重写 mention_edges + 两两组合(a<b)concept_comentions。
+        claim→{canonical} 全量重写 mention_edges + 两两组合(a<b)concept_comentions
+        (单 claim 命中的 canonical 数超过 `_MENTION_MAX_CANONS_PER_CLAIM` 时**整条
+        跳过组合**并计入 `mention_comention_claim_skipped` 事件;edges 不受影响)。
 
         seq 闸同 rebuild_canonical_relations(mention_seq==kg_mutation_seq 且表非空
         → 跳过,force 绕过;重写后写回入口捕获的 seq)。flag 关时清表返回 0。
@@ -4326,9 +4407,24 @@ class KnowledgeLifecycleService:
                  for claim_id, canon_map in claim_hits.items()
                  for canon, alias in canon_map.items()]
         comention: Dict[Tuple[str, str], int] = {}
+        skipped_claims = 0
         for canon_map in claim_hits.values():
+            # ⚠ 组合上限(`_MENTION_MAX_CANONS_PER_CLAIM`,理由见常量处):DF 双门只
+            # 界住「单别名命中多少 claim」,不界住「单 claim 命中多少 canonical」,
+            # 而后者才是这里的 O(h²)。超限**整条跳过**(不截断——字典序前缀对中文
+            # 概念有系统性偏置),且只作用于**组合**这一步:上面的 edges 已逐条建完、
+            # 不受影响。
+            if len(canon_map) > _MENTION_MAX_CANONS_PER_CLAIM:
+                skipped_claims += 1
+                continue
             for a, b in _combinations(sorted(canon_map), 2):
                 comention[(a, b)] = comention.get((a, b), 0) + 1
+        if skipped_claims > 0:
+            # 无正文:只有条数与上限(对齐上面的 mention_alias_df_dropped)。
+            self.event_log.emit({"kind": "mention_comention_claim_skipped",
+                                 "notebook_id": notebook_id,
+                                 "skipped": skipped_claims,
+                                 "max_canonicals": _MENTION_MAX_CANONS_PER_CLAIM})
         cm_rows = [(notebook_id, a, b, n) for (a, b), n in comention.items()]
         with self._write() as db:
             self.unified_kg.replace_mention_bridge(

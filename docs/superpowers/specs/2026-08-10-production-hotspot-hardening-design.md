@@ -145,6 +145,151 @@ json 物化并随 ScaleIndex 常驻 LRU（启动预热即物化）；`_unified_g
 - 全部批次后：`bash scripts/check.sh` 全绿 → 文档同步（新 Settings 数值登记
   `docs/product-and-api*.md`；本设计文档随 PR 入库）→ 单一 PR → codex 评审闭环。
 
+## 第二期（P1 轮）：三批
+
+第一期五批（PR #493）合入后启动。经代码核实后的定型方案：
+
+### 批 A+B：治理路径读取瘦身（review_queue + promotion）
+
+- `review_queue_rows`：对象查询从「全 notebook 全部对象」收窄到「出现在非 rejected
+  关系端点上的对象」（JOIN/EXISTS，无损——objects 只被用来取端点 type/name）；
+  关系查询的 `evidence` 正文列替换为 SQL 侧派生的锚点信号投影（逐字复刻
+  `evidence_anchor_score` 的判定输入，不再把全部 evidence JSON 拉进 Python）。
+  corroboration 的跨边聚合保留在 Python（分组键依赖 `_norm`，刻意不下推）；
+  centrality 缓存与 bounding 不动；排序改 `heapq.nlargest(limit)`。
+- promotion `_base_dedup_rows_for_update`：SELECT 去掉 `evidence` 列（seed 匹配
+  不读它），匹配成功后按 matched id 单行补读再合并。**FOR UPDATE 与锁序零变化**
+  （并发正确性锚由既有 PG 并发测试钉住，不动）。
+
+落地时的三处定型（与上文措辞的差异，均为实现期核实后的收窄）：
+
+1. 对象收窄**不用** JOIN/EXISTS，改为「从已在手的关系行收集端点 id → 分批按 id
+   取回」（页宽 `_REVIEW_ENDPOINT_LOOKUP_BATCH = 500`，是分页宽度不是上限）。
+   理由是 JOIN/EXISTS 要为 `review_status != 'rejected'` 再走一遍
+   knowledge_relations，而那一遍刚刚做过。关系查询的驱动计划逐字未变（仍是
+   `idx_knowledge_relations_nb_target_id (notebook_id=?)` + 两侧端点主键
+   LEFT-JOIN），只多了一个按行自身 evidence 求值的相关子查询。
+
+   ⚠ **SQLite 侧那条取数必须是裸 `id IN (...)`，`notebook_id` 只进投影、比对
+   放 Python**。本仓库从不对生产库跑 `ANALYZE`，无统计信息时
+   `WHERE notebook_id=? AND id IN (...)` 会被 planner 选成
+   `idx_knowledge_objects_nb_*(notebook_id=?)`，即**每批**扫遍该 notebook 的
+   全部对象——比本条要消灭的那次全量扫更糟（20 万行真实 schema 实测：
+   0.138s → 14.155s，×103 倒退）。裸 `id IN (...)` 在有无统计信息下都走
+   `sqlite_autoindex_knowledge_objects_1 (id=?)`。这是仓库登记过的既有坑，
+   同款结论与配方见 `query_store.notebook_source_ids` 与
+   `maintenance.chunk_texts_by_ids`。⚠ **夹具规模的 `EXPLAIN QUERY PLAN` 证明
+   不了这一点**（几行的表上两种拼写都走主键），所以护栏必须钉 SQL **文本形状**
+   （`test_endpoint_lookup_sql_keeps_no_notebook_predicate`，范式取自
+   `test_canonical_relations.py::test_relation_support_rows_issues_row_value_in_not_or_chain`）；
+   本条第一版正是因为只有行为测试才漏过一轮评审。PG 侧
+   `notebook_id = %s AND id = ANY(%s)` 已验证走 `pk_knowledge_objects`，保持原样。
+2. 锚点下推的 trim 字符集必须是 `str.strip()` 的**精确** Unicode 空白集
+   （`app/core/text_whitespace.py::PY_STRIP_WHITESPACE`，29 字符；放 `core` 是因为
+   服务层与两个适配器都要用，同 `query_syntax` 口径）：SQLite `trim(X,Y)` 与
+   PostgreSQL `btrim(X,Y)` 默认只去 U+0020，裸写会把 `"\n"` / `"　"` 这类
+   纯空白 quote 判成已锚定。两后端各有逐形状对照用例。
+3. **登记的健壮性差异**：畸形 evidence（非法 JSON TEXT、`quote` 非字符串）旧路径
+   直接抛异常（整个 review_queue 500），不存在可保真的响应；下推版一律记 0.0 并
+   正常返回。注意 `_edge_centrality_map` 仍在 Python 侧解析 evidence（本批不动），
+   所以非法 JSON TEXT 仍可能在下游让端点失败——本批只是不再自己贡献这个失败面。
+
+### 批 D：mention bridge 组合加界 + 增量 fusion 残余收敛
+
+- mention bridge：单 claim 命中 canonical 集合加上限（具名常量）——O(hits²) 组合
+  从此有界。逐 alias 查询保持（对象是连接私有内存 TEMP FTS 表，非磁盘 N+1，不值得
+  批量化）。
+- fusion 的 orphan-cluster anti-join（每源一次、无闸、全库扫描）：先核实对象删除
+  路径是否已同事务精确清理 `concept_clusters`（member_object_id 有索引）；据此
+  把 anti-join 降为低频兜底或在删除路径补精确清理。两形状二选一，以「删除路径
+  精确清理 + fusion 兜底降频」为优先。
+- fusion 无 ANN 分支的 `embedding_rows` 收窄到 concept 类型（该分支只做 concept
+  桥接，claim 占 70% 的向量读取是纯浪费）；`cluster_map_rows` 的整表读**不动**
+  （代码已登记撤回有界化的 17.6× 实测理由）。
+
+落地时的三处定型（评审后核实，与上文措辞的差异均为实现期收窄）：
+
+1. **组合上限是「整条 claim 放弃组合」，不是「按确定序截断」。** 常量
+   `_MENTION_MAX_CANONS_PER_CLAIM = 16`（C(16,2)=120 对/claim 硬顶）按
+   `_MAX_GROUP_REPS` 先例走**具名常量**而非 `Settings`——它是协议边界性质的
+   稀疏化参数，不是需要按部署在质量/成本间调的预算。之所以选「整条跳过」：
+   canonical id 由 `_norm(概念名)` 派生，字典序前缀对中文命名的概念有系统性
+   偏置（CJK 码位在 ASCII 之后），一条中英混排的巨型 claim 会只保留英文那一半
+   的桥接对；而「同时提到 17 个以上概念」的枚举式 claim 本就是**弱**桥接信号
+   （它没说明任何两个概念的具体关系），整条放弃无偏置、更简单，也顺带消解了
+   本文档「会改变结果的截断应走 `Settings`」那条原则与此处的表述冲突——现在
+   没有截断，只有一条确定性的**准入**判据。跳过条数经只含计数的结构化事件
+   `mention_comention_claim_skipped` 上报（对齐隔壁 `mention_alias_df_dropped`）；
+   `mention_edges` 线性、不受影响。
+
+2. **最终形状是把 orphan 的「生产者」清零，而不是给消费端加聪明的闸。** 闸走过
+   两个被否的版本，都登记在这里，因为它们各代表一类容易重犯的错：
+
+   - **v1 `kg_mutation_seq` 相等闸**（评审实测打回）：`store_kg` 收尾无条件
+     bump 它，而 fusion 恰跟在抽取之后跑，于是上传主热路径上闸恒开——3 次上传
+     3 次全库反连接，只有 fold 循环内部那一维真收敛。
+   - **v2 进程内「疑似 orphan」全局单调 tick**（codex P1）：只由 knowhow 投影
+     推进。多 worker 部署下 worker A 的投影只推 A 的本地信号，worker B 的记账
+     永远停在旧世代 → **B 的清扫被永久压制**，劣于改造前的无条件扫。仓库虽登记
+     「生产固定 `--workers 1`」，但改造前多 worker 也能扫到，这是真回归面。
+
+   **v3（最终）**：把唯一剩下的生产者也变成事务内清理。knowhow 投影的
+   delete-and-reinsert 走新的 `prune_cluster_rows_for_source(keep_object_ids=
+   本次要重插的 id)`——KO id 是内容稳定 hash，绝大多数对象会原样回来，所以只清
+   **差集**（这次重投影真正丢掉的对象：删掉的列/行/改名的格子），活对象一行不
+   碰；`delete_table_projection` 不传 keep 集合即全清。于是三条删对象的路径
+   （来源删除/重解析/replace_source、knowhow 重投影/删表、整库重建）**都**在
+   自己的写事务里清簇行，全仓**零 orphan 生产者**。
+
+   fusion 侧因此只剩「清掉改造之前留下的静态残渣」这一个职责，闸退化成**每进程
+   每 notebook 至多一次**的纯兜底：多 worker 下每个 worker 各扫一次，不存在任何
+   压制路径（进程本地性从此无害），进程重启后再扫一次。判据纯内存，跳过时不读库
+   也不开写事务（fold 循环 D 次白拿进程写锁是 PR#320 写锁饿死的同一形状），记账
+   落在写事务**提交之后**（回滚不记 → 下次重扫）。`orphan_cluster_signal` 模块
+   随 v2 一并删除。
+
+   守卫 `test_orphan_producing_paths_are_exhaustively_registered` 钉住这个穷举，
+   且**豁免清单为空**：两个后端各恰 4 条 `DELETE FROM knowledge_objects`，每条
+   所在函数要么自己删簇行、要么整表清空、要么是 knowhow 那两条（其清理由服务层
+   在同一写事务内经 `prune_cluster_rows_for_source` 完成，由该文件的 AST 检查
+   逐函数配对）；并断言 `orphan_cluster_signal` 已不存在，防止跨进程信号闸复辟。
+
+3. 两条精确清理的 DELETE 都带 `notebook_id` 残余谓词（`idx_clusters_member` 仍
+   驱动 seek），让它们与被替代的 `sweep_orphan_clusters` 语义逐字同形，不依赖
+   「对象 id 是全局主键 / 深拷贝重铸 id / 批次来自 notebook 内查询」这三条远端
+   事实。`prune_cluster_rows_for_source` 的规模由**一张 knowhow 表的投影**界住
+   （它读的正是紧随其后的 `delete_objects_by_source` 要扫的那一段
+   `idx_knowledge_objects_source`，调用方本来就把同量级的 `object_rows` 拿在
+   手里），必须在对象被删**之前**调用。
+
+### 批 E：relink 倒排 + source_embedding 读入分页 + orphan asset 单遍扫描
+
+- relink Rule-1：`element_id → nodes` 倒排替代逐孤立节点×全 sibling 交集
+  （严格无损：overlap 计数经倒排桶累加与集合交集数学等价）；Rule-2 不动。
+- `embed_source`：`source_elements()` 整源物化改 keyset 分页读入（计算/写回
+  已分批，这是最后一块）；页大小具名常量。
+- orphan asset sweep：O(资产×格子) 逐资产前导通配 LIKE 改为单遍扫描——一次取回
+  notebook 全部 `content_md`/`payload_json`，regex 提取 `asset://<id>` token
+  集合，与资产集合差集；写事务复核同一形状。**顺带修正 PG 侧不扫
+  `knowhow_changes` 历史引用的行为差异**（同一资产 SQLite 保留、PG 会删——
+  回退到旧版本会指向已删文件；修复后两侧同口径，登记为正确性修复）。
+
+### P1 轮登记不做（经核实后主动放弃）
+
+- rebuild 的 seed representatives ~18GB：已是流式 + float32 + 用完即 `del`，
+  18GB 是 4.4M seed × 1024 维的数据本征规模；进一步压缩需分片聚类（跨片丢对
+  的质量代价），不值。
+- `cluster_input_facts` 的 COUNT：代码自认的防御性 backstop（抓绕过
+  mark_dirty 的写路径），memo 化会掏空其存在意义，且成本占 rebuild 总时长
+  比例极小。
+- fusion 的「新类型全量 canonical names」读取：代码已登记不可收窄的完整论证
+  （别名表键不可点查，逐候选 LIKE 替代实测更差）。
+- knowhow 单项变更全表指纹：指纹是变更历史/传输守卫的对账契约本体，增量化
+  等于换算法、破坏历史对账。
+- H4/H5 checkup 首请求 anti-join：已有 30s TTL 缓解。
+- 兼容接口全量响应：旧 API 客户端行为，收紧属破坏性变更，单独立项再议。
+- relink/rebuild 单飞的多 worker 化：生产固定 `--workers 1`，收益为零。
+
 ## 本轮不做（P1/P2 登记）
 
 - review_queue 全量计算后截取（同步接口 O(E log E)）：后续改为 SQL 侧预筛 + 分页。

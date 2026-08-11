@@ -184,3 +184,37 @@ def test_corroboration_cap_at_corr_cap():
     assert corroboration_score_from_count(CORR_CAP + 5) == 1.0
     assert corroboration_score_from_count(0) == 0.0
     assert abs(corroboration_score_from_count(1) - 1.0 / CORR_CAP) < 1e-9
+
+
+def test_py_strip_whitespace_matches_str_strip():
+    """PY_STRIP_WHITESPACE (app/core/text_whitespace.py — core because both the
+    service layer and the repository adapters read it) is spelled out
+    (deriving it would scan 0x110000 code
+    points at import time), so it needs a test that recomputes it.  The review
+    queue's stores hand it to SQLite `trim()` / PostgreSQL `btrim()` so their
+    anchor predicate strips exactly what `str.strip()` strips — drift there
+    would silently score a whitespace-only quote as anchored."""
+    from app.core.text_whitespace import PY_STRIP_WHITESPACE
+
+    derived = "".join(chr(code) for code in range(0x110000) if chr(code).isspace())
+    assert PY_STRIP_WHITESPACE == derived
+    # And it really is the alphabet strip() uses, character by character.
+    assert all(f"{ch}x{ch}".strip() == "x" for ch in PY_STRIP_WHITESPACE)
+    assert all(ch.strip() == "" for ch in PY_STRIP_WHITESPACE)
+
+
+def test_compute_trust_score_precomputed_anchor_matches_derived():
+    """The evidence_anchor seam must be a pure substitution: supplying the value
+    the store computed in SQL has to yield the same score as deriving it from
+    rel["evidence"], and the default (None) must keep deriving it."""
+    from app.services.kg.edge_trust import compute_trust_score, evidence_anchor_score
+
+    node_types = {"src": "Concept", "tgt": "Concept"}
+    for evidence in ([], [{"quote": "anchored"}], [{"quote": "   "}], [{}]):
+        rel = _rel("relates_to", "Concept", "Concept", evidence)
+        derived = compute_trust_score(rel, node_types, 0.5)
+        pushed = compute_trust_score(
+            {k: v for k, v in rel.items() if k != "evidence"},
+            node_types, 0.5, evidence_anchor=evidence_anchor_score(rel),
+        )
+        assert pushed == derived

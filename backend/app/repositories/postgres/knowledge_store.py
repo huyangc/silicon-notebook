@@ -517,9 +517,21 @@ class KnowledgeStore:
         return _compat_rows(rows, payload=True)
 
     @staticmethod
-    def embedding_rows(db: Any, notebook_id: str):
+    def concept_embedding_rows(db: Any, notebook_id: str):
+        """This notebook's LIVE **concept** object vectors (SQLite parity).
+
+        See the SQLite adapter's docstring for the equivalence argument: the
+        predicates copy incremental fusion's own ``incremental_object_rows(...,
+        'concept')`` filter, so the keys its no-ANN bridge branch actually
+        reads are unchanged while the claim/formula/procedure vectors it never
+        read stop being fetched.
+        """
         return db.execute(
-            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=%s",
+            "SELECT e.object_id AS object_id, e.vector AS vector "
+            "FROM knowledge_embeddings e "
+            "JOIN knowledge_objects o ON o.id = e.object_id "
+            "WHERE e.notebook_id=%s AND o.object_type='concept' "
+            "AND o.status!='deprecated'",
             (notebook_id,),
         ).fetchall()
 
@@ -1980,6 +1992,38 @@ class KnowledgeStore:
             "DELETE FROM knowledge_objects WHERE source_id = %s", (source_id,)
         )
 
+    @classmethod
+    def prune_cluster_rows_for_source(
+        cls,
+        connection: Any,
+        notebook_id: str,
+        source_id: str,
+        keep_object_ids: Iterable[str] = (),
+    ) -> int:
+        """Drop this source's stale ``concept_clusters`` membership rows
+        (SQLite parity — see that adapter's docstring for why the surviving,
+        about-to-be-reinserted ids must be spared and why this has to run
+        BEFORE ``delete_objects_by_source``)."""
+        keep = set(keep_object_ids)
+        stale = [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM knowledge_objects WHERE source_id = %s",
+                (source_id,),
+            ).fetchall()
+            if row["id"] not in keep
+        ]
+        deleted = 0
+        for offset in range(0, len(stale), _DELETE_OBJECT_BATCH_SIZE):
+            batch = stale[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+            cursor = connection.execute(
+                "DELETE FROM concept_clusters "
+                "WHERE notebook_id = %s AND member_object_id = ANY(%s)",
+                (notebook_id, batch),
+            )
+            deleted += int(getattr(cursor, "rowcount", 0) or 0)
+        return deleted
+
     @staticmethod
     def delete_relations_by_source_object(
         connection: Any, notebook_id: str, source_object_id: str
@@ -2254,14 +2298,32 @@ class KnowledgeStore:
         return [row["id"] for row in rows]
 
     @classmethod
-    def _delete_object_id_batch(cls, db: Any, object_ids: Sequence[str]) -> None:
-        """Delete one already-bounded object batch and its derived rows."""
+    def _delete_object_id_batch(
+        cls, db: Any, notebook_id: str, object_ids: Sequence[str]
+    ) -> None:
+        """Delete one already-bounded object batch and its derived rows.
+
+        Mirrors the SQLite adapter verbatim, including the ``concept_clusters``
+        membership rows deleted in this same transaction by
+        ``(notebook_id, member_object_id)`` (``idx_clusters_member`` drives the
+        seek; the notebook column keeps this statement semantically identical to
+        the ``sweep_orphan_clusters`` it replaces) — see that adapter's
+        docstring for why they belong here rather than in
+        ``incremental_fuse_source``'s notebook-wide orphan anti-join, why the
+        knowhow projector deliberately does NOT do the same, and why no
+        ``cluster_mutation_seq`` bump accompanies it.
+        """
         batch = list(object_ids[:_DELETE_OBJECT_BATCH_SIZE])
         if not batch:
             return
         db.execute(
             "DELETE FROM knowledge_embeddings WHERE object_id = ANY(%s)",
             (batch,),
+        )
+        db.execute(
+            "DELETE FROM concept_clusters "
+            "WHERE notebook_id = %s AND member_object_id = ANY(%s)",
+            (notebook_id, batch),
         )
         db.execute(
             "DELETE FROM knowledge_objects WHERE id = ANY(%s)",
@@ -2298,13 +2360,13 @@ class KnowledgeStore:
             if not stale_batch:
                 break
             stale_after_id = stale_batch[-1]
-            self._delete_object_id_batch(db, stale_batch)
+            self._delete_object_id_batch(db, notebook_id, stale_batch)
         self.delete_relations_for_source(db, source_id)
         while True:
             direct_batch = self._direct_object_ids_for_source_batch(db, source_id)
             if not direct_batch:
                 break
-            self._delete_object_id_batch(db, direct_batch)
+            self._delete_object_id_batch(db, notebook_id, direct_batch)
 
     def clear_source_extraction_state(
         self,

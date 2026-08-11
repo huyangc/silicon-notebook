@@ -20,6 +20,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services import sqlite_repository
+from app.services import source_embedding as source_embedding_mod
 from app.services.source_embedding import SourceEmbeddingService
 from tests.model_testkit import RecordingModelProvider
 
@@ -532,3 +533,199 @@ def test_paged_embed_evicts_matrix_even_when_a_page_flush_raises(tmp_path, monke
 
     assert flushes["n"] == 2                                         # aborted mid-pagination
     assert (nb.id, "knowledge_embeddings") in invalidated           # ...yet the matrix was still evicted
+
+
+# --------------------------------------------------------------------------
+# 生产热点整改批 E: embed_source 的**读入**也分页。
+# 计算/写回早就分页了(上面几条),但 `source_elements()` 仍在最前面把整来源
+# (含每个元素的完整正文)一次性物化——分页之前那一块是这条路径上最后一个
+# 无界分配。
+# --------------------------------------------------------------------------
+
+
+def _spy_element_pages(repo, monkeypatch, *, max_pages=64):
+    """记录每次 keyset 读页的 (cursor, limit, 返回行数);并把整源读死掉。
+
+    ``max_pages`` 是**死循环守卫**,必须在 spy 里抛而不是留给循环之后的断言:
+    游标不推进的变异会让 embed_source 永远读第一页,那时循环外的断言根本执行
+    不到,测试只会挂住(挂住 ≠ 红)。"""
+    store = repo._runtime.source_store
+    real_after = store.source_elements_after
+    pages: list = []
+
+    def spy_after(source_id, after, limit):
+        if len(pages) >= max_pages:
+            raise AssertionError(
+                f"keyset 读页超过 {max_pages} 页 —— 游标没有推进(死循环)"
+            )
+        items, next_after = real_after(source_id, after, limit)
+        pages.append({"after": after, "limit": limit, "rows": len(items)})
+        return items, next_after
+
+    def forbidden(source_id):
+        raise AssertionError(
+            "embed_source 不得再整源物化 source_elements() —— 那正是批 E 要消掉的"
+        )
+
+    monkeypatch.setattr(store, "source_elements_after", spy_after)
+    monkeypatch.setattr(store, "source_elements", forbidden)
+    return pages
+
+
+def test_embed_source_reads_elements_in_bounded_keyset_pages(tmp_path, monkeypatch):
+    """读入按页推进:每页行数 ≤ 常量,且整源 `source_elements()` 一次都不调。
+
+    变异锚点:
+      - 把读回退成 `self.sources.source_elements(source_id)` → `forbidden` 断言红;
+      - 删掉游标推进(每次都传 after=None)→ 下面的页数上限红(死循环守卫)。
+    """
+    monkeypatch.setattr(source_embedding_mod, "_ELEMENT_READ_PAGE", 7)
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(r, nb.id, 55)
+    _bind(r, "source_element_embedding", _RecordingEmbedder(dim=8))
+    pages = _spy_element_pages(r, monkeypatch)
+
+    r._embed_source(sid)
+
+    assert pages, "至少读了一页"
+    assert all(p["limit"] == 7 for p in pages)
+    assert all(p["rows"] <= 7 for p in pages)          # 每页有界
+    assert sum(p["rows"] for p in pages) == 55         # 一行不漏、一行不重
+    # 死循环守卫:游标必须真的推进。ceil(55/7)=8 页,末页满 → 再一次空查询。
+    assert len(pages) <= 9, len(pages)
+    assert [p["after"] for p in pages][0] is None
+    assert all(p["after"] is not None for p in pages[1:])
+    assert _count(
+        r, "SELECT COUNT(*) FROM element_embeddings WHERE source_id=?", (sid,)
+    ) == 55
+
+
+def _embed_source_run_with_read_page(tmp_path, monkeypatch, *, read_page, n=55):
+    monkeypatch.setattr(source_embedding_mod, "_ELEMENT_READ_PAGE", read_page)
+    return _embed_source_run(tmp_path, monkeypatch, commit_batches="2", n=n)
+
+
+def test_embed_source_read_paging_keeps_calls_and_vectors_bit_identical(
+    tmp_path, monkeypatch
+):
+    """读页大小只改 I/O 形状:``embedder`` 的调用切分与落库向量逐位不变。
+
+    这条是批 E 的等价合同本体——批边界由 ``carry`` 只按整 ``size*page_sz`` 块
+    释放来保证,与读页大小正交(读页 3 / 1000 都不该移动任何一个批边界)。"""
+    tiny_calls, tiny_rows = _embed_source_run_with_read_page(
+        tmp_path / "tiny", monkeypatch, read_page=3
+    )
+    huge_calls, huge_rows = _embed_source_run_with_read_page(
+        tmp_path / "huge", monkeypatch, read_page=100000
+    )
+    assert len(tiny_calls) == 6 and len(huge_calls) == 6   # 55 / 每批 10
+    assert sorted(tiny_calls) == sorted(huge_calls)
+    assert [eid for eid, _ in tiny_rows] == [eid for eid, _ in huge_rows]
+    assert [vec for _, vec in tiny_rows] == [vec for _, vec in huge_rows]
+
+
+def test_embed_source_single_page_source_still_writes_one_transaction(
+    tmp_path, monkeypatch
+):
+    """短于一页的来源:一次写事务,与分页前逐字节同构。"""
+    monkeypatch.setattr(source_embedding_mod, "_ELEMENT_READ_PAGE", 2000)
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="1000")
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(r, nb.id, 7)
+    _bind(r, "source_element_embedding", _RecordingEmbedder(dim=8))
+    flushes: list = []
+    real_replace = r._runtime.embedding_store.replace_element_vectors
+
+    def spy_replace(source_id, notebook_id, rows, *, created_at):
+        flushes.append(len(rows))
+        return real_replace(source_id, notebook_id, rows, created_at=created_at)
+
+    monkeypatch.setattr(
+        r._runtime.embedding_store, "replace_element_vectors", spy_replace
+    )
+    pages = _spy_element_pages(r, monkeypatch)
+
+    r._embed_source(sid)
+
+    assert flushes == [7]
+    assert len(pages) == 1                 # 短页 → 游标即刻耗尽,不再多发一次查询
+    assert pages[0]["rows"] == 7
+
+
+def test_embed_source_with_nothing_embeddable_skips_warmup_and_eviction(
+    tmp_path, monkeypatch
+):
+    """全空白正文的来源:与分页前的 ``if not pending: return`` 逐字同效——
+    不 warm up、不写、不失效 matrix 缓存、不记日志。只是这个事实现在要读完
+    最后一页才知道,所以用标志位而不是 return。"""
+    monkeypatch.setattr(source_embedding_mod, "_ELEMENT_READ_PAGE", 4)
+    r = _make_repo(tmp_path, monkeypatch)
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(r, nb.id, 9, text="   ")
+    embedder = _RecordingEmbedder(dim=8)
+    _bind(r, "source_element_embedding", embedder)
+    invalidated = _spy_invalidate(r._runtime.source_embedding, monkeypatch)
+    pages = _spy_element_pages(r, monkeypatch)
+
+    r._embed_source(sid)
+
+    assert embedder.events == []                  # 既没 warm-up 也没 embed
+    assert invalidated == []
+    assert sum(p["rows"] for p in pages) == 9     # 但确实完整走了一遍
+    assert _count(
+        r, "SELECT COUNT(*) FROM element_embeddings WHERE source_id=?", (sid,)
+    ) == 0
+
+
+def test_embed_source_warms_up_once_even_across_many_read_pages(tmp_path, monkeypatch):
+    """warm-up 仍然恰好一次、在任何 embedder 调用之前——只是推迟到第一个真的
+    需要嵌入的元素出现时。"""
+    monkeypatch.setattr(source_embedding_mod, "_ELEMENT_READ_PAGE", 3)
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="1")
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(r, nb.id, 41)
+    embedder = _RecordingEmbedder(dim=8)
+    _bind(r, "source_element_embedding", embedder)
+
+    r._embed_source(sid)
+
+    assert embedder.events.count("ensure") == 1
+    assert embedder.events[0] == "ensure"
+
+
+def test_embed_source_raises_when_the_store_cursor_does_not_advance(
+    tmp_path, monkeypatch
+):
+    """生产侧死循环守卫:游标不严格推进就响亮失败,而不是永远重读第一页。
+
+    这是**生产代码**的断言,不是测试断言 —— 一个不推进的游标会让后台摄取里的
+    这条走查永不终止(而且每一轮都重新调用 embedder 付费)。upsert 语义让重复
+    的一页在数据上无害,所以不终止本身才是全部问题。
+
+    变异锚点:删掉 embed_source 里的 ``after == previous`` 检查 → 本用例挂死
+    而不是红,所以 stub 自己也带一个次数上限、超限抛别的异常,让「守卫没了」
+    仍然是**红**。"""
+    monkeypatch.setattr(source_embedding_mod, "_ELEMENT_READ_PAGE", 5)
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    sid = _insert_source_with_elements(r, nb.id, 30)
+    _bind(r, "source_element_embedding", _RecordingEmbedder(dim=8))
+
+    store = r._runtime.source_store
+    real_after = store.source_elements_after
+    calls: list = []
+
+    def stuck(source_id, after, limit):
+        calls.append(after)
+        if len(calls) > 20:
+            raise RuntimeError("守卫没拦住:走查已经重读了 20 页")
+        items, _next_after = real_after(source_id, None, limit)   # 永远回第一页
+        return items, ("frozen-cursor", "frozen-id")
+
+    monkeypatch.setattr(store, "source_elements_after", stuck)
+
+    with pytest.raises(RuntimeError, match="cursor did not advance"):
+        r._embed_source(sid)
+    # 第一页给出的游标是新的(previous 是 None),第二页才发现它没动 —— 至多两次。
+    assert len(calls) == 2, calls

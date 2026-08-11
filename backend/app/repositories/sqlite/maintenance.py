@@ -27,12 +27,23 @@ from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from app.repositories.chunk_elements import reverse_rows as chunk_element_reverse_rows
+from app.repositories.knowhow_asset_refs import (  # 后端中性,postgres maintenance 共用
+    asset_ref_tokens,
+    collect_change_payload_tokens,
+    keepers_among,
+)
 from app.repositories.ports import VectorBatchEncoder
 from app.repositories.source_fact_backfill import project_historical_source_fact
-from app.repositories.sqlite.knowhow_history_store import content_strings_in_payload
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
 from app.services.kg.source_partition_index import SOURCE_PARTITION_FORMAT_VERSION
 from app.services.vector_index import decode_vector
+
+# Rows consumed per fetch while streaming the orphan-asset keeper scan. A
+# protocol boundary, not a budget: every matching row is still visited, only the
+# resident Python-object window is bounded (the accumulated token set is what
+# survives the pass, never the notebook's cell/payload text). See
+# ``_surviving_asset_refs``.
+_ASSET_SCAN_FETCH_ROWS = 200
 
 # (table, id_column) for every embeddings table maintenance tooling touches.
 VECTOR_TABLES = (
@@ -2103,10 +2114,69 @@ class SQLiteMaintenanceAdapter:
 
     # -- knowhow-table assets (PR-2+3 Task 14) ---------------------------------
 
-    def _is_asset_referenced(
-        self, db: sqlite3.Connection, notebook_id: str, asset_id: str
-    ) -> bool:
-        """The ONE reference-determination predicate ``sweep_orphan_assets``
+    def _live_cell_ref_tokens(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> set:
+        """``asset://`` tokens in this notebook's LIVE cell content.
+
+        The ``LIKE`` narrows on the CONSTANT ``'%asset://%'`` (not one pattern
+        per asset), so a notebook whose cells never mention an asset stays
+        exactly as cheap as the retired per-asset scan — it just pays that once
+        instead of once per asset. Rows are consumed in bounded fetches so only
+        the token set, never the notebook's whole cell text, is resident.
+        """
+        tokens: set = set()
+        cursor = db.execute(
+            "SELECT c.content_md AS content_md FROM knowhow_cells c "
+            "JOIN knowhow_rows r ON r.id = c.row_id "
+            "JOIN knowhow_tables t ON t.id = r.table_id "
+            "WHERE t.notebook_id = ? AND c.content_md LIKE '%asset://%'",
+            (notebook_id,),
+        )
+        while True:
+            rows = cursor.fetchmany(_ASSET_SCAN_FETCH_ROWS)
+            if not rows:
+                break
+            for row in rows:
+                tokens.update(asset_ref_tokens(row["content_md"]))
+        return tokens
+
+    def _history_ref_tokens(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> set:
+        """``asset://`` tokens in this notebook's ``knowhow_changes`` history.
+
+        Coarse SQL pre-filter, exact Python match afterwards (mirrors
+        ``KnowhowHistoryStore.cell_history``'s own "LIKE narrows candidates,
+        Python matches exactly" pattern): a ``payload_json`` substring hit is a
+        cheap SUPERSET of what actually counts — it can false-POSITIVE (matching
+        inside an excluded ``code_text``) but never false-NEGATIVE, so narrowing
+        candidates this way before parsing JSON is safe.
+        """
+        tokens: set = set()
+        cursor = db.execute(
+            "SELECT ch.kind AS kind, ch.payload_json AS payload_json "
+            "FROM knowhow_changes ch "
+            "JOIN knowhow_tables t2 ON t2.id = ch.table_id "
+            "WHERE t2.notebook_id = ? AND ch.payload_json LIKE '%asset://%'",
+            (notebook_id,),
+        )
+        while True:
+            rows = cursor.fetchmany(_ASSET_SCAN_FETCH_ROWS)
+            if not rows:
+                break
+            for row in rows:
+                collect_change_payload_tokens(
+                    row["kind"], row["payload_json"], tokens
+                )
+        return tokens
+
+    def _surviving_asset_refs(
+        self, db: sqlite3.Connection, notebook_id: str, asset_ids
+    ) -> set:
+        """Which of ``asset_ids`` still have a surviving reference.
+
+        This is the ONE reference-determination predicate ``sweep_orphan_assets``
         below calls from BOTH its classification read and its write-phase
         re-check (knowhow 表版本管理 Task 13 code review). Those two used to
         be independently hand-duplicated copies of the same SQL string — a
@@ -2121,43 +2191,40 @@ class SQLiteMaintenanceAdapter:
         disagree" structurally impossible rather than something a future
         edit to one copy could silently reintroduce.
 
-        True if ``asset_id`` has a surviving reference: a LIVE cell's
-        ``content_md``, or a HISTORY change's content-shaped payload field
-        (see ``content_strings_in_payload`` — never a code attachment's
-        ``code_text``, wherever it rides along; see this class's own
-        ``sweep_orphan_assets`` docstring for the full boundary)."""
-        needle = f"asset://{asset_id}"
-        pattern = f"%{needle}%"
-        live = db.execute(
-            "SELECT 1 FROM knowhow_cells c "
-            "JOIN knowhow_rows r ON r.id = c.row_id "
-            "JOIN knowhow_tables t ON t.id = r.table_id "
-            "WHERE t.notebook_id = ? AND c.content_md LIKE ? LIMIT 1",
-            (notebook_id, pattern),
-        ).fetchone()
-        if live is not None:
-            return True
-        # Coarse SQL pre-filter (mirrors KnowhowHistoryStore.cell_history's
-        # own "LIKE narrows candidates, Python matches exactly" pattern): a
-        # payload_json substring match is a cheap SUPERSET of what actually
-        # counts — it can false-POSITIVE (matching inside an excluded
-        # code_text) but never false-NEGATIVE, so narrowing candidates this
-        # way before parsing JSON is safe and keeps the common case (no
-        # history even mentions this id) just as cheap as before.
-        for row in db.execute(
-            "SELECT ch.kind AS kind, ch.payload_json AS payload_json "
-            "FROM knowhow_changes ch "
-            "JOIN knowhow_tables t2 ON t2.id = ch.table_id "
-            "WHERE t2.notebook_id = ? AND ch.payload_json LIKE ?",
-            (notebook_id, pattern),
-        ).fetchall():
-            payload = json.loads(row["payload_json"])
-            if any(
-                needle in text
-                for text in content_strings_in_payload(row["kind"], payload)
-            ):
-                return True
-        return False
+        A token keeps an asset alive iff it STARTS WITH that asset's id — the
+        restatement of the retired ``LIKE '%asset://<id>%'``, whose exact scope
+        (and two registered departures) is documented on ``keepers_among``.
+
+        The corpus is a LIVE cell's ``content_md`` plus a HISTORY change's
+        content-shaped payload fields (see ``content_strings_in_payload`` —
+        never a code attachment's ``code_text``, wherever it rides along; see
+        this class's own ``sweep_orphan_assets`` docstring for the full
+        boundary).
+
+        Cost (生产热点整改批 E): the old shape was ``O(assets × cells)`` — every
+        asset paid its own full scan of every cell and every change payload,
+        each one a leading-wildcard ``LIKE`` that no index can serve. One pass
+        per corpus answers the same question for every asset at once.
+
+        The history pass is SKIPPED when the live cells alone already account
+        for every candidate — the single-pass form of the retired predicate's
+        own ``if live is not None: return True`` short circuit. Without it the
+        "few assets, long history" shape (the common one: history is retained
+        forever by default, see ``sweep_orphan_assets``'s KNOWN COST note) would
+        parse the whole change log on every sweep just to re-confirm a
+        conclusion already reached. Nothing about the ANSWER depends on it —
+        history tokens can only ever ADD keepers, so once every candidate is
+        already kept there is nothing left for them to change.
+        """
+        candidates = set(asset_ids)
+        if not candidates:
+            return set()
+        tokens = self._live_cell_ref_tokens(db, notebook_id)
+        kept = keepers_among(candidates, tokens)
+        if kept == candidates:
+            return kept
+        tokens |= self._history_ref_tokens(db, notebook_id)
+        return keepers_among(candidates, tokens)
 
     def sweep_orphan_assets(
         self,
@@ -2194,7 +2261,7 @@ class SQLiteMaintenanceAdapter:
         ``knowhow_cells.content_md`` belonging to one of THIS notebook's
         tables, OR (b) inside one of the content_md-SHAPED fields of a
         ``knowhow_changes.payload_json`` row belonging to one of this
-        notebook's tables (see ``_is_asset_referenced`` below). Before
+        notebook's tables (see ``_surviving_asset_refs`` below). Before
         version management existed, only (a) was scanned — a cell edit that
         dropped an image reference made it collectable the very next sweep.
         Now that every change is remembered forever by default, that same
@@ -2222,7 +2289,11 @@ class SQLiteMaintenanceAdapter:
         embeds that code attachment's ``code_text`` right next to the row's
         genuine ``cells``, and a ``kind``-level exclusion cannot tell them
         apart). The scan is instead field-precise:
-        ``content_strings_in_payload`` (``knowhow_history_store.py``)
+        ``content_strings_in_payload`` (``app/repositories/knowhow_asset_refs.py``
+        — backend-neutral, because BOTH maintenance adapters scan
+        ``knowhow_changes``; ``sqlite/knowhow_history_store.py`` only re-exports
+        it for its historical import site, so changing the keeper judgement
+        means editing the neutral module, not that shim)
         dispatches on ``kind`` and pulls out ONLY the content_md-shaped
         strings a change's payload carries (a deleted cell/row/column's
         remembered content, a revert's own before/after values, ...) and
@@ -2262,10 +2333,16 @@ class SQLiteMaintenanceAdapter:
         head caveat) disk growth for the ability to revert to (or simply
         browse) a past version that still has its images intact.
 
-        Table sizes here are small (per-notebook assets/cells), so a plain
-        per-asset ``LIKE`` scan is used rather than a single mega-query —
-        matches this module's existing style for the other per-notebook
-        maintenance scans above.
+        Keeper determination is ONE streamed pass over this notebook's cell
+        content and change payloads (``_surviving_asset_refs``), not the per-asset
+        leading-wildcard ``LIKE`` this
+        used to run — that was ``O(assets × cells)``, paid twice (classify,
+        then re-check under the write lock), and the "table sizes here are
+        small" justification stopped holding once history began retaining every
+        past cell value forever (see the KNOWN COST note above: assets
+        accumulate precisely because history keeps them alive). The scan's
+        semantics are unchanged: still a loose ``asset://<id>`` substring match,
+        still over-matching only ever RETAINS.
 
         File deletion happens BEFORE the row delete (opposite of
         ``delete_notebook``'s DB-first convention): unlike a notebook
@@ -2299,10 +2376,13 @@ class SQLiteMaintenanceAdapter:
                 "WHERE notebook_id=? AND source_id IS NULL",
                 (notebook_id,),
             ).fetchall()
+            asset_ids = [row["id"] for row in assets]
+            # Only scan when there is something to classify: a notebook with no
+            # pasted images pays nothing, exactly as the per-asset loop did
+            # (``_surviving_asset_refs`` early-returns on an empty candidate set).
+            kept = self._surviving_asset_refs(db, notebook_id, asset_ids)
             unreferenced = [
-                row["id"]
-                for row in assets
-                if not self._is_asset_referenced(db, notebook_id, row["id"])
+                asset_id for asset_id in asset_ids if asset_id not in kept
             ]
 
             # Marks for notebooks that no longer exist. The adapter is
@@ -2404,11 +2484,13 @@ class SQLiteMaintenanceAdapter:
                 ).fetchone()
                 is None
             )
-            for asset_id in unreferenced if grace_waived else orphan_ids:
-                still_unreferenced = not self._is_asset_referenced(
-                    db, notebook_id, asset_id
-                )
-                if not still_unreferenced:
+            candidates = unreferenced if grace_waived else orphan_ids
+            # Same single predicate as the classification read, re-run under the
+            # write lock — one pass for the whole candidate set rather than one
+            # per candidate (生产热点整改批 E).
+            still_kept = self._surviving_asset_refs(db, notebook_id, candidates)
+            for asset_id in candidates:
+                if asset_id in still_kept:
                     with self._orphan_marks_lock:
                         self._orphan_first_seen.pop((notebook_id, asset_id), None)
                     continue

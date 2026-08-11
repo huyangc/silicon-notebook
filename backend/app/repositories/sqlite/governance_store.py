@@ -14,6 +14,7 @@ import json
 import sqlite3
 from typing import Dict, List, Optional
 
+from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
@@ -24,6 +25,25 @@ from app.services.knowledge_contracts import (
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
+
+# Pagination width for the review queue's endpoint-object lookup — a page size,
+# not a cap: every endpoint id is fetched.  500 is the store-wide convention
+# (``_DELETE_OBJECT_BATCH_SIZE`` / ``CHUNK_ELEMENT_LOOKUP_BATCH``).
+_REVIEW_ENDPOINT_LOOKUP_BATCH = 500
+
+
+def _review_endpoint_ids(relation_rows) -> List[str]:
+    """Distinct object ids appearing on either end of the given relations,
+    in first-seen order.  Order only has to be deterministic: the caller folds
+    the rows into ``{id: …}`` dicts."""
+    seen: set = set()
+    ordered: List[str] = []
+    for row in relation_rows:
+        for object_id in (row["source_object_id"], row["target_object_id"]):
+            if object_id and object_id not in seen:
+                seen.add(object_id)
+                ordered.append(object_id)
+    return ordered
 
 
 def seed_fn_for(object_type: str):
@@ -37,6 +57,24 @@ def seed_fn_for(object_type: str):
         "formula": seed_formula,
         "procedure": seed_procedure,
     }.get(object_type, seed_claim)
+
+
+def base_dedup_evidence(connection: sqlite3.Connection, object_id: str) -> list:
+    """Evidence of the ONE base object a promotion deduped onto.
+
+    The dedup corpus read (``SELECT id,payload …`` over a whole object type of a
+    base notebook) deliberately no longer carries ``evidence``: seed matching
+    reads only ``payload``, so the evidence of every non-matching row was pulled
+    into Python for nothing — and evidence is the fattest column of the three.
+    At most one row is ever merged into, so it is re-read here by primary key,
+    inside the same transaction that already read (PostgreSQL: locked FOR
+    UPDATE) that row, which keeps the value identical to the one the old
+    corpus-wide read would have handed back.
+    """
+    row = connection.execute(
+        "SELECT evidence FROM knowledge_objects WHERE id=?", (object_id,)
+    ).fetchone()
+    return json.loads((row["evidence"] if row is not None else None) or "[]")
 
 
 def find_base_dedup_match(
@@ -208,20 +246,87 @@ class GovernanceStore:
     def review_queue_rows(
         connection: sqlite3.Connection, notebook_id: str
     ) -> "tuple[List[sqlite3.Row], List[sqlite3.Row]]":
+        """Relations (with a pushed-down anchor flag) + only the objects the
+        queue actually reads.
+
+        Two deliberate narrowings, both lossless for the one consumer
+        (``knowledge_governance.review_queue``):
+
+        * ``evidence`` is no longer selected.  Its ONLY use was
+          ``evidence_anchor_score`` — a boolean over the array — so the
+          predicate is evaluated in SQL and returned as ``has_anchor`` instead
+          of shipping every non-rejected edge's evidence JSON into Python to be
+          re-parsed.  ``PY_STRIP_WHITESPACE`` supplies the exact ``str.strip()``
+          alphabet so the SQL trim matches the Python one character for
+          character; the nested json_valid/json_type CASEs mirror
+          ``KnowledgeStore._object_ids_for_source_batch`` (json_each must be
+          handed a valid top-level array, and json_extract must never see a bare
+          JSON string element).
+        * objects are read for the RELATION ENDPOINTS only, instead of scanning
+          every object payload in the notebook.  The queue builds
+          ``node_types``/``node_names`` from these rows and looks up only
+          ``rel["source_object_id"]``/``["target_object_id"]``, so isolated
+          objects — of which a real notebook has many — were pure read
+          amplification.  Endpoint ids come from the relation rows already in
+          hand, so this adds no second pass over knowledge_relations.
+
+          ⚠ The endpoint lookup issues a BARE ``id IN (...)`` and compares
+          ``notebook_id`` in Python.  This repository never runs ``ANALYZE`` on
+          production databases, and without statistics the planner reads
+          ``WHERE notebook_id=? AND id IN (...)`` as
+          ``idx_knowledge_objects_nb_* (notebook_id=?)`` — i.e. it walks EVERY
+          object of the notebook once PER BATCH, which is worse than the
+          full-notebook scan this narrowing set out to remove (measured on a
+          200k-row database: 0.138s → 14.155s).  A bare ``id IN (...)`` takes
+          ``sqlite_autoindex_knowledge_objects_1 (id=?)`` with or without
+          statistics.  Same recipe and same measured reason as
+          ``query_store.notebook_source_ids`` and
+          ``maintenance.chunk_texts_by_ids``.  The judgement is unchanged — same
+          column, same value, only the evaluation site moves — and there is no
+          "read a lot and then filter" risk because the result set is capped by
+          the id list.  ``notebook_id`` therefore has to be PROJECTED so the
+          caller can apply it; a cross-notebook endpoint stayed untyped/unnamed
+          before and still does.  Pinned by
+          ``test_governance_read_narrowing.py::test_endpoint_lookup_sql_keeps_no_notebook_predicate``
+          — a behaviour test cannot see this (fixture-scale EXPLAIN does not
+          reproduce the regression), which is exactly how it slipped through
+          review once.
+        """
         relations = connection.execute(
             "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
-            "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
+            "kr.edge_type, kr.source_id, kr.review_status, "
+            "EXISTS (SELECT 1 FROM json_each("
+            "  CASE WHEN json_valid(kr.evidence) THEN "
+            "    CASE WHEN json_type(kr.evidence) = 'array' "
+            "    THEN kr.evidence ELSE '[]' END "
+            "  ELSE '[]' END) AS ev "
+            " WHERE ev.type = 'object' "
+            "   AND json_type(CASE WHEN ev.type = 'object' THEN ev.value "
+            "                      ELSE '{}' END, '$.quote') = 'text' "
+            "   AND trim(json_extract(CASE WHEN ev.type = 'object' THEN ev.value "
+            "                              ELSE '{}' END, '$.quote'), ?) <> ''"
+            ") AS has_anchor, "
             "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
             "FROM knowledge_relations kr "
             "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
             "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
             "WHERE kr.notebook_id = ? AND kr.review_status != 'rejected'",
-            (notebook_id,),
+            (PY_STRIP_WHITESPACE, notebook_id),
         ).fetchall()
-        objects = connection.execute(
-            "SELECT id, object_type, payload FROM knowledge_objects "
-            "WHERE notebook_id = ?", (notebook_id,)
-        ).fetchall()
+
+        endpoint_ids = _review_endpoint_ids(relations)
+        objects: List[sqlite3.Row] = []
+        for offset in range(0, len(endpoint_ids), _REVIEW_ENDPOINT_LOOKUP_BATCH):
+            batch = endpoint_ids[offset : offset + _REVIEW_ENDPOINT_LOOKUP_BATCH]
+            placeholders = ",".join("?" for _ in batch)
+            objects.extend(
+                row for row in connection.execute(
+                    "SELECT id, object_type, payload, notebook_id "
+                    f"FROM knowledge_objects WHERE id IN ({placeholders})",
+                    tuple(batch),
+                ).fetchall()
+                if row["notebook_id"] == notebook_id
+            )
         return relations, objects
 
     @staticmethod
@@ -989,7 +1094,7 @@ class GovernanceStore:
             if not isinstance(payload, dict) or not payload:
                 continue
             base_objs = connection.execute(
-                "SELECT id,payload,evidence FROM knowledge_objects "
+                "SELECT id,payload FROM knowledge_objects "
                 "WHERE notebook_id=? AND object_type=? AND status IN ({})".format(
                     ",".join("?" for _ in USABLE_STATUSES)
                 ),
@@ -997,9 +1102,8 @@ class GovernanceStore:
             ).fetchall()
             base_match_id = find_base_dedup_match(object_type, payload, base_objs)
             if base_match_id:
-                matched = next(row for row in base_objs if row["id"] == base_match_id)
                 merged_evidence = merge_evidence_lists(
-                    json.loads(matched["evidence"] or "[]"), evidence
+                    base_dedup_evidence(connection, base_match_id), evidence
                 )
                 connection.execute(
                     "UPDATE knowledge_objects SET evidence=?,updated_at=? WHERE id=?",
@@ -1113,7 +1217,7 @@ class GovernanceStore:
 
         # Cross-corpus dedup against existing base objects of the same type.
         base_objs = connection.execute(
-            "SELECT id, payload, evidence FROM knowledge_objects "
+            "SELECT id, payload FROM knowledge_objects "
             "WHERE notebook_id=? AND object_type=? AND status IN ({})".format(
                 ",".join("?" for _ in USABLE_STATUSES)
             ),
@@ -1123,9 +1227,8 @@ class GovernanceStore:
 
         if base_match_id:
             # Merge: combine evidence into the matched base object; keep its id.
-            matched = next(b for b in base_objs if b["id"] == base_match_id)
             merged_evidence = merge_evidence_lists(
-                json.loads(matched["evidence"] or "[]"), src_evidence
+                base_dedup_evidence(connection, base_match_id), src_evidence
             )
             connection.execute(
                 "UPDATE knowledge_objects SET evidence=?, updated_at=? WHERE id=?",

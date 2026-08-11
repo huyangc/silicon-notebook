@@ -328,6 +328,51 @@ class SourceStore:
             for row in rows
         ]
 
+    def source_elements_after(
+        self,
+        source_id: str,
+        after: "tuple[Any, str] | None",
+        limit: int,
+    ) -> "tuple[list[SourceElement], tuple[Any, str] | None]":
+        """PostgreSQL twin of the whole-source keyset walk; see the SQLite
+        adapter for why ``source_elements_page`` is not reused for it.
+
+        ``created_at`` is ``timestamptz`` here, so the cursor carries the
+        ``datetime`` this adapter returned — never a re-rendered string (same
+        reason as ``source_element_type_page``).  The ordering matches
+        ``source_elements`` verbatim, ``COLLATE "C"`` included.
+        """
+        limit = max(1, int(limit))
+        params: list[Any] = [source_id]
+        clause = ""
+        if after is not None:
+            clause = "AND (created_at, id COLLATE \"C\") > (%s, %s) "
+            params.extend([after[0], after[1]])
+        params.append(limit)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,source_id,element_type,location_label,text,"
+                "metadata,created_at FROM source_elements WHERE source_id=%s "
+                f"{clause}"
+                "ORDER BY created_at,id COLLATE \"C\" LIMIT %s",
+                tuple(params),
+            ).fetchall()
+        items = [
+            SourceElement(
+                id=row["id"],
+                source_id=row["source_id"],
+                element_type=row["element_type"],
+                location_label=row["location_label"],
+                text=row["text"],
+                metadata=json_value(row["metadata"], {}),
+            )
+            for row in rows
+        ]
+        next_after = (
+            (rows[-1]["created_at"], rows[-1]["id"]) if len(rows) == limit else None
+        )
+        return items, next_after
+
     def source_elements_page(
         self,
         source_id: str,

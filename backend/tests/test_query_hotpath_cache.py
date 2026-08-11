@@ -658,7 +658,16 @@ def test_edge_centrality_map_equals_oracle(repo):
 def test_review_queue_output_matches_uncached_oracle(repo):
     """Full review_queue() output (edge order/fields/scores) must be identical
     whether centrality is served from cache or (as the oracle does) recomputed
-    inline — caching changes WHEN centrality is computed, not WHAT it computes."""
+    inline — caching changes WHEN centrality is computed, not WHAT it computes.
+
+    ⚠ The inline oracle below is a second hand-copy of the pre-P1 read path;
+    the other one is ``test_governance_read_narrowing._old_review_queue``.  They
+    pin different properties (this one: centrality caching; that one: the P1 批 A
+    read narrowing) but transcribe the same original code — when the service
+    changes, check whether BOTH need to move, and if one is edited alone say so
+    here.  Deliberately not shared: each is only meaningful as a frozen copy of
+    the state its own test predates.
+    """
     nb_id = _seed_centrality_graph(repo)
     cached = repo.review_queue(nb_id)
 
