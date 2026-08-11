@@ -527,7 +527,12 @@ are NOT priced: charging one call each was wrong in both directions at once (the
 skip gate makes a prose window free, a parameter-dense one is several slices) and
 described text the preview never read while sitting beside copy promising the
 total could only be higher. `estimated_calls` covers the prefix alone and
-`windows_in_prefix` says how much that is. That measured prefix STOPS at the
+`windows_in_prefix` says how much that is — and both count CLOSED windows only.
+The packer closes a window when the next element does not fit, so the measured
+prefix's last window is still open: one unread element can flip its gate answer
+or add a slice, and pricing it asserts something about text the preview has not
+finished reading. Its characters rejoin the remainder instead, sharing ONE
+judgement of which window is open with the window-count floor. That measured prefix STOPS at the
 first content-truncated row: the bounded read keeps returning later elements'
 heads after clipping one, and packing them together splices text from beyond the
 missing tail directly behind it — segments belonging to no document, measured

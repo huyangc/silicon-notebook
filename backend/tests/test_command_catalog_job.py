@@ -3528,6 +3528,57 @@ def _big_element_source(repo, notebook_id, source_id, count, *, size=7_000):
     )
 
 
+def test_preview_does_not_price_the_still_open_last_window(repo, monkeypatch):
+    """The prefix's last window is open, so its price is not knowable yet.
+
+    The unread elements keep filling that window rather than starting a new
+    one, and one more element can flip its gate answer (prose becomes a
+    command window) or push its flag list past `SLICE_PARAM_LIMIT` into a
+    second slice. Charging for it makes "about M calls for the first X
+    segments" a claim about text the preview has not finished reading — the
+    same over-reach that leaving the tail beyond the prefix unpriced avoids.
+
+    Here the read rows pack into two windows and the third element would have
+    fitted into the second: exactly the shape whose price is provisional.
+    """
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_CHARS", 8_000)
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 2)
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "开窗计价",
+        _numbered("s1", [
+            {
+                "element_type": "code_block",
+                "text": "first_command -density value\n" + _filler(7_000),
+                "section_path": "",
+            },
+            {
+                "element_type": "code_block",
+                "text": "second_command -density value\n" + _filler(6_000),
+                "section_path": "",
+            },
+            # Unread, and small enough to land in the second window.
+            {
+                "element_type": "code_block",
+                "text": "third_command -density value",
+                "section_path": "",
+            },
+        ]),
+    )
+    service = _service(repo)
+
+    preview = service.preview(notebook.id, "s1")
+
+    assert preview.sampled is True
+    # Two windows were packed; only the first is closed, and only it is
+    # counted as read and priced.
+    assert preview.windows_in_prefix == 1
+    assert preview.estimated_calls == 1
+    # The open window's characters are not lost — they go back into the pot
+    # with the unread remainder, so the floor does not drop.
+    assert preview.estimated_windows >= 2
+
+
 def test_preview_without_any_clipping_measures_every_row(repo):
     """The unclipped path is untouched by the stop-at-first-clip rule: with no
     truncated row there is nothing to stop at, so the measurement still covers
@@ -3589,7 +3640,10 @@ def test_preview_past_its_prefix_is_a_declared_floor(repo, monkeypatch):
 
     assert preview.sampled is True
     assert preview.estimated_windows == 4
-    assert preview.windows_in_prefix == 2
+    # Two windows were packed from the read rows, but the SECOND is still open
+    # — the unread elements keep filling it — so only the first is settled
+    # enough to be counted as read and priced.
+    assert preview.windows_in_prefix == 1
     # The truth, for comparison: the estimate is below it, never above.
     assert len(catalog_job.extraction_windows(
         _big_element_source(repo, notebook.id, "s2", 5)
@@ -3773,17 +3827,30 @@ def test_leading_whitespace_alone_does_not_stop_a_complete_row(repo):
     assert preview.estimated_calls == 1
 
 
-def test_preview_measures_the_complete_rows_before_the_first_clipped_one(repo):
+def test_preview_measures_the_complete_rows_before_the_first_clipped_one(
+    repo, monkeypatch
+):
     """Not all-or-nothing: everything up to the first truncated element is
     real, adjacent text and is measured normally. Only from that element on
-    does the page stop describing the document."""
+    does the page stop describing the document.
+
+    Two complete elements ahead of the clip, sized so they pack into two
+    windows: the first is CLOSED (the second element did not fit behind it)
+    and is therefore priced, while the second is the open one and is not.
+    """
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_CHARS", 8_000)
     notebook = repo.create_notebook(NotebookCreate(name="n"))
     _add_elements(
         repo, notebook.id, "s1", "先命令后长表",
         _numbered("s1", [
             {
                 "element_type": "code_block",
-                "text": "first_command -density value",
+                "text": "first_command -density value\n" + _filler(7_000),
+                "section_path": "",
+            },
+            {
+                "element_type": "paragraph",
+                "text": _filler(7_000),  # complete, but opens a second window
                 "section_path": "",
             },
             {
@@ -3808,9 +3875,9 @@ def test_preview_measures_the_complete_rows_before_the_first_clipped_one(repo):
     preview = service.preview(notebook.id, "s1")
 
     assert preview.sampled is True
-    # The one complete row before the clip packs into one window, and it is
-    # priced at its own single slice — `later_command`'s 25 flags, on the far
-    # side of the clipped element, are not measured at all.
+    # One closed window before the clip, priced at its own single slice.
+    # `later_command`'s 25 flags, on the far side of the clipped element, are
+    # not measured at all.
     assert preview.windows_in_prefix == 1
     assert preview.estimated_calls == 1
 
@@ -4033,15 +4100,17 @@ def test_preview_prices_only_the_prefix_it_actually_read(
     assert whole.windows_in_prefix == whole.estimated_windows == 6
     assert whole.estimated_calls == 6
 
-    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 4)
+    # A row cap that still leaves more than one window's worth of complete
+    # rows, so the priced count is a real number rather than the degenerate 0.
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 20)
     clipped = service.preview(notebook.id, "s1")
     assert clipped.sampled is True
     # The window count is unaffected: past the prefix it falls back to the
     # character arithmetic over the source's whole text, which for this
     # gap-free fixture is the same six.
     assert clipped.estimated_windows == 6
-    # …but only the windows the prefix actually produced are priced.
-    assert clipped.windows_in_prefix < 6
+    # …but only the CLOSED windows the prefix produced are priced.
+    assert 0 < clipped.windows_in_prefix < 6
     assert clipped.estimated_calls == clipped.windows_in_prefix
 
 
@@ -6322,7 +6391,9 @@ def test_api_preview_start_job_candidates_and_apply(http):
     # sampled: the window count is the whole-document floor, while the price
     # covers only the windows the prefix produced.
     assert body["sampled"] is True
-    assert body["estimated_calls"] == body["windows_in_prefix"] == 1
+    # The measured rows pack into ONE window, which is still open (the filler
+    # element behind them was clipped), so nothing is settled enough to price.
+    assert body["estimated_calls"] == body["windows_in_prefix"] == 0
     assert body["skipped_windows_in_prefix"] == 0
     # v1's shape signal retired with sectioning, and so did the count of
     # "command sections" — no compatibility alias, so a stale client fails

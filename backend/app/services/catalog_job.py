@@ -980,19 +980,36 @@ class CommandCatalogService:
         # and says almost nothing, while the whole-document arithmetic still
         # proves the real count. `len(prefix)` is the third, and it is what
         # keeps the answer honest when the other two round down.
+        #
+        # ONE judgement about which windows are settled, read by both halves
+        # below. When the prefix is the whole document its last window is
+        # closed like every other; when there is more document, it is still
+        # open — the unread elements keep filling it — so it is neither
+        # counted as certain NOR priced. Two spellings of "which one is open"
+        # is how the counting half came to exclude it while the pricing half
+        # still charged for it.
+        closed = prefix[:-1] if sampled and prefix else list(prefix)
+        open_chars = len(prefix[-1].text) if sampled and prefix else 0
         if not sampled:
             estimated_windows = len(prefix)
         else:
-            open_tail = (len(prefix[-1].text) if prefix else 0) + remainder
+            open_tail = open_chars + remainder
             estimated_windows = max(
                 len(prefix),
-                max(0, len(prefix) - 1) + -(-open_tail // WINDOW_CHARS),
+                len(closed) + -(-open_tail // WINDOW_CHARS),
                 -(-max(0, int(total_chars)) // WINDOW_CHARS),
             )
+        # Priced over the CLOSED windows only. An open window's gate answer and
+        # slice count are both provisional: one more element can turn a prose
+        # window into a command window, or push its flag list past
+        # `SLICE_PARAM_LIMIT` into a second slice. Charging for it makes
+        # "about M calls for the first X segments" a claim about text the
+        # preview has not finished reading — the same over-reach the unpriced
+        # tail beyond the prefix already avoids.
         prefix_calls = 0
         skipped = 0
         carry: list[str] = []
-        for window in prefix:
+        for window in closed:
             own = window_candidates(window)
             if window_needs_model(window, carry, own=own):
                 prefix_calls += len(extraction_slices(window))
@@ -1013,7 +1030,7 @@ class CommandCatalogService:
             # slices) and it contradicts the "could only be more" wording
             # sitting next to it.
             estimated_calls=prefix_calls,
-            windows_in_prefix=len(prefix),
+            windows_in_prefix=len(closed),
             skipped_windows_in_prefix=skipped,
             sampled=sampled,
             element_limit=PREVIEW_ELEMENT_LIMIT,
