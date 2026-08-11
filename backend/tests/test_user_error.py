@@ -264,6 +264,28 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_api_start_and_preview_refuse_a_source_whose_parse_failed 覆盖，"
         "均断言 X-User-Message 头与逐字 detail。"
     ),
+    "app/api/catalog_routes.py::_require_settled_job": (
+        "R3（codex PR #494 评审第 3 轮 P2）：detail 是形参 `message`，两个调用方"
+        "各传本文件顶部维护的中文常量——apply 传 `_APPLY_WHILE_RUNNING_MESSAGE`"
+        "（识别还在进行中，等完成或先取消再确认）、dismiss 传"
+        "`_DISMISS_WHILE_RUNNING_MESSAGE`（同前提，动词换成「跳过」）。helper 只是"
+        "把「任务未落终态一律 409」的判据（`CATALOG_TERMINAL_STATUSES` 白名单）收拢"
+        "到一处，文案跟着调用方的动词走——与同文件 empty/too-many 两对按动词分开写"
+        "同一条惯例；不含任何异常原文或运行时拼接。真实响应由"
+        "test_command_catalog_job.py 的"
+        "test_api_apply_while_the_run_is_unfinished_is_a_user_readable_409 与"
+        "test_api_dismiss_while_the_run_is_unfinished_is_a_user_readable_409 覆盖，"
+        "均断言 409 + X-User-Message 头。"
+    ),
+    "app/api/catalog_routes.py::command_catalog_preview": (
+        "R4：detail 是 `catalog_job` 维护的中文常量 `SOURCE_REPARSING_MESSAGE`"
+        "（来源正在重新解析，等解析完成再看识别成本）。同一个 `CatalogSourceBusy`"
+        "在 apply/dismiss 映射成 `SOURCE_BUSY_MESSAGE`（措辞是「再确认或跳过」），"
+        "预告既不确认也不跳过，照搬会点名两个用户没做的动作，所以单独一条常量；"
+        "异常原文不参与也不外泄。真实响应由 test_command_catalog_job.py 的"
+        "test_api_preview_during_a_reparse_is_a_user_readable_409 覆盖，断言"
+        " X-User-Message 头与逐字 detail。"
+    ),
     "app/api/catalog_routes.py::apply_command_catalog": (
         "五处 detail 都是本文件/`catalog_job` 维护的中文常量："
         "`_APPLY_EMPTY_MESSAGE`（未选择候选）、`_APPLY_TOO_MANY_MESSAGE`"
