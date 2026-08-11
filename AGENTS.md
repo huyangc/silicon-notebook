@@ -527,7 +527,16 @@ are NOT priced: charging one call each was wrong in both directions at once (the
 skip gate makes a prose window free, a parameter-dense one is several slices) and
 described text the preview never read while sitting beside copy promising the
 total could only be higher. `estimated_calls` covers the prefix alone and
-`windows_in_prefix` says how much that is. Both prefix bounds set `sampled`, per-element
+`windows_in_prefix` says how much that is. That measured prefix STOPS at the
+first content-truncated row: the bounded read keeps returning later elements'
+heads after clipping one, and packing them together splices text from beyond the
+missing tail directly behind it — segments belonging to no document, measured
+under the name "the first X segments". Truncation is judged as `full_chars >
+len(text)` (content lost, not merely trailing whitespace). A first element that
+is already oversized leaves nothing measured, so `windows_in_prefix` and
+`estimated_calls` are 0 and the UI must degrade to the segment floor plus "the
+number of calls depends on the content" rather than "0 calls for 0 segments".
+Both prefix bounds set `sampled`, per-element
 truncation being the one that actually distorts the estimate. The row bound is
 `element_count > len(rows)`, never `len(rows) >= PREVIEW_ELEMENT_LIMIT`: a
 document holding exactly the cap's worth of elements was fully read, and calling

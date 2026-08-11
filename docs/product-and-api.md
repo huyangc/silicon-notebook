@@ -729,6 +729,20 @@ text this preview never read while sitting next to copy promising the real total
 could only be higher. So `estimated_calls` covers the prefix and nothing else,
 `windows_in_prefix` says how much of the document that is, and the UI says "about
 M calls for the first X segments; the rest depends on what is in them".
+**The measured prefix stops at the first truncated element.** The bounded read
+keeps returning later elements' heads after it clips one, and packing that whole
+list splices content from beyond the missing tail directly behind it — segments
+that exist in no document, measured under the name "the first X segments" (an
+11,990-character prose element followed by a command really is two segments
+whose first one is free prose; spliced, it reads as "the first segment costs a
+call"). Truncation is judged as "this element's stripped length exceeds what was
+transmitted", i.e. CONTENT was lost — an element clipped only through its
+trailing whitespace lost nothing and is still measured. From the first such row
+onward nothing is measured; it all goes into the arithmetic remainder. When the
+very FIRST element is oversized nothing is measured at all, `windows_in_prefix`
+and `estimated_calls` are both 0, and the UI gives the segment floor with "the
+number of calls depends on the content" — never "about 0 calls for the first 0
+segments", which would report "not measured" as "measured to be nothing".
 `sampled` is `true` when the prefix ran out, so the
 numbers are a floor; both of the prefix's bounds set it, and **per-element
 truncation** is the one that actually distorts the estimate (clipping an options

@@ -3467,6 +3467,20 @@ def _big_element_source(repo, notebook_id, source_id, count, *, size=7_000):
     )
 
 
+def test_preview_without_any_clipping_measures_every_row(repo):
+    """The unclipped path is untouched by the stop-at-first-clip rule: with no
+    truncated row there is nothing to stop at, so the measurement still covers
+    the whole page and (here) the whole document."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 3, chunk=_PREVIEW_CHUNK)
+
+    preview = _service(repo).preview(notebook.id, "s1")
+
+    assert preview.sampled is False
+    assert preview.windows_in_prefix == preview.estimated_windows == 3
+    assert preview.estimated_calls == 3
+
+
 def test_preview_counts_the_windows_element_boundaries_actually_produce(
     repo, monkeypatch
 ):
@@ -3588,6 +3602,98 @@ def test_preview_and_the_packer_agree_on_unicode_whitespace(repo, pad):
     assert preview.sampled is True
     assert actual > 1
     assert preview.estimated_windows <= actual
+
+
+def test_preview_stops_measuring_at_the_first_truncated_element(repo):
+    """The rows after a clipped one are not adjacent to it in the document.
+
+    `preview_elements` keeps returning heads after it clips one, so packing
+    that whole list splices the NEXT element's head directly behind the
+    clipped element's head — text that is nowhere in the document. Here a
+    11,990-character prose element is followed by a command: really that is
+    two segments, the first costing nothing (the skip gate) and the second one
+    call. Measured over the splice it is ONE segment that costs a call, i.e.
+    the preview charges "the first segment" for a command sitting 11,990
+    characters into a document it never read.
+
+    Measuring nothing is the honest answer when the first row is already
+    truncated — `windows_in_prefix = 0` and no price at all.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "长散文加命令",
+        _numbered("s1", [
+            {
+                "element_type": "paragraph",
+                "text": _filler(11_990),
+                "section_path": "",
+            },
+            {
+                "element_type": "code_block",
+                "text": "late_command -density value",
+                "section_path": "",
+            },
+        ]),
+    )
+    service = _service(repo)
+
+    preview = service.preview(notebook.id, "s1")
+    actual = catalog_job.extraction_windows(
+        service.chunks.source_elements_for_chunking("s1")
+    )
+
+    # The document really is two segments, and its FIRST one is pure prose.
+    assert len(actual) == 2
+    assert catalog_job.window_candidates(actual[0]) == []
+    assert preview.sampled is True
+    # Nothing complete was read, so nothing is claimed about the opening.
+    assert preview.windows_in_prefix == 0
+    assert preview.estimated_calls == 0
+    assert preview.skipped_windows_in_prefix == 0
+    # The window count is still a floor over the whole document.
+    assert preview.estimated_windows <= len(actual)
+
+
+def test_preview_measures_the_complete_rows_before_the_first_clipped_one(repo):
+    """Not all-or-nothing: everything up to the first truncated element is
+    real, adjacent text and is measured normally. Only from that element on
+    does the page stop describing the document."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "先命令后长表",
+        _numbered("s1", [
+            {
+                "element_type": "code_block",
+                "text": "first_command -density value",
+                "section_path": "",
+            },
+            {
+                "element_type": "paragraph",
+                "text": _filler(9_000),  # clipped: measurement stops here
+                "section_path": "",
+            },
+            {
+                # Enough flags to need a second slice — so a splice that
+                # pulled this element in behind the clipped one's head would
+                # show up as an extra model call, not just as extra text.
+                "element_type": "code_block",
+                "text": "later_command -density value\n" + "\n".join(
+                    f"- `-flag_{index:02d}` an option" for index in range(25)
+                ),
+                "section_path": "",
+            },
+        ]),
+    )
+    service = _service(repo)
+
+    preview = service.preview(notebook.id, "s1")
+
+    assert preview.sampled is True
+    # The one complete row before the clip packs into one window, and it is
+    # priced at its own single slice — `later_command`'s 25 flags, on the far
+    # side of the clipped element, are not measured at all.
+    assert preview.windows_in_prefix == 1
+    assert preview.estimated_calls == 1
 
 
 def test_preview_remainder_excludes_the_tails_it_never_transmitted(repo):

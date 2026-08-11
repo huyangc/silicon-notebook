@@ -197,13 +197,17 @@ export function catalogPreviewCopy(preview: CommandCatalogPreview): CatalogPrevi
   // 没读过的文本报价会同时往两个方向出错。所以这里给方向而不是给总数——旧文案
   // 那句「实际可能更多」配一个把未见段落按每段 1 次算出来的总数,本身就是自相
   // 矛盾的。
-  const body =
-    `全文至少约 ${windows} 段；` +
-    `按开头 ${measured} 段估算需约 ${calls} 次模型调用，` +
-    `其余段落视内容而定。${skipNote}`;
+  // 后端的测量在**第一个被裁的元素处就停下**(裁剪之后的行在文档里并不相邻,
+  // 拼起来量的是一份不存在的文档),所以首个元素就超长时一段都没量到。这时不能
+  // 渲染「按开头 0 段估算需约 0 次调用」——那句话把「没测」说成了「测出来是零」,
+  // 用户会读成这份文档不花钱。段数下界照给,调用数只给方向。
+  const priced =
+    measured > 0
+      ? `按开头 ${measured} 段估算需约 ${calls} 次模型调用，其余段落视内容而定。`
+      : `调用次数视内容而定。`;
   return {
     title: "识别命令目录",
-    body,
+    body: `全文至少约 ${windows} 段；${priced}${skipNote}`,
     sections: [],
     confirmLabel: "开始识别",
   };
