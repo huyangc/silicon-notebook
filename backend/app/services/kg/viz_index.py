@@ -22,6 +22,8 @@ from app.services.kg.scale_index import (
     viz_edge_npz_arrays,
     viz_edge_set_from_npz,
     viz_edge_set_from_payload,
+    viz_arrays_shape_error,
+    viz_deg_order_array,
 )
 
 _logger = logging.getLogger(__name__)
@@ -122,6 +124,7 @@ def save_viz_index(out_dir: str, *, viz_ids, viz_adj, viz_deg, viz_types,
         os.path.join(out_dir, "viz.npz"),
         viz_ids=np.asarray(viz_ids, dtype=object),
         viz_deg=np.asarray(viz_deg, dtype=np.int32),
+        viz_deg_order=viz_deg_order_array(viz_deg),
         viz_types=np.asarray(viz_types, dtype=object),
         viz_names=np.asarray(viz_names, dtype=object),
         **viz_edge_npz_arrays(viz_edge_set_from_payload(viz_payload, viz_ids)),
@@ -158,15 +161,30 @@ def load_viz_index(out_dir: str) -> Optional[VizIndex]:
     viz_adj_path = os.path.join(out_dir, "viz_adj.npz")
     if not (os.path.exists(mpath) and os.path.exists(viz_npz) and os.path.exists(viz_adj_path)):
         return None
-    with open(mpath) as fh:
-        manifest = json.load(fh)
-    with np.load(viz_npz, allow_pickle=True) as z:
-        viz_ids = list(z["viz_ids"])
-        viz_deg = z["viz_deg"]
-        viz_types = list(z["viz_types"])
-        viz_names = list(z["viz_names"])
-        viz_edges = viz_edge_set_from_npz(z, viz_ids)
-        viz_edges_authoritative = viz_edge_count_is_authoritative(z)
+    try:
+        with open(mpath) as fh:
+            manifest = json.load(fh)
+        with np.load(viz_npz, allow_pickle=True) as z:
+            viz_ids = list(z["viz_ids"])
+            viz_deg = z["viz_deg"]
+            viz_types = list(z["viz_types"])
+            viz_names = list(z["viz_names"])
+            viz_edges = viz_edge_set_from_npz(z, viz_ids)
+            viz_edges_authoritative = viz_edge_count_is_authoritative(z)
+            viz_deg_order = (
+                np.asarray(z["viz_deg_order"])
+                if "viz_deg_order" in z.files else None
+            )
+        viz_adj = sp.load_npz(viz_adj_path)
+    except Exception as exc:  # noqa: BLE001 - corrupt artifact is unavailable
+        _logger.warning("viz index at %s is unusable: %r", out_dir, exc)
+        return None
+    viz_detail = viz_arrays_shape_error(
+        viz_ids, viz_deg, viz_types, viz_names, viz_adj
+    )
+    if viz_detail is not None:
+        _logger.warning("viz index at %s is unusable: %s", out_dir, viz_detail)
+        return None
     declared_edges = _declared_edge_count(manifest)
     if (
         viz_edges_authoritative
@@ -180,7 +198,9 @@ def load_viz_index(out_dir: str) -> Optional[VizIndex]:
             out_dir, declared_edges, len(viz_edges),
         )
         return None
-    viz_adj = sp.load_npz(viz_adj_path)
-    return VizIndex(viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
-                    viz_types=viz_types, viz_names=viz_names,
-                    viz_edges=viz_edges, manifest=manifest)
+    index = VizIndex(viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
+                     viz_types=viz_types, viz_names=viz_names,
+                     viz_edges=viz_edges, manifest=manifest)
+    if viz_deg_order is not None:
+        index.install_viz_deg_order(viz_deg_order)
+    return index

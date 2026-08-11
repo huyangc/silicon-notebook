@@ -39,6 +39,18 @@ def test_save_load_roundtrip(tmp_path):
     assert (idx.viz_adj.toarray() == adj.toarray()).all()
     assert idx.manifest["version"] == ["nb-1", 3, "2026-07-01T00:00:00"]
     assert idx.manifest["n_viz_nodes"] == 3
+    # 新产物把两个昂贵派生索引一起落盘并在 load 时装入缓存；第一次请求不再
+    # 做 degree O(V log V) / edge O(E log E) 排序。
+    assert np.array_equal(idx.viz_deg_order(), np.asarray([0, 1, 2]))
+    edge_order, edge_indptr = idx.viz_edges.by_src()
+    assert np.array_equal(edge_order, np.asarray([0, 1]))
+    assert np.array_equal(edge_indptr, np.asarray([0, 2, 2, 2]))
+    assert "_viz_deg_order_cache" in idx.__dict__
+    assert "_by_src_cache" in idx.viz_edges.__dict__
+    with np.load(os.path.join(out, "viz.npz"), allow_pickle=True) as z:
+        assert "viz_deg_order" in z.files
+        assert "viz_edge_src_order" in z.files
+        assert "viz_edge_src_indptr" in z.files
 
 
 def test_load_missing_returns_none(tmp_path):
@@ -127,6 +139,8 @@ def test_scale_index_reconciles_compact_edge_count_with_manifest(tmp_path):
     good = _save_scale_with_viz(tmp_path, n_viz_edges=2, name="ok")
     idx = si.load_scale_index(good)
     assert idx is not None and len(idx.viz_edges) == 2
+    assert "_viz_deg_order_cache" in idx.__dict__
+    assert "_by_src_cache" in idx.viz_edges.__dict__
 
     lying = _save_scale_with_viz(tmp_path, n_viz_edges=3, name="lying")
     assert si.load_scale_index(lying) is None
@@ -167,6 +181,56 @@ def _save_standalone_viz(tmp_path, *, n_viz_edges, name="nb-1"):
     return out
 
 
+def _rewrite_viz_npz(out: str, **updates) -> None:
+    path = os.path.join(out, "viz.npz")
+    with np.load(path, allow_pickle=True) as z:
+        arrays = {key: z[key] for key in z.files}
+    arrays.update(updates)
+    np.savez(path, **arrays)
+
+
+@pytest.mark.parametrize("artifact_kind", ["scale", "standalone"])
+@pytest.mark.parametrize(
+    "corruption", ["bad_order", "bad_aux_dtype", "short_deg", "bad_deg_dtype"]
+)
+def test_viz_loaders_handle_malformed_aux_and_degree_arrays(
+    tmp_path, artifact_kind, corruption
+):
+    """两条 loader 都不得让畸形 order/degree 从请求热路径抛 IndexError。"""
+    if artifact_kind == "scale":
+        out = _save_scale_with_viz(
+            tmp_path, n_viz_edges=2, name=f"malformed-{corruption}"
+        )
+        load = si.load_scale_index
+    else:
+        out = _save_standalone_viz(
+            tmp_path, n_viz_edges=2, name=f"malformed-{corruption}"
+        )
+        load = vi.load_viz_index
+
+    if corruption in {"bad_order", "bad_aux_dtype"}:
+        order_dtype = np.int64 if corruption == "bad_order" else object
+        _rewrite_viz_npz(
+            out,
+            viz_deg_order=np.asarray([0, 0, 2], dtype=order_dtype),
+            viz_edge_src_order=np.asarray([1, 0], dtype=order_dtype),
+        )
+        idx = load(out)
+        assert idx is not None
+        assert "_viz_deg_order_cache" not in idx.__dict__
+        assert "_by_src_cache" not in idx.viz_edges.__dict__
+        assert idx.viz_deg_order().tolist() == [0, 1, 2]
+        assert idx.viz_edges.edge_type_at(0, 1) == "relates"
+    elif corruption == "short_deg":
+        _rewrite_viz_npz(out, viz_deg=np.asarray([2, 1], dtype=np.int32))
+        assert load(out) is None
+    else:
+        _rewrite_viz_npz(
+            out, viz_deg=np.asarray(["2", "1", "1"], dtype=object)
+        )
+        assert load(out) is None
+
+
 def test_standalone_viz_reconciles_edge_count_with_manifest(tmp_path):
     """独立 viz 产物与 scale-embedded 的一样要对账。
 
@@ -205,6 +269,23 @@ def test_standalone_viz_does_not_reconcile_legacy_json_edge_key(tmp_path):
     assert vi.load_viz_index(countless) is not None
 
 
+def test_compact_artifact_without_auxiliary_indexes_lazily_falls_back(tmp_path):
+    """上一版紧凑产物尚无 degree/by-source 辅助键，不重建也必须保持可读。"""
+    out = _save_standalone_viz(tmp_path, n_viz_edges=2, name="compact-old")
+    viz_npz = os.path.join(out, "viz.npz")
+    omitted = {"viz_deg_order", "viz_edge_src_order", "viz_edge_src_indptr"}
+    with np.load(viz_npz, allow_pickle=True) as z:
+        kept = {key: z[key] for key in z.files if key not in omitted}
+    np.savez(viz_npz, **kept)
+
+    idx = vi.load_viz_index(out)
+    assert idx is not None
+    assert "_viz_deg_order_cache" not in idx.__dict__
+    assert "_by_src_cache" not in idx.viz_edges.__dict__
+    assert idx.viz_deg_order().tolist() == [0, 1, 2]
+    assert idx.viz_edges.edge_type_at(0, 2) == "relates"
+
+
 def test_save_rejects_an_edge_set_built_against_a_different_node_table(tmp_path):
     """端点存的是下标;边集的 n_nodes 与要落盘的 viz_ids 对不上就是接错了节点表。"""
     viz_ids, adj, viz_deg, viz_types, viz_names, _ = _arrays()
@@ -236,6 +317,12 @@ def test_legacy_viz_edges_json_key_still_loads(tmp_path):
 
     idx = vi.load_viz_index(str(out))
     assert idx is not None
+    # 旧产物没有辅助数组时仍可加载；只有真正使用它们时才惰性重建。
+    assert "_viz_deg_order_cache" not in idx.__dict__
+    assert "_by_src_cache" not in idx.viz_edges.__dict__
     assert list(idx.viz_edges.rows(idx.viz_ids)) == viz_payload["edges"]
     assert len(idx.viz_edges) == 2
+    assert list(idx.viz_deg_order()) == [0, 1, 2]
     assert idx.viz_edges.edge_type_at(0, 1) == "relates"
+    assert "_viz_deg_order_cache" in idx.__dict__
+    assert "_by_src_cache" in idx.viz_edges.__dict__

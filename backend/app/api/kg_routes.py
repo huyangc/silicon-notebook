@@ -427,12 +427,13 @@ def resolve_conflicts(notebook_id: str) -> dict:
     """Trigger background conflict resolution for a notebook's KG.
 
     Mirrors kg/build: 409 if LLM not configured, 404 if notebook missing,
-    otherwise starts a daemon thread and returns immediately.
+    otherwise queues the job on the fixed heavy-maintenance workers and returns
+    immediately.
 
     Two admission gates sit in front of that thread. Single flight is per
     notebook (its own slot, not relink/rebuild's), so a second click cannot
     enqueue a duplicate pass over the same graph. Size admission refuses
-    notebooks whose active object count exceeds ``KG_CONFLICT_MAX_OBJECTS``:
+    notebooks whose active object or relation count exceeds its configured rail:
     detection is superlinear in the graph and every surviving candidate costs an
     LLM call, so accepting such a notebook would only mean a background job that
     never finishes and a bill that keeps growing. The post-build conflict tail
@@ -447,7 +448,7 @@ def resolve_conflicts(notebook_id: str) -> dict:
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     if not admitted:
-        raise user_error(409, "当前笔记本知识对象过多，暂不支持自动冲突检测")
+        raise user_error(409, "当前笔记本知识图谱规模过大，暂不支持自动冲突检测")
     try:
         job = repo.start_conflict_resolution(notebook_id)
     except KgMaintenanceAlreadyRunning:

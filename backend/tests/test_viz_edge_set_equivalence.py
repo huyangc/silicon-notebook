@@ -1,8 +1,8 @@
 """紧凑 viz 边集 old-vs-new 等价:响应 JSON 逐位不变。
 
-批 2 把 viz 边从 ``list[[src, dst, edge_type]]`` 换成列式数组 + 惰性派生索引,
-并把 ``_unified_graph_bounded`` / ``_kg_neighbors_unchecked`` 的每请求 O(N)/O(E)
-Python 循环换成向量化掩码与 O(deg) 探针。**纯性能改造**,因此本文件把改造前的
+批 2 把 viz 边从 ``list[[src, dst, edge_type]]`` 换成列式数组 + 持久化派生索引,
+并让 ``_unified_graph_bounded`` / 邻居定向按 kept pair 间接二分，不扫描高出度
+source 的完整邻接段。**纯性能改造**,因此本文件把改造前的
 实现原样抄成 oracle,断言两者的响应 dict 逐位相等——含 degree 并列的 tie 顺序、
 边序、totals/truncated、以及同一 (s,t) 多重边「最后一条胜出」的字典覆盖语义。
 """
@@ -245,6 +245,63 @@ def test_neighbor_edge_orientation_matches_pre_change_implementation():
     assert edge_set.edge_type_at(positions["k5"], positions["k6"]) == "contradicts"
 
 
+def test_batched_edge_type_lookup_matches_individual_legacy_semantics():
+    """批量 API 与逐 pair 查询逐位一致,含重复 pair、反向、缺边和最后边胜出。"""
+    full = _graph()
+    idx, _ = _index(full)
+    positions = idx.viz_node_index()
+    pairs = [
+        (positions["k5"], positions["k6"]),
+        (positions["k5"], positions["k6"]),
+        (positions["k6"], positions["k5"]),
+        (positions["k8"], positions["k8"]),
+        (positions["k198"], positions["k199"]),
+        (None, positions["k0"]),
+    ]
+    absent = object()
+    expected = [idx.viz_edges.edge_type_at(s, t, absent) for s, t in pairs]
+    assert idx.viz_edges.edge_types_at_many(pairs, absent) == expected
+
+
+def test_induced_edge_lookup_does_not_scan_a_kept_hubs_outgoing_segment():
+    """复杂度形状:degree-top core 保留超级 hub 时也只能做 pair-range 二分。"""
+    fan_out = 20_000
+    ids = [f"n{i}" for i in range(fan_out + 1)]
+    rows = [["n0", f"n{target}", "relates"]
+            for target in range(1, fan_out + 1)]
+    rows.append(["n1", "n2", "supports"])
+    edge_set = VizEdgeSet.from_rows(rows, ids)
+    edge_set.by_src()  # freeze the real auxiliary index before wrapping dst
+    original_dst = edge_set.dst
+
+    class _CountingDst:
+        def __init__(self, values):
+            self.values = values
+            self.reads = 0
+
+        def __getitem__(self, key):
+            if isinstance(key, (int, np.integer)):
+                self.reads += 1
+            return self.values[key]
+
+    counting = _CountingDst(original_dst)
+    edge_set.dst = counting
+    selected = edge_set.induced_edge_indices([0, 1, 2])
+    assert counting.reads < 256
+    assert counting.reads * 50 < len(edge_set)
+    assert selected.tolist() == [0, 1, fan_out]
+
+    counting.reads = 0
+    assert edge_set.edge_type_at(0, fan_out) == "relates"
+    assert counting.reads < 64
+
+    counting.reads = 0
+    assert edge_set.edge_types_at_many(
+        [(0, 1), (0, fan_out), (0, fan_out)], default=None
+    ) == ["relates", "relates", "relates"]
+    assert counting.reads < 128
+
+
 def test_edge_type_at_distinguishes_absent_from_falsy_edge_type():
     """「没有这条边」与「有边但 edge_type 为空」必须可分——历史靠
     `(s, t) in et_map` 免费拿到,紧凑实现靠 default 哨兵。"""
@@ -315,10 +372,45 @@ def test_by_src_index_is_consistent_with_the_raw_columns():
         lo, hi = int(indptr[node]), int(indptr[node + 1])
         segment = [int(i) for i in order[lo:hi]]
         assert all(int(edge_set.src[i]) == node for i in segment)
-        # 段内保持原边序(稳定排序),这正是「最后一条胜出」成立的前提。
-        assert segment == sorted(segment)
-        assert segment == [i for i in range(len(edge_set))
-                           if int(edge_set.src[i]) == node]
+        # 段内按 (dst,原边下标) 严格排序，pair-range 才能二分；同一 pair
+        # 的原下标升序保证最后一条仍是历史 dict 的 winner。
+        assert segment == sorted(
+            segment, key=lambda i: (int(edge_set.dst[i]), i)
+        )
+        assert set(segment) == {
+            i for i in range(len(edge_set)) if int(edge_set.src[i]) == node
+        }
+
+
+def test_src_only_legacy_auxiliary_order_is_rejected_then_lazily_rebuilt():
+    """旧辅助数组段内只保原序；dst 非单调时不可拿去二分，但事实边仍兼容。"""
+    edge_set = VizEdgeSet.from_rows(
+        [["a", "c", "first"], ["a", "b", "second"]],
+        ["a", "b", "c"],
+    )
+    assert edge_set.install_by_src(
+        np.asarray([0, 1], dtype=np.int64),
+        np.asarray([0, 2, 2, 2], dtype=np.int64),
+    ) is False
+    assert "_by_src_cache" not in edge_set.__dict__
+    order, _ = edge_set.by_src()
+    assert order.tolist() == [1, 0]
+    assert edge_set.edge_type_at(0, 2) == "first"
+
+
+def test_persisted_auxiliary_order_is_src_dst_original_index():
+    """写盘 helper 必须固化可二分三键序，而不是旧版的 src-only 稳定序。"""
+    from app.services.kg.scale_index import viz_edge_npz_arrays
+
+    edge_set = VizEdgeSet.from_rows(
+        [["a", "c", "first"], ["a", "b", "middle"],
+         ["a", "c", "last"], ["b", "a", "reverse"]],
+        ["a", "b", "c"],
+    )
+    arrays = viz_edge_npz_arrays(edge_set)
+    assert arrays["viz_edge_src_order"].tolist() == [1, 0, 2, 3]
+    assert arrays["viz_edge_src_indptr"].tolist() == [0, 3, 4, 4]
+    assert edge_set.edge_type_at(0, 2) == "last"
 
 
 def test_scale_index_and_viz_index_share_the_lazy_derivations():

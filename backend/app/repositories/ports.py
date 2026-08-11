@@ -2634,6 +2634,14 @@ class SharingStorePort(Protocol):
 @runtime_checkable
 class GovernanceStorePort(Protocol):
     @staticmethod
+    def conflict_relation_count(
+        connection: object, notebook_id: str, *, max_rows: int | None = None
+    ) -> int: ...
+    @staticmethod
+    def conflict_relation_rows(
+        connection: object, notebook_id: str, *, max_rows: int | None = None
+    ) -> list[dict]: ...
+    @staticmethod
     def promotion_candidate_identity(
         connection: object,
         candidate_id: str,

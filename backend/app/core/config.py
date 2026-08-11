@@ -783,6 +783,12 @@ class Settings(BaseSettings):
     kg_conflict_max_objects: int = Field(
         200000, gt=0, validation_alias="KG_CONFLICT_MAX_OBJECTS"
     )
+    # Relation-side admission is independent of the object ceiling: a sparse
+    # object set may still carry a very dense relation graph.  The resolver
+    # refuses the whole pass (never a partial candidate set) above this rail.
+    kg_conflict_max_relations: int = Field(
+        1000000, gt=0, validation_alias="KG_CONFLICT_MAX_RELATIONS"
+    )
     # chunk×graph mix: 叠加 KG 子图 block 和源 chunk 进候选池(默认开)。关闭后退化为纯 chunk 检索。
     chunk_kg_overlay_enabled: bool = Field(True, validation_alias="CHUNK_KG_OVERLAY_ENABLED")
     # Candidate widths for the optional chunk×KG overlay. They are retrieval

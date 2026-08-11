@@ -443,6 +443,38 @@ class TestResolveAdmission:
             f"/api/notebooks/{nb.id}/kg/conflicts/resolve"
         ).status_code == 200
 
+    def test_relation_dense_notebook_is_refused_before_submission(
+        self, tmp_path, monkeypatch
+    ):
+        _env(tmp_path, monkeypatch)
+        repo = _make_repo(monkeypatch)
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
+        tc = _client(repo, monkeypatch)
+        nb = repo.create_notebook(NotebookCreate(name="too-many-relations"))
+        repo.store_kg(nb.id, None, [
+            {"local_id": "A", "object_type": "claim",
+             "payload": {"name": "Claim A"}, "evidence": []},
+            {"local_id": "B", "object_type": "claim",
+             "payload": {"name": "Claim B"}, "evidence": []},
+        ], [
+            {"source_local_id": "A", "target_local_id": "B",
+             "edge_type": "supports", "evidence": []},
+            {"source_local_id": "A", "target_local_id": "B",
+             "edge_type": "contradicts", "evidence": []},
+        ])
+
+        submitted: list = []
+        import app.services.background_jobs as jobs
+        monkeypatch.setattr(
+            jobs, "submit", lambda *args, **kwargs: submitted.append(args)
+        )
+        monkeypatch.setattr(repo.settings, "kg_conflict_max_relations", 1)
+
+        response = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
+        assert response.status_code == 409
+        assert response.headers.get("X-User-Message") == "1"
+        assert submitted == []
+
     def test_failed_submission_releases_the_slot(self, tmp_path, monkeypatch):
         _env(tmp_path, monkeypatch)
         repo = _make_repo(monkeypatch)

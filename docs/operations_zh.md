@@ -682,6 +682,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 当前 scale-index 全量构建与 delta fold 还会写入 `chunk_ann_source_names.npy`、`chunk_ann_source_codes.npy` 和 `chunk_ann_source_counts.npy`。这些紧凑、逐行对齐的文件让收窄来源的 chunk ANN 在 HNSW 进入 Top-K 前拒绝未选行。历史已发布索引仍可加载，但在该 notebook 重建或 fold 之前，收窄的 chunk/元素检索会使用有界来源内 FTS；若部署后立刻需要跨语言的限定来源语义召回，应重建对应 scale 索引。当 manifest 声明 `has_chunk_ann_sources=true` 却缺文件、行数不一致或来源代码越界时，整份工件判不可用，不能静默削弱来源边界。
 
+同一份 `viz.npz` 现在还会写入有界图视图使用的稳定度序与按 source 的边 order/indptr。历史 compact 与旧 JSON 工件继续可加载，只在首次使用时派生一次；重建后这笔成本移到工件发布阶段。有界核心图只枚举 kept 节点的出边段，再恢复原边流顺序。多参考库 PPR 仍按需构造，但有序 participant 图只装配、归一一次，不再每挂一个库就复制一遍累计 CSR；差分测试钉住历史 PPR 分数与排序。后台维护任务进入互相独立的固定重型/轻型 worker 队列，突发提交只增加队列项，不再增加同量阻塞 OS 线程；排队披露仍只含脱敏元数据。
+
 默认 `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`，所以同一个离线 index 命令还会在主 scale 工件发布后重建 `<storage>/kg_index_partitions/<notebook-id>`。伴生产物通过临时目录原子换入，每个可见来源使用一个 SHA-256 直寻目录，校验每个 partition payload 的摘要，并绑定当前主 manifest version。伴生产物构建失败、越界或损坏不会影响既有 scale 索引，但 reader 会保持 unavailable；旧格式伴生产物必须重建。修复来源事实覆盖或按产品文档调整来源子图护栏后重新执行 index 命令；不要在不同 scale-index 代次间复制伴生产物根目录。可单独关闭 `SOURCE_PARTITIONED_PPR_ENABLED` 而保留文件。
 
 生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `ann_ms`、`hydrate_ms`、`fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
