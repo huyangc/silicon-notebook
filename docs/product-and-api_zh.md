@@ -507,7 +507,15 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 参数条数（上百个 flag 的段要分好几片），两者都得读正文，所以只在有界前缀里精确测量（连接力
 一起推进，否则前缀里的闸会和真跑时答得不一样），前缀之外的每一段按最少 1 次计。`sampled=true`
 表示前缀到顶了、这些数字是下界；两条边界都会置位它，其中**逐条截断**才是真正会扭曲估算的
-那条——把一张参数表截短就少了参数名、少了分片。`skipped_windows_in_prefix` 是前缀内被跳过
+那条——把一张参数表截短就少了参数名、少了分片。条数那条边界按**元素总数是否大于读回的行数**
+判，不是「读回行数是否已达上限」：整篇恰好等于上限的文档是被完整读过的，把它判成采样等于
+在唯一一份估算完全准确的文档上，把精确值降级成下界、还让界面写「至少约」。这个比较能成立
+的前提是两个数出自**同一代次**——两条读取是两条独立语句，中间落进一次重解析就会把一个代次
+的字符总量配上另一个代次的前缀，结果不像错的、只是描述了一份不存在的文档。所以预告在两条
+读取前后各取一次来源代次（与确认路径同一份 `MAX(source_elements.created_at)` 实现），不一致
+就**整对重读**一次（只重读代次没有意义：那只是确认了漂移，然后照样报混代次的数）；仍不一致
+就返回带用户可读文案的 `409`（「正在重新解析，请稍后」——重解析正在跑，多读几次也赢不了这场
+竞速）。`skipped_windows_in_prefix` 是前缀内被跳过
 的段数，它是「为什么调用数远小于段数」唯一的解释项，少了它，一份大多是散文的手册看到
 「约 40 段 / 约 3 次调用」会读成漏算。v1 的 `signal`（形状检测）、`is_manual` 与
 `estimated_sections` 随规则分节一起退役，刻意**不**留兼容别名：v2 没有「命令节」这个东西
@@ -575,7 +583,7 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 端点（都作用在路径里那个笔记本自己的来源上；读取需要笔记本读权限，写入需要 owner）：
 
-- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` —— 成本预告：`estimated_windows`（前缀覆盖全文时是真跑分段的精确值，`sampled=true` 时是显式下界）、`estimated_calls`、`skipped_windows_in_prefix`，有界读取触顶时带 `sampled`；来源尚未解析完或解析失败时返回带用户可读文案的 `409`
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` —— 成本预告：`estimated_windows`（前缀覆盖全文时是真跑分段的精确值，`sampled=true` 时是显式下界）、`estimated_calls`、`skipped_windows_in_prefix`，有界读取触顶时带 `sampled`（按元素总数是否超过读回行数判，不是「行数是否达上限」）；来源尚未解析完或解析失败时返回带用户可读文案的 `409`，两条读取跨了一次重解析（重读一次仍漂移）时是另一条 `409`
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog` —— 发起抽取；该来源已有活跃任务（既有任务从 `.../job` 取）、抽取模型未配置、来源尚未解析完或解析失败、或上一轮还有候选没审阅完（需先确认或跳过）时返回带用户可读文案的 `409`。上一轮的候选若已因来源被重新解析而过期，则不拦，改为整批清掉再放行
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` —— 该来源最近一次任务：`status` 与 `progress`（`sections_total`、`sections_done`——两个列名保留、计的是段数，`entries`、`rejected`、`uncovered`、`pending_candidates`），失败时带 `failure_reason`。内部诊断列 `diagnostic` 刻意不进响应
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` —— `cancelling`（worker 会在下一个分片边界停，飞行中的一次模型调用被取消时也会停，不必等到那次调用返回）、`cancelled`（本进程没有在跑它，直接落终态）或 `not_running`

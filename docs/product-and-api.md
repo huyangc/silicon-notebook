@@ -661,7 +661,21 @@ answer differently from the run's — and every segment past the prefix is charg
 the minimum of one call. `sampled` is `true` when the prefix ran out, so the
 numbers are a floor; both of the prefix's bounds set it, and **per-element
 truncation** is the one that actually distorts the estimate (clipping an options
-table drops parameter names, which drops slices).
+table drops parameter names, which drops slices). The row bound is read as
+"element count exceeds the rows returned", not "the rows returned reached the
+cap": a document holding exactly the cap's worth of elements was fully read, and
+calling that sampled downgrades an exact count to a lower bound — and words the
+UI "at least" — on the one document where the estimate is perfect. That
+comparison is only legitimate because both numbers come from **one generation**:
+the two reads are separate statements, and a reparse committing between them
+pairs one generation's character total with another's prefix, which does not
+look wrong so much as describe a document that never existed. The preview
+therefore reads the source's element generation (the same
+`MAX(source_elements.created_at)` the confirm path checks) on both sides of the
+pair and re-reads the WHOLE pair once when they differ — re-checking the token
+alone would merely confirm the drift and then report the mixed numbers anyway.
+A second drift answers `409` (a reparse is actively running; more reads will not
+win that race).
 `skipped_windows_in_prefix` is how many segments in the prefix the gate skipped
 — the only explanation for why the call count is far below the segment count,
 without which a mostly-prose manual reading "about 40 segments / about 3 calls"
@@ -767,7 +781,7 @@ never happened and charge the user for a whole re-extraction.
 Endpoints (all scoped to a source of the notebook in the path; reads need
 notebook read, writes need owner):
 
-- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — cost estimate: `estimated_windows` (exact, from the real packing, when the prefix covered the whole document; an explicit lower bound when `sampled`), `estimated_calls`, `skipped_windows_in_prefix`, plus `sampled` when the bounded read hit its cap; `409` with a user-readable message when the source is not parsed yet or its parse failed
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — cost estimate: `estimated_windows` (exact, from the real packing, when the prefix covered the whole document; an explicit lower bound when `sampled`), `estimated_calls`, `skipped_windows_in_prefix`, plus `sampled` when the bounded read hit its cap (judged on the element count exceeding the rows returned, not on the rows reaching the cap); `409` with a user-readable message when the source is not parsed yet or its parse failed, and a second `409` when the pair of reads straddled a reparse (re-read once and still drifting)
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog` — start extraction; `409` with a user-readable message when this source already has an active job (fetch it from `.../job`), the extraction model is unconfigured, the source is not parsed yet or its parse failed, or the previous run still has unreviewed candidates (confirm or dismiss them first). Candidates already expired by a reparse do not block: they are swept and the run proceeds
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` — the source's latest job: `status` plus `progress` (`sections_total`, `sections_done` — names kept, counting segments — `entries`, `rejected`, `uncovered`, `pending_candidates`) and, on failure, `failure_reason`. The internal `diagnostic` column is deliberately not exposed
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` — `cancelling` (the worker stops at its next slice boundary, or as soon as an in-flight model call notices the cancellation — it does not wait for that call to return), `cancelled` (no worker in this process; the row is settled directly), or `not_running`

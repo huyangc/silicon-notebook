@@ -3367,6 +3367,141 @@ def test_preview_past_its_prefix_is_a_declared_floor(repo, monkeypatch):
     )) == 4
 
 
+def _tiny_elements(repo, notebook_id, source_id, count):
+    """`count` short prose elements — small enough that neither preview bound
+    clips them, so `sampled` is decided by the element COUNT alone."""
+    return _add_elements(
+        repo, notebook_id, source_id, "小元素手册",
+        _numbered(source_id, [
+            {
+                "element_type": "paragraph",
+                "text": f"这是第 {index} 段说明文字。",
+                "section_path": "",
+            }
+            for index in range(count)
+        ]),
+    )
+
+
+@pytest.mark.parametrize(
+    "elements, expected_sampled", [(3, False), (4, True)]
+)
+def test_preview_sampling_is_decided_by_the_element_count_not_the_cap(
+    repo, monkeypatch, elements, expected_sampled
+):
+    """A document holding EXACTLY the row cap's worth of elements was fully
+    read, and calling that sampled downgrades an exact count to a lower bound
+    — on the one document where the estimate is perfect, and with the UI
+    wording it "at least".
+
+    `len(rows) >= PREVIEW_ELEMENT_LIMIT` cannot tell "the cap truncated" from
+    "the cap was exactly met". `element_count > len(rows)` can, and it is only
+    a legitimate comparison because both numbers now come from one generation
+    (see the drift cases below).
+    """
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _tiny_elements(repo, notebook.id, "s1", elements)
+
+    preview = _service(repo).preview(notebook.id, "s1")
+
+    assert preview.sampled is expected_sampled
+    # Either way these elements share one window; only the CLAIM about that
+    # number changes (exact vs. floor).
+    assert preview.estimated_windows == 1
+
+
+def _drifting_generations(service, tokens):
+    """Script `source_element_generation`, and count the reads it brackets.
+
+    The seam is the generation token itself: `_coherent_source_reads` calls it
+    once before its pair of statements and once after, so a scripted sequence
+    stages "a reparse committed in the middle" without having to actually swap
+    a document's elements underneath a live read.
+    """
+    supplied = iter(tokens)
+    service.catalog.source_element_generation = (  # type: ignore[assignment]
+        lambda _source_id: next(supplied)
+    )
+    counts = {"stats": 0, "rows": 0}
+    real_stats = service.catalog.source_text_stats
+    real_rows = service.catalog.preview_elements
+
+    def counting_stats(*args, **kwargs):
+        counts["stats"] += 1
+        return real_stats(*args, **kwargs)
+
+    def counting_rows(*args, **kwargs):
+        counts["rows"] += 1
+        return real_rows(*args, **kwargs)
+
+    service.catalog.source_text_stats = counting_stats  # type: ignore[assignment]
+    service.catalog.preview_elements = counting_rows  # type: ignore[assignment]
+    return counts
+
+
+def test_preview_rereads_both_statements_when_a_reparse_lands_between_them(
+    repo,
+):
+    """The two reads are two statements on two connections, and a reparse
+    committing between them pairs one generation's character total with
+    another's prefix.
+
+    Nothing about that result looks wrong — it is an estimate for a document
+    that never existed — so the only defence is to prove both reads saw one
+    generation. Re-reading the WHOLE pair is the point: re-checking the token
+    alone would confirm the drift and then report the mixed numbers anyway.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2, chunk=_PREVIEW_CHUNK)
+    service = _service(repo)
+    clean = service.preview(notebook.id, "s1")
+    # Attempt 1 opens at `g1` and closes at `g2` — a swap landed inside it.
+    # Attempt 2 opens and closes at `g3`.
+    counts = _drifting_generations(service, ["g1", "g2", "g3", "g3"])
+
+    preview = service.preview(notebook.id, "s1")
+
+    assert counts == {"stats": 2, "rows": 2}
+    assert preview.estimated_windows == clean.estimated_windows
+    assert preview.estimated_calls == clean.estimated_calls
+    assert preview.sampled is clean.sampled
+
+
+def test_preview_gives_up_rather_than_quote_a_mixed_generation(repo):
+    """Bounded at one retry. A second swap inside one bounded read means a
+    reparse is actively running, and the honest answer is "come back after
+    it" — not more reads that keep losing the same race, and never a number
+    assembled from two documents."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2, chunk=_PREVIEW_CHUNK)
+    service = _service(repo)
+    counts = _drifting_generations(service, ["g1", "g2", "g3", "g4"])
+
+    with pytest.raises(CatalogSourceBusy):
+        service.preview(notebook.id, "s1")
+
+    assert counts == {"stats": 2, "rows": 2}
+
+
+def test_api_preview_during_a_reparse_is_a_user_readable_409(http):
+    """The transport half: a distinct, actionable 409 rather than a plausible
+    number. Its copy is not `apply`'s — a preview neither confirms nor skips,
+    so naming those two actions would name something the user did not do."""
+    client, repo = http
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2, chunk=_PREVIEW_CHUNK)
+    _drifting_generations(_service(repo), ["g1", "g2", "g3", "g4"])
+
+    response = client.get(
+        f"/api/notebooks/{notebook.id}/sources/s1/command-catalog/preview"
+    )
+
+    assert response.status_code == 409
+    assert response.headers.get("X-User-Message") == "1"
+    assert response.json()["detail"] == catalog_job.SOURCE_REPARSING_MESSAGE
+
+
 def test_preview_of_an_empty_source_estimates_nothing(repo):
     """Zero characters is zero windows — not one. A source with no elements
     must not be quoted a price."""

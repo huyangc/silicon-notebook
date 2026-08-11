@@ -285,6 +285,16 @@ SOURCE_STALE_MESSAGE = (
 SOURCE_BUSY_MESSAGE = (
     "这份来源正在重新解析，请等解析完成后再确认或跳过。"
 )
+# R4 (codex PR #494 review): the same fact — a reparse is in flight, nothing has
+# been expired, waiting is the remedy — worded for the endpoint that is asking.
+# `preview` neither confirms nor skips anything, so `SOURCE_BUSY_MESSAGE`'s verbs
+# would name two actions the user did not take. The exception type is shared
+# (`CatalogSourceBusy` means "a reparse is in flight and this call could not
+# proceed"); only the copy differs, exactly as the empty/too-many pairs already
+# differ between apply and dismiss.
+SOURCE_REPARSING_MESSAGE = (
+    "这份来源正在重新解析，请等解析完成后再看识别成本。"
+)
 # How long apply/dismiss wait for the source's parse barrier before answering
 # `SOURCE_BUSY_MESSAGE`. Any positive value is CORRECT (the barrier is what
 # makes the write safe, not the length of the wait); this one is tuned for the
@@ -293,6 +303,12 @@ SOURCE_BUSY_MESSAGE = (
 # through. Seconds rather than milliseconds only so that a barrier changing
 # hands under a slow disk is absorbed instead of reported as contention.
 SOURCE_LOCK_WAIT_SECONDS = 2.0
+# How many times `preview` re-reads its pair of statements when a reparse
+# committed between them. One retry, not a loop: the second failure is evidence
+# that a reparse is actively running rather than that this call was unlucky, and
+# a preview that keeps re-reading to win a race is spending the user's wait on a
+# number that will be stale the moment the swap lands anyway.
+_PREVIEW_READ_ATTEMPTS = 2
 # Parse-status preconditions. A source still being parsed has no elements (or
 # only a prefix of them), so both the cost preview and the run itself would be
 # reading a document that is not there yet — the preview would under-report and
@@ -768,6 +784,51 @@ class CommandCatalogService:
             pass
 
     # ---------------------------------------------------------------- preview
+    def _coherent_source_reads(
+        self, source_id: str
+    ) -> tuple[int, int, list[dict], bool]:
+        """``source_text_stats`` and ``preview_elements``, proven to describe
+        ONE generation of the document.
+
+        They are two statements on two connections, and a reparse committing
+        between them mixes generations in a way neither number can reveal on
+        its own: the character total of the NEW document paired with a prefix
+        of the OLD one, or the reverse. Nothing about the result looks wrong —
+        it is simply an estimate for a document that never existed, and the
+        two failure directions do not even cancel (a reparse that shrinks a
+        manual reports a window count for the longer version).
+
+        The generation token is the one ``start`` and ``_require_current_
+        generation`` already use (``source_element_generation``, the elements'
+        ``MAX(created_at)``, which ``replace_elements`` moves exactly when it
+        swaps them). Read on both sides of the pair: unequal means a swap
+        landed somewhere inside, and the whole pair is re-read. Bracketing is
+        deliberately conservative — a swap that commits between the second
+        read and the closing token costs one harmless retry rather than a
+        wrong answer.
+
+        Bounded at ``_PREVIEW_READ_ATTEMPTS``, and a second failure is
+        reported rather than retried: two swaps inside one bounded read means
+        a reparse is actively running, and the honest answer is to come back
+        after it, not to keep paying for reads that keep losing the race. That
+        is `CatalogSourceBusy` — the same "in flight, nothing expired, wait"
+        the apply/dismiss barrier raises, worded for this endpoint
+        (`SOURCE_REPARSING_MESSAGE`).
+        """
+        for _attempt in range(_PREVIEW_READ_ATTEMPTS):
+            opened = self.catalog.source_element_generation(source_id)
+            element_count, total_chars = self.catalog.source_text_stats(source_id)
+            rows, clipped = self.catalog.preview_elements(
+                source_id,
+                limit=PREVIEW_ELEMENT_LIMIT,
+                text_chars=PREVIEW_ELEMENT_CHARS,
+            )
+            if str(opened or "") == str(
+                self.catalog.source_element_generation(source_id) or ""
+            ):
+                return int(element_count), int(total_chars), rows, bool(clipped)
+        raise CatalogSourceBusy(source_id)
+
     def preview(self, notebook_id: str, source_id: str) -> CatalogPreview:
         """Estimate, with zero model calls, what extracting this source would
         cost — two reads, each bounded a different way.
@@ -804,7 +865,13 @@ class CommandCatalogService:
         estimate: clipping an options table drops parameter names, which drops
         slices, so a manual whose option tables run past
         ``PREVIEW_ELEMENT_CHARS`` can easily cost several times the reported
-        call count.
+        call count. The row bound is read as ``element_count > len(rows)`` and
+        NOT as ``len(rows) >= PREVIEW_ELEMENT_LIMIT``: a document holding
+        exactly the cap's worth of elements is fully read, and calling that
+        sampled would downgrade an exact count to a lower bound (and word the
+        UI "at least") on the one document where the estimate is perfect. The
+        comparison is only meaningful because both numbers come from the same
+        generation — see ``_coherent_source_reads``.
 
         R8: the parse-status precondition is checked HERE as well as in
         ``start``. A cost preview over a source that has not been parsed yet is
@@ -814,11 +881,10 @@ class CommandCatalogService:
         document has nothing to extract" rather than "come back in a minute".
         """
         source = self._require_parsed(notebook_id, source_id)
-        _element_count, total_chars = self.catalog.source_text_stats(source_id)
-        rows, clipped = self.catalog.preview_elements(
-            source_id, limit=PREVIEW_ELEMENT_LIMIT, text_chars=PREVIEW_ELEMENT_CHARS
+        element_count, total_chars, rows, clipped = self._coherent_source_reads(
+            source_id
         )
-        sampled = clipped or len(rows) >= PREVIEW_ELEMENT_LIMIT
+        sampled = clipped or element_count > len(rows)
         prefix = extraction_windows(rows)
         # Exact when the prefix is the whole document; otherwise the best floor
         # available from two independent lower bounds — the windows the packer
@@ -3775,6 +3841,7 @@ __all__ = [
     "SOURCE_NOT_PARSED_MESSAGE",
     "SOURCE_PARSE_FAILED_MESSAGE",
     "SOURCE_REPARSED_REASON",
+    "SOURCE_REPARSING_MESSAGE",
     "SOURCE_STALE_MESSAGE",
     "SUBMISSION_FAILED_MESSAGE",
     "USER_DISMISSED_REASON",

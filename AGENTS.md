@@ -484,7 +484,16 @@ measured exactly over the bounded `preview_elements` prefix, advancing the relay
 exactly as `run` does (otherwise the preview's gate answers differently from the
 run's on the multi-window table the relay exists for), and every window past the
 prefix is charged one call. Both prefix bounds set `sampled`, per-element
-truncation being the one that actually distorts the estimate;
+truncation being the one that actually distorts the estimate. The row bound is
+`element_count > len(rows)`, never `len(rows) >= PREVIEW_ELEMENT_LIMIT`: a
+document holding exactly the cap's worth of elements was fully read, and calling
+it sampled downgrades an exact count to a lower bound. That comparison is only
+legitimate because both numbers come from one generation — the two reads are
+separate statements, and a reparse between them pairs one generation's character
+total with another's prefix. `_coherent_source_reads` therefore brackets the
+pair with `source_element_generation` (the confirm path's own token) and
+re-reads the WHOLE pair once on drift; a second drift raises
+`CatalogSourceBusy` → 409.
 `skipped_windows_in_prefix` is the only explanation for a call count far below
 the window count. `signal`/`is_manual`/`estimated_sections`/`truncated_sections`
 are removed from the transport layer without compatibility aliases.
