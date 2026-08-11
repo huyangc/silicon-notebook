@@ -530,7 +530,13 @@ what the relay exists for. A skipped segment makes no call, runs no liveness
 probe and emits no `catalog_section_done` event (a mostly-prose PDF has
 thousands of them) but is still counted off the progress bar — a denominator
 that counts it and a numerator that does not never finishes — and the relay
-still passes through it.
+still passes through it. That progress write's RETURN VALUE is therefore the
+skip path's only liveness signal: deleting the source or the notebook cascades
+the job row away, and ignoring it lets the worker write past every remaining
+segment and then settle a job that no longer exists (an all-prose document
+reports a plain success nobody can open the results of). A write that matched
+nothing ends the run through the existing "job deleted" outcome; an explicit
+cancel outranks it, so when both are true the run ends as cancelled.
 
 **Extraction.** One background job per source, guarded by a partial unique index
 covering `queued` and `running` — the row is written before the worker starts,

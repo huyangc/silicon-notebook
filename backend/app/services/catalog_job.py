@@ -1581,6 +1581,79 @@ class CommandCatalogService:
         except KeyError:
             raise CatalogJobGone() from None
 
+    def _record_window(
+        self,
+        job_id: str,
+        cancel: CancelEvent,
+        *,
+        entries: int,
+        rejected: int,
+        uncovered: int,
+    ) -> None:
+        """Tick one window off the progress bar — and read the answer.
+
+        ``record_section``'s ``UPDATE ... WHERE id=? AND status='running'``
+        returns whether it matched, and both call sites used to throw that
+        away. On the SKIPPED-window path that silence is the whole bug: a
+        cascaded source/notebook delete removes the job row mid-run without
+        anyone calling ``cancel()``, and the skip path deliberately carries no
+        liveness probe (it spends nothing, and a mostly-prose PDF has
+        thousands of these windows). So the worker walked every remaining
+        window writing to a row that no longer existed and only discovered it
+        at the closing ``get_job`` — as an uncaught ``KeyError``, instead of
+        the ``job_deleted`` outcome this module already has a settled,
+        documented handler for. The called path has the probe as a backstop,
+        but the same one-line check there costs nothing and closes the gap
+        between the probe and this write.
+
+        Zero new queries: this reads a value the write already returned.
+
+        **A cancel outranks a deletion.** An owner's explicit stop is the more
+        specific fact and it is what the existing cancel tests pin
+        (``cancelled_by_owner``), so it is checked first and both can be true
+        at once — see ``_emit_finished`` for the one thing that has to hold for
+        that combination to end cleanly.
+
+        A non-matching write means the row is gone rather than merely
+        non-``running``: ``run`` claims it to ``running`` before the loop, and
+        the only writer that could settle it underneath a live worker is
+        ``cancel``'s ``cancelled_no_worker`` branch — which by construction
+        runs only when no cancel event is registered for the job, i.e. never
+        while this worker holds one. That is also why no probe is added to
+        tell the two apart: ``CatalogJobGone``'s handler is a no-op settle
+        plus a return value, which is the right outcome either way.
+        """
+        if self.catalog.record_section(
+            job_id, entries=entries, rejected=rejected, uncovered=uncovered
+        ):
+            return
+        raise_if_catalog_cancelled(cancel)
+        raise CatalogJobGone()
+
+    def _emit_finished(self, job_id: str, **extra: Any) -> None:
+        """``catalog_job_finished`` for a row that may not exist anymore.
+
+        Every terminal path used to build this event by reading the row back
+        inline (``self._emit(..., self.catalog.get_job(job_id), ...)``), and
+        that read is evaluated by the CALLER — so a row a cascade deleted
+        mid-run raises ``KeyError`` from inside an ``except`` clause, replacing
+        a settled, reportable outcome with an uncaught traceback. Not
+        hypothetical: an owner cancel and a source delete can both be true at
+        once, and the cancel branch wins by design, which lands it on exactly
+        that read.
+
+        A missing row is not an error here. It is the same conclusion
+        ``CatalogJobGone``'s own branch already reached and documented: an
+        event nobody can read the job back for is not "user visible", it is a
+        dangling pointer. So it is skipped, and the caller's return value —
+        which never depended on the event — stands.
+        """
+        try:
+            job = self.catalog.get_job(job_id)
+        except KeyError:
+            return
+        self._emit("catalog_job_finished", job, **extra)
+
     # ------------------------------------------------------------------- run
     def run(self, job_id: str) -> dict:
         """Execute one extraction job to a terminal state.
@@ -1618,18 +1691,16 @@ class CommandCatalogService:
                 self._settle(
                     job_id, "failed", NOTHING_EXTRACTED_MESSAGE, "nothing_extracted"
                 )
-                self._emit(
-                    "catalog_job_finished",
-                    self.catalog.get_job(job_id),
+                self._emit_finished(
+                    job_id,
                     latency_ms=latency_ms(),
                     model_calls=result["calls"],
                     **overflow,
                 )
                 return {**result, "job_id": job_id, "nothing_extracted": True}
             self.catalog.finish_job(job_id, "succeeded")
-            self._emit(
-                "catalog_job_finished",
-                self.catalog.get_job(job_id),
+            self._emit_finished(
+                job_id,
                 latency_ms=latency_ms(),
                 model_calls=result["calls"],
                 **overflow,
@@ -1637,11 +1708,10 @@ class CommandCatalogService:
             return {**result, "job_id": job_id}
         except CatalogCancelled:
             self._settle(job_id, "cancelled", CANCELLED_MESSAGE, "cancelled_by_owner")
-            self._emit(
-                "catalog_job_finished",
-                self.catalog.get_job(job_id),
-                latency_ms=latency_ms(),
-            )
+            # A cancel and a cascaded delete can both be true; the cancel wins
+            # (see `_record_window`), so this branch has to survive the row
+            # being gone — that is `_emit_finished`'s whole job.
+            self._emit_finished(job_id, latency_ms=latency_ms())
             return {"job_id": job_id, "cancelled": True}
         except CatalogJobGone:
             # See `CatalogJobGone`'s own docstring for why this cannot share
@@ -1659,11 +1729,7 @@ class CommandCatalogService:
             return {"job_id": job_id, "job_deleted": True}
         except CatalogCircuitOpen as exc:
             self._settle(job_id, "failed", CIRCUIT_OPEN_MESSAGE, exc.diagnostic)
-            self._emit(
-                "catalog_job_finished",
-                self.catalog.get_job(job_id),
-                latency_ms=latency_ms(),
-            )
+            self._emit_finished(job_id, latency_ms=latency_ms())
             return {"job_id": job_id, "circuit_open": True}
         except (KeyboardInterrupt, SystemExit):
             # See this module's docstring: these never reach `except Exception`,
@@ -1799,8 +1865,8 @@ class CommandCatalogService:
                 # to observe a no-op. `record_section` stays: the progress bar
                 # the frontend polls reads the job ROW, not the event stream.
                 windows_skipped += 1
-                self.catalog.record_section(
-                    job["id"], entries=0, rejected=0, uncovered=0
+                self._record_window(
+                    job["id"], cancel, entries=0, rejected=0, uncovered=0
                 )
                 carry = carry_candidates(own, carry)
                 continue
@@ -1829,14 +1895,15 @@ class CommandCatalogService:
             rejected = outcome.command_rejects + work.slice_failures
             candidate_rows += accepted
             rejected_rows += rejected
-            self.catalog.record_section(
+            # v2 has no truncation concept — `extraction_windows` splits an
+            # oversized element across windows rather than dropping it. The
+            # column stays (dropping it would be a migration) and stays 0.
+            self._record_window(
                 job["id"],
+                cancel,
                 entries=accepted,
                 rejected=rejected,
                 uncovered=len(outcome.uncovered_candidates),
-                # v2 has no truncation concept — `extraction_windows` splits an
-                # oversized element across windows rather than dropping it. The
-                # column stays (dropping it would be a migration) and stays 0.
             )
             self._emit(
                 "catalog_section_done",
