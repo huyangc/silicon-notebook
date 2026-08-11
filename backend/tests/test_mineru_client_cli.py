@@ -61,6 +61,19 @@ def test_cli_office_uses_mineru_command(monkeypatch, tmp_path):
     assert out == [{"type": "text", "text": "ok", "page_idx": 0}]
 
 
+@pytest.mark.parametrize("file_name", ["doc.docx", "deck.pptx", "book.xlsx", "book.xlsm"])
+def test_cli_office_and_workbook_suffixes_use_mineru_command(monkeypatch, tmp_path, file_name):
+    """MinerU CLI 原生吃 office 三件套 + 工作簿；工作簿走 PDF 的 do_parse 脚本
+    分支会当场失败（read_fn 读不了 xlsx）。"""
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    path = tmp_path / file_name
+    path.write_bytes(b"PK\x03\x04stub")
+    out = _cli_client(monkeypatch).parse(str(path), file_name)
+    assert FakePopen.captured_cmd[0] == "mineru"
+    assert "-p" in FakePopen.captured_cmd and "-o" in FakePopen.captured_cmd
+    assert out == [{"type": "text", "text": "ok", "page_idx": 0}]
+
+
 _BLOCKS = [{"type": "text", "text": "ok", "page_idx": 0}]
 
 

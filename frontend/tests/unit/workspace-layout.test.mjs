@@ -94,16 +94,16 @@ test("source actions remain available by accessible meaning", () => {
 });
 
 
-test("PDF 降级提示提供显式重新解析与删除操作", () => {
+test("降级解析提示提供显式重新解析与删除操作", () => {
   const warnings = jsxElements(page, "section").filter(
-    ({ attributes }) => attributes["aria-label"] === "PDF 降级解析提示",
+    ({ attributes }) => attributes["aria-label"] === "降级解析提示",
   );
   assert.equal(warnings.length, 1);
   const text = jsxTextValues(page);
-  assert.ok(text.includes("当前内容由本地 Python PDF 解析器生成"));
+  assert.ok(text.includes("当前内容由本地解析器生成"));
   const buttons = jsxElements(page, "button");
-  assert.ok(buttons.some(({ attributes }) => attributes["aria-label"] === "重新解析降级 PDF"));
-  assert.ok(buttons.some(({ attributes }) => attributes["aria-label"] === "删除降级 PDF 来源"));
+  assert.ok(buttons.some(({ attributes }) => attributes["aria-label"] === "重新解析降级来源"));
+  assert.ok(buttons.some(({ attributes }) => attributes["aria-label"] === "删除降级来源"));
 });
 
 

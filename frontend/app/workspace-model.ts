@@ -240,7 +240,7 @@ export type SourceSummary = {
    *  拿到；前端本来也只用它的真假。老的 `/sources/{id}` 仍返回 `error_message`。 */
   parse_failed?: boolean;
   extraction_warning?: string | null;
-  /** MinerU 重试耗尽后由本地 Python PDF 解析器完成；原始上游错误不对外暴露。 */
+  /** MinerU 重试耗尽后由该格式对应的本地解析器完成；原始上游错误不对外暴露。 */
   parse_quality_warning?: boolean;
   kg_extracted?: boolean;
   authors?: string[];

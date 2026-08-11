@@ -121,7 +121,9 @@ class MinerUClient:
         suffix = Path(file_name).suffix.lower()
         want_images = bool(self.settings.mineru_return_images)
         with tempfile.TemporaryDirectory(prefix="mineru-") as out_dir:
-            if suffix in {".docx", ".pptx"}:
+            # MinerU CLI 原生吃 office 三件套 + 工作簿（.xlsm 与 .xlsx 同为 OOXML
+            # 工作簿；远端若不支持会非零退出 → 上层 fail-open 回落本地库解析）。
+            if suffix in {".docx", ".pptx", ".xlsx", ".xlsm"}:
                 command = self._office_cli_command(file_path, out_dir)
             else:
                 command = self._pdf_cli_command(file_path, file_name, out_dir)

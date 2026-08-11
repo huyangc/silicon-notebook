@@ -287,10 +287,10 @@ test("summarizeUpload: 折叠取后出现的同 id 快照（第 2 个文件在�
 // ------------------------------------------- classifyStagedFiles：入列前逐文件分类
 
 const CLASSIFY_OPTS = {
-  supportedExtensions: ["pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm"],
-  legacyOfficeExtensions: ["doc", "ppt", "xls"],
+  supportedExtensions: ["pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls"],
+  legacyOfficeExtensions: ["doc", "ppt"],
   maxBytes: 1024,
-  supportedHint: "PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm) / Markdown / CSV",
+  supportedHint: "PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx,.xlsm,.xls) / Markdown / CSV",
 };
 
 test("classifyStagedFiles: 不支持的类型逐条给出原因，可上传的保序进 accepted", () => {
@@ -315,7 +315,7 @@ test("classifyStagedFiles: 旧版 Office 给「另存为」引导而非笼统的
     CLASSIFY_OPTS,
   );
   assert.deepEqual(accepted, []);
-  for (const item of skipped) assert.match(item.reason, /另存为 \.docx \/ \.pptx \/ \.xlsx/);
+  for (const item of skipped) assert.match(item.reason, /另存为 \.docx \/ \.pptx/);
 });
 
 test("classifyStagedFiles: 超过单文件上限的给出带上限的原因，等于上限可上传", () => {

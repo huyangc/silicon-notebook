@@ -39,7 +39,7 @@ class ParserEngineDefinition:
 PARSER_ENGINES: tuple[ParserEngineDefinition, ...] = (
     ParserEngineDefinition(
         id="mineru_self_hosted",
-        file_extensions=("pdf", "docx", "pptx"),
+        file_extensions=("pdf", "docx", "pptx", "xlsx", "xlsm"),
         capabilities=(
             "structured_text",
             "headings",
@@ -53,7 +53,7 @@ PARSER_ENGINES: tuple[ParserEngineDefinition, ...] = (
     ),
     ParserEngineDefinition(
         id="mineru_cloud",
-        file_extensions=("pdf", "docx", "pptx"),
+        file_extensions=("pdf", "docx", "pptx", "xlsx", "xlsm"),
         capabilities=(
             "structured_text",
             "headings",
@@ -76,6 +76,7 @@ PARSER_ENGINES: tuple[ParserEngineDefinition, ...] = (
             "csv",
             "xlsx",
             "xlsm",
+            "xls",
         ),
         capabilities=("structured_text", "headings", "layout", "tables"),
         fallback=True,
@@ -110,6 +111,8 @@ def builtin_parser_id(file_name: str) -> str:
         return "markdown"
     if extension in {"xlsx", "xlsm"}:
         return "xlsx"
+    if extension == "xls":
+        return "xls"
     if extension in {"pdf", "docx", "pptx", "csv"}:
         return extension
     return "plain_text"

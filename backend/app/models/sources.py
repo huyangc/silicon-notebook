@@ -127,9 +127,13 @@ class SourceSummary(BaseModel):
     # Non-empty when the latest KG extraction had network-failed windows that
     # silently contributed zero nodes (degraded run, not a clean "completed").
     extraction_warning: Optional[str] = None
-    # MinerU failed after its retry budget and this source completed through
-    # the local Python PDF parser. The raw upstream error remains private in
-    # SourceDetail.error_message; clients receive only this stable safe fact.
+    # MinerU failed after its retry budget and this source completed through a
+    # LOSSY local library parser for its format (PyMuPDF4LLM/pypdf, python-docx,
+    # slide XML — see parsers.MINERU_FALLBACK_WARNING_SUFFIXES). Workbooks are
+    # deliberately excluded: the openpyxl fallback is cell-value faithful, so a
+    # warning there is noise the user could never clear. The raw upstream error
+    # remains private in SourceDetail.error_message; clients receive only this
+    # stable safe fact.
     parse_quality_warning: bool = False
     # 该 source 是否已抽取 KG / 已入图
     kg_extracted: bool = False

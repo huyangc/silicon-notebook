@@ -72,7 +72,7 @@ def test_authenticated_system_config_exposes_upload_guards(client):
         "user_activity_view_enabled": True,
     }
     assert payload["supported_source_extensions"] == [
-        "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm"
+        "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls"
     ]
     assert [row["id"] for row in payload["parser_engines"]] == [
         "mineru_self_hosted", "mineru_cloud", "builtin"

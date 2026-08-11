@@ -945,3 +945,272 @@ def test_upload_file_cloud_error_falls_back_to_local_python(tmp_path, monkeypatc
     assert detail.error_message.startswith("[pdf-python-fallback]")
     assert "No extractable text" in detail.error_message
     assert repo.source_asset_ids(sid) == []   # 空白页无图片资产
+
+
+# -- 降级质量警告泛化到全部 MinerU 可解析后缀 --------------------------------
+#
+# 判据此前钉死 `.pdf`，于是 docx/pptx/xlsx 走完 MinerU 优先分支再回落本地库时
+# 是**静默**的：用户拿到的是低保真结果，界面上却没有任何提示。
+
+
+def _seed_queued_office(repo, file_path, file_name, source_type):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Doc", source_type, "queued", "queued",
+             file_name, str(file_path), 0, "", "", "academic_paper", now, now))
+    return nb, sid
+
+
+def _write_docx(path):
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("Hello from docx fallback.")
+    document.save(str(path))
+    return path
+
+
+def test_docx_local_python_fallback_after_mineru_error_warns(tmp_path, monkeypatch):
+    """MinerU 已配置但产出本机兜底链（mammoth → python-docx）→ 稳定前缀 + 质量警告。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("MINERU_MODE", "http")                 # 本地 MinerU configured
+    monkeypatch.setenv("MINERU_API_URL", "http://mineru.internal")
+    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    repo = SQLiteRepository(Settings())
+    docx_path = _write_docx(tmp_path / "real.docx")
+    nb, sid = _seed_queued_office(repo, docx_path, "real.docx", "docx")
+
+    def _boom(file_path, file_name):
+        raise RuntimeError("mineru 502")
+    monkeypatch.setattr(repo.mineru_client, "parse_with_images", _boom)
+
+    repo.process_source(sid)
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "extracted"          # 降级仍是成功摄取
+    assert detail.parse_quality_warning is True
+    assert detail.error_message.startswith("[pdf-python-fallback]")
+    assert "PDF" not in detail.error_message.removeprefix("[pdf-python-fallback]")
+    assert any("Hello from docx fallback." in e.text for e in repo.source_elements(sid))
+
+
+def test_docx_fallback_without_mineru_configured_does_not_warn(tmp_path, monkeypatch):
+    """MinerU 根本没配置时的正常兜底不是降级，不许打警告（否则每个纯本地部署
+    的每份 docx 都常亮一个假异常）。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.delenv("MINERU_MODE", raising=False)
+    monkeypatch.delenv("MINERU_API_URL", raising=False)
+    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    repo = SQLiteRepository(Settings())
+    docx_path = _write_docx(tmp_path / "real.docx")
+    nb, sid = _seed_queued_office(repo, docx_path, "real.docx", "docx")
+
+    repo.process_source(sid)
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    assert detail.parse_quality_warning is False
+    assert not (detail.error_message or "").startswith("[pdf-python-fallback]")
+
+
+def _write_xlsx(path):
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Sheet1"
+    sheet.append(["Header A", "Header B"])
+    sheet.append(["Hello from xlsx fallback.", "42"])
+    book.save(str(path))
+    return path
+
+
+def test_xlsx_fallback_to_openpyxl_does_not_warn(tmp_path, monkeypatch):
+    """工作簿刻意不在警告集里：openpyxl 兜底对单元格值是全保真的（拿的是逐格原
+    值，不是版面重建），打「质量降级」是噪音；而部署的 MinerU 若不支持工作簿，
+    这条警告会在每份表格上永远点亮、重新解析也消不掉。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("MINERU_MODE", "http")                 # 本地 MinerU configured
+    monkeypatch.setenv("MINERU_API_URL", "http://mineru.internal")
+    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    repo = SQLiteRepository(Settings())
+    book = _write_xlsx(tmp_path / "real.xlsx")
+    nb, sid = _seed_queued_office(repo, book, "real.xlsx", "xlsx")
+
+    def _boom(file_path, file_name):
+        raise RuntimeError("mineru 502")
+    monkeypatch.setattr(repo.mineru_client, "parse_with_images", _boom)
+
+    repo.process_source(sid)
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    assert detail.parse_quality_warning is False              # 全保真兜底不是降级
+    assert not (detail.error_message or "").startswith("[pdf-python-fallback]")
+    elements = repo.source_elements(sid)
+    assert all(e.metadata.get("parser") == "xlsx" for e in elements)
+    assert any("Hello from xlsx fallback." in e.text for e in elements)
+
+
+def test_cloud_only_config_does_not_upload_non_mineru_suffixes(tmp_path, monkeypatch):
+    """云端上传只对 MinerU 真能解析的后缀发起：.csv 直接本地解析，绝不外发。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.delenv("MINERU_MODE", raising=False)          # 本地 off
+    monkeypatch.delenv("MINERU_API_URL", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "tok")             # 云端 configured
+    repo = SQLiteRepository(Settings())
+    csv_path = tmp_path / "rows.csv"
+    csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
+    nb, sid = _seed_queued_office(repo, csv_path, "rows.csv", "csv")
+
+    calls = []
+    monkeypatch.setattr(
+        repo.mineru_cloud_client, "parse_file_with_images",
+        lambda path, data_id="": calls.append(path) or ([], {}),
+    )
+
+    repo.process_source(sid)
+
+    assert calls == []                                        # 零次云端往返
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    assert detail.parse_quality_warning is False              # 无 MinerU 路径可降级
+    elements = repo.source_elements(sid)
+    assert any(e.metadata.get("parser") == "csv" for e in elements)
+
+
+def test_cloud_only_config_still_uploads_xlsx(tmp_path, monkeypatch):
+    """反向护栏：xlsx 属于 MinerU 可解析后缀，云端分支照常发起。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.delenv("MINERU_MODE", raising=False)
+    monkeypatch.delenv("MINERU_API_URL", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "tok")
+    repo = SQLiteRepository(Settings())
+    book = tmp_path / "book.xlsx"
+    book.write_bytes(b"PK\x03\x04stub")
+    nb, sid = _seed_queued_office(repo, book, "book.xlsx", "xlsx")
+
+    calls = []
+    monkeypatch.setattr(
+        repo.mineru_cloud_client, "parse_file_with_images",
+        lambda path, data_id="": (
+            calls.append(path)
+            or ([{"type": "text", "text": "From cloud.", "page_idx": 0}], {})
+        ),
+    )
+
+    repo.process_source(sid)
+
+    assert calls == [str(book)]
+    assert repo.get_source(sid).parse_status == "extracted"
+    elements = repo.source_elements(sid)
+    assert any(e.metadata.get("parser") == "mineru" for e in elements)
+    # 云端分支必须按后缀取标签前缀：默认的 "PDF" 会让 cloud-only 部署上传的工作簿
+    # 拿到 "PDF p.1 ..." 与 source_format="pdf"，来源详情与引用当场答错格式。
+    assert all(e.location_label.startswith("XLSX p.") for e in elements)
+    assert {e.metadata.get("source_format") for e in elements} == {"xlsx"}
+
+
+def _write_xlsx_rows(path, rows, cols=2):
+    """行/列可控的真工作簿——云端对账的两个分母分别是 rows 与 rows*cols。"""
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Sheet1"
+    for index in range(rows):
+        sheet.append([f"r{index}c{col}" for col in range(cols)])
+    book.save(str(path))
+    return path
+
+
+def _cloud_only_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.delenv("MINERU_MODE", raising=False)           # 本地 off
+    monkeypatch.delenv("MINERU_API_URL", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "tok")              # 云端 configured
+    return SQLiteRepository(Settings())
+
+
+def test_cloud_workbook_output_must_clear_the_coverage_reconciliation(tmp_path, monkeypatch):
+    """cloud-only 部署走的是摄取层自己的映射路径，不经 parse_xlsx——不在这里对账
+    就等于给云端产出开了个绕过护栏的后门：一份丢掉大半行的表照样被采信、记成
+    parser=mineru，静默数据损失。
+
+    顺带钉住「拒收零持久化」：被丢弃的产出不能在资产表/磁盘上留下孤儿图片。
+    """
+    repo = _cloud_only_repo(tmp_path, monkeypatch)
+    book = _write_xlsx_rows(tmp_path / "book.xlsx", 10)         # 10 行 × 2 列
+    nb, sid = _seed_queued_office(repo, book, "book.xlsx", "xlsx")
+
+    dropped = "".join(f"<tr><td>a{i}</td><td>b{i}</td></tr>" for i in range(3))
+    monkeypatch.setattr(
+        repo.mineru_cloud_client, "parse_file_with_images",
+        lambda path, data_id="": (
+            [
+                {"type": "table", "table_body": f"<table>{dropped}</table>", "page_idx": 0},
+                {"type": "image", "img_path": "images/a.png", "page_idx": 0},
+            ],
+            {"a.png": b"\x89PNG\r\n\x1a\n" + b"0" * 32},
+        ),
+    )
+
+    repo.process_source(sid)
+
+    assert repo.get_source(sid).parse_status == "extracted"
+    elements = repo.source_elements(sid)
+    assert all(e.metadata.get("parser") == "xlsx" for e in elements)  # 回落 openpyxl
+    assert len(elements) == 10                                        # 全保真：一行不少
+    assert repo.source_asset_ids(sid) == []                           # 零孤儿资产
+
+
+def test_cloud_workbook_output_that_covers_the_workbook_is_kept(tmp_path, monkeypatch):
+    """反向护栏：覆盖足额的云端产出照常采信，图片也照常持久化——两段式映射
+    （探针不带 persist_image，通过才重映射）不能把图片一起弄丢。"""
+    repo = _cloud_only_repo(tmp_path, monkeypatch)
+    book = _write_xlsx_rows(tmp_path / "book.xlsx", 10)
+    nb, sid = _seed_queued_office(repo, book, "book.xlsx", "xlsx")
+
+    full = "".join(f"<tr><td>a{i}</td><td>b{i}</td></tr>" for i in range(10))
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    monkeypatch.setattr(
+        repo.mineru_cloud_client, "parse_file_with_images",
+        lambda path, data_id="": (
+            [
+                {"type": "table", "table_body": f"<table>{full}</table>", "page_idx": 0},
+                {"type": "image", "img_path": "images/a.png", "page_idx": 0},
+            ],
+            {"a.png": png_bytes},
+        ),
+    )
+
+    repo.process_source(sid)
+
+    assert repo.get_source(sid).parse_status == "extracted"
+    elements = repo.source_elements(sid)
+    assert all(e.metadata.get("parser") == "mineru" for e in elements)
+    asset_ids = repo.source_asset_ids(sid)
+    assert len(asset_ids) == 1
+    image_el = next(e for e in elements if e.element_type == "image")
+    assert image_el.metadata.get("asset_id") == asset_ids[0]
