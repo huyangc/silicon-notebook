@@ -6194,9 +6194,23 @@ export default function Home() {
                       // effect(或聚合看板 poll)检测完成;queued===0 立刻复位
                       // (无事可做);出错也复位。原本的 finally { false } 让 flag
                       // 在 HTTP 往返几百毫秒内就被清 0,轮询 gate 从来没机会跑。
+                      // 请求发出前就捕获 notebook/epoch:响应回来时用户可能已切到
+                      // 别的库并发起了它自己的补全,迟到的 queued===0 / 失败若不加
+                      // 守卫会把**那个库**的 backfillingMeta 清掉、停掉它的完成轮询
+                      // (codex R3 P2);快照/来源页刷新(R1/R2)也复用同一份捕获。
+                      const nb = currentNotebookId;
+                      const workspaceEpoch = workspaceEpochRef.current;
+                      const stillCurrent = () => workspaceRequestIsCurrent(
+                        false,
+                        workspaceEpoch,
+                        workspaceEpochRef.current,
+                        nb,
+                        activeNotebookIdRef.current,
+                      );
                       setBackfillingMeta(true);
                       try {
-                        const res = await backfillPaperMetadata(currentNotebookId);
+                        const res = await backfillPaperMetadata(nb);
+                        if (!stillCurrent()) return;
                         if (res.queued === 0) {
                           setBackfillingMeta(false);
                           setToast("论文信息已是最新，无需补全");
@@ -6205,38 +6219,22 @@ export default function Home() {
                           // 标签页补完时本页 sources 里陈旧的 paper_meta_status=
                           // "missing" 行会压过 paper_meta_missing=false,只刷快照按钮
                           // 收不起来(codex R1 P2)。翻页/搜索/切库守卫与上方补全完成
-                          // 轮询同一套(refs + workspaceEpoch)。
-                          const nb = currentNotebookId;
-                          const workspaceEpoch = workspaceEpochRef.current;
-                          // 快照刷新与来源页刷新用同一套 epoch 守卫:只比 notebook id
-                          // 的话,「点补全→离开→重开同库」间隙里迟到的旧快照会覆盖
-                          // 新开工作区(codex R2 P2)。
+                          // 轮询同一套(refs + workspaceEpoch,codex R2 P2)。
                           getNotebook(nb).then((refreshed) => {
-                            if (!workspaceRequestIsCurrent(
-                              false,
-                              workspaceEpoch,
-                              workspaceEpochRef.current,
-                              nb,
-                              activeNotebookIdRef.current,
-                            )) return;
+                            if (!stillCurrent()) return;
                             setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
                           }).catch(() => {});
                           loadSourcesPage(nb, {
                             page: sourcesPageRef.current,
                             q: sourceQueryRef.current,
-                            guard: () => workspaceRequestIsCurrent(
-                              false,
-                              workspaceEpoch,
-                              workspaceEpochRef.current,
-                              nb,
-                              activeNotebookIdRef.current,
-                            ),
+                            guard: stillCurrent,
                           }).catch(() => {});
                         } else {
                           setToast(`已提交 ${res.queued} 篇论文的信息补全`);
                           // 保持 backfillingMeta=true;完成检测交给轮询 effect。
                         }
                       } catch (err) {
+                        if (!stillCurrent()) return;
                         setBackfillingMeta(false);
                         reportError(err);
                       }
