@@ -1,5 +1,4 @@
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
@@ -21,23 +20,24 @@ class _PeakEmbedder:
     configured = True
     dim = 8
 
-    def __init__(self, fail_substr=None, *, rendezvous=None):
+    def __init__(self, fail_substr=None, *, target_active=None):
         self.fail_substr = fail_substr
         self.active = 0
         self.maximum = 0
         self.lock = threading.Lock()
-        self.rendezvous = (
-            threading.Barrier(rendezvous) if rendezvous is not None else None
-        )
+        self.target_active = target_active
+        self.saturated = threading.Event()
+        self.release = threading.Event()
 
     def embed_texts(self, texts):
         with self.lock:
             self.active += 1
             self.maximum = max(self.maximum, self.active)
+            if self.target_active is not None and self.active >= self.target_active:
+                self.saturated.set()
         try:
-            if self.rendezvous is not None:
-                self.rendezvous.wait(timeout=2)
-            time.sleep(0.03)
+            if self.target_active is not None:
+                assert self.release.wait(timeout=10), "test controller did not release embed calls"
             if self.fail_substr and any(self.fail_substr in text for text in texts):
                 raise RuntimeError("batch failed")
             return [[1.0] * self.dim for _ in texts]
@@ -101,13 +101,15 @@ def _insert_source_with_elements(repo, notebook_id, n):
 
 
 def test_all_source_batches_share_bound_service_peak(repo_factory):
-    raw = _PeakEmbedder()
+    raw = _PeakEmbedder(target_active=2)
     repo = repo_factory(raw, maximum=2)
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     source_ids = [_insert_source_with_elements(repo, notebook.id, 40) for _ in range(3)]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(repo._embed_source, source_id) for source_id in source_ids]
+        assert raw.saturated.wait(timeout=10), "bound service never admitted two calls"
+        raw.release.set()
         for future in futures:
             future.result()
 
@@ -120,12 +122,16 @@ def test_all_source_batches_share_bound_service_peak(repo_factory):
 
 
 def test_source_failed_batch_isolated_under_scheduler(repo_factory):
-    raw = _PeakEmbedder(fail_substr="number 15", rendezvous=3)
+    raw = _PeakEmbedder(fail_substr="number 15", target_active=3)
     repo = repo_factory(raw, maximum=3)
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     source_id = _insert_source_with_elements(repo, notebook.id, 30)
 
-    repo._embed_source(source_id)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(repo._embed_source, source_id)
+        assert raw.saturated.wait(timeout=10), "source batches never reached configured capacity"
+        raw.release.set()
+        future.result()
 
     with repo._connect() as db:
         count = db.execute(

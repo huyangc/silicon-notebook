@@ -179,8 +179,13 @@ def test_verification_lanes_do_not_hide_committed_tests():
 
     standard = (ROOT / EXTENDED_BACKEND_LAYERS[0]).read_text(encoding="utf-8")
     extended = (ROOT / EXTENDED_BACKEND_LAYERS[1]).read_text(encoding="utf-8")
-    assert '-m "not slow and not architecture_contract"' in standard
-    assert '-m "slow or architecture_contract"' in extended
+    assert (
+        '-m "not slow and not architecture_contract and not graph_index_contract"'
+        in standard
+    )
+    assert (
+        '-m "slow or architecture_contract or graph_index_contract"' in extended
+    )
     assert "backend/tests/postgres" in standard
     assert "backend/tests/postgres" in extended
     assert "check_backend_extended.sh" in (

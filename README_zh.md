@@ -101,7 +101,7 @@ curl -s http://127.0.0.1:8000/api/health
 bash scripts/check.sh
 ```
 
-验证采用分级门禁：G0 按改动选跑目标测试；G1 `scripts/check.sh` 是编辑期及每次 PR/push 的离线门（稳定后端、契约、前端测试及负责类型检查的 production build），默认使用 12 个 backend worker、每个前端 runner 4 个测试 worker，Apple Silicon warm 目标不超过 60 秒；G2 `scripts/check_extended.sh` 追加真实索引/性能测试与全仓语义扫描，每天 18:17 UTC（北京时间次日 02:17）执行一次，也可手动触发；G3 `scripts/check_postgres.sh` 保持为独立 PostgreSQL 集成门。CI 各 lane 时长仅作观察。
+验证采用分级门禁：G0 按改动选跑目标测试；G1 `scripts/check.sh` 是编辑期及每次 PR/push 的离线门（稳定后端、契约、前端测试及负责类型检查的 production build），默认使用 12 个 backend worker、每个前端 runner 4 个测试 worker，Apple Silicon warm 目标不超过 60 秒；G2 `scripts/check_extended.sh` 追加真实索引/性能测试、冷图/索引契约与全仓语义扫描，每天 18:17 UTC（北京时间次日 02:17）执行一次，也可手动触发；G3 `scripts/check_postgres.sh` 保持为独立 PostgreSQL 集成门。CI 各 lane 时长仅作观察。
 
 仅 Codex 的执行说明：`scripts/check.sh` 包含绑定 loopback 端口和管理子进程的生命周期测试，Codex 第一次运行就必须申请沙箱外执行，不得先在沙箱内试错。GitHub 网络操作（`git fetch`、`git push`、`gh auth/repo/pr`）同样应直接申请沙箱外执行；普通本地只读 Git 检查仍留在沙箱内。
 

@@ -630,6 +630,12 @@ class RuntimeModelProvider:
         self._reload_lock = threading.Lock()
         self._config_path = self._resolved_config_path()
         self._config_signature = self._read_config_signature()
+        # In-place editors briefly expose truncated but syntactically valid
+        # TOML (including an empty registry).  Require the same changed
+        # signature on two watcher observations before publishing it.  A
+        # forced operator/test reload remains immediate.
+        self._pending_config_signature: tuple[int, int, int] | None = None
+        self._pending_config_observed = False
         self._reload_thread: threading.Thread | None = None
         if self._owns_registry and self._config_path is not None:
             self._reload_thread = threading.Thread(
@@ -674,12 +680,41 @@ class RuntimeModelProvider:
             return False
         signature = self._read_config_signature()
         with self._reload_lock:
-            if not force and signature == self._config_signature:
-                return False
-            self._config_signature = signature
+            if not force:
+                if signature == self._config_signature:
+                    self._pending_config_signature = None
+                    self._pending_config_observed = False
+                    return False
+                if (
+                    not self._pending_config_observed
+                    or signature != self._pending_config_signature
+                ):
+                    self._pending_config_signature = signature
+                    self._pending_config_observed = True
+                    return False
+            self._pending_config_signature = None
+            self._pending_config_observed = False
             try:
                 candidate = SystemModelServiceRegistry.load(self.settings)
+                # The signature that was stable before the read must still
+                # describe the file after parsing.  Otherwise the candidate
+                # came from a moving truncate/write snapshot and cannot be
+                # published.  Seed the next observation so a now-stable final
+                # file can be retried on the following watcher tick.
+                loaded_signature = self._read_config_signature()
+                if loaded_signature != signature:
+                    self._pending_config_signature = loaded_signature
+                    self._pending_config_observed = True
+                    return False
+                # A configured path is not the supported switch to offline
+                # mode.  In particular, an empty/comment-only TOML is a valid
+                # parser result but is also the common midpoint of an in-place
+                # save.  Offline mode is selected by clearing the setting and
+                # restarting, as documented.
+                if not candidate.services():
+                    raise ValueError("MODEL_SERVICES_CONFIG has no model services")
             except Exception as exc:
+                self._config_signature = signature
                 logger.error(
                     "model service config reload rejected; keeping previous configuration: %s",
                     exc,
@@ -693,6 +728,7 @@ class RuntimeModelProvider:
                 except Exception:
                     pass
                 return False
+            self._config_signature = signature
             with self._lock:
                 if self._closing or self._closed:
                     return False

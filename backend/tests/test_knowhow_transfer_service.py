@@ -50,10 +50,35 @@ def _settle(repo, tid, timeout=6.0):
     return repo.get_knowhow_table(tid)
 
 def _project(repo, tid):
-    # store 层的 add_knowhow_row 不自动调度投影（那是路由/api 层的事）——测试里显式调度。
-    from app.services.knowhow.api import get_scheduler
-    get_scheduler(repo).schedule(tid)
-    return _settle(repo, tid)
+    # Service tests need a completed projection as a precondition, not a
+    # scheduler timing test.  Run the real projector synchronously so a loaded
+    # CI runner cannot turn a six-second polling budget into a false failure.
+    from app.services.knowhow.api import build_projector, get_scheduler
+    scheduler = get_scheduler(repo)
+    claimed = False
+    with scheduler._lock:
+        pending = scheduler._timers.pop(tid, None)
+        if tid not in scheduler._running:
+            scheduler._running.add(tid)
+            claimed = True
+    if pending is not None:
+        pending.cancel()
+        pending.join(timeout=5)
+        assert not pending.is_alive(), "projection debounce timer did not stop"
+    if not claimed:
+        # The timer won the lock and already submitted the real projection;
+        # never overlap it with a direct pass.
+        return _settle(repo, tid)
+    try:
+        build_projector(repo).project_table(tid)
+    finally:
+        # A timer whose callback was already waiting on the lock sees our
+        # claim and records a rerun.  No mutation happened during this direct
+        # precondition build, so consume that stale rerun deterministically.
+        with scheduler._lock:
+            scheduler._running.discard(tid)
+            scheduler._rerun.discard(tid)
+    return repo.get_knowhow_table(tid)
 
 def test_copy_creates_independent_table_in_target(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
@@ -91,7 +116,7 @@ def test_copy_reprojection_reuses_vectors_zero_reembed(repo):
     repo._runtime.models.embedding("retrieval_query_embedding").call_count = 0  # 归零，之后只观察 copy 引发的 embed
 
     new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, creator_id="user-x")
-    _settle(repo, new_tid)  # 等重投影落地（copy_table 自己已调度）
+    _project(repo, new_tid)
 
     # K-1：chunk_embeddings 已随拷贝以稳定 id 落库 → 重投影零重嵌入
     assert repo._runtime.models.embedding("retrieval_query_embedding").call_count == 0
@@ -111,7 +136,7 @@ def test_copy_is_retrievable_in_target_via_lexical_and_vector(repo):
     _project(repo, src_tid)
 
     new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, creator_id="user-x")
-    _settle(repo, new_tid)
+    _project(repo, new_tid)
 
     with repo._connect() as db:
         # 词法/FTS 通道（production 检索用的同一个原语）
@@ -948,39 +973,6 @@ def test_move_does_not_delete_source_cell_code_updated_by_changed_after_copy_sna
     dst_tables = repo.list_knowhow_tables(dst_nb)
     assert len(dst_tables) == 1
     assert dst_tables[0]["id"] == exc_info.value.new_table_id
-
-
-# ---------------------------------------------------------------------------
-# 测试间调度器排水（追加于 EOF，避免移动上方守卫行号 pin）。
-# copy_table/move_table 会给目标（保留路径还有源）表调度 0.5s 防抖重投影；
-# 不 settle 就结束的测试会让 Timer 在测试结束后才点火，把一条持有 repo 强引用
-# （_project 里的 target = repo_ref()）的投影线程溢出到同 worker 的后续测试，
-# 间歇性打破 test_knowhow_projection.py::test_get_scheduler_entry_does_not_pin_repo
-# 的全局 len(_SCHEDULERS)==0 / repo 可回收断言。此 fixture 在每个测试收尾时
-# 取消未点火的 Timer 并等在跑的投影收敛，保证不向后续测试泄漏线程。
-import pytest as _pytest_drain
-
-
-@_pytest_drain.fixture(autouse=True)
-def _drain_projection_scheduler(repo):
-    yield
-    from app.services.knowhow import api as _kh_api
-
-    scheduler = _kh_api._SCHEDULERS.get(repo)
-    if scheduler is None:
-        return
-    with scheduler._lock:
-        pending = list(scheduler._timers.values())
-        scheduler._timers.clear()
-        scheduler._rerun.clear()
-    for timer in pending:
-        timer.cancel()
-    deadline = time.time() + 8.0
-    while time.time() < deadline:
-        with scheduler._lock:
-            if not scheduler._running and not scheduler._timers:
-                return
-        time.sleep(0.05)
 
 
 def test_copy_table_carries_the_element_chunk_reverse_rows(repo):

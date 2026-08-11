@@ -3,6 +3,7 @@
 import os
 from itertools import count
 from pathlib import Path
+import time
 
 os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
 
@@ -41,6 +42,16 @@ _GRAPH_INDEX_CONTRACT_MODULES = {
     "test_canonical_relations.py",
     "test_chunk_retrieval.py",
     "test_chunk_retrieval_characterization.py",
+    "test_incremental_fuse_bounded.py",
+    "test_incremental_fusion.py",
+    "test_index_build_consolidation.py",
+    "test_ppr.py",
+    "test_ppr_fallback_guard.py",
+    "test_ppr_retrieve.py",
+    "test_scale_artifact_runtime.py",
+    "test_scale_combined_splice_equivalence.py",
+    "test_source_partitioned_ppr.py",
+    "test_viz_bounded.py",
 }
 
 # ``tmp_path`` creates and later walks a directory for every test, including
@@ -152,6 +163,48 @@ def _reset_background_job_gates():
     background_jobs._reset_maintenance_gate_for_tests()
     yield
     background_jobs._reset_maintenance_gate_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _drain_knowhow_projection_schedulers():
+    """Cancel pending projection timers and reap active runs after every test.
+
+    Route tests and direct-service tests can construct different repository
+    objects.  File-local cleanup that watches only one of them lets the other
+    repository's delayed timer write into a closed test database during the
+    next test, producing order-dependent foreign-key and projection failures.
+    """
+    yield
+    from app.services.knowhow import api as knowhow_api
+
+    schedulers = list(knowhow_api._SCHEDULERS.values())
+    deadline = time.monotonic() + 10.0
+    pending_timers = []
+    for scheduler in schedulers:
+        with scheduler._lock:
+            pending = list(scheduler._timers.values())
+            scheduler._timers.clear()
+            scheduler._rerun.clear()
+        pending_timers.extend(pending)
+        for timer in pending:
+            timer.cancel()
+    for timer in pending_timers:
+        timer.join(timeout=max(0.0, deadline - time.monotonic()))
+    assert not any(timer.is_alive() for timer in pending_timers), (
+        "knowhow projection timer did not stop during teardown"
+    )
+
+    remaining = schedulers
+    while remaining and time.monotonic() < deadline:
+        active = []
+        for scheduler in remaining:
+            with scheduler._lock:
+                if scheduler._running or scheduler._timers or scheduler._rerun:
+                    active.append(scheduler)
+        remaining = active
+        if remaining:
+            time.sleep(0.01)
+    assert not remaining, "knowhow projection scheduler did not quiesce during teardown"
 
 
 @pytest.fixture(autouse=True)
