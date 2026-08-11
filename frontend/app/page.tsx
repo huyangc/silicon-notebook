@@ -214,7 +214,6 @@ import {
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 } from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
-import { ParserCapabilityPanel } from "./parser-capability-panel";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
@@ -7153,7 +7152,6 @@ export default function Home() {
                 )}
               </div>
             )}
-            <ParserCapabilityPanel engines={parserEngines} />
             <label
               className={`drop-zone${sourceFilePickerDisabled ? " is-disabled" : ""}${dropZoneDragActive ? " is-dragover" : ""}`}
               title={sourceFilePickerHint}
@@ -7527,9 +7525,6 @@ export default function Home() {
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
                 <span className="tag">{sourceElementsTotal || sourceDetail.element_count} 个元素</span>
               </div>
-              {!sourceDetailBaseId && (
-                <ParserCapabilityPanel engines={parserEngines} compact />
-              )}
               {sourceDetail.paper_meta_status === "has_meta" && sourceDetail.paper_meta && (
                 <div className="source-detail-paper">
                   {sourceDetail.paper_meta.title && (

@@ -5902,96 +5902,8 @@ button.chat-session-card {
 }
 
 .source-modal-card > .source-modal-header,
-.source-modal-card > .parser-capability-panel,
 .source-modal-card > .source-action-row {
   flex: 0 0 auto;
-}
-
-.parser-capability-panel {
-  margin: 14px 24px 0;
-  padding: 12px 14px;
-  border: 1px solid #dce5ea;
-  border-radius: 12px;
-  background: #f7fafb;
-  color: var(--text, #1d2530);
-}
-
-.parser-capability-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.parser-capability-heading strong {
-  font-size: 13px;
-}
-
-.parser-capability-heading span {
-  color: var(--muted, #667085);
-  font-size: 11px;
-  text-align: right;
-}
-
-.parser-capability-list {
-  display: grid;
-  gap: 5px;
-}
-
-.parser-capability-row {
-  display: grid;
-  grid-template-columns: minmax(126px, .9fr) minmax(180px, 1.45fr) auto;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  font-size: 12px;
-}
-
-.parser-capability-name,
-.parser-capability-detail {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.parser-capability-name small,
-.parser-capability-detail small {
-  color: var(--muted, #667085);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.parser-capability-status {
-  border-radius: 999px;
-  padding: 2px 7px;
-  color: #287044;
-  background: #e8f5ec;
-  white-space: nowrap;
-}
-
-.parser-capability-row.is-unavailable {
-  color: #77808c;
-}
-
-.parser-capability-row.is-unavailable .parser-capability-status {
-  color: #825200;
-  background: #fff1d4;
-}
-
-.parser-capability-panel.is-compact {
-  margin: 10px 0 0;
-}
-
-.parser-capability-panel.is-compact .parser-capability-heading span,
-.parser-capability-panel.is-compact .parser-capability-detail small {
-  display: none;
-}
-
-.parser-capability-panel.is-compact .parser-capability-row {
-  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr) auto;
 }
 
 /* 高度吃紧时的收缩顺位:拖放区第一个让（shrink 权重最高,常态 230px 压到 110px
@@ -6501,27 +6413,6 @@ button.chat-session-card {
   text-align: center;
   position: relative;
   cursor: pointer;
-}
-
-@media (max-width: 720px) {
-  .parser-capability-heading {
-    display: block;
-  }
-
-  .parser-capability-heading span {
-    display: block;
-    margin-top: 3px;
-    text-align: left;
-  }
-
-  .parser-capability-row,
-  .parser-capability-panel.is-compact .parser-capability-row {
-    grid-template-columns: 1fr auto;
-  }
-
-  .parser-capability-detail {
-    grid-column: 1 / -1;
-  }
 }
 
 .drop-zone input {

@@ -47,7 +47,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 外层页面为 notebook 集合页（KG-native 管线）：
 
 1. 点击「＋ 新建」——系统立即创建 `Untitled notebook` 并进入，无弹窗。
-2. 上传 PDF、Markdown、DOCX、PPTX、CSV、XLSX 或旧版二进制 XLS 来源（multipart）。登录后的系统配置返回一份脱敏解析能力注册表，上传校验与导入界面共同使用；界面展示自托管 MinerU → MinerU 公共云 → 内置兜底的顺序、能力、执行边界、部署可用状态和固定安全的不可用原因，服务端 endpoint、路径、凭证与原始异常绝不下发。选择始终自动完成，已配置的自托管路径绝不会被静默替换成公共云。
+2. 上传 PDF、Markdown、DOCX、PPTX、CSV、XLSX 或旧版二进制 XLS 来源（multipart）。登录后的系统配置返回一份脱敏解析能力注册表，驱动上传校验与导入界面的支持格式提示；服务端 endpoint、路径、凭证与原始异常绝不下发。解析路由流程本身（自托管 MinerU → MinerU 公共云 → 内置兜底的顺序、能力、执行边界、可用状态）刻意不向用户展示——用户只需要知道支持哪些格式。选择始终自动完成，已配置的自托管路径绝不会被静默替换成公共云。
 3. 后端（异步后台作业）：结构化 Markdown 解析 → 分块 + 向量化——源处理完即可做 chunk-native 问答。
 4. **KG 抽取按需触发**（见下方「KG 抽取触发」）：摄取期仅当该 notebook 已有 KG、或 `KG_AUTO_EXTRACT=true` 时才抽。`KG_JOB_CONCURRENCY` 只控制并行来源任务；每次抽取模型调用都由 `kg_extract` workload 所绑定服务的系统调度器准入，因此服务 TOML 中的 `max_concurrency` 始终是唯一模型容量上限。抽完的新源随后增量融入统一 KG。
 5. 知识对象写入 `knowledge_objects` + `knowledge_relations`，并绑定元素级 evidence。
