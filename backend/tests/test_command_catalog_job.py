@@ -1345,10 +1345,14 @@ def test_a_continuation_window_cannot_clear_an_earlier_suspect_mark(repo):
     page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
     assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
     payload = page["items"][0]["payload"]
-    # The continuation really did merge — this is one row, holding both
-    # windows' parameters…
-    assert [arg["name"] for arg in payload["args"]] == ["-density", "-site"]
-    # …and it did NOT wash out the warning window 0 earned.
+    # The continuation really did merge — this is one row, and `-site` came
+    # from the SECOND window. Window 0's own `-density` is deliberately NOT
+    # here: that window has no heading and no usage line for this command, so
+    # it has no evidence segment (`window_segments`) and its body grounds
+    # against nothing. The empty segment and the suspect mark are the same
+    # fact seen twice — "this window only mentions the command".
+    assert [arg["name"] for arg in payload["args"]] == ["-site"]
+    # …and the merge did NOT wash out the warning window 0 earned.
     assert payload["suspect_related"] is True
 
 
@@ -1372,7 +1376,10 @@ def test_a_later_window_that_documents_the_command_does_clear_the_mark(repo):
     page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
     assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
     payload = page["items"][0]["payload"]
-    assert [arg["name"] for arg in payload["args"]] == ["-density", "-site"]
+    # `-site` is window 1's, grounded in the segment its heading and usage
+    # line open. Window 0's `-density` is dropped for the same reason as in
+    # the test above: a mention is not documentation.
+    assert [arg["name"] for arg in payload["args"]] == ["-site"]
     assert payload["suspect_related"] is False
 
 
@@ -3503,6 +3510,45 @@ def test_preview_never_over_counts_a_document_padded_with_whitespace(repo):
 
     assert actual == 1
     assert preview.sampled is True  # 2,001 elements past the 2,000-row cap
+    assert preview.estimated_windows <= actual
+
+
+@pytest.mark.parametrize("pad", ["　", "\xa0"])
+def test_preview_and_the_packer_agree_on_unicode_whitespace(repo, pad):
+    """The lower bound only holds while BOTH sides count the same characters.
+
+    SQL's `TRIM`/`BTRIM` strips four ASCII characters; `str.strip()` strips
+    every Unicode space. A document padded with U+3000 (ubiquitous in CJK
+    typesetting) or NBSP therefore has a smaller real total than the SQL sum
+    reports, and the arithmetic floor lands ABOVE the truth — the one
+    direction a floor may not err in. The packer is pinned to the SQL set, so
+    these characters are content on both sides.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    # Each element is padded past `PREVIEW_ELEMENT_CHARS`, so the preview is
+    # `sampled` and the whole-document arithmetic — the floor this pins — is
+    # actually consulted. Unsampled, the count comes from the real packing and
+    # the two sides can never disagree.
+    _add_elements(
+        repo, notebook.id, "s1", "全角空白填充",
+        _numbered("s1", [
+            {
+                "element_type": "paragraph",
+                "text": f"x{pad * 1_300}",
+                "section_path": "",
+            }
+            for _ in range(30)
+        ]),
+    )
+    service = _service(repo)
+
+    preview = service.preview(notebook.id, "s1")
+    actual = len(catalog_job.extraction_windows(
+        service.chunks.source_elements_for_chunking("s1")
+    ))
+
+    assert preview.sampled is True
+    assert actual > 1
     assert preview.estimated_windows <= actual
 
 

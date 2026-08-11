@@ -497,6 +497,12 @@ and `preview_elements.full_chars` both sum `TRIM`ed lengths; raw `LENGTH`
 OVER-counts (2,001 elements of "one character plus twenty trailing spaces" is
 four windows by arithmetic and one in reality, and a floor above the truth is
 worse than none), while the uncounted join separators can only shrink the total.
+Both sides must strip the SAME characters: SQL removes four ASCII ones, so the
+packer is pinned to `" \t\n\r"` (`_STRIP_CHARS`) rather than `str.strip()`'s
+Unicode-wide set, or a U+3000/NBSP-padded document holds fewer real characters
+than SQL reports and the floor climbs above the truth again; such whitespace
+counts as content, which is the conservative direction. `_split_point` keeps the
+Unicode-wide test — choosing where to cut is not counting how much there is.
 And the prefix's window count may NOT simply be added to the remainder: the
 packer closes a window only when the next element does not fit, so the prefix's
 last window is still open and the unread elements keep filling it (four short
@@ -544,13 +550,31 @@ server-supplied candidate list and appear verbatim at token boundaries (failing
 either vetoes the whole entry; a relayed name is exempt from the verbatim half
 only, never from list membership); every parameter name must appear in its
 original form including its leading dash; `syntax` must be a contiguous copy of
-the WINDOW's text; a `default` that is not in the text is cleared. Grounding
-always searches `window.text` in full — the same text the model was shown, since
+the source text; a `default` that is not found is cleared. The command NAME is
+searched in `window.text` in full — the same text the model was shown, since
 validating against text it never saw would let a hallucination pass because it
 happens to appear in the part that was cut. Rejected entries are
 persisted with their reasons and a bounded text window — for a run that produces
 little, those rows are the only evidence distinguishing a bad model from a
 source that is not a manual.
+
+**The BODY grounds against the command's evidence segment, not the whole
+window** (`window_segments`). A window documents several commands, so "is this
+flag somewhere in the window" both admits and deletes: with `foo_cmd density`
+and `bar_cmd -density` in one window, `-density` filed under `foo_cmd` passes
+(the flag is present, in the other command's table) while `foo_cmd`'s own
+positional `density` is rejected by the dropped-dash rule. A line anchors a
+candidate structurally — it belongs to a heading element, or the candidate is
+that usage line's leading token — and opens its segment until the next other
+candidate's anchor; repeats union; an inline-code mention does NOT anchor (that
+is where the mis-attribution came from). Text before the first anchor is the
+prelude and belongs to relayed claims, so a zero-anchor continuation window is
+all prelude and still grounds. A command with neither a segment nor the relay
+keeps its name and loses its whole body — registered, and the same reading
+`suspect_related` gives. The slice assignment and the coverage ledger stay
+WINDOW-level: they record what was ASKED, and segmenting them would turn "never
+answered" into "filed elsewhere". Cut once per window (both `_process_window`
+and the cache-admission validator hoist it), never per entry.
 
 **A slice's answer is judged against its own assignment.** Every parameter in a
 window lives in the same window text, so grounding alone cannot tell one
