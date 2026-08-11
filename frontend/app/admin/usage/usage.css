@@ -96,13 +96,27 @@
 .usage-limit-input:disabled { opacity: .55; cursor: not-allowed; }
 
 .usage-limit-cell { white-space: nowrap; }
-.usage-limit-view, .usage-limit-edit { display: inline-flex; align-items: center; gap: 6px; }
+.usage-limit-view { display: inline-flex; align-items: center; gap: 6px; }
 .usage-limit-value { font-variant-numeric: tabular-nums; font-weight: 600; }
 .usage-limit-tag {
   padding: 1px 8px; border-radius: 999px; font-size: 12px;
   background: var(--border, #eef1f5); color: var(--muted, #666);
 }
 .usage-limit-tag-custom { background: #eff4ff; color: var(--accent, #2563eb); }
+
+/* 编辑控件放进锚定弹出层:表格布局在查看/编辑两态间保持不变,不再被内联控件顶宽。
+   position: fixed 逃出 .usage-table-wrap 的 overflow 裁剪,位置由组件量取后写入。 */
+.usage-role-button-open { background: var(--hover, #f3f4f6); border-color: var(--accent, #2563eb); }
+.usage-limit-popover {
+  position: fixed; z-index: 40; width: max-content;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; border: 1px solid var(--border, #e5e7eb); border-radius: 10px;
+  background: var(--surface, #fff); box-shadow: 0 10px 28px rgba(15, 23, 42, .16);
+  font-size: 13px; white-space: nowrap;
+}
+.usage-limit-popover-title { font-weight: 600; }
+.usage-limit-popover-row { display: flex; align-items: center; gap: 6px; }
+.usage-limit-popover-input { flex: 1; min-width: 84px; }
 
 .usage-pagination {
   display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px;

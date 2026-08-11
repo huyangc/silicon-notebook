@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fetchMe } from "../../auth.ts";
+import { clampPopoverLeft } from "../../effort-picker-logic";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
 import {
@@ -60,6 +61,173 @@ function SortableHeader({ label, sortKey, activeKey, direction, onSort }: Sortab
         </span>
       </button>
     </th>
+  );
+}
+
+/** 弹出层与视口内缘、与锚点之间的留白。 */
+const LIMIT_POPOVER_MARGIN = 8;
+const LIMIT_POPOVER_GAP = 6;
+
+type UploadLimitCellProps = {
+  user: AdminUserUsage;
+  /** 本行处于编辑态(弹出层打开)。 */
+  editing: boolean;
+  /** 其他行正在编辑,本行入口暂不可点。 */
+  lockedByOther: boolean;
+  /** 本行的保存/重置请求进行中。 */
+  pending: boolean;
+  /** 任一行请求进行中(入口统一禁点,镜像旧行为)。 */
+  anyPending: boolean;
+  input: string;
+  onInput: (value: string) => void;
+  onOpen: () => void;
+  onCancel: () => void;
+  onSave: () => void;
+  onReset: () => void;
+};
+
+/**
+ * 文档上限单元格:查看态常驻「数值 + 标签 + 编辑」,编辑控件放进锚定在按钮下方的
+ * 浮动弹出层。此前编辑态在单元格里内联展开(输入框 + 三个按钮),会把整张表顶宽、
+ * 出现横向滚动条,末尾按钮被截在可视区外——弹出层不占表格布局,行宽在两态间不变。
+ */
+function UploadLimitCell({
+  user, editing, lockedByOther, pending, anyPending,
+  input, onInput, onOpen, onCancel, onSave, onReset,
+}: UploadLimitCellProps) {
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  // null = 尚未量出位置(首帧绘制前由 layout effect 填上;jsdom 量不出宽度时保持 CSS 默认位)。
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  // 打开时量一次锚点与弹出层,定位到「编辑」按钮下方并夹回视口;表格横向滚动、页面
+  // 滚动或窗口变化都会挪动锚点,所以 scroll(捕获)/resize 时重算。
+  useLayoutEffect(() => {
+    if (!editing) {
+      setPos(null);
+      return;
+    }
+    const sync = () => {
+      const anchor = anchorRef.current;
+      const popover = popoverRef.current;
+      if (!anchor || !popover) return;
+      const anchorBox = anchor.getBoundingClientRect();
+      const popoverBox = popover.getBoundingClientRect();
+      if (popoverBox.width <= 0) return; // 尚未布局(jsdom 全零),保持默认位
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const left = anchorBox.left + clampPopoverLeft({
+        anchorLeft: anchorBox.left,
+        anchorRight: anchorBox.right,
+        popoverWidth: popoverBox.width,
+        containerLeft: 0,
+        containerRight: viewportWidth > 0 ? viewportWidth : Number.POSITIVE_INFINITY,
+        margin: LIMIT_POPOVER_MARGIN,
+      });
+      let top = anchorBox.bottom + LIMIT_POPOVER_GAP;
+      const flipped = anchorBox.top - LIMIT_POPOVER_GAP - popoverBox.height;
+      if (
+        viewportHeight > 0 &&
+        top + popoverBox.height > viewportHeight - LIMIT_POPOVER_MARGIN &&
+        flipped >= LIMIT_POPOVER_MARGIN
+      ) {
+        top = flipped; // 底部放不下且上方放得下时翻到锚点上方
+      }
+      setPos({ left, top });
+    };
+    sync();
+    window.addEventListener("resize", sync);
+    window.addEventListener("scroll", sync, true);
+    return () => {
+      window.removeEventListener("resize", sync);
+      window.removeEventListener("scroll", sync, true);
+    };
+  }, [editing]);
+
+  // 点外部 / Esc 关闭(镜像 EffortPicker);请求进行中不关,避免丢掉 pending 反馈。
+  useEffect(() => {
+    if (!editing) return;
+    function handlePointerDown(event: PointerEvent) {
+      if (pending) return;
+      const target = event.target;
+      if (target instanceof Node &&
+        (popoverRef.current?.contains(target) || anchorRef.current?.contains(target))) return;
+      onCancel();
+    }
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape" && !pending) onCancel();
+    }
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [editing, pending, onCancel]);
+
+  return (
+    <div className="usage-limit-view" ref={anchorRef}>
+      <span className="usage-limit-value">{user.upload_limit}</span>
+      <span className={`usage-limit-tag${user.upload_limit_overridden ? " usage-limit-tag-custom" : ""}`}>
+        {user.upload_limit_overridden ? "自定义" : "默认"}
+      </span>
+      <button
+        type="button"
+        className={`usage-role-button${editing ? " usage-role-button-open" : ""}`}
+        disabled={anyPending || lockedByOther}
+        aria-haspopup="dialog"
+        aria-expanded={editing}
+        onClick={() => (editing ? onCancel() : onOpen())}
+      >编辑</button>
+      {editing && (
+        <div
+          className="usage-limit-popover"
+          role="dialog"
+          aria-label={`设置 ${user.username} 的文档上限`}
+          ref={popoverRef}
+          style={pos === null ? undefined : { left: pos.left, top: pos.top }}
+        >
+          <div className="usage-limit-popover-title">文档上限 · {user.username}</div>
+          <div className="usage-limit-popover-row">
+            <input
+              className="usage-limit-input usage-limit-popover-input"
+              type="number"
+              min={1}
+              max={100000}
+              value={input}
+              disabled={pending}
+              autoFocus
+              aria-label={`${user.username} 的文档上限`}
+              onChange={(event) => onInput(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") onSave(); }}
+            />
+            <button
+              type="button"
+              className="usage-role-button usage-role-button-confirm"
+              disabled={pending}
+              onClick={onSave}
+            >
+              {pending ? "保存中…" : "保存"}
+            </button>
+          </div>
+          <div className="usage-limit-popover-row">
+            <button
+              type="button"
+              className="usage-role-button"
+              disabled={pending}
+              title="恢复为默认文档上限"
+              onClick={onReset}
+            >重置默认</button>
+            <button
+              type="button"
+              className="usage-role-button"
+              disabled={pending}
+              onClick={onCancel}
+            >取消</button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -373,53 +541,20 @@ export default function AdminUsagePage() {
                     {u.role === "admin" ? (
                       // 管理员的笔记本豁免(写路径 owner-only ⇒ owner 即当前 admin),显示「不限」不可编辑。
                       <span className="usage-role-locked">不限</span>
-                    ) : editingLimitId === u.id ? (
-                      <span className="usage-limit-edit">
-                        <input
-                          className="usage-limit-input"
-                          type="number"
-                          min={1}
-                          max={100000}
-                          value={limitInput}
-                          disabled={limitPendingId === u.id}
-                          aria-label={`${u.username} 的文档上限`}
-                          onChange={(event) => setLimitInput(event.target.value)}
-                        />
-                        <button
-                          type="button"
-                          className="usage-role-button usage-role-button-confirm"
-                          disabled={limitPendingId === u.id}
-                          onClick={() => saveLimit(u)}
-                        >
-                          {limitPendingId === u.id ? "保存中…" : "保存"}
-                        </button>
-                        <button
-                          type="button"
-                          className="usage-role-button"
-                          disabled={limitPendingId === u.id}
-                          title="恢复为默认文档上限"
-                          onClick={() => void submitLimitChange(u, null)}
-                        >重置默认</button>
-                        <button
-                          type="button"
-                          className="usage-role-button"
-                          disabled={limitPendingId === u.id}
-                          onClick={() => setEditingLimitId("")}
-                        >取消</button>
-                      </span>
                     ) : (
-                      <span className="usage-limit-view">
-                        <span className="usage-limit-value">{u.upload_limit}</span>
-                        <span className={`usage-limit-tag${u.upload_limit_overridden ? " usage-limit-tag-custom" : ""}`}>
-                          {u.upload_limit_overridden ? "自定义" : "默认"}
-                        </span>
-                        <button
-                          type="button"
-                          className="usage-role-button"
-                          disabled={Boolean(limitPendingId) || Boolean(editingLimitId)}
-                          onClick={() => { setEditingLimitId(u.id); setLimitInput(String(u.upload_limit)); setLimitNotice(null); }}
-                        >编辑</button>
-                      </span>
+                      <UploadLimitCell
+                        user={u}
+                        editing={editingLimitId === u.id}
+                        lockedByOther={Boolean(editingLimitId) && editingLimitId !== u.id}
+                        pending={limitPendingId === u.id}
+                        anyPending={Boolean(limitPendingId)}
+                        input={limitInput}
+                        onInput={setLimitInput}
+                        onOpen={() => { setEditingLimitId(u.id); setLimitInput(String(u.upload_limit)); setLimitNotice(null); }}
+                        onCancel={() => setEditingLimitId("")}
+                        onSave={() => saveLimit(u)}
+                        onReset={() => void submitLimitChange(u, null)}
+                      />
                     )}
                   </td>
                   <td>
