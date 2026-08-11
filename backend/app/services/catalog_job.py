@@ -83,6 +83,7 @@ from app.services.command_catalog import (
     COMMAND_REJECT_ALERT_RATIO,
     MAX_WINDOW_REJECTIONS,
     MIN_WINDOWS_BEFORE_ALERT,
+    STRIP_CHARS,
     WINDOW_CHARS,
     AssignmentCoverage,
     ExtractionSlice,
@@ -922,17 +923,26 @@ class CommandCatalogService:
         # `estimated_calls`/`windows_in_prefix` would be measuring it while
         # claiming to describe "the first X segments".
         #
-        # Truncation is judged per row as `full_chars > len(text)`, i.e. the
-        # element's whole stripped length exceeds what was transmitted. That is
-        # CONTENT truncation, which is the question here, and it is strictly
-        # better than the store's own row flag (raw `length(text) > bound`): an
-        # element clipped only through its trailing whitespace lost nothing a
-        # window would have held, and stopping on it would throw away a
-        # perfectly good measurement. The implication runs one way only — an
-        # unclipped row transmits its raw text, whose length is at least its
-        # stripped length, so flagged always means genuinely clipped.
+        # Truncation is judged per row as `full_chars > len(text.strip(...))`:
+        # the element's whole stripped length against what was transmitted,
+        # measured the same way on both sides. That is CONTENT truncation,
+        # which is the question here, and it is strictly better than the
+        # store's own row flag (raw `length(text) > bound`): an element clipped
+        # only through its trailing whitespace lost nothing a window would have
+        # held, and stopping on it would throw away a good measurement.
+        #
+        # BOTH sides must be stripped by `STRIP_CHARS`, or leading whitespace
+        # decides the answer: an element of 1,100 spaces then 500 characters of
+        # content transmits a 1,200-character head holding only 100 of that
+        # content, and comparing 500 against the raw 1,200 calls it complete
+        # while 400 characters are missing. Comparing against the stripped head
+        # (100) reports it correctly. This can never over-flag: an unclipped
+        # row's `text` IS its whole raw text, so stripping it by the same set
+        # the aggregate used yields exactly `full_chars` and the strict `>`
+        # stays false.
         measured = list(itertools.takewhile(
-            lambda row: int(row.get("full_chars") or 0) <= len(row.get("text") or ""),
+            lambda row: int(row.get("full_chars") or 0)
+            <= len(str(row.get("text") or "").strip(STRIP_CHARS)),
             rows,
         ))
         prefix = extraction_windows(measured)

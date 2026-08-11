@@ -1520,6 +1520,48 @@ def test_a_reply_without_an_entries_list_is_malformed_not_an_empty_answer(repo):
     )
 
 
+def test_a_scalar_args_field_is_a_visible_rejection_not_a_failed_job(repo):
+    """`{"args": 5}` is legal JSON, and the coverage ledger reads RAW payloads.
+
+    `5 or ()` is `5`, so iterating it raised `TypeError` out of a pure
+    function, through the coverage call and into `run`'s generic "internal
+    error" clause — failing a job the user paid for, over an answer the
+    grounding layer was about to record as an ordinary visible rejection.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    client = _Client(
+        lambda prompt, call: json.dumps(
+            {"entries": [{"command_name": "set_thing_0", "args": 5}]}
+        ),
+        wrap=False,
+    )
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    result = service.run(job["id"])
+
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["failure_reason"] == ""
+    # The entry itself survived (its command name grounds); only the malformed
+    # field was refused, and it is visible as such.
+    page = service.candidates_page(job["id"], state="candidate", cursor=0, limit=10)
+    assert [row["command_name"] for row in page["items"]] == ["set_thing_0"]
+    reasons = {
+        field["reason"]
+        for field in page["items"][0]["reject_info"]["fields"]
+    }
+    assert "model_response_unusable" in reasons
+    # And the slice's whole assignment reads as unanswered, which is what
+    # actually happened.
+    assert "arg_not_returned" in reasons
+    # (`uncovered` on the job row counts uncovered CANDIDATES, not args — the
+    # command itself was extracted, so that one is 0.)
+    assert result["args_uncovered"] == 3
+    assert settled["uncovered"] == 0
+
+
 def test_skipped_windows_do_not_count_toward_the_breakers_sample(repo):
     """`MIN_WINDOWS_BEFORE_ALERT` counts windows that actually made a CALL.
 
@@ -3652,6 +3694,64 @@ def test_preview_stops_measuring_at_the_first_truncated_element(repo):
     assert preview.skipped_windows_in_prefix == 0
     # The window count is still a floor over the whole document.
     assert preview.estimated_windows <= len(actual)
+
+
+def test_a_leading_whitespace_run_does_not_hide_a_truncated_element(repo):
+    """The truncation test compares two lengths, so BOTH must be stripped.
+
+    An element of 1,100 spaces then 500 characters of content transmits a
+    1,200-character head holding only 100 of that content — 400 characters are
+    gone. Comparing the element's stripped length (500) against the RAW head
+    (1,200) calls that complete, and the measurement runs on across a splice.
+    Comparing against the stripped head (100) reports it for what it is.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "前导空白",
+        _numbered("s1", [
+            {
+                "element_type": "paragraph",
+                "text": " " * 1_100 + _filler(500),
+                "section_path": "",
+            },
+            {
+                "element_type": "code_block",
+                "text": "late_command -density value",
+                "section_path": "",
+            },
+        ]),
+    )
+
+    preview = _service(repo).preview(notebook.id, "s1")
+
+    assert preview.sampled is True
+    # The first row IS truncated, so nothing is measured and the command
+    # behind it is not priced.
+    assert preview.windows_in_prefix == 0
+    assert preview.estimated_calls == 0
+
+
+def test_leading_whitespace_alone_does_not_stop_a_complete_row(repo):
+    """The counterweight: an element that is merely whitespace-padded but was
+    transmitted whole lost nothing, and stopping on it would throw away a good
+    measurement. Stripping BOTH sides is what tells the two apart."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "空白但完整",
+        _numbered("s1", [
+            {
+                "element_type": "code_block",
+                "text": "   \n\n first_command -density value  \n ",
+                "section_path": "",
+            },
+        ]),
+    )
+
+    preview = _service(repo).preview(notebook.id, "s1")
+
+    assert preview.sampled is False
+    assert preview.windows_in_prefix == 1
+    assert preview.estimated_calls == 1
 
 
 def test_preview_measures_the_complete_rows_before_the_first_clipped_one(repo):

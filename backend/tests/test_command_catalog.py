@@ -33,6 +33,7 @@ from app.services.command_catalog import (
     WINDOW_SPLIT_FLOOR_CHARS,
     ExtractionWindow,
     WindowElement,
+    assignment_coverage,
     carry_candidates,
     catalog_stats,
     extraction_slices,
@@ -2016,6 +2017,28 @@ def test_args_field_returned_as_an_object_is_not_iterated_as_keys(flops_window):
     assert result.stats.args_seen == 0
     rejection = next(item for item in result.rejections if item.field == "args")
     assert rejection.reason == "model_response_unusable"
+
+
+@pytest.mark.parametrize("bad_args", [5, "-density", {"name": "-density"}, None])
+def test_coverage_survives_every_shape_a_legal_reply_can_put_in_args(bad_args):
+    """`assignment_coverage` reads RAW payloads, so it inherits every shape a
+    legal JSON reply can have and none of `validate_entry`'s guarantees.
+
+    `{"args": 5}` is legal JSON and `5 or ()` is `5`, so the old iteration
+    raised `TypeError` out of a pure function — through the job layer's
+    coverage call and into the generic "internal error" path, failing a paid
+    job over an answer the validator was about to turn into an ordinary
+    visible rejection. Non-list `args` reads as "answered nothing", which is
+    exactly what happened.
+    """
+    coverage = assignment_coverage(
+        [{"command_name": "cluster_flops", "args": bad_args}], ["-tray_weight"]
+    )
+
+    assert coverage.assigned == 1
+    assert coverage.returned == 0
+    assert coverage.covered == 0
+    assert coverage.uncovered == ("-tray_weight",)
 
 
 def test_args_list_item_that_is_not_an_object_is_dropped_and_reported(flops_window):
