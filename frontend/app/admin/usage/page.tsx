@@ -138,9 +138,18 @@ function UploadLimitCell({
     sync();
     window.addEventListener("resize", sync);
     window.addEventListener("scroll", sync, true);
+    // 无滚动/缩放的布局位移也要跟:校验/请求横幅插到表格上方、上方行展开笔记本清单
+    // 都会把锚点向下推(codex R1 P2)。这些都会改变 body 高度,观察 body 尺寸即可覆盖;
+    // 弹出层自身也观察——「保存」变「保存中…」会改宽度,右对齐的夹取要重算。
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
+    if (observer) {
+      observer.observe(document.body);
+      if (popoverRef.current) observer.observe(popoverRef.current);
+    }
     return () => {
       window.removeEventListener("resize", sync);
       window.removeEventListener("scroll", sync, true);
+      observer?.disconnect();
     };
   }, [editing]);
 
