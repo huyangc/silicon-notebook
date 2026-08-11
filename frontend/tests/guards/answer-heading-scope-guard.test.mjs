@@ -86,8 +86,55 @@ test("the guard still sees the report heading scale it is defending", () => {
     rule.selectors.find((selector) => /^\.report-markdown h[23]$/.test(selector)),
     declaration(rule.body, "font-size"),
   ]));
-  assert.equal(sizes[".report-markdown h2"], "18px");
-  assert.equal(sizes[".report-markdown h3"], "15px");
+  assert.equal(sizes[".report-markdown h2"], "21px");
+  assert.equal(sizes[".report-markdown h3"], "19px");
+});
+
+
+test("report headings are never smaller than the body text that actually renders", () => {
+  // 背景(真机实测,不是假想):报告容器同时带 report-markdown + answer-markdown,
+  // 正文字号由源码更靠后的 `.answer-markdown p` 说了算(18px),而标题仍是
+  // `.report-markdown h*` 的——两半曾各按不同的正文定标(h3 15/h4 14 对 18px 正文),
+  // 三级/四级标题就比正文还小。这条钉住:两半必须按同一个正文自洽。
+  const rules = cssRules(CSS);
+  const sizeOf = (selector) => {
+    // 同一 selector 可能出现在多条规则里:分组的 margin/line-height 规则不带
+    // font-size(跳过),@media 窄屏覆盖被 cssRules 一并切出但恒排在顶层基线
+    // 之后(本文件写法是先基线后 @media)。所以「首个带 font-size 的」即桌面
+    // 基线——这正是要断言的对象;窄屏的公开页正文 15px 已人工核对不高于这里
+    // 钉住的任何标题字号。
+    const declared = rules
+      .filter((r) => r.selectors.includes(selector))
+      .map((r) => parseFloat(declaration(r.body, "font-size")))
+      .filter((size) => Number.isFinite(size));
+    assert.ok(declared.length >= 1,
+      `"${selector}" 应有带 font-size 的规则 —— 若改名/删除,请连同本用例一起重估`);
+    return declared[0];
+  };
+
+  // 站内报告:生效正文 = `.answer-markdown p`(级联赢家)。
+  const appBody = sizeOf(".answer-markdown p");
+  assert.ok(sizeOf(".report-markdown h2") > appBody,
+    "站内报告 h2 应大于生效正文");
+  assert.ok(sizeOf(".report-markdown h3") > appBody,
+    "站内报告 h3 应大于生效正文");
+  assert.ok(sizeOf(".report-markdown h4") >= appBody,
+    "站内报告 h4 不得小于生效正文");
+  // `.report-markdown p` 虽被级联顶掉,但必须与赢家同值,否则文件在撒谎。
+  assert.equal(sizeOf(".report-markdown p"), appBody,
+    ".report-markdown p 应与 .answer-markdown p 同值(级联赢家是后者)");
+
+  // 公开分享页:正文另降档,标题必须有自己的覆盖并保持不倒挂。
+  const publicBody = sizeOf(".public-report .report-markdown p");
+  assert.ok(sizeOf(".public-report .report-markdown h2") > publicBody,
+    "公开页 h2 应大于其正文");
+  assert.ok(sizeOf(".public-report .report-markdown h3") > publicBody,
+    "公开页 h3 应大于其正文");
+  assert.ok(sizeOf(".public-report .report-markdown h4") >= publicBody,
+    "公开页 h4 不得小于其正文");
+  assert.ok(sizeOf(".public-report .report-markdown h1")
+      >= sizeOf(".public-report .report-markdown h2"),
+    "公开页 h1(已降级避让页头)不得小于 h2");
 });
 
 
