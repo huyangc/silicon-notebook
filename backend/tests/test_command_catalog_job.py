@@ -1562,6 +1562,25 @@ def test_a_scalar_args_field_is_a_visible_rejection_not_a_failed_job(repo):
     assert settled["uncovered"] == 0
 
 
+def test_a_non_object_entry_is_a_visible_rejection_not_a_failed_job(repo):
+    """`entries: [5]` end to end — the same class as the scalar `args` above,
+    one level up. The run must finish and record it, never fail the job."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 1)
+    client = _Client(
+        lambda prompt, call: json.dumps({"entries": [5]}), wrap=False
+    )
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+
+    settled = service.catalog.get_job(job["id"])
+    assert settled["status"] == "succeeded"
+    assert settled["failure_reason"] == ""
+    assert settled["rejected"] >= 1
+
+
 def test_skipped_windows_do_not_count_toward_the_breakers_sample(repo):
     """`MIN_WINDOWS_BEFORE_ALERT` counts windows that actually made a CALL.
 

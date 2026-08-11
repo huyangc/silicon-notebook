@@ -1565,6 +1565,14 @@ def assignment_coverage(
     visible rejection. Non-list `args` is therefore normalised to empty here,
     exactly as `validate_entry` normalises it, and the slice's whole
     assignment reads as unanswered — which is precisely what happened.
+
+    A non-object ENTRY (`entries: [5]`) is skipped for the same reason, one
+    level up. The job layer's `_payload_entries` already replaces those with
+    `None` before this is called, so today that is belt and braces — but it is
+    a CALLER's guarantee about a function whose whole job is to survive raw
+    model output, and the scalar-`args` defect above was the same shape of
+    assumption. `.get` on an `int` raises `AttributeError`, which lands in the
+    same generic failure path.
     """
     names = tuple(str(name) for name in assigned or ())
     if not names:
@@ -1572,6 +1580,8 @@ def assignment_coverage(
     claimed: set[str] = set()
     returned = 0
     for entry in entries or ():
+        if entry is not None and not isinstance(entry, Mapping):
+            continue
         raw_args = (entry or {}).get("args")
         for raw_arg in raw_args if isinstance(raw_args, list) else ():
             if not isinstance(raw_arg, Mapping):

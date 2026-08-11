@@ -23,6 +23,7 @@ from app.core.config import Settings
 from app.repositories.sqlite.catalog_store import CatalogStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SqliteMigrator
+from app.services.command_catalog import STRIP_CHARS
 
 
 NOW = "2026-08-10T00:00:00+00:00"
@@ -165,6 +166,45 @@ def test_source_text_stats_char_sum_is_unclipped_unlike_preview_elements_text(
     element_count, total_chars = catalog.source_text_stats("src-1")
     assert element_count == 1
     assert total_chars == 9000  # NOT clipped to text_chars
+
+
+# The exact mixture the two sides can disagree on: the four characters SQL's
+# TRIM strips, plus four that `str.strip()` would also take and SQL must not
+# (vertical tab, form feed, the ideographic space, NBSP). Content in the middle
+# so a wrong strip set is visible as a LENGTH difference rather than as 0.
+_MIXED_WHITESPACE = "\v　 \t\xa0content\r\n \f　"
+
+
+def test_the_sql_strip_set_matches_the_packers_constant_character_for_character(
+    catalog: CatalogStore,
+):
+    """The three readers of `STRIP_CHARS` share one definition — asserted.
+
+    The packer normalises elements by it, the cost preview judges "was this row
+    truncated" by it, and this store's SQL strips it — but SQL says so as a
+    literal (`char(32)||char(9)||char(10)||char(13)`) with nothing but a
+    comment connecting it to the Python constant. That is exactly the seam the
+    preview's LOWER bound rests on: strip more in Python than SQL does and the
+    arithmetic floor lands above the truth.
+
+    So both numbers SQL produces are compared against `len(text.strip(
+    STRIP_CHARS))` computed in Python, over a string mixing the four
+    characters both sides must strip with four (`\\v`, `\\f`, U+3000, NBSP)
+    that `str.strip()` would take and SQL must leave alone.
+    """
+    _insert_elements(catalog, "src-1", [_MIXED_WHITESPACE])
+    expected = len(_MIXED_WHITESPACE.strip(STRIP_CHARS))
+
+    _element_count, total_chars = catalog.source_text_stats("src-1")
+    rows, _clipped = catalog.preview_elements(
+        "src-1", limit=10, text_chars=10_000
+    )
+
+    assert total_chars == expected
+    assert rows[0]["full_chars"] == expected
+    # And the mixture really does distinguish the two strip sets, or the
+    # assertions above would pass under either.
+    assert len(_MIXED_WHITESPACE.strip()) != expected
 
 
 def test_char_sums_mirror_the_packers_own_whitespace_strip(catalog: CatalogStore):

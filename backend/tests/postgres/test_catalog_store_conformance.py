@@ -24,6 +24,7 @@ import pytest
 
 from app.repositories.postgres.catalog_store import CatalogStore as PostgresCatalogStore
 from app.repositories.postgres.knowhow_store import KnowhowStore as PostgresKnowhowStore
+from app.services.command_catalog import STRIP_CHARS
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 
@@ -490,6 +491,57 @@ def test_source_text_stats_reads_the_same_row_universe_as_preview_elements(
     assert harness.catalog.source_text_stats(harness.source_id) == (
         len(texts), sum(len(t) for t in texts)
     )
+
+
+# The exact mixture the two sides can disagree on: the four characters SQL's
+# BTRIM strips, plus four that `str.strip()` would also take and SQL must not
+# (vertical tab, form feed, the ideographic space, NBSP). Content in the middle
+# so a wrong strip set shows up as a LENGTH difference rather than as 0.
+_MIXED_WHITESPACE = "\v\u3000 \t\xa0content\r\n \f\u3000"
+
+
+def test_the_sql_strip_set_matches_the_packers_constant_on_postgres(
+    catalog_harness,
+):
+    """`STRIP_CHARS` has three readers and this is one of them — asserted.
+
+    The packer normalises elements by that constant, the cost preview judges
+    "was this row truncated" by it, and this store strips it in SQL — as the
+    literal `E' \\t\\n\\r'`, with nothing but a comment connecting the two.
+    That seam is what the preview's LOWER bound rests on: strip more in Python
+    than SQL does and the arithmetic floor lands above the truth.
+
+    Genuinely backend-specific: PostgreSQL's `btrim` with an E-string of
+    escapes is a different construct from SQLite's
+    `trim(text, char(32)||char(9)||char(10)||char(13))`, and the escape
+    sequence itself is one typo away from stripping the wrong set. Mirrors
+    `test_the_sql_strip_set_matches_the_packers_constant_character_for_character`
+    in `tests/test_catalog_store.py`.
+    """
+    harness = catalog_harness
+    mark = "%s"
+    with harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO source_elements"
+            "(id,source_id,element_type,location_label,text,metadata,created_at)"
+            f" VALUES ({','.join([mark] * 7)})",
+            ("strip-el-0", harness.source_id, "paragraph", "p1",
+             _MIXED_WHITESPACE, "{}", NOW),
+        )
+    expected = len(_MIXED_WHITESPACE.strip(STRIP_CHARS))
+
+    _element_count, total_chars = harness.catalog.source_text_stats(
+        harness.source_id
+    )
+    rows, _clipped = harness.catalog.preview_elements(
+        harness.source_id, limit=10, text_chars=10_000
+    )
+
+    assert total_chars == expected
+    assert rows[0]["full_chars"] == expected
+    # And the mixture really does distinguish the two strip sets, or the
+    # assertions above would hold under either.
+    assert len(_MIXED_WHITESPACE.strip()) != expected
 
 
 def test_knowhow_table_columns_never_hydrates_rows_and_raises_on_a_missing_table(
