@@ -366,15 +366,24 @@ def _workbook_nonempty_counts(path: Path) -> tuple[int, int] | None:
                 pass
 
 
-def _mineru_workbook_coverage(elements: List[SourceElement]) -> tuple[int, int]:
-    """MinerU 产出覆盖了多少工作簿 (行, 格)——对账的两个分子。
+_TABLE_ROW_SEGMENT_RE = re.compile(r"<tr\b.*?(?:</tr>|(?=<tr\b)|$)", re.IGNORECASE | re.DOTALL)
+_TABLE_CELL_BODY_RE = re.compile(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 
-    - 表格元素按其 table_html 里的 `<tr` / `<td`+`<th` 出现次数计（大小写不敏感
-      ——MinerU 也吐过 `<TR>`）。格分子是这次修复的要害：宽表下 `<tr>` 可以足额而
-      列被整片丢掉，只数行看不出来。
+
+def _mineru_workbook_coverage(elements: List[SourceElement]) -> tuple[int, int]:
+    """MinerU 产出覆盖了多少工作簿 (非空行, 非空格)——对账的两个分子。
+
+    分子与分母（openpyxl 的非空判定）必须是**同一套非空语义**（codex R6 P1）：
+    只按 `<tr`/`<td` **标签**计数的话，MinerU 返回一张结构完整、值却全空的格子
+    （识别失败时的常见形态）也能刷满两个阈值，把全保真的 openpyxl 兜底绕过去——
+    护栏本身被掏空。因此：
+
+    - 表格元素逐 `<tr>` 段扫描：一个格只有在剥标签 + 反转义后仍有实文时才计入
+      格分子；一行只有在至少含一个这样的非空格时才计入行分子。空 `<td></td>`、
+      空 `<tr></tr>` 一律不算覆盖（大小写不敏感——MinerU 也吐过 `<TR>`）。
     - 非表格**文本**元素每条只向两个分子**各计 1**：MinerU 会把 sheet 标题、游离
       单元格、图注映射成标题/段落而不是表格行，不计入会把正常产出误判成缺行；但
-      一条段落最多只能顶一行一格，虚增因此有界。
+      一条段落最多只能顶一行一格，虚增因此有界（元素映射层已丢弃空文本元素）。
     - image 元素**不计入任何分子**：图片不对应任何物理行或格，计入它等于让一份
       「几张图 + 少量行」的残缺产出把分子刷够。
     """
@@ -383,8 +392,15 @@ def _mineru_workbook_coverage(elements: List[SourceElement]) -> tuple[int, int]:
     for element in elements:
         if element.element_type == "table":
             html = str(element.metadata.get("table_html", "") or "")
-            rows += len(re.findall(r"<tr", html, flags=re.IGNORECASE))
-            cells += len(re.findall(r"<t[dh]", html, flags=re.IGNORECASE))
+            for row_segment in _TABLE_ROW_SEGMENT_RE.findall(html):
+                populated = 0
+                for cell_body in _TABLE_CELL_BODY_RE.findall(row_segment):
+                    text = html_module.unescape(re.sub(r"<[^>]+>", " ", cell_body))
+                    if text.strip():
+                        populated += 1
+                cells += populated
+                if populated:
+                    rows += 1
         elif element.element_type == "image":
             continue
         else:
