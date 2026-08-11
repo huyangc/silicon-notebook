@@ -10,6 +10,8 @@ from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
+    BuiltinAdminPasswordError,
+    PasswordMismatchError,
     SelfDemotionError,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -280,6 +282,96 @@ class IdentityStore:
                 "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
             ).fetchone()
             return self._user_profile(user, profile)
+
+    def change_user_password(
+        self,
+        user_id: str,
+        old_password: str,
+        new_password: str,
+        *,
+        keep_token: "str | None" = None,
+    ) -> None:
+        """自助改密:校验调用者自己提供的旧密码后写入新密码,并吊销该用户除
+        `keep_token`(默认当前请求所带的会话)之外的全部会话——防止旧密码泄露的
+        场景下,攻击者持有的旧会话在改密后继续有效。吊销范围只有浏览器会话
+        (auth_sessions);Agent 长期凭据(agent_access_tokens)刻意不动,改密不该
+        打断已授权的外部集成。内置管理员(user-local)拒绝:它的密码每次启动都被
+        seed 按 settings.admin_password 重写,在线改了也会在下次重启被静默回滚。"""
+        from app.services.auth_utils import hash_password, verify_password
+
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        # 新密码哈希不依赖事务内状态,提前算好少持约一半写锁时间;旧密码 verify
+        # 必须留在事务内(要读当前行 + 原子的「校验-写入」),这 ~30ms 的 PBKDF2
+        # 持锁是刻意取舍——改密低频,原子性优先。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            row = db.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(user_id)
+            if not verify_password(
+                old_password,
+                row["password_hash"],
+                row["password_salt"],
+                row["password_iterations"],
+            ):
+                raise PasswordMismatchError("wrong password")
+            now = _now()
+            db.execute(
+                "UPDATE users SET password_hash = ?, password_salt = ?, "
+                "password_iterations = ?, updated_at = ? WHERE id = ?",
+                (pw_hash, pw_salt, pw_iters, now, user_id),
+            )
+            db.execute(
+                "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
+                (user_id, keep_token or ""),
+            )
+
+    def admin_reset_user_password(
+        self, actor_id: str, user_id: str, new_password: str
+    ) -> dict[str, str]:
+        """管理员重置某用户密码;目标用户的浏览器会话(auth_sessions)全部吊销,
+        须用新密码重新登录(Agent 长期凭据 agent_access_tokens 刻意不动)。
+        授权在写事务内按 actor 现时角色复检(镜像 set_user_role)。内置管理员
+        (user-local)拒绝——理由同 change_user_password。"""
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        from app.services.auth_utils import hash_password
+
+        # 与 change_user_password 同理:哈希提前算,少持写锁。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            actor = db.execute(
+                "SELECT role FROM users WHERE id = ?", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id, username FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            now = _now()
+            db.execute(
+                "UPDATE users SET password_hash = ?, password_salt = ?, "
+                "password_iterations = ?, updated_at = ? WHERE id = ?",
+                (pw_hash, pw_salt, pw_iters, now, user_id),
+            )
+            db.execute(
+                "DELETE FROM auth_sessions WHERE user_id = ?", (user_id,)
+            )
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+            }
 
     # ---- 每笔记本文档数量上限:配额解析 ----
     def _global_default_from(self, db) -> int:

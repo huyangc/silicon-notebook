@@ -84,6 +84,17 @@ class AdminUserRoleResult(BaseModel):
     role: Literal["admin", "user"]
 
 
+class AdminPasswordResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    new_password: str
+
+
+class AdminPasswordResetResult(BaseModel):
+    id: str
+    username: str
+
+
 class UploadLimitUpdate(BaseModel):
     """PATCH /admin/users/{id}/upload-limit 请求体:给某用户设/清「每笔记本文档
     数量上限」覆盖值。limit=null 表示清除覆盖、回落全局默认。"""

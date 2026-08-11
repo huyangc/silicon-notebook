@@ -21,8 +21,8 @@ const APPROVED_BARE_STATUS_ERRORS = Object.freeze({
 });
 const APPROVED_MESSAGE_READS = Object.freeze({
   "admin/usage/page.tsx|<module>.AdminUsagePage|property|message": {
-    count: 4,
-    reason: "one access is a forbidden sentinel; view, role-notice and limit-notice states contain fixed or humanized copy",
+    count: 5,
+    reason: "one access is a forbidden sentinel; view, role-notice, limit-notice and reset-notice states contain fixed or humanized copy",
   },
   "admin/usage/page.tsx|<module>.AdminUsagePage.submitRoleChange|property|message": {
     count: 1,
@@ -35,6 +35,10 @@ const APPROVED_MESSAGE_READS = Object.freeze({
   "admin/usage/page.tsx|<module>.AdminUsagePage.submitLimitChange|property|message": {
     count: 1,
     reason: "the per-user limit catch reads only the forbidden control-flow sentinel",
+  },
+  "admin/usage/page.tsx|<module>.AdminUsagePage.submitResetPassword|property|message": {
+    count: 1,
+    reason: "the password-reset catch reads only the forbidden control-flow sentinel",
   },
   "dev/logs/activity/ActivityView.tsx|<module>.isForbidden|property|message": {
     count: 1,

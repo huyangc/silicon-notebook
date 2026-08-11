@@ -5,7 +5,12 @@ import { expect, test, vi } from "vitest";
 import { AccountMenu } from "../../app/account-menu";
 
 
-function renderMenu(onLogout = vi.fn(), advancedMode = false, onToggleAdvancedMode = vi.fn()) {
+function renderMenu(
+  onLogout = vi.fn(),
+  advancedMode = false,
+  onToggleAdvancedMode = vi.fn(),
+  { canChangePassword = true, onChangePassword = vi.fn() } = {},
+) {
   render(
     <AccountMenu
       username="admin"
@@ -13,13 +18,15 @@ function renderMenu(onLogout = vi.fn(), advancedMode = false, onToggleAdvancedMo
       initials="AD"
       memoryActive={false}
       showAdminUsage
+      canChangePassword={canChangePassword}
       advancedMode={advancedMode}
       onOpenMemory={() => undefined}
       onToggleAdvancedMode={onToggleAdvancedMode}
+      onChangePassword={onChangePassword}
       onLogout={onLogout}
     />,
   );
-  return { onLogout, onToggleAdvancedMode };
+  return { onLogout, onToggleAdvancedMode, onChangePassword };
 }
 
 
@@ -52,6 +59,27 @@ test("logout is available as a menu action", async () => {
   await user.click(screen.getByRole("menuitem", { name: "退出登录" }));
 
   expect(onLogout).toHaveBeenCalledOnce();
+});
+
+
+test("修改密码是菜单动作,点击关闭菜单并触发回调", async () => {
+  const user = userEvent.setup();
+  const { onChangePassword } = renderMenu();
+
+  await user.click(screen.getByRole("button", { name: "账户菜单" }));
+  await user.click(screen.getByRole("menuitem", { name: "修改密码" }));
+
+  expect(onChangePassword).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+});
+
+
+test("内置管理员(canChangePassword=false)不显示修改密码入口", async () => {
+  const user = userEvent.setup();
+  renderMenu(vi.fn(), false, vi.fn(), { canChangePassword: false });
+
+  await user.click(screen.getByRole("button", { name: "账户菜单" }));
+  expect(screen.queryByRole("menuitem", { name: "修改密码" })).not.toBeInTheDocument();
 });
 
 

@@ -12,6 +12,8 @@ from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
 from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
+    BuiltinAdminPasswordError,
+    PasswordMismatchError,
     SelfDemotionError,
 )
 from app.repositories.postgres._store_utils import (
@@ -280,6 +282,85 @@ class IdentityStore:
                     (f"profile-{user_id}", user_id, jsonb([]), ui_mode, now, now),
                 ).fetchone()
             return self._user_profile(user, profile)
+
+    def change_user_password(
+        self,
+        user_id: str,
+        old_password: str,
+        new_password: str,
+        *,
+        keep_token: "str | None" = None,
+    ) -> None:
+        """自助改密:校验调用者自己提供的旧密码后写入新密码,并吊销该用户除
+        `keep_token`(默认当前请求所带的会话)之外的全部会话。吊销范围只有浏览器
+        会话(auth_sessions),Agent 长期凭据刻意不动;内置管理员(user-local)拒绝
+        ——它的密码每次启动都被 seed 重写,语义与 SQLite 侧逐字一致。"""
+        from app.services.auth_utils import hash_password, verify_password
+
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        # 新密码哈希不依赖事务内状态,提前算好缩短持锁时间(镜像 SQLite 侧)。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT * FROM users WHERE id=%s FOR UPDATE", (user_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(user_id)
+            if not verify_password(
+                old_password,
+                row["password_hash"],
+                row["password_salt"],
+                row["password_iterations"],
+            ):
+                raise PasswordMismatchError("wrong password")
+            db.execute(
+                "UPDATE users SET password_hash=%s,password_salt=%s,"
+                "password_iterations=%s,updated_at=%s WHERE id=%s",
+                (pw_hash, pw_salt, pw_iters, utc_now(), user_id),
+            )
+            db.execute(
+                "DELETE FROM auth_sessions WHERE user_id=%s AND token!=%s",
+                (user_id, keep_token or ""),
+            )
+
+    def admin_reset_user_password(
+        self, actor_id: str, user_id: str, new_password: str
+    ) -> dict[str, str]:
+        """管理员重置某用户密码;目标用户的浏览器会话(auth_sessions)全部吊销,
+        须用新密码重新登录(Agent 长期凭据刻意不动)。授权在写事务内按 actor
+        现时角色复检(镜像 set_user_role);内置管理员(user-local)拒绝。"""
+        if user_id == "user-local":
+            raise BuiltinAdminPasswordError("builtin admin password is env-derived")
+        if not (new_password or "").strip():
+            raise ValueError("empty password")
+        from app.services.auth_utils import hash_password
+
+        # 镜像 change_user_password:哈希提前算,缩短持锁时间。
+        pw_hash, pw_salt, pw_iters = hash_password(new_password)
+        with self.database.write() as db:
+            actor = db.execute(
+                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id,username FROM users WHERE id=%s FOR UPDATE", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            db.execute(
+                "UPDATE users SET password_hash=%s,password_salt=%s,"
+                "password_iterations=%s,updated_at=%s WHERE id=%s",
+                (pw_hash, pw_salt, pw_iters, utc_now(), user_id),
+            )
+            db.execute("DELETE FROM auth_sessions WHERE user_id=%s", (user_id,))
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+            }
 
     def _global_default_from(self, db) -> int:
         row = db.execute(

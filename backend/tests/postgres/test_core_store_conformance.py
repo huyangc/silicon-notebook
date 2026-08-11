@@ -293,6 +293,69 @@ def test_set_user_ui_mode_updates_a_non_derived_profile_row_in_place(
     assert kept["id"] == "profile-seeded-shape"
 
 
+def test_change_user_password_round_trips_and_scopes_session_revocation(
+    core_stores: CoreStores,
+):
+    """PG 侧自助改密与 SQLite 语义逐字对齐:旧密码失效/新密码生效、keep_token
+    保留当前会话且其余全吊销、旧密码错拒绝、内置管理员 user-local 拒绝。"""
+    from app.repositories.identity_errors import (
+        BuiltinAdminPasswordError,
+        PasswordMismatchError,
+    )
+
+    store = core_stores.identity
+    user = store.create_user("d00123456", "old-pw")
+    keep = store.create_session(user.id)
+    other = store.create_session(user.id)
+
+    store.change_user_password(user.id, "old-pw", "new-pw", keep_token=keep)
+
+    assert store.authenticate_user("d00123456", "old-pw") is None
+    assert store.authenticate_user("d00123456", "new-pw") is not None
+    assert store.resolve_session(keep) is not None
+    assert store.resolve_session(other) is None
+
+    with pytest.raises(PasswordMismatchError):
+        store.change_user_password(user.id, "wrong-old", "next-pw")
+    with pytest.raises(ValueError):
+        store.change_user_password(user.id, "new-pw", "   ")
+    with pytest.raises(KeyError):
+        store.change_user_password("user-missing", "a", "b")
+    with pytest.raises(BuiltinAdminPasswordError):
+        store.change_user_password("user-local", "admin", "next-pw")
+
+
+def test_admin_reset_user_password_rechecks_actor_and_revokes_all_sessions(
+    core_stores: CoreStores,
+):
+    """PG 侧管理员重置:actor 现时角色在写事务内复检、目标全部会话吊销、
+    目标缺失 KeyError、user-local 拒绝。"""
+    from app.repositories.identity_errors import BuiltinAdminPasswordError
+
+    store = core_stores.identity
+    actor = store.create_user("e00123456", "actor-pw")
+    target = store.create_user("e00123457", "old-pw")
+    token_a = store.create_session(target.id)
+    token_b = store.create_session(target.id)
+
+    with pytest.raises(PermissionError):
+        store.admin_reset_user_password(actor.id, target.id, "new-pw")
+
+    _write_sql(core_stores, "UPDATE users SET role='admin' WHERE id=%s", (actor.id,))
+    result = store.admin_reset_user_password(actor.id, target.id, "new-pw")
+    assert result == {"id": target.id, "username": "e00123457"}
+
+    assert store.authenticate_user("e00123457", "old-pw") is None
+    assert store.authenticate_user("e00123457", "new-pw") is not None
+    assert store.resolve_session(token_a) is None
+    assert store.resolve_session(token_b) is None
+
+    with pytest.raises(KeyError):
+        store.admin_reset_user_password(actor.id, "user-missing", "next-pw")
+    with pytest.raises(BuiltinAdminPasswordError):
+        store.admin_reset_user_password(actor.id, "user-local", "next-pw")
+
+
 def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):
     user = core_stores.identity.create_user("h00123456", "password-7")
     expired = core_stores.identity.create_session(user.id)

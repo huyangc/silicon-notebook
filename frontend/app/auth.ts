@@ -2,6 +2,7 @@ import {
   humanizedError,
   humanizeHttpError,
   readHttpError,
+  throwHumanizedHttpError,
 } from "./errors.ts";
 import { performApiRequest, requestJson } from "./api-client.ts";
 import { normalizeUiMode, type UiMode } from "./ui-mode.ts";
@@ -77,6 +78,17 @@ export async function logoutUser(): Promise<void> {
   } finally {
     clearToken();
   }
+}
+
+/** 自助修改密码;成功后当前会话保留,其他会话被吊销。错误一律走人话层
+ * (与 authFetch 不同,这里不特化 401,直接复用共享的 throwHumanizedHttpError)。 */
+export async function changeMyPassword(oldPassword: string, newPassword: string): Promise<void> {
+  const res = await performApiRequest("/me/password", {
+    tag: "auth",
+    method: "PATCH",
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  });
+  if (!res.ok) await throwHumanizedHttpError(res, "auth");
 }
 
 export async function fetchMe(): Promise<AuthUser> {

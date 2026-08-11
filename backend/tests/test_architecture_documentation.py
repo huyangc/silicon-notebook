@@ -631,7 +631,12 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "`reports` 表与 `/reports` API" in readme_zh
     assert "`reports` table and `/reports` APIs" in agents
     assert "small notebooks can be copied; large notebooks can be joined read-only" in agents
-    assert "There is no live collaborative editing or change-password flow" in agents
+    assert "There is no live collaborative editing" in agents
+    # 改密流程已上线:旧的「no ... change-password flow」反向陈述必须消失,
+    # 且密码合同(内置管理员拒绝 + 会话吊销范围)必须在 AGENTS.md 登记。
+    assert "or change-password flow" not in agents
+    assert "reject the built-in `user-local` administrator with 409" in agents
+    assert "revokes every other `auth_sessions` row" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
     assert "更新日期：2026-08-04" in fangan_done

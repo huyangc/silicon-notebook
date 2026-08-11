@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   updateAdminUserUploadLimit: vi.fn(),
   fetchUploadLimitDefault: vi.fn(),
   updateUploadLimitDefault: vi.fn(),
+  resetAdminUserPassword: vi.fn(),
   fetchUserNotebooks: vi.fn(),
 }));
 
@@ -22,6 +23,7 @@ vi.mock("../../app/admin/usage/api.ts", () => ({
   updateAdminUserUploadLimit: mocks.updateAdminUserUploadLimit,
   fetchUploadLimitDefault: mocks.fetchUploadLimitDefault,
   updateUploadLimitDefault: mocks.updateUploadLimitDefault,
+  resetAdminUserPassword: mocks.resetAdminUserPassword,
 }));
 vi.mock("../../app/admin/usage/notebooks.ts", () => ({
   fetchUserNotebooks: mocks.fetchUserNotebooks,
@@ -195,6 +197,54 @@ test("管理员行的文档上限显示不限且不可编辑", async () => {
   const builtin = within(builtinRow as HTMLTableRowElement);
   expect(builtin.getByText("不限")).toBeInTheDocument();
   expect(builtin.queryByRole("button", { name: "编辑" })).toBeNull();
+});
+
+test("管理员可为普通用户重置密码;内置管理员与本人行受保护", async () => {
+  primeCommonMocks();
+  mocks.resetAdminUserPassword.mockResolvedValue({ id: "user-target", username: "a00123456" });
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  await user.click(target.getByRole("button", { name: "重置密码" }));
+  const input = target.getByLabelText("a00123456 的新密码");
+  await user.type(input, "new-secret-1");
+  await user.click(target.getByRole("button", { name: "确认重置" }));
+
+  expect(mocks.resetAdminUserPassword).toHaveBeenCalledWith("user-target", "new-secret-1");
+  expect(await screen.findByText("已重置 a00123456 的密码，该用户需用新密码重新登录")).toBeInTheDocument();
+
+  // 内置管理员(user-local)也是这份 fixture 里当前登录的用户,取先判定的
+  // "受保护"分支,而不是"本人"。
+  const builtinRow = screen.getByText("admin").closest("tr");
+  expect(within(builtinRow as HTMLTableRowElement).getByText("受保护")).toBeInTheDocument();
+});
+
+test("非内置管理员看自己那行显示「本人」而非重置按钮", async () => {
+  // 评审 P2:该分支是 load-bearing——被删后管理员能在自己那行点「确认重置」,
+  // 后端会吊销其全部会话(reset 不带 keep_token),当场把自己登出。默认 fixture
+  // 里 user-local 抢先命中「受保护」,所以要用非内置管理员当 current user 才测得到。
+  const selfAdmin = {
+    ...rows[1],
+    id: "user-admin2",
+    username: "b00123456",
+    role: "admin",
+    role_mutable: true,
+    upload_limit: 20,
+  };
+  mocks.fetchMe.mockResolvedValue({ id: "user-admin2", role: "admin" });
+  mocks.fetchAdminUsers.mockResolvedValue([...rows, selfAdmin]);
+  mocks.fetchOnlineIds.mockResolvedValue([]);
+  mocks.fetchUploadLimitDefault.mockResolvedValue(20);
+
+  render(<AdminUsagePage />);
+  const selfRow = within((await screen.findByText("b00123456")).closest("tr") as HTMLTableRowElement);
+  expect(selfRow.getByText("本人")).toBeInTheDocument();
+  expect(selfRow.queryByRole("button", { name: "重置密码" })).toBeNull();
+  // 别的普通用户行仍有重置入口
+  const target = await targetRow();
+  expect(target.getByRole("button", { name: "重置密码" })).toBeInTheDocument();
 });
 
 test("用户总览按 20 条分页并支持切换每页数量", async () => {

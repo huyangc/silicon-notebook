@@ -178,6 +178,7 @@ import {
 } from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
+import { PasswordChangeModal } from "./password-change-modal";
 import { AskComposer } from "./ask-composer";
 import { quotedPhraseHint } from "./query-syntax";
 import { AskIntentReview } from "./ask-intent-review";
@@ -865,6 +866,7 @@ export default function Home() {
   const [mountedIds, setMountedIds] = useState<string[]>([]);
   const [mountEdges, setMountEdges] = useState<MountedBase[]>([]);
   const [deleteNotebook, setDeleteNotebook] = useState<NotebookSummary | null>(null);
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   // 必办 4(spec §6):删除确认弹窗要显示"N 个笔记本正在把它作为参考库"—— CASCADE
   // 会连同这些边一起清空且不可撤销。只在打开删除确认弹窗时才拉取(openDeleteConfirm)。
   const [deleteMountedByCount, setDeleteMountedByCount] = useState(0);
@@ -5905,9 +5907,11 @@ export default function Home() {
             initials={accountBadge}
             memoryActive={outerView === "memory"}
             showAdminUsage={canSeeAdminUsage(currentUser.role)}
+            canChangePassword={currentUser.id !== "user-local"}
             advancedMode={isAdvanced(uiMode)}
             onOpenMemory={showGlobalMemory}
             onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}
+            onChangePassword={() => setPasswordModalOpen(true)}
             onLogout={() => handleLogout().catch(reportError)}
           />
         </div>
@@ -7449,6 +7453,10 @@ export default function Home() {
             </>)}
           </FloatingModalCard>
         </section>
+      )}
+
+      {passwordModalOpen && (
+        <PasswordChangeModal onClose={() => setPasswordModalOpen(false)} />
       )}
 
       {infoModal && (
