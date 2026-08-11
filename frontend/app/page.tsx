@@ -1838,6 +1838,10 @@ export default function Home() {
   const pollCountRef = useRef(0);
   const sourcesRef = useRef<SourceSummary[]>([]);
   const sourceDetailRef = useRef<SourceSummary | null>(null);
+  // Live ref of currentNotebookId so async continuations (来源轮询的解析完成刷新)
+  // can distinguish「用户切库了」from「本 effect 恰好被清理了」——两者都会让闭包里
+  // 的 cancelled 变 true,但只有前者需要放弃刷新。同 sourcesRef 的既有轻量方案。
+  const currentNotebookIdRef = useRef<string | null>(null);
   // Live refs for source paging/query so long-lived poll effects (paper-meta
   // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
   // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
@@ -2267,6 +2271,7 @@ export default function Home() {
   sourceDetailRef.current = sourceDetail;
   sourcesPageRef.current = sourcesPage;
   sourceQueryRef.current = sourceQuery;
+  currentNotebookIdRef.current = currentNotebookId;
   const hasPending = sources.some(
     (source) => !["extracted", "failed"].includes(source.parse_status)
   );
@@ -2339,12 +2344,18 @@ export default function Home() {
           setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${failureHint ? ` — ${failureHint}` : ""}`);
         }
         if (reachedExtracted && currentNotebookId) {
+          // ⚠ 这段刷新不能用 `cancelled` 做闸:最后一个 pending 源翻到 extracted 时,
+          // 上面的 setSources 会让 hasPending 变 false → 本 effect 先被清理
+          // (cancelled=true),网络响应才回来。按 cancelled 判会恰好在「新建库上传
+          // 首个文档解析完成」这条路上跳过 ask_available 的重拉,输入框保持禁用直到
+          // 手动刷新。真正要守的只有「用户没切库」:按 live ref 比对 notebook id。
+          const stillOnNotebook = () => currentNotebookIdRef.current === currentNotebookId;
           await loadNotebookCollection();
           const refreshed = await getNotebook(currentNotebookId);
-          if (!cancelled) setCurrentNotebook(refreshed);
+          if (stillOnNotebook()) setCurrentNotebook(refreshed);
           // 源达终态(extracted/failed)可能新增 H2–H6:刷新体检,新损坏才会冒进铃铛而非等用户手动
           // 打开看板(codex 第5轮 P2:proactive fetch 只在 notebook ID 变时跑,漏了上传后 parse 完成)。
-          if (!cancelled) reloadCheckup(currentNotebookId);
+          if (stillOnNotebook()) reloadCheckup(currentNotebookId);
         }
       } catch (error) {
         reportError(error);
