@@ -2452,3 +2452,217 @@ def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
     assert by_id["el-src-crumb-0002"]["section_path"] == ""
     assert by_id["el-src-crumb-0003"]["caption"] == "flow diagram"
     assert [element["id"] for element in elements] == sorted(by_id)
+
+
+# ---------------------------------------------------------------------------
+# 生产热点整改批 E:orphan asset 单遍扫描 + PG 侧补上 knowhow_changes 历史扫描。
+# 后者是**正确性修复**:这个适配器此前只扫 live cell,最后一处引用落在历史里
+# 的资产在 PG 上会被删掉、在 SQLite 上会被保留 —— 回退到那个版本就指向一个
+# 已删文件。两侧现在同一份判定原语、同一份语料。
+# ---------------------------------------------------------------------------
+
+
+def _asset_gc_maintenance(postgres_database, tmp_path):
+    from app.repositories.postgres.maintenance import PostgresMaintenanceAdapter
+
+    return PostgresMaintenanceAdapter(
+        SimpleNamespace(database=postgres_database, storage_dir=tmp_path)
+    )
+
+
+def _asset_gc_fixture(postgres_database, tmp_path):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 24
+    _seed_catalog(postgres_database)
+    seams = _seams()
+    store = PostgresKnowhowStore(
+        postgres_database, new_id=seams.new_id, now=seams.now
+    )
+    table_id = store.create_knowhow_table(
+        "nb-content", "资产", "", _knowhow_columns(), "user-content"
+    )
+    table = store.get_knowhow_table(table_id)
+    anchor_id, plain_id = table["columns"][0]["id"], table["columns"][1]["id"]
+    row_id = store.add_knowhow_row(table_id, {anchor_id: "A"})
+
+    def upload(suffix: str) -> str:
+        asset_id = store.insert_notebook_asset(
+            "nb-content", f"{suffix}.png", "image/png", 3, "user-content"
+        )
+        asset_dir = tmp_path / "assets" / "nb-content"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        (asset_dir / f"{asset_id}.png").write_bytes(b"png")
+        return asset_id
+
+    return store, row_id, plain_id, upload
+
+
+def test_postgres_sweep_keeps_an_asset_referenced_only_by_history(
+    postgres_database, tmp_path
+):
+    """PG 侧的历史扫描:格子把图片改掉之后,``knowhow_changes`` 里那条
+    ``before`` 仍然引用着它 —— 回收了就没法回退回带图的版本。
+
+    变异锚点:把 ``_history_ref_tokens`` 整个删掉(或让 ``_surviving_asset_refs`` 不再调它)
+    → 这条红(资产被删),SQLite 侧同名用例仍绿 —— 那正是修复前的两侧分叉。"""
+    store, row_id, plain_id, upload = _asset_gc_fixture(postgres_database, tmp_path)
+    maintenance = _asset_gc_maintenance(postgres_database, tmp_path)
+    asset_id = upload("history-only")
+
+    store.update_knowhow_cell(row_id, plain_id, f"![图](asset://{asset_id})")
+    store.update_knowhow_cell(row_id, plain_id, "图没了")
+
+    assert maintenance.sweep_orphan_assets("nb-content") == {"removed": 0}
+    assert store.get_notebook_asset(asset_id) is not None
+
+
+def test_postgres_sweep_still_reclaims_an_asset_nothing_mentions(
+    postgres_database, tmp_path
+):
+    """删除面只缩不扩:从未被任何格子或历史提过的资产照旧回收。"""
+    store, _row_id, _plain_id, upload = _asset_gc_fixture(postgres_database, tmp_path)
+    maintenance = _asset_gc_maintenance(postgres_database, tmp_path)
+    asset_id = upload("never-referenced")
+
+    assert maintenance.sweep_orphan_assets("nb-content") == {"removed": 1}
+    assert store.get_notebook_asset(asset_id) is None
+
+
+def test_postgres_sweep_ignores_code_attachment_only_references(
+    postgres_database, tmp_path
+):
+    """代码附件里的 ``asset://`` 不是 keeper 引用 —— 与 SQLite 同口径
+    (``content_strings_in_payload`` 从不读 ``code``/``code_text``)。"""
+    store, row_id, plain_id, upload = _asset_gc_fixture(postgres_database, tmp_path)
+    maintenance = _asset_gc_maintenance(postgres_database, tmp_path)
+    asset_id = upload("code-only")
+
+    store.update_knowhow_cell(row_id, plain_id, "纯文本,没有图片")
+    store.upsert_knowhow_cell_code(
+        row_id, plain_id, f"# see asset://{asset_id}", "python", "user-content", "h"
+    )
+
+    assert maintenance.sweep_orphan_assets("nb-content") == {"removed": 1}
+    assert store.get_notebook_asset(asset_id) is None
+
+
+def test_postgres_sweep_scan_count_is_independent_of_asset_count(
+    postgres_database, tmp_path, monkeypatch
+):
+    """判定扫描按阶段发生(分类一次 + 写事务复核一次),不随资产数增长。"""
+    store, row_id, plain_id, upload = _asset_gc_fixture(postgres_database, tmp_path)
+    maintenance = _asset_gc_maintenance(postgres_database, tmp_path)
+    for index in range(9):
+        upload(f"bulk-{index}")
+    store.update_knowhow_cell(row_id, plain_id, "没有图片")
+
+    scans = _count_pg_keeper_scans(maintenance, monkeypatch)
+
+    assert maintenance.sweep_orphan_assets("nb-content") == {"removed": 9}
+    assert len(scans["decide"]) == 2, scans
+
+
+def test_postgres_source_elements_after_walk_equals_the_whole_source_read(
+    postgres_database,
+):
+    """批 E 的 keyset 整源走查:PG 侧与 ``source_elements()`` 同序、无跳无重。"""
+    from app.repositories.postgres._store_utils import jsonb
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.source_store import SourceStore
+
+    assert PostgresMigrator(postgres_database).migrate() == 24
+    _seed_catalog(postgres_database)
+    seams = _seams()
+    mark = "%s"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,file_name,"
+            "file_path,file_size,file_hash,summary,created_at,updated_at,doc_type) "
+            f"VALUES ('src-keyset',{mark},'source','markdown','extracted','parsed',"
+            f"'a.md','',0,'hash-keyset','',{mark},{mark},'textbook')",
+            ("nb-content", NOW, NOW),
+        )
+        for index in range(37):
+            connection.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                f"VALUES ({mark},'src-keyset','paragraph','L1',{mark},{mark},{mark})",
+                (
+                    f"el-keyset-{index:04d}",
+                    f"text {index}",
+                    jsonb({}),
+                    # 多个 created_at,且同一时刻下有多行 —— 次键必须参与。
+                    f"2026-07-2{1 + index // 13}T00:00:0{index % 7}+00:00",
+                ),
+            )
+
+    sources = SourceStore(postgres_database, now=seams.now)
+    whole = sources.source_elements("src-keyset")
+    assert len(whole) == 37
+    for page_size in (1, 5, 36, 37, 100):
+        walked, after, pages = [], None, 0
+        while True:
+            items, after = sources.source_elements_after("src-keyset", after, page_size)
+            pages += 1
+            assert len(items) <= page_size
+            walked.extend(items)
+            if after is None:
+                break
+            assert pages <= 60, "游标没有推进"
+        assert walked == whole, page_size
+
+
+def _count_pg_keeper_scans(maintenance, monkeypatch):
+    """PG 侧的判定计数 spy —— 与 SQLite 侧 ``_count_keeper_scans`` 同形状。"""
+    scans: dict[str, list] = {"decide": [], "history": []}
+    real_decide = maintenance._surviving_asset_refs
+    real_history = maintenance._history_ref_tokens
+
+    def counting_decide(db, notebook_id, asset_ids):
+        scans["decide"].append(notebook_id)
+        return real_decide(db, notebook_id, asset_ids)
+
+    def counting_history(db, notebook_id):
+        scans["history"].append(notebook_id)
+        return real_history(db, notebook_id)
+
+    monkeypatch.setattr(maintenance, "_surviving_asset_refs", counting_decide)
+    monkeypatch.setattr(maintenance, "_history_ref_tokens", counting_history)
+    return scans
+
+
+def test_postgres_sweep_skips_history_when_live_cells_account_for_every_asset(
+    postgres_database, tmp_path, monkeypatch
+):
+    """活格子已把全部候选判为保留时,PG 侧同样跳过历史扫描(与 SQLite 同形状)。"""
+    store, row_id, plain_id, upload = _asset_gc_fixture(postgres_database, tmp_path)
+    maintenance = _asset_gc_maintenance(postgres_database, tmp_path)
+    assets = [upload(f"live-{index}") for index in range(3)]
+    body = "\n".join(f"![图{i}](asset://{a})" for i, a in enumerate(assets))
+    store.update_knowhow_cell(row_id, plain_id, body)
+    store.update_knowhow_cell(row_id, plain_id, body + "\n补一句")
+    scans = _count_pg_keeper_scans(maintenance, monkeypatch)
+
+    assert maintenance.sweep_orphan_assets("nb-content") == {"removed": 0}
+
+    assert len(scans["decide"]) == 1
+    assert scans["history"] == [], scans
+
+
+def test_postgres_sweep_still_consults_history_when_a_candidate_is_not_live(
+    postgres_database, tmp_path, monkeypatch
+):
+    """反向护栏:短路不得退化成「永不扫历史」——那正是本轮修掉的 PG 缺陷。"""
+    store, row_id, plain_id, upload = _asset_gc_fixture(postgres_database, tmp_path)
+    maintenance = _asset_gc_maintenance(postgres_database, tmp_path)
+    asset_id = upload("history-fallthrough")
+    store.update_knowhow_cell(row_id, plain_id, f"![图](asset://{asset_id})")
+    store.update_knowhow_cell(row_id, plain_id, "图没了")
+    scans = _count_pg_keeper_scans(maintenance, monkeypatch)
+
+    assert maintenance.sweep_orphan_assets("nb-content") == {"removed": 0}
+
+    assert scans["history"], "活格子判不下来时必须继续扫历史"
+    assert store.get_notebook_asset(asset_id) is not None

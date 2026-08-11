@@ -155,6 +155,42 @@ def complete_isolated_edges(
             _elem_cache[node_id] = cached
         return cached
 
+    # rule-1 证据倒排:每受影响 source 一份 element_id → [同源节点] 的桶。
+    # 旧实现对每个孤立节点 N 扫遍**全部**同源 sibling 并逐个求 `len(n_elems &
+    # _elems(m))`,在「一篇长文档里几百个孤立节点 × 几千个 sibling」的真实形态
+    # 下是 O(I×S) 次集合交集;倒排后每个 N 只走它自己那几个 element 的桶,代价
+    # 变成 O(Σ 桶长),与「真的有共享证据的对」成正比。
+    #
+    # **数值等价而非近似**:n_elems 是 set,故每个 eid 至多贡献一次;对某个 m,
+    # 它出现在桶 eid 里 ⟺ eid ∈ _elems(m),于是按桶累加得到的计数恰好等于
+    # |n_elems ∩ _elems(m)|——就是旧实现排序键里的那个 overlap。排序键的其余三
+    # 项(concept 优先、名长、id)与遍历顺序无关,而 id 唯一使排序全序,所以候选
+    # 表在排序**之后**逐位等于旧实现,与建表顺序无关。
+    #
+    # 惰性同 _cands_for:只有真的有孤立节点带证据、Rule-1 被触发的 source 才建
+    # 索引(建索引要对该 source 全部节点求 _elems,恰好也是旧实现在同一条件下
+    # 才付的代价)。
+    #
+    # 桶按节点 id 去重:输入若含同 id 重复节点(生产不会,by_id 本身也已按 id
+    # 折叠),重复计数会虚增 overlap。旧实现在这种退化输入下会产出两条键相同的
+    # 候选,第二条必被 _try_emit 的 (src,tgt,type) 去重吃掉,等价于只算一次。
+    elem_index_by_source: Dict[str, Dict[str, List[Dict]]] = {}
+
+    def _elem_index_for(sid: str) -> Dict[str, List[Dict]]:
+        cached = elem_index_by_source.get(sid)
+        if cached is None:
+            cached = {}
+            seen_ids: set = set()
+            for m in by_source.get(sid, ()):
+                mid = m["id"]
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+                for eid in _elems(m):
+                    cached.setdefault(eid, []).append(m)
+            elem_index_by_source[sid] = cached
+        return cached
+
     # rule-2 候选表:每受影响 source 下按(名长降序、id 兜底)排序的 concept
     # 列表,与触发 rule-2 的具体 N 无关,故按 source 只排一次;`m["id"] != n["id"]`
     # 的自身排除挪到下面循环内对这份预排序表做过滤(过滤不改变相对顺序,
@@ -229,17 +265,26 @@ def complete_isolated_edges(
     for n in isolated_nodes:
         emitted_for_n = 0
         n_elems = _elems(n)
-        siblings = by_source.get(n.get("source_id"), ())
 
         # --- Rule 1: 共享证据元素 ---
         if n_elems:
+            # 倒排累加得到 candidate → overlap(与旧实现的集合交集数值相等,
+            # 见上面 _elem_index_for 的等价论证)。
+            index = _elem_index_for(n.get("source_id"))
+            n_id = n["id"]
+            overlaps: Dict[str, int] = {}
+            reps: Dict[str, Dict] = {}
+            for eid in n_elems:
+                for m in index.get(eid, ()):
+                    mid = m["id"]
+                    if mid == n_id:               # 自身排除(同旧实现)
+                        continue
+                    overlaps[mid] = overlaps.get(mid, 0) + 1
+                    if mid not in reps:
+                        reps[mid] = m
             candidates: List[Tuple[int, int, int, str]] = []  # (shared, concept?, namelen, id)
-            for m in siblings:
-                if m["id"] == n["id"]:
-                    continue
-                overlap = len(n_elems & _elems(m))
-                if overlap <= 0:
-                    continue
+            for mid, overlap in overlaps.items():
+                m = reps[mid]
                 if _shared_edge(n, m) is None:        # 无安全边类型 → 不作候选
                     continue
                 candidates.append((

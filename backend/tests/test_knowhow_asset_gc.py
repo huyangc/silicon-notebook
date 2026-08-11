@@ -376,3 +376,120 @@ def test_http_delete_notebook_route_removes_asset_file_and_dir(tmp_path, monkeyp
     assert resp.status_code == 204, resp.text
     assert not asset_file.exists()
     assert not asset_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# 生产热点整改批 E:单遍扫描替代「逐资产前导通配 LIKE」。
+# 语义面(留/删的判定)必须逐位不变——上面全部既有用例就是那份合同;这里钉的
+# 是**成本形状**与「过匹配只会保留、绝不误删」的边界。
+# ---------------------------------------------------------------------------
+
+
+def _count_keeper_scans(repo, monkeypatch):
+    """统计一次 sweep 里的判定次数,分别按「整体判定」与「历史扫描」计。"""
+    import app.repositories.sqlite.maintenance as maint_mod
+
+    adapter = maint_mod.SQLiteMaintenanceAdapter
+    seen: dict[str, list] = {"decide": [], "history": []}
+    real_decide = adapter._surviving_asset_refs
+    real_history = adapter._history_ref_tokens
+
+    def counting_decide(self, db, notebook_id, asset_ids):
+        seen["decide"].append(notebook_id)
+        return real_decide(self, db, notebook_id, asset_ids)
+
+    def counting_history(self, db, notebook_id):
+        seen["history"].append(notebook_id)
+        return real_history(self, db, notebook_id)
+
+    monkeypatch.setattr(adapter, "_surviving_asset_refs", counting_decide)
+    monkeypatch.setattr(adapter, "_history_ref_tokens", counting_history)
+    return seen
+
+
+def test_sweep_scan_count_does_not_grow_with_the_number_of_assets(repo, monkeypatch):
+    """判定扫描的次数由**阶段**决定(分类一次 + 写事务复核一次),不随资产数增长。
+
+    变异锚点:把判定改回逐资产调用(每个 asset 一次 ``_surviving_asset_refs``)
+    → 12 个资产会让计数变成 24 而不是 2。"""
+    nb = _mk_notebook(repo)
+    for _ in range(12):
+        _upload(repo, nb)
+    _make_cell(repo, nb, "没有图片")
+    scans = _count_keeper_scans(repo, monkeypatch)
+
+    assert repo.maintenance.sweep_orphan_assets(nb) == {"removed": 12}
+    # 分类一次 + 写事务复核一次 —— 与资产数无关。
+    assert len(scans["decide"]) == 2, scans
+
+
+def test_sweep_single_pass_keeps_every_referenced_asset_among_many(repo):
+    """一次扫描要同时对全部资产给出正确答案:被引用的一个都不能少留、
+    没被引用的一个都不能漏删。"""
+    nb = _mk_notebook(repo)
+    referenced = [_upload(repo, nb) for _ in range(3)]
+    orphans = [_upload(repo, nb) for _ in range(4)]
+    body = "\n".join(f"![图{i}](asset://{a['id']})" for i, a in enumerate(referenced))
+    _make_cell(repo, nb, body)
+
+    assert repo.maintenance.sweep_orphan_assets(nb) == {"removed": 4}
+
+    for asset in referenced:
+        assert repo.get_notebook_asset(asset["id"]) is not None
+    for asset in orphans:
+        assert repo.get_notebook_asset(asset["id"]) is None
+
+
+def test_sweep_keeps_an_asset_mentioned_in_prose_not_only_as_an_image(repo):
+    """扫描仍是**宽松子串**匹配,不是「只认渲染出来的图片语法」:过匹配只会
+    保留、绝不误删,这条不对称是这条路径一直以来的安全论证本体。"""
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)
+    _make_cell(repo, nb, f"这张图的地址是 asset://{asset['id']} ,先留着")
+
+    assert repo.maintenance.sweep_orphan_assets(nb) == {"removed": 0}
+    assert repo.get_notebook_asset(asset["id"]) is not None
+
+
+def test_sweep_skips_the_history_scan_when_live_cells_account_for_every_asset(
+    repo, monkeypatch
+):
+    """活格子已经把全部候选判为「保留」时,历史那趟根本不发 —— 这是旧判据
+    ``if live is not None: return True`` 短路的单遍形态。
+
+    没有它,「资产少、历史长」这个**常见**形态(历史默认永久保留,见
+    sweep_orphan_assets 的 KNOWN COST)每次清扫都要把整条变更流水解析一遍,
+    只为重新确认一个已经得出的结论。
+
+    变异锚点:删掉 ``_surviving_asset_refs`` 里的 ``if kept == candidates:``
+    短路 → 历史查询次数从 0 变成 2,本用例红(既有的留/删语义用例全绿,
+    因为短路是纯优化——所以必须由这条计数用例来钉)。"""
+    nb = _mk_notebook(repo)
+    assets = [_upload(repo, nb) for _ in range(3)]
+    body = "\n".join(f"![图{i}](asset://{a['id']})" for i, a in enumerate(assets))
+    _table_id, row_id, column_id = _make_cell(repo, nb, body)
+    # 制造一段确实提到资产的历史,证明「跳过」不是因为历史里根本没东西可扫。
+    repo.update_knowhow_cell(row_id, column_id, body + "\n补一句")
+    scans = _count_keeper_scans(repo, monkeypatch)
+
+    assert repo.maintenance.sweep_orphan_assets(nb) == {"removed": 0}
+
+    assert len(scans["decide"]) == 1        # 分类一趟;无候选可删,不进写事务复核
+    assert scans["history"] == [], scans    # 活格子已定案 → 历史一次都没扫
+
+
+def test_sweep_still_consults_history_when_a_candidate_is_not_live_referenced(
+    repo, monkeypatch
+):
+    """反向护栏:只要有一个候选活格子里找不到,历史那趟必须照发 —— 否则
+    「历史里还引用着」的资产会被误删(短路不能变成跳过历史)。"""
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)
+    _table_id, row_id, column_id = _make_cell(repo, nb, f"![图](asset://{asset['id']})")
+    repo.update_knowhow_cell(row_id, column_id, "图没了")
+    scans = _count_keeper_scans(repo, monkeypatch)
+
+    assert repo.maintenance.sweep_orphan_assets(nb) == {"removed": 0}
+
+    assert scans["history"], "活格子判不下来时必须继续扫历史"
+    assert repo.get_notebook_asset(asset["id"]) is not None

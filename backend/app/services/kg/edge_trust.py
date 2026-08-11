@@ -35,7 +35,14 @@ def _decode_evidence(rel: dict) -> list:
 
 
 def evidence_anchor_score(rel: dict) -> float:
-    """1.0 if the edge has at least one evidence entry with a non-empty quote; 0.0 otherwise."""
+    """1.0 if the edge has at least one evidence entry with a non-empty quote; 0.0 otherwise.
+
+    This function defines what "anchored" means.  The review-queue stores
+    evaluate the SAME predicate in SQL (so a whole notebook's evidence JSON
+    never reaches Python) using ``app.core.text_whitespace.PY_STRIP_WHITESPACE``
+    as the trim alphabet — change the ``.strip()`` semantics here and that
+    constant's users have to move with it.
+    """
     for entry in _decode_evidence(rel):
         if isinstance(entry, dict) and entry.get("quote", "").strip():
             return 1.0
@@ -109,13 +116,24 @@ def compute_trust_score(
     rel: dict,
     node_types: Dict[str, str],
     corroboration_score: float,
+    *,
+    evidence_anchor: float | None = None,
 ) -> float:
     """Combine the three signals into a single edge trust score in [0, 1].
 
     corroboration_score is pre-computed by the caller (use corroboration_counts +
     corroboration_score_from_count so the caller can batch-compute it once over all edges).
+
+    evidence_anchor lets a caller that already knows the anchor signal supply it
+    instead of carrying ``rel["evidence"]``.  The review queue does exactly that:
+    its store computes the same predicate in SQL (see PY_STRIP_WHITESPACE) so a
+    whole notebook's evidence JSON never has to be shipped into Python and
+    re-parsed.  Left as None, the score is derived from ``rel`` exactly as before.
     """
-    ev_score = evidence_anchor_score(rel)
+    ev_score = (
+        evidence_anchor_score(rel) if evidence_anchor is None
+        else float(evidence_anchor)
+    )
     tv_score = type_validity_score(rel, node_types)
     score = W_EVIDENCE * ev_score + W_CORR * corroboration_score + W_TYPE * tv_score
     return max(0.0, min(1.0, score))

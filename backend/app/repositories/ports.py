@@ -976,6 +976,33 @@ class SourceStorePort(Protocol):
     def source_exists_for_update_tx(connection: object, source_id: str) -> bool: ...
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
     def source_elements_page(self, source_id: str, offset: int = 0, limit: int = 40, anchor_element_id: str = "") -> PaginatedSourceElements: ...
+    def source_elements_after(
+        self, source_id: str, after: "tuple[Any, str] | None", limit: int
+    ) -> "tuple[list[SourceElement], tuple[Any, str] | None]":
+        """One keyset page of ``source_id``'s elements in the SAME global order
+        ``source_elements`` returns (``ORDER BY created_at, id``), plus the
+        cursor for the next page (``None`` once the walk is exhausted).
+
+        This is the bounded reader for whole-source PIPELINES (re-embedding),
+        distinct from ``source_elements_page``: that one is the source-detail
+        window and pages by ``OFFSET``, which is O(n²) over a whole source.
+        The row-value comparison ``(created_at, id) > (?, ?)`` keeps every page
+        an index range seek on ``idx_source_elements_source_created``.
+
+        ``after`` carries values THIS adapter returned earlier and is never
+        reparsed or reformatted — the same contract (and the same reason) as
+        ``source_element_type_page``: PostgreSQL hands back ``timestamptz``
+        ``datetime`` values, and a text round trip could skip or repeat a row
+        at a page boundary through a microsecond/offset difference.
+
+        Unlike ``source_elements``/``source_elements_page`` this does NOT probe
+        for the source's existence: a missing source is indistinguishable from
+        an exhausted one (``([], None)``), never a ``KeyError``. Callers that
+        need the distinction take it from ``get_source`` before walking — a
+        per-page existence probe would be a query per page for a fact the walk's
+        one caller has already established.
+        """
+        ...
     def source_change_signal_rows(
         self, db: object, notebook_id: str
     ) -> list[tuple[str, str, str, bool]]:
@@ -1246,9 +1273,9 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def community_context_rows(db: object, notebook_id: str, members: object) -> list[Any]: ...
     @staticmethod
-    def delete_notebook_graph_rows(db: object, notebook_id: str) -> None: ...
+    def concept_embedding_rows(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
-    def embedding_rows(db: object, notebook_id: str) -> list[Any]: ...
+    def delete_notebook_graph_rows(db: object, notebook_id: str) -> None: ...
     @staticmethod
     def embedding_rows_for_objects(db: object, notebook_id: str, object_ids: object) -> list[Any]: ...
     @staticmethod
@@ -1261,6 +1288,11 @@ class KnowledgeStorePort(Protocol):
     def insert_object_chunk(connection: object, rows: object) -> None: ...
     @staticmethod
     def insert_object_source_rows(connection: object, rows: object) -> None: ...
+    @staticmethod
+    def prune_cluster_rows_for_source(
+        connection: object, notebook_id: str, source_id: str,
+        keep_object_ids: object = (),
+    ) -> int: ...
     @staticmethod
     def validate_source_fact_publish(
         connection: object, notebook_id: str, source_id: str,

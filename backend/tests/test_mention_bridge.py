@@ -272,6 +272,130 @@ def test_mention_alias_batches_cleanup_on_exceptional_exit(repo, monkeypatch):
     assert close_calls == 1
 
 
+# ── 单 claim 组合上限(P1 轮批 D:O(hits²) 组合爆炸加界) ─────────────────────
+
+def _seed_wide_claim_nb(repo, concept_count):
+    """一条 claim 同时提到 ``concept_count`` 个跨源概念。
+
+    别名 DF 双门约束的是「单**别名**命中多少 claim」,这里每个别名只命中 1 条,
+    双门全程不触发 —— 正是它管不到的那一维:「单条 **claim** 命中多少
+    canonical」。名字取等长且互不为子串,`sorted()` 的顺序 == 生成顺序,
+    截断集合可以直接算出来。"""
+    nb = repo.create_notebook(NotebookCreate(name="wide"))
+    for i in (1, 2, 3):
+        _mk_src(repo, nb.id, f"s{i}")
+    names = [f"conceptw{chr(97 + i // 26)}{chr(97 + i % 26)}"
+             for i in range(concept_count)]
+    concepts = lambda src: [
+        {"local_id": f"{src}-{j}", "object_type": "concept",
+         "payload": {"name": n, "section_path": "1"}, "evidence": []}
+        for j, n in enumerate(names)]
+    # 每个概念都出现在 s1/s2 两个源里 → 跨源簇(mention bridge 的准入条件)。
+    repo.store_kg(nb.id, "s1", concepts("s1"), [])
+    repo.store_kg(nb.id, "s2", concepts("s2"), [])
+    repo.store_kg(nb.id, "s3", [
+        {"local_id": "s3-0", "object_type": "claim",
+         "payload": {"name": "These are jointly evaluated: "
+                             + ", ".join(names) + ".",
+                     "section_path": "1"},
+         "evidence": []}], [])
+    repo.rebuild_unified_kg(nb.id)
+    return nb, names
+
+
+def _bridge_rows(repo, notebook_id):
+    with repo._connect() as db:
+        edges = [r["concept_canonical_id"] for r in db.execute(
+            "SELECT concept_canonical_id FROM mention_edges WHERE notebook_id=?",
+            (notebook_id,))]
+        pairs = {(r["canonical_a"], r["canonical_b"]) for r in db.execute(
+            "SELECT canonical_a, canonical_b FROM concept_comentions "
+            "WHERE notebook_id=?", (notebook_id,))}
+    return edges, pairs
+
+
+def test_comention_cap_constant_is_the_registered_literal():
+    """常量语义钉死用**字面量**:夹具从常量派生,只断言派生量的话「把上限调大」
+    这种退化变异不会变红(评审的退化变异发现)。16 → C(16,2)=120 是登记在
+    `_MENTION_MAX_CANONS_PER_CLAIM` docstring 与设计文档批 D 段里的那两个数。"""
+    from app.services.knowledge_lifecycle import _MENTION_MAX_CANONS_PER_CLAIM
+
+    assert _MENTION_MAX_CANONS_PER_CLAIM == 16
+    assert 16 * (16 - 1) // 2 == 120
+
+
+def test_comentions_below_cap_are_the_full_combination_oracle(repo):
+    """≤ 上限时逐位等于「全部两两组合」—— 加界不得改变既有输出。"""
+    from itertools import combinations
+
+    nb, _ = _seed_wide_claim_nb(repo, 12)          # < 16
+    edges, pairs = _bridge_rows(repo, nb.id)
+    assert len(edges) == 12
+    assert pairs == set(combinations(sorted(set(edges)), 2))
+    assert len(pairs) == 12 * 11 // 2
+
+
+def test_comentions_skip_the_whole_claim_past_the_cap(repo):
+    """超限:该 claim **整条**退出组合(不产出任何共提对),而不是按字典序截断 ——
+    截断会系统性偏向 ASCII 命名的概念。mention_edges(线性,检索侧真正消费的
+    产物)一条不少。"""
+    nb, _ = _seed_wide_claim_nb(repo, 22)          # > 16
+    edges, pairs = _bridge_rows(repo, nb.id)
+    assert len(edges) == 22                        # edges 不受影响
+    assert len(set(edges)) == 22
+    assert pairs == set()                          # 整条跳过 → 零共提对
+    # 反面钉:若改成「取前 16」,这里会是 120 对。
+    assert len(pairs) != 120
+
+
+def test_comention_claim_skip_is_reported_as_a_countonly_event(repo):
+    """跳过必须可观测,且事件里只有计数 —— 无 claim 正文、无 canonical id
+    (对齐隔壁 `mention_alias_df_dropped`)。"""
+    nb, _ = _seed_wide_claim_nb(repo, 22)
+    events = []
+    runtime = object.__getattribute__(repo, "_runtime")
+    original = runtime.knowledge_lifecycle.event_log.emit
+    try:
+        runtime.knowledge_lifecycle.event_log.emit = (
+            lambda payload: events.append(dict(payload)) or original(payload))
+        repo.rebuild_mention_bridge(nb.id, force=True)
+    finally:
+        runtime.knowledge_lifecycle.event_log.emit = original
+    skipped = [e for e in events if e["kind"] == "mention_comention_claim_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["skipped"] == 1
+    assert skipped[0]["max_canonicals"] == 16
+    assert set(skipped[0]) == {"kind", "notebook_id", "skipped", "max_canonicals"}
+
+
+def test_comention_claim_skip_has_no_ordering_bias(repo):
+    """无偏置的直接判据:把概念名换成「一半 ASCII、一半中文」,输出仍是**空**。
+
+    截断实现在同一夹具上会只保留 ASCII 那一半的组合(canonical id 由 `_norm`
+    派生,中文码位排在 ASCII 之后),这条用例正是那个偏置的守卫。"""
+    nb = repo.create_notebook(NotebookCreate(name="mixed"))
+    for i in (1, 2, 3):
+        _mk_src(repo, nb.id, f"s{i}")
+    names = ([f"latinconcept{chr(97 + i)}" for i in range(11)]
+             + [f"中文概念{chr(97 + i)}" for i in range(11)])
+    concepts = lambda src: [
+        {"local_id": f"{src}-{j}", "object_type": "concept",
+         "payload": {"name": n, "section_path": "1"}, "evidence": []}
+        for j, n in enumerate(names)]
+    repo.store_kg(nb.id, "s1", concepts("s1"), [])
+    repo.store_kg(nb.id, "s2", concepts("s2"), [])
+    repo.store_kg(nb.id, "s3", [
+        {"local_id": "s3-0", "object_type": "claim",
+         "payload": {"name": "These are jointly evaluated: " + "、".join(names) + "。",
+                     "section_path": "1"},
+         "evidence": []}], [])
+    repo.rebuild_unified_kg(nb.id)
+    edges, pairs = _bridge_rows(repo, nb.id)
+    assert len(set(edges)) == 22          # 中英两侧都真的命中了
+    assert any(cid.startswith("K-中文") for cid in edges)
+    assert pairs == set()                 # 无偏置:不是「只留 latin 那一半」
+
+
 def _community_queries(repo):
     from app.services.communities import CommunityQueryService
 

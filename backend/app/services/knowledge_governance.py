@@ -214,7 +214,24 @@ class KnowledgeGovernanceService:
         docstring for the degree-top-K bounding behavior above
         edge_centrality_max_nodes.
         trust_score combines evidence anchoring + cross-doc corroboration + type validity.
+
+        The store hands back a pushed-down ``has_anchor`` flag instead of every
+        edge's evidence JSON, and only the objects that actually appear on a
+        relation endpoint — see ``GovernanceStore.review_queue_rows``.  The
+        corroboration aggregation stays in Python because its grouping key runs
+        through ``edge_trust._norm``.
+
+        The object narrowing is lossless.  The anchor pushdown is lossless for
+        every evidence shape that used to produce a response, but NOT for the
+        shapes that used to produce a 500: malformed evidence TEXT and a
+        non-string ``quote`` made the old Python decode raise, and now score
+        0.0 and return normally.  That difference is deliberate and registered
+        in ``docs/superpowers/specs/2026-08-10-production-hotspot-hardening-design.md``
+        (批 A+B).  Note it does not make this endpoint total: the centrality map
+        below still parses evidence in Python, so malformed TEXT can still fail
+        further downstream.
         """
+        import heapq
         import json as _json
         from app.services.kg.edge_trust import (
             compute_trust_score, corroboration_counts,
@@ -241,7 +258,7 @@ class KnowledgeGovernanceService:
                 "source_object_id": r["source_object_id"],
                 "target_object_id": r["target_object_id"],
                 "edge_type": r["edge_type"],
-                "evidence": _json.loads(r["evidence"] or "[]"),
+                "_evidence_anchor": 1.0 if r["has_anchor"] else 0.0,
                 "source_id": r["source_id"],
                 "review_status": r["review_status"],
                 "_src_type": r["src_type"] or "",
@@ -260,7 +277,10 @@ class KnowledgeGovernanceService:
         for rel in rels:
             rid = rel["id"]
             corr_score = corroboration_score_from_count(corr_counts.get(rid, 1))
-            trust = compute_trust_score(rel, node_types, corr_score)
+            trust = compute_trust_score(
+                rel, node_types, corr_score,
+                evidence_anchor=rel["_evidence_anchor"],
+            )
             ec = edge_centrality.get(rid, 0.0)
             # review_priority = high centrality × low trust
             priority = ec * (1.0 - trust)
@@ -280,8 +300,17 @@ class KnowledgeGovernanceService:
                 "review_status": rel["review_status"],
             })
 
-        items.sort(key=lambda x: x["review_priority"], reverse=True)
-        return items[:limit]
+        # heapq.nlargest is exactly ``sorted(key=…, reverse=True)[:limit]``: its
+        # decoration carries a strictly decreasing counter, so ties resolve by
+        # input order just as a stable sort does, and it never compares the
+        # (unorderable) dicts themselves.  It is O(E log limit) instead of
+        # O(E log E) — the queue ranks every non-rejected edge but serves ~100.
+        # A NEGATIVE limit is the one shape it cannot express (``items[:-1]``
+        # means "drop the tail", not "take none"), so that path keeps the sort.
+        if limit < 0:
+            items.sort(key=lambda x: x["review_priority"], reverse=True)
+            return items[:limit]
+        return heapq.nlargest(limit, items, key=lambda x: x["review_priority"])
 
     def set_edge_review(self, notebook_id: str, rel_id: str, status: str) -> None:
         """Persist review_status on a knowledge_relation.

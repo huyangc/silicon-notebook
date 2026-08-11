@@ -356,9 +356,24 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def embedding_rows(db: sqlite3.Connection, notebook_id: str):
+    def concept_embedding_rows(db: sqlite3.Connection, notebook_id: str):
+        """This notebook's LIVE **concept** object vectors.
+
+        The one consumer is incremental fusion's no-ANN brute-force bridge
+        branch, whose two vector lookups (``new_objs`` and ``existing_items``)
+        are both ``incremental_object_rows(..., 'concept')`` results — i.e.
+        exactly ``object_type='concept' AND status!='deprecated'``. Every other
+        row this used to return (claims dominate the table at roughly 70% of
+        objects) was decoded, dimension-checked, truncated and then never read.
+        The predicates here are a verbatim copy of that consumer's, so the
+        surviving keys — and therefore the branch's output — are unchanged.
+        """
         return db.execute(
-            "SELECT object_id, vector FROM knowledge_embeddings WHERE notebook_id=?",
+            "SELECT e.object_id AS object_id, e.vector AS vector "
+            "FROM knowledge_embeddings e "
+            "JOIN knowledge_objects o ON o.id = e.object_id "
+            "WHERE e.notebook_id=? AND o.object_type='concept' "
+            "AND o.status!='deprecated'",
             (notebook_id,),
         ).fetchall()
 
@@ -1769,6 +1784,61 @@ class KnowledgeStore:
             "DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,)
         )
 
+    @classmethod
+    def prune_cluster_rows_for_source(
+        cls,
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_id: str,
+        keep_object_ids: Iterable[str] = (),
+    ) -> int:
+        """Drop this source's ``concept_clusters`` membership rows EXCEPT the
+        ones whose object survives — the knowhow projector's companion to
+        ``delete_objects_by_source``, run in that same write transaction.
+
+        The projector deletes-and-reinserts under STABLE hashed ids, so a plain
+        "delete every membership row of this source" would strip the cluster
+        membership of objects that are about to be written straight back
+        (that is why ``_delete_object_id_batch``'s own cleanup is deliberately
+        NOT reused here). ``keep_object_ids`` is the set the caller is about to
+        reinsert; only the difference — objects the reprojection genuinely
+        dropped (a deleted column, a deleted row, a renamed cell) — loses its
+        membership rows. ``delete_table_projection`` passes nothing and so
+        cleans all of them.
+
+        Must be called BEFORE the objects are deleted: the stale set is derived
+        from the rows still in ``knowledge_objects`` for this source
+        (``idx_knowledge_objects_source``), which is exactly the scan
+        ``delete_objects_by_source`` performs a statement later. Bounded by one
+        knowhow table's projection, the same scale the caller already holds in
+        memory as ``object_rows``. Returns the number of membership rows
+        deleted.
+
+        With this in place the repository has ZERO paths that leave a dangling
+        membership row behind, which is what lets the fusion-side sweep be a
+        pure per-process legacy backstop (see ``incremental_fuse_source``).
+        """
+        keep = set(keep_object_ids)
+        stale = [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM knowledge_objects WHERE source_id = ?",
+                (source_id,),
+            ).fetchall()
+            if row["id"] not in keep
+        ]
+        deleted = 0
+        for offset in range(0, len(stale), _DELETE_OBJECT_BATCH_SIZE):
+            batch = stale[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            cursor = connection.execute(
+                f"DELETE FROM concept_clusters "
+                f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
+                (notebook_id, *batch),
+            )
+            deleted += int(cursor.rowcount or 0)
+        return deleted
+
     @staticmethod
     def delete_relations_by_source_object(
         connection: sqlite3.Connection, notebook_id: str, source_object_id: str
@@ -2066,9 +2136,49 @@ class KnowledgeStore:
 
     @classmethod
     def _delete_object_id_batch(
-        cls, db: sqlite3.Connection, object_ids: Sequence[str]
+        cls, db: sqlite3.Connection, notebook_id: str, object_ids: Sequence[str]
     ) -> None:
-        """Delete one already-bounded object batch and its derived rows."""
+        """Delete one already-bounded object batch and its derived rows.
+
+        The ``concept_clusters`` membership rows go with the objects, in this
+        same transaction, keyed by ``member_object_id`` (``idx_clusters_member``
+        — one indexed seek per id, no notebook-wide work). Previously nothing
+        removed them here and every dangling row waited for
+        ``incremental_fuse_source``'s notebook-wide orphan anti-join, which a
+        multi-million-object library re-paid on EVERY extracted source. Deleting
+        them at the source keeps that sweep a rare backstop (see the gate in
+        ``incremental_fuse_source``).
+
+        The ``notebook_id`` predicate rides along so this statement is the
+        byte-for-byte same SEMANTICS as the ``sweep_orphan_clusters`` it
+        replaces, rather than resting on three remote facts (ids are a global
+        primary key, deep copy remints them, the batch came from a
+        notebook-scoped query). ``idx_clusters_member`` still drives the seek —
+        the notebook column is a free residual filter on the handful of rows a
+        member id can match.
+
+        ⚠ This is safe HERE and deliberately NOT done in the knowhow projector's
+        ``delete_objects_by_source`` / ``delete_objects_by_source_and_row``.
+        Every caller of this path (source delete, reparse,
+        ``store_kg(replace_source=True)``) either drops the objects for good or
+        re-mints FRESH ids, so the membership rows really are dead. The knowhow
+        projector deletes and re-inserts under STABLE hashed ids in one
+        transaction — cleaning its cluster rows would strip a still-live
+        object's membership until the next full rebuild. Its dangling rows stay
+        the deferred sweep's job (it runs after the re-insert has committed, so
+        it correctly sees those objects alive), and its callers bump
+        ``kg_mutation_seq``, which is exactly what re-opens that sweep's gate.
+
+        Deliberately NO ``cluster_mutation_seq`` bump here (the orphan sweep
+        does bump). Reasons, registered: (a) that counter's consumers are cache
+        identities that also carry ``kg_mutation_seq``, and every caller of this
+        path bumps the latter at the service layer — ``store_kg`` /
+        ``delete_source`` / reparse-then-extract; (b) the one caller that does
+        not (reparse with KG extraction disabled) also deletes the OBJECTS
+        without a bump today, and no fusion runs in that configuration at all,
+        so those cluster rows used to linger indefinitely — removing them
+        earlier is strictly closer to the truth, never further from it.
+        """
         batch = list(object_ids[:_DELETE_OBJECT_BATCH_SIZE])
         if not batch:
             return
@@ -2077,6 +2187,11 @@ class KnowledgeStore:
             f"DELETE FROM knowledge_embeddings "
             f"WHERE object_id IN ({placeholders})",
             batch,
+        )
+        db.execute(
+            f"DELETE FROM concept_clusters "
+            f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
+            (notebook_id, *batch),
         )
         db.execute(
             f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
@@ -2113,13 +2228,13 @@ class KnowledgeStore:
             if not stale_batch:
                 break
             stale_after_id = stale_batch[-1]
-            self._delete_object_id_batch(db, stale_batch)
+            self._delete_object_id_batch(db, notebook_id, stale_batch)
         self.delete_relations_for_source(db, source_id)
         while True:
             direct_batch = self._direct_object_ids_for_source_batch(db, source_id)
             if not direct_batch:
                 break
-            self._delete_object_id_batch(db, direct_batch)
+            self._delete_object_id_batch(db, notebook_id, direct_batch)
 
     def clear_source_extraction_state(
         self,

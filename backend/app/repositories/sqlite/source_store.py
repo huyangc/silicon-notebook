@@ -324,6 +324,61 @@ class SourceStore:
             for row in rows
         ]
 
+    def source_elements_after(
+        self,
+        source_id: str,
+        after: "tuple[object, str] | None",
+        limit: int,
+    ) -> "tuple[List[SourceElement], tuple[object, str] | None]":
+        """One keyset page of this source's elements + the next cursor.
+
+        Same global order as ``source_elements`` (``created_at, id``), so a
+        whole-source walk visits exactly the same elements in exactly the same
+        sequence — only bounded. ``source_elements_page`` deliberately is NOT
+        reused for that: it pages by ``OFFSET`` (and clamps ``limit`` to 100
+        for the detail view), which makes a full-source walk quadratic.
+
+        The row-value comparison is the same deliberate spelling as
+        ``source_element_type_page``: SQLite optimizes ``(a, b) > (?, ?)``
+        against the multi-column ``idx_source_elements_source_created``, while
+        the ``created_at > ? OR (created_at = ? AND id > ?)`` form degrades
+        into a scan of the whole source range on every page.
+
+        ``after`` values are handed straight back unparsed. ``None`` is
+        returned as the next cursor once the page came up short — the caller
+        stops without a final empty query.
+        """
+        limit = max(1, int(limit))
+        params: List[object] = [source_id]
+        clause = ""
+        if after is not None:
+            clause = "AND (created_at, id) > (?, ?) "
+            params.extend([after[0], after[1]])
+        params.append(limit)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id, source_id, element_type, location_label, text, "
+                "metadata, created_at FROM source_elements WHERE source_id = ? "
+                f"{clause}"
+                "ORDER BY created_at, id LIMIT ?",
+                params,
+            ).fetchall()
+        items = [
+            SourceElement(
+                id=row["id"],
+                source_id=row["source_id"],
+                element_type=row["element_type"],
+                location_label=row["location_label"],
+                text=row["text"],
+                metadata=json.loads(row["metadata"] or "{}"),
+            )
+            for row in rows
+        ]
+        next_after = (
+            (rows[-1]["created_at"], rows[-1]["id"]) if len(rows) == limit else None
+        )
+        return items, next_after
+
     def source_elements_page(
         self,
         source_id: str,

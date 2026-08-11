@@ -14,6 +14,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from app.core.json_safety import validate_finite_json
+from app.core.text_whitespace import PY_STRIP_WHITESPACE
 from app.repositories.postgres._store_utils import (
     execute_many,
     iso_timestamp,
@@ -32,6 +33,27 @@ from app.services.knowledge_contracts import (
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
+
+# Pagination width for the review queue's endpoint-object lookup — a page size,
+# not a cap: every endpoint id is fetched.  500 is the store-wide convention
+# (``_DELETE_OBJECT_BATCH_SIZE`` / ``CHUNK_ELEMENT_LOOKUP_BATCH``).
+_REVIEW_ENDPOINT_LOOKUP_BATCH = 500
+
+
+def _review_endpoint_ids(relation_rows) -> List[str]:
+    """Distinct object ids appearing on either end of the given relations,
+    in first-seen order.  Order only has to be deterministic: the caller folds
+    the rows into ``{id: …}`` dicts."""
+    seen: set = set()
+    ordered: List[str] = []
+    for row in relation_rows:
+        for object_id in (row["source_object_id"], row["target_object_id"]):
+            if object_id and object_id not in seen:
+                seen.add(object_id)
+                ordered.append(object_id)
+    return ordered
+
+
 def _json_document(value: Any, *, expected: type, field: str):
     if isinstance(value, str):
         value = json.loads(value)
@@ -97,15 +119,31 @@ def _base_dedup_rows_for_update(
     concurrent merge that won first is therefore visible here; one that loses
     waits and recomputes from the promotion's committed evidence instead of
     either writer overwriting the other.
+
+    ``evidence`` is intentionally NOT selected: seed matching reads only
+    ``payload``, and at most one row is merged into, whose evidence
+    ``base_dedup_evidence`` re-reads by primary key while this transaction still
+    holds its FOR UPDATE lock.  The lock set, the ORDER BY and the WHERE clause
+    are unchanged — only the projection got thinner.
     """
     return connection.execute(
-        "SELECT id,payload,evidence FROM knowledge_objects "
+        "SELECT id,payload FROM knowledge_objects "
         "WHERE notebook_id=%s AND object_type=%s AND status IN ({}) "
         "ORDER BY id COLLATE \"C\" FOR UPDATE".format(
             ",".join("%s" for _ in USABLE_STATUSES)
         ),
         (base_notebook_id, object_type, *USABLE_STATUSES),
     ).fetchall()
+
+
+def base_dedup_evidence(connection: Any, object_id: str) -> list:
+    """Evidence of the ONE base object a promotion deduped onto — read by
+    primary key inside the transaction that already locked it FOR UPDATE, so the
+    value is identical to what the (now thinner) corpus read used to carry."""
+    row = connection.execute(
+        "SELECT evidence FROM knowledge_objects WHERE id=%s", (object_id,)
+    ).fetchone()
+    return json_value(row["evidence"], []) if row is not None else []
 
 
 def seed_fn_for(object_type: str):
@@ -290,22 +328,45 @@ class GovernanceStore:
     def review_queue_rows(
         connection: Any, notebook_id: str
     ) -> "tuple[List[dict], List[dict]]":
+        """SQLite ``GovernanceStore.review_queue_rows``'s mirror — see that
+        docstring for why ``evidence`` became a pushed-down ``has_anchor`` flag
+        and why objects are now fetched per relation endpoint.  jsonb makes the
+        predicate shorter here (no json_valid guard: the column is already
+        parsed, only its top-level type needs checking).
+
+        The endpoint lookup keeps its ``notebook_id`` predicate in SQL: unlike
+        SQLite, PostgreSQL plans ``notebook_id = %s AND id = ANY(%s)`` as an
+        ``pk_knowledge_objects`` scan with ``notebook_id`` as a filter, so there
+        is no full-partition regression to dodge here."""
         relations = connection.execute(
             "SELECT kr.id, kr.source_object_id, kr.target_object_id, "
-            "kr.edge_type, kr.evidence, kr.source_id, kr.review_status, "
+            "kr.edge_type, kr.source_id, kr.review_status, "
+            "EXISTS (SELECT 1 FROM jsonb_array_elements("
+            "  CASE WHEN jsonb_typeof(kr.evidence) = 'array' "
+            "  THEN kr.evidence ELSE '[]'::jsonb END) AS ev(value) "
+            " WHERE jsonb_typeof(ev.value) = 'object' "
+            "   AND jsonb_typeof(ev.value -> 'quote') = 'string' "
+            "   AND btrim(ev.value ->> 'quote', %s) <> ''"
+            ") AS has_anchor, "
             "ko_s.object_type AS src_type, ko_t.object_type AS tgt_type "
             "FROM knowledge_relations kr "
             "LEFT JOIN knowledge_objects ko_s ON ko_s.id = kr.source_object_id "
             "LEFT JOIN knowledge_objects ko_t ON ko_t.id = kr.target_object_id "
             "WHERE kr.notebook_id = %s AND kr.review_status != 'rejected'",
-            (notebook_id,),
+            (PY_STRIP_WHITESPACE, notebook_id),
         ).fetchall()
-        objects = connection.execute(
-            "SELECT id, object_type, payload FROM knowledge_objects "
-            "WHERE notebook_id = %s", (notebook_id,)
-        ).fetchall()
+
+        endpoint_ids = _review_endpoint_ids(relations)
+        objects: List[Any] = []
+        for offset in range(0, len(endpoint_ids), _REVIEW_ENDPOINT_LOOKUP_BATCH):
+            batch = endpoint_ids[offset : offset + _REVIEW_ENDPOINT_LOOKUP_BATCH]
+            objects.extend(connection.execute(
+                "SELECT id, object_type, payload FROM knowledge_objects "
+                "WHERE notebook_id = %s AND id = ANY(%s)",
+                (notebook_id, batch),
+            ).fetchall())
         return (
-            _compat_rows(relations, json_columns=(("evidence", []),)),
+            _compat_rows(relations),
             _compat_rows(objects, json_columns=(("payload", {}),)),
         )
 
@@ -1154,9 +1215,8 @@ class GovernanceStore:
             )
             base_match_id = find_base_dedup_match(object_type, payload, base_objs)
             if base_match_id:
-                matched = next(row for row in base_objs if row["id"] == base_match_id)
                 merged_evidence = merge_evidence_lists(
-                    json_value(matched["evidence"], []), evidence
+                    base_dedup_evidence(connection, base_match_id), evidence
                 )
                 connection.execute(
                     "UPDATE knowledge_objects SET evidence=%s,updated_at=%s WHERE id=%s",
@@ -1291,9 +1351,8 @@ class GovernanceStore:
 
         if base_match_id:
             # Merge: combine evidence into the matched base object; keep its id.
-            matched = next(b for b in base_objs if b["id"] == base_match_id)
             merged_evidence = merge_evidence_lists(
-                json_value(matched["evidence"], []), src_evidence
+                base_dedup_evidence(connection, base_match_id), src_evidence
             )
             connection.execute(
                 "UPDATE knowledge_objects SET evidence=%s, updated_at=%s WHERE id=%s",
