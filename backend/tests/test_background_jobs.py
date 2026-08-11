@@ -557,6 +557,81 @@ def test_capacity_admits_configured_number_of_jobs_per_pool(gate_capacity):
     assert order == ["occupy", "occupy", "third"]
 
 
+def test_queued_maintenance_jobs_share_fixed_workers_not_one_waiting_thread_each(
+    gate_capacity,
+):
+    """队列里的每个 job 只能有句柄，不能各自占一个阻塞在 semaphore 的线程。"""
+    occupying, release = _occupy_one_slot("buildkg-nb-a")
+    queued = [
+        background_jobs.submit(lambda: None, name=f"rebuildkg-nb-{index}")
+        for index in range(8)
+    ]
+
+    executor = background_jobs._executors[background_jobs._HEAVY_POOL]
+    assert executor.capacity == 1
+    assert len(executor._workers) == 1
+    assert sum(worker.is_alive() for worker in executor._workers) == 1
+    assert all(handle.is_alive() for handle in queued)
+
+    release.set()
+    for handle in (occupying, *queued):
+        handle.join(timeout=5)
+        assert not handle.is_alive()
+
+
+def test_maintenance_job_handle_cannot_be_started_twice(gate_capacity):
+    """句柄已经代表已提交任务；start() 不能悄悄另起一个空 Thread。"""
+    done = threading.Event()
+    handle = background_jobs.submit(done.set, name="buildkg-nb-a")
+    with pytest.raises(RuntimeError, match="already submitted"):
+        handle.start()
+    assert done.wait(timeout=5)
+    handle.join(timeout=5)
+
+
+def test_shared_worker_logs_and_survives_base_exception(gate_capacity, caplog):
+    """SystemExit 不得杀掉固定 worker，日志只能带池/类别而不能泄露异常内容。"""
+    ran = threading.Event()
+
+    def exiting() -> None:
+        raise SystemExit("private job detail")
+
+    with caplog.at_level(logging.ERROR, logger="silicon_notebook.jobs"):
+        exiting_handle = background_jobs.submit(exiting, name="buildkg-nb-private")
+        exiting_handle.join(timeout=5)
+        following = background_jobs.submit(ran.set, name="rebuildkg-nb-a")
+        assert ran.wait(timeout=5)
+        following.join(timeout=5)
+
+    assert "background worker survived base exception" in caplog.text
+    assert "pool=maintenance" in caplog.text
+    assert "operation=buildkg" in caplog.text
+    assert "private job detail" not in caplog.text
+
+
+def test_queued_maintenance_job_uses_submit_time_context_snapshot(gate_capacity):
+    """固定 worker 不继承请求上下文，必须运行每个 job 自己捕获的 Context。"""
+    occupying, release = _occupy_one_slot("buildkg-nb-a")
+    token = _probe.set("queued-caller-value")
+    try:
+        seen = {}
+        done = threading.Event()
+
+        def queued_job() -> None:
+            seen["value"] = _probe.get()
+            done.set()
+
+        queued = background_jobs.submit(queued_job, name="rebuildkg-nb-b")
+    finally:
+        _probe.reset(token)
+
+    release.set()
+    assert done.wait(timeout=5)
+    occupying.join(timeout=5)
+    queued.join(timeout=5)
+    assert seen["value"] == "queued-caller-value"
+
+
 def test_unnamed_job_is_never_gated_by_callable_name(gate_capacity):
     """准入只看显式 name:一个恰好叫 buildkg 的函数不得因此进闸。"""
     occupying, release = _occupy_one_slot("buildkg-nb-a")

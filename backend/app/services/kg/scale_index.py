@@ -10,7 +10,7 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import scipy.sparse as sp
@@ -54,6 +54,10 @@ def decode_viz_edges(raw) -> list:
 
 _VIZ_EDGE_SRC_KEY = "viz_edge_src"
 _VIZ_EDGE_LEGACY_KEY = "viz_edges"
+_VIZ_EDGE_ORDER_KEY = "viz_edge_src_order"
+_VIZ_EDGE_INDPTR_KEY = "viz_edge_src_indptr"
+_VIZ_DEG_ORDER_KEY = "viz_deg_order"
+_VIZ_AUX_VALIDATION_CHUNK_ROWS = 1_000_000
 
 
 def _viz_code_dtype(n_types: int):
@@ -72,9 +76,9 @@ class VizEdgeSet:
     数组:端点存 ``viz_ids`` 下标(int32),edge_type 存**逐文件**去重字符串表的
     下标(内置 12 种边不硬编码,管理员扩展类型照样进表)。
 
-    派生索引惰性构建并缓存:``by_src()`` 一次 O(E log E) 的 numpy 排序换来
-    ``edge_type_at`` 的 O(deg) 查询。并发首次访问最多重复算一次同样的结果
-    (幂等,写的是同一个值),因此不加锁。
+    新产物把 ``by_src()`` 的稳定置换与分段边界一同落盘,请求加载后直接复用;
+    旧产物仍惰性构建并缓存,保持 older-index-stays-valid。并发首次访问老产物
+    最多重复算一次同样的结果(幂等,写的是同一个值),因此不加锁。
     """
 
     src: "np.ndarray"        # int32,viz_ids 下标
@@ -100,12 +104,16 @@ class VizEdgeSet:
                    table[int(code[i])]]
 
     def by_src(self):
-        """(order, indptr):order 是按 src **稳定**排序的边下标置换,indptr 是
-        逐节点的分段边界。稳定性是语义的一部分——段内保持原边序,
-        ``edge_type_at`` 才能复现「同一 (s,t) 取最后一条」的字典覆盖语义。"""
+        """(order, indptr):按 ``(src,dst,原边下标)`` 排序的边下标置换及
+        source 分段边界。
+
+        dst 次序让热路径能在高出度 source 段上间接二分，不读取整段；原边下标
+        是末级键，所以同一 (s,t) 的最后一项仍精确复现历史字典覆盖语义。
+        """
         cache = self.__dict__.get("_by_src_cache")
         if cache is None:
-            order = np.argsort(self.src, kind="stable")
+            original = np.arange(len(self), dtype=np.int64)
+            order = np.lexsort((original, self.dst, self.src))
             indptr = np.zeros(int(self.n_nodes) + 1, dtype=np.int64)
             if len(self):
                 counts = np.bincount(self.src, minlength=int(self.n_nodes))
@@ -113,6 +121,186 @@ class VizEdgeSet:
             cache = (order, indptr)
             self._by_src_cache = cache
         return cache
+
+    def install_by_src(self, order, indptr) -> bool:
+        """校验并安装落盘的 by-source 辅助数组。
+
+        辅助数组缺失/损坏不影响图的事实数据:返回 False,调用方随后仍可走
+        ``by_src`` 的惰性兼容路径。验证既检查置换,也严格检查
+        ``(src,dst,原边下标)`` 次序和 source 边界,避免旧版仅按 src 排序的辅助
+        数组被误当成可二分的新索引。
+        """
+        try:
+            order = np.asarray(order).ravel()
+            indptr = np.asarray(indptr).ravel()
+        except (TypeError, ValueError):
+            return False
+        n_edges = len(self)
+        n_nodes = int(self.n_nodes)
+        if (
+            not np.issubdtype(order.dtype, np.integer)
+            or not np.issubdtype(indptr.dtype, np.integer)
+            or len(order) != n_edges
+            or len(indptr) != n_nodes + 1
+        ):
+            return False
+        order = order.astype(np.int64, copy=False)
+        indptr = indptr.astype(np.int64, copy=False)
+        if (
+            int(indptr[0]) != 0
+            or int(indptr[-1]) != n_edges
+            or bool(np.any(indptr[1:] < indptr[:-1]))
+        ):
+            return False
+        if n_edges:
+            if bool(np.any(order < 0)) or bool(np.any(order >= n_edges)):
+                return False
+            # A bool marker proves permutation-ness with one byte/edge; bincount
+            # would transiently allocate an int64 array as wide as the graph.
+            seen = np.zeros(n_edges, dtype=bool)
+            seen[order] = True
+            if not bool(seen.all()):
+                return False
+            del seen
+            previous = None
+            # Strict lexicographic validation in bounded windows: do not hold
+            # src[order], dst[order] and several boolean masks at E width.
+            for start in range(0, n_edges, _VIZ_AUX_VALIDATION_CHUNK_ROWS):
+                stop = min(n_edges, start + _VIZ_AUX_VALIDATION_CHUNK_ROWS)
+                chunk_order = order[start:stop]
+                chunk_sources = self.src[chunk_order]
+                chunk_targets = self.dst[chunk_order]
+                if previous is not None:
+                    first = (
+                        int(chunk_sources[0]), int(chunk_targets[0]),
+                        int(chunk_order[0]),
+                    )
+                    if first < previous:
+                        return False
+                same_source = chunk_sources[1:] == chunk_sources[:-1]
+                if (
+                    bool(np.any(chunk_sources[1:] < chunk_sources[:-1]))
+                    or bool(np.any(
+                        same_source
+                        & (chunk_targets[1:] < chunk_targets[:-1])
+                    ))
+                    or bool(np.any(
+                        same_source
+                        & (chunk_targets[1:] == chunk_targets[:-1])
+                        & (chunk_order[1:] < chunk_order[:-1])
+                    ))
+                ):
+                    return False
+                previous = (
+                    int(chunk_sources[-1]), int(chunk_targets[-1]),
+                    int(chunk_order[-1]),
+                )
+            counts = np.bincount(self.src, minlength=n_nodes)
+            if not np.array_equal(np.diff(indptr), counts[:n_nodes]):
+                return False
+        self._by_src_cache = (order, indptr)
+        return True
+
+    def _pair_edge_range(self, order, lo: int, hi: int, target: int):
+        """在一个 source 段内按间接 dst 值二分，返回目标 pair 的半开区间。
+
+        不能先做 ``self.dst[order[lo:hi]]``：高出度 hub 会因此仍读取完整邻接段。
+        标量间接探针把未命中 target 的成本保持在 O(log degree)。
+        """
+        left, right = int(lo), int(hi)
+        while left < right:
+            middle = (left + right) // 2
+            if int(self.dst[int(order[middle])]) < target:
+                left = middle + 1
+            else:
+                right = middle
+        first = left
+        right = int(hi)
+        while left < right:
+            middle = (left + right) // 2
+            if int(self.dst[int(order[middle])]) <= target:
+                left = middle + 1
+            else:
+                right = middle
+        return first, left
+
+    def induced_edge_indices(self, node_indices) -> "np.ndarray":
+        """原边序返回 ``node_indices`` 诱导子图中的边下标。
+
+        对每个 kept source×kept target 在 dst-sorted source 段内间接二分，只
+        读取命中 pair 的原边下标。因此即使 kept source 是百万出度 hub，小 core
+        也不会扫描整个邻接段。最后按原边下标排序，精确保留旧输出顺序。
+        全节点路径直接返回连续下标，不经过辅助索引。
+        """
+        keep = {
+            int(value) for value in node_indices
+            if 0 <= int(value) < int(self.n_nodes)
+        }
+        if not keep or not len(self):
+            return np.zeros(0, dtype=np.int64)
+        if len(keep) >= int(self.n_nodes):
+            return np.arange(len(self), dtype=np.int64)
+        order, indptr = self.by_src()
+        matches = []
+        targets = sorted(keep)
+        for source in sorted(keep):
+            if not (0 <= source < int(self.n_nodes)):
+                continue
+            lo, hi = int(indptr[source]), int(indptr[source + 1])
+            if lo >= hi:
+                continue
+            for target in targets:
+                pair_lo, pair_hi = self._pair_edge_range(
+                    order, lo, hi, target
+                )
+                if pair_lo < pair_hi:
+                    matches.append(order[pair_lo:pair_hi])
+        if not matches:
+            return np.zeros(0, dtype=np.int64)
+        selected = matches[0] if len(matches) == 1 else np.concatenate(matches)
+        # The auxiliary order groups pairs; legacy output follows the original
+        # edge stream. Sorting original indices is precisely that order.
+        return np.sort(selected, kind="stable")
+
+    def edge_types_at_many(self, pairs, default=None) -> list:
+        """批量查询有向边类型,结果与 ``pairs`` 对齐。
+
+        每个不同 (source,target) 在 dst-sorted source 段内只做两次间接二分；
+        同一 (s,t) 多边仍取原序最后一条。高出度焦点不会为一个小邻居窗口扫描
+        整段，更不会为每个邻居重复扫描。
+        """
+        pairs = list(pairs)
+        result = [default] * len(pairs)
+        if not pairs or not len(self):
+            return result
+        wanted_pairs: dict = {}
+        for result_index, pair in enumerate(pairs):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            source, target = pair
+            if source is None or target is None:
+                continue
+            source = int(source)
+            if not (0 <= source < int(self.n_nodes)):
+                continue
+            wanted_pairs.setdefault((source, int(target)), []).append(result_index)
+        if not wanted_pairs:
+            return result
+
+        order, indptr = self.by_src()
+        table = self.type_table
+        for (source, target), slots in wanted_pairs.items():
+            lo, hi = int(indptr[source]), int(indptr[source + 1])
+            pair_lo, pair_hi = self._pair_edge_range(order, lo, hi, target)
+            if pair_lo >= pair_hi:
+                continue
+            # original index is the final sort key, so the last position is the
+            # same last-write winner as the historical dict.
+            edge_index = int(order[pair_hi - 1])
+            edge_type = table[int(self.code[edge_index])]
+            for result_index in slots:
+                result[result_index] = edge_type
+        return result
 
     def edge_type_at(self, s_idx, t_idx, default=None):
         """有向边 (s_idx → t_idx) 的 edge_type;没有这条边返回 ``default``。
@@ -131,11 +319,12 @@ class VizEdgeSet:
         lo, hi = int(indptr[s_idx]), int(indptr[s_idx + 1])
         if lo >= hi:
             return default
-        segment = order[lo:hi]
-        hits = np.nonzero(self.dst[segment] == int(t_idx))[0]
-        if hits.size == 0:
+        pair_lo, pair_hi = self._pair_edge_range(
+            order, lo, hi, int(t_idx)
+        )
+        if pair_lo >= pair_hi:
             return default
-        return self.type_table[int(self.code[int(segment[int(hits[-1])])])]
+        return self.type_table[int(self.code[int(order[pair_hi - 1])])]
 
     @classmethod
     def from_columns(cls, src, dst, code, type_table, n_nodes: int) -> "VizEdgeSet":
@@ -263,11 +452,14 @@ def viz_edge_count_is_authoritative(z) -> bool:
 
 def viz_edge_npz_arrays(edge_set: VizEdgeSet) -> dict:
     """VizEdgeSet → np.savez 的关键字参数(紧凑键)。"""
+    order, indptr = edge_set.by_src()
     return {
         "viz_edge_src": np.asarray(edge_set.src, dtype=np.int32),
         "viz_edge_dst": np.asarray(edge_set.dst, dtype=np.int32),
         "viz_edge_code": np.asarray(edge_set.code),
         "viz_edge_types": np.asarray(edge_set.type_table, dtype=object),
+        _VIZ_EDGE_ORDER_KEY: np.asarray(order, dtype=np.int64),
+        _VIZ_EDGE_INDPTR_KEY: np.asarray(indptr, dtype=np.int64),
     }
 
 
@@ -276,10 +468,14 @@ def viz_edge_set_from_npz(z, viz_ids) -> VizEdgeSet:
     成紧凑数组后释放中间 list(不常驻);两者都没有 → 空边集。"""
     files = set(getattr(z, "files", ()) or ())
     if _VIZ_EDGE_SRC_KEY in files:
-        return VizEdgeSet.from_arrays(
+        edge_set = VizEdgeSet.from_arrays(
             z["viz_edge_src"], z["viz_edge_dst"], z["viz_edge_code"],
             list(z["viz_edge_types"]), len(viz_ids),
         )
+        if _VIZ_EDGE_ORDER_KEY in files and _VIZ_EDGE_INDPTR_KEY in files:
+            edge_set.install_by_src(
+                z[_VIZ_EDGE_ORDER_KEY], z[_VIZ_EDGE_INDPTR_KEY])
+        return edge_set
     if _VIZ_EDGE_LEGACY_KEY in files:
         return VizEdgeSet.from_rows(
             decode_viz_edges(z[_VIZ_EDGE_LEGACY_KEY]), viz_ids)
@@ -316,6 +512,80 @@ class VizArraysMixin:
                 )
             self._viz_deg_order_cache = cache
         return cache
+
+    def install_viz_deg_order(self, order) -> bool:
+        """校验并安装落盘的稳定 degree order;坏/旧辅助数组回退惰性重算。"""
+        try:
+            order = np.asarray(order).ravel()
+            deg = np.asarray(self.viz_deg)
+        except (TypeError, ValueError):
+            return False
+        n_nodes = len(self.viz_ids or [])
+        if (
+            not np.issubdtype(order.dtype, np.integer)
+            or len(order) != n_nodes
+            or deg.ndim != 1
+            or len(deg) != n_nodes
+            or not np.issubdtype(deg.dtype, np.integer)
+        ):
+            return False
+        order = order.astype(np.int64, copy=False)
+        if n_nodes:
+            if bool(np.any(order < 0)) or bool(np.any(order >= n_nodes)):
+                return False
+            seen = np.zeros(n_nodes, dtype=bool)
+            seen[order] = True
+            if not bool(seen.all()):
+                return False
+        deg = deg.astype(np.int64, copy=False)
+        ordered_deg = deg[order]
+        if (
+            n_nodes > 1
+            and (
+                bool(np.any(ordered_deg[1:] > ordered_deg[:-1]))
+                or bool(np.any(
+                    (ordered_deg[1:] == ordered_deg[:-1])
+                    & (order[1:] < order[:-1])
+                ))
+            )
+        ):
+            return False
+        self._viz_deg_order_cache = order
+        return True
+
+
+def viz_deg_order_array(viz_deg) -> "np.ndarray":
+    """构建期生成可持久化的稳定 degree order。"""
+    if viz_deg is None:
+        return np.zeros(0, dtype=np.int64)
+    return np.argsort(-np.asarray(viz_deg, dtype=np.int64), kind="stable")
+
+
+def viz_arrays_shape_error(viz_ids, viz_deg, viz_types, viz_names,
+                           viz_adj=None) -> str | None:
+    """Validate the shared core viz arrays before installing auxiliaries.
+
+    Missing auxiliary keys are a legacy compatibility case, but a short or
+    non-integral degree vector is corrupt fact data: attempting to validate a
+    persisted order against it used to raise IndexError from the request-time
+    loader. Return a stable counts-only detail for the loader's unusable path.
+    """
+    n_nodes = len(viz_ids or [])
+    try:
+        degree = np.asarray(viz_deg)
+    except (TypeError, ValueError):
+        return "viz_deg 类型非法"
+    if (
+        degree.ndim != 1
+        or len(degree) != n_nodes
+        or not np.issubdtype(degree.dtype, np.integer)
+    ):
+        return "viz_deg 与 viz_ids 形状或类型不一致"
+    if len(viz_types or []) != n_nodes or len(viz_names or []) != n_nodes:
+        return "viz 标签数组与 viz_ids 长度不一致"
+    if viz_adj is not None and tuple(viz_adj.shape) != (n_nodes, n_nodes):
+        return "viz_adj 与 viz_ids 形状不一致"
+    return None
 
 
 @dataclass
@@ -445,6 +715,7 @@ def load_scale_index(out_dir: str):
         return _unusable(out_dir, detail)
 
     viz_ids = viz_adj = viz_deg = viz_types = viz_names = viz_edges = None
+    viz_deg_order = None
     viz_edges_authoritative = False
     chunk_ann_labels = chunk_ann_path = None
     chunk_ann_source_names = None
@@ -461,8 +732,15 @@ def load_scale_index(out_dir: str):
                     viz_types = list(z["viz_types"])
                     viz_names = list(z["viz_names"])
                     viz_edges = viz_edge_set_from_npz(z, viz_ids)
+                    if _VIZ_DEG_ORDER_KEY in z.files:
+                        viz_deg_order = np.asarray(z[_VIZ_DEG_ORDER_KEY])
                     viz_edges_authoritative = viz_edge_count_is_authoritative(z)
                 viz_adj = sp.load_npz(viz_adj_path)
+                viz_detail = viz_arrays_shape_error(
+                    viz_ids, viz_deg, viz_types, viz_names, viz_adj
+                )
+                if viz_detail is not None:
+                    return _unusable(out_dir, viz_detail)
 
         if manifest.get("has_chunk_ann"):
             labpath = os.path.join(out_dir, "chunk_ann_labels.npy")
@@ -575,7 +853,7 @@ def load_scale_index(out_dir: str):
     if detail is not None:
         return _unusable(out_dir, detail)
 
-    return ScaleIndex(
+    index = ScaleIndex(
         node_ids=node_ids,
         node_index={n: i for i, n in enumerate(node_ids)},
         transition=transition,
@@ -598,6 +876,12 @@ def load_scale_index(out_dir: str):
         relation_ann_labels=relation_ann_labels,
         relation_ann_path=relation_ann_path,
     )
+    if viz_deg_order is not None:
+        # Invalid auxiliary data is safe to ignore: previous compact artifacts
+        # may carry the older src-only edge order, and both helpers have exact
+        # lazy rebuilds. Core viz array corruption was rejected above.
+        index.install_viz_deg_order(viz_deg_order)
+    return index
 
 
 def personalized_ppr(
@@ -820,6 +1104,7 @@ def save_scale_index(
             os.path.join(out_dir, "viz.npz"),
             viz_ids=np.asarray(viz_ids, dtype=object),
             viz_deg=np.asarray(viz_deg, dtype=np.int32),
+            viz_deg_order=viz_deg_order_array(viz_deg),
             viz_types=np.asarray(viz_types, dtype=object),
             viz_names=np.asarray(viz_names, dtype=object),
             **viz_edge_npz_arrays(
@@ -1029,6 +1314,94 @@ def splice_csr(
         src, tgt = base_src, base_tgt
     w = np.ones(src.size, dtype=np.float64)
     return combined_ids, _column_stochastic(n, src, tgt, w)
+
+
+def splice_csr_many(
+    base_ids: List[str],
+    base_transition: "sp.csr_matrix",
+    extras: "Sequence[Tuple[List[str], sp.csr_matrix]]",
+) -> Tuple[List[str], "sp.csr_matrix"]:
+    """Combine several indexed graphs with one final CSR construction.
+
+    This is exactly the historical left fold of :func:`splice_csr`, including
+    its deliberately order-sensitive structural reset.  After every fold the
+    accumulated transition is decoded as an unweighted structure.  Therefore,
+    immediately before the final fold, all edges from the base and earlier
+    extras have weight ``1`` regardless of how many earlier libraries shared
+    that coordinate; an edge also present in the *last* extra has weight ``2``.
+
+    We reproduce that result without materialising and normalising a growing
+    CSR once per participant: map every prefix graph into the final coordinate
+    space, collapse the prefix to a structural union once, append the last
+    extra's structure once, then run the shared column-normalisation once.
+    Node append order and duplicate-id remapping follow ``splice_csr`` one fold
+    at a time, so even its edge-case index semantics remain unchanged.
+    """
+    extras = list(extras)
+    if not extras:
+        return list(base_ids), base_transition
+    if len(extras) == 1:
+        # There is no earlier fold whose next round would reset the base to
+        # structure. Delegating preserves even a deliberately non-canonical
+        # input CSR with duplicate stored coordinates byte-for-byte.
+        extra_ids, extra_transition = extras[0]
+        return splice_csr(
+            list(base_ids), base_transition, list(extra_ids), extra_transition
+        )
+
+    combined_ids = list(base_ids)
+    base_coo = base_transition.tocoo()
+    prefix_src = [base_coo.col.astype(np.int64)]
+    prefix_tgt = [base_coo.row.astype(np.int64)]
+    last_src = np.empty(0, dtype=np.int64)
+    last_tgt = np.empty(0, dtype=np.int64)
+
+    for pos, (extra_ids, extra_transition) in enumerate(extras):
+        # Keep the per-fold snapshot rule from splice_csr: duplicate new ids
+        # inside one extra are appended exactly as before, and the dict below
+        # resolves them to their final occurrence for that fold.
+        base_set = set(combined_ids)
+        combined_ids.extend(e for e in extra_ids if e not in base_set)
+        index = {nid: i for i, nid in enumerate(combined_ids)}
+        extra_coo = extra_transition.tocoo()
+        if extra_coo.nnz:
+            remap = np.fromiter(
+                (index[nid] for nid in extra_ids),
+                dtype=np.int64,
+                count=len(extra_ids),
+            )
+            mapped_src = remap[extra_coo.col.astype(np.int64)]
+            mapped_tgt = remap[extra_coo.row.astype(np.int64)]
+        else:
+            mapped_src = np.empty(0, dtype=np.int64)
+            mapped_tgt = np.empty(0, dtype=np.int64)
+
+        if pos == len(extras) - 1:
+            last_src, last_tgt = mapped_src, mapped_tgt
+        else:
+            prefix_src.append(mapped_src)
+            prefix_tgt.append(mapped_tgt)
+
+    n = len(combined_ids)
+    raw_prefix_src = np.concatenate(prefix_src)
+    raw_prefix_tgt = np.concatenate(prefix_tgt)
+    prefix = sp.csr_matrix(
+        (
+            np.ones(raw_prefix_src.size, dtype=np.float64),
+            (raw_prefix_tgt, raw_prefix_src),
+        ),
+        shape=(n, n),
+        dtype=np.float64,
+    )
+    # Every previous splice's next round sees structure only, so collapse all
+    # prefix multiplicity before the final extra is added.
+    if prefix.nnz:
+        prefix.data.fill(1.0)
+    prefix_coo = prefix.tocoo()
+    src = np.concatenate([prefix_coo.col.astype(np.int64), last_src])
+    tgt = np.concatenate([prefix_coo.row.astype(np.int64), last_tgt])
+    weights = np.ones(src.size, dtype=np.float64)
+    return combined_ids, _column_stochastic(n, src, tgt, weights)
 
 
 def splice_active(

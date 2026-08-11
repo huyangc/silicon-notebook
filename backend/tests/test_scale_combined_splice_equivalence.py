@@ -53,13 +53,12 @@ def _old_multi_base_combine(libs):
 
 
 def _new_multi_base_combine(libs):
-    """改动后的形态：坐标 remap，不物化 tuple 列表。"""
-    combined_ids = list(libs[0][0])
-    combined_A = libs[0][1]
-    for ids, A in libs[1:]:
-        combined_ids, combined_A = si.splice_csr(
-            combined_ids, combined_A, list(ids), A)
-    return combined_ids, combined_A
+    """改动后的形态：一次性组合，不反复复制累计 CSR。"""
+    return si.splice_csr_many(
+        list(libs[0][0]),
+        libs[0][1],
+        [(list(ids), A) for ids, A in libs[1:]],
+    )
 
 
 def _three_libraries():
@@ -123,6 +122,73 @@ def test_splice_csr_matches_csr_to_edges_oracle_multi_library():
     assert np.allclose(cs[cs > 0], 1.0), "列随机性守恒"
 
 
+def test_splice_csr_many_matches_ordered_fold_randomized():
+    """随机 differential：2..6 库、节点交叠和重复边下逐位复现左折叠。"""
+    rng = np.random.default_rng(20260811)
+    universe = np.array([f"n{i}" for i in range(18)])
+    for library_count in range(2, 7):
+        for _case in range(20):
+            libs = []
+            for _ in range(library_count):
+                ids = rng.choice(
+                    universe,
+                    size=int(rng.integers(3, 10)),
+                    replace=False,
+                ).tolist()
+                # Sampling endpoint pairs with replacement intentionally creates
+                # duplicate coordinates before build_transition collapses them.
+                edges = [
+                    (
+                        ids[int(rng.integers(0, len(ids)))],
+                        ids[int(rng.integers(0, len(ids)))],
+                        float(rng.random() + 0.01),
+                    )
+                    for _ in range(int(rng.integers(0, 30)))
+                ]
+                transition, _ = si.build_transition(ids, edges)
+                libs.append((ids, transition))
+
+            old_ids, old_A = _old_multi_base_combine(libs)
+            new_ids, new_A = _new_multi_base_combine(libs)
+            assert new_ids == old_ids
+            assert np.array_equal(new_A.indptr, old_A.indptr)
+            assert np.array_equal(new_A.indices, old_A.indices)
+            assert np.array_equal(new_A.data, old_A.data)
+
+
+def test_splice_csr_many_normalizes_only_once_for_three_or_more_libraries(
+    monkeypatch,
+):
+    """复杂度护栏：参与者再多也只建/归一最终累计矩阵一次。"""
+    calls = 0
+    original = si._column_stochastic
+
+    def _counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(si, "_column_stochastic", _counted)
+    _new_multi_base_combine(_three_libraries())
+    assert calls == 1
+
+
+def test_splice_csr_many_preserves_ppr_scores_and_ranking():
+    """组合阵的 PPR 得分与排序都和历史左折叠相同，保护检索效果。"""
+    libs = _three_libraries()
+    old_ids, old_A = _old_multi_base_combine(libs)
+    new_ids, new_A = _new_multi_base_combine(libs)
+    assert new_ids == old_ids
+    reset = np.zeros(len(old_ids), dtype=np.float64)
+    reset[0], reset[-1] = 0.7, 0.3
+    old_scores = si.personalized_ppr(old_A, reset)
+    new_scores = si.personalized_ppr(new_A, reset)
+    assert np.array_equal(new_scores, old_scores)
+    assert np.argsort(-new_scores, kind="stable").tolist() == np.argsort(
+        -old_scores, kind="stable"
+    ).tolist()
+
+
 def test_splice_csr_matches_oracle_with_overlapping_active_edges():
     """多库拼接 + 末尾 active splice：active 边与已有 base 坐标重合（COO 累加）
     时两条路径仍逐位一致——这是 splice_csr 最容易被写错的地方（若在 remap 时
@@ -158,6 +224,32 @@ def test_splice_csr_single_pair_is_bitwise_equal_to_old_pair():
     assert np.array_equal(new_A.indptr, old_A.indptr)
     assert np.array_equal(new_A.indices, old_A.indices)
     assert np.array_equal(new_A.data, old_A.data)     # 逐位，不是 allclose
+
+
+def test_splice_csr_many_single_extra_keeps_noncanonical_duplicate_semantics():
+    """单 extra 前没有中间结构重置，base 的显式重复坐标仍须累加。"""
+    base_ids = ["a", "b"]
+    # Two stored entries at the same (target=b, source=a) coordinate.
+    base_A = sp.csr_matrix(
+        (
+            np.array([0.25, 0.75]),
+            np.array([0, 0]),
+            np.array([0, 0, 2]),
+        ),
+        shape=(2, 2),
+    )
+    base_A.has_canonical_format = False
+    extra_ids = ["c"]
+    extra_A = sp.csr_matrix((1, 1), dtype=np.float64)
+
+    old_ids, old_A = si.splice_csr(base_ids, base_A, extra_ids, extra_A)
+    new_ids, new_A = si.splice_csr_many(
+        base_ids, base_A, [(extra_ids, extra_A)]
+    )
+    assert new_ids == old_ids
+    assert np.array_equal(new_A.indptr, old_A.indptr)
+    assert np.array_equal(new_A.indices, old_A.indices)
+    assert np.array_equal(new_A.data, old_A.data)
 
 
 def test_splice_csr_handles_empty_and_disjoint_extras():

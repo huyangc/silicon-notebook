@@ -9,11 +9,12 @@
    job「经 copy_context() 自然带上」`_REQUEST_USER` 与 `_log_owner`。
 2. **顶层异常统一兜底**（best-effort 日志），不让 worker 线程静默崩溃。
 3. **统一 daemon 命名线程**，便于诊断。
-4. **后台 job 的进程级并发闸，重活与轻活分两个池**（`BACKGROUND_MAINTENANCE_CONCURRENCY`
+4. **后台 job 的进程级固定 worker 池，重活与轻活分两个池**（`BACKGROUND_MAINTENANCE_CONCURRENCY`
    / `BACKGROUND_LIGHT_JOB_CONCURRENCY`）。各类 job 各自已有单飞/去重闸，但彼此之间
    没有；同一时刻多个笔记本各排一个重活，数据库与模型扇出会成倍叠加。分池是因为量级
-   差：小时级的全库重建不得饿死秒级的单表投影。闸在 worker 线程内获取——`submit()`
-   仍立即返回；排队超过 `_QUEUE_WARN_SECONDS` 由日志披露。
+   差：小时级的全库重建不得饿死秒级的单表投影。提交到已存在的 worker 池后
+   `submit()` 仍立即返回；排队超过 `_QUEUE_WARN_SECONDS` 由日志披露。尤其不能为
+   每一个等槽的 job 再创建一个会阻塞在 semaphore 上的线程。
 
 收敛前，routes.py 里 6 处线程启动各写各的：report/merge-review/ask 记得 copy_context、
 build/rebuild-KG/conflict-resolve 忘了——正是「手抄易漏」的整类 bug。
@@ -21,11 +22,15 @@ build/rebuild-KG/conflict-resolve 忘了——正是「手抄易漏」的整类 
 from __future__ import annotations
 
 import contextvars
+import heapq
 import inspect
 import logging
+import queue
 import re
 import threading
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Callable
 
 from app.core import diagnostics_runtime as diagnostics
@@ -87,8 +92,8 @@ _DEFAULT_LIGHT_JOB_CONCURRENCY = 4
 # 开始跑」。库里的任务状态在排队期间仍是 running/queued(闸不写数据库,也不该写:
 # 那会让一个纯进程内的准入决定变成持久状态),所以日志是目前唯一的区分手段。
 _QUEUE_WARN_SECONDS = 30.0
-_gate_lock = threading.Lock()
-_gates: dict[str, threading.BoundedSemaphore] = {}
+_executor_lock = threading.Lock()
+_executors: dict[str, "_MaintenanceExecutor"] = {}
 
 
 def _maintenance_pool(name: str | None) -> tuple[str, str] | None:
@@ -125,61 +130,219 @@ def _pool_capacity(pool: str) -> int:
             else settings.background_light_job_concurrency
         )
         return max(1, int(configured))
-    except Exception:  # noqa: BLE001 — 配置不可用时保守用默认容量,绝不放弃闸
+    except Exception:  # noqa: BLE001 — 配置不可用时保守用默认容量,绝不放弃容量保护
         return default
 
 
-def _maintenance_slot(
-    name: str | None,
-) -> tuple[str, str, threading.BoundedSemaphore] | None:
-    """进闸 job 的 (池名, 类别名, 信号量);非进闸类别返回 None(零开销)。
+class _JobHandle(threading.Thread):
+    """兼容 ``threading.Thread`` 最常用观察接口的已提交 job 句柄。
 
-    惰性建闸:本模块被导入时 Settings 未必就绪(且导入期读配置会把一份部署值
-    钉死在 import 时刻)。每个池的容量在**首次**需要它时读一次并缓存——容量是
-    进程级不变量,中途换容量会让已在等待的 worker 与新 worker 看到两个不同的上限。
+    维护任务由进程级 worker 执行，不会为每一个 job 启动一个 ``Thread``；但大量调用
+    方及测试会对 submit 的返回值调用 ``join()`` / ``is_alive()``，也会读取名字和
+    daemon 标记。这个未启动的 Thread 子类把这份观察契约映射到完成事件，避免把队列
+    实现细节泄露给调用方。
     """
+
+    def __init__(self, name: str | None) -> None:
+        super().__init__(name=name, daemon=True)
+        self._finished = threading.Event()
+
+    def _finish(self) -> None:
+        self._finished.set()
+
+    def start(self) -> None:
+        """This is already a submitted job, not an unstarted worker Thread."""
+        raise RuntimeError("background job handle is already submitted")
+
+    def is_alive(self) -> bool:
+        return not self._finished.is_set()
+
+    def join(self, timeout: float | None = None) -> None:
+        self._finished.wait(timeout)
+
+
+@dataclass(slots=True)
+class _QueuedMaintenanceJob:
+    queue_id: int
+    context: contextvars.Context
+    observed: Callable[[], None]
+    handle: _JobHandle
+    operation: str
+    submitted_at: float
+    warned: bool = False
+
+
+class _MaintenanceExecutor:
+    """每个维护池一个固定 worker 队列，且只以固定数量的线程等待工作。
+
+    ``queue.Queue`` 有意不把尚未执行的 fire-and-forget job 静默拒绝或丢弃。容量
+    限制的是实际执行的任务数；队列期间由单个 monitor（而非一个 job 一个等待线程）
+    做超时披露。容量在本 executor 创建时冻结，和旧的进程级容量合同一致。
+    """
+
+    _STOP = object()
+
+    def __init__(self, pool: str, capacity: int) -> None:
+        self.pool = pool
+        self.capacity = capacity
+        self._queue: queue.Queue[_QueuedMaintenanceJob | object] = queue.Queue()
+        self._condition = threading.Condition()
+        # OrderedDict gives O(1) removal by job id. A list.remove() here turns
+        # a saturated queue draining in FIFO order into O(Q²) scans.
+        self._pending: OrderedDict[int, _QueuedMaintenanceJob] = OrderedDict()
+        # The monitor only needs the next disclosure deadline; scanning all
+        # pending jobs on every worker dequeue would recreate O(Q²) work.
+        # Stale keys are left in the heap and discarded when they reach its top.
+        self._deadline_heap: list[tuple[float, int, int]] = []
+        self._deadline_sequence = 0
+        self._closed = False
+        self._workers = [
+            threading.Thread(
+                target=self._worker,
+                name=f"background-{pool}-{index + 1}",
+                daemon=True,
+            )
+            for index in range(capacity)
+        ]
+        self._monitor = threading.Thread(
+            target=self._monitor_queue,
+            name=f"background-{pool}-queue-monitor",
+            daemon=True,
+        )
+        for worker in self._workers:
+            worker.start()
+        self._monitor.start()
+
+    def submit(
+        self,
+        context: contextvars.Context,
+        observed: Callable[[], None],
+        operation: str,
+        name: str | None,
+    ) -> _JobHandle:
+        handle = _JobHandle(name)
+        queued = _QueuedMaintenanceJob(
+            queue_id=0,
+            context=context,
+            observed=observed,
+            handle=handle,
+            operation=operation,
+            submitted_at=time.monotonic(),
+        )
+        with self._condition:
+            if self._closed:
+                # Only reachable from the test-only reset race. Production executors are
+                # process-lifetime objects; retry against the replacement rather than
+                # dropping a submitted job.
+                raise RuntimeError("maintenance executor is closed")
+            self._deadline_sequence += 1
+            queued_id = self._deadline_sequence
+            queued.queue_id = queued_id
+            self._pending[queued_id] = queued
+            heapq.heappush(
+                self._deadline_heap,
+                (
+                    queued.submitted_at + _QUEUE_WARN_SECONDS,
+                    self._deadline_sequence,
+                    queued_id,
+                ),
+            )
+            self._queue.put(queued)
+            self._condition.notify_all()
+        return handle
+
+    def _worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is self._STOP:
+                return
+            assert isinstance(item, _QueuedMaintenanceJob)
+            with self._condition:
+                if self._pending.pop(item.queue_id, None) is None:
+                    # Defensive only: a future cancellation path may have removed
+                    # the pending marker after this worker dequeued its item.
+                    pass
+                waited = time.monotonic() - item.submitted_at
+                if item.warned:
+                    _log.info(
+                        "background job started after queueing: pool=%s operation=%s waited=%.0fs",
+                        self.pool, item.operation, waited,
+                    )
+                self._condition.notify_all()
+            try:
+                item.context.run(item.observed)
+            except BaseException:
+                # ``_observed`` handles normal exceptions. A BaseException must not
+                # terminate a shared worker (and reduce the configured capacity).
+                # Do not use exception()/exc_info: exception payloads can contain
+                # user data, while this process-level receipt must stay content-free.
+                _log.error(
+                    "background worker survived base exception: pool=%s operation=%s",
+                    self.pool,
+                    item.operation,
+                )
+            finally:
+                item.handle._finish()
+
+    def _monitor_queue(self) -> None:
+        while True:
+            with self._condition:
+                while not self._closed and not self._pending:
+                    self._condition.wait()
+                if self._closed:
+                    return
+                while self._deadline_heap:
+                    deadline, _sequence, queued_id = self._deadline_heap[0]
+                    item = self._pending.get(queued_id)
+                    if item is None or item.warned:
+                        heapq.heappop(self._deadline_heap)
+                        continue
+                    wait_seconds = deadline - time.monotonic()
+                    if wait_seconds > 0:
+                        self._condition.wait(wait_seconds)
+                        break
+                    heapq.heappop(self._deadline_heap)
+                    item.warned = True
+                    _log.warning(
+                        "background job still queued: pool=%s operation=%s waited=%.0fs",
+                        self.pool, item.operation,
+                        time.monotonic() - item.submitted_at,
+                    )
+                else:
+                    # All pending jobs have already been disclosed; a worker dequeue
+                    # or the next submit wakes us. Do not poll or rescan the queue.
+                    self._condition.wait()
+
+    def shutdown_for_tests(self) -> None:
+        """Stop idle worker/monitor threads after a test; never used in production."""
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+        for _worker in self._workers:
+            self._queue.put(self._STOP)
+
+
+def _maintenance_executor(name: str | None) -> tuple[_MaintenanceExecutor, str] | None:
+    """返回显式维护类别的固定 executor；其他 job 保持原有直接线程语义。"""
     resolved = _maintenance_pool(name)
     if resolved is None:
         return None
     pool, operation = resolved
-    with _gate_lock:
-        gate = _gates.get(pool)
-        if gate is None:
-            gate = threading.BoundedSemaphore(_pool_capacity(pool))
-            _gates[pool] = gate
-    return pool, operation, gate
-
-
-def _acquire_with_queue_disclosure(
-    gate: threading.BoundedSemaphore, pool: str, operation: str
-) -> None:
-    """阻塞取槽,排队久了在日志里说清楚(只带池名/类别名/秒数,无 id 无正文)。
-
-    没有这条披露,一个排队中的 job 与一个卡死的 job 在外部看来完全一样。
-    """
-    started = time.monotonic()
-    warned = False
-    while not gate.acquire(timeout=_QUEUE_WARN_SECONDS):
-        if not warned:
-            warned = True
-            _log.warning(
-                "background job still queued: pool=%s operation=%s waited=%.0fs",
-                pool, operation, time.monotonic() - started,
-            )
-    if warned:
-        _log.info(
-            "background job started after queueing: pool=%s operation=%s waited=%.0fs",
-            pool, operation, time.monotonic() - started,
-        )
+    with _executor_lock:
+        executor = _executors.get(pool)
+        if executor is None:
+            executor = _MaintenanceExecutor(pool, _pool_capacity(pool))
+            _executors[pool] = executor
+    return executor, operation
 
 
 def _reset_maintenance_gate_for_tests() -> None:
-    """丢弃已建的闸,让下一次 submit 按当前 Settings 重新解析容量。
-
-    仅供测试:生产里容量是进程级不变量(见 `_maintenance_slot`)。
-    """
-    with _gate_lock:
-        _gates.clear()
+    """丢弃测试创建的固定 worker 池，让下次 submit 重读当前 Settings。"""
+    with _executor_lock:
+        executors = tuple(_executors.values())
+        _executors.clear()
+    for executor in executors:
+        executor.shutdown_for_tests()
 
 
 def _resolve_job_user() -> str | None:
@@ -208,7 +371,7 @@ def _diagnostic_job_name(fn: Callable, explicit_name: str | None) -> str:
 
 def submit(fn: Callable, *args, name: str | None = None,
            notify_pending: bool = False, **kwargs) -> threading.Thread:
-    """在传播了调用线程上下文的 daemon 线程里跑 `fn(*args, **kwargs)`，返回该线程。
+    """在传播了调用线程上下文的后台执行上下文里跑 ``fn(*args, **kwargs)``。
 
     快照必须在调用线程（通常是请求处理线程）里捕获，故 copy_context() 在此同步调用。
 
@@ -216,15 +379,16 @@ def submit(fn: Callable, *args, name: str | None = None,
     snapshot；通知失败绝不影响/冒泡出 job 本身。
 
     维护类 job（见 `_HEAVY_MAINTENANCE_OPERATIONS` / `_LIGHT_MAINTENANCE_OPERATIONS`）
-    另受所属池的进程级并发闸约束。闸在 **worker 线程内**获取：submit 本身永远立即
-    返回，请求线程不因排队而阻塞。
+    进入所属的固定容量 worker 池。submit 本身永远立即返回，请求线程不因排队而阻塞；
+    返回句柄保留原 ``Thread`` 的 ``join`` / ``is_alive`` / ``name`` / ``daemon``
+    观察契约。非维护 job 沿用原有每任务 daemon-thread 语义。
     """
     ctx = contextvars.copy_context()
     try:
         diagnostic_name = _diagnostic_job_name(fn, name)
     except Exception:  # noqa: BLE001 — diagnostics metadata is best-effort only
         diagnostic_name = "background_job"
-    slot = _maintenance_slot(name)
+    maintenance = _maintenance_executor(name)
 
     def _observed() -> None:
         try:
@@ -249,22 +413,20 @@ def submit(fn: Callable, *args, name: str | None = None,
             # preserve submit()'s fire-and-forget isolation contract.
             pass
 
-    def _run() -> None:
-        if slot is None:
-            _observed()
-            return
-        pool, operation, gate = slot
-        # 排队期间刻意在 `diagnostics.job_scope` **之外**:等槽的 job 不是
-        # 「正在跑的 job」,把它算进 active_jobs 会让运维看到一个永远在忙、
-        # 实际一行 SQL 都没发的任务。排队本身由日志披露(见 helper)。
-        _acquire_with_queue_disclosure(gate, pool, operation)
+    if maintenance is not None:
+        executor, operation = maintenance
         try:
-            _observed()
-        finally:
-            # try/finally 而非 with:释放必须覆盖 BaseException(KeyboardInterrupt/
-            # SystemExit 也会穿过 worker 线程),漏一次释放就永久少一个槽位。
-            gate.release()
+            return executor.submit(ctx, _observed, operation, name)
+        except RuntimeError:
+            # A test-only reset can race a submit. Production executors never close;
+            # resolving once more against the replacement preserves fire-and-forget
+            # delivery instead of turning that race into a dropped maintenance job.
+            replacement = _maintenance_executor(name)
+            if replacement is None:
+                raise
+            executor, operation = replacement
+            return executor.submit(ctx, _observed, operation, name)
 
-    thread = threading.Thread(target=lambda: ctx.run(_run), name=name, daemon=True)
+    thread = threading.Thread(target=lambda: ctx.run(_observed), name=name, daemon=True)
     thread.start()
     return thread

@@ -835,8 +835,32 @@ class GovernanceStore:
         return objects, vectors, notebook
 
     @staticmethod
+    def conflict_relation_count(
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        *,
+        max_rows: int | None = None,
+    ) -> int:
+        if max_rows is None:
+            row = connection.execute(
+                "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT COUNT(*) AS c FROM ("
+                "SELECT 1 FROM knowledge_relations WHERE notebook_id=? LIMIT ?"
+                ")",
+                (notebook_id, max(1, int(max_rows))),
+            ).fetchone()
+        return int(row["c"])
+
+    @staticmethod
     def conflict_relation_rows(
-        connection: sqlite3.Connection, notebook_id: str
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        *,
+        max_rows: int | None = None,
     ) -> "List[dict]":
         """Thin relation projection for conflict detection.
 
@@ -844,11 +868,15 @@ class GovernanceStore:
         for surviving candidates) and no ``review_status`` — detection has
         never filtered rejected relations and must keep not filtering them.
         """
-        rows = connection.execute(
+        sql = (
             "SELECT id, source_object_id, target_object_id, edge_type "
-            "FROM knowledge_relations WHERE notebook_id=?",
-            (notebook_id,),
-        ).fetchall()
+            "FROM knowledge_relations WHERE notebook_id=?"
+        )
+        params: tuple = (notebook_id,)
+        if max_rows is not None:
+            sql += " LIMIT ?"
+            params += (max(1, int(max_rows)),)
+        rows = connection.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
     @staticmethod

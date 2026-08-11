@@ -5214,8 +5214,18 @@ def test_postgres_conflict_relation_rows_are_thin_and_unfiltered(knowledge_harne
     store = knowledge_harness.governance
     with knowledge_harness.database.connect() as connection:
         rows = store.conflict_relation_rows(connection, "nb-personal")
+        bounded_rows = store.conflict_relation_rows(
+            connection, "nb-personal", max_rows=1
+        )
+        count = store.conflict_relation_count(connection, "nb-personal")
+        bounded_count = store.conflict_relation_count(
+            connection, "nb-personal", max_rows=1
+        )
 
     assert len(rows) == 1
+    assert bounded_rows == rows
+    assert count == 1
+    assert bounded_count == 1
     row = rows[0]
     # A rejected relation is still returned: detection has never filtered by
     # review_status and must keep not filtering.

@@ -2443,8 +2443,10 @@ def test_probe_memo_dedupes_repeated_queries_within_one_planning_run(repo, monke
     eng._probe_queries("nb", ["shared", "a"])
     eng._probe_queries("nb", ["shared", "b"])
     eng._probe_queries("nb", ["shared"])
-    assert calls["federated"] == ["shared", "a", "b"]
-    assert calls["elements"] == ["shared", "a", "b"]
+    # The two leaf channels run concurrently.  Memoization promises one call
+    # per distinct query; worker start order is deliberately not a contract.
+    assert sorted(calls["federated"]) == ["a", "b", "shared"]
+    assert sorted(calls["elements"]) == ["a", "b", "shared"]
 
     # A single parallel probe batch also preserves the old serial memo's
     # duplicate-query behavior instead of racing two identical leaves.

@@ -659,11 +659,55 @@ class KnowledgeGovernanceService:
         # object's and every edge's quoted spans through this scan is what made
         # the pass unrunnable on a large notebook.
         with self._connect() as db:
+            # Submission-time admission can sit in the fixed maintenance queue
+            # before this worker starts. Recheck the object rail on the same
+            # worker connection before either object/vector hydration or the
+            # relation sentinel read; overflow skips the whole pass.
+            object_limit = self.settings.kg_conflict_max_objects
+            object_count = self.knowledge.active_object_count(db, notebook_id)
+            if object_count > object_limit:
+                self.event_log.emit({
+                    "kind": "kg_conflict_resolution_skipped",
+                    "notebook_id": notebook_id,
+                    "reason": "too_many_objects",
+                })
+                return {
+                    "detected": 0,
+                    "auto_applied": 0,
+                    "queued": 0,
+                    "truncated": 0,
+                    "truncated_edge": 0,
+                    "truncated_node": 0,
+                    "skipped_llm": False,
+                    "skipped_object_limit": True,
+                }
+            # Count admission happens before submission, but concurrent writes
+            # may race it. LIMIT+1 is the worker-side memory guard: crossing the
+            # rail skips the whole pass, never a partial relation universe.
+            relation_limit = self.settings.kg_conflict_max_relations
+            relations = self.governance_store.conflict_relation_rows(
+                db,
+                notebook_id,
+                max_rows=relation_limit + 1,
+            )
+            if len(relations) > relation_limit:
+                self.event_log.emit({
+                    "kind": "kg_conflict_resolution_skipped",
+                    "notebook_id": notebook_id,
+                    "reason": "too_many_relations",
+                })
+                return {
+                    "detected": 0,
+                    "auto_applied": 0,
+                    "queued": 0,
+                    "truncated": 0,
+                    "truncated_edge": 0,
+                    "truncated_node": 0,
+                    "skipped_llm": False,
+                    "skipped_relation_limit": True,
+                }
             obj_rows, vec_rows, nb_row = (
                 self.governance_store.conflict_resolution_rows(db, notebook_id)
-            )
-            relations = self.governance_store.conflict_relation_rows(
-                db, notebook_id
             )
 
         # Build objects list in detect_conflict_candidates format

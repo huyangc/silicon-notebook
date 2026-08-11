@@ -193,8 +193,11 @@ def test_build_tail_honours_the_same_size_admission_as_the_endpoint(repo, monkey
     lifecycle = repo._runtime.knowledge_lifecycle
     monkeypatch.setattr(repo.settings, "kg_conflict_resolution_enabled", True)
     monkeypatch.setattr(repo.settings, "kg_relink_enabled", False)
+    admissions: list[str] = []
     monkeypatch.setattr(
-        lifecycle, "conflict_resolution_admitted", lambda _nb: False
+        lifecycle,
+        "_conflict_resolution_admission_reason",
+        lambda notebook_id: admissions.append(notebook_id) or "too_many_objects",
     )
     emitted: list = []
     monkeypatch.setattr(
@@ -208,6 +211,7 @@ def test_build_tail_honours_the_same_size_admission_as_the_endpoint(repo, monkey
     lifecycle._run_success_side_effects(nb, {}, enqueue_fold=False)
 
     assert ran == []
+    assert admissions == [nb], "超限路径只能执行一次有界准入计数"
     assert {"kind": "kg_conflict_resolution_skipped", "notebook_id": nb,
             "reason": "too_many_objects"} in emitted
     # The slot was never claimed, so a later admitted run still works.
@@ -248,3 +252,109 @@ def test_admission_predicate_reads_the_active_object_count(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "kg_conflict_max_objects", 1)
     assert lifecycle.conflict_resolution_admitted(nb) is False
     assert repo.conflict_resolution_admitted(nb) is False
+
+
+def test_admission_predicate_also_rejects_dense_relation_graph(repo, monkeypatch):
+    """对象数不过线但关系数过线时，入口同样拒绝整个检测任务。"""
+    nb = repo.create_notebook(NotebookCreate(name="dense-relations")).id
+    repo.store_kg(nb, None, [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "A"}, "evidence": []},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "B"}, "evidence": []},
+    ], [
+        {"source_local_id": "A", "target_local_id": "B",
+         "edge_type": "supports", "evidence": []},
+        {"source_local_id": "A", "target_local_id": "B",
+         "edge_type": "contradicts", "evidence": []},
+    ])
+
+    monkeypatch.setattr(repo.settings, "kg_conflict_max_objects", 10)
+    monkeypatch.setattr(repo.settings, "kg_conflict_max_relations", 1)
+    assert repo.conflict_resolution_admitted(nb) is False
+    monkeypatch.setattr(repo.settings, "kg_conflict_max_relations", 2)
+    assert repo.conflict_resolution_admitted(nb) is True
+
+
+def test_worker_relation_limit_race_skips_whole_pass(repo, monkeypatch):
+    """入口预检后的新增边也不会触发无界读取或部分图检测。"""
+    nb = repo.create_notebook(NotebookCreate(name="relation-race")).id
+    repo.store_kg(nb, None, [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "A"}, "evidence": []},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "B"}, "evidence": []},
+    ], [
+        {"source_local_id": "A", "target_local_id": "B",
+         "edge_type": "supports", "evidence": []},
+        {"source_local_id": "A", "target_local_id": "B",
+         "edge_type": "contradicts", "evidence": []},
+    ])
+    service = repo._runtime.knowledge_governance
+    monkeypatch.setattr(repo.settings, "kg_conflict_max_relations", 1)
+    monkeypatch.setattr(
+        service.model_clients, "configured", lambda _purpose: True
+    )
+
+    def _must_not_load_objects(*_args, **_kwargs):
+        raise AssertionError("over-limit relation graph must skip before object hydration")
+
+    monkeypatch.setattr(
+        service.governance_store,
+        "conflict_resolution_rows",
+        _must_not_load_objects,
+    )
+    emitted: list[dict] = []
+    monkeypatch.setattr(service.event_log, "emit", emitted.append)
+
+    result = service.resolve_notebook_conflicts(nb)
+
+    assert result["skipped_relation_limit"] is True
+    assert result["detected"] == result["queued"] == result["auto_applied"] == 0
+    assert emitted == [{
+        "kind": "kg_conflict_resolution_skipped",
+        "notebook_id": nb,
+        "reason": "too_many_relations",
+    }]
+
+
+def test_worker_object_limit_race_skips_whole_pass(repo, monkeypatch):
+    """提交后排队期间新增对象，worker 不得再无界 hydrate 对象/向量。"""
+    nb = repo.create_notebook(NotebookCreate(name="object-race")).id
+    repo.store_kg(nb, None, [
+        {"local_id": "A", "object_type": "claim",
+         "payload": {"name": "A"}, "evidence": []},
+        {"local_id": "B", "object_type": "claim",
+         "payload": {"name": "B"}, "evidence": []},
+    ], [])
+    service = repo._runtime.knowledge_governance
+    monkeypatch.setattr(repo.settings, "kg_conflict_max_objects", 1)
+    monkeypatch.setattr(
+        service.model_clients, "configured", lambda _purpose: True
+    )
+
+    def _must_not_hydrate(*_args, **_kwargs):
+        raise AssertionError("over-limit object graph must skip before hydration")
+
+    monkeypatch.setattr(
+        service.governance_store,
+        "conflict_resolution_rows",
+        _must_not_hydrate,
+    )
+    monkeypatch.setattr(
+        service.governance_store,
+        "conflict_relation_rows",
+        _must_not_hydrate,
+    )
+    emitted: list[dict] = []
+    monkeypatch.setattr(service.event_log, "emit", emitted.append)
+
+    result = service.resolve_notebook_conflicts(nb)
+
+    assert result["skipped_object_limit"] is True
+    assert result["detected"] == result["queued"] == result["auto_applied"] == 0
+    assert emitted == [{
+        "kind": "kg_conflict_resolution_skipped",
+        "notebook_id": nb,
+        "reason": "too_many_objects",
+    }]

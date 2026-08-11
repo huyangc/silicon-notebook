@@ -1423,12 +1423,26 @@ class KnowledgeLifecycleService:
 
         The endpoint and the post-build tail must agree: a notebook the endpoint
         refuses as too large cannot be admitted through the build tail instead,
-        or the gate is decoration. Both therefore call this, and it is the only
-        place the object count is taken.
+        or the gate is decoration. Objects and relations have independent
+        ceilings because a modest node set may still form a dense edge graph.
         """
+        return not self._conflict_resolution_admission_reason(notebook_id)
+
+    def _conflict_resolution_admission_reason(self, notebook_id: str) -> str:
         with self._connect() as db:
-            count = self.knowledge.active_object_count(db, notebook_id)
-        return count <= self.settings.kg_conflict_max_objects
+            object_count = self.knowledge.active_object_count(db, notebook_id)
+            if object_count > self.settings.kg_conflict_max_objects:
+                return "too_many_objects"
+            relation_count = (
+                self.governance.governance_store.conflict_relation_count(
+                    db,
+                    notebook_id,
+                    max_rows=self.settings.kg_conflict_max_relations + 1,
+                )
+            )
+        if relation_count > self.settings.kg_conflict_max_relations:
+            return "too_many_relations"
+        return ""
 
     def _resolve_conflicts_after_build(self, notebook_id: str) -> None:
         """Conflict-detection tail of a successful build — same gates as the endpoint.
@@ -1440,11 +1454,12 @@ class KnowledgeLifecycleService:
         every direction — a build must not fail because its optional conflict
         tail was skipped.
         """
-        if not self.conflict_resolution_admitted(notebook_id):
+        reason = self._conflict_resolution_admission_reason(notebook_id)
+        if reason:
             self.event_log.emit({
                 "kind": "kg_conflict_resolution_skipped",
                 "notebook_id": notebook_id,
-                "reason": "too_many_objects",
+                "reason": reason,
             })
             return
         try:
@@ -3162,10 +3177,11 @@ class KnowledgeLifecycleService:
         preserving viz_ids order (which equals _unified_graph_full's node order),
         keep the first `limit`, then keep edges whose both endpoints survive.
 
-        Both halves are vectorised over the compact viz arrays: the degree order
-        is the index's cached stable argsort (== Python's stable sorted by -deg),
-        and edge survival is a boolean membership mask over the edge endpoint
-        columns, whose np.nonzero preserves the original edge order."""
+        New artifacts carry the stable degree order and a (src,dst,original)
+        edge order. A bounded request uses pair-range binary searches for kept
+        source×target pairs, so even a kept high-degree hub does not cause a full
+        adjacency-segment scan. Old artifacts lazily derive the same helpers
+        once. Returned nodes and edges remain in legacy original order."""
         import numpy as np
         ids = idx.viz_ids or []
         total_nodes = len(ids)
@@ -3179,9 +3195,9 @@ class KnowledgeLifecycleService:
             # including a negative `limit` (drops from the tail).
             keep_positions = idx.viz_deg_order()[:limit]
 
-        member = np.zeros(total_nodes, dtype=bool)
-        member[keep_positions] = True
-        kept_order = np.nonzero(member)[0]          # viz_ids order, as before
+        # Sorting at most the requested positions restores viz_ids order without
+        # allocating/scanning a total_nodes-wide membership vector.
+        kept_order = np.sort(np.asarray(keep_positions, dtype=np.int64))
         keep_ids = [ids[int(i)] for i in kept_order]
         # Positions, not ids: this path must never build the index-wide
         # id→position map (see _viz_label_maps).
@@ -3190,7 +3206,7 @@ class KnowledgeLifecycleService:
         nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in keep_ids]
         kept_edges = []
         if total_edges:
-            selected = np.nonzero(member[edge_set.src] & member[edge_set.dst])[0]
+            selected = edge_set.induced_edge_indices(kept_order)
             table = edge_set.type_table
             src, dst, code = edge_set.src, edge_set.dst, edge_set.code
             kept_edges = [
@@ -3302,32 +3318,40 @@ class KnowledgeLifecycleService:
             # but the rendered relation is directed. Recover the persisted
             # orientation so opening a target reached by an incoming edge does
             # not manufacture a second, reversed relation in the overlay.
-            # The lookup is an O(deg) probe into the edge set's cached by-source
-            # index; it used to rebuild a full (s,t)→edge_type dict per click.
-            # Multi-edge (s,t) still resolves to the LAST persisted edge, exactly
-            # as the overwriting dict did. `positions` was resolved above.
+            # The grouped lookup binary-searches each distinct directed pair in
+            # the (src,dst,original) auxiliary order; it used to rebuild a full
+            # (s,t)→edge_type dict per click, then briefly scanned the focus
+            # segment once per neighbour. Multi-edge (s,t) still resolves to the
+            # LAST persisted edge. `positions` was resolved above.
             edge_set = idx.viz_edges
             # Sentinel, not None: "no such edge" must stay distinguishable from
             # "edge exists and its edge_type is falsy", which `(s,t) in et_map`
             # gave for free.
             absent = object()
-
-            def _edge_type(source_id, target_id):
-                if edge_set is None:
-                    return absent
-                return edge_set.edge_type_at(
-                    positions.get(source_id), positions.get(target_id),
+            neighbor_pairs = [(e["source"], e["target"]) for e in nb["edges"]]
+            directed_pairs = [
+                (positions.get(source_id), positions.get(target_id))
+                for source_id, target_id in neighbor_pairs
+            ]
+            # Ask both orientations in one grouped pass. Duplicate pairs share
+            # one pair-range lookup and no high-degree segment is scanned.
+            queried = (
+                edge_set.edge_types_at_many(
+                    directed_pairs
+                    + [(target, source) for source, target in directed_pairs],
                     default=absent,
                 )
-
+                if edge_set is not None
+                else [absent] * (2 * len(directed_pairs))
+            )
+            split = len(directed_pairs)
             edges = []
-            for e in nb["edges"]:
-                s, t = e["source"], e["target"]
-                et = _edge_type(s, t)
+            for edge_index, (s, t) in enumerate(neighbor_pairs):
+                et = queried[edge_index]
                 if et is not absent:
                     edge_s, edge_t = s, t
                 else:
-                    reversed_et = _edge_type(t, s)
+                    reversed_et = queried[split + edge_index]
                     if reversed_et is not absent:
                         edge_s, edge_t, et = t, s, reversed_et
                     else:

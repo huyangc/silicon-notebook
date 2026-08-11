@@ -724,22 +724,25 @@ class GraphRetrievalService(_RetrievalState):
                 if 0 <= int(i) < len(first.node_ids)
             }
             for bid, idx in base_indexes[1:]:
-                # Splice this base's CSR straight in (coordinate remap in numpy).
-                # Historically this went through csr_to_edges + splice_active,
-                # i.e. it materialized one Python tuple per nnz (millions at
-                # scale) only for splice_active to hash both endpoints back into
-                # indexes.  splice_csr is bit-for-bit equivalent to that pair —
-                # see its docstring for the three-step argument, and
-                # test_scale_combined_splice_equivalence.py for the oracle test
-                # that pins it against a copy of the old loop.
-                extra_ids, extra_A = si.splice_csr(
-                    combined_ids, combined_A, list(idx.node_ids), idx.transition)
-                combined_ids, combined_A = extra_ids, extra_A
                 for i, nid in enumerate(idx.node_ids):
                     combined_idf_map.setdefault(nid, float(idx.idf[i]))
                 for i in idx.chunk_index:
                     if 0 <= int(i) < len(idx.node_ids):
                         combined_chunk_ids.add(idx.node_ids[int(i)])
+
+            if len(base_indexes) > 1:
+                # One construction, exactly matching the old ordered left fold.
+                # In particular, duplicates among earlier libraries collapse to
+                # structure before the last library is added; duplicates in the
+                # last library retain the historical 2x pre-normalisation weight.
+                combined_ids, combined_A = si.splice_csr_many(
+                    list(first.node_ids),
+                    first.transition,
+                    [
+                        (list(idx.node_ids), idx.transition)
+                        for _bid, idx in base_indexes[1:]
+                    ],
+                )
 
             active_node_ids, active_edges, active_chunk_ids = \
                 self._active_kg_delta(notebook_id)
