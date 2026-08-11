@@ -1007,7 +1007,9 @@ def test_xls_cell_text_normalizes_every_ctype():
         (xlrd.XL_CELL_NUMBER, float("nan"), 0, "nan"),                 # NaN 落 str(value)
         (xlrd.XL_CELL_BOOLEAN, 0, 0, "FALSE"),
         (xlrd.XL_CELL_BOOLEAN, 1, 0, "TRUE"),
-        (xlrd.XL_CELL_ERROR, 0x2A, 0, ""),                              # #N/A 等错误码：无可用文本
+        (xlrd.XL_CELL_ERROR, 0x2A, 0, "#N/A"),                          # 错误码保留标准错误文本（codex R5 P2）
+        (xlrd.XL_CELL_ERROR, 0x07, 0, "#DIV/0!"),                       # 丢成空串会让该格从行拼接里消失、列错位
+        (xlrd.XL_CELL_ERROR, 0xEE, 0, "#ERR!"),                         # 未知错误码兜底占位，不再整格蒸发
         (xlrd.XL_CELL_BLANK, "", 0, ""),
         (xlrd.XL_CELL_EMPTY, "", 0, ""),
         # datemode 真的被使用：同一个序列值在 1900/1904 纪元下解出不同日期。
