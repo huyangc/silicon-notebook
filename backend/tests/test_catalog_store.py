@@ -146,19 +146,61 @@ def test_source_text_stats_char_sum_is_unclipped_unlike_preview_elements_text(
 ):
     """``preview_elements`` clips each row's returned text to ``text_chars``
     (and reports it via ``clipped``); ``source_text_stats`` must sum the
-    FULL, unclipped ``length(text)`` regardless — the whole point of adding a
+    FULL, unclipped length regardless — the whole point of adding a
     SQL-side aggregate is to know the true character budget without ever
-    materializing (or clipping) the text itself."""
+    materializing (or clipping) the text itself.
+
+    Each preview row carries that same full length for ITSELF (``full_chars``),
+    which is what lets the caller subtract the prefix from the total exactly.
+    Deriving it from the returned ``text`` is impossible — that string has
+    already lost everything past ``text_chars``."""
     long_text = "x" * 9000
     _insert_elements(catalog, "src-1", [long_text])
 
     rows, clipped = catalog.preview_elements("src-1", limit=10, text_chars=10)
     assert clipped is True
     assert len(rows[0]["text"]) == 10  # preview_elements' own clip
+    assert rows[0]["full_chars"] == 9000  # the element's WHOLE length
 
     element_count, total_chars = catalog.source_text_stats("src-1")
     assert element_count == 1
     assert total_chars == 9000  # NOT clipped to text_chars
+
+
+def test_char_sums_mirror_the_packers_own_whitespace_strip(catalog: CatalogStore):
+    """Both char numbers count what the PACKER counts, i.e. after stripping.
+
+    `command_catalog._window_elements` strips every element before packing,
+    so a sum of raw lengths describes a document the packer never sees. That
+    difference is not cosmetic: the preview publishes its window count as a
+    LOWER bound, and raw lengths make it over-count — 2,001 elements of "one
+    character plus twenty trailing spaces" is 42,021 raw characters (four
+    windows by arithmetic) and one single window in reality. A bound that
+    sits above the truth is worse than no bound.
+    """
+    texts = [
+        "  set_thing -density value  ",  # both ends
+        "\n\ttrailing tab and newline\r\n",
+        "   ",  # whitespace only: contributes nothing to any window
+        "no padding here",
+    ]
+    _insert_elements(catalog, "src-1", texts)
+
+    element_count, total_chars = catalog.source_text_stats("src-1")
+
+    # Every row still counts as an ELEMENT — only its characters are
+    # normalised — so the count keeps agreeing with `preview_elements`' rows.
+    assert element_count == 4
+    assert total_chars == sum(len(text.strip()) for text in texts)
+    assert total_chars < sum(len(text) for text in texts)
+
+    # `full_chars` uses the same normalisation, or the caller's subtraction
+    # would mix two different definitions of "how long is this element".
+    rows, _clipped = catalog.preview_elements("src-1", limit=10, text_chars=10_000)
+    assert [row["full_chars"] for row in rows] == [
+        len(text.strip()) for text in texts
+    ]
+    assert rows[2]["full_chars"] == 0  # the whitespace-only element
 
 
 # ------------------------------------------------- update_candidate_payload

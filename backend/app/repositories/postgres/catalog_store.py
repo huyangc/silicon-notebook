@@ -422,12 +422,17 @@ class CatalogStore:
     def preview_elements(
         self, source_id: str, *, limit: int, text_chars: int
     ) -> tuple[list[dict], bool]:
+        """See the SQLite mirror. ``full_chars`` is each element's WHOLE
+        stripped length (never the clipped ``text``'s), which is what lets the
+        caller subtract this prefix from ``source_text_stats``' total exactly.
+        """
         rows_bound = max(1, int(limit))
         chars_bound = max(1, int(text_chars))
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT id,element_type,substr(text,1,%s) AS text,metadata,"
-                "(length(text) > %s) AS clipped "
+                "(length(text) > %s) AS clipped,"
+                "length(btrim(text, E' \\t\\n\\r')) AS full_chars "
                 'FROM source_elements WHERE source_id=%s ORDER BY id COLLATE "C" '
                 "LIMIT %s",
                 (chars_bound, chars_bound, source_id, rows_bound),
@@ -448,6 +453,7 @@ class CatalogStore:
                     "element_type": row["element_type"],
                     "text": row["text"] or "",
                     "section_path": section_path,
+                    "full_chars": int(row["full_chars"] or 0),
                 }
             )
         return output, clipped
@@ -456,11 +462,14 @@ class CatalogStore:
         """``(element_count, total_chars)`` — see the SQLite mirror for the
         full rationale (same row universe as ``preview_elements``, i.e.
         ``WHERE source_id=%s`` with no other predicate, aggregated entirely
-        in SQL)."""
+        in SQL, and ``total_chars`` counting each element's text AFTER the
+        same leading/trailing whitespace strip the packer applies, so the
+        caller's published lower bound cannot over-count)."""
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS element_count, "
-                "COALESCE(SUM(LENGTH(text)),0) AS total_chars "
+                "COALESCE(SUM(length(btrim(text, E' \\t\\n\\r'))),0) "
+                "AS total_chars "
                 "FROM source_elements WHERE source_id=%s",
                 (source_id,),
             ).fetchone()

@@ -170,24 +170,40 @@ export type CatalogPreviewCopy = {
  * 用户不需要一个「像不像手册」的猜测来决定要不要点开始。
  */
 export function catalogPreviewCopy(preview: CommandCatalogPreview): CatalogPreviewCopy {
-  const { estimated_windows: windows, estimated_calls: calls, sampled, skipped_windows_in_prefix: skipped } = preview;
-  // 段数在 `sampled` 两侧是**两种量**,措辞必须跟着变。前缀覆盖全文时它是后端
-  // 真跑分段得到的**精确值**;前缀不够时它退回「已读部分的分段数」与「全文字符
-  // 数 ÷ 每段预算」两个**下界**里的大者——元素装不满一段留下的空隙、以及候选
-  // 过密时的拆段,都只会让真实段数更多。所以那一侧写「至少约」:写成「约」会
-  // 把一个下界读成估计值,而这个数只会往上跑。
-  const scale = sampled ? "至少约" : "约";
-  const cost = `将通读全文（${scale} ${windows} 段），预计约 ${calls} 次模型调用。`;
+  const {
+    estimated_windows: windows,
+    estimated_calls: calls,
+    sampled,
+    windows_in_prefix: measured,
+    skipped_windows_in_prefix: skipped,
+  } = preview;
   // skipped 是「零成本跳过闸」挡下的段数(没有可认领的命令名、也没有参数形状的
   // 部分,由确定性判据识别,不发模型调用)——它是「为什么调用数远小于段数」唯一
   // 的解释项,没有它,一份大部分是叙述性文字的手册会读成漏算。
-  const skipNote = skipped > 0 ? `其中纯叙述部分不消耗调用。` : "";
-  const sampledNote = sampled
-    ? `次数只按前 ${preview.element_limit} 个元素估算，实际可能更多。`
-    : "";
+  const skipNote = skipped > 0 ? "其中纯叙述部分不消耗调用。" : "";
+  if (!sampled) {
+    // 前缀恰好覆盖全文:段数是后端真跑分段的**精确值**,调用数也覆盖了每一段。
+    return {
+      title: "识别命令目录",
+      body: `将通读全文（约 ${windows} 段），预计约 ${calls} 次模型调用。${skipNote}`,
+      sections: [],
+      confirmLabel: "开始识别",
+    };
+  }
+  // 采样侧是**两种量**,不能混成一句。段数是**下界**(元素装不满一段留下的空隙、
+  // 候选过密时的拆段都只会让真实段数更多),所以写「至少约」——写「约」会把一个
+  // 只往上跑的下界读成估计值。调用数则**只对已读的那几段成立**:后端刻意不给
+  // 没读过的段落报价,因为跳过闸让纯叙述的段免费、参数密集的段要分好几片,替
+  // 没读过的文本报价会同时往两个方向出错。所以这里给方向而不是给总数——旧文案
+  // 那句「实际可能更多」配一个把未见段落按每段 1 次算出来的总数,本身就是自相
+  // 矛盾的。
+  const body =
+    `全文至少约 ${windows} 段；` +
+    `按开头 ${measured} 段估算需约 ${calls} 次模型调用，` +
+    `其余段落视内容而定。${skipNote}`;
   return {
     title: "识别命令目录",
-    body: [cost, skipNote, sampledNote].filter(Boolean).join(""),
+    body,
     sections: [],
     confirmLabel: "开始识别",
   };

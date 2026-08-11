@@ -653,18 +653,44 @@ too dense for one candidate list is split again. Both only ever ADD segments, so
 the arithmetic is a floor rather than a count. So when the bounded prefix turns
 out to cover the whole document (`sampled=false`), `estimated_windows` is the
 number the real packer produced over it — **exact**, and free, since the prefix
-is read anyway for the call estimate. When the prefix runs out it is the larger
-of that partial packing and `⌈total characters ÷ WINDOW_CHARS⌉` (one SQL
-aggregate returning the element count and the total character count), reported
-as an **explicit lower bound** — the UI words it "at least about N segments".
-Reading the whole document to count them exactly is the failure a cost preview
-must not have. **How many calls** cannot be arithmetic either: it depends on the zero-model-call gate
+is read anyway for the call estimate. When the prefix runs out it is the
+tightest of several **lower bounds**, reported as one — the UI words it "at
+least about N segments". Reading the whole document to count them exactly is the
+failure a cost preview must not have.
+
+Two non-obvious conditions make that bound hold. First, **characters are counted
+the way the packer counts them**: every element is stripped before packing, so
+summing raw `LENGTH` describes a document the packer never sees — 2,001 elements
+of "one character plus twenty trailing spaces" is 42,021 raw characters (four
+segments by arithmetic) and one segment in reality, and a "lower bound" above
+the truth is worse than none. Both SQL reads therefore sum stripped lengths; the
+join separators the packer inserts are deliberately not counted, which can only
+shrink the total and so keeps the bound safe. Second, **the prefix's segment
+count cannot simply be added to the remainder**: the packer closes a segment only
+when the next element does not fit, so the prefix's LAST segment is still open
+and the unread elements keep filling it rather than starting a new one (four
+short elements with the row cap at three is one segment, and adding would quote
+two). Only closed segments count as certain; the open one's characters go back
+into the pot with the remainder, and the remainder is computed from each prefix
+row's OWN full length rather than the clipped text that was transmitted —
+subtracting what came back would leave every clipped tail in the remainder to be
+counted twice.
+
+**How many calls** cannot be arithmetic either: it depends on the zero-model-call gate
 (a prose segment is free) and on each segment's parameter count (a hundred-flag
 segment is several slices), and both need the text. Those are measured exactly
 over a bounded prefix — including the relay, since a segment's gate reads the
 previous segment's candidates, and dropping it would make the preview's gate
-answer differently from the run's — and every segment past the prefix is charged
-the minimum of one call. `sampled` is `true` when the prefix ran out, so the
+answer differently from the run's. **Segments past the prefix are not priced at
+all.** They used to be charged one call each, and that figure was wrong in both
+directions at once: the skip gate makes a prose segment free (a mostly-narrative
+book was quoted for calls it will never make) while a parameter-dense one is
+several slices (a manual was quoted far too little), and either way it described
+text this preview never read while sitting next to copy promising the real total
+could only be higher. So `estimated_calls` covers the prefix and nothing else,
+`windows_in_prefix` says how much of the document that is, and the UI says "about
+M calls for the first X segments; the rest depends on what is in them".
+`sampled` is `true` when the prefix ran out, so the
 numbers are a floor; both of the prefix's bounds set it, and **per-element
 truncation** is the one that actually distorts the estimate (clipping an options
 table drops parameter names, which drops slices). The row bound is read as
@@ -787,7 +813,7 @@ never happened and charge the user for a whole re-extraction.
 Endpoints (all scoped to a source of the notebook in the path; reads need
 notebook read, writes need owner):
 
-- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — cost estimate: `estimated_windows` (exact, from the real packing, when the prefix covered the whole document; an explicit lower bound when `sampled`), `estimated_calls`, `skipped_windows_in_prefix`, plus `sampled` when the bounded read hit its cap (judged on the element count exceeding the rows returned, not on the rows reaching the cap); `409` with a user-readable message when the source is not parsed yet or its parse failed, and a second `409` when the pair of reads straddled a reparse (re-read once and still drifting)
+- `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/preview` — cost estimate: `estimated_windows` (exact, from the real packing, when the prefix covered the whole document; an explicit lower bound when `sampled`), `estimated_calls` (**covers the read prefix only**; segments past it are not priced), `windows_in_prefix` (how many segments that price covers), `skipped_windows_in_prefix`, plus `sampled` when the bounded read hit its cap (judged on the element count exceeding the rows returned, not on the rows reaching the cap); `409` with a user-readable message when the source is not parsed yet or its parse failed, and a second `409` when the pair of reads straddled a reparse (re-read once and still drifting)
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog` — start extraction; `409` with a user-readable message when this source already has an active job (fetch it from `.../job`), the extraction model is unconfigured, the source is not parsed yet or its parse failed, or the previous run still has unreviewed candidates (confirm or dismiss them first). Candidates already expired by a reparse do not block: they are swept and the run proceeds
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` — the source's latest job: `status` plus `progress` (`sections_total`, `sections_done` — names kept, counting segments — `entries`, `rejected`, `uncovered`, `pending_candidates`) and, on failure, `failure_reason`. The internal `diagnostic` column is deliberately not exposed
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` — `cancelling` (the worker stops at its next slice boundary, or as soon as an in-flight model call notices the cancellation — it does not wait for that call to return), `cancelled` (no worker in this process; the row is settled directly), or `not_running`

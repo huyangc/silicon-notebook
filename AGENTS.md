@@ -489,15 +489,31 @@ under-counts both the budget an element that did not fit leaves unspent (three
 7,000-character elements are three windows, not two) and the density split, and
 both only add windows, so it is a floor. When the bounded prefix covered the
 whole document the count is what the real packer produced over it (exact, and
-free — the prefix is read anyway); when the prefix ran out it is the larger of
-that partial packing and the `source_text_stats` arithmetic (one SQL aggregate
-returning element count and total characters), reported as an explicit lower
-bound that the UI words "at least". Reading the whole document to count them
-exactly is the failure a cost preview must not have. The CALL count needs text, so it is
+free — the prefix is read anyway); when the prefix ran out it is the tightest of
+several floors, reported as an explicit lower bound the UI words "at least".
+Two conditions make that bound hold. Characters are summed the way the PACKER
+counts them — every element is stripped before packing, so `source_text_stats`
+and `preview_elements.full_chars` both sum `TRIM`ed lengths; raw `LENGTH`
+OVER-counts (2,001 elements of "one character plus twenty trailing spaces" is
+four windows by arithmetic and one in reality, and a floor above the truth is
+worse than none), while the uncounted join separators can only shrink the total.
+And the prefix's window count may NOT simply be added to the remainder: the
+packer closes a window only when the next element does not fit, so the prefix's
+last window is still open and the unread elements keep filling it (four short
+elements with the row cap at three is one window and would be quoted two). Only
+closed windows count as certain; the open one's characters rejoin the remainder,
+which is derived from each prefix row's own `full_chars` rather than the clipped
+text transmitted, or every clipped tail would be counted twice. Reading the whole
+document to count them exactly is the failure a cost preview must not have. The
+CALL count needs text, so it is
 measured exactly over the bounded `preview_elements` prefix, advancing the relay
 exactly as `run` does (otherwise the preview's gate answers differently from the
-run's on the multi-window table the relay exists for), and every window past the
-prefix is charged one call. Both prefix bounds set `sampled`, per-element
+run's on the multi-window table the relay exists for). Windows past the prefix
+are NOT priced: charging one call each was wrong in both directions at once (the
+skip gate makes a prose window free, a parameter-dense one is several slices) and
+described text the preview never read while sitting beside copy promising the
+total could only be higher. `estimated_calls` covers the prefix alone and
+`windows_in_prefix` says how much that is. Both prefix bounds set `sampled`, per-element
 truncation being the one that actually distorts the estimate. The row bound is
 `element_count > len(rows)`, never `len(rows) >= PREVIEW_ELEMENT_LIMIT`: a
 document holding exactly the cap's worth of elements was fully read, and calling

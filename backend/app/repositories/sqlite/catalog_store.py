@@ -506,13 +506,23 @@ class CatalogStore:
         makes the estimate several times too low on exactly the documents this
         feature targets. ``length(text) > bound`` is evaluated in the same
         query, so it costs nothing extra.
+
+        Each row also carries ``full_chars``: the element's WHOLE stripped
+        length, not the clipped ``text``'s. Same normalisation and same reason
+        as ``source_text_stats``, and it is what lets the caller subtract the
+        prefix from that total exactly. Deriving it from the returned ``text``
+        cannot work — that string has already lost everything past
+        ``text_chars`` — and it is one more expression on a row the query is
+        already producing, so it transmits an integer and reads nothing extra.
         """
         rows_bound = max(1, int(limit))
         chars_bound = max(1, int(text_chars))
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT id, element_type, substr(text,1,?) AS text, metadata, "
-                "(length(text) > ?) AS clipped "
+                "(length(text) > ?) AS clipped, "
+                "length(trim(text, char(32)||char(9)||char(10)||char(13))) "
+                "AS full_chars "
                 "FROM source_elements WHERE source_id=? ORDER BY id LIMIT ?",
                 (chars_bound, chars_bound, source_id, rows_bound),
             ).fetchall()
@@ -527,6 +537,7 @@ class CatalogStore:
                     "element_type": row["element_type"],
                     "text": row["text"] or "",
                     "section_path": str(metadata.get("section_path") or ""),
+                    "full_chars": int(row["full_chars"] or 0),
                 }
             )
         return out, clipped
@@ -535,6 +546,18 @@ class CatalogStore:
         """``(element_count, total_chars)`` over the SAME row universe
         ``preview_elements`` reads — ``WHERE source_id=?``, no other
         predicate — aggregated in SQL so no element text ever reaches Python.
+
+        ``total_chars`` counts each element's text AFTER stripping leading and
+        trailing whitespace, because that is what the packer counts
+        (``command_catalog._window_elements`` strips every element before it
+        packs anything). Summing raw ``LENGTH`` instead makes the caller's
+        window arithmetic OVER-count, which is the one direction it may not
+        err in: it is published as a lower bound, and a document of 2,001
+        elements each holding one character and twenty trailing spaces would
+        be quoted four windows when it really packs into one. The element JOIN
+        separators the packer adds between elements are deliberately NOT
+        counted — that omission can only make the total smaller, so it keeps
+        the bound on the safe side.
 
         Feeds the v2 preview's ``estimated_windows`` (windows are packed by
         character count over the source's full text, not the bounded prefix
@@ -546,8 +569,9 @@ class CatalogStore:
         """
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT COUNT(*) AS element_count, "
-                "COALESCE(SUM(LENGTH(text)),0) AS total_chars "
+                "SELECT COUNT(*) AS element_count, COALESCE(SUM(length("
+                "trim(text, char(32)||char(9)||char(10)||char(13)))),0) "
+                "AS total_chars "
                 "FROM source_elements WHERE source_id=?",
                 (source_id,),
             ).fetchone()

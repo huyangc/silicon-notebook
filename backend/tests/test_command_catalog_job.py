@@ -3450,27 +3450,88 @@ def test_preview_counts_the_windows_element_boundaries_actually_produce(
 
 
 def test_preview_past_its_prefix_is_a_declared_floor(repo, monkeypatch):
-    """When the prefix runs out, both available numbers are lower bounds and
-    the larger of them is reported as one.
+    """When the prefix runs out, every number available is a lower bound and
+    the tightest of them is reported as one.
 
-    Four elements that really pack into four windows, with only three read:
-    the honest answer is "at least 3", not a census. `sampled` is what carries
-    that to the UI, which words it as "at least".
+    Five elements that really pack into five windows, with two read. The
+    unread three hold 21,000 characters, which alone only proves two more
+    windows — the packer needs three for them, because an element goes into a
+    window whole and the 5,000 characters left over in each are unspendable.
+    "At least 4" is the honest answer; a census would be a lie in the one
+    direction a cost estimate must not err in.
     """
     monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_CHARS", 8_000)
-    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 3)
+    monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 2)
     notebook = repo.create_notebook(NotebookCreate(name="n"))
-    _big_element_source(repo, notebook.id, "s1", 4)
+    _big_element_source(repo, notebook.id, "s1", 5)
 
     preview = _service(repo).preview(notebook.id, "s1")
 
     assert preview.sampled is True
-    # 3 from the partial packing, 3 from ⌈28,000 / 12,000⌉ — and the truth is
-    # 4. A floor, and reported as one.
-    assert preview.estimated_windows == 3
+    assert preview.estimated_windows == 4
+    assert preview.windows_in_prefix == 2
+    # The truth, for comparison: the estimate is below it, never above.
     assert len(catalog_job.extraction_windows(
-        _big_element_source(repo, notebook.id, "s2", 4)
-    )) == 4
+        _big_element_source(repo, notebook.id, "s2", 5)
+    )) == 5
+
+
+def test_preview_never_over_counts_a_document_padded_with_whitespace(repo):
+    """The floor has to survive the packer's own normalisation.
+
+    Every element is stripped before it is packed, so a total that counts raw
+    characters describes a document the packer will never see: 2,001 elements
+    of "one character plus twenty trailing spaces" is 42,021 raw characters —
+    four windows by arithmetic — and one single window in reality. A "lower
+    bound" that sits above the truth is worse than no bound at all, so the
+    SQL sums stripped lengths.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "空白填充",
+        _numbered("s1", [
+            {"element_type": "paragraph", "text": "x" + " " * 20, "section_path": ""}
+            for _ in range(2_001)
+        ]),
+    )
+    service = _service(repo)
+
+    preview = service.preview(notebook.id, "s1")
+    actual = len(catalog_job.extraction_windows(
+        service.chunks.source_elements_for_chunking("s1")
+    ))
+
+    assert actual == 1
+    assert preview.sampled is True  # 2,001 elements past the 2,000-row cap
+    assert preview.estimated_windows <= actual
+
+
+def test_preview_remainder_excludes_the_tails_it_never_transmitted(repo):
+    """The unread characters are counted from each row's OWN full length, not
+    from the clipped text that came back.
+
+    A row clipped at `PREVIEW_ELEMENT_CHARS` transmits a fraction of its
+    element; subtracting the transmitted length would leave every clipped
+    tail in the "not yet covered" pot and count it a second time, inflating a
+    number published as a floor.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    # Three elements far larger than the per-element clip (1,200), all read.
+    _big_element_source(repo, notebook.id, "s1", 3, size=7_000)
+    service = _service(repo)
+
+    preview = service.preview(notebook.id, "s1")
+    actual = len(catalog_job.extraction_windows(
+        service.chunks.source_elements_for_chunking("s1")
+    ))
+
+    assert preview.sampled is True  # per-element clipping
+    assert actual == 3
+    assert preview.estimated_windows <= actual
+    # Subtracting the CLIPPED lengths would put 3 x 5,800 unread characters
+    # back in the pot on top of the whole-document arithmetic and quote more
+    # windows than the document has.
+    assert preview.estimated_windows == 2
 
 
 def _tiny_elements(repo, notebook_id, source_id, count):
@@ -3638,26 +3699,41 @@ def test_preview_reports_the_windows_the_cost_gate_would_skip(repo):
     assert preview.sampled is False
 
 
-def test_preview_declares_sampled_and_charges_unread_windows_one_call_each(
+def test_preview_prices_only_the_prefix_it_actually_read(
     repo, monkeypatch
 ):
-    """The row cap and the per-element clip are two different bounds, and both
-    feed `sampled`. Past the prefix the gate cannot be evaluated at all, so
-    every unread window is charged the MINIMUM of one call — never zero, which
-    is the one direction a cost estimate must not err in."""
+    """Past the prefix the gate cannot be evaluated at all, so those windows
+    are not priced — they used to be charged one call each, and that figure
+    was wrong in both directions at once.
+
+    The skip gate makes a prose window free, so a mostly-narrative book was
+    quoted for calls it will never make; a parameter-dense window is several
+    slices, so a manual was quoted far too little. Either way it was a number
+    about text this preview never read, sitting next to copy promising the
+    real total could only be higher. `windows_in_prefix` says how much of the
+    document the quoted figure covers, and the caller says the rest depends
+    on what is in it.
+    """
     notebook = repo.create_notebook(NotebookCreate(name="n"))
     _add_manual(repo, notebook.id, "s1", 6, chunk=_PREVIEW_CHUNK)
     service = _service(repo)
-    assert service.preview(notebook.id, "s1").sampled is False
+    whole = service.preview(notebook.id, "s1")
+    assert whole.sampled is False
+    # Unsampled: the prefix IS the document, so the two agree and the price
+    # covers everything.
+    assert whole.windows_in_prefix == whole.estimated_windows == 6
+    assert whole.estimated_calls == 6
 
     monkeypatch.setattr("app.services.catalog_job.PREVIEW_ELEMENT_LIMIT", 4)
     clipped = service.preview(notebook.id, "s1")
     assert clipped.sampled is True
-    # The window count is unaffected: past the prefix the count falls back to
-    # the character arithmetic over the source's whole text, which for this
+    # The window count is unaffected: past the prefix it falls back to the
+    # character arithmetic over the source's whole text, which for this
     # gap-free fixture is the same six.
     assert clipped.estimated_windows == 6
-    assert clipped.estimated_calls == 6
+    # …but only the windows the prefix actually produced are priced.
+    assert clipped.windows_in_prefix < 6
+    assert clipped.estimated_calls == clipped.windows_in_prefix
 
 
 def test_preview_still_declares_sampled_when_only_an_element_was_clipped(
@@ -5933,7 +6009,11 @@ def test_api_preview_start_job_candidates_and_apply(http):
     assert preview.status_code == 200
     body = preview.json()
     assert body["estimated_windows"] == 2
-    assert body["estimated_calls"] == 2
+    # This fixture's 12k filler elements are clipped, so the preview is
+    # sampled: the window count is the whole-document floor, while the price
+    # covers only the windows the prefix produced.
+    assert body["sampled"] is True
+    assert body["estimated_calls"] == body["windows_in_prefix"] == 1
     assert body["skipped_windows_in_prefix"] == 0
     # v1's shape signal retired with sectioning, and so did the count of
     # "command sections" — no compatibility alias, so a stale client fails

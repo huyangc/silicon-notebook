@@ -902,7 +902,17 @@ class CatalogStorePort(Protocol):
         ...
     def preview_elements(
         self, source_id: str, *, limit: int, text_chars: int
-    ) -> tuple[list[dict], bool]: ...
+    ) -> tuple[list[dict], bool]:
+        """A row-capped, per-row-clipped prefix of one source's elements.
+
+        Each row carries ``id`` / ``element_type`` / ``text`` /
+        ``section_path`` plus ``full_chars``: the element's WHOLE stripped
+        length, normalised exactly as ``source_text_stats`` normalises its
+        sum. It cannot be derived from ``text`` (that string has already lost
+        everything past ``text_chars``), and the caller needs it to subtract
+        this prefix from that total exactly.
+        """
+        ...
     def source_text_stats(self, source_id: str) -> tuple[int, int]:
         """``(element_count, total_chars)`` over ALL of one source's elements —
         the same row universe ``preview_elements`` reads (``WHERE
@@ -912,11 +922,20 @@ class CatalogStorePort(Protocol):
         Feeds the v2 cost preview's ``estimated_windows`` (windows are packed
         by character count, so the window count is a function of the source's
         TOTAL text, not the bounded prefix ``preview_elements`` is willing to
-        hydrate). One indexed, bounded scan per call — ``COUNT(*)`` and
-        ``SUM(LENGTH(text))`` over a single source's rows, computed entirely
-        in SQL — and it transmits zero element text back to Python, unlike
+        hydrate). One indexed, bounded scan per call — ``COUNT(*)`` and a sum
+        over a single source's rows, computed entirely in SQL — and it
+        transmits zero element text back to Python, unlike
         ``preview_elements`` which exists precisely to avoid that for its own
         (smaller, row-capped) read.
+
+        ``total_chars`` sums each element's text AFTER stripping leading and
+        trailing whitespace, mirroring the packer
+        (``command_catalog._window_elements``). Raw ``LENGTH`` would make the
+        caller's window arithmetic OVER-count — the one direction it may not
+        err in, since the number is published as a lower bound. The join
+        separators the packer inserts BETWEEN elements are deliberately not
+        counted: that omission can only shrink the total, which keeps the
+        bound on the safe side.
         """
         ...
 

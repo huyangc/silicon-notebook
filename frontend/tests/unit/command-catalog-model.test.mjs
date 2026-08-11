@@ -53,6 +53,7 @@ function preview(overrides = {}) {
     source_title: "工具手册",
     estimated_windows: 12,
     estimated_calls: 18,
+    windows_in_prefix: 12,
     skipped_windows_in_prefix: 0,
     sampled: false,
     element_limit: 4000,
@@ -156,18 +157,27 @@ test("零成本跳过闸挡下的段数 >0 时附一句纯叙述部分不消耗�
   assert.ok(!noSkips.body.includes("纯叙述部分"));
 });
 
-test("采样到顶时必须明说只按前一段估算——那句「预计约 M 次」否则是守不住的承诺", () => {
-  const sampled = catalogPreviewCopy(preview({ sampled: true, element_limit: 4000 }));
-  assert.match(sampled.body, /次数只按前 4000 个元素估算，实际可能更多/);
-  assert.ok(!catalogPreviewCopy(preview({ sampled: false })).body.includes("实际可能更多"));
+test("采样到顶时只对已读的那几段报价，不替没读过的段落承诺次数", () => {
+  // 旧文案给的是「未见段落按每段 1 次」算出来的总数，再补一句「实际可能更多」
+  // ——两句自相矛盾，而且那个总数本身两个方向都错得了：跳过闸让纯叙述的段免费，
+  // 参数密集的段一段要好几次。所以现在只报已读那几段，其余给方向。
+  const sampled = catalogPreviewCopy(
+    preview({ sampled: true, estimated_calls: 5, windows_in_prefix: 3 }),
+  );
+  assert.match(sampled.body, /按开头 3 段估算需约 5 次模型调用/);
+  assert.match(sampled.body, /其余段落视内容而定/);
+  assert.ok(!sampled.body.includes("实际可能更多"));
+  // 未采样时前缀就是全文，那个次数覆盖每一段，不需要任何方向性说明。
+  const exact = catalogPreviewCopy(preview({ sampled: false }));
+  assert.ok(!exact.body.includes("其余段落"));
+  assert.ok(!exact.body.includes("按开头"));
 });
 
 test("采样到顶时段数是下界，写「至少约」；前缀覆盖全文时是精确值，写「约」", () => {
-  // 后端在 sampled 侧返回的是「已读部分的分段数」与「全文字符数 ÷ 每段预算」
-  // 里的大者——元素装不满一段留下的空隙、候选过密时的拆段，都只会让真实段数
-  // 更多。写成「约」会把一个只往上跑的下界读成估计值。
+  // 段数在 sampled 侧是下界——元素装不满一段留下的空隙、候选过密时的拆段，都
+  // 只会让真实段数更多。写成「约」会把一个只往上跑的下界读成估计值。
   const sampled = catalogPreviewCopy(preview({ sampled: true }));
-  assert.match(sampled.body, /将通读全文（至少约 12 段）/);
+  assert.match(sampled.body, /全文至少约 12 段/);
   const exact = catalogPreviewCopy(preview({ sampled: false }));
   assert.match(exact.body, /将通读全文（约 12 段）/);
   assert.ok(!exact.body.includes("至少约"));

@@ -53,6 +53,8 @@ export type CommandCatalogPreview = {
   source_title: string;
   estimated_windows: number;
   estimated_calls: number;
+  // 被计价的那一段:`estimated_calls` 只覆盖它,其余段落后端刻意不报价。
+  windows_in_prefix: number;
   skipped_windows_in_prefix: number;
   sampled: boolean;
   element_limit: number;
