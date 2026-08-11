@@ -728,7 +728,18 @@ several slices (a manual was quoted far too little), and either way it described
 text this preview never read while sitting next to copy promising the real total
 could only be higher. So `estimated_calls` covers the prefix and nothing else,
 `windows_in_prefix` says how much of the document that is, and the UI says "about
-M calls for the first X segments; the rest depends on what is in them".
+M calls for the first X segments; the rest depends on what is in them". **That X
+counts CLOSED segments only.** The packer closes a segment only when the next
+element does not fit, so the measured prefix's last segment is still open: the
+unread elements keep filling it, and one more can flip its gate answer (prose
+becomes a command segment) or push its flag list past the slice limit into an
+extra call. Pricing a segment that can still change makes "the first X segments"
+a claim about text the preview has not finished reading — the same over-reach
+that leaving the tail beyond the prefix unpriced avoids. So both the price and X
+cover the closed segments alone, and the open one's characters go back into the
+pot with the remainder (one shared judgement of which segment is open, not two).
+A prefix that packs into a single segment therefore reports X = 0 and the UI
+falls back to the segment floor alone.
 **The measured prefix stops at the first truncated element.** The bounded read
 keeps returning later elements' heads after it clips one, and packing that whole
 list splices content from beyond the missing tail directly behind it — segments
