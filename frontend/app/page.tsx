@@ -253,6 +253,7 @@ import {
   EMPTY_KNOWLEDGE,
   KNOWLEDGE_STATUS_OPTIONS,
   SOURCES_PAGE_SIZE,
+  showPaperMetaBackfill,
   type AskResponse,
   type ChatMode,
   type ChatTurn,
@@ -6176,7 +6177,10 @@ export default function Home() {
                     <Plus size={20} strokeWidth={2.7} /> 添加来源
                   </button>
                 )}
-                {!isReader && (
+                {/* 显示门:仅当存在信息不完整的论文(或补全任务进行中)才显示;
+                    后端单库快照 paper_meta_missing 为 false 且可见页无 missing 来源
+                    时隐藏。判据是纯函数 showPaperMetaBackfill(有单测)。 */}
+                {!isReader && showPaperMetaBackfill(currentNotebook, sources, backfillingMeta) && (
                   <button
                     type="button"
                     className="button secondary"
@@ -6190,17 +6194,47 @@ export default function Home() {
                       // effect(或聚合看板 poll)检测完成;queued===0 立刻复位
                       // (无事可做);出错也复位。原本的 finally { false } 让 flag
                       // 在 HTTP 往返几百毫秒内就被清 0,轮询 gate 从来没机会跑。
+                      // 请求发出前就捕获 notebook/epoch:响应回来时用户可能已切到
+                      // 别的库并发起了它自己的补全,迟到的 queued===0 / 失败若不加
+                      // 守卫会把**那个库**的 backfillingMeta 清掉、停掉它的完成轮询
+                      // (codex R3 P2);快照/来源页刷新(R1/R2)也复用同一份捕获。
+                      const nb = currentNotebookId;
+                      const workspaceEpoch = workspaceEpochRef.current;
+                      const stillCurrent = () => workspaceRequestIsCurrent(
+                        false,
+                        workspaceEpoch,
+                        workspaceEpochRef.current,
+                        nb,
+                        activeNotebookIdRef.current,
+                      );
                       setBackfillingMeta(true);
                       try {
-                        const res = await backfillPaperMetadata(currentNotebookId);
+                        const res = await backfillPaperMetadata(nb);
+                        if (!stillCurrent()) return;
                         if (res.queued === 0) {
                           setBackfillingMeta(false);
                           setToast("论文信息已是最新，无需补全");
+                          // 显示门数据已漂移(按钮显示着但确无活可干):单库快照与可见
+                          // 来源页**都**要刷——showPaperMetaBackfill 取两者并集,别的
+                          // 标签页补完时本页 sources 里陈旧的 paper_meta_status=
+                          // "missing" 行会压过 paper_meta_missing=false,只刷快照按钮
+                          // 收不起来(codex R1 P2)。翻页/搜索/切库守卫与上方补全完成
+                          // 轮询同一套(refs + workspaceEpoch,codex R2 P2)。
+                          getNotebook(nb).then((refreshed) => {
+                            if (!stillCurrent()) return;
+                            setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
+                          }).catch(() => {});
+                          loadSourcesPage(nb, {
+                            page: sourcesPageRef.current,
+                            q: sourceQueryRef.current,
+                            guard: stillCurrent,
+                          }).catch(() => {});
                         } else {
                           setToast(`已提交 ${res.queued} 篇论文的信息补全`);
                           // 保持 backfillingMeta=true;完成检测交给轮询 effect。
                         }
                       } catch (err) {
+                        if (!stillCurrent()) return;
                         setBackfillingMeta(false);
                         reportError(err);
                       }

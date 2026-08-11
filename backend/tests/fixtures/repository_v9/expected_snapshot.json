@@ -373,6 +373,7 @@
       "local_evidence_available": true,
       "name": "Repository contract fixture",
       "paper_meta_backfilling": false,
+      "paper_meta_missing": false,
       "primary_domain": "Analog IC",
       "purpose": "Freeze schema-v9 repository composition behavior.",
       "shared_from": "",

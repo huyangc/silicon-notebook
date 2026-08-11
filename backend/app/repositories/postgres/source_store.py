@@ -48,6 +48,20 @@ _UNSET = SOURCE_PAPER_META_UNSET
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
 
 
+# 论文元数据补抽候选谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id`` 过滤之后)。
+# 与 SQLite 侧 ``sqlite.source_store.PAPER_META_ELIGIBLE_SQL`` 同义;三个消费方
+# (sources_missing_paper_meta / notebook_analytics 的 missing 计数 /
+# NotebookSummary.paper_meta_missing 的 EXISTS 探针)共用这一份保证口径不漂移。
+PAPER_META_ELIGIBLE_SQL = (
+    " AND s.source_type NOT IN ('memory','knowhow')"
+    " AND s.doc_type IN ('','academic_paper')"
+    " AND s.parse_status IN ('parsed','extracting','extracted')"
+)
+PAPER_META_NO_META_SQL = (
+    " AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)"
+)
+
+
 def _sort_key(value: object) -> str:
     """A timestamp column as ORDER-BY-compatible text.
 
@@ -1386,17 +1400,11 @@ class SourceStore:
     def sources_missing_paper_meta(
         self, notebook_id: str, include_existing: bool = False
     ) -> list[str]:
-        missing = (
-            ""
-            if include_existing
-            else " AND NOT EXISTS(SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)"
-        )
+        missing = "" if include_existing else PAPER_META_NO_META_SQL
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT s.id FROM sources s WHERE s.notebook_id=%s "
-                "AND s.source_type NOT IN ('memory','knowhow') "
-                "AND s.doc_type IN ('','academic_paper') "
-                "AND s.parse_status IN ('parsed','extracting','extracted') "
+                "SELECT s.id FROM sources s WHERE s.notebook_id=%s"
+                + PAPER_META_ELIGIBLE_SQL
                 + missing
                 + " ORDER BY s.created_at,s.id COLLATE \"C\"",
                 (notebook_id,),

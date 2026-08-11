@@ -37,6 +37,23 @@ _UNSET = SOURCE_PAPER_META_UNSET
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory', 'knowhow')"
 
 
+# 论文元数据补抽候选的 SQL 谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id``
+# 过滤之后)。三个消费方共用:sources_missing_paper_meta(补抽排队)、
+# query_store.notebook_analytics 的 missing 计数、以及 NotebookSummary.
+# paper_meta_missing 的 EXISTS 探针(「补全论文信息」按钮的显示门)——口径由这
+# 一份保证不漂移。合规条件与 models.sources 的 PAPER_META_ELIGIBLE_* 常量同义。
+PAPER_META_ELIGIBLE_SQL = (
+    " AND s.source_type NOT IN ('memory', 'knowhow')"
+    " AND s.doc_type IN ('', 'academic_paper')"
+    " AND s.parse_status IN ('parsed', 'extracting', 'extracted')"
+)
+# 「尚无 meta 行」半句单独成段:sources_missing_paper_meta 的 --force
+# (include_existing=True)要能把它拿掉。
+PAPER_META_NO_META_SQL = (
+    " AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id)"
+)
+
+
 def _created_label(value: str) -> str:
     try:
         dt = datetime.fromisoformat(value)
@@ -1687,18 +1704,12 @@ class SourceStore:
         `or "academic_paper"` 语义一致)、已有解析产物(parsed 及之后)、非 memory/
         knowhow 合成源;默认排除已有 meta 行(幂等续跑),include_existing=True
         (--force)全量。"""
-        missing = (
-            "" if include_existing else
-            " AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id)"
-        )
+        missing = "" if include_existing else PAPER_META_NO_META_SQL
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT s.id FROM sources s "
-                "WHERE s.notebook_id = ? "
-                "  AND s.source_type NOT IN ('memory', 'knowhow') "
-                "  AND s.doc_type IN ('', 'academic_paper') "
-                "  AND s.parse_status IN ('parsed', 'extracting', 'extracted') "
-                f"{missing} ORDER BY s.created_at ASC",
+                "WHERE s.notebook_id = ?"
+                f"{PAPER_META_ELIGIBLE_SQL}{missing} ORDER BY s.created_at ASC",
                 (notebook_id,),
             ).fetchall()
         return [r["id"] for r in rows]
