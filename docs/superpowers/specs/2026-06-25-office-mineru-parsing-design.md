@@ -3,6 +3,22 @@
 日期：2026-06-25
 状态：设计已确认，待写实现计划
 
+> **2026-08-10 更新**：本文里「xlsx 仍用 openpyxl / 不纳入 MinerU」这条范围决策已被用户拍板**反转**。
+> xlsx/xlsm 现已接入 MinerU 优先路径 + 行/格覆盖对账 + openpyxl 兜底；降级质量警告只覆盖 pdf/docx/pptx。
+> 真源是 `backend/app/services/parsers.py` 的 `MINERU_CAPABLE_SUFFIXES` 与 `MINERU_FALLBACK_WARNING_SUFFIXES`
+> 两个常量。
+>
+> 同批：docx/pptx 的**本机兜底链本身**也已升级，不再是下表里的「python-docx 仅抽段落」「原始 XML 直读」。
+> DOCX 现为 mammoth 语义化 HTML（保住标题层级/列表/表格结构）→ python-docx 最后兜底；
+> PPTX 现为 python-pptx（形状/表格/图表标题/备注，组合形状完全递归）→ 原始幻灯片 XML 最后兜底。
+> 兜底路径的表格按 `_FALLBACK_TABLE_ROWS_PER_ELEMENT` 行切成多个 `table` 元素——`chunking.py`
+> 从不切分单个元素，整张大表折成一个元素就是一个几十万字符的 chunk。
+>
+> 同批：旧版二进制 `.xls`（BIFF/OLE2）已接入本地 xlrd 解析（不经 MinerU——该格式 MinerU
+> 不支持），入口是 `parse_xls`/`_xls_cell_text`；`.doc/.ppt` 仍维持拒绝并提示另存为。
+>
+> 下文正文保留原样作为历史记录，不重写。
+
 ## 背景与目标
 
 当前来源解析现状（代码实际行为，非印象）：
@@ -25,6 +41,9 @@
 
 **已确认的范围决策：**
 - 纳入 MinerU 的格式：**仅 docx + pptx**。xlsx 继续用 openpyxl（纯表格数据，MinerU 收益有限）。
+  （**2026-08-10 更新**：此条已反转——xlsx/xlsm 也走 MinerU 优先，非空产出须先过**行 + 格**覆盖对账才采信
+  （只数行看不出宽表丢列），任一维度覆盖不足或 MinerU 失败时整份丢弃回落 openpyxl；因 openpyxl 兜底对单元格
+  值全保真，工作簿不打降级警告。云端上传分支走同一道对账，且图片只在采信后才持久化。）
 - 回退策略：MinerU 未配置或解析失败时 → **回退到现有轻量解析器**（镜像 PDF→pypdf），永不阻断入库。
 - 遗留二进制 `.doc/.ppt/.xls`（非 OOXML）：**不支持、明确拒绝**（MinerU 不支持这些；不引入转换依赖）。
 
@@ -86,7 +105,7 @@
 
 ### ⑥ 明确不做（YAGNI）
 
-- xlsx 仍用 openpyxl；不加图片（png/jpg）上传；不支持 `.doc/.ppt/.xls`；office-URL 不走云端；不把同步解析改异步；不加 `MINERU_OFFICE_ENABLED` 开关（回退已覆盖旧版 MinerU；旧服务器对 office 会快速报错而非长挂，无需额外开关）。
+- xlsx 仍用 openpyxl（**2026-08-10 更新：已反转，见文首**）；不加图片（png/jpg）上传；不支持 `.doc/.ppt/.xls`；office-URL 不走云端；不把同步解析改异步；不加 `MINERU_OFFICE_ENABLED` 开关（回退已覆盖旧版 MinerU；旧服务器对 office 会快速报错而非长挂，无需额外开关）。
 
 ## 影响面
 

@@ -34,13 +34,17 @@ test("extraction_warning 有值 → retrieval,tooltip 用后端原文(不改写)
   assert.equal(anomalies[0].tooltip, raw, "tooltip 必须是后端原文，不能被前端改写");
 });
 
-test("Python PDF 降级解析 → retrieval，并提示可重新解析或删除", () => {
+test("MinerU 降级到本地解析器 → retrieval，并提示可重新解析或删除", () => {
   const anomalies = sourceAnomalies({ parse_quality_warning: true });
   assert.equal(anomalies.length, 1);
   assert.equal(anomalies[0].severity, "retrieval");
   assert.equal(anomalies[0].label, "降级解析");
   assert.match(anomalies[0].tooltip, /版面、公式、表格或扫描内容可能不完整/);
   assert.match(anomalies[0].tooltip, /可重新解析，不满意可删除来源/);
+  assert.ok(
+    !anomalies[0].tooltip.includes("PDF"),
+    "警告覆盖 docx/pptx/xlsx 降级，文案不得写死 PDF",
+  );
 });
 
 test("paper_meta_status=missing → info(待补全，非 amber，是刻意的重新分类)", () => {

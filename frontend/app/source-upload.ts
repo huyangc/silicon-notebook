@@ -66,7 +66,7 @@ export function classifyStagedFiles<T extends SizedSourceFile>(
       skipped.push({
         name: file.name,
         reason: opts.legacyOfficeExtensions.includes(ext)
-          ? "旧版 Office 格式不支持，请另存为 .docx / .pptx / .xlsx 后重新上传"
+          ? "旧版 Office 格式不支持，请另存为 .docx / .pptx 后重新上传"
           : `不支持的文件类型（支持：${opts.supportedHint}）`,
       });
       continue;

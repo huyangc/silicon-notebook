@@ -80,7 +80,7 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
     assert.equal(config.report_max_sections, 6);
     assert.equal(config.report_max_subqueries_per_section, 4);
     assert.deepEqual(config.supported_source_extensions, [
-      "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm",
+      "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
     ]);
     assert.deepEqual(config.parser_engines, []);
   } finally {

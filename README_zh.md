@@ -2,7 +2,7 @@
 
 [English README](./README.md)
 
-`silicon-notebook` 是面向半导体工程团队的来源可追溯 knowhow 笔记本。它把 PDF、Markdown、DOCX、PPTX、CSV、XLSX 材料转成可搜索的来源元素、结构化知识、带引用回答、私有 Memory、knowhow 表和深度报告。
+`silicon-notebook` 是面向半导体工程团队的来源可追溯 knowhow 笔记本。它把 PDF、Markdown、DOCX、PPTX、CSV、XLSX、旧版二进制 XLS 材料转成可搜索的来源元素、结构化知识、带引用回答、私有 Memory、knowhow 表和深度报告。
 
 模型证据标记无论写成 `[k1]` 还是本地化的 `【k1】`（含逗号复合组），都会在问答与深度报告中绑定为同一个可点击编号引用。
 
@@ -225,7 +225,7 @@ preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正�
 
 - SQLite 是发行默认值；PostgreSQL 16 已是可直接选择的后端。仓库提供经过校验的单向 SQLite→PostgreSQL 快照 importer；它不提供实时同步、PostgreSQL→SQLite 回放或 MySQL 迁移。
 - Docker 不是一期默认工作流，也不是运行前提。
-- 公式、图片和复杂扫描 PDF 的最高保真解析需要 MinerU；`MINERU_MODE=off` 使用本地 PyMuPDF4LLM 版面/Markdown 降级解析（pypdf 仅作最后兜底）。远端 MinerU HTTP 调用默认对瞬态失败额外重试 2 次（共最多 3 次；`MINERU_MAX_RETRIES`）。URL 云解析最终失败时，后端会下载 PDF 并用本地解析完成；来源界面会提示可能的质量损失，并提供重新解析/删除操作。
+- 公式、图片和复杂扫描 PDF 的最高保真解析需要 MinerU；`MINERU_MODE=off` 使用本地 PyMuPDF4LLM 版面/Markdown 降级解析（pypdf 仅作最后兜底）。远端 MinerU HTTP 调用默认对瞬态失败额外重试 2 次（共最多 3 次；`MINERU_MAX_RETRIES`）。URL 云解析最终失败时，后端会下载 PDF 并用本地解析完成；来源界面会提示可能的质量损失，并提供重新解析/删除操作。MinerU 覆盖 PDF、DOCX、PPTX 与 XLSX/XLSM，每种都各自沿一条分级本地链回落——PDF 先 PyMuPDF4LLM 后 pypdf，DOCX 先 mammoth（保住标题层级、列表与表格结构）后 python-docx，PPTX 先 python-pptx（含幻灯片表格、图表标题与演讲者备注）后原始幻灯片 XML，工作簿走 openpyxl；质量警告只覆盖**有损**的那几种兜底（PDF、DOCX、PPTX），工作簿不在其中——openpyxl 兜底对单元格值全保真。工作簿的 MinerU 产出还要先过一次本地**行 + 格**覆盖对账才被采信（两个维度都要达标——按页渲染常常保住每一行却丢掉页宽之外的列），悄悄丢行或丢列时改用 openpyxl；云端上传走同一道对账，内嵌图片也只在产出被采信后才持久化。MinerU 解析不了的格式（Markdown、CSV、纯文本）一律本地解析，绝不上传 mineru.net 云端。旧版二进制 `.xls`（前 OOXML 时代的 BIFF 格式）没有任何 MinerU 分支，一律走本地 `xlrd`（该格式唯一的纯 Python 读取器）；其余旧版二进制 Office 格式（`.doc`、`.ppt`）仍不受支持，请另存为 `.docx`/`.pptx`。
 - 知识抽取和模型回答需要绑定对应 workload；离线模式不会合成知识。
 - 图谱问答仍为 opt-in/实验能力，默认模式是 `chunk`。
 - 生成问题召回由部署者显式开启且默认关闭；`shadow` 只记录不含正文的对比计数、不改变结果，只有明确的 `on` 才可在 chunk 低召回时补入原 chunk。

@@ -48,7 +48,13 @@ from app.services.paper_meta import (
     verify_paper_meta,
 )
 from app.services.parser_registry import engine_supports_file
-from app.services.parsers import mineru_content_list_to_elements
+from app.services.parsers import (
+    MINERU_FALLBACK_WARNING_SUFFIXES,
+    MINERU_WORKBOOK_SUFFIXES,
+    mineru_content_list_to_elements,
+    mineru_label_prefix,
+    mineru_workbook_output_accepted,
+)
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
@@ -963,7 +969,11 @@ class SourceIngestionService:
                             source.source_url, data_id=source_id
                         )
                         elements = mineru_content_list_to_elements(
-                            source_id, content_list, images=images, persist_image=persist_image
+                            source_id,
+                            content_list,
+                            label_prefix=mineru_label_prefix(source.file_name or ""),
+                            images=images,
+                            persist_image=persist_image,
                         )
                         if not elements:
                             raise RuntimeError(
@@ -983,23 +993,62 @@ class SourceIngestionService:
             else:
                 mineru_client = self.mineru_client()
                 cloud_client = self.mineru_cloud_client()
+                # 云端上传只对 mineru_cloud 引擎声明支持的后缀发起（真源=
+                # parser_registry 的引擎扩展名表）。.md/.csv/.txt 这类后缀上传
+                # mineru.net 是把用户内容外发给一个根本解析不了它的第三方，既是
+                # 不必要的隐私暴露，又白付一次网络往返和重试预算——它们直接走
+                # 本地解析（与「两者都没配」同一路径）。
+                # ⚠ 上面的 URL 分支**刻意**没有这道后缀闸，不是遗漏：URL 添加侧的
+                # probe_pdf 已经在入库前挡掉非 PDF，「添加链接」语义上就是 PDF，
+                # 这里再按 file_name 后缀判一次只会误伤没有扩展名的合法 PDF URL。
                 if (
                     not mineru_client.configured
                     and cloud_client.configured
                     and engine_supports_file("mineru_cloud", source.file_name)
                 ):
                     # 本地 http/cli 未配置 + 云端已配 → 上传文件走云端(对称 URL 分支)；
-                    # 云端任一步失败 → 回落本地 Python PDF 解析，摄取不中断。
+                    # 云端任一步失败 → 回落本地 Python 解析，摄取不中断。
                     try:
                         content_list, images = cloud_client.parse_file_with_images(
                             source.file_path, data_id=source_id
                         )
+                        label_prefix = mineru_label_prefix(source.file_name or "")
+                        suffix = Path(source.file_name or "").suffix.lower()
+                        is_workbook = suffix in MINERU_WORKBOOK_SUFFIXES
+                        # 工作簿先做**不带 persist_image** 的探针映射跑行+格覆盖对账，
+                        # 通过才带完整参数重映射：cloud-only 部署走的是这条路而不是
+                        # parse_xlsx，不在这里对账就等于给云端产出开了个绕过护栏的后门；
+                        # 而一次性带 persist_image 映射会让拒收路径留下孤儿图片资产。
+                        # 非工作簿后缀维持原来的单次映射（PDF/DOCX/PPTX 没有可对账的
+                        # 物理行分母）。
                         elements = mineru_content_list_to_elements(
-                            source_id, content_list, images=images, persist_image=persist_image
+                            source_id,
+                            content_list,
+                            label_prefix=label_prefix,
+                            images=None if is_workbook else images,
+                            persist_image=None if is_workbook else persist_image,
                         )
                         if not elements:
                             raise RuntimeError(
                                 "MinerU cloud content_list mapped to zero source elements"
+                            )
+                        if is_workbook:
+                            if not mineru_workbook_output_accepted(
+                                Path(source.file_path), elements
+                            ):
+                                # 抛给下面的 except：回落 self.parse_file(...)，
+                                # cloud-only 时 parse_xlsx 没有本地 MinerU，自然落到
+                                # 全保真的 openpyxl。
+                                raise RuntimeError(
+                                    "MinerU cloud workbook output failed row/cell coverage "
+                                    "reconciliation"
+                                )
+                            elements = mineru_content_list_to_elements(
+                                source_id,
+                                content_list,
+                                label_prefix=label_prefix,
+                                images=images,
+                                persist_image=persist_image,
                             )
                         mineru_error = str(getattr(cloud_client, "last_error", "") or "")
                         parser_mode = "mineru_cloud"
@@ -1099,15 +1148,21 @@ class SourceIngestionService:
             #
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
+            # file_name 在库里可为空(URL 来源/历史行),两处判据共用同一防御形态。
+            suffix = Path(source.file_name or "").suffix.lower()
             empty_hint = ""
-            if not elements and source.file_name.lower().endswith(".pdf"):
+            if not elements and suffix == ".pdf":
                 empty_hint = (
                     "No extractable text — likely a scanned/image PDF. "
                     "Enable MinerU (MINERU_MODE) or add OCR to parse it."
                 )
             fallback_hint = ""
+            # 判据按「降级确实有损的后缀」而非只认 .pdf:docx/pptx 同样有 MinerU
+            # 优先分支,它们的降级此前是静默的。xlsx/xlsm 刻意不在其中——openpyxl
+            # 兜底对单元格值全保真,见 MINERU_FALLBACK_WARNING_SUFFIXES。其余两个
+            # 条件不变——它们已经保证「MinerU 根本没配置时的正常兜底」不打警告。
             used_python_fallback_after_mineru_error = (
-                source.file_name.lower().endswith(".pdf")
+                suffix in MINERU_FALLBACK_WARNING_SUFFIXES
                 and "mineru" not in element_parsers
                 and (
                     parser_mode == "python_pdf_fallback_after_cloud_error"
@@ -1115,11 +1170,14 @@ class SourceIngestionService:
                 )
             )
             if used_python_fallback_after_mineru_error:
+                # 前缀常量的名字与取值都不可改:四个存储层、shadow parity 与既有
+                # 已入库行都靠它做前缀匹配。只有正文措辞去 PDF 化。
                 fallback_hint = (
                     f"{PDF_PYTHON_FALLBACK_WARNING_PREFIX} "
                     "MinerU did not produce usable elements after retries; used a local "
-                    "Python PDF parser. Layout, formulas, tables, or OCR may still differ "
-                    "from MinerU output; reparse this source when MinerU is available."
+                    "Python parser for this document. Layout, formulas, tables, or OCR may "
+                    "still differ from MinerU output; reparse this source when MinerU is "
+                    "available."
                 )
                 if mineru_error:
                     fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"

@@ -56,7 +56,7 @@ export type ParserEngineCapability = {
 };
 
 export const DEFAULT_SUPPORTED_SOURCE_EXTENSIONS = [
-  "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm",
+  "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
 ];
 
 const PARSER_IDS = new Set(["mineru_self_hosted", "mineru_cloud", "builtin"]);

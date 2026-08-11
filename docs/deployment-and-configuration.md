@@ -803,7 +803,7 @@ MINERU_TIMEOUT_SECONDS  # MinerU call timeout
 MINERU_MAX_RETRIES      # extra transient HTTP attempts, 0..5 (default 2 = at most 3 total attempts)
 MINERU_FORMULA_ENABLE   # true/false
 MINERU_TABLE_ENABLE     # true/false
-MINERU_RETURN_IMAGES    # retain embedded images from PDF/DOCX/PPTX documents (default on: true; set 0/false to keep text and captions only)
+MINERU_RETURN_IMAGES    # retain embedded images from PDF/DOCX/PPTX/XLSX documents (default on: true; set 0/false to keep text and captions only)
 MINERU_MAX_IMAGE_BYTES  # max size per embedded image (default 5MB; larger images are dropped)
 MINERU_MAX_IMAGES_PER_SOURCE # max embedded images per source (default 200)
 ```

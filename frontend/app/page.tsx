@@ -339,8 +339,10 @@ const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false 
 // 标题清理需要在系统配置返回前可用，因此使用与后端注册表配套的兼容默认值；上传
 // 校验、accept 与可见格式列表则使用 /system/config 下发的权威注册表投影。
 const SUPPORTED_SOURCE_EXT_GROUP = DEFAULT_SUPPORTED_SOURCE_EXTENSIONS.join("|");
-// 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。
-const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt", "xls"];
+// 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。.xls 是例外：
+// xlrd 纯 Python 可读，注册表 builtin 引擎已直接放行，这里只剩 doc/ppt 两个仍需
+// 引导另存为的旧格式。
+const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt"];
 
 // 图谱边类型 → 中文。取值真源:prompts.py 列出的 edge_type 词表(supports /
 // depends_on / contrasts_with / about / defines / used_in / composed_of / mixed,
@@ -7561,9 +7563,9 @@ export default function Home() {
                 </div>
               )}
               {sourceDetail.parse_quality_warning && (
-                <section className="source-pdf-fallback-warning" aria-label="PDF 降级解析提示">
+                <section className="source-pdf-fallback-warning" aria-label="降级解析提示">
                   <div>
-                    <strong>当前内容由本地 Python PDF 解析器生成</strong>
+                    <strong>当前内容由本地解析器生成</strong>
                     <p>MinerU 重试后仍未成功，版面、公式、表格或扫描内容可能存在异常。请先检查内容；MinerU 恢复后可重新解析，不满意也可以删除该来源。</p>
                   </div>
                   {!sourceDetailBaseId && !isReader && (
@@ -7571,7 +7573,7 @@ export default function Home() {
                       <button
                         type="button"
                         className="button secondary"
-                        aria-label="重新解析降级 PDF"
+                        aria-label="重新解析降级来源"
                         disabled={reparsingSource || sourceDetailDeleting}
                         onClick={() => reparseSource().catch(reportError)}
                       >
@@ -7580,7 +7582,7 @@ export default function Home() {
                       <button
                         type="button"
                         className="button secondary source-pdf-fallback-delete"
-                        aria-label="删除降级 PDF 来源"
+                        aria-label="删除降级来源"
                         disabled={reparsingSource || sourceDetailDeleting}
                         onClick={() => confirmDeleteSource(sourceDetail)}
                       >
@@ -8779,8 +8781,11 @@ function sanitizeTableHtml(html: string): string {
   const withoutBlocks = html.replace(/<\/?(script|style)[^>]*>/gi, "");
   const withoutHandlers = withoutBlocks.replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "");
   const allowed = /^<\/?(table|thead|tbody|tfoot|tr|td|th|caption)(\s[^>]*)?>$/i;
-  // Strip every tag that is not part of the allow-list above.
-  return withoutHandlers.replace(/<\/?[a-z][^>]*>/gi, (tag) => (allowed.test(tag) ? tag : ""));
+  // Strip every tag that is not part of the allow-list above. Stripped tags become
+  // a single space, not "": mammoth wraps each cell paragraph in <p>, so dropping
+  // them outright glued a two-paragraph cell's "a" and "b" into "ab". HTML collapses
+  // the extra whitespace on render, so a plain space is enough.
+  return withoutHandlers.replace(/<\/?[a-z][^>]*>/gi, (tag) => (allowed.test(tag) ? tag : " "));
 }
 
 function ElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
