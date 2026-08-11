@@ -125,9 +125,17 @@ SPLIT_BOUNDARY_LOOKBACK_CHARS = 200
 # C0: ~100 parameters overruns the output budget. 20 keeps a slice's answer
 # comfortably inside it with room for syntax/description/examples on slice 0.
 SLICE_PARAM_LIMIT = 20
-# Bounded scans. Windows are already capped at WINDOW_CHARS; these keep the
-# per-window work constant rather than proportional to a pathological paste.
-MAX_SCAN_LINES = 200
+# (v1's `MAX_SCAN_LINES = 200` line cap lived here and is GONE. It bounded the
+# usage-line scan back when the unit was one command's section, where 200 lines
+# was far more than a section could be. In v2 the unit is a `WINDOW_CHARS` slab
+# of a document, so the character budget IS the bound and the line cap only ever
+# subtracted from it — a single 300-line element (a flattened options table, a
+# long code block) hid every command documented after line 200 from
+# `window_candidates`, hence from `_dense_overflow`, hence from the split; the
+# names were never served, and a name that is never served cannot be claimed.
+# That is the same silent, permanent loss the whole geometry change exists to
+# remove, so the scan reads every line of a window it is already only allowed
+# 12,000 characters of.)
 # Mirrors `lexical_query.identifier_terms`'s own length floor. Not imported:
 # that constant is a private literal (`len(value) < 4`) inside a function
 # body, not a name `lexical_query` exports, and this module's own gate is
@@ -576,7 +584,7 @@ def _usage_identifier(line: str) -> str:
     return ""
 
 
-def _usage_identifiers(text: str, *, max_lines: int = MAX_SCAN_LINES) -> list[str]:
+def _usage_identifiers(text: str) -> list[str]:
     """Every command invoked by a usage line in `text`, deduplicated in order.
 
     Deliberately parser-blind. The spec's shape is "the first code block's
@@ -585,11 +593,20 @@ def _usage_identifiers(text: str, *, max_lines: int = MAX_SCAN_LINES) -> list[st
     flattened MinerU text extracts as well as native markdown. Recognising the
     *line* rather than the *element type* is what keeps that true, and
     `_usage_identifier` is strict enough to survive the wider haystack.
+
+    EVERY line, with no cap. v1 stopped at 200 because its unit was one
+    command's section; a v2 window is a slab of a document, and one element can
+    hold 300 lines of flattened options table on its own. Stopping early there
+    does not save work worth having — the window is already capped at
+    `WINDOW_CHARS`, so this is bounded either way — while it silently hides
+    every command documented past the cut from `window_candidates`, from
+    `_dense_overflow`, and therefore from the split that exists to keep them
+    claimable. A name that is never served can never be claimed and never
+    produces a rejection, a ratio movement or a report line: the exact silent
+    loss the v2 geometry was built to remove, reintroduced one layer down.
     """
     found: dict[str, None] = {}
-    for index, line in enumerate((text or "").splitlines()):
-        if index >= max_lines:
-            break
+    for line in (text or "").splitlines():
         term = _usage_identifier(line)
         if term:
             found[term] = None
@@ -1273,11 +1290,11 @@ def window_segments(
 
     Cost is one pass over the window's lines with a set membership test each,
     i.e. O(lines) — not O(lines x candidates) — and lines are bounded by
-    `WINDOW_CHARS`. Deliberately NOT capped at `MAX_SCAN_LINES` the way the
-    candidate scan is: that cap bounds how much work a PROMPT-borne list is
-    worth, while a line this pass skipped would silently join a neighbouring
-    command's segment, which is the wrong direction (it would accept a
-    mis-attribution rather than reject a real parameter).
+    `WINDOW_CHARS`. Every line, no cap, for the same reason
+    `_usage_identifiers` has none: the character budget is the bound, and a
+    line skipped here would silently join a neighbouring command's segment,
+    which is the wrong direction (it would accept a mis-attribution rather
+    than reject a real parameter).
     """
     claimable = {str(name) for name in candidates or ()} | {
         str(name) for name in carried or ()
