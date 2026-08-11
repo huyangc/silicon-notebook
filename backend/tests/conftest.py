@@ -178,15 +178,22 @@ def _drain_knowhow_projection_schedulers():
     from app.services.knowhow import api as knowhow_api
 
     schedulers = list(knowhow_api._SCHEDULERS.values())
+    deadline = time.monotonic() + 10.0
+    pending_timers = []
     for scheduler in schedulers:
         with scheduler._lock:
             pending = list(scheduler._timers.values())
             scheduler._timers.clear()
             scheduler._rerun.clear()
+        pending_timers.extend(pending)
         for timer in pending:
             timer.cancel()
+    for timer in pending_timers:
+        timer.join(timeout=max(0.0, deadline - time.monotonic()))
+    assert not any(timer.is_alive() for timer in pending_timers), (
+        "knowhow projection timer did not stop during teardown"
+    )
 
-    deadline = time.monotonic() + 10.0
     remaining = schedulers
     while remaining and time.monotonic() < deadline:
         active = []
