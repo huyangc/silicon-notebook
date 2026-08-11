@@ -2216,30 +2216,36 @@ button.chat-session-card {
   line-height: 1.35;
 }
 
+/* 字阶按 18px 正文定标。⚠ 正文 18px 不是这里说了算:容器同时带
+   `report-markdown answer-markdown` 两个类,`.answer-markdown p`(在本文件更靠后)
+   与 `.report-markdown p` 同特异性 (0,1,1),按源码顺序恒赢。这里写同一个 18px 只是
+   让本块自洽可读——曾经写 15px 时,标题字阶还按 15px 正文定(h3 15/h4 14),被顶掉的
+   正文独自变成 18px,三级/四级标题就比正文还小。公开分享页(.public-report)的正文
+   另降到 15.5px,标题在那边有自己的覆盖。 */
 .report-markdown h1 {
-  font-size: 22px;
+  font-size: 24px;
 }
 
 .report-markdown h2 {
   margin-top: 10px;
   padding-bottom: 6px;
   border-bottom: 1px solid #e6eaf1;
-  font-size: 18px;
+  font-size: 21px;
 }
 
 .report-markdown h3 {
-  font-size: 15px;
+  font-size: 19px;
 }
 
 .report-markdown h4 {
-  font-size: 14px;
+  font-size: 18px;
 }
 
 .report-markdown p,
 .report-markdown ul,
 .report-markdown ol {
   margin: 0;
-  font-size: 15px;
+  font-size: 18px;
   line-height: 1.7;
 }
 
@@ -3660,9 +3666,11 @@ button.chat-session-card {
    问答答案的身份：report-view.tsx 的容器写的是 `report-markdown answer-markdown`
    （同一个元素同时带两个类），memory-panel.tsx 与 knowhow-cell-editor.tsx 也各自
    复用它。裸 `.answer-markdown h2` 与 `.report-markdown h2` 同特异性 (0,1,1)，按源码
-   顺序后来者赢——深度报告的 18px/带下边框 h2 会被这里的 21px 顶掉，h3 还会变灰。
-   收窄到问答自己的容器链后三处复用点都不受影响：Memory 卡片与 Knowhow 单元格里
-   的标题是用户自己写的短笔记，本来就不该套「多节长文」的字阶。
+   顺序后来者赢——深度报告的带下边框 h2 会被这里顶掉，h3 还会变灰（报告字阶如今
+   与这里同为 21/19px，但那是各自按 18px 正文定标的巧合，不是共享一份定义；公开
+   分享页还依赖 `.report-markdown` 基线另行降档）。收窄到问答自己的容器链后三处
+   复用点都不受影响：Memory 卡片与 Knowhow 单元格里的标题是用户自己写的短笔记，
+   本来就不该套「多节长文」的字阶。
    回归门：answer-heading-scope-guard.test.mjs。 */
 .chat-answer .answer-markdown h2,
 .chat-answer .answer-markdown h3 {
@@ -9341,9 +9349,24 @@ button.chat-session-card {
   line-height: 1.85;
 }
 
-/* 页头已有大标题;正文 h1(报告自带的标题行)降一级,避免两个巨标题对撞。 */
+/* 页头已有大标题;正文 h1(报告自带的标题行)降一级,避免两个巨标题对撞。
+   h2/h3/h4 也随本页 15.5px 的正文重新定标:基础字阶是按站内 18px 正文定的
+   (h2 21/h3 19/h4 18),照单全收会让 h2 比降过级的 h1 还大;而曾经不覆盖时
+   h3 15/h4 14 又低于 15.5px 正文,标题比正文小。 */
 .public-report .report-markdown h1 {
   font-size: 20px;
+}
+
+.public-report .report-markdown h2 {
+  font-size: 18px;
+}
+
+.public-report .report-markdown h3 {
+  font-size: 16.5px;
+}
+
+.public-report .report-markdown h4 {
+  font-size: 15.5px;
 }
 
 .public-report .report-markdown img {
