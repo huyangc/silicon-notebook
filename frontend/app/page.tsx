@@ -6206,11 +6206,21 @@ export default function Home() {
                           // "missing" 行会压过 paper_meta_missing=false,只刷快照按钮
                           // 收不起来(codex R1 P2)。翻页/搜索/切库守卫与上方补全完成
                           // 轮询同一套(refs + workspaceEpoch)。
-                          getNotebook(currentNotebookId).then((refreshed) => {
-                            setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
-                          }).catch(() => {});
                           const nb = currentNotebookId;
                           const workspaceEpoch = workspaceEpochRef.current;
+                          // 快照刷新与来源页刷新用同一套 epoch 守卫:只比 notebook id
+                          // 的话,「点补全→离开→重开同库」间隙里迟到的旧快照会覆盖
+                          // 新开工作区(codex R2 P2)。
+                          getNotebook(nb).then((refreshed) => {
+                            if (!workspaceRequestIsCurrent(
+                              false,
+                              workspaceEpoch,
+                              workspaceEpochRef.current,
+                              nb,
+                              activeNotebookIdRef.current,
+                            )) return;
+                            setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
+                          }).catch(() => {});
                           loadSourcesPage(nb, {
                             page: sourcesPageRef.current,
                             q: sourceQueryRef.current,
