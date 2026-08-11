@@ -183,6 +183,7 @@ def command_catalog_preview(
         source_title=preview.source_title,
         estimated_windows=preview.estimated_windows,
         estimated_calls=preview.estimated_calls,
+        windows_in_prefix=preview.windows_in_prefix,
         skipped_windows_in_prefix=preview.skipped_windows_in_prefix,
         sampled=preview.sampled,
         element_limit=preview.element_limit,

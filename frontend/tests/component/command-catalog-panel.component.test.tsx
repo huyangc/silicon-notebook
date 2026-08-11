@@ -94,6 +94,7 @@ const preview = {
   source_title: "工具手册",
   estimated_windows: 12,
   estimated_calls: 18,
+  windows_in_prefix: 8,
   skipped_windows_in_prefix: 3,
   sampled: true,
   element_limit: 4000,
@@ -183,10 +184,13 @@ test("发起前先弹成本预告：约数 + 采样口径 + 跳过闸提示，�
   expect(startCommandCatalog).not.toHaveBeenCalled();
   const [request] = confirmed;
   expect(request.title).toBe("识别命令目录");
-  // 这份夹具是 `sampled: true`，段数因此是下界而不是估计值 —— 文案跟着写「至少约」。
-  expect(request.body).toContain("将通读全文（至少约 12 段），预计约 18 次模型调用。");
+  // 这份夹具是 `sampled: true`：段数是下界（写「至少约」），而调用数只对已读的
+  // 那 8 段成立 —— 其余段落后端刻意不报价。
+  expect(request.body).toContain("全文至少约 12 段");
+  expect(request.body).toContain("按开头 8 段估算需约 18 次模型调用");
+  expect(request.body).toContain("其余段落视内容而定");
   expect(request.body).toContain("其中纯叙述部分不消耗调用。");
-  expect(request.body).toContain("次数只按前 4000 个元素估算，实际可能更多");
+  expect(request.body).not.toContain("实际可能更多");
   expect(request.sections).toEqual([]);
   expect(request.confirmLabel).toBe("开始识别");
 

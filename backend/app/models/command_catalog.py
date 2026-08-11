@@ -34,14 +34,18 @@ from pydantic import BaseModel
 class CommandCatalogPreview(BaseModel):
     """成本预告(v2)。
 
-    `estimated_windows` 是「整篇按字符切成多少个窗口」——窗口按字符打包,所以它是
-    对来源全文字符数的算术,不是抽样估计。`estimated_calls` 才需要读正文(跳过闸
-    与每窗分片数都要看文本),所以它只在有界前缀里精确测量、前缀之外每窗按 1 次
-    计;`sampled=true` 表示前缀到顶了、真实成本更高。
+    `estimated_windows` 在有界前缀恰好覆盖全文时是**精确值**(后端真跑了一遍分段),
+    否则是**显式下界**(`sampled=true` 时);字符算术只能算下界——元素整放留下的
+    预算空隙与候选过密时的拆段都只会让段数更多。
+
+    `estimated_calls` **只描述已读的那段前缀**,前缀之外的段一律不计价:跳过闸让
+    纯叙述的段免费、参数密集的段要分好几片,替没读过的文本报价会同时往两个方向
+    出错,还与旁边「实际可能更多」的措辞自相矛盾。`windows_in_prefix` 说明这次
+    测量覆盖了多少段,调用方据此说「开头 X 段」而不是替其余段落编一个次数。
 
     `skipped_windows_in_prefix` 是前缀内被零模型调用闸(没有可认领的命令名、也没有
-    flag 形状参数)挡下的窗口数——它是「为什么调用数远小于窗口数」唯一的解释项,
-    少了它,一份大部分是散文的手册看到 `估计 3 次调用 / 40 个窗口` 会读成漏算。
+    flag 形状参数)挡下的段数——它是「为什么调用数远小于段数」唯一的解释项,
+    少了它,一份大部分是散文的手册看到 `估计 3 次调用 / 40 段` 会读成漏算。
 
     v1 的 `signal`(形状检测)与 `estimated_sections` 已随规则分节一起退役,刻意
     **不**保留兼容别名:v2 没有「命令节」这个东西可数,留一个恒为 0 的字段比删掉
@@ -52,6 +56,7 @@ class CommandCatalogPreview(BaseModel):
     source_title: str = ""
     estimated_windows: int = 0
     estimated_calls: int = 0
+    windows_in_prefix: int = 0
     skipped_windows_in_prefix: int = 0
     sampled: bool = False
     element_limit: int = 0

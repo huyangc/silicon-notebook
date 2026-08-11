@@ -463,13 +463,19 @@ class CatalogSourceBusy(RuntimeError):
 class CatalogPreview:
     """What extracting this source would cost, in v2's own units.
 
-    ``estimated_windows`` is arithmetic on the source's total character count
-    (windows are packed by characters), so it is exact up to element boundaries
-    and the join separators — a lower bound, like every other number here.
+    ``estimated_windows`` is exact when the bounded prefix turned out to be
+    the whole document, and an explicit LOWER BOUND otherwise (``sampled``
+    says which). ``estimated_calls`` describes the prefix and nothing else:
+    the windows past it are not priced, because pricing text nobody read is
+    wrong in both directions at once — the skip gate makes a prose window
+    free, while a parameter-dense one is several slices. ``windows_in_prefix``
+    is how much of the document that measurement covered, so a caller can say
+    "the first X of at least N segments" without inventing the rest.
+
     ``skipped_windows_in_prefix`` is what the zero-model-call gate
-    (``window_needs_model``) rejected inside the bounded prefix this preview
-    actually read: it is the number that explains why ``estimated_calls`` can
-    be well under ``estimated_windows`` on a document that is mostly prose.
+    (``window_needs_model``) rejected inside that prefix: it is the number
+    that explains why ``estimated_calls`` can be well under
+    ``windows_in_prefix`` on a document that is mostly prose.
 
     v1's ``signal``/``estimated_sections`` are gone rather than kept as
     aliases: shape detection retired with sectioning, and a count of "command
@@ -480,6 +486,7 @@ class CatalogPreview:
     source_title: str
     estimated_windows: int
     estimated_calls: int
+    windows_in_prefix: int
     skipped_windows_in_prefix: int
     sampled: bool
     element_limit: int
@@ -856,9 +863,18 @@ class CommandCatalogService:
         parameter count (a 100-flag window is several slices). Both need the
         text, so they are measured exactly over the bounded PREFIX
         ``preview_elements`` returns — including the relay, since a window's
-        gate reads the previous window's candidates — and every window past
-        that prefix is charged the minimum of one call. ``sampled`` says the
-        prefix ran out, so the reader knows the number is a floor.
+        gate reads the previous window's candidates — and the windows past
+        that prefix are NOT priced at all. They used to be charged one call
+        each, and that number was wrong in both directions at once: the skip
+        gate makes a prose window free, so a mostly-narrative book was quoted
+        for calls it will never make, while a parameter-dense one is several
+        slices per window and was quoted far too little. Either way it was a
+        figure about text this preview never read, sitting next to copy
+        promising the real total could only be higher. So ``estimated_calls``
+        now describes exactly what was measured — the prefix — and
+        ``windows_in_prefix`` says how much of the document that was, leaving
+        the caller to say "the rest depends on what is in it" instead of
+        inventing a number for it.
 
         Both of ``preview_elements``' bounds feed ``sampled``, not just the row
         cap. Per-element truncation is the one that actually distorts the
@@ -886,16 +902,47 @@ class CommandCatalogService:
         )
         sampled = clipped or element_count > len(rows)
         prefix = extraction_windows(rows)
-        # Exact when the prefix is the whole document; otherwise the best floor
-        # available from two independent lower bounds — the windows the packer
-        # really produced over the prefix (whose elements are clipped, so the
-        # real document packs into at least as many) and the character
-        # arithmetic over the full text.
-        estimated_windows = (
-            max(len(prefix), -(-max(0, int(total_chars)) // WINDOW_CHARS))
-            if sampled
-            else len(prefix)
+        # Exact when the prefix is the whole document; a true floor otherwise.
+        #
+        # The characters the prefix did NOT cover come from subtracting each
+        # prefix row's own stripped length (`full_chars`) from the stripped
+        # total — never the length of the `text` that came back, since those
+        # rows are clipped at `PREVIEW_ELEMENT_CHARS` and subtracting what was
+        # transmitted would leave every clipped element's tail in the
+        # remainder to be counted a second time.
+        #
+        # `len(prefix) + ceil(remainder / WINDOW_CHARS)` would NOT be a floor,
+        # which is the whole subtlety here: the packer closes a window only
+        # when the next element does not fit, so the prefix's LAST window is
+        # still open and the unread elements keep filling it rather than
+        # starting a new one. (Four short elements with the row cap at three
+        # is one window in reality and would be quoted two.) So only the
+        # closed windows are counted as certain, and the open one's characters
+        # go back in the pot with the remainder. Every input is conservative:
+        # the prefix's own text is clipped, so its packing and its tail length
+        # both understate the real document, and the join separators the
+        # packer inserts are not counted at all.
+        remainder = max(
+            0,
+            int(total_chars) - sum(int(row.get("full_chars") or 0) for row in rows),
         )
+        #
+        # Three independent floors, and the answer is the tightest of them.
+        # The STRUCTURAL one (closed prefix windows plus the open tail and the
+        # remainder) is usually the strongest, but not always: a prefix whose
+        # every element was clipped to a few characters packs into one window
+        # and says almost nothing, while the whole-document arithmetic still
+        # proves the real count. `len(prefix)` is the third, and it is what
+        # keeps the answer honest when the other two round down.
+        if not sampled:
+            estimated_windows = len(prefix)
+        else:
+            open_tail = (len(prefix[-1].text) if prefix else 0) + remainder
+            estimated_windows = max(
+                len(prefix),
+                max(0, len(prefix) - 1) + -(-open_tail // WINDOW_CHARS),
+                -(-max(0, int(total_chars)) // WINDOW_CHARS),
+            )
         prefix_calls = 0
         skipped = 0
         carry: list[str] = []
@@ -914,11 +961,13 @@ class CommandCatalogService:
             source_id=source_id,
             source_title=self._canonical_source_title(source),
             estimated_windows=estimated_windows,
-            # One call minimum for every window the prefix did not reach: the
-            # gate cannot be evaluated on text this preview never read, and
-            # guessing it would be free is the direction a cost estimate must
-            # not err in.
-            estimated_calls=prefix_calls + max(0, estimated_windows - len(prefix)),
+            # ONLY what the prefix measured. See the docstring: a per-window
+            # guess for text this preview never read is wrong in both
+            # directions (prose windows are free, dense ones are several
+            # slices) and it contradicts the "could only be more" wording
+            # sitting next to it.
+            estimated_calls=prefix_calls,
+            windows_in_prefix=len(prefix),
             skipped_windows_in_prefix=skipped,
             sampled=sampled,
             element_limit=PREVIEW_ELEMENT_LIMIT,
