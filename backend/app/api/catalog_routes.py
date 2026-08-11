@@ -36,7 +36,7 @@ from app.models.command_catalog import (
     CommandCatalogStartResponse,
 )
 from app.models.identity import UserProfile
-from app.repositories.ports import CatalogJobAlreadyRunning
+from app.repositories.ports import CATALOG_TERMINAL_STATUSES, CatalogJobAlreadyRunning
 from app.services import background_jobs
 from app.services.catalog_job import (
     APPLY_TABLE_SHAPE_MESSAGE,
@@ -77,6 +77,18 @@ _DISMISS_TOO_MANY_MESSAGE = f"一次最多跳过 {MAX_APPLY_CANDIDATES} 条，�
 # `CommandCatalogApplyRequest`/`CommandCatalogDismissRequest` 的字段注释),
 # 拒绝的理由与措辞不因写不写库而不同。
 _DUAL_SCOPE_MESSAGE = "一次只能选择一种确认范围：逐条选择或全部待审阅。"
+# R3 (codex PR #494 评审第 3 轮 P2): 审阅一个还在跑的任务会造出一条**永远确认
+# 不了**的候选。识别中途确认某条命令 → 后面的窗口把这条命令的续表参数合并写回
+# 时发现行已 applied → 按既定的降级路径追加一条同名新候选(那是刻意的:参数看得
+# 见比丢掉好);但确认这条替补行时,目标表里已经有同名锚点,`_apply_locked` 会
+# 判 `conflict_existing_row` 跳过——迟到发现的参数从此可见而不可落库。
+# 闸放在 **API 边界**而不是服务层:①它对齐界面本来的行为(审阅入口只在终态开),
+# ②服务层的锁与降级路径因此原样保留为纵深防御——那条路仍会在「用户先取消、
+# 恰好与最后一个窗口的写回交错」这类合法竞态里跑到,只是不再被一个界面上做不到
+# 的操作源源不断地喂。两条文案分开写而不是共用一条:补救步骤相同,但用户点的是
+# 「确认」还是「跳过」不同,措辞跟着动词走(与上面 empty/too-many 两对同一惯例)。
+_APPLY_WHILE_RUNNING_MESSAGE = "识别还在进行中，请等它完成或先取消，再确认命令。"
+_DISMISS_WHILE_RUNNING_MESSAGE = "识别还在进行中，请等它完成或先取消，再跳过命令。"
 
 
 def _job_with_pending(service: CommandCatalogService, job: dict) -> CommandCatalogJob:
@@ -107,6 +119,19 @@ def _not_parsed_error(exc: CatalogSourceNotParsed) -> HTTPException:
     if exc.parse_status == "failed":
         return user_error(409, SOURCE_PARSE_FAILED_MESSAGE)
     return user_error(409, SOURCE_NOT_PARSED_MESSAGE)
+
+
+def _require_settled_job(job: dict, message: str) -> None:
+    """Refuse to review a run that is still going. See
+    `_APPLY_WHILE_RUNNING_MESSAGE` for the row this prevents from existing.
+
+    The status whitelist is `CATALOG_TERMINAL_STATUSES` — the same frozenset
+    `start`'s own restart guard reads, so "finished" has exactly one spelling
+    on the backend. A `queued` job counts as running: its worker has not
+    started yet, which is the widest window of all.
+    """
+    if job.get("status") not in CATALOG_TERMINAL_STATUSES:
+        raise user_error(409, message)
 
 
 def _owned_source(notebook_id: str, source_id: str):
@@ -316,6 +341,7 @@ def apply_command_catalog(
     job = service.scoped_job(notebook_id, source_id, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Catalog job not found")
+    _require_settled_job(job, _APPLY_WHILE_RUNNING_MESSAGE)
     repo = repository()
     # 稳定 creator id 与可读流水 label 分开传递(与 knowhow 既有写端点同一口径)。
     principal = session_audit_principal(user)
@@ -414,6 +440,11 @@ def dismiss_command_catalog(
     job = service.scoped_job(notebook_id, source_id, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Catalog job not found")
+    # Same gate as `apply`, for the same row: a dismiss mid-run can equally
+    # take a candidate out from under the write-back that is about to merge
+    # into it, and the review panel does not offer either action until the run
+    # settles. See `_APPLY_WHILE_RUNNING_MESSAGE`.
+    _require_settled_job(job, _DISMISS_WHILE_RUNNING_MESSAGE)
     try:
         result = service.dismiss(
             notebook_id,

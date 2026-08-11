@@ -6312,6 +6312,109 @@ def test_api_apply_with_both_scopes_is_a_user_readable_422_and_writes_nothing(ht
     }
 
 
+def _set_job_status(repo, job_id: str, status: str) -> None:
+    """Put the job row back into a non-terminal state.
+
+    A mid-run confirm sees exactly this: `run` writes each window's candidates
+    as it goes and only settles the row at the very end, so "candidates exist
+    AND the job is still `running`" is the ordinary state for most of a long
+    extraction — not a contrived one.
+    """
+    with repo._write() as db:
+        db.execute(
+            "UPDATE catalog_jobs SET status=? WHERE id=?", (status, job_id)
+        )
+
+
+@pytest.mark.parametrize("status", ["queued", "running"])
+def test_api_apply_while_the_run_is_unfinished_is_a_user_readable_409(
+    http, status
+):
+    """Confirming a candidate mid-run creates a row that can never be
+    confirmed at all.
+
+    The write-back merges a command's later windows into the row an earlier
+    one wrote; finding that row already `applied` it degrades to appending a
+    second candidate for the same command (deliberate — visible beats lost).
+    But confirming THAT row finds the command's anchor already in the target
+    table, so `_apply_locked` classifies it `conflict_existing_row` and skips
+    it. The late-arriving parameters are then permanently visible and
+    permanently unconfirmable.
+
+    The gate sits at the API boundary rather than in the service, which is
+    what the review panel already does (it offers no review action until the
+    run settles). The service's lock and degrade path stay exactly as they
+    are, as defence in depth for the races that remain legitimate.
+    """
+    client, repo = http
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+    before = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    _set_job_status(repo, job["id"], status)
+
+    refused = client.post(
+        f"/api/notebooks/{notebook.id}/sources/s1/command-catalog/apply",
+        json={"all_pending": True},
+    )
+
+    assert refused.status_code == 409
+    assert refused.headers.get("X-User-Message") == "1"
+    # Zero writes: no table, and every candidate still `candidate`.
+    assert repo.list_knowhow_tables(notebook.id) == []
+    after = service.candidates_page(job["id"], state="candidate", cursor=0, limit=50)
+    assert [item["id"] for item in after["items"]] == [
+        item["id"] for item in before["items"]
+    ]
+
+    # …and the very same request succeeds once the run has settled.
+    _set_job_status(repo, job["id"], "succeeded")
+    accepted = client.post(
+        f"/api/notebooks/{notebook.id}/sources/s1/command-catalog/apply",
+        json={"all_pending": True},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["rows_added"] == 2
+
+
+@pytest.mark.parametrize("status", ["queued", "running"])
+def test_api_dismiss_while_the_run_is_unfinished_is_a_user_readable_409(
+    http, status
+):
+    """Same gate, same reason: a dismiss mid-run can take a candidate out from
+    under the write-back that is about to merge into it, and the panel offers
+    neither action before the run settles."""
+    client, repo = http
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 2)
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    service.run(job["id"])
+    _set_job_status(repo, job["id"], status)
+
+    refused = client.post(
+        f"/api/notebooks/{notebook.id}/sources/s1/command-catalog/dismiss",
+        json={"all_pending": True},
+    )
+
+    assert refused.status_code == 409
+    assert refused.headers.get("X-User-Message") == "1"
+    assert service.catalog.candidate_counts(job["id"]).get("dismissed", 0) == 0
+    assert service.catalog.candidate_counts(job["id"])["candidate"] == 2
+
+    _set_job_status(repo, job["id"], "cancelled")
+    accepted = client.post(
+        f"/api/notebooks/{notebook.id}/sources/s1/command-catalog/dismiss",
+        json={"all_pending": True},
+    )
+    assert accepted.status_code == 200
+    assert len(accepted.json()["dismissed"]) == 2
+
+
 # ----------------------------------------------------------------- API dismiss
 def test_api_dismiss_clears_the_pending_guard_so_a_new_run_is_allowed(http):
     """R7's core end-to-end assertion. The guard's own copy has always said

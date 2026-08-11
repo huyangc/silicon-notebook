@@ -518,7 +518,14 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 `truncated_sections` 已从传输层删除：v2 没有截断这回事（超长元素被切成连续几段落进相邻的段），
 一个恒为 0 的字段只会让界面一直渲染一句永远不会发生的告警。
 
-**确认与合并。** 候选在人工确认前都是未生效的。确认时若不存在则创建名为
+**确认与合并。** 候选在人工确认前都是未生效的。**识别还没跑完时不能确认也不能跳过**——
+两个端点对非终态任务（`queued`/`running`）返回带用户可读文案的 `409`，审阅面板本来也只在
+终态才开审阅入口。这不是保守，是堵一条会造出**永远确认不了的候选**的路：识别中途确认某条
+命令后，后面的段把这条命令的续表参数合并写回时发现该行已确认，就按既定的降级路径追加一条
+同名新候选（那是刻意的，参数看得见比丢掉好）；可确认这条替补行时目标表里已经有同名的行，
+按「同名一律不改行、只回报 conflict」的合并语义会被跳过——迟到发现的参数从此可见而不可落库。
+闸放在 API 边界，服务层的锁与降级路径原样保留为纵深防御（用户先取消、恰好与最后一段的写回
+交错这类合法竞态仍会走到它）。确认时若不存在则创建名为
 「命令目录：<来源标题>」的 Knowhow 表（固定六列：命令 / 语法 / 参数 / 说明 / 示例 /
 出处，其中「命令」是行标题列），已存在则**只新增表里没有的命令**。`<来源标题>` 与来源在
 产品其他各处（引用卡、证据卡、清单卡）显示的名字是同一个：来源已接地判定为论文且解析出
@@ -573,8 +580,8 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` —— 该来源最近一次任务：`status` 与 `progress`（`sections_total`、`sections_done`——两个列名保留、计的是段数，`entries`、`rejected`、`uncovered`、`pending_candidates`），失败时带 `failure_reason`。内部诊断列 `diagnostic` 刻意不进响应
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` —— `cancelling`（worker 会在下一个分片边界停，飞行中的一次模型调用被取消时也会停，不必等到那次调用返回）、`cancelled`（本进程没有在跑它，直接落终态）或 `not_running`
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/candidates` —— keyset 分页（`job_id?`、`state=candidate|rejected|applied|dismissed`、`cursor`、`limit`）并带各档 `counts`。`next_cursor` 是上一页最后一条的 `position` 而不是 offset：确认候选会改 `state`，offset 分页会漏行/重行。`dismissed` 候选带 `dismiss_reason`：`conflict_existing_row`（apply 发现已有同名行）、`user_dismissed`（人工显式跳过）或 `source_reparsed`（来源已重新解析，这一轮结果整批过期）
-- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` —— body 为 `{candidate_ids}` **二选一** `{all_pending: true}`——两者同时非空/为真会返回带用户可读文案的 `422`（此前会静默偏向 `all_pending`，比调用方明确写出的 `candidate_ids` 更宽的一次写，调用方看不出自己传的选择被悄悄吞掉）；返回 `table_id`、`created`、`applied`、`rows_added`、`conflicts` 与 `pending_remaining`（一次调用最多确认一页）。来源在这一轮之后被重新解析时返回带用户可读文案的 `409`，并整批作废该任务剩余候选；重新解析**正在进行中**（还没换掉元素）时是另一条 `409`，措辞不同且**不作废任何候选**——解析可能在换元素之前就失败，那批候选仍然有效
-- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` —— body 为 `{candidate_ids}` **二选一** `{all_pending: true}`，选择契约（含两者同传时的 `422`）与单页上限同 `apply`；把选中的 `candidate` 态候选标记为 `dismissed`（原因 `user_dismissed`），不碰任何 Knowhow 表；返回 `dismissed`（真正被标记的 id）与 `pending_remaining`。来源被重新解析、或重新解析正在进行中时，两条 `409` 都同 `apply`
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` —— 任务未落终态（`queued`/`running`）时返回带用户可读文案的 `409`（理由见上文「确认与合并」）。body 为 `{candidate_ids}` **二选一** `{all_pending: true}`——两者同时非空/为真会返回带用户可读文案的 `422`（此前会静默偏向 `all_pending`，比调用方明确写出的 `candidate_ids` 更宽的一次写，调用方看不出自己传的选择被悄悄吞掉）；返回 `table_id`、`created`、`applied`、`rows_added`、`conflicts` 与 `pending_remaining`（一次调用最多确认一页）。来源在这一轮之后被重新解析时返回带用户可读文案的 `409`，并整批作废该任务剩余候选；重新解析**正在进行中**（还没换掉元素）时是另一条 `409`，措辞不同且**不作废任何候选**——解析可能在换元素之前就失败，那批候选仍然有效
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` —— 任务未落终态时同样 `409`（文案按「跳过」这个动词写）。body 为 `{candidate_ids}` **二选一** `{all_pending: true}`，选择契约（含两者同传时的 `422`）与单页上限同 `apply`；把选中的 `candidate` 态候选标记为 `dismissed`（原因 `user_dismissed`），不碰任何 Knowhow 表；返回 `dismissed`（真正被标记的 id）与 `pending_remaining`。来源被重新解析、或重新解析正在进行中时，两条 `409` 都同 `apply`
 
 数值上限（唯一登记处；代码里各有同名常量）：
 
