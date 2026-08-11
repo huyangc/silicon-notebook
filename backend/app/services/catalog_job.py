@@ -97,6 +97,7 @@ from app.services.command_catalog import (
     window_candidates,
     window_needs_model,
     window_outcome,
+    window_segments,
 )
 from app.services.kg.json_utils import safe_json
 from app.services.model_work import ModelProviderError
@@ -2277,6 +2278,11 @@ class CommandCatalogService:
         """
         work = _WindowWork(candidates=tuple(candidates))
         merged: dict[str, dict] = {}
+        # Cut once, here: every entry of every slice of this window grounds
+        # against the same per-command segmentation, and recomputing it per
+        # entry would walk a 12k window's lines once for each of the thirty
+        # commands a slab can document.
+        segments = window_segments(window, candidates, carried)
         anchors = list(window.element_ids)[:MAX_ANCHOR_ELEMENTS]
         excerpt = _clip(window.text, CANDIDATE_EXCERPT_CHARS)
         next_position = position
@@ -2335,6 +2341,7 @@ class CommandCatalogService:
                     candidates,
                     assigned=extraction.param_names,
                     carried=carried,
+                    segments=segments,
                 )
                 work.results.append(result)
                 if result.accepted and result.entry is not None:
@@ -3652,6 +3659,12 @@ def _entry_validator(
     is the right treatment for one bad answer and the wrong thing to freeze.
     """
 
+    # Same cut the run path makes, hoisted out of the closure: the validator
+    # runs the real grounding over every entry of every reply, so recomputing
+    # the segmentation per entry would repeat it for each command a window
+    # documents, on every admission check.
+    segments = window_segments(window, candidates, carried)
+
     def validator(content: str) -> bool:
         payload = safe_json(content)
         if not payload or "error" in payload:
@@ -3673,6 +3686,7 @@ def _entry_validator(
                 candidates,
                 assigned=extraction.param_names,
                 carried=carried,
+                segments=segments,
             )
             if result.accepted:
                 accepted += 1

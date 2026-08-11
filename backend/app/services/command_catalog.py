@@ -73,7 +73,7 @@ from __future__ import annotations
 
 import re
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Collection, Mapping, Sequence
 
 from app.repositories.lexical_query import exact_probe_terms
@@ -189,6 +189,26 @@ _BOUNDARY_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 # not run together on one line, or every line-oriented scan below (usage
 # lines, flag lines, a slice's own parameter lines) reads one long line.
 _ELEMENT_JOIN = "\n"
+# The whitespace an element is normalised by before it is packed — PINNED, character
+# for character, to the set the store's own `TRIM`/`BTRIM` aggregate strips
+# (`CatalogStorePort.source_text_stats`, `preview_elements.full_chars`).
+#
+# Not `str.strip()`, which strips every Unicode space: the cost preview
+# publishes a window count as a LOWER bound, and that bound is only sound while
+# the two sides count the same characters. Strip more here than SQL does and a
+# document padded with U+3000 (the ideographic space Chinese typesetting is
+# full of) or NBSP has a smaller real total than the SQL sum reports — the
+# arithmetic floor then sits ABOVE the truth, which is the one direction it may
+# not err in. Aligning to the narrower, portable set is the direction that
+# keeps both backends and this module on one definition; the cost is that a
+# U+3000 run counts as content and occupies window budget, which is
+# conservative (it can only make the estimate smaller than reality) and is what
+# a CJK manual's spacing arguably is anyway.
+#
+# `_split_point` deliberately keeps Unicode-wide `str.isspace()`: that is
+# choosing WHERE to cut, not counting how much there is, and a U+3000 is a
+# perfectly good token boundary.
+_STRIP_CHARS = " \t\n\r"
 
 
 # =========================================================== data definitions
@@ -649,10 +669,17 @@ def _window_elements(rows: Sequence[Mapping[str, Any]]) -> list[WindowElement]:
     they contribute no characters to any window and nothing in this module can
     ground against, count or cite them. Everything else is kept — the packer
     below has no discard branch at all.
+
+    "Blank" means blank by ``_STRIP_CHARS``, the same set the store aggregate
+    strips — so an element of nothing but U+3000 is CONTENT here, exactly as
+    SQL counted it. See that constant: the preview's lower bound is only sound
+    while both sides agree on which characters exist.
     """
     elements: list[WindowElement] = []
     for raw in rows or ():
-        text = str(raw.get("text") or "").strip()
+        # `_STRIP_CHARS`, never a bare `.strip()`: see that constant for why the
+        # set has to be the store aggregate's, character for character.
+        text = str(raw.get("text") or "").strip(_STRIP_CHARS)
         if not text:
             continue
         etype = str(raw.get("element_type") or raw.get("type") or "").lower()
@@ -1156,6 +1183,144 @@ def window_needs_model(
     return bool(carried) and bool(parameter_names(window.text))
 
 
+# ======================================================== 2b. evidence segments
+@dataclass(frozen=True)
+class WindowSegments:
+    """Which part of a window documents which command.
+
+    A window is a slab of a document and routinely documents several commands
+    at once, so "does this parameter appear in the window" is the wrong
+    question to ground an entry with — it is the question that made both of
+    these pass:
+
+    * a window holding `foo_cmd density` and `bar_cmd -density` accepts
+      `-density` filed under **foo_cmd**, because the flag really is in the
+      window (just in the other command's table);
+    * and it REJECTS `density` filed under foo_cmd — its own, correct,
+      positional argument — because `_check_arg_name` sees `-density` in the
+      window and reports the dash infidelity it was written to catch.
+
+    Both are the same defect from opposite sides: the haystack was the whole
+    slab when the claim was about one command. So the window is cut into
+    per-command evidence segments and each entry grounds against its own.
+
+    `prelude` is everything before the first anchor: on a continuation window
+    that is the whole window (a multi-window options table has no anchor of
+    its own), which is exactly the text a RELAYED claim must be allowed to
+    ground in.
+    """
+
+    prelude: str = ""
+    by_command: Mapping[str, str] = field(default_factory=dict)
+
+    def evidence(self, command_name: str, *, relayed: bool = False) -> str:
+        """The text `command_name`'s entry may ground against.
+
+        A relayed claim also gets the prelude — that IS its parameter table.
+        A claim with no segment and no relay grounds against nothing, so every
+        parameter and the syntax are rejected: the window only MENTIONS that
+        command (an inline cross-reference), which is the same reading
+        `suspect_related` already reports, now with teeth. Registered
+        consequence, not an accident: an entry about a command this window
+        merely name-drops keeps its name (the candidate list vouched for it)
+        and loses its body.
+        """
+        own = self.by_command.get(command_name, "")
+        if not relayed:
+            return own
+        return _ELEMENT_JOIN.join(part for part in (self.prelude, own) if part)
+
+
+def _anchor_names(
+    line: str, heading: bool, claimable: Collection[str]
+) -> list[str]:
+    """The claimable commands this line STRUCTURALLY documents.
+
+    Two forms, and deliberately not a third: the line belongs to a heading
+    element and names the command, or the command is the leading token of a
+    usage line (`_usage_identifier`, the same judgement `window_candidates`
+    admits names by).
+
+    An inline-code mention does NOT open a segment, and that exclusion is the
+    entire point. `See also \\`bar_cmd\\` for the density options` is how a
+    manual cross-references its neighbours, and treating it as an anchor would
+    hand the following parameter table to `bar_cmd` — recreating, inside one
+    window, precisely the mis-attribution segmenting exists to remove.
+    """
+    if heading:
+        return [term for term in _identifiers(line) if term in claimable]
+    term = _usage_identifier(line)
+    return [term] if term and term in claimable else []
+
+
+def window_segments(
+    window: ExtractionWindow,
+    candidates: Sequence[str],
+    carried: Collection[str] = (),
+) -> WindowSegments:
+    """Cut a window into one evidence segment per command it documents.
+
+    One pass over the window's lines. A line that structurally anchors one or
+    more claimable commands (see `_anchor_names`) OPENS their segment and
+    closes whatever was open; everything up to the next anchor belongs to the
+    commands that anchor opened. A command anchored several times (a heading,
+    then an `Examples` usage line further down) owns the UNION of its runs —
+    manuals interleave, and taking only the first run would drop the second
+    half of a command's own documentation.
+
+    Anchor lines belong to the segment they open, so a usage line grounds the
+    syntax of the command it invokes.
+
+    Cost is one pass over the window's lines with a set membership test each,
+    i.e. O(lines) — not O(lines x candidates) — and lines are bounded by
+    `WINDOW_CHARS`. Deliberately NOT capped at `MAX_SCAN_LINES` the way the
+    candidate scan is: that cap bounds how much work a PROMPT-borne list is
+    worth, while a line this pass skipped would silently join a neighbouring
+    command's segment, which is the wrong direction (it would accept a
+    mis-attribution rather than reject a real parameter).
+    """
+    claimable = {str(name) for name in candidates or ()} | {
+        str(name) for name in carried or ()
+    }
+    prelude: list[str] = []
+    runs: dict[str, list[str]] = {}
+    open_names: list[str] = []
+    for line, heading in _window_lines(window):
+        anchors = _anchor_names(line, heading, claimable) if claimable else []
+        if anchors:
+            open_names = anchors
+            for name in anchors:
+                runs.setdefault(name, [])
+        if not open_names:
+            prelude.append(line)
+            continue
+        for name in open_names:
+            runs[name].append(line)
+    return WindowSegments(
+        prelude=_ELEMENT_JOIN.join(prelude),
+        by_command={
+            name: _ELEMENT_JOIN.join(lines) for name, lines in runs.items()
+        },
+    )
+
+
+def _window_lines(window: ExtractionWindow) -> list[tuple[str, bool]]:
+    """The window's text as `(line, is_heading)` pairs.
+
+    Reconstructed from the ELEMENTS rather than from `window.text`, because
+    "is this line part of a heading" is an element property that the joined
+    string has thrown away. The two agree exactly —
+    `"\\n".join(line for line, _ in ...) == window.text` — since the window
+    joins elements with the same newline the split uses.
+    """
+    lines: list[tuple[str, bool]] = []
+    for element in window.elements:
+        heading = element.element_type == "heading"
+        for line in element.text.split(_ELEMENT_JOIN):
+            lines.append((line, heading))
+    return lines
+
+
 # ================================================================= 3. slicing
 def extraction_slices(
     window: ExtractionWindow, *, params_per_slice: int = SLICE_PARAM_LIMIT
@@ -1398,8 +1563,9 @@ def validate_entry(
     *,
     assigned: Sequence[str] | None = None,
     carried: Collection[str] = (),
+    segments: WindowSegments | None = None,
 ) -> ValidationResult:
-    """Ground ONE extracted entry against the window text, field by field.
+    """Ground ONE extracted entry against its command's evidence, field by field.
 
     One call per entry: a window's reply lists every command it documents, and
     each is judged alone, so a hallucinated entry vetoes itself and leaves its
@@ -1491,17 +1657,38 @@ def validate_entry(
     is not "wrong content" but "wrong container", which grounding could never
     have caught anyway.
 
-    Everything else is searched in `window.text` — the text the model was
-    shown, in full. Never a slice's `text_window`, even though the two hold the
-    same string today: grounding must not be able to drift with a prompt-sizing
-    field a caller can set by hand, and the invariant it needs ("this is what
-    the window actually holds") is only true of `window.text`. That includes a
-    carried claim's own body: `syntax`, every parameter and every default must
-    still ground HERE, because those are what this window is being asked about
-    (a continuation window has no usage line, so its `syntax` simply comes back
-    empty — cleared, never fatal).
+    **The body grounds against this command's SEGMENT, not the whole window**
+    (`window_segments`). A window documents several commands, so "is this flag
+    somewhere in the window" is the wrong question for a claim about one of
+    them: it accepts `bar_cmd`'s `-density` filed under `foo_cmd`, and in the
+    same breath rejects `foo_cmd`'s own positional `density` because the
+    window contains `-density` somewhere and that reads as the dropped-dash
+    infidelity. Both are the whole-slab haystack, from opposite sides. So
+    `syntax`, every parameter name and every default are searched in the text
+    that documents THIS command — plus, for a relayed claim, the prelude,
+    which on a continuation window is its parameter table. A claim with
+    neither a segment nor the relay (the window only name-drops it in inline
+    code) grounds against nothing and loses its whole body; it keeps its name,
+    since the candidate list vouched for that.
+    `assigned` and the coverage ledger stay WINDOW-level on purpose: they
+    record what the slice was ASKED, which is a property of the window's flag
+    list, and segmenting them would turn "the model ignored this parameter"
+    into "the model filed it elsewhere".
+
+    The command NAME's own verbatim check still reads `window.text` in full,
+    unchanged: list membership plus "some part of this window says it" is what
+    the served list means, and narrowing that to a segment would veto every
+    entry the segmentation is meant to judge. Never a slice's `text_window`
+    either, even though it holds the whole window today: grounding must not be
+    able to drift with a prompt-sizing field a caller can set by hand.
     """
     text = window.text
+    if segments is None:
+        # Accepted pre-computed because a window's reply carries one entry per
+        # command it documents and the cut is identical for all of them; the
+        # job layer therefore does it once per window. Omitting it computes the
+        # same thing — this is an optimisation, never a behaviour switch.
+        segments = window_segments(window, candidates, carried)
     payload: Mapping[str, Any] = entry or {}
     relayed = tuple(str(name) for name in carried or ())
     allowed = tuple(
@@ -1530,6 +1717,11 @@ def validate_entry(
             stats=ValidationStats(command_rejected=True),
         )
 
+    # From here down the haystack is THIS command's evidence, never the whole
+    # window — see the docstring for the two-sided defect that fixes. The
+    # rejection diagnostics quote it too, so a reviewer sees the text the
+    # decision was actually made against.
+    evidence = segments.evidence(name, relayed=name in relayed)
     args: list[ValidatedArg] = []
     args_seen = 0
     defaults_seen = 0
@@ -1549,7 +1741,7 @@ def validate_entry(
         # itself is wrong).
         rejections.append(
             _reject(
-                text, "args", str(raw_args)[:MAX_REJECT_VALUE_CHARS],
+                evidence, "args", str(raw_args)[:MAX_REJECT_VALUE_CHARS],
                 "model_response_unusable",
             )
         )
@@ -1557,32 +1749,37 @@ def validate_entry(
     for raw_arg in raw_args:
         if not isinstance(raw_arg, Mapping):
             rejections.append(
-                _reject(text, "arg", str(raw_arg)[:MAX_REJECT_VALUE_CHARS], "not_object")
+                _reject(
+                    evidence, "arg", str(raw_arg)[:MAX_REJECT_VALUE_CHARS],
+                    "not_object",
+                )
             )
             continue
         args_seen += 1
         arg_name = str(raw_arg.get("name") or "").strip()
-        reason = _check_arg_name(arg_name, text)
+        reason = _check_arg_name(arg_name, evidence)
         if not reason and assignment and arg_name not in assignment:
             reason = "arg_outside_slice"
         if reason:
-            rejections.append(_reject(text, "arg", arg_name, reason))
+            rejections.append(_reject(evidence, "arg", arg_name, reason))
             continue
         default = str(raw_arg.get("default") or "").strip()
         if default:
             defaults_seen += 1
             # Token-bounded, not bare `in`: the manual's own "default value is
             # 500" would let a hallucinated "5" ground as a substring of 500.
-            if _token_present(default, text):
+            if _token_present(default, evidence):
                 defaults_kept += 1
             else:
                 rejections.append(
-                    _reject(text, "default", default, "not_in_text")
+                    _reject(evidence, "default", default, "not_in_text")
                 )
                 default = ""
         required, bad_required = _coerce_required(raw_arg.get("required"))
         if bad_required:
-            rejections.append(_reject(text, "required", bad_required, "not_boolean"))
+            rejections.append(
+                _reject(evidence, "required", bad_required, "not_boolean")
+            )
         args.append(
             ValidatedArg(
                 name=arg_name,
@@ -1594,9 +1791,11 @@ def validate_entry(
 
     syntax = str(payload.get("syntax") or "").strip()
     syntax_seen = bool(syntax)
-    syntax_kept = syntax_seen and normalize_syntax(syntax) in normalize_syntax(text)
+    syntax_kept = syntax_seen and (
+        normalize_syntax(syntax) in normalize_syntax(evidence)
+    )
     if syntax_seen and not syntax_kept:
-        rejections.append(_reject(text, "syntax", syntax, "not_contiguous"))
+        rejections.append(_reject(evidence, "syntax", syntax, "not_contiguous"))
         syntax = ""
 
     # The window's own headings, not its `provenance`: provenance is a display
@@ -1618,7 +1817,12 @@ def validate_entry(
     # Note that a carried name WITH direct evidence here is not relayed: it
     # earned the clean mark in this window and may clear an earlier warning.
     relayed_claim = name in relayed and not direct
-    examples, examples_rejections = _coerce_examples(payload.get("examples"), text)
+    # `evidence` here is for the rejection diagnostics only — `_coerce_examples`
+    # checks the CONTAINER's shape and never grounds an example's content
+    # (prose cannot be matched verbatim).
+    examples, examples_rejections = _coerce_examples(
+        payload.get("examples"), evidence
+    )
     rejections.extend(examples_rejections)
     return ValidationResult(
         accepted=True,

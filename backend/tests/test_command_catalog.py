@@ -43,6 +43,7 @@ from app.services.command_catalog import (
     window_candidates,
     window_needs_model,
     window_outcome,
+    window_segments,
 )
 from app.services.parsers import parse_markdown_text
 
@@ -499,6 +500,34 @@ def test_windowing_loses_and_duplicates_nothing(rows, max_chars):
     windows = extraction_windows(rows, max_chars=max_chars)
 
     assert _rebuild(windows) == _expected_text(rows)
+
+
+@pytest.mark.parametrize("pad", ["　", "\xa0"])
+def test_whitespace_normalisation_is_pinned_to_the_stores_trim_set(pad):
+    """The packer must count exactly the characters SQL counted.
+
+    `str.strip()` removes every Unicode space; the store's `TRIM`/`BTRIM`
+    removes four ASCII ones. Strip more here and a document padded with
+    U+3000 (the ideographic space CJK typesetting is full of) or NBSP has a
+    smaller real total than the SQL sum reports — and the cost preview's
+    window count, published as a LOWER bound, ends up above the truth. So
+    these characters are CONTENT on both sides.
+    """
+    rows = _elements(
+        ("paragraph", "", f"{pad * 5}set_thing_0 -density value{pad * 5}"),
+        ("paragraph", "", pad * 40),  # nothing but wide spaces: still content
+    )
+
+    windows = extraction_windows(rows)
+
+    assert len(windows) == 1
+    # Both elements survive, padding included — nothing was trimmed away that
+    # the SQL total still counts.
+    assert len(windows[0].element_ids) == 2
+    assert windows[0].text.startswith(pad)
+    assert sum(len(window.text) for window in windows) >= sum(
+        len(str(row["text"])) for row in rows
+    )
 
 
 def test_blank_elements_are_not_windowed():
@@ -1179,6 +1208,204 @@ def test_parameter_names_keep_their_dash_and_skip_prose():
     assert parameter_names(text) == ["-timing_driven", "-density"]
 
 
+# ------------------------------------------- 4b. per-command evidence segments
+# The two-command window the whole segmentation exists for: `foo_cmd` takes a
+# POSITIONAL `density`, `bar_cmd` takes the FLAG `-density`. Both names are in
+# the same window, so a whole-window haystack cannot tell the two apart —
+# see `WindowSegments`.
+_FOO_BAR_ROWS = (
+    ("heading", "M > foo_cmd", "foo_cmd"),
+    ("code_block", "M > foo_cmd", "foo_cmd density"),
+    ("paragraph", "M > foo_cmd", "`density` is the target density, positional."),
+    ("heading", "M > bar_cmd", "bar_cmd"),
+    ("code_block", "M > bar_cmd", "bar_cmd -density value"),
+    ("paragraph", "M > bar_cmd", "| `-density` | Set target density. |"),
+)
+
+
+@pytest.fixture
+def foo_bar_window():
+    windows = extraction_windows(_elements(*_FOO_BAR_ROWS))
+    assert len(windows) == 1  # one window, two commands: the shape under test
+    return windows[0]
+
+
+def test_a_flag_from_another_commands_table_is_not_grounded(foo_bar_window):
+    """codex's counter-example, direction 1.
+
+    `-density` is really in the window — in `bar_cmd`'s options table — so a
+    whole-window haystack accepts it filed under `foo_cmd`, which does not
+    take it. The name is real and the flag is real; only the ATTRIBUTION is
+    invented, and that is exactly what no amount of "is this string present"
+    can catch.
+    """
+    candidates = window_candidates(foo_bar_window)
+    assert {"foo_cmd", "bar_cmd"} <= set(candidates)
+
+    result = validate_entry(
+        {"command_name": "foo_cmd", "args": [{"name": "-density"}]},
+        foo_bar_window,
+        candidates,
+    )
+
+    assert result.accepted is True  # the entry itself is fine
+    assert [arg.name for arg in result.entry.args] == []
+    assert [(item.field, item.value) for item in result.rejections] == [
+        ("arg", "-density")
+    ]
+    # …and it still grounds where it belongs.
+    kept = validate_entry(
+        {"command_name": "bar_cmd", "args": [{"name": "-density"}]},
+        foo_bar_window,
+        candidates,
+    )
+    assert [arg.name for arg in kept.entry.args] == ["-density"]
+
+
+def test_a_commands_own_positional_argument_survives_a_neighbours_flag(
+    foo_bar_window,
+):
+    """codex's counter-example, direction 2 — the same defect, more damaging.
+
+    `foo_cmd density` is a real positional argument documented in the window.
+    Against the whole window, `_check_arg_name` finds `-density` (bar_cmd's)
+    and reports the dropped-dash infidelity it was written to catch, deleting
+    a correct parameter. Segmenting removes the evidence that was never
+    foo_cmd's to begin with.
+    """
+    candidates = window_candidates(foo_bar_window)
+
+    result = validate_entry(
+        {"command_name": "foo_cmd", "args": [{"name": "density"}]},
+        foo_bar_window,
+        candidates,
+    )
+
+    assert result.rejections == ()
+    assert [arg.name for arg in result.entry.args] == ["density"]
+
+
+def test_each_command_in_a_shared_window_grounds_inside_its_own_segment():
+    """Several commands, several segments, no leakage in either direction."""
+    rows = _elements(
+        ("heading", "M > set_a", "set_a"),
+        ("code_block", "M > set_a", "set_a -alpha value"),
+        ("heading", "M > set_b", "set_b"),
+        ("code_block", "M > set_b", "set_b -beta value"),
+    )
+    window = extraction_windows(rows)[0]
+    candidates = window_candidates(window)
+
+    segments = window_segments(window, candidates)
+
+    assert "-alpha" in segments.evidence("set_a")
+    assert "-beta" not in segments.evidence("set_a")
+    assert "-beta" in segments.evidence("set_b")
+    assert "-alpha" not in segments.evidence("set_b")
+    assert segments.prelude == ""
+
+
+def test_an_inline_cross_reference_does_not_open_a_segment():
+    """A SEE ALSO line is how a manual points at its neighbours. Treating it
+    as an anchor would hand the parameter table that follows to the
+    cross-referenced command — recreating, inside one window, the very
+    mis-attribution segmenting removes."""
+    rows = _elements(
+        ("heading", "M > set_a", "set_a"),
+        ("code_block", "M > set_a", "set_a -alpha value"),
+        ("paragraph", "M > set_a", "See also `set_b` for the beta options."),
+        ("paragraph", "M > set_a", "| `-gamma` | Another set_a option. |"),
+    )
+    window = extraction_windows(rows)[0]
+    candidates = window_candidates(window)
+    assert "set_b" in candidates  # offered, because inline code names it
+
+    segments = window_segments(window, candidates)
+
+    # The table after the cross-reference is still set_a's.
+    assert "-gamma" in segments.evidence("set_a")
+    # And set_b, merely mentioned, has no evidence at all — so an entry
+    # claiming it keeps its name and loses its body.
+    assert segments.evidence("set_b") == ""
+    result = validate_entry(
+        {"command_name": "set_b", "args": [{"name": "-gamma"}]},
+        window,
+        candidates,
+    )
+    assert result.accepted is True
+    assert result.entry.args == ()
+    assert result.entry.suspect_related is True
+
+
+def test_a_continuation_window_is_all_prelude_and_still_grounds():
+    """The relay's own shape: a window with no anchor at all is one prelude,
+    and a carried claim grounds against it. Without that the segmentation
+    would silently delete every multi-window options table — the case the
+    relay exists for."""
+    rows = _elements(
+        ("paragraph", "", "| `-tray_weight` | Tray weight, default 32.0. |"),
+        ("paragraph", "", "| `-timing_weight` | Timing weight. |"),
+    )
+    window = extraction_windows(rows)[0]
+    assert window_candidates(window) == []
+
+    segments = window_segments(window, [], ["cluster_flops"])
+    assert "-tray_weight" in segments.prelude
+    assert segments.by_command == {}
+
+    result = validate_entry(
+        {
+            "command_name": "cluster_flops",
+            "args": [{"name": "-tray_weight", "default": "32.0"}],
+        },
+        window,
+        [],
+        carried=["cluster_flops"],
+    )
+
+    assert result.accepted is True
+    assert [(arg.name, arg.default) for arg in result.entry.args] == [
+        ("-tray_weight", "32.0")
+    ]
+
+
+def test_a_command_documented_twice_owns_both_of_its_runs():
+    """Manuals interleave: a command's `Examples` section comes back after a
+    neighbour's. Taking only the first run would drop the second half of a
+    command's own documentation."""
+    rows = _elements(
+        ("heading", "M > set_a", "set_a"),
+        ("code_block", "M > set_a", "set_a -alpha value"),
+        ("heading", "M > set_b", "set_b"),
+        ("code_block", "M > set_b", "set_b -beta value"),
+        ("heading", "M > set_a examples", "set_a"),
+        ("paragraph", "M > set_a examples", "| `-omega` | A late option. |"),
+    )
+    window = extraction_windows(rows)[0]
+    candidates = window_candidates(window)
+
+    segments = window_segments(window, candidates)
+
+    evidence = segments.evidence("set_a")
+    assert "-alpha" in evidence and "-omega" in evidence
+    assert "-beta" not in evidence
+
+
+def test_the_window_assignment_and_coverage_stay_window_level(foo_bar_window):
+    """Segmenting decides where an answer must GROUND, never what was ASKED.
+
+    The slice's assignment is the window's whole flag list — the model keys
+    each parameter onto the entry it belongs to — and the coverage ledger
+    counts against that same list. Segmenting either would turn "the model
+    never answered this parameter" into "the model filed it elsewhere", which
+    is a different fact and the one `args_keep_ratio` must not lose.
+    """
+    assert parameter_names(foo_bar_window.text) == ["-density"]
+    assert [
+        slice_.param_names for slice_ in extraction_slices(foo_bar_window)
+    ] == [("-density",)]
+
+
 # ------------------------------------------------------------- 5. validation
 def _flops_entry(**overrides):
     entry = {
@@ -1809,9 +2036,13 @@ def test_rejection_window_centers_on_a_real_hit_in_long_text():
     invented value is never in the text at all."""
     padding_before = "Unrelated padding text. " * 20
     padding_after = " More unrelated trailing text." * 20
+    # The usage line opens the window so `cluster_flops` has a real evidence
+    # segment (see `window_segments`) — the padding then lives INSIDE it,
+    # which is what puts the near-miss far from the segment's head.
     text = (
-        f"{padding_before}"
-        "cluster_flops [-tray_weight tray_weight]"
+        "cluster_flops\n"
+        f"{padding_before}\n"
+        "Options: [-tray_weight tray_weight]\n"
         f"{padding_after}"
     )
     window = _window(text)

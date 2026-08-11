@@ -573,6 +573,31 @@ rejected entries are stored too**, with the reason and a bounded look at the
 text they were searched for in — when a run produces little, those rows are the
 only way to tell "the model went wrong" from "this source is not a manual".
 
+**Parameters, `syntax` and `default` ground against the command's own evidence
+segment, not the whole segment of document.** A segment is a slab that routinely
+documents several commands, so "is this flag somewhere in here" is the wrong
+question — it accepts and it deletes, in the same breath. Given
+`foo_cmd density` and `bar_cmd -density` in one window, `-density` filed under
+`foo_cmd` passes (the flag really is present, in the other command's table),
+while `foo_cmd`'s own legitimate positional `density` is rejected by the
+dropped-dash rule (the window does contain `-density`). Both are the same defect
+from opposite sides. So each segment is cut into per-command **evidence
+segments**: a line that structurally anchors a candidate — it belongs to a
+heading element, or the candidate is the leading token of that usage line —
+opens that command's segment until the next other candidate's anchor; a command
+anchored several times owns the union of its runs; an **inline-code mention does
+not open a segment** ("see also `bar_cmd`" is precisely where the
+mis-attribution came from). Everything before the first anchor is the
+**prelude**, which belongs to the relay — a continuation window's orphaned
+parameter table is exactly that, and a window with no anchor at all is all
+prelude, so relayed claims still ground. Registered consequence: a command this
+window only name-drops has no segment and no relay, so its parameters and syntax
+are all rejected — it keeps its name (the candidate list vouched for that) and
+loses its body, the same reading `suspect_related` reports. **What was ASKED
+stays window-level**: the slice assignment and the coverage ledger still come
+from the whole window's flag list, because segmenting those would turn "the
+model never answered this parameter" into "the model filed it elsewhere".
+
 **Commands without flags still get their arguments.** A segment with no `-flag`
 anywhere is not a segment without parameters: a **positional** argument
 (`set_dont_use lib_cells`) is how a one-line command is usually documented. No
@@ -665,7 +690,16 @@ of "one character plus twenty trailing spaces" is 42,021 raw characters (four
 segments by arithmetic) and one segment in reality, and a "lower bound" above
 the truth is worse than none. Both SQL reads therefore sum stripped lengths; the
 join separators the packer inserts are deliberately not counted, which can only
-shrink the total and so keeps the bound safe. Second, **the prefix's segment
+shrink the total and so keeps the bound safe. **Both sides must strip the same
+characters**: SQL's `TRIM`/`BTRIM` removes four ASCII ones (space, tab, newline,
+carriage return), so the packer is pinned to those four rather than
+`str.strip()`'s Unicode-wide set — otherwise a document padded with U+3000 (the
+ideographic space CJK typesetting is full of) or NBSP holds fewer real characters
+than SQL reports and the arithmetic floor climbs above the truth again. The cost
+is that such whitespace counts as content and occupies window budget, which is
+the conservative direction. Choosing WHERE to cut a long element still uses the
+Unicode-wide test — that is picking a boundary, not counting how much there is.
+Second, **the prefix's segment
 count cannot simply be added to the remainder**: the packer closes a segment only
 when the next element does not fit, so the prefix's LAST segment is still open
 and the unread elements keep filling it rather than starting a new one (four
