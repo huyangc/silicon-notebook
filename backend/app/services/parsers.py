@@ -298,7 +298,16 @@ def _xls_cell_text(cell: Any, datemode: int) -> str:
     if cell.ctype == xlrd.XL_CELL_EMPTY or cell.ctype == xlrd.XL_CELL_BLANK:
         return ""
     if cell.ctype == xlrd.XL_CELL_ERROR:
-        return ""
+        # `#N/A` / `#DIV/0!` 是工作簿的真实内容（codex R5 P2）：丢成空串会让该格
+        # 从 " | " 拼接里整个消失（列错位），全错误行更是整行蒸发。openpyxl 路径
+        # (data_only) 保留的正是这些标准错误文本，两条工作簿路径口径要一致。
+        try:
+            from xlrd.biffh import error_text_from_code
+
+            text = error_text_from_code.get(int(cell.value), "")
+        except Exception:
+            text = ""
+        return text or "#ERR!"
     if cell.ctype == xlrd.XL_CELL_BOOLEAN:
         return "TRUE" if cell.value else "FALSE"
     if cell.ctype == xlrd.XL_CELL_DATE:
