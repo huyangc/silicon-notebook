@@ -1688,6 +1688,112 @@ def test_a_skipped_window_neither_probes_the_job_row_nor_emits_an_event(repo):
     assert service.catalog.latest_job("s2")["sections_done"] == 6
 
 
+def _delete_job_when_recording(repo, service, *, also_cancel: bool = False):
+    """Cascade the job row away from inside the run's own progress write.
+
+    A source or notebook delete removes this row (`ON DELETE CASCADE`) without
+    anybody calling `cancel()`, and it can land anywhere — including between
+    two skipped windows, where the run deliberately carries no liveness probe.
+    Wrapping `record_section` stages exactly that: the row is really deleted,
+    and the real store method then really matches nothing and returns False.
+    """
+    real_record = service.catalog.record_section
+
+    def deleting_record(job_id, **kwargs):
+        if also_cancel:
+            service._cancels[job_id].set()
+        with repo._write() as db:
+            db.execute("DELETE FROM catalog_jobs WHERE id=?", (job_id,))
+        return real_record(job_id, **kwargs)
+
+    service.catalog.record_section = deleting_record  # type: ignore[assignment]
+
+
+def test_a_deleted_job_row_stops_a_run_of_skipped_windows(repo):
+    """A cascaded delete during a stretch of skipped windows must end the run,
+    not be written past.
+
+    The skip path has no liveness probe on purpose — it spends nothing, and a
+    mostly-prose PDF has thousands of these windows — so the ONLY signal that
+    the row is gone is `record_section` matching nothing. Throwing that away
+    left the worker walking every remaining window writing to a row that no
+    longer existed and then settling a job that is not there: with no called
+    window left to hit the probe, the run reports a plain SUCCESS for a
+    document nobody can look at the results of.
+
+    The document here is prose end to end, deliberately. With a command
+    window anywhere after the deletion the probe on the called path catches
+    it and the outcome is right for the wrong reason — which is precisely the
+    shape that makes a guard look tested when it is not.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "全是散文",
+        _prose_windows_then_commands(
+            "s1", prose_windows=4, commands=0, chunk=_BIG_CHUNK
+        ),
+    )
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    _delete_job_when_recording(repo, service)
+
+    result = service.run(job["id"])
+
+    assert result == {"job_id": job["id"], "job_deleted": True}
+    assert client.calls == []
+    with pytest.raises(KeyError):
+        service.catalog.get_job(job["id"])
+
+
+def test_a_deleted_job_row_stops_a_run_on_the_called_path_too(repo):
+    """The called path has the liveness probe as a backstop, but the probe
+    runs BEFORE the model call and this write happens after it. Reading the
+    write's own answer closes that gap for free."""
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_manual(repo, notebook.id, "s1", 3)
+    client = _Client(_good_reply)
+    bind_chat_client(repo, "kg_extract", client)
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    _delete_job_when_recording(repo, service)
+
+    result = service.run(job["id"])
+
+    assert result == {"job_id": job["id"], "job_deleted": True}
+    # One window's worth of calls, not three: the run stopped at the first
+    # progress write rather than paying for the rest of the document.
+    assert len(client.calls) == 1
+
+
+def test_an_owner_cancel_outranks_a_row_that_vanished_at_the_same_moment(repo):
+    """Both facts can be true at once, and the explicit stop is the more
+    specific one — it is what the user did.
+
+    This is also the case that proves the terminal paths survive a vanished
+    row: the cancel branch settles (a no-op on a deleted row) and then builds
+    its event, and reading the row back inline there would raise `KeyError`
+    from inside an `except` clause — turning a clean, reportable outcome into
+    an uncaught traceback.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="n"))
+    _add_elements(
+        repo, notebook.id, "s1", "散文加命令",
+        _prose_windows_then_commands(
+            "s1", prose_windows=4, commands=1, chunk=_BIG_CHUNK
+        ),
+    )
+    bind_chat_client(repo, "kg_extract", _Client(_good_reply))
+    service = _service(repo)
+    job = service.start(notebook.id, "s1")
+    _delete_job_when_recording(repo, service, also_cancel=True)
+
+    result = service.run(job["id"])
+
+    assert result == {"job_id": job["id"], "cancelled": True}
+
+
 def test_a_cancel_still_stops_a_run_inside_a_stretch_of_skipped_windows(repo):
     """Dropping the liveness probe from the skip path must not drop the
     CANCEL check with it: the in-process event is free to read and an owner

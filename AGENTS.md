@@ -403,6 +403,20 @@ thousands), but must still `record_section` so the progress bar terminates, and
 the relay must still advance through it — `carry` is defined as a pure function
 of the previous window and this gate must not feed it.
 
+**`record_section`'s return value is the skip path's only liveness signal.** It
+reports whether its `UPDATE ... WHERE id=? AND status='running'` matched, and
+because the skip path deliberately carries no probe, a cascaded source/notebook
+delete is otherwise invisible there: the worker writes past every remaining
+window and then settles a job that does not exist (on an all-prose document,
+reporting a plain success nobody can open the results of). `_record_window`
+checks it at BOTH call sites — an explicit cancel first, so an owner's stop
+keeps outranking a deletion, then `CatalogJobGone` for the existing
+`job_deleted` handler. Zero new queries: it reads a value the write already
+returned. Because a cancel and a delete can both hold, every terminal path
+builds its `catalog_job_finished` payload through `_emit_finished`, which skips
+the event when the row is gone — reading the row back inline inside an `except`
+clause turns a settled outcome into an uncaught `KeyError`.
+
 **Candidate relay.** `carry(i) = candidates(i-1)`, inheriting `carry(i-1)` when
 `candidates(i-1)` is empty, capped at `MAX_CANDIDATES` with the nearer window's
 names preferred, and reset by any window that names something. A relayed name
