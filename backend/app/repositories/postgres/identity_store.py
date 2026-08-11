@@ -276,19 +276,30 @@ class IdentityStore:
                     labels[row["id"]] = username or display_name or row["id"]
         return labels
 
+    def _lock_actor_and_target(self, db, actor_id: str, user_id: str):
+        """管理员对目标用户的写路径统一按 id 序一次锁齐 actor/target 两行
+        (codex R2/R3):逐行 FOR UPDATE 的「先 actor 后 target」在两个管理员
+        互相操作、或同一管理员的两条不同 admin 路径并发时,会以相反顺序等待
+        对方持有的行而死锁。ORDER BY id 让所有 admin 变更(角色/文档上限/
+        密码重置)共用同一加锁顺序;actor==target 时 IN 去重命中同一行。
+        actor 缺失或非 admin → PermissionError;返回 (actor_row, target_row|None),
+        目标缺失由调用方按各自语义处理(通常 KeyError → 404)。"""
+        rows = db.execute(
+            "SELECT id,username,role FROM users WHERE id IN (%s,%s) "
+            "ORDER BY id FOR UPDATE",
+            (actor_id, user_id),
+        ).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        actor = by_id.get(actor_id)
+        if actor is None or actor["role"] != "admin":
+            raise PermissionError("admin role required")
+        return actor, by_id.get(user_id)
+
     def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]:
         if role not in {"admin", "user"}:
             raise ValueError("invalid role")
         with self.database.write() as db:
-            actor = db.execute(
-                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
-            ).fetchone()
-            if actor is None or actor["role"] != "admin":
-                raise PermissionError("admin role required")
-            target = db.execute(
-                "SELECT id,username,role FROM users WHERE id=%s FOR UPDATE",
-                (user_id,),
-            ).fetchone()
+            _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
             if target is None:
                 raise KeyError(user_id)
             if role == "user" and user_id == "user-local":
@@ -396,21 +407,7 @@ class IdentityStore:
         # 镜像 change_user_password:哈希提前算,缩短持锁时间。
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
-            # actor 与 target 两行必须按确定性顺序一次锁齐(codex R2 P2):
-            # 逐行 FOR UPDATE 是「先 actor 后 target」,两个管理员互相重置时以
-            # 相反顺序等待对方的行,直接死锁。ORDER BY id 让 PostgreSQL 按主键
-            # 序取行加锁,再从已锁行里辨认 actor/target;actor==target(重置
-            # 自己)时 IN 去重返回一行,两个键都命中同一行,语义不变。
-            rows = db.execute(
-                "SELECT id,username,role FROM users WHERE id IN (%s,%s) "
-                "ORDER BY id FOR UPDATE",
-                (actor_id, user_id),
-            ).fetchall()
-            by_id = {row["id"]: row for row in rows}
-            actor = by_id.get(actor_id)
-            if actor is None or actor["role"] != "admin":
-                raise PermissionError("admin role required")
-            target = by_id.get(user_id)
+            _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
             if target is None:
                 raise KeyError(user_id)
             db.execute(
@@ -491,14 +488,7 @@ class IdentityStore:
         if value is not None and not _DOCUMENT_LIMIT_MIN <= value <= _DOCUMENT_LIMIT_MAX:
             raise ValueError("document limit out of range")
         with self.database.write() as db:
-            actor = db.execute(
-                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
-            ).fetchone()
-            if actor is None or actor["role"] != "admin":
-                raise PermissionError("admin role required")
-            target = db.execute(
-                "SELECT id,username FROM users WHERE id=%s FOR UPDATE", (user_id,)
-            ).fetchone()
+            _actor, target = self._lock_actor_and_target(db, actor_id, user_id)
             if target is None:
                 raise KeyError(user_id)
             cursor = db.execute(
