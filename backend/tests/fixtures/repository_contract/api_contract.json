@@ -18216,7 +18216,7 @@
       },
       "/api/notebooks/{notebook_id}/sources/{source_id}/command-catalog/preview": {
         "get": {
-          "description": "零模型调用的成本预告(窗口数是算术、调用数在有界前缀内精确测量)。\n\nR8:来源还没解析完(或解析失败)时同样 409。一份对着还没有元素的来源做的成本\n预告会报出「约 0 个窗口」,读起来像「这份文档没什么可抽的」而不是「过一会\n儿再来」——成本预告唯一不能出的错就是这个方向。",
+          "description": "零模型调用的成本预告(段数在有界前缀内真跑分段、调用数同样精确测量)。\n\nR8:来源还没解析完(或解析失败)时同样 409。一份对着还没有元素的来源做的成本\n预告会报出「约 0 个窗口」,读起来像「这份文档没什么可抽的」而不是「过一会\n儿再来」——成本预告唯一不能出的错就是这个方向。\n\nR4:预告要读的两条语句之间落进一次重解析时(服务层复核来源代次后重读一次仍\n不一致),同样 409。与上面那条是同一类拒绝——「现在给不出可信的数」——只是\n原因从「还没解析」变成「正在重新解析」,所以文案分开。",
           "operationId": "command_catalog_preview_api_notebooks__notebook_id__sources__source_id__command_catalog_preview_get",
           "parameters": [
             {

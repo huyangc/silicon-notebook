@@ -45,6 +45,7 @@ from app.services.catalog_job import (
     SOURCE_BUSY_MESSAGE,
     SOURCE_NOT_PARSED_MESSAGE,
     SOURCE_PARSE_FAILED_MESSAGE,
+    SOURCE_REPARSING_MESSAGE,
     SOURCE_STALE_MESSAGE,
     CatalogApplyTargetInvalid,
     CatalogModelUnavailable,
@@ -157,17 +158,26 @@ def _owned_source(notebook_id: str, source_id: str):
 def command_catalog_preview(
     notebook_id: str, source_id: str
 ) -> CommandCatalogPreview:
-    """零模型调用的成本预告(窗口数是算术、调用数在有界前缀内精确测量)。
+    """零模型调用的成本预告(段数在有界前缀内真跑分段、调用数同样精确测量)。
 
     R8:来源还没解析完(或解析失败)时同样 409。一份对着还没有元素的来源做的成本
     预告会报出「约 0 个窗口」,读起来像「这份文档没什么可抽的」而不是「过一会
     儿再来」——成本预告唯一不能出的错就是这个方向。
+
+    R4:预告要读的两条语句之间落进一次重解析时(服务层复核来源代次后重读一次仍
+    不一致),同样 409。与上面那条是同一类拒绝——「现在给不出可信的数」——只是
+    原因从「还没解析」变成「正在重新解析」,所以文案分开。
     """
     _owned_source(notebook_id, source_id)
     try:
         preview = command_catalog_service().preview(notebook_id, source_id)
     except CatalogSourceNotParsed as exc:
         raise _not_parsed_error(exc)
+    except CatalogSourceBusy:
+        # 同一个异常类型在 apply/dismiss 那里映射成 `SOURCE_BUSY_MESSAGE`(措辞是
+        # 「再确认或跳过」)。预告既不确认也不跳过,照搬会点名两个用户没做的动作
+        # ——与 empty/too-many 两对按动词分开写同一条惯例。
+        raise user_error(409, SOURCE_REPARSING_MESSAGE)
     return CommandCatalogPreview(
         source_id=preview.source_id,
         source_title=preview.source_title,
