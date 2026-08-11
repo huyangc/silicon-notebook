@@ -2019,6 +2019,24 @@ def test_args_field_returned_as_an_object_is_not_iterated_as_keys(flops_window):
     assert rejection.reason == "model_response_unusable"
 
 
+@pytest.mark.parametrize("bad_entry", [5, "set_thing_0", ["-density"], True])
+def test_coverage_survives_a_non_object_entry(bad_entry):
+    """One level up from the scalar-`args` defect, and the same shape of
+    assumption.
+
+    The job layer's `_payload_entries` already replaces non-object items with
+    `None` before this is called, so this is belt and braces — but that is a
+    CALLER's guarantee about a function whose whole job is to survive raw model
+    output, and `.get` on an `int` raises `AttributeError` into the same
+    generic failure path that a scalar `args` used to reach.
+    """
+    coverage = assignment_coverage([bad_entry], ["-tray_weight"])
+
+    assert coverage.assigned == 1
+    assert coverage.returned == 0
+    assert coverage.uncovered == ("-tray_weight",)
+
+
 @pytest.mark.parametrize("bad_args", [5, "-density", {"name": "-density"}, None])
 def test_coverage_survives_every_shape_a_legal_reply_can_put_in_args(bad_args):
     """`assignment_coverage` reads RAW payloads, so it inherits every shape a
