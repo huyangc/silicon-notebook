@@ -61,6 +61,7 @@ pure waste.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import threading
@@ -862,10 +863,18 @@ class CommandCatalogService:
         **How many CALLS** cannot be arithmetic: it depends on the
         zero-model-call gate (a prose window is free) and on each window's
         parameter count (a 100-flag window is several slices). Both need the
-        text, so they are measured exactly over the bounded PREFIX
-        ``preview_elements`` returns — including the relay, since a window's
-        gate reads the previous window's candidates — and the windows past
-        that prefix are NOT priced at all. They used to be charged one call
+        text, so they are measured exactly over the leading run of COMPLETE
+        rows ``preview_elements`` returns — including the relay, since a
+        window's gate reads the previous window's candidates — and the windows
+        past that are NOT priced at all. The measurement stops at the first
+        content-truncated row rather than running to the end of the page: the
+        rows after a clipped one are not adjacent to it in the document, so
+        packing them together measures a splice of text that never existed
+        while claiming to describe "the first X segments". When the very first
+        row is truncated there is nothing to measure, and the honest answer is
+        `windows_in_prefix = 0` with no price at all — which the UI has to
+        word as "depends on the content" rather than "0 calls for 0
+        segments". They used to be charged one call
         each, and that number was wrong in both directions at once: the skip
         gate makes a prose window free, so a mostly-narrative book was quoted
         for calls it will never make, while a parameter-dense one is several
@@ -902,15 +911,40 @@ class CommandCatalogService:
             source_id
         )
         sampled = clipped or element_count > len(rows)
-        prefix = extraction_windows(rows)
+        # MEASURED rows stop at the first content-truncated one, and the
+        # windows below are packed from those alone.
+        #
+        # `preview_elements` keeps returning rows after it clips one, and
+        # handing that list to the packer splices text that is not adjacent in
+        # the document: the clipped element's tail is missing, so the NEXT
+        # element's head lands right behind its head. The windows that come
+        # out are a composite of a document that does not exist, and
+        # `estimated_calls`/`windows_in_prefix` would be measuring it while
+        # claiming to describe "the first X segments".
+        #
+        # Truncation is judged per row as `full_chars > len(text)`, i.e. the
+        # element's whole stripped length exceeds what was transmitted. That is
+        # CONTENT truncation, which is the question here, and it is strictly
+        # better than the store's own row flag (raw `length(text) > bound`): an
+        # element clipped only through its trailing whitespace lost nothing a
+        # window would have held, and stopping on it would throw away a
+        # perfectly good measurement. The implication runs one way only — an
+        # unclipped row transmits its raw text, whose length is at least its
+        # stripped length, so flagged always means genuinely clipped.
+        measured = list(itertools.takewhile(
+            lambda row: int(row.get("full_chars") or 0) <= len(row.get("text") or ""),
+            rows,
+        ))
+        prefix = extraction_windows(measured)
         # Exact when the prefix is the whole document; a true floor otherwise.
         #
         # The characters the prefix did NOT cover come from subtracting each
-        # prefix row's own stripped length (`full_chars`) from the stripped
-        # total — never the length of the `text` that came back, since those
-        # rows are clipped at `PREVIEW_ELEMENT_CHARS` and subtracting what was
-        # transmitted would leave every clipped element's tail in the
-        # remainder to be counted a second time.
+        # MEASURED row's own stripped length (`full_chars`) from the stripped
+        # total — never the length of the `text` that came back, since a
+        # clipped row transmits a fraction of its element and subtracting that
+        # would leave the missing tail in the remainder to be counted twice.
+        # Everything from the first clipped row onward is in the remainder
+        # whole, which is exactly right: none of it was measured.
         #
         # `len(prefix) + ceil(remainder / WINDOW_CHARS)` would NOT be a floor,
         # which is the whole subtlety here: the packer closes a window only
@@ -925,7 +959,8 @@ class CommandCatalogService:
         # packer inserts are not counted at all.
         remainder = max(
             0,
-            int(total_chars) - sum(int(row.get("full_chars") or 0) for row in rows),
+            int(total_chars)
+            - sum(int(row.get("full_chars") or 0) for row in measured),
         )
         #
         # Three independent floors, and the answer is the tightest of them.

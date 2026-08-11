@@ -173,6 +173,19 @@ test("采样到顶时只对已读的那几段报价，不替没读过的段落�
   assert.ok(!exact.body.includes("按开头"));
 });
 
+test("首个元素就超长时一段都没量到：只给段数下界，不渲染「按开头 0 段估算需 0 次」", () => {
+  // 后端的测量在第一个被裁的元素处就停（裁剪之后的行在文档里并不相邻，拼起来
+  // 量的是一份不存在的文档）。首行即裁时 windows_in_prefix/estimated_calls 都是
+  // 0，而「0 段 0 次」会把「没测」说成「测出来是零」，用户读成这份文档不花钱。
+  const copy = catalogPreviewCopy(
+    preview({ sampled: true, windows_in_prefix: 0, estimated_calls: 0 }),
+  );
+  assert.match(copy.body, /全文至少约 12 段/);
+  assert.match(copy.body, /调用次数视内容而定/);
+  assert.ok(!copy.body.includes("按开头"), `不该报价没量到的开头：${copy.body}`);
+  assert.ok(!copy.body.includes("0 次"), `不该把「没测」渲染成 0 次：${copy.body}`);
+});
+
 test("采样到顶时段数是下界，写「至少约」；前缀覆盖全文时是精确值，写「约」", () => {
   // 段数在 sampled 侧是下界——元素装不满一段留下的空隙、候选过密时的拆段，都
   // 只会让真实段数更多。写成「约」会把一个只往上跑的下界读成估计值。
