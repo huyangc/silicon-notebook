@@ -27,10 +27,12 @@ def register(payload: AuthRequest) -> AuthResult:
 
 @auth_router.post("/login", response_model=AuthResult)
 def login(payload: AuthRequest) -> AuthResult:
-    user = identity_repository().authenticate_user(payload.username, payload.password)
-    if user is None:
+    """验证与建会话必须走同一个 store 方法(单写事务):拆成 authenticate_user +
+    create_session 会与改密/重置的会话吊销竞态,让旧密码登录的会话逃过吊销。"""
+    result = identity_repository().login_with_password(payload.username, payload.password)
+    if result is None:
         raise user_error(401, "用户名或密码错误")
-    token = identity_repository().create_session(user.id)
+    user, token = result
     return AuthResult(token=token, user=user)
 
 

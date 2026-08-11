@@ -149,6 +149,44 @@ class IdentityStore:
             ).fetchone()
             return self._user_profile(user, profile)
 
+    def login_with_password(
+        self, username: str, password: str
+    ) -> "tuple[UserProfile, str] | None":
+        """密码登录:验证与建会话在**同一写事务**内完成(codex R1 P1)。拆开的
+        authenticate_user + create_session 与改密/重置存在竞态——旧密码在吊销
+        DELETE 提交前完成验证、之后再插会话,该会话就带着已作废的密码活下来。
+        同一写事务让登录与改密在同一把写锁上串行:登录排在改密前,它插的会话
+        会被改密事务的 DELETE 带走;排在后,旧密码直接验证失败。verify 的
+        PBKDF2(~30ms)因此进了写锁——登录低频,原子性优先(与改密同一取舍)。"""
+        from app.services.auth_utils import normalize_username, verify_password
+
+        norm = normalize_username(username)
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            user = db.execute(
+                "SELECT * FROM users WHERE username = ?", (norm,)
+            ).fetchone()
+            if user is None:
+                return None
+            if not verify_password(
+                password,
+                user["password_hash"],
+                user["password_salt"],
+                user["password_iterations"],
+            ):
+                return None
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)
+            ).fetchone()
+            token = secrets.token_urlsafe(32)
+            now = _now()
+            db.execute(
+                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (token, user["id"], now, _session_expiry(), now),
+            )
+            return (self._user_profile(user, profile), token)
+
     def create_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)
         now = _now()

@@ -139,6 +139,41 @@ class IdentityStore:
             ).fetchone()
         return self._user_profile(user, profile)
 
+    def login_with_password(
+        self, username: str, password: str
+    ) -> "tuple[UserProfile, str] | None":
+        """密码登录:验证与建会话在同一写事务内、对 users 行 FOR UPDATE(codex
+        R1 P1)。改密/重置同样先 FOR UPDATE 该行,两者因此在行锁上串行——登录
+        排在改密前,插的会话会被改密的 DELETE 带走;排在后,旧密码直接失败。
+        语义与 SQLite 侧逐字一致。"""
+        from app.services.auth_utils import normalize_username, verify_password
+
+        with self.database.write() as db:
+            user = db.execute(
+                "SELECT * FROM users WHERE username=%s FOR UPDATE",
+                (normalize_username(username),),
+            ).fetchone()
+            if user is None:
+                return None
+            if not verify_password(
+                password,
+                user["password_hash"],
+                user["password_salt"],
+                user["password_iterations"],
+            ):
+                return None
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id=%s", (user["id"],)
+            ).fetchone()
+            token = secrets.token_urlsafe(32)
+            now = utc_now()
+            db.execute(
+                "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
+                "VALUES (%s,%s,%s,%s,%s)",
+                (token, user["id"], now, now + timedelta(days=30), now),
+            )
+            return (self._user_profile(user, profile), token)
+
     def create_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)
         now = utc_now()

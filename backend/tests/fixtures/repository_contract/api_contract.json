@@ -11028,6 +11028,7 @@
       },
       "/api/auth/login": {
         "post": {
+          "description": "验证与建会话必须走同一个 store 方法(单写事务):拆成 authenticate_user +\ncreate_session 会与改密/重置的会话吊销竞态,让旧密码登录的会话逃过吊销。",
           "operationId": "login_api_auth_login_post",
           "requestBody": {
             "content": {

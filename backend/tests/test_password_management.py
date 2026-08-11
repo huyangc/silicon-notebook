@@ -109,6 +109,54 @@ def test_change_user_password_without_keep_token_revokes_all(tmp_path):
     assert ident.resolve_session(token_b) is None
 
 
+def test_login_with_password_round_trips(tmp_path):
+    ident = _identity(_repo(tmp_path))
+    ident.create_user("z00000012", "pw")
+
+    assert ident.login_with_password("z00000012", "wrong") is None
+    assert ident.login_with_password("z00999999", "pw") is None
+    result = ident.login_with_password("z00000012", "pw")
+    assert result is not None
+    user, token = result
+    assert user.username == "z00000012"
+    assert ident.resolve_session(token) is not None
+
+
+def test_login_verify_happens_inside_the_write_lock(tmp_path, monkeypatch):
+    """codex R1 P1 的确定性钉法:login_with_password 的密码验证必须发生在数据库
+    写事务内(验证时已持有 write_lock)。这就是「旧密码登录的会话逃不过改密吊销」
+    的机制——验证与建会话同锁串行,改密要么排在其后(它的 DELETE 带走刚插的会话),
+    要么排在其前(旧密码直接验证失败),不存在「读连接下验证通过、吊销提交后再插
+    会话」的第三种交错。旧的拆分实现(authenticate_user 读连接验证 + 事后
+    create_session)在验证点不持写锁,本断言必红;不用线程交错测试是因为那种写法
+    对拆分实现的交错结果不确定(DELETE 也可能恰好落在 INSERT 之后而侥幸变绿)。"""
+    from app.services import auth_utils
+
+    ident = _identity(_repo(tmp_path))
+    ident.create_user("z00000013", "pw")
+
+    real_verify = auth_utils.verify_password
+    held_write_lock: list[bool] = []
+
+    def probing_verify(*args, **kwargs):
+        lock = ident.database.write_lock
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        held_write_lock.append(not acquired)
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(auth_utils, "verify_password", probing_verify)
+    result = ident.login_with_password("z00000013", "pw")
+    assert result is not None
+    assert held_write_lock == [True]
+
+    # 串行语义的端到端半:改密提交后,旧密码登录必须失败(验证读到的是新哈希)。
+    ident.change_user_password(result[0].id, "pw", "rotated-pw")
+    assert ident.login_with_password("z00000013", "pw") is None
+    assert ident.login_with_password("z00000013", "rotated-pw") is not None
+
+
 # --------------------------------------------------------------------------- #
 # 2. Store 级: admin_reset_user_password
 # --------------------------------------------------------------------------- #

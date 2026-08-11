@@ -324,6 +324,14 @@ def test_change_user_password_round_trips_and_scopes_session_revocation(
     with pytest.raises(BuiltinAdminPasswordError):
         store.change_user_password("user-local", "admin", "next-pw")
 
+    # login_with_password(codex R1 P1):验证+建会话单写事务、对 users 行
+    # FOR UPDATE,与改密在行锁上串行。改密后旧密码登录必须失败。
+    assert store.login_with_password("d00123456", "old-pw") is None
+    logged_in = store.login_with_password("d00123456", "new-pw")
+    assert logged_in is not None
+    assert store.resolve_session(logged_in[1]) is not None
+    assert store.login_with_password("d00999999", "new-pw") is None
+
 
 def test_admin_reset_user_password_rechecks_actor_and_revokes_all_sessions(
     core_stores: CoreStores,
