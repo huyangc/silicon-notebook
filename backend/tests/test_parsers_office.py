@@ -777,6 +777,30 @@ def test_xlsx_rejects_mineru_output_that_drops_columns(tmp_path):
     )
 
 
+def test_xlsx_rejects_a_structurally_complete_but_value_empty_grid(tmp_path):
+    """codex R6 P1：识别失败时 MinerU 常返回**结构完整、值却全空**的格子。按
+    `<tr>/<td>` 标签计数的分子会被 10 行 20 个空 `<td>` 刷满两个阈值；分子必须与
+    openpyxl 分母同一套非空语义——剥标签+反转义后有实文的格才算覆盖，空格不算，
+    全空行也不进行分子。"""
+    path = _make_xlsx_rows(tmp_path / "hollow.xlsx", 10)          # 10 行 × 2 列 = 20 格
+    rows_html = "".join(
+        "<tr>" + ("<td>v0</td><td>v1</td>" if i == 0 else "<td></td><td> &nbsp; </td>") + "</tr>"
+        for i in range(10)
+    )
+    client = FakeMineru(content_list=[{
+        "type": "table",
+        "table_body": f"<table>{rows_html}</table>",
+        "table_caption": ["Sheet1"],
+        "page_idx": 0,
+    }])
+    els = parse_xlsx("s1", path, "hollow.xlsx", client)
+    assert all(e.metadata.get("parser") == "xlsx" for e in els)   # 拒收，回落 openpyxl
+    assert len(els) == 10
+    assert client.last_error == (
+        "MinerU workbook output covered 1/10 rows and 2/20 cells; using openpyxl"
+    )
+
+
 def test_xlsx_accepts_a_wide_table_that_keeps_its_columns(tmp_path):
     """反向护栏：同一张宽表，列没丢就照常采信——格指标不能变成第二把误杀刀。"""
     path = _make_xlsx_rows(tmp_path / "wide.xlsx", 10, cols=5)
