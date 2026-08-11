@@ -506,7 +506,7 @@ OVER-counts (2,001 elements of "one character plus twenty trailing spaces" is
 four windows by arithmetic and one in reality, and a floor above the truth is
 worse than none), while the uncounted join separators can only shrink the total.
 Both sides must strip the SAME characters: SQL removes four ASCII ones, so the
-packer is pinned to `" \t\n\r"` (`_STRIP_CHARS`) rather than `str.strip()`'s
+packer is pinned to `" \t\n\r"` (`STRIP_CHARS`, shared by the packer, the preview's truncation test and the SQL aggregate) rather than `str.strip()`'s
 Unicode-wide set, or a U+3000/NBSP-padded document holds fewer real characters
 than SQL reports and the floor climbs above the truth again; such whitespace
 counts as content, which is the conservative direction. `_split_point` keeps the

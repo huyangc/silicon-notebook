@@ -216,7 +216,11 @@ _ELEMENT_JOIN = "\n"
 # `_split_point` deliberately keeps Unicode-wide `str.isspace()`: that is
 # choosing WHERE to cut, not counting how much there is, and a U+3000 is a
 # perfectly good token boundary.
-_STRIP_CHARS = " \t\n\r"
+# Public because it is a CROSS-MODULE contract, not an implementation detail:
+# the packer normalises by it, the cost preview judges "was this row truncated"
+# by it, and the store's SQL aggregate strips exactly it. Three readers, one
+# definition — a second spelling anywhere breaks the bound below.
+STRIP_CHARS = " \t\n\r"
 
 
 # =========================================================== data definitions
@@ -687,16 +691,16 @@ def _window_elements(rows: Sequence[Mapping[str, Any]]) -> list[WindowElement]:
     ground against, count or cite them. Everything else is kept — the packer
     below has no discard branch at all.
 
-    "Blank" means blank by ``_STRIP_CHARS``, the same set the store aggregate
+    "Blank" means blank by ``STRIP_CHARS``, the same set the store aggregate
     strips — so an element of nothing but U+3000 is CONTENT here, exactly as
     SQL counted it. See that constant: the preview's lower bound is only sound
     while both sides agree on which characters exist.
     """
     elements: list[WindowElement] = []
     for raw in rows or ():
-        # `_STRIP_CHARS`, never a bare `.strip()`: see that constant for why the
+        # `STRIP_CHARS`, never a bare `.strip()`: see that constant for why the
         # set has to be the store aggregate's, character for character.
-        text = str(raw.get("text") or "").strip(_STRIP_CHARS)
+        text = str(raw.get("text") or "").strip(STRIP_CHARS)
         if not text:
             continue
         etype = str(raw.get("element_type") or raw.get("type") or "").lower()
@@ -1551,6 +1555,16 @@ def assignment_coverage(
     prompt asks for WITHOUT an assignment, since no list can be derived for
     them) from being charged as unanswered — those are judged by grounding
     alone, never by coverage.
+
+    This reads RAW model payloads, so it inherits every shape a legal JSON
+    reply can have and none of the guarantees `validate_entry` produces. A
+    scalar `args` (`{"args": 5}`) is legal JSON and `5 or ()` is `5`, so
+    iterating it raises `TypeError` — out of a pure function, through the job
+    layer's coverage call, into the generic "internal error" path, failing a
+    paid job over an answer the validator was about to turn into an ordinary
+    visible rejection. Non-list `args` is therefore normalised to empty here,
+    exactly as `validate_entry` normalises it, and the slice's whole
+    assignment reads as unanswered — which is precisely what happened.
     """
     names = tuple(str(name) for name in assigned or ())
     if not names:
@@ -1558,7 +1572,8 @@ def assignment_coverage(
     claimed: set[str] = set()
     returned = 0
     for entry in entries or ():
-        for raw_arg in (entry or {}).get("args") or ():
+        raw_args = (entry or {}).get("args")
+        for raw_arg in raw_args if isinstance(raw_args, list) else ():
             if not isinstance(raw_arg, Mapping):
                 continue
             returned += 1
