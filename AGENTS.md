@@ -581,7 +581,17 @@ answering neither question.
 
 **Apply is conservative by construction.** The target knowhow table is created
 if missing and otherwise only appended to; a candidate whose command already has
-a row is reported as a conflict and that row is left untouched. Its concurrency
+a row is reported as a conflict and that row is left untouched.
+
+**Neither apply nor dismiss is available before the run settles.** Both routes
+answer a non-terminal job (`queued`/`running`, whitelist
+`CATALOG_TERMINAL_STATUSES`) with a `user_error()` 409. This closes a path that
+manufactures a permanently unconfirmable candidate: a mid-run confirm makes the
+next window's write-back find the row already applied, degrade to a second
+candidate for that command, and that replacement then hits the conflict rule
+above and can never be confirmed at all. The gate is at the API boundary only —
+the service's catalog lock and degrade path stay as defence in depth for the
+races that remain legitimate. Its concurrency
 lock keys on `("catalog", notebook_id)` and nothing else. The key must be
 IMMUTABLE, which rules out both finer identities tried before it: a table-id key
 is rewritten by the very `create_knowhow_table` the lock protects (first applier

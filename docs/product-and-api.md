@@ -680,7 +680,20 @@ across adjacent segments), and a field pinned at 0 only makes the interface
 render a warning that can never happen.
 
 **Confirmation and merge.** Candidates are unconfirmed until a person applies
-them. Apply creates a knowhow table named `命令目录：<source title>` with fixed
+them. **Neither apply nor dismiss is available while the run is unfinished** —
+both endpoints answer a non-terminal job (`queued`/`running`) with a
+user-readable `409`, which is also what the review panel already does (it opens
+no review action before the run settles). That is not caution, it closes a path
+that manufactures a **permanently unconfirmable candidate**: confirm a command
+mid-run, and when a later segment merges that command's continuation table back
+it finds the row already applied and degrades to appending a second candidate
+for the same command (deliberate — visible beats lost); confirming THAT row then
+finds the command already in the target table, and the "same name, never
+overwrite, report a conflict" merge rule skips it, so the late-found parameters
+are permanently visible and permanently unconfirmable. The gate sits at the API
+boundary; the service's lock and degrade path stay as they are, as defence in
+depth for the races that remain legitimate (a cancel interleaving with the last
+segment's write-back). Apply creates a knowhow table named `命令目录：<source title>` with fixed
 columns (命令 / 语法 / 参数 / 说明 / 示例 / 出处, with 命令 as the row-title
 column) if it does not exist, and otherwise **only appends commands the table
 does not already have**. `<source title>` is the same canonical display name
@@ -759,8 +772,8 @@ notebook read, writes need owner):
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/job` — the source's latest job: `status` plus `progress` (`sections_total`, `sections_done` — names kept, counting segments — `entries`, `rejected`, `uncovered`, `pending_candidates`) and, on failure, `failure_reason`. The internal `diagnostic` column is deliberately not exposed
 - `POST /api/notebooks/{id}/sources/{sid}/command-catalog/cancel` — `cancelling` (the worker stops at its next slice boundary, or as soon as an in-flight model call notices the cancellation — it does not wait for that call to return), `cancelled` (no worker in this process; the row is settled directly), or `not_running`
 - `GET  /api/notebooks/{id}/sources/{sid}/command-catalog/candidates` — keyset page (`job_id?`, `state=candidate|rejected|applied|dismissed`, `cursor`, `limit`), plus per-state `counts`. `next_cursor` is the last row's `position`, not an offset: applying candidates changes their state, and an offset would skip or repeat rows. A `dismissed` candidate carries `dismiss_reason`: `conflict_existing_row` (apply found an existing row), `user_dismissed` (dismissed explicitly), or `source_reparsed` (the source was reparsed and the whole run expired)
-- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` — body `{candidate_ids}` **xor** `{all_pending: true}` — sending both is a user-readable `422` (the two used to silently resolve to `all_pending`, a wider write than a caller who also listed explicit ids asked for); returns `table_id`, `created`, `applied`, `rows_added`, `conflicts` and `pending_remaining` (one call confirms at most a page). `409` with a user-readable message when the source was reparsed after this run, which also expires the job's remaining candidates; a reparse still IN FLIGHT (elements not swapped yet) is a second, differently worded `409` that expires nothing — a parse can fail before the swap, leaving those candidates valid
-- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` — body `{candidate_ids}` **xor** `{all_pending: true}`, same selection contract (including the `422` on both fields together) and page cap as apply; marks the selected `candidate`-state rows `dismissed` (reason `user_dismissed`) without touching any knowhow table; returns `dismissed` (the ids actually moved) and `pending_remaining`. Both reparse `409`s behave as they do on apply (the completed one expires the whole run, the in-flight one expires nothing)
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/apply` — a user-readable `409` while the job is not terminal (`queued`/`running`; see "Confirmation and merge" above). Body `{candidate_ids}` **xor** `{all_pending: true}` — sending both is a user-readable `422` (the two used to silently resolve to `all_pending`, a wider write than a caller who also listed explicit ids asked for); returns `table_id`, `created`, `applied`, `rows_added`, `conflicts` and `pending_remaining` (one call confirms at most a page). `409` with a user-readable message when the source was reparsed after this run, which also expires the job's remaining candidates; a reparse still IN FLIGHT (elements not swapped yet) is a second, differently worded `409` that expires nothing — a parse can fail before the swap, leaving those candidates valid
+- `POST /api/notebooks/{id}/sources/{sid}/command-catalog/dismiss` — the same non-terminal `409` as apply, worded for "skip". Body `{candidate_ids}` **xor** `{all_pending: true}`, same selection contract (including the `422` on both fields together) and page cap as apply; marks the selected `candidate`-state rows `dismissed` (reason `user_dismissed`) without touching any knowhow table; returns `dismissed` (the ids actually moved) and `pending_remaining`. Both reparse `409`s behave as they do on apply (the completed one expires the whole run, the in-flight one expires nothing)
 
 Numeric limits (registered only here; each has a like-named constant in the code):
 
