@@ -75,6 +75,12 @@ class NotebookSummary(BaseModel):
     # 该 notebook 此刻是否正在跑论文元数据补抽（进程内内存标志，get_notebook 实时
     # 回填，镜像 kg_building 的 wiring）。重启即 False——补抽本身幂等可重触发。
     paper_meta_backfilling: bool = False
+    # 该 notebook 是否**存在**缺论文元数据的合规候选源(口径 = SourceStore.
+    # sources_missing_paper_meta 的 WHERE,即「补全论文信息」真正会排队的那批)。
+    # 驱动前端只在有活可干时显示该按钮。三值:None = 未计算(列表投影与旧后端,
+    # 前端按旧行为继续显示按钮,遵循「未回填时逐字复现字段存在之前的行为」);
+    # 仅单库 get() 经 EXISTS 探针精确回填 True/False。
+    paper_meta_missing: Optional[bool] = None
     # 本 notebook 挂载的参考库中是否有任一已建 KG。即便本 notebook 无图,挂了有图的
     # 参考库也可进行严格推理(reasoning/graph)。未挂载 → False。
     base_kg_available: bool = False

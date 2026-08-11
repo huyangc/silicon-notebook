@@ -310,6 +310,14 @@ class NotebookSummaryQuery:
                 summary.base_kg_available
                 and self.queries.notebook_has_usable_base_kg(db, notebook_id)
             )
+            # paper_meta_missing:「补全论文信息」按钮的显示门(见字段注释)。已在手的
+            # 可见来源数是合规候选的严格超集(两者同排 memory/knowhow 合成源),为 0
+            # 直接免掉 EXISTS 探针;仅此单库路径回填,列表投影保持默认 None(=未计算,
+            # 前端按旧行为继续显示按钮)。
+            summary.paper_meta_missing = bool(
+                int(summary.counts.get("sources", 0)) > 0
+                and self.queries.notebook_paper_meta_missing(db, notebook_id)
+            )
             job_row = (
                 self.kg_build_jobs.latest_on(db, notebook_id)
                 if self.kg_build_jobs is not None

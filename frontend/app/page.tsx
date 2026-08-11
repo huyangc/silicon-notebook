@@ -253,6 +253,7 @@ import {
   EMPTY_KNOWLEDGE,
   KNOWLEDGE_STATUS_OPTIONS,
   SOURCES_PAGE_SIZE,
+  showPaperMetaBackfill,
   type AskResponse,
   type ChatMode,
   type ChatTurn,
@@ -6176,7 +6177,10 @@ export default function Home() {
                     <Plus size={20} strokeWidth={2.7} /> 添加来源
                   </button>
                 )}
-                {!isReader && (
+                {/* 显示门:仅当存在信息不完整的论文(或补全任务进行中)才显示;
+                    后端单库快照 paper_meta_missing 为 false 且可见页无 missing 来源
+                    时隐藏。判据是纯函数 showPaperMetaBackfill(有单测)。 */}
+                {!isReader && showPaperMetaBackfill(currentNotebook, sources, backfillingMeta) && (
                   <button
                     type="button"
                     className="button secondary"
@@ -6196,6 +6200,11 @@ export default function Home() {
                         if (res.queued === 0) {
                           setBackfillingMeta(false);
                           setToast("论文信息已是最新，无需补全");
+                          // 显示门数据已漂移(按钮显示着但确无活可干):刷新单库快照,
+                          // 让 paper_meta_missing=false 当场收起按钮。守住「没切库」即可。
+                          getNotebook(currentNotebookId).then((refreshed) => {
+                            setCurrentNotebook((cur) => (cur && cur.id === refreshed.id ? refreshed : cur));
+                          }).catch(() => {});
                         } else {
                           setToast(`已提交 ${res.queued} 篇论文的信息补全`);
                           // 保持 backfillingMeta=true;完成检测交给轮询 effect。

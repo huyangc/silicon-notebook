@@ -34,7 +34,11 @@ from app.repositories.postgres.search import (
     notebook_knowledge_rows,
     notebook_source_rows,
 )
-from app.repositories.postgres.source_store import VISIBLE_SOURCE_TYPES_PREDICATE
+from app.repositories.postgres.source_store import (
+    PAPER_META_ELIGIBLE_SQL,
+    PAPER_META_NO_META_SQL,
+    VISIBLE_SOURCE_TYPES_PREDICATE,
+)
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.notebook_scale import NotebookScaleFacts
@@ -242,6 +246,20 @@ class QueryStore:
         knowhow-only 库无可见来源、无 KG 却可检索(PR#334)。"""
         row = db.execute(
             "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row["exists"])
+
+    @staticmethod
+    def notebook_paper_meta_missing(db: Any, notebook_id: str) -> bool:
+        """本库是否存在缺论文元数据的合规候选源(NotebookSummary.paper_meta_missing,
+        「补全论文信息」按钮的显示门)。谓词与 sources_missing_paper_meta /
+        notebook_analytics 的 missing 计数共用 source_store 的 PAPER_META_*_SQL
+        常量;EXISTS 短路,走 idx_sources_nb_parse_status_type。"""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM sources s "
+            "WHERE s.notebook_id=%s"
+            f"{PAPER_META_ELIGIBLE_SQL}{PAPER_META_NO_META_SQL}) AS exists",
             (notebook_id,),
         ).fetchone()
         return bool(row["exists"])
@@ -908,15 +926,12 @@ class QueryStore:
                 ).fetchall()
             }
             # missing 计数是 SourceStore.sources_missing_paper_meta 的 COUNT 镜像
-            # (WHERE 子句逐字保持一致,口径漂移会立刻体现为两处不一致),走
-            # idx_sources_nb_parse_status_type(notebook_id, parse_status, source_type)。
+            # (WHERE 谓词共用 source_store 的 PAPER_META_*_SQL 常量,构造性同口径),
+            # 走 idx_sources_nb_parse_status_type(notebook_id, parse_status, source_type)。
             missing = int(db.execute(
                 "SELECT COUNT(*) AS c FROM sources s "
-                "WHERE s.notebook_id = %s "
-                "  AND s.source_type NOT IN ('memory', 'knowhow') "
-                "  AND s.doc_type IN ('', 'academic_paper') "
-                "  AND s.parse_status IN ('parsed', 'extracting', 'extracted') "
-                "  AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id)",
+                "WHERE s.notebook_id = %s"
+                f"{PAPER_META_ELIGIBLE_SQL}{PAPER_META_NO_META_SQL}",
                 (notebook_id,),
             ).fetchone()["c"])
             paper_meta_counts = {

@@ -879,6 +879,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/notebooks/{id}/checkup` —— 流水线体检（只读，看板高频入口）：聚合来源与索引的损坏/待办信号——空源、缺检索片段、缺检索向量、待分析来源、检索索引过期/损坏——每项含数量、命中样本与建议修复动作，健康时全为 0。看板「来源状态」「索引与构建」两块与头像旁铃铛消费它；健康的库保持中性、不打扰。两项「缺检索向量」的数量走进程内短时缓存，**计数至多陈旧 30 秒**——补齐完成后可能要再等一轮轮询才归零（修复按钮也因此多按住一会儿，是刻意的）。
 - `POST /api/notebooks/{id}/sources/reparse` —— 体检修复：批量重新解析指定来源（空源/缺片段），后台复用既有解析管线，按 notebook 作用域过滤入参
 - `POST /api/notebooks/{id}/backfill-vectors` —— 体检修复：后台补齐该库缺失的检索向量（只补缺失、幂等，仅嵌入、不动解析）
+- `POST /api/notebooks/{id}/paper-meta/backfill` —— owner 触发的论文元数据补抽（后台、幂等可续跑），返回 `{queued}`；LLM 未配置 409。来源面板的「补全论文信息」按钮**只在确有活可干时显示**：`NotebookSummary` 的 `paper_meta_missing`（仅单库 `GET /api/notebooks/{id}` 精确回填，按补抽排队同口径的 EXISTS 探针计算；列表投影与旧后端为 `null`＝未计算）为 `false` 且当前可见来源页没有 `paper_meta_status="missing"` 的行时隐藏；`null`/缺失按旧行为继续显示（隐藏只能由显式的 `false` 触发），补抽运行期间保持可见以承载「补全中…」态
 - `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）和 `source_upload_max_files_per_batch`（固定的单次请求文件数护栏）
 - `POST /api/notebooks/{id}/sources` —— multipart 文件上传（异步解析/抽取）。每个文件在 multipart 流写入临时 spool 时即受限，超过 `SOURCE_UPLOAD_MAX_MB`（默认 50 MiB）返回 413；每次请求超过 20 个文件也返回 413。浏览器读取上面的两个护栏，取得前禁用文件输入，选择时即时拒绝超限文件，并在发送前复查暂存文件
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`、`GET /api/sources/{id}/elements-page?offset=&limit=&anchor_element_id=` —— owner∪成员口径，按来源自己所属的笔记本判权限。分页读取返回 `{items,total_count,offset,limit}`，`limit` 最大 100；anchor 有效时会把 `offset` 调整为包含目标元素的页。

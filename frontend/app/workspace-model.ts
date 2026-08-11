@@ -76,6 +76,12 @@ export type NotebookSummary = {
   is_shared?: boolean;
   paper_meta_backfilling?: boolean;
   /**
+   * 是否存在缺论文元数据的合规候选源(后端按「补全论文信息」真正会排队的同一
+   * 口径计算)。仅单库 get() 精确回填;列表投影与旧后端为 null/缺失 = 未计算,
+   * 前端按旧行为继续显示按钮。读法见 showPaperMetaBackfill。
+   */
+  paper_meta_missing?: boolean | null;
+  /**
    * owner 的有效文档数量上限。**只在 GET /notebooks/{id} 详情里是真值**——列表
    * 投影(listNotebooks)里是 0 哨兵,别拿来门控。0/缺失一律当「未知」处理。
    */
@@ -264,6 +270,26 @@ export type PaginatedSources = {
 };
 
 export const SOURCES_PAGE_SIZE = 50;
+
+/**
+ * 「补全论文信息」按钮的显示门:只在确有活可干(或无法证明没有)时显示。
+ *  - backfilling:补抽任务运行期间保持可见,承载「补全中…」文案与轮询收尾。
+ *  - notebook.paper_meta_missing === true:后端按补抽排队同口径判定存在缺元数据源。
+ *  - null/缺失(列表投影兜底、旧后端):无法证明「已补全」,按旧行为显示——隐藏
+ *    只能由显式的 false 触发。
+ *  - 可见页任一来源 paper_meta_status === "missing":单库快照与来源页刷新节奏不同
+ *    (解析完成先刷新来源页),取并集消掉两者之间的陈旧窗口;方向刻意宁多显示。
+ */
+export function showPaperMetaBackfill(
+  notebook: Pick<NotebookSummary, "paper_meta_missing"> | null,
+  sources: Pick<SourceSummary, "paper_meta_status">[],
+  backfilling: boolean,
+): boolean {
+  if (backfilling) return true;
+  const missing = notebook?.paper_meta_missing;
+  if (missing !== false) return true;
+  return sources.some((source) => source.paper_meta_status === "missing");
+}
 
 // 流水线体检(P2)。/checkup 响应体是内部契约:code(H2..H8)与 fix(修复动作枚举)
 // 都是内部代号,面向用户的界面词由 vocabulary.ts 的 CHECKUP_ISSUE / CHECKUP_FIX 映射。

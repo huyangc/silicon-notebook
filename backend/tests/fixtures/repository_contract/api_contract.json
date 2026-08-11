@@ -6007,6 +6007,17 @@
               "title": "Paper Meta Backfilling",
               "type": "boolean"
             },
+            "paper_meta_missing": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Paper Meta Missing"
+            },
             "primary_domain": {
               "title": "Primary Domain",
               "type": "string"
@@ -19807,6 +19818,7 @@
       "local_evidence_available": true,
       "name": "API fixture",
       "paper_meta_backfilling": false,
+      "paper_meta_missing": true,
       "primary_domain": "Semiconductor",
       "purpose": "Freeze serialization",
       "shared_from": "",
