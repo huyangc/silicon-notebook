@@ -109,6 +109,23 @@ def test_change_user_password_without_keep_token_revokes_all(tmp_path):
     assert ident.resolve_session(token_b) is None
 
 
+def test_register_user_with_session_is_atomic_and_sweepable(tmp_path):
+    """codex R2 P2:注册+首个会话单写事务。功能面:返回可解析的 token、重名拒绝;
+    语义面:注册后立刻重置,注册发出的会话必须被吊销 DELETE 扫到(原子化后重置
+    不可能落在「建用户」与「发会话」之间)。"""
+    ident = _identity(_repo(tmp_path))
+
+    profile, token = ident.register_user_with_session("z00000014", "pw")
+    assert profile.username == "z00000014"
+    assert ident.resolve_session(token) is not None
+    with pytest.raises(ValueError):
+        ident.register_user_with_session("z00000014", "pw2")
+
+    ident.admin_reset_user_password("user-local", profile.id, "reset-pw")
+    assert ident.resolve_session(token) is None
+    assert ident.authenticate_user("z00000014", "reset-pw") is not None
+
+
 def test_login_with_password_round_trips(tmp_path):
     ident = _identity(_repo(tmp_path))
     ident.create_user("z00000012", "pw")

@@ -80,7 +80,10 @@ class IdentityStore:
             ui_mode=ui_mode,
         )
 
-    def create_user(self, username: str, password: str) -> UserProfile:
+    def _create_user_in_txn(self, connection, username: str, password: str):
+        """在调用方已打开的写事务内建用户+profile,返回 (user_row, profile_row)。
+        供 create_user 与 register_user_with_session 共用。UniqueViolation 的
+        翻译留在公开方法(异常在 execute 时抛出,穿过本 helper 上抛)。"""
         from app.services.auth_utils import hash_password, is_valid_username, normalize_username
 
         if not is_valid_username(username):
@@ -89,36 +92,67 @@ class IdentityStore:
         user_id = f"user-{uuid4().hex}"
         now = utc_now()
         password_hash, password_salt, iterations = hash_password(password)
+        user = connection.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,role,status,username,password_hash,password_salt,"
+            "password_iterations,created_at,updated_at) "
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s) RETURNING *",
+            (
+                user_id,
+                f"{normalized}@users.silicon-notebook.local",
+                normalized,
+                normalized,
+                password_hash,
+                password_salt,
+                iterations,
+                now,
+                now,
+            ),
+        ).fetchone()
+        profile = connection.execute(
+            "INSERT INTO user_profiles "
+            "(id,user_id,memory_mode,domain_focus,created_at,updated_at) "
+            "VALUES (%s,%s,'manual',%s,%s,%s) RETURNING *",
+            (f"profile-{user_id}", user_id, jsonb([]), now, now),
+        ).fetchone()
+        return user, profile
+
+    def _insert_session_in_txn(self, connection, user_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = utc_now()
+        connection.execute(
+            "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (token, user_id, now, now + timedelta(days=30), now),
+        )
+        return token
+
+    def create_user(self, username: str, password: str) -> UserProfile:
         try:
             with self.database.write() as connection:
-                user = connection.execute(
-                    "INSERT INTO users "
-                    "(id,email,display_name,role,status,username,password_hash,password_salt,"
-                    "password_iterations,created_at,updated_at) "
-                    "VALUES (%s,%s,%s,'user','active',%s,%s,%s,%s,%s,%s) RETURNING *",
-                    (
-                        user_id,
-                        f"{normalized}@users.silicon-notebook.local",
-                        normalized,
-                        normalized,
-                        password_hash,
-                        password_salt,
-                        iterations,
-                        now,
-                        now,
-                    ),
-                ).fetchone()
-                profile = connection.execute(
-                    "INSERT INTO user_profiles "
-                    "(id,user_id,memory_mode,domain_focus,created_at,updated_at) "
-                    "VALUES (%s,%s,'manual',%s,%s,%s) RETURNING *",
-                    (f"profile-{user_id}", user_id, jsonb([]), now, now),
-                ).fetchone()
+                user, profile = self._create_user_in_txn(connection, username, password)
         except errors.UniqueViolation as exc:
             if exc.diag.constraint_name in {"idx_users_username", "uq_users_email"}:
                 raise ValueError("username already exists") from exc
             raise
         return self._user_profile(user, profile)
+
+    def register_user_with_session(
+        self, username: str, password: str
+    ) -> tuple[UserProfile, str]:
+        """注册+发首个会话在同一写事务(codex R2 P2):拆开的 create_user +
+        create_session 会让管理员重置恰好落在两次提交之间——重置的 DELETE 扫不到
+        任何会话,注册随后插入的会话带着已被重置的密码活下来。语义与 SQLite 侧
+        逐字一致。"""
+        try:
+            with self.database.write() as connection:
+                user, profile = self._create_user_in_txn(connection, username, password)
+                token = self._insert_session_in_txn(connection, user["id"])
+        except errors.UniqueViolation as exc:
+            if exc.diag.constraint_name in {"idx_users_username", "uq_users_email"}:
+                raise ValueError("username already exists") from exc
+            raise
+        return (self._user_profile(user, profile), token)
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         from app.services.auth_utils import normalize_username, verify_password
@@ -165,25 +199,11 @@ class IdentityStore:
             profile = db.execute(
                 "SELECT * FROM user_profiles WHERE user_id=%s", (user["id"],)
             ).fetchone()
-            token = secrets.token_urlsafe(32)
-            now = utc_now()
-            db.execute(
-                "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
-                "VALUES (%s,%s,%s,%s,%s)",
-                (token, user["id"], now, now + timedelta(days=30), now),
-            )
-            return (self._user_profile(user, profile), token)
+            return (self._user_profile(user, profile), self._insert_session_in_txn(db, user["id"]))
 
     def create_session(self, user_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = utc_now()
         with self.database.write() as connection:
-            connection.execute(
-                "INSERT INTO auth_sessions(token,user_id,created_at,expires_at,last_seen_at) "
-                "VALUES (%s,%s,%s,%s,%s)",
-                (token, user_id, now, now + timedelta(days=30), now),
-            )
-        return token
+            return self._insert_session_in_txn(connection, user_id)
 
     def resolve_session(self, token: str) -> UserProfile | None:
         if not token:
@@ -376,14 +396,21 @@ class IdentityStore:
         # 镜像 change_user_password:哈希提前算,缩短持锁时间。
         pw_hash, pw_salt, pw_iters = hash_password(new_password)
         with self.database.write() as db:
-            actor = db.execute(
-                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
-            ).fetchone()
+            # actor 与 target 两行必须按确定性顺序一次锁齐(codex R2 P2):
+            # 逐行 FOR UPDATE 是「先 actor 后 target」,两个管理员互相重置时以
+            # 相反顺序等待对方的行,直接死锁。ORDER BY id 让 PostgreSQL 按主键
+            # 序取行加锁,再从已锁行里辨认 actor/target;actor==target(重置
+            # 自己)时 IN 去重返回一行,两个键都命中同一行,语义不变。
+            rows = db.execute(
+                "SELECT id,username,role FROM users WHERE id IN (%s,%s) "
+                "ORDER BY id FOR UPDATE",
+                (actor_id, user_id),
+            ).fetchall()
+            by_id = {row["id"]: row for row in rows}
+            actor = by_id.get(actor_id)
             if actor is None or actor["role"] != "admin":
                 raise PermissionError("admin role required")
-            target = db.execute(
-                "SELECT id,username FROM users WHERE id=%s FOR UPDATE", (user_id,)
-            ).fetchone()
+            target = by_id.get(user_id)
             if target is None:
                 raise KeyError(user_id)
             db.execute(

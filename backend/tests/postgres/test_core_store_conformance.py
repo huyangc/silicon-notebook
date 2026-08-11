@@ -332,6 +332,13 @@ def test_change_user_password_round_trips_and_scopes_session_revocation(
     assert store.resolve_session(logged_in[1]) is not None
     assert store.login_with_password("d00999999", "new-pw") is None
 
+    # register_user_with_session(codex R2 P2):注册+首个会话单写事务,注册后
+    # 立刻重置必须扫到该会话;重名走 UniqueViolation → ValueError 翻译。
+    registered, reg_token = store.register_user_with_session("f00123456", "reg-pw")
+    assert store.resolve_session(reg_token) is not None
+    with pytest.raises(ValueError):
+        store.register_user_with_session("f00123456", "other-pw")
+
 
 def test_admin_reset_user_password_rechecks_actor_and_revokes_all_sessions(
     core_stores: CoreStores,
@@ -362,6 +369,12 @@ def test_admin_reset_user_password_rechecks_actor_and_revokes_all_sessions(
         store.admin_reset_user_password(actor.id, "user-missing", "next-pw")
     with pytest.raises(BuiltinAdminPasswordError):
         store.admin_reset_user_password(actor.id, "user-local", "next-pw")
+
+    # actor==target(管理员重置自己):两行锁的 IN 去重返回一行,两个键命中
+    # 同一行,语义与拆开锁时一致(codex R2 P2 的排序锁不改变该路径)。
+    result_self = store.admin_reset_user_password(actor.id, actor.id, "self-pw")
+    assert result_self["id"] == actor.id
+    assert store.login_with_password("e00123456", "self-pw") is not None
 
 
 def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):

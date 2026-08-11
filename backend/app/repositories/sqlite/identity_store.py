@@ -94,7 +94,9 @@ class IdentityStore:
             ui_mode=ui_mode,
         )
 
-    def create_user(self, username: str, password: str) -> UserProfile:
+    def _create_user_in_txn(self, db, username: str, password: str) -> UserProfile:
+        """在调用方已打开的写事务内建用户+profile。供 create_user 与
+        register_user_with_session 共用,后者要求「建用户+发首个会话」原子。"""
         from app.services.auth_utils import hash_password, is_valid_username, normalize_username
 
         if not is_valid_username(username):
@@ -104,28 +106,52 @@ class IdentityStore:
         now = _now()
         pw_hash, pw_salt, pw_iters = hash_password(password)
         email = f"{norm}@users.silicon-notebook.local"
+        exists = db.execute(
+            "SELECT 1 FROM users WHERE username = ?", (norm,)
+        ).fetchone()
+        if exists:
+            raise ValueError("username already exists")
+        db.execute(
+            "INSERT INTO users (id, email, display_name, role, status, username, "
+            "password_hash, password_salt, password_iterations, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
+            (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
+        )
+        db.execute(
+            "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
+            "VALUES (?, ?, 'manual', '[]', ?, ?)",
+            (f"profile-{user_id}", user_id, now, now),
+        )
+        user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        profile = db.execute(
+            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return self._user_profile(user, profile)
+
+    def _insert_session_in_txn(self, db, user_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = _now()
+        db.execute(
+            "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (token, user_id, now, _session_expiry(), now),
+        )
+        return token
+
+    def create_user(self, username: str, password: str) -> UserProfile:
         with self.database.write() as db:
-            exists = db.execute(
-                "SELECT 1 FROM users WHERE username = ?", (norm,)
-            ).fetchone()
-            if exists:
-                raise ValueError("username already exists")
-            db.execute(
-                "INSERT INTO users (id, email, display_name, role, status, username, "
-                "password_hash, password_salt, password_iterations, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'user', 'active', ?, ?, ?, ?, ?, ?)",
-                (user_id, email, norm, norm, pw_hash, pw_salt, pw_iters, now, now),
-            )
-            db.execute(
-                "INSERT INTO user_profiles (id, user_id, memory_mode, domain_focus, created_at, updated_at) "
-                "VALUES (?, ?, 'manual', '[]', ?, ?)",
-                (f"profile-{user_id}", user_id, now, now),
-            )
-            user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            profile = db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
-            ).fetchone()
-            return self._user_profile(user, profile)
+            return self._create_user_in_txn(db, username, password)
+
+    def register_user_with_session(
+        self, username: str, password: str
+    ) -> tuple[UserProfile, str]:
+        """注册+发首个会话在同一写事务(codex R2 P2):拆开的 create_user +
+        create_session 会让管理员重置恰好落在两次提交之间——重置的 DELETE 扫不到
+        任何会话,注册随后插入的会话带着已被重置的密码活下来。原子化后重置只能
+        排在整个注册之前(目标不存在,404)或之后(会话已在,吊销扫得到)。"""
+        with self.database.write() as db:
+            profile = self._create_user_in_txn(db, username, password)
+            return (profile, self._insert_session_in_txn(db, profile.id))
 
     def authenticate_user(self, username: str, password: str) -> UserProfile | None:
         from app.services.auth_utils import normalize_username, verify_password
@@ -178,25 +204,11 @@ class IdentityStore:
             profile = db.execute(
                 "SELECT * FROM user_profiles WHERE user_id = ?", (user["id"],)
             ).fetchone()
-            token = secrets.token_urlsafe(32)
-            now = _now()
-            db.execute(
-                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (token, user["id"], now, _session_expiry(), now),
-            )
-            return (self._user_profile(user, profile), token)
+            return (self._user_profile(user, profile), self._insert_session_in_txn(db, user["id"]))
 
     def create_session(self, user_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        now = _now()
         with self.database.write() as db:
-            db.execute(
-                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at, last_seen_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (token, user_id, now, _session_expiry(), now),
-            )
-        return token
+            return self._insert_session_in_txn(db, user_id)
 
     def resolve_session(self, token: str) -> UserProfile | None:
         if not token:

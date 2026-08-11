@@ -14,14 +14,17 @@ def register(payload: AuthRequest) -> AuthResult:
     if not (payload.password or "").strip():
         raise user_error(400, "密码不能为空")
     try:
-        user = identity_repository().create_user(payload.username, payload.password)
+        # 建用户与发首个会话在同一写事务:拆开会与管理员重置的会话吊销竞态
+        # (重置落在两次提交之间时,注册插入的会话带着已被重置的密码存活)。
+        user, token = identity_repository().register_user_with_session(
+            payload.username, payload.password
+        )
     except ValueError as exc:
         # 两个分支都是写给用户的中文文案（异常原文只用来分类，不外泄），
         # 所以同样带出处标记。AST 扫描只认字面量 detail，这处是变量间接
         # 引用，需要手工登记。
         detail = "用户名已被占用" if "exists" in str(exc) else "用户名不合法"
         raise user_error(400, detail)
-    token = identity_repository().create_session(user.id)
     return AuthResult(token=token, user=user)
 
 
