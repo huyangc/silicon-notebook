@@ -186,6 +186,29 @@ test("重置默认发送 null 覆盖并回落默认值", async () => {
   expect(await screen.findByText("已恢复 a00123456 的文档上限为默认值（20）")).toBeInTheDocument();
 });
 
+test("文档上限编辑态是锚定弹出层,行内查看内容保持不变", async () => {
+  primeCommonMocks();
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  await user.click(target.getByRole("button", { name: "编辑" }));
+  // 编辑控件承载在 dialog 弹出层里;单元格自身仍是「数值 + 标签 + 编辑」,不内联展开
+  // (此前内联展开会把整张表顶宽,出现横向滚动、末尾按钮被截断)。
+  const popover = target.getByRole("dialog", { name: "设置 a00123456 的文档上限" });
+  expect(within(popover).getByRole("button", { name: "保存" })).toBeInTheDocument();
+  expect(within(popover).getByRole("button", { name: "重置默认" })).toBeInTheDocument();
+  expect(within(popover).getByRole("button", { name: "取消" })).toBeInTheDocument();
+  expect(target.getByText("20")).toBeInTheDocument();
+  expect(target.getByText("默认")).toBeInTheDocument();
+  expect(target.getByRole("button", { name: "编辑" })).toHaveAttribute("aria-expanded", "true");
+
+  await user.keyboard("{Escape}");
+  expect(target.queryByRole("dialog")).toBeNull();
+  expect(mocks.updateAdminUserUploadLimit).not.toHaveBeenCalled();
+});
+
 test("管理员行的文档上限显示不限且不可编辑", async () => {
   primeCommonMocks();
   render(<AdminUsagePage />);
