@@ -131,6 +131,8 @@ def test_watcher_waits_for_a_stable_file_signature_before_publish(
     try:
         path.write_text("", encoding="utf-8")
         assert provider.reload_if_changed() is False
+        assert provider.reload_if_changed() is False
+        assert provider.reload_if_changed() is False
         assert provider.chat("ask_answer").model == "model-one"
 
         path.write_text(
@@ -141,6 +143,52 @@ def test_watcher_waits_for_a_stable_file_signature_before_publish(
         assert provider.chat("ask_answer").model == "model-one"
         assert provider.reload_if_changed() is True
         assert provider.chat("ask_answer").model == "model-two"
+    finally:
+        provider.close()
+
+
+def test_watcher_rejects_a_file_that_changes_while_it_is_loaded(monkeypatch, tmp_path):
+    """A parsed candidate is publishable only if its post-read signature matches."""
+    monkeypatch.setenv("HOT_RELOAD_KEY", "secret")
+    path = tmp_path / "model-services.toml"
+    path.write_text(
+        _config(service_id="first", model="model-one", top_p=1.0),
+        encoding="utf-8",
+    )
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, model_services_config=str(path)),
+        _EventLog(),
+        chat_factory=lambda service: _ChatDelegate(service, []),
+    )
+    registry_type = provider_module.SystemModelServiceRegistry
+    original_load = registry_type.load
+    original_descriptor = registry_type.__dict__["load"]
+    try:
+        path.write_text(
+            _config(service_id="second", model="model-two", top_p=0.95),
+            encoding="utf-8",
+        )
+        assert provider.reload_if_changed() is False
+
+        def _load_then_change(_registry_type, settings):
+            candidate = original_load(settings)
+            path.write_text(
+                _config(service_id="third", model="model-three", top_p=0.9),
+                encoding="utf-8",
+            )
+            return candidate
+
+        monkeypatch.setattr(
+            registry_type, "load", classmethod(_load_then_change)
+        )
+        assert provider.reload_if_changed() is False
+        assert provider.chat("ask_answer").model == "model-one"
+
+        monkeypatch.setattr(
+            registry_type, "load", original_descriptor
+        )
+        assert provider.reload_if_changed() is True
+        assert provider.chat("ask_answer").model == "model-three"
     finally:
         provider.close()
 

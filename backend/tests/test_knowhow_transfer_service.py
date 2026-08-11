@@ -55,11 +55,29 @@ def _project(repo, tid):
     # CI runner cannot turn a six-second polling budget into a false failure.
     from app.services.knowhow.api import build_projector, get_scheduler
     scheduler = get_scheduler(repo)
+    claimed = False
     with scheduler._lock:
         pending = scheduler._timers.pop(tid, None)
+        if tid not in scheduler._running:
+            scheduler._running.add(tid)
+            claimed = True
     if pending is not None:
         pending.cancel()
-    build_projector(repo).project_table(tid)
+        pending.join(timeout=5)
+        assert not pending.is_alive(), "projection debounce timer did not stop"
+    if not claimed:
+        # The timer won the lock and already submitted the real projection;
+        # never overlap it with a direct pass.
+        return _settle(repo, tid)
+    try:
+        build_projector(repo).project_table(tid)
+    finally:
+        # A timer whose callback was already waiting on the lock sees our
+        # claim and records a rerun.  No mutation happened during this direct
+        # precondition build, so consume that stale rerun deterministically.
+        with scheduler._lock:
+            scheduler._running.discard(tid)
+            scheduler._rerun.discard(tid)
     return repo.get_knowhow_table(tid)
 
 def test_copy_creates_independent_table_in_target(repo):

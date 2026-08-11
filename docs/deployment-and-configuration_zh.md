@@ -58,11 +58,12 @@ cp model-services.example.toml .local/model-services.toml
 `top_p`。
 
 后端会监视非空的模型服务 TOML，文件变化通常在约 2 秒内生效。watcher 会先连续两次
-观察到同一变更签名，再完整校验并原子发布，避免原地 truncate/write 保存过程中把语法
-合法的空中间态发布出去；显式强制 reload 仍会立即校验。新调用使用新 registry 与
-runtime 代际，已提交调用继续在原代际完成。文件暂时缺失、只写了一半或配置非法时，不会
-清空线上配置；后端保留上一份有效 registry，并对稳定的非法文件版本记录不含凭据的诊断。
-修正并再次保存即可触发下一次 watcher 尝试。仅修改 `.env` 中
+观察到同一变更签名，解析后再复核读后签名仍相同，才原子发布，避免原地 truncate/write
+保存过程中发布移动快照。空或仅含注释的已配置 TOML 在 reload 中按非法版本拒绝；明确
+进入离线模式须清空 `MODEL_SERVICES_CONFIG` 并重启。显式强制 reload 会跳过两次观察，
+但仍做读后复核。新调用使用新 registry 与 runtime 代际，已提交调用继续在原代际完成。
+文件暂时缺失、只写了一半或配置非法时，不会清空线上配置；后端保留上一份有效 registry，
+并对稳定的非法文件版本记录不含凭据的诊断。修正并再次保存即可触发下一次 watcher 尝试。仅修改 `.env` 中
 的密钥不会被监视；修改引用密钥后需要重启后端，或再保存一次 TOML。`MODEL_SERVICES_CONFIG`
 路径本身在启动时选定，因此从 `.env` 删除或改换路径也仍需重启。
 
