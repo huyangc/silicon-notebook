@@ -60,3 +60,47 @@ def test_assert_taxonomy_complete_flags_unclassified_command_catalog_tables(
     message = str(exc_info.value)
     assert "catalog_jobs" in message
     assert "catalog_candidates" in message
+
+
+def _schema_db(definition: tuple[str, ...]) -> sqlite3.Connection:
+    db = sqlite3.connect(":memory:")
+    db.execute(
+        "CREATE TABLE object_schemas ("
+        "object_type TEXT PRIMARY KEY, notebook_id TEXT NOT NULL DEFAULT '', "
+        "plural TEXT, fields TEXT, primary_field TEXT, description TEXT, "
+        "label TEXT, list_fields TEXT, source TEXT, status TEXT, rationale TEXT)"
+    )
+    db.execute(
+        "INSERT INTO object_schemas VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        definition,
+    )
+    return db
+
+
+def test_global_schema_union_rejects_same_name_with_different_semantics():
+    base = (
+        "claim", "", "claims", '["statement"]', "statement", "desc",
+        "Claim", "[]", "builtin", "active", "",
+    )
+    left = _schema_db(base)
+    right = _schema_db((*base[:6], "Different", *base[7:]))
+    try:
+        with pytest.raises(SystemExit, match="claim"):
+            merge_dbs._assert_global_schema_compatibility(left, right)
+    finally:
+        left.close()
+        right.close()
+
+
+def test_global_schema_union_accepts_semantically_identical_rows():
+    definition = (
+        "claim", "", "claims", '["statement"]', "statement", "desc",
+        "Claim", "[]", "builtin", "active", "",
+    )
+    left = _schema_db(definition)
+    right = _schema_db(definition)
+    try:
+        merge_dbs._assert_global_schema_compatibility(left, right)
+    finally:
+        left.close()
+        right.close()

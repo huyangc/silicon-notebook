@@ -343,7 +343,10 @@ SQLite v47 / PostgreSQL migration v25 add `notebook_object_schemas`, keyed by
 `(notebook_id, object_type)`, for owner-governed notebook-local graph schema
 definitions. Global `object_schemas` remain the administrator-managed baseline;
 an effective registry overlays same-name notebook rows, including local disable,
-without changing the canonical four-type source-extraction contract.
+without changing the canonical four-type source-extraction contract. Proposed
+rows are review-only and never shadow the effective registry before activation.
+Writes lock/recheck both registries, including after model-backed induction, and
+database merge preflight rejects conflicting same-name global definitions.
 count. Keep audit output to aggregate counts plus bounded ids without evidence
 text. This phase is write-only and must not change online Ask retrieval.
 

@@ -2531,6 +2531,15 @@ class KnowledgeStore:
 
     # ------------------------------------------------------------- schemas
     @staticmethod
+    def lock_schema_registry(db: Any) -> None:
+        # Serialize cross-table absence checks: no UNIQUE constraint can span
+        # the global baseline and notebook overlay tables.
+        db.execute(
+            "LOCK TABLE object_schemas, notebook_object_schemas "
+            "IN SHARE ROW EXCLUSIVE MODE"
+        )
+
+    @staticmethod
     def schema_rows(db: Any) -> List[dict]:
         return _compat_schema_rows(db.execute("SELECT * FROM object_schemas").fetchall())
 

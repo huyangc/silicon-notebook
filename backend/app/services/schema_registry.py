@@ -147,8 +147,8 @@ class SchemaRegistryService:
     def effective_schemas(self, notebook_id: str = "") -> Dict[str, ObjectSchema]:
         """Resolve the active global baseline plus one notebook's overlay.
 
-        A local non-active row is still an override: most importantly a
-        ``disabled`` row removes the active global definition. The optional
+        A local ``disabled`` row removes the active global definition, while a
+        ``proposed`` row remains review-only and has no runtime effect. The optional
         empty notebook id preserves the administrator/smoke compatibility
         surface; every notebook-semantic production caller passes its id.
         """
@@ -172,8 +172,9 @@ class SchemaRegistryService:
             object_type = row["object_type"]
             if row["status"] == "active":
                 registry[object_type] = self._runtime_schema(row)
-            else:
+            elif row["status"] == "disabled":
                 registry.pop(object_type, None)
+            # A proposal is review metadata, not an effective override.
         return registry
 
     def schema_labels(self, notebook_id: str) -> Dict[str, str]:
@@ -205,8 +206,9 @@ class SchemaRegistryService:
         local_by_type = {row["object_type"]: row for row in notebook_rows}
         models: List[ObjectSchemaModel] = []
         for object_type, row in global_by_type.items():
-            local = local_by_type.pop(object_type, None)
-            if local is not None:
+            local = local_by_type.get(object_type)
+            if local is not None and local["status"] != "proposed":
+                local_by_type.pop(object_type)
                 models.append(object_schema_from_row(
                     local,
                     scope="notebook",
@@ -243,6 +245,7 @@ class SchemaRegistryService:
         _validate_schema_texts(payload.plural, payload.description, payload.label)
         now = self.knowledge.seams.now()
         with self.database.write() as db:
+            self.knowledge.lock_schema_registry(db)
             if self.knowledge.schema_exists(db, object_type):
                 raise ValueError(f"object type '{object_type}' already exists")
             self.knowledge.insert_custom_schema(
@@ -262,11 +265,6 @@ class SchemaRegistryService:
     def update_object_schema(
         self, object_type: str, payload: ObjectSchemaUpdate
     ) -> ObjectSchemaModel:
-        with self.database.connect() as db:
-            current = self.knowledge.schema_row(db, object_type)
-        if current is None:
-            raise KeyError(object_type)
-        self._validate_update(current, payload)
         updates: List[str] = []
         values: List[object] = []
         if payload.plural is not None:
@@ -298,9 +296,11 @@ class SchemaRegistryService:
             updates.append("status = ?")
             values.append(status)
         with self.database.write() as db:
+            self.knowledge.lock_schema_registry(db)
             row = self.knowledge.schema_row(db, object_type)
             if row is None:
                 raise KeyError(object_type)
+            self._validate_update(row, payload)
             if updates:
                 updates.append("updated_at = ?")
                 values.append(self.knowledge.seams.now())
@@ -311,6 +311,7 @@ class SchemaRegistryService:
 
     def delete_object_schema(self, object_type: str) -> None:
         with self.database.write() as db:
+            self.knowledge.lock_schema_registry(db)
             row = self.knowledge.schema_row(db, object_type)
             if row is None:
                 raise KeyError(object_type)
@@ -331,6 +332,7 @@ class SchemaRegistryService:
         _validate_schema_texts(payload.plural, payload.description, payload.label)
         now = self.knowledge.seams.now()
         with self.database.write() as db:
+            self.knowledge.lock_schema_registry(db)
             if (
                 self.knowledge.schema_row(db, object_type) is not None
                 or self.knowledge.notebook_schema_row(db, notebook_id, object_type)
@@ -427,6 +429,7 @@ class SchemaRegistryService:
         self.notebooks.get_row(notebook_id)
         updates, values = self._update_columns(payload)
         with self.database.write() as db:
+            self.knowledge.lock_schema_registry(db)
             row = self.knowledge.notebook_schema_row(db, notebook_id, object_type)
             global_row = self.knowledge.schema_row(db, object_type)
             if row is None:
@@ -472,6 +475,7 @@ class SchemaRegistryService:
     ) -> str:
         self.notebooks.get_row(notebook_id)
         with self.database.write() as db:
+            self.knowledge.lock_schema_registry(db)
             row = self.knowledge.notebook_schema_row(db, notebook_id, object_type)
             if row is None:
                 raise KeyError(object_type)
@@ -531,6 +535,7 @@ class SchemaRegistryService:
                 data = {}
             now = self.knowledge.seams.now()
             with self.database.write() as db:
+                self.knowledge.lock_schema_registry(db)
                 for item in data.get("new_types") or []:
                     if not isinstance(item, dict):
                         continue
@@ -560,6 +565,14 @@ class SchemaRegistryService:
                             str(item.get("rationale", "")),
                         )
                     except ValueError:
+                        continue
+                    if (
+                        self.knowledge.schema_row(db, object_type) is not None
+                        or self.knowledge.notebook_schema_row(
+                            db, notebook_id, object_type
+                        ) is not None
+                    ):
+                        existing.add(object_type)
                         continue
                     self.knowledge.insert_notebook_schema(
                         db,

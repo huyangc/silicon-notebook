@@ -343,6 +343,63 @@ def test_propose_schemas_persists_new_types_and_suppresses_existing(repo, monkey
     assert [m.object_type for m in proposals] == ["design_review"]
 
 
+def test_propose_schemas_rechecks_registry_after_model_call(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _insert_element(repo, nb.id, "A review has a name and owner.")
+
+    class RacingLLM(_FakeLLM):
+        def chat_json(self, messages, schema_hint):
+            repo.create_object_schema(ObjectSchemaCreate(
+                object_type="design_review",
+                fields=["name"],
+                primary="name",
+                label="Global review",
+            ))
+            return super().chat_json(messages, schema_hint)
+
+    bind_chat_client(repo, "schema_induction", RacingLLM(
+        '{"new_types":[{"object_type":"design_review","fields":["name"]}]}'
+    ))
+
+    assert repo.propose_schemas(nb.id) == []
+    assert repo.effective_schemas(nb.id)["design_review"].fields == ["name"]
+
+
+def test_proposed_local_row_never_suppresses_global_effective_schema(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.create_object_schema(ObjectSchemaCreate(
+        object_type="design_review", fields=["name"], primary="name"
+    ))
+    now = _now()
+    with repo._write() as db:
+        repo._runtime.knowledge.insert_notebook_schema(
+            db,
+            notebook_id=nb.id,
+            object_type="design_review",
+            plural="design_reviews",
+            fields_json='["title"]',
+            primary="title",
+            description="",
+            label="Proposed review",
+            list_fields_json="[]",
+            source="induced",
+            status="proposed",
+            rationale="",
+            created_by="user-local",
+            now=now,
+        )
+
+    assert repo.effective_schemas(nb.id)["design_review"].fields == ["name"]
+    listed = repo.list_notebook_object_schemas(nb.id)
+    design_review_rows = [
+        row for row in listed if row.object_type == "design_review"
+    ]
+    assert [(row.scope, row.status) for row in design_review_rows] == [
+        ("global", "active"),
+        ("notebook", "proposed"),
+    ]
+
+
 def test_propose_schemas_fail_open_on_malformed_and_model_error(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _insert_element(repo, nb.id, "text")

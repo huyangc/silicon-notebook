@@ -96,6 +96,16 @@ test("新增校验失败或请求失败时显示原因并保留输入", async ()
   }));
 });
 
+test("新增表单在请求前执行名称与文本长度护栏", () => {
+  const onCreate = vi.fn();
+  mount({ schemas: [], onCreate });
+  fireEvent.change(screen.getByLabelText("类型标识（snake_case）"), { target: { value: `a${"b".repeat(80)}` } });
+  fireEvent.change(screen.getByLabelText("字段（逗号分隔）"), { target: { value: "title" } });
+  fireEvent.click(screen.getByRole("button", { name: "新增类型" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("类型标识不能超过 80 个字符");
+  expect(onCreate).not.toHaveBeenCalled();
+});
+
 test("当前笔记本覆盖提供恢复全局，而本库自建条目提供删除", () => {
   const callbacks = mount({ schemas: [item({ inherited: false, overrides_global: true, scope: "notebook" })] });
   expect(screen.getByText("当前笔记本覆盖")).toBeInTheDocument();

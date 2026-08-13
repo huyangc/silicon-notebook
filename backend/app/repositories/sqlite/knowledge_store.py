@@ -2436,6 +2436,12 @@ class KnowledgeStore:
 
     # ------------------------------------------------------------- schemas
     @staticmethod
+    def lock_schema_registry(db: sqlite3.Connection) -> None:
+        # SqliteDatabase.write() already owns the process write seat and starts
+        # the write transaction before this hook is called.
+        db.execute("SELECT 1")
+
+    @staticmethod
     def schema_rows(db: sqlite3.Connection) -> List[sqlite3.Row]:
         return db.execute("SELECT * FROM object_schemas").fetchall()
 

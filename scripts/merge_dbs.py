@@ -78,6 +78,11 @@ GLOBAL_UNION_TABLES = [
     "concept_whitelist", "object_schemas",
 ]
 
+OBJECT_SCHEMA_SEMANTIC_COLUMNS = (
+    "plural", "fields", "primary_field", "description", "label",
+    "list_fields", "source", "status", "rationale",
+)
+
 # 外部内容 FTS —— 导入后 rebuild
 EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 
@@ -244,6 +249,7 @@ def preflight(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
     if not (va == vb == SCHEMA_VERSION):
         raise SystemExit(
             f"schema 版本必须都为当前 SCHEMA_VERSION={SCHEMA_VERSION}, 实得 A={va} B={vb}")
+    _assert_global_schema_compatibility(conn_a, conn_b)
     # 2) 各恰好一个 base 且 id 相同
     ba, bb = _sole_base_id(conn_a, "A"), _sole_base_id(conn_b, "B")
     if ba != bb:
@@ -275,6 +281,40 @@ def _table_exists(conn: sqlite3.Connection, table: str, schema: str = "main") ->
     return conn.execute(
         f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone() is not None
+
+
+def _assert_global_schema_compatibility(
+    conn_a: sqlite3.Connection, conn_b: sqlite3.Connection
+) -> None:
+    """Reject same-name global schemas whose effective meaning differs."""
+    if not (
+        _table_exists(conn_a, "object_schemas")
+        and _table_exists(conn_b, "object_schemas")
+    ):
+        return
+    columns = ", ".join(("object_type", *OBJECT_SCHEMA_SEMANTIC_COLUMNS))
+    rows_a = {
+        row[0]: tuple(row[1:])
+        for row in conn_a.execute(
+            f"SELECT {columns} FROM object_schemas WHERE notebook_id=''"
+        )
+    }
+    rows_b = {
+        row[0]: tuple(row[1:])
+        for row in conn_b.execute(
+            f"SELECT {columns} FROM object_schemas WHERE notebook_id=''"
+        )
+    }
+    conflicts = sorted(
+        object_type
+        for object_type in rows_a.keys() & rows_b.keys()
+        if rows_a[object_type] != rows_b[object_type]
+    )
+    if conflicts:
+        raise SystemExit(
+            "两库存在同名但定义不同的全局图谱类型，拒绝静默采用主库定义: "
+            + ", ".join(conflicts)
+        )
 
 
 def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,

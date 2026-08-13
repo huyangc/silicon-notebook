@@ -17,6 +17,8 @@ type CreatePayload = {
 
 const IDENTIFIER = /^[a-z][a-z0-9_]*$/;
 const MAX_FIELDS = 64;
+const MAX_NAME_CHARS = 80;
+const MAX_TEXT_CHARS = 2000;
 
 function splitFields(value: string): string[] {
   return value.split(",").map((field) => field.trim()).filter(Boolean);
@@ -24,14 +26,22 @@ function splitFields(value: string): string[] {
 
 function validateDefinition(objectType: string, fields: string[], primary: string, listFields: string[]): string {
   if (objectType && !IDENTIFIER.test(objectType)) return "类型标识须以小写字母开头，且只能包含小写字母、数字和下划线。";
+  if (objectType.length > MAX_NAME_CHARS) return `类型标识不能超过 ${MAX_NAME_CHARS} 个字符。`;
   if (fields.length === 0) return "请至少填写一个字段。";
   if (fields.length > MAX_FIELDS || listFields.length > MAX_FIELDS) return `字段数量不能超过 ${MAX_FIELDS} 个。`;
   if ([...fields, ...listFields].some((field) => !IDENTIFIER.test(field))) return "字段须使用小写字母、数字和下划线，且以小写字母开头。";
+  if ([...fields, ...listFields].some((field) => field.length > MAX_NAME_CHARS)) return `字段名称不能超过 ${MAX_NAME_CHARS} 个字符。`;
   if (new Set(fields).size !== fields.length) return "字段不能重复。";
   if (new Set(listFields).size !== listFields.length) return "列表字段不能重复。";
   if (primary && !fields.includes(primary)) return "主字段必须包含在字段列表中。";
   if (listFields.some((field) => !fields.includes(field))) return "列表字段必须包含在字段列表中。";
   return "";
+}
+
+function validateTexts(values: string[]): string {
+  return values.some((value) => value.trim().length > MAX_TEXT_CHARS)
+    ? `显示名、复数名称和说明均不能超过 ${MAX_TEXT_CHARS} 个字符。`
+    : "";
 }
 
 function placementLabel(schema: ObjectSchema, view: SchemaView): string {
@@ -120,7 +130,8 @@ function SchemaRow({
           <button className="sort-button" disabled={busy || !dirty} onClick={async () => {
             const fields = splitFields(fieldsText);
             const listFields = splitFields(listFieldsText);
-            const message = validateDefinition(schema.object_type, fields, primary, listFields);
+            const message = validateDefinition(schema.object_type, fields, primary, listFields)
+              || validateTexts([label, plural, description]);
             if (message) {
               setError(message);
               return;
@@ -162,7 +173,8 @@ function NewSchemaForm({ busy, canEdit, title, onCreate }: { busy: boolean; canE
       return;
     }
     const resolvedPrimary = primary.trim() || fields[0] || "";
-    const message = validateDefinition(normalizedType, fields, resolvedPrimary, listFields);
+    const message = validateDefinition(normalizedType, fields, resolvedPrimary, listFields)
+      || validateTexts([label, plural, description]);
     if (message) {
       setError(message);
       return;
