@@ -60,6 +60,7 @@ log "构建前端(standalone)…"
   if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
   NEXT_OUTPUT_STANDALONE=1 \
   NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-/api}" \
+  SOURCE_UPLOAD_MAX_MB=1024 \
     npm run build
 )
 [[ -f "$ROOT_DIR/frontend/.next/standalone/server.js" ]] || \

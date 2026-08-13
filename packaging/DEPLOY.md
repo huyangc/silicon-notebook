@@ -91,6 +91,7 @@ TOML 与新的密钥槽位。推算出的并发容量仅是迁移初值，应用
 | `MCP_REQUIRE_HTTPS` | `0` | MCP 是否强制 HTTPS。默认关(允许内网明文+放宽 Host 校验);公网设 `1` |
 | `PORT` | `8000` | 后端端口 |
 | `MODEL_SERVICES_CONFIG` | `.local/model-services.toml` | 系统模型服务 TOML；留空即明确离线运行 |
+| `SOURCE_UPLOAD_MAX_MB` | `50` | 单个来源文件上限；前端从后端动态读取同一值，整数 1–1024 |
 | `SILICON_NOTEBOOK_ADMIN_PASSWORD` | — | 对外暴露(非 loopback)时**必须**设为非默认值,否则拒绝启动 |
 | `ALLOW_NO_ENV_FILE` | `0` | 设 `1` 则允许无 `.env`、仅用系统环境变量启动 |
 
@@ -229,4 +230,8 @@ database-wide advisory lock，命令结束时释放并关闭 repository。在线
   python 小版本与目标机一致。
 - **前端起来但接口 404 / CORS**:前端通过同源反代把 `/api/*` 转发到后端 `127.0.0.1:8000`。确认后端已在
   `.local/logs/backend.log` 正常起来,且未改动后端端口而没同步改反代目标(反代目标在打包时烘焙)。
+- **来源上传仍显示/卡在 10 MB**:当前包已把 Next.js rewrite 的整请求传输上限按协议最大值预构建，
+  实际单文件限制仍只由后端运行时配置决定。先登录后请求 `GET /api/system/config`，核对返回的
+  `source_upload_max_bytes` 是否等于 `.env` 的 `SOURCE_UPLOAD_MAX_MB × 1024 × 1024`；若接口正确但仍出现
+  10 MB，说明浏览器或服务端仍在运行旧前端包，完整停服、替换整个包并重启，不要只覆盖后端目录。
 - 日志在 `.local/logs/`(backend.log / frontend.log),PID 在 `.local/run/`。

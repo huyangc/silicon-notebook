@@ -409,7 +409,11 @@ Settings 派生字节上限，并对 multipart 的每个来源文件权威执行
 用户登录后，浏览器从 `GET /api/system/config` 取得解析后的字节上限，在添加来源弹窗
 显示并即时拒绝超限选择，发送 multipart 前还会复查暂存文件。前后端还会固定限制每次
 multipart 请求最多 20 个文件，避免可配置的单文件额度叠加成无界临时 spool。旧标签页和
-直接 API 客户端仍始终以后端为准。
+直接 API 客户端仍始终以后端为准。同源部署下，Next.js external rewrite 还需要整次请求的
+传输上限：其独立默认值只有 10 MiB，会在后端执行 `SOURCE_UPLOAD_MAX_MB` 之前截断合法的
+multipart 上传。前端构建从同一个单文件设置、固定批量数和有界 multipart 余量推导该传输
+上限，不增加第二个用户可见配置。离线 standalone 包按协议允许的最大值构建传输层，因此
+目标机运行时 `.env` 仍可选择任一合法的 `SOURCE_UPLOAD_MAX_MB`。
 
 **检索：**
 
