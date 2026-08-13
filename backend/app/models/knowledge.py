@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -65,6 +65,10 @@ class ObjectSchemaModel(BaseModel):
     status: str = "active"  # active | proposed | disabled
     rationale: str = ""
     notebook_id: str = ""
+    scope: Literal["global", "notebook"] = "global"
+    inherited: bool = False
+    overrides_global: bool = False
+    can_edit: bool = False
 
 
 class ObjectSchemaCreate(BaseModel):

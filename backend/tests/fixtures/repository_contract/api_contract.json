@@ -6311,6 +6311,11 @@
         "ObjectSchemaModel": {
           "description": "An editable extraction-schema definition (a typed knowledge object).",
           "properties": {
+            "can_edit": {
+              "default": false,
+              "title": "Can Edit",
+              "type": "boolean"
+            },
             "description": {
               "default": "",
               "title": "Description",
@@ -6322,6 +6327,11 @@
               },
               "title": "Fields",
               "type": "array"
+            },
+            "inherited": {
+              "default": false,
+              "title": "Inherited",
+              "type": "boolean"
             },
             "label": {
               "default": "",
@@ -6344,6 +6354,11 @@
               "title": "Object Type",
               "type": "string"
             },
+            "overrides_global": {
+              "default": false,
+              "title": "Overrides Global",
+              "type": "boolean"
+            },
             "plural": {
               "title": "Plural",
               "type": "string"
@@ -6356,6 +6371,15 @@
             "rationale": {
               "default": "",
               "title": "Rationale",
+              "type": "string"
+            },
+            "scope": {
+              "default": "global",
+              "enum": [
+                "global",
+                "notebook"
+              ],
+              "title": "Scope",
               "type": "string"
             },
             "source": {
@@ -16510,6 +16534,198 @@
           "summary": "Mounted By Count Route"
         }
       },
+      "/api/notebooks/{notebook_id}/object-schemas": {
+        "get": {
+          "operationId": "list_notebook_object_schemas_api_notebooks__notebook_id__object_schemas_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/ObjectSchemaModel"
+                    },
+                    "title": "Response List Notebook Object Schemas Api Notebooks  Notebook Id  Object Schemas Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Notebook Object Schemas"
+        },
+        "post": {
+          "operationId": "create_notebook_object_schema_api_notebooks__notebook_id__object_schemas_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectSchemaCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ObjectSchemaModel"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Notebook Object Schema"
+        }
+      },
+      "/api/notebooks/{notebook_id}/object-schemas/{object_type}": {
+        "delete": {
+          "operationId": "delete_notebook_object_schema_api_notebooks__notebook_id__object_schemas__object_type__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "object_type",
+              "required": true,
+              "schema": {
+                "title": "Object Type",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Notebook Object Schema"
+        },
+        "patch": {
+          "operationId": "update_notebook_object_schema_api_notebooks__notebook_id__object_schemas__object_type__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "object_type",
+              "required": true,
+              "schema": {
+                "title": "Object Type",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectSchemaUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ObjectSchemaModel"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Notebook Object Schema"
+        }
+      },
       "/api/notebooks/{notebook_id}/objects/{object_id}/context": {
         "get": {
           "operationId": "object_context_api_notebooks__notebook_id__objects__object_id__context_get",
@@ -19908,6 +20124,10 @@
           "fields": [
             {
               "key": "name",
+              "value": "Source degeneration stabilizes gain"
+            },
+            {
+              "key": "statement",
               "value": "Source degeneration stabilizes gain"
             }
           ],

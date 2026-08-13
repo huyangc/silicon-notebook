@@ -20,12 +20,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=46) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=47) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
-# 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
-# 被 IN (secondary_nb) 排除, 但两库若各自建了同名 object_type 的自定义类型会 UNIQUE 冲突
-# -> merge_core 整体中止并删 out_db(fail-loud, 不会静默损坏)。
+# object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
 NOTEBOOK_SCOPED_TABLES = [
     "sources", "source_authors", "source_paper_meta", "chunks", "chunk_embeddings",
     "chunk_questions",
@@ -33,7 +31,7 @@ NOTEBOOK_SCOPED_TABLES = [
     "knowledge_relations", "knowledge_object_sources", "knowledge_source_facts",
     "knowledge_source_fact_elements", "knowledge_source_fact_backfills",
     "source_index_backfills", "chunk_elements", "chunk_element_backfills",
-    "object_schemas",
+    "notebook_object_schemas",
     "concept_clusters", "concept_comentions", "concept_merge_candidates",
     "canonical_relations", "communities", "community_members", "mention_edges",
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
@@ -77,8 +75,13 @@ CHILD_TABLES = [
 # 全局表: 主库优先取并集
 GLOBAL_UNION_TABLES = [
     "users", "user_profiles", "agent_profiles", "agent_access_tokens",
-    "concept_whitelist",
+    "concept_whitelist", "object_schemas",
 ]
+
+OBJECT_SCHEMA_SEMANTIC_COLUMNS = (
+    "plural", "fields", "primary_field", "description", "label",
+    "list_fields", "source", "status", "rationale",
+)
 
 # 外部内容 FTS —— 导入后 rebuild
 EXTERNAL_FTS_TABLES = ["memory_items_fts"]
@@ -246,6 +249,7 @@ def preflight(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
     if not (va == vb == SCHEMA_VERSION):
         raise SystemExit(
             f"schema 版本必须都为当前 SCHEMA_VERSION={SCHEMA_VERSION}, 实得 A={va} B={vb}")
+    _assert_global_schema_compatibility(conn_a, conn_b)
     # 2) 各恰好一个 base 且 id 相同
     ba, bb = _sole_base_id(conn_a, "A"), _sole_base_id(conn_b, "B")
     if ba != bb:
@@ -277,6 +281,40 @@ def _table_exists(conn: sqlite3.Connection, table: str, schema: str = "main") ->
     return conn.execute(
         f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone() is not None
+
+
+def _assert_global_schema_compatibility(
+    conn_a: sqlite3.Connection, conn_b: sqlite3.Connection
+) -> None:
+    """Reject same-name global schemas whose effective meaning differs."""
+    if not (
+        _table_exists(conn_a, "object_schemas")
+        and _table_exists(conn_b, "object_schemas")
+    ):
+        return
+    columns = ", ".join(("object_type", *OBJECT_SCHEMA_SEMANTIC_COLUMNS))
+    rows_a = {
+        row[0]: tuple(row[1:])
+        for row in conn_a.execute(
+            f"SELECT {columns} FROM object_schemas WHERE notebook_id=''"
+        )
+    }
+    rows_b = {
+        row[0]: tuple(row[1:])
+        for row in conn_b.execute(
+            f"SELECT {columns} FROM object_schemas WHERE notebook_id=''"
+        )
+    }
+    conflicts = sorted(
+        object_type
+        for object_type in rows_a.keys() & rows_b.keys()
+        if rows_a[object_type] != rows_b[object_type]
+    )
+    if conflicts:
+        raise SystemExit(
+            "两库存在同名但定义不同的全局图谱类型，拒绝静默采用主库定义: "
+            + ", ".join(conflicts)
+        )
 
 
 def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,

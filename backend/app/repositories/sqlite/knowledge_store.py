@@ -1216,11 +1216,10 @@ class KnowledgeStore:
     ) -> "tuple[Dict[str, int], Dict[str, str]]":
         from app.repositories.sqlite import knowledge_counts_cache
         counts = knowledge_counts_cache.type_counts(db, notebook_id)  # non-deprecated
-        label_rows = db.execute(
-            "SELECT object_type, label FROM object_schemas"
-        ).fetchall()
-        labels = {r["object_type"]: (r["label"] or r["object_type"]) for r in label_rows}
-        return counts, labels
+        # Labels are resolved by SchemaRegistryService so global + notebook
+        # overlay semantics have one implementation rather than dialect SQL
+        # duplicated in both knowledge stores.
+        return counts, {}
 
     # --------------------------------------------------------------- list
     @staticmethod
@@ -2437,6 +2436,12 @@ class KnowledgeStore:
 
     # ------------------------------------------------------------- schemas
     @staticmethod
+    def lock_schema_registry(db: sqlite3.Connection) -> None:
+        # SqliteDatabase.write() already owns the process write seat and starts
+        # the write transaction before this hook is called.
+        db.execute("SELECT 1")
+
+    @staticmethod
     def schema_rows(db: sqlite3.Connection) -> List[sqlite3.Row]:
         return db.execute("SELECT * FROM object_schemas").fetchall()
 
@@ -2529,6 +2534,92 @@ class KnowledgeStore:
         db.execute(
             "DELETE FROM object_schemas WHERE object_type = ?", (object_type,)
         )
+
+    @staticmethod
+    def notebook_schema_rows(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> List[sqlite3.Row]:
+        return db.execute(
+            "SELECT * FROM notebook_object_schemas WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def notebook_schema_row(
+        db: sqlite3.Connection, notebook_id: str, object_type: str
+    ) -> "sqlite3.Row | None":
+        return db.execute(
+            "SELECT * FROM notebook_object_schemas "
+            "WHERE notebook_id = ? AND object_type = ?",
+            (notebook_id, object_type),
+        ).fetchone()
+
+    @staticmethod
+    def insert_notebook_schema(
+        db: sqlite3.Connection,
+        *,
+        notebook_id: str,
+        object_type: str,
+        plural: str,
+        fields_json: str,
+        primary: str,
+        description: str,
+        label: str,
+        list_fields_json: str,
+        source: str,
+        status: str,
+        rationale: str,
+        created_by: str,
+        now: str,
+    ) -> None:
+        db.execute(
+            """
+            INSERT INTO notebook_object_schemas
+            (notebook_id, object_type, plural, fields, primary_field,
+             description, label, list_fields, source, status, rationale,
+             created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                notebook_id, object_type, plural, fields_json, primary,
+                description, label, list_fields_json, source, status,
+                rationale, created_by, now, now,
+            ),
+        )
+
+    @staticmethod
+    def update_notebook_schema_columns(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        updates: List[str],
+        values: List[object],
+    ) -> None:
+        db.execute(
+            f"UPDATE notebook_object_schemas SET {', '.join(updates)} "
+            "WHERE notebook_id = ? AND object_type = ?",
+            (*values, notebook_id, object_type),
+        )
+
+    @staticmethod
+    def delete_notebook_schema_row(
+        db: sqlite3.Connection, notebook_id: str, object_type: str
+    ) -> None:
+        db.execute(
+            "DELETE FROM notebook_object_schemas "
+            "WHERE notebook_id = ? AND object_type = ?",
+            (notebook_id, object_type),
+        )
+
+    @staticmethod
+    def notebook_schema_has_objects(
+        db: sqlite3.Connection, notebook_id: str, object_type: str
+    ) -> bool:
+        return db.execute(
+            "SELECT 1 FROM knowledge_objects "
+            "WHERE notebook_id = ? AND object_type = ? LIMIT 1",
+            (notebook_id, object_type),
+        ).fetchone() is not None
 
     # ------------------------------------------------- Task 26 primitives
     # The last facade SQL bodies, moved verbatim.  All connection-taking —

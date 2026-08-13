@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import * as ask from "../../app/ask-api.ts";
 import * as kg from "../../features/kg-maintenance/kg-api.ts";
+import * as knowledge from "../../app/knowledge-api.ts";
 import * as notebook from "../../app/notebook-api.ts";
 import * as report from "../../app/report-api.ts";
 import * as source from "../../app/source-api.ts";
@@ -68,6 +69,32 @@ test("domain clients are directly importable and Ask owns notebook search", asyn
   }
   assert.equal(typeof ask.searchNotebook, "function");
   assert.equal("searchNotebook" in notebook, false);
+});
+
+test("notebook type APIs stay separate from the global baseline APIs", async () => {
+  installWindow();
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if ((init?.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(null, { status: 204 });
+  };
+
+  await knowledge.listNotebookObjectSchemas("nb-1");
+  await knowledge.createNotebookObjectSchema("nb-1", { object_type: "project_note", fields: ["note"] });
+  await knowledge.updateNotebookObjectSchema("nb-1", "claim", { label: "项目结论" });
+  await knowledge.deleteNotebookObjectSchema("nb-1", "claim");
+
+  assert.equal(calls.length, 4);
+  assert.match(calls[0].url, /\/notebooks\/nb-1\/object-schemas$/);
+  assert.match(calls[1].url, /\/notebooks\/nb-1\/object-schemas$/);
+  assert.match(calls[2].url, /\/notebooks\/nb-1\/object-schemas\/claim$/);
+  assert.match(calls[3].url, /\/notebooks\/nb-1\/object-schemas\/claim$/);
+  assert.deepEqual(calls.map((call) => call.init?.method ?? "GET"), ["GET", "POST", "PATCH", "DELETE"]);
+  assert.equal(calls[1].init.body, JSON.stringify({ object_type: "project_note", fields: ["note"] }));
+  assert.equal(calls[2].init.body, JSON.stringify({ label: "项目结论" }));
 });
 
 test("Ask stream consumes started progress final events and yields for paint", async () => {

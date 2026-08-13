@@ -764,6 +764,51 @@ def test_copy_skips_object_schemas_and_backfills_fts(repo):
             "SELECT COUNT(*) FROM kg_objects_fts WHERE notebook_id=?", (new.id,)).fetchone()[0] == 2
 
 
+def test_copy_carries_notebook_schema_rows_and_reassigns_creator(repo):
+    from app.models.knowledge import ObjectSchemaCreate
+    from app.models.schemas import NotebookCreate
+
+    _mk_user(repo, "copy-owner")
+    source = repo.create_notebook(NotebookCreate(name="source"))
+    repo.create_notebook_object_schema(
+        source.id,
+        ObjectSchemaCreate(
+            object_type="lab_recipe",
+            fields=["name", "steps"],
+            primary="name",
+            list_fields=["steps"],
+            label="Recipe",
+        ),
+        created_by="user-local",
+    )
+
+    copied = repo.copy_notebook(
+        source.id, new_owner_id="copy-owner", new_name="copied"
+    )
+    with repo._connect() as db:
+        source_row = db.execute(
+            "SELECT * FROM notebook_object_schemas "
+            "WHERE notebook_id=? AND object_type='lab_recipe'",
+            (source.id,),
+        ).fetchone()
+        copied_row = db.execute(
+            "SELECT * FROM notebook_object_schemas "
+            "WHERE notebook_id=? AND object_type='lab_recipe'",
+            (copied.id,),
+        ).fetchone()
+    assert source_row is not None
+    assert copied_row is not None
+    assert copied_row["fields"] == source_row["fields"]
+    assert copied_row["created_by"] == "copy-owner"
+
+    repo.delete_notebook(copied.id)
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM notebook_object_schemas WHERE notebook_id=?",
+            (copied.id,),
+        ).fetchone()[0] == 0
+
+
 def test_share_returns_transaction_token_if_concurrent_unshare_wins(repo, monkeypatch):
     nb = _mk_nb(repo, "race")
     store = repo._runtime.sharing_store

@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 24
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 25
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 24
-    assert migrator.migrate() == 24
-    assert migrator.current_version() == 24
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 24
+    assert migrator.migrate() == 25
+    assert migrator.migrate() == 25
+    assert migrator.current_version() == 25
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 25
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 24
+    assert migrator.migrate() == 25
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 24
+        assert PostgresMigrator(databases[1]).migrate() == 25
     finally:
         for database in databases:
             database.close()
@@ -192,6 +192,7 @@ def test_packaged_index_migration_phases_are_exact():
         (22, "chunk_questions"),
         (23, "user_profiles_ui_mode"),
         (24, "chunk_elements"),
+        (25, "notebook_object_schemas"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -277,6 +278,10 @@ def test_packaged_index_migration_phases_are_exact():
     # backing bounded collection enumeration (formula/table/image/code_block).
     v37_index = index_declarations(15)
     assert v37_index == [(False, "idx_source_elements_source_type")]
+
+    assert index_declarations(25) == [
+        (False, "idx_notebook_object_schemas_status")
+    ]
 
     # Migration 16 pairs SQLite v38's bounded visible-source identity roster.
     v38_index = index_declarations(16)

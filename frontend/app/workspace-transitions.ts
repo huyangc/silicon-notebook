@@ -155,7 +155,10 @@ export function workspaceCapabilities(access: string | undefined, role: string) 
     canWriteNotebook: canWrite,
     canGovernKnowledge: canWrite,
     canManageReports: canWrite,
-    canManageSchemas: role === "admin",
+    // 图谱类型的有效配置属于当前笔记本：owner 可以维护自己的覆盖和自建类型；
+    // reader 只读。全局基线仍只允许管理员变更。
+    canManageNotebookSchemas: canWrite,
+    canManageGlobalSchemas: role === "admin",
   };
 }
 

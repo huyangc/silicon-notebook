@@ -107,6 +107,10 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("knowledge_embeddings", "SELECT * FROM knowledge_embeddings WHERE notebook_id = ?"),
     ("relation_embeddings", "SELECT * FROM relation_embeddings WHERE notebook_id = ?"),
     ("concept_clusters", "SELECT * FROM concept_clusters WHERE notebook_id = ?"),
+    (
+        "notebook_object_schemas",
+        "SELECT * FROM notebook_object_schemas WHERE notebook_id = ?",
+    ),
     # --- PR-2+3 Task 13: knowhow business tables (their own source of truth;
     # travel WITH the copy, fresh ids, joined down from knowhow_tables since
     # none of columns/rows/cells/cell_code carry a notebook_id of their own).
@@ -158,6 +162,7 @@ _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
      f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
     ("concept_clusters", ""),
+    ("notebook_object_schemas", ""),
     ("knowhow_tables", ""),
     ("notebook_assets", ""),
 )

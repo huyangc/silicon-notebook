@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
     get_current_user,
+    notebook_access_repository,
     repository,
     require_notebook_access,
     require_notebook_read,
@@ -26,6 +27,7 @@ from app.models.knowledge import (
     PaginatedKnowledge,
 )
 from app.services.knowledge_contracts import KnowledgeGraphTooLargeError
+from app.services.schema_registry import SchemaConflictError
 
 
 router = APIRouter()
@@ -60,8 +62,10 @@ def list_knowledge(
 
 # --- Editable extraction-schema registry ---------------------------------
 @router.get("/object-schemas", response_model=List[ObjectSchemaModel])
-def list_object_schemas() -> List[ObjectSchemaModel]:
-    return repository().list_object_schemas()
+def list_object_schemas(
+    user: UserProfile = Depends(get_current_user),
+) -> List[ObjectSchemaModel]:
+    return repository().list_object_schemas(can_edit=user.role == "admin")
 
 
 @router.post("/object-schemas", response_model=ObjectSchemaModel)
@@ -97,6 +101,81 @@ def delete_object_schema(object_type: str, user: UserProfile = Depends(get_curre
         raise HTTPException(status_code=404, detail="Schema not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get(
+    "/notebooks/{notebook_id}/object-schemas",
+    response_model=List[ObjectSchemaModel],
+    dependencies=[Depends(require_notebook_read)],
+)
+def list_notebook_object_schemas(
+    notebook_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> List[ObjectSchemaModel]:
+    try:
+        return repository().list_notebook_object_schemas(
+            notebook_id,
+            can_edit=notebook_access_repository().user_can_access_notebook(
+                notebook_id, user.id
+            ),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post(
+    "/notebooks/{notebook_id}/object-schemas",
+    response_model=ObjectSchemaModel,
+    dependencies=[Depends(require_notebook_access)],
+)
+def create_notebook_object_schema(
+    notebook_id: str,
+    payload: ObjectSchemaCreate,
+    user: UserProfile = Depends(get_current_user),
+) -> ObjectSchemaModel:
+    try:
+        return repository().create_notebook_object_schema(
+            notebook_id, payload, created_by=user.id
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    except SchemaConflictError:
+        raise user_error(409, "当前笔记本已存在同名类型，请换一个类型标识")
+    except ValueError:
+        raise user_error(400, "类型定义无效，请检查类型标识、字段、主字段和列表字段")
+
+
+@router.patch(
+    "/notebooks/{notebook_id}/object-schemas/{object_type}",
+    response_model=ObjectSchemaModel,
+    dependencies=[Depends(require_notebook_access)],
+)
+def update_notebook_object_schema(
+    notebook_id: str,
+    object_type: str,
+    payload: ObjectSchemaUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> ObjectSchemaModel:
+    try:
+        return repository().update_notebook_object_schema(
+            notebook_id, object_type, payload, created_by=user.id
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    except ValueError:
+        raise user_error(400, "类型定义无效，请检查字段、主字段和列表字段")
+
+
+@router.delete("/notebooks/{notebook_id}/object-schemas/{object_type}",
+    dependencies=[Depends(require_notebook_access)])
+def delete_notebook_object_schema(notebook_id: str, object_type: str):
+    try:
+        status = repository().delete_notebook_object_schema(notebook_id, object_type)
+        return {"status": status, "object_type": object_type}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Schema override not found")
+    except ValueError:
+        raise user_error(409, "该类型仍有知识条目，暂时不能删除")
 
 
 @router.post(

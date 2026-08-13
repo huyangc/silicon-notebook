@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=46, postgres_version=24, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=47, postgres_version=25, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -594,6 +594,15 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         78,
         "timestamptz",
+    ),
+    # SQLite v47 / PostgreSQL v25: notebook-owned schema overrides/custom rows.
+    # Its notebook parent is rank 15, so the appended rank is FK-consistent.
+    _table(
+        "notebook_object_schemas",
+        ("notebook_id", "object_type"),
+        ReplicationKeyKind.DECLARED_PK,
+        79,
+        "jsonb+timestamptz",
     ),
 )
 

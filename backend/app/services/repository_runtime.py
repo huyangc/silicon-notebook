@@ -323,6 +323,7 @@ class RepositoryRuntime:
             self.source_store,
             self.models,
             settings,
+            current_user_id=lambda: self.identity.current_user().id,
         )
         # Task 23: Ask cancellation + detached streaming execution.  Both are
         # seam-free (the Task-22 ask_state store, the module-level

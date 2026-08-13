@@ -214,7 +214,8 @@ class KnowledgeQueryService:
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         self.catalog.get_notebook(notebook_id)
         with self.database.connect() as db:
-            counts, labels = self.knowledge.type_counts(db, notebook_id)
+            counts, _ = self.knowledge.type_counts(db, notebook_id)
+        labels = self.schemas.schema_labels(notebook_id)
         ordered = [item for item in OBJECT_SCHEMAS if item in counts]
         ordered += [item for item in counts if item not in OBJECT_SCHEMAS]
         return [
@@ -241,7 +242,7 @@ class KnowledgeQueryService:
         self.catalog.get_notebook(notebook_id)
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
-        schema = self.schemas.effective_schemas().get(object_type)
+        schema = self.schemas.effective_schemas(notebook_id).get(object_type)
         with self.database.connect() as db:
             total, objects = self.knowledge.list_knowledge_page(
                 db, notebook_id, object_type, status, offset, limit

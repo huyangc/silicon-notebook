@@ -78,6 +78,10 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("knowledge_embeddings", "SELECT * FROM knowledge_embeddings WHERE notebook_id=%s"),
     ("relation_embeddings", "SELECT * FROM relation_embeddings WHERE notebook_id=%s"),
     ("concept_clusters", "SELECT * FROM concept_clusters WHERE notebook_id=%s"),
+    (
+        "notebook_object_schemas",
+        "SELECT * FROM notebook_object_schemas WHERE notebook_id=%s",
+    ),
     ("knowhow_tables", "SELECT * FROM knowhow_tables WHERE notebook_id=%s"),
     (
         "knowhow_columns",
@@ -117,6 +121,7 @@ _COPY_VALIDATED_TABLES = (
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
     ),
     ("concept_clusters", ""),
+    ("notebook_object_schemas", ""),
     ("knowhow_tables", ""),
     ("notebook_assets", ""),
 )
@@ -156,6 +161,7 @@ _JSON_COLUMNS = {
     "knowledge_objects": {"payload", "evidence"},
     "knowledge_source_facts": {"payload", "evidence"},
     "knowledge_relations": {"evidence"},
+    "notebook_object_schemas": {"fields", "list_fields"},
 }
 
 

@@ -1404,11 +1404,8 @@ class KnowledgeStore:
                 (notebook_id,),
             ).fetchall()
         }
-        label_rows = db.execute(
-            "SELECT object_type, label FROM object_schemas"
-        ).fetchall()
-        labels = {r["object_type"]: (r["label"] or r["object_type"]) for r in label_rows}
-        return counts, labels
+        # SchemaRegistryService owns effective global + notebook label merging.
+        return counts, {}
 
     # --------------------------------------------------------------- list
     @staticmethod
@@ -2534,6 +2531,15 @@ class KnowledgeStore:
 
     # ------------------------------------------------------------- schemas
     @staticmethod
+    def lock_schema_registry(db: Any) -> None:
+        # Serialize cross-table absence checks: no UNIQUE constraint can span
+        # the global baseline and notebook overlay tables.
+        db.execute(
+            "LOCK TABLE object_schemas, notebook_object_schemas "
+            "IN SHARE ROW EXCLUSIVE MODE"
+        )
+
+    @staticmethod
     def schema_rows(db: Any) -> List[dict]:
         return _compat_schema_rows(db.execute("SELECT * FROM object_schemas").fetchall())
 
@@ -2672,6 +2678,121 @@ class KnowledgeStore:
         db.execute(
             "DELETE FROM object_schemas WHERE object_type = %s", (object_type,)
         )
+
+    @staticmethod
+    def notebook_schema_rows(db: Any, notebook_id: str) -> List[dict]:
+        return _compat_schema_rows(db.execute(
+            "SELECT * FROM notebook_object_schemas WHERE notebook_id = %s",
+            (notebook_id,),
+        ).fetchall())
+
+    @staticmethod
+    def notebook_schema_row(
+        db: Any, notebook_id: str, object_type: str
+    ) -> "dict | None":
+        rows = _compat_schema_rows(db.execute(
+            "SELECT * FROM notebook_object_schemas "
+            "WHERE notebook_id = %s AND object_type = %s",
+            (notebook_id, object_type),
+        ).fetchall())
+        return rows[0] if rows else None
+
+    @staticmethod
+    def insert_notebook_schema(
+        db: Any,
+        *,
+        notebook_id: str,
+        object_type: str,
+        plural: str,
+        fields_json: str,
+        primary: str,
+        description: str,
+        label: str,
+        list_fields_json: str,
+        source: str,
+        status: str,
+        rationale: str,
+        created_by: str,
+        now: str,
+    ) -> None:
+        db.execute(
+            """
+            INSERT INTO notebook_object_schemas
+            (notebook_id, object_type, plural, fields, primary_field,
+             description, label, list_fields, source, status, rationale,
+             created_by, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                notebook_id,
+                object_type,
+                plural,
+                jsonb(_json_document(fields_json, expected=list, field="schema fields")),
+                primary,
+                description,
+                label,
+                jsonb(_json_document(
+                    list_fields_json, expected=list, field="schema list fields"
+                )),
+                source,
+                status,
+                rationale,
+                created_by,
+                normalize_timestamp(now),
+                normalize_timestamp(now),
+            ),
+        )
+
+    @staticmethod
+    def update_notebook_schema_columns(
+        db: Any,
+        notebook_id: str,
+        object_type: str,
+        updates: List[str],
+        values: List[object],
+    ) -> None:
+        allowed = {
+            "plural", "fields", "primary_field", "description", "label",
+            "list_fields", "status", "updated_at",
+        }
+        columns = []
+        adapted = list(values)
+        for index, update in enumerate(updates):
+            column = update.split("=", 1)[0].strip()
+            if column not in allowed:
+                raise ValueError("unsupported notebook object schema update column")
+            columns.append(sql.SQL("{}=%s").format(sql.Identifier(column)))
+            if column in {"fields", "list_fields"}:
+                adapted[index] = jsonb(_json_document(
+                    adapted[index], expected=list, field=f"schema {column}"
+                ))
+            elif column == "updated_at":
+                adapted[index] = normalize_timestamp(adapted[index])
+        statement = sql.SQL(
+            "UPDATE notebook_object_schemas SET {} "
+            "WHERE notebook_id=%s AND object_type=%s"
+        ).format(sql.SQL(",").join(columns))
+        db.execute(statement, (*adapted, notebook_id, object_type))
+
+    @staticmethod
+    def delete_notebook_schema_row(
+        db: Any, notebook_id: str, object_type: str
+    ) -> None:
+        db.execute(
+            "DELETE FROM notebook_object_schemas "
+            "WHERE notebook_id = %s AND object_type = %s",
+            (notebook_id, object_type),
+        )
+
+    @staticmethod
+    def notebook_schema_has_objects(
+        db: Any, notebook_id: str, object_type: str
+    ) -> bool:
+        return db.execute(
+            "SELECT 1 FROM knowledge_objects "
+            "WHERE notebook_id = %s AND object_type = %s LIMIT 1",
+            (notebook_id, object_type),
+        ).fetchone() is not None
 
     # ------------------------------------------------- Task 26 primitives
     # The last facade SQL bodies, moved verbatim.  All connection-taking —

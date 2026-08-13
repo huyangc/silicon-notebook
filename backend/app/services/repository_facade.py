@@ -1875,13 +1875,46 @@ class RepositoryFacade:
     def _object_schema_from_row(row) -> ObjectSchemaModel:
         return SchemaRegistryService.from_row(row)
 
-    def effective_schemas(self) -> Dict[str, ObjectSchema]:
+    def effective_schemas(self, notebook_id: str = "") -> Dict[str, ObjectSchema]:
         """Active object schemas as an ObjectSchema registry for extraction —
         DB rows overlaid on the code defaults."""
-        return self._runtime.schema_registry.effective_schemas()
+        return self._runtime.schema_registry.effective_schemas(notebook_id)
 
-    def list_object_schemas(self) -> List[ObjectSchemaModel]:
-        return self._runtime.schema_registry.list_object_schemas()
+    def list_object_schemas(self, *, can_edit: bool = False) -> List[ObjectSchemaModel]:
+        return self._runtime.schema_registry.list_object_schemas(can_edit=can_edit)
+
+    def list_notebook_object_schemas(
+        self, notebook_id: str, *, can_edit: bool = False
+    ) -> List[ObjectSchemaModel]:
+        return self._runtime.schema_registry.list_notebook_object_schemas(
+            notebook_id, can_edit=can_edit
+        )
+
+    def create_notebook_object_schema(
+        self, notebook_id: str, payload: ObjectSchemaCreate, *, created_by: str
+    ) -> ObjectSchemaModel:
+        return self._runtime.schema_registry.create_notebook_object_schema(
+            notebook_id, payload, created_by=created_by
+        )
+
+    def update_notebook_object_schema(
+        self,
+        notebook_id: str,
+        object_type: str,
+        payload: ObjectSchemaUpdate,
+        *,
+        created_by: str,
+    ) -> ObjectSchemaModel:
+        return self._runtime.schema_registry.update_notebook_object_schema(
+            notebook_id, object_type, payload, created_by=created_by
+        )
+
+    def delete_notebook_object_schema(
+        self, notebook_id: str, object_type: str
+    ) -> str:
+        return self._runtime.schema_registry.delete_notebook_object_schema(
+            notebook_id, object_type
+        )
 
     def create_object_schema(self, payload: ObjectSchemaCreate) -> ObjectSchemaModel:
         return self._runtime.schema_registry.create_object_schema(payload)

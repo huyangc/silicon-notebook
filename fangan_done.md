@@ -91,7 +91,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **候选知识治理**：候选知识列表、evidence 与 approve / reject 后端能力保留；左侧 Source Stack 不再显示独立「审核队列」按钮，避免出现无效入口。
 - **source detail 结构化渲染**：`formula` 元素先剥除包裹整值的 Markdown 数学定界符，再用 KaTeX 排版（失败回退可见的原始 LaTeX）、`table` 元素用 sanitized `table_html` 渲染、其余文本 + element_type 徽标。
 - **图谱分析可操作性与质量解释（2026-08-11）**：图谱分析由原始指标墙改为结论优先的质量面板，先回答报告是否可用、各类型合并是否异常、主题结构是否值得查看，以及最需要复核的来源；红／黄／灰／当前状态在页内直接解释，并明确收敛率与关联度是诊断信号而不是越高越好的总分。五份预计算数据逐项说明用途，最大概念合并组与关联形成方式展开为完整诊断区块。可编辑成员可在面板内「生成分析／更新分析」，复用已有 `unified-kg/rebuild` 后台单飞任务与 `job_id` 配对轮询，不重新抽取来源，完成后自动刷新；只读成员仍可查看相同报告但不显示写动作。组件回归、TypeScript、生产构建及完整 `scripts/check.sh` 均已通过。
-- 「分析」菜单当前只含晋升队列（admin）、tier 切换（admin）与边审查队列；看板、全屏知识图谱为其他顶栏动作，图谱 Schema（仅管理员）已移入知识图谱视图头部的「图谱 Schema」按钮。当前没有文章、思维导图、信息图或派生规则入口。
+- 「分析」菜单当前只含晋升队列（admin）、tier 切换（admin）与边审查队列；看板、全屏知识图谱为其他顶栏动作，「图谱 Schema」已移入知识图谱视图头部：成员可查看，owner 可维护当前笔记本定义，管理员可另管全局基线。当前没有文章、思维导图、信息图或派生规则入口。
 
 ## 6. Source 上传与管理（异步闭环）
 
@@ -277,8 +277,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 23. Schema 管理 + 归纳 + 关系图 + ask 织入 + 抽取自我修正
 
-- **可编辑 schema 注册表**：新增 `object_schemas` 表（迁移时从代码默认 seed，`INSERT OR IGNORE` 保留人工编辑）。抽取改为读 **DB 生效 schema**（`effective_schemas()` 叠加在代码默认上），prompt/schema-hint/字段排序全部按生效注册表。端点 `GET/POST/PATCH/DELETE /object-schemas`（内置可停用不可删、自定义可删）。前端「Schema」弹窗：列出/编辑字段·标签·说明、启用/停用、新增自定义类型。
-- **Schema 归纳（建议态，§开放发现）**：`POST /notebooks/{id}/schema-proposals` 用 LLM 从笔记本内容提议新类型（offline 为 no-op），存为 `status='proposed' source='induced'`，绝不自动启用；前端在 Schema 弹窗审核（批准→active / 拒绝→删除）。
+- **全局基线 + 笔记本覆盖的可编辑注册表**：`object_schemas` 继续承载管理员维护、所有笔记本默认继承的全局基线；`notebook_object_schemas` 承载 owner 的 copy-on-write 覆盖、本库停用和本库专属类型。Ask 知识块、知识浏览与类型标签统一读取 **notebook 生效注册表**；来源的核心图谱抽取仍由独立的 Concept / Claim / Formula / Procedure 四类边契约约束，本次不把自定义类型隐式塞进该抽取器，也不迁移历史对象。删除同名覆盖表示恢复继承；有存量知识对象时拒绝删除本库专属类型。全局 `GET/POST/PATCH/DELETE /object-schemas` 的写入仍仅管理员，笔记本 `GET/POST/PATCH/DELETE /notebooks/{id}/object-schemas...` 分别使用 read / owner 权限。知识图谱里的「图谱 Schema」对成员开放查看，owner 可维护本库定义，管理员可另切全局基线视图。
+- **Schema 归纳（建议态，§开放发现）**：`POST /notebooks/{id}/schema-proposals` 用 LLM 从笔记本内容提议新类型（offline 为 no-op），按 notebook 和创建者存为 `status='proposed' source='induced'`，绝不自动启用、遮蔽同名继承类型或占用其它 notebook 的同名类型；模型返回后在串行写事务内重查全局/本地注册表，避免并发写入被候选覆盖。前端在当前笔记本视图审核（批准→active / 拒绝→删除）。
 - **关系边消费（§7.4 基础）**：当前主线使用 `knowledge_relations` 与 `/unified-kg`，不再依赖各对象 payload 中的 `related_rules/cases/methods/concepts` 自由文本去临时推边。
 - **Object 级知识图谱可视化（§7.4）**：前端「知识图谱」改为读取 `/unified-kg?level=object`，Concept / Claim / Formula / Procedure 同屏展示；主 canvas 直接绘制节点名称、类型形状/颜色、边关系标签，并按容器尺寸响应式布局；密集全量视图用类型分区与标签降噪，左侧提供可选一种或多种类型的过滤；侧栏提供按类型分组的节点总览，选中节点会聚焦 canvas 并展示 payload、相邻关系和「出处」；问答知识对象引用会按真实来源 notebook（含挂载 base，纯 graph-BFS anchor 也保留来源）定向补载核心范围外的一跳邻域，并把原始 Concept id 有界解析为 canonical `focus_id` 后精确选中、居中，同时保留 raw object id 供 context 读取；浏览器以 active notebook 过权限，后端在有效 participant 集内解析并代理 base 读取，避免把公共库挂载误当成直接成员权限；大库 viz 未就绪时显式提示暂不可定位且不进入全量 cluster-map fallback；「出处」使用证据卡片分离来源元数据与原文正文，避免长文件名/英文段落/公式在窄侧栏中挤成细列。Concept 节点继续拉取详情，相关 Claim / Formula / Procedure 以「相关节点」展示在出处下方，并按类型分组且复用 canvas 的类型颜色/形状。
 - **新类型织入 ask**：`AskResponse.related_knowledge`（通用块）召回 KG top 命中 + USABLE 一跳邻居；前端 AnswerView 不再把所有相关知识平铺在答案下方，而是用顺序引用承接证据，并在引用区提供知识图谱入口供用户继续浏览相关节点。

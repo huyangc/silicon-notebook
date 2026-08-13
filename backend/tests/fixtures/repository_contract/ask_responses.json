@@ -841,6 +841,10 @@
               {
                 "key": "name",
                 "value": "fixture gain remains stable"
+              },
+              {
+                "key": "statement",
+                "value": "feedback stabilizes gain"
               }
             ],
             "headline": "fixture gain remains stable",
@@ -1023,6 +1027,10 @@
               {
                 "key": "name",
                 "value": "fixture gain remains stable"
+              },
+              {
+                "key": "statement",
+                "value": "feedback stabilizes gain"
               }
             ],
             "headline": "fixture gain remains stable",

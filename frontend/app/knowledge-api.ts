@@ -46,8 +46,18 @@ export const mergeKnowledge = (nb: string, sourceId: string, intoId: string) =>
 
 export const listObjectSchemas = () => requestJson<ObjectSchema[]>("/object-schemas", options);
 
+export const listNotebookObjectSchemas = (nb: string) =>
+  requestJson<ObjectSchema[]>(`/notebooks/${nb}/object-schemas`, options);
+
 export const createObjectSchema = (payload: unknown) =>
   requestVoid("/object-schemas", {
+    ...options,
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+export const createNotebookObjectSchema = (nb: string, payload: unknown) =>
+  requestVoid(`/notebooks/${nb}/object-schemas`, {
     ...options,
     method: "POST",
     body: JSON.stringify(payload),
@@ -60,8 +70,21 @@ export const updateObjectSchema = (type: string, patch: unknown) =>
     body: JSON.stringify(patch),
   });
 
+export const updateNotebookObjectSchema = (nb: string, type: string, patch: unknown) =>
+  requestVoid(`/notebooks/${nb}/object-schemas/${encodeURIComponent(type)}`, {
+    ...options,
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
 export const deleteObjectSchema = (type: string) =>
   requestVoid(`/object-schemas/${encodeURIComponent(type)}`, {
+    ...options,
+    method: "DELETE",
+  });
+
+export const deleteNotebookObjectSchema = (nb: string, type: string) =>
+  requestVoid(`/notebooks/${nb}/object-schemas/${encodeURIComponent(type)}`, {
     ...options,
     method: "DELETE",
   });
