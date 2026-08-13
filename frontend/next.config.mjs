@@ -1,3 +1,5 @@
+import { sourceUploadProxyBodyMaxBytes } from "./next-upload-limit.mjs";
+
 // 同源反代：浏览器只与前端(:3000)同源通信，Next 把 /api/* 转发到本机后端。
 // 好处：免 CORS、后端无需对外暴露(可留 127.0.0.1)、前端包不写死后端地址。
 // 前端把 NEXT_PUBLIC_API_BASE_URL 设为相对的 /api 即走此代理。
@@ -16,6 +18,17 @@ const output =
 const nextConfig = {
   typedRoutes: true,
   output,
+  experimental: {
+    // Next 15 otherwise clones only the first 10 MiB before an external rewrite.
+    // This is a whole-multipart transport envelope derived from the backend's
+    // per-file setting and fixed batch rail; backend streaming validation stays
+    // authoritative. prod.sh exports the root .env before build, while pack.sh
+    // deliberately builds against the protocol maximum for runtime-configurable
+    // offline bundles.
+    middlewareClientMaxBodySize: sourceUploadProxyBodyMaxBytes(
+      process.env.SOURCE_UPLOAD_MAX_MB,
+    ),
+  },
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${backendTarget}/api/:path*` },

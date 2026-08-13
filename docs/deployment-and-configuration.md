@@ -489,7 +489,14 @@ add-source dialog, rejects oversized selections immediately, and rechecks the
 staged files before it sends multipart data. Both sides also enforce a fixed
 20-file maximum per multipart request so the configured per-file allowance cannot
 multiply into an unbounded temporary spool. The backend remains authoritative for
-stale tabs and direct API clients.
+stale tabs and direct API clients. In a same-origin deployment, Next.js's external
+rewrite also needs a whole-request transport envelope: its independent default is
+only 10 MiB and would otherwise truncate a valid multipart upload before the backend
+could enforce `SOURCE_UPLOAD_MAX_MB`. The frontend build derives that envelope from
+the same per-file setting, the fixed batch count, and bounded multipart overhead; it
+adds no second user-visible size setting. Offline standalone bundles build the
+transport envelope against the allowed protocol maximum so a target-machine runtime
+`.env` remains free to select any valid `SOURCE_UPLOAD_MAX_MB`.
 
 **Retrieval:**
 
