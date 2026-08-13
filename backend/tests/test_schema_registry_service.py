@@ -76,6 +76,53 @@ def test_runtime_owns_schema_registry_service(repo):
     assert service.settings is repo.settings
 
 
+def test_v47_migration_relocates_legacy_notebook_schema(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="legacy schema"))
+    now = _now()
+    with repo._write() as db:
+        db.execute("DROP TABLE notebook_object_schemas")
+        db.execute(
+            "INSERT INTO object_schemas "
+            "(object_type,notebook_id,plural,fields,primary_field,label,source,"
+            "status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy_recipe", notebook.id, "legacy_recipes", '["name"]',
+                "name", "Legacy recipe", "induced", "proposed", now, now,
+            ),
+        )
+        db.execute("PRAGMA user_version = 46")
+
+    reopened = SQLiteRepository(repo.settings)
+    with reopened._connect() as db:
+        relocated = db.execute(
+            "SELECT * FROM notebook_object_schemas "
+            "WHERE notebook_id=? AND object_type='legacy_recipe'",
+            (notebook.id,),
+        ).fetchone()
+        legacy = db.execute(
+            "SELECT 1 FROM object_schemas WHERE object_type='legacy_recipe'"
+        ).fetchone()
+    assert relocated is not None
+    assert relocated["created_by"] == "user-local"
+    assert relocated["status"] == "proposed"
+    assert legacy is None
+
+
+def test_v47_migration_refuses_orphaned_legacy_schema(repo):
+    now = _now()
+    with repo._write() as db:
+        db.execute("DROP TABLE notebook_object_schemas")
+        db.execute(
+            "INSERT INTO object_schemas "
+            "(object_type,notebook_id,created_at,updated_at) VALUES (?,?,?,?)",
+            ("orphan_recipe", "nb-missing", now, now),
+        )
+        db.execute("PRAGMA user_version = 46")
+
+    with pytest.raises(RuntimeError, match="missing notebook"):
+        SQLiteRepository(repo.settings)
+
+
 def test_effective_schemas_overlays_db_rows_on_builtin(repo):
     from app.services.extraction_profiles import OBJECT_SCHEMAS
 
@@ -89,6 +136,127 @@ def test_effective_schemas_overlays_db_rows_on_builtin(repo):
     ))
     registry = repo.effective_schemas()
     assert registry["lab_recipe"].fields == ["name", "steps"]
+
+
+def test_effective_schema_truth_table_global_and_notebook_overrides(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    other = repo.create_notebook(NotebookCreate(name="other"))
+
+    # Code default exists only through the seeded active global row.
+    assert "concept" in repo.effective_schemas(nb.id)
+    repo.update_object_schema("concept", ObjectSchemaUpdate(status="disabled"))
+    assert "concept" not in repo.effective_schemas(nb.id)
+    disabled_view = {
+        item.object_type: item for item in repo.list_notebook_object_schemas(nb.id)
+    }
+    assert disabled_view["concept"].status == "disabled"
+    assert disabled_view["concept"].inherited is True
+    assert disabled_view["concept"].can_edit is False
+
+    local_enabled = repo.update_notebook_object_schema(
+        nb.id,
+        "concept",
+        ObjectSchemaUpdate(status="active"),
+        created_by="user-local",
+    )
+    assert local_enabled.overrides_global is True
+    assert "concept" in repo.effective_schemas(nb.id)
+    assert "concept" not in repo.effective_schemas(other.id)
+    assert repo.delete_notebook_object_schema(nb.id, "concept") == "inherited"
+
+    repo.update_object_schema("concept", ObjectSchemaUpdate(status="active"))
+    local = repo.update_notebook_object_schema(
+        nb.id,
+        "concept",
+        ObjectSchemaUpdate(label="Local concept", status="disabled"),
+        created_by="user-local",
+    )
+    assert local.scope == "notebook"
+    assert local.overrides_global is True
+    assert "concept" not in repo.effective_schemas(nb.id)
+    assert "concept" in repo.effective_schemas(other.id)
+
+    assert repo.delete_notebook_object_schema(nb.id, "concept") == "inherited"
+    assert "concept" in repo.effective_schemas(nb.id)
+
+
+def test_notebook_schema_custom_type_is_isolated_and_delete_guards_objects(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    other = repo.create_notebook(NotebookCreate(name="other"))
+    created = repo.create_notebook_object_schema(
+        nb.id,
+        ObjectSchemaCreate(
+            object_type="lab_recipe", fields=["name", "steps"],
+            primary="name", list_fields=["steps"], label="Notebook recipe",
+        ),
+        created_by="user-local",
+    )
+    assert created.scope == "notebook"
+    assert created.inherited is False
+    assert created.overrides_global is False
+    assert created.can_edit is True
+    assert "lab_recipe" in repo.effective_schemas(nb.id)
+    assert "lab_recipe" not in repo.effective_schemas(other.id)
+
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,source_id,payload,evidence,status,"
+            "owner,last_reviewed,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "ko-schema", nb.id, "lab_recipe", "", '{"name":"x"}',
+                "[]", "approved", "", "", now, now,
+            ),
+        )
+    with pytest.raises(ValueError, match="knowledge objects"):
+        repo.delete_notebook_object_schema(nb.id, "lab_recipe")
+    with repo._write() as db:
+        db.execute("DELETE FROM knowledge_objects WHERE id='ko-schema'")
+    assert repo.delete_notebook_object_schema(nb.id, "lab_recipe") == "deleted"
+
+
+def test_schema_field_order_never_hides_existing_payload_fields():
+    from app.services.ask_service import knowledge_record
+    from app.services.extraction_profiles import ObjectSchema
+
+    schema = ObjectSchema(
+        type="lab_recipe",
+        plural="lab_recipes",
+        fields=["name"],
+        primary="name",
+        description="",
+        list_fields=[],
+    )
+    record = knowledge_record(
+        "lab_recipe",
+        {
+            "id": "ko-existing",
+            "payload": {"name": "etch", "retired_field": "still valuable"},
+            "evidence": [],
+        },
+        schema,
+    )
+
+    assert [field.key for field in record.fields] == ["name", "retired_field"]
+
+
+@pytest.mark.parametrize(
+    "payload,message",
+    [
+        (ObjectSchemaCreate(object_type="Bad-Type", fields=["name"]), "object_type"),
+        (ObjectSchemaCreate(object_type="x", fields=["name", "name"]), "unique"),
+        (ObjectSchemaCreate(object_type="x", fields=["name"], primary="missing"), "primary"),
+        (ObjectSchemaCreate(object_type="x", fields=["name"], list_fields=["missing"]), "list_fields"),
+    ],
+)
+def test_notebook_schema_input_rails(repo, payload, message):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    with pytest.raises(ValueError, match=message):
+        repo.create_notebook_object_schema(
+            nb.id, payload, created_by="user-local"
+        )
 
 
 def test_schema_crud_roundtrip_and_ordering(repo):
@@ -168,6 +336,7 @@ def test_propose_schemas_persists_new_types_and_suppresses_existing(repo, monkey
     assert model.fields == ["name", "owner"]
     assert model.rationale == "seen in doc"
     assert model.notebook_id == nb.id
+    assert model.scope == "notebook"
     # second run: the freshly-proposed type is now "existing" -> suppressed,
     # no duplicate row
     proposals = repo.propose_schemas(nb.id)
@@ -219,3 +388,46 @@ def test_schema_induction_sample_is_bounded_before_prompt_build(repo):
 
     assert len(rendered) <= 8000
     assert len(elements) < 100
+
+
+def test_unconfigured_induction_returns_only_current_notebook_proposals(repo):
+    first = repo.create_notebook(NotebookCreate(name="first"))
+    second = repo.create_notebook(NotebookCreate(name="second"))
+    now = _now()
+    with repo._write() as db:
+        repo._runtime.knowledge.insert_notebook_schema(
+            db,
+            notebook_id=first.id,
+            object_type="first_proposal",
+            plural="first_proposals",
+            fields_json='["name"]',
+            primary="name",
+            description="",
+            label="First",
+            list_fields_json="[]",
+            source="induced",
+            status="proposed",
+            rationale="",
+            created_by="user-local",
+            now=now,
+        )
+        repo._runtime.knowledge.insert_notebook_schema(
+            db,
+            notebook_id=second.id,
+            object_type="second_proposal",
+            plural="second_proposals",
+            fields_json='["name"]',
+            primary="name",
+            description="",
+            label="Second",
+            list_fields_json="[]",
+            source="induced",
+            status="proposed",
+            rationale="",
+            created_by="user-local",
+            now=now,
+        )
+
+    assert [item.object_type for item in repo.propose_schemas(first.id)] == [
+        "first_proposal"
+    ]

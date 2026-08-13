@@ -34,7 +34,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v46 adds the element→chunk reverse index (chunk_elements), its restartable
 # offline backfill ledger (chunk_element_backfills) and the per-notebook
 # chunk_elements_indexed marker that forks the read path.
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2285,6 +2285,68 @@ class SqliteMigrator:
             self.add_column_if_missing(
                 db, "unified_kg_state", "chunk_elements_indexed",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+
+    def _migration_47(self) -> None:
+        """Notebook-owned object-schema overrides and custom definitions.
+
+        ``object_schemas`` remains the administrator-owned global baseline.
+        Older schema-induction rows carried a non-empty ``notebook_id`` in that
+        global table; move those rows into the scoped table so two notebooks may
+        propose the same type independently and no proposal can leak cross-library.
+        """
+        with self._connect() as db:
+            orphan = db.execute(
+                "SELECT os.object_type, os.notebook_id FROM object_schemas os "
+                "LEFT JOIN notebooks n ON n.id=os.notebook_id "
+                "WHERE os.notebook_id<>'' AND n.id IS NULL LIMIT 1"
+            ).fetchone()
+            if orphan is not None:
+                raise RuntimeError(
+                    "cannot migrate notebook-scoped object schema with missing notebook"
+                )
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS notebook_object_schemas (
+                  notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  object_type TEXT NOT NULL,
+                  plural TEXT NOT NULL DEFAULT '',
+                  fields TEXT NOT NULL DEFAULT '[]',
+                  primary_field TEXT NOT NULL DEFAULT '',
+                  description TEXT NOT NULL DEFAULT '',
+                  label TEXT NOT NULL DEFAULT '',
+                  list_fields TEXT NOT NULL DEFAULT '[]',
+                  source TEXT NOT NULL DEFAULT 'custom',
+                  status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active','proposed','disabled')),
+                  rationale TEXT NOT NULL DEFAULT '',
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, object_type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_notebook_object_schemas_status
+                  ON notebook_object_schemas(notebook_id, status, object_type);
+
+                INSERT INTO notebook_object_schemas
+                (notebook_id, object_type, plural, fields, primary_field,
+                 description, label, list_fields, source, status, rationale,
+                 created_by, created_at, updated_at)
+                SELECT os.notebook_id, os.object_type, os.plural, os.fields,
+                       os.primary_field, os.description, os.label, os.list_fields,
+                       os.source, os.status, os.rationale,
+                       COALESCE(n.created_by, ''), os.created_at, os.updated_at
+                FROM object_schemas os
+                JOIN notebooks n ON n.id = os.notebook_id
+                WHERE os.notebook_id <> '';
+
+                DELETE FROM object_schemas
+                WHERE notebook_id <> ''
+                  AND EXISTS (
+                    SELECT 1 FROM notebooks n WHERE n.id=object_schemas.notebook_id
+                  );
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:

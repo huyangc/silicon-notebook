@@ -86,6 +86,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("conversations",),
     ("edge-review-queue",),
     ("relations", None, "review"),
+    ("object-schemas",),
+    ("object-schemas", None),
     ("tier",),
     ("bases",),
     ("mountable",),

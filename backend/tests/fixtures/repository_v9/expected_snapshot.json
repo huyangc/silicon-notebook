@@ -248,6 +248,10 @@
             {
               "key": "section_path",
               "value": "§1 Gain"
+            },
+            {
+              "key": "definition",
+              "value": "Local feedback that stabilizes amplifier gain."
             }
           ],
           "headline": "source degeneration",
@@ -1523,6 +1527,11 @@
         "type": "index"
       },
       {
+        "name": "idx_notebook_object_schemas_status",
+        "sql_sha256": "9710ee05267376c4dab30d4e2e17a7c22d963a425b51d9987009ae195e693af8",
+        "type": "index"
+      },
+      {
         "name": "idx_notebooks_created_by",
         "sql_sha256": "d8bb5f5ab8114a7eec4188731865be5033ae58750235b00760cf7135ab8cb994",
         "type": "index"
@@ -2028,6 +2037,11 @@
         "type": "table"
       },
       {
+        "name": "notebook_object_schemas",
+        "sql_sha256": "24682bb2d9e875de060e989af5e93cb0e1215731046eb4f8f7ccabc7ff98f859",
+        "type": "table"
+      },
+      {
         "name": "notebooks",
         "sql_sha256": "28665711d4b06b89aa1be3f04cbeafe7221b5abc877b0f16ca4fd89a7349ca19",
         "type": "table"
@@ -2123,6 +2137,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 46
+    "user_version": 47
   }
 }

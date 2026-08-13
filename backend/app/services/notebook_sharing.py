@@ -222,6 +222,15 @@ class NotebookCopyService:
                 "source_authors", authors_out, chunk_size=chunk_size
             )
 
+            schema_rows = []
+            for data in snapshot["notebook_object_schemas"]:
+                data["notebook_id"] = new_id
+                data["created_by"] = new_owner_id
+                schema_rows.append(data)
+            self._store.insert_copy_rows(
+                "notebook_object_schemas", schema_rows, chunk_size=chunk_size
+            )
+
             # --- PR-2+3 Task 13: knowhow business tables ------------------
             # Order is FK-safe (each leg's remap map is fully populated
             # before the next leg that depends on it runs): tables (needs

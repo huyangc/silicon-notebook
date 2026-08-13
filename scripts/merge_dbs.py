@@ -20,12 +20,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=46) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=47) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
-# 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
-# 被 IN (secondary_nb) 排除, 但两库若各自建了同名 object_type 的自定义类型会 UNIQUE 冲突
-# -> merge_core 整体中止并删 out_db(fail-loud, 不会静默损坏)。
+# object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
 NOTEBOOK_SCOPED_TABLES = [
     "sources", "source_authors", "source_paper_meta", "chunks", "chunk_embeddings",
     "chunk_questions",
@@ -33,7 +31,7 @@ NOTEBOOK_SCOPED_TABLES = [
     "knowledge_relations", "knowledge_object_sources", "knowledge_source_facts",
     "knowledge_source_fact_elements", "knowledge_source_fact_backfills",
     "source_index_backfills", "chunk_elements", "chunk_element_backfills",
-    "object_schemas",
+    "notebook_object_schemas",
     "concept_clusters", "concept_comentions", "concept_merge_candidates",
     "canonical_relations", "communities", "community_members", "mention_edges",
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
@@ -77,7 +75,7 @@ CHILD_TABLES = [
 # 全局表: 主库优先取并集
 GLOBAL_UNION_TABLES = [
     "users", "user_profiles", "agent_profiles", "agent_access_tokens",
-    "concept_whitelist",
+    "concept_whitelist", "object_schemas",
 ]
 
 # 外部内容 FTS —— 导入后 rebuild

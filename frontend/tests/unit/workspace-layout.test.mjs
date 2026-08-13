@@ -201,18 +201,27 @@ test("background responses require the same workspace and notebook", () => {
 });
 
 
-test("workspace capabilities mirror read-only and admin boundaries", () => {
+test("workspace capabilities separate notebook type ownership from the global baseline", () => {
   assert.deepEqual(workspaceCapabilities("reader", "user"), {
     canWriteNotebook: false,
     canGovernKnowledge: false,
     canManageReports: false,
-    canManageSchemas: false,
+    canManageNotebookSchemas: false,
+    canManageGlobalSchemas: false,
+  });
+  assert.deepEqual(workspaceCapabilities("owner", "user"), {
+    canWriteNotebook: true,
+    canGovernKnowledge: true,
+    canManageReports: true,
+    canManageNotebookSchemas: true,
+    canManageGlobalSchemas: false,
   });
   assert.deepEqual(workspaceCapabilities("owner", "admin"), {
     canWriteNotebook: true,
     canGovernKnowledge: true,
     canManageReports: true,
-    canManageSchemas: true,
+    canManageNotebookSchemas: true,
+    canManageGlobalSchemas: true,
   });
 });
 

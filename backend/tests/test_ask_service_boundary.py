@@ -411,6 +411,79 @@ def test_reasoning_conditional_complete_query_does_not_claim_full_table():
     assert service.knowhow_store.catalog_calls == 1
 
 
+def test_reasoning_renders_federated_hits_with_their_owning_schema(
+    monkeypatch,
+):
+    from app.services.extraction_profiles import ObjectSchema
+    from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
+
+    hits = [
+        RetrievedKnowledge(
+            object_id="ko-active", notebook_id="nb-active",
+            object_type="lab_recipe",
+            payload={"active_field": "a", "base_field": "b"},
+            status="approved", score=1.0, relevance=1.0, evidence=[],
+        ),
+        RetrievedKnowledge(
+            object_id="ko-base", notebook_id="nb-base",
+            object_type="lab_recipe",
+            payload={"active_field": "a", "base_field": "b"},
+            status="approved", score=0.9, relevance=0.9, evidence=[],
+        ),
+    ]
+    monkeypatch.setattr(
+        ReasoningRetriever,
+        "run",
+        lambda self, *args, **kwargs: ReasoningResult(top_hits=hits),
+    )
+
+    calls: list[str] = []
+    registries = {
+        "nb-active": {
+            "lab_recipe": ObjectSchema(
+                type="lab_recipe", plural="lab_recipes",
+                fields=["active_field"], primary="active_field",
+                description="", list_fields=[],
+            )
+        },
+        "nb-base": {
+            "lab_recipe": ObjectSchema(
+                type="lab_recipe", plural="lab_recipes",
+                fields=["base_field"], primary="base_field",
+                description="", list_fields=[],
+            )
+        },
+    }
+
+    class Schemas:
+        def effective_schemas(self, notebook_id):
+            calls.append(notebook_id)
+            return registries[notebook_id]
+
+    service = _minimal_ask_service()
+    service.schemas = Schemas()
+    service._activate_selected_source_graph = (
+        lambda *args, **kwargs: ([], None)
+    )
+    response = service.ask_reasoning(
+        "nb-active",
+        AskRequest(
+            question="How do the active and mounted base lab recipes differ?",
+            mode="reasoning",
+        ),
+        user_id="user",
+    )
+
+    records = {item.id: item for item in response.related_knowledge}
+    assert set(calls) == {"nb-active", "nb-base"}
+    assert [field.key for field in records["ko-active"].fields] == [
+        "active_field", "base_field",
+    ]
+    assert [field.key for field in records["ko-base"].fields] == [
+        "base_field", "active_field",
+    ]
+
+
 def test_stream_route_helper_uses_ask_stream_port_without_runtime():
     from app.api.ask_routes import _stream_ask_events
     from app.services.ask_modes import resolve_mode

@@ -85,6 +85,8 @@ SPECIAL_TABLES = (
     "user_profiles",
     "concept_whitelist",
     "object_schemas",
+    "notebooks",
+    "notebook_object_schemas",
     "merge_review_jobs",
     "ask_jobs",
     "sources",
@@ -1159,6 +1161,7 @@ def _empty_normalized() -> Dict[str, int]:
         "seeded_user_profiles": 0,
         "seeded_concept_whitelist": 0,
         "seeded_object_schemas": 0,
+        "relocated_object_schemas": 0,
         "admin_upgraded": 0,
         "concept_clusters": 0,
         "scrubbed_model_profiles": 0,
@@ -1329,6 +1332,36 @@ def compare_snapshots(
     def note(table: str, reason: str) -> None:
         changed.setdefault(table, []).append(reason)
 
+    relocation_active = pre.user_version < 47 <= post.user_version
+    relocated_keys: set[Tuple[Any, ...]] = set()
+    expected_relocated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    if relocation_active:
+        notebook_owners = {
+            row.get("id"): row.get("created_by") or ""
+            for row in pre.special_rows.get("notebooks", {}).values()
+        }
+        for key, row in pre.special_rows.get("object_schemas", {}).items():
+            notebook_id = row.get("notebook_id") or ""
+            if not notebook_id:
+                continue
+            relocated_keys.add(key)
+            expected_relocated[(notebook_id, row.get("object_type"))] = {
+                "notebook_id": notebook_id,
+                "object_type": row.get("object_type"),
+                "plural": row.get("plural"),
+                "fields": row.get("fields"),
+                "primary_field": row.get("primary_field"),
+                "description": row.get("description"),
+                "label": row.get("label"),
+                "list_fields": row.get("list_fields"),
+                "source": row.get("source"),
+                "status": row.get("status"),
+                "rationale": row.get("rationale"),
+                "created_by": notebook_owners.get(notebook_id, ""),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            }
+
     if post.user_version != SCHEMA_VERSION:
         discrepancies.append(
             f"user_version={post.user_version} expected={SCHEMA_VERSION}"
@@ -1406,7 +1439,12 @@ def compare_snapshots(
                     )
                 continue
             if kind == "table":
-                if post.tables[name].row_count and name not in MEMORY_FTS_SHADOW_TABLES:
+                relocation_table = relocation_active and name == "notebook_object_schemas"
+                if (
+                    post.tables[name].row_count
+                    and name not in MEMORY_FTS_SHADOW_TABLES
+                    and not relocation_table
+                ):
                     note(name, "migration-added-table-not-empty")
                 else:
                     migration_added.append(name)
@@ -1456,9 +1494,15 @@ def compare_snapshots(
             continue
         if name in SPECIAL_TABLES:
             problems: List[str] = []
+            pre_special_rows = pre.special_rows.get(name, {})
+            if relocation_active and name == "object_schemas":
+                pre_special_rows = {
+                    key: row for key, row in pre_special_rows.items()
+                    if key not in relocated_keys
+                }
             _compare_special_rows(
                 name,
-                pre.special_rows.get(name, {}),
+                pre_special_rows,
                 post.special_rows.get(name, {}),
                 normalized,
                 problems,
@@ -1480,6 +1524,13 @@ def compare_snapshots(
             note(name, "row-count-changed")
         elif pre_table.digest != post_table.digest:
             note(name, "row-digest-changed")
+
+    if relocation_active:
+        actual_relocated = post.special_rows.get("notebook_object_schemas", {})
+        if actual_relocated != expected_relocated:
+            note("notebook_object_schemas", "migration-v47-relocation-mismatch")
+        else:
+            normalized["relocated_object_schemas"] = len(expected_relocated)
 
     changed_tables = sorted(changed)
     for table in changed_tables:
@@ -2888,6 +2939,53 @@ MIGRATION_MANIFEST[(45, 46)] = {
     "tables": CHUNK_ELEMENT_TABLES,
     "columns": CHUNK_ELEMENT_COLUMNS,
     "indexes": CHUNK_ELEMENT_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
+# v47: notebook-owned schema overrides/custom definitions. Historical induced
+# rows with a notebook_id are relocated from the global baseline table by the
+# migration; the schema manifest records the new durable surface.
+NOTEBOOK_OBJECT_SCHEMA_TABLES = {
+    "notebook_object_schemas":
+        "CREATE TABLE notebook_object_schemas (\n"
+        "                  notebook_id TEXT NOT NULL\n"
+        "                    REFERENCES notebooks(id) ON DELETE CASCADE,\n"
+        "                  object_type TEXT NOT NULL,\n"
+        "                  plural TEXT NOT NULL DEFAULT '',\n"
+        "                  fields TEXT NOT NULL DEFAULT '[]',\n"
+        "                  primary_field TEXT NOT NULL DEFAULT '',\n"
+        "                  description TEXT NOT NULL DEFAULT '',\n"
+        "                  label TEXT NOT NULL DEFAULT '',\n"
+        "                  list_fields TEXT NOT NULL DEFAULT '[]',\n"
+        "                  source TEXT NOT NULL DEFAULT 'custom',\n"
+        "                  status TEXT NOT NULL DEFAULT 'active'\n"
+        "                    CHECK(status IN ('active','proposed','disabled')),\n"
+        "                  rationale TEXT NOT NULL DEFAULT '',\n"
+        "                  created_by TEXT NOT NULL DEFAULT '',\n"
+        "                  created_at TEXT NOT NULL,\n"
+        "                  updated_at TEXT NOT NULL,\n"
+        "                  PRIMARY KEY (notebook_id, object_type)\n"
+        "                )",
+}
+NOTEBOOK_OBJECT_SCHEMA_INDEXES = {
+    "idx_notebook_object_schemas_status":
+        "CREATE INDEX idx_notebook_object_schemas_status\n"
+        "                  ON notebook_object_schemas(notebook_id, status, object_type)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 47, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **NOTEBOOK_OBJECT_SCHEMA_TABLES},
+        "indexes": {**manifest["indexes"], **NOTEBOOK_OBJECT_SCHEMA_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(46, 47)] = {
+    "tables": NOTEBOOK_OBJECT_SCHEMA_TABLES,
+    "columns": {},
+    "indexes": NOTEBOOK_OBJECT_SCHEMA_INDEXES,
     "triggers": {},
     "views": {},
 }

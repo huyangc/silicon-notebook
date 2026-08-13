@@ -132,7 +132,7 @@ import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getS
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
-import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
+import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "../features/kg-maintenance/kg-api";
 import { prepareKgFocus } from "./kg-focus";
@@ -215,6 +215,7 @@ import {
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
 } from "./report-outline-model";
 import { SourceDetailWindow } from "./source-detail-window";
+import { SchemaManager, type SchemaView } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
@@ -1033,6 +1034,16 @@ export default function Home() {
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [schemas, setSchemas] = useState<ObjectSchema[] | null>(null);
   const [schemaBusy, setSchemaBusy] = useState(false);
+  const [schemaView, setSchemaView] = useState<SchemaView>("notebook");
+  const schemaLoadEpochRef = useRef(0);
+  // 切库时关闭旧库的类型面板，并使所有在飞响应失效，避免把 A 库的有效类型盖到 B 库。
+  useEffect(() => {
+    schemaLoadEpochRef.current += 1;
+    setSchemaModalOpen(false);
+    setSchemas(null);
+    setSchemaBusy(false);
+    setSchemaView("notebook");
+  }, [currentNotebookId]);
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
@@ -4515,32 +4526,56 @@ export default function Home() {
     }));
   }
 
-  async function loadSchemas() {
-    const response = await listObjectSchemas();
-    setSchemas(response);
+  async function loadSchemas(view = schemaView, notebookId = currentNotebookId) {
+    const requestEpoch = ++schemaLoadEpochRef.current;
+    const response = view === "global"
+      ? await listObjectSchemas()
+      : notebookId
+        ? await listNotebookObjectSchemas(notebookId)
+        : [];
+    // 不让切换笔记本/视图前启动的请求覆盖现在正在看的有效类型。
+    if (requestEpoch === schemaLoadEpochRef.current) setSchemas(response);
   }
 
   function openSchemas() {
+    const initialView: SchemaView = "notebook";
+    setSchemaView(initialView);
+    setSchemas(null);
     setSchemaModalOpen(true);
-    loadSchemas().catch(reportError);
+    loadSchemas(initialView).catch(reportError);
+  }
+
+  function switchSchemaView(view: SchemaView) {
+    if (view === "global" && !capabilities.canManageGlobalSchemas) return;
+    setSchemaView(view);
+    setSchemas(null);
+    loadSchemas(view).catch(reportError);
   }
 
   async function patchSchema(objectType: string, patch: Partial<ObjectSchema> & { status?: string }) {
+    const view = schemaView;
+    const notebookId = currentNotebookId;
+    if (view === "notebook" && !notebookId) return;
     setSchemaBusy(true);
     try {
-      await updateObjectSchema(objectType, patch);
-      await loadSchemas();
+      if (view === "global") await updateObjectSchema(objectType, patch);
+      else await updateNotebookObjectSchema(notebookId!, objectType, patch);
+      await loadSchemas(view, notebookId);
       setToast("类型已更新");
     } finally {
       setSchemaBusy(false);
     }
   }
 
-  async function createSchema(payload: { object_type: string; label: string; fields: string[]; description: string }) {
+  async function createSchema(payload: { object_type: string; plural: string; label: string; fields: string[]; primary: string; list_fields: string[]; description: string }) {
+    const view = schemaView;
+    const notebookId = currentNotebookId;
+    if (view === "notebook" && !notebookId) return;
     setSchemaBusy(true);
     try {
-      await createObjectSchema(payload);
-      await loadSchemas();
+      if (view === "global") await createObjectSchema(payload);
+      else await createNotebookObjectSchema(notebookId!, payload);
+      await loadSchemas(view, notebookId);
       setToast("已新增类型");
     } finally {
       setSchemaBusy(false);
@@ -4548,11 +4583,15 @@ export default function Home() {
   }
 
   async function deleteSchema(objectType: string) {
+    const view = schemaView;
+    const notebookId = currentNotebookId;
+    if (view === "notebook" && !notebookId) return;
     setSchemaBusy(true);
     try {
-      await deleteObjectSchema(objectType);
-      await loadSchemas();
-      setToast("类型已删除");
+      if (view === "global") await deleteObjectSchema(objectType);
+      else await deleteNotebookObjectSchema(notebookId!, objectType);
+      await loadSchemas(view, notebookId);
+      setToast(view === "notebook" ? "类型已更新" : "类型已删除");
     } finally {
       setSchemaBusy(false);
     }
@@ -5444,11 +5483,12 @@ export default function Home() {
   }
 
   async function induceSchemas() {
-    if (!currentNotebookId) return;
+    const notebookId = currentNotebookId;
+    if (!notebookId) return;
     setSchemaBusy(true);
     try {
-      const proposals = await proposeObjectSchemas(currentNotebookId);
-      await loadSchemas();
+      const proposals = await proposeObjectSchemas(notebookId);
+      await loadSchemas("notebook", notebookId);
       setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或模型服务暂不可用）");
     } finally {
       setSchemaBusy(false);
@@ -8105,14 +8145,14 @@ export default function Home() {
         </section>
       )}
 
-      {schemaModalOpen && capabilities.canManageSchemas && (
+      {schemaModalOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSchemaModalOpen(false); }}>
           <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>图谱 Schema</h2>
-                <p>管理要从来源中分析出的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
+                <p>查看当前笔记本实际采用的类型。所有者可改写继承类型或新增本库类型；管理员可切换到全局基线。</p>
               </div>
               <button className="icon-button" onClick={() => setSchemaModalOpen(false)} title="Close">×</button>
             </div>
@@ -8120,7 +8160,10 @@ export default function Home() {
               <SchemaManager
                 schemas={schemas}
                 busy={schemaBusy}
-                canInduce={Boolean(currentNotebookId)}
+                view={schemaView}
+                canEdit={schemaView === "global" ? capabilities.canManageGlobalSchemas : capabilities.canManageNotebookSchemas}
+                canManageGlobal={capabilities.canManageGlobalSchemas}
+                onView={switchSchemaView}
                 onPatch={(t, p) => patchSchema(t, p).catch(reportError)}
                 onCreate={(p) => createSchema(p).catch(reportError)}
                 onDelete={(t) => deleteSchema(t).catch(reportError)}
@@ -8186,19 +8229,14 @@ export default function Home() {
               >
                 <BarChart3 size={16} /> 图谱分析
               </button>
-              {/* 「图谱 Schema」= 原顶层导航「内容类型」,已并入本视图(仍 admin 门控):
-                  定义要从来源中分析出的知识对象类型与字段。打开的是既有 SchemaManager
-                  弹窗(utility-modal z:60 > kg-view z:50,正确叠在本视图之上)。 */}
-              {capabilities.canManageSchemas && (
-                <button
-                  type="button"
-                  className="sort-button kg-schema-button"
-                  onClick={openSchemas}
-                  title="定义要从来源中分析出的知识对象类型与字段"
-                >
-                  <Database size={16} /> 图谱 Schema
-                </button>
-              )}
+              <button
+                type="button"
+                className="sort-button kg-schema-button"
+                onClick={openSchemas}
+                title="查看当前笔记本采用的知识对象类型与字段"
+              >
+                <Database size={16} /> 图谱 Schema
+              </button>
               <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
             </div>
           </div>
@@ -9019,166 +9057,6 @@ function genericBody(item: KnowledgeItem) {
 
 function knowledgeBody(_kind: KnowledgeKind, item: KnowledgeItem) {
   return genericBody(item);
-}
-
-function SchemaRow({
-  schema,
-  busy,
-  onPatch,
-  onDelete
-}: {
-  schema: ObjectSchema;
-  busy: boolean;
-  onPatch: (t: string, p: Partial<ObjectSchema> & { status?: string }) => void;
-  onDelete: (t: string) => void;
-}) {
-  const [fieldsText, setFieldsText] = useState(schema.fields.join(", "));
-  const [label, setLabel] = useState(schema.label);
-  const [description, setDescription] = useState(schema.description);
-  const dirty =
-    fieldsText !== schema.fields.join(", ") ||
-    label !== schema.label ||
-    description !== schema.description;
-  const save = () =>
-    onPatch(schema.object_type, {
-      fields: fieldsText.split(",").map((f) => f.trim()).filter(Boolean),
-      label,
-      description
-    });
-  return (
-    <article className={`item schema-card ${schema.status === "disabled" ? "knowledge-deprecated" : ""}`}>
-      <div className="schema-card-head">
-        <strong>{schema.object_type}</strong>
-        <span className="tag">{schema.source}</span>
-        <span className={`tag ${schema.status === "active" ? "severity-low" : ""}`}>{schema.status}</span>
-      </div>
-      <label className="schema-field">
-        <span>显示名</span>
-        <input value={label} disabled={busy} onChange={(e) => setLabel(e.target.value)} />
-      </label>
-      <label className="schema-field">
-        <span>字段（逗号分隔，按顺序）</span>
-        <textarea rows={2} value={fieldsText} disabled={busy} onChange={(e) => setFieldsText(e.target.value)} />
-      </label>
-      <label className="schema-field">
-        <span>说明（用于分析提示）</span>
-        <input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} />
-      </label>
-      <div className="schema-actions">
-        <button className="sort-button" disabled={busy || !dirty} onClick={save}>保存</button>
-        {schema.status === "active" ? (
-          <button className="sort-button" disabled={busy} onClick={() => onPatch(schema.object_type, { status: "disabled" })}>停用</button>
-        ) : (
-          <button className="sort-button" disabled={busy} onClick={() => onPatch(schema.object_type, { status: "active" })}>启用</button>
-        )}
-        {schema.source !== "builtin" && (
-          <button className="sort-button" disabled={busy} onClick={() => onDelete(schema.object_type)}>删除</button>
-        )}
-      </div>
-    </article>
-  );
-}
-
-function NewSchemaForm({
-  busy,
-  onCreate
-}: {
-  busy: boolean;
-  onCreate: (p: { object_type: string; label: string; fields: string[]; description: string }) => void;
-}) {
-  const [objectType, setObjectType] = useState("");
-  const [label, setLabel] = useState("");
-  const [fieldsText, setFieldsText] = useState("");
-  const [description, setDescription] = useState("");
-  const submit = () => {
-    const fields = fieldsText.split(",").map((f) => f.trim()).filter(Boolean);
-    if (!objectType.trim() || fields.length === 0) return;
-    onCreate({ object_type: objectType.trim(), label: label.trim(), fields, description: description.trim() });
-    setObjectType(""); setLabel(""); setFieldsText(""); setDescription("");
-  };
-  return (
-    <article className="item schema-card">
-      <p className="section-title">新增自定义类型</p>
-      <label className="schema-field">
-        <span>类型 id（snake_case）</span>
-        <input value={objectType} disabled={busy} placeholder="例如 process_window" onChange={(e) => setObjectType(e.target.value)} />
-      </label>
-      <label className="schema-field">
-        <span>显示名</span>
-        <input value={label} disabled={busy} onChange={(e) => setLabel(e.target.value)} />
-      </label>
-      <label className="schema-field">
-        <span>字段（逗号分隔）</span>
-        <textarea rows={2} value={fieldsText} disabled={busy} placeholder="title, condition, limit" onChange={(e) => setFieldsText(e.target.value)} />
-      </label>
-      <label className="schema-field">
-        <span>说明</span>
-        <input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} />
-      </label>
-      <div className="schema-actions">
-        <button className="sort-button" disabled={busy} onClick={submit}>新增类型</button>
-      </div>
-    </article>
-  );
-}
-
-function SchemaManager({
-  schemas,
-  busy,
-  canInduce,
-  onPatch,
-  onCreate,
-  onDelete,
-  onInduce
-}: {
-  schemas: ObjectSchema[] | null;
-  busy: boolean;
-  canInduce: boolean;
-  onPatch: (t: string, p: Partial<ObjectSchema> & { status?: string }) => void;
-  onCreate: (p: { object_type: string; label: string; fields: string[]; description: string }) => void;
-  onDelete: (t: string) => void;
-  onInduce: () => void;
-}) {
-  if (schemas === null) return <p className="tool-hint">加载中…</p>;
-  const proposed = schemas.filter((s) => s.status === "proposed");
-  const managed = schemas.filter((s) => s.status !== "proposed");
-  return (
-    <div className="stack">
-      <div className="tag-row">
-        <button className="sort-button" disabled={busy || !canInduce} onClick={onInduce} title={canInduce ? "" : "先选择一个笔记本"}>
-          从当前笔记本归纳候选类型
-        </button>
-        {busy && <span className="tag">处理中…</span>}
-      </div>
-
-      {proposed.length > 0 && (
-        <>
-          <p className="section-title">归纳候选（建议态，待批准）</p>
-          {proposed.map((schema) => (
-            <article className="item" key={schema.object_type}>
-              <div className="tag-row">
-                <strong>{schema.object_type}</strong>
-                <span className="tag">induced</span>
-              </div>
-              {schema.rationale && <p><strong>理由：</strong>{schema.rationale}</p>}
-              <p><strong>字段：</strong>{schema.fields.join(", ")}</p>
-              <div className="tag-row">
-                <button className="sort-button" disabled={busy} onClick={() => onPatch(schema.object_type, { status: "active" })}>批准并启用</button>
-                <button className="sort-button" disabled={busy} onClick={() => onDelete(schema.object_type)}>拒绝</button>
-              </div>
-            </article>
-          ))}
-        </>
-      )}
-
-      <p className="section-title">已有类型（{managed.length}）</p>
-      {managed.map((schema) => (
-        <SchemaRow key={schema.object_type} schema={schema} busy={busy} onPatch={onPatch} onDelete={onDelete} />
-      ))}
-
-      <NewSchemaForm busy={busy} onCreate={onCreate} />
-    </div>
-  );
 }
 
 function KnowledgeBrowser({

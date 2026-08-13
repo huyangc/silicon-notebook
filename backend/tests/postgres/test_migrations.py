@@ -264,7 +264,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 24
+    assert len(PostgresMigrator(postgres_database).migrations) == 25
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -308,7 +308,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 24
+    assert migrator.migrate() == 25
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -328,10 +328,72 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_knowledge_relations_nb_target_id" in final_indexes
     assert "uq_clusters_notebook_type_member" in final_indexes
     assert "idx_source_elements_source_type" in final_indexes
+    assert "idx_notebook_object_schemas_status" in final_indexes
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-        22, 23, 24,
+        22, 23, 24, 25,
     ]
+
+
+def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_database):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=24) == 24
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("nb-schema-v25", "legacy", "2026-01-01", "2026-01-01"),
+        )
+        connection.execute(
+            "INSERT INTO object_schemas "
+            "(object_type,notebook_id,label,status,source,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (
+                "legacy_recipe", "nb-schema-v25", "Legacy recipe", "proposed",
+                "induced", "2026-01-01", "2026-01-01",
+            ),
+        )
+
+    assert migrator.migrate() == 25
+    with postgres_database.connect() as connection:
+        relocated = connection.execute(
+            "SELECT notebook_id,object_type,status,created_by "
+            "FROM notebook_object_schemas WHERE notebook_id=%s",
+            ("nb-schema-v25",),
+        ).fetchone()
+        legacy = connection.execute(
+            "SELECT 1 FROM object_schemas WHERE object_type=%s",
+            ("legacy_recipe",),
+        ).fetchone()
+    assert relocated == {
+        "notebook_id": "nb-schema-v25",
+        "object_type": "legacy_recipe",
+        "status": "proposed",
+        "created_by": "",
+    }
+    assert legacy is None
+
+
+def test_notebook_object_schema_migration_refuses_orphaned_rows(postgres_database):
+    import psycopg
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=24) == 24
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO object_schemas "
+            "(object_type,notebook_id,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("orphan_recipe", "nb-missing", "2026-01-01", "2026-01-01"),
+        )
+
+    with pytest.raises(psycopg.errors.RaiseException, match="missing notebook"):
+        migrator.migrate()
+    assert migrator.current_version() == 24
 
 
 def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_database):
@@ -373,7 +435,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 24
+    assert migrator.migrate() == 25
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

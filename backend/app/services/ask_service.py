@@ -262,10 +262,19 @@ def knowledge_record(object_type: str, obj: dict, schema) -> KnowledgeRecord:
     from app.services.knowledge_governance import knowledge_headline
 
     payload = obj.get("payload") or {}
+    visible_payload_keys = [
+        key for key in payload if not str(key).startswith("_")
+    ]
+    # A definition controls preferred field order; it must not hide persisted
+    # user data when an owner later removes a field from the definition. Keep
+    # any additional payload keys after the configured fields so existing
+    # objects remain completely browsable and can be governed/migrated.
     keys = (
-        schema.fields
+        [*schema.fields, *(
+            key for key in visible_payload_keys if key not in schema.fields
+        )]
         if schema
-        else [k for k in payload if not str(k).startswith("_")]
+        else visible_payload_keys
     )
     fields: List[KnowledgeFieldValue] = []
     for key in keys:
@@ -2471,7 +2480,16 @@ class AskService:
                 reasoning_outline = []
                 reasoning_outline_evidence = []
 
-            registry = self.schemas.effective_schemas()
+            # Federated hits carry their owning notebook. Render each payload
+            # against THAT notebook's schema overlay: the active notebook may
+            # customize the same object_type, but its field order/primary label
+            # must never be projected onto an object from a mounted base.
+            schema_registries = {
+                owner_id: self.schemas.effective_schemas(owner_id)
+                for owner_id in {
+                    item.notebook_id or notebook_id for item in top_hits
+                }
+            }
             seen_ids: set = set()
             related_knowledge: List[KnowledgeRecord] = []
             raise_if_cancelled(cancel_event)
@@ -2485,7 +2503,9 @@ class AskService:
                      "owner": getattr(item, "owner", ""),
                      "last_reviewed": getattr(item, "last_reviewed", ""),
                      "evidence": item.evidence},
-                    registry.get(item.object_type)))
+                    schema_registries[item.notebook_id or notebook_id].get(
+                        item.object_type
+                    )))
             related_knowledge = related_knowledge[
                 : self.settings.ask_related_knowledge_limit
             ]

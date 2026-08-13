@@ -610,6 +610,14 @@ export type ObjectSchema = {
   status: string;
   rationale: string;
   notebook_id: string;
+  /** 当前响应里的生效范围：全局基线或当前笔记本条目。 */
+  scope?: "global" | "notebook";
+  /** 当前笔记本仍直接采用全局基线。 */
+  inherited?: boolean;
+  /** 当前笔记本有同名、覆盖全局基线的版本。 */
+  overrides_global?: boolean;
+  /** 后端按当前用户和视图计算出的写权限。 */
+  can_edit?: boolean;
 };
 
 export type KnowledgeRecord = {
