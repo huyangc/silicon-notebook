@@ -837,14 +837,15 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
         `build` 里。实测报红的是**组合变异** ——「`_drain_column` 返回视图」+「无重复边
         时省掉末尾那次拷贝」,而后者恰恰是一个看起来很自然的优化。这条守卫钉的就是
         那个组合;
-      · 边表对象若被 `rebuild_communities` 另存一份(换个变量名藏起来),refcount
-        会高于基线 —— 按**对象身份**判,不按变量名。
+      · 三列原始数组若被调用栈、容器或对象属性中的任何额外引用留住,弱引用会在真实
+        折叠返回后继续存活,直接抓住没有释放的约 100 MB 底层缓冲。
 
-    refcount 的四份:`rebuild_communities` 的局部名、`_compute_kg_analysis` 的形参、
-    本探针的形参、以及 `getrefcount` 自己的实参。多出来的第五份就是那份不该存在的拷贝。
+    直接检查三列大缓冲的生命周期,而不是断言 ``sys.getrefcount`` 的精确值。CPython
+    3.14 会借用操作数栈上的引用,同一条调用路径的计数从 4 变成 2;官方也只保证 0/1
+    对判断唯一引用有意义。``release()`` 会原位替换 wrapper 的三列,所以 wrapper 自身
+    多一个别名并不妨碍释放;真正的回归是旧数组仍被某处持有。
     """
     notebook_id = _seed(repo)
-    import sys
 
     from app.services import knowledge_lifecycle as lifecycle_module
 
@@ -859,13 +860,23 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
         return graph
 
     def _probe(edge_table, community_of_index):
-        observed.append((
-            len(edge_table),
-            sys.getrefcount(edge_table),
+        edge_count = len(edge_table)
+        column_bases = (
             edge_table.src.base, edge_table.dst.base, edge_table.weight.base,
-            bool(graph_ref) and graph_ref[-1]() is not None,
+        )
+        column_refs = tuple(
+            weakref.ref(column)
+            for column in (edge_table.src, edge_table.dst, edge_table.weight)
+        )
+        graph_alive = bool(graph_ref) and graph_ref[-1]() is not None
+        folded = original(edge_table, community_of_index)
+        observed.append((
+            edge_count,
+            tuple(ref() is not None for ref in column_refs),
+            column_bases,
+            graph_alive,
         ))
-        return original(edge_table, community_of_index)
+        return folded
 
     monkeypatch.setattr(igraph, "Graph", recording_graph)
     monkeypatch.setattr(lifecycle_module, "fold_cross_community_edges", _probe)
@@ -873,18 +884,18 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
 
     assert len(observed) == 1
     assert graph_ref, "仪器没装上:Louvain 那张图一次都没被建"
-    edges, refcount, src_base, dst_base, weight_base, graph_alive = observed[0]
+    edges, columns_alive, column_bases, graph_alive = observed[0]
     assert edges > 0, "夹具必须真的有边,否则这条守卫是空的"
     assert not graph_alive, (
         "折叠时 Louvain 的 igraph 图还活着 —— 那是边表的第二份拷贝(836 万边),"
         "它的 membership/degree 早已被抄进 comms/deg"
     )
-    assert (src_base, dst_base, weight_base) == (None, None, None), (
+    assert column_bases == (None, None, None), (
         "边表的列是视图,底下那块更大的建表缓冲跟着活着"
     )
-    assert refcount == 4, (
-        f"折叠时边表有 {refcount} 份引用(应为 4):"
-        "还有一份拷贝活在栈帧上,释放因此白做"
+    assert columns_alive == (False, False, False), (
+        f"折叠返回后边表三列仍被持有:{columns_alive!r};"
+        "原始大缓冲没有按契约释放"
     )
 
 
