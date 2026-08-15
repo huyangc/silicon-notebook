@@ -238,6 +238,7 @@ Chinese counterparts are linked from the top of each split document.
 - Knowledge extraction and model-backed answers require the relevant workload bindings; offline mode does not synthesize knowledge.
 - Graph Ask remains opt-in/experimental; `chunk` is the default.
 - Generated-question recall is deployment opt-in and defaults off; `shadow` records content-free comparison counts without changing results, while only explicit `on` may supplement a low-recall chunk result with original chunks.
+- In answer, report, and Memory Markdown a single `~` is a literal (ranges and approximations such as `7~5nm` or `~3GHz` render as typed); strikethrough must be written as GFM's `~~text~~`.
 - Memory is manual opt-in and creator-private.
 - Sharing is copy or read-only membership, not live collaborative editing.
 - Web/network source search remains a disabled future affordance.
