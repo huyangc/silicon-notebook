@@ -17,12 +17,12 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
+import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import {
   fetchPublicReport,
@@ -147,7 +147,7 @@ export default function PublicReportPage() {
       <article className="report-markdown answer-markdown">
         <ReactMarkdown
           remarkPlugins={[
-            remarkGfm,
+            remarkGfmPlugin,
             remarkMath,
             [remarkCitations, citationRefs] as [typeof remarkCitations, typeof citationRefs],
           ]}
