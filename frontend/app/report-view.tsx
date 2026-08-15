@@ -15,10 +15,10 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Share2, Sparkles, Square, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
 import { remarkCitations } from "./answer-citations";
 import { computeSourceTierCounts, referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
@@ -384,7 +384,7 @@ export function ReportMarkdown({
     <div className="report-markdown answer-markdown">
       <ReactMarkdown
         remarkPlugins={[
-          remarkGfm,
+          remarkGfmPlugin,
           remarkMath,
           [remarkCitations, refsByKey] as [typeof remarkCitations, Record<string, AnswerReference>],
         ]}

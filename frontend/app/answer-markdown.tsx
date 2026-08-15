@@ -8,7 +8,6 @@
 
 import { MouseEvent } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -20,6 +19,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { remarkCitations } from "./answer-citations";
+import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
 
 // Re-export types for external callers (page.tsx uses these).
@@ -105,7 +105,7 @@ export function AnswerMarkdown({
     <div className="answer-markdown">
       <ReactMarkdown
         remarkPlugins={[
-          remarkGfm,
+          remarkGfmPlugin,
           remarkMath,
           [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
         ]}

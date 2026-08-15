@@ -4,11 +4,11 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
 import { remarkCitations } from "../../app/answer-citations.ts";
+import { remarkGfmPlugin } from "../../app/markdown-gfm.ts";
 import { normalizeMathMarkdown } from "../../app/math-markdown.ts";
 
 // 与 AnswerMarkdown 完全一致的渲染管线（含 [remarkCitations, refsByKey] 元组形态
@@ -20,7 +20,7 @@ function render(answer, refsByKey) {
     React.createElement(
       ReactMarkdown,
       {
-        remarkPlugins: [remarkGfm, remarkMath, [remarkCitations, refsByKey]],
+        remarkPlugins: [remarkGfmPlugin, remarkMath, [remarkCitations, refsByKey]],
         rehypePlugins: [rehypeKatex],
         urlTransform,
       },
