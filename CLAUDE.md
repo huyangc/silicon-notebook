@@ -400,8 +400,10 @@ Claude Code 的通用默认是「评审和验证留在主 agent 循环里，不�
 
 ### 自动触发只有两个点
 
-1. `gh pr create` 成功 → 第 1 轮评审。
-2. `git push` → **仅当该 PR 状态为 `awaiting_fix`（即上一轮判了 P0/P1）时**才重审。这是刻意设计：无关推送不烧额度。
+1. `gh pr create` 成功 → 第 1 轮评审。PR 号**只从该命令的输出里取 PR URL**：命令匹配是文本匹配，一条 `echo "gh pr create …"`（往 PR 正文里写命令示例就会这样）照样命中，要求 URL 才能把误触发挡在发起一次真实评审之前。
+2. `git push` → **仅当该 PR 状态为 `awaiting_fix`（即上一轮判了 P0/P1）时**才重审。这是刻意设计：无关推送不烧额度。这一路按当前分支查 PR 号（推送本身不打印 PR URL），状态闸就是它的兜底。
+
+命令匹配按**基名**而不是整串前缀（`([^[:space:]]*/)?gh`），也不用 settings 的 `if: Bash(gh pr create*)` 规则：`gh` 可能没链进 PATH，实际调用是 `/opt/homebrew/opt/gh/bin/gh pr create …`，前缀规则匹配不到它——那不会报错，只会让评审**静默地永远不跑**。同理，钩子必须 `cd` 到发起该命令的目录（PostToolUse 载荷里的 `cwd`），否则空 diff 硬失败会在每次多 worktree 的会话里误报。
 
 **推论，很容易踩：上一轮是 🟡 或 🟢 之后再 push 修复，不会自动重审。** 这时必须自己补跑并补贴——hook 只代贴它自己跑的那几轮。手动命令与 hook 内部一致：
 
@@ -427,13 +429,14 @@ codex exec review --base <base> --ephemeral \
 | 🔴 P0/P1 | 阻塞 | 状态自动置 `awaiting_fix`；停下来问人。改完 push 会自动触发下一轮 |
 | 🟡 P2/P3 | 非阻塞 | 可以如实说明后不改 |
 | ⚪️ 解析不出标签但正文很长 | 格式可能变了 | 保守拦人，绝不因解析失败默认放行 |
-| 🟢 无输出标签且正文很短 | 通过 | 问人是否合入 |
+| 🟢 无输出标签且正文很短 | 通过 | 等 CI 绿后按下面「合入」处理 |
 
-自动评审上限 5 轮（`CODEX_REVIEW_MAX_ROUNDS`）。人决定放弃修复时，由我显式落状态：
+自动评审上限 5 轮（`CODEX_REVIEW_MAX_ROUNDS`）。人决定放弃修复时，由我显式落状态；🟡/🟢 之后修完再审也由我手动补跑（那种情况 push 不会自动触发，见上）：
 
 ```bash
 ~/.claude/hooks/codex-pr-review.sh set-state <PR号> <waived|awaiting_fix|passed>
 ~/.claude/hooks/codex-pr-review.sh show-state <PR号>
+~/.claude/hooks/codex-pr-review.sh run <PR号> manual
 ```
 
 ### 意见不是照单全收
@@ -446,7 +449,9 @@ codex 的评审对象是 diff，它未必了解本 harness 的运行时事实。
 
 ### 合入
 
-- **必须先拿到用户明确同意**，绝不自作主张合。
+- **默认闭环到合入**：codex 判 🟡/🟢（非阻塞）**且** CI 全绿时直接合，不再逐次问人。**唯一例外**：用户明确说过「等我合入」——说过就绝不自动合，只把 PR 链接和状态交回去。这是 2026-08-15 用户的明确决定，取代了原先「必须先拿到用户明确同意」。
+- **闸只有这两个，缺一不可**：🔴 P0/P1 与 ⚪️（解析不出标签但正文很长）一律**停下来问人**，不自动合；CI 未全绿也不合。判 CI 用 `gh pr checks <PR号>`，只有全部 `pass` 才算绿——`mergeStateStatus: CLEAN` 只说没有冲突/没有必需检查在拦，不等于检查跑绿了。
+- 本地门禁有既有失败时，不拿它当合入依据也不假装没有：在 PR 里写清楚它**改动前就存在**（证据：相关目录零改动，或在 base commit 上跑出逐字相同的失败），CI 才是权威。
 - 本仓库用 **Rebase and merge**：`gh pr merge <PR号> --rebase`（也有 squash 合入的历史，标题带 `(#NNN)` 后缀的即是）。
 - base 不一定是 `master`——stacked PR 的 base 是它的基分支，别硬写 `master`。
 - 判断分支是否已进 `master`，**只认 `gh pr view --json state` 为 `MERGED`**。别用 SHA 祖先判断（rebase 会改 SHA），也别只信 `git cherry`（squash 合并会把提交全报成未合）。
