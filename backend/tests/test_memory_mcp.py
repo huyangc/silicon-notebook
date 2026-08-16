@@ -2898,6 +2898,18 @@ async def test_build_kg_queues_one_job_and_refuses_a_concurrent_second_call(
         assert started["job_id"]
         _assert_budgeted(started)
 
+        # P3-3: the poll chain an Agent actually follows -- build_kg's own
+        # response is a point-in-time echo, get_build_status is the thing
+        # meant to be re-read afterward. `prepare_notebook_kg_job` marks the
+        # in-process `kg_building` flag synchronously (before
+        # background_jobs.submit is even reached), so this is visible without
+        # the stubbed submission ever running.
+        polled = _payload(await client.call("get_build_status", {}))
+        assert polled["kg"]["building"] is True
+        assert polled["kg"]["job"] is not None
+        assert polled["kg"]["job"]["job_id"] == started["job_id"]
+        _assert_budgeted(polled)
+
         busy = await client.call("build_kg", {})
         assert busy.isError
         assert "当前笔记本已有知识图谱分析任务正在运行" in busy.content[0].text
@@ -2914,11 +2926,45 @@ async def test_build_kg_queues_one_job_and_refuses_a_concurrent_second_call(
 
 
 @pytest.mark.anyio
-async def test_build_retrieval_index_validates_when_and_lets_ineligibility_through(
+async def test_build_retrieval_index_validates_when_before_touching_an_eligible_notebook(
     mcp_env
 ):
-    """`when` outside {now, idle} is refused before any repository call. A
-    fresh mcp_env notebook (personal tier, no index, few chunks) is
+    """`when` outside {now, idle} must be refused BEFORE the repository is
+    even called -- proven on a base-tier ELIGIBLE notebook, not the default
+    small one.
+
+    P3-2: on the (ineligible-by-construction) default notebook, this class of
+    guard is indirectly proven at best -- deleting the `when` validation
+    entirely still produces an `isError` response, because the fallen-
+    through call reaches `trigger_scale_index_rebuild` and dies on
+    eligibility instead ("notebook too small..."), which happens to not
+    contain the word "when" either. That coincidence is not what this test
+    is supposed to be pinning. On an ELIGIBLE notebook the two failure modes
+    are observably different: a deleted check lets "soon" fall through the
+    `when == "idle"` branch as an implicit "now" and actually START A BUILD
+    (or return "already_building"), which this asserts did NOT happen, on
+    top of the error text actually saying so."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    _mark_notebook_base_tier(repo, notebook_id)
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        bad_when = await client.call("build_retrieval_index", {"when": "soon"})
+        assert bad_when.isError
+        assert "when" in bad_when.content[0].text.lower()
+
+    # No immediate-build side effect: neither queued nor (would-be
+    # synchronous) building/already_building.
+    assert notebook_id not in repo._runtime.scale_artifacts.idle_queue
+    assert notebook_id not in repo._runtime.scale_artifacts.building
+
+
+@pytest.mark.anyio
+async def test_build_retrieval_index_lets_ineligibility_through(mcp_env):
+    """A fresh mcp_env notebook (personal tier, no index, few chunks) is
     ineligible by construction -- the service layer's own readable message
     ("notebook too small and not base-tier...") comes through unedited,
     exactly like add_source_url lets add_url_sources' rejection wording
@@ -2928,10 +2974,6 @@ async def test_build_retrieval_index_validates_when_and_lets_ineligibility_throu
         mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
     ) as client:
         _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
-        bad_when = await client.call("build_retrieval_index", {"when": "soon"})
-        assert bad_when.isError
-        assert "when" in bad_when.content[0].text.lower()
-
         ineligible = await client.call("build_retrieval_index", {"when": "now"})
         assert ineligible.isError
         assert "too small" in ineligible.content[0].text.lower()
@@ -2941,7 +2983,21 @@ async def test_build_retrieval_index_validates_when_and_lets_ineligibility_throu
 async def test_build_retrieval_index_queues_for_the_low_traffic_window(mcp_env):
     """when='idle' on an eligible (base-tier) notebook queues instead of
     starting immediately -- exercising the one branch of `trigger()` that
-    never spawns real indexing work, so this needs no embedder stub."""
+    never spawns real indexing work, so this needs no embedder stub.
+
+    Also covers the get_build_status read-back an Agent actually polls with
+    (P2-1's mutation-guarded scale_index key-priority fix): queue_position
+    AND total_chunks/unindexed_sources must all be in the SAME response --
+    before the fix, alphabetical field-limit truncation silently dropped the
+    latter two behind higher-priority-but-lower-value keys.
+
+    Cleans up the queue entry afterward (mirrors
+    test_scale_index_repo.py::test_trigger_when_and_mode's own drain): a
+    dangling `idle_queue` entry left on this test's SQLiteRepository instance
+    would be a live target for the runtime idle-queue scheduler thread the
+    'idle' branch starts, which polls for the deployment's offpeak window
+    (02:00-06:00, overlapping check_extended.sh's own 02:17 nightly run) and
+    would build against a tmp DB this test has already torn down."""
     repo = repository()
     notebook_id = mcp_env["notebook"].id
     _mark_notebook_base_tier(repo, notebook_id)
@@ -2958,6 +3014,18 @@ async def test_build_retrieval_index_queues_for_the_low_traffic_window(mcp_env):
             "truncation": queued["truncation"],
         }
         _assert_budgeted(queued)
+
+        status = _payload(await client.call("get_build_status", {}))
+        scale_index = status["scale_index"]
+        assert scale_index["state"] == "queued"
+        assert "queue_position" in scale_index
+        assert "total_chunks" in scale_index
+        assert "unindexed_sources" in scale_index
+        _assert_budgeted(status)
+
+    cancelled = repo.cancel_scale_index(notebook_id)
+    assert cancelled["cancelled"] is True
+    assert notebook_id not in repo._runtime.scale_artifacts.idle_queue
 
 
 @pytest.mark.anyio

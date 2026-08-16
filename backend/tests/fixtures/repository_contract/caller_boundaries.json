@@ -253,6 +253,14 @@
     {
       "count": 1,
       "kind": "independent_private",
+      "path": "backend/app/api/mcp_server.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.create_memory_mcp.build_kg.run",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
       "path": "backend/app/api/report_routes.py",
       "reason": "API readiness checks the process-owned model provider",
       "scope": "<module>._report_llm_ready",
@@ -264,6 +272,14 @@
       "path": "backend/app/api/report_routes.py",
       "reason": "API readiness checks the process-owned model provider",
       "scope": "<module>.generate_report",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/source_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>._backfill_page_rows",
       "target": "_runtime"
     },
     {
@@ -1685,6 +1701,22 @@
       "target": "connection.execute"
     },
     {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/repositories/source_subgraph_projection.py",
+      "reason": "backend-neutral selected-source graph reads bind the caller's own read transaction, outside the sqlite/postgres adapter prefixes this scan already exempts",
+      "scope": "<module>._rows",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/repositories/source_subgraph_projection.py",
+      "reason": "backend-neutral selected-source graph reads bind the caller's own read transaction, outside the sqlite/postgres adapter prefixes this scan already exempts",
+      "scope": "<module>.source_subgraph_signature_on",
+      "target": "connection.execute"
+    },
+    {
       "count": 2,
       "kind": "independent_sql",
       "path": "scripts/audit_kg_edge_contract.py",
@@ -1696,6 +1728,30 @@
       "count": 1,
       "kind": "independent_sql",
       "path": "scripts/audit_kg_edge_contract.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.audit",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/audit_source_facts.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._postgres",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/audit_source_facts.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._sqlite",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/audit_source_facts.py",
       "reason": "read-only host database diagnostic",
       "scope": "<module>.audit",
       "target": "connection.execute"
@@ -2057,6 +2113,22 @@
       "kind": "independent_sql",
       "path": "scripts/merge_dbs.py",
       "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>._assert_global_schema_compatibility",
+      "target": "conn_a.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>._assert_global_schema_compatibility",
+      "target": "conn_b.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
       "scope": "<module>._sole_base_id",
       "target": "conn.execute"
     },
@@ -2300,6 +2372,14 @@
       "path": "scripts/audit_kg_edge_contract.py",
       "reason": "read-only host database diagnostic",
       "scope": "<module>._open_readonly",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/audit_source_facts.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._sqlite",
       "target": "sqlite3.connect"
     },
     {

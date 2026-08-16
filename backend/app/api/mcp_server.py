@@ -252,6 +252,23 @@ def _sanitize_output(
                 "dirty", "last_rebuild_at", "objects", "relations", "clusters",
                 "viz_building",
             ),
+            # get_build_status's scale_index sub-object: the QUEUED shape
+            # alone (state + the base 8 + 5 queue fields + a conditional
+            # last_built_at/last_build_ms pair) plus the shared setdefault
+            # tail (stale/n_nodes/n_chunks/n_ann/n_chunk_ann/has_chunk_ann)
+            # totals 22 keys -- over OUTPUT_MAPPING_LIMIT (20). Alphabetical
+            # fallback ordering silently dropped `total_chunks` and
+            # `unindexed_sources`, the two counters an Agent polling a queued
+            # build actually needs, while marking a 719-byte response
+            # `truncated: true`. Front-load the progress-relevant keys so any
+            # overflow eats the low-value tail (n_* internals, `stale`,
+            # `offpeak_in_window`) instead.
+            "scale_index": (
+                "state", "exists", "building", "queue_position",
+                "queue_length", "queued_at", "offpeak_next_start_at",
+                "total_chunks", "unindexed_sources", "delta_chunks",
+                "last_built_at", "last_build_ms",
+            ),
         }.get(field, ())
         priority_index = {key: index for index, key in enumerate(priorities)}
         entries = sorted(
@@ -697,12 +714,15 @@ def _writable_notebook(
 
     This is not belt-and-braces. ``require_agent_access`` clears on
     ``user_can_read_notebook`` — owner ∪ read-only member — because every tool
-    that existed before this one only read. A token's allowlist can perfectly
-    well name a notebook its owner merely joined as a read-only member, and
-    that user cannot add or delete a source through the browser. Landing an
-    Agent write there would hand the sharing boundary's read side a write it
-    was explicitly denied, through a door the notebook's real owner never
-    opened.
+    that existed before the first caller of this helper only read. A token's
+    allowlist can perfectly well name a notebook its owner merely joined as a
+    read-only member, and that user cannot write to it through the browser
+    (add/delete a source, or start a background knowledge-graph/index build).
+    Landing an Agent write there would hand the sharing boundary's read side a
+    write it was explicitly denied, through a door the notebook's real owner
+    never opened. Shared by both the source-management and the build/
+    maintenance tools below — every write operation on this surface, not just
+    document uploads.
 
     ``user_can_access_notebook`` is the product's one write predicate (its own
     docstring: 「写权:仅 owner(安全边界,勿放宽)」), the same one the HTTP
@@ -711,8 +731,8 @@ def _writable_notebook(
     principal, notebook_id = _selected_notebook(ctx, repo, scope)
     if not repo.user_can_access_notebook(notebook_id, principal.owner_id):
         raise PermissionError(
-            "this notebook is read-only for the token owner; "
-            "writing sources requires owning the notebook"
+            "this write operation requires owning the notebook; the token "
+            "owner only has read access here"
         )
     return principal, notebook_id
 
