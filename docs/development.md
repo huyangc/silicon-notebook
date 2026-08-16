@@ -341,6 +341,18 @@ dispatch only. Both use `ubuntu-24.04`, Python 3.13, Node.js 22, install from
 the declared lock/requirements files, and delegate selection to their matching
 wrapper script. G3 remains `CI / level-3-postgres-integration`.
 
+`CI / level-1-frontend-node26` re-runs the frontend lane and the production build
+on the current Node.js major, on the same triggers as G1. The documented floor is
+"Node.js ≥ 20" while G1 pins 22, so without this lane the upper half of that promise
+is unverified: Node ≥ 24 ships built-in Web Storage globals whose getters return
+`undefined` unless `--localstorage-file` is passed, and vitest's jsdom environment
+lets them shadow jsdom's own — every component test that touches `localStorage`
+fails on a developer's machine while CI stays green.
+`frontend/test-support/setup.ts` restores real jsdom storage, and the matching
+`Storage` class so `vi.spyOn(Storage.prototype, …)` still intercepts, only when the
+built-ins read as `undefined`; Node 22 behavior is byte-identical. The lane also runs
+the build, which is what caught that fix's first attempt importing untyped `jsdom`.
+
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
 exactly. Upgrade either framework only together with an intentional OpenAPI

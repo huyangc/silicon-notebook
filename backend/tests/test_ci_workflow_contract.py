@@ -76,7 +76,11 @@ def test_standard_ci_job_installs_declared_dependencies_and_runs_only_standard_g
     workflow = _load_workflow()
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
-    assert set(jobs) == {"standard-gate", "postgres-integration"}
+    assert set(jobs) == {
+        "standard-gate",
+        "frontend-node-current",
+        "postgres-integration",
+    }
     job = jobs["standard-gate"]
     assert isinstance(job, dict)
 
@@ -129,6 +133,61 @@ def test_standard_ci_job_installs_declared_dependencies_and_runs_only_standard_g
         "PYTHON_BIN": "python",
         "BACKEND_PYTEST_WORKERS": "4",
     }
+
+
+def test_frontend_node_current_job_covers_the_documented_node_ceiling() -> None:
+    """前端泳道必须在 Node.js **当前**大版本上再跑一遍,而不是只跑 G1 钉的 22。
+
+    两份 README 与部署文档承诺「Node.js ≥ 20」,而 `standard-gate` 钉 22 ——
+    没有这条泳道,承诺的上半段就无人验证。真机踩过:Node ≥ 24 自带 Web Storage
+    全局,不给 `--localstorage-file` 时 getter 返回 `undefined`,vitest 的 jsdom
+    环境会让它盖住 jsdom 自己那份,于是每一条读 `localStorage` 的组件测试都在
+    开发者本机红、CI 全绿(修复见 `frontend/test-support/setup.ts`)。
+
+    这条泳道**同时**跑生产构建:那次修复的第一版误引了没有类型声明的 `jsdom`,
+    正是 `next build` 的类型检查当场抓到的。只跑 `npm test` 就漏掉那一类。
+    """
+    workflow = _load_workflow()
+    job = workflow["jobs"]["frontend-node-current"]
+    assert isinstance(job, dict)
+    assert job["name"] == "level-1-frontend-node26"
+    assert job["runs-on"] == "ubuntu-24.04"
+
+    checkout = _uses_step(
+        job,
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    )
+    assert checkout["with"] == {"persist-credentials": "false"}
+
+    node = _uses_step(
+        job,
+        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+    )
+    # 这条泳道的**全部意义**就是这个版本高于 standard-gate 钉的 22:两者相等时
+    # 它只是把同一份验证跑了两遍,那个缺口会重新变成不可见。
+    standard_node = _uses_step(
+        workflow["jobs"]["standard-gate"],
+        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+    )
+    assert int(node["with"]["node-version"]) > int(
+        standard_node["with"]["node-version"]
+    )
+    assert node["with"]["cache"] == "npm"
+    assert node["with"]["cache-dependency-path"] == "frontend/package-lock.json"
+
+    commands = [
+        step["run"]
+        for step in job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+    assert commands == [
+        "npm ci --prefix frontend",
+        "npm test --prefix frontend",
+        "npm run build --prefix frontend",
+    ]
+    # 这条泳道只碰前端:后端门禁归 standard-gate,重复跑既慢又会让「哪条门禁在管
+    # 什么」变糊。
+    assert not any("scripts/check" in command for command in commands)
 
 
 def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() -> None:
