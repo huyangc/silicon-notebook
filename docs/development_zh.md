@@ -105,6 +105,16 @@ G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_bac
 并把测试选择委托给对应 wrapper。G3 保持为
 `CI / level-3-postgres-integration`。
 
+`CI / level-1-frontend-node26` 在 Node.js **当前**大版本上重跑前端泳道与生产构建，
+触发条件与 G1 相同。文档承诺的是「Node.js ≥ 20」而 G1 钉 22，没有这条泳道，承诺的
+上半段就无人验证：Node ≥ 24 自带 Web Storage 全局，不给 `--localstorage-file` 时它们
+的 getter 返回 `undefined`，而 vitest 的 jsdom 环境会让它们盖住 jsdom 自己那份——凡是
+读 `localStorage` 的组件测试都在开发者本机整片红、CI 却全绿。
+`frontend/test-support/setup.ts` 只在内建 storage 取值为 `undefined` 时补回真正的 jsdom
+storage，并连 `Storage` 类一起补（否则 `vi.spyOn(Storage.prototype, …)` 会静默打空），
+Node 22 上行为逐字不变。该泳道同时跑生产构建——那次修复的第一版误引了没有类型声明的
+`jsdom`，正是被构建的类型检查当场抓到的。
+
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
 `2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑 G2 扩展门时，

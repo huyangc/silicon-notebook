@@ -1104,6 +1104,17 @@ Size-independent boundary branches may lower only the test-local threshold while
 - `CI / level-1-standard` runs on pull requests to `master`, pushes to `master`, and
   manual dispatches on `ubuntu-24.04` with Python 3.13, Node.js 22, and four
   backend pytest workers.
+- `CI / level-1-frontend-node26` runs the frontend lane (`npm test`) and the
+  production build on the current Node.js major, on the same triggers. It exists
+  because the documented floor is "Node.js ≥ 20" while `level-1-standard` pins 22:
+  Node ≥ 24 ships built-in Web Storage globals whose getters return `undefined`
+  without `--localstorage-file`, and vitest's jsdom environment lets them shadow
+  jsdom's own — every component test that reads `localStorage` fails on a
+  developer's machine while CI stays green. `frontend/test-support/setup.ts`
+  restores real jsdom storage (and the matching `Storage` class, so
+  `vi.spyOn(Storage.prototype, …)` still intercepts) only when the built-ins are
+  undefined, so Node 22 behavior is byte-identical. The lane also runs the build,
+  which is what caught that fix's first attempt pulling in untyped `jsdom`.
 - `Daily Extended Gate / level-2-extended` has exactly one daily cron
   (`17 18 * * *`) plus manual dispatch. Do not add PR/push triggers to it.
 - `CI / level-3-postgres-integration` remains the separately authoritative
