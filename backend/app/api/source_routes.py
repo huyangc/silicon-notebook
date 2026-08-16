@@ -230,6 +230,19 @@ def _document_capacity(
     return repo.visible_document_count(notebook_id), repo.effective_document_limit(owner_id)
 
 
+def document_capacity_message(current: int, limit: int, adding: int) -> str:
+    """「文档数量上限」超限时给用户看的**唯一**一句话。
+
+    抽出来是因为它现在有两个出处:浏览器路由的 409(下面),和 MCP 的 Agent 建源工具
+    (它抛的是 ValueError,`user_error` 的 HTTP 载体在那条路上没有意义)。同一个条件在
+    两个界面上说两种话——尤其一中一英——用户和 Agent 就会以为遇到了两个不同的限制。
+    纯中文模板,只插三个整数,无内部黑话(界面词只说「文档」)。"""
+    return (
+        f"该笔记本最多可添加 {limit} 篇文档，当前已有 {current} 篇，"
+        f"无法再添加 {adding} 篇。"
+    )
+
+
 def _enforce_document_capacity(notebook_id: str, adding: int) -> None:
     """建源前批量预检(上传/导入:提交的每个文件/条目都会入库,故按总数一次性判)。超限
     整批 409。URL 导入不用它——URL 天然部分成功(空白/不可达/非 PDF 跳过),改由
@@ -242,11 +255,7 @@ def _enforce_document_capacity(notebook_id: str, adding: int) -> None:
         return
     current, limit = cap
     if current + adding > limit:
-        raise user_error(
-            409,
-            f"该笔记本最多可添加 {limit} 篇文档，当前已有 {current} 篇，"
-            f"无法再添加 {adding} 篇。",
-        )
+        raise user_error(409, document_capacity_message(current, limit, adding))
 
 
 def _truthy_form_flag(raw: str) -> bool:

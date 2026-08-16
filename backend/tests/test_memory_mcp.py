@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from app.api.deps import (
 )
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
+from app.api.source_routes import document_capacity_message
 from app.models.schemas import MemoryHit, NotebookCreate
 from tests.model_testkit import bind_chat_client
 
@@ -236,6 +238,7 @@ def mcp_env(tmp_path, monkeypatch):
         "notebook": notebook,
         "other": other,
         "profile_a": profile_a,
+        "profile_b": profile_b,
         "bob_profile": bob_profile,
         "token_a": token_a,
         "token_b": token_b,
@@ -769,6 +772,103 @@ async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
                 "ask_notebook", {"question": "memory scoping", "mode": "chunk"}
             ))
         assert any(c.get("memory_id") == "mem-1" for c in with_scope["citations"])
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitted(
+    mcp_env, monkeypatch
+):
+    """The scope filter must run BEFORE the RESULT_LIMIT slice.
+
+    With more citations than the limit, filtering after the slice leaks the
+    exact number it is hiding through arithmetic: both tokens report the same
+    `omitted_items` (computed from the unfiltered length), so the difference in
+    returned row counts IS the private Memory count. The previous test's
+    payload sits under the limit, where the bug is invisible.
+
+    Here: 25 citations, 4 of them Memory-backed. A token with memory:read must
+    see 20 rows; a token without must ALSO see 20 rows (there are 21 non-Memory
+    citations, enough to fill the page), and the two omitted counts must differ
+    exactly as the two visible populations differ — never in a way that lets
+    the second token solve for 4.
+    """
+    from app.api import mcp_server
+
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+    # Lift the citations sub-budget for this case only. At its real 1,800 chars
+    # a 20-row page does not fit (~150 chars/row even with every field empty),
+    # so the budget's own pre-fit would drop rows and fold ITS omissions into
+    # the same counter — masking the ordering bug this test exists to catch.
+    # The sub-budget has its own coverage in
+    # test_ask_notebook_preserves_answer_text_under_realistic_citation_load.
+    monkeypatch.setattr(mcp_server, "CITATIONS_BUDGET_CHARS", 20_000)
+
+    memory_positions = {2, 7, 13, 22}
+
+    def fake_ask(*_a, **_k):
+        return SimpleNamespace(
+            answer_id="ans-leak", answer="Answer.", conclusion="Answer.",
+            grounded=True, evidence_level="grounded", mode="chunk",
+            conversation_id="conv-leak", anchors=[],
+            citations=[
+                SimpleNamespace(
+                    label=f"C{index}",
+                    source_id="" if index in memory_positions else f"s{index}",
+                    element_id="" if index in memory_positions else f"e{index}",
+                    location_label="1", quoted_span="q", source_file_name="d.md",
+                    tier="personal", notebook_id="",
+                    memory_id=f"mem-{index}" if index in memory_positions else "",
+                    knowhow=None,
+                )
+                for index in range(25)
+            ],
+        )
+
+    monkeypatch.setattr(service, "ask", fake_ask)
+    full_token = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id,
+        ["knowledge:read", "memory:read", "ask:execute"],
+        notebook_id, [notebook_id], None,
+    )
+    ask_only_token = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask:execute"],
+        notebook_id, [notebook_id], None,
+    )
+
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, full_token.token, manage_lifespan=False
+        ) as client:
+            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+            with_scope = _payload(await client.call(
+                "ask_notebook", {"question": "leak probe", "mode": "chunk"}
+            ))
+        async with OfficialMcpClient(
+            app, ask_only_token.token, manage_lifespan=False
+        ) as client:
+            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+            without_scope = _payload(await client.call(
+                "ask_notebook", {"question": "leak probe", "mode": "chunk"}
+            ))
+
+    assert len(with_scope["citations"]) == 20
+    assert len(without_scope["citations"]) == 20, (
+        "过滤发生在切片之前,21 条非 Memory 引用足以填满这一页"
+    )
+    assert not any(c.get("memory_id") for c in without_scope["citations"])
+    # 25 - 20 = 5 with the scope, 21 - 20 = 1 without. The unscoped token sees a
+    # SMALLER omitted count, so subtracting cannot recover 4; the pre-fix code
+    # reported 5 to both, and 20 - 16 = 4 fell straight out.
+    assert with_scope["truncation"]["omitted_items"] == 5
+    assert without_scope["truncation"]["omitted_items"] == 1
+    assert (
+        len(without_scope["citations"])
+        + without_scope["truncation"]["omitted_items"]
+        == 21
+    ), "无 memory:read 的 token 只该看到非 Memory 的那 21 条,总量不得泄露 25"
 
 
 @pytest.mark.anyio
@@ -1934,19 +2034,47 @@ _SOURCE_DELETE = ["knowledge:read", "sources:delete"]
 _SOURCE_FULL = ["knowledge:read", "sources:write", "sources:delete"]
 
 
-def _agent_token(mcp_env, scopes, *, user="alice", notebook_ids=None) -> str:
+def _agent_token(
+    mcp_env, scopes, *, user="alice", notebook_ids=None, profile=None
+) -> str:
     """Issue a raw Agent token for ``user`` with exactly ``scopes``.
 
     The mcp_env fixture's own tokens deliberately carry only the read/propose
     scopes, so every source test mints its own — which is also how each test
-    pins that one scope, and no more, is what opens its tool.
+    pins that one scope, and no more, is what opens its tool. ``profile``
+    selects a specific Agent profile of that user (both of Alice's profiles are
+    needed to pin the cross-profile delete rule).
     """
     notebook_ids = notebook_ids or [mcp_env["notebook"].id]
-    profile = mcp_env["profile_a"] if user == "alice" else mcp_env["bob_profile"]
+    if profile is None:
+        profile = mcp_env["profile_a"] if user == "alice" else mcp_env["bob_profile"]
     return mcp_env["service"].issue_agent_token(
         mcp_env[user].id, profile.id, scopes,
         notebook_ids[0], notebook_ids, None,
     ).token
+
+
+@pytest.fixture
+def reachable_pdf_url(monkeypatch):
+    """Make add_source_url's happy path reachable WITHOUT touching the network.
+
+    Two stubs, both required: the ingestion service refuses outright unless a
+    MinerU parser is configured (the fixture clears every MINERU_* var), and
+    ``probe_pdf`` is what would otherwise issue a real HTTP request. Returns the
+    URL the stubs accept.
+    """
+    from app.services import remote_sources
+
+    repo = repository()
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion, "mineru_cloud_client",
+        lambda: SimpleNamespace(configured=True), raising=False,
+    )
+    monkeypatch.setattr(
+        remote_sources, "probe_pdf",
+        lambda url, **kwargs: remote_sources.PdfProbe(True, "", 4096, "手册.pdf"),
+    )
+    return "https://example.test/handbook.pdf"
 
 
 @pytest.fixture
@@ -2116,8 +2244,61 @@ async def test_add_source_text_rejects_bad_envelopes_before_touching_the_repo(
 
 
 @pytest.mark.anyio
-async def test_add_source_text_honours_the_notebook_document_limit(
+async def test_add_source_text_keeps_the_stored_file_name_within_the_fs_limit(
     mcp_env, scheduled_jobs
+):
+    """A maximum-length CJK title must still produce a WRITABLE file name.
+
+    The budget belongs to the name ingestion actually writes —
+    ``SourceFileStore.write_upload`` stores ``f"{source_id}_{safe_filename}"``,
+    so the ``src-`` + 32-hex id and its separator (37 bytes) come out of the
+    same 255-byte path component. Asserting on the bare stem instead is how a
+    budget that overflows by exactly that prefix passes review.
+
+    ⚠ This cannot fail on a dev Mac even when it is wrong: APFS/HFS+ count 255
+    UTF-16 units, ext4/XFS/NTFS count 255 BYTES, and a 200-character CJK title
+    is 600 bytes. So the assertion is arithmetic on the composed name, not "did
+    the write raise" — the latter is green here and red in Linux production.
+    """
+    from app.api.mcp_server import SOURCE_TITLE_MAX_CHARS
+
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    longest = "笔" * SOURCE_TITLE_MAX_CHARS
+    assert len(longest.encode("utf-8")) == SOURCE_TITLE_MAX_CHARS * 3
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call("add_source_text", {
+            "title": longest, "content_md": "正文",
+        }))
+        # Over-long titles are SHORTENED, never refused: the file write happens
+        # before the row insert, so the alternative is an OSError the caller can
+        # do nothing about, carrying the storage absolute path in its message.
+        assert payload["reused"] is False
+
+    source_id = payload["source_id"]
+    detail = repo.get_source(source_id)
+    stored = pathlib.Path(detail.file_path).name
+    assert len(stored.encode("utf-8")) <= 255, (
+        f"落盘组件 {len(stored.encode('utf-8'))} 字节 > 255,Linux 上会 OSError"
+    )
+    # Pin the composition too, so the check keeps holding for the longest id
+    # this scheme can mint rather than for whichever uuid this run happened to
+    # draw (they are fixed-width today, and this states that dependency).
+    assert stored.startswith(f"{source_id}_") and stored.endswith(".md")
+    widest = f"src-{'0' * 32}_{stored.split('_', 1)[1]}"
+    assert len(widest.encode("utf-8")) <= 255
+    # Truncation is byte-safe: no character was split mid-sequence.
+    assert stored.encode("utf-8").decode("utf-8") == stored
+    assert len(repo.list_sources(notebook_id)) == 1
+
+
+@pytest.mark.anyio
+async def test_add_source_text_honours_the_notebook_document_limit(
+    mcp_env, scheduled_jobs, reachable_pdf_url
 ):
     """The per-notebook document ceiling lives in the ROUTER, not in
     ``upload_sources`` — so an Agent create path that skipped it would simply
@@ -2139,7 +2320,17 @@ async def test_add_source_text_honours_the_notebook_document_limit(
             "title": "第二篇", "content_md": "第二篇正文",
         })
         assert full.isError
-        assert "1" in full.content[0].text
+        # The message is the browser route's, verbatim -- one condition must
+        # not read one way in the web UI and another way to an Agent (and it
+        # must not be English, which the frontend error layer would swallow).
+        assert document_capacity_message(1, 1, 1) in full.content[0].text
+        # add_source_url refuses the same way rather than passing through the
+        # ingestion service's separate over-limit wording.
+        url_full = await client.call(
+            "add_source_url", {"url": reachable_pdf_url}
+        )
+        assert url_full.isError
+        assert document_capacity_message(1, 1, 1) in url_full.content[0].text
 
     assert len(repo.list_sources(notebook_id)) == 1
 
@@ -2188,6 +2379,46 @@ async def test_add_source_url_explains_a_rejected_url_and_a_missing_parser(
 
     assert repo.list_sources(notebook_id) == []
     assert scheduled_jobs == []
+
+
+@pytest.mark.anyio
+async def test_add_source_url_files_an_agent_owned_pdf(
+    mcp_env, scheduled_jobs, reachable_pdf_url
+):
+    """The success path, with the network stubbed out at both gates.
+
+    Exact values for all five projected fields — the refusal cases above only
+    ever exercise the error branch, so without this the shape an Agent actually
+    consumes on success is unasserted.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call(
+            "add_source_url", {"url": reachable_pdf_url}
+        ))
+
+    assert set(payload) == {
+        "source_id", "title", "parse_status", "status", "agent_created",
+        "truncation",
+    }
+    assert payload["title"] == "手册.pdf"
+    assert payload["parse_status"] == "queued"
+    assert payload["status"] == "queued"
+    assert payload["agent_created"] is True
+    _assert_budgeted(payload)
+
+    source_id = payload["source_id"]
+    assert _stored_provenance(repo, source_id) == mcp_env["profile_a"].id
+    detail = repo.get_source(source_id)
+    assert detail.notebook_id == notebook_id
+    assert detail.source_url == reachable_pdf_url
+    # Queued through the ordinary ingestion scheduler, like the browser route.
+    assert [args for _fn, args in scheduled_jobs] == [(source_id,)]
 
 
 @pytest.mark.anyio
@@ -2367,14 +2598,28 @@ async def test_delete_source_removes_an_agent_source_but_never_a_user_one(
 
 
 @pytest.mark.anyio
-async def test_source_scopes_do_not_imply_one_another(mcp_env, scheduled_jobs):
+async def test_source_scopes_do_not_imply_one_another(
+    mcp_env, scheduled_jobs, reachable_pdf_url
+):
     """sources:write and sources:delete are separate capabilities, and
-    knowledge:read alone opens neither. Each session below holds exactly one of
-    them and must be refused everything else."""
+    knowledge:read alone opens neither.
+
+    ⚠ Every refusal below is asserted on an argument that a LATER session —
+    differing only in scope — accepts. That is what makes the assertion about
+    the scope gate: a nonexistent source id or an unreachable URL would be
+    refused by a build with no scope check at all, so such a case proves
+    nothing. Hence the pre-seeded Agent-stamped source and the stubbed
+    reachable URL.
+    """
     repo = repository()
     notebook_id = mcp_env["notebook"].id
     app = mcp_env["app"]
-    agent_source = ""
+    seeded = _seed_cited_source(repo, notebook_id, "scope-probe")["source_id"]
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sources SET agent_profile_id=? WHERE id=?",
+            (mcp_env["profile_a"].id, seeded),
+        )
 
     async with app.router.lifespan_context(app):
         async with OfficialMcpClient(
@@ -2383,17 +2628,23 @@ async def test_source_scopes_do_not_imply_one_another(mcp_env, scheduled_jobs):
             _payload(await reader.call(
                 "select_notebook", {"notebook_id": notebook_id}
             ))
+            # knowledge:read really does open the read tool on this very source,
+            # so the four refusals that follow are not "this session can do
+            # nothing here".
+            assert not (await reader.call(
+                "get_source_status", {"source_id": seeded}
+            )).isError
             assert (await reader.call("add_source_text", {
                 "title": "无权", "content_md": "无权",
             })).isError
-            assert (await reader.call("add_source_url", {
-                "url": "https://example.test/a.pdf",
-            })).isError
             assert (await reader.call(
-                "reparse_source", {"source_id": "src-anything"}
+                "add_source_url", {"url": reachable_pdf_url}
             )).isError
             assert (await reader.call(
-                "delete_source", {"source_id": "src-anything"}
+                "reparse_source", {"source_id": seeded}
+            )).isError
+            assert (await reader.call(
+                "delete_source", {"source_id": seeded}
             )).isError
 
         async with OfficialMcpClient(
@@ -2405,6 +2656,13 @@ async def test_source_scopes_do_not_imply_one_another(mcp_env, scheduled_jobs):
             agent_source = _payload(await writer.call("add_source_text", {
                 "title": "可写", "content_md": "可写的正文",
             }))["source_id"]
+            # The same URL and the same source id the reader was refused.
+            assert not (await writer.call(
+                "add_source_url", {"url": reachable_pdf_url}
+            )).isError
+            assert not (await writer.call(
+                "reparse_source", {"source_id": seeded}
+            )).isError
             assert (await writer.call(
                 "delete_source", {"source_id": agent_source}
             )).isError, "sources:write 不蕴含 sources:delete"
@@ -2419,13 +2677,63 @@ async def test_source_scopes_do_not_imply_one_another(mcp_env, scheduled_jobs):
                 "title": "只许删", "content_md": "只许删",
             })).isError, "sources:delete 不蕴含 sources:write"
             assert (await deleter.call(
-                "reparse_source", {"source_id": agent_source}
+                "reparse_source", {"source_id": seeded}
             )).isError
             assert not (await deleter.call(
                 "delete_source", {"source_id": agent_source}
             )).isError
 
     assert not _source_row_exists(repo, agent_source)
+    assert _source_row_exists(repo, seeded)
+
+
+@pytest.mark.anyio
+async def test_delete_source_accepts_a_row_stamped_by_a_sibling_agent_profile(
+    mcp_env, scheduled_jobs
+):
+    """The decided rule is "SOME Agent added this row", not "this profile did".
+
+    Agent profiles are the owner's own bookkeeping — they get rotated and
+    revoked — so a source left behind by a retired profile must not become
+    permanently undeletable through this surface. Without this case, narrowing
+    the criterion to ``agent_profile_id == principal.profile_id`` would turn no
+    test red.
+
+    The user-added protection is unaffected and is pinned separately by
+    ``test_delete_source_removes_an_agent_source_but_never_a_user_one``.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    app = mcp_env["app"]
+
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app,
+            _agent_token(mcp_env, _SOURCE_WRITE, profile=mcp_env["profile_b"]),
+            manage_lifespan=False,
+        ) as codex:
+            _payload(await codex.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            source_id = _payload(await codex.call("add_source_text", {
+                "title": "Codex 建的", "content_md": "另一个 Agent 的产物。",
+            }))["source_id"]
+        assert _stored_provenance(repo, source_id) == mcp_env["profile_b"].id
+
+        async with OfficialMcpClient(
+            app,
+            _agent_token(mcp_env, _SOURCE_DELETE, profile=mcp_env["profile_a"]),
+            manage_lifespan=False,
+        ) as claude_code:
+            _payload(await claude_code.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            deleted = _payload(await claude_code.call(
+                "delete_source", {"source_id": source_id}
+            ))
+            assert deleted["deleted"] is True
+
+    assert not _source_row_exists(repo, source_id)
 
 
 @pytest.mark.anyio

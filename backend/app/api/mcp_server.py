@@ -33,6 +33,7 @@ from app.api.source_routes import (
     # repository 的参数),不是在这里重写一遍 admin 豁免 + 计数 + 上限三段判据。
     _HIDDEN_SOURCE_TYPES,
     _document_capacity,
+    document_capacity_message,
     source_readable_in_participant_scope,
 )
 # Private on purpose and imported on purpose: `_knowhow_ref` IS the repository's
@@ -99,14 +100,23 @@ OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
 CITATIONS_BUDGET_CHARS = 1_800
 CONVERSATION_ID_MAX_LENGTH = 200  # mirrors AskIntentPreviewRequest.conversation_id
 # add_source_text's title. Deliberately NOT MEMORY_TITLE_MAX_CHARS (80): this
-# names a DOCUMENT, and it also becomes the stored file name, so the ceiling
-# that matters is the filesystem's, applied on encoded bytes below.
+# names a DOCUMENT. The full value is stored in `sources.title`; only the
+# DERIVED file name below is shortened, so nothing the user typed is lost.
 SOURCE_TITLE_MAX_CHARS = 200
-# Leaves room for the ".md" suffix inside the 255-BYTE component limit shared by
-# ext4/APFS/NTFS. Counted in UTF-8 bytes, not characters: a 200-character CJK
-# title is 600 bytes and would fail at write time, after the row's file has
-# already been named.
-SOURCE_FILE_NAME_MAX_BYTES = 240
+# Byte budget for the file-name stem, DERIVED from the name actually written to
+# disk rather than guessed. `SourceFileStore.write_upload` stores
+#     f"{source_id}_{safe_filename(file_name)}"
+# and `source_id` is `_new_id("src")` = "src-" + uuid4().hex, i.e. 4 + 32 = 36
+# ASCII bytes, plus the "_" separator and this module's ".md" suffix:
+#     255 - (4 + 32 + 1) - len(".md") = 215
+# 200 keeps a margin under that. The limit is 255 BYTES per path component on
+# ext4/XFS/NTFS, so the budget is spent in UTF-8 bytes, not characters — a
+# 200-character CJK title is 600 bytes. Getting this wrong is a Linux-only
+# production failure that cannot reproduce on a dev Mac: APFS/HFS+ count 255
+# UTF-16 units instead, so an over-long name writes fine here and raises
+# `OSError: File name too long` there — after the row has been named, with the
+# storage absolute path inside the error text.
+SOURCE_FILE_NAME_MAX_BYTES = 200
 # reparse_source's bounded wait on the per-source parse lock. Effectively a
 # non-blocking probe: that lock is held by process_source from replace_elements
 # through build_chunks, with two LLM calls in between, so a parse that is
@@ -741,9 +751,11 @@ def _reject_when_notebook_is_full(repo: Any, notebook_id: str, adding: int) -> N
     The ceiling lives in the ROUTER, not in ``upload_sources`` — the service
     never counts documents — so an Agent-side create path that does not call
     this simply has no limit. Reuses source_routes' ``_document_capacity``
-    (admin-owned notebooks exempt → None) rather than restating it, and only
-    turns its result into a message; the HTTP twin raises a 409 through
-    ``user_error``, which is a browser carrier and has no meaning here.
+    (admin-owned notebooks exempt → None) for the judgement and
+    ``document_capacity_message`` for the wording, restating neither: only the
+    CARRIER differs, because the HTTP twin's 409-through-``user_error`` is a
+    browser mechanism with no meaning on this surface. One condition, one
+    sentence, in whichever interface the user meets it.
 
     Same non-atomic check-then-insert trade-off as the HTTP side: a concurrent
     submission can slip one document over, and the next call refuses.
@@ -753,19 +765,28 @@ def _reject_when_notebook_is_full(repo: Any, notebook_id: str, adding: int) -> N
         return
     current, limit = capacity
     if current + adding > limit:
-        raise ValueError(
-            f"this notebook already holds {current} of its {limit} allowed "
-            f"documents, so {adding} more cannot be added"
-        )
+        raise ValueError(document_capacity_message(current, limit, adding))
 
 
 def _markdown_source_file_name(title: str) -> str:
     """``title`` → the stored ``<name>.md`` file name.
 
     ``safe_filename`` (the ingestion service applies it too) defuses separator
-    smuggling; the byte budget here is what keeps the write from failing after
-    the row has already been named. Truncation is on ENCODED bytes and never
-    splits a character.
+    smuggling; the byte budget keeps the ``{source_id}_{name}`` component the
+    ingestion service writes inside the filesystem's 255-byte limit (see
+    ``SOURCE_FILE_NAME_MAX_BYTES`` for the derivation). Truncation is on ENCODED
+    bytes and never splits a character.
+
+    Only the DERIVED file name is shortened. The title the caller typed is
+    stored whole in ``sources.title`` (``SOURCE_TITLE_MAX_CHARS`` is the only
+    limit on it, and exceeding that is an explicit refusal, never a silent
+    trim), so this is not user data being quietly truncated.
+
+    Over-long names must be shortened rather than refused because the write
+    happens BEFORE the row is inserted (``upload_sources``:
+    ``write_upload`` → ``insert_source_if_absent``). An ``OSError`` there is a
+    clean failure with no orphan row, but it is still a failure the caller can
+    do nothing about, and its message carries the storage absolute path.
     """
     stem = safe_filename(title)
     encoded = stem.encode("utf-8")
@@ -1155,16 +1176,25 @@ def create_memory_mcp(
                     "row_id": anchor.knowhow.row_id,
                 }
             anchor_rows.append(row)
+        # Scope-filtered rows leave NO trace, exactly as search_notebook_context
+        # drops memory hits: `omitted_items` would otherwise tell a token
+        # without memory:read how many private Memory citations back this answer
+        # -- a number it is not entitled to. Budget truncation is a different
+        # thing and is still reported.
+        #
+        # ⚠ The filter must run BEFORE the [:RESULT_LIMIT] slice, and the
+        # omitted count below must be taken from the FILTERED length. Filtering
+        # inside the loop over an already-sliced list leaks the very number this
+        # is protecting: with 25 citations of which 3 are Memory, a token with
+        # memory:read gets 20 rows + omitted_items=5, and a token without gets
+        # 18 rows + omitted_items=5 -- and 20-18 is the Memory count, recovered
+        # by arithmetic from a response that was supposed to hide it.
+        visible_citations = [
+            citation for citation in answer.citations
+            if allow_memory or not citation.memory_id
+        ]
         citation_rows = []
-        for citation in answer.citations[:RESULT_LIMIT]:
-            # Scope-filtered rows leave NO trace, exactly as
-            # search_notebook_context drops memory hits: counting them into
-            # `omitted_items` would tell a token without memory:read how many
-            # private Memory citations back this answer -- a number it is not
-            # entitled to. Budget truncation is a different thing and is still
-            # reported.
-            if citation.memory_id and not allow_memory:
-                continue
+        for citation in visible_citations[:RESULT_LIMIT]:
             row = {
                 "label": citation.label,
                 "source_id": citation.source_id,
@@ -1205,7 +1235,10 @@ def create_memory_mcp(
             "citations": citation_rows,
         }, initial_omitted_items=(
                 max(0, len(answer.anchors) - RESULT_LIMIT)
-                + max(0, len(answer.citations) - RESULT_LIMIT)
+                # `visible_citations`, not `answer.citations` -- see the note
+                # above the filter: counting the unfiltered list here is exactly
+                # how the hidden Memory count leaks back out.
+                + max(0, len(visible_citations) - RESULT_LIMIT)
             ),
             field_limits={"answer": 6_000, "conclusion": 1_000,
                           "object_type": 100, "label": 300,
@@ -1277,15 +1310,17 @@ def create_memory_mcp(
 
     # --- knowhow-tables PR-2+3 Task 10: agent surface (design doc §⑥) ------
     # Same service core as app.api.knowhow_agent_routes's HTTP endpoints
-    # (app.services.knowhow.api) — imported here (not hoisted to this file's
-    # own top-of-module import block) to avoid shifting this file's own
-    # EXACT-LINE-pinned consumer sites above (user_can_read_notebook:656,
-    # get_notebook:661/698, unified_kg_status:699, agent_memory_hits:743,
-    # search_notebook:813, ask:909 — see
-    # test_repository_surface_manifest.py); every tool below reuses
-    # _selected_notebook exactly like search_notebook_context/ask_notebook,
-    # so no bespoke auth flow is needed here even though this feature's HTTP
-    # side has no notebook_id in its URL at all.
+    # (app.services.knowhow.api), imported function-locally to keep this
+    # feature's dependency inside the feature. Every tool below reuses
+    # _selected_notebook exactly like search_notebook_context/ask_notebook, so
+    # no bespoke auth flow is needed here even though this feature's HTTP side
+    # has no notebook_id in its URL at all.
+    # (The original note here claimed the local import avoided shifting
+    # "exact-line-pinned" consumer sites checked by a
+    # `test_repository_surface_manifest.py`. That was already wrong: no such
+    # test exists, the architecture guards are semantic — {path, scope, kind,
+    # target}, no line numbers — and the source-management block below inserted
+    # ~450 lines above those sites with every guard still green.)
     from app.services.knowhow import api as knowhow_api
     from app.services.knowhow import audit as knowhow_audit
 
@@ -1626,12 +1661,20 @@ def create_memory_mcp(
 
         def run() -> dict[str, Any]:
             with _owner_request_context(principal):
-                # Capacity reaches add_url_sources as a BUDGET, mirroring the
-                # browser's URL route exactly: a URL import is naturally partial
-                # (unreachable / non-PDF entries are skipped), so the ceiling is
-                # charged per successful probe instead of refusing up front.
-                # With one URL the two spellings coincide, but sharing the
-                # route's shape keeps the over-limit REASON identical too.
+                # Refuse a full notebook up front, with the SAME sentence
+                # add_source_text uses -- one condition must not have two
+                # wordings. The browser's URL route cannot do this because a URL
+                # import is naturally partial (unreachable / non-PDF entries are
+                # skipped), so it charges the ceiling per successful probe and
+                # reports over-limit entries in `rejected`; with exactly one URL
+                # the two are equivalent.
+                _reject_when_notebook_is_full(repo, notebook_id, 1)
+                # Still passed as a BUDGET as well, keeping the service-level
+                # accounting identical to the browser route. It stays the
+                # authority if the count moves between the check and the call --
+                # in that race the reason comes from add_url_sources itself,
+                # which is that service's own user-facing wording (the browser
+                # shows it too), not a second spelling of the sentence above.
                 capacity = _document_capacity(notebook_id, repo)
                 budget = None if capacity is None else max(0, capacity[1] - capacity[0])
                 try:
@@ -1829,18 +1872,19 @@ def create_memory_mcp(
     return server, app
 
 
-# knowhow-tables PR-2+3 Task 10: extend the public tool manifest with the
-# four new tools registered above. Appended here — reassigning the module-
-# level name rather than editing the original 7-tuple literal near the top
-# of the file — to avoid shifting THIS FILE's own exact-line-pinned consumer
-# sites (user_can_read_notebook:656, get_notebook:661/698,
-# unified_kg_status:699, agent_memory_hits:743, search_notebook:813, ask:909;
-# see test_repository_surface_manifest.py): inserting anything above line 909
-# would renumber every one of them. PUBLIC_TOOLS is a pure documentation/
-# test-assertion manifest (never consulted by create_memory_mcp itself to
-# drive registration — that happens via the literal @server.tool decorators
-# above), so reassigning it here, after the function that populates the
-# actual server, is equivalent to editing it in place.
+# Extend the public tool manifest with the tools registered above, in
+# registration order. Reassigning the module-level name here — rather than
+# editing the original 7-tuple literal near the top of the file — keeps each
+# feature's manifest entry next to nothing else, so two features landing at
+# once cannot conflict on one literal. PUBLIC_TOOLS is a pure documentation/
+# test-assertion manifest (never consulted by create_memory_mcp itself to drive
+# registration — that happens via the literal @server.tool decorators above),
+# so reassigning it after the function that populates the actual server is
+# equivalent to editing it in place.
+# (An earlier note here justified the append by "exact-line-pinned" consumer
+# sites guarded by a `test_repository_surface_manifest.py`. There is no such
+# test, the architecture guards carry no line numbers, and the source-management
+# block above added ~450 lines under those sites with every guard green.)
 PUBLIC_TOOLS = PUBLIC_TOOLS + (
     "list_knowhow_tables",
     "get_knowhow_discrimination",
