@@ -211,7 +211,7 @@ Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the
 
 See [architecture.md](./architecture.md) for runtime boundaries and [Development and repository contracts](./docs/development.md) for contributor-facing constraints.
 
-Contributor safety: any task that will write repository code, tests, documentation, or configuration starts in an isolated linked git worktree and branch; the main checkout remains read-only for that task. Read-only research, status, and review are exempt.
+Contributor safety: any task that will write repository code, tests, documentation, or configuration starts in an isolated linked git worktree and branch; the main checkout remains read-only for that task. Read-only research, status, and review are exempt. Every change lands through a pull request reviewed by codex, with each round's raw output posted verbatim to the PR; a PR may be merged once that review is non-blocking **and** CI is fully green **and** a review for the current head commit is visible on the PR itself — review automation that silently never fired looks exactly like one that passed, so local state is not evidence.
 
 ## Documentation
 

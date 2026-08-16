@@ -206,7 +206,7 @@ preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正�
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 
-贡献者安全约束：凡任务会写入仓库代码、测试、文档或配置，都必须先新建隔离的 linked git worktree 和分支；该任务期间主 checkout 只读。纯调研、状态汇报和只读审查除外。
+贡献者安全约束：凡任务会写入仓库代码、测试、文档或配置，都必须先新建隔离的 linked git worktree 和分支；该任务期间主 checkout 只读。纯调研、状态汇报和只读审查除外。所有改动都经 PR 合入，PR 必须经 codex 评审且每一轮原始输出逐字贴回 PR；只有在评审非阻塞、CI 全绿、且 PR 上能看到针对**当前 head 提交**的评审这三条同时成立时才可合入——评审静默没触发，和它跑完判了通过，在外部看起来一模一样，所以本地状态不算证据。
 
 ## 文档导航
 
