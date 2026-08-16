@@ -196,6 +196,16 @@ class NotebookCopyService:
                 # partial unique index idx_sources_memory_id (which the
                 # source row's own unchanged memory_id still occupies).
                 data["memory_id"] = ""
+                # v48 provenance is likewise not an identity that travels with a
+                # copy: the copy row is created by the USER's copy action, so it
+                # is user-added by definition. Force NULL — not "" — because the
+                # projection derives ``agent_created`` from IS NOT NULL, and an
+                # empty string would read as "an Agent added this". Clearing it
+                # moves every copied row into the protected class (a source an
+                # Agent may never delete), which is the conservative direction:
+                # carrying the id over would hand an Agent delete rights on rows
+                # in a notebook it never touched.
+                data["agent_profile_id"] = None
                 sources_out.append(data)
             self._store.insert_copy_rows("sources", sources_out, chunk_size=chunk_size)
 

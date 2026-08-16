@@ -6544,6 +6544,14 @@ export default function Home() {
                               {source.kg_extracted ? "已分析" : "待分析"}
                             </span>
                           )}
+                          {source.agent_created && (
+                            <span
+                              className="source-agent-badge"
+                              title="由 Agent 通过接入通道添加的来源"
+                            >
+                              Agent 添加
+                            </span>
+                          )}
                           {source.source_url ? (
                             <a
                               className="source-link-button"

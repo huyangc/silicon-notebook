@@ -353,17 +353,35 @@ class SourceIngestionService:
         return self.import_sources(notebook_id, payload, self.pipeline_hooks())
 
     def add_url_sources_compat(
-        self, notebook_id: str, urls: Iterable[str], scheduler=None, capacity=None
+        self,
+        notebook_id: str,
+        urls: Iterable[str],
+        scheduler=None,
+        capacity=None,
+        agent_profile_id: str = "",
     ) -> AddUrlSourcesResult:
         return self.add_url_sources(
-            notebook_id, urls, scheduler, self.pipeline_hooks(), capacity=capacity
+            notebook_id,
+            urls,
+            scheduler,
+            self.pipeline_hooks(),
+            capacity=capacity,
+            agent_profile_id=agent_profile_id,
         )
 
     def upload_sources_compat(
-        self, notebook_id: str, files: Iterable[UploadedSourceFile], scheduler=None
+        self,
+        notebook_id: str,
+        files: Iterable[UploadedSourceFile],
+        scheduler=None,
+        agent_profile_id: str = "",
     ) -> List[UploadedSourceSummary]:
         return self.upload_sources(
-            notebook_id, files, scheduler, self.pipeline_hooks()
+            notebook_id,
+            files,
+            scheduler,
+            self.pipeline_hooks(),
+            agent_profile_id=agent_profile_id,
         )
 
     def process_source_compat(self, source_id: str) -> SourceSummary:
@@ -428,6 +446,13 @@ class SourceIngestionService:
         payload: SourceImportRequest,
         hooks: SourcePipelineHooks,
     ) -> List[SourceSummary]:
+        """登记一批「只有元数据」的来源行（文件本身尚未上传）。
+
+        刻意不接出处参数：这条路径只服务浏览器的元数据导入，落下的行因而一律是
+        用户添加的（`agent_profile_id` 留 NULL）。Agent 侧入口若将来要走这里，
+        必须先补出处穿透——否则 Agent 建出的行会被记成人添加的，既拿不回删除
+        权限，也让「这份来源是谁加的」在同一张表里分叉。
+        """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         source_ids: List[str] = []
         with self.write() as db:
@@ -460,13 +485,17 @@ class SourceIngestionService:
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
         capacity: "int | None" = None,
+        agent_profile_id: str = "",
     ) -> AddUrlSourcesResult:
         """逐 URL 初筛(空白跳过;非 PDF/不可达→rejected,不建来源);通过的建 source_url
         来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。
 
         capacity 是「每笔记本文档数量上限」的剩余额度(None=不限,如 admin 笔记本):容量
         按**成功探测逐条**扣减——探测通过但额度已用尽的 URL 进 rejected(超限原因),不消耗
-        配额。故一个无效链接不会拖累整批,接近上限时仍能建成额度内的有效来源。"""
+        配额。故一个无效链接不会拖累整批,接近上限时仍能建成额度内的有效来源。
+
+        agent_profile_id 非空时把这批来源标成「Agent 添加」(v48 出处列),空串(所有既有
+        调用方的默认值)落 NULL = 人添加的,行为逐位不变。"""
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
         if not (
@@ -506,6 +535,7 @@ class SourceIngestionService:
                 file_hash="",
                 summary="链接已添加，解析排队中。",
                 doc_type="",
+                agent_profile_id=agent_profile_id,
             )
             if scheduler is not None:
                 scheduler(source_id)
@@ -747,6 +777,7 @@ class SourceIngestionService:
         files: Iterable[UploadedSourceFile],
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
+        agent_profile_id: str = "",
     ) -> List[UploadedSourceSummary]:
         """Register uploaded files and kick off processing.
 
@@ -765,6 +796,11 @@ class SourceIngestionService:
         its KG re-extracted), so the returned ``doc_type`` is the value that
         now holds — callers that describe the outcome should read it rather
         than assume "nothing happened".
+
+        ``agent_profile_id`` (non-empty only on the Agent surface) stamps v48
+        provenance on rows this call CREATES. A reused row keeps whatever
+        provenance it already had: an Agent re-uploading bytes a person already
+        added must not turn that person's source into an Agent-deletable one.
         """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         imported: List[UploadedSourceSummary] = []
@@ -811,6 +847,7 @@ class SourceIngestionService:
                 file_size=len(file.content),
                 summary="Uploaded; parsing is queued.",
                 doc_type=self.normalize_doc_type(file.doc_type),
+                agent_profile_id=agent_profile_id,
             )
             if reused_id is not None:
                 # 输给了并发的另一次首传（它先插入并提交）→ 复用那一行，清掉孤儿文件。

@@ -5317,8 +5317,13 @@ button.chat-session-card {
   background: #9a5b00;
 }
 
-/* Per-source KG status badge shown in source-row-actions when kg_ready is true. */
-.source-kg-badge {
+/* Per-source KG status badge shown in source-row-actions when kg_ready is true,
+   and the "Agent 添加" provenance badge shown alongside it (标注该来源由 Agent 经
+   MCP 接入通道添加)——两者是同一套中性 pill,合并成一个选择器组让"同一套样式"
+   由 CSS 自己保证,不必在两处分别维护 8 条逐字相同的声明。这是一条事实说明,不是
+   异常,所以刻意不复用 AnomalyBadge 的红/黄警示色。 */
+.source-kg-badge,
+.source-agent-badge {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 999px;
@@ -5326,6 +5331,12 @@ button.chat-session-card {
   color: var(--muted);
   background: var(--soft);
   white-space: nowrap;
+}
+
+/* source-kg-badge 独有:下方没有需要接管点击的控件,历史行为不变。
+   source-agent-badge 刻意不继承这条——它的 title(「由 Agent 通过接入通道添加的
+   来源」)需要真正可悬停,pointer-events:none 会让浏览器直接跳过 title tooltip。 */
+.source-kg-badge {
   pointer-events: none;
 }
 

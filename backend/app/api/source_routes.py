@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List
+from typing import Callable, List, Sequence
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -32,7 +32,7 @@ from app.models.sources import (
     SourceSummary,
     UploadedSourceSummary,
 )
-from app.repositories.ports import UploadedSourceFile
+from app.repositories.ports import SourceRepository, UploadedSourceFile
 from app.services import background_jobs
 from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow.assets import AssetService
@@ -211,11 +211,19 @@ def _validate_source_file(file_name: str, content_size: int | None = None) -> No
             raise _source_upload_too_large(max_bytes)
 
 
-def _document_capacity(notebook_id: str) -> "tuple[int, int] | None":
+def _document_capacity(
+    notebook_id: str, repo: "SourceRepository | None" = None
+) -> "tuple[int, int] | None":
     """(当前可见文档数, owner 有效上限) —— 「每笔记本文档数量上限」的单一计算点,供
     上传/导入的批量预检与 URL 导入的逐条预算共用。owner 为 admin 的笔记本豁免 → None
-    (不限)。分享拷贝、离线批量摄取、Memory 派生源都走各自路径,不经这些 HTTP 端点。"""
-    repo = source_repository()
+    (不限)。分享拷贝、离线批量摄取、Memory 派生源都走各自路径,不经这些 HTTP 端点。
+
+    ``repo`` 是**注入取数口**,给不经 FastAPI 依赖的调用方用:MCP 的 Agent 来源工具
+    拿的是 ``create_memory_mcp`` 注入的 repository,不走 ``source_repository()``
+    (同 ``in_participant_scope`` 的 ``participant_notebook_ids`` 参数,理由逐字相同)。
+    默认 None 保持浏览器侧三个调用点逐字不变。这个参数**不是**允许调用方另写一份上限
+    规则的口子——上限判据只写在这里一次,Agent 侧上传/加链接也必须过这一道。"""
+    repo = repo if repo is not None else source_repository()
     owner_id, owner_role = repo.notebook_owner(notebook_id)
     if owner_role == "admin":
         return None
@@ -614,15 +622,65 @@ def source_elements_page(
 # deny by default:目标资源自己声明它属于哪个 notebook(sources.notebook_id /
 # notebook_assets.notebook_id),不在 participant 集内一律 404(与本仓库「不泄露存在性」
 # 的惯例一致,不区分「不存在」与「无权」)。参与集查询是一次有界的挂载边 join,不随库大小增长。
-def _in_participant_scope(notebook_id: str, owner_notebook_id: str) -> bool:
+#
+# 判据本体(下面两个不带下划线的函数)刻意不依赖 FastAPI,也不自己去取参与集——它们
+# 收一个 `participant_notebook_ids` 可调用对象。理由是这条合同现在有**第二个**消费方:
+# MCP 的 `get_cited_element`(外部 Agent 把 Ask 回执里的 source_id/element_id 解引用回
+# 原文),它没有 Request、没有 HTTPException,拿到的是注入的 repository 而不是 deps 里的
+# 全局 port。让两处各写一遍谓词就是这份红线最典型的失效方式,所以判据只写一次,
+# 「怎么取参与集」和「不满足时抛什么」留给各自的调用方。
+# ⚠ 取参与集的入口仍然只有 `participant_notebook_ids`(唯一定义点 mount_sql.py);
+# 这个参数是**注入取数口**,不是允许调用方另写一份挂载谓词的口子。
+def in_participant_scope(
+    notebook_id: str,
+    owner_notebook_id: str,
+    participant_notebook_ids: Callable[[str], Sequence[str]],
+) -> bool:
     """``owner_notebook_id`` 是否在 ``notebook_id`` 的有效参与集内。
 
     同库先短路:participant 集首项恒为 active 自身,所以「资源就属于当前库」这个
     绝对主流的路径(本库来源、本库图片,一张图一次请求)一次挂载边 join 都不用付。
     """
     return owner_notebook_id == notebook_id or owner_notebook_id in (
-        notebook_store_port().participant_notebook_ids(notebook_id)
+        participant_notebook_ids(notebook_id)
     )
+
+
+def source_readable_in_participant_scope(
+    notebook_id: str,
+    detail: SourceDetail,
+    participant_notebook_ids: Callable[[str], Sequence[str]],
+) -> bool:
+    """``detail`` 这份来源可否作为 ``notebook_id`` 的参与集资源被代理读取。
+
+    两道判据,顺序固定:先参与集,再跨库隐藏合成源。
+    """
+    if not in_participant_scope(
+        notebook_id, detail.notebook_id, participant_notebook_ids
+    ):
+        return False
+    # ⚠ 跨库时再挡一道隐藏合成源。集合地图/枚举**刻意**把 memory/knowhow 的物理 source
+    # 行算进作用域(`source_change_signal_rows` 的原话:数的是检索能够到的东西,不是来源
+    # 面板显示的东西),所以一个清单条目原则上可以带着这类 source_id 出现在跨库结果里,
+    # 用户一点「查看来源」,`/elements` 就会把整条合成源摊开——包括没被枚举到的部分,而
+    # Memory 是**按创建者私有**的。当前这条路径实际走不通(knowhow 只写 `knowhow_cell`
+    # 元素、不在可枚举白名单里,Memory 投影根本不写 source_elements),但那是别处的事实,
+    # 不该被这里的授权判断依赖 —— deny by default 更便宜也更稳。
+    # 同库刻意不挡:那是既有 `/sources/{id}` owner∪member 路径逐字不变的行为,收紧它属于
+    # 另一件事。图片资产端点同样不挡:knowhow 单元格图片是普通内容资产,本就随挂载库的
+    # 内容参与检索,与「文档视图对合成源没有意义」不是一回事。
+    return not (
+        detail.notebook_id != notebook_id and detail.type in _HIDDEN_SOURCE_TYPES
+    )
+
+
+def _participant_ids(active_notebook_id: str) -> list[str]:
+    """本模块(HTTP 侧)的参与集取数口 —— deps 的全局 port。"""
+    return notebook_store_port().participant_notebook_ids(active_notebook_id)
+
+
+def _in_participant_scope(notebook_id: str, owner_notebook_id: str) -> bool:
+    return in_participant_scope(notebook_id, owner_notebook_id, _participant_ids)
 
 
 def _participant_scoped_source(notebook_id: str, source_id: str) -> SourceDetail:
@@ -635,19 +693,9 @@ def _participant_scoped_source(notebook_id: str, source_id: str) -> SourceDetail
         detail = source_repository().get_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
-    if not _in_participant_scope(notebook_id, detail.notebook_id):
-        raise HTTPException(status_code=404, detail="Source not found")
-    # ⚠ 跨库时再挡一道隐藏合成源。集合地图/枚举**刻意**把 memory/knowhow 的物理 source
-    # 行算进作用域(`source_change_signal_rows` 的原话:数的是检索能够到的东西,不是来源
-    # 面板显示的东西),所以一个清单条目原则上可以带着这类 source_id 出现在跨库结果里,
-    # 用户一点「查看来源」,`/elements` 就会把整条合成源摊开——包括没被枚举到的部分,而
-    # Memory 是**按创建者私有**的。当前这条路径实际走不通(knowhow 只写 `knowhow_cell`
-    # 元素、不在可枚举白名单里,Memory 投影根本不写 source_elements),但那是别处的事实,
-    # 不该被这里的授权判断依赖 —— deny by default 更便宜也更稳。
-    # 同库刻意不挡:那是既有 `/sources/{id}` owner∪member 路径逐字不变的行为,收紧它属于
-    # 另一件事。图片资产端点同样不挡:knowhow 单元格图片是普通内容资产,本就随挂载库的
-    # 内容参与检索,与「文档视图对合成源没有意义」不是一回事。
-    if detail.notebook_id != notebook_id and detail.type in _HIDDEN_SOURCE_TYPES:
+    if not source_readable_in_participant_scope(
+        notebook_id, detail, _participant_ids
+    ):
         raise HTTPException(status_code=404, detail="Source not found")
     return detail
 

@@ -948,6 +948,7 @@ class SourceStore:
         doc_type: str,
         source_url: str = "",
         memory_id: str = "",
+        agent_profile_id: str = "",
         connection: "sqlite3.Connection | None" = None,
     ) -> None:
         """Insert one sources row (created_at/updated_at minted via the ``now``
@@ -958,21 +959,32 @@ class SourceStore:
         ``memory_id`` links a Memory-derived synthetic source (source_type=
         'memory') back to its origin Memory row; the default "" leaves
         ordinary sources out of the partial unique index
-        (idx_sources_memory_id caps this at one derived source per Memory)."""
+        (idx_sources_memory_id caps this at one derived source per Memory).
+
+        ``agent_profile_id`` (v48) records that an Agent — not a person — added
+        this source. The default "" is stored as SQL NULL, not as "": NULL is
+        the value every pre-v48 row already carries and the one the delete
+        permission check reads as "user-added, an Agent may never remove it",
+        so a caller that omits the argument lands on exactly the same row shape
+        as the whole existing corpus."""
         now = self.now()
         statement = (
             """
             INSERT INTO sources
             (id, notebook_id, title, source_type, status, parse_status, file_name,
              file_path, source_url, file_size, file_hash, summary, doc_type,
-             memory_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             memory_id, agent_profile_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         )
         values = (
             source_id, notebook_id, title, source_type, status, parse_status,
             file_name, file_path, source_url, file_size, file_hash, summary,
-            doc_type, memory_id, now, now,
+            # Whitespace-only is the same statement as "": strip before the NULL
+            # fold, or a caller that passes "   " lands a non-NULL row that reads
+            # as "an Agent added this" while naming no agent at all. Both backends
+            # normalize with this exact expression.
+            doc_type, memory_id, (agent_profile_id or "").strip() or None, now, now,
         )
         if connection is not None:
             connection.execute(statement, values)
@@ -1059,11 +1071,17 @@ class SourceStore:
         file_size: int,
         summary: str,
         doc_type: str,
+        agent_profile_id: str = "",
     ) -> Optional[str]:
         """Atomic content-dedup insert: if a same-content VISIBLE source already
         exists in this notebook return its id (the caller reuses it, no row is
         created); otherwise insert the new row (``file_hash=digest``) and return
         None.
+
+        ``agent_profile_id`` is written ONLY on the insert branch. Reusing an
+        existing row must never restamp its provenance: a user-added source
+        that an Agent later re-uploads stays user-added, which is what keeps it
+        undeletable through the Agent surface.
 
         upload_sources' former "``source_id_by_hash`` (read) then
         ``insert_source`` (write)" was two steps: two concurrent FIRST uploads of
@@ -1103,6 +1121,7 @@ class SourceStore:
                 file_hash=digest,
                 summary=summary,
                 doc_type=doc_type,
+                agent_profile_id=agent_profile_id,
                 connection=db,
             )
             return None
@@ -1475,6 +1494,13 @@ class SourceStore:
             created_label=_created_label(row["created_at"]),
             doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
             source_url=row["source_url"] if "source_url" in row.keys() else "",
+            # v48 provenance, derived from "the column is not NULL" — the raw
+            # agent id stays server-side. Guarded like doc_type/source_url
+            # above so a caller-supplied narrow row still projects.
+            agent_created=(
+                row["agent_profile_id"] is not None
+                if "agent_profile_id" in row.keys() else False
+            ),
             extraction_warning=self.extraction_warning(db, row["id"]),
             parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
             kg_extracted=kg_extracted,
@@ -1570,6 +1596,13 @@ class SourceStore:
                 created_label=_created_label(row["created_at"]),
                 doc_type=row["doc_type"] if "doc_type" in row.keys() else "",
                 source_url=row["source_url"] if "source_url" in row.keys() else "",
+                # v48 provenance, derived from "the column is not NULL" — the raw
+                # agent id stays server-side. Guarded like doc_type/source_url
+                # above so a caller-supplied narrow row still projects.
+                agent_created=(
+                    row["agent_profile_id"] is not None
+                    if "agent_profile_id" in row.keys() else False
+                ),
                 extraction_warning=_warning(sid),
                 parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
                 kg_extracted=sid in kg_extracted_ids,

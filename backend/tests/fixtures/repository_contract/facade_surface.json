@@ -2140,12 +2140,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade._participant_notebook_ids",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._pending_merges_batch",
         "target": "_runtime"
       },
@@ -2956,6 +2950,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.create_notebook_object_schema",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.create_object_schema",
         "target": "_runtime"
       },
@@ -3052,6 +3052,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.delete_notebook_object_schema",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.delete_object_schema",
         "target": "_runtime"
       },
@@ -3095,6 +3101,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.effective_schemas",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.evidence_elements",
         "target": "_runtime"
       },
       {
@@ -3460,6 +3472,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.list_notebook_object_schemas",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.list_notebook_templates",
         "target": "_runtime"
       },
@@ -3629,6 +3647,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.parse_source",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.participant_notebook_ids",
         "target": "_runtime"
       },
       {
@@ -4012,7 +4036,19 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.source_metadata",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.source_owner",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.source_parse_busy",
         "target": "_runtime"
       },
       {
@@ -4163,6 +4199,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.update_notebook",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.update_notebook_object_schema",
         "target": "_runtime"
       },
       {
@@ -4452,6 +4494,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_source_url.run",
+        "target": "add_url_sources"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>.add_url_sources",
         "target": "add_url_sources"
@@ -4461,7 +4509,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None, capacity: 'Optional[int]' = None) -> 'AddUrlSourcesResult'"
+    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None, capacity: 'Optional[int]' = None, agent_profile_id: 'str' = '') -> 'AddUrlSourcesResult'"
   },
   "agent_memory_hits": {
     "consumers": [
@@ -5161,6 +5209,12 @@
         "target": "configured"
       },
       {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_question_index",
+        "target": "configured"
+      },
+      {
         "kind": "patch",
         "path": "backend/tests/test_checkup_service.py",
         "scope": "<module>.test_backfill_job_discovers_chunks_once_too",
@@ -5397,6 +5451,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, payload: 'NotebookCreate') -> 'NotebookSummary'"
+  },
+  "create_notebook_object_schema": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowledge_routes.py",
+        "scope": "<module>.create_notebook_object_schema",
+        "target": "create_notebook_object_schema"
+      }
+    ],
+    "kind": "method",
+    "owner": "SchemaRegistryService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', payload: 'ObjectSchemaCreate', *, created_by: 'str') -> 'ObjectSchemaModel'"
   },
   "create_object_schema": {
     "consumers": [
@@ -5671,6 +5740,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
+  "delete_notebook_object_schema": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowledge_routes.py",
+        "scope": "<module>.delete_notebook_object_schema",
+        "target": "delete_notebook_object_schema"
+      }
+    ],
+    "kind": "method",
+    "owner": "SchemaRegistryService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', object_type: 'str') -> 'str'"
+  },
   "delete_object_schema": {
     "consumers": [
       {
@@ -5709,6 +5793,12 @@
   },
   "delete_source": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.delete_source.run",
+        "target": "delete_source"
+      },
       {
         "kind": "attribute",
         "path": "scripts/smoke_backend.py",
@@ -5750,7 +5840,7 @@
     "owner": "SchemaRegistryService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self) -> 'Dict[str, ObjectSchema]'"
+    "signature": "(self, notebook_id: 'str' = '') -> 'Dict[str, ObjectSchema]'"
   },
   "event_log": {
     "consumers": [
@@ -5766,6 +5856,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "<instance attribute>"
+  },
+  "evidence_elements": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.get_cited_element.load",
+        "target": "evidence_elements"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, element_ids: 'Sequence[str]') -> 'Dict[str, Dict[str, Any]]'"
   },
   "execute_notebook_kg_job": {
     "consumers": [
@@ -6270,6 +6375,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._report_scope_recheck",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.confirm_report_intent",
         "target": "get_notebook"
       },
@@ -6306,6 +6417,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_backfill_chunk_elements",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_backfill_source_facts",
         "target": "get_notebook"
       },
@@ -6319,6 +6436,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_kg._finalize",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_question_index",
         "target": "get_notebook"
       },
       {
@@ -6438,6 +6561,12 @@
   },
   "get_source": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>._own_source",
+        "target": "get_source"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
@@ -6784,6 +6913,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'list[dict]'"
   },
+  "list_notebook_object_schemas": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowledge_routes.py",
+        "scope": "<module>.list_notebook_object_schemas",
+        "target": "list_notebook_object_schemas"
+      }
+    ],
+    "kind": "method",
+    "owner": "SchemaRegistryService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', *, can_edit: 'bool' = False) -> 'List[ObjectSchemaModel]'"
+  },
   "list_notebooks": {
     "consumers": [
       {
@@ -6818,7 +6962,7 @@
     "owner": "SchemaRegistryService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self) -> 'List[ObjectSchemaModel]'"
+    "signature": "(self, *, can_edit: 'bool' = False) -> 'List[ObjectSchemaModel]'"
   },
   "list_promotion_queue": {
     "consumers": [
@@ -6942,6 +7086,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._backfill_chunk_elements_for_notebook",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._backfill_source_facts_for_notebook",
         "target": "maintenance"
       },
@@ -7020,6 +7170,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_backfill_chunk_elements",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_backfill_source_facts",
         "target": "maintenance"
       },
@@ -7045,6 +7201,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_metadata._one",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_question_index",
         "target": "maintenance"
       },
       {
@@ -7587,6 +7749,21 @@
     "scope": "module",
     "signature": "(source_id: 'str', file_path: 'str', file_name: 'str', mineru_client: 'Any' = None, persist_image: 'Any' = None) -> 'List[SourceElement]'"
   },
+  "participant_notebook_ids": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.get_cited_element.load",
+        "target": "participant_notebook_ids"
+      }
+    ],
+    "kind": "method",
+    "owner": "NotebookStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'List[str]'"
+  },
   "pending_actions": {
     "consumers": [
       {
@@ -7697,6 +7874,24 @@
   },
   "process_source": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_source_text.run.<lambda>",
+        "target": "process_source"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_source_url.run.<lambda>",
+        "target": "process_source"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.reparse_source.run",
+        "target": "process_source"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
@@ -8244,6 +8439,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>._selected_notebook",
+        "target": "require_agent_access"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.ask_notebook.check_memory_scope",
         "target": "require_agent_access"
       },
       {
@@ -8960,6 +9161,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_question_index",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_reparse",
         "target": "settings"
       },
@@ -9047,6 +9254,36 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'List[SourceElement]'"
+  },
+  "source_metadata": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.get_cited_element.load",
+        "target": "source_metadata"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, source_ids: 'Sequence[str]') -> 'Dict[str, Dict[str, Any]]'"
+  },
+  "source_parse_busy": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.reparse_source.run",
+        "target": "source_parse_busy"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceIngestionService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, source_id: 'str', *, timeout: 'float' = 0.0) -> 'bool'"
   },
   "sources_missing_paper_meta": {
     "consumers": [
@@ -9426,6 +9663,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'NotebookUpdate') -> 'NotebookSummary'"
   },
+  "update_notebook_object_schema": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowledge_routes.py",
+        "scope": "<module>.update_notebook_object_schema",
+        "target": "update_notebook_object_schema"
+      }
+    ],
+    "kind": "method",
+    "owner": "SchemaRegistryService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', object_type: 'str', payload: 'ObjectSchemaUpdate', *, created_by: 'str') -> 'ObjectSchemaModel'"
+  },
   "update_object_schema": {
     "consumers": [
       {
@@ -9482,6 +9734,12 @@
   },
   "upload_sources": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_source_text.run",
+        "target": "upload_sources"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
@@ -9544,7 +9802,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None) -> 'List[UploadedSourceSummary]'"
+    "signature": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None, agent_profile_id: 'str' = '') -> 'List[UploadedSourceSummary]'"
   },
   "upsert_knowhow_cell_code": {
     "consumers": [
@@ -9560,6 +9818,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, row_id: 'str', column_id: 'str', code_text: 'str', language: 'str', updated_by: 'str', cell_content_hash: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'str'"
+  },
+  "user_can_access_notebook": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>._writable_notebook",
+        "target": "user_can_access_notebook"
+      }
+    ],
+    "kind": "method",
+    "owner": "NotebookSharingService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', user_id: 'str') -> 'bool'"
   },
   "user_can_read_notebook": {
     "consumers": [

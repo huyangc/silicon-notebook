@@ -360,7 +360,7 @@ def content_harness(request) -> ContentHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 25
+    assert PostgresMigrator(database).migrate() == 26
     _seed_catalog(database)
     yield ContentHarness(
         database=database,
@@ -1070,7 +1070,7 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
@@ -1204,7 +1204,7 @@ def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
@@ -1331,7 +1331,7 @@ def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     report = PostgresReportStore(
@@ -1566,7 +1566,7 @@ def test_postgres_code_mutation_wins_against_conditional_transfer_delete(
     """Code is fingerprinted business state and locks the table aggregate."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -1725,7 +1725,7 @@ def test_postgres_memory_search_filters_scope_before_candidate_limit(
     from app.repositories.postgres.migrator import PostgresMigrator
     from psycopg.types.json import Jsonb
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
@@ -1810,7 +1810,7 @@ def test_postgres_memory_search_total_is_exact_beyond_candidate_page(
     from app.repositories.postgres.migrator import PostgresMigrator
     from psycopg.types.json import Jsonb
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
@@ -1952,7 +1952,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2069,7 +2069,7 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2186,7 +2186,7 @@ def test_postgres_delete_route_cleans_source_created_after_initial_snapshot(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
@@ -2301,7 +2301,7 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
     from app.repositories.postgres.source_store import SourceStore
     from app.services.knowhow.projection import KnowhowProjector
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
 
@@ -2419,7 +2419,7 @@ def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
     from app.repositories.postgres.chunk_store import ChunkStore
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     mark = "%s"
     with postgres_database.write() as connection:
@@ -2473,7 +2473,7 @@ def _asset_gc_maintenance(postgres_database, tmp_path):
 def _asset_gc_fixture(postgres_database, tmp_path):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresKnowhowStore(
@@ -2571,7 +2571,7 @@ def test_postgres_source_elements_after_walk_equals_the_whole_source_read(
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.source_store import SourceStore
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     _seed_catalog(postgres_database)
     seams = _seams()
     mark = "%s"

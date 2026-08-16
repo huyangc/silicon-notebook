@@ -43,6 +43,12 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // AST,jsdom 又不实现特异性级联,文本是唯一诚实的输入。同文件对 report-view.tsx 的
   // 断言仍走 semantic-source 的语义解析。
   "tests/guards/answer-heading-scope-guard.test.mjs",
+  // 同上,只读 globals.css:断言 `.source-agent-badge` 与 `.source-kg-badge` 共用同一个
+  // 选择器组(同一套中性 pill),且该声明块内不含 danger/warning 警示 token、也不含
+  // `.source-kg-badge` 独有的 `pointer-events: none`(否则会重新压住徽标的 title 悬浮
+  // 提示)。样式表没有可消费的 AST,文本是唯一诚实的输入;文件里对 page.tsx 门控条件
+  // 与徽标元素的断言仍走 semantic-source 的语义解析,不读裸文本。
+  "tests/guards/source-agent-badge-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

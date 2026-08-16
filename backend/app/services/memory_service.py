@@ -59,6 +59,23 @@ AGENT_SCOPES = frozenset(
         # the pre-existing "knowledge:read" scope; this scope gates ONLY
         # PUT/DELETE .../cells/{col}/code, never a read.
         "knowhow:code",
+        # Per-source content writes: add a source (upload text / add a URL) and
+        # re-parse one. Re-parse belongs here rather than under
+        # "maintenance:execute" because it operates on ONE source's content and
+        # replaces its elements — the same class of act as adding it. Reads of
+        # a source's state stay on "knowledge:read"; this scope gates writes
+        # only. The user-facing label is 「添加/重新解析来源」.
+        "sources:write",
+        # Remove a source. Deliberately separate from "sources:write": the
+        # permission check still additionally requires that the Agent itself
+        # added the row (v48 sources.agent_profile_id), so a person's source is
+        # never removable no matter which scopes a token carries.
+        "sources:delete",
+        # Notebook-level maintenance the UI already exposes: knowledge-graph and
+        # retrieval-index builds. NOT per-source re-parse (that is
+        # "sources:write" above). No new capability, just the Agent-side door to
+        # an existing one.
+        "maintenance:execute",
     }
 )
 _AGENT_TOKEN_RE = re.compile(r"^snm_([^.]+)\.(.+)$")

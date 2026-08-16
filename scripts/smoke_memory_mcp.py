@@ -26,6 +26,12 @@ TOOLS = {
     "get_knowhow_discrimination",
     "get_knowhow_row",
     "put_knowhow_cell_code",
+    "get_cited_element",
+    "add_source_text",
+    "add_source_url",
+    "get_source_status",
+    "reparse_source",
+    "delete_source",
 }
 
 
@@ -184,8 +190,8 @@ async def run() -> None:
                 assert memory_id in {item["memory_id"] for item in recalled["items"]}
 
     print(
-        "memory MCP smoke: OK "
-        "(11 tools, session isolation, candidate plane isolation)"
+        f"memory MCP smoke: OK "
+        f"({len(TOOLS)} tools, session isolation, candidate plane isolation)"
     )
 
 

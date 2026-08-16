@@ -249,6 +249,8 @@ export type SourceSummary = {
   /** MinerU 重试耗尽后由该格式对应的本地解析器完成；原始上游错误不对外暴露。 */
   parse_quality_warning?: boolean;
   kg_extracted?: boolean;
+  /** 该来源是否由 Agent 经 MCP 接入通道添加。可选：旧后端缺字段按 false 处理。 */
+  agent_created?: boolean;
   authors?: string[];
   pub_year?: number | null;
   venue?: string | null;

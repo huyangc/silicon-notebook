@@ -7884,6 +7884,11 @@
         "ScopedSourceDetail": {
           "description": "参与集内**代理读取**的来源详情：`SourceDetail` 去掉两个后端内部字段。\n\n这个模型存在的唯一理由是收窄披露面。代理读取会把挂载参考库的来源交给一个对\n该库既非 owner 也非成员的用户，而 `SourceDetail` 带着两样只对库主有意义、却\n会泄露服务端内部形态的东西：\n\n- `file_path` 是后端存储的**本机绝对路径**，前端一处都没用过；\n- `error_message` 是 `str(exc)` 原样落库的异常串（`services/source_ingestion.py`），\n  同样可能带上绝对路径（`FileNotFoundError: /…/storage/notebooks/…`）。前端从来\n  不直出它，只按「有没有失败」二选一给固定文案——那点信息由 `parse_failed` 如实\n  承载，原文没有任何理由跨出这个库。\n\n刻意做成**去掉字段**而不是运行时置空：schema 层的保证不会因为哪条分支忘了清而\n悄悄退回去。也刻意对同库/跨库**一视同仁**——同库来源另有 `/sources/{id}` 那条\nowner∪member 的完整详情路径，代理端点没必要按调用场景分叉出两种响应形状。",
           "properties": {
+            "agent_created": {
+              "default": false,
+              "title": "Agent Created",
+              "type": "boolean"
+            },
             "authors": {
               "items": {
                 "type": "string"
@@ -8251,6 +8256,11 @@
         },
         "SourceDetail": {
           "properties": {
+            "agent_created": {
+              "default": false,
+              "title": "Agent Created",
+              "type": "boolean"
+            },
             "authors": {
               "items": {
                 "type": "string"
@@ -8693,6 +8703,11 @@
         },
         "SourceSummary": {
           "properties": {
+            "agent_created": {
+              "default": false,
+              "title": "Agent Created",
+              "type": "boolean"
+            },
             "authors": {
               "items": {
                 "type": "string"
@@ -9454,6 +9469,11 @@
         "UploadedSourceSummary": {
           "description": "One row of an upload response: a plain ``SourceSummary`` plus whether it\nis a brand-new source or an existing same-content one that was reused.\n\nPurely additive — every field the pre-dedup upload contract returned is\nstill here, so any client that ignores ``reused`` behaves exactly as\nbefore. Clients that count \"how many sources did this upload add\" MUST\nread it: same-notebook content dedup means an upload can return sources it\ndid not create, and counting those inflates the notebook's source total\nuntil the page is reloaded.",
           "properties": {
+            "agent_created": {
+              "default": false,
+              "title": "Agent Created",
+              "type": "boolean"
+            },
             "authors": {
               "items": {
                 "type": "string"
@@ -20265,6 +20285,7 @@
       }
     },
     "source_detail": {
+      "agent_created": false,
       "authors": [],
       "created_at": "2024-01-02T03:04:05",
       "created_label": "fixture-date",

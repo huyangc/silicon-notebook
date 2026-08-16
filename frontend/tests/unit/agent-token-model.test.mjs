@@ -70,6 +70,9 @@ test("scope options expose all and only the approved capabilities", () => {
     "memory:propose",
     "ask:execute",
     "knowhow:code",
+    "sources:write",
+    "sources:delete",
+    "maintenance:execute",
   ]);
 });
 
