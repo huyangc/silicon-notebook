@@ -890,9 +890,13 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
         "AGENTS.md": (
             "Cell code attachments are stored per cell but never executed, indexed, embedded, "
             "FTS'd, projected into the KG, or included in Ask context",
-            "The only scopes are `knowledge:read`, `memory:read`, `memory:read_candidates`, "
-            "`memory:propose`, `ask:execute`, `knowhow:code`, `sources:write`, "
-            "`sources:delete`, and `maintenance:execute`",
+            # NOTE: the enumerated scope list used to be pinned here as a
+            # literal. It now lives in
+            # `test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface`,
+            # DERIVED from `AGENT_SCOPES` and checked for set equality — which
+            # is strictly stronger and, unlike a literal, cannot itself go
+            # stale. Keeping a second hand-copied spelling here would mean two
+            # places to update and one of them silently authoritative.
             "plus the four knowhow tools `list_knowhow_tables`, `get_knowhow_discrimination`, "
             "`get_knowhow_row`, and `put_knowhow_cell_code`",
         ),
@@ -934,6 +938,43 @@ def _chinese_number(value: int) -> str:
     return head if ones == 0 else head + digits[ones]
 
 
+def _where(name: str) -> str:
+    """Name the files an assertion actually covers.
+
+    `_read` silently expands `README.md` into its whole documentation bundle,
+    so a bare failure reading "README.md is missing X" invites exactly the
+    wrong fix: writing X into the lean root README. That is forbidden by the
+    repository's documentation rules — and it WOULD turn the guard green,
+    which is the worst possible combination. Spell the bundle out instead.
+    """
+    paths = DOCUMENTATION_BUNDLES.get(name, (name,))
+    if paths == (name,):
+        return name
+    return f"the {name} bundle (any of: {', '.join(paths)})"
+
+
+def _markdown_table_rows(text: str, header_prefix: str) -> list[list[str]]:
+    """Return the body cells of the first Markdown table with this header."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith(header_prefix):
+            break
+    else:
+        raise AssertionError(f"no Markdown table headed {header_prefix!r}")
+    rows = []
+    for line in lines[index + 2:]:  # skip the header and its separator row
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            break
+        rows.append([cell.strip() for cell in stripped.strip("|").split("|")])
+    return rows
+
+
+def _scope_names(text: str) -> set[str]:
+    """Every `scope:name`-shaped backticked token in a fragment."""
+    return set(re.findall(r"`([a-z_]+:[a-z_]+)`", text))
+
+
 def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
     """Live docs must list every tool `/mcp` actually publishes.
 
@@ -951,35 +992,84 @@ def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
     to carry a tool list.
     """
     from app.api.mcp_server import PUBLIC_TOOLS
+    from app.services.memory_service import AGENT_SCOPES
 
+    expected_tools = set(PUBLIC_TOOLS)
     count_word = _chinese_number(len(PUBLIC_TOOLS))
     chinese_docs = ("architecture.md", "README_zh.md")
     english_docs = ("AGENTS.md", "README.md")
-    # The scopes that gate the surface. `knowledge:read` covers the reads and
-    # is already pinned by the knowhow contract test above.
-    write_scopes = ("`knowhow:code`", "`sources:write`", "`sources:delete`",
-                    "`maintenance:execute`")
 
+    # Existence check across every doc that claims to describe the surface.
     for name in chinese_docs + english_docs:
         text = _read(name)
-        for tool in PUBLIC_TOOLS:
+        for tool in sorted(expected_tools):
             assert f"`{tool}`" in text, (
-                f"{name} is missing current MCP tool {tool}"
+                f"{_where(name)} is missing current MCP tool `{tool}`"
             )
-        for scope in write_scopes:
-            assert scope in text, (
-                f"{name} must document the {scope} write scope"
+
+    # The full scope VOCABULARY is only owned by the developer contract and
+    # the two per-language product references. `architecture.md` deliberately
+    # discusses the write boundary rather than enumerating auth scopes, so
+    # demanding the whole set there would push reference material into an
+    # architecture document to satisfy a test.
+    for name in ("AGENTS.md", "README.md", "README_zh.md"):
+        text = _read(name)
+        for scope in sorted(AGENT_SCOPES):
+            assert f"`{scope}`" in text, (
+                f"{_where(name)} is missing Agent scope `{scope}`"
             )
+
+    # SET EQUALITY on the authoritative per-language tool table. Existence
+    # alone is one-directional: it cannot see a table that invents a tool the
+    # server does not publish, and it cannot see the table being lifted out of
+    # the product reference into some other file (the bundle would still
+    # contain the names, from the prose around it). The table is the thing an
+    # integrator reads as "the list", so it must equal the manifest exactly.
+    for name, header in (
+        ("docs/product-and-api.md", "| Group | Tools | Scope |"),
+        ("docs/product-and-api_zh.md", "| 分组 | 工具 | Scope |"),
+    ):
+        rows = _markdown_table_rows(_read_file(name), header)
+        documented = {
+            tool
+            for row in rows
+            for tool in re.findall(r"`([a-z_]+)`", row[1])
+        }
+        assert documented == expected_tools, (
+            f"{name}'s MCP tool table does not equal PUBLIC_TOOLS; "
+            f"undocumented={sorted(expected_tools - documented)}, "
+            f"invented={sorted(documented - expected_tools)}"
+        )
 
     for name in chinese_docs:
         compact_text = "".join(_read(name).split())
         assert f"{count_word}个工具" in compact_text, (
-            f"{name} must describe the complete {len(PUBLIC_TOOLS)}-tool MCP surface"
+            f"{_where(name)} must describe the complete "
+            f"{len(PUBLIC_TOOLS)}-tool MCP surface"
         )
     for name in english_docs:
-        assert f"{len(PUBLIC_TOOLS)} tools" in _read(name), (
-            f"{name} must describe the complete {len(PUBLIC_TOOLS)}-tool MCP surface"
+        # Tolerant on purpose: "these 20 tools", "exactly the 20 published
+        # tools" and "the 20 MCP tools" are all correct English for the same
+        # claim, and a bare f"{n} tools" literal would red-flag the prose
+        # rather than the fact.
+        pattern = rf"\b{len(PUBLIC_TOOLS)}\b[\w ]{{0,24}}\btools\b"
+        assert re.search(pattern, _read(name)), (
+            f"{_where(name)} must describe the complete "
+            f"{len(PUBLIC_TOOLS)}-tool MCP surface"
         )
+
+    # The AGENTS.md scope sentence must equal the runtime vocabulary exactly.
+    # Derived from `AGENT_SCOPES`, so adding a tenth scope without touching
+    # the docs fails here rather than silently shipping an undocumented one.
+    sentence = re.search(
+        r"The only scopes are [^.]+\.", _read_file("AGENTS.md")
+    )
+    assert sentence, "AGENTS.md lost its authoritative Agent-scope sentence"
+    assert _scope_names(sentence.group(0)) == set(AGENT_SCOPES), (
+        "AGENTS.md's 'The only scopes are ...' sentence does not equal "
+        f"AGENT_SCOPES; documented={sorted(_scope_names(sentence.group(0)))}, "
+        f"actual={sorted(AGENT_SCOPES)}"
+    )
 
     # `fangan_done.md` / `silicon_notebook_fangan.md` are dated accounting:
     # "十一个工具" is a true statement about what the 2026-07-16 feature
@@ -989,8 +1079,8 @@ def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
     for name in ("fangan_done.md", "silicon_notebook_fangan.md"):
         compact_text = "".join(_read(name).split())
         assert f"后续已扩展至{count_word}个工具" in compact_text, (
-            f"{name} keeps a historical eleven-tool claim without a forward "
-            f"pointer to the current {len(PUBLIC_TOOLS)}-tool surface"
+            f"{_where(name)} keeps a historical eleven-tool claim without a "
+            f"forward pointer to the current {len(PUBLIC_TOOLS)}-tool surface"
         )
 
     stale_claims = (
@@ -1003,6 +1093,44 @@ def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
             assert re.search(pattern, text, flags=re.IGNORECASE) is None, (
                 f"{name} retains obsolete seven-tool MCP wording: {pattern}"
             )
+
+
+def test_agent_onboarding_sop_scope_tables_stay_bilingually_identical():
+    """The two SOPs' scope tables must describe the same scope vocabulary.
+
+    `docs/agent-mcp-memory-sop.md` and `_zh.md` are maintained as a pair, and
+    the one thing a reader acts on directly is the "purpose → required scope"
+    table they use to pick a least-privilege token. Updating one language and
+    forgetting the other is the cheap, likely mistake, and it is invisible to
+    anyone who reads only their own language.
+
+    Comparing the SCOPE SETS (not the prose, and not row-by-row: the two
+    tables legitimately word their purposes differently) is enough to catch
+    it, and anchoring both to `AGENT_SCOPES` additionally makes a newly added
+    scope fail here until BOTH SOPs offer it.
+    """
+    from app.services.memory_service import AGENT_SCOPES
+
+    tables = {}
+    for name, header in (
+        ("docs/agent-mcp-memory-sop.md", "| Purpose | Required scope |"),
+        ("docs/agent-mcp-memory-sop_zh.md", "| 用途 | 必需 scope |"),
+    ):
+        rows = _markdown_table_rows(_read_file(name), header)
+        tables[name] = _scope_names("\n".join("|".join(row) for row in rows))
+
+    (en_name, en_scopes), (zh_name, zh_scopes) = tables.items()
+    assert en_scopes == zh_scopes, (
+        f"{en_name} and {zh_name} scope tables diverged; "
+        f"only in {en_name}: {sorted(en_scopes - zh_scopes)}, "
+        f"only in {zh_name}: {sorted(zh_scopes - en_scopes)}"
+    )
+    for name, scopes in tables.items():
+        assert scopes == set(AGENT_SCOPES), (
+            f"{name}'s scope table does not equal AGENT_SCOPES; "
+            f"missing={sorted(set(AGENT_SCOPES) - scopes)}, "
+            f"unknown={sorted(scopes - set(AGENT_SCOPES))}"
+        )
 
 
 def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferred():

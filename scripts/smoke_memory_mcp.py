@@ -14,30 +14,6 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
-TOOLS = {
-    "list_notebooks",
-    "select_notebook",
-    "search_agent_memory",
-    "search_notebook_context",
-    "get_memory",
-    "ask_notebook",
-    "propose_memory",
-    "list_knowhow_tables",
-    "get_knowhow_discrimination",
-    "get_knowhow_row",
-    "put_knowhow_cell_code",
-    "get_cited_element",
-    "add_source_text",
-    "add_source_url",
-    "get_source_status",
-    "reparse_source",
-    "delete_source",
-    "build_kg",
-    "build_retrieval_index",
-    "get_build_status",
-}
-
-
 def payload(result):
     if result.isError:
         raise AssertionError(result)
@@ -115,11 +91,24 @@ async def run() -> None:
             notebook_catalog_repository,
             repository,
         )
+        from app.api.mcp_server import PUBLIC_TOOLS
         from app.core.config import get_settings
         from app.core.request_context import reset_request_user, set_request_user
         from app.main import create_app
         from app.models.schemas import NotebookCreate
 
+        # DERIVED from the manifest rather than hand-copied here. PUBLIC_TOOLS
+        # is never consulted by `create_memory_mcp` (registration happens
+        # through the literal `@server.tool` decorators), so comparing it with
+        # a live `list_tools()` below still proves the manifest matches the
+        # real surface — while removing a third independently maintained copy
+        # that could quietly agree with a stale peer instead of with reality.
+        #
+        # The import belongs HERE, not at module scope, with the other `app.*`
+        # imports: they are deliberately deferred until after `os.environ` is
+        # populated above, so this smoke binds to its own temporary database
+        # and never reads the developer's env file.
+        tools = set(PUBLIC_TOOLS)
         get_settings.cache_clear()
         repository.cache_clear()
         app = create_app()
@@ -154,7 +143,7 @@ async def run() -> None:
             await wait_for_ready(app)
             async with Client(app, first.token) as creator:
                 listed = await creator.session.list_tools()
-                assert {item.name for item in listed.tools} == TOOLS
+                assert {item.name for item in listed.tools} == tools
                 assert (await creator.call(
                     "search_agent_memory", {"query": "probe"}
                 )).isError
@@ -194,7 +183,7 @@ async def run() -> None:
 
     print(
         f"memory MCP smoke: OK "
-        f"({len(TOOLS)} tools, session isolation, candidate plane isolation)"
+        f"({len(tools)} tools, session isolation, candidate plane isolation)"
     )
 
 

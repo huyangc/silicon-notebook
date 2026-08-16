@@ -70,8 +70,13 @@ curl -s http://127.0.0.1:8000/api/ready
 
 本 SOP 的完整 Memory 示例选择：`knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`。不需要 Ask 或代码写入就不要勾选相应权限。
 
-最后四行只授予确实需要归档文档或跑构建的 Agent。它们是写入平面：`sources:write` 与
-`maintenance:execute` 会改变笔记本的内容和分析开销，`sources:delete` 不可逆。
+上表里真正属于写入平面的只有三个 scope——`sources:write`、`sources:delete` 与
+`maintenance:execute`——不确实需要归档文档或跑构建就不要授予：第一个改变笔记本的内容，
+第三个改变分析开销，`sources:delete` 不可逆。旁边那两项状态读取（`get_source_status`、
+`get_build_status`）只需要 `knowledge:read`。
+
+`list_notebooks` 与 `select_notebook` 不需要任何 scope——判据只有 token 存活、笔记本在白名单内、
+且对它有读权限——因此再小权限的 token 也能正常开始一个 session。
 
 7. 设置短有效期。网页会把浏览器本地时间转换成带时区的 UTC 瞬间；后端拒绝没有时区的时间。
 8. 点击 **签发 Token**，立即复制明文 token。它只显示一次；已签发列表只保留脱敏摘要。

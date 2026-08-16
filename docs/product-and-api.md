@@ -255,6 +255,10 @@ these 20 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:
 | Build | `build_kg`, `build_retrieval_index` | `maintenance:execute` (owner-only) |
 | Build read | `get_build_status` | `knowledge:read` |
 
+`list_notebooks` and `select_notebook` require **no scope at all**: the entire check is a
+live token, a notebook inside its allowlist, and read access to that notebook. Every session
+can therefore bootstrap regardless of how narrow the token is.
+
 The server rechecks scope, allowlist, token state, and notebook access on data calls;
 retrieved text is untrusted evidence, not executable Agent instructions.
 
@@ -268,12 +272,15 @@ the returned id against the one it sent. Each anchor additionally carries `sourc
 `element_id`, and, for a knowhow-projected node, `knowhow: {table_id, row_id}`. A separate
 `citations` list carries the fallback (non-anchor) evidence with `label`, `source_id`,
 `element_id`, `location_label`, `quoted_span`, `source_file_name`, and `tier`; `notebook_id`
-and `memory_id` are emitted only when non-empty. Rows whose `memory_id` is set require
+and `memory_id` are emitted only when non-empty, and a knowhow-projected citation carries the
+same `knowhow: {table_id, row_id}` pair anchors use. Rows whose `memory_id` is set require
 `memory:read` — without that scope the whole row is filtered out **before** the result cap
 and does not contribute to the truncation count, because reporting it would leak the private
-Memory count by arithmetic. Anchors and citations are each capped at 20 rows; the response
-budget reserves 3,500 characters for anchors (500 of them for anchor provenance) and 1,800
-characters for citations, so a large citation set cannot crowd out the answer text.
+Memory count by arithmetic. Anchors and citations are each capped at 20 rows. The response
+budget applies in two stages: each anchor's `provenance` is fitted to 500 characters
+individually first, and only then is the anchors list as a whole compressed to 3,500;
+citations are pre-fitted to 1,800 characters, so a large citation set cannot crowd out the
+answer text.
 
 `get_cited_element` dereferences one citation back to its source text: pass `source_id` and
 `element_id` exactly as `ask_notebook` or `search_notebook_context` returned them and get
@@ -293,9 +300,13 @@ non-blank and within this deployment's `SOURCE_UPLOAD_MAX_MB` per-source ceiling
 the stored UTF-8 bytes. Re-adding byte-identical content returns the existing source with
 `reused: true` instead of creating a duplicate. `add_source_url` adds a PDF by URL and
 refuses anything the server cannot reach or probe as a PDF. Both respect the notebook's
-document limit. Parsing runs in the background, so poll `get_source_status`, which reports
-parse/extraction state, element count, and a derived `parse_failed` boolean rather than the
-raw `error_message`. `reparse_source` re-runs parsing and extraction for one source and
+document limit. Parsing runs in the background, so poll `get_source_status`, which returns
+`parse_status`, `status`, `element_count`, `kg_extracted` (whether knowledge extraction has
+run), `agent_created`, and — instead of the raw `error_message`, which is `str(exc)` stored
+verbatim and routinely carries server-side absolute paths — a derived `parse_failed` boolean
+plus `parse_quality_warning`. The latter is the MinerU degradation signal: layout, formulas,
+and tables may be wrong even though the source reached `extracted`, which an Agent about to
+cite it needs to know. `reparse_source` re-runs parsing and extraction for one source and
 refuses while that source's parse lock is held (a bounded ~0.5-second probe, not a wait:
 that lock spans two LLM calls, so a parse genuinely in flight will still be in flight a
 second later).

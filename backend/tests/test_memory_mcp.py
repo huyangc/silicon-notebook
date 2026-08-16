@@ -18,6 +18,7 @@ from app.api.deps import (
     notebook_sharing_repository,
     repository,
 )
+from app.api.mcp_server import PUBLIC_TOOLS as mcp_server_public_tools
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.api.source_routes import document_capacity_message
@@ -25,35 +26,18 @@ from app.models.schemas import MemoryHit, NotebookCreate
 from tests.model_testkit import bind_chat_client
 
 
-PUBLIC_TOOLS = {
-    "list_notebooks",
-    "select_notebook",
-    "search_agent_memory",
-    "search_notebook_context",
-    "get_memory",
-    "ask_notebook",
-    "propose_memory",
-    # knowhow-tables PR-2+3 Task 10 (design doc §⑥): agent surface mirroring
-    # app.api.knowhow_agent_routes's HTTP endpoints.
-    "list_knowhow_tables",
-    "get_knowhow_discrimination",
-    "get_knowhow_row",
-    "put_knowhow_cell_code",
-    # Citation point-read: dereference an ask/search result's
-    # source_id+element_id back to the source text it came from.
-    "get_cited_element",
-    # Source management. delete_source additionally requires that an Agent
-    # created the row it is asked to remove.
-    "add_source_text",
-    "add_source_url",
-    "get_source_status",
-    "reparse_source",
-    "delete_source",
-    # Build/maintenance tools: the "maintenance:execute" scope's consumers.
-    "build_kg",
-    "build_retrieval_index",
-    "get_build_status",
-}
+# DERIVED from the manifest, deliberately not a third hand-copied list.
+#
+# `mcp_server.PUBLIC_TOOLS` is a documentation/test-assertion manifest: it is
+# never consulted by `create_memory_mcp`, which registers through the literal
+# `@server.tool` decorators. So the comparison below still has teeth — it
+# proves the manifest matches what the server actually registers, and the
+# architecture-documentation guard proves the docs match the manifest. Three
+# separately maintained copies (here, `scripts/smoke_memory_mcp.py`, and the
+# docs guard) could each agree with a stale peer while the real surface moved;
+# one manifest with two derived consumers cannot. Per-group commentary lives
+# next to `PUBLIC_TOOLS` itself.
+PUBLIC_TOOLS = set(mcp_server_public_tools)
 MCP_OUTPUT_BUDGET = 12_000
 
 
