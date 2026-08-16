@@ -91,6 +91,19 @@ class UploadedSourceFile:
     # 只有显式时，reuse 路径才允许改/重置既有源的类型；auto-detect 的建议值、以及不发此
     # 信号的调用方（老前端、batch_ingest）都视为「没表态」、绝不动既有源的类型。缺省 False。
     doc_type_explicit: bool = False
+    # 这份来源的**显示标题**，与 file_name 分开。
+    #
+    # 浏览器上传里两者天然同源（用户给的就是文件名），所以 upload_sources 一直拿
+    # file_name 当 title 用。但合成来源的调用方（MCP 的 add_source_text：用户给的是
+    # 一个**标题**，文件名是它派生出来的）两者并不同——file_name 会被 safe_filename
+    # 净化、按文件系统字节预算截断、再缀上 `.md`，把它写进 title 就是拿一条派生的
+    # 路径串冒充用户提交的标题。
+    #
+    # 空串＝没表态，落回 file_name，故全部既有调用方（浏览器/batch_ingest/eval/
+    # smoke）逐位不变。只作用于**新建**行：复用既有行不改它的标题（与 doc_type 的
+    # 复用语义一致——复用不是重命名）。追加在字段表末尾而不是插在 file_name 之后，
+    # 以免推移任何按位置传参的构造点。
+    title: str = ""
 
 
 @dataclass(frozen=True)
