@@ -180,14 +180,17 @@ def test_frontend_node_current_job_covers_the_documented_node_ceiling() -> None:
         for step in job["steps"]
         if isinstance(step, dict) and isinstance(step.get("run"), str)
     ]
+    # 必须**委派**给 G1 用的同一个 wrapper,而不是把 `npm test`/`npm run build` 抄进
+    # workflow:抄一遍的话,wrapper 将来加一步前置检查,这条泳道会继续绿着跑一份旧清单、
+    # 与 G1 和本地验证悄悄分叉。这条泳道要换的只有 Node 版本。
     assert commands == [
         "npm ci --prefix frontend",
-        "npm test --prefix frontend",
-        "npm run build --prefix frontend",
+        "bash scripts/check_frontend.sh",
     ]
-    # 这条泳道只碰前端:后端门禁归 standard-gate,重复跑既慢又会让「哪条门禁在管
-    # 什么」变糊。
-    assert not any("scripts/check" in command for command in commands)
+    # 只碰前端:后端门禁归 standard-gate,重复跑既慢又会让「哪条门禁在管什么」变糊。
+    assert not any(
+        command.startswith("bash scripts/check.sh") for command in commands
+    )
 
 
 def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() -> None:

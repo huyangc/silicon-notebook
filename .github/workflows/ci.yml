@@ -77,11 +77,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
 
-      - name: Run frontend tests
-        run: npm test --prefix frontend
-
-      - name: Build frontend (type check)
-        run: npm run build --prefix frontend
+      # 委派给 G1 用的同一个 wrapper,而不是把 `npm test` / `npm run build` 抄一遍:
+      # 抄一遍的话,`scripts/check_frontend.sh` 将来加一步前置检查,这条泳道会继续绿着
+      # 跑一份**旧**的清单,与 G1 和本地验证悄悄分叉(AGENTS.md「Never duplicate test
+      # roots or frontend commands」)。这条泳道要换的只有 Node 版本,不是那份清单。
+      - name: Run frontend lane on the current Node.js major
+        run: bash scripts/check_frontend.sh
 
   postgres-integration:
     name: level-3-postgres-integration
