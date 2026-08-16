@@ -8,6 +8,7 @@ the live token row, scope, allowlist, and notebook membership.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import math
@@ -1621,9 +1622,27 @@ def create_memory_mcp(
             _writable_notebook, ctx, repo, "sources:write"
         )
 
+        # The dedup key `upload_sources` will compute from these same bytes.
+        digest = hashlib.sha256(payload).hexdigest()
+
         def run() -> dict[str, Any]:
             with _owner_request_context(principal):
-                _reject_when_notebook_is_full(repo, notebook_id, 1)
+                # Order matters: a call that is about to REUSE an existing row
+                # adds no document, so the per-notebook ceiling must not refuse
+                # it. Checking capacity first made the documented idempotence
+                # ("re-adding identical content returns the existing source")
+                # fail exactly when a notebook was full -- the one state where
+                # an Agent most needs a repeat call to be a safe no-op.
+                #
+                # ⚠ Window between this probe and the upload: if the matched row
+                # is deleted in between, upload_sources creates a row and the
+                # notebook ends up one document over. Bounded to one, and the
+                # same shape as the browser's own check-then-insert TOCTOU
+                # (documented on `_enforce_document_capacity`) -- the next call
+                # refuses. Closing it would mean holding a write lock across the
+                # whole ingest.
+                if repo.source_id_by_hash(notebook_id, digest) is None:
+                    _reject_when_notebook_is_full(repo, notebook_id, 1)
                 # The synthetic-markdown upload seam (app/eval/speed.py uses the
                 # same one): hand `upload_sources` an UploadedSourceFile and the
                 # whole existing path -- content dedup, storage, background
@@ -1631,9 +1650,16 @@ def create_memory_mcp(
                 created = repo.upload_sources(
                     notebook_id,
                     [UploadedSourceFile(
+                        # `title` and `file_name` are DIFFERENT things here, and
+                        # conflating them is what this pair fixes: the file name
+                        # is sanitized, byte-truncated and suffixed, so writing
+                        # it into `sources.title` would show the Agent (and the
+                        # user, in the sources tab) a derived path string in
+                        # place of the title that was submitted.
                         file_name=_markdown_source_file_name(clean_title),
                         content_type="text/markdown",
                         content=payload,
+                        title=clean_title,
                     )],
                     lambda source_id: kg_scheduler.submit_job(
                         repo.process_source, source_id

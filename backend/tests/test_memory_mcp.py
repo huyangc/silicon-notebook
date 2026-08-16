@@ -2122,9 +2122,9 @@ async def test_add_source_text_files_agent_authored_markdown(mcp_env, scheduled_
     assert payload["reused"] is False
     assert payload["agent_created"] is True
     assert payload["parse_status"] == "queued"
-    # The title becomes the stored .md file name — that is what makes the
-    # source recognisable in the sources tab afterwards.
-    assert payload["title"] == "时钟树收敛方案.md"
+    # The stored title is the SUBMITTED title, verbatim — not the derived file
+    # name (which is sanitized, byte-truncated and suffixed).
+    assert payload["title"] == "时钟树收敛方案"
     _assert_budgeted(payload)
 
     source_id = payload["source_id"]
@@ -2132,6 +2132,8 @@ async def test_add_source_text_files_agent_authored_markdown(mcp_env, scheduled_
     detail = repo.get_source(source_id)
     assert detail.notebook_id == notebook_id
     assert detail.agent_created is True
+    assert detail.title == "时钟树收敛方案"
+    assert detail.file_name == "时钟树收敛方案.md"
     # Queued through the ordinary ingestion scheduler, not a bespoke path.
     assert [args for _fn, args in scheduled_jobs] == [(source_id,)]
 
@@ -2281,7 +2283,52 @@ async def test_add_source_text_keeps_the_stored_file_name_within_the_fs_limit(
     assert len(widest.encode("utf-8")) <= 255
     # Truncation is byte-safe: no character was split mid-sequence.
     assert stored.encode("utf-8").decode("utf-8") == stored
+    # ⚠ And the shortening stops at the FILE NAME. The stored title is the
+    # submitted title in full — read back from the row, not echoed from the
+    # response — because the file name is derived from the title and feeding it
+    # back into `sources.title` would put a truncated path string where the
+    # user's own words belong.
+    assert detail.title == longest
     assert len(repo.list_sources(notebook_id)) == 1
+
+
+@pytest.mark.anyio
+async def test_add_source_text_stores_the_submitted_title_not_the_file_name(
+    mcp_env, scheduled_jobs
+):
+    """The title and the file name are two different values.
+
+    ``upload_sources`` historically wrote ``title=file_name`` because for a
+    browser upload they ARE the same thing. Here they are not: the file name is
+    the title after ``safe_filename`` (separators flattened), a byte budget, and
+    a ``.md`` suffix. A title carrying path characters therefore shows exactly
+    how much a shared field would corrupt.
+
+    Read back from the stored row, not from the tool's own reply — echoing the
+    request would pass even if nothing reached the database.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    title = "docs/2026 Q3: 时序收敛/复盘"
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call("add_source_text", {
+            "title": title, "content_md": "正文内容",
+        }))
+
+    detail = repo.get_source(payload["source_id"])
+    assert detail.title == title
+    assert repo.list_sources(notebook_id)[0].title == title
+    # The file name is the sanitized derivation and is NOT what landed in the
+    # title. `safe_filename` keeps only the FINAL path component, so sharing one
+    # field would have reduced this title to a two-character stub — the whole
+    # of "docs/2026 Q3: 时序收敛/" silently gone from the sources tab.
+    assert detail.file_name == "复盘.md"
+    assert detail.file_name != detail.title
+    assert pathlib.Path(detail.file_path).name.endswith(detail.file_name)
 
 
 @pytest.mark.anyio
@@ -2319,6 +2366,52 @@ async def test_add_source_text_honours_the_notebook_document_limit(
         )
         assert url_full.isError
         assert document_capacity_message(1, 1, 1) in url_full.content[0].text
+
+    assert len(repo.list_sources(notebook_id)) == 1
+
+
+@pytest.mark.anyio
+async def test_add_source_text_still_dedups_when_the_notebook_is_full(
+    mcp_env, scheduled_jobs
+):
+    """A full notebook must not break the documented idempotence.
+
+    "Re-adding byte-identical content returns the existing source" is the tool's
+    contract, and a reuse adds NO document — so refusing it on the document
+    ceiling is refusing a call that would not have consumed the quota. That
+    matters precisely at the limit, which is the one state where an Agent most
+    needs a repeat call to be a safe no-op (retry after a dropped response,
+    resumed run, …).
+
+    So the ceiling is checked only after the content hash misses. New content is
+    still refused, which is what keeps this from being a hole in the quota.
+    """
+    repo = repository()
+    identity = identity_repository()
+    notebook_id = mcp_env["notebook"].id
+    body = "# 已经存在的内容\n\n同样的字节。\n"
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        first = _payload(await client.call("add_source_text", {
+            "title": "第一篇", "content_md": body,
+        }))
+        assert first["reused"] is False
+
+        # Now the notebook is exactly full.
+        identity.set_user_document_limit_override("user-local", mcp_env["alice"].id, 1)
+        assert (await client.call("add_source_text", {
+            "title": "新内容", "content_md": "完全不同的正文",
+        })).isError, "满库仍然拒绝真正新增的文档"
+
+        # Same bytes, different title: still a reuse, still allowed.
+        again = _payload(await client.call("add_source_text", {
+            "title": "换个标题重试", "content_md": body,
+        }))
+        assert again["reused"] is True
+        assert again["source_id"] == first["source_id"]
 
     assert len(repo.list_sources(notebook_id)) == 1
 

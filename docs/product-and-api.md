@@ -294,13 +294,17 @@ notebook's own sources plus the reference libraries it currently mounts.
 deliberately spans the mounted reference libraries because an answer's citations already do.
 
 `add_source_text` files a Markdown document from text the Agent
-provides: `title` is at most 200 characters (stored in full on the source row; only the
-derived on-disk file-name stem is shortened, to 200 UTF-8 bytes) and `content_md` must be
+provides: `title` is at most 200 characters and `content_md` must be
 non-blank and within this deployment's `SOURCE_UPLOAD_MAX_MB` per-source ceiling, measured on
-the stored UTF-8 bytes. Re-adding byte-identical content returns the existing source with
-`reused: true` instead of creating a duplicate. `add_source_url` adds a PDF by URL and
-refuses anything the server cannot reach or probe as a PDF. Both respect the notebook's
-document limit. Parsing runs in the background, so poll `get_source_status`, which returns
+the stored UTF-8 bytes. The submitted title is stored verbatim as the source's title; the
+on-disk file name is a separate, derived value — sanitized, capped at 200 UTF-8 bytes (so the
+`{source_id}_` prefix and the `.md` suffix still fit a 255-byte path component) and suffixed —
+and an over-long title shortens that file name only, never the stored title. Re-adding
+byte-identical content returns the existing source with `reused: true` instead of creating a
+duplicate. `add_source_url` adds a PDF by URL and refuses anything the server cannot reach or
+probe as a PDF. Both respect the notebook's document limit, except that a re-add which
+resolves to an existing source is still allowed at the limit — it adds no document, and
+refusing it would break the idempotence above exactly where a retry needs it most. Parsing runs in the background, so poll `get_source_status`, which returns
 `parse_status`, `status`, `element_count`, `kg_extracted` (whether knowledge extraction has
 run), `agent_created`, and — instead of the raw `error_message`, which is `str(exc)` stored
 verbatim and routinely carries server-side absolute paths — a derived `parse_failed` boolean

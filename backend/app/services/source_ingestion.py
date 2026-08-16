@@ -801,6 +801,12 @@ class SourceIngestionService:
         provenance on rows this call CREATES. A reused row keeps whatever
         provenance it already had: an Agent re-uploading bytes a person already
         added must not turn that person's source into an Agent-deletable one.
+
+        ``UploadedSourceFile.title`` likewise applies to CREATED rows only, and
+        is what a caller whose display name is NOT its file name (MCP's
+        ``add_source_text``: the user supplies a title, the file name is derived
+        from it) uses to keep the two apart. Empty falls back to ``file_name``,
+        which is every browser/CLI caller.
         """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         imported: List[UploadedSourceSummary] = []
@@ -838,7 +844,11 @@ class SourceIngestionService:
                 source_id=source_id,
                 notebook_id=notebook_id,
                 digest=digest,
-                title=file_name,
+                # 显示标题优先用调用方给的那个;空串(浏览器上传、batch_ingest、eval
+                # ——那里用户给的本来就是文件名)落回 file_name,行为逐位不变。
+                # ⚠ 只在**新建**分支:上面两条 reuse 路径刻意不碰既有行的 title,
+                # 与 doc_type 的复用语义一致(复用不是重命名)。
+                title=file.title or file_name,
                 source_type=self.source_type_from_name(file_name),
                 status="queued",
                 parse_status="queued",

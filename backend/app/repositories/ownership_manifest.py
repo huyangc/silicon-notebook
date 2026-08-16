@@ -628,6 +628,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.build_kg.run', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_page_rows', kind='attribute', target='_runtime'),
@@ -1043,6 +1044,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_asset_ids', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_elements', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_elements_page', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_id_by_hash', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_metadata', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_owner', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.source_parse_busy', kind='attribute', target='_runtime'),
@@ -1864,6 +1866,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='execute_notebook_kg_job'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='execute_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.build_kg.run', kind='attribute', target='execute_notebook_kg_job'),
         ),
         patches=(
         ),
@@ -1909,6 +1912,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.build_kg.run', kind='attribute', target='fail_notebook_kg_job_submission'),
         ),
         patches=(
         ),
@@ -2128,6 +2132,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.index_status', kind='attribute', target='index_status'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.get_build_status.load', kind='attribute', target='index_status'),
         ),
         patches=(
         ),
@@ -2651,6 +2656,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='prepare_notebook_kg_job'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='prepare_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.build_kg.run', kind='attribute', target='prepare_notebook_kg_job'),
         ),
         patches=(
         ),
@@ -3182,6 +3188,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='source_id_by_hash',
+        owner='SourceStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.add_source_text.run', kind='attribute', target='source_id_by_hash'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='source_metadata',
         owner='SourceStore',
         kind='method',
@@ -3295,6 +3311,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_scale_index', kind='attribute', target='trigger_scale_index_rebuild'),
+            ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.build_retrieval_index.run', kind='attribute', target='trigger_scale_index_rebuild'),
         ),
         patches=(
         ),

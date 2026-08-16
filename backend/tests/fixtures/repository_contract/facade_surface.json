@@ -1545,6 +1545,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.build_kg.run",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>._report_llm_ready",
         "target": "_runtime"
@@ -4036,6 +4042,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.source_id_by_hash",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.source_metadata",
         "target": "_runtime"
       },
@@ -5885,6 +5897,12 @@
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
         "target": "execute_notebook_kg_job"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.build_kg.run",
+        "target": "execute_notebook_kg_job"
       }
     ],
     "kind": "method",
@@ -5977,6 +5995,12 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
+        "target": "fail_notebook_kg_job_submission"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.build_kg.run",
         "target": "fail_notebook_kg_job_submission"
       }
     ],
@@ -6619,6 +6643,12 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.index_status",
+        "target": "index_status"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.get_build_status.load",
         "target": "index_status"
       }
     ],
@@ -7848,6 +7878,12 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
+        "target": "prepare_notebook_kg_job"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.build_kg.run",
         "target": "prepare_notebook_kg_job"
       }
     ],
@@ -9255,6 +9291,21 @@
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'List[SourceElement]'"
   },
+  "source_id_by_hash": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.add_source_text.run",
+        "target": "source_id_by_hash"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', digest: 'str') -> 'Optional[str]'"
+  },
   "source_metadata": {
     "consumers": [
       {
@@ -9459,6 +9510,12 @@
         "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_scale_index",
+        "target": "trigger_scale_index_rebuild"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.build_retrieval_index.run",
         "target": "trigger_scale_index_rebuild"
       }
     ],

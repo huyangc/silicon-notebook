@@ -1761,6 +1761,20 @@ class RepositoryFacade:
             source_id, offset, limit, anchor_element_id
         )
 
+    def source_id_by_hash(self, notebook_id: str, digest: str) -> Optional[str]:
+        """The existing same-content source in this notebook, if any — the very
+        lookup ``upload_sources`` uses for its dedup short-circuit.
+
+        Exposed on the facade so a caller can ASK whether an upload would be a
+        reuse before committing to one. MCP's ``add_source_text`` needs that to
+        order two independent rules correctly: the per-notebook document ceiling
+        must not refuse a call that is about to add no document at all. Reusing
+        this method rather than re-deriving "have I seen these bytes" keeps one
+        dedup rule (its docstring on the store is the authority: empty digest
+        never matches, hidden synthetic rows excluded, oldest row wins).
+        """
+        return self._runtime.source_store.source_id_by_hash(notebook_id, digest)
+
     def source_metadata(
         self, source_ids: Sequence[str]
     ) -> Dict[str, Dict[str, Any]]:
