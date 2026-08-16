@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=47) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=48) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。

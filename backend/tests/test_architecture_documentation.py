@@ -891,7 +891,8 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
             "Cell code attachments are stored per cell but never executed, indexed, embedded, "
             "FTS'd, projected into the KG, or included in Ask context",
             "The only scopes are `knowledge:read`, `memory:read`, `memory:read_candidates`, "
-            "`memory:propose`, `ask:execute`, and `knowhow:code`",
+            "`memory:propose`, `ask:execute`, `knowhow:code`, `sources:write`, "
+            "`sources:delete`, and `maintenance:execute`",
             "plus the four knowhow tools `list_knowhow_tables`, `get_knowhow_discrimination`, "
             "`get_knowhow_row`, and `put_knowhow_cell_code`",
         ),
@@ -922,43 +923,81 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
         )
 
 
-def test_current_mcp_docs_pin_complete_eleven_tool_surface():
-    public_tools = (
-        "list_notebooks",
-        "select_notebook",
-        "search_agent_memory",
-        "search_notebook_context",
-        "get_memory",
-        "ask_notebook",
-        "propose_memory",
-        "list_knowhow_tables",
-        "get_knowhow_discrimination",
-        "get_knowhow_row",
-        "put_knowhow_cell_code",
-    )
-    current_docs = (
-        "architecture.md",
-        "fangan_done.md",
-        "silicon_notebook_fangan.md",
-    )
+def _chinese_number(value: int) -> str:
+    """Render 1..99 the way the Chinese docs actually spell a count."""
+    digits = "零一二三四五六七八九"
+    assert 1 <= value <= 99, f"unsupported documentation count: {value}"
+    if value < 10:
+        return digits[value]
+    tens, ones = divmod(value, 10)
+    head = "十" if tens == 1 else digits[tens] + "十"
+    return head if ones == 0 else head + digits[ones]
 
-    for name in current_docs:
+
+def test_current_mcp_docs_pin_the_complete_public_mcp_tool_surface():
+    """Live docs must list every tool `/mcp` actually publishes.
+
+    The expectation is DERIVED from `mcp_server.PUBLIC_TOOLS`, not a second
+    copy of it. A hand-maintained tuple here pins the docs to whatever this
+    test happened to believe, so shipping a new tool without documenting it
+    stays green — the guard ends up guarding a stale document rather than
+    the surface. Reading the runtime manifest makes the docs fail instead,
+    and the prose count word is derived too so "二十个工具" cannot rot into
+    a number nobody re-checked.
+
+    `README.md` / `README_zh.md` are read as their documentation BUNDLES
+    (see `DOCUMENTATION_BUNDLES`), so the per-language product/API reference
+    and development guide are covered without forcing the lean root README
+    to carry a tool list.
+    """
+    from app.api.mcp_server import PUBLIC_TOOLS
+
+    count_word = _chinese_number(len(PUBLIC_TOOLS))
+    chinese_docs = ("architecture.md", "README_zh.md")
+    english_docs = ("AGENTS.md", "README.md")
+    # The scopes that gate the surface. `knowledge:read` covers the reads and
+    # is already pinned by the knowhow contract test above.
+    write_scopes = ("`knowhow:code`", "`sources:write`", "`sources:delete`",
+                    "`maintenance:execute`")
+
+    for name in chinese_docs + english_docs:
         text = _read(name)
-        compact_text = "".join(text.split())
-        assert "十一个工具" in compact_text, (
-            f"{name} must describe the complete eleven-tool MCP surface"
+        for tool in PUBLIC_TOOLS:
+            assert f"`{tool}`" in text, (
+                f"{name} is missing current MCP tool {tool}"
+            )
+        for scope in write_scopes:
+            assert scope in text, (
+                f"{name} must document the {scope} write scope"
+            )
+
+    for name in chinese_docs:
+        compact_text = "".join(_read(name).split())
+        assert f"{count_word}个工具" in compact_text, (
+            f"{name} must describe the complete {len(PUBLIC_TOOLS)}-tool MCP surface"
         )
-        assert "`knowhow:code`" in text, (
-            f"{name} must document the write scope required by the knowhow tool"
+    for name in english_docs:
+        assert f"{len(PUBLIC_TOOLS)} tools" in _read(name), (
+            f"{name} must describe the complete {len(PUBLIC_TOOLS)}-tool MCP surface"
         )
-        for tool in public_tools:
-            assert tool in text, f"{name} is missing current MCP tool {tool}"
+
+    # `fangan_done.md` / `silicon_notebook_fangan.md` are dated accounting:
+    # "十一个工具" is a true statement about what the 2026-07-16 feature
+    # delivered and is deliberately NOT rewritten. What must not survive is
+    # the impression that eleven is still the whole surface, so each carries
+    # a forward pointer whose count is derived here as well.
+    for name in ("fangan_done.md", "silicon_notebook_fangan.md"):
+        compact_text = "".join(_read(name).split())
+        assert f"后续已扩展至{count_word}个工具" in compact_text, (
+            f"{name} keeps a historical eleven-tool claim without a forward "
+            f"pointer to the current {len(PUBLIC_TOOLS)}-tool surface"
+        )
 
     stale_claims = (
         r"mcp_server\.py` 提供七个 scoped",
         r"(?:离线 )?smoke[：，][^。\n]{0,30}七工具契约",
     )
-    for name in current_docs:
+    for name in ("architecture.md", "fangan_done.md", "silicon_notebook_fangan.md"):
         text = _read(name)
         for pattern in stale_claims:
             assert re.search(pattern, text, flags=re.IGNORECASE) is None, (

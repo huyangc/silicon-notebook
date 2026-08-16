@@ -207,7 +207,8 @@ The raw tag list is capped before trimming/deduplication, and blank tags are rej
 The Memory page's **Agent access** area creates stable Agent profiles and one-time plaintext
 tokens. A token has an expiry, a default notebook, a notebook allowlist, and the smallest
 needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
-`memory:propose`, `ask:execute`, and `knowhow:code`; it can be revoked immediately. Install the backend
+`memory:propose`, `ask:execute`, `knowhow:code`, `sources:write`, `sources:delete`, and
+`maintenance:execute`; it can be revoked immediately. Install the backend
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
 then connect to the Streamable HTTP server at `/mcp` (`/mcp/` is handled through redirect).
 By default MCP allows remote plain HTTP and relaxes Host/Origin (DNS-rebinding)
@@ -239,13 +240,95 @@ Claude Code may persist that raw header in its local configuration. Use least-pr
 scopes, a short expiry, protect the local config, and revoke/rotate the token after use.
 Do not assume shell environment interpolation in that header.
 
-Every new MCP session must call `select_notebook` before a data tool. The exact tool set is:
-`list_notebooks`, `select_notebook`, `search_agent_memory`,
-`search_notebook_context`, `get_memory`, `ask_notebook`, `propose_memory`,
-`list_knowhow_tables`, `get_knowhow_discrimination`, `get_knowhow_row`, and
-`put_knowhow_cell_code`.
+Every new MCP session must call `select_notebook` before a data tool. The exact tool set is
+these 20 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:
+
+| Group | Tools | Scope |
+| --- | --- | --- |
+| Memory / context | `list_notebooks`, `select_notebook`, `search_agent_memory`, `search_notebook_context`, `get_memory`, `ask_notebook`, `propose_memory` | `knowledge:read` / `memory:read` / `memory:read_candidates` / `memory:propose` / `ask:execute` |
+| Knowhow | `list_knowhow_tables`, `get_knowhow_discrimination`, `get_knowhow_row` | `knowledge:read` |
+| Knowhow code write | `put_knowhow_cell_code` | `knowhow:code` |
+| Citation point-read | `get_cited_element` | `knowledge:read` |
+| Source management | `add_source_text`, `add_source_url`, `reparse_source` | `sources:write` (owner-only) |
+| Source deletion | `delete_source` | `sources:delete` (owner-only, Agent-added rows only) |
+| Source read | `get_source_status` | `knowledge:read` |
+| Build | `build_kg`, `build_retrieval_index` | `maintenance:execute` (owner-only) |
+| Build read | `get_build_status` | `knowledge:read` |
+
 The server rechecks scope, allowlist, token state, and notebook access on data calls;
 retrieved text is untrusted evidence, not executable Agent instructions.
+
+`ask_notebook` accepts an optional `conversation_id` (at most 200 characters, mirroring
+`AskIntentPreviewRequest.conversation_id`) and returns the `conversation_id` the answer was
+actually recorded under. Passing an id continues that conversation across turns, including
+one started by another Agent profile or in the web UI, as long as it belongs to the same
+owner and the same selected notebook. An id from a different notebook or owner does **not**
+error: the server silently starts a new conversation, which the caller detects by comparing
+the returned id against the one it sent. Each anchor additionally carries `source_id`,
+`element_id`, and, for a knowhow-projected node, `knowhow: {table_id, row_id}`. A separate
+`citations` list carries the fallback (non-anchor) evidence with `label`, `source_id`,
+`element_id`, `location_label`, `quoted_span`, `source_file_name`, and `tier`; `notebook_id`
+and `memory_id` are emitted only when non-empty. Rows whose `memory_id` is set require
+`memory:read` — without that scope the whole row is filtered out **before** the result cap
+and does not contribute to the truncation count, because reporting it would leak the private
+Memory count by arithmetic. Anchors and citations are each capped at 20 rows; the response
+budget reserves 3,500 characters for anchors (500 of them for anchor provenance) and 1,800
+characters for citations, so a large citation set cannot crowd out the answer text.
+
+`get_cited_element` dereferences one citation back to its source text: pass `source_id` and
+`element_id` exactly as `ask_notebook` or `search_notebook_context` returned them and get
+that element's own text, its location inside the document, and the document's display title.
+It discloses nothing beyond what an answer in the selected notebook may already cite — the
+notebook's own sources plus the reference libraries it currently mounts.
+
+**Source management.** Every tool here that names a `source_id` resolves it inside the
+**selected notebook only** — never the mounted participant set, and never a hidden
+`memory`/`knowhow` projection row. That is narrower than `get_cited_element`, which
+deliberately spans the mounted reference libraries because an answer's citations already do.
+
+`add_source_text` files a Markdown document from text the Agent
+provides: `title` is at most 200 characters (stored in full on the source row; only the
+derived on-disk file-name stem is shortened, to 200 UTF-8 bytes) and `content_md` must be
+non-blank and within this deployment's `SOURCE_UPLOAD_MAX_MB` per-source ceiling, measured on
+the stored UTF-8 bytes. Re-adding byte-identical content returns the existing source with
+`reused: true` instead of creating a duplicate. `add_source_url` adds a PDF by URL and
+refuses anything the server cannot reach or probe as a PDF. Both respect the notebook's
+document limit. Parsing runs in the background, so poll `get_source_status`, which reports
+parse/extraction state, element count, and a derived `parse_failed` boolean rather than the
+raw `error_message`. `reparse_source` re-runs parsing and extraction for one source and
+refuses while that source's parse lock is held (a bounded ~0.5-second probe, not a wait:
+that lock spans two LLM calls, so a parse genuinely in flight will still be in flight a
+second later).
+
+`delete_source` is irreversible and deliberately narrow. It needs `sources:delete`, which
+`sources:write` does not imply, **and** the row must have been added by an Agent. The
+criterion is the `agent_created` boolean — the projection of the v48 `sources.agent_profile_id`
+provenance column being non-NULL — so a document a person uploaded can never be removed
+through this surface, no matter which scopes a token carries. The criterion is "some Agent
+added this row", not "this profile did": Agent identities get rotated and revoked, and a
+source left by a retired profile would otherwise be undeletable forever. Provenance is
+written on the INSERT branch only, so re-uploading a person's bytes reuses their row and
+leaves it user-added, and a notebook deep copy clears the column outright — every copied
+source counts as user-added. The `sources` list and detail responses expose the same
+`agent_created` boolean, and the browser's source list renders it as a neutral 「Agent 添加」
+badge.
+
+**Builds.** `build_kg` triggers an incremental knowledge-graph extraction (already-extracted
+sources are skipped; a previously partial source is retried) and `build_retrieval_index`
+triggers a retrieval-index rebuild with `when="now"` (default) or `when="idle"` for the next
+low-traffic window. Both are owner-only, return immediately, and are polled through
+`get_build_status`, which reports KG state (ready/building, pending source count, current
+job stage and progress) together with retrieval-index state (exists/building/queued, queue
+position, next idle window). `build_kg` refusing because a build is already running for that
+notebook is a **queueing signal, not an error**: the notebook-scoped single-flight guard is
+working, and the caller should poll `get_build_status` until it clears rather than retry
+immediately. `build_retrieval_index` refuses when the notebook is too small to need an index.
+`get_build_status` is a pure read and any member of the notebook may call it.
+
+Writes are owner-only across this whole surface. A token's allowlist may name a notebook its
+owner merely joined as a read-only member; adding, re-parsing, deleting a source, or starting
+a background build there would hand that share's read side a write it was never granted, so
+those calls are refused. Reads keep the member-readable rule their HTTP twins use.
 
 The four knowhow tools mirror the HTTP surface at `/api/agent/knowhow/...` (see
 [APIs](#apis)) through the same service functions, so HTTP and MCP never drift on

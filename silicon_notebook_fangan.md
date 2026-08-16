@@ -1355,6 +1355,8 @@ chunk 或 knowledge object。
   `get_memory`、`ask_notebook`、`propose_memory`、`list_knowhow_tables`、
   `get_knowhow_discrimination`、`get_knowhow_row`、`put_knowhow_cell_code`。
   knowhow 读取需 `knowledge:read`，格子代码写入需 `knowhow:code`。
+  （以上是本方案定稿时的工具面；后续已扩展至二十个工具——引用点查、来源管理与构建工具组，
+  当前权威清单见 `mcp_server.PUBLIC_TOOLS` 与 `docs/product-and-api_zh.md`。）
   Agent 不能确认、拒绝、弃用或晋升 Memory；返回内容始终作为不可信 evidence/data，不作为指令。
 
 ## 19.4 Memory → KG 治理
@@ -1370,6 +1372,6 @@ dedupe/merge，创建或合并一个或多个 Base KG 对象，并由 API 与晋
 
 固定 gold 计算 Recall@5、MRR、nDCG，并以三项零容忍计数守卫 candidate→正式平面、跨用户、
 跨 notebook 泄漏；另有 A/B harness 对比 no-Memory、KB-only、KB+confirmed-Memory。发布门槛
-还包含官方 MCP client 离线 smoke：十一个工具契约（七个 Memory/context 工具与四个 knowhow
-工具）、session 选择隔离、candidate 不进入正式上下文，以及同用户同 notebook 的跨 Agent
+还包含官方 MCP client 离线 smoke：定稿时为十一个工具契约（七个 Memory/context 工具与四个 knowhow
+工具；该 smoke 现按上述扩展后的工具面锁定）、session 选择隔离、candidate 不进入正式上下文，以及同用户同 notebook 的跨 Agent
 candidate 召回。
