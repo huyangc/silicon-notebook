@@ -32,6 +32,9 @@ TOOLS = {
     "get_source_status",
     "reparse_source",
     "delete_source",
+    "build_kg",
+    "build_retrieval_index",
+    "get_build_status",
 }
 
 

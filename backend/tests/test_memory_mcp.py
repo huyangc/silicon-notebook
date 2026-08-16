@@ -49,6 +49,10 @@ PUBLIC_TOOLS = {
     "get_source_status",
     "reparse_source",
     "delete_source",
+    # Build/maintenance tools: the "maintenance:execute" scope's consumers.
+    "build_kg",
+    "build_retrieval_index",
+    "get_build_status",
 }
 MCP_OUTPUT_BUDGET = 12_000
 
@@ -2803,3 +2807,262 @@ async def test_source_writes_are_refused_in_a_read_only_shared_notebook(
     assert _source_row_exists(repo, seeded["source_id"])
     assert len(repo.list_sources(notebook_id)) == 1
     assert scheduled_jobs == []
+
+
+# --- build/maintenance tools -------------------------------------------
+# "maintenance:execute" was already a valid AGENT_SCOPES entry (and offered by
+# the token-creation UI) before build_kg/build_retrieval_index existed to
+# consume it -- these tests cover that closing of the loop, plus the
+# read-only get_build_status that sits on "knowledge:read" like the source
+# tools' own get_source_status does.
+_MAINTENANCE = ["knowledge:read", "maintenance:execute"]
+
+
+@pytest.fixture
+def scheduled_kg_jobs(monkeypatch):
+    """Capture build_kg's background submission instead of running a real
+    extraction pipeline (with real LLM calls) on a worker thread mid-test."""
+    from app.services import background_jobs
+
+    calls: list = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, **kwargs: calls.append((fn, args, kwargs)),
+    )
+    return calls
+
+
+class _KgExtractStub:
+    """Just enough for `configured("kg_extract")` to read True via
+    bind_chat_client. `execute_notebook_kg_job` is never reached in these
+    tests -- `scheduled_kg_jobs` stubs the submission that would run it --
+    so an actual call here is a test bug, not a feature path."""
+
+    configured = True
+
+    def chat_json(self, *args, **kwargs):
+        raise AssertionError(
+            "kg_extract must not be invoked: background_jobs.submit is "
+            "stubbed by the scheduled_kg_jobs fixture in this test"
+        )
+
+
+def _mark_notebook_base_tier(repo, notebook_id: str) -> None:
+    """The cheapest eligible-for-a-retrieval-index notebook shape (mirrors
+    test_scale_index_repo.py's own `test_trigger_when_and_mode`):
+    `eligible()` returns True immediately for tier=='base', before it ever
+    looks at chunk counts or copy stats -- no source/chunk/embedding seeding
+    needed at all."""
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook_id,))
+
+
+@pytest.mark.anyio
+async def test_build_kg_refuses_when_no_chat_model_is_configured(mcp_env):
+    """Default mcp_env clears every chat/embedding provider env var, so this
+    reproduces a deployment with no LLM configured -- the same state
+    kg_routes.build_kg's own 409 guards against -- without any extra setup.
+    The message must not name the deployment's env vars (mirrors
+    add_source_url's MinerUCloudNotConfigured wording)."""
+    notebook_id = mcp_env["notebook"].id
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        refused = await client.call("build_kg", {})
+        assert refused.isError
+        text = refused.content[0].text
+        assert "chat model" in text.lower()
+        assert "MINERU" not in text and "OPENAI" not in text.upper()
+
+
+@pytest.mark.anyio
+async def test_build_kg_queues_one_job_and_refuses_a_concurrent_second_call(
+    mcp_env, scheduled_kg_jobs
+):
+    """Happy path with exact values, plus the durable per-notebook
+    single-flight (kg_build_jobs' own conditional unique index) surfacing as
+    the router's own Chinese busy sentence -- 409 semantics, not an error the
+    caller should retry differently; poll get_build_status instead."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    bind_chat_client(repo, "kg_extract", _KgExtractStub())
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        started = _payload(await client.call("build_kg", {}))
+        assert started["mode"] == "incremental"
+        assert started["status"] == "building"
+        assert started["job_id"]
+        _assert_budgeted(started)
+
+        busy = await client.call("build_kg", {})
+        assert busy.isError
+        assert "当前笔记本已有知识图谱分析任务正在运行" in busy.content[0].text
+
+    assert len(scheduled_kg_jobs) == 1
+    fn, args, kwargs = scheduled_kg_jobs[0]
+    assert fn == repo.execute_notebook_kg_job
+    assert args == (notebook_id, started["job_id"], "incremental")
+    assert kwargs == {
+        "retry_partial": True,
+        "name": f"buildkg-{notebook_id}",
+        "notify_pending": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_build_retrieval_index_validates_when_and_lets_ineligibility_through(
+    mcp_env
+):
+    """`when` outside {now, idle} is refused before any repository call. A
+    fresh mcp_env notebook (personal tier, no index, few chunks) is
+    ineligible by construction -- the service layer's own readable message
+    ("notebook too small and not base-tier...") comes through unedited,
+    exactly like add_source_url lets add_url_sources' rejection wording
+    through."""
+    notebook_id = mcp_env["notebook"].id
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        bad_when = await client.call("build_retrieval_index", {"when": "soon"})
+        assert bad_when.isError
+        assert "when" in bad_when.content[0].text.lower()
+
+        ineligible = await client.call("build_retrieval_index", {"when": "now"})
+        assert ineligible.isError
+        assert "too small" in ineligible.content[0].text.lower()
+
+
+@pytest.mark.anyio
+async def test_build_retrieval_index_queues_for_the_low_traffic_window(mcp_env):
+    """when='idle' on an eligible (base-tier) notebook queues instead of
+    starting immediately -- exercising the one branch of `trigger()` that
+    never spawns real indexing work, so this needs no embedder stub."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    _mark_notebook_base_tier(repo, notebook_id)
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        queued = _payload(await client.call(
+            "build_retrieval_index", {"when": "idle"}
+        ))
+        assert queued == {
+            "status": "queued", "notebook_id": notebook_id,
+            "truncation": queued["truncation"],
+        }
+        _assert_budgeted(queued)
+
+
+@pytest.mark.anyio
+async def test_get_build_status_reports_kg_and_scale_index_state(mcp_env):
+    """The one read behind both build tools: kg (ready/building/pending
+    sources/current job) and scale_index (exists/building/eligible/state)
+    sub-objects both present in a single call, readable by a plain
+    knowledge:read token."""
+    notebook_id = mcp_env["notebook"].id
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_READ)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        status = _payload(await client.call("get_build_status", {}))
+        assert status["kg"]["ready"] is False
+        assert status["kg"]["building"] is False
+        assert status["kg"]["pending_sources"] == 0
+        assert status["kg"]["job"] is None
+        assert status["scale_index"]["exists"] is False
+        assert status["scale_index"]["eligible"] is False
+        _assert_budgeted(status)
+
+
+@pytest.mark.anyio
+async def test_maintenance_tools_require_a_selected_notebook(mcp_env):
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _MAINTENANCE)
+    ) as client:
+        assert (await client.call("build_kg", {})).isError
+        assert (await client.call("build_retrieval_index", {})).isError
+        assert (await client.call("get_build_status", {})).isError
+
+
+@pytest.mark.anyio
+async def test_maintenance_and_source_scopes_do_not_imply_one_another(
+    mcp_env, scheduled_kg_jobs
+):
+    """Scope gates prove nothing about a build that would have failed
+    anyway, so this configures kg_extract (a call WOULD succeed) and still
+    shows the unscoped token refused -- knowledge:read alone reads
+    get_build_status but opens neither write tool, and maintenance:execute
+    does not imply sources:write either."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    bind_chat_client(repo, "kg_extract", _KgExtractStub())
+    app = mcp_env["app"]
+
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, _agent_token(mcp_env, _SOURCE_WRITE), manage_lifespan=False
+        ) as writer:
+            _payload(await writer.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            # knowledge:read really does open the read tool here, so the two
+            # refusals below are not "this session can do nothing".
+            assert not (await writer.call("get_build_status", {})).isError
+            assert (await writer.call("build_kg", {})).isError
+            assert (await writer.call("build_retrieval_index", {})).isError
+
+        async with OfficialMcpClient(
+            app, _agent_token(mcp_env, _MAINTENANCE), manage_lifespan=False
+        ) as maintainer:
+            _payload(await maintainer.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            assert (await maintainer.call("add_source_text", {
+                "title": "无权", "content_md": "无权",
+            })).isError, "maintenance:execute 不蕴含 sources:write"
+            assert not (await maintainer.call("build_kg", {})).isError
+
+    assert len(scheduled_kg_jobs) == 1
+
+
+@pytest.mark.anyio
+async def test_maintenance_writes_are_refused_in_a_read_only_shared_notebook(
+    mcp_env, scheduled_kg_jobs
+):
+    """Same rule as the source-management tools: an allowlist entry proves a
+    token may SELECT a notebook, not that it may write to it. Bob is a
+    read-only member of Alice's notebook; his token carries maintenance:
+    execute anyway, and only the owner-only gate stops a background build
+    from starting through a share the browser itself renders read-only.
+
+    Both underlying calls are made to WOULD-SUCCEED (kg_extract configured;
+    notebook marked base-tier so the retrieval-index build is eligible) --
+    otherwise a domain-level refusal (LLM not configured / notebook too
+    small) would make `.isError` true for the wrong reason and this test
+    would not actually be pinning the owner-only gate.
+
+    P1 mutation guard (verified manually, then reverted -- see task report):
+    swapping build_kg's `_writable_notebook` for `_selected_notebook` turns
+    this red, because Bob IS a read-only member (`user_can_read_notebook`
+    passes) and kg_extract is configured, so the call goes on to actually
+    queue a job instead of being refused."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    bind_chat_client(repo, "kg_extract", _KgExtractStub())
+    _mark_notebook_base_tier(repo, notebook_id)
+    bob_token = _agent_token(mcp_env, _MAINTENANCE, user="bob")
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert not (await client.call("get_build_status", {})).isError
+        assert (await client.call("build_kg", {})).isError
+        assert (await client.call("build_retrieval_index", {})).isError
+
+    assert scheduled_kg_jobs == []
