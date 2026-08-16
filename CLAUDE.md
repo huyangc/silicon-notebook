@@ -398,14 +398,27 @@ Claude Code 的通用默认是「评审和验证留在主 agent 循环里，不�
 
 执行由本机全局的 PostToolUse hook `~/.claude/hooks/codex-pr-review.sh` 承担。**它不是仓库产物**，`git grep` 在本仓库里找不到它；换机器或新 clone 上没有它时规则依然成立，那就手动跑。
 
-### 自动触发只有两个点
+### 触发判据不看命令文本
 
-1. `gh pr create` 成功 → 第 1 轮评审。PR 号**只从该命令的输出里取 PR URL**：命令匹配是文本匹配，一条 `echo "gh pr create …"`（往 PR 正文里写命令示例就会这样）照样命中，要求 URL 才能把误触发挡在发起一次真实评审之前。
-2. `git push` → **仅当该 PR 状态为 `awaiting_fix`（即上一轮判了 P0/P1）时**才重审。这是刻意设计：无关推送不烧额度。这一路按当前分支查 PR 号（推送本身不打印 PR URL），状态闸就是它的兜底。
+**这条是踩出来的（2026-08-16，PR #511）**：原实现按 `gh pr create` / `git push` 的命令**文本**匹配。我用 `$GH pr create`（把 gh 放进 shell 变量）开了 PR，文本匹配不上 → 评审**一轮都没跑、PR 上零评论**，而我还在汇报「hook 正在评审」。这类失败不报错、只是什么都不发生，是整条链最危险的形态；命令文本是其中最脆的一环，所以判据整个换掉了。
 
-命令匹配按**基名**而不是整串前缀（`([^[:space:]]*/)?gh`），也不用 settings 的 `if: Bash(gh pr create*)` 规则：`gh` 可能没链进 PATH，实际调用是 `/opt/homebrew/opt/gh/bin/gh pr create …`，前缀规则匹配不到它——那不会报错，只会让评审**静默地永远不跑**。同理，钩子必须 `cd` 到发起该命令的目录（PostToolUse 载荷里的 `cwd`），否则空 diff 硬失败会在每次多 worktree 的会话里误报。
+PR 号的来源，按顺序：
 
-**推论，很容易踩：上一轮是 🟡 或 🟢 之后再 push 修复，不会自动重审。** 这时必须自己补跑并补贴——hook 只代贴它自己跑的那几轮。手动命令与 hook 内部一致：
+1. **命令输出里出现 PR URL** —— `gh pr create` 必然打印，且不受调用形式影响（`gh` / `$GH` / 绝对路径一视同仁）。
+2. **本分支已知的 PR** —— 第一次见到就把 branch→PR 缓存在本机，之后任何一条 Bash 命令都能零 API 认出它。
+
+两者都只认**当前分支**的 PR（比对 `headRefName`），免得别处贴出的 PR URL 把评审引到无关 PR 上。
+
+跑不跑，两个闸：
+
+- **从没评审过（rounds=0）** → 跑第 1 轮。
+- **上一轮判了 P0/P1（`awaiting_fix`）且 HEAD SHA 与上轮评审的不同** → 重审。「改完了」由提交本身证明，不由命令长什么样证明。
+
+**推论，很容易踩：上一轮是 🟡 或 🟢 之后再提交修复，不会自动重审。** 这时必须自己补跑并补贴——hook 只代贴它自己跑的那几轮。
+
+钩子必须 `cd` 到发起该命令的目录（PostToolUse 载荷里的 `cwd`），否则空 diff 硬失败会在每次多 worktree 的会话里误报。载荷不是合法 JSON 时**出声**而不是静默退出：它与「这条命令与评审无关」在退出码上原本长得一模一样。
+
+手动命令与 hook 内部一致：
 
 ```bash
 codex exec review --base <base> --ephemeral \
@@ -437,7 +450,10 @@ codex exec review --base <base> --ephemeral \
 ~/.claude/hooks/codex-pr-review.sh set-state <PR号> <waived|awaiting_fix|passed>
 ~/.claude/hooks/codex-pr-review.sh show-state <PR号>
 ~/.claude/hooks/codex-pr-review.sh run <PR号> manual
+~/.claude/hooks/codex-pr-review.sh verify <PR号>
 ```
+
+`verify` 是**给人核对用的**：它不读本地状态文件（那是我写的），只查 GitHub 上的实际评论里有没有针对**当前 head SHA** 的评审，没有就非零退出。合入前必须先跑它——见下面「合入」。
 
 ### 意见不是照单全收
 
@@ -450,6 +466,7 @@ codex 的评审对象是 diff，它未必了解本 harness 的运行时事实。
 ### 合入
 
 - **默认闭环到合入**：codex 判 🟡/🟢（非阻塞）**且** CI 全绿时直接合，不再逐次问人。**唯一例外**：用户明确说过「等我合入」——说过就绝不自动合，只把 PR 链接和状态交回去。这是 2026-08-15 用户的明确决定，取代了原先「必须先拿到用户明确同意」。
+- **合入前先跑 `verify <PR号>` 自证**：它只查 GitHub 上的实际评论、不信本地状态，非零退出就是「当前 head 没有已贴出的评审」，那就不许合。这条不是形式主义——评审静默没跑过一次（#511），而当时我自己汇报的是「正在评审」；本地状态和我的说法都不是证据，PR 上的评论才是。
 - **闸只有这两个，缺一不可**：🔴 P0/P1 与 ⚪️（解析不出标签但正文很长）一律**停下来问人**，不自动合；CI 未全绿也不合。判 CI 用 `gh pr checks <PR号>`，只有全部 `pass` 才算绿——`mergeStateStatus: CLEAN` 只说没有冲突/没有必需检查在拦，不等于检查跑绿了。
 - 本地门禁有既有失败时，不拿它当合入依据也不假装没有：在 PR 里写清楚它**改动前就存在**（证据：相关目录零改动，或在 base commit 上跑出逐字相同的失败），CI 才是权威。
 - 本仓库用 **Rebase and merge**：`gh pr merge <PR号> --rebase`（也有 squash 合入的历史，标题带 `(#NNN)` 后缀的即是）。
