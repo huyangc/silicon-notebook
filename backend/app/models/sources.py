@@ -146,6 +146,12 @@ class SourceSummary(BaseModel):
     # | "missing"=合规候选但尚未跑过论文元数据抽取 | None=不适用(memory/knowhow/
     # 非论文 doc_type/未解析完成)。
     paper_meta_status: Optional[str] = None
+    # 这份来源是不是 Agent 添加的(v48 `sources.agent_profile_id IS NOT NULL`)。
+    # 刻意只上 wire 一个布尔:原始 agent_profile_id 是删除权限的判据,由服务层直接
+    # 读行内列,没有任何理由把某个 Agent 的身份 id 发给浏览器。新增字段而不改写
+    # 既有字段(同 display_title 先例),默认 False = 人添加的——那也正是全部存量行
+    # 的取值。派生是零成本的:`SELECT *` 本来就把这一列取回来了,不加 join、不加查询。
+    agent_created: bool = False
 
 
 class PaginatedSources(BaseModel):

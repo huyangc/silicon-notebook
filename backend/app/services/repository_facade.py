@@ -1607,9 +1607,10 @@ class RepositoryFacade:
         urls: Iterable[str],
         scheduler: Optional[Callable[[str], None]] = None,
         capacity: Optional[int] = None,
+        agent_profile_id: str = "",
     ) -> AddUrlSourcesResult:
         return self._runtime.source_ingestion.add_url_sources_compat(
-            notebook_id, urls, scheduler, capacity
+            notebook_id, urls, scheduler, capacity, agent_profile_id
         )
 
     def upload_sources(
@@ -1617,9 +1618,10 @@ class RepositoryFacade:
         notebook_id: str,
         files: Iterable[UploadedSourceFile],
         scheduler: Optional[Callable[[str], None]] = None,
+        agent_profile_id: str = "",
     ) -> List[UploadedSourceSummary]:
         return self._runtime.source_ingestion.upload_sources_compat(
-            notebook_id, files, scheduler
+            notebook_id, files, scheduler, agent_profile_id
         )
 
     def _set_source_status(
@@ -1689,6 +1691,35 @@ class RepositoryFacade:
     def process_source(self, source_id: str) -> SourceSummary:
         return self._runtime.source_ingestion.process_source_compat(source_id)
 
+    def source_parse_busy(self, source_id: str, *, timeout: float = 0.0) -> bool:
+        """Is this source's parse pipeline running right now?
+
+        A bounded PROBE of the ingestion service's own per-source chunk lock —
+        the same mutex ``process_source`` holds continuously from
+        ``replace_elements`` through ``build_chunks``, and the same one
+        ``CommandCatalogService._source_write_barrier`` takes to serialize
+        against it. Taking it and immediately dropping it answers "is a parse
+        in flight" without inventing a second status signal (``parse_status``
+        is written at stage boundaries and would report ``parsed`` in the
+        middle of chunk building).
+
+        Exposed as a boolean rather than by re-exporting the context manager
+        because the one caller (MCP's ``reparse_source``) cannot hold the lock
+        across its own submit anyway: it hands the work to the background
+        scheduler and returns. The residual race — idle at probe time, busy by
+        the time the job thread starts — is accepted and documented on that
+        tool; ``process_source`` serializes on this very lock, so the worst
+        case is duplicated work, never interleaved writes.
+
+        ``timeout`` is the bounded acquire wait, in seconds, forwarded verbatim
+        to ``try_hold_source_chunk_lock``. The default 0.0 makes this a
+        non-blocking probe.
+        """
+        with self._runtime.source_ingestion.try_hold_source_chunk_lock(
+            source_id, timeout=timeout
+        ) as acquired:
+            return not acquired
+
     def parse_source(self, source_id: str) -> SourceSummary:
         return self._runtime.source_ingestion.parse_source_compat(source_id)
 
@@ -1729,6 +1760,34 @@ class RepositoryFacade:
         return self._runtime.source_store.source_elements_page(
             source_id, offset, limit, anchor_element_id
         )
+
+    def source_metadata(
+        self, source_ids: Sequence[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """The narrow source-card projection (one SQL, no paper-author/element
+        -count/KG hydration), keyed by source id.
+
+        Exposed on the facade for MCP's ``get_cited_element``: a citation
+        point-read needs the owning notebook, the source type and the display
+        -title columns, and nothing else — ``get_source`` would fan out into
+        paper authors, an element ``COUNT(*)``, a KG ``EXISTS`` and the private
+        ``error_message``, every one of which that caller discards. Agents call
+        the point-read in a loop, so the discarded work is the whole cost.
+        """
+        return self._runtime.source_store.source_metadata(source_ids)
+
+    def evidence_elements(
+        self, element_ids: Sequence[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Raw ``source_elements`` rows by id (one primary-key SQL), the same
+        reader ``EvidenceContextService`` hydrates citations from.
+
+        ``metadata`` arrives as the stored JSON TEXT on both backends, which is
+        exactly the carrier ``evidence_context._knowhow_ref`` parses — so a
+        consumer that needs both the element and its knowhow pointer reuses
+        that one judgement instead of restating it.
+        """
+        return self._runtime.source_store.evidence_elements(element_ids)
 
     def delete_source(self, source_id: str) -> None:
         return self._runtime.source_ingestion.delete_source_compat(source_id)
@@ -3323,9 +3382,14 @@ class RepositoryFacade:
     def _mix_retrieve(self, notebook_id: str, query: str, hl: str, sub_queries: list) -> tuple:
         return self.retrieval.candidates._mix_retrieve(notebook_id, query, hl, sub_queries)
 
-    def _participant_notebook_ids(self, notebook_id: str) -> List[str]:
+    def participant_notebook_ids(self, notebook_id: str) -> List[str]:
         """联邦参与库:active 在首位 + 全部 base tier(与 _ppr_graph/federated_retrieve
-        的内联谓词一致;此 helper v1 只供新代码使用,存量调用点不迁移)。"""
+        的内联谓词一致;此 helper v1 只供新代码使用,存量调用点不迁移)。
+
+        公开(v1 落地时叫 `_participant_notebook_ids`,零调用点)是因为它现在有了
+        facade **外部**的消费方:MCP 的 `get_cited_element` 拿注入的 repository 去做
+        「引用点查」的参与集校验——deps 里的 `notebook_store_port()` 是浏览器侧
+        (FastAPI 依赖)的取数口,MCP 不经过它。唯一定义点仍是 mount_sql.py。"""
         return self._runtime.notebook_store.participant_notebook_ids(notebook_id)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],

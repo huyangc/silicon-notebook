@@ -37,6 +37,16 @@ PUBLIC_TOOLS = {
     "get_knowhow_discrimination",
     "get_knowhow_row",
     "put_knowhow_cell_code",
+    # Citation point-read: dereference an ask/search result's
+    # source_id+element_id back to the source text it came from.
+    "get_cited_element",
+    # Source management. delete_source additionally requires that an Agent
+    # created the row it is asked to remove.
+    "add_source_text",
+    "add_source_url",
+    "get_source_status",
+    "reparse_source",
+    "delete_source",
 }
 MCP_OUTPUT_BUDGET = 12_000
 
@@ -158,6 +168,14 @@ def mcp_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "")
     monkeypatch.setenv("EMBED_PROVIDER", "")
+    # MinerU must be cleared EXPLICITLY (repo red line): pydantic-settings would
+    # otherwise read the repository-root .env and give these tests a real cloud
+    # token, at which point add_source_url's probe path could reach the network.
+    # Cleared here rather than per-test because Settings is captured when the
+    # fixture builds the app — a later monkeypatch would not reach the runtime.
+    monkeypatch.setenv("MINERU_MODE", "off")
+    monkeypatch.setenv("MINERU_API_URL", "")
+    monkeypatch.setenv("MINERU_API_TOKEN", "")
     # Startup declares the public deployment as HTTPS and pins the strict
     # (fail-closed) policy so the runtime transport still rejects a remote
     # client that reaches ASGI over plain HTTP. The product default is now
@@ -218,6 +236,7 @@ def mcp_env(tmp_path, monkeypatch):
         "notebook": notebook,
         "other": other,
         "profile_a": profile_a,
+        "bob_profile": bob_profile,
         "token_a": token_a,
         "token_b": token_b,
         "restricted": restricted,
@@ -447,7 +466,309 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_experimental_graph(mcp_env
         ))
         assert answer["mode"] == "chunk"
         assert "answer" in answer
+        # conversation_id round-trips (AskResponse.conversation_id is always
+        # non-empty on success) and anchors/citations project the fields the
+        # frontend needs to jump straight to the backing element/knowhow row.
+        assert answer["conversation_id"]
+        assert answer["anchors"]
+        assert all(
+            "source_id" in anchor and "element_id" in anchor
+            for anchor in answer["anchors"]
+        )
+        assert answer["anchors"][0]["source_id"] == "mcp-ask-source"
+        assert answer["citations"]
+        assert all(
+            citation["content_is_untrusted_evidence"] is True
+            for citation in answer["citations"]
+        )
+        assert answer["citations"][0]["source_id"] == "mcp-ask-source"
+        # Passing the returned conversation_id back continues the same
+        # conversation instead of silently starting a new one.
+        followup = _payload(await client.call(
+            "ask_notebook",
+            {
+                "question": "What else is here?",
+                "mode": "chunk",
+                "conversation_id": answer["conversation_id"],
+            },
+        ))
+        assert followup["conversation_id"] == answer["conversation_id"]
     assert "ask_answer" in repo._runtime.models._test_chat_calls
+
+
+def _fake_notebook_summary(mcp_env):
+    return mcp_env["notebook"].model_copy(update={"ask_available": True})
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
+    mcp_env, monkeypatch
+):
+    """P1 mutation guard: exact-value assertions (not presence/upper-bound
+    checks) for every field the ask_notebook projection adds. This is a small,
+    controlled payload -- one anchor/citation with knowhow, one without, and
+    over-limit quoted_span/source_file_name strings -- specifically so neither
+    the citations sub-budget fit nor the global convergence loop touches
+    anything, and the field_limits truncation math is exactly predictable.
+    Mutations this must catch (verified by replay, see task report):
+      1. deleting the anchors/citations knowhow projection blocks
+      2. citation.element_id -> "" (dropping the real value)
+      3. deleting the quoted_span/source_file_name field_limits entries
+    """
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+
+    long_quoted_span = "证据原文内容片段" * 40  # 320 chars, over the 200-char limit
+    long_file_name = "really-long-file-name-that-exceeds-the-limit-" * 8  # >300 chars
+
+    monkeypatch.setattr(
+        service,
+        "ask",
+        lambda *a, **k: SimpleNamespace(
+            answer_id="ans-precise",
+            answer="Answer [k1].",
+            conclusion="Answer.",
+            grounded=True,
+            evidence_level="grounded",
+            mode="chunk",
+            conversation_id="conv-precise",
+            anchors=[
+                SimpleNamespace(
+                    key="k1", object_id="obj-1", object_type="concept",
+                    label="Anchor label", source_title="Source A",
+                    location_label="1.1", source_id="anchor-source-1",
+                    element_id="anchor-element-1", tier="personal",
+                    provenance={},
+                    knowhow=SimpleNamespace(table_id="tbl-1", row_id="row-1"),
+                ),
+                SimpleNamespace(
+                    key="k2", object_id="obj-2", object_type="concept",
+                    label="Anchor label 2", source_title="Source B",
+                    location_label="1.2", source_id="anchor-source-2",
+                    element_id="anchor-element-2", tier="personal",
+                    provenance={}, knowhow=None,
+                ),
+            ],
+            citations=[
+                SimpleNamespace(
+                    label="Citation A", source_id="citation-source-1",
+                    element_id="citation-element-1", location_label="1.1",
+                    quoted_span=long_quoted_span, source_file_name=long_file_name,
+                    tier="personal", notebook_id="", memory_id="",
+                    knowhow=SimpleNamespace(table_id="tbl-2", row_id="row-2"),
+                ),
+                SimpleNamespace(
+                    label="Citation B", source_id="citation-source-2",
+                    element_id="citation-element-2", location_label="1.2",
+                    quoted_span="short span", source_file_name="short.md",
+                    tier="personal", notebook_id="", memory_id="",
+                    knowhow=None,
+                ),
+            ],
+        ),
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "precise fields", "mode": "chunk"}
+        ))
+
+    anchors = answer["anchors"]
+    assert anchors[0]["knowhow"] == {"table_id": "tbl-1", "row_id": "row-1"}
+    assert "knowhow" not in anchors[1]
+
+    citations = answer["citations"]
+    assert citations[0]["source_id"] == "citation-source-1"
+    assert citations[0]["element_id"] == "citation-element-1"
+    assert citations[0]["knowhow"] == {"table_id": "tbl-2", "row_id": "row-2"}
+    assert citations[1]["element_id"] == "citation-element-2"
+    assert "knowhow" not in citations[1]
+    # Empty notebook_id/memory_id are OMITTED, matching get_cited_element's rule
+    # for the same field: a same-notebook citation restates the notebook the
+    # Agent selected, and a non-Memory citation has no memory. Both fixtures
+    # above carry "" for both fields, which is the ordinary case.
+    for citation in citations:
+        assert "notebook_id" not in citation
+        assert "memory_id" not in citation
+
+    # field_limits truncation is exact: value[:limit-1] + "…" (len == limit).
+    assert citations[0]["quoted_span"] == long_quoted_span[:199] + "…"
+    assert len(citations[0]["quoted_span"]) == 200
+    assert citations[0]["source_file_name"] == long_file_name[:299] + "…"
+    assert len(citations[0]["source_file_name"]) == 300
+    # The untouched short citation proves the limit only clips, never pads.
+    assert citations[1]["quoted_span"] == "short span"
+    assert citations[1]["source_file_name"] == "short.md"
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_preserves_answer_text_under_realistic_citation_load(
+    mcp_env, monkeypatch
+):
+    """P0: with a realistic (non-adversarial) CJK payload -- an answer sized
+    like a real synthesis, plus one citation per retrieved chunk at the
+    chunk_mmr_k=16 default -- the shared _budget_response convergence loop
+    must never shrink the answer text to make room for citations.
+
+    Before citations_budget_chars, this broke in production: _serialized_size
+    counts UTF-8 bytes (3 bytes/CJK char), but the convergence loop's
+    _shrink_longest_string picks its victim by Python len() (characters).
+    "answer" (field-limited to 6000 chars) was reliably the single longest
+    string by character count and got halved repeatedly to make room for an
+    unbounded citations list -- collapsing a ~900-character Chinese answer to
+    ~112 characters in a real repro.
+    """
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+
+    filler = "知识图谱检索增强生成技术在企业级应用中的落地实践与挑战分析"
+
+    def zh_text(n: int) -> str:
+        return (filler * (n // len(filler) + 1))[:n]
+
+    answer_text = zh_text(1500)
+    conclusion_text = zh_text(150)
+    anchors = [
+        SimpleNamespace(
+            key=f"k{i + 1}", object_id=f"obj-{i}", object_type="concept",
+            label=zh_text(20), source_title=zh_text(15),
+            location_label=f"2.{i}", source_id=f"source-{i}",
+            element_id=f"element-{i}", tier="personal", provenance={},
+            knowhow=None,
+        )
+        for i in range(8)
+    ]
+    citations = [
+        SimpleNamespace(
+            label=zh_text(15) + f" · {i}", source_id=f"source-{i}",
+            element_id=f"element-{i}", location_label=f"2.{i}",
+            quoted_span=zh_text(200), source_file_name=f"doc-{i}.md",
+            tier="personal", notebook_id="", memory_id="", knowhow=None,
+        )
+        for i in range(16)
+    ]
+    monkeypatch.setattr(
+        service,
+        "ask",
+        lambda *a, **k: SimpleNamespace(
+            answer_id="ans-realistic", answer=answer_text,
+            conclusion=conclusion_text, grounded=True,
+            evidence_level="grounded", mode="chunk",
+            conversation_id="conv-realistic",
+            anchors=anchors, citations=citations,
+        ),
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "realistic load", "mode": "chunk"}
+        ))
+    # The core guardrail: answer survives byte-for-byte, and the response
+    # still fits the public MCP JSON budget.
+    assert answer["answer"] == answer_text
+    _assert_budgeted(answer)
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_rejects_conversation_id_over_max_length(mcp_env):
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        rejected = await client.call(
+            "ask_notebook",
+            {
+                "question": "anything",
+                "mode": "chunk",
+                "conversation_id": "c" * 201,
+            },
+        )
+        assert rejected.isError
+        assert "too long" in rejected.content[0].text
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
+    mcp_env, monkeypatch
+):
+    """Additional locked-in fix: chunk/reasoning ask unconditionally builds a
+    Citation row for confirmed-Memory hits (Citation.memory_id non-empty). A
+    token lacking memory:read must not see that row -- mirrors
+    search_notebook_context's allow_memory gate exactly (same scope probe,
+    same PermissionError-as-deny semantics), filtered at citation_rows
+    construction so it never reaches the wire."""
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+
+    def fake_ask(*_a, **_k):
+        return SimpleNamespace(
+            answer_id="ans-memscope", answer="Answer [k1].", conclusion="Answer.",
+            grounded=True, evidence_level="grounded", mode="chunk",
+            conversation_id="conv-memscope", anchors=[],
+            citations=[
+                SimpleNamespace(
+                    label="Memory hit", source_id="", element_id="",
+                    location_label="", quoted_span="memory content",
+                    source_file_name="", tier="personal", notebook_id="",
+                    memory_id="mem-1", knowhow=None,
+                ),
+                SimpleNamespace(
+                    label="Source hit", source_id="source-1", element_id="element-1",
+                    location_label="1", quoted_span="source content",
+                    source_file_name="doc.md", tier="personal", notebook_id="",
+                    memory_id="", knowhow=None,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(service, "ask", fake_ask)
+
+    ask_only_token = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["ask:execute"],
+        notebook_id, [notebook_id], None,
+    )
+    full_scopes = [
+        "knowledge:read", "memory:read", "memory:read_candidates",
+        "memory:propose", "ask:execute",
+    ]
+    full_token = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, full_scopes,
+        notebook_id, [notebook_id], None,
+    )
+    # The MCP session manager can only .run() once per app instance, so both
+    # tokens share one outer lifespan (mirrors
+    # test_notebook_selection_is_required_and_session_scoped's pattern).
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, ask_only_token.token, manage_lifespan=False
+        ) as client:
+            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+            without_scope = _payload(await client.call(
+                "ask_notebook", {"question": "memory scoping", "mode": "chunk"}
+            ))
+        memory_ids = {c.get("memory_id") for c in without_scope["citations"]}
+        assert "mem-1" not in memory_ids
+        assert any(c["source_id"] == "source-1" for c in without_scope["citations"])
+        # A scope-filtered row leaves NO trace in the truncation stats (this is
+        # the search_notebook_context gate's behaviour, and it is the point):
+        # a non-zero `omitted_items` here would tell a token without
+        # memory:read exactly how many private Memory citations back this
+        # answer -- the count is itself the disclosure.
+        assert without_scope["truncation"]["truncated"] is False
+        assert _omitted_total(without_scope) == 0
+
+        async with OfficialMcpClient(
+            app, full_token.token, manage_lifespan=False
+        ) as client:
+            _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+            with_scope = _payload(await client.call(
+                "ask_notebook", {"question": "memory scoping", "mode": "chunk"}
+            ))
+        assert any(c.get("memory_id") == "mem-1" for c in with_scope["citations"])
 
 
 @pytest.mark.anyio
@@ -648,6 +969,7 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
             grounded=True,
             evidence_level="source",
             mode="chunk",
+            conversation_id="conversation-budget-id",
             anchors=[
                 SimpleNamespace(
                     key=f"k_{index}",
@@ -656,8 +978,32 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
                     label=sentinel * 500,
                     source_title=sentinel * 500,
                     location_label=sentinel * 500,
+                    source_id=f"anchor-source-{index}",
+                    element_id=f"anchor-element-{index}",
                     tier="personal",
                     provenance={"nested": [sentinel * 100 for _ in range(100)]},
+                    knowhow=(
+                        SimpleNamespace(table_id="anchor-table-0", row_id="anchor-row-0")
+                        if index == 0 else None
+                    ),
+                )
+                for index in range(20)
+            ],
+            citations=[
+                SimpleNamespace(
+                    label=sentinel * 500,
+                    source_id=f"citation-source-{index}",
+                    element_id=f"citation-element-{index}",
+                    location_label=sentinel * 500,
+                    quoted_span=sentinel * 2_000,
+                    source_file_name=sentinel * 500,
+                    tier="personal",
+                    notebook_id=f"citation-notebook-{index}",
+                    memory_id="",
+                    knowhow=(
+                        SimpleNamespace(table_id="citation-table-0", row_id="citation-row-0")
+                        if index == 0 else None
+                    ),
                 )
                 for index in range(20)
             ],
@@ -723,11 +1069,26 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
     assert detail["memory_id"] == record.id
     assert detail["notebook_id"] == notebook_id
     ask = responses["ask_notebook"]
+    assert ask["conversation_id"] == "conversation-budget-id"
     assert _json_chars(ask["anchors"]) <= 3_500
     assert ask["anchors"]
     assert all(_json_chars(anchor["provenance"]) <= 500 for anchor in ask["anchors"])
     assert ask["anchors"][0]["key"] == "k_0"
     assert ask["anchors"][0]["object_id"] == "object-0"
+    assert ask["anchors"][0]["source_id"] == "anchor-source-0"
+    assert ask["anchors"][0]["element_id"] == "anchor-element-0"
+    assert ask["citations"]
+    assert all(
+        citation["content_is_untrusted_evidence"] is True
+        for citation in ask["citations"]
+    )
+    # The exact quoted_span (200)/source_file_name (300) field_limits are
+    # covered by test_ask_notebook_projects_precise_anchor_and_citation_fields
+    # with a small payload that never reaches the citations sub-budget fit or
+    # the global convergence loop -- both of which crush every string well
+    # under those limits here regardless of whether field_limits fires at
+    # all, making an upper-bound assertion on this adversarial payload
+    # vacuously true and unable to catch a dropped field_limits entry.
     for name, payload in responses.items():
         _assert_budgeted(payload)
         assert payload["truncation"]["truncated"] is True, name
@@ -1288,3 +1649,849 @@ async def test_knowhow_agent_tool_responses_respect_serialized_budget(mcp_env):
 
         row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
         _assert_budgeted(row)
+
+
+# --- get_cited_element: 引用点查 -------------------------------------------
+# 界面上「点 [k] 看原文」的 MCP 等价物。能力面刻意不超过一次 Ask 已经授权披露的
+# 范围,所以它复用的是浏览器代理读取那条同一份判据
+# (`source_routes.source_readable_in_participant_scope`),而不是另写一遍。
+_CITED_NOW = "2026-05-05T06:07:08"
+
+
+def _seed_cited_source(
+    repo,
+    notebook_id: str,
+    tag: str,
+    *,
+    source_type: str = "document",
+    title: str = "",
+    element_type: str = "formula",
+    location_label: str = "第 2 页",
+    text: str = "E = mc^2",
+    element_metadata: str = "{}",
+    paper_title: str = "",
+) -> dict:
+    """在 ``notebook_id`` 里插一条最小可读来源(1 个元素)。
+
+    直插行而不跑摄取管线:本组用例只关心**授权口径与投影字段**,解析/嵌入/抽取
+    都与之无关(与 test_multi_domain_bases 里代理读取那组同款做法)。
+    """
+    source_id = f"src-{tag}"
+    element_id = f"el-{tag}"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (source_id, notebook_id, title or f"{tag} 讲义", source_type,
+             "ready", _CITED_NOW, _CITED_NOW),
+        )
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (element_id, source_id, element_type, location_label, text,
+             element_metadata, _CITED_NOW),
+        )
+        if paper_title:
+            db.execute(
+                "INSERT INTO source_paper_meta "
+                "(source_id,notebook_id,is_paper,paper_title,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (source_id, notebook_id, 1, paper_title, _CITED_NOW, _CITED_NOW),
+            )
+    return {"source_id": source_id, "element_id": element_id}
+
+
+@pytest.mark.anyio
+async def test_get_cited_element_dereferences_a_citation_to_its_source_text(mcp_env):
+    """Happy path with exact values (not presence checks) for every projected
+    field, so a mutation to any one of them shows up here:
+      - the element's own type/text/location, keyed by the id that was asked
+        for (never the source's first element, see the miss cases below);
+      - ``source_title`` taken from the ONE display-title rule
+        (``source_display.source_display_title``): a grounded paper title
+        outranks the uploaded file name, which is exactly what a second,
+        locally re-written title rule would get wrong;
+      - the knowhow row pointer when the element carries one, absent when not;
+      - ``notebook_id`` omitted for same-notebook evidence;
+      - no ``file_path``/``error_message``, mirroring ``ScopedSourceDetail``.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    plain = _seed_cited_source(repo, notebook_id, "cited-plain")
+    cell = _seed_cited_source(
+        repo, notebook_id, "cited-knowhow",
+        element_type="knowhow_cell", location_label="第 3 行 · 步骤",
+        text="先做 kelvin 保护环",
+        element_metadata=json.dumps(
+            {"knowhow": {"table_id": "tbl-7", "row_id": "row-9"}}
+        ),
+    )
+    paper = _seed_cited_source(
+        repo, notebook_id, "cited-paper",
+        title="1706.03762.pdf", paper_title="Attention Is All You Need",
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+
+        payload = _payload(await client.call("get_cited_element", {
+            "source_id": plain["source_id"], "element_id": plain["element_id"],
+        }))
+        assert payload["source_id"] == "src-cited-plain"
+        assert payload["element_id"] == "el-cited-plain"
+        assert payload["element_type"] == "formula"
+        assert payload["text"] == "E = mc^2"
+        assert payload["location_label"] == "第 2 页"
+        assert payload["source_title"] == "cited-plain 讲义"
+        assert payload["content_is_untrusted_evidence"] is True
+        assert "notebook_id" not in payload, "同库证据不复述 Agent 自己选的库"
+        assert "knowhow" not in payload, "普通元素没有可跳的格子"
+        assert "file_path" not in payload and "error_message" not in payload
+        _assert_budgeted(payload)
+
+        knowhow_payload = _payload(await client.call("get_cited_element", {
+            "source_id": cell["source_id"], "element_id": cell["element_id"],
+        }))
+        assert knowhow_payload["knowhow"] == {"table_id": "tbl-7", "row_id": "row-9"}
+        assert knowhow_payload["element_type"] == "knowhow_cell"
+
+        paper_payload = _payload(await client.call("get_cited_element", {
+            "source_id": paper["source_id"], "element_id": paper["element_id"],
+        }))
+        assert paper_payload["source_title"] == "Attention Is All You Need"
+
+
+@pytest.mark.anyio
+async def test_get_cited_element_rejects_ids_it_cannot_ground(mcp_env):
+    """Three misses that must all fail rather than return *something*.
+
+    The middle one is the load-bearing case, and it is an AUTHORIZATION check,
+    not tidiness: ``evidence_elements`` looks an element up by its own id with
+    no source predicate at all, so pairing source A's id with source B's
+    element id would hand back B's text under A's title. That pairing is also
+    exactly how a caller would probe a source it is not allowed to open. The
+    unknown-source case stays indistinguishable from the unauthorized one (no
+    existence disclosure).
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    plain = _seed_cited_source(repo, notebook_id, "miss-plain")
+    elsewhere = _seed_cited_source(
+        repo, notebook_id, "miss-elsewhere", text="别的来源的正文"
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+
+        assert (await client.call("get_cited_element", {
+            "source_id": plain["source_id"], "element_id": "el-does-not-exist",
+        })).isError
+        crossed = await client.call("get_cited_element", {
+            "source_id": plain["source_id"],
+            "element_id": elsewhere["element_id"],
+        })
+        assert crossed.isError, "元素必须属于入参 source,否则就是一次跨来源探测"
+        assert "别的来源的正文" not in json.dumps(
+            [item.text for item in crossed.content], ensure_ascii=False
+        )
+        assert (await client.call("get_cited_element", {
+            "source_id": "src-does-not-exist",
+            "element_id": plain["element_id"],
+        })).isError
+
+
+@pytest.mark.anyio
+async def test_get_cited_element_requires_knowledge_read_and_a_selected_notebook(
+    mcp_env,
+):
+    """The two authentication gates every data tool shares, on this one:
+    a token without ``knowledge:read`` (the restricted fixture holds only
+    ``memory:read``) and a session that never called ``select_notebook``."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = _seed_cited_source(repo, notebook_id, "gated")
+    arguments = {
+        "source_id": seeded["source_id"], "element_id": seeded["element_id"],
+    }
+
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["restricted"].token, manage_lifespan=False
+        ) as restricted:
+            _payload(await restricted.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            assert (await restricted.call("get_cited_element", arguments)).isError
+
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            assert (await client.call("get_cited_element", arguments)).isError
+            _payload(await client.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            assert not (await client.call("get_cited_element", arguments)).isError
+
+
+@pytest.mark.anyio
+async def test_get_cited_element_follows_the_participant_set_not_the_allowlist(
+    mcp_env,
+):
+    """Scope is the SELECTED notebook's live participant set (itself plus the
+    reference libraries it currently mounts) — NOT the token's allowlist.
+
+    The allowlist deliberately does NOT cover ``other`` and DOES cover a third
+    notebook that is never mounted, so the two axes are pinned in both
+    directions and neither can be mistaken for the other:
+      - in the allowlist, not a participant (``unmounted``) → denied. "This
+        token may select that notebook" must never double as "that notebook's
+        sources are readable from here".
+      - not in the allowlist, but mounted (``other``) → readable, and it
+        reports the library the source really belongs to (``notebook_id``),
+        which is how the Agent knows the quote is not from the notebook it
+        selected. Reading the allowlist instead of the mount would deny this.
+    Plus: a hidden synthetic (memory/knowhow) source stays unreachable ACROSS
+    libraries — Memory is owner-private and a projection row is not a user
+    document — while the same-notebook case keeps its existing behaviour
+    (tightening that belongs to its own change).
+    """
+    repo = repository()
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    other_id = mcp_env["other"].id
+    marker = set_request_user(mcp_env["alice"])
+    try:
+        unmounted = notebook_catalog_repository().create_notebook(
+            NotebookCreate(name="Allowlisted but never mounted")
+        )
+    finally:
+        reset_request_user(marker)
+    base_doc = _seed_cited_source(
+        repo, other_id, "base-doc", text="参考库里的原文", location_label="第 9 页"
+    )
+    base_memory = _seed_cited_source(
+        repo, other_id, "base-memory", source_type="memory"
+    )
+    own_memory = _seed_cited_source(
+        repo, notebook_id, "own-memory", source_type="memory"
+    )
+    unmounted_doc = _seed_cited_source(repo, unmounted.id, "allowlisted-only")
+    scoped_token = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["knowledge:read"],
+        notebook_id, [notebook_id, unmounted.id], None,
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], scoped_token.token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+
+        assert (await client.call("get_cited_element", {
+            "source_id": unmounted_doc["source_id"],
+            "element_id": unmounted_doc["element_id"],
+        })).isError, "在 allowlist 里但不在参与集内:能选中 ≠ 来源可读"
+        assert (await client.call("get_cited_element", {
+            "source_id": base_doc["source_id"],
+            "element_id": base_doc["element_id"],
+        })).isError, "未挂载时,别的库的来源与不存在同义"
+
+        service.replace_notebook_bases(notebook_id, [other_id], mcp_env["alice"].id)
+
+        mounted = _payload(await client.call("get_cited_element", {
+            "source_id": base_doc["source_id"],
+            "element_id": base_doc["element_id"],
+        }))
+        assert mounted["text"] == "参考库里的原文"
+        assert mounted["location_label"] == "第 9 页"
+        assert mounted["notebook_id"] == other_id
+        assert "file_path" not in mounted and "error_message" not in mounted
+        _assert_budgeted(mounted)
+
+        # The mount did not widen the allowlist axis back open either.
+        assert (await client.call("get_cited_element", {
+            "source_id": unmounted_doc["source_id"],
+            "element_id": unmounted_doc["element_id"],
+        })).isError
+
+        assert (await client.call("get_cited_element", {
+            "source_id": base_memory["source_id"],
+            "element_id": base_memory["element_id"],
+        })).isError, "跨库的隐藏合成源一律不代理"
+        assert not (await client.call("get_cited_element", {
+            "source_id": own_memory["source_id"],
+            "element_id": own_memory["element_id"],
+        })).isError, "同库合成源保持既有行为不变"
+
+
+# --------------------------------------------------------------------------- #
+# Agent source management: add_source_text / add_source_url / get_source_status
+# / reparse_source / delete_source.
+# --------------------------------------------------------------------------- #
+_SOURCE_READ = ["knowledge:read"]
+_SOURCE_WRITE = ["knowledge:read", "sources:write"]
+_SOURCE_DELETE = ["knowledge:read", "sources:delete"]
+_SOURCE_FULL = ["knowledge:read", "sources:write", "sources:delete"]
+
+
+def _agent_token(mcp_env, scopes, *, user="alice", notebook_ids=None) -> str:
+    """Issue a raw Agent token for ``user`` with exactly ``scopes``.
+
+    The mcp_env fixture's own tokens deliberately carry only the read/propose
+    scopes, so every source test mints its own — which is also how each test
+    pins that one scope, and no more, is what opens its tool.
+    """
+    notebook_ids = notebook_ids or [mcp_env["notebook"].id]
+    profile = mcp_env["profile_a"] if user == "alice" else mcp_env["bob_profile"]
+    return mcp_env["service"].issue_agent_token(
+        mcp_env[user].id, profile.id, scopes,
+        notebook_ids[0], notebook_ids, None,
+    ).token
+
+
+@pytest.fixture
+def scheduled_jobs(monkeypatch):
+    """Capture background submissions instead of running them.
+
+    Both add_source_text and reparse_source hand parsing to
+    ``kg_scheduler.submit_job``. Letting that run would start a real
+    parse/embed/extract pipeline on a worker thread mid-test; capturing it
+    keeps these tests about the tool contract AND lets them assert that the
+    work was actually queued (which a swallowed submit could not be
+    distinguished from).
+    """
+    from app.services.kg import scheduler as kg_scheduler
+
+    calls: list = []
+    monkeypatch.setattr(
+        kg_scheduler, "submit_job",
+        lambda fn, *args, **kwargs: calls.append((fn, args)),
+    )
+    return calls
+
+
+def _stored_provenance(repo, source_id: str):
+    """The RAW v48 column — the thing `agent_created` is derived from."""
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT agent_profile_id FROM sources WHERE id = ?", (source_id,)
+        ).fetchone()
+    return None if row is None else row["agent_profile_id"]
+
+
+def _source_row_exists(repo, source_id: str) -> bool:
+    with repo._connect() as db:
+        return db.execute(
+            "SELECT 1 FROM sources WHERE id = ?", (source_id,)
+        ).fetchone() is not None
+
+
+@pytest.mark.anyio
+async def test_add_source_text_files_agent_authored_markdown(mcp_env, scheduled_jobs):
+    """Happy path with exact values: the row exists, carries this Agent's
+    profile id in the raw provenance column, is queued for the ordinary
+    background parse, and reports itself as Agent-added."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call("add_source_text", {
+            "title": "时钟树收敛方案",
+            "content_md": "# 时钟树\n\n先做 useful skew。\n",
+        }))
+
+    assert payload["reused"] is False
+    assert payload["agent_created"] is True
+    assert payload["parse_status"] == "queued"
+    # The title becomes the stored .md file name — that is what makes the
+    # source recognisable in the sources tab afterwards.
+    assert payload["title"] == "时钟树收敛方案.md"
+    _assert_budgeted(payload)
+
+    source_id = payload["source_id"]
+    assert _stored_provenance(repo, source_id) == mcp_env["profile_a"].id
+    detail = repo.get_source(source_id)
+    assert detail.notebook_id == notebook_id
+    assert detail.agent_created is True
+    # Queued through the ordinary ingestion scheduler, not a bespoke path.
+    assert [args for _fn, args in scheduled_jobs] == [(source_id,)]
+
+
+@pytest.mark.anyio
+async def test_add_source_text_reusing_a_user_source_does_not_claim_it(
+    mcp_env, scheduled_jobs
+):
+    """Content dedup must not launder provenance.
+
+    A person uploads bytes; the Agent later files the identical text. The
+    existing row is reused (no duplicate document), and it stays user-added —
+    which is precisely what keeps delete_source from removing it afterwards.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    body = "# 共享内容\n\n同样的字节。\n"
+    marker = set_request_user(mcp_env["alice"])
+    try:
+        from app.repositories.ports import UploadedSourceFile
+
+        human = repo.upload_sources(
+            notebook_id,
+            [UploadedSourceFile("人写的.md", "text/markdown", body.encode("utf-8"))],
+            lambda source_id: None,
+        )
+    finally:
+        reset_request_user(marker)
+    assert _stored_provenance(repo, human[0].id) is None
+
+    token = _agent_token(mcp_env, _SOURCE_FULL)
+    app = mcp_env["app"]
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(app, token, manage_lifespan=False) as client:
+            _payload(await client.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            payload = _payload(await client.call("add_source_text", {
+                "title": "换个标题", "content_md": body,
+            }))
+            assert payload["source_id"] == human[0].id
+            assert payload["reused"] is True
+            assert payload["agent_created"] is False, (
+                "复用既有行不得改写出处——否则一次重传就能拿到删除权"
+            )
+            # And the reused row is genuinely still undeletable through MCP.
+            refused = await client.call(
+                "delete_source", {"source_id": human[0].id}
+            )
+            assert refused.isError
+
+    assert _stored_provenance(repo, human[0].id) is None
+    assert _source_row_exists(repo, human[0].id)
+    assert len(repo.list_sources(notebook_id)) == 1
+
+
+@pytest.mark.anyio
+async def test_add_source_text_rejects_bad_envelopes_before_touching_the_repo(
+    mcp_env, monkeypatch, scheduled_jobs
+):
+    """Blank title, blank body and an over-limit body all fail, and none of
+    them creates a row. The size ceiling is the deployment's own
+    ``source_upload_max_bytes``, measured on UTF-8 BYTES — a character count
+    would let a CJK body through at three times the configured limit."""
+    from app.api import mcp_server
+
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(
+        mcp_server, "get_settings",
+        lambda: SimpleNamespace(source_upload_max_bytes=64),
+    )
+    # 30 characters, 90 UTF-8 bytes: under a naive character check, over the
+    # real byte budget.
+    oversized = "很长的中文正文内容需要被拒绝掉哦" * 2
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert (await client.call("add_source_text", {
+            "title": "   ", "content_md": "有内容",
+        })).isError
+        assert (await client.call("add_source_text", {
+            "title": "标题", "content_md": "   \n  ",
+        })).isError
+        too_big = await client.call("add_source_text", {
+            "title": "标题", "content_md": oversized,
+        })
+        assert too_big.isError
+        assert len(oversized) < 64 < len(oversized.encode("utf-8"))
+        # Just under the same ceiling still lands.
+        assert not (await client.call("add_source_text", {
+            "title": "标题", "content_md": "ok",
+        })).isError
+
+    assert len(repo.list_sources(notebook_id)) == 1
+
+
+@pytest.mark.anyio
+async def test_add_source_text_honours_the_notebook_document_limit(
+    mcp_env, scheduled_jobs
+):
+    """The per-notebook document ceiling lives in the ROUTER, not in
+    ``upload_sources`` — so an Agent create path that skipped it would simply
+    have no limit at all. Squeeze the owner's effective limit down to one and
+    watch the second document be refused."""
+    repo = repository()
+    identity = identity_repository()
+    notebook_id = mcp_env["notebook"].id
+    identity.set_user_document_limit_override("user-local", mcp_env["alice"].id, 1)
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert not (await client.call("add_source_text", {
+            "title": "第一篇", "content_md": "第一篇正文",
+        })).isError
+        full = await client.call("add_source_text", {
+            "title": "第二篇", "content_md": "第二篇正文",
+        })
+        assert full.isError
+        assert "1" in full.content[0].text
+
+    assert len(repo.list_sources(notebook_id)) == 1
+
+
+@pytest.mark.anyio
+async def test_add_source_url_explains_a_rejected_url_and_a_missing_parser(
+    mcp_env, scheduled_jobs
+):
+    """Two refusals, neither of which touches the network.
+
+    ``MINERU_*`` is cleared by the fixture, so the first call reproduces a
+    deployment with no PDF parser and must say so without naming the
+    deployment's environment variables. With a stub parser configured, an
+    ``ftp://`` URL is rejected by ``probe_pdf``'s scheme check — which returns
+    before any request is made — and the caller gets that reason back.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _SOURCE_WRITE)
+    app = mcp_env["app"]
+
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(app, token, manage_lifespan=False) as client:
+            _payload(await client.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            unconfigured = await client.call(
+                "add_source_url", {"url": "https://example.test/a.pdf"}
+            )
+            assert unconfigured.isError
+            text = unconfigured.content[0].text
+            assert "MINERU" not in text.upper()
+
+            repo._runtime.source_ingestion.mineru_cloud_client = (
+                lambda: SimpleNamespace(configured=True)
+            )
+            try:
+                rejected = await client.call(
+                    "add_source_url", {"url": "ftp://example.test/a.pdf"}
+                )
+                assert rejected.isError
+                assert "http" in rejected.content[0].text
+                assert (await client.call("add_source_url", {"url": "  "})).isError
+            finally:
+                del repo._runtime.source_ingestion.mineru_cloud_client
+
+    assert repo.list_sources(notebook_id) == []
+    assert scheduled_jobs == []
+
+
+@pytest.mark.anyio
+async def test_get_source_status_projects_state_without_the_private_diagnostics(
+    mcp_env,
+):
+    """The projection is exactly the parse/extraction state, plus a DERIVED
+    ``parse_failed`` boolean. ``error_message`` is ``str(exc)`` stored verbatim
+    and routinely carries server-side absolute paths, so it never appears —
+    the same narrowing ``ScopedSourceDetail`` applies to the browser's proxy
+    read. ``file_path`` likewise."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = _seed_cited_source(repo, notebook_id, "status-ok")
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sources SET parse_status='failed', error_message=? WHERE id=?",
+            ("/Users/secret/storage/notebooks/x.pdf 打不开", seeded["source_id"]),
+        )
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_READ)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call(
+            "get_source_status", {"source_id": seeded["source_id"]}
+        ))
+
+    assert payload["source_id"] == seeded["source_id"]
+    assert payload["parse_status"] == "failed"
+    assert payload["parse_failed"] is True
+    assert payload["element_count"] == 1
+    assert payload["kg_extracted"] is False
+    assert payload["agent_created"] is False
+    assert payload["parse_quality_warning"] is False
+    assert "error_message" not in payload and "file_path" not in payload
+    assert "/Users/secret" not in json.dumps(payload, ensure_ascii=False)
+    _assert_budgeted(payload)
+
+
+@pytest.mark.anyio
+async def test_source_tools_see_the_selected_notebook_only_never_the_mounted_set(
+    mcp_env,
+):
+    """Scope for these tools is the SELECTED notebook itself.
+
+    ``get_cited_element`` reads across the participant set because an answer
+    may quote a mounted reference library. Managing documents is the opposite:
+    a mounted library's sources belong to another notebook whose owner never
+    agreed to an Agent re-parsing or deleting them. So ``other`` is mounted
+    here — proving the refusal comes from the notebook boundary and not from
+    the source being unreachable — and hidden memory/knowhow projection rows
+    are refused even inside the selected notebook.
+    """
+    repo = repository()
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    other_id = mcp_env["other"].id
+    mounted = _seed_cited_source(repo, other_id, "mounted-doc")
+    synthetic = _seed_cited_source(
+        repo, notebook_id, "own-synthetic", source_type="memory"
+    )
+    service.replace_notebook_bases(notebook_id, [other_id], mcp_env["alice"].id)
+    # The mount really is live: the citation tool CAN read that same source.
+    token = _agent_token(mcp_env, _SOURCE_FULL)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert not (await client.call("get_cited_element", {
+            "source_id": mounted["source_id"],
+            "element_id": mounted["element_id"],
+        })).isError
+        for tool in ("get_source_status", "reparse_source", "delete_source"):
+            assert (await client.call(
+                tool, {"source_id": mounted["source_id"]}
+            )).isError, f"{tool} 不得跨参考库管理来源"
+            assert (await client.call(
+                tool, {"source_id": synthetic["source_id"]}
+            )).isError, f"{tool} 不得触碰隐藏合成源"
+            assert (await client.call(
+                tool, {"source_id": "src-does-not-exist"}
+            )).isError
+
+    assert _source_row_exists(repo, mounted["source_id"])
+    assert _source_row_exists(repo, synthetic["source_id"])
+
+
+@pytest.mark.anyio
+async def test_reparse_source_queues_one_job_and_refuses_a_source_being_parsed(
+    mcp_env, scheduled_jobs
+):
+    """Re-parse has no single-flight guard behind it — the browser route
+    submits unconditionally — so calling it in a loop would queue N full
+    pipelines for one document. The tool probes the ingestion service's own
+    per-source chunk lock, the same mutex ``process_source`` holds from
+    ``replace_elements`` through ``build_chunks``."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = _seed_cited_source(repo, notebook_id, "reparse-target")
+    ingestion = repo._runtime.source_ingestion
+
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_WRITE)
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call(
+            "reparse_source", {"source_id": seeded["source_id"]}
+        ))
+        assert payload == {
+            "source_id": seeded["source_id"],
+            "queued": True,
+            "truncation": payload["truncation"],
+        }
+        _assert_budgeted(payload)
+        assert [args for _fn, args in scheduled_jobs] == [(seeded["source_id"],)]
+
+        # Hold the real lock from this thread; the tool body runs on an anyio
+        # worker thread, so the contention is genuine.
+        with ingestion.hold_source_chunk_lock(seeded["source_id"]):
+            busy = await client.call(
+                "reparse_source", {"source_id": seeded["source_id"]}
+            )
+        assert busy.isError
+        assert "pars" in busy.content[0].text.lower()
+
+    # The refused call queued nothing extra.
+    assert len(scheduled_jobs) == 1
+
+
+@pytest.mark.anyio
+async def test_delete_source_removes_an_agent_source_but_never_a_user_one(
+    mcp_env, scheduled_jobs
+):
+    """THE safety case for this whole surface.
+
+    A source a person added must survive a delete_source call from a token
+    that holds every source scope and owns the notebook. The only thing
+    standing between the two outcomes is the v48 provenance check, so removing
+    or inverting it turns this test red (mutation-verified; see task report).
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    human = _seed_cited_source(repo, notebook_id, "human-authored")
+    token = _agent_token(mcp_env, _SOURCE_FULL)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        agent_source = _payload(await client.call("add_source_text", {
+            "title": "Agent 写的", "content_md": "Agent 自己的产物。",
+        }))["source_id"]
+
+        refused = await client.call(
+            "delete_source", {"source_id": human["source_id"]}
+        )
+        assert refused.isError
+        assert "user" in refused.content[0].text.lower()
+        assert _source_row_exists(repo, human["source_id"]), (
+            "用户添加的来源必须原样留在库里"
+        )
+
+        deleted = _payload(await client.call(
+            "delete_source", {"source_id": agent_source}
+        ))
+        assert deleted["deleted"] is True
+        _assert_budgeted(deleted)
+        assert not _source_row_exists(repo, agent_source)
+
+        # Repeating it AFTER it completed is indistinguishable from deleting
+        # something that never existed — the same no-disclosure shape every
+        # other miss on this surface has. (Two genuinely IN-FLIGHT deletes are
+        # a different case and are safe for a different reason: both get past
+        # the existence read, and `delete_source`'s own
+        # `source_exists_for_update_tx` makes the loser's write a no-op.)
+        assert (await client.call(
+            "delete_source", {"source_id": agent_source}
+        )).isError
+
+
+@pytest.mark.anyio
+async def test_source_scopes_do_not_imply_one_another(mcp_env, scheduled_jobs):
+    """sources:write and sources:delete are separate capabilities, and
+    knowledge:read alone opens neither. Each session below holds exactly one of
+    them and must be refused everything else."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    app = mcp_env["app"]
+    agent_source = ""
+
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, _agent_token(mcp_env, _SOURCE_READ), manage_lifespan=False
+        ) as reader:
+            _payload(await reader.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            assert (await reader.call("add_source_text", {
+                "title": "无权", "content_md": "无权",
+            })).isError
+            assert (await reader.call("add_source_url", {
+                "url": "https://example.test/a.pdf",
+            })).isError
+            assert (await reader.call(
+                "reparse_source", {"source_id": "src-anything"}
+            )).isError
+            assert (await reader.call(
+                "delete_source", {"source_id": "src-anything"}
+            )).isError
+
+        async with OfficialMcpClient(
+            app, _agent_token(mcp_env, _SOURCE_WRITE), manage_lifespan=False
+        ) as writer:
+            _payload(await writer.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            agent_source = _payload(await writer.call("add_source_text", {
+                "title": "可写", "content_md": "可写的正文",
+            }))["source_id"]
+            assert (await writer.call(
+                "delete_source", {"source_id": agent_source}
+            )).isError, "sources:write 不蕴含 sources:delete"
+
+        async with OfficialMcpClient(
+            app, _agent_token(mcp_env, _SOURCE_DELETE), manage_lifespan=False
+        ) as deleter:
+            _payload(await deleter.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            assert (await deleter.call("add_source_text", {
+                "title": "只许删", "content_md": "只许删",
+            })).isError, "sources:delete 不蕴含 sources:write"
+            assert (await deleter.call(
+                "reparse_source", {"source_id": agent_source}
+            )).isError
+            assert not (await deleter.call(
+                "delete_source", {"source_id": agent_source}
+            )).isError
+
+    assert not _source_row_exists(repo, agent_source)
+
+
+@pytest.mark.anyio
+async def test_source_tools_require_a_selected_notebook(mcp_env, scheduled_jobs):
+    """The gate every data tool here shares: no select_notebook, no tool."""
+    async with OfficialMcpClient(
+        mcp_env["app"], _agent_token(mcp_env, _SOURCE_FULL)
+    ) as client:
+        assert (await client.call("add_source_text", {
+            "title": "未选库", "content_md": "未选库",
+        })).isError
+        assert (await client.call("add_source_url", {
+            "url": "https://example.test/a.pdf",
+        })).isError
+        assert (await client.call(
+            "get_source_status", {"source_id": "src-anything"}
+        )).isError
+        assert (await client.call(
+            "reparse_source", {"source_id": "src-anything"}
+        )).isError
+        assert (await client.call(
+            "delete_source", {"source_id": "src-anything"}
+        )).isError
+
+
+@pytest.mark.anyio
+async def test_source_writes_are_refused_in_a_read_only_shared_notebook(
+    mcp_env, scheduled_jobs
+):
+    """An allowlist entry proves the token may SELECT a notebook; it says
+    nothing about writing to it.
+
+    Bob is a read-only member of Alice's notebook — a share that gives him no
+    way to add or delete a source in the browser. His Agent token carries both
+    source scopes anyway, because ``require_agent_access`` only ever proves
+    READ access (``user_can_read_notebook`` = owner ∪ member). Without the
+    owner-only gate on top, this share would become writable through MCP.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    seeded = _seed_cited_source(repo, notebook_id, "readonly-share")
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sources SET agent_profile_id=? WHERE id=?",
+            (mcp_env["bob_profile"].id, seeded["source_id"]),
+        )
+    bob_token = _agent_token(mcp_env, _SOURCE_FULL, user="bob")
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        # Reading is exactly what a read-only member may do.
+        assert not (await client.call(
+            "get_source_status", {"source_id": seeded["source_id"]}
+        )).isError
+        assert (await client.call("add_source_text", {
+            "title": "只读成员", "content_md": "只读成员写不进来",
+        })).isError
+        assert (await client.call(
+            "reparse_source", {"source_id": seeded["source_id"]}
+        )).isError
+        # Agent-added is NOT sufficient: ownership is checked first, so even a
+        # row this token's own profile stamped stays untouchable from here.
+        assert (await client.call(
+            "delete_source", {"source_id": seeded["source_id"]}
+        )).isError
+
+    assert _source_row_exists(repo, seeded["source_id"])
+    assert len(repo.list_sources(notebook_id)) == 1
+    assert scheduled_jobs == []

@@ -7,6 +7,9 @@ export const AGENT_SCOPE_OPTIONS = [
   { value: "memory:propose", label: "主动提交候选记忆" },
   { value: "ask:execute", label: "执行笔记本问答" },
   { value: "knowhow:code", label: "Knowhow 代码附件写入" },
+  { value: "sources:write", label: "添加/重新解析来源" },
+  { value: "sources:delete", label: "删除 Agent 添加的来源" },
+  { value: "maintenance:execute", label: "触发图谱分析与检索索引构建" },
 ] as const;
 
 export const AGENT_ACCESS_PAGE_SIZE = 25;

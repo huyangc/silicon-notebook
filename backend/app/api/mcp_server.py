@@ -12,6 +12,7 @@ import json
 import logging
 import math
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
@@ -22,9 +23,37 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
+from app.api.source_routes import (
+    # ⚠ 两个私名是**唯一定义点**,不是便利 import。
+    # `_HIDDEN_SOURCE_TYPES`:memory/knowhow 隐藏合成投影行,浏览器的重解析路由按同一
+    # 个常量跳过它们;来源管理工具再抄一份枚举,两处迟早分叉。
+    # `_document_capacity`:「每笔记本文档数量上限」的计算点。红线写明这道闸在**路由层
+    # 不在服务层**——`upload_sources`/`add_url_sources` 服务本身不查上限,所以 Agent 侧
+    # 的建源入口必须自己执行它,而执行它的正确方式是调用同一个函数(它为此收了一个注入
+    # repository 的参数),不是在这里重写一遍 admin 豁免 + 计数 + 上限三段判据。
+    _HIDDEN_SOURCE_TYPES,
+    _document_capacity,
+    source_readable_in_participant_scope,
+)
+# Private on purpose and imported on purpose: `_knowhow_ref` IS the repository's
+# one judgement for "does this element row point at a knowhow cell", and it
+# takes the raw ``source_elements`` row (``metadata`` still stored JSON text) --
+# exactly what ``evidence_elements`` returns here. Its public sibling
+# ``EvidenceContextService.knowhow_refs_for`` cannot be used instead: it runs
+# ``evidence_elements`` itself, so a caller that also needs the element's text
+# would pay that read twice. Restating the rule locally was the alternative and
+# is the thing not to do.
+from app.services.evidence_context import _knowhow_ref
+from app.services.kg import scheduler as kg_scheduler
+from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.source_display import source_display_title
+from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.identity import AgentPrincipal, UserProfile
 from app.models.ask import AskRequest
+from app.models.sources import SourceDetail
+from app.repositories.ports import UploadedSourceFile
+from app.repositories.source_files import safe_filename
 from app.core.memory_inputs import (
     normalize_client_request_id,
     normalize_content,
@@ -32,6 +61,7 @@ from app.core.memory_inputs import (
     normalize_reason,
     normalize_tags,
     normalize_task_context,
+    normalize_text,
     normalize_title,
 )
 
@@ -56,6 +86,33 @@ OUTPUT_KEY_LIMIT = 120
 OUTPUT_MAPPING_LIMIT = 20
 OUTPUT_DEPTH_LIMIT = 5
 OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
+# citations has no per-item cap on its own (unlike anchors, which the answer's
+# [k] markers bound to RESULT_LIMIT distinct keys); a chunk-mode answer can
+# carry one citation per retrieved chunk (chunk_mmr_k defaults to 16). Without
+# a dedicated sub-budget, the shared _budget_response convergence loop treats
+# "answer" as just another string to keep halving — and being pure-CJK text,
+# TOTAL_TEXT_LIMIT (UTF-8 bytes) makes it the loop's preferred victim long
+# before citations is even touched. Pre-fitting citations to this char budget
+# (tuned against realistic CJK payloads; see
+# test_ask_notebook_preserves_answer_text_under_realistic_citation_load)
+# keeps the answer text itself out of that loop's reach in the common case.
+CITATIONS_BUDGET_CHARS = 1_800
+CONVERSATION_ID_MAX_LENGTH = 200  # mirrors AskIntentPreviewRequest.conversation_id
+# add_source_text's title. Deliberately NOT MEMORY_TITLE_MAX_CHARS (80): this
+# names a DOCUMENT, and it also becomes the stored file name, so the ceiling
+# that matters is the filesystem's, applied on encoded bytes below.
+SOURCE_TITLE_MAX_CHARS = 200
+# Leaves room for the ".md" suffix inside the 255-BYTE component limit shared by
+# ext4/APFS/NTFS. Counted in UTF-8 bytes, not characters: a 200-character CJK
+# title is 600 bytes and would fail at write time, after the row's file has
+# already been named.
+SOURCE_FILE_NAME_MAX_BYTES = 240
+# reparse_source's bounded wait on the per-source parse lock. Effectively a
+# non-blocking probe: that lock is held by process_source from replace_elements
+# through build_chunks, with two LLM calls in between, so a parse that is
+# genuinely in flight will still be in flight a second from now. Waiting longer
+# buys the caller nothing but latency on the way to the same refusal.
+SOURCE_BUSY_PROBE_SECONDS = 0.5
 _SELECTED_ATTR = "_silicon_notebook_selected_notebook"
 _MCP_PRINCIPAL: contextvars.ContextVar[AgentPrincipal | None] = (
     contextvars.ContextVar("mcp_agent_principal", default=None)
@@ -389,6 +446,7 @@ def _budget_response(
     tags_budget_chars: int | None = None,
     anchors_budget_chars: int | None = None,
     anchor_provenance_budget_chars: int | None = None,
+    citations_budget_chars: int | None = None,
 ) -> dict[str, Any]:
     """Return a useful response that strictly fits the public MCP JSON budget."""
     stats: dict[str, Any] = {
@@ -428,6 +486,17 @@ def _budget_response(
             anchors,
             field="anchors",
             char_budget=anchors_budget_chars,
+            stats=stats,
+        )
+    citations = result.get("citations")
+    if citations_budget_chars is not None and isinstance(citations, list):
+        # Pre-fit citations to its own budget, mirroring anchors above, so the
+        # shared convergence loop below never needs to shrink the answer text
+        # just to make room for an unbounded number of chunk-mode citations.
+        result["citations"] = _fit_value_to_chars(
+            citations,
+            field="citations",
+            char_budget=citations_budget_chars,
             stats=stats,
         )
     result["truncation"] = stats
@@ -478,6 +547,23 @@ def _validate_proposal_input(
         clean_evidence,
         clean_request_id,
     )
+
+
+@dataclass(frozen=True)
+class _SourceScopeFacts:
+    """The only two fields ``source_readable_in_participant_scope`` reads.
+
+    The HTTP side hands that predicate a full ``SourceDetail`` because its
+    endpoints return one anyway.  A citation point-read does not: it reads the
+    narrow ``source_metadata`` row (one SQL) precisely to avoid ``get_source``'s
+    fan-out, so it names the two facts the predicate needs and passes those.
+    Deliberately not a stub ``SourceDetail`` -- that model's required fields
+    (``element_count``, ``status``, ...) would have to be invented, and an
+    invented row is exactly what an authorization input must never be.
+    """
+
+    notebook_id: str
+    type: str
 
 
 def _principal() -> AgentPrincipal:
@@ -591,6 +677,104 @@ def _selected_notebook(ctx: Context, repo: Any, scope: str) -> tuple[AgentPrinci
         principal, scope, notebook_id
     )
     return principal, notebook_id
+
+
+def _writable_notebook(
+    ctx: Context, repo: Any, scope: str
+) -> tuple[AgentPrincipal, str]:
+    """``_selected_notebook`` plus the OWNER-ONLY write gate.
+
+    This is not belt-and-braces. ``require_agent_access`` clears on
+    ``user_can_read_notebook`` — owner ∪ read-only member — because every tool
+    that existed before this one only read. A token's allowlist can perfectly
+    well name a notebook its owner merely joined as a read-only member, and
+    that user cannot add or delete a source through the browser. Landing an
+    Agent write there would hand the sharing boundary's read side a write it
+    was explicitly denied, through a door the notebook's real owner never
+    opened.
+
+    ``user_can_access_notebook`` is the product's one write predicate (its own
+    docstring: 「写权:仅 owner(安全边界,勿放宽)」), the same one the HTTP
+    ``require_notebook_access`` dependency resolves to.
+    """
+    principal, notebook_id = _selected_notebook(ctx, repo, scope)
+    if not repo.user_can_access_notebook(notebook_id, principal.owner_id):
+        raise PermissionError(
+            "this notebook is read-only for the token owner; "
+            "writing sources requires owning the notebook"
+        )
+    return principal, notebook_id
+
+
+def _own_source(repo: Any, notebook_id: str, source_id: str) -> SourceDetail:
+    """Resolve a source that belongs to the SELECTED notebook itself.
+
+    Deliberately NOT ``get_cited_element``'s participant set. That tool
+    dereferences a citation, and an answer may legitimately quote a mounted
+    reference library; these tools MANAGE documents, and a mounted library's
+    documents belong to another notebook whose owner did not consent to an
+    Agent re-parsing or deleting them. The browser draws the same line: source
+    writes are deliberately not proxied across the mount (source detail renders
+    read-only for reference-library sources).
+
+    Hidden synthetic rows (``memory``/``knowhow`` projections) are equally out
+    of reach, using source_routes' own ``_HIDDEN_SOURCE_TYPES``: they carry no
+    uploaded file and are maintained by their own projection services, so
+    feeding one to the document pipeline only marks it failed, and deleting one
+    would silently destroy a Memory's or a knowhow table's retrieval projection
+    behind that feature's back. The browser's re-parse route skips them for the
+    same reason.
+
+    A source outside the notebook is reported as ``KeyError`` — identical to
+    one that does not exist. No existence disclosure, same as every other tool
+    here.
+    """
+    detail = repo.get_source(source_id)
+    if detail.notebook_id != notebook_id or detail.type in _HIDDEN_SOURCE_TYPES:
+        raise KeyError(source_id)
+    return detail
+
+
+def _reject_when_notebook_is_full(repo: Any, notebook_id: str, adding: int) -> None:
+    """The per-notebook document ceiling, enforced on the Agent surface.
+
+    The ceiling lives in the ROUTER, not in ``upload_sources`` — the service
+    never counts documents — so an Agent-side create path that does not call
+    this simply has no limit. Reuses source_routes' ``_document_capacity``
+    (admin-owned notebooks exempt → None) rather than restating it, and only
+    turns its result into a message; the HTTP twin raises a 409 through
+    ``user_error``, which is a browser carrier and has no meaning here.
+
+    Same non-atomic check-then-insert trade-off as the HTTP side: a concurrent
+    submission can slip one document over, and the next call refuses.
+    """
+    capacity = _document_capacity(notebook_id, repo)
+    if capacity is None:
+        return
+    current, limit = capacity
+    if current + adding > limit:
+        raise ValueError(
+            f"this notebook already holds {current} of its {limit} allowed "
+            f"documents, so {adding} more cannot be added"
+        )
+
+
+def _markdown_source_file_name(title: str) -> str:
+    """``title`` → the stored ``<name>.md`` file name.
+
+    ``safe_filename`` (the ingestion service applies it too) defuses separator
+    smuggling; the byte budget here is what keeps the write from failing after
+    the row has already been named. Truncation is on ENCODED bytes and never
+    splits a character.
+    """
+    stem = safe_filename(title)
+    encoded = stem.encode("utf-8")
+    if len(encoded) > SOURCE_FILE_NAME_MAX_BYTES:
+        stem = encoded[:SOURCE_FILE_NAME_MAX_BYTES].decode("utf-8", "ignore")
+    # safe_filename's own empty-input fallback is "source.bin"; re-apply the
+    # guard because the byte truncation above can strip a short name down to
+    # nothing (a lone multi-byte character clipped mid-sequence).
+    return f"{stem.strip() or 'source'}.md"
 
 
 def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
@@ -893,13 +1077,25 @@ def create_memory_mcp(
         return await anyio.to_thread.run_sync(load)
 
     @server.tool(
-        description="Ask the selected notebook using confirmed formal context only."
+        description=(
+            "Ask the selected notebook using confirmed formal context only. "
+            "Pass the conversation_id from a prior response to continue that "
+            "conversation across turns. Any conversation of the same owner in "
+            "the same notebook can be continued -- including ones started by "
+            "another Agent profile or in the web UI. If the id belongs to a "
+            "different notebook or owner, the server silently starts a new "
+            "conversation instead of erroring -- compare the returned "
+            "conversation_id against the one you sent to detect that."
+        )
     )
     async def ask_notebook(
-        question: str, ctx: Context, mode: str = "chunk"
+        question: str, ctx: Context, mode: str = "chunk",
+        conversation_id: str = "",
     ) -> dict[str, Any]:
         if mode not in {"chunk", "reasoning"}:
             raise ValueError("mode must be chunk or reasoning")
+        if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
+            raise ValueError("conversation_id too long")
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
             _selected_notebook, ctx, repo, "ask:execute"
@@ -917,23 +1113,85 @@ def create_memory_mcp(
                         "或在「设置 → 编辑当前笔记本」里挂载一个参考库。"
                     )
                 return repo.ask(
-                    notebook_id, AskRequest(question=question, mode=mode)
+                    notebook_id,
+                    AskRequest(
+                        question=question,
+                        mode=mode,
+                        conversation_id=conversation_id or None,
+                    ),
                 )
 
         answer = await anyio.to_thread.run_sync(run_ask)
-        anchor_rows = [
-            {
+
+        def check_memory_scope() -> bool:
+            # Mirrors search_notebook_context's allow_memory gate exactly: a
+            # token without memory:read must not see memory-backed citations,
+            # even though chunk/reasoning ask unconditionally builds them.
+            try:
+                repo.require_agent_access(principal, "memory:read", notebook_id)
+                return True
+            except PermissionError:
+                return False
+
+        allow_memory = await anyio.to_thread.run_sync(check_memory_scope)
+
+        anchor_rows = []
+        for anchor in answer.anchors[:RESULT_LIMIT]:
+            row = {
                 "key": anchor.key,
                 "object_id": anchor.object_id,
                 "object_type": anchor.object_type,
                 "label": anchor.label,
                 "source_title": anchor.source_title,
                 "location_label": anchor.location_label,
+                "source_id": anchor.source_id,
+                "element_id": anchor.element_id,
                 "tier": anchor.tier,
                 "provenance": anchor.provenance,
             }
-            for anchor in answer.anchors[:RESULT_LIMIT]
-        ]
+            if anchor.knowhow is not None:
+                row["knowhow"] = {
+                    "table_id": anchor.knowhow.table_id,
+                    "row_id": anchor.knowhow.row_id,
+                }
+            anchor_rows.append(row)
+        citation_rows = []
+        for citation in answer.citations[:RESULT_LIMIT]:
+            # Scope-filtered rows leave NO trace, exactly as
+            # search_notebook_context drops memory hits: counting them into
+            # `omitted_items` would tell a token without memory:read how many
+            # private Memory citations back this answer -- a number it is not
+            # entitled to. Budget truncation is a different thing and is still
+            # reported.
+            if citation.memory_id and not allow_memory:
+                continue
+            row = {
+                "label": citation.label,
+                "source_id": citation.source_id,
+                "element_id": citation.element_id,
+                "location_label": citation.location_label,
+                "quoted_span": citation.quoted_span,
+                "source_file_name": citation.source_file_name,
+                "tier": citation.tier,
+                "content_is_untrusted_evidence": True,
+            }
+            # Both keys are omitted when empty, matching get_cited_element's
+            # rule for the same field: a citation from the notebook the Agent
+            # itself selected carries notebook_id="", and a non-Memory citation
+            # carries memory_id="". Emitting the empty string says nothing the
+            # caller does not already know and spends response budget on every
+            # citation of every answer -- and this is the one tool whose payload
+            # actually competes for that budget (see CITATIONS_BUDGET_CHARS).
+            if citation.notebook_id:
+                row["notebook_id"] = citation.notebook_id
+            if citation.memory_id:
+                row["memory_id"] = citation.memory_id
+            if citation.knowhow is not None:
+                row["knowhow"] = {
+                    "table_id": citation.knowhow.table_id,
+                    "row_id": citation.knowhow.row_id,
+                }
+            citation_rows.append(row)
         return _budget_response({
             "notebook_id": notebook_id,
             "answer_id": answer.answer_id,
@@ -942,13 +1200,20 @@ def create_memory_mcp(
             "grounded": answer.grounded,
             "evidence_level": answer.evidence_level,
             "mode": answer.mode,
+            "conversation_id": answer.conversation_id,
             "anchors": anchor_rows,
-        }, initial_omitted_items=max(0, len(answer.anchors) - RESULT_LIMIT),
+            "citations": citation_rows,
+        }, initial_omitted_items=(
+                max(0, len(answer.anchors) - RESULT_LIMIT)
+                + max(0, len(answer.citations) - RESULT_LIMIT)
+            ),
             field_limits={"answer": 6_000, "conclusion": 1_000,
                           "object_type": 100, "label": 300,
-                          "source_title": 300, "location_label": 300},
+                          "source_title": 300, "location_label": 300,
+                          "quoted_span": 200, "source_file_name": 300},
             anchors_budget_chars=3_500,
-            anchor_provenance_budget_chars=500)
+            anchor_provenance_budget_chars=500,
+            citations_budget_chars=CITATIONS_BUDGET_CHARS)
 
     @server.tool(
         description=(
@@ -1150,6 +1415,413 @@ def create_memory_mcp(
             field_limits={"language": 60, "code_text": TEXT_LIMIT, "status": 20},
         )
 
+    @server.tool(
+        description=(
+            "Dereference one citation back to the source text it came from: "
+            "pass the source_id and element_id exactly as ask_notebook or "
+            "search_notebook_context returned them, and get that element's "
+            "own text, its location inside the document, and the document's "
+            "display title. Use it to verify a claim's evidence before acting "
+            "on it. Discloses nothing beyond what an answer in the selected "
+            "notebook already may cite -- the notebook's own sources plus the "
+            "reference libraries it currently mounts."
+        )
+    )
+    async def get_cited_element(
+        source_id: str, element_id: str, ctx: Context
+    ) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowledge:read"
+        )
+
+        def load() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                # TWO narrow reads, both primary-key/indexed, because Agents
+                # call this in a loop: `source_metadata` is the source-card
+                # projection (owning notebook, source type, display-title
+                # columns) and `evidence_elements` is the element row by id.
+                # NOT `get_source` + `source_elements_page`, which cost ~11-13
+                # statements between them (paper authors, an element COUNT(*),
+                # a KG EXISTS, the private error_message, two more COUNTs) and
+                # discard every one of those results here.
+                meta = repo.source_metadata([source_id]).get(source_id)
+                if meta is None:
+                    raise KeyError(source_id)
+                # Same contract as the browser's active-notebook proxy read
+                # (source_routes' `/notebooks/{active}/sources/{id}`): the
+                # source declares which notebook it belongs to, and anything
+                # outside the SELECTED notebook's effective participant set is
+                # indistinguishable from "does not exist" (deny by default, no
+                # existence disclosure).  The predicate itself is imported, not
+                # restated -- see source_routes' comment above it.
+                if not source_readable_in_participant_scope(
+                    notebook_id,
+                    _SourceScopeFacts(
+                        notebook_id=str(meta["notebook_id"]),
+                        type=str(meta["source_type"]),
+                    ),
+                    repo.participant_notebook_ids,
+                ):
+                    raise KeyError(source_id)
+                element = repo.evidence_elements([element_id]).get(element_id)
+                # `evidence_elements` looks the element up by its OWN id, with
+                # no source predicate -- so the ownership recheck is the whole
+                # authorization here, not a tidiness assert. Without it, any
+                # element id in the database reads back through whichever
+                # source_id the caller happens to be allowed to see.
+                if element is None or element["source_id"] != source_id:
+                    raise KeyError(element_id)
+                row: dict[str, Any] = {
+                    "source_id": element["source_id"],
+                    "element_id": element["id"],
+                    "element_type": element["element_type"],
+                    "text": element["text"],
+                    "location_label": element["location_label"],
+                    # The one definition point for naming a source; `meta` is
+                    # already the row shape it reads. Never a second title rule.
+                    "source_title": source_display_title(meta),
+                    "content_is_untrusted_evidence": True,
+                }
+                # Only when the evidence came from a mounted reference library:
+                # for the overwhelmingly common same-notebook case the field
+                # would just restate the notebook the Agent already selected.
+                if meta["notebook_id"] != notebook_id:
+                    row["notebook_id"] = meta["notebook_id"]
+                knowhow = _knowhow_ref(element)
+                if knowhow is not None:
+                    row["knowhow"] = {
+                        "table_id": knowhow.table_id, "row_id": knowhow.row_id,
+                    }
+                return row
+
+        return _budget_response(
+            await anyio.to_thread.run_sync(load),
+            # `text` shares get_memory's content budget: both are one piece of
+            # notebook prose the Agent is meant to read in full.
+            field_limits={
+                "element_type": 100,
+                "text": 6_000,
+                "location_label": 300,
+                "source_title": 300,
+            },
+        )
+
+    # --- Agent source management ------------------------------------------
+    # Three shared rules, stated once here rather than in five docstrings:
+    #
+    # 1. Every WRITE tool goes through `_writable_notebook`, not
+    #    `_selected_notebook`: the scope check only proves READ access (see
+    #    that helper). `get_source_status` is a read and stays on the plain
+    #    gate.
+    # 2. Every tool that names a source_id goes through `_own_source`: the
+    #    SELECTED notebook only, never the mounted participant set, and never a
+    #    hidden memory/knowhow projection row.
+    # 3. Created rows are stamped with `principal.profile_id`
+    #    (v48 `sources.agent_profile_id`). That column is what makes
+    #    `delete_source` safe, and it is written ONLY on the insert branch —
+    #    an Agent re-uploading bytes a person already added reuses that
+    #    person's row and does not inherit delete rights over it.
+
+    @server.tool(
+        description=(
+            "Add a Markdown document to the selected notebook from text you "
+            "provide, and start parsing it. Use this to file a finished piece "
+            "of work (a design note, an extracted spec, a summary) as a "
+            "first-class notebook source that later answers can cite -- not "
+            "for scratch findings, which belong in propose_memory. The text is "
+            "stored verbatim as a .md source named after `title`; parsing runs "
+            "in the background, so poll get_source_status for the outcome. "
+            "Re-adding byte-identical content returns the existing source "
+            "(`reused: true`) instead of creating a duplicate. Requires the "
+            "sources:write scope and ownership of the notebook."
+        )
+    )
+    async def add_source_text(
+        title: str, content_md: str, ctx: Context
+    ) -> dict[str, Any]:
+        # Validate the caller-controlled envelope BEFORE any repository work,
+        # exactly as propose_memory does: a blank title or an oversized body is
+        # the caller's bug and must not cost a lookup, a lock or a file write.
+        clean_title = normalize_text(
+            title, field="title", max_chars=SOURCE_TITLE_MAX_CHARS
+        )
+        if not isinstance(content_md, str):
+            raise ValueError("content_md must be a string")
+        if not content_md.strip():
+            raise ValueError("content_md must not be blank")
+        # The SAME ceiling the browser upload enforces per file
+        # (`settings.source_upload_max_bytes`), measured on the bytes that will
+        # actually be stored -- a character count would under-count CJK by 3x.
+        payload = content_md.encode("utf-8")
+        max_bytes = get_settings().source_upload_max_bytes
+        if len(payload) > max_bytes:
+            raise ValueError(
+                f"content_md is {len(payload)} bytes, over this deployment's "
+                f"{max_bytes}-byte limit for one source"
+            )
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _writable_notebook, ctx, repo, "sources:write"
+        )
+
+        def run() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                _reject_when_notebook_is_full(repo, notebook_id, 1)
+                # The synthetic-markdown upload seam (app/eval/speed.py uses the
+                # same one): hand `upload_sources` an UploadedSourceFile and the
+                # whole existing path -- content dedup, storage, background
+                # parse, KG extraction -- runs unchanged. No second ingest path.
+                created = repo.upload_sources(
+                    notebook_id,
+                    [UploadedSourceFile(
+                        file_name=_markdown_source_file_name(clean_title),
+                        content_type="text/markdown",
+                        content=payload,
+                    )],
+                    lambda source_id: kg_scheduler.submit_job(
+                        repo.process_source, source_id
+                    ),
+                    principal.profile_id,
+                )
+                source = created[0]
+                return {
+                    "source_id": source.id,
+                    "title": source.title,
+                    # True = byte-identical content already existed in this
+                    # notebook and was reused. Report it rather than silently
+                    # answering "created": the Agent needs to know it did not
+                    # add a document, and `agent_created` below may then be
+                    # False because the row is somebody else's.
+                    "reused": bool(source.reused),
+                    "parse_status": source.parse_status,
+                    "status": source.status,
+                    "agent_created": source.agent_created,
+                }
+
+        return _budget_response(
+            await anyio.to_thread.run_sync(run),
+            field_limits={
+                "title": 300, "parse_status": 40, "status": 40,
+            },
+        )
+
+    @server.tool(
+        description=(
+            "Add a PDF to the selected notebook by URL and start parsing it. "
+            "Only PDFs are accepted -- the server probes the URL first and "
+            "refuses anything that is not one, or that it cannot reach. "
+            "Parsing runs in the background; poll get_source_status. Requires "
+            "the sources:write scope and ownership of the notebook."
+        )
+    )
+    async def add_source_url(url: str, ctx: Context) -> dict[str, Any]:
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("url must not be blank")
+        clean_url = url.strip()
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _writable_notebook, ctx, repo, "sources:write"
+        )
+
+        def run() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                # Capacity reaches add_url_sources as a BUDGET, mirroring the
+                # browser's URL route exactly: a URL import is naturally partial
+                # (unreachable / non-PDF entries are skipped), so the ceiling is
+                # charged per successful probe instead of refusing up front.
+                # With one URL the two spellings coincide, but sharing the
+                # route's shape keeps the over-limit REASON identical too.
+                capacity = _document_capacity(notebook_id, repo)
+                budget = None if capacity is None else max(0, capacity[1] - capacity[0])
+                try:
+                    result = repo.add_url_sources(
+                        notebook_id,
+                        [clean_url],
+                        lambda source_id: kg_scheduler.submit_job(
+                            repo.process_source, source_id
+                        ),
+                        budget,
+                        principal.profile_id,
+                    )
+                except MinerUCloudNotConfigured:
+                    # The exception's own text names the deployment's env vars.
+                    # An Agent can act on "ask the operator", not on
+                    # MINERU_API_TOKEN, and server configuration is not its
+                    # business.
+                    raise ValueError(
+                        "this deployment has no PDF parsing service configured, "
+                        "so PDFs cannot be added by URL; upload the text with "
+                        "add_source_text instead, or ask the operator to "
+                        "configure PDF parsing"
+                    ) from None
+                if not result.created:
+                    # `reason` is the same user-facing sentence the browser shows
+                    # for a rejected URL ("not a PDF", "unreachable", "over the
+                    # document limit") and is the only actionable part of this
+                    # failure. Bounded on the way out by the response budget's
+                    # field limit below -- it is not re-raised anywhere it could
+                    # carry a traceback.
+                    reason = (
+                        result.rejected[0].reason if result.rejected
+                        else "the URL was skipped"
+                    )
+                    raise ValueError(f"the URL was not added: {reason}")
+                source = result.created[0]
+                return {
+                    "source_id": source.id,
+                    "title": source.title,
+                    "parse_status": source.parse_status,
+                    "status": source.status,
+                    "agent_created": source.agent_created,
+                }
+
+        return _budget_response(
+            await anyio.to_thread.run_sync(run),
+            field_limits={"title": 300, "parse_status": 40, "status": 40},
+        )
+
+    @server.tool(
+        description=(
+            "Check one source's parsing/extraction state in the selected "
+            "notebook -- the way to find out whether a source you just added "
+            "is ready to be asked about. Reports whether parsing finished, "
+            "failed, or produced a degraded result, how many elements it "
+            "yielded, and whether its knowledge has been extracted."
+        )
+    )
+    async def get_source_status(source_id: str, ctx: Context) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowledge:read"
+        )
+
+        def load() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                detail = _own_source(repo, notebook_id, source_id)
+                return {
+                    "source_id": detail.id,
+                    "parse_status": detail.parse_status,
+                    "status": detail.status,
+                    # A DERIVED boolean, never `detail.error_message`: that
+                    # field is `str(exc)` stored verbatim and routinely carries
+                    # server-side absolute paths. Same narrowing
+                    # `ScopedSourceDetail` applies to the browser's cross-
+                    # notebook proxy read, for the same reason.
+                    "parse_failed": detail.parse_status == "failed",
+                    # MinerU fell back to a lossy local parser: layout, formulas
+                    # and tables may be wrong even though the source is
+                    # "extracted". An Agent about to cite it should know.
+                    "parse_quality_warning": detail.parse_quality_warning,
+                    "element_count": detail.element_count,
+                    "kg_extracted": detail.kg_extracted,
+                    "agent_created": detail.agent_created,
+                }
+
+        return _budget_response(
+            await anyio.to_thread.run_sync(load),
+            field_limits={"parse_status": 40, "status": 40},
+        )
+
+    @server.tool(
+        description=(
+            "Re-run parsing and knowledge extraction for one source in the "
+            "selected notebook, discarding its previous elements. Use it after "
+            "a failed or degraded parse. The work is queued in the background "
+            "and this returns immediately -- poll get_source_status to see the "
+            "result. Refuses while that source is already being parsed. "
+            "Requires the sources:write scope and ownership of the notebook."
+        )
+    )
+    async def reparse_source(source_id: str, ctx: Context) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _writable_notebook, ctx, repo, "sources:write"
+        )
+
+        def run() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                _own_source(repo, notebook_id, source_id)
+                # There is no single-flight guard behind process_source: the
+                # browser's re-parse route submits unconditionally, so calling
+                # this in a loop would queue N full parse+embed+extract
+                # pipelines for one document. Probe the ingestion service's own
+                # per-source chunk lock instead of inventing a status signal.
+                #
+                # ⚠ Residual race, accepted on purpose: the lock is released
+                # before the background job is submitted, so a parse starting in
+                # that window is not seen here. It cannot corrupt anything --
+                # process_source serializes on this same lock, so the second run
+                # waits and then redoes the work. Closing it would mean holding
+                # the lock across a scheduler submit, i.e. blocking this MCP
+                # request thread for the minutes a parse can take.
+                if repo.source_parse_busy(
+                    source_id, timeout=SOURCE_BUSY_PROBE_SECONDS
+                ):
+                    raise ValueError(
+                        "this source is being parsed right now; poll "
+                        "get_source_status and retry once it settles"
+                    )
+                kg_scheduler.submit_job(repo.process_source, source_id)
+                return {"source_id": source_id, "queued": True}
+
+        return _budget_response(await anyio.to_thread.run_sync(run))
+
+    @server.tool(
+        description=(
+            "Delete one source that an Agent added to the selected notebook, "
+            "together with everything derived from it. Sources a PERSON added "
+            "are refused: use this only to clean up your own uploads. "
+            "Irreversible. Requires the sources:delete scope (which "
+            "sources:write does not imply) and ownership of the notebook."
+        )
+    )
+    async def delete_source(source_id: str, ctx: Context) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _writable_notebook, ctx, repo, "sources:delete"
+        )
+
+        def run() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                detail = _own_source(repo, notebook_id, source_id)
+                # THE safety gate of this whole surface. `agent_created` is the
+                # projection of v48 `sources.agent_profile_id IS NOT NULL`,
+                # taken from the very row that just proved notebook membership
+                # and non-synthetic type -- one read, no window between the two
+                # judgements, and no second spelling of the predicate.
+                #
+                # The criterion is "SOME Agent added this row", not "this
+                # profile did": Agent identities are the owner's own
+                # bookkeeping, they get rotated and revoked, and a source left
+                # behind by a retired profile would otherwise be undeletable
+                # through this surface forever. What the criterion does protect,
+                # absolutely, is the user's own documents.
+                #
+                # It is safe against laundering because provenance is written on
+                # the INSERT branch only: re-uploading a person's bytes reuses
+                # their row and leaves the column NULL
+                # (test_agent_reupload_of_a_user_source_stays_user_added), and a
+                # notebook deep copy clears the column outright.
+                #
+                # Fails closed by construction: the projection defaults to False
+                # whenever the column is absent from the row.
+                if not detail.agent_created:
+                    raise PermissionError(
+                        "this source was added by a user; an Agent token may "
+                        "only delete sources that an Agent added"
+                    )
+                # Synchronous. Safe against a CONCURRENT duplicate call:
+                # delete_source re-checks the row inside its write transaction
+                # (`source_exists_for_update_tx`), so the loser's destructive
+                # work becomes a no-op instead of an error. A call REPEATED
+                # after the first one finished fails above, in `_own_source`,
+                # as an ordinary not-found.
+                repo.delete_source(source_id)
+                return {"source_id": source_id, "deleted": True}
+
+        return _budget_response(await anyio.to_thread.run_sync(run))
+
     app = AgentBearerMiddleware(
         server.streamable_http_app(), repository_provider,
         require_https=require_https,
@@ -1174,4 +1846,14 @@ PUBLIC_TOOLS = PUBLIC_TOOLS + (
     "get_knowhow_discrimination",
     "get_knowhow_row",
     "put_knowhow_cell_code",
+    # Citation point-read: the MCP equivalent of clicking a [k] marker in the
+    # web answer, registered above right after put_knowhow_cell_code.
+    "get_cited_element",
+    # Source management, registered above right after get_cited_element.
+    # `delete_source` additionally requires that an Agent created the row.
+    "add_source_text",
+    "add_source_url",
+    "get_source_status",
+    "reparse_source",
+    "delete_source",
 )

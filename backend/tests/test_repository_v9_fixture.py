@@ -115,9 +115,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 游标/计数账本，v43 报告公开分享的 share_token/shared_at 列，v44 生成问题
     # 影子索引，v45 user_profiles.ui_mode 界面模式偏好列，v46 element→chunk
     # 反查索引 chunk_elements / 其离线回填账本 chunk_element_backfills /
-    # unified_kg_state.chunk_elements_indexed 标记列，以及 v47 notebook schema
-    # 覆盖表，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 47
+    # unified_kg_state.chunk_elements_indexed 标记列，v47 notebook schema
+    # 覆盖表，以及 v48 sources.agent_profile_id 出处列，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 48
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

@@ -474,6 +474,7 @@
       }
     },
     "source_detail": {
+      "agent_created": false,
       "authors": [],
       "created_at": "<timestamp>",
       "created_label": "2024年1月2日",
@@ -528,6 +529,7 @@
     ],
     "sources": [
       {
+        "agent_created": false,
         "authors": [],
         "created_at": "<timestamp>",
         "created_label": "2024年1月2日",
@@ -972,6 +974,7 @@
     ],
     "sources": [
       {
+        "agent_profile_id": null,
         "chunked_at": "<timestamp>",
         "created_at": "<timestamp>",
         "doc_type": "textbook",
@@ -2098,7 +2101,7 @@
       },
       {
         "name": "sources",
-        "sql_sha256": "e3253ece4636a176c066004397dd968ce1aff7b2939a8ccd552b34f5e15c590f",
+        "sql_sha256": "1917bc77196977d858a302fe883c9092f3dc19a5efd282d5110fcc442d99c8b4",
         "type": "table"
       },
       {
@@ -2137,6 +2140,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 47
+    "user_version": 48
   }
 }

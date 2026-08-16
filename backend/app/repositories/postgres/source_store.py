@@ -849,13 +849,15 @@ class SourceStore:
         doc_type: str,
         source_url: str = "",
         memory_id: str = "",
+        agent_profile_id: str = "",
         connection=None,
     ) -> None:
         statement = (
             "INSERT INTO sources"
             "(id,notebook_id,title,source_type,status,parse_status,file_name,file_path,"
-            "source_url,file_size,file_hash,summary,doc_type,memory_id,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            "source_url,file_size,file_hash,summary,doc_type,memory_id,"
+            "agent_profile_id,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         )
         now = self.now()
         values = (
@@ -873,6 +875,13 @@ class SourceStore:
             summary,
             doc_type,
             memory_id or None,
+            # "" -> NULL, the same sentinel-free shape memory_id uses: NULL is
+            # what every pre-v48 row carries and what the Agent-facing delete
+            # check reads as "a person added this, never removable by an Agent".
+            # Whitespace-only is the same statement as "": strip before the NULL
+            # fold, or "   " lands a non-NULL row that reads as "an Agent added
+            # this" while naming no agent. Same expression as the SQLite twin.
+            (agent_profile_id or "").strip() or None,
             now,
             now,
         )
@@ -1025,6 +1034,7 @@ class SourceStore:
         file_size: int,
         summary: str,
         doc_type: str,
+        agent_profile_id: str = "",
     ) -> str | None:
         """Atomic content-dedup insert (postgres): the whole ``write()`` block is
         one transaction, so the dedup re-check and the insert commit together —
@@ -1033,7 +1043,10 @@ class SourceStore:
         created) or None (a new row was inserted with ``file_hash=digest``).
         Mirrors the SQLite SourceStore rule (same dedup SELECT + insert_source
         shape); the SQLite side takes RESERVED via BEGIN IMMEDIATE, here the
-        transaction boundary is the atomicity."""
+        transaction boundary is the atomicity.
+
+        ``agent_profile_id`` reaches the insert branch only — a reused row keeps
+        the provenance of whoever created it (see the SQLite twin)."""
         with self.database.write() as connection:
             if digest:
                 row = connection.execute(
@@ -1057,6 +1070,7 @@ class SourceStore:
                 file_hash=digest,
                 summary=summary,
                 doc_type=doc_type,
+                agent_profile_id=agent_profile_id,
                 connection=connection,
             )
         return None
@@ -1192,6 +1206,8 @@ class SourceStore:
             created_label=_created_label(row["created_at"]),
             doc_type=row.get("doc_type", ""),
             source_url=row.get("source_url", ""),
+            # v48 provenance: "the column is not NULL", never the raw agent id.
+            agent_created=row.get("agent_profile_id") is not None,
             extraction_warning=self.extraction_warning(connection, source_id),
             parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
             kg_extracted=kg_extracted,
@@ -1272,6 +1288,8 @@ class SourceStore:
                 created_label=_created_label(row["created_at"]),
                 doc_type=row.get("doc_type", ""),
                 source_url=row.get("source_url", ""),
+                # v48 provenance: "the column is not NULL", never the raw agent id.
+                agent_created=row.get("agent_profile_id") is not None,
                 extraction_warning=warning(source_id),
                 parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
                 kg_extracted=source_id in kg_extracted_ids,

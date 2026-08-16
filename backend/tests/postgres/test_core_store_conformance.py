@@ -75,7 +75,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -117,6 +117,18 @@ def _fetch_one(
             postgres_sql,
             params,
         ).fetchone()
+
+
+def _fetch_all(
+    stores: CoreStores,
+    postgres_sql: str,
+    params: tuple[object, ...] = (),
+):
+    with stores.database.connect() as connection:
+        return connection.execute(
+            postgres_sql,
+            params,
+        ).fetchall()
 
 
 def _iso(value: object) -> str:
@@ -502,7 +514,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -580,7 +592,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -645,7 +657,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 25
+    assert PostgresMigrator(postgres_database).migrate() == 26
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -1134,6 +1146,130 @@ def test_source_visibility_physical_count_and_delete_cascade(core_stores: CoreSt
         "SELECT 1 FROM chunks WHERE id=%s",
         ("chunk-delete",),
     ) is None
+
+
+def test_source_agent_provenance_matches_sqlite_semantics(core_stores: CoreStores):
+    """v26 `sources.agent_profile_id`: "" -> NULL, projection is a bare bool.
+
+    SQLite twin: ``tests/test_source_agent_provenance.py``. The dedup branch is
+    the load-bearing half — ``insert_source_if_absent`` must never restamp an
+    existing row's provenance, or an Agent could turn a person's source into an
+    Agent-deletable one by re-uploading the same bytes.
+    """
+    owner = core_stores.identity.create_user("k00123499", "password-10")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Provenance"), owner.id
+    )
+    # "   " is the same statement as "" — both fold to NULL, byte-for-byte the
+    # same expression as the SQLite twin. A non-NULL blank would read as "an
+    # Agent added this" while naming no agent.
+    for source_id, agent in (
+        ("src-user", ""), ("src-blank", "   "), ("src-agent", "ap-agent-1"),
+    ):
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type="markdown",
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash="",
+            summary="",
+            doc_type="",
+            agent_profile_id=agent,
+        )
+    stored = {
+        row["id"]: row["agent_profile_id"]
+        for row in _fetch_all(
+            core_stores,
+            "SELECT id,agent_profile_id FROM sources WHERE notebook_id=%s",
+            (notebook_id,),
+        )
+    }
+    assert stored == {
+        "src-user": None, "src-blank": None, "src-agent": "ap-agent-1",
+    }
+    assert {
+        item.id: item.agent_created
+        for item in core_stores.sources.list_sources(notebook_id)
+    } == {"src-user": False, "src-blank": False, "src-agent": True}
+    assert core_stores.sources.get_source("src-agent").agent_created is True
+    assert core_stores.sources.get_source("src-user").agent_created is False
+
+    # Content dedup reuse keeps the FIRST writer's provenance in both directions.
+    core_stores.sources.insert_source(
+        source_id="src-person-hashed",
+        notebook_id=notebook_id,
+        title="shared bytes",
+        source_type="markdown",
+        status="parsed",
+        parse_status="parsed",
+        file_name="shared.md",
+        file_path="uploads/shared.md",
+        file_size=1,
+        file_hash="digest-shared",
+        summary="",
+        doc_type="",
+    )
+    reused = core_stores.sources.insert_source_if_absent(
+        source_id="src-agent-retry",
+        notebook_id=notebook_id,
+        digest="digest-shared",
+        title="shared bytes",
+        source_type="markdown",
+        status="queued",
+        parse_status="queued",
+        file_name="shared.md",
+        file_path="uploads/shared.md",
+        file_size=1,
+        summary="",
+        doc_type="",
+        agent_profile_id="ap-agent-1",
+    )
+    assert reused == "src-person-hashed"
+    assert _fetch_one(
+        core_stores,
+        "SELECT agent_profile_id FROM sources WHERE id=%s",
+        ("src-person-hashed",),
+    )["agent_profile_id"] is None
+
+    assert core_stores.sources.insert_source_if_absent(
+        source_id="src-agent-first",
+        notebook_id=notebook_id,
+        digest="digest-agent",
+        title="agent bytes",
+        source_type="markdown",
+        status="queued",
+        parse_status="queued",
+        file_name="agent.md",
+        file_path="uploads/agent.md",
+        file_size=1,
+        summary="",
+        doc_type="",
+        agent_profile_id="ap-agent-1",
+    ) is None
+    assert core_stores.sources.insert_source_if_absent(
+        source_id="src-person-retry",
+        notebook_id=notebook_id,
+        digest="digest-agent",
+        title="agent bytes",
+        source_type="markdown",
+        status="queued",
+        parse_status="queued",
+        file_name="agent.md",
+        file_path="uploads/agent.md",
+        file_size=1,
+        summary="",
+        doc_type="",
+    ) == "src-agent-first"
+    assert _fetch_one(
+        core_stores,
+        "SELECT agent_profile_id FROM sources WHERE id=%s",
+        ("src-agent-first",),
+    )["agent_profile_id"] == "ap-agent-1"
 
 
 def test_typed_collection_catalog_primitives_match_sqlite_semantics(

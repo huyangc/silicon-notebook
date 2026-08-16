@@ -2991,5 +2991,38 @@ MIGRATION_MANIFEST[(46, 47)] = {
 }
 
 
+# v48: sources.agent_profile_id — "an Agent, not a person, added this source".
+# One nullable column on an existing table; no new tables, indexes or triggers,
+# and no backfill (NULL is exactly what every deployed row already means). Same
+# nested-merge shape as the v27 sources.chunked_at layer: merge into each
+# manifest's ``columns["sources"]`` dict rather than overwriting it, so the
+# memory_id / chunked_at columns the earlier hops carry survive.
+SOURCE_AGENT_PROVENANCE_COLUMNS = {
+    "sources": {
+        "agent_profile_id": ("agent_profile_id", "TEXT", 0, None, 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 48, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "sources": {
+                **manifest["columns"].get("sources", {}),
+                **SOURCE_AGENT_PROVENANCE_COLUMNS["sources"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(47, 48)] = {
+    "tables": {},
+    "columns": SOURCE_AGENT_PROVENANCE_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

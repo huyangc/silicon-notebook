@@ -34,7 +34,11 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v46 adds the element→chunk reverse index (chunk_elements), its restartable
 # offline backfill ledger (chunk_element_backfills) and the per-notebook
 # chunk_elements_indexed marker that forks the read path.
-SCHEMA_VERSION = 47
+# v47 adds notebook_object_schemas, the notebook-owned copy-on-write overrides
+# and notebook-only definitions layered over the global object_schemas baseline.
+# v48 adds sources.agent_profile_id (nullable; NULL means "a person added
+# this source"), the provenance an Agent-facing delete has to prove.
+SCHEMA_VERSION = 48
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2348,6 +2352,26 @@ class SqliteMigrator:
                   );
                 """
             )
+
+    def _migration_48(self) -> None:
+        """Agent provenance on ``sources`` (nullable ``agent_profile_id``).
+
+        NULL is the load-bearing value: it means "a person added this source",
+        and the Agent-facing delete tool is only ever allowed to remove rows
+        whose provenance proves the Agent itself added them.  Nothing is
+        backfilled — every already-deployed row is user-added by definition,
+        which is exactly what NULL states.
+
+        Deliberately no index and no unique constraint, unlike ``memory_id``
+        (v14): the delete permission check is a single-row read on the primary
+        key, and nothing enumerates "sources of this agent".  Deliberately no
+        foreign key to ``agent_profiles`` either — mirroring ``memory_id``,
+        which likewise stores a bare id.  Provenance must survive the profile
+        being deleted (the row was still not user-added), and an incoming FK
+        would also add an edge to the forward-shadow parent closure.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "sources", "agent_profile_id", "TEXT")
 
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
