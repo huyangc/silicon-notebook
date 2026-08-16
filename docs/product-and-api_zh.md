@@ -195,7 +195,8 @@ tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直�
 总 Memory 页的“Agent 接入”可创建稳定 Agent profile，以及明文只显示一次的 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
-`ask:execute`、`knowhow:code` 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
+`ask:execute`、`knowhow:code`、`sources:write`、`sources:delete`、`maintenance:execute`
+子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp`（到 `/mcp/` 的 redirect 已处理）。本机可用
 loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
 启动会打印明文告警（Agent token 明文过网）。公网部署请设 `MCP_REQUIRE_HTTPS=1` 强制 HTTPS
@@ -221,13 +222,74 @@ claude mcp add --transport http silicon-notebook http://127.0.0.1:8000/mcp \
 Claude Code 可能把这段原始 header 保存到本机配置。应使用最小 scope、短有效期，保护
 本机配置，并在使用后撤销/轮换；不要假设该 header 会做 shell 环境变量插值。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的十一个工具是：
-`list_notebooks`、`select_notebook`、`search_agent_memory`、
-`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`、
-`list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row`、
-`put_knowhow_cell_code`。
+每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的二十个工具如下，
+权威清单是 `mcp_server.PUBLIC_TOOLS`：
+
+| 分组 | 工具 | Scope |
+| --- | --- | --- |
+| Memory / 上下文 | `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory` | `knowledge:read` / `memory:read` / `memory:read_candidates` / `memory:propose` / `ask:execute` |
+| Knowhow 读取 | `list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row` | `knowledge:read` |
+| Knowhow 代码写入 | `put_knowhow_cell_code` | `knowhow:code` |
+| 引用点查 | `get_cited_element` | `knowledge:read` |
+| 来源管理 | `add_source_text`、`add_source_url`、`reparse_source` | `sources:write`（owner-only） |
+| 来源删除 | `delete_source` | `sources:delete`（owner-only，且仅限 Agent 添加的来源） |
+| 来源状态读取 | `get_source_status` | `knowledge:read` |
+| 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
+| 构建状态读取 | `get_build_status` | `knowledge:read` |
+
 服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
+
+`ask_notebook` 接受可选的 `conversation_id`（至多 200 字符，与 `AskIntentPreviewRequest.conversation_id`
+同一上限），并回传本次答案实际记入的 `conversation_id`。传入 id 即接续该会话跨轮对话——包括
+另一个 Agent profile 或网页端开启的会话——前提是它属于同一 owner 且同一个已选笔记本。属于
+其他笔记本或其他 owner 的 id **不报错**：服务端会静默新建一个会话，调用方通过比对回传 id 与
+自己发出的 id 即可察觉。每个 anchor 另带 `source_id`、`element_id`，knowhow 投影节点还带
+`knowhow: {table_id, row_id}`。新增的 `citations` 回退列表携带非 anchor 证据的 `label`、
+`source_id`、`element_id`、`location_label`、`quoted_span`、`source_file_name` 与 `tier`；
+`notebook_id` 与 `memory_id` 只在非空时下发。`memory_id` 非空的行需要 `memory:read`——没有该
+scope 时整行在结果截断**之前**被过滤，且不计入截断计数，否则那个被隐藏的私有 Memory 条数会
+被算术还原出来。anchors 与 citations 各自最多 20 行；响应预算为 anchors 预留 3,500 字符
+（其中 anchor provenance 500 字符）、为 citations 预留 1,800 字符，使大体量引用不会挤掉正文。
+
+`get_cited_element` 把一条引用还原回原文：按 `ask_notebook` 或 `search_notebook_context` 返回的
+`source_id` 与 `element_id` 原样传入，取回该元素自身的文本、它在文档中的位置和文档显示标题。
+它披露的范围不超过当前所选笔记本的答案本来就可以引用的内容——本库来源加上它当前挂载的参考库。
+
+**来源管理。** 这一组里凡是接受 `source_id` 的工具，都只在**当前所选笔记本内**解析它——不含
+挂载的参与库，也不含隐藏的 `memory`/`knowhow` 投影行。这比 `get_cited_element` 更窄：后者刻意
+覆盖已挂载的参考库，因为答案的引用本来就会指向那里。
+
+`add_source_text` 用 Agent 提供的文本建立一份 Markdown 文档来源：`title` 至多
+200 字符（完整存进来源行，只有派生的磁盘文件名会被压到 200 UTF-8 字节），`content_md` 必须
+非空且不超过本部署的 `SOURCE_UPLOAD_MAX_MB` 单文件上限（按存储的 UTF-8 字节计）。重复提交
+逐字节相同的内容会复用既有来源并回传 `reused: true`，不产生重复行。`add_source_url` 按 URL
+添加 PDF，服务端会先探测，取不到或不是 PDF 一律拒绝。两者都受笔记本文档数量上限约束。解析
+在后台进行，用 `get_source_status` 轮询：它给出解析/抽取状态、元素数量，以及派生的
+`parse_failed` 布尔而非原始 `error_message`。`reparse_source` 重跑一份来源的解析与抽取；该
+来源的解析锁被占用时直接拒绝（约 0.5 秒的有界探测而非等待——那把锁跨越两次模型调用，真的
+正在解析的来源一秒后仍在解析）。
+
+`delete_source` 不可逆，权限刻意收窄：需要 `sources:delete`（`sources:write` 不蕴含它），
+**并且**该来源必须是 Agent 添加的。判据是 `agent_created` 布尔——v48 `sources.agent_profile_id`
+非空的投影——所以用户上传的文档无论 token 带什么 scope 都删不掉。判据是「某个 Agent 添加过」
+而不是「本 profile 添加过」：Agent 身份会轮换、会撤销，按 profile 判会让退役身份留下永远删不掉
+的来源。出处只在 INSERT 分支写入，因此重传用户的字节只会复用他那一行、仍算用户添加，笔记本
+深拷贝还会显式清空该列——副本一律视为用户添加。来源列表与详情响应同样暴露这个 `agent_created`
+布尔，网页端来源列表把它渲染成中性的「Agent 添加」徽标。
+
+**构建。** `build_kg` 触发增量知识图谱抽取（已抽取的来源跳过，此前部分失败的来源重试），
+`build_retrieval_index` 触发检索索引重建，`when="now"`（默认）立即开始、`when="idle"` 排进
+下一个空闲窗口。两者都是 owner-only、立即返回，由 `get_build_status` 轮询——它同时给出图谱
+状态（就绪/构建中、待处理来源数、当前任务阶段与进度）与检索索引状态（是否存在/构建中/排队中、
+队列位次、下一个空闲窗口）。`build_kg` 因该笔记本已有构建在跑而拒绝，是**排队信号而不是错误**：
+笔记本级单飞守卫正在生效，调用方应轮询 `get_build_status` 直到它清空，而不是立刻重试。
+`build_retrieval_index` 在笔记本规模不足以需要索引时拒绝。`get_build_status` 是纯读取，笔记本
+的任何成员都可调用。
+
+整个来源与构建面的写入一律 owner-only。token 的白名单可能包含 owner 只是以只读成员身份加入的
+笔记本；在那里添加、重新解析、删除来源或发起后台构建，等于把这份共享的读侧升级成写侧，因此
+一律拒绝。读取仍沿用其 HTTP 对应端点的成员可读口径。
 
 四个 knowhow 工具与 `/api/agent/knowhow/...` 下的 HTTP 端点（见 [API](#api)）共用同一套
 service 函数，HTTP 与 MCP 不会在响应形状上走样。`list_knowhow_tables`、

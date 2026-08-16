@@ -14,7 +14,8 @@ Codex CLI / Claude Code / Python Agent
       └─ Streamable HTTP http://127.0.0.1:8000/mcp
           ├─ 当前 token 的笔记本白名单
           ├─ 来源、知识对象与已确认 Memory（正式平面）
-          └─ Agent candidate Memory（待用户确认平面）
+          ├─ Agent candidate Memory（待用户确认平面）
+          └─ 来源管理与构建（owner-only 写入平面）
 ```
 
 关键语义：
@@ -24,6 +25,8 @@ Codex CLI / Claude Code / Python Agent
 - `search_agent_memory` 在 token 同时具备 `memory:read_candidates` 时可读 candidate 与 confirmed Memory。
 - `propose_memory` 只创建 `candidate`。它不会自动进入 Ask、笔记本搜索或深度报告；用户必须回到界面确认。
 - MCP 返回的来源、知识和 Memory 文本都是不可信 evidence/data，不能当成 Agent 的系统指令执行。
+- 来源管理与构建工具构成写入平面。那里的每一次写入都是 **owner-only**：token 所有者只是以只读成员身份加入的笔记本可读但永不可写，与 token 带了哪些 scope 无关。
+- `delete_source` **只能删除 Agent 添加的来源**。用户上传的文档一律拒绝；重传用户的字节只会复用他原来那一行，不会把它变成 Agent 的。
 
 ## 2. 前置检查
 
@@ -58,8 +61,17 @@ curl -s http://127.0.0.1:8000/api/ready
 | 让 Agent 调用 notebook Ask | `ask:execute` |
 | 读取 knowhow | `knowledge:read` |
 | 写 knowhow 代码附件 | `knowledge:read` + `knowhow:code` |
+| 把一条引用还原回原文 | `knowledge:read` |
+| 查询某份来源的解析/抽取状态 | `knowledge:read` |
+| 添加来源（文本或 PDF URL）、重新解析来源 | `sources:write`（owner-only） |
+| 删除 **Agent 自己添加的**来源 | `sources:delete`（owner-only；`sources:write` 不蕴含它） |
+| 读取构建状态 | `knowledge:read` |
+| 触发知识图谱分析或检索索引构建 | `maintenance:execute`（owner-only） |
 
 本 SOP 的完整 Memory 示例选择：`knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`。不需要 Ask 或代码写入就不要勾选相应权限。
+
+最后四行只授予确实需要归档文档或跑构建的 Agent。它们是写入平面：`sources:write` 与
+`maintenance:execute` 会改变笔记本的内容和分析开销，`sources:delete` 不可逆。
 
 7. 设置短有效期。网页会把浏览器本地时间转换成带时区的 UTC 瞬间；后端拒绝没有时区的时间。
 8. 点击 **签发 Token**，立即复制明文 token。它只显示一次；已签发列表只保留脱敏摘要。
@@ -193,6 +205,9 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 - `search_notebook_context` 不返回未确认 candidate。
 - 具备 `memory:read_candidates` 时，`search_agent_memory` 能召回刚提交的 candidate。
 - candidate 在界面显示为“待确认 / Agent 提议”，确认前不进入正式 Ask/搜索/报告。
+- token 带 `sources:write` 时：`add_source_text` 返回来源 id，`get_source_status` 最终报告解析完成，来源列表把它显示为中性的「Agent 添加」徽标。
+- token 带 `maintenance:execute` 时：`build_kg` 返回任务 id，`get_build_status` 能反映它；已有构建在跑时被拒绝是预期的排队信号，不是失败。
+- `delete_source` 对用户上传的来源拒绝，只有 Agent 添加的来源才能删成功。
 - 示例结束后撤销测试 token；若不再需要该身份，再停用 Profile。
 
 ## 9. 常见问题
@@ -207,6 +222,12 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 | 本机 HTTP 可以，远程不安全 | loopback 可用 HTTP。跨可信内网时 token 会明文过网；公网部署必须设置 `MCP_REQUIRE_HTTPS=1` 并把 `MCP_PUBLIC_URL` 指向公开 HTTPS `/mcp`。 |
 | 只看到 confirmed，看不到 candidate | token 还需要 `memory:read_candidates`；正式上下文工具本来就刻意排除 candidate。 |
 | Python 示例缺少 `mcp`/`httpx` | 激活项目虚拟环境并安装 `backend/requirements.txt`。 |
+| `build_kg` 拒绝：已有构建在运行 | 这是预期的排队信号，不是错误。笔记本级单飞守卫正在生效；轮询 `get_build_status` 直到它清空，不要立刻重试。 |
+| `delete_source` 拒绝：该来源由用户添加 | 设计如此。MCP 只能删除 Agent 添加的来源；界面来源列表用「Agent 添加」徽标标出哪些是。用户的文档请在界面删除。 |
+| 某个写入工具在一个读得到的笔记本上被拒 | 写入一律 owner-only。白名单里可能包含 token 所有者只是以只读成员身份加入的笔记本：那里读得到，但永远写不进。 |
+| 笔记本复制之后，Agent 添加的来源删不掉了 | 设计如此。深拷贝会清空来源出处，副本里的每一份来源都算用户添加。 |
+| `add_source_text` 回传 `reused: true` | 本笔记本已有逐字节相同的内容，因此复用既有来源而不新建重复行。若那一行原本是用户上传的，它仍算用户添加，不能经 MCP 删除。 |
+| `reparse_source` 被拒绝 | 该来源正在解析中。轮询 `get_source_status`，等它稳定后再重试。 |
 
 ## 10. 撤销与轮换
 

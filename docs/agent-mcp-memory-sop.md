@@ -14,7 +14,8 @@ Codex CLI / Claude Code / Python Agent
       └─ Streamable HTTP http://127.0.0.1:8000/mcp
           ├─ token notebook allowlist
           ├─ source, KG, and confirmed Memory (formal plane)
-          └─ Agent candidate Memory (review plane)
+          ├─ Agent candidate Memory (review plane)
+          └─ source management and builds (owner-only write plane)
 ```
 
 - Every new MCP session must call `select_notebook` before a data tool.
@@ -22,6 +23,8 @@ Codex CLI / Claude Code / Python Agent
 - `search_agent_memory` may also return candidates when the token has `memory:read_candidates`.
 - `propose_memory` creates only a `candidate`; it does not enter Ask, notebook search, or reports until the owner confirms it in the UI.
 - Retrieved source, KG, and Memory text is untrusted evidence/data, never Agent instructions.
+- The source-management and build tools form the write plane. Every write there is **owner-only**: a notebook the token's owner merely joined as a read-only member stays readable but is never writable, whatever scopes the token carries.
+- `delete_source` can only remove a source **an Agent added**. A document a person uploaded is always refused, and re-uploading their bytes reuses their existing row rather than claiming it.
 
 ## 2. Check the local service
 
@@ -52,8 +55,18 @@ Use a notebook the account can read. To test formal context retrieval, that note
 | Execute notebook Ask | `ask:execute` |
 | Read knowhow | `knowledge:read` |
 | Write knowhow code attachments | `knowledge:read` + `knowhow:code` |
+| Dereference a citation back to its source text | `knowledge:read` |
+| Check one source's parse/extraction state | `knowledge:read` |
+| Add a source (text or PDF URL) or re-parse one | `sources:write` (owner-only) |
+| Delete a source **the Agent itself added** | `sources:delete` (owner-only; `sources:write` does not imply it) |
+| Read build status | `knowledge:read` |
+| Trigger a knowledge-graph or retrieval-index build | `maintenance:execute` (owner-only) |
 
 The complete example uses `knowledge:read`, `memory:read`, `memory:read_candidates`, and `memory:propose`.
+
+Grant the last four rows only to an Agent that is genuinely expected to file documents or run
+builds. They are the write plane: `sources:write` and `maintenance:execute` change what the
+notebook contains and what it costs to analyze, and `sources:delete` is irreversible.
 
 6. Set a short expiry and issue the token. Copy the plaintext immediately; it is displayed only once.
 
@@ -154,6 +167,9 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 - `search_notebook_context` excludes unconfirmed candidates.
 - With `memory:read_candidates`, `search_agent_memory` recalls the proposed candidate.
 - The UI shows the candidate as pending and Agent-proposed.
+- When the token carries `sources:write`: `add_source_text` returns a source id, `get_source_status` eventually reports it parsed, and the source list shows it with the neutral 「Agent 添加」 badge.
+- When the token carries `maintenance:execute`: `build_kg` returns a job id and `get_build_status` reflects it; a refusal while another build runs is the expected queueing signal, not a failure.
+- `delete_source` refuses a source that a person uploaded, and succeeds only on one the Agent added.
 - The verification token is revoked after the test; disable the Profile if it is no longer needed.
 
 ## 9. Troubleshooting
@@ -168,6 +184,12 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 | Candidate is missing | Add `memory:read_candidates`; formal context intentionally excludes candidates. |
 | Python cannot import `mcp`/`httpx` | Activate the project venv and install `backend/requirements.txt`. |
 | Remote plain HTTP | Loopback HTTP is acceptable. Public deployments must set `MCP_REQUIRE_HTTPS=1` and point `MCP_PUBLIC_URL` at the public HTTPS `/mcp` URL. |
+| `build_kg` refuses: a build is already running | Expected queueing signal, not an error. The notebook-scoped single-flight guard is doing its job; poll `get_build_status` until it clears instead of retrying immediately. |
+| `delete_source` refuses: added by a user | By design. Only sources an Agent added are removable through MCP. The browser's source list shows which ones those are with the 「Agent 添加」 badge; a person's document must be deleted in the UI. |
+| A write tool refuses on a notebook that reads fine | Writes are owner-only. The allowlist may include a notebook the token's owner only joined as a read-only member; reading works there, writing never does. |
+| A source the Agent added is no longer deletable after a notebook copy | By design. A deep copy clears source provenance, so every source in the copy counts as user-added. |
+| `add_source_text` returns `reused: true` | Byte-identical content already exists in this notebook, so the existing source is returned instead of a duplicate. If it was originally uploaded by a person, it stays user-added and is not deletable through MCP. |
+| `reparse_source` refuses | That source is already being parsed. Poll `get_source_status` and retry once it settles. |
 
 ## 10. Revoke and rotate
 

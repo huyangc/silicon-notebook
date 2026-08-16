@@ -28,8 +28,8 @@ fixtures in tests are outside this rule.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 47. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v47 and remains readable. Those migrations
+The current schema version is 48. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v48 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -164,6 +164,23 @@ to be enforced by live notebook owner/read guards. PostgreSQL migration v25 is
 the paired schema, and the forward-shadow manifest includes the new business
 table.
 
+SQLite v48 adds the nullable `sources.agent_profile_id` provenance column, which
+records that an Agent (rather than a person) added a source. NULL is the
+load-bearing value — it means "a person added this" — so nothing is backfilled:
+every already-deployed row is user-added by definition. It deliberately carries
+no index, no unique constraint, and no foreign key to `agent_profiles`: the
+permission check behind the MCP `delete_source` tool is a single-row primary-key
+read, nothing enumerates "sources of this agent", provenance must outlive the
+profile row, and an incoming FK would add an edge to the forward-shadow parent
+closure. The column is written on the INSERT branch only, so content-hash dedupe
+that reuses an existing row keeps the first writer's provenance and a notebook
+deep copy clears it outright. `SourceSummary` and the source detail models
+project it as the `agent_created` boolean. PostgreSQL migration v26 is the paired
+schema; because the column adds no table, index, constraint, or FK edge, the
+forward-shadow invariants (74 business tables, 100 unique surfaces, a
+branch-counted bound of 12 row slots) are unchanged, and the current pairing is
+SQLite 48 / PostgreSQL 26 / epoch 1.
+
 Run it only while application/background writers are stopped:
 
 ```bash
@@ -180,7 +197,7 @@ is `--database-url`, and both audit paths are transaction/read-only. The audit
 exits nonzero while any visible source is missing, running, failed,
 incomplete, or fails an integrity reconciliation.
 
-PostgreSQL migration v25 is the current paired
+PostgreSQL migration v26 is the current paired
 business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
@@ -191,7 +208,7 @@ batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
 copy as explicit ordinals and their catalog-resolved identity sequences reseed,
 and the final forward checkpoint advances atomically to snapshot H0 after the
-v25 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
+v26 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
 owner-only real directory and exclusive 0600 temporary creation. COPY fully
 qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
 capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
@@ -201,7 +218,7 @@ across open and immediately before publication/PG commit. JSONB prefix proof
 normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
 SQL numeric columns remain type-distinct. It uses bounded
 named server cursors plus statement timeouts/cancellation polls, and performs
-full initial/final migration-derived validation of v25 tables, columns,
+full initial/final migration-derived validation of v26 tables, columns,
 constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
 is intentionally lightweight. The final SQLite fence is acquired only after
 the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
@@ -226,9 +243,9 @@ bundle may exceed the byte cap, and a same-key replacement that grows past the
 cap rolls back and defers when another actual bundle is already accepted. FK
 parents come only from the verified current source snapshot through a
 64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v25 graph has a branch-counted bound of exactly 12 row slots and no
+the fixed v26 graph has a branch-counted bound of exactly 12 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG25 catalog plans cover all
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG26 catalog plans cover all
 100 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
@@ -312,7 +329,7 @@ The verification gates are tiered:
 | G2 extended | `scripts/check_extended.sh`: G1 plus real-index/performance, cold graph/index contracts, and repository-wide semantic scans | Once daily at `17 18 * * *` UTC (02:17 Asia/Shanghai), plus manual dispatch |
 | G3 PostgreSQL | `scripts/check_postgres.sh`: direct PostgreSQL adapter integration | Independent PR/push/manual CI job |
 
-G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 12 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, and the production frontend build. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build owns TypeScript validation and must keep `ignoreBuildErrors` unset, so G1 does not parse the same TypeScript program once with `tsc --noEmit` and immediately again in the build; `npm run lint` remains available as a focused G0 command. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract` repository-wide semantic scans, and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 12 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, and the production frontend build. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build owns TypeScript validation and must keep `ignoreBuildErrors` unset, so G1 does not parse the same TypeScript program once with `tsc --noEmit` and immediately again in the build; `npm run lint` remains available as a focused G0 command. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract` repository-wide semantic scans, and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 20 published tools: seven Memory/context, four knowhow, one citation point-read, five source-management, and three build tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 

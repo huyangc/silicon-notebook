@@ -349,7 +349,9 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   `search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、
   `propose_memory`，及 knowhow 四工具 `list_knowhow_tables`、`get_knowhow_discrimination`、
   `get_knowhow_row`、`put_knowhow_cell_code`（2026-07-16 随 knowhow 表 Agent 面加入，读取需
-  `knowledge:read`、代码写入需 `knowhow:code`）。每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
+  `knowledge:read`、代码写入需 `knowhow:code`）。**以上是本条目交付当时的工具面；后续已扩展至二十个工具
+  （引用点查、来源管理与构建工具组，当前权威清单见 `mcp_server.PUBLIC_TOOLS` 与
+  `docs/product-and-api.md`）。** 每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
   候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 默认
   允许明文 HTTP（放宽 Host/Origin 校验并打印启动告警），设 `MCP_REQUIRE_HTTPS=1` 恢复强制 HTTPS；
   返回私有文本按不可信 evidence 处理并做长度/结果数上限。
@@ -361,8 +363,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   `base_object_ids`。私有 Memory 的 owner/status 不改变，完整私有任务上下文不进入 Base KG 对象。
 - **确定性评价与验证**：固定 gold 计算 Recall@5/MRR/nDCG，candidate→正式平面、跨用户、跨
   notebook 三个泄漏计数均为 0；A/B harness 覆盖 no-Memory、KB-only、KB+confirmed-Memory。
-  `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证十一个工具契约（七个 Memory/context
-  工具与四个 knowhow 工具）、session 选择隔离、candidate
+  `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，当时验证十一个工具契约（七个 Memory/context
+  工具与四个 knowhow 工具；该 smoke 现按上述扩展后的工具面锁定）、session 选择隔离、candidate
   正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2939 passed, 1 skipped`、
   前端 `189 passed`、TypeScript 与 Next.js production build 均成功。
 
