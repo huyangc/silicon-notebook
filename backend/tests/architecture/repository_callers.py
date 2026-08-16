@@ -61,6 +61,11 @@ SQL_REASON_BY_PATH = {
     "backend/app/migration/shadow/retention.py": (
         "temporary migration worker owns conservative verified change-log retention"
     ),
+    "backend/app/repositories/source_subgraph_projection.py": (
+        "backend-neutral selected-source graph reads bind the caller's own "
+        "read transaction, outside the sqlite/postgres adapter prefixes this "
+        "scan already exempts"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),
@@ -77,6 +82,7 @@ SQL_REASON_BY_PATH = {
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
     "scripts/kg_quality_audit.py": "read-only host database diagnostic",
     "scripts/audit_kg_edge_contract.py": "read-only host database diagnostic",
+    "scripts/audit_source_facts.py": "read-only host database diagnostic",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",
     "scripts/verify_repository_snapshot.py": "read-only backup and probe databases",
 }
@@ -118,6 +124,7 @@ FACADE_IMPORT_TARGETS = {
 PRIVATE_REASON_BY_PATH = {
     "backend/app/api/deps.py": "composition root extracts narrow runtime ports",
     "backend/app/api/kg_routes.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/mcp_server.py": "API readiness checks the process-owned model provider",
     "backend/app/api/report_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/api/source_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/services/knowhow/api.py": "knowhow orchestration constructs narrow services from runtime ports",
@@ -157,6 +164,7 @@ SQLITE_CONNECT_REASON_BY_PATH = {
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
     "scripts/kg_quality_audit.py": "read-only host database diagnostic",
     "scripts/audit_kg_edge_contract.py": "read-only host database diagnostic",
+    "scripts/audit_source_facts.py": "read-only host database diagnostic",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",
     "scripts/verify_repository_snapshot.py": "read-only backup and probe databases",
 }
