@@ -64,9 +64,15 @@ Use a notebook the account can read. To test formal context retrieval, that note
 
 The complete example uses `knowledge:read`, `memory:read`, `memory:read_candidates`, and `memory:propose`.
 
-Grant the last four rows only to an Agent that is genuinely expected to file documents or run
-builds. They are the write plane: `sources:write` and `maintenance:execute` change what the
-notebook contains and what it costs to analyze, and `sources:delete` is irreversible.
+Only three of those scopes are the write plane — `sources:write`, `sources:delete`, and
+`maintenance:execute` — and they are the ones to withhold unless the Agent is genuinely
+expected to file documents or run builds: the first changes what the notebook contains, the
+third changes what it costs to analyze, and `sources:delete` is irreversible. The status
+reads beside them (`get_source_status`, `get_build_status`) need only `knowledge:read`.
+
+`list_notebooks` and `select_notebook` require no scope at all — a live token, an allowlisted
+notebook, and read access to it are the whole check — so every session can start even with a
+minimal token.
 
 6. Set a short expiry and issue the token. Copy the plaintext immediately; it is displayed only once.
 

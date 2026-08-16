@@ -237,6 +237,9 @@ Claude Code 可能把这段原始 header 保存到本机配置。应使用最小
 | 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
 | 构建状态读取 | `get_build_status` | `knowledge:read` |
 
+`list_notebooks` 与 `select_notebook` **不需要任何 scope**：判据只有 token 存活、目标笔记本在
+白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
+
 服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
 
@@ -247,10 +250,12 @@ Claude Code 可能把这段原始 header 保存到本机配置。应使用最小
 自己发出的 id 即可察觉。每个 anchor 另带 `source_id`、`element_id`，knowhow 投影节点还带
 `knowhow: {table_id, row_id}`。新增的 `citations` 回退列表携带非 anchor 证据的 `label`、
 `source_id`、`element_id`、`location_label`、`quoted_span`、`source_file_name` 与 `tier`；
-`notebook_id` 与 `memory_id` 只在非空时下发。`memory_id` 非空的行需要 `memory:read`——没有该
+`notebook_id` 与 `memory_id` 只在非空时下发，knowhow 投影来源的 citation 也带与 anchor 相同的
+`knowhow: {table_id, row_id}`。`memory_id` 非空的行需要 `memory:read`——没有该
 scope 时整行在结果截断**之前**被过滤，且不计入截断计数，否则那个被隐藏的私有 Memory 条数会
-被算术还原出来。anchors 与 citations 各自最多 20 行；响应预算为 anchors 预留 3,500 字符
-（其中 anchor provenance 500 字符）、为 citations 预留 1,800 字符，使大体量引用不会挤掉正文。
+被算术还原出来。anchors 与 citations 各自最多 20 行。响应预算分两步：先把**每一条** anchor 的
+`provenance` 各自压到 500 字符，然后才把 anchors 整体压到 3,500 字符；citations 另外预压到
+1,800 字符，使大体量引用不会挤掉正文。
 
 `get_cited_element` 把一条引用还原回原文：按 `ask_notebook` 或 `search_notebook_context` 返回的
 `source_id` 与 `element_id` 原样传入，取回该元素自身的文本、它在文档中的位置和文档显示标题。
@@ -265,8 +270,11 @@ scope 时整行在结果截断**之前**被过滤，且不计入截断计数，�
 非空且不超过本部署的 `SOURCE_UPLOAD_MAX_MB` 单文件上限（按存储的 UTF-8 字节计）。重复提交
 逐字节相同的内容会复用既有来源并回传 `reused: true`，不产生重复行。`add_source_url` 按 URL
 添加 PDF，服务端会先探测，取不到或不是 PDF 一律拒绝。两者都受笔记本文档数量上限约束。解析
-在后台进行，用 `get_source_status` 轮询：它给出解析/抽取状态、元素数量，以及派生的
-`parse_failed` 布尔而非原始 `error_message`。`reparse_source` 重跑一份来源的解析与抽取；该
+在后台进行，用 `get_source_status` 轮询：它返回 `parse_status`、`status`、`element_count`、
+`kg_extracted`（是否已跑过知识抽取）、`agent_created`，以及派生的 `parse_failed` 布尔与
+`parse_quality_warning`，而不是原始 `error_message`（后者是逐字保存的 `str(exc)`，经常带着
+服务端绝对路径）。`parse_quality_warning` 是 MinerU 降级信号：即使来源已到 `extracted`，版面、
+公式与表格仍可能有误，准备引用它的 Agent 需要知道这一点。`reparse_source` 重跑一份来源的解析与抽取；该
 来源的解析锁被占用时直接拒绝（约 0.5 秒的有界探测而非等待——那把锁跨越两次模型调用，真的
 正在解析的来源一秒后仍在解析）。
 
