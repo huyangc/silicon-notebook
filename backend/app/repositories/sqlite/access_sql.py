@@ -26,9 +26,10 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 * `sqlite/sharing_store.py`:`user_can_access_notebook`(写权)、`user_can_read_notebook`
   (读权)、`is_member`(成员探测)。
 * `sqlite/memory_store.py`:`_read_access_clause`(嵌进 Memory 各处读查询)、
-  `create_candidate_with_initial_revision`(写前判定)、`_answer_save_scope_*`
-  (答案存 Memory 的范围校验)、`validate_promotion_approval_access_on`(晋升审批
-  写事务内复核)。
+  `create_candidate_with_initial_revision`(写前判定)、
+  `create_answer_with_initial_revision`(答案存 Memory 的范围校验;同名的
+  `_answer_save_scope_locked_on` 是不含 SQL 的空接缝,谓词不在那儿)、
+  `validate_promotion_approval_access_on`(晋升审批写事务内复核)。
 * `sqlite/memory_store.py::_lock_memory_aggregate_on` —— ⚠ **两段式写法,刻意保留**:
   它先单查 `created_by` 以区分「notebook 不存在」(KeyError)与「不是成员」
   (PermissionError/KeyError),再单独探成员;PG 侧对应实现还在这两步上各挂 `FOR SHARE`

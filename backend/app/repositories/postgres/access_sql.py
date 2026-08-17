@@ -13,8 +13,9 @@ PG 侧独有的事实。
   `user_can_read_notebook`(读权)、`is_member`(成员探测)。
 * `postgres/memory_store.py`:`_read_access_clause`、`_answer_save_scope_exists`、
   `validate_promotion_approval_access_on`。
-* `postgres/search.py::memory_lexical_candidates` —— Memory 词法候选的读权过滤,
-  与 `_read_access_clause` 同形,是本次收口前的第三份独立复刻。
+* `postgres/search.py::_memory_match_predicates` —— Memory 词法检索的读权过滤
+  (被 `memory_candidate_ids` / `memory_match_count` / `memory_page_candidate_ids`
+  三个入口共用),与 `_read_access_clause` 同形,是本次收口前的第三份独立复刻。
 * ⚠ **两段式带锁写法,刻意保留**(`postgres/memory_store.py` 的
   `create_candidate_with_initial_revision`、答案存 Memory 的写事务分支、
   `_lock_memory_aggregate_on`):它们先 `SELECT created_by FROM notebooks ... FOR SHARE`
