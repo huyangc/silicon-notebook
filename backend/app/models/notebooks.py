@@ -47,6 +47,29 @@ class MountedBase(NotebookRef):
     inactive_reason: str = ""
 
 
+class MountableNotebook(NotebookRef):
+    """`GET /notebooks/{id}/mountable` 的一个候选。
+
+    `origin` 说的是「这个候选**凭什么**能挂」,取三值之一:
+
+    * `base`   —— 公共知识库(`tier='base'`);
+    * `mine`   —— 与挂载方同 owner 的库;
+    * `shared` —— 其余,即挂载方 owner 经只读共享或群组授权读得到的库。
+
+    存在的理由是**界面上的一句事实**:群组知识共享 P1 把「读权 ⇒ 可挂载」放开之后,
+    挂载选择器里开始出现别人 owner 的库,而前端只有 `tier` 可分,只能把它们归进
+    「我的笔记本」——一句错话。三值由 `MOUNT_VALID_EXPR` 已有的列信息投影而来
+    (`tier` 与 `created_by` 比较),不新增任何查询。
+
+    ⚠ 刻意**新开一个模型**而不是给 `NotebookRef` 加字段:后者同时是 `MountedBase`
+    的基类,而挂载边那条查询并不计算这个标志,加上去只会多一个恒为默认值的字段。
+
+    优先级 base → mine → shared:自己 owner 的公共知识库判成 `base`,与本字段出现
+    之前前端按 `tier` 分组的结果逐字一致(改的只是新准入的那批行的归属)。
+    """
+    origin: str = ""
+
+
 class NotebookSummary(BaseModel):
     id: str
     name: str
@@ -179,6 +202,10 @@ class SharedByMeItem(BaseModel):
     mode: str                          # "copy" | "readonly"
     size: Dict[str, int]
     members: List[Dict[str, str]]      # [{username, added_at}];仅 readonly 有值
+    # 这本库共享给了几个**不同的**群组(群组知识共享 P1-T4)。总览的范围因此是
+    # 「只读共享 ∨ 共享给群组」,与卡片上的「已分享」徽标同一个判据;`share_token`
+    # 为空而本字段非 0 的行,就是一条只因群组共享而出现的记录(没有分享链接可发)。
+    group_count: int = 0
 
 
 class NotebookTemplate(BaseModel):

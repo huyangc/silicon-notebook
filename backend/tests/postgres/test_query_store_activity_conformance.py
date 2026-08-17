@@ -503,7 +503,10 @@ def test_pending_report_of_a_member_without_own_notebooks(postgres_database, sto
 
     共享笔记本里的成员可以建自己的报告,但他可能一个自有库都没有;闸内的写法会让
     他的铃铛恒为 0,而报告卡在 intent_ready 等他确认。两个后端各有一份实现,所以
-    这条不变量必须两边各钉一次。"""
+    这条不变量必须两边各钉一次。
+
+    P1-T4 又加了一条:库名不再取自「我自有的库」映射(共享库不在其中,条目会显示成
+    一条没有出处的报告),而是随报告行 LEFT JOIN 出来。"""
     with postgres_database.write() as connection:
         _insert_user(connection, "u-owner")
         _insert_user(connection, "u-member")            # 没有任何自有 notebook
@@ -516,7 +519,8 @@ def test_pending_report_of_a_member_without_own_notebooks(postgres_database, sto
     reports = [it for it in projection["items"] if it["type"] == "report_outline"]
     assert [it["report_id"] for it in reports] == ["rep-member"]
     assert reports[0]["notebook_id"] == "n-shared"
-    assert reports[0]["notebook_name"] == ""            # 库名解析留给 T4
+    # 库名来自共享库那一行本身(P1-T4),不是「我自有的库」映射。
+    assert reports[0]["notebook_name"] == "NB-n-shared"
 
     # 反向:owner 的铃铛里不出现成员的报告。
     owner_reports = [

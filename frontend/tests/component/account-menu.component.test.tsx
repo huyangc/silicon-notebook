@@ -21,6 +21,7 @@ function renderMenu(
       canChangePassword={canChangePassword}
       advancedMode={advancedMode}
       onOpenMemory={() => undefined}
+      onOpenGroups={() => undefined}
       onToggleAdvancedMode={onToggleAdvancedMode}
       onChangePassword={onChangePassword}
       onLogout={onLogout}

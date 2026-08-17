@@ -843,6 +843,101 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
     )["c"] == 0
 
 
+def test_group_sharing_shows_up_in_the_owner_facing_projections(
+    core_stores: CoreStores,
+):
+    """P1-T4 的两条 owner 视角投影必须与 SQLite 侧同义:
+
+    * `summary_notebook_row` / `owned_notebook_rows` 的 `_shared_to_groups` 列
+      ——「已分享」徽标的第二个来源;
+    * `list_shared_by_owner` 的范围与 `group_count`——总览与徽标同一个判据。
+
+    两个后端各写一条 SQL,而这两条查询共用中性层的同一份文本;这里钉的是「PG 上真的
+    跑得通、且计数按组去重」——`group` 与 `group_admins` 是同一个组的两条边。
+    """
+    groups = core_stores.groups
+    owner = core_stores.identity.create_user("s00123456", "password-49")
+    group = groups.create_group(
+        name="甲组", kind="project", description="", created_by=owner.id
+    )
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="共享库"), owner.id
+    )
+
+    with core_stores.database.connect() as connection:
+        row = core_stores.queries.summary_notebook_row(connection, notebook_id)
+    assert bool(row["_shared_to_groups"]) is False
+    assert core_stores.sharing.list_shared_by_owner(owner.id) == []
+
+    for principal_type in ("group", "group_admins"):
+        groups.create_grant(
+            notebook_id,
+            principal_type=principal_type,
+            principal_id=group["id"],
+            role="viewer" if principal_type == "group" else "admin",
+            created_by=owner.id,
+            admin_user_id=owner.id,
+        )
+
+    with core_stores.database.connect() as connection:
+        row = core_stores.queries.summary_notebook_row(connection, notebook_id)
+        owned = core_stores.queries.owned_notebook_rows(connection, owner.id)
+    assert bool(row["_shared_to_groups"]) is True
+    assert bool(owned[0]["_shared_to_groups"]) is True
+
+    shared = core_stores.sharing.list_shared_by_owner(owner.id)
+    assert [item["id"] for item in shared] == [notebook_id]
+    assert shared[0]["share_token"] is None      # 只因群组共享而出现,没有分享链接
+    assert shared[0]["group_count"] == 1         # 两条边、一个组
+
+    # `user` / `everyone` 主体不算「共享给群组」:前者是只读共享(徽标那一半由
+    # `notebooks.is_shared` 负责),后者是公共知识库的兼容映射。
+    other_notebook = core_stores.notebooks.create_row(
+        NotebookCreate(name="别的库"), owner.id
+    )
+    _pg_grant(core_stores, "gr-user-x", other_notebook, "user", owner.id, owner.id)
+    _pg_grant(core_stores, "gr-all-x", other_notebook, "everyone", "", owner.id)
+    assert [item["id"] for item in core_stores.sharing.list_shared_by_owner(owner.id)] == [
+        notebook_id
+    ]
+
+
+def test_mountable_candidates_report_where_they_come_from(core_stores: CoreStores):
+    """挂载候选的 `origin` 投影(P1-T4)必须与 SQLite 侧同一套判据与优先级。
+
+    优先级 base → mine → shared:自己 owner 的公共知识库仍判 `base`,让本字段出现
+    之前前端按 `tier` 分组的结果逐字不变。
+    """
+    groups = core_stores.groups
+    owner = core_stores.identity.create_user("t00123456", "password-50")
+    other = core_stores.identity.create_user("v00123456", "password-51")
+
+    mine = core_stores.notebooks.create_row(NotebookCreate(name="我的库"), owner.id)
+    public = core_stores.notebooks.create_row(NotebookCreate(name="公共库"), owner.id)
+    core_stores.notebooks.set_tier(public, "base")
+
+    group = groups.create_group(
+        name="他的组", kind="project", description="", created_by=other.id
+    )
+    groups.upsert_member(group["id"], owner.id, role="member", added_by=other.id)
+    borrowed = core_stores.notebooks.create_row(NotebookCreate(name="他的库"), other.id)
+    groups.create_grant(
+        borrowed,
+        principal_type="group",
+        principal_id=group["id"],
+        role="viewer",
+        created_by=other.id,
+        admin_user_id=other.id,
+    )
+
+    target = core_stores.notebooks.create_row(NotebookCreate(name="挂载方"), owner.id)
+    candidates = core_stores.notebooks.mountable_for_notebook(target)
+    origins = {item["id"]: item["origin"] for item in candidates}
+    assert origins[public] == "base"
+    assert origins[mine] == "mine"
+    assert origins[borrowed] == "shared"
+
+
 def test_granted_notebook_rows_matches_the_sqlite_list_projection(
     core_stores: CoreStores,
 ):
@@ -1280,9 +1375,12 @@ def test_notebook_raw_rows_feed_neutral_summary_json_lists(
         assert summary.taxonomy == ["analog", "模拟"]
 
     # This sharing-list projection does not expose any JSON notebook columns,
-    # so it cannot accidentally cross the raw-row summary boundary.
+    # so it cannot accidentally cross the raw-row summary boundary.  ``group_count``
+    # (group knowledge sharing P1-T4) is a derived integer, not a notebook column,
+    # so it stays on the safe side of that boundary too.
     shared_rows = core_stores.sharing.list_shared_by_owner(owner.id)
-    assert set(shared_rows[0].keys()) == {"id", "name", "share_token"}
+    assert set(shared_rows[0].keys()) == {"id", "name", "share_token", "group_count"}
+    assert shared_rows[0]["group_count"] == 0
 
 
 def test_copy_snapshot_excludes_backend_ordinals_and_serializes_json(

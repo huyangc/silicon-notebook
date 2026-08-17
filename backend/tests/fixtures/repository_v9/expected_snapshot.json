@@ -441,6 +441,7 @@
     "sharing": {
       "by_me": [
         {
+          "group_count": 0,
           "id": "<nb-id-1>",
           "members": [],
           "mode": "copy",

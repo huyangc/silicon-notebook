@@ -1276,3 +1276,157 @@ def test_group_ids_are_random_per_creation(tmp_path, monkeypatch):
         suffix = group_id.split("-", 1)[1]
         assert len(suffix) == len(uuid.uuid4().hex)
         int(suffix, 16)  # 纯十六进制:确认是随机 uuid 而不是自增序号
+
+
+# ------------------------------------------------- P1-T4:owner 侧的可见性对账
+
+
+def test_the_shared_badge_and_the_shared_by_me_overview_both_count_group_sharing(
+    tmp_path, monkeypatch
+):
+    """「已分享」徽标与「已分享」总览的范围 = 只读共享 ∨ 共享给群组(P1-T4)。
+
+    此前两者都只看 `notebooks.is_shared`(分享链接那一列),于是 owner 会看到一本
+    「没有分享过」的库其实整组人可读——徽标不亮、总览也不列。两处必须同时改口径,
+    否则会变成「徽标亮着而总览说尚未分享任何笔记本」这种更难解释的形态。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+
+    # 共享之前:徽标灭、总览空。
+    def summary() -> dict:
+        listed = client.get("/api/notebooks", headers=owner).json()
+        return next(item for item in listed if item["id"] == notebook_id)
+
+    assert summary()["is_shared"] is False
+    assert client.get("/api/notebooks/shared-by-me", headers=owner).json() == []
+
+    assert _share_to_group(client, owner, notebook_id, group_id).status_code == 200
+
+    assert summary()["is_shared"] is True
+    # 单库详情走的是另一条行查询,同样要带上这一列。
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=owner).json()["is_shared"] is True
+
+    overview = client.get("/api/notebooks/shared-by-me", headers=owner).json()
+    assert [item["id"] for item in overview] == [notebook_id]
+    # 只因群组共享而出现的行没有分享链接——前端据此不渲染链接框,也不给「取消分享」
+    # (那个动作只撤链接与只读成员,对授权边是空操作)。
+    assert overview[0]["share_token"] == ""
+    assert overview[0]["group_count"] == 1
+
+
+def test_group_count_counts_groups_not_grant_rows(tmp_path, monkeypatch):
+    """同一个组的两条边(成员只读 / 组管理员可管)是一个组,不是两个。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    other_group = _make_group(client, owner, name="另一个组")
+    notebook_id = _make_notebook(client, owner)
+
+    assert _share_to_group(client, owner, notebook_id, group_id).status_code == 200
+    assert client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group_admins", "principal_id": group_id, "role": "admin"},
+        headers=owner,
+    ).status_code == 200
+    assert _share_to_group(client, owner, notebook_id, other_group).status_code == 200
+
+    overview = client.get("/api/notebooks/shared-by-me", headers=owner).json()
+    assert overview[0]["group_count"] == 2
+
+
+def test_revoking_the_last_group_grant_puts_the_badge_back_out(tmp_path, monkeypatch):
+    """撤销之后徽标必须灭、总览必须空——徽标只增不减就是另一种撒谎。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    grant_id = _share_to_group(client, owner, notebook_id, group_id).json()["id"]
+
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/grants/{grant_id}", headers=owner
+    ).status_code == 204
+
+    listed = client.get("/api/notebooks", headers=owner).json()
+    assert next(item for item in listed if item["id"] == notebook_id)["is_shared"] is False
+    assert client.get("/api/notebooks/shared-by-me", headers=owner).json() == []
+
+
+def test_a_link_shared_notebook_keeps_its_overview_row_shape(tmp_path, monkeypatch):
+    """只读共享那条路逐字不变:仍带 token、仍可取消,只是多一个恒为 0 的群组计数。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, owner)
+    client.post(f"/api/notebooks/{notebook_id}/share", headers=owner)
+
+    overview = client.get("/api/notebooks/shared-by-me", headers=owner).json()
+    assert [item["id"] for item in overview] == [notebook_id]
+    assert overview[0]["share_token"]
+    assert overview[0]["group_count"] == 0
+
+
+def test_a_group_reader_does_not_see_the_owners_sharing_state(tmp_path, monkeypatch):
+    """`is_shared` 是 owner 视角的字段。成员那份投影不带它——群组共享进来的库在成员
+    列表里仍是 `is_shared=False`,与只读共享成员看到的形状一致。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    member, member_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}", json={"role": "member"}, headers=owner
+    )
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+
+    listed = client.get("/api/notebooks", headers=member).json()
+    shared = next(item for item in listed if item["id"] == notebook_id)
+    assert shared["access"] == "reader"
+    assert shared["is_shared"] is False
+    assert [g["group_id"] for g in shared["granted_via"]] == [group_id]
+
+
+def test_mountable_candidates_carry_where_they_come_from(tmp_path, monkeypatch, repo):
+    """挂载候选带 `origin`,让选择器分得出「我的」与「共享给我的」(P1-T4)。
+
+    「读权 ⇒ 可挂载」放开之后,别人 owner 的库也会进候选;前端只有 `tier` 可分时会
+    把它们标成「我的笔记本」——一句事实错误的标签。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    other, _other_id, _ = _new_user(client)
+    _promote_to_admin(repo, owner_id)
+
+    mine = _make_notebook(client, owner, name="我的库")
+    public = _make_notebook(client, owner, name="公共库")
+    client.post(f"/api/notebooks/{public}/tier", json={"tier": "base"}, headers=owner)
+
+    # 别人的库经群组授权共享给我。
+    group_id = _make_group(client, other, name="他的组")
+    client.put(
+        f"/api/groups/{group_id}/members/{owner_id}", json={"role": "member"}, headers=other
+    )
+    borrowed = _make_notebook(client, other, name="他的库")
+    assert _share_to_group(client, other, borrowed, group_id).status_code == 200
+
+    target = _make_notebook(client, owner, name="挂载方")
+    candidates = client.get(f"/api/notebooks/{target}/mountable", headers=owner).json()
+    origins = {item["id"]: item["origin"] for item in candidates}
+    assert origins[public] == "base"
+    assert origins[mine] == "mine"
+    assert origins[borrowed] == "shared"
+
+
+def test_my_own_public_notebook_still_reads_as_a_public_one(tmp_path, monkeypatch, repo):
+    """优先级 base → mine → shared:自己 owner 的公共知识库仍判 `base`,这样本字段
+    出现之前按 `tier` 分组的结果逐字不变。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    _promote_to_admin(repo, owner_id)
+    public = _make_notebook(client, owner, name="我建的公共库")
+    client.post(f"/api/notebooks/{public}/tier", json={"tier": "base"}, headers=owner)
+    target = _make_notebook(client, owner, name="挂载方")
+
+    candidates = client.get(f"/api/notebooks/{target}/mountable", headers=owner).json()
+    assert {item["id"]: item["origin"] for item in candidates}[public] == "base"

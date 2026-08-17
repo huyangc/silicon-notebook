@@ -16,6 +16,7 @@ from app.repositories.postgres.mount_sql import (
     MOUNT_GATE_CLOSED_EXPR as _MOUNT_GATE_CLOSED_EXPR,
     MOUNT_JOIN as _MOUNT_JOIN,
     MOUNT_ORDER as _MOUNT_ORDER,
+    MOUNT_ORIGIN_COLUMN as _MOUNT_ORIGIN_COLUMN,
     MOUNT_VALID as _MOUNT_VALID,
     MOUNT_VALID_EXPR as _MOUNT_VALID_EXPR,
 )
@@ -155,15 +156,21 @@ class NotebookStore:
     @staticmethod
     def mountable_notebooks(connection, notebook_id: str) -> list[dict]:
         rows = connection.execute(
-            "SELECT b.id AS id,b.name AS name,b.tier AS tier "
-            "FROM notebooks b JOIN notebooks a ON a.id=%s "
+            "SELECT b.id AS id,b.name AS name,b.tier AS tier,"
+            + _MOUNT_ORIGIN_COLUMN
+            + " FROM notebooks b JOIN notebooks a ON a.id=%s "
             "WHERE b.id<>a.id AND "
             + _MOUNT_VALID_EXPR
             + _MOUNT_ORDER,
             (notebook_id,),
         ).fetchall()
         return [
-            {"id": row["id"], "name": row["name"], "tier": row["tier"] or "personal"}
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "tier": row["tier"] or "personal",
+                "origin": row["origin"],
+            }
             for row in rows
         ]
 

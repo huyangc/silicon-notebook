@@ -5887,6 +5887,15 @@ button.chat-session-card {
   background: #f2f5f9;
 }
 
+/* 笔记本操作菜单里的只读说明行(群组共享的库没有「退出共享」可按)。与菜单里的
+   按钮同一套排版,只是不可点。 */
+.notebook-menu-note {
+  display: block;
+  min-height: 36px;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
 .popover button.danger {
   color: #ba2d2d;
 }
@@ -8992,6 +9001,9 @@ button.chat-session-card {
   background: #94a3b8;
 }
 .base-picker-group--public .base-picker-group-title::before { background: var(--blue); }
+/* 群组知识共享 P1:第三组「共享给我的」——别人 owner、经只读共享或群组授权
+   可挂的库。与「我的笔记本」用不同色条区分,免得两组只靠标题文字分辨。 */
+.base-picker-group--shared .base-picker-group-title::before { background: var(--warning); }
 /* 审查 M1/M2:.base-picker-row 落在一个 <label> 元素上,又嵌在 .edit-form 表单里——
    .edit-form label(特异性 0,1,1)压过纯类选择器 .base-picker-row(0,1,0),会静默把
    gap 从设计值 8px 吃成 7px。这里用 .base-picker-group 父类限定把特异性提到 (0,2,0)

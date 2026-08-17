@@ -5988,6 +5988,35 @@
           "title": "ModelWorkloadView",
           "type": "object"
         },
+        "MountableNotebook": {
+          "description": "`GET /notebooks/{id}/mountable` 的一个候选。\n\n`origin` 说的是「这个候选**凭什么**能挂」,取三值之一:\n\n* `base`   —— 公共知识库(`tier='base'`);\n* `mine`   —— 与挂载方同 owner 的库;\n* `shared` —— 其余,即挂载方 owner 经只读共享或群组授权读得到的库。\n\n存在的理由是**界面上的一句事实**:群组知识共享 P1 把「读权 ⇒ 可挂载」放开之后,\n挂载选择器里开始出现别人 owner 的库,而前端只有 `tier` 可分,只能把它们归进\n「我的笔记本」——一句错话。三值由 `MOUNT_VALID_EXPR` 已有的列信息投影而来\n(`tier` 与 `created_by` 比较),不新增任何查询。\n\n⚠ 刻意**新开一个模型**而不是给 `NotebookRef` 加字段:后者同时是 `MountedBase`\n的基类,而挂载边那条查询并不计算这个标志,加上去只会多一个恒为默认值的字段。\n\n优先级 base → mine → shared:自己 owner 的公共知识库判成 `base`,与本字段出现\n之前前端按 `tier` 分组的结果逐字一致(改的只是新准入的那批行的归属)。",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "origin": {
+              "default": "",
+              "title": "Origin",
+              "type": "string"
+            },
+            "tier": {
+              "default": "personal",
+              "title": "Tier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "MountableNotebook",
+          "type": "object"
+        },
         "MountedBase": {
           "description": "一条挂载边。active=False 表示边还在但当前不生效(被挂库易主 / 公共库被降级),\n前端须置灰并说明,不能假装它还在工作。",
           "properties": {
@@ -8477,6 +8506,11 @@
         },
         "SharedByMeItem": {
           "properties": {
+            "group_count": {
+              "default": 0,
+              "title": "Group Count",
+              "type": "integer"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -17369,7 +17403,7 @@
       },
       "/api/notebooks/{notebook_id}/mountable": {
         "get": {
-          "description": "可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪\n(本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。\n\n最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
+          "description": "可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪\n(本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。\n\n最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n\n响应模型是 `MountableNotebook` 而不是 `NotebookRef`:每个候选还带一个 `origin`\n(base / mine / shared),让挂载选择器能如实分组——群组共享放开之后,别人 owner\n的库也会出现在这份候选里,只按 `tier` 分组会把它们标成「我的笔记本」。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
           "operationId": "mountable_notebooks_route_api_notebooks__notebook_id__mountable_get",
           "parameters": [
             {
@@ -17388,7 +17422,7 @@
                 "application/json": {
                   "schema": {
                     "items": {
-                      "$ref": "#/components/schemas/NotebookRef"
+                      "$ref": "#/components/schemas/MountableNotebook"
                     },
                     "title": "Response Mountable Notebooks Route Api Notebooks  Notebook Id  Mountable Get",
                     "type": "array"
@@ -21208,6 +21242,7 @@
         }
       },
       "shared_by_me": {
+        "group_count": 0,
         "id": "nb-api",
         "members": [],
         "mode": "copy",

@@ -239,7 +239,16 @@ class NotebookSummaryQuery:
             kg_pending_sources=self.visible_pending_kg_sources(
                 connection, row["id"]
             ),
-            is_shared=bool(row["is_shared"]) if "is_shared" in keys else False,
+            # 「已分享」徽标的口径是**这本库不只我一个人能看**,所以它是两件事的并集:
+            # 只读共享(`notebooks.is_shared` 这一列)**或**存在指向某个群组的授权边
+            # (`_shared_to_groups`,由 summary/owned 两条行查询顺带带回,零新增往返)。
+            # 少了后者,owner 会看到一本「没有分享过」的库其实整组人可读(P1-T4)。
+            # 只读成员/群组成员看到的那份投影里没有这一列(那两条查询不带它),与既有
+            # 「reader 不显示 owner 的分享状态」逐字一致。
+            is_shared=(
+                (bool(row["is_shared"]) if "is_shared" in keys else False)
+                or ("_shared_to_groups" in keys and bool(row["_shared_to_groups"]))
+            ),
         )
 
     def get(

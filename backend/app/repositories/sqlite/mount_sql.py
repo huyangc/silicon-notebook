@@ -118,6 +118,20 @@ MOUNT_GATE_CLOSED_EXPR = (
 # 追加到 MOUNT_JOIN 之后的有效性过滤。
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 
+# 可挂候选的**来源**投影(群组知识共享 P1-T4)。回答的是「这个候选凭什么能挂」,
+# 供挂载选择器给候选分组。三值与 MOUNT_VALID_EXPR 的分支一一对应,但刻意**不**
+# 把第 3/4 支分开:`everyone` 授权与受限读权对用户是同一句话(「别人共享给我的」),
+# 而它们的区别(转手再分享的门)只体现在候选在不在列表里,不体现在标签上。
+#
+# 优先级 base → mine → shared:自己 owner 的公共知识库仍判 `base`,这样本列出现
+# 之前前端按 `tier` 分「公共知识库 / 我的笔记本」的结果逐字不变,新准入的那批库
+# 才落进第三组。不消费任何位置参数(纯列引用),与本模块其余片段同款。
+MOUNT_ORIGIN_COLUMN = (
+    "CASE WHEN b.tier = 'base' THEN 'base'"
+    " WHEN b.created_by = a.created_by THEN 'mine'"
+    " ELSE 'shared' END AS origin"
+)
+
 # 统一次序:公共知识库在前,组内按名字、同名按 id。tier 只有
 # 'base'/'personal' 两个字面量,
 # 'base' < 'personal' 字典序——写成 `tier DESC` 曾经因为这份巧合而被顺手打反

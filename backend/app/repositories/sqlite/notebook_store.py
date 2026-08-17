@@ -7,7 +7,8 @@ from typing import Callable, List, Literal, Sequence
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
-    MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID, MOUNT_VALID_EXPR,
+    MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER, MOUNT_ORIGIN_COLUMN,
+    MOUNT_VALID, MOUNT_VALID_EXPR,
 )
 
 # Knowledge-object statuses that count as "usable" for retrieval and the
@@ -180,14 +181,21 @@ class NotebookStore:
         点)——但 FROM 子句不能复用 MOUNT_JOIN:这里枚举的是候选笔记本本身,不是
         已有的挂载边。"""
         rows = db.execute(
-            "SELECT b.id AS id, b.name AS name, b.tier AS tier "
-            "FROM notebooks b JOIN notebooks a ON a.id = ? "
+            "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
+            + MOUNT_ORIGIN_COLUMN
+            + " FROM notebooks b JOIN notebooks a ON a.id = ? "
             "WHERE b.id != a.id AND " + MOUNT_VALID_EXPR
             + MOUNT_ORDER,
             (notebook_id,),
         ).fetchall()
         return [
-            {"id": r["id"], "name": r["name"], "tier": r["tier"] or "personal"}
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "tier": r["tier"] or "personal",
+                # 「凭什么能挂」——挂载选择器据此分组,见 MOUNT_ORIGIN_COLUMN。
+                "origin": r["origin"],
+            }
             for r in rows
         ]
 

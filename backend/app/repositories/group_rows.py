@@ -22,6 +22,35 @@ GROUP_PRINCIPAL_TYPES = ("group", "group_admins")
 #: 没有名字的共享记录,既不知道它是什么,也不知道该不该删。标注出来让他看得懂。
 MISSING_PRINCIPAL_KIND = "missing"
 
+#: 「这本笔记本共享给群组了吗」的 SQL 判据 —— 双后端共用**一份文本**。
+#:
+#: 它没有任何占位符,也没用到方言函数,所以放在中性层是安全的;放在这里而不是各
+#: 写一份,是因为同一个判据现在有三个消费点(两条 summary 行查询喂「已分享」徽标、
+#: 「已分享」总览的 WHERE),三份手抄迟早会让徽标亮着而总览说「尚未分享」。
+#:
+#: 谓词只认**两个群组主体**:`user` 主体在 P1 还没有任何写入口(只读共享仍走
+#: `notebook_members`,徽标那一半由 `notebooks.is_shared` 负责),`everyone` 是公共
+#: 知识库的兼容映射、有自己的 tier 表达,把它算成「已分享」会让每个公共库都多一个
+#: 说不清的徽标。
+#:
+#: 关联列写死 `notebooks.id`:三个消费点的主表都是未起别名的 `notebooks`。
+GROUP_GRANT_EXISTS_SQL = (
+    "EXISTS(SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id = notebooks.id"
+    " AND ng.principal_type IN ('group', 'group_admins'))"
+)
+
+#: 上一条的计数形态:这本库共享给了几个**不同的**群组。
+#: `DISTINCT principal_id` 而不是 `COUNT(*)`——同一个组可以同时有 `group` 与
+#: `group_admins` 两条边(设计文档 §3 的两行编码),按行数会把一个组报成两个。
+GROUP_GRANT_COUNT_SQL = (
+    "(SELECT COUNT(DISTINCT ng.principal_id) FROM notebook_grants ng"
+    " WHERE ng.notebook_id = notebooks.id"
+    " AND ng.principal_type IN ('group', 'group_admins'))"
+)
+
+#: `NotebookSummary.is_shared` 的第二个来源列(见 `notebook_catalog.from_row`)。
+SHARED_TO_GROUPS_COLUMN = GROUP_GRANT_EXISTS_SQL + " AS _shared_to_groups"
+
 
 def resolve_grant_principal(
     principal_type: Any, group_name: Any, group_kind: Any

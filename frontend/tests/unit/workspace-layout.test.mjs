@@ -202,10 +202,13 @@ test("background responses require the same workspace and notebook", () => {
 
 
 test("workspace capabilities separate notebook type ownership from the global baseline", () => {
+  // 只读成员的 canManageReports 为 **true**（群组知识共享 P1）：报告按创建者行级
+  // 隔离，列表里出现的每一份都是当前用户自己建的，可操作性恒成立。其余四项仍跟着
+  // 写权走——这条断言同时钉住「只放开了报告面」。
   assert.deepEqual(workspaceCapabilities("reader", "user"), {
     canWriteNotebook: false,
     canGovernKnowledge: false,
-    canManageReports: false,
+    canManageReports: true,
     canManageNotebookSchemas: false,
     canManageGlobalSchemas: false,
   });

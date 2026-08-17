@@ -6,6 +6,7 @@ import {
   KeyRound,
   LogOut,
   SlidersHorizontal,
+  Users,
 } from "lucide-react";
 
 
@@ -20,6 +21,8 @@ type AccountMenuProps = {
   /** 当前是否为高级模式；开关渲染其开/关态，点击调用 onToggleAdvancedMode。 */
   advancedMode: boolean;
   onOpenMemory: () => void;
+  /** 群组管理弹窗。任何登录用户都可用（项目组人人可建）。 */
+  onOpenGroups: () => void;
   onToggleAdvancedMode: () => void;
   onChangePassword: () => void;
   onLogout: () => void | Promise<void>;
@@ -35,6 +38,7 @@ export function AccountMenu({
   canChangePassword,
   advancedMode,
   onOpenMemory,
+  onOpenGroups,
   onToggleAdvancedMode,
   onChangePassword,
   onLogout,
@@ -110,6 +114,19 @@ export function AccountMenu({
           >
             <Bookmark size={16} />
             <span>私有记忆</span>
+          </button>
+          <button
+            className="user-logout"
+            type="button"
+            role="menuitem"
+            title="管理群组成员，并查看共享给群组的知识库"
+            onClick={() => {
+              setOpen(false);
+              onOpenGroups();
+            }}
+          >
+            <Users size={16} />
+            <span>群组</span>
           </button>
           <button
             className={`user-logout user-menu-toggle ${advancedMode ? "active" : ""}`}

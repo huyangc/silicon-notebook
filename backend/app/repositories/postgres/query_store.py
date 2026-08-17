@@ -22,6 +22,7 @@ from app.models.sources import (
     has_pdf_python_fallback_warning,
     paper_meta_status,
 )
+from app.repositories.group_rows import SHARED_TO_GROUPS_COLUMN
 from app.repositories.postgres._store_utils import (
     iso_timestamp,
     json_value,
@@ -372,14 +373,16 @@ class QueryStore:
     @staticmethod
     def summary_notebook_row(db: Any, notebook_id: str):
         return sqlite_compatible_notebook_row(db.execute(
-            "SELECT * FROM notebooks WHERE id = %s AND status != 'copying'",
+            "SELECT *, " + SHARED_TO_GROUPS_COLUMN
+            + " FROM notebooks WHERE id = %s AND status != 'copying'",
             (notebook_id,),
         ).fetchone())
 
     @staticmethod
     def owned_notebook_rows(db: Any, user_id: str):
         return _compat_notebook_rows(db.execute(
-            "SELECT * FROM notebooks WHERE created_by = %s AND status != 'copying' "
+            "SELECT *, " + SHARED_TO_GROUPS_COLUMN
+            + " FROM notebooks WHERE created_by = %s AND status != 'copying' "
             "ORDER BY created_at ASC",
             (user_id,),
         ).fetchall())
@@ -998,10 +1001,14 @@ class QueryStore:
             # 报告这一半**不在** `if notebook_ids:` 闸内(P1-T3b)——理由与 SQLite
             # 侧逐字相同:谓词只有 `created_by`,不消费任何 notebook id,放在闸内
             # 会让「没有自有库的成员」整体看不到自己待确认的报告。
+            # 库名走 LEFT JOIN(P1-T4),理由见 SQLite 侧同名方法。
             reports = db.execute(
-                "SELECT id, question, notebook_id, created_at FROM reports "
-                "WHERE status IN ('intent_ready','outline_ready') "
-                "AND created_by = %s ORDER BY updated_at DESC",
+                "SELECT r.id AS id, r.question AS question, "
+                "r.notebook_id AS notebook_id, r.created_at AS created_at, "
+                "nb.name AS notebook_name "
+                "FROM reports r LEFT JOIN notebooks nb ON nb.id = r.notebook_id "
+                "WHERE r.status IN ('intent_ready','outline_ready') "
+                "AND r.created_by = %s ORDER BY r.updated_at DESC",
                 (user_id,),
             ).fetchall()
             for row in reports:
@@ -1009,8 +1016,7 @@ class QueryStore:
                     {
                         "type": "report_outline",
                         "notebook_id": row["notebook_id"],
-                        # 共享库的名字解析不出来 → 空串(T4 负责库名解析)。
-                        "notebook_name": name_of.get(row["notebook_id"], ""),
+                        "notebook_name": row["notebook_name"] or "",
                         "report_id": row["id"],
                         "title": (row["question"] or "")[:60],
                         "created_at": iso_timestamp(row["created_at"]),

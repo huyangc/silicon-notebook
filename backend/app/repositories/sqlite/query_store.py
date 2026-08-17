@@ -22,6 +22,7 @@ from app.models.sources import (
     has_pdf_python_fallback_warning,
     paper_meta_status,
 )
+from app.repositories.group_rows import SHARED_TO_GROUPS_COLUMN
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.identity_store import (
     _UPLOAD_LIMIT_DEFAULT_KEY,
@@ -425,14 +426,16 @@ class QueryStore:
     @staticmethod
     def summary_notebook_row(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
-            "SELECT * FROM notebooks WHERE id = ? AND status != 'copying'",
+            "SELECT *, " + SHARED_TO_GROUPS_COLUMN
+            + " FROM notebooks WHERE id = ? AND status != 'copying'",
             (notebook_id,),
         ).fetchone()
 
     @staticmethod
     def owned_notebook_rows(db: sqlite3.Connection, user_id: str):
         return db.execute(
-            "SELECT * FROM notebooks WHERE created_by = ? AND status != 'copying' "
+            "SELECT *, " + SHARED_TO_GROUPS_COLUMN
+            + " FROM notebooks WHERE created_by = ? AND status != 'copying' "
             "ORDER BY created_at ASC",
             (user_id,),
         ).fetchall()
@@ -1058,10 +1061,18 @@ class QueryStore:
             # 共享库里的成员只要自己没建过库,待确认报告就整体缺席——铃铛对他
             # 永远是 0,而报告卡在 intent_ready 等他确认。零新增查询:同一条
             # SQL 只是挪出了那个 if。
+            #
+            # 库名走 LEFT JOIN 而不是上面那份自有库映射(P1-T4):共享库里建的报告
+            # 在 `name_of` 里查不到,条目会显示成一条没有出处的「深度报告《…》」。
+            # 零新增往返——同一条语句多一个 join。报告是本人建的(`created_by`
+            # 已经在 WHERE 里),所以库名对他不是新披露。
             reports = db.execute(
-                "SELECT id, question, notebook_id, created_at FROM reports "
-                "WHERE status IN ('intent_ready','outline_ready') "
-                "AND created_by = ? ORDER BY updated_at DESC",
+                "SELECT r.id AS id, r.question AS question, "
+                "r.notebook_id AS notebook_id, r.created_at AS created_at, "
+                "nb.name AS notebook_name "
+                "FROM reports r LEFT JOIN notebooks nb ON nb.id = r.notebook_id "
+                "WHERE r.status IN ('intent_ready','outline_ready') "
+                "AND r.created_by = ? ORDER BY r.updated_at DESC",
                 (user_id,),
             ).fetchall()
             for row in reports:
@@ -1069,9 +1080,7 @@ class QueryStore:
                     {
                         "type": "report_outline",
                         "notebook_id": row["notebook_id"],
-                        # 非自有库(共享库)的名字这里解析不出来 → 空串。库名解析
-                        # 是 T4 前端的事;条目本身必须在。
-                        "notebook_name": name_of.get(row["notebook_id"], ""),
+                        "notebook_name": row["notebook_name"] or "",
                         "report_id": row["id"],
                         "title": (row["question"] or "")[:60],
                         "created_at": row["created_at"],

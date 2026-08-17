@@ -10,6 +10,54 @@ import {
   toMountedBases,
 } from "../../app/notebook-bases.ts";
 
+// 群组知识共享 P1:「读权 ⇒ 可挂载」放开之后,别人 owner 的库也会进候选。只按 tier
+// 分组会把它们标成「我的笔记本」——一句事实错误的标签。后端因此随每个候选带回
+// origin(base/mine/shared),前端按它分三组;缺失时才退回 tier 两组分法。
+
+test("groupMountable 按 origin 分成公共/我的/共享给我的三组", () => {
+  const got = groupMountable([
+    { id: "1", name: "模拟", tier: "base", origin: "base" },
+    { id: "2", name: "我的笔记", tier: "personal", origin: "mine" },
+    { id: "3", name: "同事的库", tier: "personal", origin: "shared" },
+    { id: "4", name: "组里的库", tier: "personal", origin: "shared" },
+  ]);
+  assert.deepEqual(got.public.map((n) => n.id), ["1"]);
+  assert.deepEqual(got.mine.map((n) => n.id), ["2"]);
+  assert.deepEqual(got.shared.map((n) => n.id), ["3", "4"]);
+});
+
+test("origin 缺失(旧后端 / 只存在于挂载边的死边)退回 tier 两组分法,不猜「我的」", () => {
+  const got = groupMountable([
+    { id: "1", name: "模拟", tier: "base" },
+    { id: "2", name: "我的笔记", tier: "personal" },
+  ]);
+  assert.deepEqual(got.public.map((n) => n.id), ["1"]);
+  assert.deepEqual(got.mine.map((n) => n.id), ["2"]);
+  assert.deepEqual(got.shared, []);
+});
+
+test("mergeMountCandidates 把候选的 origin 捎到已挂载的边上(最常见的那种库靠它分组)", () => {
+  // 已挂上的群组共享库:边(/bases)不带 origin,候选(/mountable)带。直接用边就等于
+  // 让每一条**已经挂上**的借来库退回按 tier 猜——而那正是最需要看清来路的一批。
+  const merged = mergeMountCandidates(
+    [{ id: "2", name: "组里的库", tier: "personal", origin: "shared" }],
+    [{ id: "2", name: "组里的库", tier: "personal", active: true, inactive_reason: "" }],
+  );
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].origin, "shared");
+  assert.equal(merged[0].active, true, "边自身的 active/inactive_reason 仍是权威");
+  assert.deepEqual(groupMountable(merged).shared.map((n) => n.id), ["2"]);
+});
+
+test("只存在于挂载边的失效边没有 origin,按 tier 归组(与本字段出现之前逐字一致)", () => {
+  const merged = mergeMountCandidates(
+    [],
+    [{ id: "9", name: "已不可用的知识库", tier: "base", active: false, inactive_reason: "原因" }],
+  );
+  assert.equal(merged[0].origin, undefined);
+  assert.deepEqual(groupMountable(merged).public.map((n) => n.id), ["9"]);
+});
+
 test("groupMountable 按 tier 分成公共/我的两组", () => {
   const got = groupMountable([
     { id: "1", name: "模拟", tier: "base" },
