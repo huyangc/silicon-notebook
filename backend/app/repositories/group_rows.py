@@ -10,6 +10,37 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 
+#: 群组主体的两个 `principal_type`。授权边清单要按它判「这条边该不该解析出组名」。
+GROUP_PRINCIPAL_TYPES = ("group", "group_admins")
+
+#: 群组主体解析不出组时,`principal_kind` 上的失效标注。
+#:
+#: 它不是「这个组恰好没填 kind」——`groups.kind` 是 `NOT NULL DEFAULT 'project'`,
+#: 有组就必有 kind。所以「群组主体 + 空 kind」只可能是**孤儿边**:指向的组已经
+#: 不存在了。删组事务会清掉这类边,但 `principal_id` 没有外键,合库(`merge_dbs`)
+#: 的并集仍可能复活它们,而它们在界面上原本长得和正常条目一模一样——库主看到一条
+#: 没有名字的共享记录,既不知道它是什么,也不知道该不该删。标注出来让他看得懂。
+MISSING_PRINCIPAL_KIND = "missing"
+
+
+def resolve_grant_principal(
+    principal_type: Any, group_name: Any, group_kind: Any
+) -> tuple[str, str]:
+    """一条授权边的 ``(principal_name, principal_kind)`` 展示投影 —— 双后端共用。
+
+    * 群组主体 + 解析到组 → ``(组名, 组分类)``;
+    * 群组主体 + 解析不到组 → ``("", "missing")``,即孤儿边;
+    * `user` / `everyone` 主体 → ``("", "")``:它们本来就没有组可解析,由
+      `principal_type` 自我标注,不在这里替它们编一个名字,更**不能**误标成
+      `missing`(那会把两条完全正常的边说成坏数据)。
+    """
+    if str(principal_type or "") not in GROUP_PRINCIPAL_TYPES:
+        return ("", "")
+    name = str(group_name or "")
+    kind = str(group_kind or "")
+    return (name, kind or MISSING_PRINCIPAL_KIND)
+
+
 def fold_shared_notebooks(rows: Sequence[Any]) -> list[dict]:
     """``(notebook_id, role, name, owner_username)`` 行 → 每库一项、`roles` 去重。
 

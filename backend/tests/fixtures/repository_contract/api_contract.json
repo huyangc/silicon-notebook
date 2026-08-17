@@ -3334,7 +3334,7 @@
         },
         "GroupUpdate": {
           "additionalProperties": false,
-          "description": "只改可编辑的展示字段。`kind` 刻意不可改:它决定了「谁能建这个组」,\n改它等于让普通用户把自己建的项目组升格成部门/领域组,绕开建组时的管理员闸。",
+          "description": "只改可编辑的展示字段。`kind` 刻意**不可改**,由 `extra=\"forbid\"` 兜住(传了\n`kind` 直接 422,而不是安静地忽略它)。\n\n理由不是权限:`kind` 只是分类标签,不影响任何权限机制(设计文档 §3)。放开它的\n后果是**标签失真**——普通用户能把自己建的项目组改标成「部门」,于是目录里出现一\n个谁都能建的「部门」,而建组时那道「部门/领域仅系统管理员」的闸正是为了让这个\n标签可信。要改分类就重建一个组,让那道闸重新判一次。",
           "properties": {
             "description": {
               "anyOf": [
@@ -12076,7 +12076,7 @@
       },
       "/api/groups": {
         "get": {
-          "description": "我所在的群组;`?scope=all` 是系统管理员的全局管理面。",
+          "description": "我所在的群组;`?scope=all` 是系统管理员的全局管理面。\n\n非法 `scope` 明确 422,**不静默当成 `mine`**:那会让一个拼错的 `?scope=al` 安静地\n返回一份收窄过的清单,调用方看到 200 就以为拿到了全部。",
           "operationId": "list_groups_route_api_groups_get",
           "parameters": [
             {
@@ -12189,7 +12189,7 @@
           "summary": "Delete Group Route"
         },
         "get": {
-          "description": "组详情 + 成员清单。仅组成员可见,非成员 404。",
+          "description": "组详情 + 成员清单。仅组成员可见(系统管理员经运维旁路可见),非成员 404。\n\n可见性判定直接读 `get_group` 已经算好的 `my_role`,不再单发一次成员查询:非成员\n的 `my_role` 恒为空串,这与「不是成员」是同一件事。",
           "operationId": "get_group_route_api_groups__group_id__get",
           "parameters": [
             {
@@ -14374,7 +14374,7 @@
       },
       "/api/notebooks/{notebook_id}/grants": {
         "get": {
-          "description": "这本库上的全部授权边。\n\n四类主体都如实返回(含本端点不允许创建的 `user` / `everyone`):这个清单是库主\n「谁能看我的库」的完整答案,按主体类型过滤掉一半会让它变成一份骗人的清单。",
+          "description": "这本库上的全部授权边。\n\n四类主体都如实返回(含本端点不允许创建的 `user` / `everyone`):这个清单是库主\n「谁能看我的库」的完整答案,按主体类型过滤掉一半会让它变成一份骗人的清单。\n\n指向已不存在的群组的**孤儿边**带 `principal_kind=\"missing\"` 标注(删组事务会清掉\n这类边,但 `principal_id` 没有外键,合库仍可能复活它们)。不标注的话它在界面上与\n正常条目长得一模一样,只是没有名字——库主既看不懂那是什么,也不知道能不能删。",
           "operationId": "list_notebook_grants_route_api_notebooks__notebook_id__grants_get",
           "parameters": [
             {
@@ -14416,7 +14416,7 @@
           "summary": "List Notebook Grants Route"
         },
         "post": {
-          "description": "共享给群组。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的组管理员。",
+          "description": "共享给群组。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的组管理员。\n\n⚠ 群组那一半的**权威判定在 store 的写事务里**(`create_grant` 同事务复核组存在\n与发起者的组管理员身份),这里不做前置查询。理由是这条边一落库就**立刻**给整组\n人读权:在路由层查一次、再在另一个事务里插入,中间那个窗口足够让组被删、或让\n发起者被移出/降级,而边照发不误。两个异常各自映射,文案仍能说清缺的是哪一半。",
           "operationId": "create_notebook_grant_route_api_notebooks__notebook_id__grants_post",
           "parameters": [
             {

@@ -23,8 +23,13 @@ from typing import Any, Callable
 
 from psycopg import errors
 
-from app.repositories.group_rows import fold_shared_notebooks
-from app.repositories.ports import GroupGrantAlreadyExists, LastGroupAdminError
+from app.repositories.group_rows import fold_shared_notebooks, resolve_grant_principal
+from app.repositories.ports import (
+    GroupAdminRequiredError,
+    GroupGrantAlreadyExists,
+    GroupNotFoundError,
+    LastGroupAdminError,
+)
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     iso_timestamp,
@@ -33,8 +38,8 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.database import PostgresDatabase
 
 
-# 见 SQLite 那份同名常量:LEFT JOIN 的 ON 条件必须带 `principal_type IN (...)`,
-# 否则多态的 `principal_id` 会拿 user id 去撞 `groups.id`。
+# 见 SQLite 那份同名常量:LEFT JOIN 的 ON 条件带 `principal_type IN (...)` 是纵深
+# 防御——今天的 id 前缀已经保证撞不上,但那条保证不属于这条 SQL。
 _GRANT_SELECT = (
     "SELECT ng.*, g.name AS _group_name, g.kind AS _group_kind "
     "FROM notebook_grants ng "
@@ -80,14 +85,17 @@ class GroupStore:
 
     @staticmethod
     def _grant_row(row) -> dict:
+        name, kind = resolve_grant_principal(
+            row["principal_type"], row["_group_name"], row["_group_kind"]
+        )
         return {
             "id": row["id"],
             "notebook_id": row["notebook_id"],
             "principal_type": row["principal_type"],
             "principal_id": row["principal_id"],
             "role": row["role"],
-            "principal_name": row["_group_name"] or "",
-            "principal_kind": row["_group_kind"] or "",
+            "principal_name": name,
+            "principal_kind": kind,
             "created_at": iso_timestamp(row["created_at"]),
         }
 
@@ -227,14 +235,26 @@ class GroupStore:
 
     # -------------------------------------------------------------- 成员
     @staticmethod
-    def _lock_group_on(connection: Any, group_id: str) -> bool:
-        """锁住聚合根并回答「组还在吗」。理由见模块 docstring 的第三条。"""
-        return (
+    def _lock_group_on(connection: Any, group_id: str, *, mode: str = "UPDATE") -> None:
+        """锁住聚合根,顺便复核它还在;不在就 `GroupNotFoundError`。
+
+        锁的理由见模块 docstring 的第三条。**返回值不可省**这件事是单独一条:并发
+        的删组请求可以整个跑完在路由层那次前置检查与本事务之间,`FOR UPDATE` 只是让
+        本事务**等到**那次删除提交,等完之后行就真的没了。忽略这个事实继续往下走,
+        `INSERT INTO group_members` 会撞外键抛 `ForeignKeyViolation`——用户拿到 500,
+        而正确答案是 404。所以这里直接抛,调用方无从忽略。
+
+        ``mode`` 只有两档:改成员用 `FOR UPDATE`(排他,把同组的成员变更串起来);
+        发授权边用 `FOR SHARE`(只要保证「复核期间这个组不会被删」,不必把并发的
+        发边互相排开)。两档都与 `DELETE FROM groups` 互斥,那正是要防的那件事。
+        """
+        if (
             connection.execute(
-                "SELECT id FROM groups WHERE id=%s FOR UPDATE", (group_id,)
+                f"SELECT id FROM groups WHERE id=%s FOR {mode}", (group_id,)
             ).fetchone()
-            is not None
-        )
+            is None
+        ):
+            raise GroupNotFoundError(group_id)
 
     @staticmethod
     def _admin_count_on(connection: Any, group_id: str) -> int:
@@ -249,6 +269,8 @@ class GroupStore:
     def upsert_member(
         self, group_id: str, user_id: str, *, role: str, added_by: str
     ) -> str:
+        """加人 / 改角色。组已被并发删掉 → `GroupNotFoundError`;把最后一名组管理员
+        降级 → `LastGroupAdminError`。两条判定都在写事务内。"""
         with self.database.write() as connection:
             self._lock_group_on(connection, group_id)
             current = self._role_on(connection, group_id, user_id)
@@ -272,6 +294,7 @@ class GroupStore:
         return "updated"
 
     def remove_member(self, group_id: str, user_id: str) -> bool:
+        """移除成员(自助退出走同一条路径)。移除最后一名组管理员 → 报错。"""
         with self.database.write() as connection:
             self._lock_group_on(connection, group_id)
             current = self._role_on(connection, group_id, user_id)
@@ -325,10 +348,21 @@ class GroupStore:
         principal_id: str,
         role: str,
         created_by: str,
+        admin_user_id: str,
     ) -> dict:
+        """`sqlite/group_store.py::create_grant` 的镜像:插入 + **同事务**复核双重
+        条件的群组那一半(组还在、发起者仍是它的组管理员)。
+
+        PG 侧多一把 `FOR SHARE`(而不是 SQLite 的裸存在性查询):它让复核与插入之间
+        这个组删不掉。用 `FOR SHARE` 而非 `FOR UPDATE` 是因为要防的只有「同时被删」,
+        并发的两次发边互不冲突(真撞上了由 UNIQUE 约束负责)。
+        """
         grant_id = self.new_id("gnt")
         try:
             with self.database.write() as connection:
+                self._lock_group_on(connection, principal_id, mode="SHARE")
+                if self._role_on(connection, principal_id, admin_user_id) != "admin":
+                    raise GroupAdminRequiredError(principal_id)
                 connection.execute(
                     "INSERT INTO notebook_grants "
                     "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
@@ -352,14 +386,6 @@ class GroupStore:
                 _GRANT_SELECT + "WHERE ng.id=%s", (grant_id,)
             ).fetchone()
         return self._grant_row(row)
-
-    def grant_row(self, notebook_id: str, grant_id: str) -> "dict | None":
-        with self.database.connect() as connection:
-            row = connection.execute(
-                _GRANT_SELECT + "WHERE ng.id=%s AND ng.notebook_id=%s",
-                (grant_id, notebook_id),
-            ).fetchone()
-        return self._grant_row(row) if row else None
 
     def delete_grant(self, notebook_id: str, grant_id: str) -> bool:
         with self.database.write() as connection:

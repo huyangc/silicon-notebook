@@ -16,6 +16,8 @@ GROUP_KINDS = ("project", "department", "domain")
 OPEN_GROUP_KINDS = ("project",)
 # 组内角色。两级,不引入 editor(已定决策 4)。
 GROUP_ROLES = ("member", "admin")
+# `GET /groups` 的 `scope` 取值。非法值 422 而不是静默落回 `mine`。
+GROUP_LIST_SCOPES = ("mine", "all")
 
 # 授权边主体。四值白名单,判定谓词按精确匹配消费(已定裁决 1b)。
 PRINCIPAL_TYPES = ("user", "group", "group_admins", "everyone")
@@ -37,8 +39,13 @@ class GroupCreate(BaseModel):
 
 
 class GroupUpdate(BaseModel):
-    """只改可编辑的展示字段。`kind` 刻意不可改:它决定了「谁能建这个组」,
-    改它等于让普通用户把自己建的项目组升格成部门/领域组,绕开建组时的管理员闸。"""
+    """只改可编辑的展示字段。`kind` 刻意**不可改**,由 `extra="forbid"` 兜住(传了
+    `kind` 直接 422,而不是安静地忽略它)。
+
+    理由不是权限:`kind` 只是分类标签,不影响任何权限机制(设计文档 §3)。放开它的
+    后果是**标签失真**——普通用户能把自己建的项目组改标成「部门」,于是目录里出现一
+    个谁都能建的「部门」,而建组时那道「部门/领域仅系统管理员」的闸正是为了让这个
+    标签可信。要改分类就重建一个组,让那道闸重新判一次。"""
 
     model_config = ConfigDict(extra="forbid")
 

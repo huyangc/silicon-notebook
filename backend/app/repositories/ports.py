@@ -2719,6 +2719,24 @@ class GroupGrantAlreadyExists(RuntimeError):
     """
 
 
+class GroupNotFoundError(RuntimeError):
+    """写事务在**真正落库之前**复核时发现群组已不存在。
+
+    路由层的前置检查(「这个组在不在」)与写入之间永远有一个窗口:并发的删组请求可
+    以恰好落在中间。少了这条,SQLite 侧会撞 `group_members.group_id` 的外键约束抛
+    `IntegrityError`(用户看到 500),PG 侧则在 `FOR UPDATE` 拿不到行之后继续往下走。
+    store 在同一事务里复核并抛它,路由统一映射成 404。
+    """
+
+
+class GroupAdminRequiredError(RuntimeError):
+    """写事务在落库前复核时发现请求者已不是目标群组的组管理员。
+
+    与 `GroupNotFoundError` 同源:授权边的双重条件在路由层查过一次,但「被移出组」
+    与「被降级」都可以发生在那次查询与写入之间。真正承重的是写事务里的这一次复核。
+    """
+
+
 @runtime_checkable
 class GroupStorePort(Protocol):
     """群组 / 组成员 / 笔记本授权边的行持久化面。
@@ -2759,8 +2777,16 @@ class GroupStorePort(Protocol):
         principal_id: str,
         role: str,
         created_by: str,
-    ) -> dict: ...
-    def grant_row(self, notebook_id: str, grant_id: str) -> "dict | None": ...
+        admin_user_id: str,
+    ) -> dict:
+        """插入一条群组授权边,并在**同一个写事务**里复核双重条件的群组那一半。
+
+        ``admin_user_id`` 是发起者。store 在事务内复核「``principal_id`` 这个组还
+        在」且「发起者仍是它的组管理员」,不成立分别抛 `GroupNotFoundError` /
+        `GroupAdminRequiredError`。路由层那次前置查询只用来给出友好文案,**授权
+        判定以这一次为准**——两次查询之间,组可以被删、发起者可以被移出或降级。
+        """
+        ...
     def delete_grant(self, notebook_id: str, grant_id: str) -> bool: ...
     def list_group_shared_notebooks(self, group_id: str) -> list[dict]: ...
     def delete_group_grants_for_notebook(

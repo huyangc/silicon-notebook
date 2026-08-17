@@ -104,3 +104,116 @@ def test_global_schema_union_accepts_semantically_identical_rows():
     finally:
         left.close()
         right.close()
+
+
+# ---------------------------------------------------------------------------
+# 孤儿群组授权边清扫(群组知识共享 P1,已定裁决 1c 的审计承诺)
+# ---------------------------------------------------------------------------
+
+
+def _seed_grant_world(conn: sqlite3.Connection) -> None:
+    """一个用户 + 一本笔记本,供下面的授权边用(两张表都有外键指向它们)。"""
+    now = "2026-08-18T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+        "VALUES ('u1','u1@t','U1','user','active','u00000001',?,?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO notebooks (id,name,purpose,primary_domain,status,created_by,"
+        "created_at,updated_at) VALUES ('nb1','NB','','Semiconductor','draft','u1',?,?)",
+        (now, now),
+    )
+    conn.commit()
+
+
+def _add_group(conn: sqlite3.Connection, group_id: str) -> None:
+    now = "2026-08-18T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO groups (id,name,kind,description,created_by,created_at,updated_at) "
+        "VALUES (?,?, 'project','', 'u1', ?, ?)",
+        (group_id, group_id, now, now),
+    )
+    conn.commit()
+
+
+def _add_grant(
+    conn: sqlite3.Connection,
+    grant_id: str,
+    principal_type: str,
+    principal_id: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO notebook_grants "
+        "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+        "VALUES (?, 'nb1', ?, ?, 'viewer', 'u1', '2026-08-18T00:00:00+00:00')",
+        (grant_id, principal_type, principal_id),
+    )
+    conn.commit()
+
+
+def test_orphan_group_grants_are_swept_but_live_ones_survive(fresh_db):
+    """合并后清扫:指向已不存在群组的边被清掉,组还在的边一条不动。
+
+    合并是这类孤儿边**唯一**的来源:平时删组走的是同一个写事务(先清边、再删组),
+    而合并把 `notebook_grants` 按 notebook 范围导入、把 `groups` 按并集导入,两者
+    口径不同就会对不上。数据库替不了这件事——`principal_id` 是无外键的多态列,
+    `PRAGMA foreign_key_check` 永远看不见这类行。
+    """
+    _seed_grant_world(fresh_db)
+    _add_group(fresh_db, "grp-alive")
+    _add_grant(fresh_db, "g-live-viewer", "group", "grp-alive")
+    _add_grant(fresh_db, "g-live-admins", "group_admins", "grp-alive")
+    _add_grant(fresh_db, "g-orphan-viewer", "group", "grp-gone")
+    _add_grant(fresh_db, "g-orphan-admins", "group_admins", "grp-gone")
+
+    assert merge_dbs.sweep_orphan_group_grants(fresh_db) == 2
+    fresh_db.commit()
+    survivors = {
+        row[0]
+        for row in fresh_db.execute("SELECT id FROM notebook_grants").fetchall()
+    }
+    assert survivors == {"g-live-viewer", "g-live-admins"}
+    # 幂等:再跑一次没有可清的行。
+    assert merge_dbs.sweep_orphan_group_grants(fresh_db) == 0
+
+
+def test_orphan_sweep_never_touches_user_or_everyone_principals(fresh_db):
+    """`user` / `everyone` 主体的 `principal_id` 根本不指向 `groups`。
+
+    把它们一起扫掉就是**删掉两类完全正常的授权**:`everyone` 存的是空串,`user` 存
+    的是用户 id,两者拿去 `groups` 里查当然都查不到。判据必须只认两个群组主体。
+    """
+    _seed_grant_world(fresh_db)
+    _add_grant(fresh_db, "g-user", "user", "u1")
+    _add_grant(fresh_db, "g-everyone", "everyone", "")
+    _add_grant(fresh_db, "g-orphan", "group", "grp-gone")
+
+    assert merge_dbs.sweep_orphan_group_grants(fresh_db) == 1
+    fresh_db.commit()
+    survivors = {
+        row[0]
+        for row in fresh_db.execute("SELECT id FROM notebook_grants").fetchall()
+    }
+    assert survivors == {"g-user", "g-everyone"}
+
+
+def test_orphan_sweep_keeps_edges_whose_group_survived_the_union(fresh_db):
+    """合库语义的正例:副库那本笔记本的边导进来了,而它指向的组也在并集里 → 保留。
+
+    这条与上面那条一起构成裁决 1c 要的两种情形:「主库孤儿边 + 副库同组存活 → 保留」
+    与「两侧都没组 → 清掉」。`groups` 走 GLOBAL_UNION(主库优先并集),所以「组从副库
+    来、边从主库来」是完全正常的终态,绝不能被扫掉。
+    """
+    _seed_grant_world(fresh_db)
+    _add_grant(fresh_db, "g-from-primary", "group", "grp-from-secondary")
+    assert merge_dbs.sweep_orphan_group_grants(fresh_db) == 1  # 组还没并进来:是孤儿
+
+    fresh_db.execute("DELETE FROM notebook_grants")
+    _add_group(fresh_db, "grp-from-secondary")  # GLOBAL_UNION 把副库的组并了进来
+    _add_grant(fresh_db, "g-from-primary", "group", "grp-from-secondary")
+    assert merge_dbs.sweep_orphan_group_grants(fresh_db) == 0
+    fresh_db.commit()
+    assert fresh_db.execute(
+        "SELECT COUNT(*) FROM notebook_grants"
+    ).fetchone()[0] == 1
