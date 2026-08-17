@@ -29,8 +29,8 @@ fixtures in tests are outside this rule.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 48. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v48 and remains readable. Those migrations
+The current schema version is 49. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v49 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -177,10 +177,50 @@ closure. The column is written on the INSERT branch only, so content-hash dedupe
 that reuses an existing row keeps the first writer's provenance and a notebook
 deep copy clears it outright. `SourceSummary` and the source detail models
 project it as the `agent_created` boolean. PostgreSQL migration v26 is the paired
-schema; because the column adds no table, index, constraint, or FK edge, the
-forward-shadow invariants (74 business tables, 100 unique surfaces, a
-branch-counted bound of 12 row slots) are unchanged, and the current pairing is
-SQLite 48 / PostgreSQL 26 / epoch 1.
+schema; because the column adds no table, index, constraint, or FK edge, it left
+the forward-shadow invariants of its generation (74 business tables, 100 unique
+surfaces, a branch-counted bound of 12 row slots) unchanged.
+
+SQLite v49 adds the three group-knowledge-sharing tables. `groups` carries a
+group's name, `kind` (`project` | `department` | `domain` — a classification
+label that changes who may create the group and the interface wording, never the
+permission mechanism) and description. `group_members` maps users to groups with
+a two-level in-group role (`member` | `admin`), keyed by `(group_id, user_id)`
+and indexed on `user_id` for the "which groups am I in" direction.
+`notebook_grants` holds one row per live authorization edge —
+`(notebook_id, principal_type, principal_id, role)` with `principal_type ∈
+{user, group, group_admins, everyone}` and `role ∈ {viewer, admin}`. Every enum
+is validated in the application layer, deliberately without CHECK constraints,
+and `principal_id` is a **polymorphic** reference (user id, group id, or the
+empty string for `everyone`) that intentionally carries no principal foreign key:
+the forward shadow's static parking strategy requires at least one of those two
+columns to stay a bare text column.
+
+Two consequences of that shape are load-bearing. First, `principal_id` must stay
+`NOT NULL DEFAULT ''`: NULL does not participate in unique comparison, so an
+`everyone` row would escape `UNIQUE (notebook_id, principal_type, principal_id)`
+altogether — duplicate grants would accumulate and a revocation would not fully
+revoke — and NOT NULL is also what hands the shadow's parking column to
+`principal_type` (SENTINEL_TEXT). Second, the `everyone` test must be the exact
+four-value match `principal_type = 'everyone'` and must never be inferred from
+`principal_id` (neither `IS NULL` nor `= ''`), because parking temporarily writes
+a sentinel string into a conflicting row's `principal_type`, and exact matching
+is what makes a parked row fail safe (it matches nothing). The `UNIQUE` implicit
+index already covers `notebook_id` prefix lookups, so no separate notebook index
+exists; `idx_notebook_grants_principal` on `(principal_type, principal_id)`
+serves the "which notebooks is this group granted" direction. Notebook deep copy
+deliberately does **not** carry authorization edges, following the
+`notebook_members` precedent — access-control state is not knowledge, and the
+copy's new owner re-grants it. Deleting a group clears the grant rows pointing at
+it inside the same write transaction, because `principal_id` has no foreign key
+to enforce that; `scripts/merge_dbs.py` sweeps the orphan edges a union merge can
+otherwise resurrect.
+
+PostgreSQL migration v27 is the paired schema. Because v49/v27 adds three tables
+and one UNIQUE constraint, the forward-shadow invariants move to 77 business
+tables and 104 unique surfaces; the branch-counted bound stays at exactly 12 row
+slots (all three tables are shallow). The current pairing is
+SQLite 49 / PostgreSQL 27 / epoch 1.
 
 Run it only while application/background writers are stopped:
 
@@ -198,18 +238,18 @@ is `--database-url`, and both audit paths are transaction/read-only. The audit
 exits nonzero while any visible source is missing, running, failed,
 incomplete, or fails an integrity reconciliation.
 
-PostgreSQL migration v26 is the current paired
+PostgreSQL migration v27 is the current paired
 business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
 schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 74-table epoch-1 manifest. It also includes
+logical-key guards across the exact 77-table epoch-1 manifest. It also includes
 run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
 batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
 copy as explicit ordinals and their catalog-resolved identity sequences reseed,
 and the final forward checkpoint advances atomically to snapshot H0 after the
-v26 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
+v27 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
 owner-only real directory and exclusive 0600 temporary creation. COPY fully
 qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
 capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
@@ -219,7 +259,7 @@ across open and immediately before publication/PG commit. JSONB prefix proof
 normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
 SQL numeric columns remain type-distinct. It uses bounded
 named server cursors plus statement timeouts/cancellation polls, and performs
-full initial/final migration-derived validation of v26 tables, columns,
+full initial/final migration-derived validation of v27 tables, columns,
 constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
 is intentionally lightweight. The final SQLite fence is acquired only after
 the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
@@ -244,10 +284,10 @@ bundle may exceed the byte cap, and a same-key replacement that grows past the
 cap rolls back and defers when another actual bundle is already accepted. FK
 parents come only from the verified current source snapshot through a
 64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v26 graph has a branch-counted bound of exactly 12 row slots and no
+the fixed v27 graph has a branch-counted bound of exactly 12 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG26 catalog plans cover all
-100 unique surfaces using NULL; deterministic candidates scoped by indexable
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG27 catalog plans cover all
+104 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
 indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first

@@ -499,11 +499,12 @@ class QueryStore:
                     "SELECT created_by AS k, COUNT(*) AS c FROM ask_jobs GROUP BY created_by"
                 ).fetchall()
             }
+            # 报告按**创建者**归集,不按笔记本 owner——与 SQLite 侧同一条裁决,
+            # 理由见那边的注释(群组知识共享 P1-T3b)。
             reports = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT nb.created_by AS k, COUNT(*) AS c FROM reports r "
-                    "JOIN notebooks nb ON nb.id = r.notebook_id GROUP BY nb.created_by"
+                    "SELECT created_by AS k, COUNT(*) AS c FROM reports GROUP BY created_by"
                 ).fetchall()
             }
             active = {
