@@ -229,7 +229,7 @@ export SILICON_NOTEBOOK_NOTEBOOK_ID='<notebook-id>'
 | Python 示例缺少 `mcp`/`httpx` | 激活项目虚拟环境并安装 `backend/requirements.txt`。 |
 | `build_kg` 拒绝：已有构建在运行 | 这是预期的排队信号，不是错误。笔记本级单飞守卫正在生效；轮询 `get_build_status` 直到它清空，不要立刻重试。 |
 | `delete_source` 拒绝：该来源由用户添加 | 设计如此。MCP 只能删除 Agent 添加的来源；界面来源列表用「Agent 添加」徽标标出哪些是。用户的文档请在界面删除。 |
-| 某个写入工具在一个读得到的笔记本上被拒 | 写入一律 owner-only。白名单里可能包含 token 所有者只是以只读成员身份加入的笔记本：那里读得到，但永远写不进。 |
+| 某个来源或构建写入工具在一个读得到的笔记本上被拒 | 来源管理与构建写入一律 owner-only。白名单里可能包含 token 所有者只是以只读成员身份加入的笔记本：那里读得到，但这些写入永远进不去。唯一例外是 `knowhow:code` 的格子代码写入——它按设计由 scope 决定，只读成员也可写。 |
 | 笔记本复制之后，Agent 添加的来源删不掉了 | 设计如此。深拷贝会清空来源出处，副本里的每一份来源都算用户添加。 |
 | `add_source_text` 回传 `reused: true` | 本笔记本已有逐字节相同的内容，因此复用既有来源而不新建重复行。若那一行原本是用户上传的，它仍算用户添加，不能经 MCP 删除。 |
 | `reparse_source` 被拒绝 | 该来源正在解析中。轮询 `get_source_status`，等它稳定后再重试。 |
