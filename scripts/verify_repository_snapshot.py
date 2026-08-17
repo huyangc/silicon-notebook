@@ -3051,7 +3051,7 @@ GROUP_SHARING_TABLES = {
                   id             TEXT NOT NULL PRIMARY KEY,
                   notebook_id    TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
                   principal_type TEXT NOT NULL,
-                  principal_id   TEXT,
+                  principal_id   TEXT NOT NULL DEFAULT '',
                   role           TEXT NOT NULL,
                   created_by     TEXT REFERENCES users(id),
                   created_at     TEXT NOT NULL,
@@ -3061,8 +3061,6 @@ GROUP_SHARING_TABLES = {
 GROUP_SHARING_INDEXES = {
     "idx_group_members_user":
         "CREATE INDEX idx_group_members_user ON group_members(user_id)",
-    "idx_notebook_grants_nb":
-        "CREATE INDEX idx_notebook_grants_nb ON notebook_grants(notebook_id)",
     "idx_notebook_grants_principal":
         "CREATE INDEX idx_notebook_grants_principal "
         "ON notebook_grants(principal_type, principal_id)",

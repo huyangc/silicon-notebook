@@ -35,15 +35,17 @@ CREATE INDEX idx_group_members_user ON group_members(user_id);
 CREATE TABLE notebook_grants (
   id             TEXT NOT NULL PRIMARY KEY,
   notebook_id    TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
-  principal_type TEXT NOT NULL,      -- user|group|group_admins|everyone(app 层校验,不加 CHECK:
-                                     -- 保住两个 SENTINEL_TEXT 停车候选,见盘点 §3.3)
-  principal_id   TEXT,               -- 多态引用,刻意无 FK(仿 catalog_candidates.job_id 先例)
+  principal_type TEXT NOT NULL,      -- user|group|group_admins|everyone(app 层校验,不加 CHECK)
+  principal_id   TEXT NOT NULL DEFAULT '',  -- 多态引用,刻意无 FK;everyone 存 ''
+                                     -- 而非 NULL(NULL 不参与唯一比较会让 everyone 逃出
+                                     -- UNIQUE——重复授权可累积且撤销撤不干净;NOT NULL 还把
+                                     -- shadow 停车列让给 principal_type SENTINEL_TEXT)
   role           TEXT NOT NULL,      -- viewer|admin
   created_by     TEXT REFERENCES users(id),
   created_at     TEXT NOT NULL,
   UNIQUE (notebook_id, principal_type, principal_id)
 );
-CREATE INDEX idx_notebook_grants_nb ON notebook_grants(notebook_id);
+-- UNIQUE 隐式索引已覆盖 notebook_id 前缀查找,刻意不建 idx_notebook_grants_nb
 CREATE INDEX idx_notebook_grants_principal ON notebook_grants(principal_type, principal_id);
 ```
 
@@ -201,8 +203,18 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
 
 ## 已定裁决(实现子代理不得自行更改)
 
-1. `principal_id` 全程保持裸 `COLLATE "C"` text 列——不加 CHECK/FK(停车方案
-   依赖它或 principal_type 至少一个可停车)。
+1. `principal_id` 全程保持裸 `COLLATE "C"` text 列 **NOT NULL DEFAULT ''**——
+   不加 CHECK/FK(停车方案依赖它或 principal_type 至少一个可停车;NOT NULL 让
+   停车落在 principal_type SENTINEL_TEXT)。everyone 主体的 principal_id 存 `''`。
+1b. **everyone 判据只能写 `principal_type='everyone'` 的精确匹配**,绝不能从
+   `principal_id` 推断(`IS NULL`/`=''` 都不行):shadow 停车会给冲突行的
+   principal_type 暂写哨兵串,四值精确匹配让停车行 fail-safe(谁也匹配不上);
+   谓词一律按已知四值白名单匹配,不写 NOT IN/else 分支。
+1c. T3 的 grants 写入必须对 everyone 做 app 层幂等(UNIQUE 已覆盖它,但
+   `ON CONFLICT DO NOTHING` 语义要实测钉住);组 id 一律 uuid 随机生成
+   (merge_dbs 的 GLOBAL_UNION 语义依赖跨部署 id 不撞车);删组同事务清
+   指向该组的 grants 行,另在 T3 补孤儿授权边审计(merge_dbs 并集可能复活
+   孤儿边,防线不能只有删除事务一条,见 T1 质量评审 P2-3)。
 2. `principal_type`/`kind`/`role` 的取值校验全在 app 层(Pydantic/服务层),
    schema 不加 CHECK。
 3. 深拷贝不带授权边;删组同事务清孤儿授权行。

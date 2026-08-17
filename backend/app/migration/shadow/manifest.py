@@ -607,12 +607,13 @@ _TABLES = (
     # SQLite v49 / PostgreSQL v27: group knowledge sharing P1 (zero behavior
     # change — no reader/writer consumes these tables yet). groups has no FK
     # dependency among these three tables other than users (rank 11), so it
-    # ranks first; group_members FKs onto groups (rank 80) and must rank
-    # higher; notebook_grants FKs onto notebooks (rank 15) only — its
-    # principal_id column is a deliberately bare, unconstrained polymorphic
-    # reference with no foreign key (see migrations.py _migration_49) — so it
-    # is FK-consistent at any rank above 15 and is placed last for reading
-    # order alongside its sibling tables.
+    # ranks first; group_members FKs onto groups (rank 80) and users (rank 11)
+    # and must rank higher than groups; notebook_grants FKs onto notebooks
+    # (rank 15) and users (rank 11) — its principal_id column is a
+    # deliberately bare, unconstrained polymorphic reference with no foreign
+    # key (see migrations.py _migration_49) — so it is FK-consistent at any
+    # rank above 15 and is placed last for reading order alongside its
+    # sibling tables.
     _table("groups", ("id",), ReplicationKeyKind.DECLARED_PK, 80, "timestamptz"),
     _table(
         "group_members",
