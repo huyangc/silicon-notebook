@@ -1,4 +1,11 @@
-"""Canonical PostgreSQL reference-library mount SQL fragments."""
+"""Canonical PostgreSQL reference-library mount SQL fragments.
+
+`sqlite/mount_sql.py` 的镜像。完整理由(含 P1「读权 ⇒ 可挂载」这条显式行为变更、
+以及为什么同 owner 那一支刻意保留在读权谓词之外)写在 SQLite 那一份的模块 docstring
+里,两份必须同修。
+"""
+
+from app.repositories.postgres.access_sql import read_access_clause
 
 MOUNT_JOIN = (
     "FROM notebook_bases e "
@@ -8,7 +15,8 @@ MOUNT_JOIN = (
 )
 
 MOUNT_VALID_EXPR = (
-    "(b.status != 'copying' AND (b.tier = 'base' OR b.created_by = a.created_by))"
+    "(b.status != 'copying' AND (b.tier = 'base' OR b.created_by = a.created_by"
+    " OR " + read_access_clause("b", user_ref="a.created_by") + "))"
 )
 
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR

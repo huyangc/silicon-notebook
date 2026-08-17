@@ -577,6 +577,57 @@ def test_embedding_completion_stays_ready_when_notebook_access_is_revoked(
     assert memory_service.get(created.id, users.alice.id).embedding_status == "ready"
 
 
+def test_group_granted_reader_can_keep_private_memory_in_a_shared_notebook(
+    repo, memory_service, users
+):
+    """群组授权(P1)的被授权者在共享库里存/读**自己的** Memory。
+
+    这条同时穿过两类站点:`create_candidate` 走嵌入片段的读权谓词,`confirm` 走
+    `_lock_memory_aggregate_on` 的三段式(owner → 成员 → 授权边)。两者是各自独立
+    的判定实现,只测其中一条会漏掉另一条(PG 侧还额外挂着行锁)。撤掉授权边之后
+    必须**当场**读不到:授权是实时判定,不是一次性授予。
+    """
+    token = set_request_user(users.bob)
+    try:
+        shared = repo.create_notebook(NotebookCreate(name="Group grant memory"))
+    finally:
+        reset_request_user(token)
+    now = "2026-08-17T00:00:00Z"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO groups (id,name,kind,description,created_by,created_at,updated_at) "
+            "VALUES ('grp-mem','记忆组','project','',?,?,?)",
+            (users.bob.id, now, now),
+        )
+        db.execute(
+            "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
+            "VALUES ('grp-mem',?, 'member',?,?)",
+            (users.alice.id, now, users.bob.id),
+        )
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES ('gr-mem',?,'group','grp-mem','viewer',?,?)",
+            (shared.id, users.bob.id, now),
+        )
+    assert repo.user_can_read_notebook(shared.id, users.alice.id) is True
+    assert repo.user_can_access_notebook(shared.id, users.alice.id) is False
+
+    created = memory_service.create_candidate(
+        shared.id, users.alice.id, None, "grp-req", "Title", "Body", [],
+        "reason", {}, [],
+    )
+    confirmed = memory_service.confirm(created.id, users.alice.id)
+    assert confirmed.status == "confirmed"
+    assert memory_service.get(created.id, users.alice.id).id == created.id
+
+    with repo._write() as db:
+        db.execute("DELETE FROM group_members WHERE group_id='grp-mem' AND user_id=?",
+                   (users.alice.id,))
+    with pytest.raises(KeyError):
+        memory_service.get(created.id, users.alice.id)
+
+
 def test_candidate_lifecycle_updates_snapshots_and_rejects_invalid_transition(
     memory_service, users, notebook
 ):

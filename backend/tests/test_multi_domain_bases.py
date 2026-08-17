@@ -507,11 +507,15 @@ class TestApiUnauthorizedWrite:
         from app.api.deps import repository
         assert repository().list_notebook_bases(a["id"]) == [], "候选校验拒绝后必须零写入"
 
-    def test_read_only_share_does_not_grant_mountable_status(self, two_users_client):
-        """显式构造"u2 把私有库分享给 u1(notebook_members,role='reader')"这个
-        状态,证明即便 u1 对 stranger 有合法只读权限,仍然挂不上——可挂候选
-        (mountable_notebooks)刻意不查 notebook_members,对方撤销分享后边仍在
-        也不会变成越权通道。"""
+    def test_read_only_share_grants_mountable_status(self, two_users_client):
+        """⚠ **P1 登记的显式行为变更**(群组知识共享设计文档 §6):读权 ⇒ 可挂载。
+
+        此前这条测的是反面(只读分享进来的库挂不上),理由是「对方撤销分享后边仍在
+        会成为越权通道」。那条顾虑由 `mount_sql.py` 开头那句「有效性是解析时的实时
+        判定」吸收:撤销的下一次解析里 `read_access_clause` 当场为假,边即刻失效,
+        与公共库被降级完全同构。继续排除反而自相矛盾——同一个人打得开那个库、却不
+        能把它当参考库挂上。下面的 `test_..._deactivates_when_the_share_is_revoked`
+        钉住失效那一半。"""
         c = two_users_client
         client = c["client"]
         from app.api.deps import repository
@@ -527,16 +531,103 @@ class TestApiUnauthorizedWrite:
                 "VALUES (?,?,?,?)",
                 (shared["id"], c["u1_id"], "reader", "2026-07-19T00:00:00Z"),
             )
-        assert repo_api.user_can_read_notebook(shared["id"], c["u1_id"]) is True, (
-            "前置条件:分享确实生效,下面的 400 不能是因为 u1 连读都读不到"
-        )
+        assert repo_api.user_can_read_notebook(shared["id"], c["u1_id"]) is True
 
+        assert shared["id"] in {
+            row["id"] for row in repo_api.mountable_notebooks(a["id"])
+        }
         resp = client.put(
             f"/api/notebooks/{a['id']}/bases", headers=c["u1"],
             json={"base_notebook_ids": [shared["id"]]},
         )
-        assert resp.status_code == 400
-        assert repo_api.list_notebook_bases(a["id"]) == []
+        assert resp.status_code == 200
+        assert [b["id"] for b in resp.json()] == [shared["id"]]
+        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], shared["id"]]
+
+    def test_mount_deactivates_when_the_share_is_revoked(self, two_users_client):
+        """撤销只读分享 ⇒ 边保留但不生效,重新分享即自动恢复。
+
+        这是「挂载边不是授权凭证」在读权维度上的兑现:与公共库被降级、被挂库易主
+        走的是同一条实时判定,不静默删用户配置。"""
+        c = two_users_client
+        client = c["client"]
+        from app.api.deps import repository
+        repo_api = repository()
+
+        a = client.post("/api/notebooks", headers=c["u1"], json={"name": "u1 项目"}).json()
+        shared = client.post(
+            "/api/notebooks", headers=c["u2"], json={"name": "u2 分享给我的库"}
+        ).json()
+        repo_api.add_member(shared["id"], c["u1_id"])
+        client.put(
+            f"/api/notebooks/{a['id']}/bases", headers=c["u1"],
+            json={"base_notebook_ids": [shared["id"]]},
+        )
+        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], shared["id"]]
+
+        repo_api.remove_member(shared["id"], c["u1_id"])
+        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"]]
+        edges = repo_api.list_notebook_bases(a["id"])
+        assert [(e["id"], e["active"]) for e in edges] == [(shared["id"], False)], (
+            "边必须保留、只是失效——静默删掉用户配置无法撤销"
+        )
+
+        repo_api.add_member(shared["id"], c["u1_id"])
+        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], shared["id"]]
+
+    def test_group_grant_grants_mountable_status(self, two_users_client):
+        """群组授权边同样让被挂库进入可挂候选,撤销授权即刻失效。
+
+        走的是 `MOUNT_VALID_EXPR` 里同一条读权支(列引用形式、零参数),所以这里
+        只需证明群组这一路真的接通了、并且和只读分享一样是实时判定。"""
+        c = two_users_client
+        client = c["client"]
+        from app.api.deps import repository
+        repo_api = repository()
+
+        a = client.post("/api/notebooks", headers=c["u1"], json={"name": "u1 项目"}).json()
+        theirs = client.post(
+            "/api/notebooks", headers=c["u2"], json={"name": "u2 私有笔记"}
+        ).json()
+        assert theirs["id"] not in {
+            row["id"] for row in repo_api.mountable_notebooks(a["id"])
+        }, "前置条件:没有授权边时它本来就挂不上"
+
+        now = "2026-08-17T00:00:00Z"
+        with repo_api._write() as db:
+            db.execute(
+                "INSERT INTO groups (id,name,kind,description,created_by,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("grp-mount", "挂载测试组", "project", "", c["u2_id"], now, now),
+            )
+            db.execute(
+                "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
+                "VALUES (?,?,?,?,?)",
+                ("grp-mount", c["u1_id"], "member", now, c["u2_id"]),
+            )
+            db.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("gr-mount", theirs["id"], "group", "grp-mount", "viewer", c["u2_id"], now),
+            )
+
+        assert theirs["id"] in {
+            row["id"] for row in repo_api.mountable_notebooks(a["id"])
+        }
+        resp = client.put(
+            f"/api/notebooks/{a['id']}/bases", headers=c["u1"],
+            json={"base_notebook_ids": [theirs["id"]]},
+        )
+        assert resp.status_code == 200
+        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"], theirs["id"]]
+
+        with repo_api._write() as db:
+            db.execute("DELETE FROM notebook_grants WHERE id=?", ("gr-mount",))
+        assert repo_api.participant_notebook_ids(a["id"]) == [a["id"]]
+        assert theirs["id"] not in {
+            row["id"] for row in repo_api.mountable_notebooks(a["id"])
+        }
 
     def test_owner_can_mount_a_public_base_as_a_positive_control(self, two_users_client):
         """对照组:证明上面三条拒绝不是端点整体失灵——同一撮用户,挂一个真正
