@@ -9,8 +9,8 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 from app.api.deps import (
     get_current_user,
     notebook_access_repository,
+    notebook_capability_allowed,
     notebook_store_port,
-    notebook_write_allowed,
     repository,
     require_notebook_capability,
     require_notebook_read,
@@ -394,14 +394,16 @@ def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) ->
 
 @router.post("/sources/{source_id}/parse", response_model=SourceSummary)
 def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceSummary:
-    # notebook_id 不是这个端点 URL 上的路径参数(URL 只带 source_id),owner 判定
-    # 没法挂在静态的 Depends(require_notebook_capability(...)) 上——先反查
-    # notebook_id,再复用与 "sources:write" 能力逐字相同的判据(见
-    # notebook_write_allowed 的 docstring)。语义与旧的
+    # notebook_id 不是这个端点 URL 上的路径参数(URL 只带 source_id),守卫没法
+    # 挂在静态的 Depends(require_notebook_capability(...)) 上——先反查
+    # notebook_id,再按同一张能力表判 "sources:write"(见
+    # notebook_capability_allowed 的 docstring)。语义与旧的
     # `source_owner(source_id) != user.id` 逐字等价:source 不存在 → 404;
     # 非 owner → 404。
     notebook_id = notebook_access_repository().source_notebook_id(source_id)
-    if notebook_id is None or not notebook_write_allowed(notebook_id, user.id):
+    if notebook_id is None or not notebook_capability_allowed(
+        "sources:write", notebook_id, user.id
+    ):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return source_repository().parse_source(source_id)
@@ -767,10 +769,12 @@ def source_elements_page_in_scope(
 
 @router.delete("/sources/{source_id}", status_code=204)
 def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    # 同 parse_source 上面的注释:notebook_id 不在 URL 上,owner 判定在函数体内
-    # 先反查再自查,复用与 "sources:write" 能力逐字相同的判据。
+    # 同 parse_source 上面的注释:notebook_id 不在 URL 上,守卫在函数体内先反查
+    # 再按同一张能力表判 "sources:write"。
     notebook_id = notebook_access_repository().source_notebook_id(source_id)
-    if notebook_id is None or not notebook_write_allowed(notebook_id, user.id):
+    if notebook_id is None or not notebook_capability_allowed(
+        "sources:write", notebook_id, user.id
+    ):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         source_repository().delete_source(source_id)

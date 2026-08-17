@@ -7,11 +7,18 @@ P0 阶段行为零变化(每个能力名都解析到既有的 owner-only 判定,
   ② 能力值域被冻结在 ``{"owner"}``(P1/P2 群组授权落地时这条断言要跟着改,
      它就是那道"改这里"的提醒);
   ③ 结构扫描:``backend/app/api/*.py`` 里不得再残留裸 ``require_notebook_access``
-     或直接 ``Depends(require_notebook_write)``——防止新端点绕过能力工厂、
-     悄悄回退到裸守卫;
+     (文本扫描,连注释一起拦),也不得以任何书写形态引用 ``require_notebook_write``
+     标识符(AST 扫描——换行的 ``Depends(\n require_notebook_write)``、
+     ``import ... as`` 别名、中间变量赋值统统按标识符节点抓)——防止新端点绕过
+     能力工厂、悄悄回退到裸守卫;
   ④ 行为等价抽查:挑 sources:write 与 notebook:manage 两个代表性端点,
      owner 通过守卫、只读成员 404、陌生人 404——与 T1 既有矩阵同口径。
+
+⚠ 结构扫描**不检查归类是否正确**:把读端点错挂写能力(或把 kg 端点挂成
+knowhow:write)在结构上不可检测——守卫只保证"必经能力工厂",归类对错靠
+任务级评审兜底。
 """
+import ast
 from pathlib import Path
 
 import pytest
@@ -29,6 +36,13 @@ def test_unknown_capability_raises_keyerror():
     宽松默认值上。这里直接调用工厂本体验证同一件事,不依赖某个具体路由。"""
     with pytest.raises(KeyError):
         deps.require_notebook_capability("no:such")
+
+
+def test_notebook_capability_allowed_rejects_unknown_capability():
+    """体内自查的纯函数版本与工厂吃同一张表:未知能力名同样当场 KeyError,
+    不许静默落回某个默认判定。"""
+    with pytest.raises(KeyError):
+        deps.notebook_capability_allowed("no:such", "nb-x", "user-x")
 
 
 # --------------------------------------------------------------------------
@@ -67,7 +81,19 @@ _DIRECT_WRITE_DEPENDS_SCAN_EXEMPT = {"deps.py"}
 
 
 def _api_py_files() -> list[Path]:
-    return sorted(p for p in _API_DIR.glob("*.py") if p.is_file())
+    files = sorted(p for p in _API_DIR.glob("*.py") if p.is_file())
+    # 空转保护:能扫 0 个文件还报绿的守卫比没有守卫更糟——api 目录改名、本测试
+    # 文件挪层都会让 glob 静默落空。routes.py(聚合器)与 deps.py 必然存在。
+    scanned = {p.name for p in files}
+    assert {"routes.py", "deps.py"} <= scanned, (
+        f"api 目录扫描落空({_API_DIR}):只见 {sorted(scanned)[:5]}…——"
+        "目录被改名/挪动时必须同步更新本守卫,不许让它静默全绿"
+    )
+    # 豁免名单里的文件必须真实存在:文件被改名后,豁免会悄悄变成无主条目,
+    # 而它当年豁免的内容可能已在新名字的文件里重新违规。
+    for exempt in _BARE_ACCESS_SCAN_EXEMPT | _DIRECT_WRITE_DEPENDS_SCAN_EXEMPT:
+        assert exempt in scanned, f"豁免名单引用了不存在的文件: {exempt}"
+    return files
 
 
 def test_no_bare_require_notebook_access_outside_deps_and_mcp():
@@ -86,20 +112,38 @@ def test_no_bare_require_notebook_access_outside_deps_and_mcp():
     )
 
 
-def test_no_direct_depends_require_notebook_write_outside_deps():
+def test_require_notebook_write_identifier_absent_from_route_files():
     """``require_notebook_write`` 函数本体仍然存在(被能力工厂内部复用作
-    "owner" 级的实现),但路由文件不得再直接写
-    ``Depends(require_notebook_write)`` ——必须一律经
+    "owner" 级的实现),但路由文件不得以**任何书写形态**引用它——必须一律经
     ``Depends(require_notebook_capability("<能力名>"))`` 声明,才谈得上"按能力
-    归类"。"""
+    归类"。
+
+    用 AST 按标识符节点判而不是子串匹配:换行的 ``Depends(\n
+    require_notebook_write,\n)``、``from ... import require_notebook_write as g``
+    别名、``g = require_notebook_write`` 中间变量,子串扫描全都漏,AST 全都抓
+    (Name / Attribute / import alias 三种节点)。"""
     offenders = []
     for path in _api_py_files():
         if path.name in _DIRECT_WRITE_DEPENDS_SCAN_EXEMPT:
             continue
-        if "Depends(require_notebook_write)" in path.read_text(encoding="utf-8"):
-            offenders.append(path.name)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+        for node in ast.walk(tree):
+            hit = (
+                (isinstance(node, ast.Name) and node.id == "require_notebook_write")
+                or (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "require_notebook_write"
+                )
+                or (
+                    isinstance(node, ast.alias)
+                    and node.name == "require_notebook_write"
+                )
+            )
+            if hit:
+                offenders.append(path.name)
+                break
     assert offenders == [], (
-        f"发现绕过能力工厂、直接 Depends(require_notebook_write) 的路由: {offenders}"
+        f"发现绕过能力工厂、直接引用 require_notebook_write 的路由文件: {offenders}"
     )
 
 
