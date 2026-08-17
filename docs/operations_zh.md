@@ -772,6 +772,27 @@ PYTHONPATH=backend python scripts/merge_dbs.py \
 
 **落败一侧 base 自己的参考库挂载边:** 合并后保留的 base notebook(`--keep-base` 那一侧)只保留它自己的参考库挂载边;如果**另一侧**的 base notebook 曾挂载过别的参考库,这些挂载边不会被带过来——这和该 base 名下其它 notebook-scoped 数据(它自己的 sources、chunks、knowledge objects……)的既定规则完全一致。两侧其它(个人)notebook 自己持有的挂载边则原样全部并入,不受影响。
 
+**群组与授权边(群组知识共享):** `groups` 与 `group_members` 按**主库优先的全局并集**合并
+——与 `users` / `agent_profiles` / `agent_access_tokens` 同一套处理,因为这两张表都不挂
+notebook,不存在「被副库 notebook 筛选排除掉」这回事。去重按主键(`groups.id`,以及
+`(group_id, user_id)`),所以副库里与主库撞 id 的行是**整行丢弃**而不是逐字段合并。组 id
+一律是随机 uuid,正是为了让跨部署撞车不会偶然发生。
+
+`notebook_grants` 则是**按 notebook 范围**导入,两条口径并不一致。这个错位是孤儿授权边的
+**唯一**来源(平时删组走的是同一个写事务、先删边再删组),所以合并自己负责清扫:
+`sweep_orphan_group_grants` 在全局并集合并**之后**(那一步才决定 `groups` 的最终并集)、
+`PRAGMA foreign_key_check` **之前**运行,删掉 `principal_type` 为 `group` / `group_admins`
+且 `principal_id` 不在 `groups` 里的行并打日志计数。这件事不能交给数据库:`principal_id`
+是刻意无外键的多态列,`foreign_key_check` 永远看不见这类行。判据只认两个**群组**主体——
+`user` / `everyone` 的 `principal_id` 根本不指向 `groups`,一起扫等于删掉两类完全正常的
+授权。留着孤儿边不会立刻越权(谓词 join `group_members` 落空即判假),但库主的共享管理列表
+会永久挂着一条指向不存在的组的记录;更糟的是将来某个部署里凑巧新建一个同 id 的组,这条边
+就会**复活成真授权**。
+
+指向**非存活 base** 的授权边随那本 notebook 名下的其它数据(挂载、来源、知识对象……)一起
+丢弃,与上一段是同一条 caveat。合并完成后请逐库复核共享管理列表:凡是保留下来、但指向的
+群组成员来自另一侧的边,都应重新确认一次。
+
 **被导入 notebook 的图谱状态与「图谱分析」产物一律归零:** 从副库带过来的每个 notebook,其图谱构建状态与「图谱分析」报告的预计算产物都不保留(前者导入后清空,后者根本不导入)。两者都是派生数据,而且它们记录的版本戳只在原来那个库里有意义——留着会让分析报告拿源库的版本戳去比合并库的当前状态,得出「这份数字比当前内容还新」这种本不该出现的告警。归零之后这些报告如实显示为「从未计算过」,由下面那次「刷新图谱」连同主题板块一起重新算出来。
 
 合并完成后,把 `merged/` 产出(db + storage)部署到要保留下来的那台主机,首次启动后在 app 内触发一次索引重建(「重建索引」/「刷新图谱」)以重新生成 `kg_index`/`kg_viz`/ANN 等未被拷贝的产物。

@@ -36,10 +36,14 @@ def _seed(repo):
                 "INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?)", (sid, "n1", sid, "md", now, now),
             )
-        db.execute(
-            "INSERT INTO reports (id,notebook_id,question,created_at,updated_at) "
-            "VALUES (?,?,?,?,?)", ("r1", "n1", "q?", now, now),
-        )
+        # 两份报告都建在 u1 的 notebook n1 里,但创建者不同:r1 是 owner 自己建的,
+        # r2 是共享成员 u2 在同一本库里建的**他自己的**报告(群组知识共享 P1)。
+        # 用量必须按 created_by 归集——按 notebook owner 归集会把 r2 记到 u1 头上。
+        for report_id, creator in (("r1", "u1"), ("r2", "u2")):
+            db.execute(
+                "INSERT INTO reports (id,notebook_id,question,created_by,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)", (report_id, "n1", "q?", creator, now, now),
+            )
         db.execute(
             "INSERT INTO conversations (id,notebook_id,created_by,created_at,updated_at) "
             "VALUES (?,?,?,?,?)", ("c1", "n1", "u1", "2026-07-06T10:00:00", "2026-07-06T12:00:00"),
@@ -73,12 +77,15 @@ def test_list_user_usage_counts(repo):
     assert a["sources"] == 2
     assert a["conversations"] == 1      # 兼容旧 API 字段
     assert a["questions"] == 2
+    # 只数 u1 自己建的那一份;u2 在同一本库里建的 r2 不算 u1 的用量。
     assert a["reports"] == 1
     assert a["last_active"] == "2026-07-06T12:00:00"
     b = rows["b00000002"]
     assert b["notebooks"] == 0 and b["sources"] == 0
     assert b["conversations"] == 1 and b["questions"] == 1
-    assert b["reports"] == 0
+    # u2 一本自己的库都没有,但他在别人的共享库里建了一份报告——按创建者归集,
+    # 这一份必须记在他头上(与 `questions` 含共享库提交是同一条口径)。
+    assert b["reports"] == 1
     assert b["last_active"] == "2026-07-05T12:00:00"
 
 

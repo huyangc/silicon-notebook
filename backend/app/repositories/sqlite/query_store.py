@@ -587,11 +587,16 @@ class QueryStore:
                     "SELECT created_by AS k, COUNT(*) AS c FROM ask_jobs GROUP BY created_by"
                 ).fetchall()
             }
+            # 报告按**创建者**归集,不按笔记本 owner(群组知识共享 P1-T3b 裁决)。
+            # 共享笔记本里成员建的是**自己的**报告(行级 created_by 隔离,owner 都看
+            # 不见),把它记到库 owner 头上等于让一个人的用量出现在另一个人的账上。
+            # 与三条既有口径同一谓词:`questions`(按 ask_jobs.created_by)、
+            # `list_user_notebooks` 的展开报告数、以及活动流的报告条目——那三处早已
+            # 按 created_by 收窄,只有这个总数还在 join notebooks,同一屏自相矛盾。
             reports = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT nb.created_by AS k, COUNT(*) AS c FROM reports r "
-                    "JOIN notebooks nb ON nb.id = r.notebook_id GROUP BY nb.created_by"
+                    "SELECT created_by AS k, COUNT(*) AS c FROM reports GROUP BY created_by"
                 ).fetchall()
             }
             active = {

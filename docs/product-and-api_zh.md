@@ -26,10 +26,11 @@
 - 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`chunk` 基线只从当前 active notebook 读取 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 使用 federated KG 路径。exact-score 的 `base` 次序只适用于知识对象命中：`federated_retrieve()` 不改相关度分数，分数更高的 personal hit 仍排在前面；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。
 - **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有；用户库包含自己拥有的 notebook，以及主动加入的大型只读共享 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改），并由它持有原有 notebook。管理员可在用户使用总览通过 `PATCH /api/admin/users/{user_id}/role` 授予或撤销 `admin` 角色；内置管理员和当前操作管理员自身不可被降级，已有会话会在下一次请求时读取到新权限。用户使用总览先对 `/api/admin/users` 返回的完整集合排序，再按页显示；默认每页 20 条，可切换为 50/100 条，并可点击各数据列表头切换升降序。总览及 `GET /api/admin/users/{user_id}/notebooks` 的问答用量字段统一为 `questions`，按归属目标用户的持久 `ask_jobs` 提交次数计数（失败/取消任务也计入），而非 `conversations` 会话容器数量；同一会话内连续提问会分别累计，共享成员的提问不会算到笔记本所有者名下。用户总数包含其在加入的只读共享笔记本中的提交；`GET /api/admin/users/{user_id}/notebooks` 刻意保持 owner-only，因此只分解自有笔记本里的提问，其合计不要求等于用户总数。旧 `conversations` 字段为 API 兼容继续返回并标记 deprecated。每个笔记本对用户上传的文档数量设有上限（默认 20，可由 `USER_UPLOAD_DOCUMENT_LIMIT` 配置）；管理员在用户使用总览调整——设置全局默认（`PATCH /api/admin/settings/upload-limit-default`）并为单个用户设置覆盖值（`PATCH /api/admin/users/{user_id}/upload-limit`，传 `null` 清除覆盖、回落全局默认）；管理员拥有的笔记本不受此限。任何管理员都可将 notebook 发布为公共知识库。公共知识库对普通用户的列表隐藏，但可在每个笔记本的参考库选择器里发现，仅对显式挂载了它们的笔记本参与检索。升级到 schema 20 不会回填挂载：所有既有笔记本挂载数清零，联邦检索对它们全部停止，直到用户自己显式挂载一个参考库。非内置用户可在头像菜单自助修改密码，走 `PATCH /api/me/password`（body `{"old_password", "new_password"}`；当前密码错误或新密码空白返回 400）：成功后当前会话保持登录，该用户其他浏览器会话全部吊销。管理员可在用户使用总览通过 `POST /api/admin/users/{user_id}/reset-password`（body `{"new_password"}`）重置某用户密码；目标用户的浏览器会话全部吊销、须用新密码重新登录，且请求必须来自真实登录的管理员会话——`auth_optional` 的匿名回退被拒绝（403）。Agent 长期凭据不在两种吊销范围内。内置 `admin` 账号在两条路径都被拒绝（409）：它的密码每次启动都会按 `SILICON_NOTEBOOK_ADMIN_PASSWORD` 重新写入，改密请修改环境变量后重启；界面对它隐藏「修改密码」入口，用户总览该行密码列显示「受保护」。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
 - **分享链接**：owner 可发布不透明 notebook 链接；小 notebook 复制到接收者账号，大 notebook 以只读成员方式加入。写权限仍归 owner；当前没有实时协同编辑。
+- **群组共享**：用户按群组（`project`｜`department`｜`domain`）组织，组内两级角色；组管理员经授权边把知识库共享给整个群组。群组共享的库出现在成员笔记本列表的**「群组」分区**，成员可提问、写自己的深度报告并把它挂为参考库，且**读权 ⇒ 可挂载**。详见下文「群组知识共享」章。
 - **报告公开链接**：单份**已完成**的深度报告可由有写权限的成员发布成免登录只读页（`POST /notebooks/{nb}/reports/{rid}/share` 发放 token，`DELETE` 撤销，`GET /public/reports/{token}` 匿名读取）。发放是幂等的——重复分享返回同一个 token，已发出去的链接不会突然失效；撤销后与从未存在的 token 无法区分，都是 404。未完成的报告不能分享（409）。匿名端点挂在**独立 router** 上：主 API router 带 router 级 `Depends(get_current_user)`，公开端点挂在那上面会 401 拦掉它服务的访客；它也因此不绑定请求用户，所以只能调用不依赖 current-user 的仓储方法（ContextVar 未设时 `current_user` 会回退 seeded admin）。投影是**白名单**而非脱敏：正文、问题、时间，以及每条引用的标题/原始文件名/位置/摘录。`source_id`、`element_id`、`object_id`、`notebook_id` 与整个 `understanding` 合同（含意图与冻结的来源范围）都不跨出去——公开页本就不能打开原始资料，给出这些 id 只会让人拿去探测已认证接口。资料基础等披露已在生成时固化进 `content_md`，无需另行下发。**渲染管线与站内共用**：正文经同一个 `remarkCitations` 把 `[k]` / 【k】标记链接化成可点编号，编号取自 key 里的序号（后端已全局重编号；公开投影会丢掉既无标题又无摘录的条目，按位置数会和正文对不上），点击跳到本页「引用出处」条目并高亮——公开页打不开原文，所以标记通往的是摘录而不是原始资料。表格/代码块沿用 `.answer-table-wrap` / `.answer-code`，宽内容在自己的内容块里横向滚动；页面必须自带 `katex/dist/katex.min.css`，否则 rehype-katex 产出的 MathML 不被裁掉，每条公式会连着逐字符的 MathML 文本渲染两遍。
 - **绑定 notebook 的私有 Memory**：用户可手动把 Ask 回答生成可编辑预览，并在确认后沉淀为可复用 Memory。外层提供用户级总 Memory 页面，notebook 卡片显示当前用户的数量，工作区为 **问答**（Ask） | **知识库**（Knowledge） | **记忆**（Memory） | **深度报告**（Deep Report）。外部 Agent 可经 MCP 提交 `candidate`；它只在同一用户、同一 notebook 的获授权 Agent 间共享，用户确认前不会进入正式 Ask/搜索/报告检索。
 - 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
-- 深度报告（两阶段后台任务）：notebook 级「深度报告」动作把一个问题变成多节技术报告。**阶段1a 是完全不读语料的问题理解**：提取可编辑的最终研究问题、目标、必答主题、实体、比较轴、约束、排除项、期望输出、暂定假设、置信度与最多八个阻断性歧义，不调用 notebook 检索。报告停在 `intent_ready` 等 owner 确认，除非创建请求带 `auto_generate=true` 且问题清晰（无阻断性歧义）——此时服务端复用人工确认端点的同一份确定性冻结自动确认意图（不二次调用理解模型）并直接推进到规划；带阻断性歧义的问题无论是否 `auto_generate` 都仍停在该状态，必填歧义必须先回答，人工或服务端才能确认。带来源/参考库范围的报告在自动确认前还会重跑与人工确认端点相同的范围重验；重验不过（意图理解期间来源被删、参考库被卸载）就留在确认门，事件 reason 记 `scope_invalid`；重验通过时采用刷新后的冻结范围（期间新增来源/挂库导致的 narrowed 变化会像人工确认一样落进持久化 understanding 与后续规划/生成的范围上下文）。只读成员只能等待 owner。自动推进失败或竞态一律 fail-open 留在原状态、人工确认门保持可用，只发无正文事件 `report_intent_auto_confirm_skipped`。确认操作（人工或自动）以数据库原子转换认领 `intent_ready → planning`，并确定性冻结用户已经看过的合同，不会再调用一次隐藏的理解模型；澄清答案只补充内部检索/写作问题，不进入报告可见标题。**阶段1b 仅在意图确认后开始**：确认后的问题和答案成为权威输入，再对每个必答主题做有界的零 LLM 覆盖探针，同时统计联邦 KG 与直接解析 `SourceElement` 命中；此后 STORM 式规划器才使用来源标题、KG 命中和 chunk 出处来改进术语、排序、专家视角和张力。语料不足只能形成缺口，不能替换或收窄用户明确要求的主题；代码会验证映射并补回模型漏掉的必答主题。大纲编辑器展示每节对应的用户问题、可编辑检索方向，以及原文元素/KG/公共库覆盖；绑定某个必答主题的最后一节不可删除，API 同步强制此约束。**阶段2（确认大纲后）**：除完整 `reasoning` 深挖外，每条已确认检索方向都会实际执行；各节并行。chunk、KG 对象、类型化关系、confirmed Memory 与直接 `SourceElement` 共用 `[k]` 绑定链路，原始 element 不再只是不可引用的提示附文：小库可直接评分 element；不可复制的大库先走有界 chunk ANN/FTS，再只按命中 chunk 的精确 `element_ids` 做有界主键 hydration，绝不全表加载 element 文本/向量。参考文献按具体证据锚点去重，不再按来源标题折叠，点击报告引用可展开其绑定的来源、位置和原文片段。Ask 与报告引用仅在来源已接地判定为论文（`is_paper=true`）且解析出非空 `paper_title` 时优先显示论文名；其余情况继续显示普通来源名/文件名。引用响应另以 `source_file_name` 携带持久化上传文件名；当它与显示标题不同时，Ask/报告引用卡显示「原始文件」，挂载公共参考库的证据同样适用。该值只可来自 `sources.file_name`，绝不能使用 MinerU 临时/输出 Markdown 名。模型返回的 `grounded` 仅是建议，后端会重新解析锚点，并要求被引证据达到相关度阈值。最终编辑器只生成执行摘要并标记未完整回答的必答主题/跨节冲突，不改写章节、不新增事实。原有（推断）/【通识】纪律、五档研究深度、`KG_JOB_CONCURRENCY` 并行、实时 `section_status`、取消和 Markdown/ZIP 导出保持不变。`ReportSummary` 与 `ReportDetail` 新增返回 `updated_at` 和 `generation_started_at`；后者在成功原子认领 `outline_ready → generating` 时写入报告内部状态。已完成报告的列表与详情用 `updated_at` 显示浏览器本地时区的精确生成时间，同时保留相对时间，并展示从 `generation_started_at` 到最终写入的总耗时。意图确认和大纲确认的等待时间不计入；旧报告缺少生成开始戳时不编造耗时。未完成报告只显示创建时间，不冒充已有最终耗时。
+- 深度报告（两阶段后台任务）：notebook 级「深度报告」动作把一个问题变成多节技术报告。**阶段1a 是完全不读语料的问题理解**：提取可编辑的最终研究问题、目标、必答主题、实体、比较轴、约束、排除项、期望输出、暂定假设、置信度与最多八个阻断性歧义，不调用 notebook 检索。报告停在 `intent_ready` 等**创建者**确认，除非创建请求带 `auto_generate=true` 且问题清晰（无阻断性歧义）——此时服务端复用人工确认端点的同一份确定性冻结自动确认意图（不二次调用理解模型）并直接推进到规划；带阻断性歧义的问题无论是否 `auto_generate` 都仍停在该状态，必填歧义必须先回答，人工或服务端才能确认。带来源/参考库范围的报告在自动确认前还会重跑与人工确认端点相同的范围重验；重验不过（意图理解期间来源被删、参考库被卸载）就留在确认门，事件 reason 记 `scope_invalid`；重验通过时采用刷新后的冻结范围（期间新增来源/挂库导致的 narrowed 变化会像人工确认一样落进持久化 understanding 与后续规划/生成的范围上下文）。确认权归**报告的创建者**而不是笔记本 owner：共享库里成员建的报告由该成员自己确认，谁都不能确认或推进别人的报告（行级 `created_by` 隔离，见「群组知识共享」章），owner 也不例外。「只能等待」因此只对**别人的**报告成立。自动推进失败或竞态一律 fail-open 留在原状态、人工确认门保持可用，只发无正文事件 `report_intent_auto_confirm_skipped`。确认操作（人工或自动）以数据库原子转换认领 `intent_ready → planning`，并确定性冻结用户已经看过的合同，不会再调用一次隐藏的理解模型；澄清答案只补充内部检索/写作问题，不进入报告可见标题。**阶段1b 仅在意图确认后开始**：确认后的问题和答案成为权威输入，再对每个必答主题做有界的零 LLM 覆盖探针，同时统计联邦 KG 与直接解析 `SourceElement` 命中；此后 STORM 式规划器才使用来源标题、KG 命中和 chunk 出处来改进术语、排序、专家视角和张力。语料不足只能形成缺口，不能替换或收窄用户明确要求的主题；代码会验证映射并补回模型漏掉的必答主题。大纲编辑器展示每节对应的用户问题、可编辑检索方向，以及原文元素/KG/公共库覆盖；绑定某个必答主题的最后一节不可删除，API 同步强制此约束。**阶段2（确认大纲后）**：除完整 `reasoning` 深挖外，每条已确认检索方向都会实际执行；各节并行。chunk、KG 对象、类型化关系、confirmed Memory 与直接 `SourceElement` 共用 `[k]` 绑定链路，原始 element 不再只是不可引用的提示附文：小库可直接评分 element；不可复制的大库先走有界 chunk ANN/FTS，再只按命中 chunk 的精确 `element_ids` 做有界主键 hydration，绝不全表加载 element 文本/向量。参考文献按具体证据锚点去重，不再按来源标题折叠，点击报告引用可展开其绑定的来源、位置和原文片段。Ask 与报告引用仅在来源已接地判定为论文（`is_paper=true`）且解析出非空 `paper_title` 时优先显示论文名；其余情况继续显示普通来源名/文件名。引用响应另以 `source_file_name` 携带持久化上传文件名；当它与显示标题不同时，Ask/报告引用卡显示「原始文件」，挂载公共参考库的证据同样适用。该值只可来自 `sources.file_name`，绝不能使用 MinerU 临时/输出 Markdown 名。模型返回的 `grounded` 仅是建议，后端会重新解析锚点，并要求被引证据达到相关度阈值。最终编辑器只生成执行摘要并标记未完整回答的必答主题/跨节冲突，不改写章节、不新增事实。原有（推断）/【通识】纪律、五档研究深度、`KG_JOB_CONCURRENCY` 并行、实时 `section_status`、取消和 Markdown/ZIP 导出保持不变。`ReportSummary` 与 `ReportDetail` 新增返回 `updated_at` 和 `generation_started_at`；后者在成功原子认领 `outline_ready → generating` 时写入报告内部状态。已完成报告的列表与详情用 `updated_at` 显示浏览器本地时区的精确生成时间，同时保留相对时间，并展示从 `generation_started_at` 到最终写入的总耗时。意图确认和大纲确认的等待时间不计入；旧报告缺少生成开始戳时不编造耗时。未完成报告只显示创建时间，不冒充已有最终耗时。
 - **深度报告容量、输出与重试护栏**：整篇生成按 `REPORT_GENERATION_CONCURRENCY` 准入（每个后端进程默认 1 篇）；已准入报告至多同时运行 `REPORT_SECTION_CONCURRENCY` 节（默认 5），并同时受所绑模型服务容量和 `POSTGRES_POOL_MAX_SIZE - 2` 约束——后者只约束节级扇出：每节自身的子查询扇出仍可能短暂借用更多池连接，等待者受池获取超时约束，因此这道闸限制的是池压力上界，不是为在线请求预留固定连接数；排队报告不持有数据库连接。分节撰写使用 `REPORT_SECTION_MAX_TOKENS=65536`；详尽档全篇蓝图与最终只读终审分别通过 `REPORT_SYNTHESIS_MAX_TOKENS`、`REPORT_SUMMARY_MAX_TOKENS` 使用独立的 `102400` completion 上限。这些配置是 completion 上限，不是应用侧总上下文声明，也不会预占输出；实际绑定 provider/model 必须能在对应 workload 的 prompt 下接受该上限。蓝图提示只选择承重主张，单节最多 12 条、全篇最多 60 条。主张的 facet 标签接受 `id:value` 复合形态并确定性归一为合法前缀；标签写成某个 facet 的名称、声明取值，或其 id/名称/取值的大小写变体时，只要拼写无歧义即确定性修复为所属 facet id（声明 id 优先于其他 facet 的名称/取值；两个及以上 facet 共享的拼写绝不猜测归属）。修不回来的标签只清空该条主张自己的标签——facet 标签是组织性标注，绝不因它作废整份蓝图；证据绑定、章节归属与结构仍原子校验。修复/清空计数以仅含计数与不透明报告 id 的 `report_synthesis_facet_tags` 事件记录（绝不带 facet 拼写），综合 prompt 会逐字枚举 frame 的合法 facet id。综合失败的披露语义不变。若全部章节都为空或失败，报告终态为 `failed`；至少一节有效时继续 fail-open，并把失败节显式写入报告。保留已确认大纲的失败报告可原子重新进入 `generating`：重试保留冻结意图/大纲、重置 `generation_started_at`、清空旧生成产物，绝不重新理解问题或规划。认领后的排队时间计入生成耗时。
 - **Retrieval run、充分性与 reasoning 动作护栏**：一次报告规划/生成 run 在全部节 worker 间共享 `REPORT_RETRIEVAL_FANOUT=8` 个叶子 KG/chunk/element/PPR 槽；规划的独立 KG/原文元素探针使用 `REPORT_PROBE_CHANNEL_CONCURRENCY=2`（校验范围 `1..2`）。等待报告 leaf 槽位时会有界检查取消，拿到槽位后、发起 I/O 前再检查一次；已进入底层数据库/后端调用的 leaf 安全收束，不脱离成后台任务。Ask 共用同一 request-local 成功 query embedding single-flight，不改原扇出。报告充分性至少要求 `REPORT_SUFFICIENCY_MIN_RELEVANT_ITEMS=3` 个相关证据单元与 `REPORT_SUFFICIENCY_MIN_FAMILIES=2` 个可区分来源族（完整范围用 `REPORT_SUFFICIENCY_COMPLETE_MIN_FAMILIES=3`），且 `REPORT_SUFFICIENCY_MAX_TOP_FAMILY_SHARE=0.8`。reasoning run 最多执行 `REASONING_MAX_PPR_RETRIEVES=3`、`REASONING_MAX_EXACT_LOOKUPS=3`、`REASONING_MAX_FOLLOW_CHAIN_ACTIONS=3`；跨库社区同伴总帽是 `REASONING_COMMUNITY_PEERS_CAP_FACTOR=2 × COMMUNITY_PEERS_TOPK`，大纲更新最多 `REASONING_MAX_OUTLINE_UPDATES=6`。默认值与原内联规则完全相同，部署只应基于冻结评测集调整。规划子阶段、retrieve/synthesis/draft/final-editor、章节外层尝试和 retrieval-run 缓存/扇出计数都只发送 fail-open、无内容事件，字段仅限阶段/run 类型、不透明 report/run id、索引、计数、状态和毫秒。
 - **邻居展开上限与后台任务固定 worker 队列**：逐步推理的一次 `expand_graph` **每个方向**（出边/入边各自计算）最多展开 `REASONING_NEIGHBOR_EXPAND_LIMIT=1000` 个**唯一合格邻居**，因此即便碰上病态枢纽节点，邻居知识对象的取数也保持有界。上限的单位是邻居而不是关系行：同一个邻居常带多条重复/佐证关系，还有一部分行会被判为不可查边，所以数据库读取界取邻居预算的四倍（有意的过扫描：把这些行吸收掉，而不是让它们吃掉预算、把靠后的合法邻居整个略过）。对象状态的合格性在读取上限**之前**于 SQL 侧生效（只作用于 JOIN 的邻居那一侧），因此指向 deprecated 等对象的关系不会占掉有界读取窗口、把排在它们后面的可用邻居挡在外面。取行仍按稳定的关系 id 序，走既有 `(notebook_id, source/target_object_id, id)` 索引。截断绝不静默：展开轨迹步带 `neighbor_truncated` 与该上限，反思循环也会收到「哪些节点只展开了一部分」，让模型改换动作，而不是把它当成「这个节点只有这些邻居」。另外，后台任务使用**两个互相独立的固定 worker 队列**，分池判据是量级差而不是重要性：重活（知识图谱分析/重建、补上关联、统一图重建、冲突检测、合并预审）在每个后端进程内至多使用 `BACKGROUND_MAINTENANCE_CONCURRENCY=4` 个 worker；秒级轻活（论文元数据补抽、命令目录识别、knowhow 投影与孤儿资产清扫）另有 `BACKGROUND_LIGHT_JOB_CONCURRENCY=4` 个 worker。合用一个队列时，几个小时级重建就能把用户点一下就该出结果的格子投影饿死。提交只入队并立即返回，绝不为每个等待的维护任务创建一个线程；交互路径 `ask-*` 与已有整篇准入闸的 `report-*` 刻意都不进这两个队列。需要知道的后果：任务排队期间在库里的状态仍是 `running`/`queued`，界面暂不区分「排队中」与「执行中」；排队只在后端日志披露（等待越过阈值记一条 warning，开始执行后再记一条说明等了多久的 info，只带池名与任务类别，绝不带 id）。
@@ -122,6 +123,221 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 ### 界面模式（自动/高级）
 
 每个用户持久化一份 `user_profiles.ui_mode` 偏好（`"auto"` 默认 / `"advanced"`），经 `GET /me` 的 `UserProfile.ui_mode` 下发，并可通过自助端点 `PATCH /me/ui-mode`（body `{"ui_mode": "auto" | "advanced"}`；非法取值返回 422）修改。早于该字段的旧后端不会返回它，前端把缺失值按 `auto` 处理。高级模式就是本文档通篇描述的完整界面，与既有行为逐位一致。自动模式是从头像菜单开关的刻意精简界面：只保留「通用问答」「深入分析」两个 Ask tab，隐藏引擎子切换（深入分析固定为 `reasoning`）、检索档位控件（固定「标准」）、深度报告研究深度控件（固定「标准」，`depth=2`），以及上文的来源/参考库范围复选框——自动模式下被隐藏的控件永远在请求侧发送未收窄的默认值（当前 notebook 全部可见来源、全部已挂载参考库），绝不沿用高级模式会话残留的收窄勾选。自动模式创建的深度报告固定携带 `auto_generate=true`（参见上文「深度报告」条目及其可能触发的 `report_intent_auto_confirm_skipped` 事件）。问答输入框仅在该笔记本**尚无可用证据**且存在解析未到终态的来源时锁定——已有证据的笔记本上传新文档不会锁死输入框；能可靠统计处理中来源数（来源搜索框为空且当前已加载全部可见来源）时显示「N 篇文档处理中，完成后即可提问」，否则显示不带数字的「文档处理中，完成后即可提问」。切换模式即时生效，只改变前端渲染哪些控件与请求携带的默认值，从不改变后端检索或生成逻辑；高级模式的行为不受自动模式是否存在影响。
+
+## 群组知识共享
+
+三个真实场景——**项目**组共享一个知识库、**部门**共享若干个、范围更大的**领域**知识
+库——由同一套模型承载。三者的差异**只落在配置上，不落在机制上**。
+
+### 模型：群组、授权边、挂载
+
+- **群组**是一组用户加上组内角色。`kind ∈ {project, department, domain}` 只是**分类
+  标签**：它决定谁能建这个组、界面怎么措辞，不影响任何权限机制。项目组人人可建，
+  部门组与领域组仅系统管理员可建——正是这道闸让标签可信。因此 `kind` 建成之后**不可
+  改**：把它传给更新端点会被明确拒绝而不是静默忽略，否则普通用户能把自己建的项目组
+  改标成「部门」，那道闸就白设了。
+- **授权边**是 `(notebook, principal, role)`，`principal ∈ {user, group,
+  group_admins, everyone}`、`role ∈ {viewer, admin}`。表里的每一行都是**生效中**的
+  授权——判定谓词零 status 过滤，因此不存在「忘了滤 pending」这类漏洞形态。笔记本
+  owner（`created_by`）仍是隐含的最高授权。
+- **挂载**机制不变，只改有效性谓词：**读权 ⇒ 可挂载**，但受下面的借入挂载门约束。
+
+「某人在不在组里」与「这个组能不能读这本库」是两件独立的事，两者都**实时判定**：把人
+移出组、删掉授权边、或者删掉整个组，都在下一次请求上立刻生效。
+
+### 角色
+
+组内两级，加上笔记本 owner：
+
+| 能力 | 成员 | 组管理员 | owner |
+| --- | :-: | :-: | :-: |
+| 打开库、看来源/图谱、提问（会话按提问者隔离）、存自己的 Memory | ✓ | ✓ | ✓ |
+| 在库内创建**自己的**深度报告（计入自己的用量；他人不可见） | ✓ | ✓ | ✓ |
+| 把本库挂为自己 notebook 的参考库 | ✓ | ✓ | ✓ |
+| 添加/删除/重新解析来源，触发图谱与检索索引构建 | | P2 | ✓ |
+| 管理授权边、改名、图谱 Schema 覆盖 | | P2 | ✓ |
+| 删库、转让 owner | | | ✓ |
+
+两个 P2 格子是刻意的 P1 边界：`group_admins` 边可以存下、`admin` 角色也已经在枚举里，
+但 P1 只消费边的**读**含义（任何生效边都 ≥ viewer）。因此分享界面**只发** `(group,
+viewer)` 一条边——现在发出 `(group_admins, admin)` 等于宣告一个当前毫无效果的权限。
+笔记本写守卫保持 owner-only；**Agent/MCP 面一个字不动**：`sources:write` /
+`sources:delete` / `maintenance:execute` 仍是 owner-only 红线，组管理员的权限只在浏览器
+界面生效。
+
+系统管理员另有**群组维度的运维旁路**——可读任意组详情、可管理任意组的成员与授权边，
+不要求他是该组成员。这与既有的「系统管理员可转移 `notebooks.created_by`」同性质，理由
+有两条具体的：「至少保留一名组管理员」在并发窗口下仍可能留下一个零管理员的组，而所有
+管理端点都要求组管理员身份，那个组在 API 里就**永远不可恢复**；以及
+`GET /groups?scope=all` 是给系统管理员的全局管理面，没有旁路它就是一张每行都点不开的
+表。旁路**不覆盖自助退出**（「退出」的前提是本人真的在组里），不伪造成员身份
+（`my_role` 仍如实为空），也不放宽笔记本维度的任何读写守卫。
+
+### 端点面
+
+`group_routes.py` 里 14 个端点，另加笔记本 router 上一个只读端点。
+
+| 端点 | 谁可以调 | 说明 |
+| --- | --- | --- |
+| `POST /groups` | 任何用户（`project`）；管理员（`department`/`domain`） | 创建者在同一事务里成为组管理员 |
+| `GET /groups` | 任何用户 | 我加入的群组；`?scope=all` 仅系统管理员 |
+| `GET /groups/{id}` | 组成员（管理员经旁路） | 组详情 + 成员清单 |
+| `PATCH /groups/{id}` | 组管理员 | 只改 `name` / `description` |
+| `DELETE /groups/{id}` | 组管理员 | 同一写事务清掉指向本组的授权边 |
+| `PUT /groups/{id}/members/{user_id}` | 组管理员 | 加人与改角色同一个端点 |
+| `DELETE /groups/{id}/members/{user_id}` | 组管理员 | 会移除最后一名管理员时 409 |
+| `DELETE /groups/{id}/membership` | 成员本人 | 自助退出；最后一名管理员 409 |
+| `GET /users/resolve?username=` | 任何登录用户 | 按用户名**精确**查，只返回 id/用户名/显示名 |
+| `GET /notebooks/{id}/grants` | `notebook:manage` | 该库全部授权边，四类主体如实返回 |
+| `POST /notebooks/{id}/grants` | `notebook:manage` **且**目标组组管理员 | 只收 `group` / `group_admins` 两个主体 |
+| `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | 笔记本维度撤销 |
+| `GET /groups/{id}/shared-notebooks` | 组管理员 | 「共享给本组的知识库」清单 |
+| `DELETE /groups/{id}/shared-notebooks/{nb}` | 组管理员 | 组维度撤销，删掉指向本组的**全部**边 |
+| `GET /notebooks/{id}/share` | `notebook:manage` | **新增**，只读；见下 |
+
+有几条边界必须写明：
+
+- **群组的可见性口径是 404，不是 403。** 非组成员访问一个群组，得到的答复与「这个组
+  不存在」完全一样——群组名本身就是可探测信息（哪个部门在用这个系统、有没有某个项目
+  组）。唯一刻意的例外是 `POST /notebooks/{id}/grants`：那里「组不存在」（404）与
+  「组存在但你不是它的管理员」（403）**可区分**，因为能走到这一步已经证明请求者对这
+  本库有管理权，而且他手上必须已经有那个 128 位随机组 id（猜不出来）——于是拿到两条
+  各有出路的错误文案，而不构成枚举通道。
+- **创建组授权边是双重条件**（设计决策 9）：请求者既要对这本笔记本有管理权，又要是
+  目标群组的组管理员。群组那一半的权威判定在 **store 的写事务里**，不做前置查询：这条
+  边一落库就**立刻**给整组人读权，而「先查一次、再在另一个事务里插入」中间那个窗口
+  足够让组被删、或让发起者被移出/降级，边却照发不误。
+- **撤销是不对称的。** 库的管理者可以从笔记本维度删任意一条边；组管理员可以从群组维度
+  删掉指向本组的全部边。两个入口各自只需要自己那一半权限——组管理员管理共享给本组的
+  全部内容，库主随时可以收回自己的库。
+- **`user` 与 `everyone` 主体不经这些端点。** `user` 主体继续走既有的只读共享
+  （share_token）流程，`everyone` 继续走 `POST /notebooks/{id}/tier`。同一件事有两个
+  写入口，迟早会有一个漏掉另一个的某条校验。
+- **非法 `scope` 明确 422，绝不静默落回 `mine`**——一个拼错的 `?scope=al` 在 200 下返回
+  一份收窄过的清单，调用方读到的就是「这是全部」。
+- **`GET /users/resolve` 任何登录用户可调**，这是内部部署下**已登记接受**的取舍：它让
+  用户名可被逐个探测。两个替代方案都更糟——只允许组管理员调，就没法加第一个成员；做成
+  模糊搜索，则把逐个探测换成批量枚举。返回面刻意只有 id / 用户名 / 显示名，不含邮箱、
+  角色、用量。
+- **孤儿边要标注，不能藏。** 指向已不存在的群组的边带 `principal_kind="missing"` 回来。
+  删组事务会清掉这类边，但 `principal_id` 没有外键，合库仍可能复活它们
+  （`scripts/merge_dbs.py` 负责清扫）；有了这个标注，库主才看得懂残留的那条是什么、
+  知道可以删。
+
+### 读权 ⇒ 可挂载，以及借入挂载的「未共享门」
+
+挂载有效性历来是「公共库 ∨ 同 owner」，刻意**排除**只读分享进来的库，理由是「撤销分享
+后挂载边还在，会成为越权通道」。这条顾虑已由实时谓词吸收（撤销 → 谓词不满足 → 边失效），
+因此**读权 ⇒ 可挂载**成为一致规则——这正是「项目成员挂载项目知识库」的需求本体。
+`GET /notebooks/{id}/mountable` 随之放宽。
+
+但历史顾虑还有实时判定治不了的另一半：**转手再分享**。Carol 把 Y 分享给 Alice，Alice
+把 Y 挂进自己的 X，Alice 再把 X 分享给 Bob——Bob 就经 X 的代理读取与联邦检索读到了 Y 的
+全文，而 Carol 从未授权他。全程没有任何授权被撤销，是挂载方**新增**一次共享就凭空多出
+一批读者。
+
+所以挂载谓词的受限读权那一支额外要求：借入挂载**仅在挂载方笔记本自身没有被共享出去**
+（没有任何 `notebook_members` 行、也没有任何 `notebook_grants` 行）时有效。挂载方一旦被
+共享，借入边即刻失效（边保留置灰，与既有失效边惯例一致）；取消共享后自动恢复。
+`tier='base'` 与 `everyone` 授权**不受此限**——受众本就是全员，转手不增加任何暴露面，这
+也是 `access_sql` 要把授权边拆成受限片段与 `everyone` 片段的**唯一**理由（读权谓词本身
+并不区分这两类）。同 owner 支同样不受限：挂载方 owner 共享 X 就是在处置自己的内容。
+谓词只认「有没有被共享」这个事实，**不比对两边的受众**：受众比对要跨库展开成员/组/授权边
+三张表，而这是每次参与集解析都要跑的热路径；宁可保守，恢复手段（取消共享）在用户手上。
+产品含义与「挂载不传递」同向：**借来的东西不转借。**
+
+界面上有两处配套：分享弹窗在**发出共享之前**就提示「共享后，本笔记本借入的参考库将暂停
+参与检索」；被这道门关上的边有自己的文案（「本笔记本已共享，借来的参考库暂停参与检索；
+取消本笔记本的共享即可恢复」），而不是那句对借入边根本不成立的固定文案「该库已不是公共
+知识库，且不属于你」。这道门自己的判别式由挂载谓词派生成 `MOUNT_GATE_CLOSED_EXPR`，消费点
+不许手拼；它同时保持被挂库的真实名字可见——此形态下挂载方 owner 对被挂库**仍有合法读权**，
+没有泄露可言。
+
+### 群组库在笔记本列表里的呈现
+
+经生效组授权边可读、且**既非 owner 也非** `notebook_members` 行的库，构成笔记本列表的
+**「群组」分区**。
+
+- `NotebookSummary.access` 仍是 `"reader"`，**不新增枚举值**（已定裁决 7）。群组成员拿到
+  的就是 reader 那一档，行为逐字相同：隐藏写按钮、Ask 走同一读守卫、默认全选检索范围、
+  隐藏参与者快照。而「访问权**从哪来**」是正交的一维，所以另开一个字段。
+- `NotebookSummary.granted_via` 是 `{group_id, group_name, kind}` 的列表，驱动卡片上的
+  「来自群组《X》」标注。自有库与经分享链接加入的库为空，因此旧行为逐字不变。**列表与
+  详情两条路径都回填**，去重口径两边一致：**成员行优先**——既经分享链接加入、又在被授权
+  群组里的人，`granted_via` 为空、「退出共享」仍然可用（它删的正是那条成员行）。
+- 反过来，`granted_via` 非空的卡片**不得**显示「退出共享」：那个按钮只删
+  `notebook_members` 行，对授权边一点作用都没有，点了而库还在列表里是一个**必然发生的
+  假失败**。改为展示「由组管理员管理」的静态说明。
+- `GET /notebooks/{id}/mountable` 换了响应模型 `MountableNotebook`，多一个
+  `origin ∈ {base, mine, shared}`，由 `MOUNT_VALID_EXPR` 已有的列信息（`tier` 与
+  `created_by`）投影而来，**零新增查询**。挂载选择器据它分三档「公共知识库 / 我的笔记本 /
+  共享给我的」——「读权 ⇒ 可挂载」放开之后别人 owner 的库也进候选，只按 `tier` 分会把它们
+  标成「我的笔记本」，一句事实错误的标签。优先级 base → mine → shared：自己 owner 的公共
+  知识库仍判 `base`，本字段出现之前的分组结果逐字不变，只有新准入的那批行落进第三组。
+  该字段刻意挂在**新模型**上而不是 `NotebookRef`（后者同时是 `MountedBase` 的基类与另一条
+  并不计算这个标志的查询的响应模型）。
+- owner 侧的「已分享」口径改为**并集**：只读共享（`notebooks.is_shared`）**∨** 存在指向
+  群组的授权边。卡片徽标与 `shared-by-me` 总览用同一个判据，`SharedByMeItem.group_count`
+  带上共享给了几个**不同的**群组。`share_token` 为空而 `group_count` 非 0 的行，就是一条
+  只因群组共享而出现的记录（没有链接可发）。没有链接的行不算规模、不查成员——`mode` /
+  `size` / `members` 说的都是链接。
+- 待确认中心的铃铛现在能解析出**非自有库**的库名（此前共享库里建的报告库名为空），并且它的
+  报告那一半移到了「有没有自有库」这道闸**之外**——那一半的谓词只有 `created_by`、一个
+  notebook id 都不消费，于是「没有任何自有库的成员」铃铛恒为 0，而他的报告正卡在
+  `intent_ready` 等他确认，是条走不通的路。
+
+### `GET /notebooks/{id}/share` 零副作用
+
+打开分享弹窗此前会 `POST .../share`，于是「只想共享给群组」的用户会顺带被发一条分享链接
+——一次纯查看的动作产生了持久副作用。新增的 GET 只读回当前链接状态、**绝不铸新 token**，
+链接改由用户显式点「开启链接分享」时才 POST（那条 POST 幂等，已有 token 原样返回）。没有
+token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一次真实的规模统计（大库上
+不便宜），而没有链接的库根本用不到它。因此 `copyable` / `size` 只在 `share_token` 非空时
+有意义，消费方必须先判它。
+
+### 共享库里的深度报告
+
+建报告的能力跟着**读权**走，报告则**按创建者隔离**。
+
+- 创建报告只要求对该笔记本有读权。凡是碰**已存在**报告的端点——详情、确认意图、改大纲、
+  生成、取消、删除、分享、读分享状态、撤销分享，共九个——都要再过
+  `report_routes.py::_own_report_or_404` 这道行级校验（`reports.created_by == 当前用户`，
+  另有 AST 守卫钉住「每个这类端点都调了它」）；列表与导出按同一谓词在 SQL 里收窄。别人的
+  报告与「不存在」同为 404。
+- **notebook owner 也不例外**：他只看得见自己建的报告。这是刻意不引入「owner 看全部」这条
+  新披露；要给别人看，走既有的公开分享链接。
+- 由于该能力跟的是**读权**而不是「读权怎么来的」，经 share-token 加入的普通只读成员**同样
+  获得**建报告的能力。这是**有意**的（能力表达的是「谁能读这本库」），不是群组特性的溢出，
+  也是相对旧版本的一次**对外行为变化**。
+- 成员发布的公开链接是一个**受托面，有效期 = 他的读权**。`GET /public/reports/{token}` 在
+  token 命中后**每次请求实时复核**报告**创建者**当前是否仍对该 notebook 有读权
+  （`user_can_read_notebook(notebook_id, created_by)`，两个 id 显式传参——匿名 router 不绑定
+  请求用户，绝不能碰 `current_user` 的 seeded-admin 回退）。不通过时返回**与无效 token 同款
+  的 404**：可区分的响应会把某人的组成员身份透露给匿名调用者。恢复授权即复活链接，与 token
+  既有的幂等语义一致。这与挂载实时判定是同一套哲学，理由也相同：失权路径有好几条（授权边
+  删除、退组、组被删、成员行移除、库改 tier），级联要在每一处记账，漏一处就留一个永久后门。
+  具体形态是——成员失权后，成员被读守卫挡在库外、owner 被行级判定挡在报告外，**谁都够不到
+  撤销**，而公开页会永远 200 服务 owner 的语料。owner 自己的报告与全部历史报告零变化
+  （创建者 = owner，读权恒成立）。
+- 管理员用量归集同此口径：`GET /admin/users` 的报告数按 `reports.created_by` 计，不按笔记本
+  owner，与既有的 `questions`（按提交者计数、含共享库提交）以及展开清单、活动流的报告条目
+  （本就按创建者收窄）一致。
+
+### 已登记的上限与取舍
+
+- **组名 120 字符，组说明 1000 字符。** 两者都是用户编辑的数据，所以超限**明确拒绝**，
+  绝不静默截断。
+- **三个清单端点无分页**——`GET /groups/{id}` 的成员清单、`?scope=all` 的全量群组、
+  `GET /notebooks/{id}/grants`。这是**已定取舍而非遗漏**：规模按单组最多几百人设计
+  （决策 11），一次全量返回在这个量级内成立。写在这里是免得将来有人把「没分页」读成 bug。
+- **「群组」分区把一个已知的 N+1 放大了**，作为已登记的债务保留。`granted_notebook_rows`
+  只是一条查询，但每行都要过 `NotebookSummaryQuery.from_row`，而它逐库发若干次计数/挂载
+  查询——约 7 条语句/库，500 本组授权库量级即约 3500 条。「自有库」与「加入的库」两段是
+  同一个既有形态，所以这不是本特性引入的新问题，但群组分区把可能的行数放大了一个量级。
+  优化方向（批量预取计数）另行排期。
+- **不做判定缓存。** 单次判定是若干带索引的 `EXISTS` 探测（grants 按 `notebook_id` 或
+  `(principal_type, principal_id)`，`group_members` 按主键或 `user_id`），与现状同量级；
+  热路径不新增全表扫描。
 
 ## Knowhow 表
 
@@ -994,7 +1210,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - 笔记本生效图谱类型：`GET /api/notebooks/{id}/object-schemas` 要求 notebook 读权限；`POST /api/notebooks/{id}/object-schemas`、`PATCH /api/notebooks/{id}/object-schemas/{type}`、`DELETE /api/notebooks/{id}/object-schemas/{type}` 要求 notebook owner 权限。修改继承的全局类型会创建本库覆盖；删除覆盖会恢复继承；只有该 notebook 已不存在此类型知识对象时才能删除本库专属类型。`POST /api/notebooks/{id}/schema-proposals` 把仅供审核的候选类型保存在当前 notebook，而不是写入全局基线；owner 明确批准前，候选行绝不会遮蔽继承类型。全局与笔记本类型写入跨两张注册表串行执行，模型返回的候选会在落库前重新校验；数据库合并预检遇到同名但语义列不同的全局定义会直接拒绝，绝不静默保留目标库行。`object_type` 与每个字段键必须以 ASCII 小写字母开头，只能包含 ASCII 小写字母、数字和下划线，最长 80 个字符。每份定义最多包含 64 个不重复字段和 64 个不重复列表字段；`primary` 必须属于 `fields`，每个列表字段也必须属于 `fields`。每个人类可读的类型文本（`plural`、`label`、`description` 与候选 `rationale`）最多 2,000 个字符。浏览器在创建或编辑提交前执行同一组护栏，API 仍是权威校验方。
 - `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 可发布为公共知识库，personal = 默认用户笔记）；`base` notebook 只有在被其它笔记本显式挂载后才参与该笔记本的检索（`GET`/`PUT /api/notebooks/{id}/bases`，候选列表见 `GET /api/notebooks/{id}/mountable`）。
-- 参考库挂载：`GET /api/notebooks/{id}/bases` → `MountedBase[]`（本 notebook 的挂载边，含置灰的失效边）；`PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → 全量替换，返回更新后的 `MountedBase[]`（含不可挂载的 id 时 400；仅 owner 可写）；`GET /api/notebooks/{id}/mountable` → `NotebookRef[]`（可挂候选：所有公共知识库，加上本 notebook 自己同 owner 的库）。
+- 参考库挂载：`GET /api/notebooks/{id}/bases` → `MountedBase[]`（本 notebook 的挂载边，含置灰的失效边）；`PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → 全量替换，返回更新后的 `MountedBase[]`（含不可挂载的 id 时 400；仅 owner 可写）；`GET /api/notebooks/{id}/mountable` → `MountableNotebook[]`（可挂候选：所有公共知识库、本 notebook 自己同 owner 的库，以及群组知识共享之后本 notebook owner 读得到的每一本库——受借入挂载的未共享门约束；每个候选带 `origin ∈ {base, mine, shared}`，供选择器如实分组）。
+- 群组与授权边：`POST`/`GET /api/groups`、`GET`/`PATCH`/`DELETE /api/groups/{id}`、`PUT`/`DELETE /api/groups/{id}/members/{user_id}`、`DELETE /api/groups/{id}/membership`、`GET /api/users/resolve?username=`、`GET`/`POST /api/notebooks/{id}/grants`、`DELETE /api/notebooks/{id}/grants/{grant_id}`、`GET`/`DELETE /api/groups/{id}/shared-notebooks[/{notebook_id}]`，另加只读的 `GET /api/notebooks/{id}/share`。角色、可见性口径（404 而非 403）、创建授权边的双重条件、不对称撤销与已登记的上限全部见上文「群组知识共享」章。
 - 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
 - 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
 - 深度报告（两阶段）：`POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`；先做不接触语料的问题理解，并停在 `status=intent_ready` 等人工确认，除非请求带 `auto_generate=true` 且问题清晰（无阻断性歧义）——此时意图同样通过同一份确定性冻结自动确认（不二次调用理解模型）后再进入规划。`GET .../reports/{rid}` 会返回持久化的 `understanding` 与状态/进度。`POST .../reports/{rid}/intent` body `{resolved_question, answers:[{id,answer}]}` 校验所有必填歧义，并原子认领进入语料规划的唯一转换，返回 `{status:"planning"}`；重复或过期确认返回 409 且不会启动第二个任务。规划完成后停在 `outline_ready`；若原始请求含 `auto_generate=true`，则意图阶段同样自动确认（仅当无阻断性歧义）之后自动进入生成。富 `outline` 含每节 `intent_ids`、`intent_questions`、可编辑 `sub_queries`、客观 `coverage`、视角/张力/充分性，详情继续包含 `content_md` 与实时 `section_status`。`PATCH .../reports/{rid}/outline` body `{sections}` 仅在 `outline_ready` 编辑草案；服务端保留 intent catalog，最多接受 `REPORT_MAX_SECTIONS` 节，每节最多接受 `REPORT_MAX_SUBQUERIES_PER_SECTION` 条非空检索方向。浏览器从 `/api/system/config` 同步这两项护栏并阻止超限提交；直接 API 客户端的章节或检索方向超限时收到 422，不再被静默截断。没有有效节或某个必答主题失去最后一个章节绑定时也返回 422。`POST .../reports/{rid}/generate` body `{depth?}` 可从 `outline_ready` 或仍保有大纲的 `failed` 报告原子启动**阶段2 生成**，其他状态返回 409；重试在认领事务内保留确认意图/大纲并清空旧生成产物。生成章节含后端重算的 `evidence_level`/`grounded`；引用可携带精确 `source_id`/`element_id`。另 `GET /reports`（列表）、`POST .../cancel`、`DELETE`、`POST .../reports/export` `{report_ids}` → `reports.zip`。节级并发采用上文报告专用的数据库保护护栏，不再复用 `KG_JOB_CONCURRENCY`。
@@ -1037,7 +1254,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
 - KG 抽取需要在系统模型 TOML 中绑定 `kg_extract` workload；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
-- Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
+- Notebook 分享有三种形态：链接复制、只读成员、共享给群组——都不是实时协同编辑。群组成员可以提问、写自己的深度报告；内容管理（来源、图谱、授权边）仍归 owner，组管理员的写权限是 P2。
 - SQLite 与 PostgreSQL 都可由唯一 repository factory 原子选择，发行默认仍是 SQLite。只改 `DATABASE_URL` 不会同步既有行；存量切换/回滚必须停写、验证备份，必要时执行外部数据迁移，并在启动后做一致性检查。PostgreSQL 向量存 `bytea`，不要求 pgvector。
 - `off` 模式 PDF 回退用 PyMuPDF4LLM 的分页 Markdown，保留标题、多栏阅读顺序和重建表格；只有该解析器缺失或报错时才最后回退 pypdf。公式、图片和复杂扫描件的权威高保真路径仍是 MinerU。URL/上传文件的云解析在重试后仍失败时也走同一本地回退，并以 `extracted` + `parse_quality_warning=true` 返回；来源详情会说明风险并提供重新解析/删除入口，后续 MinerU 重解析成功会清掉警告。见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。

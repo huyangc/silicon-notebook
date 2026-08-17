@@ -3164,6 +3164,42 @@ def test_postgres_query_store_multi_notebook_count_placeholders(postgres_databas
 
 
 @pytest.mark.postgres_integration
+def test_postgres_user_usage_attributes_reports_to_their_creator(postgres_database):
+    """报告用量按 `reports.created_by` 归集,不按笔记本 owner(群组知识共享 P1)。
+
+    共享笔记本里成员建的是**自己的**报告(行级隔离,owner 都看不见),按 owner 归集
+    会把成员的用量记到库主账上。SQLite 侧的对应用例是
+    `test_admin_users.py::test_list_user_usage_counts`。
+    """
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 27
+    _seed_catalog(postgres_database)
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
+            ("user-member", "member@example.test", "Member", NOW, NOW, "m00123456"),
+        )
+        # 两份报告都在 owner 的 nb-personal 里,创建者一个是 owner、一个是共享成员。
+        for report_id, creator in (
+            ("report-owner", "user-golden"),
+            ("report-member", "user-member"),
+        ):
+            connection.execute(
+                "INSERT INTO reports(id,notebook_id,question,created_by,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (report_id, "nb-personal", "q?", creator, NOW, NOW),
+            )
+    usage = {row["id"]: row for row in PostgresQueryStore(postgres_database).list_user_usage()}
+    assert usage["user-golden"]["reports"] == 1
+    # 成员一本自己的库都没有,那份报告仍记在他头上。
+    assert usage["user-member"]["notebooks"] == 0
+    assert usage["user-member"]["reports"] == 1
+
+
+@pytest.mark.postgres_integration
 def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedback(
     postgres_database,
 ):

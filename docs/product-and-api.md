@@ -26,10 +26,11 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). Baseline `chunk` retrieval reads chunks from the active notebook only; optional KG overlay/PPR can add federated KG context and base-backed chunks, while `graph` and `reasoning` use federated KG paths. The exact-score `base` tie-break applies only to knowledge-object hits returned by `federated_retrieve()`: scores stay unchanged and a higher-scoring personal hit still wins. `federated_retrieve_relations()` remains score-only. Separately, when base and personal evidence contradict during answer synthesis, the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`) and Ask renders a `base`/`personal` badge per cited anchor.
 - **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; a user's library contains owned notebooks plus large shared notebooks they explicitly joined read-only. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, local default `admin`; production/non-loopback startup requires changing it) and owns pre-existing notebooks. Administrators can grant or revoke the `admin` role from the user-usage page through `PATCH /api/admin/users/{user_id}/role`; the built-in administrator and the active administrator's own role cannot be revoked. Role changes are observed by existing sessions on their next request. The user-usage table sorts the complete `/api/admin/users` result before pagination, defaults to 20 rows per page, provides 20/50/100-row page sizes, and supports ascending/descending sorting from its data-column headers. Its `questions` value (also returned by `GET /api/admin/users/{user_id}/notebooks`) counts durable `ask_jobs` submissions owned by the target user, including failed or cancelled jobs; it does not count `conversations` containers, so repeated questions in one conversation remain distinct and another member's question is not charged to the notebook owner. The user total includes submissions in joined read-only notebooks. `GET /api/admin/users/{user_id}/notebooks` intentionally remains an owner-only notebook inventory, so its per-notebook question counts break down only the user's owned notebooks and need not sum to the user total. The legacy `conversations` field is retained and marked deprecated for API compatibility. Each notebook caps the number of user-uploaded documents (default 20, `USER_UPLOAD_DOCUMENT_LIMIT`); administrators tune it from the user-usage page — a global default (`PATCH /api/admin/settings/upload-limit-default`) plus per-user overrides (`PATCH /api/admin/users/{user_id}/upload-limit`, `null` clears the override and falls back to the global default). Administrator-owned notebooks are exempt. Any administrator can publish a notebook as a public knowledge base. Base notebooks are hidden from regular users' lists but are discoverable through each notebook's reference-library picker, and participate in retrieval only for notebooks that explicitly mount them. Upgrading an existing deployment to schema 20 does not backfill mounts: every pre-existing notebook starts with zero mounted reference libraries, and federation stays off for it until a user explicitly mounts one. Every non-built-in user can change their own password from the avatar menu through `PATCH /api/me/password` (body `{"old_password", "new_password"}`; a wrong current password or a blank new password returns 400): on success the requesting session stays signed in while every other browser session of that user is revoked. Administrators can reset a user's password from the user-usage page through `POST /api/admin/users/{user_id}/reset-password` (body `{"new_password"}`); all of the target's browser sessions are revoked so they must sign in with the new password, and the request must come from a real signed-in administrator session — the `auth_optional` anonymous fallback is refused (403). Agent long-lived credentials are outside both revocation scopes. The built-in `admin` account is rejected by both paths (409) because its password is re-seeded from `SILICON_NOTEBOOK_ADMIN_PASSWORD` on every startup — change the environment variable and restart instead; the UI hides the change-password entry for it and marks its user-usage row as protected. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
 - **Share links**: owners can publish an opaque notebook link. Small notebooks are copied into the recipient's account; large notebooks are joined as read-only membership. Write access stays with the owner, and there is no live collaborative editing.
+- **Group sharing**: users are organized into groups (`project` | `department` | `domain`) with a two-level in-group role, and a group admin shares a library with the whole group through an authorization edge. Group-shared libraries appear in a **群组** partition of the member's notebook list, members may ask questions, write their own deep reports and mount the library, and read access now implies mountability. See 群组知识共享 below.
 - **Public report links**: one **finished** deep report can be published by a write-capable member as a sign-in-free read-only page (`POST /notebooks/{nb}/reports/{rid}/share` issues a token, `DELETE` revokes, `GET /public/reports/{token}` reads it anonymously). Issuing is idempotent — re-sharing returns the same token, so a link already handed out never starts 404ing; after revocation it is indistinguishable from a token that never existed. An unfinished report cannot be shared (409). The anonymous endpoint lives on a **separate router**: the main API router carries a router-level `Depends(get_current_user)`, which would 401 exactly the visitors this page exists for. That also means no request user is bound, so it may only call repository methods that do not consult the current user — `current_user` falls back to the seeded admin when the ContextVar is unset. The payload is an **allowlist**, not a redaction: body, question, timing, and per citation the title, original filename, location, and stored excerpt. `source_id`, `element_id`, `object_id`, `notebook_id`, and the whole `understanding` contract (intent and the frozen source scope) never cross — the public page cannot open sources anyway, so those handles would only enable probing of the authenticated API. Corpus-basis disclosure is already frozen into `content_md` at generation time. **The rendering pipeline is shared with the in-app view**: the body runs through the same `remarkCitations`, so `[k]` / 【k】 markers become clickable numbers taken from the number inside the key (the backend already renumbered globally; the public projection drops entries with neither title nor excerpt, so positional numbering would disagree with the body). Clicking one jumps to and highlights the matching entry in this page's citation list — the public page cannot open sources, so a marker leads to the excerpt, not the original. Tables and code blocks reuse `.answer-table-wrap` / `.answer-code` so wide content scrolls inside its own block, and the page must import `katex/dist/katex.min.css` itself: without it rehype-katex's MathML is never clipped and every formula renders twice, once as character-by-character MathML text.
 - **Notebook-bound private Memory**: users can manually turn an Ask answer into an editable preview and confirm it as reusable Memory. The collection has a user-level Memory page; notebook cards show the current user's count, and each workspace exposes **问答** (Ask) | **知识库** (Knowledge) | **记忆** (Memory) | **深度报告** (Deep Report). External Agents can submit `candidate` Memory through MCP; candidates are shared only among that same user's authorized Agents in the same notebook and do not enter formal Ask/search/report retrieval until the user confirms them.
 - Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `chunk`)
-- Deep report (two-phase background job): a notebook-level "深度报告" action turns one question into a multi-section technical report. **Phase 1a is corpus-blind question understanding**: it extracts an editable resolved question, objective, mandatory topics, entities, comparison axes, constraints, exclusions, expected output, assumptions, confidence, and at most eight blocking ambiguities without calling notebook search. The report pauses at `intent_ready` for owner confirmation, unless the create request has `auto_generate=true` and the question is clear (no blocking ambiguity), in which case the server auto-confirms through the same deterministic freeze the manual endpoint uses (no second LLM call) and proceeds directly into planning; a question with blocking ambiguities always pauses regardless of `auto_generate`, and required ambiguities must be answered before either a human or the server can confirm. A report carrying a source/reference-library scope also reruns the manual endpoint's scope revalidation before auto-confirming; when that recheck fails (sources deleted or libraries unmounted while intent understanding ran) the report stays at the confirmation gate and the skip event carries reason `scope_invalid`; when it passes, the refreshed freeze is adopted for the claimed understanding and the later planning/generation scope context, exactly as manual confirmation would persist it. Read-only members cannot confirm it. A failure or race while auto-advancing fails open — the report is left at its prior status with the manual confirmation gate still usable — and emits only the body-free `report_intent_auto_confirm_skipped` event. Confirmation (manual or auto) atomically claims `intent_ready → planning` and deterministically freezes the contract already shown to the user; it does not run a hidden second interpretation pass. Clarification answers enrich the internal retrieval/drafting question but never the visible report heading. **Phase 1b begins only after intent confirmation**: the confirmed wording and answers become authoritative, a bounded zero-LLM probe measures both federated KG and direct parsed-`SourceElement` coverage for every mandatory topic, and only then does the STORM-style planner use source titles, KG hits, and chunk provenance to refine vocabulary, ordering, perspectives, and tensions. Corpus availability may expose a gap but cannot replace or narrow a required topic; code validates the mapping and restores any omitted mandatory topic. The outline editor shows each section's mandatory question, editable retrieval directions, and raw-element/KG/base coverage before confirmation; the last section binding a mandatory topic cannot be deleted, and the API enforces the same invariant. **Phase 2 (minutes, on outline confirm)** runs every approved retrieval direction as well as the full `reasoning` deep-dive, in parallel by section. Chunks, KG objects, typed relation hops, confirmed Memory, and direct `SourceElement` hits share the same `[k]` binding path. `SourceElement` is a first-class citation rather than uncitable prompt decoration: small libraries may score element rows directly, while non-copyable large libraries derive a bounded candidate set from chunk ANN/FTS hits and hydrate only those chunks' exact `element_ids`, never the full element table. Report references deduplicate by exact evidence anchor rather than source title, and selecting a report citation reveals its bound source/location excerpt. Ask and report citations prefer `source_paper_meta.paper_title` only for a grounded paper row (`is_paper=true`) with a nonblank parsed title; all other sources keep their ordinary source title/file name. Citation responses also carry the persisted upload name as `source_file_name`; Ask/report citation cards show it as `原始文件` when it differs from the display title, including mounted public-reference-library evidence. That value comes only from `sources.file_name`, never a MinerU temporary/output Markdown name. The model's `grounded` boolean is advisory: the backend reparses emitted anchors and requires cited evidence to meet the configured relevance threshold. A read-only final editor creates the executive summary and flags incomplete mandatory intent or cross-section contradictions without rewriting sections or adding facts. The existing `（推断）`/`【通识】` discipline, five depth levels, live `section_status`, cancellation, `.md`, and `reports.zip` export remain unchanged. `ReportSummary` and `ReportDetail` expose `updated_at` plus `generation_started_at`, the latter stored atomically inside report state at the successful `outline_ready → generating` claim. Completed-report list and detail metadata use `updated_at` as the exact browser-local generation time, retain the relative age, and show the wall-clock duration from `generation_started_at` through that final write. Intent and outline confirmation waits are excluded; legacy completed reports without a generation-start stamp show no invented duration. Non-completed reports display creation time only and never claim a final duration.
+- Deep report (two-phase background job): a notebook-level "深度报告" action turns one question into a multi-section technical report. **Phase 1a is corpus-blind question understanding**: it extracts an editable resolved question, objective, mandatory topics, entities, comparison axes, constraints, exclusions, expected output, assumptions, confidence, and at most eight blocking ambiguities without calling notebook search. The report pauses at `intent_ready` for its **creator's** confirmation, unless the create request has `auto_generate=true` and the question is clear (no blocking ambiguity), in which case the server auto-confirms through the same deterministic freeze the manual endpoint uses (no second LLM call) and proceeds directly into planning; a question with blocking ambiguities always pauses regardless of `auto_generate`, and required ambiguities must be answered before either a human or the server can confirm. A report carrying a source/reference-library scope also reruns the manual endpoint's scope revalidation before auto-confirming; when that recheck fails (sources deleted or libraries unmounted while intent understanding ran) the report stays at the confirmation gate and the skip event carries reason `scope_invalid`; when it passes, the refreshed freeze is adopted for the claimed understanding and the later planning/generation scope context, exactly as manual confirmation would persist it. Confirmation belongs to whoever created the report, not to the notebook owner: a member who created a report in a shared notebook confirms it themselves, and nobody — the owner included — can confirm or advance somebody else's report (row-level `created_by` isolation; see 群组知识共享). "Can only wait" is therefore true only of *other people's* reports. A failure or race while auto-advancing fails open — the report is left at its prior status with the manual confirmation gate still usable — and emits only the body-free `report_intent_auto_confirm_skipped` event. Confirmation (manual or auto) atomically claims `intent_ready → planning` and deterministically freezes the contract already shown to the user; it does not run a hidden second interpretation pass. Clarification answers enrich the internal retrieval/drafting question but never the visible report heading. **Phase 1b begins only after intent confirmation**: the confirmed wording and answers become authoritative, a bounded zero-LLM probe measures both federated KG and direct parsed-`SourceElement` coverage for every mandatory topic, and only then does the STORM-style planner use source titles, KG hits, and chunk provenance to refine vocabulary, ordering, perspectives, and tensions. Corpus availability may expose a gap but cannot replace or narrow a required topic; code validates the mapping and restores any omitted mandatory topic. The outline editor shows each section's mandatory question, editable retrieval directions, and raw-element/KG/base coverage before confirmation; the last section binding a mandatory topic cannot be deleted, and the API enforces the same invariant. **Phase 2 (minutes, on outline confirm)** runs every approved retrieval direction as well as the full `reasoning` deep-dive, in parallel by section. Chunks, KG objects, typed relation hops, confirmed Memory, and direct `SourceElement` hits share the same `[k]` binding path. `SourceElement` is a first-class citation rather than uncitable prompt decoration: small libraries may score element rows directly, while non-copyable large libraries derive a bounded candidate set from chunk ANN/FTS hits and hydrate only those chunks' exact `element_ids`, never the full element table. Report references deduplicate by exact evidence anchor rather than source title, and selecting a report citation reveals its bound source/location excerpt. Ask and report citations prefer `source_paper_meta.paper_title` only for a grounded paper row (`is_paper=true`) with a nonblank parsed title; all other sources keep their ordinary source title/file name. Citation responses also carry the persisted upload name as `source_file_name`; Ask/report citation cards show it as `原始文件` when it differs from the display title, including mounted public-reference-library evidence. That value comes only from `sources.file_name`, never a MinerU temporary/output Markdown name. The model's `grounded` boolean is advisory: the backend reparses emitted anchors and requires cited evidence to meet the configured relevance threshold. A read-only final editor creates the executive summary and flags incomplete mandatory intent or cross-section contradictions without rewriting sections or adding facts. The existing `（推断）`/`【通识】` discipline, five depth levels, live `section_status`, cancellation, `.md`, and `reports.zip` export remain unchanged. `ReportSummary` and `ReportDetail` expose `updated_at` plus `generation_started_at`, the latter stored atomically inside report state at the successful `outline_ready → generating` claim. Completed-report list and detail metadata use `updated_at` as the exact browser-local generation time, retain the relative age, and show the wall-clock duration from `generation_started_at` through that final write. Intent and outline confirmation waits are excluded; legacy completed reports without a generation-start stamp show no invented duration. Non-completed reports display creation time only and never claim a final duration.
 - **Deep-report capacity, output, and retry rails:** whole-report generation is admitted through `REPORT_GENERATION_CONCURRENCY` (default 1 per backend process). One admitted report runs at most `REPORT_SECTION_CONCURRENCY` sections concurrently (default 5), also capped by the bound model service and by `POSTGRES_POOL_MAX_SIZE - 2`. That last cap bounds section-level fan-out only — each section's own sub-query fan-out can briefly borrow further pool connections, with waiters bounded by the pool acquire timeout — so it limits pool pressure rather than reserving fixed slots for online work; a queued report holds no database connection. Section drafting uses `REPORT_SECTION_MAX_TOKENS=65536`; the detailed-tier report-wide blueprint and final read-only editor each use an independent `102400` completion ceiling through `REPORT_SYNTHESIS_MAX_TOKENS` and `REPORT_SUMMARY_MAX_TOKENS`. These settings are completion ceilings, not application-side total-context declarations or reserved output; the bound provider/model must accept each ceiling together with that workload's prompt. The blueprint prompt selects only load-bearing claims, at most 12 per section and 60 report-wide. A claim's facet tag accepts an `id:value` composite and is deterministically narrowed to the legal prefix; a tag written as a facet's name, one of its declared values, or a case variant of the facet's id, name, or value is deterministically repaired to the owning facet id when the spelling is unambiguous (declared ids win over other facets' names and values; a spelling that two facets share is never guessed). An unrepairable tag is cleared on that claim alone — the tag is organizational, so no facet tag ever discards the blueprint, while evidence bindings, section ownership, and structure remain atomically validated; repair/clear counts surface as the counts-only `report_synthesis_facet_tags` event (two counters plus opaque report identity, never a facet spelling), and the synthesis prompt enumerates the frame's legal facet ids verbatim. Synthesis-failure disclosure semantics are unchanged. A run with zero non-failed, non-empty section bodies terminates as `failed`; a partial run with at least one valid body remains fail-open and discloses failed sections. Failed generation that retains a confirmed outline can atomically re-enter `generating`: retry keeps the frozen intent/outline, resets `generation_started_at`, clears stale generated artifacts, and never reruns intent understanding or planning. Queue time after that claim is included in generation duration.
 - **Retrieval-run, sufficiency, and reasoning-action rails:** one report planning/generation run shares `REPORT_RETRIEVAL_FANOUT=8` leaf KG/chunk/element/PPR slots across all section workers; independent planning KG/raw-element probes use `REPORT_PROBE_CHANNEL_CONCURRENCY=2` (validated `1..2`). Waiting for a report leaf slot observes cancellation at bounded intervals and rechecks it after acquisition before starting I/O; a leaf already inside a backend/database call finishes safely instead of being detached. Ask uses the same request-local successful query-embedding single-flight without changing its historical fan-out. Report sufficiency requires at least `REPORT_SUFFICIENCY_MIN_RELEVANT_ITEMS=3` relevant evidence units and `REPORT_SUFFICIENCY_MIN_FAMILIES=2` distinguishable families (`REPORT_SUFFICIENCY_COMPLETE_MIN_FAMILIES=3` for complete scope), with `REPORT_SUFFICIENCY_MAX_TOP_FAMILY_SHARE=0.8`. The reasoning run admits at most `REASONING_MAX_PPR_RETRIEVES=3`, `REASONING_MAX_EXACT_LOOKUPS=3`, `REASONING_MAX_FOLLOW_CHAIN_ACTIONS=3`, a cross-library community-peer cap of `REASONING_COMMUNITY_PEERS_CAP_FACTOR=2 × COMMUNITY_PEERS_TOPK`, and `REASONING_MAX_OUTLINE_UPDATES=6`. These defaults exactly preserve the former inline rules; deployments should change them only against a frozen evaluation set. Planning sub-stages, retrieve/synthesis/draft/final-editor stages, outer section attempts, and retrieval-run cache/fan-out counters emit fail-open, content-free events containing only stage/run kind, opaque report/run ids, indices, counts, statuses, and milliseconds.
 - **Bounded neighbour expansion and background job concurrency pools:** one reasoning `expand_graph` action expands at most `REASONING_NEIGHBOR_EXPAND_LIMIT=1000` **distinct qualifying neighbours per direction** (outgoing and incoming are budgeted separately), so hydration of the neighbouring knowledge objects stays bounded even on a pathological hub node. The budget counts neighbours, not relation rows: one neighbour often carries several duplicate or corroborating relations, and some rows are dropped as non-queryable edge pairs, so the database read is bounded at four times the neighbour budget (a deliberate over-scan that absorbs those rows instead of letting them consume the budget and silently skip later, legitimate neighbours). Object-status eligibility is applied in SQL **before** the read bound (on the neighbour side of the join only), so relations pointing at deprecated objects cannot consume the bounded window and hide usable neighbours that sort after them. Rows are still taken in stable relation-id order from the existing `(notebook_id, source/target_object_id, id)` indexes. Truncation is never silent: the expand trace step carries `neighbor_truncated` plus the limit, and the reflect loop is told which nodes were only partially expanded so the model can retarget instead of assuming it has seen every neighbour. Separately, background jobs use **two independent fixed worker queues**, split by order of magnitude rather than by importance: heavy jobs (KG analysis/rebuild, relink, unified rebuild, conflict detection, merge pre-review) use at most `BACKGROUND_MAINTENANCE_CONCURRENCY=4` workers per backend process, while second-scale light jobs (paper-metadata backfill, command-catalog recognition, knowhow projection and orphan-asset sweep) get their own `BACKGROUND_LIGHT_JOB_CONCURRENCY=4` workers. A single pool would let a handful of hour-long rebuilds starve a table projection the user expects back in seconds. Submission enqueues work and returns immediately; it never creates one waiting thread per queued maintenance job. Interactive `ask-*` jobs and `report-*` jobs (already bounded by the whole-report admission gate) are deliberately outside both queues. Consequence to be aware of: while a job waits its stored status is still `running`/`queued` and the UI does not distinguish queued from executing; the wait is disclosed in the backend log only (a warning once the wait crosses the threshold, then an info line stating how long it queued, carrying only the pool and job category — never an id).
@@ -122,6 +123,306 @@ The content-free `selected_source_graph` event is operator-only telemetry and is
 ### Interface mode (auto/advanced)
 
 Every user carries a persisted `user_profiles.ui_mode` preference, `"auto"` (the default) or `"advanced"`, returned as `UserProfile.ui_mode` by `GET /me` and self-service-editable through `PATCH /me/ui-mode` (body `{"ui_mode": "auto" | "advanced"}`; any other literal returns 422). A backend that predates this field omits it, and the client treats a missing value as `auto`. Advanced mode is the complete interface described throughout this document, byte-for-byte identical to prior behavior. Auto mode is a deliberately reduced surface toggled from the avatar menu: it keeps only the **通用问答** and **深入分析** Ask tabs and hides the engine sub-switch (深入分析 pins to `reasoning`), the retrieval-effort picker (pinned to `standard`), the Deep Report research-depth picker (pinned to `standard`, `depth=2`), and the source/reference-library scope checkboxes described above — a control hidden in auto mode always sends the unnarrowed request default (every visible source, every mounted reference library), never whatever a prior advanced-mode session happened to leave narrowed. Deep Reports created from auto mode always set `auto_generate=true` (see the Deep Report entry above and the `report_intent_auto_confirm_skipped` event it can emit). The Ask composer locks only when the notebook has **no usable evidence yet** and some source is still mid-parse — a notebook that already has evidence never locks the composer just because a new upload is parsing. When the pending-source count can be trusted (the source search box is empty and every visible source page is already loaded), the lock shows `N 篇文档处理中，完成后即可提问`; otherwise it shows the number-free `文档处理中，完成后即可提问`. Switching modes takes effect immediately and only changes which controls the client renders and which request defaults it sends; it never changes backend retrieval or generation logic, and advanced-mode behavior is unaffected by auto mode's existence.
+
+## Group knowledge sharing
+
+Three real situations — a **project** team sharing one knowledge base, a
+**department** sharing several, and a wider **domain** library — are served by a
+single model. Their differences live entirely in configuration, never in the
+mechanism.
+
+### The model: groups, grants, mounts
+
+- A **group** is a set of users plus an in-group role. `kind ∈ {project,
+  department, domain}` is only a classification label: it decides who may create
+  the group and how the interface words it, and it changes no permission
+  mechanism whatsoever. Anyone may create a `project` group; `department` and
+  `domain` groups are administrator-only, which is what makes the label
+  trustworthy. `kind` is therefore immutable after creation — a request that
+  sends it to the update endpoint is rejected rather than silently ignored,
+  because a user who could relabel their own project group as a "department"
+  would defeat the very gate that makes the label mean something.
+- An **authorization edge** is `(notebook, principal, role)` with `principal ∈
+  {user, group, group_admins, everyone}` and `role ∈ {viewer, admin}`. Every row
+  in the table is a *live* grant — the decision predicate applies no status
+  filter at all, so there is no "forgot to exclude pending" failure mode. The
+  notebook's owner (`created_by`) remains the implicit highest authority.
+- **Mounting** is unchanged except for its validity predicate. Read access now
+  implies mountability, subject to the borrowed-mount gate below.
+
+Membership in a group and the "group members share this library" edge are two
+separate facts, and both are evaluated live: removing someone from a group, or
+deleting the grant, or deleting the group, all take effect on the next request.
+
+### Roles
+
+Two in-group levels plus the notebook owner:
+
+| Capability | member | group admin | owner |
+| --- | :-: | :-: | :-: |
+| Open the notebook, read sources/graph, ask questions (conversations stay per-asker), keep own Memory | ✓ | ✓ | ✓ |
+| Create **their own** deep report in the notebook (counts toward their own usage; invisible to others) | ✓ | ✓ | ✓ |
+| Mount the notebook as a reference library of their own notebook | ✓ | ✓ | ✓ |
+| Add/delete/re-parse sources, trigger graph and retrieval index builds | | P2 | ✓ |
+| Manage authorization edges, rename, graph-schema overrides | | P2 | ✓ |
+| Delete the notebook, transfer ownership | | | ✓ |
+
+The two P2 cells are the deliberate P1 boundary: a `group_admins` edge can be
+stored and its `admin` role is already in the enum, but P1 consumes only the
+**read** meaning of an edge (any live edge is at least `viewer`). The share UI
+therefore issues only the `(group, viewer)` row — emitting a `(group_admins,
+admin)` row now would advertise a permission that has no effect yet. Notebook
+write guards stay owner-only, and the **Agent/MCP surface is untouched**:
+`sources:write` / `sources:delete` / `maintenance:execute` remain owner-only, so
+group admin authority exists in the browser UI only.
+
+Administrators additionally hold an **operations bypass on the group dimension**
+— they may read any group's detail and manage any group's members and edges
+without being a member. This mirrors the existing "an administrator may transfer
+`notebooks.created_by`" bypass and exists for two concrete reasons: the
+"keep at least one group admin" rule can still, under a concurrency window, leave
+a group with zero admins, and since every management endpoint demands group-admin
+identity such a group would be unrecoverable through the API; and
+`GET /groups?scope=all` is the administrator's global management view, which
+without the bypass would be a table whose every row 404s. The bypass does **not**
+cover self-service leave (leaving presupposes actually being a member), does not
+fabricate membership (`my_role` still reports empty truthfully), and relaxes no
+notebook-dimension read or write guard.
+
+### Endpoints
+
+Fourteen endpoints in `group_routes.py`, plus one read-only addition on the
+notebook router.
+
+| Endpoint | Who | Notes |
+| --- | --- | --- |
+| `POST /groups` | any user (`project`); admin (`department`/`domain`) | creator becomes group admin in the same transaction |
+| `GET /groups` | any user | groups I am in; `?scope=all` is admin-only |
+| `GET /groups/{id}` | group member (admin bypass) | detail + member roster |
+| `PATCH /groups/{id}` | group admin | `name` / `description` only |
+| `DELETE /groups/{id}` | group admin | clears grants pointing at the group in the same write transaction |
+| `PUT /groups/{id}/members/{user_id}` | group admin | add or change role in one call |
+| `DELETE /groups/{id}/members/{user_id}` | group admin | 409 if it would remove the last admin |
+| `DELETE /groups/{id}/membership` | member | self-service leave; 409 for the last admin |
+| `GET /users/resolve?username=` | any signed-in user | exact username lookup, returns id/username/display name only |
+| `GET /notebooks/{id}/grants` | `notebook:manage` | every edge on the library, all four principal types |
+| `POST /notebooks/{id}/grants` | `notebook:manage` **and** group admin | only `group` / `group_admins` principals |
+| `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | notebook-side revocation |
+| `GET /groups/{id}/shared-notebooks` | group admin | "libraries shared with this group" |
+| `DELETE /groups/{id}/shared-notebooks/{nb}` | group admin | group-side revocation; removes every edge pointing at this group |
+| `GET /notebooks/{id}/share` | `notebook:manage` | **new**, read-only; see below |
+
+Several boundaries are worth stating explicitly:
+
+- **Group visibility is 404, not 403.** A non-member asking about a group gets
+  exactly the same answer as for a group that does not exist. Group names are
+  themselves probeable information (which departments use this system, whether
+  some project exists). The single deliberate exception is `POST
+  /notebooks/{id}/grants`: there "the group does not exist" (404) and "the group
+  exists but you do not administer it" (403) are distinguishable, because
+  reaching that endpoint already proves you hold management rights on the library
+  and you must already possess the 128-bit random group id — so the distinction
+  buys two actionable error messages without opening an enumeration channel.
+- **Creating a group edge is a double condition** (design decision 9): the caller
+  must both hold management rights on the notebook *and* be an administrator of
+  the target group. The group half is decided **inside the store's write
+  transaction**, not by a pre-flight query: the edge grants an entire group read
+  access the instant it lands, and a check-then-insert window is long enough for
+  the group to be deleted or the caller to be demoted while the edge ships anyway.
+- **Revocation is asymmetric.** The library's manager may delete any edge from
+  the notebook side; a group admin may delete every edge pointing at their group
+  from the group side. Each entrance needs only its own half — a group admin
+  governs everything shared with their group, and a library owner may always take
+  their library back.
+- **`user` and `everyone` principals do not go through these endpoints.** The
+  `user` principal keeps using the existing read-only share-token flow, and
+  `everyone` keeps using `POST /notebooks/{id}/tier`. Two write entrances for one
+  fact will eventually leave one of them missing the other's validation.
+- **An invalid `scope` is a 422, never a silent fall back to `mine`** — a
+  mistyped `?scope=al` returning a narrowed list under a 200 reads to the caller
+  as the complete answer.
+- **`GET /users/resolve` is callable by any signed-in user**, which is a
+  registered, accepted trade-off for an internal deployment: it makes usernames
+  probeable one at a time. The alternatives are worse — restricting it to group
+  admins makes adding the first member impossible, and a fuzzy search replaces
+  one-at-a-time probing with bulk enumeration. The response is deliberately only
+  id, username and display name: no email, role, or usage.
+- **Orphan edges are labelled, not hidden.** An edge pointing at a group that no
+  longer exists comes back with `principal_kind="missing"`. Deleting a group
+  clears its edges in the same transaction, but `principal_id` carries no foreign
+  key, so a database merge can resurrect them; `scripts/merge_dbs.py` sweeps
+  those, and the label is what lets a library owner understand and delete any
+  that survive.
+
+### Read access implies mountability, and the borrowed-mount gate
+
+Mount validity was historically "public library ∨ same owner", specifically
+*excluding* read-only shares, on the grounds that a mount edge would outlive a
+revoked share. That concern is answered by the live predicate — revoke the grant
+and the edge stops being valid — so **read access now implies mountability**,
+which is exactly the "project members mount the project library" requirement.
+`GET /notebooks/{id}/mountable` widens accordingly.
+
+But the historical worry had a second half that liveness does *not* answer:
+**re-sharing what you borrowed**. Carol shares Y with Alice; Alice mounts Y into
+her X; Alice shares X with Bob — and Bob now reads Y through X's proxy reads and
+federated retrieval, though Carol never authorized him. Nothing was revoked here;
+a *new* share on the mounting side conjured a new set of readers.
+
+So the restricted-read branch of the mount predicate carries an extra condition:
+a borrowed mount is valid only while **the mounting notebook itself has not been
+shared** (no `notebook_members` rows and no `notebook_grants` rows). Share the
+mounting notebook and the borrowed edge goes inactive immediately (the edge is
+kept and greyed out, matching the existing inactive-edge convention); un-share it
+and the edge recovers on its own. `tier='base'` and `everyone` grants are exempt
+— their audience is already everybody, so passing them on adds no exposure, and
+this is the only reason `access_sql` splits the edge test into a restricted and
+an `everyone` fragment (the read predicate itself does not distinguish them). The
+same-owner branch is exempt too: sharing your own X is disposing of your own
+content. The predicate looks only at "has this been shared", never comparing the
+two audiences, because an audience comparison would expand membership/group/edge
+tables across two libraries on a path that runs at every participant-set
+resolution. The product reading matches "mounts do not cascade": **what you
+borrowed, you do not lend on.**
+
+Two UI consequences: the share dialog warns *before* the sharing action that
+borrowed reference libraries will pause participating in retrieval, and an edge
+disabled by this gate gets its own explanation ("this notebook has been shared,
+so borrowed reference libraries have paused; un-share it to restore") instead of
+the older fixed "this library is no longer public and is not yours", which is
+simply untrue for a borrowed edge. The gate's own predicate is derived from the
+mount predicate in `MOUNT_GATE_CLOSED_EXPR`, never re-spelled at the consumer,
+and it also keeps the library's real name visible, since the mounting owner still
+legitimately holds read access.
+
+### Group libraries in the notebook list
+
+A library readable through a live group edge, where the viewer is neither owner
+nor a `notebook_members` row, forms the notebook list's **群组** partition.
+
+- `NotebookSummary.access` stays `"reader"` — no new enum value (decision 7).
+  Group members get exactly the reader permission tier and behave identically:
+  hidden write buttons, the same read guard on Ask, default-all retrieval scope,
+  hidden-participant snapshots. Where the access *came from* is an orthogonal
+  dimension, so it gets its own field.
+- `NotebookSummary.granted_via` is a list of `{group_id, group_name, kind}` and
+  drives the card's "来自群组《X》" label. It is empty for owned and
+  share-token-joined libraries, so old behavior is unchanged verbatim. Both the
+  list **and the detail** path fill it in; the de-duplication rule is identical on
+  both: **the membership row wins** — somebody who both joined by share link and
+  sits in a granted group gets an empty `granted_via` and keeps a working "退出
+  共享" button, because that button deletes precisely that membership row.
+- Conversely, a card whose `granted_via` is non-empty **must not** show "退出
+  共享": that button only deletes a `notebook_members` row and does nothing to an
+  authorization edge, so pressing it while the library stays in the list is a
+  guaranteed false failure. It is replaced by a static explanation that the group
+  admin governs this access.
+- `GET /notebooks/{id}/mountable` now returns `MountableNotebook`, which adds
+  `origin ∈ {base, mine, shared}`, projected from columns `MOUNT_VALID_EXPR`
+  already reads (`tier` and `created_by`) at zero extra queries. The mount picker
+  groups by it into 公共知识库 / 我的笔记本 / 共享给我的. Without it, the
+  read-access widening would file other people's libraries under "我的笔记本" — a
+  plainly false label. Priority is base → mine → shared, so a public library you
+  own is still `base` and the picker's pre-existing grouping is byte-for-byte
+  unchanged; only the newly admitted rows land in the third group. The field is
+  deliberately on a **new model** rather than on `NotebookRef`, which is also
+  `MountedBase`'s base class and the response model of a query that does not
+  compute this flag.
+- Owner-side "已分享" is now a **union**: a read-only share (`notebooks.is_shared`)
+  **or** at least one edge pointing at a group. The card badge and the
+  `shared-by-me` overview use the same criterion, and `SharedByMeItem.group_count`
+  carries the number of distinct groups. A row with an empty `share_token` and a
+  non-zero `group_count` is one that exists purely because of group sharing —
+  there is no link to hand out. Rows without a link are not size-counted and their
+  members are not queried, because `mode` / `size` / `members` all describe the
+  link.
+- The pending-actions bell resolves the notebook name for reports created in
+  libraries the user does not own (previously blank), and its report half is
+  evaluated outside the owned-notebook gate, since its predicate consumes only
+  `created_by` and not a single notebook id — a member with no libraries of their
+  own otherwise had a permanently-zero bell while a report of theirs waited at
+  `intent_ready`.
+
+### `GET /notebooks/{id}/share` has no side effect
+
+Opening the share dialog used to `POST .../share`, so a user who only wanted to
+share with a group was issued a share link as a by-product: a purely
+informational action with a persistent side effect. The new `GET` returns the
+current link state without minting a token, and the link is created only when the
+user explicitly asks for it (that `POST` remains idempotent and returns an
+existing token as-is). With no token, `share_token` is the empty string and
+copy-statistics are **not** computed — that is a real size measurement, not cheap
+on a large library, and a library with no link has no use for it. `copyable` and
+`size` are therefore meaningful only when `share_token` is non-empty, and
+consumers must test that first.
+
+### Deep reports in a shared notebook
+
+Report creation follows **read** access, and reports are isolated **per creator**.
+
+- Creating a report needs read access on the notebook. Every endpoint that
+  touches an **existing** report — detail, confirm intent, edit outline,
+  generate, cancel, delete, share, read share state, unshare: nine of them —
+  additionally goes through `report_routes.py::_own_report_or_404`, the row-level
+  check that `reports.created_by` is the calling user (an AST guard pins that
+  every such endpoint calls it). List and export narrow by the same predicate in
+  SQL. Somebody else's report is indistinguishable from a nonexistent one (404).
+- **The notebook owner is no exception**: they see only reports they created
+  themselves. This deliberately avoids introducing an "owner sees everything" new
+  disclosure. To show a report to someone else, use the existing public link.
+- Because the capability follows read access rather than *how* that access was
+  obtained, a plain read-only member who joined through a share token gains
+  report creation too. This is **intentional**, not a group-feature spillover —
+  the capability expresses "who may read this library" — and it is an outward
+  behavior change from previous versions.
+- A member's public report link is a **delegated surface whose lifetime equals
+  their read access**. `GET /public/reports/{token}` re-checks, on every request,
+  that the report's *creator* still has read access to the notebook
+  (`user_can_read_notebook(notebook_id, created_by)`, both ids passed explicitly
+  — the anonymous router binds no request user and must never touch the
+  `current_user` ContextVar, which falls back to the seeded administrator when
+  unset). Failure returns the **same 404 as an unknown token**, because a
+  distinguishable response would report somebody's group membership to an
+  anonymous caller. Restoring access revives the link, matching the token's
+  existing idempotent semantics. This is the same philosophy as live mount
+  validity, and for the same reason: there are several ways to lose read access
+  (edge deleted, left the group, group deleted, membership row dropped, notebook
+  re-tiered) and a cascade would have to be re-derived at each one — miss one and
+  a permanent back door remains. Concretely, once a member loses access, neither
+  the member (stopped by the read guard) nor the owner (stopped by the row-level
+  creator check) can reach `unshare`, so a stale token would otherwise serve the
+  owner's corpus forever. Owner-authored reports and all historical reports are
+  unaffected (creator = owner, whose read access always holds).
+- Administrative usage attribution follows the same rule: `GET /admin/users`
+  counts reports by `reports.created_by`, not by notebook owner, matching the
+  existing `questions` predicate (counted per submitter, including submissions in
+  shared notebooks) and the per-notebook breakdown and activity feed, which were
+  already creator-scoped.
+
+### Registered limits and trade-offs
+
+- **Group name: 120 characters. Group description: 1,000 characters.** Both are
+  user-edited data, so an over-limit value is **explicitly rejected** and never
+  silently truncated.
+- **Three list endpoints are unpaginated** — the member roster in `GET
+  /groups/{id}`, the full inventory under `?scope=all`, and `GET
+  /notebooks/{id}/grants`. This is a **settled trade-off, not an omission**: the
+  design targets at most a few hundred people per group (decision 11), a scale at
+  which returning everything in one response holds. It is written down here so
+  nobody later reads "no pagination" as a bug.
+- **The 群组 partition amplifies a known N+1**, kept as registered debt.
+  `granted_notebook_rows` is a single query, but every row then goes through
+  `NotebookSummaryQuery.from_row`, which issues several count/mount queries per
+  library — roughly 7 statements per library, so on the order of 3,500 statements
+  for 500 granted libraries. The "own libraries" and "joined libraries" sections
+  have the same existing shape, so this is not a defect introduced by group
+  sharing, but the group partition raises the plausible row count by an order of
+  magnitude. Batch count pre-fetching is the optimization direction, scheduled
+  separately.
+- **No decision cache.** A single decision is a handful of indexed `EXISTS`
+  probes (grants by `notebook_id` or `(principal_type, principal_id)`,
+  `group_members` by primary key or `user_id`), which is the same order as the
+  previous predicate; hot paths add no full-table scan.
 
 ## Knowhow tables
 
@@ -1269,7 +1570,8 @@ Key local beta APIs:
 - Notebook-effective graph types: `GET /api/notebooks/{id}/object-schemas` requires notebook read access; `POST /api/notebooks/{id}/object-schemas`, `PATCH /api/notebooks/{id}/object-schemas/{type}`, and `DELETE /api/notebooks/{id}/object-schemas/{type}` require notebook owner access. Patching an inherited global type creates a notebook override. Deleting an override restores inheritance; deleting a notebook-only type removes it only when no knowledge object of that type remains. `POST /api/notebooks/{id}/schema-proposals` stores review-only proposed types in that notebook rather than the global baseline; a proposal never suppresses an inherited type until the owner explicitly activates it. Global and notebook writes are serialized across both registries and proposal results are rechecked after the model call. Database merge preflight rejects same-name global definitions whose semantic columns differ rather than silently keeping the destination row. `object_type` and every field key must start with a lowercase ASCII letter, contain only lowercase ASCII letters, digits, and underscores, and contain at most 80 characters. A definition may contain at most 64 unique fields and 64 unique list fields; `primary` must be one of `fields`, and every list field must also be in `fields`. Each human-facing schema text value (`plural`, `label`, `description`, and proposal `rationale`) is limited to 2,000 characters. The browser applies the same creation/editing rails before submission; the API remains authoritative.
 - `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
 - Two-tier: `POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → returns the updated `NotebookSummary` (400 on bad tier, 404 on missing notebook). Sets the notebook's federation tier (base = publishable as a public knowledge base, personal = default user notes); a `base` notebook only participates in another notebook's retrieval once that notebook explicitly mounts it (`GET`/`PUT /api/notebooks/{id}/bases`, candidates via `GET /api/notebooks/{id}/mountable`).
-- Reference-library mounts: `GET /api/notebooks/{id}/bases` → `MountedBase[]` (this notebook's mount edges, including greyed-out inactive ones); `PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → full replace, returns the updated `MountedBase[]` (400 if any id is outside the mountable candidate set; owner-only); `GET /api/notebooks/{id}/mountable` → `NotebookRef[]` (mountable candidates: every public knowledge base plus this notebook's own same-owner libraries).
+- Reference-library mounts: `GET /api/notebooks/{id}/bases` → `MountedBase[]` (this notebook's mount edges, including greyed-out inactive ones); `PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → full replace, returns the updated `MountedBase[]` (400 if any id is outside the mountable candidate set; owner-only); `GET /api/notebooks/{id}/mountable` → `MountableNotebook[]` (mountable candidates: every public knowledge base, this notebook's own same-owner libraries, and — since group knowledge sharing — every library this notebook's owner can read, subject to the borrowed-mount gate; each candidate carries `origin ∈ {base, mine, shared}` so the picker can group them truthfully).
+- Groups and authorization edges: `POST`/`GET /api/groups`, `GET`/`PATCH`/`DELETE /api/groups/{id}`, `PUT`/`DELETE /api/groups/{id}/members/{user_id}`, `DELETE /api/groups/{id}/membership`, `GET /api/users/resolve?username=`, `GET`/`POST /api/notebooks/{id}/grants`, `DELETE /api/notebooks/{id}/grants/{grant_id}`, `GET`/`DELETE /api/groups/{id}/shared-notebooks[/{notebook_id}]`, plus the read-only `GET /api/notebooks/{id}/share`. Roles, visibility (404 not 403), the double condition on edge creation, asymmetric revocation and the registered limits are all in 群组知识共享 above.
 - Edge trust & curation: `GET /api/notebooks/{id}/edge-review-queue`, `POST /api/notebooks/{id}/relations/{rel_id}/review`
 - Governance / promotion: `POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`, `GET /api/promotion-queue`, `POST /api/promotion-queue/{candidate_id}/approve|reject`
 - Deep report (two-phase): `POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`; performs corpus-blind understanding and stops at `status=intent_ready` for manual confirmation, unless the request has `auto_generate=true` and the question is clear (no blocking ambiguity), in which case intent is also auto-confirmed — through the same deterministic freeze and no second LLM call — before planning starts. `GET /api/notebooks/{id}/reports/{rid}` exposes durable `understanding` plus status/progress. `POST .../reports/{rid}/intent` body `{resolved_question, answers:[{id,answer}]}` validates every required ambiguity and atomically claims the only transition into corpus-backed planning; it returns `{status:"planning"}`, while a duplicate/stale confirmation returns 409 without launching another job. Planning then stops at `outline_ready`, or proceeds directly to generation when the original request had `auto_generate=true` (the intent stage above already auto-confirmed under the same condition — no blocking ambiguity). The enriched `outline` carries per-section `intent_ids`, `intent_questions`, editable `sub_queries`, objective `coverage`, perspectives / tensions / sufficiency; `content_md` and live `section_status` remain on detail. `PATCH .../reports/{rid}/outline` body `{sections}` edits the draft only while `outline_ready`; it preserves the server intent catalog, accepts at most `REPORT_MAX_SECTIONS`, and accepts at most `REPORT_MAX_SUBQUERIES_PER_SECTION` nonblank retrieval directions per section. The browser mirrors both rails from `/api/system/config` and blocks over-limit submission; direct clients receive 422 instead of having excess sections or directions silently truncated. The endpoint also returns 422 if there is no valid section or a mandatory intent loses its final section binding. `POST .../reports/{rid}/generate` body `{depth?}` atomically launches **phase-2 generation** from either `outline_ready` or a `failed` report that still has an outline; all other states return 409. Retry preserves the confirmed intent/outline and clears prior generated artifacts in the claim transaction. Generated sections include backend-derived `evidence_level`/`grounded`; references can carry exact `source_id`/`element_id` metadata. Also `GET /reports` (list), `POST .../cancel`, `DELETE`, `POST .../reports/export` body `{report_ids}` → `reports.zip`. Section concurrency follows the report-specific database-protection rails above, not `KG_JOB_CONCURRENCY`.
@@ -1313,7 +1615,7 @@ Explicitly not yet built (a phased sequencing choice, not a silent gap): correla
 - Cross-document concept merge uses deterministic alias normalization plus bounded top-k vector candidates (scales past thousands of concepts); optional LLM pre-review (`POST /notebooks/{id}/unified-kg/merges/review`) confirms/rejects high-confidence near-synonym merges in small batches.
 - LLM-backed KG extraction requires the `kg_extract` workload to be bound in the system model-service TOML; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
 - Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; publishing a notebook as a public knowledge base only makes it mountable — tier-aware federation and the base-wins conflict rule activate only for notebooks that explicitly mount it as a reference library.
-- Notebook sharing is link-based copy/read-only membership, not live collaborative editing; owners retain write authority.
+- Notebook sharing is link-based copy, read-only membership, or group sharing — not live collaborative editing. Group members may ask questions and write their own deep reports; content management (sources, graph, authorization edges) stays with the owner, and the group-admin write tier is P2.
 - SQLite/PostgreSQL selection is direct and atomic through the repository factory. Changing `DATABASE_URL` does not synchronize existing rows; cutover and rollback therefore require stopped writers, verified backups, an external data migration when data already exists, and post-start consistency checks.
 - The `off`-mode PDF fallback uses PyMuPDF4LLM page-chunked Markdown to retain headings, multi-column reading order and reconstructed tables; pypdf is only the last resort if that parser is unavailable or errors. MinerU still provides the authoritative high-fidelity formula/image/complex-scan path. A cloud URL/file parse that fails after retries uses the same local fallback and returns an extracted source with `parse_quality_warning=true`; the source detail explains the risk and offers reparse/delete actions. A later successful MinerU reparse clears the warning. See [PDF parsing with MinerU](./operations.md#pdf-parsing-with-mineru).
 - User memory remains manual opt-in only; no automatic memory behavior has been added.
