@@ -156,11 +156,13 @@ class NotebookStore:
 
     @staticmethod
     def mountable_notebooks(db: sqlite3.Connection, notebook_id: str) -> list[dict]:
-        """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库，排除本库自己。
+        """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库 ∪ 本库 owner 有读权的库，
+        排除本库自己。
 
         公共知识库对普通用户的常规列表是隐藏的,故此处专门放行 id/name/tier 三个
-        字段——这是用户发现领域库的唯一入口。刻意不含只读分享(notebook_members)
-        进来的库:对方撤销分享后边仍在会成为越权通道。
+        字段——这是用户发现领域库的唯一入口。第三支(只读分享进来的、以及经群组
+        授权边可读的)是 P1 群组知识共享登记的显式行为变更,理由与「对方撤销后
+        怎么办」写在 mount_sql.py 的模块 docstring 里。
 
         有效性谓词与排序复用 mount_sql 的 MOUNT_VALID_EXPR/MOUNT_ORDER(唯一定义
         点)——但 FROM 子句不能复用 MOUNT_JOIN:这里枚举的是候选笔记本本身,不是

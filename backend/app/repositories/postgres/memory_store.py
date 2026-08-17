@@ -23,10 +23,12 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.access_sql import (
+    GRANT_PROBE_FOR_SHARE_SQL,
     MEMBER_PROBE_FOR_SHARE_SQL,
-    member_exists_expr,
+    grant_probe_params,
     read_access_clause,
     read_access_exists_clause,
+    read_access_params,
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.search import (
@@ -493,22 +495,28 @@ class MemoryStore:
         self, write: MemoryWrite, changed_by: str, reason: str
     ) -> MemoryRecord:
         with self.database.write() as db:
-            # ⚠ 两段式,刻意不合并成 access_sql.NOTEBOOK_READ_SQL 单条 EXISTS:两步各自
-            # 挂 FOR SHARE 锁住 notebooks / notebook_members 的行,EXISTS 子查询里的行
-            # 拿不到这把锁。成员那一半复用唯一定义点;群组授权扩展读权时这里必须同步
+            # ⚠ 三段式(owner / 成员 / 授权边),刻意不合并成 access_sql.NOTEBOOK_READ_SQL
+            # 单条 EXISTS:每一步各自挂 FOR SHARE 锁住 notebooks / notebook_members /
+            # notebook_grants 的行,EXISTS 子查询里的行拿不到这把锁。后两半复用唯一
+            # 定义点的探测常量;读权谓词扩展时这里不会自动跟随,必须像本次这样手改
             # (已登记在 access_sql 的消费者清单)。
             notebook = db.execute(
                 "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
                 (write.notebook_id,),
             ).fetchone()
-            member = None
+            granted = None
             if notebook is not None and notebook["created_by"] != write.created_by:
-                member = db.execute(
+                granted = db.execute(
                     MEMBER_PROBE_FOR_SHARE_SQL,
                     (write.notebook_id, write.created_by),
                 ).fetchone()
+                if granted is None:
+                    granted = db.execute(
+                        GRANT_PROBE_FOR_SHARE_SQL,
+                        grant_probe_params(write.notebook_id, write.created_by),
+                    ).fetchone()
             if notebook is None or (
-                notebook["created_by"] != write.created_by and member is None
+                notebook["created_by"] != write.created_by and granted is None
             ):
                 raise PermissionError(write.notebook_id)
             agent_profile = None
@@ -654,20 +662,27 @@ class MemoryStore:
                     if item.notebook_id != write.notebook_id:
                         raise KeyError(write.source_answer_id)
                     return item
-                # ⚠ 两段式带 FOR SHARE 行锁,刻意不合并——理由同
+                # ⚠ 三段式带 FOR SHARE 行锁,刻意不合并——理由同
                 # create_candidate_with_initial_revision 处的注释。
                 notebook = db.execute(
                     "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
                     (write.notebook_id,),
                 ).fetchone()
-                member = None
+                granted = None
                 if notebook is not None and notebook["created_by"] != write.created_by:
-                    member = db.execute(
+                    granted = db.execute(
                         MEMBER_PROBE_FOR_SHARE_SQL,
                         (write.notebook_id, write.created_by),
                     ).fetchone()
+                    if granted is None:
+                        granted = db.execute(
+                            GRANT_PROBE_FOR_SHARE_SQL,
+                            grant_probe_params(
+                                write.notebook_id, write.created_by
+                            ),
+                        ).fetchone()
                 if notebook is None or (
-                    notebook["created_by"] != write.created_by and member is None
+                    notebook["created_by"] != write.created_by and granted is None
                 ):
                     raise KeyError(write.source_answer_id)
                 row = db.execute(
@@ -721,8 +736,7 @@ class MemoryStore:
                 (
                     write.source_answer_id,
                     write.notebook_id,
-                    write.created_by,
-                    write.created_by,
+                    *read_access_params(write.created_by),
                 ),
             ).fetchone()
         return row is not None
@@ -733,7 +747,7 @@ class MemoryStore:
                 f"SELECT {self._select_columns()} FROM memory_items m "
                 "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
                 f"WHERE m.id=%s AND m.created_by=%s AND {self._read_access_clause()}",
-                (memory_id, user_id, user_id, user_id),
+                (memory_id, user_id, *read_access_params(user_id)),
             ).fetchone()
         if row is None:
             raise KeyError(memory_id)
@@ -766,7 +780,7 @@ class MemoryStore:
                 "WHERE m.notebook_id=%s AND m.created_by=%s "
                 f"AND m.source_answer_id IN ({placeholders}) "
                 f"AND {self._read_access_clause()}",
-                (notebook_id, user_id, *unique_ids, user_id, user_id),
+                (notebook_id, user_id, *unique_ids, *read_access_params(user_id)),
             ).fetchall()
         return {str(row["source_answer_id"]): str(row["id"]) for row in rows}
 
@@ -965,10 +979,10 @@ class MemoryStore:
         creator_id = str(routing["created_by"])
         if expected_notebook is not None and notebook_id != expected_notebook:
             raise ValueError("promotion candidate notebook does not match Memory notebook")
-        # ⚠ 两段式带 FOR SHARE 行锁,刻意不合并成单条 EXISTS:除了锁,owner 那一半还要
-        # 单独区分「notebook 不存在」(恒 KeyError)与「不是成员」(按调用方选
-        # PermissionError/KeyError)。成员那一半复用唯一定义点;群组授权扩展读权时
-        # 这里必须同步(已登记在 access_sql 的消费者清单)。
+        # ⚠ 三段式带 FOR SHARE 行锁,刻意不合并成单条 EXISTS:除了锁,owner 那一半还要
+        # 单独区分「notebook 不存在」(恒 KeyError)与「无读权」(按调用方选
+        # PermissionError/KeyError)。成员与授权边两半复用唯一定义点的探测常量;读权
+        # 谓词扩展时这里必须手改(已登记在 access_sql 的消费者清单)。
         notebook = db.execute(
             "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
             (notebook_id,),
@@ -981,9 +995,14 @@ class MemoryStore:
                 (notebook_id, creator_id),
             ).fetchone()
             if member is None:
-                if permission_error:
-                    raise PermissionError(memory_id)
-                raise KeyError(memory_id)
+                grant = db.execute(
+                    GRANT_PROBE_FOR_SHARE_SQL,
+                    grant_probe_params(notebook_id, creator_id),
+                ).fetchone()
+                if grant is None:
+                    if permission_error:
+                        raise PermissionError(memory_id)
+                    raise KeyError(memory_id)
         row = db.execute(
             f"SELECT {self._select_columns()} FROM memory_items m "
             "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
@@ -1148,7 +1167,7 @@ class MemoryStore:
             "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
             f"WHERE m.id=%s AND m.created_by=%s AND {self._read_access_clause()} "
             "FOR UPDATE OF m",
-            (memory_id, user_id, user_id, user_id),
+            (memory_id, user_id, *read_access_params(user_id)),
         ).fetchone()
         if row is None:
             raise KeyError(memory_id)
@@ -1322,11 +1341,15 @@ class MemoryStore:
         memory_id: str,
         candidate_notebook_id: str,
     ) -> None:
-        """Revalidate Memory scope and creator access inside approval's write txn."""
+        """Revalidate Memory scope and creator access inside approval's write txn.
+
+        读权判定整条走唯一定义点的**列引用**形式,不消费参数——理由与 SQLite 侧同款
+        (见那一份的 docstring)。
+        """
         row = db.execute(
-            "SELECT m.notebook_id,m.created_by,n.created_by AS notebook_owner,"
-            + member_exists_expr("m.notebook_id", "m.created_by")
-            + " AS is_member FROM memory_items m "
+            "SELECT m.notebook_id,"
+            + read_access_clause("n", user_ref="m.created_by")
+            + " AS has_access FROM memory_items m "
             "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=%s",
             (memory_id,),
         ).fetchone()
@@ -1334,7 +1357,7 @@ class MemoryStore:
             raise KeyError(memory_id)
         if row["notebook_id"] != candidate_notebook_id:
             raise ValueError("promotion candidate notebook does not match Memory notebook")
-        if row["created_by"] != row["notebook_owner"] and not bool(row["is_member"]):
+        if not bool(row["has_access"]):
             raise PermissionError(memory_id)
 
     def record_promotion_decision_on(
@@ -1419,8 +1442,7 @@ class MemoryStore:
             normalize_timestamp(self.now()),
             memory_id,
             user_id,
-            user_id,
-            user_id,
+            *read_access_params(user_id),
         ])
         with self.database.write() as db:
             cursor = db.execute(
@@ -1450,7 +1472,7 @@ class MemoryStore:
         params: list[Any] = [target, normalize_timestamp(now)]
         if target == "confirmed":
             params.extend([user_id, normalize_timestamp(now)])
-        params.extend([memory_id, user_id, user_id, user_id, *sorted(expected)])
+        params.extend([memory_id, user_id, *read_access_params(user_id), *sorted(expected)])
         with self.database.write() as db:
             cursor = db.execute(
                 f"UPDATE memory_items SET status=%s,updated_at=%s{confirmation} "
@@ -1464,7 +1486,7 @@ class MemoryStore:
                     "SELECT status FROM memory_items m "
                     "WHERE id=%s AND created_by=%s AND "
                     f"{self._read_access_clause()}",
-                    (memory_id, user_id, user_id, user_id),
+                    (memory_id, user_id, *read_access_params(user_id)),
                 ).fetchone()
                 if exists is None:
                     raise KeyError(memory_id)
@@ -1599,7 +1621,7 @@ class MemoryStore:
         limit = max(1, min(200, int(limit)))
         joins = "LEFT JOIN memory_provenance p ON p.memory_id=m.id"
         clauses = ["m.created_by=%s", self._read_access_clause()]
-        params: list[Any] = [user_id, user_id, user_id]
+        params: list[Any] = [user_id, *read_access_params(user_id)]
         clean_query = (query or "").strip()
         if notebook_id:
             clauses.append("m.notebook_id=%s")
@@ -1639,7 +1661,7 @@ class MemoryStore:
                 "COALESCE(SUM(CASE WHEN m.status='candidate' THEN 1 ELSE 0 END),0) "
                 "AS pending_count FROM memory_items m WHERE m.created_by=%s AND "
                 f"{self._read_access_clause()}",
-                (user_id, user_id, user_id),
+                (user_id, *read_access_params(user_id)),
             ).fetchone()
             option_rows = db.execute(
                 "SELECT m.notebook_id,nb.name,COUNT(*) AS memory_count,"
@@ -1650,7 +1672,7 @@ class MemoryStore:
                 f"{self._read_access_clause()} "
                 "GROUP BY m.notebook_id,nb.name "
                 "ORDER BY nb.name COLLATE \"C\",m.notebook_id COLLATE \"C\" LIMIT 200",
-                (user_id, user_id, user_id),
+                (user_id, *read_access_params(user_id)),
             ).fetchall()
             total = (
                 filtered_total
@@ -1794,7 +1816,7 @@ class MemoryStore:
         lexical_limit = max(1, min(int(lexical_limit), 200))
         vector_limit = max(1, min(int(vector_limit), 500))
         placeholders = ",".join("%s" for _ in allowed)
-        common_params = (user_id, notebook_id, *allowed, user_id, user_id)
+        common_params = (user_id, notebook_id, *allowed, *read_access_params(user_id))
         select = self._select_columns()
         with self.database.connect() as db:
             candidate_ids = memory_candidate_ids(

@@ -22,6 +22,7 @@ from app.repositories.postgres.access_sql import (
     MEMBER_PROBE_SQL,
     NOTEBOOK_READ_SQL,
     NOTEBOOK_WRITE_SQL,
+    read_access_params,
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
@@ -290,10 +291,10 @@ class SharingStore:
         return row is not None
 
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
-        """读权:owner ∪ 只读成员。谓词见 `access_sql.NOTEBOOK_READ_SQL`。"""
+        """读权:owner ∪ 只读成员 ∪ 有效授权边。谓词见 `access_sql.NOTEBOOK_READ_SQL`。"""
         with self.database.connect() as connection:
             row = connection.execute(
-                NOTEBOOK_READ_SQL, (notebook_id, user_id, user_id)
+                NOTEBOOK_READ_SQL, (notebook_id, *read_access_params(user_id))
             ).fetchone()
         return row is not None
 
