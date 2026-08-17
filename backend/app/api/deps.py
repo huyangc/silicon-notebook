@@ -100,8 +100,68 @@ async def require_notebook_read(
     return notebook_id
 
 
-# 向后兼容别名:老代码/未分类路由默认仍是 owner-only(默认最严兜底)。
-require_notebook_access = require_notebook_write
+def notebook_write_allowed(notebook_id: str, user_id: str) -> bool:
+    """能力判定的纯函数版本(非 ``Depends``)。
+
+    与 ``require_notebook_capability`` 的 "owner" 级判据逐字相同——供路由体内
+    **必须先从别的 id 反查出 notebook_id、再自查**的场景复用(source_routes.py
+    的 parse_source/delete_source:notebook_id 不是这两个端点 URL 上的路径参数,
+    owner 判定没法挂在静态的 ``Depends(require_notebook_capability(...))`` 上,
+    只能在函数体内先解析出 notebook_id 再调用它)。别在调用点手拼
+    ``source_owner(source_id) == user.id`` 这类判据的第二份拷贝——群组授权
+    (P1/P2)落地时,唯一要跟着改的就是这一个函数。
+    """
+    return notebook_access_repository().user_can_access_notebook(notebook_id, user_id)
+
+
+# --------------------------------------------------------------------------
+# 按能力命名的 notebook 写守卫(P0-T2)。
+#
+# P0 阶段:每个能力都解析到与 require_notebook_write 完全相同的 owner-only 判定
+# ——这一步只是把「一个裸守卫」拆成「能力名 → 判定级别」的一张表,给后续群组
+# 授权(P1/P2:群组管理员可写某些能力)留一个接缝。届时改的只是这张表(以及
+# require_notebook_capability 本体新增的判定分支),端点声明里
+# ``Depends(require_notebook_capability("kg:write"))`` 这类调用点一个字都不用
+# 再动一次。
+#
+# 值域目前只有 "owner" 一档(P0 冻结,见 test_notebook_capability_guard.py 的
+# value-domain 断言)。
+_CAPABILITY_LEVELS: dict[str, str] = {
+    "sources:write": "owner",
+    "kg:write": "owner",
+    "knowhow:write": "owner",
+    "knowledge:write": "owner",
+    "catalog:write": "owner",
+    "reports:write": "owner",
+    "notebook:manage": "owner",
+    "notebook:delete": "owner",
+}
+
+
+def require_notebook_capability(capability: str):
+    """按能力命名的 notebook 写守卫工厂。
+
+    在**模块 import 时**(而不是第一次请求到达时)按 ``capability`` 查
+    ``_CAPABILITY_LEVELS``——路由文件里的调用点都写成
+    ``dependencies=[Depends(require_notebook_capability("sources:write"))]``,
+    这个字符串实参在路由装饰器求值那一刻(也就是模块 import 时)就被传进来,
+    未登记的能力名当场 ``KeyError``,逼着新端点显式登记,而不是漏迁移后
+    静默落到某个宽松默认值上、直到线上才暴露。
+
+    P0 阶段值域只有 ``"owner"`` 一档,直接复用 ``require_notebook_write`` 本体
+    ——同一个函数对象,行为逐字相同(非 owner → 404,不泄露存在性)。这一步
+    刻意不重写判定逻辑。
+    """
+    level = _CAPABILITY_LEVELS[capability]
+    if level == "owner":
+        return require_notebook_write
+    raise AssertionError(f"unknown notebook capability level: {level!r}")  # pragma: no cover
+
+
+# 向后兼容别名——**刻意删除**(P0-T2)。所有路由消费点已迁移到
+# ``require_notebook_capability(...)``;留着这个别名会让漏迁移的新端点继续
+# 安静地拿到 owner-only 守卫,而不是在 import 时就因为拼错能力名而报错。
+# 结构扫描守卫(test_notebook_capability_guard.py)钉死它不再出现。
 
 
 def memory_service() -> MemoryRepository:
@@ -122,14 +182,16 @@ def mcp_memory_repository() -> McpMemoryRepository:
 
 # --- knowhow-tables PR-2+3 Task 10: "session OR Agent token" dependency -----
 # Appended at EOF rather than interleaved above (e.g. right after
-# get_current_user, which it otherwise reads a lot like): every line above
-# this point is individually pinned by test_repository_surface_manifest.py
-# (_runtime at :20/:23/:26/:29/:32, resolve_session at :57, current_user
-# at :61, llm_client at :109, ...) and test_repository_callers_static.py —
-# inserting anything above them shifts every one of those line numbers.
-# Appending here keeps every existing pin exactly where it already is (same
-# zero-line-shift discipline documented in services/knowhow/api.py above its
-# own Task 10 section).
+# get_current_user, which it otherwise reads a lot like) purely for
+# readability — it is not required for correctness.
+# (The original note here claimed every line above this point was
+# individually pinned by a `test_repository_surface_manifest.py` and a
+# `test_repository_callers_static.py`, and that inserting anything above them
+# would shift those pins. That was already wrong: no such tests exist, the
+# architecture guards are semantic — {path, scope, kind, target}, no line
+# numbers — and P0-T2 inserted ~80 lines above this point (the capability
+# guard factory) with every guard still green. See the identical correction
+# in app/api/mcp_server.py above its own Task 10 section.)
 from contextlib import asynccontextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 
@@ -285,10 +347,13 @@ def require_user_or_agent(scope: str, *, write: bool = False):
 # --------------------------------------------------------------------------
 # 用户可见文案的「出处标记」
 #
-# ⚠追加在文件末尾是刻意的：本模块顶部那几个 `_runtime` 取值行被
-# tests/test_repository_callers_static.py 的 INDEPENDENT_PRIVATE_SITES 按
-# **行号**精确登记，在上方插入代码会整体移位、打破那份账本（见
-# AGENTS.md 的 line-exact 约定）。新增模块级内容一律往这后面加。
+# 追加在文件末尾纯粹是可读性考量，不是正确性要求。
+# （这里原先的注释声称本模块顶部那几个 `_runtime` 取值行被一份
+# `tests/test_repository_callers_static.py` 的 INDEPENDENT_PRIVATE_SITES 按
+# **行号**精确登记，在上方插入代码会整体移位、打破那份账本。那条说法本来就是
+# 错的：不存在这样的测试，架构守卫是语义化的——{path, scope, kind, target}，
+# 不含行号——P0-T2 在这个位置之上插入了约 90 行（能力守卫工厂 + 值域表），
+# 全部守卫照样绿。与 app/api/mcp_server.py 里同一处更正完全一致。）
 #
 # 后端的 4xx `detail` 有两类，结构上完全一样：一类是刻意为终端用户写的中文文案
 # （「仅管理员可设为公共知识库」），另一类是 `detail=str(exc)` 直接甩出来的异常文本

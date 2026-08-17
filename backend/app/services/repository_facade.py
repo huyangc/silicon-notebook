@@ -1458,6 +1458,9 @@ class RepositoryFacade:
     def source_owner(self, source_id: str) -> "str | None":
         return self._runtime.sharing.source_owner(source_id)
 
+    def source_notebook_id(self, source_id: str) -> "str | None":
+        return self._runtime.sharing.source_notebook_id(source_id)
+
     def conversation_owner(self, conversation_id: str) -> "str | None":
         return self._runtime.sharing.conversation_owner(conversation_id)
 

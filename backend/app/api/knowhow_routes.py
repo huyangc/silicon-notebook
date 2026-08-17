@@ -15,7 +15,7 @@ from app.api.deps import (
     get_current_user,
     notebook_access_repository as _kh_access,
     repository,
-    require_notebook_access,
+    require_notebook_capability,
     require_notebook_read,
     user_error,
 )
@@ -72,8 +72,9 @@ def _knowhow_import_user_error(
 
 # --- knowhow-tables PR-1 Task 6: table/import API. Guards mirror the asset
 # routes above exactly: POST/DELETE need write access (owner-only via
-# require_notebook_access, 404 on denial), GET needs read access (owner ∪
-# read-only member via require_notebook_read, 404 on denial). Routes stay
+# require_notebook_capability("knowhow:write"), 404 on denial), GET needs
+# read access (owner ∪ read-only member via require_notebook_read, 404 on
+# denial). Routes stay
 # thin (param parsing / guard / dispatch + background-job launch); parsing,
 # validation and row/table orchestration live in app.services.knowhow.api;
 # GridParseError (a ValueError subclass) and the store's own ValueErrors
@@ -82,7 +83,7 @@ def _knowhow_import_user_error(
 @router.post(
     "/notebooks/{notebook_id}/knowhow/import/preview",
     response_model=KnowhowImportPreview,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 async def preview_knowhow_import(
     notebook_id: str,
@@ -114,7 +115,7 @@ async def preview_knowhow_import(
 @router.post(
     "/notebooks/{notebook_id}/knowhow/import",
     response_model=KnowhowTableDetail,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 async def import_knowhow_table(
     notebook_id: str,
@@ -182,7 +183,7 @@ def get_knowhow_table(notebook_id: str, table_id: str) -> dict:
 @router.delete(
     "/notebooks/{notebook_id}/knowhow/{table_id}",
     status_code=204,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
     """Cascade-delete (task brief: "连投影产物+隐藏源"). Ordering: fetch+
@@ -243,7 +244,7 @@ def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
 
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/reproject",
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def reproject_knowhow_table(notebook_id: str, table_id: str) -> dict:
     """Full-rebuild escape hatch (task brief: "全量重投影逃生口，后台执行") —
@@ -263,8 +264,8 @@ def reproject_knowhow_table(notebook_id: str, table_id: str) -> dict:
 
 # --- knowhow-tables PR-2+3 Task 3: editing API (table/column/row/cell) +
 # create-table wizard backend. Guards mirror the import/table routes above
-# exactly (owner-only write via require_notebook_access, 404 on denial).
-# Every mutation schedules a debounced full-table reprojection via
+# exactly (owner-only write via require_notebook_capability("knowhow:write"),
+# 404 on denial). Every mutation schedules a debounced full-table reprojection via
 # knowhow_api.get_scheduler(repo).schedule(table_id) — never a raw
 # background_jobs.submit call, and never seq-gated (ProjectionScheduler
 # always runs the full deterministic project_table pass). Routes stay thin;
@@ -304,7 +305,7 @@ def _require_row_in_table(table: dict, row_id: str) -> None:
 @router.post(
     "/notebooks/{notebook_id}/knowhow",
     response_model=KnowhowTableDetail,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def create_knowhow_table(
     notebook_id: str, body: KnowhowTableCreate,
@@ -334,7 +335,7 @@ def create_knowhow_table(
 @router.patch(
     "/notebooks/{notebook_id}/knowhow/{table_id}",
     response_model=KnowhowTableDetail,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def patch_knowhow_table(
     notebook_id: str, table_id: str, patch: KnowhowTablePatch,
@@ -374,7 +375,7 @@ def patch_knowhow_table(
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/columns",
     response_model=KnowhowColumn,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def add_knowhow_column(
     notebook_id: str, table_id: str, body: KnowhowColumnCreate,
@@ -399,7 +400,7 @@ def add_knowhow_column(
 @router.patch(
     "/notebooks/{notebook_id}/knowhow/{table_id}/columns/{column_id}",
     response_model=KnowhowColumn,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def patch_knowhow_column(
     notebook_id: str, table_id: str, column_id: str, body: KnowhowColumnPatch,
@@ -430,7 +431,7 @@ def patch_knowhow_column(
 @router.delete(
     "/notebooks/{notebook_id}/knowhow/{table_id}/columns/{column_id}",
     status_code=204,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def delete_knowhow_column(
     notebook_id: str, table_id: str, column_id: str,
@@ -447,7 +448,7 @@ def delete_knowhow_column(
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/rows",
     response_model=KnowhowRow,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def add_knowhow_row(
     notebook_id: str, table_id: str, body: KnowhowRowCreate,
@@ -470,7 +471,7 @@ def add_knowhow_row(
 @router.delete(
     "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}",
     status_code=204,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def delete_knowhow_row(
     notebook_id: str, table_id: str, row_id: str,
@@ -487,7 +488,7 @@ def delete_knowhow_row(
 @router.patch(
     "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}",
     response_model=KnowhowCellPatchResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def patch_knowhow_cell(
     notebook_id: str, table_id: str, row_id: str, column_id: str, body: KnowhowCellPatch,
@@ -594,7 +595,7 @@ def patch_knowhow_cell(
 @router.patch(
     "/notebooks/{notebook_id}/knowhow/{table_id}/cells",
     response_model=List[KnowhowCellPatchResult],
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def patch_knowhow_cells_batch(
     notebook_id: str, table_id: str, body: KnowhowCellsBatchPatch,
@@ -791,7 +792,7 @@ def download_knowhow_template(notebook_id: str, table_id: str) -> StreamingRespo
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/append",
     response_model=Union[KnowhowAppendPreview, KnowhowAppendResult],
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 async def append_knowhow_rows(
     notebook_id: str,
@@ -835,8 +836,8 @@ async def append_knowhow_rows(
 
 # --- knowhow-tables PR-2+3 Task 8: LLM cell rewrite (design doc §③, explicit
 # trigger only, suggestion-only). Write-gated like every other knowhow
-# mutation (require_notebook_access) even though it never writes the store
-# itself — this is an authoring affordance (the cell-editor's "优化表达"
+# mutation (require_notebook_capability("knowhow:write")) even though it
+# never writes the store itself — this is an authoring affordance (the cell-editor's "优化表达"
 # button), not a read. Never schedules a reprojection either: the user's own
 # explicit accept goes through the EXISTING PATCH cell endpoint, which is
 # what writes + schedules. ValueError/ModelNotConfiguredError -> 400 (both
@@ -848,7 +849,7 @@ async def append_knowhow_rows(
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize",
     response_model=KnowhowCellOptimizeResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def optimize_knowhow_cell(
     notebook_id: str, table_id: str, row_id: str, column_id: str
@@ -884,7 +885,7 @@ def optimize_knowhow_cell(
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/complete",
     response_model=KnowhowRowCompleteResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def complete_knowhow_row(
     notebook_id: str,
@@ -927,7 +928,7 @@ def complete_knowhow_row(
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/reformat",
     response_model=KnowhowCellReformatResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def reformat_knowhow_cell(
     notebook_id: str, table_id: str, row_id: str, column_id: str
@@ -1079,7 +1080,7 @@ def get_knowhow_cell_history(
 
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/revert",
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def revert_knowhow_table(
     notebook_id: str, table_id: str, body: KnowhowRevertRequest,
@@ -1123,7 +1124,7 @@ def revert_knowhow_table(
 
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/milestones",
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def create_knowhow_milestone(
     notebook_id: str, table_id: str, body: KnowhowMilestoneCreate,
@@ -1158,7 +1159,7 @@ def create_knowhow_milestone(
 @router.delete(
     "/notebooks/{notebook_id}/knowhow/{table_id}/milestones/{milestone_id}",
     status_code=204,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def delete_knowhow_milestone(notebook_id: str, table_id: str, milestone_id: str) -> None:
     """spec §8.1 行 7。store 的 ``delete_milestone`` 本身按 ``table_id``
@@ -1173,7 +1174,7 @@ def delete_knowhow_milestone(notebook_id: str, table_id: str, milestone_id: str)
 
 @router.post(
     "/notebooks/{notebook_id}/knowhow/{table_id}/history/prune",
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowhow:write"))],
 )
 def prune_knowhow_history(
     notebook_id: str, table_id: str, body: KnowhowHistoryPruneRequest,
@@ -1219,9 +1220,10 @@ def transfer_knowhow_table(
     principal = session_audit_principal(user)
     access = _kh_access()
     # 只有 copy 能放宽到「只读成员」——写成 `read if copy else access` 而不是
-    # `access if move else read`，是为了失败关闭（默认最严兜底，同 deps.py 末尾
-    # require_notebook_access = require_notebook_write 的取向）：将来若多出第三
-    # 种 mode，它继承的是 owner-only 的强守卫，而不是悄悄拿到只读成员权限。
+    # `access if move else read`，是为了失败关闭（默认最严兜底，同
+    # require_notebook_capability 的每个能力当前都解析到 owner-only 判定的
+    # 取向）：将来若多出第三种 mode，它继承的是 owner-only 的强守卫，而不是
+    # 悄悄拿到只读成员权限。
     # 今天两者等价（mode 是 Literal["copy","move"]），差别只在未来。
     source_check = (
         access.user_can_read_notebook

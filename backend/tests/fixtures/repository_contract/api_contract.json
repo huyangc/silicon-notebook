@@ -13260,7 +13260,7 @@
           "summary": "List Notebook Bases Route"
         },
         "put": {
-          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)\n∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。\n写权限本身由 require_notebook_access(owner-only,404 on denial)在依赖层挡;\n这里只做候选集校验,不重复手工判断写权限。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主后)永远不会\n出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
+          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)\n∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。\n写权限本身由 require_notebook_capability(\"notebook:manage\")(P0 阶段解析到\nowner-only,404 on denial)在依赖层挡;\n这里只做候选集校验,不重复手工判断写权限。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主后)永远不会\n出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
           "operationId": "set_notebook_bases_route_api_notebooks__notebook_id__bases_put",
           "parameters": [
             {
@@ -13650,7 +13650,7 @@
       },
       "/api/notebooks/{notebook_id}/index-status": {
         "get": {
-          "description": "三系统构建状态聚合(kg/unified_kg/scale_index)。纯读:与 /analytics、\n/unified-kg/status 一致用 read 守卫——只读成员也要能看面板里的状态位,\n写操作(build/rebuild/cancel)各自仍是 require_notebook_access 且前端按 !isReader 隐藏按钮。",
+          "description": "三系统构建状态聚合(kg/unified_kg/scale_index)。纯读:与 /analytics、\n/unified-kg/status 一致用 read 守卫——只读成员也要能看面板里的状态位,\n写操作(build/rebuild/cancel)各自仍是 require_notebook_capability(\"kg:write\")\n(P0 阶段解析到 owner-only)且前端按 !isReader 隐藏按钮。",
           "operationId": "index_status_api_notebooks__notebook_id__index_status_get",
           "parameters": [
             {
@@ -16878,7 +16878,7 @@
       },
       "/api/notebooks/{notebook_id}/paper-meta/backfill": {
         "post": {
-          "description": "补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;\nLLM 未配置 409。owner 门控由 require_notebook_access 承担(非 owner 404)。",
+          "description": "补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;\nLLM 未配置 409。owner 门控由 require_notebook_capability(\"sources:write\")\n承担(P0 阶段解析到 owner-only,非 owner 404)。",
           "operationId": "backfill_paper_metadata_api_notebooks__notebook_id__paper_meta_backfill_post",
           "parameters": [
             {
@@ -18079,7 +18079,7 @@
       },
       "/api/notebooks/{notebook_id}/sources/reparse": {
         "post": {
-          "description": "体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)\n——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。\n⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守\nnotebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。\n⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发\n排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。",
+          "description": "体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)\n——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。\n⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:\n``require_notebook_capability(\"sources:write\")`` 只守 notebook,不守 body 里\n带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。\n⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发\n排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。",
           "operationId": "reparse_sources_api_notebooks__notebook_id__sources_reparse_post",
           "parameters": [
             {

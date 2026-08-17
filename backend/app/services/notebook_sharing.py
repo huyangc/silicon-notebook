@@ -927,6 +927,9 @@ class NotebookSharingService:
     def source_owner(self, source_id: str) -> "str | None":
         return self._store.source_owner(source_id)
 
+    def source_notebook_id(self, source_id: str) -> "str | None":
+        return self._store.source_notebook_id(source_id)
+
     def conversation_owner(self, conversation_id: str) -> "str | None":
         return self._store.conversation_owner(conversation_id)
 

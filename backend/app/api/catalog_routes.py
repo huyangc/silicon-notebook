@@ -2,8 +2,9 @@
 
 守卫口径与既有来源端点一致:`preview` / `job` / `candidates` 是只读,走
 `require_notebook_read`(只读成员也该看得到成本预告与审阅队列);`start` /
-`cancel` / `apply` / `dismiss` 会写库或花模型钱,走 `require_notebook_access`
-(owner)——`dismiss` 虽然不写 knowhow 表,但改的是候选的持久状态,口径与
+`cancel` / `apply` / `dismiss` 会写库或花模型钱,走
+`require_notebook_capability("catalog:write")`(P0 阶段解析到 owner-only)
+——`dismiss` 虽然不写 knowhow 表,但改的是候选的持久状态,口径与
 `apply` 一致。拒绝一律 404 而不是 403 —— 本仓库「不确认资源存在性」的既有约定。
 
 路由体保持薄:参数解析 + 守卫 + 一跳编排。抽取逻辑在
@@ -15,7 +16,7 @@ from app.api.deps import (
     command_catalog_service,
     get_current_user,
     repository,
-    require_notebook_access,
+    require_notebook_capability,
     require_notebook_read,
     source_repository,
     user_error,
@@ -193,7 +194,7 @@ def command_catalog_preview(
 @router.post(
     "/notebooks/{notebook_id}/sources/{source_id}/command-catalog",
     response_model=CommandCatalogStartResponse,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("catalog:write"))],
 )
 def start_command_catalog(
     notebook_id: str, source_id: str
@@ -262,7 +263,7 @@ def command_catalog_job(
 @router.post(
     "/notebooks/{notebook_id}/sources/{source_id}/command-catalog/cancel",
     response_model=CommandCatalogCancelResponse,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("catalog:write"))],
 )
 def cancel_command_catalog(
     notebook_id: str, source_id: str
@@ -318,7 +319,7 @@ def command_catalog_candidates(
 @router.post(
     "/notebooks/{notebook_id}/sources/{source_id}/command-catalog/apply",
     response_model=CommandCatalogApplyResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("catalog:write"))],
 )
 def apply_command_catalog(
     notebook_id: str,
@@ -418,7 +419,7 @@ def apply_command_catalog(
 @router.post(
     "/notebooks/{notebook_id}/sources/{source_id}/command-catalog/dismiss",
     response_model=CommandCatalogDismissResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("catalog:write"))],
 )
 def dismiss_command_catalog(
     notebook_id: str,
