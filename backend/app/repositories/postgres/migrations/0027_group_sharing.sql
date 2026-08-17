@@ -20,13 +20,24 @@
 -- (viewer|admin) to principal_type (user|group|group_admins|everyone)
 -- identified by principal_id. principal_id is deliberately a bare,
 -- unconstrained text column with NO foreign key -- it references either
--- users.id or groups.id depending on principal_type, or is NULL for the
--- everyone principal (no single-table FK can express that). This mirrors the
--- catalog_candidates.job_id precedent (v17): a real FK here would make
--- whichever table it points to a non-leaf table for the forward-shadow
--- replicator's UNIQUE-conflict park strategy, and the
--- UNIQUE (notebook_id, principal_type, principal_id) index below needs a
--- column it CAN safely park a poison value into during conflict resolution.
+-- users.id or groups.id depending on principal_type, and no single-table FK
+-- can express that (the catalog_candidates.job_id precedent, v17). It is
+-- NOT NULL DEFAULT '' -- the everyone principal stores '', not NULL:
+-- PostgreSQL's UNIQUE treats NULLs as distinct (as does SQLite's), so a
+-- nullable principal_id would silently exempt every everyone row from
+-- UNIQUE (notebook_id, principal_type, principal_id) -- duplicate grants
+-- would accumulate and revoking one would not revoke the permission.
+-- Keeping the column NOT NULL also hands the forward-shadow UNIQUE park
+-- strategy to principal_type (SENTINEL_TEXT), which is why neither of those
+-- two columns may ever gain a CHECK or FK. Consumers must match
+-- principal_type against the four known values exactly and never infer
+-- everyone from principal_id -- a parked shadow row temporarily carries a
+-- sentinel principal_type, and exact matching makes such rows fail safe.
+--
+-- The UNIQUE constraint's implicit index already serves notebook_id lookups
+-- (leftmost prefix), so there is deliberately no separate
+-- idx_notebook_grants_nb; idx_notebook_grants_principal is not redundant
+-- (different leading column) and stays.
 --
 -- All three tables are additive with no backfill: no existing row in any
 -- other table implies a group or a grant, so there is nothing to populate.
@@ -57,7 +68,7 @@ CREATE TABLE notebook_grants (
   id text COLLATE "C" NOT NULL,
   notebook_id text COLLATE "C" NOT NULL,
   principal_type text COLLATE "C" NOT NULL,
-  principal_id text COLLATE "C",
+  principal_id text COLLATE "C" NOT NULL DEFAULT '',
   role text COLLATE "C" NOT NULL,
   created_by text COLLATE "C",
   created_at timestamptz NOT NULL,
@@ -66,7 +77,6 @@ CREATE TABLE notebook_grants (
     UNIQUE (notebook_id, principal_type, principal_id)
 );
 
-CREATE INDEX idx_notebook_grants_nb ON notebook_grants(notebook_id);
 CREATE INDEX idx_notebook_grants_principal
   ON notebook_grants(principal_type, principal_id);
 

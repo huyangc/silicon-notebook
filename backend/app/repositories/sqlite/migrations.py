@@ -2408,16 +2408,29 @@ class SqliteMigrator:
         group_admins|everyone) identified by ``principal_id``. ``principal_id``
         is deliberately a bare, unconstrained TEXT column with NO foreign key —
         it references either ``users.id`` or ``groups.id`` depending on
-        ``principal_type``, or is NULL for the ``everyone`` principal (no
-        single-table FK can express that). This mirrors the existing
-        ``catalog_candidates.job_id`` precedent (v39): a real FK here would
-        make whichever table it points to a non-leaf table for the
-        forward-shadow replicator's UNIQUE-conflict park strategy, and the
-        ``UNIQUE (notebook_id, principal_type, principal_id)`` index below
-        needs a column it CAN safely park a poison value into during conflict
-        resolution. ``id`` is the primary key and every PK/composite-PK column
-        in this migration is explicitly ``NOT NULL`` for the same
-        null-guard-avoidance reason as ``group_members`` above.
+        ``principal_type``, and no single-table FK can express that (the
+        ``catalog_candidates.job_id`` precedent, v39). It is ``NOT NULL
+        DEFAULT ''`` — the ``everyone`` principal stores ``''``, NOT NULL:
+        both backends treat NULLs as distinct in UNIQUE comparisons, so a
+        nullable ``principal_id`` would silently exempt every ``everyone``
+        row from ``UNIQUE (notebook_id, principal_type, principal_id)`` —
+        duplicate grants would accumulate and revoking one would not revoke
+        the permission. Keeping the column NOT NULL also hands the
+        forward-shadow UNIQUE park strategy to ``principal_type``
+        (SENTINEL_TEXT) — which is why neither of those two columns may ever
+        gain a CHECK or FK (see the park-candidate note above). Consumers must
+        match ``principal_type`` against the four known values exactly and
+        never infer ``everyone`` from ``principal_id`` — a parked shadow row
+        temporarily carries a sentinel ``principal_type``, and exact matching
+        makes such rows fail safe (matching nobody). ``id`` is the primary key
+        and every PK/composite-PK column in this migration is explicitly
+        ``NOT NULL`` for the same null-guard-avoidance reason as
+        ``group_members`` above.
+
+        The UNIQUE constraint's implicit index already serves lookups by
+        ``notebook_id`` (leftmost prefix), so there is deliberately no
+        separate ``idx_notebook_grants_nb``; ``idx_notebook_grants_principal``
+        is NOT redundant (its leading column differs) and stays.
 
         All three tables are additive with no backfill: no existing row in any
         other table implies a group or a grant, so there is nothing to
@@ -2450,13 +2463,12 @@ class SqliteMigrator:
                   id             TEXT NOT NULL PRIMARY KEY,
                   notebook_id    TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
                   principal_type TEXT NOT NULL,
-                  principal_id   TEXT,
+                  principal_id   TEXT NOT NULL DEFAULT '',
                   role           TEXT NOT NULL,
                   created_by     TEXT REFERENCES users(id),
                   created_at     TEXT NOT NULL,
                   UNIQUE (notebook_id, principal_type, principal_id)
                 );
-                CREATE INDEX IF NOT EXISTS idx_notebook_grants_nb ON notebook_grants(notebook_id);
                 CREATE INDEX IF NOT EXISTS idx_notebook_grants_principal ON notebook_grants(principal_type, principal_id);
                 """
             )

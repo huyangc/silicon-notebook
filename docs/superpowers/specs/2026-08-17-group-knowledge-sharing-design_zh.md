@@ -138,16 +138,18 @@ CREATE TABLE group_members (
 CREATE INDEX idx_group_members_user ON group_members(user_id);
 
 CREATE TABLE notebook_grants (
-  id             TEXT PRIMARY KEY,
+  id             TEXT NOT NULL PRIMARY KEY,
   notebook_id    TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
   principal_type TEXT NOT NULL,      -- user|group|group_admins|everyone
-  principal_id   TEXT,               -- user_id | group_id | NULL(everyone)
+  principal_id   TEXT NOT NULL DEFAULT '',  -- user_id | group_id | ''(everyone)
+                                     -- NOT NULL:NULL 不参与唯一比较,会让 everyone
+                                     -- 逃出 UNIQUE(实现期评审发现,已定裁决)
   role           TEXT NOT NULL,      -- viewer|admin(editor 保留不启用)
   created_by     TEXT REFERENCES users(id),
   created_at     TEXT NOT NULL,
   UNIQUE (notebook_id, principal_type, principal_id)
 );
-CREATE INDEX idx_notebook_grants_nb ON notebook_grants(notebook_id);
+-- UNIQUE 隐式索引覆盖 notebook_id 前缀,不另建 nb 单列索引
 CREATE INDEX idx_notebook_grants_principal ON notebook_grants(principal_type, principal_id);
 
 -- 成员贡献审批流。刻意独立于 notebook_grants:grants 表的每一行都是「生效中的
