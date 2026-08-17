@@ -883,10 +883,13 @@ class NotebookSharingService:
         return self._store.is_member(notebook_id, user_id)
 
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
-        """读权:owner ∪ 只读成员。"""
-        return self.user_can_access_notebook(notebook_id, user_id) or self.is_member(
-            notebook_id, user_id
-        )
+        """读权:owner ∪ 只读成员。
+
+        谓词的唯一定义点在两个后端的 `access_sql.NOTEBOOK_READ_SQL`,故这里一跳直接
+        委托 store。曾经写成 `写权 or 成员`——语义相同但要发两次查询,而且是一份手写
+        复刻:群组授权扩展读权时,唯一定义点改了这里不会跟随。
+        """
+        return self._store.user_can_read_notebook(notebook_id, user_id)
 
     def user_can_read_source(self, source_id: str, user_id: str) -> bool:
         notebook_id = self._store.source_notebook_id(source_id)

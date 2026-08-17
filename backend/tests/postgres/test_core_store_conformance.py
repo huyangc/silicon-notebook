@@ -484,6 +484,46 @@ def test_notebook_mount_and_sharing_semantics(core_stores: CoreStores):
     assert core_stores.sharing.list_members(personal_id) == []
 
 
+def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
+    """PG 侧的读/写权矩阵必须与 `test_access_sql_contract.py` 的 SQLite 矩阵逐格相同。
+
+    谓词的唯一定义点是 `repositories/*/access_sql.py` 两份镜像文件。SQLite 侧那份
+    契约测试跑在 G1,单靠它看不见「只改了一个后端」的分叉;这条把同一张矩阵钉在 G3。
+    写权恒 owner-only(只读成员是访客),不存在的 notebook 两权皆否。
+    """
+    sharing = core_stores.sharing
+    owner = core_stores.identity.create_user("d00123456", "password-30")
+    member = core_stores.identity.create_user("e00123456", "password-31")
+    stranger = core_stores.identity.create_user("f00123456", "password-32")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Access matrix"), owner.id
+    )
+    sharing.add_member(notebook_id, member.id)
+    missing = "nb-does-not-exist"
+
+    expected = [
+        (owner.id, notebook_id, True, True),
+        (member.id, notebook_id, True, False),  # 只读成员:能读,绝不能写
+        (stranger.id, notebook_id, False, False),
+        (owner.id, missing, False, False),  # 不存在的 notebook:两权皆否
+        (member.id, missing, False, False),
+        (stranger.id, missing, False, False),
+    ]
+    for user_id, target, expect_read, expect_write in expected:
+        assert sharing.user_can_read_notebook(target, user_id) is expect_read
+        assert sharing.user_can_access_notebook(target, user_id) is expect_write
+        # 重构前 service 层的旧口径(写权 or 成员)必须与新的单条查询同义。
+        legacy = sharing.user_can_access_notebook(
+            target, user_id
+        ) or sharing.is_member(target, user_id)
+        assert legacy is expect_read
+
+    # 读权是实时判定而非一次性授予:踢掉成员即刻失读权。
+    sharing.remove_member(notebook_id, member.id)
+    assert sharing.user_can_read_notebook(notebook_id, member.id) is False
+    assert sharing.user_can_access_notebook(notebook_id, member.id) is False
+
+
 def test_shared_members_validate_as_shared_by_me_string_fields(
     core_stores: CoreStores,
 ):

@@ -14,6 +14,13 @@ from app.models.memory import (
     PaginatedMemories,
 )
 from app.core.json_safety import strict_json_dumps
+from app.repositories.sqlite.access_sql import (
+    MEMBER_PROBE_SQL,
+    NOTEBOOK_READ_SQL,
+    member_exists_expr,
+    read_access_clause,
+    read_access_exists_clause,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.vector_index import encode_vector
 
@@ -271,12 +278,8 @@ class MemoryStore:
 
     @staticmethod
     def _read_access_clause(alias: str = "m") -> str:
-        return (
-            "EXISTS (SELECT 1 FROM notebooks access_nb "
-            f"WHERE access_nb.id={alias}.notebook_id AND "
-            "(access_nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members access_nm "
-            "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=?)))"
-        )
+        """读权谓词。定义点在 `access_sql`,这里只是保留既有调用形状的薄封装。"""
+        return read_access_exists_clause(alias)
 
     def insert_memory(self, write: MemoryWrite) -> MemoryRecord:
         with self.database.write() as db:
@@ -428,9 +431,7 @@ class MemoryStore:
         with self.database.write() as db:
             db.execute("BEGIN IMMEDIATE")
             access = db.execute(
-                "SELECT 1 FROM notebooks nb WHERE nb.id=? AND "
-                "(nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members nm "
-                "WHERE nm.notebook_id=nb.id AND nm.user_id=?))",
+                NOTEBOOK_READ_SQL,
                 (write.notebook_id, write.created_by, write.created_by),
             ).fetchone()
             if access is None:
@@ -583,9 +584,7 @@ class MemoryStore:
             row = db.execute(
                 "SELECT a.question,a.payload,a.conversation_id FROM answers a "
                 "JOIN notebooks nb ON nb.id=a.notebook_id "
-                "WHERE a.id=? AND a.notebook_id=? AND "
-                "(nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members nm "
-                "WHERE nm.notebook_id=nb.id AND nm.user_id=?))",
+                "WHERE a.id=? AND a.notebook_id=? AND " + read_access_clause(),
                 (
                     write.source_answer_id,
                     write.notebook_id,
@@ -858,6 +857,11 @@ class MemoryStore:
         creator_id = str(routing["created_by"])
         if expected_notebook is not None and notebook_id != expected_notebook:
             raise ValueError("promotion candidate notebook does not match Memory notebook")
+        # ⚠ 两段式,刻意不合并成 access_sql.NOTEBOOK_READ_SQL 单条 EXISTS:owner 那一半
+        # 要单独区分「notebook 不存在」(恒 KeyError)与「不是成员」(按调用方选
+        # PermissionError/KeyError),合并后两者都只剩「无行」这一个信号。PG 侧对应
+        # 实现还在这两步上各挂 FOR SHARE 行锁,合并会一并丢掉。成员那一半复用唯一
+        # 定义点;群组授权扩展读权时这里必须同步(已登记在 access_sql 的消费者清单)。
         notebook = db.execute(
             "SELECT created_by FROM notebooks WHERE id=?", (notebook_id,)
         ).fetchone()
@@ -865,8 +869,7 @@ class MemoryStore:
             raise KeyError(memory_id)
         if notebook["created_by"] != creator_id:
             member = db.execute(
-                "SELECT 1 FROM notebook_members WHERE notebook_id=? AND user_id=?",
-                (notebook_id, creator_id),
+                MEMBER_PROBE_SQL, (notebook_id, creator_id)
             ).fetchone()
             if member is None:
                 if permission_error:
@@ -1215,9 +1218,8 @@ class MemoryStore:
         """Revalidate Memory scope and creator access inside approval's write txn."""
         row = db.execute(
             "SELECT m.notebook_id,m.created_by,n.created_by AS notebook_owner,"
-            "EXISTS(SELECT 1 FROM notebook_members nm "
-            "WHERE nm.notebook_id=m.notebook_id AND nm.user_id=m.created_by) "
-            "AS is_member FROM memory_items m "
+            + member_exists_expr("m.notebook_id", "m.created_by")
+            + " AS is_member FROM memory_items m "
             "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=?",
             (memory_id,),
         ).fetchone()
