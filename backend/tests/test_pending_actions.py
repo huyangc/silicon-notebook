@@ -96,6 +96,38 @@ def test_pending_actions_isolation(repo):
     assert out == {"count": 0, "items": []}
 
 
+def test_member_without_own_notebooks_still_sees_their_shared_notebook_report(repo):
+    """共享库里成员自建的待确认报告必须进铃铛,哪怕他一个自有库都没有(P1-T3b)。
+
+    报告那一半的谓词只有 `created_by`,一个 notebook id 都不消费——它此前却待在
+    `if notebook_ids:` 闸内,于是「没建过库的成员」铃铛恒为 0,而报告卡在
+    intent_ready 等他确认,是一条走不通的路。
+    库名解析不出来(非自有库)是已知的、留给 T4 的显示问题:条目本身必须在。"""
+    owner_nb = _seed_user_nb(repo, "user-owner")
+    _mk_user(repo, "user-member")          # 成员自己一个 notebook 都没有
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO reports (id, notebook_id, question, status, created_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("r-shared", owner_nb, "成员自己的问题", "intent_ready", "user-member",
+             "2026-07-07T01:00:00", "2026-07-07T01:00:00"),
+        )
+
+    out = repo.pending_actions("user-member")
+    items = [it for it in out["items"] if it["type"] == "report_outline"]
+    assert [it["report_id"] for it in items] == ["r-shared"]
+    assert items[0]["notebook_id"] == owner_nb
+    assert items[0]["notebook_name"] == ""      # T4 负责库名解析
+    assert out["count"] == 1
+
+    # 反向:owner 的铃铛里不出现成员的报告(行级隔离在这一层同样成立)。
+    owner_items = [
+        it for it in repo.pending_actions("user-owner")["items"]
+        if it["type"] == "report_outline"
+    ]
+    assert owner_items == []
+
+
 def test_pending_actions_index_state(repo, monkeypatch):
     """索引态走 scale_index_status().state;用 monkeypatch 覆盖真实态,
     避免真造 stale/building 场景(需真实磁盘 manifest/后台线程)。"""

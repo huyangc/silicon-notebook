@@ -995,28 +995,32 @@ class QueryStore:
             ).fetchall()
             name_of = {row["id"]: row["name"] for row in mine}
             notebook_ids = list(name_of)
+            # 报告这一半**不在** `if notebook_ids:` 闸内(P1-T3b)——理由与 SQLite
+            # 侧逐字相同:谓词只有 `created_by`,不消费任何 notebook id,放在闸内
+            # 会让「没有自有库的成员」整体看不到自己待确认的报告。
+            reports = db.execute(
+                "SELECT id, question, notebook_id, created_at FROM reports "
+                "WHERE status IN ('intent_ready','outline_ready') "
+                "AND created_by = %s ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+            for row in reports:
+                items.append(
+                    {
+                        "type": "report_outline",
+                        "notebook_id": row["notebook_id"],
+                        # 共享库的名字解析不出来 → 空串(T4 负责库名解析)。
+                        "notebook_name": name_of.get(row["notebook_id"], ""),
+                        "report_id": row["id"],
+                        "title": (row["question"] or "")[:60],
+                        "created_at": iso_timestamp(row["created_at"]),
+                    }
+                )
             if notebook_ids:
                 role_row = db.execute(
                     "SELECT role FROM users WHERE id = %s", (user_id,)
                 ).fetchone()
                 is_admin = bool(role_row) and role_row["role"] == "admin"
-                reports = db.execute(
-                    "SELECT id, question, notebook_id, created_at FROM reports "
-                    "WHERE status IN ('intent_ready','outline_ready') "
-                    "AND created_by = %s ORDER BY updated_at DESC",
-                    (user_id,),
-                ).fetchall()
-                for row in reports:
-                    items.append(
-                        {
-                            "type": "report_outline",
-                            "notebook_id": row["notebook_id"],
-                            "notebook_name": name_of.get(row["notebook_id"], ""),
-                            "report_id": row["id"],
-                            "title": (row["question"] or "")[:60],
-                            "created_at": iso_timestamp(row["created_at"]),
-                        }
-                    )
                 placeholders = ",".join("%s" for _ in notebook_ids)
                 governance = [
                     ("merge", "concept_merge_candidates", "status = 'pending'"),

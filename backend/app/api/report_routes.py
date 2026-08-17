@@ -75,8 +75,15 @@ def _own_report_or_404(repo, notebook_id: str, report_id: str) -> dict:
     One read answers both halves at once — the row proves notebook membership
     (``get_report`` already filters on ``notebook_id``) and carries
     ``created_by`` for the creator check — so no endpoint has to hand-assemble
-    a second copy of the predicate.  Every caller reuses the returned row
-    instead of re-reading it.
+    a second copy of the predicate.
+
+    The returned row is the full report projection.  Six callers go on to use
+    it (status checks, outline/understanding, question); ``cancel``, ``delete``
+    and ``unshare`` discard it and pay for a full-row read they do not need.
+    That is accepted rather than optimized with a second narrow read: all three
+    are cold, user-clicked, one-per-report paths, and a separate
+    "just the owner column" query would be a second place where the gate's
+    predicate lives — exactly what this helper exists to prevent.
 
     "Exists but belongs to someone else" and "does not exist" must be the same
     404: a distinguishable 403 would turn this endpoint into an oracle for
@@ -622,7 +629,34 @@ def public_report_route(token: str) -> PublicReport:
     that reason, and the payload is an explicit allowlist rather than the stored
     row.
     """
-    row = repository().public_report_by_token(token)
+    repo = repository()
+    row = repo.public_report_by_token(token)
     if row is None:
+        raise HTTPException(status_code=404, detail="shared report not found")
+    # Live re-authorization of the CREATOR (P1-T3b ruling).  A member may
+    # publish a report built from a shared notebook's corpus, but that is a
+    # grant that lasts exactly as long as their read access does: revoke the
+    # group grant / remove them from the group / delete the group, and every
+    # link they issued in that notebook must die immediately.
+    #
+    # It has to be here rather than a cascade at each revocation point: there
+    # are several ways to lose read access (grant deleted, group membership
+    # removed, group deleted, member row dropped, notebook re-tiered), and a
+    # cascade would have to be re-derived at every one of them — the same
+    # argument that made mount validity a live predicate instead of stored
+    # state.  Once neither the member (blocked by the read guard) nor the owner
+    # (blocked by the row-level creator check) can reach `unshare`, a stale
+    # token would otherwise serve the owner's corpus forever.
+    #
+    # `user_can_read_notebook` takes both ids EXPLICITLY, so this stays legal on
+    # the anonymous router: it binds no request user and never consults the
+    # ContextVar (which falls back to the seeded admin when unset).
+    # Same 404 as an unknown token — a distinguishable response would report on
+    # somebody's group membership to an anonymous caller.  Restoring access
+    # revives the link, which is the same idempotent-token semantics `share`
+    # already promises.
+    if not repo.user_can_read_notebook(
+        str(row.get("notebook_id") or ""), str(row.get("created_by") or "")
+    ):
         raise HTTPException(status_code=404, detail="shared report not found")
     return PublicReport(**public_report_payload(row, row.get("references") or []))
