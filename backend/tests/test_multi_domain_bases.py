@@ -989,6 +989,36 @@ class TestBorrowedMountReshare:
         repo.remove_member(x["id"], c["bob_id"])
         assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
 
+    def test_gate_closed_edge_keeps_the_name_and_explains_the_exit(
+        self, three_users_client
+    ):
+        """⑥ 被未共享门关上的借入边:名字照常显示,文案给出恢复出口。
+
+        Alice 对 Y 仍有合法读权(她只是共享了自己的 X),名字遮成「已不可用的
+        知识库」没有任何泄露可防,文案写「不属于你」更是事实错误——这是修复
+        复核抓出的产品面死角:用户既看不出关的是哪个库,也拿不到「取消共享即可
+        恢复」的补救办法。对照:真正失权的失效边(公共库降级那类)保持旧文案与
+        名字遮蔽,两类失效边不能共用一句解释。
+        """
+        c = three_users_client
+        repo, x, y, _source_id = self._stage(c)
+        repo.add_member(x["id"], c["bob_id"])
+
+        edges = repo.list_notebook_bases(x["id"])
+        assert len(edges) == 1
+        edge = edges[0]
+        assert edge["active"] is False
+        assert edge["name"] == "Carol 的库 Y", "门关闭时 Alice 仍有读权,名字不遮蔽"
+        assert "取消本笔记本的共享" in edge["inactive_reason"]
+        assert "不属于你" not in edge["inactive_reason"]
+
+        # 对照:Carol 撤销对 Alice 的分享(真正失权)→ 旧文案 + 名字遮蔽。
+        repo.remove_member(y["id"], c["alice_id"])
+        edge = repo.list_notebook_bases(x["id"])[0]
+        assert edge["active"] is False
+        assert edge["name"] == "已不可用的知识库"
+        assert "不属于你" in edge["inactive_reason"]
+
     def test_public_base_and_own_library_are_exempt_from_the_gate(
         self, three_users_client
     ):

@@ -106,6 +106,15 @@ MOUNT_VALID_EXPR = (
     "))"
 )
 
+# 借入边被「未共享门」关上(而非授权消失/公共库降级/深拷贝中)的判别式——
+# list_mount_edges 用它给失效边选对解释文案与名字可见性:此形态下挂载方 owner
+# 对被挂库**仍有合法读权**,名字不该被遮蔽,文案要给出「取消共享即可恢复」的
+# 出口。与 MOUNT_VALID_EXPR 同源派生,消费点不许手拼。
+MOUNT_GATE_CLOSED_EXPR = (
+    "(b.status != 'copying' AND " + _BORROWED_READ_EXPR
+    + " AND NOT " + _MOUNTER_NOT_SHARED_EXPR + ")"
+)
+
 # 追加到 MOUNT_JOIN 之后的有效性过滤。
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 
