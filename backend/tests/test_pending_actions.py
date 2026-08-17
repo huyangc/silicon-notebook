@@ -106,6 +106,9 @@ def test_member_without_own_notebooks_still_sees_their_shared_notebook_report(re
     一条没有出处的报告),而是随报告行 LEFT JOIN 出来。"""
     owner_nb = _seed_user_nb(repo, "user-owner")
     _mk_user(repo, "user-member")          # 成员自己一个 notebook 都没有
+    # 建报告的前提本来就是对该库有读权(require_notebook_read);铃铛现在叠加了
+    # 同一读谓词(codex #517 R1 P2),夹具如实给出成员行。
+    repo.add_member(owner_nb, "user-member")
     with repo._connect() as db:
         db.execute(
             "INSERT INTO reports (id, notebook_id, question, status, created_by, created_at, updated_at) "
@@ -128,6 +131,36 @@ def test_member_without_own_notebooks_still_sees_their_shared_notebook_report(re
         if it["type"] == "report_outline"
     ]
     assert owner_items == []
+
+
+def test_pending_report_drops_out_when_the_creator_loses_read_access(repo):
+    """创建者失去读权后,待确认报告不进铃铛;恢复读权自动回来(codex #517 R1 P2)。
+
+    没有这道谓词,被撤权的成员会永远挂着一条点不开的待确认项——每个报告端点都
+    对他 404(require_notebook_read),铃铛却还在催他确认。修法是把 access_sql 的
+    规范读谓词叠进铃铛查询,与「授权即时生效」同口径;条目从未被删,恢复即回。"""
+    owner_nb = _seed_user_nb(repo, "user-owner")
+    _mk_user(repo, "user-member")
+    repo.add_member(owner_nb, "user-member")
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO reports (id, notebook_id, question, status, created_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("r-revoked", owner_nb, "撤权场景", "intent_ready", "user-member",
+             "2026-07-07T02:00:00", "2026-07-07T02:00:00"),
+        )
+
+    def _member_report_ids():
+        return [
+            it["report_id"] for it in repo.pending_actions("user-member")["items"]
+            if it["type"] == "report_outline"
+        ]
+
+    assert _member_report_ids() == ["r-revoked"]
+    repo.remove_member(owner_nb, "user-member")
+    assert _member_report_ids() == []
+    repo.add_member(owner_nb, "user-member")
+    assert _member_report_ids() == ["r-revoked"]
 
 
 def test_pending_actions_index_state(repo, monkeypatch):

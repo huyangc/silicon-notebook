@@ -23,6 +23,7 @@ from app.models.sources import (
     paper_meta_status,
 )
 from app.repositories.group_rows import SHARED_TO_GROUPS_COLUMN
+from app.repositories.postgres import access_sql
 from app.repositories.postgres._store_utils import (
     iso_timestamp,
     json_value,
@@ -1016,15 +1017,18 @@ class QueryStore:
             # 报告这一半**不在** `if notebook_ids:` 闸内(P1-T3b)——理由与 SQLite
             # 侧逐字相同:谓词只有 `created_by`,不消费任何 notebook id,放在闸内
             # 会让「没有自有库的成员」整体看不到自己待确认的报告。
-            # 库名走 LEFT JOIN(P1-T4),理由见 SQLite 侧同名方法。
+            # 库名走 LEFT JOIN(P1-T4)、叠加规范读谓词(codex #517 R1 P2:失权
+            # 的报告不进铃铛,恢复读权自动回来),理由见 SQLite 侧同名方法。
             reports = db.execute(
                 "SELECT r.id AS id, r.question AS question, "
                 "r.notebook_id AS notebook_id, r.created_at AS created_at, "
                 "nb.name AS notebook_name "
                 "FROM reports r LEFT JOIN notebooks nb ON nb.id = r.notebook_id "
                 "WHERE r.status IN ('intent_ready','outline_ready') "
-                "AND r.created_by = %s ORDER BY r.updated_at DESC",
-                (user_id,),
+                "AND r.created_by = %s AND "
+                + access_sql.read_access_exists_clause("r")
+                + " ORDER BY r.updated_at DESC",
+                (user_id, *access_sql.read_access_params(user_id)),
             ).fetchall()
             for row in reports:
                 items.append(
