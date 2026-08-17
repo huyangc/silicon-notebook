@@ -118,6 +118,11 @@ SOURCE_TITLE_MAX_CHARS = 200
 # UTF-16 units instead, so an over-long name writes fine here and raises
 # `OSError: File name too long` there — after the row has been named, with the
 # storage absolute path inside the error text.
+# `stored_upload_name` now enforces the 255-byte bound inside the store itself
+# (browser uploads hand it raw client names, which reach 255 bytes on their
+# own), so this pre-clamp is no longer the only line of defense. It stays
+# because the derived name ALSO becomes `sources.file_name`, which the store's
+# disk-only clamp never touches.
 SOURCE_FILE_NAME_MAX_BYTES = 200
 # reparse_source's bounded wait on the per-source parse lock. Effectively a
 # non-blocking probe: that lock is held by process_source from replace_elements

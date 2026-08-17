@@ -13,6 +13,45 @@ def safe_filename(file_name: str) -> str:
     return cleaned or "source.bin"
 
 
+# ext4/XFS/NTFS cap one path component at 255 BYTES. APFS/HFS+ count 255
+# UTF-16 units instead, so an over-long name writes fine on a dev Mac and only
+# fails in Linux production — as an OSError whose message carries the storage
+# absolute path. Filesystem protocol boundary, not a tunable budget.
+FILESYSTEM_NAME_MAX_BYTES = 255
+
+
+def stored_upload_name(source_id: str, file_name: str) -> str:
+    """The on-disk component for one uploaded source:
+    ``{source_id}_{safe_filename(file_name)}``, kept within
+    ``FILESYSTEM_NAME_MAX_BYTES`` by clipping the name's stem on ENCODED bytes
+    (never mid-character). Browsers accept client file names up to 255 bytes
+    of their own, so the composed component can reach 255 + prefix bytes.
+
+    Only this DERIVED disk name is shortened; ``sources.file_name`` and
+    ``sources.title`` keep the client's value whole, so nothing user-visible
+    is truncated. The extension survives clipping because consumers dispatch
+    on the STORED path's suffix (``read_source_text`` recognises
+    .md/.markdown/.txt); an extension that cannot fit the budget by itself is
+    garbage, treated as part of the stem and clipped with it.
+    """
+    name = safe_filename(file_name)
+    prefix = f"{source_id}_"
+    budget = FILESYSTEM_NAME_MAX_BYTES - len(prefix.encode("utf-8"))
+    if len(name.encode("utf-8")) <= budget:
+        return prefix + name
+    suffix = Path(name).suffix
+    stem_budget = budget - len(suffix.encode("utf-8"))
+    if not suffix or stem_budget <= 0:
+        suffix, stem_budget = "", budget
+    stem = name[: len(name) - len(suffix)]
+    clipped = stem.encode("utf-8")[:stem_budget].decode("utf-8", "ignore")
+    # Byte clipping can strip a short stem to nothing (a lone multi-byte
+    # character cut mid-sequence). The fallback is itself sliced to the stem
+    # budget so the guarantee stays arithmetic rather than resting on ids
+    # being fixed-width (`src-` + 32 hex leaves a ~218-byte budget today).
+    return prefix + (clipped.strip() or "source"[:stem_budget]) + suffix
+
+
 def delete_source_file(file_path: str) -> None:
     """Remove one stored source file, then its per-notebook directory when the
     file was the last one in it.  Shared by SourceFileStore.delete (the
@@ -50,7 +89,7 @@ class SourceFileStore:
     ) -> Path:
         source_dir = self.storage_dir / "notebooks" / notebook_id
         source_dir.mkdir(parents=True, exist_ok=True)
-        stored_path = source_dir / f"{source_id}_{safe_filename(file_name)}"
+        stored_path = source_dir / stored_upload_name(source_id, file_name)
         stored_path.write_bytes(content)
         return stored_path
 
