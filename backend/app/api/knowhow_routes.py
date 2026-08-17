@@ -14,6 +14,7 @@ from app.api.deps import (
     content_overview_service,
     get_current_user,
     notebook_access_repository as _kh_access,
+    notebook_capability_allowed,
     repository,
     require_notebook_capability,
     require_notebook_read,
@@ -1219,21 +1220,26 @@ def transfer_knowhow_table(
     repo = repository()
     principal = session_audit_principal(user)
     access = _kh_access()
-    # 只有 copy 能放宽到「只读成员」——写成 `read if copy else access` 而不是
-    # `access if move else read`，是为了失败关闭（默认最严兜底，同
-    # require_notebook_capability 的每个能力当前都解析到 owner-only 判定的
-    # 取向）：将来若多出第三种 mode，它继承的是 owner-only 的强守卫，而不是
-    # 悄悄拿到只读成员权限。
+    # 只有 copy 能放宽到「只读成员」——写成 `read if copy else 写判定` 而不是
+    # `写判定 if move else read`，是为了失败关闭（默认最严兜底）：将来若多出
+    # 第三种 mode，它继承的是写级别的强守卫，而不是悄悄拿到只读成员权限。
     # 今天两者等价（mode 是 Literal["copy","move"]），差别只在未来。
-    source_check = (
-        access.user_can_read_notebook
+    # 写半走 notebook_capability_allowed("knowhow:write", ...) 而不是手拼
+    # user_can_access_notebook：与本文件 21 个装饰器端点吃同一张能力表，
+    # P1/P2 翻转 knowhow:write 时 move/目标库判定自动跟随——否则会出现
+    # 「组管理员能改每个格子、却复制/移动不了整张表」的半翻转，且报的还是
+    # 与「库不存在」同码的 404。读半（copy 的源库）沿用 user_can_read_notebook。
+    source_ok = (
+        access.user_can_read_notebook(notebook_id, principal.identity_id)
         if payload.mode == "copy"
-        else access.user_can_access_notebook
+        else notebook_capability_allowed(
+            "knowhow:write", notebook_id, principal.identity_id
+        )
     )
-    if not source_check(notebook_id, principal.identity_id):
+    if not source_ok:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    if not access.user_can_access_notebook(
-        payload.target_notebook_id, principal.identity_id
+    if not notebook_capability_allowed(
+        "knowhow:write", payload.target_notebook_id, principal.identity_id
     ):
         raise HTTPException(status_code=404, detail="Notebook not found")
     try:

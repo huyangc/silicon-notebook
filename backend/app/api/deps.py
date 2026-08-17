@@ -100,20 +100,6 @@ async def require_notebook_read(
     return notebook_id
 
 
-def notebook_write_allowed(notebook_id: str, user_id: str) -> bool:
-    """能力判定的纯函数版本(非 ``Depends``)。
-
-    与 ``require_notebook_capability`` 的 "owner" 级判据逐字相同——供路由体内
-    **必须先从别的 id 反查出 notebook_id、再自查**的场景复用(source_routes.py
-    的 parse_source/delete_source:notebook_id 不是这两个端点 URL 上的路径参数,
-    owner 判定没法挂在静态的 ``Depends(require_notebook_capability(...))`` 上,
-    只能在函数体内先解析出 notebook_id 再调用它)。别在调用点手拼
-    ``source_owner(source_id) == user.id`` 这类判据的第二份拷贝——群组授权
-    (P1/P2)落地时,唯一要跟着改的就是这一个函数。
-    """
-    return notebook_access_repository().user_can_access_notebook(notebook_id, user_id)
-
-
 # --------------------------------------------------------------------------
 # 按能力命名的 notebook 写守卫(P0-T2)。
 #
@@ -126,6 +112,25 @@ def notebook_write_allowed(notebook_id: str, user_id: str) -> bool:
 #
 # 值域目前只有 "owner" 一档(P0 冻结,见 test_notebook_capability_guard.py 的
 # value-domain 断言)。
+#
+# ⚠ 群组授权(P1/P2)动这张表时,还有四个**表外**的写谓词/写投影消费点,翻转
+# 能力级别时必须逐处核对(它们不经这张表,漏掉就是「API 收写而 UI 只读」或
+# 「Agent 面与浏览器面口径分叉」):
+#   1. `user_or_agent_scope` 的 session 分支(本文件下方)——Agent/MCP 面,
+#      CLAUDE.md「MCP 工具面」红线已登记其独立的 owner-only 取向;
+#   2. `knowledge_routes.py` 的 `can_edit` 响应投影——驱动前端编辑控件显隐,
+#      判定放宽时它必须同步,否则新获授权的成员看到的是只读界面;
+#   3. `knowhow_routes.py::transfer_knowhow_table` 的 mode 门(copy=读/move=写,
+#      写半已走 notebook_capability_allowed,读半沿用 user_can_read_notebook);
+#   4. `source_routes.py` 的 parse/delete 体内自查(已走
+#      notebook_capability_allowed("sources:write"),随表自动翻转)。
+#
+# ⚠ `reports:write` 的已知前瞻:设计文档(docs/superpowers/specs/
+# 2026-08-17-group-knowledge-sharing-design_zh.md §4)把「在共享库内创建自己的
+# 深度报告」放在成员(viewer)档,而这里的 9 个 report 写端点挂的是同一个
+# notebook 级能力——P1 落地成员自有报告时,这批端点需要行级 `created_by` 判定
+# (谁建的谁能 generate/cancel/delete),不是翻一格表就完事。现在登记,免得
+# P1 才发现接缝形状不够。
 _CAPABILITY_LEVELS: dict[str, str] = {
     "sources:write": "owner",
     "kg:write": "owner",
@@ -138,6 +143,7 @@ _CAPABILITY_LEVELS: dict[str, str] = {
 }
 
 
+@lru_cache
 def require_notebook_capability(capability: str):
     """按能力命名的 notebook 写守卫工厂。
 
@@ -155,6 +161,34 @@ def require_notebook_capability(capability: str):
     level = _CAPABILITY_LEVELS[capability]
     if level == "owner":
         return require_notebook_write
+    raise AssertionError(f"unknown notebook capability level: {level!r}")  # pragma: no cover
+
+
+# 工厂挂 @lru_cache 的理由写在这里而不是工厂 docstring:P0 阶段每个能力都返回
+# 同一个 require_notebook_write 对象,缓存是 no-op;但 P2 按能力返回不同闭包时,
+# FastAPI 的每请求依赖缓存按 callable 身份去重——不缓存的话,同一路由声明两个
+# 能力依赖就会各拿一个新函数对象、多跑一次判定查询。现在加是零成本消掉那个坑。
+
+
+def notebook_capability_allowed(capability: str, notebook_id: str, user_id: str) -> bool:
+    """能力判定的纯函数版本(非 ``Depends``),与工厂共用同一张能力表。
+
+    供路由体内**必须先从别的 id 反查出 notebook_id、再自查**的场景复用
+    (source_routes.py 的 parse_source/delete_source:notebook_id 不是这两个端点
+    URL 上的路径参数,守卫没法挂在静态的 ``Depends(...)`` 上)。带 ``capability``
+    形参是为了让这些体内调用点与 73 个装饰器点吃**同一张** ``_CAPABILITY_LEVELS``
+    表:P1/P2 翻转某个能力的级别时,体内点自动跟随,不会出现「组管理员能整库
+    重解析、却删不掉单篇来源」的半翻转。未知能力名同样当场 ``KeyError``。
+
+    别在调用点手拼 ``source_owner(source_id) == user.id`` 这类判据的第二份拷贝。
+    注意「翻转能力级别时要核对的表外消费点」清单在 ``_CAPABILITY_LEVELS`` 上方
+    的注释里——本函数只覆盖「进表」的那部分。
+    """
+    level = _CAPABILITY_LEVELS[capability]
+    if level == "owner":
+        return notebook_access_repository().user_can_access_notebook(
+            notebook_id, user_id
+        )
     raise AssertionError(f"unknown notebook capability level: {level!r}")  # pragma: no cover
 
 

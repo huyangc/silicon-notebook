@@ -734,16 +734,13 @@ def get_scheduler(repo: Any) -> ProjectionScheduler:
 # unchanged, exactly like every other function in this module.
 #
 # Deliberately appended here, AFTER build_projector/ProjectionScheduler/
-# get_scheduler rather than interleaved earlier in the file: this file's
-# lines 133-152 (build_projector's body) are EXACT-LINE pinned by
-# test_repository_callers_static.py's INDEPENDENT_PRIVATE_SITES (`_runtime`
-# at line 138) and test_repository_surface_manifest.py's
-# TASK6_KNOWHOW_ALLOWED_CONSUMERS (`_runtime`/`settings` at lines 138/140 —
-# from the PRE-EXISTING PR-1 Task 6, a different task under the same number;
-# see that constant's own docstring). Inserting anything ABOVE those lines
-# would shift them and break both guards; appending at EOF is the zero-risk
-# option (task-3-report-pr23.md documents the identical reasoning for why
-# ITS OWN test-file registration went to EOF instead of interleaved).
+# get_scheduler rather than interleaved earlier in the file. Historical note:
+# this placement was originally forced by exact-line pinning in
+# test_repository_callers_static.py / test_repository_surface_manifest.py —
+# both were RETIRED in #307; today's architecture guards are semantic
+# ({path, scope, kind, target}, no line numbers), so nothing pins line
+# positions anymore. The layout is kept as-is because moving code to
+# "modernize" a comment is pure churn; new additions may interleave freely.
 
 
 _TEMPLATE_KIND_HINTS: dict[str, str] = {
@@ -2169,11 +2166,10 @@ def complete_row(
 # 人工评审】的建议，且 shared-column 保存扇出会把同组所有兄弟行一起改写（见
 # update_knowhow_cells），组一致性天然保持。故这里不加 anchor 跳过是对的，勿"修"。
 #
-# ``md_normalize`` 的 import 放在这里（而非文件顶部 import 块）是与上面
-# build_projector/optimize_cell 完全相同的零行移位理由：往文件顶部插入会移动
-# INDEPENDENT_PRIVATE_SITES/TASK*_KNOWHOW_ALLOWED_CONSUMERS 已按精确行号钉住的
-# 138/716 两个 `_runtime` 落点；本节自己的新 `_runtime` 落点（reformat_cell 内）
-# 已作为第三个独立落点登记在两个守卫测试里。
+# ``md_normalize`` 的 import 位置属历史布局：当年「零行移位」是为了不动
+# 已按精确行号钉住的守卫落点，但那套行号钉死机制已随 #307 整体退役（现行
+# 架构守卫是语义化四元组、无行号）。import 留在原地只是避免无意义搬动，
+# 想上提到文件顶部 import 块也完全安全。
 from app.services.knowhow import md_normalize
 
 _REFORMAT_SCHEMA_HINT = '{"reformatted_md": ""}'
@@ -2289,13 +2285,12 @@ def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> di
 # the same call, which cannot be expressed as a pure pre-fetched-dict
 # transform.
 #
-# ``hashlib``/``textops`` are imported HERE (not hoisted to the file's own
-# top-of-module import block) for the same zero-line-shift reason documented
-# above build_template_xlsx/optimize_cell: build_projector's body is EXACT-
-# LINE pinned (lines 133-152) by test_repository_callers_static.py's
-# INDEPENDENT_PRIVATE_SITES and test_repository_surface_manifest.py's
-# TASK6_KNOWHOW_ALLOWED_CONSUMERS; inserting anything above those lines
-# (including a top-of-file import) would shift them and break both guards.
+# ``hashlib``/``textops`` are imported HERE (not hoisted to the top-of-module
+# import block) as historical layout only: the exact-line pinning that once
+# forbade insertions above (test_repository_callers_static.py /
+# test_repository_surface_manifest.py) was retired in #307 — current guards
+# are semantic and line-number-free. Hoisting is safe; kept in place to avoid
+# no-op churn.
 import hashlib
 
 from app.services.knowhow import textops

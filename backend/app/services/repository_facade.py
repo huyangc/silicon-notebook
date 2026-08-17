@@ -3701,7 +3701,8 @@ class RepositoryFacade:
         动作),但仍作为 item 呈现供前端展示进度。
 
         「晋升候选」子项仅对 admin 呈现 —— 非 admin 也能创建晋升候选
-        (propose_promotion 只受 require_notebook_access 守卫),但深链目标
+        (propose_promotion 只受 require_notebook_capability("knowledge:write")
+        守卫,P0 阶段解析为 owner-only),但深链目标
         /promotion-queue 是 admin-only(403),故对非 admin 隐藏该项以免铃铛
         指向一个必 403 的动作。"""
         return self._runtime.pending_actions_service.list_for_user(user_id)
