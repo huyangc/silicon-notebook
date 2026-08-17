@@ -38,7 +38,10 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # and notebook-only definitions layered over the global object_schemas baseline.
 # v48 adds sources.agent_profile_id (nullable; NULL means "a person added
 # this source"), the provenance an Agent-facing delete has to prove.
-SCHEMA_VERSION = 48
+# v49 adds the group-sharing tables (groups, group_members, notebook_grants)
+# for P1 of group knowledge sharing. Additive only: no consumer reads them
+# yet, so this migration is zero-behavior-change.
+SCHEMA_VERSION = 49
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2372,6 +2375,91 @@ class SqliteMigrator:
         """
         with self._connect() as db:
             self.add_column_if_missing(db, "sources", "agent_profile_id", "TEXT")
+
+    def _migration_49(self) -> None:
+        """Group knowledge sharing P1: groups, group membership, notebook grants.
+
+        Zero behavior change — three additive tables with no reader or writer
+        anywhere in the codebase yet. ``access_sql.py``'s read-access predicate
+        extension, the group/grant API surface and the frontend all land in
+        later tasks of the same feature; this migration only lays the schema
+        down so later tasks touch data, not DDL.
+
+        ``groups`` is the group row itself. ``kind`` (project/department/domain)
+        and every other enumerated column in this migration is validated in the
+        application layer, not by a ``CHECK`` constraint — the design doc's
+        already-decided list requires this, because the forward-shadow UNIQUE
+        park strategy on ``notebook_grants`` (see below) depends on at least one
+        of ``principal_type``/``principal_id`` staying free of both CHECK and FK
+        so it remains a legal SENTINEL_TEXT/NULL park column; a CHECK on
+        ``principal_type`` would remove that candidate.
+
+        ``group_members`` is deliberately shaped like ``notebook_members``
+        (v16): composite ``(group_id, user_id)`` primary key, both columns
+        explicitly ``NOT NULL`` so this table needs no entry in the shadow
+        migration's ``_SQLITE_NULL_GUARD_KEYS`` (that set exists only for
+        rowid tables whose declared PK is nullable — this one's isn't).
+        ``ON DELETE CASCADE`` on ``group_id`` means deleting a group silently
+        drops its membership rows; ``user_id`` has no ON DELETE clause,
+        mirroring every other ``REFERENCES users(id)`` column in this schema.
+
+        ``notebook_grants`` is the polymorphic authorization edge: one row
+        grants ``role`` (viewer|admin) to ``principal_type`` (user|group|
+        group_admins|everyone) identified by ``principal_id``. ``principal_id``
+        is deliberately a bare, unconstrained TEXT column with NO foreign key —
+        it references either ``users.id`` or ``groups.id`` depending on
+        ``principal_type``, or is NULL for the ``everyone`` principal (no
+        single-table FK can express that). This mirrors the existing
+        ``catalog_candidates.job_id`` precedent (v39): a real FK here would
+        make whichever table it points to a non-leaf table for the
+        forward-shadow replicator's UNIQUE-conflict park strategy, and the
+        ``UNIQUE (notebook_id, principal_type, principal_id)`` index below
+        needs a column it CAN safely park a poison value into during conflict
+        resolution. ``id`` is the primary key and every PK/composite-PK column
+        in this migration is explicitly ``NOT NULL`` for the same
+        null-guard-avoidance reason as ``group_members`` above.
+
+        All three tables are additive with no backfill: no existing row in any
+        other table implies a group or a grant, so there is nothing to
+        populate. ``notebook_grants`` and ``group_members`` both CASCADE off
+        their owning row (``notebooks``/``groups``) so deleting the parent
+        cannot leave an orphaned authorization or membership row behind.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS groups (
+                  id          TEXT NOT NULL PRIMARY KEY,
+                  name        TEXT NOT NULL,
+                  kind        TEXT NOT NULL DEFAULT 'project',
+                  description TEXT NOT NULL DEFAULT '',
+                  created_by  TEXT REFERENCES users(id),
+                  created_at  TEXT NOT NULL,
+                  updated_at  TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS group_members (
+                  group_id  TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                  user_id   TEXT NOT NULL REFERENCES users(id),
+                  role      TEXT NOT NULL DEFAULT 'member',
+                  added_at  TEXT NOT NULL,
+                  added_by  TEXT REFERENCES users(id),
+                  PRIMARY KEY (group_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id);
+                CREATE TABLE IF NOT EXISTS notebook_grants (
+                  id             TEXT NOT NULL PRIMARY KEY,
+                  notebook_id    TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  principal_type TEXT NOT NULL,
+                  principal_id   TEXT,
+                  role           TEXT NOT NULL,
+                  created_by     TEXT REFERENCES users(id),
+                  created_at     TEXT NOT NULL,
+                  UNIQUE (notebook_id, principal_type, principal_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_notebook_grants_nb ON notebook_grants(notebook_id);
+                CREATE INDEX IF NOT EXISTS idx_notebook_grants_principal ON notebook_grants(principal_type, principal_id);
+                """
+            )
 
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

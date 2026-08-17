@@ -116,8 +116,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 影子索引，v45 user_profiles.ui_mode 界面模式偏好列，v46 element→chunk
     # 反查索引 chunk_elements / 其离线回填账本 chunk_element_backfills /
     # unified_kg_state.chunk_elements_indexed 标记列，v47 notebook schema
-    # 覆盖表，以及 v48 sources.agent_profile_id 出处列，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 48
+    # 覆盖表，v48 sources.agent_profile_id 出处列，以及 v49 群组知识共享 P1
+    # 的 groups / group_members / notebook_grants 三张表，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 49
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]
