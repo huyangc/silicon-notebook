@@ -511,6 +511,13 @@ def test_pending_report_of_a_member_without_own_notebooks(postgres_database, sto
         _insert_user(connection, "u-owner")
         _insert_user(connection, "u-member")            # 没有任何自有 notebook
         _insert_notebook(connection, "n-shared", "u-owner")
+        # 建报告的前提本来就是读权;铃铛现叠加同一读谓词(codex #517 R1 P2),
+        # 夹具如实给出成员行。
+        connection.execute(
+            "INSERT INTO notebook_members (notebook_id, user_id, role, added_at) "
+            "VALUES (%s,%s,'reader',%s)",
+            ("n-shared", "u-member", NOW),
+        )
         _insert_report(connection, "rep-member", "n-shared", "u-member", NOW,
                        status="intent_ready")
 
@@ -528,6 +535,18 @@ def test_pending_report_of_a_member_without_own_notebooks(postgres_database, sto
         if it["type"] == "report_outline"
     ]
     assert owner_reports == []
+
+    # 撤权即出铃铛、恢复即回(codex #517 R1 P2 的 PG 侧对等断言)。
+    with postgres_database.write() as connection:
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n-shared", "u-member"),
+        )
+    gone = [
+        it for it in store.pending_actions_projection_rows("u-member")["items"]
+        if it["type"] == "report_outline"
+    ]
+    assert gone == []
 
 
 def test_browser_local_day_window_selects_that_local_day(postgres_database, store):

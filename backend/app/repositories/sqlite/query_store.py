@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.repositories.sqlite import access_sql
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
     SEARCH_HIT_CAP,
@@ -1108,14 +1109,21 @@ class QueryStore:
             # 在 `name_of` 里查不到,条目会显示成一条没有出处的「深度报告《…》」。
             # 零新增往返——同一条语句多一个 join。报告是本人建的(`created_by`
             # 已经在 WHERE 里),所以库名对他不是新披露。
+            #
+            # 另叠加规范读谓词(codex #517 R1 P2):创建者可能在报告等确认期间
+            # 失去该库的读权(撤授权边/被移出组/共享撤销)——此时每个报告端点都
+            # 对他 404,铃铛却还挂着一条永远点不开的待确认项。按「授权即时生效」
+            # 的同一口径,失权的报告不进铃铛;恢复读权后自动回来(条目从未删除)。
             reports = db.execute(
                 "SELECT r.id AS id, r.question AS question, "
                 "r.notebook_id AS notebook_id, r.created_at AS created_at, "
                 "nb.name AS notebook_name "
                 "FROM reports r LEFT JOIN notebooks nb ON nb.id = r.notebook_id "
                 "WHERE r.status IN ('intent_ready','outline_ready') "
-                "AND r.created_by = ? ORDER BY r.updated_at DESC",
-                (user_id,),
+                "AND r.created_by = ? AND "
+                + access_sql.read_access_exists_clause("r")
+                + " ORDER BY r.updated_at DESC",
+                (user_id, *access_sql.read_access_params(user_id)),
             ).fetchall()
             for row in reports:
                 items.append(
