@@ -425,9 +425,20 @@ class QueryStore:
 
     @staticmethod
     def summary_notebook_row(db: sqlite3.Connection, notebook_id: str):
+        """单库详情的行。
+
+        `_owner_username` 与列表侧 `joined_notebook_rows` / `granted_notebook_rows`
+        的同名列同义,喂 `NotebookSummary.shared_from`(P1-T4 修:详情投影此前**从不**
+        回填 access/shared_from,reader 顶栏整段是死代码)。用 LEFT JOIN 而不是另发
+        一次点查:这条路径是「打开笔记本」的现场,多一次往返比多一个 join 贵得多。
+        """
+        # ⚠ `notebooks` 刻意不起别名:`SHARED_TO_GROUPS_COLUMN` 的关联子查询写的是
+        # `notebooks.id`,而 SQLite/PG 一旦给表起了别名,原表名就不再可用。
         return db.execute(
-            "SELECT *, " + SHARED_TO_GROUPS_COLUMN
-            + " FROM notebooks WHERE id = ? AND status != 'copying'",
+            "SELECT notebooks.*, u.username AS _owner_username, "
+            + SHARED_TO_GROUPS_COLUMN
+            + " FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by "
+            "WHERE notebooks.id = ? AND notebooks.status != 'copying'",
             (notebook_id,),
         ).fetchone()
 
@@ -441,19 +452,39 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
-    def joined_notebook_rows(db: sqlite3.Connection, user_id: str):
+    def joined_notebook_rows(
+        db: sqlite3.Connection, user_id: str, notebook_id: "str | None" = None
+    ):
+        """经只读共享(`notebook_members`)加入的笔记本。
+
+        传 `notebook_id` 就是点查形态(P1-T4:单库详情要判「我在不在这本库的成员行
+        里」)。与 `granted_notebook_rows` 同一个理由做成参数而不是另写一条:去重口径
+        是**成员行优先**,详情与列表必须用同一条谓词判「有没有成员行」,分叉了会让同
+        一本库在卡片上和打开之后是两副面孔。
+        """
+        point_filter = "" if notebook_id is None else "AND m.notebook_id = ? "
+        params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return db.execute(
             "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
             "JOIN notebooks nb ON nb.id = m.notebook_id "
             "LEFT JOIN users u ON u.id = nb.created_by "
-            "WHERE m.user_id = ? AND nb.status != 'copying' "
+            "WHERE m.user_id = ? " + point_filter
+            + "AND nb.status != 'copying' "
             "ORDER BY m.added_at ASC",
-            (user_id,),
+            params,
         ).fetchall()
 
     @staticmethod
-    def granted_notebook_rows(db: sqlite3.Connection, user_id: str):
+    def granted_notebook_rows(
+        db: sqlite3.Connection, user_id: str, notebook_id: "str | None" = None
+    ):
         """「经群组授权边可读」的笔记本列表投影(群组知识共享 P1-T3)。
+
+        ⚠ 传 `notebook_id` 就是同一条查询的**点查**形态(P1-T4:单库详情要回填
+        `granted_via`)。刻意做成参数而不是另写一条:两处的谓词——两个群组主体、
+        `group_admins` 只到组管理员、排除 copying——必须逐字相同,而这份谓词分叉了
+        没有任何测试会自然抓到(它不报错,只是详情页与列表页对同一本库给出不同的
+        来源标注)。
 
         与 `joined_notebook_rows` 是**同一类**东西,理由也一样(见
         `access_sql.py` 模块 docstring 的「刻意不收口」):它不是「我能不能读这个
@@ -482,6 +513,12 @@ class QueryStore:
         **该用户加入的组数**增长(EXPLAIN QUERY PLAN 实测)。PG 侧刻意**不**照抄:
         标准 SQL 的 `CROSS JOIN` 不带 `ON`,而 PG 有真实统计信息、自己就会选对。
         """
+        # 点查那半刻意**在下面那条语句之外**算好:
+        # `test_group_partition_query_is_bounded_by_my_memberships` 把这条语句的查询
+        # 计划钉死,而它靠 `inspect.getsource` 把执行调用之后的全部字符串字面量拼成
+        # SQL —— 点查子句写在里面会被无条件粘进列表形态,参数个数当场对不上。
+        point_filter = "" if notebook_id is None else "AND ng.notebook_id = ? "
+        params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return db.execute(
             "SELECT nb.*, u.username AS _owner_username, "
             "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind "
@@ -491,11 +528,11 @@ class QueryStore:
             "JOIN groups g ON g.id = gm.group_id "
             "JOIN notebooks nb ON nb.id = ng.notebook_id "
             "LEFT JOIN users u ON u.id = nb.created_by "
-            "WHERE gm.user_id = ? "
-            "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
+            "WHERE gm.user_id = ? " + point_filter
+            + "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
             "AND nb.status != 'copying' "
             "ORDER BY nb.created_at ASC, nb.id ASC, g.id ASC",
-            (user_id,),
+            params,
         ).fetchall()
 
     @staticmethod

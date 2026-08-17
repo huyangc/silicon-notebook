@@ -171,6 +171,23 @@ export function workspaceCapabilities(access: string | undefined, role: string) 
 }
 
 
+/**
+ * 笔记本列表「角色」列的文案。
+ *
+ * 此前那一列**整列写死 "Owner"**,于是只读共享进来的库也被标成所有者——与挂载选择器
+ * 把别人的库标成「我的笔记本」是同一类事实错误的标签,同批修掉。判据按行取;
+ * `override` 只给「群组」分区用(那一批的 `access` 同样是 reader,但「群组成员」比
+ * 「只读成员」更准)。
+ */
+export function notebookRoleText(
+  notebook: { access?: string },
+  override?: string,
+): string {
+  if (override) return override;
+  return (notebook.access ?? "owner") === "reader" ? "只读成员" : "Owner";
+}
+
+
 export function doneItemDestination(kind: string | undefined): "sources" | "kg" {
   return kind === "paper_meta_done" ? "sources" : "kg";
 }

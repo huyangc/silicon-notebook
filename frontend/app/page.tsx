@@ -91,6 +91,7 @@ import {
   type ScaleIndexOp, type ScaleIndexStatus,
 } from "./scale-index";
 import {
+  getShareState,
   shareNotebook,
   unshareNotebook,
   previewShared,
@@ -102,7 +103,7 @@ import {
   shareLinkCopyToast,
   parseShareToken,
   buildShareLink,
-  type ShareResponse,
+  type ShareState,
   type SharedPreview,
   type SharedByMeItem,
 } from "./notebook-share";
@@ -181,6 +182,7 @@ import { AccountMenu } from "./account-menu";
 import { GroupsModal } from "./groups-panel";
 import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
 import { grantedViaLabel, isGroupGranted, partitionByGrant } from "./group-api";
+import { NotebookMenuActions, ReaderNotebookBadge } from "./notebook-reader-actions";
 import { PasswordChangeModal } from "./password-change-modal";
 import { AskComposer } from "./ask-composer";
 import { quotedPhraseHint } from "./query-syntax";
@@ -246,6 +248,7 @@ import {
   historyModeForTransition,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
   notebookIsActive,
+  notebookRoleText,
   openMemoryDeepLink,
   ownsWorkspaceRun,
   restoreLatestConversation,
@@ -1019,8 +1022,12 @@ export default function Home() {
   const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
   const [edgeReviewOpen, setEdgeReviewOpen] = useState(false);
   const [edgeBusy, setEdgeBusy] = useState(false);
-  // 分享(owner 侧):shareModal 存分享结果并驱动分享弹窗;shareBusy 覆盖分享/取消分享请求
-  const [shareModal, setShareModal] = useState<ShareResponse | null>(null);
+  // 分享(owner 侧):shareModal 存**当前**分享状态并驱动分享弹窗。它现在由
+  // `GET .../share` 填充(只读),而不是打开弹窗就 POST 一条链接出来——弹窗里还有
+  // 「共享给群组」一节,只想共享给群组的用户不该顺带被发一条分享链接(P1-T4)。
+  // `share_token` 为空即「还没有链接」,链接区渲染成「开启链接分享」按钮。
+  // shareBusy 覆盖开启/取消分享请求。
+  const [shareModal, setShareModal] = useState<ShareState | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
   // 接收分享(拷贝侧):sharedPreview 存预览并驱动预览弹窗;copyBusy 覆盖拷贝/加入请求
   const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
@@ -5516,13 +5523,27 @@ export default function Home() {
   }
 
   // --- 分享与拷贝(Phase 1) --------------------------------------------
-  // A. 分享(owner 侧):开启分享 → 拿 token → 打开分享弹窗
+  // A. 打开分享弹窗(owner 侧):**只读**当前状态,零副作用。
+  //
+  // 这里刻意不 POST(P1-T4):弹窗里除了链接还有「共享给群组」一节,而 POST 会当场
+  // 铸出一条分享链接——一次纯查看的动作产生了持久副作用,只想共享给群组的用户会
+  // 莫名其妙多出一条链接。链接改由用户显式点「开启链接分享」时才发 POST。
   async function openShareModal() {
     if (!currentNotebook) return;
     setShareBusy(true);
     try {
-      const result = await shareNotebook(currentNotebook.id);
-      setShareModal(result);
+      setShareModal(await getShareState(currentNotebook.id));
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  // 显式开启链接分享。后端幂等(已有 token 原样返回),所以重复点不会换链接。
+  async function enableShareLink() {
+    if (!currentNotebook) return;
+    setShareBusy(true);
+    try {
+      setShareModal(await shareNotebook(currentNotebook.id));
     } finally {
       setShareBusy(false);
     }
@@ -5539,14 +5560,17 @@ export default function Home() {
     await handleShareLinkCopy(link);
   }
 
-  // 取消分享:撤销 token → 关弹窗
+  // 取消分享:撤销 token 并踢掉只读成员。**弹窗不关**——它同时是「共享给群组」的
+  // 界面,而取消链接对群组授权是空操作,关掉整个弹窗会让用户以为群组共享也没了。
+  // 只把链接态清空,链接区回到「开启链接分享」。
   async function handleUnshare() {
     if (!currentNotebook) return;
     setShareBusy(true);
     try {
       await unshareNotebook(currentNotebook.id);
-      setShareModal(null);
-      setToast("已取消分享，链接立即失效");
+      setShareModal({ share_token: "", copyable: false, size: {} });
+      await loadNotebookCollection();
+      setToast("已取消链接分享，链接立即失效");
     } finally {
       setShareBusy(false);
     }
@@ -5624,7 +5648,7 @@ export default function Home() {
       const items = await sharedByMe();
       setSharedByMeList(items);
       await loadNotebookCollection();
-      setToast("已取消分享，链接立即失效");
+      setToast("已取消链接分享，链接立即失效");
     } finally {
       setShareBusy(false);
     }
@@ -6135,29 +6159,11 @@ export default function Home() {
               </button>
               <div className="workspace-title-main">
                 {isReader ? (
-                  <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
-                    <h1 className="notebook-title-input" style={{ margin: 0 }}>{currentNotebook.name}</h1>
-                    <span className="new-pill" title="只读，无写权限">
-                      {isGroupGranted(currentNotebook)
-                        ? `只读 · ${grantedViaLabel(currentNotebook)}`
-                        : `只读 · 来自 ${currentNotebook.shared_from || "他人"}`}
-                    </span>
-                    {/* 经群组共享进来的库**没有**「退出共享」:那个按钮打的是只读成员
-                        表,对群组授权一点作用都没有——点了会拿到一句成功提示,而库还
-                        在列表里,是一个必然发生的假失败。改为说清该找谁。 */}
-                    {isGroupGranted(currentNotebook) ? (
-                      <span className="tool-hint">由组管理员管理；要停止访问，请联系组管理员撤销共享，或在账户菜单的「群组」里退出该群组。</span>
-                    ) : (
-                      <button
-                        className="sort-button"
-                        disabled={leaveBusy}
-                        title="退出该只读共享（仅移除你自己的访问）"
-                        onClick={() => handleLeaveShared().catch(reportError)}
-                      >
-                        {leaveBusy ? "退出中…" : "退出共享"}
-                      </button>
-                    )}
-                  </div>
+                  <ReaderNotebookBadge
+                    notebook={currentNotebook}
+                    leaveBusy={leaveBusy}
+                    onLeave={() => { handleLeaveShared().catch(reportError); }}
+                  />
                 ) : (
                   <input
                     className="notebook-title-input"
@@ -7049,29 +7055,20 @@ export default function Home() {
           className="popover notebook-menu"
           style={{ left: menuPosition.left, top: menuPosition.top }}
         >
-          {/* 经群组共享进来的库不给「退出共享」——那个按钮删的是只读成员行,对群组
-              授权边是空操作,却会弹一句「已退出」而库仍在列表里(评审抓的假失败)。 */}
-          {menuNotebook.access === "reader" && isGroupGranted(menuNotebook) ? (
-            <span className="notebook-menu-note">由组管理员管理</span>
-          ) : menuNotebook.access === "reader" ? (
-            <button
-              className="danger"
-              onClick={() => {
-                const target = menuNotebook;
-                setMenuNotebookId(null);
-                setMenuPosition(null);
-                leaveNotebook(target.id)
-                  .then(() => loadNotebookCollection())
-                  .then(() => setToast("已退出只读共享"))
-                  .catch(reportError);
-              }}
-            >退出共享</button>
-          ) : (
-            <>
-              <button onClick={() => { openNotebookEditor(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}>编辑信息</button>
-              <button className="danger" onClick={() => { openDeleteConfirm(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}>删除笔记本</button>
-            </>
-          )}
+          <NotebookMenuActions
+            notebook={menuNotebook}
+            onLeave={() => {
+              const target = menuNotebook;
+              setMenuNotebookId(null);
+              setMenuPosition(null);
+              leaveNotebook(target.id)
+                .then(() => loadNotebookCollection())
+                .then(() => setToast("已退出只读共享"))
+                .catch(reportError);
+            }}
+            onEdit={() => { openNotebookEditor(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}
+            onDelete={() => { openDeleteConfirm(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}
+          />
         </div>
       )}
 
@@ -7110,41 +7107,52 @@ export default function Home() {
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>分享「{currentNotebook.name}」</h2>
-                <p>{shareModal.copyable
-                  ? "拿到链接的登录用户可将这个笔记本整份拷贝到自己的空间。"
-                  : "此笔记本较大，拿到链接的登录用户可以只读方式加入(浏览/问答/看图，不能修改)。"}</p>
+                <p>两种方式：发一条链接给具体的人，或者共享给一个群组（随成员进出自动生效与失效）。</p>
               </div>
               <button className="icon-button" onClick={() => setShareModal(null)} title="Close">×</button>
             </div>
             <div className="source-detail-body">
-              <label>分享链接
-                <div className="tag-row" style={{ marginTop: 6 }}>
-                  <input
-                    readOnly
-                    value={buildShareLink(shareModal.share_token, window.location.origin)}
-                    onFocus={(event) => event.currentTarget.select()}
-                    style={{ flex: 1 }}
-                  />
-                  <button className="sort-button" onClick={() => copyShareLink().catch(reportError)}>复制</button>
+              <span className="section-title">链接分享</span>
+              {shareModal.share_token ? (<>
+                <label>分享链接
+                  <div className="tag-row" style={{ marginTop: 6 }}>
+                    <input
+                      readOnly
+                      value={buildShareLink(shareModal.share_token, window.location.origin)}
+                      onFocus={(event) => event.currentTarget.select()}
+                      style={{ flex: 1 }}
+                    />
+                    <button className="sort-button" onClick={() => copyShareLink().catch(reportError)}>复制</button>
+                  </div>
+                </label>
+                <p className="tool-hint" style={{ margin: "2px 0 0" }}>
+                  {shareModal.copyable ? "他人可拷贝" : "笔记本较大，他人可只读加入"}
+                  {` · ${shareModal.size.sources ?? 0} 来源 · ${shareModal.size.nodes ?? 0} 节点 · ${shareModal.size.edges ?? 0} 边 · ${formatFileSize(shareModal.size.bytes ?? 0)}`}
+                </p>
+                <div className="tag-row">
+                  <button className="sort-button" disabled={shareBusy} onClick={() => handleUnshare().catch(reportError)}>
+                    {shareBusy ? "取消中…" : "取消链接分享"}
+                  </button>
                 </div>
-              </label>
-              <p className="tool-hint" style={{ margin: "2px 0 0" }}>
-                {shareModal.copyable ? "他人可拷贝" : "笔记本较大，他人可只读加入"}
-                {` · ${shareModal.size.sources} 来源 · ${shareModal.size.nodes} 节点 · ${shareModal.size.edges} 边 · ${formatFileSize(shareModal.size.bytes)}`}
-              </p>
-              {/* 借入参考库的「未共享门」:一旦这本笔记本被共享出去,它借来的参考库
-                  就停止参与检索(设计文档 §6.1)。提示要在动作之前给,而不是事后
-                  在失效边上解释——那时用户已经不知道是哪一步造成的。 */}
-              <p className="tool-hint" style={{ margin: "2px 0 0" }}>{BORROWED_BASE_SHARE_WARNING}</p>
+              </>) : (<>
+                <p className="tool-hint" style={{ margin: "2px 0 0" }}>
+                  还没有分享链接。开启后，拿到链接的登录用户可以拷贝这个笔记本，或（笔记本较大时）以只读方式加入。
+                </p>
+                {/* 借入参考库的「未共享门」:一旦这本笔记本被共享出去,它借来的参考库
+                    就停止参与检索(设计文档 §6.1)。提示挨着**将要触发它的那个按钮**,
+                    而不是事后在失效边上解释——那时用户已经不知道是哪一步造成的。 */}
+                <p className="tool-hint" style={{ margin: "2px 0 0" }}>{BORROWED_BASE_SHARE_WARNING}</p>
+                <div className="tag-row">
+                  <button className="new-pill" disabled={shareBusy} onClick={() => enableShareLink().catch(reportError)}>
+                    {shareBusy ? "开启中…" : "开启链接分享"}
+                  </button>
+                </div>
+              </>)}
               <NotebookGroupShare
                 notebookId={currentNotebook.id}
                 onChanged={() => { loadNotebookCollection().catch(reportError); }}
               />
-              <p className="tool-hint" style={{ margin: "2px 0 0" }}>
-                「取消分享」只撤销上面的链接并移除已加入的只读成员，不影响已经共享给群组的授权。
-              </p>
               <div className="tag-row">
-                <button className="sort-button" disabled={shareBusy} onClick={() => handleUnshare().catch(reportError)}>取消分享</button>
                 <button className="new-pill" onClick={() => setShareModal(null)}>完成</button>
               </div>
             </div>
@@ -7266,9 +7274,13 @@ export default function Home() {
                           >复制</button>
                         </div>
                       )}
-                      <p className="tool-hint" style={{ margin: "0" }}>
-                        {`${item.size.sources} 来源 · ${item.size.nodes} 节点 · ${item.size.edges} 边 · ${formatFileSize(item.size.bytes)}`}
-                      </p>
+                      {/* 规模统计只在有链接时算(纯群组共享的行后端刻意不跑那次统计,
+                          省掉 N 次新鲜复核),所以也只在有链接时显示。 */}
+                      {item.share_token && (
+                        <p className="tool-hint" style={{ margin: "0" }}>
+                          {`${item.size.sources ?? 0} 来源 · ${item.size.nodes ?? 0} 节点 · ${item.size.edges ?? 0} 边 · ${formatFileSize(item.size.bytes ?? 0)}`}
+                        </p>
+                      )}
                       {item.share_token && item.mode === "readonly" && (
                         <p className="tool-hint" style={{ margin: "0" }}>
                           只读成员:{item.members.length > 0 ? item.members.map((m) => m.username).join("，") : "暂无成员"}
@@ -7288,7 +7300,7 @@ export default function Home() {
                             disabled={shareBusy}
                             title="撤销分享链接并移除所有只读成员"
                             onClick={() => handleUnshareFromOverview(item.id).catch(reportError)}
-                          >取消分享</button>
+                          >取消链接分享</button>
                         </div>
                       )}
                     </div>
@@ -8917,18 +8929,21 @@ export default function Home() {
 }
 function NotebookList({
   entries,
-  roleText = "Owner",
+  roleText,
   openNotebook,
   openMemory,
   openMenu
 }: {
   entries: Array<{ notebook: NotebookSummary; index: number; hits: SearchHit[] }>;
-  /** 「角色」列的文案。「群组」分区传「群组成员」——那一批库的角色不是所有者。 */
+  /** 覆盖「角色」列的文案。「群组」分区传「群组成员」;省略时按每行的 access 判。 */
   roleText?: string;
   openNotebook: (id: string) => void;
   openMemory: (id: string) => void;
   openMenu: (id: string, event: MouseEvent<HTMLButtonElement>) => void;
 }) {
+  // 全部库都落在「群组」分区时,主区一行都没有——只剩一排孤零零的表头,读起来像
+  // 「这里本该有东西但没加载出来」。没有行就整段不渲染。
+  if (entries.length === 0) return null;
   return (
     <section className="notebook-list">
       <div className="notebook-list-header">
@@ -8947,7 +8962,7 @@ function NotebookList({
           <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.counts.sources ?? 0} 个来源</button>
           <button className="notebook-list-cell notebook-memory-link" onClick={() => openMemory(notebook.id)}>{notebook.counts.memories ?? 0} 条</button>
           <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
-          <button className="notebook-list-cell role-cell" onClick={() => openNotebook(notebook.id)}>{roleText}</button>
+          <button className="notebook-list-cell role-cell" onClick={() => openNotebook(notebook.id)}>{notebookRoleText(notebook, roleText)}</button>
           <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="笔记本操作">⋮</button>
         </article>
       ))}

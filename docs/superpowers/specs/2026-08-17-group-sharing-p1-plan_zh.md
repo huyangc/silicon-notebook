@@ -251,6 +251,24 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
     - 公开分享页**每次请求实时复核创建者的读权**:成员失权(撤授权边/被踢出组/
       组被删)后,他在该库发出的公开链接立刻 404;恢复读权则复活。owner 自己的
       报告不受影响(创建者=owner,读权恒成立)。
+  T4 落代码时留下的待登记项(逐条,别漏):
+  - **`GET /notebooks/{id}/mountable` 换了响应模型**:`NotebookRef` → `MountableNotebook`
+    (多一个 `origin ∈ base|mine|shared`,由 `MOUNT_VALID_EXPR` 已有的列信息投影,
+    零新增查询)。挂载选择器据它分三档「公共知识库 / 我的笔记本 / 共享给我的」——
+    「读权 ⇒ 可挂载」放开之后,别人 owner 的库也进候选,只按 `tier` 分会把它们标成
+    「我的笔记本」。角色矩阵与端点表要跟上。
+  - **新端点 `GET /notebooks/{id}/share`**(`notebook:manage`,只读):返回当前分享
+    链接状态,**不铸 token**、无 token 时**不算规模统计**。存在的理由是「打开分享
+    弹窗」不该有持久副作用(弹窗里还有「共享给群组」一节)。
+  - **`SharedByMeItem.group_count`** 与「已分享」口径改为**并集**:只读共享
+    (`notebooks.is_shared`)∨ 存在指向群组的授权边。徽标与总览同一个判据;
+    没有链接的行不算规模、不查成员(`mode`/`size`/`members` 说的都是链接)。
+  - **`NotebookSummary.access` / `shared_from` / `granted_via` 现在**详情也回填**
+    (此前只有列表)。去重口径与列表一致:**成员行优先**——既经分享链接加入又在被
+    授权群组里的人,`granted_via` 为空、「退出共享」仍然可用(它删的正是那条成员行)。
+  - **深度报告面对只读成员开放**(前端 `canManageReports` 恒真):报告按创建者行级
+    隔离,列表里出现的每一份都是本人建的。文档里「只读成员只能等待」那句同批订正。
+  - **待确认中心的报告条目现在带库名**(共享库里建的报告此前解析不出库名)。
 - `fangan_done.md` 不动(群组不在 silicon_notebook_fangan.md 范围)。
 - **P2 待办登记(P1-T2 评审转出,不在 P1 修)**:
   - P2-4 **Memory 热路径读谓词的成本形状**:读权片段从 2 层 EXISTS 变成 5 层

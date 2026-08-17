@@ -89,10 +89,15 @@ export const createGroup = (
 export const getGroup = (groupId: string): Promise<GroupDetail> =>
   requestJson(`/groups/${groupId}`, { tag: TAG });
 
-export const renameGroup = (groupId: string, name: string): Promise<GroupDetail> =>
+/** 改名 + 改说明。`kind` 刻意不可改(后端 `extra="forbid"` 直接 422),分类要变就重建。 */
+export const updateGroup = (
+  groupId: string,
+  name: string,
+  description: string,
+): Promise<GroupDetail> =>
   requestJson(`/groups/${groupId}`, {
     method: "PATCH",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, description }),
     tag: TAG,
   });
 

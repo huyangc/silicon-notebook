@@ -49,13 +49,37 @@ test("mergeMountCandidates 把候选的 origin 捎到已挂载的边上(最常�
   assert.deepEqual(groupMountable(merged).shared.map((n) => n.id), ["2"]);
 });
 
-test("只存在于挂载边的失效边没有 origin,按 tier 归组(与本字段出现之前逐字一致)", () => {
+test("只存在于挂载边的失效边没有 origin:base 的仍归公共知识库", () => {
   const merged = mergeMountCandidates(
     [],
     [{ id: "9", name: "已不可用的知识库", tier: "base", active: false, inactive_reason: "原因" }],
   );
   assert.equal(merged[0].origin, undefined);
   assert.deepEqual(groupMountable(merged).public.map((n) => n.id), ["9"]);
+});
+
+// origin 缺席只剩一种形态:候选里没有、只存在于挂载边的**失效边**。这类边里
+// tier='personal' 的恰恰是别人家的库(共享被撤销 / 被挂库易主 / 本笔记本被共享而
+// 关掉借入边),落进「我的笔记本」正是这次要修的那句事实错误的标签。
+test("失效的 personal 边不落「我的笔记本」——那是别人家的库,归「共享给我的」", () => {
+  const merged = mergeMountCandidates(
+    [],
+    [{ id: "7", name: "同事的库", tier: "personal", active: false, inactive_reason: "共享已撤销" }],
+  );
+  const groups = groupMountable(merged);
+  assert.deepEqual(groups.mine, []);
+  assert.deepEqual(groups.shared.map((n) => n.id), ["7"]);
+  assert.equal(groups.shared[0].inactive_reason, "共享已撤销", "失效原因必须保留");
+});
+
+test("旧后端(全部候选都没有 origin)逐字回到 tier 两组分法:active 恒真,不落第三组", () => {
+  const groups = groupMountable([
+    { id: "1", name: "模拟", tier: "base", active: true, inactive_reason: "" },
+    { id: "2", name: "我的笔记", tier: "personal", active: true, inactive_reason: "" },
+  ]);
+  assert.deepEqual(groups.public.map((n) => n.id), ["1"]);
+  assert.deepEqual(groups.mine.map((n) => n.id), ["2"]);
+  assert.deepEqual(groups.shared, []);
 });
 
 test("groupMountable 按 tier 分成公共/我的两组", () => {

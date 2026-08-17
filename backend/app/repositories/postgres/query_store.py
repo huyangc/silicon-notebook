@@ -372,9 +372,16 @@ class QueryStore:
 
     @staticmethod
     def summary_notebook_row(db: Any, notebook_id: str):
+        """`sqlite/query_store.py::summary_notebook_row` 的镜像(含 `_owner_username`)。
+
+        ⚠ `notebooks` 刻意不起别名:`SHARED_TO_GROUPS_COLUMN` 的关联子查询写的是
+        `notebooks.id`,起了别名原表名就不再可用。
+        """
         return sqlite_compatible_notebook_row(db.execute(
-            "SELECT *, " + SHARED_TO_GROUPS_COLUMN
-            + " FROM notebooks WHERE id = %s AND status != 'copying'",
+            "SELECT notebooks.*, u.username AS _owner_username, "
+            + SHARED_TO_GROUPS_COLUMN
+            + " FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by "
+            "WHERE notebooks.id = %s AND notebooks.status != 'copying'",
             (notebook_id,),
         ).fetchone())
 
@@ -388,19 +395,23 @@ class QueryStore:
         ).fetchall())
 
     @staticmethod
-    def joined_notebook_rows(db: Any, user_id: str):
+    def joined_notebook_rows(db: Any, user_id: str, notebook_id: "str | None" = None):
+        """`sqlite/query_store.py::joined_notebook_rows` 的镜像(含点查形态)。"""
+        point_filter = "" if notebook_id is None else "AND m.notebook_id = %s "
+        params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return _compat_notebook_rows(db.execute(
             "SELECT nb.*, u.username AS _owner_username FROM notebook_members m "
             "JOIN notebooks nb ON nb.id = m.notebook_id "
             "LEFT JOIN users u ON u.id = nb.created_by "
-            "WHERE m.user_id = %s AND nb.status != 'copying' "
+            "WHERE m.user_id = %s " + point_filter
+            + "AND nb.status != 'copying' "
             "ORDER BY m.added_at ASC",
-            (user_id,),
+            params,
         ).fetchall())
 
     @staticmethod
-    def granted_notebook_rows(db: Any, user_id: str):
-        """`sqlite/query_store.py::granted_notebook_rows` 的镜像。
+    def granted_notebook_rows(db: Any, user_id: str, notebook_id: "str | None" = None):
+        """`sqlite/query_store.py::granted_notebook_rows` 的镜像(含点查形态)。
 
         完整理由(为什么它是列表投影而不是授权判定、为什么只收两个群组主体、为什么
         去重留在 service)写在 SQLite 那一份里,两份必须同修。PG 侧有**两处**刻意
@@ -417,6 +428,9 @@ class QueryStore:
           里只碰 2 条。SQLite 那侧需要提示,是因为它的 planner 在没有 ANALYZE 时按
           固定启发式估价,会误选 `notebook_grants` 当驱动表。
         """
+        # 点查子句在 `db.execute(` 之前算好 —— 与 SQLite 侧同一形态,理由见那一份。
+        point_filter = "" if notebook_id is None else "AND ng.notebook_id = %s "
+        params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return _compat_notebook_rows(db.execute(
             "SELECT nb.*, u.username AS _owner_username, "
             "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind "
@@ -426,11 +440,11 @@ class QueryStore:
             "JOIN groups g ON g.id = gm.group_id "
             "JOIN notebooks nb ON nb.id = ng.notebook_id "
             "LEFT JOIN users u ON u.id = nb.created_by "
-            "WHERE gm.user_id = %s "
-            "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
+            "WHERE gm.user_id = %s " + point_filter
+            + "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
             "AND nb.status != 'copying' "
             'ORDER BY nb.created_at ASC, nb.id COLLATE "C" ASC, g.id COLLATE "C" ASC',
-            (user_id,),
+            params,
         ).fetchall())
 
     @staticmethod

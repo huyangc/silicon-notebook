@@ -76,17 +76,27 @@ export const shouldShowBorrowedBaseHint = ({
 // 别人 owner 的库(经只读共享或群组授权)也会出现在候选里,而前端此前只有 `tier`
 // 可分——它们会被归进「我的笔记本」,一句事实错误的标签。
 //
-// 归属判据优先读后端给的 `origin`;缺失时(挂载边自带的行、旧后端)按 `tier` 退回
-// 两组分法,与本字段出现之前逐字一致——绝不猜:把一条来路不明的边说成「我的」正是
-// 这次要修的那个错。
-export const mountableGroupOf = (candidate: MountableNotebook): "public" | "mine" | "shared" => {
+// 归属判据优先读后端给的 `origin`;缺失时才退回 `tier`。
+//
+// ⚠ `origin` 缺席只剩**一种**形态:候选里没有、只存在于挂载边的**失效边**(它按
+// `MOUNT_VALID_EXPR` 的定义永远不会出现在 mountable 里,所以捎不到 origin)。这类边
+// 里 `tier='base'` 的确实是降级了的公共知识库,但 `tier='personal'` 的恰恰是**别人
+// 家的库**(共享被撤销、被挂库易主、或本笔记本自身被共享而关掉了借入边)——把它们
+// 落进「我的笔记本」正是这次要修的那句事实错误的标签,而且是最容易复现的那一例。
+// 所以这一支归「共享给我的」:那是它们真实的来路,而「我的库」不会因为共享变动而
+// 失效(同 owner 支不依赖任何授权)。
+//
+// 旧后端(不发 origin)会让**全部**候选走到这里 —— 那时 `active` 恒为 true,判据
+// 落在第一支/第二支上,与本字段出现之前逐字一致。
+export const mountableGroupOf = (candidate: MountableNotebook & { active?: boolean }): "public" | "mine" | "shared" => {
   if (candidate.origin === "base") return "public";
   if (candidate.origin === "mine") return "mine";
   if (candidate.origin === "shared") return "shared";
-  return candidate.tier === "base" ? "public" : "mine";
+  if (candidate.tier === "base") return "public";
+  return candidate.active === false ? "shared" : "mine";
 };
 
-export const groupMountable = <T extends MountableNotebook>(
+export const groupMountable = <T extends MountableNotebook & { active?: boolean }>(
   list: readonly T[]
 ): { public: T[]; mine: T[]; shared: T[] } => ({
   public: list.filter((n) => mountableGroupOf(n) === "public"),

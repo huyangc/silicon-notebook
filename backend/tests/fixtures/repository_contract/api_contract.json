@@ -8504,6 +8504,30 @@
           "title": "ShareResponse",
           "type": "object"
         },
+        "ShareState": {
+          "description": "`GET /notebooks/{id}/share` —— **只读**当前的分享链接状态,绝不铸新 token。\n\n存在的理由(群组知识共享 P1-T4):打开「分享」弹窗本来就会 `POST .../share`,于是\n「只想共享给群组」的用户会顺带被发一条分享链接——一次纯查看的动作产生了持久副作用。\n有了这个端点,弹窗打开走 GET,链接由用户显式点「开启链接分享」时才 POST(那条\nPOST 幂等,已有 token 原样返回)。\n\n没有 token 时 `share_token` 为空串,并且**不计算** copy-stats:那是一次真实的\n规模统计(大库上不便宜),而没有链接的库根本用不到它。`copyable` / `size` 因此\n只在 `share_token` 非空时有意义,消费方必须先判它。",
+          "properties": {
+            "copyable": {
+              "default": false,
+              "title": "Copyable",
+              "type": "boolean"
+            },
+            "share_token": {
+              "default": "",
+              "title": "Share Token",
+              "type": "string"
+            },
+            "size": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "title": "Size",
+              "type": "object"
+            }
+          },
+          "title": "ShareState",
+          "type": "object"
+        },
         "SharedByMeItem": {
           "properties": {
             "group_count": {
@@ -18769,6 +18793,44 @@
             }
           },
           "summary": "Unshare Notebook Route"
+        },
+        "get": {
+          "description": "当前的分享链接状态。**只读**——打开分享弹窗不该铸出一条链接。\n\n与 POST 同路径同守卫,只是这一条没有副作用:没有 token 时返回空串且**不计算**\n规模统计。理由见 `ShareState` 的模型注释(「只想共享给群组」的用户不该因为打开\n了一次弹窗就被发一条分享链接)。",
+          "operationId": "share_state_route_api_notebooks__notebook_id__share_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ShareState"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Share State Route"
         },
         "post": {
           "operationId": "share_notebook_route_api_notebooks__notebook_id__share_post",
