@@ -178,6 +178,9 @@ import {
 } from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
+import { GroupsModal } from "./groups-panel";
+import { NotebookGroupShare, BORROWED_BASE_SHARE_WARNING } from "./notebook-group-share";
+import { grantedViaLabel, isGroupGranted, partitionByGrant } from "./group-api";
 import { PasswordChangeModal } from "./password-change-modal";
 import { AskComposer } from "./ask-composer";
 import { quotedPhraseHint } from "./query-syntax";
@@ -1026,6 +1029,8 @@ export default function Home() {
   const [leaveBusy, setLeaveBusy] = useState(false);
   const [sharedByMeList, setSharedByMeList] = useState<SharedByMeItem[] | null>(null);
   const [sharedByMeOpen, setSharedByMeOpen] = useState(false);
+  // 群组管理弹窗(账户菜单入口)。与笔记本无关,故不随切库复位。
+  const [groupsOpen, setGroupsOpen] = useState(false);
   const [analytics, setAnalytics] = useState<NotebookAnalytics | null>(null);
   const [contentOverview, setContentOverview] = useState<NotebookContentOverview | null>(null);
   const [contentOverviewLoading, setContentOverviewLoading] = useState(false);
@@ -5889,6 +5894,46 @@ export default function Home() {
       ? `来自参考库《${notebookNames[sourceDetailBaseId]}》`
       : "来自参考库";
 
+  // 笔记本列表的两个分区(设计决策 10):自有/只读共享 一区,经**群组**共享进来的
+  // 单独一区。判据是 granted_via 非空而不是 access —— 只读共享同样是 reader,但它
+  // 有「退出共享」这个用户自己能按的出口,群组共享没有(那个按钮打的是成员表,对
+  // 授权边一点作用都没有),两者必须分开。
+  const notebookPartition = partitionByGrant(visibleNotebooks);
+
+  // 两个分区渲染的是同一种卡片,所以抽成一个函数 —— 复制一份 JSX 必然分叉。
+  const renderNotebookCard = (
+    { notebook, hits }: { notebook: NotebookSummary; hits: SearchHit[] },
+    index: number,
+  ) => (
+    <article key={notebook.id} className={`notebook-card ${cardTone(index)}`}>
+      <button className="card-menu" onClick={(event) => openNotebookMenu(notebook.id, event)} title="笔记本操作">⋮</button>
+      <button className="notebook-card-main" onClick={() => openNotebook(notebook.id).catch(reportError)}>
+        <div className="card-icon">{cardIcon(index, notebook)}</div>
+        <div>
+          <h2>{notebook.name}</h2>
+          <p>{notebook.purpose || "No purpose set yet."}</p>
+          {isGroupGranted(notebook) && (
+            <p className="notebook-card-meta">{grantedViaLabel(notebook)}</p>
+          )}
+        </div>
+        <SearchHits hits={hits} compact={false} />
+      </button>
+      <div className="notebook-card-footer">
+        <p className="notebook-card-meta">{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
+        <div className="notebook-card-footer-actions">
+          {notebook.access !== "reader" && notebook.is_shared && (
+            <span className="notebook-shared-badge" title="已分享" aria-label="已分享"><User size={14} /></span>
+          )}
+          <button
+            type="button"
+            className="notebook-memory-link"
+            onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
+          >{notebook.counts.memories ?? 0} 条记忆</button>
+        </div>
+      </div>
+    </article>
+  );
+
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
   if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
@@ -5950,6 +5995,7 @@ export default function Home() {
             canChangePassword={currentUser.id !== "user-local"}
             advancedMode={isAdvanced(uiMode)}
             onOpenMemory={showGlobalMemory}
+            onOpenGroups={() => setGroupsOpen(true)}
             onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}
             onChangePassword={() => setPasswordModalOpen(true)}
             onLogout={() => handleLogout().catch(reportError)}
@@ -6015,7 +6061,7 @@ export default function Home() {
           <section className={`notebook-grid view-${viewMode}`}>
             {viewMode === "list" ? (
               <NotebookList
-                entries={visibleNotebooks}
+                entries={notebookPartition.personal}
                 openNotebook={(id) => openNotebook(id).catch(reportError)}
                 openMemory={(id) => openNotebookMemory(id).catch(reportError)}
                 openMenu={openNotebookMenu}
@@ -6028,32 +6074,7 @@ export default function Home() {
                     <h2>新建笔记本</h2>
                   </button>
                 )}
-                {visibleNotebooks.map(({ notebook, hits }, index) => (
-                  <article key={notebook.id} className={`notebook-card ${cardTone(index)}`}>
-                    <button className="card-menu" onClick={(event) => openNotebookMenu(notebook.id, event)} title="笔记本操作">⋮</button>
-                    <button className="notebook-card-main" onClick={() => openNotebook(notebook.id).catch(reportError)}>
-                      <div className="card-icon">{cardIcon(index, notebook)}</div>
-                      <div>
-                        <h2>{notebook.name}</h2>
-                        <p>{notebook.purpose || "No purpose set yet."}</p>
-                      </div>
-                      <SearchHits hits={hits} compact={false} />
-                    </button>
-                    <div className="notebook-card-footer">
-                      <p className="notebook-card-meta">{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
-                      <div className="notebook-card-footer-actions">
-                        {notebook.access !== "reader" && notebook.is_shared && (
-                          <span className="notebook-shared-badge" title="已分享" aria-label="已分享"><User size={14} /></span>
-                        )}
-                        <button
-                          type="button"
-                          className="notebook-memory-link"
-                          onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
-                        >{notebook.counts.memories ?? 0} 条记忆</button>
-                      </div>
-                    </div>
-                  </article>
-                ))}
+                {notebookPartition.personal.map(renderNotebookCard)}
               </>
             )}
             {visibleNotebooks.length === 0 && (
@@ -6063,6 +6084,30 @@ export default function Home() {
               </article>
             )}
           </section>
+
+          {/* 「群组」分区(设计决策 10)。经群组共享进来的库单独成一区,而不是混进
+              上面那批——它们不是「我的」,也没有「退出共享」这个自己能按的出口。 */}
+          {notebookPartition.group.length > 0 && (
+            <>
+              <section className="collection-title">
+                <h1>群组</h1>
+                <p>经群组共享给你的知识库。可以打开、提问、写自己的深度报告，也可以挂为参考库；由组管理员管理。</p>
+              </section>
+              <section className={`notebook-grid view-${viewMode}`}>
+                {viewMode === "list" ? (
+                  <NotebookList
+                    entries={notebookPartition.group}
+                    roleText="群组成员"
+                    openNotebook={(id) => openNotebook(id).catch(reportError)}
+                    openMemory={(id) => openNotebookMemory(id).catch(reportError)}
+                    openMenu={openNotebookMenu}
+                  />
+                ) : (
+                  notebookPartition.group.map(renderNotebookCard)
+                )}
+              </section>
+            </>
+          )}
         </main>
       )}
 
@@ -6092,17 +6137,26 @@ export default function Home() {
                 {isReader ? (
                   <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
                     <h1 className="notebook-title-input" style={{ margin: 0 }}>{currentNotebook.name}</h1>
-                    <span className="new-pill" title="只读共享,无写权限">
-                      只读 · 来自 {currentNotebook.shared_from || "他人"}
+                    <span className="new-pill" title="只读，无写权限">
+                      {isGroupGranted(currentNotebook)
+                        ? `只读 · ${grantedViaLabel(currentNotebook)}`
+                        : `只读 · 来自 ${currentNotebook.shared_from || "他人"}`}
                     </span>
-                    <button
-                      className="sort-button"
-                      disabled={leaveBusy}
-                      title="退出该只读共享（仅移除你自己的访问）"
-                      onClick={() => handleLeaveShared().catch(reportError)}
-                    >
-                      {leaveBusy ? "退出中…" : "退出共享"}
-                    </button>
+                    {/* 经群组共享进来的库**没有**「退出共享」:那个按钮打的是只读成员
+                        表,对群组授权一点作用都没有——点了会拿到一句成功提示,而库还
+                        在列表里,是一个必然发生的假失败。改为说清该找谁。 */}
+                    {isGroupGranted(currentNotebook) ? (
+                      <span className="tool-hint">由组管理员管理；要停止访问，请联系组管理员撤销共享，或在账户菜单的「群组」里退出该群组。</span>
+                    ) : (
+                      <button
+                        className="sort-button"
+                        disabled={leaveBusy}
+                        title="退出该只读共享（仅移除你自己的访问）"
+                        onClick={() => handleLeaveShared().catch(reportError)}
+                      >
+                        {leaveBusy ? "退出中…" : "退出共享"}
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <input
@@ -6995,7 +7049,11 @@ export default function Home() {
           className="popover notebook-menu"
           style={{ left: menuPosition.left, top: menuPosition.top }}
         >
-          {menuNotebook.access === "reader" ? (
+          {/* 经群组共享进来的库不给「退出共享」——那个按钮删的是只读成员行,对群组
+              授权边是空操作,却会弹一句「已退出」而库仍在列表里(评审抓的假失败)。 */}
+          {menuNotebook.access === "reader" && isGroupGranted(menuNotebook) ? (
+            <span className="notebook-menu-note">由组管理员管理</span>
+          ) : menuNotebook.access === "reader" ? (
             <button
               className="danger"
               onClick={() => {
@@ -7074,6 +7132,17 @@ export default function Home() {
                 {shareModal.copyable ? "他人可拷贝" : "笔记本较大，他人可只读加入"}
                 {` · ${shareModal.size.sources} 来源 · ${shareModal.size.nodes} 节点 · ${shareModal.size.edges} 边 · ${formatFileSize(shareModal.size.bytes)}`}
               </p>
+              {/* 借入参考库的「未共享门」:一旦这本笔记本被共享出去,它借来的参考库
+                  就停止参与检索(设计文档 §6.1)。提示要在动作之前给,而不是事后
+                  在失效边上解释——那时用户已经不知道是哪一步造成的。 */}
+              <p className="tool-hint" style={{ margin: "2px 0 0" }}>{BORROWED_BASE_SHARE_WARNING}</p>
+              <NotebookGroupShare
+                notebookId={currentNotebook.id}
+                onChanged={() => { loadNotebookCollection().catch(reportError); }}
+              />
+              <p className="tool-hint" style={{ margin: "2px 0 0" }}>
+                「取消分享」只撤销上面的链接并移除已加入的只读成员，不影响已经共享给群组的授权。
+              </p>
               <div className="tag-row">
                 <button className="sort-button" disabled={shareBusy} onClick={() => handleUnshare().catch(reportError)}>取消分享</button>
                 <button className="new-pill" onClick={() => setShareModal(null)}>完成</button>
@@ -7150,7 +7219,7 @@ export default function Home() {
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>已分享</h2>
-                <p>你分享出去的笔记本。较小的可被他人拷贝为独立副本;较大的以只读方式共享,下方列出已加入的只读成员。</p>
+                <p>你分享出去的笔记本：经链接分享的（较小的可被拷贝为独立副本，较大的以只读方式加入，下方列出已加入的只读成员），以及共享给群组的。</p>
               </div>
               <button className="icon-button" onClick={() => setSharedByMeOpen(false)} title="Close">×</button>
             </div>
@@ -7169,41 +7238,59 @@ export default function Home() {
                     <div className="checklist-row" key={item.id} style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
                       <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
                         <span style={{ flex: 1, wordBreak: "break-word", fontWeight: 600 }}>{item.name}</span>
-                        <span className="new-pill" title={item.mode === "readonly" ? "笔记本较大,只读共享" : "笔记本较小,可被拷贝"}>
-                          {shareModeLabel(item.mode)}
-                        </span>
+                        {/* 只因群组共享而出现的行没有分享链接(share_token 为空)——
+                            它的分享模式(可拷贝/只读)对读者没有意义,不显示。 */}
+                        {item.share_token && (
+                          <span className="new-pill" title={item.mode === "readonly" ? "笔记本较大,只读共享" : "笔记本较小,可被拷贝"}>
+                            {shareModeLabel(item.mode)}
+                          </span>
+                        )}
+                        {item.group_count > 0 && (
+                          <span className="new-pill" title="已共享给群组">共享给 {item.group_count} 个群组</span>
+                        )}
                       </div>
-                      <div className="tag-row" style={{ marginTop: 2 }}>
-                        <input
-                          readOnly
-                          value={buildShareLink(item.share_token, window.location.origin)}
-                          onFocus={(event) => event.currentTarget.select()}
-                          style={{ flex: 1 }}
-                        />
-                        <button
-                          className="sort-button"
-                          onClick={() => {
-                            const link = buildShareLink(item.share_token, window.location.origin);
-                            handleShareLinkCopy(link).catch(reportError);
-                          }}
-                        >复制</button>
-                      </div>
+                      {item.share_token && (
+                        <div className="tag-row" style={{ marginTop: 2 }}>
+                          <input
+                            readOnly
+                            value={buildShareLink(item.share_token, window.location.origin)}
+                            onFocus={(event) => event.currentTarget.select()}
+                            style={{ flex: 1 }}
+                          />
+                          <button
+                            className="sort-button"
+                            onClick={() => {
+                              const link = buildShareLink(item.share_token, window.location.origin);
+                              handleShareLinkCopy(link).catch(reportError);
+                            }}
+                          >复制</button>
+                        </div>
+                      )}
                       <p className="tool-hint" style={{ margin: "0" }}>
                         {`${item.size.sources} 来源 · ${item.size.nodes} 节点 · ${item.size.edges} 边 · ${formatFileSize(item.size.bytes)}`}
                       </p>
-                      {item.mode === "readonly" && (
+                      {item.share_token && item.mode === "readonly" && (
                         <p className="tool-hint" style={{ margin: "0" }}>
                           只读成员:{item.members.length > 0 ? item.members.map((m) => m.username).join("，") : "暂无成员"}
                         </p>
                       )}
-                      <div className="tag-row" style={{ marginTop: 2 }}>
-                        <button
-                          className="sort-button"
-                          disabled={shareBusy}
-                          title="撤销分享链接并移除所有只读成员"
-                          onClick={() => handleUnshareFromOverview(item.id).catch(reportError)}
-                        >取消分享</button>
-                      </div>
+                      {item.group_count > 0 && (
+                        <p className="tool-hint" style={{ margin: "0" }}>
+                          共享给群组的部分在这本笔记本的「分享」里查看与撤销，或由组管理员在「群组」里撤销。
+                        </p>
+                      )}
+                      {/* 「取消分享」只撤销链接与只读成员,对群组授权是空操作——所以
+                          只因群组共享而出现的行不给这个按钮(点了会成功却什么都没变)。 */}
+                      {item.share_token && (
+                        <div className="tag-row" style={{ marginTop: 2 }}>
+                          <button
+                            className="sort-button"
+                            disabled={shareBusy}
+                            title="撤销分享链接并移除所有只读成员"
+                            onClick={() => handleUnshareFromOverview(item.id).catch(reportError)}
+                          >取消分享</button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -7413,7 +7500,7 @@ export default function Home() {
                   // 它、保存表单会被后端 400 拒绝(见 notebook-bases.ts mergeMountCandidates
                   // 与 routes.py set_notebook_bases_route 的联动说明)。
                   const groups = groupMountable(mergeMountCandidates(mountable, mountEdges));
-                  const render = (title: string, list: MountedBase[], variant: "public" | "mine") =>
+                  const render = (title: string, list: MountedBase[], variant: "public" | "mine" | "shared") =>
                     list.length === 0 ? null : (
                       <div className={`base-picker-group base-picker-group--${variant}`} key={title}>
                         <span className="base-picker-group-title">{title}</span>
@@ -7447,7 +7534,11 @@ export default function Home() {
                     <>
                       {render("公共知识库", groups.public, "public")}
                       {render("我的笔记本", groups.mine, "mine")}
-                      {groups.public.length === 0 && groups.mine.length === 0 && (
+                      {/* 第三组是群组共享放开「读权 ⇒ 可挂载」之后新出现的:别人 owner
+                          的库。此前它们会被归进「我的笔记本」,一句事实错误的标签。 */}
+                      {render("共享给我的", groups.shared, "shared")}
+                      {groups.public.length === 0 && groups.mine.length === 0
+                        && groups.shared.length === 0 && (
                         <p className="base-picker-empty">暂无可挂载的知识库。</p>
                       )}
                     </>
@@ -7505,6 +7596,14 @@ export default function Home() {
 
       {passwordModalOpen && (
         <PasswordChangeModal onClose={() => setPasswordModalOpen(false)} />
+      )}
+
+      {groupsOpen && (
+        <GroupsModal
+          isSystemAdmin={currentUser.role === "admin"}
+          onChanged={() => { loadNotebookCollection().catch(reportError); }}
+          onClose={() => setGroupsOpen(false)}
+        />
       )}
 
       {infoModal && (
@@ -8818,11 +8917,14 @@ export default function Home() {
 }
 function NotebookList({
   entries,
+  roleText = "Owner",
   openNotebook,
   openMemory,
   openMenu
 }: {
   entries: Array<{ notebook: NotebookSummary; index: number; hits: SearchHit[] }>;
+  /** 「角色」列的文案。「群组」分区传「群组成员」——那一批库的角色不是所有者。 */
+  roleText?: string;
   openNotebook: (id: string) => void;
   openMemory: (id: string) => void;
   openMenu: (id: string, event: MouseEvent<HTMLButtonElement>) => void;
@@ -8838,13 +8940,14 @@ function NotebookList({
             <span className="list-icon">{cardIcon(index, notebook)}</span>
             <span>
               <strong>{notebook.name}</strong>
+              {isGroupGranted(notebook) && <small>{grantedViaLabel(notebook)}</small>}
               <SearchHits hits={hits} compact />
             </span>
           </button>
           <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.counts.sources ?? 0} 个来源</button>
           <button className="notebook-list-cell notebook-memory-link" onClick={() => openMemory(notebook.id)}>{notebook.counts.memories ?? 0} 条</button>
           <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
-          <button className="notebook-list-cell role-cell" onClick={() => openNotebook(notebook.id)}>Owner</button>
+          <button className="notebook-list-cell role-cell" onClick={() => openNotebook(notebook.id)}>{roleText}</button>
           <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="笔记本操作">⋮</button>
         </article>
       ))}

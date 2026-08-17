@@ -14,11 +14,11 @@ from app.api.deps import (
 from app.core.audit_actor import session_audit_principal
 from app.models.identity import UserProfile
 from app.models.notebooks import (
+    MountableNotebook,
     MountedBase,
     MountedByCount,
     NotebookAnalytics,
     NotebookCreate,
-    NotebookRef,
     NotebookSummary,
     NotebookUpdate,
     SetBasesRequest,
@@ -143,17 +143,21 @@ def set_notebook_bases_route(
     return [MountedBase(**edge) for edge in repo.list_notebook_bases(notebook_id)]
 
 
-@router.get("/notebooks/{notebook_id}/mountable", response_model=List[NotebookRef],
+@router.get("/notebooks/{notebook_id}/mountable", response_model=List[MountableNotebook],
             dependencies=[Depends(require_notebook_capability("notebook:manage"))])
-def mountable_notebooks_route(notebook_id: str) -> List[NotebookRef]:
+def mountable_notebooks_route(notebook_id: str) -> List[MountableNotebook]:
     """可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪
     (本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。
 
     最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。
 
+    响应模型是 `MountableNotebook` 而不是 `NotebookRef`:每个候选还带一个 `origin`
+    (base / mine / shared),让挂载选择器能如实分组——群组共享放开之后,别人 owner
+    的库也会出现在这份候选里,只按 `tier` 分组会把它们标成「我的笔记本」。
+
     刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的
     /notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。"""
-    return [NotebookRef(**n) for n in repository().mountable_notebooks(notebook_id)]
+    return [MountableNotebook(**n) for n in repository().mountable_notebooks(notebook_id)]
 
 
 @router.get("/notebooks/{notebook_id}/mounted-by-count", response_model=MountedByCount,

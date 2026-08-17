@@ -8,6 +8,10 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
+from app.repositories.group_rows import (
+    GROUP_GRANT_COUNT_SQL,
+    GROUP_GRANT_EXISTS_SQL,
+)
 from app.repositories.ports import NotebookTooLargeToCopyError
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -246,10 +250,14 @@ class SharingStore:
         return row["id"] if row else None
 
     def list_shared_by_owner(self, user_id: str) -> list[dict]:
+        """`sqlite/sharing_store.py::list_shared_by_owner` 的镜像(P1-T4 起含群组共享)。"""
         with self.database.connect() as connection:
             return connection.execute(
-                "SELECT id,name,share_token FROM notebooks "
-                "WHERE created_by=%s AND is_shared=1 ORDER BY updated_at DESC,id COLLATE \"C\"",
+                "SELECT id,name,share_token,"
+                + GROUP_GRANT_COUNT_SQL + " AS group_count "
+                "FROM notebooks WHERE created_by=%s "
+                "AND (is_shared=1 OR " + GROUP_GRANT_EXISTS_SQL + ") "
+                "ORDER BY updated_at DESC,id COLLATE \"C\"",
                 (user_id,),
             ).fetchall()
 

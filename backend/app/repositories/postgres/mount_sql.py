@@ -48,6 +48,14 @@ MOUNT_GATE_CLOSED_EXPR = (
 
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 
+# 可挂候选的来源投影(群组知识共享 P1-T4)。
+# `sqlite/mount_sql.py::MOUNT_ORIGIN_COLUMN` 的镜像,完整理由写在那一份。
+MOUNT_ORIGIN_COLUMN = (
+    "CASE WHEN b.tier = 'base' THEN 'base'"
+    " WHEN b.created_by = a.created_by THEN 'mine'"
+    " ELSE 'shared' END AS origin"
+)
+
 MOUNT_ORDER = (
     " ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, "
     "b.name COLLATE \"C\", b.id COLLATE \"C\""

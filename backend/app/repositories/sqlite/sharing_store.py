@@ -5,6 +5,10 @@ from datetime import datetime, timedelta
 from typing import Callable, Sequence
 
 from app.core.config import Settings
+from app.repositories.group_rows import (
+    GROUP_GRANT_COUNT_SQL,
+    GROUP_GRANT_EXISTS_SQL,
+)
 from app.repositories.ports import NotebookTooLargeToCopyError
 from app.repositories.sqlite.access_sql import (
     MEMBER_PROBE_SQL,
@@ -281,10 +285,21 @@ class SharingStore:
         return row["id"] if row else None
 
     def list_shared_by_owner(self, user_id: str) -> list[sqlite3.Row]:
+        """「已分享」总览的行。
+
+        P1-T4:范围与卡片上的「已分享」徽标同一个判据——只读共享(`is_shared`)
+        **或**共享给了某个群组。只按 `is_shared` 取,徽标会亮着而这张总览说
+        「尚未分享任何笔记本」,而群组共享恰恰是 owner 最需要在这里看到的一条。
+        群组那半没有分享链接(`share_token` 为 NULL),由 `group_count` 自我标注,
+        消费方据此渲染成「已共享给 N 个群组」而不是一个空链接框。
+        """
         with self.database.connect() as db:
             return db.execute(
-                "SELECT id, name, share_token FROM notebooks "
-                "WHERE created_by = ? AND is_shared = 1 ORDER BY updated_at DESC",
+                "SELECT id, name, share_token, "
+                + GROUP_GRANT_COUNT_SQL + " AS group_count "
+                "FROM notebooks WHERE created_by = ? "
+                "AND (is_shared = 1 OR " + GROUP_GRANT_EXISTS_SQL + ") "
+                "ORDER BY updated_at DESC",
                 (user_id,),
             ).fetchall()
 

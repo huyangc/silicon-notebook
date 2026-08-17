@@ -102,7 +102,8 @@ def test_member_without_own_notebooks_still_sees_their_shared_notebook_report(re
     报告那一半的谓词只有 `created_by`,一个 notebook id 都不消费——它此前却待在
     `if notebook_ids:` 闸内,于是「没建过库的成员」铃铛恒为 0,而报告卡在
     intent_ready 等他确认,是一条走不通的路。
-    库名解析不出来(非自有库)是已知的、留给 T4 的显示问题:条目本身必须在。"""
+    库名由 P1-T4 补上:它不再取自「我自有的库」映射(共享库不在其中,条目会显示成
+    一条没有出处的报告),而是随报告行 LEFT JOIN 出来。"""
     owner_nb = _seed_user_nb(repo, "user-owner")
     _mk_user(repo, "user-member")          # 成员自己一个 notebook 都没有
     with repo._connect() as db:
@@ -117,7 +118,8 @@ def test_member_without_own_notebooks_still_sees_their_shared_notebook_report(re
     items = [it for it in out["items"] if it["type"] == "report_outline"]
     assert [it["report_id"] for it in items] == ["r-shared"]
     assert items[0]["notebook_id"] == owner_nb
-    assert items[0]["notebook_name"] == ""      # T4 负责库名解析
+    # 库名来自共享库那一行本身,不是「我自有的库」映射(P1-T4)。
+    assert items[0]["notebook_name"] == "NB"
     assert out["count"] == 1
 
     # 反向:owner 的铃铛里不出现成员的报告(行级隔离在这一层同样成立)。

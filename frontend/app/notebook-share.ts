@@ -48,6 +48,15 @@ export type SharedByMeItem = {
   mode: "copy" | "readonly";
   size: ShareSize;
   members: { username: string; added_at: string }[];
+  /**
+   * 这本库共享给了几个**不同的**群组(群组知识共享 P1)。
+   *
+   * 总览的范围因此是「只读共享 ∨ 共享给群组」,与卡片上的「已分享」徽标同一个
+   * 判据——只按链接取会让徽标亮着而这张总览说「尚未分享任何笔记本」。
+   * `share_token` 为空而本字段非 0 的行,是只因群组共享而出现的:它没有链接可发,
+   * 也不该给「取消分享」(那个动作对授权边是空操作)。
+   */
+  group_count: number;
 };
 
 // 开启分享,拿到分享 token / 是否可拷贝 / 规模(仅 owner)。

@@ -1,5 +1,6 @@
 import type { AskModeId } from "./ask-modes";
 import type { ReasoningTraceStep } from "./ask-stream";
+import type { GrantedGroupRef } from "./group-api";
 import type { NotebookRef } from "./notebook-bases";
 
 /**
@@ -74,6 +75,15 @@ export type NotebookSummary = {
   access?: "owner" | "reader";
   shared_from?: string;
   is_shared?: boolean;
+  /**
+   * 这本笔记本是**经哪几个群组**共享给我的（群组知识共享 P1）。
+   *
+   * 非空即「群组」分区的判据。`access` 刻意没有新增枚举值（已定裁决 7）——群组
+   * 共享与只读共享同为 `reader`，区别只由本字段表达。两者在界面上必须分开的地方
+   * 见 `group-api.ts::partitionByGrant`：只读共享有「退出共享」这个用户自己能按的
+   * 出口，群组共享没有（那个按钮打的是成员表，对授权边一点作用都没有）。
+   */
+  granted_via?: GrantedGroupRef[];
   paper_meta_backfilling?: boolean;
   /**
    * 是否存在缺论文元数据的合规候选源(后端按「补全论文信息」真正会排队的同一

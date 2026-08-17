@@ -840,6 +840,10 @@ class NotebookSharingService:
                     "mode": "readonly" if readonly else "copy",
                     "size": stats["size"],
                     "members": self.list_members(row["id"]) if readonly else [],
+                    # 共享给了几个**不同的**群组(P1-T4)。为 0 时这一行就是一条
+                    # 纯只读共享,与改动前逐字一致;非 0 而 share_token 为空时,
+                    # 这一行只因群组共享而存在——消费方据此不渲染分享链接。
+                    "group_count": int(row["group_count"] or 0),
                 }
             )
         return out

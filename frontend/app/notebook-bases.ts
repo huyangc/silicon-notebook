@@ -11,10 +11,19 @@ import { requestJson } from "./api-client.ts";
 export type NotebookRef = { id: string; name: string; tier: string };
 export type MountedBase = NotebookRef & { active: boolean; inactive_reason: string };
 
+/**
+ * 可挂候选。`origin` 说的是「这个候选凭什么能挂」——base(公共知识库)/ mine
+ * (自己的库)/ shared(别人共享或经群组授权给我的库)。
+ *
+ * 可选是因为它只由 `GET .../mountable` 计算:挂载边那条查询(`/bases`)不带它,
+ * 旧后端也不带。缺失时按 `tier` 退回两组分法,与本字段出现之前逐字一致。
+ */
+export type MountableNotebook = NotebookRef & { origin?: string };
+
 export const listBases = (notebookId: string): Promise<MountedBase[]> =>
   requestJson(`/notebooks/${notebookId}/bases`, { tag: "bases" });
 
-export const listMountable = (notebookId: string): Promise<NotebookRef[]> =>
+export const listMountable = (notebookId: string): Promise<MountableNotebook[]> =>
   requestJson(`/notebooks/${notebookId}/mountable`, { tag: "bases" });
 
 export const setBases = (
@@ -63,11 +72,26 @@ export const shouldShowBorrowedBaseHint = ({
 );
 
 
-export const groupMountable = <T extends NotebookRef>(
+// 挂载选择器的分组。**三组**,不是两组:群组知识共享把「读权 ⇒ 可挂载」放开之后,
+// 别人 owner 的库(经只读共享或群组授权)也会出现在候选里,而前端此前只有 `tier`
+// 可分——它们会被归进「我的笔记本」,一句事实错误的标签。
+//
+// 归属判据优先读后端给的 `origin`;缺失时(挂载边自带的行、旧后端)按 `tier` 退回
+// 两组分法,与本字段出现之前逐字一致——绝不猜:把一条来路不明的边说成「我的」正是
+// 这次要修的那个错。
+export const mountableGroupOf = (candidate: MountableNotebook): "public" | "mine" | "shared" => {
+  if (candidate.origin === "base") return "public";
+  if (candidate.origin === "mine") return "mine";
+  if (candidate.origin === "shared") return "shared";
+  return candidate.tier === "base" ? "public" : "mine";
+};
+
+export const groupMountable = <T extends MountableNotebook>(
   list: readonly T[]
-): { public: T[]; mine: T[] } => ({
-  public: list.filter((n) => n.tier === "base"),
-  mine: list.filter((n) => n.tier !== "base"),
+): { public: T[]; mine: T[]; shared: T[] } => ({
+  public: list.filter((n) => mountableGroupOf(n) === "public"),
+  mine: list.filter((n) => mountableGroupOf(n) === "mine"),
+  shared: list.filter((n) => mountableGroupOf(n) === "shared"),
 });
 
 // 最终审查 BLOCKER 1:编辑表单的参考库选择器过去只渲染 groupMountable(mountable)
@@ -81,16 +105,25 @@ export const groupMountable = <T extends NotebookRef>(
 // 边自身的数据(active/inactive_reason,失效时 name 可能已被后端遮蔽,见
 // notebook_store.list_mount_edges 的隐私说明);仅存在于 mountable、尚未挂载的
 // 候选补全 active:true/inactive_reason:""。纯函数,不依赖 React state,可单测。
+//
+// ⚠ 已挂载的候选取**边**的数据(active/inactive_reason/遮蔽过的名字才是权威),但
+// `origin` 必须从候选那边捎过来:挂载边查询不计算它,直接用边就等于让每一条**已经
+// 挂上的**群组共享库退回「按 tier 猜」,而那正是最常见的一种(挂了才最需要看清它
+// 是借来的)。仅存在于边、不在候选里的死边没有 origin,照旧退回 tier 分法。
 export const mergeMountCandidates = (
-  mountable: readonly NotebookRef[],
+  mountable: readonly MountableNotebook[],
   mountEdges: readonly MountedBase[]
-): MountedBase[] => {
+): (MountedBase & { origin?: string })[] => {
   const edgeById = new Map(mountEdges.map((edge) => [edge.id, edge] as const));
   const seen = new Set<string>();
-  const merged: MountedBase[] = [];
+  const merged: (MountedBase & { origin?: string })[] = [];
   for (const candidate of mountable) {
     const edge = edgeById.get(candidate.id);
-    merged.push(edge ?? { ...candidate, active: true, inactive_reason: "" });
+    merged.push(
+      edge
+        ? { ...edge, origin: candidate.origin }
+        : { ...candidate, active: true, inactive_reason: "" },
+    );
     seen.add(candidate.id);
   }
   for (const edge of mountEdges) {

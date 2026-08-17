@@ -196,6 +196,20 @@ export const CHECKUP_FIX_BUSY: Record<string, string> = {
   rebuild_index: "重建中…",
 };
 
+// 群组分类（groups.kind）。只是分类标签，不影响任何权限；影响的是谁能建组与这里
+// 的界面文案（后端 app/models/groups.py 的 GROUP_KINDS 是取值真源）。
+export const GROUP_KIND: Record<string, string> = {
+  project: "项目",
+  department: "部门",
+  domain: "领域",
+};
+
+// 组内角色（group_members.role）。两级，不引入第三级。
+export const GROUP_ROLE: Record<string, string> = {
+  admin: "组管理员",
+  member: "成员",
+};
+
 /**
  * 严格查表：命中返回映射值，未命中返回 `fallback`——永远不会是 `value` 本身。
  *

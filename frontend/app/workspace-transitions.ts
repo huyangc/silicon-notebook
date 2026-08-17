@@ -154,7 +154,15 @@ export function workspaceCapabilities(access: string | undefined, role: string) 
   return {
     canWriteNotebook: canWrite,
     canGovernKnowledge: canWrite,
-    canManageReports: canWrite,
+    // 深度报告对**只读成员也开放**（群组知识共享 P1）。它不是 `canWrite` 的一部分：
+    // 报告按创建者行级隔离——成员只看得见、也只改得动**自己建的**那些，owner 也
+    // 一样（不引入「owner 看全部」这条新披露）。所以列表里出现的每一份报告都是
+    // 当前用户自己的，可操作性恒成立，没有需要按 access 收起来的动作。后端 9 个
+    // 写端点各自挂 `require_notebook_read` + 体内 `reports.created_by == 当前用户`，
+    // 这里放开的是**入口**，不是判定。
+    //
+    // 只放开报告面：来源写、图谱构建、知识治理仍跟着 `canWrite` 走。
+    canManageReports: true,
     // 图谱类型的有效配置属于当前笔记本：owner 可以维护自己的覆盖和自建类型；
     // reader 只读。全局基线仍只允许管理员变更。
     canManageNotebookSchemas: canWrite,

@@ -295,7 +295,10 @@ export function PendingBell(props: {
                 <button className="pending-row" key={`${g.key}-${idx}`}
                         onClick={() => { setOpen(false); onOpenItem(it); }}>
                   <span className="pending-row-main">
-                    {it.type !== "report_outline" && <span className="pending-row-nb">{it.notebook_name}</span>}
+                    {/* 库名对报告条目同样要显示(群组知识共享 P1):共享库里建的报告
+                        原本连库名都解析不出来,现在后端随行带回。判据从「不是报告」
+                        改成「有库名」——名字为空(旧数据/库已删)时不渲染一个空格子。 */}
+                    {it.notebook_name && <span className="pending-row-nb">{it.notebook_name}</span>}
                     <span className="pending-row-label">{labelFor(it)}</span>
                   </span>
                   <span className="pending-row-x" title="关掉"
