@@ -91,7 +91,12 @@ async def require_notebook_write(
 async def require_notebook_read(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> str:
-    """读守卫:owner ∪ 只读成员。非授权 → 404(不泄露存在性)。"""
+    """读守卫:owner ∪ 只读成员 ∪ 有效授权边(user/group/group_admins/everyone)。
+
+    非授权 → 404(不泄露存在性)。谓词的唯一定义点是两个后端的
+    `repositories/*/access_sql.py`,这里只是一跳委托——读权扩了什么,这道守卫
+    自动跟随。**写权不对称**:`require_notebook_capability` 那侧仍是 owner-only。
+    """
     allowed = await run_in_threadpool(
         notebook_access_repository().user_can_read_notebook, notebook_id, user.id
     )

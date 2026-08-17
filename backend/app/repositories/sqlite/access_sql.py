@@ -109,20 +109,22 @@ def member_exists_expr(
     )
 
 
-def _principal_match_expr(
+def _restricted_principal_arms(
     grant_alias: str,
     user_ref: str,
     group_alias: str,
     group_admin_alias: str,
 ) -> str:
-    """授权边主体判定:四个已知 `principal_type` 各一条臂,没有兜底分支。
+    """**受限**主体的三条臂(user / group / group_admins),不含 `everyone`。
 
-    臂的顺序是「便宜的先算」+「与设计文档的枚举顺序一致」的折中,语义与顺序无关。
-    消费三个 `user_ref`(user / group / group_admins 各一次);`everyone` 那条臂只比
-    一个字面量,一个参数都不消费——**绝不能**改成看 `principal_id`(裁决 1b)。
+    「受限」= 受众是一份点名的名单,库主授权时心里有一份具体的人。`everyone` 是
+    另一类:受众本来就是全员。两者在**读权**上完全同权,拆开只是为了让挂载有效性
+    能对它们区别对待(见 `mount_sql.py` 的借入挂载未共享门)。
+
+    消费三个 `user_ref`。臂的顺序是「便宜的先算」+「与设计文档的枚举顺序一致」的
+    折中,语义与顺序无关。
     """
     return (
-        "("
         f"({grant_alias}.principal_type='user' "
         f"AND {grant_alias}.principal_id={user_ref})"
         f" OR ({grant_alias}.principal_type='group' AND EXISTS ("
@@ -134,8 +136,46 @@ def _principal_match_expr(
         f"WHERE {group_admin_alias}.group_id={grant_alias}.principal_id "
         f"AND {group_admin_alias}.user_id={user_ref} "
         f"AND {group_admin_alias}.role='admin'))"
-        f" OR {grant_alias}.principal_type='everyone'"
-        ")"
+    )
+
+
+def _everyone_principal_arm(grant_alias: str) -> str:
+    """`everyone` 那条臂:只比一个字面量,一个参数都不消费。
+
+    **绝不能**改成看 `principal_id`(裁决 1b)。
+    """
+    return f"{grant_alias}.principal_type='everyone'"
+
+
+def _principal_match_expr(
+    grant_alias: str,
+    user_ref: str,
+    group_alias: str,
+    group_admin_alias: str,
+) -> str:
+    """授权边主体判定:四个已知 `principal_type` 各一条臂,没有兜底分支。
+
+    = 受限三臂 ∪ everyone。拆成两个私有片段之后这里必须**逐字**拼回原样:读权语义
+    在 P1-T2 的评审修复里一个字都没有变,变的只有挂载有效性。
+    """
+    return (
+        "("
+        + _restricted_principal_arms(
+            grant_alias, user_ref, group_alias, group_admin_alias
+        )
+        + " OR "
+        + _everyone_principal_arm(grant_alias)
+        + ")"
+    )
+
+
+def _grant_exists_expr(notebook_ref: str, grant_alias: str, condition: str) -> str:
+    """`notebook_grants` 上的 `EXISTS (...)` 骨架,主体判定由 `condition` 决定。"""
+    return (
+        f"EXISTS (SELECT 1 FROM notebook_grants {grant_alias} "
+        f"WHERE {grant_alias}.notebook_id={notebook_ref} AND "
+        + condition
+        + ")"
     )
 
 
@@ -146,18 +186,48 @@ def grant_access_expr(
     group_alias: str = "ngm",
     group_admin_alias: str = "nga",
 ) -> str:
-    """有效授权边的 `EXISTS (...)` 布尔表达式。
+    """**任意**有效授权边的 `EXISTS (...)` 布尔表达式(四类主体全收)。
 
     两个 ref 既可以是占位符 `?`,也可以是外层查询的列引用。传占位符时消费
     **三个** user 参数(见 `_principal_match_expr`),传列引用时不消费参数。
     """
-    return (
-        f"EXISTS (SELECT 1 FROM notebook_grants {grant_alias} "
-        f"WHERE {grant_alias}.notebook_id={notebook_ref} AND "
-        + _principal_match_expr(
+    return _grant_exists_expr(
+        notebook_ref,
+        grant_alias,
+        _principal_match_expr(grant_alias, user_ref, group_alias, group_admin_alias),
+    )
+
+
+def restricted_grant_access_expr(
+    notebook_ref: str,
+    user_ref: str,
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """**受限**授权边(user / group / group_admins,不含 everyone)的 `EXISTS (...)`。
+
+    只有 `mount_sql.MOUNT_VALID_EXPR` 用它:借入挂载的转手再分享收窄要区分「点名
+    授权」与「全员授权」,而读权谓词不区分。参数消费同 `grant_access_expr`。
+    """
+    return _grant_exists_expr(
+        notebook_ref,
+        grant_alias,
+        "("
+        + _restricted_principal_arms(
             grant_alias, user_ref, group_alias, group_admin_alias
         )
-        + ")"
+        + ")",
+    )
+
+
+def everyone_grant_expr(notebook_ref: str, grant_alias: str = "nge") -> str:
+    """`everyone` 授权边的 `EXISTS (...)`——与**谁在问**无关,故不接 user_ref。
+
+    因此它一个参数都不消费,`notebook_ref` 传占位符时才消费一个。
+    """
+    return _grant_exists_expr(
+        notebook_ref, grant_alias, _everyone_principal_arm(grant_alias)
     )
 
 

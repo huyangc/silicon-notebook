@@ -4,26 +4,52 @@
 若各自手写谓词,任何一份副本漂移都会让「能检索到」与「界面显示挂着」不一致,而且
 这种不一致没有任何测试会自然抓到。故谓词只在这里定义一次,五处一律 import。
 
-「有效」是解析时的实时判定而非挂载时的一次性校验:挂载边不是授权凭证。可挂范围=
-公共知识库(tier='base')、与挂载方同 owner 的库,或**挂载方 owner 对其有读权**的库
-(只读共享进来的、以及经群组授权边可读的);被挂库易主、公共库被降级、共享被撤销
-或用户被移出群组后,边保留但不生效(降级/转让/撤销常是临时的,静默删掉用户配置
-无法撤销),重新满足条件即自动恢复。owner 取「挂载方笔记本的 created_by」而非请求
-用户,使参与集与「谁在提问」无关 —— 只读共享的访客与库主必须看到同一个参与集。
+「有效」是解析时的实时判定而非挂载时的一次性校验:挂载边不是授权凭证。可挂范围
+共四支:
 
-⚠ **读权 ⇒ 可挂载是 P1 群组知识共享登记的显式行为变更**(设计文档 §6)。此前
-`mountable_notebooks` 刻意排除只读分享进来的库,理由是「对方撤销分享后边仍在会成为
-越权通道」——那条顾虑已经被本模块开头那句「实时判定」吸收:撤销的下一次解析里,
-`read_access_clause` 当场为假,边即刻失效,与公共库被降级完全同构。继续排除反而与
-「读权」的定义自相矛盾:同一个人打得开那个库、却不能把它当参考库挂上。
+1. 公共知识库(`tier='base'`);
+2. 与挂载方同 owner 的库;
+3. 被挂库上有 **`everyone` 授权边**的库;
+4. 挂载方 owner 对被挂库有**受限读权**(只读成员,或 user/group/group_admins 授权
+   边),**且挂载方笔记本自身尚未被共享**——见下面的「借入挂载」。
 
-读权那一支用 `access_sql.read_access_clause` 的**列引用**形式嵌入(被挂库 `b`、
-挂载方 owner `a.created_by`),因而不消费任何参数——本模块「每个片段恰好一个位置
-参数」的契约由此保住。同 owner 那一支刻意保留、没有被读权谓词吸收(它是读权的真
-子集):它是一次纯列比较,能在最常见的自有库场景上把两层 EXISTS 整个短路掉。
+被挂库易主、公共库被降级、共享被撤销或用户被移出群组后,边保留但不生效(降级/
+转让/撤销常是临时的,静默删掉用户配置无法撤销),重新满足条件即自动恢复。owner 取
+「挂载方笔记本的 created_by」而非请求用户,使参与集与「谁在提问」无关 —— 只读共享
+的访客与库主必须看到同一个参与集。
+
+## 借入挂载(第 4 支)与它的未共享门
+
+⚠ **读权 ⇒ 可挂载是 P1 群组知识共享登记的显式行为变更**(设计文档 §6);而它带的
+**未共享门**是同一轮质量评审真机复现出来的收窄,两半必须一起读:
+
+    Carol 只读分享 Y 给 Alice → Alice 把 Y 挂进自己的 X → Alice 把 X 分享给 Bob
+    → Bob 经 X 的代理读取与联邦检索读到 Y 的全文,而 Carol 从未授权 Bob。
+
+历史上 `mountable_notebooks` 刻意排除只读分享进来的库,真实动机就是这条**转手再
+分享**通道。它与「撤销」是两个不同的漏法,只有前者被开头那句「实时判定」吸收:撤销
+的下一次解析里第 4 支当场为假,与公共库被降级完全同构;而转手不需要任何撤销,是
+挂载方**新增**一次共享就凭空多出一批读者。所以第 4 支额外要求挂载方笔记本自身
+没有任何 `notebook_members` 行、也没有任何 `notebook_grants` 行——挂载方一旦被
+共享,借入边即刻失效;取消共享后自动恢复。这与「挂载不传递」的产品决策同向:借来
+的东西不转借。
+
+三支不受此限,各有理由:`tier='base'` 与 `everyone` 授权的受众本来就是全员,转手
+不增加任何暴露面;同 owner 支是挂载方 owner 自己的内容,他共享 X 就是在处置自己的
+内容。**只有「点名给了某几个人」的受限授权**才需要这道门,因此 `access_sql` 把授权
+边拆成 `restricted_grant_access_expr` 与 `everyone_grant_expr` 两个片段——读权谓词
+本身仍然不区分这两类(`grant_access_expr` 逐字未变),区别只存在于挂载有效性。
+
+第 4 支被挡住时边**保留、置灰**,与既有失效边惯例完全一致(`list_mount_edges` 的
+`active=False`),不静默删用户配置。
+
+全部新增判定都是列引用或关联子查询(被挂库 `b`、挂载方 `a` / `a.created_by`、以及
+`a.id` 上的两个 `NOT EXISTS`),因而不消费任何参数——本模块「每个片段恰好一个位置
+参数」的契约由此保住。同 owner 那一支刻意保留、没有被读权片段吸收:它是一次纯列
+比较,能在最常见的自有库场景上把后面几层 EXISTS 整个短路掉。
 
 status='copying' 的库(notebook_sharing.copy_notebook 深拷贝期间的哨兵状态)必须
-被两个 OR 分支一起挡住:深拷贝落库那一刻 created_by 已经是新 owner,但数据要
+被全部 OR 分支一起挡住:深拷贝落库那一刻 created_by 已经是新 owner,但数据要
 跨多个事务才灌完,「同 owner」分支不查 status 的话会在拷贝完成前就先满足——
 另一个请求能把它当参考库挂上并从中检索,读到写入中途的半成品,与本仓库既有的
 「copying 状态尚不可用」不变量(notebook_catalog.NotebookSummaryQuery.get /
@@ -36,7 +62,11 @@ tier='base' 分支同样带上这条检查,不依赖「copy_notebook 只产出 t
 **双后端同修**:`postgres/mount_sql.py` 是本文件的镜像。
 """
 
-from app.repositories.sqlite.access_sql import read_access_clause
+from app.repositories.sqlite.access_sql import (
+    everyone_grant_expr,
+    member_exists_expr,
+    restricted_grant_access_expr,
+)
 
 # 挂载边的 join 骨架(不含有效性过滤)—— 需要连失效边一起看的场景直接用它。
 MOUNT_JOIN = (
@@ -46,11 +76,34 @@ MOUNT_JOIN = (
     "WHERE e.notebook_id = ? AND b.id != e.notebook_id"
 )
 
+# 挂载方 owner 对被挂库的**受限**读权(只读成员 ∨ 点名授权边)。同 owner 那半不在
+# 这里——它已经是 MOUNT_VALID_EXPR 的独立 OR 支,且不受未共享门约束。
+_BORROWED_READ_EXPR = (
+    "("
+    + member_exists_expr("b.id", "a.created_by", "nm")
+    + " OR "
+    + restricted_grant_access_expr("b.id", "a.created_by")
+    + ")"
+)
+
+# 未共享门:挂载方笔记本自身没有任何只读成员、也没有任何授权边。**借来的东西不
+# 转借**——Alice 把 Carol 分享给她的 Y 挂进 X 之后再把 X 分享给 Bob,Bob 就经 X 读到
+# 了 Carol 从未授权他的 Y(质量评审真机复现)。谓词侧只认「有没有被共享」这个事实,
+# 不去比对两边的受众:即使 Bob 恰好也在 Y 的受众里,X 一旦被共享也一律关闭借入边,
+# 宁可保守——受众比对要跨库展开成员/组/授权边三张表,而这是每次参与集解析都要跑的
+# 热路径。用户想恢复,取消 X 的共享即可。
+_MOUNTER_NOT_SHARED_EXPR = (
+    "(NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id)"
+    " AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))"
+)
+
 # 有效性谓词。作为布尔表达式单独取用(如 list_mount_edges 的 active 标记)。
-# b.status != 'copying':被挂库自己正在深拷贝中(半成品)时,三个 OR 分支都不算数。
+# b.status != 'copying':被挂库自己正在深拷贝中(半成品)时,四个 OR 分支都不算数。
 MOUNT_VALID_EXPR = (
     "(b.status != 'copying' AND (b.tier = 'base' OR b.created_by = a.created_by"
-    " OR " + read_access_clause("b", user_ref="a.created_by") + "))"
+    " OR " + everyone_grant_expr("b.id")
+    + " OR (" + _BORROWED_READ_EXPR + " AND " + _MOUNTER_NOT_SHARED_EXPR + ")"
+    "))"
 )
 
 # 追加到 MOUNT_JOIN 之后的有效性过滤。

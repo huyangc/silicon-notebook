@@ -19,7 +19,7 @@
 * `postgres/search.py::_memory_match_predicates` —— Memory 词法检索的读权过滤
   (被 `memory_candidate_ids` / `memory_match_count` / `memory_page_candidate_ids`
   三个入口共用),与 `_read_access_clause` 同形,是本次收口前的第三份独立复刻。
-* ⚠ **两段式带锁写法,刻意保留**(`postgres/memory_store.py` 的
+* ⚠ **三段式带锁写法,刻意保留**(`postgres/memory_store.py` 的
   `create_candidate_with_initial_revision`、答案存 Memory 的写事务分支、
   `_lock_memory_aggregate_on`):它们先 `SELECT created_by FROM notebooks ... FOR SHARE`
   锁住 notebooks 行,再依次 `SELECT 1 FROM notebook_members ... FOR SHARE` 锁成员行、
@@ -27,9 +27,16 @@
   子查询里的行拿不到 `FOR SHARE`),也会丢掉「notebook 不存在」与「无读权」的三态
   区分。这三处只复用 `MEMBER_PROBE_FOR_SHARE_SQL` / `GRANT_PROBE_FOR_SHARE_SQL`
   这两半,owner 那一半保持原样。
-  `GRANT_PROBE_FOR_SHARE_SQL` 刻意只写 `FOR SHARE OF ng`:它锁的是**授权边行**
-  (防写事务进行中被撤销),与成员探测锁成员行同理。组成员资格是二阶输入、经
-  EXISTS 子查询判定,拿不到也不需要这把锁——正如既有实现从不锁 `users` 行。
+  `GRANT_PROBE_FOR_SHARE_SQL` 写 `FOR SHARE OF ng`:锁的是**授权边行**(防写事务
+  进行中授权被撤销),与成员探测锁成员行同理。`OF ng` 不是语法必须——本语句同层
+  rangetable 里只有 `notebook_grants ng`,裸 `FOR SHARE` 锁的对象相同;写出来是为了
+  让「锁的到底是哪张表的行」不依赖读者去数 FROM 子句。
+  ⚠ **组成员资格刻意不锁**,这是一条已登记的取舍而不是遗漏:`group_members` 只在
+  EXISTS 子查询里,`FOR SHARE` 够不着它(要锁就得改写成 LEFT JOIN,而 PG 不允许对
+  外连接的可空侧加锁)。后果是**一次在飞的写事务可以带着提交时已经失效的组授权
+  落地**——用户在 t0 通过组授权拿到读权、t1 被移出组、他 t0 就开始的那个写事务在
+  t2 提交成功。残留物是**一条被移除者自己也读不到的私有 Memory 行**(读路径当场
+  为假),既不扩散也不可见,代价远小于为它把热路径改成带锁 join。
 
 **刻意不收口**(与 SQLite 侧同款,理由写在那份 docstring 里):
 `postgres/query_store.py::joined_notebook_rows`(成员列表查询,只要成员那一半且多一个
@@ -63,19 +70,17 @@ def member_exists_expr(
     )
 
 
-def _principal_match_expr(
+def _restricted_principal_arms(
     grant_alias: str,
     user_ref: str,
     group_alias: str,
     group_admin_alias: str,
 ) -> str:
-    """授权边主体判定:四个已知 `principal_type` 各一条臂,没有兜底分支。
+    """**受限**主体的三条臂(user / group / group_admins),不含 `everyone`。
 
-    消费三个 `user_ref`;`everyone` 那条臂只比一个字面量,一个参数都不消费——
-    **绝不能**改成看 `principal_id`(设计文档已定裁决 1b)。
+    拆分理由与 SQLite 那一份同款(挂载有效性要区别对待,读权不区别对待)。
     """
     return (
-        "("
         f"({grant_alias}.principal_type='user' "
         f"AND {grant_alias}.principal_id={user_ref})"
         f" OR ({grant_alias}.principal_type='group' AND EXISTS ("
@@ -87,8 +92,42 @@ def _principal_match_expr(
         f"WHERE {group_admin_alias}.group_id={grant_alias}.principal_id "
         f"AND {group_admin_alias}.user_id={user_ref} "
         f"AND {group_admin_alias}.role='admin'))"
-        f" OR {grant_alias}.principal_type='everyone'"
-        ")"
+    )
+
+
+def _everyone_principal_arm(grant_alias: str) -> str:
+    """`everyone` 那条臂——**绝不能**改成看 `principal_id`(已定裁决 1b)。"""
+    return f"{grant_alias}.principal_type='everyone'"
+
+
+def _principal_match_expr(
+    grant_alias: str,
+    user_ref: str,
+    group_alias: str,
+    group_admin_alias: str,
+) -> str:
+    """授权边主体判定:四个已知 `principal_type` 各一条臂,没有兜底分支。
+
+    = 受限三臂 ∪ everyone,逐字拼回拆分之前的原样。
+    """
+    return (
+        "("
+        + _restricted_principal_arms(
+            grant_alias, user_ref, group_alias, group_admin_alias
+        )
+        + " OR "
+        + _everyone_principal_arm(grant_alias)
+        + ")"
+    )
+
+
+def _grant_exists_expr(notebook_ref: str, grant_alias: str, condition: str) -> str:
+    """`notebook_grants` 上的 `EXISTS (...)` 骨架,主体判定由 `condition` 决定。"""
+    return (
+        f"EXISTS (SELECT 1 FROM notebook_grants {grant_alias} "
+        f"WHERE {grant_alias}.notebook_id={notebook_ref} AND "
+        + condition
+        + ")"
     )
 
 
@@ -99,18 +138,44 @@ def grant_access_expr(
     group_alias: str = "ngm",
     group_admin_alias: str = "nga",
 ) -> str:
-    """有效授权边的 `EXISTS (...)` 布尔表达式。
+    """**任意**有效授权边的 `EXISTS (...)` 布尔表达式(四类主体全收)。
 
     两个 ref 既可以是占位符 `%s`,也可以是外层查询的列引用。传占位符时消费
     **三个** user 参数,传列引用时不消费参数。
     """
-    return (
-        f"EXISTS (SELECT 1 FROM notebook_grants {grant_alias} "
-        f"WHERE {grant_alias}.notebook_id={notebook_ref} AND "
-        + _principal_match_expr(
+    return _grant_exists_expr(
+        notebook_ref,
+        grant_alias,
+        _principal_match_expr(grant_alias, user_ref, group_alias, group_admin_alias),
+    )
+
+
+def restricted_grant_access_expr(
+    notebook_ref: str,
+    user_ref: str,
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """**受限**授权边(user / group / group_admins,不含 everyone)的 `EXISTS (...)`。
+
+    只有 `mount_sql.MOUNT_VALID_EXPR` 用它。参数消费同 `grant_access_expr`。
+    """
+    return _grant_exists_expr(
+        notebook_ref,
+        grant_alias,
+        "("
+        + _restricted_principal_arms(
             grant_alias, user_ref, group_alias, group_admin_alias
         )
-        + ")"
+        + ")",
+    )
+
+
+def everyone_grant_expr(notebook_ref: str, grant_alias: str = "nge") -> str:
+    """`everyone` 授权边的 `EXISTS (...)`——与**谁在问**无关,故不接 user_ref。"""
+    return _grant_exists_expr(
+        notebook_ref, grant_alias, _everyone_principal_arm(grant_alias)
     )
 
 
@@ -121,8 +186,8 @@ GRANT_PROBE_SQL = (
     + _principal_match_expr("ng", "%s", "ngm", "nga")
 )
 
-# 上面那条加行锁的变体,供两段式带锁写法使用。`OF ng` 是必须的:被 EXISTS 子查询
-# 引用的 group_members 不在 FROM 列表里,裸 `FOR SHARE` 也锁不到它。
+# 上面那条加行锁的变体,供三段式带锁写法使用。`OF ng` 是显式化而非语法必须(本语句
+# 同层 rangetable 里只有 ng);组成员资格刻意不锁,取舍见模块 docstring。
 GRANT_PROBE_FOR_SHARE_SQL = GRANT_PROBE_SQL + " FOR SHARE OF ng"
 
 

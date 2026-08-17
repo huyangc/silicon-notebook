@@ -8,9 +8,10 @@ P0-T1 把散落在 sharing_store / memory_store / search 的「owner ∨ 只读�
 * 写权恒为 owner-only —— 只读成员与群组被授权者都是**访客**,读权扩了这一列不得
   跟着松(组管理员的写权是 P2 的能力翻转)。
 * 不存在的 notebook 两权皆否(无行 → False),不抛异常、不泄露存在性。
-* `legacy_read` 一列是 P1 之前的口径(`写权 or is_member`)。它同时钉两件事:老
-  主体上新旧口径必须逐格相同(读权没有顺手放宽既有语义),而授权边主体上必须**恰好**
-  是它翻了——只断言新口径的话,一个「把所有人都放行」的实现同样能全绿。
+* `legacy_read` 一列是 P1 之前的口径(`写权 or is_member`)。它钉的是**旧口径没被
+  顺手改**,外加「只许扩、不许收窄既有主体」这条单调性。它并**不**是防「全放行」的
+  那道闸——那由矩阵里 `expect_read=False` 的格子(陌生人、`group_plain`、哨兵库)
+  承担,`legacy_read` 在那些格子上本来就是 False。两者一起看才完整。
 * `principal_type` 按四值白名单精确匹配:正向 shadow 停车会给冲突行写哨兵
   `principal_type`,这类行必须谁也匹配不上(裁决 1b)。哨兵用例覆盖三种最可能被
   写出来的推断形态(`principal_id=''`、`principal_id=<某用户>`、`=<某组>`)。
@@ -450,6 +451,33 @@ def test_read_access_param_helper_matches_the_predicate_placeholders():
     assert set(access_sql.grant_probe_params("n", "u")[1:]) == {"u"}
 
 
+def test_grant_expr_is_exactly_the_restricted_and_everyone_halves():
+    """`grant_access_expr` = 受限三臂 ∪ everyone,两个半支不重不漏。
+
+    拆出这两个 public 片段是为了让**挂载**有效性区别对待点名授权与全员授权
+    (`mount_sql` 的借入挂载未共享门);**读权**必须完全不受影响。这条钉的就是那句
+    「不受影响」的可执行形式:任何一臂在拆分中被漏掉或被两边同时收下,这里当场红。
+    """
+    from app.repositories.postgres import access_sql as pg
+
+    for mod, ph in ((access_sql, "?"), (pg, "%s")):
+        whole = mod.grant_access_expr("b.id", ph)
+        restricted = mod.restricted_grant_access_expr("b.id", ph)
+        everyone = mod.everyone_grant_expr("b.id", "ng")
+        for arm in ("principal_type='user'", "principal_type='group'",
+                    "principal_type='group_admins'"):
+            assert arm in whole and arm in restricted, arm
+            assert arm not in everyone, arm
+        assert "principal_type='everyone'" in whole
+        assert "principal_type='everyone'" in everyone
+        assert "principal_type='everyone'" not in restricted, (
+            "受限片段收下了 everyone —— 借入挂载的未共享门会连全员授权一起挡掉"
+        )
+        # 受限片段的参数消费必须与整体一致(everyone 那臂本来就零参数)。
+        assert restricted.count(ph) == whole.count(ph)
+        assert everyone.count(ph) == 0
+
+
 # ---------------------------------------------------------------------------
 # 双后端同修守卫
 # ---------------------------------------------------------------------------
@@ -477,6 +505,10 @@ _CALLABLE_PROBES = {
     "grant_access_expr": lambda mod: mod.grant_access_expr(
         "outer.notebook_id", "outer.user_id"
     ),
+    "restricted_grant_access_expr": lambda mod: mod.restricted_grant_access_expr(
+        "outer.notebook_id", "outer.user_id"
+    ),
+    "everyone_grant_expr": lambda mod: mod.everyone_grant_expr("outer.notebook_id"),
     "read_access_clause": lambda mod: mod.read_access_clause(),
     "read_access_exists_clause": lambda mod: mod.read_access_exists_clause("m"),
     "read_access_params": lambda mod: repr(mod.read_access_params("U")),
@@ -534,8 +566,9 @@ def test_backends_declare_the_same_predicate_surface():
         assert p_val.replace("%s", "?") == s_val, name
 
     # PG 独有:三段式带锁写法用的加锁变体,只应比裸探测多一个 FOR SHARE 后缀。
-    # 授权边那条必须写 `OF ng`:被 EXISTS 子查询引用的 group_members 不在 FROM
-    # 列表里,裸 FOR SHARE 锁不到它,写成裸的只会让人误以为它锁了。
+    # 授权边那条写 `OF ng`:显式化「锁的是哪张表的行」。它不是语法必须(同层
+    # rangetable 里只有 ng),钉住它是为了让「组成员资格刻意不锁」这条已登记取舍
+    # 在代码里始终看得见——见 postgres/access_sql.py 的模块 docstring。
     assert pg.MEMBER_PROBE_FOR_SHARE_SQL == pg.MEMBER_PROBE_SQL + " FOR SHARE"
     assert pg.GRANT_PROBE_FOR_SHARE_SQL == pg.GRANT_PROBE_SQL + " FOR SHARE OF ng"
 

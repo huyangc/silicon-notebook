@@ -384,7 +384,7 @@ async def upload_sources(
 
 @router.get("/sources/{source_id}", response_model=SourceDetail)
 def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceDetail:
-    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员 ∪ 有效授权边
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return source_repository().get_source(source_id)
@@ -597,7 +597,7 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
 
 @router.get("/sources/{source_id}/elements", response_model=List[SourceElement])
 def source_elements(source_id: str, user: UserProfile = Depends(get_current_user)) -> List[SourceElement]:
-    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
+    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员 ∪ 有效授权边
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return source_repository().source_elements(source_id)

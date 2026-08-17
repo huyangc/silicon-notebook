@@ -13260,7 +13260,7 @@
           "summary": "List Notebook Bases Route"
         },
         "put": {
-          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)\n∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。\n写权限本身由 require_notebook_capability(\"notebook:manage\")(P0 阶段解析到\nowner-only,404 on denial)在依赖层挡;\n这里只做候选集校验,不重复手工判断写权限。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主后)永远不会\n出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
+          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选 ∪ 当前已挂载的 id(含失效边),\n其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。可挂候选共四支:公共知识库、\n同 owner 的库、被挂库上有「全员可读」授权的库,以及本笔记本 owner 有受限读权\n(只读共享或点名/群组授权)且**本笔记本自身尚未被共享**的库。最后那道未共享门\n堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n写权限本身由 require_notebook_capability(\"notebook:manage\")(P0 阶段解析到\nowner-only,404 on denial)在依赖层挡;\n这里只做候选集校验,不重复手工判断写权限。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主、共享被撤销,\n或本笔记本自身被共享而关闭了借入边之后)永远不会出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
           "operationId": "set_notebook_bases_route_api_notebooks__notebook_id__bases_put",
           "parameters": [
             {
@@ -16472,7 +16472,7 @@
       },
       "/api/notebooks/{notebook_id}/mountable": {
         "get": {
-          "description": "可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
+          "description": "可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪\n(本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。\n\n最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
           "operationId": "mountable_notebooks_route_api_notebooks__notebook_id__mountable_get",
           "parameters": [
             {

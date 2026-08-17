@@ -472,9 +472,12 @@ class TestApiUnauthorizedWrite:
     是不是我的 —— require_notebook_access,owner-only)与候选集(传入的
     base_notebook_ids 是不是我能挂的 —— mountable_notebooks)。两条防线分别用
     真实两用户打穿,并且每条都查库确认失败请求真的零写入,不能只看响应码。
-    可挂候选刻意排除只读分享(notebook_members)——本仓库 2026-07-17 的
-    knowhow/memory 转移设计对"只读访问 ≠ 可挂候选"这个问题拍过同样的板,
-    notebook_store.mountable_notebooks 的 docstring 原话也是这句。"""
+
+    ⚠ 类 docstring 曾写「可挂候选刻意排除只读分享(notebook_members)」。P1 群组
+    知识共享把它改成了「**受限读权 ⇒ 可挂载,但挂载方笔记本自身未被共享才生效**」
+    (设计文档 §6 的借入挂载小节)。当年那句话的真实动机是**转手再分享**这条通道,
+    现在由 `mount_sql._MOUNTER_NOT_SHARED_EXPR` 这道门专门堵住,而不是靠一刀切排除
+    整类库;`TestBorrowedMountReshare` 是它的三方回归。写权那两条防线逐字不变。"""
 
     def test_non_owner_cannot_write_bases_at_all(self, two_users_client):
         c = two_users_client
@@ -746,6 +749,275 @@ class TestApiUnauthorizedWrite:
         )
         assert context.status_code == 200
         assert context.json()["id"] == source_id
+
+
+@pytest.fixture
+def three_users_client(monkeypatch, tmp_path):
+    """借入挂载的三方场景需要三个真实用户:Carol(库主)/ Alice(挂载方)/ Bob。
+
+    形状照抄 `two_users_client`(auth_optional=false + 经 HTTP 建库拿到正确的
+    created_by);两人测不出「转手」——转手至少要一个原始授权方、一个中间人和一个
+    最终受益人。
+    """
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'api_three.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "api_storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    client = TestClient(create_app())
+
+    def _register(username):
+        body = client.post(
+            "/api/auth/register", json={"username": username, "password": "pw"}
+        ).json()
+        return body["user"]["id"], {"Authorization": f"Bearer {body['token']}"}
+
+    carol_id, carol = _register("a00900301")
+    alice_id, alice = _register("a00900302")
+    bob_id, bob = _register("a00900303")
+    return {
+        "client": client,
+        "carol_id": carol_id, "carol": carol,
+        "alice_id": alice_id, "alice": alice,
+        "bob_id": bob_id, "bob": bob,
+    }
+
+
+_NOW = "2026-08-18T00:00:00Z"
+
+
+def _insert_source(repo, notebook_id: str, source_id: str) -> str:
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,file_name,"
+            "file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,'Carol 的机密','markdown','extracted','parsed','y.md','',"
+            "0,'','','note',?,?)",
+            (source_id, notebook_id, _NOW, _NOW),
+        )
+    return source_id
+
+
+def _insert_grant(repo, notebook_id, principal_type, principal_id, creator, gid):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES (?,?,?,?,'viewer',?,?)",
+            (gid, notebook_id, principal_type, principal_id, creator, _NOW),
+        )
+
+
+class TestBorrowedMountReshare:
+    """借入挂载的**转手再分享**收窄(P1-T2 质量评审 P0)。
+
+    真机复现的漏洞:Carol 只读分享 Y 给 Alice → Alice 把 Y 挂进自己的 X → Alice 把
+    X 分享给 Bob → Bob 经 X 的代理读取读到 Y 的全文,而 Carol 从未授权 Bob。历史上
+    `mountable_notebooks` 刻意排除只读分享,真实动机就是这条通道。
+
+    收窄规则(`mount_sql.MOUNT_VALID_EXPR` 的第 4 支):受限读权(成员 ∨
+    user/group/group_admins 授权边)的借入挂载,只在**挂载方笔记本自身未被共享**时
+    有效。`tier='base'` 与 `everyone` 授权不受此限——它们的受众本来就是全员,转手
+    不增加任何暴露面。
+    """
+
+    @staticmethod
+    def _repo():
+        from app.api.deps import repository
+        return repository()
+
+    def _stage(self, c):
+        """Carol 建 Y(内含一份来源)并只读分享给 Alice;Alice 建 X 并挂上 Y。"""
+        client = c["client"]
+        repo = self._repo()
+        y = client.post(
+            "/api/notebooks", headers=c["carol"], json={"name": "Carol 的库 Y"}
+        ).json()
+        x = client.post(
+            "/api/notebooks", headers=c["alice"], json={"name": "Alice 的库 X"}
+        ).json()
+        source_id = _insert_source(repo, y["id"], "src-carol-secret")
+        repo.add_member(y["id"], c["alice_id"])
+        resp = client.put(
+            f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
+            json={"base_notebook_ids": [y["id"]]},
+        )
+        assert resp.status_code == 200, "① 未共享的 X 借入挂载 Y 必须成立"
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        return repo, x, y, source_id
+
+    def test_borrowed_mount_works_while_the_mounter_is_not_shared(
+        self, three_users_client
+    ):
+        """① Alice 自己用:Y 在参与集里,Alice 经 X 代理读得到 Y 的来源。"""
+        c = three_users_client
+        repo, x, y, source_id = self._stage(c)
+        detail = c["client"].get(
+            f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c["alice"]
+        )
+        assert detail.status_code == 200
+        assert detail.json()["id"] == source_id
+
+    def test_resharing_the_mounter_deactivates_the_borrowed_edge(
+        self, three_users_client
+    ):
+        """② Alice 把 X 分享给 Bob ⇒ 借入边即刻失效,Bob 读不到 Y 的来源。
+
+        这是 P0 本身:断言必须同时覆盖参与集(检索/联邦面)与代理读取(HTTP 面),
+        只测其中一个都可能让另一条通道继续漏。
+        """
+        c = three_users_client
+        repo, x, y, source_id = self._stage(c)
+        client = c["client"]
+
+        repo.add_member(x["id"], c["bob_id"])
+        assert repo.user_can_read_notebook(x["id"], c["bob_id"]) is True
+
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"]], (
+            "X 一被共享,借来的 Y 就必须退出参与集——否则检索会替 Carol 把全文交给 Bob"
+        )
+        for who in ("bob", "alice"):
+            got = client.get(
+                f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c[who]
+            )
+            assert got.status_code == 404, f"{who} 仍能经 X 代理读到 Y 的来源"
+        edges = repo.list_notebook_bases(x["id"])
+        assert [(e["id"], e["active"]) for e in edges] == [(y["id"], False)], (
+            "边必须保留、只是置灰——与既有失效边惯例一致"
+        )
+
+    def test_borrowed_edge_recovers_after_the_reshare_is_revoked(
+        self, three_users_client
+    ):
+        """③ Bob 被踢 ⇒ X 重新回到未共享状态,借入边自动恢复。"""
+        c = three_users_client
+        repo, x, y, source_id = self._stage(c)
+        repo.add_member(x["id"], c["bob_id"])
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"]]
+
+        repo.remove_member(x["id"], c["bob_id"])
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        detail = c["client"].get(
+            f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c["alice"]
+        )
+        assert detail.status_code == 200
+
+    def test_a_grant_on_the_mounter_also_closes_the_borrowed_edge(
+        self, three_users_client
+    ):
+        """②' 未共享门的另一半:授权边(不只是 notebook_members)同样关闭借入边。
+
+        只挡 `notebook_members` 的话,群组共享一上线(T3)就是同一个漏洞的第二个
+        入口——而那条路径不写任何成员行。
+        """
+        c = three_users_client
+        repo, x, y, source_id = self._stage(c)
+        _insert_grant(repo, x["id"], "user", c["bob_id"], c["alice_id"], "gr-x-bob")
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"]]
+        with repo._write() as db:
+            db.execute("DELETE FROM notebook_grants WHERE id='gr-x-bob'")
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+
+    def test_everyone_grant_survives_the_mounter_being_shared(
+        self, three_users_client
+    ):
+        """④ Y 改成 everyone 授权:X 已共享给 Bob,边仍有效。
+
+        `everyone` 的受众本来就是全员,Bob 直接打开 Y 也读得到,经 X 读没有多给他
+        任何东西。未共享门若把它一起挡掉,就是在无收益地砍掉公共知识的可组合性。
+        """
+        c = three_users_client
+        client = c["client"]
+        repo = self._repo()
+        y = client.post(
+            "/api/notebooks", headers=c["carol"], json={"name": "Carol 的公开库 Y"}
+        ).json()
+        x = client.post(
+            "/api/notebooks", headers=c["alice"], json={"name": "Alice 的库 X"}
+        ).json()
+        source_id = _insert_source(repo, y["id"], "src-open")
+        _insert_grant(repo, y["id"], "everyone", "", c["carol_id"], "gr-y-everyone")
+
+        assert client.put(
+            f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
+            json={"base_notebook_ids": [y["id"]]},
+        ).status_code == 200
+        repo.add_member(x["id"], c["bob_id"])
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+        got = client.get(
+            f"/api/notebooks/{x['id']}/sources/{source_id}", headers=c["bob"]
+        )
+        assert got.status_code == 200
+
+    def test_group_granted_borrow_follows_the_same_gate(self, three_users_client):
+        """⑤ 群组授权走同一条受限支:自己库未共享时有效,共享后失效、恢复后回来。"""
+        c = three_users_client
+        client = c["client"]
+        repo = self._repo()
+        y = client.post(
+            "/api/notebooks", headers=c["carol"], json={"name": "Carol 的组共享库"}
+        ).json()
+        x = client.post(
+            "/api/notebooks", headers=c["alice"], json={"name": "Alice 的库 X"}
+        ).json()
+        with repo._write() as db:
+            db.execute(
+                "INSERT INTO groups "
+                "(id,name,kind,description,created_by,created_at,updated_at) "
+                "VALUES ('grp-borrow','借入组','project','',?,?,?)",
+                (c["carol_id"], _NOW, _NOW),
+            )
+            db.execute(
+                "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
+                "VALUES ('grp-borrow',?,'member',?,?)",
+                (c["alice_id"], _NOW, c["carol_id"]),
+            )
+        _insert_grant(repo, y["id"], "group", "grp-borrow", c["carol_id"], "gr-y-grp")
+
+        assert client.put(
+            f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
+            json={"base_notebook_ids": [y["id"]]},
+        ).status_code == 200
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+
+        repo.add_member(x["id"], c["bob_id"])
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"]]
+        repo.remove_member(x["id"], c["bob_id"])
+        assert repo.participant_notebook_ids(x["id"]) == [x["id"], y["id"]]
+
+    def test_public_base_and_own_library_are_exempt_from_the_gate(
+        self, three_users_client
+    ):
+        """对照组:被共享的 X 仍能挂公共知识库与自己的库——门只收窄第 4 支。
+
+        少了这条,一个「X 被共享就全部失效」的过度收窄实现同样能让上面几条全绿。
+        """
+        c = three_users_client
+        client = c["client"]
+        repo = self._repo()
+        x = client.post(
+            "/api/notebooks", headers=c["alice"], json={"name": "Alice 的库 X"}
+        ).json()
+        own = client.post(
+            "/api/notebooks", headers=c["alice"], json={"name": "Alice 自己的另一个库"}
+        ).json()
+        public = client.post(
+            "/api/notebooks", headers=c["carol"], json={"name": "公共库"}
+        ).json()
+        repo.mark_notebook_base(public["id"])
+        repo.add_member(x["id"], c["bob_id"])
+
+        assert client.put(
+            f"/api/notebooks/{x['id']}/bases", headers=c["alice"],
+            json={"base_notebook_ids": [public["id"], own["id"]]},
+        ).status_code == 200
+        assert set(repo.participant_notebook_ids(x["id"])) == {
+            x["id"], public["id"], own["id"]
+        }
 
 
 class TestPromotionTargetApi:
