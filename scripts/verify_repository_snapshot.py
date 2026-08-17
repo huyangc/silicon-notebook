@@ -3024,5 +3024,65 @@ MIGRATION_MANIFEST[(47, 48)] = {
 }
 
 
+# v49: group knowledge sharing P1 (zero behavior change — no reader or writer
+# anywhere in the codebase consumes these tables yet). Same cascade as every
+# other hop: broadcast onto every prior hop key rebased to v49, then register
+# the explicit (48, 49) single hop. SQL text matches sqlite_master storage
+# verbatim (SQLite strips "IF NOT EXISTS" and keeps the source indentation).
+GROUP_SHARING_TABLES = {
+    "groups": """CREATE TABLE groups (
+                  id          TEXT NOT NULL PRIMARY KEY,
+                  name        TEXT NOT NULL,
+                  kind        TEXT NOT NULL DEFAULT 'project',
+                  description TEXT NOT NULL DEFAULT '',
+                  created_by  TEXT REFERENCES users(id),
+                  created_at  TEXT NOT NULL,
+                  updated_at  TEXT NOT NULL
+                )""",
+    "group_members": """CREATE TABLE group_members (
+                  group_id  TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                  user_id   TEXT NOT NULL REFERENCES users(id),
+                  role      TEXT NOT NULL DEFAULT 'member',
+                  added_at  TEXT NOT NULL,
+                  added_by  TEXT REFERENCES users(id),
+                  PRIMARY KEY (group_id, user_id)
+                )""",
+    "notebook_grants": """CREATE TABLE notebook_grants (
+                  id             TEXT NOT NULL PRIMARY KEY,
+                  notebook_id    TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  principal_type TEXT NOT NULL,
+                  principal_id   TEXT,
+                  role           TEXT NOT NULL,
+                  created_by     TEXT REFERENCES users(id),
+                  created_at     TEXT NOT NULL,
+                  UNIQUE (notebook_id, principal_type, principal_id)
+                )""",
+}
+GROUP_SHARING_INDEXES = {
+    "idx_group_members_user":
+        "CREATE INDEX idx_group_members_user ON group_members(user_id)",
+    "idx_notebook_grants_nb":
+        "CREATE INDEX idx_notebook_grants_nb ON notebook_grants(notebook_id)",
+    "idx_notebook_grants_principal":
+        "CREATE INDEX idx_notebook_grants_principal "
+        "ON notebook_grants(principal_type, principal_id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 49, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **GROUP_SHARING_TABLES},
+        "indexes": {**manifest["indexes"], **GROUP_SHARING_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(48, 49)] = {
+    "tables": GROUP_SHARING_TABLES,
+    "columns": {},
+    "indexes": GROUP_SHARING_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

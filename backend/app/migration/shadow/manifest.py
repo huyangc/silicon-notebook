@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=48, postgres_version=26, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=49, postgres_version=27, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -603,6 +603,26 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         79,
         "jsonb+timestamptz",
+    ),
+    # SQLite v49 / PostgreSQL v27: group knowledge sharing P1 (zero behavior
+    # change — no reader/writer consumes these tables yet). groups has no FK
+    # dependency among these three tables other than users (rank 11), so it
+    # ranks first; group_members FKs onto groups (rank 80) and must rank
+    # higher; notebook_grants FKs onto notebooks (rank 15) only — its
+    # principal_id column is a deliberately bare, unconstrained polymorphic
+    # reference with no foreign key (see migrations.py _migration_49) — so it
+    # is FK-consistent at any rank above 15 and is placed last for reading
+    # order alongside its sibling tables.
+    _table("groups", ("id",), ReplicationKeyKind.DECLARED_PK, 80, "timestamptz"),
+    _table(
+        "group_members",
+        ("group_id", "user_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        81,
+        "timestamptz",
+    ),
+    _table(
+        "notebook_grants", ("id",), ReplicationKeyKind.DECLARED_PK, 82, "timestamptz"
     ),
 )
 

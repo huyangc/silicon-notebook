@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=48) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=49) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -43,6 +43,9 @@ NOTEBOOK_SCOPED_TABLES = [
     "answers", "feedback", "ask_jobs", "kg_build_jobs", "reports", "memory_items",
     "knowhow_tables", "notebook_assets", "notebook_members", "agent_token_notebooks",
     "notebook_bases",
+    # v49 群组知识共享 P1: notebook_grants 直接带 notebook_id 列，与
+    # notebook_members 同一形状——按 notebook_id IN (sec_nb) 筛即可。
+    "notebook_grants",
 ]
 # notebook_bases 是"挂载方"拥有的行(notebook_id=挂载方, base_notebook_id=被挂的公共知识
 # 库), 按本类通用规则以 notebook_id IN (sec_nb) 筛——sec_nb 恒不含 shared_base(它并入
@@ -76,6 +79,14 @@ CHILD_TABLES = [
 GLOBAL_UNION_TABLES = [
     "users", "user_profiles", "agent_profiles", "agent_access_tokens",
     "concept_whitelist", "object_schemas",
+    # v49 群组知识共享 P1: groups/group_members 都不带 notebook_id，与
+    # agent_profiles/agent_access_tokens 同一先例——group_members 的 FK 挂在
+    # groups 上而非 notebooks 上，不适用 CHILD_TABLES 的"按 sec_nb 已导入父行"
+    # 筛选语义(groups 本身就是全量并集，没有"被 sec_nb 排除"这回事)。两表主键
+    # 均是自然复合/稳定 id(groups.id、group_members 的 (group_id, user_id))，
+    # INSERT OR IGNORE 按主键去重即是正确的并集语义，与 users/agent_profiles
+    # 同一套"主库优先、副库同 id 冲突即丢弃"处理。
+    "groups", "group_members",
 ]
 
 OBJECT_SCHEMA_SEMANTIC_COLUMNS = (

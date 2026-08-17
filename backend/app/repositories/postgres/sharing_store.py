@@ -28,6 +28,17 @@ from app.repositories.postgres.knowhow_history_store import record_change
 
 
 _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
+
+# Deliberately absent: `notebook_grants` (group knowledge sharing P1, schema
+# v27), for the same reason `notebook_members` (share-token readers) already
+# isn't copied. Access-control state is not knowledge: who else can read a
+# notebook is a property of the ORIGINAL notebook, not of the knowledge
+# inside it, and a copy is a brand-new notebook the new owner alone controls.
+# Carrying grants across would silently hand the copy's owner's collaborators
+# to whoever they were on the source — the new owner must re-grant access
+# explicitly. `groups`/`group_members` need no mention here: they hang off no
+# `notebook_id` at all, so they were never candidates for this per-notebook
+# snapshot in the first place.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id=%s"),
     ("sources", "SELECT * FROM sources WHERE notebook_id=%s"),
