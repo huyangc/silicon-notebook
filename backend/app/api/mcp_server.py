@@ -728,6 +728,16 @@ def _writable_notebook(
     ``user_can_access_notebook`` is the product's one write predicate (its own
     docstring: 「写权:仅 owner(安全边界,勿放宽)」), the same one the HTTP
     ``require_notebook_access`` dependency resolves to.
+
+    The one Agent write this gate deliberately does NOT cover is
+    ``put_knowhow_cell_code`` (and its HTTP twins under
+    ``/api/agent/knowhow/...``): design doc §⑥-4 keeps ``knowhow:code``
+    entirely scope-driven — a cell code attachment is inert (never executed,
+    indexed, embedded, or projected into retrieval/KG), so the blast-radius
+    argument above does not carry over. Two authority models coexisting is a
+    recorded decision, not drift (AGENTS.md's Agent source-management bullet;
+    ``deps.user_or_agent_scope`` states the knowhow side), pinned on both
+    sides by backend/tests/test_memory_mcp.py.
     """
     principal, notebook_id = _selected_notebook(ctx, repo, scope)
     if not repo.user_can_access_notebook(notebook_id, principal.owner_id):

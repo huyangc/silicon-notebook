@@ -197,7 +197,14 @@ async def user_or_agent_scope(
     require_notebook_read above). ``write`` is IGNORED for an Agent
     principal — its read/write capability is entirely scope-driven (the
     CALLER picks knowledge:read for a read, knowhow:code for a code write),
-    never a second owner/reader axis layered on top.
+    never a second owner/reader axis layered on top. That is THIS surface's
+    contract (design doc §⑥-4: a cell code attachment is inert — never
+    executed, indexed, embedded, or projected), not a codebase-wide rule:
+    the MCP source-management/build tools DO layer an owner-only gate on
+    top of their scopes (mcp_server._writable_notebook) because a document
+    write reaches every member's retrieval. The divergence is a recorded
+    decision (AGENTS.md's Agent source-management bullet), pinned on both
+    sides by backend/tests/test_memory_mcp.py.
 
     Otherwise -> session Bearer (or the auth_optional seeded-admin
     fallback): resolves the user like get_current_user, then applies

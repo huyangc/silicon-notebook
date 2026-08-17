@@ -2886,6 +2886,50 @@ async def test_source_writes_are_refused_in_a_read_only_shared_notebook(
     assert scheduled_jobs == []
 
 
+@pytest.mark.anyio
+async def test_knowhow_code_write_is_allowed_in_a_read_only_shared_notebook(
+    mcp_env,
+):
+    """The deliberate counterpart of the test above: the two Agent write
+    surfaces use DIFFERENT authority models on purpose.
+
+    Source management layers an owner-only gate on top of its scopes
+    (``mcp_server._writable_notebook``) because adding, re-parsing, or
+    deleting a document reaches every member's retrieval. ``knowhow:code``
+    does not: design doc §⑥-4 keeps an Agent's write capability entirely
+    scope-driven (``deps.user_or_agent_scope`` documents the same rule for
+    the HTTP twins), and a cell code attachment is inert — never executed,
+    indexed, embedded, or projected — so the blast-radius argument does not
+    carry over. Recorded as a decision in AGENTS.md / CLAUDE.md /
+    docs/product-and-api*.md; this test pins the knowhow side so the
+    divergence cannot drift silently.
+
+    Bob is a read-only member of Alice's notebook: the very share where his
+    ``add_source_text`` is refused accepts his cell-code write.
+    """
+    table_id, row_id, method_id = _seed_knowhow_table(mcp_env["notebook"].id)
+    bob_token = _agent_token(
+        mcp_env, ["knowledge:read", "knowhow:code"], user="bob"
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        put_result = _payload(await client.call(
+            "put_knowhow_cell_code",
+            {
+                "row_id": row_id, "column_id": method_id,
+                "code_text": "print('bob')", "language": "python",
+            },
+        ))
+        assert put_result["status"] == "implemented"
+
+        row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
+        assert row["code"][0]["column_id"] == method_id
+        assert row["code"][0]["updated_by"] == mcp_env["bob_profile"].name
+
+
 # --- build/maintenance tools -------------------------------------------
 # "maintenance:execute" was already a valid AGENT_SCOPES entry (and offered by
 # the token-creation UI) before build_kg/build_retrieval_index existed to

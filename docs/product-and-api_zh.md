@@ -317,6 +317,12 @@ embedding/chunk/索引/KG 投影——其新鲜度（`implemented`/`stale`/`none
 HTTP `PUT`/`DELETE .../code`）才需要 `knowhow:code`——一个既要读现有代码又要写新版本的
 token，两个 scope 都要授予。
 
+与上面来源与构建面的 owner-only 写入不同，`knowhow:code` 刻意**不加 owner 轴**：Agent
+在这里的写能力完全由 scope 决定（设计文档 §⑥-4），owner 只是以只读成员身份加入的共享
+笔记本，也能保存格子代码附件。代码附件是惰性数据——从不执行、不进索引/embedding/KG
+投影，而删除或重新解析文档会波及每个成员的检索，两个面因此采用不同的权限模型。这处
+分歧是拍板取舍不是疏漏，`backend/tests/test_memory_mcp.py` 对两侧行为各钉一条测试。
+
 只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后，admin queue 展示脱敏后的结构化提取
 候选与服务端验证过的 evidence，而不是原始 Memory revision/provenance 浏览器。提案会固定精确的
 来源 revision、脱敏候选快照和审核所见 evidence；编辑或弃用审核中的 Memory 会在同一事务中废止
