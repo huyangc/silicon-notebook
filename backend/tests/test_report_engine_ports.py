@@ -60,13 +60,13 @@ class _Reports:
         row.update(status="generating", generation_started_at="fixture-start")
         return True
 
-    def list_reports(self, notebook_id):
+    def list_reports(self, notebook_id, *, created_by=None):
         return list(self.rows.values())
 
     def delete_report(self, notebook_id, report_id):
         self.rows.pop(report_id, None)
 
-    def export_reports(self, notebook_id, report_ids):
+    def export_reports(self, notebook_id, report_ids, *, created_by=None):
         return []
 
 

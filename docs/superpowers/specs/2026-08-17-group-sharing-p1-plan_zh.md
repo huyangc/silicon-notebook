@@ -208,6 +208,9 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
 - 组件测试:群组弹窗、分享给群组流、列表分区标注(进 frontend/tests/
   {unit,component},生产代码只进 app/features)。
 
+- T3b 登记:待确认中心铃铛对共享库内自己的报告显示空库名(pending_actions 的
+  notebook_name 只映射自有库)——T4 补非自有库的库名解析,无泄露、深链可用。
+
 ### T5 文档 + 门禁 + PR
 
 - 文档数字与版本(T1 留下的):CLAUDE.md(schema 红线段 + shadow 大段)、
@@ -278,3 +281,8 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
 5. 报告可见性按创建者隔离(owner 也只见自己的),分享走既有公开链接。
 6. Agent/MCP 面零改动(owner-only 红线)。
 7. `NotebookSummary.access` 不新增枚举值;群组来源经 `granted_via` 新字段表达。
+
+- **T3b 裁决(用量归集)**:管理员用量总览的报告数当前按 notebook owner 归集
+  (GROUP BY nb.created_by),成员自建报告会记到库 owner 头上;T5 改按
+  reports.created_by 归集,与 questions「按提交者计数、含共享库提交」先例及
+  list_user_notebooks/活动流的既有口径一致。

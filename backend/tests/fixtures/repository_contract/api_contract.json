@@ -18343,7 +18343,7 @@
       },
       "/api/notebooks/{notebook_id}/reports/{report_id}/share": {
         "delete": {
-          "description": "Revoke the link. The next public request 404s like any unknown token.",
+          "description": "Revoke the link. The next public request 404s like any unknown token.\n\nRow-level gated like every other operation on an existing report: revoking\nsomeone else's link is a destructive act on their report, and the silent\nzero-row UPDATE underneath would report success either way.",
           "operationId": "unshare_report_route_api_notebooks__notebook_id__reports__report_id__share_delete",
           "parameters": [
             {

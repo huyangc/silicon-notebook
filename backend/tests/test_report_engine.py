@@ -122,10 +122,10 @@ def test_report_crud_roundtrip(repo):
     assert detail["generation_started_at"] == started_at
     assert detail["updated_at"] >= started_at
     assert detail["outline"][0]["title"] == "机理" and detail["gaps"] == ["缺 X"]
-    lst = repo.list_reports(nb.id)
+    lst = repo.list_reports(nb.id, created_by=None)
     assert len(lst) == 1 and lst[0]["id"] == rid and "content_md" not in lst[0]
     repo.delete_report(nb.id, rid)
-    assert repo.list_reports(nb.id) == []
+    assert repo.list_reports(nb.id, created_by=None) == []
     with pytest.raises(KeyError):
         repo.get_report(nb.id, rid)
 

@@ -138,12 +138,16 @@ async def require_notebook_read(
 #   4. `source_routes.py` 的 parse/delete 体内自查(已走
 #      notebook_capability_allowed("sources:write"),随表自动翻转)。
 #
-# ⚠ `reports:write` 的已知前瞻:设计文档(docs/superpowers/specs/
-# 2026-08-17-group-knowledge-sharing-design_zh.md §4)把「在共享库内创建自己的
-# 深度报告」放在成员(viewer)档,而这里的 9 个 report 写端点挂的是同一个
-# notebook 级能力——P1 落地成员自有报告时,这批端点需要行级 `created_by` 判定
-# (谁建的谁能 generate/cancel/delete),不是翻一格表就完事。现在登记,免得
-# P1 才发现接缝形状不够。
+# ⚠ `reports:write` 现在**没有任何端点消费**(P1-T3b),条目刻意保留:
+# 报告的授权已经不是「一个 notebook 级能力」能表达的形状——9 个 report 写端点
+# 改成了 `require_notebook_read` + 体内行级 `reports.created_by == 当前用户`
+# (见 report_routes.py 顶部的两层授权说明),因为设计文档(docs/superpowers/
+# specs/2026-08-17-group-knowledge-sharing-design_zh.md §4)把「在共享库内创建
+# 自己的深度报告」放在成员(viewer)档,而报告按创建者隔离。能力名留给 P2 的
+# 组管理员**管理**动作(例如批量清理本组库里的报告),届时新端点直接挂它;
+# 现在删掉只会让 P2 重新想一遍这个名字。
+# ⚠ 因此:翻转这一格**不会**让成员能动别人的报告(没有消费点),也**不是**
+# 收回成员自建报告的开关——那条路径由 report_routes.py 的行级判定负责。
 _CAPABILITY_LEVELS: dict[str, str] = {
     "sources:write": "owner",
     "kg:write": "owner",

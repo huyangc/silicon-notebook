@@ -5579,6 +5579,24 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._own_report_or_404",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.export_reports_endpoint",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.list_reports",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>.upload_notebook_asset",
         "target": "current_user"
@@ -5936,7 +5954,7 @@
     "owner": "ReportStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', report_ids: 'list') -> 'list'"
+    "signature": "(self, notebook_id: 'str', report_ids: 'list', *, created_by: 'str | None') -> 'list'"
   },
   "extract_source": {
     "consumers": [
@@ -6543,43 +6561,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
-        "scope": "<module>.cancel_report_endpoint",
-        "target": "get_report"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/report_routes.py",
-        "scope": "<module>.confirm_report_intent",
-        "target": "get_report"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/report_routes.py",
-        "scope": "<module>.generate_report",
-        "target": "get_report"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/report_routes.py",
-        "scope": "<module>.get_report",
-        "target": "get_report"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/report_routes.py",
-        "scope": "<module>.get_report_share_route",
-        "target": "get_report"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/report_routes.py",
-        "scope": "<module>.share_report_route",
-        "target": "get_report"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/report_routes.py",
-        "scope": "<module>.update_report_outline",
+        "scope": "<module>._own_report_or_404",
         "target": "get_report"
       },
       {
@@ -7040,7 +7022,7 @@
     "owner": "ReportStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'list'"
+    "signature": "(self, notebook_id: 'str', *, created_by: 'str | None') -> 'list'"
   },
   "list_sources": {
     "consumers": [

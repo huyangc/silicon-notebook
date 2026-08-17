@@ -163,11 +163,26 @@ class ReportStore:
             raise KeyError(report_id)
         return self.row_to_dict(row, full=True)
 
-    def list_reports(self, notebook_id: str) -> list:
+    def list_reports(self, notebook_id: str, *, created_by: str | None) -> list:
+        """Rows for one notebook, optionally narrowed to one creator.
+
+        ``created_by`` is keyword-only and **required** (P1 group sharing):
+        reports are per-creator private inside a shared notebook, and an
+        optional filter defaulting to "no filter" is exactly the shape that
+        lets a future call site list everyone's reports without anyone
+        noticing.  Pass ``None`` only from ops/verification paths that
+        deliberately want the whole notebook.  The predicate is pushed into
+        SQL rather than applied to the result so paging/ordering semantics
+        stay identical for both shapes.
+        """
+        sql = "SELECT * FROM reports WHERE notebook_id = ?"
+        args: list = [notebook_id]
+        if created_by is not None:
+            sql += " AND created_by = ?"
+            args.append(created_by)
+        sql += " ORDER BY created_at DESC, id"
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT * FROM reports WHERE notebook_id = ? ORDER BY created_at DESC, id",
-                (notebook_id,)).fetchall()
+            rows = db.execute(sql, args).fetchall()
         return [self.row_to_dict(r, full=False) for r in rows]
 
     def delete_report(self, notebook_id: str, report_id: str) -> None:
@@ -262,10 +277,15 @@ class ReportStore:
         for i in range(0, len(ids), self.IN_CHUNK):
             yield ids[i:i + self.IN_CHUNK]
 
-    def export_reports(self, notebook_id: str, report_ids: list) -> list:
+    def export_reports(self, notebook_id: str, report_ids: list, *,
+                       created_by: str | None) -> list:
         """批量导出:返回 [(filename, content_md)],按传入 report_ids 顺序,只取该
         notebook 下 status='done' 且 content_md 非空的报告(非 done/空/跨 notebook 的
         id 静默跳过)。文件名 = f"{_safe(question)[:40]}-{rid}.md"。
+
+        ``created_by`` 与 ``list_reports`` 同一条契约:keyword-only 且必填,
+        非 None 时作为 **SQL 谓词**下推(不做结果侧过滤),别人的报告 id 混进
+        请求时与「不存在/未完成」一样静默跳过。
 
         只读走 connect()。report_ids 数量通常极小(用户勾选的几份报告),直接构造
         占位符即可;但仍按 _in_batches 分批以防罕见的大批量超 SQLite 变量上限
@@ -278,6 +298,8 @@ class ReportStore:
         if not ids:
             return []
         found: dict = {}                         # rid -> (question, content_md)
+        creator_clause = "" if created_by is None else "AND created_by = ? "
+        creator_args: tuple = () if created_by is None else (created_by,)
         with self.database.connect() as db:
             for batch in self._in_batches(ids):
                 placeholders = ",".join("?" for _ in batch)
@@ -285,8 +307,9 @@ class ReportStore:
                     f"SELECT id, question, content_md FROM reports "
                     f"WHERE notebook_id = ? AND status = 'done' "
                     f"AND content_md IS NOT NULL AND content_md != '' "
+                    f"{creator_clause}"
                     f"AND id IN ({placeholders})",
-                    (notebook_id, *batch)).fetchall()
+                    (notebook_id, *creator_args, *batch)).fetchall()
                 for row in rows:
                     found[row["id"]] = (row["question"], row["content_md"])
         out: list = []
