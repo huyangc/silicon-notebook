@@ -1388,3 +1388,191 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
     assert candidate["status"] == "proposed"
     assert memory["promotion_state"] == "proposed"
     assert base_count == 0
+
+
+# ---------------------------------------------------------------------------
+# 群组成员变更的并发不变量(群组知识共享 P1-T3)
+# ---------------------------------------------------------------------------
+#
+# 与本文件其余用例同一目的:证明**行锁真的承重**,而不是「代码里写了一句 FOR
+# UPDATE」。静态那一半(检查必须落在写事务体内)由
+# `backend/tests/test_group_store_transaction_guard.py` 承担,两者互补——静态守卫
+# 看不见「锁根本没生效」,而这两条用例删掉 `_lock_group_on` 就会红。
+
+
+def _seed_group_world(postgres_database, now: str, users: tuple[str, ...]) -> None:
+    with postgres_database.write() as connection:
+        for index, user_id in enumerate(users):
+            connection.execute(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,"
+                "updated_at,username,password_hash,password_salt,password_iterations) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (user_id, f"{user_id}@example.test", user_id, "user", "active",
+                 now, now, f"g{index:08d}", "", "", 0),
+            )
+        connection.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,updated_at) "
+            "VALUES (%s,%s,'project','',%s,%s,%s)",
+            ("grp-race", "Race", users[0], now, now),
+        )
+        for user_id in users:
+            connection.execute(
+                "INSERT INTO group_members(group_id,user_id,role,added_at,added_by) "
+                "VALUES (%s,%s,'admin',%s,%s)",
+                ("grp-race", user_id, now, users[0]),
+            )
+
+
+def _group_store(postgres_database, now: str):
+    from app.repositories.postgres.group_store import GroupStore
+
+    counter = iter(range(1, 50))
+    counter_lock = threading.Lock()
+
+    def new_id(prefix: str) -> str:
+        with counter_lock:
+            return f"{prefix}-race-{next(counter)}"
+
+    return GroupStore(postgres_database, new_id=new_id, now=lambda: now)
+
+
+@pytest.mark.postgres_integration
+def test_concurrent_demotions_cannot_both_strip_the_last_group_admin(
+    postgres_database, monkeypatch
+):
+    """两名组管理员被并发降级:`FOR UPDATE` 必须让第二个看到第一个的结果。
+
+    没有那把锁,两条 `read committed` 事务各自读到 ``admin_count == 2``、各自判「还有
+    别人」、然后**都提交**——组里一个管理员都不剩,而它的每个管理端点都要求组管理员
+    身份。这个终态在单线程测试里造不出来,所以只有真并发用例证得了锁在承重。
+
+    编排:winner 线程先在自己的写事务里拿到 `groups` 行的 `FOR UPDATE`,放行 loser
+    线程进来;loser 的 store 体内那次 `FOR UPDATE` 必然阻塞到 winner 提交为止。
+    """
+    from app.repositories.ports import LastGroupAdminError
+
+    assert PostgresMigrator(postgres_database).migrate() == 27
+    now = "2026-08-18T00:00:00+00:00"
+    _seed_group_world(postgres_database, now, ("user-race-a", "user-race-b"))
+    store = _group_store(postgres_database, now)
+
+    thread_role = threading.local()
+    winner_locked = threading.Event()
+    loser_connected = threading.Event()
+    original_write = postgres_database.write
+
+    @contextmanager
+    def coordinated_write(*args, **kwargs):
+        with original_write(*args, **kwargs) as connection:
+            role = getattr(thread_role, "value", "")
+            if role == "winner":
+                connection.execute(
+                    "SELECT id FROM groups WHERE id='grp-race' FOR UPDATE"
+                ).fetchone()
+                winner_locked.set()
+                assert loser_connected.wait(timeout=5)
+            elif role:
+                loser_connected.set()
+            yield connection
+
+    monkeypatch.setattr(postgres_database, "write", coordinated_write)
+
+    def demote(role_name: str, user_id: str):
+        thread_role.value = role_name
+        try:
+            return store.upsert_member(
+                "grp-race", user_id, role="member", added_by="user-race-a"
+            )
+        except LastGroupAdminError:
+            return "refused"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner_future = executor.submit(demote, "winner", "user-race-a")
+        assert winner_locked.wait(timeout=5)
+        loser_future = executor.submit(demote, "loser", "user-race-b")
+        outcomes = [winner_future.result(timeout=15), loser_future.result(timeout=15)]
+
+    assert sorted(outcomes) == ["refused", "updated"], outcomes
+    with postgres_database.connect() as connection:
+        admins = connection.execute(
+            "SELECT COUNT(*) AS n FROM group_members "
+            "WHERE group_id='grp-race' AND role='admin'"
+        ).fetchone()["n"]
+    assert admins == 1, "并发降级把组的管理员降到了 0 —— 行锁没有承重"
+
+
+@pytest.mark.postgres_integration
+def test_adding_a_member_to_a_concurrently_deleted_group_fails_closed(
+    postgres_database, monkeypatch
+):
+    """并发删组 + 加成员:必须是 `GroupNotFoundError`(→ 404),不是外键炸出来的 500。
+
+    钉的是 `_lock_group_on` **消费了自己的返回值**这一半:等锁等完之后 `groups` 行
+    真的没了,必须当场抛出;忽略它继续 INSERT,撞的是 `group_members.group_id` 的外键,
+    用户拿到的是「服务器出错」而不是「这个群组不存在」。
+
+    ⚠ 它**不是**行锁本身的承重证明——实测把 `FOR UPDATE` 摘掉这条仍然绿(两条事务的
+    可见性在这个编排下已经足够让加成员那侧看到组没了)。锁的承重由上面那条
+    `test_concurrent_demotions_cannot_both_strip_the_last_group_admin` 证明:摘锁即红。
+    两条各钉一半,别把它们读成同一件事。
+    """
+    from app.repositories.ports import GroupNotFoundError
+
+    assert PostgresMigrator(postgres_database).migrate() == 27
+    now = "2026-08-18T00:00:00+00:00"
+    _seed_group_world(postgres_database, now, ("user-del-a", "user-del-b"))
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at,username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("user-del-c", "c@example.test", "C", "user", "active", now, now,
+             "g00000099", "", "", 0),
+        )
+    store = _group_store(postgres_database, now)
+
+    thread_role = threading.local()
+    deleter_locked = threading.Event()
+    adder_connected = threading.Event()
+    original_write = postgres_database.write
+
+    @contextmanager
+    def coordinated_write(*args, **kwargs):
+        with original_write(*args, **kwargs) as connection:
+            role = getattr(thread_role, "value", "")
+            if role == "delete":
+                yield connection
+                # 删除语句已经发出(行锁在手),放行加成员线程去撞这把锁,
+                # 然后本事务才提交。
+                deleter_locked.set()
+                assert adder_connected.wait(timeout=5)
+                return
+            if role == "add":
+                adder_connected.set()
+            yield connection
+
+    monkeypatch.setattr(postgres_database, "write", coordinated_write)
+
+    def delete_group():
+        thread_role.value = "delete"
+        return store.delete_group("grp-race")
+
+    def add_member():
+        thread_role.value = "add"
+        assert deleter_locked.wait(timeout=5)
+        with pytest.raises(GroupNotFoundError):
+            store.upsert_member(
+                "grp-race", "user-del-c", role="member", added_by="user-del-a"
+            )
+        return "fail-closed"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        delete_future = executor.submit(delete_group)
+        add_future = executor.submit(add_member)
+        assert delete_future.result(timeout=15) is True
+        assert add_future.result(timeout=15) == "fail-closed"
+
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM group_members WHERE user_id='user-del-c'"
+        ).fetchone()["n"] == 0

@@ -197,6 +197,18 @@ _ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
         None,
     ),
     ("api", "kg", "concept-whitelist", None),
+    # 群组与授权边(群组知识共享 P1-T3)。路径段全是固定字面量 + 不透明 id,组名/
+    # 角色/用户名都在请求体或查询串里,所以整条路径可以原样进诊断快照。
+    # 少了这几条,它们会落到兜底的 `/api/{id}/{id}`——不是泄露,是**丢观测**:整个
+    # 群组域在诊断里挤成同一个桶,慢请求分不出是哪个端点。
+    ("api", "groups"),
+    ("api", "groups", None),
+    ("api", "groups", None, "members", None),
+    ("api", "groups", None, "membership"),
+    ("api", "groups", None, "shared-notebooks"),
+    ("api", "groups", None, "shared-notebooks", None),
+    # 用户名在**查询串**里(`?username=`),不在路径上——路径本身没有用户内容。
+    ("api", "users", "resolve"),
     ("_diagnostics-test", "block"),
     ("docs",),
     ("openapi.json",),

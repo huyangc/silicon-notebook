@@ -8,6 +8,14 @@
    同款:403 会确认「这个 id 确实存在」,而群组名本身就是可探测的信息(哪个部门在
    用这个系统、有没有某个项目组)。
 
+   ⚠ **系统管理员(`user.role == "admin"`)绕过这一层**——可读任意组详情、可管理
+   任意组。这是**运维旁路**,与「系统管理员可转移 `notebooks.created_by`」同性质
+   (设计文档 §4 已登记)。少了它有两处直接坏掉:①「最后一名组管理员保护」在
+   理论并发窗口下仍可能留下一个零管理员的组,而所有管理端点对系统管理员也 404,
+   那个组在 API 里**永远不可恢复**,只能改数据库;②`GET /groups?scope=all` 是给
+   系统管理员的全局管理面,没有旁路它就是一张每一行都点不开的表。旁路只作用于
+   群组维度,笔记本的读写守卫一个字不动。
+
 2. **授权边的创建是双重条件**(设计文档决策 9):请求者既要对这本笔记本有管理权
    (由 `require_notebook_capability("notebook:manage")` 在依赖层挡住),又要是目标
    群组的组管理员(在路由体内查)。少任何一半都不许发边,而且两半的失败形态要说清
@@ -44,6 +52,7 @@ from app.models.groups import (
     GRANT_ROLES,
     GRANTABLE_PRINCIPAL_TYPES,
     GROUP_KINDS,
+    GROUP_LIST_SCOPES,
     GROUP_ROLES,
     OPEN_GROUP_KINDS,
     GrantCreate,
@@ -58,14 +67,20 @@ from app.models.groups import (
     UserRef,
 )
 from app.models.identity import UserProfile
-from app.repositories.ports import GroupGrantAlreadyExists, LastGroupAdminError
+from app.repositories.ports import (
+    GroupAdminRequiredError,
+    GroupGrantAlreadyExists,
+    GroupNotFoundError,
+    LastGroupAdminError,
+)
 
 
 router = APIRouter()
 
 # 群组名/说明的长度上限。约束的是**用户编辑的数据**,所以按 CLAUDE.md 的「数值上限
-# 与截断」红线:超限**明确拒绝**,绝不静默截断。精确数值只登记在
-# docs/product-and-api*.md 的群组章节。
+# 与截断」红线:超限**明确拒绝**,绝不静默截断。
+# ⚠ 精确数值**待 T5 登记**进 docs/product-and-api*.md 的群组章节(本轮只落代码,
+# 文档批次在 T5;别把这条注释读成「已经登记过了」)。
 _MAX_GROUP_NAME_CHARS = 120
 _MAX_GROUP_DESCRIPTION_CHARS = 1000
 
@@ -79,8 +94,16 @@ def _group_not_found() -> HTTPException:
     return user_error(404, "群组不存在")
 
 
-def _require_membership(group_id: str, user: UserProfile) -> str:
-    """我在这个组里的角色;不是成员 → 404(不泄露存在性)。"""
+def _is_system_admin(user: UserProfile) -> bool:
+    return user.role == "admin"
+
+
+def _require_own_membership(group_id: str, user: UserProfile) -> str:
+    """我**本人**在这个组里的角色;不是成员 → 404。
+
+    刻意**不带**系统管理员旁路:唯一的调用点是自助退出,而「退出」的前提是本人真的
+    在组里。给它旁路只会让一个不是成员的系统管理员拿到 204 却什么也没发生。
+    """
     role = group_repository().user_group_role(group_id, user.id)
     if role is None:
         raise _group_not_found()
@@ -93,9 +116,17 @@ def _require_group_admin(group_id: str, user: UserProfile) -> None:
     普通成员在这里也拿 404 而不是 403:他知道组存在,但「你不是管理员」这句话对他
     没有可操作性(能给他授权的正是管理员,界面本来就不该给他这个入口),而统一成
     404 让这道守卫只有一种响应形态,不必在每个调用点判「这次该露多少」。
+
+    系统管理员经运维旁路放行(见模块 docstring),但**仍要求组真的存在**:旁路给的
+    是「谁能管」,不是「管一个不存在的东西」。存在性那次额外查询只发生在旁路这条
+    分支上,普通组管理员仍是一次查询。
     """
-    if _require_membership(group_id, user) != "admin":
-        raise _group_not_found()
+    groups = group_repository()
+    if groups.user_group_role(group_id, user.id) == "admin":
+        return
+    if _is_system_admin(user) and groups.get_group(group_id) is not None:
+        return
+    raise _group_not_found()
 
 
 def _validated_name(raw: str) -> str:
@@ -150,9 +181,15 @@ def list_groups_route(
     scope: str = Query("mine"),
     user: UserProfile = Depends(get_current_user),
 ) -> List[GroupSummary]:
-    """我所在的群组;`?scope=all` 是系统管理员的全局管理面。"""
+    """我所在的群组;`?scope=all` 是系统管理员的全局管理面。
+
+    非法 `scope` 明确 422,**不静默当成 `mine`**:那会让一个拼错的 `?scope=al` 安静地
+    返回一份收窄过的清单,调用方看到 200 就以为拿到了全部。
+    """
+    if scope not in GROUP_LIST_SCOPES:
+        raise user_error(422, "查看范围只能是我所在的群组或全部群组")
     if scope == "all":
-        if user.role != "admin":
+        if not _is_system_admin(user):
             raise user_error(403, "仅管理员可查看全部群组")
         return [GroupSummary(**g) for g in group_repository().list_all_groups(user_id=user.id)]
     return [GroupSummary(**g) for g in group_repository().list_groups_for_user(user.id)]
@@ -183,11 +220,14 @@ def resolve_user_route(
 def get_group_route(
     group_id: str, user: UserProfile = Depends(get_current_user)
 ) -> GroupDetail:
-    """组详情 + 成员清单。仅组成员可见,非成员 404。"""
-    _require_membership(group_id, user)
+    """组详情 + 成员清单。仅组成员可见(系统管理员经运维旁路可见),非成员 404。
+
+    可见性判定直接读 `get_group` 已经算好的 `my_role`,不再单发一次成员查询:非成员
+    的 `my_role` 恒为空串,这与「不是成员」是同一件事。
+    """
     groups = group_repository()
     group = groups.get_group(group_id, user_id=user.id)
-    if group is None:
+    if group is None or (not group["my_role"] and not _is_system_admin(user)):
         raise _group_not_found()
     return GroupDetail(
         **group, members=[GroupMemberItem(**m) for m in groups.list_members(group_id)]
@@ -256,6 +296,10 @@ def put_group_member_route(
         groups.upsert_member(group_id, user_id, role=role, added_by=user.id)
     except LastGroupAdminError:
         raise user_error(409, "群组至少要保留一名组管理员")
+    except GroupNotFoundError:
+        # 组在守卫通过之后、写事务落库之前被并发删掉。少了这一支,SQLite 会撞
+        # `group_members.group_id` 的外键抛 IntegrityError,用户拿到 500。
+        raise _group_not_found()
     group = groups.get_group(group_id, user_id=user.id)
     if group is None:
         raise _group_not_found()
@@ -273,6 +317,8 @@ def remove_group_member_route(
         removed = group_repository().remove_member(group_id, user_id)
     except LastGroupAdminError:
         raise user_error(409, "群组至少要保留一名组管理员")
+    except GroupNotFoundError:
+        raise _group_not_found()
     if not removed:
         raise user_error(404, "该用户不是这个群组的成员")
 
@@ -282,11 +328,13 @@ def leave_group_route(
     group_id: str, user: UserProfile = Depends(get_current_user)
 ) -> None:
     """自助退出。最后一名组管理员不得退出——否则组就没人能管了。"""
-    _require_membership(group_id, user)
+    _require_own_membership(group_id, user)
     try:
         group_repository().remove_member(group_id, user.id)
     except LastGroupAdminError:
         raise user_error(409, "你是这个群组唯一的组管理员,请先指定其他组管理员再退出")
+    except GroupNotFoundError:
+        raise _group_not_found()
 
 
 # ------------------------------------------------------------------- 授权边
@@ -302,6 +350,10 @@ def list_notebook_grants_route(notebook_id: str) -> List[NotebookGrantItem]:
 
     四类主体都如实返回(含本端点不允许创建的 `user` / `everyone`):这个清单是库主
     「谁能看我的库」的完整答案,按主体类型过滤掉一半会让它变成一份骗人的清单。
+
+    指向已不存在的群组的**孤儿边**带 `principal_kind="missing"` 标注(删组事务会清掉
+    这类边,但 `principal_id` 没有外键,合库仍可能复活它们)。不标注的话它在界面上与
+    正常条目长得一模一样,只是没有名字——库主既看不懂那是什么,也不知道能不能删。
     """
     return [NotebookGrantItem(**g) for g in group_repository().list_grants(notebook_id)]
 
@@ -316,27 +368,32 @@ def create_notebook_grant_route(
     payload: GrantCreate,
     user: UserProfile = Depends(get_current_user),
 ) -> NotebookGrantItem:
-    """共享给群组。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的组管理员。"""
+    """共享给群组。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的组管理员。
+
+    ⚠ 群组那一半的**权威判定在 store 的写事务里**(`create_grant` 同事务复核组存在
+    与发起者的组管理员身份),这里不做前置查询。理由是这条边一落库就**立刻**给整组
+    人读权:在路由层查一次、再在另一个事务里插入,中间那个窗口足够让组被删、或让
+    发起者被移出/降级,而边照发不误。两个异常各自映射,文案仍能说清缺的是哪一半。
+    """
     principal_type = payload.principal_type.strip().lower()
     if principal_type not in GRANTABLE_PRINCIPAL_TYPES:
         raise user_error(422, "这里只能共享给群组;共享给个人请用只读共享链接")
     role = payload.role.strip().lower()
     if role not in GRANT_ROLES:
         raise user_error(422, "共享权限只能是只读或管理")
-    groups = group_repository()
-    group_id = payload.principal_id.strip()
-    if groups.get_group(group_id) is None:
-        raise _group_not_found()
-    if groups.user_group_role(group_id, user.id) != "admin":
-        raise user_error(403, "你不是这个群组的组管理员,无法把知识库共享给它")
     try:
-        grant = groups.create_grant(
+        grant = group_repository().create_grant(
             notebook_id,
             principal_type=principal_type,
-            principal_id=group_id,
+            principal_id=payload.principal_id.strip(),
             role=role,
             created_by=user.id,
+            admin_user_id=user.id,
         )
+    except GroupNotFoundError:
+        raise _group_not_found()
+    except GroupAdminRequiredError:
+        raise user_error(403, "你不是这个群组的组管理员,无法把知识库共享给它")
     except GroupGrantAlreadyExists:
         raise user_error(409, "这本知识库已经共享给该群组了")
     return NotebookGrantItem(**grant)

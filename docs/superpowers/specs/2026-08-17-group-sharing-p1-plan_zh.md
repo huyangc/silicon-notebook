@@ -179,8 +179,19 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
   「管理权将在后续版本生效」或先不勾选默认只发 viewer——**取后者**:P1 只发
   (group, viewer),group_admins 行留给 P2 一起上,避免发出一条当前无效果的边)。
   已共享条目列表 + 撤销。
-- **笔记本列表**:「群组」分区,卡片标注「来自群组《X》」(granted_via);
-  reader 行为(隐藏写按钮)复用既有 `isReader` 派生,零新分支。
+- **笔记本列表**:「群组」分区,卡片标注「来自群组《X》」(granted_via)。
+  写按钮的隐藏确实复用既有 `isReader` 派生,但**「零新分支」是错的措辞**(P1-T3
+  评审更正)——`granted_via` 非空的卡片与只读共享卡片在三处必须分开:
+  1. **隐藏「退出共享」**:那个按钮打的是 `DELETE /notebooks/{id}/membership`,
+     它只删 `notebook_members` 行,对群组授权边一点作用都没有。点了「退出」而库
+     还在列表里,是一个必然发生的假失败。改为展示「由组管理员管理」的静态说明
+     (要退出请找组管理员撤销共享,或退出该群组)。
+  2. **owner 侧的「已分享」徽标与 `shared-by-me` 总览**:现状只看 `is_shared` /
+     `notebook_members`,群组共享一条都不算——owner 会看到一本「没有分享过」的库
+     其实整组人可读。T4 拍板覆盖方式(徽标口径扩为「有成员 ∨ 有授权边」,总览是否
+     并入群组条目)。
+  3. **挂载选择器的分组标签**:已在本节上文登记(现状按 tier 分「公共知识库 /
+     我的笔记本」,组授权库会被归进后者,一句事实错误的标签)。
 - **挂载选择器**:mountable 自动包含组授权可读的库(后端已扩)。**但不是零改动**
   (P1-T2 规格评审发现):现状按 `tier` 分成「公共知识库 / 我的笔记本」两组,组
   授权与只读共享进来的库会被归进「我的笔记本」——一句事实错误的标签。要么后端给
@@ -202,9 +213,23 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
 - 文档数字与版本(T1 留下的):CLAUDE.md(schema 红线段 + shadow 大段)、
   AGENTS.md(3 处)、docs/development*.md(各 2 处):49/27、77 表、104 surface、
   锁 ledger+77;12 不变。逐版本历史各接一句 v49/v27。
-- 产品文档:docs/product-and-api*.md 群组章节(端点、角色矩阵、数值上限:组名
-  长度、每组成员上限?——v1 不设硬上限,只登记分页页大小);README 两份的共享
-  能力句;AGENTS.md Product Flow 相应段;CLAUDE.md 红线段按需。
+- 产品文档:docs/product-and-api*.md 群组章节(端点、角色矩阵、数值上限);
+  README 两份的共享能力句;AGENTS.md Product Flow 相应段;CLAUDE.md 红线段按需。
+  T3 落代码时留下的待登记项(逐条,别漏):
+  - **组名 120 字符 / 组说明 1000 字符**上限。两者都是「超限明确拒绝、绝不静默
+    截断」,常量在 `backend/app/api/group_routes.py`,精确数值按红线只登记在
+    `docs/product-and-api*.md`。
+  - **群组三个清单端点无分页**(`GET /groups/{id}` 的成员清单、`?scope=all` 的全
+    量群组、`GET /notebooks/{id}/grants`)。这是**已定取舍**而非遗漏:规模按单组
+    几百人设计(设计决策 11),一次全量返回在这个量级内成立。要登记的是这条口径
+    本身,免得将来有人把「没分页」读成 bug。
+  - **「群组」分区列表投影的 N+1 放大**(已知取舍,待优化)。`granted_notebook_rows`
+    只是一条查询,但每行都要过 `NotebookSummaryQuery.from_row`,而它逐库发若干次
+    计数/挂载查询——500 本组授权库量级约 3500 条语句。与「自有库」「加入的库」两段
+    是同一个既有形态(那两段也逐库 from_row),所以不是本特性引入的新问题,但群组
+    分区把可能的行数放大了一个量级。优化方向(批量预取计数)另行排期。
+  - `?scope=all` 与非法 `scope` 的 422 口径、系统管理员的群组运维旁路(设计文档
+    §4 已登记,产品文档的角色矩阵要跟上)。
 - `fangan_done.md` 不动(群组不在 silicon_notebook_fangan.md 范围)。
 - **P2 待办登记(P1-T2 评审转出,不在 P1 修)**:
   - P2-4 **Memory 热路径读谓词的成本形状**:读权片段从 2 层 EXISTS 变成 5 层
@@ -238,6 +263,14 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
    (merge_dbs 的 GLOBAL_UNION 语义依赖跨部署 id 不撞车);删组同事务清
    指向该组的 grants 行,另在 T3 补孤儿授权边审计(merge_dbs 并集可能复活
    孤儿边,防线不能只有删除事务一条,见 T1 质量评审 P2-3)。
+   **审计的落点已定**(P1-T3 实现期裁决):`scripts/merge_dbs.py::sweep_orphan_group_grants`
+   ——在 GLOBAL_UNION 合并**之后**、`foreign_key_check` **之前**清扫
+   `principal_type IN ('group','group_admins') AND principal_id NOT IN (SELECT id
+   FROM groups)` 的行并打日志计数。放这里而不是放运行时:合并是这类孤儿边**唯一**
+   的来源(平时删组走同事务清理),而 `principal_id` 无外键,`foreign_key_check`
+   永远看不见它们。判据只认两个群组主体——`user`/`everyone` 的 `principal_id` 根本
+   不指向 `groups`,一起扫等于删掉两类完全正常的授权。运行时侧的兜底是
+   `list_grants` 给解析不出组的边打 `principal_kind="missing"`,让库主看得懂并能删。
 2. `principal_type`/`kind`/`role` 的取值校验全在 app 层(Pydantic/服务层),
    schema 不加 CHECK。
 3. 深拷贝不带授权边;删组同事务清孤儿授权行。

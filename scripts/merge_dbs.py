@@ -328,6 +328,34 @@ def _assert_global_schema_compatibility(
         )
 
 
+def sweep_orphan_group_grants(conn: sqlite3.Connection) -> int:
+    """清掉指向已不存在群组的 `notebook_grants` 行, 返回清掉的条数。
+
+    **合并是这类孤儿边唯一的来源**(已定裁决 1c 的审计承诺就落在这里)。平时删组走
+    的是同一个写事务: 先删指向该组的授权边, 再删组。但合并把两库的 `notebook_grants`
+    按 notebook 范围导入、把 `groups` 按 GLOBAL_UNION 并集导入, 两者的取舍口径不同,
+    于是「副库里那本笔记本的边导进来了, 而它指向的组因为主库同 id 优先/或压根不在
+    并集里而对不上」就成立了。
+
+    为什么必须清而不是留着: 谓词侧确实拦得住(join 不到 group_members 就判假, 不会
+    越权), 但库主的共享管理列表会永久挂着一条指向不存在的组的记录; 更糟的是将来
+    某个部署里凑巧新建一个同 id 的组, 这条边就会**复活成真授权**。
+
+    刻意**不**依赖外键: `principal_id` 是无 FK 的多态列(v49 迁移里写明的裁决),
+    所以下面的 `foreign_key_check` 永远看不见这类行 —— 必须显式扫。判据只认两个
+    群组主体, `user` / `everyone` 主体的 `principal_id` 根本不指向 `groups`。
+    """
+    if not (_table_exists(conn, "notebook_grants", "main")
+            and _table_exists(conn, "groups", "main")):
+        return 0
+    cur = conn.execute(
+        "DELETE FROM main.notebook_grants "
+        "WHERE principal_type IN ('group','group_admins') "
+        "AND principal_id NOT IN (SELECT id FROM main.groups)"
+    )
+    return cur.rowcount or 0
+
+
 def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                shared_base: str) -> dict:
     if out_db.exists():
@@ -394,6 +422,15 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                 if _table_exists(conn, t, "main"):
                     conn.execute(
                         f"DELETE FROM main.{t} WHERE notebook_id IN ({ph})", tuple(sec_nb))
+
+        # 孤儿群组授权边清扫。必须在 GLOBAL_UNION 合并**之后**(那一步才决定
+        # `groups` 的最终并集)、`foreign_key_check` **之前**(它看不见这类行 ——
+        # `principal_id` 无外键, 见 sweep_orphan_group_grants 的说明)。
+        with conn:
+            orphan_grants = sweep_orphan_group_grants(conn)
+        if orphan_grants:
+            print(f"[merge] 清理指向已不存在群组的共享授权 {orphan_grants} 条")
+        row_counts["notebook_grants_orphans_removed"] = orphan_grants
 
         # 外部内容 FTS rebuild(在自己的事务里), 提交后再 DETACH(DETACH 不能在事务中)。
         for t in EXTERNAL_FTS_TABLES:

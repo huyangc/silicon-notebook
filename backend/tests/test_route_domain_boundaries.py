@@ -159,13 +159,19 @@ def test_group_and_grant_endpoints_have_a_domain_owner():
 
     这条钉的正是那件容易滑掉的事:URL 前缀是 notebook,策略却是群组的(双重条件、
     组管理员判定),照 URL 把它们搬进 `notebook_routes.py` 会让群组策略散成两处。
+
+    清单是**穷举**的:少写一个端点,它搬去别的模块就没人拦得住。第二条断言按数量
+    对账,保证「新增端点忘了登记」当场报红,而不是被这份不完整的清单默默放过。
     """
     modules = _endpoint_modules()
     expected = {
         "create_group_route": "app.api.group_routes",
         "list_groups_route": "app.api.group_routes",
         "get_group_route": "app.api.group_routes",
+        "update_group_route": "app.api.group_routes",
+        "delete_group_route": "app.api.group_routes",
         "put_group_member_route": "app.api.group_routes",
+        "remove_group_member_route": "app.api.group_routes",
         "leave_group_route": "app.api.group_routes",
         "resolve_user_route": "app.api.group_routes",
         "list_notebook_grants_route": "app.api.group_routes",
@@ -176,6 +182,16 @@ def test_group_and_grant_endpoints_have_a_domain_owner():
     }
     for endpoint, module in expected.items():
         assert modules[endpoint] == module, endpoint
+
+    declared = {
+        route.name
+        for route in group_router.routes
+        if isinstance(route, APIRoute)
+    }
+    assert declared == set(expected), (
+        "群组路由的端点集合与本清单不一致——新增/改名端点必须同步登记,"
+        f"否则它搬去别的域模块不会被拦下:{sorted(declared ^ set(expected))}"
+    )
 
 
 def test_aggregate_routes_module_is_composition_only():

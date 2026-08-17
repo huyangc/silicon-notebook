@@ -30,20 +30,35 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
-from app.repositories.group_rows import fold_shared_notebooks
-from app.repositories.ports import GroupGrantAlreadyExists, LastGroupAdminError
+from app.repositories.group_rows import fold_shared_notebooks, resolve_grant_principal
+from app.repositories.ports import (
+    GroupAdminRequiredError,
+    GroupGrantAlreadyExists,
+    GroupNotFoundError,
+    LastGroupAdminError,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 
 
-# 一条授权边 + 它的群组主体名字(仅群组主体有值)。LEFT JOIN 的 ON 条件里必须带
-# `principal_type IN (...)`:`principal_id` 是多态列,不限定主体类型就会拿一个 user
-# id 去撞 `groups.id`。它不判「谁能读」——只给已经存在的行贴个名字。
+# 一条授权边 + 它的群组主体名字(仅群组主体有值)。LEFT JOIN 的 ON 条件里带
+# `principal_type IN (...)` 是**纵深防御**:今天的 id 都带前缀(`user-…` / `grp-…`),
+# 一个 user id 撞不上 `groups.id`,所以不限定主体类型在今天也拿不到错的行;但那条
+# 「不会撞」的保证来自 `_new_id` 的前缀约定,而不是这条 SQL 自己——`principal_id` 是
+# 一列没有外键的多态引用,谁也拦不住将来某个写入口塞进裸 id。限定住主体类型之后,
+# 这条 JOIN 的正确性不再依赖别处的命名习惯。它不判「谁能读」,只给已经存在的行贴名字。
 _GRANT_SELECT = (
     "SELECT ng.*, g.name AS _group_name, g.kind AS _group_kind "
     "FROM notebook_grants ng "
     "LEFT JOIN groups g ON g.id=ng.principal_id "
     "AND ng.principal_type IN ('group','group_admins') "
 )
+
+# SQLite 的 UNIQUE 冲突只能从异常文本分类。判据钉到**具体那条约束**的列上
+# (`UNIQUE constraint failed: notebook_grants.notebook_id, …`),与 PG 侧按
+# `constraint_name == "uq_notebook_grants_principal"` 判是同一口径:只认「同库同主体
+# 已有边」这一种冲突。裸 `"UNIQUE" in message` 会把主键冲突之类的别的约束也吞进来,
+# 报成一句「已经共享过了」——那是把一个真 bug 说成用户操作重复。
+_GRANT_UNIQUE_MARKERS = ("UNIQUE constraint failed", "notebook_grants.notebook_id")
 
 
 class GroupStore:
@@ -83,14 +98,17 @@ class GroupStore:
 
     @staticmethod
     def _grant_row(row) -> dict:
+        name, kind = resolve_grant_principal(
+            row["principal_type"], row["_group_name"], row["_group_kind"]
+        )
         return {
             "id": row["id"],
             "notebook_id": row["notebook_id"],
             "principal_type": row["principal_type"],
             "principal_id": row["principal_id"],
             "role": row["role"],
-            "principal_name": row["_group_name"] or "",
-            "principal_kind": row["_group_kind"] or "",
+            "principal_name": name,
+            "principal_kind": kind,
             "created_at": row["created_at"],
         }
 
@@ -248,15 +266,29 @@ class GroupStore:
             ).fetchone()["c"]
         )
 
+    @staticmethod
+    def _require_group_on(db: sqlite3.Connection, group_id: str) -> None:
+        """在**当前写事务里**复核这个组还在,不在就 `GroupNotFoundError`。
+
+        PG 侧对应的是 `_lock_group_on` 的 `FOR UPDATE`。SQLite 不需要行锁(进程级写
+        锁已经把所有写事务串起来了),但**存在性仍要在事务内查**:路由层那次前置
+        检查与这里之间,一个并发的删组请求可以整个跑完。少了这条,`INSERT INTO
+        group_members` 会撞 `group_id` 的外键约束抛 `sqlite3.IntegrityError`——用户
+        拿到的是 500,而正确答案是 404。
+        """
+        if db.execute("SELECT 1 FROM groups WHERE id=?", (group_id,)).fetchone() is None:
+            raise GroupNotFoundError(group_id)
+
     def upsert_member(
         self, group_id: str, user_id: str, *, role: str, added_by: str
     ) -> str:
         """加人 / 改角色。返回 ``"added"`` 或 ``"updated"``。
 
-        把最后一名组管理员降级 → `LastGroupAdminError`。判定与写入同一事务,并发的
-        两次降级不可能都通过。
+        把最后一名组管理员降级 → `LastGroupAdminError`;组已被并发删掉 →
+        `GroupNotFoundError`。两条判定都在写事务内,并发的两次降级不可能都通过。
         """
         with self.database.write() as db:
+            self._require_group_on(db, group_id)
             current = self._role_on(db, group_id, user_id)
             if (
                 current == "admin"
@@ -280,6 +312,7 @@ class GroupStore:
     def remove_member(self, group_id: str, user_id: str) -> bool:
         """移除成员(自助退出走同一条路径)。移除最后一名组管理员 → 报错。"""
         with self.database.write() as db:
+            self._require_group_on(db, group_id)
             current = self._role_on(db, group_id, user_id)
             if current is None:
                 return False
@@ -339,15 +372,27 @@ class GroupStore:
         principal_id: str,
         role: str,
         created_by: str,
+        admin_user_id: str,
     ) -> dict:
-        """新建一条授权边。同库同主体已有边 → `GroupGrantAlreadyExists`。
+        """新建一条群组授权边,并在**同一个写事务**里复核双重条件的群组那一半。
 
-        重复刻意**不**做幂等复用而是明确报错:两条边的 `role` 可以不同,静默返回既有
+        三种失败:同库同主体已有边 → `GroupGrantAlreadyExists`;组已不存在 →
+        `GroupNotFoundError`;`admin_user_id` 已不是它的组管理员 →
+        `GroupAdminRequiredError`。
+
+        为什么复核必须在事务里:路由层查过一次「组在不在、你是不是它的管理员」,
+        但那次查询与这次插入之间,组可以被删、发起者可以被移出或降级——而这条边一旦
+        落库就**立刻**给整组人读权。前置查询只用来给出友好文案,授权判定以这一次为准。
+
+        重复边刻意**不**做幂等复用而是明确报错:两条边的 `role` 可以不同,静默返回既有
         行会让「我改成了管理」与「库里其实还是只读」这两件事长得一模一样。
         """
         grant_id = self.new_id("gnt")
         try:
             with self.database.write() as db:
+                self._require_group_on(db, principal_id)
+                if self._role_on(db, principal_id, admin_user_id) != "admin":
+                    raise GroupAdminRequiredError(principal_id)
                 db.execute(
                     "INSERT INTO notebook_grants "
                     "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
@@ -363,28 +408,20 @@ class GroupStore:
                     ),
                 )
         except sqlite3.IntegrityError as exc:
-            if "UNIQUE" in str(exc).upper():
+            message = str(exc)
+            if all(marker in message for marker in _GRANT_UNIQUE_MARKERS):
                 raise GroupGrantAlreadyExists(notebook_id, principal_id) from exc
             raise
         with self.database.connect() as db:
             row = db.execute(_GRANT_SELECT + "WHERE ng.id=?", (grant_id,)).fetchone()
         return self._grant_row(row)
 
-    def grant_row(self, notebook_id: str, grant_id: str) -> "dict | None":
-        """按 id 取一条边,**同时**要求它属于这个 notebook。
-
-        撤销端点的权限是挂在 notebook 上的,所以 id 必须与 notebook 一起验——
-        只按 grant_id 查/删,等于让「我有一本自己的库的管理权」变成「我能删任何库上
-        的授权边」。
-        """
-        with self.database.connect() as db:
-            row = db.execute(
-                _GRANT_SELECT + "WHERE ng.id=? AND ng.notebook_id=?",
-                (grant_id, notebook_id),
-            ).fetchone()
-        return self._grant_row(row) if row else None
-
     def delete_grant(self, notebook_id: str, grant_id: str) -> bool:
+        """按 id 删一条边,**同时**要求它属于这个 notebook。
+
+        两列一起验:撤销端点的权限挂在 notebook 上,只按 grant_id 删等于让「我有一本
+        自己的库的管理权」变成「我能删任何库上的授权边」。
+        """
         with self.database.write() as db:
             cursor = db.execute(
                 "DELETE FROM notebook_grants WHERE id=? AND notebook_id=?",

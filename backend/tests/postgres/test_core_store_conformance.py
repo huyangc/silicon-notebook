@@ -707,7 +707,11 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
     core_stores: CoreStores,
 ):
     """授权边 CRUD + 删组清理。重复授权必须是**明确冲突**而不是静默复用。"""
-    from app.repositories.ports import GroupGrantAlreadyExists
+    from app.repositories.ports import (
+        GroupAdminRequiredError,
+        GroupGrantAlreadyExists,
+        GroupNotFoundError,
+    )
 
     groups = core_stores.groups
     owner = core_stores.identity.create_user("n00123456", "password-43")
@@ -730,6 +734,7 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
         principal_id=group["id"],
         role="viewer",
         created_by=owner.id,
+        admin_user_id=owner.id,
     )
     assert grant["principal_name"] == "甲组"
     assert grant["principal_kind"] == "department"
@@ -740,6 +745,7 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
             principal_id=group["id"],
             role="admin",
             created_by=owner.id,
+            admin_user_id=owner.id,
         )
     # 同组的另一个主体类型是**另一条**边,不受 UNIQUE 影响。
     groups.create_grant(
@@ -748,6 +754,7 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
         principal_id=group["id"],
         role="admin",
         created_by=owner.id,
+        admin_user_id=owner.id,
     )
     # 本端点建不出来、但库里可能存在的 everyone 行:不得被 LEFT JOIN 误配上组名。
     _pg_grant(core_stores, "gr-all", notebook_id, "everyone", "", owner.id)
@@ -756,10 +763,18 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
     everyone = next(g for g in listed if g["principal_type"] == "everyone")
     assert everyone["principal_name"] == "" and everyone["principal_kind"] == ""
 
+    # 孤儿边(指向已不存在的组)必须带可识别的失效标注,而不是与正常条目长得一样、
+    # 只是没有名字。`user`/`everyone` 主体**不得**被误标成 missing —— 它们本来就没有
+    # 组可解析。
+    _pg_grant(core_stores, "gr-orphan", notebook_id, "group", "grp-vanished", owner.id)
+    with_orphan = {g["id"]: g for g in groups.list_grants(notebook_id)}
+    assert with_orphan["gr-orphan"]["principal_kind"] == "missing"
+    assert with_orphan["gr-orphan"]["principal_name"] == ""
+    assert with_orphan["gr-all"]["principal_kind"] == ""
+    _write_sql(core_stores, "DELETE FROM notebook_grants WHERE id='gr-orphan'")
+
     # grant id 必须与 notebook 一起验:否则「我有一本自己的库的管理权」就变成
     # 「我能删任何库上的授权边」。
-    assert groups.grant_row(notebook_id, grant["id"])["id"] == grant["id"]
-    assert groups.grant_row(another_notebook, grant["id"]) is None
     assert groups.delete_grant(another_notebook, grant["id"]) is False
     assert groups.delete_grant(notebook_id, grant["id"]) is True
     assert groups.delete_grant(notebook_id, grant["id"]) is False
@@ -770,6 +785,7 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
         principal_id=group["id"],
         role="viewer",
         created_by=owner.id,
+        admin_user_id=owner.id,
     )
     groups.create_grant(
         another_notebook,
@@ -777,12 +793,35 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
         principal_id=other["id"],
         role="viewer",
         created_by=owner.id,
+        admin_user_id=owner.id,
     )
     shared = groups.list_group_shared_notebooks(group["id"])
     assert [item["notebook_id"] for item in shared] == [notebook_id]
     assert shared[0]["name"] == "共享库"
     assert shared[0]["owner_username"] == "n00123456"
     assert sorted(shared[0]["roles"]) == ["admin", "viewer"]  # 同库两条边折成一项
+
+    # 双重条件的群组那一半在**写事务里**复核:发起者不是组管理员 / 组不存在,
+    # 都在插入之前失败关闭。路由层那次前置查询不参与判定(它只负责文案)。
+    outsider = core_stores.identity.create_user("r00123456", "password-47")
+    with pytest.raises(GroupAdminRequiredError):
+        groups.create_grant(
+            another_notebook,
+            principal_type="group",
+            principal_id=group["id"],
+            role="viewer",
+            created_by=outsider.id,
+            admin_user_id=outsider.id,
+        )
+    with pytest.raises(GroupNotFoundError):
+        groups.create_grant(
+            another_notebook,
+            principal_type="group",
+            principal_id="grp-does-not-exist",
+            role="viewer",
+            created_by=owner.id,
+            admin_user_id=owner.id,
+        )
 
     assert groups.delete_group_grants_for_notebook(group["id"], notebook_id) == 2
     assert groups.list_group_shared_notebooks(group["id"]) == []
@@ -830,6 +869,7 @@ def test_granted_notebook_rows_matches_the_sqlite_list_projection(
         principal_id=group["id"],
         role="viewer",
         created_by=owner.id,
+        admin_user_id=owner.id,
     )
     groups.create_grant(
         admin_notebook,
@@ -837,6 +877,7 @@ def test_granted_notebook_rows_matches_the_sqlite_list_projection(
         principal_id=group["id"],
         role="admin",
         created_by=owner.id,
+        admin_user_id=owner.id,
     )
     # 本投影刻意不收 everyone 主体(它沿用公共知识库的隐藏惯例)。
     everyone_notebook = core_stores.notebooks.create_row(

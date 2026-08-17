@@ -65,6 +65,19 @@ def _new_user(client: TestClient) -> tuple[dict, str, str]:
     return headers, user_id, username
 
 
+def _app_group_store():
+    """**应用**(TestClient)手上那个 GroupStore 实例。
+
+    `repo` fixture 另建了一个 `SQLiteRepository`——同一个 tmp 数据库文件,但不是同一个
+    Python 对象。要在 HTTP 请求的执行路径中间插桩(模拟「守卫过了、写事务还没开」这个
+    并发窗口),必须打应用自己那个实例的桩;打 `repo._runtime.groups` 的桩路由压根看
+    不见,请求会一路成功,而测试看起来只是「断言写错了」。
+    """
+    from app.api import deps
+
+    return deps.repository()._runtime.groups
+
+
 def _promote_to_admin(repo, user_id: str) -> None:
     with repo._write() as db:
         db.execute("UPDATE users SET role='admin' WHERE id=?", (user_id,))
@@ -866,6 +879,391 @@ def test_group_partition_query_is_bounded_by_my_memberships(repo):
         for step in plan
     ), plan
     assert not any("SCAN" in step for step in plan), plan
+
+
+# ------------------------------------------------- 系统管理员运维旁路(裁决 A)
+
+
+def test_system_admin_can_administer_any_group(tmp_path, monkeypatch, repo):
+    """系统管理员绕过群组维度的成员/管理员判定(运维旁路)。
+
+    与「系统管理员可转移 `notebooks.created_by`」同性质。普通用户的行为一个字不变,
+    由本文件其余用例(非成员 404、普通成员不能改组)逐条钉住。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner, name="别人的组")
+    boss, boss_id, _ = _new_user(client)
+
+    # 提权之前:与任何陌生人一样,一律 404。
+    assert client.get(f"/api/groups/{group_id}", headers=boss).status_code == 404
+    assert client.patch(
+        f"/api/groups/{group_id}", json={"name": "X"}, headers=boss
+    ).status_code == 404
+
+    _promote_to_admin(repo, boss_id)
+
+    detail = client.get(f"/api/groups/{group_id}", headers=boss)
+    assert detail.status_code == 200
+    assert detail.json()["my_role"] == ""  # 旁路不伪造成员身份
+    assert client.patch(
+        f"/api/groups/{group_id}", json={"name": "接管改名"}, headers=boss
+    ).status_code == 200
+    assert client.get(
+        f"/api/groups/{group_id}/shared-notebooks", headers=boss
+    ).status_code == 200
+    # 旁路仍要求组真的存在。
+    assert client.get("/api/groups/grp-nope", headers=boss).status_code == 404
+    assert client.patch(
+        "/api/groups/grp-nope", json={"name": "X"}, headers=boss
+    ).status_code == 404
+    assert client.delete(f"/api/groups/{group_id}", headers=boss).status_code == 204
+
+
+def test_system_admin_can_repair_a_group_left_without_admins(
+    tmp_path, monkeypatch, repo
+):
+    """零管理员的组必须在 API 里可恢复 —— 那正是这条旁路存在的理由。
+
+    「最后一名组管理员保护」在理论并发窗口下仍可能留下这种组;没有旁路,它的每个
+    管理端点对**所有人**(包括系统管理员)都 404,只能改数据库才救得回来。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    orphan, orphan_id, _ = _new_user(client)
+    boss, boss_id, _ = _new_user(client)
+    _promote_to_admin(repo, boss_id)
+    # 直接造出零管理员的终态(并发窗口的产物,正常路径造不出来)。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE group_members SET role='member' WHERE group_id=?", (group_id,)
+        )
+
+    assert client.patch(
+        f"/api/groups/{group_id}", json={"name": "X"}, headers=owner
+    ).status_code == 404, "组管理员没了,原创建者自己也管不了 —— 这正是要救的形态"
+
+    repaired = client.put(
+        f"/api/groups/{group_id}/members/{orphan_id}",
+        json={"role": "admin"},
+        headers=boss,
+    )
+    assert repaired.status_code == 200
+    assert {m["id"]: m["role"] for m in repaired.json()["members"]}[orphan_id] == "admin"
+    # 补回管理员之后,组重新自治。
+    assert client.patch(
+        f"/api/groups/{group_id}", json={"name": "恢复"}, headers=orphan
+    ).status_code == 200
+    del owner_id
+
+
+def test_system_admin_bypass_does_not_apply_to_leaving_a_group(
+    tmp_path, monkeypatch, repo
+):
+    """自助退出**不**走旁路:「退出」的前提是本人真的在组里。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    boss, boss_id, _ = _new_user(client)
+    _promote_to_admin(repo, boss_id)
+    assert client.delete(
+        f"/api/groups/{group_id}/membership", headers=boss
+    ).status_code == 404
+    assert client.get(f"/api/groups/{group_id}", headers=owner).json()["member_count"] == 1
+
+
+def test_scope_all_rows_are_openable_by_the_system_admin(tmp_path, monkeypatch, repo):
+    """`?scope=all` 的每一行都必须点得开 —— 否则它是一张没用的表。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    first = _make_group(client, owner, name="甲")
+    second = _make_group(client, owner, name="乙")
+    boss, boss_id, _ = _new_user(client)
+    _promote_to_admin(repo, boss_id)
+    listed = client.get("/api/groups?scope=all", headers=boss).json()
+    assert sorted(g["id"] for g in listed) == sorted([first, second])
+    for row in listed:
+        assert client.get(f"/api/groups/{row['id']}", headers=boss).status_code == 200
+
+
+def test_scope_parameter_is_strict(tmp_path, monkeypatch, repo):
+    """非法 scope 明确 422,不静默当成 mine。"""
+    client = _client(tmp_path, monkeypatch)
+    boss, boss_id, _ = _new_user(client)
+    _promote_to_admin(repo, boss_id)
+    for bad in ("al", "ALL", "everything", ""):
+        response = client.get(f"/api/groups?scope={bad}", headers=boss)
+        assert response.status_code == 422, bad
+    assert client.get("/api/groups?scope=mine", headers=boss).status_code == 200
+    assert client.get("/api/groups?scope=all", headers=boss).status_code == 200
+
+
+# ------------------------------------------------------ 并发窗口的失败关闭
+
+
+def test_adding_a_member_to_a_concurrently_deleted_group_is_404_not_500(
+    tmp_path, monkeypatch, repo
+):
+    """守卫通过之后、写事务落库之前组被删掉 → 404。
+
+    少了写事务内那次存在性复核,`INSERT INTO group_members` 会撞外键抛
+    `IntegrityError`,用户拿到的是 500。这里直接在守卫与写入之间把组删掉来复现
+    (等价于并发删组恰好落在那个窗口里)。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    _member, member_id, _ = _new_user(client)
+
+    store = _app_group_store()
+    original = store.user_group_role
+
+    def delete_then_answer(gid, uid):
+        role = original(gid, uid)
+        if gid == group_id:
+            store.delete_group(group_id)  # 守卫刚过,写事务还没开
+        return role
+
+    monkeypatch.setattr(store, "user_group_role", delete_then_answer)
+    response = client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    monkeypatch.undo()
+    assert response.status_code == 404, response.text
+    assert response.headers.get("X-User-Message") == "1"
+
+
+def test_removing_a_member_from_a_concurrently_deleted_group_is_404_not_500(repo):
+    """`remove_member` 走同一条复核。直接打 store:路由已由上一条覆盖。"""
+    from app.repositories.ports import GroupNotFoundError
+
+    store = repo._runtime.groups
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,username,password_hash,role,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("gone-a", "gone-a@t", "a", "gone-a", "x", "user", _now(), _now()),
+        )
+    group = store.create_group(
+        name="将被删除", kind="project", description="", created_by="gone-a"
+    )
+    store.delete_group(group["id"])
+    with pytest.raises(GroupNotFoundError):
+        store.remove_member(group["id"], "gone-a")
+    with pytest.raises(GroupNotFoundError):
+        store.upsert_member(group["id"], "gone-a", role="member", added_by="gone-a")
+
+
+def test_grant_creation_rechecks_group_admin_inside_the_write_transaction(
+    tmp_path, monkeypatch, repo
+):
+    """授权边的双重条件在**写事务里**复核,不靠路由层那次查询。
+
+    这条边一落库就立刻给整组人读权,所以「组还在、我还是它的管理员」必须与插入同
+    事务。这里在请求进入 store 之前把发起者降级(等价于并发降级恰好落在窗口里),
+    响应必须是 403 而**不是**一条已经发出去的边。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, boss_id, _ = _new_user(client)
+    group_id = _make_group(client, boss)
+    notebook_id = _make_notebook(client, boss)
+
+    store = _app_group_store()
+    original = store.create_grant
+
+    def demote_then_create(*args, **kwargs):
+        with repo._write() as db:
+            db.execute(
+                "UPDATE group_members SET role='member' WHERE group_id=? AND user_id=?",
+                (group_id, boss_id),
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "create_grant", demote_then_create)
+    response = _share_to_group(client, boss, notebook_id, group_id)
+    monkeypatch.undo()
+    assert response.status_code == 403, response.text
+    assert client.get(f"/api/notebooks/{notebook_id}/grants", headers=boss).json() == []
+
+
+def test_grant_creation_rechecks_group_existence_inside_the_write_transaction(
+    tmp_path, monkeypatch, repo
+):
+    client = _client(tmp_path, monkeypatch)
+    boss, _boss_id, _ = _new_user(client)
+    group_id = _make_group(client, boss)
+    notebook_id = _make_notebook(client, boss)
+
+    store = _app_group_store()
+    original = store.create_grant
+
+    def delete_then_create(*args, **kwargs):
+        store.delete_group(group_id)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "create_grant", delete_then_create)
+    response = _share_to_group(client, boss, notebook_id, group_id)
+    monkeypatch.undo()
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "群组不存在"
+
+
+def test_orphan_grants_are_labelled_so_the_owner_can_understand_them(
+    tmp_path, monkeypatch, repo
+):
+    """指向已不存在群组的孤儿边带 `principal_kind="missing"`,并且删得掉。
+
+    删组事务会清掉这类边,但 `principal_id` 没有外键,合库(merge_dbs)的并集仍可能
+    复活它们。不标注的话,库主看到的是一条没有名字的共享记录 —— 既不知道那是什么,
+    也不知道能不能删。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, owner)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("gnt-orphan", notebook_id, "group", "grp-vanished", "viewer", owner_id, _now()),
+        )
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("gnt-all", notebook_id, "everyone", "", "viewer", owner_id, _now()),
+        )
+    listed = {g["id"]: g for g in client.get(
+        f"/api/notebooks/{notebook_id}/grants", headers=owner
+    ).json()}
+    assert listed["gnt-orphan"]["principal_kind"] == "missing"
+    assert listed["gnt-orphan"]["principal_name"] == ""
+    # everyone / user 主体本来就没有组可解析,**不得**被误标成失效。
+    assert listed["gnt-all"]["principal_kind"] == ""
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/grants/gnt-orphan", headers=owner
+    ).status_code == 204
+
+
+def test_duplicate_grant_classification_is_narrowed_to_its_own_constraint(repo):
+    """UNIQUE 分类必须钉到**这条**约束上,别的完整性错误照常上抛。
+
+    裸 `"UNIQUE" in message` 会把主键冲突之类的别的约束一起吞成一句「已经共享过了」
+    —— 那是把一个真 bug 说成用户操作重复。
+    """
+    import sqlite3
+
+    from app.repositories.ports import GroupGrantAlreadyExists
+
+    store = repo._runtime.groups
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,username,password_hash,role,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("dup-a", "dup-a@t", "a", "dup-a", "x", "user", _now(), _now()),
+        )
+        db.execute(
+            "INSERT INTO notebooks "
+            "(id,name,purpose,primary_domain,status,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("nb-dup", "NB", "", "Semiconductor", "draft", "dup-a", _now(), _now()),
+        )
+    group = store.create_group(
+        name="重复", kind="project", description="", created_by="dup-a"
+    )
+    kwargs = dict(
+        principal_type="group",
+        principal_id=group["id"],
+        role="viewer",
+        created_by="dup-a",
+        admin_user_id="dup-a",
+    )
+    store.create_grant("nb-dup", **kwargs)
+    with pytest.raises(GroupGrantAlreadyExists):
+        store.create_grant("nb-dup", **kwargs)
+
+    # 别的完整性错误必须**原样上抛**,不被当成「重复共享」。这里造的是主键冲突:
+    # 两条边的 (notebook, principal_type, principal_id) 三元组**不同**(第二个组),
+    # 所以那条 UNIQUE 不成立,只有 `notebook_grants.id` 的主键会撞。两种冲突的
+    # SQLite 报文都以「UNIQUE constraint failed」开头 —— 裸 `"UNIQUE" in message`
+    # 会把这条真 bug 说成「你已经共享过了」。
+    other = store.create_group(
+        name="另一个", kind="project", description="", created_by="dup-a"
+    )
+    store.new_id = lambda prefix: "gnt-fixed-id"
+    store.create_grant("nb-dup", **{**kwargs, "principal_id": other["id"]})
+    with pytest.raises(sqlite3.IntegrityError) as raised:
+        store.create_grant(
+            "nb-dup", **{**kwargs, "principal_id": other["id"], "principal_type": "group_admins"}
+        )
+    assert "notebook_grants.id" in str(raised.value)
+    assert not isinstance(raised.value, GroupGrantAlreadyExists)
+
+
+# ------------------------------------------------------------- 成员侧行为
+
+
+def test_group_granted_reader_can_ask_in_the_shared_notebook(tmp_path, monkeypatch):
+    """成员经组授权 reader 走的是同一道读守卫 —— Ask/检索自动生效,零代码。
+
+    计划里这一行的交付物就是这条验证用例。用 `test_notebook_share_readonly.py` 的
+    同一批读路由,证明组授权 reader 与只读成员逐条同权。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+
+    for suffix in ("", "/analytics", "/sources", "/graph", "/search?q=x", "/conversations"):
+        assert client.get(
+            f"/api/notebooks/{notebook_id}{suffix}", headers=member
+        ).status_code == 404, suffix  # 授权之前一律不可见
+
+    _share_to_group(client, owner, notebook_id, group_id)
+
+    for suffix in ("", "/analytics", "/sources", "/graph", "/search?q=x", "/conversations"):
+        assert client.get(
+            f"/api/notebooks/{notebook_id}{suffix}", headers=member
+        ).status_code == 200, suffix
+    # 问题理解预检(Ask 管线的第一步)同样只过读守卫。
+    intent = client.post(
+        f"/api/notebooks/{notebook_id}/ask/intent",
+        json={"question": "这本库讲了什么?"},
+        headers=member,
+    )
+    assert intent.status_code != 404, intent.status_code
+
+
+def test_group_kind_cannot_be_changed_after_creation(tmp_path, monkeypatch):
+    """`kind` 不可改:传了直接 422(`extra="forbid"`),不是安静地忽略。
+
+    它只是分类标签、不影响权限机制;放开它的后果是**标签失真**——普通用户能把自己
+    建的项目组改标成「部门」,而建组时那道「部门/领域仅系统管理员」的闸正是为了让
+    这个标签可信。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    rejected = client.patch(
+        f"/api/groups/{group_id}", json={"kind": "department"}, headers=owner
+    )
+    assert rejected.status_code == 422
+    assert client.get(f"/api/groups/{group_id}", headers=owner).json()["kind"] == "project"
+    # 合法字段照常可改(证明 422 来自 kind 本身,不是整个端点坏了)。
+    assert client.patch(
+        f"/api/groups/{group_id}", json={"name": "新名"}, headers=owner
+    ).status_code == 200
 
 
 def test_group_ids_are_random_per_creation(tmp_path, monkeypatch):
