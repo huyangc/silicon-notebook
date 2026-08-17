@@ -10,7 +10,7 @@ from app.api.deps import (
     model_status_service,
     identity_repository,
     repository,
-    require_notebook_access,
+    require_notebook_capability,
     user_error,
 )
 from app.core.cache import CacheAdmin, make_cache_backend
@@ -92,7 +92,7 @@ def test_all_system_model_services(
     "/notebooks/{notebook_id}/knowledge/{knowledge_id}/promote",
     response_model=PromotionCandidate,
     status_code=201,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowledge:write"))],
 )
 def propose_promotion(
     notebook_id: str, knowledge_id: str, payload: PromoteRequest = PromoteRequest()

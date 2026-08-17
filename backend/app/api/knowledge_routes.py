@@ -8,7 +8,7 @@ from app.api.deps import (
     get_current_user,
     notebook_access_repository,
     repository,
-    require_notebook_access,
+    require_notebook_capability,
     require_notebook_read,
     user_error,
 )
@@ -126,7 +126,7 @@ def list_notebook_object_schemas(
 @router.post(
     "/notebooks/{notebook_id}/object-schemas",
     response_model=ObjectSchemaModel,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowledge:write"))],
 )
 def create_notebook_object_schema(
     notebook_id: str,
@@ -148,7 +148,7 @@ def create_notebook_object_schema(
 @router.patch(
     "/notebooks/{notebook_id}/object-schemas/{object_type}",
     response_model=ObjectSchemaModel,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowledge:write"))],
 )
 def update_notebook_object_schema(
     notebook_id: str,
@@ -167,7 +167,7 @@ def update_notebook_object_schema(
 
 
 @router.delete("/notebooks/{notebook_id}/object-schemas/{object_type}",
-    dependencies=[Depends(require_notebook_access)])
+    dependencies=[Depends(require_notebook_capability("knowledge:write"))])
 def delete_notebook_object_schema(notebook_id: str, object_type: str):
     try:
         status = repository().delete_notebook_object_schema(notebook_id, object_type)
@@ -181,7 +181,7 @@ def delete_notebook_object_schema(notebook_id: str, object_type: str):
 @router.post(
     "/notebooks/{notebook_id}/schema-proposals",
     response_model=List[ObjectSchemaModel],
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("knowledge:write"))],
 )
 def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
     try:
@@ -190,7 +190,7 @@ def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}", dependencies=[Depends(require_notebook_access)])
+@router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}", dependencies=[Depends(require_notebook_capability("knowledge:write"))])
 def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate):
     try:
         return repository().update_knowledge(notebook_id, knowledge_id, payload)
@@ -230,7 +230,7 @@ def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
         raise HTTPException(status_code=413, detail=str(exc))
 
 
-@router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_capability("knowledge:write"))])
 def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest):
     try:
         return repository().merge_knowledge(notebook_id, knowledge_id, payload)
@@ -254,7 +254,7 @@ def edge_review_queue(notebook_id: str, limit: int = 100) -> List[EdgeReviewItem
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/relations/{rel_id}/review", status_code=200, dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/relations/{rel_id}/review", status_code=200, dependencies=[Depends(require_notebook_capability("knowledge:write"))])
 def review_relation(notebook_id: str, rel_id: str,
                     payload: EdgeReviewRequest) -> dict:
     """Mark an edge as 'verified', 'rejected', or 'pending'.

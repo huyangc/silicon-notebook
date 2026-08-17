@@ -7,7 +7,7 @@ from app.api.deps import (
     notebook_catalog_repository,
     notebook_sharing_repository,
     repository,
-    require_notebook_access,
+    require_notebook_capability,
     require_notebook_read,
     user_error,
 )
@@ -64,7 +64,7 @@ def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.patch("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_access)])
+@router.patch("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def update_notebook(
     notebook_id: str,
     payload: NotebookUpdate,
@@ -75,7 +75,7 @@ def update_notebook(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.delete("/notebooks/{notebook_id}", status_code=204, dependencies=[Depends(require_notebook_access)])
+@router.delete("/notebooks/{notebook_id}", status_code=204, dependencies=[Depends(require_notebook_capability("notebook:delete"))])
 def delete_notebook(notebook_id: str) -> None:
     try:
         notebook_catalog_repository().delete_notebook(notebook_id)
@@ -83,7 +83,7 @@ def delete_notebook(notebook_id: str) -> None:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/tier", response_model=NotebookSummary, dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/tier", response_model=NotebookSummary, dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
     """Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本
     挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己
@@ -105,7 +105,7 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
 
 
 @router.get("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
-            dependencies=[Depends(require_notebook_access)])
+            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
     """本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被
     降级),前端置灰展示——边保留是为了对方恢复后自动生效。"""
@@ -113,14 +113,15 @@ def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
 
 
 @router.put("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
-            dependencies=[Depends(require_notebook_access)])
+            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def set_notebook_bases_route(
     notebook_id: str, payload: SetBasesRequest,
     user: UserProfile = Depends(get_current_user),
 ) -> List[MountedBase]:
     """全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)
     ∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。
-    写权限本身由 require_notebook_access(owner-only,404 on denial)在依赖层挡;
+    写权限本身由 require_notebook_capability("notebook:manage")(P0 阶段解析到
+    owner-only,404 on denial)在依赖层挡;
     这里只做候选集校验,不重复手工判断写权限。
 
     并入"当前已挂载的 id"是刻意的:mountable_notebooks 与失效边的判定谓词
@@ -140,7 +141,7 @@ def set_notebook_bases_route(
 
 
 @router.get("/notebooks/{notebook_id}/mountable", response_model=List[NotebookRef],
-            dependencies=[Depends(require_notebook_access)])
+            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def mountable_notebooks_route(notebook_id: str) -> List[NotebookRef]:
     """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库。
 
@@ -150,7 +151,7 @@ def mountable_notebooks_route(notebook_id: str) -> List[NotebookRef]:
 
 
 @router.get("/notebooks/{notebook_id}/mounted-by-count", response_model=MountedByCount,
-            dependencies=[Depends(require_notebook_access)])
+            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def mounted_by_count_route(notebook_id: str) -> MountedByCount:
     """删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——
     ON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。
@@ -159,7 +160,7 @@ def mounted_by_count_route(notebook_id: str) -> MountedByCount:
 
 
 @router.post("/notebooks/{notebook_id}/share", response_model=ShareResponse,
-             dependencies=[Depends(require_notebook_access)])
+             dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def share_notebook_route(notebook_id: str) -> ShareResponse:
     try:
         return ShareResponse(**notebook_sharing_repository().share_notebook(notebook_id))
@@ -168,7 +169,7 @@ def share_notebook_route(notebook_id: str) -> ShareResponse:
 
 
 @router.delete("/notebooks/{notebook_id}/share", status_code=204,
-               dependencies=[Depends(require_notebook_access)])
+               dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def unshare_notebook_route(notebook_id: str) -> None:
     try:
         notebook_sharing_repository().unshare_notebook(notebook_id)

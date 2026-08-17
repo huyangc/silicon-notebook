@@ -7,7 +7,7 @@ from app.api.deps import (
     get_current_user,
     kg_analysis_service,
     repository,
-    require_notebook_access,
+    require_notebook_capability,
     require_notebook_read,
     user_error,
 )
@@ -72,7 +72,7 @@ def kg_search(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def build_kg(notebook_id: str) -> dict:
     """按需触发该 notebook 的 KG 建图(后台线程,幂等)。
     已有 knowledge_objects 的 source 会跳过。需 LLM 已配置,否则 409。"""
@@ -109,7 +109,7 @@ def build_kg(notebook_id: str) -> dict:
     }
 
 
-@router.post("/notebooks/{notebook_id}/kg/rebuild", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/kg/rebuild", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def rebuild_kg(notebook_id: str) -> dict:
     """Full re-extract: clears all KG artefacts then re-extracts ALL sources
     (background thread). Requires LLM configured (409 if not), 404 if notebook
@@ -144,7 +144,7 @@ def rebuild_kg(notebook_id: str) -> dict:
     }
 
 
-@router.post("/notebooks/{notebook_id}/kg/relink", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/kg/relink", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def relink_kg(notebook_id: str) -> dict:
     """Deterministic reconnection of isolated KG nodes (background thread, no LLM).
 
@@ -204,7 +204,7 @@ def relink_kg_status(notebook_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/notebooks/{notebook_id}/unified-kg/rebuild", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/unified-kg/rebuild", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def rebuild_unified_kg(notebook_id: str) -> dict:
     """「重新合并」(background thread). Same shape as kg/relink above.
 
@@ -283,7 +283,7 @@ def unified_kg_status(notebook_id: str) -> UnifiedKgStatus:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/scale-index/rebuild", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/scale-index/rebuild", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def rebuild_scale_index(notebook_id: str, body: RebuildScaleIndexRequest = RebuildScaleIndexRequest()) -> dict:
     """在线重建 scale 检索索引(base-tier / 已建过)。when=now 立即后台/idle 低峰调度;
     mode=auto(fold/full 自选)|fold|full。400 若参数非法,409 若不合格,404 若缺。"""
@@ -299,7 +299,7 @@ def rebuild_scale_index(notebook_id: str, body: RebuildScaleIndexRequest = Rebui
         raise HTTPException(status_code=409, detail=str(exc))
 
 
-@router.post("/notebooks/{notebook_id}/scale-index/cancel", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/scale-index/cancel", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def cancel_scale_index(notebook_id: str) -> dict:
     """取消检索索引:排队中→出队;构建中→拒绝(不可打断)。"""
     try:
@@ -308,7 +308,7 @@ def cancel_scale_index(notebook_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.get("/notebooks/{notebook_id}/scale-index/status", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/scale-index/status", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def scale_index_status(notebook_id: str) -> ScaleIndexStatus:
     try:
         return ScaleIndexStatus(**repository().scale_index_status(notebook_id))
@@ -320,7 +320,8 @@ def scale_index_status(notebook_id: str) -> ScaleIndexStatus:
 def index_status(notebook_id: str) -> dict:
     """三系统构建状态聚合(kg/unified_kg/scale_index)。纯读:与 /analytics、
     /unified-kg/status 一致用 read 守卫——只读成员也要能看面板里的状态位,
-    写操作(build/rebuild/cancel)各自仍是 require_notebook_access 且前端按 !isReader 隐藏按钮。"""
+    写操作(build/rebuild/cancel)各自仍是 require_notebook_capability("kg:write")
+    (P0 阶段解析到 owner-only)且前端按 !isReader 隐藏按钮。"""
     try:
         return repository().index_status(notebook_id)
     except KeyError:
@@ -398,7 +399,7 @@ def object_neighbors(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/confirm", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/confirm", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def confirm_merge(notebook_id: str, candidate_id: str) -> dict:
     try:
         repository().confirm_merge(notebook_id, candidate_id)
@@ -407,7 +408,7 @@ def confirm_merge(notebook_id: str, candidate_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Merge candidate not found")
 
 
-@router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/reject", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/{candidate_id}/reject", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def reject_merge(notebook_id: str, candidate_id: str) -> dict:
     try:
         repository().reject_merge(notebook_id, candidate_id)
@@ -422,7 +423,7 @@ def reject_merge(notebook_id: str, candidate_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/notebooks/{notebook_id}/kg/conflicts/resolve", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/kg/conflicts/resolve", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def resolve_conflicts(notebook_id: str) -> dict:
     """Trigger background conflict resolution for a notebook's KG.
 
@@ -480,7 +481,7 @@ def get_pending_conflicts(notebook_id: str) -> list:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/kg/conflicts/{candidate_id}/confirm", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/kg/conflicts/{candidate_id}/confirm", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def confirm_conflict(notebook_id: str, candidate_id: str) -> dict:
     """Apply a pending conflict candidate and mark it as 'applied'."""
     try:
@@ -491,7 +492,7 @@ def confirm_conflict(notebook_id: str, candidate_id: str) -> dict:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
-@router.post("/notebooks/{notebook_id}/kg/conflicts/{candidate_id}/reject", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/kg/conflicts/{candidate_id}/reject", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def reject_conflict(notebook_id: str, candidate_id: str) -> dict:
     """Reject a pending conflict candidate (no KG mutation)."""
     try:
@@ -525,7 +526,7 @@ def delete_concept_whitelist(term: str, user: UserProfile = Depends(get_current_
     repository().concept_whitelist_remove(term)
 
 
-@router.post("/notebooks/{notebook_id}/unified-kg/merges/review", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/review", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def review_unified_kg_merges(notebook_id: str, payload: MergeReviewRequest) -> MergeReviewSummary:
     try:
         return MergeReviewSummary(**repository().review_pending_merges(
@@ -538,7 +539,7 @@ def review_unified_kg_merges(notebook_id: str, payload: MergeReviewRequest) -> M
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/unified-kg/merges/review-all", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/unified-kg/merges/review-all", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def review_all_unified_kg_merges(notebook_id: str) -> dict:
     repo = repository()
     try:
@@ -552,7 +553,7 @@ def review_all_unified_kg_merges(notebook_id: str) -> dict:
     return {"status": "started"}
 
 
-@router.get("/notebooks/{notebook_id}/unified-kg/merges/review-job", dependencies=[Depends(require_notebook_access)])
+@router.get("/notebooks/{notebook_id}/unified-kg/merges/review-job", dependencies=[Depends(require_notebook_capability("kg:write"))])
 def merge_review_job(notebook_id: str) -> MergeReviewJob:
     try:
         return MergeReviewJob(**repository().merge_review_job_status(notebook_id))

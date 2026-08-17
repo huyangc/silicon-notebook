@@ -7,8 +7,8 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
     repository,
+    require_notebook_capability,
     require_notebook_read,
-    require_notebook_write,
     user_error,
 )
 from app.models.reports import (
@@ -144,7 +144,7 @@ def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
 
 
 @router.post("/notebooks/{notebook_id}/reports",
-             dependencies=[Depends(require_notebook_write)])
+             dependencies=[Depends(require_notebook_capability("reports:write"))])
 def create_report(notebook_id: str, payload: ReportCreate) -> dict:
     repo = repository()
     if not payload.question.strip():
@@ -203,7 +203,7 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/intent",
-             dependencies=[Depends(require_notebook_write)])
+             dependencies=[Depends(require_notebook_capability("reports:write"))])
 def confirm_report_intent(notebook_id: str, report_id: str,
                           payload: ReportIntentConfirm) -> dict:
     repo = repository()
@@ -312,7 +312,7 @@ def get_report(notebook_id: str, report_id: str) -> ReportDetail:
 
 
 @router.patch("/notebooks/{notebook_id}/reports/{report_id}/outline",
-              dependencies=[Depends(require_notebook_write)])
+              dependencies=[Depends(require_notebook_capability("reports:write"))])
 def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutlineUpdate) -> dict:
     from app.services.report_synthesis import normalize_report_frame
 
@@ -430,7 +430,7 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/generate",
-             dependencies=[Depends(require_notebook_write)])
+             dependencies=[Depends(require_notebook_capability("reports:write"))])
 def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateRequest) -> dict:
     repo = repository()
     if not repo._runtime.models.configured("report_section"):
@@ -497,7 +497,7 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/cancel",
-             dependencies=[Depends(require_notebook_write)])
+             dependencies=[Depends(require_notebook_capability("reports:write"))])
 def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
     from app.services.report_engine import cancel_report as _cancel
     repo = repository()
@@ -514,7 +514,7 @@ def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
 
 
 @router.delete("/notebooks/{notebook_id}/reports/{report_id}",
-               dependencies=[Depends(require_notebook_write)])
+               dependencies=[Depends(require_notebook_capability("reports:write"))])
 def delete_report(notebook_id: str, report_id: str) -> dict:
     repository().delete_report(notebook_id, report_id)
     return {"status": "deleted"}
@@ -522,7 +522,7 @@ def delete_report(notebook_id: str, report_id: str) -> dict:
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/share",
              response_model=ReportShareResponse,
-             dependencies=[Depends(require_notebook_write)])
+             dependencies=[Depends(require_notebook_capability("reports:write"))])
 def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
     """Publish one finished report behind an unguessable link.
 
@@ -541,7 +541,7 @@ def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
 
 @router.get("/notebooks/{notebook_id}/reports/{report_id}/share",
             response_model=ReportShareResponse,
-            dependencies=[Depends(require_notebook_write)])
+            dependencies=[Depends(require_notebook_capability("reports:write"))])
 def get_report_share_route(notebook_id: str, report_id: str) -> ReportShareResponse:
     """Read back the existing link. Write-guarded: the token *is* the grant.
 
@@ -563,7 +563,7 @@ def get_report_share_route(notebook_id: str, report_id: str) -> ReportShareRespo
 
 @router.delete("/notebooks/{notebook_id}/reports/{report_id}/share",
                status_code=204,
-               dependencies=[Depends(require_notebook_write)])
+               dependencies=[Depends(require_notebook_capability("reports:write"))])
 def unshare_report_route(notebook_id: str, report_id: str) -> None:
     """Revoke the link. The next public request 404s like any unknown token."""
     repository().unshare_report(notebook_id, report_id)

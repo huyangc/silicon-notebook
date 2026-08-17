@@ -10,8 +10,9 @@ from app.api.deps import (
     get_current_user,
     notebook_access_repository,
     notebook_store_port,
+    notebook_write_allowed,
     repository,
-    require_notebook_access,
+    require_notebook_capability,
     require_notebook_read,
     source_repository,
     user_error,
@@ -274,7 +275,7 @@ def list_sources(
     return source_repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
 
 
-@router.post("/notebooks/{notebook_id}/sources/import", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/sources/import", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_capability("sources:write"))])
 def import_sources(
     notebook_id: str,
     payload: SourceImportRequest,
@@ -288,7 +289,7 @@ def import_sources(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/sources/url", response_model=AddUrlSourcesResult, dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/sources/url", response_model=AddUrlSourcesResult, dependencies=[Depends(require_notebook_capability("sources:write"))])
 def add_url_sources(
     notebook_id: str,
     payload: AddUrlSourcesRequest,
@@ -318,7 +319,7 @@ def add_url_sources(
 @router.post(
     "/notebooks/{notebook_id}/sources",
     response_model=List[UploadedSourceSummary],
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("sources:write"))],
     openapi_extra=_SOURCE_UPLOAD_OPENAPI,
 )
 async def upload_sources(
@@ -393,7 +394,14 @@ def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) ->
 
 @router.post("/sources/{source_id}/parse", response_model=SourceSummary)
 def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceSummary:
-    if notebook_access_repository().source_owner(source_id) != user.id:
+    # notebook_id 不是这个端点 URL 上的路径参数(URL 只带 source_id),owner 判定
+    # 没法挂在静态的 Depends(require_notebook_capability(...)) 上——先反查
+    # notebook_id,再复用与 "sources:write" 能力逐字相同的判据(见
+    # notebook_write_allowed 的 docstring)。语义与旧的
+    # `source_owner(source_id) != user.id` 逐字等价:source 不存在 → 404;
+    # 非 owner → 404。
+    notebook_id = notebook_access_repository().source_notebook_id(source_id)
+    if notebook_id is None or not notebook_write_allowed(notebook_id, user.id):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         return source_repository().parse_source(source_id)
@@ -404,15 +412,16 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
 @router.post(
     "/notebooks/{notebook_id}/sources/reparse",
     response_model=RepairScheduledResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("sources:write"))],
 )
 def reparse_sources(
     notebook_id: str, payload: ReparseSourcesRequest
 ) -> RepairScheduledResult:
     """体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)
     ——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。
-    ⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守
-    notebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。
+    ⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:
+    ``require_notebook_capability("sources:write")`` 只守 notebook,不守 body 里
+    带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。
     ⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发
     排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。"""
     unique_ids = list(dict.fromkeys(payload.source_ids))
@@ -555,7 +564,7 @@ def _backfill_vectors_job(repo, notebook_id: str) -> None:
 @router.post(
     "/notebooks/{notebook_id}/backfill-vectors",
     response_model=RepairScheduledResult,
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("sources:write"))],
 )
 def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     """体检修复(H4 缺 chunk 向量 / H5 缺 element 向量):后台补齐该 notebook 的缺失向量
@@ -758,7 +767,10 @@ def source_elements_page_in_scope(
 
 @router.delete("/sources/{source_id}", status_code=204)
 def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    if notebook_access_repository().source_owner(source_id) != user.id:
+    # 同 parse_source 上面的注释:notebook_id 不在 URL 上,owner 判定在函数体内
+    # 先反查再自查,复用与 "sources:write" 能力逐字相同的判据。
+    notebook_id = notebook_access_repository().source_notebook_id(source_id)
+    if notebook_id is None or not notebook_write_allowed(notebook_id, user.id):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
         source_repository().delete_source(source_id)
@@ -773,7 +785,7 @@ def delete_source(source_id: str, user: UserProfile = Depends(get_current_user))
 # codebase's "don't leak existence" convention. Route bodies stay thin
 # (param parsing / guard / orchestration only); validation + disk I/O live
 # in AssetService.
-@router.post("/notebooks/{notebook_id}/assets", dependencies=[Depends(require_notebook_access)])
+@router.post("/notebooks/{notebook_id}/assets", dependencies=[Depends(require_notebook_capability("sources:write"))])
 async def upload_notebook_asset(notebook_id: str, file: UploadFile = File(...)) -> dict:
     repo = repository()
     content = await file.read()
@@ -819,11 +831,12 @@ def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
 
 @router.post(
     "/notebooks/{notebook_id}/paper-meta/backfill",
-    dependencies=[Depends(require_notebook_access)],
+    dependencies=[Depends(require_notebook_capability("sources:write"))],
 )
 def backfill_paper_metadata(notebook_id: str) -> dict:
     """补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;
-    LLM 未配置 409。owner 门控由 require_notebook_access 承担(非 owner 404)。"""
+    LLM 未配置 409。owner 门控由 require_notebook_capability("sources:write")
+    承担(P0 阶段解析到 owner-only,非 owner 404)。"""
     repo = repository()
     llm_ready = repo._runtime.models.configured("paper_metadata")
     if not llm_ready:
