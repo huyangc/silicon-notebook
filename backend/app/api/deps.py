@@ -10,7 +10,7 @@ from app.core.audit_actor import session_audit_principal
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.identity import UserProfile
 from app.repositories.factory import create_repository
-from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
+from app.repositories.ports import AdminQueryRepository, GroupStorePort, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
 
 
 @lru_cache
@@ -31,6 +31,14 @@ def notebook_access_repository() -> NotebookAccessRepository:
 
 def notebook_sharing_repository() -> NotebookSharingRepository:
     return repository()._runtime.sharing  # type: ignore[attr-defined]
+
+def group_repository() -> GroupStorePort:
+    # 群组 / 组成员 / 授权边的行持久化(群组知识共享 P1-T3)。刻意直取 store 端口
+    # 而不经一层 service:策略(谁能建哪一类组、双重条件的授权边创建、最后一名组
+    # 管理员的 409)全在 group_routes.py,store 只管行,中间那层会是纯转发。
+    # ⚠ 这个端口**不含**授权判定——「谁能读这个 notebook」仍只由
+    # notebook_access_repository()/access_sql.py 回答。
+    return repository()._runtime.groups  # type: ignore[attr-defined]
 
 def source_repository() -> SourceRepository:
     return repository()

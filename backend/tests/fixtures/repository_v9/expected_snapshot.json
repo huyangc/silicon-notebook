@@ -368,6 +368,7 @@
       "expected_questions": [
         "Why is gain stable?"
       ],
+      "granted_via": [],
       "id": "<nb-id-1>",
       "is_shared": true,
       "kg_build": null,

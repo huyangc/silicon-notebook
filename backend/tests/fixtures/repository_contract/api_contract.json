@@ -3091,6 +3091,277 @@
           "title": "Freshness",
           "type": "object"
         },
+        "GrantCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "principal_id": {
+              "title": "Principal Id",
+              "type": "string"
+            },
+            "principal_type": {
+              "title": "Principal Type",
+              "type": "string"
+            },
+            "role": {
+              "default": "viewer",
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "principal_type",
+            "principal_id"
+          ],
+          "title": "GrantCreate",
+          "type": "object"
+        },
+        "GrantedGroupRef": {
+          "description": "`NotebookSummary.granted_via` 的元素:这本笔记本是**经哪个群组**共享给我的。",
+          "properties": {
+            "group_id": {
+              "title": "Group Id",
+              "type": "string"
+            },
+            "group_name": {
+              "default": "",
+              "title": "Group Name",
+              "type": "string"
+            },
+            "kind": {
+              "default": "project",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "required": [
+            "group_id"
+          ],
+          "title": "GrantedGroupRef",
+          "type": "object"
+        },
+        "GroupCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "kind": {
+              "default": "project",
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "title": "GroupCreate",
+          "type": "object"
+        },
+        "GroupDetail": {
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "project",
+              "title": "Kind",
+              "type": "string"
+            },
+            "member_count": {
+              "default": 0,
+              "title": "Member Count",
+              "type": "integer"
+            },
+            "members": {
+              "items": {
+                "$ref": "#/components/schemas/GroupMemberItem"
+              },
+              "title": "Members",
+              "type": "array"
+            },
+            "my_role": {
+              "default": "",
+              "title": "My Role",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "GroupDetail",
+          "type": "object"
+        },
+        "GroupMemberItem": {
+          "properties": {
+            "added_at": {
+              "default": "",
+              "title": "Added At",
+              "type": "string"
+            },
+            "display_name": {
+              "default": "",
+              "title": "Display Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "role": {
+              "default": "member",
+              "title": "Role",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username"
+          ],
+          "title": "GroupMemberItem",
+          "type": "object"
+        },
+        "GroupMemberRoleRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "role": {
+              "default": "member",
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "title": "GroupMemberRoleRequest",
+          "type": "object"
+        },
+        "GroupSharedNotebookItem": {
+          "description": "组管理员视角:共享给本组的一本笔记本(同组两条边折成一项)。",
+          "properties": {
+            "name": {
+              "default": "",
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "owner_username": {
+              "default": "",
+              "title": "Owner Username",
+              "type": "string"
+            },
+            "roles": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Roles",
+              "type": "array"
+            }
+          },
+          "required": [
+            "notebook_id"
+          ],
+          "title": "GroupSharedNotebookItem",
+          "type": "object"
+        },
+        "GroupSummary": {
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "project",
+              "title": "Kind",
+              "type": "string"
+            },
+            "member_count": {
+              "default": 0,
+              "title": "Member Count",
+              "type": "integer"
+            },
+            "my_role": {
+              "default": "",
+              "title": "My Role",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "GroupSummary",
+          "type": "object"
+        },
+        "GroupUpdate": {
+          "additionalProperties": false,
+          "description": "只改可编辑的展示字段。`kind` 刻意不可改:它决定了「谁能建这个组」,\n改它等于让普通用户把自己建的项目组升格成部门/领域组,绕开建组时的管理员闸。",
+          "properties": {
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Description"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name"
+            }
+          },
+          "title": "GroupUpdate",
+          "type": "object"
+        },
         "HTTPValidationError": {
           "properties": {
             "detail": {
@@ -5886,6 +6157,50 @@
           "title": "NotebookCreate",
           "type": "object"
         },
+        "NotebookGrantItem": {
+          "description": "一条授权边的只读投影。\n\n`principal_name` / `principal_kind` 只在群组主体上有值——`user` 与 `everyone`\n行如实返回、由 `principal_type` 自我标注,不在这里替它们编一个名字。",
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "principal_id": {
+              "default": "",
+              "title": "Principal Id",
+              "type": "string"
+            },
+            "principal_kind": {
+              "default": "",
+              "title": "Principal Kind",
+              "type": "string"
+            },
+            "principal_name": {
+              "default": "",
+              "title": "Principal Name",
+              "type": "string"
+            },
+            "principal_type": {
+              "title": "Principal Type",
+              "type": "string"
+            },
+            "role": {
+              "default": "viewer",
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "principal_type"
+          ],
+          "title": "NotebookGrantItem",
+          "type": "object"
+        },
         "NotebookRef": {
           "description": "轻量 notebook 引用 —— 参考库挂载相关接口共用。",
           "properties": {
@@ -5989,6 +6304,13 @@
                 "type": "string"
               },
               "title": "Expected Questions",
+              "type": "array"
+            },
+            "granted_via": {
+              "items": {
+                "$ref": "#/components/schemas/GrantedGroupRef"
+              },
+              "title": "Granted Via",
               "type": "array"
             },
             "id": {
@@ -9676,6 +9998,30 @@
           "title": "UserProfile",
           "type": "object"
         },
+        "UserRef": {
+          "description": "按用户名精确查到的用户。供组管理员加人;不含邮箱等任何额外身份信息。",
+          "properties": {
+            "display_name": {
+              "default": "",
+              "title": "Display Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username"
+          ],
+          "title": "UserRef",
+          "type": "object"
+        },
         "ValidationError": {
           "properties": {
             "ctx": {
@@ -11728,6 +12074,423 @@
           "summary": "List Doc Types"
         }
       },
+      "/api/groups": {
+        "get": {
+          "description": "我所在的群组;`?scope=all` 是系统管理员的全局管理面。",
+          "operationId": "list_groups_route_api_groups_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "scope",
+              "required": false,
+              "schema": {
+                "default": "mine",
+                "title": "Scope",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/GroupSummary"
+                    },
+                    "title": "Response List Groups Route Api Groups Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Groups Route"
+        },
+        "post": {
+          "description": "建组。项目组人人可建;部门/领域组仅系统管理员可建(已定决策 2)。\n\n管理员闸内联在这里而不做成能力守卫,与 `set_notebook_tier` 同一形态:它判的是\n**全局角色**,没有 notebook 可挂。",
+          "operationId": "create_group_route_api_groups_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Group Route"
+        }
+      },
+      "/api/groups/{group_id}": {
+        "delete": {
+          "description": "删组。指向本组的授权边在**同一个写事务**里一并清掉(已定裁决 3)。\n\n不清就是孤儿授权边:谓词侧因 join 不到组成员而失效(不会越权),但共享管理列表\n会永远挂着一条指向已不存在的组的边——`principal_id` 是刻意无 FK 的多态列,\n数据库替不了这件事。",
+          "operationId": "delete_group_route_api_groups__group_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Group Route"
+        },
+        "get": {
+          "description": "组详情 + 成员清单。仅组成员可见,非成员 404。",
+          "operationId": "get_group_route_api_groups__group_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Group Route"
+        },
+        "patch": {
+          "operationId": "update_group_route_api_groups__group_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Group Route"
+        }
+      },
+      "/api/groups/{group_id}/members/{user_id}": {
+        "delete": {
+          "operationId": "remove_group_member_route_api_groups__group_id__members__user_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Remove Group Member Route"
+        },
+        "put": {
+          "description": "加人 / 改角色。同一个端点做两件事:目标用户在不在组里,调用方本来就不必先查。",
+          "operationId": "put_group_member_route_api_groups__group_id__members__user_id__put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMemberRoleRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/GroupDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Put Group Member Route"
+        }
+      },
+      "/api/groups/{group_id}/membership": {
+        "delete": {
+          "description": "自助退出。最后一名组管理员不得退出——否则组就没人能管了。",
+          "operationId": "leave_group_route_api_groups__group_id__membership_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Leave Group Route"
+        }
+      },
+      "/api/groups/{group_id}/shared-notebooks": {
+        "get": {
+          "description": "组管理员视角:共享给本组的知识库清单。",
+          "operationId": "list_group_shared_notebooks_route_api_groups__group_id__shared_notebooks_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/GroupSharedNotebookItem"
+                    },
+                    "title": "Response List Group Shared Notebooks Route Api Groups  Group Id  Shared Notebooks Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Group Shared Notebooks Route"
+        }
+      },
+      "/api/groups/{group_id}/shared-notebooks/{notebook_id}": {
+        "delete": {
+          "description": "撤销不对称的组维度入口:删掉这本库上指向本组的**全部**边。\n\n只要组管理员这一半权限——他管理共享给本组的全部内容,不必也是那本库的管理者。",
+          "operationId": "delete_group_shared_notebook_route_api_groups__group_id__shared_notebooks__notebook_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Group Shared Notebook Route"
+        }
+      },
       "/api/health": {
         "get": {
           "operationId": "health_api_health_get",
@@ -13607,6 +14370,140 @@
             }
           },
           "summary": "Edge Review Queue"
+        }
+      },
+      "/api/notebooks/{notebook_id}/grants": {
+        "get": {
+          "description": "这本库上的全部授权边。\n\n四类主体都如实返回(含本端点不允许创建的 `user` / `everyone`):这个清单是库主\n「谁能看我的库」的完整答案,按主体类型过滤掉一半会让它变成一份骗人的清单。",
+          "operationId": "list_notebook_grants_route_api_notebooks__notebook_id__grants_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/NotebookGrantItem"
+                    },
+                    "title": "Response List Notebook Grants Route Api Notebooks  Notebook Id  Grants Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Notebook Grants Route"
+        },
+        "post": {
+          "description": "共享给群组。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的组管理员。",
+          "operationId": "create_notebook_grant_route_api_notebooks__notebook_id__grants_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookGrantItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Notebook Grant Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/grants/{grant_id}": {
+        "delete": {
+          "description": "从笔记本维度撤销一条边。库的管理者即可,不要求他也是那个组的管理员。\n\n`grant_id` 与 `notebook_id` 一起验(store 侧的 WHERE 带两列):只按 grant_id 删,\n等于让「我有一本自己的库的管理权」变成「我能删任何库上的授权边」。",
+          "operationId": "delete_notebook_grant_route_api_notebooks__notebook_id__grants__grant_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "grant_id",
+              "required": true,
+              "schema": {
+                "title": "Grant Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Notebook Grant Route"
         }
       },
       "/api/notebooks/{notebook_id}/graph": {
@@ -19990,6 +20887,46 @@
           },
           "summary": "System Configuration"
         }
+      },
+      "/api/users/resolve": {
+        "get": {
+          "description": "按用户名**精确**查一个用户,供组管理员加人。\n\n任何登录用户可调。这在内部部署下是**已登记接受**的取舍:它让用户名可被逐个探测\n(「这个人有没有账号」)。替代方案(只允许组管理员调、或做成模糊搜索)都更糟——\n前者要先有组才能加第一个人,后者把逐个探测换成批量枚举。返回面刻意只有 id /\n用户名 / 显示名,不含邮箱、角色、用量等任何额外身份信息。",
+          "operationId": "resolve_user_route_api_users_resolve_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "username",
+              "required": true,
+              "schema": {
+                "title": "Username",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UserRef"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Resolve User Route"
+        }
       }
     }
   },
@@ -20183,6 +21120,7 @@
       "created_label": "fixture-date",
       "document_limit": 20,
       "expected_questions": [],
+      "granted_via": [],
       "id": "nb-api",
       "is_shared": true,
       "kg_build": null,

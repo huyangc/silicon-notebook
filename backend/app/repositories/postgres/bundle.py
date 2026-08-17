@@ -15,6 +15,7 @@ from app.repositories.postgres.chunk_store import ChunkStore
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.embedding_store import EmbeddingStore
 from app.repositories.postgres.governance_store import GovernanceStore
+from app.repositories.postgres.group_store import GroupStore
 from app.repositories.postgres.identity_store import IdentityStore
 from app.repositories.postgres.index_projection_store import IndexProjectionStore
 from app.repositories.postgres.kg_build_job_store import KgBuildJobStore
@@ -129,6 +130,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     identity: IdentityStore
     notebooks: NotebookStore
     sharing: SharingStore
+    groups: GroupStore
     sources: SourceStore
     chunks: ChunkStore
     embeddings: EmbeddingStore
@@ -192,6 +194,7 @@ class PostgresPersistenceBundleFactory:
                 database, new_id=seams.new_id, now=seams.now
             )
             catalog = CatalogStore(database, new_id=seams.new_id, now=seams.now)
+            groups = GroupStore(database, new_id=seams.new_id, now=seams.now)
             knowhow = KnowhowStore(database, new_id=seams.new_id, now=seams.now)
             knowhow_history = KnowhowHistoryStore(
                 database, new_id=seams.new_id, now=seams.now
@@ -213,6 +216,7 @@ class PostgresPersistenceBundleFactory:
                 identity=identity,
                 notebooks=notebooks,
                 sharing=sharing,
+                groups=groups,
                 sources=sources,
                 chunks=chunks,
                 embeddings=embeddings,

@@ -11,6 +11,7 @@ from app.repositories.ports import (
     ChunkStorePort,
     EmbeddingStorePort,
     GovernanceStorePort,
+    GroupStorePort,
     IdentityStorePort,
     IndexProjectionStorePort,
     KgBuildJobStorePort,
@@ -37,6 +38,7 @@ class PersistenceBundle(Protocol):
     identity: IdentityStorePort
     notebooks: NotebookStorePort
     sharing: SharingStorePort
+    groups: GroupStorePort
     sources: SourceStorePort
     chunks: ChunkStorePort
     embeddings: EmbeddingStorePort

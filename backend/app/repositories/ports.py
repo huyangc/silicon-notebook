@@ -2702,6 +2702,72 @@ class SharingStorePort(Protocol):
     def list_members(self, notebook_id: str) -> list: ...
 
 
+class LastGroupAdminError(RuntimeError):
+    """把一个群组的最后一名组管理员降级/移除了。
+
+    住在这一层(后端中性契约层)的理由与 `NotebookTooLargeToCopyError` 同款:两个
+    `GroupStore` 都要在自己的写事务里抛它,而路由要 catch 它并映射成 409 —— store
+    不能 import service/api,路由不能 import 某一个后端。
+    """
+
+
+class GroupGrantAlreadyExists(RuntimeError):
+    """同一本笔记本上,同一个主体已经有一条授权边(UNIQUE 冲突)。
+
+    刻意做成明确失败而不是幂等复用:两条边的 `role` 可以不同,静默返回既有行会让
+    「我改成了管理」与「库里其实还是只读」这两件事在响应上长得一模一样。
+    """
+
+
+@runtime_checkable
+class GroupStorePort(Protocol):
+    """群组 / 组成员 / 笔记本授权边的行持久化面。
+
+    **不含任何授权判定谓词**:「谁能读这个 notebook」的唯一定义点仍是
+    `repositories/*/access_sql.py`,本 store 只做 CRUD 与按主体 id 的直查。
+    策略(谁能建哪一类组、双重条件的授权边创建)全在 `app/api/group_routes.py`。
+    """
+
+    def create_group(
+        self, *, name: str, kind: str, description: str, created_by: str
+    ) -> dict: ...
+    def get_group(self, group_id: str, *, user_id: str = "") -> "dict | None": ...
+    def user_group_role(self, group_id: str, user_id: str) -> "str | None": ...
+    def list_groups_for_user(self, user_id: str) -> list[dict]: ...
+    def list_all_groups(self, *, user_id: str = "") -> list[dict]: ...
+    def list_members(self, group_id: str) -> list[dict]: ...
+    def update_group(
+        self,
+        group_id: str,
+        *,
+        name: "str | None" = None,
+        description: "str | None" = None,
+    ) -> bool: ...
+    def delete_group(self, group_id: str) -> bool: ...
+    def upsert_member(
+        self, group_id: str, user_id: str, *, role: str, added_by: str
+    ) -> str: ...
+    def remove_member(self, group_id: str, user_id: str) -> bool: ...
+    def find_user_by_username(self, username: str) -> "dict | None": ...
+    def find_user_by_id(self, user_id: str) -> "dict | None": ...
+    def list_grants(self, notebook_id: str) -> list[dict]: ...
+    def create_grant(
+        self,
+        notebook_id: str,
+        *,
+        principal_type: str,
+        principal_id: str,
+        role: str,
+        created_by: str,
+    ) -> dict: ...
+    def grant_row(self, notebook_id: str, grant_id: str) -> "dict | None": ...
+    def delete_grant(self, notebook_id: str, grant_id: str) -> bool: ...
+    def list_group_shared_notebooks(self, group_id: str) -> list[dict]: ...
+    def delete_group_grants_for_notebook(
+        self, group_id: str, notebook_id: str
+    ) -> int: ...
+
+
 @runtime_checkable
 class GovernanceStorePort(Protocol):
     @staticmethod

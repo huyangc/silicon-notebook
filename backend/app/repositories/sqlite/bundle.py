@@ -14,6 +14,7 @@ from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.governance_store import GovernanceStore
+from app.repositories.sqlite.group_store import GroupStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
@@ -48,6 +49,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     identity: IdentityStore
     notebooks: NotebookStore
     sharing: SharingStore
+    groups: GroupStore
     sources: SourceStore
     chunks: ChunkStore
     embeddings: EmbeddingStore
@@ -101,6 +103,7 @@ class SqlitePersistenceBundleFactory:
             database, new_id=seams.new_id, now=seams.now
         )
         catalog = CatalogStore(database, new_id=seams.new_id, now=seams.now)
+        groups = GroupStore(database, new_id=seams.new_id, now=seams.now)
         knowhow = KnowhowStore(database, new_id=seams.new_id, now=seams.now)
         knowhow_history = KnowhowHistoryStore(
             database, new_id=seams.new_id, now=seams.now
@@ -122,6 +125,7 @@ class SqlitePersistenceBundleFactory:
             identity=identity,
             notebooks=notebooks,
             sharing=sharing,
+            groups=groups,
             sources=sources,
             chunks=chunks,
             embeddings=embeddings,

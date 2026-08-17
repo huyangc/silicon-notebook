@@ -449,6 +449,53 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
+    def granted_notebook_rows(db: sqlite3.Connection, user_id: str):
+        """「经群组授权边可读」的笔记本列表投影(群组知识共享 P1-T3)。
+
+        与 `joined_notebook_rows` 是**同一类**东西,理由也一样(见
+        `access_sql.py` 模块 docstring 的「刻意不收口」):它不是「我能不能读这个
+        notebook」的授权判定,而是一条**列表**查询——所以它不复用读权谓词,而且刻意
+        只覆盖两个**群组**主体:
+        * `user` 主体的边在 P1 里还没有任何写入口(只读共享仍走 `notebook_members`,
+          由 `joined_notebook_rows` 那条负责),收进来只会凭空多一条空路径;
+        * `everyone` 主体沿用 `tier='base'` 的既有隐藏惯例——公共知识库不进常规
+          列表,只在挂载选择器出现。把它收进来会让每个人的笔记本列表突然多出全部
+          公共库。
+        自有库与只读成员库的去重留给 service 层按 id 做(成员行优先),这里不写
+        `NOT EXISTS`:两处判据只该有一份,而 service 手上本来就有已产出的 id 集合。
+
+        每行是「一本笔记本 × 一个把它共享给我的群组」,组信息带 `_group_*` 前缀随行
+        返回,由 service 折成 `granted_via`。`group_admins` 那条边只对组内 role='admin'
+        的人生效——这一条与读权谓词同义,但这里是 JOIN 出来的,不是那份四值白名单的
+        复刻(它一次只看两个群组主体,永远碰不到 `everyone` 与哨兵停车行)。
+
+        ⚠ **`CROSS JOIN` 是给 SQLite 查询规划器的驱动顺序提示,不是语义**(SQLite 对
+        `CROSS JOIN ... ON` 与 `JOIN ... ON` 的结果集完全相同,区别只是前者禁止重排
+        表顺序)。少了它,planner 会从 `notebook_grants` 起步、按
+        `idx_notebook_grants_principal (principal_type=?)` **单列**扫掉全库所有群组
+        授权边,再逐行探组成员——代价随**整个部署的共享边总数**增长,而这条查询挂在
+        每次打开笔记本列表的路径上。钉死从 `group_members (user_id=?)` 起步之后,
+        同一条索引变成 `(principal_type=?, principal_id=?)` 的双列点查,代价只随
+        **该用户加入的组数**增长(EXPLAIN QUERY PLAN 实测)。PG 侧刻意**不**照抄:
+        标准 SQL 的 `CROSS JOIN` 不带 `ON`,而 PG 有真实统计信息、自己就会选对。
+        """
+        return db.execute(
+            "SELECT nb.*, u.username AS _owner_username, "
+            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind "
+            "FROM group_members gm "
+            "CROSS JOIN notebook_grants ng ON ng.principal_id = gm.group_id "
+            "AND ng.principal_type IN ('group', 'group_admins') "
+            "JOIN groups g ON g.id = gm.group_id "
+            "JOIN notebooks nb ON nb.id = ng.notebook_id "
+            "LEFT JOIN users u ON u.id = nb.created_by "
+            "WHERE gm.user_id = ? "
+            "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
+            "AND nb.status != 'copying' "
+            "ORDER BY nb.created_at ASC, nb.id ASC, g.id ASC",
+            (user_id,),
+        ).fetchall()
+
+    @staticmethod
     def memory_counts_by_owner_notebook(
         db: sqlite3.Connection, user_id: str
     ) -> dict[tuple[str, str], int]:

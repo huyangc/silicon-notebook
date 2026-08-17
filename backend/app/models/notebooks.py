@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.groups import GrantedGroupRef
 from app.models.kg import KgBuildJobStatus
 
 
@@ -131,6 +132,18 @@ class NotebookSummary(BaseModel):
     access: str = "owner"
     # reader 时 = 原 owner 的用户名(前端展示「来自 X」);owner 时空串。
     shared_from: str = ""
+    # 这本库是**经哪几个群组**共享给我的(群组知识共享 P1)。非空 ⇒ 它属于列表的
+    # 「群组」分区,前端据此标注「来自群组《X》」。
+    #
+    # 为什么另加字段而不给 `access` 加一个枚举值(已定裁决 7):`access` 是**权限档**
+    # ——群组成员拿到的就是 reader 那一档,行为逐字相同(隐藏写按钮、Ask 走同一读
+    # 守卫)。新增枚举值会让每个消费 `access` 的旧分支都要重新判一次「这个新值算不算
+    # 可读」,而它们本该一个字都不改。来源(经谁共享)是**正交**的一维,所以另开一维。
+    #
+    # 默认空列表 = 旧行为逐字不变:只读共享进来的库、自有库都不带它。仅
+    # `list_notebooks` 的群组那一段回填;单库 `get_notebook` 详情保持默认(详情页
+    # 不消费它,列表卡片才消费)。
+    granted_via: List[GrantedGroupRef] = Field(default_factory=list)
     # owner 视角:本 notebook 是否已开启分享(存在有效 share_token 或 notebook_members)。
     # 驱动前端卡片右下角的「已分享」小人徽标(仿 NotebookLM);reader 看到的原库 is_shared
     # 也为 True,但 reader 卡片本身已带「来自 X」不再重复标记。

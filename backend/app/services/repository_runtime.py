@@ -12,6 +12,7 @@ from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
 from app.repositories.ports import (
     EmbeddingStorePort,
+    GroupStorePort,
     IndexProjectionStorePort,
     SharingStorePort,
 )
@@ -307,6 +308,11 @@ class RepositoryRuntime:
         # storage_dir) are facade-bound seams that only exist once the facade
         # constructor reaches them.  Construction stays lazy — no seam calls.
         self.sharing_store: SharingStorePort = bundle.sharing
+        # 群组 / 组成员 / 授权边的行持久化。构造 seam-free(只存 bundle 给的实例),
+        # 故 eager;它没有 service 层——策略全在 `app/api/group_routes.py`,store 只
+        # 管行,所以路由经 `deps.group_repository()` 直取这个端口(与
+        # `notebook_store_port()` 同一惯例),中间不架一层只做转发的 service。
+        self.groups: GroupStorePort = bundle.groups
         self.notebook_copies: "NotebookCopyService | None" = None
         self.sharing: "NotebookSharingService | None" = None
         self.evidence_context: "EvidenceContextService | None" = None
