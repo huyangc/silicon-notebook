@@ -13,6 +13,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.mount_sql import (
+    MOUNT_GATE_CLOSED_EXPR as _MOUNT_GATE_CLOSED_EXPR,
     MOUNT_JOIN as _MOUNT_JOIN,
     MOUNT_ORDER as _MOUNT_ORDER,
     MOUNT_VALID as _MOUNT_VALID,
@@ -104,7 +105,9 @@ class NotebookStore:
         rows = connection.execute(
             "SELECT b.id AS id,b.name AS name,b.tier AS tier,"
             + _MOUNT_VALID_EXPR
-            + " AS ok,(b.created_by=a.created_by) AS same_owner "
+            + " AS ok,"
+            + _MOUNT_GATE_CLOSED_EXPR
+            + " AS gate_closed,(b.created_by=a.created_by) AS same_owner "
             + _MOUNT_JOIN
             + _MOUNT_ORDER,
             (notebook_id,),
@@ -112,14 +115,23 @@ class NotebookStore:
         result = []
         for row in rows:
             active = bool(row["ok"])
-            name_visible = active or bool(row["same_owner"])
+            gate_closed = bool(row["gate_closed"])
+            # 被未共享门关上的借入边:挂载方 owner 对被挂库仍有合法读权,名字
+            # 照常显示,文案给出恢复出口(与 SQLite 侧逐字一致)。
+            name_visible = active or bool(row["same_owner"]) or gate_closed
+            if active:
+                reason = ""
+            elif gate_closed:
+                reason = "本笔记本已共享，借来的参考库暂停参与检索；取消本笔记本的共享即可恢复"
+            else:
+                reason = "该库已不是公共知识库，且不属于你"
             result.append(
                 {
                     "id": row["id"],
                     "name": row["name"] if name_visible else "已不可用的知识库",
                     "tier": row["tier"] or "personal",
                     "active": active,
-                    "inactive_reason": "" if active else "该库已不是公共知识库，且不属于你",
+                    "inactive_reason": reason,
                 }
             )
         return result

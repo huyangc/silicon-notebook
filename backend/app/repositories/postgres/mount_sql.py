@@ -40,6 +40,12 @@ MOUNT_VALID_EXPR = (
     "))"
 )
 
+# 借入边被「未共享门」关上的判别式(镜像 sqlite/mount_sql.py,理由写在那份)。
+MOUNT_GATE_CLOSED_EXPR = (
+    "(b.status != 'copying' AND " + _BORROWED_READ_EXPR
+    + " AND NOT " + _MOUNTER_NOT_SHARED_EXPR + ")"
+)
+
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 
 MOUNT_ORDER = (

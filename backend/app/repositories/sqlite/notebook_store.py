@@ -7,7 +7,7 @@ from typing import Callable, List, Literal, Sequence
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
-    MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID, MOUNT_VALID_EXPR,
+    MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID, MOUNT_VALID_EXPR,
 )
 
 # Knowledge-object statuses that count as "usable" for retrieval and the
@@ -114,6 +114,7 @@ class NotebookStore:
         rows = db.execute(
             "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
             + MOUNT_VALID_EXPR + " AS ok, "
+            + MOUNT_GATE_CLOSED_EXPR + " AS gate_closed, "
             "(b.created_by = a.created_by) AS same_owner "
             + MOUNT_JOIN + MOUNT_ORDER,
             (notebook_id,),
@@ -121,13 +122,22 @@ class NotebookStore:
         out = []
         for row in rows:
             active = bool(row["ok"])
-            name_visible = active or bool(row["same_owner"])
+            gate_closed = bool(row["gate_closed"])
+            # 被未共享门关上的借入边:挂载方 owner 对被挂库仍有合法读权,名字
+            # 照常显示(无泄露可言),文案给出恢复出口而不是错误的「不属于你」。
+            name_visible = active or bool(row["same_owner"]) or gate_closed
+            if active:
+                reason = ""
+            elif gate_closed:
+                reason = "本笔记本已共享，借来的参考库暂停参与检索；取消本笔记本的共享即可恢复"
+            else:
+                reason = "该库已不是公共知识库，且不属于你"
             out.append({
                 "id": row["id"],
                 "name": row["name"] if name_visible else "已不可用的知识库",
                 "tier": row["tier"] or "personal",
                 "active": active,
-                "inactive_reason": "" if active else "该库已不是公共知识库，且不属于你",
+                "inactive_reason": reason,
             })
         return out
 
@@ -156,13 +166,15 @@ class NotebookStore:
 
     @staticmethod
     def mountable_notebooks(db: sqlite3.Connection, notebook_id: str) -> list[dict]:
-        """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库 ∪ 本库 owner 有读权的库，
-        排除本库自己。
+        """可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ everyone 授权的库 ∪
+        (本库 owner 有受限读权、且**本库自身未被共享**的库),排除本库自己。
 
         公共知识库对普通用户的常规列表是隐藏的,故此处专门放行 id/name/tier 三个
-        字段——这是用户发现领域库的唯一入口。第三支(只读分享进来的、以及经群组
-        授权边可读的)是 P1 群组知识共享登记的显式行为变更,理由与「对方撤销后
-        怎么办」写在 mount_sql.py 的模块 docstring 里。
+        字段——这是用户发现领域库的唯一入口。受限读权那一支(只读分享进来的、
+        经 user/group/group_admins 授权边可读的)带「未共享门」:本库一旦被共享,
+        这批候选就从列表消失(已挂的边同步失效、保留置灰)——门堵的是把借来的
+        参考库转手再分享;完整理由(实时判定吸收撤销、未共享门吸收转手)写在
+        mount_sql.py 的模块 docstring。
 
         有效性谓词与排序复用 mount_sql 的 MOUNT_VALID_EXPR/MOUNT_ORDER(唯一定义
         点)——但 FROM 子句不能复用 MOUNT_JOIN:这里枚举的是候选笔记本本身,不是
