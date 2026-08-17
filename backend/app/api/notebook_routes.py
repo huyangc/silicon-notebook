@@ -24,6 +24,7 @@ from app.models.notebooks import (
     SetBasesRequest,
     SetTierRequest,
     ShareResponse,
+    ShareState,
     SharedByMeItem,
     SharedPreview,
 )
@@ -167,6 +168,21 @@ def mounted_by_count_route(notebook_id: str) -> MountedByCount:
     ON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。
     与 DELETE 端点用同一个 owner-only 依赖(不新开一套权限判断)。"""
     return MountedByCount(count=repository().mounted_by_count(notebook_id))
+
+
+@router.get("/notebooks/{notebook_id}/share", response_model=ShareState,
+            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+def share_state_route(notebook_id: str) -> ShareState:
+    """当前的分享链接状态。**只读**——打开分享弹窗不该铸出一条链接。
+
+    与 POST 同路径同守卫,只是这一条没有副作用:没有 token 时返回空串且**不计算**
+    规模统计。理由见 `ShareState` 的模型注释(「只想共享给群组」的用户不该因为打开
+    了一次弹窗就被发一条分享链接)。
+    """
+    try:
+        return ShareState(**notebook_sharing_repository().share_state(notebook_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.post("/notebooks/{notebook_id}/share", response_model=ShareResponse,

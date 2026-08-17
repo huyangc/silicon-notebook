@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   doneItemDestination,
+  notebookRoleText,
   workspaceCapabilities,
   workspaceRequestIsCurrent,
 } from "../../app/workspace-transitions.ts";
@@ -233,4 +234,15 @@ test("completed paper metadata opens sources while index work opens KG", () => {
   assert.equal(doneItemDestination("paper_meta_done"), "sources");
   assert.equal(doneItemDestination("index_done"), "kg");
   assert.equal(doneItemDestination(undefined), "kg");
+});
+
+
+// 「角色」列此前整列写死 "Owner",连只读共享进来的库也被标成所有者——与挂载选择器把
+// 别人的库标成「我的笔记本」是同一类事实错误的标签。
+test("笔记本列表的角色文案按 access 判,群组分区可显式覆盖", () => {
+  assert.equal(notebookRoleText({ access: "owner" }), "Owner");
+  assert.equal(notebookRoleText({}), "Owner");                 // 缺字段按 owner(向后兼容)
+  assert.equal(notebookRoleText({ access: "reader" }), "只读成员");
+  assert.equal(notebookRoleText({ access: "reader" }, "群组成员"), "群组成员");
+  assert.equal(notebookRoleText({ access: "owner" }, "群组成员"), "群组成员");
 });

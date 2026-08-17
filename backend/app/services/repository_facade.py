@@ -1391,6 +1391,9 @@ class RepositoryFacade:
     def share_notebook(self, notebook_id: str) -> dict:
         return self._runtime.sharing.share_notebook(notebook_id)
 
+    def share_state(self, notebook_id: str) -> dict:
+        return self._runtime.sharing.share_state(notebook_id)
+
     def unshare_notebook(self, notebook_id: str) -> None:
         return self._runtime.sharing.unshare_notebook(notebook_id)
 

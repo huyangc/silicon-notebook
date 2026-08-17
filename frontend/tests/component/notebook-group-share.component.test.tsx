@@ -113,3 +113,45 @@ test("只读共享(user)与公共知识库(everyone)的授权不混进「共享�
   await screen.findByText("还没有共享给任何群组。");
   expect(screen.queryByRole("button", { name: "撤销共享" })).not.toBeInTheDocument();
 });
+
+test("撤销只让**那一条**显示进行态,不是整段一起变灰", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listNotebookGrants).mockResolvedValue([
+    grant({ id: "gr1", principal_id: "g1", principal_name: "封装项目" }),
+    grant({ id: "gr2", principal_id: "g2", principal_name: "工艺部", principal_kind: "department" }),
+  ]);
+  let release: () => void = () => undefined;
+  vi.mocked(revokeNotebookGrant).mockReturnValue(new Promise<void>((resolve) => { release = resolve; }));
+  renderSection();
+
+  await screen.findByText("封装项目");
+  const buttons = screen.getAllByRole("button", { name: "撤销共享" });
+  await user.click(buttons[1]);
+
+  // 忙碌位记的是「哪一条在忙」,所以只有被点的那条换文案(两条都禁用是对的:
+  // 清单会整份重取,期间不该再发第二次撤销)。
+  await screen.findByRole("button", { name: "撤销中…" });
+  expect(screen.getAllByRole("button", { name: "撤销中…" })).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "撤销共享" })).toBeDisabled();
+  release();
+});
+
+test("撤销中途失败也要重取清单——不留一个「删了一半」的旧视图", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listNotebookGrants).mockResolvedValue([
+    grant({ id: "gr1", principal_type: "group" }),
+    grant({ id: "gr2", principal_type: "group_admins", role: "admin" }),
+  ]);
+  vi.mocked(revokeNotebookGrant)
+    .mockResolvedValueOnce(undefined)                  // 第一条删掉了
+    .mockRejectedValueOnce(new Error("boom"));         // 第二条炸了
+  renderSection();
+
+  await screen.findByText("封装项目");
+  vi.mocked(listNotebookGrants).mockClear();
+  await user.click(screen.getByRole("button", { name: "撤销共享" }));
+
+  await screen.findByText("撤销共享失败");
+  // 失败分支也重取:否则界面还按发起前那份清单渲染,用户看不出删掉了哪几条。
+  await waitFor(() => expect(listNotebookGrants).toHaveBeenCalled());
+});

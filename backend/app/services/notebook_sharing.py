@@ -787,6 +787,28 @@ class NotebookSharingService:
             "size": stats["size"],
         }
 
+    def share_state(self, notebook_id: str) -> dict:
+        """当前的分享链接状态(P1-T4)。**只读**:不铸 token、无 token 时不算规模。
+
+        存在性检查刻意用 `notebook_row` 而不是 `self._catalog.get_notebook`:后者是
+        一次完整的 summary 水合(逐类计数、挂载参考库、KG 探针……),而这里只需要
+        「这本库在不在、它的 token 是什么」两个字段。路由上的 `notebook:manage` 守卫
+        已经解析过这本库,这里再水合一遍纯属白付。
+        """
+        row = self._store.notebook_row(notebook_id)
+        if row is None:
+            raise KeyError(notebook_id)
+        token = str(row["share_token"] or "") if row["is_shared"] else ""
+        if not token:
+            # 没有链接就没有「可不可拷贝 / 多大」这回事 —— 也不为它跑一次规模统计。
+            return {"share_token": "", "copyable": False, "size": {}}
+        stats = self.notebook_copy_stats(notebook_id)
+        return {
+            "share_token": token,
+            "copyable": stats["copyable"],
+            "size": stats["size"],
+        }
+
     def unshare_notebook(self, notebook_id: str) -> None:
         self._catalog.get_notebook(notebook_id)  # raises KeyError if missing
         self._store.clear_share(notebook_id)
@@ -828,18 +850,34 @@ class NotebookSharingService:
         }
 
     def shared_by_me(self, user_id: str) -> list:
+        """owner 的「已分享」总览:只读共享 ∨ 共享给群组(P1-T4)。
+
+        ⚠ **没有分享链接的行不算规模、不查成员**。`mode` / `size` / `members` 三个
+        字段说的全是「这条**链接**是怎么回事」——纯群组共享的行没有链接,消费方也不
+        渲染它们。而 `notebook_copy_stats` 每次都要新鲜复核一次深拷贝上限
+        (`snapshot_copy_within_limits`,一次真实统计),`list_members` 又是一次查询:
+        50 本只共享给群组的库会白付 100 次。所以这两笔只在真有 token 时才付。
+        """
         out = []
         for row in self._store.list_shared_by_owner(user_id):
-            stats = self.notebook_copy_stats(row["id"])
-            readonly = not stats["copyable"]
+            token = row["share_token"] or ""
+            if token:
+                stats = self.notebook_copy_stats(row["id"])
+                readonly = not stats["copyable"]
+                mode = "readonly" if readonly else "copy"
+                size = stats["size"]
+                members = self.list_members(row["id"]) if readonly else []
+            else:
+                # 中性值:没有链接就没有「可不可拷贝 / 多大 / 谁加入了」这回事。
+                mode, size, members = "readonly", {}, []
             out.append(
                 {
                     "id": row["id"],
                     "name": row["name"],
-                    "share_token": row["share_token"] or "",
-                    "mode": "readonly" if readonly else "copy",
-                    "size": stats["size"],
-                    "members": self.list_members(row["id"]) if readonly else [],
+                    "share_token": token,
+                    "mode": mode,
+                    "size": size,
+                    "members": members,
                     # 共享给了几个**不同的**群组(P1-T4)。为 0 时这一行就是一条
                     # 纯只读共享,与改动前逐字一致;非 0 而 share_token 为空时,
                     # 这一行只因群组共享而存在——消费方据此不渲染分享链接。

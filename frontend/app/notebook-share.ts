@@ -28,6 +28,16 @@ export type ShareResponse = {
   size: ShareSize;
 };
 
+// GET /notebooks/{id}/share 的响应:**只读**当前状态,不铸新 token。
+//
+// `share_token` 为空 = 这本笔记本还没有分享链接。此时后端刻意**不算**规模统计
+// (`copyable`/`size` 无意义,`size` 是空对象),所以消费方必须先判 token 再读它们。
+export type ShareState = {
+  share_token: string;
+  copyable: boolean;
+  size: Partial<ShareSize>;
+};
+
 // GET /shared/{token} 的响应。mode: "copy"(可拷贝) | "readonly"(库太大→只读共享,加入为只读成员)。
 export type SharedPreview = {
   name: string;
@@ -46,7 +56,8 @@ export type SharedByMeItem = {
   name: string;
   share_token: string;
   mode: "copy" | "readonly";
-  size: ShareSize;
+  /** 只在 `share_token` 非空时是真值:纯群组共享的行不算规模(空对象)。 */
+  size: Partial<ShareSize>;
   members: { username: string; added_at: string }[];
   /**
    * 这本库共享给了几个**不同的**群组(群组知识共享 P1)。
@@ -59,7 +70,11 @@ export type SharedByMeItem = {
   group_count: number;
 };
 
-// 开启分享,拿到分享 token / 是否可拷贝 / 规模(仅 owner)。
+// 读当前的分享链接状态(仅 owner)。**无副作用**——打开分享弹窗走它,不会铸出链接。
+export const getShareState = (notebookId: string): Promise<ShareState> =>
+  requestJson(`/notebooks/${notebookId}/share`, { tag: "share" });
+
+// 开启分享,拿到分享 token / 是否可拷贝 / 规模(仅 owner)。幂等:已有 token 原样返回。
 export const shareNotebook = (notebookId: string): Promise<ShareResponse> =>
   requestJson(`/notebooks/${notebookId}/share`, { method: "POST", tag: "share" });
 

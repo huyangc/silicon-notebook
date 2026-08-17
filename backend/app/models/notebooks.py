@@ -151,7 +151,10 @@ class NotebookSummary(BaseModel):
     # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
     kg_pending_sources: int = 0
     # Phase 2 只读共享:本用户对该库的访问权。"owner" = 自有(可写);
-    # "reader" = 经只读共享加入(仅读)。默认 owner 向后兼容。
+    # "reader" = 经只读共享或群组授权可读(仅读)。默认 owner 向后兼容。
+    #
+    # **列表与详情两条路径都回填**(群组知识共享 P1-T4)。此前只有列表回填,详情恒为
+    # 模型默认的 "owner",于是工作区顶栏那整段 reader 分支对着详情响应从来没为真过。
     access: str = "owner"
     # reader 时 = 原 owner 的用户名(前端展示「来自 X」);owner 时空串。
     shared_from: str = ""
@@ -163,9 +166,12 @@ class NotebookSummary(BaseModel):
     # 守卫)。新增枚举值会让每个消费 `access` 的旧分支都要重新判一次「这个新值算不算
     # 可读」,而它们本该一个字都不改。来源(经谁共享)是**正交**的一维,所以另开一维。
     #
-    # 默认空列表 = 旧行为逐字不变:只读共享进来的库、自有库都不带它。仅
-    # `list_notebooks` 的群组那一段回填;单库 `get_notebook` 详情保持默认(详情页
-    # 不消费它,列表卡片才消费)。
+    # 默认空列表 = 旧行为逐字不变:只读共享进来的库、自有库都不带它。
+    #
+    # **列表与详情两条路径都回填**(P1-T4 更正):详情页现在是消费方——工作区顶栏要
+    # 据它把只读徽章写成「来自群组《X》」,并把「退出共享」换成「由组管理员管理」
+    # (那个按钮打的是成员表,对授权边是空操作,点了会假成功)。详情侧只在非 owner
+    # 时发一次点查,owner 零新增查询。
     granted_via: List[GrantedGroupRef] = Field(default_factory=list)
     # owner 视角:本 notebook 是否已开启分享(存在有效 share_token 或 notebook_members)。
     # 驱动前端卡片右下角的「已分享」小人徽标(仿 NotebookLM);reader 看到的原库 is_shared
@@ -182,6 +188,24 @@ class ShareResponse(BaseModel):
     share_token: str
     copyable: bool
     size: Dict[str, int]
+
+
+class ShareState(BaseModel):
+    """`GET /notebooks/{id}/share` —— **只读**当前的分享链接状态,绝不铸新 token。
+
+    存在的理由(群组知识共享 P1-T4):打开「分享」弹窗本来就会 `POST .../share`,于是
+    「只想共享给群组」的用户会顺带被发一条分享链接——一次纯查看的动作产生了持久副作用。
+    有了这个端点,弹窗打开走 GET,链接由用户显式点「开启链接分享」时才 POST(那条
+    POST 幂等,已有 token 原样返回)。
+
+    没有 token 时 `share_token` 为空串,并且**不计算** copy-stats:那是一次真实的
+    规模统计(大库上不便宜),而没有链接的库根本用不到它。`copyable` / `size` 因此
+    只在 `share_token` 非空时有意义,消费方必须先判它。
+    """
+
+    share_token: str = ""
+    copyable: bool = False
+    size: Dict[str, int] = Field(default_factory=dict)
 
 
 class SharedPreview(BaseModel):

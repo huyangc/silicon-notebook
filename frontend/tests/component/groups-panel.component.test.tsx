@@ -9,10 +9,10 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     listGroups: vi.fn(),
     getGroup: vi.fn(),
     createGroup: vi.fn(),
-    renameGroup: vi.fn(),
     deleteGroup: vi.fn(),
     putGroupMember: vi.fn(),
     removeGroupMember: vi.fn(),
+    updateGroup: vi.fn(),
     leaveGroup: vi.fn(),
     resolveUser: vi.fn(),
     listGroupSharedNotebooks: vi.fn(),
@@ -30,6 +30,7 @@ import {
   putGroupMember,
   resolveUser,
   revokeGroupSharedNotebook,
+  updateGroup,
   type GroupDetail,
   type GroupSummary,
 } from "../../app/group-api.ts";
@@ -39,7 +40,7 @@ const ADMIN_GROUP: GroupSummary = {
   id: "g1",
   name: "封装项目",
   kind: "project",
-  description: "",
+  description: "封装工艺相关的项目组",
   my_role: "admin",
   member_count: 2,
   created_at: "",
@@ -101,7 +102,7 @@ test("系统管理员能选分类建组,并有「全部群组」视图", async (
   await user.type(screen.getByLabelText("群组名称"), "先进封装");
   await user.click(screen.getByRole("button", { name: "创建群组" }));
 
-  await waitFor(() => expect(createGroup).toHaveBeenCalledWith("先进封装", "domain"));
+  await waitFor(() => expect(createGroup).toHaveBeenCalledWith("先进封装", "domain", ""));
 
   await user.click(screen.getByRole("tab", { name: "全部群组" }));
   await waitFor(() => expect(listGroups).toHaveBeenCalledWith("all"));
@@ -197,4 +198,64 @@ test("退出被后端拒绝(最后一名组管理员是 409)时必须上屏,不�
   // 失败之后确认态保留、组仍在:界面不能假装退出成功。
   expect(screen.getByRole("button", { name: "确认退出" })).toBeInTheDocument();
   expect(screen.getByText("封装项目 · 项目")).toBeInTheDocument();
+});
+
+
+// P3-2 全栈对等的小缺口:后端 PATCH 一直支持 description,界面却既不显示也不给编辑。
+test("组说明可显示与编辑,保存后让外层重取(组名进笔记本卡片的来源标注)", async () => {
+  const user = userEvent.setup();
+  vi.mocked(updateGroup).mockResolvedValue({
+    ...ADMIN_DETAIL, name: "封装项目 2026", description: "改过的说明",
+  });
+  const { onChanged } = renderModal();
+
+  await screen.findByText("封装项目");
+  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+
+  const description = await screen.findByLabelText("群组说明");
+  expect(description).toHaveValue("封装工艺相关的项目组");
+  // 名字没改、说明改了,也要能保存 —— 保存闸不能只看名字。
+  await user.clear(description);
+  await user.type(description, "改过的说明");
+  await user.click(screen.getByRole("button", { name: "保存群组信息" }));
+
+  await waitFor(() => expect(updateGroup).toHaveBeenCalledWith("g1", "封装项目", "改过的说明"));
+  await waitFor(() => expect(onChanged).toHaveBeenCalled());
+});
+
+test("普通成员只读到说明,没有编辑框", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getGroup).mockResolvedValue({
+    ...ADMIN_DETAIL, my_role: "member", description: "只读的说明",
+  });
+  renderModal();
+
+  await screen.findByText("封装项目");
+  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+
+  await screen.findByText("只读的说明");
+  expect(screen.queryByLabelText("群组说明")).not.toBeInTheDocument();
+});
+
+// 串组事故:详情请求失败时,如果不先清空,屏幕上会留着上一个组的成员与「共享给本组
+// 的知识库」,而标题接的是刚点开的那个组 —— 一排「撤销共享」打的是新组、列的却是旧
+// 组的库。
+test("打开另一个组失败时不残留上一个组的成员与共享清单", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroupSharedNotebooks).mockResolvedValue([
+    { notebook_id: "nb1", name: "甲组的库", owner_username: "carol", roles: ["viewer"] },
+  ]);
+  renderModal();
+
+  await screen.findByText("封装项目");
+  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await screen.findByText("甲组的库");
+
+  vi.mocked(getGroup).mockRejectedValue(new Error("boom"));
+  await user.click(screen.getAllByRole("button", { name: "查看" })[1]);
+
+  await screen.findByText("群组详情加载失败");
+  expect(screen.queryByText("甲组的库")).not.toBeInTheDocument();
+  expect(screen.queryByText("爱丽丝（alice）")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "撤销共享" })).not.toBeInTheDocument();
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { toUserMessage } from "./errors.ts";
 import {
@@ -15,12 +15,16 @@ import {
   type GroupSummary,
 } from "./group-api.ts";
 
+/** `busySlot` 里代表「正在发出共享」的那一格 —— 它不是任何一个组的 id。 */
+const SHARE_SLOT = "__share__";
+
 /**
  * 借入参考库的「未共享门」提示(设计文档 §6.1)。
  *
  * 一旦这本笔记本被共享出去(有了只读成员或群组授权),它**借来的**参考库就停止参与
- * 检索——借来的东西不转借。取消共享后自动恢复。文案要在用户按下共享之前就在,不是
- * 事后在失效边上解释:那时候他已经不知道是哪一步造成的。
+ * 检索——借来的东西不转借。取消共享后自动恢复。文案必须挨着**将要触发它的那个
+ * 按钮**(开启链接分享 / 共享给该群组),不是事后在失效边上解释:那时候用户已经不
+ * 知道是哪一步造成的。
  */
 export const BORROWED_BASE_SHARE_WARNING =
   "共享出去之后，本笔记本借来的参考库会暂停参与检索；取消共享即可恢复。";
@@ -48,42 +52,54 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [entries, setEntries] = useState<GroupShareEntry[] | null>(null);
   const [picked, setPicked] = useState("");
-  const [busy, setBusy] = useState(false);
+  /** 空串 = 不忙;否则是**正在忙的那一项**(条目 id 或 `SHARE_SLOT`)。 */
+  const [busySlot, setBusySlot] = useState("");
   const [error, setError] = useState("");
+  // 切库 / 卸载之后落地的响应一律丢弃。`useEffect` 的局部 `cancelled` 只能覆盖它自己
+  // 那一次加载,而写动作之后的 reload 是在事件回调里发的 —— 它同样可能在卸载后落地。
+  const liveRef = useRef(true);
+  useEffect(() => {
+    liveRef.current = true;
+    return () => { liveRef.current = false; };
+  }, []);
 
   const reload = useCallback(async () => {
     const [grants, mine] = await Promise.all([
       listNotebookGrants(notebookId),
       listGroups("mine"),
     ]);
+    // ⚠ 成功路径也要看存活位:只在失败分支看它,等于「加载成功就无条件 setState」,
+    // 那正是 React 卸载后更新状态的经典形态。
+    if (!liveRef.current) return;
     setEntries(foldGroupShares(grants));
     setGroups(mine);
   }, [notebookId]);
 
   useEffect(() => {
-    let cancelled = false;
     setEntries(null);
     reload().catch((err) => {
-      if (!cancelled) setError(toUserMessage(err, "共享清单加载失败"));
+      if (liveRef.current) setError(toUserMessage(err, "共享清单加载失败"));
     });
-    return () => { cancelled = true; };
   }, [reload]);
 
-  async function run(action: () => Promise<void>, fallback: string) {
-    setBusy(true);
+  async function run(slot: string, action: () => Promise<void>, fallback: string) {
+    setBusySlot(slot);
     setError("");
     try {
       await action();
-      await reload();
-      onChanged();
+      if (liveRef.current) onChanged();
     } catch (err) {
-      setError(toUserMessage(err, fallback));
+      if (liveRef.current) setError(toUserMessage(err, fallback));
     } finally {
-      setBusy(false);
+      // 无论成败都重取:撤销是逐条删边,中途失败会留下一个「删了一半」的状态,
+      // 不重取的话界面还按发起前那份清单渲染,用户看不出到底删掉了哪几条。
+      await reload().catch(() => undefined);
+      if (liveRef.current) setBusySlot("");
     }
   }
 
   const options = shareableGroups(groups, entries ?? []);
+  const busy = busySlot !== "";
 
   return (
     <div className="stack">
@@ -91,7 +107,6 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
       <p className="tool-hint" style={{ margin: 0 }}>
         群组成员可以打开这本笔记本、提问、写自己的深度报告，并把它挂为参考库；不能修改内容。
       </p>
-      <p className="tool-hint" style={{ margin: 0 }}>{BORROWED_BASE_SHARE_WARNING}</p>
 
       {error && <p className="password-change-status error">{error}</p>}
 
@@ -112,19 +127,21 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
             <button
               className="sort-button"
               disabled={busy}
-              onClick={() => { void run(async () => {
+              onClick={() => { void run(entry.groupId, async () => {
                 // 同一个组可能有两条边(成员只读 / 组管理员可管),撤销要一并删掉,
                 // 否则界面上「撤销」过的条目会因为剩下那条边而重新出现。
                 for (const grantId of entry.grantIds) {
                   await revokeNotebookGrant(notebookId, grantId);
                 }
               }, "撤销共享失败"); }}
-            >{busy ? "撤销中…" : "撤销共享"}</button>
+            >{busySlot === entry.groupId ? "撤销中…" : "撤销共享"}</button>
           </div>
         ))
       )}
 
-      {options.length > 0 ? (
+      {options.length > 0 ? (<>
+        {/* 未共享门的提示挨着**将要触发它的那个按钮**(设计文档 §6.1)。 */}
+        <p className="tool-hint" style={{ margin: 0 }}>{BORROWED_BASE_SHARE_WARNING}</p>
         <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
           <select
             value={picked}
@@ -143,13 +160,13 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
           <button
             className="new-pill"
             disabled={busy || !picked}
-            onClick={() => { void run(async () => {
+            onClick={() => { void run(SHARE_SLOT, async () => {
               await shareNotebookToGroup(notebookId, picked);
               setPicked("");
             }, "共享失败"); }}
-          >{busy ? "共享中…" : "共享给该群组"}</button>
+          >{busySlot === SHARE_SLOT ? "共享中…" : "共享给该群组"}</button>
         </div>
-      ) : (
+      </>) : (
         entries !== null && (
           <p className="tool-hint" style={{ margin: 0 }}>
             没有可选的群组。只有你担任组管理员的群组才能收到共享，可在账户菜单的「群组」里创建或管理。

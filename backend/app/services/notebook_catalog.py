@@ -243,13 +243,86 @@ class NotebookSummaryQuery:
             # 只读共享(`notebooks.is_shared` 这一列)**或**存在指向某个群组的授权边
             # (`_shared_to_groups`,由 summary/owned 两条行查询顺带带回,零新增往返)。
             # 少了后者,owner 会看到一本「没有分享过」的库其实整组人可读(P1-T4)。
-            # 只读成员/群组成员看到的那份投影里没有这一列(那两条查询不带它),与既有
-            # 「reader 不显示 owner 的分享状态」逐字一致。
+            #
+            # ⚠ 覆盖面按查询而不是按角色,如实说清:**列表**投影里成员那两条查询
+            # (`joined_notebook_rows` / `granted_notebook_rows`)不带 `_shared_to_groups`,
+            # 所以成员在列表上看不到「群组共享」那一半;但它们各自 `SELECT nb.*`,
+            # `notebooks.is_shared` 那一列成员本来就看得到(只读共享一开,他那张卡的
+            # `is_shared` 就是 True)。**详情**路径不分角色——`summary_notebook_row` 带这
+            # 一列,reader 打开详情同样拿到并集,这与 `NotebookSummary.is_shared` 字段
+            # 注释早就写明的「reader 看到的原库 is_shared 也为 True」一致。
             is_shared=(
                 (bool(row["is_shared"]) if "is_shared" in keys else False)
                 or ("_shared_to_groups" in keys and bool(row["_shared_to_groups"]))
             ),
         )
+
+    def _fill_viewer_relation(
+        self,
+        db: object,
+        summary: NotebookSummary,
+        row: Any,
+        user_id: "str | None",
+    ) -> None:
+        """单库详情的 `access` / `shared_from` / `granted_via`(群组知识共享 P1-T4)。
+
+        **修的是一个长期缺口**:详情投影从来没回填过 `access`,于是它永远是模型默认的
+        `"owner"`——工作区顶栏那整段 reader 分支(只读徽章、退出共享、群组来源)对着
+        详情响应从来没有为真过。列表投影一直是对的,所以这个缺口只在「打开一本别人
+        共享给我的库」时暴露,而那正是本特性的主场景。
+
+        判据与列表投影同口径,且刻意**不新增授权判定**:
+
+        * `access` 只比 `created_by` —— 走到这里的请求已经过了路由上的读守卫
+          (`require_notebook_read` = owner ∪ 只读成员 ∪ 有效授权边),所以「不是
+          owner」就等于「有读权的 reader」。在这里重算一遍读权,等于把权限判定复制成
+          两份,而两份迟早会不一致(真正的权威是那道守卫,不是这段投影)。
+        * `shared_from` 取 `_owner_username` —— 由 `summary_notebook_row` 的 LEFT JOIN
+          随行带回,零新增往返。
+        * `granted_via` 的去重口径与列表**完全一致**:先按 `joined_notebook_rows` 的
+          点查形态判「有没有只读成员行」,**有就到此为止**(成员行优先,`granted_via`
+          留空);没有才发 `granted_notebook_rows` 的点查。两条都是列表那两条查询本身,
+          只是加了 notebook 过滤——谓词只有一份。
+
+          交叉态(既经分享链接加入、又在被授权的群组里)必须落在成员行那一支:他手上
+          的「退出共享」删的正是那条成员行,是一个**真的有效**的动作;按群组来源把它
+          藏起来等于拿走一个能用的出口。删掉成员行之后,群组授权接管,同一本库改带
+          来源标注——列表与详情同时切换,不会一处一副面孔。
+
+        成本:owner 打开自己的库 **+0** 次查询(最常见的那条路);只读共享进来的 +1;
+        群组共享进来的 +2。`user_id` 缺席(非请求上下文的内部调用)时整段跳过,字段
+        保持默认——与本函数出现之前逐字一致。
+        """
+        if not user_id:
+            return
+        keys = row.keys()
+        owner_id = row["created_by"] if "created_by" in keys else None
+        if owner_id == user_id:
+            summary.access = "owner"
+            return
+        summary.access = "reader"
+        summary.shared_from = (
+            row["_owner_username"] or "" if "_owner_username" in keys else ""
+        )
+        if self.queries.joined_notebook_rows(db, user_id, notebook_id=summary.id):
+            return
+        granted = self.queries.granted_notebook_rows(
+            db, user_id, notebook_id=summary.id
+        )
+        summary.granted_via = [
+            GrantedGroupRef(**item)
+            for item in fold_granted_notebook_groups(
+                [
+                    {
+                        "notebook_id": item["id"],
+                        "group_id": item["_group_id"],
+                        "group_name": item["_group_name"],
+                        "group_kind": item["_group_kind"],
+                    }
+                    for item in granted
+                ]
+            ).get(summary.id, [])
+        ]
 
     def get(
         self,
@@ -277,6 +350,7 @@ class NotebookSummaryQuery:
                 row,
                 memory_count=memory_counts.get((user_id, notebook_id), 0),
             )
+            self._fill_viewer_relation(db, summary, row, user_id)
             # ask_available: 该库能否在任一模式下产出有据回答(见 NotebookSummary 字段注释)。
             # 判据对齐检索口径:KG 只算**可用状态**(USABLE_STATUSES,排除 deprecated),故不
             # 直接用 kg_ready/base_kg_available(含 deprecated),而用 usable 版查询。短路:

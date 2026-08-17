@@ -866,7 +866,14 @@ def test_group_partition_query_is_bounded_by_my_memberships(repo):
 
     from app.repositories.sqlite.query_store import QueryStore
 
-    source = inspect.getsource(QueryStore.granted_notebook_rows)
+    # 先剥注释再切:注释里出现执行调用那几个字(说明为什么某个子句必须待在语句外面)
+    # 会让 split 切在注释上,于是拼出来的「SQL」只剩注释后面那几个字面量。剥掉之后
+    # 这条提取只看代码。
+    source = "\n".join(
+        line
+        for line in inspect.getsource(QueryStore.granted_notebook_rows).splitlines()
+        if not line.strip().startswith("#")
+    )
     sql = "".join(
         re.findall(r'"((?:[^"\\]|\\.)*)"', source.split("return db.execute(")[1])
     )
@@ -1430,3 +1437,226 @@ def test_my_own_public_notebook_still_reads_as_a_public_one(tmp_path, monkeypatc
 
     candidates = client.get(f"/api/notebooks/{target}/mountable", headers=owner).json()
     assert {item["id"]: item["origin"] for item in candidates}[public] == "base"
+
+
+# ------------------------------------------ P1-T4:单库详情投影(修长期缺口)
+
+
+def test_notebook_detail_reports_the_viewers_own_relation(tmp_path, monkeypatch):
+    """`GET /notebooks/{id}` 必须如实回填 `access` / `shared_from` / `granted_via`。
+
+    这是一个**长期缺口**:详情投影从来没算过 `access`,于是它永远是模型默认的
+    `"owner"`,工作区顶栏那整段 reader 分支(只读徽章、退出共享、群组来源标注)对着
+    详情响应从来没有为真过。列表投影一直是对的,所以缺口只在「打开一本别人共享给我
+    的库」时暴露 —— 而那正是本特性的主场景。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, owner_name = _new_user(client)
+    member, member_id, _ = _new_user(client)
+    group_id = _make_group(client, owner, name="封装项目")
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}", json={"role": "member"}, headers=owner
+    )
+    notebook_id = _make_notebook(client, owner, name="封装工艺库")
+    assert _share_to_group(client, owner, notebook_id, group_id).status_code == 200
+
+    seen = client.get(f"/api/notebooks/{notebook_id}", headers=member)
+    assert seen.status_code == 200, seen.text
+    body = seen.json()
+    assert body["access"] == "reader"
+    assert body["shared_from"] == owner_name
+    assert [
+        (g["group_id"], g["group_name"], g["kind"]) for g in body["granted_via"]
+    ] == [(group_id, "封装项目", "project")]
+
+    # owner 自己打开同一本库:仍是 owner,不带来源标注(他的库不可能经群组共享给他)。
+    mine = client.get(f"/api/notebooks/{notebook_id}", headers=owner).json()
+    assert mine["access"] == "owner"
+    assert mine["shared_from"] == ""
+    assert mine["granted_via"] == []
+
+
+def test_plain_readonly_member_detail_has_no_group_origin(tmp_path, monkeypatch):
+    """只读共享(分享链接)进来的成员同样是 reader,但 `granted_via` 为空。
+
+    前端两处入口靠这一条分流:只读共享有「退出共享」这个用户自己能按的出口,群组
+    共享没有(那个按钮打的是成员表,对授权边是空操作)。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, owner_name = _new_user(client)
+    member, member_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, owner)
+    _app_group_store()  # 触发应用实例构造,与本文件其它用例同款
+    from app.api import deps
+
+    deps.repository().add_member(notebook_id, member_id)
+
+    body = client.get(f"/api/notebooks/{notebook_id}", headers=member).json()
+    assert body["access"] == "reader"
+    assert body["shared_from"] == owner_name
+    assert body["granted_via"] == []
+
+
+def test_a_member_who_is_also_in_a_granted_group_keeps_the_member_row(
+    tmp_path, monkeypatch
+):
+    """交叉态(P3-3):既经分享链接加入、又在被授权的群组里。
+
+    列表投影按 **id 去重、成员行优先**,所以这本库出现一次、`granted_via` 为空 ——
+    他仍然拿得到「退出共享」,而那个动作对他确实有效(删的正是那条成员行)。删掉成员
+    行之后,群组授权接管,同一本库改从「群组」那一段来、带上来源标注。详情投影必须
+    与列表同口径,否则同一本库在卡片上和打开之后是两副面孔。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    member, member_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}", json={"role": "member"}, headers=owner
+    )
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+    from app.api import deps
+
+    deps.repository().add_member(notebook_id, member_id)
+
+    listed = [
+        item for item in client.get("/api/notebooks", headers=member).json()
+        if item["id"] == notebook_id
+    ]
+    assert len(listed) == 1, "同一本库不得出现两次"
+    assert listed[0]["granted_via"] == []            # 成员行优先
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).json()["granted_via"] == []
+
+    # 退出只读共享之后,群组授权接管 —— 库还在,只是这次带上来源标注。
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/membership", headers=member
+    ).status_code == 204
+    after = [
+        item for item in client.get("/api/notebooks", headers=member).json()
+        if item["id"] == notebook_id
+    ]
+    assert len(after) == 1
+    assert [g["group_id"] for g in after[0]["granted_via"]] == [group_id]
+    detail = client.get(f"/api/notebooks/{notebook_id}", headers=member).json()
+    assert [g["group_id"] for g in detail["granted_via"]] == [group_id]
+
+
+def test_detail_still_reports_is_shared_to_a_reader(tmp_path, monkeypatch):
+    """`is_shared` 是 owner 视角的字段,但**详情**路径不分角色地带上它。
+
+    这不是本轮改出来的:`NotebookSummary.is_shared` 的字段注释一直写着「reader 看到
+    的原库 is_shared 也为 True」。钉住现状,免得日后有人把它读成泄露。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    member, member_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}", json={"role": "member"}, headers=owner
+    )
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).json()["is_shared"] is True
+
+
+# ------------------------------------- P1-T4:打开分享弹窗不该铸出一条链接
+
+
+def test_reading_share_state_never_mints_a_token(tmp_path, monkeypatch):
+    """`GET /notebooks/{id}/share` 是只读的。
+
+    此前打开分享弹窗会 `POST .../share`,于是「只想共享给群组」的用户会顺带被发一条
+    分享链接——一次纯查看的动作产生了持久副作用。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+
+    state = client.get(f"/api/notebooks/{notebook_id}/share", headers=owner)
+    assert state.status_code == 200, state.text
+    assert state.json() == {"share_token": "", "copyable": False, "size": {}}
+
+    # 真的没铸:读第二次仍然没有 token,总览里也没有链接。
+    assert client.get(f"/api/notebooks/{notebook_id}/share", headers=owner).json()["share_token"] == ""
+    overview = client.get("/api/notebooks/shared-by-me", headers=owner).json()
+    assert [item["share_token"] for item in overview] == [""]
+    assert overview[0]["group_count"] == 1
+
+
+def test_share_state_reports_an_existing_link(tmp_path, monkeypatch):
+    """已经开过链接的库:GET 如实返回同一个 token 与规模,POST 仍然幂等。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, owner)
+    minted = client.post(f"/api/notebooks/{notebook_id}/share", headers=owner).json()
+
+    state = client.get(f"/api/notebooks/{notebook_id}/share", headers=owner).json()
+    assert state["share_token"] == minted["share_token"]
+    assert state["copyable"] == minted["copyable"]
+    assert state["size"] == minted["size"]
+    # 撤销之后回到空态。
+    assert client.delete(f"/api/notebooks/{notebook_id}/share", headers=owner).status_code == 204
+    assert client.get(f"/api/notebooks/{notebook_id}/share", headers=owner).json()["share_token"] == ""
+
+
+def test_share_state_is_owner_only(tmp_path, monkeypatch):
+    """与 POST 同一道 `notebook:manage` 守卫:组成员读不到别人库的分享状态。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    member, member_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}", json={"role": "member"}, headers=owner
+    )
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
+    assert client.get(f"/api/notebooks/{notebook_id}/share", headers=member).status_code == 404
+
+
+def test_group_only_rows_skip_the_copy_stats_and_member_lookups(tmp_path, monkeypatch):
+    """「已分享」总览对**没有链接**的行不算规模、不查成员。
+
+    `mode`/`size`/`members` 说的全是「这条链接是怎么回事」,纯群组共享的行没有链接、
+    前端也不渲染它们;而 `notebook_copy_stats` 每次要新鲜复核一次深拷贝上限、
+    `list_members` 又是一次查询——50 本只共享给群组的库会白付 100 次。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    linked = _make_notebook(client, owner, name="发了链接的")
+    group_only = _make_notebook(client, owner, name="只共享给组的")
+    client.post(f"/api/notebooks/{linked}/share", headers=owner)
+    _share_to_group(client, owner, group_only, group_id)
+
+    from app.api import deps
+
+    sharing = deps.notebook_sharing_repository()
+    calls: list[str] = []
+    original = sharing.notebook_copy_stats
+    member_calls: list[str] = []
+    original_members = sharing.list_members
+
+    def spy_stats(notebook_id: str):
+        calls.append(notebook_id)
+        return original(notebook_id)
+
+    def spy_members(notebook_id: str):
+        member_calls.append(notebook_id)
+        return original_members(notebook_id)
+
+    monkeypatch.setattr(sharing, "notebook_copy_stats", spy_stats)
+    monkeypatch.setattr(sharing, "list_members", spy_members)
+
+    overview = {item["id"]: item for item in sharing.shared_by_me(_owner_id)}
+    assert set(overview) == {linked, group_only}
+    assert calls == [linked], "纯群组共享的行不该触发规模统计"
+    assert group_only not in member_calls
+    assert overview[group_only]["size"] == {}
+    assert overview[group_only]["members"] == []
+    assert overview[linked]["size"]["sources"] == 0

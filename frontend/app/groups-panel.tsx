@@ -17,9 +17,9 @@ import {
   listGroups,
   putGroupMember,
   removeGroupMember,
-  renameGroup,
   resolveUser,
   revokeGroupSharedNotebook,
+  updateGroup,
   type GroupDetail,
   type GroupSharedNotebook,
   type GroupSummary,
@@ -63,8 +63,10 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
 
   const [newName, setNewName] = useState("");
   const [newKind, setNewKind] = useState("project");
+  const [newDescription, setNewDescription] = useState("");
   const [memberName, setMemberName] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
+  const [descriptionDraft, setDescriptionDraft] = useState("");
   const [confirming, setConfirming] = useState("");
 
   const kinds = creatableGroupKinds(isSystemAdmin ? "admin" : "user");
@@ -98,10 +100,17 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
   async function openDetail(groupId: string) {
     setConfirming("");
     setMemberName("");
+    // ⚠ **先把上一个组的详情与共享清单清空**,再去取新的。不清的话,详情请求失败时
+    // 屏幕上会留着甲组的成员和「共享给本组的知识库」,而标题下面接的是刚点开的乙组
+    // ——那一排「撤销共享」按钮打的是乙组,列的却是甲组的库。清空之后失败就是一片
+    // 空白 + 一句错误,读起来是「没打开」,而不是「打开了别的组的内容」。
+    setDetail(null);
+    setShared(null);
     await run(async () => {
       const group = await getGroup(groupId);
       setDetail(group);
       setRenameDraft(group.name);
+      setDescriptionDraft(group.description);
       // 「共享给本组的知识库」只有组管理员读得到(非管理员 404),所以对普通成员
       // 连查都不查——不是藏起来,是那条清单本来就不属于他这一层。
       setShared(
@@ -169,15 +178,29 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                 className="new-pill"
                 disabled={busy || !newName.trim()}
                 onClick={() => { void run(async () => {
-                  const created = await createGroup(newName.trim(), kinds.length > 1 ? newKind : "project");
+                  const created = await createGroup(
+                    newName.trim(),
+                    kinds.length > 1 ? newKind : "project",
+                    newDescription.trim(),
+                  );
                   setNewName("");
+                  setNewDescription("");
                   await refreshGroups(scope);
                   setDetail(created);
                   setRenameDraft(created.name);
+                  setDescriptionDraft(created.description);
                   setShared(await listGroupSharedNotebooks(created.id));
                 }, "建组失败"); }}
               >{busy ? "创建中…" : "创建群组"}</button>
             </div>
+            <textarea
+              rows={2}
+              value={newDescription}
+              placeholder="群组说明（可选）"
+              aria-label="新群组的说明"
+              disabled={busy}
+              onChange={(event) => setNewDescription(event.target.value)}
+            />
             {kinds.length === 1 && (
               <p className="tool-hint" style={{ margin: 0 }}>
                 你可以创建项目群组；部门与领域群组由管理员创建。
@@ -212,25 +235,53 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
             <div className="stack">
               <span className="section-title">{detail.name} · {groupKindLabel(detail.kind)}</span>
 
-              {canManage && (
-                <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
-                  <input
-                    value={renameDraft}
-                    aria-label="群组新名称"
+              {canManage ? (
+                <>
+                  <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
+                    <input
+                      value={renameDraft}
+                      aria-label="群组新名称"
+                      disabled={busy}
+                      style={{ flex: 1 }}
+                      onChange={(event) => setRenameDraft(event.target.value)}
+                    />
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={descriptionDraft}
+                    placeholder="群组说明（可选）"
+                    aria-label="群组说明"
                     disabled={busy}
-                    style={{ flex: 1 }}
-                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onChange={(event) => setDescriptionDraft(event.target.value)}
                   />
-                  <button
-                    className="sort-button"
-                    disabled={busy || !renameDraft.trim() || renameDraft.trim() === detail.name}
-                    onClick={() => { void run(async () => {
-                      const updated = await renameGroup(detail.id, renameDraft.trim());
-                      setDetail(updated);
-                      await refreshGroups(scope);
-                    }, "改名失败"); }}
-                  >{busy ? "保存中…" : "保存名称"}</button>
-                </div>
+                  <div className="tag-row">
+                    <button
+                      className="sort-button"
+                      disabled={
+                        busy
+                        || !renameDraft.trim()
+                        || (renameDraft.trim() === detail.name
+                            && descriptionDraft === detail.description)
+                      }
+                      onClick={() => { void run(async () => {
+                        const updated = await updateGroup(
+                          detail.id, renameDraft.trim(), descriptionDraft,
+                        );
+                        setDetail(updated);
+                        setRenameDraft(updated.name);
+                        setDescriptionDraft(updated.description);
+                        await refreshGroups(scope);
+                        // 组名进笔记本卡片的「来自群组《X》」标注,改完要让外层重取
+                        // ——否则列表上挂的还是旧名字,直到下一次整页刷新。
+                        onChanged();
+                      }, "保存群组信息失败"); }}
+                    >{busy ? "保存中…" : "保存群组信息"}</button>
+                  </div>
+                </>
+              ) : (
+                detail.description && (
+                  <p className="tool-hint" style={{ margin: 0 }}>{detail.description}</p>
+                )
               )}
 
               <span className="section-title">成员</span>

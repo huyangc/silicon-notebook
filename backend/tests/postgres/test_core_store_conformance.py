@@ -902,6 +902,82 @@ def test_group_sharing_shows_up_in_the_owner_facing_projections(
     ]
 
 
+def test_point_query_forms_of_the_two_list_projections(core_stores: CoreStores):
+    """列表投影的两条查询都有**点查形态**(P1-T4:单库详情要按同一条谓词判来源)。
+
+    刻意做成同一个方法的参数而不是另写两条 SQL:去重口径是「成员行优先」,详情与
+    列表分叉了会让同一本库在卡片上和打开之后是两副面孔。这里钉的是 PG 侧那两条
+    带过滤的语句真的跑得通、且只返回被点名的那本库。
+    """
+    groups = core_stores.groups
+    owner = core_stores.identity.create_user("w00123456", "password-52")
+    member = core_stores.identity.create_user("x00123456", "password-53")
+    group = groups.create_group(
+        name="甲组", kind="project", description="", created_by=owner.id
+    )
+    groups.upsert_member(group["id"], member.id, role="member", added_by=owner.id)
+
+    granted = core_stores.notebooks.create_row(NotebookCreate(name="组里的库"), owner.id)
+    joined = core_stores.notebooks.create_row(NotebookCreate(name="分享给我的"), owner.id)
+    groups.create_grant(
+        granted,
+        principal_type="group",
+        principal_id=group["id"],
+        role="viewer",
+        created_by=owner.id,
+        admin_user_id=owner.id,
+    )
+    core_stores.sharing.add_member(joined, member.id)
+
+    queries = core_stores.queries
+    with core_stores.database.connect() as connection:
+        all_granted = queries.granted_notebook_rows(connection, member.id)
+        one_granted = queries.granted_notebook_rows(
+            connection, member.id, notebook_id=granted
+        )
+        other_granted = queries.granted_notebook_rows(
+            connection, member.id, notebook_id=joined
+        )
+        all_joined = queries.joined_notebook_rows(connection, member.id)
+        one_joined = queries.joined_notebook_rows(
+            connection, member.id, notebook_id=joined
+        )
+        other_joined = queries.joined_notebook_rows(
+            connection, member.id, notebook_id=granted
+        )
+
+    assert [row["id"] for row in all_granted] == [granted]
+    assert [row["id"] for row in one_granted] == [granted]
+    assert other_granted == []            # 那本库不是经群组来的
+    assert [row["id"] for row in all_joined] == [joined]
+    assert [row["id"] for row in one_joined] == [joined]
+    assert other_joined == []             # 那本库没有成员行
+
+
+def test_notebook_row_reports_the_share_token_without_minting_one(
+    core_stores: CoreStores,
+):
+    """`share_state`(只读的分享状态)读的就是这一行,所以它必须如实三态。
+
+    ⚠ 这条钉的是**存储原语**,不是那个服务方法(`CoreStores` 里只有 store)。服务层
+    的「打开弹窗不铸 token」由 `tests/test_group_routes.py` 的
+    `test_reading_share_state_never_mints_a_token` 走 HTTP 钉住。这里补的是 PG 侧
+    「没开过分享 → NULL、开过 → 那个 token、撤销 → 回到 NULL」的对等性。
+    """
+    owner = core_stores.identity.create_user("y00123456", "password-54")
+    notebook_id = core_stores.notebooks.create_row(NotebookCreate(name="库"), owner.id)
+
+    fresh = core_stores.sharing.notebook_row(notebook_id)
+    assert fresh["share_token"] is None and not fresh["is_shared"]
+
+    minted = core_stores.sharing.set_share_token(notebook_id, "shr-fixed")
+    opened = core_stores.sharing.notebook_row(notebook_id)
+    assert opened["share_token"] == minted and opened["is_shared"]
+
+    core_stores.sharing.clear_share(notebook_id)
+    assert core_stores.sharing.notebook_row(notebook_id)["share_token"] is None
+
+
 def test_mountable_candidates_report_where_they_come_from(core_stores: CoreStores):
     """挂载候选的 `origin` 投影(P1-T4)必须与 SQLite 侧同一套判据与优先级。
 
