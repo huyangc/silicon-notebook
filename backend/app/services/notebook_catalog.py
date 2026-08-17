@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.models.groups import GrantedGroupRef
 from app.models.kg import KgBuildJobStatus
 from app.models.notebooks import (
     NotebookAnalytics,
@@ -19,6 +20,7 @@ from app.models.notebooks import (
 from app.models.ask import SEARCH_HIT_CAP, NotebookSearchResponse, SearchHit
 from app.core import diagnostics_runtime as diagnostics
 from app.core.query_syntax import strip_accepted_quote_markers
+from app.repositories.group_rows import fold_granted_notebook_groups
 from app.repositories.ports import (
     IdentityStorePort,
     KgBuildJobStorePort,
@@ -332,12 +334,21 @@ class NotebookSummaryQuery:
         return summary
 
     def list_for_user(self, user_id: str) -> list[NotebookSummary]:
-        """自有库(access=owner)∪ 经只读共享加入的库(access=reader)。
+        """自有库(access=owner)∪ 经只读共享加入的库 ∪ 经**群组授权边**可读的库。
+
+        后两者都是 `access="reader"`(已定裁决 7:P1 不给 `access` 加枚举值),区别
+        由 `granted_via` 表达——非空即「来自群组《X》」。
 
         status='copying' 是 copy_notebook 分批写入期间的哨兵状态(P1-4),半拷贝
         的副本必须排除,不然用户能看到/点进一个字段还没写全的空壳 notebook。
+
+        **去重按 id、成员行优先**:同一本库可以既在只读成员清单里、又被共享给我所在
+        的组;三段按 owner → 成员 → 群组的顺序追加,已出现过的 id 直接跳过。判据放在
+        这里而不是写进第三条 SQL 的 `NOT EXISTS`,是因为「已经产出了哪些库」这份事实
+        本来就在手上,再用 SQL 算一遍就是同一判据的第二份拷贝。
         """
         out: List[NotebookSummary] = []
+        seen: set[str] = set()
         with self.database.connect() as db:
             memory_counts = self.queries.memory_counts_by_owner_notebook(db, user_id)
             rows = self.queries.owned_notebook_rows(db, user_id)
@@ -348,6 +359,7 @@ class NotebookSummaryQuery:
                     memory_count=memory_counts.get((user_id, row["id"]), 0),
                 )
                 nb.access = "owner"
+                seen.add(nb.id)
                 out.append(nb)
             joined = self.queries.joined_notebook_rows(db, user_id)
             for row in joined:
@@ -358,6 +370,36 @@ class NotebookSummaryQuery:
                 )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""
+                seen.add(nb.id)
+                out.append(nb)
+            granted = self.queries.granted_notebook_rows(db, user_id)
+            groups_by_notebook = fold_granted_notebook_groups(
+                [
+                    {
+                        "notebook_id": row["id"],
+                        "group_id": row["_group_id"],
+                        "group_name": row["_group_name"],
+                        "group_kind": row["_group_kind"],
+                    }
+                    for row in granted
+                ]
+            )
+            for row in granted:
+                notebook_id = row["id"]
+                if notebook_id in seen:
+                    continue
+                seen.add(notebook_id)
+                nb = self.from_row(
+                    db,
+                    row,
+                    memory_count=memory_counts.get((user_id, notebook_id), 0),
+                )
+                nb.access = "reader"
+                nb.shared_from = row["_owner_username"] or ""
+                nb.granted_via = [
+                    GrantedGroupRef(**item)
+                    for item in groups_by_notebook.get(notebook_id, [])
+                ]
                 out.append(nb)
         return out
 

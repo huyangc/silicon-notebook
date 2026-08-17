@@ -7,6 +7,7 @@ from app.api.admin_routes import router as admin_router
 from app.api.ask_routes import router as ask_router
 from app.api.catalog_routes import router as catalog_router
 from app.api.content_overview_routes import router as content_overview_router
+from app.api.group_routes import router as group_router
 from app.api.kg_routes import router as kg_router
 from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
@@ -31,6 +32,7 @@ DOMAIN_ROUTERS = (
     kg_router,
     admin_router,
     catalog_router,
+    group_router,
 )
 EXPECTED_COMPOSITION_NAMES = (
     "memory_router",
@@ -51,6 +53,8 @@ EXPECTED_COMPOSITION_NAMES = (
     # `_write_json`), so `paths` lands sorted by path string regardless of
     # registration order (see the comment at the composition site).
     "catalog_router",
+    # 群组与授权边(群组知识共享 P1-T3),同上:接在末尾只是延续写法。
+    "group_router",
 )
 
 
@@ -145,6 +149,30 @@ def test_kg_and_admin_endpoints_have_domain_owners():
         "list_online_users": "app.api.admin_routes",
         "test_system_model_service": "app.api.admin_routes",
         "test_all_system_model_services": "app.api.admin_routes",
+    }
+    for endpoint, module in expected.items():
+        assert modules[endpoint] == module, endpoint
+
+
+def test_group_and_grant_endpoints_have_a_domain_owner():
+    """授权边的两个端点挂在 `/notebooks/{id}/...` 下,但**归群组域所有**。
+
+    这条钉的正是那件容易滑掉的事:URL 前缀是 notebook,策略却是群组的(双重条件、
+    组管理员判定),照 URL 把它们搬进 `notebook_routes.py` 会让群组策略散成两处。
+    """
+    modules = _endpoint_modules()
+    expected = {
+        "create_group_route": "app.api.group_routes",
+        "list_groups_route": "app.api.group_routes",
+        "get_group_route": "app.api.group_routes",
+        "put_group_member_route": "app.api.group_routes",
+        "leave_group_route": "app.api.group_routes",
+        "resolve_user_route": "app.api.group_routes",
+        "list_notebook_grants_route": "app.api.group_routes",
+        "create_notebook_grant_route": "app.api.group_routes",
+        "delete_notebook_grant_route": "app.api.group_routes",
+        "list_group_shared_notebooks_route": "app.api.group_routes",
+        "delete_group_shared_notebook_route": "app.api.group_routes",
     }
     for endpoint, module in expected.items():
         assert modules[endpoint] == module, endpoint

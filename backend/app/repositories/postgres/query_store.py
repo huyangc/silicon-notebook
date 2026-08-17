@@ -396,6 +396,41 @@ class QueryStore:
         ).fetchall())
 
     @staticmethod
+    def granted_notebook_rows(db: Any, user_id: str):
+        """`sqlite/query_store.py::granted_notebook_rows` 的镜像。
+
+        完整理由(为什么它是列表投影而不是授权判定、为什么只收两个群组主体、为什么
+        去重留在 service)写在 SQLite 那一份里,两份必须同修。PG 侧有**两处**刻意
+        不同:
+
+        * 排序键的 `COLLATE "C"` —— 非 C collation 的库里 `ORDER BY id` 与 SQLite 的
+          字节序不同,同一批库在两个后端上会排出不同的顺序。
+        * SQLite 那份的 `CROSS JOIN` 驱动顺序提示**不照抄**:标准 SQL 的 `CROSS JOIN`
+          不接 `ON`,而 PG 有真实统计信息、自己就会选对。实测(2000 个组 / 2000 条
+          群组授权边 / 该用户只在其中 2 个组里,`ANALYZE` 之后):
+          `Index Scan using idx_group_members_user (user_id=...)` 起步取到 2 行,再
+          `Index Scan using idx_notebook_grants_principal
+          (principal_type = ANY(...) AND principal_id = g.id)` 逐个点查,2000 条边
+          里只碰 2 条。SQLite 那侧需要提示,是因为它的 planner 在没有 ANALYZE 时按
+          固定启发式估价,会误选 `notebook_grants` 当驱动表。
+        """
+        return _compat_notebook_rows(db.execute(
+            "SELECT nb.*, u.username AS _owner_username, "
+            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind "
+            "FROM group_members gm "
+            "JOIN notebook_grants ng ON ng.principal_id = gm.group_id "
+            "AND ng.principal_type IN ('group', 'group_admins') "
+            "JOIN groups g ON g.id = gm.group_id "
+            "JOIN notebooks nb ON nb.id = ng.notebook_id "
+            "LEFT JOIN users u ON u.id = nb.created_by "
+            "WHERE gm.user_id = %s "
+            "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
+            "AND nb.status != 'copying' "
+            'ORDER BY nb.created_at ASC, nb.id COLLATE "C" ASC, g.id COLLATE "C" ASC',
+            (user_id,),
+        ).fetchall())
+
+    @staticmethod
     def memory_counts_by_owner_notebook(
         db: Any, user_id: str
     ) -> dict[tuple[str, str], int]:

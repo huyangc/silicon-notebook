@@ -20,6 +20,7 @@ from app.repositories.postgres.kg_build_job_store import (
     KgBuildAlreadyRunning as PostgresKgBuildAlreadyRunning,
     KgBuildJobStore as PostgresKgBuildJobStore,
 )
+from app.repositories.postgres.group_store import GroupStore as PostgresGroupStore
 from app.repositories.postgres.notebook_store import NotebookStore as PostgresNotebookStore
 from app.repositories.postgres.model_status_store import (
     ModelStatusStore as PostgresModelStatusStore,
@@ -47,6 +48,7 @@ class CoreStores:
     model_status: Any
     notebooks: Any
     sharing: Any
+    groups: Any
     sources: Any
     chunks: Any
     queries: Any
@@ -87,6 +89,7 @@ def core_stores(request) -> CoreStores:
             now=now,
             insert_row=PostgresSharingStore.insert_row_values,
         ),
+        groups=PostgresGroupStore(postgres_database, new_id=new_id, now=now),
         sources=PostgresSourceStore(postgres_database, now=now),
         chunks=PostgresChunkStore(postgres_database),
         queries=PostgresQueryStore(postgres_database, postgres_settings),
@@ -621,6 +624,247 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
     assert sharing.user_can_read_notebook(notebook_id, grantee.id) is False
     # group_admins 那条边没动,组管理员仍可读——上面两条删除没有误伤别的主体。
     assert sharing.user_can_read_notebook(notebook_id, group_admin.id) is True
+
+
+def test_group_store_crud_and_membership_mirror_the_sqlite_store(
+    core_stores: CoreStores,
+):
+    """群组 / 组成员的 PG 行为必须与 `test_group_routes.py` 的 SQLite 矩阵逐条相同。
+
+    G1 只跑得到 SQLite 那一份,单靠它看不见「只改了一个后端」的分叉。这里钉的三件事
+    都是**分叉了不会报错、只会静默走样**的形态:建组是不是真的连组管理员一起落库、
+    最后一名组管理员保护是不是真的在同一事务里判、成员/群组清单的顺序会不会随
+    collation 漂。
+    """
+    from app.repositories.ports import LastGroupAdminError
+
+    groups = core_stores.groups
+    owner = core_stores.identity.create_user("k00123456", "password-40")
+    member = core_stores.identity.create_user("l00123456", "password-41")
+    outsider = core_stores.identity.create_user("m00123456", "password-42")
+
+    created = groups.create_group(
+        name="项目组", kind="project", description="说明", created_by=owner.id
+    )
+    # 建组即建组管理员 —— 中间没有「有组无管理员」的窗口。
+    assert created["my_role"] == "admin"
+    assert created["member_count"] == 1
+    assert created["kind"] == "project"
+    assert created["description"] == "说明"
+    assert isinstance(created["created_at"], str) and created["created_at"]
+    group_id = created["id"]
+
+    assert groups.user_group_role(group_id, owner.id) == "admin"
+    assert groups.user_group_role(group_id, outsider.id) is None
+    assert groups.get_group("grp-missing") is None
+    assert groups.get_group(group_id, user_id=outsider.id)["my_role"] == ""
+
+    assert [g["id"] for g in groups.list_groups_for_user(owner.id)] == [group_id]
+    assert groups.list_groups_for_user(outsider.id) == []
+    everything = groups.list_all_groups(user_id=outsider.id)
+    assert [g["id"] for g in everything] == [group_id]
+    assert everything[0]["my_role"] == ""
+
+    assert groups.upsert_member(
+        group_id, member.id, role="member", added_by=owner.id
+    ) == "added"
+    assert groups.upsert_member(
+        group_id, member.id, role="member", added_by=owner.id
+    ) == "updated"
+    members = groups.list_members(group_id)
+    assert {m["id"]: (m["role"], m["username"]) for m in members} == {
+        owner.id: ("admin", "k00123456"),
+        member.id: ("member", "l00123456"),
+    }
+    assert all(isinstance(m["added_at"], str) and m["added_at"] for m in members)
+    # 顺序是 `(added_at, user_id)`,与 SQLite 侧逐字相同。这里两行的 added_at 由固定
+    # 时钟写成同一个值,所以实际比的是次键——它**必须**存在:并列 added_at 下缺次键
+    # 时,PG 的 collation 与 SQLite 的字节序会给出不同的成员顺序。
+    assert [m["id"] for m in members] == sorted(m["id"] for m in members)
+
+    # 最后一名组管理员:降级与移除都必须被同一事务里的判定拦下。
+    with pytest.raises(LastGroupAdminError):
+        groups.upsert_member(group_id, owner.id, role="member", added_by=owner.id)
+    with pytest.raises(LastGroupAdminError):
+        groups.remove_member(group_id, owner.id)
+    groups.upsert_member(group_id, member.id, role="admin", added_by=owner.id)
+    assert groups.remove_member(group_id, owner.id) is True
+    assert groups.remove_member(group_id, owner.id) is False
+
+    assert groups.update_group(group_id, name="改名") is True
+    assert groups.get_group(group_id)["name"] == "改名"
+    assert groups.get_group(group_id)["description"] == "说明"  # 未传的字段不动
+    assert groups.update_group(group_id) is True  # 合法 no-op
+    assert groups.update_group("grp-missing", name="X") is False
+
+    assert groups.find_user_by_username("k00123456")["id"] == owner.id
+    assert groups.find_user_by_username("k0012345") is None  # 精确匹配,不认前缀
+    assert groups.find_user_by_id(owner.id)["username"] == "k00123456"
+    assert groups.find_user_by_id("user-missing") is None
+
+
+def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
+    core_stores: CoreStores,
+):
+    """授权边 CRUD + 删组清理。重复授权必须是**明确冲突**而不是静默复用。"""
+    from app.repositories.ports import GroupGrantAlreadyExists
+
+    groups = core_stores.groups
+    owner = core_stores.identity.create_user("n00123456", "password-43")
+    group = groups.create_group(
+        name="甲组", kind="department", description="", created_by=owner.id
+    )
+    other = groups.create_group(
+        name="乙组", kind="project", description="", created_by=owner.id
+    )
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="共享库"), owner.id
+    )
+    another_notebook = core_stores.notebooks.create_row(
+        NotebookCreate(name="另一本"), owner.id
+    )
+
+    grant = groups.create_grant(
+        notebook_id,
+        principal_type="group",
+        principal_id=group["id"],
+        role="viewer",
+        created_by=owner.id,
+    )
+    assert grant["principal_name"] == "甲组"
+    assert grant["principal_kind"] == "department"
+    with pytest.raises(GroupGrantAlreadyExists):
+        groups.create_grant(
+            notebook_id,
+            principal_type="group",
+            principal_id=group["id"],
+            role="admin",
+            created_by=owner.id,
+        )
+    # 同组的另一个主体类型是**另一条**边,不受 UNIQUE 影响。
+    groups.create_grant(
+        notebook_id,
+        principal_type="group_admins",
+        principal_id=group["id"],
+        role="admin",
+        created_by=owner.id,
+    )
+    # 本端点建不出来、但库里可能存在的 everyone 行:不得被 LEFT JOIN 误配上组名。
+    _pg_grant(core_stores, "gr-all", notebook_id, "everyone", "", owner.id)
+    listed = groups.list_grants(notebook_id)
+    assert {g["principal_type"] for g in listed} == {"group", "group_admins", "everyone"}
+    everyone = next(g for g in listed if g["principal_type"] == "everyone")
+    assert everyone["principal_name"] == "" and everyone["principal_kind"] == ""
+
+    # grant id 必须与 notebook 一起验:否则「我有一本自己的库的管理权」就变成
+    # 「我能删任何库上的授权边」。
+    assert groups.grant_row(notebook_id, grant["id"])["id"] == grant["id"]
+    assert groups.grant_row(another_notebook, grant["id"]) is None
+    assert groups.delete_grant(another_notebook, grant["id"]) is False
+    assert groups.delete_grant(notebook_id, grant["id"]) is True
+    assert groups.delete_grant(notebook_id, grant["id"]) is False
+
+    groups.create_grant(
+        notebook_id,
+        principal_type="group",
+        principal_id=group["id"],
+        role="viewer",
+        created_by=owner.id,
+    )
+    groups.create_grant(
+        another_notebook,
+        principal_type="group",
+        principal_id=other["id"],
+        role="viewer",
+        created_by=owner.id,
+    )
+    shared = groups.list_group_shared_notebooks(group["id"])
+    assert [item["notebook_id"] for item in shared] == [notebook_id]
+    assert shared[0]["name"] == "共享库"
+    assert shared[0]["owner_username"] == "n00123456"
+    assert sorted(shared[0]["roles"]) == ["admin", "viewer"]  # 同库两条边折成一项
+
+    assert groups.delete_group_grants_for_notebook(group["id"], notebook_id) == 2
+    assert groups.list_group_shared_notebooks(group["id"]) == []
+    assert groups.delete_group_grants_for_notebook(group["id"], notebook_id) == 0
+    # 别的组的边没被误伤。
+    assert [i["notebook_id"] for i in groups.list_group_shared_notebooks(other["id"])] == [
+        another_notebook
+    ]
+
+    # 删组:成员行经 FK 级联消失,指向本组的授权边由同一个写事务显式清掉
+    # (`principal_id` 无 FK,级联够不着它)。
+    assert groups.delete_group(other["id"]) is True
+    assert groups.delete_group(other["id"]) is False
+    assert groups.list_grants(another_notebook) == []
+    assert _fetch_one(
+        core_stores,
+        "SELECT COUNT(*) AS c FROM group_members WHERE group_id=%s",
+        (other["id"],),
+    )["c"] == 0
+
+
+def test_granted_notebook_rows_matches_the_sqlite_list_projection(
+    core_stores: CoreStores,
+):
+    """「群组」分区的列表投影:只收两个群组主体,`group_admins` 只到组管理员手上。"""
+    groups = core_stores.groups
+    queries = core_stores.queries
+    owner = core_stores.identity.create_user("o00123456", "password-44")
+    plain = core_stores.identity.create_user("p00123456", "password-45")
+    deputy = core_stores.identity.create_user("q00123456", "password-46")
+    group = groups.create_group(
+        name="芯片项目", kind="project", description="", created_by=owner.id
+    )
+    groups.upsert_member(group["id"], plain.id, role="member", added_by=owner.id)
+    groups.upsert_member(group["id"], deputy.id, role="admin", added_by=owner.id)
+    viewer_notebook = core_stores.notebooks.create_row(
+        NotebookCreate(name="全员可读"), owner.id
+    )
+    admin_notebook = core_stores.notebooks.create_row(
+        NotebookCreate(name="仅管理员"), owner.id
+    )
+    groups.create_grant(
+        viewer_notebook,
+        principal_type="group",
+        principal_id=group["id"],
+        role="viewer",
+        created_by=owner.id,
+    )
+    groups.create_grant(
+        admin_notebook,
+        principal_type="group_admins",
+        principal_id=group["id"],
+        role="admin",
+        created_by=owner.id,
+    )
+    # 本投影刻意不收 everyone 主体(它沿用公共知识库的隐藏惯例)。
+    everyone_notebook = core_stores.notebooks.create_row(
+        NotebookCreate(name="全员授权"), owner.id
+    )
+    _pg_grant(core_stores, "gr-everyone-list", everyone_notebook, "everyone", "", owner.id)
+
+    with core_stores.database.connect() as connection:
+        plain_rows = queries.granted_notebook_rows(connection, plain.id)
+        deputy_rows = queries.granted_notebook_rows(connection, deputy.id)
+    assert [row["id"] for row in plain_rows] == [viewer_notebook]
+    assert plain_rows[0]["_owner_username"] == "o00123456"
+    assert plain_rows[0]["_group_id"] == group["id"]
+    assert plain_rows[0]["_group_name"] == "芯片项目"
+    assert plain_rows[0]["_group_kind"] == "project"
+    assert sorted(row["id"] for row in deputy_rows) == sorted(
+        [viewer_notebook, admin_notebook]
+    )
+
+    # 降级即失效;半拷贝的哨兵状态与另外两段一样被排除。
+    groups.upsert_member(group["id"], deputy.id, role="member", added_by=owner.id)
+    _write_sql(
+        core_stores,
+        "UPDATE notebooks SET status='copying' WHERE id=%s",
+        (viewer_notebook,),
+    )
+    with core_stores.database.connect() as connection:
+        assert queries.granted_notebook_rows(connection, deputy.id) == []
 
 
 def test_shared_members_validate_as_shared_by_me_string_fields(

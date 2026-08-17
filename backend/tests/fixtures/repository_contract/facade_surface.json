@@ -1474,6 +1474,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.group_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.identity_repository",
         "target": "_runtime"
       },
@@ -4049,6 +4055,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.source_metadata",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.source_notebook_id",
         "target": "_runtime"
       },
       {

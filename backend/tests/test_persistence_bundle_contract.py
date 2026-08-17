@@ -25,6 +25,7 @@ BUNDLE_STORE_PORTS = {
     "identity": "IdentityStorePort",
     "notebooks": "NotebookStorePort",
     "sharing": "SharingStorePort",
+    "groups": "GroupStorePort",
     "sources": "SourceStorePort",
     "chunks": "ChunkStorePort",
     "embeddings": "EmbeddingStorePort",

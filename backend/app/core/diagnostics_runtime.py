@@ -94,6 +94,11 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("mounted-by-count",),
     ("share",),
     ("membership",),
+    # 群组授权边(群组知识共享 P1-T3)。路径里没有任何用户内容:第二段是固定字面量,
+    # 授权边 id 走 None 打 {id},主体 id / 角色都在请求体里,所以整条路径可以原样
+    # 进诊断快照。
+    ("grants",),
+    ("grants", None),
     ("kg", "search"),
     ("kg", "build"),
     ("kg", "rebuild"),

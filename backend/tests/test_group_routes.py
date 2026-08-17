@@ -1,0 +1,880 @@
+# backend/tests/test_group_routes.py
+"""群组与授权边 API 的行为契约(群组知识共享 P1-T3)。
+
+T2 已经让 `notebook_grants` 一有行、读权与挂载有效性就自动生效;本轮做的是让那些行
+**能被建出来、也能被撤掉**。所以这份矩阵钉的是策略层,而不是谓词层(谓词由
+`test_access_sql_contract.py` 负责):
+
+* 谁能建哪一类组(项目人人可建;部门/领域仅系统管理员);
+* 建组即建组管理员——中间不存在一个「有组无管理员」的窗口;
+* 群组的可见性口径是 **404**(非成员与不存在同一形态,不泄露存在性);
+* 最后一名组管理员不可被降级/移除/退出(409),判定与写入同事务;
+* 授权边创建的**双重条件**——对库有管理权 **且** 是目标组的组管理员,缺哪一半各有
+  各自的响应;
+* 撤销的**不对称**——笔记本维度与群组维度两个入口各只要一半权限;
+* 删组把指向本组的授权边在同一事务里清掉(否则共享清单会挂着孤儿边);
+* 列表投影:经群组授权可读的库进「群组」分区、带 `granted_via`,与成员行去重。
+"""
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.core.config import Settings
+from app.services.sqlite_repository import SQLiteRepository, _now
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    return SQLiteRepository(Settings())
+
+
+def _client(tmp_path, monkeypatch) -> TestClient:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+
+    return TestClient(app)
+
+
+_PASSWORD = "pw12345678"
+_USERNAMES = iter(f"u{index:08d}" for index in range(1, 999))
+
+
+def _login(client: TestClient, username: str) -> dict:
+    client.post(
+        "/api/auth/register", json={"username": username, "password": _PASSWORD}
+    )
+    token = client.post(
+        "/api/auth/login", json={"username": username, "password": _PASSWORD}
+    ).json()["token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _new_user(client: TestClient) -> tuple[dict, str, str]:
+    """注册并登录一个新用户 → (headers, user_id, username)。"""
+    username = next(_USERNAMES)
+    headers = _login(client, username)
+    user_id = client.get("/api/me", headers=headers).json()["id"]
+    return headers, user_id, username
+
+
+def _promote_to_admin(repo, user_id: str) -> None:
+    with repo._write() as db:
+        db.execute("UPDATE users SET role='admin' WHERE id=?", (user_id,))
+
+
+def _make_group(client: TestClient, headers: dict, name: str = "组") -> str:
+    response = client.post("/api/groups", json={"name": name}, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+def _make_notebook(client: TestClient, headers: dict, name: str = "库") -> str:
+    return client.post("/api/notebooks", json={"name": name}, headers=headers).json()["id"]
+
+
+def _share_to_group(
+    client: TestClient, headers: dict, notebook_id: str, group_id: str, role: str = "viewer"
+):
+    return client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group", "principal_id": group_id, "role": role},
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------- 建组
+
+
+def test_project_groups_are_open_but_department_and_domain_need_a_system_admin(
+    tmp_path, monkeypatch, repo
+):
+    client = _client(tmp_path, monkeypatch)
+    plain, _plain_id, _ = _new_user(client)
+
+    assert client.post("/api/groups", json={"name": "项目组"}, headers=plain).status_code == 200
+    for kind in ("department", "domain"):
+        denied = client.post(
+            "/api/groups", json={"name": "受限", "kind": kind}, headers=plain
+        )
+        assert denied.status_code == 403, kind
+        assert denied.headers.get("X-User-Message") == "1"
+
+    boss, boss_id, _ = _new_user(client)
+    _promote_to_admin(repo, boss_id)
+    for kind in ("department", "domain"):
+        allowed = client.post(
+            "/api/groups", json={"name": f"{kind}组", "kind": kind}, headers=boss
+        )
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["kind"] == kind
+
+
+def test_unknown_kind_is_rejected_before_the_admin_gate(tmp_path, monkeypatch):
+    """非法 kind 是 422,而不是「不是管理员」的 403 —— 两种错因不能混为一谈。"""
+    client = _client(tmp_path, monkeypatch)
+    plain, _uid, _ = _new_user(client)
+    bad = client.post("/api/groups", json={"name": "X", "kind": "team"}, headers=plain)
+    assert bad.status_code == 422
+
+
+def test_creator_becomes_group_admin_in_the_same_write(tmp_path, monkeypatch):
+    """建组即建组管理员。分成两个事务会留下一个谁也管不了的组。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, owner_name = _new_user(client)
+    created = client.post("/api/groups", json={"name": "项目"}, headers=owner).json()
+
+    assert created["my_role"] == "admin"
+    assert created["member_count"] == 1
+    assert [(m["id"], m["role"]) for m in created["members"]] == [(owner_id, "admin")]
+    assert created["members"][0]["username"] == owner_name
+
+
+def test_blank_and_overlong_group_names_are_refused_not_truncated(tmp_path, monkeypatch):
+    """用户编辑的数据不得静默截断:超限**明确拒绝**。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _uid, _ = _new_user(client)
+    assert client.post("/api/groups", json={"name": "   "}, headers=headers).status_code == 400
+    too_long = client.post("/api/groups", json={"name": "名" * 121}, headers=headers)
+    assert too_long.status_code == 400
+    assert client.get("/api/groups", headers=headers).json() == []
+
+
+# ----------------------------------------------------------------- 可见性
+
+
+def test_a_non_member_cannot_tell_a_group_apart_from_a_missing_one(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    stranger, _stranger_id, _ = _new_user(client)
+
+    real = client.get(f"/api/groups/{group_id}", headers=stranger)
+    missing = client.get("/api/groups/grp-does-not-exist", headers=stranger)
+    assert real.status_code == missing.status_code == 404
+    assert real.json()["detail"] == missing.json()["detail"]
+    # 写路径同样 404(而不是 403):存在性不能从状态码上被区分出来。
+    assert client.patch(
+        f"/api/groups/{group_id}", json={"name": "改名"}, headers=stranger
+    ).status_code == 404
+    assert client.delete(f"/api/groups/{group_id}", headers=stranger).status_code == 404
+
+
+def test_a_plain_member_sees_the_group_but_cannot_administer_it(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    member, member_id, _ = _new_user(client)
+    assert client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    ).status_code == 200
+
+    detail = client.get(f"/api/groups/{group_id}", headers=member)
+    assert detail.status_code == 200
+    assert detail.json()["my_role"] == "member"
+    assert detail.json()["member_count"] == 2
+    assert client.patch(
+        f"/api/groups/{group_id}", json={"name": "改名"}, headers=member
+    ).status_code == 404
+
+
+def test_scope_all_is_admin_only(tmp_path, monkeypatch, repo):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    _make_group(client, owner)
+    outsider, outsider_id, _ = _new_user(client)
+
+    assert client.get("/api/groups", headers=outsider).json() == []
+    assert client.get("/api/groups?scope=all", headers=outsider).status_code == 403
+    _promote_to_admin(repo, outsider_id)
+    everything = client.get("/api/groups?scope=all", headers=outsider)
+    assert everything.status_code == 200
+    assert len(everything.json()) == 1
+    # 全局管理面里,他自己不是成员 —— my_role 必须如实为空,不能借视图冒充成员。
+    assert everything.json()[0]["my_role"] == ""
+
+
+# ----------------------------------------------------------------- 成员管理
+
+
+def test_member_add_promote_demote_and_remove(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    member, member_id, _ = _new_user(client)
+
+    added = client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    assert added.status_code == 200
+    assert {m["id"]: m["role"] for m in added.json()["members"]}[member_id] == "member"
+
+    promoted = client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    assert {m["id"]: m["role"] for m in promoted.json()["members"]}[member_id] == "admin"
+    # 升成管理员之后,他自己也能管人了。
+    assert client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=member,
+    ).status_code == 200
+
+    assert client.delete(
+        f"/api/groups/{group_id}/members/{member_id}", headers=owner
+    ).status_code == 204
+    assert client.delete(
+        f"/api/groups/{group_id}/members/{member_id}", headers=owner
+    ).status_code == 404  # 已经不是成员了
+
+
+def test_adding_an_unknown_user_is_a_clean_404_not_a_foreign_key_crash(
+    tmp_path, monkeypatch
+):
+    """`group_members.user_id` 有 FK;不先查存在性就插,用户看到的是 500。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    missing = client.put(
+        f"/api/groups/{group_id}/members/user-does-not-exist",
+        json={"role": "member"},
+        headers=owner,
+    )
+    assert missing.status_code == 404
+    assert missing.headers.get("X-User-Message") == "1"
+
+
+def test_unknown_group_role_is_rejected(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    _member, member_id, _ = _new_user(client)
+    assert client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "owner"},
+        headers=owner,
+    ).status_code == 422
+
+
+def test_the_last_group_admin_cannot_be_demoted_removed_or_leave(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    _member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+
+    for response in (
+        client.put(
+            f"/api/groups/{group_id}/members/{owner_id}",
+            json={"role": "member"},
+            headers=owner,
+        ),
+        client.delete(f"/api/groups/{group_id}/members/{owner_id}", headers=owner),
+        client.delete(f"/api/groups/{group_id}/membership", headers=owner),
+    ):
+        assert response.status_code == 409, response.text
+        assert response.headers.get("X-User-Message") == "1"
+
+    # 有第二名管理员之后,原管理员才能退出。
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    assert client.delete(f"/api/groups/{group_id}/membership", headers=owner).status_code == 204
+    assert client.get(f"/api/groups/{group_id}", headers=owner).status_code == 404
+
+
+def test_a_plain_member_can_always_leave(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    assert client.delete(f"/api/groups/{group_id}/membership", headers=member).status_code == 204
+    assert client.get(f"/api/groups/{group_id}", headers=member).status_code == 404
+    assert client.get(f"/api/groups/{group_id}", headers=owner).json()["member_count"] == 1
+
+
+def test_concurrent_last_admin_demotions_cannot_both_win(repo):
+    """判定与写入必须在同一事务里 —— 两次并发降级不可能都通过。
+
+    走 store 而不是 HTTP:要观察的是事务边界,不是路由。SQLite 侧由进程级写锁串行,
+    所以这条在真实并发下也成立(PG 侧另在同一事务里锁 `groups` 行,由 G3 conformance
+    覆盖)。
+    """
+    from app.repositories.ports import LastGroupAdminError
+
+    store = repo._runtime.groups
+    with repo._write() as db:
+        for uid in ("g-admin-a", "g-admin-b"):
+            db.execute(
+                "INSERT INTO users "
+                "(id,email,display_name,username,password_hash,role,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (uid, f"{uid}@t", uid, uid, "x", "user", _now(), _now()),
+            )
+    group = store.create_group(
+        name="并发", kind="project", description="", created_by="g-admin-a"
+    )
+    store.upsert_member(group["id"], "g-admin-b", role="admin", added_by="g-admin-a")
+
+    # 两名管理员:先降一个成功,再降另一个必须失败。
+    assert store.upsert_member(
+        group["id"], "g-admin-b", role="member", added_by="g-admin-a"
+    ) == "updated"
+    with pytest.raises(LastGroupAdminError):
+        store.upsert_member(
+            group["id"], "g-admin-a", role="member", added_by="g-admin-a"
+        )
+    with pytest.raises(LastGroupAdminError):
+        store.remove_member(group["id"], "g-admin-a")
+
+
+# ------------------------------------------------------------- 用户名解析
+
+
+def test_resolve_user_is_exact_and_reveals_nothing_extra(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _uid, _ = _new_user(client)
+    _other, other_id, other_name = _new_user(client)
+
+    found = client.get(f"/api/users/resolve?username={other_name}", headers=headers)
+    assert found.status_code == 200
+    assert found.json() == {
+        "id": other_id,
+        "username": other_name,
+        "display_name": other_name,
+    }
+    # 精确匹配:前缀不算命中。
+    assert client.get(
+        f"/api/users/resolve?username={other_name[:-1]}", headers=headers
+    ).status_code == 404
+
+
+# ------------------------------------------------------------------- 授权边
+
+
+def test_granting_needs_both_notebook_manage_and_group_admin(tmp_path, monkeypatch):
+    """双重条件:两半都要,而且缺哪一半的响应形态不同。"""
+    client = _client(tmp_path, monkeypatch)
+    boss, _boss_id, _ = _new_user(client)
+    group_id = _make_group(client, boss)
+
+    librarian, librarian_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, librarian)
+
+    # ① 有库的管理权,但不是组管理员 → 403(库的存在性对他本来就不是秘密)。
+    lacking_group = _share_to_group(client, librarian, notebook_id, group_id)
+    assert lacking_group.status_code == 403
+    assert lacking_group.headers.get("X-User-Message") == "1"
+
+    # ② 是组管理员,但对这本库没有管理权 → 404(不泄露库的存在性)。
+    lacking_notebook = _share_to_group(client, boss, notebook_id, group_id)
+    assert lacking_notebook.status_code == 404
+
+    # ③ 两半都有 → 200。
+    client.put(
+        f"/api/groups/{group_id}/members/{librarian_id}",
+        json={"role": "admin"},
+        headers=boss,
+    )
+    granted = _share_to_group(client, librarian, notebook_id, group_id)
+    assert granted.status_code == 200, granted.text
+    body = granted.json()
+    assert body["principal_type"] == "group"
+    assert body["principal_id"] == group_id
+    assert body["role"] == "viewer"
+    assert body["principal_name"] == "组"
+    assert body["principal_kind"] == "project"
+
+
+def test_granting_to_a_missing_group_is_a_group_shaped_404(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, owner)
+    missing = _share_to_group(client, owner, notebook_id, "grp-nope")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "群组不存在"
+
+
+def test_only_group_principals_can_be_granted_here(tmp_path, monkeypatch):
+    """`user` 走只读共享链接、`everyone` 走公共知识库开关 —— 都不从这里进。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, owner)
+    for principal_type, principal_id in (("user", owner_id), ("everyone", "")):
+        rejected = client.post(
+            f"/api/notebooks/{notebook_id}/grants",
+            json={
+                "principal_type": principal_type,
+                "principal_id": principal_id,
+                "role": "viewer",
+            },
+            headers=owner,
+        )
+        assert rejected.status_code == 422, principal_type
+    bad_role = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group", "principal_id": "g", "role": "editor"},
+        headers=owner,
+    )
+    assert bad_role.status_code == 422
+
+
+def test_duplicate_grants_are_refused_not_silently_reused(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+
+    assert _share_to_group(client, owner, notebook_id, group_id).status_code == 200
+    duplicate = _share_to_group(client, owner, notebook_id, group_id, role="admin")
+    assert duplicate.status_code == 409
+    assert duplicate.headers.get("X-User-Message") == "1"
+    # 冲突之后库里仍然只有原来那一条(role 没被偷偷改成 admin)。
+    grants = client.get(f"/api/notebooks/{notebook_id}/grants", headers=owner).json()
+    assert [(g["principal_id"], g["role"]) for g in grants] == [(group_id, "viewer")]
+    # 同组的另一个主体类型是**另一条**边,不受 UNIQUE 影响。
+    admins_edge = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={
+            "principal_type": "group_admins",
+            "principal_id": group_id,
+            "role": "admin",
+        },
+        headers=owner,
+    )
+    assert admins_edge.status_code == 200
+
+
+def test_grant_list_is_owner_only_and_reports_every_principal_kind(
+    tmp_path, monkeypatch, repo
+):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+    # 本端点建不出来、但库里可能存在的两类边:清单必须如实带上它们。
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("gnt-everyone", notebook_id, "everyone", "", "viewer", None, _now()),
+        )
+
+    listed = client.get(f"/api/notebooks/{notebook_id}/grants", headers=owner).json()
+    assert {g["principal_type"] for g in listed} == {"group", "everyone"}
+    everyone = next(g for g in listed if g["principal_type"] == "everyone")
+    # everyone 行不该被 LEFT JOIN 误配上某个组的名字(principal_id 是多态列)。
+    assert everyone["principal_name"] == "" and everyone["principal_kind"] == ""
+
+    stranger, _stranger_id, _ = _new_user(client)
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/grants", headers=stranger
+    ).status_code == 404
+
+
+# --------------------------------------------------------------------- 撤销
+
+
+def test_revocation_is_asymmetric_from_both_sides(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    boss, boss_id, _ = _new_user(client)
+    group_id = _make_group(client, boss)
+    librarian, librarian_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{librarian_id}",
+        json={"role": "admin"},
+        headers=boss,
+    )
+    notebook_id = _make_notebook(client, librarian)
+    grant_id = _share_to_group(client, librarian, notebook_id, group_id).json()["id"]
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=boss,
+    )
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
+
+    # ① 笔记本维度:库的管理者删边,不要求他也是那个组的管理员。
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/grants/{grant_id}", headers=librarian
+    ).status_code == 204
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 404
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/grants/{grant_id}", headers=librarian
+    ).status_code == 404
+
+    # ② 群组维度:组管理员(这里用 boss,他对这本库没有任何权限)撤掉指向本组的边。
+    _share_to_group(client, librarian, notebook_id, group_id)
+    client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={
+            "principal_type": "group_admins",
+            "principal_id": group_id,
+            "role": "admin",
+        },
+        headers=librarian,
+    )
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=boss).status_code == 200
+
+    shared = client.get(f"/api/groups/{group_id}/shared-notebooks", headers=boss).json()
+    assert len(shared) == 1
+    assert shared[0]["notebook_id"] == notebook_id
+    assert sorted(shared[0]["roles"]) == ["admin", "viewer"]
+
+    assert client.delete(
+        f"/api/groups/{group_id}/shared-notebooks/{notebook_id}", headers=boss
+    ).status_code == 204
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 404
+    assert client.get(f"/api/groups/{group_id}/shared-notebooks", headers=boss).json() == []
+    assert client.delete(
+        f"/api/groups/{group_id}/shared-notebooks/{notebook_id}", headers=boss
+    ).status_code == 404
+    # 撤销入口只对组管理员开放。
+    assert client.delete(
+        f"/api/groups/{group_id}/shared-notebooks/{notebook_id}", headers=member
+    ).status_code == 404
+
+
+def test_a_grant_id_from_another_notebook_cannot_be_deleted(tmp_path, monkeypatch):
+    """撤销端点的权限挂在 notebook 上,所以 id 必须与 notebook 一起验。"""
+    client = _client(tmp_path, monkeypatch)
+    victim, _victim_id, _ = _new_user(client)
+    victim_group = _make_group(client, victim)
+    victim_notebook = _make_notebook(client, victim)
+    victim_grant = _share_to_group(
+        client, victim, victim_notebook, victim_group
+    ).json()["id"]
+
+    attacker, _attacker_id, _ = _new_user(client)
+    own_notebook = _make_notebook(client, attacker)
+    assert client.delete(
+        f"/api/notebooks/{own_notebook}/grants/{victim_grant}", headers=attacker
+    ).status_code == 404
+    assert len(
+        client.get(f"/api/notebooks/{victim_notebook}/grants", headers=victim).json()
+    ) == 1
+
+
+def test_deleting_a_group_clears_its_grants_in_the_same_write(tmp_path, monkeypatch, repo):
+    """已定裁决 3:`principal_id` 无 FK,级联够不着它,必须显式清。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
+
+    assert client.delete(f"/api/groups/{group_id}", headers=owner).status_code == 204
+
+    # 谓词即刻失效……
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 404
+    assert repo.user_can_read_notebook(notebook_id, member_id) is False
+    # ……而且没有留下一条谁也解释不了的孤儿边。
+    assert client.get(f"/api/notebooks/{notebook_id}/grants", headers=owner).json() == []
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM notebook_grants WHERE principal_id=?",
+            (group_id,),
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM group_members WHERE group_id=?", (group_id,)
+        ).fetchone()["c"] == 0
+
+
+# --------------------------------------------------------------- 列表投影
+
+
+def test_group_granted_notebooks_join_the_list_as_readers_with_their_origin(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, owner_name = _new_user(client)
+    group_id = _make_group(client, owner, name="芯片项目")
+    notebook_id = _make_notebook(client, owner, name="共享库")
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    own_notebook = _make_notebook(client, member, name="我自己的")
+
+    assert client.get("/api/notebooks", headers=member).json() != []
+    _share_to_group(client, owner, notebook_id, group_id)
+    listed = {n["id"]: n for n in client.get("/api/notebooks", headers=member).json()}
+
+    assert set(listed) == {own_notebook, notebook_id}
+    assert listed[own_notebook]["access"] == "owner"
+    assert listed[own_notebook]["granted_via"] == []
+    shared = listed[notebook_id]
+    assert shared["access"] == "reader"
+    assert shared["shared_from"] == owner_name
+    assert shared["granted_via"] == [
+        {"group_id": group_id, "group_name": "芯片项目", "kind": "project"}
+    ]
+
+    # 撤掉授权边,库立刻从列表里消失。
+    grants = client.get(f"/api/notebooks/{notebook_id}/grants", headers=owner).json()
+    client.delete(
+        f"/api/notebooks/{notebook_id}/grants/{grants[0]['id']}", headers=owner
+    )
+    assert {n["id"] for n in client.get("/api/notebooks", headers=member).json()} == {
+        own_notebook
+    }
+
+
+def test_group_admins_grants_only_reach_group_admins(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    plain, plain_id, _ = _new_user(client)
+    deputy, deputy_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{plain_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    client.put(
+        f"/api/groups/{group_id}/members/{deputy_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={
+            "principal_type": "group_admins",
+            "principal_id": group_id,
+            "role": "admin",
+        },
+        headers=owner,
+    )
+
+    assert {n["id"] for n in client.get("/api/notebooks", headers=plain).json()} == set()
+    assert notebook_id in {
+        n["id"] for n in client.get("/api/notebooks", headers=deputy).json()
+    }
+    # 降级即失效 —— 列表投影与读权谓词同步。
+    client.put(
+        f"/api/groups/{group_id}/members/{deputy_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    assert {n["id"] for n in client.get("/api/notebooks", headers=deputy).json()} == set()
+
+
+def test_a_notebook_reachable_twice_appears_once_with_the_member_row_winning(
+    tmp_path, monkeypatch, repo
+):
+    """既是只读成员、又被共享给我所在的组 —— 列表里只出现一次,成员行优先。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    _share_to_group(client, owner, notebook_id, group_id)
+    repo.add_member(notebook_id, member_id)
+
+    listed = [n for n in client.get("/api/notebooks", headers=member).json()]
+    assert [n["id"] for n in listed] == [notebook_id]
+    assert listed[0]["access"] == "reader"
+    assert listed[0]["granted_via"] == []  # 成员行优先,不带群组来源
+
+
+def test_owning_a_notebook_shared_to_my_own_group_does_not_duplicate_it(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+
+    listed = client.get("/api/notebooks", headers=owner).json()
+    assert [n["id"] for n in listed] == [notebook_id]
+    assert listed[0]["access"] == "owner"
+
+
+def test_two_groups_sharing_the_same_notebook_fold_into_one_card(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    first = _make_group(client, owner, name="甲组")
+    second = _make_group(client, owner, name="乙组")
+    notebook_id = _make_notebook(client, owner)
+    member, member_id, _ = _new_user(client)
+    for group_id in (first, second):
+        client.put(
+            f"/api/groups/{group_id}/members/{member_id}",
+            json={"role": "member"},
+            headers=owner,
+        )
+        _share_to_group(client, owner, notebook_id, group_id)
+
+    listed = client.get("/api/notebooks", headers=member).json()
+    assert [n["id"] for n in listed] == [notebook_id]
+    assert sorted(g["group_id"] for g in listed[0]["granted_via"]) == sorted(
+        [first, second]
+    )
+
+
+def test_a_copying_notebook_never_leaks_through_the_group_partition(
+    tmp_path, monkeypatch, repo
+):
+    """半拷贝的哨兵状态必须与另外两段一样被排除。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    _share_to_group(client, owner, notebook_id, group_id)
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "member"},
+        headers=owner,
+    )
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET status='copying' WHERE id=?", (notebook_id,)
+        )
+    assert client.get("/api/notebooks", headers=member).json() == []
+
+
+def test_shared_notebook_list_hides_copies_in_flight(tmp_path, monkeypatch, repo):
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, owner_name = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner, name="半拷贝")
+    _share_to_group(client, owner, notebook_id, group_id)
+    assert client.get(f"/api/groups/{group_id}/shared-notebooks", headers=owner).json() == [
+        {
+            "notebook_id": notebook_id,
+            "name": "半拷贝",
+            "owner_username": owner_name,
+            "roles": ["viewer"],
+        }
+    ]
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET status='copying' WHERE id=?", (notebook_id,))
+    assert client.get(f"/api/groups/{group_id}/shared-notebooks", headers=owner).json() == []
+
+
+def test_group_grants_do_not_widen_write_access(tmp_path, monkeypatch):
+    """P1 只扩读权。授权边的 role 写成 admin 也一个字的写权都不给(那是 P2)。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={
+            "principal_type": "group_admins",
+            "principal_id": group_id,
+            "role": "admin",
+        },
+        headers=owner,
+    )
+
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
+    for method, suffix in (
+        ("patch", ""),
+        ("delete", ""),
+        ("post", "/tier"),
+        ("post", "/share"),
+        ("get", "/grants"),
+    ):
+        response = client.request(
+            method.upper(),
+            f"/api/notebooks/{notebook_id}{suffix}",
+            headers=member,
+            json={} if method in ("post", "patch") else None,
+        )
+        assert response.status_code == 404, (method, suffix, response.status_code)
+
+
+def test_group_partition_query_is_bounded_by_my_memberships(repo):
+    """「群组」分区的列表投影挂在**每次打开笔记本列表**的路径上,代价必须只随
+    「我加入了几个组」增长,不随「整个部署共享了多少本库」增长。
+
+    判据是查询规划:必须从 `idx_group_members_user (user_id=?)` 起步,再用
+    `idx_notebook_grants_principal` 的**双列**(principal_type + principal_id)点查。
+    去掉 SQLite 那条 `CROSS JOIN` 驱动顺序提示时,planner 会改从 `notebook_grants`
+    起步、只用得上 `principal_type` 单列——那是把全库群组授权边扫一遍。两者都不报错,
+    也都返回同一批行,所以只有钉住计划才拦得住这次退化。
+    """
+    import inspect
+    import re
+
+    from app.repositories.sqlite.query_store import QueryStore
+
+    source = inspect.getsource(QueryStore.granted_notebook_rows)
+    sql = "".join(
+        re.findall(r'"((?:[^"\\]|\\.)*)"', source.split("return db.execute(")[1])
+    )
+    with repo._connect() as db:
+        plan = [row["detail"] for row in db.execute("EXPLAIN QUERY PLAN " + sql, ("u",))]
+
+    assert plan[0] == "SEARCH gm USING INDEX idx_group_members_user (user_id=?)", plan
+    assert any(
+        "idx_notebook_grants_principal (principal_type=? AND principal_id=?)" in step
+        for step in plan
+    ), plan
+    assert not any("SCAN" in step for step in plan), plan
+
+
+def test_group_ids_are_random_per_creation(tmp_path, monkeypatch):
+    """已定裁决 1c:合库的 GLOBAL_UNION 语义依赖跨部署 id 不撞车。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    ids = {_make_group(client, owner, name=f"组{index}") for index in range(3)}
+    assert len(ids) == 3
+    for group_id in ids:
+        suffix = group_id.split("-", 1)[1]
+        assert len(suffix) == len(uuid.uuid4().hex)
+        int(suffix, 16)  # 纯十六进制:确认是随机 uuid 而不是自增序号
