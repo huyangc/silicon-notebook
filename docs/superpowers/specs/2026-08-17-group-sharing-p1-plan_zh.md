@@ -181,8 +181,15 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
   已共享条目列表 + 撤销。
 - **笔记本列表**:「群组」分区,卡片标注「来自群组《X》」(granted_via);
   reader 行为(隐藏写按钮)复用既有 `isReader` 派生,零新分支。
-- **挂载选择器**:mountable 自动包含组授权可读的库(后端已扩),前端零改动,
-  验证即可。
+- **挂载选择器**:mountable 自动包含组授权可读的库(后端已扩)。**但不是零改动**
+  (P1-T2 规格评审发现):现状按 `tier` 分成「公共知识库 / 我的笔记本」两组,组
+  授权与只读共享进来的库会被归进「我的笔记本」——一句事实错误的标签。要么后端给
+  候选项补一个来源字段(base / own / shared / group),要么前端把第二组改成中性
+  措辞(如「可选知识库」)。二选一,不能原样上线。
+- **借入挂载的未共享门**(裁决 1d)必须在 UI 上说清:分享弹窗在发出共享前提示
+  「共享后,本笔记本借入的参考库将暂停参与检索」;失效边的 `inactive_reason` 文案
+  也要覆盖这条新原因(现状固定文案「该库已不是公共知识库，且不属于你」对借入边
+  是错的)——后端已按边给出 `active` 布尔,文案分支留在 T4。
 - **报告**:成员在共享库可见「深度报告」入口并可创建(移除 reader 隐藏逻辑中
   报告入口那一条);报告列表只显示自己的。
 - 界面词:群组/成员/组管理员/项目/部门/领域/共享给群组——过
@@ -199,6 +206,13 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
   长度、每组成员上限?——v1 不设硬上限,只登记分页页大小);README 两份的共享
   能力句;AGENTS.md Product Flow 相应段;CLAUDE.md 红线段按需。
 - `fangan_done.md` 不动(群组不在 silicon_notebook_fangan.md 范围)。
+- **P2 待办登记(P1-T2 评审转出,不在 P1 修)**:
+  - P2-4 **Memory 热路径读谓词的成本形状**:读权片段从 2 层 EXISTS 变成 5 层
+    (成员 + 授权边 + 两条 group_members 关联子查询),而它嵌在 Memory 列表/聚合/
+    检索的每一条语句里。SQLite `EXPLAIN QUERY PLAN` 全部走索引、无全表扫描,PG 侧
+    未在真实数据量上量过。P2 翻转能力级别时一并做一次带量 benchmark,必要时给
+    「该 notebook 有没有授权边」加一次性短路。
+  - 失效边文案(`inactive_reason`)对借入挂载不准确,已在 T4 登记。
 - G1 + G2 扩展门按需;PR + codex 闭环(评审非阻塞 + CI 绿 + verify 三闸)。
 
 ## 已定裁决(实现子代理不得自行更改)
@@ -210,6 +224,15 @@ principal_id) 索引点查、group_members 按 PK/(user_id) 索引),单组几百
    `principal_id` 推断(`IS NULL`/`=''` 都不行):shadow 停车会给冲突行的
    principal_type 暂写哨兵串,四值精确匹配让停车行 fail-safe(谁也匹配不上);
    谓词一律按已知四值白名单匹配,不写 NOT IN/else 分支。
+1d. **借入挂载的未共享门**(P1-T2 质量评审 P0,真机复现):`MOUNT_VALID_EXPR` 的
+   「受限读权 ⇒ 可挂载」那一支额外要求**挂载方笔记本自身未被共享**(无
+   `notebook_members` 行、无 `notebook_grants` 行)。堵的是转手再分享:Carol 分享
+   Y 给 Alice、Alice 把 Y 挂进 X、Alice 再把 X 分享给 Bob,Bob 就读到了 Carol 从
+   未授权他的 Y。实时判定只吸收「撤销」那一半,转手这一半必须另设门。`tier='base'`
+   与 `everyone` 授权**不受此限**(受众本就是全员,转手不增加暴露面),同 owner 支
+   同样不受限(处置自己的内容)。为此 `access_sql` 拆出
+   `restricted_grant_access_expr` / `everyone_grant_expr` 两个片段,而**读权谓词
+   逐字不变**。边保留置灰、取消共享后自动恢复。详见设计文档 §6.1。
 1c. T3 的 grants 写入必须对 everyone 做 app 层幂等(UNIQUE 已覆盖它,但
    `ON CONFLICT DO NOTHING` 语义要实测钉住);组 id 一律 uuid 随机生成
    (merge_dbs 的 GLOBAL_UNION 语义依赖跨部署 id 不撞车);删组同事务清

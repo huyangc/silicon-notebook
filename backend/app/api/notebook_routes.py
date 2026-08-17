@@ -118,15 +118,18 @@ def set_notebook_bases_route(
     notebook_id: str, payload: SetBasesRequest,
     user: UserProfile = Depends(get_current_user),
 ) -> List[MountedBase]:
-    """全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)
-    ∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。
+    """全量替换挂载集合。只接受本 notebook 的可挂候选 ∪ 当前已挂载的 id(含失效边),
+    其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。可挂候选共四支:公共知识库、
+    同 owner 的库、被挂库上有「全员可读」授权的库,以及本笔记本 owner 有受限读权
+    (只读共享或点名/群组授权)且**本笔记本自身尚未被共享**的库。最后那道未共享门
+    堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。
     写权限本身由 require_notebook_capability("notebook:manage")(P0 阶段解析到
     owner-only,404 on denial)在依赖层挡;
     这里只做候选集校验,不重复手工判断写权限。
 
     并入"当前已挂载的 id"是刻意的:mountable_notebooks 与失效边的判定谓词
-    (MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主后)永远不会
-    出现在 mountable 里。前端编辑表单原样重新提交"保留这条失效边不变"的挂载集合
+    (MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主、共享被撤销,
+    或本笔记本自身被共享而关闭了借入边之后)永远不会出现在 mountable 里。前端编辑表单原样重新提交"保留这条失效边不变"的挂载集合
     (不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)
     时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。
     并入的是"已挂载"而非"任意 id",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。"""
@@ -143,7 +146,10 @@ def set_notebook_bases_route(
 @router.get("/notebooks/{notebook_id}/mountable", response_model=List[NotebookRef],
             dependencies=[Depends(require_notebook_capability("notebook:manage"))])
 def mountable_notebooks_route(notebook_id: str) -> List[NotebookRef]:
-    """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库。
+    """可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪
+    (本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。
+
+    最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。
 
     刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的
     /notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。"""

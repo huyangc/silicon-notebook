@@ -1667,6 +1667,121 @@ def test_memory_revision_provenance_and_json_null_match_persisted_golden(content
     assert all(revision.created_at.startswith("2026-07-23T00:00:00") for revision in revisions)
 
 
+def _seed_group_grant(database, user_id: str, username: str) -> None:
+    """给 `user_id` 一条指向 nb-content 的 `group` 授权边(经 `grp-pg`)。"""
+    mark = "%s"
+    with database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            f"VALUES ({','.join([mark] * 11)})",
+            (user_id, f"{username}@example.test", "Grantee", "user", "active",
+             NOW, NOW, username, "", "", 0),
+        )
+        connection.execute(
+            "INSERT INTO groups(id,name,kind,description,created_by,created_at,updated_at) "
+            f"VALUES ({','.join([mark] * 7)})",
+            ("grp-pg", "PG 组", "project", "", "user-content", NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO group_members(group_id,user_id,role,added_at,added_by) "
+            f"VALUES ({','.join([mark] * 5)})",
+            ("grp-pg", user_id, "member", NOW, "user-content"),
+        )
+        connection.execute(
+            "INSERT INTO notebook_grants"
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            f"VALUES ({','.join([mark] * 7)})",
+            ("gr-pg", "nb-content", "group", "grp-pg", "viewer", "user-content", NOW),
+        )
+
+
+def test_group_granted_reader_can_keep_private_memory_in_a_shared_notebook(
+    content_harness,
+):
+    """PG 侧三段式带锁站点的**行为**面(P1-T2 质量评审 P1)。
+
+    `test_access_sql_contract.py` 的两段式 allowlist 只数 token 不数站点——把某个
+    站点的授权边探测搬走、在另一个站点复制一份,三个计数照样全绿。SQLite 侧有
+    `test_memory_service.py` 的同名用例兜底,PG 侧此前没有,而 PG 恰恰是多挂了
+    `FOR SHARE` 行锁、实现分叉可能性更高的那一侧。
+
+    三个站点一次跑穿:`create_candidate_with_initial_revision`(写前判定)、
+    `create_answer_with_initial_revision`(答案存 Memory 的范围校验)、
+    `_lock_memory_aggregate_on`(`transition_with_revision` 的写事务内复核)。撤掉
+    组成员之后三条路径必须**当场**全部拒绝——授权是实时判定,不是一次性授予。
+    """
+    reader = "user-pg-grantee"
+    _seed_group_grant(content_harness.database, reader, "p00123456")
+    store = content_harness.memory
+
+    def _write(memory_id: str, **extra) -> MemoryWrite:
+        return MemoryWrite(
+            id=memory_id,
+            notebook_id="nb-content",
+            created_by=reader,
+            origin="user",
+            status="candidate",
+            title="组授权可写自己的 Memory",
+            content_md="Body",
+            tags=[],
+            created_at=NOW,
+            updated_at=NOW,
+            provenance={},
+            **extra,
+        )
+
+    # ① 写前判定:owner FOR SHARE → 成员 FOR SHARE(未命中)→ 授权边 FOR SHARE。
+    item = store.create_candidate_with_initial_revision(
+        _write("mem-pg-grant"), reader, "created"
+    )
+    assert item.created_by == reader
+
+    # ② 答案存 Memory 的范围校验(同一三段式的第二处复刻)。
+    request = AskRequest(question="组授权成员能提问吗?")
+    _job_id, conversation_id = content_harness.ask.begin_durable_job(
+        "nb-content", request, "chunk", reader
+    )
+    answer_id = content_harness.ask.save_answer(
+        "nb-content",
+        conversation_id,
+        request.question,
+        AskResponse(answer="能。", conclusion="能。", citations=[], anchors=[]),
+        reader,
+    )
+    from_answer = store.create_answer_with_initial_revision(
+        _write("mem-pg-answer", source_answer_id=answer_id), reader, "created"
+    )
+    assert from_answer.source_answer_id == answer_id
+
+    # ③ 写事务内复核(_lock_memory_aggregate_on)。
+    confirmed = store.transition_with_revision(
+        item.id, reader, {"candidate"}, "confirmed",
+        fields=None, changed_by=reader, reason="confirmed",
+    )
+    assert confirmed.status == "confirmed"
+    assert store.memory_for_user(item.id, reader).id == item.id
+
+    # 撤销组成员 ⇒ 读路径与两条写路径一起关闭。
+    mark = "%s"
+    with content_harness.database.write() as connection:
+        connection.execute(
+            f"DELETE FROM group_members WHERE group_id={mark} AND user_id={mark}",
+            ("grp-pg", reader),
+        )
+    with pytest.raises(KeyError):
+        store.memory_for_user(item.id, reader)
+    with pytest.raises(KeyError):
+        store.transition_with_revision(
+            item.id, reader, {"confirmed"}, "archived",
+            fields=None, changed_by=reader, reason="revoked",
+        )
+    with pytest.raises(PermissionError):
+        store.create_candidate_with_initial_revision(
+            _write("mem-pg-after-revoke"), reader, "created"
+        )
+
+
 def test_memory_rejects_nested_non_finite_json_without_partial_row(content_harness):
     write = MemoryWrite(
         id="mem-invalid-json",

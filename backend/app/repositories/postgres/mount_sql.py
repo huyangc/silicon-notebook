@@ -1,11 +1,15 @@
 """Canonical PostgreSQL reference-library mount SQL fragments.
 
-`sqlite/mount_sql.py` 的镜像。完整理由(含 P1「读权 ⇒ 可挂载」这条显式行为变更、
-以及为什么同 owner 那一支刻意保留在读权谓词之外)写在 SQLite 那一份的模块 docstring
-里,两份必须同修。
+`sqlite/mount_sql.py` 的镜像。完整理由(四支可挂范围、P1「读权 ⇒ 可挂载」这条显式
+行为变更、以及第 4 支「借入挂载」为什么要额外挂一道未共享门)写在 SQLite 那一份的
+模块 docstring 里,两份必须同修。
 """
 
-from app.repositories.postgres.access_sql import read_access_clause
+from app.repositories.postgres.access_sql import (
+    everyone_grant_expr,
+    member_exists_expr,
+    restricted_grant_access_expr,
+)
 
 MOUNT_JOIN = (
     "FROM notebook_bases e "
@@ -14,9 +18,26 @@ MOUNT_JOIN = (
     "WHERE e.notebook_id = %s AND b.id != e.notebook_id"
 )
 
+# 挂载方 owner 对被挂库的**受限**读权(只读成员 ∨ 点名授权边)。
+_BORROWED_READ_EXPR = (
+    "("
+    + member_exists_expr("b.id", "a.created_by", "nm")
+    + " OR "
+    + restricted_grant_access_expr("b.id", "a.created_by")
+    + ")"
+)
+
+# 未共享门:挂载方笔记本自身没有任何只读成员、也没有任何授权边。借来的东西不转借。
+_MOUNTER_NOT_SHARED_EXPR = (
+    "(NOT EXISTS (SELECT 1 FROM notebook_members xm WHERE xm.notebook_id = a.id)"
+    " AND NOT EXISTS (SELECT 1 FROM notebook_grants xg WHERE xg.notebook_id = a.id))"
+)
+
 MOUNT_VALID_EXPR = (
     "(b.status != 'copying' AND (b.tier = 'base' OR b.created_by = a.created_by"
-    " OR " + read_access_clause("b", user_ref="a.created_by") + "))"
+    " OR " + everyone_grant_expr("b.id")
+    + " OR (" + _BORROWED_READ_EXPR + " AND " + _MOUNTER_NOT_SHARED_EXPR + ")"
+    "))"
 )
 
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR

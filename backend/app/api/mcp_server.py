@@ -719,10 +719,12 @@ def _writable_notebook(
     """``_selected_notebook`` plus the OWNER-ONLY write gate.
 
     This is not belt-and-braces. ``require_agent_access`` clears on
-    ``user_can_read_notebook`` — owner ∪ read-only member — because every tool
-    that existed before the first caller of this helper only read. A token's
-    allowlist can perfectly well name a notebook its owner merely joined as a
-    read-only member, and that user cannot write to it through the browser
+    ``user_can_read_notebook`` — owner ∪ read-only member ∪ an effective grant
+    edge (user/group/group_admins/everyone, since P1 group sharing) — because
+    every tool that existed before the first caller of this helper only read.
+    A token's allowlist can perfectly well name a notebook its owner merely
+    joined as a read-only member or reached through a group grant, and that
+    user cannot write to it through the browser
     (add/delete a source, or start a background knowledge-graph/index build).
     Landing an Agent write there would hand the sharing boundary's read side a
     write it was explicitly denied, through a door the notebook's real owner
