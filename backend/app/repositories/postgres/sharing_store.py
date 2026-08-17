@@ -18,6 +18,11 @@ from app.repositories.postgres._store_utils import (
     sqlite_compatible_row,
     utc_now,
 )
+from app.repositories.postgres.access_sql import (
+    MEMBER_PROBE_SQL,
+    NOTEBOOK_READ_SQL,
+    NOTEBOOK_WRITE_SQL,
+)
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
 
@@ -266,17 +271,25 @@ class SharingStore:
         return (owner["username"] if owner and owner["username"] else "", [r["title"] for r in rows])
 
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """写权:仅 owner。谓词见 `access_sql.NOTEBOOK_WRITE_SQL`。"""
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT created_by FROM notebooks WHERE id=%s", (notebook_id,)
+                NOTEBOOK_WRITE_SQL, (notebook_id, user_id)
             ).fetchone()
-        return bool(row) and row["created_by"] == user_id
+        return row is not None
+
+    def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """读权:owner ∪ 只读成员。谓词见 `access_sql.NOTEBOOK_READ_SQL`。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                NOTEBOOK_READ_SQL, (notebook_id, user_id, user_id)
+            ).fetchone()
+        return row is not None
 
     def is_member(self, notebook_id: str, user_id: str) -> bool:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT 1 FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
-                (notebook_id, user_id),
+                MEMBER_PROBE_SQL, (notebook_id, user_id)
             ).fetchone()
         return row is not None
 

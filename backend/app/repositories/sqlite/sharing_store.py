@@ -6,6 +6,11 @@ from typing import Callable, Sequence
 
 from app.core.config import Settings
 from app.repositories.ports import NotebookTooLargeToCopyError
+from app.repositories.sqlite.access_sql import (
+    MEMBER_PROBE_SQL,
+    NOTEBOOK_READ_SQL,
+    NOTEBOOK_WRITE_SQL,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
 
@@ -314,18 +319,28 @@ class SharingStore:
 
     # ------------------------------------------------------- access & members
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """写权:仅 owner。谓词见 `access_sql.NOTEBOOK_WRITE_SQL`。"""
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT created_by FROM notebooks WHERE id = ?", (notebook_id,)
+                NOTEBOOK_WRITE_SQL, (notebook_id, user_id)
             ).fetchone()
-        return bool(row) and row["created_by"] == user_id
+        return row is not None
+
+    def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """读权:owner ∪ 只读成员。谓词见 `access_sql.NOTEBOOK_READ_SQL`。
+
+        一次查询答完两个分支——service 层曾写成 `写权 or is_member`(两次查询),
+        收口到唯一定义点后顺带省掉一跳。
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                NOTEBOOK_READ_SQL, (notebook_id, user_id, user_id)
+            ).fetchone()
+        return row is not None
 
     def is_member(self, notebook_id: str, user_id: str) -> bool:
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT 1 FROM notebook_members WHERE notebook_id = ? AND user_id = ?",
-                (notebook_id, user_id),
-            ).fetchone()
+            row = db.execute(MEMBER_PROBE_SQL, (notebook_id, user_id)).fetchone()
         return row is not None
 
     def add_member(self, notebook_id: str, user_id: str) -> None:

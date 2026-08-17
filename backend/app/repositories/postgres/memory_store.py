@@ -22,6 +22,12 @@ from app.repositories.postgres._store_utils import (
     jsonb,
     normalize_timestamp,
 )
+from app.repositories.postgres.access_sql import (
+    MEMBER_PROBE_FOR_SHARE_SQL,
+    member_exists_expr,
+    read_access_clause,
+    read_access_exists_clause,
+)
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.search import (
     MemoryCandidateScope,
@@ -312,12 +318,8 @@ class MemoryStore:
 
     @staticmethod
     def _read_access_clause(alias: str = "m") -> str:
-        return (
-            "EXISTS (SELECT 1 FROM notebooks access_nb "
-            f"WHERE access_nb.id={alias}.notebook_id AND "
-            "(access_nb.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members access_nm "
-            "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s)))"
-        )
+        """读权谓词。定义点在 `access_sql`,这里只是保留既有调用形状的薄封装。"""
+        return read_access_exists_clause(alias)
 
     def insert_memory(self, write: MemoryWrite) -> MemoryRecord:
         with self.database.write() as db:
@@ -491,6 +493,10 @@ class MemoryStore:
         self, write: MemoryWrite, changed_by: str, reason: str
     ) -> MemoryRecord:
         with self.database.write() as db:
+            # ⚠ 两段式,刻意不合并成 access_sql.NOTEBOOK_READ_SQL 单条 EXISTS:两步各自
+            # 挂 FOR SHARE 锁住 notebooks / notebook_members 的行,EXISTS 子查询里的行
+            # 拿不到这把锁。成员那一半复用唯一定义点;群组授权扩展读权时这里必须同步
+            # (已登记在 access_sql 的消费者清单)。
             notebook = db.execute(
                 "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
                 (write.notebook_id,),
@@ -498,8 +504,7 @@ class MemoryStore:
             member = None
             if notebook is not None and notebook["created_by"] != write.created_by:
                 member = db.execute(
-                    "SELECT 1 FROM notebook_members WHERE notebook_id=%s "
-                    "AND user_id=%s FOR SHARE",
+                    MEMBER_PROBE_FOR_SHARE_SQL,
                     (write.notebook_id, write.created_by),
                 ).fetchone()
             if notebook is None or (
@@ -649,6 +654,8 @@ class MemoryStore:
                     if item.notebook_id != write.notebook_id:
                         raise KeyError(write.source_answer_id)
                     return item
+                # ⚠ 两段式带 FOR SHARE 行锁,刻意不合并——理由同
+                # create_candidate_with_initial_revision 处的注释。
                 notebook = db.execute(
                     "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
                     (write.notebook_id,),
@@ -656,8 +663,7 @@ class MemoryStore:
                 member = None
                 if notebook is not None and notebook["created_by"] != write.created_by:
                     member = db.execute(
-                        "SELECT 1 FROM notebook_members WHERE notebook_id=%s "
-                        "AND user_id=%s FOR SHARE",
+                        MEMBER_PROBE_FOR_SHARE_SQL,
                         (write.notebook_id, write.created_by),
                     ).fetchone()
                 if notebook is None or (
@@ -711,8 +717,7 @@ class MemoryStore:
             row = db.execute(
                 "SELECT 1 FROM answers a JOIN notebooks n ON n.id=a.notebook_id "
                 "WHERE a.id=%s AND a.notebook_id=%s AND "
-                "(n.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members nm "
-                "WHERE nm.notebook_id=n.id AND nm.user_id=%s))",
+                + read_access_clause("n", "nm"),
                 (
                     write.source_answer_id,
                     write.notebook_id,
@@ -960,6 +965,10 @@ class MemoryStore:
         creator_id = str(routing["created_by"])
         if expected_notebook is not None and notebook_id != expected_notebook:
             raise ValueError("promotion candidate notebook does not match Memory notebook")
+        # ⚠ 两段式带 FOR SHARE 行锁,刻意不合并成单条 EXISTS:除了锁,owner 那一半还要
+        # 单独区分「notebook 不存在」(恒 KeyError)与「不是成员」(按调用方选
+        # PermissionError/KeyError)。成员那一半复用唯一定义点;群组授权扩展读权时
+        # 这里必须同步(已登记在 access_sql 的消费者清单)。
         notebook = db.execute(
             "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
             (notebook_id,),
@@ -968,8 +977,7 @@ class MemoryStore:
             raise KeyError(memory_id)
         if notebook["created_by"] != creator_id:
             member = db.execute(
-                "SELECT 1 FROM notebook_members WHERE notebook_id=%s AND user_id=%s "
-                "FOR SHARE",
+                MEMBER_PROBE_FOR_SHARE_SQL,
                 (notebook_id, creator_id),
             ).fetchone()
             if member is None:
@@ -1317,9 +1325,8 @@ class MemoryStore:
         """Revalidate Memory scope and creator access inside approval's write txn."""
         row = db.execute(
             "SELECT m.notebook_id,m.created_by,n.created_by AS notebook_owner,"
-            "EXISTS(SELECT 1 FROM notebook_members nm "
-            "WHERE nm.notebook_id=m.notebook_id AND nm.user_id=m.created_by) "
-            "AS is_member FROM memory_items m "
+            + member_exists_expr("m.notebook_id", "m.created_by")
+            + " AS is_member FROM memory_items m "
             "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=%s",
             (memory_id,),
         ).fetchone()

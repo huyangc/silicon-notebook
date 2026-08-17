@@ -7,6 +7,7 @@ from typing import Sequence
 from psycopg import sql
 
 from app.repositories.like_pattern import LIKE_ESCAPE_CHAR, escape_like_pattern
+from app.repositories.postgres.access_sql import read_access_exists_clause
 
 
 PAYLOAD_NAME_EXPRESSION = '(payload ->> \'name\') COLLATE "C"'
@@ -770,12 +771,7 @@ def _memory_match_predicates(
     if scope.origin is not None:
         predicates.append("origin=%s")
         params.append(scope.origin)
-    predicates.append(
-        "EXISTS (SELECT 1 FROM notebooks access_nb "
-        "WHERE access_nb.id=memory_items.notebook_id AND "
-        "(access_nb.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members access_nm "
-        "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s)))"
-    )
+    predicates.append(read_access_exists_clause("memory_items"))
     params.extend([scope.viewer_id, scope.viewer_id])
     probes = memory_match_probes(query, phrase_queries)
     groups: list[str] = []
