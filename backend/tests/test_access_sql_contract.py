@@ -11,7 +11,9 @@ P0-T1 把散落在 sharing_store / memory_store / search 的「owner ∨ 只读�
 另钉住 service 层 `user_can_read_notebook` 与 store 新方法结果一致:重构把 service
 从「写权 or 成员」两次查询改成一跳委托 store 单条查询,两者必须逐格同义。
 """
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -201,24 +203,160 @@ def test_member_probe_matches_is_member(world):
         assert (row is not None) is repo.is_member(notebook, user_id)
 
 
-def test_backends_declare_the_same_predicate_shape():
-    """双后端同修:两份 access_sql 只应差在占位符上。
+# ---------------------------------------------------------------------------
+# 双后端同修守卫
+# ---------------------------------------------------------------------------
+#
+# 手写逐符号断言挡得住「改了同一个符号」,挡不住「只在一侧**新增**符号」——而 P1
+# 群组授权要做的恰是后者(grants/group_members 的新片段)。故改为模块自省驱动:
+# 先断言两侧 public 符号集合相等,再对交集逐项 normalized 比对,新增符号自动进入
+# 比对范围,单侧新增当场报红。
 
-    群组授权会在这两份文件里扩展同一条读权谓词;一侧漏改就是「PostgreSQL 部署的
-    权限与 SQLite 部署不同」,而这种分叉在单后端的测试里永远看不见。
+# 单侧独有符号的显式豁免名单:每一项都要写清楚为什么只该在一侧存在。
+_PG_ONLY_SYMBOLS = {
+    # 两段式带锁写法的加锁变体;SQLite 没有行锁概念,不应有对应物。
+    "MEMBER_PROBE_FOR_SHARE_SQL",
+}
+_SQLITE_ONLY_SYMBOLS: set[str] = set()
+
+# 可调用符号的比对探针:新增可调用符号必须在此登记调用参数,否则下面的守卫响亮
+# 失败(逼着登记,而不是静默跳过比对)。
+_CALLABLE_PROBES = {
+    "member_exists_expr": lambda mod: mod.member_exists_expr(
+        "outer.notebook_id", "outer.user_id"
+    ),
+    "read_access_clause": lambda mod: mod.read_access_clause(),
+    "read_access_exists_clause": lambda mod: mod.read_access_exists_clause("m"),
+}
+
+
+def _public_symbols(mod) -> dict[str, tuple[str, object]]:
+    """模块的 public 面:str 常量 + 本模块定义的可调用。"""
+    symbols: dict[str, tuple[str, object]] = {}
+    for name in dir(mod):
+        if name.startswith("_"):
+            continue
+        value = getattr(mod, name)
+        if isinstance(value, str):
+            symbols[name] = ("const", value)
+        elif callable(value) and getattr(value, "__module__", None) == mod.__name__:
+            symbols[name] = ("callable", value)
+    return symbols
+
+
+def _probe_value(mod, name: str, kind: str, value) -> str:
+    if kind == "const":
+        return value
+    assert name in _CALLABLE_PROBES, (
+        f"可调用符号 {name} 未在 _CALLABLE_PROBES 登记比对参数——"
+        "新增片段函数时必须同时登记,双后端同修守卫才看得见它"
+    )
+    return _CALLABLE_PROBES[name](mod)
+
+
+def test_backends_declare_the_same_predicate_surface():
+    """双后端同修:符号集合相等,交集逐项只差占位符。
+
+    群组授权会在这两份文件里扩展同一条读权谓词;一侧漏改(改了同一符号)或漏加
+    (只在一侧新增符号)都是「PostgreSQL 部署的权限与 SQLite 部署不同」,而这种
+    分叉在单后端的测试里永远看不见。
     """
     from app.repositories.postgres import access_sql as pg
 
-    def normalized(text: str) -> str:
-        return text.replace("%s", "?")
+    sqlite_syms = _public_symbols(access_sql)
+    pg_syms = _public_symbols(pg)
 
-    assert normalized(pg.NOTEBOOK_READ_SQL) == access_sql.NOTEBOOK_READ_SQL
-    assert normalized(pg.NOTEBOOK_WRITE_SQL) == access_sql.NOTEBOOK_WRITE_SQL
-    assert normalized(pg.MEMBER_PROBE_SQL) == access_sql.MEMBER_PROBE_SQL
-    assert normalized(pg.read_access_clause()) == access_sql.read_access_clause()
-    assert (
-        normalized(pg.read_access_exists_clause("m"))
-        == access_sql.read_access_exists_clause("m")
+    assert set(sqlite_syms) - _SQLITE_ONLY_SYMBOLS == set(pg_syms) - _PG_ONLY_SYMBOLS, (
+        "两份 access_sql 的 public 符号集合不等——单侧新增/删除了符号。"
+        "要么补齐另一侧,要么在豁免名单里写明为什么只该一侧有。"
     )
+
+    for name in sorted(set(sqlite_syms) & set(pg_syms)):
+        s_kind, s_raw = sqlite_syms[name]
+        p_kind, p_raw = pg_syms[name]
+        assert s_kind == p_kind, f"{name} 在两侧的形态不同({s_kind} vs {p_kind})"
+        s_val = _probe_value(access_sql, name, s_kind, s_raw)
+        p_val = _probe_value(pg, name, p_kind, p_raw)
+        assert p_val.replace("%s", "?") == s_val, name
+
     # PG 独有:两段式带锁写法用的加锁变体,只应比裸探测多一个 FOR SHARE 后缀。
     assert pg.MEMBER_PROBE_FOR_SHARE_SQL == pg.MEMBER_PROBE_SQL + " FOR SHARE"
+
+
+def test_placeholder_styles_are_not_cross_contaminated():
+    """PG 串不得含 `?`、SQLite 串不得含 `%s`。
+
+    normalized 比对是单向替换(`%s`→`?`),分不出「PG 用 %s」与「PG 被整份复制成
+    SQLite 版」——后者会让 psycopg 在每次授权判定上抛语法错误。方向性断言把这类
+    复制粘贴当场拦下。
+    """
+    from app.repositories.postgres import access_sql as pg
+
+    for name, (kind, raw) in sorted(_public_symbols(access_sql).items()):
+        assert "%s" not in _probe_value(access_sql, name, kind, raw), (
+            f"sqlite/access_sql.py::{name} 含 %s 占位符"
+        )
+    for name, (kind, raw) in sorted(_public_symbols(pg).items()):
+        assert "?" not in _probe_value(pg, name, kind, raw), (
+            f"postgres/access_sql.py::{name} 含 ? 占位符"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 结构性守卫:谓词不许离开唯一定义点
+# ---------------------------------------------------------------------------
+
+_BACKEND_APP = Path(__file__).resolve().parents[1] / "app"
+
+
+def _collapsed(text: str) -> str:
+    """去掉引号与全部空白:让跨行字符串拼接与源码换行都现出连续的 SQL 形状。"""
+    return re.sub(r"[\s'\"]+", "", text)
+
+
+def test_owner_or_member_shape_lives_only_in_access_sql():
+    """「owner ∨ 成员」的内联形状只许出现在 access_sql.py。
+
+    唯一定义点的价值在于没有第二份:重新手写一份逐字相同的复刻,今天语义相同,
+    P1 扩展群组授权那天就是一条静默分叉的授权路径。这条移动变异守卫保证「把定义
+    搬回消费点」会报红,而不是靠 docstring 清单的自觉。
+    """
+    pattern = re.compile(r"created_by=(\?|%s)OREXISTS\(SELECT1FROMnotebook_members")
+    offenders = []
+    for path in sorted(_BACKEND_APP.rglob("*.py")):
+        if path.name == "access_sql.py":
+            continue
+        if pattern.search(_collapsed(path.read_text(encoding="utf-8"))):
+            offenders.append(str(path.relative_to(_BACKEND_APP)))
+    assert offenders == [], (
+        f"授权谓词形状出现在唯一定义点之外:{offenders}。"
+        "请改用 access_sql 的片段函数,不要手写内联复刻。"
+    )
+
+
+def test_two_step_locked_sites_stay_pinned():
+    """两段式带锁/三态站点的 allowlist:数量一变就必须回来更新这里与 docstring。
+
+    这些站点只复用了成员探测那一半,owner 半是手写的 `SELECT created_by`——群组
+    授权(P1)在 read_access_clause 里扩进群组成员时,它们**不会自动跟随**,必须
+    逐处手改。这条守卫在「有人新增/删除/搬动这类站点」时逼人回来看清单,而不是
+    让新站点静默游离在扩展范围之外。
+    """
+    pg_store = _collapsed(
+        (_BACKEND_APP / "repositories/postgres/memory_store.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert pg_store.count("SELECTcreated_byFROMnotebooksWHEREid=%sFORSHARE") == 3, (
+        "postgres/memory_store.py 的两段式带锁站点数量变了——"
+        "同步更新本 allowlist 与两份 access_sql 的 docstring 清单"
+    )
+    sqlite_store = _collapsed(
+        (_BACKEND_APP / "repositories/sqlite/memory_store.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert sqlite_store.count("SELECTcreated_byFROMnotebooksWHEREid=?") == 1, (
+        "sqlite/memory_store.py 的两段式三态站点数量变了——"
+        "同步更新本 allowlist 与两份 access_sql 的 docstring 清单"
+    )
