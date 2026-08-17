@@ -195,6 +195,14 @@ class ReportStore:
         "id", "question", "content_md", "created_at", "updated_at",
         "references_json", "understanding_json",
     )
+    # Columns the token lookup reads for the SERVER-SIDE gate only — the route
+    # checks that the report's creator still has read access to the notebook
+    # before serving anything (P1-T3b), and `public_report_payload` is an
+    # allowlist that never names them.  Deliberately a separate tuple from
+    # PUBLIC_FIELDS so that name keeps its single meaning ("what may cross to an
+    # anonymous reader"); `understanding_json` above is the existing precedent
+    # for a selected-then-dropped column, and it is popped for the same reason.
+    GATE_FIELDS = ("notebook_id", "created_by")
 
     def share_report(self, notebook_id: str, report_id: str) -> str:
         """Issue (or return) the public token for one report.
@@ -251,11 +259,15 @@ class ReportStore:
         leaves the authenticated surface, so a column added later must be opted
         in here rather than inherited.  Returns None for unknown/revoked tokens
         so the caller cannot distinguish "never existed" from "unshared".
+
+        Also returns ``GATE_FIELDS`` (``notebook_id`` / ``created_by``) for the
+        caller's live authorization check.  They are NOT part of the disclosure
+        surface — ``public_report_payload`` names neither.
         """
         clean = str(token or "").strip()
         if not clean:
             return None
-        columns = ", ".join(self.PUBLIC_FIELDS)
+        columns = ", ".join(self.PUBLIC_FIELDS + self.GATE_FIELDS)
         with self.database.connect() as db:
             row = db.execute(
                 f"SELECT {columns} FROM reports "

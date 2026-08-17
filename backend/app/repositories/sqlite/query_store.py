@@ -1053,28 +1053,35 @@ class QueryStore:
             ).fetchall()
             name_of = {row["id"]: row["name"] for row in mine}
             notebook_ids = list(name_of)
+            # 报告这一半**不在** `if notebook_ids:` 闸内(P1-T3b):它的谓词只有
+            # `created_by = 当前用户`,一个 notebook id 都不消费。放在闸内时,
+            # 共享库里的成员只要自己没建过库,待确认报告就整体缺席——铃铛对他
+            # 永远是 0,而报告卡在 intent_ready 等他确认。零新增查询:同一条
+            # SQL 只是挪出了那个 if。
+            reports = db.execute(
+                "SELECT id, question, notebook_id, created_at FROM reports "
+                "WHERE status IN ('intent_ready','outline_ready') "
+                "AND created_by = ? ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+            for row in reports:
+                items.append(
+                    {
+                        "type": "report_outline",
+                        "notebook_id": row["notebook_id"],
+                        # 非自有库(共享库)的名字这里解析不出来 → 空串。库名解析
+                        # 是 T4 前端的事;条目本身必须在。
+                        "notebook_name": name_of.get(row["notebook_id"], ""),
+                        "report_id": row["id"],
+                        "title": (row["question"] or "")[:60],
+                        "created_at": row["created_at"],
+                    }
+                )
             if notebook_ids:
                 role_row = db.execute(
                     "SELECT role FROM users WHERE id = ?", (user_id,)
                 ).fetchone()
                 is_admin = bool(role_row) and role_row["role"] == "admin"
-                reports = db.execute(
-                    "SELECT id, question, notebook_id, created_at FROM reports "
-                    "WHERE status IN ('intent_ready','outline_ready') "
-                    "AND created_by = ? ORDER BY updated_at DESC",
-                    (user_id,),
-                ).fetchall()
-                for row in reports:
-                    items.append(
-                        {
-                            "type": "report_outline",
-                            "notebook_id": row["notebook_id"],
-                            "notebook_name": name_of.get(row["notebook_id"], ""),
-                            "report_id": row["id"],
-                            "title": (row["question"] or "")[:60],
-                            "created_at": row["created_at"],
-                        }
-                    )
                 placeholders = ",".join("?" for _ in notebook_ids)
                 governance = [
                     ("merge", "concept_merge_candidates", "status = 'pending'"),

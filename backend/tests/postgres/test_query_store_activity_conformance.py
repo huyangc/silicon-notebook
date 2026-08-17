@@ -497,6 +497,35 @@ def test_reports_count_matches_activity_stream_entries(postgres_database, store)
     assert len(report_ids) == reports_count
 
 
+def test_pending_report_of_a_member_without_own_notebooks(postgres_database, store):
+    """PostgreSQL 侧的同一条 P1-T3b 断言:待确认报告那一半**不在**
+    `if notebook_ids:` 闸内。
+
+    共享笔记本里的成员可以建自己的报告,但他可能一个自有库都没有;闸内的写法会让
+    他的铃铛恒为 0,而报告卡在 intent_ready 等他确认。两个后端各有一份实现,所以
+    这条不变量必须两边各钉一次。"""
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-owner")
+        _insert_user(connection, "u-member")            # 没有任何自有 notebook
+        _insert_notebook(connection, "n-shared", "u-owner")
+        _insert_report(connection, "rep-member", "n-shared", "u-member", NOW,
+                       status="intent_ready")
+
+    projection = store.pending_actions_projection_rows("u-member")
+    assert projection["notebook_ids"] == []
+    reports = [it for it in projection["items"] if it["type"] == "report_outline"]
+    assert [it["report_id"] for it in reports] == ["rep-member"]
+    assert reports[0]["notebook_id"] == "n-shared"
+    assert reports[0]["notebook_name"] == ""            # 库名解析留给 T4
+
+    # 反向:owner 的铃铛里不出现成员的报告。
+    owner_reports = [
+        it for it in store.pending_actions_projection_rows("u-owner")["items"]
+        if it["type"] == "report_outline"
+    ]
+    assert owner_reports == []
+
+
 def test_browser_local_day_window_selects_that_local_day(postgres_database, store):
     """与 SQLite 侧逐字同一条(F1):选「浏览器本地日」要真的选中那一天的行。
 

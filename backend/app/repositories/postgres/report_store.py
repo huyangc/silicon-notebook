@@ -199,6 +199,9 @@ class ReportStore:
         "id", "question", "content_md", "created_at", "updated_at",
         "references_json", "understanding_json",
     )
+    # Server-side gate columns — see the SQLite adapter's docstring for why they
+    # are a separate tuple from PUBLIC_FIELDS and never reach the payload.
+    GATE_FIELDS = ("notebook_id", "created_by")
 
     def share_report(self, notebook_id: str, report_id: str) -> str:
         """Issue (or return) the public token for one report.
@@ -257,11 +260,14 @@ class ReportStore:
         leaves the authenticated surface, so a column added later must be opted
         in here rather than inherited.  Returns None for unknown/revoked tokens
         so the caller cannot distinguish "never existed" from "unshared".
+
+        Also returns ``GATE_FIELDS`` for the caller's live authorization check;
+        they are not part of the disclosure surface.
         """
         clean = str(token or "").strip()
         if not clean:
             return None
-        columns = ", ".join(self.PUBLIC_FIELDS)
+        columns = ", ".join(self.PUBLIC_FIELDS + self.GATE_FIELDS)
         with self.database.connect() as db:
             row = db.execute(
                 f"SELECT {columns} FROM reports "

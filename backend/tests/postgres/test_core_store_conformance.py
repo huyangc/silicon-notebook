@@ -2275,7 +2275,15 @@ def test_concurrent_share_issuance_converges_under_read_committed(
     assert reports.report_share_token(notebook_id, report_id) == issued[0]
     assert reports.public_report_by_token(issued[0]) is None  # 未 done 不可读
     reports.update_report(notebook_id, report_id, status="done")
-    assert reports.public_report_by_token(issued[0]) is not None
+    resolved = reports.public_report_by_token(issued[0])
+    assert resolved is not None
+    # 匿名路由要用 notebook_id/created_by 实时复核创建者的读权(P1-T3b 裁决),
+    # 所以 token 查询必须在 PG 侧也把这两列带回来——它们是**服务端**闸的输入,
+    # 不进 `public_report_payload` 的白名单。列名拼错只会在这一侧暴露。
+    assert resolved["notebook_id"] == notebook_id
+    assert resolved["created_by"] == owner.id
+    # 未 done 与未知 token 仍不可区分。
+    assert reports.public_report_by_token("rshr-never-issued") is None
 
 
 def test_terminal_understanding_write_keeps_the_generation_stamp_on_postgres(

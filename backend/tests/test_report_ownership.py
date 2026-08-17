@@ -79,6 +79,10 @@ def _new_user(client: TestClient) -> tuple[dict, str]:
     return headers, client.get("/api/me", headers=headers).json()["id"]
 
 
+def _me(client: TestClient, headers: dict) -> str:
+    return client.get("/api/me", headers=headers).json()["id"]
+
+
 def _notebook(client: TestClient, headers: dict, name: str = "库") -> str:
     return client.post("/api/notebooks", json={"name": name},
                        headers=headers).json()["id"]
@@ -92,12 +96,17 @@ def _create_report(client: TestClient, headers: dict, notebook_id: str,
     return response.json()["report_id"]
 
 
-def _group_granted_reader(client: TestClient, owner: dict,
-                          notebook_id: str) -> tuple[dict, str]:
-    """建组 → 拉人进组 → 把库共享给该组,返回这位组授权 reader。"""
+def _group_granted_reader(client: TestClient, owner: dict, notebook_id: str,
+                          reader: dict | None = None,
+                          reader_id: str = "") -> tuple[dict, str, str]:
+    """建组 → 拉人进组 → 把库共享给该组,返回 (reader headers, reader id, group id)。
+
+    传入 `reader`/`reader_id` 可以把一位已有用户拉进新建的组(撤授权后再恢复的
+    场景要复用同一个人)。"""
     group_id = client.post("/api/groups", json={"name": "项目组"},
                            headers=owner).json()["id"]
-    reader, reader_id = _new_user(client)
+    if reader is None:
+        reader, reader_id = _new_user(client)
     assert client.put(
         f"/api/groups/{group_id}/members/{reader_id}",
         json={"role": "member"}, headers=owner,
@@ -108,7 +117,7 @@ def _group_granted_reader(client: TestClient, owner: dict,
               "role": "viewer"},
         headers=owner,
     ).status_code == 200
-    return reader, reader_id
+    return reader, reader_id, group_id
 
 
 def _finish(notebook_id: str, report_id: str, content: str = "# 正文") -> None:
@@ -156,7 +165,7 @@ def test_group_granted_reader_creates_a_report_owned_by_himself(
     于是谁也看不见自己的、owner 看得见全部)。"""
     owner, owner_id = _new_user(client)
     notebook_id = _notebook(client, owner)
-    reader, reader_id = _group_granted_reader(client, owner, notebook_id)
+    reader, reader_id, _ = _group_granted_reader(client, owner, notebook_id)
 
     report_id = _create_report(client, reader, notebook_id)
 
@@ -196,7 +205,7 @@ def test_another_members_report_is_404_on_every_operation(client, stub_report_la
     403 会把这些端点变成"owner 手上有哪些报告 id"的探针。"""
     owner, _ = _new_user(client)
     notebook_id = _notebook(client, owner)
-    member_a, _ = _group_granted_reader(client, owner, notebook_id)
+    member_a, _, _ = _group_granted_reader(client, owner, notebook_id)
     member_b, member_b_id = _new_user(client)
     from app.api.deps import repository
     repository().add_member(notebook_id, member_b_id)
@@ -215,6 +224,87 @@ def test_another_members_report_is_404_on_every_operation(client, stub_report_la
     # DELETE 自带 notebook 谓词但**不带** created_by,漏了行级判定它会静默成功
     # 并同样返回 200,两种结果在响应上分不出来。
     assert repository().get_report(notebook_id, report_id)["id"] == report_id
+
+
+def test_intruder_write_attempts_leave_the_report_state_untouched(
+    client, stub_report_launch
+):
+    """404 之外还要断言**没发生任何事**——防"闸挪到状态转换之后"的砖机形态。
+
+    `generate` / `cancel` / `intent` 都会原子改写 `status`(claim/取消)。行级判定
+    若挪到 `claim_report_generation` 或 `update_report(status='cancelled')` 之后,
+    响应仍是 404,而报告已经被外人推进/取消/砖掉——创建者再也回不到
+    `outline_ready`。所以这里用 **outline_ready** 的报告(三条路径都会真的动它),
+    而不是 done 的(done 会在更早的状态闸上被弹回,弱化整条断言)。"""
+    owner, _ = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    member_a, _, _ = _group_granted_reader(client, owner, notebook_id)
+    member_b, member_b_id = _new_user(client)
+    from app.api.deps import repository
+    repository().add_member(notebook_id, member_b_id)
+
+    report_id = _create_report(client, member_a, notebook_id)
+    repository().update_report(
+        notebook_id, report_id, status="outline_ready", progress="大纲就绪",
+        outline=[{"title": "T", "sub_queries": ["q"]}],
+    )
+    before = repository().get_report(notebook_id, report_id)
+    assert before["status"] == "outline_ready"
+
+    destructive = (
+        ("post", "/generate", {}),
+        ("post", "/cancel", {}),
+        ("post", "/intent", {"resolved_question": "被劫持的问题", "answers": []}),
+        ("patch", "/outline",
+         {"sections": [{"title": "劫持", "sub_queries": ["x"]}]}),
+    )
+    for intruder, label in ((member_b, "另一位成员"), (owner, "notebook owner")):
+        for method, suffix, body in destructive:
+            response = _operate(client, intruder, notebook_id, report_id,
+                                method, suffix, body)
+            assert response.status_code == 404, (label, suffix)
+            after = repository().get_report(notebook_id, report_id)
+            assert after["status"] == before["status"], (label, suffix)
+            assert after["progress"] == before["progress"], (label, suffix)
+            assert after["outline"] == before["outline"], (label, suffix)
+            assert after["question"] == before["question"], (label, suffix)
+
+    # 创建者自己仍能正常推进——证明上面拦下的是入侵者,不是这条状态路径本身。
+    assert _operate(client, member_a, notebook_id, report_id,
+                    "post", "/generate", {}).status_code == 200
+
+
+def test_a_report_id_from_another_notebook_is_404(client, stub_report_launch):
+    """URL 上的 notebook 维度不是装饰:换一个**同样有读权**的 notebook_id 去拼
+    同一个 report_id,必须 404。
+
+    行级判定读的是 `get_report(notebook_id, report_id)` 返回的行,那条 SQL 的
+    `notebook_id = ?` 谓词是"报告属于这个库"的唯一证明。删掉它,守卫仍会看到
+    一个 `created_by` 对得上的行、照常放行——而请求声称的库是另一本。两种形态
+    都要覆盖:同一用户的两个自有库(排除"其实是读守卫在拦"的解释),以及
+    自有库报告 × 共享库 id。"""
+    owner, _ = _new_user(client)
+    own_a = _notebook(client, owner, "A")
+    own_b = _notebook(client, owner, "B")
+    report_in_a = _create_report(client, owner, own_a)
+
+    # 形态一:两个库都归他,读守卫对 B 一定放行 → 只可能是 notebook 谓词在拦。
+    assert client.get(f"/api/notebooks/{own_b}/reports/{report_in_a}",
+                      headers=owner).status_code == 404
+    assert client.get(f"/api/notebooks/{own_a}/reports/{report_in_a}",
+                      headers=owner).status_code == 200
+
+    # 形态二:自有库的报告 × 一本他有读权的共享库。
+    librarian, _ = _new_user(client)
+    shared = _notebook(client, librarian, "共享库")
+    _group_granted_reader(client, librarian, shared, owner, _me(client, owner))
+    assert client.get(f"/api/notebooks/{shared}/reports/{report_in_a}",
+                      headers=owner).status_code == 404
+    # 写路径同理(它们走同一个 helper,但 URL 拼错的形态值得各钉一条)。
+    assert _operate(client, owner, shared, report_in_a,
+                    "delete", "", None).status_code == 404
+    assert client.get(f"/api/notebooks/{own_a}/reports/{report_in_a}",
+                      headers=owner).status_code == 200
 
 
 def test_a_stranger_is_404_on_creation_and_on_every_operation(
@@ -249,7 +339,7 @@ def test_list_and_export_only_ever_return_my_own_reports(client, stub_report_lau
     """
     owner, _ = _new_user(client)
     notebook_id = _notebook(client, owner)
-    member, _ = _group_granted_reader(client, owner, notebook_id)
+    member, _, _ = _group_granted_reader(client, owner, notebook_id)
 
     owner_report = _create_report(client, owner, notebook_id, "owner 的问题")
     member_report = _create_report(client, member, notebook_id, "成员的问题")
@@ -325,7 +415,7 @@ def test_a_member_runs_the_full_lifecycle_on_their_own_report(
     """成员对**自己的**报告拥有与 owner 相同的一整套操作。"""
     owner, _ = _new_user(client)
     notebook_id = _notebook(client, owner)
-    member, _ = _group_granted_reader(client, owner, notebook_id)
+    member, _, _ = _group_granted_reader(client, owner, notebook_id)
     report_id = _create_report(client, member, notebook_id)
     _finish(notebook_id, report_id)
 
@@ -351,7 +441,7 @@ def test_the_creators_share_token_still_serves_the_anonymous_page(
     发放的 token 照常服务任何人,包括 notebook owner 与陌生人。"""
     owner, _ = _new_user(client)
     notebook_id = _notebook(client, owner)
-    member, _ = _group_granted_reader(client, owner, notebook_id)
+    member, _, _ = _group_granted_reader(client, owner, notebook_id)
     report_id = _create_report(client, member, notebook_id)
     _finish(notebook_id, report_id, "# 成员写的报告")
 
@@ -367,6 +457,149 @@ def test_the_creators_share_token_still_serves_the_anonymous_page(
     assert _operate(client, member, notebook_id, report_id,
                     "delete", "/share", None).status_code == 204
     assert client.get(f"/api/public/reports/{token}").status_code == 404
+
+
+def test_public_link_dies_the_moment_the_creator_loses_read_access(
+    client, stub_report_launch
+):
+    """成员发布的公开链接只在他对该库仍有读权时有效(P1-T3b 裁决)。
+
+    真机形态:成员建报告 → 发公开 token → 被撤授权。此后成员被读守卫挡在库外、
+    owner 被行级判定挡在报告外,**谁都够不到 unshare**,而公开页会永远 200 服务
+    owner 的语料。裁决不是收回成员的发布权(设计 §4 拍板「分享走既有公开链接」),
+    也不是在每个撤销点做级联(撤销点有好几个,级联要处处记账),而是把「挂载
+    实时判定」那套哲学延伸过来:公开页每次请求复核创建者的**当前**读权。
+
+    三条失权路径各来一遍——它们在数据层是三件不同的事(授权边没了 / 人不在组里
+    了 / 组没了),只测一条会漏掉另外两条。"""
+    from app.api.deps import repository
+
+    def _published(owner_headers, notebook_id, member_headers):
+        report_id = _create_report(client, member_headers, notebook_id)
+        _finish(notebook_id, report_id, "# 成员发布的正文")
+        token = _operate(client, member_headers, notebook_id, report_id,
+                         "post", "/share", {}).json()["share_token"]
+        assert client.get(f"/api/public/reports/{token}").status_code == 200
+        return report_id, token
+
+    # ① 撤掉授权边。
+    owner, _ = _new_user(client)
+    nb = _notebook(client, owner)
+    member, member_id, group_id = _group_granted_reader(client, owner, nb)
+    _report_id, token = _published(owner, nb, member)
+    grant_id = client.get(f"/api/notebooks/{nb}/grants",
+                          headers=owner).json()[0]["id"]
+    assert client.delete(f"/api/notebooks/{nb}/grants/{grant_id}",
+                         headers=owner).status_code in (200, 204)
+    assert client.get(f"/api/public/reports/{token}").status_code == 404
+    # 恢复授权 → 链接复活(token 幂等语义不因这道闸被破坏)。
+    assert client.post(
+        f"/api/notebooks/{nb}/grants",
+        json={"principal_type": "group", "principal_id": group_id,
+              "role": "viewer"},
+        headers=owner,
+    ).status_code == 200
+    assert client.get(f"/api/public/reports/{token}").status_code == 200
+
+    # ② 把人踢出群组(授权边还在,但他不再是组成员)。
+    assert client.delete(f"/api/groups/{group_id}/members/{member_id}",
+                         headers=owner).status_code in (200, 204)
+    assert client.get(f"/api/public/reports/{token}").status_code == 404
+    assert client.put(f"/api/groups/{group_id}/members/{member_id}",
+                      json={"role": "member"}, headers=owner).status_code == 200
+    assert client.get(f"/api/public/reports/{token}").status_code == 200
+
+    # ③ 删掉整个群组(授权边随之清掉)。
+    assert client.delete(f"/api/groups/{group_id}",
+                         headers=owner).status_code in (200, 204)
+    assert client.get(f"/api/public/reports/{token}").status_code == 404
+    # 失权期间与无效 token 不可区分:同样的 404,同样的 detail。
+    unknown = client.get("/api/public/reports/rshr-never-issued")
+    revoked = client.get(f"/api/public/reports/{token}")
+    assert unknown.status_code == revoked.status_code == 404
+    assert unknown.json() == revoked.json()
+    # 报告行本身没有被动过——这是一道读闸,不是级联删除。
+    assert repository().get_report(nb, _report_id)["status"] == "done"
+
+
+def test_the_creator_gate_never_touches_owner_reports_or_the_payload(
+    client, stub_report_launch
+):
+    """owner 自己发布的链接不受这道闸影响(创建者=owner,读权恒成立),
+    且闸用的两列内部 id 绝不能跟着爬进公开响应。"""
+    owner, _ = _new_user(client)
+    nb = _notebook(client, owner)
+    report_id = _create_report(client, owner, nb)
+    _finish(nb, report_id, "# owner 的正文")
+    token = _operate(client, owner, nb, report_id,
+                     "post", "/share", {}).json()["share_token"]
+
+    # 无关的群组变动(建组、共享、撤销)一次都不该影响 owner 的链接。
+    _member, _member_id, group_id = _group_granted_reader(client, owner, nb)
+    assert client.get(f"/api/public/reports/{token}").status_code == 200
+    assert client.delete(f"/api/groups/{group_id}",
+                         headers=owner).status_code in (200, 204)
+    public = client.get(f"/api/public/reports/{token}")
+    assert public.status_code == 200
+    assert public.json()["content_md"] == "# owner 的正文"
+
+    # 判定读的是 notebook_id/created_by,两者都必须留在服务端。
+    body = public.json()
+    assert "notebook_id" not in body and "created_by" not in body
+    assert nb not in public.text
+
+
+# --------------------------------------------------------------- 结构守卫
+
+
+def test_every_report_id_route_calls_the_row_level_gate():
+    """凡路径含 `{report_id}` 的认证端点,函数体内必须出现 `_own_report_or_404`。
+
+    行级判定是**体内**的,没法像 `Depends(...)` 那样在声明处看见——P2 加一个
+    "重新生成"或"导出单份"端点时,漏挂不会有任何报错,只会安静地让任何读权用户
+    操作别人的报告。AST 扫描(形状仿 test_notebook_capability_guard):按装饰器
+    路径字面量选端点,按 Name 节点判是否调用了守卫。
+    公开分享端点挂在 `public_router` 上、路径里也没有 `{report_id}`(token 就是
+    全部授权),按 router 显式豁免。"""
+    import ast
+    from pathlib import Path
+
+    path = (Path(__file__).resolve().parents[1] / "app" / "api"
+            / "report_routes.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+
+    checked: list[str] = []
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if not (isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Attribute)
+                    and isinstance(decorator.func.value, ast.Name)):
+                continue
+            router_name = decorator.func.value.id
+            route = decorator.args[0] if decorator.args else None
+            if not (isinstance(route, ast.Constant)
+                    and isinstance(route.value, str)):
+                continue
+            if "{report_id}" not in route.value:
+                continue
+            if router_name == "public_router":      # 匿名面:token 即授权
+                continue
+            checked.append(node.name)
+            calls_gate = any(
+                isinstance(inner, ast.Name) and inner.id == "_own_report_or_404"
+                for inner in ast.walk(node)
+            )
+            if not calls_gate:
+                offenders.append(node.name)
+
+    # 空转保护:扫到 0 个端点却报绿,比没有守卫更糟(路由文件改名/装饰器换写法)。
+    assert len(checked) >= 9, f"只扫到 {len(checked)} 个 {{report_id}} 端点: {checked}"
+    assert offenders == [], (
+        f"以下 {{report_id}} 端点没有调用行级守卫 _own_report_or_404: {offenders}"
+    )
 
 
 # --------------------------------------------------------------- 执行身份
@@ -398,7 +631,7 @@ def test_a_members_report_executes_under_the_creators_identity(client, monkeypat
 
     owner, owner_id = _new_user(client)
     notebook_id = _notebook(client, owner)
-    member, member_id = _group_granted_reader(client, owner, notebook_id)
+    member, member_id, _ = _group_granted_reader(client, owner, notebook_id)
 
     _create_report(client, member, notebook_id)
 
