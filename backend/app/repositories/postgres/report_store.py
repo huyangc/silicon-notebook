@@ -175,12 +175,18 @@ class ReportStore:
             raise KeyError(report_id)
         return self.row_to_dict(row, full=True)
 
-    def list_reports(self, notebook_id: str) -> list:
+    def list_reports(self, notebook_id: str, *, created_by: str | None) -> list:
+        """Mirror of the SQLite store — see its docstring for why ``created_by``
+        is keyword-only and required, and why the predicate is pushed into SQL
+        instead of being applied to the returned rows."""
+        sql = "SELECT * FROM reports WHERE notebook_id = %s"
+        args: list = [notebook_id]
+        if created_by is not None:
+            sql += " AND created_by = %s"
+            args.append(created_by)
+        sql += " ORDER BY created_at DESC, id COLLATE \"C\""
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT * FROM reports WHERE notebook_id = %s "
-                "ORDER BY created_at DESC, id COLLATE \"C\"",
-                (notebook_id,)).fetchall()
+            rows = db.execute(sql, args).fetchall()
         return [self.row_to_dict(r, full=False) for r in rows]
 
     def delete_report(self, notebook_id: str, report_id: str) -> None:
@@ -276,10 +282,14 @@ class ReportStore:
         for i in range(0, len(ids), self.IN_CHUNK):
             yield ids[i:i + self.IN_CHUNK]
 
-    def export_reports(self, notebook_id: str, report_ids: list) -> list:
+    def export_reports(self, notebook_id: str, report_ids: list, *,
+                       created_by: str | None) -> list:
         """批量导出:返回 [(filename, content_md)],按传入 report_ids 顺序,只取该
         notebook 下 status='done' 且 content_md 非空的报告(非 done/空/跨 notebook 的
         id 静默跳过)。文件名 = f"{_safe(question)[:40]}-{rid}.md"。
+
+        ``created_by`` 与 ``list_reports`` 同一条契约:keyword-only 且必填,
+        非 None 时作为 **SQL 谓词**下推(不做结果侧过滤)。
 
         只读走 connect()。report_ids 数量通常极小；仍按 _in_batches 分批以限制
         单条语句的参数与内存占用，批间用 dict 汇总后按原顺序回放。"""
@@ -291,6 +301,8 @@ class ReportStore:
         if not ids:
             return []
         found: dict = {}                         # rid -> (question, content_md)
+        creator_clause = "" if created_by is None else "AND created_by = %s "
+        creator_args: tuple = () if created_by is None else (created_by,)
         with self.database.connect() as db:
             for batch in self._in_batches(ids):
                 placeholders = ",".join("%s" for _ in batch)
@@ -298,8 +310,9 @@ class ReportStore:
                     f"SELECT id, question, content_md FROM reports "
                     f"WHERE notebook_id = %s AND status = 'done' "
                     f"AND content_md IS NOT NULL AND content_md != '' "
+                    f"{creator_clause}"
                     f"AND id IN ({placeholders})",
-                    (notebook_id, *batch)).fetchall()
+                    (notebook_id, *creator_args, *batch)).fetchall()
                 for row in rows:
                     found[row["id"]] = (row["question"], row["content_md"])
         out: list = []

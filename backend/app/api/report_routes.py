@@ -7,7 +7,6 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
     repository,
-    require_notebook_capability,
     require_notebook_read,
     user_error,
 )
@@ -39,6 +38,23 @@ from app.api.ask_routes import (
 
 
 router = APIRouter()
+# 群组共享 P1-T3b:深度报告是 P1 **唯一**放宽写面的地方。整个报告面的授权因此
+# 是两层,缺一层就是越权或泄露:
+#
+#   ① notebook 层 —— 每个端点都挂 `Depends(require_notebook_read)`(owner ∪
+#      只读成员 ∪ 有效授权边)。写端点此前挂的是
+#      `require_notebook_capability("reports:write")`(owner-only);那张能力表
+#      里 "reports:write" 保留给 P2 的组管理员管理动作,当前无端点消费它。
+#   ② 行级 —— 已存在报告的每个操作都必须再过 `_own_report_or_404`
+#      (`reports.created_by == 当前用户`),列表/导出按同一判据在 **SQL 里**
+#      收窄。报告按创建者隔离:notebook owner 也只看得见自己建的,刻意不引入
+#      「owner 看全部」这条新披露(设计决策 1 / 5:他人不可见,要给别人看就发
+#      公开分享链接)。
+#
+# 唯一没有第二层的写端点是 `create_report`——它还没有行可归属,创建者身份由
+# `ReportStore.create_report` 写进 `created_by`(取请求用户,不是 notebook
+# owner),于是第二层从下一次请求起就成立。
+#
 # 公开分享面。**刻意与上面的 router 分开**：main.py 给 `router` 挂了 router 级
 # `Depends(get_current_user)`（零逐路由遗漏），公开报告是全站唯一不需要 session
 # 的读取，挂在那上面会被 401 拦掉。与 `auth_router` / `knowhow_agent_router`
@@ -51,6 +67,29 @@ public_router = APIRouter()
 
 def _report_llm_ready(repo) -> bool:
     return repo._runtime.models.configured("report_outline")
+
+
+def _own_report_or_404(repo, notebook_id: str, report_id: str) -> dict:
+    """Row-level gate for every operation on an EXISTING report (P1-T3b).
+
+    One read answers both halves at once — the row proves notebook membership
+    (``get_report`` already filters on ``notebook_id``) and carries
+    ``created_by`` for the creator check — so no endpoint has to hand-assemble
+    a second copy of the predicate.  Every caller reuses the returned row
+    instead of re-reading it.
+
+    "Exists but belongs to someone else" and "does not exist" must be the same
+    404: a distinguishable 403 would turn this endpoint into an oracle for
+    "how many reports has the owner got, and what are their ids" inside a
+    notebook the caller can legitimately read.
+    """
+    try:
+        row = repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if str(row.get("created_by") or "") != repo.current_user().id:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return row
 
 
 def _report_scope_recheck(repo, notebook_id: str, understanding: dict):
@@ -144,7 +183,7 @@ def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
 
 
 @router.post("/notebooks/{notebook_id}/reports",
-             dependencies=[Depends(require_notebook_capability("reports:write"))])
+             dependencies=[Depends(require_notebook_read)])
 def create_report(notebook_id: str, payload: ReportCreate) -> dict:
     repo = repository()
     if not payload.question.strip():
@@ -203,14 +242,11 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/intent",
-             dependencies=[Depends(require_notebook_capability("reports:write"))])
+             dependencies=[Depends(require_notebook_read)])
 def confirm_report_intent(notebook_id: str, report_id: str,
                           payload: ReportIntentConfirm) -> dict:
     repo = repository()
-    try:
-        cur = repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
+    cur = _own_report_or_404(repo, notebook_id, report_id)
     if cur.get("status") != "intent_ready":
         raise user_error(409, "当前报告不在问题确认阶段")
 
@@ -278,16 +314,26 @@ def confirm_report_intent(notebook_id: str, report_id: str,
             dependencies=[Depends(require_notebook_read)])
 def list_reports(notebook_id: str) -> List[ReportSummary]:
     # repo 行含 notebook_id/updated_at 等多余键 → 按模型字段过滤(仓库无 extra=ignore 风格)
+    # 读权放行到列表,再按 created_by 在 SQL 里收窄(不是结果侧过滤):共享笔记本里
+    # 每位成员只看得见自己建的报告,notebook owner 同样只看得见自己的。
+    repo = repository()
     return [ReportSummary(**{k: v for k, v in r.items() if k in ReportSummary.model_fields})
-            for r in repository().list_reports(notebook_id)]
+            for r in repo.list_reports(
+                notebook_id, created_by=repo.current_user().id
+            )]
 
 
 @router.post("/notebooks/{notebook_id}/reports/export",
              dependencies=[Depends(require_notebook_read)])
 def export_reports_endpoint(notebook_id: str, payload: ReportExportRequest) -> StreamingResponse:
     # owner∪成员可下(require_notebook_read);只导出该 notebook 下 status='done' 且
-    # content_md 非空的报告,非 done/空/跨 notebook 的 id 静默跳过(repo 层已过滤)。
-    rows = repository().export_reports(notebook_id, payload.report_ids)
+    # content_md 非空**且本人创建**的报告,非 done/空/跨 notebook/别人的 id 一律
+    # 静默跳过(repo 层已过滤——跳过而不是 404,免得导出成为「这个 id 存不存在」
+    # 的探针)。全部被跳过时仍走下面既有的 422。
+    repo = repository()
+    rows = repo.export_reports(
+        notebook_id, payload.report_ids, created_by=repo.current_user().id
+    )
     if not rows:                                 # 空 report_ids 或全部无效
         raise HTTPException(status_code=422, detail="no exportable reports")
     buf = io.BytesIO()
@@ -304,23 +350,18 @@ def export_reports_endpoint(notebook_id: str, payload: ReportExportRequest) -> S
 @router.get("/notebooks/{notebook_id}/reports/{report_id}",
             dependencies=[Depends(require_notebook_read)])
 def get_report(notebook_id: str, report_id: str) -> ReportDetail:
-    try:
-        r = repository().get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
+    repo = repository()
+    r = _own_report_or_404(repo, notebook_id, report_id)
     return ReportDetail(**{k: v for k, v in r.items() if k in ReportDetail.model_fields})
 
 
 @router.patch("/notebooks/{notebook_id}/reports/{report_id}/outline",
-              dependencies=[Depends(require_notebook_capability("reports:write"))])
+              dependencies=[Depends(require_notebook_read)])
 def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutlineUpdate) -> dict:
     from app.services.report_synthesis import normalize_report_frame
 
     repo = repository()
-    try:
-        cur = repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
+    cur = _own_report_or_404(repo, notebook_id, report_id)
     if cur.get("status") != "outline_ready":
         raise HTTPException(status_code=409, detail="outline editable only when outline_ready")
     intent_catalog = next(
@@ -430,15 +471,12 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/generate",
-             dependencies=[Depends(require_notebook_capability("reports:write"))])
+             dependencies=[Depends(require_notebook_read)])
 def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateRequest) -> dict:
     repo = repository()
     if not repo._runtime.models.configured("report_section"):
         raise HTTPException(status_code=409, detail="LLM not configured")
-    try:
-        cur = repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
+    cur = _own_report_or_404(repo, notebook_id, report_id)
     retrying = cur.get("status") == "failed"
     if cur.get("status") not in {"outline_ready", "failed"}:
         raise HTTPException(
@@ -497,14 +535,11 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/cancel",
-             dependencies=[Depends(require_notebook_capability("reports:write"))])
+             dependencies=[Depends(require_notebook_read)])
 def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
     from app.services.report_engine import cancel_report as _cancel
     repo = repository()
-    try:
-        repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
+    _own_report_or_404(repo, notebook_id, report_id)
     repo.update_report(
         notebook_id, report_id, status="cancelled", progress="已取消"
     )
@@ -514,15 +549,20 @@ def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
 
 
 @router.delete("/notebooks/{notebook_id}/reports/{report_id}",
-               dependencies=[Depends(require_notebook_capability("reports:write"))])
+               dependencies=[Depends(require_notebook_read)])
 def delete_report(notebook_id: str, report_id: str) -> dict:
-    repository().delete_report(notebook_id, report_id)
+    # 这个端点此前不读行(仓库层的 DELETE 自带 notebook 谓词,零行删除是静默
+    # no-op)。行级判定要求先读一次:少了它,共享笔记本里任何成员都能删掉别人的
+    # 报告,而且因为 no-op 静默,越权和「本来就不存在」在响应上无法区分。
+    repo = repository()
+    _own_report_or_404(repo, notebook_id, report_id)
+    repo.delete_report(notebook_id, report_id)
     return {"status": "deleted"}
 
 
 @router.post("/notebooks/{notebook_id}/reports/{report_id}/share",
              response_model=ReportShareResponse,
-             dependencies=[Depends(require_notebook_capability("reports:write"))])
+             dependencies=[Depends(require_notebook_read)])
 def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
     """Publish one finished report behind an unguessable link.
 
@@ -530,10 +570,7 @@ def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
     would show an empty or half-written body to whoever it was sent to.
     """
     repo = repository()
-    try:
-        report = repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="report not found")
+    report = _own_report_or_404(repo, notebook_id, report_id)
     if str(report.get("status") or "") != "done":
         raise user_error(409, "只能分享已完成的报告。")
     return ReportShareResponse(share_token=repo.share_report(notebook_id, report_id))
@@ -541,7 +578,7 @@ def share_report_route(notebook_id: str, report_id: str) -> ReportShareResponse:
 
 @router.get("/notebooks/{notebook_id}/reports/{report_id}/share",
             response_model=ReportShareResponse,
-            dependencies=[Depends(require_notebook_capability("reports:write"))])
+            dependencies=[Depends(require_notebook_read)])
 def get_report_share_route(notebook_id: str, report_id: str) -> ReportShareResponse:
     """Read back the existing link. Write-guarded: the token *is* the grant.
 
@@ -550,10 +587,7 @@ def get_report_share_route(notebook_id: str, report_id: str) -> ReportShareRespo
     would let them grant anonymous access without write access.
     """
     repo = repository()
-    try:
-        report = repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="report not found")
+    report = _own_report_or_404(repo, notebook_id, report_id)
     if not report.get("shared"):
         raise HTTPException(status_code=404, detail="report is not shared")
     return ReportShareResponse(
@@ -563,10 +597,17 @@ def get_report_share_route(notebook_id: str, report_id: str) -> ReportShareRespo
 
 @router.delete("/notebooks/{notebook_id}/reports/{report_id}/share",
                status_code=204,
-               dependencies=[Depends(require_notebook_capability("reports:write"))])
+               dependencies=[Depends(require_notebook_read)])
 def unshare_report_route(notebook_id: str, report_id: str) -> None:
-    """Revoke the link. The next public request 404s like any unknown token."""
-    repository().unshare_report(notebook_id, report_id)
+    """Revoke the link. The next public request 404s like any unknown token.
+
+    Row-level gated like every other operation on an existing report: revoking
+    someone else's link is a destructive act on their report, and the silent
+    zero-row UPDATE underneath would report success either way.
+    """
+    repo = repository()
+    _own_report_or_404(repo, notebook_id, report_id)
+    repo.unshare_report(notebook_id, report_id)
 
 
 @public_router.get("/public/reports/{token}", response_model=PublicReport)

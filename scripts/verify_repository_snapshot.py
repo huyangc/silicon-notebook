@@ -1621,7 +1621,10 @@ def exercise_reads(repo: Any, backup_path: Path) -> Dict[str, int]:
                 ).fetchone()
                 if job_row and repo.ask_job_detail(job_row[0]):
                     counts["ask_jobs"] += 1
-                reports = repo.list_reports(notebook_id)
+                # created_by=None: the snapshot verifier counts every report in
+                # the notebook, not one creator's — the per-creator narrowing is
+                # an API-surface rule (P1-T3b), not a storage-integrity one.
+                reports = repo.list_reports(notebook_id, created_by=None)
                 counts["reports"] += len(reports)
                 if reports:
                     repo.get_report(notebook_id, reports[0]["id"])

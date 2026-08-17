@@ -266,9 +266,24 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
         assert completed_report["status"] == "done"
         assert completed_report["generation_started_at"] == generation_started_at
         assert completed_report["updated_at"] >= generation_started_at
-        assert [item["id"] for item in repository.list_reports(notebook.id)] == [
+        assert [item["id"] for item in repository.list_reports(
+            notebook.id, created_by=None
+        )] == [
             report_id
         ]
+        # Per-creator narrowing (P1-T3b) is a SQL predicate in each backend's
+        # own dialect, so the PostgreSQL spelling needs its own coverage: a
+        # mis-spaced clause or a lost parameter only shows up here.
+        assert [item["id"] for item in repository.list_reports(
+            notebook.id, created_by=owner.id
+        )] == [report_id]
+        assert repository.list_reports(notebook.id, created_by=reader.id) == []
+        assert len(repository.export_reports(
+            notebook.id, [report_id], created_by=owner.id
+        )) == 1
+        assert repository.export_reports(
+            notebook.id, [report_id], created_by=reader.id
+        ) == []
 
         share = repository.share_notebook(notebook.id)
         assert repository.find_notebook_by_share_token(share["share_token"]) == notebook.id
