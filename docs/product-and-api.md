@@ -363,6 +363,15 @@ Reading code still only needs `knowledge:read` — only writing it
 `knowhow:code`, so a token that must read existing code before writing a new version
 needs both scopes.
 
+Unlike the source-management and build writes above, `knowhow:code` is deliberately
+**not** owner-only: an Agent's write capability here is entirely scope-driven (design
+doc §⑥-4), so a token whose owner joined a shared notebook as a read-only member can
+still save a cell code attachment there. A code attachment is inert — never executed,
+indexed, embedded, or projected into retrieval or the KG — while deleting or
+re-parsing a document reaches every member's retrieval, which is why the two surfaces
+carry different authority models. The divergence is a recorded decision, pinned on
+both sides by `backend/tests/test_memory_mcp.py`.
+
 Only a `confirmed` Memory can be proposed for KG promotion. The creator proposes it; the
 admin queue shows sanitized extraction candidates and server-validated evidence, not a raw
 Memory revision/provenance browser. The proposal pins the exact source revision, sanitized
