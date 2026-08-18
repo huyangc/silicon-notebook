@@ -51,6 +51,8 @@ from app.repositories.ports import (
 from app.repositories.sqlite.access_sql import (
     ADMIN_GRANT_PROBE_SQL,
     admin_grant_probe_params,
+    read_access_clause,
+    read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -90,6 +92,40 @@ _SHARE_REQUEST_PENDING_UNIQUE_MARKERS = (
 # 消失。LEFT JOIN 只是纵深防御,不改变行数。
 _SHARE_REQUEST_SELECT = (
     "SELECT sr.*, nb.name AS _notebook_name, g.name AS _group_name, "
+    "u.username AS _requested_by_username "
+    "FROM notebook_share_requests sr "
+    "LEFT JOIN notebooks nb ON nb.id = sr.notebook_id "
+    "LEFT JOIN groups g ON g.id = sr.group_id "
+    "LEFT JOIN users u ON u.id = sr.requested_by "
+)
+
+
+# 「我发起的待审批申请」专用的投影:两个展示标签**各自**按当前权限决定给不给
+# (codex #519 R12 P2)。
+#
+# 为什么不能直接用 `_SHARE_REQUEST_SELECT`:那份无条件带出 `notebooks.name` 与
+# `groups.name`。申请人在提交之后可能失去这本库的权限、或被移出目标组,而这条清单是
+# **他失权之后仍然够得着**的(裁决 P2-7 的另一半,正是这么设计的)。于是它就成了一条
+# **活的**信息通道:对方改名,清单持续把**新**名字送给他。他知道的只是**提交那一刻**的
+# 名字——这是时间维度上的越权,与「跨库资产 no-store」「取消挂载即 404」「公开页每次
+# 实时复核读权」是同一条线。
+#
+# 两个标签**分别**判,不是一起:笔记本那半按**读权**判,群组那半按**是否仍是成员**判。
+# 一起判的话,只失去一半的人两个名字都会消失,多条待审批就都长成「知识库 → 群组」,
+# 根本分不清该撤哪条。两半同时失去才两个都空,那是罕见情形。
+#
+# ⚠ 读权那半**必须**嵌 `access_sql.read_access_clause()`,绝不能在这里手抄一份判定
+# ——那是 P0 建唯一定义点时立的规矩。群组成员资格那半留在本模块自己写:`access_sql` 的
+# 模块 docstring 明确把「组成员关系的 CRUD 与列表查询」划在唯一定义点之外(本模块的
+# `_role_on` 就是同一类读),它不是 notebook 授权谓词。
+#
+# 全部在**同一条**查询里用条件表达式做完,不逐行回查(N+1)。
+_MY_PENDING_SHARE_REQUEST_SELECT = (
+    "SELECT sr.*, "
+    "CASE WHEN " + read_access_clause("nb") + " THEN nb.name ELSE '' END AS _notebook_name, "
+    "CASE WHEN EXISTS (SELECT 1 FROM group_members gmv "
+    "WHERE gmv.group_id = sr.group_id AND gmv.user_id = ?) "
+    "THEN g.name ELSE '' END AS _group_name, "
     "u.username AS _requested_by_username "
     "FROM notebook_share_requests sr "
     "LEFT JOIN notebooks nb ON nb.id = sr.notebook_id "
@@ -679,13 +715,19 @@ class GroupStore:
 
         只回 `status='pending'`(**正向精确匹配**,红线):已决定的申请撤不回来,列出来
         既没有可做的动作,又平白多披露一份历史。
+
+        ⚠ 两个展示标签**各自**按当前权限决定给不给(codex #519 R12 P2),理由与写法见
+        `_MY_PENDING_SHARE_REQUEST_SELECT` 上面那段:他知道的是**提交那一刻**的名字,
+        失权之后这条清单不能继续把改名后的**新**名字送给他。
         """
         with self.database.connect() as db:
             rows = db.execute(
-                _SHARE_REQUEST_SELECT
+                _MY_PENDING_SHARE_REQUEST_SELECT
                 + "WHERE sr.requested_by=? AND sr.status='pending' "
                 + "ORDER BY sr.created_at DESC, sr.id ASC",
-                (requested_by,),
+                # 参数顺序跟着 SQL 文本走:两个 CASE 在 SELECT 列表里,所以它们的占位符
+                # 排在 WHERE 之前。读权那半消费几个由 `read_access_params` 自己说了算。
+                (*read_access_params(requested_by), requested_by, requested_by),
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
 

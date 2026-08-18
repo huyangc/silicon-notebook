@@ -46,6 +46,8 @@ from app.repositories.postgres.access_sql import (
     ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL,
     admin_grant_group_chain_params,
     admin_grant_user_arm_params,
+    read_access_clause,
+    read_access_params,
 )
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -67,6 +69,24 @@ _GRANT_SELECT = (
 # 见 SQLite 那份同名常量。三个 LEFT JOIN 恒能解析(CASCADE 外键保证父行随子行同在)。
 _SHARE_REQUEST_SELECT = (
     "SELECT sr.*, nb.name AS _notebook_name, g.name AS _group_name, "
+    "u.username AS _requested_by_username "
+    "FROM notebook_share_requests sr "
+    "LEFT JOIN notebooks nb ON nb.id = sr.notebook_id "
+    "LEFT JOIN groups g ON g.id = sr.group_id "
+    "LEFT JOIN users u ON u.id = sr.requested_by "
+)
+
+
+# 见 SQLite 那份同名常量的完整论证(codex #519 R12 P2):「我发起的待审批申请」是申请人
+# **失权之后仍然够得着**的清单,所以两个展示标签必须各自按**当前**权限决定给不给,否则它
+# 就成了一条持续输出改名后新名字的活通道。读权那半嵌 `access_sql.read_access_clause()`
+# (唯一定义点),群组成员那半留在本模块自己写(它不是 notebook 授权谓词)。
+_MY_PENDING_SHARE_REQUEST_SELECT = (
+    "SELECT sr.*, "
+    "CASE WHEN " + read_access_clause("nb") + " THEN nb.name ELSE '' END AS _notebook_name, "
+    "CASE WHEN EXISTS (SELECT 1 FROM group_members gmv "
+    "WHERE gmv.group_id = sr.group_id AND gmv.user_id = %s) "
+    "THEN g.name ELSE '' END AS _group_name, "
     "u.username AS _requested_by_username "
     "FROM notebook_share_requests sr "
     "LEFT JOIN notebooks nb ON nb.id = sr.notebook_id "
@@ -654,13 +674,15 @@ class GroupStore:
     ) -> list[dict]:
         """`sqlite/group_store.py::list_pending_share_requests_by_requester` 的镜像:
         我发起的、仍待审批的全部申请,唯一谓词是 `requested_by`(与撤回的授权轴逐字相同)。
-        完整理由(裁决 P2-7 的另一半)写在 SQLite 那一份。"""
+        完整理由(裁决 P2-7 的另一半)写在 SQLite 那一份。两个展示标签各自按当前权限
+        决定给不给,见 `_MY_PENDING_SHARE_REQUEST_SELECT`(codex #519 R12 P2)。"""
         with self.database.connect() as connection:
             rows = connection.execute(
-                _SHARE_REQUEST_SELECT
+                _MY_PENDING_SHARE_REQUEST_SELECT
                 + "WHERE sr.requested_by=%s AND sr.status='pending' "
                 + 'ORDER BY sr.created_at DESC, sr.id COLLATE "C" ASC',
-                (requested_by,),
+                # 参数顺序跟着 SQL 文本走(两个 CASE 在 SELECT 列表里,排在 WHERE 之前)。
+                (*read_access_params(requested_by), requested_by, requested_by),
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
 

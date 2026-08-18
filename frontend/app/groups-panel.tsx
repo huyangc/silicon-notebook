@@ -232,10 +232,20 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
               <p className="tool-hint" style={{ margin: 0 }}>
                 等待组管理员审批。撤回后可以重新发起。
               </p>
+              {/* 名称按**当前**权限逐个给:失权/退组之后后端不再返回它(否则改名后的新
+                  名字会持续送到一个已经无权查看的人手里)。空的那半给一句中性说明,不留
+                  空白——也不影响撤回,那条的授权轴是「这条申请是你提的」。 */}
+              {myRequests.some((req) => !req.notebook_name || !req.group_name) && (
+                <p className="tool-hint" style={{ margin: 0 }}>
+                  部分名称不再显示：你已不再有权查看对应的知识库或群组。撤回不受影响。
+                </p>
+              )}
               {myRequests.map((req) => (
                 <div className="checklist-row" key={req.id} style={{ alignItems: "center", gap: 8 }}>
                   <span style={{ flex: 1, wordBreak: "break-word" }}>
-                    {req.notebook_name || "知识库"} → {req.group_name || "群组"}
+                    {req.notebook_name || "名称不再显示的知识库"}
+                    {" → "}
+                    {req.group_name || "名称不再显示的群组"}
                   </span>
                   <span className="new-pill">待审批</span>
                   <button

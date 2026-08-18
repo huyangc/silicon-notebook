@@ -300,14 +300,25 @@ Several boundaries are worth stating explicitly:
   /me/share-requests` is that global entrance, and the UI puts it in the groups
   panel rather than the notebook workspace, because the requester may have lost
   read access as well and cannot open the workspace at all. Its **disclosure
-  surface is chosen field by field**, against "did he already know this?":
-  `notebook_id` and `notebook_name` are included — he held management rights on
-  that library when he filed (creation requires `notebook:manage`), and
-  `notebooks.created_by` is written only at creation and deep-copy (there is no
-  ownership transfer, and the column is absent from `NotebookUpdate`, with a guard
-  pinning that), so an id cannot be used to probe a *new* owner later; without the
-  name a requester with several pending requests cannot tell which one to withdraw.
-  `group_id`/`group_name` are the group he chose while a member of it. `status` is
+  surface is chosen field by field**, against "did he already know this?" — and,
+  just as importantly, **"does he still know it?"**: what he learned was the label
+  *at the moment he filed*. `notebook_id` is included permanently (he filed with
+  it, and `notebooks.created_by` is written only at creation and deep-copy — there
+  is no ownership transfer, and the column is absent from `NotebookUpdate` with a
+  guard pinning that — so an id cannot be used to probe a *new* owner later). The
+  two **display labels are conditional on current access, evaluated separately**:
+  `notebook_name` only while the read predicate still holds for him, `group_name`
+  only while he is still a member of that group. Otherwise the label comes back
+  empty and the UI renders a neutral placeholder. Without this the list would be a
+  *live* channel: the counterparty renames, and the rename keeps being delivered to
+  someone who may no longer observe that object — the same line held by `no-store`
+  on cross-library assets, by unmounting turning proxied reads into 404s, and by the
+  public report page re-checking the creator's read access on every request. The two
+  halves are judged **independently** on purpose: judged together, losing just one
+  would blank both, and several pending requests would all read "library → group"
+  with no way to tell which to withdraw. Withdrawal itself is unaffected — its axis
+  is request ownership, not label visibility.
+  `group_id` is the group he chose while a member of it. `status` is
   always `pending`, so `decided_by`/`decided_at` are always null — **no approver
   identity leaves through this path**, because decided requests are not returned at
   all. Nothing about the library's current state (source counts, whether it is
