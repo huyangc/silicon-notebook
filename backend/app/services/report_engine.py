@@ -1731,7 +1731,10 @@ class ReportEngine:
         # `{c.chunk_id: c.element_ids for c in selected}`,就地给 ctx 补一个
         # 字段;`id_map` 在持久化前整体被丢弃(`s.pop("id_map", None)`,见
         # `_run_sections` 调用点),不影响 sections 的存储形状。
-        _chunk_element_ids = {chunk.chunk_id: list(chunk.element_ids) for chunk in chunks}
+        _chunk_element_ids = {
+            chunk.chunk_id: list(getattr(chunk, "element_ids", None) or [])
+            for chunk in chunks
+        }
         for _ctx in chunk_map.values():
             _ctx["element_ids"] = _chunk_element_ids.get(_ctx.get("object_id", ""), [])
         kg_block, kg_map = knowledge_context_with_outline(
@@ -2914,10 +2917,16 @@ class ReportEngine:
         # "k1, k2, …" 全局顺序消费(见 `attach_reference_images` docstring)。
         # 必须在上面的 section 循环结束、`references` 已经是终态之后才调用——
         # 拆到循环内部按节各调一次,会把"一份报告一次批量点查"变成"每节一次"。
+        # fail-open(评审 F2):这是全部撰写完成后的最后一步装饰性读取,镜像上面
+        # `_resolve_source_families` 的既有惯例——一次 DB 抖动不得废掉整份已经
+        # 生成好的报告正文(status=failed、正文全丢),失败只丢图不丢报告。
         if reference_image_candidates:
-            self.dependencies.evidence_context.attach_reference_images(
-                references, reference_image_candidates
-            )
+            try:
+                self.dependencies.evidence_context.attach_reference_images(
+                    references, reference_image_candidates
+                )
+            except Exception:
+                pass
 
         # --- 覆盖度信号:库内证据不足 + 必答主题缺口 + 跨节矛盾。 ---
         # 报告体例要求正文不堆砌诊断,这些信号统一落在结尾局限与 gaps 数据。
