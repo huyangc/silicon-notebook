@@ -130,15 +130,19 @@ def _admin_principal_match_expr(
     group_alias: str,
     group_admin_alias: str,
 ) -> str:
-    """**管理级**授权边的主体判定 = 读权那四条臂 ∧ `role='admin'`(裁决 P2-1)。
+    """**管理级**授权边的主体判定 = **受限三臂**(不含 everyone)∧ `role='admin'`
+    (裁决 P2-1,P2-T2 评审 P2-1 收窄)。
 
-    结构上复用 `_principal_match_expr` 而不是另抄一份四臂,使「管理权 ⊆ 读权」构造性
-    成立;`everyone` 那条臂不特判(发放口径由 app 层挡)。理由详见 SQLite 那一份。
+    结构上复用 `_restricted_principal_arms` 使「管理权 ⊆ 读权」构造性成立;`everyone`
+    被排除是深度防御(设计 §4:everyone 只能 viewer),不再依赖「发放口径永不写
+    everyone+admin」这个外部前提。完整理由详见 SQLite 那一份。
     """
     return (
-        f"({grant_alias}.role='admin' AND "
-        + _principal_match_expr(grant_alias, user_ref, group_alias, group_admin_alias)
-        + ")"
+        f"({grant_alias}.role='admin' AND ("
+        + _restricted_principal_arms(
+            grant_alias, user_ref, group_alias, group_admin_alias
+        )
+        + "))"
     )
 
 

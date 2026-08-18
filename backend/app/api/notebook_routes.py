@@ -106,7 +106,7 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
 
 
 @router.get("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
-            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+            dependencies=[Depends(require_notebook_capability("notebook:configure"))])
 def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
     """本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被
     降级),前端置灰展示——边保留是为了对方恢复后自动生效。"""
@@ -114,7 +114,7 @@ def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
 
 
 @router.put("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
-            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+            dependencies=[Depends(require_notebook_capability("notebook:configure"))])
 def set_notebook_bases_route(
     notebook_id: str, payload: SetBasesRequest,
     user: UserProfile = Depends(get_current_user),
@@ -124,9 +124,12 @@ def set_notebook_bases_route(
     同 owner 的库、被挂库上有「全员可读」授权的库,以及本笔记本 owner 有受限读权
     (只读共享或点名/群组授权)且**本笔记本自身尚未被共享**的库。最后那道未共享门
     堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。
-    写权限本身由 require_notebook_capability("notebook:manage")(P0 阶段解析到
-    owner-only,404 on denial)在依赖层挡;
-    这里只做候选集校验,不重复手工判断写权限。
+    写权限本身由 require_notebook_capability("notebook:configure")(**恒 owner**,
+    404 on denial)在依赖层挡;这里只做候选集校验,不重复手工判断写权限。
+    ⚠ 挂载配置刻意**不随内容管理权翻给组管理员**(P2-T2 评审 P0):候选集
+    (mountable_notebooks)按**被挂库 owner** `a.created_by` 解析,含「同 owner」支——
+    组管理员若能改挂载,就能把库主从未共享的私有库挂进来经代理端点读全文。
+    见 deps.py `_CAPABILITY_LEVELS` 上 notebook:configure 那条注释。
 
     并入"当前已挂载的 id"是刻意的:mountable_notebooks 与失效边的判定谓词
     (MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主、共享被撤销,
@@ -145,12 +148,16 @@ def set_notebook_bases_route(
 
 
 @router.get("/notebooks/{notebook_id}/mountable", response_model=List[MountableNotebook],
-            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+            dependencies=[Depends(require_notebook_capability("notebook:configure"))])
 def mountable_notebooks_route(notebook_id: str) -> List[MountableNotebook]:
     """可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪
     (本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。
 
     最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。
+
+    ⚠ 恒 owner(notebook:configure):候选按**被挂库 owner** `a.created_by` 解析,
+    「同 owner」支会列出库主的**全部私有库**(含从未共享的)。组管理员若能调它,就拿到
+    了库主全部私有库名的枚举——所以这条与 PUT bases 一起是 owner-only(P2-T2 评审 P0)。
 
     响应模型是 `MountableNotebook` 而不是 `NotebookRef`:每个候选还带一个 `origin`
     (base / mine / shared),让挂载选择器能如实分组——群组共享放开之后,别人 owner
@@ -162,22 +169,30 @@ def mountable_notebooks_route(notebook_id: str) -> List[MountableNotebook]:
 
 
 @router.get("/notebooks/{notebook_id}/mounted-by-count", response_model=MountedByCount,
-            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+            dependencies=[Depends(require_notebook_capability("notebook:configure"))])
 def mounted_by_count_route(notebook_id: str) -> MountedByCount:
     """删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——
     ON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。
-    与 DELETE 端点用同一个 owner-only 依赖(不新开一套权限判断)。"""
+    它只喂 owner-only 的删除确认流,自身语义是 owner-scoped,故归 notebook:configure
+    (恒 owner)——与 DELETE 同为 owner-only,不随内容管理权翻给组管理员(P2-T2 评审)。
+    计数本身不泄露库名/token,归 configure 是为了让这个「与 DELETE 同权」的旧承诺在
+    翻格后仍然成立,而不是留在 notebook:manage 上被顺带翻成 admin。"""
     return MountedByCount(count=repository().mounted_by_count(notebook_id))
 
 
 @router.get("/notebooks/{notebook_id}/share", response_model=ShareState,
-            dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+            dependencies=[Depends(require_notebook_capability("notebook:configure"))])
 def share_state_route(notebook_id: str) -> ShareState:
     """当前的分享链接状态。**只读**——打开分享弹窗不该铸出一条链接。
 
-    与 POST 同路径同守卫,只是这一条没有副作用:没有 token 时返回空串且**不计算**
-    规模统计。理由见 `ShareState` 的模型注释(「只想共享给群组」的用户不该因为打开
-    了一次弹窗就被发一条分享链接)。
+    与 POST/DELETE 同为 owner-only(notebook:configure):它回传 `share_token`——一条
+    只要拿到就能整本 copy/join 的持有型凭证。组管理员即便有内容管理权也不该读到它
+    (会把库主对外处置的链接转手泄露出去,P2-T2 评审 P0)。「共享给群组」那一节的
+    授权边管理走独立的 notebook:manage(GET/POST/DELETE /grants),前端因此对组管理员
+    跳过这条 GET、只渲染群组授权区(见 page.tsx openShareModal)。
+
+    没有 token 时返回空串且**不计算**规模统计。理由见 `ShareState` 的模型注释
+    (「只想共享给群组」的用户不该因为打开了一次弹窗就被发一条分享链接)。
     """
     try:
         return ShareState(**notebook_sharing_repository().share_state(notebook_id))
@@ -186,8 +201,11 @@ def share_state_route(notebook_id: str) -> ShareState:
 
 
 @router.post("/notebooks/{notebook_id}/share", response_model=ShareResponse,
-             dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+             dependencies=[Depends(require_notebook_capability("notebook:configure"))])
 def share_notebook_route(notebook_id: str) -> ShareResponse:
+    """铸/取回本库的公开分享链接。**恒 owner**(notebook:configure):链接是库主对外
+    处置(拿到链接的任何登录用户可整本 copy 或只读 join),不随内容管理权转移
+    ——组管理员替库主铸链接、组外任意人整本 copy 正是 P2-T2 评审复现的 P0。"""
     try:
         return ShareResponse(**notebook_sharing_repository().share_notebook(notebook_id))
     except KeyError:
@@ -195,8 +213,10 @@ def share_notebook_route(notebook_id: str) -> ShareResponse:
 
 
 @router.delete("/notebooks/{notebook_id}/share", status_code=204,
-               dependencies=[Depends(require_notebook_capability("notebook:manage"))])
+               dependencies=[Depends(require_notebook_capability("notebook:configure"))])
 def unshare_notebook_route(notebook_id: str) -> None:
+    """撤销分享链接。**恒 owner**(notebook:configure):撤销会连带**踢掉全部只读
+    成员**(unshare_notebook 清 notebook_members),爆炸半径超出内容管理,不给组管理员。"""
     try:
         notebook_sharing_repository().unshare_notebook(notebook_id)
     except KeyError:

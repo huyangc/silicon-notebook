@@ -1,6 +1,6 @@
 "use client";
 
-import type { MouseEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent } from "react";
 
 import { grantedViaLabel, isGroupGranted } from "./group-api.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
@@ -31,10 +31,31 @@ import type { NotebookSummary } from "./workspace-model.ts";
  * 所以卡片菜单只给「编辑信息」,不给「删除笔记本」。
  */
 
+/**
+ * 组管理员的行内改名(群组知识共享 P2-T2 评审 P2-4)。
+ *
+ * 改名走 PATCH /notebooks/{id}（notebook:manage,组管理员 ✓,后端实测 200)——**不是**
+ * 那个 fused 编辑器(它连挂载配置一起拉,是 owner-only 的 notebook:configure)。所以
+ * owner 的顶栏输入框与组管理员的这个共用同一个 PATCH-only handler,只是渲染位置不同:
+ * owner 走 page.tsx 自己的 <input>,组管理员走**徽章内**的这个,好保住「可管理·来自
+ * 群组《X》」的身份标注。纯只读成员不传它(下面按 can_manage_content 才启用)。
+ */
+type BadgeRenameProps = {
+  value: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+  /** blur / Enter:提交改名。 */
+  onCommit: () => void;
+  /** Escape:丢弃草稿、复位。 */
+  onReset: () => void;
+};
+
 type ReaderNotebookBadgeProps = {
   notebook: NotebookSummary;
   leaveBusy: boolean;
   onLeave: () => void;
+  /** 组管理员改名(可选);仅当 `notebook.can_manage_content` 时真正渲染成可编辑。 */
+  rename?: BadgeRenameProps;
 };
 
 /**
@@ -49,13 +70,34 @@ export function ReaderNotebookBadge({
   notebook,
   leaveBusy,
   onLeave,
+  rename,
 }: ReaderNotebookBadgeProps) {
   const granted = isGroupGranted(notebook);
   const canManage = Boolean(notebook.can_manage_content);
   const accessWord = canManage ? "可管理" : "只读";
   return (
     <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
-      <h1 className="notebook-title-input" style={{ margin: 0 }}>{notebook.name}</h1>
+      {canManage && rename ? (
+        <input
+          className="notebook-title-input"
+          style={{ margin: 0 }}
+          value={rename.value}
+          disabled={rename.saving}
+          aria-label="笔记本名称"
+          maxLength={80}
+          onChange={(event) => rename.onChange(event.target.value)}
+          onBlur={() => rename.onCommit()}
+          onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              rename.onReset();
+              event.currentTarget.blur();
+            }
+          }}
+        />
+      ) : (
+        <h1 className="notebook-title-input" style={{ margin: 0 }}>{notebook.name}</h1>
+      )}
       <span
         className="new-pill"
         title={canManage ? "你可以管理这本笔记本的内容，但它不属于你" : "只读，无写权限"}
@@ -92,14 +134,16 @@ type NotebookMenuActionsProps = {
 };
 
 /**
- * 笔记本卡片的操作菜单。
+ * 笔记本卡片(主页列表)的操作菜单。
  *
  * - owner:编辑信息 + 删除笔记本;
- * - 组管理员(reader + `can_manage_content`):编辑信息 + 由组管理员管理的说明,
- *   **没有删除**——`notebook:delete` 恒 owner(裁决 P2-1),画出来只会 404;
- *   也没有「退出共享」(他的访问来自授权边,那个按钮打的是成员表,点了是假成功);
- * - 群组共享的纯只读成员:只有说明;
- * - 只读共享(分享链接):退出共享。
+ * - 组管理员 / 群组共享的只读成员(reader + `granted_via`):只有「由组管理员管理」
+ *   说明,**没有编辑信息、没有删除、没有退出**。⚠ 组管理员的「编辑信息」刻意**不在
+ *   这里**(P2-T2 评审 P2-4 修正):卡片菜单的「编辑信息」打开的是那个 fused 编辑器
+ *   (`openNotebookEditor` 连挂载配置一起拉,是 owner-only 的 notebook:configure),
+ *   给组管理员画出来点了会在 listMountable 上 404。组管理员改名走**工作区顶栏**的
+ *   行内输入框(PATCH-only,见 ReaderNotebookBadge.rename)——那条不碰挂载配置;
+ * - 只读共享(分享链接、非群组):退出共享。
  */
 export function NotebookMenuActions({
   notebook,
@@ -108,17 +152,9 @@ export function NotebookMenuActions({
   onDelete,
 }: NotebookMenuActionsProps) {
   if ((notebook.access ?? "owner") === "reader") {
-    if (!isGroupGranted(notebook)) {
-      return <button className="danger" onClick={onLeave}>退出共享</button>;
-    }
-    return notebook.can_manage_content ? (
-      <>
-        <button onClick={onEdit}>编辑信息</button>
-        <span className="notebook-menu-note">由组管理员管理</span>
-      </>
-    ) : (
-      <span className="notebook-menu-note">由组管理员管理</span>
-    );
+    return isGroupGranted(notebook)
+      ? <span className="notebook-menu-note">由组管理员管理</span>
+      : <button className="danger" onClick={onLeave}>退出共享</button>;
   }
   return (
     <>

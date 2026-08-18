@@ -1343,6 +1343,10 @@ export function MemoryPanel({
         <DestinationPicker
           sourceNotebookId={pendingTransfer.sourceNotebookId}
           allowMove
+          // Memory transfer 的目标走 user_can_access_notebook（owner-only）——组管理员
+          // 可管理的共享库接收会 404,所以**不**放行(默认 false),免得给出必失败的目标
+          // (P2-T2 评审 P2-4)。若将来把 Memory transfer 目标也放宽到 admin,这里同改。
+          allowManagedTargets={false}
           title={
             pendingTransfer.excludedCount
               ? `复制/移动 ${pendingTransfer.ids.length} 条记忆（已排除 ${pendingTransfer.excludedCount} 条非已确认状态）`

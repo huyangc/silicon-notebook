@@ -19,10 +19,12 @@
  * knowhow-panel-logic.ts 里（无 JSX，供 knowhow-panel.test.mjs 直接 import——
  * Node 原生 TS 类型剥离不支持 .tsx，只能拆到 .ts）。
  *
- * 权限（PR-2+3 Task 5）：`canEdit`（= notebook 写权限，page.tsx 传
- * `!isReader`）统一门控**全部写入口**——新建表 / 导入表格 / 添加行 / 管理 /
- * 重建投影 / 删除表 / 失败行「重试」。只读成员（canEdit=false）看到纯浏览
- * 视图，一个写按钮都不出现（规格⑦「只读成员可看」）。唯一例外（C3）：
+ * 权限（PR-2+3 Task 5）：`canEdit`（= notebook 内容写权限，page.tsx 传
+ * `!readOnlyWorkspace`）统一门控**全部写入口**——新建表 / 导入表格 / 添加行 /
+ * 管理 / 重建投影 / 删除表 / 失败行「重试」。⚠ P2-T2 起是 `!readOnlyWorkspace`
+ * 而**不是** `!isReader`:knowhow 写是内容写（knowhow:write=admin），组管理员
+ * 有权（access 仍是 reader 却 canEdit=true）。无写权者（canEdit=false）看到纯
+ * 浏览视图，一个写按钮都不出现（规格⑦「只读成员可看」）。唯一例外（C3）：
  * 「复制/移动到…」不受 canEdit 整体门控——它不写入本笔记本，copy 只需对源
  * 笔记本有读权限即可，只读成员也能看到并使用（把表复制到自己另有写权限的
  * 笔记本）；`allowMove={canEdit}` 单独收紧「移动」这一半（会从源删除，需要
@@ -236,8 +238,8 @@ import {
 export interface KnowhowPanelProps {
   notebookId: string;
   apiBase: string;
-  /** notebook 写权限（page.tsx 传 `!isReader`）：false=只读成员，隐藏全部
-   * 写入口（新建/导入/添加行/管理/重建投影/删除表/失败重试）。 */
+  /** notebook 内容写权限（page.tsx 传 `!readOnlyWorkspace`，P2-T2 起含组管理员）：
+   * false=无写权，隐藏全部写入口（新建/导入/添加行/管理/重建投影/删除表/失败重试）。 */
   canEdit: boolean;
   /** 关闭整个面板（page.tsx 用于收起挂载它的 knowhowOpen 态）。 */
   onClose: () => void;
@@ -1554,6 +1556,9 @@ export function KnowhowPanel({
         <DestinationPicker
           sourceNotebookId={notebookId}
           allowMove={canEdit}
+          // knowhow 表 transfer 的目标走 knowhow:write（admin）——组管理员可管理的共享库
+          // 能接收(后端实测 200),故把它们列进候选(P2-T2 评审 P2-4)。
+          allowManagedTargets
           title={`复制/移动表：${detail.title}`}
           onCancel={() => setTransferOpen(false)}
           onSubmit={async (targetNotebookId, mode) => {

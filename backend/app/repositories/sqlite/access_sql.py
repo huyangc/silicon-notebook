@@ -199,22 +199,29 @@ def _admin_principal_match_expr(
     group_alias: str,
     group_admin_alias: str,
 ) -> str:
-    """**管理级**授权边的主体判定 = 读权那四条臂 ∧ `role='admin'`(裁决 P2-1)。
+    """**管理级**授权边的主体判定 = **受限三臂**(user/group/group_admins,**不含
+    everyone**)∧ `role='admin'`(裁决 P2-1,P2-T2 评审 P2-1 收窄)。
 
-    刻意写成「同一个 `_principal_match_expr` 外加一个 `role` 条件」而不是另抄一份四臂:
-    抄一份的话,某天有人只在读权那份里补了第五种主体、或只在这份里漏掉 `role='admin'`
-    的子条件,两条谓词就静默分叉,而分叉的形态恰好是「管理权比读权更宽」——一条越权
-    通道。这里的结构保证「管理权 ⊆ 读权」是**构造性**的,不靠测试去覆盖每一格。
+    刻意写成「复用 `_restricted_principal_arms` 外加一个 `role` 条件」而不是另抄一份三臂:
+    抄一份的话,某天有人只在读权那份里补了主体、或只在这份里漏掉 `role='admin'` 的子
+    条件,两条谓词就静默分叉,而分叉的形态恰好是「管理权比读权更宽」——一条越权通道。
+    复用保证「管理权 ⊆ 读权」是**构造性**的(受限三臂 ⊂ 读权四臂),不靠测试逐格覆盖。
 
-    `everyone` 那条臂**不特判**:`everyone` + `admin` 的行由 app 层发放口径挡住
-    (`GRANTABLE_PRINCIPAL_TYPES` 只收两个群组主体),谓词侧保持同构。
+    **`everyone` 被排除**是深度防御(设计 §4 明文:everyone 只能 viewer;发放口径
+    `GRANTABLE_PRINCIPAL_TYPES` 也只收两个群组主体,根本写不出 everyone+admin 边)。
+    不特判 everyone 的旧写法依赖「发放口径永不写 everyone+admin」这个外部前提;正向
+    shadow 停车会给冲突行的 `role` 暂写哨兵串,一条 `(everyone,'',<非法role>)` 停车行
+    若恰好在某个瞬间被读成 `role='admin'`,就会把管理权发给全站——用受限三臂从谓词侧
+    根绝,不再依赖那个前提。读权谓词一个字都没动(它照旧四臂全收、role 不参与)。
 
-    参数消费与 `_principal_match_expr` 完全相同(`role` 比的是字面量)。
+    参数消费与 `_restricted_principal_arms` 完全相同(`role` 比的是字面量)。
     """
     return (
-        f"({grant_alias}.role='admin' AND "
-        + _principal_match_expr(grant_alias, user_ref, group_alias, group_admin_alias)
-        + ")"
+        f"({grant_alias}.role='admin' AND ("
+        + _restricted_principal_arms(
+            grant_alias, user_ref, group_alias, group_admin_alias
+        )
+        + "))"
     )
 
 

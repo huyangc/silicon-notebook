@@ -128,6 +128,26 @@ G1/G2/G3、PR + codex 闭环。
   `transform._EMPTY_TIME_SENTINELS` 分叉的遗留登记(见下「遗留登记」一节)
   转成独立跟踪项,不在本特性 PR 内解决,T4 只需确认它已被记录、不必修。
 
+**T4 交接清单(T2 评审 P0 追加——`notebook:configure` 拆格)**:
+- **能力表现在有三档 owner-格**:`notebook:delete`、`reports:write`、以及 T2 评审
+  新增的 `notebook:configure`(挂载配置 + 链接分享,**恒 owner**)。product-and-api
+  的能力矩阵与 AGENTS/CLAUDE 授权条目都要说清这条边界:内容管理权(六格 admin)
+  翻给了组管理员,但**挂载配置与 share_token 链接分享不翻**,它们是 owner 对本库
+  检索范围与对外处置的配置,不随内容管理权转移。理由:mount_sql 的「同 owner 候选」
+  按被挂库 owner 解析,组管理员若能改挂载就能枚举/挂载库主全部私有库并经代理端点
+  读全文;链接分享能替库主铸对外链接让组外人整本 copy。
+- **`notebook:manage`(翻 admin)的爆炸半径逐条**——它现在 = 改名(PATCH)+ 授权边
+  管理(GET/POST/DELETE /grants)。**不含**任何链接分享:尤其 `DELETE /share`
+  (撤链接分享**连带踢掉全部只读成员**,`clear_share` 清 `notebook_members`)刻意
+  留在 `notebook:configure`,因为它的爆炸半径超出内容管理。product-and-api 要逐条
+  列出 manage 覆盖哪些端点、configure 覆盖哪些端点(bases/mountable/share/
+  mounted-by-count),别让读者以为「组管理员能管共享」= 能动链接。
+- **「写权恒 owner-only」的文档失效句必须逐处改写**(T1 计划就点了名,这里给出
+  待改的锚点供 T4 定位):CLAUDE.md 的 access_sql 红线段(约 :294)与 mount_sql 相关
+  段(约 :39)、AGENTS.md 的授权 baseline 段(约 :235 / :208)——这些「写权恒
+  owner-only」的表述在 T2 之后只对 `NOTEBOOK_WRITE_SQL`(delete/Agent 面)成立,
+  内容管理已是 owner∪admin 边;改写时同时说清「configure 那三格仍恒 owner」。
+
 ## 裁决(沿用 + 新增)
 
 - P1 裁决全部有效(四值白名单、未共享门、公开页 fail-closed、创建者隔离等)。

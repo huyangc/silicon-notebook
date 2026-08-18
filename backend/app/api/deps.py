@@ -183,12 +183,28 @@ async def require_notebook_read(
 # 收回成员自建报告的开关——那条路径由 report_routes.py 的行级判定负责。
 #
 # P2-T2 翻的**恰好是这六格**(裁决 P2-1):sources/kg/knowhow/knowledge/catalog
-# 五个内容写 + notebook:manage(共享管理)。留在 "owner" 的**恰好是这两格**:
+# 五个内容写 + notebook:manage(=改名 + 授权边管理,设计 §4 组管理员矩阵)。
+# 留在 "owner" 的**恰好是这三格**:
 #   * `notebook:delete` —— 删库的爆炸半径是整本库且 owner 无法撤销,不随组管理员走;
+#   * `notebook:configure` —— **挂载配置 + 链接分享,P2-T2 评审 P0 拆出来的新格**。
+#     mount_sql 的「同 owner 候选」安全论证建立在「只有 owner 改挂载」上;能力翻转
+#     作废了它——组管理员 Bob 对共享库 N(owner Alice)有 manage,若 mount 端点也翻
+#     admin,他就能 `GET /notebooks/N/mountable` 列出 Alice **从未共享的**全部私有库
+#     名、`PUT /notebooks/N/bases` 把 Alice 的私有库挂进 N、再经 active-notebook 代理
+#     端点读到全文(基线全 404)。链接分享同理:组管理员能替 Alice 铸公开链接、组外
+#     任意人整本 copy。设计 §4 的组管理员矩阵是「改名 + 管理授权边」,**挂载配置与
+#     share_token 链接分享都不在其中**——它们是 owner 对本库检索范围与对外处置的配置,
+#     不随内容管理权转移。故单列一格恒 owner,不与 notebook:manage 合并(合并会让这
+#     两类端点跟着 manage 一起翻 admin)。
 #   * `reports:write` —— P1-T3b 起已无端点消费(报告转成行级 created_by 判定),
 #     它现在只是一个**留给 P2/P3 组管理员批量管理动作**的名字。翻它既不会放开也不会
 #     收回任何东西(没有消费点),所以刻意保持 "owner":让这个名字在真正长出消费点
 #     那天,由那次改动显式决定它属于哪一档,而不是被这次批量翻格顺手带走。
+#
+# ⚠ notebook:configure 解析到 **owner 档**(与 notebook:delete 同,复用
+# require_notebook_write / user_can_access_notebook),所以能力值域仍是 {owner, admin}
+# ——它不新增第三档,只是把两个 owner-only 端点从 notebook:manage 拆出来单独命名,
+# 好让「哪些端点恒 owner」在能力表上一眼可见、且不会被下一次批量翻格顺手带走。
 _CAPABILITY_LEVELS: dict[str, str] = {
     "sources:write": "admin",
     "kg:write": "admin",
@@ -197,6 +213,7 @@ _CAPABILITY_LEVELS: dict[str, str] = {
     "catalog:write": "admin",
     "reports:write": "owner",
     "notebook:manage": "admin",
+    "notebook:configure": "owner",
     "notebook:delete": "owner",
 }
 

@@ -209,6 +209,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
   assert.deepEqual(workspaceCapabilities("reader", "user"), {
     canWriteNotebook: false,
     canGovernKnowledge: false,
+    canConfigureNotebook: false,
     canManageReports: true,
     canManageNotebookSchemas: false,
     canManageGlobalSchemas: false,
@@ -216,6 +217,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
   assert.deepEqual(workspaceCapabilities("owner", "user"), {
     canWriteNotebook: true,
     canGovernKnowledge: true,
+    canConfigureNotebook: true,
     canManageReports: true,
     canManageNotebookSchemas: true,
     canManageGlobalSchemas: false,
@@ -223,6 +225,7 @@ test("workspace capabilities separate notebook type ownership from the global ba
   assert.deepEqual(workspaceCapabilities("owner", "admin"), {
     canWriteNotebook: true,
     canGovernKnowledge: true,
+    canConfigureNotebook: true,
     canManageReports: true,
     canManageNotebookSchemas: true,
     canManageGlobalSchemas: true,
@@ -237,6 +240,9 @@ test("group admins get the content-management bits on a notebook that is still `
   assert.deepEqual(workspaceCapabilities("reader", "user", true), {
     canWriteNotebook: true,
     canGovernKnowledge: true,
+    // ⚠ 挂载配置 + 链接分享**恒 owner**(notebook:configure,P2-T2 评审 P0):组管理员
+    // 有内容管理权,但 access 仍是 reader → canConfigureNotebook 为 **false**。
+    canConfigureNotebook: false,
     canManageReports: true,
     canManageNotebookSchemas: true,
     // 全局图谱类型基线仍只认系统管理员——组管理员在**这本库**里有权，不是全站有权。
@@ -256,6 +262,18 @@ test("group admins get the content-management bits on a notebook that is still `
     workspaceCapabilities("reader", "admin", true).canManageGlobalSchemas,
     true,
   );
+});
+
+
+test("canConfigureNotebook is owner-only — content-management权 never unlocks it", () => {
+  // P2-T2 评审 P0:挂载配置(参考库增删)与链接分享是 owner 对本库检索范围/对外处置的
+  // 配置,后端 notebook:configure 恒 owner,不随内容管理权翻给组管理员。判据只看 access。
+  assert.equal(workspaceCapabilities("owner", "user").canConfigureNotebook, true);
+  // 组管理员(reader + can_manage_content=true)有内容写权,但配置权仍为 false。
+  assert.equal(workspaceCapabilities("reader", "user", true).canConfigureNotebook, false);
+  assert.equal(workspaceCapabilities("reader", "user", false).canConfigureNotebook, false);
+  // canWrite 放宽了(组管理员为真),canConfigure 没有——两者刻意分开。
+  assert.equal(workspaceCapabilities("reader", "user", true).canWriteNotebook, true);
 });
 
 

@@ -31,6 +31,30 @@ test("destinationNotebooks: 源不在候选里时不排除任何只读之外的�
   assert.deepEqual(out.map((n) => n.id), ["n3", "n4"]);
 });
 
+// P2-T2 评审 P2-4:allowManaged 决定「组管理员可管理的共享库」算不算目标——取决于
+// 这次传的是 knowhow(目标 admin,放行)还是 Memory(目标 owner-only,不放行)。
+test("destinationNotebooks: allowManaged=false(默认)时,组管理员可管理的共享库仍被排除", () => {
+  const all = [
+    { id: "n1", name: "自有", access: "owner" },
+    { id: "n2", name: "组管理", access: "reader", can_manage_content: true },
+    { id: "n3", name: "纯只读", access: "reader", can_manage_content: false },
+  ];
+  // Memory transfer 口径(默认):只留 owner 自有库——组管理库接收会 404,不给它当目标。
+  assert.deepEqual(destinationNotebooks(all, "src").map((n) => n.id), ["n1"]);
+  assert.deepEqual(destinationNotebooks(all, "src", false).map((n) => n.id), ["n1"]);
+});
+
+test("destinationNotebooks: allowManaged=true 时,组管理库进候选,纯只读仍排除", () => {
+  const all = [
+    { id: "n1", name: "自有", access: "owner" },
+    { id: "n2", name: "组管理", access: "reader", can_manage_content: true },
+    { id: "n3", name: "纯只读", access: "reader", can_manage_content: false },
+    { id: "n4", name: "组只读", access: "reader" },  // 缺字段 = 非组管理
+  ];
+  // knowhow transfer 口径:目标是 admin 档,组管理库能接收 → 进候选;纯只读/缺字段仍排除。
+  assert.deepEqual(destinationNotebooks(all, "src", true).map((n) => n.id), ["n1", "n2"]);
+});
+
 test("knowhowTransferBody: 锁字段名 target_notebook_id/mode", () => {
   assert.deepEqual(knowhowTransferBody("nb-2", "move"), {
     target_notebook_id: "nb-2",

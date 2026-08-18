@@ -57,8 +57,9 @@ def test_notebook_capability_allowed_rejects_unknown_capability():
 
 #: P2-T2 之后的**逐格**期望值。改这张表 = 声明一次权限边界变更,评审必须看见它。
 #:
-#: 翻成 "admin" 的六格是设计文档裁决 P2-1 点名的内容管理能力;留在 "owner" 的两格
+#: 翻成 "admin" 的六格是设计文档裁决 P2-1 点名的内容管理能力;留在 "owner" 的三格
 #: 各有理由(见 deps.py 的表上注释):删库爆炸半径太大且 owner 无法撤销;
+#: notebook:configure(挂载配置 + 链接分享)不随内容管理权转移(P2-T2 评审 P0);
 #: reports:write 目前没有任何消费点,留给它真正长出消费点的那次改动去决定档位。
 EXPECTED_CAPABILITY_LEVELS = {
     "sources:write": "admin",
@@ -68,6 +69,7 @@ EXPECTED_CAPABILITY_LEVELS = {
     "catalog:write": "admin",
     "reports:write": "owner",
     "notebook:manage": "admin",
+    "notebook:configure": "owner",
     "notebook:delete": "owner",
 }
 
@@ -93,14 +95,19 @@ def test_capability_levels_are_pinned_cell_by_cell():
 
 
 def test_never_touched_capabilities_stay_owner_only():
-    """点名钉住**没翻的那两格**,并说清为什么。
+    """点名钉住**没翻的那三格**,并说清为什么。
 
-    与上一条不是重复:上一条是整表比对(改表就红),这一条把「这两格必须是 owner」
+    与上一条不是重复:上一条是整表比对(改表就红),这一条把「这三格必须是 owner」
     这句话本身写成可执行的断言,并且带着理由 —— 它的失败信息直接告诉后来者动的是
     一条安全边界,而不是「更新一下期望表」。
     """
     assert deps._CAPABILITY_LEVELS["notebook:delete"] == "owner", (
         "删库恒 owner:爆炸半径是整本库,且 owner 事后无法撤销组管理员的删除"
+    )
+    assert deps._CAPABILITY_LEVELS["notebook:configure"] == "owner", (
+        "挂载配置 + 链接分享恒 owner(P2-T2 评审 P0):mountable 会枚举库主全部私有库名、"
+        "PUT bases 能把私有库挂进来经代理端点读全文、share 能替库主铸对外链接——"
+        "这些是 owner 对本库检索范围与对外处置的配置,不随内容管理权翻给组管理员"
     )
     assert deps._CAPABILITY_LEVELS["reports:write"] == "owner", (
         "reports:write 目前无消费点(P1-T3b 起报告走行级 created_by 判定),"
@@ -275,7 +282,12 @@ def test_sources_write_capability_matches_owner_member_stranger_matrix(
 def test_notebook_manage_capability_matches_owner_member_stranger_matrix(
     tmp_path, monkeypatch
 ):
-    """代表性抽查 #2:``notebook:manage``(GET .../mounted-by-count)。"""
+    """代表性抽查 #2:``notebook:manage``(PATCH /notebooks/{id} 改名)。
+
+    改名是设计 §4 组管理员矩阵里明确 ✓ 的能力,所以 manage 的代表端点用它——
+    ⚠ **不能**再用 mounted-by-count 了:P2-T2 评审把 mounted-by-count 归到了
+    notebook:configure(恒 owner),那条现在测的是 configure 不是 manage(见下一条)。
+    """
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "m00000001")
     nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
@@ -283,6 +295,39 @@ def test_notebook_manage_capability_matches_owner_member_stranger_matrix(
     member_id = client.get("/api/me", headers=member_h).json()["id"]
     deps.repository().add_member(nb, member_id)
     stranger_h = _login(client, "m00000003")
+
+    owner_resp = client.patch(
+        f"/api/notebooks/{nb}", json={"name": "L2"}, headers=owner_h
+    )
+    assert owner_resp.status_code == 200, owner_resp.text
+
+    member_resp = client.patch(
+        f"/api/notebooks/{nb}", json={"name": "X"}, headers=member_h
+    )
+    assert member_resp.status_code == 404
+
+    stranger_resp = client.patch(
+        f"/api/notebooks/{nb}", json={"name": "X"}, headers=stranger_h
+    )
+    assert stranger_resp.status_code == 404
+
+
+def test_notebook_configure_capability_matches_owner_member_stranger_matrix(
+    tmp_path, monkeypatch
+):
+    """代表性抽查 #3:``notebook:configure``(GET .../mounted-by-count,恒 owner)。
+
+    P2-T2 评审 P0 从 notebook:manage 拆出的新格,解析到 **owner 档**。只读成员与
+    陌生人一律 404,和翻格前的 mounted-by-count 行为逐字相同——这条钉的正是「拆出来
+    单独命名之后,它对非 owner 仍然是 404」。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "c00000001")
+    nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
+    member_h = _login(client, "c00000002")
+    member_id = client.get("/api/me", headers=member_h).json()["id"]
+    deps.repository().add_member(nb, member_id)
+    stranger_h = _login(client, "c00000003")
 
     owner_resp = client.get(f"/api/notebooks/{nb}/mounted-by-count", headers=owner_h)
     assert owner_resp.status_code == 200, owner_resp.text
@@ -402,18 +447,26 @@ def test_group_admin_passes_the_flipped_content_capabilities(tmp_path, monkeypat
         # 拒绝同码。所以先塞一行真来源(直接写库,不跑一次真实解析),让 owner 那半
         # 能越过 404 这个形态,否则这一格测的其实什么都不是。
         ("catalog:write", "post", f"/api/notebooks/{nb}/sources/{src}/command-catalog"),
-        ("notebook:manage", "get", f"/api/notebooks/{nb}/mounted-by-count"),
+        # ⚠ notebook:manage 的代表端点是 PATCH 改名(设计 §4 组管理员 ✓),**不是**
+        # mounted-by-count —— 后者 P2-T2 评审归到了 notebook:configure(恒 owner),
+        # 组管理员对它是 404,拿它当 manage 代表会把这一格测反。
+        ("notebook:manage", "patch", f"/api/notebooks/{nb}"),
     ]
     for capability, method, path in probes:
         assert deps._CAPABILITY_LEVELS[capability] == "admin", capability
         for who in ("owner", "deputy"):
-            resp = getattr(client, method)(path, json={}, headers=w[who]) if method == "post" \
+            resp = getattr(client, method)(path, json={}, headers=w[who]) if method in ("post", "patch") \
                 else getattr(client, method)(path, headers=w[who])
             assert resp.status_code != 404, (capability, who, resp.status_code, resp.text)
         for who in ("plain", "stranger"):
-            resp = getattr(client, method)(path, json={}, headers=w[who]) if method == "post" \
+            resp = getattr(client, method)(path, json={}, headers=w[who]) if method in ("post", "patch") \
                 else getattr(client, method)(path, headers=w[who])
             assert resp.status_code == 404, (capability, who, resp.status_code, resp.text)
+
+
+# notebook:manage 的代表端点(组管理员可达),各处「证明 deputy 确有管理权」共用它。
+def _manage_probe(client: TestClient, nb: str, headers: dict):
+    return client.patch(f"/api/notebooks/{nb}", json={"name": "probe"}, headers=headers)
 
 
 def test_group_admin_still_cannot_delete_the_notebook(tmp_path, monkeypatch):
@@ -428,7 +481,7 @@ def test_group_admin_still_cannot_delete_the_notebook(tmp_path, monkeypatch):
 
     assert deps._CAPABILITY_LEVELS["notebook:delete"] == "owner"
     # 先证明这位组管理员**确实**持有管理权(否则下面那个 404 可能只是因为他什么都不是)。
-    assert client.get(f"/api/notebooks/{nb}/mounted-by-count", headers=w["deputy"]).status_code == 200
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 200
     assert client.delete(f"/api/notebooks/{nb}", headers=w["deputy"]).status_code == 404
     assert client.get(f"/api/notebooks/{nb}", headers=w["deputy"]).status_code == 200
     assert client.delete(f"/api/notebooks/{nb}", headers=w["owner"]).status_code == 204
@@ -437,29 +490,27 @@ def test_group_admin_still_cannot_delete_the_notebook(tmp_path, monkeypatch):
 def test_revoking_the_admin_grant_takes_effect_immediately(tmp_path, monkeypatch):
     """撤边即失能力:管理权是每次请求实时判定,不是一次性授予。"""
     client = _client(tmp_path, monkeypatch)
-    w = _group_admin_world(client, "c")
+    w = _group_admin_world(client, "g")
     nb = w["notebook"]
-    probe = f"/api/notebooks/{nb}/mounted-by-count"
 
-    assert client.get(probe, headers=w["deputy"]).status_code == 200
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 200
     client.delete(f"/api/notebooks/{nb}/grants/{w['grant_id']}", headers=w["owner"])
-    assert client.get(probe, headers=w["deputy"]).status_code == 404
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 404
 
 
 def test_demoting_the_group_admin_takes_effect_immediately(tmp_path, monkeypatch):
     """组内降级同样即刻失能力——两根轴(边的 role、组成员的 role)任一为假即为假。"""
     client = _client(tmp_path, monkeypatch)
-    w = _group_admin_world(client, "d")
+    w = _group_admin_world(client, "h")
     nb = w["notebook"]
-    probe = f"/api/notebooks/{nb}/mounted-by-count"
 
-    assert client.get(probe, headers=w["deputy"]).status_code == 200
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 200
     client.put(
         f"/api/groups/{w['group']}/members/{w['deputy_id']}",
         json={"role": "member"},
         headers=w["owner"],
     )
-    assert client.get(probe, headers=w["deputy"]).status_code == 404
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 404
 
 
 def test_a_viewer_grant_does_not_confer_content_capabilities(tmp_path, monkeypatch):
@@ -492,8 +543,9 @@ def test_a_viewer_grant_does_not_confer_content_capabilities(tmp_path, monkeypat
     )
 
     assert client.get(f"/api/notebooks/{nb}", headers=deputy_h).status_code == 200
-    assert client.get(
-        f"/api/notebooks/{nb}/mounted-by-count", headers=deputy_h
+    # viewer 边不给 manage(改名)也不给内容写(backfill)。
+    assert client.patch(
+        f"/api/notebooks/{nb}", json={"name": "X"}, headers=deputy_h
     ).status_code == 404
     assert client.post(
         f"/api/notebooks/{nb}/backfill-vectors", headers=deputy_h
@@ -503,20 +555,139 @@ def test_a_viewer_grant_does_not_confer_content_capabilities(tmp_path, monkeypat
 def test_group_admin_uploads_count_against_the_owners_document_quota(
     tmp_path, monkeypatch
 ):
-    """裁决 P2-4:组管理员的内容操作仍记 **owner** 的配额,不记他自己的。
+    """裁决 P2-4:文档上限按 **owner** 算,不按请求者(组管理员)算。
 
-    钉住现状而不是引入新行为:文档上限是 `sources` 的 owner 侧口径
-    (`document_limit` 由 `notebooks.created_by` 那位用户的有效上限算出),组管理员
-    往共享库里传文档,吃的是库主的名额。翻转能力时最容易顺手改错的就是这类
-    「按当前请求用户算」的口径。
+    ⚠ P2-T2 评审 P2-5:旧版只比 `owner_view == deputy_view` 是**恒真**的——
+    `document_limit` 由 `notebooks.created_by` 那位用户算,同一本库谁来看都一样,
+    比相等什么都证明不了。这一版给 deputy 设一个**不同**的 per-user 覆盖上限,再断言
+    deputy 看这本共享库时拿到的仍是**库主**的上限,而不是 deputy 自己的——只有「按
+    owner 算」为真才成立,「误改成按请求者算」会当场红。
     """
     client = _client(tmp_path, monkeypatch)
     w = _group_admin_world(client, "e")
     nb = w["notebook"]
 
-    owner_view = client.get(f"/api/notebooks/{nb}", headers=w["owner"]).json()
+    owner_limit = client.get(
+        f"/api/notebooks/{nb}", headers=w["owner"]
+    ).json()["document_limit"]
+    assert owner_limit > 0
+    # 给 deputy 设一个与库主明显不同的个人上限(直接写 user_profiles,绕开 admin 门
+    # ——这里要的只是「deputy 的个人上限 ≠ 库主的」这个前提)。
+    deputy_limit = owner_limit + 7
+    with deps.repository()._write() as db:
+        db.execute(
+            "UPDATE user_profiles SET upload_document_limit = ? WHERE user_id = ?",
+            (deputy_limit, w["deputy_id"]),
+        )
+    # 自证覆盖真的生效:deputy 打开**自己 owner 的**库时看到的是 deputy_limit。
+    own_nb = client.post(
+        "/api/notebooks", json={"name": "deputy 自己的"}, headers=w["deputy"]
+    ).json()["id"]
+    assert client.get(f"/api/notebooks/{own_nb}", headers=w["deputy"]).json()[
+        "document_limit"
+    ] == deputy_limit
+
+    # 关键断言:deputy 看**共享进来的**库时,上限仍是**库主**的,不是他自己的。
     deputy_view = client.get(f"/api/notebooks/{nb}", headers=w["deputy"]).json()
-    assert owner_view["document_limit"] == deputy_view["document_limit"], (
-        "组管理员看到的文档上限必须仍是**库主**的有效上限"
+    assert deputy_view["document_limit"] == owner_limit, (
+        "组管理员看共享库时,文档上限必须按**库主**算(误改成按请求者算会在这里红)"
     )
-    assert deputy_view["document_limit"] > 0
+    assert deputy_view["document_limit"] != deputy_limit
+
+
+# --------------------------------------------------------------------------
+# ⑥ P2-T2 评审 P0:notebook:configure(挂载配置 + 链接分享)恒 owner
+# --------------------------------------------------------------------------
+#
+# 组管理员有内容管理权(manage/内容写),但**没有** configure。configure 端点若跟着
+# 翻 admin,组管理员就能:枚举库主全部私有库名(mountable)、把库主从未共享的私有库
+# 挂进共享库经代理端点读全文(PUT bases)、替库主铸对外链接(POST share)、撤链接连带
+# 踢只读成员(DELETE share)。这一节把这些端点对组管理员的 404 逐条钉死。
+
+
+def test_group_admin_is_denied_every_configure_endpoint(tmp_path, monkeypatch):
+    """组管理员对全部 configure 端点一律 404,owner 一律放行(不是 404)。"""
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "k")
+    nb = w["notebook"]
+
+    # (方法, 路径, POST/PUT 的 body)
+    configure_probes = [
+        ("get", f"/api/notebooks/{nb}/bases", None),
+        ("get", f"/api/notebooks/{nb}/mountable", None),
+        ("put", f"/api/notebooks/{nb}/bases", {"base_notebook_ids": []}),
+        ("get", f"/api/notebooks/{nb}/mounted-by-count", None),
+        ("get", f"/api/notebooks/{nb}/share", None),
+        ("post", f"/api/notebooks/{nb}/share", None),
+        ("delete", f"/api/notebooks/{nb}/share", None),
+    ]
+    for method, path, body in configure_probes:
+        kwargs = {"headers": w["deputy"]}
+        if body is not None:
+            kwargs["json"] = body
+        deputy_resp = getattr(client, method)(path, **kwargs)
+        assert deputy_resp.status_code == 404, (
+            method, path, deputy_resp.status_code, deputy_resp.text,
+        )
+        owner_kwargs = {"headers": w["owner"]}
+        if body is not None:
+            owner_kwargs["json"] = body
+        owner_resp = getattr(client, method)(path, **owner_kwargs)
+        assert owner_resp.status_code != 404, (
+            method, path, owner_resp.status_code, owner_resp.text,
+        )
+
+    # deputy **确实**是组管理员(有 manage 权),证明上面的 404 不是「他什么都不是」。
+    assert _manage_probe(client, nb, w["deputy"]).status_code == 200
+
+
+def test_group_admin_cannot_enumerate_or_mount_the_owners_private_libraries(
+    tmp_path, monkeypatch
+):
+    """P0 复现钉成回归用例:组管理员**读不到**库主的其它私有库、**挂不进来**。
+
+    复现路径(基线 a27c6b18 之前会成功):Alice owns 共享库 N(admin 边给组,Bob 是
+    组管理员)+ 一本**从未共享的**私有库 P。mountable 候选按 N 的 owner `a.created_by`
+    解析、含「同 owner」支,所以候选集里**有** P(owner 视角能看到,证明泄露面真实
+    存在)。Bob 若能调 mountable 就拿到 P 的库名;若能 PUT bases 就把 P 挂进 N、经
+    active-notebook 代理端点读 P 全文。configure 恒 owner 之后:Bob 两条都 404。
+    """
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "l")
+    shared_nb = w["notebook"]
+
+    # Alice(owner)另建一本**从未共享**的私有库 P。
+    private_p = client.post(
+        "/api/notebooks", json={"name": "Alice 的私有库"}, headers=w["owner"]
+    ).json()["id"]
+
+    # owner 视角:mountable 候选**确实**列出了 P(「同 owner」支)——泄露面真实存在。
+    owner_mountable = client.get(
+        f"/api/notebooks/{shared_nb}/mountable", headers=w["owner"]
+    )
+    assert owner_mountable.status_code == 200, owner_mountable.text
+    assert private_p in {n["id"] for n in owner_mountable.json()}, (
+        "前提失败:mountable 候选没有列出 owner 的私有库,这条测不到 P0 的泄露面"
+    )
+
+    # 组管理员 Bob:mountable 404(读不到库名枚举)。
+    assert client.get(
+        f"/api/notebooks/{shared_nb}/mountable", headers=w["deputy"]
+    ).status_code == 404
+    # 组管理员 Bob:把 P 挂进 N 也 404(挂不进来 → 代理端点无从读 P)。
+    assert client.put(
+        f"/api/notebooks/{shared_nb}/bases",
+        json={"base_notebook_ids": [private_p]},
+        headers=w["deputy"],
+    ).status_code == 404
+    # 兜底:即便 Bob 直接开 P 的详情也 404(P 从未共享给他,与本 P0 正交但一并钉)。
+    assert client.get(f"/api/notebooks/{private_p}", headers=w["deputy"]).status_code == 404
+
+    # owner 仍可正常挂载自己的库(configure 对 owner 照常放行)。
+    ok = client.put(
+        f"/api/notebooks/{shared_nb}/bases",
+        json={"base_notebook_ids": [private_p]},
+        headers=w["owner"],
+    )
+    assert ok.status_code == 200, ok.text
+    assert private_p in {edge["id"] for edge in ok.json()}
