@@ -9,6 +9,7 @@ import {
   DIRECTORY_READ_FAILED_REASON,
   INLINE_TOO_LARGE_IMAGE_LINES,
   NO_MARKDOWN_IN_BUNDLE_REASON,
+  PAIRING_SKIPPED_SUMMARY,
   approxByteSizeLabel,
   bundleCapsFrom,
   bundleErrorMessage,
@@ -51,11 +52,23 @@ test("approxByteSizeLabel: 按量级选择 MB/KB/字节，非整数场景不退�
   assert.equal(approxByteSizeLabel(500), "500 字节");
 });
 
-test("inlineTooLargeMessage: 同时报出实际体积与上限，且措辞给出可操作建议", () => {
-  const msg = inlineTooLargeMessage(3 * 1024 * 1024, 1024 * 1024);
+test("inlineTooLargeMessage: 有实际内联张数时，同时报出体积与上限，措辞含「精简图片」", () => {
+  const msg = inlineTooLargeMessage(3 * 1024 * 1024, 1024 * 1024, 1);
   assert.match(msg, /约 3\.0 MB/);
   assert.match(msg, /1 MB/);
+  assert.match(msg, /内联图片后体积/);
   assert.match(msg, /精简图片或拆分文档/);
+});
+
+// F3：零张实际内联时（正文本身已超限、图片配对被跳过、或正文里根本没有本地图片），
+// 「请精简图片」是对不上症状的建议——不得出现在措辞里，改说「拆分文档」。
+test("inlineTooLargeMessage: 零张实际内联时不提图片，只说文档体积超限、请拆分文档", () => {
+  const msg = inlineTooLargeMessage(3 * 1024 * 1024, 1024 * 1024, 0);
+  assert.match(msg, /约 3\.0 MB/);
+  assert.match(msg, /1 MB/);
+  assert.match(msg, /文档体积.*超过单文件上限.*请拆分文档后重试/);
+  assert.ok(!msg.includes("图片"), `零张内联时不该提图片：${msg}`);
+  assert.ok(!msg.includes("内联"), `零张内联时不该说「内联图片后体积」：${msg}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -199,9 +212,12 @@ test("processMarkdownCandidate: imagesEnabled=false 时跳过整个图片配对/
   // 正文原样保留：既没有被改写成 data URI，也没有做任何图片相关处理。
   assert.equal(result.rewritten, mdText);
   assert.deepEqual(result.receipt, { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] });
+  // F2：pairingSkipped 必须为真——这份回执是"根本没做配对"而不是"配对了、零命中"，
+  // 两者对回执面板是不同的措辞。
+  assert.equal(result.pairingSkipped, true);
 });
 
-test("processMarkdownCandidate: imagesEnabled=false 时仍然遵守单文件上传上限", () => {
+test("processMarkdownCandidate: imagesEnabled=false 时仍然遵守单文件上传上限，且标注 pairingSkipped", () => {
   const mdText = "# Title\n\n" + "x".repeat(100);
   const mdFile = { path: "note.md", bytes: new TextEncoder().encode(mdText) };
   const result = processMarkdownCandidate(
@@ -214,9 +230,10 @@ test("processMarkdownCandidate: imagesEnabled=false 时仍然遵守单文件上�
   assert.ok(result.bytes > 10);
   assert.equal(result.images.length, 0);
   assert.deepEqual(result.receipt, { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] });
+  assert.equal(result.pairingSkipped, true);
 });
 
-test("processMarkdownCandidate: imagesEnabled 省略时保持既有内联行为（向后兼容）", () => {
+test("processMarkdownCandidate: imagesEnabled 省略时保持既有内联行为（向后兼容），pairingSkipped 为假", () => {
   const mdText = "# Title\n\n![a picture](pic.png)\n";
   const mdFile = { path: "note.md", bytes: new TextEncoder().encode(mdText) };
   const picFile = { path: "pic.png", bytes: PNG };
@@ -224,12 +241,28 @@ test("processMarkdownCandidate: imagesEnabled 省略时保持既有内联行为�
   assert.equal(result.ok, true);
   assert.match(result.rewritten, /data:image\/png;base64,/);
   assert.equal(result.receipt.inlined.length, 1);
+  assert.equal(result.pairingSkipped, false);
+});
+
+test("processMarkdownCandidate: imagesEnabled=true 且内联后超限时 pairingSkipped 为假", () => {
+  const mdText = "# Title\n\n![a picture](pic.png)\n";
+  const mdFile = { path: "note.md", bytes: new TextEncoder().encode(mdText) };
+  const picFile = { path: "pic.png", bytes: PNG };
+  const result = processMarkdownCandidate(mdFile, [mdFile, picFile], { uploadMaxBytes: 5 });
+  assert.equal(result.ok, false);
+  assert.equal(result.pairingSkipped, false);
 });
 
 test("BUNDLE_IMAGES_DISABLED_NOTE：非空中文提示，说明图片不会被保存", () => {
   assert.equal(typeof BUNDLE_IMAGES_DISABLED_NOTE, "string");
   assert.match(BUNDLE_IMAGES_DISABLED_NOTE, /图片/);
   assert.match(BUNDLE_IMAGES_DISABLED_NOTE, /不会被保存/);
+});
+
+test("PAIRING_SKIPPED_SUMMARY：非空中文提示，说明本次未做配对（区别于「没发现图片」）", () => {
+  assert.equal(typeof PAIRING_SKIPPED_SUMMARY, "string");
+  assert.match(PAIRING_SKIPPED_SUMMARY, /配对/);
+  assert.match(PAIRING_SKIPPED_SUMMARY, /关闭/);
 });
 
 // ---------------------------------------------------------------------------

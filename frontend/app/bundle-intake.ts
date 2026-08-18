@@ -299,7 +299,16 @@ function flattenBundlePath(path: string): string {
 }
 
 export type ProcessedMarkdown =
-  | { ok: true; fileName: string; rewritten: string; receipt: InlineReceipt }
+  | {
+    ok: true;
+    fileName: string;
+    rewritten: string;
+    receipt: InlineReceipt;
+    /** 本次是否因部署级开关关闭而**整个跳过**图片配对/内联（而不是「配对了但零命中」）。
+     *  两者对回执面板必须是不同的措辞：空回执 + 未跳过＝真的没在正文里发现本地图片；
+     *  空回执 + 跳过＝根本没去看过，不能说「没发现」。 */
+    pairingSkipped: boolean;
+  }
   | {
     ok: false;
     fileName: string;
@@ -308,6 +317,9 @@ export type ProcessedMarkdown =
     limit: number;
     /** 按体积降序的逐图明细，供调用方如实列出「是哪几张撑爆的」。 */
     images: ReadonlyArray<{ src: string; path: string; encodedBytes: number }>;
+    /** 同上——`imagesEnabled === false` 短路分支下，超限判定针对的是正文本身而非
+     *  内联结果，`images` 恒为空。 */
+    pairingSkipped: boolean;
   };
 
 export type MarkdownCandidateOptions = InlineOptions & {
@@ -344,13 +356,18 @@ export function processMarkdownCandidate(
     const bytes = utf8ByteLength(text);
     const limit = resolveLimit(opts.uploadMaxBytes);
     if (limit !== null && bytes > limit) {
-      return { ok: false, fileName, receipt: emptyInlineReceipt(), bytes, limit, images: [] };
+      return {
+        ok: false, fileName, receipt: emptyInlineReceipt(), bytes, limit, images: [],
+        pairingSkipped: true,
+      };
     }
-    return { ok: true, fileName, rewritten: text, receipt: emptyInlineReceipt() };
+    return { ok: true, fileName, rewritten: text, receipt: emptyInlineReceipt(), pairingSkipped: true };
   }
   const result = inlineMdImages(mdFile.path, text, files, opts);
   if (result.ok) {
-    return { ok: true, fileName, rewritten: result.rewritten, receipt: result.receipt };
+    return {
+      ok: true, fileName, rewritten: result.rewritten, receipt: result.receipt, pairingSkipped: false,
+    };
   }
   return {
     ok: false,
@@ -359,6 +376,7 @@ export function processMarkdownCandidate(
     bytes: result.error.bytes,
     limit: result.error.limit,
     images: result.error.images,
+    pairingSkipped: false,
   };
 }
 
@@ -378,8 +396,14 @@ export function approxByteSizeLabel(bytes: number): string {
   return `${bytes} 字节`;
 }
 
-/** 内联后体积超过单文件上传上限时的回执文案。 */
-export function inlineTooLargeMessage(bytes: number, limit: number): string {
+/** 超过单文件上传上限时的回执文案。`inlinedCount` 是这次改写实际内联成功的图片张数：
+ *  零张时——文本本身已超限、或部署关闭了图片存储、或正文里根本没有本地图片——「请精简
+ *  图片」是对不上症状的建议（超限的是正文，不是图片），改说「拆分文档」；有内联时才是
+ *  真的「内联图片撑爆了体积」，保留原措辞（含「精简图片」这个可操作项）。 */
+export function inlineTooLargeMessage(bytes: number, limit: number, inlinedCount: number): string {
+  if (inlinedCount === 0) {
+    return `文档体积${approxByteSizeLabel(bytes)}，超过单文件上限（${sourceUploadSizeLabel(limit)}），请拆分文档后重试`;
+  }
   return `内联图片后体积${approxByteSizeLabel(bytes)}，超过单文件上限（${sourceUploadSizeLabel(limit)}），请精简图片或拆分文档后重试`;
 }
 
@@ -418,6 +442,11 @@ export const ALREADY_STAGED_REASON = "同名同大小的文件已在列表中";
  *  配对/内联，压缩包/文件夹里的图片不会进入待上传正文，这条说明必须贴在结果
  *  概览之前，而不是散落在某一份 md 的逐条明细里（部署级开关，跟哪份 md 无关）。 */
 export const BUNDLE_IMAGES_DISABLED_NOTE = "该部署未开启图片存储，压缩包中的图片将不会被保存";
+
+/** `pairingSkipped` 为真的那一行的概览措辞——图片配对根本没有跑过，不能落进
+ *  `receiptSummaryLine` 的「未在正文中发现本地图片」兜底（那句话是具体的事实断言：
+ *  「看过了、没找到」，而这里是「压根没看」）。唯一实现真源，避免 UI 层另写一遍。 */
+export const PAIRING_SKIPPED_SUMMARY = "图片存储已关闭，未做配对";
 
 /** 一份 md 的配对结果概览行——「N 张已内联 / M 张未找到 / K 张不支持 / …」
  *  （设计文档 §3.1 第 7 条的字面措辞）。 */

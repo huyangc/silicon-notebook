@@ -10,6 +10,7 @@
  */
 
 import {
+  PAIRING_SKIPPED_SUMMARY,
   missingImageLine,
   noAltImageLine,
   receiptSummaryLine,
@@ -74,6 +75,11 @@ export type BundleReceiptEntry = {
    *  最大的几张图片…）。回执面板本来只描述「图片配上了没有」，一份被拒或被去重的
    *  md 若不加标注就会看起来像入列成功了。 */
   notes?: readonly string[];
+  /** 本次是否因部署级开关关闭而整个跳过了图片配对/内联（`processMarkdownCandidate`
+   *  的同名字段透传）。为真时概览行渲染 `PAIRING_SKIPPED_SUMMARY`，绝不落进
+   *  `receiptSummaryLine` 的「未在正文中发现本地图片」——那句话断言「看过了、没找到」，
+   *  这里是「压根没看」。 */
+  pairingSkipped?: boolean;
 };
 
 export function BundleReceiptsPanel({
@@ -102,7 +108,7 @@ export function BundleReceiptsPanel({
           <div className="bundle-receipt-row" key={entry.key}>
             <div className="staged-skipped-row">
               <span className="staged-skipped-name" title={entry.fileName}>{compactStagedFileName(entry.fileName)}</span>
-              <small>{receiptSummaryLine(entry.receipt)}</small>
+              <small>{entry.pairingSkipped ? PAIRING_SKIPPED_SUMMARY : receiptSummaryLine(entry.receipt)}</small>
             </div>
             {((entry.notes?.length ?? 0) > 0
               || entry.receipt.missing.length > 0

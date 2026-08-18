@@ -173,6 +173,19 @@ describe("BundleReceiptsPanel", () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  test("pairingSkipped 为真时概览行渲染「图片存储已关闭，未做配对」，不落入「未在正文中发现」兜底", () => {
+    const receipts: BundleReceiptEntry[] = [
+      { key: "a", bundleLabel: "x.zip", fileName: "one.md", receipt: emptyReceipt(), pairingSkipped: true },
+      { key: "b", bundleLabel: "x.zip", fileName: "two.md", receipt: emptyReceipt() },
+    ];
+    render(<BundleReceiptsPanel receipts={receipts} onDismiss={() => undefined} />);
+
+    expect(screen.getByText("图片存储已关闭，未做配对")).toBeInTheDocument();
+    // 未跳过的那一份仍走既有的「未在正文中发现本地图片」——两者不能互相污染。
+    expect(screen.getByText("未在正文中发现本地图片")).toBeInTheDocument();
+    expect(screen.queryByText(/one\.md.*未在正文中发现/)).toBeNull();
+  });
+
   test("imagesDisabledNote 传入时在面板顶部持久显示；省略或空不渲染", () => {
     const receipts: BundleReceiptEntry[] = [
       { key: "a", bundleLabel: "x.zip", fileName: "one.md", receipt: emptyReceipt() },
