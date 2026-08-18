@@ -161,9 +161,33 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 | 删库、转让 owner | | | ✓ |
 
 P2 兑现了这两格。内容管理能力（来源增删/重解析、构建触发、knowhow/知识治理/命令目录
-写）以及 `notebook:manage`（改名 + 授权边管理）现在解析到 **admin 档**——owner ∪
+写）以及 `notebook:manage` 现在解析到 **admin 档**——owner ∪
 `role='admin'` 的有效授权边（谓词唯一定义点 `access_sql.NOTEBOOK_ADMIN_SQL`，它复用读权的
 受限三臂外加 `role='admin'` 并排除 `everyone`）。组管理员因此能经浏览器管理内容与共享。
+
+**`notebook:manage` 到底覆盖什么**——它是 `PATCH /notebooks/{id}` 加三个授权边端点，而那个
+PATCH 编辑的是笔记本的整份**描述性画像**，不只是改名:`NotebookUpdate` 收 `name`、`purpose`、
+`primary_domain`、`target_users`、`expected_questions`、`source_types`、`taxonomy`、
+`access_scope` 八个字段。本页早先写作「改名」，那是「PATCH 那个端点」的简写，不该被读成字段
+清单。使这件事安全的是下面两条性质，它们是**承重的**而不是碰巧成立:
+
+- **这八个字段没有一个参与授权判定。** 访问权只由 `access_sql.py` 的三条谓词（外加
+  `mount_sql.py` 的可挂载性）决定，它们引用的是 `notebooks.created_by`、`notebooks.tier`、
+  `notebook_members` 与 `notebook_grants`，八个字段一个都不在其中。尤其 `access_scope`
+  是**「这个库是给谁用的」这句描述文字**，不是访问控制列:它只被 notebook store 写入、
+  被目录投影读回，再无别的消费者。所以改它们不可能提权。这条由反向护栏冻结
+  （`backend/tests/test_notebook_update_authorization_free.py`）——往 `NotebookUpdate` 里
+  加字段时**必须有人回来重新回答**这个问题，而不是静默继承旧答案。
+- **生命周期状态是 repository 私有的。** `NotebookUpdate` 设了
+  `model_config = ConfigDict(extra="forbid")`，所以 `status`（尤其内部的 `copying` 哨兵）、
+  `tier`、`created_by`、`is_shared` 经这个端点根本写不进来——未知键是 422，不是静默忽略。
+
+这些字段就是普通的用户可见内容:`primary_domain` 在库内搜索框里可被匹配到，`purpose` 会经
+MCP 的 `list_notebooks` / `select_notebook` 提供给外部 Agent（截断到 500 字符）。所以它们是
+**内容邻接**的——描述这个库讲什么——正落在内容管理权本来的范围里。「拆端点或逐字段校验、
+让非 owner 只能改名」这条路评估过并否决:为纯描述性元数据增加一道真实的接缝不划算，而同一个
+组管理员本来就能把这个库里每一份来源增删重解析。
+
 分享界面据此新增「组管理员可管理这本笔记本」勾选：勾上就在 `(group, viewer)` 之外追加一条
 `(group_admins, admin)` 边；撤销共享时同组两行一起删，共享清单把两行折叠成一条并标注管理权。
 **但两类 owner 专属能力刻意不翻**：`notebook:delete`（删库，爆炸半径整本库且 owner 不可

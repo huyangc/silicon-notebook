@@ -171,11 +171,47 @@ Two in-group levels plus the notebook owner:
 
 P2 delivers those two cells. Content-management capabilities (source add/delete/
 re-parse, build triggers, knowhow/knowledge-governance/command-catalog writes) and
-`notebook:manage` (rename + grant-edge management) now resolve to the **admin
+`notebook:manage` now resolve to the **admin
 tier** — owner ∪ an effective `role='admin'` grant edge (predicate definition point
 `access_sql.NOTEBOOK_ADMIN_SQL`, which reuses the read predicate's restricted three
 arms plus `role='admin'` and excludes `everyone`). A group admin can therefore
-manage content and sharing through the browser. The share dialog gains a "group
+manage content and sharing through the browser.
+
+**What `notebook:manage` actually covers** — it is `PATCH /notebooks/{id}` plus the
+three grant endpoints, and the PATCH edits the notebook's whole **descriptive
+profile**, not just its name: `NotebookUpdate` accepts `name`, `purpose`,
+`primary_domain`, `target_users`, `expected_questions`, `source_types`, `taxonomy`
+and `access_scope`. Earlier revisions of this page said "rename", which was
+shorthand for "the PATCH endpoint" and should never have been read as the field
+list. Two properties make that safe, and both are load-bearing rather than
+incidental:
+
+- **None of those fields participates in any authorization decision.** Access is
+  decided exclusively by the three predicates in `access_sql.py` (plus
+  `mount_sql.py` for mountability), which reference `notebooks.created_by`,
+  `notebooks.tier`, `notebook_members` and `notebook_grants` — and none of the
+  eight. In particular `access_scope` is *descriptive prose about who the library
+  is for*, not an access-control column: it is written by the notebook store and
+  read back into the catalog projection, nothing else. So editing them cannot
+  escalate privilege. A regression guard freezes this
+  (`backend/tests/test_notebook_update_authorization_free.py`) so that adding a
+  field to `NotebookUpdate` forces someone to re-answer the question rather than
+  inheriting the answer silently.
+- **Lifecycle state is repository-private.** `NotebookUpdate` sets
+  `model_config = ConfigDict(extra="forbid")`, so `status` (notably the internal
+  `copying` sentinel), `tier`, `created_by` and `is_shared` are not writable
+  through this endpoint at all — an unknown key is a 422, not a silent no-op.
+
+These fields are ordinary user-visible content: `primary_domain` is matchable in
+the in-notebook search box, and `purpose` is surfaced to external agents by the
+MCP `list_notebooks` / `select_notebook` tools (capped at 500 characters). They are
+therefore *content-adjacent* — they describe what the library is about — which is
+exactly the scope a content manager already holds. Splitting the endpoint or
+per-field validation so that a non-owner could only rename was considered and
+rejected: it would add a real seam for purely descriptive metadata while the same
+group admin can already add, delete and re-parse every source in the library.
+
+The share dialog gains a "group
 admins may manage this notebook" checkbox accordingly: ticking it appends a
 `(group_admins, admin)` edge beside `(group, viewer)`; unsharing removes both
 same-group rows together, and the share list folds them into one entry marked with

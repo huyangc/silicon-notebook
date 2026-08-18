@@ -350,6 +350,42 @@ G1/G2/G3、PR + codex 闭环。
   `notebook:configure` 恒 owner——**安全相关的错误指引**,照表实现会把链接分享控件暴露给组
   管理员)、提交共享申请(表写「目标组成员」,P2-12 之后是「目标组**普通成员**」)。
 
+- **P2-15**(T4 codex 第 10 轮评审):**「`notebook:manage` = 改名」是简写被当成了契约——
+  修文档,不拆端点。** codex 指出的分叉是**真的**:能力翻转让 `PATCH /notebooks/{id}` 对组
+  管理员开放,而 `NotebookUpdate` 收的是八个字段(`name` + `purpose` / `primary_domain` /
+  `target_users` / `expected_questions` / `source_types` / `taxonomy` / `access_scope`),仓库
+  契约却写成「改名 + 授权边管理」。两个修法方向:①拆端点或逐字段校验,让非 owner 只能改名;
+  ②把契约写准。**选 ②**。
+
+  裁决理由:这些字段是**内容邻接**的(描述这个库讲什么),正落在内容管理权里;一个已经能
+  增删/重解析全部来源、触发图谱重建、写 knowhow 与知识治理的组管理员,却不许改「这个库是
+  干什么的」这行描述,不自洽。为纯描述性元数据增加一道真实的接缝不划算。
+
+  **两条实证(独立复核过,其中一条修正了交接时的说法)**:
+  - ✅ **`access_scope` 不参与任何授权判定**——名字像权限、行为不是。全仓只有两个消费者:
+    `notebook_store` 的 update 写它、`notebook_catalog` 读回投影;授权全部在 `access_sql.py`
+    的三条谓词(外加 `mount_sql.py`),引用的是 `created_by`/`tier`/`notebook_members`/
+    `notebook_grants`。**不存在提权。**
+  - ⚠ **「七个字段全仓只有 `notebook_templates.py` 用到」不准确**,实际还有两个消费者(都
+    **不是** prompt、也**不是**授权):`primary_domain` 是库内搜索框(`GET /notebooks/{id}/search`)
+    的可匹配字段;`purpose` 会经 MCP `list_notebooks` / `select_notebook` 提供给外部 Agent
+    (截断 500 字符)。两者都是内容邻接的读,不改变裁决——但文档必须写这条**准确**的性质,
+    不能写「它们哪儿也不去」:本轮要修的毛病正是「宽泛的简写被当成契约」,反方向再犯一次
+    就没意思了。(`prompts.py` 里的 `purpose` 参数是**同名局部量**,取值是 `"deep report"` /
+    `"step-by-step evidence-grounded answer"` 这类字面量,与笔记本字段无关;`catalog_job` /
+    `collection_enumeration` / `knowhow/api` / `memory_service` 的命中全是散文里的
+    "on purpose" 或另一个局部变量。)
+
+  承重的不是文档而是**反向护栏** `backend/tests/test_notebook_update_authorization_free.py`
+  (三条):①冻结字段集合,失败信息**告诉后来者该想什么**(会不会进谓词/是不是生命周期
+  状态/会不会喂进 prompt),而不是只报「集合变了」;②把字段名与授权谓词的**实际 SQL** 比对
+  ——冻结集合通知不了「有人把某个既有字段引进了谓词」,那种改动在另一个文件里发生、字段集合
+  一个字不变;③`extra="forbid"` 仍然挡得住 `status`/`tier`/`created_by`/`is_shared`。判据
+  用 Pydantic 运行时自省而不是解析源码文本(模型自己就是真源)。
+
+  ⚠ 那句简写在**五处**(两份 product-and-api、`AGENTS.md`、`CLAUDE.md`、`deps.py` 注释)
+  逐字重复,已一并改准——只改被点名的两处,另外三处会继续把同一个误解教给下一个人。
+
 ## 遗留登记(不阻塞本特性,独立跟踪)
 
 - `schema_manifest.POSTGRES_EMPTY_TIME_SENTINELS`
