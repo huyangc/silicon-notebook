@@ -530,6 +530,10 @@ export function AgentProfilePanel({
       const release = scope === "shared" ? setBaseBusyIds : setMineBusyIds;
       release((prev) => releaseNotebookClaim(prev, notebookId));
       setError(toUserMessage(err, "现在没能开始整理，请稍后重试"));
+      // codex R10 P2:409 的常见来历是「别的端/自动触发抢先认领」——本地手上
+      // 的 data.job 还是终态旧照,不重取就不会进入轮询,按钮立刻恢复可点、
+      // 再点还是 409。重取一次让服务端的 running 接管忙碌位与轮询。
+      load().catch(() => undefined);
       return;
     }
     // 排上了 ≠ 做完了。终态由上面那条轮询按服务端状态判,这里不猜。
