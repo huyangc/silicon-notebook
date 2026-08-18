@@ -953,6 +953,12 @@ def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores)
     assert again["id"] == created["id"]
     assert [r["id"] for r in groups.list_pending_share_requests(group["id"])] == [created["id"]]
     assert [r["id"] for r in groups.list_my_share_requests(notebook_id, requested_by=librarian.id)] == [created["id"]]
+    # 全局入口(codex #519 R11 P1):唯一谓词是 requested_by,只回 pending。
+    # boss 看得见整个组队列,但他自己没提过申请,所以这条清单对他是空的。
+    assert [
+        r["id"] for r in groups.list_pending_share_requests_by_requester(librarian.id)
+    ] == [created["id"]]
+    assert groups.list_pending_share_requests_by_requester(boss.id) == []
 
     # 批准:同事务写 (group, viewer) 边 + 状态 approved;decided_at 变非空 ISO。
     decided = groups.approve_share_request(
@@ -1004,6 +1010,18 @@ def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores)
     assert (
         groups.delete_share_request(notebook_id, others["id"], librarian.id) == "deleted"
     )
+
+    # 已决定的申请不进全局清单(撤不回来,列出来只是多披露一份历史 + 审批者身份)。
+    decided_one = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+    assert [
+        r["id"] for r in groups.list_pending_share_requests_by_requester(librarian.id)
+    ] == [decided_one["id"]]
+    assert groups.reject_share_request(
+        group["id"], decided_one["id"], decided_by=boss.id
+    )["status"] == "rejected"
+    assert groups.list_pending_share_requests_by_requester(librarian.id) == []
 
 
 def test_share_request_authorization_rechecks_mirror_the_sqlite_store(

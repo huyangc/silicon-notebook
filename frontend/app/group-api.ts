@@ -238,6 +238,18 @@ export const withdrawShareRequest = (
     tag: TAG,
   });
 
+/**
+ * 我发起的、仍**待审批**的全部申请 —— 跨笔记本的**全局**入口,只要求登录。
+ *
+ * 与 `listMyShareRequests(notebookId)` 的区别是**授权轴**:那条挂在笔记本维度、要
+ * `notebook:manage`,申请人一失去管理权就打不开;这条唯一的谓词是「这条申请是你提的」,
+ * 与撤回端点逐字相同。裁决 P2-7 特意让撤回不要求笔记本权限(否则失权申请人的申请既批不了
+ * 也撤不掉),而没有这条清单他连申请 id 都拿不回来 —— 那个口子在它唯一存在意义的场景里
+ * 就是够不着的(codex #519 R11 P1)。
+ */
+export const listMyPendingShareRequests = (): Promise<ShareRequest[]> =>
+  requestJson(`/me/share-requests`, { tag: TAG });
+
 /** 组管理员的审核队列:共享给本组的待审批申请。 */
 export const listGroupShareRequests = (groupId: string): Promise<ShareRequest[]> =>
   requestJson(`/groups/${groupId}/share-requests`, { tag: TAG });

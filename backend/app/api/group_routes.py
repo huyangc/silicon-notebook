@@ -580,6 +580,40 @@ def list_my_share_requests_route(
     ]
 
 
+@router.get("/me/share-requests", response_model=List[ShareRequestItem])
+def list_my_pending_share_requests_route(
+    user: UserProfile = Depends(get_current_user),
+) -> List[ShareRequestItem]:
+    """我发起的、仍**待审批**的全部共享申请 —— 跨笔记本,只要求登录。
+
+    ⚠ **路径刻意在 `/me` 下而不是 `/notebooks/{id}/...`**:授权轴是**申请归属**,不是笔记本
+    权限。挂成 notebook 维度再把守卫放宽,等于让「谁能列这本库的申请」有两套口径;放在 `/me`
+    下,主体是「我」这件事从路径就读得出来。既有的
+    `GET /notebooks/{id}/share-requests`(笔记本维度、`notebook:manage` 门)一个字不动。
+
+    存在的理由是裁决 P2-7 的另一半(codex #519 R11 P1):撤回只认「这条申请是你提的」,
+    因为 P2-6 让批准会拒绝已失权的申请人——两边都要管理权,这类申请就**既批不了也撤不掉**。
+    但申请人一失权就打不开那本笔记本,唯一列出申请、拿到 id 的入口也跟着消失,于是那个刻意
+    留下的口子在**它唯一存在意义的场景**里够不着。这条端点就是给他的全局入口。
+
+    **披露面是有意选定的**,不是顺手把 store 的行倒出来(每一项都对照「他原本知不知道」):
+    * `id` / `notebook_id` —— 撤回请求要用;两者都是他自己提交时就持有的。
+    * `notebook_name` —— **带**。他提交申请时对这本库有管理权(创建端点要求 `notebook:manage`),
+      库名是他早就知道的;而 `notebooks.created_by` 全仓只在建库与深拷贝时写入(无转让功能,
+      `NotebookUpdate` 里也没有这一列,有护栏钉着),所以不存在「库易主后拿旧 id 探测新主人」
+      这条通道。不带的话清单只能显示「某个知识库」,有多条待审批时根本分不清撤哪个。
+    * `group_id` / `group_name` —— 他自己选的目标组,提交时是其成员。
+    * `requested_by` / `requested_by_username` —— 他自己。
+    * `status` 恒 `pending`;`decided_by` / `decided_at` 因此恒为 null —— 审批者身份**不**经这条
+      路泄露(已决定的申请压根不在结果里)。
+    * 库的其它任何状态(来源数、是否仍共享、现任成员……)一律不带。
+    """
+    return [
+        ShareRequestItem(**item)
+        for item in group_repository().list_pending_share_requests_by_requester(user.id)
+    ]
+
+
 @router.delete(
     "/notebooks/{notebook_id}/share-requests/{request_id}",
     status_code=204,

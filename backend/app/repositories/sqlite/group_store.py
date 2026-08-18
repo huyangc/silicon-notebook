@@ -665,6 +665,30 @@ class GroupStore:
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
 
+    def list_pending_share_requests_by_requester(
+        self, requested_by: str
+    ) -> list[dict]:
+        """**我发起的、仍待审批的**全部申请 —— 跨笔记本,不带任何 notebook 维度收窄。
+
+        存在的理由是裁决 P2-7 的另一半(codex #519 R11 P1):撤回刻意只认「这条申请是你
+        提的」、不要求笔记本管理权,因为 P2-6 让批准会拒绝已失权的申请人——两边都要管理权
+        的话,这类申请**既批不了也撤不掉**,永远卡在组管理员队列里。但按笔记本列申请的
+        `list_my_share_requests` 挂在 manage 门后面,申请人一失权就连申请 id 都拿不回来,
+        那个口子等于没开。这条查询是给他的:**唯一的谓词是 `requested_by`**,与 DELETE
+        的授权轴逐字相同。
+
+        只回 `status='pending'`(**正向精确匹配**,红线):已决定的申请撤不回来,列出来
+        既没有可做的动作,又平白多披露一份历史。
+        """
+        with self.database.connect() as db:
+            rows = db.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.requested_by=? AND sr.status='pending' "
+                + "ORDER BY sr.created_at DESC, sr.id ASC",
+                (requested_by,),
+            ).fetchall()
+        return [self._share_request_row(row) for row in rows]
+
     def _require_plain_membership_on(
         self, db: sqlite3.Connection, group_id: str, user_id: str
     ) -> None:

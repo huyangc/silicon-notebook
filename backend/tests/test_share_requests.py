@@ -600,6 +600,101 @@ def test_withdrawing_a_decided_request_is_409(tmp_path, monkeypatch, decision):
     assert conflict.headers.get("X-User-Message") == "1"
 
 
+def _my_pending(client, headers):
+    return client.get("/api/me/share-requests", headers=headers)
+
+
+def test_a_requester_who_lost_manage_rights_can_still_find_and_withdraw(
+    tmp_path, monkeypatch
+):
+    """裁决 P2-7 的另一半:失权申请人必须**够得着**自己的申请(codex #519 R11 P1)。
+
+    撤回刻意只认「这条申请是你提的」,但按笔记本列申请那条挂 `notebook:manage`——申请人
+    一失权就拿不到申请 id,那个口子在**它唯一存在意义的场景**里等于没开。全局入口
+    `GET /me/share-requests` 补上这一半:唯一谓词是 `requested_by`,与 DELETE 逐字相同。
+
+    舞台:Bob 经 `group_admins` 边对 Alice 的库有管理权 → 提交申请 → Alice 撤掉那条边。
+    此后他对那本库**连读权都没有**。
+    """
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, alice, name="Alice 的库")
+    bob, bob_id, _ = _new_user(client)
+    conferring = _make_group(client, alice, name="授权组")
+    assert _add_member(client, alice, conferring, bob_id, role="admin").status_code == 200
+    edge = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group_admins", "principal_id": conferring, "role": "admin"},
+        headers=alice,
+    )
+    assert edge.status_code == 200, edge.text
+    carol, _carol_id, _ = _new_user(client)
+    target = _make_group(client, carol, name="Carol 的组")
+    assert _add_member(client, carol, target, bob_id).status_code == 200
+    request_id = _submit(client, bob, notebook_id, target).json()["id"]
+
+    # Alice 收回管理边 —— Bob 从此对这本库一无所有。
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/grants/{edge.json()['id']}", headers=alice
+    ).status_code == 204
+    # 笔记本维度那条(manage 门)现在对他关着 —— 这正是 R11 P1 描述的处境。
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/share-requests", headers=bob
+    ).status_code == 404
+
+    # 全局入口仍然给得出这条申请,且带着撤回所需的两个 id。
+    mine = _my_pending(client, bob)
+    assert mine.status_code == 200, mine.text
+    assert [r["id"] for r in mine.json()] == [request_id]
+    row = mine.json()[0]
+    assert row["notebook_id"] == notebook_id
+    assert row["notebook_name"] == "Alice 的库"   # 有意披露,见路由 docstring
+    assert row["status"] == "pending"
+    assert row["decided_by"] is None and row["decided_at"] is None
+
+    # 而且撤得掉 —— 这才是整条裁决要兑现的动作。
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/share-requests/{request_id}", headers=bob
+    ).status_code == 204
+    assert _my_pending(client, bob).json() == []
+    assert _pending_for(client, carol, target).json() == []
+
+
+def test_the_global_request_list_is_scoped_to_the_requester_and_to_pending(
+    tmp_path, monkeypatch
+):
+    """全局入口的两条收窄:**只回自己发起的**、**只回待审批的**。
+
+    前者是授权轴(否则它就成了「谁提过申请」的全站清单);后者是披露面——已决定的申请撤不
+    回来,列出来既没有可做的动作、又平白多披露一份历史(连同审批者身份)。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    mine_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    # 另一个人对自己的库、同一个组也提一条 —— 绝不能出现在我的清单里。
+    other, other_id, _ = _new_user(client)
+    other_nb = _make_notebook(client, other, name="别人的库")
+    assert _add_member(client, boss, group_id, other_id).status_code == 200
+    other_id_req = _submit(client, other, other_nb, group_id).json()["id"]
+
+    assert [r["id"] for r in _my_pending(client, librarian).json()] == [mine_id]
+    assert [r["id"] for r in _my_pending(client, other).json()] == [other_id_req]
+    # 组管理员自己没提过申请 —— 哪怕他能看见整个队列,这条清单也是空的。
+    assert _my_pending(client, boss).json() == []
+    assert len(_pending_for(client, boss, group_id).json()) == 2
+
+    # 被驳回之后从这条清单消失(它撤不回来了)。
+    assert client.post(
+        f"/api/groups/{group_id}/share-requests/{mine_id}/reject", headers=boss
+    ).status_code == 200
+    assert _my_pending(client, librarian).json() == []
+    # 但笔记本维度那条仍然回显「已驳回」(那是给有管理权的人看的历史)。
+    assert [r["status"] for r in client.get(
+        f"/api/notebooks/{notebook_id}/share-requests", headers=librarian
+    ).json()] == ["rejected"]
+
+
 def test_a_requester_who_lost_manage_rights_can_still_withdraw(tmp_path, monkeypatch):
     """撤回按**申请归属**授权,不按当前笔记本权限(codex #519 R6 P2)。
 

@@ -649,6 +649,21 @@ class GroupStore:
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
 
+    def list_pending_share_requests_by_requester(
+        self, requested_by: str
+    ) -> list[dict]:
+        """`sqlite/group_store.py::list_pending_share_requests_by_requester` 的镜像:
+        我发起的、仍待审批的全部申请,唯一谓词是 `requested_by`(与撤回的授权轴逐字相同)。
+        完整理由(裁决 P2-7 的另一半)写在 SQLite 那一份。"""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.requested_by=%s AND sr.status='pending' "
+                + 'ORDER BY sr.created_at DESC, sr.id COLLATE "C" ASC',
+                (requested_by,),
+            ).fetchall()
+        return [self._share_request_row(row) for row in rows]
+
     def _require_plain_membership_on(
         self, connection: Any, group_id: str, user_id: str
     ) -> None:

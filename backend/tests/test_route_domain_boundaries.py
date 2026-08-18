@@ -184,6 +184,10 @@ def test_group_and_grant_endpoints_have_a_domain_owner():
         # 两个端点同一条边界,一并登记在群组域,不能照 URL 搬进 notebook_routes。
         "create_share_request_route": "app.api.group_routes",
         "list_my_share_requests_route": "app.api.group_routes",
+        # `GET /me/share-requests`(codex #519 R11 P1):URL 前缀在 `/me`(授权轴是**申请
+        # 归属**,不是笔记本权限,所以刻意不挂在 notebook 维度),但策略仍归群组域——它是
+        # 审批流的一部分,和上面那条按笔记本列的清单共用同一套 store 与状态口径。
+        "list_my_pending_share_requests_route": "app.api.group_routes",
         "delete_share_request_route": "app.api.group_routes",
         "list_group_share_requests_route": "app.api.group_routes",
         "approve_share_request_route": "app.api.group_routes",

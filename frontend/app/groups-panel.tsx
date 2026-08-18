@@ -19,12 +19,14 @@ import {
   listGroupShareRequests,
   listGroupSharedNotebooks,
   listGroups,
+  listMyPendingShareRequests,
   putGroupMember,
   rejectShareRequest,
   removeGroupMember,
   resolveUser,
   revokeGroupSharedNotebook,
   updateGroup,
+  withdrawShareRequest,
   type GroupDetail,
   type GroupSharedNotebook,
   type GroupSummary,
@@ -74,6 +76,10 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
   const [shareRequests, setShareRequests] = useState<ShareRequest[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  /** 中性说明(**不是**错误):改动已经生效,只是这一屏没跟上。 */
+  const [notice, setNotice] = useState("");
+  /** 我发起的、仍待审批的申请(全局,不依赖任何笔记本权限)。 */
+  const [myRequests, setMyRequests] = useState<ShareRequest[] | null>(null);
 
   const [newName, setNewName] = useState("");
   const [newKind, setNewKind] = useState("project");
@@ -98,14 +104,63 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
     return () => { cancelled = true; };
   }, [scope]);
 
+  // 我发起的待审批申请 —— 与 `scope` 无关(它不是群组维度的东西),所以单独一次加载。
+  // ⚠ 失败**不**报错:这一节是给失权申请人的补救入口,它自己挂了不该盖住整个群组面板。
+  useEffect(() => {
+    let cancelled = false;
+    listMyPendingShareRequests()
+      .then((list) => { if (!cancelled) setMyRequests(list); })
+      .catch(() => { if (!cancelled) setMyRequests([]); });
+    return () => { cancelled = true; };
+  }, []);
+
   // 每个写动作都走它:统一收敛忙碌位、错误文案与「动作之后重取哪几份数据」。
   async function run(action: () => Promise<void>, fallback: string) {
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       await action();
     } catch (err) {
       setError(toUserMessage(err, fallback));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * 「先把改动做掉,再去对账」——两段**分开**报(codex #519 R11 P2)。
+   *
+   * 批准/驳回都是**已经提交成功**的服务端改动。此前它们和随后的两三个列表请求同在一个
+   * `run` 里,于是刷新任一失败就报「批准申请失败」、那条已批准的行还留在界面上,用户照着
+   * 提示重试 —— 而它已经不是 pending 了,重试必然 404。两件事必须分开说:「批准失败」该让
+   * 人重试,「已批准但列表没刷出来」只该让人刷新。
+   *
+   * ⚠ 不是把刷新错误吞掉:对账失败给中性说明(它不是故障,是视图落后了),与
+   * `notebook-group-share` 那处「重取被拒 → 清空清单 + 中性说明」同口径。
+   */
+  async function mutateThenReconcile(
+    mutate: () => Promise<void>,
+    reconcile: () => Promise<void>,
+    mutationFallback: string,
+    staleNotice: string,
+  ) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await mutate();
+    } catch (err) {
+      setError(toUserMessage(err, mutationFallback));
+      setBusy(false);
+      return;
+    }
+    try {
+      await reconcile();
+    } catch {
+      // 改动已经生效,只是这一屏没跟上。绝不能报成「失败」——那会把人骗去重试一个
+      // 已经完成的动作(重试拿 404,因为它已经不是待审批状态了)。
+      setNotice(staleNotice);
     } finally {
       setBusy(false);
     }
@@ -163,6 +218,38 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
           )}
 
           {error && <p className="password-change-status error">{error}</p>}
+          {notice && <p className="tool-hint" style={{ margin: 0 }}>{notice}</p>}
+
+          {/* 我发起的共享申请(codex #519 R11 P1)。
+              ⚠ **刻意放在群组面板顶层、且不挂任何笔记本条件**:裁决 P2-7 让撤回只认「这条
+              申请是你提的」,正是为了让**已失去笔记本管理权**的申请人还能收回自己的提议
+              (否则批准会拒绝他、撤回也够不着,申请永远卡在组管理员队列里)。所以入口必须
+              在笔记本工作区**之外** —— 他可能连那本库的读权都一起没了,打不开工作区。
+              空清单时整节不渲染,不给没有申请的人添一行噪音。 */}
+          {myRequests !== null && myRequests.length > 0 && (
+            <div className="stack">
+              <span className="section-title">我发起的共享申请</span>
+              <p className="tool-hint" style={{ margin: 0 }}>
+                等待组管理员审批。撤回后可以重新发起。
+              </p>
+              {myRequests.map((req) => (
+                <div className="checklist-row" key={req.id} style={{ alignItems: "center", gap: 8 }}>
+                  <span style={{ flex: 1, wordBreak: "break-word" }}>
+                    {req.notebook_name || "知识库"} → {req.group_name || "群组"}
+                  </span>
+                  <span className="new-pill">待审批</span>
+                  <button
+                    className="sort-button"
+                    disabled={busy}
+                    onClick={() => { void run(async () => {
+                      await withdrawShareRequest(req.notebook_id, req.id);
+                      setMyRequests(await listMyPendingShareRequests());
+                    }, "撤回申请失败"); }}
+                  >{busy ? "处理中…" : "撤回"}</button>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="stack">
             <span className="section-title">新建群组</span>
@@ -411,20 +498,35 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                         <button
                           className="new-pill"
                           disabled={busy}
-                          onClick={() => { void run(async () => {
-                            await approveShareRequest(detail.id, req.id);
-                            setShareRequests(await listGroupShareRequests(detail.id));
-                            setShared(await listGroupSharedNotebooks(detail.id));
-                            onChanged();
-                          }, "批准申请失败"); }}
+                          onClick={() => { void mutateThenReconcile(
+                            () => approveShareRequest(detail.id, req.id).then(() => {
+                              // 服务端已经改完:先把这一行从本地清单里拿掉。对账失败时它
+                              // 若还挂在屏幕上,就是在诱人再点一次——而再点必然 404(它已经
+                              // 不是待审批状态了)。
+                              setShareRequests((current) => (current ?? []).filter((r) => r.id !== req.id));
+                            }),
+                            async () => {
+                              setShareRequests(await listGroupShareRequests(detail.id));
+                              setShared(await listGroupSharedNotebooks(detail.id));
+                              onChanged();
+                            },
+                            "批准申请失败",
+                            "已批准，但列表没能刷新，请手动刷新查看最新状态。",
+                          ); }}
                         >{busy ? "处理中…" : "批准"}</button>
                         <button
                           className="sort-button"
                           disabled={busy}
-                          onClick={() => { void run(async () => {
-                            await rejectShareRequest(detail.id, req.id);
-                            setShareRequests(await listGroupShareRequests(detail.id));
-                          }, "驳回申请失败"); }}
+                          onClick={() => { void mutateThenReconcile(
+                            () => rejectShareRequest(detail.id, req.id).then(() => {
+                              setShareRequests((current) => (current ?? []).filter((r) => r.id !== req.id));
+                            }),
+                            async () => {
+                              setShareRequests(await listGroupShareRequests(detail.id));
+                            },
+                            "驳回申请失败",
+                            "已驳回，但列表没能刷新，请手动刷新查看最新状态。",
+                          ); }}
                         >{busy ? "处理中…" : "驳回"}</button>
                       </div>
                     ))
