@@ -174,7 +174,8 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     # ⚠️ 顺序敏感：_request_metadata 取**首个**同长匹配。同为 4 段的
     # history/diff、history/prune（字面末段）必须排在 history/{seq}（通配
     # None 末段）之前，否则 None 会先吞掉 diff/prune，把它们误归一成
-    # history/{id}。这是本白名单里唯一「同长同前缀、末段一字面一通配」的情形。
+    # history/{id}。这是本白名单里其中一处「同长同前缀、末段一字面一通配」的
+    # 情形（另一处见上面 understanding/rebuild 的注释）。
     ("knowhow", None, "history", "diff"),
     ("knowhow", None, "history", "prune"),
     ("knowhow", None, "history", None),

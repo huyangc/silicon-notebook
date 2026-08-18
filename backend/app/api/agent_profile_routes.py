@@ -43,9 +43,11 @@ from app.models.agent_profile import (
     UnderstandingBlockUpdate,
     UnderstandingJobs,
     UnderstandingJobStatus,
+    UnderstandingLabel,
     UnderstandingRebuildRequest,
     UnderstandingRebuildResponse,
     UnderstandingResponse,
+    UnderstandingScope,
 )
 from app.models.identity import UserProfile
 from app.repositories.ports import AgentProfileRevisionConflict
@@ -148,13 +150,15 @@ def _ordered_blocks(rows: list[dict], owner_id: str) -> list[UnderstandingBlockO
 def get_understanding(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> UnderstandingResponse:
+    if not _wiring_active():
+        # 关闸时不查这项能力——总闸已经决定了「不可编辑」，能力查询的结果无关
+        # 紧要，白付一次查询没有意义；响应固定给 False。
+        return UnderstandingResponse(
+            enabled=False, base=[], mine=[], job=UnderstandingJobs(), can_edit_base=False
+        )
     can_edit_base = notebook_capability_allowed(
         "agent_profile:write", notebook_id, user.id
     )
-    if not _wiring_active():
-        return UnderstandingResponse(
-            enabled=False, base=[], mine=[], job=UnderstandingJobs(), can_edit_base=can_edit_base
-        )
     store = _profile_store()
     rows = store.read_blocks(notebook_id, user.id)
     base_job = store.job_row(notebook_id, BASE_CHAIN_OWNER)
@@ -175,7 +179,7 @@ def get_understanding(
 )
 def update_understanding_block(
     notebook_id: str,
-    label: str,
+    label: UnderstandingLabel,
     payload: UnderstandingBlockUpdate,
     user: UserProfile = Depends(get_current_user),
 ) -> UnderstandingBlockOut:
@@ -211,8 +215,8 @@ def update_understanding_block(
 )
 def clear_understanding_block(
     notebook_id: str,
-    label: str,
-    scope: str = Query(...),
+    label: UnderstandingLabel,
+    scope: UnderstandingScope = Query(...),
     user: UserProfile = Depends(get_current_user),
 ) -> UnderstandingBlockOut:
     if not _wiring_active():

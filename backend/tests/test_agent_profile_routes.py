@@ -287,6 +287,69 @@ def test_scope_label_mismatch_is_422(tmp_path, monkeypatch):
     assert bad_scope.status_code == 422, bad_scope.text
 
 
+def test_delete_scope_is_validated_against_the_literal_value_domain(tmp_path, monkeypatch):
+    """``DELETE .../understanding/{label}?scope=...`` 走 ``UnderstandingScope``
+    (``Literal["shared", "mine"]``)而不是裸 ``str`` —— 越域值在 pydantic 校验
+    这一层就该 422,不该先落进 handler 再被 ``_label_allowed_for_scope`` 判
+    "不匹配"。既覆盖完全未知的值,也覆盖大小写不匹配(``Literal`` 大小写敏
+    感,``"Mine"`` 不是 ``"mine"``)。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+
+    bogus = client.delete(
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=bogus",
+        headers=owner,
+    )
+    assert bogus.status_code == 422, bogus.text
+
+    wrong_case = client.delete(
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=Mine",
+        headers=owner,
+    )
+    assert wrong_case.status_code == 422, wrong_case.text
+
+
+def test_unknown_label_422s_before_handler_code_runs(tmp_path, monkeypatch):
+    """``label`` 路径参数走 ``UnderstandingLabel``(五个合法值的 ``Literal``)。
+    未知 label 必须在 FastAPI 的请求校验这一层就 422 —— 不是 handler 里那句
+    「scope 与 label 不匹配」的归属文案,而是路径参数本身就不存在这个值。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+
+    resp = client.put(
+        f"/api/notebooks/{notebook_id}/understanding/bogus",
+        json={"scope": "shared", "value": "x", "expected_revision": 0},
+        headers=owner,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_body_cannot_smuggle_an_owner_id_field(tmp_path, monkeypatch):
+    """``UnderstandingBlockUpdate`` 从不读请求体里的 owner —— ``owner_id`` 永远
+    由服务端从已认证调用者派生。这条用例钉的是「给 body 多塞一个 owner_id 字段
+    并被采信」这种移动变异:``extra="forbid"`` 必须真的兜住它,而不是被某次
+    改动悄悄换成 ``extra="ignore"`` 或在模型里加一个会被读取的 ``owner_id``
+    字段。"""
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    _other_headers, other_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+
+    resp = client.put(
+        f"/api/notebooks/{notebook_id}/understanding/retrieval_notes",
+        json={
+            "scope": "mine",
+            "value": "x",
+            "expected_revision": 0,
+            "owner_id": other_id,
+        },
+        headers=owner,
+    )
+    assert resp.status_code == 422, resp.text
+
+
 def test_clear_block_is_idempotent_and_preserves_the_row(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner, _owner_id = _new_user(client)
@@ -361,6 +424,16 @@ def test_manual_rebuild_claims_via_start_base_and_start_overlay(tmp_path, monkey
     ).json()
     assert status["job"]["base"]["status"] == "running"
     assert status["job"]["mine"]["status"] == "running"
+    # 披露面是一份固定键集——存储层的 ``diagnostic`` 列绝不能混进这份 wire
+    # payload(store docstring 明确写它「永不上屏」)。直接断言键集,不依赖
+    # api_contract 夹具(那份夹具钉的是 schema 形状,不是「这次真实响应里出现
+    # 了哪些键」)。
+    assert set(status["job"]["base"].keys()) == {
+        "status", "pending", "updated_at", "failure_reason",
+    }
+    assert set(status["job"]["mine"].keys()) == {
+        "status", "pending", "updated_at", "failure_reason",
+    }
 
 
 def test_manual_rebuild_is_409_when_already_running(tmp_path, monkeypatch):
@@ -401,8 +474,9 @@ def test_disabled_gate_is_transparent_on_get_and_409_on_writes(tmp_path, monkeyp
     assert body["base"] == []
     assert body["mine"] == []
     assert body["job"] == {"base": None, "mine": None}
-    # can_edit_base 是一条独立于总闸的纯权限判定,关闸时仍如实返回
-    assert body["can_edit_base"] is True
+    # 总闸关闭时不再查这项能力——不可编辑已经由总闸决定,响应固定为 False
+    # (即使调用者本来是 owner、本该有 agent_profile:write 能力)。
+    assert body["can_edit_base"] is False
 
     put = client.put(
         f"/api/notebooks/{notebook_id}/understanding/corpus_shape",
