@@ -222,7 +222,30 @@ class GroupStore:
         return int(cursor.rowcount or 0) > 0
 
     def delete_group(self, group_id: str) -> bool:
+        """删组 + 清掉指向本组的全部授权边,一个写事务(已定裁决 3)。
+
+        ⚠ **锁必须在最前面**:`_lock_group_on` 先把 `groups` 行排他锁住,再清边、再删
+        组行。反过来(先清边、后删组)在 PG 上会留下**孤儿授权边**——`create_grant`
+        持的是同一行的 `FOR SHARE`,它可以在「清边」与「删组」之间提交一条新边:
+        清理已经走过去了,而 `notebook_grants.principal_id` 没有外键,`DELETE FROM
+        groups` 带不走它。结果是组没了、边还在,而那种边只能靠 `merge_dbs` 的孤儿清扫
+        或库主在共享清单里看见 `principal_kind="missing"` 才被发现。
+        把锁提到事务开头,并发的 `create_grant` 要么在删组之前整个完成(它那条边随后
+        被清理带走),要么等到删组提交后发现组已不在而抛 `GroupNotFoundError`。
+
+        SQLite 侧**刻意没有对等改动**:`SqliteDatabase.write()` 是进程级写锁,同一时刻
+        只有一个写事务在跑,「清边」与「删组」之间根本插不进另一个事务。那边加一次
+        `SELECT ... ` 只会多一次查询而不多一分保证。
+
+        存在性沿用 `bool` 返回而不是让 `GroupNotFoundError` 冒出去:两个后端的
+        `delete_group` 契约必须一致(SQLite 侧删一个不存在的组返回 `False`),路由层
+        据此给 404。
+        """
         with self.database.write() as connection:
+            try:
+                self._lock_group_on(connection, group_id)
+            except GroupNotFoundError:
+                return False
             connection.execute(
                 "DELETE FROM notebook_grants "
                 "WHERE principal_type IN ('group','group_admins') AND principal_id=%s",

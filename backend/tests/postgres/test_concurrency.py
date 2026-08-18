@@ -14,6 +14,7 @@ from app.models.ask import AskRequest, AskResponse
 from app.models.memory import MemoryWrite
 from app.repositories.postgres.ask_state_store import AskStateStore
 from app.repositories.postgres.governance_store import GovernanceStore
+from app.repositories.postgres.group_store import GroupStore as PostgresGroupStore
 from app.repositories.postgres.knowhow_store import KnowhowStore
 from app.repositories.postgres.maintenance import PostgresMaintenanceAdapter
 from app.repositories.postgres.memory_store import MemoryStore
@@ -1576,3 +1577,86 @@ def test_adding_a_member_to_a_concurrently_deleted_group_fails_closed(
         assert connection.execute(
             "SELECT COUNT(*) AS n FROM group_members WHERE user_id='user-del-c'"
         ).fetchone()["n"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_delete_group_locks_the_group_row_before_sweeping_its_grants(
+    postgres_database, monkeypatch
+):
+    """删组必须**先**锁住 `groups` 行,再清 `notebook_grants`。
+
+    反过来会留下**孤儿授权边**:`create_grant` 持的是同一行的 `FOR SHARE`,它可以在
+    「清边」与「删组」之间提交一条新边——清理已经走过去了,而 `principal_id` 没有外键,
+    `DELETE FROM groups` 带不走它。组没了、边还在,只有 `merge_dbs` 的孤儿清扫或库主在
+    共享清单里看见 `principal_kind="missing"` 才发现得了。
+
+    本用例把那个窗口撑开:让 `create_grant` 拿到 `FOR SHARE` 之后停住,再发删组。锁在
+    最前面时,删组会**阻塞**在取锁那一步(而不是先把清理跑完);放行之后它清掉的就是
+    那条刚提交的新边。把锁挪回清理之后,这条用例会看到删组照常跑完清理、最后留下一条
+    指向已删群组的边。
+    """
+    assert PostgresMigrator(postgres_database).migrate() == 27
+    _seed_memory_race(postgres_database)
+    store = PostgresGroupStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-delete-race",
+        now=lambda: "2026-07-23T00:00:00+00:00",
+    )
+    group = store.create_group(
+        name="删组竞态", kind="project", description="", created_by="owner-race"
+    )
+
+    share_locked = threading.Event()
+    allow_grant_commit = threading.Event()
+    delete_lock_attempted = threading.Event()
+    delete_lock_acquired = threading.Event()
+    allow_delete_continue = threading.Event()
+    original_lock = store._lock_group_on
+
+    def hooked_lock(connection, group_id, *, mode="UPDATE"):
+        if mode == "SHARE":                       # create_grant 那一侧:拿到锁后停住
+            original_lock(connection, group_id, mode=mode)
+            share_locked.set()
+            assert allow_grant_commit.wait(timeout=5)
+            return None
+        delete_lock_attempted.set()               # delete_group 那一侧:观察它等不等
+        original_lock(connection, group_id, mode=mode)
+        delete_lock_acquired.set()
+        # ⚠ 拿到锁之后再停一次,是为了拆掉**测试自己**的一处竞态,与被测的锁序无关:
+        # `create_grant` 提交之后还要在**新事务**里回读那一行做投影,而删组的锁恰好
+        # 在那次提交的瞬间解开——不挡一下,删组会赶在回读之前把边删掉,granter 拿到
+        # None 崩在投影上(整套件并行跑时稳定复现,单跑靠运气过)。
+        assert allow_delete_continue.wait(timeout=5)
+        return None
+
+    monkeypatch.setattr(store, "_lock_group_on", hooked_lock)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        granter = executor.submit(
+            store.create_grant,
+            "nb-memory-race",
+            principal_type="group",
+            principal_id=group["id"],
+            role="viewer",
+            created_by="owner-race",
+            admin_user_id="owner-race",
+        )
+        assert share_locked.wait(timeout=5)
+        deleter = executor.submit(store.delete_group, group["id"])
+        assert delete_lock_attempted.wait(timeout=5)
+        # 锁在最前面 ⇒ 删组此刻**还没有**开始清理,它卡在取锁上。
+        assert not delete_lock_acquired.wait(timeout=0.3)
+        allow_grant_commit.set()
+        granter.result(timeout=10)
+        allow_delete_continue.set()
+        assert deleter.result(timeout=10) is True
+
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM groups WHERE id=%s", (group["id"],)
+        ).fetchone() is None
+        orphans = connection.execute(
+            "SELECT COUNT(*) AS c FROM notebook_grants WHERE principal_id=%s",
+            (group["id"],),
+        ).fetchone()["c"]
+    assert int(orphans) == 0, "删组之后留下了指向它的孤儿授权边"

@@ -29,10 +29,49 @@ test("群组管理弹窗与「共享给群组」都真的挂在 page 上,不是�
   const shares = jsxElements(page, "NotebookGroupShare");
   assert.equal(shares.length, 1, "「共享给群组」必须恰好挂在分享弹窗里一次");
   assert.equal(shares[0].bindings.notebookId, "currentNotebook.id");
-  // 共享面变了要让笔记本清单重取:「已分享」徽标的口径含群组共享,不重取就会看到
-  // 一本刚共享出去的库仍然没有徽标。
-  assert.match(shares[0].bindings.onChanged ?? "", /loadNotebookCollection\(\)/);
+  // 群组弹窗改的是成员/授权面,只影响列表(它不在某本笔记本的上下文里)。
   assert.match(modals[0].bindings.onChanged ?? "", /loadNotebookCollection\(\)/);
+});
+
+// 加/撤群组授权、开启/取消链接分享都会翻转「未共享门」——本笔记本一旦被共享出去,
+// 它**借来的**参考库当场失效(设计文档 §6.1)。只刷集合列表的话
+// `currentNotebook.base_notebooks` 还是旧的:检索范围控件继续列出并允许勾选一个这轮
+// 取不到的参考库,Ask 与深度报告随之提交一份无效(甚至空)的范围,直到重开笔记本。
+//
+// 所以三个共享回调必须走**同一个**刷新入口,而那个入口必须同时刷列表与当前笔记本详情。
+test("共享面变更的三个回调都刷新当前笔记本详情,而不只是集合列表", () => {
+  const refresher = findFunction(page, "handleSharingChanged");
+  assert.ok(refresher, "缺统一的共享变更刷新入口 handleSharingChanged");
+  const inside = callsIn(refresher);
+  assert.ok(inside.includes("loadNotebookCollection"), "共享变更后没刷集合列表");
+  assert.ok(
+    inside.includes("refreshActiveNotebook"),
+    "共享变更后没重取当前笔记本详情 —— 借入参考库失效后检索范围控件仍显示旧的挂载集",
+  );
+
+  // 三个入口逐个钉:少接一个,那条路径上的失效就只有重开笔记本才能被发现。
+  const share = jsxElements(page, "NotebookGroupShare")[0];
+  assert.match(
+    share.bindings.onChanged ?? "",
+    /handleSharingChanged\(\)/,
+    "「共享给群组」的回调没接统一刷新",
+  );
+  for (const name of ["enableShareLink", "handleUnshare"]) {
+    const fn = findFunction(page, name);
+    assert.ok(fn, `${name} 找不到了(改名或删除?)`);
+    assert.ok(
+      callsIn(fn).includes("handleSharingChanged"),
+      `${name} 没接统一刷新 —— 它同样翻转未共享门`,
+    );
+  }
+
+  // 刷新走的是既有的单库取数路径,不是新造的第二条。
+  const refreshActive = findFunction(page, "refreshActiveNotebook");
+  assert.ok(refreshActive && callsIn(refreshActive).includes("getNotebook"));
+  assert.ok(
+    callsIn(findFunction(page, "revalidateAskAvailability")).includes("refreshActiveNotebook"),
+    "单库刷新分叉成了两条路径",
+  );
 });
 
 // 打开「分享」是一次**查看**,不该有持久副作用。此前 openShareModal 无条件

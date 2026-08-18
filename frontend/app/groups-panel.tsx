@@ -7,8 +7,10 @@ import { FloatingModalCard } from "./floating-modal-card.tsx";
 import {
   createGroup,
   creatableGroupKinds,
+  GROUP_INPUT_LIMITS,
   deleteGroup,
   getGroup,
+  groupLengthHint,
   groupKindLabel,
   groupRoleLabel,
   isGroupAdmin,
@@ -24,6 +26,13 @@ import {
   type GroupSharedNotebook,
   type GroupSummary,
 } from "./group-api.ts";
+
+/** 快到长度上限时才出声的余量提示;还早的时候一个字都不渲染。 */
+function LengthHint({ value, max, label }: { value: string; max: number; label: string }) {
+  const hint = groupLengthHint(value, max);
+  return hint ? <p className="tool-hint" style={{ margin: 0 }}>{label}{hint}</p> : null;
+}
+
 
 type GroupsModalProps = {
   /** 系统管理员:能建部门/领域组,并有「全部群组」这一档运维视图。 */
@@ -159,6 +168,7 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                 placeholder="群组名称"
                 aria-label="群组名称"
                 disabled={busy}
+                maxLength={GROUP_INPUT_LIMITS.nameMaxChars}
                 style={{ flex: 1 }}
                 onChange={(event) => setNewName(event.target.value)}
               />
@@ -199,8 +209,13 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
               placeholder="群组说明（可选）"
               aria-label="新群组的说明"
               disabled={busy}
+              maxLength={GROUP_INPUT_LIMITS.descriptionMaxChars}
               onChange={(event) => setNewDescription(event.target.value)}
             />
+            {/* 前端显示同一护栏(数值上限红线):输入框直接敲不进去,快到上限时先出声,
+                不必等提交吃一个 400 才知道边界在哪。 */}
+            <LengthHint value={newName} max={GROUP_INPUT_LIMITS.nameMaxChars} label="群组名称" />
+            <LengthHint value={newDescription} max={GROUP_INPUT_LIMITS.descriptionMaxChars} label="群组说明" />
             {kinds.length === 1 && (
               <p className="tool-hint" style={{ margin: 0 }}>
                 你可以创建项目群组；部门与领域群组由管理员创建。
@@ -242,6 +257,7 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                       value={renameDraft}
                       aria-label="群组新名称"
                       disabled={busy}
+                      maxLength={GROUP_INPUT_LIMITS.nameMaxChars}
                       style={{ flex: 1 }}
                       onChange={(event) => setRenameDraft(event.target.value)}
                     />
@@ -252,8 +268,11 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                     placeholder="群组说明（可选）"
                     aria-label="群组说明"
                     disabled={busy}
+                    maxLength={GROUP_INPUT_LIMITS.descriptionMaxChars}
                     onChange={(event) => setDescriptionDraft(event.target.value)}
                   />
+                  <LengthHint value={renameDraft} max={GROUP_INPUT_LIMITS.nameMaxChars} label="群组名称" />
+                  <LengthHint value={descriptionDraft} max={GROUP_INPUT_LIMITS.descriptionMaxChars} label="群组说明" />
                   <div className="tag-row">
                     <button
                       className="sort-button"
@@ -306,17 +325,36 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                   ) : (
                     <span className="tool-hint">{groupRoleLabel(member.role)}</span>
                   )}
+                  {/* 两步确认,与删组同一套:移出成员会当场撤掉这个人经**本组**拿到的
+                      全部知识库访问,误点一下的爆炸半径和删组同量级,不该一击即发。 */}
                   {canManage && (
-                    <button
-                      className="sort-button"
-                      disabled={busy}
-                      onClick={() => { void run(async () => {
-                        await removeGroupMember(detail.id, member.id);
-                        setDetail(await getGroup(detail.id));
-                        await refreshGroups(scope);
-                        onChanged();
-                      }, "移除成员失败"); }}
-                    >移出群组</button>
+                    confirming === `remove:${member.id}` ? (
+                      <>
+                        <span className="tool-hint">移出后，他将看不到共享给本组的知识库。</span>
+                        <button
+                          className="sort-button"
+                          disabled={busy}
+                          onClick={() => { void run(async () => {
+                            await removeGroupMember(detail.id, member.id);
+                            setDetail(await getGroup(detail.id));
+                            setConfirming("");
+                            await refreshGroups(scope);
+                            onChanged();
+                          }, "移除成员失败"); }}
+                        >确认移出</button>
+                        <button
+                          className="sort-button"
+                          disabled={busy}
+                          onClick={() => setConfirming("")}
+                        >取消</button>
+                      </>
+                    ) : (
+                      <button
+                        className="sort-button"
+                        disabled={busy}
+                        onClick={() => setConfirming(`remove:${member.id}`)}
+                      >移出群组</button>
+                    )
                   )}
                 </div>
               ))}
