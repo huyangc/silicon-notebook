@@ -529,12 +529,17 @@ def delete_share_request_route(
 
     撤回不是第三个状态,是删整行(裁决 P2-2)。只有 `status='pending'` 可撤:已批准/已驳回
     是既成的决定,撤回它没有意义——store 在写事务里按精确状态判定,已决定的申请撤回请求
-    映射成 **409**;根本没有这条申请(或不属于这本库)则 404。`notebook_id` 一起验,防止
-    「有一本库的管理权」变成「能撤任何库上的任何申请」。
+    映射成 **409**;根本没有这条申请(或不属于这本库、或不是本人提交的)则 404。
+
+    ⚠ `user.id` 必须传进 store:能力守卫只证明「这个人对这本库有管理权」,证明不了「这条
+    申请是他提的」。同一本库可以有多个管理权持有者(owner + 组管理员),丢掉这个参数
+    就等于让他们互相撤回对方的待审批申请(codex #519 R1 P1)。别人的申请与不存在的申请
+    同样落 404,不泄露存在性。
     """
-    del user
     try:
-        outcome = group_repository().delete_share_request(notebook_id, request_id)
+        outcome = group_repository().delete_share_request(
+            notebook_id, request_id, user.id
+        )
     except ShareRequestNotPendingError:
         raise user_error(409, "这条共享申请已经处理过了,无法撤回")
     if outcome == "not_found":

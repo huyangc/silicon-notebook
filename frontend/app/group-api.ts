@@ -334,9 +334,13 @@ export const foldGroupShares = (grants: readonly NotebookGrant[]): GroupShareEnt
   const byPrincipal = new Map<string, GroupShareEntry>();
   for (const grant of grants) {
     if (grant.principal_type !== "group" && grant.principal_type !== "group_admins") continue;
-    // `group_admins` 边即「组管理员可管理」——不管它是先出现还是后出现,都把这一项标成
-    // 可管理(两条边任意顺序返回都成立)。
-    const conferManage = grant.principal_type === "group_admins";
+    // 「组管理员可管理」要求**两个条件同时成立**:主体是 `group_admins` **且** role 是
+    // `admin`。只看主体类型会说谎——API 的 principal_type 与 role 是两个独立字段,一条
+    // `(group_admins, viewer)` 边完全可以存在,而后端的 `NOTEBOOK_ADMIN_SQL` 明确要求
+    // `role='admin'`,那条边一点管理权都不给(codex #519 R1 P2)。判据与后端谓词
+    // 逐字对齐:两条边任意顺序返回都成立(OR 累积)。
+    const conferManage =
+      grant.principal_type === "group_admins" && grant.role === "admin";
     const existing = byPrincipal.get(grant.principal_id);
     if (existing) {
       existing.grantIds.push(grant.id);

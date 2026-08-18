@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent } from "react";
 
 import { grantedViaLabel, isGroupGranted } from "./group-api.ts";
@@ -75,6 +76,11 @@ export function ReaderNotebookBadge({
   const granted = isGroupGranted(notebook);
   const canManage = Boolean(notebook.can_manage_content);
   const accessWord = canManage ? "可管理" : "只读";
+  // Escape 之后紧跟的那次 blur **不提交**。`onReset()` 只是排一次 state 更新,而同一个
+  // 事件里立刻调用的 `blur()` 会同步触发 onBlur——它读到的仍是本次渲染的**旧**编辑值,
+  // 于是「取消」反而把已被撤销的标题 PATCH 了出去(codex #519 R1 P2)。用 ref 而不是
+  // state 抑制:它必须在同一个事件循环里立即生效,state 更新做不到。
+  const cancelledRef = useRef(false);
   return (
     <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
       {canManage && rename ? (
@@ -86,10 +92,17 @@ export function ReaderNotebookBadge({
           aria-label="笔记本名称"
           maxLength={80}
           onChange={(event) => rename.onChange(event.target.value)}
-          onBlur={() => rename.onCommit()}
+          onBlur={() => {
+            if (cancelledRef.current) {
+              cancelledRef.current = false;
+              return;
+            }
+            rename.onCommit();
+          }}
           onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
             if (event.key === "Enter") event.currentTarget.blur();
             if (event.key === "Escape") {
+              cancelledRef.current = true;
               rename.onReset();
               event.currentTarget.blur();
             }

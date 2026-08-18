@@ -331,6 +331,54 @@ def test_withdraw_deletes_a_pending_request(tmp_path, monkeypatch):
     ).status_code == 404
 
 
+def test_another_manager_cannot_withdraw_someone_elses_request(tmp_path, monkeypatch):
+    """撤回只属于**申请者本人**——同一本库上的另一位管理权持有者撤不掉别人的申请。
+
+    能力守卫只证明「这个人对这本库有管理权」,证明不了「这条申请是他提的」。P2 之后
+    一本库可以同时有多个管理权持有者(owner + 经 `group_admins` 边的组管理员),丢掉
+    `requested_by` 谓词就等于让他们互相撤回对方的待审批申请(codex #519 R1 P1)。
+    别人的申请与不存在的申请同样落 **404**,不泄露「这本库上有一条别人的待审批申请」。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    # deputy:librarian 建一个自己管理的组、把 deputy 提为该组的组管理员,再发一条
+    # `(group_admins, admin)` 边 —— 于是 deputy 对这本库有 notebook:manage(P2 六格
+    # 之一),但那条申请不是他提的。发边要求发起者同时是目标组的组管理员(P1 双重
+    # 条件),所以这条边必须由建组的 librarian 自己发。
+    deputy, deputy_id, _ = _new_user(client)
+    deputy_group = _make_group(client, librarian, name="受托组")
+    assert _add_member(
+        client, librarian, deputy_group, deputy_id, role="admin"
+    ).status_code == 200
+    granted = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        headers=librarian,
+        json={
+            "principal_type": "group_admins",
+            "principal_id": deputy_group,
+            "role": "admin",
+        },
+    )
+    assert granted.status_code in (200, 201), granted.text
+
+    # deputy 确实拿到了管理权(否则本用例证明不了它拦的是「不是申请者」而非「没权限」)。
+    assert client.patch(
+        f"/api/notebooks/{notebook_id}", headers=deputy, json={"name": "受托改名"}
+    ).status_code == 200
+
+    stolen = client.delete(
+        f"/api/notebooks/{notebook_id}/share-requests/{request_id}", headers=deputy
+    )
+    assert stolen.status_code == 404, stolen.text
+    # 申请仍在,申请者本人仍可撤。
+    assert [r["id"] for r in _pending_for(client, boss, group_id).json()] == [request_id]
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/share-requests/{request_id}", headers=librarian
+    ).status_code == 204
+
+
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 def test_withdrawing_a_decided_request_is_409(tmp_path, monkeypatch, decision):
     """已批准 **或** 已驳回的申请都不能撤回:撤回是申请者的动作,已决定的不可回退

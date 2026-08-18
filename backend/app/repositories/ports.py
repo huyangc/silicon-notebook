@@ -2860,9 +2860,13 @@ class GroupStorePort(Protocol):
         """驳回:状态置 rejected + `decided_by`/`decided_at`。申请不存在或已被决定返回
         `None`。不写任何授权边。"""
         ...
-    def delete_share_request(self, notebook_id: str, request_id: str) -> str:
-        """撤回:仅 `status='pending'` 可删。返回 `"deleted"`;不存在返回 `"not_found"`;
-        已决定抛 `ShareRequestNotPendingError`。"""
+    def delete_share_request(
+        self, notebook_id: str, request_id: str, requester_id: str
+    ) -> str:
+        """撤回:仅**申请者本人**、仅 `status='pending'` 可删。返回 `"deleted"`;不存在、
+        不属于这本库、或不是本人提交的都返回 `"not_found"`(不泄露存在性);已决定抛
+        `ShareRequestNotPendingError`。`requester_id` 不可省——能力守卫证明不了「这条申请
+        是他提的」(codex #519 R1 P1)。"""
         ...
 
 

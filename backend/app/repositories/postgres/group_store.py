@@ -626,20 +626,25 @@ class GroupStore:
             ).fetchone()
         return self._share_request_row(out)
 
-    def delete_share_request(self, notebook_id: str, request_id: str) -> str:
+    def delete_share_request(
+        self, notebook_id: str, request_id: str, requester_id: str
+    ) -> str:
+        """见 SQLite 侧同名方法的完整论证(三列 WHERE 各挡一种越权)。"""
         with self.database.write() as connection:
             row = connection.execute(
                 "SELECT status FROM notebook_share_requests "
-                "WHERE id=%s AND notebook_id=%s FOR UPDATE",
-                (request_id, notebook_id),
+                "WHERE id=%s AND notebook_id=%s AND requested_by=%s FOR UPDATE",
+                (request_id, notebook_id, requester_id),
             ).fetchone()
             if row is None:
                 return "not_found"
-            # 见 SQLite 侧同名方法:放行是**正向** `== 'pending'`,不用 `!= 'pending'`。
+            # 见 SQLite 侧同名方法:放行是**正向** `== 'pending'`,不用 `!= 'pending'`;
+            # `requested_by` 一起验,撤回只属于申请者本人(codex #519 R1 P1)。
             if row["status"] == "pending":
                 connection.execute(
-                    "DELETE FROM notebook_share_requests WHERE id=%s AND notebook_id=%s",
-                    (request_id, notebook_id),
+                    "DELETE FROM notebook_share_requests "
+                    "WHERE id=%s AND notebook_id=%s AND requested_by=%s",
+                    (request_id, notebook_id, requester_id),
                 )
                 return "deleted"
             raise ShareRequestNotPendingError(request_id)

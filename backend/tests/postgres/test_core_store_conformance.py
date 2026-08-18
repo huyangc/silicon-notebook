@@ -967,7 +967,7 @@ def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores)
     # 已决定的申请再批 → None(FOR UPDATE + 精确 status 匹配);撤回 → 409 语义。
     assert groups.approve_share_request(group["id"], created["id"], decided_by=boss.id) is None
     with pytest.raises(ShareRequestNotPendingError):
-        groups.delete_share_request(notebook_id, created["id"])
+        groups.delete_share_request(notebook_id, created["id"], librarian.id)
 
     # 驳回一条新申请:状态 rejected、不写边;撤回一条 pending:删整行。
     reject_target = groups.create_share_request(
@@ -982,9 +982,28 @@ def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores)
     withdraw_target = groups.create_share_request(
         notebook_id, group_id=group["id"], requested_by=librarian.id
     )
-    assert groups.delete_share_request(notebook_id, withdraw_target["id"]) == "deleted"
-    assert groups.delete_share_request(notebook_id, withdraw_target["id"]) == "not_found"
+    assert (
+        groups.delete_share_request(notebook_id, withdraw_target["id"], librarian.id)
+        == "deleted"
+    )
+    assert (
+        groups.delete_share_request(notebook_id, withdraw_target["id"], librarian.id)
+        == "not_found"
+    )
     assert groups.list_pending_share_requests(group["id"]) == []
+
+    # 撤回只属于申请者本人:别人(哪怕是组管理员 boss)撤不掉,且与「不存在」同样
+    # 返回 not_found、不泄露存在性(codex #519 R1 P1,与 SQLite 侧同口径)。
+    others = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+    assert groups.delete_share_request(notebook_id, others["id"], boss.id) == "not_found"
+    assert [r["id"] for r in groups.list_pending_share_requests(group["id"])] == [
+        others["id"]
+    ]
+    assert (
+        groups.delete_share_request(notebook_id, others["id"], librarian.id) == "deleted"
+    )
 
 
 def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
