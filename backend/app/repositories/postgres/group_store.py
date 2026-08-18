@@ -472,6 +472,13 @@ class GroupStore:
         PG 侧多一把 `FOR SHARE`(而不是 SQLite 的裸存在性查询):它让复核与插入之间
         这个组删不掉。用 `FOR SHARE` 而非 `FOR UPDATE` 是因为要防的只有「同时被删」,
         并发的两次发边互不冲突(真撞上了由 UNIQUE 约束负责)。
+
+        **笔记本那个外键父行同样要复核**(`_lock_notebook_on`,codex #519 R7 存疑项收口):
+        `_require_notebook_manage_on` 的 owner 分支是一条**无锁** SELECT 且当场短路,库主
+        并发删库若恰好提交在它与 INSERT 之间,`notebook_grants.notebook_id` 外键当场违例
+        (`ForeignKeyViolation`),而本方法只 catch `UniqueViolation` → 500。非 owner 分支
+        本来就安全(`FOR SHARE OF ng` 锁住授权边行,删库要 CASCADE 掉它,必须先拿同一把锁),
+        所以洞只有 owner 这一格——但复核**不按分支收窄**:existence 是先决条件,谁发起都一样。
         """
         grant_id = self.new_id("gnt")
         try:
@@ -479,6 +486,13 @@ class GroupStore:
                 self._lock_group_on(connection, principal_id, mode="SHARE")
                 if self._role_on(connection, principal_id, admin_user_id) != "admin":
                     raise GroupAdminRequiredError(principal_id)
+                # 笔记本维度两条,**存在性在前、权限在后**(与 `create_share_request`
+                # 同一顺序):库都不在了,「他还有没有管理权」不是一个有意义的问题。
+                # 刻意插在这里而不是紧跟 `_lock_group_on`——群组维度的错误优先级因此
+                # 逐字不变(不是组管理员仍先拿它自己的 403)。锁序不受影响:`groups`
+                # 两种写法下都已在手,`groups → notebooks` 与 `create_share_request`
+                # 一致(论证见 `_lock_notebook_on`)。
+                self._lock_notebook_on(connection, notebook_id)
                 # **笔记本侧**的那一半同样要在事务内复核(codex #519 R6 P1):
                 # 能力守卫放行之后、本事务开始之前,库主可以撤掉发起人的管理边;
                 # 少了这一次复核,失权者仍能发出一条**新的**授权边(甚至给另一个
@@ -669,6 +683,15 @@ class GroupStore:
            功能(`notebooks.created_by` 只在建库与深拷贝时写入),owner 身份不可能在本
            事务执行期间被撤销,锁它只会多一次无谓的行锁争用。这个前提写在这里,将来真
            加了转让功能就得回来给它补 `FOR SHARE`。
+
+           ⚠ 这条论的是「**身份**不会变」,**不是**「那**一行**还在」——两者是不同维度:
+           `DELETE FROM notebooks` 让整行消失,与「谁是 owner」毫无关系,所以上面那个前提
+           再成立也盖不住它。行还在这件事由**两个调用方各自**负责,手段不同(codex #519
+           R7 存疑项收口):`create_grant` 在本方法之前显式 `_lock_notebook_on`;
+           `approve_share_request` 靠它对申请行的 `FOR UPDATE` ——删库要 CASCADE 掉那一行,
+           必须先拿到同一把锁,于是删不进来。少了那一层,
+           owner 分支这条无锁 SELECT 与随后的 INSERT 之间可以插进一次**已提交**的删库,
+           `notebook_grants.notebook_id` 外键当场违例 → 未处理异常 → 500。
         2. **授权边半**:`ADMIN_GRANT_PROBE_FOR_SHARE_SQL`,顶层查 `notebook_grants`
            并 `FOR SHARE OF ng` 锁住命中的边行。锁住之后,并发的撤销会**阻塞**到本事务
            提交,撤销随后生效——序列化顺序是「批准在前、撤销在后」,语义正确:库主看到

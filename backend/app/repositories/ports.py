@@ -2903,6 +2903,12 @@ class GroupStorePort(Protocol):
         在」且「发起者仍是它的组管理员」,不成立分别抛 `GroupNotFoundError` /
         `GroupAdminRequiredError`。路由层那次前置查询只用来给出友好文案,**授权
         判定以这一次为准**——两次查询之间,组可以被删、发起者可以被移出或降级。
+
+        **两个外键父行都要在同一写事务内复核**(与 `create_share_request` 同一条契约):
+        笔记本已被并发删掉抛 `NotebookNotFoundError`(路由 → 404)。PG 侧不复核就是
+        `notebook_grants.notebook_id` 的 `ForeignKeyViolation` → 500;SQLite 侧本来就
+        不会 500(权限复核的两半都查不到 → `NotebookManageRequiredError`),补它是为了
+        两个后端答同一句话(codex #519 R7 存疑项收口)。
         """
         ...
     def delete_grant(self, notebook_id: str, grant_id: str) -> bool: ...

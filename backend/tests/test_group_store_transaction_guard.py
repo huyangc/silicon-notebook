@@ -71,6 +71,8 @@ REQUIRED_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
         "_require_group_on|_lock_group_on",   # 组还在
         "_role_on",                            # 发起者的组内角色
         "GroupAdminRequiredError",             # 以及它的抛出
+        # 它同样引用两个父表,`notebooks` 那个也要复核(codex #519 R7 存疑项收口)。
+        "_require_notebook_on|_lock_notebook_on",
     }),
     # 共享申请引用**两个**父表,两个存在性复核都必须与插入同事务(codex #519 R7 P2)。
     # 缺任意一条,那个父行被并发删掉时就是一次未处理的外键异常 → 500(正确答案 404)。
@@ -92,8 +94,16 @@ REQUIRED_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
 #:
 #: SQLite 侧**刻意不登记**:`SqliteDatabase.write()` 是进程级写锁,两条 DELETE 之间
 #: 插不进另一个写事务,不需要对等的行锁(理由写在两侧的 `delete_group` docstring 里)。
+#: `create_grant`(PostgreSQL):`_lock_notebook_on` 必须排在写 `notebook_grants` **之前**。
+#: 集合成员资格只答「锁在不在事务里」,答不了「排第几」——而这里的漏洞恰恰是「锁在、只是
+#: 排到 INSERT 后面」:那时外键检查已经先撞上去了,锁再拿也来不及(codex #519 R7 存疑项)。
+#: SQLite 侧同样**不登记**(理由同 `delete_group`:进程写锁,顺序不承重;它那一条补的是
+#: 响应对等而不是 500,由行为用例钉住)。
 REQUIRED_ORDER_IN_WRITE_TRANSACTION: dict[str, dict[str, tuple[str, str]]] = {
-    "postgres": {"delete_group": ("_lock_group_on", "notebook_grants")},
+    "postgres": {
+        "delete_group": ("_lock_group_on", "notebook_grants"),
+        "create_grant": ("_lock_notebook_on", "notebook_grants"),
+    },
 }
 
 #: 会开出新作用域的节点 —— 遍历时不下钻(嵌套函数里的调用不属于事务的执行流)。

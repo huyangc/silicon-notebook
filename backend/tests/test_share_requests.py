@@ -807,6 +807,54 @@ def test_a_demoted_manager_cannot_still_hand_out_a_new_grant(tmp_path, monkeypat
     assert client.get(f"/api/notebooks/{notebook_id}/grants", headers=alice).json() == []
 
 
+def test_granting_into_a_notebook_deleted_in_the_toctou_window_is_a_404(
+    tmp_path, monkeypatch
+):
+    """`create_grant` 的**外键父行**复核(codex #519 R7 存疑项收口)。
+
+    与上面那条同一个注入窗口(能力守卫已放行、store 写事务未开),但换一个维度:那条撤掉
+    发起人的**权限**,这条删掉**笔记本本身**。少了 `_require_notebook_on` /
+    `_lock_notebook_on`:
+
+    * PG 侧 —— `_require_notebook_manage_on` 的 owner 半是一条**无锁** SELECT 且当场短路,
+      删库若提交在它与 INSERT 之间,`notebook_grants.notebook_id` 外键违例,而
+      `create_grant` 只 catch `UniqueViolation` → **500**;
+    * SQLite 侧 —— 进程写锁保证删库插不进事务中间,两半都查不到 → 抛的是
+      `NotebookManageRequiredError` → **403「你已不再拥有这本笔记本的管理权」**。不是 500,
+      但在库已经不存在时是一句误导,而且与 PG 修好之后的 404 分叉。
+
+    所以两个后端都补,这条钉的是**它们答同一句话**。真并发那一半(锁在不在承重)由
+    `tests/postgres/test_concurrency.py` 的 PG 用例承担。
+    """
+    from app.api import deps
+
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, alice, name="Alice 的库")
+    group_id = _make_group(client, alice, name="组")
+
+    store = _app_group_store()
+    original_create = store.create_grant
+
+    def drop_notebook_then_create(*args, **kwargs):
+        with deps.repository()._write() as db:
+            db.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(store, "create_grant", drop_notebook_then_create)
+    denied = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group", "principal_id": group_id, "role": "viewer"},
+        headers=alice,
+    )
+    monkeypatch.setattr(store, "create_grant", original_create)
+    assert denied.status_code == 404, denied.text
+    # 笔记本维度的文案:不是「你已不再拥有这本笔记本的管理权」(库根本不在了),
+    # 也不是「群组不存在」(组没有问题)。
+    assert denied.json()["detail"] == "笔记本不存在"
+    assert denied.headers.get("X-User-Message") == "1"
+
+
 def test_granting_still_works_while_the_initiator_keeps_manage_rights(
     tmp_path, monkeypatch
 ):

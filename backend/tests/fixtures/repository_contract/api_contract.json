@@ -14765,7 +14765,7 @@
           "summary": "List Notebook Grants Route"
         },
         "post": {
-          "description": "共享给群组。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的组管理员。\n\n⚠ 群组那一半的**权威判定在 store 的写事务里**(`create_grant` 同事务复核组存在\n与发起者的组管理员身份),这里不做前置查询。理由是这条边一落库就**立刻**给整组\n人读权:在路由层查一次、再在另一个事务里插入,中间那个窗口足够让组被删、或让\n发起者被移出/降级,而边照发不误。两个异常各自映射,文案仍能说清缺的是哪一半。",
+          "description": "共享给群组。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的组管理员。\n\n⚠ 群组那一半的**权威判定在 store 的写事务里**(`create_grant` 同事务复核组存在\n与发起者的组管理员身份),这里不做前置查询。理由是这条边一落库就**立刻**给整组\n人读权:在路由层查一次、再在另一个事务里插入,中间那个窗口足够让组被删、或让\n发起者被移出/降级,而边照发不误。两个异常各自映射,文案仍能说清缺的是哪一半。\n\n⚠ **笔记本那个外键父行同样在事务内复核** → `NotebookNotFoundError` → 404\n(codex #519 R7 存疑项收口,与 `create_share_request_route` 同款)。它复核的是\n**存在性**而不是权限:能力守卫放行之后、写事务之前库被并发删掉,PG 侧那条 INSERT\n会撞 `notebook_id` 外键变成 500。",
           "operationId": "create_notebook_grant_route_api_notebooks__notebook_id__grants_post",
           "parameters": [
             {
