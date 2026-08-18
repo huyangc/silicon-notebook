@@ -2777,6 +2777,20 @@ class GroupMembershipRequiredError(RuntimeError):
     """
 
 
+class ShareRequestAlreadyPendingError(RuntimeError):
+    """同一 (笔记本, 群组) 上**别人**已经有一条待审批申请(群组知识共享 P2-T3)。
+
+    幂等只对**同一个申请者**成立(codex #519 R3):一本库可以有多个管理权持有者(owner +
+    组管理员),两个人先后对同一个组提交时,第二个人撞上
+    `uq_share_requests_one_pending`。把第一个人的行原样返回给他,会让他的界面报成功、
+    而 `list_my_share_requests` 里查不到、也撤不掉,那个组对他还永远显示「可申请」——
+    一个说不通的三方矛盾。所以按申请者收窄:不是本人的就明确冲突。
+
+    路由映射成 **409**,文案只说「已有一条待审批的申请」,**不点名申请者**——谁提的是
+    别人的事,冲突本身已经足够解释为什么这次没提交成功。
+    """
+
+
 class ShareRequestNotPendingError(RuntimeError):
     """撤回一条**已被决定**(approved/rejected)的共享申请(群组知识共享 P2-T3)。
 
@@ -2848,11 +2862,17 @@ class GroupStorePort(Protocol):
     def create_share_request(
         self, notebook_id: str, *, group_id: str, requested_by: str
     ) -> dict:
-        """新建一条共享申请;撞 `uq_share_requests_one_pending` **不报错**,而是返回
-        已存在的那条 `pending` 行(幂等)——申请者刷新页面重复提交是常见操作。组已被
-        并发删掉(FK 冲突)抛 `GroupNotFoundError`;`requested_by` 已不是该组成员抛
+        """新建一条共享申请;撞 `uq_share_requests_one_pending` 时**按申请者收窄**地幂等:
+        既有 pending 是**本人**提的就原样返回(刷新页面重复提交是常见操作),是别人提的
+        则抛 `ShareRequestAlreadyPendingError`(路由 → 409)——把别人的行返回给他会让
+        「界面报成功、自查列表里没有、也撤不掉」三件事同时成立(codex #519 R3)。
+
+        组已被并发删掉(FK 冲突)抛 `GroupNotFoundError`;`requested_by` 已不是该组成员抛
         `GroupMembershipRequiredError`——两条复核都在**同一写事务内**,路由层那次前置
-        查询与写入之间的窗口足够让组被删、让人被移出组(codex #519 R2 P2-1)。"""
+        查询与写入之间的窗口足够让组被删、让人被移出组(codex #519 R2 P2-1)。
+
+        冲突恢复期间那条 pending 又被决定/撤回时**重试一次插入**(此时部分唯一索引的
+        谓词已不再覆盖它),绝不让原始的 DB 唯一违例冒成 500(codex #519 R3)。"""
         ...
     def list_pending_share_requests(self, group_id: str) -> list[dict]:
         """某个组的**待审批**申请清单(组管理员的审核队列)。`status='pending'` 精确匹配。"""

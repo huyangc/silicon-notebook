@@ -201,6 +201,95 @@ def test_duplicate_pending_request_is_idempotent_not_an_error(tmp_path, monkeypa
     assert len(_pending_for(client, boss, group_id).json()) == 1
 
 
+def test_another_managers_pending_request_is_a_conflict_not_a_silent_handover(
+    tmp_path, monkeypatch
+):
+    """幂等**只对本人成立**(codex #519 R3):别人已提过 → 409,不把他的行返回给我。
+
+    一本库可以有多个管理权持有者(owner + 组管理员)。把第一个人的申请行原样返回给第二
+    个人,会让三件事同时成立而互相矛盾:他的界面报成功、`list_my_share_requests` 里查
+    不到、那条申请他也撤不掉,于是那个组对他永远显示「可申请」。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, boss_id, _ = _new_user(client)
+    group_id = _make_group(client, boss, name="芯片项目")
+    # 另一个组、boss 自己的库:两个组管理员都对它有 manage(owner + group_admins 边),
+    # 于是「同一 (库,组) 上两个不同申请者」这个形态成立。
+    other_group = _make_group(client, boss, name="另一个组")
+    notebook_id = _make_notebook(client, boss, name="共享库")
+    deputy, deputy_id, _ = _new_user(client)
+    _add_member(client, boss, other_group, deputy_id, role="admin")
+    shared = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group_admins", "principal_id": other_group, "role": "admin"},
+        headers=boss,
+    )
+    assert shared.status_code == 200, shared.text
+    # 两人都只是**目标组** `group_id` 的普通成员 —— 所以都得走申请这条路。
+    _add_member(client, boss, group_id, deputy_id, role="member")
+    demote = client.put(
+        f"/api/groups/{group_id}/members/{boss_id}", json={"role": "member"}, headers=boss
+    )
+    assert demote.status_code == 409  # 唯一组管理员不能自我降级,补一个再降
+    third, third_id, _ = _new_user(client)
+    _add_member(client, boss, group_id, third_id, role="admin")
+    assert client.put(
+        f"/api/groups/{group_id}/members/{boss_id}", json={"role": "member"}, headers=boss
+    ).status_code == 200
+
+    first = _submit(client, boss, notebook_id, group_id)
+    assert first.status_code == 200, first.text
+
+    conflict = _submit(client, deputy, notebook_id, group_id)
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.headers.get("X-User-Message") == "1"
+    # 文案不点名申请者。
+    detail = conflict.json()["detail"]
+    assert "申请" in detail
+    assert boss_id not in detail
+    # 第一个人的申请分毫未动,仍归他所有;第二个人的自查列表是空的(没有凭空多一条)。
+    assert [r["id"] for r in client.get(
+        f"/api/notebooks/{notebook_id}/share-requests", headers=boss
+    ).json()] == [first.json()["id"]]
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/share-requests", headers=deputy
+    ).json() == []
+    assert len(_pending_for(client, third, group_id).json()) == 1
+
+
+def test_a_pending_request_decided_during_conflict_recovery_retries_instead_of_500(
+    tmp_path, monkeypatch
+):
+    """撞唯一违例后、回读之前那条 pending 被决定 → **重试插入**,不让 DB 异常冒成 500。
+
+    注入式:让恢复期的 `_pending_share_request` 回读在第一次被调用时先把那条 pending
+    批准掉再回答 —— 回读因此得 None(部分唯一索引的谓词只覆盖 pending)。此时正确行为
+    是重试插入并成功,而不是把原始 UniqueViolation/IntegrityError 抛给用户(codex #519 R3)。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    first_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    boss_id = client.get("/api/me", headers=boss).json()["id"]
+    store = _app_group_store()
+    original = store._pending_share_request
+    calls: list[int] = []
+
+    def decide_then_answer(nb_id, gid):
+        if not calls:
+            calls.append(1)
+            # 恢复窗口里那条 pending 被批准 —— 回读将得 None。
+            store.approve_share_request(gid, first_id, decided_by=boss_id)
+        return original(nb_id, gid)
+
+    monkeypatch.setattr(store, "_pending_share_request", decide_then_answer)
+    retried = _submit(client, librarian, notebook_id, group_id)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "pending"
+    assert retried.json()["id"] != first_id
+    assert calls, "注入未生效——本用例没有真的走到冲突恢复路径"
+
+
 def test_submitting_into_a_deleted_group_is_a_group_shaped_404(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     _boss, librarian, _lid, _group_id, notebook_id = _make_member_owned_notebook(client)
