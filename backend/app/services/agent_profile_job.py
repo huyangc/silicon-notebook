@@ -1296,6 +1296,18 @@ class AgentProfileConsolidationService:
 
         Fail-open in full for the same reason as above: the report is finished
         and persisted before this runs.
+
+        ⚠ Trigger, not input (codex #520 R9 P2, registered): the run this
+        schedules reads the member's ASK traces (``usage_stats`` →
+        ``recent_user_ask_traces``) — a report's own per-section retrieval is
+        not persisted in that shape, so for a member whose only activity is
+        this report the run terminates as ``no_usage_sample`` and writes
+        nothing. That is the P1 contract as designed (§5.3: the report is a
+        high-information *moment* to refresh notes distilled from asks), and
+        feeding report section traces in would need a whole new persisted
+        projection with its own ownership predicate and guard surface —
+        registered for P2 alongside the claim-generation rework rather than
+        widened here.
         """
         try:
             if not user_id or self.ask_state is None:

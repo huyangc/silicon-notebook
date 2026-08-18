@@ -213,3 +213,19 @@ test("AgentProfilePanel 随 currentNotebookId 整体重挂（key，不只靠关�
     "AgentProfilePanel 缺 key={currentNotebookId} —— 切库时状态可能残留到下一个库",
   );
 });
+
+
+test("理解弹窗渲染在知识关系图弹窗之后(同层 z-60,DOM 序即层叠序)", () => {
+  // codex #520 R9 P1:两者同为 .utility-modal(z-index 60),同层 fixed 兄弟按
+  // DOM 序作画——理解弹窗排在 graphOpen 之前时,后开的图谱弹窗整层拦截输入,
+  // 唯一入口点开的是一个摸不到的面板。入口 onOpen 里的 setGraphOpen(false)
+  // 是第二层保险,这里钉结构那一半。
+  const pageText = page.text ?? page.source ?? "";
+  const graphAt = pageText.indexOf("{graphOpen && (");
+  const understandingAt = pageText.indexOf("{understandingOpen && currentNotebookId && (");
+  assert.ok(graphAt > 0 && understandingAt > 0, "两个弹层块都必须存在");
+  assert.ok(
+    understandingAt > graphAt,
+    "understanding 弹窗块必须排在 graphOpen 块之后(同层 z-60 靠 DOM 序压住它)",
+  );
+});
