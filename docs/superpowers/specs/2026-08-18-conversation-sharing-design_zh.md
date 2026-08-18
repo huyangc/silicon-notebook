@@ -171,14 +171,17 @@ Memory 投影**按创建者私有**(`memory_items.created_by`,与 Memory 检索�
 但**分享弹窗仍必须明说**「公开页会包含引用到的个人记忆摘录」并给出条数:用户按下分享时
 想的是「把这段问答发出去」,记忆是他自己写的、却未必逐条记得写了什么。
 
-### 待定:清单卡(`result_sets`)
+### 已定:清单卡(`result_sets`)**不进 v1**
 
-集合枚举结果卡(覆盖率徽标 + 按来源分组的条目)是作者当时**看得见**的答案组成部分。
-两个已定口径都倾向「把我看到的发出去」,所以**建议 v1 纳入**,按与 `references` 同一套
-白名单投影(条目只留标题/位置/摘录,不留 id),覆盖率徽标原样保留。
+集合枚举结果卡(覆盖率徽标 + 按来源分组的条目)v1 不外发。
 
-**绝不接受的是静默丢弃**:若最终决定 v1 不做,公开页必须在该位置留一句可见说明,
-而不是让读者以为答案本来就长这样。(这条与 §六的附图口径同源。)
+**但绝不接受静默丢弃**:原答案带清单卡的轮次,公开页必须在该位置留一句可见说明
+(「本次回答还包含一份清单,未包含在公开分享中」),而不是让读者以为答案本来就长这样。
+这与 §六附图那条口径同源:少给内容可以,让读者不知道少了什么不行。
+
+⚠ 判据要落在**投影侧**而不是渲染侧:投影里带一个 `omitted_result_sets: int`(只有计数,
+没有任何内容),渲染按它出提示。把判据放在前端「payload 里有没有这个字段」会让一条
+历史 payload 的格式差异静默关掉提示。
 
 ---
 
@@ -270,14 +273,44 @@ O(n) 可接受;绝不接受把别名反向映射持久化成一张新表。
 | **T5** | 前端弹窗 + 公开页 | §八;katex/remarkCitations/横向滚动三条守卫 |
 | **T6** | 文档 + 门禁 + PR + codex 闭环 | 四份文档同步;数值上限只登记在 `docs/product-and-api*.md`;G1/G2/G3 |
 
+### T1 的文件清单(从 `fd38d259`(P2-T1)的实际改动面推导,22 个文件)
+
+本次与 P2-T1 的差别:那次是**新建表**,这次是**给既有表加三列 + 一个部分唯一索引**。
+所以 shadow `_TABLES` 不新增条目(`conversations` 已在集合内),但**列清单要改**。
+
+1. `backend/app/repositories/sqlite/migrations.py` — `_migration_51` + `SCHEMA_VERSION=51`
+   (⚠ **追加新迁移,绝不塞进已封版的旧迁移**——版本闸对已部署库短路,`IF NOT EXISTS`
+   救不了没被执行到的语句)
+2. `backend/app/repositories/postgres/migrations/0029_conversation_share.sql`
+3. `backend/app/repositories/postgres/schema_manifest.py` — 50/28 → 51/29
+4. `backend/app/migration/shadow/manifest.py` — `conversations` 的列清单 + 唯一面
+5. 两侧 store(发放/回读/撤销/水位),照 `sharing_store.py` 报告 token 的先例
+6. `backend/tests/fixtures/repository_v9/{manifest.json,expected_snapshot.json}` — 重生成
+7. `backend/tests/test_repository_v9_fixture.py` — `user_version == 51`
+8. `backend/tests/test_repository_snapshot_verifier.py` + `scripts/verify_repository_snapshot.py`
+   — `(50, 51)` + `_rollback_v51` + 用例
+9. `scripts/merge_dbs.py` — 分类(会话是 notebook-scoped;token 与水位随行走)
+10. **⚠ 最易漏的一格**:`backend/tests/postgres/` 下**九个**文件里的
+    `migrate() == 28` 版本断言(P2-T1 时是 **85 处**)+ packaged 阶段清单补
+    `(29, 'conversation_share')`。P1-T1 就是漏了这一格让整条 G3 泳道在分支上全红,
+    而它**没有 marker、三门都不跑**,只能靠全仓 grep 找。**动手第一件事就是先 grep 数
+    出这轮到底有多少处**,别信这里写的历史数字。
+
 ---
 
-## 十、待拍板(不阻塞 T1,但要在 T3 之前定)
+## 十、裁决(2026-08-18 拍板,三条全部已定)
 
-1. **清单卡是否纳入 v1**(§五末)。建议纳入,按同一白名单。
-2. **库主是否需要「禁止本库会话被公开分享」开关**。建议 v1 不做(报告已是同一形态,
-   单给会话加闸会造成两套口径),登记为待议。
-3. **水位排序键的最终形态**(§3.2 那条 `rowid` vs `id` 的差异)——T1 实测后定死。
+- **C-1 清单卡不进 v1**,但必须留可见说明,判据落在投影侧的 `omitted_result_sets` 计数
+  (§五末)。
+- **C-2 不做「禁止本库会话被公开分享」开关**。理由:报告已经是同一形态,单给会话加一道闸
+  会造成两套口径。**链接寿命 = 创建者读权的寿命**——这就是它的缓解手段,也是必须在
+  产品文档里写清的那句话。撤销群组授权 / 把人移出组 / 删组,他在那本库里发出去的每条
+  会话链接当场全灭;恢复授权即复活。
+- **C-3 公开页的轮次顺序必须与作者自己看到的逐字同源**。落地形态**不是**「另写一条排序
+  一样的 SQL」,而是**把那段 ORDER BY 提成每个后端各一份的具名常量**,由
+  `get_conversation` 与公开快照查询**共同消费**——两处各写一遍,迟早会在某次优化里分叉,
+  而分叉的表现是「公开出去的内容顺序和我看到的不一样」,读者会读成内容被改过。
+  另加一条测试:同一份数据下,两条路径返回的轮次序列**逐位相等**。
 
 ---
 
