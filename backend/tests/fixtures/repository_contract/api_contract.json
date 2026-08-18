@@ -12658,7 +12658,7 @@
       },
       "/api/groups/{group_id}/share-requests/{request_id}/approve": {
         "post": {
-          "description": "批准:同一写事务写 `(group, viewer)` 授权边并把申请标 approved。\n\n已共享(同库同组已有边)时幂等——不因「已经共享过」让批准失败,那会留下一条永远批\n不掉的申请。申请不存在或已被其他管理员决定 → 404(`approve_share_request` 返回\n`None`,并发双审由 store 的行锁 + 精确状态匹配挡住)。",
+          "description": "批准:同一写事务写 `(group, viewer)` 授权边并把申请标 approved。\n\n已共享(同库同组已有边)时幂等——不因「已经共享过」让批准失败,那会留下一条永远批\n不掉的申请。申请不存在或已被其他管理员决定 → 404(`approve_share_request` 返回\n`None`,并发双审由 store 的行锁 + 精确状态匹配挡住)。\n\n⚠ 下面这道守卫**不是**最终判定:它与写事务之间有一个窗口,足够让这个人被降级或移出\n组,而批准会把**整组**的读权放出去(codex #519 R2 P1)。store 因此在同一写事务里再\n复核一次审批资格,不成立抛 `GroupAdminRequiredError` → **403**。这里的 403 不退化成\n404:能走到这一步说明他刚刚还是这个组的管理员,组的存在性对他本来就不是秘密——与\n`create_notebook_grant_route` 的同款取舍一致。系统管理员的运维旁路必须一路传到 store\n(他不必是组成员),所以显式把 `_is_system_admin(user)` 交给它,而不是让 store 去读\n`users.role`(store 不做身份解析)。",
           "operationId": "approve_share_request_route_api_groups__group_id__share_requests__request_id__approve_post",
           "parameters": [
             {
@@ -12707,7 +12707,7 @@
       },
       "/api/groups/{group_id}/share-requests/{request_id}/reject": {
         "post": {
-          "description": "驳回:把申请标 rejected,不写任何授权边。\n\n申请不存在或已被决定 → 404,与批准同一口径。驳回后申请者可看到「已驳回」,并可对同\n库同组重新发起(rejected 不占那条部分唯一索引,`WHERE status='pending'` 才占)。",
+          "description": "驳回:把申请标 rejected,不写任何授权边。\n\n申请不存在或已被决定 → 404,与批准同一口径。驳回后申请者可看到「已驳回」,并可对同\n库同组重新发起(rejected 不占那条部分唯一索引,`WHERE status='pending'` 才占)。\n\n审批资格的事务内复核与系统管理员旁路同 `approve_share_request_route`:驳回虽然不发\n授权边,但它同样是一个终态决定(把别人的申请判死),被降级的人不该还能做。",
           "operationId": "reject_share_request_route_api_groups__group_id__share_requests__request_id__reject_post",
           "parameters": [
             {
@@ -19207,7 +19207,7 @@
           "summary": "List My Share Requests Route"
         },
         "post": {
-          "description": "提交共享申请。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的成员。\n\n组成员那一半在这里查(`user_group_role` 非空即成员,普通成员也可——组管理员本就\n不必申请)。非成员与「组不存在」同为 **404**(群组的可见性口径):库主固然知道自己\n的库在,但他不知道那个组存不存在,统一 404 不泄露组的存在性。\n\n幂等:同库同组已有一条待审批申请时,`create_share_request` **返回既有那条**而不是\n报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。组在守卫通过\n之后、写事务落库之前被并发删掉 → `GroupNotFoundError` → 404。",
+          "description": "提交共享申请。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的成员。\n\n组成员那一半在这里查(`user_group_role` 非空即成员,普通成员也可——组管理员本就\n不必申请)。非成员与「组不存在」同为 **404**(群组的可见性口径):库主固然知道自己\n的库在,但他不知道那个组存不存在,统一 404 不泄露组的存在性。\n\n幂等:同库同组已有一条待审批申请时,`create_share_request` **返回既有那条**而不是\n报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。\n\n⚠ 这里的前置查询**只用来给出友好文案**,承重的复核在 store 的写事务里:组在守卫通过\n之后被删 → `GroupNotFoundError`;申请人在那之后被移出组 → `GroupMembershipRequiredError`\n(codex #519 R2 P2-1)。两者都映射成同一个 404 —— 与上面那次前置检查逐字同一个响应,\n群组维度的「看不见」口径不因为走到了哪一层而变。",
           "operationId": "create_share_request_route_api_notebooks__notebook_id__share_requests_post",
           "parameters": [
             {

@@ -204,6 +204,13 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                   setRenameDraft(created.name);
                   setDescriptionDraft(created.description);
                   setShared(await listGroupSharedNotebooks(created.id));
+                  // ⚠ 建组路径也必须初始化 `shareRequests`:创建者恒是组管理员,所以
+                  // 「待审批申请」区一定会渲染,而它把 `null` 当「加载中…」——不置值
+                  // 的话新建的组一打开就是**永久加载态**,直到关掉重开(codex #519 R2
+                  // P2-2)。直接置 `[]` 而不发请求:这个组是这一刻刚建出来的,申请只能
+                  // 由成员对已存在的组提交,所以它的待审批集合可证明为空——多发一次
+                  // 必然返回 `[]` 的请求换不来任何信息。
+                  setShareRequests([]);
                 }, "建组失败"); }}
               >{busy ? "创建中…" : "创建群组"}</button>
             </div>

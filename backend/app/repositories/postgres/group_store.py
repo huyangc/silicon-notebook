@@ -31,6 +31,7 @@ from app.repositories.group_rows import (
 from app.repositories.ports import (
     GroupAdminRequiredError,
     GroupGrantAlreadyExists,
+    GroupMembershipRequiredError,
     GroupNotFoundError,
     LastGroupAdminError,
     ShareRequestNotPendingError,
@@ -504,11 +505,16 @@ class GroupStore:
         PG 侧多一把 `FOR SHARE`(`_lock_group_on(mode="SHARE")`)复核组还在,与
         `create_grant` 同一手法;唯一索引冲突在 `write()` 块**之外**捕获(UniqueViolation
         会中止 PG 事务,必须先整体回滚再另起只读事务取既有 pending 行)。
+
+        成员资格同样在事务内复核(`GroupMembershipRequiredError`),理由与 SQLite 侧逐字
+        相同:路由那次查询与插入之间,`requested_by` 可以被移出组(codex #519 R2 P2-1)。
         """
         request_id = self.new_id("shr")
         try:
             with self.database.write() as connection:
                 self._lock_group_on(connection, group_id, mode="SHARE")
+                if self._role_on(connection, group_id, requested_by) is None:
+                    raise GroupMembershipRequiredError(group_id)
                 connection.execute(
                     "INSERT INTO notebook_share_requests "
                     "(id,notebook_id,group_id,requested_by,status,created_at) "
@@ -549,8 +555,31 @@ class GroupStore:
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
 
+    def _require_share_decider_on(
+        self,
+        connection: Any,
+        group_id: str,
+        decided_by: str,
+        is_system_admin: bool,
+    ) -> None:
+        """`sqlite/group_store.py::_require_share_decider_on` 的镜像:在当前写事务里复核
+        这个人此刻仍有权审批本组的共享申请;完整理由写在 SQLite 那一份。
+
+        PG 侧调用点排在 `FOR UPDATE` 锁住申请行**之后**:那把锁已经把并发的同一条申请的
+        审批串起来了,资格复核紧随其后读到的成员行就是本事务要据以决定的那一份。
+        """
+        if is_system_admin:
+            return
+        if self._role_on(connection, group_id, decided_by) != "admin":
+            raise GroupAdminRequiredError(group_id)
+
     def approve_share_request(
-        self, group_id: str, request_id: str, *, decided_by: str
+        self,
+        group_id: str,
+        request_id: str,
+        *,
+        decided_by: str,
+        decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
         """`sqlite` 镜像:同事务里复核仍 pending → 写 `(group, viewer)` 边(已共享则
         `ON CONFLICT DO NOTHING` 幂等)→ 状态置 approved。
@@ -586,6 +615,9 @@ class GroupStore:
             ).fetchone()
             if row is None:
                 return None
+            self._require_share_decider_on(
+                connection, group_id, decided_by, decided_by_is_system_admin
+            )
             notebook_id = row["notebook_id"]
             connection.execute(
                 "INSERT INTO notebook_grants "
@@ -608,10 +640,20 @@ class GroupStore:
         return self._share_request_row(out)
 
     def reject_share_request(
-        self, group_id: str, request_id: str, *, decided_by: str
+        self,
+        group_id: str,
+        request_id: str,
+        *,
+        decided_by: str,
+        decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
+        """见 SQLite 侧同名方法:审批资格复核**先于** UPDATE 发出——驳回同样是终态决定,
+        被降级的人不该还能做。"""
         stamp = self.now()
         with self.database.write() as connection:
+            self._require_share_decider_on(
+                connection, group_id, decided_by, decided_by_is_system_admin
+            )
             cursor = connection.execute(
                 "UPDATE notebook_share_requests "
                 "SET status='rejected', decided_by=%s, decided_at=%s "

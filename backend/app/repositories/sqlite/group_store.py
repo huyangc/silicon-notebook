@@ -38,6 +38,7 @@ from app.repositories.group_rows import (
 from app.repositories.ports import (
     GroupAdminRequiredError,
     GroupGrantAlreadyExists,
+    GroupMembershipRequiredError,
     GroupNotFoundError,
     LastGroupAdminError,
     ShareRequestNotPendingError,
@@ -532,11 +533,20 @@ class GroupStore:
         在写事务里先 `_require_group_on` 复核组还在:少了它,组被并发删掉时插入会撞
         `group_id` 外键抛 `IntegrityError`(用户拿到 500),而正确答案是 404。同一写锁下
         复核过后,唯一还可能的 `IntegrityError` 就是那条 pending 唯一索引冲突。
+
+        ⚠ **成员资格也必须在这个事务里复核**(codex #519 R2 P2-1):路由查过一次
+        「`requested_by` 在不在这个组里」,但「被移出组」可以发生在那次查询与插入之间。
+        少了这一条,一个刚被移出组的人仍能落一条**非成员**的待审批申请,组管理员的审核
+        队列里会出现一个已经不属于本组的人。判据是「有成员行」而不是「是组管理员」——
+        申请这条路本来就是给普通成员走的。与「最后一名组管理员保护」「`create_grant` 的
+        双重条件」同一手法:承重的复核在写事务内,路由那次只用来给友好文案。
         """
         request_id = self.new_id("shr")
         try:
             with self.database.write() as db:
                 self._require_group_on(db, group_id)
+                if self._role_on(db, group_id, requested_by) is None:
+                    raise GroupMembershipRequiredError(group_id)
                 db.execute(
                     "INSERT INTO notebook_share_requests "
                     "(id,notebook_id,group_id,requested_by,status,created_at) "
@@ -585,11 +595,39 @@ class GroupStore:
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
 
+    def _require_share_decider_on(
+        self,
+        db: sqlite3.Connection,
+        group_id: str,
+        decided_by: str,
+        is_system_admin: bool,
+    ) -> None:
+        """在**当前写事务里**复核这个人此刻仍有权审批本组的共享申请。
+
+        路由的 `_require_group_admin` 与本事务之间永远有一个窗口:一个并发的「把他降级/
+        移出组」请求可以整个跑完在中间。少了这一条,一个**刚被降级的人**仍能批准申请、
+        把整组的读权放出去(驳回同窗口)。这与「最后一名组管理员保护」「`create_grant` 的
+        双重条件」是同一条纪律:授权判定以写事务内这一次为准。
+
+        ``is_system_admin`` 由路由传入(store 不读 `users.role`、不做身份解析),承载
+        `_require_group_admin` 的系统管理员运维旁路:他不必是组成员也能审批。
+        """
+        if is_system_admin:
+            return
+        if self._role_on(db, group_id, decided_by) != "admin":
+            raise GroupAdminRequiredError(group_id)
+
     def approve_share_request(
-        self, group_id: str, request_id: str, *, decided_by: str
+        self,
+        group_id: str,
+        request_id: str,
+        *,
+        decided_by: str,
+        decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
-        """批准:**同一写事务**里复核仍 pending → 写 `(group, viewer)` 授权边 → 状态置
-        approved。申请不存在或已被决定返回 `None`(路由 → 404)。
+        """批准:**同一写事务**里复核仍 pending + 审批人仍有资格 → 写 `(group, viewer)`
+        授权边 → 状态置 approved。申请不存在或已被决定返回 `None`(路由 → 404);审批人
+        已被降级/移出组抛 `GroupAdminRequiredError`(路由 → 403)。
 
         `status='pending'` 是**精确匹配**(红线:绝不 `!= ...`)。授权边用
         `ON CONFLICT DO NOTHING` 写:已共享(同库同组已有边)时静默复用,继续把申请标
@@ -611,6 +649,9 @@ class GroupStore:
             ).fetchone()
             if row is None:
                 return None
+            self._require_share_decider_on(
+                db, group_id, decided_by, decided_by_is_system_admin
+            )
             notebook_id = row["notebook_id"]
             db.execute(
                 "INSERT INTO notebook_grants "
@@ -631,12 +672,25 @@ class GroupStore:
         return self._share_request_row(out)
 
     def reject_share_request(
-        self, group_id: str, request_id: str, *, decided_by: str
+        self,
+        group_id: str,
+        request_id: str,
+        *,
+        decided_by: str,
+        decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
         """驳回:状态置 rejected + `decided_by`/`decided_at`。不写任何授权边。申请不存在
-        或已被决定返回 `None`。`status='pending'` 精确匹配。"""
+        或已被决定返回 `None`;审批人已被降级/移出组抛 `GroupAdminRequiredError`。
+        `status='pending'` 精确匹配。
+
+        ⚠ 审批资格复核**先于** UPDATE 发出:驳回虽然不发授权边,但它同样是一个终态决定
+        (把别人的申请判死、并让那条 pending 从队列消失),被降级的人不该还能做。
+        """
         stamp = self.now()
         with self.database.write() as db:
+            self._require_share_decider_on(
+                db, group_id, decided_by, decided_by_is_system_admin
+            )
             cursor = db.execute(
                 "UPDATE notebook_share_requests "
                 "SET status='rejected', decided_by=?, decided_at=? "

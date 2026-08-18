@@ -1006,6 +1006,59 @@ def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores)
     )
 
 
+def test_share_request_authorization_rechecks_mirror_the_sqlite_store(
+    core_stores: CoreStores,
+):
+    """审批资格 / 申请人成员资格的**事务内**复核必须双后端同款(codex #519 R2 P1+P2-1)。
+
+    路由守卫与写事务之间的窗口足够让人被降级或移出组;批准会把**整组**的读权放出去,
+    所以承重的复核住在 store 的写事务里。PG 侧的调用点排在 `FOR UPDATE` 之后,分叉了
+    不会报错——只会让 PG 部署上的降级管理员仍能审批,而 SQLite 部署被拦下。
+    """
+    from app.repositories.ports import (
+        GroupAdminRequiredError,
+        GroupMembershipRequiredError,
+    )
+
+    groups = core_stores.groups
+    boss = core_stores.identity.create_user("v00112233", "password-74")
+    librarian = core_stores.identity.create_user("v00445566", "password-75")
+    outsider = core_stores.identity.create_user("v00778899", "password-76")
+    group = groups.create_group(
+        name="复检组", kind="project", description="", created_by=boss.id
+    )
+    groups.upsert_member(group["id"], librarian.id, role="member", added_by=boss.id)
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="复检库"), librarian.id
+    )
+    request = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+
+    # 普通成员与完全的外人都不能审批(批准与驳回同一道闸)。
+    for who in (librarian.id, outsider.id):
+        with pytest.raises(GroupAdminRequiredError):
+            groups.approve_share_request(group["id"], request["id"], decided_by=who)
+        with pytest.raises(GroupAdminRequiredError):
+            groups.reject_share_request(group["id"], request["id"], decided_by=who)
+    # 一条边都没发出去、申请仍 pending。
+    assert groups.list_grants(notebook_id) == []
+    assert [r["id"] for r in groups.list_pending_share_requests(group["id"])] == [request["id"]]
+
+    # 系统管理员的运维旁路由**路由**证明并传入,store 不读 users.role。
+    decided = groups.approve_share_request(
+        group["id"], request["id"],
+        decided_by=outsider.id, decided_by_is_system_admin=True,
+    )
+    assert decided["status"] == "approved"
+
+    # 非成员发不出申请(成员资格同样在事务内复核)。
+    with pytest.raises(GroupMembershipRequiredError):
+        groups.create_share_request(
+            notebook_id, group_id=group["id"], requested_by=outsider.id
+        )
+
+
 def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
     core_stores: CoreStores,
 ):
