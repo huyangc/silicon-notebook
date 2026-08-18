@@ -7,16 +7,25 @@ import {
   foldGroupShares,
   groupKindLabel,
   listGroups,
+  listMyShareRequests,
   listNotebookGrants,
+  requestableGroups,
   revokeNotebookGrant,
-  shareNotebookToGroup,
   shareableGroups,
+  shareNotebookToGroup,
+  shareRequestStatusLabel,
+  submitShareRequest,
+  visibleMyShareRequests,
+  withdrawShareRequest,
   type GroupShareEntry,
   type GroupSummary,
+  type ShareRequest,
 } from "./group-api.ts";
 
 /** `busySlot` 里代表「正在发出共享」的那一格 —— 它不是任何一个组的 id。 */
 const SHARE_SLOT = "__share__";
+/** 「正在提交申请」的那一格。 */
+const REQUEST_SLOT = "__request__";
 
 /**
  * 借入参考库的「未共享门」提示(设计文档 §6.1)。
@@ -36,23 +45,26 @@ type NotebookGroupShareProps = {
 };
 
 /**
- * 分享弹窗里的「共享给群组」一节(群组知识共享 P1-T4)。
+ * 分享弹窗里的「共享给群组」一节(群组知识共享 P1-T4 + P2-T3)。
  *
  * 与既有的只读共享链接**并列**而不是替代:链接是发给具体某个人的,群组共享是发给
  * 一整个组、并随成员进出自动生效与失效。
  *
- * 两条 P1 的口径直接写进了这里:
+ * P2 之后有**两条**共享路径,取决于我在目标组里的角色:
  *
- * * **只列我担任组管理员的组**(`shareableGroups`)。后端要求发边的人同时对这本库
- *   有管理权、又是目标组的组管理员;列出别的组只会让用户点一次拿一个 403。
- * * **只发一条只读授权**(已定裁决 4)。组管理员的写权限随 P2 一起上;现在多发一条
- *   等于放一条当前没有任何效果的授权在库上。
+ * * **我是组管理员** → 直接发边(`shareableGroups`);可勾「组管理员可管理」再追加一条
+ *   `group_admins`/`admin` 边,让整组的组管理员获得这本库的内容管理权。
+ * * **我只是普通成员** → 发不了边(后端双重条件要求我同时是组管理员),只能**提交共享
+ *   申请**(`requestableGroups`),由组管理员审批。申请状态(待审批 / 已驳回)在下方回显。
  */
 export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShareProps) {
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [entries, setEntries] = useState<GroupShareEntry[] | null>(null);
+  const [requests, setRequests] = useState<ShareRequest[]>([]);
   const [picked, setPicked] = useState("");
-  /** 空串 = 不忙;否则是**正在忙的那一项**(条目 id 或 `SHARE_SLOT`)。 */
+  const [manage, setManage] = useState(false);
+  const [requestPick, setRequestPick] = useState("");
+  /** 空串 = 不忙;否则是**正在忙的那一项**(条目 id / 申请 id / `SHARE_SLOT` / `REQUEST_SLOT`)。 */
   const [busySlot, setBusySlot] = useState("");
   const [error, setError] = useState("");
   // 切库 / 卸载之后落地的响应一律丢弃。`useEffect` 的局部 `cancelled` 只能覆盖它自己
@@ -64,15 +76,17 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
   }, []);
 
   const reload = useCallback(async () => {
-    const [grants, mine] = await Promise.all([
+    const [grants, mine, myReqs] = await Promise.all([
       listNotebookGrants(notebookId),
       listGroups("mine"),
+      listMyShareRequests(notebookId),
     ]);
     // ⚠ 成功路径也要看存活位:只在失败分支看它,等于「加载成功就无条件 setState」,
     // 那正是 React 卸载后更新状态的经典形态。
     if (!liveRef.current) return;
     setEntries(foldGroupShares(grants));
     setGroups(mine);
+    setRequests(myReqs);
   }, [notebookId]);
 
   useEffect(() => {
@@ -99,6 +113,8 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
   }
 
   const options = shareableGroups(groups, entries ?? []);
+  const requestOptions = requestableGroups(groups, entries ?? [], requests);
+  const pendingAndRejected = visibleMyShareRequests(requests);
   const busy = busySlot !== "";
 
   return (
@@ -121,6 +137,8 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
               {entry.missing ? "已失效的群组共享" : entry.name}
             </span>
             {!entry.missing && <span className="new-pill">{groupKindLabel(entry.kind)}</span>}
+            {/* 同组两条边(成员只读 + 组管理员可管)折成一项时,标注它带了管理权。 */}
+            {!entry.missing && entry.manage && <span className="tool-hint">组管理员可管理</span>}
             {entry.missing && (
               <span className="tool-hint">该群组已不存在，这条共享不再生效，可以删掉。</span>
             )}
@@ -161,17 +179,89 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
             className="new-pill"
             disabled={busy || !picked}
             onClick={() => { void run(SHARE_SLOT, async () => {
-              await shareNotebookToGroup(notebookId, picked);
+              await shareNotebookToGroup(notebookId, picked, { manage });
               setPicked("");
+              setManage(false);
             }, "共享失败"); }}
           >{busySlot === SHARE_SLOT ? "共享中…" : "共享给该群组"}</button>
         </div>
+        {/* 「组管理员可管理」:追加一条 group_admins/admin 边,组管理员因此能改内容。 */}
+        <label className="checklist-row" style={{ alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={manage}
+            disabled={busy}
+            onChange={(event) => setManage(event.target.checked)}
+            aria-label="组管理员可管理这本笔记本"
+          />
+          <span className="tool-hint" style={{ margin: 0 }}>
+            允许该群组的组管理员管理这本笔记本（添加/删除来源、构建索引、编辑知识）。
+          </span>
+        </label>
       </>) : (
-        entries !== null && (
+        entries !== null && options.length === 0 && requestOptions.length === 0 && (
           <p className="tool-hint" style={{ margin: 0 }}>
-            没有可选的群组。只有你担任组管理员的群组才能收到共享，可在账户菜单的「群组」里创建或管理。
+            没有可共享的群组。你可以在账户菜单的「群组」里创建群组，或等组管理员把你加进来。
           </p>
         )
+      )}
+
+      {/* 我只是普通成员的组:发不了边,只能申请。 */}
+      {requestOptions.length > 0 && (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="section-title">申请共享给群组</span>
+          <p className="tool-hint" style={{ margin: 0 }}>
+            你不是这些群组的组管理员，无法直接共享；提交申请后由组管理员审批。
+          </p>
+          <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
+            <select
+              value={requestPick}
+              aria-label="选择要申请的群组"
+              disabled={busy}
+              style={{ flex: 1 }}
+              onChange={(event) => setRequestPick(event.target.value)}
+            >
+              <option value="">选择一个群组…</option>
+              {requestOptions.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}（{groupKindLabel(group.kind)}）
+                </option>
+              ))}
+            </select>
+            <button
+              className="new-pill"
+              disabled={busy || !requestPick}
+              onClick={() => { void run(REQUEST_SLOT, async () => {
+                await submitShareRequest(notebookId, requestPick);
+                setRequestPick("");
+              }, "提交共享申请失败"); }}
+            >{busySlot === REQUEST_SLOT ? "提交中…" : "提交共享申请"}</button>
+          </div>
+        </div>
+      )}
+
+      {/* 我发起过的、尚未落地的申请(待审批 / 已驳回)。待审批的可撤回。 */}
+      {pendingAndRejected.length > 0 && (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="section-title">我的共享申请</span>
+          {pendingAndRejected.map((req) => (
+            <div className="checklist-row" key={req.id} style={{ alignItems: "center", gap: 8 }}>
+              <span style={{ flex: 1, wordBreak: "break-word" }}>{req.group_name || "群组"}</span>
+              <span className={req.status === "rejected" ? "tool-hint" : "new-pill"}>
+                {shareRequestStatusLabel(req.status)}
+              </span>
+              {req.status === "pending" && (
+                <button
+                  className="sort-button"
+                  disabled={busy}
+                  onClick={() => { void run(req.id, async () => {
+                    await withdrawShareRequest(notebookId, req.id);
+                  }, "撤回申请失败"); }}
+                >{busySlot === req.id ? "撤回中…" : "撤回申请"}</button>
+              )}
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

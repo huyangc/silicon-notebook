@@ -916,6 +916,77 @@ def test_group_grants_crud_and_group_deletion_mirror_the_sqlite_store(
     )["c"] == 0
 
 
+def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores):
+    """成员贡献审批流的 PG 行为必须与 `test_share_requests.py` 的 SQLite 矩阵逐条相同。
+
+    这里钉的是**分叉了不会报错、只会静默走样**的 PG 专有形态:`ON CONFLICT ON
+    CONSTRAINT` 写授权边、`FOR UPDATE` 防并发双审、`iso_timestamp` 归一 `decided_at`、
+    以及撞 `uq_share_requests_one_pending` 时靠 `exc.diag.constraint_name` 判幂等。
+    """
+    from app.repositories.ports import ShareRequestNotPendingError
+
+    groups = core_stores.groups
+    boss = core_stores.identity.create_user("p00123456", "password-70")
+    librarian = core_stores.identity.create_user("q00123456", "password-71")
+    group = groups.create_group(
+        name="芯片项目", kind="project", description="", created_by=boss.id
+    )
+    groups.upsert_member(group["id"], librarian.id, role="member", added_by=boss.id)
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="共享库"), librarian.id
+    )
+
+    created = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+    assert created["status"] == "pending"
+    # decided_at 两态:pending → None(经 iso_timestamp 归一后仍是 None,不是空串)。
+    assert created["decided_at"] is None
+    assert created["decided_by"] is None
+    assert created["notebook_name"] == "共享库"
+    assert created["requested_by_username"] == "q00123456"
+
+    # 撞 pending 唯一索引 → 幂等返回既有行(靠 constraint_name 判,不是别的约束)。
+    again = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+    assert again["id"] == created["id"]
+    assert [r["id"] for r in groups.list_pending_share_requests(group["id"])] == [created["id"]]
+    assert [r["id"] for r in groups.list_my_share_requests(notebook_id, requested_by=librarian.id)] == [created["id"]]
+
+    # 批准:同事务写 (group, viewer) 边 + 状态 approved;decided_at 变非空 ISO。
+    decided = groups.approve_share_request(
+        group["id"], created["id"], decided_by=boss.id
+    )
+    assert decided["status"] == "approved"
+    assert decided["decided_by"] == boss.id
+    assert isinstance(decided["decided_at"], str) and decided["decided_at"]
+    edges = groups.list_grants(notebook_id)
+    assert [(g["principal_type"], g["role"]) for g in edges] == [("group", "viewer")]
+
+    # 已决定的申请再批 → None(FOR UPDATE + 精确 status 匹配);撤回 → 409 语义。
+    assert groups.approve_share_request(group["id"], created["id"], decided_by=boss.id) is None
+    with pytest.raises(ShareRequestNotPendingError):
+        groups.delete_share_request(notebook_id, created["id"])
+
+    # 驳回一条新申请:状态 rejected、不写边;撤回一条 pending:删整行。
+    reject_target = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+    rejected = groups.reject_share_request(
+        group["id"], reject_target["id"], decided_by=boss.id
+    )
+    assert rejected["status"] == "rejected"
+    assert isinstance(rejected["decided_at"], str) and rejected["decided_at"]
+
+    withdraw_target = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+    assert groups.delete_share_request(notebook_id, withdraw_target["id"]) == "deleted"
+    assert groups.delete_share_request(notebook_id, withdraw_target["id"]) == "not_found"
+    assert groups.list_pending_share_requests(group["id"]) == []
+
+
 def test_group_sharing_shows_up_in_the_owner_facing_projections(
     core_stores: CoreStores,
 ):

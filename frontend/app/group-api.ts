@@ -61,6 +61,24 @@ export type GroupSharedNotebook = {
   roles: string[];
 };
 
+/** 一条共享申请的只读投影(后端 app/models/groups.py::ShareRequestItem 的镜像)。
+ *
+ * 状态机 **pending → approved / rejected 单向**;撤回是删整行、不是第四个状态。
+ * `decided_at` 只在已决定的行上是 ISO 时间戳,pending 时为 `null`(绝不是空串)。 */
+export type ShareRequest = {
+  id: string;
+  notebook_id: string;
+  notebook_name: string;
+  group_id: string;
+  group_name: string;
+  requested_by: string;
+  requested_by_username: string;
+  status: string;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  created_at: string;
+};
+
 /** `NotebookSummary.granted_via` 的元素:这本笔记本是经哪个群组共享给我的。 */
 export type GrantedGroupRef = {
   group_id: string;
@@ -142,12 +160,18 @@ export const revokeGroupSharedNotebook = (
 export const listNotebookGrants = (notebookId: string): Promise<NotebookGrant[]> =>
   requestJson(`/notebooks/${notebookId}/grants`, { tag: TAG });
 
-/** 共享给群组。P1 只发一条只读边,理由见文件顶部第 2 条。 */
+/** 共享给群组。默认只发一条只读边(`group`/`viewer`)。
+ *
+ * `manage=true` 时**追加**一条 `group_admins`/`admin` 边(P2 的「组管理员可管理」勾选):
+ * 组管理员因此获得这本库的内容管理权。两条边分两次 POST——先发只读边,成功后再发管理边
+ * (顺序无所谓,权限由两条边各自的谓词独立生效),这样即使第二条失败,库主也至少完成了
+ * 只读共享,不会两条都回滚成「什么都没共享」。 */
 export const shareNotebookToGroup = (
   notebookId: string,
   groupId: string,
-): Promise<NotebookGrant> =>
-  requestJson(`/notebooks/${notebookId}/grants`, {
+  opts: { manage?: boolean } = {},
+): Promise<NotebookGrant> => {
+  const viewer = requestJson<NotebookGrant>(`/notebooks/${notebookId}/grants`, {
     method: "POST",
     body: JSON.stringify({
       principal_type: "group",
@@ -156,9 +180,74 @@ export const shareNotebookToGroup = (
     }),
     tag: TAG,
   });
+  if (!opts.manage) return viewer;
+  return viewer.then(async (grant) => {
+    await requestJson(`/notebooks/${notebookId}/grants`, {
+      method: "POST",
+      body: JSON.stringify({
+        principal_type: "group_admins",
+        principal_id: groupId,
+        role: "admin",
+      }),
+      tag: TAG,
+    });
+    return grant;
+  });
+};
 
 export const revokeNotebookGrant = (notebookId: string, grantId: string): Promise<void> =>
   requestVoid(`/notebooks/${notebookId}/grants/${grantId}`, { method: "DELETE", tag: TAG });
+
+// --- 成员贡献审批流(群组知识共享 P2-T3) ------------------------------------
+
+/** 提交共享申请:把这本库贡献给一个我只是普通成员的群组,由组管理员审批。 */
+export const submitShareRequest = (
+  notebookId: string,
+  groupId: string,
+): Promise<ShareRequest> =>
+  requestJson(`/notebooks/${notebookId}/share-requests`, {
+    method: "POST",
+    body: JSON.stringify({ group_id: groupId }),
+    tag: TAG,
+  });
+
+/** 我对这本库发起过的申请(弹窗回显待审批 / 已驳回)。只回本人发起的。 */
+export const listMyShareRequests = (notebookId: string): Promise<ShareRequest[]> =>
+  requestJson(`/notebooks/${notebookId}/share-requests`, { tag: TAG });
+
+/** 撤回一条**待审批**申请(删整行)。已决定的会被后端 409 挡住,文案直接上屏。 */
+export const withdrawShareRequest = (
+  notebookId: string,
+  requestId: string,
+): Promise<void> =>
+  requestVoid(`/notebooks/${notebookId}/share-requests/${requestId}`, {
+    method: "DELETE",
+    tag: TAG,
+  });
+
+/** 组管理员的审核队列:共享给本组的待审批申请。 */
+export const listGroupShareRequests = (groupId: string): Promise<ShareRequest[]> =>
+  requestJson(`/groups/${groupId}/share-requests`, { tag: TAG });
+
+/** 批准:同事务写 `(group, viewer)` 边并把申请标 approved。 */
+export const approveShareRequest = (
+  groupId: string,
+  requestId: string,
+): Promise<ShareRequest> =>
+  requestJson(`/groups/${groupId}/share-requests/${requestId}/approve`, {
+    method: "POST",
+    tag: TAG,
+  });
+
+/** 驳回:把申请标 rejected,不发任何边。 */
+export const rejectShareRequest = (
+  groupId: string,
+  requestId: string,
+): Promise<ShareRequest> =>
+  requestJson(`/groups/${groupId}/share-requests/${requestId}/reject`, {
+    method: "POST",
+    tag: TAG,
+  });
 
 // --- 输入护栏 ---------------------------------------------------------------
 
@@ -223,6 +312,8 @@ export type GroupShareEntry = {
   kind: string;
   /** 组已不存在(孤儿边):名字解析不出来,只能给用户一个删除入口。 */
   missing: boolean;
+  /** 有一条 `group_admins`/`admin` 边——组管理员可管理这本库(标注「可管理」)。 */
+  manage: boolean;
   /** 这一项背后的全部边 id——撤销时要逐条删掉。 */
   grantIds: string[];
 };
@@ -243,9 +334,13 @@ export const foldGroupShares = (grants: readonly NotebookGrant[]): GroupShareEnt
   const byPrincipal = new Map<string, GroupShareEntry>();
   for (const grant of grants) {
     if (grant.principal_type !== "group" && grant.principal_type !== "group_admins") continue;
+    // `group_admins` 边即「组管理员可管理」——不管它是先出现还是后出现,都把这一项标成
+    // 可管理(两条边任意顺序返回都成立)。
+    const conferManage = grant.principal_type === "group_admins";
     const existing = byPrincipal.get(grant.principal_id);
     if (existing) {
       existing.grantIds.push(grant.id);
+      existing.manage = existing.manage || conferManage;
       continue;
     }
     const entry: GroupShareEntry = {
@@ -253,6 +348,7 @@ export const foldGroupShares = (grants: readonly NotebookGrant[]): GroupShareEnt
       name: grant.principal_name,
       kind: grant.principal_kind,
       missing: grant.principal_kind === "missing",
+      manage: conferManage,
       grantIds: [grant.id],
     };
     byPrincipal.set(grant.principal_id, entry);
@@ -269,6 +365,42 @@ export const shareableGroups = <T extends { id: string; my_role: string }>(
   const taken = new Set(shared.map((entry) => entry.groupId));
   return adminGroups(groups).filter((group) => !taken.has(group.id));
 };
+
+/** 我在这个组里只是**普通成员**(不是组管理员,也不是非成员)。 */
+export const isPlainMember = (group: { my_role: string }): boolean =>
+  group.my_role === "member";
+
+/**
+ * 「提交共享申请」的可选项 = 我只是普通成员的组,且既没共享过、也没有正在待审批的申请。
+ *
+ * 与 `shareableGroups`(我担任组管理员的组、可直接发边)**互斥**:组管理员不必申请,
+ * 直接发边;普通成员发不了边,只能申请。已共享的组从两个入口都消失(共享是终态);
+ * 已有 pending 申请的组也不再出现(重复提交后端会幂等返回,但界面不该给一个「再申请」
+ * 的入口——那让人以为能提交第二份)。已驳回(rejected)**不**挡在这里:被驳回后用户可以
+ * 重新申请,所以只按 pending 过滤。
+ */
+export const requestableGroups = <T extends { id: string; my_role: string }>(
+  groups: readonly T[],
+  shared: readonly GroupShareEntry[],
+  requests: readonly ShareRequest[],
+): T[] => {
+  const taken = new Set(shared.map((entry) => entry.groupId));
+  const pending = new Set(
+    requests.filter((r) => r.status === "pending").map((r) => r.group_id),
+  );
+  return groups.filter(
+    (group) => isPlainMember(group) && !taken.has(group.id) && !pending.has(group.id),
+  );
+};
+
+/** 共享申请状态的界面词。未知状态退成中性词,绝不吐后端的英文 id。 */
+export const shareRequestStatusLabel = (status: string): string =>
+  status === "pending" ? "待审批" : status === "approved" ? "已批准" : status === "rejected" ? "已驳回" : "申请";
+
+/** 弹窗里要回显的申请 = 尚未完成的(待审批)或刚被驳回的;已批准的已经变成共享条目,不再单列。 */
+export const visibleMyShareRequests = (
+  requests: readonly ShareRequest[],
+): ShareRequest[] => requests.filter((r) => r.status === "pending" || r.status === "rejected");
 
 // --- 笔记本列表侧的纯 helper -------------------------------------------------
 

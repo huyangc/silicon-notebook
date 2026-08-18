@@ -1042,6 +1042,32 @@ class QueryStore:
                         "created_at": iso_timestamp(row["created_at"]),
                     }
                 )
+            # 组管理员的待审批共享申请(群组知识共享 P2-T3)。理由与 SQLite 侧逐字相同:
+            # 谓词只有「我在该组是 admin」+「申请仍 pending」,不消费 notebook id,放在
+            # `if notebook_ids:` 之外;`gm.role='admin'` 与 `sr.status='pending'` 均精确匹配。
+            # GROUP BY 走 groups 主键 `g.id`——PostgreSQL 认 PK 的函数依赖,`g.name`/
+            # `g.created_at` 因此可被选择/排序而不必进 GROUP BY;对非 PK 的 `sr.group_id`
+            # 它不认(会 GroupingError)。与 SQLite 侧同一形态,行为逐字一致。
+            share_requests = db.execute(
+                "SELECT g.id AS group_id, g.name AS group_name, COUNT(*) AS c "
+                "FROM notebook_share_requests sr "
+                "JOIN group_members gm ON gm.group_id = sr.group_id "
+                "AND gm.user_id = %s AND gm.role = 'admin' "
+                "JOIN groups g ON g.id = sr.group_id "
+                "WHERE sr.status = 'pending' "
+                "GROUP BY g.id, g.name, g.created_at "
+                'ORDER BY g.created_at ASC, g.id COLLATE "C" ASC',
+                (user_id,),
+            ).fetchall()
+            for row in share_requests:
+                items.append(
+                    {
+                        "type": "share_request",
+                        "group_id": row["group_id"],
+                        "group_name": row["group_name"] or "",
+                        "count": int(row["c"]),
+                    }
+                )
             if notebook_ids:
                 role_row = db.execute(
                     "SELECT role FROM users WHERE id = %s", (user_id,)

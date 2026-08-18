@@ -17,25 +17,38 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     resolveUser: vi.fn(),
     listGroupSharedNotebooks: vi.fn(),
     revokeGroupSharedNotebook: vi.fn(),
+    listGroupShareRequests: vi.fn(),
+    approveShareRequest: vi.fn(),
+    rejectShareRequest: vi.fn(),
   };
 });
 
 import {
+  approveShareRequest,
   createGroup,
   deleteGroup,
   getGroup,
   leaveGroup,
+  listGroupShareRequests,
   listGroupSharedNotebooks,
   listGroups,
   putGroupMember,
+  rejectShareRequest,
   removeGroupMember,
   resolveUser,
   revokeGroupSharedNotebook,
   updateGroup,
   type GroupDetail,
+  type ShareRequest,
   type GroupSummary,
 } from "../../app/group-api.ts";
 import { GroupsModal } from "../../app/groups-panel.tsx";
+
+const shareRequest = (over: Partial<ShareRequest>): ShareRequest => ({
+  id: "sr1", notebook_id: "nb9", notebook_name: "候选库", group_id: "g1", group_name: "封装项目",
+  requested_by: "u7", requested_by_username: "erin", status: "pending",
+  decided_by: null, decided_at: null, created_at: "", ...over,
+});
 
 const ADMIN_GROUP: GroupSummary = {
   id: "g1",
@@ -68,6 +81,7 @@ beforeEach(() => {
   vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP, MEMBER_GROUP]);
   vi.mocked(getGroup).mockResolvedValue(ADMIN_DETAIL);
   vi.mocked(listGroupSharedNotebooks).mockResolvedValue([]);
+  vi.mocked(listGroupShareRequests).mockResolvedValue([]);
 });
 
 function renderModal(isSystemAdmin = false) {
@@ -155,11 +169,57 @@ test("普通成员没有管理入口,也不去读「共享给本组的知识库�
 
   await screen.findByText("工艺部 · 部门");
   expect(listGroupSharedNotebooks).not.toHaveBeenCalled();
+  // 「待审批申请」也只属于组管理员这一层——普通成员连查都不查。
+  expect(listGroupShareRequests).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "添加成员" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "删除群组" })).not.toBeInTheDocument();
   expect(screen.queryByText("共享给本组的知识库")).not.toBeInTheDocument();
+  expect(screen.queryByText("待审批申请")).not.toBeInTheDocument();
   // 自助退出仍在:它按「我是不是成员」显示,与管理权无关。
   expect(screen.getByRole("button", { name: "退出群组" })).toBeInTheDocument();
+});
+
+test("组管理员看到「待审批申请」区,可批准(写边、刷新)或驳回", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroupShareRequests)
+    .mockResolvedValueOnce([
+      shareRequest({ id: "sr1", notebook_name: "候选库甲", requested_by_username: "erin" }),
+      shareRequest({ id: "sr2", notebook_name: "候选库乙", requested_by_username: "frank" }),
+    ])
+    .mockResolvedValue([shareRequest({ id: "sr2", notebook_name: "候选库乙" })]);
+  vi.mocked(approveShareRequest).mockResolvedValue(shareRequest({ id: "sr1", status: "approved" }));
+  const { onChanged } = renderModal();
+
+  await screen.findByText("封装项目");
+  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+
+  await screen.findByText("待审批申请");
+  expect(screen.getByText("候选库甲")).toBeInTheDocument();
+  expect(screen.getByText("申请人 erin")).toBeInTheDocument();
+
+  // 批准第一条 → 写边、刷新申请队列与共享清单、让外层重取。
+  await user.click(screen.getAllByRole("button", { name: "批准" })[0]);
+  await waitFor(() => expect(approveShareRequest).toHaveBeenCalledWith("g1", "sr1"));
+  await waitFor(() => expect(listGroupSharedNotebooks).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(onChanged).toHaveBeenCalled());
+});
+
+test("驳回申请不写边,只刷新审核队列", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroupShareRequests)
+    .mockResolvedValueOnce([shareRequest({ id: "sr1" })])
+    .mockResolvedValue([]);
+  vi.mocked(rejectShareRequest).mockResolvedValue(shareRequest({ id: "sr1", status: "rejected" }));
+  renderModal();
+
+  await screen.findByText("封装项目");
+  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await screen.findByText("待审批申请");
+
+  await user.click(screen.getByRole("button", { name: "驳回" }));
+  await waitFor(() => expect(rejectShareRequest).toHaveBeenCalledWith("g1", "sr1"));
+  // 驳回不发授权边。
+  expect(approveShareRequest).not.toHaveBeenCalled();
 });
 
 test("删除群组是两步确认,并说清共享会被一并收回", async () => {

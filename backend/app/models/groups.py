@@ -29,6 +29,12 @@ GRANTABLE_PRINCIPAL_TYPES = ("group", "group_admins")
 # 翻转是 P2 的事;枚举现在就收下,免得 P2 再动一次 schema 与前端。
 GRANT_ROLES = ("viewer", "admin")
 
+# 成员贡献审批流的状态(群组知识共享 P2-T3)。状态机 **pending → approved/rejected 单向**,
+# 撤回是申请者删整行、不是第四个状态(裁决 P2-2)。取值一律**精确匹配**消费——绝不用
+# `status != 'pending'` 当「已决定」判据(v50 迁移注释里点名的红线:shadow 停车会给冲突行的
+# `status` 暂写哨兵串,否定式判据会把停车行误判成正常状态)。这份元组是那份校验的真源。
+SHARE_REQUEST_STATUSES = ("pending", "approved", "rejected")
+
 
 class GroupCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -126,3 +132,36 @@ class GroupSharedNotebookItem(BaseModel):
     name: str = ""
     owner_username: str = ""
     roles: List[str] = Field(default_factory=list)
+
+
+class ShareRequestCreate(BaseModel):
+    """普通成员发起「把这本库共享给这个组」的申请(群组知识共享 P2-T3)。
+
+    只带 `group_id`——`notebook_id` 在 URL 路径里,请求者是当前登录用户,状态恒 `pending`
+    (不由客户端指定)。`extra="forbid"` 兜住:传别的字段直接 422,而不是安静忽略。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_id: str
+
+
+class ShareRequestItem(BaseModel):
+    """一条共享申请的只读投影。
+
+    `decided_by` / `decided_at` 只在**已决定**(approved/rejected)的行上有值——组管理员
+    做出决定时才写。`decided_at` 是可空 ISO 时间戳:pending 时为 `None`,绝不是空串
+    (v50 迁移注释里点名的纪律,store 层有两态断言把关)。
+    """
+
+    id: str
+    notebook_id: str
+    notebook_name: str = ""
+    group_id: str
+    group_name: str = ""
+    requested_by: str = ""
+    requested_by_username: str = ""
+    status: str = "pending"
+    decided_by: Optional[str] = None
+    decided_at: Optional[str] = None
+    created_at: str = ""

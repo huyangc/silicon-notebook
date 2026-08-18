@@ -1151,6 +1151,35 @@ class QueryStore:
                         "created_at": row["created_at"],
                     }
                 )
+            # 组管理员的待审批共享申请(群组知识共享 P2-T3)。谓词是「我在这个组里是
+            # admin」+「申请仍 pending」,一个 notebook id 都不消费——所以和报告那一半
+            # 一样放在 `if notebook_ids:` **之外**:一个只在别人库里当组管理员、自己没
+            # 建过库的人,铃铛同样要提醒他有待审批申请。`gm.role='admin'` 与
+            # `sr.status='pending'` 都是**精确匹配**(v50 迁移点名的红线:否定式会把
+            # shadow 停车行误判成正常状态)。
+            # GROUP BY 走 groups 主键 `g.id`,让 `g.name`/`g.created_at` 因函数依赖可被
+            # 选择与排序而不必进 GROUP BY——PostgreSQL 对非 PK 的 `sr.group_id` 不认这层
+            # 依赖(会报 GroupingError),两侧统一按 g.id 分组,行为逐字一致。
+            share_requests = db.execute(
+                "SELECT g.id AS group_id, g.name AS group_name, COUNT(*) AS c "
+                "FROM notebook_share_requests sr "
+                "JOIN group_members gm ON gm.group_id = sr.group_id "
+                "AND gm.user_id = ? AND gm.role = 'admin' "
+                "JOIN groups g ON g.id = sr.group_id "
+                "WHERE sr.status = 'pending' "
+                "GROUP BY g.id, g.name, g.created_at "
+                "ORDER BY g.created_at ASC, g.id ASC",
+                (user_id,),
+            ).fetchall()
+            for row in share_requests:
+                items.append(
+                    {
+                        "type": "share_request",
+                        "group_id": row["group_id"],
+                        "group_name": row["group_name"] or "",
+                        "count": int(row["c"]),
+                    }
+                )
             if notebook_ids:
                 role_row = db.execute(
                     "SELECT role FROM users WHERE id = ?", (user_id,)

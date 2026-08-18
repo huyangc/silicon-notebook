@@ -99,6 +99,10 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     # 进诊断快照。
     ("grants",),
     ("grants", None),
+    # 成员贡献审批流(群组知识共享 P2-T3)。同 grants:第二段是固定字面量,申请 id 走
+    # None 打 {id},group_id 在请求体里。少了这两条整条会落到兜底 {redacted},丢观测。
+    ("share-requests",),
+    ("share-requests", None),
     ("kg", "search"),
     ("kg", "build"),
     ("kg", "rebuild"),
@@ -207,6 +211,11 @@ _ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("api", "groups", None, "membership"),
     ("api", "groups", None, "shared-notebooks"),
     ("api", "groups", None, "shared-notebooks", None),
+    # 组管理员的审批面(群组知识共享 P2-T3)。申请 id 走 None 打 {id},approve/reject 是
+    # 固定末段字面量;整条路径无用户内容。
+    ("api", "groups", None, "share-requests"),
+    ("api", "groups", None, "share-requests", None, "approve"),
+    ("api", "groups", None, "share-requests", None, "reject"),
     # 用户名在**查询串**里(`?username=`),不在路径上——路径本身没有用户内容。
     ("api", "users", "resolve"),
     ("_diagnostics-test", "block"),

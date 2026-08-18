@@ -33,6 +33,9 @@ export function doneMessage(
 export function itemSig(it: PendingItem): string {
   if (it.type === "report_outline") return `report:${it.report_id ?? it.notebook_id ?? ""}`;
   if (it.type === "governance") return `gov:${it.notebook_id}:${it.subtype ?? ""}:${it.count ?? 0}`;
+  // 共享申请按组分组,签名带 count:待审批数变化 → 新签名 → 关掉过的项重新出现
+  // (诚实反映积压变化,与治理项同一手法)。它没有 notebook 维度。
+  if (it.type === "share_request") return `share_req:${it.group_id ?? ""}:${it.count ?? 0}`;
   if (it.type === "paper_meta") return `paper_meta:${it.notebook_id}:${it.state ?? ""}`;
   return `index:${it.notebook_id}:${it.state ?? ""}`;
 }

@@ -179,6 +179,15 @@ def test_group_and_grant_endpoints_have_a_domain_owner():
         "delete_notebook_grant_route": "app.api.group_routes",
         "list_group_shared_notebooks_route": "app.api.group_routes",
         "delete_group_shared_notebook_route": "app.api.group_routes",
+        # 成员贡献审批流(P2-T3)。三个 `/notebooks/{id}/share-requests...` 端点同样是
+        # URL 前缀在 notebook、策略归群组域(申请的双重条件、组管理员审批)——与授权边
+        # 两个端点同一条边界,一并登记在群组域,不能照 URL 搬进 notebook_routes。
+        "create_share_request_route": "app.api.group_routes",
+        "list_my_share_requests_route": "app.api.group_routes",
+        "delete_share_request_route": "app.api.group_routes",
+        "list_group_share_requests_route": "app.api.group_routes",
+        "approve_share_request_route": "app.api.group_routes",
+        "reject_share_request_route": "app.api.group_routes",
     }
     for endpoint, module in expected.items():
         assert modules[endpoint] == module, endpoint
