@@ -40,11 +40,29 @@ export type TransferResult = {
   status: TransferStatus;
 };
 
-/** 目标笔记本候选:排除源自身 + 排除只读(reader)库(只读没有写入权限,不能接收传输)。 */
+/**
+ * 目标笔记本候选:排除源自身 + 排除不能接收传输的库。
+ *
+ * `allowManaged`(群组知识共享 P2-T2 评审 P2-4)决定「组管理员可管理的共享库」算不算
+ * 合法目标——它取决于**这次传的是什么**,因为两条 transfer 的目标鉴权不同:
+ * - **knowhow 表** transfer 的目标走 `notebook_capability_allowed("knowhow:write")`
+ *   = **admin**,组管理员能接收 → knowhow-panel 传 `allowManaged=true`;
+ * - **Memory** transfer 的目标走 `user_can_access_notebook` = **owner-only**,组管理员
+ *   接收会 404 → memory-panel 传 `allowManaged=false`(默认),不把这些库列进候选,
+ *   免得给出一个提交必失败的目标。
+ * `can_manage_content` 只有在 `allowManaged` 时才放行(且仍要求它为真);否则一律按
+ * `access !== "reader"`(owner-only)的旧口径,逐字复现本参数出现之前的行为。
+ */
 export const destinationNotebooks = (
   all: readonly NotebookSummary[],
-  sourceId: string
-): NotebookSummary[] => all.filter((n) => n.id !== sourceId && n.access !== "reader");
+  sourceId: string,
+  allowManaged: boolean = false,
+): NotebookSummary[] =>
+  all.filter(
+    (n) =>
+      n.id !== sourceId &&
+      (n.access !== "reader" || (allowManaged && Boolean(n.can_manage_content))),
+  );
 
 /** POST /notebooks/{id}/knowhow/{table_id}/transfer 的请求体。字段名是 wire 契约,勿改。 */
 export const knowhowTransferBody = (targetNotebookId: string, mode: TransferMode) => ({

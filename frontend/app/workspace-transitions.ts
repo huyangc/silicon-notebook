@@ -159,6 +159,14 @@ export const NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING =
  * ⚠ 后端才是权威（`require_notebook_capability` / `notebook_capability_allowed`）。
  * 这里画多了按钮只会让用户点进一个必然 404 的动作，所以缺省一律取**收**的那一侧:
  * 参数省略 = false = 逐字复现本参数出现之前的行为（旧后端不发这个字段）。
+ *
+ * `canConfigureNotebook` 是**第三档、owner-only**（群组知识共享 P2-T2 评审 P0）:
+ * 挂载配置（参考库增删）与链接分享是 owner 对本库检索范围与对外处置的配置，后端挂
+ * `notebook:configure`（恒 owner），**不随内容管理权翻给组管理员**。它 = `!isReader`，
+ * 与 `canWriteNotebook`（含组管理员）刻意分开——组管理员能加来源/建图谱/写 knowhow，
+ * 但不能改挂载、不能铸/撤对外链接（否则会把库主从未共享的私有库挂进来经代理端点读
+ * 全文、或替库主铸链接让组外人整本 copy）。判据只看 `access`，与 `canManageContent`
+ * 无关。
  */
 export function workspaceCapabilities(
   access: string | undefined,
@@ -169,6 +177,10 @@ export function workspaceCapabilities(
   return {
     canWriteNotebook: canWrite,
     canGovernKnowledge: canWrite,
+    // owner 对本库检索范围（挂载配置）与对外处置（链接分享）的配置权，**恒 owner**。
+    // 组管理员有内容管理权（canWrite）但没有它——见函数头注释与 deps.py
+    // notebook:configure。
+    canConfigureNotebook: access !== "reader",
     // 深度报告对**只读成员也开放**（群组知识共享 P1）。它不是 `canWrite` 的一部分：
     // 报告按创建者行级隔离——成员只看得见、也只改得动**自己建的**那些，owner 也
     // 一样（不引入「owner 看全部」这条新披露）。所以列表里出现的每一份报告都是

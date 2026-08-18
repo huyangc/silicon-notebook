@@ -298,15 +298,23 @@ class NotebookSummaryQuery:
           「可管理」、详情说「只读」——同一本库两副面孔,正是上一段要防的东西。
 
         ⚠ 两条点查的**顺序被 P2-T2 掉了个个**:先 granted、后 joined。语义逐字不变
-        (`granted_via` 仍是成员行优先),但查询次数逐形态不变:
+        (`granted_via` 仍是成员行优先)。查询次数**不是**逐形态不变——两个形态各挪了
+        一次,是拿 `_grant_role` 必须付的代价(P2-T2 评审 P2-6 订正):
           * owner:+0(最常见的那条路,提前 return);
-          * 只读共享进来的:granted 点查为空 → `granted_via` 必然为空、
-            `can_manage_content` 必然为假,**成员行判不判都不改结果**,直接跳过 joined
-            那次点查 → 仍是 +1(与改前相同);
-          * 群组共享进来的:granted 非空,才需要 joined 点查决定要不要压掉
-            `granted_via` → +2(与改前相同)。
-        原来的顺序(先 joined 再 granted)拿不到交叉态的 `_grant_role`,而把 granted
-        无条件放在 joined 之后又会让只读共享那条路多付一次点查。
+          * 只读共享(有成员行、无授权边):granted 点查为空 → 直接 return,+1
+            (与改前相同——改前也是 joined 命中即 return);
+          * **everyone 只读**(公共库,既无成员行也无授权边):granted 点查为空 →
+            return,+1。**改前是 +2**(先 joined 落空、再 granted 落空),这里省了一次
+            (**−1**)——granted 先跑、一空就走,不再白问一次 joined;
+          * 群组共享(有授权边、无成员行):granted 非空 → 再 joined 一次(落空)→ +2
+            (与改前相同);
+          * **交叉态**(既有成员行、又有授权边):granted 非空 → joined 命中 → +2。
+            **改前是 +1**(先 joined 命中即 return,根本不查 granted),这里**多付一次
+            (+2)**——因为 `can_manage_content` 必须从 granted 行的 `_grant_role` 算,
+            而交叉态恰恰要在成员行压掉 `granted_via` **之前**先拿到那个 role,躲不开。
+        净效果是「everyone 只读 −1、交叉态 +1」的对调,不是零变化;交叉态那 +1 是硬成本
+        (拿不到 `_grant_role` 就没法给交叉态的组管理员画写入口),everyone 那 −1 是顺带
+        白赚的。原来的顺序(先 joined 再 granted)在交叉态上永远拿不到 `_grant_role`。
         """
         if not user_id:
             return

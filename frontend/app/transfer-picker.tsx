@@ -14,6 +14,7 @@ import { destinationNotebooks, type TransferMode } from "./transfer-model.ts";
 export function DestinationPicker({
   sourceNotebookId,
   allowMove,
+  allowManagedTargets = false,
   title,
   showExtractKg = false,
   extractKg = true,
@@ -23,6 +24,9 @@ export function DestinationPicker({
 }: {
   sourceNotebookId: string;
   allowMove: boolean;
+  // 组管理员可管理的共享库能否作为传输目标(P2-T2 评审 P2-4)。knowhow 传输目标是
+  // admin 档 → true;Memory 传输目标是 owner-only → false(默认)。见 destinationNotebooks。
+  allowManagedTargets?: boolean;
   title: string;
   // Important 4（复审）：spec §5.2.6/§9/§12 要求的「同时抽取到知识图谱」
   // opt-out——批量 move/copy 会对每条 confirmed memory 触发一次 LLM 抽取
@@ -63,12 +67,12 @@ export function DestinationPicker({
       signal: controller.signal,
       tag: "transfer-picker",
     })
-      .then((all: NotebookSummary[]) => setNotebooks(destinationNotebooks(all, sourceNotebookId)))
+      .then((all: NotebookSummary[]) => setNotebooks(destinationNotebooks(all, sourceNotebookId, allowManagedTargets)))
       .catch((err) => {
         if (err?.name !== "AbortError") setError("加载笔记本列表失败");
       });
     return () => controller.abort();
-  }, [sourceNotebookId]);
+  }, [sourceNotebookId, allowManagedTargets]);
 
   const submit = async () => {
     if (!target) {

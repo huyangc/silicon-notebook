@@ -861,8 +861,9 @@ def test_an_admin_grant_widens_management_but_never_deletion(tmp_path, monkeypat
 
     这条取代了 P1 的「授权边的 role 写成 admin 也一个字的写权都不给」:那句话在 P2
     之后**不再为真**,是刻意的边界放宽(裁决 P2-1),不是回归。翻的是 `notebook:manage`
-    那几格(改库信息 / 设 tier / 分享链接 / 看授权边清单);`DELETE /notebooks/{id}`
-    挂的是 `notebook:delete`,恒 owner,组管理员照旧 404。
+    那几格(改库信息 / 设 tier / 看授权边清单);`DELETE /notebooks/{id}` 挂
+    `notebook:delete`,`/share` 与 `/bases`、`/mountable` 挂 `notebook:configure`
+    (P2-T2 评审 P0),这三类恒 owner,组管理员照旧 404。
 
     ⚠ 「组管理员能删掉库主的整本笔记本」是本次改动最贵的失手形态,所以删库那一格
     **单独断言**而不是混在循环里——它失败时的信息必须直接说出这件事。
@@ -888,10 +889,11 @@ def test_an_admin_grant_widens_management_but_never_deletion(tmp_path, monkeypat
     )
 
     assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
+    # notebook:manage 那几格 —— 组管理员放行(不是 404)。/share **不在这里**:它已归
+    # notebook:configure(恒 owner),下面单独断言 404。
     for method, suffix, payload in (
         ("patch", "", {"name": "组管理员改的名"}),
         ("post", "/tier", {"tier": "personal"}),
-        ("post", "/share", None),
         ("get", "/grants", None),
     ):
         response = client.request(
@@ -901,6 +903,25 @@ def test_an_admin_grant_widens_management_but_never_deletion(tmp_path, monkeypat
             json=payload,
         )
         assert response.status_code != 404, (method, suffix, response.status_code, response.text)
+
+    # notebook:configure 那几格(挂载配置 + 链接分享)—— 组管理员一律 404(P2-T2 评审 P0)。
+    for method, suffix, payload in (
+        ("get", "/bases", None),
+        ("get", "/mountable", None),
+        ("put", "/bases", {"base_notebook_ids": []}),
+        ("get", "/share", None),
+        ("post", "/share", None),
+        ("delete", "/share", None),
+    ):
+        response = client.request(
+            method.upper(),
+            f"/api/notebooks/{notebook_id}{suffix}",
+            headers=member,
+            json=payload,
+        )
+        assert response.status_code == 404, (
+            "configure 端点漏给了组管理员(P0):", method, suffix, response.status_code,
+        )
 
     deleted = client.delete(f"/api/notebooks/{notebook_id}", headers=member)
     assert deleted.status_code == 404, (
@@ -1803,9 +1824,10 @@ def test_can_manage_content_survives_the_member_row_dedup(tmp_path, monkeypatch,
     detail = client.get(f"/api/notebooks/{notebook_id}", headers=deputy).json()
     assert detail["granted_via"] == []
     assert detail["can_manage_content"] is True
-    # 且它确实能用:管理档端点放行。
-    assert client.get(
-        f"/api/notebooks/{notebook_id}/mounted-by-count", headers=deputy
+    # 且它确实能用:内容管理档端点放行(改名 = notebook:manage)。⚠ 不用 mounted-by-count
+    # ——它是 notebook:configure(恒 owner),组管理员对它 404,拿它当「管理档」会测反。
+    assert client.patch(
+        f"/api/notebooks/{notebook_id}", json={"name": "probe"}, headers=deputy
     ).status_code == 200
 
 

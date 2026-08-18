@@ -18,9 +18,12 @@ export type KgBuildRequestOwner = {
 export function canContinueKgBuild(
   actionLabel: string | null,
   buildingKg: boolean,
-  isReader: boolean,
+  // 无写权即隐藏「继续分析」——page.tsx 传 `readOnlyWorkspace`(= !canWriteNotebook)。
+  // ⚠ P2-T2 起**不是** `isReader`:继续构建 KG 是内容写(kg:write=admin),组管理员
+  // 有权(readOnlyWorkspace 为 false),按 isReader 判会把他挡掉。
+  readOnly: boolean,
 ): boolean {
-  return Boolean(actionLabel) && !buildingKg && !isReader;
+  return Boolean(actionLabel) && !buildingKg && !readOnly;
 }
 
 export function ownsKgBuildRequest(

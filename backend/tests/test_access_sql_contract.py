@@ -141,6 +141,14 @@ def world(repo):
     everyone_nb = _mk_nb(repo, owner=owner)
     _mk_grant(repo, everyone_nb, "everyone", "")
 
+    # everyone + role='admin' 的库(P2-T2 评审 P2-1):这条边**发放口径根本写不出来**
+    # (GRANTABLE_PRINCIPAL_TYPES 只收群组主体),这里手插它是为了钉住谓词侧的深度
+    # 防御——管理级主体判定排除 everyone,所以即便这样一条边存在(比如正向 shadow
+    # 停车把某行的 role 暂写成 'admin'),它也**绝不**授予任何人管理权。读权那一半照旧
+    # 全员放行(everyone 是 viewer)。
+    everyone_admin_nb = _mk_nb(repo, owner=owner)
+    _mk_grant(repo, everyone_admin_nb, "everyone", "", role="admin")
+
     # 管理库(P2-T2):把「主体类型」与「边的 role」这**两根轴**拆开测。
     # 上面那本 `notebook` 里两者恰好同向(group→viewer、group_admins→admin),
     # 于是「组管理员可管理」既可能是主体判对了,也可能是把 group_admins 主体当成了
@@ -175,6 +183,7 @@ def world(repo):
         "admins": admins,
         "notebook": notebook,
         "everyone": everyone_nb,
+        "everyone_admin": everyone_admin_nb,
         "managed": admin_nb,
         "sentinel": sentinel_nb,
         "missing": MISSING_NOTEBOOK,
@@ -202,6 +211,12 @@ ACCESS_MATRIX = [
     ("owner", "everyone", True, True, True, True),
     ("stranger", "everyone", True, False, False, False),
     ("group_plain", "everyone", True, False, False, False),
+    # ↓ everyone + role='admin'(手插的非法边,P2-T2 评审 P2-1):读权照旧全员放行
+    #   (everyone 是 viewer),但**管理权对谁都是 False**——谓词侧排除 everyone,
+    #   即便这条边存在也不授予管理权。owner 仍按 owner 分支可管(与这条边无关)。
+    ("stranger", "everyone_admin", True, False, False, False),
+    ("group_plain", "everyone_admin", True, False, False, False),
+    ("owner", "everyone_admin", True, True, True, True),
     # ↓ 管理库:两根轴交叉,专拆「principal_type 与 role 谁决定管理权」。
     ("owner", "managed", True, True, True, True),
     # group 边发成 admin:整组人(含**普通**组成员)都可管理。
@@ -391,6 +406,47 @@ def test_parked_sentinel_admin_grant_matches_nobody(world):
     for key in ("stranger", "grantee", "group_member", "group_admin", "group_plain", "member"):
         assert repo.user_can_admin_notebook(sentinel, world[key]) is False, key
     assert repo.user_can_admin_notebook(sentinel, world["owner"]) is True
+
+
+def test_everyone_grant_never_confers_admin(world):
+    """`everyone` 主体**绝不**授予管理权,无论边的 role 写成什么(P2-T2 评审 P2-1)。
+
+    设计 §4 明文:everyone 只能 viewer。`world` 里 `everyone_admin` 那本库手插了一条
+    `(everyone,'',admin)` 边(发放口径根本写不出来,但正向 shadow 停车可能把某行 role
+    暂写成 'admin')。管理级主体判定排除 everyone,所以这条边对**任何人**都不授予管理
+    权;读权那一半照旧全员放行(everyone 是 viewer)。owner 仍按 owner 分支可管。
+    """
+    repo, nb = world["repo"], world["everyone_admin"]
+    for key in ("stranger", "grantee", "group_member", "group_admin", "group_plain", "member"):
+        assert repo.user_can_admin_notebook(nb, world[key]) is False, key
+        assert repo.user_can_read_notebook(nb, world[key]) is True, key  # everyone=viewer
+    assert repo.user_can_admin_notebook(nb, world["owner"]) is True  # owner 分支
+
+
+def test_admin_predicate_reuses_the_restricted_arms_and_excludes_everyone():
+    """结构守卫(P2-T2 评审 P2-2):管理级 SQL **逐字内含**受限三臂、且**不含** everyone。
+
+    行为矩阵证明的是「当前数据上答案对」,这条证明的是「谓词是怎么拼出来的」——管理级
+    复用读权的受限三臂(user/group/group_admins)而不是另抄一份,所以「管理权 ⊆ 读权」
+    构造性成立;手抄一份再丢一条臂的变异会让这条断言当场红,而它在行为矩阵里可能恰好
+    照不到(丢的那条臂在矩阵里没有对应主体时)。双后端各一份。
+    """
+    from app.repositories.postgres import access_sql as pg
+
+    for mod, ph in ((access_sql, "?"), (pg, "%s")):
+        restricted = mod._restricted_principal_arms("ng", ph, "ngm", "nga")
+        assert restricted in mod.NOTEBOOK_ADMIN_SQL, (
+            f"{mod.__name__}: 管理级 SQL 没有逐字复用受限三臂(疑似另抄了一份)"
+        )
+        # everyone 那条臂绝不出现在管理级里(它出现在读权里,是刻意的)。
+        assert "principal_type='everyone'" not in mod.NOTEBOOK_ADMIN_SQL, (
+            f"{mod.__name__}: 管理级 SQL 收下了 everyone(应只 viewer)"
+        )
+        assert "principal_type='everyone'" in mod.read_access_clause(), (
+            f"{mod.__name__}: 读权谓词丢了 everyone 臂(它必须留在读权里)"
+        )
+        # 受限三臂本身是读权四臂的逐字子串(管理权主体 ⊂ 读权主体)。
+        assert restricted in mod._principal_match_expr("ng", ph, "ngm", "nga")
 
 
 def test_admin_grant_role_literal_agrees_across_its_three_spellings():

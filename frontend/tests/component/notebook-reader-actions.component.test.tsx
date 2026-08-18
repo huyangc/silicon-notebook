@@ -148,21 +148,73 @@ test("同一本库、只差 can_manage_content:纯只读成员仍写「只读」
   expect(screen.getByText(/由组管理员管理/)).toBeInTheDocument();
 });
 
-test("卡片菜单:组管理员有「编辑信息」但**没有**「删除笔记本」", async () => {
-  const onEdit = vi.fn();
+test("卡片菜单:组管理员只有「由组管理员管理」——没有编辑/删除/退出", () => {
+  // ⚠ P2-T2 评审 P2-4 修正:卡片菜单的「编辑信息」打开的是那个 fused 编辑器
+  // (openNotebookEditor 连挂载配置一起拉,是 owner-only 的 notebook:configure),
+  // 给组管理员画出来点了会在 listMountable 上 404。所以卡片菜单对组管理员**不给**
+  // 编辑信息——他改名走工作区顶栏的行内输入框(见下一条),那条是 PATCH-only。
   render(
     <NotebookMenuActions
       notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
       onLeave={vi.fn()}
-      onEdit={onEdit}
+      onEdit={vi.fn()}
       onDelete={vi.fn()}
     />,
   );
 
-  await userEvent.setup().click(screen.getByRole("button", { name: "编辑信息" }));
-  expect(onEdit).toHaveBeenCalledOnce();
-  // `notebook:delete` 恒 owner(裁决 P2-1):画出来只会 404,而它是不可撤销的动作。
+  expect(screen.getByText("由组管理员管理")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "编辑信息" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "删除笔记本" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "退出共享" })).not.toBeInTheDocument();
-  expect(screen.getByText("由组管理员管理")).toBeInTheDocument();
+});
+
+// P2-T2 评审 P2-4:组管理员在顶栏改名(PATCH-only,notebook:manage),而不是走 fused
+// 编辑器。徽章按 can_manage_content 渲染成**可编辑输入框**,并保住身份标注。
+test("顶栏徽章:组管理员的标题是可编辑输入框,改名回调可用", async () => {
+  const onCommit = vi.fn();
+  const onChange = vi.fn();
+  render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+      rename={{
+        value: "封装工艺库",
+        saving: false,
+        onChange,
+        onCommit,
+        onReset: vi.fn(),
+      }}
+    />,
+  );
+
+  const input = screen.getByRole("textbox", { name: "笔记本名称" }) as HTMLInputElement;
+  expect(input.value).toBe("封装工艺库");
+  // 身份标注仍在(可编辑标题 + 「可管理·来自群组《X》」)。
+  expect(screen.getByText("可管理 · 来自群组《封装项目》")).toBeInTheDocument();
+  await userEvent.setup().type(input, "X");
+  expect(onChange).toHaveBeenCalled();
+  input.blur();
+  expect(onCommit).toHaveBeenCalledOnce();
+});
+
+// 纯只读成员即便传了 rename 也**不**渲染成可编辑(can_manage_content 为假)——
+// 门控是 can_manage_content,不是「有没有传 rename」。
+test("顶栏徽章:纯只读成员的标题不可编辑,即便传了 rename", () => {
+  render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: false })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+      rename={{
+        value: "封装工艺库",
+        saving: false,
+        onChange: vi.fn(),
+        onCommit: vi.fn(),
+        onReset: vi.fn(),
+      }}
+    />,
+  );
+  expect(screen.queryByRole("textbox", { name: "笔记本名称" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "封装工艺库" })).toBeInTheDocument();
 });

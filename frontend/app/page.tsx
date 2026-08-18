@@ -6035,6 +6035,14 @@ export default function Home() {
   // 莫名其妙多出一条链接。链接改由用户显式点「开启链接分享」时才发 POST。
   async function openShareModal() {
     if (!currentNotebook) return;
+    // 链接分享(GET/POST/DELETE /share)是 notebook:configure(**恒 owner**,P2-T2 评审
+    // P0)。组管理员只到「共享给群组」一节(授权边管理 = notebook:manage),不该也不能
+    // 读链接态——`getShareState` 对他会 404。所以非 owner 直接渲染空链接态(不发 GET),
+    // 弹窗里的链接分享区另由 canConfigureNotebook 收起,只留群组授权区(它自己拉 grants)。
+    if (!capabilities.canConfigureNotebook) {
+      setShareModal({ share_token: "", copyable: false, size: {} });
+      return;
+    }
     setShareBusy(true);
     try {
       setShareModal(await getShareState(currentNotebook.id));
@@ -6699,6 +6707,15 @@ export default function Home() {
                     notebook={currentNotebook}
                     leaveBusy={leaveBusy}
                     onLeave={() => { handleLeaveShared().catch(reportError); }}
+                    // 组管理员(can_manage_content)可在顶栏改名(PATCH-only,notebook:manage)。
+                    // 徽章按 can_manage_content 才渲染成可编辑;纯只读成员传了也只显示 h1。
+                    rename={{
+                      value: titleDraft,
+                      saving: titleSaveInFlight,
+                      onChange: setTitleDraft,
+                      onCommit: () => { saveInlineNotebookName().catch(reportError); },
+                      onReset: () => setTitleDraft(currentNotebook.name),
+                    }}
                   />
                 ) : (
                   <input
@@ -6773,16 +6790,20 @@ export default function Home() {
                   <Cpu size={17} />
                   <span>模型服务</span>
                 </button>
-                {/* 设置直接进入笔记本编辑器(去掉原先「设置弹窗 → 编辑当前笔记本」的二级跳转);
-                    只读访客拿不到 editor 数据(listMountable/listBases 是 owner-only,访客 404),
-                    故只读时退回一句只读说明,不打开编辑器。 */}
+                {/* 设置直接进入笔记本编辑器(去掉原先「设置弹窗 → 编辑当前笔记本」的二级跳转)。
+                    编辑器拉/写挂载配置(listMountable/listBases/setBases),这些是
+                    notebook:configure(**恒 owner**,P2-T2 评审 P0)——组管理员即便有内容管理
+                    权也 404。故门控用 canConfigureNotebook 而非 canWriteNotebook:非 owner
+                    (含组管理员)退回一句说明,不打开编辑器(打开就会在 listMountable 上 404)。 */}
                 <button className="workspace-nav-button" onClick={() => {
-                  if (capabilities.canWriteNotebook) {
+                  if (capabilities.canConfigureNotebook) {
                     openNotebookEditor(currentNotebook).catch(reportError);
                   } else {
                     setInfoModal({
                       title: "设置",
-                      message: "当前笔记本为只读；模型服务由系统统一管理。",
+                      message: capabilities.canWriteNotebook
+                        ? "参考库挂载与笔记本信息由库主配置；你可以管理来源与图谱内容。"
+                        : "当前笔记本为只读；模型服务由系统统一管理。",
                       actions: []
                     });
                   }
@@ -7644,11 +7665,17 @@ export default function Home() {
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>分享「{currentNotebook.name}」</h2>
-                <p>两种方式：发一条链接给具体的人，或者共享给一个群组（随成员进出自动生效与失效）。</p>
+                <p>{capabilities.canConfigureNotebook
+                  ? "两种方式：发一条链接给具体的人，或者共享给一个群组（随成员进出自动生效与失效）。"
+                  : "共享给一个群组（随成员进出自动生效与失效）。链接分享由库主管理。"}</p>
               </div>
               <button className="icon-button" onClick={() => setShareModal(null)} title="Close">×</button>
             </div>
             <div className="source-detail-body">
+              {/* 链接分享区只对 owner 渲染(notebook:configure,恒 owner,P2-T2 评审 P0):
+                  链接是库主对外处置,组管理员即便打开这个弹窗(为了下面的「共享给群组」)
+                  也看不到/动不了链接。组管理员的 openShareModal 甚至不发 GET /share。 */}
+              {capabilities.canConfigureNotebook && (<>
               <span className="section-title">链接分享</span>
               {shareModal.share_token ? (<>
                 <label>分享链接
@@ -7684,6 +7711,7 @@ export default function Home() {
                     {shareBusy ? "开启中…" : "开启链接分享"}
                   </button>
                 </div>
+              </>)}
               </>)}
               <NotebookGroupShare
                 notebookId={currentNotebook.id}

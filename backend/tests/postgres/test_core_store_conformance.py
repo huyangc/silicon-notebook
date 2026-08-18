@@ -567,6 +567,16 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
     )
     _pg_grant(core_stores, "gr-everyone", everyone_id, "everyone", "", owner.id)
 
+    # everyone + role='admin'(手插的非法边,P2-T2 评审 P2-1):管理级主体判定排除
+    # everyone,所以这条边对谁都不授予管理权;读权照旧全员放行。
+    everyone_admin_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Everyone admin grant"), owner.id
+    )
+    _pg_grant(
+        core_stores, "gr-everyone-admin", everyone_admin_id, "everyone", "", owner.id,
+        role="admin",
+    )
+
     # 管理库:把「主体类型」与「边的 role」两根轴交叉(与 SQLite 那份的 `managed` 同
     # 一形态)。`group` 边发成 admin → 整组人可管理;`group_admins` 边发成 viewer →
     # 组管理员可读不可管。按 principal_type 推断管理权的实现会把两格同时判反。
@@ -616,6 +626,10 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
         (owner.id, everyone_id, True, True, True, True),
         (stranger.id, everyone_id, True, False, False, False),
         (group_plain.id, everyone_id, True, False, False, False),
+        # everyone + admin:读权全放行,管理权对谁都是 False(排除 everyone)。
+        (stranger.id, everyone_admin_id, True, False, False, False),
+        (group_plain.id, everyone_admin_id, True, False, False, False),
+        (owner.id, everyone_admin_id, True, True, True, True),
         (owner.id, managed_id, True, True, True, True),
         (group_member.id, managed_id, True, True, False, False),   # group 边 + admin
         (group_admin.id, managed_id, True, False, False, False),   # group_admins + viewer

@@ -14139,7 +14139,7 @@
           "summary": "List Notebook Bases Route"
         },
         "put": {
-          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选 ∪ 当前已挂载的 id(含失效边),\n其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。可挂候选共四支:公共知识库、\n同 owner 的库、被挂库上有「全员可读」授权的库,以及本笔记本 owner 有受限读权\n(只读共享或点名/群组授权)且**本笔记本自身尚未被共享**的库。最后那道未共享门\n堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n写权限本身由 require_notebook_capability(\"notebook:manage\")(P0 阶段解析到\nowner-only,404 on denial)在依赖层挡;\n这里只做候选集校验,不重复手工判断写权限。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主、共享被撤销,\n或本笔记本自身被共享而关闭了借入边之后)永远不会出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
+          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选 ∪ 当前已挂载的 id(含失效边),\n其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。可挂候选共四支:公共知识库、\n同 owner 的库、被挂库上有「全员可读」授权的库,以及本笔记本 owner 有受限读权\n(只读共享或点名/群组授权)且**本笔记本自身尚未被共享**的库。最后那道未共享门\n堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n写权限本身由 require_notebook_capability(\"notebook:configure\")(**恒 owner**,\n404 on denial)在依赖层挡;这里只做候选集校验,不重复手工判断写权限。\n⚠ 挂载配置刻意**不随内容管理权翻给组管理员**(P2-T2 评审 P0):候选集\n(mountable_notebooks)按**被挂库 owner** `a.created_by` 解析,含「同 owner」支——\n组管理员若能改挂载,就能把库主从未共享的私有库挂进来经代理端点读全文。\n见 deps.py `_CAPABILITY_LEVELS` 上 notebook:configure 那条注释。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主、共享被撤销,\n或本笔记本自身被共享而关闭了借入边之后)永远不会出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
           "operationId": "set_notebook_bases_route_api_notebooks__notebook_id__bases_put",
           "parameters": [
             {
@@ -17485,7 +17485,7 @@
       },
       "/api/notebooks/{notebook_id}/mountable": {
         "get": {
-          "description": "可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪\n(本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。\n\n最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n\n响应模型是 `MountableNotebook` 而不是 `NotebookRef`:每个候选还带一个 `origin`\n(base / mine / shared),让挂载选择器能如实分组——群组共享放开之后,别人 owner\n的库也会出现在这份候选里,只按 `tier` 分组会把它们标成「我的笔记本」。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
+          "description": "可挂候选 = 公共知识库 ∪ 同 owner 的库 ∪ 有「全员可读」授权的库 ∪\n(本库 owner 有受限读权的库,且仅当本笔记本自身尚未被共享)。\n\n最后一支的未共享门堵的是转手再分享:借来的参考库不能随着本笔记本再被共享出去。\n\n⚠ 恒 owner(notebook:configure):候选按**被挂库 owner** `a.created_by` 解析,\n「同 owner」支会列出库主的**全部私有库**(含从未共享的)。组管理员若能调它,就拿到\n了库主全部私有库名的枚举——所以这条与 PUT bases 一起是 owner-only(P2-T2 评审 P0)。\n\n响应模型是 `MountableNotebook` 而不是 `NotebookRef`:每个候选还带一个 `origin`\n(base / mine / shared),让挂载选择器能如实分组——群组共享放开之后,别人 owner\n的库也会出现在这份候选里,只按 `tier` 分组会把它们标成「我的笔记本」。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
           "operationId": "mountable_notebooks_route_api_notebooks__notebook_id__mountable_get",
           "parameters": [
             {
@@ -17529,7 +17529,7 @@
       },
       "/api/notebooks/{notebook_id}/mounted-by-count": {
         "get": {
-          "description": "删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——\nON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。\n与 DELETE 端点用同一个 owner-only 依赖(不新开一套权限判断)。",
+          "description": "删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——\nON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。\n它只喂 owner-only 的删除确认流,自身语义是 owner-scoped,故归 notebook:configure\n(恒 owner)——与 DELETE 同为 owner-only,不随内容管理权翻给组管理员(P2-T2 评审)。\n计数本身不泄露库名/token,归 configure 是为了让这个「与 DELETE 同权」的旧承诺在\n翻格后仍然成立,而不是留在 notebook:manage 上被顺带翻成 admin。",
           "operationId": "mounted_by_count_route_api_notebooks__notebook_id__mounted_by_count_get",
           "parameters": [
             {
@@ -18823,6 +18823,7 @@
       },
       "/api/notebooks/{notebook_id}/share": {
         "delete": {
+          "description": "撤销分享链接。**恒 owner**(notebook:configure):撤销会连带**踢掉全部只读\n成员**(unshare_notebook 清 notebook_members),爆炸半径超出内容管理,不给组管理员。",
           "operationId": "unshare_notebook_route_api_notebooks__notebook_id__share_delete",
           "parameters": [
             {
@@ -18853,7 +18854,7 @@
           "summary": "Unshare Notebook Route"
         },
         "get": {
-          "description": "当前的分享链接状态。**只读**——打开分享弹窗不该铸出一条链接。\n\n与 POST 同路径同守卫,只是这一条没有副作用:没有 token 时返回空串且**不计算**\n规模统计。理由见 `ShareState` 的模型注释(「只想共享给群组」的用户不该因为打开\n了一次弹窗就被发一条分享链接)。",
+          "description": "当前的分享链接状态。**只读**——打开分享弹窗不该铸出一条链接。\n\n与 POST/DELETE 同为 owner-only(notebook:configure):它回传 `share_token`——一条\n只要拿到就能整本 copy/join 的持有型凭证。组管理员即便有内容管理权也不该读到它\n(会把库主对外处置的链接转手泄露出去,P2-T2 评审 P0)。「共享给群组」那一节的\n授权边管理走独立的 notebook:manage(GET/POST/DELETE /grants),前端因此对组管理员\n跳过这条 GET、只渲染群组授权区(见 page.tsx openShareModal)。\n\n没有 token 时返回空串且**不计算**规模统计。理由见 `ShareState` 的模型注释\n(「只想共享给群组」的用户不该因为打开了一次弹窗就被发一条分享链接)。",
           "operationId": "share_state_route_api_notebooks__notebook_id__share_get",
           "parameters": [
             {
@@ -18891,6 +18892,7 @@
           "summary": "Share State Route"
         },
         "post": {
+          "description": "铸/取回本库的公开分享链接。**恒 owner**(notebook:configure):链接是库主对外\n处置(拿到链接的任何登录用户可整本 copy 或只读 join),不随内容管理权转移\n——组管理员替库主铸链接、组外任意人整本 copy 正是 P2-T2 评审复现的 P0。",
           "operationId": "share_notebook_route_api_notebooks__notebook_id__share_post",
           "parameters": [
             {
