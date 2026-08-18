@@ -79,9 +79,11 @@ const APPROVED_MESSAGE_READS = Object.freeze({
 });
 const APPROVED_DIAGNOSTIC_READS = Object.freeze({
   "bundle-intake.ts|<module>.processMarkdownCandidate|diagnostic|error": {
-    count: 2,
-    reason: "InlineResult.error is md-bundle.ts's typed too-large payload ({bytes,limit,...}), "
-      + "not a caught exception; both reads (.bytes/.limit) feed inlineTooLargeMessage's fixed copy",
+    count: 3,
+    reason: "InlineResult.error is md-bundle.ts's typed too-large payload ({bytes,limit,images}), "
+      + "not a caught exception; .bytes/.limit feed inlineTooLargeMessage's fixed copy and "
+      + ".images is a per-image {src,path,encodedBytes} list rendered through "
+      + "inlineTooLargeImageLines' fixed copy — none of the three is diagnostic text",
   },
   "dev/logs/activity/ActivityDetail.tsx|<module>.AskDetailPane|diagnostic|error": {
     count: 1,

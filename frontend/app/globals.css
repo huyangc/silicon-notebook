@@ -6592,10 +6592,19 @@ button.chat-session-card {
 }
 
 /* 压缩包/文件夹图片配对回执：复用 .staged-skipped 的面板外观（同一「弹窗内持久
-   展示、不能只发即逝 toast」的精神），行区不设固定高度上限——每个 md 下面可能
-   跟着好几条配对明细，交给弹窗自身的滚动而不是再套一层内部滚动裁掉内容。 */
+   展示、不能只发即逝 toast」的精神）。行区比「已跳过」放宽（每个 md 下面可能跟着
+   好几条配对明细），但**必须有限**并在内部滚动：一个含几十份 md、每份十几条明细的
+   压缩包会把面板撑成上千像素，把吸底的上传按钮顶出视口——那正是 codex #487 R1 P1
+   「上传按钮永远不为回执让路」裁决要防的形态（`max-height: none` 等于把那条裁决
+   在这块面板上作废）。overflow-y 继承自 .staged-skipped-rows。 */
 .bundle-receipt-rows {
-  max-height: none;
+  max-height: 240px;
+}
+
+/* 回执行上的补充说明（未加入待上传列表 / 超限时最大的几张图片）：与配对明细
+   同一份列表，但用警示色区分——它说的是「这一份没进列表」，不是配对细节。 */
+.bundle-receipt-note {
+  color: var(--danger, #c0392b);
 }
 
 .bundle-receipt-row {

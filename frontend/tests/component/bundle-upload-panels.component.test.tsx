@@ -120,6 +120,42 @@ describe("BundleReceiptsPanel", () => {
     expect(screen.getByText(/「e\.png」无图注，上传后无法被检索/)).toBeInTheDocument();
   });
 
+  test("未入列的 md 带「未加入待上传列表」标注，不伪装成一次成功的配对", () => {
+    const receipts: BundleReceiptEntry[] = [
+      {
+        key: "a",
+        bundleLabel: "export.zip",
+        fileName: "huge.md",
+        receipt: {
+          inlined: [{ src: "a.png", path: "a.png", mime: "image/png", bytes: 10, encodedBytes: 20, alt: "图 A", line: 0 }],
+          missing: [],
+          unsupported: [],
+          remote: [],
+          noAlt: [],
+        },
+        notes: [
+          "未加入待上传列表：内联图片后体积约 62.0 MB，超过单文件上限（50 MB）",
+          "体积最大的图片：imgs/big.png（约 40.0 MB）",
+        ],
+      },
+    ];
+    render(<BundleReceiptsPanel receipts={receipts} onDismiss={() => undefined} />);
+
+    // 概览行仍如实说「1 张已内联」——图确实配上了，只是整份没进列表；那句标注
+    // 才是区分这两件事的唯一线索，缺了它这条回执读起来就是一次成功。
+    expect(screen.getByText(/1 张已内联/)).toBeInTheDocument();
+    expect(screen.getByText(/未加入待上传列表：内联图片后体积约 62\.0 MB/)).toBeInTheDocument();
+    expect(screen.getByText(/体积最大的图片：imgs\/big\.png（约 40\.0 MB）/)).toBeInTheDocument();
+  });
+
+  test("没有 notes 也没有配对明细时不渲染空的明细列表", () => {
+    const receipts: BundleReceiptEntry[] = [
+      { key: "a", bundleLabel: "x.zip", fileName: "one.md", receipt: emptyReceipt() },
+    ];
+    const { container } = render(<BundleReceiptsPanel receipts={receipts} onDismiss={() => undefined} />);
+    expect(container.querySelector(".bundle-receipt-list")).toBeNull();
+  });
+
   test("多个 md 各自一段，互不混淆；点击「知道了」触发关闭回调", async () => {
     const user = userEvent.setup();
     const onDismiss = vi.fn();
