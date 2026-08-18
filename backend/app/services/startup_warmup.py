@@ -257,6 +257,26 @@ def _fail_lifecycle(lease: object, exc: BaseException) -> None:
     logger.error("startup FAILED — service stays not-ready: %s", safe_error)
 
 
+def _sweep_agent_profile_chains(repo: object) -> None:
+    """Settle understanding-consolidation rows stranded by a previous process.
+
+    ``getattr``-shaped like the relation-completion resume below it: a runtime
+    that does not compose the service (a narrow test double) is not an error,
+    and startup must never fail on crash-recovery hygiene.
+    """
+    service = getattr(getattr(repo, "_runtime", None), "agent_profile_jobs", None)
+    sweep = getattr(service, "sweep_on_start", None)
+    if not callable(sweep):
+        return
+    try:
+        swept = int(sweep() or 0)
+    except Exception:
+        logger.exception("startup: agent profile chain sweep failed")
+        return
+    if swept:
+        logger.info("startup: settled %d stranded understanding chain(s)", swept)
+
+
 def run_startup(lease: object | None) -> object | None:
     """Construct the repository, recover interrupted work, warm caches, and
     then mark the service ready. Any exception is captured into readiness and
@@ -285,6 +305,15 @@ def run_startup(lease: object | None) -> object | None:
         # in-progress state by the previous process. Offline CLIs must not make
         # this claim while a live backend may still own those jobs.
         repo._recover_interrupted_jobs()
+        # Agentic Memory P1 (T4): the same claim, for the same reason, for the
+        # understanding-consolidation chains. It is NOT part of
+        # ``_recover_interrupted_jobs`` because that one is a per-backend SQL
+        # script while this sweep is a backend-neutral store method — but it
+        # has to run in the same place and only here: rows left ``running`` by
+        # a previous process hold their notebook's chain forever otherwise, and
+        # an offline CLI has no right to make the "nothing else owns these
+        # rows" claim while a live backend may.
+        _sweep_agent_profile_chains(repo)
         if not _bind_repository_and_begin_warmup(lease, repo):
             # Defensive only: a valid lease cannot be detached during startup.
             # If that invariant is ever broken, do not leak the just-created

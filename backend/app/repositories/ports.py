@@ -3465,6 +3465,18 @@ AGENT_PROFILE_JOB_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 #: backend the deployment runs, and neither copy is greppable from the UI side.
 AGENT_PROFILE_RESTART_FAILURE_MESSAGE = "服务重启，整理未完成"
 
+#: The consolidation job's own terminal ``failure_reason`` wordings (T4). ⚠ ALL
+#: USER-FACING: they reach the screen through the same job-status field as the
+#: sweep message above, so they live here as named constants for the same
+#: reason — one greppable home per sentence, never a literal buried in a
+#: service branch. Wording is deliberately about the ACTION the user asked for
+#: ("整理"), never about the internal chain, workload or model plumbing.
+AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE = "模型未配置，无法整理"
+AGENT_PROFILE_MALFORMED_MESSAGE = "整理结果不可用，已保留原有理解"
+AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE = "整理时出错，请稍后重试"
+AGENT_PROFILE_INTERRUPTED_MESSAGE = "服务中断，整理未完成"
+AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE = "整理任务未能启动，请稍后重试"
+
 
 def append_profile_history(
     history: list,

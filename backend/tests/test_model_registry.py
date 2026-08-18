@@ -38,6 +38,7 @@ _EXPECTED_WORKLOADS = {
     "knowhow_optimize": ("chat", "interactive", "经验表述优化"),
     "knowhow_reformat": ("chat", "interactive", "经验格式整理"),
     "knowhow_complete": ("chat", "interactive", "经验空列补全"),
+    "agent_profile_consolidate": ("chat", "background", "库理解整理"),
     "retrieval_query_embedding": ("embedding", "interactive", "检索查询向量"),
     "source_element_embedding": ("embedding", "background", "来源元素向量"),
     "chunk_embedding": ("embedding", "background", "来源分块向量"),
