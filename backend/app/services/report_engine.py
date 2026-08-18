@@ -2456,6 +2456,7 @@ class ReportEngine:
                 gate.slot(cancel_event=self.cancel_event, on_wait=_queued)
                 if gate is not None else nullcontext()
             )
+            report_done = False
             with slot:
                 reports.update_report(notebook_id, rid, status="generating",
                                       progress=f"章节 0/{len(outline)} 完成")
@@ -2491,13 +2492,21 @@ class ReportEngine:
                     content_md=content_md, gaps=gaps,
                     references=references, status="done", progress="完成",
                 )
-                # Agentic Memory P1 (T5):报告完成是覆盖层链路的第二个触发点,
-                # 且**直接达阈**(设计 §5.3:一份报告是天然的高信息量结束点——
-                # 确认过的意图、审阅过的大纲、跨多节的完整检索,全部出自同一个
-                # 人在同一个库里)。挂在 ``status="done"`` 那次写之后,只有这一
-                # 条路;失败/取消的报告说明不了这个人怎么检索。fail-open 在服务
-                # 内,这里再包一层是因为它落在会把异常判成「生成失败」的 except
-                # 里——报告已经落库完成,不能因为排不上一个后台整理而被改判。
+                report_done = True
+            # Agentic Memory P1 (T5, repair round):报告完成是覆盖层链路的
+            # 第二个触发点,且**直接达阈**(设计 §5.3:一份报告是天然的高信息
+            # 量结束点——确认过的意图、审阅过的大纲、跨多节的完整检索,全部
+            # 出自同一个人在同一个库里)。挂在 ``status="done"`` 那次写之后,
+            # 只有这一条路;失败/取消的报告说明不了这个人怎么检索。
+            #
+            # 刻意挪到 ``with slot:`` **之外**:这只是「报告已经完成」之后的
+            # 记账,不是生成本身的一部分,继续占着这本笔记本的生成准入闸位
+            # 等它跑完,会让排在后面的下一份报告多等一次写而拿不到任何好处
+            # ——报告行此刻已经落成终态,槽位释放的时刻不改变落库的任何内容,
+            # 只改变下一份排队报告等多久开始。fail-open 在服务内,这里再包
+            # 一层是因为它落在会把异常判成「生成失败」的 except 里——报告
+            # 已经落库完成,不能因为排不上一个后台整理而被改判。
+            if report_done:
                 self._note_report_completed(notebook_id)
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
@@ -2506,12 +2515,20 @@ class ReportEngine:
                                   error=str(exc)[:500], progress="失败")
 
     def _note_report_completed(self, notebook_id: str) -> None:
-        """Signal the report author's own overlay chain — fail-open, always.
+        """Signal the overlay chain of the member who triggered THIS
+        generation run — fail-open, always.
 
-        ``self.user_id`` is the report's creator, taken explicitly and never
-        from the request ContextVar: reports run on a background thread where
+        ``self.user_id`` is that member (see the constructor's own comment:
+        "发起者身份"), explicitly passed in and never read from the request
+        ContextVar — reports run on a background thread where
         ``current_user()`` falls back to the seeded admin, and that fallback
         would consolidate someone else's private notes from this report.
+        This is deliberately NOT necessarily "the report's creator": in a
+        shared notebook any writable member can (re)trigger generation of a
+        report someone else created (e.g. retrying from a confirmed outline
+        after the original author left), and the overlay must credit whoever
+        actually ran and watched THIS retrieval, not the row's historical
+        owner.
         """
         service = self.dependencies.agent_profile_jobs
         if service is None or not self.user_id:

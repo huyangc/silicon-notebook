@@ -370,9 +370,16 @@ class AskStateStore:
         Bounded twice and independently: ``job_limit`` most-recent asks, and
         ``step_limit`` trace rows across all of them. One exhaustive reasoning
         ask can carry a hundred steps, so "N asks" alone is not a bound.
-        ``ORDER BY t.job_id, t.seq`` before the row cap makes the truncation
-        deterministic (whole leading asks, in their own step order) rather
-        than an arbitrary slice of whatever the planner emitted first.
+        ``ORDER BY j.created_at DESC, j.id DESC, t.seq ASC`` before the row cap
+        makes the truncation deterministic AND biased the right way: it groups
+        every job's steps together (major key is the job's own recency, not
+        ``t.job_id`` — a job id is an opaque string with no relationship to
+        when the job ran, so sorting by it directly discarded steps from
+        whichever job happened to sort last lexicographically, not the oldest
+        one), newest job first, each job's own steps still in ``seq`` order.
+        When the 600-row ceiling bites, what falls off the LIMIT is therefore
+        the OLDEST job's tail steps — never a step belonging to the ask the
+        member just finished.
         """
         job_limit = max(1, int(job_limit))
         step_limit = max(1, int(step_limit))
@@ -397,7 +404,7 @@ class AskStateStore:
                 "SELECT t.job_id AS job_id, t.step_json AS step_json "
                 "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
                 f"WHERE j.notebook_id = ? AND j.created_by = ? AND t.job_id IN ({placeholders}) "
-                "ORDER BY t.job_id ASC, t.seq ASC LIMIT ?",
+                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
                 (notebook_id, user_id, *by_job.keys(), step_limit),
             ).fetchall()
         for row in step_rows:

@@ -211,13 +211,19 @@ class AskExecutionCoordinator:
                     job_id=job_id, on_trace=on_trace, cancel_event=cancel_event,
                 )
                 self._finish(job_id, "done", answer_id=response.answer_id)
-                # Agentic Memory P1 (T5): AFTER the terminal job row, never
-                # inside ``_finish`` — that sequence is frozen, and this is not
-                # part of it. Only the ``done`` path signals: a cancelled or
+                events.put({"event": "final", "response": response.model_dump()})
+                # Agentic Memory P1 (T5, repair round): AFTER the terminal job
+                # row AND after the "final" event is queued for the browser —
+                # never inside ``_finish`` (frozen sequence) and never ahead
+                # of the event the browser is waiting on. This call is
+                # fail-open on its own (see its docstring), so moving it past
+                # ``events.put`` cannot turn a delivered answer into a
+                # reported failure; it only stops an overlay notification
+                # from ever being able to delay or precede the terminal
+                # event. Only the ``done`` path signals: a cancelled or
                 # failed ask says nothing about how this person searches, and
                 # counting it would let a broken provider drive the threshold.
                 self._note_ask_completed(notebook_id, user_id)
-                events.put({"event": "final", "response": response.model_dump()})
             except AskCancelled:
                 self._finish(job_id, "cancelled")
                 events.put({"event": "cancelled"})

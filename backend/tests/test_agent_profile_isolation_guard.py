@@ -51,6 +51,7 @@ import pytest
 
 import app.repositories
 import app.services
+from app.repositories.ports import AskStateStorePort
 
 
 _SERVICE_PATH = Path(app.services.__file__).parent / "agent_profile_job.py"
@@ -164,9 +165,14 @@ NEUTRAL_ALLOWED_PORT_CALLS = frozenset({
 })
 
 #: 层二检查的四个座位。`ask_state` 是 T5 新增的,登记它的**主要作用是让底座报红**:
-#: 底座函数一旦写出 `self.ask_state.<任何方法>`,它必然不在 `ALLOWED_PORT_CALLS`
-#: 里。`self.database` 刻意不在其中:它上面只调 `connect()`,拿到的连接**只**转交给
-#: 端口方法(见本文件 docstring 的「挡不住」一节)。
+#: 底座函数一旦写出 `self.ask_state.<任何方法>`,它今天必然不在 `ALLOWED_PORT_CALLS`
+#: 里——但这不是这份守卫自身的性质,而是一个**外部前提**:`ALLOWED_PORT_CALLS`
+#: (底座的层二白名单)与 `AskStateStorePort` 的方法名集合当前恰好不相交。这个前提
+#: 本身不是恒真的(明天两边各自演化,谁都不保证永远不撞名字),所以
+#: `test_the_base_allowlist_never_collides_with_ask_state_port_methods` 把它单独钉成
+#: 一条断言——前提本身也需要一份守卫,而不是被这句注释当成理所当然。`self.database`
+#: 刻意不在这四个座位之中:它上面只调 `connect()`,拿到的连接**只**转交给端口方法
+#: (见本文件 docstring 的「挡不住」一节)。
 PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state")
 
 #: 层三:必须自带 user 谓词的 store 方法(两个后端各一份实现)。
@@ -373,6 +379,39 @@ def test_the_two_chains_never_share_a_port_allowlist_entry_that_reads_usage():
             "全体成员可见,它读到任何人的提问轨迹都等于把那个人的使用情况公开。"
         )
     assert "ask_state" not in " ".join(sorted(ALLOWED_PORT_CALLS))
+
+
+def test_the_base_allowlist_never_collides_with_ask_state_port_methods():
+    """自检(T5 修复轮):给 `PORT_ATTRIBUTES` 那条注释的承诺补一份守卫。
+
+    那条注释说「底座函数一旦写出 ``self.ask_state.<任何方法>``,它必然不在
+    ``ALLOWED_PORT_CALLS`` 里」——这句话之所以成立,唯一原因是
+    ``ALLOWED_PORT_CALLS``(底座的层二白名单)与 ``AskStateStorePort`` 的方法名
+    集合**当前恰好不相交**。这不是一个自动成立的性质:明天 `AskStateStorePort`
+    新增一个方法,名字恰好撞上 `ALLOWED_PORT_CALLS` 里已经登记的某个 notebook 级
+    聚合方法名(比如两边都叫 ``read_blocks`` 这类巧合),那句注释描述的「必然」
+    就悄悄不成立了——底座函数写 ``self.ask_state.read_blocks(...)`` 会被层二
+    误判成在调用块本身的 `read_blocks`(实际上那是完全不同的、会读某个用户轨迹
+    的方法),从而放行一条本该报红的调用。introspect `AskStateStorePort` 的
+    公开方法名集合,直接钉住这个交集恒为空。
+    """
+    ask_state_methods = {
+        name
+        for name, value in vars(AskStateStorePort).items()
+        if callable(value) and not name.startswith("_")
+    }
+    collisions = sorted(ask_state_methods & ALLOWED_PORT_CALLS)
+    assert collisions == [], (
+        f"`AskStateStorePort` 与底座的 `ALLOWED_PORT_CALLS` 出现同名方法:"
+        f"{collisions}。`PORT_ATTRIBUTES` 那条注释的『必然不在白名单里』前提已经"
+        "不成立——底座函数写 `self.ask_state.<这个名字>` 会被层二误判成在调用"
+        "无害的 notebook 级聚合方法。请把冲突的名字之一改名,或者重新评估这条"
+        "隔离判据是否还站得住。"
+    )
+    assert ask_state_methods, (
+        "AskStateStorePort 的公开方法名一个都没读到——这条断言本身可能被 introspect"
+        "写坏了,恒真地绿。"
+    )
 
 
 def test_the_overlay_chain_actually_reads_the_member_trace():

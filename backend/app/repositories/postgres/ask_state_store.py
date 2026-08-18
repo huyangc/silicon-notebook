@@ -338,6 +338,11 @@ class AskStateStore:
           hands it a ``jsonb``-decoded dict where SQLite hands it TEXT, which
           is exactly the kind of difference a per-backend copy would resolve
           differently over time.
+        * ``ORDER BY j.created_at DESC, j.id DESC, t.seq ASC`` before the
+          ``step_limit`` cap — same fix as the SQLite side: the major sort key
+          must be the job's own recency, not ``t.job_id`` (an opaque id with
+          no relationship to when the job ran), or truncation drops whichever
+          job's steps sort last lexicographically instead of the oldest one.
         """
         job_limit = max(1, int(job_limit))
         step_limit = max(1, int(step_limit))
@@ -365,7 +370,7 @@ class AskStateStore:
                 "SELECT t.job_id AS job_id, t.step_json AS step_json "
                 "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
                 f"WHERE j.notebook_id = %s AND j.created_by = %s AND t.job_id IN ({placeholders}) "
-                "ORDER BY t.job_id ASC, t.seq ASC LIMIT %s",
+                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT %s",
                 (notebook_id, user_id, *by_job.keys(), step_limit),
             ).fetchall()
         for row in step_rows:

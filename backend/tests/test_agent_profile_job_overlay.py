@@ -359,6 +359,13 @@ def test_the_read_is_bounded_by_both_asks_and_trace_rows(harness):
     # Newest first, and the step cap bites across asks rather than per ask.
     assert [row["question"] for row in rows] == ["问题4", "问题3"]
     assert sum(len(row["steps"]) for row in rows) == 3
+    # T5 repair round (双评审): the 3-row cap must fall off the OLDEST job's
+    # tail, not whichever job's id happens to sort last lexicographically.
+    # "问题4" (newest) keeps all 3 of the steps the cap allows; "问题3"
+    # (older) is truncated to nothing. Ordering by ``t.job_id ASC`` instead
+    # of ``j.created_at DESC`` would have handed "问题3" (id "job-3" <
+    # "job-4") the steps and starved the ask the member just finished.
+    assert [len(row["steps"]) for row in rows] == [3, 0]
 
 
 def test_the_projection_drops_everything_but_type_summary_duration_and_count(harness):
@@ -475,6 +482,9 @@ def test_removing_a_member_discards_their_overlay_and_leaves_the_base(harness):
         NOTEBOOK_ID, BASE_CHAIN_OWNER, "corpus_shape", value="共享底座",
         evidence=[], expected_revision=0, origin="job", actor="",
     )
+    # B also has a job/status row — the part of the overlay ``clear_all``
+    # alone (block rows only) does NOT reach.
+    profiles.bump_signal(NOTEBOOK_ID, USER_B, delta=2)
     removed: list[tuple] = []
     sharing = NotebookSharingService(
         store=SimpleNamespace(
@@ -490,12 +500,45 @@ def test_removing_a_member_discards_their_overlay_and_leaves_the_base(harness):
     assert _blocks(harness, USER_B) == {}
     assert "retrieval_notes" in _blocks(harness, USER_A)      # untouched
     assert "corpus_shape" in _blocks(harness, BASE_CHAIN_OWNER)
+    # T5 repair round: the job row (and its pending_signal counter) is gone
+    # too, not just the blocks.
+    assert profiles.job_row(NOTEBOOK_ID, USER_B) is None
+
+
+def test_a_removed_and_rejoined_member_starts_their_counter_at_zero(harness):
+    """T5 repair round: rejoining is a blank slate for BOTH halves of the
+    overlay. Without clearing the job row, a member removed mid-batch and
+    re-added would come back with a ``pending_signal`` already partway to the
+    next consolidation run — counting activity from before they even had
+    access again."""
+    profiles = harness["profiles"]
+    profiles.bump_signal(NOTEBOOK_ID, USER_B, delta=2)
+    assert profiles.job_row(NOTEBOOK_ID, USER_B)["pending_signal"] == 2
+    sharing = NotebookSharingService(
+        store=SimpleNamespace(
+            remove_member=lambda nb, uid: None,
+            add_member=lambda nb, uid: None,
+        ),
+        copies=None, catalog=None, summaries=None, database=harness["database"],
+        copy_stats=lambda _nb: {}, profiles=profiles,
+    )
+
+    sharing.remove_member(NOTEBOOK_ID, USER_B)
+    assert profiles.job_row(NOTEBOOK_ID, USER_B) is None
+    sharing.add_member(NOTEBOOK_ID, USER_B)
+    # Re-added: no row exists until this member's activity bumps one again,
+    # and when it does, it starts from zero — not from where it left off.
+    assert profiles.job_row(NOTEBOOK_ID, USER_B) is None
+    assert profiles.bump_signal(NOTEBOOK_ID, USER_B, delta=1) == 1
 
 
 def test_a_failing_overlay_cleanup_never_blocks_the_access_change():
     """Membership first, cleanup second: an access change must not depend on a
-    cleanup succeeding, and the read-side gate already covers leftover rows."""
+    cleanup succeeding, and the read-side gate already covers leftover rows.
+    Both halves of the cleanup (blocks AND the job row) are independently
+    fail-open — one raising must not stop the other or the access change."""
     removed: list[tuple] = []
+    cleared: list[str] = []
     sharing = NotebookSharingService(
         store=SimpleNamespace(
             remove_member=lambda nb, uid: removed.append((nb, uid))
@@ -503,13 +546,40 @@ def test_a_failing_overlay_cleanup_never_blocks_the_access_change():
         copies=None, catalog=None, summaries=None, database=None,
         copy_stats=lambda _nb: {},
         profiles=SimpleNamespace(
-            clear_all=lambda _nb, _uid: (_ for _ in ()).throw(RuntimeError("db down"))
+            clear_all=lambda _nb, _uid: (_ for _ in ()).throw(RuntimeError("db down")),
+            clear_job_row=lambda nb, uid: cleared.append((nb, uid)),
         ),
     )
 
     sharing.remove_member(NOTEBOOK_ID, USER_B)
 
     assert removed == [(NOTEBOOK_ID, USER_B)]
+    # The job-row clear still ran despite the block-row clear raising.
+    assert cleared == [(NOTEBOOK_ID, USER_B)]
+
+
+def test_a_failing_job_row_cleanup_never_blocks_the_access_change():
+    """The reverse of the previous test: ``clear_job_row`` raising must not
+    stop membership removal either, and must not prevent ``clear_all`` from
+    having already run."""
+    removed: list[tuple] = []
+    cleared: list[str] = []
+    sharing = NotebookSharingService(
+        store=SimpleNamespace(
+            remove_member=lambda nb, uid: removed.append((nb, uid))
+        ),
+        copies=None, catalog=None, summaries=None, database=None,
+        copy_stats=lambda _nb: {},
+        profiles=SimpleNamespace(
+            clear_all=lambda nb, uid: cleared.append((nb, uid)),
+            clear_job_row=lambda _nb, _uid: (_ for _ in ()).throw(RuntimeError("db down")),
+        ),
+    )
+
+    sharing.remove_member(NOTEBOOK_ID, USER_B)
+
+    assert removed == [(NOTEBOOK_ID, USER_B)]
+    assert cleared == [(NOTEBOOK_ID, USER_B)]
 
 
 # =====================================================================
@@ -565,6 +635,38 @@ def test_usage_gaps_evidence_is_the_server_s_own_zero_hit_count(harness, monkeyp
     ]
     # retrieval_notes is about how searching went; no document is its source.
     assert blocks["retrieval_notes"]["evidence"] == []
+
+
+def test_zero_hit_counting_matches_real_trace_step_shapes(harness, monkeypatch):
+    """Step-detail fixtures here are the ACTUAL shapes ``reasoning_retrieval.py``
+    emits, not a simplified ``{"count": n}`` stand-in — the T5 repair round
+    found ``_TRACE_COUNT_KEYS``/``_ZERO_HIT_STEP_TYPES`` had drifted from the
+    real emitters (missing ``found``/``returned_total`` entirely, and reading
+    ``retrieve``'s follow-up ``"new"`` key as though it meant zero hits).
+
+    - ``exact_lookup`` with ``{"found": 0, ...}`` (the "按名称精确查找" record
+      site) is a genuine empty search and MUST count.
+    - ``retrieve`` with ``{"query": ..., "new": 0}`` (the "补充子查询"/
+      "补充已确认方向" record sites) means "nothing NEW beyond what this run
+      already had", not "found nothing", and MUST NOT count.
+    """
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "exact_lookup", "summary": "按名称精确查找:新增 0 段原文",
+         "detail": {"terms": ["set_db"], "found": 0, "phase": "seed"}},
+        {"step_type": "retrieve", "summary": "补充子查询: 已有候选",
+         "detail": {"query": "已有候选", "new": 0}},
+    ))
+    service = _service(harness, client=_Client(_reply(
+        retrieval_notes="n", usage_gaps="g",
+    )))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    blocks = _blocks(harness, USER_A)
+    assert blocks["usage_gaps"]["evidence"] == [
+        {"claim_index": 0, "zero_hit_queries": 1}
+    ]
 
 
 def test_an_empty_sample_settles_done_without_paying_for_a_call(harness, monkeypatch):
@@ -837,9 +939,32 @@ def _response() -> AskResponse:
                        related_knowledge=[], citations=[], llm_mode="x")
 
 
-def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row():
+def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row(
+    monkeypatch,
+):
+    """T5 repair round (双评审): the note must fire AFTER the terminal job row
+    AND after the ``final`` event is queued for the browser — never before
+    the answer has actually been delivered. A three-element sequence rather
+    than the previous two: ``_note_ask_completed`` used to run before
+    ``events.put({"event": "final", ...})``, which meant a slow or
+    exception-prone overlay notification could delay (or, if it somehow
+    raised past its own fail-open guard, corrupt) the terminal event the
+    browser is waiting on. Pinning ``queue.Queue.put`` lets this test see the
+    real ordering without inspecting engine internals.
+    """
+    import app.services.ask_execution as ask_execution_module
+
     calls: list = []
     noted: list = []
+
+    class _RecordingQueue(queue.Queue):
+        def put(self, item, *args, **kwargs):
+            if isinstance(item, dict) and item.get("event") == "final":
+                calls.append(("put_final",))
+            return super().put(item, *args, **kwargs)
+
+    monkeypatch.setattr(ask_execution_module.queue, "Queue", _RecordingQueue)
+
     coordinator = _ask_coordinator(
         calls, runner=_response,
         noted=lambda nb, uid: noted.append(("note", nb, uid)) or calls.append(("note",)),
@@ -851,8 +976,10 @@ def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row():
     ))
 
     assert noted == [("note", "nb-t5", USER_A)]
-    # AFTER the terminal job row, never inside ``_finish`` (frozen sequence).
-    assert calls == [("finish", "done"), ("note",)]
+    # finish the durable job → queue the "final" event → THEN signal the
+    # overlay chain. Neither "note" nor "put_final" may lead "finish", and
+    # "note" specifically must trail "put_final" (not just "finish").
+    assert calls == [("finish", "done"), ("put_final",), ("note",)]
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("engine down")])

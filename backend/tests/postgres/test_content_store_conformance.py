@@ -559,6 +559,46 @@ def test_recent_user_ask_traces_scopes_to_the_reading_member(content_harness):
     ) == []
 
 
+def test_recent_user_ask_traces_step_cap_drops_the_oldest_job_first(content_harness):
+    """Agentic Memory P1 (T5 repair round): the ``step_limit`` cap must bite on
+    the OLDEST included job's tail, not on whichever job's opaque id happens to
+    sort last lexicographically. Two jobs, four steps each, ``step_limit=3``:
+    the newer job must keep all 3 of the steps the cap allows, and the older
+    job must be truncated to zero — the reverse of what ``ORDER BY t.job_id
+    ASC`` would have produced.
+    """
+    older, _conv = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="older?"), "reasoning", "user-content"
+    )
+    newer, _conv2 = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="newer?"), "reasoning", "user-content"
+    )
+    with content_harness.database.write() as db:
+        db.execute(
+            "UPDATE ask_jobs SET created_at=%s WHERE id=%s",
+            ("2026-08-10T00:00:00+00:00", older),
+        )
+        db.execute(
+            "UPDATE ask_jobs SET created_at=%s WHERE id=%s",
+            ("2026-08-11T00:00:00+00:00", newer),
+        )
+    for job_id, label in ((older, "older"), (newer, "newer")):
+        for n in range(4):
+            content_harness.ask.append_trace(
+                "nb-content", job_id,
+                {"step_type": "retrieve", "summary": f"{label}-{n}",
+                 "detail": {"count": n}},
+                "user-content",
+            )
+
+    rows = content_harness.ask.recent_user_ask_traces(
+        "nb-content", "user-content", job_limit=2, step_limit=3
+    )
+
+    assert [row["question"] for row in rows] == ["newer?", "older?"]
+    assert [len(row["steps"]) for row in rows] == [3, 0]
+
+
 def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     content_harness,
 ):
