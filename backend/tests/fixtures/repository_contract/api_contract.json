@@ -20585,6 +20585,13 @@
               "name": "label",
               "required": true,
               "schema": {
+                "enum": [
+                  "corpus_shape",
+                  "key_entities",
+                  "corpus_gaps",
+                  "retrieval_notes",
+                  "usage_gaps"
+                ],
                 "title": "Label",
                 "type": "string"
               }
@@ -20594,6 +20601,10 @@
               "name": "scope",
               "required": true,
               "schema": {
+                "enum": [
+                  "shared",
+                  "mine"
+                ],
                 "title": "Scope",
                 "type": "string"
               }
@@ -20640,6 +20651,13 @@
               "name": "label",
               "required": true,
               "schema": {
+                "enum": [
+                  "corpus_shape",
+                  "key_entities",
+                  "corpus_gaps",
+                  "retrieval_notes",
+                  "usage_gaps"
+                ],
                 "title": "Label",
                 "type": "string"
               }

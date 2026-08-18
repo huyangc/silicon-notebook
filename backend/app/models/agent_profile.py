@@ -26,7 +26,8 @@ from app.services.agent_profile_block import PROFILE_LABEL_ORDER
 UnderstandingScope = Literal["shared", "mine"]
 
 #: The five app-layer labels, restated as a FastAPI path-parameter type so an
-#: unknown label 422s before any handler code runs. Kept in sync with
+#: unknown label 422s before any handler code runs (both PUT and DELETE wire
+#: it into their ``label`` path parameter). Kept in sync with
 #: ``PROFILE_LABEL_ORDER`` by the assertion below — the same "duplicate the
 #: names as a literal, then assert the two agree" idiom
 #: ``agent_profile_block.py`` already uses for its own label table, so a
