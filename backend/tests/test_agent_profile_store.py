@@ -20,7 +20,10 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
-from app.repositories.ports import AgentProfileRevisionConflict
+from app.repositories.ports import (
+    AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
+    AgentProfileRevisionConflict,
+)
 from app.repositories.sqlite.agent_profile_store import AgentProfileStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SqliteMigrator
@@ -291,34 +294,85 @@ def test_bump_signal_creates_the_row_on_first_touch_and_accumulates(
     assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 5
 
 
+def test_bump_signal_rejects_a_negative_delta(store: AgentProfileStore):
+    """A negative bump is refused, not clamped: the only legitimate decrement
+    is ``settle(consumed=...)``, which is CAS'd on the chain being claimed."""
+    with pytest.raises(ValueError):
+        store.bump_signal(NOTEBOOK_ID, "", delta=-1)
+    # Nothing was written by the rejected call.
+    assert store.job_row(NOTEBOOK_ID, "") is None
+
+
 # --------------------------------------------------------------------- claim
-def test_claim_succeeds_only_once_while_the_chain_is_busy(store: AgentProfileStore):
+def test_claim_returns_the_pending_signal_snapshot_and_only_once(
+    store: AgentProfileStore,
+):
     store.bump_signal(NOTEBOOK_ID, "", delta=5)
 
-    assert store.claim(NOTEBOOK_ID, "") is True
+    assert store.claim(NOTEBOOK_ID, "") == 5
     row = store.job_row(NOTEBOOK_ID, "")
     assert row["status"] == "running"
     assert row["started_at"] == NOW
 
     # A second claim while still running is refused.
-    assert store.claim(NOTEBOOK_ID, "") is False
+    assert store.claim(NOTEBOOK_ID, "") is None
 
     # Once settled back to a non-busy state, claim can succeed again.
-    assert store.settle(NOTEBOOK_ID, "", "done", reset_signal=True) is True
-    assert store.claim(NOTEBOOK_ID, "") is True
+    assert store.settle(NOTEBOOK_ID, "", "done", consumed=5) is True
+    assert store.claim(NOTEBOOK_ID, "") == 0
 
 
-def test_claim_on_a_never_signalled_chain_is_false(store: AgentProfileStore):
-    assert store.claim(NOTEBOOK_ID, "") is False
+def test_claim_creates_the_row_for_a_never_signalled_chain(
+    store: AgentProfileStore,
+):
+    """A manual "rebuild now" must be able to take the slot on a chain that
+    has never crossed a threshold — without faking a bump that would corrupt
+    the automatic path's counter. The claim itself creates the row."""
+    assert store.job_row(NOTEBOOK_ID, "") is None
+    assert store.claim(NOTEBOOK_ID, "") == 0
+    row = store.job_row(NOTEBOOK_ID, "")
+    assert row is not None
+    assert row["status"] == "running"
+    assert row["pending_signal"] == 0
+    # And it is still single-flight on this freshly created row.
+    assert store.claim(NOTEBOOK_ID, "") is None
+
+
+def test_claim_resets_the_previous_runs_leftovers(store: AgentProfileStore):
+    """Without this, a successful run keeps displaying the last failure's
+    reason (and its blocks_written / finished_at)."""
+    store.bump_signal(NOTEBOOK_ID, "", delta=1)
+    store.claim(NOTEBOOK_ID, "")
+    store.settle(
+        NOTEBOOK_ID, "", "failed",
+        failure_reason="模型未配置", diagnostic="no binding",
+        blocks_written=2, consumed=0,
+    )
+    stale = store.job_row(NOTEBOOK_ID, "")
+    assert stale["failure_reason"] == "模型未配置"
+    assert stale["finished_at"] == NOW
+
+    assert store.claim(NOTEBOOK_ID, "") == 1
+    fresh = store.job_row(NOTEBOOK_ID, "")
+    assert fresh["status"] == "running"
+    assert fresh["failure_reason"] == ""
+    assert fresh["diagnostic"] == ""
+    assert fresh["blocks_written"] == 0
+    assert fresh["finished_at"] == ""
+    # runs is a lifetime counter and is NOT part of the reset.
+    assert fresh["runs"] == 1
 
 
 # -------------------------------------------------------------------- settle
-def test_settle_resets_signal_and_increments_runs(store: AgentProfileStore):
+def test_settle_consumes_the_claimed_snapshot_and_increments_runs(
+    store: AgentProfileStore,
+):
     store.bump_signal(NOTEBOOK_ID, "", delta=5)
-    store.claim(NOTEBOOK_ID, "")
+    snapshot = store.claim(NOTEBOOK_ID, "")
+    assert snapshot == 5
 
     assert store.settle(
-        NOTEBOOK_ID, "", "done", blocks_written=3, reset_signal=True
+        NOTEBOOK_ID, "", "done", blocks_written=3, consumed=snapshot
     ) is True
     row = store.job_row(NOTEBOOK_ID, "")
     assert row["status"] == "done"
@@ -328,13 +382,36 @@ def test_settle_resets_signal_and_increments_runs(store: AgentProfileStore):
     assert row["finished_at"] == NOW
 
 
-def test_settle_without_reset_signal_leaves_pending_signal_untouched(
+def test_settle_keeps_signals_that_arrived_while_the_run_was_in_flight(
     store: AgentProfileStore,
 ):
+    """The whole reason ``claim`` returns a snapshot instead of ``settle``
+    zeroing the counter: twelve files uploaded DURING a consolidation must
+    still count toward the next round. A blanket reset discarded them and
+    left the corpus un-reconsolidated until twelve more arrived."""
+    store.bump_signal(NOTEBOOK_ID, "", delta=5)
+    snapshot = store.claim(NOTEBOOK_ID, "")
+    assert snapshot == 5
+
+    # Twelve more source changes land while the run is still going.
+    for _ in range(12):
+        store.bump_signal(NOTEBOOK_ID, "", delta=1)
+    assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 17
+
+    store.settle(NOTEBOOK_ID, "", "done", consumed=snapshot)
+    # Only the 5 the run actually looked at were consumed.
+    assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 12
+
+
+def test_settle_with_consumed_zero_leaves_pending_signal_untouched(
+    store: AgentProfileStore,
+):
+    """A failed run consumed nothing, so its triggering changes must still
+    count toward the retry."""
     store.bump_signal(NOTEBOOK_ID, "", delta=5)
     store.claim(NOTEBOOK_ID, "")
     store.settle(
-        NOTEBOOK_ID, "", "failed", failure_reason="模型未配置", reset_signal=False
+        NOTEBOOK_ID, "", "failed", failure_reason="模型未配置", consumed=0
     )
     row = store.job_row(NOTEBOOK_ID, "")
     assert row["status"] == "failed"
@@ -342,14 +419,23 @@ def test_settle_without_reset_signal_leaves_pending_signal_untouched(
     assert row["pending_signal"] == 5
 
 
+def test_settle_floors_pending_signal_at_zero(store: AgentProfileStore):
+    """``consumed`` larger than the current counter (a caller passing a stale
+    snapshot) must not drive it negative."""
+    store.bump_signal(NOTEBOOK_ID, "", delta=2)
+    store.claim(NOTEBOOK_ID, "")
+    store.settle(NOTEBOOK_ID, "", "done", consumed=99)
+    assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 0
+
+
 def test_settle_is_cas_and_a_repeated_settle_touches_nothing(
     store: AgentProfileStore,
 ):
     store.bump_signal(NOTEBOOK_ID, "", delta=1)
-    store.claim(NOTEBOOK_ID, "")
-    assert store.settle(NOTEBOOK_ID, "", "done", reset_signal=True) is True
+    snapshot = store.claim(NOTEBOOK_ID, "")
+    assert store.settle(NOTEBOOK_ID, "", "done", consumed=snapshot) is True
     # Already terminal: a second settle is a no-op, not an overwrite.
-    assert store.settle(NOTEBOOK_ID, "", "failed", reset_signal=True) is False
+    assert store.settle(NOTEBOOK_ID, "", "failed", consumed=0) is False
     assert store.job_row(NOTEBOOK_ID, "")["status"] == "done"
 
 
@@ -357,7 +443,7 @@ def test_settle_rejects_a_non_terminal_status(store: AgentProfileStore):
     store.bump_signal(NOTEBOOK_ID, "", delta=1)
     store.claim(NOTEBOOK_ID, "")
     with pytest.raises(ValueError):
-        store.settle(NOTEBOOK_ID, "", "running", reset_signal=True)
+        store.settle(NOTEBOOK_ID, "", "running", consumed=1)
 
 
 # ------------------------------------------------------------ sweep_stale_on_start
@@ -375,11 +461,11 @@ def test_sweep_stale_on_start_force_settles_queued_and_running_chains(
 
     base_row = store.job_row(NOTEBOOK_ID, "")
     assert base_row["status"] == "failed"
-    assert base_row["failure_reason"] == "服务重启，整理未完成"
+    assert base_row["failure_reason"] == AGENT_PROFILE_RESTART_FAILURE_MESSAGE
 
     a_row = store.job_row(NOTEBOOK_ID, "user-a")
     assert a_row["status"] == "failed"
-    assert a_row["failure_reason"] == "服务重启，整理未完成"
+    assert a_row["failure_reason"] == AGENT_PROFILE_RESTART_FAILURE_MESSAGE
 
     # The idle chain (never claimed) is untouched — sweep only reclaims
     # queued/running rows.

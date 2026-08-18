@@ -3457,6 +3457,48 @@ AGENT_PROFILE_HISTORY_MAX = 20  # ring cap for agent_notebook_profile.history_js
 
 AGENT_PROFILE_JOB_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 
+#: ``sweep_stale_on_start``'s fixed ``failure_reason``. ⚠ USER-FACING TEXT: it
+#: reaches the screen through the understanding panel's job status, so it lives
+#: here as one named constant rather than as a literal inside each backend's
+#: SQL. Two copies of a Chinese sentence embedded in two SQL strings drift
+#: silently — the panel would then show a different wording depending on which
+#: backend the deployment runs, and neither copy is greppable from the UI side.
+AGENT_PROFILE_RESTART_FAILURE_MESSAGE = "服务重启，整理未完成"
+
+
+def append_profile_history(
+    history: list,
+    before: object,
+    after: str,
+    origin: str,
+    actor: str,
+    at: str,
+    revision: int,
+) -> list:
+    """Append one before/after entry to a block's history ring and keep it
+    bounded at ``AGENT_PROFILE_HISTORY_MAX`` — the OLDEST entry drops first.
+
+    ⚠ SINGLE SOURCE OF TRUTH for both backends. This is pure list arithmetic
+    with no SQL in it, so the two stores share it instead of each carrying an
+    identical private copy: the ring's DIRECTION (keep the newest, drop the
+    oldest) is exactly the kind of detail a copy can invert while every
+    existing test stays green — a store that kept the oldest 20 entries still
+    returns 20 entries of the right shape. One implementation makes that
+    class of divergence unrepresentable rather than merely tested-for.
+    """
+    entry = {
+        "before": before,
+        "after": after,
+        "origin": origin,
+        "actor": actor,
+        "at": at,
+        "revision": revision,
+    }
+    updated = [*history, entry]
+    if len(updated) > AGENT_PROFILE_HISTORY_MAX:
+        updated = updated[-AGENT_PROFILE_HISTORY_MAX:]
+    return updated
+
 
 class AgentProfileRevisionConflict(RuntimeError):
     """``write_block``/``clear_block``'s ``expected_revision`` no longer
@@ -3487,8 +3529,10 @@ class AgentProfileStorePort(Protocol):
     (notebook, owner), doubling as the threshold counter).
 
     Every read here is bounded on purpose. A block read is a primary-key-
-    prefix query over at most a handful of labelled rows (five labels, per
-    the app-layer enum) — never a scan. A job read is a single primary-key
+    prefix query over at most TEN rows — the five app-layer labels for the
+    shared base layer plus the same five for the one caller's overlay, which
+    is exactly what ``read_blocks``' ``owner_id IN ('', ?)`` predicate spans —
+    never a scan. A job read is a single primary-key
     point query. ``owner_id=''`` is the notebook's shared base layer; a
     non-empty ``owner_id`` is that one member's private overlay, and the
     ``owner_id`` predicate in ``read_blocks`` is baked into the SQL text
@@ -3552,14 +3596,38 @@ class AgentProfileStorePort(Protocol):
     def bump_signal(self, notebook_id: str, owner_id: str, delta: int = 1) -> int:
         """Zero-scan primary-key upsert: increments (or creates at) this
         chain's ``pending_signal`` threshold counter and returns the new
-        count. The row is created with ``status='idle'`` on first touch."""
+        count. The row is created with ``status='idle'`` on first touch.
+
+        ``delta`` must be non-negative (``ValueError`` otherwise). This
+        counter is a monotone accumulator whose only legitimate decrement is
+        ``settle(consumed=...)``, which is CAS'd on the chain being claimed;
+        a negative bump would be an uncontrolled decrement racing whatever
+        run is in flight."""
         ...
-    def claim(self, notebook_id: str, owner_id: str) -> bool:
-        """CAS this chain's row to ``status='running'`` (and stamp
-        ``started_at``), succeeding only when it was not already
-        ``queued``/``running`` — the single-flight guard. Decided on
-        rowcount, never on a prior read: two callers racing this method can
-        never both get ``True``."""
+    def claim(self, notebook_id: str, owner_id: str) -> int | None:
+        """Take this chain's single-flight slot, returning the
+        ``pending_signal`` SNAPSHOT observed at the moment of the claim, or
+        ``None`` when the slot was already taken.
+
+        The row is created first if it does not exist (``INSERT OR IGNORE`` /
+        ``ON CONFLICT DO NOTHING``), so a chain that was never signalled is
+        claimable — that is what a manual "rebuild now" is, and it must not
+        have to fake a threshold bump to get a slot. The CAS then moves
+        ``status`` to ``'running'`` only when it was not already
+        ``queued``/``running``, decided on the UPDATE's own rowcount and never
+        on a prior read: two callers racing this method can never both get an
+        int back.
+
+        The same UPDATE resets the PREVIOUS run's leftovers
+        (``failure_reason``, ``diagnostic``, ``blocks_written``,
+        ``finished_at``) and stamps ``started_at``. Without that reset a
+        successful run would keep displaying the last failure's reason.
+
+        The snapshot is the whole point of returning an int: the run that
+        holds the slot passes it back as ``settle(consumed=...)``, so signals
+        that arrive WHILE it runs survive into the next round instead of
+        being zeroed by a run that never saw them.
+        """
         ...
     def settle(
         self,
@@ -3570,20 +3638,31 @@ class AgentProfileStorePort(Protocol):
         failure_reason: str = "",
         diagnostic: str = "",
         blocks_written: int = 0,
-        reset_signal: bool,
+        consumed: int,
     ) -> bool:
         """Move a claimed chain to a terminal status (``done``/``failed``/
         ``cancelled``), stamping ``finished_at`` and incrementing ``runs``.
-        ``reset_signal=True`` zeroes ``pending_signal`` (a successful run
-        consumed the accumulated change signal); ``False`` leaves it alone
-        (e.g. a failed run whose triggering changes are still
-        un-consolidated). CAS'd on ``status IN ('queued','running')`` so a
-        settle racing a second settle for the same chain can only land
-        once."""
+
+        ``consumed`` is subtracted from ``pending_signal``, floored at zero
+        (``max(0, pending_signal - consumed)``). A successful run passes the
+        snapshot ``claim`` handed it — that consumes exactly the signal the
+        run actually looked at and LEAVES anything that arrived mid-run, so
+        the next threshold check still sees those changes. A failed run
+        passes ``0``: it consumed nothing, and its triggering changes must
+        still count toward the next attempt.
+
+        CAS'd on ``status IN ('queued','running')`` so a settle racing a
+        second settle for the same chain can only land once."""
         ...
     def sweep_stale_on_start(self) -> int:
         """Startup crash recovery: every ``queued``/``running`` row (there is
         no cross-process liveness for this in-process job) is force-settled
-        to ``failed`` with a fixed Chinese ``failure_reason``. Returns the
-        row count swept."""
+        to ``failed`` with ``AGENT_PROFILE_RESTART_FAILURE_MESSAGE``. Returns
+        the row count swept.
+
+        ``queued`` is defensive-only in P1: nothing writes that status today
+        (``claim`` goes straight to ``running``). It stays in every CAS
+        predicate and in this sweep so that a future queue-then-run split
+        cannot leave rows that no guard recognises; T6/T7 deliberately do not
+        render a queued state."""
         ...
