@@ -310,6 +310,76 @@ def render_current_blocks(blocks: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _retire_requested(entry: Mapping[str, Any]) -> bool:
+    """Is this entry a withdrawal (``{"label": …, "retire": true}``)?
+
+    codex #520 R2 P2. The prompt's "omission keeps the previous value" rule is
+    a ratchet without a withdrawal channel: a block written from documents that
+    have since been deleted or reparsed away rides in every planning prompt
+    forever, because the model's only way to say "that is no longer true" was
+    an empty value — which means "I have nothing to add" and must NOT clear
+    anything (a quiet run would otherwise wipe every block it happened to have
+    no new statistics about).
+
+    STRUCTURAL validation, so it raises rather than degrading: ``retire`` may
+    only be literally ``true``, and may not ride along with a real value. Both
+    malformed shapes mean the reply did not answer the question that was asked,
+    and the fail-open outcome (keep what is stored) is strictly safer than
+    guessing which half was meant. ``is True`` rather than truthiness on
+    purpose — ``1``/``"yes"`` are a model improvising a protocol.
+
+    Shared by both chains and therefore module level: the two parsers already
+    differ only in their label sets, and a second copy of this would be the
+    one that keeps accepting ``{"retire": "true"}`` after this one stops.
+    """
+    raw = entry.get("retire")
+    if raw is None:
+        return False
+    if raw is not True:
+        raise AgentProfileOutputRejected("retire_not_true")
+    value = entry.get("value")
+    if value is not None and (
+        not isinstance(value, str) or clip_block_value(value)
+    ):
+        raise AgentProfileOutputRejected("retire_with_value")
+    return True
+
+
+#: What a withdrawal actually does to the stored block, decided from the stored
+#: block alone.
+RETIRE_NOOP = "noop"
+RETIRE_REFUSED = "refused"
+RETIRE_WRITE = "retire"
+
+
+def retire_disposition(existing: "Mapping[str, Any] | None") -> str:
+    """Should this withdrawal be written, refused, or ignored?
+
+    Three outcomes, and the middle one is the boundary this feature cannot get
+    wrong: **a user-authored block is never retired**. Design §5.4 makes a
+    person's edit authoritative input rather than a draft, and it is also the
+    cold-start channel — someone telling the agent what this library is. A
+    model that decided their sentence was "no longer supported by the
+    statistics" would silently delete the one input here that was never a
+    guess. It is refused rather than rejected outright: the rest of the reply
+    may be perfectly sound, and the refusal rides out in the diagnostic.
+
+    ``noop`` (no row, or a row already blank) is not an error either — there
+    is simply nothing to withdraw, and counting it as a write would make
+    ``blocks_written`` report work that did not happen.
+
+    A pure function of the stored row so it can be tested without a database,
+    and so both chains share one answer: the two writers are otherwise
+    mirror images, and this rule drifting between them is the shape where the
+    shared base keeps a stale claim while the overlay drops a person's note.
+    """
+    if existing is None or not str(existing.get("value") or ""):
+        return RETIRE_NOOP
+    if str(existing.get("updated_origin") or "") == "user":
+        return RETIRE_REFUSED
+    return RETIRE_WRITE
+
+
 def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
     """Validate one reply into the blocks that may be written.
 
@@ -328,6 +398,10 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
     ``str(...)`` would coerce a returned ``{"text": ...}`` into the literal
     characters ``{'text': ...}`` and store that as the library's understanding,
     where it would ride in every planning prompt until a person noticed.
+
+    An entry may instead be a WITHDRAWAL (``{"label": …, "retire": true}``,
+    see ``_retire_requested``); whether it is permitted is decided at the
+    write, where the stored block's origin is known.
 
     Per-entry salvage applies to exactly one thing: evidence ids the
     statistics never served are dropped. Those are a citation error, not a
@@ -354,6 +428,12 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
         if label in seen:
             raise AgentProfileOutputRejected("duplicate_label")
         seen.add(label)
+        if _retire_requested(entry):
+            # An explicit withdrawal. Whether it is ALLOWED (the block may be
+            # user-authored) is decided at the write, where the stored origin
+            # is known — this parser sees only the reply.
+            parsed.append({"label": label, "retire": True})
+            continue
         raw_value = entry.get("value")
         if not isinstance(raw_value, str):
             raise AgentProfileOutputRejected("value_not_a_string")
@@ -362,7 +442,8 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
             # An empty value means "I have nothing to say about this block",
             # which is the prompt's own instruction to OMIT it. It must not
             # clear an existing block: clearing is a user action (the panel's
-            # own control), never a side effect of a quiet consolidation run.
+            # own control) or an explicit ``retire``, never a side effect of a
+            # quiet consolidation run.
             continue
         raw_evidence = entry.get("evidence")
         if raw_evidence is not None and not isinstance(raw_evidence, list):
@@ -583,9 +664,9 @@ def parse_overlay_reply(payload: object) -> list[dict]:
     """Validate one overlay reply into the blocks that may be written.
 
     Structurally identical to ``parse_base_reply`` — whole-payload rejection
-    for anything structural, empty value means "omit", fail-open keeps what is
-    already stored — with ONE deliberate difference: there is no evidence
-    handling at all. The overlay prompt never asks for evidence (its input is
+    for anything structural, empty value means "omit", ``retire: true`` is the
+    explicit withdrawal, fail-open keeps what is already stored — with ONE
+    deliberate difference: there is no evidence handling at all. The overlay prompt never asks for evidence (its input is
     the member's own trace, in which there is no document to cite), and what
     ``usage_gaps`` is grounded in is counted server-side from the same sample.
     A model that volunteers an ``evidence`` key is therefore IGNORED rather
@@ -612,6 +693,9 @@ def parse_overlay_reply(payload: object) -> list[dict]:
         if label in seen:
             raise AgentProfileOutputRejected("duplicate_label")
         seen.add(label)
+        if _retire_requested(entry):
+            parsed.append({"label": label, "retire": True})
+            continue
         raw_value = entry.get("value")
         if not isinstance(raw_value, str):
             raise AgentProfileOutputRejected("value_not_a_string")
@@ -910,11 +994,43 @@ class AgentProfileConsolidationService:
         chars = 0
         evidence_ids = 0
         conflicts: list[str] = []
+        retired: list[str] = []
+        refused: list[str] = []
         dropped = 0
         for block in parsed:
             label = str(block["label"])
             existing = by_label.get(label)
             expected = int(existing["revision"]) if existing else 0
+            if block.get("retire"):
+                # An explicit withdrawal (codex #520 R2 P2). Written as an
+                # empty value with ``origin="job"`` rather than through
+                # ``clear_block``, which hardcodes ``updated_origin='user'``:
+                # a job's withdrawal recorded in the history as a person's
+                # clear is a lie in the one record that explains why a block
+                # disappeared.
+                disposition = retire_disposition(existing)
+                if disposition == RETIRE_NOOP:
+                    continue
+                if disposition == RETIRE_REFUSED:
+                    refused.append(label)
+                    continue
+                try:
+                    self.profiles.write_block(
+                        notebook_id,
+                        BASE_CHAIN_OWNER,
+                        label,
+                        value="",
+                        evidence=[],
+                        expected_revision=expected,
+                        origin="job",
+                        actor="",
+                    )
+                except AgentProfileRevisionConflict:
+                    conflicts.append(label)
+                    continue
+                written += 1
+                retired.append(label)
+                continue
             evidence = list(block["evidence"])
             dropped += int(block.get("evidence_dropped") or 0)
             try:
@@ -947,6 +1063,10 @@ class AgentProfileConsolidationService:
         diagnostic_parts: list[str] = []
         if conflicts:
             diagnostic_parts.append("cas_conflict:" + ",".join(sorted(conflicts)))
+        if retired:
+            diagnostic_parts.append("retired:" + ",".join(sorted(retired)))
+        if refused:
+            diagnostic_parts.append("retire_refused:" + ",".join(sorted(refused)))
         if dropped:
             diagnostic_parts.append(f"evidence_dropped:{dropped}")
         return _BaseOutcome(
@@ -974,17 +1094,25 @@ class AgentProfileConsolidationService:
           or formulas", which is not a failure at all in a prose library.
         * ``element_type_count_rows`` — one grouped, index-covered count per
           batch of those visible ids.
-        * ``knowledge_type_count_rows`` minus
-          ``knowledge_type_count_rows_for_sources(memory_source_ids)`` — the KG
-          type counts, less the objects a private Memory owns. The seq-gated
-          count is notebook-wide and has no owner filter, so without the
-          subtraction one member's Memory would inflate a number every member
-          reads.
+        * ``knowledge_type_count_rows_excluding_memory`` — the KG type counts,
+          less the objects a private Memory owns. The notebook-wide count has
+          no owner filter, so without the exclusion one member's Memory would
+          inflate a number every member reads.
         * ``top_concept_names`` — the recurring concept names, with the same
-          Memory exclusion pushed into the query. This is the only input that
-          can support ``key_entities``; counts cannot say what a library is
-          about, so before this read that block had no basis and the prompt's
-          own "omit what you cannot support" rule kept it permanently empty.
+          Memory exclusion. This is the only input that can support
+          ``key_entities``; counts cannot say what a library is about, so
+          before this read that block had no basis and the prompt's own "omit
+          what you cannot support" rule kept it permanently empty.
+
+        ⚠ Both Memory exclusions live INSIDE their statements (codex #520 R2
+        P1). They used to be arithmetic across reads — fetch the Memory source
+        ids, subtract their type counts, pass the same ids in as an exclusion
+        list — and the reads share a connection but NOT a snapshot. A Memory
+        created or deleted in between made the subtrahend describe a different
+        library than the minuend (the shared base could then carry a
+        Memory-derived count), and made the exclusion list miss a row whose
+        CONCEPT NAMES then reached a block every member of a shared notebook
+        reads. One statement, one evaluation, no window.
 
         Nothing in this method can reach usage data. That is the property
         ``test_agent_profile_isolation_guard.py`` pins, and the reason this
@@ -1008,29 +1136,15 @@ class AgentProfileConsolidationService:
                 else []
             )
             kg_rows = list(
-                self.queries.knowledge_type_count_rows(
+                self.queries.knowledge_type_count_rows_excluding_memory(
                     db, notebook_id, USABLE_STATUSES
                 )
-            )
-            # One extra query only when the notebook HAS private Memory: a
-            # reference library has none and keeps paying exactly what it paid
-            # before.
-            memory_ids = list(self.sources.memory_source_ids(db, notebook_id))
-            memory_kg_rows = (
-                list(
-                    self.queries.knowledge_type_count_rows_for_sources(
-                        db, notebook_id, memory_ids, USABLE_STATUSES
-                    )
-                )
-                if memory_ids
-                else []
             )
             concept_rows = list(
                 self.queries.top_concept_names(
                     db,
                     notebook_id,
                     USABLE_STATUSES,
-                    memory_ids,
                     AGENT_PROFILE_TOP_CONCEPTS,
                 )
             )
@@ -1049,20 +1163,11 @@ class AgentProfileConsolidationService:
             per_source.items(),
             key=lambda item: (-sum(item[1].values()), item[0]),
         )[:AGENT_PROFILE_STATS_MAX_DOCUMENTS]
+        # No subtraction, and therefore no negative-count floor to defend: the
+        # exclusion happened in the statement that produced these rows.
         kg_counts: dict[str, int] = {
             str(row["object_type"]): int(row["c"] or 0) for row in kg_rows
         }
-        for row in memory_kg_rows:
-            object_type = str(row["object_type"])
-            if object_type in kg_counts:
-                # ``max(0, …)`` is a floor, not a fix: the two counts share one
-                # connection but not one snapshot, so a Memory extraction
-                # committing between them can make the subtrahend the larger
-                # number. A negative count would then be rendered into the
-                # prompt as fact.
-                kg_counts[object_type] = max(
-                    0, kg_counts[object_type] - int(row["c"] or 0)
-                )
         kg_objects = tuple(
             (object_type, count)
             for object_type, count in kg_counts.items()
@@ -1379,10 +1484,39 @@ class AgentProfileConsolidationService:
         chars = 0
         evidence_entries = 0
         conflicts: list[str] = []
+        retired: list[str] = []
+        refused: list[str] = []
         for block in parsed:
             label = str(block["label"])
             existing = by_label.get(label)
             expected = int(existing["revision"]) if existing else 0
+            if block.get("retire"):
+                # Same withdrawal protocol as the base chain, same refusal of
+                # user-authored notes — here the person being overruled would
+                # be the note's own owner (codex #520 R2 P2).
+                disposition = retire_disposition(existing)
+                if disposition == RETIRE_NOOP:
+                    continue
+                if disposition == RETIRE_REFUSED:
+                    refused.append(label)
+                    continue
+                try:
+                    self.profiles.write_block(
+                        notebook_id,
+                        user_id,
+                        label,
+                        value="",
+                        evidence=[],
+                        expected_revision=expected,
+                        origin="job",
+                        actor="",
+                    )
+                except AgentProfileRevisionConflict:
+                    conflicts.append(label)
+                    continue
+                written += 1
+                retired.append(label)
+                continue
             evidence: list[dict] = (
                 [{"claim_index": 0, "zero_hit_queries": int(zero_hit_steps)}]
                 if label == "usage_gaps" else []
@@ -1407,14 +1541,18 @@ class AgentProfileConsolidationService:
             written += 1
             chars += len(str(block["value"]))
             evidence_entries += len(evidence)
-        diagnostic = (
-            "cas_conflict:" + ",".join(sorted(conflicts)) if conflicts else ""
-        )
+        diagnostic_parts: list[str] = []
+        if conflicts:
+            diagnostic_parts.append("cas_conflict:" + ",".join(sorted(conflicts)))
+        if retired:
+            diagnostic_parts.append("retired:" + ",".join(sorted(retired)))
+        if refused:
+            diagnostic_parts.append("retire_refused:" + ",".join(sorted(refused)))
         return _BaseOutcome(
             written=written,
             chars=chars,
             evidence=evidence_entries,
-            diagnostic=diagnostic,
+            diagnostic=" ".join(diagnostic_parts),
         )
 
     # ---------------------------------------------------- overlay: reading

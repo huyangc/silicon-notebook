@@ -48,6 +48,13 @@ _UNSET = SOURCE_PAPER_META_UNSET
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
 
 
+# 「这一行是私有 Memory 的合成来源」的 SQL 谓词,与 SQLite 侧
+# ``source_store.MEMORY_SOURCE_TYPE_PREDICATE`` 逐字同义;两侧的理由与用法边界写在
+# 那一份注释里(简述:底座聚合把 Memory 排除压进语句内,跨查询的相减/排除清单在
+# READ COMMITTED 下会被并发的 Memory 增删漏掉,而漏掉的东西里包含概念名称)。
+MEMORY_SOURCE_TYPE_PREDICATE = "source_type = 'memory'"
+
+
 # 论文元数据补抽候选谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id`` 过滤之后)。
 # 与 SQLite 侧 ``sqlite.source_store.PAPER_META_ELIGIBLE_SQL`` 同义;三个消费方
 # (sources_missing_paper_meta / notebook_analytics 的 missing 计数 /
@@ -487,7 +494,7 @@ class SourceStore:
             row["id"]
             for row in connection.execute(
                 "SELECT id FROM sources "
-                "WHERE notebook_id=%s AND source_type='memory'",
+                f"WHERE notebook_id=%s AND {MEMORY_SOURCE_TYPE_PREDICATE}",
                 (notebook_id,),
             ).fetchall()
         ]

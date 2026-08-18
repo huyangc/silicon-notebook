@@ -8908,7 +8908,17 @@ export default function Home() {
               {/* key=当前笔记本:切库那一刻整个面板重挂而不是靠 prop 变化自己刷新——
                   草稿/忙碌位/确认态必须随库清零,不能等下面那条关弹窗 effect 追上来
                   (那条 effect 是第二层保险,这里是结构性保证)。 */}
-              <AgentProfilePanel key={currentNotebookId} notebookId={currentNotebookId} />
+              {/* 依据来源 chip 复用**引用卡点击走的同一条**打开路径,不另造弹窗;
+                  标题从已加载的来源列表解析(`display_title` 与引用卡、清单卡同一
+                  份服务端命名),查不到就由面板退回 id。 */}
+              <AgentProfilePanel
+                key={currentNotebookId}
+                notebookId={currentNotebookId}
+                onOpenSource={(sourceId) => onOpenSourceElement(sourceId)}
+                resolveSourceTitle={(sourceId) =>
+                  sources.find((item) => item.id === sourceId)?.display_title || ""
+                }
+              />
             </div>
             </>)}
           </FloatingModalCard>

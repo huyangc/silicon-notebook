@@ -104,12 +104,18 @@ OVERLAY_CHAIN_FUNCTIONS: frozenset[str] = frozenset({
 #: 取业务数据」。`_safe_settle`/`_fail` 只写**调用方指定的那一行** job 状态(两条链
 #: 路共用,owner 是必填参数而不是默认值),`_emit` 只发计数,`sweep_on_start` 只调一
 #: 个无参的全表结算,`_clip_name` 是纯字符串函数。
+#: `_retire_requested` / `retire_disposition` 是两条链**共用**的纯函数(codex #520
+#: R2 P2 的退役协议):前者只读模型回复里的一个键,后者只读已存那一行的 value 与
+#: updated_origin。两者都不发查询、也拿不到座位,所以放中性而不是复制两份进各自
+#: 链路——「用户手写的块不许退役」这条边界在两条链上必须是同一个答案。
 NEUTRAL_FUNCTIONS = frozenset({
     "__init__",
     "_clip_name",
     "_emit",
     "_fail",
+    "_retire_requested",
     "_safe_settle",
+    "retire_disposition",
     "sweep_on_start",
 })
 
@@ -120,8 +126,15 @@ NEUTRAL_FUNCTIONS = frozenset({
 #: 共同面就是端口方法名。
 #:
 #: ⚠ 加一条之前先问:它读的是 notebook 级数据,还是某个成员的数据?
-#: `top_concept_names` 与 `knowledge_type_count_rows_for_sources` 之所以在列,正是
-#: 因为它们**减掉**私有 Memory;而任何按 user 取数的方法都不该出现在这里。
+#: `top_concept_names` 与 `knowledge_type_count_rows_excluding_memory` 之所以在列,
+#: 正是因为它们在**自己的语句里**排掉私有 Memory;而任何按 user 取数的方法都不该
+#: 出现在这里。
+#:
+#: ⚠ 白名单**只留实际用的**(codex #520 R2 P1):`memory_source_ids` /
+#: `knowledge_type_count_rows` / `knowledge_type_count_rows_for_sources` 三条随
+#: 「先读 id 清单再相减」那套写法一起退场——底座不再读 Memory 的 id 清单,而是让两条
+#: 聚合各自在语句内排除。留着它们等于给「把排除拆回跨查询算术」留一条无人报红的路,
+#: 而那条路的失败形态是共享块里出现一位成员私有 Memory 的计数与概念名称。
 ALLOWED_PORT_CALLS = frozenset({
     # 块本身(notebook + 空 owner = 共享底座那一行)
     "read_blocks",
@@ -130,9 +143,7 @@ ALLOWED_PORT_CALLS = frozenset({
     "source_change_signal_rows",
     "visible_parse_status_counts",
     "element_type_count_rows",
-    "memory_source_ids",
-    "knowledge_type_count_rows",
-    "knowledge_type_count_rows_for_sources",
+    "knowledge_type_count_rows_excluding_memory",
     "top_concept_names",
     # 单飞与阈值(只碰这条链路自己那一行)
     "bump_signal",
@@ -373,7 +384,7 @@ def test_the_allowlists_are_not_silently_empty():
     """
     assert len(BASE_CHAIN_FUNCTIONS) >= 9
     assert "corpus_stats" in BASE_CHAIN_FUNCTIONS
-    assert len(ALLOWED_PORT_CALLS) >= 11
+    assert len(ALLOWED_PORT_CALLS) >= 9
     assert len(OVERLAY_CHAIN_FUNCTIONS) >= 11
     assert "usage_stats" in OVERLAY_CHAIN_FUNCTIONS
     assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 5
@@ -394,6 +405,30 @@ def test_the_two_chains_never_share_a_port_allowlist_entry_that_reads_usage():
             "全体成员可见,它读到任何人的提问轨迹都等于把那个人的使用情况公开。"
         )
     assert "ask_state" not in " ".join(sorted(ALLOWED_PORT_CALLS))
+
+
+def test_the_memory_exclusion_stays_inside_the_statement():
+    """反向护栏(codex #520 R2 P1):底座不许把 Memory 排除拆回跨查询算术。
+
+    白名单只管「不许多」——把 `memory_source_ids` 与
+    `knowledge_type_count_rows_for_sources` 从 `ALLOWED_PORT_CALLS` 里删掉之后,
+    层二会拦住重新写出这两个调用的形态。但那条判据只在**这两个名字**还没被谁"顺手
+    加回来"时成立,所以这里正面钉住它们不在列:一旦回到「先读一次 Memory id 清单、
+    再相减/再当排除清单传进去」,两次读之间就又有了一个没有共享快照的窗口,而那个
+    窗口漏掉的东西里包含**概念名称**——它会被写进全体成员都读得到的共享块。
+    """
+    for retired in ("memory_source_ids", "knowledge_type_count_rows_for_sources",
+                    "knowledge_type_count_rows"):
+        assert retired not in ALLOWED_PORT_CALLS, (
+            f"{retired} 又出现在底座的端口白名单里。底座的 Memory 排除必须发生在"
+            "聚合语句**内部**(`knowledge_type_count_rows_excluding_memory` /"
+            "`top_concept_names`);拆成「先读 id 清单再算」会重新打开一个并发的"
+            "Memory 增删就能钻过去的窗口,而它泄漏的是共享块里的私有概念名称。"
+        )
+    assert "knowledge_type_count_rows_excluding_memory" in ALLOWED_PORT_CALLS, (
+        "语句内排除的那条聚合不在白名单里了——这条护栏会变成恒真:三个退役名字"
+        "当然不在列,而底座也已经读不到任何知识对象计数。"
+    )
 
 
 def test_the_base_allowlist_never_collides_with_ask_state_port_methods():
@@ -448,8 +483,7 @@ def test_the_base_chain_actually_reads_something():
     for required in (
         "source_change_signal_rows",
         "element_type_count_rows",
-        "knowledge_type_count_rows",
-        "memory_source_ids",
+        "knowledge_type_count_rows_excluding_memory",
         "top_concept_names",
         "visible_parse_status_counts",
     ):

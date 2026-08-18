@@ -31,6 +31,7 @@ from app.repositories.sqlite.identity_store import (
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.sqlite.source_store import (
+    MEMORY_SOURCE_TYPE_PREDICATE,
     PAPER_META_ELIGIBLE_SQL,
     PAPER_META_NO_META_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
@@ -79,6 +80,24 @@ def _absolute_instant(column: str) -> str:
     planner 会用它消掉 TEMP B-TREE)——那是一次 schema 迁移,不在本轮缝隙整改范围内。
     """
     return f"COALESCE(julianday({column}), julianday('{UNRESOLVED_INSTANT_ISO}'))"
+
+
+#: 「这一行知识对象**不**属于任何私有 Memory 合成来源」,写成语句内的相关子查询。
+#: 约定被排除的那张表在外层用别名 ``o``(两个消费方都是 ``knowledge_objects o``)。
+#:
+#: 这是 codex #520 R2 P1 的落点:底座聚合此前先读一次 ``memory_source_ids``、再用
+#: 相减(计数)或排除清单(概念名)兑现排除。两次读之间没有共享快照——PG 的
+#: READ COMMITTED 下尤其明显——所以在两者之间新建/删除一个私有 Memory,就会让相减
+#: 漏减、让排除清单漏项;后一种漏项泄漏的是**概念名称本身**,而它会被写进全体成员
+#: 都读得到的共享块。压进同一条语句之后,排除与被排除的行由同一次求值决定。
+#:
+#: ``knowledge_objects.source_id`` 默认是 ``''`` 且不是外键,所以「没有归属来源」的
+#: 对象匹配不到任何 ``sources`` 行、照旧保留——与旧的 ``NOT IN (memory ids)`` 逐字
+#: 同义。``sources.id`` 是主键,子查询是一次点查。
+_NOT_MEMORY_OWNED_SQL = (
+    "NOT EXISTS (SELECT 1 FROM sources "
+    f"WHERE sources.id = o.source_id AND {MEMORY_SOURCE_TYPE_PREDICATE})"
+)
 
 
 class QueryStore:
@@ -174,22 +193,68 @@ class QueryStore:
         return [{"object_type": ot, "c": c} for ot, c in totals.items()]
 
     @staticmethod
+    def knowledge_type_count_rows_excluding_memory(
+        db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]
+    ) -> "list[dict]":
+        """``[{object_type, c}]`` for the notebook, MINUS the objects a private
+        Memory owns — the exclusion evaluated inside this one statement.
+
+        Deliberately NOT ``knowledge_type_count_rows`` minus
+        ``knowledge_type_count_rows_for_sources(memory ids)``: that arithmetic
+        spans three reads with no shared snapshot, so a Memory created or
+        deleted between them makes the subtrahend describe a different library
+        than the minuend, and the shared base then carries a count derived from
+        one member's private Memory (codex #520 R2 P1).  The generic
+        ``…_for_sources`` variant stays for the enumeration denominator, whose
+        caller genuinely holds an arbitrary id list.
+
+        NOT served from ``knowledge_counts_cache`` for the same reason that one
+        is not: the memo holds the whole notebook's ``(type, status)``
+        breakdown and knows nothing about sources, and it is the board's
+        counting path — the board answers "how much knowledge is in this
+        library", which is a different question from this one.
+
+        Empty ``statuses`` returns nothing rather than "all statuses", matching
+        every other counting query here.
+        """
+        allowed = tuple(statuses)
+        if not allowed:
+            return []
+        status_marks = ",".join("?" for _ in allowed)
+        rows = db.execute(
+            "SELECT o.object_type AS object_type, COUNT(*) AS c "
+            "FROM knowledge_objects o "
+            f"WHERE o.notebook_id = ? AND o.status IN ({status_marks}) "
+            f"AND {_NOT_MEMORY_OWNED_SQL} "
+            "GROUP BY o.object_type",
+            (notebook_id, *allowed),
+        ).fetchall()
+        return [
+            {"object_type": str(row["object_type"]), "c": int(row["c"] or 0)}
+            for row in rows
+        ]
+
+    @staticmethod
     def top_concept_names(
         db: sqlite3.Connection,
         notebook_id: str,
         statuses: tuple[str, ...],
-        exclude_source_ids: "list[str]",
         limit: int,
     ) -> "list[tuple[str, int]]":
         """``[(canonical concept name, members)]``, most-supported first.
 
         Same shape as ``UnifiedKgStore.largest_clusters`` (group the notebook's
         concept cluster rows, probe each member into ``knowledge_objects``,
-        order by member count) plus one thing that one does not have: the
-        ``exclude_source_ids`` filter, which its only caller feeds with
-        ``SourceStore.memory_source_ids`` so a private Memory's concepts cannot
-        reach a notebook-shared prompt block.  It is therefore NOT a call into
-        that method — the exclusion is the reason this query exists.
+        order by member count) plus one thing that one does not have: private
+        Memory's objects are excluded, so a concept that exists only inside one
+        member's Memory cannot reach a notebook-shared prompt block.  That is
+        the reason this query exists next to ``largest_clusters`` at all.
+
+        ⚠ The exclusion is a predicate INSIDE this statement, not an id list
+        the caller passes in (codex #520 R2 P1).  A caller-supplied list is
+        read at a different instant than this query runs, and the window
+        between them leaks CONCEPT NAMES — the one input here that is not a
+        count — into a block every member of a shared notebook reads.
 
         ⚠ Cost class is ``largest_clusters``' own: the LIMIT truncates output,
         not the scan.  Background-chain use only; see the port docstring.
@@ -202,11 +267,6 @@ class QueryStore:
         if not allowed or limit <= 0:
             return []
         status_marks = ",".join("?" for _ in allowed)
-        excluded = list(dict.fromkeys(sid for sid in exclude_source_ids if sid))
-        exclude_clause = ""
-        if excluded:
-            exclude_marks = ",".join("?" for _ in excluded)
-            exclude_clause = f"AND o.source_id NOT IN ({exclude_marks}) "
         rows = db.execute(
             "SELECT COALESCE(MIN(NULLIF(c.canonical_name, '')), '') AS name, "
             "       COUNT(o.id) AS members "
@@ -214,12 +274,12 @@ class QueryStore:
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
             "     AND o.notebook_id = c.notebook_id "
             f"     AND o.status IN ({status_marks}) "
-            f"{exclude_clause}"
+            f"     AND {_NOT_MEMORY_OWNED_SQL} "
             "WHERE c.notebook_id = ? AND c.object_type = 'concept' "
             "GROUP BY c.canonical_id "
             "HAVING name <> '' "
             "ORDER BY members DESC, name ASC LIMIT ?",
-            (*allowed, *excluded, notebook_id, int(limit)),
+            (*allowed, notebook_id, int(limit)),
         ).fetchall()
         return [(str(row["name"]), int(row["members"])) for row in rows]
 
