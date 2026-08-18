@@ -112,3 +112,57 @@ test("交叉态(既是只读成员又在授权群组里):成员行优先,退出�
   expect(screen.getByRole("button", { name: "退出共享" })).toBeInTheDocument();
   expect(screen.getByText("只读 · 来自 carol")).toBeInTheDocument();
 });
+
+// ---------------------------------------------------------------- P2:组管理员
+//
+// `access` 仍是 "reader"(权限档没有新增枚举值,裁决 P2-3),但 `can_manage_content`
+// 为真时后端六个内容管理能力全部放行。界面必须跟上,否则组管理员对着一个 API 允许、
+// 按钮全藏的只读工作区;反过来写着「只读」而整屏写入口都亮着,也是一句自相矛盾的话。
+
+test("组管理员打开共享库:徽章说「可管理」而不是「只读」", () => {
+  render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+    />,
+  );
+
+  expect(screen.getByText("可管理 · 来自群组《封装项目》")).toBeInTheDocument();
+  expect(screen.queryByText(/^只读 ·/)).not.toBeInTheDocument();
+  // 说明改成「你是该群组的管理员」——原来那句「由组管理员管理」是说给**别人**听的。
+  expect(screen.getByText(/你是该群组的管理员/)).toBeInTheDocument();
+  // 他的访问来自授权边,「退出共享」打的是成员表,对他仍是空操作。
+  expect(screen.queryByRole("button", { name: "退出共享" })).not.toBeInTheDocument();
+});
+
+test("同一本库、只差 can_manage_content:纯只读成员仍写「只读」", () => {
+  render(
+    <ReaderNotebookBadge
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: false })}
+      leaveBusy={false}
+      onLeave={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("只读 · 来自群组《封装项目》")).toBeInTheDocument();
+  expect(screen.getByText(/由组管理员管理/)).toBeInTheDocument();
+});
+
+test("卡片菜单:组管理员有「编辑信息」但**没有**「删除笔记本」", async () => {
+  const onEdit = vi.fn();
+  render(
+    <NotebookMenuActions
+      notebook={notebook({ granted_via: VIA_GROUP, can_manage_content: true })}
+      onLeave={vi.fn()}
+      onEdit={onEdit}
+      onDelete={vi.fn()}
+    />,
+  );
+
+  await userEvent.setup().click(screen.getByRole("button", { name: "编辑信息" }));
+  expect(onEdit).toHaveBeenCalledOnce();
+  // `notebook:delete` 恒 owner(裁决 P2-1):画出来只会 404,而它是不可撤销的动作。
+  expect(screen.queryByRole("button", { name: "删除笔记本" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "退出共享" })).not.toBeInTheDocument();
+  expect(screen.getByText("由组管理员管理")).toBeInTheDocument();
+});

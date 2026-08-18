@@ -6349,6 +6349,11 @@
               "title": "Base Notebooks",
               "type": "array"
             },
+            "can_manage_content": {
+              "default": false,
+              "title": "Can Manage Content",
+              "type": "boolean"
+            },
             "counts": {
               "additionalProperties": {
                 "type": "integer"
@@ -21256,6 +21261,7 @@
       "base_kg_available": false,
       "base_kg_notebook_ids": [],
       "base_notebooks": [],
+      "can_manage_content": true,
       "counts": {
         "cases": 0,
         "checklist_items": 0,

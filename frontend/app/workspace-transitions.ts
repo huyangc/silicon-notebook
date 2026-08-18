@@ -149,8 +149,23 @@ export const NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING =
   "所有成员各自绑定到此笔记本的私有记忆也会按生命周期一并删除。";
 
 
-export function workspaceCapabilities(access: string | undefined, role: string) {
-  const canWrite = access !== "reader";
+/**
+ * 工作区的能力位 —— 「哪些入口画出来」的唯一判据。
+ *
+ * `canManageContent` 是 `NotebookSummary.can_manage_content`（群组知识共享 P2）:
+ * 组管理员打开被共享进本组的库时 `access` 仍是 `"reader"`（权限档没有新增枚举值，
+ * 裁决 P2-3），但他确实有内容管理权。所以内容管理那几位不能再只看 `access`。
+ *
+ * ⚠ 后端才是权威（`require_notebook_capability` / `notebook_capability_allowed`）。
+ * 这里画多了按钮只会让用户点进一个必然 404 的动作，所以缺省一律取**收**的那一侧:
+ * 参数省略 = false = 逐字复现本参数出现之前的行为（旧后端不发这个字段）。
+ */
+export function workspaceCapabilities(
+  access: string | undefined,
+  role: string,
+  canManageContent: boolean = false,
+) {
+  const canWrite = access !== "reader" || canManageContent;
   return {
     canWriteNotebook: canWrite,
     canGovernKnowledge: canWrite,
@@ -162,9 +177,11 @@ export function workspaceCapabilities(access: string | undefined, role: string) 
     // 这里放开的是**入口**，不是判定。
     //
     // 只放开报告面：来源写、图谱构建、知识治理仍跟着 `canWrite` 走。
+    // P2 之后 `canWrite` 本身放宽了（组管理员为真），但这一位**恒 true 不变**——
+    // 它本来就已经对每一位只读成员开着，没有可放宽的余地。
     canManageReports: true,
-    // 图谱类型的有效配置属于当前笔记本：owner 可以维护自己的覆盖和自建类型；
-    // reader 只读。全局基线仍只允许管理员变更。
+    // 图谱类型的有效配置属于当前笔记本：owner 与组管理员可以维护本库的覆盖和自建
+    // 类型；纯只读成员不行。全局基线仍只允许系统管理员变更。
     canManageNotebookSchemas: canWrite,
     canManageGlobalSchemas: role === "admin",
   };

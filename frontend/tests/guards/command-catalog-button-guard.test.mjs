@@ -134,10 +134,19 @@ test("入口真的挂在来源详情上（工作区不引用面板就等于这�
   assert.ok(imported.includes("CommandCatalogSection"), "page.tsx 没有引入命令目录入口");
   const mounted = jsxElements(page, "CommandCatalogSection");
   assert.equal(mounted.length, 1, "命令目录入口应在来源详情里挂载恰好一次");
-  // 参考库来源是只读的:发起/取消/确认在后端都是 owner-only 且按 notebook 收窄。
-  // 入口渲染条件必须带上这条,否则会对一个只是被挂载进来的库发起识别。
+  // 参考库来源是只读的:发起/取消/确认在后端按 `catalog:write` 能力收窄且绑当前
+  // notebook。入口渲染条件必须带上这条,否则会对一个只是被挂载进来的库发起识别。
+  //
+  // ⚠ 判据从 `!isReader` 换成 `!readOnlyWorkspace`(群组知识共享 P2):`catalog:write`
+  // 已从 owner-only 翻成「owner ∪ 组管理边」,而 `access` 仍是 "reader"——继续按
+  // access 判会把组管理员挡在一个后端明明放行的入口外面。`readOnlyWorkspace` 由
+  // `workspaceCapabilities` 派生,是页面里内容管理入口的唯一判据。
   const [element] = mounted;
-  assert.equal(element.bindings?.canEdit, "!isReader", "只读成员不该拿到发起/确认能力");
+  assert.equal(
+    element.bindings?.canEdit,
+    "!readOnlyWorkspace",
+    "纯只读成员不该拿到发起/确认能力（判据必须是内容管理权,不是 access）",
+  );
 
   // 授权门断言:命令目录必须绑定**当前活跃笔记本** id,不能落到来源自己的
   // notebook_id(来源可能属于被挂载进来的参考库)。

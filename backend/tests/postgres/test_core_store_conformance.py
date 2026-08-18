@@ -515,24 +515,27 @@ def _pg_grant(
     principal_type: str,
     principal_id: str,
     owner_id: str,
+    role: str = "viewer",
 ) -> None:
     with core_stores.database.write() as connection:
         connection.execute(
             "INSERT INTO notebook_grants "
             "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
-            "VALUES (%s,%s,%s,%s,'viewer',%s,now())",
-            (grant_id, notebook_id, principal_type, principal_id, owner_id),
+            "VALUES (%s,%s,%s,%s,%s,%s,now())",
+            (grant_id, notebook_id, principal_type, principal_id, role, owner_id),
         )
 
 
 def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
-    """PG 侧的读/写权矩阵必须与 `test_access_sql_contract.py` 的 SQLite 矩阵逐格相同。
+    """PG 侧的读/管理/写权矩阵必须与 `test_access_sql_contract.py` 的 SQLite 矩阵逐格相同。
 
     谓词的唯一定义点是 `repositories/*/access_sql.py` 两份镜像文件。SQLite 侧那份
     契约测试跑在 G1,单靠它看不见「只改了一个后端」的分叉;这条把同一张矩阵钉在 G3。
-    写权恒 owner-only(只读成员与群组被授权者都是访客),不存在的 notebook 两权皆否。
+    写权恒 owner-only(只读成员与群组被授权者都是访客),不存在的 notebook 三权皆否。
     P1 扩展的四类授权边主体(user / group / group_admins / everyone)与哨兵停车行的
-    fail-safe 一并在此对齐。
+    fail-safe、以及 P2 新增的**管理权**(owner ∪ `role='admin'` 的有效授权边)一并
+    在此对齐——管理权那一列是权限边界的放宽,单后端漂移的后果是「PG 部署的组管理员
+    写不了 / 或写得比 SQLite 部署更多」,而这种分叉在 G1 里永远看不见。
     """
     sharing = core_stores.sharing
     owner = core_stores.identity.create_user("d00123456", "password-30")
@@ -555,7 +558,8 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
     _pg_grant(core_stores, "gr-user", notebook_id, "user", grantee.id, owner.id)
     _pg_grant(core_stores, "gr-group", notebook_id, "group", viewers, owner.id)
     _pg_grant(
-        core_stores, "gr-admins", notebook_id, "group_admins", admins, owner.id
+        core_stores, "gr-admins", notebook_id, "group_admins", admins, owner.id,
+        role="admin",
     )
 
     everyone_id = core_stores.notebooks.create_row(
@@ -563,7 +567,24 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
     )
     _pg_grant(core_stores, "gr-everyone", everyone_id, "everyone", "", owner.id)
 
-    # 哨兵停车行(正向 shadow 给冲突行写的非白名单 principal_type)必须谁也不放行。
+    # 管理库:把「主体类型」与「边的 role」两根轴交叉(与 SQLite 那份的 `managed` 同
+    # 一形态)。`group` 边发成 admin → 整组人可管理;`group_admins` 边发成 viewer →
+    # 组管理员可读不可管。按 principal_type 推断管理权的实现会把两格同时判反。
+    managed_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Managed grant"), owner.id
+    )
+    _pg_grant(
+        core_stores, "gr-managed-group", managed_id, "group", viewers, owner.id,
+        role="admin",
+    )
+    _pg_grant(
+        core_stores, "gr-managed-admins", managed_id, "group_admins", admins, owner.id,
+        role="viewer",
+    )
+
+    # 哨兵停车行(正向 shadow 给冲突行写的非白名单 principal_type)必须谁也不放行,
+    # 含最后那行带 `role='admin'` 的——管理权谓词比读权多一个 role 条件,于是多一种
+    # 「先判 role、再放宽主体白名单」的失守形态,那行专钉它。
     sentinel_id = core_stores.notebooks.create_row(
         NotebookCreate(name="Parked grant"), owner.id
     )
@@ -576,32 +597,48 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
             principal_id,
             owner.id,
         )
+    _pg_grant(
+        core_stores, "gr-parked-admin", sentinel_id, "__shadow_parked__", admins,
+        owner.id, role="admin",
+    )
     missing = "nb-does-not-exist"
 
-    # (user_id, notebook_id, 期望读权, 期望写权, P1 之前的旧读权口径)
+    # (user_id, notebook_id, 期望读权, 期望**管理权**, 期望写权, P1 之前的旧读权口径)
     expected = [
-        (owner.id, notebook_id, True, True, True),
-        (member.id, notebook_id, True, False, True),  # 只读成员:能读,绝不能写
-        (stranger.id, notebook_id, False, False, False),
-        (grantee.id, notebook_id, True, False, False),
-        (group_member.id, notebook_id, True, False, False),
-        (group_admin.id, notebook_id, True, False, False),
-        (group_plain.id, notebook_id, False, False, False),
-        (owner.id, everyone_id, True, True, True),
-        (stranger.id, everyone_id, True, False, False),
-        (group_plain.id, everyone_id, True, False, False),
-        (owner.id, sentinel_id, True, True, True),
-        (stranger.id, sentinel_id, False, False, False),
-        (grantee.id, sentinel_id, False, False, False),
-        (group_member.id, sentinel_id, False, False, False),
-        (owner.id, missing, False, False, False),  # 不存在的 notebook:两权皆否
-        (member.id, missing, False, False, False),
-        (stranger.id, missing, False, False, False),
-        (grantee.id, missing, False, False, False),
+        (owner.id, notebook_id, True, True, True, True),
+        (member.id, notebook_id, True, False, False, True),  # 只读成员:能读,不能管/写
+        (stranger.id, notebook_id, False, False, False, False),
+        (grantee.id, notebook_id, True, False, False, False),
+        (group_member.id, notebook_id, True, False, False, False),
+        # P2 翻的那一格:管理边 → 管理权真,写权仍假(他不是 owner)。
+        (group_admin.id, notebook_id, True, True, False, False),
+        (group_plain.id, notebook_id, False, False, False, False),
+        (owner.id, everyone_id, True, True, True, True),
+        (stranger.id, everyone_id, True, False, False, False),
+        (group_plain.id, everyone_id, True, False, False, False),
+        (owner.id, managed_id, True, True, True, True),
+        (group_member.id, managed_id, True, True, False, False),   # group 边 + admin
+        (group_admin.id, managed_id, True, False, False, False),   # group_admins + viewer
+        (group_plain.id, managed_id, False, False, False, False),
+        (stranger.id, managed_id, False, False, False, False),
+        (owner.id, sentinel_id, True, True, True, True),
+        (stranger.id, sentinel_id, False, False, False, False),
+        (grantee.id, sentinel_id, False, False, False, False),
+        (group_member.id, sentinel_id, False, False, False, False),
+        (group_admin.id, sentinel_id, False, False, False, False),
+        (owner.id, missing, False, False, False, False),  # 不存在的 notebook:三权皆否
+        (member.id, missing, False, False, False, False),
+        (stranger.id, missing, False, False, False, False),
+        (grantee.id, missing, False, False, False, False),
+        (group_admin.id, missing, False, False, False, False),
     ]
-    for user_id, target, expect_read, expect_write, legacy_read in expected:
+    for user_id, target, expect_read, expect_admin, expect_write, legacy_read in expected:
         assert sharing.user_can_read_notebook(target, user_id) is expect_read
+        assert sharing.user_can_admin_notebook(target, user_id) is expect_admin
         assert sharing.user_can_access_notebook(target, user_id) is expect_write
+        # 包含链 `写权 ⊆ 管理权 ⊆ 读权` 逐格成立(与 SQLite 那份同款结构断言)。
+        assert not (expect_write and not expect_admin)
+        assert not (expect_admin and not expect_read)
         # P1 之前 service 层的旧口径(写权 or 成员):老主体上必须与新谓词逐格相同,
         # 只有授权边主体才允许「新真旧假」。
         legacy = sharing.user_can_access_notebook(
@@ -610,7 +647,7 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
         assert legacy is legacy_read
         assert not (legacy and not expect_read)
 
-    # 读权是实时判定而非一次性授予:踢掉成员/组成员/授权边都即刻失读权。
+    # 读权/管理权都是实时判定而非一次性授予:踢掉成员/组成员/授权边都即刻失效。
     sharing.remove_member(notebook_id, member.id)
     assert sharing.user_can_read_notebook(notebook_id, member.id) is False
     assert sharing.user_can_access_notebook(notebook_id, member.id) is False
@@ -622,7 +659,29 @@ def test_access_predicates_match_the_sqlite_matrix(core_stores: CoreStores):
         connection.execute("DELETE FROM notebook_grants WHERE id='gr-user'")
     assert sharing.user_can_read_notebook(notebook_id, group_member.id) is False
     assert sharing.user_can_read_notebook(notebook_id, grantee.id) is False
-    # group_admins 那条边没动,组管理员仍可读——上面两条删除没有误伤别的主体。
+    # group_admins 那条边没动,组管理员仍可读可管——上面两条删除没有误伤别的主体。
+    assert sharing.user_can_read_notebook(notebook_id, group_admin.id) is True
+    assert sharing.user_can_admin_notebook(notebook_id, group_admin.id) is True
+
+    # 组内降级即刻失管理权,读权跟着一起没(那条边是他唯一的读权来源)。
+    with core_stores.database.write() as connection:
+        connection.execute(
+            "UPDATE group_members SET role='member' WHERE group_id=%s AND user_id=%s",
+            (admins, group_admin.id),
+        )
+    assert sharing.user_can_admin_notebook(notebook_id, group_admin.id) is False
+    assert sharing.user_can_read_notebook(notebook_id, group_admin.id) is False
+
+    # 把管理边降成 viewer:管理权当场消失,读权原样保留(两根轴各判各的)。
+    with core_stores.database.write() as connection:
+        connection.execute(
+            "UPDATE group_members SET role='admin' WHERE group_id=%s AND user_id=%s",
+            (admins, group_admin.id),
+        )
+        connection.execute(
+            "UPDATE notebook_grants SET role='viewer' WHERE id='gr-admins'"
+        )
+    assert sharing.user_can_admin_notebook(notebook_id, group_admin.id) is False
     assert sharing.user_can_read_notebook(notebook_id, group_admin.id) is True
 
 
@@ -952,6 +1011,29 @@ def test_point_query_forms_of_the_two_list_projections(core_stores: CoreStores):
     assert [row["id"] for row in all_joined] == [joined]
     assert [row["id"] for row in one_joined] == [joined]
     assert other_joined == []             # 那本库没有成员行
+
+    # P2-T2:两条形态都必须带回**边自己的 role**(`can_manage_content` 的派生源,
+    # 零新增查询)。少这一列不会报错——`notebook_grant_confers_admin` 读不到键时按
+    # False 收,于是 PG 部署的组管理员静默看不到任何写入口,而 SQLite 部署照常。
+    from app.repositories.group_rows import notebook_grant_confers_admin
+
+    for row in (*all_granted, *one_granted):
+        assert row["_grant_role"] == "viewer"
+        assert notebook_grant_confers_admin(row) is False
+
+    groups.create_grant(
+        granted,
+        principal_type="group_admins",
+        principal_id=group["id"],
+        role="admin",
+        created_by=owner.id,
+        admin_user_id=owner.id,
+    )
+    groups.upsert_member(group["id"], member.id, role="admin", added_by=owner.id)
+    with core_stores.database.connect() as connection:
+        rows = queries.granted_notebook_rows(connection, member.id, notebook_id=granted)
+    assert sorted(row["_grant_role"] for row in rows) == ["admin", "viewer"]
+    assert any(notebook_grant_confers_admin(row) for row in rows)
 
 
 def test_notebook_row_reports_the_share_token_without_minting_one(

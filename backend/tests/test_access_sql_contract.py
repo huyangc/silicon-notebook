@@ -2,12 +2,17 @@
 """notebook 授权谓词唯一定义点(`repositories/*/access_sql.py`)的行为契约。
 
 P0-T1 把散落在 sharing_store / memory_store / search 的「owner ∨ 只读成员」手写复刻
-收进唯一定义点;P1-T2 在同一处把读权扩成「owner ∪ 只读成员 ∪ 有效授权边」。这份
-矩阵钉住的是**哪一格该翻、哪一格绝不许翻**:
+收进唯一定义点;P1-T2 在同一处把读权扩成「owner ∪ 只读成员 ∪ 有效授权边」;
+P2-T2 在同一处新增第三条谓词——**管理权** = owner ∪ `role='admin'` 的有效授权边。
+这份矩阵钉住的是**哪一格该翻、哪一格绝不许翻**:
 
-* 写权恒为 owner-only —— 只读成员与群组被授权者都是**访客**,读权扩了这一列不得
-  跟着松(组管理员的写权是 P2 的能力翻转)。
-* 不存在的 notebook 两权皆否(无行 → False),不抛异常、不泄露存在性。
+* 写权(`user_can_access_notebook`)恒为 owner-only —— 只读成员、viewer 边、
+  **乃至持管理边的组管理员**都不得为真。P2 翻的是能力表(`deps._CAPABILITY_LEVELS`
+  把六个能力从 owner 档挪到 admin 档),**不是**这条谓词:它仍然是
+  `notebook:delete` 与 Agent/MCP 面的实现,松了它就等于把删库一起送出去。
+* 管理权(`user_can_admin_notebook`)= owner ∪ 管理边。这一列是 P2 唯一的新列。
+* 包含链 `写权 ⊆ 管理权 ⊆ 读权` 逐格成立(`test_predicate_levels_are_nested`)。
+* 不存在的 notebook 三权皆否(无行 → False),不抛异常、不泄露存在性。
 * `legacy_read` 一列是 P1 之前的口径(`写权 or is_member`)。它钉的是**旧口径没被
   顺手改**,外加「只许扩、不许收窄既有主体」这条单调性。它并**不**是防「全放行」的
   那道闸——那由矩阵里 `expect_read=False` 的格子(陌生人、`group_plain`、哨兵库)
@@ -136,12 +141,26 @@ def world(repo):
     everyone_nb = _mk_nb(repo, owner=owner)
     _mk_grant(repo, everyone_nb, "everyone", "")
 
-    # 哨兵库:三行停车中的授权边,分别长得像「everyone」「点名 stranger」「点名
-    # grp-viewers」。四值精确匹配下它们一行都不生效。
+    # 管理库(P2-T2):把「主体类型」与「边的 role」这**两根轴**拆开测。
+    # 上面那本 `notebook` 里两者恰好同向(group→viewer、group_admins→admin),
+    # 于是「组管理员可管理」既可能是主体判对了,也可能是把 group_admins 主体当成了
+    # 管理权——两种实现在那本库上给出完全相同的答案。这本库把它们交叉过来:
+    #   * `group` 边发成 `admin`  → 整组人(含普通成员 group_member)都可管理;
+    #   * `group_admins` 边发成 `viewer` → 组管理员(group_admin)可读但**不可管理**。
+    # 任何「按 principal_type 推断管理权」的实现都会在这本库上把两格都判反。
+    admin_nb = _mk_nb(repo, owner=owner)
+    _mk_grant(repo, admin_nb, "group", viewers, role="admin")
+    _mk_grant(repo, admin_nb, "group_admins", admins, role="viewer")
+
+    # 哨兵库:四行停车中的授权边,分别长得像「everyone」「点名 stranger」「点名
+    # grp-viewers」,外加一行**带 `role='admin'`** 的。四值精确匹配下它们一行都不
+    # 生效;最后那行专钉管理权谓词——它比读权多一个 `role='admin'` 条件,一个
+    # 「role 对了就放行、主体白名单写漏了」的实现只会在这一行上暴露。
     sentinel_nb = _mk_nb(repo, owner=owner)
     _mk_grant(repo, sentinel_nb, PARKED_PRINCIPAL_TYPE, "")
     _mk_grant(repo, sentinel_nb, PARKED_PRINCIPAL_TYPE, stranger)
     _mk_grant(repo, sentinel_nb, PARKED_PRINCIPAL_TYPE, viewers)
+    _mk_grant(repo, sentinel_nb, PARKED_PRINCIPAL_TYPE, admins, role="admin")
 
     return {
         "repo": repo,
@@ -156,35 +175,53 @@ def world(repo):
         "admins": admins,
         "notebook": notebook,
         "everyone": everyone_nb,
+        "managed": admin_nb,
         "sentinel": sentinel_nb,
         "missing": MISSING_NOTEBOOK,
     }
 
 
-# (主体键, notebook 键, 期望读权, 期望写权, P1 之前的旧读权口径)
+# (主体键, notebook 键, 期望读权, 期望**管理权**, 期望写权, P1 之前的旧读权口径)
+#
+# 管理权那一列是 P2-T2 新增的。写权那一列**逐格未变**——这份矩阵在 P2 的改动里
+# 一个 `expect_write` 都没有翻,那正是「写权谓词本身没被顺手放宽」的可执行证据。
 ACCESS_MATRIX = [
-    ("owner", "notebook", True, True, True),
-    ("member", "notebook", True, False, True),       # 只读成员:能读,绝不能写
-    ("stranger", "notebook", False, False, False),
-    # ↓ P1 翻的正是这三格,且只有这三格。
-    ("grantee", "notebook", True, False, False),     # principal_type='user'
-    ("group_member", "notebook", True, False, False),   # principal_type='group'
-    ("group_admin", "notebook", True, False, False),    # principal_type='group_admins'
+    ("owner", "notebook", True, True, True, True),
+    ("member", "notebook", True, False, False, True),   # 只读成员:能读,不能管、不能写
+    ("stranger", "notebook", False, False, False, False),
+    # ↓ P1 翻的正是这三格,且只有这三格(读权那一列)。
+    ("grantee", "notebook", True, False, False, False),      # principal_type='user'
+    ("group_member", "notebook", True, False, False, False),  # principal_type='group'
+    # ↓ P2-T2 翻的**唯一**一格:group_admins 主体 + role='admin' 的边 → 管理权为真。
+    #   写权那一列仍是 False —— 组管理员**不是** owner,删库与 Agent 面照旧拒绝。
+    ("group_admin", "notebook", True, True, False, False),
     # 授权给「组管理员」的库,组里的普通成员读不到(除非另有 group 行)。
-    ("group_plain", "notebook", False, False, False),
-    # everyone 授权:任何登录用户都能读,但一个字的写权都不给。
-    ("owner", "everyone", True, True, True),
-    ("stranger", "everyone", True, False, False),
-    ("group_plain", "everyone", True, False, False),
-    # 哨兵停车行:谁也匹配不上,owner 仍按 owner 分支照常可读。
-    ("owner", "sentinel", True, True, True),
-    ("stranger", "sentinel", False, False, False),
-    ("grantee", "sentinel", False, False, False),
-    ("group_member", "sentinel", False, False, False),
-    ("owner", "missing", False, False, False),       # 不存在的 notebook:两权皆否
-    ("member", "missing", False, False, False),
-    ("stranger", "missing", False, False, False),
-    ("grantee", "missing", False, False, False),
+    ("group_plain", "notebook", False, False, False, False),
+    # everyone 授权:任何登录用户都能读,但一个字的写权/管理权都不给
+    # (那批边的 role 是 viewer;everyone+admin 由 app 层发放口径挡住)。
+    ("owner", "everyone", True, True, True, True),
+    ("stranger", "everyone", True, False, False, False),
+    ("group_plain", "everyone", True, False, False, False),
+    # ↓ 管理库:两根轴交叉,专拆「principal_type 与 role 谁决定管理权」。
+    ("owner", "managed", True, True, True, True),
+    # group 边发成 admin:整组人(含**普通**组成员)都可管理。
+    ("group_member", "managed", True, True, False, False),
+    # group_admins 边发成 viewer:组管理员可读,**不可管理**。
+    ("group_admin", "managed", True, False, False, False),
+    # 该组的普通成员连读都不该有(group_admins 边只到管理员)。
+    ("group_plain", "managed", False, False, False, False),
+    ("stranger", "managed", False, False, False, False),
+    # 哨兵停车行:谁也匹配不上(含那行 role='admin' 的),owner 仍按 owner 分支照常。
+    ("owner", "sentinel", True, True, True, True),
+    ("stranger", "sentinel", False, False, False, False),
+    ("grantee", "sentinel", False, False, False, False),
+    ("group_member", "sentinel", False, False, False, False),
+    ("group_admin", "sentinel", False, False, False, False),
+    ("owner", "missing", False, False, False, False),  # 不存在的 notebook:三权皆否
+    ("member", "missing", False, False, False, False),
+    ("stranger", "missing", False, False, False, False),
+    ("grantee", "missing", False, False, False, False),
+    ("group_admin", "missing", False, False, False, False),
 ]
 
 # 「片段嵌进更大的查询」类测试统一用这批主体:每种授权路径至少一个,外加一个必须
@@ -201,12 +238,12 @@ _EMBED_SUBJECTS = (
 
 
 @pytest.mark.parametrize(
-    "subject,target,expect_read,expect_write,legacy_read",
+    "subject,target,expect_read,expect_admin,expect_write,legacy_read",
     ACCESS_MATRIX,
-    ids=[f"{s}-{t}" for s, t, _r, _w, _l in ACCESS_MATRIX],
+    ids=[f"{s}-{t}" for s, t, _r, _a, _w, _l in ACCESS_MATRIX],
 )
-def test_read_and_write_predicates_match_the_pre_refactor_matrix(
-    world, subject, target, expect_read, expect_write, legacy_read
+def test_read_admin_and_write_predicates_match_the_matrix(
+    world, subject, target, expect_read, expect_admin, expect_write, legacy_read
 ):
     del legacy_read
     repo = world["repo"]
@@ -214,11 +251,45 @@ def test_read_and_write_predicates_match_the_pre_refactor_matrix(
     notebook_id = world[target]
 
     assert repo.user_can_read_notebook(notebook_id, user_id) is expect_read
+    assert repo.user_can_admin_notebook(notebook_id, user_id) is expect_admin
     assert repo.user_can_access_notebook(notebook_id, user_id) is expect_write
 
 
+@pytest.mark.parametrize(
+    "subject,target,expect_read,expect_admin,expect_write,legacy_read",
+    ACCESS_MATRIX,
+    ids=[f"{s}-{t}" for s, t, _r, _a, _w, _l in ACCESS_MATRIX],
+)
+def test_predicate_levels_are_nested(
+    world, subject, target, expect_read, expect_admin, expect_write, legacy_read
+):
+    """`写权 ⊆ 管理权 ⊆ 读权` 逐格成立。
+
+    这条不是重复上面那份矩阵,而是钉住三条谓词之间的**结构关系**:管理权谓词是
+    「读权那四条臂 ∧ role='admin'」拼出来的,所以它**永远**不可能比读权宽——真出现
+    「能管却不能读」的格子,只可能是有人另抄了一份主体判定并在里面漏了一条臂
+    (那正是唯一定义点要防的形态,而它在单条谓词的行为矩阵里看不出来)。
+    """
+    del legacy_read
+    repo = world["repo"]
+    user_id, notebook_id = world[subject], world[target]
+
+    can_read = repo.user_can_read_notebook(notebook_id, user_id)
+    can_admin = repo.user_can_admin_notebook(notebook_id, user_id)
+    can_write = repo.user_can_access_notebook(notebook_id, user_id)
+    assert (can_read, can_admin, can_write) == (expect_read, expect_admin, expect_write)
+    assert not (can_write and not can_admin), "写权跑到管理权之外了"
+    assert not (can_admin and not can_read), "管理权跑到读权之外了"
+
+
 def test_write_predicate_stays_owner_only_for_every_member(world):
-    """写权是安全边界:凡不是 owner,一律没有写权——读权扩到群组后这条不得松。"""
+    """写权是安全边界:凡不是 owner,一律没有写权。
+
+    ⚠ P2 的能力翻转发生在 `deps._CAPABILITY_LEVELS`(六个能力从 owner 档挪到 admin
+    档),**不在这条谓词上**:它仍然是 `notebook:delete` 与 Agent/MCP 面的实现。所以
+    持管理边的 `group_admin` 在这里必须仍为 False —— 顺手把它放宽就等于把「删掉整本
+    库」和「Agent token 写别人的库」一起送出去。
+    """
     repo, notebook = world["repo"], world["notebook"]
     assert repo.user_can_access_notebook(notebook, world["owner"]) is True
     for key in ("member", "stranger", "grantee", "group_member", "group_admin"):
@@ -227,17 +298,136 @@ def test_write_predicate_stays_owner_only_for_every_member(world):
         assert repo.user_can_access_notebook(notebook, non_owner) is False
     # everyone 授权同样一个字的写权都不给。
     assert repo.user_can_access_notebook(world["everyone"], world["stranger"]) is False
+    # 管理库上「整组可管理」的那条边同样不给写权。
+    assert repo.user_can_access_notebook(world["managed"], world["group_member"]) is False
+
+
+def test_admin_predicate_tracks_the_grant_role_not_the_principal_type(world):
+    """管理权判的是**边自己的 `role`**,不是 `principal_type`。
+
+    这条把 `managed` 库那两格单独说清楚:`group_admins` 主体 + viewer 边 → 不可管理;
+    `group` 主体 + admin 边 → 连组里的普通成员都可管理。把 `group_admins` 主体当成
+    「管理权」的实现(一个非常自然的误读——名字里就带 admins)会把两格同时判反,而
+    在 `notebook` 那本库上它给出的答案与正确实现**逐格相同**。
+    """
+    repo, managed = world["repo"], world["managed"]
+    assert repo.user_can_admin_notebook(managed, world["group_admin"]) is False
+    assert repo.user_can_read_notebook(managed, world["group_admin"]) is True
+    assert repo.user_can_admin_notebook(managed, world["group_member"]) is True
+
+
+def test_downgrading_the_grant_role_revokes_admin_but_keeps_read(world):
+    """把管理边改成 viewer:管理权当场消失,读权原样保留(实时判定,不是一次性授予)。"""
+    repo, notebook = world["repo"], world["notebook"]
+    group_admin = world["group_admin"]
+    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebook_grants SET role='viewer' "
+            "WHERE notebook_id=? AND principal_type='group_admins'",
+            (notebook,),
+        )
+    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+    assert repo.user_can_read_notebook(notebook, group_admin) is True
+
+
+def test_deleting_the_admin_grant_edge_revokes_admin(world):
+    """删掉管理边即刻失管理权(读权也一并没了——那条边是他唯一的读权来源)。"""
+    repo, notebook = world["repo"], world["notebook"]
+    group_admin = world["group_admin"]
+    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    _delete_rows(
+        repo,
+        "DELETE FROM notebook_grants WHERE notebook_id=? AND principal_type='group_admins'",
+        (notebook,),
+    )
+    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+    assert repo.user_can_read_notebook(notebook, group_admin) is False
+
+
+def test_demoting_a_group_admin_revokes_admin_capability(world):
+    """组内降级(role='member')同样即刻失管理权——两根轴任一为假即为假。"""
+    repo, notebook = world["repo"], world["notebook"]
+    group_admin, admins = world["group_admin"], world["admins"]
+    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    with repo._write() as db:
+        db.execute(
+            "UPDATE group_members SET role='member' WHERE group_id=? AND user_id=?",
+            (admins, group_admin),
+        )
+    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+
+
+def test_admin_grant_pointing_at_a_deleted_group_fails_closed(world):
+    """管理边指向已删组:`group_members` 经 CASCADE 消失,管理权当场为假。
+
+    与读权那条同款的 fail-safe:授权边行本身还在(`principal_id` 无 FK),但谓词
+    join 不到成员,所以孤儿管理边不会留下一条越权写通道。
+    """
+    repo, notebook = world["repo"], world["notebook"]
+    group_admin = world["group_admin"]
+    assert repo.user_can_admin_notebook(notebook, group_admin) is True
+    with repo._write() as db:
+        db.execute("PRAGMA foreign_keys = ON")
+        db.execute("DELETE FROM groups WHERE id=?", (world["admins"],))
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM notebook_grants "
+            "WHERE notebook_id=? AND principal_type='group_admins'",
+            (notebook,),
+        ).fetchone()["c"]
+    assert remaining == 1, "授权边行刻意保留:这条测的是谓词侧的 fail-safe"
+    assert repo.user_can_admin_notebook(notebook, group_admin) is False
+
+
+def test_parked_sentinel_admin_grant_matches_nobody(world):
+    """带 `role='admin'` 的哨兵停车行同样谁也匹配不上。
+
+    管理权谓词比读权多一个 `role='admin'` 条件,所以它有一种读权没有的失守形态:
+    实现者先判 role、再「反正 role 对了」放宽主体白名单。哨兵库那行
+    (`principal_type` 是停车串、`principal_id` 指向 grp-admins、`role='admin'`)
+    专钉这一形态。
+    """
+    repo, sentinel = world["repo"], world["sentinel"]
+    for key in ("stranger", "grantee", "group_member", "group_admin", "group_plain", "member"):
+        assert repo.user_can_admin_notebook(sentinel, world[key]) is False, key
+    assert repo.user_can_admin_notebook(sentinel, world["owner"]) is True
+
+
+def test_admin_grant_role_literal_agrees_across_its_three_spellings():
+    """`'admin'` 这个字面量在三处独立出现,必须是同一个值。
+
+    `models/groups.py::GRANT_ROLES`(API 校验)、`group_rows.ADMIN_GRANT_ROLE`
+    (行整形)、两份 `access_sql` 的谓词文本(SQL)刻意不互相 import(会成环),
+    所以由这条断言把三处钉在一起——改其中一处而漏掉另一处,表现是「API 收下了这个
+    role,但谓词/投影认不出它」,不报错、只是权限静默失效。
+    """
+    from app.models.groups import GRANT_ROLES
+    from app.repositories.group_rows import ADMIN_GRANT_ROLE
+    from app.repositories.postgres import access_sql as pg
+
+    assert ADMIN_GRANT_ROLE in GRANT_ROLES
+    for mod in (access_sql, pg):
+        assert f"ng.role='{ADMIN_GRANT_ROLE}'" in mod.NOTEBOOK_ADMIN_SQL
+        # 反向:读权谓词里**绝不许**出现授权边(别名 `ng`)自己的 role 条件——读权
+        # 对 viewer 边必须照样为真。`nga.role='admin'` 是**组成员**角色,另一根轴,
+        # 读权那条臂本来就有它,所以判据必须精确到别名。
+        assert "ng.role=" not in mod.read_access_clause(), (
+            "读权谓词里出现了授权边的 role 条件——读权对 viewer 边必须照样为真"
+        )
+        assert "nga.role='admin'" in mod.read_access_clause(), (
+            "读权谓词丢了 group_admins 那条臂的组成员角色条件"
+        )
 
 
 @pytest.mark.parametrize(
-    "subject,target,expect_read,expect_write,legacy_read",
+    "subject,target,expect_read,expect_admin,expect_write,legacy_read",
     ACCESS_MATRIX,
-    ids=[f"{s}-{t}" for s, t, _r, _w, _l in ACCESS_MATRIX],
+    ids=[f"{s}-{t}" for s, t, _r, _a, _w, _l in ACCESS_MATRIX],
 )
-def test_service_read_predicate_agrees_with_the_store_predicate(
-    world, subject, target, expect_read, expect_write, legacy_read
+def test_service_predicates_agree_with_the_store_predicates(
+    world, subject, target, expect_read, expect_admin, expect_write, legacy_read
 ):
-    """service 一跳委托 store 之后,两层必须逐格同义。
+    """service 一跳委托 store 之后,两层必须逐格同义(读权与管理权各一条)。
 
     另钉住 P1 的读权扩展**恰好**发生在授权边那几格:旧口径(写权 or 成员)在老主体
     上必须与新谓词逐格相同,只有授权边主体才允许出现「新真旧假」。反过来任何一格
@@ -252,6 +442,11 @@ def test_service_read_predicate_agrees_with_the_store_predicate(
     store_result = store.user_can_read_notebook(notebook_id, user_id)
     assert store_result is expect_read
     assert repo.user_can_read_notebook(notebook_id, user_id) is store_result
+
+    store_admin = store.user_can_admin_notebook(notebook_id, user_id)
+    assert store_admin is expect_admin
+    assert repo.user_can_admin_notebook(notebook_id, user_id) is store_admin
+
     legacy = store.user_can_access_notebook(notebook_id, user_id) or store.is_member(
         notebook_id, user_id
     )
@@ -373,6 +568,28 @@ def test_read_clause_embeds_into_a_larger_query_with_identical_results(world):
                 embedded, (notebook, *access_sql.read_access_params(user_id))
             ).fetchone()
         assert (row is not None) is repo.user_can_read_notebook(notebook, user_id)
+
+
+def test_admin_clause_embeds_into_a_larger_query_with_identical_results(world):
+    """管理权的可嵌片段与完整查询同义 —— 与读权那条同款,理由也一样。
+
+    片段形式是给未来的消费点(投影/列表查询)准备的;它与 `NOTEBOOK_ADMIN_SQL` 一旦
+    漂移,「界面画不画写按钮」与「守卫放不放行」就会给出不同答案。
+    """
+    repo = world["repo"]
+    clause = access_sql.admin_access_clause()
+    embedded = "SELECT nb.id FROM notebooks nb WHERE nb.id=? AND " + clause
+    for target in ("notebook", "managed", "everyone", "sentinel"):
+        notebook_id = world[target]
+        for subject in _EMBED_SUBJECTS:
+            user_id = world[subject]
+            with repo._connect() as db:
+                row = db.execute(
+                    embedded, (notebook_id, *access_sql.admin_access_params(user_id))
+                ).fetchone()
+            assert (row is not None) is repo.user_can_admin_notebook(
+                notebook_id, user_id
+            ), (target, subject)
 
 
 def test_exists_form_agrees_with_the_joined_form(world):
@@ -509,9 +726,14 @@ _CALLABLE_PROBES = {
         "outer.notebook_id", "outer.user_id"
     ),
     "everyone_grant_expr": lambda mod: mod.everyone_grant_expr("outer.notebook_id"),
+    "admin_grant_access_expr": lambda mod: mod.admin_grant_access_expr(
+        "outer.notebook_id", "outer.user_id"
+    ),
     "read_access_clause": lambda mod: mod.read_access_clause(),
+    "admin_access_clause": lambda mod: mod.admin_access_clause(),
     "read_access_exists_clause": lambda mod: mod.read_access_exists_clause("m"),
     "read_access_params": lambda mod: repr(mod.read_access_params("U")),
+    "admin_access_params": lambda mod: repr(mod.admin_access_params("U")),
     "grant_probe_params": lambda mod: repr(mod.grant_probe_params("N", "U")),
 }
 

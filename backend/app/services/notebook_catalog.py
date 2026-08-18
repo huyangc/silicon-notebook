@@ -20,7 +20,10 @@ from app.models.notebooks import (
 from app.models.ask import SEARCH_HIT_CAP, NotebookSearchResponse, SearchHit
 from app.core import diagnostics_runtime as diagnostics
 from app.core.query_syntax import strip_accepted_quote_markers
-from app.repositories.group_rows import fold_granted_notebook_groups
+from app.repositories.group_rows import (
+    fold_granted_notebook_groups,
+    notebook_grant_confers_admin,
+)
 from app.repositories.ports import (
     IdentityStorePort,
     KgBuildJobStorePort,
@@ -279,19 +282,31 @@ class NotebookSummaryQuery:
           两份,而两份迟早会不一致(真正的权威是那道守卫,不是这段投影)。
         * `shared_from` 取 `_owner_username` —— 由 `summary_notebook_row` 的 LEFT JOIN
           随行带回,零新增往返。
-        * `granted_via` 的去重口径与列表**完全一致**:先按 `joined_notebook_rows` 的
-          点查形态判「有没有只读成员行」,**有就到此为止**(成员行优先,`granted_via`
-          留空);没有才发 `granted_notebook_rows` 的点查。两条都是列表那两条查询本身,
-          只是加了 notebook 过滤——谓词只有一份。
+        * `granted_via` 的去重口径与列表**完全一致**:成员行优先——有只读成员行就把
+          `granted_via` 留空。两条点查都是列表那两条查询本身,只是加了 notebook
+          过滤——谓词只有一份。
 
           交叉态(既经分享链接加入、又在被授权的群组里)必须落在成员行那一支:他手上
           的「退出共享」删的正是那条成员行,是一个**真的有效**的动作;按群组来源把它
           藏起来等于拿走一个能用的出口。删掉成员行之后,群组授权接管,同一本库改带
           来源标注——列表与详情同时切换,不会一处一副面孔。
 
-        成本:owner 打开自己的库 **+0** 次查询(最常见的那条路);只读共享进来的 +1;
-        群组共享进来的 +2。`user_id` 缺席(非请求上下文的内部调用)时整段跳过,字段
-        保持默认——与本函数出现之前逐字一致。
+        * `can_manage_content`(P2-T2)由授权边行自己的 `_grant_role` 判定,与列表侧
+          **同一个派生规则**(`notebook_grant_confers_admin`)。⚠ 它**必须**在成员行
+          那一支之外单独算:管理权是权限,而「成员行优先」只是 `granted_via` 的展示
+          去重。交叉态的组管理员一样能写,把这个布尔一起藏进那条 return 会让列表说
+          「可管理」、详情说「只读」——同一本库两副面孔,正是上一段要防的东西。
+
+        ⚠ 两条点查的**顺序被 P2-T2 掉了个个**:先 granted、后 joined。语义逐字不变
+        (`granted_via` 仍是成员行优先),但查询次数逐形态不变:
+          * owner:+0(最常见的那条路,提前 return);
+          * 只读共享进来的:granted 点查为空 → `granted_via` 必然为空、
+            `can_manage_content` 必然为假,**成员行判不判都不改结果**,直接跳过 joined
+            那次点查 → 仍是 +1(与改前相同);
+          * 群组共享进来的:granted 非空,才需要 joined 点查决定要不要压掉
+            `granted_via` → +2(与改前相同)。
+        原来的顺序(先 joined 再 granted)拿不到交叉态的 `_grant_role`,而把 granted
+        无条件放在 joined 之后又会让只读共享那条路多付一次点查。
         """
         if not user_id:
             return
@@ -299,16 +314,22 @@ class NotebookSummaryQuery:
         owner_id = row["created_by"] if "created_by" in keys else None
         if owner_id == user_id:
             summary.access = "owner"
+            summary.can_manage_content = True
             return
         summary.access = "reader"
         summary.shared_from = (
             row["_owner_username"] or "" if "_owner_username" in keys else ""
         )
-        if self.queries.joined_notebook_rows(db, user_id, notebook_id=summary.id):
-            return
         granted = self.queries.granted_notebook_rows(
             db, user_id, notebook_id=summary.id
         )
+        if not granted:
+            return
+        summary.can_manage_content = any(
+            notebook_grant_confers_admin(item) for item in granted
+        )
+        if self.queries.joined_notebook_rows(db, user_id, notebook_id=summary.id):
+            return
         summary.granted_via = [
             GrantedGroupRef(**item)
             for item in fold_granted_notebook_groups(
@@ -429,6 +450,12 @@ class NotebookSummaryQuery:
         的组;三段按 owner → 成员 → 群组的顺序追加,已出现过的 id 直接跳过。判据放在
         这里而不是写进第三条 SQL 的 `NOT EXISTS`,是因为「已经产出了哪些库」这份事实
         本来就在手上,再用 SQL 算一遍就是同一判据的第二份拷贝。
+
+        `can_manage_content`(P2-T2)零新增查询:owner 那段恒 True;另外两段查
+        `admin_ids` —— 它由**去重之前**的全部授权边行折出来,所以交叉态(既有成员行、
+        又持管理边)的库落在成员那一段时照样为真。⚠ 从 `out` 里逐条判而不是只在群组
+        那一段赋值,正是为了这一条:被 `seen` 跳过的授权边行仍然携带权限事实,而它的
+        `granted_via`(纯展示)才是该被成员行压掉的那一半。
         """
         out: List[NotebookSummary] = []
         seen: set[str] = set()
@@ -442,6 +469,7 @@ class NotebookSummaryQuery:
                     memory_count=memory_counts.get((user_id, row["id"]), 0),
                 )
                 nb.access = "owner"
+                nb.can_manage_content = True
                 seen.add(nb.id)
                 out.append(nb)
             joined = self.queries.joined_notebook_rows(db, user_id)
@@ -456,6 +484,9 @@ class NotebookSummaryQuery:
                 seen.add(nb.id)
                 out.append(nb)
             granted = self.queries.granted_notebook_rows(db, user_id)
+            admin_ids = {
+                row["id"] for row in granted if notebook_grant_confers_admin(row)
+            }
             groups_by_notebook = fold_granted_notebook_groups(
                 [
                     {
@@ -484,6 +515,9 @@ class NotebookSummaryQuery:
                     for item in groups_by_notebook.get(notebook_id, [])
                 ]
                 out.append(nb)
+        for nb in out:
+            if nb.id in admin_ids:
+                nb.can_manage_content = True
         return out
 
 

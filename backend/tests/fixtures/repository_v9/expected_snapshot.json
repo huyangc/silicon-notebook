@@ -353,6 +353,7 @@
       "base_kg_available": false,
       "base_kg_notebook_ids": [],
       "base_notebooks": [],
+      "can_manage_content": true,
       "counts": {
         "cases": 0,
         "checklist_items": 0,

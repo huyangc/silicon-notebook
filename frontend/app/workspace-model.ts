@@ -84,6 +84,18 @@ export type NotebookSummary = {
    * 出口，群组共享没有（那个按钮打的是成员表，对授权边一点作用都没有）。
    */
   granted_via?: GrantedGroupRef[];
+  /**
+   * 本用户对这本库是否持有**内容管理权**（群组知识共享 P2，裁决 P2-3）。
+   *
+   * = owner ∨ 一条 `role='admin'` 的有效授权边。组管理员打开被共享进本组的库时，
+   * `access` 仍是 `"reader"`（那是权限档，没有新增枚举值），但来源添加/删除/重解析、
+   * 图谱与索引构建、knowhow 写、知识治理写、分享管理这些入口必须画出来。
+   *
+   * 缺失/false = 只读，与本字段出现之前逐字一致（旧后端不发它）。读法只有一处：
+   * `workspaceCapabilities`——别在组件里直接判它，否则「哪些入口算内容管理」会散成
+   * 二十几份。
+   */
+  can_manage_content?: boolean;
   paper_meta_backfilling?: boolean;
   /**
    * 是否存在缺论文元数据的合规候选源(后端按「补全论文信息」真正会排队的同一
