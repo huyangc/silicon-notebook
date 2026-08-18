@@ -1,10 +1,13 @@
-"""守卫:共享底座的巡固输入**结构上**够不到任何成员的使用数据。
+"""守卫:两条巡固链路各自**结构上**只够得到它该够得到的那部分数据。
 
 设计 §5.3 / §12-Q2 把这条隔离建成了「取数 SQL 拿不到」而不是「prompt 里请求别写」,
-理由是后者不可验证。这个文件把那句话变成一条静态判据。
+理由是后者不可验证。这个文件把那句话变成静态判据。两条链路的判据方向相反:
 
-**两层,都是 allowlist(白名单),不是 denylist(黑名单)。** 这是这份守卫与它上一版
-最重要的区别:上一版扫的是「函数体里有没有出现 `ask_jobs` 这六个字符串」。那种形态
+* **共享底座**(一库一份、全体成员可见)——不许读**任何**成员的使用数据;
+* **覆盖层**(per (notebook, user)、只有本人可见)——只许读**它自己那位成员**的。
+
+**三层,全部是 allowlist(白名单),不是 denylist(黑名单)。** 这是这份守卫与它上一
+版最重要的区别:上一版扫的是「函数体里有没有出现 `ask_jobs` 这六个字符串」。那种形态
 只拦得住**已经想到的**六个名字,而 `agent_profile_job.py` 里新加一个读取时,它一个字
 都不会说。真正要钉的不是「别读这六张表」,而是「只许读登记过的那几样」。
 
@@ -12,30 +15,30 @@
   `AgentProfileConsolidationService` 的每个方法,都必须落进
   `BASE_CHAIN_FUNCTIONS` / `OVERLAY_CHAIN_FUNCTIONS` / `NEUTRAL_FUNCTIONS`
   三个显式集合之一。**新增一个没登记的函数就报红**——那正是「悄悄加一条读」的入口。
-  `OVERLAY_CHAIN_FUNCTIONS` 今天是空集(覆盖层是 T5),它存在是为了让 T5 落地时
-  作者必须显式声明「这个函数属于覆盖层」,而不是往中性集合里一扔。
-* **层二(端口调用白名单)**:底座链路的函数体内,对 `self.profiles` /
-  `self.sources` / `self.queries` 这三个座位调用的方法名,必须在
-  `ALLOWED_PORT_CALLS` 里。白名单之外的端口方法(比如 `queries.list_user_activity`)
-  即报红——它拦的是「经另一个 store 端口读使用数据」这条更省事、也更可能被写出来的
-  路径,而且不需要预先知道那个方法叫什么。
+* **层二(端口调用白名单,每类一张)**:函数体内对 `self.profiles` / `self.sources`
+  / `self.queries` / `self.ask_state` 四个座位调用的方法名,必须在**它所属那一类**
+  的白名单里。底座那张不含轨迹读,覆盖层那张含,中性那张只许收尾自己那一行 job 状态
+  ——最后这张堵的是分类制度自己的后门(往中性一扔就谁也扫不到它)。它拦的是「经另一
+  个 store 端口读使用数据」这条更省事、也更可能被写出来的路径,而且不需要预先知道那
+  个方法叫什么。
+* **层三(轨迹读的 SQL 谓词)**:覆盖层那条读的判据是反过来的——每条 SQL **字面量**
+  必须自带 `created_by` 谓词。这一层扫的不是服务层而是**两个后端的
+  `ask_state_store.py`**:`TRACE_READ_METHODS` 里登记的方法,它体内每一条 SQL 字符串
+  都必须含该谓词。把谓词从 SQL 挪到 Python 侧过滤即报红——那正是这条隔离最可能被
+  「重构掉」的形态,因为过滤写在 Python 里读起来完全正常。
 
 **这份守卫能挡什么、不能挡什么**(docstring 只声称真的挡得住的):
-  · 挡得住:模块内新增未分类函数;底座函数调用未登记的端口方法。
-  · **挡不住**:底座函数里 `import` 另一个模块再从它读(层二只看三个座位上的属性
-    调用);经 `self.database` 手写 SQL 字符串(那条路今天没有,`corpus_stats` 只把
-    连接转交给端口方法)。这两条靠评审,不靠本文件——写一句它兑现不了的承诺,比不
-    写更糟。
+  · 挡得住:模块内新增未分类函数;某类函数调用不属于它那类的端口方法;登记过的轨迹
+    读把 user 谓词挪出 SQL。
+  · **挡不住**:函数里 `import` 另一个模块再从它读(层二只看四个座位上的属性调用);
+    经 `self.database` 手写 SQL 字符串(那条路今天没有,`corpus_stats` 只把连接转交
+    给端口方法);覆盖层**新增**一条按 user 收窄的读而不登记进 `TRACE_READ_METHODS`
+    ——层二会拦下它的方法名,但层三不会去读它的 SQL。这几条靠评审,不靠本文件——写
+    一句它兑现不了的承诺,比不写更糟。
 
 **为什么需要静态判据**:运行时测试只能证明「今天这条代码路径没读」,证不了「明天
 也读不到」。而这条隔离一旦破,后果不是报错而是**共享库里 A 的提问出现在 B 也能看到
 的块里**——一次静默的隐私事故,没有任何用例会因此变红。
-
-**层三(T5,覆盖层的轨迹读)**:覆盖层链路读的正是该成员自己的轨迹,所以它的判据是
-反过来的——每条读轨迹的 SQL **字面量**必须自带 `created_by` 谓词。这一层扫的不是
-服务层而是**两个后端的 `ask_state_store.py`**:`TRACE_READ_METHODS` 里登记的方法,
-它体内每一条 SQL 字符串都必须含该谓词。把谓词从 SQL 挪到 Python 侧过滤即报红——那
-正是这条隔离最可能被「重构掉」的形态,因为过滤在 Python 里读起来完全正常。
 
 不经 import 定位源文件:只需要读源码文本,不需要把服务层的依赖拖进这条离线判据。
 """
@@ -145,6 +148,19 @@ OVERLAY_ALLOWED_PORT_CALLS = frozenset({
     # 单飞与阈值(只碰这条链路自己那一行)
     "bump_signal",
     "claim",
+})
+
+#: 层二白名单:**中性**函数允许调用的端口方法名——只有这条链路自己那一行 job 状态
+#: 的收尾。
+#:
+#: ⚠ 这一条堵的是分类制度自己的后门:层一只要求「登记过」,而 NEUTRAL 是那三个集合
+#: 里唯一不带输入约束的。把一个新的取数函数往 NEUTRAL 一扔,层一绿、两条链路的层二
+#: 都不会 parametrize 到它,整份守卫一个字都不会说(变异实测:把 `usage_stats` 从
+#: 覆盖层搬进中性集合)。写死「中性 = 不取业务数据」之后,那条路就必须先把方法名加
+#: 进某张白名单,而加的那一刻正是「它会读到谁的数据」被想清楚的时刻。
+NEUTRAL_ALLOWED_PORT_CALLS = frozenset({
+    "settle",
+    "sweep_stale_on_start",
 })
 
 #: 层二检查的四个座位。`ask_state` 是 T5 新增的,登记它的**主要作用是让底座报红**:
@@ -277,6 +293,22 @@ def test_the_overlay_chain_only_calls_allowlisted_ports(function_name: str):
     )
 
 
+@pytest.mark.parametrize("function_name", sorted(NEUTRAL_FUNCTIONS))
+def test_neutral_functions_do_not_read_business_data(function_name: str):
+    """层二(中性):登记成「不取业务数据」的函数,必须真的不取。
+
+    没有这一条,`NEUTRAL_FUNCTIONS` 就是整份守卫的旁路:新增一个读使用数据的函数、
+    往中性集合一放,层一满意、两条链路的层二都扫不到它。
+    """
+    node = _functions(_SERVICE_PATH)[function_name]
+    offenders = sorted(_port_calls(node) - NEUTRAL_ALLOWED_PORT_CALLS)
+    assert offenders == [], (
+        f"登记为中性的 {function_name} 调用了取数端口方法:{offenders}。\n"
+        "中性的含义是「我看过它,它不取业务数据」。它一旦开始取数,就必须先归到底座"
+        "或覆盖层某一条链路上——那两条各有自己的输入约束,而中性没有。"
+    )
+
+
 @pytest.mark.parametrize("backend", sorted(_STORE_PATHS))
 @pytest.mark.parametrize("method_name", TRACE_READ_METHODS)
 def test_the_trace_read_carries_the_user_predicate_in_sql(
@@ -324,6 +356,7 @@ def test_the_allowlists_are_not_silently_empty():
     assert len(OVERLAY_CHAIN_FUNCTIONS) >= 11
     assert "usage_stats" in OVERLAY_CHAIN_FUNCTIONS
     assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 5
+    assert NEUTRAL_FUNCTIONS and len(NEUTRAL_ALLOWED_PORT_CALLS) == 2
     assert TRACE_READ_METHODS and len(_STORE_PATHS) == 2
 
 
