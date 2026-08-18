@@ -752,6 +752,13 @@ function referenceLocation(reference: AnswerReference): string {
 // 枚举清单行的引用(evidence_context.py collection_item_citations)不调
 // attach_citation_images,故 images 恒缺席;但枚举行**锚点**走的是别的装配点,可能带
 // 图——这里不做特判,读取路径对两者一视同仁,由数据形状自然决定是否渲染。
+//
+// F5(评审登记,checkpoint b6541f26):弹层高频开合(点引用→关闭→再点回同一条)会让
+// 附图重复下载——AuthedImage 卸载即 revoke objectURL,下次挂载是全新的 fetch,这里
+// 没有跨挂载的结果缓存。这是复用既有 AuthedImage 组件带来的已登记代价,不在本处
+// 加一层 blob 缓存去解决它:objectURL 的生命周期一旦要跨组件实例存活,谁负责在
+// 「最后一个引用者卸载」时 revoke 会显著复杂化,而附图请求本身走鉴权 fetch、体量
+// 有限,权衡后维持现状。
 function referenceImages(reference: AnswerReference): CitationImageLike[] {
   return reference.anchor?.images ?? reference.citation?.images ?? [];
 }

@@ -94,7 +94,14 @@ function AskDetailPane({
             buildingScaleIndex={false}
             feedbackSent=""
             memorySaved={false}
-            notebookId={item.notebook_id}
+            // F3(评审修复,checkpoint b6541f26):检索结果带图(T1/T2)的附图资产 URL
+            // 恒用**当前 active notebook**过权限；这里的 item.notebook_id 是被查看者
+            // 的笔记本，不是管理员自己的 active notebook，用它拼资产 URL 会打向一个
+            // 管理员未必在其 participant 集内的库、必 404。而 SelectedReferenceDetail
+            // 对 notebookId 为空已有既有行为——整个「本段附图」区不渲染，与「无图」
+            // 等价（见其 JSDoc）。管理员查看他人活动本就是只读排障场景，宁可不显示
+            // 附图，也不给一颗必然 404 的图片请求或误导性的直连。
+            notebookId={null}
             notebookNames={notebookNames}
             scaleIndexStatus={null}
           />
