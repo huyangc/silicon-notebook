@@ -560,3 +560,38 @@ def test_delete_requires_the_revision_the_browser_saw(tmp_path, monkeypatch):
         headers=other,
     )
     assert ghost.status_code == 409, ghost.text
+
+
+def test_get_reads_job_rows_before_blocks(tmp_path, monkeypatch):
+    """codex R7 P2:读序是契约——job 行先于块。
+
+    反序时「巡固在两读之间写块并 settle」会产出 done + 旧块,前端据此解除忙碌、
+    停止轮询,旧文本挂到重开面板;job 先走后同一交错最坏是 running + 新块,
+    下一拍轮询自然收敛。
+    """
+    from app.repositories.sqlite.agent_profile_store import AgentProfileStore
+
+    calls: list[str] = []
+    real_job_row = AgentProfileStore.job_row
+    real_read_blocks = AgentProfileStore.read_blocks
+
+    def spy_job_row(self, notebook_id, owner_id):
+        calls.append("job_row")
+        return real_job_row(self, notebook_id, owner_id)
+
+    def spy_read_blocks(self, notebook_id, owner_id):
+        calls.append("read_blocks")
+        return real_read_blocks(self, notebook_id, owner_id)
+
+    monkeypatch.setattr(AgentProfileStore, "job_row", spy_job_row)
+    monkeypatch.setattr(AgentProfileStore, "read_blocks", spy_read_blocks)
+
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+    calls.clear()
+    resp = client.get(
+        f"/api/notebooks/{notebook_id}/understanding", headers=owner
+    )
+    assert resp.status_code == 200, resp.text
+    assert calls == ["job_row", "job_row", "read_blocks"]

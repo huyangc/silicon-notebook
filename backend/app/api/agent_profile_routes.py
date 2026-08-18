@@ -160,9 +160,13 @@ def get_understanding(
         "agent_profile:write", notebook_id, user.id
     )
     store = _profile_store()
-    rows = store.read_blocks(notebook_id, user.id)
+    # codex R7 P2:读序是契约——**先读两条 job 行,再读块**。反过来(先块后 job)
+    # 时,一次巡固恰好在两读之间写块并 settle,响应就是「done + 旧块」:前端据此
+    # 解除忙碌位、停止轮询,旧文本一直挂到重开面板。job 先走后,同一交错最坏是
+    # 「running + 新块」——继续轮询,下一拍自然收敛到 done。
     base_job = store.job_row(notebook_id, BASE_CHAIN_OWNER)
     mine_job = store.job_row(notebook_id, user.id)
+    rows = store.read_blocks(notebook_id, user.id)
     return UnderstandingResponse(
         enabled=True,
         base=_ordered_blocks(rows, BASE_CHAIN_OWNER),
