@@ -1272,3 +1272,27 @@ def test_a_member_cleared_note_hands_the_label_back_to_the_agent(harness):
     row = _blocks(harness, USER_A)["retrieval_notes"]
     assert row["value"] == "新的整理"
     assert row["updated_origin"] == "job"
+
+
+def test_an_internal_failure_still_requeues_a_filled_threshold(
+    harness, monkeypatch
+):
+    """codex R5 P2:内部异常的终态路径与其他终态一样要复查剩余计数——
+    run 崩溃时攒满的阈值不该滞留到该成员下一次提问(可能永远不来)。"""
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+
+    def reply(_prompt: str) -> str:
+        profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
+        raise RuntimeError("boom")
+
+    service = _service(harness, client=_Client(reply))
+    with pytest.raises(RuntimeError):
+        service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    assert [c["name"] for c in submitter.calls] == [
+        f"agentprofile-overlay-{NOTEBOOK_ID}"
+    ]
