@@ -2777,6 +2777,19 @@ class GroupMembershipRequiredError(RuntimeError):
     """
 
 
+class NotebookManageRequiredError(RuntimeError):
+    """写事务在落库前复核时发现**发起人**已不再对这本笔记本拥有管理权。
+
+    能力守卫(`require_notebook_capability("notebook:manage")`)与写事务之间永远有一个
+    窗口,库主可以在中间撤掉发起人的管理边。**这个窗口不是每个写端点都要堵**——判据见
+    `api/deps.py` 里「授予他人访问权的写入必须事务内复检」那条裁决:内容写入在窗口内落库
+    只是普通竞态,而**创建持久授权状态**的写入会把访问权授予他人、效力超出发起人自身权限
+    的存续,必须在同一写事务内复检并锁住发起人的笔记本侧权限。
+
+    路由映射成 **403**:能走到这一步说明他刚刚还有管理权,库的存在性对他不是秘密。
+    """
+
+
 class ShareRequesterUnauthorizedError(RuntimeError):
     """批准时发现**申请人**已不再对那本笔记本拥有管理权(群组知识共享 P2-T3)。
 

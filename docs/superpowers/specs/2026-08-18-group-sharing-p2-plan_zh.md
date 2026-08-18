@@ -184,6 +184,27 @@ G1/G2/G3、PR + codex 闭环。
   任何一方**在验「申请人现在还有没有权把它交出去」:组管理员验的是「我的组要不要这个
   库」,库主根本不在回路里。
 
+- **P2-7**(T3 codex 第 6 轮评审):**撤回按「申请归属」授权,不按当前笔记本权限**。
+  `DELETE /notebooks/{id}/share-requests/{rid}` 只要求登录,授权判据是 store 的三列谓词
+  (`notebook_id` + `request_id` + `requested_by`);非本人与不存在同为 404(无存在性
+  泄露),跨库拼 URL 因 `notebook_id` 仍在 WHERE 里同样 404。
+
+  它与 P2-6 互补:P2-6 让批准**拒绝**失权申请人的申请(防止陈旧授权被兑现),所以撤回
+  绝不能也要求管理权——否则这类申请**既批不了也撤不掉**,永远卡在组管理员队列里。也不能
+  改挂 `require_notebook_read`:读权同样可能随那条授权边一起消失。一句话:一个防止陈旧
+  授权生效,一个保证申请人**始终**能收回自己的提议。
+
+- **P2-8**(T3 codex 第 6 轮评审,**通用规则**):**能力守卫的 TOCTOU 窗口不是每个写端点
+  都要堵**,判据是「这次写入产生的是什么」——内容写入(来源/knowhow/图谱构建/治理)在窗口
+  内落库只是普通竞态,那些内容本就在库主掌控下,他撤权后照样能删改重建;但**创建持久授权
+  状态**的写入会把访问权授予**他人**、且效力**超出发起人自身权限的存续**。规则:**凡是写
+  `notebook_grants`(或未来任何授予他人访问权的行)的路径,必须在同一写事务内复检并锁住
+  发起人的笔记本侧权限**,其余写端点不加。规则正文写在 `backend/app/api/deps.py` 的能力表
+  注释里(新增端点时最先读到的地方);落地形态是
+  `repositories/*/group_store.py::_require_notebook_manage_on`(两段式:owner 半普通查 +
+  `ADMIN_GRANT_PROBE_FOR_SHARE_SQL` 锁授权边行)。当前两个消费点:`create_grant`(发起人)
+  与 `approve_share_request`(申请人)。
+
 ## 遗留登记(不阻塞本特性,独立跟踪)
 
 - `schema_manifest.POSTGRES_EMPTY_TIME_SENTINELS`

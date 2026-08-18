@@ -19257,7 +19257,7 @@
       },
       "/api/notebooks/{notebook_id}/share-requests/{request_id}": {
         "delete": {
-          "description": "撤回一条**待审批**申请(申请者自己的动作)。\n\n撤回不是第三个状态,是删整行(裁决 P2-2)。只有 `status='pending'` 可撤:已批准/已驳回\n是既成的决定,撤回它没有意义——store 在写事务里按精确状态判定,已决定的申请撤回请求\n映射成 **409**;根本没有这条申请(或不属于这本库、或不是本人提交的)则 404。\n\n⚠ `user.id` 必须传进 store:能力守卫只证明「这个人对这本库有管理权」,证明不了「这条\n申请是他提的」。同一本库可以有多个管理权持有者(owner + 组管理员),丢掉这个参数\n就等于让他们互相撤回对方的待审批申请(codex #519 R1 P1)。别人的申请与不存在的申请\n同样落 404,不泄露存在性。",
+          "description": "撤回一条**待审批**申请(申请者自己的动作)。\n\n撤回不是第三个状态,是删整行(裁决 P2-2)。只有 `status='pending'` 可撤:已批准/已驳回\n是既成的决定,撤回它没有意义——store 在写事务里按精确状态判定,已决定的申请撤回请求\n映射成 **409**;根本没有这条申请(或不属于这本库、或不是本人提交的)则 404。\n\n⚠ **本端点刻意没有 notebook 能力依赖,只要求登录**(codex #519 R6 P2)。授权轴是\n**申请归属**而不是当前笔记本权限:store 按三列谓词\n(`notebook_id` + `request_id` + `requested_by`)兜底,非本人一律 `not_found` → 404,\n与「这条申请不存在」不可区分(无存在性泄露),跨库拼 URL 因为 `notebook_id` 仍在\nWHERE 里同样 404。\n\n挂 `notebook:manage` 是**用错了轴**,而且在 R4 之后会造出死锁形态:R4 让批准拒绝\n「申请人已失去管理权」的申请,若撤回也要求管理权,这类申请就**既批不了也撤不掉**,\n永远卡在组管理员的队列里。也**不能**换成 `require_notebook_read`——读权同样可能随那条\n授权边一起没了。两条裁决是互补的:R4 防止陈旧授权被兑现,本条保证申请人**始终**能收回\n自己的提议。\n\n⚠ `user.id` 必须传进 store:它现在是唯一的授权判据(此前还有能力守卫兜底)。同一本库\n可以有多个管理权持有者(owner + 组管理员),丢掉这个参数就等于让他们互相撤回对方的\n待审批申请(codex #519 R1 P1)。",
           "operationId": "delete_share_request_route_api_notebooks__notebook_id__share_requests__request_id__delete",
           "parameters": [
             {
