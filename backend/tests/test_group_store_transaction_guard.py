@@ -68,6 +68,22 @@ REQUIRED_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
     }),
 }
 
+#: 后端 -> 方法 -> ``(必须先出现的符号, 必须后出现的 SQL 片段)``。
+#:
+#: 与上面那张表的区别是它钉**顺序**而不是**存在性**——集合成员资格拦不住「锁还在,
+#: 只是挪到了清理后面」这种改动。
+#:
+#: `delete_group`(PostgreSQL):`_lock_group_on` 必须排在删 `notebook_grants` **之前**。
+#: 反过来会留下孤儿授权边——并发的 `create_grant` 持同一行的 `FOR SHARE`,可以在
+#: 「清边」与「删组」之间提交一条新边;清理已经走过去了,而 `principal_id` 没有外键,
+#: `DELETE FROM groups` 带不走它。组没了、边还在,只能靠 merge_dbs 的孤儿清扫发现。
+#:
+#: SQLite 侧**刻意不登记**:`SqliteDatabase.write()` 是进程级写锁,两条 DELETE 之间
+#: 插不进另一个写事务,不需要对等的行锁(理由写在两侧的 `delete_group` docstring 里)。
+REQUIRED_ORDER_IN_WRITE_TRANSACTION: dict[str, dict[str, tuple[str, str]]] = {
+    "postgres": {"delete_group": ("_lock_group_on", "notebook_grants")},
+}
+
 #: 会开出新作用域的节点 —— 遍历时不下钻(嵌套函数里的调用不属于事务的执行流)。
 _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
@@ -186,4 +202,72 @@ def test_concurrency_invariants_live_inside_the_write_transaction(backend: str):
         "检查与写入必须同事务——挪到 with 块之外,两个并发请求会各自读到通过的"
         "条件然后都提交(最后一名组管理员被同时降级 / 组被并发删掉之后仍然插成员行)。"
         "这类退化在单线程测试里全绿,只有这条静态判据拦得住。"
+    )
+
+
+def _first_statement_index(block: ast.With, predicate) -> int | None:
+    """写事务体内**第一条**满足 predicate 的顶层语句的下标;没有则 None。
+
+    按顶层语句而不是按 AST 节点位置比:同一条语句里的先后没有意义(参数求值序),
+    要钉的是「哪一条先执行」。
+    """
+    for index, statement in enumerate(block.body):
+        if isinstance(statement, _NESTED_SCOPES):
+            continue
+        if predicate(statement):
+            return index
+    return None
+
+
+def _statement_symbols(statement) -> set[str]:
+    return _symbols([statement])
+
+
+def _statement_mentions(statement, needle: str) -> bool:
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and needle in node.value
+        for node in _walk_same_scope(statement)
+    )
+
+
+@pytest.mark.parametrize("backend", sorted(BACKEND_STORES))
+def test_lock_ordering_inside_the_write_transaction(backend: str):
+    """核心断言之二:登记过的方法里,锁必须排在它保护的那次写入**之前**。
+
+    上面那条只问「在不在事务体内」,答不了「排第几」——而 `delete_group` 的漏洞恰恰
+    是「锁在、但排在清理后面」:那时锁已经拦不住并发 `create_grant` 在两次 DELETE
+    之间插进来的那条边。
+    """
+    expectations = REQUIRED_ORDER_IN_WRITE_TRANSACTION.get(backend, {})
+    methods = _method_nodes(BACKEND_STORES[backend])
+    offenders: list[str] = []
+    for name, (first_symbol, later_sql) in sorted(expectations.items()):
+        node = methods.get(name)
+        if node is None:
+            offenders.append(f"{name} 不存在了(改名/删除时同步更新登记表)")
+            continue
+        blocks = _write_transactions(node)
+        if not blocks:
+            offenders.append(f"{name} 不再开写事务")
+            continue
+        ordered = False
+        for block in blocks:
+            lock_at = _first_statement_index(
+                block, lambda stmt: first_symbol in _statement_symbols(stmt)
+            )
+            write_at = _first_statement_index(
+                block, lambda stmt: _statement_mentions(stmt, later_sql)
+            )
+            if lock_at is not None and write_at is not None and lock_at < write_at:
+                ordered = True
+                break
+        if not ordered:
+            offenders.append(f"{name}:{first_symbol} 必须排在写 {later_sql} 之前")
+    assert offenders == [], (
+        f"{backend} 后端 GroupStore 的锁序不对:{offenders}。"
+        "把锁挪到它保护的写入之后,并发事务就能挤进这中间——delete_group 的形态是"
+        "「组删了、指向它的授权边留下」,而那种孤儿边没有外键兜底,只能靠合库时的"
+        "孤儿清扫或库主在共享清单里看见 missing 标注才被发现。"
     )

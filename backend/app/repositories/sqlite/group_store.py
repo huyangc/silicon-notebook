@@ -245,6 +245,12 @@ class GroupStore:
 
         `group_members` 由 FK 级联带走(连接恒开 `PRAGMA foreign_keys = ON`);
         `notebook_grants` 的 `principal_id` 无 FK,必须显式删。
+
+        ⚠ 这里**不**像 PG 侧那样先对 `groups` 行取锁,是刻意的:`SqliteDatabase.write()`
+        是进程级写锁,同一时刻只有一个写事务在跑,并发的 `create_grant` 插不进「清边」
+        与「删组」之间。PG 没有那把锁,所以那边必须在事务开头显式 `FOR UPDATE`,否则
+        会留下孤儿授权边(理由完整写在 `postgres/group_store.py::delete_group`)。
+        在这里补一次 `SELECT` 只会多一次查询而不多一分保证。
         """
         with self.database.write() as db:
             db.execute(

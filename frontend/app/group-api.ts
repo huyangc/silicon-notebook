@@ -160,6 +160,31 @@ export const shareNotebookToGroup = (
 export const revokeNotebookGrant = (notebookId: string, grantId: string): Promise<void> =>
   requestVoid(`/notebooks/${notebookId}/grants/${grantId}`, { method: "DELETE", tag: TAG });
 
+// --- 输入护栏 ---------------------------------------------------------------
+
+/**
+ * 组名 / 组说明的长度上限。
+ *
+ * **与 `backend/app/api/group_routes.py` 的 `_MAX_GROUP_NAME_CHARS` /
+ * `_MAX_GROUP_DESCRIPTION_CHARS` 同值**,改一侧就要改另一侧。
+ *
+ * 两侧都要有,是「数值上限与截断」红线的要求:用户编辑的数据不得静默截断——前端显示
+ * 同一护栏(输入框直接敲不进去),API 超限**明确拒绝**(后端 400,不裁短了存)。少了
+ * 前端这半,用户会敲完一长串才在提交时吃一个 400,而且不知道边界在哪。
+ */
+export const GROUP_INPUT_LIMITS = {
+  nameMaxChars: 120,
+  descriptionMaxChars: 1000,
+} as const;
+
+/** 接近上限时才出现的余量提示;还早的时候返回空串(不给一个常驻的计数噪音)。 */
+export const groupLengthHint = (value: string, max: number): string => {
+  const used = value.length;
+  if (used >= max) return `已达上限 ${max} 个字`;
+  if (used >= max - Math.max(1, Math.round(max * 0.1))) return `还可输入 ${max - used} 个字`;
+  return "";
+};
+
 // --- 纯 helper(单测) --------------------------------------------------------
 
 /** 群组分类的界面词。未知分类退成中性词,绝不把后端的英文 id 吐给用户。 */

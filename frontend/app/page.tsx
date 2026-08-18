@@ -2538,17 +2538,36 @@ export default function Home() {
   // PR#334 第5轮 P1:此前只在被禁时重拉,漏了 true→false)。来源增删这条路已各自覆盖
   // (处理轮询 reachedExtracted 分支 / deleteSource 末尾重拉),不在此列。
   //
-  // 无条件重拉一次:既捕获 Memory 页签的证据增,也捕获其删除(true→false)。
-  function revalidateAskAvailability() {
+  // 重取**当前**笔记本详情并替换 currentNotebook —— 单库刷新的唯一取数路径。
+  //
+  // 两道守卫都不可省(既有惯例):切库之后落地的响应必须整份丢弃,所以先比
+  // activeNotebookIdRef,再在函数式更新里复核 `cur.id === nb`(两次之间仍可能切库)。
+  async function refreshActiveNotebook() {
     const nb = activeNotebookIdRef.current;
     if (!nb) return;
-    getNotebook(nb)
-      .then((refreshed) => {
-        if (activeNotebookIdRef.current === nb) {
-          setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
-        }
-      })
-      .catch(reportError);
+    const refreshed = await getNotebook(nb);
+    if (activeNotebookIdRef.current !== nb) return;
+    setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+  }
+
+  // 共享面变更(加/撤群组授权、开启/取消链接分享)之后的统一刷新。
+  //
+  // ⚠ **两份都要刷,不能只刷集合列表**:这类变更会翻转「未共享门」——本笔记本一旦被
+  // 共享出去,它**借来的**参考库当场失效(设计文档 §6.1)。只刷列表的话
+  // `currentNotebook.base_notebooks` 还是旧的,检索范围控件会继续列出、并允许勾选一个
+  // 这轮根本取不到的参考库,Ask 与深度报告随之提交一份无效(甚至空)的范围,直到用户
+  // 重开笔记本才恢复。
+  //
+  // 两条刷新写的是不相干的 state(集合列表 / 当前笔记本详情),彼此无竞态;顺序取
+  // 「先列表后详情」只是让卡片徽标与顶栏尽早一致。详情那条自带切库守卫。
+  async function handleSharingChanged() {
+    await loadNotebookCollection();
+    await refreshActiveNotebook();
+  }
+
+  // 无条件重拉一次:既捕获 Memory 页签的证据增,也捕获其删除(true→false)。
+  function revalidateAskAvailability() {
+    refreshActiveNotebook().catch(reportError);
   }
   // 关闭 knowhow 抽屉:抽屉是覆盖层、不改 chatMode,故 chatMode effect 不会触发。knowhow
   // 投影是防抖后台任务,建/改/清/删格子都可能在落库后**双向**改变可检索证据。轮询判据取
@@ -5544,6 +5563,7 @@ export default function Home() {
     setShareBusy(true);
     try {
       setShareModal(await shareNotebook(currentNotebook.id));
+      await handleSharingChanged();
     } finally {
       setShareBusy(false);
     }
@@ -5569,7 +5589,7 @@ export default function Home() {
     try {
       await unshareNotebook(currentNotebook.id);
       setShareModal({ share_token: "", copyable: false, size: {} });
-      await loadNotebookCollection();
+      await handleSharingChanged();
       setToast("已取消链接分享，链接立即失效");
     } finally {
       setShareBusy(false);
@@ -7150,7 +7170,7 @@ export default function Home() {
               </>)}
               <NotebookGroupShare
                 notebookId={currentNotebook.id}
-                onChanged={() => { loadNotebookCollection().catch(reportError); }}
+                onChanged={() => { handleSharingChanged().catch(reportError); }}
               />
               <div className="tag-row">
                 <button className="new-pill" onClick={() => setShareModal(null)}>完成</button>

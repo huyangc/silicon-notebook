@@ -28,6 +28,7 @@ import {
   listGroupSharedNotebooks,
   listGroups,
   putGroupMember,
+  removeGroupMember,
   resolveUser,
   revokeGroupSharedNotebook,
   updateGroup,
@@ -258,4 +259,54 @@ test("打开另一个组失败时不残留上一个组的成员与共享清单",
   expect(screen.queryByText("甲组的库")).not.toBeInTheDocument();
   expect(screen.queryByText("爱丽丝（alice）")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "撤销共享" })).not.toBeInTheDocument();
+});
+
+
+// 移出成员会当场撤掉这个人经**本组**拿到的全部知识库访问——爆炸半径与删组同量级,
+// 不该一击即发(组件自述是两步确认,实现却少了这一半)。
+test("移出成员是两步确认,第一下不发请求", async () => {
+  const user = userEvent.setup();
+  vi.mocked(removeGroupMember).mockResolvedValue(undefined);
+  const { onChanged } = renderModal();
+
+  await screen.findByText("封装项目");
+  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await screen.findByText("爱丽丝（alice）");
+
+  await user.click(screen.getAllByRole("button", { name: "移出群组" })[1]);
+  expect(removeGroupMember).not.toHaveBeenCalled();
+  expect(screen.getByText(/他将看不到共享给本组的知识库/)).toBeInTheDocument();
+
+  // 取消回到原状,仍然没发请求。
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  expect(removeGroupMember).not.toHaveBeenCalled();
+  expect(screen.getAllByRole("button", { name: "移出群组" })).toHaveLength(2);
+
+  await user.click(screen.getAllByRole("button", { name: "移出群组" })[1]);
+  await user.click(screen.getByRole("button", { name: "确认移出" }));
+  await waitFor(() => expect(removeGroupMember).toHaveBeenCalledWith("g1", "u2"));
+  await waitFor(() => expect(onChanged).toHaveBeenCalled());
+});
+
+// 数值上限红线:前端显示同一护栏(敲不进去),API 超限明确拒绝。
+test("组名与说明的长度护栏在前端同显,快到上限时出声", async () => {
+  const user = userEvent.setup();
+  renderModal();
+
+  await screen.findByText("封装项目");
+  expect(screen.getByLabelText("群组名称")).toHaveAttribute("maxlength", "120");
+  expect(screen.getByLabelText("新群组的说明")).toHaveAttribute("maxlength", "1000");
+
+  // 还早的时候一个字都不渲染(不给常驻计数噪音)。
+  await user.type(screen.getByLabelText("群组名称"), "短名字");
+  expect(screen.queryByText(/还可输入/)).not.toBeInTheDocument();
+
+  await user.clear(screen.getByLabelText("群组名称"));
+  await user.paste("x".repeat(115));
+  expect(screen.getByText("群组名称还可输入 5 个字")).toBeInTheDocument();
+
+  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await screen.findByLabelText("群组说明");
+  expect(screen.getByLabelText("群组新名称")).toHaveAttribute("maxlength", "120");
+  expect(screen.getByLabelText("群组说明")).toHaveAttribute("maxlength", "1000");
 });

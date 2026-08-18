@@ -6,6 +6,8 @@ import {
   creatableGroupKinds,
   foldGroupShares,
   grantedViaLabel,
+  GROUP_INPUT_LIMITS,
+  groupLengthHint,
   groupKindLabel,
   groupRoleLabel,
   isGroupAdmin,
@@ -109,4 +111,19 @@ test("列表分区按 granted_via 判,不按 access —— 只读共享仍留在
   const { personal, group } = partitionByGrant(entries);
   assert.deepEqual(personal.map((e) => e.notebook.id), ["a", "b", "c"]);
   assert.deepEqual(group.map((e) => e.notebook.id), ["d"]);
+});
+
+test("长度护栏与后端同值,余量提示只在接近上限时出声", () => {
+  // 与 backend/app/api/group_routes.py 的 _MAX_GROUP_NAME_CHARS /
+  // _MAX_GROUP_DESCRIPTION_CHARS 同值 —— 改一侧就要改另一侧。
+  assert.equal(GROUP_INPUT_LIMITS.nameMaxChars, 120);
+  assert.equal(GROUP_INPUT_LIMITS.descriptionMaxChars, 1000);
+
+  assert.equal(groupLengthHint("", 120), "");
+  assert.equal(groupLengthHint("x".repeat(100), 120), "");     // 还早,不给计数噪音
+  assert.equal(groupLengthHint("x".repeat(108), 120), "还可输入 12 个字");
+  assert.equal(groupLengthHint("x".repeat(119), 120), "还可输入 1 个字");
+  assert.equal(groupLengthHint("x".repeat(120), 120), "已达上限 120 个字");
+  // 超出(粘贴时浏览器 maxLength 之外的路径)同样说「已达上限」,不报负数。
+  assert.equal(groupLengthHint("x".repeat(130), 120), "已达上限 120 个字");
 });
