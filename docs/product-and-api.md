@@ -242,7 +242,7 @@ notebook-dimension read or write guard.
 
 ### Endpoints
 
-Twenty endpoints in `group_routes.py` (including the six P2 approval-flow
+Twenty-one endpoints in `group_routes.py` (including the seven P2 approval-flow
 endpoints), plus one read-only addition on the notebook router.
 
 | Endpoint | Who | Notes |
@@ -263,6 +263,7 @@ endpoints), plus one read-only addition on the notebook router.
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | group admin | group-side revocation; removes every edge pointing at this group |
 | `POST /notebooks/{id}/share-requests` | `notebook:manage` **and** target-group **plain member** | **P2** submit a share request; a group's *admin* is refused with 403 — he shares directly via `POST /notebooks/{id}/grants` and never goes through this table. Idempotent (an in-flight request returns the existing pending row, not a 409) |
 | `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** the requester's own requests on this library (dialog echoes pending/rejected) |
+| `GET /me/share-requests` | signed in | **P2** every **pending** request *I* filed, across all notebooks. The counterpart of the withdraw endpoint: same authorization axis (`requested_by`), no notebook capability at all, so a requester who has since lost management rights can still find and withdraw their own proposal. Deliberately **not** mounted under `/notebooks/{id}/…` — that dimension already has a manage-gated list and must keep one meaning. Pending only: a decided request cannot be withdrawn, so listing it would only widen disclosure |
 | `DELETE /notebooks/{id}/share-requests/{rid}` | signed in, **and the request is yours** | **P2** withdraw a **pending** request (whole-row delete, not a third status); already-decided is 409, missing is 404. ⚠ **Deliberately carries no notebook capability dependency**: the authorization axis is request ownership, not current library rights. Since approval refuses a requester who has since lost manage rights, requiring manage here too would make such a request neither approvable nor withdrawable — permanently stuck in the reviewer's queue |
 | `GET /groups/{id}/share-requests` | group admin | **P2** the review queue: pending requests to share into this group |
 | `POST /groups/{id}/share-requests/{rid}/approve` | group admin | **P2** write the `(group, viewer)` edge and mark approved in one transaction; idempotent if already shared; missing/decided is 404 |
@@ -291,6 +292,26 @@ Several boundaries are worth stating explicitly:
   from the group side. Each entrance needs only its own half — a group admin
   governs everything shared with their group, and a library owner may always take
   their library back.
+- **A requester must be able to reach their own request without any rights on the
+  notebook.** Withdrawal is deliberately gated on request ownership alone, so the
+  list that surfaces the request id must be too — otherwise the escape hatch is
+  unreachable in the one situation it exists for (the requester lost manage rights;
+  approval now refuses the request; the notebook-side list 404s). `GET
+  /me/share-requests` is that global entrance, and the UI puts it in the groups
+  panel rather than the notebook workspace, because the requester may have lost
+  read access as well and cannot open the workspace at all. Its **disclosure
+  surface is chosen field by field**, against "did he already know this?":
+  `notebook_id` and `notebook_name` are included — he held management rights on
+  that library when he filed (creation requires `notebook:manage`), and
+  `notebooks.created_by` is written only at creation and deep-copy (there is no
+  ownership transfer, and the column is absent from `NotebookUpdate`, with a guard
+  pinning that), so an id cannot be used to probe a *new* owner later; without the
+  name a requester with several pending requests cannot tell which one to withdraw.
+  `group_id`/`group_name` are the group he chose while a member of it. `status` is
+  always `pending`, so `decided_by`/`decided_at` are always null — **no approver
+  identity leaves through this path**, because decided requests are not returned at
+  all. Nothing about the library's current state (source counts, whether it is
+  still shared, its present members) is included.
 - **`user` and `everyone` principals do not go through these endpoints.** The
   `user` principal keeps using the existing read-only share-token flow, and
   `everyone` keeps using `POST /notebooks/{id}/tier`. Two write entrances for one

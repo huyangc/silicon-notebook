@@ -2967,6 +2967,17 @@ class GroupStorePort(Protocol):
     ) -> list[dict]:
         """请求者本人对某本库发起过的全部申请(弹窗里回显「待审批 / 已驳回」)。"""
         ...
+    def list_pending_share_requests_by_requester(
+        self, requested_by: str
+    ) -> list[dict]:
+        """**我发起的、仍待审批的**申请,跨笔记本、不带 notebook 维度收窄(codex #519 R11)。
+
+        与上面那条的区别是**授权轴**:那条按笔记本列(消费它的端点挂 `notebook:manage`),
+        这条唯一的谓词是 `requested_by` —— 与撤回端点逐字相同的判据。裁决 P2-7 让撤回不要求
+        笔记本管理权(否则失权申请人的申请既批不了也撤不掉),但申请人失权后就打不开那本
+        笔记本、也就拿不到申请 id,那个口子形同虚设。只回 `status='pending'`(正向精确匹配)。
+        """
+        ...
     def approve_share_request(
         self,
         group_id: str,

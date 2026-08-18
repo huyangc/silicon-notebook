@@ -20,6 +20,8 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     listGroupShareRequests: vi.fn(),
     approveShareRequest: vi.fn(),
     rejectShareRequest: vi.fn(),
+    listMyPendingShareRequests: vi.fn(),
+    withdrawShareRequest: vi.fn(),
   };
 });
 
@@ -32,12 +34,14 @@ import {
   listGroupShareRequests,
   listGroupSharedNotebooks,
   listGroups,
+  listMyPendingShareRequests,
   putGroupMember,
   rejectShareRequest,
   removeGroupMember,
   resolveUser,
   revokeGroupSharedNotebook,
   updateGroup,
+  withdrawShareRequest,
   type GroupDetail,
   type ShareRequest,
   type GroupSummary,
@@ -82,6 +86,7 @@ beforeEach(() => {
   vi.mocked(getGroup).mockResolvedValue(ADMIN_DETAIL);
   vi.mocked(listGroupSharedNotebooks).mockResolvedValue([]);
   vi.mocked(listGroupShareRequests).mockResolvedValue([]);
+  vi.mocked(listMyPendingShareRequests).mockResolvedValue([]);
 });
 
 function renderModal(isSystemAdmin = false) {
@@ -387,4 +392,74 @@ test("组名与说明的长度护栏在前端同显,快到上限时出声", asyn
   await screen.findByLabelText("群组说明");
   expect(screen.getByLabelText("群组新名称")).toHaveAttribute("maxlength", "120");
   expect(screen.getByLabelText("群组说明")).toHaveAttribute("maxlength", "1000");
+});
+
+// --- 我发起的共享申请:失权申请人的全局撤回入口(codex #519 R11 P1) --------------
+
+test("我发起的待审批申请出现在群组面板顶层,且撤回不依赖任何笔记本权限", async () => {
+  const user = userEvent.setup();
+  // 舞台:他已经失去那本库的管理权,所以笔记本工作区里那块 UI 对他不存在。这一节是
+  // 裁决 P2-7 留的口子在界面上的落点——入口必须在工作区之外。
+  vi.mocked(listMyPendingShareRequests)
+    .mockResolvedValueOnce([shareRequest({ id: "sr-mine", notebook_id: "nb-lost", notebook_name: "Alice 的库" })])
+    .mockResolvedValue([]);
+  vi.mocked(withdrawShareRequest).mockResolvedValue(undefined);
+  renderModal();
+
+  await screen.findByText("我发起的共享申请");
+  expect(screen.getByText("Alice 的库 → 封装项目")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "撤回" }));
+  // 撤回打的是申请所属的那本笔记本 —— 全局清单必须把 notebook_id 带回来,否则这个
+  // 动作根本发不出去。
+  await waitFor(() => expect(withdrawShareRequest).toHaveBeenCalledWith("nb-lost", "sr-mine"));
+  await waitFor(() => expect(screen.queryByText("我发起的共享申请")).not.toBeInTheDocument());
+});
+
+test("没有待审批申请时不渲染这一节,也不因它加载失败而盖住整个面板", async () => {
+  vi.mocked(listMyPendingShareRequests).mockRejectedValue(new Error("boom"));
+  renderModal();
+
+  await screen.findByText("群组清单");
+  expect(screen.queryByText("我发起的共享申请")).not.toBeInTheDocument();
+  // 它是补救入口,自己挂了不该把群组面板整块报成错误。
+  expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+});
+
+// --- 批准/驳回:改动成功与对账失败必须分开报(codex #519 R11 P2) ----------------
+
+test("批准成功但列表刷新失败:不报失败、行不残留、不诱导重试", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroupShareRequests)
+    .mockResolvedValueOnce([shareRequest({ id: "sr-ok" })])
+    .mockRejectedValue(new Error("network"));   // 对账那次失败
+  vi.mocked(approveShareRequest).mockResolvedValue(shareRequest({ id: "sr-ok", status: "approved" }));
+  renderModal();
+
+  await user.click((await screen.findAllByRole("button", { name: "查看" }))[0]);
+  await screen.findByText("待审批申请");
+  await user.click(await screen.findByRole("button", { name: "批准" }));
+
+  await waitFor(() => expect(approveShareRequest).toHaveBeenCalledWith("g1", "sr-ok"));
+  // ① 不报「批准申请失败」——批准**成功了**,报失败会把人骗去重试一个已完成的动作
+  //    (重试必然 404:它已经不是待审批状态)。
+  await waitFor(() => expect(screen.getByText(/列表没能刷新/)).toBeInTheDocument());
+  expect(screen.queryByText("批准申请失败")).not.toBeInTheDocument();
+  // ② 那条已批准的行不能残留在待审批清单里。
+  expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
+});
+
+test("批准本身失败时仍然报失败(分离不能变成把错误吞掉)", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroupShareRequests).mockResolvedValue([shareRequest({ id: "sr-bad" })]);
+  vi.mocked(approveShareRequest).mockRejectedValue(new Error("nope"));
+  renderModal();
+
+  await user.click((await screen.findAllByRole("button", { name: "查看" }))[0]);
+  await user.click(await screen.findByRole("button", { name: "批准" }));
+
+  await screen.findByText("批准申请失败");
+  expect(screen.queryByText(/列表没能刷新/)).not.toBeInTheDocument();
+  // 改动没生效,行必须留着让人重试。
+  expect(screen.getByRole("button", { name: "批准" })).toBeInTheDocument();
 });
