@@ -358,6 +358,12 @@ class RepositoryRuntime:
             job_submitter=background_jobs,
             event_log=self.event_log,
             ask=self.ask_service,
+            # Agentic Memory P1 (T5):完成一次提问 ⇒ 推进**该成员**在该库的覆盖层
+            # 计数。late-bound lambda 而不是直接传方法:巡固服务在本构造函数里
+            # 更靠后才建出来(与上面 ``ask`` 同一个理由)。
+            note_ask_completed=lambda nb, uid: (
+                self.agent_profile_jobs.note_ask_completed(nb, uid)
+            ),
         )
         # Task 27: SQLite maintenance face for CLI/batch composition roots —
         # lazily wired by the facade `maintenance` property (it needs the
@@ -426,6 +432,10 @@ class RepositoryRuntime:
             queries=self.queries,
             models=self.models,
             event_log=self.event_log,
+            # T5:覆盖层链路唯一的取数座位。它读的是**该成员自己**的提问轨迹
+            # (谓词写在 SQL 里,见 ``recent_user_ask_traces``),底座链路一个字
+            # 都不许碰它——那条边界由隔离守卫按函数分组静态钉住。
+            ask_state=self.ask_state,
         )
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
@@ -1166,6 +1176,8 @@ class RepositoryRuntime:
             summaries=self.notebook_summaries,
             database=self.database,
             copy_stats=copy_stats,
+            # T5:成员被移出后,他在这本库里的私有「理解」覆盖层随之清空。
+            profiles=self.agent_profile,
         )
         return self.sharing
 
@@ -1226,6 +1238,8 @@ class RepositoryRuntime:
                 # Agentic Memory P1:逐节深挖的理解注入(§5.2)。报告侧没有任何
                 # 自动贯通的路,必须在这里显式填座位。
                 agent_profile=self.agent_profile,
+                # T5:报告完成 ⇒ 推进**报告创建者**的覆盖层链路(直接达阈)。
+                agent_profile_jobs=self.agent_profile_jobs,
                 selected_source_graph=self.selected_source_graph,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (

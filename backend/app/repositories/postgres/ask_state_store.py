@@ -15,7 +15,12 @@ from app.models.ask import (
     FeedbackRequest,
     FeedbackResponse,
 )
-from app.repositories.ports import ConversationBusyError, PreparedAskTurn
+from app.repositories.ports import (
+    ConversationBusyError,
+    PreparedAskTurn,
+    project_ask_row,
+    project_trace_step,
+)
 from app.repositories.postgres._store_utils import (
     json_value,
     jsonb,
@@ -309,6 +314,66 @@ class AskStateStore:
             except (TypeError, ValueError):
                 continue
         return public_trace_steps(trace)
+
+    def recent_user_ask_traces(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        job_limit: int,
+        step_limit: int,
+    ) -> list[dict]:
+        """ONE member's own recent asks in ONE notebook, projected and bounded.
+
+        Agentic Memory P1 (T5) — the PostgreSQL half of the SQLite method of
+        the same name; see that docstring for the full contract. The two
+        properties that must not diverge:
+
+        * ``created_by = %s`` lives **in both SQL statements**, the trace one
+          included even though its job ids came out of the first. This is a
+          privacy boundary, not a filter: the result feeds one member's private
+          overlay blocks, and a foreign row would be summarised into them
+          silently. ``test_agent_profile_isolation_guard.py`` pins it here too.
+        * The projection is the SHARED ``project_trace_step`` — this backend
+          hands it a ``jsonb``-decoded dict where SQLite hands it TEXT, which
+          is exactly the kind of difference a per-backend copy would resolve
+          differently over time.
+        """
+        job_limit = max(1, int(job_limit))
+        step_limit = max(1, int(step_limit))
+        with self.database.connect() as db:
+            job_rows = db.execute(
+                "SELECT id, question, status, created_at FROM ask_jobs "
+                "WHERE notebook_id = %s AND created_by = %s "
+                "ORDER BY created_at DESC, id DESC LIMIT %s",
+                (notebook_id, user_id, job_limit),
+            ).fetchall()
+            asks = [
+                project_ask_row(
+                    row["id"],
+                    row["question"],
+                    row["status"],
+                    iso_timestamp(row["created_at"]),
+                )
+                for row in job_rows
+            ]
+            if not asks:
+                return []
+            by_job = {ask["job_id"]: ask for ask in asks}
+            placeholders = ",".join("%s" for _ in by_job)
+            step_rows = db.execute(
+                "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                f"WHERE j.notebook_id = %s AND j.created_by = %s AND t.job_id IN ({placeholders}) "
+                "ORDER BY t.job_id ASC, t.seq ASC LIMIT %s",
+                (notebook_id, user_id, *by_job.keys(), step_limit),
+            ).fetchall()
+        for row in step_rows:
+            step = project_trace_step(json_value(row["step_json"], None))
+            target = by_job.get(str(row["job_id"]))
+            if step is not None and target is not None:
+                target["steps"].append(step)
+        return asks
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

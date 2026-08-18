@@ -1,0 +1,914 @@
+"""Agentic Memory P1 (T5): the per-(notebook, member) OVERLAY chain.
+
+This is the privacy-sensitive half of the feature, so what this file pins is
+first and foremost the isolation — stated as behaviour, next to the static
+guard that states it as structure:
+
+1. **One member's activity moves only their own counter.** A's ask must not
+   bump B's chain, and must not bump the SHARED base chain either (``''`` is
+   the base's owner sentinel, so a missing identity would).
+2. **One member's prompt contains only their own questions.** The strongest
+   statement available at runtime: two members ask in the same notebook, the
+   overlay runs for A, and B's question text appears nowhere in what the model
+   was handed.
+3. **A finished report reaches the threshold on its own** (design §5.3) —
+   directly, without first parking the counter at the threshold.
+4. **Losing access discards the overlay.** Removal is what turns "unreadable"
+   into "gone".
+
+Plus the run protocol T4 established and this chain must not diverge from:
+every exit path settles (``BaseException`` included), a malformed reply keeps
+the previous notes, ``settle`` consumes exactly the ``claim`` snapshot so
+mid-run signals survive, and the event stays counts-only — never naming the
+member it ran for.
+
+Built on the stores plus a bare migrated ``SqliteDatabase`` (not the full
+repository composition) for the same reason as ``test_agent_profile_job_base``:
+what is under test is this service's protocol, not the ingestion stack.
+"""
+from __future__ import annotations
+
+import json
+import queue
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+
+import contextvars
+import pytest
+
+from app.core.config import Settings
+from app.models.schemas import AskRequest, AskResponse
+from app.repositories.ports import (
+    AGENT_PROFILE_MALFORMED_MESSAGE,
+    AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
+    AGENT_PROFILE_TRACE_SAMPLE,
+)
+from app.repositories.sqlite.agent_profile_store import AgentProfileStore
+from app.repositories.sqlite.ask_state_store import AskStateStore
+from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.migrations import SqliteMigrator
+from app.repositories.sqlite.query_store import QueryStore
+from app.repositories.sqlite.source_store import SourceStore
+from app.services import background_jobs
+from app.services.agent_profile_job import (
+    AGENT_PROFILE_WORKLOAD,
+    BASE_CHAIN_OWNER,
+    OVERLAY_LABELS,
+    AgentProfileConsolidationService,
+)
+from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
+from app.services.ask_modes import ASK_MODES
+from app.services.notebook_sharing import NotebookSharingService
+
+NOW = "2026-08-18T00:00:00+00:00"
+NOTEBOOK_ID = "nb-1"
+USER_A = "user-a"
+USER_B = "user-b"
+
+A_QUESTION = "阿尔法项目的时序收敛怎么做"
+B_QUESTION = "贝塔团队的预算表在哪一份文档里"
+
+
+# --------------------------------------------------------------------- doubles
+class _Client:
+    def __init__(self, reply):
+        self.reply = reply
+        self.prompts: list[str] = []
+
+    settings = None  # no ``settings`` -> cap_kwargs stays off
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        prompt = messages[0]["content"]
+        self.prompts.append(prompt)
+        return self.reply(prompt) if callable(self.reply) else self.reply
+
+
+class _Models:
+    def __init__(self, client: "_Client | None"):
+        self.client = client
+        self.chat_calls = 0
+
+    def configured(self, workload_id: str) -> bool:
+        assert workload_id == AGENT_PROFILE_WORKLOAD
+        return self.client is not None
+
+    def chat(self, workload_id: str):
+        assert workload_id == AGENT_PROFILE_WORKLOAD
+        assert self.client is not None
+        self.chat_calls += 1
+        return self.client
+
+
+class _EventLog:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def emit(self, event, **_kwargs) -> None:
+        self.events.append(event)
+
+
+class _Submitter:
+    """Records submissions instead of starting threads (synchronous by default)."""
+
+    def __init__(self, *, run: bool = True, fail: "BaseException | None" = None):
+        self.run = run
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    def __call__(self, fn, *args, name=None, notify_pending=False, **kwargs):
+        self.calls.append({"name": name, "args": args, "notify_pending": notify_pending})
+        if self.fail is not None:
+            raise self.fail
+        if self.run:
+            fn(*args, **kwargs)
+        return None
+
+
+# -------------------------------------------------------------------- fixtures
+@pytest.fixture
+def harness(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENT_PROFILE_OVERLAY_TRIGGER", "3")
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}")
+    database = SqliteDatabase(settings, tmp_path)
+    assert SqliteMigrator(database, settings).migrate()
+
+    with database.write() as db:
+        for user_id in (USER_A, USER_B):
+            db.execute(
+                "INSERT INTO users(id,email,display_name,role,status,created_at,"
+                "updated_at) VALUES (?,?,?,?,?,?,?)",
+                (user_id, f"{user_id}@example.test", user_id, "user", "active",
+                 NOW, NOW),
+            )
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,"
+            "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (NOTEBOOK_ID, "NB", "", "engineering", "ready", USER_A, NOW, NOW),
+        )
+
+    from app.repositories.sqlite import knowledge_counts_cache
+
+    knowledge_counts_cache.invalidate(NOTEBOOK_ID)
+
+    seams = SimpleNamespace(now=lambda: NOW, new_id=lambda prefix: f"{prefix}-1")
+    return {
+        "settings": settings,
+        "database": database,
+        "profiles": AgentProfileStore(database, new_id=seams.new_id, now=seams.now),
+        "sources": SourceStore(database, now=lambda: NOW),
+        "queries": QueryStore(database, settings),
+        "ask_state": AskStateStore(database, seams),
+        "event_log": _EventLog(),
+    }
+
+
+def _service(harness, *, client: "_Client | None" = None, models=None):
+    return AgentProfileConsolidationService(
+        settings=harness["settings"],
+        profiles=harness["profiles"],
+        database=harness["database"],
+        sources=harness["sources"],
+        queries=harness["queries"],
+        models=models if models is not None else _Models(client),
+        event_log=harness["event_log"],
+        ask_state=harness["ask_state"],
+    )
+
+
+def _with_submitter(monkeypatch, submitter):
+    monkeypatch.setattr(background_jobs, "submit", submitter)
+    return submitter
+
+
+def _add_ask(
+    harness,
+    job_id: str,
+    *,
+    user_id: str,
+    question: str,
+    notebook_id: str = NOTEBOOK_ID,
+    status: str = "done",
+    created_at: str = NOW,
+    steps: tuple[dict, ...] = (),
+) -> None:
+    """One persisted ask plus its trace rows, written directly.
+
+    Direct SQL rather than ``begin_durable_job``: what these tests are about is
+    the READ's predicate, and going through the writer would drag conversation
+    lifecycle into a file about isolation.
+    """
+    with harness["database"].write() as db:
+        db.execute(
+            "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,"
+            "question,status,trace_json,answer_id,error,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,'','','',?,?)",
+            (job_id, notebook_id, f"conv-{job_id}", user_id, "reasoning",
+             question, status, created_at, created_at),
+        )
+        for seq, step in enumerate(steps):
+            db.execute(
+                "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) "
+                "VALUES (?,?,?,?)",
+                (job_id, seq, json.dumps(step, ensure_ascii=False), created_at),
+            )
+
+
+def _reply(**values) -> str:
+    return json.dumps({
+        "blocks": [
+            {"label": label, "value": value} for label, value in values.items()
+        ]
+    })
+
+
+def _blocks(harness, owner_id: str) -> dict[str, dict]:
+    return {
+        row["label"]: row
+        for row in harness["profiles"].read_blocks(NOTEBOOK_ID, owner_id)
+        if row["owner_id"] == owner_id
+    }
+
+
+def _job(harness, owner_id: str) -> dict:
+    return harness["profiles"].job_row(NOTEBOOK_ID, owner_id) or {}
+
+
+# =====================================================================
+# 1. one member's activity moves only their own chain
+# =====================================================================
+
+def test_an_ask_advances_only_the_asking_member_s_counter(harness, monkeypatch):
+    """A's ask must not touch B's chain — and must not touch the SHARED base.
+
+    The base's owner is ``''``, so "the identity got lost somewhere" and "this
+    signal belongs to everyone" are the same value. That is why an empty
+    ``user_id`` is refused outright rather than defaulted.
+    """
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    service = _service(harness)
+
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)
+
+    assert _job(harness, USER_A)["pending_signal"] == 2
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_B) is None
+    assert harness["profiles"].job_row(NOTEBOOK_ID, BASE_CHAIN_OWNER) is None
+    assert submitter.calls == []          # below the threshold: nothing scheduled
+
+
+def test_a_missing_identity_never_bumps_the_shared_base(harness, monkeypatch):
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    service = _service(harness)
+
+    service.note_ask_completed(NOTEBOOK_ID, "")
+
+    assert harness["profiles"].job_row(NOTEBOOK_ID, BASE_CHAIN_OWNER) is None
+    assert submitter.calls == []
+
+
+def test_the_threshold_schedules_exactly_one_run_per_batch(harness, monkeypatch):
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    service = _service(harness)
+
+    for _ in range(3):                                  # trigger == 3
+        service.note_ask_completed(NOTEBOOK_ID, USER_A)
+
+    assert len(submitter.calls) == 1
+    assert submitter.calls[0]["args"] == (NOTEBOOK_ID, USER_A, 3)
+    assert submitter.calls[0]["notify_pending"] is False
+    # ⚠ The job name must not name the member: thread names reach the queue
+    # warning logs, and "whose searching is being consolidated" is exactly the
+    # fact this feature keeps out of shared channels.
+    assert USER_A not in submitter.calls[0]["name"]
+    assert NOTEBOOK_ID in submitter.calls[0]["name"]
+    # Claimed, so a fourth ask finds the slot taken rather than scheduling again.
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)
+    assert len(submitter.calls) == 1
+    assert _job(harness, USER_A)["status"] == "running"
+
+
+# =====================================================================
+# 2. one member's prompt contains only their own questions
+# =====================================================================
+
+def test_the_prompt_never_contains_another_member_s_question(harness, monkeypatch):
+    """The isolation, stated as behaviour.
+
+    Both members ask in the same notebook; the overlay consolidates A. B's
+    question — and B's trace summaries — must appear nowhere in the prompt,
+    and A's must.
+    """
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "阿尔法时序检索得到 0 个候选节点",
+         "detail": {"count": 0}, "duration_ms": 120},
+    ))
+    _add_ask(harness, "job-b", user_id=USER_B, question=B_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "贝塔预算表检索得到 0 个候选节点",
+         "detail": {"count": 0}, "duration_ms": 90},
+    ))
+    client = _Client(_reply(retrieval_notes="按项目代号检索更容易命中"))
+    service = _service(harness, client=client)
+
+    assert service.start_overlay(NOTEBOOK_ID, USER_A) is True
+
+    prompt = client.prompts[0]
+    assert A_QUESTION in prompt
+    assert "阿尔法时序检索得到 0 个候选节点" in prompt
+    assert B_QUESTION not in prompt
+    assert "贝塔预算表" not in prompt
+
+
+def test_the_store_read_is_scoped_before_the_service_ever_sees_it(harness):
+    """Same property one layer down: the SQL, not a Python filter, is what
+    excludes the other member. ``test_agent_profile_isolation_guard.py`` pins
+    that the predicate is written into the statement; this pins that it works.
+    """
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    _add_ask(harness, "job-b", user_id=USER_B, question=B_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+
+    rows = harness["ask_state"].recent_user_ask_traces(
+        NOTEBOOK_ID, USER_A, job_limit=40, step_limit=600
+    )
+
+    assert [row["question"] for row in rows] == [A_QUESTION]
+    assert [row["job_id"] for row in rows] == ["job-a"]
+    assert len(rows[0]["steps"]) == 1
+
+
+def test_the_read_is_bounded_by_both_asks_and_trace_rows(harness):
+    for index in range(5):
+        _add_ask(
+            harness, f"job-{index}", user_id=USER_A, question=f"问题{index}",
+            created_at=f"2026-08-1{index}T00:00:00+00:00",
+            steps=tuple(
+                {"step_type": "retrieve", "summary": f"s{n}", "detail": {"count": n}}
+                for n in range(4)
+            ),
+        )
+
+    rows = harness["ask_state"].recent_user_ask_traces(
+        NOTEBOOK_ID, USER_A, job_limit=2, step_limit=3
+    )
+
+    # Newest first, and the step cap bites across asks rather than per ask.
+    assert [row["question"] for row in rows] == ["问题4", "问题3"]
+    assert sum(len(row["steps"]) for row in rows) == 3
+
+
+def test_the_projection_drops_everything_but_type_summary_duration_and_count(harness):
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "reflect", "summary": "继续", "duration_ms": 12,
+         "detail": {"count": 3, "error": "boom: 内部异常正文",
+                    "evidence": "证据原文不得外泄"}},
+    ))
+
+    step = harness["ask_state"].recent_user_ask_traces(
+        NOTEBOOK_ID, USER_A, job_limit=5, step_limit=5
+    )[0]["steps"][0]
+
+    assert step == {"step_type": "reflect", "summary": "继续",
+                    "duration_ms": 12, "count": 3}
+
+
+# =====================================================================
+# 3. a finished report reaches the threshold on its own
+# =====================================================================
+
+def test_a_finished_report_claims_directly_without_parking_the_counter(
+    harness, monkeypatch
+):
+    """Design §5.3: a report is a naturally high-information endpoint.
+
+    It claims rather than bumping-to-threshold, so a claim that loses to a run
+    already in flight leaves the counter where it was instead of parked AT the
+    threshold (which would fire again on the member's very next ask).
+    """
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    service = _service(harness)
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    assert len(submitter.calls) == 1
+    assert submitter.calls[0]["args"] == (NOTEBOOK_ID, USER_A, 0)
+    assert _job(harness, USER_A)["status"] == "running"
+    assert _job(harness, USER_A)["pending_signal"] == 0
+
+
+def test_a_report_finishing_while_a_run_is_in_flight_keeps_the_ask_signal(
+    harness, monkeypatch
+):
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    service = _service(harness)
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)      # pending == 1
+    assert service.start_overlay(NOTEBOOK_ID, USER_A) is True
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)   # busy -> no-op
+
+    assert len(submitter.calls) == 1
+    assert _job(harness, USER_A)["pending_signal"] == 1
+
+
+def test_the_report_engine_signals_the_report_author_and_never_the_request_user():
+    """The engine passes ``self.user_id`` — the report's creator — explicitly.
+
+    Reports run on a background thread where ``current_user()`` falls back to
+    the seeded admin, so a ContextVar-derived owner would consolidate someone
+    else's private notes from this report.
+    """
+    from app.services.report_engine import ReportEngine, ReportEngineDependencies
+
+    calls: list[tuple] = []
+    deps = ReportEngineDependencies(
+        reports=None, retrieval=None, evidence_context=None, model_clients=None,
+        model_errors=None, source_query=None, communities=None, settings=None,
+        event_log=None,
+        agent_profile_jobs=SimpleNamespace(
+            note_report_completed=lambda nb, uid: calls.append((nb, uid))
+        ),
+    )
+    engine = ReportEngine(deps, user_id=USER_B)
+
+    engine._note_report_completed(NOTEBOOK_ID)
+
+    assert calls == [(NOTEBOOK_ID, USER_B)]
+
+
+def test_the_report_engine_swallows_a_failing_notification():
+    from app.services.report_engine import ReportEngine, ReportEngineDependencies
+
+    def _boom(_nb, _uid):
+        raise RuntimeError("scheduler down")
+
+    deps = ReportEngineDependencies(
+        reports=None, retrieval=None, evidence_context=None, model_clients=None,
+        model_errors=None, source_query=None, communities=None, settings=None,
+        event_log=None,
+        agent_profile_jobs=SimpleNamespace(note_report_completed=_boom),
+    )
+
+    # A stored, finished report must not be re-judged "failed" because a
+    # background refresh could not be scheduled.
+    ReportEngine(deps, user_id=USER_A)._note_report_completed(NOTEBOOK_ID)
+
+
+# =====================================================================
+# 4. losing access discards the overlay
+# =====================================================================
+
+def test_removing_a_member_discards_their_overlay_and_leaves_the_base(harness):
+    profiles = harness["profiles"]
+    profiles.write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="A 的心得",
+        evidence=[], expected_revision=0, origin="user", actor=USER_A,
+    )
+    profiles.write_block(
+        NOTEBOOK_ID, USER_B, "retrieval_notes", value="B 的心得",
+        evidence=[], expected_revision=0, origin="user", actor=USER_B,
+    )
+    profiles.write_block(
+        NOTEBOOK_ID, BASE_CHAIN_OWNER, "corpus_shape", value="共享底座",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    removed: list[tuple] = []
+    sharing = NotebookSharingService(
+        store=SimpleNamespace(
+            remove_member=lambda nb, uid: removed.append((nb, uid))
+        ),
+        copies=None, catalog=None, summaries=None, database=harness["database"],
+        copy_stats=lambda _nb: {}, profiles=profiles,
+    )
+
+    sharing.remove_member(NOTEBOOK_ID, USER_B)
+
+    assert removed == [(NOTEBOOK_ID, USER_B)]
+    assert _blocks(harness, USER_B) == {}
+    assert "retrieval_notes" in _blocks(harness, USER_A)      # untouched
+    assert "corpus_shape" in _blocks(harness, BASE_CHAIN_OWNER)
+
+
+def test_a_failing_overlay_cleanup_never_blocks_the_access_change():
+    """Membership first, cleanup second: an access change must not depend on a
+    cleanup succeeding, and the read-side gate already covers leftover rows."""
+    removed: list[tuple] = []
+    sharing = NotebookSharingService(
+        store=SimpleNamespace(
+            remove_member=lambda nb, uid: removed.append((nb, uid))
+        ),
+        copies=None, catalog=None, summaries=None, database=None,
+        copy_stats=lambda _nb: {},
+        profiles=SimpleNamespace(
+            clear_all=lambda _nb, _uid: (_ for _ in ()).throw(RuntimeError("db down"))
+        ),
+    )
+
+    sharing.remove_member(NOTEBOOK_ID, USER_B)
+
+    assert removed == [(NOTEBOOK_ID, USER_B)]
+
+
+# =====================================================================
+# 5. the run protocol (terminal settle, fail-open, consumed semantics)
+# =====================================================================
+
+def test_a_successful_run_writes_the_member_s_own_blocks(harness, monkeypatch):
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "初检索得到 0 个候选节点",
+         "detail": {"count": 0}},
+    ))
+    client = _Client(_reply(
+        retrieval_notes="用项目代号做关键词更容易命中",
+        usage_gaps="反复找预算类材料但库里没有",
+    ))
+    service = _service(harness, client=client)
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    blocks = _blocks(harness, USER_A)
+    assert set(blocks) == set(OVERLAY_LABELS)
+    assert blocks["retrieval_notes"]["value"] == "用项目代号做关键词更容易命中"
+    assert _job(harness, USER_A)["status"] == "done"
+    assert _job(harness, USER_A)["blocks_written"] == 2
+    # Nothing was written into the shared base.
+    assert _blocks(harness, BASE_CHAIN_OWNER) == {}
+
+
+def test_usage_gaps_evidence_is_the_server_s_own_zero_hit_count(harness, monkeypatch):
+    """Design §5.1's documented exception: the overlay's evidence is a count of
+    empty retrievals, computed here from the same sample the prompt rendered —
+    never a number the model restated, and never a source id list."""
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "空一", "detail": {"count": 0}},
+        {"step_type": "retrieve", "summary": "空二", "detail": {"count": 0}},
+        {"step_type": "retrieve", "summary": "有", "detail": {"count": 5}},
+        # ⚠ ``reflect`` also carries counts, and zero there means "no new
+        # sub-queries", not "found nothing". Counting it would inflate the one
+        # number this block is grounded in.
+        {"step_type": "reflect", "summary": "无新查询", "detail": {"count": 0}},
+    ))
+    service = _service(harness, client=_Client(_reply(
+        retrieval_notes="n", usage_gaps="g",
+    )))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    blocks = _blocks(harness, USER_A)
+    assert blocks["usage_gaps"]["evidence"] == [
+        {"claim_index": 0, "zero_hit_queries": 2}
+    ]
+    # retrieval_notes is about how searching went; no document is its source.
+    assert blocks["retrieval_notes"]["evidence"] == []
+
+
+def test_an_empty_sample_settles_done_without_paying_for_a_call(harness, monkeypatch):
+    _with_submitter(monkeypatch, _Submitter())
+    models = _Models(_Client(_reply(retrieval_notes="不该被写出来")))
+    service = _service(harness, models=models)
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    assert models.chat_calls == 0
+    assert _job(harness, USER_A)["status"] == "done"
+    assert _blocks(harness, USER_A) == {}
+
+
+@pytest.mark.parametrize("reply", [
+    "not json at all",
+    json.dumps({"blocks": "nope"}),
+    json.dumps({"blocks": [{"label": "corpus_shape", "value": "抢底座的标签"}]}),
+    json.dumps({"blocks": [{"label": "retrieval_notes", "value": {"t": 1}}]}),
+])
+def test_an_unusable_reply_keeps_the_previous_notes(harness, monkeypatch, reply):
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="原有心得",
+        evidence=[], expected_revision=0, origin="user", actor=USER_A,
+    )
+    service = _service(harness, client=_Client(reply))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    assert _blocks(harness, USER_A)["retrieval_notes"]["value"] == "原有心得"
+    job = _job(harness, USER_A)
+    assert job["status"] == "failed"
+    assert job["failure_reason"] == AGENT_PROFILE_MALFORMED_MESSAGE
+    # A base label in an overlay reply is rejected, so the base stays empty.
+    assert _blocks(harness, BASE_CHAIN_OWNER) == {}
+
+
+def test_an_unconfigured_model_settles_failed_with_a_showable_reason(
+    harness, monkeypatch
+):
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION)
+    service = _service(harness, client=None)
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    assert _job(harness, USER_A)["failure_reason"] == (
+        AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE
+    )
+
+
+def test_a_base_exception_still_settles_the_row(harness, monkeypatch):
+    """``KeyboardInterrupt``/``SystemExit`` sail past ``except Exception``, and
+    a row left ``running`` holds this member's chain until the next restart —
+    every later trigger silently no-ops against it."""
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION)
+
+    def _interrupt(_prompt):
+        raise KeyboardInterrupt()
+
+    service = _service(harness, client=_Client(_interrupt))
+    assert service.profiles.claim(NOTEBOOK_ID, USER_A) == 0
+
+    with pytest.raises(KeyboardInterrupt):
+        service.run_overlay(NOTEBOOK_ID, USER_A, 0)
+
+    assert _job(harness, USER_A)["status"] == "failed"
+
+
+def test_a_submit_failure_releases_the_claim(harness, monkeypatch):
+    _with_submitter(monkeypatch, _Submitter(fail=RuntimeError("no thread")))
+    service = _service(harness)
+
+    with pytest.raises(RuntimeError):
+        service.start_overlay(NOTEBOOK_ID, USER_A)
+
+    assert _job(harness, USER_A)["status"] == "failed"
+    # Nothing ran, so nothing was consumed.
+    assert _job(harness, USER_A)["pending_signal"] == 0
+
+
+def test_settle_consumes_exactly_the_claim_snapshot(harness, monkeypatch):
+    """Signals that arrive WHILE a run is in flight must survive it."""
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    service = _service(harness, client=_Client(_reply(retrieval_notes="n")))
+    for _ in range(3):
+        harness["profiles"].bump_signal(NOTEBOOK_ID, USER_A)
+    claimed = harness["profiles"].claim(NOTEBOOK_ID, USER_A)
+    assert claimed == 3
+    harness["profiles"].bump_signal(NOTEBOOK_ID, USER_A)   # arrives mid-run
+
+    service.run_overlay(NOTEBOOK_ID, USER_A, claimed)
+
+    assert _job(harness, USER_A)["pending_signal"] == 1
+
+
+def test_a_member_edit_during_the_run_wins_and_is_not_retried(harness, monkeypatch):
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    profiles = harness["profiles"]
+    profiles.write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="旧值",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+
+    def _edit_then_reply(_prompt):
+        # The member edits while the model is answering: the run's CAS is now
+        # stale, and their text must stand.
+        profiles.write_block(
+            NOTEBOOK_ID, USER_A, "retrieval_notes", value="我自己写的",
+            evidence=[], expected_revision=1, origin="user", actor=USER_A,
+        )
+        return _reply(retrieval_notes="模型算出来的")
+
+    service = _service(harness, client=_Client(_edit_then_reply))
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+    service.run_overlay(NOTEBOOK_ID, USER_A, claimed or 0)
+
+    assert _blocks(harness, USER_A)["retrieval_notes"]["value"] == "我自己写的"
+    assert "cas_conflict:retrieval_notes" in _job(harness, USER_A)["diagnostic"]
+
+
+def test_a_user_authored_note_reaches_the_prompt_marked_as_authority(
+    harness, monkeypatch
+):
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="我更常按型号搜",
+        evidence=[], expected_revision=0, origin="user", actor=USER_A,
+    )
+    client = _Client(_reply(usage_gaps="g"))
+    service = _service(harness, client=client)
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    assert "retrieval_notes (user-authored): 我更常按型号搜" in client.prompts[0]
+
+
+def test_the_base_layer_never_leaks_into_the_overlay_prompt(harness, monkeypatch):
+    """``read_blocks`` spans ``owner_id IN ('', ?)``, so the base's own text
+    comes back with the overlay's. Rendering it as "your note" would have the
+    model rewrite the library's shared description into a private block."""
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, BASE_CHAIN_OWNER, "corpus_shape", value="底座描述这个库",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    client = _Client(_reply(retrieval_notes="n"))
+
+    _service(harness, client=client).note_report_completed(NOTEBOOK_ID, USER_A)
+
+    assert "底座描述这个库" not in client.prompts[0]
+
+
+def test_the_event_is_counts_only_and_names_the_overlay_chain(harness, monkeypatch):
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    _service(harness, client=_Client(_reply(retrieval_notes="心得正文"))).\
+        note_report_completed(NOTEBOOK_ID, USER_A)
+
+    event = harness["event_log"].events[-1]
+    assert event["kind"] == "agent_profile_consolidated"
+    assert event["chain"] == "overlay"
+    assert set(event) == {
+        "kind", "chain", "notebook_id", "status", "blocks", "chars",
+        "evidence", "latency_ms",
+    }
+    serialized = json.dumps(event, ensure_ascii=False)
+    assert USER_A not in serialized          # which member never leaves the process
+    assert "心得正文" not in serialized
+    assert A_QUESTION not in serialized
+
+
+def test_the_trigger_is_fail_open_when_the_store_is_down(harness, monkeypatch):
+    service = _service(harness)
+    monkeypatch.setattr(
+        service.profiles, "bump_signal",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)      # must not raise
+
+
+def test_the_kill_switch_stops_the_chain_before_any_write(harness, monkeypatch):
+    monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
+    harness["settings"] = Settings(
+        database_url=harness["settings"].database_url,
+    )
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    service = _service(harness)
+
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_A) is None
+    assert submitter.calls == []
+
+
+# =====================================================================
+# 6. the Ask trigger's wiring
+# =====================================================================
+
+class _RecordingAskState:
+    def __init__(self, calls: list):
+        self.calls = calls
+
+    def begin_durable_job(self, notebook_id, payload, mode, user_id):
+        payload.conversation_id = "conv-t5"
+        return "askjob-t5", "conv-t5"
+
+    def append_trace(self, notebook_id, job_id, step, user_id):
+        pass
+
+    def finish_job(self, job_id, status, *, answer_id="", error=""):
+        self.calls.append(("finish", status))
+        return "conv-t5"
+
+    def cleanup_empty_conversation(self, conversation_id):
+        pass
+
+
+class _InlineSubmitter:
+    def submit(self, fn, *args, name=None, notify_pending=False, **kwargs):
+        contextvars.copy_context().run(fn, *args, **kwargs)
+        return threading.current_thread()
+
+
+def _ask_coordinator(calls, *, runner, noted):
+    service = SimpleNamespace(
+        ask=lambda notebook_id, payload, *, user_id, job_id="", on_trace=None,
+        cancel_event=None: runner(),
+    )
+    return AskExecutionCoordinator(
+        ask_state=_RecordingAskState(calls),
+        cancellations=AskCancellationRegistry(),
+        job_submitter=_InlineSubmitter(),
+        event_log=SimpleNamespace(logger=SimpleNamespace(exception=lambda *a: None)),
+        ask=lambda: service,
+        note_ask_completed=noted,
+    )
+
+
+def _drain(events: "queue.Queue") -> list:
+    out = []
+    while True:
+        item = events.get(timeout=2.0)
+        if item is None:
+            return out
+        out.append(item)
+
+
+def _response() -> AskResponse:
+    return AskResponse(answer_id="ans-t5", conversation_id="conv-t5",
+                       conclusion="", answer="a", grounded=True, anchors=[],
+                       related_knowledge=[], citations=[], llm_mode="x")
+
+
+def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row():
+    calls: list = []
+    noted: list = []
+    coordinator = _ask_coordinator(
+        calls, runner=_response,
+        noted=lambda nb, uid: noted.append(("note", nb, uid)) or calls.append(("note",)),
+    )
+
+    _drain(coordinator.start(
+        "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
+        user_id=USER_A,
+    ))
+
+    assert noted == [("note", "nb-t5", USER_A)]
+    # AFTER the terminal job row, never inside ``_finish`` (frozen sequence).
+    assert calls == [("finish", "done"), ("note",)]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("engine down")])
+def test_a_failed_ask_never_signals(failure):
+    calls: list = []
+    noted: list = []
+
+    def _boom():
+        raise failure
+
+    _drain(_ask_coordinator(
+        calls, runner=_boom, noted=lambda nb, uid: noted.append((nb, uid)),
+    ).start(
+        "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
+        user_id=USER_A,
+    ))
+
+    assert noted == []
+    assert calls == [("finish", "failed")]
+
+
+def test_a_failing_signal_never_turns_a_delivered_answer_into_an_error():
+    """⚠ The call site sits inside the worker's ``try``, whose
+    ``except Exception`` finishes the job as *failed* and delivers an error
+    event. An exception escaping here would rewrite a delivered answer into a
+    reported failure."""
+    calls: list = []
+
+    def _boom(_nb, _uid):
+        raise RuntimeError("scheduler down")
+
+    delivered = _drain(_ask_coordinator(
+        calls, runner=_response, noted=_boom,
+    ).start(
+        "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
+        user_id=USER_A,
+    ))
+
+    assert [event["event"] for event in delivered][-1] == "final"
+    assert calls == [("finish", "done")]
+
+
+def test_the_sample_size_constant_is_the_one_the_service_uses(harness):
+    """The service must not carry a second spelling of the bound: a local
+    default here and the real constant there is exactly how "40" becomes two
+    different numbers."""
+    captured: dict = {}
+
+    class _Recorder:
+        def recent_user_ask_traces(self, notebook_id, user_id, *, job_limit,
+                                   step_limit):
+            captured.update(job_limit=job_limit, step_limit=step_limit)
+            return []
+
+    service = _service(harness)
+    service.ask_state = _Recorder()
+    service.usage_stats(NOTEBOOK_ID, USER_A)
+
+    assert captured["job_limit"] == AGENT_PROFILE_TRACE_SAMPLE

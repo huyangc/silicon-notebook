@@ -20,9 +20,18 @@ notebook but belongs to one member.
 statically — a promise a reviewer has to re-check by hand is a promise that
 erodes.
 
-The per-(notebook, member) OVERLAY chain, which DOES read one member's own
-trace (under a ``WHERE user_id = ?`` predicate written into the reading SQL),
-is T5 and lands in this module beside this one.
+The per-(notebook, member) OVERLAY chain (T5) lives in this module beside it
+and is its mirror image. It DOES read usage — but only one member's own, under
+a ``created_by = ?`` predicate written into the reading SQL itself (see
+``AskStateStore.recent_user_ask_traces``), and it writes only into blocks that
+same member alone can read. Two chains, two disjoint label sets
+(``BASE_LABELS`` / ``OVERLAY_LABELS``), two separate single-flight rows: the
+base cannot see any member's usage, and the overlay cannot see any member's
+usage but its own owner's. The same guard file pins both halves — layer one
+forces every function in this module into one chain or the other, layer two
+allowlists the ports each chain may call, and a third check reads the trace
+SQL to confirm the user predicate is in the statement rather than in a Python
+filter.
 
 Terminal-state discipline is the ``kg_build_jobs`` / ``catalog_jobs`` protocol,
 for the same reason: the chain's single-flight slot is a durable row, so a run
@@ -43,8 +52,11 @@ from app.repositories.ports import (
     AGENT_PROFILE_MALFORMED_MESSAGE,
     AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
     AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE,
+    AGENT_PROFILE_TRACE_SAMPLE,
+    AGENT_PROFILE_TRACE_STEP_LIMIT,
     AgentProfileRevisionConflict,
     AgentProfileStorePort,
+    AskStateStorePort,
     QueryStorePort,
     RepositoryDatabasePort,
     SourceStorePort,
@@ -58,8 +70,10 @@ from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.kg.json_utils import safe_json
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.prompts import (
+    AGENT_PROFILE_OVERLAY_SCHEMA_HINT,
     AGENT_PROFILE_SCHEMA_HINT,
     agent_profile_base_prompt,
+    agent_profile_overlay_prompt,
 )
 from app.services.reasoning_retrieval import profile_wiring_active
 
@@ -372,6 +386,235 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
     return parsed
 
 
+# ===========================================================================
+# T5 — the per-(notebook, member) OVERLAY chain
+# ===========================================================================
+
+#: The two blocks the overlay chain owns. ⚠ Disjoint from ``BASE_LABELS`` by
+#: construction and checked as such below: a chain writing the other's labels
+#: would put usage-derived text into a block every member reads (or a
+#: notebook-wide statement into a block only one member can see), and both
+#: directions are silent.
+OVERLAY_LABELS: tuple[str, ...] = ("retrieval_notes", "usage_gaps")
+
+assert not (set(OVERLAY_LABELS) & set(BASE_LABELS)), (
+    "the two chains must own disjoint labels — see the note above"
+)
+
+#: Character budget for the rendered usage sample. The sample is already
+#: bounded by ``AGENT_PROFILE_TRACE_SAMPLE`` asks, but a question may be 120
+#: characters and forty of them plus their step lines is a prompt section that
+#: dwarfs everything around it. Overflow is DISCLOSED on the line rather than
+#: silently cut, so the model cannot read a clipped sample as the person's
+#: complete history.
+AGENT_PROFILE_USAGE_SECTION_MAX_CHARS = 3000
+
+#: How many distinct "this search came back empty" summaries the sample may
+#: name. It is the single most decision-relevant input for ``usage_gaps``, and
+#: also the most repetitive (one library-wide gap produces the same line in
+#: every ask), so it is deduplicated and then capped.
+AGENT_PROFILE_EMPTY_QUERY_SAMPLES = 12
+
+#: Step types whose ``count == 0`` genuinely means "this retrieval found
+#: nothing". An explicit set rather than "any step with count 0": ``reflect``
+#: and the outline steps also carry counts, and zero there means something else
+#: entirely (no new sub-queries this round, no sections yet) — counting them
+#: would inflate the one number ``usage_gaps`` is grounded in.
+_ZERO_HIT_STEP_TYPES = frozenset({
+    "retrieve",
+    "enumerate",
+    "expand",
+    "follow_chain",
+    "exact_lookup",
+    "memory",
+})
+
+_OVERLAY_JOB_NAME_PREFIX = "agentprofile-overlay-"
+
+
+@dataclass(frozen=True)
+class UsageStats:
+    """Everything the overlay prompt is allowed to know — all of it ONE
+    member's own activity in ONE notebook.
+
+    Deliberately no answer text, no Memory content and no evidence excerpts:
+    the projection in ``ports.project_trace_step`` keeps an action type, a
+    human summary, a duration and one count, and this dataclass cannot hold
+    anything the projection did not produce.
+    """
+
+    #: Projected ask rows, newest first (``ports.project_ask_row`` shape).
+    asks: tuple[Mapping[str, Any], ...]
+    total_steps: int
+    #: The number ``usage_gaps``' stored evidence records — counted here, by
+    #: the server, never restated by the model (design §5.1's exception to
+    #: source-id evidence).
+    zero_hit_steps: int
+    failed_asks: int
+    #: Deduplicated, bounded summaries of the searches that came back empty.
+    empty_search_summaries: tuple[str, ...] = ()
+
+
+def summarize_usage(asks: Sequence[Mapping[str, Any]]) -> UsageStats:
+    """Fold the projected sample into the counts the prompt renders.
+
+    Pure arithmetic over the store's projection — no I/O, so the isolation
+    story stays "the overlay reads exactly one thing".
+    """
+    total_steps = 0
+    zero_hits = 0
+    failed = 0
+    empties: list[str] = []
+    seen: set[str] = set()
+    for ask in asks:
+        if str(ask.get("status") or "") in ("failed", "cancelled"):
+            failed += 1
+        for step in ask.get("steps") or ():
+            total_steps += 1
+            if str(step.get("step_type") or "") not in _ZERO_HIT_STEP_TYPES:
+                continue
+            if step.get("count") != 0:
+                continue
+            zero_hits += 1
+            summary = str(step.get("summary") or "")
+            if summary and summary not in seen:
+                seen.add(summary)
+                if len(empties) < AGENT_PROFILE_EMPTY_QUERY_SAMPLES:
+                    empties.append(summary)
+    return UsageStats(
+        asks=tuple(asks),
+        total_steps=total_steps,
+        zero_hit_steps=zero_hits,
+        failed_asks=failed,
+        empty_search_summaries=tuple(empties),
+    )
+
+
+def render_usage_block(stats: UsageStats) -> str:
+    """The "how you have been searching" half of the overlay prompt.
+
+    English scaffolding for the same reason as every other prompt block here:
+    it is structure sitting among English instructions, not user-facing copy.
+    The questions inside it are of course in whatever language the person
+    writes.
+    """
+    lines = [
+        "[Your recent searching in this library]",
+        f"asks sampled: {len(stats.asks)} (most recent first, at most "
+        f"{AGENT_PROFILE_TRACE_SAMPLE})",
+        f"of those, ended in failure or cancellation: {stats.failed_asks}",
+        f"retrieval steps that returned nothing: {stats.zero_hit_steps} "
+        f"(of {stats.total_steps} steps sampled)",
+    ]
+    spent = 0
+    rendered = 0
+    body: list[str] = []
+    for ask in stats.asks:
+        question = str(ask.get("question") or "")
+        if not question:
+            # A job row with no question text says nothing about how this
+            # person searches; it still counted in the totals above.
+            continue
+        steps = list(ask.get("steps") or ())
+        empty_here = sum(
+            1
+            for step in steps
+            if str(step.get("step_type") or "") in _ZERO_HIT_STEP_TYPES
+            and step.get("count") == 0
+        )
+        line = (
+            f"- {question} [{ask.get('status') or 'unknown'}] "
+            f"({len(steps)} steps, {empty_here} came back empty)"
+        )
+        if spent + len(line) + 1 > AGENT_PROFILE_USAGE_SECTION_MAX_CHARS:
+            break
+        body.append(line)
+        spent += len(line) + 1
+        rendered += 1
+    if body:
+        hidden = len(stats.asks) - rendered
+        suffix = f" (+{hidden} more not listed)" if hidden > 0 else ""
+        lines.append(f"questions{suffix}:")
+        lines.extend(body)
+    if stats.empty_search_summaries:
+        lines.append("searches that came back empty:")
+        lines.extend(f"- {text}" for text in stats.empty_search_summaries)
+    return "\n".join(lines)
+
+
+def render_current_overlay_blocks(blocks: Sequence[Mapping[str, Any]], owner_id: str) -> str:
+    """The "what you already believe about your own searching" half.
+
+    ⚠ Filters on ``owner_id`` even though the caller reads with that owner:
+    ``read_blocks``' predicate is ``owner_id IN ('', ?)``, so a base block
+    would otherwise be rendered into the overlay prompt as if it were this
+    member's note, and the model would then rewrite the library's shared
+    description into a private block. The base's own content reaching the
+    overlay prompt is not a privacy problem (every member can read it) — it is
+    a correctness one, and it is the reason this takes the owner rather than
+    trusting the list it was handed.
+    """
+    lines = ["[Your current notes]"]
+    by_label = {
+        str(block.get("label") or ""): block
+        for block in blocks or ()
+        if str(block.get("owner_id") or "") == owner_id
+    }
+    for label in OVERLAY_LABELS:
+        block = by_label.get(label)
+        value = clip_block_value(block.get("value") if block else "")
+        if not value:
+            lines.append(f"- {label}: (empty)")
+            continue
+        authored = str((block or {}).get("updated_origin") or "") == "user"
+        marker = " (user-authored)" if authored else ""
+        lines.append(f"- {label}{marker}: {value}")
+    return "\n".join(lines)
+
+
+def parse_overlay_reply(payload: object) -> list[dict]:
+    """Validate one overlay reply into the blocks that may be written.
+
+    Structurally identical to ``parse_base_reply`` — whole-payload rejection
+    for anything structural, empty value means "omit", fail-open keeps what is
+    already stored — with ONE deliberate difference: there is no evidence
+    handling at all. The overlay prompt never asks for evidence (its input is
+    the member's own trace, in which there is no document to cite), and what
+    ``usage_gaps`` is grounded in is counted server-side from the same sample.
+    A model that volunteers an ``evidence`` key is therefore IGNORED rather
+    than rejected: an extra key the prompt never asked for is not a statement
+    about the answer's shape, and throwing away an otherwise sound refresh over
+    it would trade a real improvement for pedantry.
+    """
+    if not isinstance(payload, Mapping):
+        raise AgentProfileOutputRejected("reply_not_an_object")
+    raw_blocks = payload.get("blocks")
+    if not isinstance(raw_blocks, list):
+        raise AgentProfileOutputRejected("blocks_not_a_list")
+    parsed: list[dict] = []
+    seen: set[str] = set()
+    for entry in raw_blocks:
+        if not isinstance(entry, Mapping):
+            raise AgentProfileOutputRejected("block_not_an_object")
+        label = str(entry.get("label") or "").strip()
+        if label not in OVERLAY_LABELS:
+            # Base labels land here too, and that is the point: this chain has
+            # read one member's usage and nothing else, so it must not be able
+            # to write a block every other member reads.
+            raise AgentProfileOutputRejected("unknown_label")
+        if label in seen:
+            raise AgentProfileOutputRejected("duplicate_label")
+        seen.add(label)
+        raw_value = entry.get("value")
+        if not isinstance(raw_value, str):
+            raise AgentProfileOutputRejected("value_not_a_string")
+        value = clip_block_value(raw_value)
+        if not value:
+            continue
+        parsed.append({"label": label, "value": value})
+    return parsed
+
+
 class AgentProfileConsolidationService:
     """Threshold gate, single-flight claim, one bounded call, terminal settle.
 
@@ -390,6 +633,7 @@ class AgentProfileConsolidationService:
         queries: QueryStorePort,
         models: Any,
         event_log: Any,
+        ask_state: "AskStateStorePort | None" = None,
     ) -> None:
         self.settings = settings
         self.profiles = profiles
@@ -398,6 +642,14 @@ class AgentProfileConsolidationService:
         self.queries = queries
         self.models = models
         self.event_log = event_log
+        # T5: the OVERLAY chain's only data seat, and the only one in this
+        # service that can reach a member's own usage. It is a separate seat
+        # rather than another method on an existing one so the isolation guard
+        # can say something a reviewer cannot forget: base-chain functions may
+        # not touch it at all. ``None`` = overlay unavailable (a composition
+        # root that predates T5), and every overlay entry point degrades to a
+        # no-op rather than raising — this feature never breaks its host.
+        self.ask_state = ask_state
 
     # ------------------------------------------------------------- triggering
     def note_corpus_change(self, notebook_id: str) -> None:
@@ -477,12 +729,13 @@ class AgentProfileConsolidationService:
             # every later trigger silently no-ops against it.
             self._safe_settle(
                 notebook_id,
+                BASE_CHAIN_OWNER,
                 "failed",
                 failure_reason=AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE,
                 diagnostic="job_submission_failed",
                 consumed=0,
             )
-            self._emit("failed", notebook_id, latency_ms=0)
+            self._emit("failed", notebook_id, chain="base", latency_ms=0)
             raise
         return True
 
@@ -535,41 +788,49 @@ class AgentProfileConsolidationService:
         except AgentProfileModelUnavailable:
             return self._fail(
                 notebook_id,
+                BASE_CHAIN_OWNER,
                 AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
                 "model_unconfigured",
                 latency_ms(),
                 consumed,
+                chain="base",
             )
         except AgentProfileOutputRejected as exc:
             # Fail-open: the blocks that were already there stand untouched.
             return self._fail(
                 notebook_id,
+                BASE_CHAIN_OWNER,
                 AGENT_PROFILE_MALFORMED_MESSAGE,
                 exc.diagnostic,
                 latency_ms(),
                 consumed,
+                chain="base",
             )
         except (KeyboardInterrupt, SystemExit):
             self._safe_settle(
                 notebook_id,
+                BASE_CHAIN_OWNER,
                 "failed",
                 failure_reason=AGENT_PROFILE_INTERRUPTED_MESSAGE,
                 diagnostic="worker_interrupted",
                 consumed=consumed,
             )
-            self._emit("failed", notebook_id, latency_ms=latency_ms())
+            self._emit("failed", notebook_id, chain="base", latency_ms=latency_ms())
             raise
         except Exception:
             self._fail(
                 notebook_id,
+                BASE_CHAIN_OWNER,
                 AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE,
                 "internal_error",
                 latency_ms(),
                 consumed,
+                chain="base",
             )
             raise
         self._safe_settle(
             notebook_id,
+            BASE_CHAIN_OWNER,
             "done",
             diagnostic=outcome.diagnostic,
             blocks_written=outcome.written,
@@ -578,6 +839,7 @@ class AgentProfileConsolidationService:
         self._emit(
             "done",
             notebook_id,
+            chain="base",
             blocks=outcome.written,
             chars=outcome.chars,
             evidence=outcome.evidence,
@@ -813,54 +1075,402 @@ class AgentProfileConsolidationService:
             served_ids=frozenset(sid for sid, _counts in ranked),
         )
 
+    # -------------------------------------------------- overlay: triggering
+    def note_ask_completed(self, notebook_id: str, user_id: str) -> None:
+        """This member finished one Ask in this notebook.
+
+        ⚠ FAIL-OPEN IN FULL, exactly like ``note_corpus_change``: this hangs
+        off the streaming Ask worker immediately after the terminal job row,
+        and an answer that was delivered must never be reported as failed
+        because a background note refresh could not be scheduled.
+
+        The gate is one primary-key upsert and no model call. ``user_id`` is
+        the OWNER of the chain being signalled, so an empty one is refused
+        outright rather than defaulted: ``''`` is the shared base's sentinel,
+        and a missing identity silently bumping the base counter would let a
+        per-member event fire the notebook-wide chain.
+
+        ⚠ The synchronous ``POST /ask`` endpoint deliberately does NOT call
+        this. It creates no ``ask_jobs`` row, which is the same reason the
+        admin usage overview counts questions from ``ask_jobs`` submissions
+        rather than from conversations — one definition of "an ask happened",
+        not two that disagree.
+        """
+        try:
+            if not user_id or self.ask_state is None:
+                return
+            if not profile_wiring_active(self.settings, self.profiles):
+                return
+            pending = self.profiles.bump_signal(notebook_id, user_id)
+            if pending < int(self.settings.agent_profile_overlay_trigger):
+                return
+            self.start_overlay(notebook_id, user_id)
+        except Exception:  # noqa: BLE001 — never break a delivered answer
+            _log.exception(
+                "agent profile ask notification failed for notebook %s",
+                notebook_id,
+            )
+
+    def note_report_completed(self, notebook_id: str, user_id: str) -> None:
+        """This member finished one deep report in this notebook.
+
+        A completed report reaches the threshold on its own (design §5.3: it is
+        a naturally high-information endpoint — a confirmed intent, an approved
+        outline and a full multi-section retrieval, all from one person in one
+        library). So this claims DIRECTLY rather than bumping to the threshold
+        and re-checking: bumping would be two writes to say one thing, and — if
+        the claim then lost to a run already in flight — would leave the
+        counter parked AT the threshold, firing again on the member's very next
+        ask. Claiming instead means a busy chain simply keeps whatever ask
+        signal it had already accumulated.
+
+        Fail-open in full for the same reason as above: the report is finished
+        and persisted before this runs.
+        """
+        try:
+            if not user_id or self.ask_state is None:
+                return
+            if not profile_wiring_active(self.settings, self.profiles):
+                return
+            self.start_overlay(notebook_id, user_id)
+        except Exception:  # noqa: BLE001 — never break a finished report
+            _log.exception(
+                "agent profile report notification failed for notebook %s",
+                notebook_id,
+            )
+
+    def start_overlay(self, notebook_id: str, user_id: str) -> bool:
+        """Claim this member's chain and submit the worker; ``False`` = busy.
+
+        Mirrors ``start_base`` step for step (claim before the thread exists,
+        settle on the spot if the submit raises) and, like it, does NOT consult
+        ``profile_wiring_active`` — the kill switch belongs to each caller's own
+        gate, and T6's manual endpoint must apply it before calling here.
+
+        ⚠ The two chains of one notebook claim SEPARATE rows
+        (``owner_id=''`` vs the member's id) and therefore run independently,
+        including in a single-member notebook where both may run back to back
+        over overlapping input. Merging them there is a possible optimisation
+        and P1 deliberately does not do it: the merged form needs a third
+        prompt and a third set of labels, while the cost it saves is one
+        bounded call per threshold batch.
+
+        ⚠ The job name carries the notebook but NEVER the owner. Thread names
+        reach queue-warning logs, which are a shared channel, and "which member
+        is having their searching consolidated" is the exact fact this
+        feature's isolation exists to keep out of those.
+        """
+        if self.ask_state is None:
+            return False
+        claimed = self.profiles.claim(notebook_id, user_id)
+        if claimed is None:
+            return False
+        try:
+            background_jobs.submit(
+                self.run_overlay,
+                notebook_id,
+                user_id,
+                int(claimed),
+                name=f"{_OVERLAY_JOB_NAME_PREFIX}{notebook_id}",
+                notify_pending=False,
+            )
+        except BaseException:
+            self._safe_settle(
+                notebook_id,
+                user_id,
+                "failed",
+                failure_reason=AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE,
+                diagnostic="job_submission_failed",
+                consumed=0,
+            )
+            self._emit("failed", notebook_id, chain="overlay", latency_ms=0)
+            raise
+        return True
+
+    # -------------------------------------------------------- overlay: the run
+    def run_overlay(
+        self, notebook_id: str, user_id: str, claimed_signal: int = 0
+    ) -> dict:
+        """Execute one overlay consolidation to a terminal state.
+
+        Same protocol as ``run_base`` — every exit path settles,
+        ``KeyboardInterrupt``/``SystemExit`` get their own clause because
+        ``except Exception`` cannot see them, and EVERY terminal path consumes
+        exactly the ``claim`` snapshot so mid-run signals survive while a
+        failing provider still cannot be billed once per ask.
+        """
+        started = time.perf_counter()
+        consumed = max(0, int(claimed_signal))
+
+        def latency_ms() -> int:
+            return round((time.perf_counter() - started) * 1000)
+
+        try:
+            outcome = self._consolidate_overlay(notebook_id, user_id)
+        except AgentProfileModelUnavailable:
+            return self._fail(
+                notebook_id,
+                user_id,
+                AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
+                "model_unconfigured",
+                latency_ms(),
+                consumed,
+                chain="overlay",
+            )
+        except AgentProfileOutputRejected as exc:
+            # Fail-open: the notes that were already there stand untouched.
+            return self._fail(
+                notebook_id,
+                user_id,
+                AGENT_PROFILE_MALFORMED_MESSAGE,
+                exc.diagnostic,
+                latency_ms(),
+                consumed,
+                chain="overlay",
+            )
+        except (KeyboardInterrupt, SystemExit):
+            self._safe_settle(
+                notebook_id,
+                user_id,
+                "failed",
+                failure_reason=AGENT_PROFILE_INTERRUPTED_MESSAGE,
+                diagnostic="worker_interrupted",
+                consumed=consumed,
+            )
+            self._emit("failed", notebook_id, chain="overlay",
+                       latency_ms=latency_ms())
+            raise
+        except Exception:
+            self._fail(
+                notebook_id,
+                user_id,
+                AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE,
+                "internal_error",
+                latency_ms(),
+                consumed,
+                chain="overlay",
+            )
+            raise
+        self._safe_settle(
+            notebook_id,
+            user_id,
+            "done",
+            diagnostic=outcome.diagnostic,
+            blocks_written=outcome.written,
+            consumed=consumed,
+        )
+        self._emit(
+            "done",
+            notebook_id,
+            chain="overlay",
+            blocks=outcome.written,
+            chars=outcome.chars,
+            evidence=outcome.evidence,
+            latency_ms=latency_ms(),
+        )
+        return {
+            "notebook_id": notebook_id,
+            "blocks_written": outcome.written,
+            "diagnostic": outcome.diagnostic,
+        }
+
+    def _consolidate_overlay(self, notebook_id: str, user_id: str) -> _BaseOutcome:
+        if self.ask_state is None:
+            raise AgentProfileOutputRejected("overlay_unavailable")
+        if not self.models.configured(AGENT_PROFILE_WORKLOAD):
+            # Checked before the reads: an unconfigured deployment should pay
+            # nothing to learn it is unconfigured.
+            raise AgentProfileModelUnavailable()
+        blocks = self.profiles.read_blocks(notebook_id, user_id)
+        stats = self.usage_stats(notebook_id, user_id)
+        if not stats.asks:
+            # Nothing of this member's is left to summarise (their asks were
+            # deleted, or the chain was claimed manually before they used the
+            # library). Terminal SUCCESS with zero blocks, and NO model call:
+            # an empty sample cannot support either block, so paying for a
+            # reply whose only correct content is "omit both" is pure waste.
+            return _BaseOutcome(written=0, chars=0, evidence=0,
+                                diagnostic="no_usage_sample")
+        client = self.models.chat(AGENT_PROFILE_WORKLOAD)
+        prompt = agent_profile_overlay_prompt(
+            render_usage_block(stats),
+            render_current_overlay_blocks(blocks, user_id),
+            value_max_chars=AGENT_PROFILE_VALUE_MAX_CHARS,
+        )
+        raw = client.chat_json(
+            [{"role": "user", "content": prompt}],
+            AGENT_PROFILE_OVERLAY_SCHEMA_HINT,
+            max_tokens=AGENT_PROFILE_MAX_OUTPUT_TOKENS,
+        )
+        if not str(raw or "").strip():
+            raise AgentProfileOutputRejected("empty_reply")
+        data = safe_json(raw)
+        if not data:
+            raise AgentProfileOutputRejected("unparsable_reply")
+        parsed = parse_overlay_reply(data)
+        return self._write_overlay_blocks(
+            notebook_id, user_id, blocks, parsed, stats.zero_hit_steps
+        )
+
+    def _write_overlay_blocks(
+        self,
+        notebook_id: str,
+        user_id: str,
+        current: Sequence[Mapping[str, Any]],
+        parsed: Sequence[Mapping[str, Any]],
+        zero_hit_steps: int,
+    ) -> _BaseOutcome:
+        """Write the parsed overlay blocks under this member's own owner id.
+
+        Evidence is SERVER-COMPUTED and shaped per label (design §5.1's
+        documented exception): ``usage_gaps`` records the zero-result step
+        count the sample actually contained, and ``retrieval_notes`` records
+        none at all — it is a statement about how searching went, and there is
+        no document that could be its source. Neither is taken from the model:
+        a count it restated would be a count nobody checked.
+        """
+        by_label = {
+            str(block.get("label") or ""): block
+            for block in current
+            if str(block.get("owner_id") or "") == user_id
+        }
+        written = 0
+        chars = 0
+        evidence_entries = 0
+        conflicts: list[str] = []
+        for block in parsed:
+            label = str(block["label"])
+            existing = by_label.get(label)
+            expected = int(existing["revision"]) if existing else 0
+            evidence: list[dict] = (
+                [{"claim_index": 0, "zero_hit_queries": int(zero_hit_steps)}]
+                if label == "usage_gaps" else []
+            )
+            try:
+                self.profiles.write_block(
+                    notebook_id,
+                    user_id,
+                    label,
+                    value=str(block["value"]),
+                    evidence=evidence,
+                    expected_revision=expected,
+                    origin="job",
+                    actor="",
+                )
+            except AgentProfileRevisionConflict:
+                # The member edited this note while the run was in flight.
+                # Their edit wins and this block is skipped — never retried:
+                # a retry would re-apply a value computed before their edit.
+                conflicts.append(label)
+                continue
+            written += 1
+            chars += len(str(block["value"]))
+            evidence_entries += len(evidence)
+        diagnostic = (
+            "cas_conflict:" + ",".join(sorted(conflicts)) if conflicts else ""
+        )
+        return _BaseOutcome(
+            written=written,
+            chars=chars,
+            evidence=evidence_entries,
+            diagnostic=diagnostic,
+        )
+
+    # ---------------------------------------------------- overlay: reading
+    def usage_stats(self, notebook_id: str, user_id: str) -> UsageStats:
+        """The overlay chain's ENTIRE view — ONE member's own recent asks.
+
+        Exactly one read: ``recent_user_ask_traces``, whose two statements both
+        carry ``created_by = ?`` **in the SQL text** (see its docstring, and
+        ``test_agent_profile_isolation_guard.py``, which pins that literally in
+        both backends). This is the mirror image of ``corpus_stats``' rule:
+        the base chain must be unable to reach any member's usage, and this
+        chain must be unable to reach any member's usage BUT THIS ONE.
+
+        The result feeds a block only this member can read. There is therefore
+        no path from here into a shared surface — and equally no path from
+        anyone else's activity into here, because the predicate is in the
+        statement rather than in a Python filter one refactor away from being
+        dropped.
+
+        Private Memory content is not in this sample and cannot be: the
+        projection keeps an action type, a summary, a duration and a count
+        (``ports.project_trace_step``), so even the ``memory`` step contributes
+        only "found N".
+        """
+        asks = self.ask_state.recent_user_ask_traces(
+            notebook_id,
+            user_id,
+            job_limit=AGENT_PROFILE_TRACE_SAMPLE,
+            step_limit=AGENT_PROFILE_TRACE_STEP_LIMIT,
+        )
+        return summarize_usage(asks)
+
     # ------------------------------------------------------------ bookkeeping
     def _fail(
         self,
         notebook_id: str,
+        owner_id: str,
         failure_reason: str,
         diagnostic: str,
         latency_ms: int,
         consumed: int,
+        *,
+        chain: str,
     ) -> dict:
         """Settle a run that reached a terminal failure.
 
         ``consumed`` is required, not defaulted to zero: the one place that
-        legitimately consumes nothing is ``start_base``'s submit failure (no run
-        ever existed), and making that the DEFAULT would silently re-introduce
-        the per-upload retry billing the moment someone adds a new failure path
+        legitimately consumes nothing is a submit failure (no run ever
+        existed), and making that the DEFAULT would silently re-introduce the
+        per-trigger retry billing the moment someone adds a new failure path
         without thinking about the counter.
+
+        ``owner_id``/``chain`` are required for the same class of reason: both
+        chains settle through here, and a defaulted owner would quietly settle
+        the SHARED base row for an overlay failure — releasing a slot nobody
+        claimed while leaving the real one stuck ``running`` until restart.
         """
         self._safe_settle(
             notebook_id,
+            owner_id,
             "failed",
             failure_reason=failure_reason,
             diagnostic=diagnostic,
             consumed=max(0, int(consumed)),
         )
-        self._emit("failed", notebook_id, latency_ms=latency_ms)
+        self._emit("failed", notebook_id, chain=chain, latency_ms=latency_ms)
         return {"notebook_id": notebook_id, "failed": diagnostic}
 
-    def _safe_settle(self, notebook_id: str, status: str, **kwargs: Any) -> bool:
+    def _safe_settle(
+        self, notebook_id: str, owner_id: str, status: str, **kwargs: Any
+    ) -> bool:
         """Settle, and never let a settle failure replace the real outcome.
 
         Mirrors ``catalog_job._settle``: if the write itself fails (or the row
         was cascade-deleted mid-run) the caller's own exception/interrupt must
         still be the thing that propagates, and the row falls back to the
         startup sweep the same way a SIGKILL leftover does.
+
+        ⚠ The log line names the notebook but NEVER the owner: which member a
+        consolidation ran for is precisely the usage fact this feature's
+        isolation exists to keep out of shared channels, and a log file is a
+        shared channel. ``(base)``/``(overlay)`` is as much as it says.
         """
         try:
             return bool(
-                self.profiles.settle(notebook_id, BASE_CHAIN_OWNER, status, **kwargs)
+                self.profiles.settle(notebook_id, owner_id, status, **kwargs)
             )
         except Exception:  # noqa: BLE001
             _log.exception(
-                "failed to settle agent profile base chain for notebook %s",
+                "failed to settle agent profile %s chain for notebook %s",
+                "base" if owner_id == BASE_CHAIN_OWNER else "overlay",
                 notebook_id,
             )
             return False
 
     def _emit(
-        self, status: str, notebook_id: str, *, chain: str = "base", **extra: Any
+        self, status: str, notebook_id: str, *, chain: str, **extra: Any
     ) -> None:
         """Counts only — never a block value, a document title or model text.
 

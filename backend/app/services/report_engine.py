@@ -14,6 +14,7 @@ register_cancel/cancel_report/unregister_cancel 是它的显式委托(冻结调�
 from __future__ import annotations
 import contextvars
 import json
+import logging
 import re
 import threading
 import time
@@ -69,6 +70,8 @@ if TYPE_CHECKING:
         CommunityQueryPort, EvidenceContextPort, ModelClientProvider,
         ModelErrorSink, ReportRepository, ReportSourceQueryPort, RetrievalPort,
     )
+
+_log = logging.getLogger("silicon_notebook.report_engine")
 
 _MARKER = MARKER_RE  # 节内 [k_i]/【k_i】及复合引用标记（全局重编号用）
 _HIGH_RISK_NUMBER = re.compile(
@@ -526,6 +529,11 @@ class ReportEngineDependencies:
     # 端口(集合枚举也刻意不传),没有一条会自动带上它的路。缺省 None ⇒ 与接入前
     # 逐字相同。
     agent_profile: Any = None
+    # T5:巡固服务(``AgentProfileConsolidationService``)。报告**完成**是覆盖层
+    # 链路的第二个触发点,且直接达阈。与上面的 store 座位分开两个字段:一个是
+    # 「读理解」、一个是「排整理」,同一个对象兼两职会让「只接注入、不接触发」
+    # 这种完全合理的部署形态无法表达。
+    agent_profile_jobs: Any = None
 
 
 class ReportEngine:
@@ -2483,11 +2491,38 @@ class ReportEngine:
                     content_md=content_md, gaps=gaps,
                     references=references, status="done", progress="完成",
                 )
+                # Agentic Memory P1 (T5):报告完成是覆盖层链路的第二个触发点,
+                # 且**直接达阈**(设计 §5.3:一份报告是天然的高信息量结束点——
+                # 确认过的意图、审阅过的大纲、跨多节的完整检索,全部出自同一个
+                # 人在同一个库里)。挂在 ``status="done"`` 那次写之后,只有这一
+                # 条路;失败/取消的报告说明不了这个人怎么检索。fail-open 在服务
+                # 内,这里再包一层是因为它落在会把异常判成「生成失败」的 except
+                # 里——报告已经落库完成,不能因为排不上一个后台整理而被改判。
+                self._note_report_completed(notebook_id)
         except AskCancelled:
             reports.update_report(notebook_id, rid, status="cancelled", progress="已取消")
         except Exception as exc:
             reports.update_report(notebook_id, rid, status="failed",
                                   error=str(exc)[:500], progress="失败")
+
+    def _note_report_completed(self, notebook_id: str) -> None:
+        """Signal the report author's own overlay chain — fail-open, always.
+
+        ``self.user_id`` is the report's creator, taken explicitly and never
+        from the request ContextVar: reports run on a background thread where
+        ``current_user()`` falls back to the seeded admin, and that fallback
+        would consolidate someone else's private notes from this report.
+        """
+        service = self.dependencies.agent_profile_jobs
+        if service is None or not self.user_id:
+            return
+        try:
+            service.note_report_completed(notebook_id, self.user_id)
+        except Exception:  # noqa: BLE001 — the report is finished and stored
+            _log.exception(
+                "agent profile report notification failed for notebook %s",
+                notebook_id,
+            )
 
     def _auto_confirm_intent(self, notebook_id: str, rid: str,
                              contract: dict | None, *,

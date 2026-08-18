@@ -31,8 +31,11 @@
 也读不到」。而这条隔离一旦破,后果不是报错而是**共享库里 A 的提问出现在 B 也能看到
 的块里**——一次静默的隐私事故,没有任何用例会因此变红。
 
-⚠ 本守卫只覆盖**底座**链路(T4)。覆盖层链路(T5)读的正是该成员自己的轨迹,它的判据
-是反过来的:每条读轨迹的 SQL 必须自带 `WHERE user_id = ?` 谓词。那半条随 T5 一起加。
+**层三(T5,覆盖层的轨迹读)**:覆盖层链路读的正是该成员自己的轨迹,所以它的判据是
+反过来的——每条读轨迹的 SQL **字面量**必须自带 `created_by` 谓词。这一层扫的不是
+服务层而是**两个后端的 `ask_state_store.py`**:`TRACE_READ_METHODS` 里登记的方法,
+它体内每一条 SQL 字符串都必须含该谓词。把谓词从 SQL 挪到 Python 侧过滤即报红——那
+正是这条隔离最可能被「重构掉」的形态,因为过滤在 Python 里读起来完全正常。
 
 不经 import 定位源文件:只需要读源码文本,不需要把服务层的依赖拖进这条离线判据。
 """
@@ -43,10 +46,16 @@ from pathlib import Path
 
 import pytest
 
+import app.repositories
 import app.services
 
 
 _SERVICE_PATH = Path(app.services.__file__).parent / "agent_profile_job.py"
+_REPO_ROOT = Path(app.repositories.__file__).parent
+_STORE_PATHS = {
+    "sqlite": _REPO_ROOT / "sqlite" / "ask_state_store.py",
+    "postgres": _REPO_ROOT / "postgres" / "ask_state_store.py",
+}
 
 #: 底座链路的函数/方法名。名字改了就报红(见
 #: `test_every_function_in_the_module_is_classified`),这是刻意的:改名的人必须
@@ -63,14 +72,27 @@ BASE_CHAIN_FUNCTIONS = frozenset({
     "parse_base_reply",
 })
 
-#: 覆盖层链路(T5)。**刻意留空**:空集不是占位符,而是一条断言——今天这个模块里
-#: 一个覆盖层函数都还没有。T5 往这里加名字时,那个动作本身就是「我知道这个函数会读
-#: 该成员自己的轨迹」的显式声明,而它的判据(每条读必须带 `user_id` 谓词)另立。
-OVERLAY_CHAIN_FUNCTIONS: frozenset[str] = frozenset()
+#: 覆盖层链路(T5)。名字在这里 = 显式声明「我知道这个函数会读该成员自己的轨迹」。
+#: 它的层二白名单是**另一张**(`OVERLAY_ALLOWED_PORT_CALLS`,含 `ask_state` 座位),
+#: 判据另有层三:那条读的 SQL 必须自带 `created_by` 谓词。
+OVERLAY_CHAIN_FUNCTIONS: frozenset[str] = frozenset({
+    "note_ask_completed",
+    "note_report_completed",
+    "start_overlay",
+    "run_overlay",
+    "_consolidate_overlay",
+    "_write_overlay_blocks",
+    "usage_stats",
+    "summarize_usage",
+    "render_usage_block",
+    "render_current_overlay_blocks",
+    "parse_overlay_reply",
+})
 
 #: 与取数无关的函数:构造、事件、结算、纯文本处理。登记在这里表示「我看过它,它不
-#: 取业务数据」。`_safe_settle`/`_fail` 只写自己那一行 job 状态,`_emit` 只发计数,
-#: `sweep_on_start` 只调一个无参的全表结算,`_clip_name` 是纯字符串函数。
+#: 取业务数据」。`_safe_settle`/`_fail` 只写**调用方指定的那一行** job 状态(两条链
+#: 路共用,owner 是必填参数而不是默认值),`_emit` 只发计数,`sweep_on_start` 只调一
+#: 个无参的全表结算,`_clip_name` 是纯字符串函数。
 NEUTRAL_FUNCTIONS = frozenset({
     "__init__",
     "_clip_name",
@@ -106,9 +128,39 @@ ALLOWED_PORT_CALLS = frozenset({
     "claim",
 })
 
-#: 层二检查的三个座位。`self.database` 刻意不在其中:它上面只调 `connect()`,拿到的
-#: 连接**只**转交给端口方法(见本文件 docstring 的「挡不住」一节)。
-PORT_ATTRIBUTES = ("profiles", "sources", "queries")
+#: 层二白名单:**覆盖层**链路允许调用的端口方法名。刻意是**另一张表**而不是往上面
+#: 那张加两条——两条链路的合法输入本来就是互斥的,合成一张会让「底座能不能读轨迹」
+#: 这个问题不再有答案(而那正是本文件存在的理由)。
+#:
+#: ⚠ `recent_user_ask_traces` 是这里唯一的取数方法,也是全仓唯一一条把「这个库」
+#: 读成「这个人对这个库的使用」的读。它凭什么在列:谓词 `created_by = ?` 写在 SQL
+#: 里(层三静态钉住),产物只写进该成员自己的 owner 行。任何**不按 user 收窄**的
+#: 使用数据读法都不该出现在这里。
+OVERLAY_ALLOWED_PORT_CALLS = frozenset({
+    # 块本身(notebook + 该成员的 owner id = 他自己的覆盖层)
+    "read_blocks",
+    "write_block",
+    # 该成员自己的提问轨迹
+    "recent_user_ask_traces",
+    # 单飞与阈值(只碰这条链路自己那一行)
+    "bump_signal",
+    "claim",
+})
+
+#: 层二检查的四个座位。`ask_state` 是 T5 新增的,登记它的**主要作用是让底座报红**:
+#: 底座函数一旦写出 `self.ask_state.<任何方法>`,它必然不在 `ALLOWED_PORT_CALLS`
+#: 里。`self.database` 刻意不在其中:它上面只调 `connect()`,拿到的连接**只**转交给
+#: 端口方法(见本文件 docstring 的「挡不住」一节)。
+PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state")
+
+#: 层三:必须自带 user 谓词的 store 方法(两个后端各一份实现)。
+TRACE_READ_METHODS = ("recent_user_ask_traces",)
+
+#: 层三认的谓词形状。两个后端占位符不同(`?` / `%s`),所以只钉列名与紧随其后的
+#: 比较——列名本身就是判据,`created_by` 出现在一条读 `ask_jobs` 的 SQL 里,没有第
+#: 二种含义。
+USER_PREDICATE_TOKENS = ("created_by = ?", "created_by = %s",
+                         "created_by=?", "created_by=%s")
 
 
 def _functions(path: Path) -> dict[str, ast.AST]:
@@ -145,6 +197,29 @@ def _port_calls(node: ast.AST) -> set[str]:
             and owner.attr in PORT_ATTRIBUTES
         ):
             found.add(func.attr)
+    return found
+
+
+def _sql_literals(node: ast.AST) -> list[str]:
+    """函数体内的「像 SQL 的」字符串:相邻字面量已被解析器折成一个 Constant;
+    f-string(占位符拼接用)只取其中的常量片段拼起来——被插值的部分本来就不是
+    可静态检查的内容。判据是同时含 SELECT 与 FROM,避免把普通字符串当 SQL 判。
+    """
+    found: list[str] = []
+
+    def _record(text: str) -> None:
+        upper = text.upper()
+        if "SELECT" in upper and "FROM" in upper:
+            found.append(text)
+
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            _record(child.value)
+        elif isinstance(child, ast.JoinedStr):
+            _record("".join(
+                part.value for part in child.values
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            ))
     return found
 
 
@@ -187,16 +262,94 @@ def test_the_base_chain_only_calls_allowlisted_ports(function_name: str):
     )
 
 
+@pytest.mark.parametrize("function_name", sorted(OVERLAY_CHAIN_FUNCTIONS))
+def test_the_overlay_chain_only_calls_allowlisted_ports(function_name: str):
+    """层二(覆盖层):只许调**它自己那张**白名单里的端口方法。"""
+    node = _functions(_SERVICE_PATH)[function_name]
+    offenders = sorted(_port_calls(node) - OVERLAY_ALLOWED_PORT_CALLS)
+    assert offenders == [], (
+        f"覆盖层的 {function_name} 调用了未登记的端口方法:{offenders}。\n"
+        "覆盖层可以读使用数据,但只能读**它自己那位成员**的,而且产物只写进该成员"
+        "自己的 owner 行。一条不按 user 收窄的读会把别人的提问搅进这个人的私有块,"
+        "而共享笔记本里没有任何报错会提示这件事。要加一条读,先确认它的谓词按 user"
+        "收窄、且写在 SQL 里(层三会静态复核),再把它加进 OVERLAY_ALLOWED_PORT_CALLS"
+        "并在那里写明理由。"
+    )
+
+
+@pytest.mark.parametrize("backend", sorted(_STORE_PATHS))
+@pytest.mark.parametrize("method_name", TRACE_READ_METHODS)
+def test_the_trace_read_carries_the_user_predicate_in_sql(
+    backend: str, method_name: str
+):
+    """层三:覆盖层的轨迹读,每一条 SQL 字面量都必须自带 `created_by` 谓词。
+
+    这一条钉的不是「有没有按用户过滤」,而是**过滤写在哪儿**。写在 SQL 里,它是
+    语句的性质;挪到 Python 侧(先取回再 `if row["created_by"] == user_id`),读起来
+    同样正常、测试同样能全绿,但下一次重构可以把那一行删掉而不留痕迹——而被删掉之
+    后的失败形态是「别人的提问进了这个人的私有块」,没有任何报错。
+    """
+    functions = _functions(_STORE_PATHS[backend])
+    assert method_name in functions, (
+        f"{backend} 的 ask_state_store 里找不到 {method_name}——覆盖层的取数方法"
+        "被改名或删掉了,而层三会因此静默地什么都不检查。"
+    )
+    statements = _sql_literals(functions[method_name])
+    assert statements, (
+        f"{backend}.{method_name} 里一条 SQL 字面量都扫不到:要么它不再自己发查询"
+        "(那这条隔离的判据就落到了别处,必须重新登记),要么 SQL 被拼成了这个守卫"
+        "读不到的形状。"
+    )
+    for sql in statements:
+        assert any(token in sql for token in USER_PREDICATE_TOKENS), (
+            f"{backend}.{method_name} 里有一条读不带 `created_by` 谓词:\n"
+            f"  {' '.join(sql.split())[:200]}\n"
+            "覆盖层的输入必须在**语句层面**只包含发起人自己的行。Python 侧过滤不算"
+            "——那是一行随时可能被重构掉的代码,而它一旦没了,别人的提问就会被总结进"
+            "这个人的私有理解块里。"
+        )
+
+
 def test_the_allowlists_are_not_silently_empty():
-    """自检:两层的判据都不能被清空成恒真断言。
+    """自检:三层的判据都不能被清空成恒真断言。
 
     层一的空转形态是「三个集合都空」(那时 unclassified 会报红,所以它自防);
-    层二的空转形态是 BASE_CHAIN_FUNCTIONS 被清空——那样 parametrize 出零个用例,
-    整个层二一个字都不检查而 pytest 全绿。
+    层二的空转形态是 BASE_CHAIN_FUNCTIONS / OVERLAY_CHAIN_FUNCTIONS 被清空——那样
+    parametrize 出零个用例,整个层二一个字都不检查而 pytest 全绿;层三同理,清空
+    TRACE_READ_METHODS 或 _STORE_PATHS 就没有任何用例被生成。
     """
     assert len(BASE_CHAIN_FUNCTIONS) >= 9
     assert "corpus_stats" in BASE_CHAIN_FUNCTIONS
     assert len(ALLOWED_PORT_CALLS) >= 11
+    assert len(OVERLAY_CHAIN_FUNCTIONS) >= 11
+    assert "usage_stats" in OVERLAY_CHAIN_FUNCTIONS
+    assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 5
+    assert TRACE_READ_METHODS and len(_STORE_PATHS) == 2
+
+
+def test_the_two_chains_never_share_a_port_allowlist_entry_that_reads_usage():
+    """反向护栏:轨迹读绝不能悄悄出现在**底座**的白名单里。
+
+    两张白名单是分开的,但分开本身挡不住有人把 `recent_user_ask_traces` 往两张里
+    各加一条(「反正都要用」)。共享底座一旦读到任何成员的使用数据,它写出的块是
+    全体成员可见的——这正是整份守卫存在的那一个失败形态。
+    """
+    for method in TRACE_READ_METHODS:
+        assert method not in ALLOWED_PORT_CALLS, (
+            f"{method} 出现在**底座**的端口白名单里。底座的产物一库一份、"
+            "全体成员可见,它读到任何人的提问轨迹都等于把那个人的使用情况公开。"
+        )
+    assert "ask_state" not in " ".join(sorted(ALLOWED_PORT_CALLS))
+
+
+def test_the_overlay_chain_actually_reads_the_member_trace():
+    """反向护栏:层二是白名单,把 `usage_stats` 的读**删光**同样能让它绿。
+    所以正面钉住:覆盖层确实在读那一条,而且只读那一条。"""
+    calls = _port_calls(_functions(_SERVICE_PATH)["usage_stats"])
+    assert calls == {"recent_user_ask_traces"}, (
+        f"usage_stats 的端口调用变成了 {sorted(calls)}——覆盖层的输入面被改了。"
+        "它应当恰好读一样东西:该成员自己的提问轨迹。"
+    )
 
 
 def test_the_base_chain_actually_reads_something():
