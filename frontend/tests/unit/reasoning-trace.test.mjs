@@ -494,3 +494,54 @@ test("收尾合成步渲染略过节与依据不足节的披露(有界:前 3 个
     "5 处引用",
   );
 });
+
+// Agentic Memory P1:Agent 对这个库的已有理解进了这一轮的规划/反思。缺标签会
+// 回退成 "profile" 直出英文机制名,撑爆 48px 徽章列。
+test("profile 有短标签,detail 说清带了几条已有理解", () => {
+  const step = {
+    step_type: "profile",
+    summary: "带上对这个库的已有理解",
+    detail: { blocks: 3, chars: 218 },
+  };
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "经验");
+  assert.equal(getTraceStepDetail(step), "3 条已有理解");
+
+  // blocks 缺失/非数字时给空串,绝不上屏 "undefined 条已有理解"。
+  assert.equal(getTraceStepDetail({ step_type: "profile", summary: "", detail: {} }), "");
+  assert.equal(
+    getTraceStepDetail({ step_type: "profile", summary: "", detail: { blocks: "3" } }),
+    "",
+  );
+  // chars 单独存在也不足以渲染:它是整块字符数,不是「几条」。
+  assert.equal(
+    getTraceStepDetail({ step_type: "profile", summary: "", detail: { chars: 218 } }),
+    "",
+  );
+});
+
+// 分支顺序守卫:profile 必须排在通用 `detail.count` 分支之前(同 memory/synthesis
+// 的理由)。哪天 profile 的 detail 多出一个 count 键,排在后面就会被静默渲染成
+// 「N 个候选」——一个读起来对、其实完全错位的数。
+test("profile 分支先于通用 count 分支命中", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "profile",
+      summary: "",
+      detail: { blocks: 2, count: 99 },
+    }),
+    "2 条已有理解",
+  );
+});
+
+// profile 步不进 source_subgraph 那类隐藏名单:它是用户该看到的一步。
+test("profile 步计入可见步数与总耗时", () => {
+  const summary = getReasoningTraceSummary(
+    [
+      { step_type: "profile", summary: "带上对这个库的已有理解", detail: { blocks: 1 }, duration_ms: 2 },
+      { step_type: "plan", summary: "规划", detail: {}, duration_ms: 1000 },
+    ],
+    false,
+  );
+  assert.equal(summary.stepCountLabel, "2 步");
+  assert.equal(summary.totalLabel, "1.0s");
+});

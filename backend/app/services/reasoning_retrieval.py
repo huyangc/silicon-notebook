@@ -25,6 +25,9 @@ from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
     exact_probe_terms,
 )
+from app.services.agent_profile_block import (
+    render_profile_block, selected_profile_blocks,
+)
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.services.collection_catalog import (
@@ -158,6 +161,25 @@ def enumeration_wiring_active(settings, catalog, enumeration) -> bool:
         getattr(settings, "reasoning_enum_tools_enabled", True)
         and catalog is not None
         and enumeration is not None
+    )
+
+
+def profile_wiring_active(settings, profile_store) -> bool:
+    """接线层面上,Agent 的「对这个库的已有理解」是否可用(kill switch + store 在)。
+
+    与 ``enumeration_wiring_active`` 同款、同理由:它有**第二、第三个**调用方——
+    巡固任务的触发闸(来源变更/提问完成要不要排一次整理)与 API 的可见性投影
+    (``GET .../understanding`` 的 ``enabled``,前端据它决定显不显示入口)。三处
+    必须用**同一个**判据:各写一份的话,总开关一关就会剩下「不注入了,但后台还
+    在整理」或「后端说关了,前端还摆着一个点了没反应的按钮」这类半关状态。
+
+    ``profile_store is None`` 是「这个调用方没接线」的拼写(镜像两个集合服务):
+    knowhow 智能补全与窄测试替身照旧构造得出 ``ReasoningRetriever``,只是那条 run
+    与接入前逐字相同。
+    """
+    return bool(
+        getattr(settings, "agent_profile_enabled", True)
+        and profile_store is not None
     )
 
 
@@ -1395,6 +1417,8 @@ class ReasoningRetriever:
         fail_closed: bool = False,
         collection_catalog=None,
         collection_enumeration=None,
+        agent_profile=None,
+        profile_owner_id: str = "",
     ):
         self.retrieval = retrieval
         self.model_clients = model_clients
@@ -1405,6 +1429,15 @@ class ReasoningRetriever:
         # (深度报告逐节深挖等)行为与接入前逐字相同——不注入地图、不提供动作。
         self.collection_catalog = collection_catalog
         self.collection_enumeration = collection_enumeration
+        # Agentic Memory P1:Agent 对这个库的已有理解(``AgentProfileStorePort``)。
+        # 同样缺省 None ⇒ 没接线的调用方与接入前逐字相同(见
+        # ``profile_wiring_active``)。
+        self.agent_profile = agent_profile
+        # ⚠ **必须由调用方显式传入,绝不回退到 ContextVar。**``current_user()`` 在
+        # ContextVar 未设时回退 seeded admin —— 后台任务与报告生成正是那种场景,
+        # 一旦回退,一个人的私有覆盖层就会被注进另一个人的 run。空串是合法且安全
+        # 的取值:只注入共享底座,不碰任何人的覆盖层。
+        self.profile_owner_id = profile_owner_id
         # Ask keeps its historical fail-open retrieval behavior. Authoring
         # flows such as knowhow completion opt into strict execution so a
         # failed plan/reflect/retrieval cannot masquerade as deep reasoning.
@@ -1605,7 +1638,8 @@ class ReasoningRetriever:
         return result
 
     # --- LLM 决策点 ---
-    def plan(self, question, history="", max_subqueries=None, collection_map=""):
+    def plan(self, question, history="", max_subqueries=None, collection_map="",
+             profile_block=""):
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
@@ -1628,7 +1662,10 @@ class ReasoningRetriever:
                           # 计数行(无原文)注入规划上下文:plan() 真正发出的 prompt
                           # 是 expand_query_prompt,plan_prompt 只是同一指令的另一份
                           # 拼写,所以注入点在这里而不在那里。
-                          collection_map=collection_map)
+                          collection_map=collection_map,
+                          # Agent 对该库的已有理解(背景,不是证据):同上,两份
+                          # 拼写都加了,production 走的是这一份。
+                          profile_block=profile_block)
         out = [SubQuery(query=s.query, types=s.types, prefer=s.prefer, reason=s.reason)
                for s in ex.sub_queries]
         return out or fallback
@@ -2088,6 +2125,39 @@ class ReasoningRetriever:
                         summary="跳过内容清点(暂时读不到各类条目数量)",
                         detail={"reason": "collection_map_unavailable",
                                 "error": str(exc)[:120]}))
+            # Agent 对这个库的已有理解(共享底座 + 本次提问者的覆盖层)。同样每
+            # run 只读一次,同一个字符串既进规划上下文、又进每一轮 reflect 的候选
+            # 摘要尾部。
+            #
+            # 收窄口径与集合地图**刻意不同**:``_unsafe_scope_restricted()`` 为真时
+            # 地图必须清空(它承诺了一批本次枚举不到的集合),而理解块**照常注入**
+            # ——它不开任何检索通道、不是证据、不能被 [k] 引用,只影响措辞与查法,
+            # 收窄来源范围并不会让「这个库主要是工艺手册」这句话变得不成立。
+            #
+            # fail-open 同款:读不到就当没有。但**不记 skip 步**——这与 memory 零
+            # 命中记 skip 的口径是分开的:那条 skip 承载的是一次 embedding 往返 +
+            # 向量扫描的耗时账目,而这里是一次 ≤10 行的主键前缀点查,亚毫秒。每个
+            # 还没整理过的库(常态)每一轮都多一条「无」步是纯噪声。
+            profile_block = ""
+            if profile_wiring_active(self.settings, self.agent_profile):
+                try:
+                    blocks = self.agent_profile.read_blocks(
+                        notebook_id, self.profile_owner_id)
+                    profile_block = render_profile_block(blocks)
+                    if profile_block:
+                        record(TraceStep(
+                            step_type="profile",
+                            summary="带上对这个库的已有理解",
+                            detail={
+                                # 真正进了 prompt 的条数,不是读回来的行数:清空过
+                                # 的块保留行但值为空,两者常常不等(见
+                                # selected_profile_blocks 的 docstring)。
+                                "blocks": len(selected_profile_blocks(blocks)),
+                                "chars": len(profile_block)}))
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
+                    profile_block = ""
             reviewed_all = list(dict.fromkeys(
                 str(query).strip() for query in (intent_queries or [])
                 if str(query).strip()
@@ -2115,6 +2185,8 @@ class ReasoningRetriever:
                 plan_kwargs["max_subqueries"] = limits.max_initial_subqueries
             if collection_map_text:
                 plan_kwargs["collection_map"] = collection_map_text
+            if profile_block:
+                plan_kwargs["profile_block"] = profile_block
             subqueries = (
                 [SubQuery(query=query) for query in reviewed_queries]
                 if reviewed_queries
@@ -2730,6 +2802,12 @@ class ReasoningRetriever:
             if nudge_note:
                 summary = f"{summary}\n\n{nudge_note}"
                 outline_nudges += 1
+            # 理解块排在集合地图**之前**:地图后面紧跟着一个按剩余额度算出来的
+            # 后缀(``_allowance_suffix``),两者是一句话;把理解块插进它们中间会
+            # 把那个额度句从它解释的计数上拆开。reflect 的 prompt 签名零改动——
+            # 与地图同款,拼在 summary 尾部就够,不必给 reflect 再开一个形参。
+            if profile_block:
+                summary = f"{summary}\n\n{profile_block}"
             if collection_map_text:
                 summary = (
                     f"{summary}\n\n{collection_map_text}"
@@ -3706,6 +3784,12 @@ def _construct_reasoning_retriever(
             repository, "collection_enumeration", None),
         cancel_event=cancel_event,
     )
+    # ⚠ ``agent_profile`` / ``profile_owner_id`` 刻意**不接**在这里。这个工厂是
+    # ``from_repository`` 与 knowhow 智能补全(``services/knowhow/api.py``)共用的
+    # 那条路,而补全的「查询」是一个 JSON 信封、它的策略位本来就在关闭 PPR/精确
+    # 通道 —— 给它注一段库级理解只会让那次合成多背一段与空格子无关的背景。要用
+    # 这两个参数的调用方(Ask、深度报告逐节深挖)显式构造 ``ReasoningRetriever``
+    # 并显式传入 owner,这也正是「owner 绝不回退 ContextVar」得以成立的形状。
     if fail_closed:
         kwargs["fail_closed"] = True
     return factory(**kwargs)

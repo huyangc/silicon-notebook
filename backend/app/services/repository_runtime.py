@@ -1207,6 +1207,9 @@ class RepositoryRuntime:
                 memory_retriever=self.memory_retriever,
                 corpus_profile=ReportCorpusProfileService(self.source_store),
                 generation_gate=generation_gate,
+                # Agentic Memory P1:逐节深挖的理解注入(§5.2)。报告侧没有任何
+                # 自动贯通的路,必须在这里显式填座位。
+                agent_profile=self.agent_profile,
                 selected_source_graph=self.selected_source_graph,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
@@ -1297,6 +1300,10 @@ class RepositoryRuntime:
                 # 调用方共用同一份 per-source 计数缓存(地图与清单必须同源)。
                 collection_catalog=self.collection_catalog,
                 collection_enumeration=self.collection_enumeration,
+                # Agentic Memory P1:Agent 对该库的已有理解 store。交座位本身
+                # (形态同上面两个集合服务),提问者身份由 ask 在构造 retriever
+                # 时显式传入 —— 绝不让下游回退 ContextVar。
+                agent_profile=self.agent_profile,
                 selected_source_graph=self.selected_source_graph,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (

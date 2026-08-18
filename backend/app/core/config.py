@@ -679,6 +679,14 @@ class Settings(BaseSettings):
     # 「flag 关 = 执行处 skip、不改动作面」的惯例——这条回喂本来也不新增动作)。
     reasoning_outline_kg_gap_enabled: bool = Field(
         True, validation_alias="REASONING_OUTLINE_KG_GAP_ENABLED")
+    # Agentic Memory P1:Agent 对每个笔记本的「已有理解」(共享底座 + 个人覆盖层)
+    # 总开关。判据只有一处 —— ``reasoning_retrieval.profile_wiring_active``,注入、
+    # 巡固触发、API 可见性与前端显隐四处必须共用它(镜像上面那把枚举闸的教训:
+    # 各写一份的话,关掉之后总会剩下一处还在跑)。关掉即完全回到接入前:plan/
+    # reflect 不注入理解块、不记 ``profile`` 轨迹步、不排巡固任务、API 报
+    # ``enabled=false``、前端不显示入口,零额外查询。
+    agent_profile_enabled: bool = Field(
+        True, validation_alias="AGENT_PROFILE_ENABLED")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

@@ -384,7 +384,8 @@ PLAN_SCHEMA_HINT = (
 
 
 def plan_prompt(
-    question: str, history_block: str = "", collection_map: str = ""
+    question: str, history_block: str = "", collection_map: str = "",
+    profile_block: str = "",
 ) -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
@@ -402,6 +403,12 @@ def plan_prompt(
     # a keyword hunt.  Empty when the enumeration tools are off or the map could
     # not be built — the prompt then reads exactly as it did before.
     collection_section = f"{collection_map}\n\n" if collection_map else ""
+    # The agent's accumulated understanding of THIS library (Agentic Memory P1,
+    # design §5.2).  Same "add it to BOTH spellings" rule as the map above —
+    # this backup spelling exists so the two never state different plans.
+    # Empty when the feature is off, when nothing has been consolidated yet, or
+    # when the read failed; the prompt then reads exactly as it did before.
+    profile_section = f"{profile_block}\n\n" if profile_block else ""
     return (
         "You plan how to retrieve a knowledge graph (KG) to answer an "
         "engineer's question. The KG has 4 node types: concept (definitions), "
@@ -418,6 +425,7 @@ def plan_prompt(
         f"{quoted_phrase_grounding(question)}"
         "\n"
         f"{history_section}"
+        f"{profile_section}"
         f"{collection_section}"
         f"Question: {question}\n\n"
         'Return JSON only: {"sub_queries":[{"query":"","types":[],'
@@ -767,7 +775,8 @@ EXPAND_SCHEMA_HINT = ('{"query":"","high_level_keywords":[],"low_level_keywords"
 def expand_query_prompt(question: str, history_block: str = "", want_types: bool = False,
                         max_subqueries: int = 4,
                         corpus_langs: Optional[List[str]] = None,
-                        collection_map: str = "") -> str:
+                        collection_map: str = "",
+                        profile_block: str = "") -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
         f"{history_block}\n\n" if history_block else "")
@@ -775,6 +784,11 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
     # the prompt the reasoning planner actually sends, so this — not
     # ``plan_prompt`` — is where the map has to land to reach a planning model.
     collection_section = f"{collection_map}\n\n" if collection_map else ""
+    # The agent's understanding block (see ``plan_prompt``).  This function is
+    # what production sends, so this — not ``plan_prompt`` — is where it has to
+    # land to reach a planning model.  Empty string = byte-for-byte the prompt
+    # this function produced before the feature existed.
+    profile_section = f"{profile_block}\n\n" if profile_block else ""
     types_line = (
         "- types: which KG node types to search (subset of concept/claim/formula/"
         "procedure; omit/empty = all). prefer: keyword|semantic|balanced.\n"
@@ -820,6 +834,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         f"{quoted_phrase_grounding(question)}"
         "\n"
         f"{history_section}"
+        f"{profile_section}"
         f"{collection_section}"
         f"Question: {question}\n\n"
         'Return JSON only: {"query":"","high_level_keywords":[],'
