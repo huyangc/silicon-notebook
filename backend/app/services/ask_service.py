@@ -335,6 +335,7 @@ class AskService:
         cancellations=None,
         collection_catalog=None,
         collection_enumeration=None,
+        agent_profile=None,
         selected_source_graph=None,
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
@@ -363,6 +364,9 @@ class AskService:
         # 组合根照旧可构造,只是那条 run 不提供枚举工具。
         self.collection_catalog = collection_catalog
         self.collection_enumeration = collection_enumeration
+        # Agentic Memory P1:Agent 对该库的已有理解 store(``AgentProfileStorePort``)。
+        # 缺省 None ⇒ 那条 run 与接入前逐字相同(见 ``profile_wiring_active``)。
+        self.agent_profile = agent_profile
         self.selected_source_graph = selected_source_graph
         self.scale_version = scale_version
         self.selected_graph_hydrate = selected_graph_hydrate
@@ -2457,6 +2461,11 @@ class AskService:
                     cancel_event=cancel_event,
                     collection_catalog=self.collection_catalog,
                     collection_enumeration=self.collection_enumeration,
+                    agent_profile=self.agent_profile,
+                    # 提问者身份**显式**传入(绝不让 retriever 回退 ContextVar,
+                    # 那会在 ContextVar 未设时读到 seeded admin 的覆盖层)。这条
+                    # 路径上 `user_id` 就是本次提问的持久化归属。
+                    profile_owner_id=user_id,
                 ).run(
                     notebook_id,
                     research_question,

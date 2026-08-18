@@ -521,6 +521,11 @@ class ReportEngineDependencies:
     selected_source_graph: Any = None
     scale_version: Any = None
     selected_graph_hydrate: Any = None
+    # Agentic Memory P1:Agent 对该库的已有理解 store(``AgentProfileStorePort``)。
+    # 报告侧必须**显式**接线才能贯通:逐节深挖的 ``ReasoningRetriever`` 只传四个
+    # 端口(集合枚举也刻意不传),没有一条会自动带上它的路。缺省 None ⇒ 与接入前
+    # 逐字相同。
+    agent_profile: Any = None
 
 
 class ReportEngine:
@@ -1533,6 +1538,14 @@ class ReportEngine:
             communities=deps.communities,
             settings=self.settings,
             cancel_event=self.cancel_event,
+            # Agent 对该库的已有理解(Agentic Memory P1 §5.2):v1 只接**逐节检索**
+            # 这一处,意图理解与大纲规划两阶段刻意不接(那两步跑在用户确认门之前,
+            # 一段背景印象不该参与「这个问题问的是什么」的定性)。owner 取报告
+            # 创建者并显式传入 —— 报告在后台线程里生成,ContextVar 未设时
+            # ``current_user()`` 会回退 seeded admin,回退就等于把别人的私有覆盖层
+            # 注进这份报告。
+            agent_profile=deps.agent_profile,
+            profile_owner_id=self.user_id,
         ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
               limits=limits,
               intent_queries=([sec_question, *directions]

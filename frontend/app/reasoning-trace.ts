@@ -18,6 +18,10 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
+  // profile = Agent 对这个库的已有理解被带进了这一轮的规划/反思(Agentic Memory
+  // P1)。只在真的有内容可带时出现:没整理过的库不落这一步(后端刻意不记空步——
+  // 它是一次亚毫秒的主键点查,不像记忆检索那样有耗时需要交代)。
+  profile: "经验",
   answer: "合成",
   // answer = 检索器决定作答并报告采用了哪些证据;synthesis = 答案真的写出来了。
   // 分两步是因为中间那次生成调用往往是整轮里最长的一段,合并会让它彻底隐形。
@@ -112,8 +116,14 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     const empty = Array.isArray(detail.empty_sections) ? detail.empty_sections.length : 0;
     return `${sections} 节(${empty} 节待补)`;
   }
-  // memory/synthesis 必须先于下面按 detail 形状的通用分支:两者的 count/anchors
-  // 数的都不是「候选」,落到通用分支会给出一个读起来对、其实错位的数。
+  // memory/synthesis/profile 必须先于下面按 detail 形状的通用分支:三者的
+  // count/anchors/blocks 数的都不是「候选」,落到通用分支会给出一个读起来对、
+  // 其实错位的数。profile 这一支尤其:它的 detail 还带 chars(整块字符数),
+  // 通用分支虽然读不到 chars,但一旦哪天 profile 的 detail 多出一个 count 键,
+  // 排在后面就会被静默渲染成「N 个候选」。
+  if (step.step_type === "profile") {
+    return typeof detail.blocks === "number" ? `${detail.blocks} 条已有理解` : "";
+  }
   if (step.step_type === "memory") {
     return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";
   }
