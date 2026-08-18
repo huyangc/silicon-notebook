@@ -28,7 +28,9 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import (
+    Any, Callable, Dict, Iterable, List, Optional, Sequence, TYPE_CHECKING,
+)
 
 if TYPE_CHECKING:
     from app.repositories.ports import (
@@ -58,6 +60,7 @@ from app.models.knowledge import (
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
+from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import ModelNotConfiguredError
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
@@ -1932,6 +1935,10 @@ class AskService:
             citation_source_info = self.evidence_context.citation_source_info(
                 c.source_id for c in selected
             )
+            # 本段附图: 每条 chunk 引用的候选是该 chunk 的**整个** element_ids,
+            # 不是上面 knowhow 用的首个 eid —— 配图元素通常不是 chunk 的第一个
+            # 元素。引用与它的 chunk 在这里配好对,因为 Citation 自己不带 chunk_id。
+            citation_image_targets: List[tuple[Citation, Sequence[str]]] = []
             if overlay_on:
                 by_id = {c.chunk_id: c for c in selected}
                 for a in anchors:
@@ -1940,26 +1947,37 @@ class AskService:
                         eid = c.element_ids[0] if c.element_ids else ""
                         source_info = citation_source_info.get(c.source_id) or {}
                         source_title = source_info.get("title", c.source_title)
-                        citations.append(Citation(
+                        citation = Citation(
                             label=f"{source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
                             source_file_name=source_info.get("file_name", ""),
                             tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
-                            knowhow=knowhow_refs.get(eid)))
+                            knowhow=knowhow_refs.get(eid))
+                        citations.append(citation)
+                        citation_image_targets.append((citation, c.element_ids))
             else:
                 for c in selected:
                     eid = c.element_ids[0] if c.element_ids else ""
                     source_info = citation_source_info.get(c.source_id) or {}
                     source_title = source_info.get("title", c.source_title)
-                    citations.append(Citation(
+                    citation = Citation(
                         label=f"{source_title} · {c.section_path}".strip(" ·"),
                         source_id=c.source_id, element_id=eid,
                         location_label=c.section_path, quoted_span=c.text[:200],
                         source_file_name=source_info.get("file_name", ""),
                         tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
-                        knowhow=knowhow_refs.get(eid)))
+                        knowhow=knowhow_refs.get(eid))
+                    citations.append(citation)
+                    citation_image_targets.append((citation, c.element_ids))
             citations.extend(self._memory_citations(anchors, memory_hits))
+            # 锚点与引用一次调用(共享每答案预算,见 attach_citation_images
+            # docstring),一次 store 读取。
+            self.evidence_context.attach_citation_images(
+                anchor_image_targets(
+                    anchors, {c.chunk_id: c.element_ids for c in selected}
+                ) + citation_image_targets
+            )
 
             # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
             combined_hits = list(selected) + list(kg_hits) + list(memory_hits)
@@ -2905,6 +2923,17 @@ class AskService:
             if enumerations and synthesis_ran and not anchors:
                 citations = []
 
+            # 本段附图: 统一挂在**锚点最终确定之后**——按节合成(sectioned)会整体
+            # 换掉 anchors,在它之前富化等于富化一批被丢弃的对象;citations 也要等
+            # 到上面那条枚举清零判完,否则会给一批马上要被扔掉的引用白发一次读取。
+            # 这里的引用(KG / element / 集合行)各自都带 element_id,所以只有 chunk
+            # 锚点需要额外候选。锚点与引用同一次调用,共享每答案预算。
+            self.evidence_context.attach_citation_images(
+                anchor_image_targets(
+                    anchors, {item.chunk_id: item.element_ids for item in chunks}
+                ) + [(citation, ()) for citation in citations]
+            )
+
             if synthesis_ran:
                 # The retriever's own last step reports which evidence it ADOPTED;
                 # writing the answer (and assembling its citations) happens out
@@ -3294,21 +3323,32 @@ class AskService:
                     citation_source_info = self.evidence_context.citation_source_info(
                         c.source_id for c in ppr_chunks
                     )
+                    # 本段附图: 引用与它的 chunk 在这里配对(Citation 不带
+                    # chunk_id),候选是整个 element_ids 而非首个 eid。
+                    citation_image_targets: List[tuple[Citation, Sequence[str]]] = []
                     for a in anchors:
                         if a.object_type == "chunk" and a.object_id in by_id:
                             c = by_id[a.object_id]
                             eid = c.element_ids[0] if c.element_ids else ""
                             source_info = citation_source_info.get(c.source_id) or {}
                             source_title = source_info.get("title", c.source_title)
-                            citations.append(Citation(
+                            citation = Citation(
                                 label=f"{source_title} · {c.section_path}".strip(" ·"),
                                 source_id=c.source_id, element_id=eid,
                                 location_label=c.section_path, quoted_span=c.text[:200],
                                 source_file_name=source_info.get("file_name", ""),
                                 tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal"),
                                 notebook_id=_cite_notebook_id(c),
-                                knowhow=knowhow_refs.get(eid)))
+                                knowhow=knowhow_refs.get(eid))
+                            citations.append(citation)
+                            citation_image_targets.append((citation, c.element_ids))
                     citations.extend(self._memory_citations(anchors, memory_hits))
+                    self.evidence_context.attach_citation_images(
+                        anchor_image_targets(
+                            anchors,
+                            {c.chunk_id: c.element_ids for c in ppr_chunks},
+                        ) + citation_image_targets
+                    )
                     evidence_level, top_relevance = classify_evidence(
                         list(ppr_chunks) + list(memory_hits), anchors, llm_grounded,
                         self.settings.evidence_tau_low, self.settings.evidence_tau_high)
@@ -3512,11 +3552,14 @@ class AskService:
                 # 侧口径,运行效率是一等约束)。
                 knowhow_refs = self.evidence_context.knowhow_refs_for(
                     c.element_ids[0] for c in src_chunks if c.element_ids)
+                # 本段附图: 同 PPR 分支——引用在这里与它的 chunk 配对,候选是整个
+                # element_ids。
+                citation_image_targets: List[tuple[Citation, Sequence[str]]] = []
                 for a in anchors:
                     if a.object_type == "chunk" and a.object_id in by_id:
                         c = by_id[a.object_id]
                         eid = c.element_ids[0] if c.element_ids else ""
-                        citations.append(Citation(
+                        citation = Citation(
                             label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
@@ -3524,8 +3567,15 @@ class AskService:
                                 _source_info.get(c.source_id) or {}
                             ).get("file_name", ""),
                             tier=src_chunk_tier, notebook_id=_cite_notebook_id(c),
-                            knowhow=knowhow_refs.get(eid)))
+                            knowhow=knowhow_refs.get(eid))
+                        citations.append(citation)
+                        citation_image_targets.append((citation, c.element_ids))
                 citations.extend(self._memory_citations(anchors, memory_hits))
+                self.evidence_context.attach_citation_images(
+                    anchor_image_targets(
+                        anchors, {c.chunk_id: c.element_ids for c in src_chunks}
+                    ) + citation_image_targets
+                )
                 evidence_level, top_relevance = classify_evidence(
                     list(src_chunks) + list(memory_hits), anchors, llm_grounded,
                     self.settings.evidence_tau_low, self.settings.evidence_tau_high)

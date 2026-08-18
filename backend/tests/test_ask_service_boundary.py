@@ -247,6 +247,13 @@ class _MinimalEvidence:
         # call this minimal boundary fixture must implement to stay reachable.
         return {}
 
+    def attach_citation_images(self, targets):
+        # T1（检索结果带图）: the same four assembly points now also call this
+        # once per answer to fill Citation/AnswerAnchor.images. Mirrors the
+        # knowhow_refs_for entry above — a newly-declared port call this
+        # minimal boundary fixture must implement to stay reachable.
+        return None
+
 
 def _minimal_ask_service():
     return AskService(

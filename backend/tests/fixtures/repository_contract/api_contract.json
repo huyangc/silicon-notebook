@@ -901,6 +901,13 @@
               "title": "Element Id",
               "type": "string"
             },
+            "images": {
+              "items": {
+                "$ref": "#/components/schemas/CitationImage"
+              },
+              "title": "Images",
+              "type": "array"
+            },
             "key": {
               "title": "Key",
               "type": "string"
@@ -1973,6 +1980,13 @@
               "title": "Element Id",
               "type": "string"
             },
+            "images": {
+              "items": {
+                "$ref": "#/components/schemas/CitationImage"
+              },
+              "title": "Images",
+              "type": "array"
+            },
             "knowhow": {
               "anyOf": [
                 {
@@ -2033,6 +2047,30 @@
             "quoted_span"
           ],
           "title": "Citation",
+          "type": "object"
+        },
+        "CitationImage": {
+          "description": "一张「本段附图」：绑定证据里带图注的图片元素（图注命中检索才带得出）。\n\n产品裁决（设计文档 §0）：**模型不看图**。这是纯响应装配层的增强——检索行为、\n引用文本、锚点解析逐字不变，附图只是「证据片段附近的图」，展示层必须把它与\n引证内容视觉区分，绝不冒充模型引用过的证据。\n\n``caption`` 取 ``source_elements.metadata.caption``（解析器只在图注非空时写\n这个键），刻意**不**回退到元素 ``text``：无图注的图片元素 ``text`` 是\n「Markdown 图 3」/「PDF p.2 图 1」这类占位定位串，把它当图注渲染是在编造一个\n用户从没写过的说明。缺图注时留空，由前端只渲染图。\n\n``asset_id`` 只是句柄，不是内容：前端仍走 active-notebook 资产代理端点\n(``GET /api/notebooks/{active}/assets/{asset_id}``) 取图，那里每请求实时复验\n参与集权限。因此本字段不新增任何权限面。",
+          "properties": {
+            "asset_id": {
+              "title": "Asset Id",
+              "type": "string"
+            },
+            "caption": {
+              "default": "",
+              "title": "Caption",
+              "type": "string"
+            },
+            "element_id": {
+              "title": "Element Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "element_id",
+            "asset_id"
+          ],
+          "title": "CitationImage",
           "type": "object"
         },
         "CitationKnowhowRef": {

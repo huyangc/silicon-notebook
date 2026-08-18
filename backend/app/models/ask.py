@@ -52,6 +52,27 @@ class CitationKnowhowRef(BaseModel):
     row_id: str
 
 
+class CitationImage(BaseModel):
+    """一张「本段附图」：绑定证据里带图注的图片元素（图注命中检索才带得出）。
+
+    产品裁决（设计文档 §0）：**模型不看图**。这是纯响应装配层的增强——检索行为、
+    引用文本、锚点解析逐字不变，附图只是「证据片段附近的图」，展示层必须把它与
+    引证内容视觉区分，绝不冒充模型引用过的证据。
+
+    ``caption`` 取 ``source_elements.metadata.caption``（解析器只在图注非空时写
+    这个键），刻意**不**回退到元素 ``text``：无图注的图片元素 ``text`` 是
+    「Markdown 图 3」/「PDF p.2 图 1」这类占位定位串，把它当图注渲染是在编造一个
+    用户从没写过的说明。缺图注时留空，由前端只渲染图。
+
+    ``asset_id`` 只是句柄，不是内容：前端仍走 active-notebook 资产代理端点
+    (``GET /api/notebooks/{active}/assets/{asset_id}``) 取图，那里每请求实时复验
+    参与集权限。因此本字段不新增任何权限面。
+    """
+    element_id: str
+    asset_id: str
+    caption: str = ""
+
+
 class Citation(BaseModel):
     label: str
     source_id: str
@@ -80,6 +101,12 @@ class Citation(BaseModel):
     )
     knowhow: Optional[CitationKnowhowRef] = Field(
         default=None, exclude_if=lambda value: value is None
+    )
+    # 本段附图（检索结果带图）: 与 knowhow/notebook_id 同一 exclude_if 惯例——空
+    # 列表整体从 JSON 缺席，所以绝大多数（无图）引用的 payload 一个字节都不多带，
+    # 旧持久化 payload 重开时缺这个键自然回退空列表，零 migration。
+    images: List[CitationImage] = Field(
+        default_factory=list, exclude_if=lambda value: not value
     )
 
 
@@ -241,6 +268,13 @@ class AnswerAnchor(BaseModel):
     # 跳转入口，与 Citation 侧的回退列表入口互补。
     knowhow: Optional[CitationKnowhowRef] = Field(
         default=None, exclude_if=lambda value: value is None
+    )
+    # 本段附图（检索结果带图）: 字段必须同时活在 AnswerAnchor 上——reasoning 模式
+    # 的权威显示路径是 `[k]` 锚点（前端 buildAnswerReferences 是 anchor 优先的
+    # 全有全无），只加在 Citation 上就只覆盖到「模型一个锚点都没吐出来」的回退
+    # 列表，主路径永远看不到图。同 Citation.images 的 exclude_if 惯例。
+    images: List[CitationImage] = Field(
+        default_factory=list, exclude_if=lambda value: not value
     )
 
 
