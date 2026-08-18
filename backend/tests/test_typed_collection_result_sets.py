@@ -1709,3 +1709,83 @@ def test_document_rows_carry_their_own_citation_and_bind_as_evidence(arepo):
     # 必须携带查表身份,否则被引文档在 citations 里凭空消失(codex R7 P2)。
     assert [c.source_id for c in (resp.citations or [])] == ["s1"]
     assert (resp.citations or [])[0].element_id == ""
+
+
+# ------------------------------------------- T1 附图与清单行的边界（评审 F2）
+
+CARD_ASSET_ID = "asset-enum-fig"
+
+
+def _seed_one_image_element(repo):
+    """一个只有一张（已落资产的）配图的库——清单行本身就指向 image 元素。
+
+    这是「附图富化会不会打到清单行」唯一能真正观察到的形状：清单行的
+    Citation 若被就地填上 `.images`，那份 payload 会随 `result_sets` 一起发出，
+    而它是在 `typed_collection_results` 收完载荷账**之后**才被填的。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(notebook.id, None, [
+        {"local_id": "C1", "object_type": "claim",
+         "payload": {"name": "版图设计要点", "section_path": "1"}, "evidence": []},
+    ], [])
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", notebook.id, "论文一", "pdf", "extracted", "extracted", NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,"
+            "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("el-img", "s1", "image", "p1", "图 1 版图剖面",
+             json.dumps({"asset_id": CARD_ASSET_ID, "caption": "图 1 版图剖面"},
+                        ensure_ascii=False), NOW),
+        )
+    repo.collection_catalog.invalidate()
+    return notebook
+
+
+def test_cited_collection_row_keeps_its_card_asset_and_gains_no_citation_images(
+    arepo,
+):
+    """清单行的 Citation **不进**附图富化目标（T1 评审 F2）。
+
+    三件事一起钉：
+
+    1. 该 Citation 是**嵌在 result_sets 里的同一个实例**（``citation=`` 字段直接
+       挂原对象），就地填 `.images` 会让每张图约 +77 字节绕过
+       `typed_collection_results` 已经按 wire 形状收完的载荷账——「响应不会大于
+       它声明的」那条保证就不成立了；
+    2. 清单卡本来就自带 `TypedCollectionItem.asset_id`，附图对它纯属冗余；
+    3. **k5001 锚点那条腿不受影响**：锚点是另一批对象，图照常挂上去。第三条是
+       这条修复的边界——只排除引用，不是把枚举 run 整个排除在附图之外。
+    """
+    notebook = _seed_one_image_element(arepo)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点", "types": ["formula"]}]},
+        reflects=[
+            {"next_action": "enumerate_elements", "enumerate": {"kind": "image"},
+             "reason": "列出图片"},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        answer={"answer": "库里有一张图 [k5001]。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(notebook.id, AskRequest(question="库里有哪些图", mode="reasoning"))
+
+    row = next(row for row in resp.result_sets if row.kind == "collection")
+    item = row.items[0]
+    assert item.item_id == "el-img"
+    # (2) 卡片自己的图片句柄照旧。
+    assert item.asset_id == CARD_ASSET_ID
+    # (1) 卡片里那条引用没有被就地填上附图……
+    assert item.citation is not None and item.citation.images == []
+    # ……wire 上也确实一个字节都没多带（载荷账因此仍是上界）。
+    assert "images" not in row.model_dump_json()
+    # 答案级 citations 数组里的就是**同一个实例**——这正是为什么排除要按身份做。
+    assert any(citation is item.citation for citation in resp.citations)
+    assert all(citation.images == [] for citation in resp.citations)
+    # (3) 锚点腿照常带图。
+    anchor = next(anchor for anchor in resp.anchors if anchor.key == "k5001")
+    assert [image.asset_id for image in anchor.images] == [CARD_ASSET_ID]

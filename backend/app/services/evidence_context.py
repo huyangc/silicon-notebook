@@ -71,29 +71,33 @@ def _knowhow_ref_from_payload(payload: Mapping[str, Any]) -> CitationKnowhowRef 
 CITATION_IMAGES_PER_ANCHOR = 3
 # 一次回答（锚点 + 引用合计）最多附多少张图。计的是**已分配的位**而不是不同图片
 # 数：同一张图被 5 个锚点各带一次，响应里就真的躺着 5 份 payload，按位计数才是
-# 严格上界（位数 ≥ 不同图片数）。
+# 严格上界（位数 ≥ 不同图片数）。同一张图同时被锚点腿和引用腿装配时也各占一位,
+# 所以这个数是**响应体积**口径的上界,不是「用户能看到几张不同的图」——后者只会
+# 更小,两条腿在界面上是同一份证据的两种展示。
 CITATION_IMAGES_PER_ANSWER = 12
+# 图注上限。同 `Citation.quoted_span`（200）/枚举行 `summary`（300）一条惯例:
+# 新 payload 里的每个字符串都得有上界,否则一份图注畸长的文档能把响应撑大。精确
+# 数值只登记在 `docs/product-and-api*.md`。
+CITATION_IMAGE_CAPTION_CHARS = 200
 
 
 def _citation_image(
-    element_id: str, element_row: Mapping[str, Any] | None
+    element_id: str, metadata_json: Any
 ) -> CitationImage | None:
-    """从 ``evidence_elements()`` 返回的一行里取出「本段附图」，不是图片/没落资产
-    /metadata 解析失败一律安全返回 None——从不抛异常，镜像 `_knowhow_ref` 的防御
-    风格。
+    """从 ``image_asset_rows()`` 返回的一行的 ``metadata`` 里取出「本段附图」，
+    没落资产 / metadata 解析失败一律安全返回 None——从不抛异常，镜像
+    `_knowhow_ref` 的防御风格。
 
-    准入判据只有两条：``element_type == 'image'`` 且 ``metadata.asset_id`` 非空。
-    刻意**不**要求图注非空：图注是图片进检索的唯一入口（无图注的图片压根不进
-    chunk，见 `chunking.py`），所以「命中了却没图注」在正常管线里到不了这里；真
-    到了（例如别的路径直接把 element id 递进来），少一行说明也不是丢弃这张图的
-    理由。knowhow / memory 投影行没有这个形状，天然不命中，无需特判。
+    准入判据只有两条：``element_type == 'image'``（已由 `image_asset_rows` 在
+    SQL 里下推，本函数因此只看后半条）且 ``metadata.asset_id`` 非空。刻意**不**
+    要求图注非空：图注是图片进检索的唯一入口（无图注的图片压根不进 chunk，见
+    `chunking.py`），所以「命中了却没图注」在正常管线里到不了这里；真到了（例如
+    别的路径直接把 element id 递进来），少一行说明也不是丢弃这张图的理由。
+    合成投影行（knowhow / memory）无需特判，两条前提见
+    `attach_citation_images` 的 docstring。
     """
-    if not element_row:
-        return None
-    if str(element_row.get("element_type") or "") != "image":
-        return None
     try:
-        metadata = json.loads(element_row.get("metadata") or "{}")
+        metadata = json.loads(metadata_json or "{}")
     except (TypeError, ValueError):
         return None
     if not isinstance(metadata, dict):
@@ -105,7 +109,10 @@ def _citation_image(
     return CitationImage(
         element_id=element_id,
         asset_id=asset_id,
-        caption=caption if isinstance(caption, str) else "",
+        caption=(
+            caption[:CITATION_IMAGE_CAPTION_CHARS]
+            if isinstance(caption, str) else ""
+        ),
     )
 
 
@@ -887,23 +894,27 @@ class EvidenceContextService:
     ) -> dict[str, CitationImage]:
         """{element_id: 本段附图}，一次有界批量 PK 读解完。
 
-        与 `knowhow_refs_for` 逐字同一口径：入参可带空串/重复 id（调用方直接把
+        与 `knowhow_refs_for` 同一批量口径：入参可带空串/重复 id（调用方直接把
         chunk 的整个 ``element_ids`` 倒进来即可），本方法自己去重 + 丢弃假值，
-        只返回命中的。复用既有的 `evidence_elements()`——它就是证据 hydration
-        那条路的批量点查，返回的列（``element_type`` / ``metadata``）恰好是判定
-        附图要的全部信息，没有理由再给两个后端各加一个新方法。
+        只返回命中的。
+
+        但**不**复用 `evidence_elements()`：候选集合是每条被引 chunk 的全部元素，
+        而其中是图片的通常一个都没有——宽读会把这些元素的**正文**整批拖过网来回答
+        一个只关心少数配图的问题（实测：40 节 MinerU PDF 的一次回答拖了 2750 KiB
+        正文、最终一张图都没附；工作簿形状的来源单次问 908 个 id）。窄方法
+        `image_asset_rows()` 把 ``element_type='image'`` 和 id 集两个谓词都下推
+        数据库，只取 ``(id, metadata)``。
 
         零新增模型/embedding 调用。
         """
         ids = list(dict.fromkeys(eid for eid in element_ids if eid))
         if not ids:
             return {}
-        elements = self.sources.evidence_elements(ids)
         images: dict[str, CitationImage] = {}
-        for eid in ids:
-            image = _citation_image(eid, elements.get(eid))
+        for element_id, metadata_json in self.sources.image_asset_rows(ids):
+            image = _citation_image(str(element_id), metadata_json)
             if image is not None:
-                images[eid] = image
+                images[str(element_id)] = image
         return images
 
     def attach_citation_images(
@@ -924,6 +935,21 @@ class EvidenceContextService:
 
         Memory 引用（``memory_id`` 非空）不参与：它的 ``element_id`` 指向记忆自己
         的投影行，不是文档证据。``AnswerAnchor`` 没有这个字段，`getattr` 回退空串。
+
+        锚点侧**没有**对应的排除，这是安全的而不是遗漏，但两类合成投影各靠一条
+        不同的前提，都点名在此以免将来形状变了没人想起：
+
+        * knowhow 格子投影（`knowhow.projection.KnowhowProjector._write_elements`）
+          写死 ``element_type='knowhow_cell'``，被 `image_asset_rows` 的 SQL 谓词
+          直接挡在候选之外；
+        * memory 派生源**会**经 `parsers.parse_markdown_text` 产出 ``image`` 元素
+          （记忆正文是 markdown），但 `SourceIngestionService.ingest_memory_source`
+          刻意不传 ``persist_image`` 闭包，于是这些行永远没有
+          ``metadata.asset_id``，`_citation_image` 在第二条判据上返回 None。挡它
+          的是缺资产而不是元素类型。
+
+        哪天某种投影开始写**带资产**的 image 元素，锚点侧就得像引用侧一样显式
+        排除。
         """
         entries = list(targets)
         if not entries:

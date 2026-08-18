@@ -28,6 +28,7 @@ from app.models.ask import AnswerAnchor, Citation, CitationImage
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.evidence_context import (
+    CITATION_IMAGE_CAPTION_CHARS,
     CITATION_IMAGES_PER_ANCHOR,
     CITATION_IMAGES_PER_ANSWER,
     EvidenceContextService,
@@ -73,16 +74,37 @@ class _Knowledge:
 
 
 class _SpySources:
-    """记录每次批量调用，让「只查一次」成为主动断言而不是假设。"""
+    """记录每次批量调用，让「只查一次」成为主动断言而不是假设。
+
+    `image_asset_rows` 是本特性专用的**窄**读取（`SourceStorePort`）：两个谓词
+    (id 集合 + ``element_type='image'``)都在 SQL 里，只回 ``(id, metadata)``、
+    不带 ``text``。这个 fake 照着 SQL 的形状过滤，所以「非图片元素不进结果」在
+    单测层是**建模**；真 SQL 确实这么过滤由 `test_image_asset_rows_*` 那两条
+    store 级用例证明。
+
+    `evidence_elements`（宽读）在这里**直接报错**：附图路径复用它就是把每条被引
+    chunk 的全部元素正文拖过网（40 节 MinerU PDF 实测 2750 KiB、最终 0 张图），
+    这是本文件要钉死的性能契约，退回去必须报红而不是悄悄变慢。
+    """
 
     def __init__(self, elements: dict[str, dict]) -> None:
         self._elements = elements
         self.calls: list[list[str]] = []
 
     def evidence_elements(self, element_ids):
+        raise AssertionError(
+            "附图路径不得走宽读 evidence_elements()，必须用窄的 image_asset_rows()"
+        )
+
+    def image_asset_rows(self, element_ids):
         ids = list(element_ids)
         self.calls.append(ids)
-        return {eid: self._elements[eid] for eid in ids if eid in self._elements}
+        return [
+            (eid, self._elements[eid]["metadata"])
+            for eid in ids
+            if eid in self._elements
+            and self._elements[eid].get("element_type") == "image"
+        ]
 
     def source_metadata(self, source_ids):
         return {}
@@ -137,7 +159,8 @@ def test_captioned_image_with_asset_becomes_an_attached_image():
 
 def test_non_image_element_is_not_attached_even_when_metadata_carries_an_asset_id():
     # 判据是 element_type == 'image' **且** asset_id 非空；只看 asset_id 会让
-    # 任何顺手带了这个键的元素（例如未来某种附件形态）被当成配图渲染。
+    # 任何顺手带了这个键的元素（例如未来某种附件形态）被当成配图渲染。前半条
+    # 现在下推在 SQL 里（fake 照 SQL 形状建模），真 SQL 见 store 级用例。
     sources = _SpySources({
         "el-para": _row("paragraph", {"asset_id": "asset-9", "caption": "图 1"}),
     })
@@ -160,6 +183,19 @@ def test_image_without_a_caption_still_attaches_but_with_an_empty_caption():
 
     assert images["el-img"].asset_id == "asset-2"
     assert images["el-img"].caption == ""
+
+
+def test_a_runaway_caption_is_truncated_to_the_named_cap():
+    # `caption` 是本 payload 唯一的自由文本；兄弟字段各有上界（Citation
+    # .quoted_span 200 / 枚举行 summary 300），少一个上界就够让一份图注畸长的
+    # 文档把响应撑大。具名常量而不是裸切片（「数值上限与截断」红线）。
+    long_caption = "图" * (CITATION_IMAGE_CAPTION_CHARS + 50)
+    sources = _SpySources({"el-img": _image_row("asset-1", long_caption)})
+
+    images = _service(sources).citation_images_for(["el-img"])
+
+    assert len(images["el-img"].caption) == CITATION_IMAGE_CAPTION_CHARS
+    assert images["el-img"].caption == long_caption[:CITATION_IMAGE_CAPTION_CHARS]
 
 
 def test_malformed_metadata_and_missing_rows_resolve_to_nothing_without_raising():
@@ -428,17 +464,22 @@ def _seed_source_with_a_captioned_figure(repo) -> tuple[str, str]:
     return notebook.id, source_id
 
 
-def _spy_on_evidence_elements(repo, monkeypatch) -> list:
-    """包住**真实** SourceStore.evidence_elements，观察生产接线本身。"""
+def _spy_on_image_asset_rows(repo, monkeypatch) -> list:
+    """包住**真实** SourceStore.image_asset_rows，观察生产接线本身。
+
+    钉的是附图这一路的调用次数：把锚点与引用拆成两次 `attach_citation_images`
+    会让一次回答拿到两份 `CITATION_IMAGES_PER_ANSWER` 预算，那个上限就不再是
+    上限——这个 spy 是唯一能让那种拆分报红的东西。
+    """
     calls: list[list[str]] = []
-    original = repo._runtime.source_store.evidence_elements
+    original = repo._runtime.source_store.image_asset_rows
 
     def _spy(element_ids):
         ids = list(element_ids)
         calls.append(ids)
         return original(ids)
 
-    monkeypatch.setattr(repo._runtime.source_store, "evidence_elements", _spy)
+    monkeypatch.setattr(repo._runtime.source_store, "image_asset_rows", _spy)
     return calls
 
 
@@ -453,11 +494,42 @@ def test_the_captioned_figure_really_lands_in_the_chunks_element_ids(repo):
     assert f"el-{source_id}-0002" in element_ids
 
 
+def test_image_asset_rows_filters_to_images_in_sql_and_never_selects_text(repo):
+    """store 级：混合 id 请求只回 image 行，且行形状里根本没有 ``text``。
+
+    单测层的 fake 是照这个形状**建模**的；这条用例是真 SQL 的证明。两点都是
+    性能契约而不是整洁性：``element_type`` 过滤留在 Python 里意味着每条被引
+    chunk 的全部元素**正文**都要过一遍网络（实测 2750 KiB / 次），而这条路径
+    从头到尾没有一个消费者读 ``text``。
+    """
+    _notebook_id, source_id = _seed_source_with_a_captioned_figure(repo)
+    paragraph_id = f"el-{source_id}-0001"
+    image_id = f"el-{source_id}-0002"
+
+    rows = repo._runtime.source_store.image_asset_rows(
+        [paragraph_id, image_id, "el-absent", "", image_id]
+    )
+
+    assert [element_id for element_id, _metadata in rows] == [image_id]
+    assert json.loads(rows[0][1])["asset_id"] == ASSET_ID
+    # 行形状：恰好 (id, metadata) 两项——多一列就是又把正文拖回来了。
+    assert len(rows[0]) == 2
+    # 宽读同一批 id 会返回段落行（并带 text），这正是本方法要避开的那个形状。
+    wide = repo._runtime.source_store.evidence_elements([paragraph_id, image_id])
+    assert set(wide) == {paragraph_id, image_id}
+    assert "text" in wide[image_id]
+
+
+def test_image_asset_rows_returns_nothing_for_an_all_falsy_request(repo):
+    _notebook_id, _source_id = _seed_source_with_a_captioned_figure(repo)
+    assert repo._runtime.source_store.image_asset_rows(["", ""]) == []
+
+
 def test_ask_chunk_citation_carries_the_section_figure(repo, monkeypatch):
     """chunk 模式（默认模式）的引用回退列表：无 LLM 的确定性路径，anchors 恒空，
     每个精选 chunk 一条引用——引用必须带出该 chunk 里那张配图。"""
     notebook_id, source_id = _seed_source_with_a_captioned_figure(repo)
-    calls = _spy_on_evidence_elements(repo, monkeypatch)
+    calls = _spy_on_image_asset_rows(repo, monkeypatch)
 
     response = repo.ask_chunk(notebook_id, AskRequest(question=UNIQUE_TERM))
 
@@ -470,8 +542,10 @@ def test_ask_chunk_citation_carries_the_section_figure(repo, monkeypatch):
     assert image.element_id == f"el-{source_id}-0002"
     # JSON 形状（前端真正收到的东西）。
     assert with_images[0].model_dump(mode="json")["images"][0]["asset_id"] == ASSET_ID
-    # 批量口径：knowhow 定位一次 + 附图一次，与引用/锚点数量无关。
-    assert len(calls) == 2, calls
+    # 批量口径：附图恰好一次，与引用条数无关。这条路径 anchors 恒空，所以它抓
+    # 不到「锚点腿与引用腿拆成两次调用」那种变异（空锚点那次会 early-return）
+    # ——那条由下面 grounded 用例的同名断言钉住。
+    assert len(calls) == 1, calls
 
 
 class _ChunkAnswerLLM:
@@ -501,6 +575,7 @@ def test_grounded_chunk_answer_puts_the_figure_on_the_chunk_anchor(repo, monkeyp
     这正是「字段必须同时加在 AnswerAnchor 上」那条设计裁决的钉子测试。"""
     notebook_id, source_id = _seed_source_with_a_captioned_figure(repo)
     bind_chat_client(repo, "ask_answer", _ChunkAnswerLLM())
+    calls = _spy_on_image_asset_rows(repo, monkeypatch)
 
     response = repo.ask_chunk(notebook_id, AskRequest(question=UNIQUE_TERM))
 
@@ -512,6 +587,11 @@ def test_grounded_chunk_answer_puts_the_figure_on_the_chunk_anchor(repo, monkeyp
     assert with_images[0].images[0].asset_id == ASSET_ID
     assert with_images[0].images[0].element_id == f"el-{source_id}-0002"
     assert with_images[0].model_dump(mode="json")["images"][0]["caption"] == FIGURE_CAPTION
+    # 单次调用口径,在**锚点与引用都非空**的形态上钉：把 ask_chunk 那一处
+    # `attach_citation_images` 拆成「先锚点、后引用」两次会让一次回答拿到两份
+    # `CITATION_IMAGES_PER_ANSWER` 预算——只有这里能让那个变异报红。
+    assert response.citations, "grounded 路径仍应产出引用回退列表"
+    assert len(calls) == 1, calls
 
 
 class _ReasoningLLM:
@@ -533,13 +613,47 @@ class _ReasoningLLM:
         return self._answer.chat_json(messages, schema_hint, **kwargs)
 
 
+def _seed_kg_concept(repo, notebook_id: str, source_id: str) -> None:
+    """一个指向该来源正文元素的 concept 知识对象。
+
+    只为让 reasoning 装配点的**引用腿**非空：reasoning 的 `citations` 只由 KG
+    命中（`citations_from`）/ 记忆 / element 锚点 / 集合行产生，纯 chunk 命中不
+    产生引用。没有它，「锚点腿与引用腿拆成两次调用」的变异在这个装配点抓不到
+    ——空的那次会 early-return，调用数仍是 1。轻量 raw-SQL 造数，镜像
+    test_knowhow_citation.py 的同款做法，不经完整 KG 抽取管线。
+    """
+    now = "2026-01-01T00:00:00"
+    evidence = json.dumps([{
+        "source_id": source_id, "source_title": "时序手册",
+        "element_id": f"el-{source_id}-0001", "element_type": "paragraph",
+        "location_label": "p1", "quoted_span": f"{UNIQUE_TERM} 收敛",
+        "confidence": 1.0,
+    }], ensure_ascii=False)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("ko-fig", notebook_id, "concept", "approved", "",
+             json.dumps({"name": f"{UNIQUE_TERM} 时序收敛"}, ensure_ascii=False),
+             evidence, source_id, now, now),
+        )
+    # 造完行还得给它向量，否则 ANN 检索根本看不到它（raw-SQL 插入不经抽取管线的
+    # embed 步）。
+    repo._embed_objects_batch(notebook_id, [{
+        "_oid": "ko-fig", "payload": {"name": f"{UNIQUE_TERM} 时序收敛"},
+    }])
+
+
 def test_reasoning_chunk_anchor_carries_the_section_figure(repo, monkeypatch):
     """reasoning 模式的 chunk 锚点同样富化——它与 chunk 模式是两个独立的装配点，
     共用同一个 `anchor_image_targets` 规则（chunk 锚点按 object_id 反查）。"""
     notebook_id, source_id = _seed_source_with_a_captioned_figure(repo)
+    _seed_kg_concept(repo, notebook_id, source_id)
     client = _ReasoningLLM()
     for workload in ("reasoning_agent", "evidence_refine", "ask_answer"):
         bind_chat_client(repo, workload, client)
+    calls = _spy_on_image_asset_rows(repo, monkeypatch)
 
     response = repo.ask(
         notebook_id, AskRequest(question=UNIQUE_TERM, mode="reasoning"),
@@ -551,3 +665,134 @@ def test_reasoning_chunk_anchor_carries_the_section_figure(repo, monkeypatch):
     assert with_images, [(a.object_id, a.element_id) for a in chunk_anchors]
     assert with_images[0].images[0].asset_id == ASSET_ID
     assert with_images[0].images[0].element_id == f"el-{source_id}-0002"
+    # 单次调用口径（reasoning 装配点自己的那份）：这里锚点与引用都非空，拆成两次
+    # 调用即预算翻倍，必须报红。
+    assert response.citations, "reasoning 路径仍应产出引用回退列表"
+    assert len(calls) == 1, calls
+
+
+# ---------------------------------------------------------------------------
+# graph 模式 · PPR 分支。四个装配点里此前唯一没有钉子测试的一个：评审把
+# `ask_service.py` 的那处 `attach_citation_images` 整块删掉后，256 个相关用例
+# 全绿。这条用例镜像 test_knowhow_citation.py 对 src_chunks(mix)分支的写法。
+# ---------------------------------------------------------------------------
+
+PPR_TERM = "Mixture-of-Experts (MoE)"
+PPR_ASSET_ID = "asset-ppr-fig"
+PPR_CAPTION = "图 1 MoE 路由结构"
+
+
+def _seed_two_doc_ppr_corpus_with_a_figure(repo) -> str:
+    """两篇文档经同一概念簇桥接（PPR 的最小可召回形状，镜像
+    test_ppr_retrieve.py 的 `_seed_two_doc_moe`），其中一篇的 chunk 里带一张
+    真正落了资产的配图元素。
+
+    与那份 fixture 的唯一实质差别：这里真的插 `source_elements` 行——附图取图
+    走的是元素表，只有 chunk.element_ids 而没有元素行的话，这条链看不出来。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="ppr"))
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        for source_id, title in (("src-A", "DeepSeek paper"), ("src-B", "GLM paper")):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (source_id, notebook.id, title, "md", "ready", now, now),
+            )
+        elements = [
+            ("elA", "src-A", "paragraph", "p1",
+             f"DeepSeek-V3 uses a {PPR_TERM} architecture.", "{}"),
+            ("elA-img", "src-A", "image", "Markdown image 1", PPR_CAPTION,
+             json.dumps({"asset_id": PPR_ASSET_ID, "caption": PPR_CAPTION},
+                        ensure_ascii=False)),
+            ("elB", "src-B", "paragraph", "p1",
+             f"GLM-4.5 is a {PPR_TERM} model.", "{}"),
+        ]
+        for element_id, source_id, element_type, label, text, metadata in elements:
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (element_id, source_id, element_type, label, text, metadata, now),
+            )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("cA", notebook.id, "src-A",
+             f"DeepSeek-V3 uses a {PPR_TERM} architecture.", "Arch",
+             json.dumps(["elA", "elA-img"]), now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("cB", notebook.id, "src-B", f"GLM-4.5 is a {PPR_TERM} model.",
+             "Arch", json.dumps(["elB"]), now),
+        )
+        for object_id, source_id, element_id in (
+            ("e1", "src-A", "elA"), ("e2", "src-B", "elB"),
+        ):
+            evidence = json.dumps([{
+                "source_id": source_id, "source_title": "",
+                "element_id": element_id, "element_type": "paragraph",
+                "location_label": "p1", "quoted_span": "MoE", "confidence": 1.0,
+            }])
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,"
+                "source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (object_id, notebook.id, "concept", "approved", "",
+                 json.dumps({"name": PPR_TERM}), evidence, source_id, now, now),
+            )
+            db.execute(
+                "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
+                "member_object_id,canonical_name,object_type,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"cl-{object_id}", notebook.id, "K-moe", object_id, PPR_TERM,
+                 "concept", now),
+            )
+    return notebook.id
+
+
+class _PprAnswerLLM:
+    configured = True
+    model = "fake-ppr-answer-llm"
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        return json.dumps(
+            {"answer": "两篇都用 MoE [k1][k2]。", "grounded": True},
+            ensure_ascii=False,
+        )
+
+
+def test_ask_graph_ppr_branch_carries_the_section_figure(repo, monkeypatch):
+    """graph 模式的 PPR 分支同样富化附图。
+
+    这是四个装配点里最容易悄悄失效的一个：删掉该处 `attach_citation_images`
+    之后，本仓库既有的 256 个相关用例一个都不报红（评审实测的删除变异）。
+    """
+    notebook_id = _seed_two_doc_ppr_corpus_with_a_figure(repo)
+    monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
+    bind_chat_client(repo, "ask_answer", _PprAnswerLLM())
+    calls = _spy_on_image_asset_rows(repo, monkeypatch)
+
+    response = repo.ask_graph(
+        notebook_id, AskRequest(question=f"{PPR_TERM} 架构", mode="graph"),
+    )
+
+    assert response.mode == "graph"
+    # 前置条件：这次真的走了 PPR 分支（而不是 mix / KG 分支）。
+    assert any(
+        step.step_type == "ppr" for step in (response.reasoning_trace or [])
+    ), [step.step_type for step in (response.reasoning_trace or [])]
+    carriers = [
+        target for target in list(response.anchors) + list(response.citations)
+        if target.images
+    ]
+    assert carriers, (
+        [(a.object_id, a.element_id) for a in response.anchors],
+        [(c.source_id, c.element_id) for c in response.citations],
+    )
+    assert carriers[0].images[0].asset_id == PPR_ASSET_ID
+    assert carriers[0].images[0].element_id == "elA-img"
+    # 单次调用口径：PPR 分支的锚点腿与引用腿也共用一次调用。
+    assert len(calls) == 1, calls

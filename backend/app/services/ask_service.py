@@ -2864,6 +2864,11 @@ class AskService:
             # bindings.  Mirror the cited rows into the fallback Citation
             # contract as well, while keeping the anchor path authoritative.
             seen_collection_citations: set[tuple[str, str]] = set()
+            # 这些 Citation **实例**同时躺在 `typed_collection_result_sets` 的行
+            # 里(`typed_collection_results` 把同一个对象挂进 `TypedCollectionItem
+            # .citation`),所以下面那次 `attach_citation_images` 必须按身份把它们
+            # 排除——理由写在那处。
+            collection_citation_ids: set[int] = set()
             for anchor in anchors:
                 citation = collection_item_citations.get(anchor.object_id)
                 if citation is None:
@@ -2873,6 +2878,7 @@ class AskService:
                     continue
                 seen_collection_citations.add(identity)
                 citations.append(citation)
+                collection_citation_ids.add(id(citation))
             element_evidence = [SimpleNamespace(
                 object_id=item.element_id, relevance=float(item.score or 0.0),
             ) for item in elements]
@@ -2926,12 +2932,22 @@ class AskService:
             # 本段附图: 统一挂在**锚点最终确定之后**——按节合成(sectioned)会整体
             # 换掉 anchors,在它之前富化等于富化一批被丢弃的对象;citations 也要等
             # 到上面那条枚举清零判完,否则会给一批马上要被扔掉的引用白发一次读取。
-            # 这里的引用(KG / element / 集合行)各自都带 element_id,所以只有 chunk
-            # 锚点需要额外候选。锚点与引用同一次调用,共享每答案预算。
+            # 这里的引用(KG / element)各自都带 element_id,所以只有 chunk 锚点需要
+            # 额外候选。锚点与引用同一次调用,共享每答案预算。
+            #
+            # **集合枚举行的引用按身份排除**(collection_citation_ids):它们是嵌在
+            # `typed_collection_result_sets` 里的**同一个** Citation 实例,就地填
+            # `.images` 会绕过 `typed_collection_results` 已经按 wire 形状收完的
+            # 载荷计费(每张图约 +77 字节未计费),把「响应不会大于它声明的」这条
+            # 保证拆掉;而清单卡本来就自带 `TypedCollectionItem.asset_id`,附图对它
+            # 纯属冗余。k5001 锚点那条腿不受影响——锚点是另一批对象。
             self.evidence_context.attach_citation_images(
                 anchor_image_targets(
                     anchors, {item.chunk_id: item.element_ids for item in chunks}
-                ) + [(citation, ()) for citation in citations]
+                ) + [
+                    (citation, ()) for citation in citations
+                    if id(citation) not in collection_citation_ids
+                ]
             )
 
             if synthesis_ran:

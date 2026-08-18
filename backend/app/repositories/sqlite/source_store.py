@@ -689,6 +689,34 @@ class SourceStore:
                     out[row["id"]] = dict(row)
         return out
 
+    def image_asset_rows(
+        self, element_ids: Sequence[str]
+    ) -> List[tuple[str, Any]]:
+        """``(id, metadata)`` for the image elements among ``element_ids``.
+
+        The narrow sibling of ``evidence_elements`` — see ``SourceStorePort``
+        for why the citation-image path may not reuse the wide reader: both
+        predicates are pushed into SQL and ``text`` (the whole reason the wide
+        read is expensive) is never selected.
+        """
+        ids = list(dict.fromkeys(element_id for element_id in element_ids if element_id))
+        if not ids:
+            return []
+        out: List[tuple[str, Any]] = []
+        with self.database.connect() as db:
+            for offset in range(0, len(ids), self.IN_CHUNK):
+                batch = ids[offset:offset + self.IN_CHUNK]
+                placeholders = ",".join("?" for _ in batch)
+                out.extend(
+                    (row["id"], row["metadata"])
+                    for row in db.execute(
+                        "SELECT id, metadata FROM source_elements "
+                        f"WHERE id IN ({placeholders}) AND element_type='image'",
+                        batch,
+                    ).fetchall()
+                )
+        return out
+
     def source_listing_rows(
         self, db: sqlite3.Connection, source_ids: Sequence[str]
     ) -> List[sqlite3.Row]:

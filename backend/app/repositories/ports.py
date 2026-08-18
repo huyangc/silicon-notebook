@@ -1008,6 +1008,24 @@ class SourceStorePort(Protocol):
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]: ...
+    def image_asset_rows(
+        self, element_ids: Sequence[str]
+    ) -> list[tuple[str, Any]]:
+        """``(element_id, metadata)`` for the requested ids that are IMAGE
+        elements — filtered in SQL, and WITHOUT the ``text`` column.
+
+        Deliberately not ``evidence_elements`` plus a Python-side type test.
+        The citation-image pass asks about every candidate element of every
+        cited chunk, so the wide reader drags each of those element BODIES
+        across the wire to answer a question about a handful of figures
+        (measured on a 40-section MinerU PDF: 2 750 KiB of element text for one
+        answer that attached zero images; a workbook-shaped source asks about
+        908 ids at once).  Both selective predicates — the id set and
+        ``element_type='image'`` — belong in the database, and ``text`` is
+        never read on this path.  ``metadata`` arrives as the stored JSON TEXT
+        on both backends, the same carrier ``evidence_elements`` hands over.
+        """
+        ...
     def source_metadata(
         self, source_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]: ...
