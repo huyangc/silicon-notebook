@@ -2777,6 +2777,28 @@ class GroupMembershipRequiredError(RuntimeError):
     """
 
 
+class ShareRequesterUnauthorizedError(RuntimeError):
+    """批准时发现**申请人**已不再对那本笔记本拥有管理权(群组知识共享 P2-T3)。
+
+    场景:Bob 经 `group_admins` 边对库 N 有管理权 → 提交「把 N 共享给 G1」的申请 →
+    库主 Alice 撤掉 Bob 的管理边 → G1 的组管理员批准 → N 的读权发给整个 G1。Bob 早已
+    失权、库主从未同意,而一条**活的**授权边就这样落库了。
+
+    ⚠ 这条**推翻**了 codex #519 R2 那轮登记的「approve 不复检申请人当前 manage 权是刻意
+    设计(异步审批语义)」(R4 裁决变更)。理由是本仓库最反复钉的那条原则:**授权在生效
+    时刻实时判定、绝不缓存**——挂载边不是授权凭证、撤销即时生效;P1-T3b 也正是按它裁的
+    公开报告页(创建时合法 ≠ 持续有效,创建者失去读权链接即 404)。审批把一次陈旧的检查
+    兑现成一条活授权边,与这条原则正相反。而且批准这一刻**没有任何一方**在验「申请人现在
+    还有没有权把它交出去」:组管理员验的是「我的组要不要这个库」,库主根本不在回路里。
+
+    路由映射成 **409** 并给出可读原因,而不是静默失败——组管理员要看得懂为什么批不动。
+    申请行**刻意保留**(不自动删):审计价值大于清理,组管理员可以自行驳回。
+
+    `reject_share_request` **不做**这条复检:驳回是终止、不产生任何授权,失权申请人的
+    申请当然可以被驳回。
+    """
+
+
 class ShareRequestAlreadyPendingError(RuntimeError):
     """同一 (笔记本, 群组) 上**别人**已经有一条待审批申请(群组知识共享 P2-T3)。
 
@@ -2891,9 +2913,11 @@ class GroupStorePort(Protocol):
         decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
         """批准:**同一写事务**内复核申请仍 pending + 组在 + `decided_by` 仍有审批资格
-        + 写 `(group, viewer)` 授权边(已共享则幂等复用)+ 状态置 approved、写
-        `decided_by`/`decided_at`。申请不存在或已被决定返回 `None`(路由 → 404);
-        `decided_by` 已不是该组组管理员抛 `GroupAdminRequiredError`(路由 → 403)。
+        + **`requested_by` 仍对该库有管理权** + 写 `(group, viewer)` 授权边(已共享则幂等
+        复用)+ 状态置 approved、写 `decided_by`/`decided_at`。申请不存在或已被决定返回
+        `None`(路由 → 404);`decided_by` 已不是该组组管理员抛 `GroupAdminRequiredError`
+        (路由 → 403);`requested_by` 已失去管理权抛 `ShareRequesterUnauthorizedError`
+        (路由 → 409,申请行保留)。
 
         ``decided_by_is_system_admin`` 由**路由**传入,不在 store 里读 `users.role` 判定
         (store 不做身份解析)。它承载的是 `_require_group_admin` 的系统管理员运维旁路:

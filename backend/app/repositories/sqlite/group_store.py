@@ -43,6 +43,11 @@ from app.repositories.ports import (
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
+    ShareRequesterUnauthorizedError,
+)
+from app.repositories.sqlite.access_sql import (
+    NOTEBOOK_ADMIN_SQL,
+    admin_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -628,6 +633,29 @@ class GroupStore:
         if self._role_on(db, group_id, decided_by) != "admin":
             raise GroupAdminRequiredError(group_id)
 
+    def _require_requester_still_authorized_on(
+        self, db: sqlite3.Connection, notebook_id: str, requested_by: str
+    ) -> None:
+        """批准前在**当前写事务里**复核申请人此刻仍对这本库有管理权(R4 裁决变更)。
+
+        授权在**生效时刻**实时判定、绝不缓存——这是本仓库反复钉的原则(挂载边不是授权
+        凭证、撤销即时生效;公开报告页也按同一条裁过:创建时合法 ≠ 持续有效)。申请提交
+        与批准之间可以隔任意长时间,库主完全可能在中间撤掉申请人的管理边;批准把那次陈旧
+        的检查兑现成一条**活的**授权边,整组人立刻读得到,而库主从未同意。批准这一刻没有
+        任何一方在验这件事:组管理员验的是「我的组要不要这个库」。
+
+        谓词直接用 `access_sql.NOTEBOOK_ADMIN_SQL`(owner ∪ 管理级有效授权边),不自己拼
+        ——「谁能管这个 notebook」的唯一定义点在 access_sql,store 消费它是既有惯例
+        (见 `sharing_store.user_can_admin_notebook`)。
+        """
+        if (
+            db.execute(
+                NOTEBOOK_ADMIN_SQL, (notebook_id, *admin_access_params(requested_by))
+            ).fetchone()
+            is None
+        ):
+            raise ShareRequesterUnauthorizedError(notebook_id)
+
     def approve_share_request(
         self,
         group_id: str,
@@ -654,7 +682,7 @@ class GroupStore:
         stamp = self.now()
         with self.database.write() as db:
             row = db.execute(
-                "SELECT notebook_id FROM notebook_share_requests "
+                "SELECT notebook_id, requested_by FROM notebook_share_requests "
                 "WHERE id=? AND group_id=? AND status='pending'",
                 (request_id, group_id),
             ).fetchone()
@@ -664,6 +692,9 @@ class GroupStore:
                 db, group_id, decided_by, decided_by_is_system_admin
             )
             notebook_id = row["notebook_id"]
+            self._require_requester_still_authorized_on(
+                db, notebook_id, row["requested_by"]
+            )
             db.execute(
                 "INSERT INTO notebook_grants "
                 "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "

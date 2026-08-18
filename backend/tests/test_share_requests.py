@@ -629,6 +629,91 @@ def test_a_demoted_admin_cannot_decide_in_the_toctou_window(
     assert client.get(f"/api/notebooks/{notebook_id}/grants", headers=librarian).json() == []
 
 
+def test_approving_a_request_whose_author_lost_manage_rights_is_refused(
+    tmp_path, monkeypatch
+):
+    """申请人在提交后失去管理权 → 批准必须被拒(409),且**零副作用**(R4 裁决变更)。
+
+    场景是 codex #519 R4 的原话:Bob 经 `group_admins` 边对库 N 有管理权 → 提交申请 →
+    库主 Alice 撤掉那条边 → 组管理员批准 → N 的读权发给整个 G1。Bob 早已失权、库主从未
+    同意,而一条**活的**授权边就这么落库了。授权在生效时刻实时判定、绝不缓存。
+    """
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)          # 库主
+    notebook_id = _make_notebook(client, alice, name="Alice 的库")
+
+    # Bob 经「授权组」的 group_admins 边拿到对该库的管理权。
+    grantor_group = _make_group(client, alice, name="授权组")
+    bob, bob_id, _ = _new_user(client)
+    _add_member(client, alice, grantor_group, bob_id, role="admin")
+    edge = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group_admins", "principal_id": grantor_group, "role": "admin"},
+        headers=alice,
+    )
+    assert edge.status_code == 200, edge.text
+
+    # 目标组 G1:Bob 只是普通成员,所以只能申请;carol 是它的组管理员。
+    carol, carol_id, _ = _new_user(client)
+    target_group = _make_group(client, carol, name="G1")
+    _add_member(client, carol, target_group, bob_id, role="member")
+
+    request_id = _submit(client, bob, notebook_id, target_group).json()["id"]
+    assert [r["id"] for r in _pending_for(client, carol, target_group).json()] == [request_id]
+
+    # 库主撤掉 Bob 的管理边——他从此对这本库什么权限都没有。
+    grants = client.get(f"/api/notebooks/{notebook_id}/grants", headers=alice).json()
+    for g in grants:
+        client.delete(f"/api/notebooks/{notebook_id}/grants/{g['id']}", headers=alice)
+
+    refused = client.post(
+        f"/api/groups/{target_group}/share-requests/{request_id}/approve", headers=carol
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.headers.get("X-User-Message") == "1"
+    assert "管理权" in refused.json()["detail"]
+
+    # 零副作用:①没有任何授权边落库(整组读不到这本库);
+    assert client.get(f"/api/notebooks/{notebook_id}/grants", headers=alice).json() == []
+    # ②申请**保留**在待审批队列里(刻意不自动删,审计价值 > 清理);
+    still = _pending_for(client, carol, target_group).json()
+    assert [r["id"] for r in still] == [request_id]
+    assert still[0]["status"] == "pending"
+    assert still[0]["decided_by"] is None and still[0]["decided_at"] is None
+    # ③G1 的成员确实读不到这本库。
+    member, member_id, _ = _new_user(client)
+    _add_member(client, carol, target_group, member_id, role="member")
+    assert notebook_id not in {
+        n["id"] for n in client.get("/api/notebooks", headers=member).json()
+    }
+
+    # 驳回**不做**这条复检:终止不产生授权,失权申请人的申请当然可以被驳回。
+    rejected = client.post(
+        f"/api/groups/{target_group}/share-requests/{request_id}/reject", headers=carol
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["status"] == "rejected"
+
+
+def test_approval_still_succeeds_while_the_author_keeps_manage_rights(
+    tmp_path, monkeypatch
+):
+    """反向护栏:申请人仍有管理权时,批准必须照常成功——复检不能变成一道恒关的闸。"""
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    approved = client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/approve", headers=boss
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    assert [
+        (g["principal_type"], g["role"])
+        for g in client.get(f"/api/notebooks/{notebook_id}/grants", headers=librarian).json()
+    ] == [("group", "viewer")]
+
+
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 def test_a_system_admin_can_still_decide_without_being_a_group_member(
     tmp_path, monkeypatch, repo, decision

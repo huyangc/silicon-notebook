@@ -1059,6 +1059,69 @@ def test_share_request_authorization_rechecks_mirror_the_sqlite_store(
         )
 
 
+def test_approval_rechecks_the_requesters_manage_rights_on_postgres(
+    core_stores: CoreStores,
+):
+    """批准前复核**申请人**此刻仍对该库有管理权(codex #519 R4 裁决变更,PG 侧)。
+
+    授权在生效时刻实时判定、绝不缓存:提交与批准之间库主可以撤掉申请人的管理权,而批准
+    会把那次陈旧检查兑现成一条**活的**授权边。谓词取 `access_sql.NOTEBOOK_ADMIN_SQL`,
+    两个后端必须判出同一个结果——分叉了不会报错,只会让某一个后端上的失权申请照样批得掉。
+    """
+    from app.repositories.ports import ShareRequesterUnauthorizedError
+
+    groups = core_stores.groups
+    alice = core_stores.identity.create_user("y00112233", "password-81")   # 库主
+    bob = core_stores.identity.create_user("y00445566", "password-82")     # 申请人
+    carol = core_stores.identity.create_user("y00778899", "password-83")   # G1 组管理员
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="失权库"), alice.id
+    )
+    # Bob 经「授权组」的 group_admins 边拿到管理权。
+    grantor = groups.create_group(
+        name="授权组", kind="project", description="", created_by=alice.id
+    )
+    groups.upsert_member(grantor["id"], bob.id, role="admin", added_by=alice.id)
+    edge = groups.create_grant(
+        notebook_id,
+        principal_type="group_admins",
+        principal_id=grantor["id"],
+        role="admin",
+        created_by=alice.id,
+        admin_user_id=alice.id,
+    )
+    # 目标组 G1:Bob 只是成员。
+    target = groups.create_group(
+        name="G1", kind="project", description="", created_by=carol.id
+    )
+    groups.upsert_member(target["id"], bob.id, role="member", added_by=carol.id)
+    request = groups.create_share_request(
+        notebook_id, group_id=target["id"], requested_by=bob.id
+    )
+
+    # 还有管理权时批得掉这件事由下面的反向断言保证——先撤边,再证明批不掉。
+    assert groups.delete_grant(notebook_id, edge["id"]) is True
+    with pytest.raises(ShareRequesterUnauthorizedError):
+        groups.approve_share_request(
+            target["id"], request["id"], decided_by=carol.id
+        )
+    # 零副作用:没有边落库,申请仍 pending。
+    assert groups.list_grants(notebook_id) == []
+    assert [r["id"] for r in groups.list_pending_share_requests(target["id"])] == [request["id"]]
+
+    # 驳回不做这条复检 —— 终止不产生授权。
+    assert groups.reject_share_request(
+        target["id"], request["id"], decided_by=carol.id
+    )["status"] == "rejected"
+
+    # 反向护栏:申请人仍是 owner 的库,批准照常成功(复检不是恒关的闸)。
+    own = core_stores.notebooks.create_row(NotebookCreate(name="Bob 自己的"), bob.id)
+    ok = groups.create_share_request(own, group_id=target["id"], requested_by=bob.id)
+    assert groups.approve_share_request(
+        target["id"], ok["id"], decided_by=carol.id
+    )["status"] == "approved"
+
+
 def test_share_request_conflict_is_narrowed_to_the_requester_on_postgres(
     core_stores: CoreStores,
 ):
