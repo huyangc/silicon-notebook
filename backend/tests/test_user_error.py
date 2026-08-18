@@ -242,6 +242,25 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "test_outline_patch_rejects_excess_retrieval_directions 覆盖"
         "（断言 422 + detail 含上限数字）。"
     ),
+    "app/api/agent_profile_routes.py::update_understanding_block": (
+        "四处动态 detail 全部是本文件顶部维护的中文模块常量（_DISABLED_MESSAGE/"
+        "_SCOPE_LABEL_MISMATCH_MESSAGE/_VALUE_TOO_LONG_MESSAGE/_REVISION_CONFLICT_MESSAGE），"
+        "其中 _VALUE_TOO_LONG_MESSAGE 是纯中文模板 f-string，只插入"
+        "AGENT_PROFILE_VALUE_MAX_CHARS 一个协议整数（400）——无内部黑话、无异常原文、"
+        "无用户输入回显。抽成常量是因为 PUT/DELETE/rebuild 三个端点共享同一批文案。"
+        "真实响应由 test_agent_profile_routes.py 的超长 422、归属不匹配 422、"
+        "revision 冲突 409 与关闸 409 用例覆盖（断言 X-User-Message 逐字文案）。"
+    ),
+    "app/api/agent_profile_routes.py::clear_understanding_block": (
+        "两处动态 detail 是与 update_understanding_block 共享的同一批中文模块常量"
+        "（_DISABLED_MESSAGE/_SCOPE_LABEL_MISMATCH_MESSAGE/_REVISION_CONFLICT_MESSAGE），"
+        "见上一条的论证；真实响应由 test_agent_profile_routes.py 的 DELETE 用例覆盖。"
+    ),
+    "app/api/agent_profile_routes.py::rebuild_understanding": (
+        "两处动态 detail 是共享中文模块常量 _DISABLED_MESSAGE 与 _REBUILD_BUSY_MESSAGE"
+        "（正在整理，请稍候），无插值、无异常原文；真实响应由"
+        "test_agent_profile_routes.py 的忙碌 409 与关闸 409 用例覆盖（断言逐字文案）。"
+    ),
     "app/api/catalog_routes.py::start_command_catalog": (
         "三处 detail：本文件顶部维护的中文常量 `_ALREADY_RUNNING_MESSAGE`"
         "（该来源已有识别任务在跑）、`catalog_job.MODEL_UNAVAILABLE_MESSAGE`"
