@@ -1374,7 +1374,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - 命令目录：`GET .../sources/{sid}/command-catalog/preview`（零模型调用的成本预告）、`POST .../sources/{sid}/command-catalog`（发起；该来源已有活跃任务、或上一轮还有候选没审阅完时 409）、`GET .../command-catalog/job`、`POST .../command-catalog/cancel`、`GET .../command-catalog/candidates?job_id=&state=&cursor=&limit=`（keyset 分页 + 各档计数）、`POST .../command-catalog/apply` body `{candidate_ids}` 或 `{all_pending}`（创建或追加「命令目录：<来源>」表，绝不覆盖已有行）、`POST .../command-catalog/dismiss` body `{candidate_ids}` 或 `{all_pending}`（把候选标记为已跳过，不写任何表——不冲突的候选唯一的放弃出口——见[命令目录](#命令目录工具手册)）
 - `GET /api/notebooks/{id}/understanding` —— 「AI 对这个库的理解」；任意有读权的成员；返回 `enabled`、`base`、`mine`、`job`、`can_edit_base`——见[AI 对这个库的理解](#ai-对这个库的理解)
 - `PUT /api/notebooks/{id}/understanding/{label}` body `{scope: "shared"|"mine", value, expected_revision}` —— `shared` 需要 `agent_profile:write` 能力，`mine` 只需读权 + 行级归属；超过 400 字符上限返回 422，`expected_revision` 过期返回 409
-- `DELETE /api/notebooks/{id}/understanding/{label}?scope=` —— 与写端点相同的权限口径；清空取值但保留该行与其历史
+- `DELETE /api/notebooks/{id}/understanding/{label}?scope=&expected_revision=` —— 与写端点相同的权限口径与同一套乐观并发：`expected_revision` 为界面上看到过的版本号（必填；过期 409）；清空取值但保留该行与其历史
 - `POST /api/notebooks/{id}/understanding/rebuild` body `{scope}` —— 与写端点相同的权限口径；忙碌或 `AGENT_PROFILE_ENABLED` 关闭时返回 409
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`

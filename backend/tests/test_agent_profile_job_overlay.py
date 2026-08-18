@@ -1039,3 +1039,122 @@ def test_the_sample_size_constant_is_the_one_the_service_uses(harness):
     service.usage_stats(NOTEBOOK_ID, USER_A)
 
     assert captured["job_limit"] == AGENT_PROFILE_TRACE_SAMPLE
+
+
+# =====================================================================
+# codex R1: revocation race + threshold requeue
+# =====================================================================
+
+
+def _seed_one_ask(harness):
+    _add_ask(
+        harness, "job-r1", user_id=USER_A, question=A_QUESTION,
+        steps=({"step_type": "retrieve", "summary": "查", "detail": {"count": 2}},),
+    )
+
+
+def test_a_member_removed_during_the_model_call_gets_no_resurrected_blocks(harness):
+    """codex R1 P1(写前复核那一侧)。
+
+    移除发生在 LLM 调用期间:clear_all + clear_job_row 都已跑完,worker 拿着
+    模型回复回来。没有写前复核,``expected_revision=0`` 的写入会把私有块整个
+    **重建**——被撤销的成员重新加入后看到旧心得而不是白纸。
+    """
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+    assert claimed is not None
+
+    def reply(_prompt: str) -> str:
+        # 模型调用期间成员被移除:与 _clear_member_profile 相同的两步
+        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        return _reply(retrieval_notes="复活的心得")
+
+    service = _service(harness, client=_Client(reply))
+    result = service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    assert result["diagnostic"] == "revoked_mid_run"
+    assert result["blocks_written"] == 0
+    assert _blocks(harness, USER_A) == {}          # 没有任何块被重建
+    assert profiles.job_row(NOTEBOOK_ID, USER_A) is None
+
+
+def test_a_removal_between_the_precheck_and_the_writes_is_wiped_after_settle(
+    harness, monkeypatch
+):
+    """codex R1 P1(写后兜底那一侧)。
+
+    移除落在写前复核**之后**、settle **之前**的毫秒级窗口:写入已经发生,但
+    settle 撞不到行(rowcount=0 → False)。此时唯一正确的动作是把刚写进去的
+    行再清一遍——settle False 是「只有移除会删这行」的可靠信号。
+    """
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+    assert claimed is not None
+
+    original_settle = profiles.settle
+
+    def settle_after_removal(notebook_id, owner_id, status, **kwargs):
+        # 写入已完成;settle 之前移除路径跑完了两步
+        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        return original_settle(notebook_id, owner_id, status, **kwargs)
+
+    monkeypatch.setattr(profiles, "settle", settle_after_removal)
+    service = _service(harness, client=_Client(_reply(retrieval_notes="心得")))
+    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    # 写后兜底把竞态窗口里刚重建的块清掉了
+    assert _blocks(harness, USER_A) == {}
+
+
+def test_a_threshold_that_filled_up_mid_run_requeues_the_next_round(
+    harness, monkeypatch
+):
+    """codex R1 P2:满阈值的信号不再滞留。
+
+    run 在飞期间又攒满一整个阈值——期间每次 claim 都被 running 拒。settle 只
+    扣认领快照,剩余 pending 已 ≥ 阈值,但再没有触发者。修复后 run 收尾自查
+    并重排下一轮;每轮消费自己的快照,总调用数仍 ≤ 信号数/阈值。
+    """
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+    assert claimed == 3
+
+    def reply(_prompt: str) -> str:
+        # 运行期间又攒满一个阈值(触发方的 claim 都会被 running 拒,这里直接 bump)
+        profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
+        return _reply(retrieval_notes="心得")
+
+    service = _service(harness, client=_Client(reply))
+    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    # settle 扣掉快照 3,剩 3 ≥ 阈值 → 自动重排了一轮(行已被 claim 成 running)
+    assert [c["name"] for c in submitter.calls] == [
+        f"agentprofile-overlay-{NOTEBOOK_ID}"
+    ]
+    assert _job(harness, USER_A)["status"] == "running"
+
+
+def test_a_leftover_below_the_threshold_does_not_requeue(harness, monkeypatch):
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+
+    def reply(_prompt: str) -> str:
+        profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=1)   # 只攒了 1,不够阈值
+        return _reply(retrieval_notes="心得")
+
+    service = _service(harness, client=_Client(reply))
+    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    assert submitter.calls == []
+    assert _job(harness, USER_A)["status"] == "done"
+    assert _job(harness, USER_A)["pending_signal"] == 1

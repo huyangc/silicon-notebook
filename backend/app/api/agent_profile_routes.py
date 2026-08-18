@@ -217,8 +217,12 @@ def clear_understanding_block(
     notebook_id: str,
     label: UnderstandingLabel,
     scope: UnderstandingScope = Query(...),
+    expected_revision: int = Query(..., ge=0),
     user: UserProfile = Depends(get_current_user),
 ) -> UnderstandingBlockOut:
+    # codex R1 P2: DELETE 与 PUT 同享乐观并发——``expected_revision`` 是浏览器
+    # **看到过**的那个版本,必填。服务端自读当前 revision 再清空会把「加载后被
+    # 巡固/他人更新过」的未见内容清掉,恰恰绕开了 PUT 的保护。
     if not _wiring_active():
         raise user_error(409, _DISABLED_MESSAGE)
     if not _label_allowed_for_scope(scope, label):
@@ -227,21 +231,25 @@ def clear_understanding_block(
     store = _profile_store()
     current = store.read_block(notebook_id, owner_id, label)
     if current is None:
-        # 从没写过的块 —— 清空是幂等的:没有行,也就没有值可清,直接回一份空块。
-        return _empty_block_out(label)
+        # 从没写过的块:expected_revision==0(浏览器看到的就是空块)按幂等清空;
+        # 非 0 说明浏览器看过的那行已被整块删掉(clear_all)——按冲突报,让前端
+        # 重取后再决定。
+        if expected_revision == 0:
+            return _empty_block_out(label)
+        raise user_error(409, _REVISION_CONFLICT_MESSAGE)
     try:
         row = store.clear_block(
             notebook_id,
             owner_id,
             label,
-            expected_revision=int(current["revision"]),
+            expected_revision=expected_revision,
             actor=user.id,
         )
     except AgentProfileRevisionConflict:
         raise user_error(409, _REVISION_CONFLICT_MESSAGE)
     except KeyError:
-        # 读到行之后、清空之前被别的请求整块删掉(``clear_all``)——同样按幂等
-        # 处理,不是这次调用的错。
+        # 读到行之后、清空之前被别的请求整块删掉(``clear_all``)——浏览器看到的
+        # 值确实已经不在了,按幂等空块收。
         return _empty_block_out(label)
     return _block_out(row)
 

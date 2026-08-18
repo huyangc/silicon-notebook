@@ -20608,6 +20608,16 @@
                 "title": "Scope",
                 "type": "string"
               }
+            },
+            {
+              "in": "query",
+              "name": "expected_revision",
+              "required": true,
+              "schema": {
+                "minimum": 0,
+                "title": "Expected Revision",
+                "type": "integer"
+              }
             }
           ],
           "responses": {

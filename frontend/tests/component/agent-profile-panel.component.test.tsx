@@ -174,7 +174,10 @@ test("清空是两步确认：第一下只出确认按钮，确认后才发请�
   expect(within(item).getByRole("button", { name: "取消" })).toBeInTheDocument();
 
   await user.click(within(item).getByRole("button", { name: "确认清空" }));
-  await waitFor(() => expect(mockClear).toHaveBeenCalledWith("nb1", "corpus_shape", "shared"));
+  // codex R1 P2:清空必须带界面看到过的 revision(夹具默认 4),与保存同享乐观并发
+  await waitFor(() =>
+    expect(mockClear).toHaveBeenCalledWith("nb1", "corpus_shape", "shared", 4),
+  );
 });
 
 test("清空可以取消：点「取消」之后既不发请求，也回到原来的按钮", async () => {

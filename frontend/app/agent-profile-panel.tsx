@@ -414,7 +414,9 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
     setError("");
     setNotice("");
     try {
-      await clearUnderstandingBlock(notebookId, block.label, scope);
+      // 带上界面看到过的版本号:加载后内容又被整理/他人改过时走 409 冲突路径,
+      // 而不是把没看过的内容清掉(codex R1 P2)。
+      await clearUnderstandingBlock(notebookId, block.label, scope, block.revision);
       dropDraft(block.label);
       await load();
     } catch (err) {

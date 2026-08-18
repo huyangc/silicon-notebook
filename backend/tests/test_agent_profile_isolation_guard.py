@@ -74,6 +74,9 @@ BASE_CHAIN_FUNCTIONS = frozenset({
     "render_corpus_block",
     "render_current_blocks",
     "parse_base_reply",
+    # codex R1 P2: settle 后按剩余 pending 重排下一轮。只读本链路自己那一行
+    # (job_row) + 调 start_base,不触任何业务数据。
+    "_maybe_requeue_base",
 })
 
 #: 覆盖层链路(T5)。名字在这里 = 显式声明「我知道这个函数会读该成员自己的轨迹」。
@@ -91,6 +94,10 @@ OVERLAY_CHAIN_FUNCTIONS: frozenset[str] = frozenset({
     "render_usage_block",
     "render_current_overlay_blocks",
     "parse_overlay_reply",
+    # codex R1: P1 撤销竞态的写后兜底(只删该成员自己的行)与 P2 的重排(只读
+    # 本链路自己那一行 + 调 start_overlay)。
+    "_clear_revoked_overlay",
+    "_maybe_requeue_overlay",
 })
 
 #: 与取数无关的函数:构造、事件、结算、纯文本处理。登记在这里表示「我看过它,它不
@@ -130,6 +137,9 @@ ALLOWED_PORT_CALLS = frozenset({
     # 单飞与阈值(只碰这条链路自己那一行)
     "bump_signal",
     "claim",
+    # codex R1 P2: settle 后重排要读本链路自己那一行的 pending——job_row 与
+    # claim/bump_signal 同类:按 (notebook, owner) 主键点查状态行,不触业务数据。
+    "job_row",
 })
 
 #: 层二白名单:**覆盖层**链路允许调用的端口方法名。刻意是**另一张表**而不是往上面
@@ -149,6 +159,11 @@ OVERLAY_ALLOWED_PORT_CALLS = frozenset({
     # 单飞与阈值(只碰这条链路自己那一行)
     "bump_signal",
     "claim",
+    # codex R1: P1 写前复核与 P2 重排读本链路自己那一行(job_row);P1 写后兜底
+    # 删**该成员自己的**覆盖层行(clear_all(notebook, user)——owner 实参是链路
+    # 身份,不是任意成员)。
+    "job_row",
+    "clear_all",
 })
 
 #: 层二白名单:**中性**函数允许调用的端口方法名——只有这条链路自己那一行 job 状态

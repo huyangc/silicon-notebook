@@ -793,7 +793,7 @@ class AgentProfileConsolidationService:
         try:
             outcome = self._consolidate_base(notebook_id)
         except AgentProfileModelUnavailable:
-            return self._fail(
+            result = self._fail(
                 notebook_id,
                 BASE_CHAIN_OWNER,
                 AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
@@ -802,9 +802,11 @@ class AgentProfileConsolidationService:
                 consumed,
                 chain="base",
             )
+            self._maybe_requeue_base(notebook_id)
+            return result
         except AgentProfileOutputRejected as exc:
             # Fail-open: the blocks that were already there stand untouched.
-            return self._fail(
+            result = self._fail(
                 notebook_id,
                 BASE_CHAIN_OWNER,
                 AGENT_PROFILE_MALFORMED_MESSAGE,
@@ -813,6 +815,8 @@ class AgentProfileConsolidationService:
                 consumed,
                 chain="base",
             )
+            self._maybe_requeue_base(notebook_id)
+            return result
         except (KeyboardInterrupt, SystemExit):
             self._safe_settle(
                 notebook_id,
@@ -834,6 +838,7 @@ class AgentProfileConsolidationService:
                 consumed,
                 chain="base",
             )
+            self._maybe_requeue_base(notebook_id)
             raise
         self._safe_settle(
             notebook_id,
@@ -852,6 +857,7 @@ class AgentProfileConsolidationService:
             evidence=outcome.evidence,
             latency_ms=latency_ms(),
         )
+        self._maybe_requeue_base(notebook_id)
         return {
             "notebook_id": notebook_id,
             "blocks_written": outcome.written,
@@ -1215,7 +1221,7 @@ class AgentProfileConsolidationService:
         try:
             outcome = self._consolidate_overlay(notebook_id, user_id)
         except AgentProfileModelUnavailable:
-            return self._fail(
+            result = self._fail(
                 notebook_id,
                 user_id,
                 AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
@@ -1224,9 +1230,13 @@ class AgentProfileConsolidationService:
                 consumed,
                 chain="overlay",
             )
+            if not result.get("settled", True):
+                self._clear_revoked_overlay(notebook_id, user_id)
+            self._maybe_requeue_overlay(notebook_id, user_id)
+            return result
         except AgentProfileOutputRejected as exc:
             # Fail-open: the notes that were already there stand untouched.
-            return self._fail(
+            result = self._fail(
                 notebook_id,
                 user_id,
                 AGENT_PROFILE_MALFORMED_MESSAGE,
@@ -1235,8 +1245,12 @@ class AgentProfileConsolidationService:
                 consumed,
                 chain="overlay",
             )
+            if not result.get("settled", True):
+                self._clear_revoked_overlay(notebook_id, user_id)
+            self._maybe_requeue_overlay(notebook_id, user_id)
+            return result
         except (KeyboardInterrupt, SystemExit):
-            self._safe_settle(
+            settled = self._safe_settle(
                 notebook_id,
                 user_id,
                 "failed",
@@ -1244,11 +1258,13 @@ class AgentProfileConsolidationService:
                 diagnostic="worker_interrupted",
                 consumed=consumed,
             )
+            if not settled:
+                self._clear_revoked_overlay(notebook_id, user_id)
             self._emit("failed", notebook_id, chain="overlay",
                        latency_ms=latency_ms())
             raise
         except Exception:
-            self._fail(
+            result = self._fail(
                 notebook_id,
                 user_id,
                 AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE,
@@ -1257,8 +1273,10 @@ class AgentProfileConsolidationService:
                 consumed,
                 chain="overlay",
             )
+            if not result.get("settled", True):
+                self._clear_revoked_overlay(notebook_id, user_id)
             raise
-        self._safe_settle(
+        settled = self._safe_settle(
             notebook_id,
             user_id,
             "done",
@@ -1266,6 +1284,11 @@ class AgentProfileConsolidationService:
             blocks_written=outcome.written,
             consumed=consumed,
         )
+        if not settled:
+            # codex R1 P1(写后兜底): the job row vanished between the writes
+            # and this settle — only member removal deletes it, so any block
+            # this run just recreated is revoked private data. Wipe it again.
+            self._clear_revoked_overlay(notebook_id, user_id)
         self._emit(
             "done",
             notebook_id,
@@ -1275,6 +1298,7 @@ class AgentProfileConsolidationService:
             evidence=outcome.evidence,
             latency_ms=latency_ms(),
         )
+        self._maybe_requeue_overlay(notebook_id, user_id)
         return {
             "notebook_id": notebook_id,
             "blocks_written": outcome.written,
@@ -1315,6 +1339,16 @@ class AgentProfileConsolidationService:
         if not data:
             raise AgentProfileOutputRejected("unparsable_reply")
         parsed = parse_overlay_reply(data)
+        # codex R1 P1(写前复核): the model call above is a minutes-long window
+        # in which the member may have been removed. Removal runs clear_all +
+        # clear_job_row; a missing job row therefore means "revoked" — writing
+        # now would recreate private usage-derived blocks with
+        # ``expected_revision=0`` and hand them to the member on re-join. Skip
+        # every write. The millisecond window between this check and the
+        # writes is closed by the post-settle guard in ``run_overlay``.
+        if self.profiles.job_row(notebook_id, user_id) is None:
+            return _BaseOutcome(written=0, chars=0, evidence=0,
+                                diagnostic="revoked_mid_run")
         return self._write_overlay_blocks(
             notebook_id, user_id, blocks, parsed, stats.zero_hit_steps
         )
@@ -1438,7 +1472,7 @@ class AgentProfileConsolidationService:
         the SHARED base row for an overlay failure — releasing a slot nobody
         claimed while leaving the real one stuck ``running`` until restart.
         """
-        self._safe_settle(
+        settled = self._safe_settle(
             notebook_id,
             owner_id,
             "failed",
@@ -1447,7 +1481,77 @@ class AgentProfileConsolidationService:
             consumed=max(0, int(consumed)),
         )
         self._emit("failed", notebook_id, chain=chain, latency_ms=latency_ms)
-        return {"notebook_id": notebook_id, "failed": diagnostic}
+        # ``settled`` is surfaced so run_overlay can detect the row vanishing
+        # mid-run (member revoked) and run its clean-up guard; run_base ignores
+        # it — the shared base row is never deleted by membership changes.
+        return {"notebook_id": notebook_id, "failed": diagnostic,
+                "settled": settled}
+
+    def _clear_revoked_overlay(self, notebook_id: str, user_id: str) -> None:
+        """Best-effort wipe of overlay rows recreated by a revocation race.
+
+        codex R1 P1(双侧护栏的写后一侧): a member removed WHILE their overlay
+        consolidation was inside the model call has already had clear_all +
+        clear_job_row run — but this worker's ``expected_revision=0`` writes
+        can recreate the blocks afterwards. The pre-write ``job_row`` check in
+        ``_consolidate_overlay`` closes the minutes-long window (the model
+        call); the millisecond window between that check and the writes is
+        closed HERE, keyed off ``settle`` returning ``False`` (the job row was
+        gone by the time the run tried to settle — only removal deletes it).
+        Fail-open: a failed wipe falls back to the read-side gate, which never
+        serves these rows to a non-member anyway.
+        """
+        try:
+            self.profiles.clear_all(notebook_id, user_id)
+        except Exception:  # noqa: BLE001
+            _log.exception(
+                "failed to wipe a revoked member's overlay for notebook %s",
+                notebook_id,
+            )
+
+    def _maybe_requeue_base(self, notebook_id: str) -> None:
+        """codex R1 P2: re-arm the base chain when a full threshold survived.
+
+        Signals arriving WHILE a run is in flight survive settlement (settle
+        only subtracts the claim snapshot) — but every trigger that arrived
+        during the run lost its ``claim`` race against the running row, so
+        without this recheck a counter already at the threshold waits for the
+        NEXT source change that may never come. Each requeued round claims and
+        consumes its own snapshot, so total model calls stay ≤ signals /
+        threshold — the cost contract is unchanged. Fail-open: a requeue
+        failure leaves the signals pending for the next trigger or T6's manual
+        rebuild.
+        """
+        try:
+            row = self.profiles.job_row(notebook_id, BASE_CHAIN_OWNER)
+            if not row:
+                return
+            pending = int(row.get("pending_signal") or 0)
+            if pending >= int(self.settings.agent_profile_base_trigger):
+                self.start_base(notebook_id)
+        except Exception:  # noqa: BLE001
+            _log.exception(
+                "failed to requeue the base chain for notebook %s", notebook_id
+            )
+
+    def _maybe_requeue_overlay(self, notebook_id: str, user_id: str) -> None:
+        """Overlay twin of ``_maybe_requeue_base`` (codex R1 P2).
+
+        A ``None`` row means the member was revoked mid-run — nothing to
+        requeue, and the revocation guard has already handled the blocks.
+        """
+        try:
+            row = self.profiles.job_row(notebook_id, user_id)
+            if not row:
+                return
+            pending = int(row.get("pending_signal") or 0)
+            if pending >= int(self.settings.agent_profile_overlay_trigger):
+                self.start_overlay(notebook_id, user_id)
+        except Exception:  # noqa: BLE001
+            _log.exception(
+                "failed to requeue the overlay chain for notebook %s",
+                notebook_id,
+            )
 
     def _safe_settle(
         self, notebook_id: str, owner_id: str, status: str, **kwargs: Any

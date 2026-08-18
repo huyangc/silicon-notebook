@@ -359,18 +359,26 @@ def test_signals_arriving_during_a_run_survive_the_settle(harness, monkeypatch):
     bumped: list[int] = []
 
     def reply(_prompt: str) -> str:
-        for _ in range(3):
-            bumped.append(harness["profiles"].bump_signal(NOTEBOOK_ID, ""))
+        # 只在第一轮的模型调用里攒满一个阈值;第二轮(重排出来的)不再攒。
+        if not bumped:
+            for _ in range(3):
+                bumped.append(harness["profiles"].bump_signal(NOTEBOOK_ID, ""))
         return _reply([{"label": "corpus_shape", "value": "v", "evidence": []}])
 
     _with_submitter(monkeypatch, _Submitter())
-    service = _service(harness, client=_Client(reply))
+    client = _Client(reply)
+    service = _service(harness, client=client)
 
     for _ in range(3):
         service.note_corpus_change(NOTEBOOK_ID)
 
+    # 运行期间攒进来的三个信号确实活过了 settle(bump 观察到 4/5/6)……
     assert bumped == [4, 5, 6]
-    assert _job(harness)["pending_signal"] == 3
+    # ……而且不再滞留:codex R1 P2 的收尾自查发现剩余 pending 已达阈值,
+    # 自动重排并消费掉了它们——总共两轮,不需要等下一次来源变更。
+    assert client.prompts and len(client.prompts) == 2
+    assert _job(harness)["pending_signal"] == 0
+    assert _job(harness)["status"] == "done"
 
 
 def test_a_failed_run_still_consumes_its_batch(harness, monkeypatch):
