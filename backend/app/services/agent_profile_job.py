@@ -1252,6 +1252,17 @@ class AgentProfileConsolidationService:
         admin usage overview counts questions from ``ask_jobs`` submissions
         rather than from conversations — one definition of "an ask happened",
         not two that disagree.
+
+        ⚠ Registered residual (codex #520 R5 P2, accepted — same family as
+        the R4 ABA note in ``_consolidate_overlay``): this hook does not
+        verify the member still has notebook access, so a completion landing
+        AFTER their removal can recreate the job row (``bump_signal`` upserts)
+        and, once the counter fills, a later run rebuilds that member's own
+        blocks from their pre-removal traces. Blast radius is again that one
+        member's own notes — the read side never serves them to anyone else —
+        and closing it needs an access-checker seat wired into this service
+        for a check that would itself race the removal it guards against.
+        Registered for the P2 claim-generation rework instead.
         """
         try:
             if not user_id or self.ask_state is None:
@@ -1419,6 +1430,11 @@ class AgentProfileConsolidationService:
             )
             if not result.get("settled", True):
                 self._clear_revoked_overlay(notebook_id, user_id)
+            # codex R5 P2: this terminal path re-checks the leftover count like
+            # every other one — without it, signals that filled a threshold
+            # during a run that then crashed stay stranded until the member's
+            # next ask, which may never come.
+            self._maybe_requeue_overlay(notebook_id, user_id)
             raise
         settled = self._safe_settle(
             notebook_id,
