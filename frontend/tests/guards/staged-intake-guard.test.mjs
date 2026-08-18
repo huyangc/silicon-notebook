@@ -134,6 +134,65 @@ test("内联超限的回执带上体积明细（只报总量对用户不可操�
   assert.ok(targets.includes("bundleFileNamesFor"), "同批同名 md 必须先消歧再入列（否则会被去重折叠）");
 });
 
+test("批量名额闸走 processBundleCandidates，且名额基准是同步 ref 镜像", () => {
+  // codex #518 R1 P1：候选默认全选，若在这里直接逐个 processMarkdownCandidate，
+  // 单次上传数量上限就只剩 mergeStagedFiles 那道**入列时**的闸——一个合法的两千
+  // 条目压缩包会先被全部内联成 base64、再丢掉其中绝大多数。判据因此是「闸有没有
+  // 在内联之前」，而不是「有没有算过一个 remaining 变量」：把循环搬回本函数、闸
+  // 却留在入列处，是这条最容易发生的回退形态。
+  const stage = findFunctionIn(page, "Home", "stageBundleCandidates");
+  const calls = callSitesIn(stage);
+  const targets = calls.map((call) => call.target);
+  assert.ok(
+    targets.includes("processBundleCandidates"),
+    "必须经带名额预算的 processBundleCandidates 处理候选",
+  );
+  assert.ok(
+    !targets.includes("processMarkdownCandidate"),
+    "绕开 processBundleCandidates 直接逐个内联 = 名额闸退回入列时才生效，"
+      + "两千条目的合法压缩包会白分配 GB 级 base64",
+  );
+  const batch = calls.filter((call) => call.target === "processBundleCandidates");
+  assert.equal(batch.length, 1, "候选只该被处理一次（攒批单次入列）");
+  assert.match(
+    batch[0].arguments[3] ?? "",
+    /stagedRef\.current/,
+    "剩余名额必须从同步 ref 镜像起算；读 render 闭包里的 staged 会在跨 await 的链里"
+      + "拿到旧数量，名额算多了闸就形同虚设",
+  );
+  assert.match(
+    batch[0].arguments[3] ?? "",
+    /remainingSlots/,
+    "预算参数必须真的带上剩余名额",
+  );
+});
+
+test("图片内联读的是「有效」开关（零值上限等同于关闭），面板提示读同一个判据", () => {
+  // codex #518 R1 P2：MINERU_MAX_IMAGE_BYTES=0 / MINERU_MAX_IMAGES_PER_SOURCE=0 是
+  // 合法部署值（一张都不存）。直接读 sourceImagesEnabled 会在这类部署上照常内联并
+  // 报「N 张已内联」，而服务端把资产全部丢弃。
+  const stage = findFunctionIn(page, "Home", "stageBundleCandidates");
+  const options = callSitesIn(stage)
+    .filter((call) => call.target === "processBundleCandidates")
+    .flatMap((call) => call.arguments);
+  assert.ok(
+    options.some((argument) => argument.includes("sourceImagePairingEnabled")),
+    "必须传有效开关 sourceImagePairingEnabled，而不是裸的 sourceImagesEnabled",
+  );
+  assert.ok(
+    !options.some((argument) => /imagesEnabled:\s*sourceImagesEnabled/.test(argument)),
+    "裸 sourceImagesEnabled 会漏掉两个零值上限这一半",
+  );
+  const derived = scopedCalls(page).filter(
+    (entry) => entry.target === "bundleImagesEffectivelyEnabled",
+  );
+  assert.equal(
+    derived.length,
+    1,
+    "有效关闭态只能有一处推导（内联与面板顶部提示读同一个判据），不得各写一份",
+  );
+});
+
 test("解包的忙碌位成对 push/pop，嵌套帧不被内层的清零抹掉", () => {
   for (const name of ["ingestZipFile", "ingestDroppedDirectory"]) {
     const targets = callSitesIn(findFunctionIn(page, "Home", name)).map((call) => call.target);

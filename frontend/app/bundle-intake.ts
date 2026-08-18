@@ -29,7 +29,7 @@ import {
   resolveLimit,
   utf8ByteLength,
 } from "./md-bundle.ts";
-import { sourceUploadSizeLabel } from "./source-upload.ts";
+import { sourceUploadSizeLabel, type SkippedStagedFile } from "./source-upload.ts";
 
 // ---------------------------------------------------------------------------
 // 文件夹遍历护栏
@@ -85,8 +85,38 @@ export function bundleTotalBytesLimit(uploadMaxBytes: number | null): number | n
   return base === null ? null : base * MD_BUNDLE_TOTAL_BYTES_FACTOR;
 }
 
-/** 读取一个 zip `File` 的字节并交给 `md-bundle.ts` 的纯函数解析。 */
+/** `source_upload_max_bytes` 尚未从 `/system/config` 到达时，压缩输入上界的具名回退值。
+ *
+ *  取值依据：部署变量 `SOURCE_UPLOAD_MAX_MB` 的取值域是 1–1024，协议最大值即 1024 MiB，
+ *  所以任何部署的单文件上限都 ≤ 本值——用它当回退不会比真实配置更宽。它刻意比
+ *  「已知配置下的 `uploadMaxBytes × MD_BUNDLE_TOTAL_BYTES_FACTOR`」更严：配置到达
+ *  之前宁可保守。
+ *
+ *  这里**不能**沿用别处「拿不到上限就不预检」的口径——那正是本条要堵的洞：不预检
+ *  等于把几 GB 的压缩包整包读进内存，标签页当场耗死，连一条结构化拒绝都给不出来。 */
+export const BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES = 1024 * 1024 * 1024;
+
+/** 压缩输入（**读进内存之前**）的体积上界。
+ *
+ *  直接复用解压后总量那条线：压缩态字节必然不大于它解出来的总量，所以任何能通过
+ *  解压后预算的包，压缩态一定也在这条线以内——这道闸不会拒掉任何本来合法的包，
+ *  只是把「几 GB 误选」的拒绝时点从「已经分配完整包」提前到「只看了 `File.size`」。 */
+export function bundleZipInputLimit(uploadMaxBytes: number | null): number {
+  return bundleTotalBytesLimit(uploadMaxBytes) ?? BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES;
+}
+
+/** 读取一个 zip `File` 的字节并交给 `md-bundle.ts` 的纯函数解析。
+ *
+ *  体积闸必须跑在 `arrayBuffer()` **之前**：`.zip` 刻意绕开普通上传的单文件大小
+ *  校验（它不是上传目标，是前端交换格式），而解压后总量的闸只有在整包字节已经
+ *  进了内存之后才够得着——误选一个几 GB 的归档因此能在任何结构化拒绝之前把标签页
+ *  耗死（codex #518 R1 P2）。`File.size` 是条目元数据，取它不读任何内容，与文件夹
+ *  那条路 `collectDirectoryFiles` 的零 I/O 预检同一口径。 */
 export async function unpackZipFile(file: File, caps: BundleCaps): Promise<ZipBundleResult> {
+  const inputLimit = bundleZipInputLimit(caps.uploadMaxBytes);
+  if (file.size > inputLimit) {
+    return { ok: false, error: { code: "too_large", actual: file.size, limit: inputLimit } };
+  }
   const bytes = new Uint8Array(await file.arrayBuffer());
   return parseZipBundle(bytes, caps);
 }
@@ -109,7 +139,13 @@ export function bundleErrorMessage(error: BundleError): string {
     case "too_many_entries":
       return `压缩包内文件过多（最多 ${error.limit ?? MD_BUNDLE_MAX_ENTRIES} 个）`;
     case "too_large":
-      return "压缩包解压后体积过大";
+      // 两种形态，措辞必须分开：读进内存**之前**按 `File.size` 拦下的压缩输入是
+      // 整包级拒绝（没有触发条目 `path`，带实际体积与上限），此时一个字节都没读，
+      // 说「解压后」就是在描述一件没发生过的事；`parseZipBundle` 那条则必定带上
+      // 触发条目的 `path`。
+      return error.path === undefined && error.actual !== undefined && error.limit !== undefined
+        ? `压缩包体积${approxByteSizeLabel(error.actual)}，超过上限（${sourceUploadSizeLabel(error.limit)}），未读取内容`
+        : "压缩包解压后体积过大";
     default:
       return "无法读取该压缩包";
   }
@@ -324,9 +360,10 @@ export type ProcessedMarkdown =
 
 export type MarkdownCandidateOptions = InlineOptions & {
   /** 部署级图片存储总开关（`/system/config` 的 `source_images_enabled`）。省略按
-   *  `true` 处理。`false` 时整段图片配对/内联被跳过——服务端不会持久化任何图片，
-   *  花时间做 base64 编码没有意义（design doc §3.3：「不白付 base64 体积」），
-   *  正文原样入列，未内联的相对图片链接由调用方在回执面板顶部统一说明。 */
+   *  `true` 处理。`false`（或 `imageMaxBytes`/`maxImagesPerSource` 被显式配成 `0`，
+   *  见 `bundleImagesEffectivelyEnabled`）时整段图片配对/内联被跳过——服务端不会
+   *  持久化任何图片，花时间做 base64 编码没有意义（design doc §3.3：「不白付 base64
+   *  体积」），正文原样入列，未内联的相对图片链接由调用方在回执面板顶部统一说明。 */
   imagesEnabled?: boolean;
 };
 
@@ -334,12 +371,56 @@ function emptyInlineReceipt(): InlineReceipt {
   return { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] };
 }
 
+/** 图片存储的**有效**开关：部署总开关为 `false`，**或**单图字节上限/每来源张数上限
+ *  被显式配成 `0`，都意味着服务端一张图都不会持久化。
+ *
+ *  `MINERU_MAX_IMAGE_BYTES=0` / `MINERU_MAX_IMAGES_PER_SOURCE=0` 是合法部署值（后端
+ *  转发这两个字段时刻意没有正数约束，有后端用例钉住），语义就是「一张都不存」。
+ *  浏览器侧若把 `0` 当成 `resolveLimit` 那套「拿不到上限、不做本地预检」，就会照常
+ *  base64 内联、在回执里报「N 张已内联」，而上传后这些资产被服务端全部丢弃——既白付
+ *  了体积，又对用户撒了谎（codex #518 R1 P2）。
+ *
+ *  判定放在本模块而不是只写在 `page.tsx` 的调用点，是为了让
+ *  `processMarkdownCandidate` 的短路成为**结构性**保证：`0` 因此永远到不了
+ *  `inlineMdImages` 的上限参数，也就不会被它内部的 `resolveLimit` 反过来解释成
+ *  「无上限」。 */
+export function bundleImagesEffectivelyEnabled(opts: {
+  imagesEnabled?: boolean;
+  imageMaxBytes?: number | null;
+  maxImagesPerSource?: number | null;
+}): boolean {
+  return opts.imagesEnabled !== false
+    && opts.imageMaxBytes !== 0
+    && opts.maxImagesPerSource !== 0;
+}
+
+/** `/system/config` 的 `source_upload_max_files_per_batch` 尚未到达时，
+ *  「内联之前先算名额」那道闸的具名回退值。
+ *
+ *  权威闸 `mergeStagedFiles` 允许 `maxFilesPerBatch === null`＝「配置没到，不预检」，
+ *  对它是安全的（只是把截断推迟到服务端）；对本闸不是：没有名额上限就等于退回
+ *  「先把两千份候选全部内联成 base64，再丢掉其中一千九百八十份」。
+ *
+ *  取值 20 = 后端 `SOURCE_UPLOAD_MAX_FILES_PER_BATCH`（`backend/app/core/config.py`），
+ *  那是固定的 multipart 资源护栏、不随部署变化；下发值一旦到达一律以它为准。 */
+export const BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH = 20;
+
+/** 候选因单次上传数量上限而**根本没被处理**时的跳过原因。
+ *
+ *  与 `staged-files.ts` 的 `batchFullReason`（那是「内联完了但装不进列表」）刻意
+ *  分成两句：这一句的主体是「连图片配对都没跑」，用户看到的回执里不会有它的任何
+ *  配对结果，必须说清是为什么。 */
+export function bundleBatchFullReason(maxFilesPerBatch: number): string {
+  return `超出单次上传上限（${maxFilesPerBatch} 个），未处理，请先上传当前批次再继续添加`;
+}
+
 /** 内联一个已选中的 md 候选：解码文本 → 按包内其余文件配对/内联图片 → 算出用作
  *  暂存文件名的 basename（`fileNameOverride` 用于同批同名消歧，见
  *  `bundleFileNamesFor`）。超过单文件上传上限时不返回可入列的正文，只返回体积明细
  *  供调用方拒绝并如实报出（设计文档 §3.1 第 5 条的预检）。
  *
- *  `opts.imagesEnabled === false` 时跳过 `inlineMdImages` 整个配对/内联流程，
+ *  图片存储**有效关闭**时（总开关 `false`，或两个上限中任一被显式配成 `0`，判据见
+ *  `bundleImagesEffectivelyEnabled`）跳过 `inlineMdImages` 整个配对/内联流程，
  *  只做原有的单文件上限校验（正文本身仍受这条护栏约束），md 正文原样返回、回执
  *  全空——`md-bundle.ts` 是已过双评审的纯函数管线，这条部署级开关只在编排层
  *  （本文件）短路，不在那边加分支。
@@ -352,7 +433,7 @@ export function processMarkdownCandidate(
 ): ProcessedMarkdown {
   const text = decodeMarkdownText(mdFile.bytes);
   const fileName = fileNameOverride ?? baseNameOf(mdFile.path);
-  if (opts.imagesEnabled === false) {
+  if (!bundleImagesEffectivelyEnabled(opts)) {
     const bytes = utf8ByteLength(text);
     const limit = resolveLimit(opts.uploadMaxBytes);
     if (limit !== null && bytes > limit) {
@@ -378,6 +459,57 @@ export function processMarkdownCandidate(
     images: result.error.images,
     pairingSkipped: false,
   };
+}
+
+export type BundleCandidateBatch = {
+  /** 按候选顺序真正跑过配对/内联的那些（含被单文件上限拒掉的——它们**被处理过**，
+   *  有真实回执可展示）。 */
+  processed: ProcessedMarkdown[];
+  /** 名额耗尽、**根本没被处理**的那些，逐条带用户可读原因。刻意不给它们造回执：
+   *  一条空回执会被渲染成「未在正文中发现本地图片」，那是一句没发生过的事实断言。 */
+  skipped: SkippedStagedFile[];
+};
+
+/** 把一批被勾选的 md 候选按**剩余名额**逐个处理，名额耗尽即**停止调用**
+ *  `processMarkdownCandidate`。
+ *
+ *  为什么闸必须在这里而不是等入列时的 `mergeStagedFiles`：候选默认全选，而内联会把
+ *  每张图 base64 展开进正文。一个合法的两千条目压缩包里若每份 md 都引用同一张几 MB
+ *  的图，「先全部内联、再由入列闸截断」等于白分配 GB 级 base64——只有前 N 份进得了
+ *  列表，其余当场作废（codex #518 R1 P1）。
+ *
+ *  名额只由**成功产出**的候选消耗：被单文件上限拒掉的那些不入列、也就不占格，与
+ *  `mergeStagedFiles` 的口径一致。去重会让这个估算偏保守（同名同大小的重复项在这里
+ *  占了格、在入列时其实不占），方向安全：宁可让用户再拖一次，也不能先分配再丢弃。 */
+export function processBundleCandidates(
+  candidates: readonly BundleFile[],
+  files: readonly BundleFile[],
+  opts: MarkdownCandidateOptions,
+  batch: {
+    /** 同批同名消歧后的文件名（`bundleFileNamesFor` 的产出）。 */
+    names: ReadonlyMap<string, string>;
+    /** 本批还能产出几份（调用方按「上限 − 列表现有数量」算出）。 */
+    remainingSlots: number;
+    /** 上限本身，只用于跳过原因的措辞。 */
+    batchCap: number;
+  },
+): BundleCandidateBatch {
+  const processed: ProcessedMarkdown[] = [];
+  const skipped: SkippedStagedFile[] = [];
+  let produced = 0;
+  for (const candidate of candidates) {
+    if (produced >= batch.remainingSlots) {
+      skipped.push({
+        name: batch.names.get(candidate.path) ?? candidate.path,
+        reason: bundleBatchFullReason(batch.batchCap),
+      });
+      continue;
+    }
+    const result = processMarkdownCandidate(candidate, files, opts, batch.names.get(candidate.path));
+    if (result.ok) produced += 1;
+    processed.push(result);
+  }
+  return { processed, skipped };
 }
 
 // ---------------------------------------------------------------------------

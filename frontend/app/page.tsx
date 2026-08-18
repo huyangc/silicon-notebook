@@ -133,12 +133,14 @@ import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getS
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
 import { emptyStagedList, mergeStagedFiles, type StagedList } from "./staged-files.ts";
 import {
-  bundleCapsFrom, bundleErrorMessage, bundleFileNamesFor, bundleTotalBytesLimit,
+  bundleCapsFrom, bundleErrorMessage, bundleFileNamesFor,
+  bundleImagesEffectivelyEnabled, bundleTotalBytesLimit,
   classifyBundleContents, collectDirectoryFiles, directoryHasMarkdown,
   directoryTooLargeMessage, directoryTruncatedMessage, inlineTooLargeImageLines,
-  inlineTooLargeMessage, notStagedNote, processMarkdownCandidate,
+  inlineTooLargeMessage, notStagedNote, processBundleCandidates,
   readDirectoryAsBundleFiles, unpackZipFile,
   ALREADY_STAGED_REASON, BUNDLE_IMAGES_DISABLED_NOTE, BUNDLE_READ_FAILED_REASON,
+  BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH,
   DIRECTORY_READ_FAILED_REASON, NO_MARKDOWN_IN_BUNDLE_REASON,
 } from "./bundle-intake.ts";
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
@@ -907,6 +909,14 @@ export default function Home() {
   const [sourceImageMaxBytes, setSourceImageMaxBytes] = useState<number | null>(null);
   const [sourceImageMaxPerSource, setSourceImageMaxPerSource] = useState<number | null>(null);
   const [sourceImagesEnabled, setSourceImagesEnabled] = useState(true);
+  // 有效关闭态:总开关 false,**或**任一上限被显式配成 `0`(合法部署值,语义是「一张
+  // 都不存」)。零值部署此前会走完整内联并报「N 张已内联」,而服务端把资产全部丢弃
+  // (codex #518 R1 P2)。内联与面板顶部提示读同一个判据,不各写一份。
+  const sourceImagePairingEnabled = bundleImagesEffectivelyEnabled({
+    imagesEnabled: sourceImagesEnabled,
+    imageMaxBytes: sourceImageMaxBytes,
+    maxImagesPerSource: sourceImageMaxPerSource,
+  });
   const [supportedSourceExtensions, setSupportedSourceExtensions] = useState<string[]>(
     DEFAULT_SUPPORTED_SOURCE_EXTENSIONS,
   );
@@ -3669,18 +3679,33 @@ export default function Home() {
       { fileName: string; receipt: InlineReceipt; notes: string[]; pairingSkipped: boolean }
     > = [];
     const rejected: SkippedStagedFile[] = [];
-    for (const candidate of candidates) {
-      const processed = processMarkdownCandidate(
-        candidate,
-        files,
-        {
-          uploadMaxBytes: sourceUploadMaxBytes ?? 0,
-          imageMaxBytes: sourceImageMaxBytes,
-          maxImagesPerSource: sourceImageMaxPerSource,
-          imagesEnabled: sourceImagesEnabled,
-        },
-        names.get(candidate.path),
-      );
+    // 单次上传数量上限必须在**内联之前**生效（判据与循环都在 bundle-intake 的
+    // processBundleCandidates 里，可在纯函数层单测）：候选默认全选，而 mergeStagedFiles
+    // 那道权威闸只在入列时才截断，「先全部内联、再截断」在一个合法的两千条目压缩包上
+    // 等于白分配 GB 级 base64（codex #518 R1 P1）。
+    //
+    // 名额从 stagedRef.current（同步镜像，跨 await 安全）起算——与 stageIncomingFilesSync
+    // 的合并基准同一份值，不读 render 闭包里的 state。
+    const batchCap = sourceUploadMaxFilesPerBatch ?? BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH;
+    const batch = processBundleCandidates(
+      candidates,
+      files,
+      {
+        uploadMaxBytes: sourceUploadMaxBytes ?? 0,
+        imageMaxBytes: sourceImageMaxBytes,
+        maxImagesPerSource: sourceImageMaxPerSource,
+        imagesEnabled: sourceImagePairingEnabled,
+      },
+      {
+        names,
+        remainingSlots: Math.max(0, batchCap - stagedRef.current.files.length),
+        batchCap,
+      },
+    );
+    // 名额耗尽、根本没被处理的那些：只落跳过记录，不造回执（空回执会被渲染成
+    // 「未在正文中发现本地图片」——一句没发生过的事实断言）。
+    rejected.push(...batch.skipped);
+    for (const processed of batch.processed) {
       if (!processed.ok) {
         // 零张实际内联（正文本身已超限，或图片配对整个被跳过/没有本地图片）时，
         // 「请精简图片」是对不上症状的建议——超限的是正文，改说「拆分文档」。
@@ -7811,7 +7836,7 @@ export default function Home() {
             <BundleReceiptsPanel
               receipts={bundleReceipts}
               onDismiss={() => setBundleReceipts([])}
-              imagesDisabledNote={sourceImagesEnabled ? null : BUNDLE_IMAGES_DISABLED_NOTE}
+              imagesDisabledNote={sourceImagePairingEnabled ? null : BUNDLE_IMAGES_DISABLED_NOTE}
             />
             <div className="source-action-row">
               <label
