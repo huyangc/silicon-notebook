@@ -437,7 +437,10 @@ export function ReportMarkdown({
               .cite-detail-images CSS（该 class 不 scope 在 .cite-popover
               下）。缺字段（旧报告/无图引用）或没有 notebookId（无资产代理端点
               可用，同 T2 的既有防御式惯例）时整体不渲染，AuthedImage 保持
-              懒加载。 */}
+              懒加载。这里刻意**不**接 onOpenSource 跳转（对比 answer-panel.tsx
+              第 922 行 Ask 侧图片可点击跳转来源）：本组件没有这个 prop——报告
+              侧引用详情区本就没有"打开来源"的交互面，与 Ask 侧的不对称是 v1
+              范围内的刻意决定，不是遗漏。 */}
           {(selectedReference.images?.length ?? 0) > 0 && notebookId && (
             <div className="cite-detail-images">
               <span className="cite-detail-images-label">本段附图</span>

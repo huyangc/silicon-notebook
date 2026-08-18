@@ -297,11 +297,17 @@ def _mk_engine(repo, llm):
     return ReportEngine.from_repository(repo, repo.settings)
 
 
-def _seed_source_with_a_figure(repo, notebook_id: str) -> tuple[str, str, str]:
+def _seed_source_with_a_figure(
+    repo, notebook_id: str, suffix: str = "1",
+) -> tuple[str, str, str]:
     """一段正文 + 一张带图注的配图，各自单独一行 source_elements（不实际跑
     分块管线——`_draft_section` 只需要 `chunk_map` 的 ctx 带 element_ids，
-    真实取图走的是 `image_asset_rows()` 的窄读，不依赖 chunk 表本身）。"""
-    source_id = "src-fig-1"
+    真实取图走的是 `image_asset_rows()` 的窄读，不依赖 chunk 表本身）。
+
+    ``suffix``（默认 "1"，与既有调用点的字面量逐字保持一致）区分同一 notebook
+    内的多个来源——评审 F1 的多节批量测试需要两个互不冲突的 (source_id,
+    element_id, asset_id)。"""
+    source_id = f"src-fig-{suffix}"
     now = "2026-01-01T00:00:00"
     with repo._write() as db:
         db.execute(
@@ -324,7 +330,8 @@ def _seed_source_with_a_figure(repo, notebook_id: str) -> tuple[str, str, str]:
             "VALUES (?,?,?,?,?,?,?)",
             (f"el-{source_id}-fig", source_id, "image", "Markdown image 1",
              "图 1 时钟树收敛示意",
-             json.dumps({"asset_id": "asset-fig-1", "caption": "图 1 时钟树收敛示意"},
+             json.dumps({"asset_id": f"asset-fig-{suffix}",
+                        "caption": "图 1 时钟树收敛示意"},
                         ensure_ascii=False), now),
         )
     return source_id, f"el-{source_id}-text", f"el-{source_id}-fig"
@@ -413,6 +420,108 @@ def test_assemble_attaches_images_to_a_chunk_reference_via_one_batch_read(
     ]
     # 批量口径:恰好一次读取。
     assert len(calls) == 1, calls
+
+
+def test_assemble_batches_image_reads_across_multiple_sections(repo, monkeypatch):
+    """评审 F1：上面那条端到端用例只有 1 个 section，证明不了 `_assemble` 里
+    `attach_reference_images` 调用真的在 section 循环**之外**——把它挪进循环
+    体末尾，1 节的用例照样全绿（移动变异实测）。这里驱动 2 个 section，钉住
+    两条只有"循环外、一次性批量"才成立的不变量：①批量点查恰好 1 次；②那一次
+    请求的 id 集合是两节候选的**并集**。挪回循环内会变成 2 次调用（第 2 次仍
+    读到累积在 `reference_image_candidates` 里的两节候选），①先破；就算调用点
+    改成只发本节候选，②也会破——两条断言合起来堵死"看似通过但其实在循环内"
+    的两种变体。"""
+    from app.services.reasoning_retrieval import ReasoningResult
+    from app.services.retrieval import RetrievedChunk
+
+    class _ChunkLLM:
+        configured = True
+        model = "m"
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({"markdown": "## 正文\n配图见 [k1]。",
+                               "grounded": True})
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _ChunkLLM())
+    source_1, text_eid_1, fig_eid_1 = _seed_source_with_a_figure(repo, nb.id, "1")
+    source_2, text_eid_2, fig_eid_2 = _seed_source_with_a_figure(repo, nb.id, "2")
+    calls = _spy_on_image_asset_rows(repo, monkeypatch)
+
+    def _section(chunk_id, source_id, text_eid, fig_eid, title):
+        result = ReasoningResult(chunks=[RetrievedChunk(
+            chunk_id=chunk_id, source_id=source_id, source_title="时序手册",
+            section_path="§1", text="收敛需要在综合阶段预留时序裕量。",
+            element_ids=[text_eid, fig_eid], relevance=0.9,
+        )])
+        return eng._draft_section(
+            nb.id, {"title": title, "scope": f"s{title}", "sub_queries": ["q"]},
+            "q", result,
+        )
+
+    section_a = _section("chunk-a", source_1, text_eid_1, fig_eid_1, "A")
+    section_b = _section("chunk-b", source_2, text_eid_2, fig_eid_2, "B")
+    rid = repo.create_report(nb.id, "q")
+    md, gaps, references = eng._assemble(
+        nb.id, rid, "q",
+        [{"title": "A", "scope": "sA"}, {"title": "B", "scope": "sB"}],
+        [section_a, section_b],
+    )
+
+    assert len(references) == 2
+    images_by_key = {
+        r["key"]: [image["asset_id"] for image in r.get("images", [])]
+        for r in references
+    }
+    assert images_by_key == {"k1": ["asset-fig-1"], "k2": ["asset-fig-2"]}
+    # ① 恰好一次批量点查(不是每节各一次)。
+    assert len(calls) == 1, calls
+    # ② 那一次请求的 id 集合是两节候选的并集(不是只有最后一节的候选)。
+    assert sorted(calls[0]) == sorted(
+        [text_eid_1, fig_eid_1, text_eid_2, fig_eid_2]
+    )
+
+
+def test_assemble_completes_even_when_the_image_store_read_fails(repo, monkeypatch):
+    """评审 F2：附图是全部撰写完成后的最后一步装饰性读取，一次 DB 抖动不得
+    废掉整份已经生成好的报告正文——镜像 `_resolve_source_families` 在同一个
+    `_assemble` 里的既有 fail-open 惯例（report_engine.py 里紧邻的
+    try/except Exception 写法）。"""
+    from app.services.reasoning_retrieval import ReasoningResult
+    from app.services.retrieval import RetrievedChunk
+
+    class _ChunkLLM:
+        configured = True
+        model = "m"
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({"markdown": "## A\n正文附近有配图 [k1]。",
+                               "grounded": True})
+
+    def _boom(element_ids):
+        raise RuntimeError("db hiccup")
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _ChunkLLM())
+    source_id, text_eid, fig_eid = _seed_source_with_a_figure(repo, nb.id)
+    monkeypatch.setattr(repo._runtime.source_store, "image_asset_rows", _boom)
+    result = ReasoningResult(chunks=[RetrievedChunk(
+        chunk_id="chunk-1", source_id=source_id, source_title="时序手册",
+        section_path="§1", text="收敛需要在综合阶段预留时序裕量。",
+        element_ids=[text_eid, fig_eid], relevance=0.9,
+    )])
+    section = eng._draft_section(
+        nb.id, {"title": "A", "scope": "sa", "sub_queries": ["qa"]}, "q", result,
+    )
+    rid = repo.create_report(nb.id, "q")
+    md, gaps, references = eng._assemble(
+        nb.id, rid, "q", [{"title": "A", "scope": "sa"}], [section],
+    )
+
+    # 报告正文没有因为附图这一步炸了而丢失。
+    assert md
+    assert len(references) == 1
+    assert "images" not in references[0]
 
 
 class _SummaryOnlyLLM:
