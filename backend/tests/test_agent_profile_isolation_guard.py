@@ -116,6 +116,9 @@ NEUTRAL_FUNCTIONS = frozenset({
     "_retire_requested",
     "_safe_settle",
     "retire_disposition",
+    # codex #520 R3 P1:与 retire_disposition 同族的纯函数——只读已存行的
+    # value/updated_origin,回答「job 能不能碰这个块」。两条链共用同一个答案。
+    "user_authoritative",
     "sweep_on_start",
 })
 
