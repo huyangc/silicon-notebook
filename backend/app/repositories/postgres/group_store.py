@@ -515,16 +515,16 @@ class GroupStore:
                     "VALUES (%s,%s,%s,%s, 'pending', %s)",
                     (request_id, notebook_id, group_id, requested_by, self.now()),
                 )
+                # 终态投影在事务内读回(理由同 approve:事务外读会被并发删撞成 None)。
+                row = connection.execute(
+                    _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
+                ).fetchone()
         except errors.UniqueViolation as exc:
             if exc.diag.constraint_name == "uq_share_requests_one_pending":
                 existing = self._pending_share_request(notebook_id, group_id)
                 if existing is not None:
                     return existing
             raise
-        with self.database.connect() as connection:
-            row = connection.execute(
-                _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
-            ).fetchone()
         return self._share_request_row(row)
 
     def list_pending_share_requests(self, group_id: str) -> list[dict]:
@@ -558,9 +558,27 @@ class GroupStore:
         对**申请行** `FOR UPDATE`(防并发双审):第二个并发批准在第一个提交后重估
         `status='pending'` 谓词(EvalPlanQual),此时已是 approved、不再匹配 → 返回
         `None`。`status='pending'` 是精确匹配(红线)。
+
+        ⚠ **写事务开头必须先锁 groups 行**(`_lock_group_on(mode="SHARE")`),与
+        `create_grant` / `create_share_request` 同一手法:approve 是**真正写
+        `notebook_grants` 边**的地方,而 `notebook_grants.principal_id` 是多态无 FK 列,
+        `DELETE FROM groups` 的 CASCADE 带不走它(见 `delete_group` docstring)。不先锁组,
+        一个并发的 `delete_group` 可以在「它清完本组的边」与「A 插入新边」之间穿过去 ——
+        它清边发生在 A 插入之前、删组发生在 A 提交之后,于是 A 那条边指向一个已不存在的组
+        = **孤儿边**(真 PG 实测已复现)。`FOR SHARE` 让 `delete_group` 的 `FOR UPDATE`
+        等到本事务提交后才拿到组行,那时它的清边步骤会把 A 刚写的边一并带走;若组已先被删,
+        本事务在这里 `GroupNotFoundError` → 落 `None`(路由 404),而不是让 500 冒出去。
+        锁序 group→request,与 `delete_group` 的 group→cascade 一致,无死锁。
+
+        SQLite 侧**刻意没有对等改动**:`SqliteDatabase.write()` 是进程级写锁,approve 与
+        delete_group 不可能交错(理由同 `create_share_request` / `delete_group`)。
         """
         stamp = self.now()
         with self.database.write() as connection:
+            try:
+                self._lock_group_on(connection, group_id, mode="SHARE")
+            except GroupNotFoundError:
+                return None
             row = connection.execute(
                 "SELECT notebook_id FROM notebook_share_requests "
                 "WHERE id=%s AND group_id=%s AND status='pending' FOR UPDATE",
@@ -581,7 +599,9 @@ class GroupStore:
                 "SET status='approved', decided_by=%s, decided_at=%s WHERE id=%s",
                 (decided_by, stamp, request_id),
             )
-        with self.database.connect() as connection:
+            # 终态投影必须在**同一写事务内**读回:放到事务外的独立连接里读,一个并发的
+            # `delete_group` 可以在提交与这次读之间 CASCADE 删掉本行,`out` 变 None →
+            # `_share_request_row(None)` 崩(真 PG 并发实测复现)。事务内这行必然存在。
             out = connection.execute(
                 _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
             ).fetchone()
@@ -600,7 +620,7 @@ class GroupStore:
             )
             if int(cursor.rowcount or 0) == 0:
                 return None
-        with self.database.connect() as connection:
+            # 终态投影在事务内读回(理由同 approve:事务外读会被并发删撞成 None)。
             out = connection.execute(
                 _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
             ).fetchone()
