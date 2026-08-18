@@ -154,7 +154,7 @@ def test_readonly_member_reads_base_and_own_overlay_but_cannot_write_base(
 
     # 同理不能清空共享底座
     denied_clear = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared&expected_revision=0",
         headers=reader,
     )
     assert denied_clear.status_code == 404, denied_clear.text
@@ -187,7 +187,7 @@ def test_stranger_gets_404_on_every_endpoint(tmp_path, monkeypatch):
     assert put_resp.status_code == 404, put_resp.text
 
     delete_resp = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared&expected_revision=0",
         headers=stranger,
     )
     assert delete_resp.status_code == 404, delete_resp.text
@@ -276,7 +276,7 @@ def test_scope_label_mismatch_is_422(tmp_path, monkeypatch):
 
     # DELETE 同一条校验
     wrong_scope_delete = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=mine",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=mine&expected_revision=0",
         headers=owner,
     )
     assert wrong_scope_delete.status_code == 422, wrong_scope_delete.text
@@ -301,13 +301,13 @@ def test_delete_scope_is_validated_against_the_literal_value_domain(tmp_path, mo
     notebook_id = _notebook(client, owner)
 
     bogus = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=bogus",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=bogus&expected_revision=0",
         headers=owner,
     )
     assert bogus.status_code == 422, bogus.text
 
     wrong_case = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=Mine",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=Mine&expected_revision=0",
         headers=owner,
     )
     assert wrong_case.status_code == 422, wrong_case.text
@@ -360,7 +360,7 @@ def test_clear_block_is_idempotent_and_preserves_the_row(tmp_path, monkeypatch):
 
     # 从没写过的块:清空是幂等的,不报错
     empty = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared&expected_revision=0",
         headers=owner,
     )
     assert empty.status_code == 200, empty.text
@@ -373,7 +373,7 @@ def test_clear_block_is_idempotent_and_preserves_the_row(tmp_path, monkeypatch):
         headers=owner,
     )
     cleared = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared&expected_revision=1",
         headers=owner,
     )
     assert cleared.status_code == 200, cleared.text
@@ -491,7 +491,7 @@ def test_disabled_gate_is_transparent_on_get_and_409_on_writes(tmp_path, monkeyp
     assert put.json()["detail"] == "这项功能当前未开启，暂时无法编辑"
 
     delete = client.delete(
-        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared",
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared&expected_revision=0",
         headers=owner,
     )
     assert delete.status_code == 409, delete.text
@@ -503,3 +503,60 @@ def test_disabled_gate_is_transparent_on_get_and_409_on_writes(tmp_path, monkeyp
     )
     assert rebuild.status_code == 409, rebuild.text
     assert rebuild.headers.get("X-User-Message") == "1"
+
+
+def test_delete_requires_the_revision_the_browser_saw(tmp_path, monkeypatch):
+    """codex R1 P2:DELETE 与 PUT 同享乐观并发。
+
+    服务端自读当前 revision 再清空,会把「浏览器加载之后被巡固/他人更新过」的
+    未见内容清掉——恰恰绕开了 PUT 的保护。DELETE 因此必须带界面看到过的
+    ``expected_revision``:过期 409,缺参 422,幂等语义只对「浏览器看到的确实是
+    空块」成立。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id = _new_user(client)
+    notebook_id = _notebook(client, owner)
+
+    # 建块(revision=1),再更新一次(revision=2)——模拟浏览器只看过 revision=1
+    client.put(
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape",
+        json={"scope": "shared", "value": "第一版", "expected_revision": 0},
+        headers=owner,
+    )
+    client.put(
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape",
+        json={"scope": "shared", "value": "第二版", "expected_revision": 1},
+        headers=owner,
+    )
+
+    stale = client.delete(
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared&expected_revision=1",
+        headers=owner,
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.headers.get("X-User-Message") == "1"
+    assert stale.json()["detail"] == "这段理解刚被更新过，请刷新后再改"
+
+    # 拿最新 revision 才能清
+    ok = client.delete(
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared&expected_revision=2",
+        headers=owner,
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["value"] == ""
+
+    # 缺参是请求形状错误(FastAPI 校验),不是幂等清空
+    missing = client.delete(
+        f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared",
+        headers=owner,
+    )
+    assert missing.status_code == 422, missing.text
+
+    # 行不存在但浏览器声称看过非 0 版本:它看过的那行已被整块删掉 → 409 让它重取
+    other, _other_id = _new_user(client)
+    fresh_nb = _notebook(client, other)
+    ghost = client.delete(
+        f"/api/notebooks/{fresh_nb}/understanding/corpus_shape?scope=shared&expected_revision=3",
+        headers=other,
+    )
+    assert ghost.status_code == 409, ghost.text

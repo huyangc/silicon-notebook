@@ -42,14 +42,22 @@ export function saveUnderstandingBlock(
   );
 }
 
-/** 清空一块的内容(行与历史仍在服务端保留)。冷启动时是幂等的。 */
+/**
+ * 清空一块的内容(行与历史仍在服务端保留)。冷启动时是幂等的。
+ * `expectedRevision` 是界面上**看到过**的版本号(codex R1 P2:与保存同享乐观
+ * 并发)——加载后内容又被整理/他人改过时服务端回 409,而不是清掉没看过的内容。
+ */
 export function clearUnderstandingBlock(
   notebookId: string,
   label: string,
   scope: UnderstandingScope,
+  expectedRevision: number,
 ): Promise<UnderstandingBlock> {
+  const query =
+    `scope=${encodeURIComponent(scope)}` +
+    `&expected_revision=${encodeURIComponent(String(expectedRevision))}`;
   return requestJson<UnderstandingBlock>(
-    `/notebooks/${notebookId}/understanding/${label}?scope=${encodeURIComponent(scope)}`,
+    `/notebooks/${notebookId}/understanding/${label}?${query}`,
     { ...options, method: "DELETE" },
   );
 }
