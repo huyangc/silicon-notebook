@@ -11,7 +11,9 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 
 from app.core.config import Settings
-from app.models.ask import AnswerAnchor, Citation, CitationKnowhowRef
+from app.models.ask import (
+    AnswerAnchor, Citation, CitationImage, CitationKnowhowRef,
+)
 from app.repositories.ports import (
     EvidenceKnowledgeContextPort, NotebookStorePort, SourceStorePort,
 )
@@ -59,6 +61,74 @@ def _knowhow_ref_from_payload(payload: Mapping[str, Any]) -> CitationKnowhowRef 
     if not table_id or not row_id:
         return None
     return CitationKnowhowRef(table_id=str(table_id), row_id=str(row_id))
+
+
+# 本段附图的两道上限。**协议边界，不是部署预算**——它们约束的是一次回答的响应
+# 体积与弹层里的视觉噪音，两者都与语料规模、检索档位无关，所以刻意不进 Settings
+# (可调的那类才进,见「数值上限与截断」红线)。具名常量而不是裸切片同理:
+# `images[:3]` 这种字面量正是该红线点名禁止的形状。精确数值只登记在
+# `docs/product-and-api*.md`。
+CITATION_IMAGES_PER_ANCHOR = 3
+# 一次回答（锚点 + 引用合计）最多附多少张图。计的是**已分配的位**而不是不同图片
+# 数：同一张图被 5 个锚点各带一次，响应里就真的躺着 5 份 payload，按位计数才是
+# 严格上界（位数 ≥ 不同图片数）。
+CITATION_IMAGES_PER_ANSWER = 12
+
+
+def _citation_image(
+    element_id: str, element_row: Mapping[str, Any] | None
+) -> CitationImage | None:
+    """从 ``evidence_elements()`` 返回的一行里取出「本段附图」，不是图片/没落资产
+    /metadata 解析失败一律安全返回 None——从不抛异常，镜像 `_knowhow_ref` 的防御
+    风格。
+
+    准入判据只有两条：``element_type == 'image'`` 且 ``metadata.asset_id`` 非空。
+    刻意**不**要求图注非空：图注是图片进检索的唯一入口（无图注的图片压根不进
+    chunk，见 `chunking.py`），所以「命中了却没图注」在正常管线里到不了这里；真
+    到了（例如别的路径直接把 element id 递进来），少一行说明也不是丢弃这张图的
+    理由。knowhow / memory 投影行没有这个形状，天然不命中，无需特判。
+    """
+    if not element_row:
+        return None
+    if str(element_row.get("element_type") or "") != "image":
+        return None
+    try:
+        metadata = json.loads(element_row.get("metadata") or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    asset_id = metadata.get("asset_id")
+    if not asset_id or not isinstance(asset_id, str):
+        return None
+    caption = metadata.get("caption")
+    return CitationImage(
+        element_id=element_id,
+        asset_id=asset_id,
+        caption=caption if isinstance(caption, str) else "",
+    )
+
+
+def anchor_image_targets(
+    anchors: Sequence[AnswerAnchor],
+    chunk_element_ids: Mapping[str, Sequence[str]],
+) -> list[tuple[AnswerAnchor, Sequence[str]]]:
+    """把一批锚点配上各自的候选 element id，供 `attach_citation_images` 消费。
+
+    这是「chunk 锚点按 ``object_id`` 反查」这条规则的**唯一**拼写：四个装配点
+    (ask_chunk / ask_reasoning / ask_graph 两处) 都调它，而不是各写一遍
+    `by_id.get(anchor.object_id)`——四份手抄能互相认同一个陈旧值。
+
+    chunk 锚点非查不可：`chunk_context` 只在 chunk 恰好只有一个元素时才填
+    ``anchor.element_id``（多元素 chunk 留空），而「一段正文 + 一张配图」恰恰是
+    多元素形态——只看 ``anchor.element_id`` 的话，本特性要救的主场景一张图都出
+    不来。element / KG 锚点自己的 ``element_id`` 已由 `element_context` /
+    `knowledge_context` 填好，不需要额外候选。
+    """
+    return [
+        (anchor, chunk_element_ids.get(anchor.object_id, ()))
+        for anchor in anchors
+    ]
 
 
 def _is_document_row(item: object) -> bool:
@@ -811,6 +881,85 @@ class EvidenceContextService:
             if ref is not None:
                 refs[eid] = ref
         return refs
+
+    def citation_images_for(
+        self, element_ids: Iterable[str]
+    ) -> dict[str, CitationImage]:
+        """{element_id: 本段附图}，一次有界批量 PK 读解完。
+
+        与 `knowhow_refs_for` 逐字同一口径：入参可带空串/重复 id（调用方直接把
+        chunk 的整个 ``element_ids`` 倒进来即可），本方法自己去重 + 丢弃假值，
+        只返回命中的。复用既有的 `evidence_elements()`——它就是证据 hydration
+        那条路的批量点查，返回的列（``element_type`` / ``metadata``）恰好是判定
+        附图要的全部信息，没有理由再给两个后端各加一个新方法。
+
+        零新增模型/embedding 调用。
+        """
+        ids = list(dict.fromkeys(eid for eid in element_ids if eid))
+        if not ids:
+            return {}
+        elements = self.sources.evidence_elements(ids)
+        images: dict[str, CitationImage] = {}
+        for eid in ids:
+            image = _citation_image(eid, elements.get(eid))
+            if image is not None:
+                images[eid] = image
+        return images
+
+    def attach_citation_images(
+        self,
+        targets: Iterable[tuple[Citation | AnswerAnchor, Sequence[str]]],
+    ) -> None:
+        """给**一次回答**的全部锚点/引用就地填上 ``.images``，只发一次 store 读取。
+
+        入参是 (目标, 额外候选 element id) 对。候选集合的统一规则：目标自身的
+        ``element_id``（非空时）∪ 调用方给的额外 id（chunk 目标给该 chunk 的整个
+        ``element_ids``）。每个目标的候选先去重再**按 element id 升序**——截断必须
+        确定性，否则同一个问题两次问会带出不同的图。
+
+        整次调用共享一份 `CITATION_IMAGES_PER_ANSWER` 预算，所以四个装配点各自
+        **只调一次**、并且把锚点与引用放进同一次调用：拆成两次会让一次回答拿到两
+        份预算，那个上限就不再是上限。目标按传入顺序消费预算（锚点在前、引用在
+        后），顺序本身是确定的。
+
+        Memory 引用（``memory_id`` 非空）不参与：它的 ``element_id`` 指向记忆自己
+        的投影行，不是文档证据。``AnswerAnchor`` 没有这个字段，`getattr` 回退空串。
+        """
+        entries = list(targets)
+        if not entries:
+            return
+        candidates: list[tuple[Citation | AnswerAnchor, list[str]]] = []
+        for target, extra_ids in entries:
+            if getattr(target, "memory_id", ""):
+                continue
+            ids = {eid for eid in extra_ids if eid}
+            own = getattr(target, "element_id", "")
+            if own:
+                ids.add(own)
+            if ids:
+                candidates.append((target, sorted(ids)))
+        if not candidates:
+            return
+        images = self.citation_images_for(
+            eid for _target, ids in candidates for eid in ids
+        )
+        if not images:
+            return
+        remaining = CITATION_IMAGES_PER_ANSWER
+        for target, ids in candidates:
+            if remaining <= 0:
+                break
+            picked: list[CitationImage] = []
+            for eid in ids:
+                if len(picked) >= CITATION_IMAGES_PER_ANCHOR or remaining <= 0:
+                    break
+                image = images.get(eid)
+                if image is None:
+                    continue
+                picked.append(image)
+                remaining -= 1
+            if picked:
+                target.images = picked
 
     def citations_from(
         self,
