@@ -70,6 +70,21 @@ test("同一个组的两条边(成员只读 / 组管理员可管)折成一项,�
   assert.equal(entries[0].manage, true);
 });
 
+test("管理标注只看 role,两种群组主体一视同仁(四格:主体 × role)", () => {
+  // 与后端 `_admin_principal_match_expr` 逐字对齐:group / group_admins 两条臂都只要求
+  // role='admin'。所以 (group, admin) 也是管理权——它把管理权给了整组每个成员。
+  const edge = (principal_type, role, id = "gr") => ({
+    id, principal_type, principal_id: "g1", role,
+    principal_name: "组", principal_kind: "project", created_at: "",
+  });
+  const manageOf = (grant) => foldGroupShares([grant])[0].manage;
+
+  assert.equal(manageOf(edge("group", "admin")), true);          // ← R4 修的那一格
+  assert.equal(manageOf(edge("group_admins", "admin")), true);
+  assert.equal(manageOf(edge("group", "viewer")), false);
+  assert.equal(manageOf(edge("group_admins", "viewer")), false); // ← R1 修的那一格
+});
+
 test("只有一条只读边时 manage 为假;group_admins 边先出现也照样标可管理", () => {
   const readOnly = foldGroupShares([
     { id: "gr1", principal_type: "group", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },

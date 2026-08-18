@@ -77,6 +77,7 @@ from app.repositories.ports import (
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
+    ShareRequesterUnauthorizedError,
 )
 
 
@@ -594,6 +595,12 @@ def approve_share_request_route(
     `create_notebook_grant_route` 的同款取舍一致。系统管理员的运维旁路必须一路传到 store
     (他不必是组成员),所以显式把 `_is_system_admin(user)` 交给它,而不是让 store 去读
     `users.role`(store 不做身份解析)。
+
+    ⚠ store 还会复核**申请人**此刻仍对这本库有管理权,不成立 → **409**(申请行保留,
+    组管理员可自行驳回)。这条**推翻**了此前登记的「不复检申请人当前 manage 权是刻意
+    设计」:授权在生效时刻实时判定、绝不缓存,而批准正是把一次陈旧检查兑现成一条活的
+    授权边——库主可能早已撤掉申请人的管理权,却没有任何一方在这一刻验它。完整理由见
+    `ShareRequesterUnauthorizedError`。
     """
     _require_group_admin(group_id, user)
     try:
@@ -605,6 +612,10 @@ def approve_share_request_route(
         )
     except GroupAdminRequiredError:
         raise user_error(403, "你不是这个群组的组管理员,无法审批共享申请")
+    except ShareRequesterUnauthorizedError:
+        raise user_error(
+            409, "申请人已不再拥有这本笔记本的管理权,无法批准这条申请"
+        )
     if decided is None:
         raise user_error(404, "这条待审批的共享申请不存在或已被处理")
     return ShareRequestItem(**decided)

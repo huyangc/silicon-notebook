@@ -334,13 +334,14 @@ export const foldGroupShares = (grants: readonly NotebookGrant[]): GroupShareEnt
   const byPrincipal = new Map<string, GroupShareEntry>();
   for (const grant of grants) {
     if (grant.principal_type !== "group" && grant.principal_type !== "group_admins") continue;
-    // 「组管理员可管理」要求**两个条件同时成立**:主体是 `group_admins` **且** role 是
-    // `admin`。只看主体类型会说谎——API 的 principal_type 与 role 是两个独立字段,一条
-    // `(group_admins, viewer)` 边完全可以存在,而后端的 `NOTEBOOK_ADMIN_SQL` 明确要求
-    // `role='admin'`,那条边一点管理权都不给(codex #519 R1 P2)。判据与后端谓词
-    // 逐字对齐:两条边任意顺序返回都成立(OR 累积)。
-    const conferManage =
-      grant.principal_type === "group_admins" && grant.role === "admin";
+    // 管理权判据**只看 role**,对 `group` 与 `group_admins` 两种主体一视同仁——与后端
+    // `_admin_principal_match_expr` 逐字对齐:那三条臂(`user`/`group`/`group_admins`)
+    // 都只要求 `role='admin'`。所以一条 `(group, role='admin')` 边把管理权给了**整组每个
+    // 成员**,把它标成「不可管理」会让用户看到的权限比实际**小**(codex #519 R4 P2);
+    // 反过来一条 `(group_admins, viewer)` 边一点管理权都不给,只看主体类型又会标大
+    // (codex #519 R1 P2)。两次修的是同一处:R1 补了 role 判定但把类型判定留窄了。
+    // 两条边任意顺序返回都成立(OR 累积)。
+    const conferManage = grant.role === "admin";
     const existing = byPrincipal.get(grant.principal_id);
     if (existing) {
       existing.grantIds.push(grant.id);

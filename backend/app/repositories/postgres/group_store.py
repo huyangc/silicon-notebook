@@ -36,6 +36,11 @@ from app.repositories.ports import (
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
+    ShareRequesterUnauthorizedError,
+)
+from app.repositories.postgres.access_sql import (
+    NOTEBOOK_ADMIN_SQL,
+    admin_access_params,
 )
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -582,6 +587,20 @@ class GroupStore:
         if self._role_on(connection, group_id, decided_by) != "admin":
             raise GroupAdminRequiredError(group_id)
 
+    def _require_requester_still_authorized_on(
+        self, connection: Any, notebook_id: str, requested_by: str
+    ) -> None:
+        """`sqlite/group_store.py::_require_requester_still_authorized_on` 的镜像;完整
+        理由(授权实时判定、绝不缓存)写在 SQLite 那一份与 `ShareRequesterUnauthorizedError`
+        的 docstring 里。谓词同样直接取 `access_sql.NOTEBOOK_ADMIN_SQL`。"""
+        if (
+            connection.execute(
+                NOTEBOOK_ADMIN_SQL, (notebook_id, *admin_access_params(requested_by))
+            ).fetchone()
+            is None
+        ):
+            raise ShareRequesterUnauthorizedError(notebook_id)
+
     def approve_share_request(
         self,
         group_id: str,
@@ -618,7 +637,7 @@ class GroupStore:
             except GroupNotFoundError:
                 return None
             row = connection.execute(
-                "SELECT notebook_id FROM notebook_share_requests "
+                "SELECT notebook_id, requested_by FROM notebook_share_requests "
                 "WHERE id=%s AND group_id=%s AND status='pending' FOR UPDATE",
                 (request_id, group_id),
             ).fetchone()
@@ -628,6 +647,9 @@ class GroupStore:
                 connection, group_id, decided_by, decided_by_is_system_admin
             )
             notebook_id = row["notebook_id"]
+            self._require_requester_still_authorized_on(
+                connection, notebook_id, row["requested_by"]
+            )
             connection.execute(
                 "INSERT INTO notebook_grants "
                 "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
