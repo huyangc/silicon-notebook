@@ -21,11 +21,17 @@ import "katex/dist/katex.min.css";
 import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
 import { remarkCitations } from "./answer-citations";
-import { computeSourceTierCounts, referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
+import {
+  computeSourceTierCounts, referenceByAnchorKey, type AnswerReference,
+  type CitationImageLike,
+} from "./answer-formatting";
+import { API_BASE } from "./api-config";
+import { AuthedImage } from "./authed-image";
 import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { buildPublicReportLink } from "./public-report";
 import { quotedPhraseHint } from "./query-syntax";
+import { sourceImageAssetUrl } from "./source-image";
 import { isAdvanced, type UiMode } from "./ui-mode.ts";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
@@ -221,6 +227,13 @@ export type ReportDetailT = ReportSummaryT & {
     from_reference_library?: boolean;
     /** 同一可区分资料可能有多个锚点；仅用于统计，不改引用跳转。 */
     family_key?: string;
+    /**
+     * 本段附图（T6）：绑定证据里带图注的图片，与 Ask 侧的
+     * `AnswerAnchorLike.images`/`CitationLike.images` 同一惯例——只在命中时
+     * 非空，旧报告/无图引用整体缺席这个字段。真源：后端
+     * `EvidenceContextService.attach_reference_images`。
+     */
+    images?: CitationImageLike[];
   }[];
   understanding: ReportUnderstandingT;
   error: string;
@@ -321,6 +334,9 @@ function reportReferencesAsAnswerReferences(
       location_label: reference.location_label,
       snippet: reference.snippet,
       tier: reference.tier,
+      // 本段附图（T6）：空数组同 exclude_if 惯例整体缺席，undefined 时
+      // AnswerAnchorLike.images 保持可选。
+      images: reference.images,
     },
   }));
 }
@@ -328,9 +344,17 @@ function reportReferencesAsAnswerReferences(
 export function ReportMarkdown({
   markdown,
   references = [],
+  notebookId = "",
 }: {
   markdown: string;
   references?: ReportDetailT["references"];
+  /**
+   * 本段附图（T6）资产代理端点用的 active notebook id。可选——镜像
+   * answer-panel.tsx SelectedReferenceDetail 的 `notebookId: string | null`
+   * 防御式惯例：没有可用 notebook 上下文的调用点（如纯 markdown 渲染测试）
+   * 不必传，此时附图区整体不渲染，与"无附图"等价，不是渲染失败。
+   */
+  notebookId?: string;
 }) {
   const [selectedRefKey, setSelectedRefKey] = useState<string | null>(null);
   const refObjs = reportReferencesAsAnswerReferences(references);
@@ -407,6 +431,33 @@ export function ReportMarkdown({
               </small>
             )}
           {selectedReference.snippet && <blockquote>{selectedReference.snippet}</blockquote>}
+          {/* 本段附图（T6）：与上方引证内容（snippet/来源/原始文件）用独立区块 +
+              顶部分隔线区分——不是模型引用过的证据，只是证据片段附近的图，
+              与 answer-panel.tsx SelectedReferenceDetail 同一视觉语义、同一套
+              .cite-detail-images CSS（该 class 不 scope 在 .cite-popover
+              下）。缺字段（旧报告/无图引用）或没有 notebookId（无资产代理端点
+              可用，同 T2 的既有防御式惯例）时整体不渲染，AuthedImage 保持
+              懒加载。 */}
+          {(selectedReference.images?.length ?? 0) > 0 && notebookId && (
+            <div className="cite-detail-images">
+              <span className="cite-detail-images-label">本段附图</span>
+              <ul className="cite-detail-image-list">
+                {selectedReference.images!.map((image) => {
+                  const imageUrl = sourceImageAssetUrl(API_BASE, notebookId, image.asset_id);
+                  return (
+                    <li key={image.element_id} className="cite-detail-image-item">
+                      {imageUrl
+                        ? <AuthedImage url={imageUrl} alt={image.caption || "附图"} />
+                        : <p className="tool-hint">图片不可用</p>}
+                      {image.caption && (
+                        <small className="cite-detail-image-caption">{image.caption}</small>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
         </aside>
       )}
     </div>
@@ -1939,7 +1990,7 @@ export function ReportsPanel({
           </div>
         )}
         {active.content_md ? (
-          <ReportMarkdown markdown={active.content_md} references={active.references} />
+          <ReportMarkdown markdown={active.content_md} references={active.references} notebookId={notebookId} />
         ) : (
           !isReportActive(active.status)
           && !["failed", "intent_ready", "outline_ready"].includes(active.status) && (

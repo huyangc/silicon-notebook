@@ -1240,6 +1240,13 @@ def test_public_report_share_link_is_anonymous_and_bounded(client, monkeypatch):
             # None of these may cross to an anonymous reader.
             "source_id": "src-secret", "element_id": "el-secret",
             "object_id": "ko-secret", "family_key": "source:src-secret",
+            # T6（深度报告引用卡附图）：images/asset_id 与 source_id/element_id
+            # 同类内部 handle，绝不跨出公开投影（见 report_public_view.py 的
+            # 白名单 docstring）。
+            "images": [{
+                "element_id": "el-secret-fig", "asset_id": "asset-secret-1",
+                "caption": "机密图注",
+            }],
         }],
         understanding={"objective": "内部意图", "source_scope": {"source_ids": ["src-secret"]}},
     )
@@ -1262,6 +1269,10 @@ def test_public_report_share_link_is_anonymous_and_bounded(client, monkeypatch):
     detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert detail["shared"] is True
     assert "share_token" not in detail
+    # Sanity: the authenticated (owner-visible) projection is unfiltered — it
+    # really does carry images/asset_id. This is what makes the public
+    # allowlist below a meaningful assertion rather than a vacuous one.
+    assert detail["references"][0]["images"][0]["asset_id"] == "asset-secret-1"
     assert token not in client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").text
     # The token is readable only through the write-guarded endpoint.
     assert client.get(
@@ -1275,9 +1286,13 @@ def test_public_report_share_link_is_anonymous_and_bounded(client, monkeypatch):
     assert body["references"][0]["title"] == "论文标题"
     assert body["references"][0]["snippet"] == "被引用的原文片段"
     assert body["references"][0]["location"] == "第 3 页"
+    assert "images" not in body["references"][0]
     # The allowlist holds: no internal handles, no intent contract.
     serialized = public.text
-    for secret in ("src-secret", "el-secret", "ko-secret", "内部意图"):
+    for secret in (
+        "src-secret", "el-secret", "ko-secret", "内部意图",
+        "el-secret-fig", "asset-secret-1", "机密图注",
+    ):
         assert secret not in serialized
     assert "understanding" not in body and "notebook_id" not in body
 

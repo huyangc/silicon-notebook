@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
 from app.models.ask import (
@@ -75,6 +75,13 @@ CITATION_IMAGES_PER_ANCHOR = 3
 # 所以这个数是**响应体积**口径的上界,不是「用户能看到几张不同的图」——后者只会
 # 更小,两条腿在界面上是同一份证据的两种展示。
 CITATION_IMAGES_PER_ANSWER = 12
+# 一份**报告**（`report_engine._assemble` 全局重编号后的 `references`）合计最多
+# 附多少张图。报告横跨多个章节,参考文献条数天然多于单次 Ask 回答的锚点数——
+# 复用 `CITATION_IMAGES_PER_ANSWER` 会让排在后面章节的引用永远分不到图(预算
+# 按引用 key 顺序消费,见 `attach_reference_images`)。仍是协议边界内的响应体积
+# 上限,不是部署预算;取值取单次回答上限的整数倍,精确数值只登记在
+# `docs/product-and-api*.md`。
+CITATION_IMAGES_PER_REPORT = 24
 # 图注上限。同 `Citation.quoted_span`（200）/枚举行 `summary`（300）一条惯例:
 # 新 payload 里的每个字符串都得有上界,否则一份图注畸长的文档能把响应撑大。精确
 # 数值只登记在 `docs/product-and-api*.md`。
@@ -986,6 +993,65 @@ class EvidenceContextService:
                 remaining -= 1
             if picked:
                 target.images = picked
+
+    def attach_reference_images(
+        self,
+        references: Sequence[MutableMapping[str, Any]],
+        candidate_ids: Mapping[str, Sequence[str]],
+    ) -> None:
+        """T6（深度报告引用卡附图）：给**一份报告**的全部参考文献字典就地填上
+        ``"images"``，全报告一次 store 读取。
+
+        与 `attach_citation_images` 同一套规则（去重 → 升序 → 逐条
+        `CITATION_IMAGES_PER_ANCHOR` 帽 → 总量帽），只是目标形状不同：报告的
+        ``references`` 是 `report_engine._assemble()` 全局重编号后的 dict 列表
+        （`ReportDetail.references: List[dict]`，不是 `Citation`/`AnswerAnchor`
+        强类型模型），所以 ``candidate_ids`` 以每条 reference 自己的 ``key``
+        （如 ``"k3"``）为键——报告去重之后的引用没有一个天然可当 dict key 的
+        稳定对象引用，复用 `attach_citation_images` 那种"以 target 对象本身为
+        键"的写法在这里行不通。
+
+        遍历顺序是 ``references`` 列表自身（已是 `_assemble` 全局重编号后的
+        "k1, k2, …" 顺序），不是 ``candidate_ids`` 字典的插入序——这保证跨章节
+        的预算消费顺序确定、可复现，与 `attach_citation_images` "目标按传入
+        顺序消费预算" 同一惯例。``candidate_ids`` 只需覆盖调用方想让哪些 key
+        参与；没有候选 id 的 reference 保持原样（不追加空 ``"images"`` 键，同
+        `attach_citation_images` 的 ``if picked: target.images = ...`` 惯例——
+        报告侧因此也是"空则整条从存储 JSON 里缺席"）。
+
+        合计上限用 ``CITATION_IMAGES_PER_REPORT`` 而不是
+        ``CITATION_IMAGES_PER_ANSWER``：见该常量的定义处注释。
+        """
+        if not references:
+            return
+        prepared: list[tuple[MutableMapping[str, Any], list[str]]] = []
+        for reference in references:
+            key = str(reference.get("key") or "")
+            unique_ids = sorted({eid for eid in candidate_ids.get(key, ()) if eid})
+            if unique_ids:
+                prepared.append((reference, unique_ids))
+        if not prepared:
+            return
+        images = self.citation_images_for(
+            eid for _reference, ids in prepared for eid in ids
+        )
+        if not images:
+            return
+        remaining = CITATION_IMAGES_PER_REPORT
+        for reference, ids in prepared:
+            if remaining <= 0:
+                break
+            picked: list[CitationImage] = []
+            for eid in ids:
+                if len(picked) >= CITATION_IMAGES_PER_ANCHOR or remaining <= 0:
+                    break
+                image = images.get(eid)
+                if image is None:
+                    continue
+                picked.append(image)
+                remaining -= 1
+            if picked:
+                reference["images"] = [image.model_dump() for image in picked]
 
     def citations_from(
         self,
