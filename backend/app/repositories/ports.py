@@ -5,6 +5,7 @@ protocols intentionally contain no business logic and are structural seams for
 the later store/service extraction.
 """
 from __future__ import annotations
+import json
 import threading
 import queue
 
@@ -2589,6 +2590,33 @@ class AskStateStorePort(Protocol):
         self, notebook_id: str, older_than_days: int, user_id: str
     ) -> ConversationBulkDeleteResult: ...
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse: ...
+    def recent_user_ask_traces(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        job_limit: int,
+        step_limit: int,
+    ) -> list[dict]: ...
+    # ⚠ Agentic Memory P1 (T5) — the ONE read that crosses from "this notebook"
+    # into "this member's own use of it", and therefore the one place in this
+    # port where the ``user_id`` argument is a PRIVACY BOUNDARY rather than an
+    # audit attribution.
+    #
+    # Both statements behind it carry ``created_by = ?`` IN THE SQL TEXT, the
+    # trace statement included even though its job ids were already narrowed by
+    # the first one: a redundant predicate costs nothing on an indexed column,
+    # while a Python-side filter is one refactor away from being dropped by
+    # someone who cannot see why it was there. ``memory_items.created_by`` is
+    # the same rule for the same reason.
+    # ``backend/tests/test_agent_profile_isolation_guard.py`` pins that
+    # statically, in both backends.
+    #
+    # Bounded by BOTH arguments (most recent ``job_limit`` asks, at most
+    # ``step_limit`` trace rows across them) and PROJECTED through
+    # ``project_trace_step``: what comes back is the member's own question text
+    # plus, per step, the action type / human summary / duration / one count.
+    # Never an answer body, never Memory content, never evidence text.
 
 
 # Memory write/revision values are storage-neutral domain types.  The port
@@ -3571,6 +3599,100 @@ def append_profile_history(
     if len(updated) > AGENT_PROFILE_HISTORY_MAX:
         updated = updated[-AGENT_PROFILE_HISTORY_MAX:]
     return updated
+
+
+#: How many of the member's most recent asks in ONE notebook the overlay chain
+#: samples, and the hard ceiling on trace rows read across all of them. Two
+#: numbers rather than one because they bound different things: a member can
+#: have thousands of asks (so the ask count must be capped), and ONE exhaustive
+#: reasoning ask can carry a hundred trace steps (so the step total must be
+#: capped independently — 40 asks × "however many steps each happens to have"
+#: is not a bound).
+AGENT_PROFILE_TRACE_SAMPLE = 40
+AGENT_PROFILE_TRACE_STEP_LIMIT = 600
+
+#: Per-item clip for the two free-text fields that survive the projection (the
+#: member's own question, and a step's human summary). They are the member's
+#: own words about their own run, but they still ride into a prompt on a
+#: budget, so one pathological 5 000-character question cannot spend the whole
+#: usage section.
+AGENT_PROFILE_TRACE_TEXT_MAX_CHARS = 120
+
+#: The ONLY ``detail`` keys the projection keeps, and it keeps at most one of
+#: them, as an int. An allowlist rather than "copy ``detail`` through": trace
+#: details are free-form dicts that some steps fill with error strings
+#: (``str(exc)[:120]``) and model-written reflection text. None of that is
+#: needed to say "this retrieval came back empty", and a pass-through would
+#: quietly widen what the overlay prompt sees every time a new step type is
+#: added anywhere in the retrieval stack.
+_TRACE_COUNT_KEYS = ("count", "new", "results", "citations", "rows", "hits")
+
+
+def _clip_trace_text(value: object) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) > AGENT_PROFILE_TRACE_TEXT_MAX_CHARS:
+        return text[: AGENT_PROFILE_TRACE_TEXT_MAX_CHARS - 1] + "…"
+    return text
+
+
+def project_trace_step(step: object) -> dict | None:
+    """Narrow ONE persisted trace step to the fields the overlay chain may see.
+
+    ⚠ SINGLE SOURCE OF TRUTH for both backends, for the same reason as
+    ``append_profile_history`` above and with a sharper edge: SQLite stores
+    ``step_json`` as TEXT and PostgreSQL as ``jsonb``, so the two stores hand
+    this function different Python types for the same row — and a per-backend
+    copy of a *narrowing* rule is a copy that can silently widen on one side
+    only. What gets into an understanding block would then depend on which
+    database the deployment runs.
+
+    Returns ``None`` for anything that is not a step object, so a corrupt row
+    is skipped rather than failing the read (the same tolerance ``read_trace``
+    has had since the trace sub-table existed).
+    """
+    if isinstance(step, (str, bytes, bytearray)):
+        try:
+            step = json.loads(step)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(step, Mapping):
+        return None
+    detail = step.get("detail")
+    count: int | None = None
+    if isinstance(detail, Mapping):
+        for key in _TRACE_COUNT_KEYS:
+            raw = detail.get(key)
+            if isinstance(raw, bool):
+                continue
+            if isinstance(raw, int):
+                count = int(raw)
+                break
+    duration = step.get("duration_ms")
+    return {
+        "step_type": str(step.get("step_type") or ""),
+        "summary": _clip_trace_text(step.get("summary")),
+        "duration_ms": int(duration) if isinstance(duration, int) and not isinstance(duration, bool) else None,
+        "count": count,
+    }
+
+
+def project_ask_row(
+    job_id: object, question: object, status: object, created_at: object
+) -> dict:
+    """One sampled ask, narrowed the same way and in the same one place.
+
+    The question is the member's OWN question — the single most useful input
+    the overlay has (``retrieval_notes`` is about how this person searches this
+    library) — and it is also the only free text in the sample, so it is
+    clipped here rather than at each call site.
+    """
+    return {
+        "job_id": str(job_id or ""),
+        "question": _clip_trace_text(question),
+        "status": str(status or ""),
+        "created_at": str(created_at or ""),
+        "steps": [],
+    }
 
 
 class AgentProfileRevisionConflict(RuntimeError):

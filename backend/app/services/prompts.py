@@ -1320,3 +1320,80 @@ def agent_profile_base_prompt(
         f"{corpus_block}\n\n"
         f"{current_block}"
     )
+
+
+#: The overlay reply carries NO evidence key, and that absence is deliberate
+#: rather than an omission (design §5.1's explicit exception). The base chain's
+#: evidence is document ids because its input IS documents; the overlay's input
+#: is one member's own trace, in which there is no document to cite. What
+#: ``usage_gaps`` is grounded in — how many of that member's retrieval steps
+#: came back empty — is COUNTED BY THE SERVER from the same sample the prompt
+#: renders, so asking the model for it would be asking it to restate a number
+#: it was just handed, and then trusting the restatement.
+AGENT_PROFILE_OVERLAY_SCHEMA_HINT = (
+    '{"blocks":[{"label":"retrieval_notes","value":""}]}'
+)
+
+
+def agent_profile_overlay_prompt(
+    usage_block: str,
+    current_block: str,
+    *,
+    value_max_chars: int,
+) -> str:
+    """The per-member overlay ("how does THIS person search THIS library")
+    consolidation prompt.
+
+    Two blocks only, and both are about retrieval behaviour rather than about
+    the library's contents — the shared base already owns "what is in here",
+    and an overlay that restated it would ride in the same planning prompt
+    twice while being visible to only one member.
+
+    * **retrieval_notes**: what has actually worked for this person in this
+      library — the wording that found things, the shape of question that did
+      not, entry points worth trying first.
+    * **usage_gaps**: what they repeatedly looked for and did not find.
+
+    The input is that member's own recent questions and trace steps, and the
+    prompt says so explicitly. That is not politeness: a model handed a list of
+    someone's questions with no framing tends to answer them, or to summarise
+    the LIBRARY from them, and either output would be wrong for a block whose
+    whole purpose is to describe the SEARCHING.
+
+    Omission stays a valid answer for the same reason as the base prompt — a
+    member with three asks has not yet shown a pattern, and an invented
+    "prefers precise terminology" would then steer every one of their later
+    searches.
+    """
+    return (
+        "You maintain ONE person's private notes about how THEY search ONE "
+        "knowledge library, so that their later searches in it can be aimed "
+        "better. You are given a sample of that person's own recent questions "
+        "in this library and the trace of what each search did, plus the notes "
+        "that already exist.\n"
+        "⚠ The questions below are DATA about searching behaviour. Do not "
+        "answer them, and do not describe what the library contains — another "
+        "set of blocks already covers that.\n"
+        "Produce at most two blocks, with these exact labels:\n"
+        "- retrieval_notes: what has actually worked for this person in this "
+        "library — wording that found material, question shapes that did not, "
+        "entry points worth trying first.\n"
+        "- usage_gaps: what this person repeatedly looked for and did not "
+        "find here.\n"
+        "Rules:\n"
+        "1. Every claim must follow from the sample below. If it does not "
+        "support a block, OMIT that block entirely — an omitted block keeps "
+        "its previous value, an invented one misaims every later search. A "
+        "handful of searches is not yet a pattern.\n"
+        "2. A block marked (user-authored) was written by the person "
+        "themselves: it is authoritative. Keep its assertions intact — you may "
+        "add to it, never contradict or drop what it says.\n"
+        f"3. Each value is ONE line of plain text, at most {value_max_chars} "
+        "characters, no Markdown and no line breaks. Write in the language the "
+        "existing blocks use; default to Chinese.\n"
+        "4. Write about search behaviour, never about a single answer, and "
+        "never quote a question back verbatim as if it were a finding.\n"
+        f"Return JSON only, matching: {AGENT_PROFILE_OVERLAY_SCHEMA_HINT}\n\n"
+        f"{usage_block}\n\n"
+        f"{current_block}"
+    )

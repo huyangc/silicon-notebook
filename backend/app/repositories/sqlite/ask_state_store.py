@@ -51,7 +51,12 @@ from app.models.ask import (
     FeedbackRequest,
     FeedbackResponse,
 )
-from app.repositories.ports import ConversationBusyError, PreparedAskTurn
+from app.repositories.ports import (
+    ConversationBusyError,
+    PreparedAskTurn,
+    project_ask_row,
+    project_trace_step,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -332,6 +337,75 @@ class AskStateStore:
             except (TypeError, ValueError):
                 continue
         return public_trace_steps(trace)
+
+    def recent_user_ask_traces(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        job_limit: int,
+        step_limit: int,
+    ) -> list[dict]:
+        """ONE member's own recent asks in ONE notebook, projected and bounded.
+
+        Agentic Memory P1 (T5). This is the only read in the repository whose
+        ``user_id`` argument is a **privacy boundary** rather than an audit
+        attribution: its result feeds that member's private overlay blocks, and
+        a row belonging to someone else would put A's questions into a block
+        the consolidation prompt then summarises — a leak with no error and no
+        failing test anywhere.
+
+        ⚠ Both statements carry ``created_by = ?`` **in the SQL text**, the
+        trace statement included even though its ``job_id`` list already came
+        out of the first one. That second predicate is redundant TODAY and
+        deliberately kept: it costs nothing (``ask_jobs.id`` is the primary
+        key), and it makes "these steps belong to this user" a property of the
+        statement rather than of the two statements' relationship — which is
+        what survives someone later changing how the job ids are chosen. The
+        same rule, for the same reason, as ``memory_items.created_by``.
+        ``backend/tests/test_agent_profile_isolation_guard.py`` pins it
+        statically in both backends; a Python-side filter fails that guard on
+        purpose.
+
+        Bounded twice and independently: ``job_limit`` most-recent asks, and
+        ``step_limit`` trace rows across all of them. One exhaustive reasoning
+        ask can carry a hundred steps, so "N asks" alone is not a bound.
+        ``ORDER BY t.job_id, t.seq`` before the row cap makes the truncation
+        deterministic (whole leading asks, in their own step order) rather
+        than an arbitrary slice of whatever the planner emitted first.
+        """
+        job_limit = max(1, int(job_limit))
+        step_limit = max(1, int(step_limit))
+        with self.database.connect() as db:
+            job_rows = db.execute(
+                "SELECT id, question, status, created_at FROM ask_jobs "
+                "WHERE notebook_id = ? AND created_by = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (notebook_id, user_id, job_limit),
+            ).fetchall()
+            asks = [
+                project_ask_row(
+                    row["id"], row["question"], row["status"], row["created_at"]
+                )
+                for row in job_rows
+            ]
+            if not asks:
+                return []
+            by_job = {ask["job_id"]: ask for ask in asks}
+            placeholders = ",".join("?" for _ in by_job)
+            step_rows = db.execute(
+                "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                f"WHERE j.notebook_id = ? AND j.created_by = ? AND t.job_id IN ({placeholders}) "
+                "ORDER BY t.job_id ASC, t.seq ASC LIMIT ?",
+                (notebook_id, user_id, *by_job.keys(), step_limit),
+            ).fetchall()
+        for row in step_rows:
+            step = project_trace_step(row["step_json"])
+            target = by_job.get(str(row["job_id"]))
+            if step is not None and target is not None:
+                target["steps"].append(step)
+        return asks
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

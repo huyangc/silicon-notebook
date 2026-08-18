@@ -127,12 +127,21 @@ class AskExecutionCoordinator:
         job_submitter: BackgroundJobSubmitter,
         event_log: "EventLogger",
         ask: "Callable[[], AskServicePort]",
+        note_ask_completed: "Callable[[str, str], None] | None" = None,
     ) -> None:
         self.ask_state = ask_state
         self.cancellations = cancellations
         self.job_submitter = job_submitter
         self.event_log = event_log
         self.ask = ask
+        # Agentic Memory P1 (T5): "this member finished an ask in this
+        # notebook", the overlay chain's threshold signal. A late-bound
+        # callable rather than the service object because this coordinator is
+        # constructed before that service exists in the runtime — the same
+        # reason ``ask`` above is an accessor. ``None`` = not wired (unit-test
+        # doubles, older composition roots) and the call site degrades to a
+        # no-op: the feature never changes whether an answer is delivered.
+        self.note_ask_completed = note_ask_completed
 
     def start(
         self,
@@ -202,6 +211,12 @@ class AskExecutionCoordinator:
                     job_id=job_id, on_trace=on_trace, cancel_event=cancel_event,
                 )
                 self._finish(job_id, "done", answer_id=response.answer_id)
+                # Agentic Memory P1 (T5): AFTER the terminal job row, never
+                # inside ``_finish`` — that sequence is frozen, and this is not
+                # part of it. Only the ``done`` path signals: a cancelled or
+                # failed ask says nothing about how this person searches, and
+                # counting it would let a broken provider drive the threshold.
+                self._note_ask_completed(notebook_id, user_id)
                 events.put({"event": "final", "response": response.model_dump()})
             except AskCancelled:
                 self._finish(job_id, "cancelled")
@@ -218,6 +233,30 @@ class AskExecutionCoordinator:
             self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
             raise
         return events
+
+    def _note_ask_completed(self, notebook_id: str, user_id: str) -> None:
+        """Signal the member's overlay chain — fail-open, always.
+
+        ⚠ This runs INSIDE the worker's ``try``, whose ``except Exception``
+        finishes the job as *failed* and delivers an error event. An exception
+        escaping here would therefore turn a delivered answer into a reported
+        failure, which is why the swallow is here rather than only in the
+        service: the service is fail-open too, but the coordinator must not
+        depend on the collaborator it was handed being well-behaved.
+
+        Cost at the call site is one primary-key upsert; only when the
+        threshold is reached does it additionally hand a callable to the light
+        background pool (a queue put, never a blocking wait), so the terminal
+        event is not meaningfully delayed.
+        """
+        if self.note_ask_completed is None:
+            return
+        try:
+            self.note_ask_completed(notebook_id, user_id)
+        except Exception:  # noqa: BLE001 — an answer was delivered; keep it that way
+            self.event_log.logger.exception(
+                "agent profile ask notification failed for notebook %s", notebook_id
+            )
 
     def _finish(self, job_id: str, status: str, *, answer_id: str = "", error: str = "") -> None:
         """终态收尾的冻结次序:终态 job 行事务 → 注销 cancel_event →

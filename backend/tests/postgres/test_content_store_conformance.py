@@ -500,6 +500,65 @@ def test_ask_and_report_state_shapes_match_persisted_golden(content_harness):
     assert cancelled["content_md"] == "# State"
 
 
+def test_recent_user_ask_traces_scopes_to_the_reading_member(content_harness):
+    """Agentic Memory P1 (T5): the overlay chain's ONE read, on PostgreSQL.
+
+    ⚠ This is a privacy boundary, not an audit filter — the result feeds blocks
+    only the reading member can see, so a foreign row would be summarised into
+    them with no error anywhere. ``created_by = %s`` is written into BOTH
+    statements (``test_agent_profile_isolation_guard.py`` pins that statically
+    in both backends); this pins that PostgreSQL actually honours it, and that
+    it projects the SAME narrow shape SQLite does — this backend hands the
+    shared projection a ``jsonb``-decoded dict where SQLite hands it TEXT, and
+    an understanding block whose contents depended on the database would be a
+    long way from obvious.
+    """
+    mark = "%s"
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at,username,password_hash,password_salt,password_iterations) "
+            f"VALUES ({','.join([mark] * 11)})",
+            ("user-other", "other@example.test", "Other", "user", "active",
+             NOW, NOW, "o00123456", "", "", 0),
+        )
+    mine, _conv = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="mine?"), "reasoning", "user-content"
+    )
+    theirs, _conv2 = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="theirs?"), "reasoning", "user-other"
+    )
+    content_harness.ask.append_trace(
+        "nb-content", mine,
+        {"step_type": "retrieve", "summary": "mine step",
+         "duration_ms": 11, "detail": {"count": 0, "error": "internal text"}},
+        "user-content",
+    )
+    content_harness.ask.append_trace(
+        "nb-content", theirs,
+        {"step_type": "retrieve", "summary": "their step", "detail": {"count": 3}},
+        "user-other",
+    )
+
+    rows = content_harness.ask.recent_user_ask_traces(
+        "nb-content", "user-content", job_limit=40, step_limit=600
+    )
+
+    assert [row["question"] for row in rows] == ["mine?"]
+    assert rows[0]["job_id"] == mine
+    # Projected, not passed through: no ``error`` text, no other detail keys.
+    assert rows[0]["steps"] == [
+        {"step_type": "retrieve", "summary": "mine step",
+         "duration_ms": 11, "count": 0}
+    ]
+    assert content_harness.ask.recent_user_ask_traces(
+        "nb-content", "user-other", job_limit=40, step_limit=600
+    )[0]["job_id"] == theirs
+    assert content_harness.ask.recent_user_ask_traces(
+        "nb-content", "user-nobody", job_limit=40, step_limit=600
+    ) == []
+
+
 def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     content_harness,
 ):

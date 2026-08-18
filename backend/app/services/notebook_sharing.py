@@ -10,6 +10,7 @@ from typing import Callable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
 from app.repositories.ports import (
+    AgentProfileStorePort,
     NotebookTooLargeToCopyError,
     RepositoryDatabasePort,
     SharingStorePort,
@@ -766,6 +767,7 @@ class NotebookSharingService:
         summaries: NotebookSummaryQuery,
         database: RepositoryDatabasePort,
         copy_stats: Callable[[str], dict],
+        profiles: "AgentProfileStorePort | None" = None,
     ) -> None:
         self._store = store
         self._copies = copies
@@ -773,6 +775,12 @@ class NotebookSharingService:
         self._summaries = summaries
         self._database = database
         self._copy_stats = copy_stats
+        # Agentic Memory P1 (T5): the member's private "understanding" overlay
+        # for this notebook. Losing access is the one event that makes those
+        # blocks orphaned data, so removal cleans them up here. ``None`` = not
+        # wired (older composition roots / test doubles): membership removal
+        # must never fail because of it.
+        self._profiles = profiles
 
     # ---------------------------------------------------------------- share
     def share_notebook(self, notebook_id: str) -> dict:
@@ -955,9 +963,55 @@ class NotebookSharingService:
         return self._store.add_member(notebook_id, user_id)
 
     def remove_member(self, notebook_id: str, user_id: str) -> None:
-        return self._store.remove_member(notebook_id, user_id)
+        """Drop the membership row, then discard that member's private
+        understanding overlay for this notebook.
+
+        Agentic Memory P1 (T5). The blocks are derived ENTIRELY from that
+        person's own use of this library, so the moment they lose access the
+        rows are orphaned data about a notebook they can no longer open — and
+        if access is ever granted again, starting from a blank slate is the
+        correct behaviour, not a regression.
+
+        This is defence in depth, not the access control: reading is already
+        gated (injection takes an explicit owner, the API reads through the
+        notebook read guard), so a row that outlived a removal would not be
+        exposed. The physical delete is what makes "revoked" also mean "gone".
+
+        Order matters — membership first. If the clear fails, the removal has
+        still happened (an access change must never depend on a cleanup), and
+        the read-side gate covers the leftover rows. The reverse order could
+        delete a live member's notes and then leave them a member.
+
+        The SHARED base is untouched by construction: ``clear_all`` scopes to
+        one ``owner_id``, and ``user_id`` here is never the ``''`` sentinel.
+        """
+        self._store.remove_member(notebook_id, user_id)
+        self._clear_member_profile(notebook_id, user_id)
+
+    def _clear_member_profile(self, notebook_id: str, user_id: str) -> None:
+        if self._profiles is None or not user_id:
+            return
+        try:
+            self._profiles.clear_all(notebook_id, user_id)
+        except Exception:  # noqa: BLE001 — access change already committed
+            _log.exception(
+                "failed to clear agent profile overlay for notebook %s",
+                notebook_id,
+            )
 
     def kick_all_members(self, notebook_id: str) -> None:
+        """Drop every membership row for this notebook.
+
+        ⚠ Deliberately does NOT clear the removed members' overlays, and the
+        reason is that it cannot do so honestly: the store method removes the
+        rows in one statement, so this layer has no list of who was removed,
+        and reconstructing one with a read-then-delete would be racing the very
+        rows it is deleting. Those blocks stay unreadable through the read-side
+        gate (identical to the ``remove_member`` case before its clear runs),
+        and rejoining the notebook is what makes them visible again — which is
+        the same person's own notes, so that is correct rather than a leak.
+        The single-member path is the one users actually take, and it cleans up.
+        """
         return self._store.kick_all_members(notebook_id)
 
     def list_members(self, notebook_id: str) -> list:
