@@ -164,18 +164,32 @@ Two in-group levels plus the notebook owner:
 | Open the notebook, read sources/graph, ask questions (conversations stay per-asker), keep own Memory | ✓ | ✓ | ✓ |
 | Create **their own** deep report in the notebook (counts toward their own usage; invisible to others) | ✓ | ✓ | ✓ |
 | Mount the notebook as a reference library of their own notebook | ✓ | ✓ | ✓ |
-| Add/delete/re-parse sources, trigger graph and retrieval index builds | | P2 | ✓ |
-| Manage authorization edges, rename, graph-schema overrides | | P2 | ✓ |
+| Add/delete/re-parse sources, trigger graph and retrieval index builds | | ✓ | ✓ |
+| Manage authorization edges, rename, graph-schema overrides | | ✓ | ✓ |
+| Mount configuration, `share_token` link sharing (unsharing also drops all read-only members) | | | ✓ |
 | Delete the notebook, transfer ownership | | | ✓ |
 
-The two P2 cells are the deliberate P1 boundary: a `group_admins` edge can be
-stored and its `admin` role is already in the enum, but P1 consumes only the
-**read** meaning of an edge (any live edge is at least `viewer`). The share UI
-therefore issues only the `(group, viewer)` row — emitting a `(group_admins,
-admin)` row now would advertise a permission that has no effect yet. Notebook
-write guards stay owner-only, and the **Agent/MCP surface is untouched**:
-`sources:write` / `sources:delete` / `maintenance:execute` remain owner-only, so
-group admin authority exists in the browser UI only.
+P2 delivers those two cells. Content-management capabilities (source add/delete/
+re-parse, build triggers, knowhow/knowledge-governance/command-catalog writes) and
+`notebook:manage` (rename + grant-edge management) now resolve to the **admin
+tier** — owner ∪ an effective `role='admin'` grant edge (predicate definition point
+`access_sql.NOTEBOOK_ADMIN_SQL`, which reuses the read predicate's restricted three
+arms plus `role='admin'` and excludes `everyone`). A group admin can therefore
+manage content and sharing through the browser. The share dialog gains a "group
+admins may manage this notebook" checkbox accordingly: ticking it appends a
+`(group_admins, admin)` edge beside `(group, viewer)`; unsharing removes both
+same-group rows together, and the share list folds them into one entry marked with
+management rights. **But two owner-only capabilities deliberately do not flip**:
+`notebook:delete` (deleting a whole library, un-revocable by the owner) and
+`notebook:configure` (mount configuration + `share_token` link sharing) stay owner
+— see "Mount configuration and link sharing stay owner-only" below. **The Agent/MCP
+surface is also untouched**: `sources:write` / `sources:delete` /
+`maintenance:execute` remain owner-only — a long-lived token is a separate
+credential whose owner may have been granted admin long after it was issued, and
+the MCP write tools' blast radius (deleting documents) is what that owner gate was
+created for. The browser HTTP surface widened to admin while the Agent token surface
+did not; that is a deliberate divergence, not an oversight, so group-admin write
+authority exists in the browser UI only.
 
 Administrators additionally hold an **operations bypass on the group dimension**
 — they may read any group's detail and manage any group's members and edges
@@ -192,8 +206,8 @@ notebook-dimension read or write guard.
 
 ### Endpoints
 
-Fourteen endpoints in `group_routes.py`, plus one read-only addition on the
-notebook router.
+Twenty endpoints in `group_routes.py` (including the six P2 approval-flow
+endpoints), plus one read-only addition on the notebook router.
 
 | Endpoint | Who | Notes |
 | --- | --- | --- |
@@ -211,7 +225,13 @@ notebook router.
 | `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | notebook-side revocation |
 | `GET /groups/{id}/shared-notebooks` | group admin | "libraries shared with this group" |
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | group admin | group-side revocation; removes every edge pointing at this group |
-| `GET /notebooks/{id}/share` | `notebook:manage` | **new**, read-only; see below |
+| `POST /notebooks/{id}/share-requests` | `notebook:manage` **and** target-group member | **P2** submit a share request; idempotent (an in-flight request returns the existing pending row, not a 409) |
+| `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** the requester's own requests on this library (dialog echoes pending/rejected) |
+| `DELETE /notebooks/{id}/share-requests/{rid}` | `notebook:manage` | **P2** withdraw a **pending** request (whole-row delete, not a third status); already-decided is 409, missing is 404 |
+| `GET /groups/{id}/share-requests` | group admin | **P2** the review queue: pending requests to share into this group |
+| `POST /groups/{id}/share-requests/{rid}/approve` | group admin | **P2** write the `(group, viewer)` edge and mark approved in one transaction; idempotent if already shared; missing/decided is 404 |
+| `POST /groups/{id}/share-requests/{rid}/reject` | group admin | **P2** mark rejected, write no edge; the requester may re-submit for the same (library, group) |
+| `GET /notebooks/{id}/share` | `notebook:manage` | read-only; see below |
 
 Several boundaries are worth stating explicitly:
 
@@ -254,6 +274,76 @@ Several boundaries are worth stating explicitly:
   key, so a database merge can resurrect them; `scripts/merge_dbs.py` sweeps
   those, and the label is what lets a library owner understand and delete any
   that survive.
+
+### Member-contribution approval flow (P2)
+
+A plain member who wants to share **their own** library with a group cannot issue
+the grant directly (they are only a plain member of that group), so they go through
+"request → group-admin approval". **Watch the direction axis**: the requester holds
+manage rights on the library (owner/admin) but is only a **plain member** of the
+target group; a group admin sharing into a group **they administer** always uses the
+existing grants endpoint and never touches this table.
+
+- The request is a **double condition**: manage rights on the library (enforced by
+  the `notebook:manage` dependency) **and** membership of the target group (checked
+  in the endpoint body as a non-empty `user_group_role`; a plain member is enough).
+  A non-member gets the same **404** as "the group does not exist" (group visibility
+  rule — the existence of the group is not disclosed).
+- The state machine is **one-directional** `pending → approved/rejected`.
+  **Withdrawal is not a third status**: the requester `DELETE`s a **pending** request
+  as a whole row. An approved/rejected request is a settled decision and withdrawing
+  it is meaningless — the store decides on exact status, an already-decided withdrawal
+  maps to **409**, and a request that does not exist (or does not belong to this
+  library) is 404. `decided_by`/`decided_at` therefore stay purely "the group admin's
+  decision" and withdrawal writes neither.
+- **Approval writes the `(group, viewer)` edge and marks the request `approved` in
+  one write transaction**; it is **idempotent** when already shared (same library,
+  same group) — approval never fails because the edge already exists, which would
+  strand an un-approvable request. Concurrent double-review is blocked by the store's
+  row lock plus exact status matching. Rejection only marks `rejected` and writes no
+  edge; the requester sees "rejected" and may **re-submit** for the same (library,
+  group) (a `rejected` row does not occupy the `WHERE status='pending'` partial unique
+  index).
+- **Idempotent submission**: when a pending request already exists for this
+  (library, group), the create endpoint **returns that existing row** rather than a
+  409 — a requester refreshing the page and re-submitting is a common action that
+  should not raise an error (`uq_share_requests_one_pending` caps one in-flight
+  request).
+- A request grants no permission: `pending` enters no decision predicate, and the
+  grant table stays purely live grants. Deleting the group or the library carries the
+  requests away through FK CASCADE. The bell: a group admin's pending-request count
+  enters the pending-actions center (reusing `pending_actions` with the same read
+  predicate).
+- `status` is exact-matched against `pending`/`approved`/`rejected` and never used
+  as `!=` for a "decided" test; `decided_at` is only ever written as SQL `NULL` or an
+  ISO timestamp, never the empty string (it is this table's only nullable time column
+  entering the forward shadow, and `''` would type-error PostgreSQL's `timestamptz`
+  and poison the replication channel).
+
+### Mount configuration and link sharing stay owner-only (P2)
+
+P2 flipped content management to group admins, but **mount configuration and
+`share_token` link sharing** deliberately stay with the owner — they configure the
+owner's own retrieval scope and outward disposal, do not transfer with content
+management, and get their own capability cell `notebook:configure` (owner-only, not
+folded into `notebook:manage`). Two hard reasons:
+
+- **Mount configuration**: `mount_sql`'s "same-owner candidate" is resolved by the
+  *mounted* library's owner. A group admin who could edit mounts would enumerate the
+  owner's **never-shared** private libraries through `GET /notebooks/{id}/mountable`,
+  `PUT .../bases` them into this shared library, and read them whole through the
+  active-notebook proxy endpoints — a privilege-escalation read channel.
+- **Link sharing**: `share_token` can mint a sign-in-free public link on the owner's
+  behalf that lets anyone outside the group copy the whole library. In particular
+  `DELETE /notebooks/{id}/share` (unsharing the link) **also drops every read-only
+  member** (`clear_share` clears `notebook_members`), a blast radius beyond content
+  management, so it deliberately stays under `notebook:configure`.
+
+So "a group admin can manage sharing" means managing **grant edges**, **not** touching
+mounts or links: `notebook:manage` covers rename (`PATCH /notebooks/{id}`) plus
+grant-edge management (`GET`/`POST`/`DELETE /notebooks/{id}/grants`), while
+`notebook:configure` covers mounts (`bases` / `mountable`) and link sharing (`share` /
+`mounted-by-count`).
 
 ### Read access implies mountability, and the borrowed-mount gate
 
@@ -405,12 +495,21 @@ Report creation follows **read** access, and reports are isolated **per creator*
 - **Group name: 120 characters. Group description: 1,000 characters.** Both are
   user-edited data, so an over-limit value is **explicitly rejected** and never
   silently truncated.
-- **Three list endpoints are unpaginated** — the member roster in `GET
-  /groups/{id}`, the full inventory under `?scope=all`, and `GET
-  /notebooks/{id}/grants`. This is a **settled trade-off, not an omission**: the
-  design targets at most a few hundred people per group (decision 11), a scale at
-  which returning everything in one response holds. It is written down here so
+- **The list endpoints are unpaginated** — the member roster in `GET
+  /groups/{id}`, the full inventory under `?scope=all`, `GET
+  /notebooks/{id}/grants`, and the two P2 approval-flow lists (`GET
+  /groups/{id}/share-requests`, the group's pending review queue, and `GET
+  /notebooks/{id}/share-requests`, the requester's own echo). This is a **settled
+  trade-off, not an omission**: the design targets at most a few hundred people per
+  group (decision 11), a scale at which returning everything in one response holds;
+  the request lists carry only **pending** rows and at most one in-flight per
+  (library, group) (see below), so they are smaller still. It is written down here so
   nobody later reads "no pagination" as a bug.
+- **One pending request per pair.** `uq_share_requests_one_pending` caps a single
+  in-flight request per (library, group). The create endpoint hitting it **returns
+  the existing pending row idempotently**, not a 409: a requester refreshing the page
+  and re-submitting is a common action. This is a **product-behavior contract, not a
+  quota**, recorded here because it bounds the request lists' size.
 - **The 群组 partition amplifies a known N+1**, kept as registered debt.
   `granted_notebook_rows` is a single query, but every row then goes through
   `NotebookSummaryQuery.from_row`, which issues several count/mount queries per
@@ -1269,8 +1368,8 @@ state without landing a row when it CONFLICTS with an existing row in the
 target table; a candidate a reviewer simply does not want otherwise had no
 route out at all. `.../command-catalog/dismiss` is that route: the review
 panel's "跳过所选" / "跳过全部待审阅" actions, mirroring apply's own selection
-contract, per-notebook catalog lock and owner-only authorization, but touching
-no knowhow table at all.
+contract, per-notebook catalog lock and `catalog:write` authorization (owner ∪
+group admin since P2), but touching no knowhow table at all.
 
 **A reparse invalidates the run.** Each job records the **source generation**
 it was created against (the single landing instant every element of that source
@@ -1585,7 +1684,7 @@ Key local beta APIs:
 - `POST /api/notebooks/{id}/sources` — multipart file upload (async parse/extract). Each file is bounded while the multipart stream is spooled and is rejected with 413 above `SOURCE_UPLOAD_MAX_MB` (default 50 MiB); each request is also rejected above 20 files. The browser reads both guards above, blocks its file inputs until they are known, rejects oversized selections immediately, and rechecks staged files before sending. Each accepted file lands on disk as `{source_id}_{sanitized client name}`; that component is clamped to the filesystem's 255-byte path-component limit (stem clipped on UTF-8 bytes, extension preserved — a browser may legally submit a 255-byte file name, which composed with the 37-byte id prefix would otherwise exceed the cap on ext4/XFS/NTFS and fail the upload). Only the derived disk name is shortened; the stored file name and title keep the client's value whole
 - `GET /api/sources/{id}`, `DELETE /api/sources/{id}`, `POST /api/sources/{id}/parse`, `GET /api/sources/{id}/elements`, `GET /api/sources/{id}/elements-page?offset=&limit=&anchor_element_id=` — owner-or-member scope, keyed on the source's own notebook. The paged reader returns `{items,total_count,offset,limit}`, caps `limit` at 100, and moves `offset` to the page containing a valid anchor.
 - `GET /api/notebooks/{id}/sources/{source_id}/elements-page?offset=&limit=&anchor_element_id=` — the bounded source-detail reader under active-notebook participant authorization. The browser uses this endpoint; the proxied unpaged element endpoint remains backward compatible.
-- `GET /api/notebooks/{id}/sources/{source_id}`, `GET /api/notebooks/{id}/sources/{source_id}/elements` — the same two reads, authorized on the **active** notebook in the path and resolved inside its valid participant set (itself plus the reference libraries it has effectively mounted). Mounting a reference library never grants direct membership in it, so the browser keeps filtering on the active notebook only and the backend proxies the read internally; the participant set is re-evaluated per request, so a demoted/transferred/mid-copy library or an unmounted edge returns 404 immediately. Same-notebook sources take this identical path (the participant set always starts with the active notebook), and the response reports the source's real owning notebook so the client can render it read-only. Writes are deliberately not proxied — re-parse and delete stay owner-only on `/api/sources/{id}`. The detail response is a narrower model than `/api/sources/{id}`'s: it drops `file_path` and the raw `error_message` (both can carry server-side absolute paths) and reports a `parse_failed` boolean instead; a cross-library source of a hidden synthetic type (`memory`/`knowhow` projection rows, which the collection map deliberately counts) is refused outright
+- `GET /api/notebooks/{id}/sources/{source_id}`, `GET /api/notebooks/{id}/sources/{source_id}/elements` — the same two reads, authorized on the **active** notebook in the path and resolved inside its valid participant set (itself plus the reference libraries it has effectively mounted). Mounting a reference library never grants direct membership in it, so the browser keeps filtering on the active notebook only and the backend proxies the read internally; the participant set is re-evaluated per request, so a demoted/transferred/mid-copy library or an unmounted edge returns 404 immediately. Same-notebook sources take this identical path (the participant set always starts with the active notebook), and the response reports the source's real owning notebook so the client can render it read-only. Writes are deliberately not proxied — re-parse and delete stay direct operations on `/api/sources/{id}` under the `sources:write` capability (owner ∪ group admin since P2). The detail response is a narrower model than `/api/sources/{id}`'s: it drops `file_path` and the raw `error_message` (both can carry server-side absolute paths) and reports a `parse_failed` boolean instead; a cross-library source of a hidden synthetic type (`memory`/`knowhow` projection rows, which the collection map deliberately counts) is refused outright
 - `GET /api/notebooks/{id}/assets/{asset_id}` — image assets (knowhow cell images, source figures) under the same participant-set rule: the notebook in the path is the viewer's active notebook, the asset declares its own owning notebook, and any asset outside the active notebook's valid participant set is 404. An asset served from a mounted library is `Cache-Control: no-store` so unmounting takes effect immediately; assets of the active notebook itself keep the long private cache
 - Command catalog: `GET .../sources/{sid}/command-catalog/preview` (zero-model cost estimate), `POST .../sources/{sid}/command-catalog` (start; 409 when a job is already active for that source, or the previous run still has unreviewed candidates), `GET .../command-catalog/job`, `POST .../command-catalog/cancel`, `GET .../command-catalog/candidates?job_id=&state=&cursor=&limit=` (keyset page + per-state counts), `POST .../command-catalog/apply` body `{candidate_ids}` or `{all_pending}` (creates or appends to `命令目录：<source>`, never overwrites an existing row), `POST .../command-catalog/dismiss` body `{candidate_ids}` or `{all_pending}` (marks candidates skipped without writing any table — the only way to clear the unreviewed-candidates guard for a candidate that does not conflict — see [Command catalog](#command-catalog-tool-manuals))
 - `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`

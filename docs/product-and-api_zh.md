@@ -155,15 +155,23 @@ notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视�
 | 打开库、看来源/图谱、提问（会话按提问者隔离）、存自己的 Memory | ✓ | ✓ | ✓ |
 | 在库内创建**自己的**深度报告（计入自己的用量；他人不可见） | ✓ | ✓ | ✓ |
 | 把本库挂为自己 notebook 的参考库 | ✓ | ✓ | ✓ |
-| 添加/删除/重新解析来源，触发图谱与检索索引构建 | | P2 | ✓ |
-| 管理授权边、改名、图谱 Schema 覆盖 | | P2 | ✓ |
+| 添加/删除/重新解析来源，触发图谱与检索索引构建 | | ✓ | ✓ |
+| 管理授权边、改名、图谱 Schema 覆盖 | | ✓ | ✓ |
+| 挂载配置、`share_token` 链接分享（撤链接连带踢只读成员） | | | ✓ |
 | 删库、转让 owner | | | ✓ |
 
-两个 P2 格子是刻意的 P1 边界：`group_admins` 边可以存下、`admin` 角色也已经在枚举里，
-但 P1 只消费边的**读**含义（任何生效边都 ≥ viewer）。因此分享界面**只发** `(group,
-viewer)` 一条边——现在发出 `(group_admins, admin)` 等于宣告一个当前毫无效果的权限。
-笔记本写守卫保持 owner-only；**Agent/MCP 面一个字不动**：`sources:write` /
-`sources:delete` / `maintenance:execute` 仍是 owner-only 红线，组管理员的权限只在浏览器
+P2 兑现了这两格。内容管理能力（来源增删/重解析、构建触发、knowhow/知识治理/命令目录
+写）以及 `notebook:manage`（改名 + 授权边管理）现在解析到 **admin 档**——owner ∪
+`role='admin'` 的有效授权边（谓词唯一定义点 `access_sql.NOTEBOOK_ADMIN_SQL`，它复用读权的
+受限三臂外加 `role='admin'` 并排除 `everyone`）。组管理员因此能经浏览器管理内容与共享。
+分享界面据此新增「组管理员可管理这本笔记本」勾选：勾上就在 `(group, viewer)` 之外追加一条
+`(group_admins, admin)` 边；撤销共享时同组两行一起删，共享清单把两行折叠成一条并标注管理权。
+**但两类 owner 专属能力刻意不翻**：`notebook:delete`（删库，爆炸半径整本库且 owner 不可
+撤销）与 `notebook:configure`（挂载配置 + `share_token` 链接分享）恒 owner——见下文
+「挂载配置与链接分享恒 owner」。**Agent/MCP 面也一个字不动**：`sources:write` /
+`sources:delete` / `maintenance:execute` 仍是 owner-only 红线——长期 token 是独立凭据，其
+owner 可能在签发后很久才被授管理权，MCP 写工具删文档的爆炸半径正是这道 owner 门当初要防的。
+浏览器 HTTP 面已放宽 admin、Agent token 面没有，是刻意分歧不是疏漏，组管理员的写权只在浏览器
 界面生效。
 
 系统管理员另有**群组维度的运维旁路**——可读任意组详情、可管理任意组的成员与授权边，
@@ -176,7 +184,7 @@ viewer)` 一条边——现在发出 `(group_admins, admin)` 等于宣告一个�
 
 ### 端点面
 
-`group_routes.py` 里 14 个端点，另加笔记本 router 上一个只读端点。
+`group_routes.py` 里 20 个端点（含 P2 审批流 6 个），另加笔记本 router 上一个只读端点。
 
 | 端点 | 谁可以调 | 说明 |
 | --- | --- | --- |
@@ -194,7 +202,13 @@ viewer)` 一条边——现在发出 `(group_admins, admin)` 等于宣告一个�
 | `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | 笔记本维度撤销 |
 | `GET /groups/{id}/shared-notebooks` | 组管理员 | 「共享给本组的知识库」清单 |
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | 组管理员 | 组维度撤销，删掉指向本组的**全部**边 |
-| `GET /notebooks/{id}/share` | `notebook:manage` | **新增**，只读；见下 |
+| `POST /notebooks/{id}/share-requests` | `notebook:manage` **且**目标组成员 | **P2** 提交共享申请；幂等（撞在飞申请返回既有 pending，不是 409） |
+| `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** 请求者本人对本库发起过的申请（弹窗回显待审批/已驳回） |
+| `DELETE /notebooks/{id}/share-requests/{rid}` | `notebook:manage` | **P2** 撤回**待审批**申请（整行删，不是第三个状态）；已决定 409、不存在 404 |
+| `GET /groups/{id}/share-requests` | 组管理员 | **P2** 审核队列：共享给本组的待审批申请清单 |
+| `POST /groups/{id}/share-requests/{rid}/approve` | 组管理员 | **P2** 同一写事务写 `(group, viewer)` 边并标 approved；已共享幂等；不存在/已决定 404 |
+| `POST /groups/{id}/share-requests/{rid}/reject` | 组管理员 | **P2** 标 rejected、不写边；申请者可对同库同组重新发起 |
+| `GET /notebooks/{id}/share` | `notebook:manage` | 只读；见下 |
 
 有几条边界必须写明：
 
@@ -224,6 +238,48 @@ viewer)` 一条边——现在发出 `(group_admins, admin)` 等于宣告一个�
   删组事务会清掉这类边，但 `principal_id` 没有外键，合库仍可能复活它们
   （`scripts/merge_dbs.py` 负责清扫）；有了这个标注，库主才看得懂残留的那条是什么、
   知道可以删。
+
+### 成员贡献审批流（P2）
+
+普通成员想把**自己的**库共享给一个组，但他只是那个组的普通成员、直接发不了授权边——于是走
+「申请 → 组管理员审批」。**方向轴要看清**：请求者是这本库的 manage 权（owner/admin）持有者、
+对目标组**只是普通成员**；组管理员分享进**自己管理**的组永远走既有 grants 端点、不经这张表。
+
+- 申请是**双重条件**：对库有 manage（依赖层 `notebook:manage` 挡）＋是目标组成员（端点体内查
+  `user_group_role` 非空，普通成员即可）。非成员与「组不存在」同为 **404**（群组可见性口径，不
+  泄露组的存在性）。
+- 状态机 `pending → approved/rejected` **单向**。**撤回不是第三个状态**：申请者对**待审批**申请走
+  `DELETE` 整行删；已批准/已驳回是既成的决定，撤回它没有意义——store 按精确状态判定，已决定的撤回
+  请求映射成 **409**，根本没有这条（或不属于这本库）则 404。`decided_by`/`decided_at` 因此纯粹是
+  「组管理员做出的决定」，撤回不写这两列。
+- **批准在同一写事务**里插 `(group, viewer)` 授权边并把申请标 `approved`；已共享（同库同组已有边）
+  时**幂等**——不因「已经共享过」让批准失败（那会留下一条永远批不掉的申请）。并发双审由 store 的
+  行锁＋精确状态匹配挡住。驳回只标 `rejected`、不写任何边，申请者可看到「已驳回」并对同库同组**重新
+  发起**（`rejected` 不占 `WHERE status='pending'` 的那条部分唯一索引）。
+- **幂等提交**：同库同组已有一条待审批申请时，创建端点**返回既有那条**而不是报 409——申请者刷新页面
+  重复点提交是常见操作，不该弹错误（`uq_share_requests_one_pending` 保证同一 (库, 组) 至多一条在飞）。
+- 申请不授予任何权限：`pending` 不进任何判定谓词，grants 表恒为纯生效授权。删组/删库经 FK CASCADE
+  带走申请。铃铛：组管理员的待审批申请数进待确认中心（复用 `pending_actions`，读谓词同口径）。
+- `status` 一律精确匹配 `pending`/`approved`/`rejected` 三值，绝不用 `!=` 当「已决定」判据；`decided_at`
+  只写 SQL `NULL`/ISO 时间戳、绝不写空串（它是本表唯一进入 shadow 正向复制的可空时间列，空串会让 PG 的
+  `timestamptz` 类型报错并 poison 整条通道）。
+
+### 挂载配置与链接分享恒 owner（P2）
+
+P2 把内容管理权翻给了组管理员，但**挂载配置与 `share_token` 链接分享**刻意留在 owner——它们是 owner
+对本库检索范围与对外处置的配置，不随内容管理权转移，在能力表里单列一格 `notebook:configure`（恒
+owner，不并进 `notebook:manage`）。两条硬理由：
+
+- **挂载配置**：`mount_sql` 的「同 owner 候选」是按被挂库 owner 解析的。组管理员若能改挂载，就能经
+  `GET /notebooks/{id}/mountable` 枚举出库主**从未共享**的全部私有库名、`PUT .../bases` 把它们挂进这本
+  共享库，再经 active-notebook 代理端点读到全文——一条越权读通道。
+- **链接分享**：`share_token` 能替库主铸一条对外免登录链接，让组外任意人整本 copy。尤其
+  `DELETE /notebooks/{id}/share`（撤链接分享）会**连带踢掉全部只读成员**（`clear_share` 清
+  `notebook_members`），爆炸半径超出内容管理，刻意留在 `notebook:configure`。
+
+所以「组管理员能管共享」= 能管**授权边**（grants），**不**等于能动挂载或链接分享：`notebook:manage`
+覆盖改名（`PATCH /notebooks/{id}`）＋授权边管理（`GET`/`POST`/`DELETE /notebooks/{id}/grants`），
+`notebook:configure` 覆盖挂载（`bases` / `mountable`）与链接分享（`share` / `mounted-by-count`）。
 
 ### 读权 ⇒ 可挂载，以及借入挂载的「未共享门」
 
@@ -328,9 +384,14 @@ token 时 `share_token` 为空串，并且**不计算** copy-stats：那是一�
 
 - **组名 120 字符，组说明 1000 字符。** 两者都是用户编辑的数据，所以超限**明确拒绝**，
   绝不静默截断。
-- **三个清单端点无分页**——`GET /groups/{id}` 的成员清单、`?scope=all` 的全量群组、
-  `GET /notebooks/{id}/grants`。这是**已定取舍而非遗漏**：规模按单组最多几百人设计
-  （决策 11），一次全量返回在这个量级内成立。写在这里是免得将来有人把「没分页」读成 bug。
+- **清单端点无分页**——`GET /groups/{id}` 的成员清单、`?scope=all` 的全量群组、
+  `GET /notebooks/{id}/grants`，以及 P2 审批流的两个清单（`GET /groups/{id}/share-requests`
+  的组内待审批队列、`GET /notebooks/{id}/share-requests` 的本人申请回显）。这是**已定取舍而非
+  遗漏**：规模按单组最多几百人设计（决策 11），一次全量返回在这个量级内成立；申请清单只含**待审批**
+  行、且每个 (库, 组) 至多一条在飞（见下），量级更小。写在这里是免得将来有人把「没分页」读成 bug。
+- **防重复 pending 一条**——`uq_share_requests_one_pending` 保证同一 (库, 组) 至多一条在飞申请。
+  创建端点撞它时**幂等返回既有 pending 行**，不是 409：申请者刷新页面重复点提交是常见操作。这是**产品
+  行为契约而非配额**，写在此处是因为它决定了申请清单的量级上限。
 - **「群组」分区把一个已知的 N+1 放大了**，作为已登记的债务保留。`granted_notebook_rows`
   只是一条查询，但每行都要过 `NotebookSummaryQuery.from_row`，而它逐库发若干次计数/挂载
   查询——约 7 条语句/库，500 本组授权库量级即约 3500 条。「自有库」与「加入的库」两段是
@@ -917,7 +978,7 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 拦截提示写的就是「确认或跳过」。`apply` 只在候选与目标表冲突时才会把它挪出 `candidate`
 态而不落库；一条审阅者单纯不想要、又不冲突的候选此前没有任何路可走。
 `.../command-catalog/dismiss` 就是这条路——审阅面板里「跳过所选」/「跳过全部待审阅」
-两个动作，选择契约、并发锁（每个笔记本一把的目录锁）与 owner-only 权限都镜像 `apply`，
+两个动作，选择契约、并发锁（每个笔记本一把的目录锁）与 `catalog:write` 权限（P2 起 owner∪组管理员）都镜像 `apply`，
 只是完全不碰 Knowhow 表。
 
 **来源被重新解析之后，这一轮的结果就作废了。** 每个任务在创建时记下当时的**来源代次**
@@ -1225,7 +1286,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `POST /api/notebooks/{id}/sources` —— multipart 文件上传（异步解析/抽取）。每个文件在 multipart 流写入临时 spool 时即受限，超过 `SOURCE_UPLOAD_MAX_MB`（默认 50 MiB）返回 413；每次请求超过 20 个文件也返回 413。浏览器读取上面的两个护栏，取得前禁用文件输入，选择时即时拒绝超限文件，并在发送前复查暂存文件。每个被接受的文件以 `{source_id}_{净化后的客户端文件名}` 落盘；该组件整体压进文件系统 255 字节的单组件上限（按 UTF-8 字节截断主干、保留扩展名——浏览器允许客户端提交最长 255 字节的文件名，加上 37 字节的 id 前缀会在 ext4/XFS/NTFS 上超限导致上传失败）；被压缩的只有派生的磁盘名，存储的文件名与标题保持客户端原值
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`、`GET /api/sources/{id}/elements-page?offset=&limit=&anchor_element_id=` —— owner∪成员口径，按来源自己所属的笔记本判权限。分页读取返回 `{items,total_count,offset,limit}`，`limit` 最大 100；anchor 有效时会把 `offset` 调整为包含目标元素的页。
 - `GET /api/notebooks/{id}/sources/{source_id}/elements-page?offset=&limit=&anchor_element_id=` —— 采用当前活跃 notebook 参与集授权的有界来源详情读取。浏览器使用该端点；代理全量 element 端点继续保留向后兼容。
-- `GET /api/notebooks/{id}/sources/{source_id}`、`GET /api/notebooks/{id}/sources/{source_id}/elements` —— 同样两个读取，但权限按路径里的**当前活跃**笔记本判，目标在它的有效参与集（自身 + 已生效挂载的参考库）内解析。挂载参考库不等于获得该库的直接成员权限，因此浏览器始终只用活跃笔记本过权限、由后端内部代理读取；参与集每次请求实时判定，被挂库降级/易主/深拷贝中或挂载被取消时当场 404。本库来源走的是同一条路径（参与集首项恒为活跃笔记本自身），响应如实返回来源真正所属的笔记本，供前端据此按只读渲染。写入刻意不代理——重新解析与删除仍是 `/api/sources/{id}` 上的 owner-only 操作。详情响应比 `/api/sources/{id}` 更窄：去掉 `file_path` 与原始 `error_message`（两者都可能带服务端绝对路径），改回一个如实的 `parse_failed` 布尔；跨库的隐藏合成源（memory/knowhow 投影行，集合地图刻意把它们算进作用域）直接拒绝
+- `GET /api/notebooks/{id}/sources/{source_id}`、`GET /api/notebooks/{id}/sources/{source_id}/elements` —— 同样两个读取，但权限按路径里的**当前活跃**笔记本判，目标在它的有效参与集（自身 + 已生效挂载的参考库）内解析。挂载参考库不等于获得该库的直接成员权限，因此浏览器始终只用活跃笔记本过权限、由后端内部代理读取；参与集每次请求实时判定，被挂库降级/易主/深拷贝中或挂载被取消时当场 404。本库来源走的是同一条路径（参与集首项恒为活跃笔记本自身），响应如实返回来源真正所属的笔记本，供前端据此按只读渲染。写入刻意不代理——重新解析与删除仍是 `/api/sources/{id}` 上受 `sources:write` 能力守卫（P2 起 owner∪组管理员）的直接操作。详情响应比 `/api/sources/{id}` 更窄：去掉 `file_path` 与原始 `error_message`（两者都可能带服务端绝对路径），改回一个如实的 `parse_failed` 布尔；跨库的隐藏合成源（memory/knowhow 投影行，集合地图刻意把它们算进作用域）直接拒绝
 - `GET /api/notebooks/{id}/assets/{asset_id}` —— 图片资产（knowhow 单元格图片、来源插图）适用同一条参与集规则：路径里的笔记本是查看者的活跃笔记本，资产自己声明所属笔记本，不在活跃笔记本有效参与集内的资产一律 404。经挂载库代理来的资产用 `Cache-Control: no-store`，取消挂载即刻生效；活跃笔记本自己的资产保持原有长缓存
 - 命令目录：`GET .../sources/{sid}/command-catalog/preview`（零模型调用的成本预告）、`POST .../sources/{sid}/command-catalog`（发起；该来源已有活跃任务、或上一轮还有候选没审阅完时 409）、`GET .../command-catalog/job`、`POST .../command-catalog/cancel`、`GET .../command-catalog/candidates?job_id=&state=&cursor=&limit=`（keyset 分页 + 各档计数）、`POST .../command-catalog/apply` body `{candidate_ids}` 或 `{all_pending}`（创建或追加「命令目录：<来源>」表，绝不覆盖已有行）、`POST .../command-catalog/dismiss` body `{candidate_ids}` 或 `{all_pending}`（把候选标记为已跳过，不写任何表——不冲突的候选唯一的放弃出口——见[命令目录](#命令目录工具手册)）
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`

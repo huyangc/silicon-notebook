@@ -240,7 +240,7 @@ Chinese counterparts are linked from the top of each split document.
 - Generated-question recall is deployment opt-in and defaults off; `shadow` records content-free comparison counts without changing results, while only explicit `on` may supplement a low-recall chunk result with original chunks.
 - In answer, report, and Memory Markdown a single `~` is a literal (ranges and approximations such as `7~5nm` or `~3GHz` render as typed); strikethrough must be written as GFM's `~~text~~`.
 - Memory is manual opt-in and creator-private.
-- Sharing is copy, read-only membership, or group sharing — not live collaborative editing. Group members may ask questions and write their own deep reports; content management stays with the owner.
+- Sharing is copy, read-only membership, or group sharing — not live collaborative editing. Group members may ask questions and write their own deep reports; group admins manage the shared library's content (sources, builds, grant edges), while mount configuration, link sharing, and deletion stay with the owner, and a plain member can request to contribute their own library to a group for admin approval.
 - Web/network source search remains a disabled future affordance.
 
 ## Documentation maintenance
