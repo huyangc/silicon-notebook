@@ -26,7 +26,7 @@ from app.repositories.lexical_query import (
     exact_probe_terms,
 )
 from app.services.agent_profile_block import (
-    render_profile_block, selected_profile_blocks,
+    render_profile_block, rendered_row_count,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE
@@ -2108,6 +2108,47 @@ class ReasoningRetriever:
                 self.ppr_retrieve, notebook_id, question)
 
         try:
+            # Agent 对这个库的已有理解(共享底座 + 本次提问者的覆盖层)。每 run 只
+            # 读一次,同一个字符串既进规划上下文、又进每一轮 reflect 的候选摘要
+            # 尾部。
+            #
+            # ⚠ 顺序刻意排在下面的集合地图**之前**:这里的 record() 是 run 进入
+            # try 块后的第一次记账。若排在地图构建之后,地图那次(若干次查询、
+            # 有界缓存但仍非零耗时)会被计进 profile 步自己的 duration_ms——而这
+            # 一步对应的其实只是一次 ≤10 行的主键前缀点查。排在前面让地图的构建
+            # 耗时改由它后面的下一步(plan,本来就是一次模型调用)吸收,不会污染
+            # profile 步的账目。
+            #
+            # 收窄口径与集合地图**刻意不同**:``_unsafe_scope_restricted()`` 为真时
+            # 地图必须清空(它承诺了一批本次枚举不到的集合),而理解块**照常注入**
+            # ——它不开任何检索通道、不是证据、不能被 [k] 引用,只影响措辞与查法,
+            # 收窄来源范围并不会让「这个库主要是工艺手册」这句话变得不成立。
+            #
+            # fail-open:读不到就当没有。但**不记 skip 步**——这与 memory 零命中记
+            # skip 的口径是分开的:那条 skip 承载的是一次 embedding 往返 + 向量
+            # 扫描的耗时账目,而这里是一次 ≤10 行的主键前缀点查,亚毫秒。每个还没
+            # 整理过的库(常态)每一轮都多一条「无」步是纯噪声。
+            profile_block = ""
+            if profile_wiring_active(self.settings, self.agent_profile):
+                try:
+                    blocks = self.agent_profile.read_blocks(
+                        notebook_id, self.profile_owner_id)
+                    profile_block = render_profile_block(blocks)
+                    if profile_block:
+                        record(TraceStep(
+                            step_type="profile",
+                            summary="带上对这个库的已有理解",
+                            detail={
+                                # 真正**渲染进** prompt 的行数,不是清空前候选的
+                                # 行数:整块 1200 字符硬顶可能把候选行整行截掉,
+                                # 按候选数计会在那种情况下高报(见
+                                # rendered_row_count 的 docstring)。
+                                "blocks": rendered_row_count(profile_block),
+                                "chars": len(profile_block)}))
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
+                    profile_block = ""
             # 集合地图:每 run 只建一次(计数走有界缓存,但仍是若干次查询),同一个
             # 字符串既进规划上下文、又进每一轮 reflect 的候选摘要尾部。
             # fail-open:地图建不出来时照常检索作答——它只是让模型「知道有多少」,
@@ -2125,39 +2166,6 @@ class ReasoningRetriever:
                         summary="跳过内容清点(暂时读不到各类条目数量)",
                         detail={"reason": "collection_map_unavailable",
                                 "error": str(exc)[:120]}))
-            # Agent 对这个库的已有理解(共享底座 + 本次提问者的覆盖层)。同样每
-            # run 只读一次,同一个字符串既进规划上下文、又进每一轮 reflect 的候选
-            # 摘要尾部。
-            #
-            # 收窄口径与集合地图**刻意不同**:``_unsafe_scope_restricted()`` 为真时
-            # 地图必须清空(它承诺了一批本次枚举不到的集合),而理解块**照常注入**
-            # ——它不开任何检索通道、不是证据、不能被 [k] 引用,只影响措辞与查法,
-            # 收窄来源范围并不会让「这个库主要是工艺手册」这句话变得不成立。
-            #
-            # fail-open 同款:读不到就当没有。但**不记 skip 步**——这与 memory 零
-            # 命中记 skip 的口径是分开的:那条 skip 承载的是一次 embedding 往返 +
-            # 向量扫描的耗时账目,而这里是一次 ≤10 行的主键前缀点查,亚毫秒。每个
-            # 还没整理过的库(常态)每一轮都多一条「无」步是纯噪声。
-            profile_block = ""
-            if profile_wiring_active(self.settings, self.agent_profile):
-                try:
-                    blocks = self.agent_profile.read_blocks(
-                        notebook_id, self.profile_owner_id)
-                    profile_block = render_profile_block(blocks)
-                    if profile_block:
-                        record(TraceStep(
-                            step_type="profile",
-                            summary="带上对这个库的已有理解",
-                            detail={
-                                # 真正进了 prompt 的条数,不是读回来的行数:清空过
-                                # 的块保留行但值为空,两者常常不等(见
-                                # selected_profile_blocks 的 docstring)。
-                                "blocks": len(selected_profile_blocks(blocks)),
-                                "chars": len(profile_block)}))
-                except AskCancelled:
-                    raise
-                except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
-                    profile_block = ""
             reviewed_all = list(dict.fromkeys(
                 str(query).strip() for query in (intent_queries or [])
                 if str(query).strip()

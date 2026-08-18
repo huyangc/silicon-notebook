@@ -37,9 +37,14 @@ PROFILE_LABEL_ORDER: tuple[str, ...] = (
     "usage_gaps",
 )
 
-# Human-readable name per label. Kept next to the order tuple so adding a label
-# in one place without the other is a KeyError at import-adjacent test time
-# rather than a silently unnamed line in a production prompt.
+# Human-readable name per label. A mismatch against ``PROFILE_LABEL_ORDER`` is
+# NOT a KeyError at runtime in either direction: a label present only in
+# ``PROFILE_LABEL_ORDER`` is silently dropped by ``selected_profile_blocks``
+# (it filters on ``_LABEL_NAMES`` membership), and a label present only here
+# is silently dropped by ``render_profile_block``'s final loop (which only
+# walks ``PROFILE_LABEL_ORDER``). The assert right below the dict is what
+# turns "added a label in one place but not the other" into a hard failure
+# at import time instead of a quietly missing prompt line.
 _LABEL_NAMES: dict[str, str] = {
     "corpus_shape": "corpus shape",
     "key_entities": "key entities",
@@ -47,6 +52,9 @@ _LABEL_NAMES: dict[str, str] = {
     "retrieval_notes": "retrieval notes",
     "usage_gaps": "usage gaps",
 }
+assert set(PROFILE_LABEL_ORDER) == set(_LABEL_NAMES), (
+    "PROFILE_LABEL_ORDER and _LABEL_NAMES must name exactly the same labels"
+)
 
 # Per-block cap. The API (T6) rejects longer user edits outright with a 422 and
 # the consolidation job (T4) clamps its own output, so reaching this here means
@@ -69,7 +77,15 @@ _GUIDANCE = (
 
 
 def _clean(value: object) -> str:
-    return str(value or "").strip()
+    """Strip + collapse all internal whitespace (incl. newlines) to single
+    spaces (mirrors ``reasoning_retrieval._outline_text`` for model-authored
+    free text). A multi-line value that only got its ends stripped could
+    forge a fake second ``- name (scope): value`` row — or even a fake
+    ``[Collections in scope]``-style header — inside the rendered block by
+    embedding literal newlines; collapsing to one line before this string
+    ever reaches an ``f"- {name} ({scope}): {value}"`` line makes that
+    forgery structurally impossible, not just discouraged."""
+    return " ".join(str(value or "").split())
 
 
 def selected_profile_blocks(
@@ -134,3 +150,17 @@ def render_profile_block(blocks: Sequence[Mapping[str, Any]]) -> str:
     if len(text) > AGENT_PROFILE_BLOCK_MAX_CHARS:
         return text[: AGENT_PROFILE_BLOCK_MAX_CHARS - 1] + "…"
     return text
+
+
+def rendered_row_count(rendered: str) -> int:
+    """How many ``- name (scope): value`` rows are actually present in an
+    already-rendered block string.
+
+    NOT the same as ``len(selected_profile_blocks(...))``: the whole-block
+    cap in ``render_profile_block`` can truncate away entire trailing rows
+    (five oversized blocks routinely collapse the whole-block char budget
+    down to two or three rows actually delivered), so counting the
+    pre-truncation selection over-reports how many rows the model saw. The
+    caller (the trace step's ``blocks`` field) wants the delivered count.
+    """
+    return sum(1 for line in rendered.splitlines() if line.startswith("- "))
