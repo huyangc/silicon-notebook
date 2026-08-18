@@ -390,11 +390,11 @@ def test_the_projection_drops_everything_but_type_summary_duration_and_count(har
 def test_a_finished_report_claims_directly_without_parking_the_counter(
     harness, monkeypatch
 ):
-    """Design §5.3: a report is a naturally high-information endpoint.
+    """Design §5.3 + codex R7 P2:报告先落满阈值信号、再当场认领。
 
-    It claims rather than bumping-to-threshold, so a claim that loses to a run
-    already in flight leaves the counter where it was instead of parked AT the
-    threshold (which would fire again on the member's very next ask).
+    bump 先行让任何交错都有人接(worker settle 后的复查看得见它,或本调用自己
+    的 claim 把它连同快照一并消费);空闲链路上的净效果与旧的直接认领一致——
+    快照含刚落的满阈值,settle 时恰好消费掉,不会停在阈值上等下一次提问点火。
     """
     submitter = _with_submitter(monkeypatch, _Submitter(run=False))
     service = _service(harness)
@@ -402,9 +402,10 @@ def test_a_finished_report_claims_directly_without_parking_the_counter(
     service.note_report_completed(NOTEBOOK_ID, USER_A)
 
     assert len(submitter.calls) == 1
-    assert submitter.calls[0]["args"] == (NOTEBOOK_ID, USER_A, 0)
+    # claim 的快照就是刚落的满阈值信号(3):它会随这次 run 的 settle 被消费。
+    assert submitter.calls[0]["args"] == (NOTEBOOK_ID, USER_A, 3)
     assert _job(harness, USER_A)["status"] == "running"
-    assert _job(harness, USER_A)["pending_signal"] == 0
+    assert _job(harness, USER_A)["pending_signal"] == 3
 
 
 def test_a_report_finishing_while_a_run_is_in_flight_keeps_the_ask_signal(

@@ -1302,12 +1302,22 @@ class AgentProfileConsolidationService:
                 return
             if not profile_wiring_active(self.settings, self.profiles):
                 return
-            if not self.start_overlay(notebook_id, user_id):
-                self.profiles.bump_signal(
-                    notebook_id,
-                    user_id,
-                    delta=int(self.settings.agent_profile_overlay_trigger),
-                )
+            # codex R7 P2: the bump comes BEFORE the claim attempt. Bumping
+            # only after a failed claim left a window — the in-flight worker
+            # could settle AND run its final leftover re-check between our
+            # failed claim and our bump, parking a terminal row at the
+            # threshold with nobody left to look. Bump-first closes every
+            # interleaving: a worker that settles after our bump sees it in
+            # its re-check; one that settled before it leaves the row
+            # claimable, so our own claim below picks the signal right up
+            # (its snapshot includes the bump, so it is consumed exactly
+            # once either way).
+            self.profiles.bump_signal(
+                notebook_id,
+                user_id,
+                delta=int(self.settings.agent_profile_overlay_trigger),
+            )
+            self.start_overlay(notebook_id, user_id)
         except Exception:  # noqa: BLE001 — never break a finished report
             _log.exception(
                 "agent profile report notification failed for notebook %s",
