@@ -117,6 +117,12 @@ _UNIQUE_PREDICATES = {
         "share_token IS NOT NULL",
         ("share_token", "is", "not", "null"),
     ),
+    # Conversation public share tokens (v29): same shape as the report/
+    # notebook token indexes above.
+    "idx_conversations_share_token": (
+        "share_token IS NOT NULL",
+        ("share_token", "is", "not", "null"),
+    ),
     "idx_promotion_object": (
         "status NOT IN ('approved', 'rejected')",
         ("status", "not", "in", "'approved'", "'rejected'"),

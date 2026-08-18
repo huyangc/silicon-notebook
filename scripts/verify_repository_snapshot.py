@@ -3186,5 +3186,46 @@ MIGRATION_MANIFEST[(50, 51)] = {
 }
 
 
+# v52: per-conversation public share tokens + a read watermark (T1 of
+# question-answer session sharing). Same shape as v43's per-report share
+# token: three nullable/defaulted columns on an existing table plus one
+# partial unique index over issued tokens only. Same cascade as every other
+# hop: broadcast onto every prior hop key rebased to v52, then register the
+# explicit (51, 52) single hop.
+CONVERSATION_SHARE_COLUMNS = {
+    "conversations": {
+        "share_token": ("share_token", "TEXT", 0, "NULL", 0),
+        "shared_through_at": ("shared_through_at", "TEXT", 0, "NULL", 0),
+        "shared_through_id": ("shared_through_id", "TEXT", 0, "NULL", 0),
+    },
+}
+CONVERSATION_SHARE_INDEXES = {
+    "idx_conversations_share_token":
+        "CREATE UNIQUE INDEX idx_conversations_share_token\n"
+        "                  ON conversations(share_token) WHERE share_token IS NOT NULL",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 52, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "conversations": {
+                **manifest["columns"].get("conversations", {}),
+                **CONVERSATION_SHARE_COLUMNS["conversations"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **CONVERSATION_SHARE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(51, 52)] = {
+    "tables": {},
+    "columns": CONVERSATION_SHARE_COLUMNS,
+    "indexes": CONVERSATION_SHARE_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

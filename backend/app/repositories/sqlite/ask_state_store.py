@@ -36,6 +36,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+from app.core.capability_tokens import new_capability_token
 from app.core.internal_observability import (
     public_trace_steps,
     sanitize_answer_payload,
@@ -58,6 +59,26 @@ from app.repositories.ports import (
     project_trace_step,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+
+
+# Canonical oldest -> newest order for one conversation's answers.
+# `AskStateStore.get_conversation` and the public-share snapshot query
+# (`public_conversation_by_token` below) MUST stay byte-identical here — the
+# question-answer session sharing design doc's C-3 decision is that the
+# public page's turn order can never diverge from what the author sees, and
+# two independently-typed copies of this ORDER BY are exactly how that would
+# silently drift. `julianday()` leads because it compares the absolute
+# instant across legacy naive-UTC and newer offset-aware `created_at` text
+# (same reasoning as the "Ask 会话即时入历史" SQLite offset-comparison red
+# line); `rowid` — not `id` — is the final tie-break because within-tick
+# answer order is insertion order, and rowid is SQLite's insertion-order
+# column for this table.
+CONVERSATION_ANSWERS_ORDER_ASC = (
+    "ORDER BY julianday(created_at) ASC, created_at ASC, rowid ASC"
+)
+CONVERSATION_ANSWERS_ORDER_DESC = (
+    "ORDER BY julianday(created_at) DESC, created_at DESC, rowid DESC"
+)
 
 
 class AskStateStore:
@@ -622,8 +643,7 @@ class AskStateStore:
                 raise KeyError(conversation_id)
             rows = db.execute(
                 "SELECT id, question, payload, created_at FROM answers "
-                "WHERE conversation_id = ? "
-                "ORDER BY julianday(created_at) ASC, created_at ASC, rowid ASC",
+                "WHERE conversation_id = ? " + CONVERSATION_ANSWERS_ORDER_ASC,
                 (conversation_id,),
             ).fetchall()
             job = db.execute(
@@ -824,6 +844,162 @@ class AskStateStore:
         return ConversationBulkDeleteResult(
             deleted=len(deleted_ids), deleted_ids=deleted_ids
         )
+
+    # ------------------------------------------------------------------
+    # public conversation sharing (T1: schema + store only, no caller yet —
+    # see docs/superpowers/specs/2026-08-18-conversation-sharing-design_zh.md)
+    # ------------------------------------------------------------------
+
+    def share_conversation(self, notebook_id: str, conversation_id: str) -> dict:
+        """Issue (or reuse) the public token for one conversation and push
+        its read watermark to the conversation's current latest answer.
+
+        Idempotent on the TOKEN only: re-sharing keeps the existing link, so
+        a URL already handed out never silently starts 404ing (mirrors
+        ``report_store.share_report``). The WATERMARK is deliberately NOT
+        idempotent — "share" and "update to latest" are the same call (see
+        the design doc §四), so every invocation advances
+        ``shared_through_at``/``shared_through_id`` to whichever answer is
+        newest at call time, even when the token itself does not change.
+
+        Raises ``KeyError`` when the conversation does not exist in this
+        notebook. A conversation with zero answers can still be "shared"
+        here (link issued, watermark stays NULL) — the row-level
+        ``created_by`` gate and the "at least one written answer" policy
+        (design doc §七 item 5) belong to the API/service layer that calls
+        this method, not to this store method.
+        """
+        candidate = new_capability_token("cshr")
+        with self.database.write() as db:
+            conv = db.execute(
+                "SELECT id FROM conversations WHERE id=? AND notebook_id=?",
+                (conversation_id, notebook_id),
+            ).fetchone()
+            if conv is None:
+                raise KeyError(conversation_id)
+            latest = db.execute(
+                "SELECT id, created_at FROM answers WHERE conversation_id=? "
+                + CONVERSATION_ANSWERS_ORDER_DESC + " LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+            through_at = latest["created_at"] if latest is not None else None
+            through_id = latest["id"] if latest is not None else None
+            issued = db.execute(
+                "UPDATE conversations SET share_token=COALESCE(share_token,?), "
+                "shared_through_at=?, shared_through_id=? "
+                "WHERE id=? AND notebook_id=? "
+                "RETURNING share_token, shared_through_at, shared_through_id",
+                (candidate, through_at, through_id, conversation_id, notebook_id),
+            ).fetchone()
+        return {
+            "share_token": str(issued["share_token"]),
+            "shared_through_at": str(issued["shared_through_at"] or ""),
+            "shared_through_id": str(issued["shared_through_id"] or ""),
+        }
+
+    def unshare_conversation(self, notebook_id: str, conversation_id: str) -> None:
+        """Revoke the public link. The next public request 404s, same as an
+        unknown token (mirrors ``report_store.unshare_report``)."""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE conversations SET share_token=NULL, "
+                "shared_through_at=NULL, shared_through_id=NULL "
+                "WHERE id=? AND notebook_id=?",
+                (conversation_id, notebook_id),
+            )
+
+    def conversation_share_state(self, notebook_id: str, conversation_id: str) -> dict:
+        """The issued token + watermark, for the write-guarded read-back
+        endpoint only (mirrors ``report_store.report_share_token``).
+
+        Never fold this into ``get_conversation``'s projection: that method
+        is reachable with read permission, and ``share_token`` is an
+        anonymous access grant.
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT share_token, shared_through_at, shared_through_id "
+                "FROM conversations WHERE id=? AND notebook_id=?",
+                (conversation_id, notebook_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(conversation_id)
+        return {
+            "share_token": str(row["share_token"] or ""),
+            "shared_through_at": str(row["shared_through_at"] or ""),
+            "shared_through_id": str(row["shared_through_id"] or ""),
+        }
+
+    def public_conversation_by_token(self, token: str) -> "dict | None":
+        """Resolve one shared conversation by token alone — the only
+        session-free read (mirrors ``report_store.public_report_by_token``;
+        see its docstring for why this must take nothing but the token: the
+        caller is an anonymous router that never binds a request user, and
+        any other identifier would let this method run as whichever user the
+        ContextVar happens to default to).
+
+        Turns are watermark-bounded: only answers with
+        ``julianday(created_at) <= julianday(shared_through_at)`` are
+        returned, in the SAME canonical order ``get_conversation`` uses
+        (``CONVERSATION_ANSWERS_ORDER_ASC`` — design doc C-3). An in-flight
+        turn (question submitted, no answer row written yet) is excluded by
+        construction: the predicate only ever matches committed ``answers``
+        rows, never a running ``ask_jobs`` entry.
+
+        Returns ``None`` for an unknown/revoked token, or for a conversation
+        whose watermark is NULL (``share_conversation`` always sets the
+        watermark together with the token, so NULL here means this row was
+        never actually shared through the normal path — fail closed rather
+        than serve an ungated conversation).
+
+        Also returns ``notebook_id`` and ``created_by`` (GATE fields,
+        mirroring ``report_store.GATE_FIELDS``) for the caller's live
+        authorization re-check (design doc §七 item 3) — they are NOT part
+        of any future public disclosure surface and must be popped before
+        anything crosses to an anonymous reader.
+        """
+        clean = str(token or "").strip()
+        if not clean:
+            return None
+        with self.database.connect() as db:
+            conv = db.execute(
+                "SELECT id, notebook_id, created_by, title, created_at, "
+                "shared_through_at, shared_through_id "
+                "FROM conversations WHERE share_token=?",
+                (clean,),
+            ).fetchone()
+            if conv is None or not conv["shared_through_at"]:
+                return None
+            rows = db.execute(
+                "SELECT id, question, payload, created_at FROM answers "
+                "WHERE conversation_id=? AND julianday(created_at) <= julianday(?) "
+                + CONVERSATION_ANSWERS_ORDER_ASC,
+                (conv["id"], conv["shared_through_at"]),
+            ).fetchall()
+        turns = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            turns.append(
+                {
+                    "answer_id": row["id"],
+                    "question": row["question"],
+                    "payload": payload,
+                    "created_at": row["created_at"],
+                }
+            )
+        return {
+            "id": conv["id"],
+            "notebook_id": conv["notebook_id"],
+            "created_by": conv["created_by"],
+            "title": conv["title"] or "",
+            "created_at": conv["created_at"],
+            "shared_through_at": conv["shared_through_at"],
+            "shared_through_id": conv["shared_through_id"] or "",
+            "turns": turns,
+        }
 
     # ------------------------------------------------------------------
     # feedback

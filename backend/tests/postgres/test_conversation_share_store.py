@@ -1,0 +1,164 @@
+"""Question-answer session sharing T1 (schema + store only, no caller yet).
+
+Mirrors backend/tests/test_conversation_share_store.py (the SQLite adapter's
+own copy of this contract test) — see its module docstring for the design
+doc's C-3 decision this proves. PostgreSQL's tie-break is `ordinal` (the
+BY DEFAULT identity column standing in for SQLite's rowid), not `id`.
+"""
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from app.repositories.postgres.ask_state_store import (
+    AskStateStore as PostgresAskStateStore,
+)
+from app.repositories.postgres.migrator import PostgresMigrator
+from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+
+pytestmark = pytest.mark.postgres_integration
+
+
+def _seams() -> RepositoryCompatibilitySeams:
+    lock = threading.Lock()
+    counter: dict[str, int] = {}
+
+    def new_id(prefix: str) -> str:
+        with lock:
+            counter[prefix] = counter.get(prefix, 0) + 1
+            return f"{prefix}-share-{counter[prefix]:04d}"
+
+    return RepositoryCompatibilitySeams(
+        new_id=new_id,
+        now=lambda: "2026-01-01T00:00:09+00:00",
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+
+
+def _seed_conversation_with_tied_timestamps(database) -> tuple[str, str]:
+    """One conversation, four answers across three distinct instants.
+
+    ``ans-c`` and ``ans-b`` share the SAME ``created_at`` instant but are
+    inserted in reverse alphabetical/physical order (``ans-c`` first, so its
+    ``ordinal`` is lower) — a query that tie-broke on ``id`` instead of
+    ``ordinal`` would silently put ``ans-b`` first for one of the two paths
+    and not the other, and this test would catch that.
+    """
+    with database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            (
+                "nb-share-pg",
+                "n",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (
+                "conv-share-pg",
+                "nb-share-pg",
+                "t",
+                "user-local",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:03+00:00",
+            ),
+        )
+        for answer_id, created_at in (
+            ("ans-a", "2026-01-01T00:00:00+00:00"),
+            ("ans-c", "2026-01-01T00:00:01+00:00"),
+            ("ans-b", "2026-01-01T00:00:01+00:00"),
+            ("ans-d", "2026-01-01T00:00:03+00:00"),
+        ):
+            connection.execute(
+                "INSERT INTO answers "
+                "(id,notebook_id,conversation_id,question,payload,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (
+                    answer_id,
+                    "nb-share-pg",
+                    "conv-share-pg",
+                    "q",
+                    '{"conclusion": "c"}',
+                    created_at,
+                ),
+            )
+    return "nb-share-pg", "conv-share-pg"
+
+
+def test_public_snapshot_turn_order_matches_get_conversation_bit_for_bit(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    authored_order = [
+        turn.answer_id for turn in store.get_conversation(conversation_id).turns
+    ]
+
+    share = store.share_conversation(notebook_id, conversation_id)
+    public = store.public_conversation_by_token(share["share_token"])
+    public_order = [turn["answer_id"] for turn in public["turns"]]
+
+    assert authored_order == public_order
+    # Pins the actual resolved order, not just "the two paths agree with
+    # each other" -- both must resolve the tied instant as ans-c before
+    # ans-b (insertion/ordinal order), never the reverse and never
+    # id-lexical order (which would also put ans-b before ans-c, matching
+    # by accident).
+    assert authored_order == ["ans-a", "ans-c", "ans-b", "ans-d"]
+
+
+def test_public_snapshot_freezes_at_the_watermark_and_advances_on_reshare(
+    postgres_database,
+):
+    """"Freeze + explicit update" (design doc §二): a turn written after the
+    share call must NOT appear until the conversation is explicitly
+    re-shared ("update to latest"), which reuses the same token."""
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    share = store.share_conversation(notebook_id, conversation_id)
+    token = share["share_token"]
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO answers "
+            "(id,notebook_id,conversation_id,question,payload,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (
+                "ans-e",
+                "nb-share-pg",
+                "conv-share-pg",
+                "q",
+                '{"conclusion": "c"}',
+                "2026-01-01T00:00:05+00:00",
+            ),
+        )
+
+    frozen = store.public_conversation_by_token(token)
+    assert [t["answer_id"] for t in frozen["turns"]] == [
+        "ans-a", "ans-c", "ans-b", "ans-d",
+    ]
+
+    updated = store.share_conversation(notebook_id, conversation_id)
+    assert updated["share_token"] == token  # same link, not a new one
+
+    refreshed = store.public_conversation_by_token(token)
+    assert [t["answer_id"] for t in refreshed["turns"]] == [
+        "ans-a", "ans-c", "ans-b", "ans-d", "ans-e",
+    ]

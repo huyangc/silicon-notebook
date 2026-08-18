@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=50) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=51) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -62,6 +62,11 @@ NOTEBOOK_SCOPED_TABLES = [
     # 同款裁决 1c 论证一致), 而不是任何运行期兜底; `foreign_key_check` 这道
     # 闸只对"真的引用不到任何行"的悬挂外键有效, 对 id 冲突这类问题无能为力。
     "notebook_share_requests",
+    # v51 问答会话公开分享 T1: conversations 新增 share_token/shared_through_at/
+    # shared_through_id 三列, 均随行走——不需要新分类, `conversations` 早已在
+    # 上面这份清单里。与 reports.share_token/notebooks.share_token 同一先例:
+    # token 冲突概率由 256 位随机凭据(new_capability_token)兜底, 本脚本不做
+    # 任何专门的 token 冲突检测或清空。
 ]
 # notebook_bases 是"挂载方"拥有的行(notebook_id=挂载方, base_notebook_id=被挂的公共知识
 # 库), 按本类通用规则以 notebook_id IN (sec_nb) 筛——sec_nb 恒不含 shared_base(它并入
