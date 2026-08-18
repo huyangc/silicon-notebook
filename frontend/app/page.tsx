@@ -8893,38 +8893,6 @@ export default function Home() {
         </section>
       )}
 
-      {understandingOpen && currentNotebookId && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setUnderstandingOpen(false); }}>
-          <FloatingModalCard storageKey="understanding.window" className="utility-modal-card">
-            {(floating) => (<>
-            <div className="source-modal-header" {...floating.dragHandleProps}>
-              <div>
-                <h2>AI 对这个库的理解</h2>
-                <p>AI 读过这个库之后形成的印象，以及你自己的检索心得。提问时会一并带上，可以随时改。</p>
-              </div>
-              <button className="icon-button" onClick={() => setUnderstandingOpen(false)} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              {/* key=当前笔记本:切库那一刻整个面板重挂而不是靠 prop 变化自己刷新——
-                  草稿/忙碌位/确认态必须随库清零,不能等下面那条关弹窗 effect 追上来
-                  (那条 effect 是第二层保险,这里是结构性保证)。 */}
-              {/* 依据来源 chip 复用**引用卡点击走的同一条**打开路径,不另造弹窗;
-                  标题从已加载的来源列表解析(`display_title` 与引用卡、清单卡同一
-                  份服务端命名),查不到就由面板退回 id。 */}
-              <AgentProfilePanel
-                key={currentNotebookId}
-                notebookId={currentNotebookId}
-                onOpenSource={(sourceId) => onOpenSourceElement(sourceId)}
-                resolveSourceTitle={(sourceId) =>
-                  sources.find((item) => item.id === sourceId)?.display_title || ""
-                }
-              />
-            </div>
-            </>)}
-          </FloatingModalCard>
-        </section>
-      )}
-
       {graphOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setGraphOpen(false); }}>
           <FloatingModalCard storageKey="graph.window" className="utility-modal-card">
@@ -8963,6 +8931,43 @@ export default function Home() {
         </section>
       )}
 
+      {/* codex #520 R9 P1:本弹窗必须渲染在 graphOpen(知识关系图,同为
+          .utility-modal z-60)**之后**——同层 fixed 兄弟按 DOM 序作画,排在前面
+          会被后开的图谱弹窗整层盖住输入。入口处还会顺手关掉图谱弹窗(双保险),
+          这里的 DOM 序是结构性那一半。 */}
+      {understandingOpen && currentNotebookId && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setUnderstandingOpen(false); }}>
+          <FloatingModalCard storageKey="understanding.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
+              <div>
+                <h2>AI 对这个库的理解</h2>
+                <p>AI 读过这个库之后形成的印象，以及你自己的检索心得。提问时会一并带上，可以随时改。</p>
+              </div>
+              <button className="icon-button" onClick={() => setUnderstandingOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              {/* key=当前笔记本:切库那一刻整个面板重挂而不是靠 prop 变化自己刷新——
+                  草稿/忙碌位/确认态必须随库清零,不能等下面那条关弹窗 effect 追上来
+                  (那条 effect 是第二层保险,这里是结构性保证)。 */}
+              {/* 依据来源 chip 复用**引用卡点击走的同一条**打开路径,不另造弹窗;
+                  标题从已加载的来源列表解析(`display_title` 与引用卡、清单卡同一
+                  份服务端命名),查不到就由面板退回 id。 */}
+              <AgentProfilePanel
+                key={currentNotebookId}
+                notebookId={currentNotebookId}
+                onOpenSource={(sourceId) => onOpenSourceElement(sourceId)}
+                resolveSourceTitle={(sourceId) =>
+                  sources.find((item) => item.id === sourceId)?.display_title || ""
+                }
+              />
+            </div>
+            </>)}
+          </FloatingModalCard>
+        </section>
+      )}
+
+
       {kgViewOpen && (
         <section className="kg-view" role="dialog" aria-modal="true">
           <div className="kg-view-header">
@@ -8992,7 +8997,12 @@ export default function Home() {
                   部署总闸关掉时按钮整个不渲染(判据在组件内部)。 */}
               <UnderstandingEntryButton
                 enabled={agentProfileEnabled}
-                onOpen={() => setUnderstandingOpen(true)}
+                onOpen={() => {
+                  // 关掉可能还开着的知识关系图弹窗(同层 z-60):它若压在本弹窗
+                  // 之上,唯一入口点开的就是一个摸不到的面板(codex R9 P1)。
+                  setGraphOpen(false);
+                  setUnderstandingOpen(true);
+                }}
               />
               <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
             </div>
