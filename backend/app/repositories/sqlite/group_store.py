@@ -46,8 +46,8 @@ from app.repositories.ports import (
     ShareRequesterUnauthorizedError,
 )
 from app.repositories.sqlite.access_sql import (
-    NOTEBOOK_ADMIN_SQL,
-    admin_access_params,
+    ADMIN_GRANT_PROBE_SQL,
+    admin_grant_probe_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -644,13 +644,30 @@ class GroupStore:
         的检查兑现成一条**活的**授权边,整组人立刻读得到,而库主从未同意。批准这一刻没有
         任何一方在验这件事:组管理员验的是「我的组要不要这个库」。
 
-        谓词直接用 `access_sql.NOTEBOOK_ADMIN_SQL`(owner ∪ 管理级有效授权边),不自己拼
-        ——「谁能管这个 notebook」的唯一定义点在 access_sql,store 消费它是既有惯例
-        (见 `sharing_store.user_can_admin_notebook`)。
+        谓词一律取自 `access_sql`——「谁能管这个 notebook」的唯一定义点在那里,store 消费
+        它是既有惯例(见 `sharing_store.user_can_admin_notebook`)。
+
+        写成**两段式**(owner 半 + 授权边半)而不是单跑 `NOTEBOOK_ADMIN_SQL`,是为了与 PG
+        侧结构对齐:那边必须拆开才能给授权边行挂 `FOR SHARE`(行锁够不到 `EXISTS` 子查询
+        里的行),否则并发撤销能与批准交错(codex #519 R5)。
+
+        ⚠ SQLite 侧**刻意没有**对应的行锁:`SqliteDatabase.write()` 是进程级写锁,同一时刻
+        只有一个写事务在跑,撤销授权边与本次批准根本插不进彼此中间——与
+        `delete_group` / `create_share_request` / `approve` 组锁同款的后端分叉。两段拆分在
+        这一侧因此纯粹是结构对等(外加保住 owner 半那条便宜的短路)。
         """
         if (
             db.execute(
-                NOTEBOOK_ADMIN_SQL, (notebook_id, *admin_access_params(requested_by))
+                "SELECT 1 FROM notebooks WHERE id=? AND created_by=?",
+                (notebook_id, requested_by),
+            ).fetchone()
+            is not None
+        ):
+            return
+        if (
+            db.execute(
+                ADMIN_GRANT_PROBE_SQL,
+                admin_grant_probe_params(notebook_id, requested_by),
             ).fetchone()
             is None
         ):

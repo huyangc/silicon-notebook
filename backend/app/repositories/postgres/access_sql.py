@@ -236,6 +236,24 @@ GRANT_PROBE_SQL = (
 # 同层 rangetable 里只有 ng);组成员资格刻意不锁,取舍见模块 docstring。
 GRANT_PROBE_FOR_SHARE_SQL = GRANT_PROBE_SQL + " FOR SHARE OF ng"
 
+# **管理级**授权边探测:该用户在这个 notebook 上是否有一条 `role='admin'` 的有效授权边。
+# 与 `GRANT_PROBE_SQL` 同形,只把主体判定换成 `_admin_principal_match_expr`——**复用**
+# 那一份而不是另抄一遍主体判定(唯一定义点红线)。参数用 `admin_grant_probe_params()`。
+#
+# ⚠ 为什么需要这条**顶层**查询,而不能给 `NOTEBOOK_ADMIN_SQL` 加锁了事:后者的形状是
+# `SELECT 1 FROM notebooks nb WHERE nb.id=%s AND (nb.created_by=%s OR EXISTS(...))`,
+# 授权边行藏在 EXISTS 子查询里,`FOR SHARE` 够不着它(只会锁 notebooks 那一行)——
+# 与模块 docstring 里三段式带锁写法的理由逐字相同。审批共享申请时要锁住的恰恰是那条
+# 授权边行(codex #519 R5)。
+ADMIN_GRANT_PROBE_SQL = (
+    "SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=%s AND "
+    + _admin_principal_match_expr("ng", "%s", "ngm", "nga")
+)
+
+# 上面那条加行锁的变体。`OF ng` 同样是显式化:锁**授权边行**,让并发的撤销
+# (`DELETE FROM notebook_grants`)阻塞到本事务提交,序列化成「先批准、后撤销」。
+ADMIN_GRANT_PROBE_FOR_SHARE_SQL = ADMIN_GRANT_PROBE_SQL + " FOR SHARE OF ng"
+
 
 def read_access_clause(
     nb_alias: str = "nb",
@@ -304,6 +322,7 @@ def read_access_exists_clause(
 _READ_ACCESS_PARAM_COUNT = read_access_clause().count("%s")
 _ADMIN_ACCESS_PARAM_COUNT = admin_access_clause().count("%s")
 _GRANT_PROBE_USER_PARAM_COUNT = GRANT_PROBE_SQL.count("%s") - 1
+_ADMIN_GRANT_PROBE_USER_PARAM_COUNT = ADMIN_GRANT_PROBE_SQL.count("%s") - 1
 
 
 def admin_access_params(user_id: str) -> tuple[str, ...]:
@@ -319,6 +338,16 @@ def read_access_params(user_id: str) -> tuple[str, ...]:
 def grant_probe_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
     """`GRANT_PROBE_SQL`(及 FOR SHARE 变体)要消费的位置参数。"""
     return (notebook_id,) + (user_id,) * _GRANT_PROBE_USER_PARAM_COUNT
+
+
+def admin_grant_probe_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
+    """`ADMIN_GRANT_PROBE_SQL`(及 FOR SHARE 变体)要消费的位置参数。
+
+    单独一份而不是复用 `grant_probe_params`:两条查询的主体判定不同(管理级排除了
+    `everyone` 那一臂),占位符数是各自**推导**出来的——今天恰好相等,明天任一侧的臂
+    变了就会分叉,而共用一份参数展开会静默错位。
+    """
+    return (notebook_id,) + (user_id,) * _ADMIN_GRANT_PROBE_USER_PARAM_COUNT
 
 
 # 写权(owner-only)的完整查询:有行即有写权。notebook 不存在 → 无行 → 无写权。
