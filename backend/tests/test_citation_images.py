@@ -548,6 +548,26 @@ def test_ask_chunk_citation_carries_the_section_figure(repo, monkeypatch):
     assert len(calls) == 1, calls
 
 
+def test_ask_chunk_answer_survives_an_image_store_read_failure(repo, monkeypatch):
+    """评审 F1：附图是已生成回答上的最后一步装饰性富化，一次 DB 抖动不得废掉
+    整条已经算完的回答——镜像 `test_report_reference_images.py` 的同型用例
+    `test_assemble_completes_even_when_the_image_store_read_fails`（同一套
+    fail-open 惯例，`attach_citation_images` 内部 try/except 见
+    `evidence_context.py`）。"""
+    notebook_id, _source_id = _seed_source_with_a_captioned_figure(repo)
+
+    def _boom(element_ids):
+        raise RuntimeError("db hiccup")
+
+    monkeypatch.setattr(repo._runtime.source_store, "image_asset_rows", _boom)
+
+    response = repo.ask_chunk(notebook_id, AskRequest(question=UNIQUE_TERM))
+
+    # 回答没有因为附图这一步炸了而丢失。
+    assert response.citations, "ask_chunk 未产出引用"
+    assert all(c.images == [] for c in response.citations)
+
+
 class _ChunkAnswerLLM:
     """grounded 主路径：读上下文块，把每条含 UNIQUE_TERM 的 k 行都 `[k]` 标出来,
     让 chunk 锚点真的解析出来（前端 buildAnswerReferences 是 anchor 优先的全有

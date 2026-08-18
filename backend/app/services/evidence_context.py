@@ -957,7 +957,26 @@ class EvidenceContextService:
 
         哪天某种投影开始写**带资产**的 image 元素，锚点侧就得像引用侧一样显式
         排除。
+
+        fail-open（评审 F1）：本方法是已生成回答上的最后一步装饰性富化，`store`
+        读取（`citation_images_for` → `image_asset_rows`）瞬态异常必须只丢图不
+        丢答案——四个调用点（ask_chunk/ask_reasoning/两处 ask_graph）此前都没
+        有兜底，一次 DB 抖动会把已经算完的回答整个打失败。兜底放在共享层而不
+        是每个调用点各包一次，理由与 `attach_reference_images` 的"共享一份
+        `CITATION_IMAGES_PER_ANSWER` 预算"同源：装配是这里的单一定义点。
+        `report_engine.py` 里 `attach_reference_images` 外层那个 try/except 因
+        此对它自己的调用冗余，但保留作纵深防御，不因为这里加了兜底而删除。
         """
+        try:
+            self._attach_citation_images_unguarded(targets)
+        except Exception:
+            return
+
+    def _attach_citation_images_unguarded(
+        self,
+        targets: Iterable[tuple[Citation | AnswerAnchor, Sequence[str]]],
+    ) -> None:
+        """`attach_citation_images` 的实际实现，被外层 fail-open 包裹。"""
         entries = list(targets)
         if not entries:
             return
