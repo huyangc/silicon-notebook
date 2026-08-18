@@ -58,6 +58,9 @@
         "created_by": "<user-id-1>",
         "id": "<conv-id-1>",
         "notebook_id": "<nb-id-1>",
+        "share_token": null,
+        "shared_through_at": null,
+        "shared_through_id": null,
         "title": "Why is gain stable?",
         "updated_at": "<timestamp>"
       }
@@ -710,6 +713,9 @@
         "created_by": "<user-id-1>",
         "id": "<conv-id-1>",
         "notebook_id": "<nb-id-1>",
+        "share_token": null,
+        "shared_through_at": null,
+        "shared_through_id": null,
         "title": "Why is gain stable?",
         "updated_at": "<timestamp>"
       }
@@ -1262,6 +1268,11 @@
       {
         "name": "idx_conversations_created_by",
         "sql_sha256": "a0a3892af417fb782f6840c56d4844b173ff9871c2d82855a8c3dd4b2a080025",
+        "type": "index"
+      },
+      {
+        "name": "idx_conversations_share_token",
+        "sql_sha256": "adb8379ab2933fa2972568676eafb4d4d9492f5a445c4d1e00e511a56b9dadd8",
         "type": "index"
       },
       {
@@ -1836,7 +1847,7 @@
       },
       {
         "name": "conversations",
-        "sql_sha256": "2561fb56c92b2d6ede61fb9b54e8a37250064f67f948ac99f1c7dc5b306d38aa",
+        "sql_sha256": "ef3d6300acb2dd856bb41e9deef150081eef2bf11559bc65c933acc56522f684",
         "type": "table"
       },
       {

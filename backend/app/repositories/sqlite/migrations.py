@@ -49,7 +49,11 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # per-notebook understanding blocks with their shared base / per-member
 # overlay layering, and agent_profile_jobs, the per-chain consolidation
 # state). Additive only: no reader or writer exists yet.
-SCHEMA_VERSION = 51
+# v52 adds conversation public-share tokens + a read watermark for T1 of
+# question-answer session sharing. Additive only: the repository methods
+# that use these columns have no caller yet (that lands in a later task),
+# so this migration is zero-behavior-change.
+SCHEMA_VERSION = 52
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2679,6 +2683,84 @@ class SqliteMigrator:
                   updated_at    TEXT NOT NULL,
                   PRIMARY KEY (notebook_id, owner_id)
                 );
+                """
+            )
+
+    def _migration_52(self) -> None:
+        """Per-conversation public share tokens + a read watermark (T1 of
+        question-answer session sharing).
+
+        Same shape as v43's per-report share token (``reports.share_token``)
+        and the pre-v9 ``notebooks.share_token``: the token lives on the
+        conversation row rather than in a side table, so a deleted
+        conversation takes its public link with it without a second cascade
+        to maintain. The partial unique index only covers issued tokens, so
+        the unshared majority costs nothing and NULLs never collide — the
+        same park strategy PostgreSQL's forward-shadow replicator already
+        has pinned for ``idx_reports_share_token``/``idx_notebooks_share_
+        token`` (see ``_UNIQUE_PREDICATES`` in
+        ``app/migration/shadow/replicator.py``).
+
+        Unlike a report, a conversation keeps growing after it is shared —
+        the design doc's decision is "freeze + explicit update" (sharing
+        again pushes the boundary; it never happens implicitly), so this
+        migration adds TWO watermark columns beyond the token:
+
+        * ``shared_through_at`` is a literal ISO-8601 TIMESTAMP VALUE, not a
+          foreign key to an answer row. Storing an answer id instead would
+          make the watermark meaningless the moment that answer is deleted
+          (no created_at to compare against, no way to tell what came before
+          it); a literal value keeps the boundary predicate
+          (``julianday(created_at) <= julianday(shared_through_at)``)
+          self-contained regardless of whether the referenced row still
+          exists. This is also why the closed-interval comparison is ``<=``:
+          the watermark is captured from the last answer that existed at
+          share time.
+        * ``shared_through_id`` is a denormalized copy of that answer's
+          ``id`` — recorded for display/audit ("shared through this turn"),
+          NOT consumed by the boundary predicate above (which is
+          self-contained on purpose, see above). It is a plain snapshotted
+          string, not a live reference, so it carries the same
+          delete-safety as ``shared_through_at``.
+
+        The read order for a conversation's answers (oldest -> newest) is a
+        three-key tie-break — ``julianday(created_at) ASC, created_at ASC,
+        rowid ASC`` — that already exists verbatim in
+        ``AskStateStore.get_conversation``. The design doc's C-3 decision
+        requires the public snapshot query to read turns in the SAME order
+        an author sees them, so that ordering is promoted to a named module
+        constant (``CONVERSATION_ANSWERS_ORDER_ASC`` /
+        ``_DESC`` in ``app/repositories/sqlite/ask_state_store.py``) shared
+        by both queries, rather than being retyped a second time where it
+        could silently drift.
+
+        Zero behavior change: the store methods that read/write these three
+        columns (``share_conversation`` / ``unshare_conversation`` /
+        ``conversation_share_state`` / ``public_conversation_by_token``) have
+        no caller anywhere in the codebase yet — the API surface, the
+        row-level ``created_by`` gate and "must have at least one written
+        answer" policy all land in a later task of the same feature. This
+        migration only lays the schema down.
+
+        Deep notebook copy does NOT need to scrub these columns before or
+        after copying: ``_COPY_VALIDATED_TABLES`` in
+        ``app/repositories/sqlite/sharing_store.py`` does not include
+        ``conversations`` at all (conversations do not travel with a deep
+        copy — same as ``reports``, ``answers`` and every other per-user
+        working-state table). Unlike ``notebooks.share_token`` /
+        ``reports.share_token`` (which DO need an explicit clear-on-copy
+        step because the deep-copy path deliberately keeps a copy's rows in
+        the destination tables those columns live on), there is no copy path
+        that ever touches a conversation row, so there is nothing to scrub.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "conversations", "share_token", "TEXT DEFAULT NULL")
+            self.add_column_if_missing(db, "conversations", "shared_through_at", "TEXT DEFAULT NULL")
+            self.add_column_if_missing(db, "conversations", "shared_through_id", "TEXT DEFAULT NULL")
+            db.executescript(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_share_token
+                  ON conversations(share_token) WHERE share_token IS NOT NULL;
                 """
             )
 
