@@ -1,0 +1,302 @@
+// 「AI 对这个库的理解」面板的渲染守卫(P1-T7)。
+//
+// 钉的是「后端契约在界面上真的兑现了」这一层——纯逻辑那一半在
+// tests/unit/agent-profile-model.test.mjs:
+//   · 角色:共享那一档 `can_edit_base=false` 时**只读渲染而不是隐藏**;本人那一份
+//     只读成员也能改;
+//   · 编辑:保存带读回来的 `expected_revision`;超限直接禁用保存(不发必然 422 的请求);
+//   · 清空:两步确认,第一下不发请求;
+//   · 重新整理:点完立刻不可点并换成「整理中…」,解除**只认服务端证据**;
+//   · 409:后端那句人话原样上屏,并重取一次拿到新的 revision;
+//   · 总闸:关掉时入口按钮一个节点都不渲染。
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, test, vi } from "vitest";
+
+vi.mock("../../features/agent-profile/profile-api.ts", () => ({
+  fetchUnderstanding: vi.fn(),
+  saveUnderstandingBlock: vi.fn(),
+  clearUnderstandingBlock: vi.fn(),
+  rebuildUnderstanding: vi.fn(),
+}));
+
+import {
+  clearUnderstandingBlock,
+  fetchUnderstanding,
+  rebuildUnderstanding,
+  saveUnderstandingBlock,
+} from "../../features/agent-profile/profile-api.ts";
+import {
+  AgentProfilePanel,
+  UnderstandingEntryButton,
+} from "../../app/agent-profile-panel.tsx";
+import { humanizedError } from "../../app/errors.ts";
+import type {
+  UnderstandingBlock,
+  UnderstandingResponse,
+} from "../../features/agent-profile/profile-model.ts";
+
+function block(label: string, value: string, revision = 4): UnderstandingBlock {
+  return {
+    label,
+    value,
+    evidence: [],
+    revision,
+    updated_at: "2026-08-18T02:00:00+00:00",
+    updated_origin: "job",
+  };
+}
+
+function response(over: Partial<UnderstandingResponse> = {}): UnderstandingResponse {
+  return {
+    enabled: true,
+    // 服务端只回写过的行 —— 这里刻意只给两块,面板要自己把剩下的补成空块。
+    base: [block("corpus_shape", "封装工艺资料库")],
+    mine: [block("retrieval_notes", "先写型号再问问题")],
+    job: { base: null, mine: null },
+    can_edit_base: true,
+    ...over,
+  };
+}
+
+const mockFetch = vi.mocked(fetchUnderstanding);
+const mockSave = vi.mocked(saveUnderstandingBlock);
+const mockClear = vi.mocked(clearUnderstandingBlock);
+const mockRebuild = vi.mocked(rebuildUnderstanding);
+
+beforeEach(() => {
+  mockFetch.mockResolvedValue(response());
+  mockSave.mockImplementation(async (_nb, label, body) => block(label, body.value, body.expected_revision + 1));
+  mockClear.mockImplementation(async (_nb, label) => block(label, "", 9));
+  mockRebuild.mockResolvedValue({ started: true });
+});
+
+test("可写成员：两档都渲染，五块齐全（服务端没回的补成空块）", async () => {
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  expect(await screen.findByRole("heading", { name: "AI 对这个库的理解" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "我的检索心得" })).toBeInTheDocument();
+
+  for (const title of ["这个库大致是什么", "反复出现的关键内容", "这个库还缺什么", "怎么查更容易找到", "常问却没找到的"]) {
+    expect(screen.getByRole("textbox", { name: title })).toBeInTheDocument();
+  }
+  expect(screen.getByRole("textbox", { name: "这个库大致是什么" })).toHaveValue("封装工艺资料库");
+  // 没写过的那块是空的,不是消失了。
+  expect(screen.getByRole("textbox", { name: "这个库还缺什么" })).toHaveValue("");
+});
+
+test("只读成员：共享那一档只读渲染（内容照常显示，写入控件不渲染），自己那一份仍可改", async () => {
+  mockFetch.mockResolvedValue(response({ can_edit_base: false }));
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  expect(await screen.findByText("封装工艺资料库")).toBeInTheDocument();
+  // 共享那一档:没有输入框、没有「重新整理」。
+  expect(screen.queryByRole("textbox", { name: "这个库大致是什么" })).not.toBeInTheDocument();
+  // 共享那一档里另外两块服务端还没写过：只读态下如实说「还没有」，而不是整块消失。
+  expect(screen.getAllByText("还没有整理出内容。")).toHaveLength(2);
+  // 本人那一份不受影响 —— 只读成员唯一能写的就是它。
+  expect(screen.getByRole("textbox", { name: "怎么查更容易找到" })).toHaveValue("先写型号再问问题");
+  expect(screen.getAllByRole("button", { name: "重新整理" })).toHaveLength(1);
+});
+
+test("编辑保存：带读回来的 expected_revision，成功后重取", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  const field = await screen.findByRole("textbox", { name: "这个库还缺什么" });
+  await user.type(field, "缺少测试报告");
+  const save = within(field.closest(".item") as HTMLElement).getByRole("button", { name: "保存" });
+  await user.click(save);
+
+  await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1));
+  expect(mockSave).toHaveBeenCalledWith("nb1", "corpus_gaps", {
+    scope: "shared",
+    value: "缺少测试报告",
+    // 服务端没回过这块 —— 面板补的空块 revision 是 0,正是「创建这一行」的约定值。
+    expected_revision: 0,
+  });
+  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+});
+
+test("没改动时保存禁用（不发一次什么都没变的写请求）", async () => {
+  render(<AgentProfilePanel notebookId="nb1" />);
+  const field = await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  const save = within(field.closest(".item") as HTMLElement).getByRole("button", { name: "保存" });
+  expect(save).toBeDisabled();
+});
+
+test("超限：字数提示上屏且保存禁用，一个请求都不发", async () => {
+  const user = userEvent.setup();
+  mockFetch.mockResolvedValue(
+    response({ base: [block("corpus_shape", "封")] }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  const field = await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  // 直接粘一整段超限文本(逐字符 type 400 次没有额外信息量,只是慢)。
+  await user.clear(field);
+  await user.click(field);
+  await user.paste("字".repeat(401));
+
+  const item = field.closest(".item") as HTMLElement;
+  expect(within(item).getByText(/401 \/ 400 字/)).toBeInTheDocument();
+  expect(within(item).getByText(/内容过长/)).toBeInTheDocument();
+  expect(within(item).getByRole("button", { name: "保存" })).toBeDisabled();
+  expect(mockSave).not.toHaveBeenCalled();
+});
+
+test("清空是两步确认：第一下只出确认按钮，确认后才发请求", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  const field = await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  const item = field.closest(".item") as HTMLElement;
+  await user.click(within(item).getByRole("button", { name: "清空" }));
+
+  expect(mockClear).not.toHaveBeenCalled();
+  expect(within(item).getByRole("button", { name: "取消" })).toBeInTheDocument();
+
+  await user.click(within(item).getByRole("button", { name: "确认清空" }));
+  await waitFor(() => expect(mockClear).toHaveBeenCalledWith("nb1", "corpus_shape", "shared"));
+});
+
+test("清空可以取消：点「取消」之后既不发请求，也回到原来的按钮", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  const field = await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  const item = field.closest(".item") as HTMLElement;
+  await user.click(within(item).getByRole("button", { name: "清空" }));
+  await user.click(within(item).getByRole("button", { name: "取消" }));
+
+  expect(mockClear).not.toHaveBeenCalled();
+  expect(within(item).getByRole("button", { name: "清空" })).toBeInTheDocument();
+});
+
+test("重新整理：点完立刻不可点并换成「整理中…」", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  const [baseRebuild] = screen.getAllByRole("button", { name: "重新整理" });
+  await user.click(baseRebuild);
+
+  await waitFor(() => expect(mockRebuild).toHaveBeenCalledWith("nb1", "shared"));
+  const busy = screen.getByRole("button", { name: "整理中…" });
+  expect(busy).toBeDisabled();
+  // 只有被点的那一档在忙 —— 另一档照常可点。
+  expect(screen.getByRole("button", { name: "重新整理" })).toBeEnabled();
+});
+
+test("重新整理失败：忙碌位当场解除，按钮回到可点并给出人话", async () => {
+  const user = userEvent.setup();
+  mockRebuild.mockRejectedValue(humanizedError("正在整理，请稍候", 409));
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  await screen.findByRole("heading", { name: "AI 对这个库的理解" });
+  await user.click(screen.getAllByRole("button", { name: "重新整理" })[0]);
+
+  expect(await screen.findByText("正在整理，请稍候")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "重新整理" })).toHaveLength(2));
+});
+
+test("服务端说还在跑时：一打开面板按钮就是「整理中…」，跑完之后才解除", async () => {
+  vi.useFakeTimers();
+  try {
+    const running = { status: "running", pending: 2, updated_at: "", failure_reason: "" };
+    mockFetch.mockResolvedValue(response({ job: { base: running, mine: null } }));
+    render(<AgentProfilePanel notebookId="nb1" />);
+
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "整理中…" })).toBeDisabled());
+
+    // 解除只认服务端证据:轮询读到这条链不再是 running 才放开。
+    mockFetch.mockResolvedValue(
+      response({ job: { base: { ...running, status: "done" }, mine: null } }),
+    );
+    await vi.advanceTimersByTimeAsync(4000);
+    await vi.waitFor(() => expect(screen.getAllByRole("button", { name: "重新整理" })).toHaveLength(2));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("轮询超过尝试上限：停轮询并给中性文案，不宣布结局", async () => {
+  vi.useFakeTimers();
+  try {
+    const running = { status: "running", pending: 1, updated_at: "", failure_reason: "" };
+    mockFetch.mockResolvedValue(response({ job: { base: running, mine: null } }));
+    render(<AgentProfilePanel notebookId="nb1" />);
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "整理中…" })).toBeDisabled());
+
+    // 服务端一直如实回报「在跑」(任务卡死时正是这个形态) —— 60 次之后必须停。
+    await vi.advanceTimersByTimeAsync(4000 * 61);
+    await vi.waitFor(() =>
+      expect(screen.getByText("整理可能仍在进行，稍后刷新查看")).toBeInTheDocument(),
+    );
+    const callsAfterGivingUp = mockFetch.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(4000 * 5);
+    expect(mockFetch.mock.calls.length).toBe(callsAfterGivingUp);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("上次整理失败的原因照实上屏（后端刻意写给用户的那一句）", async () => {
+  mockFetch.mockResolvedValue(
+    response({
+      job: {
+        base: { status: "failed", pending: 5, updated_at: "", failure_reason: "服务重启，整理未完成" },
+        mine: null,
+      },
+    }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  expect(await screen.findByText(/服务重启，整理未完成/)).toBeInTheDocument();
+});
+
+test("保存撞 409：后端那句人话原样上屏，并重取一次拿到新的 revision", async () => {
+  const user = userEvent.setup();
+  mockSave.mockRejectedValue(humanizedError("这段理解刚被更新过，请刷新后再改", 409));
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  const field = await screen.findByRole("textbox", { name: "怎么查更容易找到" });
+  await user.type(field, "补一句");
+  await user.click(within(field.closest(".item") as HTMLElement).getByRole("button", { name: "保存" }));
+
+  expect(await screen.findByText("这段理解刚被更新过，请刷新后再改")).toBeInTheDocument();
+  // 重取:不重取的话用户手里还是旧 revision,再点保存只会撞同一堵墙。
+  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+  // 写了一半的字不该被一次冲突吃掉。
+  expect(screen.getByRole("textbox", { name: "怎么查更容易找到" })).toHaveValue("先写型号再问问题补一句");
+});
+
+test("总闸关掉：GET 回 enabled=false 时面板不给任何编辑入口", async () => {
+  mockFetch.mockResolvedValue(
+    response({ enabled: false, base: [], mine: [], can_edit_base: false }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  expect(await screen.findByText("这项功能当前未开启。")).toBeInTheDocument();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "重新整理" })).not.toBeInTheDocument();
+});
+
+test("总闸关掉：入口按钮一个节点都不渲染", () => {
+  const { container, rerender } = render(
+    <UnderstandingEntryButton enabled={false} onOpen={vi.fn()} />,
+  );
+  expect(container).toBeEmptyDOMElement();
+
+  rerender(<UnderstandingEntryButton enabled onOpen={vi.fn()} />);
+  expect(screen.getByRole("button", { name: /AI 对这个库的理解/ })).toBeInTheDocument();
+});
+
+test("入口按钮点开时把开关交回调用方（弹窗由工作区在根层渲染）", async () => {
+  const user = userEvent.setup();
+  const onOpen = vi.fn();
+  render(<UnderstandingEntryButton enabled onOpen={onOpen} />);
+
+  await user.click(screen.getByRole("button", { name: /AI 对这个库的理解/ }));
+  expect(onOpen).toHaveBeenCalledOnce();
+});
