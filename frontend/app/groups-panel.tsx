@@ -241,10 +241,17 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                   <button
                     className="sort-button"
                     disabled={busy}
-                    onClick={() => { void run(async () => {
-                      await withdrawShareRequest(req.notebook_id, req.id);
-                      setMyRequests(await listMyPendingShareRequests());
-                    }, "撤回申请失败"); }}
+                    onClick={() => { void mutateThenReconcile(
+                      // 撤回与批准/驳回是同一种形状,所以走同一条两段式:撤回成功之后
+                      // 重取失败会把这条已经不存在的申请留在屏幕上,用户再点一次就撞
+                      // 404——那是在把人骗去重试一个已经完成的动作。
+                      () => withdrawShareRequest(req.notebook_id, req.id).then(() => {
+                        setMyRequests((current) => (current ?? []).filter((r) => r.id !== req.id));
+                      }),
+                      async () => { setMyRequests(await listMyPendingShareRequests()); },
+                      "撤回申请失败",
+                      "已撤回，但列表没能刷新，请手动刷新查看最新状态。",
+                    ); }}
                   >{busy ? "处理中…" : "撤回"}</button>
                 </div>
               ))}
