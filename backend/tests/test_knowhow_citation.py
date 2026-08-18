@@ -468,10 +468,11 @@ def test_ask_chunk_citations_carry_knowhow_and_the_batch_query_still_fires_once(
     assert {c.knowhow.row_id for c in term_citations} == {seeded["row_a"], seeded["row_c"]}
     assert all(c.knowhow.table_id == seeded["table_id"] for c in term_citations)
     # 无 LLM → 答案合成不跑 → chunk_context（anchor 侧批量）不触发，只剩
-    # citation 侧的一次批量；T1（检索结果带图）另加**恰好一次**附图批量
-    # (attach_citation_images)。这个数必须与引用条数无关——它钉的是「批量」
-    # 本身，本 fixture 命中两条以上引用正是为了让退化成逐条时报红。
-    assert len(calls) == 2, calls
+    # citation 侧的一次批量。这个数必须与引用条数无关——它钉的是「批量」本身，
+    # 本 fixture 命中两条以上引用正是为了让退化成逐条时报红。（T1 的附图走窄
+    # 读 `image_asset_rows`，不经这个 spy；它自己的调用计数在
+    # test_citation_images.py。）
+    assert len(calls) == 1, calls
 
 
 class _ChunkAnswerLLM:
@@ -526,9 +527,10 @@ def test_grounded_chunk_answer_puts_knowhow_on_the_chunk_anchor(
     assert dumped["knowhow"]["table_id"] == seeded["table_id"]
     # citations 仍然照旧富化（回退腿保持绿），只是 UI 上被 anchor 分支遮蔽。
     assert resp.citations and all(c.knowhow is not None for c in resp.citations)
-    # 批量口径：anchor 侧（chunk_context）一次 + citation 侧一次 + T1 附图
-    # (attach_citation_images) 一次 = 恰好 3 次 store 读取，与锚点/引用数量无关。
-    assert len(calls) == 3, calls
+    # 批量口径：anchor 侧（chunk_context）一次 + citation 侧一次 = 恰好 2 次
+    # store 读取，与锚点/引用数量无关。（T1 附图走窄读 `image_asset_rows`，
+    # 不经这个 spy。）
+    assert len(calls) == 2, calls
 
 
 class _GraphAnswerLLM:
@@ -612,7 +614,7 @@ def test_ask_graph_src_chunk_citation_carries_knowhow(repo, monkeypatch):
     assert kh_citations[0].knowhow.row_id == "row-1"
     # 评审修复后 graph mix 路径固定两次批量：anchor 侧（_answer_mix →
     # chunk_context，让 [k] 命中的 chunk 锚点也带 knowhow）+ citation 侧
-    # 一次，与锚点/引用数量无关；T1（检索结果带图）另加恰好一次附图批量。
+    # 一次，与锚点/引用数量无关。（T1 附图走窄读 `image_asset_rows`。）
     anchor = next(a for a in resp.anchors if a.object_type == "chunk")
     assert anchor.knowhow is not None and anchor.knowhow.row_id == "row-1"
-    assert len(calls) == 3, calls
+    assert len(calls) == 2, calls
