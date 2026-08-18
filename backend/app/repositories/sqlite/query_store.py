@@ -99,6 +99,23 @@ _NOT_MEMORY_OWNED_SQL = (
     f"WHERE sources.id = o.source_id AND {MEMORY_SOURCE_TYPE_PREDICATE})"
 )
 
+#: codex #520 R8 P1:``concept_clusters.canonical_name`` 是**代表名整簇复制**的,
+#: 代表可能恰好选自某位成员私有 Memory 派生的对象——只过滤成员行(上面那条)洗不
+#: 掉名字本身。所以取名字的查询按**整簇**排除:簇内只要有一个成员归 Memory 源所
+#: 有,整簇不出名字(约定外层别名 ``c``,列 ``notebook_id``/``canonical_id``)。
+#: 宁可少一个也在可见文档里出现的名字,不冒把私有 Memory 的措辞写进全员可见块的
+#: 险。计数查询不受此累——计数不携带名字,成员行过滤就够了。
+#: ``source_type`` 不加限定词与上一条同理:三张 join 表里只有 sources(ms) 有这列,
+#: 只能解析到它——这样才能逐字复用同一份谓词常量。
+_NO_MEMORY_MEMBER_CLUSTER_SQL = (
+    "NOT EXISTS (SELECT 1 FROM concept_clusters mc "
+    "JOIN knowledge_objects mo ON mo.id = mc.member_object_id "
+    "JOIN sources ms ON ms.id = mo.source_id "
+    "WHERE mc.notebook_id = c.notebook_id "
+    "AND mc.canonical_id = c.canonical_id "
+    f"AND {MEMORY_SOURCE_TYPE_PREDICATE})"
+)
+
 
 class QueryStore:
     def __init__(
@@ -276,6 +293,7 @@ class QueryStore:
             f"     AND o.status IN ({status_marks}) "
             f"     AND {_NOT_MEMORY_OWNED_SQL} "
             "WHERE c.notebook_id = ? AND c.object_type = 'concept' "
+            f"AND {_NO_MEMORY_MEMBER_CLUSTER_SQL} "
             "GROUP BY c.canonical_id "
             "HAVING name <> '' "
             "ORDER BY members DESC, name ASC LIMIT ?",

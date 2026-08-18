@@ -1192,3 +1192,30 @@ def test_the_job_name_routes_to_the_light_maintenance_pool():
     assert background_jobs._diagnostic_job_name(
         lambda: None, f"agentprofile-{NOTEBOOK_ID}"
     ) == "agentprofile"
+
+
+def test_a_cluster_with_any_memory_member_hides_its_name_entirely(harness):
+    """codex #520 R8 P1:``canonical_name`` 是代表名整簇复制。
+
+    一个簇同时含可见成员与 Memory 成员时,只过滤成员行(计数正确)洗不掉名字——
+    代表可能恰好是那个 Memory 对象,名字会进全员可见的 key_entities。取名字的
+    查询因此按**整簇**排除:任一成员归 Memory 源所有,整簇不出名字。计数不携带
+    名字,仍按成员行过滤(可见成员照常计入)。
+    """
+    _add_source(harness, "src-a", elements=(("table", 1),))
+    _add_source(harness, "src-memory", source_type="memory")
+    _add_kg_object(harness, "ko-visible", "concept", source_id="src-a")
+    _add_kg_object(harness, "ko-private", "concept", source_id="src-memory")
+    # 同一个簇:代表名恰好来自 Memory 对象的措辞
+    _add_cluster(harness, "can-mixed", "ko-visible", "私人记忆里的叫法")
+    _add_cluster(harness, "can-mixed", "ko-private", "私人记忆里的叫法")
+    # 对照:纯可见簇照常出名字
+    _add_kg_object(harness, "ko-clean", "concept", source_id="src-a")
+    _add_cluster(harness, "can-clean", "ko-clean", "干净概念")
+
+    service = _service(harness, client=_Client(_reply([])))
+    stats = service.corpus_stats(NOTEBOOK_ID)
+
+    assert [name for name, _members in stats.key_concepts] == ["干净概念"]
+    # 计数维度不受整簇排除影响:可见对象仍被数到(2 个可见 concept)
+    assert stats.kg_objects == (("concept", 2),)
