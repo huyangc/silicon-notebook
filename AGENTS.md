@@ -878,17 +878,19 @@ agent has learned about a notebook, stored in `agent_notebook_profile` (five
 label blocks: `corpus_shape`/`key_entities`/`corpus_gaps` in the shared base
 layer, `retrieval_notes`/`usage_gaps` in each member's private overlay) and
 `agent_profile_jobs` (one status/threshold-counter row per chain). The **base
-chain** is per-notebook, triggered off accumulated source changes (new/deleted
-source), and its consolidation input is structurally restricted to corpus
+chain** is per-notebook, triggered off accumulated source changes (every terminal
+(re)parse outcome — including failed parses — and deletions, filtered to
+user-visible sources), and its consolidation input is structurally restricted to corpus
 statistics and KG-object aggregates — never any usage/query/answer table; the
 **overlay chain** is per-`(notebook, user)`, triggered off that user's
 completed Ask jobs or deep reports, and its input is that user's own retrieval
 trace only, with the `created_by`/`user_id` predicate written into the SQL
 itself rather than filtered in Python. Both isolation boundaries are pinned by
 `backend/tests/test_agent_profile_isolation_guard.py`, a semantic (no line
-number) scan that fails closed if a base-chain function body references a
-usage-data table name or an overlay-chain read is missing its ownership
-predicate. A single judgment function, `reasoning_retrieval.profile_wiring_active(settings,
+number) allowlist scan: every function in the job module must be classified
+(base/overlay/neutral), each class may only call the port methods on its own
+allowlist, and every trace-read SQL literal must carry the ownership
+predicate; unclassified functions or off-list port calls fail closed. A single judgment function, `reasoning_retrieval.profile_wiring_active(settings,
 profile_store)`, gates every consumer — plan/reflect injection, the
 consolidation trigger, and the two API read/write surfaces — behind one flag
 (`AGENT_PROFILE_ENABLED`, default true); turning it off restores byte-identical

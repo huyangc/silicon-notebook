@@ -216,6 +216,7 @@ def test_value_too_long_is_rejected_with_422(tmp_path, monkeypatch):
     )
     assert resp.status_code == 422, resp.text
     assert resp.headers.get("X-User-Message") == "1"
+    assert resp.json()["detail"] == "内容过长，最多 400 字"
 
 
 def test_revision_conflict_is_409(tmp_path, monkeypatch):
@@ -239,6 +240,7 @@ def test_revision_conflict_is_409(tmp_path, monkeypatch):
     )
     assert stale.status_code == 409, stale.text
     assert stale.headers.get("X-User-Message") == "1"
+    assert stale.json()["detail"] == "这段理解刚被更新过，请刷新后再改"
 
     # 对一条从未写过的块,非 0 的 expected_revision 同样是冲突(没有行可比对)
     never_written = client.put(
@@ -262,6 +264,7 @@ def test_scope_label_mismatch_is_422(tmp_path, monkeypatch):
     )
     assert wrong_scope.status_code == 422, wrong_scope.text
     assert wrong_scope.headers.get("X-User-Message") == "1"
+    assert wrong_scope.json()["detail"] == "所选范围与这项内容不匹配，无法编辑"
 
     # retrieval_notes 是覆盖层的 label,不许在 scope=shared 下编辑
     wrong_scope_2 = client.put(
@@ -485,6 +488,7 @@ def test_disabled_gate_is_transparent_on_get_and_409_on_writes(tmp_path, monkeyp
     )
     assert put.status_code == 409, put.text
     assert put.headers.get("X-User-Message") == "1"
+    assert put.json()["detail"] == "这项功能当前未开启，暂时无法编辑"
 
     delete = client.delete(
         f"/api/notebooks/{notebook_id}/understanding/corpus_shape?scope=shared",

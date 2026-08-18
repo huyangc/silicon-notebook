@@ -60,9 +60,8 @@ NOT_LINTABLE = {
     "状态": "同上",
     "队列": "同上",
     "画像": "图谱质量分析视图已把「来源画像」用作合法界面词(source profile),裸「画像」子串"
-    "匹配会连它一起误杀;与「节点」/「边」同一处理,靠人工把关",
-    "底座画像": "同「画像」——Agentic Memory P1 表格行里的复合写法,同一理由不收进黑名单",
-    "覆盖层画像": "同「画像」",
+    "匹配会连它一起误杀;与「节点」/「边」同一处理,靠人工把关。无歧义复合形态"
+    "底座画像/覆盖层画像 已按「孤立节点」同款政策入黑名单,不在此豁免",
 }
 
 
@@ -95,6 +94,15 @@ def test_豁免清单本身不许含已被覆盖的词():
     """防止 NOT_LINTABLE 变成掩盖真实规则的垃圾桶:登记了豁免却其实能匹配 = 账本失真。"""
     bogus = [tok for tok in NOT_LINTABLE if any(p.search(tok) for p in ALL_TERMS.values())]
     assert not bogus, f"这些词其实已被黑名单覆盖,不该登记成豁免:{bogus}"
+
+
+def test_豁免清单不许挂着词表里已不存在的词():
+    """反向孤儿检查:词表删行后,对应豁免必须一起删——否则 NOT_LINTABLE 变成
+    无人认领的登记(镜像 test_user_error 的 stale 半边;「动作/状态/队列」是
+    表格「：」切分的解析产物,同样应随其宿主行存在)。"""
+    tokens = set(table_tokens())
+    orphans = [tok for tok in NOT_LINTABLE if tok not in tokens]
+    assert not orphans, f"这些豁免在词汇表里已没有对应词,应一起删除:{orphans}"
 
 
 # --------------------------------------------------------------------------

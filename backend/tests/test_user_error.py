@@ -252,7 +252,7 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "revision 冲突 409 与关闸 409 用例覆盖（断言 X-User-Message 逐字文案）。"
     ),
     "app/api/agent_profile_routes.py::clear_understanding_block": (
-        "两处动态 detail 是与 update_understanding_block 共享的同一批中文模块常量"
+        "三处动态 detail 是与 update_understanding_block 共享的同一批中文模块常量"
         "（_DISABLED_MESSAGE/_SCOPE_LABEL_MISMATCH_MESSAGE/_REVISION_CONFLICT_MESSAGE），"
         "见上一条的论证；真实响应由 test_agent_profile_routes.py 的 DELETE 用例覆盖。"
     ),
