@@ -88,6 +88,22 @@ def _clean(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
+def clip_block_value(value: object) -> str:
+    """One line, capped at ``AGENT_PROFILE_VALUE_MAX_CHARS``, "…" on overflow.
+
+    The ONE implementation of "make this text safe and small enough to be a
+    block value", shared by this renderer and by the consolidation job's write
+    path (``agent_profile_job``). Two copies drifted apart trivially — the job
+    would store a 400-character value that the renderer then re-clipped to 399,
+    and the value a user sees in the panel would differ from the value the
+    model was shown — so the collapse and the cap live together, once.
+    """
+    text = _clean(value)
+    if len(text) > AGENT_PROFILE_VALUE_MAX_CHARS:
+        return text[: AGENT_PROFILE_VALUE_MAX_CHARS - 1] + "…"
+    return text
+
+
 def selected_profile_blocks(
     blocks: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
@@ -142,10 +158,7 @@ def render_profile_block(blocks: Sequence[Mapping[str, Any]]) -> str:
     for block in selected:
         name = _LABEL_NAMES[_clean(block.get("label"))]
         scope = "shared" if not _clean(block.get("owner_id")) else "yours"
-        value = _clean(block.get("value"))
-        if len(value) > AGENT_PROFILE_VALUE_MAX_CHARS:
-            value = value[: AGENT_PROFILE_VALUE_MAX_CHARS - 1] + "…"
-        lines.append(f"- {name} ({scope}): {value}")
+        lines.append(f"- {name} ({scope}): {clip_block_value(block.get('value'))}")
     text = "\n".join(lines)
     if len(text) > AGENT_PROFILE_BLOCK_MAX_CHARS:
         return text[: AGENT_PROFILE_BLOCK_MAX_CHARS - 1] + "…"

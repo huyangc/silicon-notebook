@@ -555,6 +555,27 @@ class SourceStore:
             ).fetchall()
         ]
 
+    def visible_parse_status_counts(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> List[tuple[str, int]]:
+        """``[(parse_status, count)]`` over this notebook's user-visible sources.
+
+        A second read of the same rows ``source_change_signal_rows`` walks, and
+        deliberately so: that row's change signal is contractually opaque, so
+        the ``parse_status`` inside it cannot be consumed even though the bytes
+        are there.  Same ``notebook_id``-prefixed seek, same residual
+        visible-source predicate; the result is one row per distinct status.
+        """
+        return [
+            (str(row["parse_status"] or ""), int(row["c"]))
+            for row in db.execute(
+                "SELECT parse_status, COUNT(*) AS c FROM sources "
+                f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+                "GROUP BY parse_status",
+                (notebook_id,),
+            ).fetchall()
+        ]
+
     def element_type_count_rows(
         self,
         db: sqlite3.Connection,

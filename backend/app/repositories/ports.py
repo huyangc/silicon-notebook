@@ -1144,6 +1144,28 @@ class SourceStorePort(Protocol):
         those sources own from the enumeration denominator.
         """
         ...
+    def visible_parse_status_counts(
+        self, db: object, notebook_id: str
+    ) -> list[tuple[str, int]]:
+        """``[(parse_status, count)]`` over the notebook's USER-VISIBLE sources.
+
+        A separate query rather than a fourth field on
+        ``source_change_signal_rows``: that row's ``change_signal`` is
+        contractually OPAQUE ("never parse it"), so the ``parse_status`` baked
+        into it is not readable by a consumer even though the characters are
+        physically there.  Widening that tuple instead would push a column into
+        the collection catalog's hottest read for a caller it does not have.
+
+        Bounded by construction — the notebook's source rows are visited once
+        (the same ``notebook_id``-prefixed seek the signal query uses; the
+        visible-source predicate is a residual filter on rows already in hand,
+        never a second access path) and the RESULT is one row per distinct
+        status, i.e. a handful.  The visible predicate is each adapter's own
+        ``VISIBLE_SOURCE_TYPES_PREDICATE``, the same one ``list_sources`` and
+        ``source_change_signal_rows``' ``user_visible`` projection evaluate, so
+        the denominator here means what the source tab shows.
+        """
+        ...
     def element_type_count_rows(
         self, db: object, source_ids: Sequence[str], element_types: Sequence[str]
     ) -> list[tuple[str, str, int]]:
@@ -3413,6 +3435,45 @@ class QueryStorePort(Protocol):
         """
         ...
     @staticmethod
+    def top_concept_names(
+        db: object,
+        notebook_id: str,
+        statuses: tuple[str, ...],
+        exclude_source_ids: list[str],
+        limit: int,
+    ) -> list[tuple[str, int]]:
+        """``[(canonical concept name, member count)]``, most-supported first.
+
+        The one place a caller can learn WHAT this library's recurring concepts
+        are called without hydrating objects: names are not a column on
+        ``knowledge_objects`` (they live inside ``payload`` JSON), so the only
+        materialized spelling is ``concept_clusters.canonical_name``.  Restricted
+        to ``object_type='concept'`` for the reason ``largest_clusters`` is — a
+        whole claim sentence is not a name — and the name is taken as
+        ``MIN(NULLIF(canonical_name,''))`` because one ``canonical_id`` is not
+        guaranteed to carry one spelling and a bare ``MIN()`` lets an empty
+        string hijack the row.
+
+        ``exclude_source_ids`` drops objects owned by those sources.  Its one
+        caller passes ``SourceStorePort.memory_source_ids`` — a confirmed Memory
+        is owner-private, and this list feeds a NOTEBOOK-SHARED prompt block, so
+        a concept that exists only inside one member's Memory must not become
+        part of what every member's agent "knows" about the library.  The filter
+        is in the SQL, on the join this query already makes, not a post-filter.
+
+        Output is bounded by ``limit`` and ordered ``members DESC, name ASC`` so
+        two runs over an unchanged library produce the same list.  ⚠ Bounded
+        OUTPUT is not a cheap query: like ``UnifiedKgStorePort.largest_clusters``
+        (same shape) the LIMIT truncates the result, not the scan — the
+        notebook's ``concept_clusters`` rows are grouped in full.  This is
+        deliberately NOT a request-path read; its only caller is the background
+        understanding-consolidation chain, which runs at most once per threshold
+        batch of source changes, i.e. strictly less often than the community
+        precompute that already runs ``largest_clusters`` on every KG rebuild of
+        the same notebook.
+        """
+        ...
+    @staticmethod
     def knowhow_knowledge_type_rows(
         db: object, notebook_id: str, statuses: tuple[str, ...]
     ) -> list[dict]: ...
@@ -3656,12 +3717,22 @@ class AgentProfileStorePort(Protocol):
         ``cancelled``), stamping ``finished_at`` and incrementing ``runs``.
 
         ``consumed`` is subtracted from ``pending_signal``, floored at zero
-        (``max(0, pending_signal - consumed)``). A successful run passes the
-        snapshot ``claim`` handed it — that consumes exactly the signal the
-        run actually looked at and LEAVES anything that arrived mid-run, so
-        the next threshold check still sees those changes. A failed run
-        passes ``0``: it consumed nothing, and its triggering changes must
-        still count toward the next attempt.
+        (``max(0, pending_signal - consumed)``). EVERY terminal path passes the
+        snapshot ``claim`` handed it — success, failure and interruption alike.
+        That consumes exactly the signal the run was handed and LEAVES anything
+        that arrived mid-run, so the next threshold check still sees those
+        changes.
+
+        Failure deliberately consumes too, and the reason is cost, not
+        bookkeeping: a chain that keeps its signal on failure re-fires on the
+        very next source change, so a provider returning malformed output would
+        bill one model call per upload for as long as it stays broken. Charging
+        the batch caps the chain at one call per threshold batch no matter what
+        the provider does; a transient failure is picked up by the next batch of
+        changes, or immediately by T6's manual rebuild. The one exception is a
+        claim that never produced a run at all (a submit that raised before any
+        worker existed): nothing looked at those signals, so that path passes
+        ``0``.
 
         CAS'd on ``status IN ('queued','running')`` so a settle racing a
         second settle for the same chain can only land once."""

@@ -492,6 +492,22 @@ class SourceStore:
             ).fetchall()
         ]
 
+    def visible_parse_status_counts(
+        self, connection: Any, notebook_id: str
+    ) -> list[tuple[str, int]]:
+        """``[(parse_status, count)]`` over this notebook's user-visible sources;
+        see the SQLite adapter for why this is its own query rather than a
+        widening of the (contractually opaque) change signal."""
+        return [
+            (str(row["parse_status"] or ""), int(row["c"]))
+            for row in connection.execute(
+                "SELECT parse_status, COUNT(*) AS c FROM sources "
+                f"WHERE notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+                "GROUP BY parse_status",
+                (notebook_id,),
+            ).fetchall()
+        ]
+
     # Batch width for the typed-collection count, deliberately narrower than
     # the class-wide ``IN_CHUNK`` (5 000, tuned for id hydration that returns
     # one row per id).  This query returns up to len(element_types) rows PER

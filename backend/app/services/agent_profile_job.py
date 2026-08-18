@@ -6,14 +6,19 @@ model call refreshes the notebook's three shared-base blocks (``corpus_shape`` /
 ``key_entities`` / ``corpus_gaps``).
 
 ⚠ **The isolation is structural, not a prompt rule** (design §5.3 / §12-Q2, and
-the acceptance criterion of this task). The base chain reads exactly three
-things — the current base blocks, corpus statistics, and KG object aggregates —
-and every one of them is notebook-level data that every member of a shared
-notebook can already see. No read here can reach ``ask_jobs``, ``ask_trace_
-steps``, ``answers``, ``memory_items``, ``conversations`` or ``reports``: the
-shared base cannot leak one member's usage to another because it never has it.
-``backend/tests/test_agent_profile_isolation_guard.py`` pins that statically —
-a promise a reviewer has to re-check by hand is a promise that erodes.
+the acceptance criterion of this task). The base chain reads only the current
+base blocks plus notebook-level corpus aggregates (see ``corpus_stats`` for the
+exact list), every one of them data that every member of a shared notebook can
+already see. No read here can reach ``ask_jobs``, ``ask_trace_steps``,
+``answers``, ``memory_items``, ``conversations`` or ``reports``: the shared base
+cannot leak one member's usage to another because it never has it. Private
+Memory is excluded a second time at the source level — its synthetic source
+rows and the KG objects they own are subtracted from every aggregate — because
+"notebook-level" is not the same as "shared": a confirmed Memory lives in the
+notebook but belongs to one member.
+``backend/tests/test_agent_profile_isolation_guard.py`` pins both halves
+statically — a promise a reviewer has to re-check by hand is a promise that
+erodes.
 
 The per-(notebook, member) OVERLAY chain, which DOES read one member's own
 trace (under a ``WHERE user_id = ?`` predicate written into the reading SQL),
@@ -32,7 +37,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from app.core.llm import cap_kwargs
 from app.repositories.ports import (
     AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE,
     AGENT_PROFILE_INTERRUPTED_MESSAGE,
@@ -46,7 +50,10 @@ from app.repositories.ports import (
     SourceStorePort,
 )
 from app.services import background_jobs
-from app.services.agent_profile_block import AGENT_PROFILE_VALUE_MAX_CHARS
+from app.services.agent_profile_block import (
+    AGENT_PROFILE_VALUE_MAX_CHARS,
+    clip_block_value,
+)
 from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.kg.json_utils import safe_json
 from app.services.knowledge_contracts import USABLE_STATUSES
@@ -91,6 +98,32 @@ AGENT_PROFILE_STATS_MAX_DOCUMENTS = 40
 #: this is not traceability, it is the model copying the roster back.
 AGENT_PROFILE_EVIDENCE_MAX_IDS = 8
 
+#: How many recurring concept names the statistics may name, how long one name
+#: may be, and how many characters the whole section may spend. Three caps
+#: rather than one because they fail differently: a library with 200 000
+#: concepts would otherwise send a roster, one pathological cluster name can be
+#: a whole paragraph, and CJK names make "24 × 48" a poor proxy for the real
+#: budget. The section is what makes ``key_entities`` answerable at all — the
+#: other aggregates are counts, and no count can say what a library is ABOUT.
+AGENT_PROFILE_TOP_CONCEPTS = 24
+AGENT_PROFILE_CONCEPT_NAME_MAX_CHARS = 48
+AGENT_PROFILE_CONCEPT_SECTION_MAX_CHARS = 600
+
+#: Output budget for the one consolidation call. Its own named constant rather
+#: than borrowing ``kg_extract_max_tokens`` (51 200): what this call may
+#: legitimately produce is three ~400-character values plus a short id list per
+#: block, i.e. low thousands of tokens at the absolute outside. Borrowing the KG
+#: extraction budget would let one malformed reply stream fifty thousand tokens
+#: of billed output that ``parse_base_reply`` then throws away in full, and
+#: would tie this call's cost to a number tuned for an entirely different shape.
+AGENT_PROFILE_MAX_OUTPUT_TOKENS = 2048
+
+#: ``parse_status`` values that mean "this document's text is available".
+#: Everything else that is not ``failed`` is still in flight, which is a third
+#: thing entirely and must not be reported as either a gap or a failure. Same
+#: three values the paper-metadata eligibility predicate uses.
+_PARSED_STATUSES = frozenset({"parsed", "extracting", "extracted"})
+
 
 class AgentProfileModelUnavailable(RuntimeError):
     """No chat service is bound to ``agent_profile_consolidate``."""
@@ -124,12 +157,24 @@ class CorpusStats:
     #: ``[(source_id, {kind: count})]``, richest first, already clipped to
     #: ``AGENT_PROFILE_STATS_MAX_DOCUMENTS``.
     per_document: tuple[tuple[str, Mapping[str, int]], ...]
-    #: Visible documents that yielded none of the listed element kinds — the
-    #: single most useful ``corpus_gaps`` signal available from aggregates.
+    #: Visible documents that yielded none of the LISTED element kinds. ⚠ Not
+    #: "documents with no content": a pure-prose document has neither tables nor
+    #: formulas nor images nor code blocks and is perfectly well parsed. The
+    #: renderer names the kinds for exactly that reason.
     documents_without_elements: int
     element_totals: Mapping[str, int]
     element_document_counts: Mapping[str, int]
     kg_objects: tuple[tuple[str, int], ...]
+    #: ``[(concept name, member count)]``, most-supported first — the only input
+    #: that can support ``key_entities``, and already free of private Memory.
+    key_concepts: tuple[tuple[str, int], ...] = ()
+    #: Visible documents whose parse ended in failure, and visible documents
+    #: that have not reached a parsed state yet. These are the REAL
+    #: "nothing came out of this document" signals, and keeping them apart from
+    #: ``documents_without_elements`` is what stops a prose library from being
+    #: described as unparsed.
+    documents_parse_failed: int = 0
+    documents_not_parsed: int = 0
     #: The ids the prompt actually served, i.e. the only ids an evidence list
     #: may legally contain.
     served_ids: frozenset[str] = field(default_factory=frozenset)
@@ -143,19 +188,16 @@ class _BaseOutcome:
     diagnostic: str
 
 
-def _clip_value(value: str) -> str:
-    """One line, capped at the per-block budget.
+def _clip_name(name: str) -> str:
+    """One concept name, collapsed to a line and capped.
 
-    The renderer collapses whitespace on the way OUT
-    (``agent_profile_block._clean``) so a stored multi-line value cannot forge
-    prompt structure; this collapses it on the way IN as well, because the
-    same value is also shown in the panel and edited by users there, and a
-    block whose stored form differs from every form anyone sees is a block
-    nobody can reason about.
+    Deliberately its own cap rather than ``clip_block_value``'s: this is one
+    item in a list of two dozen, not a whole block, and a 400-character item
+    would spend the entire section on one row.
     """
-    text = " ".join(str(value or "").split())
-    if len(text) > AGENT_PROFILE_VALUE_MAX_CHARS:
-        return text[: AGENT_PROFILE_VALUE_MAX_CHARS - 1] + "…"
+    text = " ".join(str(name or "").split())
+    if len(text) > AGENT_PROFILE_CONCEPT_NAME_MAX_CHARS:
+        return text[: AGENT_PROFILE_CONCEPT_NAME_MAX_CHARS - 1] + "…"
     return text
 
 
@@ -177,14 +219,42 @@ def render_corpus_block(stats: CorpusStats) -> str:
         for kind in ENUMERABLE_ELEMENT_KINDS
     )
     lines.append(f"elements by kind: {elements}")
+    # ⚠ Spell the kinds out. The earlier wording ("documents with none of those
+    # element kinds") reads, to a model writing ``corpus_gaps``, as "N documents
+    # produced nothing" — and in a pure-prose library that number is EVERY
+    # document, so the block came out saying the library had failed to parse.
+    # The two lines below are the ones that actually mean that, and they are
+    # separate numbers from separate columns.
     lines.append(
-        "documents with none of those element kinds: "
-        f"{stats.documents_without_elements}"
+        "documents with no tables/formulas/images/code blocks: "
+        f"{stats.documents_without_elements} (prose-only documents count here; "
+        "this is not a parse failure)"
     )
+    lines.append(f"documents that failed to parse: {stats.documents_parse_failed}")
+    lines.append(f"documents not finished parsing yet: {stats.documents_not_parsed}")
     kg_objects = ", ".join(
         f"{object_type} {count}" for object_type, count in stats.kg_objects
     ) or "none"
     lines.append(f"extracted knowledge objects: {kg_objects}")
+    if stats.key_concepts:
+        # Bounded twice: by item count upstream and by characters here, with
+        # the overflow disclosed rather than silently cut, so the model cannot
+        # read a clipped list as the library's complete vocabulary.
+        rendered: list[str] = []
+        spent = 0
+        for name, members in stats.key_concepts:
+            item = f"{_clip_name(name)} ({members})"
+            if spent + len(item) + 2 > AGENT_PROFILE_CONCEPT_SECTION_MAX_CHARS:
+                break
+            rendered.append(item)
+            spent += len(item) + 2
+        hidden = len(stats.key_concepts) - len(rendered)
+        suffix = f", +{hidden} more" if hidden > 0 else ""
+        if rendered:
+            lines.append(
+                "recurring concept names, each followed by how many extracted "
+                f"occurrences merged into it: {', '.join(rendered)}{suffix}"
+            )
     if stats.per_document:
         hidden = max(0, stats.documents - len(stats.per_document))
         suffix = f" (+{hidden} more documents not listed)" if hidden else ""
@@ -216,7 +286,7 @@ def render_current_blocks(blocks: Sequence[Mapping[str, Any]]) -> str:
     }
     for label in BASE_LABELS:
         block = by_label.get(label)
-        value = _clip_value(block.get("value") if block else "")
+        value = clip_block_value(block.get("value") if block else "")
         if not value:
             lines.append(f"- {label}: (empty)")
             continue
@@ -231,19 +301,28 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
 
     Whole-payload rejection (rather than per-block salvage) for anything
     STRUCTURAL — not a JSON object, no ``blocks`` list, a non-object entry, an
-    unknown label. A reply that invents a label is a reply that did not answer
+    unknown label, a ``value`` that is not a string, an ``evidence`` that is
+    present but is not a list. A reply that invents a label, or that hands back
+    a dict where a line of prose was asked for, is a reply that did not answer
     the question that was asked, and the fail-open outcome (keep the existing
     blocks) is strictly safer than writing the half of it that happened to
     parse. Overlay labels are rejected here too, by construction: they are not
     in ``BASE_LABELS``, and this chain has read nothing that could support
     them.
 
+    ⚠ The type checks are load-bearing, not defensive garnish: without them
+    ``str(...)`` would coerce a returned ``{"text": ...}`` into the literal
+    characters ``{'text': ...}`` and store that as the library's understanding,
+    where it would ride in every planning prompt until a person noticed.
+
     Per-entry salvage applies to exactly one thing: evidence ids the
     statistics never served are dropped. Those are a citation error, not a
     structural one — the claim itself may still be sound, and dropping the
     whole refresh over one hallucinated id would trade a real improvement for
     a bookkeeping detail. The count of what was dropped rides out in the
-    diagnostic.
+    diagnostic, and it counts the ids lost to the per-block cap as well: both
+    are "the model named a document that the stored evidence does not", and
+    reporting only half of that would make the number mean nothing.
     """
     if not isinstance(payload, Mapping):
         raise AgentProfileOutputRejected("reply_not_an_object")
@@ -261,7 +340,10 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
         if label in seen:
             raise AgentProfileOutputRejected("duplicate_label")
         seen.add(label)
-        value = _clip_value(entry.get("value"))
+        raw_value = entry.get("value")
+        if not isinstance(raw_value, str):
+            raise AgentProfileOutputRejected("value_not_a_string")
+        value = clip_block_value(raw_value)
         if not value:
             # An empty value means "I have nothing to say about this block",
             # which is the prompt's own instruction to OMIT it. It must not
@@ -269,22 +351,22 @@ def parse_base_reply(payload: object, served_ids: frozenset[str]) -> list[dict]:
             # own control), never a side effect of a quiet consolidation run.
             continue
         raw_evidence = entry.get("evidence")
-        evidence = [
+        if raw_evidence is not None and not isinstance(raw_evidence, list):
+            # ``None``/absent is the prompt's own "no single document is the
+            # reason" and stays legal; a string or an object is not.
+            raise AgentProfileOutputRejected("evidence_not_a_list")
+        raw_list = raw_evidence or []
+        kept = [
             source_id
-            for source_id in (raw_evidence if isinstance(raw_evidence, list) else [])
+            for source_id in raw_list
             if isinstance(source_id, str) and source_id in served_ids
-        ]
-        dropped = (
-            len(raw_evidence) - len(evidence)
-            if isinstance(raw_evidence, list)
-            else 0
-        )
+        ][:AGENT_PROFILE_EVIDENCE_MAX_IDS]
         parsed.append(
             {
                 "label": label,
                 "value": value,
-                "evidence": evidence[:AGENT_PROFILE_EVIDENCE_MAX_IDS],
-                "evidence_dropped": max(0, dropped),
+                "evidence": kept,
+                "evidence_dropped": max(0, len(raw_list) - len(kept)),
             }
         )
     return parsed
@@ -358,6 +440,15 @@ class AgentProfileConsolidationService:
 
         Shared with T6's manual "rebuild now" button, which is the same two
         steps without the threshold gate.
+
+        ⚠ This method does NOT consult ``profile_wiring_active``: it is the
+        shared entry point, and the kill switch is enforced by each caller's own
+        gate — ``note_corpus_change`` checks it before bumping, and T6's manual
+        endpoint must check it at the API layer before calling here. Putting the
+        check in both places would be harmless; leaving it out of the API layer
+        would not, so that requirement is written into T6's contract rather than
+        silently absorbed here (a caller that believes this method self-gates is
+        exactly how a "disabled" feature keeps running).
         """
         claimed = self.profiles.claim(notebook_id, BASE_CHAIN_OWNER)
         if claimed is None:
@@ -371,6 +462,14 @@ class AgentProfileConsolidationService:
                 # Not a pending-actions item: nothing here waits for a human
                 # decision, so ringing the bell would train users to ignore it.
                 notify_pending=False,
+                # ⚠ Waiting happens in the LIGHT maintenance pool's own queue,
+                # not in the row: the row went to ``running`` at claim time and
+                # stays there while the pool holds the callable. That is why the
+                # row's ``queued`` status is never written (it is kept in the
+                # CAS predicates and the startup sweep as defence for a future
+                # queue-then-run split), and why the panel must read "整理中"
+                # from ``running`` rather than expecting a queued state that no
+                # writer produces.
             )
         except BaseException:
             # The row is claimed but no thread will ever run it. Without this
@@ -407,16 +506,26 @@ class AgentProfileConsolidationService:
         """Execute one shared-base consolidation to a terminal state.
 
         ``claimed_signal`` is the ``pending_signal`` snapshot ``claim``
-        returned: on success it is exactly what this run consumed, so signals
-        that arrived WHILE it ran survive to trigger the next round. A failed
-        run consumes nothing — its triggering changes still count toward the
-        retry.
+        returned, and EVERY terminal path consumes exactly it — success,
+        failure and interrupt alike. Signals that arrived WHILE the run was in
+        flight therefore survive to trigger the next round, and a failed run
+        does NOT re-fire on the next single source change.
+
+        ⚠ That last half is a cost gate, and it is the reason failure consumes.
+        Keeping the signal on failure sounds kinder (the changes "still count"),
+        but it means a provider returning malformed JSON is billed once per
+        upload for as long as it stays broken: threshold reached → call →
+        rejected → counter still at the threshold → next upload calls again.
+        Charging the batch caps this chain at one call per threshold batch no
+        matter how the provider behaves. A transient failure is picked up by the
+        next batch of changes, or immediately by T6's manual rebuild.
 
         Every exit path settles. ``KeyboardInterrupt``/``SystemExit`` get their
         own clause because ``except Exception`` cannot see them, and a row left
         ``running`` holds this notebook's chain until the next restart.
         """
         started = time.perf_counter()
+        consumed = max(0, int(claimed_signal))
 
         def latency_ms() -> int:
             return round((time.perf_counter() - started) * 1000)
@@ -429,6 +538,7 @@ class AgentProfileConsolidationService:
                 AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
                 "model_unconfigured",
                 latency_ms(),
+                consumed,
             )
         except AgentProfileOutputRejected as exc:
             # Fail-open: the blocks that were already there stand untouched.
@@ -437,6 +547,7 @@ class AgentProfileConsolidationService:
                 AGENT_PROFILE_MALFORMED_MESSAGE,
                 exc.diagnostic,
                 latency_ms(),
+                consumed,
             )
         except (KeyboardInterrupt, SystemExit):
             self._safe_settle(
@@ -444,7 +555,7 @@ class AgentProfileConsolidationService:
                 "failed",
                 failure_reason=AGENT_PROFILE_INTERRUPTED_MESSAGE,
                 diagnostic="worker_interrupted",
-                consumed=0,
+                consumed=consumed,
             )
             self._emit("failed", notebook_id, latency_ms=latency_ms())
             raise
@@ -454,6 +565,7 @@ class AgentProfileConsolidationService:
                 AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE,
                 "internal_error",
                 latency_ms(),
+                consumed,
             )
             raise
         self._safe_settle(
@@ -461,7 +573,7 @@ class AgentProfileConsolidationService:
             "done",
             diagnostic=outcome.diagnostic,
             blocks_written=outcome.written,
-            consumed=max(0, int(claimed_signal)),
+            consumed=consumed,
         )
         self._emit(
             "done",
@@ -493,7 +605,7 @@ class AgentProfileConsolidationService:
         raw = client.chat_json(
             [{"role": "user", "content": prompt}],
             AGENT_PROFILE_SCHEMA_HINT,
-            **cap_kwargs(client, "kg_extract_max_tokens"),
+            max_tokens=AGENT_PROFILE_MAX_OUTPUT_TOKENS,
         )
         if not str(raw or "").strip():
             raise AgentProfileOutputRejected("empty_reply")
@@ -575,16 +687,29 @@ class AgentProfileConsolidationService:
     def corpus_stats(self, notebook_id: str) -> CorpusStats:
         """The base chain's ENTIRE view of the library.
 
-        Three reads, all of them existing bounded aggregates:
+        All of it aggregates, all of it notebook-level, read from ONE snapshot:
 
         * ``source_change_signal_rows`` — one query for the whole notebook,
           and it already excludes private Memory synthetic rows. Only rows it
           marks ``user_visible`` are used, so hidden Knowhow/Memory projections
           stay out of the shared base entirely; that also makes the document
           count here mean the same thing the source tab shows.
+        * ``visible_parse_status_counts`` — how many of those documents failed
+          to parse / have not finished. Separate from "documents with no tables
+          or formulas", which is not a failure at all in a prose library.
         * ``element_type_count_rows`` — one grouped, index-covered count per
           batch of those visible ids.
-        * ``knowledge_type_count_rows`` — the seq-gated KG type counts.
+        * ``knowledge_type_count_rows`` minus
+          ``knowledge_type_count_rows_for_sources(memory_source_ids)`` — the KG
+          type counts, less the objects a private Memory owns. The seq-gated
+          count is notebook-wide and has no owner filter, so without the
+          subtraction one member's Memory would inflate a number every member
+          reads.
+        * ``top_concept_names`` — the recurring concept names, with the same
+          Memory exclusion pushed into the query. This is the only input that
+          can support ``key_entities``; counts cannot say what a library is
+          about, so before this read that block had no basis and the prompt's
+          own "omit what you cannot support" rule kept it permanently empty.
 
         Nothing in this method can reach usage data. That is the property
         ``test_agent_profile_isolation_guard.py`` pins, and the reason this
@@ -595,6 +720,9 @@ class AgentProfileConsolidationService:
             visible_ids = [
                 str(row[0]) for row in signals if bool(row[3])
             ]
+            parse_status_rows = list(
+                self.sources.visible_parse_status_counts(db, notebook_id)
+            )
             element_rows = (
                 list(
                     self.sources.element_type_count_rows(
@@ -607,6 +735,28 @@ class AgentProfileConsolidationService:
             kg_rows = list(
                 self.queries.knowledge_type_count_rows(
                     db, notebook_id, USABLE_STATUSES
+                )
+            )
+            # One extra query only when the notebook HAS private Memory: a
+            # reference library has none and keeps paying exactly what it paid
+            # before.
+            memory_ids = list(self.sources.memory_source_ids(db, notebook_id))
+            memory_kg_rows = (
+                list(
+                    self.queries.knowledge_type_count_rows_for_sources(
+                        db, notebook_id, memory_ids, USABLE_STATUSES
+                    )
+                )
+                if memory_ids
+                else []
+            )
+            concept_rows = list(
+                self.queries.top_concept_names(
+                    db,
+                    notebook_id,
+                    USABLE_STATUSES,
+                    memory_ids,
+                    AGENT_PROFILE_TOP_CONCEPTS,
                 )
             )
         per_source: dict[str, dict[str, int]] = {}
@@ -624,11 +774,26 @@ class AgentProfileConsolidationService:
             per_source.items(),
             key=lambda item: (-sum(item[1].values()), item[0]),
         )[:AGENT_PROFILE_STATS_MAX_DOCUMENTS]
+        kg_counts: dict[str, int] = {
+            str(row["object_type"]): int(row["c"] or 0) for row in kg_rows
+        }
+        for row in memory_kg_rows:
+            object_type = str(row["object_type"])
+            if object_type in kg_counts:
+                # ``max(0, …)`` is a floor, not a fix: the two counts share one
+                # connection but not one snapshot, so a Memory extraction
+                # committing between them can make the subtrahend the larger
+                # number. A negative count would then be rendered into the
+                # prompt as fact.
+                kg_counts[object_type] = max(
+                    0, kg_counts[object_type] - int(row["c"] or 0)
+                )
         kg_objects = tuple(
-            (str(row["object_type"]), int(row["c"]))
-            for row in kg_rows
-            if int(row["c"] or 0) > 0
+            (object_type, count)
+            for object_type, count in kg_counts.items()
+            if count > 0
         )
+        parse_counts = {str(status): int(count) for status, count in parse_status_rows}
         return CorpusStats(
             documents=len(visible_ids),
             per_document=tuple((sid, dict(counts)) for sid, counts in ranked),
@@ -636,6 +801,15 @@ class AgentProfileConsolidationService:
             element_totals=totals,
             element_document_counts=document_counts,
             kg_objects=tuple(sorted(kg_objects, key=lambda item: (-item[1], item[0]))),
+            key_concepts=tuple(
+                (str(name), int(members)) for name, members in concept_rows
+            ),
+            documents_parse_failed=parse_counts.get("failed", 0),
+            documents_not_parsed=sum(
+                count
+                for status, count in parse_counts.items()
+                if status not in _PARSED_STATUSES and status != "failed"
+            ),
             served_ids=frozenset(sid for sid, _counts in ranked),
         )
 
@@ -646,13 +820,22 @@ class AgentProfileConsolidationService:
         failure_reason: str,
         diagnostic: str,
         latency_ms: int,
+        consumed: int,
     ) -> dict:
+        """Settle a run that reached a terminal failure.
+
+        ``consumed`` is required, not defaulted to zero: the one place that
+        legitimately consumes nothing is ``start_base``'s submit failure (no run
+        ever existed), and making that the DEFAULT would silently re-introduce
+        the per-upload retry billing the moment someone adds a new failure path
+        without thinking about the counter.
+        """
         self._safe_settle(
             notebook_id,
             "failed",
             failure_reason=failure_reason,
             diagnostic=diagnostic,
-            consumed=0,
+            consumed=max(0, int(consumed)),
         )
         self._emit("failed", notebook_id, latency_ms=latency_ms)
         return {"notebook_id": notebook_id, "failed": diagnostic}
