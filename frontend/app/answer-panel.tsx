@@ -23,6 +23,7 @@ import {
   renderTextWithReferenceNumbers,
   splitInlineLatex,
   type AnswerReference,
+  type CitationImageLike,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
 import { AuthedImage } from "./authed-image";
@@ -746,14 +747,30 @@ function referenceLocation(reference: AnswerReference): string {
 }
 
 
+// 检索结果带图(T1/T2)：anchor 优先、citation 兜底,与本文件其余 reference* helper
+// 的既有惯例一致(anchor/citation 二选一,由 buildAnswerReferences 全有全无保证)。
+// 枚举清单行的引用(evidence_context.py collection_item_citations)不调
+// attach_citation_images,故 images 恒缺席;但枚举行**锚点**走的是别的装配点,可能带
+// 图——这里不做特判,读取路径对两者一视同仁,由数据形状自然决定是否渲染。
+function referenceImages(reference: AnswerReference): CitationImageLike[] {
+  return reference.anchor?.images ?? reference.citation?.images ?? [];
+}
+
+
 function SelectedReferenceDetail({
   reference,
+  notebookId,
   notebookNames,
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
   onOpenSource,
 }: {
   reference: AnswerReference;
+  /** 检索结果带图(T1/T2)：本段附图的资产 URL 恒用**当前 active notebook**——同
+   *  ElementCollectionItemRow 的既有口径,后端按资产自己声明的所属库在参与集内
+   *  解析,跨库图片因此也能取到。可为 null(极少数尚未选中笔记本的调用点);此时
+   *  附图区不渲染(与「无图」等价——没有可用的代理端点)。 */
+  notebookId: string | null;
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，供引用徽章把 notebook_id 解成人类可读的库名。 */
   notebookNames: Record<string, string>;
@@ -789,6 +806,11 @@ function SelectedReferenceDetail({
   // 出现在同一条 reference 上（buildAnswerReferences 二选一），但顺序仍按
   // "更具体的赢"的既有惯例书写，与 knowhow-citation.test.mjs 的显式断言一致。
   const knowhowRef = mapCitationKnowhowRef(reference.citation?.knowhow ?? reference.anchor?.knowhow);
+  // 检索结果带图(T1/T2)。图片与「查看原文」按钮共用同一个已解析的 sourceId——
+  // 后端 attach_citation_images 只从绑定证据自己所在 chunk/元素的候选里取图,
+  // 因此一条引用下的全部附图恒与该引用同源,不存在附图跨到别的来源的情况。
+  const images = referenceImages(reference);
+  const canOpenImageSource = Boolean(onOpenSource && sourceId);
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
@@ -871,6 +893,40 @@ function SelectedReferenceDetail({
           原始文件：{sourceFileName}
         </small>
       )}
+      {/* 检索结果带图(T1/T2)：与上方引证内容(snippet/来源/原始文件)用独立区块 +
+          分隔线区分——本段附图不是模型引用过的证据,只是证据片段附近的图,绝不能
+          让它看起来像 snippet 的一部分。notebookId 为空(极少数尚未选中笔记本的
+          调用点)时没有可用的资产代理端点,整个区块不渲染,与"无附图"等价。 */}
+      {images.length > 0 && notebookId && (
+        <div className="cite-detail-images">
+          <span className="cite-detail-images-label">本段附图</span>
+          <ul className="cite-detail-image-list">
+            {images.map((image) => {
+              const imageUrl = sourceImageAssetUrl(API_BASE, notebookId, image.asset_id);
+              const thumbnail = imageUrl
+                ? <AuthedImage url={imageUrl} alt={image.caption || "附图"} />
+                : <p className="tool-hint">图片不可用</p>;
+              return (
+                <li key={image.element_id} className="cite-detail-image-item">
+                  {canOpenImageSource ? (
+                    <button
+                      type="button"
+                      className="cite-detail-image-button"
+                      onClick={() => onOpenSource!(sourceId, image.element_id)}
+                      title="在来源详情中查看这张附图"
+                    >
+                      {thumbnail}
+                    </button>
+                  ) : thumbnail}
+                  {image.caption && (
+                    <small className="cite-detail-image-caption">{image.caption}</small>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
     </aside>
   );
 }
@@ -878,6 +934,7 @@ function SelectedReferenceDetail({
 
 function CitationPopover({
   reference,
+  notebookId,
   notebookNames,
   anchorRect,
   onClose,
@@ -886,6 +943,9 @@ function CitationPopover({
   onOpenSource,
 }: {
   reference: AnswerReference;
+  /** 检索结果带图(T1/T2)：透传给 SelectedReferenceDetail 拼装资产 URL,见其
+   *  完整注释。 */
+  notebookId: string | null;
   notebookNames: Record<string, string>;
   anchorRect: DOMRect;
   onClose: () => void;
@@ -937,6 +997,7 @@ function CitationPopover({
     >
       <SelectedReferenceDetail
         reference={reference}
+        notebookId={notebookId}
         notebookNames={notebookNames}
         onOpenKnowledgeGraph={onOpenKnowledgeGraph}
         onOpenKnowhowRow={onOpenKnowhowRow}
@@ -1294,6 +1355,7 @@ export function AnswerView({
       {citePopover && (
         <CitationPopover
           reference={citePopover.reference}
+          notebookId={notebookId}
           notebookNames={notebookNames}
           anchorRect={citePopover.rect}
           onClose={() => setCitePopover(null)}
