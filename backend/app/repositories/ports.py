@@ -2764,6 +2764,19 @@ class GroupAdminRequiredError(RuntimeError):
     """
 
 
+class GroupMembershipRequiredError(RuntimeError):
+    """写事务在落库前复核时发现请求者已不是目标群组的**成员**(群组知识共享 P2-T3)。
+
+    与 `GroupAdminRequiredError` 同源、只是轴更低一档:提交共享申请只要求是组成员(任意
+    role),不要求组管理员。路由层查过一次「你在不在这个组里」,但「被移出组」可以发生在
+    那次查询与写入之间——少了事务内这一次复核,一个刚被移出组的人仍能落一条**非成员**的
+    待审批申请,而组管理员的审核队列里会出现一个已经不属于本组的人。
+
+    路由把它映射成 **404**(与路由自己那次前置检查逐字同一个响应):群组维度的「看不见」
+    口径是 404,非成员与「组不存在」不可区分。
+    """
+
+
 class ShareRequestNotPendingError(RuntimeError):
     """撤回一条**已被决定**(approved/rejected)的共享申请(群组知识共享 P2-T3)。
 
@@ -2837,7 +2850,9 @@ class GroupStorePort(Protocol):
     ) -> dict:
         """新建一条共享申请;撞 `uq_share_requests_one_pending` **不报错**,而是返回
         已存在的那条 `pending` 行(幂等)——申请者刷新页面重复提交是常见操作。组已被
-        并发删掉(FK 冲突)抛 `GroupNotFoundError`。"""
+        并发删掉(FK 冲突)抛 `GroupNotFoundError`;`requested_by` 已不是该组成员抛
+        `GroupMembershipRequiredError`——两条复核都在**同一写事务内**,路由层那次前置
+        查询与写入之间的窗口足够让组被删、让人被移出组(codex #519 R2 P2-1)。"""
         ...
     def list_pending_share_requests(self, group_id: str) -> list[dict]:
         """某个组的**待审批**申请清单(组管理员的审核队列)。`status='pending'` 精确匹配。"""
@@ -2848,17 +2863,35 @@ class GroupStorePort(Protocol):
         """请求者本人对某本库发起过的全部申请(弹窗里回显「待审批 / 已驳回」)。"""
         ...
     def approve_share_request(
-        self, group_id: str, request_id: str, *, decided_by: str
+        self,
+        group_id: str,
+        request_id: str,
+        *,
+        decided_by: str,
+        decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
-        """批准:**同一写事务**内复核申请仍 pending + 组在 + 写 `(group, viewer)` 授权边
-        (已共享则幂等复用)+ 状态置 approved、写 `decided_by`/`decided_at`。申请不存在
-        或已被决定返回 `None`(路由 → 404)。"""
+        """批准:**同一写事务**内复核申请仍 pending + 组在 + `decided_by` 仍有审批资格
+        + 写 `(group, viewer)` 授权边(已共享则幂等复用)+ 状态置 approved、写
+        `decided_by`/`decided_at`。申请不存在或已被决定返回 `None`(路由 → 404);
+        `decided_by` 已不是该组组管理员抛 `GroupAdminRequiredError`(路由 → 403)。
+
+        ``decided_by_is_system_admin`` 由**路由**传入,不在 store 里读 `users.role` 判定
+        (store 不做身份解析)。它承载的是 `_require_group_admin` 的系统管理员运维旁路:
+        系统管理员不必是组成员也能审批,所以事务内的复核判据是「本人是该组组管理员 **或**
+        路由已证明他是系统管理员」。
+        """
         ...
     def reject_share_request(
-        self, group_id: str, request_id: str, *, decided_by: str
+        self,
+        group_id: str,
+        request_id: str,
+        *,
+        decided_by: str,
+        decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
         """驳回:状态置 rejected + `decided_by`/`decided_at`。申请不存在或已被决定返回
-        `None`。不写任何授权边。"""
+        `None`。不写任何授权边。审批资格复核与旁路参数同 `approve_share_request`——驳回
+        同样是组管理员对本组的决定,同一个 TOCTOU 窗口。"""
         ...
     def delete_share_request(
         self, notebook_id: str, request_id: str, requester_id: str

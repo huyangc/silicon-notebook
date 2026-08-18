@@ -67,6 +67,12 @@ def _make_notebook(client: TestClient, headers: dict, name: str = "库") -> str:
     return client.post("/api/notebooks", json={"name": name}, headers=headers).json()["id"]
 
 
+def _promote_to_system_admin(repo, user_id: str) -> None:
+    """把用户提成**系统**管理员(`users.role`,与组内 role 两条轴,别混用)。"""
+    with repo._write() as db:
+        db.execute("UPDATE users SET role='admin' WHERE id=?", (user_id,))
+
+
 def _add_member(client, admin_headers, group_id, user_id, role="member"):
     return client.put(
         f"/api/groups/{group_id}/members/{user_id}",
@@ -462,6 +468,8 @@ def test_decided_at_is_null_while_pending_and_iso_once_decided(repo):
     _seed_users(repo, "sr-owner", "sr-admin")
     _seed_notebook(repo, "nb-sr", "sr-owner")
     group = store.create_group(name="g", kind="project", description="", created_by="sr-admin")
+    # 申请人必须真的是组成员——事务内的成员资格复核是无条件的(R2 P2-1)。
+    store.upsert_member(group["id"], "sr-owner", role="member", added_by="sr-admin")
 
     created = store.create_share_request("nb-sr", group_id=group["id"], requested_by="sr-owner")
     assert created["status"] == "pending"
@@ -471,6 +479,159 @@ def test_decided_at_is_null_while_pending_and_iso_once_decided(repo):
     assert decided["status"] == "approved"
     assert isinstance(decided["decided_at"], str) and decided["decided_at"]
     assert decided["decided_by"] == "sr-admin"
+
+
+# ------------------------------------------------- 事务内的授权复检(TOCTOU)
+
+
+def _app_group_store():
+    """**应用**(TestClient)手上那个 GroupStore 实例。
+
+    要在 HTTP 请求的执行路径中间插桩(模拟「守卫过了、写事务还没开」这个并发窗口),
+    必须打应用自己那个实例的桩;打 `repo._runtime.groups` 的桩路由压根看不见,请求会
+    一路成功,而测试看起来只是「断言写错了」(与 `test_group_routes.py` 同款)。
+    """
+    from app.api import deps
+
+    return deps.repository()._runtime.groups
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_a_demoted_admin_cannot_decide_in_the_toctou_window(
+    tmp_path, monkeypatch, decision
+):
+    """守卫过了、写事务还没开的窗口里被降级 → 审批/驳回必须被事务内复核拦下(403)。
+
+    这正是 codex #519 R2 P1:批准会把**整组**的读权放出去,而 `_require_group_admin`
+    与写事务之间的窗口足够让这个人被降级。窗口用桩模拟——降级动作插在守卫那次
+    `user_group_role` 之后、store 写事务之前,与 `test_group_routes.py` 里模拟并发删组
+    的手法逐字相同。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    # 再加一名组管理员,好让 boss 可以被合法降级(最后一名组管理员保护会拦住降级)。
+    deputy, deputy_id, _ = _new_user(client)
+    _add_member(client, boss, group_id, deputy_id, role="admin")
+    boss_id = client.get("/api/me", headers=boss).json()["id"]
+
+    store = _app_group_store()
+    original = store.user_group_role
+
+    def demote_then_answer(gid, uid):
+        role = original(gid, uid)
+        if gid == group_id and uid == boss_id:
+            # 守卫刚读到 "admin",紧接着他被降级——写事务尚未开始。
+            store.upsert_member(gid, boss_id, role="member", added_by=deputy_id)
+        return role
+
+    monkeypatch.setattr(store, "user_group_role", demote_then_answer)
+    denied = client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/{decision}", headers=boss
+    )
+    assert denied.status_code == 403, denied.text
+    assert denied.headers.get("X-User-Message") == "1"
+
+    # 申请仍是 pending:被拒的决定一点副作用都不能留下。
+    monkeypatch.setattr(store, "user_group_role", original)
+    assert [r["id"] for r in _pending_for(client, deputy, group_id).json()] == [request_id]
+    # 批准那一支还要证明**没有**把整组的读权放出去。
+    assert client.get(f"/api/notebooks/{notebook_id}/grants", headers=librarian).json() == []
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_a_system_admin_can_still_decide_without_being_a_group_member(
+    tmp_path, monkeypatch, repo, decision
+):
+    """系统管理员的运维旁路必须**穿过** store 的资格复核(P2-T2 裁决 A)。
+
+    `_require_group_admin` 放行系统管理员而不要求他是组成员,所以事务内那次复核的判据
+    是「本人是组管理员 **或** 路由已证明他是系统管理员」。只按组成员行判会把旁路整个
+    掐断——系统管理员会在自己放行过的守卫之后吃一个 403。
+    """
+    client = _client(tmp_path, monkeypatch)
+    _boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    root, root_id, _ = _new_user(client)
+    _promote_to_system_admin(repo, root_id)
+    # 他**不是**这个组的成员,连成员行都没有。
+    assert client.get(f"/api/groups/{group_id}", headers=root).status_code == 200
+
+    decided = client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/{decision}", headers=root
+    )
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["status"] == ("approved" if decision == "approve" else "rejected")
+    assert decided.json()["decided_by"] == root_id
+
+
+def test_a_member_removed_in_the_toctou_window_cannot_file_a_request(
+    tmp_path, monkeypatch
+):
+    """申请人的成员资格同样要在事务内复核(codex #519 R2 P2-1)。
+
+    路由查过「你在不在这个组里」之后、插入之前被移出组,仍能落一条**非成员**的 pending
+    申请——组管理员的审核队列里会出现一个已经不属于本组的人。非成员与「组不存在」同为
+    404(群组可见性口径),与路由自己那次前置检查逐字同一个响应。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, librarian_id, group_id, notebook_id = _make_member_owned_notebook(client)
+
+    store = _app_group_store()
+    original = store.user_group_role
+
+    def evict_then_answer(gid, uid):
+        role = original(gid, uid)
+        if gid == group_id and uid == librarian_id:
+            store.remove_member(gid, librarian_id)  # 守卫刚过,写事务还没开
+        return role
+
+    monkeypatch.setattr(store, "user_group_role", evict_then_answer)
+    denied = _submit(client, librarian, notebook_id, group_id)
+    assert denied.status_code == 404, denied.text
+    assert denied.json()["detail"] == "群组不存在"
+
+    # 一条非成员的申请都不该落库。
+    monkeypatch.setattr(store, "user_group_role", original)
+    assert _pending_for(client, boss, group_id).json() == []
+
+
+def test_store_level_decision_and_membership_rechecks_are_unconditional(repo):
+    """直接走 store:非组管理员批准/驳回 → `GroupAdminRequiredError`;非成员申请 →
+    `GroupMembershipRequiredError`。不经路由,证明复核住在写事务里而不是守卫里。"""
+    from app.repositories.ports import (
+        GroupAdminRequiredError,
+        GroupMembershipRequiredError,
+    )
+
+    store = repo._runtime.groups
+    _seed_users(repo, "tc-admin", "tc-member", "tc-outsider")
+    _seed_notebook(repo, "nb-tc", "tc-member")
+    group = store.create_group(
+        name="g", kind="project", description="", created_by="tc-admin"
+    )
+    store.upsert_member(group["id"], "tc-member", role="member", added_by="tc-admin")
+    request = store.create_share_request(
+        "nb-tc", group_id=group["id"], requested_by="tc-member"
+    )
+
+    # 普通成员与完全的外人都不能审批。
+    for who in ("tc-member", "tc-outsider"):
+        with pytest.raises(GroupAdminRequiredError):
+            store.approve_share_request(group["id"], request["id"], decided_by=who)
+        with pytest.raises(GroupAdminRequiredError):
+            store.reject_share_request(group["id"], request["id"], decided_by=who)
+    # 旁路开关放行(路由证明他是系统管理员)。
+    assert store.reject_share_request(
+        group["id"], request["id"],
+        decided_by="tc-outsider", decided_by_is_system_admin=True,
+    )["status"] == "rejected"
+
+    # 非成员发不出申请。
+    with pytest.raises(GroupMembershipRequiredError):
+        store.create_share_request("nb-tc", group_id=group["id"], requested_by="tc-outsider")
 
 
 def test_decided_at_two_state_invariant_actually_rejects_bad_values():
@@ -508,6 +669,8 @@ def test_the_partial_unique_index_holds_at_the_store_layer(repo):
     _seed_users(repo, "u-o", "u-a")
     _seed_notebook(repo, "nb-u", "u-o")
     group = store.create_group(name="g", kind="project", description="", created_by="u-a")
+    # 申请人必须真的是组成员——事务内的成员资格复核是无条件的(R2 P2-1)。
+    store.upsert_member(group["id"], "u-o", role="member", added_by="u-a")
 
     first = store.create_share_request("nb-u", group_id=group["id"], requested_by="u-o")
     second = store.create_share_request("nb-u", group_id=group["id"], requested_by="u-o")

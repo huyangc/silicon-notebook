@@ -72,6 +72,7 @@ from app.models.identity import UserProfile
 from app.repositories.ports import (
     GroupAdminRequiredError,
     GroupGrantAlreadyExists,
+    GroupMembershipRequiredError,
     GroupNotFoundError,
     LastGroupAdminError,
     ShareRequestNotPendingError,
@@ -478,8 +479,12 @@ def create_share_request_route(
     的库在,但他不知道那个组存不存在,统一 404 不泄露组的存在性。
 
     幂等:同库同组已有一条待审批申请时,`create_share_request` **返回既有那条**而不是
-    报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。组在守卫通过
-    之后、写事务落库之前被并发删掉 → `GroupNotFoundError` → 404。
+    报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。
+
+    ⚠ 这里的前置查询**只用来给出友好文案**,承重的复核在 store 的写事务里:组在守卫通过
+    之后被删 → `GroupNotFoundError`;申请人在那之后被移出组 → `GroupMembershipRequiredError`
+    (codex #519 R2 P2-1)。两者都映射成同一个 404 —— 与上面那次前置检查逐字同一个响应,
+    群组维度的「看不见」口径不因为走到了哪一层而变。
     """
     groups = group_repository()
     group_id = payload.group_id.strip()
@@ -489,7 +494,7 @@ def create_share_request_route(
         request = groups.create_share_request(
             notebook_id, group_id=group_id, requested_by=user.id
         )
-    except GroupNotFoundError:
+    except (GroupNotFoundError, GroupMembershipRequiredError):
         raise _group_not_found()
     return ShareRequestItem(**request)
 
@@ -575,11 +580,25 @@ def approve_share_request_route(
     已共享(同库同组已有边)时幂等——不因「已经共享过」让批准失败,那会留下一条永远批
     不掉的申请。申请不存在或已被其他管理员决定 → 404(`approve_share_request` 返回
     `None`,并发双审由 store 的行锁 + 精确状态匹配挡住)。
+
+    ⚠ 下面这道守卫**不是**最终判定:它与写事务之间有一个窗口,足够让这个人被降级或移出
+    组,而批准会把**整组**的读权放出去(codex #519 R2 P1)。store 因此在同一写事务里再
+    复核一次审批资格,不成立抛 `GroupAdminRequiredError` → **403**。这里的 403 不退化成
+    404:能走到这一步说明他刚刚还是这个组的管理员,组的存在性对他本来就不是秘密——与
+    `create_notebook_grant_route` 的同款取舍一致。系统管理员的运维旁路必须一路传到 store
+    (他不必是组成员),所以显式把 `_is_system_admin(user)` 交给它,而不是让 store 去读
+    `users.role`(store 不做身份解析)。
     """
     _require_group_admin(group_id, user)
-    decided = group_repository().approve_share_request(
-        group_id, request_id, decided_by=user.id
-    )
+    try:
+        decided = group_repository().approve_share_request(
+            group_id,
+            request_id,
+            decided_by=user.id,
+            decided_by_is_system_admin=_is_system_admin(user),
+        )
+    except GroupAdminRequiredError:
+        raise user_error(403, "你不是这个群组的组管理员,无法审批共享申请")
     if decided is None:
         raise user_error(404, "这条待审批的共享申请不存在或已被处理")
     return ShareRequestItem(**decided)
@@ -598,11 +617,20 @@ def reject_share_request_route(
 
     申请不存在或已被决定 → 404,与批准同一口径。驳回后申请者可看到「已驳回」,并可对同
     库同组重新发起(rejected 不占那条部分唯一索引,`WHERE status='pending'` 才占)。
+
+    审批资格的事务内复核与系统管理员旁路同 `approve_share_request_route`:驳回虽然不发
+    授权边,但它同样是一个终态决定(把别人的申请判死),被降级的人不该还能做。
     """
     _require_group_admin(group_id, user)
-    decided = group_repository().reject_share_request(
-        group_id, request_id, decided_by=user.id
-    )
+    try:
+        decided = group_repository().reject_share_request(
+            group_id,
+            request_id,
+            decided_by=user.id,
+            decided_by_is_system_admin=_is_system_admin(user),
+        )
+    except GroupAdminRequiredError:
+        raise user_error(403, "你不是这个群组的组管理员,无法审批共享申请")
     if decided is None:
         raise user_error(404, "这条待审批的共享申请不存在或已被处理")
     return ShareRequestItem(**decided)

@@ -179,6 +179,24 @@ test("普通成员没有管理入口,也不去读「共享给本组的知识库�
   expect(screen.getByRole("button", { name: "退出群组" })).toBeInTheDocument();
 });
 
+// 新建的组:创建者恒是组管理员,所以「待审批申请」区必然渲染;不初始化 shareRequests
+// 就会把 null 渲染成「加载中…」并永久卡在那里,直到关掉重开(codex #519 R2 P2-2)。
+test("新建群组后审批区显示空态而不是永久「加载中」", async () => {
+  const user = userEvent.setup();
+  vi.mocked(createGroup).mockResolvedValue({ ...ADMIN_DETAIL, id: "g9", name: "新组" });
+  renderModal();
+
+  await screen.findByText("封装项目");
+  await user.type(screen.getByLabelText("群组名称"), "新组");
+  await user.click(screen.getByRole("button", { name: "创建群组" }));
+
+  await screen.findByText("待审批申请");
+  expect(await screen.findByText("没有待审批的共享申请。")).toBeInTheDocument();
+  expect(screen.queryByText("加载中…")).not.toBeInTheDocument();
+  // 新组的待审批集合可证明为空,不必多发一次必然返回 [] 的请求。
+  expect(listGroupShareRequests).not.toHaveBeenCalled();
+});
+
 test("组管理员看到「待审批申请」区,可批准(写边、刷新)或驳回", async () => {
   const user = userEvent.setup();
   vi.mocked(listGroupShareRequests)
