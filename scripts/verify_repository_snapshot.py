@@ -3128,5 +3128,63 @@ MIGRATION_MANIFEST[(49, 50)] = {
 }
 
 
+# v51: Agentic Memory P1 (zero behavior change — no reader or writer anywhere in
+# the codebase consumes these two tables yet). Same cascade as every other hop:
+# broadcast onto every prior hop key rebased to v51, then register the explicit
+# (50, 51) single hop. SQL text matches sqlite_master storage verbatim (SQLite
+# strips "IF NOT EXISTS" and keeps the source indentation). The migration
+# deliberately creates no index, so there is no AGENT_PROFILE_INDEXES content to
+# broadcast — the empty dict is spelled out rather than omitted so a later
+# reader can see the absence was decided (the primary keys cover every read
+# path).
+AGENT_PROFILE_TABLES = {
+    "agent_notebook_profile": """CREATE TABLE agent_notebook_profile (
+                  notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id      TEXT NOT NULL DEFAULT '',
+                  label         TEXT NOT NULL,
+                  value         TEXT NOT NULL DEFAULT '',
+                  evidence_json TEXT NOT NULL DEFAULT '[]',
+                  history_json  TEXT NOT NULL DEFAULT '[]',
+                  revision      INTEGER NOT NULL DEFAULT 1,
+                  updated_by    TEXT NOT NULL DEFAULT '',
+                  updated_origin TEXT NOT NULL DEFAULT 'job',
+                  created_at    TEXT NOT NULL,
+                  updated_at    TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id, label)
+                )""",
+    "agent_profile_jobs": """CREATE TABLE agent_profile_jobs (
+                  notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id      TEXT NOT NULL DEFAULT '',
+                  status        TEXT NOT NULL DEFAULT 'idle',
+                  pending_signal INTEGER NOT NULL DEFAULT 0,
+                  runs          INTEGER NOT NULL DEFAULT 0,
+                  blocks_written INTEGER NOT NULL DEFAULT 0,
+                  failure_reason TEXT NOT NULL DEFAULT '',
+                  diagnostic    TEXT NOT NULL DEFAULT '',
+                  started_at    TEXT NOT NULL DEFAULT '',
+                  finished_at   TEXT NOT NULL DEFAULT '',
+                  created_at    TEXT NOT NULL,
+                  updated_at    TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id)
+                )""",
+}
+AGENT_PROFILE_INDEXES: dict[str, str] = {}
+MIGRATION_MANIFEST = {
+    (key[0], 51, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **AGENT_PROFILE_TABLES},
+        "indexes": {**manifest["indexes"], **AGENT_PROFILE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(50, 51)] = {
+    "tables": AGENT_PROFILE_TABLES,
+    "columns": {},
+    "indexes": AGENT_PROFILE_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

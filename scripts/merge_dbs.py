@@ -148,6 +148,14 @@ SKIP_SECONDARY_TABLES = [
     # ⚠ 反过来做(照拷进来再由 KG_STATE_TABLES 清)语义一样, 但要先把生产 base 库里
     #   数以百万计的跨板块边搬进合并事务再删掉 —— 白付一遍 IO。
     "kg_community_edges", "kg_source_profiles", "kg_analysis_artifacts",
+    # Agentic Memory P1(v51)的两张表:理解块与每条链的巡固状态。同一理由与措辞
+    # 见 sharing_store.py 深拷贝快照里对这两张表的同款排除注释——块里存的是这本库
+    # 被**用出来**的理解(共享底座 + 每位成员各自的覆盖层),不是知识本身;知识随
+    # NOTEBOOK_SCOPED_TABLES 正常合并,合并后的语料与合并前不是同一份,导入副库那
+    # 份对旧语料的理解只会让底座描述一本已经不存在的库。job 行则与 catalog_jobs
+    # 同类:一次运行的进程状态外加阈值计数器,合进来等于把副库的活动记在主库账上。
+    # 留白 = 「还没巡固过」的诚实表达,合并后由正常触发重新算出来。
+    "agent_notebook_profile", "agent_profile_jobs",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

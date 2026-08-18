@@ -35,6 +35,8 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 # targets and any newly added business table that lacks a reviewed mapping.
 POSTGRES_BUSINESS_TABLES = (
     "agent_access_tokens",
+    "agent_notebook_profile",
+    "agent_profile_jobs",
     "agent_profiles",
     "agent_token_notebooks",
     "answers",
@@ -145,6 +147,8 @@ SQLITE_MIGRATION_INTERNAL_TABLES = (
 POSTGRES_JSON_COLUMNS = frozenset(
     {
         "agent_access_tokens.scopes_json",
+        "agent_notebook_profile.evidence_json",
+        "agent_notebook_profile.history_json",
         "answers.payload",
         "ask_jobs.trace_json",
         "ask_trace_steps.step_json",
@@ -211,6 +215,8 @@ POSTGRES_EMPTY_JSON_LIST_SENTINELS = frozenset(
 # value where the old contract requires it.
 POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
     {
+        "agent_profile_jobs.finished_at",
+        "agent_profile_jobs.started_at",
         "ask_jobs.created_at",
         "ask_jobs.updated_at",
         "ask_trace_steps.created_at",
@@ -230,6 +236,6 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=50,
-    postgres_version=28,
+    sqlite_version=51,
+    postgres_version=29,
 )
