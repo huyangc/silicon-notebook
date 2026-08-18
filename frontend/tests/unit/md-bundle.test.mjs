@@ -3,6 +3,7 @@ import test from "node:test";
 import { deflateRawSync } from "node:zlib";
 
 import {
+  MD_BUNDLE_MAX_DECLARED_ENTRIES,
   MD_BUNDLE_MAX_ENTRIES,
   MD_BUNDLE_MAX_SUGGESTIONS,
   MD_BUNDLE_TOTAL_BYTES_FACTOR,
@@ -78,7 +79,13 @@ class ByteWriter {
   }
 }
 
-/** entries: [{ name, data, method = 0, flags = 0, sentinelSize = false }] */
+/** entries: [{
+ *    name, data, method = 0, flags = 0, sentinelSize = false, sentinelOffset = false,
+ *    blob,                 // 覆盖压缩载荷（构造损坏/截断的 deflate 流用）
+ *    compressedSizeDelta,  // 声明的 compressed size 相对真实载荷的偏移（负数＝声明得更短）
+ *    localExtra, centralExtra,  // local / central 两侧**各自独立**的 extra 字段
+ *  }]
+ */
 function makeZip(entries, options = {}) {
   const w = new ByteWriter();
   const prepared = [];
@@ -86,25 +93,31 @@ function makeZip(entries, options = {}) {
     const name = bytesOf(entry.name);
     const data = bytesOf(entry.data ?? "");
     const method = entry.method ?? 0;
-    const blob = method === 8 ? new Uint8Array(deflateRawSync(Buffer.from(data))) : data;
+    const blob = entry.blob
+      ?? (method === 8 ? new Uint8Array(deflateRawSync(Buffer.from(data))) : data);
+    const declaredCompressed = blob.length + (entry.compressedSizeDelta ?? 0);
+    const localExtra = bytesOf(entry.localExtra ?? new Uint8Array(0));
+    const centralExtra = bytesOf(entry.centralExtra ?? new Uint8Array(0));
     const offset = w.length;
     const declaredUncompressed = entry.sentinelSize ? 0xffffffff : data.length;
     w.u32(0x04034b50).u16(20).u16(entry.flags ?? 0).u16(method)
       .u16(0).u16(0)
-      .u32(crc32(data)).u32(blob.length).u32(data.length)
-      .u16(name.length).u16(0)
-      .raw(name).raw(blob);
-    prepared.push({ name, data, blob, method, offset, declaredUncompressed, entry });
+      .u32(crc32(data)).u32(declaredCompressed).u32(data.length)
+      .u16(name.length).u16(localExtra.length)
+      .raw(name).raw(localExtra).raw(blob);
+    prepared.push({
+      name, data, method, offset, declaredCompressed, declaredUncompressed, centralExtra, entry,
+    });
   }
   const centralStart = w.length;
   for (const item of prepared) {
     w.u32(0x02014b50).u16(20).u16(20).u16(item.entry.flags ?? 0).u16(item.method)
       .u16(0).u16(0)
-      .u32(crc32(item.data)).u32(item.blob.length).u32(item.declaredUncompressed)
-      .u16(item.name.length).u16(0).u16(0)
+      .u32(crc32(item.data)).u32(item.declaredCompressed).u32(item.declaredUncompressed)
+      .u16(item.name.length).u16(item.centralExtra.length).u16(0)
       .u16(0).u16(0).u32(0)
       .u32(item.entry.sentinelOffset ? 0xffffffff : item.offset)
-      .raw(item.name);
+      .raw(item.name).raw(item.centralExtra);
   }
   const centralSize = w.length - centralStart;
   if (options.zip64Locator) {
@@ -153,6 +166,65 @@ test("a zip comment does not hide the end-of-central-directory record", async ()
   const result = await parseZipBundle(zip, CAPS);
   assert.equal(result.ok, true);
   assert.deepEqual(result.files.map((f) => f.path), ["a.md"]);
+});
+
+
+test("a fake EOCD signature planted inside the comment does not win the backward scan", async () => {
+  // 尾部回扫是从后往前的，所以注释里的假签名会**先于**真 EOCD 被看到。挡住它的只有
+  // 「注释长度必须正好补齐到文件末尾」这一条。少了那条判据：假签名处读出的
+  // entries/centralSize/centralOffset 全是零 → 解析「成功」但一个文件都没有,
+  // 静默返回空包,没有任何错误码。所以这里必须断言文件真的在。
+  const comment = new Uint8Array(40);
+  comment.set(bytesOf("PK\x05\x06"), 0);
+  const zip = makeZip([{ name: "a.md", data: "hi" }], { comment });
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.files.map((f) => f.path), ["a.md"]);
+});
+
+
+test("the data offset follows the local header's own extra length, not the central one", async () => {
+  // local 与 central 的 extra 字段长度经常不同（时间戳扩展在两侧写法不一样）。
+  // 拿 central 的长度去算数据起点会整体错位 5 字节,而错位后的字节仍是「一段数据」
+  // ——不断言内容就完全看不出来,所以这里逐字节比对 PNG。
+  const zip = makeZip([{
+    name: "images/shot.png",
+    data: PNG,
+    localExtra: bytesOf("UT\x05\x00\x03aaaa"),
+    centralExtra: bytesOf("UT\x01\x00"),
+  }]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, true);
+  assert.deepEqual([...result.files[0].bytes], [...PNG]);
+});
+
+
+test("both extra fields also line up when the deflated branch is taken", async () => {
+  const prose = "# 标题\n\n".repeat(50);
+  const zip = makeZip([{
+    name: "notes.md",
+    data: prose,
+    method: 8,
+    localExtra: bytesOf("UT\x09\x00\x03abcdefghi"),
+    centralExtra: bytesOf("UT\x00\x00"),
+  }]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, true);
+  assert.equal(decodeMarkdownText(result.files[0].bytes), prose);
+});
+
+
+test("a duplicate entry path keeps the first copy and is not counted twice", async () => {
+  const zip = makeZip([
+    { name: "a.png", data: PNG },
+    { name: "a.png", data: JPEG },
+  ]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.files.map((f) => f.path), ["a.png"]);
+  assert.deepEqual([...result.files[0].bytes], [...PNG], "first writer wins");
+  // totalBytes 必须与 files 的字节和一致——重复条目既没进文件集,就不能进总量。
+  assert.equal(result.totalBytes, PNG.length);
 });
 
 
@@ -237,10 +309,46 @@ for (const [label, build, code] of ZIP_REJECTIONS) {
 }
 
 
+/** 非法 deflate：首字节的 BTYPE 位是保留值 11，解压器立刻拒绝。 */
+const GARBAGE_DEFLATE = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+
+
+test("a deflate payload that is not a valid stream is reported as corrupt, not as too large", async () => {
+  // 尺寸自洽（声明的 compressed size 就是这堆垃圾的真实长度），所以除了真去解一次
+  // 之外没有别的办法发现它坏了。不接住解压器抛的错就是一条 unhandled rejection：
+  // 调用方拿不到任何错误码,浏览器里还会把整页的错误处理拖下水。
+  const zip = makeZip([{ name: "broken.md", data: "whatever", method: 8, blob: GARBAGE_DEFLATE }]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "corrupt");
+  assert.equal(result.error.path, "broken.md");
+});
+
+
+test("a compressed size shorter than the real stream is reported as corrupt", async () => {
+  // central/local 声明的长度比真实 deflate 流短 → 我们只喂进去一个被砍头的流。
+  // 它同样只有在真解一次的时候才暴露。
+  const zip = makeZip([{
+    name: "short.md",
+    data: "a".repeat(4000),
+    method: 8,
+    compressedSizeDelta: -3,
+  }]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "corrupt");
+  assert.equal(result.error.path, "short.md");
+});
+
+
 test("more entries than the cap is refused before anything is decompressed", async () => {
+  // 第一个条目的压缩流是坏的：只要解压发生在条目闸之前,结局就会是 `corrupt` 而不是
+  // `too_many_entries`。这是「先拦再解」的字节级证明——只数条目数证明不了顺序。
   const entries = Array.from(
     { length: MD_BUNDLE_MAX_ENTRIES + 1 },
-    (_v, i) => ({ name: `f${i}.txt`, data: "x" }),
+    (_v, i) => (i === 0
+      ? { name: "f0.txt", data: "x", method: 8, blob: GARBAGE_DEFLATE }
+      : { name: `f${i}.txt`, data: "x" }),
   );
   const result = await parseZipBundle(makeZip(entries), CAPS);
   assert.equal(result.ok, false);
@@ -261,6 +369,49 @@ test("exactly at the entry cap the bundle still parses", async () => {
 });
 
 
+test("macOS resource forks do not consume the entry cap", async () => {
+  // 「压缩」给每个文件配一条 `__MACOSX/._x` 伴随条目,声明数因此正好翻倍。按声明数
+  // 预拦会让一个刚好合规的包被判成超限,而用户在 Finder 里看到的文件数只有一半。
+  const entries = [];
+  for (let i = 0; i < MD_BUNDLE_MAX_ENTRIES; i += 1) {
+    entries.push({ name: `f${i}.txt`, data: "x" });
+    entries.push({ name: `__MACOSX/._f${i}.txt`, data: "junk" });
+  }
+  const result = await parseZipBundle(makeZip(entries), CAPS);
+  assert.equal(result.ok, true);
+  assert.equal(result.files.length, MD_BUNDLE_MAX_ENTRIES);
+});
+
+
+test("real files over the cap are still refused even when resource forks pad the count", async () => {
+  const entries = [];
+  for (let i = 0; i < MD_BUNDLE_MAX_ENTRIES + 1; i += 1) {
+    entries.push({ name: `f${i}.txt`, data: "x" });
+    if (i % 2 === 0) entries.push({ name: `__MACOSX/._f${i}.txt`, data: "junk" });
+  }
+  const result = await parseZipBundle(makeZip(entries), CAPS);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "too_many_entries");
+  // 报出去的是**保留**条目数,不是被资源叉撑大的声明数。
+  assert.equal(result.error.actual, MD_BUNDLE_MAX_ENTRIES + 1);
+  assert.equal(result.error.limit, MD_BUNDLE_MAX_ENTRIES);
+});
+
+
+test("an absurd declared entry count is refused without scanning the directory", async () => {
+  // 保留条目数要扫完才知道,所以扫描本身需要一个先验上界,否则一个声明了六万条的
+  // 畸形包会先让我们白扫一遍。这不是产品上限,只是扫描的封顶。
+  const zip = makeZip(
+    [{ name: "a.md", data: "x" }],
+    { declaredEntries: MD_BUNDLE_MAX_DECLARED_ENTRIES + 1 },
+  );
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "too_many_entries");
+  assert.equal(result.error.limit, MD_BUNDLE_MAX_DECLARED_ENTRIES);
+});
+
+
 test("a stored entry past the decompressed-byte budget stops the parse", async () => {
   const caps = { uploadMaxBytes: 1000 };
   const budget = caps.uploadMaxBytes * MD_BUNDLE_TOTAL_BYTES_FACTOR;
@@ -276,8 +427,18 @@ test("a stored entry past the decompressed-byte budget stops the parse", async (
 test("a deflate bomb is cut off mid-stream rather than fully inflated", async () => {
   const caps = { uploadMaxBytes: 1000 };
   const budget = caps.uploadMaxBytes * MD_BUNDLE_TOTAL_BYTES_FACTOR;
-  // 高度可压缩:压缩后只有几十字节,解出来远超预算——只有边解边计预算才拦得住。
-  const zip = makeZip([{ name: "bomb.bin", data: "a".repeat(budget * 50), method: 8 }]);
+  // 高度可压缩:压缩后只有两百来字节,解出来远超预算。**尾部被截掉 3 字节**,所以这个
+  // 流最终是解不开的——这就是「中途切断」的字节级判据:
+  //   边解边计预算 → 第一个 16KiB 分片就超预算 → cancel,坏尾根本没读到 → too_large
+  //   先整个解完再看总量 → 读到坏尾先抛 → corrupt
+  // 两种结局都不会报错退出测试,只有断言分得开它们。
+  const real = new Uint8Array(deflateRawSync(Buffer.from("a".repeat(budget * 50))));
+  const zip = makeZip([{
+    name: "bomb.bin",
+    data: "",
+    method: 8,
+    blob: real.subarray(0, real.length - 3),
+  }]);
   const result = await parseZipBundle(zip, caps);
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "too_large");
@@ -299,6 +460,21 @@ test("the budget is cumulative across entries, not per entry", async () => {
 });
 
 
+test("an unusable upload cap disables the byte budget instead of rejecting everything", async () => {
+  // `0` 曾在这里算成「预算 0」→ 任何包都拒；而在 inlineMdImages 那边算成「不检查」。
+  // 同一个缺省值一边全拒一边全放不是保守而是矛盾:全拒那侧没有任何合法操作能绕开。
+  const zip = makeZip([
+    { name: "notes.md", data: "# 标题\n", method: 8 },
+    { name: "shot.png", data: PNG },
+  ]);
+  for (const uploadMaxBytes of [0, -1, Number.NaN, 1.5]) {
+    const result = await parseZipBundle(zip, { uploadMaxBytes });
+    assert.equal(result.ok, true, `uploadMaxBytes=${uploadMaxBytes}`);
+    assert.deepEqual(result.files.map((f) => f.path), ["notes.md", "shot.png"]);
+  }
+});
+
+
 // ---------------------------------------------------------------------------
 // 2. md 发现
 // ---------------------------------------------------------------------------
@@ -315,8 +491,13 @@ test("markdown discovery accepts both extensions and ignores case", () => {
 });
 
 
-test("a byte-order mark is stripped from decoded markdown", () => {
-  assert.equal(decodeMarkdownText(bytesOf("﻿# title")), "# title");
+test("a byte-order mark never survives into the decoded markdown", () => {
+  // 显式拼 EF BB BF,不靠源文件里一个看不见的字符。TextDecoder 默认就吞 BOM,所以
+  // 这里钉的是「结果里没有 U+FEFF」——真源换成 `{ ignoreBOM: true }`（名字骗人,实际
+  // 是「原样留着」）会让首个标题带上一个不可见字符,而且不会报任何错。
+  const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...bytesOf("# title")]);
+  assert.equal(decodeMarkdownText(withBom), "# title");
+  assert.equal(decodeMarkdownText(withBom).charCodeAt(0), "#".charCodeAt(0));
 });
 
 
@@ -334,6 +515,12 @@ const PATH_CASES = [
   ["docs/note.md", "sub\\win.png", "docs/sub/win.png"],
   ["docs/note.md", "./a/./b/../img.png", "docs/a/img.png"],
   ["note.md", "../escape.png", null],
+  // 缓存戳与锚点是 URL 语法,不是文件名的一部分——不剥就永远配不上磁盘上那个文件。
+  ["docs/note.md", "img.png?v=2", "docs/img.png"],
+  ["docs/note.md", "img.png#fig-1", "docs/img.png"],
+  ["docs/note.md", "img.png?v=2#fig-1", "docs/img.png"],
+  ["docs/note.md", "img.png#a?b", "docs/img.png"],
+  ["docs/note.md", "../assets/img.png?w=100", "assets/img.png"],
 ];
 
 test("relative image links resolve against the markdown file's own directory", () => {
@@ -362,6 +549,42 @@ test("a file whose name literally contains %20 still matches the raw link", () =
   const out = inlineOf("docs/n.md", "![图注](my%20shot.png)\n", files);
   assert.equal(out.ok, true);
   assert.equal(out.receipt.inlined[0].path, "docs/my%20shot.png");
+});
+
+
+test("when both spellings exist in the bundle the decoded one wins", () => {
+  // 两个候选同时命中时的优先级必须是确定的:`%20` 在链接里的**规范**含义就是空格,
+  // 所以按规范解读取 `my shot.png`。反过来（原样优先）会让 Notion 这类导出——目录里
+  // 恰好同时有两个名字——配到那个几乎不可能是作者本意的文件上。
+  const files = [
+    { path: "docs/my%20shot.png", bytes: JPEG },
+    { path: "docs/my shot.png", bytes: PNG },
+  ];
+  const out = inlineOf("docs/n.md", "![图注](my%20shot.png)\n", files);
+  assert.equal(out.ok, true);
+  assert.equal(out.receipt.inlined[0].path, "docs/my shot.png");
+  assert.equal(out.receipt.inlined[0].mime, "image/png");
+});
+
+
+test("a link with a cache-busting query still pairs with the plain file", () => {
+  const files = [{ path: "docs/shot.png", bytes: PNG }];
+  const out = inlineOf("docs/n.md", "![图注](shot.png?v=2)\n", files);
+  assert.equal(out.ok, true);
+  assert.equal(out.receipt.inlined[0].path, "docs/shot.png");
+  // 目标整体被替换:查询串跟着原链接一起消失,不能残留成 `data:...;base64,AAA?v=2`。
+  assert.equal(out.rewritten, `![图注](data:image/png;base64,${bytesToBase64(PNG)})\n`);
+});
+
+
+test("a protocol-relative link is remote, not a missing bundle file", () => {
+  // 它没有 scheme,逃得过「绝对 URL」判据,却绝不是包内相对路径。当成相对路径去配对
+  // 会报一条「未找到 cdn.example.com/a.png」——把产品决定说成用户的包少了个文件。
+  const out = inlineOf("n.md", "![a](//cdn.example.com/a.png)\n", []);
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.receipt.remote.map((r) => r.src), ["//cdn.example.com/a.png"]);
+  assert.deepEqual(out.receipt.missing, []);
+  assert.deepEqual(out.receipt.unsupported, []);
 });
 
 
@@ -401,6 +624,8 @@ test("a link escaping the bundle root is a miss with no resolved path", () => {
 // 4. 独占段判定
 // ---------------------------------------------------------------------------
 
+// 每个 `true` 都对着服务端 `structural_markdown.parse_blocks` 实测过（该文档确实产出
+// 一个 `image` 块）；每个 `false` 要么服务端不产出 image 块，要么本模块刻意保守。
 const STANDALONE_CASES = [
   ["a paragraph of its own", "lead\n\n![a](x.png)\n\ntrail\n", true],
   ["the very first line", "![a](x.png)\n\ntrail\n", true],
@@ -408,7 +633,26 @@ const STANDALONE_CASES = [
   ["a link title after the destination", '\n![a](x.png "标题")\n', true],
   ["an angle-bracketed destination", "\n![a](<my file.png>)\n", true],
   ["balanced parens in the destination", "\n![a](img(1).png)\n", true],
-  ["indented by up to three spaces", "\n   ![a](x.png)\n", true],
+  // 相邻行是块边界（不只是空行）：标题下面直接贴图是导出工具的常见写法，此前整片
+  // 判成不可改写。
+  ["an ATX heading on the line directly above", "# 标题\n![a](x.png)\n\ntrail\n", true],
+  ["an ATX heading on the line directly below", "lead\n\n![a](x.png)\n## 下节\n", true],
+  ["headings on both sides", "# 上\n![a](x.png)\n## 下\n", true],
+  ["a thematic break directly above", "lead\n\n***\n![a](x.png)\n\ntrail\n", true],
+  ["a --- thematic break directly above", "---\n![a](x.png)\n\ntrail\n", true],
+  ["an underscore thematic break directly below", "lead\n\n![a](x.png)\n___\n", true],
+  ["a spaced-out dash break directly below", "lead\n\n![a](x.png)\n- - -\n", true],
+  // ⚠ `---`/`----`/`===` 跟在**下面**是 setext 下划线而不是分隔线：服务端把图片行
+  // 整个吸成一个标题（实测 blocks=[paragraph, heading]，零个 image 块）。上下不对称。
+  ["a --- setext underline directly below", "lead\n\n![a](x.png)\n---\n", false],
+  ["a ==== setext underline directly below", "lead\n\n![a](x.png)\n===\n", false],
+  ["a four-dash setext underline directly below", "lead\n\n![a](x.png)\n----\n", false],
+  // 缩进 1–3 空格是**松散列表项的续段**最常见的形态,服务端会把它并进 list_item、
+  // 只留 alt 文本。内联进去 = 把整张图的 base64 写进一个注定只保留文字的位置。
+  ["a loose ordered list item's continuation", "1. step\n\n   ![a](x.png)\n\n2. b\n", false],
+  ["a loose bullet list item's continuation", "- step\n\n  ![a](x.png)\n\n- b\n", false],
+  ["indented by three spaces", "\n   ![a](x.png)\n", false],
+  ["indented by one space", "lead\n\n ![a](x.png)\n\ntrail\n", false],
   ["mid-sentence", "\nsee ![a](x.png) here\n", false],
   ["a list item", "\n- ![a](x.png)\n", false],
   ["a numbered list item", "\n1. ![a](x.png)\n", false],
@@ -417,8 +661,8 @@ const STANDALONE_CASES = [
   ["two images on one line", "\n![a](x.png) ![b](y.png)\n", false],
   ["prose on the line directly above", "\nlead-in\n![a](x.png)\n\n", false],
   ["prose on the line directly below", "\n![a](x.png)\ntrailer\n", false],
+  ["a bare # that is not a heading below", "lead\n\n![a](x.png)\n#下节\n", false],
   ["an indented code block", "\n    ![a](x.png)\n", false],
-  ["wrapped in inline code", "\n`![a](x.png)`\n", false],
 ];
 
 test("only a markdown image that owns its whole paragraph is rewritable", () => {
@@ -427,6 +671,20 @@ test("only a markdown image that owns its whole paragraph is rewritable", () => 
     assert.ok(refs.length >= 1, label);
     assert.equal(refs[0].standalone, expected, label);
   }
+});
+
+
+test("image syntax inside an inline code span is not an image reference at all", () => {
+  // 被展示的字面文本,不是引用——既不改写,也不该在回执里编出一条「这张图没内联」。
+  assert.deepEqual(findMarkdownImages("\n`![a](x.png)`\n"), []);
+  assert.deepEqual(findMarkdownImages("see ``![a](x.png)`` here\n"), []);
+  // 同一行上代码跨度之外的图片仍然要认出来。
+  assert.deepEqual(
+    findMarkdownImages("`![a](x.png)` and ![b](y.png)\n").map((r) => r.src),
+    ["y.png"],
+  );
+  // 落单的反引号不成跨度,后面的图片照常认。
+  assert.deepEqual(findMarkdownImages("a ` b ![c](z.png)\n").map((r) => r.src), ["z.png"]);
 });
 
 
@@ -528,7 +786,8 @@ test("a large image round-trips through the rewritten data URI", () => {
 
 test("only the destination is replaced — alt, title and surrounding bytes are untouched", () => {
   const files = [{ path: "x.png", bytes: PNG }];
-  const doc = 'prologue\n\n   ![图 *注*](x.png "悬停标题")   \n\nepilogue\n';
+  // 行尾留白仍要保留（行首缩进现在会让它不可改写，见 STANDALONE_CASES）。
+  const doc = 'prologue\n\n![图 *注*](x.png "悬停标题")   \n\nepilogue\n';
   const out = inlineOf("n.md", doc, files);
   assert.equal(out.ok, true);
   const expected = doc.replace("x.png", `data:image/png;base64,${bytesToBase64(PNG)}`);
@@ -566,6 +825,85 @@ test("remote links are reported as not fetched, data URIs stay silent", () => {
     ],
   );
   assert.deepEqual(out.receipt.unsupported, []);
+});
+
+
+test("reference-style images are reported instead of silently dropped", () => {
+  // 目标写在文末的链接定义里,本模块不解析定义表。此前它们连回执都不进——用户看到
+  // 「0 张未找到」就以为都配上了,上传后才发现图全没了。
+  const files = [{ path: "x.png", bytes: PNG }];
+  const doc = [
+    "![完整引用式][shot]",
+    "![折叠引用式][]",
+    "[shot]: x.png",
+  ].join("\n\n") + "\n";
+  const out = inlineOf("n.md", doc, files);
+  assert.equal(out.ok, true);
+  assert.equal(out.rewritten, doc, "正文逐字不变");
+  assert.deepEqual(
+    out.receipt.unsupported.map((u) => [u.src, u.reason]),
+    [["shot", "reference_syntax"], ["", "reference_syntax"]],
+  );
+  assert.deepEqual(out.receipt.inlined, []);
+  assert.deepEqual(out.receipt.missing, []);
+});
+
+
+test("html img tags are reported instead of silently dropped", () => {
+  const files = [{ path: "x.png", bytes: PNG }];
+  const doc = [
+    '<img src="x.png" alt="双引号">',
+    "<img src='x.png'>",
+    "<img src=x.png width=200>",
+    "<IMG SRC=\"x.png\">",
+    "<img alt='没有 src'>",
+  ].join("\n\n") + "\n";
+  const out = inlineOf("n.md", doc, files);
+  assert.equal(out.ok, true);
+  assert.equal(out.rewritten, doc, "正文逐字不变");
+  assert.deepEqual(
+    out.receipt.unsupported.map((u) => [u.src, u.reason]),
+    [
+      ["x.png", "html_syntax"],
+      ["x.png", "html_syntax"],
+      ["x.png", "html_syntax"],
+      ["x.png", "html_syntax"],
+      ["", "html_syntax"],
+    ],
+  );
+  assert.deepEqual(out.receipt.inlined, []);
+});
+
+
+test("an html img tag reports its own syntax rather than being called remote", () => {
+  // 「这种写法不支持」可操作（改成 markdown 语法就能用）；「远程图片不拉取」暗示
+  // 改不了。语法判据因此排在 scheme 判据之前。
+  const out = inlineOf("n.md", '<img src="https://example.com/a.png">\n', []);
+  assert.deepEqual(
+    out.receipt.unsupported.map((u) => u.reason),
+    ["html_syntax"],
+  );
+  assert.deepEqual(out.receipt.remote, []);
+});
+
+
+test("unsupported image syntax inside code is still not reported", () => {
+  const doc = "```html\n<img src=\"x.png\">\n```\n\n行内 `![a][ref]` 与 `<img src=y.png>`。\n";
+  const out = inlineOf("n.md", doc, [{ path: "x.png", bytes: PNG }]);
+  assert.equal(out.rewritten, doc);
+  assert.deepEqual(out.receipt.unsupported, []);
+});
+
+
+test("the three syntaxes keep document order in the receipt", () => {
+  const files = [{ path: "x.png", bytes: PNG }];
+  const doc = "![a](x.png)\n\n![b][ref]\n\n<img src=\"c.png\">\n\n![d](x.png)\n";
+  const out = inlineOf("n.md", doc, files);
+  assert.deepEqual(
+    out.receipt.unsupported.map((u) => u.reason),
+    ["reference_syntax", "html_syntax"],
+  );
+  assert.deepEqual(out.receipt.inlined.map((i) => i.line), [0, 6]);
 });
 
 
@@ -640,6 +978,22 @@ test("omitting the optional caps disables the client-side pre-checks", () => {
   });
   assert.equal(out.receipt.inlined.length, 2);
   assert.deepEqual(out.receipt.unsupported, []);
+});
+
+
+test("unusable cap values disable the pre-checks the same way omitting them does", () => {
+  // 与 parseZipBundle 同一个方向：`0` 不是「上限为零」而是「没有可用上限」。
+  const files = [{ path: "a.png", bytes: PNG }, { path: "b.png", bytes: PNG }];
+  for (const bad of [0, -1, Number.NaN, 2.5]) {
+    const out = inlineMdImages("n.md", "![1](a.png)\n\n![2](b.png)\n", files, {
+      uploadMaxBytes: bad,
+      imageMaxBytes: bad,
+      maxImagesPerSource: bad,
+    });
+    assert.equal(out.ok, true, `cap=${bad}`);
+    assert.equal(out.receipt.inlined.length, 2, `cap=${bad}`);
+    assert.deepEqual(out.receipt.unsupported, [], `cap=${bad}`);
+  }
 });
 
 
@@ -726,10 +1080,23 @@ test("the same image referenced twice is inlined at both sites", () => {
 });
 
 
+test("the same image reached through different spellings encodes once per bundle path", () => {
+  // memo 的键是包内路径而不是 src——`./x.png`、`x.png`、`x.png?v=1` 是同一个文件。
+  // 三处都必须内联,且都必须是同一段 base64。
+  const doc = "![一](x.png)\n\n![二](./x.png)\n\n![三](x.png?v=1)\n";
+  const out = inlineOf("n.md", doc, [{ path: "x.png", bytes: PNG }]);
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.receipt.inlined.map((i) => i.path), ["x.png", "x.png", "x.png"]);
+  assert.equal(out.rewritten.split(bytesToBase64(PNG)).length - 1, 3);
+});
+
+
 test("a markdown file with no images passes through byte for byte", () => {
   const doc = "# 标题\n\n正文 with `![not](an.png)` inline code.\n";
   const out = inlineOf("n.md", doc, [{ path: "an.png", bytes: PNG }]);
   assert.equal(out.ok, true);
   assert.equal(out.rewritten, doc);
   assert.deepEqual(out.receipt.inlined, []);
+  // 行内代码里的图片语法连回执都不该有：它是被展示的文本，不是一张没配上的图。
+  assert.deepEqual(out.receipt.unsupported, []);
 });

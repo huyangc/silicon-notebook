@@ -18,11 +18,28 @@
 // 护栏常量
 // ---------------------------------------------------------------------------
 
-/** 单个压缩包允许的条目数上限（含目录条目）。
+/** 单个压缩包允许的**保留条目**数上限。
+ *
+ *  判据刻意是「保留下来的条目」（去掉目录条目、`__MACOSX` 资源叉与同名重复项之后）
+ *  而不是 EOCD 声明的条目数：macOS 的「压缩」会给每个文件配一条 `__MACOSX/._x`
+ *  伴随条目，按声明数判会让 1001 个真文件的包被当成 2002 条直接拒掉。
  *
  *  精确值登记于 `docs/product-and-api*.md`；这里是唯一实现真源。
  */
 export const MD_BUNDLE_MAX_ENTRIES = 2000;
+
+/** EOCD 声明条目数的宽松硬顶系数：`MD_BUNDLE_MAX_ENTRIES × 本系数`。
+ *
+ *  保留条目数只有扫完 central directory 才知道，所以扫描本身需要一个先验上界，
+ *  否则一个声明了 65535 条的畸形包会先让我们白扫一遍。它**不是**产品上限——真实
+ *  的闸是 `MD_BUNDLE_MAX_ENTRIES`，这里只要宽到装得下「每个文件配一条 `__MACOSX`
+ *  再加上目录条目」的最坏形态即可。
+ */
+export const MD_BUNDLE_DECLARED_ENTRIES_FACTOR = 4;
+
+/** EOCD 声明条目数的绝对上限（扫描前的先验闸，见上）。 */
+export const MD_BUNDLE_MAX_DECLARED_ENTRIES =
+  MD_BUNDLE_MAX_ENTRIES * MD_BUNDLE_DECLARED_ENTRIES_FACTOR;
 
 /** 解压后总字节的上限系数：`uploadMaxBytes × 本系数`。
  *
@@ -127,18 +144,31 @@ export type ZipBundleResult =
   | { ok: true; files: BundleFile[]; totalBytes: number }
   | { ok: false; error: BundleError };
 
-/** 解压护栏参数。`uploadMaxBytes` 来自 `/system/config` 的 `source_upload_max_bytes`。 */
+/** 解压护栏参数。`uploadMaxBytes` 来自 `/system/config` 的 `source_upload_max_bytes`；
+ *  非正数/非整数按「拿不到上限」处理，不做本地预检（见 `resolveLimit`）。 */
 export type BundleCaps = { uploadMaxBytes: number };
 
 function fail(error: BundleError): { ok: false; error: BundleError } {
   return { ok: false, error };
 }
 
-function totalBytesLimit(caps: BundleCaps): number {
-  const base = Number.isSafeInteger(caps.uploadMaxBytes) && caps.uploadMaxBytes > 0
-    ? caps.uploadMaxBytes
-    : 0;
-  return base * MD_BUNDLE_TOTAL_BYTES_FACTOR;
+/** 部署上限归一：缺失 / 非整数 / 非正数一律解成 `null` ＝「不做本地预检」。
+ *
+ *  `parseZipBundle` 与 `inlineMdImages` **必须**共用这一份，因为它们此前对同一个
+ *  `0` 给出了相反的答案：前者算出「预算 0」把任何包都拒掉，后者算成「不检查」全
+ *  放行。同一个缺省值一边全拒一边全放不是保守，是矛盾——只要有一处会误拒，用户就
+ *  会遇到一个没有任何合法操作能绕开的死路。方向统一取**放行**：本地预检本就只是
+ *  提前告知，真正的权威是服务端携带当前上限的流式 413，与既有「省略即关闭预检」
+ *  的口径一致。
+ */
+export function resolveLimit(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/** 解压总量预算；`null` 表示没有可用上限，不做本地预检。 */
+function totalBytesLimit(caps: BundleCaps): number | null {
+  const base = resolveLimit(caps.uploadMaxBytes);
+  return base === null ? null : base * MD_BUNDLE_TOTAL_BYTES_FACTOR;
 }
 
 function viewOf(bytes: Uint8Array): DataView {
@@ -180,8 +210,23 @@ function normalizeEntryPath(raw: string): string | null {
   return segments.join("/");
 }
 
-/** `deflate-raw` 解压，边解边计预算：超出剩余预算立刻取消读取并返回 `null`。 */
-async function inflateRaw(data: Uint8Array, budget: number): Promise<Uint8Array | null> {
+/** `inflateRaw` 的「流本身解不开」哨兵，必须与「超预算」的 `null` 可区分。
+ *
+ *  两者是完全不同的两件事：超预算是**用户能理解并能自己解决**的体积问题（拆包再传），
+ *  解不开是**包坏了**。合成同一个返回值就会把一个损坏的 zip 报成「压缩包过大」，
+ *  用户照着提示去拆包，怎么拆都还是失败。
+ */
+const CORRUPT_STREAM = Symbol("md-bundle:corrupt-deflate-stream");
+
+/** `deflate-raw` 解压，边解边计预算。
+ *
+ *  三种结局：解出的字节 / `null`（超出剩余预算，已取消读取）/ `CORRUPT_STREAM`
+ *  （流本身非法）。
+ */
+async function inflateRaw(
+  data: Uint8Array,
+  budget: number,
+): Promise<Uint8Array | null | typeof CORRUPT_STREAM> {
   const input = new ReadableStream<BufferSource>({
     start(controller) {
       // 裸 `Uint8Array` 参数化成 `ArrayBufferLike`(含 SharedArrayBuffer),而
@@ -195,16 +240,31 @@ async function inflateRaw(data: Uint8Array, budget: number): Promise<Uint8Array 
   const reader = input.pipeThrough(new DecompressionStream("deflate-raw")).getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > budget) {
-      await reader.cancel();
-      return null;
+  let overBudget = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > budget) {
+        overBudget = true;
+        break;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch {
+    // 坏 deflate 流让 `reader.read()` reject。不接住它，这条 rejection 就直接穿过
+    // `parseZipBundle` 的 Promise 冒出去：调用方拿不到任何结构化错误码，浏览器里
+    // 还会变成一条 unhandled rejection。损坏的包必须走和其它拒绝面同一条回执路径。
+    await reader.cancel().catch(() => {});
+    return CORRUPT_STREAM;
+  }
+  if (overBudget) {
+    // 取消放在 try 之外：预算耗尽是正常控制流，不能因为 cancel 抖一下就被
+    // 上面的 catch 改判成「包坏了」。
+    await reader.cancel().catch(() => {});
+    return null;
   }
   const out = new Uint8Array(total);
   let at = 0;
@@ -215,11 +275,27 @@ async function inflateRaw(data: Uint8Array, budget: number): Promise<Uint8Array 
   return out;
 }
 
+/** central directory 扫描阶段留下的条目描述（还没解压）。 */
+type CentralEntry = {
+  path: string;
+  flags: number;
+  method: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localOffset: number;
+};
+
 /** 解析 zip 字节为虚拟文件集：EOCD 定位 + central directory 遍历 + 逐条目解压。
  *
+ *  刻意分两趟：先扫完整个 central directory（只读头部与文件名，不碰任何压缩数据），
+ *  在这一趟里做路径归一、丢弃目录/`__MACOSX`/同名重复项，并对**保留下来**的条目数
+ *  执行 `MD_BUNDLE_MAX_ENTRIES`；第二趟才逐条目解压。合成一趟会同时坏掉两件事：
+ *  条目闸会退化成「先解压前 N 个再说超限」，而按 EOCD 声明数预拦又会把 macOS 的
+ *  资源叉条目算进产品上限。
+ *
  *  拒绝面（都是明确错误，不静默丢条目）：加密条目、zip64、非 store/deflate 压缩方法、
- *  逃出包根的路径、条目数超限、解压总量超限。嵌套 zip **不递归**——`.zip` 条目按普通
- *  文件收进文件集（魔数嗅探永远不会把它当图片配上），不再往里解一层。
+ *  逃出包根的路径、条目数超限、解压总量超限、损坏的压缩流。嵌套 zip **不递归**——
+ *  `.zip` 条目按普通文件收进文件集（魔数嗅探永远不会把它当图片配上），不再往里解一层。
  */
 export async function parseZipBundle(
   bytes: Uint8Array,
@@ -236,28 +312,32 @@ export async function parseZipBundle(
     return fail({ code: "zip64" });
   }
 
-  const totalEntries = view.getUint16(eocd + 10, true);
+  const declaredEntries = view.getUint16(eocd + 10, true);
   const centralSize = view.getUint32(eocd + 12, true);
   const centralOffset = view.getUint32(eocd + 16, true);
   if (
-    totalEntries === ZIP64_SENTINEL_16
+    declaredEntries === ZIP64_SENTINEL_16
     || centralSize === ZIP64_SENTINEL_32
     || centralOffset === ZIP64_SENTINEL_32
   ) {
     return fail({ code: "zip64" });
   }
-  if (totalEntries > MD_BUNDLE_MAX_ENTRIES) {
-    return fail({ code: "too_many_entries", actual: totalEntries, limit: MD_BUNDLE_MAX_ENTRIES });
+  // 只是给扫描本身封顶，不是产品上限——真正的闸在下面按保留条目数执行。
+  if (declaredEntries > MD_BUNDLE_MAX_DECLARED_ENTRIES) {
+    return fail({
+      code: "too_many_entries",
+      actual: declaredEntries,
+      limit: MD_BUNDLE_MAX_DECLARED_ENTRIES,
+    });
   }
   if (centralOffset + centralSize > bytes.byteLength) return fail({ code: "corrupt" });
 
-  const budgetTotal = totalBytesLimit(caps);
-  const files: BundleFile[] = [];
+  // ---- 第一趟：扫 central directory，只看头部与文件名 ----
+  const kept: CentralEntry[] = [];
   const seen = new Set<string>();
-  let consumed = 0;
   let cursor = centralOffset;
 
-  for (let index = 0; index < totalEntries; index += 1) {
+  for (let index = 0; index < declaredEntries; index += 1) {
     if (cursor + CENTRAL_HEADER_FIXED_SIZE > bytes.byteLength) return fail({ code: "corrupt" });
     if (view.getUint32(cursor, true) !== CENTRAL_HEADER_SIGNATURE) return fail({ code: "corrupt" });
 
@@ -285,19 +365,42 @@ export async function parseZipBundle(
     if (normalized === APPLE_DOUBLE_ROOT || normalized.startsWith(`${APPLE_DOUBLE_ROOT}/`)) {
       continue;
     }
+    // 同名条目保留先出现的那条：文件集、它的索引与 `totalBytes` 必须是同一个口径，
+    // 否则「列出来的路径」「配对时取到的字节」「报出去的总量」会来自不同的条目。
+    // 丢在这里而不是解压之后，重复条目连解压都不必付。
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+
+    kept.push({ path: normalized, flags, method, compressedSize, uncompressedSize, localOffset });
+    if (kept.length > MD_BUNDLE_MAX_ENTRIES) {
+      return fail({
+        code: "too_many_entries",
+        actual: kept.length,
+        limit: MD_BUNDLE_MAX_ENTRIES,
+      });
+    }
+  }
+
+  // ---- 第二趟：逐条目解压 ----
+  const budgetTotal = totalBytesLimit(caps);
+  const files: BundleFile[] = [];
+  let consumed = 0;
+
+  for (const entry of kept) {
+    const { path, flags, method, compressedSize, uncompressedSize, localOffset } = entry;
 
     if ((flags & GP_FLAG_ENCRYPTED) !== 0 || (flags & GP_FLAG_STRONG_ENCRYPTION) !== 0) {
-      return fail({ code: "encrypted", path: normalized });
+      return fail({ code: "encrypted", path });
     }
     if (
       compressedSize === ZIP64_SENTINEL_32
       || uncompressedSize === ZIP64_SENTINEL_32
       || localOffset === ZIP64_SENTINEL_32
     ) {
-      return fail({ code: "zip64", path: normalized });
+      return fail({ code: "zip64", path });
     }
     if (method !== METHOD_STORE && method !== METHOD_DEFLATE) {
-      return fail({ code: "unsupported_compression", path: normalized, method });
+      return fail({ code: "unsupported_compression", path, method });
     }
 
     if (localOffset + LOCAL_HEADER_FIXED_SIZE > bytes.byteLength) return fail({ code: "corrupt" });
@@ -309,15 +412,17 @@ export async function parseZipBundle(
     const dataStart = localOffset + LOCAL_HEADER_FIXED_SIZE + localNameLength + localExtraLength;
     if (dataStart + compressedSize > bytes.byteLength) return fail({ code: "corrupt" });
 
-    const remaining = budgetTotal - consumed;
+    const remaining = budgetTotal === null
+      ? Number.POSITIVE_INFINITY
+      : budgetTotal - consumed;
     let content: Uint8Array;
     if (method === METHOD_STORE) {
       if (compressedSize > remaining) {
         return fail({
           code: "too_large",
-          path: normalized,
+          path,
           actual: consumed + compressedSize,
-          limit: budgetTotal,
+          limit: budgetTotal ?? undefined,
         });
       }
       content = bytes.slice(dataStart, dataStart + compressedSize);
@@ -326,18 +431,14 @@ export async function parseZipBundle(
         bytes.subarray(dataStart, dataStart + compressedSize),
         remaining,
       );
+      if (inflated === CORRUPT_STREAM) return fail({ code: "corrupt", path });
       if (inflated === null) {
-        return fail({ code: "too_large", path: normalized, limit: budgetTotal });
+        return fail({ code: "too_large", path, limit: budgetTotal ?? undefined });
       }
       content = inflated;
     }
     consumed += content.byteLength;
-
-    // 同名条目保留先出现的那条：文件集与它的索引必须是同一个口径，否则「列出来的
-    // 路径」和「配对时取到的字节」会来自两个不同的条目。
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    files.push({ path: normalized, bytes: content });
+    files.push({ path, bytes: content });
   }
 
   return { ok: true, files, totalBytes: consumed };
@@ -361,10 +462,15 @@ export function markdownFiles(files: readonly BundleFile[]): BundleFile[] {
   return files.filter((file) => MD_BUNDLE_MARKDOWN_EXTENSIONS.includes(extensionOf(file.path)));
 }
 
-/** 把 markdown 字节解成文本，顺带剥掉 BOM（否则首个标题会带一个不可见字符）。 */
+/** 把 markdown 字节解成文本。
+ *
+ *  BOM 无需手工剥：`TextDecoder("utf-8")` 默认 `ignoreBOM: false`，已经吞掉首个
+ *  U+FEFF。**别改成 `new TextDecoder("utf-8", { ignoreBOM: true })`**——那个选项
+ *  的名字读起来像「忽略 BOM」，实际语义是「不把它当 BOM，原样留在文本里」，换过去
+ *  会让首个标题带一个不可见字符，而且不会报任何错。
+ */
 export function decodeMarkdownText(bytes: Uint8Array): string {
-  const decoded = utf8Decoder.decode(bytes);
-  return decoded.charCodeAt(0) === 0xfeff ? decoded.slice(1) : decoded;
+  return utf8Decoder.decode(bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -454,14 +560,25 @@ export function utf8ByteLength(value: string): number {
 // markdown 图片语法
 // ---------------------------------------------------------------------------
 
+/** 图片的书写形态。只有 `inline` 能被改写；另两种只进回执，正文一个字节都不动。 */
+export type MarkdownImageSyntax =
+  /** 行内式 `![alt](dest)`——唯一可改写的形态。 */
+  | "inline"
+  /** 引用式 `![alt][ref]` / `![alt][]`：目标写在文末的链接定义里。 */
+  | "reference"
+  /** 原生 `<img src=...>` 标签。 */
+  | "html";
+
 export type MarkdownImageRef = {
-  /** md 里写的原始链接（未做百分号解码）。 */
+  /** md 里写的原始链接（未做百分号解码）。引用式取方括号里的标签，`<img>` 取 `src`。 */
   src: string;
   alt: string;
+  syntax: MarkdownImageSyntax;
   /** 整个 `![...](...)` 在原文里的跨度。 */
   start: number;
   end: number;
-  /** 链接目标在原文里的跨度——改写只替换这一段，其余字节逐字保留。 */
+  /** 链接目标在原文里的跨度——改写只替换这一段，其余字节逐字保留。
+   *  非 `inline` 形态不可改写，这两个值等于 `start`/`end`，不得用于替换。 */
   destStart: number;
   destEnd: number;
   /** 是否独占一整段（服务端唯一会落成图片元素的形态）。 */
@@ -527,6 +644,79 @@ function indentWidth(raw: string): number {
   return width;
 }
 
+/** ATX 标题行：`# ` 到 `###### `，最多 3 空格缩进，`#` 串后必须是空白或行尾。 */
+const ATX_HEADING_LINE = /^ {0,3}#{1,6}(?:[ \t].*)?$/;
+
+/** 主题分隔线：`***` / `---` / `___`，三个及以上、字符之间可有空白。 */
+const THEMATIC_BREAK_LINE = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+
+/** setext 标题下划线：纯 `=` 串或纯 `-` 串的一行。 */
+const SETEXT_UNDERLINE_LINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+
+/** 上一行是否结束了上一个块，使得图片行能起一个新段落。
+ *
+ *  空行以外，ATX 标题与主题分隔线同样是块边界——服务端实测 `# 标题\n![a](x.png)`
+ *  产出 `[heading, image]`，图片确实独占一段。此前只认空行，这类紧凑写法（标题下
+ *  面直接贴图，导出工具很常见）会被整片判成不可改写。
+ */
+function closesBlockAbove(raw: string): boolean {
+  return ATX_HEADING_LINE.test(raw) || THEMATIC_BREAK_LINE.test(raw);
+}
+
+/** 下一行是否开启了新块，使得图片行仍然独占自己那一段。
+ *
+ *  与上一行**不对称**，这是踩出来的：`---` / `----` / `===` 紧跟在图片行下面时是
+ *  **setext 标题下划线**而不是主题分隔线，会把图片行整个吸成一个标题——服务端实测
+ *  `![a](x.png)\n---` 产出 `[paragraph, heading]`，一个 image 块都没有。setext 优先
+ *  于主题分隔线，所以这里必须显式排除它。带空格的 `- - -` 不是合法的 setext 下划线，
+ *  仍按主题分隔线放行（实测产出 image 块）。
+ */
+function opensBlockBelow(raw: string): boolean {
+  if (ATX_HEADING_LINE.test(raw)) return true;
+  return THEMATIC_BREAK_LINE.test(raw) && !SETEXT_UNDERLINE_LINE.test(raw);
+}
+
+/** 一行上的行内代码跨度（绝对偏移，左闭右开）。
+ *
+ *  CommonMark 的代码跨度按「等长反引号串配对」：`` `x` ``、``` ``a`b`` ``` 都算。
+ *  跨行的代码跨度刻意不处理——按行判已经覆盖了实际写法，而跨行状态机会把整份文档的
+ *  反引号耦合起来，一个落单的反引号就能让后面所有图片消失。
+ */
+function codeSpansOnLine(raw: string, lineStart: number): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let i = 0;
+  while (i < raw.length) {
+    if (raw.charAt(i) !== "`") {
+      i += 1;
+      continue;
+    }
+    let run = 0;
+    while (raw.charAt(i + run) === "`") run += 1;
+    let j = i + run;
+    let closeStart = -1;
+    while (j < raw.length) {
+      if (raw.charAt(j) !== "`") {
+        j += 1;
+        continue;
+      }
+      let closeRun = 0;
+      while (raw.charAt(j + closeRun) === "`") closeRun += 1;
+      if (closeRun === run) {
+        closeStart = j;
+        break;
+      }
+      j += closeRun;
+    }
+    if (closeStart < 0) {
+      i += run;
+      continue;
+    }
+    spans.push([lineStart + i, lineStart + closeStart + run]);
+    i = closeStart + run;
+  }
+  return spans;
+}
+
 /** 从 `!` 处尝试解析一个完整的 `![alt](dest "title")`。
  *
  *  手写扫描而不是正则：目标里可以有成对括号（`![a](img(1).png)`）、可以用尖括号包裹
@@ -554,6 +744,39 @@ function parseImageAt(md: string, at: number): MarkdownImageRef | null {
   if (depth !== 0) return null;
   const alt = md.slice(altStart, i);
   i += 1;
+  if (md.charAt(i) === "[") {
+    // 引用式 `![alt][ref]` / `![alt][]`：目标在文末的链接定义里，本模块不解析定义
+    // 表，所以只如实登记、不改写。**只认后面紧跟 `[` 的这两种**：省略括号的简写式
+    // `![alt]` 与普通的字面文本 `![不是链接]` 在没有定义表时长得一模一样，把它也算
+    // 进来会给一堆纯文本编出「未支持的图片」回执。
+    let j = i + 1;
+    let labelDepth = 1;
+    while (j < md.length) {
+      const ch = md.charAt(j);
+      if (ch === "\\") {
+        j += 2;
+        continue;
+      }
+      if (ch === "[") labelDepth += 1;
+      else if (ch === "]") {
+        labelDepth -= 1;
+        if (labelDepth === 0) break;
+      }
+      j += 1;
+    }
+    if (labelDepth !== 0) return null;
+    return {
+      src: md.slice(i + 1, j),
+      alt,
+      syntax: "reference",
+      start: at,
+      end: j + 1,
+      destStart: at,
+      destEnd: j + 1,
+      standalone: false,
+      line: 0,
+    };
+  }
   if (md.charAt(i) !== "(") return null;
   i += 1;
   while (i < md.length && /\s/.test(md.charAt(i))) i += 1;
@@ -607,6 +830,7 @@ function parseImageAt(md: string, at: number): MarkdownImageRef | null {
   return {
     src: md.slice(destStart, destEnd),
     alt,
+    syntax: "inline",
     start: at,
     end: i + 1,
     destStart,
@@ -616,45 +840,111 @@ function parseImageAt(md: string, at: number): MarkdownImageRef | null {
   };
 }
 
-/** 列出 md 里的全部图片引用，并逐条判定是否「独占一整段」。
+/** 原生 `<img ...>` 标签。属性里不可能出现 `>`（否则标签早就闭合了），所以 `[^>]*`
+ *  既够用又是线性的，不会在长 base64 上回溯。 */
+const HTML_IMG_TAG = /<img\b[^>]*>/gi;
+
+/** 从一个 `<img ...>` 标签里取 `src`（双引号 / 单引号 / 裸值三种写法）。 */
+const HTML_IMG_SRC = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+
+/** 扫出全部 `<img>` 标签，按出现位置升序。 */
+function findHtmlImgTags(md: string): MarkdownImageRef[] {
+  const out: MarkdownImageRef[] = [];
+  HTML_IMG_TAG.lastIndex = 0;
+  for (;;) {
+    const match = HTML_IMG_TAG.exec(md);
+    if (match === null) break;
+    const src = HTML_IMG_SRC.exec(match[0]);
+    out.push({
+      src: src === null ? "" : (src[1] ?? src[2] ?? src[3] ?? ""),
+      alt: "",
+      syntax: "html",
+      start: match.index,
+      end: match.index + match[0].length,
+      destStart: match.index,
+      destEnd: match.index + match[0].length,
+      standalone: false,
+      line: 0,
+    });
+  }
+  return out;
+}
+
+/** 列出 md 里的全部图片引用（三种语法形态），按文档顺序，并逐条判定是否「独占一整段」。
  *
  *  独占段的判据镜像服务端 `structural_markdown.parse_blocks`：只有「整段的行内内容
  *  恰好是一个 image、没有任何非空白文字」的段落才会被发成 image 元素。落到行上就是
- *  ——该图片跨度正好等于所在行去掉首尾空白后的全部内容、缩进不到代码块门槛、上下行
- *  为空行或文件边界。同一行两张图、图下面紧跟一行文字、列表项/表格单元格/引用块里的
- *  图片，服务端一律只留 alt 文本，这里也一律不改写。
+ *  ——图片跨度正好等于所在行去掉首尾空白后的全部内容、**零缩进**、上一行结束了上一个
+ *  块、下一行开启了新块。
  *
- *  围栏代码块内的图片语法整条不列出——那是代码示例，不是引用。
+ *  两处判据比「上下都是空行、缩进 < 4」更精确，都是对着服务端实测定的：
+ *
+ *  - **零缩进**（而不是「缩进 < 4」）：松散列表项的续段缩进 1–3 空格（`1. a` 的续段
+ *    缩进 3、`- a` 的缩进 2），服务端会把它并进 `list_item` 块、图片只剩 alt 文本。
+ *    按「< 4」判就会把它们当成可改写的独占段，把整张图的 base64 内联进一个注定只保留
+ *    文字的位置——白白撑爆上传体积上限，而用户看不到任何解释。代价是缩进 1–3 又**不在**
+ *    列表里的图片（服务端确实会发成 image 块）被判成不可改写：这是登记接受的假阴，
+ *    方向上安全（原样保留链接 + 一条如实回执），且这种写法本身罕见。
+ *  - **相邻行**：空行/文件边界之外，ATX 标题与主题分隔线同样是块边界。唯一的坑是
+ *    `---`/`===` 跟在图片行**下面**时是 setext 下划线而非分隔线，见 `opensBlockBelow`。
+ *
+ *  围栏代码块内、以及行内代码跨度内的图片语法整条不列出——那是代码示例，不是引用。
  */
 export function findMarkdownImages(md: string): MarkdownImageRef[] {
   const lines = scanLines(md);
+  const htmlTags = findHtmlImgTags(md);
   const refs: MarkdownImageRef[] = [];
   let lineIndex = 0;
+  let tagIndex = 0;
   let at = 0;
   for (;;) {
-    const found = md.indexOf("![", at);
-    if (found < 0) break;
-    while (lineIndex + 1 < lines.length && lines[lineIndex + 1].start <= found) lineIndex += 1;
-    const parsed = parseImageAt(md, found);
-    if (parsed === null) {
-      at = found + 2;
-      continue;
+    const bang = md.indexOf("![", at);
+    while (tagIndex < htmlTags.length && htmlTags[tagIndex].end <= at) tagIndex += 1;
+    const tag = tagIndex < htmlTags.length ? htmlTags[tagIndex] : null;
+    if (bang < 0 && tag === null) break;
+
+    let parsed: MarkdownImageRef | null;
+    if (tag !== null && (bang < 0 || tag.start < bang)) {
+      parsed = tag;
+      at = tag.end;
+      tagIndex += 1;
+    } else {
+      parsed = parseImageAt(md, bang);
+      if (parsed === null) {
+        at = bang + 2;
+        continue;
+      }
+      at = parsed.end;
     }
-    at = parsed.end;
+
+    // 显式收窄成 const，别指望 `let` 的控制流收窄能活到下面那个回调里。
+    const ref = parsed;
+    while (lineIndex + 1 < lines.length && lines[lineIndex + 1].start <= ref.start) {
+      lineIndex += 1;
+    }
     const line = lines[lineIndex];
     if (line.fenced) continue;
-    parsed.line = lineIndex;
     const raw = md.slice(line.start, line.end);
+    // 行内代码里的图片语法是被展示的字面文本，不是引用——既不改写，也不该在回执里
+    // 编出一条「这张图没内联」。判据必须是「整条不列出」而不是 standalone 的一个
+    // 条件：后者会照常产出一条 `inline_position` 回执，凭空多出一张“没配上的图”。
+    const inCode = codeSpansOnLine(raw, line.start)
+      .some(([from, to]) => ref.start >= from && ref.end <= to);
+    if (inCode) continue;
+    ref.line = lineIndex;
     const leading = raw.length - raw.trimStart().length;
     const trailing = raw.length - raw.trimEnd().length;
     const contentStart = line.start + leading;
     const contentEnd = line.end - trailing;
-    parsed.standalone = parsed.start === contentStart
-      && parsed.end === contentEnd
-      && indentWidth(raw) < INDENTED_CODE_SPACES
-      && (lineIndex === 0 || lines[lineIndex - 1].blank)
-      && (lineIndex === lines.length - 1 || lines[lineIndex + 1].blank);
-    refs.push(parsed);
+    const above = lineIndex === 0 ? null : lines[lineIndex - 1];
+    const below = lineIndex === lines.length - 1 ? null : lines[lineIndex + 1];
+    ref.standalone = ref.syntax === "inline"
+      && ref.start === contentStart
+      && ref.end === contentEnd
+      && indentWidth(raw) === 0
+      && (above === null || above.blank || closesBlockAbove(md.slice(above.start, above.end)))
+      && (below === null || below.blank || opensBlockBelow(md.slice(below.start, below.end)));
+    refs.push(ref);
   }
   return refs;
 }
@@ -672,11 +962,30 @@ function baseNameOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/** 把 md 里的相对链接解析成包内路径。返回 `null` 表示逃出了包根。 */
-export function resolveBundleRef(mdPath: string, ref: string): string | null {
+/** 剥掉链接尾部的 `?query` / `#fragment`。
+ *
+ *  `x.png?v=2` 这种缓存戳在导出的 md 里很常见，磁盘上的文件就叫 `x.png`；不剥就永远
+ *  配不上，还会给用户一条查无此文件的回执。**必须在百分号解码之前做**：`%23` 正是
+ *  「文件名里真的有一个 `#`」的写法，先解码再剥会把它从中间斩断。
+ */
+function stripLinkSuffix(ref: string): string {
+  const hash = ref.indexOf("#");
+  const query = ref.indexOf("?");
+  const cut = hash < 0 ? query : query < 0 ? hash : Math.min(hash, query);
+  return cut < 0 ? ref : ref.slice(0, cut);
+}
+
+/** 把已经剥过尾缀的链接解析成包内路径。返回 `null` 表示逃出了包根。 */
+function resolveBundlePath(mdPath: string, ref: string): string | null {
   const cleaned = ref.replaceAll("\\", "/");
   const base = cleaned.startsWith("/") ? "" : directoryOf(mdPath);
   return normalizeEntryPath(base === "" ? cleaned : `${base}/${cleaned}`);
+}
+
+/** 把 md 里的相对链接解析成包内路径（先剥 `?query`/`#fragment`）。
+ *  返回 `null` 表示逃出了包根。 */
+export function resolveBundleRef(mdPath: string, ref: string): string | null {
+  return resolveBundlePath(mdPath, stripLinkSuffix(ref));
 }
 
 function decodePercent(value: string): string | null {
@@ -730,17 +1039,22 @@ function suggestFor(index: BundleIndex, resolved: string | null): string[] {
 /** 按包内路径找文件：先试百分号解码后的形态，再试原样。
  *
  *  两种都试是因为两种都真实存在——Notion 导出把空格写成 `%20`，而手写的 md 里也可能
- *  真有个名字带 `%20` 的文件。
+ *  真有个名字带 `%20` 的文件。解码后的形态优先：`%20` 在链接里的**规范**含义就是空格，
+ *  两个候选同时存在于包里时按规范解读取 `my shot.png`。
+ *
+ *  尾缀在这里剥一次就够，候选走的是不再剥的 `resolveBundlePath`——否则 `%23` 解码出
+ *  的字面 `#` 会在第二轮被当成 fragment 斩掉。
  */
 function lookup(
   index: BundleIndex,
   mdPath: string,
   src: string,
 ): { file: BundleFile; path: string } | { file: null; resolved: string | null } {
-  const candidates = [decodePercent(src), src].filter((value): value is string => value !== null);
+  const bare = stripLinkSuffix(src);
+  const candidates = [decodePercent(bare), bare].filter((value): value is string => value !== null);
   let firstResolved: string | null = null;
   for (const candidate of candidates) {
-    const resolved = resolveBundleRef(mdPath, candidate);
+    const resolved = resolveBundlePath(mdPath, candidate);
     if (firstResolved === null) firstResolved = resolved;
     if (resolved === null) continue;
     const file = index.byPath.get(resolved);
@@ -754,8 +1068,19 @@ function lookup(
 // ---------------------------------------------------------------------------
 
 export type UnsupportedReason =
-  /** 图片写在列表项/表格单元格/句子中间等位置，服务端只会留下文字。 */
+  /** 图片不在独立段落中（列表项、表格单元格、句子中间、引用块、强调包裹……）：
+   *  **本次未内联，保留原始链接**。
+   *
+   *  措辞刻意只陈述本模块做了什么，不替服务端断言它会怎么处理。判据是保守的——只改写
+   *  能确定会落成图片元素的形态，落在这一类里的既有服务端真的只保留文字的（列表项、
+   *  表格单元格、句子中间），也有服务端其实会当成图片、只是本模块不敢担保的（引用块
+   *  `> ![](x)`、强调包裹 `*![](x)*`、尾随行内代码）。旧文案「服务端只会留下文字」对
+   *  后一半是事实错误，会让用户按一个不存在的原因去改 md。 */
   | "inline_position"
+  /** 引用式 `![alt][ref]` / `![alt][]`：目标写在文末的链接定义里，本模块不解析定义表。 */
+  | "reference_syntax"
+  /** 原生 `<img src=...>` 标签，不是 markdown 图片语法。 */
+  | "html_syntax"
   /** `![alt]()`：链接是空的。 */
   | "empty_src"
   /** 魔数不是 png/jpeg/gif/webp（含 SVG）。 */
@@ -807,12 +1132,14 @@ export type InlineReceipt = {
   noAlt: NoAltImage[];
 };
 
+/** 三个上限一律经 `resolveLimit` 归一：省略、`null`、`0`、负数、非整数都表示
+ *  「拿不到这个上限」→ 不做本地预检，交给服务端护栏。 */
 export type InlineOptions = {
   /** `/system/config` 的 `source_upload_max_bytes`：改写后的 md 必须不超过它。 */
   uploadMaxBytes: number;
-  /** 部署的单图字节上限；省略表示前端不预检，交给服务端护栏。 */
+  /** 部署的单图字节上限。 */
   imageMaxBytes?: number | null;
-  /** 部署的每来源图片张数上限；省略表示前端不预检。 */
+  /** 部署的每来源图片张数上限。 */
   maxImagesPerSource?: number | null;
 };
 
@@ -836,6 +1163,12 @@ export type InlineResult =
 /** 判断链接是不是带 scheme 的绝对 URL（`data:` / `http:` / `https:` / …）。 */
 const ABSOLUTE_URL = /^[a-z][a-z0-9+.-]*:/i;
 
+/** 协议相对 URL（`//cdn.example.com/a.png`）：浏览器按当前页协议去网络取，与
+ *  `https://` 完全同类。它没有 scheme，所以逃得过 `ABSOLUTE_URL`；不单独拦一下就会
+ *  被当成包内相对路径去配对，然后报一条「未找到 cdn.example.com/a.png」——把一个
+ *  「不拉取远程图片」的产品决定说成了「你的包里少了个文件」。 */
+const PROTOCOL_RELATIVE_URL = /^\/\//;
+
 function emptyReceipt(): InlineReceipt {
   return { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] };
 }
@@ -843,12 +1176,16 @@ function emptyReceipt(): InlineReceipt {
 /** 把一份 md 里的本地图片链接改写成自包含的 data URI，并给出逐条配对回执。
  *
  *  分类顺序（每条引用最多产出一条回执，按文档顺序）：
- *  1. 围栏代码块里的图片语法 —— 根本不列出（是代码示例）。
- *  2. `data:` —— 已经是自包含形态，静默跳过。
- *  3. 其它带 scheme 的链接 —— 记 `remote`，如实告知不会去拉取。
- *  4. 非独占段的本地图片 —— 记 `unsupported/inline_position`：服务端只留文字，
- *     内联进去也不会成为图片，只会白白撑大体积。
- *  5. 剩下的独占段本地图片走配对 → 魔数 → 单图上限 → 张数上限 → 内联。
+ *  1. 围栏代码块 / 行内代码里的图片语法 —— 根本不列出（是被展示的代码，不是引用）。
+ *  2. 引用式 `![a][ref]` 与 `<img>` 标签 —— 记 `reference_syntax` / `html_syntax`。
+ *     这两种本模块不改写，但必须如实登记：静默跳过会让用户以为图片配上了。
+ *  3. `data:` —— 已经是自包含形态，静默跳过。
+ *  4. 其它带 scheme 的链接、以及协议相对的 `//host/x.png` —— 记 `remote`。
+ *  5. 非独占段的本地图片 —— 记 `unsupported/inline_position`（语义见该枚举值的注释）。
+ *  6. 剩下的独占段本地图片走配对 → 魔数 → 单图上限 → 张数上限 → 内联。
+ *
+ *  语法形态排在 `data:`/remote 之前：一个 `<img src="https://...">` 报「这种写法不支持」
+ *  比报「远程图片不拉取」更可操作——改成 markdown 语法它就能工作，而后者暗示改不了。
  *
  *  `maxImagesPerSource` 只由**真正内联成功**的张数消耗：一张超限的大图不该顺带占掉
  *  一个名额（服务端也是跳过它而不是记账）。
@@ -861,15 +1198,27 @@ export function inlineMdImages(
 ): InlineResult {
   const index = buildIndex(files);
   const receipt = emptyReceipt();
-  const imageLimit = normalizeLimit(opts.imageMaxBytes);
-  const countLimit = normalizeLimit(opts.maxImagesPerSource);
+  const imageLimit = resolveLimit(opts.imageMaxBytes);
+  const countLimit = resolveLimit(opts.maxImagesPerSource);
 
   const pieces: string[] = [];
+  // 同一张图被引用多次时只编码一次：base64 是纯函数，而一张几 MB 的图编一次就要
+  // 遍历全部字节并拼出 4/3 倍长的字符串。按包内路径 memo（不是按 src——`./a.png`
+  // 与 `a.png` 是同一个文件）。
+  const encodedByPath = new Map<string, string>();
   let cursor = 0;
   let inlinedCount = 0;
 
   for (const ref of findMarkdownImages(mdText)) {
-    if (ABSOLUTE_URL.test(ref.src)) {
+    if (ref.syntax !== "inline") {
+      receipt.unsupported.push({
+        src: ref.src,
+        reason: ref.syntax === "reference" ? "reference_syntax" : "html_syntax",
+        line: ref.line,
+      });
+      continue;
+    }
+    if (ABSOLUTE_URL.test(ref.src) || PROTOCOL_RELATIVE_URL.test(ref.src)) {
       if (!/^data:/i.test(ref.src)) receipt.remote.push({ src: ref.src, line: ref.line });
       continue;
     }
@@ -926,7 +1275,12 @@ export function inlineMdImages(
       continue;
     }
 
-    const dataUri = `data:${mime};base64,${bytesToBase64(hit.file.bytes)}`;
+    let encoded = encodedByPath.get(hit.path);
+    if (encoded === undefined) {
+      encoded = bytesToBase64(hit.file.bytes);
+      encodedByPath.set(hit.path, encoded);
+    }
+    const dataUri = `data:${mime};base64,${encoded}`;
     // 只替换链接目标那一段，alt / 标题 / 缩进 / 换行全部逐字保留。
     pieces.push(mdText.slice(cursor, ref.destStart), dataUri);
     cursor = ref.destEnd;
@@ -948,9 +1302,7 @@ export function inlineMdImages(
   pieces.push(mdText.slice(cursor));
   const rewritten = pieces.join("");
   const bytes = utf8ByteLength(rewritten);
-  const limit = Number.isSafeInteger(opts.uploadMaxBytes) && opts.uploadMaxBytes > 0
-    ? opts.uploadMaxBytes
-    : null;
+  const limit = resolveLimit(opts.uploadMaxBytes);
   if (limit !== null && bytes > limit) {
     return {
       ok: false,
@@ -967,8 +1319,4 @@ export function inlineMdImages(
     };
   }
   return { ok: true, rewritten, bytes, receipt };
-}
-
-function normalizeLimit(value: number | null | undefined): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
