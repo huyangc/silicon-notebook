@@ -90,10 +90,14 @@ test("无图注的附图仍渲染缩略图,但不渲染图注文字", async () =
   renderAnswer(answer);
 
   await user.click(screen.getByRole("button", { name: "[1]" }));
-  expect(screen.getByText("本段附图")).toBeInTheDocument();
+  const imagesRegion = screen.getByText("本段附图").closest(".cite-detail-images");
+  expect(imagesRegion).toBeInTheDocument();
   await screen.findByRole("img");
-  // 图注区块本身没有渲染任何 <small> 文字节点(附图区只剩标题 + 图),不会留下空文案。
-  expect(document.querySelector(".cite-detail-image-caption")).toBeNull();
+  // 语义断言而非类名耦合(评审修复 F4,checkpoint b6541f26):图注固定用 <small>
+  // 渲染,断言"附图区块内不存在任何 <small> 节点"就覆盖了"没有图注",且不会在
+  // 图注实现换了个类名(而不是换了标签)时假绿——原断言直接查 `.cite-detail-
+  // image-caption` 这个具体类名,是与实现细节耦合而非与行为耦合。
+  expect(imagesRegion?.querySelectorAll("small").length).toBe(0);
 });
 
 test("旧答案缺 images 字段:不渲染「本段附图」区,其余渲染逐字节不变", async () => {
@@ -157,6 +161,21 @@ test("关闭弹层后不再显示附图区,重新打开的懒挂载纪律仍然�
   await user.keyboard("{Escape}");
   expect(screen.queryByText("本段附图")).not.toBeInTheDocument();
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
+
+  // F4(评审修复,checkpoint b6541f26):测试名承诺了"重新打开的懒挂载纪律仍然
+  // 成立",此前只验证到关闭为止,从未真正重新打开过——名不副实。AuthedImage
+  // 卸载即 revoke objectURL,重新打开必须触发第二次全新 fetch(不是复用已失效
+  // 的旧 blob),用第二次调用次数兑现这条测试名承诺的断言。
+  //
+  // ⚠ 重新查询按钮而不是复用上面的 `badge` 引用:AnswerMarkdown 未对
+  // `components.a` 做 memo,`citePopover` 状态每次变化都会让引用徽章重新挂载成
+  // 新的 DOM 节点(排查记录:关闭态下沿用旧引用点击,click 事件能到达那个已从
+  // 文档摘下的节点,但不会经 React 的委托监听触发 onReferenceClick,弹层永远
+  // 打不开——这是测试要按实时 DOM 查询的既有惯例,不是组件缺陷;
+  // answer-panel-readonly.component.test.tsx 里换徽章前也总是重新 getByRole)。
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  await screen.findByRole("img");
+  expect(fetchInternalAssetBlob).toHaveBeenCalledTimes(2);
 });
 
 test("点击附图跳转来源详情,定位到该图片元素(复用「查看原文」的 onOpenSource 通道)", async () => {
@@ -177,6 +196,29 @@ test("未传 onOpenSource 时附图仍展示,只是不可点击跳转", async ()
   await user.click(screen.getByRole("button", { name: "[1]" }));
   await screen.findByRole("img");
   expect(screen.queryByTitle("在来源详情中查看这张附图")).not.toBeInTheDocument();
+});
+
+// ---------------------------------------------------------------------------
+// F2(评审修复,checkpoint b6541f26):跨库锚点的资产 URL 边界。镜像
+// answer-collection-results.component.test.tsx 里"跨库图片条目"那条用例的判据
+// (445 行起)——资产 URL 恒用**当前 active notebook**过权限,绝不用条目/锚点
+// 自己的 notebook_id 直连另一个库(那是成员口径的越权猜测,红线见 §"参与库资源的
+// 代理读取")。代码路径已经这样写(SelectedReferenceDetail 拼 URL 用的是 prop
+// notebookId 而非 sourceNotebookId),这里补的是回归门,不是修复。
+// ---------------------------------------------------------------------------
+test("跨库锚点的附图:经 active notebook 维度的资产 URL 取图,绝不用锚点自己的 notebook_id 直连", async () => {
+  vi.mocked(fetchInternalAssetBlob).mockClear();
+  const user = userEvent.setup();
+  const answer = anchorAnswerWithImages();
+  answer.anchors[0].notebook_id = "base-1";
+  answer.anchors[0].tier = "base";
+  renderAnswer(answer);
+
+  await user.click(screen.getByRole("button", { name: "[1]" }));
+  await screen.findByRole("img");
+  const url = vi.mocked(fetchInternalAssetBlob).mock.calls[0][0];
+  expect(url).toContain("/notebooks/nb-1/assets/asset-1");
+  expect(url).not.toContain("base-1");
 });
 
 test("citation 回退列表(无 [k] 锚点命中)携带 images 时渲染同一套附图区", async () => {

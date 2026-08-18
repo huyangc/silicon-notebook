@@ -5823,6 +5823,82 @@ button.chat-session-card {
   white-space: nowrap;
 }
 
+/* 检索结果带图(T1/T2)：本段附图区——与上方引证内容(snippet/来源/原始文件)用
+   顶部分隔线明确切开,视觉上不与"模型引用的证据"混在一起(产品裁决,见设计文档
+   §0)。.cite-popover 的宽度上限是 min(360px, 100vw-24px),缩略图用固定像素上限
+   而非 100%,避免单张大图把这张本就窄的卡片撑得比文字区更宽。颜色跟 --muted/
+   --line 两个既有 token,不写死十六进制值。 */
+.cite-detail-images {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.cite-detail-images-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cite-detail-image-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cite-detail-image-item {
+  display: grid;
+  gap: 4px;
+  max-width: 160px;
+}
+
+/* F1(评审修复,checkpoint b6541f26):弹层定位(placeCitationPopover)只在
+   useLayoutEffect 里量一次尺寸,而附图是异步加载的——AuthedImage 先渲染占位文案
+   （图片加载中…/加载失败）,IntersectionObserver 判定可见后才发鉴权请求、拿到
+   blob 才换成真实 <img>。占位文案与图片的高度不同,一次性测量必然撞不上加载完成
+   后的终值:弹层会停在按加载前(更矮)高度算出的位置,图片到位后卡片变高却不
+   重新定位。用 min-height 等于 max-height,让占位阶段就占满最终尺寸,把"高度
+   不确定"钉死成常量,一次测量即终值;代价是小于 160px 的图片会在框内留白,可
+   接受。宽度同理给 min-width——宽度不参与那次高度测量,不严格要求,但同样让
+   缩略图网格在加载前后保持尺寸稳定,不因为最后一张图加载完成而抖动。 */
+.cite-detail-image-item .authed-image-frame {
+  max-width: 160px;
+  max-height: 160px;
+  min-width: 160px;
+  min-height: 160px;
+  overflow: hidden;
+  border-radius: 6px;
+}
+
+.cite-detail-image-item .element-image {
+  max-width: 160px;
+  max-height: 160px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.cite-detail-image-button {
+  display: block;
+  border: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.cite-detail-image-caption {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .severity-high {
   color: var(--red);
 }
@@ -6513,6 +6589,35 @@ button.chat-session-card {
 .staged-skipped-reason {
   color: var(--danger, #c0392b);
   text-align: right;
+}
+
+/* 压缩包/文件夹图片配对回执：复用 .staged-skipped 的面板外观（同一「弹窗内持久
+   展示、不能只发即逝 toast」的精神），行区不设固定高度上限——每个 md 下面可能
+   跟着好几条配对明细，交给弹窗自身的滚动而不是再套一层内部滚动裁掉内容。 */
+.bundle-receipt-rows {
+  max-height: none;
+}
+
+.bundle-receipt-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.bundle-receipt-row + .bundle-receipt-row {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #ecd3ab;
+}
+
+.bundle-receipt-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .drop-zone strong {
