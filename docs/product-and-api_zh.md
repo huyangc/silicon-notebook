@@ -1206,6 +1206,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `MD_BUNDLE_MAX_SUGGESTIONS`（每张未匹配图片给出的近似候选路径数） | 3 |
 | `BUNDLE_DIR_MAX_DEPTH`（拖入文件夹的遍历深度） | 16 |
 | `BUNDLE_DIR_MAX_FILES`（拖入文件夹的文件数上限，与 `MD_BUNDLE_MAX_ENTRIES` 同值） | 2,000 |
+| 文件夹总量上界（读任何文件内容**之前**按累加的 `File.size` 判定）：`min(source_upload_max_bytes × 4, 绝对顶)`——与上面压缩输入上界共用同一条解压后总量线与同一个绝对顶，但**不加**容器余量（文件夹条目的 `File.size` 本就是真实内容字节数，没有 zip 头/deflate 微膨胀这层容器开销要抵消） | 见公式 |
 | `INLINE_TOO_LARGE_IMAGE_LINES`（超限时逐条列出的图片明细行数，按体积降序） | 3 |
 | `BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH`（`source_upload_max_files_per_batch` 尚未到达时，**内联之前**那道名额闸的回退值；取值 = 后端固定的 `SOURCE_UPLOAD_MAX_FILES_PER_BATCH`） | 20 |
 

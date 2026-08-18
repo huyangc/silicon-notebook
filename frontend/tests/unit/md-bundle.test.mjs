@@ -578,6 +578,16 @@ const PATH_CASES = [
   ["docs/note.md", "img.png?v=2#fig-1", "docs/img.png"],
   ["docs/note.md", "img.png#a?b", "docs/img.png"],
   ["docs/note.md", "../assets/img.png?w=100", "assets/img.png"],
+  // 评审 F1：反斜杠转义必须在路径归一化/后缀剥离之前解码（CommonMark 语义）。
+  // `\(`/`\)` 是括号字面量,不解码就会被 `\` → `/` 归一成 `img/(1/).png`。
+  ["docs/note.md", "img\\(1\\).png", "docs/img(1).png"],
+  // `\#` 解码后是文件名里的字面 `#`,不能再被当 fragment 分隔符剥掉。
+  ["docs/note.md", "a\\#b.png", "docs/a#b.png"],
+  // `\?` 同上,解码后是字面 `?` 而不是 query 分隔符。
+  ["docs/note.md", "img\\?note.png", "docs/img?note.png"],
+  // 反斜杠后面跟非标点字符(这里是字母)时是字面反斜杠本身,仍按既有行为归一成 `/`——
+  // Windows 风格分隔符不能因为加了转义解码就回归。
+  ["docs/note.md", "img\\sub\\a.png", "docs/img/sub/a.png"],
 ];
 
 test("relative image links resolve against the markdown file's own directory", () => {
@@ -631,6 +641,26 @@ test("a link with a cache-busting query still pairs with the plain file", () => 
   assert.equal(out.receipt.inlined[0].path, "docs/shot.png");
   // 目标整体被替换:查询串跟着原链接一起消失,不能残留成 `data:...;base64,AAA?v=2`。
   assert.equal(out.rewritten, `![图注](data:image/png;base64,${bytesToBase64(PNG)})\n`);
+});
+
+
+test("a link with backslash-escaped parentheses in its target still pairs with the plain file (codex #518 R6 P2)", () => {
+  // parseImageAt 已经正确把 `\(`/`\)` 当转义括号处理、不提前闭合目标——真正在这条
+  // 链上出问题的是路径归一化把两个反斜杠都当分隔符，解析成 `img/(1/).png`。
+  const files = [{ path: "docs/img(1).png", bytes: PNG }];
+  const out = inlineOf("docs/n.md", "![图注](img\\(1\\).png)\n", files);
+  assert.equal(out.ok, true);
+  assert.equal(out.receipt.inlined.length, 1);
+  assert.equal(out.receipt.inlined[0].path, "docs/img(1).png");
+});
+
+
+test("an escaped # in the target is not stripped as a fragment (codex #518 R6 P2)", () => {
+  const files = [{ path: "docs/a#b.png", bytes: PNG }];
+  const out = inlineOf("docs/n.md", "![图注](a\\#b.png)\n", files);
+  assert.equal(out.ok, true);
+  assert.equal(out.receipt.inlined.length, 1);
+  assert.equal(out.receipt.inlined[0].path, "docs/a#b.png");
 });
 
 

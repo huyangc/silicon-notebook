@@ -1566,6 +1566,7 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 | `MD_BUNDLE_MAX_SUGGESTIONS` (near-miss path suggestions per unmatched image) | 3 |
 | `BUNDLE_DIR_MAX_DEPTH` (dropped-folder traversal depth) | 16 |
 | `BUNDLE_DIR_MAX_FILES` (dropped-folder file count, same value as `MD_BUNDLE_MAX_ENTRIES`) | 2,000 |
+| Dropped-folder total-byte cap (checked against summed `File.size` **before** any file content is read): `min(source_upload_max_bytes × 4, absolute ceiling)` — shares the same decompressed-budget line and absolute ceiling with the compressed-input cap above, but **no** container slack (a folder entry's `File.size` is already the real content byte count; there is no zip-header/deflate-expansion overhead to offset) | formula above |
 | `INLINE_TOO_LARGE_IMAGE_LINES` (oversized-image detail lines shown per over-limit md, largest first) | 3 |
 | `BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH` (per-batch slot budget used **before** inlining while `source_upload_max_files_per_batch` has not arrived; equals the backend's fixed `SOURCE_UPLOAD_MAX_FILES_PER_BATCH`) | 20 |
 
