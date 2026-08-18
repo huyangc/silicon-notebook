@@ -172,4 +172,28 @@ describe("BundleReceiptsPanel", () => {
     await user.click(screen.getByRole("button", { name: "知道了" }));
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
+
+  test("imagesDisabledNote 传入时在面板顶部持久显示；省略或空不渲染", () => {
+    const receipts: BundleReceiptEntry[] = [
+      { key: "a", bundleLabel: "x.zip", fileName: "one.md", receipt: emptyReceipt() },
+    ];
+    const { container, rerender } = render(
+      <BundleReceiptsPanel receipts={receipts} onDismiss={() => undefined} />,
+    );
+    expect(container.querySelector(".bundle-images-disabled-note")).toBeNull();
+
+    rerender(
+      <BundleReceiptsPanel
+        receipts={receipts}
+        onDismiss={() => undefined}
+        imagesDisabledNote="该部署未开启图片存储，压缩包中的图片将不会被保存"
+      />,
+    );
+    expect(screen.getByText("该部署未开启图片存储，压缩包中的图片将不会被保存")).toBeInTheDocument();
+
+    rerender(
+      <BundleReceiptsPanel receipts={receipts} onDismiss={() => undefined} imagesDisabledNote={null} />,
+    );
+    expect(container.querySelector(".bundle-images-disabled-note")).toBeNull();
+  });
 });

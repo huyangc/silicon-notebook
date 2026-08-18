@@ -48,3 +48,13 @@ class SystemConfiguration(BaseModel):
     # 关闭时前端不应默认进一个会全部 404 的视图（见 dev/logs/page.tsx 与 system-api.ts
     # 的消费逻辑）。
     user_activity_view_enabled: bool
+    # markdown 压缩包/文件夹上传的图片内联预检护栏（直接反映
+    # Settings.mineru_max_image_bytes / mineru_max_images_per_source）：前端在配对
+    # 阶段拿它们提前判定「这张图会被服务端跳过」，避免只能等上传后才发现。真正的
+    # 护栏仍在服务端（这里只是预检镜像），源见 md-bundle.ts 的 InlineOptions。
+    source_image_max_bytes: int = Field(gt=0)
+    source_image_max_per_source: int = Field(gt=0)
+    # 部署级图片存储总开关，直接反映 Settings.mineru_return_images——它门控所有来源
+    # 类型的图片持久化，关闭时压缩包/文件夹上传里的图片内联对前端毫无意义（服务端
+    # 会静默丢弃），前端据此跳过内联并提示用户。
+    source_images_enabled: bool

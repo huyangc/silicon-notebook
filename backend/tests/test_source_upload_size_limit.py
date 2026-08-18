@@ -63,6 +63,9 @@ def test_authenticated_system_config_exposes_upload_guards(client):
             "report_max_sections",
             "report_max_subqueries_per_section",
             "user_activity_view_enabled",
+            "source_image_max_bytes",
+            "source_image_max_per_source",
+            "source_images_enabled",
         )
     } == {
         "source_upload_max_bytes": 1024 * 1024,
@@ -70,6 +73,9 @@ def test_authenticated_system_config_exposes_upload_guards(client):
         "report_max_sections": 6,
         "report_max_subqueries_per_section": 4,
         "user_activity_view_enabled": True,
+        "source_image_max_bytes": 5 * 1024 * 1024,
+        "source_image_max_per_source": 200,
+        "source_images_enabled": True,
     }
     assert payload["supported_source_extensions"] == [
         "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls"
@@ -78,6 +84,34 @@ def test_authenticated_system_config_exposes_upload_guards(client):
         "mineru_self_hosted", "mineru_cloud", "builtin"
     ]
     assert all("api" not in row and "token" not in row for row in payload["parser_engines"])
+
+
+def test_authenticated_system_config_reflects_image_guard_overrides(tmp_path, monkeypatch):
+    # 独立于 `client` fixture：需要在 app 创建前额外设置图片护栏相关的部署变量，
+    # 证明 /system/config 的三个新字段确实转发 Settings 而不是硬编码默认值。
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/upload-limit-images.db")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("MINERU_RETURN_IMAGES", "false")
+    monkeypatch.setenv("MINERU_MAX_IMAGE_BYTES", "1048576")
+    monkeypatch.setenv("MINERU_MAX_IMAGES_PER_SOURCE", "7")
+    get_settings.cache_clear()
+    from app.api import deps, source_routes
+    from app.main import create_app
+
+    deps.repository.cache_clear()
+    monkeypatch.setattr(source_routes.kg_scheduler, "submit_job", lambda *_args, **_kwargs: None)
+    image_client = TestClient(create_app())
+
+    response = image_client.get("/api/system/config", headers=_auth(image_client))
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["source_images_enabled"] is False
+    assert payload["source_image_max_bytes"] == 1048576
+    assert payload["source_image_max_per_source"] == 7
+    get_settings.cache_clear()
 
 
 def test_source_multipart_auth_runs_before_the_bounded_body_parser(client):

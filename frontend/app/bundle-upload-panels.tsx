@@ -79,9 +79,13 @@ export type BundleReceiptEntry = {
 export function BundleReceiptsPanel({
   receipts,
   onDismiss,
+  imagesDisabledNote,
 }: {
   receipts: readonly BundleReceiptEntry[];
   onDismiss: () => void;
+  /** 部署未开启图片存储时的持久提示（`bundle-intake.ts` 的
+   *  `BUNDLE_IMAGES_DISABLED_NOTE`）；省略或空表示该部署支持图片存储，不显示。 */
+  imagesDisabledNote?: string | null;
 }) {
   if (receipts.length === 0) return null;
   return (
@@ -90,6 +94,9 @@ export function BundleReceiptsPanel({
         <span>压缩包/文件夹图片配对结果</span>
         <button type="button" className="sort-button" onClick={onDismiss}>知道了</button>
       </div>
+      {imagesDisabledNote && (
+        <p className="tool-hint bundle-images-disabled-note">{imagesDisabledNote}</p>
+      )}
       <div className="staged-skipped-rows bundle-receipt-rows">
         {receipts.map((entry) => (
           <div className="bundle-receipt-row" key={entry.key}>

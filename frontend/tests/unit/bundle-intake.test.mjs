@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ALREADY_STAGED_REASON,
   BUNDLE_DIR_MAX_FILES,
+  BUNDLE_IMAGES_DISABLED_NOTE,
   BUNDLE_READ_FAILED_REASON,
   DIRECTORY_READ_FAILED_REASON,
   INLINE_TOO_LARGE_IMAGE_LINES,
@@ -149,6 +150,86 @@ test("processMarkdownCandidate: fileNameOverride 覆盖 basename（同批同名 
   assert.equal(plain.fileName, "README.md");
   const renamed = processMarkdownCandidate(mdFile, [mdFile], { uploadMaxBytes: 10_000 }, "a-README.md");
   assert.equal(renamed.fileName, "a-README.md");
+});
+
+test("processMarkdownCandidate: imageMaxBytes/maxImagesPerSource 传入后对内联生效（上限传入生效）", () => {
+  const mdText = "# Title\n\n![one](a.png)\n\n![two](b.png)\n";
+  const mdFile = { path: "note.md", bytes: new TextEncoder().encode(mdText) };
+  const files = [
+    mdFile,
+    { path: "a.png", bytes: PNG },
+    { path: "b.png", bytes: PNG },
+  ];
+  // 单图上限比 PNG 的字节数还小：两张图都该被判 image_too_large，而不是内联。
+  const byBytes = processMarkdownCandidate(mdFile, files, {
+    uploadMaxBytes: 10_000_000,
+    imageMaxBytes: 1,
+  });
+  assert.equal(byBytes.ok, true);
+  assert.equal(byBytes.receipt.inlined.length, 0);
+  assert.equal(byBytes.receipt.unsupported.length, 2);
+  assert.ok(byBytes.receipt.unsupported.every((item) => item.reason === "image_too_large"));
+
+  // 张数上限为 1：第一张内联成功，第二张被 too_many_images 挡下。
+  const byCount = processMarkdownCandidate(mdFile, files, {
+    uploadMaxBytes: 10_000_000,
+    maxImagesPerSource: 1,
+  });
+  assert.equal(byCount.ok, true);
+  assert.equal(byCount.receipt.inlined.length, 1);
+  assert.equal(byCount.receipt.unsupported.length, 1);
+  assert.equal(byCount.receipt.unsupported[0].reason, "too_many_images");
+});
+
+// ---------------------------------------------------------------------------
+// processMarkdownCandidate：imagesEnabled === false（部署未开启图片存储）
+// ---------------------------------------------------------------------------
+
+test("processMarkdownCandidate: imagesEnabled=false 时跳过整个图片配对/内联，正文原样返回，回执全空", () => {
+  const mdText = "# Title\n\n![a picture](pic.png)\n";
+  const mdFile = { path: "docs/note.md", bytes: new TextEncoder().encode(mdText) };
+  const picFile = { path: "docs/pic.png", bytes: PNG };
+  const result = processMarkdownCandidate(
+    mdFile,
+    [mdFile, picFile],
+    { uploadMaxBytes: 10_000_000, imagesEnabled: false },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.fileName, "note.md");
+  // 正文原样保留：既没有被改写成 data URI，也没有做任何图片相关处理。
+  assert.equal(result.rewritten, mdText);
+  assert.deepEqual(result.receipt, { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] });
+});
+
+test("processMarkdownCandidate: imagesEnabled=false 时仍然遵守单文件上传上限", () => {
+  const mdText = "# Title\n\n" + "x".repeat(100);
+  const mdFile = { path: "note.md", bytes: new TextEncoder().encode(mdText) };
+  const result = processMarkdownCandidate(
+    mdFile,
+    [mdFile],
+    { uploadMaxBytes: 10, imagesEnabled: false },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.limit, 10);
+  assert.ok(result.bytes > 10);
+  assert.equal(result.images.length, 0);
+  assert.deepEqual(result.receipt, { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] });
+});
+
+test("processMarkdownCandidate: imagesEnabled 省略时保持既有内联行为（向后兼容）", () => {
+  const mdText = "# Title\n\n![a picture](pic.png)\n";
+  const mdFile = { path: "note.md", bytes: new TextEncoder().encode(mdText) };
+  const picFile = { path: "pic.png", bytes: PNG };
+  const result = processMarkdownCandidate(mdFile, [mdFile, picFile], { uploadMaxBytes: 10_000_000 });
+  assert.equal(result.ok, true);
+  assert.match(result.rewritten, /data:image\/png;base64,/);
+  assert.equal(result.receipt.inlined.length, 1);
+});
+
+test("BUNDLE_IMAGES_DISABLED_NOTE：非空中文提示，说明图片不会被保存", () => {
+  assert.equal(typeof BUNDLE_IMAGES_DISABLED_NOTE, "string");
+  assert.match(BUNDLE_IMAGES_DISABLED_NOTE, /图片/);
+  assert.match(BUNDLE_IMAGES_DISABLED_NOTE, /不会被保存/);
 });
 
 // ---------------------------------------------------------------------------

@@ -118,6 +118,9 @@ def system_configuration(
             settings.report_max_subqueries_per_section
         ),
         user_activity_view_enabled=settings.user_activity_view_enabled,
+        source_image_max_bytes=settings.mineru_max_image_bytes,
+        source_image_max_per_source=settings.mineru_max_images_per_source,
+        source_images_enabled=settings.mineru_return_images,
     )
 
 
