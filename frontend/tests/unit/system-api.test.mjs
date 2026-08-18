@@ -125,18 +125,47 @@ test("fetchSystemConfiguration treats malformed image guard values as absent, no
   globalThis.fetch = async () => new Response(JSON.stringify({
     source_upload_max_bytes: 50 * 1024 * 1024,
     source_upload_max_files_per_batch: 20,
-    source_image_max_bytes: 0,
-    source_image_max_per_source: -3,
+    source_image_max_bytes: -1,
+    source_image_max_per_source: 3.5,
     source_images_enabled: "false",
   }), {
     status: 200,
   });
   try {
     const config = await fetchSystemConfiguration();
+    // 负数/非整数是坏值,不是可执行的配置 → `null`(不做本地预检)。
     assert.equal(config.source_image_max_bytes, null);
     assert.equal(config.source_image_max_per_source, null);
     // 非布尔的 "false" 字符串不是显式 `false`:只有真值 `false` 才关闭本地预检/内联,
     // 其余一律按开启处理,保守方向不变。
+    assert.equal(config.source_images_enabled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchSystemConfiguration preserves an explicit zero image guard (a legal deployment value)", async () => {
+  // codex #518 R1 P2:`MINERU_MAX_IMAGE_BYTES=0` / `MINERU_MAX_IMAGES_PER_SOURCE=0`
+  // 是合法部署值(后端转发这两个字段时刻意没有正数约束,见
+  // backend/tests/test_source_upload_size_limit.py 的零值用例),语义是「一张都不
+  // 持久化」——与 `null`(拿不到上限,不做预检)恰恰相反。折成 `null` 会让打包上传
+  // 按「无上限」照常 base64 内联并报「N 张已内联」,而服务端把资产全部丢弃。
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    source_image_max_bytes: 0,
+    source_image_max_per_source: 0,
+    source_images_enabled: true,
+  }), {
+    status: 200,
+  });
+  try {
+    const config = await fetchSystemConfiguration();
+    assert.equal(config.source_image_max_bytes, 0);
+    assert.equal(config.source_image_max_per_source, 0);
+    // 总开关本身仍是 true:有效关闭态由 bundle-intake 的
+    // `bundleImagesEffectivelyEnabled` 从这三个值推导,解析层不替它做判断。
     assert.equal(config.source_images_enabled, true);
   } finally {
     globalThis.fetch = originalFetch;

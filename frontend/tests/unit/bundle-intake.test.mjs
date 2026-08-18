@@ -6,15 +6,20 @@ import {
   BUNDLE_DIR_MAX_FILES,
   BUNDLE_IMAGES_DISABLED_NOTE,
   BUNDLE_READ_FAILED_REASON,
+  BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH,
+  BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES,
   DIRECTORY_READ_FAILED_REASON,
   INLINE_TOO_LARGE_IMAGE_LINES,
   NO_MARKDOWN_IN_BUNDLE_REASON,
   PAIRING_SKIPPED_SUMMARY,
   approxByteSizeLabel,
+  bundleBatchFullReason,
   bundleCapsFrom,
   bundleErrorMessage,
   bundleFileNamesFor,
+  bundleImagesEffectivelyEnabled,
   bundleTotalBytesLimit,
+  bundleZipInputLimit,
   classifyBundleContents,
   collectDirectoryFiles,
   directoryHasMarkdown,
@@ -25,6 +30,7 @@ import {
   missingImageLine,
   noAltImageLine,
   notStagedNote,
+  processBundleCandidates,
   processMarkdownCandidate,
   readDirectoryAsBundleFiles,
   receiptSummaryLine,
@@ -251,6 +257,69 @@ test("processMarkdownCandidate: imagesEnabled=true 且内联后超限时 pairing
   const result = processMarkdownCandidate(mdFile, [mdFile, picFile], { uploadMaxBytes: 5 });
   assert.equal(result.ok, false);
   assert.equal(result.pairingSkipped, false);
+});
+
+// ---------------------------------------------------------------------------
+// bundleImagesEffectivelyEnabled：零值护栏（codex #518 R1 P2）
+//
+// MINERU_MAX_IMAGE_BYTES=0 / MINERU_MAX_IMAGES_PER_SOURCE=0 是合法部署值（后端有
+// 用例钉住），语义是「一张都不存」。把 0 当成「拿不到上限、不做预检」会让浏览器照常
+// base64 内联并报「N 张已内联」，而服务端把资产全部丢弃——既白付体积又对用户撒谎。
+// ---------------------------------------------------------------------------
+
+test("bundleImagesEffectivelyEnabled: 任一上限为 0 即视为图片存储关闭", () => {
+  assert.equal(bundleImagesEffectivelyEnabled({ imageMaxBytes: 0 }), false);
+  assert.equal(bundleImagesEffectivelyEnabled({ maxImagesPerSource: 0 }), false);
+  assert.equal(bundleImagesEffectivelyEnabled({ imagesEnabled: true, imageMaxBytes: 0 }), false);
+  assert.equal(
+    bundleImagesEffectivelyEnabled({ imagesEnabled: true, maxImagesPerSource: 0 }),
+    false,
+  );
+});
+
+test("bundleImagesEffectivelyEnabled: 总开关 false 关闭；正数上限与 null/缺失保持开启", () => {
+  assert.equal(bundleImagesEffectivelyEnabled({ imagesEnabled: false }), false);
+  // 反向对照：上面几条单独看，把实现写成恒 false 也能通过。
+  assert.equal(bundleImagesEffectivelyEnabled({}), true);
+  assert.equal(
+    bundleImagesEffectivelyEnabled({ imagesEnabled: true, imageMaxBytes: null, maxImagesPerSource: null }),
+    true,
+  );
+  assert.equal(
+    bundleImagesEffectivelyEnabled({ imagesEnabled: true, imageMaxBytes: 1024, maxImagesPerSource: 20 }),
+    true,
+  );
+});
+
+test("processMarkdownCandidate: imageMaxBytes=0 时按「图片存储关闭」短路，绝不内联", () => {
+  const mdText = "# Title\n\n![a picture](pic.png)\n";
+  const mdFile = { path: "docs/note.md", bytes: new TextEncoder().encode(mdText) };
+  const picFile = { path: "docs/pic.png", bytes: PNG };
+  const result = processMarkdownCandidate(
+    mdFile,
+    [mdFile, picFile],
+    { uploadMaxBytes: 10_000_000, imagesEnabled: true, imageMaxBytes: 0, maxImagesPerSource: 200 },
+  );
+  assert.equal(result.ok, true);
+  // 关键断言：0 不能被 resolveLimit 反过来解释成「无上限」而照常内联。
+  assert.equal(result.rewritten, mdText);
+  assert.ok(!result.rewritten.includes("data:image"), "零值部署不得产出 base64 内联");
+  assert.deepEqual(result.receipt, { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] });
+  assert.equal(result.pairingSkipped, true);
+});
+
+test("processMarkdownCandidate: maxImagesPerSource=0 时同样短路（张数上限那一维）", () => {
+  const mdText = "# Title\n\n![a picture](pic.png)\n";
+  const mdFile = { path: "note.md", bytes: new TextEncoder().encode(mdText) };
+  const picFile = { path: "pic.png", bytes: PNG };
+  const result = processMarkdownCandidate(
+    mdFile,
+    [mdFile, picFile],
+    { uploadMaxBytes: 10_000_000, imagesEnabled: true, imageMaxBytes: 5_242_880, maxImagesPerSource: 0 },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.rewritten, mdText);
+  assert.equal(result.pairingSkipped, true);
 });
 
 test("BUNDLE_IMAGES_DISABLED_NOTE：非空中文提示，说明图片不会被保存", () => {
@@ -655,4 +724,208 @@ test("unpackZipFile: 不是 zip 的文件报 not_a_zip，而不是抛异常", as
   const result = await unpackZipFile(file, { uploadMaxBytes: 50 * 1024 * 1024 });
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "not_a_zip");
+});
+
+// ---------------------------------------------------------------------------
+// unpackZipFile：压缩输入体积闸（codex #518 R1 P2）
+//
+// `.zip` 刻意绕开普通上传的单文件大小校验，而解压后总量的闸只有在整包字节已经进了
+// 内存之后才够得着——误选一个几 GB 的归档能在任何结构化拒绝之前把标签页耗死。
+// 因此闸必须跑在 arrayBuffer() 之前，只看 File.size 元数据。
+// ---------------------------------------------------------------------------
+
+/** 造一个能数出 `arrayBuffer()` 被调用几次、并可伪造 `size` 的 zip 文件。
+ *  `size` 是 Blob.prototype 上的 getter，`defineProperty` 在实例上遮蔽它即可，
+ *  这样才能在不真的分配 1 GiB 的前提下测到回退上限那条边界。 */
+function spyZipFile(bytes, { size } = {}) {
+  const file = new File([bytes], "bundle.zip");
+  const calls = { arrayBuffer: 0 };
+  if (size !== undefined) Object.defineProperty(file, "size", { value: size });
+  const real = file.arrayBuffer.bind(file);
+  file.arrayBuffer = async () => {
+    calls.arrayBuffer += 1;
+    return real();
+  };
+  return { file, calls };
+}
+
+test("bundleZipInputLimit: 已知单文件上限时复用解压后总量那条线，不另抄一份数字", () => {
+  assert.equal(bundleZipInputLimit(1024), 1024 * MD_BUNDLE_TOTAL_BYTES_FACTOR);
+  assert.equal(bundleZipInputLimit(50 * 1024 * 1024), bundleTotalBytesLimit(50 * 1024 * 1024));
+});
+
+test("bundleZipInputLimit: 配置未到达时回退具名常量，而不是「不预检」", () => {
+  // 这里**不能**沿用「拿不到上限就放行」——那正是本条要堵的洞。
+  assert.equal(bundleZipInputLimit(null), BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+  assert.equal(bundleZipInputLimit(0), BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+  // 取值依据：SOURCE_UPLOAD_MAX_MB 的协议最大值 1024 MiB。
+  assert.equal(BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES, 1024 * 1024 * 1024);
+});
+
+test("unpackZipFile: 超过压缩输入上限时直接拒绝，且**不调用** arrayBuffer", async () => {
+  const caps = { uploadMaxBytes: 1024 };            // → 上限 4096 字节
+  const { file, calls } = spyZipFile(new Uint8Array(5000));
+  const result = await unpackZipFile(file, caps);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "too_large");
+  assert.equal(result.error.actual, 5000);
+  assert.equal(result.error.limit, 1024 * MD_BUNDLE_TOTAL_BYTES_FACTOR);
+  assert.equal(calls.arrayBuffer, 0, "整包字节绝不能在体积闸之前被读进内存");
+});
+
+test("unpackZipFile: 恰好等于上限时放行（边界是 >，不是 >=）", async () => {
+  const caps = { uploadMaxBytes: 1024 };            // → 上限 4096 字节
+  const { file, calls } = spyZipFile(new Uint8Array(4096));
+  const result = await unpackZipFile(file, caps);
+  assert.equal(calls.arrayBuffer, 1, "等于上限的包必须照常读取解析");
+  assert.equal(result.ok, false);
+  // 走到了 parseZipBundle（这堆零字节不是 zip），而不是被体积闸拦下。
+  assert.equal(result.error.code, "not_a_zip");
+});
+
+test("unpackZipFile: 上限未知时按回退常量拦截（不真的分配 1 GiB）", async () => {
+  const over = spyZipFile(new Uint8Array(8), { size: BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES + 1 });
+  const rejected = await unpackZipFile(over.file, { uploadMaxBytes: 0 });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error.code, "too_large");
+  assert.equal(rejected.error.limit, BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+  assert.equal(over.calls.arrayBuffer, 0);
+
+  const at = spyZipFile(new Uint8Array(8), { size: BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES });
+  const allowed = await unpackZipFile(at.file, { uploadMaxBytes: 0 });
+  assert.equal(at.calls.arrayBuffer, 1);
+  assert.equal(allowed.error.code, "not_a_zip");
+});
+
+test("bundleErrorMessage: 读入内存前拦下的整包级 too_large 不说「解压后」", () => {
+  const preRead = bundleErrorMessage({
+    code: "too_large",
+    actual: 3 * 1024 * 1024,
+    limit: 200 * 1024 * 1024,
+  });
+  assert.match(preRead, /约 3\.0 MB/);
+  assert.match(preRead, /200 MB/);
+  assert.match(preRead, /未读取内容/);
+  assert.ok(!preRead.includes("解压后"), `一个字节都没读，不能说「解压后」：${preRead}`);
+  // 解压过程中触发的那条（parseZipBundle 必定带上触发条目 path）逐字不变。
+  assert.equal(
+    bundleErrorMessage({ code: "too_large", path: "big/a.bin", limit: 4096 }),
+    "压缩包解压后体积过大",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// processBundleCandidates：单次上传数量上限必须在**内联之前**生效
+// （codex #518 R1 P1）
+// ---------------------------------------------------------------------------
+
+/** 一个会记下「`bytes` 被读过」的候选：`processMarkdownCandidate` 的第一件事就是
+ *  `decodeMarkdownText(mdFile.bytes)`，所以这个计数就是「它被调用了几次」的证明，
+ *  不需要往生产代码里塞一个测试专用的注入口。 */
+function countingCandidate(path, text, seen) {
+  const bytes = new TextEncoder().encode(text);
+  return {
+    path,
+    get bytes() {
+      seen.push(path);
+      return bytes;
+    },
+  };
+}
+
+function namesFor(candidates) {
+  return bundleFileNamesFor(candidates.map((item) => item.path));
+}
+
+test("processBundleCandidates: 候选 5、余额 2 → 恰处理 2、跳过 3，且零多余内联调用", () => {
+  const seen = [];
+  const candidates = ["a", "b", "c", "d", "e"].map(
+    (name) => countingCandidate(`${name}.md`, `# ${name}\n\n![pic](pic.png)\n`, seen),
+  );
+  const files = [{ path: "pic.png", bytes: PNG }];
+  const batch = processBundleCandidates(
+    candidates,
+    files,
+    { uploadMaxBytes: 10_000_000 },
+    { names: namesFor(candidates), remainingSlots: 2, batchCap: 20 },
+  );
+  assert.equal(batch.processed.length, 2);
+  assert.equal(batch.skipped.length, 3);
+  // 这一条才是本次修复的核心：其余 3 份**根本没被处理**，没有白付 base64 体积。
+  assert.deepEqual(seen, ["a.md", "b.md"]);
+  assert.deepEqual(batch.skipped.map((item) => item.name), ["c.md", "d.md", "e.md"]);
+  assert.ok(batch.skipped.every((item) => item.reason === bundleBatchFullReason(20)));
+  // 被处理的那两份确实走完了内联（对照：不是整批都被跳过）。
+  assert.ok(batch.processed.every((item) => item.ok && item.rewritten.includes("data:image")));
+});
+
+test("processBundleCandidates: 余额为 0 时一份都不处理（列表已满）", () => {
+  const seen = [];
+  const candidates = [countingCandidate("a.md", "# a", seen), countingCandidate("b.md", "# b", seen)];
+  const batch = processBundleCandidates(
+    candidates,
+    [],
+    { uploadMaxBytes: 10_000_000 },
+    { names: namesFor(candidates), remainingSlots: 0, batchCap: 20 },
+  );
+  assert.deepEqual(batch.processed, []);
+  assert.equal(batch.skipped.length, 2);
+  assert.deepEqual(seen, [], "余额为 0 时连一次解码都不该发生");
+});
+
+test("processBundleCandidates: 余额足够时全部处理，跳过为空（反向对照）", () => {
+  const seen = [];
+  const candidates = [countingCandidate("a.md", "# a", seen), countingCandidate("b.md", "# b", seen)];
+  const batch = processBundleCandidates(
+    candidates,
+    [],
+    { uploadMaxBytes: 10_000_000 },
+    { names: namesFor(candidates), remainingSlots: 5, batchCap: 20 },
+  );
+  assert.equal(batch.processed.length, 2);
+  assert.deepEqual(batch.skipped, []);
+  assert.deepEqual(seen, ["a.md", "b.md"]);
+});
+
+test("processBundleCandidates: 被单文件上限拒掉的候选不占名额（与 mergeStagedFiles 同口径）", () => {
+  const seen = [];
+  const candidates = [
+    countingCandidate("big.md", "# big\n\n" + "x".repeat(500), seen),
+    countingCandidate("small.md", "# s", seen),
+  ];
+  const batch = processBundleCandidates(
+    candidates,
+    [],
+    { uploadMaxBytes: 50 },
+    { names: namesFor(candidates), remainingSlots: 1, batchCap: 20 },
+  );
+  // big.md 超限 → ok:false，不入列也就不占格，small.md 仍拿得到那唯一一格。
+  assert.equal(batch.processed.length, 2);
+  assert.equal(batch.processed[0].ok, false);
+  assert.equal(batch.processed[1].ok, true);
+  assert.deepEqual(batch.skipped, []);
+  assert.deepEqual(seen, ["big.md", "small.md"]);
+});
+
+test("processBundleCandidates: 跳过项沿用同批消歧后的名字，而不是包内路径", () => {
+  const seen = [];
+  const candidates = [
+    countingCandidate("a/README.md", "# a", seen),
+    countingCandidate("b/README.md", "# b", seen),
+  ];
+  const batch = processBundleCandidates(
+    candidates,
+    [],
+    { uploadMaxBytes: 10_000_000 },
+    { names: namesFor(candidates), remainingSlots: 1, batchCap: 20 },
+  );
+  assert.deepEqual(batch.skipped.map((item) => item.name), ["b-README.md"]);
+});
+
+test("bundleBatchFullReason: 带上具体上限，并说明「未处理」（区别于内联完却装不下）", () => {
+  const reason = bundleBatchFullReason(BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH);
+  assert.match(reason, new RegExp(String(BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH)));
+  assert.match(reason, /未处理/);
+  // 回退值必须等于后端固定的 multipart 资源护栏（SOURCE_UPLOAD_MAX_FILES_PER_BATCH）。
+  assert.equal(BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH, 20);
 });

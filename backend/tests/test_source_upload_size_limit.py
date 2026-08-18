@@ -119,8 +119,9 @@ def test_authenticated_system_config_accepts_zero_image_guard_overrides(tmp_path
     # deployment values (equivalent to "persist no images at all") because the
     # forwarded Settings fields carry no positivity constraint. `SystemConfiguration`
     # must not add one, or every request on such a deployment 500s and disables
-    # uploads entirely — the browser's `positiveIntOrNull` mirror already treats a
-    # non-positive value as "no usable limit, skip local pre-check".
+    # uploads entirely — the browser's `nonNegativeIntOrNull` mirror keeps an
+    # explicit 0 (deployment persists no images → pairing is skipped honestly)
+    # and only maps negative/invalid/missing values to "no local pre-check".
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/upload-limit-images-zero.db")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
