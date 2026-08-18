@@ -1587,6 +1587,11 @@
         "type": "index"
       },
       {
+        "name": "idx_share_requests_group",
+        "sql_sha256": "832ba7b09d01fbba79a74ca0c29b14d978b3b9741d0c3d9aa3d0d341a687df01",
+        "type": "index"
+      },
+      {
         "name": "idx_source_authors_nb",
         "sql_sha256": "f7eb219af72748c765a4f359b426e46bc8338f76ed1f031e0766e50d5cd3dc73",
         "type": "index"
@@ -2072,6 +2077,11 @@
         "type": "table"
       },
       {
+        "name": "notebook_share_requests",
+        "sql_sha256": "8e5e2d39be8e55a17a16dbf5af200c9b0488834bdb92de8e95faccbb082aa39f",
+        "type": "table"
+      },
+      {
         "name": "notebooks",
         "sql_sha256": "28665711d4b06b89aa1be3f04cbeafe7221b5abc877b0f16ca4fd89a7349ca19",
         "type": "table"
@@ -2167,6 +2177,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 49
+    "user_version": 50
   }
 }
