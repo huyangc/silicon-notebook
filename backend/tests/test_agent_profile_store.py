@@ -1,0 +1,390 @@
+"""Store-level coverage for ``AgentProfileStorePort`` (Agentic Memory P1, T2).
+
+Deliberately built directly on
+``app.repositories.sqlite.agent_profile_store.AgentProfileStore`` plus a bare
+migrated ``SqliteDatabase`` — not through the full ``SQLiteRepository``/
+``app.services.repository_runtime`` composition, mirroring
+``test_catalog_store.py``'s own rationale: this file proves the STORE
+primitive in isolation. T2 wires no consumer to it yet (no route, no
+injection, no job), so there is nothing else to exercise it through.
+
+``owner_id`` carries no foreign key (see ``_migration_50``'s docstring), so
+these tests use bare strings like ``"user-a"``/``"user-b"`` without seeding
+real ``users`` rows for them — only ``notebooks.created_by`` needs a real
+user to satisfy that table's own FK.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from app.core.config import Settings
+from app.repositories.ports import AgentProfileRevisionConflict
+from app.repositories.sqlite.agent_profile_store import AgentProfileStore
+from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.migrations import SqliteMigrator
+
+NOW = "2026-08-18T00:00:00+00:00"
+NOTEBOOK_ID = "nb-1"
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> AgentProfileStore:
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}")
+    database = SqliteDatabase(settings, tmp_path)
+    migrated = SqliteMigrator(database, settings).migrate()
+    assert migrated, "fresh database must actually run the migration ladder"
+
+    counter = {"n": 0}
+
+    def new_id(prefix: str) -> str:
+        counter["n"] += 1
+        return f"{prefix}-{counter['n']:04d}"
+
+    with database.write() as db:
+        db.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?,?)",
+            ("user-owner", "owner@example.test", "Owner", "admin", "active", NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,"
+            "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (NOTEBOOK_ID, "NB", "", "engineering", "ready", "user-owner", NOW, NOW),
+        )
+
+    return AgentProfileStore(database, new_id=new_id, now=lambda: NOW)
+
+
+# --------------------------------------------------------------- write_block
+def test_write_block_creates_a_new_row_at_revision_one(store: AgentProfileStore):
+    block = store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape",
+        value="这本库主要是模拟电路论文",
+        evidence=[{"claim_index": 0, "source_ids": ["src-1"]}],
+        expected_revision=0,
+        origin="job",
+        actor="",
+    )
+    assert block["revision"] == 1
+    assert block["value"] == "这本库主要是模拟电路论文"
+    assert block["evidence"] == [{"claim_index": 0, "source_ids": ["src-1"]}]
+    assert block["updated_origin"] == "job"
+    assert block["updated_by"] == ""
+    assert block["history"] == [
+        {
+            "before": None,
+            "after": "这本库主要是模拟电路论文",
+            "origin": "job",
+            "actor": "",
+            "at": NOW,
+            "revision": 1,
+        }
+    ]
+    # Round-trips through a fresh read.
+    assert store.read_block(NOTEBOOK_ID, "", "corpus_shape") == block
+
+
+def test_write_block_with_expected_revision_zero_against_an_existing_row_conflicts(
+    store: AgentProfileStore,
+):
+    store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="v1",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    with pytest.raises(AgentProfileRevisionConflict):
+        store.write_block(
+            NOTEBOOK_ID, "", "corpus_shape", value="v2",
+            evidence=[], expected_revision=0, origin="job", actor="",
+        )
+    # The conflicting write left the row untouched.
+    assert store.read_block(NOTEBOOK_ID, "", "corpus_shape")["value"] == "v1"
+
+
+# -------------------------------------------------------- CAS revision conflict
+def test_write_block_stale_expected_revision_raises_and_leaves_row_untouched(
+    store: AgentProfileStore,
+):
+    first = store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="v1",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    assert first["revision"] == 1
+
+    with pytest.raises(AgentProfileRevisionConflict) as excinfo:
+        store.write_block(
+            NOTEBOOK_ID, "", "corpus_shape", value="v2-stale",
+            evidence=[], expected_revision=99, origin="job", actor="",
+        )
+    assert excinfo.value.notebook_id == NOTEBOOK_ID
+    assert excinfo.value.owner_id == ""
+    assert excinfo.value.label == "corpus_shape"
+
+    # No partial write: value, revision and history all unchanged.
+    current = store.read_block(NOTEBOOK_ID, "", "corpus_shape")
+    assert current["value"] == "v1"
+    assert current["revision"] == 1
+    assert len(current["history"]) == 1
+
+    # The CORRECT revision still succeeds afterwards.
+    second = store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="v2",
+        evidence=[], expected_revision=1, origin="user", actor="user-owner",
+    )
+    assert second["revision"] == 2
+    assert second["value"] == "v2"
+
+
+# --------------------------------------------------------------- history ring
+def test_write_block_history_ring_stays_bounded_at_twenty_and_drops_oldest(
+    store: AgentProfileStore,
+):
+    block = store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="v0",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    for i in range(1, 25):
+        block = store.write_block(
+            NOTEBOOK_ID, "", "corpus_shape", value=f"v{i}",
+            evidence=[], expected_revision=block["revision"], origin="job", actor="",
+        )
+    # 25 total writes (v0..v24) -> ring holds only the most recent 20.
+    assert block["revision"] == 25
+    assert len(block["history"]) == 20
+    # Oldest entries (v0 -> v1, v1 -> v2, ...) were dropped; the ring keeps
+    # the tail, ending with the very last transition.
+    assert block["history"][0]["before"] == "v4"
+    assert block["history"][0]["after"] == "v5"
+    assert block["history"][-1]["before"] == "v23"
+    assert block["history"][-1]["after"] == "v24"
+
+
+# ----------------------------------------------------------------- clear_block
+def test_clear_block_blanks_value_but_keeps_the_row_and_its_history(
+    store: AgentProfileStore,
+):
+    written = store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="v1",
+        evidence=[{"claim_index": 0, "source_ids": ["src-1"]}],
+        expected_revision=0, origin="job", actor="",
+    )
+    cleared = store.clear_block(
+        NOTEBOOK_ID, "", "corpus_shape",
+        expected_revision=written["revision"], actor="user-owner",
+    )
+    assert cleared["value"] == ""
+    assert cleared["evidence"] == []
+    assert cleared["revision"] == written["revision"] + 1
+    assert cleared["updated_origin"] == "user"
+    assert cleared["updated_by"] == "user-owner"
+    # The row itself, and its prior history entry, survive the clear.
+    assert len(cleared["history"]) == 2
+    assert cleared["history"][0]["after"] == "v1"
+    assert cleared["history"][-1] == {
+        "before": "v1", "after": "", "origin": "user",
+        "actor": "user-owner", "at": NOW, "revision": written["revision"] + 1,
+    }
+    # Reading it back confirms the row is still there, not deleted.
+    assert store.read_block(NOTEBOOK_ID, "", "corpus_shape") is not None
+
+
+def test_clear_block_on_a_never_written_label_raises_key_error(
+    store: AgentProfileStore,
+):
+    with pytest.raises(KeyError):
+        store.clear_block(
+            NOTEBOOK_ID, "", "usage_gaps", expected_revision=0, actor="user-owner",
+        )
+
+
+def test_clear_block_stale_revision_conflicts(store: AgentProfileStore):
+    store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="v1",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    with pytest.raises(AgentProfileRevisionConflict):
+        store.clear_block(
+            NOTEBOOK_ID, "", "corpus_shape", expected_revision=99, actor="user-owner",
+        )
+    assert store.read_block(NOTEBOOK_ID, "", "corpus_shape")["value"] == "v1"
+
+
+# ------------------------------------------------------------------- clear_all
+def test_clear_all_deletes_every_row_in_the_scope_and_nothing_else(
+    store: AgentProfileStore,
+):
+    store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="base-1",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    store.write_block(
+        NOTEBOOK_ID, "", "key_entities", value="base-2",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    store.write_block(
+        NOTEBOOK_ID, "user-a", "retrieval_notes", value="overlay-a",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+
+    deleted = store.clear_all(NOTEBOOK_ID, "")
+    assert deleted == 2
+    assert store.read_block(NOTEBOOK_ID, "", "corpus_shape") is None
+    assert store.read_block(NOTEBOOK_ID, "", "key_entities") is None
+    # A different scope (the overlay) is untouched.
+    assert store.read_block(NOTEBOOK_ID, "user-a", "retrieval_notes") is not None
+
+
+# -------------------------------------------------------------- read isolation
+def test_read_blocks_never_returns_another_users_overlay(store: AgentProfileStore):
+    store.write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="shared base",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    store.write_block(
+        NOTEBOOK_ID, "user-a", "retrieval_notes", value="A's private notes",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    store.write_block(
+        NOTEBOOK_ID, "user-b", "retrieval_notes", value="B's private notes",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+
+    a_view = store.read_blocks(NOTEBOOK_ID, "user-a")
+    a_labels = {(row["owner_id"], row["label"], row["value"]) for row in a_view}
+    assert a_labels == {
+        ("", "corpus_shape", "shared base"),
+        ("user-a", "retrieval_notes", "A's private notes"),
+    }
+    # B's overlay never appears in A's read, and vice versa.
+    assert "B's private notes" not in {row["value"] for row in a_view}
+
+    b_view = store.read_blocks(NOTEBOOK_ID, "user-b")
+    b_labels = {(row["owner_id"], row["label"], row["value"]) for row in b_view}
+    assert b_labels == {
+        ("", "corpus_shape", "shared base"),
+        ("user-b", "retrieval_notes", "B's private notes"),
+    }
+    assert "A's private notes" not in {row["value"] for row in b_view}
+
+    # owner_id='' degrades to base-only through the SAME statement.
+    base_view = store.read_blocks(NOTEBOOK_ID, "")
+    assert [row["label"] for row in base_view] == ["corpus_shape"]
+
+
+# ------------------------------------------------------------------- job rows
+def test_job_row_is_none_until_the_chain_is_ever_touched(store: AgentProfileStore):
+    assert store.job_row(NOTEBOOK_ID, "") is None
+
+
+def test_bump_signal_creates_the_row_on_first_touch_and_accumulates(
+    store: AgentProfileStore,
+):
+    assert store.bump_signal(NOTEBOOK_ID, "", delta=1) == 1
+    row = store.job_row(NOTEBOOK_ID, "")
+    assert row is not None
+    assert row["status"] == "idle"
+    assert row["pending_signal"] == 1
+
+    assert store.bump_signal(NOTEBOOK_ID, "", delta=1) == 2
+    assert store.bump_signal(NOTEBOOK_ID, "", delta=3) == 5
+    assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 5
+
+
+# --------------------------------------------------------------------- claim
+def test_claim_succeeds_only_once_while_the_chain_is_busy(store: AgentProfileStore):
+    store.bump_signal(NOTEBOOK_ID, "", delta=5)
+
+    assert store.claim(NOTEBOOK_ID, "") is True
+    row = store.job_row(NOTEBOOK_ID, "")
+    assert row["status"] == "running"
+    assert row["started_at"] == NOW
+
+    # A second claim while still running is refused.
+    assert store.claim(NOTEBOOK_ID, "") is False
+
+    # Once settled back to a non-busy state, claim can succeed again.
+    assert store.settle(NOTEBOOK_ID, "", "done", reset_signal=True) is True
+    assert store.claim(NOTEBOOK_ID, "") is True
+
+
+def test_claim_on_a_never_signalled_chain_is_false(store: AgentProfileStore):
+    assert store.claim(NOTEBOOK_ID, "") is False
+
+
+# -------------------------------------------------------------------- settle
+def test_settle_resets_signal_and_increments_runs(store: AgentProfileStore):
+    store.bump_signal(NOTEBOOK_ID, "", delta=5)
+    store.claim(NOTEBOOK_ID, "")
+
+    assert store.settle(
+        NOTEBOOK_ID, "", "done", blocks_written=3, reset_signal=True
+    ) is True
+    row = store.job_row(NOTEBOOK_ID, "")
+    assert row["status"] == "done"
+    assert row["pending_signal"] == 0
+    assert row["runs"] == 1
+    assert row["blocks_written"] == 3
+    assert row["finished_at"] == NOW
+
+
+def test_settle_without_reset_signal_leaves_pending_signal_untouched(
+    store: AgentProfileStore,
+):
+    store.bump_signal(NOTEBOOK_ID, "", delta=5)
+    store.claim(NOTEBOOK_ID, "")
+    store.settle(
+        NOTEBOOK_ID, "", "failed", failure_reason="模型未配置", reset_signal=False
+    )
+    row = store.job_row(NOTEBOOK_ID, "")
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == "模型未配置"
+    assert row["pending_signal"] == 5
+
+
+def test_settle_is_cas_and_a_repeated_settle_touches_nothing(
+    store: AgentProfileStore,
+):
+    store.bump_signal(NOTEBOOK_ID, "", delta=1)
+    store.claim(NOTEBOOK_ID, "")
+    assert store.settle(NOTEBOOK_ID, "", "done", reset_signal=True) is True
+    # Already terminal: a second settle is a no-op, not an overwrite.
+    assert store.settle(NOTEBOOK_ID, "", "failed", reset_signal=True) is False
+    assert store.job_row(NOTEBOOK_ID, "")["status"] == "done"
+
+
+def test_settle_rejects_a_non_terminal_status(store: AgentProfileStore):
+    store.bump_signal(NOTEBOOK_ID, "", delta=1)
+    store.claim(NOTEBOOK_ID, "")
+    with pytest.raises(ValueError):
+        store.settle(NOTEBOOK_ID, "", "running", reset_signal=True)
+
+
+# ------------------------------------------------------------ sweep_stale_on_start
+def test_sweep_stale_on_start_force_settles_queued_and_running_chains(
+    store: AgentProfileStore,
+):
+    store.bump_signal(NOTEBOOK_ID, "", delta=1)
+    store.claim(NOTEBOOK_ID, "")  # -> running
+    store.bump_signal(NOTEBOOK_ID, "user-a", delta=1)
+    store.claim(NOTEBOOK_ID, "user-a")  # -> running
+    store.bump_signal(NOTEBOOK_ID, "user-b", delta=1)  # -> idle, never claimed
+
+    swept = store.sweep_stale_on_start()
+    assert swept == 2
+
+    base_row = store.job_row(NOTEBOOK_ID, "")
+    assert base_row["status"] == "failed"
+    assert base_row["failure_reason"] == "服务重启，整理未完成"
+
+    a_row = store.job_row(NOTEBOOK_ID, "user-a")
+    assert a_row["status"] == "failed"
+    assert a_row["failure_reason"] == "服务重启，整理未完成"
+
+    # The idle chain (never claimed) is untouched — sweep only reclaims
+    # queued/running rows.
+    b_row = store.job_row(NOTEBOOK_ID, "user-b")
+    assert b_row["status"] == "idle"
+
+    # Idempotent: nothing left to sweep the second time.
+    assert store.sweep_stale_on_start() == 0

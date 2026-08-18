@@ -6,6 +6,7 @@ from typing import Protocol, runtime_checkable
 
 from app.core.config import Settings
 from app.repositories.ports import (
+    AgentProfileStorePort,
     AskStateStorePort,
     CatalogStorePort,
     ChunkStorePort,
@@ -56,6 +57,7 @@ class PersistenceBundle(Protocol):
     ask_state: AskStateStorePort
     unified_kg: UnifiedKgStorePort
     model_status: ModelStatusStorePort
+    agent_profile: AgentProfileStorePort
 
 
 class PersistenceBundleFactory(Protocol):

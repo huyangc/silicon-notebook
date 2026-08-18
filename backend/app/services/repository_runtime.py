@@ -132,6 +132,10 @@ class RepositoryRuntime:
         self.queries = bundle.queries
         self.notebook_store = bundle.notebooks
         self.kg_build_jobs = bundle.kg_build_jobs
+        # Agentic Memory P1 (T2): bare store seat, no consumer yet — T3-T6
+        # wire injection/routes on top of this. See AgentProfileStorePort in
+        # repositories/ports.py for the read/write contract.
+        self.agent_profile = bundle.agent_profile
         self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries, self.kg_build_jobs)
         # Source files resolve storage_dir through the database. Construct eagerly
         # BEFORE the catalog so its storage_dir callable can bind THIS store

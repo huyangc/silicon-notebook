@@ -2233,6 +2233,14 @@
       "kind": "independent_sql",
       "path": "scripts/merge_dbs.py",
       "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.sweep_orphan_group_grants",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
       "scope": "<module>.table_columns",
       "target": "conn.execute"
     },

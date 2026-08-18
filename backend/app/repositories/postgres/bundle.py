@@ -9,6 +9,7 @@ from app.core.config import Settings
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.ports import RepositorySeams
 from app.repositories.postgres._store_utils import jsonb, normalize_timestamp
+from app.repositories.postgres.agent_profile_store import AgentProfileStore
 from app.repositories.postgres.ask_state_store import AskStateStore
 from app.repositories.postgres.catalog_store import CatalogStore
 from app.repositories.postgres.chunk_store import ChunkStore
@@ -148,6 +149,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     ask_state: AskStateStore
     unified_kg: UnifiedKgStore
     model_status: ModelStatusStore
+    agent_profile: AgentProfileStore
 
 
 class PostgresPersistenceBundleFactory:
@@ -211,6 +213,9 @@ class PostgresPersistenceBundleFactory:
             ask_state = AskStateStore(database, seams)
             unified_kg = UnifiedKgStore(database, seams.now)
             model_status = ModelStatusStore(database)
+            agent_profile = AgentProfileStore(
+                database, new_id=seams.new_id, now=seams.now
+            )
             return PostgresPersistenceBundle(
                 database=database,
                 identity=identity,
@@ -234,6 +239,7 @@ class PostgresPersistenceBundleFactory:
                 ask_state=ask_state,
                 unified_kg=unified_kg,
                 model_status=model_status,
+                agent_profile=agent_profile,
             )
         except BaseException:
             database.close()

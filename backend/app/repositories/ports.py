@@ -3442,3 +3442,148 @@ class QueryStorePort(Protocol):
 @runtime_checkable
 class ReportStorePort(ReportRepository, Protocol):
     def row_to_dict(self, row: object, *, full: bool) -> dict: ...
+
+
+# Agentic Memory P1 (T2): the agent's per-notebook "understanding" — a
+# handful of named text blocks plus one consolidation-chain status row per
+# (notebook, owner). See ``docs/superpowers/specs/2026-08-18-agentic-memory-
+# design.md`` §5 for the product shape; this store is deliberately consumer-
+# free as of T2 (no route, no injection, no job wires to it yet).
+
+AGENT_PROFILE_HISTORY_MAX = 20  # ring cap for agent_notebook_profile.history_json;
+# the oldest before/after entry drops once a block accumulates more edits
+# than this. Written by write_block/clear_block inside the SAME write
+# transaction as the value change, as the transaction's LAST step.
+
+AGENT_PROFILE_JOB_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
+
+
+class AgentProfileRevisionConflict(RuntimeError):
+    """``write_block``/``clear_block``'s ``expected_revision`` no longer
+    matches the row's stored ``revision`` — a concurrent edit (another user,
+    or the consolidation job) landed first, or (``expected_revision=0``) a
+    concurrent writer already created the row. Mirrors the
+    ``memory_revisions`` lesson: optimistic concurrency is a revision
+    counter, never a timestamp — SQLite's second-granularity clock makes a
+    timestamp CAS falsely agree on rapid successive edits. The caller
+    re-reads the current block and either re-applies or surfaces a 409; this
+    store never blind-overwrites."""
+
+    def __init__(self, notebook_id: str, owner_id: str, label: str) -> None:
+        super().__init__(
+            "agent profile block revision conflict: "
+            f"{notebook_id}/{owner_id or '(base)'}/{label}"
+        )
+        self.notebook_id = notebook_id
+        self.owner_id = owner_id
+        self.label = label
+
+
+@runtime_checkable
+class AgentProfileStorePort(Protocol):
+    """Durable state for the agent's per-notebook "understanding":
+    ``agent_notebook_profile`` (the blocks themselves) and
+    ``agent_profile_jobs`` (one consolidation-chain status row per
+    (notebook, owner), doubling as the threshold counter).
+
+    Every read here is bounded on purpose. A block read is a primary-key-
+    prefix query over at most a handful of labelled rows (five labels, per
+    the app-layer enum) — never a scan. A job read is a single primary-key
+    point query. ``owner_id=''`` is the notebook's shared base layer; a
+    non-empty ``owner_id`` is that one member's private overlay, and the
+    ``owner_id`` predicate in ``read_blocks`` is baked into the SQL text
+    itself — it is a privacy boundary, not a filter a caller could
+    accidentally omit or apply after the fact in Python. Nothing in this
+    store ever hands back another user's overlay row.
+    """
+
+    # ------------------------------------------------------------- blocks
+    def read_blocks(self, notebook_id: str, owner_id: str) -> list[dict]: ...
+    def read_block(
+        self, notebook_id: str, owner_id: str, label: str
+    ) -> dict | None: ...
+    def write_block(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        label: str,
+        *,
+        value: str,
+        evidence: Sequence[Mapping[str, Any]],
+        expected_revision: int,
+        origin: str,
+        actor: str,
+    ) -> dict:
+        """Upsert one block inside a single write transaction: the
+        value/evidence change and the ``revision`` optimistic-concurrency
+        bump happen together, and the LAST step of that same transaction
+        appends a bounded before/after entry to ``history_json`` (ring
+        capped at ``AGENT_PROFILE_HISTORY_MAX``, oldest dropped first).
+
+        ``expected_revision=0`` means "no row yet, this write creates it";
+        any other value is compared against the stored ``revision`` and
+        raises ``AgentProfileRevisionConflict`` on mismatch (including
+        "someone else's write created the row first").
+        """
+        ...
+    def clear_block(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        label: str,
+        *,
+        expected_revision: int,
+        actor: str,
+    ) -> dict:
+        """Blank a block's value (and evidence) while KEEPING the row and its
+        history — the opposite of ``clear_all``. Same CAS and same
+        same-transaction history append as ``write_block``; raises
+        ``KeyError`` if the block was never written (nothing to clear)."""
+        ...
+    def clear_all(self, notebook_id: str, owner_id: str) -> int:
+        """Delete every block row for one (notebook, owner) scope outright —
+        the "start this chain's understanding over" reset, not a per-block
+        clear. Returns the row count deleted. No CAS: this is a full-scope
+        wipe, not a single block's optimistic-concurrency edit."""
+        ...
+
+    # --------------------------------------------------------------- jobs
+    def job_row(self, notebook_id: str, owner_id: str) -> dict | None: ...
+    def bump_signal(self, notebook_id: str, owner_id: str, delta: int = 1) -> int:
+        """Zero-scan primary-key upsert: increments (or creates at) this
+        chain's ``pending_signal`` threshold counter and returns the new
+        count. The row is created with ``status='idle'`` on first touch."""
+        ...
+    def claim(self, notebook_id: str, owner_id: str) -> bool:
+        """CAS this chain's row to ``status='running'`` (and stamp
+        ``started_at``), succeeding only when it was not already
+        ``queued``/``running`` — the single-flight guard. Decided on
+        rowcount, never on a prior read: two callers racing this method can
+        never both get ``True``."""
+        ...
+    def settle(
+        self,
+        notebook_id: str,
+        owner_id: str,
+        status: str,
+        *,
+        failure_reason: str = "",
+        diagnostic: str = "",
+        blocks_written: int = 0,
+        reset_signal: bool,
+    ) -> bool:
+        """Move a claimed chain to a terminal status (``done``/``failed``/
+        ``cancelled``), stamping ``finished_at`` and incrementing ``runs``.
+        ``reset_signal=True`` zeroes ``pending_signal`` (a successful run
+        consumed the accumulated change signal); ``False`` leaves it alone
+        (e.g. a failed run whose triggering changes are still
+        un-consolidated). CAS'd on ``status IN ('queued','running')`` so a
+        settle racing a second settle for the same chain can only land
+        once."""
+        ...
+    def sweep_stale_on_start(self) -> int:
+        """Startup crash recovery: every ``queued``/``running`` row (there is
+        no cross-process liveness for this in-process job) is force-settled
+        to ``failed`` with a fixed Chinese ``failure_reason``. Returns the
+        row count swept."""
+        ...
