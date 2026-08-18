@@ -8,6 +8,7 @@ import {
   BUNDLE_READ_FAILED_REASON,
   BUNDLE_STAGE_FALLBACK_MAX_FILES_PER_BATCH,
   BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES,
+  BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES,
   DIRECTORY_READ_FAILED_REASON,
   INLINE_TOO_LARGE_IMAGE_LINES,
   NO_MARKDOWN_IN_BUNDLE_REASON,
@@ -769,33 +770,61 @@ function spyZipFile(bytes, { size } = {}) {
   return { file, calls };
 }
 
-test("bundleZipInputLimit: 已知单文件上限时复用解压后总量那条线，不另抄一份数字", () => {
-  assert.equal(bundleZipInputLimit(1024), 1024 * MD_BUNDLE_TOTAL_BYTES_FACTOR);
-  assert.equal(bundleZipInputLimit(50 * 1024 * 1024), bundleTotalBytesLimit(50 * 1024 * 1024));
+test("bundleZipInputLimit: 已知单文件上限时复用解压后总量那条线 + 容器余量，不另抄数字", () => {
+  assert.equal(
+    bundleZipInputLimit(1024),
+    1024 * MD_BUNDLE_TOTAL_BYTES_FACTOR + BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES,
+  );
+  assert.equal(
+    bundleZipInputLimit(50 * 1024 * 1024),
+    bundleTotalBytesLimit(50 * 1024 * 1024) + BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES,
+  );
 });
 
-test("bundleZipInputLimit: 配置未到达时回退具名常量，而不是「不预检」", () => {
+test("bundleZipInputLimit: 配置未到达时回退具名常量 + 余量，而不是「不预检」", () => {
   // 这里**不能**沿用「拿不到上限就放行」——那正是本条要堵的洞。
-  assert.equal(bundleZipInputLimit(null), BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
-  assert.equal(bundleZipInputLimit(0), BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+  const expected = BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES + BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES;
+  assert.equal(bundleZipInputLimit(null), expected);
+  assert.equal(bundleZipInputLimit(0), expected);
   // 取值依据：SOURCE_UPLOAD_MAX_MB 的协议最大值 1024 MiB。
   assert.equal(BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES, 1024 * 1024 * 1024);
 });
 
+test("bundleZipInputLimit: 顶配部署被绝对顶封住，公式不许自我放空（codex R5 P2）", () => {
+  // SOURCE_UPLOAD_MAX_MB=1024 时按系数算出 4 GiB——正是这道闸要防的量级。
+  const protocolMax = 1024 * 1024 * 1024;
+  assert.equal(
+    bundleZipInputLimit(protocolMax),
+    BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES + BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES,
+  );
+  assert.ok(bundleZipInputLimit(protocolMax) < protocolMax * MD_BUNDLE_TOTAL_BYTES_FACTOR);
+});
+
 test("unpackZipFile: 超过压缩输入上限时直接拒绝，且**不调用** arrayBuffer", async () => {
-  const caps = { uploadMaxBytes: 1024 };            // → 上限 4096 字节
-  const { file, calls } = spyZipFile(new Uint8Array(5000));
+  const caps = { uploadMaxBytes: 1024 };
+  const limit = bundleZipInputLimit(1024);
+  const { file, calls } = spyZipFile(new Uint8Array(64), { size: limit + 1 });
   const result = await unpackZipFile(file, caps);
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "too_large");
-  assert.equal(result.error.actual, 5000);
-  assert.equal(result.error.limit, 1024 * MD_BUNDLE_TOTAL_BYTES_FACTOR);
+  assert.equal(result.error.actual, limit + 1);
+  assert.equal(result.error.limit, limit);
   assert.equal(calls.arrayBuffer, 0, "整包字节绝不能在体积闸之前被读进内存");
 });
 
+test("unpackZipFile: 贴着解压总量线的包不因 zip 头/deflate 微膨胀被误拒（codex R5 P2）", async () => {
+  // File.size 不保证 ≤ 解出总量：stored 头、EOCD、deflate 微膨胀都算在压缩态里。
+  // 「四个恰好贴着单文件上限的合法 md」打包后恰好比总量线大出头部字节——余量必须盖住。
+  const caps = { uploadMaxBytes: 1024 };
+  const overheadOnly = 1024 * MD_BUNDLE_TOTAL_BYTES_FACTOR + 700; // 总量线 + 模拟头部字节
+  const { file, calls } = spyZipFile(new Uint8Array(64), { size: overheadOnly });
+  await unpackZipFile(file, caps);
+  assert.equal(calls.arrayBuffer, 1, "头部余量内的包必须照常读取解析");
+});
+
 test("unpackZipFile: 恰好等于上限时放行（边界是 >，不是 >=）", async () => {
-  const caps = { uploadMaxBytes: 1024 };            // → 上限 4096 字节
-  const { file, calls } = spyZipFile(new Uint8Array(4096));
+  const caps = { uploadMaxBytes: 1024 };
+  const { file, calls } = spyZipFile(new Uint8Array(64), { size: bundleZipInputLimit(1024) });
   const result = await unpackZipFile(file, caps);
   assert.equal(calls.arrayBuffer, 1, "等于上限的包必须照常读取解析");
   assert.equal(result.ok, false);
@@ -804,14 +833,15 @@ test("unpackZipFile: 恰好等于上限时放行（边界是 >，不是 >=）", 
 });
 
 test("unpackZipFile: 上限未知时按回退常量拦截（不真的分配 1 GiB）", async () => {
-  const over = spyZipFile(new Uint8Array(8), { size: BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES + 1 });
+  const fallbackLimit = bundleZipInputLimit(null); // 回退顶 + 容器余量
+  const over = spyZipFile(new Uint8Array(8), { size: fallbackLimit + 1 });
   const rejected = await unpackZipFile(over.file, { uploadMaxBytes: 0 });
   assert.equal(rejected.ok, false);
   assert.equal(rejected.error.code, "too_large");
-  assert.equal(rejected.error.limit, BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+  assert.equal(rejected.error.limit, fallbackLimit);
   assert.equal(over.calls.arrayBuffer, 0);
 
-  const at = spyZipFile(new Uint8Array(8), { size: BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES });
+  const at = spyZipFile(new Uint8Array(8), { size: fallbackLimit });
   const allowed = await unpackZipFile(at.file, { uploadMaxBytes: 0 });
   assert.equal(at.calls.arrayBuffer, 1);
   assert.equal(allowed.error.code, "not_a_zip");

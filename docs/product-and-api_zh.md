@@ -1200,8 +1200,9 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `MD_BUNDLE_MAX_ENTRIES`（压缩包保留条目数，去掉目录条目/`__MACOSX` 资源叉/精确重复项之后） | 2,000 |
 | `MD_BUNDLE_MAX_DECLARED_ENTRIES`（EOCD 声明条目数的扫描前上限，`MD_BUNDLE_MAX_ENTRIES × 4`） | 8,000 |
 | `MD_BUNDLE_TOTAL_BYTES_FACTOR`（解压后总字节上限系数，`× source_upload_max_bytes`） | 4 |
-| 压缩输入上界（读进内存**之前**按 `File.size` 判定；与解压后总量同一系数，因而不会拒掉任何本来合法的包） | `× source_upload_max_bytes`，系数 4 |
-| `BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES`（`source_upload_max_bytes` 尚未到达时的压缩输入上界，刻意不沿用「不预检」；取值 = `SOURCE_UPLOAD_MAX_MB` 的协议最大值） | 1,024 MiB |
+| 压缩输入上界（读进内存**之前**按 `File.size` 判定）：`min(source_upload_max_bytes × 4, 绝对顶) + 容器余量`。解压预算内 + 有界容器开销的包绝不在此被拒；压缩态超过绝对顶的归档一律拒绝——已登记的浏览器安全取舍（请把 md 拆出直接上传） | 见公式 |
+| `BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES`（双重身份：`source_upload_max_bytes` 未到达时的回退值——刻意不沿用「不预检」；**同时**是绝对浏览器安全顶——顶配部署按 `× 4` 公式会放行 4 GiB 整包分配；取值 = `SOURCE_UPLOAD_MAX_MB` 的协议最大值） | 1,024 MiB |
+| `BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES`（zip local/central 头、EOCD 与不可压数据 deflate 微膨胀的有界余量，保证贴着解压预算的合法包不因容器字节被误拒） | 4 MiB |
 | `MD_BUNDLE_MAX_SUGGESTIONS`（每张未匹配图片给出的近似候选路径数） | 3 |
 | `BUNDLE_DIR_MAX_DEPTH`（拖入文件夹的遍历深度） | 16 |
 | `BUNDLE_DIR_MAX_FILES`（拖入文件夹的文件数上限，与 `MD_BUNDLE_MAX_ENTRIES` 同值） | 2,000 |

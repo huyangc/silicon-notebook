@@ -1560,8 +1560,9 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 | `MD_BUNDLE_MAX_ENTRIES` (retained zip entries, after dropping directory entries / `__MACOSX` resource forks / exact duplicates) | 2,000 |
 | `MD_BUNDLE_MAX_DECLARED_ENTRIES` (EOCD-declared-entry pre-scan cap, `MD_BUNDLE_MAX_ENTRIES × 4`) | 8,000 |
 | `MD_BUNDLE_TOTAL_BYTES_FACTOR` (decompressed-byte cap, `× source_upload_max_bytes`) | 4 |
-| Compressed-input cap (checked against `File.size` **before** the archive is read into memory; same factor as the decompressed cap, so no otherwise-legal archive is rejected) | `× source_upload_max_bytes`, factor 4 |
-| `BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES` (compressed-input cap while `source_upload_max_bytes` has not arrived — deliberately not "skip the pre-check"; equals the protocol maximum of `SOURCE_UPLOAD_MAX_MB`) | 1,024 MiB |
+| Compressed-input cap (checked against `File.size` **before** the archive is read into memory): `min(source_upload_max_bytes × 4, absolute ceiling) + container slack`. Archives within the decompressed budget plus bounded container overhead are never rejected here; archives whose compressed size exceeds the absolute ceiling are rejected regardless — a registered browser-safety trade-off (split the md out and upload it directly) | formula above |
+| `BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES` (doubles as the fallback while `source_upload_max_bytes` has not arrived — deliberately not "skip the pre-check" — **and** as the absolute browser-safety ceiling: a top-spec deployment's `× 4` formula would otherwise permit a 4 GiB whole-archive allocation; equals the protocol maximum of `SOURCE_UPLOAD_MAX_MB`) | 1,024 MiB |
+| `BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES` (bounded allowance for zip local/central headers, EOCD, and worst-case deflate expansion of incompressible data, so archives hugging the decompressed budget are not falsely rejected by container bytes) | 4 MiB |
 | `MD_BUNDLE_MAX_SUGGESTIONS` (near-miss path suggestions per unmatched image) | 3 |
 | `BUNDLE_DIR_MAX_DEPTH` (dropped-folder traversal depth) | 16 |
 | `BUNDLE_DIR_MAX_FILES` (dropped-folder file count, same value as `MD_BUNDLE_MAX_ENTRIES`) | 2,000 |
