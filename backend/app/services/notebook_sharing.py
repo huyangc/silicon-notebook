@@ -1014,21 +1014,33 @@ class NotebookSharingService:
         could still show a stale ``failed``/``running`` status from before
         they left. Both deletes are independently fail-open — a job-row
         failure must not re-raise past an already-committed access change,
-        the same reasoning that already applied to the block-row delete."""
+        the same reasoning that already applied to the block-row delete.
+
+        ⚠ Order matters (codex #520 R3 P1): the job row goes FIRST. The
+        overlay worker's revocation guards are keyed off that row — it
+        re-reads it before writing, and a ``settle`` that finds it gone
+        triggers the post-write wipe. Blocks-first left a window where an
+        in-flight worker passed its pre-write check, recreated the just-
+        cleared blocks AND settled successfully, all before the job row
+        vanished — every guard green, private data resurrected. Deleting the
+        marker first means any worker still in flight either skips its writes
+        (pre-check) or fails its settle and wipes what it wrote (post-guard);
+        the block delete below then covers the fully-settled-before-removal
+        case."""
         if self._profiles is None or not user_id:
             return
-        try:
-            self._profiles.clear_all(notebook_id, user_id)
-        except Exception:  # noqa: BLE001 — access change already committed
-            _log.exception(
-                "failed to clear agent profile overlay for notebook %s",
-                notebook_id,
-            )
         try:
             self._profiles.clear_job_row(notebook_id, user_id)
         except Exception:  # noqa: BLE001 — access change already committed
             _log.exception(
                 "failed to clear agent profile job row for notebook %s",
+                notebook_id,
+            )
+        try:
+            self._profiles.clear_all(notebook_id, user_id)
+        except Exception:  # noqa: BLE001 — access change already committed
+            _log.exception(
+                "failed to clear agent profile overlay for notebook %s",
                 notebook_id,
             )
 

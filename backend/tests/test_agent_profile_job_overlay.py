@@ -1114,9 +1114,10 @@ def test_a_member_removed_during_the_model_call_gets_no_resurrected_blocks(harne
     assert claimed is not None
 
     def reply(_prompt: str) -> str:
-        # 模型调用期间成员被移除:与 _clear_member_profile 相同的两步
-        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        # 模型调用期间成员被移除:与 _clear_member_profile 相同的两步(codex R3
+        # P1 之后的顺序——job 行先走,让 worker 的两道护栏可靠触发)
         profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        profiles.clear_all(NOTEBOOK_ID, USER_A)
         return _reply(retrieval_notes="复活的心得")
 
     service = _service(harness, client=_Client(reply))
@@ -1145,9 +1146,9 @@ def test_a_removal_between_the_precheck_and_the_writes_is_wiped_after_settle(
     original_settle = profiles.settle
 
     def settle_after_removal(notebook_id, owner_id, status, **kwargs):
-        # 写入已完成;settle 之前移除路径跑完了两步
-        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        # 写入已完成;settle 之前移除路径跑完了两步(job 行先走)
         profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        profiles.clear_all(NOTEBOOK_ID, USER_A)
         return original_settle(notebook_id, owner_id, status, **kwargs)
 
     monkeypatch.setattr(profiles, "settle", settle_after_removal)
@@ -1206,3 +1207,68 @@ def test_a_leftover_below_the_threshold_does_not_requeue(harness, monkeypatch):
     assert submitter.calls == []
     assert _job(harness, USER_A)["status"] == "done"
     assert _job(harness, USER_A)["pending_signal"] == 1
+
+
+def test_removal_deletes_the_job_marker_before_the_blocks(harness):
+    """codex R3 P1:清理顺序本身是契约。
+
+    先清块、后删 job 行会留一个窗口:在飞 worker 的写前复核(job 行还在)通过、
+    写入、settle 也成功,随后 job 行才消失——两道护栏全绿,被撤销的私有块复活。
+    job 行先走,任何仍在飞的 worker 要么写前跳过、要么 settle False 触发写后兜底。
+    """
+    calls: list[str] = []
+
+    class _Recorder:
+        def clear_job_row(self, nb, uid):
+            calls.append("job_row")
+
+        def clear_all(self, nb, uid):
+            calls.append("blocks")
+
+    sharing = NotebookSharingService(
+        store=SimpleNamespace(remove_member=lambda nb, uid: None),
+        copies=None, catalog=None, summaries=None, database=harness["database"],
+        copy_stats=lambda _nb: {}, profiles=_Recorder(),
+    )
+    sharing.remove_member(NOTEBOOK_ID, USER_B)
+    assert calls == ["job_row", "blocks"]
+
+
+def test_a_job_update_to_a_member_written_note_is_refused(harness):
+    """codex R3 P1(身份洗白):模型对用户手写块的普通更新会把 updated_origin
+    翻成 job,下一轮就能 retire 用户的断言。非空的用户块对 job 是只读的。"""
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    profiles.write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="我自己的心得",
+        evidence=[], expected_revision=0, origin="user", actor=USER_A,
+    )
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+    service = _service(harness, client=_Client(_reply(retrieval_notes="模型想改写")))
+    result = service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    row = _blocks(harness, USER_A)["retrieval_notes"]
+    assert row["value"] == "我自己的心得"          # 原文保留
+    assert row["updated_origin"] == "user"          # 身份没有被洗成 job
+    assert "user_authoritative:retrieval_notes" in result["diagnostic"]
+
+
+def test_a_member_cleared_note_hands_the_label_back_to_the_agent(harness):
+    """用户清空过的块(origin=user 但值为空)不再是权威——否则清空会把这个
+    label 永远冻死,而清空的产品语义是「让 AI 重新填」。"""
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    profiles.write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="旧心得",
+        evidence=[], expected_revision=0, origin="user", actor=USER_A,
+    )
+    profiles.clear_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", expected_revision=1, actor=USER_A,
+    )
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+    service = _service(harness, client=_Client(_reply(retrieval_notes="新的整理")))
+    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    row = _blocks(harness, USER_A)["retrieval_notes"]
+    assert row["value"] == "新的整理"
+    assert row["updated_origin"] == "job"

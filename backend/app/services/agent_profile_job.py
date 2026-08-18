@@ -352,6 +352,32 @@ RETIRE_REFUSED = "refused"
 RETIRE_WRITE = "retire"
 
 
+def user_authoritative(existing: "Mapping[str, Any] | None") -> bool:
+    """Is this stored block a person's own, still-standing text?
+
+    codex #520 R3 P1: the retire refusal alone was launderable — the prompt
+    used to permit "additive refinement" of user-authored blocks, and that
+    ordinary job write flipped ``updated_origin`` to ``job``, so the NEXT run
+    was free to retire what a person wrote. The rule that closes the loop is
+    stronger and simpler: while a user-authored block still has text, a job
+    write to it — update or retire alike — is refused, so the provenance can
+    never be laundered in the first place. A person hands the block back to
+    the agent by clearing it (``clear_block`` keeps ``updated_origin='user'``
+    but empties the value, and an EMPTY user block is deliberately not
+    authoritative — otherwise clearing would freeze the block forever instead
+    of meaning "let the agent fill this in again").
+
+    Pure function of the stored row, shared by both chains and both kinds of
+    write, so "can a job touch this block" has exactly one answer.
+    """
+    if existing is None:
+        return False
+    return (
+        bool(str(existing.get("value") or ""))
+        and str(existing.get("updated_origin") or "") == "user"
+    )
+
+
 def retire_disposition(existing: "Mapping[str, Any] | None") -> str:
     """Should this withdrawal be written, refused, or ignored?
 
@@ -996,6 +1022,7 @@ class AgentProfileConsolidationService:
         conflicts: list[str] = []
         retired: list[str] = []
         refused: list[str] = []
+        preserved: list[str] = []
         dropped = 0
         for block in parsed:
             label = str(block["label"])
@@ -1030,6 +1057,14 @@ class AgentProfileConsolidationService:
                     continue
                 written += 1
                 retired.append(label)
+                continue
+            if user_authoritative(existing):
+                # codex R3 P1: an ordinary job update to a person's block
+                # would flip its provenance to ``job`` and let the NEXT run
+                # retire their words. Refused outright — the prompt says not
+                # to return these labels, and the server does not trust that
+                # instruction alone.
+                preserved.append(label)
                 continue
             evidence = list(block["evidence"])
             dropped += int(block.get("evidence_dropped") or 0)
@@ -1067,6 +1102,10 @@ class AgentProfileConsolidationService:
             diagnostic_parts.append("retired:" + ",".join(sorted(retired)))
         if refused:
             diagnostic_parts.append("retire_refused:" + ",".join(sorted(refused)))
+        if preserved:
+            diagnostic_parts.append(
+                "user_authoritative:" + ",".join(sorted(preserved))
+            )
         if dropped:
             diagnostic_parts.append(f"evidence_dropped:{dropped}")
         return _BaseOutcome(
@@ -1445,12 +1484,25 @@ class AgentProfileConsolidationService:
             raise AgentProfileOutputRejected("unparsable_reply")
         parsed = parse_overlay_reply(data)
         # codex R1 P1(写前复核): the model call above is a minutes-long window
-        # in which the member may have been removed. Removal runs clear_all +
-        # clear_job_row; a missing job row therefore means "revoked" — writing
-        # now would recreate private usage-derived blocks with
-        # ``expected_revision=0`` and hand them to the member on re-join. Skip
-        # every write. The millisecond window between this check and the
-        # writes is closed by the post-settle guard in ``run_overlay``.
+        # in which the member may have been removed. Removal runs
+        # clear_job_row + clear_all (marker first); a missing job row
+        # therefore means "revoked" — writing now would recreate private
+        # usage-derived blocks with ``expected_revision=0`` and hand them to
+        # the member on re-join. Skip every write. The millisecond window
+        # between this check and the writes is closed by the post-settle
+        # guard in ``run_overlay``.
+        #
+        # ⚠ Registered residual (codex #520 R4 P2, accepted): this existence
+        # check is ABA-prone — if the SAME member is removed, re-added, and a
+        # NEW overlay run is claimed all within this one model call, the
+        # replacement row passes the check and this stale worker may write
+        # pre-removal notes (or its settle may consume the new run's claim).
+        # Accepted because the blast radius is that one member's own private
+        # notes (never another member's data), the window needs three
+        # membership/scheduling events inside a single LLM call, and the next
+        # consolidation rewrites the blocks from post-rejoin traces anyway.
+        # Closing it needs a claim generation carried through claim/settle —
+        # registered for P2 rather than widening the store contract here.
         if self.profiles.job_row(notebook_id, user_id) is None:
             return _BaseOutcome(written=0, chars=0, evidence=0,
                                 diagnostic="revoked_mid_run")
@@ -1486,6 +1538,7 @@ class AgentProfileConsolidationService:
         conflicts: list[str] = []
         retired: list[str] = []
         refused: list[str] = []
+        preserved: list[str] = []
         for block in parsed:
             label = str(block["label"])
             existing = by_label.get(label)
@@ -1516,6 +1569,12 @@ class AgentProfileConsolidationService:
                     continue
                 written += 1
                 retired.append(label)
+                continue
+            if user_authoritative(existing):
+                # codex R3 P1: same rule as the base writer — a job update to
+                # a note the member wrote would launder its provenance and
+                # open it to retirement next round.
+                preserved.append(label)
                 continue
             evidence: list[dict] = (
                 [{"claim_index": 0, "zero_hit_queries": int(zero_hit_steps)}]
@@ -1548,6 +1607,10 @@ class AgentProfileConsolidationService:
             diagnostic_parts.append("retired:" + ",".join(sorted(retired)))
         if refused:
             diagnostic_parts.append("retire_refused:" + ",".join(sorted(refused)))
+        if preserved:
+            diagnostic_parts.append(
+                "user_authoritative:" + ",".join(sorted(preserved))
+            )
         return _BaseOutcome(
             written=written,
             chars=chars,
