@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   adminGroups,
+  confersManage,
   creatableGroupKinds,
   foldGroupShares,
   grantedViaLabel,
@@ -15,6 +16,7 @@ import {
   isPlainMember,
   partitionByGrant,
   requestableGroups,
+  revocationOrder,
   shareableGroups,
   shareRequestStatusLabel,
   visibleMyShareRequests,
@@ -65,9 +67,45 @@ test("同一个组的两条边(成员只读 / 组管理员可管)折成一项,�
     { id: "gr2", principal_type: "group_admins", principal_id: "g1", role: "admin", principal_name: "封装项目", principal_kind: "project", created_at: "" },
   ]);
   assert.equal(entries.length, 1);
-  assert.deepEqual(entries[0].grantIds, ["gr1", "gr2"]);
+  assert.deepEqual(entries[0].grants, [
+    { id: "gr1", role: "viewer" },
+    { id: "gr2", role: "admin" },
+  ]);
   // 带 group_admins 边 → 标注可管理(两条边任意顺序都成立)。
   assert.equal(entries[0].manage, true);
+});
+
+test("撤销顺序把给管理权的边排到最后——先删它就把自己的删除权删掉了", () => {
+  // 标准共享模板**先发** (group_admins, admin) **后发** (group, viewer),所以后端按
+  // created_at 返回时 admin 边天然排在前:这是主路径,不是边角情形(codex #519 R7 P2)。
+  const [entry] = foldGroupShares([
+    { id: "gr-admin", principal_type: "group_admins", principal_id: "g1", role: "admin", principal_name: "组", principal_kind: "project", created_at: "" },
+    { id: "gr-view", principal_type: "group", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.deepEqual(entry.grants.map((g) => g.id), ["gr-admin", "gr-view"]);  // 原始返回序
+  assert.deepEqual(revocationOrder(entry), ["gr-view", "gr-admin"]);          // 管理边最后
+
+  // 已经是「管理边在后」的输入不被打乱;单边、零边都不炸。
+  const [reversed] = foldGroupShares([
+    { id: "gr-view", principal_type: "group", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+    { id: "gr-admin", principal_type: "group", principal_id: "g1", role: "admin", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.deepEqual(revocationOrder(reversed), ["gr-view", "gr-admin"]);
+  assert.deepEqual(revocationOrder({ grants: [{ id: "only", role: "viewer" }] }), ["only"]);
+  assert.deepEqual(revocationOrder({ grants: [] }), []);
+});
+
+test("排序判据与「可管理」标注是同一个 confersManage——只看 role,不看主体类型", () => {
+  // 两个消费者共用一份判据:分成两份写法迟早会出现「标着可管理、却没被排到最后」的边。
+  assert.equal(confersManage({ role: "admin" }), true);
+  assert.equal(confersManage({ role: "viewer" }), false);
+  // (group, admin) 也是管理边 —— 它把管理权给了整组每个成员,撤销时同样必须最后删。
+  const [entry] = foldGroupShares([
+    { id: "gr-a", principal_type: "group", principal_id: "g1", role: "admin", principal_name: "组", principal_kind: "project", created_at: "" },
+    { id: "gr-b", principal_type: "group_admins", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.equal(entry.manage, true);
+  assert.deepEqual(revocationOrder(entry), ["gr-b", "gr-a"]);
 });
 
 test("管理标注只看 role,两种群组主体一视同仁(四格:主体 × role)", () => {
@@ -141,7 +179,7 @@ test("孤儿边(组已不存在)标成 missing,让库主看得懂并且删得掉
     { id: "gr9", principal_type: "group", principal_id: "gone", role: "viewer", principal_name: "", principal_kind: "missing", created_at: "" },
   ]);
   assert.equal(entries[0].missing, true);
-  assert.deepEqual(entries[0].grantIds, ["gr9"]);
+  assert.deepEqual(entries[0].grants, [{ id: "gr9", role: "viewer" }]);
 });
 
 test("已经共享过的组不再出现在选择器里(重复发边后端会 409)", () => {

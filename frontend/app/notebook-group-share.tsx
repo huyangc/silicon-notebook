@@ -10,6 +10,7 @@ import {
   listMyShareRequests,
   listNotebookGrants,
   requestableGroups,
+  revocationOrder,
   revokeNotebookGrant,
   shareableGroups,
   shareNotebookToGroup,
@@ -148,7 +149,11 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
               onClick={() => { void run(entry.groupId, async () => {
                 // 同一个组可能有两条边(成员只读 / 组管理员可管),撤销要一并删掉,
                 // 否则界面上「撤销」过的条目会因为剩下那条边而重新出现。
-                for (const grantId of entry.grantIds) {
+                // ⚠ 顺序必须走 `revocationOrder`——它把**给管理权的那条边排到最后**。
+                // 撤销权限本身可能就来自那条边(三个 grant 端点都是 admin 档能力,组管理员
+                // 也能进这个面板),先删它就等于当场把自己的删除权删掉:第二次 DELETE 拿
+                // 404,只读边留下、共享仍然生效,而界面已经报了「撤销」(codex #519 R7 P2)。
+                for (const grantId of revocationOrder(entry)) {
                   await revokeNotebookGrant(notebookId, grantId);
                 }
               }, "撤销共享失败"); }}

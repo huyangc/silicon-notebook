@@ -43,6 +43,7 @@ from app.repositories.ports import (
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
     NotebookManageRequiredError,
+    NotebookNotFoundError,
     ShareRequestNotPendingError,
     ShareRequesterUnauthorizedError,
 )
@@ -341,6 +342,31 @@ class GroupStore:
         if db.execute("SELECT 1 FROM groups WHERE id=?", (group_id,)).fetchone() is None:
             raise GroupNotFoundError(group_id)
 
+    @staticmethod
+    def _require_notebook_on(db: sqlite3.Connection, notebook_id: str) -> None:
+        """在**当前写事务里**复核这本笔记本还在,不在就 `NotebookNotFoundError`。
+
+        `_require_group_on` 的**同类兄弟**,只是换了另一个外键父行:一次插入有几个外键,
+        就有几个父行可能在守卫通过之后被并发删掉,只堵其中一个不算堵住(codex #519 R7)。
+        少了这条,`INSERT INTO notebook_share_requests` 会撞 `notebook_id` 的外键抛
+        `sqlite3.IntegrityError`——用户拿到的是 500,而正确答案是 404。
+
+        与 `_require_group_on` 一样,SQLite 侧**不需要**行锁:`SqliteDatabase.write()` 是
+        进程级写锁,同一时刻只有一个写事务在跑,并发的删库事务插不进「复核」与「插入」
+        之间;但**存在性仍要在事务内查**,因为能力守卫那次查询与本事务之间,一个完整的
+        删库请求可以整个跑完。PG 侧对应的是 `_lock_notebook_on` 的 `FOR KEY SHARE`。
+
+        ⚠ 这里查的是**存在性**,不是权限。权限那条轴是 `_require_notebook_manage_on`,
+        判据完全不同(裁决 P2-8:只有写 `notebook_grants` 这类授予他人访问权的路径才做
+        事务内权限复检)。别把两者合并——库已经不存在时,「他还有没有管理权」不是一个
+        有意义的问题,而这条要回答的恰恰是那个不成立的前提。
+        """
+        if (
+            db.execute("SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
+            is None
+        ):
+            raise NotebookNotFoundError(notebook_id)
+
     def upsert_member(
         self, group_id: str, user_id: str, *, role: str, added_by: str
     ) -> str:
@@ -545,9 +571,12 @@ class GroupStore:
         (幂等,不报错——刷新页面重复提交是常见操作)。
 
         `status` 恒 `'pending'`、`decided_at` **留 NULL**(不写列,取默认;绝不写 `''`)。
-        在写事务里先 `_require_group_on` 复核组还在:少了它,组被并发删掉时插入会撞
-        `group_id` 外键抛 `IntegrityError`(用户拿到 500),而正确答案是 404。同一写锁下
-        复核过后,唯一还可能的 `IntegrityError` 就是那条 pending 唯一索引冲突。
+        写事务里先复核**两个外键父行**都还在——`_require_group_on`(组)与
+        `_require_notebook_on`(笔记本)。少了任意一条,那个父行被并发删掉时插入会撞对应的
+        外键抛 `IntegrityError`(用户拿到 500),而正确答案都是 404。这不是「顺手多查一次」:
+        一次插入有几个外键,守卫与写事务之间就有几个父行可能消失,只堵组那一个等于把笔记本
+        那一个的 500 留在原地(codex #519 R7 P2)。同一写锁下两条都复核过后,唯一还可能的
+        `IntegrityError` 就是那条 pending 唯一索引冲突。
 
         ⚠ **成员资格也必须在这个事务里复核**(codex #519 R2 P2-1):路由查过一次
         「`requested_by` 在不在这个组里」,但「被移出组」可以发生在那次查询与插入之间。
@@ -562,7 +591,10 @@ class GroupStore:
         for _attempt in range(2):
             try:
                 with self.database.write() as db:
+                    # 顺序与 PG 侧保持一致(组 → 笔记本):那边这个顺序承载锁序论证,
+                    # 这边没有行锁、顺序无关,但两份实现读起来必须是同一段代码。
                     self._require_group_on(db, group_id)
+                    self._require_notebook_on(db, notebook_id)
                     if self._role_on(db, group_id, requested_by) is None:
                         raise GroupMembershipRequiredError(group_id)
                     db.execute(

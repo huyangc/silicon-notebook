@@ -123,6 +123,31 @@ test("已共享的组(含 group_admins 边)折成一项、标注可管理;撤销
   expect(revokeNotebookGrant).toHaveBeenCalledWith("nb1", "gr2");
 });
 
+test("撤销把给管理权的那条边**最后**删——先删它就把自己的删除权删掉了", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP]);
+  // 标准共享模板先发 (group_admins, admin) 后发 (group, viewer),后端按 created_at 返回,
+  // 所以 admin 边**排在前**——这是主路径。照单顺序删,第一次 DELETE 就撤掉了调用者自己的
+  // 管理权(三个 grant 端点都是 admin 档能力,组管理员也能进这个面板),第二次拿 404,
+  // 只读边留下、共享仍然生效,而界面已经报了「撤销」(codex #519 R7 P2)。
+  vi.mocked(listNotebookGrants).mockResolvedValue([
+    grant({ id: "gr-admin", principal_type: "group_admins", role: "admin" }),
+    grant({ id: "gr-view", principal_type: "group", role: "viewer" }),
+  ]);
+  vi.mocked(revokeNotebookGrant).mockResolvedValue(undefined);
+  renderSection();
+
+  await screen.findByText("封装项目");
+  await user.click(screen.getByRole("button", { name: "撤销共享" }));
+
+  await waitFor(() => expect(revokeNotebookGrant).toHaveBeenCalledTimes(2));
+  // 断言的是**调用顺序**,不只是「两条都删了」——后者对着 bug 也是绿的。
+  expect(vi.mocked(revokeNotebookGrant).mock.calls.map(([, id]) => id)).toEqual([
+    "gr-view",
+    "gr-admin",
+  ]);
+});
+
 test("孤儿边标成失效并给删除入口,不显示一条没有名字的共享", async () => {
   vi.mocked(listNotebookGrants).mockResolvedValue([
     grant({ id: "gr9", principal_id: "gone", principal_name: "", principal_kind: "missing" }),
