@@ -372,8 +372,11 @@ def user_authoritative(existing: "Mapping[str, Any] | None") -> bool:
     """
     if existing is None:
         return False
+    # codex R10 P2:空判用**归一化后**的口径(与渲染层 clip_block_value 的
+    # 压空白一致)——纯空白的用户保存渲染出来是空块,按原始真值判会把它当成
+    # 永久权威,巡固从此填不回来,而用户看到的明明是「还没有内容」。
     return (
-        bool(str(existing.get("value") or ""))
+        bool(" ".join(str(existing.get("value") or "").split()))
         and str(existing.get("updated_origin") or "") == "user"
     )
 
@@ -399,7 +402,9 @@ def retire_disposition(existing: "Mapping[str, Any] | None") -> str:
     mirror images, and this rule drifting between them is the shape where the
     shared base keeps a stale claim while the overlay drops a person's note.
     """
-    if existing is None or not str(existing.get("value") or ""):
+    if existing is None or not " ".join(str(existing.get("value") or "").split()):
+        # 空判同样用归一化口径(codex R10 P2):纯空白值渲染即空块,撤回它
+        # 与撤回空块同为 noop,而不是被当成「有内容的用户块」拒绝。
         return RETIRE_NOOP
     if str(existing.get("updated_origin") or "") == "user":
         return RETIRE_REFUSED
