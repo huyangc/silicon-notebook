@@ -275,6 +275,29 @@ async function inflateRaw(
   return out;
 }
 
+/** CRC-32（IEEE 802.3 多项式）查找表，模块内私有。
+ *
+ *  central directory 记的 CRC 是**解压后**内容的终值——data descriptor（通用位 3 声明
+ *  的那种）只影响 local header，central directory 里这份永远是终值，不受它影响。
+ *  一段被位翻转的 stored 条目、或一段仍能被 `DecompressionStream` 解出（但已经不是
+ *  原文件）的坏 deflate 流，长度检查未必能拦下，只有比对 CRC 才行。
+ */
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32Of(bytes: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.byteLength; i += 1) c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 /** central directory 扫描阶段留下的条目描述（还没解压）。 */
 type CentralEntry = {
   path: string;
@@ -283,6 +306,8 @@ type CentralEntry = {
   compressedSize: number;
   uncompressedSize: number;
   localOffset: number;
+  /** central directory 记的解压后 CRC-32，提取后用来核对产出确实是原文件。 */
+  crc32: number;
 };
 
 /** 解析 zip 字节为虚拟文件集：EOCD 定位 + central directory 遍历 + 逐条目解压。
@@ -343,6 +368,7 @@ export async function parseZipBundle(
 
     const flags = view.getUint16(cursor + 8, true);
     const method = view.getUint16(cursor + 10, true);
+    const crc32 = view.getUint32(cursor + 16, true);
     const compressedSize = view.getUint32(cursor + 20, true);
     const uncompressedSize = view.getUint32(cursor + 24, true);
     const nameLength = view.getUint16(cursor + 28, true);
@@ -371,7 +397,7 @@ export async function parseZipBundle(
     if (seen.has(normalized)) continue;
     seen.add(normalized);
 
-    kept.push({ path: normalized, flags, method, compressedSize, uncompressedSize, localOffset });
+    kept.push({ path: normalized, flags, method, compressedSize, uncompressedSize, localOffset, crc32 });
     if (kept.length > MD_BUNDLE_MAX_ENTRIES) {
       return fail({
         code: "too_many_entries",
@@ -387,7 +413,7 @@ export async function parseZipBundle(
   let consumed = 0;
 
   for (const entry of kept) {
-    const { path, flags, method, compressedSize, uncompressedSize, localOffset } = entry;
+    const { path, flags, method, compressedSize, uncompressedSize, localOffset, crc32 } = entry;
 
     if ((flags & GP_FLAG_ENCRYPTED) !== 0 || (flags & GP_FLAG_STRONG_ENCRYPTION) !== 0) {
       return fail({ code: "encrypted", path });
@@ -437,6 +463,12 @@ export async function parseZipBundle(
       }
       content = inflated;
     }
+    // 产出必须逐字等于 central directory 承诺的那份原文件：长度先比（便宜、能拦住
+    // 大多数截断/错位），CRC 再比（拦位翻转的 stored 条目、以及仍能被解压器解出
+    // 但已经不是原文件的坏 deflate 流——只有真读一遍才发现）。两者都只对**真读出
+    // 的条目**算，与既有解压预算同一数量级，不是新增的一遍扫描。
+    if (content.byteLength !== uncompressedSize) return fail({ code: "corrupt", path });
+    if (crc32Of(content) !== crc32) return fail({ code: "corrupt", path });
     consumed += content.byteLength;
     files.push({ path, bytes: content });
   }

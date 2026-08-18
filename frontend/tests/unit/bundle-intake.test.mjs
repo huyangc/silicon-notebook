@@ -652,10 +652,28 @@ const CENTRAL_SIG = 0x02014b50;
 const LOCAL_SIG = 0x04034b50;
 const EOCD_SIG = 0x06054b50;
 
+// md-bundle.ts 现在核对 central directory 里的 CRC-32（拦位翻转的 stored 条目/
+// 坏 deflate 流），所以这个夹具必须写真实值，不能再全零——否则每份用它构造的包
+// 都会被新护栏当成损坏拒收。算法与 md-bundle.test.mjs 里那份逐字同构。
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 /** 最小 store-only zip 构造器：只用于验证 unpackZipFile 这层"读 File → 交给
  *  parseZipBundle"的胶水代码本身，不重复 md-bundle.test.mjs 已经覆盖的 zip 格式
- *  边界（那些测试直接喂字节给 parseZipBundle，本文件不重复）。parseZipBundle 不校验
- *  CRC，这里全部写 0。 */
+ *  边界（那些测试直接喂字节给 parseZipBundle，本文件不重复）。 */
 function makeStoreZip(entries) {
   const enc = new TextEncoder();
   const localParts = [];
@@ -668,6 +686,7 @@ function makeStoreZip(entries) {
     view.setUint32(0, LOCAL_SIG, true);
     view.setUint16(4, 20, true);
     view.setUint16(8, 0, true); // method = store
+    view.setUint32(14, crc32(entry.data), true);
     view.setUint32(18, entry.data.length, true);
     view.setUint32(22, entry.data.length, true);
     view.setUint16(26, nameBytes.length, true);
@@ -686,6 +705,7 @@ function makeStoreZip(entries) {
     view.setUint16(4, 20, true);
     view.setUint16(6, 20, true);
     view.setUint16(10, 0, true); // method = store
+    view.setUint32(16, crc32(entry.data), true);
     view.setUint32(20, entry.data.length, true);
     view.setUint32(24, entry.data.length, true);
     view.setUint16(28, nameBytes.length, true);

@@ -3106,6 +3106,13 @@ export default function Home() {
     // 切库同样是暂存批次的清理路径:上一个库里还在飞的 zip/文件夹解包链落盘时
     // 必须整条丢弃,不能把它的结果写进(可能已经属于)新库的「添加来源」弹窗。
     bundleIntakeGenerationRef.current += 1;
+    // 世代递增只挡了迟到落盘——挂起的 bundleChoice 勾选面板、它的 resolver 与忙碌
+    // 栈帧不会因此自动消失。深链/浏览器导航切库时弹窗未必被 closeSourceModal 关过，
+    // 不结清就会让上一个笔记本的勾选面板悬在新笔记本上，把「添加来源」入口一直锁死
+    // 到用户手动确认/取消一个已经不指向当前笔记本的面板（评审 F2）。走与关闭弹窗
+    // 同一条路径：resolve 挂起 resolver（unblock 还在 await 的解包链，让它自己的
+    // finally 释放忙碌栈帧）、清空 bundleChoice、把忙碌文案同步回当前栈顶。
+    cancelBundleChoice();
     setSessionLoading(true);
     try {
       askRunEpochRef.current += 1;
