@@ -648,7 +648,11 @@ def test_a_requester_who_lost_manage_rights_can_still_find_and_withdraw(
     assert [r["id"] for r in mine.json()] == [request_id]
     row = mine.json()[0]
     assert row["notebook_id"] == notebook_id
-    assert row["notebook_name"] == "Alice 的库"   # 有意披露,见路由 docstring
+    # ⚠ 库名此刻**不再返回**:他已经失去这本库的读权(codex #519 R12 P2)。他知道的是
+    # 提交那一刻的名字,清单不能继续把改名后的新名字送给他。撤回**不受影响** —— 这正是
+    # 两个标签分开判的意义:群组那半他还是成员,所以仍然给。
+    assert row["notebook_name"] == ""
+    assert row["group_name"] == "Carol 的组"
     assert row["status"] == "pending"
     assert row["decided_by"] is None and row["decided_at"] is None
 
@@ -693,6 +697,217 @@ def test_the_global_request_list_is_scoped_to_the_requester_and_to_pending(
     assert [r["status"] for r in client.get(
         f"/api/notebooks/{notebook_id}/share-requests", headers=librarian
     ).json()] == ["rejected"]
+
+
+def _bell(client, headers):
+    """待确认中心的快照(铃铛读的就是它)。"""
+    response = client.get("/api/me/pending-actions", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _share_request_count(snapshot) -> int:
+    return sum(
+        int(item.get("count") or 0)
+        for item in snapshot["items"]
+        if item["type"] == "share_request"
+    )
+
+
+def test_share_request_lifecycle_publishes_to_the_affected_group_admins(
+    tmp_path, monkeypatch
+):
+    """建立/批准/驳回/撤回之后,受影响的组管理员要收到一次待办快照(codex #519 R12 P1)。
+
+    铃铛的 `share_request` 项判据是「我是这个组的 admin」+「申请仍 pending」,所以受影响的
+    是**这个组的全部管理员**——不是只有动手的那一个:A 批准之后 B 的队列也少了一条。这条
+    用例盯的是**发布调用**(SSE 的失效通知),快照本身的数字由下面那条断言。
+    """
+    from app.services import pending_bus as bus
+
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, librarian_id, group_id, notebook_id = _make_member_owned_notebook(client)
+    boss_id = client.get("/api/me", headers=boss).json()["id"]
+    # 再加一名组管理员:批准之后**他**的队列也变了,不能只通知动手的那个。
+    deputy, deputy_id, _ = _new_user(client)
+    _add_member(client, boss, group_id, deputy_id, role="admin")
+
+    published: list[str] = []
+    monkeypatch.setattr(bus.pending_bus, "mark_dirty", lambda uid: published.append(uid))
+
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+    assert set(published) == {boss_id, deputy_id}, (
+        "建立申请之后,目标组的**每一个**管理员都要收到失效通知;申请人自己不在其中"
+        "(他的铃铛里没有 share_request 项)"
+    )
+
+    published.clear()
+    assert client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/approve", headers=boss
+    ).status_code == 200
+    assert set(published) == {boss_id, deputy_id}, "批准之后 deputy 的队列也少了一条"
+
+    # 撤回同样要通知(队列少一条)。
+    second_group = _make_group(client, boss, name="二组")
+    _add_member(client, boss, second_group, librarian_id)   # 申请人必须是普通成员(R8 P2)
+    second = _submit(client, librarian, notebook_id, second_group)
+    assert second.status_code == 200, second.text
+    published.clear()
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/share-requests/{second.json()['id']}",
+        headers=librarian,
+    ).status_code == 204
+    assert boss_id in published
+
+
+def test_a_broken_pending_bus_never_fails_an_already_committed_change(
+    tmp_path, monkeypatch
+):
+    """总线抛异常 → 改动仍然成功(fail-open,codex #519 R12 P1)。
+
+    通知发不出去只是「铃铛晚一点」,而让它冒泡就成了「批准失败」——用户会去重试一个已经
+    完成的动作,正是 codex #519 R11 P2 刚修的那类混淆。
+    """
+    from app.services import pending_bus as bus
+
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+
+    def explode(_uid):
+        raise RuntimeError("bus is down")
+
+    monkeypatch.setattr(bus.pending_bus, "mark_dirty", explode)
+
+    created = _submit(client, librarian, notebook_id, group_id)
+    assert created.status_code == 200, created.text
+    request_id = created.json()["id"]
+    # 申请确实落库了 —— 通知失败没有回滚它。
+    assert [r["id"] for r in _pending_for(client, boss, group_id).json()] == [request_id]
+
+    approved = client.post(
+        f"/api/groups/{group_id}/share-requests/{request_id}/approve", headers=boss
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    assert [
+        (g["principal_type"], g["role"])
+        for g in client.get(f"/api/notebooks/{notebook_id}/grants", headers=librarian).json()
+    ] == [("group", "viewer")]
+
+
+def test_the_bell_count_follows_share_requests_and_group_role_changes(
+    tmp_path, monkeypatch
+):
+    """端到端:快照里的待审批数真的跟着申请与**角色变更**走。
+
+    上面那条盯的是「有没有发通知」,这条盯的是「通知过去之后,重算出来的数对不对」——
+    尤其角色变更那一格:升成组管理员就该多出这个组的待审批数,降级/移出就该消失。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    deputy, deputy_id, _ = _new_user(client)
+    _add_member(client, boss, group_id, deputy_id)          # 先只是普通成员
+
+    assert _share_request_count(_bell(client, boss)) == 0
+    _submit(client, librarian, notebook_id, group_id)
+    assert _share_request_count(_bell(client, boss)) == 1
+    # 普通成员看不到待审批数 —— 判据是 admin,不是「组里的人」。
+    assert _share_request_count(_bell(client, deputy)) == 0
+
+    # 升成组管理员 → 他的铃铛立刻有了这一条。
+    _add_member(client, boss, group_id, deputy_id, role="admin")
+    assert _share_request_count(_bell(client, deputy)) == 1
+    # 移出组 → 又消失。
+    assert client.delete(
+        f"/api/groups/{group_id}/members/{deputy_id}", headers=boss
+    ).status_code == 204
+    assert _share_request_count(_bell(client, deputy)) == 0
+    assert _share_request_count(_bell(client, boss)) == 1
+
+
+def test_the_global_list_stops_showing_labels_the_requester_may_no_longer_see(
+    tmp_path, monkeypatch
+):
+    """失权之后**改名**,这条清单不能继续把新名字送出去(codex #519 R12 P2)。
+
+    披露面的推理里漏掉的是**时间维度**:他知道的是**提交那一刻**的名字。这条清单是他失权
+    之后仍然够得着的(裁决 P2-7 就是这么设计的),所以无条件带出当前名字 = 一条对已经无权
+    观察的对象的**活的**信息通道 —— 与「跨库资产 no-store」「取消挂载即 404」「公开页每次
+    实时复核读权」是同一条线。
+
+    两个标签**分别**判,这条用例把四格走全:
+      ① 都还在 → 两个名字都给;
+      ② 只失去笔记本读权 → 库名空、组名仍给;
+      ③ 只被移出组 → 组名空、库名仍给;
+      ④ 两个都失去 → 两个都空(罕见)。
+    分开判的意义在②③:一起判的话只失去一半的人两个名字都会消失,多条待审批就都长成
+    「知识库 → 群组」,根本分不清该撤哪条。
+    """
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)
+    bob, bob_id, _ = _new_user(client)
+    carol, _carol_id, _ = _new_user(client)
+
+    def stage(name: str):
+        """建一本 Alice 的库,经 group_admins 边把管理权给 Bob,再让他提一条申请。"""
+        nb = _make_notebook(client, alice, name=name)
+        conferring = _make_group(client, alice, name=f"授权组-{name}")
+        assert _add_member(client, alice, conferring, bob_id, role="admin").status_code == 200
+        edge = client.post(
+            f"/api/notebooks/{nb}/grants",
+            json={"principal_type": "group_admins", "principal_id": conferring, "role": "admin"},
+            headers=alice,
+        )
+        assert edge.status_code == 200, edge.text
+        target = _make_group(client, carol, name=f"目标组-{name}")
+        assert _add_member(client, carol, target, bob_id).status_code == 200
+        _submit(client, bob, nb, target)
+        return nb, edge.json()["id"], target
+
+    keep_nb, _keep_edge, keep_group = stage("都还在")
+    lost_nb, lost_edge, lost_nb_group = stage("丢读权")
+    kept_nb, _kept_edge, left_group = stage("退出组")
+    both_nb, both_edge, both_group = stage("两个都丢")
+
+    # ② 撤掉读权边;③ 退出目标组;④ 两样都来。
+    for edge_id, nb in ((lost_edge, lost_nb), (both_edge, both_nb)):
+        assert client.delete(
+            f"/api/notebooks/{nb}/grants/{edge_id}", headers=alice
+        ).status_code == 204
+    for group_id in (left_group, both_group):
+        assert client.delete(
+            f"/api/groups/{group_id}/members/{bob_id}", headers=carol
+        ).status_code == 204
+
+    # 失权之后对方**改名** —— 这正是不能再送出去的那个新名字。
+    for nb in (lost_nb, both_nb):
+        assert client.patch(
+            f"/api/notebooks/{nb}", json={"name": "改名之后"}, headers=alice
+        ).status_code == 200
+
+    rows = {r["notebook_id"]: r for r in _my_pending(client, bob).json()}
+    assert len(rows) == 4, "四条申请都必须还在 —— 隐藏的是标签,不是行"
+
+    assert rows[keep_nb]["notebook_name"] == "都还在"          # ①
+    assert rows[keep_nb]["group_name"] == "目标组-都还在"
+
+    assert rows[lost_nb]["notebook_name"] == ""                 # ②
+    assert rows[lost_nb]["group_name"] == "目标组-丢读权"       #   另一半不受连累
+    assert "改名之后" not in str(rows[lost_nb])
+
+    assert rows[kept_nb]["notebook_name"] == "退出组"           # ③
+    assert rows[kept_nb]["group_name"] == ""
+
+    assert rows[both_nb]["notebook_name"] == ""                 # ④
+    assert rows[both_nb]["group_name"] == ""
+
+    # 无论标签给不给,撤回都得照常工作 —— 它的授权轴是申请归属,与这两半无关。
+    for nb, row in rows.items():
+        assert client.delete(
+            f"/api/notebooks/{nb}/share-requests/{row['id']}", headers=bob
+        ).status_code == 204
+    assert _my_pending(client, bob).json() == []
+    del keep_group, lost_nb_group
 
 
 def test_a_requester_who_lost_manage_rights_can_still_withdraw(tmp_path, monkeypatch):

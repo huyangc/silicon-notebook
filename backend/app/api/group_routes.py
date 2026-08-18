@@ -69,6 +69,7 @@ from app.models.groups import (
     UserRef,
 )
 from app.models.identity import UserProfile
+from app.services.pending_bus import publish_snapshot
 from app.repositories.ports import (
     GroupAdminRequiredError,
     GroupAdminShouldShareDirectlyError,
@@ -113,6 +114,29 @@ def _share_request_not_for_group_admins() -> HTTPException:
     return user_error(
         403, "你是这个群组的组管理员,直接共享给它即可,不必提交申请"
     )
+
+
+def _notify_group_admins(group_id: str) -> None:
+    """该组的待审批数变了 → 给它的**全部组管理员**各推一次待办快照(codex #519 R12 P1)。
+
+    铃铛里 `share_request` 那一项的判据是「我是这个组的 admin」+「申请仍 pending」
+    (见 `query_store` 的投影),所以受影响的正是**这个组的全部管理员**——不是只有动手的
+    那一个:A 批准之后,B 的队列也少了一条。反过来也不能全量广播:别的组的管理员这一刻
+    什么都没变。
+
+    ⚠ 三条硬性:
+    * **在写事务之外调**(全部调用点都在 store 返回之后),绝不持锁做 I/O;
+    * **fail-open**:总线发不出去绝不能让已经提交成功的改动报失败——那会把「通知没送到」
+      变成「批准失败」,正是 codex #519 R11 P2 刚修的那类混淆。`publish_snapshot` 自身已
+      fail-open,这里再包一层是因为**解析管理员名单**这一步也可能抛;
+    * **一次改动只解析一次名单**(一条 `list_members` 查询),不逐个管理员回查。
+    """
+    try:
+        for member in group_repository().list_members(group_id):
+            if member["role"] == "admin":   # 精确匹配,与投影里的 `gm.role='admin'` 同口径
+                publish_snapshot(member["id"])
+    except Exception:  # noqa: BLE001 - 通知是尽力而为,绝不影响已提交的改动
+        pass
 
 
 def _is_system_admin(user: UserProfile) -> bool:
@@ -321,6 +345,9 @@ def put_group_member_route(
         # 组在守卫通过之后、写事务落库之前被并发删掉。少了这一支,SQLite 会撞
         # `group_members.group_id` 的外键抛 IntegrityError,用户拿到 500。
         raise _group_not_found()
+    # 角色变了 → **被改的那个人**的铃铛要变(升成组管理员就多出这个组的待审批数,
+    # 降级就少掉)。只推他一个:别人的判定一个字都没动。
+    publish_snapshot(user_id)
     group = groups.get_group(group_id, user_id=user.id)
     if group is None:
         raise _group_not_found()
@@ -342,6 +369,8 @@ def remove_group_member_route(
         raise _group_not_found()
     if not removed:
         raise user_error(404, "该用户不是这个群组的成员")
+    # 被移出组的人如果原来是组管理员,他的铃铛里这个组的待审批数要消失。
+    publish_snapshot(user_id)
 
 
 @router.delete("/groups/{group_id}/membership", status_code=204)
@@ -356,6 +385,8 @@ def leave_group_route(
         raise user_error(409, "你是这个群组唯一的组管理员,请先指定其他组管理员再退出")
     except GroupNotFoundError:
         raise _group_not_found()
+    # 自助退出:退出者自己的铃铛要去掉这个组的待审批数。
+    publish_snapshot(user.id)
 
 
 # ------------------------------------------------------------------- 授权边
@@ -556,6 +587,8 @@ def create_share_request_route(
         raise user_error(404, "笔记本不存在")
     except ShareRequestAlreadyPendingError:
         raise user_error(409, "这本笔记本已有一条待该群组审批的申请")
+    # 队列里多了一条 → 该组的管理员铃铛要立刻更新(事务已提交,fail-open)。
+    _notify_group_admins(group_id)
     return ShareRequestItem(**request)
 
 
@@ -645,14 +678,28 @@ def delete_share_request_route(
     可以有多个管理权持有者(owner + 组管理员),丢掉这个参数就等于让他们互相撤回对方的
     待审批申请(codex #519 R1 P1)。
     """
+    groups = group_repository()
+    # 撤回之后这一行就没了,拿不到它的 group_id 了,所以**先**读出来(只为通知用)。
+    # 刻意不改 `delete_share_request` 的返回契约:它的 `"deleted"`/`"not_found"` 被十来处
+    # 断言钉着,为一次尽力而为的通知去动它不划算。这是一次有界的单人查询(我在这本库上
+    # 的申请,至多几条),不是 N+1;读在写之前的 TOCTOU 也无害——申请的 `group_id` 不可变。
+    target_group = next(
+        (
+            item["group_id"]
+            for item in groups.list_my_share_requests(notebook_id, requested_by=user.id)
+            if item["id"] == request_id
+        ),
+        "",
+    )
     try:
-        outcome = group_repository().delete_share_request(
-            notebook_id, request_id, user.id
-        )
+        outcome = groups.delete_share_request(notebook_id, request_id, user.id)
     except ShareRequestNotPendingError:
         raise user_error(409, "这条共享申请已经处理过了,无法撤回")
     if outcome == "not_found":
         raise user_error(404, "这条共享申请不存在")
+    # 队列里少了一条 → 该组管理员的铃铛要更新。
+    if target_group:
+        _notify_group_admins(target_group)
 
 
 @router.get(
@@ -715,6 +762,8 @@ def approve_share_request_route(
         )
     if decided is None:
         raise user_error(404, "这条待审批的共享申请不存在或已被处理")
+    # 队列里少了一条 —— 对**全组**管理员都成立,不只是动手的这一个。
+    _notify_group_admins(group_id)
     return ShareRequestItem(**decided)
 
 
@@ -747,4 +796,6 @@ def reject_share_request_route(
         raise user_error(403, "你不是这个群组的组管理员,无法审批共享申请")
     if decided is None:
         raise user_error(404, "这条待审批的共享申请不存在或已被处理")
+    # 同 approve:队列少一条对全组管理员都成立。
+    _notify_group_admins(group_id)
     return ShareRequestItem(**decided)

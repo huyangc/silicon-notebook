@@ -1023,6 +1023,20 @@ def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores)
     )["status"] == "rejected"
     assert groups.list_pending_share_requests_by_requester(librarian.id) == []
 
+    # 两个展示标签按**当前**权限逐个给(codex #519 R12 P2)。PG 侧的占位符顺序与 SQLite
+    # 不同(`read_access_params` 的个数由谓词自己决定),所以这一格必须在 PG 上真跑一遍。
+    labelled = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+    both = groups.list_pending_share_requests_by_requester(librarian.id)[0]
+    assert both["notebook_name"] == "共享库" and both["group_name"] == "芯片项目"
+    # 把他移出组:组名那半消失,而库名那半**不受连累**(他是这本库的 owner,读权还在)。
+    assert groups.remove_member(group["id"], librarian.id) is True
+    after = groups.list_pending_share_requests_by_requester(librarian.id)[0]
+    assert after["id"] == labelled["id"], "隐藏的是标签,不是行"
+    assert after["group_name"] == ""
+    assert after["notebook_name"] == "共享库"
+
 
 def test_share_request_authorization_rechecks_mirror_the_sqlite_store(
     core_stores: CoreStores,

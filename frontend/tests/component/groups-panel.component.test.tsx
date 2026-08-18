@@ -499,3 +499,30 @@ test("批准本身失败时仍然报失败(分离不能变成把错误吞掉)", 
   // 改动没生效,行必须留着让人重试。
   expect(screen.getByRole("button", { name: "批准" })).toBeInTheDocument();
 });
+
+test("失权之后名称不再显示时给中性说明,而不是留空白或黑话", async () => {
+  // 后端在申请人已无权查看时把对应标签置空(codex #519 R12 P2)。两半**分别**判,所以
+  // 常见形态是只空一半——界面必须仍能让人分清该撤哪条。
+  vi.mocked(listMyPendingShareRequests).mockResolvedValue([
+    shareRequest({ id: "sr-a", notebook_id: "nb-a", notebook_name: "", group_name: "封装项目" }),
+    shareRequest({ id: "sr-b", notebook_id: "nb-b", notebook_name: "仍看得见的库", group_name: "" }),
+  ]);
+  renderModal();
+
+  await screen.findByText("我发起的共享申请");
+  expect(screen.getByText("名称不再显示的知识库 → 封装项目")).toBeInTheDocument();
+  expect(screen.getByText("仍看得见的库 → 名称不再显示的群组")).toBeInTheDocument();
+  expect(screen.getByText(/你已不再有权查看对应的知识库或群组/)).toBeInTheDocument();
+  // 撤回不受影响 —— 它的授权轴是申请归属,与名称给不给无关。
+  expect(screen.getAllByRole("button", { name: "撤回" })).toHaveLength(2);
+});
+
+test("名称都在时不出现那句说明(不给没失权的人添噪音)", async () => {
+  vi.mocked(listMyPendingShareRequests).mockResolvedValue([
+    shareRequest({ id: "sr-ok", notebook_name: "我的库", group_name: "封装项目" }),
+  ]);
+  renderModal();
+
+  await screen.findByText("我的库 → 封装项目");
+  expect(screen.queryByText(/你已不再有权查看/)).not.toBeInTheDocument();
+});
