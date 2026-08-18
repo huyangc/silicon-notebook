@@ -420,13 +420,20 @@ AGENT_PROFILE_EMPTY_QUERY_SAMPLES = 12
 #: and the outline steps also carry counts, and zero there means something else
 #: entirely (no new sub-queries this round, no sections yet) — counting them
 #: would inflate the one number ``usage_gaps`` is grounded in.
+#:
+#: ``"memory"`` is deliberately NOT in this set, even though it is a real
+#: zero-hit-shaped retrieval: ``ask_service.py`` never records a ``"memory"``
+#: step with ``count == 0`` — a miss is recorded as a ``"skip"`` step instead
+#: (``记 skip 步``, see its own trace-recording site), and the ``"memory"``
+#: step type only fires when there IS at least one hit. Keeping ``"memory"``
+#: here would be dead code: the match condition (``step_type in
+#: _ZERO_HIT_STEP_TYPES and count == 0``) can never be satisfied for it.
 _ZERO_HIT_STEP_TYPES = frozenset({
     "retrieve",
     "enumerate",
     "expand",
     "follow_chain",
     "exact_lookup",
-    "memory",
 })
 
 _OVERLAY_JOB_NAME_PREFIX = "agentprofile-overlay-"

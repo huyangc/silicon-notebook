@@ -202,6 +202,13 @@ class _MaintenanceExecutor:
         self._deadline_heap: list[tuple[float, int, int]] = []
         self._deadline_sequence = 0
         self._closed = False
+        # Count of jobs a worker has dequeued and is currently running
+        # (``item.context.run(...)`` in flight), guarded by ``self._condition``
+        # the same way ``self._pending`` is. Test-only teardown (see
+        # ``wait_idle``) needs BOTH "nothing queued" and "nothing running" to
+        # call a pool actually idle — a job already dequeued is invisible to
+        # ``self._pending`` alone.
+        self._active = 0
         self._workers = [
             threading.Thread(
                 target=self._worker,
@@ -274,6 +281,11 @@ class _MaintenanceExecutor:
                         "background job started after queueing: pool=%s operation=%s waited=%.0fs",
                         self.pool, item.operation, waited,
                     )
+                # Dequeued and about to run: no longer "pending", now "active"
+                # — ``wait_idle`` needs this window covered too, or a test's
+                # teardown can observe an empty ``self._pending`` while the
+                # job it just submitted is still executing on this thread.
+                self._active += 1
                 self._condition.notify_all()
             try:
                 item.context.run(item.observed)
@@ -289,6 +301,9 @@ class _MaintenanceExecutor:
                 )
             finally:
                 item.handle._finish()
+                with self._condition:
+                    self._active -= 1
+                    self._condition.notify_all()
 
     def _monitor_queue(self) -> None:
         while True:
@@ -327,6 +342,29 @@ class _MaintenanceExecutor:
         for _worker in self._workers:
             self._queue.put(self._STOP)
 
+    def wait_idle(self, deadline: float) -> bool:
+        """Block, bounded by ``deadline`` (a ``time.monotonic()`` value), until
+        this pool has nothing queued AND nothing currently running. Returns
+        whether it actually went idle (``False`` on timeout). Test-only.
+
+        Needed because ``shutdown_for_tests`` only stops IDLE workers — a job
+        already dequeued keeps running ``item.context.run(...)`` on its own
+        thread after the executor object is discarded and replaced. Without
+        this, a maintenance job submitted late in one test (the "AI 对这个库
+        的理解" background consolidation is exactly this shape: cheap and
+        fire-and-forget) can still be mid-flight — writing to that test's
+        now-torn-down temporary database, or emitting an event like
+        ``agent_profile_consolidated`` — while the NEXT test has already
+        started and is asserting on a fresh one.
+        """
+        with self._condition:
+            while self._pending or self._active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return not self._pending and not self._active
+                self._condition.wait(remaining)
+            return True
+
 
 def _maintenance_executor(name: str | None) -> tuple[_MaintenanceExecutor, str] | None:
     """返回显式维护类别的固定 executor；其他 job 保持原有直接线程语义。"""
@@ -340,6 +378,21 @@ def _maintenance_executor(name: str | None) -> tuple[_MaintenanceExecutor, str] 
             executor = _MaintenanceExecutor(pool, _pool_capacity(pool))
             _executors[pool] = executor
     return executor, operation
+
+
+def _drain_maintenance_executors_for_tests(timeout: float = 10.0) -> None:
+    """Wait, bounded, for every live maintenance pool to go idle before it is
+    discarded. Test-only teardown helper — see ``_MaintenanceExecutor.wait_idle``
+    for why this is necessary and not merely defensive.
+    """
+    with _executor_lock:
+        executors = tuple(_executors.values())
+    deadline = time.monotonic() + timeout
+    for executor in executors:
+        assert executor.wait_idle(deadline), (
+            f"background maintenance pool {executor.pool!r} did not drain its "
+            "queue and in-flight job during test teardown"
+        )
 
 
 def _reset_maintenance_gate_for_tests() -> None:

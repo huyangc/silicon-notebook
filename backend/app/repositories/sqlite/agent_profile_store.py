@@ -454,3 +454,14 @@ class AgentProfileStore:
                 (AGENT_PROFILE_RESTART_FAILURE_MESSAGE, now, now),
             )
         return cursor.rowcount
+
+    def clear_job_row(self, notebook_id: str, owner_id: str) -> int:
+        """Delete this chain's status/threshold row outright (see the port
+        docstring — the job-table counterpart of ``clear_all``). Primary-key
+        delete, at most one row."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "DELETE FROM agent_profile_jobs WHERE notebook_id=? AND owner_id=?",
+                (notebook_id, owner_id),
+            )
+        return cursor.rowcount

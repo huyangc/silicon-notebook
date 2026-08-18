@@ -158,10 +158,23 @@ def _reset_background_job_gates():
     同一个 xdist worker 里,只要有测试改过 `BACKGROUND_*_CONCURRENCY`(或只是
     先跑了一个维护类 job),那份容量就会被后跑的测试继承——串味方向还不固定,
     取决于 xdist 的分配顺序。统一在这里前后各清一次。
+
+    T5 修复轮追加:teardown 在丢弃/关闭池之前先对两个维护池(重活/轻活)做
+    **有界等待收敛**——理由与下面 `_drain_knowhow_projection_schedulers` 完全
+    同构。`_reset_maintenance_gate_for_tests` 只停 IDLE 的 worker:一个已经被
+    某个 worker 从队列取出、正在跑的维护类 job(比如「AI 对这个库的理解」巡固,
+    见 `_LIGHT_MAINTENANCE_OPERATIONS` 里的 `agentprofile`——一次有界 LLM 调用+
+    几条聚合查询,故意进轻活池以免被小时级重建饿死)不会因为 executor 对象被
+    丢弃而停止执行,它仍在自己的线程上跑到底:可能还在往这一测试已经拆掉的临时
+    数据库写,也可能发出下一个测试完全没预期到的事件(例如
+    `agent_profile_consolidated`,实测复现见 `test_report_engine.py` 的跨测试
+    噪声——只关掉池、不等在飞任务收敛时,任何跑过维护类 job 的测试都可能把这条
+    事件泄漏进随后按 xdist 调度顺序排到同一 worker 的下一个测试)。
     """
     from app.services import background_jobs
     background_jobs._reset_maintenance_gate_for_tests()
     yield
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
     background_jobs._reset_maintenance_gate_for_tests()
 
 

@@ -984,11 +984,37 @@ class NotebookSharingService:
 
         The SHARED base is untouched by construction: ``clear_all`` scopes to
         one ``owner_id``, and ``user_id`` here is never the ``''`` sentinel.
+
+        This method only removes the explicit per-user membership row — it
+        does not, and cannot, revoke access a person still holds through a
+        group grant (``notebook_grants`` with a group/group_admins/everyone
+        principal). That authorization path does not run through here at
+        all; whether the caller can still open this notebook after this call
+        is decided entirely by the read-side gate
+        (``user_can_read_notebook``/``NOTEBOOK_READ_SQL``), same as every
+        other access decision in this service. If a group grant still gives
+        them read access, this call still resets their overlay — that is a
+        blank slate, not a leak, and is the same "start over" outcome as any
+        other rejoin.
         """
         self._store.remove_member(notebook_id, user_id)
         self._clear_member_profile(notebook_id, user_id)
 
     def _clear_member_profile(self, notebook_id: str, user_id: str) -> None:
+        """Discard both halves of this member's overlay: the block rows
+        (``clear_all``) AND the job/status row (``clear_job_row``).
+
+        Agentic Memory P1 (T5 repair round). Clearing only the blocks left a
+        stale ``agent_profile_jobs`` row behind — most visibly its
+        ``pending_signal`` counter, which is derived entirely from this
+        member's own asks/reports in THIS notebook. Without this, a member
+        removed and then re-added would not start from a blank slate (the
+        "rejoin" contract this method exists to guarantee): their counter
+        would already be partway to the next consolidation run, or their row
+        could still show a stale ``failed``/``running`` status from before
+        they left. Both deletes are independently fail-open — a job-row
+        failure must not re-raise past an already-committed access change,
+        the same reasoning that already applied to the block-row delete."""
         if self._profiles is None or not user_id:
             return
         try:
@@ -996,6 +1022,13 @@ class NotebookSharingService:
         except Exception:  # noqa: BLE001 — access change already committed
             _log.exception(
                 "failed to clear agent profile overlay for notebook %s",
+                notebook_id,
+            )
+        try:
+            self._profiles.clear_job_row(notebook_id, user_id)
+        except Exception:  # noqa: BLE001 — access change already committed
+            _log.exception(
+                "failed to clear agent profile job row for notebook %s",
                 notebook_id,
             )
 

@@ -3625,7 +3625,34 @@ AGENT_PROFILE_TRACE_TEXT_MAX_CHARS = 120
 #: needed to say "this retrieval came back empty", and a pass-through would
 #: quietly widen what the overlay prompt sees every time a new step type is
 #: added anywhere in the retrieval stack.
-_TRACE_COUNT_KEYS = ("count", "new", "results", "citations", "rows", "hits")
+#:
+#: Grep-verified against every real ``TraceStep(detail=...)`` call site in
+#: ``reasoning_retrieval.py`` / ``ask_service.py`` / ``structured_retrieval.py``
+#: (2026-08-18): ``"results"``/``"rows"``/``"hits"`` are never emitted as a
+#: trace-step detail key anywhere in the repo (``"rows"``/``"hits"`` only show
+#: up in unrelated progress dicts and a report-profile helper that never
+#: touches ``TraceStep``), so they are dropped rather than kept "just in
+#: case". ``"found"`` (``expand``/``exact_lookup``) and ``"returned_total"``
+#: (the collection-enumeration ``enumerate`` step's running total across the
+#: whole chain) are real emitters and were missing entirely — without them
+#: every ``expand``/``exact_lookup``/``enumerate`` step projected ``count=None``
+#: and could never register as a zero-hit signal for ``usage_gaps``.
+_TRACE_COUNT_KEYS = ("count", "found", "returned_total", "new", "citations")
+
+#: ``step_type == "retrieve"`` is special-cased in ``project_trace_step``
+#: below: its ``add_subquery``/confirmed-direction emit sites only ever carry
+#: ``{"query", "new"}`` (see ``reasoning_retrieval.py``'s two "补充..." record
+#: sites), and ``new == 0`` there means "nothing NEW beyond what was already
+#: collected" — a query that reproduces existing candidates, not one that
+#: found nothing. The retrieval that DID genuinely return nothing is the
+#: first, unconditional "初检索" step, which uses ``"count"`` instead. Reading
+#: ``"new"`` for zero-hit purposes would flag every de-duplicating follow-up
+#: query as an empty search. Only the initial-retrieval ``"count"`` key is
+#: trustworthy as a zero-hit signal for this step type, so retrieve steps
+#: read ONLY it; other step types (``expand``/``follow_chain``/``exact_lookup``/
+#: ``enumerate``) still get the full allowlist above, and ``"new"`` remains
+#: available there for plain display purposes (it is never their zero-hit key).
+_RETRIEVE_COUNT_KEYS = ("count",)
 
 
 def _clip_trace_text(value: object) -> str:
@@ -3658,9 +3685,15 @@ def project_trace_step(step: object) -> dict | None:
     if not isinstance(step, Mapping):
         return None
     detail = step.get("detail")
+    step_type = str(step.get("step_type") or "")
     count: int | None = None
     if isinstance(detail, Mapping):
-        for key in _TRACE_COUNT_KEYS:
+        # "retrieve" reads a narrower key set than every other step type —
+        # see the comment on ``_RETRIEVE_COUNT_KEYS`` above.
+        candidate_keys = (
+            _RETRIEVE_COUNT_KEYS if step_type == "retrieve" else _TRACE_COUNT_KEYS
+        )
+        for key in candidate_keys:
             raw = detail.get(key)
             if isinstance(raw, bool):
                 continue
@@ -3669,7 +3702,7 @@ def project_trace_step(step: object) -> dict | None:
                 break
     duration = step.get("duration_ms")
     return {
-        "step_type": str(step.get("step_type") or ""),
+        "step_type": step_type,
         "summary": _clip_trace_text(step.get("summary")),
         "duration_ms": int(duration) if isinstance(duration, int) and not isinstance(duration, bool) else None,
         "count": count,
@@ -3870,4 +3903,18 @@ class AgentProfileStorePort(Protocol):
         predicate and in this sweep so that a future queue-then-run split
         cannot leave rows that no guard recognises; T6/T7 deliberately do not
         render a queued state."""
+        ...
+    def clear_job_row(self, notebook_id: str, owner_id: str) -> int:
+        """Delete this chain's status/threshold row outright — the job-table
+        counterpart of ``clear_all`` for the block rows.
+
+        Agentic Memory P1 (T5 repair round). A removed member's overlay
+        JOB row is exactly as much "unreadable data about a notebook they can
+        no longer open" as the block rows ``clear_all`` already discards —
+        it carries a ``pending_signal`` counter derived from that person's
+        own activity, and a stale ``running``/``failed`` status would
+        otherwise survive their removal and greet them with someone else's
+        (or their own, stale) job state if they are ever re-added. Returns
+        the row count deleted (0 or 1 — the primary key is
+        ``(notebook_id, owner_id)``)."""
         ...
