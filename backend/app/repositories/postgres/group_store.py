@@ -39,8 +39,8 @@ from app.repositories.ports import (
     ShareRequesterUnauthorizedError,
 )
 from app.repositories.postgres.access_sql import (
-    NOTEBOOK_ADMIN_SQL,
-    admin_access_params,
+    ADMIN_GRANT_PROBE_FOR_SHARE_SQL,
+    admin_grant_probe_params,
 )
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -590,12 +590,40 @@ class GroupStore:
     def _require_requester_still_authorized_on(
         self, connection: Any, notebook_id: str, requested_by: str
     ) -> None:
-        """`sqlite/group_store.py::_require_requester_still_authorized_on` 的镜像;完整
-        理由(授权实时判定、绝不缓存)写在 SQLite 那一份与 `ShareRequesterUnauthorizedError`
-        的 docstring 里。谓词同样直接取 `access_sql.NOTEBOOK_ADMIN_SQL`。"""
+        """`sqlite/group_store.py::_require_requester_still_authorized_on` 的镜像,但这里
+        是**两段式带锁**写法(codex #519 R5)——与 `memory_store._lock_memory_aggregate_on`
+        同一手法。
+
+        ⚠ 为什么不能直接跑 `NOTEBOOK_ADMIN_SQL`:那是一条**不加锁**的 SELECT,PG 在
+        READ COMMITTED 下让它看到语句开始时的快照。库主并发 `DELETE` 掉申请人的 admin 边
+        并提交,本事务仍读到撤销前的行,随后 INSERT 那条 `(group, viewer)` 持久边并提交
+        ——R4 要防的越权照样发生,只是窗口更窄。而给它加 `FOR SHARE` 也救不了:授权边行
+        藏在 `EXISTS (...)` 子查询里,行锁够不着,只会锁住 `notebooks` 那一行(access_sql
+        模块 docstring 里 `FOR SHARE OF ng` 那段讲的正是这件事)。
+
+        所以拆成两段,各自锁自己那半:
+
+        1. **owner 半**:`notebooks.created_by`。刻意**不加锁**——产品没有转让 owner 的
+           功能(`notebooks.created_by` 只在建库与深拷贝时写入),owner 身份不可能在本
+           事务执行期间被撤销,锁它只会多一次无谓的行锁争用。这个前提写在这里,将来真
+           加了转让功能就得回来给它补 `FOR SHARE`。
+        2. **授权边半**:`ADMIN_GRANT_PROBE_FOR_SHARE_SQL`,顶层查 `notebook_grants`
+           并 `FOR SHARE OF ng` 锁住命中的边行。锁住之后,并发的撤销会**阻塞**到本事务
+           提交,撤销随后生效——序列化顺序是「批准在前、撤销在后」,语义正确:库主看到
+           的是「我撤销时它刚好已经批了」,而不是「我明明撤销了它还是批了」。
+        """
         if (
             connection.execute(
-                NOTEBOOK_ADMIN_SQL, (notebook_id, *admin_access_params(requested_by))
+                "SELECT 1 FROM notebooks WHERE id=%s AND created_by=%s",
+                (notebook_id, requested_by),
+            ).fetchone()
+            is not None
+        ):
+            return
+        if (
+            connection.execute(
+                ADMIN_GRANT_PROBE_FOR_SHARE_SQL,
+                admin_grant_probe_params(notebook_id, requested_by),
             ).fetchone()
             is None
         ):

@@ -315,6 +315,19 @@ GRANT_PROBE_SQL = (
     + _principal_match_expr("ng", "?", "ngm", "nga")
 )
 
+# **管理级**授权边探测:该用户在这个 notebook 上是否有一条 `role='admin'` 的有效授权边。
+# 与 `GRANT_PROBE_SQL` 同形,只把主体判定换成 `_admin_principal_match_expr`——**复用**
+# 那一份而不是另抄一遍主体判定(唯一定义点红线)。参数用 `admin_grant_probe_params()`。
+#
+# 为什么要一条**顶层**查询而不是给 `NOTEBOOK_ADMIN_SQL` 加锁:授权边行藏在后者的 EXISTS
+# 子查询里,PG 侧 `FOR SHARE` 够不着它。SQLite 侧没有行锁(进程写锁已把写事务串起来),
+# 这条常量存在的意义是**让两个后端的谓词面对等**——PG 侧的带锁变体必须有个同名同义的
+# 对侧,否则 parity 守卫报红(codex #519 R5)。
+ADMIN_GRANT_PROBE_SQL = (
+    "SELECT 1 FROM notebook_grants ng WHERE ng.notebook_id=? AND "
+    + _admin_principal_match_expr("ng", "?", "ngm", "nga")
+)
+
 
 def read_access_clause(
     nb_alias: str = "nb",
@@ -391,6 +404,7 @@ def read_access_exists_clause(
 _READ_ACCESS_PARAM_COUNT = read_access_clause().count("?")
 _ADMIN_ACCESS_PARAM_COUNT = admin_access_clause().count("?")
 _GRANT_PROBE_USER_PARAM_COUNT = GRANT_PROBE_SQL.count("?") - 1
+_ADMIN_GRANT_PROBE_USER_PARAM_COUNT = ADMIN_GRANT_PROBE_SQL.count("?") - 1
 
 
 def admin_access_params(user_id: str) -> tuple[str, ...]:
@@ -416,6 +430,16 @@ def read_access_params(user_id: str) -> tuple[str, ...]:
 def grant_probe_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
     """`GRANT_PROBE_SQL`(及 PG 的 FOR SHARE 变体)要消费的位置参数。"""
     return (notebook_id,) + (user_id,) * _GRANT_PROBE_USER_PARAM_COUNT
+
+
+def admin_grant_probe_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
+    """`ADMIN_GRANT_PROBE_SQL`(及 PG 的 FOR SHARE 变体)要消费的位置参数。
+
+    单独一份而不是复用 `grant_probe_params`:两条查询的主体判定不同(管理级排除了
+    `everyone` 那一臂),占位符数各自**推导**——今天恰好相等,明天任一侧的臂变了就会
+    分叉,而共用一份参数展开会静默错位。
+    """
+    return (notebook_id,) + (user_id,) * _ADMIN_GRANT_PROBE_USER_PARAM_COUNT
 
 
 # 写权(owner-only)的完整查询:有行即有写权。notebook 不存在 → 无行 → 无写权。

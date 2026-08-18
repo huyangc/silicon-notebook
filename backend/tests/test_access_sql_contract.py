@@ -765,6 +765,9 @@ _PG_ONLY_SYMBOLS = {
     # 三段式带锁写法的加锁变体;SQLite 没有行锁概念,不应有对应物。
     "MEMBER_PROBE_FOR_SHARE_SQL",
     "GRANT_PROBE_FOR_SHARE_SQL",
+    # 共享申请审批时锁申请人的管理级授权边(codex #519 R5)。同上:SQLite 的进程写锁
+    # 已把写事务串起来,不需要也不存在行锁变体;裸的 ADMIN_GRANT_PROBE_SQL 两侧都有。
+    "ADMIN_GRANT_PROBE_FOR_SHARE_SQL",
 }
 _SQLITE_ONLY_SYMBOLS: set[str] = set()
 
@@ -791,6 +794,9 @@ _CALLABLE_PROBES = {
     "read_access_params": lambda mod: repr(mod.read_access_params("U")),
     "admin_access_params": lambda mod: repr(mod.admin_access_params("U")),
     "grant_probe_params": lambda mod: repr(mod.grant_probe_params("N", "U")),
+    "admin_grant_probe_params": lambda mod: repr(
+        mod.admin_grant_probe_params("N", "U")
+    ),
 }
 
 
@@ -849,6 +855,16 @@ def test_backends_declare_the_same_predicate_surface():
     # 在代码里始终看得见——见 postgres/access_sql.py 的模块 docstring。
     assert pg.MEMBER_PROBE_FOR_SHARE_SQL == pg.MEMBER_PROBE_SQL + " FOR SHARE"
     assert pg.GRANT_PROBE_FOR_SHARE_SQL == pg.GRANT_PROBE_SQL + " FOR SHARE OF ng"
+    assert (
+        pg.ADMIN_GRANT_PROBE_FOR_SHARE_SQL
+        == pg.ADMIN_GRANT_PROBE_SQL + " FOR SHARE OF ng"
+    )
+    # 管理级探测必须是「裸探测 + role='admin'」的收窄,而不是另抄一份主体判定:
+    # 两条查询只差 role 那个条件,everyone 那条臂在管理级里不存在(裁决 P2-1 收窄)。
+    assert "ng.role='admin'" in pg.ADMIN_GRANT_PROBE_SQL
+    assert "ng.role='admin'" in access_sql.ADMIN_GRANT_PROBE_SQL
+    assert "everyone" not in pg.ADMIN_GRANT_PROBE_SQL
+    assert "everyone" not in access_sql.ADMIN_GRANT_PROBE_SQL
 
 
 def test_placeholder_styles_are_not_cross_contaminated():
