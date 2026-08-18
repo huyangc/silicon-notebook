@@ -182,18 +182,31 @@ export const shareNotebookToGroup = (
   });
   if (!opts.manage) return viewer;
   return viewer.then(async (grant) => {
-    await requestJson(`/notebooks/${notebookId}/grants`, {
-      method: "POST",
-      body: JSON.stringify({
-        principal_type: "group_admins",
-        principal_id: groupId,
-        role: "admin",
-      }),
-      tag: TAG,
-    });
+    await grantGroupAdminsManage(notebookId, groupId);
     return grant;
   });
 };
+
+/**
+ * 给一个**已经共享过**的群组补上「组管理员可管理」。
+ *
+ * 与 `shareNotebookToGroup({manage:true})` 发的是同一条边,所以抽成一个函数由两处共用:
+ * 新建路径先发只读边再调它,已有共享则直接调它(那条只读边已经在库里了,重发会 409)。
+ * 请求体只写一处,免得两个入口对同一件事有两种拼法。
+ */
+export const grantGroupAdminsManage = (
+  notebookId: string,
+  groupId: string,
+): Promise<NotebookGrant> =>
+  requestJson(`/notebooks/${notebookId}/grants`, {
+    method: "POST",
+    body: JSON.stringify({
+      principal_type: "group_admins",
+      principal_id: groupId,
+      role: "admin",
+    }),
+    tag: TAG,
+  });
 
 export const revokeNotebookGrant = (notebookId: string, grantId: string): Promise<void> =>
   requestVoid(`/notebooks/${notebookId}/grants/${grantId}`, { method: "DELETE", tag: TAG });
@@ -356,6 +369,31 @@ export const revocationOrder = (entry: {
   ...entry.grants.filter((grant) => !confersManage(grant)).map((grant) => grant.id),
   ...entry.grants.filter(confersManage).map((grant) => grant.id),
 ];
+
+/**
+ * 「取消组管理员管理」要删的那几条边 —— **只**删授予管理权的,读权边原样保留。
+ *
+ * 判据同样是 `confersManage`(不是「主体类型是不是 `group_admins`」):一条
+ * `(group, admin)` 边把管理权给了整组每个成员,按主体类型挑就会漏掉它、点了没反应。
+ */
+export const manageGrantIds = (entry: {
+  grants: readonly GroupShareGrantRef[];
+}): string[] => entry.grants.filter(confersManage).map((grant) => grant.id);
+
+/**
+ * 取消管理权之后**还剩得下读权**吗?
+ *
+ * 标准模板(`(group_admins, admin)` + `(group, viewer)`)为真:删掉管理边,只读边还在。
+ * 但一条孤零零的 `(group, admin)` 边**既是**读权又是管理权,删了它这个组就什么都看不到
+ * 了——那不叫「取消管理权」,那叫撤销共享。这种形态界面因此不给「取消管理权」入口,
+ * 用户要收回就走「撤销共享」(语义诚实),想改成只读则撤销后重新共享。
+ *
+ * 界面自己创建的共享永远是标准模板(先发只读边、再按勾选补管理边),批准共享申请写的也是
+ * `(group, viewer)`,所以这个分支只可能来自 API 直调或历史数据。
+ */
+export const canDropManage = (entry: {
+  grants: readonly GroupShareGrantRef[];
+}): boolean => entry.grants.some((grant) => !confersManage(grant));
 
 /**
  * 授权边清单 → 界面上的「已共享给群组」条目。

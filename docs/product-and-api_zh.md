@@ -202,13 +202,13 @@ owner 可能在签发后很久才被授管理权，MCP 写工具删文档的爆�
 | `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | 笔记本维度撤销 |
 | `GET /groups/{id}/shared-notebooks` | 组管理员 | 「共享给本组的知识库」清单 |
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | 组管理员 | 组维度撤销，删掉指向本组的**全部**边 |
-| `POST /notebooks/{id}/share-requests` | `notebook:manage` **且**目标组成员 | **P2** 提交共享申请；幂等（撞在飞申请返回既有 pending，不是 409） |
+| `POST /notebooks/{id}/share-requests` | `notebook:manage` **且**目标组**普通成员** | **P2** 提交共享申请；目标组的**组管理员**会被 403 拒绝——他直接走 `POST /notebooks/{id}/grants` 发边，永远不经这张表。幂等（撞在飞申请返回既有 pending，不是 409） |
 | `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** 请求者本人对本库发起过的申请（弹窗回显待审批/已驳回） |
-| `DELETE /notebooks/{id}/share-requests/{rid}` | `notebook:manage` | **P2** 撤回**待审批**申请（整行删，不是第三个状态）；已决定 409、不存在 404 |
+| `DELETE /notebooks/{id}/share-requests/{rid}` | 已登录，**且这条申请是你提的** | **P2** 撤回**待审批**申请（整行删，不是第三个状态）；已决定 409、不存在 404。⚠ **刻意没有 notebook 能力依赖**：授权轴是**申请归属**而不是当前的库权限。批准会拒绝已失去管理权的申请人，撤回若也要求管理权，这类申请就**既批不了也撤不掉**，永远卡在审核队列里 |
 | `GET /groups/{id}/share-requests` | 组管理员 | **P2** 审核队列：共享给本组的待审批申请清单 |
 | `POST /groups/{id}/share-requests/{rid}/approve` | 组管理员 | **P2** 同一写事务写 `(group, viewer)` 边并标 approved；已共享幂等；不存在/已决定 404 |
 | `POST /groups/{id}/share-requests/{rid}/reject` | 组管理员 | **P2** 标 rejected、不写边；申请者可对同库同组重新发起 |
-| `GET /notebooks/{id}/share` | `notebook:manage` | 只读；见下 |
+| `GET /notebooks/{id}/share` | `notebook:configure` | 只读；见下。⚠ **恒 owner，不是 `notebook:manage`**——链接分享是库主对本库对外处置的配置，不随内容管理权转移 |
 
 有几条边界必须写明：
 
