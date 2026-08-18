@@ -46,11 +46,13 @@ import {
   busyForNotebook,
   claimNotebookSlot,
   draftIsStale,
+  evidenceSourceIds,
   isUnderstandingChainBusy,
   orderedUnderstandingBlocks,
   releaseNotebookClaim,
   understandingValueLength,
   understandingValueTooLong,
+  zeroHitCount,
   type UnderstandingBlock,
   type UnderstandingDraft,
   type UnderstandingJobStatus,
@@ -86,6 +88,65 @@ export function UnderstandingEntryButton({
   );
 }
 
+/**
+ * 「这段话凭什么这么说」——一块的依据行。
+ *
+ * codex #520 R2 P2-2:服务端一直在写这份记账(底座记来源 id、`usage_gaps` 记零命中
+ * 次数),前端却把它当 opaque 透传、一个字都不渲染,而设计契约要的正是「结论可点开
+ * 来源」。只对**AI 整理出来的**块显示:人自己写的那段话,依据是他自己,再挂一排
+ * 来源只会让人以为那是系统给他的论据。
+ *
+ * `onOpenSource` 缺省时 chip 仍然渲染、只是不可点——面板要能脱离 page.tsx 单独
+ * 测试,而「有几份资料支撑」这件事本身就有信息量,不该因为没接线就整行消失。
+ */
+function BlockEvidence({
+  block,
+  onOpenSource,
+  resolveSourceTitle,
+}: {
+  block: UnderstandingBlock;
+  onOpenSource?: (sourceId: string) => void;
+  resolveSourceTitle?: (sourceId: string) => string;
+}) {
+  if (block.updated_origin !== "job") return null;
+  const zeroHits = zeroHitCount(block);
+  if (zeroHits !== null) {
+    return (
+      <p className="tool-hint" style={{ margin: "6px 0 0" }}>
+        依据：{zeroHits} 次没找到结果的检索
+      </p>
+    );
+  }
+  const sourceIds = evidenceSourceIds(block);
+  if (sourceIds.length === 0) return null;
+  return (
+    <div style={{ marginTop: 6 }}>
+      <p className="tool-hint" style={{ margin: "0 0 4px" }}>依据来源</p>
+      <div className="tag-row">
+        {sourceIds.map((sourceId) => {
+          // 标题查不到时退回 id:那不是内部黑话,是这份资料在这个库里的名字,
+          // 而「隐藏一条查不到标题的依据」会让依据数与实际不符。
+          const title = resolveSourceTitle?.(sourceId) || sourceId;
+          if (!onOpenSource) {
+            return <span className="tag" key={sourceId}>{title}</span>;
+          }
+          return (
+            <button
+              type="button"
+              className="tag"
+              key={sourceId}
+              title="打开这份资料"
+              onClick={() => onOpenSource(sourceId)}
+            >
+              {title}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 type ChainProps = {
   title: string;
   description: string;
@@ -107,6 +168,8 @@ type ChainProps = {
   onCancelClear: () => void;
   onClear: (scope: UnderstandingScope, block: UnderstandingBlock) => void;
   onRebuild: (scope: UnderstandingScope) => void;
+  onOpenSource?: (sourceId: string) => void;
+  resolveSourceTitle?: (sourceId: string) => string;
 };
 
 function UnderstandingChain({
@@ -127,6 +190,8 @@ function UnderstandingChain({
   onCancelClear,
   onClear,
   onRebuild,
+  onOpenSource,
+  resolveSourceTitle,
 }: ChainProps) {
   return (
     <section className="stack">
@@ -241,6 +306,13 @@ function UnderstandingChain({
                 {block.value || "还没有整理出内容。"}
               </p>
             )}
+            {block.value ? (
+              <BlockEvidence
+                block={block}
+                onOpenSource={onOpenSource}
+                resolveSourceTitle={resolveSourceTitle}
+              />
+            ) : null}
           </div>
         );
       })}
@@ -252,7 +324,20 @@ function UnderstandingChain({
  * 面板主体。外层(page.tsx)负责浮动窗与标题栏,这里只管内容——同 `SchemaManager`
  * 与 `KgAnalysisView` 的分工。
  */
-export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
+export function AgentProfilePanel({
+  notebookId,
+  onOpenSource,
+  resolveSourceTitle,
+}: {
+  notebookId: string;
+  /**
+   * 打开一份资料的详情。由 page.tsx 接到**引用卡走的同一条**打开路径上
+   * (`onOpenSourceElement`),不另造弹窗;缺省时依据 chip 仍显示、只是不可点。
+   */
+  onOpenSource?: (sourceId: string) => void;
+  /** source id → 用户看得懂的资料名。查不到就回空串,由调用处退回 id。 */
+  resolveSourceTitle?: (sourceId: string) => string;
+}) {
   const [data, setData] = useState<UnderstandingResponse | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -492,6 +577,8 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
         onCancelClear={() => setConfirmingLabel("")}
         onClear={(scope, block) => { void clearBlock(scope, block); }}
         onRebuild={(scope) => { void startRebuild(scope); }}
+        onOpenSource={onOpenSource}
+        resolveSourceTitle={resolveSourceTitle}
       />
       <UnderstandingChain
         title="我的检索心得"
@@ -511,6 +598,8 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
         onCancelClear={() => setConfirmingLabel("")}
         onClear={(scope, block) => { void clearBlock(scope, block); }}
         onRebuild={(scope) => { void startRebuild(scope); }}
+        onOpenSource={onOpenSource}
+        resolveSourceTitle={resolveSourceTitle}
       />
     </div>
   );

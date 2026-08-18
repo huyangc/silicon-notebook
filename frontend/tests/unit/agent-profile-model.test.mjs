@@ -19,11 +19,13 @@ import {
   claimNotebookSlot,
   draftIsStale,
   emptyUnderstandingBlock,
+  evidenceSourceIds,
   isUnderstandingChainBusy,
   orderedUnderstandingBlocks,
   releaseNotebookClaim,
   understandingValueLength,
   understandingValueTooLong,
+  zeroHitCount,
 } from "../../features/agent-profile/profile-model.ts";
 import {
   busyForNotebook as sharedBusyForNotebook,
@@ -122,6 +124,45 @@ test("陈旧草稿判据：fork 点还是那一版就不陈旧，服务端往前
   assert.equal(draftIsStale(current, { value: "还没保存的字", baseRevision: 5 }), false);
   // 草稿 fork 自更早一版,服务端这一行已经往前走了 —— 陈旧,保存会是知情覆盖。
   assert.equal(draftIsStale(current, { value: "还没保存的字", baseRevision: 4 }), true);
+});
+
+test("依据来源：跨条目扁平化、去重、保持服务端顺序", () => {
+  const withEvidence = {
+    ...block("corpus_shape", "值"),
+    evidence: [
+      { claim_index: 0, source_ids: ["src-b", "src-a"] },
+      // 同一份资料支撑两条主张只算一份——重复渲染同一个 chip 会让人以为依据更厚。
+      { claim_index: 1, source_ids: ["src-a", "src-c"] },
+    ],
+  };
+  assert.deepEqual(evidenceSourceIds(withEvidence), ["src-b", "src-a", "src-c"]);
+});
+
+test("依据来源：认不出来的形状一律跳过，不抛", () => {
+  // 历史行、别的写入方、以及 `usage_gaps` 那种压根没有 source_ids 的形状都会
+  // 经过这里。一个纯函数抛异常等于整个面板白屏,而它救不回任何东西。
+  const messy = {
+    ...block("corpus_shape", "值"),
+    evidence: [
+      null,
+      "src-a",
+      { claim_index: 0 },
+      { claim_index: 1, source_ids: "src-b" },
+      { claim_index: 2, source_ids: [null, 7, "", "src-real"] },
+    ],
+  };
+  assert.deepEqual(evidenceSourceIds(messy), ["src-real"]);
+  assert.deepEqual(evidenceSourceIds(block("corpus_shape", "值")), []);
+});
+
+test("零命中次数：0 与「不记这种依据」是两回事", () => {
+  const gaps = (evidence) => ({ ...block("usage_gaps", "值"), evidence });
+  assert.equal(zeroHitCount(gaps([{ claim_index: 0, zero_hit_queries: 5 }])), 5);
+  // 服务端真的数出来零次 —— 有依据,依据是「零次」,不能与「没有这项」合并。
+  assert.equal(zeroHitCount(gaps([{ claim_index: 0, zero_hit_queries: 0 }])), 0);
+  assert.equal(zeroHitCount(gaps([{ claim_index: 0, source_ids: ["src-a"] }])), null);
+  assert.equal(zeroHitCount(gaps([{ zero_hit_queries: "5" }])), null);
+  assert.equal(zeroHitCount(block("corpus_shape", "值")), null);
 });
 
 test("忙碌位用的就是那份共享实现，不是又抄了一遍", () => {

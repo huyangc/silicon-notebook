@@ -796,6 +796,54 @@ def test_a_member_edit_during_the_run_wins_and_is_not_retried(harness, monkeypat
     assert "cas_conflict:retrieval_notes" in _job(harness, USER_A)["diagnostic"]
 
 
+def _retire_reply(*labels: str) -> str:
+    return json.dumps({"blocks": [{"label": label, "retire": True} for label in labels]})
+
+
+def test_the_member_s_own_stale_note_can_be_retired(harness, monkeypatch):
+    """codex #520 R2 P2 的覆盖层一侧:同一条退役协议,同一条边界。
+
+    这里的失败形态与底座不同但同样安静——一条早就不像这个人现在搜法的旧心得,会
+    在他之后每一次提问的规划 prompt 里继续把检索往错的方向带。
+    """
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="上一轮模型写的旧心得",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    service = _service(harness, client=_Client(_retire_reply("retrieval_notes")))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    block = _blocks(harness, USER_A)["retrieval_notes"]
+    assert block["value"] == ""
+    assert block["updated_origin"] == "job"
+    assert "retired:retrieval_notes" in _job(harness, USER_A)["diagnostic"]
+
+
+def test_the_member_s_own_handwritten_note_is_never_retired(harness, monkeypatch):
+    """人自己写下的检索心得,被撤掉的正是那个人。"""
+    _with_submitter(monkeypatch, _Submitter())
+    _add_ask(harness, "job-a", user_id=USER_A, question=A_QUESTION, steps=(
+        {"step_type": "retrieve", "summary": "s", "detail": {"count": 1}},
+    ))
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="我更常按型号搜",
+        evidence=[], expected_revision=0, origin="user", actor=USER_A,
+    )
+    service = _service(harness, client=_Client(_retire_reply("retrieval_notes")))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    block = _blocks(harness, USER_A)["retrieval_notes"]
+    assert block["value"] == "我更常按型号搜"
+    assert block["revision"] == 1, "用户那一行根本不该被写"
+    assert "retire_refused:retrieval_notes" in _job(harness, USER_A)["diagnostic"]
+
+
 def test_a_user_authored_note_reaches_the_prompt_marked_as_authority(
     harness, monkeypatch
 ):

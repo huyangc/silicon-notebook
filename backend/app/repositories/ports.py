@@ -3463,11 +3463,33 @@ class QueryStorePort(Protocol):
         """
         ...
     @staticmethod
+    def knowledge_type_count_rows_excluding_memory(
+        db: object, notebook_id: str, statuses: tuple[str, ...]
+    ) -> list[dict]:
+        """``[{object_type, c}]`` for the notebook, MINUS the objects owned by
+        its private Memory synthetic sources — the exclusion evaluated INSIDE
+        the statement.
+
+        Deliberately not expressible as ``knowledge_type_count_rows`` minus
+        ``knowledge_type_count_rows_for_sources(memory_source_ids)``: that
+        arithmetic reads three times with no shared snapshot (PostgreSQL runs
+        each at READ COMMITTED), so a Memory created or deleted between them
+        makes the subtrahend describe a different library than the minuend, and
+        the shared-base understanding then carries a number derived from one
+        member's private Memory.  The generic ``…_for_sources`` variant stays
+        for the enumeration denominator, whose caller genuinely holds an
+        arbitrary id list.
+
+        Same cost class as ``knowledge_type_count_rows`` plus one primary-key
+        probe into ``sources`` per counted row; not served from the counts
+        memo, which knows nothing about sources.
+        """
+        ...
+    @staticmethod
     def top_concept_names(
         db: object,
         notebook_id: str,
         statuses: tuple[str, ...],
-        exclude_source_ids: list[str],
         limit: int,
     ) -> list[tuple[str, int]]:
         """``[(canonical concept name, member count)]``, most-supported first.
@@ -3482,12 +3504,17 @@ class QueryStorePort(Protocol):
         guaranteed to carry one spelling and a bare ``MIN()`` lets an empty
         string hijack the row.
 
-        ``exclude_source_ids`` drops objects owned by those sources.  Its one
-        caller passes ``SourceStorePort.memory_source_ids`` — a confirmed Memory
-        is owner-private, and this list feeds a NOTEBOOK-SHARED prompt block, so
-        a concept that exists only inside one member's Memory must not become
-        part of what every member's agent "knows" about the library.  The filter
-        is in the SQL, on the join this query already makes, not a post-filter.
+        Objects owned by the notebook's private Memory synthetic sources are
+        excluded BY THE STATEMENT ITSELF — a confirmed Memory is owner-private,
+        and this result feeds a NOTEBOOK-SHARED prompt block, so a concept that
+        exists only inside one member's Memory must not become part of what
+        every member's agent "knows" about the library.  ⚠ The exclusion used
+        to be an ``exclude_source_ids`` list the caller read separately and
+        passed in; that read happens at a different instant than this query
+        runs, and the window between them leaks CONCEPT NAMES — the one input
+        here that is not a count — into a block every member reads.  There is
+        no parameter for it any more, so there is no way to call this without
+        the exclusion.
 
         Output is bounded by ``limit`` and ordered ``members DESC, name ASC`` so
         two runs over an unchanged library produce the same list.  ⚠ Bounded

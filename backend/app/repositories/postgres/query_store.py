@@ -37,6 +37,7 @@ from app.repositories.postgres.search import (
     notebook_source_rows,
 )
 from app.repositories.postgres.source_store import (
+    MEMORY_SOURCE_TYPE_PREDICATE,
     PAPER_META_ELIGIBLE_SQL,
     PAPER_META_NO_META_SQL,
     VISIBLE_SOURCE_TYPES_PREDICATE,
@@ -83,6 +84,17 @@ def _absolute_instant(column: str) -> str:
     同一个可往返的串。刻意不用 ``'-infinity'``:它排序对、却写不成 ISO 游标。
     """
     return f"COALESCE({column}, TIMESTAMPTZ '{UNRESOLVED_INSTANT_ISO}')"
+
+
+#: 「这一行知识对象**不**属于任何私有 Memory 合成来源」——SQLite 侧
+#: ``query_store._NOT_MEMORY_OWNED_SQL`` 的孪生实现,同一条约定(外层别名 ``o``)、
+#: 同一个理由(codex #520 R2 P1:排除必须与被排除的行由同一次求值决定,跨查询的
+#: 相减/排除清单会被并发的 Memory 增删漏掉,而漏掉的东西里包含概念名称)。
+#: PG 的 READ COMMITTED 让「两次读没有共享快照」这件事在这一侧尤其显式。
+_NOT_MEMORY_OWNED_SQL = (
+    "NOT EXISTS (SELECT 1 FROM sources "
+    f"WHERE sources.id=o.source_id AND {MEMORY_SOURCE_TYPE_PREDICATE})"
+)
 
 
 def _snippet(text: str, needle: str) -> str:
@@ -194,16 +206,35 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
+    def knowledge_type_count_rows_excluding_memory(
+        db: Any, notebook_id: str, statuses: tuple[str, ...]
+    ) -> "list[dict]":
+        """``[{object_type, c}]`` for the notebook MINUS private Memory's
+        objects, excluded inside this one statement; see the SQLite adapter for
+        why this is not the generic variant subtracted from the notebook-wide
+        count."""
+        allowed = list(statuses)
+        if not allowed:
+            return []
+        return db.execute(
+            "SELECT o.object_type,COUNT(*) AS c FROM knowledge_objects o "
+            "WHERE o.notebook_id=%s AND o.status=ANY(%s) "
+            f"AND {_NOT_MEMORY_OWNED_SQL} "
+            "GROUP BY o.object_type",
+            (notebook_id, allowed),
+        ).fetchall()
+
+    @staticmethod
     def top_concept_names(
         db: Any,
         notebook_id: str,
         statuses: tuple[str, ...],
-        exclude_source_ids: "list[str]",
         limit: int,
     ) -> "list[tuple[str, int]]":
         """``[(canonical concept name, members)]``, most-supported first; see
         the SQLite adapter for why this exists next to ``largest_clusters``
-        (the private-Memory exclusion) and for its cost class.
+        (the private-Memory exclusion, in-statement since codex #520 R2 P1) and
+        for its cost class.
 
         ``=ANY(%s)`` keeps one bound parameter per list.  The name tie-break
         uses ``COLLATE "C"`` so the ordering is byte-wise and matches the other
@@ -212,12 +243,7 @@ class QueryStore:
         allowed = list(statuses)
         if not allowed or limit <= 0:
             return []
-        excluded = list(dict.fromkeys(sid for sid in exclude_source_ids if sid))
-        exclude_clause = "AND NOT (o.source_id = ANY(%s)) " if excluded else ""
-        params: "list[Any]" = [allowed]
-        if excluded:
-            params.append(excluded)
-        params.extend([notebook_id, int(limit)])
+        params: "list[Any]" = [allowed, notebook_id, int(limit)]
         rows = db.execute(
             "SELECT COALESCE(MIN(NULLIF(c.canonical_name, '')), '') AS name, "
             "       COUNT(o.id) AS members "
@@ -225,7 +251,7 @@ class QueryStore:
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
             "     AND o.notebook_id = c.notebook_id "
             "     AND o.status = ANY(%s) "
-            f"{exclude_clause}"
+            f"     AND {_NOT_MEMORY_OWNED_SQL} "
             "WHERE c.notebook_id = %s AND c.object_type = 'concept' "
             "GROUP BY c.canonical_id "
             "HAVING COALESCE(MIN(NULLIF(c.canonical_name, '')), '') <> '' "

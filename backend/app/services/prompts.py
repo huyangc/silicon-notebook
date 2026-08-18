@@ -1260,7 +1260,8 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
 # ---------------------------------------------------------------------------
 
 AGENT_PROFILE_SCHEMA_HINT = (
-    '{"blocks":[{"label":"corpus_shape","value":"","evidence":["source_id"]}]}'
+    '{"blocks":[{"label":"corpus_shape","value":"","evidence":["source_id"]},'
+    '{"label":"corpus_gaps","retire":true}]}'
 )
 
 
@@ -1286,6 +1287,16 @@ def agent_profile_base_prompt(
     * **One line, hard character cap.** The renderer collapses whitespace
       anyway (``agent_profile_block._clean``), but a value written long is a
       value truncated later — better spent by the model than cut by a slice.
+
+    And one rule that exists because the first three, alone, are a ratchet
+    (codex #520 R2 P2): "omission keeps the previous value" means a block whose
+    evidence has since been deleted or reparsed away can never be taken back.
+    An explicit ``{"label": …, "retire": true}`` is the withdrawal channel —
+    deliberately a separate key rather than "an empty value clears it", because
+    an empty value is ALREADY the far more common "I have nothing to add", and
+    conflating the two would let every quiet run wipe blocks it merely had
+    nothing to say about. Retirement stops at user-authored blocks; the server
+    refuses those rather than trusting this instruction alone.
     """
     return (
         "You maintain an agent's shared understanding of ONE knowledge library, "
@@ -1316,6 +1327,12 @@ def agent_profile_base_prompt(
         "4. evidence lists the document ids that support the block, and may only "
         "contain ids that appear verbatim in the statistics below. Use an empty "
         "list when no single document is the reason.\n"
+        "5. If an existing block's claim is CONTRADICTED by the statistics below "
+        "— the material it described is no longer here at all — withdraw it with "
+        '{"label": "<that label>", "retire": true} and no value. Retire only '
+        "what the statistics contradict: having nothing to add is rule 1's "
+        "omission, not a retirement. A block marked (user-authored) can never be "
+        "retired; a person's own statement is not yours to withdraw.\n"
         f"Return JSON only, matching: {AGENT_PROFILE_SCHEMA_HINT}\n\n"
         f"{corpus_block}\n\n"
         f"{current_block}"
@@ -1331,7 +1348,8 @@ def agent_profile_base_prompt(
 #: renders, so asking the model for it would be asking it to restate a number
 #: it was just handed, and then trusting the restatement.
 AGENT_PROFILE_OVERLAY_SCHEMA_HINT = (
-    '{"blocks":[{"label":"retrieval_notes","value":""}]}'
+    '{"blocks":[{"label":"retrieval_notes","value":""},'
+    '{"label":"usage_gaps","retire":true}]}'
 )
 
 
@@ -1393,6 +1411,12 @@ def agent_profile_overlay_prompt(
         "existing blocks use; default to Chinese.\n"
         "4. Write about search behaviour, never about a single answer, and "
         "never quote a question back verbatim as if it were a finding.\n"
+        "5. If an existing note is CONTRADICTED by the sample below — it "
+        "describes searching that no longer resembles this person's at all — "
+        'withdraw it with {"label": "<that label>", "retire": true} and no '
+        "value. Retire only what the sample contradicts: having nothing to add "
+        "is rule 1's omission, not a retirement. A note marked (user-authored) "
+        "can never be retired; the person wrote it themselves.\n"
         f"Return JSON only, matching: {AGENT_PROFILE_OVERLAY_SCHEMA_HINT}\n\n"
         f"{usage_block}\n\n"
         f"{current_block}"

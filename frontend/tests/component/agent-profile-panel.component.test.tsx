@@ -406,6 +406,84 @@ test("总闸关掉：GET 回 enabled=false 时面板不给任何编辑入口", a
   expect(screen.queryByRole("button", { name: "重新整理" })).not.toBeInTheDocument();
 });
 
+// ---------------------------------------------------------------- 依据渲染
+// codex #520 R2 P2-2:服务端一直在写 `evidence`,前端却把它当 opaque 透传、一个字
+// 都不渲染,而设计契约要的正是「结论可点开来源」。
+function evidenced(over: Partial<UnderstandingResponse> = {}): UnderstandingResponse {
+  return response({
+    base: [
+      {
+        ...block("corpus_shape", "封装工艺资料库"),
+        evidence: [{ claim_index: 0, source_ids: ["src-a", "src-b"] }],
+      },
+    ],
+    mine: [
+      {
+        ...block("usage_gaps", "反复找预算材料但没有"),
+        evidence: [{ claim_index: 0, zero_hit_queries: 7 }],
+      },
+    ],
+    ...over,
+  });
+}
+
+test("依据来源：AI 整理出的块渲染成可点的资料 chip，点击回调带上 source id", async () => {
+  const user = userEvent.setup();
+  const onOpenSource = vi.fn();
+  mockFetch.mockResolvedValue(evidenced());
+  render(
+    <AgentProfilePanel
+      notebookId="nb1"
+      onOpenSource={onOpenSource}
+      resolveSourceTitle={(id) => (id === "src-a" ? "热设计手册" : "")}
+    />,
+  );
+
+  expect(await screen.findByText("依据来源")).toBeInTheDocument();
+  // 解析得到标题就显示标题;查不到退回 id(隐藏它会让依据数与实际不符)。
+  await user.click(screen.getByRole("button", { name: "热设计手册" }));
+  expect(onOpenSource).toHaveBeenCalledWith("src-a");
+
+  await user.click(screen.getByRole("button", { name: "src-b" }));
+  expect(onOpenSource).toHaveBeenCalledWith("src-b");
+});
+
+test("依据来源：没接 onOpenSource 时 chip 仍显示，只是不可点", async () => {
+  mockFetch.mockResolvedValue(evidenced());
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  expect(await screen.findByText("依据来源")).toBeInTheDocument();
+  expect(screen.getByText("src-a")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "src-a" })).not.toBeInTheDocument();
+});
+
+test("零命中依据：usage_gaps 渲染成不可点的小字，说清那个数是怎么来的", async () => {
+  mockFetch.mockResolvedValue(evidenced());
+  render(<AgentProfilePanel notebookId="nb1" onOpenSource={vi.fn()} />);
+
+  expect(await screen.findByText("依据：7 次没找到结果的检索")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /7/ })).not.toBeInTheDocument();
+});
+
+test("依据只属于 AI 整理出来的块：人自己写的那段不挂来源", async () => {
+  mockFetch.mockResolvedValue(
+    evidenced({
+      base: [
+        {
+          ...block("corpus_shape", "这是工具手册库"),
+          updated_origin: "user",
+          evidence: [{ claim_index: 0, source_ids: ["src-a"] }],
+        },
+      ],
+    }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" onOpenSource={vi.fn()} />);
+
+  expect(await screen.findByRole("heading", { name: "AI 对这个库的理解" })).toBeInTheDocument();
+  // 人写的那段话,依据是他自己;再挂一排来源会让人以为那是系统给他的论据。
+  expect(screen.queryByRole("button", { name: "src-a" })).not.toBeInTheDocument();
+});
+
 test("总闸关掉：入口按钮一个节点都不渲染", () => {
   const { container, rerender } = render(
     <UnderstandingEntryButton enabled={false} onOpen={vi.fn()} />,

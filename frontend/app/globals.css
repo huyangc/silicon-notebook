@@ -5440,6 +5440,16 @@ button.chat-session-card {
   background: #fff;
   font-size: 12px;
 }
+/* 可点的 .tag(「AI 对这个库的理解」里点开依据来源的那一排):与静态 chip 同形,
+   只补按钮本身不继承的字体与手型——`<button>` 不继承 font-family,不写这一条
+   chip 会在同一排里换字体。 */
+button.tag {
+  font-family: inherit;
+  cursor: pointer;
+}
+button.tag:hover {
+  background: #f3f6fb;
+}
 
 /* 看板「检索索引」状态卡:图标 + 状态 + 说明/计数 + 右侧动作(构建/更新/全量重建) */
 .index-card {

@@ -384,6 +384,86 @@ def test_enumeration_page_rows_and_per_source_counts_carry_the_memory_seam(
     assert per_source["concept"] == 2
 
 
+def test_the_shared_base_aggregates_exclude_memory_inside_the_statement(
+    knowledge_harness,
+):
+    """codex #520 R2 P1 的 PG 侧:底座那两条聚合各自在**语句内**排掉私有 Memory。
+
+    与上面那条枚举用例的区别正是这一条要钉的东西:枚举侧拿的是「按给定源计数」
+    这个通用原语,由调用方自己去减;底座不能那样做——它读的两样(知识对象计数、
+    概念名称)之间没有共享快照(PG 是 READ COMMITTED),中间一次并发的 Memory
+    增删就会让相减漏减、让排除清单漏项,而后者漏掉的是**概念名称本身**,它会被
+    写进全体成员都读得到的共享块。
+
+    ``top_concept_names`` 此前在 PG 侧没有任何 conformance 覆盖,而这一轮它的 SQL
+    变了(排除从绑定参数变成相关子查询),所以两个后端的结果必须在这里对齐一次。
+    """
+    memory_source = (
+        "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+        "file_name,summary,created_at,updated_at) "
+        "VALUES (%s,'nb-personal',%s,%s,'ready','ready','','',%s,%s)"
+    )
+    rows = [
+        (
+            "ko-base-shared", "nb-personal", "concept", "approved",
+            json.dumps({"name": "shared", "section_path": "1"}),
+            json.dumps(_evidence()), "source-base-golden", NOW, NOW,
+        ),
+        (
+            "ko-base-private", "nb-personal", "concept", "approved",
+            json.dumps({"name": "private", "section_path": "1"}),
+            json.dumps(_evidence()), "source-base-memory", NOW, NOW,
+        ),
+        # source_id 空串:没有归属来源的对象既不是 Memory 也不该被连坐排掉。
+        (
+            "ko-base-unowned", "nb-personal", "claim", "approved",
+            json.dumps({"name": "unowned", "section_path": "1"}),
+            json.dumps(_evidence()), "", NOW, NOW,
+        ),
+    ]
+    cluster_sql = (
+        "INSERT INTO concept_clusters(id,notebook_id,canonical_id,member_object_id,"
+        "canonical_name,object_type,created_at) VALUES (%s,%s,%s,%s,%s,'concept',%s)"
+    )
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            memory_source, ("source-base-golden", "普通资料", "upload", NOW, NOW)
+        )
+        connection.execute(
+            memory_source, ("source-base-memory", "私人记忆", "memory", NOW, NOW)
+        )
+        knowledge_harness.knowledge.insert_object_chunk(connection, rows)
+        connection.execute(cluster_sql, (
+            "cc-base-shared", "nb-personal", "can-base-shared",
+            "ko-base-shared", "闸门设计", NOW,
+        ))
+        connection.execute(cluster_sql, (
+            "cc-base-private", "nb-personal", "can-base-private",
+            "ko-base-private", "我的私人记忆主题", NOW,
+        ))
+
+    queries = PostgresQueryStore(knowledge_harness.database)
+    with knowledge_harness.database.connect() as connection:
+        counts = {
+            row["object_type"]: int(row["c"])
+            for row in queries.knowledge_type_count_rows_excluding_memory(
+                connection, "nb-personal", USABLE_STATUSES
+            )
+        }
+        names = queries.top_concept_names(
+            connection, "nb-personal", USABLE_STATUSES, 24
+        )
+        # 空 statuses 一律返回空,不静默放宽成「全部状态」(与另一侧同口径)。
+        assert queries.knowledge_type_count_rows_excluding_memory(
+            connection, "nb-personal", ()
+        ) == []
+        assert queries.top_concept_names(connection, "nb-personal", (), 24) == []
+
+    assert counts["concept"] == 1, "私有 Memory 的知识对象进了共享底座的计数"
+    assert counts["claim"] == 1, "没有归属来源的对象被连坐排掉了"
+    assert [name for name, _members in names] == ["闸门设计"]
+
+
 def test_formula_evidence_enrichment_on_postgres(knowledge_harness):
     formula = r"C _ {l} = 2 \sigma (\tilde {C} _ {l}).\tag{7}"
     values = (

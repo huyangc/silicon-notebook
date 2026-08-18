@@ -37,6 +37,21 @@ _UNSET = SOURCE_PAPER_META_UNSET
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory', 'knowhow')"
 
 
+# 「这一行是私有 Memory 的合成来源」的 SQL 谓词——`memory_source_ids` 取的正是这批
+# 行,而 `source_change_signal_rows` 排掉的也正是这批行(一条谓词,两个方向)。
+#
+# 提升成模块级常量而不是继续在每条语句里裸写,是因为它已经不只有「取 id 清单」一个
+# 消费方了:`query_store` 的两条底座聚合(知识对象计数、Top 概念名)现在把这条排除
+# **压进它们自己的语句内**——先读 id 清单再相减/传排除清单,两次读之间没有共享快照,
+# PG 的 READ COMMITTED 下一次并发的 Memory 增删就会让相减漏减、让排除清单漏项,
+# 而后一种漏项泄漏的是**概念名称**本身。唯一定义点因此从 Python 方法下移到这条谓词。
+#
+# ⚠ 用在子查询里时保持不加限定词(`SELECT 1 FROM sources WHERE sources.id = o.
+# source_id AND source_type = 'memory'`):`knowledge_objects` / `concept_clusters`
+# 都没有 `source_type` 列,所以最内层的 `sources` 是它唯一能解析到的表。
+MEMORY_SOURCE_TYPE_PREDICATE = "source_type = 'memory'"
+
+
 # 论文元数据补抽候选的 SQL 谓词(接在 ``FROM sources s`` 且已按 ``s.notebook_id``
 # 过滤之后)。三个消费方共用:sources_missing_paper_meta(补抽排队)、
 # query_store.notebook_analytics 的 missing 计数、以及 NotebookSummary.
@@ -550,7 +565,7 @@ class SourceStore:
             row["id"]
             for row in db.execute(
                 "SELECT id FROM sources "
-                "WHERE notebook_id = ? AND source_type = 'memory'",
+                f"WHERE notebook_id = ? AND {MEMORY_SOURCE_TYPE_PREDICATE}",
                 (notebook_id,),
             ).fetchall()
         ]

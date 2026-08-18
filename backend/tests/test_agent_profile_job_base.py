@@ -567,6 +567,25 @@ def test_an_unconfigured_model_fails_the_chain_and_keeps_the_blocks(harness):
             '{"blocks": [{"label": "corpus_shape", "value": "x", "evidence": "src-a"}]}',
             "evidence_not_a_list",
         ),
+        # 退役标记(codex #520 R2 P2)也是结构:`retire` 只认字面 true,truthy 的
+        # `1` / `"true"` 是模型在自创协议,而它自创的下一版可能是 `"false"`。
+        (
+            '{"blocks": [{"label": "corpus_shape", "retire": 1}]}',
+            "retire_not_true",
+        ),
+        (
+            '{"blocks": [{"label": "corpus_shape", "retire": "true"}]}',
+            "retire_not_true",
+        ),
+        (
+            '{"blocks": [{"label": "corpus_shape", "retire": false}]}',
+            "retire_not_true",
+        ),
+        # 「既要退役又给正文」两个意思互相矛盾,猜哪一半都是错的。
+        (
+            '{"blocks": [{"label": "corpus_shape", "retire": true, "value": "还有话说"}]}',
+            "retire_with_value",
+        ),
     ],
 )
 def test_an_unusable_reply_keeps_every_previous_block(harness, raw, diagnostic):
@@ -662,6 +681,82 @@ def test_a_block_edited_mid_run_is_skipped_and_not_retried(harness):
     assert "cas_conflict:corpus_shape" in row["diagnostic"]
 
 
+# ------------------------------------------------------------------- retiring
+def test_a_job_written_block_can_be_retired_and_keeps_its_history(harness):
+    """codex #520 R2 P2: without a withdrawal channel the prompt's "omission
+    keeps the previous value" rule is a ratchet — a block written from
+    documents that were since deleted rides in every planning prompt forever.
+
+    The row and its history stay (this is a withdrawal, not a wipe), the origin
+    recorded is ``job`` rather than ``user`` (``clear_block`` hardcodes the
+    latter, and a job's decision filed as a person's is a lie in the one record
+    that explains why the text disappeared), and the diagnostic names it.
+    """
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="这个库全是热设计手册", evidence=[],
+        expected_revision=0, origin="job", actor="",
+    )
+    service = _service(harness, client=_Client(
+        _reply([{"label": "corpus_shape", "retire": True}])
+    ))
+
+    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+
+    block = _blocks(harness)["corpus_shape"]
+    assert block["value"] == ""
+    assert block["updated_origin"] == "job"
+    assert block["revision"] == 2
+    assert block["history"], "退役必须留在历史里——这是一次撤回,不是抹掉这一行"
+    row = _job(harness)
+    assert row["status"] == "done"
+    assert row["blocks_written"] == 1
+    assert "retired:corpus_shape" in row["diagnostic"]
+
+
+def test_a_user_written_block_is_never_retired(harness):
+    """设计 §5.4:人写的块是权威输入,也是冷启动通道(用户直接告诉 agent 这个库是
+    什么)。模型判定它「统计支持不了」而撤掉,删掉的正是这里唯一不是猜测的输入。
+
+    拒绝是**过滤降级**而不是整份作废:同一次回复里别的块可能完全站得住。"""
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="这是工具手册库", evidence=[],
+        expected_revision=0, origin="user", actor="user-owner",
+    )
+    service = _service(harness, client=_Client(
+        _reply([
+            {"label": "corpus_shape", "retire": True},
+            {"label": "corpus_gaps", "value": "没有图片", "evidence": []},
+        ])
+    ))
+
+    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+
+    blocks = _blocks(harness)
+    assert blocks["corpus_shape"]["value"] == "这是工具手册库"
+    assert blocks["corpus_shape"]["revision"] == 1, "用户那一行根本不该被写"
+    assert blocks["corpus_gaps"]["value"] == "没有图片", "同一次回复里的其他块被连坐"
+    row = _job(harness)
+    assert row["status"] == "done"
+    assert "retire_refused:corpus_shape" in row["diagnostic"]
+    assert "retired:" not in row["diagnostic"]
+
+
+def test_retiring_a_block_that_has_nothing_to_withdraw_is_not_a_write(harness):
+    """没有行、或行已经是空的,退役就是无事发生:把它记成一次写入会让
+    ``blocks_written`` 报出没发生过的工作。"""
+    service = _service(harness, client=_Client(
+        _reply([{"label": "corpus_shape", "retire": True}])
+    ))
+
+    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+
+    row = _job(harness)
+    assert row["status"] == "done"
+    assert row["blocks_written"] == 0
+    assert row["diagnostic"] == ""
+    assert _blocks(harness) == {}
+
+
 # ------------------------------------------------------- user authority input
 def test_a_user_edited_block_reaches_the_prompt_marked_as_authoritative(harness):
     harness["profiles"].write_block(
@@ -731,6 +826,63 @@ def test_private_memory_never_reaches_the_shared_statistics(harness):
     from app.services.agent_profile_job import render_corpus_block
 
     assert "我的私人记忆主题" not in render_corpus_block(stats)
+
+
+def test_the_memory_exclusion_is_carried_by_the_statements_themselves(harness):
+    """codex #520 R2 P1: the two aggregates exclude private Memory on their own.
+
+    The service used to read the Memory source ids first and then subtract
+    (counts) / pass them in as an exclusion list (names). Those are separate
+    reads with no shared snapshot — PostgreSQL runs each at READ COMMITTED —
+    so a Memory created or deleted in between made the subtrahend describe a
+    different library than the minuend, and made the exclusion list miss a row
+    whose CONCEPT NAMES then reached a block every member of a shared notebook
+    reads.
+
+    Calling the store methods DIRECTLY is the point: they are handed nothing
+    but a notebook and the usable statuses, and the Memory rows still have to
+    be gone. And the signatures are pinned so the exclusion cannot become
+    optional again — a caller that could omit it is a caller that eventually
+    will.
+    """
+    import inspect
+
+    from app.services.knowledge_contracts import USABLE_STATUSES
+
+    _add_source(harness, "src-a", elements=(("table", 1),))
+    _add_source(harness, "src-memory", source_type="memory")
+    _add_kg_object(harness, "ko-shared", "concept", source_id="src-a")
+    _add_kg_object(harness, "ko-private", "concept", source_id="src-memory")
+    _add_kg_object(harness, "ko-unowned", "claim")  # source_id '' — never a Memory
+    _add_cluster(harness, "can-shared", "ko-shared", "闸门设计")
+    _add_cluster(harness, "can-private", "ko-private", "我的私人记忆主题")
+
+    queries = harness["queries"]
+    with harness["database"].connect() as db:
+        counts = {
+            str(row["object_type"]): int(row["c"])
+            for row in queries.knowledge_type_count_rows_excluding_memory(
+                db, NOTEBOOK_ID, USABLE_STATUSES
+            )
+        }
+        names = queries.top_concept_names(db, NOTEBOOK_ID, USABLE_STATUSES, 24)
+
+    assert counts == {"concept": 1, "claim": 1}, (
+        "语句内排除没生效:私有 Memory 的知识对象被算进了共享底座的计数,"
+        "或者没有归属来源的对象被连坐排掉了(它的 source_id 是 ''，不是 Memory)"
+    )
+    assert [name for name, _members in names] == ["闸门设计"]
+
+    for method in (
+        queries.knowledge_type_count_rows_excluding_memory,
+        queries.top_concept_names,
+    ):
+        params = set(inspect.signature(method).parameters)
+        assert "exclude_source_ids" not in params, (
+            f"{method.__name__} 又收回了调用方传入的排除清单参数。排除必须是语句"
+            "自己的性质:参数化它就等于允许某个调用方省掉它,而省掉之后共享块里会"
+            "出现某位成员私有 Memory 的内容,没有任何报错。"
+        )
 
 
 def test_the_concept_names_are_ordered_by_support_and_bounded(harness):

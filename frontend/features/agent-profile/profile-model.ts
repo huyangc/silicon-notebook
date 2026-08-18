@@ -36,15 +36,73 @@ export { busyForNotebook, claimNotebookSlot, releaseNotebookClaim };
 /** 写端点的两条作用域:共享底座 / 本人的那一份。服务端永远从登录身份解析归属。 */
 export type UnderstandingScope = "shared" | "mine";
 
+/**
+ * 一条「这段话凭什么这么说」的记账。形状随写入方而变,两种都由服务端计算:
+ *
+ * * 共享底座(`corpus_shape`/`key_entities`/`corpus_gaps`)记 `source_ids`——模型
+ *   给的 id 必须逐字出现在服务端喂过去的统计里,对不上的在落库前就被丢掉;
+ * * `usage_gaps` 记 `zero_hit_queries`——本人这批提问里有多少次检索空手而归,
+ *   由服务端从同一份样本数出来,不是模型复述的数字。
+ *
+ * ⚠ 类型此前是 `unknown[]` 且从不渲染(codex #520 R2 P2-2):设计契约要的是
+ * 「结论可点开来源」,而一个界面上永远看不见的字段等于没有这条契约。字段本身
+ * 可能缺失(旧行、别的写入方),所以每一项都是可选的,消费方只读它认得的那些。
+ */
+export type BlockEvidenceEntry = {
+  claim_index?: number;
+  source_ids?: unknown;
+  zero_hit_queries?: unknown;
+};
+
 export type UnderstandingBlock = {
   label: string;
   value: string;
-  /** 形状随 label 与写入方而变,面板不消费,原样透传。 */
-  evidence: unknown[];
+  evidence: readonly BlockEvidenceEntry[];
   revision: number;
   updated_at: string;
   updated_origin: string;
 };
+
+/**
+ * 这一块背后的来源 id,去重、保持服务端给的顺序。
+ *
+ * 宽松到底:`evidence` 是服务端 JSON 列里存下来的,历史行、别的写入方、以及
+ * `usage_gaps` 那种压根没有 `source_ids` 的形状都会经过这里。任何认不出来的东西
+ * 一律跳过而不是抛——一个渲染不出「依据来源」的块只是少一行,一个抛异常的
+ * 纯函数会把整个面板打成白屏。
+ */
+export function evidenceSourceIds(block: UnderstandingBlock): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const entry of block.evidence ?? []) {
+    if (!entry || typeof entry !== "object") continue;
+    const ids = (entry as BlockEvidenceEntry).source_ids;
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) {
+      if (typeof id !== "string" || !id || seen.has(id)) continue;
+      seen.add(id);
+      ordered.push(id);
+    }
+  }
+  return ordered;
+}
+
+/**
+ * 这一块背后的「检索没找到」次数,没有就是 `null`。
+ *
+ * `null` 与 `0` 刻意分开:前者是「这一块不记这种依据」(整行不渲染),后者是服务端
+ * 真的数出来零次。把两者合并会让 `usage_gaps` 在样本里一次空检索都没有时显示成
+ * 「没有依据」,而它恰恰是有依据的——依据是「零次」。
+ */
+export function zeroHitCount(block: UnderstandingBlock): number | null {
+  for (const entry of block.evidence ?? []) {
+    if (!entry || typeof entry !== "object") continue;
+    const count = (entry as BlockEvidenceEntry).zero_hit_queries;
+    if (typeof count !== "number" || !Number.isFinite(count)) continue;
+    return count;
+  }
+  return null;
+}
 
 export type UnderstandingJobStatus = {
   status: string;
