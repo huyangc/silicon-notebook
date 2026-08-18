@@ -1764,3 +1764,100 @@ def test_share_request_blocks_on_the_notebook_row_and_fails_closed(
                 "SELECT COUNT(*) AS c FROM notebook_share_requests"
             ).fetchone()["c"]
         ) == 0, "指向已删笔记本的共享申请落库了"
+
+
+@pytest.mark.postgres_integration
+def test_create_grant_owner_branch_blocks_on_the_notebook_row_and_fails_closed(
+    postgres_database, monkeypatch
+):
+    """`create_grant` 的 **owner 分支**同款外键竞态(codex #519 R7 存疑项收口)。
+
+    `_require_notebook_manage_on` 拆成两半,只有非 owner 那半带锁:`FOR SHARE OF ng` 锁住
+    授权边行,删库要 CASCADE 掉它就得先拿同一把锁,于是删不进来。**owner 半是一条无锁
+    SELECT 且当场短路** —— 库主自己发边时,那条 SELECT 与随后的 INSERT 之间可以插进一次
+    已提交的删库,`notebook_grants.notebook_id` 外键当场违例;而 `create_grant` 只 catch
+    `UniqueViolation`,`ForeignKeyViolation` 一路冒成 500。
+
+    编排与 `test_share_request_blocks_on_the_notebook_row_and_fails_closed` 相同,断言也同样
+    **两件都钉**(删掉锁 → 第一条红;摘掉 `FOR KEY SHARE` → 第二条红)。
+
+    ⚠ 发起人**就是库主**是本用例的要件:换成非 owner 会走进那条自带 `FOR SHARE OF ng` 的
+    分支,竞态本来就不存在,用例会变成一条对着 bug 也全绿的空转。
+    """
+    from app.repositories.ports import NotebookNotFoundError
+
+    assert PostgresMigrator(postgres_database).migrate() == 28
+    _seed_memory_race(postgres_database)
+    counter = iter(range(1, 50))
+    counter_lock = threading.Lock()
+
+    def new_id(prefix: str) -> str:
+        with counter_lock:
+            return f"{prefix}-grant-nb-race-{next(counter)}"
+
+    store = PostgresGroupStore(
+        postgres_database, new_id=new_id, now=lambda: "2026-07-23T00:00:00+00:00"
+    )
+    # owner-race 既是 nb-memory-race 的库主(走无锁的 owner 短路),又是本组的组管理员
+    # (群组那一半的复核会通过)——两个前置条件都满足,才轮得到笔记本存在性这一关。
+    group = store.create_group(
+        name="发边删库竞态", kind="project", description="", created_by="owner-race"
+    )
+
+    delete_issued = threading.Event()
+    allow_delete_commit = threading.Event()
+    lock_attempted = threading.Event()
+    lock_returned = threading.Event()
+    original_lock = store._lock_notebook_on
+
+    def hooked_lock(connection, notebook_id):
+        lock_attempted.set()
+        try:
+            return original_lock(connection, notebook_id)
+        finally:
+            lock_returned.set()   # 正常返回与抛 NotebookNotFoundError 都算「结束了」
+
+    monkeypatch.setattr(store, "_lock_notebook_on", hooked_lock)
+
+    def delete_notebook():
+        with postgres_database.write() as connection:
+            connection.execute("DELETE FROM notebooks WHERE id='nb-memory-race'")
+            delete_issued.set()          # 行锁在手,尚未提交
+            assert allow_delete_commit.wait(timeout=10)
+        return "deleted"
+
+    def hand_out_grant():
+        assert delete_issued.wait(timeout=10)
+        with pytest.raises(NotebookNotFoundError):
+            store.create_grant(
+                "nb-memory-race",
+                principal_type="group",
+                principal_id=group["id"],
+                role="viewer",
+                created_by="owner-race",
+                admin_user_id="owner-race",
+            )
+        return "fail-closed"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        deleter = executor.submit(delete_notebook)
+        assert delete_issued.wait(timeout=10)
+        granter = executor.submit(hand_out_grant)
+        try:
+            assert lock_attempted.wait(timeout=10), (
+                "发边压根没去复核笔记本行 —— owner 短路之后那次 INSERT 会直接撞外键"
+            )
+            assert not lock_returned.wait(timeout=0.5), (
+                "复核没有阻塞在未提交的删库上 —— 锁模式被摘掉了"
+            )
+        finally:
+            allow_delete_commit.set()
+        assert deleter.result(timeout=15) == "deleted"
+        assert granter.result(timeout=15) == "fail-closed"
+
+    with postgres_database.connect() as connection:
+        assert int(
+            connection.execute(
+                "SELECT COUNT(*) AS c FROM notebook_grants"
+            ).fetchone()["c"]
+        ) == 0, "指向已删笔记本的授权边落库了"

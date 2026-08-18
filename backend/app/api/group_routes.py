@@ -382,6 +382,11 @@ def create_notebook_grant_route(
     与发起者的组管理员身份),这里不做前置查询。理由是这条边一落库就**立刻**给整组
     人读权:在路由层查一次、再在另一个事务里插入,中间那个窗口足够让组被删、或让
     发起者被移出/降级,而边照发不误。两个异常各自映射,文案仍能说清缺的是哪一半。
+
+    ⚠ **笔记本那个外键父行同样在事务内复核** → `NotebookNotFoundError` → 404
+    (codex #519 R7 存疑项收口,与 `create_share_request_route` 同款)。它复核的是
+    **存在性**而不是权限:能力守卫放行之后、写事务之前库被并发删掉,PG 侧那条 INSERT
+    会撞 `notebook_id` 外键变成 500。
     """
     principal_type = payload.principal_type.strip().lower()
     if principal_type not in GRANTABLE_PRINCIPAL_TYPES:
@@ -400,6 +405,10 @@ def create_notebook_grant_route(
         )
     except GroupNotFoundError:
         raise _group_not_found()
+    except NotebookNotFoundError:
+        # 与 `create_share_request_route` 逐字同一个响应:笔记本维度的「看不见」是 404,
+        # 与能力守卫拒绝时同一个状态码。不复用 `_group_not_found()`——组没有问题。
+        raise user_error(404, "笔记本不存在")
     except GroupAdminRequiredError:
         raise user_error(403, "你不是这个群组的组管理员,无法把知识库共享给它")
     except NotebookManageRequiredError:

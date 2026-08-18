@@ -205,6 +205,71 @@ G1/G2/G3、PR + codex 闭环。
   `ADMIN_GRANT_PROBE_FOR_SHARE_SQL` 锁授权边行)。当前两个消费点:`create_grant`(发起人)
   与 `approve_share_request`(申请人)。
 
+- **P2-9**(T4 codex 第 7 轮评审):**外键父行的存在性不是 P2-8 说的那种权限复检**,两者
+  是正交的两件事,别指望前一条规则顺带覆盖它。P2-8 问「发起人现在还有没有权」,这一条问
+  「被引用的那一行还在不在」——`notebooks.created_by` 不可变(产品没有转让 owner 的功能)
+  保证了 owner 身份不会在事务执行期间被撤销,但**保证不了那一行还存在**。窗口是能力守卫
+  通过之后、INSERT 之前的一次并发删库;后果是外键违例冒泡成 **500**,而正确答案是 404。
+
+  规则:**凡是 INSERT 一行带外键的记录的写路径,它的每一个父行都要在同一写事务内复核**
+  (不只是复核其中一个)。`create_share_request` 此前只复核了 `groups`、漏了 `notebooks`,
+  正是这种「补了一半」的形态——两个父行的理由逐字相同,漏掉的那半没有任何独立论证。
+
+  两个后端的形态刻意不同,与 `delete_group` / `approve_share_request` 的既有分叉一致:
+  SQLite 的 `database.write()` 是进程级写锁,复核与插入之间插不进第三个事务,所以**只查
+  存在性、不加锁**;PG 必须显式锁行,用 **`FOR KEY SHARE`** 而不是 `FOR SHARE`——前者
+  恰好就是 PostgreSQL 自己在随后那次 INSERT 上为外键检查取的锁,所以显式加锁**不新增
+  任何冲突边**(这个顺序今天就已经在走),而 `FOR SHARE` 会额外与 `FOR NO KEY UPDATE`
+  冲突,即与任何一次普通 `UPDATE notebooks SET …`(改名、改状态、推 `updated_at`)互相
+  阻塞,凭空造出一整类新的死锁面;防住并发删库只需与 `FOR UPDATE` 冲突,`FOR KEY SHARE`
+  已经做到。
+
+  **锁序 `groups → notebooks`**,论证是「`groups` 是根锁」:全仓只有
+  `postgres/group_store.py` 会锁 `groups` 行,而它的每个调用点都把 `_lock_group_on` 写成
+  写事务的第一条语句,因此没有任何事务会持着别的锁去等 `groups`,成环的必要条件不成立。
+  反方向不存在:删库持 `notebooks` 行锁后级联删的是**子**行,不需要 `groups` 锁;
+  `memory_store` 的三段式是 `notebooks → notebook_members/notebook_grants`,同样不碰
+  `groups`。新增会同时锁这两类行的路径时,必须回来复核这个论证仍然成立。
+
+  **收口范围(同轮次补记):`create_grant` 也在这条规则里。** 它同样 INSERT 一行引用
+  `notebooks` 的 `notebook_grants`,而 `_require_notebook_manage_on` 只有**非 owner** 那半
+  自带锁(`FOR SHARE OF ng` 锁住授权边行,删库要 CASCADE 掉它就得先拿同一把锁);**owner
+  半是一条无锁 SELECT 且当场短路**,库主自己发边时那条 SELECT 与 INSERT 之间可以插进一次
+  已提交的删库 → 同款 500。复核**不按分支收窄**(existence 是先决条件,谁发起都一样),
+  位置放在 `_require_notebook_manage_on` **之前**、`_lock_group_on` 之后:笔记本维度内部
+  「存在性在前、权限在后」,而群组维度的错误优先级逐字不变。顺带把非 owner 分支原有的
+  `notebook_grants → notebooks` 反向获取抹平(它与删库级联的 `notebooks → notebook_grants`
+  互为逆序,是一个窄死锁面)。
+
+  ⚠ **SQLite 侧补这一条的动机与 PG 不同,别读成同一件事**(已实测):这一侧**本来就不会
+  500**——库被删时 `_require_notebook_manage_on` 的 owner 半查不到行、授权边半的行也被外键
+  级联带走,于是抛 `NotebookManageRequiredError`,根本走不到 INSERT。补它是为了**两个后端
+  答同一句话**:PG 修好之后答 404「笔记本不存在」,SQLite 不补就答 403「你已不再拥有这本
+  笔记本的管理权」——后者在库已经不存在时纯属误导。所以「双后端同修」这里的理由是响应对等,
+  不是各自都在修同一个 500。
+
+  ⚠ **`_require_notebook_manage_on` 里「owner 半刻意不加锁」那段论证仍然成立,不要删**:
+  它论的是「**身份**不会变」(产品没有转让 owner 的功能),而本条问的是「那**一行**还在
+  吗」——两者正交,`DELETE FROM notebooks` 与「谁是 owner」毫无关系。两条并列写在那个
+  docstring 里,连同「将来真加了转让功能就得回来补 `FOR SHARE`」的提醒一起保留。
+
+  **尚未收口(独立跟踪)**:`approve_share_request` 不在本条范围内——它靠对申请行的
+  `FOR UPDATE` 挡住了删库(CASCADE 要拿同一把锁),**没有** 500 风险;但它的获取顺序仍是
+  `share_request → notebook_grants → notebooks`,与删库级联的 `notebooks → 子行` 互为逆序,
+  理论上构成一个窄死锁面(PG 会检测并中止其中一方)。它是**另一种**失败形态(死锁而非外键
+  违例、且不产生坏数据),需要自己的分析与用例,故未随本轮改动。
+
+- **P2-10**(T4 codex 第 7 轮评审):**撤销折叠的群组共享时,带管理权的那条边必须最后删。**
+  共享给群组的标准模板是两条边(`(group_admins:G, admin)` + `(group:G, viewer)`),界面把
+  它们折成一项、撤销时逐条 DELETE。而三个 grant 端点的守卫是 `notebook:manage`(admin 级),
+  所以**组管理员**(非 owner)也走这条路——按 `grantIds` 的自然顺序删,第一次 DELETE 就
+  删掉了他自己的管理权,第二次 404,viewer 边留着:界面报「已撤销」,群组其实还读得到。
+  发放顺序正是 admin 在前,所以这是**默认路径**而非边角情形;owner 因为 owner 臂恒成立
+  不受影响,也正因如此这个洞只在 P2 新开的非 owner 路径上发作。排序判据必须与
+  `foldGroupShares` 的 `manage` 判据**共用同一个** `confersManage`(只看 `role`,对
+  `group` 与 `group_admins` 一视同仁,见 P1/R1/R4 那串论证)——分成两份写法迟早会出现
+  「标着可管理、却没被排到最后」的边。
+
 ## 遗留登记(不阻塞本特性,独立跟踪)
 
 - `schema_manifest.POSTGRES_EMPTY_TIME_SENTINELS`

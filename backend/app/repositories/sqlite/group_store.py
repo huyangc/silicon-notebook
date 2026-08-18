@@ -474,6 +474,14 @@ class GroupStore:
 
         重复边刻意**不**做幂等复用而是明确报错:两条边的 `role` 可以不同,静默返回既有
         行会让「我改成了管理」与「库里其实还是只读」这两件事长得一模一样。
+
+        **笔记本那个外键父行也复核一次**(`_require_notebook_on`,codex #519 R7 存疑项收口)。
+        ⚠ 这一侧的动机与 PG 不同,别读成同一件事:SQLite **本来就不会 500**——库被并发删掉
+        时,`_require_notebook_manage_on` 的 owner 半查不到行、授权边半的行也被外键级联带走,
+        于是它抛 `NotebookManageRequiredError`,根本走不到 INSERT(已实测)。补这一条是为了
+        **两个后端的响应对等**:PG 侧的 `_lock_notebook_on` 让那种情形答 404「笔记本不存在」,
+        这边不补就会答 403「你已不再拥有这本笔记本的管理权」——一句在库已经不存在时纯属误导
+        的话,还让同一个场景在两个后端上长得不一样。
         """
         grant_id = self.new_id("gnt")
         try:
@@ -481,6 +489,11 @@ class GroupStore:
                 self._require_group_on(db, principal_id)
                 if self._role_on(db, principal_id, admin_user_id) != "admin":
                     raise GroupAdminRequiredError(principal_id)
+                # 笔记本维度两条,**存在性在前、权限在后**(与 PG 侧逐条对应):库都不在
+                # 了,「他还有没有管理权」不是一个有意义的问题。这一侧不修 500(见 docstring:
+                # 这边本来就不会 500),修的是**答什么**——不补就会答一句「你已不再拥有这本
+                # 笔记本的管理权」,而真相是库没了。
+                self._require_notebook_on(db, notebook_id)
                 # **笔记本侧**的那一半同样要在事务内复核(codex #519 R6 P1):
                 # 能力守卫放行之后、本事务开始之前,库主可以撤掉发起人的管理边;
                 # 少了这一次复核,失权者仍能发出一条**新的**授权边(甚至给另一个
@@ -701,6 +714,14 @@ class GroupStore:
         只有一个写事务在跑,撤销授权边与本次批准根本插不进彼此中间——与
         `delete_group` / `create_share_request` / `approve` 组锁同款的后端分叉。两段拆分在
         这一侧因此纯粹是结构对等(外加保住 owner 半那条便宜的短路)。
+
+        ⚠ 与 PG 侧同一条:owner 半论的是「**身份**不会变」,不是「那**一行**还在」。库被并发
+        删掉时两半都查不到 → 这里抛 `NotebookManageRequiredError`(不会像 PG 那样撞外键 500,
+        进程写锁保证删库不会插在本事务中间),但那句话在库已经不存在时是误导。所以两个调用方
+        里的 `create_grant` 在本方法之前先跑 `_require_notebook_on`,让答案变成 404
+        「笔记本不存在」,与 PG 侧对齐(codex #519 R7 存疑项收口);另一个调用方
+        `approve_share_request` 不需要——它先按 `id + group_id + status='pending'` 取申请行,
+        库被删时那行已被外键级联带走,查不到就返回 `None`(路由 404),压根到不了这里。
         """
         if (
             db.execute(
