@@ -1014,30 +1014,75 @@ function baseNameOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/** 剥掉链接尾部的 `?query` / `#fragment`。
+/** CommonMark 转义表：反斜杠只能转义这些 ASCII 标点；反斜杠后面跟非标点字符时，
+ *  反斜杠是字面反斜杠本身，不消费下一个字符（CommonMark spec §6.1）。 */
+const ASCII_PUNCTUATION = new Set(
+  "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".split(""),
+);
+
+/** 转义解码后的链接目标：`text` 是解码结果，`escaped[i]` 标记 `text[i]` 是不是某个
+ *  `\P` 转义序列解码出来的产物（`P` 是 ASCII 标点）。后面剥 `?query`/`#fragment` 只能
+ *  看未转义的字符——`\#`/`\?` 解码后是路径里的字面标点，不是分隔符。 */
+type DecodedLinkTarget = { text: string; escaped: boolean[] };
+
+/** 按 CommonMark 语义解码链接目标里的反斜杠转义（评审 F1）：
  *
- *  `x.png?v=2` 这种缓存戳在导出的 md 里很常见，磁盘上的文件就叫 `x.png`；不剥就永远
- *  配不上，还会给用户一条查无此文件的回执。**必须在百分号解码之前做**：`%23` 正是
- *  「文件名里真的有一个 `#`」的写法，先解码再剥会把它从中间斩断。
+ *  - `\` + ASCII 标点 → 该标点字面量，反斜杠被吃掉（`img\(1\).png` → `img(1).png`）。
+ *  - `\` + 其它字符（含到达串尾）→ 字面反斜杠本身，反斜杠与后面那个字符都原样保留——
+ *    随后仍按既有行为把这个字面反斜杠归一成 `/`（`sub\win.png` 这类 Windows 风格
+ *    分隔符不回归）。
+ *
+ *  必须在路径归一化（`\` → `/`）与后缀剥离（`?query`/`#fragment`）**之前**解码：不
+ *  解码就会把 `img\(1\).png` 里的两个反斜杠也当分隔符归一，解析成 `img/(1/).png`；
+ *  而 `stripLinkSuffix` 必须借助这里产出的 `escaped` 标记，才能分清 `a\#b.png` 里
+ *  解码出的字面 `#` 与真正的 fragment 分隔符。
  */
-function stripLinkSuffix(ref: string): string {
-  const hash = ref.indexOf("#");
-  const query = ref.indexOf("?");
-  const cut = hash < 0 ? query : query < 0 ? hash : Math.min(hash, query);
-  return cut < 0 ? ref : ref.slice(0, cut);
+function decodeLinkTarget(raw: string): DecodedLinkTarget {
+  let text = "";
+  const escaped: boolean[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    const ch = raw.charAt(i);
+    if (ch === "\\" && i + 1 < raw.length && ASCII_PUNCTUATION.has(raw.charAt(i + 1))) {
+      text += raw.charAt(i + 1);
+      escaped.push(true);
+      i += 2;
+      continue;
+    }
+    text += ch;
+    escaped.push(false);
+    i += 1;
+  }
+  return { text, escaped };
 }
 
-/** 把已经剥过尾缀的链接解析成包内路径。返回 `null` 表示逃出了包根。 */
+/** 剥掉链接尾部的 `?query` / `#fragment`——只剥**未转义**的那一个字符。
+ *
+ *  `x.png?v=2` 这种缓存戳在导出的 md 里很常见，磁盘上的文件就叫 `x.png`；不剥就永远
+ *  配不上，还会给用户一条查无此文件的回执。判据看 `decoded.escaped`（评审 F1）：
+ *  `a\#b.png` 解码后是 `a#b.png`，但那个 `#` 是转义产物、是文件名的一部分，不能被
+ *  当成 fragment 分隔符剥掉；真正未转义的 `#`/`?` 才是分隔符，取先出现的那个。
+ */
+function stripLinkSuffix(decoded: DecodedLinkTarget): string {
+  const { text, escaped } = decoded;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charAt(i);
+    if ((ch === "#" || ch === "?") && !escaped[i]) return text.slice(0, i);
+  }
+  return text;
+}
+
+/** 把已经解码转义、剥过尾缀的链接解析成包内路径。返回 `null` 表示逃出了包根。 */
 function resolveBundlePath(mdPath: string, ref: string): string | null {
   const cleaned = ref.replaceAll("\\", "/");
   const base = cleaned.startsWith("/") ? "" : directoryOf(mdPath);
   return normalizeEntryPath(base === "" ? cleaned : `${base}/${cleaned}`);
 }
 
-/** 把 md 里的相对链接解析成包内路径（先剥 `?query`/`#fragment`）。
+/** 把 md 里的相对链接解析成包内路径（先解码反斜杠转义，再剥 `?query`/`#fragment`）。
  *  返回 `null` 表示逃出了包根。 */
 export function resolveBundleRef(mdPath: string, ref: string): string | null {
-  return resolveBundlePath(mdPath, stripLinkSuffix(ref));
+  return resolveBundlePath(mdPath, stripLinkSuffix(decodeLinkTarget(ref)));
 }
 
 function decodePercent(value: string): string | null {
@@ -1094,15 +1139,15 @@ function suggestFor(index: BundleIndex, resolved: string | null): string[] {
  *  真有个名字带 `%20` 的文件。解码后的形态优先：`%20` 在链接里的**规范**含义就是空格，
  *  两个候选同时存在于包里时按规范解读取 `my shot.png`。
  *
- *  尾缀在这里剥一次就够，候选走的是不再剥的 `resolveBundlePath`——否则 `%23` 解码出
- *  的字面 `#` 会在第二轮被当成 fragment 斩掉。
+ *  转义解码与尾缀剥离在这里各做一次就够，候选走的是不再剥的 `resolveBundlePath`——
+ *  否则 `%23` 解码出的字面 `#` 会在第二轮被当成 fragment 斩掉。
  */
 function lookup(
   index: BundleIndex,
   mdPath: string,
   src: string,
 ): { file: BundleFile; path: string } | { file: null; resolved: string | null } {
-  const bare = stripLinkSuffix(src);
+  const bare = stripLinkSuffix(decodeLinkTarget(src));
   const candidates = [decodePercent(bare), bare].filter((value): value is string => value !== null);
   let firstResolved: string | null = null;
   for (const candidate of candidates) {

@@ -96,7 +96,7 @@ test("入列/解包的每条异步链都有错误出口（不是被 await 就是
   assert.deepEqual(dangling, [], "这些调用丢掉了 promise：失败会变成未处理 rejection，用户只看到「拖了没反应」");
 });
 
-test("文件夹遍历带总字节预算，且预算取自 bundleTotalBytesLimit 而不是另抄一份数字", () => {
+test("文件夹遍历带总字节预算，且预算取自 bundleDirTotalBytesLimit 而不是另抄一份数字", () => {
   const ingest = findFunctionIn(page, "Home", "ingestDroppedDirectory");
   const calls = callSitesIn(ingest);
   const collect = calls.filter((call) => call.target === "collectDirectoryFiles");
@@ -107,8 +107,15 @@ test("文件夹遍历带总字节预算，且预算取自 bundleTotalBytesLimit 
     "collectDirectoryFiles 必须收到总字节预算，否则整棵目录树会被无界读进内存",
   );
   assert.ok(
-    calls.some((call) => call.target === "bundleTotalBytesLimit"),
-    "预算必须来自 bundleTotalBytesLimit（复用 zip 侧同一系数），不能在这里写死第二份数字",
+    calls.some((call) => call.target === "bundleDirTotalBytesLimit"),
+    "预算必须来自 bundleDirTotalBytesLimit（复用 zip 侧同一系数 + 绝对顶，不加容器余量），"
+      + "不能在这里写死第二份数字，也不能绕回裸 bundleTotalBytesLimit——顶配部署会放行"
+      + "4 GiB，readDirectoryAsBundleFiles 的 Promise.all 会整读进内存耗死标签页"
+      + "（codex #518 R6 P2）",
+  );
+  assert.ok(
+    !calls.some((call) => call.target === "bundleTotalBytesLimit"),
+    "绕回裸 bundleTotalBytesLimit 会让顶配部署的文件夹预算重新失去绝对顶",
   );
 });
 

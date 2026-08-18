@@ -16,6 +16,7 @@ import {
   approxByteSizeLabel,
   bundleBatchFullReason,
   bundleCapsFrom,
+  bundleDirTotalBytesLimit,
   bundleErrorMessage,
   bundleFileNamesFor,
   bundleImagesEffectivelyEnabled,
@@ -424,6 +425,46 @@ test("bundleTotalBytesLimit: 缺失/非正数 = 没有可用上限，不做本�
   assert.equal(bundleTotalBytesLimit(null), null);
   assert.equal(bundleTotalBytesLimit(0), null);
   assert.equal(bundleTotalBytesLimit(-1), null);
+});
+
+// ---------------------------------------------------------------------------
+// bundleDirTotalBytesLimit：与 zip 输入侧共用同一条总量线 + 绝对顶，但不加容器余量
+// （codex #518 R6 P2）
+// ---------------------------------------------------------------------------
+
+test("bundleDirTotalBytesLimit: 普通配置下与 bundleTotalBytesLimit 相同，不额外加余量", () => {
+  assert.equal(bundleDirTotalBytesLimit(1024), bundleTotalBytesLimit(1024));
+  assert.equal(bundleDirTotalBytesLimit(50 * 1024 * 1024), bundleTotalBytesLimit(50 * 1024 * 1024));
+});
+
+test("bundleDirTotalBytesLimit: 顶配部署被绝对顶封住，不会放行 4 GiB", () => {
+  // SOURCE_UPLOAD_MAX_MB=1024 时裸 bundleTotalBytesLimit 按系数算出 4 GiB——
+  // readDirectoryAsBundleFiles 的 Promise.all 会把这些字节整读进内存耗死标签页。
+  const protocolMax = 1024 * 1024 * 1024;
+  assert.equal(bundleTotalBytesLimit(protocolMax), protocolMax * MD_BUNDLE_TOTAL_BYTES_FACTOR);
+  assert.equal(bundleDirTotalBytesLimit(protocolMax), BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+  assert.ok(bundleDirTotalBytesLimit(protocolMax) < protocolMax * MD_BUNDLE_TOTAL_BYTES_FACTOR);
+});
+
+test("bundleDirTotalBytesLimit: 配置未到达时落在绝对顶，而不是「不预检」", () => {
+  assert.equal(bundleDirTotalBytesLimit(null), BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+  assert.equal(bundleDirTotalBytesLimit(0), BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+});
+
+test("bundleDirTotalBytesLimit: 恒返回有限数，从不是 null（与裸 bundleTotalBytesLimit 的区别）", () => {
+  for (const value of [null, 0, -1, 1024, 1024 * 1024 * 1024]) {
+    assert.equal(typeof bundleDirTotalBytesLimit(value), "number");
+    assert.ok(Number.isFinite(bundleDirTotalBytesLimit(value)));
+  }
+});
+
+test("bundleDirTotalBytesLimit: 不像 bundleZipInputLimit 那样叠加容器余量", () => {
+  // 文件夹条目的 File.size 就是真实内容字节数，没有 zip 头/deflate 微膨胀这层容器
+  // 开销要抵消；叠加余量只会让「贴着绝对顶」的判断比实际内容更宽松。
+  assert.equal(
+    bundleDirTotalBytesLimit(1024),
+    bundleZipInputLimit(1024) - BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES,
+  );
 });
 
 test("directoryTooLargeMessage: 报出具体上限，并说明内容未被读取", () => {

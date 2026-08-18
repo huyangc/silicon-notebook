@@ -133,8 +133,8 @@ import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getS
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
 import { emptyStagedList, mergeStagedFiles, type StagedList } from "./staged-files.ts";
 import {
-  bundleCapsFrom, bundleErrorMessage, bundleFileNamesFor,
-  bundleImagesEffectivelyEnabled, bundleTotalBytesLimit,
+  bundleCapsFrom, bundleDirTotalBytesLimit, bundleErrorMessage, bundleFileNamesFor,
+  bundleImagesEffectivelyEnabled,
   classifyBundleContents, collectDirectoryFiles, directoryHasMarkdown,
   directoryTooLargeMessage, directoryTruncatedMessage, inlineTooLargeImageLines,
   inlineTooLargeMessage, notStagedNote, processBundleCandidates,
@@ -3642,7 +3642,11 @@ export default function Home() {
     try {
       // 总字节预算是**零 I/O** 预检：只累加条目的 File.size 元数据，超限就地止损，
       // 一个字节都不读（zip 那条路由 parseZipBundle 的解压护栏把关，这里是它的对偶）。
-      const totalLimit = bundleTotalBytesLimit(sourceUploadMaxBytes);
+      // bundleDirTotalBytesLimit 恒返回有限数（复用 zip 输入侧同一个绝对顶，但不加
+      // 容器余量）——顶配部署下裸 bundleTotalBytesLimit 会放行 4 GiB，
+      // readDirectoryAsBundleFiles 的 Promise.all 会把它们整读进内存耗死标签页
+      // （codex #518 R6 P2）。
+      const totalLimit = bundleDirTotalBytesLimit(sourceUploadMaxBytes);
       const { entries, truncated, overBudget } = await collectDirectoryFiles(entry, {
         maxTotalBytes: totalLimit,
       });
@@ -3652,10 +3656,9 @@ export default function Home() {
         return;
       }
       if (overBudget) {
-        // overBudget 只可能在给了预算时为真（collectDirectoryFiles 的契约，有单测钉住）；
-        // `?? 0` 只是类型收窄。判据刻意不写成 `overBudget && totalLimit !== null`——
-        // 那样一旦契约变了就会**穿过去**，把一份中途止损的残缺清单当完整清单入列。
-        appendStagedSkipped([{ name: entry.name, reason: directoryTooLargeMessage(totalLimit ?? 0) }]);
+        // bundleDirTotalBytesLimit 恒返回有限数（不像裸 bundleTotalBytesLimit 那样
+        // 可能是 null），totalLimit 因此不需要再做 `?? 0` 类型收窄。
+        appendStagedSkipped([{ name: entry.name, reason: directoryTooLargeMessage(totalLimit) }]);
         return;
       }
       // 只看路径（零 I/O）判断有没有 markdown：不含 md 的文件夹没必要把里面可能

@@ -128,6 +128,26 @@ export function bundleZipInputLimit(uploadMaxBytes: number | null): number {
   );
 }
 
+/** 一个被拖入的文件夹允许的总字节预算（**零 I/O** 预检，读的是 `File.size` 元数据）。
+ *
+ *  形状：`min(bundleTotalBytesLimit(u) ?? 绝对顶, 绝对顶)`——复用与 zip 输入侧同一条
+ *  解压后总量线与同一个 `BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES` 绝对顶，理由与
+ *  `bundleZipInputLimit` 一致：顶配部署（`SOURCE_UPLOAD_MAX_MB=1024`）按
+ *  `MD_BUNDLE_TOTAL_BYTES_FACTOR=4` 算出的上界是 4 GiB，`readDirectoryAsBundleFiles`
+ *  的 `Promise.all` 会把这些字节一次性读进内存，足以把标签页拖垮（codex #518 R6 P2）。
+ *  配置尚未到达（`bundleTotalBytesLimit` 返回 `null`）时同样落在绝对顶，而不是「没有
+ *  可用上限、不做本地预检」——那正是这道闸要堵的洞，所以本函数**恒返回一个有限数**，
+ *  不像 `bundleTotalBytesLimit` 那样可能是 `null`。
+ *
+ *  与 `bundleZipInputLimit` 唯一的差异：**不加**容器余量。那份余量补的是 zip
+ *  local/central 头、EOCD 与 deflate 微膨胀——是压缩容器本身的开销；文件夹条目走的是
+ *  浏览器原生 `File.size`，就是磁盘上的真实内容字节数，没有这层容器开销要抵消，加了
+ *  反而会让「贴着绝对顶」的判断比实际内容更宽松。 */
+export function bundleDirTotalBytesLimit(uploadMaxBytes: number | null): number {
+  const configured = bundleTotalBytesLimit(uploadMaxBytes) ?? BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES;
+  return Math.min(configured, BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES);
+}
+
 /** 读取一个 zip `File` 的字节并交给 `md-bundle.ts` 的纯函数解析。
  *
  *  体积闸必须跑在 `arrayBuffer()` **之前**：`.zip` 刻意绕开普通上传的单文件大小
