@@ -208,7 +208,11 @@ async def require_notebook_read(
 # 收回成员自建报告的开关——那条路径由 report_routes.py 的行级判定负责。
 #
 # P2-T2 翻的**恰好是这六格**(裁决 P2-1):sources/kg/knowhow/knowledge/catalog
-# 五个内容写 + notebook:manage(=改名 + 授权边管理,设计 §4 组管理员矩阵)。
+# 五个内容写 + notebook:manage(= `PATCH /notebooks/{id}` + 三个授权边端点,设计 §4
+# 组管理员矩阵)。⚠ 那个 PATCH 编辑的是**整份描述性画像**(`NotebookUpdate` 的八个字段)
+# 而不只是改名——「改名」是端点的简写,别读成字段清单(codex #519 R10)。安全性靠两条:
+# 八个字段没有一个参与授权判定(授权只在 `access_sql.py`),且 `extra="forbid"` 挡住了
+# 生命周期列。反向护栏 `backend/tests/test_notebook_update_authorization_free.py`。
 # 留在 "owner" 的**恰好是这三格**:
 #   * `notebook:delete` —— 删库的爆炸半径是整本库且 owner 无法撤销,不随组管理员走;
 #   * `notebook:configure` —— **挂载配置 + 链接分享,P2-T2 评审 P0 拆出来的新格**。
