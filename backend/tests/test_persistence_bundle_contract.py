@@ -43,6 +43,7 @@ BUNDLE_STORE_PORTS = {
     "ask_state": "AskStateStorePort",
     "unified_kg": "UnifiedKgStorePort",
     "model_status": "ModelStatusStorePort",
+    "agent_profile": "AgentProfileStorePort",
 }
 
 

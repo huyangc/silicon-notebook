@@ -2794,6 +2794,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.bump_signal",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.cancel_ask_job",
         "target": "_runtime"
       },
@@ -2812,6 +2818,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.claim",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.claim_report_generation",
         "target": "_runtime"
       },
@@ -2819,6 +2831,18 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.claim_report_intent",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.clear_all",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.clear_block",
         "target": "_runtime"
       },
       {
@@ -3316,6 +3340,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.job_row",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.join_shared",
         "target": "_runtime"
       },
@@ -3742,6 +3772,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.read_block",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.read_blocks",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.rebuild_canonical_relations",
         "target": "_runtime"
       },
@@ -4006,6 +4048,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.settle",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.share_notebook",
         "target": "_runtime"
       },
@@ -4013,6 +4061,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.share_report",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.share_state",
         "target": "_runtime"
       },
       {
@@ -4127,6 +4181,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.summarize_communities",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.sweep_stale_on_start",
         "target": "_runtime"
       },
       {
@@ -4325,6 +4385,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.warm_open_path_caches",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.write_block",
         "target": "_runtime"
       },
       {
@@ -9897,6 +9963,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.select_notebook.load",
+        "target": "user_can_read_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.public_report_route",
         "target": "user_can_read_notebook"
       }
     ],

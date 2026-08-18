@@ -8,6 +8,7 @@ from typing import Any
 from app.core.config import Settings
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.ports import RepositorySeams
+from app.repositories.sqlite.agent_profile_store import AgentProfileStore
 from app.repositories.sqlite.ask_state_store import AskStateStore
 from app.repositories.sqlite.catalog_store import CatalogStore
 from app.repositories.sqlite.chunk_store import ChunkStore
@@ -67,6 +68,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     ask_state: AskStateStore
     unified_kg: UnifiedKgStore
     model_status: ModelStatusStore
+    agent_profile: AgentProfileStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -120,6 +122,9 @@ class SqlitePersistenceBundleFactory:
         ask_state = AskStateStore(database, seams)
         unified_kg = UnifiedKgStore(database, seams.now)
         model_status = ModelStatusStore(database)
+        agent_profile = AgentProfileStore(
+            database, new_id=seams.new_id, now=seams.now
+        )
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -143,4 +148,5 @@ class SqlitePersistenceBundleFactory:
             ask_state=ask_state,
             unified_kg=unified_kg,
             model_status=model_status,
+            agent_profile=agent_profile,
         )
