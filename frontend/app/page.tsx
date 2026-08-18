@@ -3222,7 +3222,10 @@ export default function Home() {
 
   // --- Pending center: precise deep-link per item type --------------------
   async function openPendingItem(item: PendingItem) {
-    if (!await openNotebook(item.notebook_id)) return;
+    // 共享申请是**组维度**的待办,没有 notebook——直接打开群组弹窗,组管理员在
+    // 「待审批申请」区批准/驳回。放在 openNotebook 之前:它没有 notebook_id 可开。
+    if (item.type === "share_request") { setGroupsOpen(true); return; }
+    if (!item.notebook_id || !await openNotebook(item.notebook_id)) return;
     if (item.type === "report_outline") {
       switchChatMode("reports");
       if (item.report_id) setPendingReportFocusId(item.report_id);

@@ -23,12 +23,17 @@ from typing import Any, Callable
 
 from psycopg import errors
 
-from app.repositories.group_rows import fold_shared_notebooks, resolve_grant_principal
+from app.repositories.group_rows import (
+    assert_share_request_decided_at,
+    fold_shared_notebooks,
+    resolve_grant_principal,
+)
 from app.repositories.ports import (
     GroupAdminRequiredError,
     GroupGrantAlreadyExists,
     GroupNotFoundError,
     LastGroupAdminError,
+    ShareRequestNotPendingError,
 )
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -45,6 +50,16 @@ _GRANT_SELECT = (
     "FROM notebook_grants ng "
     "LEFT JOIN groups g ON g.id=ng.principal_id "
     "AND ng.principal_type IN ('group','group_admins') "
+)
+
+# 见 SQLite 那份同名常量。三个 LEFT JOIN 恒能解析(CASCADE 外键保证父行随子行同在)。
+_SHARE_REQUEST_SELECT = (
+    "SELECT sr.*, nb.name AS _notebook_name, g.name AS _group_name, "
+    "u.username AS _requested_by_username "
+    "FROM notebook_share_requests sr "
+    "LEFT JOIN notebooks nb ON nb.id = sr.notebook_id "
+    "LEFT JOIN groups g ON g.id = sr.group_id "
+    "LEFT JOIN users u ON u.id = sr.requested_by "
 )
 
 
@@ -96,6 +111,29 @@ class GroupStore:
             "role": row["role"],
             "principal_name": name,
             "principal_kind": kind,
+            "created_at": iso_timestamp(row["created_at"]),
+        }
+
+    @staticmethod
+    def _share_request_row(row) -> dict:
+        # `decided_at` 是 timestamptz(datetime 或 None):先归一成 ISO/None,**再**断言
+        # ——SQLite 侧断言吃原始 TEXT,PG 侧断言吃归一后的值,两边归一后语义一致
+        # (pending → None,已决定 → 非空 ISO)。PG 的 timestamptz 收不下空串(DB 直接
+        # 类型报错),所以这里 `''` 根本到不了,断言仍作 None-ness 复核。
+        status = row["status"]
+        decided_at = iso_timestamp(row["decided_at"]) or None
+        assert_share_request_decided_at(status, decided_at)
+        return {
+            "id": row["id"],
+            "notebook_id": row["notebook_id"],
+            "notebook_name": row["_notebook_name"] or "",
+            "group_id": row["group_id"],
+            "group_name": row["_group_name"] or "",
+            "requested_by": row["requested_by"],
+            "requested_by_username": row["_requested_by_username"] or row["requested_by"],
+            "status": status,
+            "decided_by": row["decided_by"],
+            "decided_at": decided_at,
             "created_at": iso_timestamp(row["created_at"]),
         }
 
@@ -443,3 +481,145 @@ class GroupStore:
                 (notebook_id, group_id),
             )
         return int(cursor.rowcount or 0)
+
+    # -------------------------------------------------------- 共享申请(P2-T3)
+    def _pending_share_request(
+        self, notebook_id: str, group_id: str
+    ) -> "dict | None":
+        with self.database.connect() as connection:
+            row = connection.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.notebook_id=%s AND sr.group_id=%s AND sr.status='pending'",
+                (notebook_id, group_id),
+            ).fetchone()
+        return self._share_request_row(row) if row is not None else None
+
+    def create_share_request(
+        self, notebook_id: str, *, group_id: str, requested_by: str
+    ) -> dict:
+        """`sqlite/group_store.py::create_share_request` 的镜像:插入 + 撞 pending 唯一
+        索引返回既有行(幂等)。`decided_at` 不写列、留 NULL(绝不写 `''`——PG 的
+        timestamptz 收到空串会类型报错,poison 整条 shadow 正向复制通道)。
+
+        PG 侧多一把 `FOR SHARE`(`_lock_group_on(mode="SHARE")`)复核组还在,与
+        `create_grant` 同一手法;唯一索引冲突在 `write()` 块**之外**捕获(UniqueViolation
+        会中止 PG 事务,必须先整体回滚再另起只读事务取既有 pending 行)。
+        """
+        request_id = self.new_id("shr")
+        try:
+            with self.database.write() as connection:
+                self._lock_group_on(connection, group_id, mode="SHARE")
+                connection.execute(
+                    "INSERT INTO notebook_share_requests "
+                    "(id,notebook_id,group_id,requested_by,status,created_at) "
+                    "VALUES (%s,%s,%s,%s, 'pending', %s)",
+                    (request_id, notebook_id, group_id, requested_by, self.now()),
+                )
+        except errors.UniqueViolation as exc:
+            if exc.diag.constraint_name == "uq_share_requests_one_pending":
+                existing = self._pending_share_request(notebook_id, group_id)
+                if existing is not None:
+                    return existing
+            raise
+        with self.database.connect() as connection:
+            row = connection.execute(
+                _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
+            ).fetchone()
+        return self._share_request_row(row)
+
+    def list_pending_share_requests(self, group_id: str) -> list[dict]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.group_id=%s AND sr.status='pending' "
+                + 'ORDER BY sr.created_at ASC, sr.id COLLATE "C" ASC',
+                (group_id,),
+            ).fetchall()
+        return [self._share_request_row(row) for row in rows]
+
+    def list_my_share_requests(
+        self, notebook_id: str, *, requested_by: str
+    ) -> list[dict]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.notebook_id=%s AND sr.requested_by=%s "
+                + 'ORDER BY sr.created_at DESC, sr.id COLLATE "C" ASC',
+                (notebook_id, requested_by),
+            ).fetchall()
+        return [self._share_request_row(row) for row in rows]
+
+    def approve_share_request(
+        self, group_id: str, request_id: str, *, decided_by: str
+    ) -> "dict | None":
+        """`sqlite` 镜像:同事务里复核仍 pending → 写 `(group, viewer)` 边(已共享则
+        `ON CONFLICT DO NOTHING` 幂等)→ 状态置 approved。
+
+        对**申请行** `FOR UPDATE`(防并发双审):第二个并发批准在第一个提交后重估
+        `status='pending'` 谓词(EvalPlanQual),此时已是 approved、不再匹配 → 返回
+        `None`。`status='pending'` 是精确匹配(红线)。
+        """
+        stamp = self.now()
+        with self.database.write() as connection:
+            row = connection.execute(
+                "SELECT notebook_id FROM notebook_share_requests "
+                "WHERE id=%s AND group_id=%s AND status='pending' FOR UPDATE",
+                (request_id, group_id),
+            ).fetchone()
+            if row is None:
+                return None
+            notebook_id = row["notebook_id"]
+            connection.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES (%s,%s, 'group', %s, 'viewer', %s, %s) "
+                "ON CONFLICT ON CONSTRAINT uq_notebook_grants_principal DO NOTHING",
+                (self.new_id("gnt"), notebook_id, group_id, decided_by, stamp),
+            )
+            connection.execute(
+                "UPDATE notebook_share_requests "
+                "SET status='approved', decided_by=%s, decided_at=%s WHERE id=%s",
+                (decided_by, stamp, request_id),
+            )
+        with self.database.connect() as connection:
+            out = connection.execute(
+                _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
+            ).fetchone()
+        return self._share_request_row(out)
+
+    def reject_share_request(
+        self, group_id: str, request_id: str, *, decided_by: str
+    ) -> "dict | None":
+        stamp = self.now()
+        with self.database.write() as connection:
+            cursor = connection.execute(
+                "UPDATE notebook_share_requests "
+                "SET status='rejected', decided_by=%s, decided_at=%s "
+                "WHERE id=%s AND group_id=%s AND status='pending'",
+                (decided_by, stamp, request_id, group_id),
+            )
+            if int(cursor.rowcount or 0) == 0:
+                return None
+        with self.database.connect() as connection:
+            out = connection.execute(
+                _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
+            ).fetchone()
+        return self._share_request_row(out)
+
+    def delete_share_request(self, notebook_id: str, request_id: str) -> str:
+        with self.database.write() as connection:
+            row = connection.execute(
+                "SELECT status FROM notebook_share_requests "
+                "WHERE id=%s AND notebook_id=%s FOR UPDATE",
+                (request_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                return "not_found"
+            # 见 SQLite 侧同名方法:放行是**正向** `== 'pending'`,不用 `!= 'pending'`。
+            if row["status"] == "pending":
+                connection.execute(
+                    "DELETE FROM notebook_share_requests WHERE id=%s AND notebook_id=%s",
+                    (request_id, notebook_id),
+                )
+                return "deleted"
+            raise ShareRequestNotPendingError(request_id)

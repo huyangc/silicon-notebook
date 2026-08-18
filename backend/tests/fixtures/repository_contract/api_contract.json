@@ -8521,6 +8521,97 @@
           "title": "SetTierRequest",
           "type": "object"
         },
+        "ShareRequestCreate": {
+          "additionalProperties": false,
+          "description": "普通成员发起「把这本库共享给这个组」的申请(群组知识共享 P2-T3)。\n\n只带 `group_id`——`notebook_id` 在 URL 路径里,请求者是当前登录用户,状态恒 `pending`\n(不由客户端指定)。`extra=\"forbid\"` 兜住:传别的字段直接 422,而不是安静忽略。",
+          "properties": {
+            "group_id": {
+              "title": "Group Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "group_id"
+          ],
+          "title": "ShareRequestCreate",
+          "type": "object"
+        },
+        "ShareRequestItem": {
+          "description": "一条共享申请的只读投影。\n\n`decided_by` / `decided_at` 只在**已决定**(approved/rejected)的行上有值——组管理员\n做出决定时才写。`decided_at` 是可空 ISO 时间戳:pending 时为 `None`,绝不是空串\n(v50 迁移注释里点名的纪律,store 层有两态断言把关)。",
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Decided At"
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Decided By"
+            },
+            "group_id": {
+              "title": "Group Id",
+              "type": "string"
+            },
+            "group_name": {
+              "default": "",
+              "title": "Group Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
+              "type": "string"
+            },
+            "requested_by": {
+              "default": "",
+              "title": "Requested By",
+              "type": "string"
+            },
+            "requested_by_username": {
+              "default": "",
+              "title": "Requested By Username",
+              "type": "string"
+            },
+            "status": {
+              "default": "pending",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "group_id"
+          ],
+          "title": "ShareRequestItem",
+          "type": "object"
+        },
         "ShareResponse": {
           "properties": {
             "copyable": {
@@ -12519,6 +12610,148 @@
             }
           },
           "summary": "Leave Group Route"
+        }
+      },
+      "/api/groups/{group_id}/share-requests": {
+        "get": {
+          "description": "组管理员的审核队列:共享给本组的**待审批**申请清单。",
+          "operationId": "list_group_share_requests_route_api_groups__group_id__share_requests_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/ShareRequestItem"
+                    },
+                    "title": "Response List Group Share Requests Route Api Groups  Group Id  Share Requests Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Group Share Requests Route"
+        }
+      },
+      "/api/groups/{group_id}/share-requests/{request_id}/approve": {
+        "post": {
+          "description": "批准:同一写事务写 `(group, viewer)` 授权边并把申请标 approved。\n\n已共享(同库同组已有边)时幂等——不因「已经共享过」让批准失败,那会留下一条永远批\n不掉的申请。申请不存在或已被其他管理员决定 → 404(`approve_share_request` 返回\n`None`,并发双审由 store 的行锁 + 精确状态匹配挡住)。",
+          "operationId": "approve_share_request_route_api_groups__group_id__share_requests__request_id__approve_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "request_id",
+              "required": true,
+              "schema": {
+                "title": "Request Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ShareRequestItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Approve Share Request Route"
+        }
+      },
+      "/api/groups/{group_id}/share-requests/{request_id}/reject": {
+        "post": {
+          "description": "驳回:把申请标 rejected,不写任何授权边。\n\n申请不存在或已被决定 → 404,与批准同一口径。驳回后申请者可看到「已驳回」,并可对同\n库同组重新发起(rejected 不占那条部分唯一索引,`WHERE status='pending'` 才占)。",
+          "operationId": "reject_share_request_route_api_groups__group_id__share_requests__request_id__reject_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "group_id",
+              "required": true,
+              "schema": {
+                "title": "Group Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "request_id",
+              "required": true,
+              "schema": {
+                "title": "Request Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ShareRequestItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reject Share Request Route"
         }
       },
       "/api/groups/{group_id}/shared-notebooks": {
@@ -18930,6 +19163,140 @@
           "summary": "Share Notebook Route"
         }
       },
+      "/api/notebooks/{notebook_id}/share-requests": {
+        "get": {
+          "description": "请求者本人对这本库发起过的申请(弹窗回显待审批 / 已驳回状态)。\n\n只回**本人**发起的(`requested_by = 当前用户`):这是「我提过哪些申请」的自查,不是\n库上全部申请的管理面。管理权那一半仍在依赖层挡住(不能替别人查他对别的组的申请)。",
+          "operationId": "list_my_share_requests_route_api_notebooks__notebook_id__share_requests_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/ShareRequestItem"
+                    },
+                    "title": "Response List My Share Requests Route Api Notebooks  Notebook Id  Share Requests Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List My Share Requests Route"
+        },
+        "post": {
+          "description": "提交共享申请。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的成员。\n\n组成员那一半在这里查(`user_group_role` 非空即成员,普通成员也可——组管理员本就\n不必申请)。非成员与「组不存在」同为 **404**(群组的可见性口径):库主固然知道自己\n的库在,但他不知道那个组存不存在,统一 404 不泄露组的存在性。\n\n幂等:同库同组已有一条待审批申请时,`create_share_request` **返回既有那条**而不是\n报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。组在守卫通过\n之后、写事务落库之前被并发删掉 → `GroupNotFoundError` → 404。",
+          "operationId": "create_share_request_route_api_notebooks__notebook_id__share_requests_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShareRequestCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ShareRequestItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Share Request Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/share-requests/{request_id}": {
+        "delete": {
+          "description": "撤回一条**待审批**申请(申请者自己的动作)。\n\n撤回不是第三个状态,是删整行(裁决 P2-2)。只有 `status='pending'` 可撤:已批准/已驳回\n是既成的决定,撤回它没有意义——store 在写事务里按精确状态判定,已决定的申请撤回请求\n映射成 **409**;根本没有这条申请(或不属于这本库)则 404。`notebook_id` 一起验,防止\n「有一本库的管理权」变成「能撤任何库上的任何申请」。",
+          "operationId": "delete_share_request_route_api_notebooks__notebook_id__share_requests__request_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "request_id",
+              "required": true,
+              "schema": {
+                "title": "Request Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Share Request Route"
+        }
+      },
       "/api/notebooks/{notebook_id}/sources": {
         "get": {
           "operationId": "list_sources_api_notebooks__notebook_id__sources_get",
@@ -19838,7 +20205,7 @@
       },
       "/api/notebooks/{notebook_id}/tier": {
         "post": {
-          "description": "Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本\n挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己\n的公共知识库。",
+          "description": "Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本\n挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己\n的公共知识库。\n\n⚠ 能力档留在 `notebook:manage`(P2-T2 后 = admin,组管理员可过守卫),但体内\n还有一道**系统管理员**门(`user.role != \"admin\"`):发布公共库始终只有系统\n管理员能做,组管理员过了能力守卫也会被这道 403 挡住。它不与 `notebook:configure`\n(挂载/链接分享,恒 owner)同轴——那批是 owner 对自己库的配置,这里是系统级\n发布,两道门的判据不同,刻意不合并。",
           "operationId": "set_notebook_tier_api_notebooks__notebook_id__tier_post",
           "parameters": [
             {

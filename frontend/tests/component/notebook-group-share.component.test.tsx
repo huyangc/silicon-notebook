@@ -8,18 +8,25 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     ...actual,
     listGroups: vi.fn(),
     listNotebookGrants: vi.fn(),
+    listMyShareRequests: vi.fn(),
     shareNotebookToGroup: vi.fn(),
+    submitShareRequest: vi.fn(),
+    withdrawShareRequest: vi.fn(),
     revokeNotebookGrant: vi.fn(),
   };
 });
 
 import {
   listGroups,
+  listMyShareRequests,
   listNotebookGrants,
   revokeNotebookGrant,
   shareNotebookToGroup,
+  submitShareRequest,
+  withdrawShareRequest,
   type GroupSummary,
   type NotebookGrant,
+  type ShareRequest,
 } from "../../app/group-api.ts";
 import { NotebookGroupShare } from "../../app/notebook-group-share.tsx";
 
@@ -34,9 +41,16 @@ const grant = (over: Partial<NotebookGrant>): NotebookGrant => ({
   principal_name: "封装项目", principal_kind: "project", created_at: "", ...over,
 });
 
+const shareRequest = (over: Partial<ShareRequest>): ShareRequest => ({
+  id: "sr1", notebook_id: "nb1", notebook_name: "库", group_id: "g2", group_name: "工艺部",
+  requested_by: "me", requested_by_username: "me", status: "pending",
+  decided_by: null, decided_at: null, created_at: "", ...over,
+});
+
 beforeEach(() => {
   vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP, MEMBER_GROUP]);
   vi.mocked(listNotebookGrants).mockResolvedValue([]);
+  vi.mocked(listMyShareRequests).mockResolvedValue([]);
 });
 
 function renderSection() {
@@ -57,7 +71,7 @@ test("只列我担任组管理员的组,并在共享前说清借来的参考库�
   expect(picker).not.toHaveTextContent("工艺部");
 });
 
-test("共享给群组只发一条只读授权,并让外层重取笔记本清单", async () => {
+test("共享给群组默认只发只读授权(manage 未勾),并让外层重取笔记本清单", async () => {
   const user = userEvent.setup();
   vi.mocked(shareNotebookToGroup).mockResolvedValue(grant({}));
   const { onChanged } = renderSection();
@@ -66,14 +80,29 @@ test("共享给群组只发一条只读授权,并让外层重取笔记本清单"
   await user.selectOptions(screen.getByLabelText("选择群组"), "g1");
   await user.click(screen.getByRole("button", { name: "共享给该群组" }));
 
-  await waitFor(() => expect(shareNotebookToGroup).toHaveBeenCalledWith("nb1", "g1"));
-  // P1 的裁决:不发第二条 group_admins 边——那条边现在没有任何效果。
+  // 默认不勾「组管理员可管理」:manage:false,不追加 group_admins 边。
+  await waitFor(() => expect(shareNotebookToGroup).toHaveBeenCalledWith("nb1", "g1", { manage: false }));
   expect(shareNotebookToGroup).toHaveBeenCalledTimes(1);
   await waitFor(() => expect(onChanged).toHaveBeenCalled());
 });
 
-test("已共享的组不再出现在选择器里;撤销会把该组的两条边一起删掉", async () => {
+test("勾选「组管理员可管理」后共享带 manage:true(追加 group_admins/admin 边)", async () => {
   const user = userEvent.setup();
+  vi.mocked(shareNotebookToGroup).mockResolvedValue(grant({}));
+  renderSection();
+
+  await screen.findByLabelText("选择群组");
+  await user.selectOptions(screen.getByLabelText("选择群组"), "g1");
+  await user.click(screen.getByLabelText("组管理员可管理这本笔记本"));
+  await user.click(screen.getByRole("button", { name: "共享给该群组" }));
+
+  await waitFor(() => expect(shareNotebookToGroup).toHaveBeenCalledWith("nb1", "g1", { manage: true }));
+});
+
+test("已共享的组(含 group_admins 边)折成一项、标注可管理;撤销把两条边一起删掉", async () => {
+  const user = userEvent.setup();
+  // 只有一个我担任组管理员的组,且它已经共享过(两条边)——没有别的组可选/可申请。
+  vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP]);
   vi.mocked(listNotebookGrants).mockResolvedValue([
     grant({ id: "gr1", principal_type: "group" }),
     grant({ id: "gr2", principal_type: "group_admins", role: "admin" }),
@@ -82,9 +111,11 @@ test("已共享的组不再出现在选择器里;撤销会把该组的两条边�
   renderSection();
 
   await screen.findByText("封装项目");
-  // 唯一的组管理员身份的组已经共享过,所以连选择器都不该出现。
+  // 已共享过,直接共享选择器不该出现;没有别的组,兜底文案出现。
   expect(screen.queryByLabelText("选择群组")).not.toBeInTheDocument();
-  expect(screen.getByText(/没有可选的群组/)).toBeInTheDocument();
+  expect(screen.getByText(/没有可共享的群组/)).toBeInTheDocument();
+  // 带 group_admins 边 → 折成一项并标注「组管理员可管理」。
+  expect(screen.getByText("组管理员可管理")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "撤销共享" }));
   await waitFor(() => expect(revokeNotebookGrant).toHaveBeenCalledTimes(2));
@@ -154,4 +185,53 @@ test("撤销中途失败也要重取清单——不留一个「删了一半」�
   await screen.findByText("撤销共享失败");
   // 失败分支也重取:否则界面还按发起前那份清单渲染,用户看不出删掉了哪几条。
   await waitFor(() => expect(listNotebookGrants).toHaveBeenCalled());
+});
+
+test("我只是普通成员的组走「提交共享申请」而不是直接发边", async () => {
+  const user = userEvent.setup();
+  vi.mocked(submitShareRequest).mockResolvedValue(shareRequest({}));
+  const { onChanged } = renderSection();
+
+  await screen.findByText(/你不是这些群组的组管理员/);
+  const picker = screen.getByLabelText("选择要申请的群组");
+  // 我只是成员的 g2 出现在申请选择器里;我是组管理员的 g1 不在这里(它走直接共享)。
+  expect(picker).toHaveTextContent("工艺部");
+  expect(picker).not.toHaveTextContent("封装项目");
+
+  await user.selectOptions(picker, "g2");
+  await user.click(screen.getByRole("button", { name: "提交共享申请" }));
+  await waitFor(() => expect(submitShareRequest).toHaveBeenCalledWith("nb1", "g2"));
+  // 直接共享的入口没被误触发。
+  expect(shareNotebookToGroup).not.toHaveBeenCalled();
+  await waitFor(() => expect(onChanged).toHaveBeenCalled());
+});
+
+test("我发起的申请回显状态:待审批可撤回,已驳回只读且不再出现在申请选择器", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([MEMBER_GROUP]); // 只有一个我是成员的组 g2
+  vi.mocked(listMyShareRequests).mockResolvedValue([
+    shareRequest({ id: "sr-pending", group_id: "g2", group_name: "工艺部", status: "pending" }),
+  ]);
+  vi.mocked(withdrawShareRequest).mockResolvedValue(undefined);
+  renderSection();
+
+  await screen.findByText("我的共享申请");
+  expect(screen.getByText("待审批")).toBeInTheDocument();
+  // 已有 pending 申请的组不再出现在申请选择器里(避免让人以为能提交第二份)。
+  expect(screen.queryByLabelText("选择要申请的群组")).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "撤回申请" }));
+  await waitFor(() => expect(withdrawShareRequest).toHaveBeenCalledWith("nb1", "sr-pending"));
+});
+
+test("已驳回的申请只读回显,没有撤回按钮", async () => {
+  vi.mocked(listGroups).mockResolvedValue([MEMBER_GROUP]);
+  vi.mocked(listMyShareRequests).mockResolvedValue([
+    shareRequest({ id: "sr-rej", group_id: "g2", group_name: "工艺部", status: "rejected" }),
+  ]);
+  renderSection();
+
+  await screen.findByText("我的共享申请");
+  expect(screen.getByText("已驳回")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "撤回申请" })).not.toBeInTheDocument();
 });

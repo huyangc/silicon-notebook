@@ -69,7 +69,7 @@ class PendingActionsService:
         count = sum(
             1
             for item in items
-            if item["type"] in ("report_outline", "governance")
+            if item["type"] in ("report_outline", "governance", "share_request")
             or (
                 item["type"] == "index"
                 and item["state"] in ("stale", "suggested")

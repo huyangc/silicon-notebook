@@ -2764,6 +2764,17 @@ class GroupAdminRequiredError(RuntimeError):
     """
 
 
+class ShareRequestNotPendingError(RuntimeError):
+    """撤回一条**已被决定**(approved/rejected)的共享申请(群组知识共享 P2-T3)。
+
+    撤回(`DELETE /notebooks/{id}/share-requests/{rid}`)只在 `status='pending'` 时允许:
+    已审批/已驳回的申请是一个既成的决定,撤回它没有意义。store 在写事务内按**精确**
+    状态匹配判定(`status == 'pending'` 才删),否则抛它,路由映射成 409。与
+    `GroupNotFoundError` 分开:「这条申请不存在」是 404,「它在但已决定」是 409,两者
+    对用户是完全不同的两件事。
+    """
+
+
 @runtime_checkable
 class GroupStorePort(Protocol):
     """群组 / 组成员 / 笔记本授权边的行持久化面。
@@ -2819,6 +2830,40 @@ class GroupStorePort(Protocol):
     def delete_group_grants_for_notebook(
         self, group_id: str, notebook_id: str
     ) -> int: ...
+
+    # --- 成员贡献审批流(群组知识共享 P2-T3) -----------------------------
+    def create_share_request(
+        self, notebook_id: str, *, group_id: str, requested_by: str
+    ) -> dict:
+        """新建一条共享申请;撞 `uq_share_requests_one_pending` **不报错**,而是返回
+        已存在的那条 `pending` 行(幂等)——申请者刷新页面重复提交是常见操作。组已被
+        并发删掉(FK 冲突)抛 `GroupNotFoundError`。"""
+        ...
+    def list_pending_share_requests(self, group_id: str) -> list[dict]:
+        """某个组的**待审批**申请清单(组管理员的审核队列)。`status='pending'` 精确匹配。"""
+        ...
+    def list_my_share_requests(
+        self, notebook_id: str, *, requested_by: str
+    ) -> list[dict]:
+        """请求者本人对某本库发起过的全部申请(弹窗里回显「待审批 / 已驳回」)。"""
+        ...
+    def approve_share_request(
+        self, group_id: str, request_id: str, *, decided_by: str
+    ) -> "dict | None":
+        """批准:**同一写事务**内复核申请仍 pending + 组在 + 写 `(group, viewer)` 授权边
+        (已共享则幂等复用)+ 状态置 approved、写 `decided_by`/`decided_at`。申请不存在
+        或已被决定返回 `None`(路由 → 404)。"""
+        ...
+    def reject_share_request(
+        self, group_id: str, request_id: str, *, decided_by: str
+    ) -> "dict | None":
+        """驳回:状态置 rejected + `decided_by`/`decided_at`。申请不存在或已被决定返回
+        `None`。不写任何授权边。"""
+        ...
+    def delete_share_request(self, notebook_id: str, request_id: str) -> str:
+        """撤回:仅 `status='pending'` 可删。返回 `"deleted"`;不存在返回 `"not_found"`;
+        已决定抛 `ShareRequestNotPendingError`。"""
+        ...
 
 
 @runtime_checkable

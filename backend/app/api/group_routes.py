@@ -64,6 +64,8 @@ from app.models.groups import (
     GroupSummary,
     GroupUpdate,
     NotebookGrantItem,
+    ShareRequestCreate,
+    ShareRequestItem,
     UserRef,
 )
 from app.models.identity import UserProfile
@@ -72,6 +74,7 @@ from app.repositories.ports import (
     GroupGrantAlreadyExists,
     GroupNotFoundError,
     LastGroupAdminError,
+    ShareRequestNotPendingError,
 )
 
 
@@ -442,3 +445,159 @@ def delete_group_shared_notebook_route(
     _require_group_admin(group_id, user)
     if not group_repository().delete_group_grants_for_notebook(group_id, notebook_id):
         raise user_error(404, "这本知识库没有共享给该群组")
+
+
+# --------------------------------------------------------------- 成员贡献审批流
+#
+# 授权边的两个写入口(库主/组管理员直接发边)覆盖的是「发起者本人就是目标组的组
+# 管理员」那一半;这一节覆盖**另一半**:一个对某本库有管理权、但对目标组只是普通成员
+# 的人,想把库贡献给那个组——他没有直接发边的权限,只能**申请**,由组管理员审批
+# (设计文档 §4 决策 9)。状态机 **pending → approved / rejected 单向**(裁决 P2-2):
+# 撤回是申请者删整行、不是第四个状态,所以 `decided_by`/`decided_at` 保持「组管理员做出
+# 的决定」这一纯粹语义。批准把 `(group, viewer)` 边与状态更新放在**同一写事务**里——
+# 批准这件事要么整体生效、要么整体不生效,不能出现「边发了、申请还挂着 pending」或
+# 反过来的半成品。
+#
+# ⚠ 组管理员分享进**自己管理**的组永远不走这张表:他直接写 `notebook_grants` 行。
+
+
+@router.post(
+    "/notebooks/{notebook_id}/share-requests",
+    response_model=ShareRequestItem,
+    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+)
+def create_share_request_route(
+    notebook_id: str,
+    payload: ShareRequestCreate,
+    user: UserProfile = Depends(get_current_user),
+) -> ShareRequestItem:
+    """提交共享申请。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的成员。
+
+    组成员那一半在这里查(`user_group_role` 非空即成员,普通成员也可——组管理员本就
+    不必申请)。非成员与「组不存在」同为 **404**(群组的可见性口径):库主固然知道自己
+    的库在,但他不知道那个组存不存在,统一 404 不泄露组的存在性。
+
+    幂等:同库同组已有一条待审批申请时,`create_share_request` **返回既有那条**而不是
+    报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。组在守卫通过
+    之后、写事务落库之前被并发删掉 → `GroupNotFoundError` → 404。
+    """
+    groups = group_repository()
+    group_id = payload.group_id.strip()
+    if groups.user_group_role(group_id, user.id) is None:
+        raise _group_not_found()
+    try:
+        request = groups.create_share_request(
+            notebook_id, group_id=group_id, requested_by=user.id
+        )
+    except GroupNotFoundError:
+        raise _group_not_found()
+    return ShareRequestItem(**request)
+
+
+@router.get(
+    "/notebooks/{notebook_id}/share-requests",
+    response_model=List[ShareRequestItem],
+    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+)
+def list_my_share_requests_route(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> List[ShareRequestItem]:
+    """请求者本人对这本库发起过的申请(弹窗回显待审批 / 已驳回状态)。
+
+    只回**本人**发起的(`requested_by = 当前用户`):这是「我提过哪些申请」的自查,不是
+    库上全部申请的管理面。管理权那一半仍在依赖层挡住(不能替别人查他对别的组的申请)。
+    """
+    return [
+        ShareRequestItem(**item)
+        for item in group_repository().list_my_share_requests(
+            notebook_id, requested_by=user.id
+        )
+    ]
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/share-requests/{request_id}",
+    status_code=204,
+    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
+)
+def delete_share_request_route(
+    notebook_id: str,
+    request_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> None:
+    """撤回一条**待审批**申请(申请者自己的动作)。
+
+    撤回不是第三个状态,是删整行(裁决 P2-2)。只有 `status='pending'` 可撤:已批准/已驳回
+    是既成的决定,撤回它没有意义——store 在写事务里按精确状态判定,已决定的申请撤回请求
+    映射成 **409**;根本没有这条申请(或不属于这本库)则 404。`notebook_id` 一起验,防止
+    「有一本库的管理权」变成「能撤任何库上的任何申请」。
+    """
+    del user
+    try:
+        outcome = group_repository().delete_share_request(notebook_id, request_id)
+    except ShareRequestNotPendingError:
+        raise user_error(409, "这条共享申请已经处理过了,无法撤回")
+    if outcome == "not_found":
+        raise user_error(404, "这条共享申请不存在")
+
+
+@router.get(
+    "/groups/{group_id}/share-requests",
+    response_model=List[ShareRequestItem],
+)
+def list_group_share_requests_route(
+    group_id: str, user: UserProfile = Depends(get_current_user)
+) -> List[ShareRequestItem]:
+    """组管理员的审核队列:共享给本组的**待审批**申请清单。"""
+    _require_group_admin(group_id, user)
+    return [
+        ShareRequestItem(**item)
+        for item in group_repository().list_pending_share_requests(group_id)
+    ]
+
+
+@router.post(
+    "/groups/{group_id}/share-requests/{request_id}/approve",
+    response_model=ShareRequestItem,
+)
+def approve_share_request_route(
+    group_id: str,
+    request_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> ShareRequestItem:
+    """批准:同一写事务写 `(group, viewer)` 授权边并把申请标 approved。
+
+    已共享(同库同组已有边)时幂等——不因「已经共享过」让批准失败,那会留下一条永远批
+    不掉的申请。申请不存在或已被其他管理员决定 → 404(`approve_share_request` 返回
+    `None`,并发双审由 store 的行锁 + 精确状态匹配挡住)。
+    """
+    _require_group_admin(group_id, user)
+    decided = group_repository().approve_share_request(
+        group_id, request_id, decided_by=user.id
+    )
+    if decided is None:
+        raise user_error(404, "这条待审批的共享申请不存在或已被处理")
+    return ShareRequestItem(**decided)
+
+
+@router.post(
+    "/groups/{group_id}/share-requests/{request_id}/reject",
+    response_model=ShareRequestItem,
+)
+def reject_share_request_route(
+    group_id: str,
+    request_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> ShareRequestItem:
+    """驳回:把申请标 rejected,不写任何授权边。
+
+    申请不存在或已被决定 → 404,与批准同一口径。驳回后申请者可看到「已驳回」,并可对同
+    库同组重新发起(rejected 不占那条部分唯一索引,`WHERE status='pending'` 才占)。
+    """
+    _require_group_admin(group_id, user)
+    decided = group_repository().reject_share_request(
+        group_id, request_id, decided_by=user.id
+    )
+    if decided is None:
+        raise user_error(404, "这条待审批的共享申请不存在或已被处理")
+    return ShareRequestItem(**decided)

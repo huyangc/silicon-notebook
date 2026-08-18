@@ -12,8 +12,12 @@ import {
   groupRoleLabel,
   isGroupAdmin,
   isGroupGranted,
+  isPlainMember,
   partitionByGrant,
+  requestableGroups,
   shareableGroups,
+  shareRequestStatusLabel,
+  visibleMyShareRequests,
 } from "../../app/group-api.ts";
 
 test("群组分类与角色都翻成界面词,未知值退中性词而不是吐后端的英文 id", () => {
@@ -62,6 +66,59 @@ test("同一个组的两条边(成员只读 / 组管理员可管)折成一项,�
   ]);
   assert.equal(entries.length, 1);
   assert.deepEqual(entries[0].grantIds, ["gr1", "gr2"]);
+  // 带 group_admins 边 → 标注可管理(两条边任意顺序都成立)。
+  assert.equal(entries[0].manage, true);
+});
+
+test("只有一条只读边时 manage 为假;group_admins 边先出现也照样标可管理", () => {
+  const readOnly = foldGroupShares([
+    { id: "gr1", principal_type: "group", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.equal(readOnly[0].manage, false);
+  // group_admins 边先返回、group 边后返回,manage 仍为真(顺序无关)。
+  const adminFirst = foldGroupShares([
+    { id: "gr2", principal_type: "group_admins", principal_id: "g1", role: "admin", principal_name: "组", principal_kind: "project", created_at: "" },
+    { id: "gr1", principal_type: "group", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.equal(adminFirst.length, 1);
+  assert.equal(adminFirst[0].manage, true);
+});
+
+test("普通成员的组走申请路径:排除已共享的组与已有 pending 申请的组,但保留已驳回的", () => {
+  const groups = [
+    { id: "g1", my_role: "admin" },   // 组管理员 → 走直接共享,不在申请路径
+    { id: "g2", my_role: "member" },  // 普通成员 → 可申请
+    { id: "g3", my_role: "member" },  // 普通成员,但已共享 → 排除
+    { id: "g4", my_role: "member" },  // 普通成员,但已有 pending → 排除
+    { id: "g5", my_role: "member" },  // 普通成员,曾被驳回 → 仍可重新申请
+    { id: "g6", my_role: "" },        // 非成员 → 都不在
+  ];
+  assert.ok(isPlainMember(groups[1]));
+  assert.ok(!isPlainMember(groups[0]));
+  const shared = foldGroupShares([
+    { id: "s3", principal_type: "group", principal_id: "g3", role: "viewer", principal_name: "已共享", principal_kind: "project", created_at: "" },
+  ]);
+  const requests = [
+    { id: "r4", group_id: "g4", status: "pending" },
+    { id: "r5", group_id: "g5", status: "rejected" },
+  ];
+  assert.deepEqual(
+    requestableGroups(groups, shared, requests).map((g) => g.id),
+    ["g2", "g5"],
+  );
+});
+
+test("申请状态翻成界面词,未知值退中性词;回显只留待审批与已驳回(已批准已变成共享)", () => {
+  assert.equal(shareRequestStatusLabel("pending"), "待审批");
+  assert.equal(shareRequestStatusLabel("approved"), "已批准");
+  assert.equal(shareRequestStatusLabel("rejected"), "已驳回");
+  assert.equal(shareRequestStatusLabel("weird"), "申请");
+  const visible = visibleMyShareRequests([
+    { id: "a", group_id: "g1", status: "pending" },
+    { id: "b", group_id: "g2", status: "approved" },
+    { id: "c", group_id: "g3", status: "rejected" },
+  ]);
+  assert.deepEqual(visible.map((r) => r.id), ["a", "c"]);
 });
 
 test("孤儿边(组已不存在)标成 missing,让库主看得懂并且删得掉", () => {

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { toUserMessage } from "./errors.ts";
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import {
+  approveShareRequest,
   createGroup,
   creatableGroupKinds,
   GROUP_INPUT_LIMITS,
@@ -15,9 +16,11 @@ import {
   groupRoleLabel,
   isGroupAdmin,
   leaveGroup,
+  listGroupShareRequests,
   listGroupSharedNotebooks,
   listGroups,
   putGroupMember,
+  rejectShareRequest,
   removeGroupMember,
   resolveUser,
   revokeGroupSharedNotebook,
@@ -25,6 +28,7 @@ import {
   type GroupDetail,
   type GroupSharedNotebook,
   type GroupSummary,
+  type ShareRequest,
 } from "./group-api.ts";
 
 /** 快到长度上限时才出声的余量提示;还早的时候一个字都不渲染。 */
@@ -67,6 +71,7 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
   const [groups, setGroups] = useState<GroupSummary[] | null>(null);
   const [detail, setDetail] = useState<GroupDetail | null>(null);
   const [shared, setShared] = useState<GroupSharedNotebook[] | null>(null);
+  const [shareRequests, setShareRequests] = useState<ShareRequest[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -115,18 +120,17 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
     // 空白 + 一句错误,读起来是「没打开」,而不是「打开了别的组的内容」。
     setDetail(null);
     setShared(null);
+    setShareRequests(null);
     await run(async () => {
       const group = await getGroup(groupId);
       setDetail(group);
       setRenameDraft(group.name);
       setDescriptionDraft(group.description);
-      // 「共享给本组的知识库」只有组管理员读得到(非管理员 404),所以对普通成员
-      // 连查都不查——不是藏起来,是那条清单本来就不属于他这一层。
-      setShared(
-        isGroupAdmin(group) || isSystemAdmin
-          ? await listGroupSharedNotebooks(groupId)
-          : null,
-      );
+      // 「共享给本组的知识库」与「待审批申请」都只有组管理员读得到(非管理员 404),
+      // 所以对普通成员连查都不查——不是藏起来,是那两条清单本来就不属于他这一层。
+      const manageable = isGroupAdmin(group) || isSystemAdmin;
+      setShared(manageable ? await listGroupSharedNotebooks(groupId) : null);
+      setShareRequests(manageable ? await listGroupShareRequests(groupId) : null);
     }, "群组详情加载失败");
   }
 
@@ -152,7 +156,7 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                   role="tab"
                   aria-selected={scope === id}
                   className={`tab ${scope === id ? "active" : ""}`}
-                  onClick={() => { setScope(id); setDetail(null); setShared(null); }}
+                  onClick={() => { setScope(id); setDetail(null); setShared(null); setShareRequests(null); }}
                 >{text}</button>
               ))}
             </div>
@@ -385,6 +389,40 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
 
               {canManage && (
                 <>
+                  <span className="section-title">待审批申请</span>
+                  {shareRequests === null ? (
+                    <p className="tool-hint">加载中…</p>
+                  ) : shareRequests.length === 0 ? (
+                    <p className="tool-hint">没有待审批的共享申请。</p>
+                  ) : (
+                    shareRequests.map((req) => (
+                      <div className="checklist-row" key={req.id} style={{ alignItems: "center", gap: 8 }}>
+                        <span style={{ flex: 1, wordBreak: "break-word" }}>{req.notebook_name || "知识库"}</span>
+                        <span className="tool-hint">申请人 {req.requested_by_username}</span>
+                        {/* 批准会写一条授权边、把库交给整组——即时反馈够了(边可撤),
+                            但不能默默无声,所以两个按钮各自忙碌态可见。 */}
+                        <button
+                          className="new-pill"
+                          disabled={busy}
+                          onClick={() => { void run(async () => {
+                            await approveShareRequest(detail.id, req.id);
+                            setShareRequests(await listGroupShareRequests(detail.id));
+                            setShared(await listGroupSharedNotebooks(detail.id));
+                            onChanged();
+                          }, "批准申请失败"); }}
+                        >{busy ? "处理中…" : "批准"}</button>
+                        <button
+                          className="sort-button"
+                          disabled={busy}
+                          onClick={() => { void run(async () => {
+                            await rejectShareRequest(detail.id, req.id);
+                            setShareRequests(await listGroupShareRequests(detail.id));
+                          }, "驳回申请失败"); }}
+                        >{busy ? "处理中…" : "驳回"}</button>
+                      </div>
+                    ))
+                  )}
+
                   <span className="section-title">共享给本组的知识库</span>
                   {shared === null ? (
                     <p className="tool-hint">加载中…</p>
@@ -422,6 +460,7 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                           await leaveGroup(detail.id);
                           setDetail(null);
                           setShared(null);
+                          setShareRequests(null);
                           setConfirming("");
                           await refreshGroups(scope);
                           onChanged();
@@ -448,6 +487,7 @@ export function GroupsModal({ isSystemAdmin, onChanged, onClose }: GroupsModalPr
                           await deleteGroup(detail.id);
                           setDetail(null);
                           setShared(null);
+                          setShareRequests(null);
                           setConfirming("");
                           await refreshGroups(scope);
                           onChanged();

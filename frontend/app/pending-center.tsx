@@ -15,9 +15,12 @@ const saveSigs = (key: string, v: string[]) => {
 };
 
 export type PendingItem = {
-  type: "report_outline" | "governance" | "index" | "paper_meta";
-  notebook_id: string;
-  notebook_name: string;
+  type: "report_outline" | "governance" | "index" | "paper_meta" | "share_request";
+  // share_request 是**组维度**的项——没有 notebook,所以这两个字段对它是可选/空。
+  notebook_id?: string;
+  notebook_name?: string;
+  group_id?: string;    // share_request:待审批申请所属的群组
+  group_name?: string;  // share_request:群组名(行标签)
   subtype?: "merge" | "edge" | "promotion";
   report_id?: string;
   title?: string;
@@ -230,6 +233,7 @@ export function PendingBell(props: {
 
   const groups: { key: string; label: string; items: PendingItem[] }[] = [
     { key: "report_outline", label: "深度报告待确认", items: view.visibleItems.filter((i) => i.type === "report_outline") },
+    { key: "share_request", label: "共享申请", items: view.visibleItems.filter((i) => i.type === "share_request") },
     { key: "governance", label: "治理待办", items: view.visibleItems.filter((i) => i.type === "governance") },
     { key: "index", label: "索引状态", items: view.visibleItems.filter((i) => i.type === "index") },
     { key: "paper_meta", label: "论文元数据", items: view.visibleItems.filter((i) => i.type === "paper_meta") },
@@ -237,6 +241,7 @@ export function PendingBell(props: {
 
   const labelFor = (it: PendingItem): string => {
     if (it.type === "report_outline") return `深度报告《${it.title}》`;
+    if (it.type === "share_request") return `${it.group_name || "群组"} · ${it.count ?? 0} 项待审批`;
     if (it.type === "governance") {
       const n = it.subtype === "merge" ? "待合并" : it.subtype === "edge" ? "关系审核" : "内容审核";
       return `${it.notebook_name} · ${n} ${it.count}`;

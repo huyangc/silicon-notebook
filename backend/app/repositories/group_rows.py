@@ -124,6 +124,43 @@ def notebook_grant_confers_admin(row: Any) -> bool:
     return role == ADMIN_GRANT_ROLE
 
 
+#: 共享申请的三个合法状态。与 `models/groups.py::SHARE_REQUEST_STATUSES` 同值——
+#: 那份是 API 层校验真源,这里是行整形层复用的同一集合(两处不互相 import:models 是
+#: API 层、这里是中性行整形,由 `test_group_routes` 的写路径断言与它一致)。
+SHARE_REQUEST_DECIDED_STATUSES = ("approved", "rejected")
+
+
+def assert_share_request_decided_at(status: Any, decided_at: Any) -> None:
+    """`notebook_share_requests` 的 `decided_at` 两态不变式(群组知识共享 P2-T3)。
+
+    两侧 store 的行投影都在读到每一行时调它,把「decided_at 该是 NULL 还是 ISO」这条
+    纪律做成**always-on 的写路径复核**而不是只靠人工审阅:
+
+    * `status == 'pending'` ⟺ `decided_at is None`。pending 行的 `decided_at` 若不是
+      真 NULL(尤其是被某处手滑写成了 `''`),这里当场 `AssertionError` ——那正是 v50
+      迁移注释点名要防的:PostgreSQL 的 `timestamptz` 收到空串会类型报错、poison 整条
+      shadow 正向复制通道,而空串又刻意**没有**登记进 `POSTGRES_EMPTY_TIME_SENTINELS`,
+      不会被哨兵表悄悄兼容掉。所以最省事的防线就是「决不让 `''` 落库」,由这条断言在
+      开发/测试期把它顶回去。
+    * `status in ('approved','rejected')` ⟹ `decided_at` 是**非空**字符串(datetime
+      已在调用点归一成 ISO)。已决定却没有决定时间同样是坏数据。
+
+    只对三个合法状态生效:shadow 停车会给冲突行的 `status` 暂写哨兵串,但那种行只在
+    replicator 内部流转、从不经本 store 投影,所以这里遇到未知 `status` 直接放行、不
+    误伤(与「status 精确匹配」红线同一方向)。
+    """
+    if status == "pending":
+        assert decided_at is None, (
+            "pending share request must have decided_at IS NULL, got "
+            f"{decided_at!r} (never write '' — it poisons the shadow timestamptz)"
+        )
+    elif status in SHARE_REQUEST_DECIDED_STATUSES:
+        assert isinstance(decided_at, str) and decided_at, (
+            f"decided share request ({status}) must carry an ISO decided_at, got "
+            f"{decided_at!r}"
+        )
+
+
 def fold_granted_notebook_groups(rows: Sequence[Any]) -> dict[str, list[dict]]:
     """授权边列表投影的第二半:``notebook_id -> [{group_id, group_name, kind}]``。
 

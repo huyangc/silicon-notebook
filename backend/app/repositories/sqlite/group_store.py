@@ -30,12 +30,17 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
-from app.repositories.group_rows import fold_shared_notebooks, resolve_grant_principal
+from app.repositories.group_rows import (
+    assert_share_request_decided_at,
+    fold_shared_notebooks,
+    resolve_grant_principal,
+)
 from app.repositories.ports import (
     GroupAdminRequiredError,
     GroupGrantAlreadyExists,
     GroupNotFoundError,
     LastGroupAdminError,
+    ShareRequestNotPendingError,
 )
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -59,6 +64,28 @@ _GRANT_SELECT = (
 # 已有边」这一种冲突。裸 `"UNIQUE" in message` 会把主键冲突之类的别的约束也吞进来,
 # 报成一句「已经共享过了」——那是把一个真 bug 说成用户操作重复。
 _GRANT_UNIQUE_MARKERS = ("UNIQUE constraint failed", "notebook_grants.notebook_id")
+
+# 同款判据,钉到 `uq_share_requests_one_pending` 的首列:同库同组已有一条**待审批**
+# 申请。撞它不是失败而是**幂等**(返回既有 pending 行,见 `create_share_request`),
+# 所以判据要窄——PK 冲突(`notebook_share_requests.id`)不能落进这个分支,否则真 bug
+# 会被当成「重复提交」。
+_SHARE_REQUEST_PENDING_UNIQUE_MARKERS = (
+    "UNIQUE constraint failed",
+    "notebook_share_requests.notebook_id",
+)
+
+# 一条共享申请 + 它的库名/组名/申请者用户名(仅供展示)。三个 LEFT JOIN 都恒能解析:
+# `notebook_id`/`group_id` 是 ON DELETE CASCADE 外键——库或组一旦删掉,申请行随之消失,
+# 所以「行还在」就意味着两个父行都在;`requested_by` 无 ON DELETE 子句但用户不会凭空
+# 消失。LEFT JOIN 只是纵深防御,不改变行数。
+_SHARE_REQUEST_SELECT = (
+    "SELECT sr.*, nb.name AS _notebook_name, g.name AS _group_name, "
+    "u.username AS _requested_by_username "
+    "FROM notebook_share_requests sr "
+    "LEFT JOIN notebooks nb ON nb.id = sr.notebook_id "
+    "LEFT JOIN groups g ON g.id = sr.group_id "
+    "LEFT JOIN users u ON u.id = sr.requested_by "
+)
 
 
 class GroupStore:
@@ -109,6 +136,27 @@ class GroupStore:
             "role": row["role"],
             "principal_name": name,
             "principal_kind": kind,
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _share_request_row(row) -> dict:
+        # SQLite 的 `decided_at` 已是 TEXT(None 或 ISO);断言直接吃**原始**值,
+        # 好让「pending 行被手滑写成 '' 」当场被顶回(v50 迁移点名的 poison 前置防线)。
+        status = row["status"]
+        decided_at = row["decided_at"]
+        assert_share_request_decided_at(status, decided_at)
+        return {
+            "id": row["id"],
+            "notebook_id": row["notebook_id"],
+            "notebook_name": row["_notebook_name"] or "",
+            "group_id": row["group_id"],
+            "group_name": row["_group_name"] or "",
+            "requested_by": row["requested_by"],
+            "requested_by_username": row["_requested_by_username"] or row["requested_by"],
+            "status": status,
+            "decided_by": row["decided_by"],
+            "decided_at": decided_at,
             "created_at": row["created_at"],
         }
 
@@ -461,3 +509,163 @@ class GroupStore:
                 (notebook_id, group_id),
             )
         return cursor.rowcount
+
+    # -------------------------------------------------------- 共享申请(P2-T3)
+    def _pending_share_request(
+        self, notebook_id: str, group_id: str
+    ) -> "dict | None":
+        with self.database.connect() as db:
+            row = db.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.notebook_id=? AND sr.group_id=? AND sr.status='pending'",
+                (notebook_id, group_id),
+            ).fetchone()
+        return self._share_request_row(row) if row is not None else None
+
+    def create_share_request(
+        self, notebook_id: str, *, group_id: str, requested_by: str
+    ) -> dict:
+        """新建一条共享申请。撞 `uq_share_requests_one_pending` **返回既有 pending 行**
+        (幂等,不报错——刷新页面重复提交是常见操作)。
+
+        `status` 恒 `'pending'`、`decided_at` **留 NULL**(不写列,取默认;绝不写 `''`)。
+        在写事务里先 `_require_group_on` 复核组还在:少了它,组被并发删掉时插入会撞
+        `group_id` 外键抛 `IntegrityError`(用户拿到 500),而正确答案是 404。同一写锁下
+        复核过后,唯一还可能的 `IntegrityError` 就是那条 pending 唯一索引冲突。
+        """
+        request_id = self.new_id("shr")
+        try:
+            with self.database.write() as db:
+                self._require_group_on(db, group_id)
+                db.execute(
+                    "INSERT INTO notebook_share_requests "
+                    "(id,notebook_id,group_id,requested_by,status,created_at) "
+                    "VALUES (?,?,?,?, 'pending', ?)",
+                    (request_id, notebook_id, group_id, requested_by, self.now()),
+                )
+        except sqlite3.IntegrityError as exc:
+            if all(
+                marker in str(exc)
+                for marker in _SHARE_REQUEST_PENDING_UNIQUE_MARKERS
+            ):
+                existing = self._pending_share_request(notebook_id, group_id)
+                if existing is not None:
+                    return existing
+            raise
+        with self.database.connect() as db:
+            row = db.execute(
+                _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
+            ).fetchone()
+        return self._share_request_row(row)
+
+    def list_pending_share_requests(self, group_id: str) -> list[dict]:
+        """组管理员的审核队列:该组全部**待审批**申请。`status='pending'` 精确匹配。"""
+        with self.database.connect() as db:
+            rows = db.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.group_id=? AND sr.status='pending' "
+                + "ORDER BY sr.created_at ASC, sr.id ASC",
+                (group_id,),
+            ).fetchall()
+        return [self._share_request_row(row) for row in rows]
+
+    def list_my_share_requests(
+        self, notebook_id: str, *, requested_by: str
+    ) -> list[dict]:
+        """请求者本人对某本库发起过的全部申请(弹窗回显待审批 / 已驳回),最新在前。"""
+        with self.database.connect() as db:
+            rows = db.execute(
+                _SHARE_REQUEST_SELECT
+                + "WHERE sr.notebook_id=? AND sr.requested_by=? "
+                + "ORDER BY sr.created_at DESC, sr.id ASC",
+                (notebook_id, requested_by),
+            ).fetchall()
+        return [self._share_request_row(row) for row in rows]
+
+    def approve_share_request(
+        self, group_id: str, request_id: str, *, decided_by: str
+    ) -> "dict | None":
+        """批准:**同一写事务**里复核仍 pending → 写 `(group, viewer)` 授权边 → 状态置
+        approved。申请不存在或已被决定返回 `None`(路由 → 404)。
+
+        `status='pending'` 是**精确匹配**(红线:绝不 `!= ...`)。授权边用
+        `ON CONFLICT DO NOTHING` 写:已共享(同库同组已有边)时静默复用,继续把申请标
+        approved——不能因为「已经共享过」就让批准失败,那会留下一条永远批不掉的申请。
+        写授权边与改状态在同一事务:批准这件事要么整体生效,要么整体不生效。
+        """
+        stamp = self.now()
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT notebook_id FROM notebook_share_requests "
+                "WHERE id=? AND group_id=? AND status='pending'",
+                (request_id, group_id),
+            ).fetchone()
+            if row is None:
+                return None
+            notebook_id = row["notebook_id"]
+            db.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES (?,?, 'group', ?, 'viewer', ?, ?) "
+                "ON CONFLICT(notebook_id, principal_type, principal_id) DO NOTHING",
+                (self.new_id("gnt"), notebook_id, group_id, decided_by, stamp),
+            )
+            db.execute(
+                "UPDATE notebook_share_requests "
+                "SET status='approved', decided_by=?, decided_at=? WHERE id=?",
+                (decided_by, stamp, request_id),
+            )
+        with self.database.connect() as db:
+            out = db.execute(
+                _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
+            ).fetchone()
+        return self._share_request_row(out)
+
+    def reject_share_request(
+        self, group_id: str, request_id: str, *, decided_by: str
+    ) -> "dict | None":
+        """驳回:状态置 rejected + `decided_by`/`decided_at`。不写任何授权边。申请不存在
+        或已被决定返回 `None`。`status='pending'` 精确匹配。"""
+        stamp = self.now()
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE notebook_share_requests "
+                "SET status='rejected', decided_by=?, decided_at=? "
+                "WHERE id=? AND group_id=? AND status='pending'",
+                (decided_by, stamp, request_id, group_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        with self.database.connect() as db:
+            out = db.execute(
+                _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
+            ).fetchone()
+        return self._share_request_row(out)
+
+    def delete_share_request(self, notebook_id: str, request_id: str) -> str:
+        """撤回:仅 `status='pending'` 可删(申请者自己的动作,不写 `decided_*`)。
+
+        返回 `"deleted"` / `"not_found"`;已决定抛 `ShareRequestNotPendingError`(→ 409)。
+        判据按**精确**状态匹配 `status == 'pending'`,绝不用否定式。`notebook_id` 一起验
+        (WHERE 带两列):只按 request_id 删等于让「我有一本库的管理权」变成「我能撤任何库
+        上的任何申请」。
+        """
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT status FROM notebook_share_requests "
+                "WHERE id=? AND notebook_id=?",
+                (request_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                return "not_found"
+            # 放行判据是**正向**精确匹配 `== 'pending'`,不是 `!= 'pending'`(红线):
+            # 已决定(approved/rejected)以及任何非 pending 值都落进 else、一律不可撤回。
+            # 否定式会把 shadow 停车行的哨兵 status 误判成「已决定」,正向式让它天然 fail
+            # safe。
+            if row["status"] == "pending":
+                db.execute(
+                    "DELETE FROM notebook_share_requests WHERE id=? AND notebook_id=?",
+                    (request_id, notebook_id),
+                )
+                return "deleted"
+            raise ShareRequestNotPendingError(request_id)
