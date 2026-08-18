@@ -305,6 +305,9 @@ export const adminGroups = <T extends { my_role: string }>(groups: readonly T[])
 export const creatableGroupKinds = (role: string): string[] =>
   role === "admin" ? ["project", "department", "domain"] : ["project"];
 
+/** 折叠项背后的一条边:撤销要按 id 逐条删,而排序要看 role,两个字段缺一不可。 */
+export type GroupShareGrantRef = { id: string; role: string };
+
 /** 一条已共享给群组的记录(同一个组的多条边折成一项)。 */
 export type GroupShareEntry = {
   groupId: string;
@@ -314,9 +317,45 @@ export type GroupShareEntry = {
   missing: boolean;
   /** 有一条 `group_admins`/`admin` 边——组管理员可管理这本库(标注「可管理」)。 */
   manage: boolean;
-  /** 这一项背后的全部边 id——撤销时要逐条删掉。 */
-  grantIds: string[];
+  /** 这一项背后的全部边——撤销时要逐条删掉,**顺序**见 `revocationOrder`。 */
+  grants: GroupShareGrantRef[];
 };
+
+/**
+ * 这条边给不给管理权。**只看 `role`**,对 `group` 与 `group_admins` 两种主体一视同仁
+ * ——与后端 `_admin_principal_match_expr` 逐字对齐:那三条臂(`user`/`group`/
+ * `group_admins`)都只要求 `role='admin'`。
+ *
+ * 所以一条 `(group, role='admin')` 边把管理权给了**整组每个成员**,把它标成「不可管理」
+ * 会让用户看到的权限比实际**小**(codex #519 R4 P2);反过来一条 `(group_admins, viewer)`
+ * 边一点管理权都不给,只看主体类型又会标大(codex #519 R1 P2)。两次修的是同一处:
+ * R1 补了 role 判定但把类型判定留窄了。
+ *
+ * ⚠ 提成模块级共用函数,是因为它现在有**两个**消费者,而它们必须是同一个判据:
+ * `foldGroupShares` 用它算「要不要标注可管理」,`revocationOrder` 用它决定「哪条边最后删」。
+ * 分成两份写法,总有一天会出现「标着可管理、却没被排到最后」的边——那正是 R7 P2 的形态。
+ */
+export const confersManage = (grant: { role: string }): boolean => grant.role === "admin";
+
+/**
+ * 撤销顺序:**给管理权的边(`role === "admin"`)排到最后**(codex #519 R7 P2)。
+ *
+ * 撤销是逐条 `DELETE`,而这三个 grant 端点的守卫都是 `notebook:manage`(admin 档)——
+ * 也就是说**组管理员**(非库主)也能进这个面板。他对这本库的管理权恰恰来自那条
+ * `(group_admins, admin)` 边:先删它,他当场就失去了继续删的权限,第二次 DELETE 拿 404,
+ * 于是 `(group, viewer)` 边**仍然生效**、整组人照样读得到,而界面已经报了「撤销」。
+ *
+ * 而「先发 admin 边、后发 viewer 边」正是 `shareNotebookToGroup` 的**默认顺序**,所以
+ * 后端按 `created_at` 返回时 admin 边天然排在前——这不是边角情形,是主路径。
+ *
+ * 库主不受影响(owner 臂恒成立),但顺序对他也无害:同一份顺序两种人都对。
+ */
+export const revocationOrder = (entry: {
+  grants: readonly GroupShareGrantRef[];
+}): string[] => [
+  ...entry.grants.filter((grant) => !confersManage(grant)).map((grant) => grant.id),
+  ...entry.grants.filter(confersManage).map((grant) => grant.id),
+];
 
 /**
  * 授权边清单 → 界面上的「已共享给群组」条目。
@@ -334,18 +373,15 @@ export const foldGroupShares = (grants: readonly NotebookGrant[]): GroupShareEnt
   const byPrincipal = new Map<string, GroupShareEntry>();
   for (const grant of grants) {
     if (grant.principal_type !== "group" && grant.principal_type !== "group_admins") continue;
-    // 管理权判据**只看 role**,对 `group` 与 `group_admins` 两种主体一视同仁——与后端
-    // `_admin_principal_match_expr` 逐字对齐:那三条臂(`user`/`group`/`group_admins`)
-    // 都只要求 `role='admin'`。所以一条 `(group, role='admin')` 边把管理权给了**整组每个
-    // 成员**,把它标成「不可管理」会让用户看到的权限比实际**小**(codex #519 R4 P2);
-    // 反过来一条 `(group_admins, viewer)` 边一点管理权都不给,只看主体类型又会标大
-    // (codex #519 R1 P2)。两次修的是同一处:R1 补了 role 判定但把类型判定留窄了。
+    // 管理权判据见 `confersManage`(与后端 `_admin_principal_match_expr` 逐字对齐)。
     // 两条边任意顺序返回都成立(OR 累积)。
-    const conferManage = grant.role === "admin";
+    const grantsManage = confersManage(grant);
     const existing = byPrincipal.get(grant.principal_id);
     if (existing) {
-      existing.grantIds.push(grant.id);
-      existing.manage = existing.manage || conferManage;
+      // 原样按返回序累积;撤销那一侧要的顺序由 `revocationOrder` 现算,不在这里排
+      // ——这份数组还要服务「这一项背后有哪几条边」这个与顺序无关的用途。
+      existing.grants.push({ id: grant.id, role: grant.role });
+      existing.manage = existing.manage || grantsManage;
       continue;
     }
     const entry: GroupShareEntry = {
@@ -353,8 +389,8 @@ export const foldGroupShares = (grants: readonly NotebookGrant[]): GroupShareEnt
       name: grant.principal_name,
       kind: grant.principal_kind,
       missing: grant.principal_kind === "missing",
-      manage: conferManage,
-      grantIds: [grant.id],
+      manage: grantsManage,
+      grants: [{ id: grant.id, role: grant.role }],
     };
     byPrincipal.set(grant.principal_id, entry);
     out.push(entry);

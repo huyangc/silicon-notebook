@@ -76,6 +76,7 @@ from app.repositories.ports import (
     GroupNotFoundError,
     LastGroupAdminError,
     NotebookManageRequiredError,
+    NotebookNotFoundError,
     ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
     ShareRequesterUnauthorizedError,
@@ -495,6 +496,11 @@ def create_share_request_route(
     之后被删 → `GroupNotFoundError`;申请人在那之后被移出组 → `GroupMembershipRequiredError`
     (codex #519 R2 P2-1)。两者都映射成同一个 404 —— 与上面那次前置检查逐字同一个响应,
     群组维度的「看不见」口径不因为走到了哪一层而变。
+
+    ⚠ **笔记本那个外键父行同样要复核** → `NotebookNotFoundError` → 404(codex #519 R7 P2)。
+    这一条与上面两条不是同一类:它复核的是**存在性**而不是权限——能力守卫放行之后、写事务
+    开始之前,这本库可以被并发删掉,而 `INSERT` 会撞 `notebook_id` 的外键,用户拿到的是 500。
+    一次插入有几个外键,守卫与写事务之间就有几个父行可能消失,只堵组那一个不算堵住。
     """
     groups = group_repository()
     group_id = payload.group_id.strip()
@@ -506,6 +512,11 @@ def create_share_request_route(
         )
     except (GroupNotFoundError, GroupMembershipRequiredError):
         raise _group_not_found()
+    except NotebookNotFoundError:
+        # 笔记本维度的「看不见」:与能力守卫拒绝时**同一个状态码**(404,不泄露存在性),
+        # 只是文案走 `user_error()` 好让浏览器能直接上屏。刻意不复用 `_group_not_found()`
+        # ——那句「群组不存在」在这里是错的,用户会去查一个根本没问题的组。
+        raise user_error(404, "笔记本不存在")
     except ShareRequestAlreadyPendingError:
         raise user_error(409, "这本笔记本已有一条待该群组审批的申请")
     return ShareRequestItem(**request)

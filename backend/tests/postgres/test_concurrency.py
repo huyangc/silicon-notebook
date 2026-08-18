@@ -1660,3 +1660,107 @@ def test_delete_group_locks_the_group_row_before_sweeping_its_grants(
             (group["id"],),
         ).fetchone()["c"]
     assert int(orphans) == 0, "删组之后留下了指向它的孤儿授权边"
+
+
+@pytest.mark.postgres_integration
+def test_share_request_blocks_on_the_notebook_row_and_fails_closed(
+    postgres_database, monkeypatch
+):
+    """并发删库 + 提交共享申请:必须是 `NotebookNotFoundError`(→ 404),不是外键 500。
+
+    `notebook_share_requests` 引用**两个**父表。`groups` 那一半早就有复核了,`notebooks`
+    那一半没有(codex #519 R7 P2):能力守卫放行之后、写事务开始之前库被删掉,
+    `INSERT` 撞 `notebook_id` 外键抛 `ForeignKeyViolation` —— `create_share_request` 只
+    catch `UniqueViolation`,于是它一路冒到路由外面变成 500。
+
+    编排把那个窗口撑开:deleter 线程发出 `DELETE FROM notebooks` 后**不提交**(行锁在手),
+    requester 线程再进来提交申请。
+
+    ⚠ 这条用例同时钉住**锁本身**和**锁模式**,两种退化各自都会让它红:
+
+    * 把 `_lock_notebook_on` 整个删掉 → `lock_attempted` 永远不 set,第一条断言红
+      (真实后果就是那次 `ForeignKeyViolation`);
+    * 把 `FOR KEY SHARE` 摘成一条普通 `SELECT` → 未提交的 DELETE 在 `read committed` 下
+      看不见,存在性检查**照常通过**、当场返回,`lock_returned` 立刻 set,第二条断言红
+      (真实后果同样是随后 INSERT 的外键违例,只是窗口更窄)。
+
+    与 `test_adding_a_member_to_a_concurrently_deleted_group_fails_closed` 分工:那条钉
+    `groups` 那一半、且**不**证明锁在承重;这条两件都证。
+    """
+    from app.repositories.ports import NotebookNotFoundError
+
+    assert PostgresMigrator(postgres_database).migrate() == 28
+    _seed_memory_race(postgres_database)
+    counter = iter(range(1, 50))
+    counter_lock = threading.Lock()
+
+    def new_id(prefix: str) -> str:
+        with counter_lock:
+            return f"{prefix}-nb-race-{next(counter)}"
+
+    store = PostgresGroupStore(
+        postgres_database, new_id=new_id, now=lambda: "2026-07-23T00:00:00+00:00"
+    )
+    # 建组时创建者就是组管理员,所以事务内的成员资格复核会通过——本用例要证的是**它后面**
+    # 那条笔记本存在性复核,别让申请在更早的一步就被挡下。
+    group = store.create_group(
+        name="删库竞态", kind="project", description="", created_by="owner-race"
+    )
+
+    delete_issued = threading.Event()
+    allow_delete_commit = threading.Event()
+    lock_attempted = threading.Event()
+    lock_returned = threading.Event()
+    original_lock = store._lock_notebook_on
+
+    def hooked_lock(connection, notebook_id):
+        lock_attempted.set()
+        try:
+            return original_lock(connection, notebook_id)
+        finally:
+            # 「这次取锁结束了」——正常返回与抛 NotebookNotFoundError 都算,要观察的是
+            # 它有没有**阻塞**,不是它的结论。
+            lock_returned.set()
+
+    monkeypatch.setattr(store, "_lock_notebook_on", hooked_lock)
+
+    def delete_notebook():
+        with postgres_database.write() as connection:
+            connection.execute("DELETE FROM notebooks WHERE id='nb-memory-race'")
+            delete_issued.set()          # 行锁在手,尚未提交
+            assert allow_delete_commit.wait(timeout=10)
+        return "deleted"
+
+    def file_request():
+        assert delete_issued.wait(timeout=10)
+        with pytest.raises(NotebookNotFoundError):
+            store.create_share_request(
+                "nb-memory-race", group_id=group["id"], requested_by="owner-race"
+            )
+        return "fail-closed"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        deleter = executor.submit(delete_notebook)
+        assert delete_issued.wait(timeout=10)
+        requester = executor.submit(file_request)
+        try:
+            assert lock_attempted.wait(timeout=10), (
+                "申请压根没去复核笔记本行 —— 那次 INSERT 会直接撞 notebook_id 外键"
+            )
+            # 锁模式承重的证明:`FOR KEY SHARE` 与 deleter 那条未提交 DELETE 的
+            # `FOR UPDATE` 冲突,所以这一刻它必须还卡着。裸 SELECT 会当场通过。
+            assert not lock_returned.wait(timeout=0.5), (
+                "复核没有阻塞在未提交的删库上 —— 锁模式被摘掉了,存在性检查看到的是"
+                "一行马上就要消失的记录"
+            )
+        finally:
+            allow_delete_commit.set()
+        assert deleter.result(timeout=15) == "deleted"
+        assert requester.result(timeout=15) == "fail-closed"
+
+    with postgres_database.connect() as connection:
+        assert int(
+            connection.execute(
+                "SELECT COUNT(*) AS c FROM notebook_share_requests"
+            ).fetchone()["c"]
+        ) == 0, "指向已删笔记本的共享申请落库了"

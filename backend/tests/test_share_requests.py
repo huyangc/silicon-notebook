@@ -900,6 +900,47 @@ def test_a_member_removed_in_the_toctou_window_cannot_file_a_request(
     assert _pending_for(client, boss, group_id).json() == []
 
 
+def test_a_notebook_deleted_in_the_toctou_window_is_a_404_not_a_500(
+    tmp_path, monkeypatch
+):
+    """笔记本那个**外键父行**同样要在事务内复核(codex #519 R7 P2)。
+
+    能力守卫(`notebook:manage`)通过之后、写事务开始之前,这本库可以被并发删掉。少了
+    `_require_notebook_on` / `_lock_notebook_on`,`INSERT INTO notebook_share_requests` 撞
+    `notebook_id` 的外键抛 `IntegrityError`——用户拿到的是「服务器出错」,而正确答案是 404。
+
+    与 `test_a_member_removed_in_the_toctou_window_cannot_file_a_request` 同款插桩(删库
+    动作插在守卫那次 `user_group_role` 之后、store 写事务之前),但钉的是**另一个**父行:
+    那条钉群组成员资格(权限轴),这条钉笔记本存在性(外键轴)。只堵组那一个不算堵住。
+    """
+    from app.api import deps
+
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, librarian_id, group_id, notebook_id = _make_member_owned_notebook(client)
+
+    store = _app_group_store()
+    original = store.user_group_role
+
+    def drop_notebook_then_answer(gid, uid):
+        role = original(gid, uid)
+        if gid == group_id and uid == librarian_id:
+            # 守卫刚过、写事务还没开:库在这一瞬间被删掉。
+            with deps.repository()._write() as db:
+                db.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
+        return role
+
+    monkeypatch.setattr(store, "user_group_role", drop_notebook_then_answer)
+    denied = _submit(client, librarian, notebook_id, group_id)
+    assert denied.status_code == 404, denied.text
+    # 笔记本维度的文案,不是「群组不存在」——用户不该被支去查一个没问题的组。
+    assert denied.json()["detail"] == "笔记本不存在"
+    assert denied.headers.get("X-User-Message") == "1"
+
+    # 一条指向已删笔记本的申请都不该落库。
+    monkeypatch.setattr(store, "user_group_role", original)
+    assert _pending_for(client, boss, group_id).json() == []
+
+
 def test_store_level_decision_and_membership_rechecks_are_unconditional(repo):
     """直接走 store:非组管理员批准/驳回 → `GroupAdminRequiredError`;非成员申请 →
     `GroupMembershipRequiredError`。不经路由,证明复核住在写事务里而不是守卫里。"""

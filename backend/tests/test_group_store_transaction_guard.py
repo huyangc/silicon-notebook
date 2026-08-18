@@ -21,6 +21,12 @@
    所以「发起者是不是这个组的管理员」必须与插入同事务;在路由层查、在 store 里插,
    中间那个窗口足够让发起者被移出或降级,而边照发不误。
 
+4. **共享申请的两个外键父行复核**(`create_share_request`)。`notebook_share_requests`
+   同时引用 `notebooks` 与 `groups`,**两个父行都可能**在能力守卫通过之后被并发删掉。
+   只复核其中一个不算复核:漏掉的那一边会撞外键(SQLite `IntegrityError` / PG
+   `ForeignKeyViolation`),用户拿到 500 而正确答案是 404(codex #519 R7 P2)。它是
+   一条**存在性**契约,与第 3 条那类权限复核分属两轴,别读成同一件事。
+
 ⚠ 本守卫**只钉「在不在事务体内」**,不钉块内位置、也不钉具体写法。位置与措辞由代码
 评审承担——按行号或按语句序钉住会在每次无害重排上误红。
 
@@ -65,6 +71,12 @@ REQUIRED_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
         "_require_group_on|_lock_group_on",   # 组还在
         "_role_on",                            # 发起者的组内角色
         "GroupAdminRequiredError",             # 以及它的抛出
+    }),
+    # 共享申请引用**两个**父表,两个存在性复核都必须与插入同事务(codex #519 R7 P2)。
+    # 缺任意一条,那个父行被并发删掉时就是一次未处理的外键异常 → 500(正确答案 404)。
+    "create_share_request": frozenset({
+        "_require_group_on|_lock_group_on",        # groups 那个父行
+        "_require_notebook_on|_lock_notebook_on",  # notebooks 那个父行
     }),
 }
 

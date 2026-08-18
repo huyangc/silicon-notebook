@@ -36,6 +36,7 @@ from app.repositories.ports import (
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
     NotebookManageRequiredError,
+    NotebookNotFoundError,
     ShareRequestNotPendingError,
     ShareRequesterUnauthorizedError,
 )
@@ -326,6 +327,52 @@ class GroupStore:
             raise GroupNotFoundError(group_id)
 
     @staticmethod
+    def _lock_notebook_on(connection: Any, notebook_id: str) -> None:
+        """锁住笔记本行,顺便复核它还在;不在就 `NotebookNotFoundError`(codex #519 R7)。
+
+        `_lock_group_on` 的**同类兄弟**,只是换了另一个外键父行:一次插入有几个外键,就有
+        几个父行可能在能力守卫通过之后被并发删掉,只堵组那一个不算堵住。少了它,
+        `INSERT INTO notebook_share_requests` 撞 `notebook_id` 外键抛 `ForeignKeyViolation`
+        ——用户拿到 500,而正确答案是 404。SQLite 侧对应的是 `_require_notebook_on`。
+
+        ⚠ **锁模式是 `FOR KEY SHARE`,不是 `FOR SHARE`,这一格不能随手改宽。**
+
+        `FOR KEY SHARE` 恰好就是 PostgreSQL 自己在几条语句之后执行那次 INSERT 时,为满足
+        外键而对**同一行**取的锁。所以这句显式锁**不新增任何冲突边**——它只是把本事务
+        本来就要取的那把锁提前几条语句取到手,好让我们有机会当场返回 404,而不是等 INSERT
+        炸出一个未处理异常。改成 `FOR SHARE` 就不一样了:它额外与 `FOR NO KEY UPDATE`
+        冲突,也就是与**任何一次普通的** `UPDATE notebooks SET …`(改名、改状态、推
+        `updated_at`)互相阻塞——那是一整类今天根本不存在的阻塞关系,凭空造出新的死锁面。
+        而防住并发删库只需要与 `FOR UPDATE`(`DELETE FROM notebooks` 取的正是它)冲突,
+        `FOR KEY SHARE` 已经做到。
+
+        **锁序论证**(为什么在 `create_share_request` 里排在 `_lock_group_on` 之后是安全的):
+
+        1. 全仓**只有本文件**会锁 `groups` 行(`FOR UPDATE`/`FOR SHARE` 的全量枚举),而
+           这里的七个调用点(`delete_group` / `upsert_member` / `remove_member` /
+           `create_grant` / `create_share_request` / `approve_share_request` /
+           `reject_share_request`)**无一例外**把 `_lock_group_on` 写成写事务的**第一条**
+           语句。于是 `groups` 是一把「根锁」:
+           没有任何事务能在**持有别的锁**的状态下去等 `groups`,成环的必要条件不成立。
+        2. 因此新锁只可能与 `groups` **之后**的资源成环。而 `create_share_request` 在
+           `groups → notebooks` 这个顺序上**今天就已经是这样了**——INSERT 的外键检查正是
+           在持有 `groups` 锁的情况下去取 `notebooks` 的 `FOR KEY SHARE`。本次改动没有引入
+           新的资源对,只是把同一对的获取时刻提前。
+        3. 反方向(先 `notebooks` 后 `groups`)不存在:删库(`DELETE FROM notebooks`)持
+           `notebooks` 的行锁后级联删 `notebook_grants` / `notebook_share_requests` 等**子**
+           行,删子行从不需要父行(`groups`)的锁;`memory_store` 的三段式是
+           `notebooks FOR SHARE → notebook_members/notebook_grants FOR SHARE`,同样不碰
+           `groups`。
+        """
+        if (
+            connection.execute(
+                "SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE", (notebook_id,)
+            ).fetchone()
+            is None
+        ):
+            raise NotebookNotFoundError(notebook_id)
+
+    @staticmethod
     def _admin_count_on(connection: Any, group_id: str) -> int:
         return int(
             connection.execute(
@@ -517,9 +564,13 @@ class GroupStore:
         索引返回既有行(幂等)。`decided_at` 不写列、留 NULL(绝不写 `''`——PG 的
         timestamptz 收到空串会类型报错,poison 整条 shadow 正向复制通道)。
 
-        PG 侧多一把 `FOR SHARE`(`_lock_group_on(mode="SHARE")`)复核组还在,与
-        `create_grant` 同一手法;唯一索引冲突在 `write()` 块**之外**捕获(UniqueViolation
-        会中止 PG 事务,必须先整体回滚再另起只读事务取既有 pending 行)。
+        PG 侧多两把行锁:`_lock_group_on(mode="SHARE")` 复核组还在(与 `create_grant` 同一
+        手法),`_lock_notebook_on` 复核笔记本还在。**两个外键父行都要复核**——只堵组那一个
+        等于把 `notebook_id` 的 `ForeignKeyViolation` 留成 500(codex #519 R7 P2)。两把锁的
+        先后不可颠倒,完整锁序论证写在 `_lock_notebook_on` 的 docstring 里(一句话版:
+        `groups` 是全仓唯一的「根锁」,`groups → notebooks` 正是今天 INSERT 外键检查已经在
+        走的顺序)。唯一索引冲突在 `write()` 块**之外**捕获(UniqueViolation 会中止 PG 事务,
+        必须先整体回滚再另起只读事务取既有 pending 行)。
 
         成员资格同样在事务内复核(`GroupMembershipRequiredError`),理由与 SQLite 侧逐字
         相同:路由那次查询与插入之间,`requested_by` 可以被移出组(codex #519 R2 P2-1)。
@@ -529,7 +580,9 @@ class GroupStore:
         for _attempt in range(2):
             try:
                 with self.database.write() as connection:
+                    # 锁序 group → notebook,不可颠倒(论证见 `_lock_notebook_on`)。
                     self._lock_group_on(connection, group_id, mode="SHARE")
+                    self._lock_notebook_on(connection, notebook_id)
                     if self._role_on(connection, group_id, requested_by) is None:
                         raise GroupMembershipRequiredError(group_id)
                     connection.execute(

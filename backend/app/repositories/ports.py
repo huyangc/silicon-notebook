@@ -2756,6 +2756,24 @@ class GroupNotFoundError(RuntimeError):
     """
 
 
+class NotebookNotFoundError(RuntimeError):
+    """写事务在**真正落库之前**复核时发现笔记本已不存在(codex #519 R7 P2)。
+
+    `GroupNotFoundError` 的**同类兄弟**,只是换了另一个外键父行:能力守卫
+    (`require_notebook_capability("notebook:manage")`)与写事务之间同样有一个窗口,
+    并发的删库请求可以恰好落在中间。少了这条复核,`INSERT INTO notebook_share_requests`
+    会撞 `notebook_id` 的外键——SQLite 抛 `IntegrityError`、PG 抛 `ForeignKeyViolation`,
+    两边都是未处理异常 → 用户拿到 **500**,而正确答案是 404。
+
+    ⚠ 它复核的是**外键父行的存在性**,不是权限。权限那条轴由
+    `NotebookManageRequiredError` 承担(判据见 `api/deps.py` 的裁决 P2-8:只有写
+    `notebook_grants` 这类「授予他人访问权」的路径才做事务内权限复检)。两者不可互相
+    替代:一个已经被删掉的库上,发起人的管理权判定本来就没有意义。
+
+    路由映射成 **404**,与能力守卫拒绝时同一个状态码口径(不泄露存在性)。
+    """
+
+
 class GroupAdminRequiredError(RuntimeError):
     """写事务在落库前复核时发现请求者已不是目标群组的组管理员。
 
@@ -2902,9 +2920,11 @@ class GroupStorePort(Protocol):
         则抛 `ShareRequestAlreadyPendingError`(路由 → 409)——把别人的行返回给他会让
         「界面报成功、自查列表里没有、也撤不掉」三件事同时成立(codex #519 R3)。
 
-        组已被并发删掉(FK 冲突)抛 `GroupNotFoundError`;`requested_by` 已不是该组成员抛
-        `GroupMembershipRequiredError`——两条复核都在**同一写事务内**,路由层那次前置
-        查询与写入之间的窗口足够让组被删、让人被移出组(codex #519 R2 P2-1)。
+        **两个外键父行都要在同一写事务内复核**:组已被并发删掉抛 `GroupNotFoundError`,
+        笔记本已被并发删掉抛 `NotebookNotFoundError`(codex #519 R7 P2)——只复核其中一个
+        等于把另一个的 FK 违例留成 500。`requested_by` 已不是该组成员抛
+        `GroupMembershipRequiredError`——三条复核都在**同一写事务内**,路由层那次前置
+        查询与写入之间的窗口足够让组被删、让库被删、让人被移出组(codex #519 R2 P2-1)。
 
         冲突恢复期间那条 pending 又被决定/撤回时**重试一次插入**(此时部分唯一索引的
         谓词已不再覆盖它),绝不让原始的 DB 唯一违例冒成 500(codex #519 R3)。"""
