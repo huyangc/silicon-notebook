@@ -18,6 +18,7 @@ from app.core.event_logging import EventLogger
 from app.core.llm import cap_kwargs
 from app.models.sources import (
     AddUrlSourcesResult,
+    HIDDEN_SYNTHETIC_SOURCE_TYPES,
     PDF_PYTHON_FALLBACK_WARNING_PREFIX,
     RejectedUrl,
     SourceDetail,
@@ -1376,7 +1377,22 @@ class SourceIngestionService:
         # refresh that cannot be scheduled must never turn a successful
         # (re)parse into a failure). New sources and reparses BOTH land here —
         # `parse_source` delegates to this method.
-        hooks.note_corpus_change(source.notebook_id)
+        #
+        # Reached on EVERY terminal path of the pipeline, including the `except`
+        # branch above that lands `failed` — deliberately: a document that
+        # yielded nothing IS a corpus-shape signal (it is exactly what
+        # `corpus_gaps` reports), and the counter is a "something changed here"
+        # accumulator, not a success counter.
+        #
+        # Hidden synthetic rows (memory/knowhow projections) are NOT corpus
+        # changes: the shared understanding is built from user-visible documents
+        # only, and a confirmed Memory belongs to one member — letting one
+        # member's Memory advance a notebook-shared counter would spend the
+        # whole notebook's model call on an event the other members cannot see.
+        # Same predicate the statistics use (`VISIBLE_SOURCE_TYPES_PREDICATE`
+        # via this constant), evaluated on the row already in hand.
+        if source.type not in HIDDEN_SYNTHETIC_SOURCE_TYPES:
+            hooks.note_corpus_change(source.notebook_id)
         return self.sources.get_source(source_id)
 
     def parse_source(
@@ -1474,7 +1490,15 @@ class SourceIngestionService:
         # understanding block (the document a claim cited is gone). Last step,
         # after the deletion itself has fully committed, so a failure here can
         # only lose a background refresh, never the delete.
-        hooks.note_corpus_change(source.notebook_id)
+        #
+        # Hidden synthetic rows are excluded here for a sharper reason than on
+        # the ingest side: deleting a Memory-derived source is how a member
+        # REVOKES a private Memory, and letting that advance the notebook-shared
+        # counter would let one member's private housekeeping trigger (and pay
+        # for) everyone's shared refresh. See the ingest call site for the
+        # single-predicate argument.
+        if source.type not in HIDDEN_SYNTHETIC_SOURCE_TYPES:
+            hooks.note_corpus_change(source.notebook_id)
 
     # ------------------------------------------------------ memory-derived
     def memory_kg_eligible(self, notebook_id: str) -> bool:

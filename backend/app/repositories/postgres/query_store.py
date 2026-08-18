@@ -194,6 +194,49 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
+    def top_concept_names(
+        db: Any,
+        notebook_id: str,
+        statuses: tuple[str, ...],
+        exclude_source_ids: "list[str]",
+        limit: int,
+    ) -> "list[tuple[str, int]]":
+        """``[(canonical concept name, members)]``, most-supported first; see
+        the SQLite adapter for why this exists next to ``largest_clusters``
+        (the private-Memory exclusion) and for its cost class.
+
+        ``=ANY(%s)`` keeps one bound parameter per list.  The name tie-break
+        uses ``COLLATE "C"`` so the ordering is byte-wise and matches the other
+        backend's, rather than following the database's lc_collate.
+        """
+        allowed = list(statuses)
+        if not allowed or limit <= 0:
+            return []
+        excluded = list(dict.fromkeys(sid for sid in exclude_source_ids if sid))
+        exclude_clause = "AND NOT (o.source_id = ANY(%s)) " if excluded else ""
+        params: "list[Any]" = [allowed]
+        if excluded:
+            params.append(excluded)
+        params.extend([notebook_id, int(limit)])
+        rows = db.execute(
+            "SELECT COALESCE(MIN(NULLIF(c.canonical_name, '')), '') AS name, "
+            "       COUNT(o.id) AS members "
+            "FROM concept_clusters c "
+            "JOIN knowledge_objects o ON o.id = c.member_object_id "
+            "     AND o.notebook_id = c.notebook_id "
+            "     AND o.status = ANY(%s) "
+            f"{exclude_clause}"
+            "WHERE c.notebook_id = %s AND c.object_type = 'concept' "
+            "GROUP BY c.canonical_id "
+            "HAVING COALESCE(MIN(NULLIF(c.canonical_name, '')), '') <> '' "
+            "ORDER BY members DESC, "
+            "         COALESCE(MIN(NULLIF(c.canonical_name, '')), '') COLLATE \"C\" ASC "
+            "LIMIT %s",
+            tuple(params),
+        ).fetchall()
+        return [(str(row["name"]), int(row["members"])) for row in rows]
+
+    @staticmethod
     def knowhow_knowledge_type_rows(
         db: Any, notebook_id: str, statuses: tuple[str, ...]
     ) -> "list[dict]":

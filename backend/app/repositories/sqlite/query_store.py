@@ -174,6 +174,56 @@ class QueryStore:
         return [{"object_type": ot, "c": c} for ot, c in totals.items()]
 
     @staticmethod
+    def top_concept_names(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        statuses: tuple[str, ...],
+        exclude_source_ids: "list[str]",
+        limit: int,
+    ) -> "list[tuple[str, int]]":
+        """``[(canonical concept name, members)]``, most-supported first.
+
+        Same shape as ``UnifiedKgStore.largest_clusters`` (group the notebook's
+        concept cluster rows, probe each member into ``knowledge_objects``,
+        order by member count) plus one thing that one does not have: the
+        ``exclude_source_ids`` filter, which its only caller feeds with
+        ``SourceStore.memory_source_ids`` so a private Memory's concepts cannot
+        reach a notebook-shared prompt block.  It is therefore NOT a call into
+        that method — the exclusion is the reason this query exists.
+
+        ⚠ Cost class is ``largest_clusters``' own: the LIMIT truncates output,
+        not the scan.  Background-chain use only; see the port docstring.
+
+        Empty ``statuses`` returns nothing rather than "all statuses": every
+        caller means "the usable ones", and a silent widening here would put
+        deprecated objects into an agent's understanding.
+        """
+        allowed = tuple(statuses)
+        if not allowed or limit <= 0:
+            return []
+        status_marks = ",".join("?" for _ in allowed)
+        excluded = list(dict.fromkeys(sid for sid in exclude_source_ids if sid))
+        exclude_clause = ""
+        if excluded:
+            exclude_marks = ",".join("?" for _ in excluded)
+            exclude_clause = f"AND o.source_id NOT IN ({exclude_marks}) "
+        rows = db.execute(
+            "SELECT COALESCE(MIN(NULLIF(c.canonical_name, '')), '') AS name, "
+            "       COUNT(o.id) AS members "
+            "FROM concept_clusters c "
+            "JOIN knowledge_objects o ON o.id = c.member_object_id "
+            "     AND o.notebook_id = c.notebook_id "
+            f"     AND o.status IN ({status_marks}) "
+            f"{exclude_clause}"
+            "WHERE c.notebook_id = ? AND c.object_type = 'concept' "
+            "GROUP BY c.canonical_id "
+            "HAVING name <> '' "
+            "ORDER BY members DESC, name ASC LIMIT ?",
+            (*allowed, *excluded, notebook_id, int(limit)),
+        ).fetchall()
+        return [(str(row["name"]), int(row["members"])) for row in rows]
+
+    @staticmethod
     def knowhow_knowledge_type_rows(
         db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]
     ) -> "list[dict]":

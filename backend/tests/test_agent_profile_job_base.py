@@ -191,6 +191,7 @@ def _add_source(
     *,
     notebook_id: str = NOTEBOOK_ID,
     source_type: str = "upload",
+    parse_status: str = "extracted",
     elements: tuple[tuple[str, int], ...] = (),
 ) -> None:
     with harness["database"].write() as db:
@@ -198,7 +199,7 @@ def _add_source(
             "INSERT INTO sources(id,notebook_id,title,source_type,status,"
             "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
             (source_id, notebook_id, source_id, source_type, "active",
-             "extracted", NOW, NOW),
+             parse_status, NOW, NOW),
         )
         index = 0
         for element_type, count in elements:
@@ -212,12 +213,29 @@ def _add_source(
                 )
 
 
-def _add_kg_object(harness, object_id: str, object_type: str) -> None:
+def _add_kg_object(
+    harness, object_id: str, object_type: str, *, source_id: str = ""
+) -> None:
     with harness["database"].write() as db:
         db.execute(
             "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,"
-            "created_at,updated_at) VALUES (?,?,?,?,?,?)",
-            (object_id, NOTEBOOK_ID, object_type, "approved", NOW, NOW),
+            "source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (object_id, NOTEBOOK_ID, object_type, "approved", source_id, NOW, NOW),
+        )
+
+
+def _add_cluster(
+    harness, canonical_id: str, member_object_id: str, canonical_name: str
+) -> None:
+    """One ``concept_clusters`` member row — the only place a concept's NAME is
+    materialized (names live inside ``knowledge_objects.payload`` JSON)."""
+    with harness["database"].write() as db:
+        db.execute(
+            "INSERT INTO concept_clusters(id,notebook_id,canonical_id,"
+            "member_object_id,canonical_name,object_type,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"cc-{member_object_id}", NOTEBOOK_ID, canonical_id,
+             member_object_id, canonical_name, "concept", NOW),
         )
 
 
@@ -355,7 +373,14 @@ def test_signals_arriving_during_a_run_survive_the_settle(harness, monkeypatch):
     assert _job(harness)["pending_signal"] == 3
 
 
-def test_a_failed_run_consumes_nothing(harness, monkeypatch):
+def test_a_failed_run_still_consumes_its_batch(harness, monkeypatch):
+    """Failure consumes the claim snapshot, exactly like success.
+
+    Not a bookkeeping preference — a cost gate. If a failed run kept its
+    signal the counter would still sit at the threshold, so the very NEXT
+    source change would fire another call: a provider returning malformed JSON
+    would be billed once per upload for as long as it stays broken.
+    """
     _with_submitter(monkeypatch, _Submitter())
     service = _service(harness, client=None)  # model unconfigured
 
@@ -364,7 +389,62 @@ def test_a_failed_run_consumes_nothing(harness, monkeypatch):
 
     row = _job(harness)
     assert row["status"] == "failed"
-    assert row["pending_signal"] == 3, "a failed run's triggers still count"
+    assert row["pending_signal"] == 0
+
+
+def test_a_broken_provider_costs_one_call_per_threshold_batch(harness, monkeypatch):
+    """The cost gate, end to end: a model that always returns garbage must not
+    be called once per upload.
+
+    Six changes at a threshold of three = exactly two calls. Without the
+    consume-on-failure rule the counter would stay at three after the first
+    failure and every subsequent change would trigger a fresh one — five calls
+    here, and unbounded in a real import.
+    """
+    calls: list[str] = []
+
+    def reply(prompt: str) -> str:
+        calls.append(prompt)
+        return "not json at all"
+
+    _with_submitter(monkeypatch, _Submitter())
+    service = _service(harness, client=_Client(reply))
+
+    for _ in range(6):
+        service.note_corpus_change(NOTEBOOK_ID)
+
+    assert len(calls) == 2
+    assert _job(harness)["pending_signal"] == 0
+    assert _job(harness)["runs"] == 2
+
+
+def test_an_interrupted_run_also_consumes_its_batch(harness):
+    def reply(_prompt: str) -> str:
+        raise KeyboardInterrupt()
+
+    service = _service(harness, client=_Client(reply))
+    harness["profiles"].bump_signal(NOTEBOOK_ID, "")
+    harness["profiles"].bump_signal(NOTEBOOK_ID, "")
+    claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
+
+    with pytest.raises(KeyboardInterrupt):
+        service.run_base(NOTEBOOK_ID, claimed)
+
+    assert _job(harness)["pending_signal"] == 0
+
+
+def test_a_claim_that_never_ran_consumes_nothing(harness, monkeypatch):
+    """The one path that legitimately keeps the signal: the submit raised, so
+    no worker ever looked at those changes. Charging them would drop three real
+    corpus changes on the floor for a pool error that has nothing to do with
+    them."""
+    _with_submitter(monkeypatch, _Submitter(fail=RuntimeError("pool is closed")))
+    service = _service(harness, client=_Client(_reply([])))
+
+    for _ in range(3):
+        service.note_corpus_change(NOTEBOOK_ID)
+
+    assert _job(harness)["pending_signal"] == 3
 
 
 # ------------------------------------------------------------- terminal states
@@ -465,6 +545,20 @@ def test_an_unconfigured_model_fails_the_chain_and_keeps_the_blocks(harness):
         ('{"blocks": "corpus_shape"}', "blocks_not_a_list"),
         ('{"blocks": ["corpus_shape"]}', "block_not_an_object"),
         ('{"blocks": [{"label": "retrieval_notes", "value": "x"}]}', "unknown_label"),
+        # Type errors are STRUCTURAL, not salvageable: without the check
+        # ``str({"text": ...})`` would store the literal characters
+        # ``{'text': ...}`` as the library's understanding, and that string
+        # would then ride in every planning prompt until a person noticed.
+        (
+            '{"blocks": [{"label": "corpus_shape", "value": {"text": "x"}}]}',
+            "value_not_a_string",
+        ),
+        ('{"blocks": [{"label": "corpus_shape", "value": 42}]}', "value_not_a_string"),
+        ('{"blocks": [{"label": "corpus_shape"}]}', "value_not_a_string"),
+        (
+            '{"blocks": [{"label": "corpus_shape", "value": "x", "evidence": "src-a"}]}',
+            "evidence_not_a_list",
+        ),
     ],
 )
 def test_an_unusable_reply_keeps_every_previous_block(harness, raw, diagnostic):
@@ -606,6 +700,91 @@ def test_the_statistics_describe_the_user_visible_corpus_only(harness):
     assert stats.served_ids == frozenset({"src-a", "src-b"})
 
 
+def test_private_memory_never_reaches_the_shared_statistics(harness):
+    """A confirmed Memory lives in the notebook but belongs to ONE member, and
+    the base block is read by every member. Its documents, its knowledge objects
+    and its concept names must all be absent — three separate exclusions, and
+    the KG one is the easy miss (``knowledge_objects`` carries no source type,
+    so the notebook-wide count includes Memory unless it is subtracted)."""
+    _add_source(harness, "src-a", elements=(("table", 1),))
+    _add_source(harness, "src-memory", source_type="memory", elements=(("table", 9),))
+    _add_kg_object(harness, "ko-shared", "concept", source_id="src-a")
+    _add_kg_object(harness, "ko-private", "concept", source_id="src-memory")
+    _add_cluster(harness, "can-shared", "ko-shared", "闸门设计")
+    _add_cluster(harness, "can-private", "ko-private", "我的私人记忆主题")
+
+    service = _service(harness, client=_Client(_reply([])))
+    stats = service.corpus_stats(NOTEBOOK_ID)
+
+    assert stats.documents == 1
+    assert stats.kg_objects == (("concept", 1),), "Memory's objects were counted"
+    assert [name for name, _members in stats.key_concepts] == ["闸门设计"]
+
+    from app.services.agent_profile_job import render_corpus_block
+
+    assert "我的私人记忆主题" not in render_corpus_block(stats)
+
+
+def test_the_concept_names_are_ordered_by_support_and_bounded(harness):
+    _add_source(harness, "src-a", elements=(("table", 1),))
+    for index in range(3):
+        _add_kg_object(harness, f"ko-weak-{index}", "concept", source_id="src-a")
+    _add_cluster(harness, "can-weak", "ko-weak-0", "边缘概念")
+    for index in range(3):
+        _add_kg_object(harness, f"ko-strong-{index}", "concept", source_id="src-a")
+        _add_cluster(harness, "can-strong", f"ko-strong-{index}", "核心概念")
+
+    service = _service(harness, client=_Client(_reply([])))
+    stats = service.corpus_stats(NOTEBOOK_ID)
+
+    assert stats.key_concepts == (("核心概念", 3), ("边缘概念", 1))
+
+
+def test_parse_failures_are_reported_apart_from_prose_documents(harness):
+    """The distinction the whole ``corpus_gaps`` wording turns on: a document
+    with no tables/formulas/images/code blocks is prose, not a parse failure.
+    Conflating them made the block describe a prose library as unparsed."""
+    _add_source(harness, "src-prose")  # parsed, but no listed element kinds
+    _add_source(harness, "src-broken", parse_status="failed")
+    _add_source(harness, "src-running", parse_status="queued")
+
+    service = _service(harness, client=_Client(_reply([])))
+    stats = service.corpus_stats(NOTEBOOK_ID)
+
+    assert stats.documents_without_elements == 3
+    assert stats.documents_parse_failed == 1
+    assert stats.documents_not_parsed == 1
+
+    from app.services.agent_profile_job import render_corpus_block
+
+    rendered = render_corpus_block(stats)
+    assert "documents with no tables/formulas/images/code blocks: 3" in rendered
+    assert "documents that failed to parse: 1" in rendered
+    assert "documents not finished parsing yet: 1" in rendered
+
+
+def test_the_consolidation_call_uses_its_own_output_budget(harness):
+    """Not ``kg_extract_max_tokens`` (51 200): one malformed reply under that
+    budget is fifty thousand billed tokens this parser then discards in full."""
+    from app.services.agent_profile_job import AGENT_PROFILE_MAX_OUTPUT_TOKENS
+
+    client = _Client(_reply([]))
+    seen: list[dict] = []
+    original = client.chat_json
+
+    def spy(messages, schema_hint, **kwargs):
+        seen.append(kwargs)
+        return original(messages, schema_hint, **kwargs)
+
+    client.chat_json = spy
+    service = _service(harness, client=client)
+
+    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+
+    assert seen == [{"max_tokens": AGENT_PROFILE_MAX_OUTPUT_TOKENS}]
+    assert AGENT_PROFILE_MAX_OUTPUT_TOKENS <= 8192
+
+
 def test_evidence_the_statistics_never_served_is_dropped(harness):
     _add_source(harness, "src-a", elements=(("table", 2),))
     service = _service(
@@ -718,6 +897,126 @@ def test_the_pipeline_hooks_carry_the_injected_callable():
     from app.services.source_ingestion import SourcePipelineHooks
 
     assert "note_corpus_change" in SourcePipelineHooks.__dataclass_fields__
+
+
+def test_both_trigger_sites_gate_on_the_visible_source_predicate():
+    """Hidden synthetic rows (memory/knowhow projections) must not advance the
+    shared counter.
+
+    Static for the same reason the call-site test above is: the failure mode is
+    a MISSING guard, and without it every ingestion test stays green while one
+    member's private Memory pays for — and triggers — the whole notebook's
+    shared refresh. Deleting a Memory-derived source is how a member revokes a
+    private Memory; that is not a corpus change anyone else can see.
+
+    Pinned by shape rather than by behaviour: the guard must consume the single
+    Python-level spelling of the predicate (``HIDDEN_SYNTHETIC_SOURCE_TYPES``),
+    so a hand-rolled ``!= "memory"`` fails here even though it would "work".
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    import app.services.source_ingestion as ingestion
+
+    tree = ast.parse(_Path(ingestion.__file__).read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for parent in tree.body
+        if isinstance(parent, ast.ClassDef)
+        for node in parent.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for name in ("process_source", "delete_source"):
+        guarded = False
+        for node in ast.walk(functions[name]):
+            if not isinstance(node, ast.If):
+                continue
+            names = {
+                child.id
+                for child in ast.walk(node.test)
+                if isinstance(child, ast.Name)
+            }
+            if "HIDDEN_SYNTHETIC_SOURCE_TYPES" not in names:
+                continue
+            calls = {
+                inner.func.attr
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+            }
+            if "note_corpus_change" in calls:
+                guarded = True
+        assert guarded, (
+            f"{name} 里的 note_corpus_change 不再受「用户可见来源」判据保护。"
+            "隐藏合成源(memory/knowhow 投影)不是语料变更:私有 Memory 属于某一位成员,"
+            "让它推进 notebook 共享计数器等于用一位成员的私人操作触发并支付全库的整理。"
+        )
+
+
+def test_startup_actually_sweeps_the_chain_on_a_runtime_that_has_one():
+    """The startup wiring is a ``getattr`` chain, so BOTH halves can rot
+    silently: rename the runtime attribute and the sweep is skipped forever
+    (a stranded ``running`` row then holds that notebook's chain until someone
+    notices it never refreshes). One assertion for the call, one for the
+    attribute NAME actually existing on the runtime class."""
+    import ast
+    from pathlib import Path as _Path
+
+    from app.services import repository_runtime, startup_warmup
+
+    calls: list[int] = []
+
+    class _Service:
+        def sweep_on_start(self) -> int:
+            calls.append(1)
+            return 2
+
+    class _Runtime:
+        agent_profile_jobs = _Service()
+
+    class _Repo:
+        _runtime = _Runtime()
+
+    startup_warmup._sweep_agent_profile_chains(_Repo())
+
+    assert calls == [1], "startup 没有真的调到 sweep_on_start"
+
+    # …and the name it reaches for is really the one the runtime assigns.
+    # ``agent_profile_jobs`` is an INSTANCE attribute (set in ``__init__``), so
+    # no attribute-level introspection of the class can see it — and
+    # constructing a real runtime here would drag the whole composition root
+    # into a file about a threshold counter. Compare the two spellings in the
+    # source instead.
+    startup_source = _Path(startup_warmup.__file__).read_text(encoding="utf-8")
+    wanted = {
+        node.args[1].value
+        for node in ast.walk(ast.parse(startup_source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+        and node.args[1].value.startswith("agent_profile")
+    }
+    assert wanted == {"agent_profile_jobs"}, (
+        f"startup 取的属性名是 {sorted(wanted)},与运行时座位对不上。"
+    )
+    assigned = {
+        target.attr
+        for node in ast.walk(
+            ast.parse(_Path(repository_runtime.__file__).read_text(encoding="utf-8"))
+        )
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    }
+    assert "agent_profile_jobs" in assigned, (
+        "RepositoryRuntime 不再赋值 `agent_profile_jobs`——startup 的 getattr 对"
+        "错误的属性名不会报错,只会永远跳过清扫,而每一条既有用例仍然全绿。"
+    )
 
 
 # --------------------------------------------------------------- job plumbing
