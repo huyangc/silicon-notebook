@@ -27,6 +27,7 @@ import {
   markdownFiles,
   parseZipBundle,
   resolveLimit,
+  utf8ByteLength,
 } from "./md-bundle.ts";
 import { sourceUploadSizeLabel } from "./source-upload.ts";
 
@@ -309,19 +310,44 @@ export type ProcessedMarkdown =
     images: ReadonlyArray<{ src: string; path: string; encodedBytes: number }>;
   };
 
+export type MarkdownCandidateOptions = InlineOptions & {
+  /** 部署级图片存储总开关（`/system/config` 的 `source_images_enabled`）。省略按
+   *  `true` 处理。`false` 时整段图片配对/内联被跳过——服务端不会持久化任何图片，
+   *  花时间做 base64 编码没有意义（design doc §3.3：「不白付 base64 体积」），
+   *  正文原样入列，未内联的相对图片链接由调用方在回执面板顶部统一说明。 */
+  imagesEnabled?: boolean;
+};
+
+function emptyInlineReceipt(): InlineReceipt {
+  return { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] };
+}
+
 /** 内联一个已选中的 md 候选：解码文本 → 按包内其余文件配对/内联图片 → 算出用作
  *  暂存文件名的 basename（`fileNameOverride` 用于同批同名消歧，见
  *  `bundleFileNamesFor`）。超过单文件上传上限时不返回可入列的正文，只返回体积明细
  *  供调用方拒绝并如实报出（设计文档 §3.1 第 5 条的预检）。
+ *
+ *  `opts.imagesEnabled === false` 时跳过 `inlineMdImages` 整个配对/内联流程，
+ *  只做原有的单文件上限校验（正文本身仍受这条护栏约束），md 正文原样返回、回执
+ *  全空——`md-bundle.ts` 是已过双评审的纯函数管线，这条部署级开关只在编排层
+ *  （本文件）短路，不在那边加分支。
  */
 export function processMarkdownCandidate(
   mdFile: BundleFile,
   files: readonly BundleFile[],
-  opts: InlineOptions,
+  opts: MarkdownCandidateOptions,
   fileNameOverride?: string,
 ): ProcessedMarkdown {
   const text = decodeMarkdownText(mdFile.bytes);
   const fileName = fileNameOverride ?? baseNameOf(mdFile.path);
+  if (opts.imagesEnabled === false) {
+    const bytes = utf8ByteLength(text);
+    const limit = resolveLimit(opts.uploadMaxBytes);
+    if (limit !== null && bytes > limit) {
+      return { ok: false, fileName, receipt: emptyInlineReceipt(), bytes, limit, images: [] };
+    }
+    return { ok: true, fileName, rewritten: text, receipt: emptyInlineReceipt() };
+  }
   const result = inlineMdImages(mdFile.path, text, files, opts);
   if (result.ok) {
     return { ok: true, fileName, rewritten: result.rewritten, receipt: result.receipt };
@@ -386,6 +412,12 @@ export function notStagedNote(reason: string): string {
 
 /** 被去重掉（同名同大小已在列表里）时的标注原因。 */
 export const ALREADY_STAGED_REASON = "同名同大小的文件已在列表中";
+
+/** `source_images_enabled === false` 时，回执面板顶部的一条持久提示（唯一实现
+ *  真源，避免 UI 层另写一遍）——此时 `processMarkdownCandidate` 已跳过整个图片
+ *  配对/内联，压缩包/文件夹里的图片不会进入待上传正文，这条说明必须贴在结果
+ *  概览之前，而不是散落在某一份 md 的逐条明细里（部署级开关，跟哪份 md 无关）。 */
+export const BUNDLE_IMAGES_DISABLED_NOTE = "该部署未开启图片存储，压缩包中的图片将不会被保存";
 
 /** 一份 md 的配对结果概览行——「N 张已内联 / M 张未找到 / K 张不支持 / …」
  *  （设计文档 §3.1 第 7 条的字面措辞）。 */

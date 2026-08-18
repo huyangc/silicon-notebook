@@ -28,6 +28,9 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       report_max_sections: 7,
       report_max_subqueries_per_section: 6,
       user_activity_view_enabled: false,
+      source_image_max_bytes: 5 * 1024 * 1024,
+      source_image_max_per_source: 200,
+      source_images_enabled: false,
     }), {
       status: 200,
     });
@@ -52,6 +55,9 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       report_max_sections: 7,
       report_max_subqueries_per_section: 6,
       user_activity_view_enabled: false,
+      source_image_max_bytes: 5 * 1024 * 1024,
+      source_image_max_per_source: 200,
+      source_images_enabled: false,
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -83,6 +89,55 @@ test("fetchSystemConfiguration treats a missing user_activity_view_enabled as un
       "pdf", "md", "markdown", "docx", "pptx", "csv", "xlsx", "xlsm", "xls",
     ]);
     assert.deepEqual(config.parser_engines, []);
+    // 旧后端同样不下发图片护栏三兄弟:上限缺失 = 不做本地预检(`null`),
+    // 开关缺失 = 视为开启(不能凭空对旧部署弹出「图片不会被保存」的警告)。
+    assert.equal(config.source_image_max_bytes, null);
+    assert.equal(config.source_image_max_per_source, null);
+    assert.equal(config.source_images_enabled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchSystemConfiguration parses the image guard trio when the backend sends them", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    source_image_max_bytes: 2 * 1024 * 1024,
+    source_image_max_per_source: 12,
+    source_images_enabled: false,
+  }), {
+    status: 200,
+  });
+  try {
+    const config = await fetchSystemConfiguration();
+    assert.equal(config.source_image_max_bytes, 2 * 1024 * 1024);
+    assert.equal(config.source_image_max_per_source, 12);
+    assert.equal(config.source_images_enabled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchSystemConfiguration treats malformed image guard values as absent, not a hard failure", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    source_image_max_bytes: 0,
+    source_image_max_per_source: -3,
+    source_images_enabled: "false",
+  }), {
+    status: 200,
+  });
+  try {
+    const config = await fetchSystemConfiguration();
+    assert.equal(config.source_image_max_bytes, null);
+    assert.equal(config.source_image_max_per_source, null);
+    // 非布尔的 "false" 字符串不是显式 `false`:只有真值 `false` 才关闭本地预检/内联,
+    // 其余一律按开启处理,保守方向不变。
+    assert.equal(config.source_images_enabled, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -39,6 +39,17 @@ export type SystemConfiguration = {
    *  旧后端可能不下发这个字段——缺失或类型不对时按 `true` 处理(后端默认就是开
    *  的,不该在新前端 + 旧后端组合下把一个其实可用的视图藏掉)。 */
   user_activity_view_enabled: boolean;
+  /** 部署的单图字节上限(镜像 MINERU_MAX_IMAGE_BYTES),供压缩包/文件夹上传的图片
+   *  配对预检。旧后端不下发时为 `null`——与 `source_upload_max_bytes` 缺失时一样,
+   *  含义是「拿不到这个上限,不做本地预检,由服务端护栏兜底」,不能猜一个假上限。 */
+  source_image_max_bytes: number | null;
+  /** 部署的每来源图片张数上限(镜像 MINERU_MAX_IMAGES_PER_SOURCE)。同上,缺失即
+   *  `null` = 不做本地预检。 */
+  source_image_max_per_source: number | null;
+  /** 部署级图片存储总开关(镜像 MINERU_RETURN_IMAGES)。缺失(旧后端)按 `true`
+   *  处理——这是能力位不是校验值,旧后端从未关闭过这个开关,方向必须是「不凭空弹
+   *  警告」而不是「不确定就当关闭」。 */
+  source_images_enabled: boolean;
 };
 
 export type ParserEngineCapability = {
@@ -67,6 +78,13 @@ const PARSER_CAPABILITIES = new Set([
 const PARSER_UNAVAILABLE_REASONS = new Set([
   "disabled", "missing_endpoint", "missing_credentials",
 ]);
+
+/** 正整数或 `null`("拿不到这个值,不做本地预检")。与 `md-bundle.ts` 的
+ *  `resolveLimit` 同一口径,这里不直接 import 它——system-api.ts 是通用系统配置
+ *  解析层,不必耦合到 bundle 管线那个模块。 */
+function positiveIntOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
 
 function normalizedExtensions(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0) return null;
@@ -159,6 +177,15 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   const activityViewEnabled = record.user_activity_view_enabled;
   const supportedExtensions = normalizedExtensions(record.supported_source_extensions)
     ?? DEFAULT_SUPPORTED_SOURCE_EXTENSIONS;
+  // 图片护栏值缺失(旧后端)一律按 `null` = 「拿不到这个上限,不做本地预检」,与
+  // `source_upload_max_bytes` 缺失时的既有口径同一方向(md-bundle.ts 的
+  // `resolveLimit` 就是这份契约在纯函数层的镜像)。
+  const imageMaxBytes = positiveIntOrNull(record.source_image_max_bytes);
+  const imageMaxPerSource = positiveIntOrNull(record.source_image_max_per_source);
+  // 缺字段(旧后端)按 `true` 处理:这个开关此前从不存在,不能让新前端凭空对旧
+  // 后端的正常部署弹出一条「图片不会被保存」的警告。只有服务端显式给出 `false`
+  // 才关闭本地内联与提示。
+  const imagesEnabled = record.source_images_enabled;
   return {
     source_upload_max_bytes: limit,
     source_upload_max_files_per_batch: batchFiles,
@@ -167,6 +194,9 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
     report_max_sections: reportMaxSections,
     report_max_subqueries_per_section: reportMaxSubqueries,
     user_activity_view_enabled: activityViewEnabled === true,
+    source_image_max_bytes: imageMaxBytes,
+    source_image_max_per_source: imageMaxPerSource,
+    source_images_enabled: imagesEnabled !== false,
   };
 }
 

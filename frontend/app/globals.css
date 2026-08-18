@@ -6601,6 +6601,15 @@ button.chat-session-card {
   max-height: 240px;
 }
 
+/* 部署未开启图片存储时的面板顶部持久提示（与哪一份 md 无关，所以不放进逐条明细），
+   用 --danger 而不是默认 .tool-hint 灰色——图片会被静默丢弃这件事需要比普通提示
+   更醒目。 */
+.bundle-images-disabled-note {
+  margin: 0;
+  color: var(--danger, #c0392b);
+  font-weight: 600;
+}
+
 /* 回执行上的补充说明（未加入待上传列表 / 超限时最大的几张图片）：与配对明细
    同一份列表，但用警示色区分——它说的是「这一份没进列表」，不是配对细节。 */
 .bundle-receipt-note {

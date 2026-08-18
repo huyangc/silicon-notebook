@@ -138,8 +138,8 @@ import {
   directoryTooLargeMessage, directoryTruncatedMessage, inlineTooLargeImageLines,
   inlineTooLargeMessage, notStagedNote, processMarkdownCandidate,
   readDirectoryAsBundleFiles, unpackZipFile,
-  ALREADY_STAGED_REASON, BUNDLE_READ_FAILED_REASON, DIRECTORY_READ_FAILED_REASON,
-  NO_MARKDOWN_IN_BUNDLE_REASON,
+  ALREADY_STAGED_REASON, BUNDLE_IMAGES_DISABLED_NOTE, BUNDLE_READ_FAILED_REASON,
+  DIRECTORY_READ_FAILED_REASON, NO_MARKDOWN_IN_BUNDLE_REASON,
 } from "./bundle-intake.ts";
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
@@ -902,6 +902,11 @@ export default function Home() {
   // only the short initial fetch window; the server remains the final 413 guard.
   const [sourceUploadMaxBytes, setSourceUploadMaxBytes] = useState<number | null>(null);
   const [sourceUploadMaxFilesPerBatch, setSourceUploadMaxFilesPerBatch] = useState<number | null>(null);
+  // 压缩包/文件夹上传的图片配对预检护栏(§3.3):`null` = 拿不到这个上限,不做本地
+  // 预检；`sourceImagesEnabled` 缺省按 true(旧后端从未关闭过图片存储)。
+  const [sourceImageMaxBytes, setSourceImageMaxBytes] = useState<number | null>(null);
+  const [sourceImageMaxPerSource, setSourceImageMaxPerSource] = useState<number | null>(null);
+  const [sourceImagesEnabled, setSourceImagesEnabled] = useState(true);
   const [supportedSourceExtensions, setSupportedSourceExtensions] = useState<string[]>(
     DEFAULT_SUPPORTED_SOURCE_EXTENSIONS,
   );
@@ -1387,6 +1392,9 @@ export default function Home() {
           setParserEngines(config.parser_engines);
           setReportMaxSections(config.report_max_sections);
           setReportMaxSubqueriesPerSection(config.report_max_subqueries_per_section);
+          setSourceImageMaxBytes(config.source_image_max_bytes);
+          setSourceImageMaxPerSource(config.source_image_max_per_source);
+          setSourceImagesEnabled(config.source_images_enabled);
         }
       } catch {
         if (!cancelled) retryTimer = window.setTimeout(loadUploadLimit, 2000);
@@ -2989,6 +2997,9 @@ export default function Home() {
       setReportMaxSubqueriesPerSection(
         systemConfiguration.report_max_subqueries_per_section,
       );
+      setSourceImageMaxBytes(systemConfiguration.source_image_max_bytes);
+      setSourceImageMaxPerSource(systemConfiguration.source_image_max_per_source);
+      setSourceImagesEnabled(systemConfiguration.source_images_enabled);
     }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
@@ -3660,7 +3671,12 @@ export default function Home() {
       const processed = processMarkdownCandidate(
         candidate,
         files,
-        { uploadMaxBytes: sourceUploadMaxBytes ?? 0 },
+        {
+          uploadMaxBytes: sourceUploadMaxBytes ?? 0,
+          imageMaxBytes: sourceImageMaxBytes,
+          maxImagesPerSource: sourceImageMaxPerSource,
+          imagesEnabled: sourceImagesEnabled,
+        },
         names.get(candidate.path),
       );
       if (!processed.ok) {
@@ -7777,7 +7793,11 @@ export default function Home() {
                 onCancel={cancelBundleChoice}
               />
             )}
-            <BundleReceiptsPanel receipts={bundleReceipts} onDismiss={() => setBundleReceipts([])} />
+            <BundleReceiptsPanel
+              receipts={bundleReceipts}
+              onDismiss={() => setBundleReceipts([])}
+              imagesDisabledNote={sourceImagesEnabled ? null : BUNDLE_IMAGES_DISABLED_NOTE}
+            />
             <div className="source-action-row">
               <label
                 className={`source-action-button${sourceFilePickerDisabled ? " is-disabled" : ""}`}

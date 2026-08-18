@@ -9500,6 +9500,20 @@
               "title": "Report Max Subqueries Per Section",
               "type": "integer"
             },
+            "source_image_max_bytes": {
+              "exclusiveMinimum": 0.0,
+              "title": "Source Image Max Bytes",
+              "type": "integer"
+            },
+            "source_image_max_per_source": {
+              "exclusiveMinimum": 0.0,
+              "title": "Source Image Max Per Source",
+              "type": "integer"
+            },
+            "source_images_enabled": {
+              "title": "Source Images Enabled",
+              "type": "boolean"
+            },
             "source_upload_max_bytes": {
               "exclusiveMinimum": 0.0,
               "title": "Source Upload Max Bytes",
@@ -9529,7 +9543,10 @@
             "parser_engines",
             "report_max_sections",
             "report_max_subqueries_per_section",
-            "user_activity_view_enabled"
+            "user_activity_view_enabled",
+            "source_image_max_bytes",
+            "source_image_max_per_source",
+            "source_images_enabled"
           ],
           "title": "SystemConfiguration",
           "type": "object"
