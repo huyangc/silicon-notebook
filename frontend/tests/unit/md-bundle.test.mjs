@@ -82,7 +82,10 @@ class ByteWriter {
 /** entries: [{
  *    name, data, method = 0, flags = 0, sentinelSize = false, sentinelOffset = false,
  *    blob,                 // 覆盖压缩载荷（构造损坏/截断的 deflate 流用）
- *    compressedSizeDelta,  // 声明的 compressed size 相对真实载荷的偏移（负数＝声明得更短）
+ *    compressedSizeDelta,    // 声明的 compressed size 相对真实载荷的偏移（负数＝声明得更短）
+ *    uncompressedSizeDelta,  // 声明的 uncompressed size 相对 data.length 的偏移，独立于
+ *                            // 实际内容/CRC——用来单独钉住「长度检查」而不牵连 CRC 检查
+ *                            // （两者正常情况下总是同时触发，需要这个旋钮才能拆开验证）
  *    localExtra, centralExtra,  // local / central 两侧**各自独立**的 extra 字段
  *  }]
  */
@@ -99,7 +102,9 @@ function makeZip(entries, options = {}) {
     const localExtra = bytesOf(entry.localExtra ?? new Uint8Array(0));
     const centralExtra = bytesOf(entry.centralExtra ?? new Uint8Array(0));
     const offset = w.length;
-    const declaredUncompressed = entry.sentinelSize ? 0xffffffff : data.length;
+    const declaredUncompressed = entry.sentinelSize
+      ? 0xffffffff
+      : data.length + (entry.uncompressedSizeDelta ?? 0);
     w.u32(0x04034b50).u16(20).u16(entry.flags ?? 0).u16(method)
       .u16(0).u16(0)
       .u32(crc32(data)).u32(declaredCompressed).u32(data.length)
@@ -338,6 +343,58 @@ test("a compressed size shorter than the real stream is reported as corrupt", as
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "corrupt");
   assert.equal(result.error.path, "short.md");
+});
+
+
+test("a bit-flipped stored entry fails the CRC-32 check even though sizes line up", async () => {
+  // 位翻转不改变长度,只改变字节内容——单靠 uncompressedSize 比对完全看不出来,
+  // 必须真的比 CRC。central directory 记的 CRC 来自「本该是」的原文,磁盘上的
+  // 字节被翻了一位,两者就对不上。
+  const original = bytesOf("A".repeat(64));
+  const flipped = new Uint8Array(original);
+  flipped[10] ^= 0xff;
+  const zip = makeZip([{ name: "shot.png", data: original, blob: flipped }]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "corrupt");
+  assert.equal(result.error.path, "shot.png");
+});
+
+
+test("a declared uncompressed size that disagrees with the real (CRC-valid) content is reported as corrupt", async () => {
+  // 内容与 CRC 都合法(content 就是 data,crc32(data) 逐字写进两处 header)——只有
+  // 声明的 uncompressed size 被单独改错了 1 字节。CRC 检查在这份夹具上必然通过,
+  // 唯一能拦下它的只有长度比对,借此把两条检查彼此独立地钉住。
+  const zip = makeZip([{ name: "off-by-one.md", data: "x".repeat(40), uncompressedSizeDelta: -1 }]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "corrupt");
+  assert.equal(result.error.path, "off-by-one.md");
+});
+
+
+test("a deflated entry whose decoded length disagrees with the declared size is reported as corrupt", async () => {
+  // central/local 两处的 uncompressedSize 与 CRC 都是照「声明的」原文算出来的,
+  // 而磁盘上真正的 deflate 流解出来是另一段更短的内容——长度一比对就露馅,
+  // 不需要走到 CRC 那一步。
+  const declared = bytesOf("a".repeat(100));
+  const actualBlob = new Uint8Array(deflateRawSync(Buffer.from("a".repeat(50))));
+  const zip = makeZip([{ name: "notes.md", data: declared, method: 8, blob: actualBlob }]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "corrupt");
+  assert.equal(result.error.path, "notes.md");
+});
+
+
+test("an intact bundle with matching CRCs parses normally (no false positives)", async () => {
+  const zip = makeZip([
+    { name: "notes.md", data: "# 标题\n\n正文。".repeat(30), method: 8 },
+    { name: "images/shot.png", data: PNG, method: 0 },
+  ]);
+  const result = await parseZipBundle(zip, CAPS);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.files.map((f) => f.path), ["notes.md", "images/shot.png"]);
 });
 
 

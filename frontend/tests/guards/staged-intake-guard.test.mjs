@@ -261,6 +261,21 @@ test("世代计数器在两个清理路径（关弹窗/清空/上传成功、切
   );
 });
 
+test("openNotebook 结清挂起的 bundleChoice 勾选（不只是递增世代）", () => {
+  // codex #518 R3 P2：世代递增只挡了迟到落盘——挂起的 bundleChoice 面板、它的
+  // resolver 与忙碌栈帧不会因此自动消失。深链/浏览器导航切库时弹窗未必被
+  // closeSourceModal 关过，旧笔记本的勾选面板会悬在新笔记本上，把「添加来源」
+  // 入口一直锁死到用户手动确认/取消一个已经不指向当前笔记本的面板。
+  const open = findFunctionIn(page, "Home", "openNotebook");
+  const targets = callSitesIn(open).map((call) => call.target);
+  assert.ok(
+    targets.includes("cancelBundleChoice"),
+    "openNotebook 必须调用 cancelBundleChoice（与关闭弹窗同一条结清路径：resolve"
+      + " 挂起 resolver、清空 bundleChoice、把忙碌文案同步回当前栈顶），否则切库后"
+      + "「添加来源」的文件选择器会被上一个笔记本的勾选面板永久锁死",
+  );
+});
+
 test("每条异步 bundle 链在落盘（入列/写回执/跳过记录）前都比对世代", () => {
   const guarded = [
     "stageIncomingFilesSync",
