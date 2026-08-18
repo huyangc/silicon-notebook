@@ -272,6 +272,22 @@ def test_prompt_functions_are_frozen_without_a_block():
                     "q", history, want_types, 4, None, cmap, profile_block="")
 
 
+def test_both_planning_spellings_render_the_block():
+    """「要到达规划模型的东西必须两份拼写都加」——正向那一半。
+
+    ⚠ 这条是**变异验证驱动**加的:只测整轮 run 的话,``plan_prompt``(备份拼写,
+    production 不走它)把注入删掉不会有任何测试变红,而它的存在理由恰恰是「两份
+    绝不各说各的」。冻结用例只证明空串时两份都不变,证明不了非空时两份都带。
+    """
+    from app.services.prompts import expand_query_prompt, plan_prompt
+
+    block = render_profile_block(
+        [{"label": "corpus_shape", "owner_id": "", "value": "以工艺手册为主"}])
+    assert block
+    assert block in plan_prompt("q", profile_block=block)
+    assert block in expand_query_prompt("q", profile_block=block)
+
+
 def test_the_gate_is_one_predicate(repo):
     """总闸单点判定:开关关、或 store 没接线,都等于「不可用」。"""
     settings = repo.settings
