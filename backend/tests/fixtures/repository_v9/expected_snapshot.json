@@ -1688,6 +1688,16 @@
         "type": "table"
       },
       {
+        "name": "agent_notebook_profile",
+        "sql_sha256": "176caa83777b3199a3b40683f3c0bf8b3ebb74b33ffd13abe120aa642f71086a",
+        "type": "table"
+      },
+      {
+        "name": "agent_profile_jobs",
+        "sql_sha256": "90f3e1cf37fc5d76b1da31e7044dedcf12d00ef398e4aa00e29486a8facf7d1c",
+        "type": "table"
+      },
+      {
         "name": "agent_profiles",
         "sql_sha256": "bd343e9937e743e441fc0be7136034698a87f3d4137b44c646bfd9a035d2a00e",
         "type": "table"
@@ -2183,6 +2193,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 50
+    "user_version": 51
   }
 }

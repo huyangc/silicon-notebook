@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=50, postgres_version=28, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=51, postgres_version=29, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -636,6 +636,33 @@ _TABLES = (
         ("id",),
         ReplicationKeyKind.DECLARED_PK,
         83,
+        "timestamptz",
+    ),
+    # SQLite v51 / PostgreSQL v29: Agentic Memory P1 (zero behavior change — no
+    # reader/writer consumes these tables yet). Both hang off notebooks
+    # (rank 15) and nothing else, so the appended ranks stay FK-consistent, and
+    # neither table has any incoming foreign key of its own.
+    #
+    # The declared replication key of each table is deliberately the exact
+    # column list of its composite PRIMARY KEY. That equality is the park
+    # precondition: replicator.py's _build_unique_surfaces resolves a surface to
+    # REPLICATION_KEY only when the surface's columns equal the spec's
+    # replication key, which is what keeps these two tables off the sentinel /
+    # nullable / leaf-delete park paths entirely. Changing either key here — or
+    # adding a second unique surface to either table in a migration — silently
+    # moves them onto a weaker strategy or fails replicator construction closed.
+    _table(
+        "agent_notebook_profile",
+        ("notebook_id", "owner_id", "label"),
+        ReplicationKeyKind.DECLARED_PK,
+        84,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "agent_profile_jobs",
+        ("notebook_id", "owner_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        85,
         "timestamptz",
     ),
 )

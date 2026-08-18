@@ -58,6 +58,17 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
 # not of the knowledge inside it. A copy is a brand-new notebook with no
 # such history; its owner starts from a clean slate and requests sharing
 # explicitly if they want it.
+#
+# Also deliberately absent: `agent_notebook_profile` / `agent_profile_jobs`
+# (Agentic Memory P1, schema v29). The copy starts its understanding from
+# scratch — registered as intentional in the feature's design doc. What those
+# blocks hold is how this library came to be *used and read*, not the knowledge
+# in it: the shared base layer describes a corpus that the copy's owner will
+# grow differently from here, and each per-member overlay is that one member's
+# retrieval habit, which no copy recipient inherits. The job rows are transient
+# *process* state (one chain's run status plus its threshold counter), the same
+# reason `catalog_jobs`/`catalog_candidates` are absent from this snapshot on
+# the SQLite side.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id=%s"),
     ("sources", "SELECT * FROM sources WHERE notebook_id=%s"),

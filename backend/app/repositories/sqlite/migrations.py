@@ -45,7 +45,11 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # member's request to share their own notebook with a group they belong to,
 # pending a group admin's approval. Additive only: no consumer reads or
 # writes it yet, so this migration is zero-behavior-change.
-SCHEMA_VERSION = 50
+# v51 adds the two Agentic-Memory P1 tables (agent_notebook_profile, the
+# per-notebook understanding blocks with their shared base / per-member
+# overlay layering, and agent_profile_jobs, the per-chain consolidation
+# state). Additive only: no reader or writer exists yet.
+SCHEMA_VERSION = 51
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2567,6 +2571,114 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_share_requests_group ON notebook_share_requests(group_id, status);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_share_requests_one_pending
                   ON notebook_share_requests(notebook_id, group_id, status) WHERE status = 'pending';
+                """
+            )
+
+    def _migration_51(self) -> None:
+        """Agentic Memory P1: per-notebook understanding blocks + chain state.
+
+        零行为变化——两张纯追加表,全仓没有任何读写方。store / ports / facade、
+        注入面、巡固 job 与 API 都落在本特性的后续任务里;本迁移只铺 DDL,让后面
+        的任务只碰数据、不碰 schema。
+
+        ``agent_notebook_profile`` 是理解块本身:``owner_id=''`` 是这本库的共享
+        底座,非空 ``owner_id`` 是该成员自己的覆盖层。``agent_profile_jobs`` 是
+        每条链(库/成员)一行的巡固状态,兼当阈值计数器。
+
+        六个已拍板的取舍(逐条登记,免得下一个读者把它们当疏漏"修"回去):
+
+        1. ``owner_id`` 用 ``NOT NULL DEFAULT ''`` 哨兵,不用 NULL。理由与 v49
+           ``notebook_grants.principal_id`` 逐字同源(见 ``_migration_49`` 与
+           ``0027_group_sharing.sql`` 的模块注释):两个后端的 UNIQUE 都把 NULL
+           视为互不相等,可空的 ``owner_id`` 会让**每一行底座**逃出唯一性——重复
+           底座行可累积、清空清不干净、巡固的乐观并发失效。设计文档里"nullable
+           列正是 shadow 停车最省事的形状"那句解决的是停车方案,而停车方案在这里
+           由第 2 条更彻底地解决了。
+
+        2. 唯一面用复合主键,不用独立 UNIQUE(仿 v47 ``notebook_object_schemas``
+           的 ``PRIMARY KEY (notebook_id, object_type)``,shadow manifest 里是
+           ``DECLARED_PK``)。这是**停车方案本身**:
+           ``replicator.py::_build_unique_surfaces`` 的第一条分支是
+           ``if set(columns) == set(spec.replication_key)`` → ``REPLICATION_KEY``,
+           只要 shadow manifest 里这张表的 ``replication_key`` 逐字等于这几列,
+           停车策略自动落到 ``REPLICATION_KEY``,不需要哨兵列、不需要 nullable
+           列、不需要叶表 delete/reinsert。两张新表都按这条走。
+
+        3. ``owner_id`` 刻意无外键到 ``users``:``''`` 哨兵与 FK 天然冲突;且与
+           ``notebook_grants.principal_id``、``catalog_candidates.job_id``、
+           ``sources.agent_profile_id`` 同一先例——出处/归属列存裸 id。这也让两张
+           表不新增任何入向 FK(保持叶表)。**任何时候都不得给 ``owner_id`` /
+           ``label`` 加 CHECK 或 FK**:那会同时破坏第 2 条的停车前提与枚举值走
+           应用层校验的惯例(``label`` 取
+           corpus_shape|key_entities|corpus_gaps|retrieval_notes|usage_gaps,
+           ``updated_origin`` 取 job|user,``status`` 取
+           idle|queued|running|done|failed|cancelled,都在应用层校验)。
+
+        4. PK 三列全部显式 ``NOT NULL`` ⇒ 两张表都**不进** shadow
+           ``manifest.py::_SQLITE_NULL_GUARD_KEYS``(那个集合只服务"rowid 表的
+           声明 PK 可空"这一种形态)。
+
+        5. 不建条件唯一索引,因此不需要 ``replicator.py::_UNIQUE_PREDICATES`` 的
+           pin。单飞由 ``agent_profile_jobs`` 的 PK 行 CAS
+           (``UPDATE ... WHERE (notebook_id, owner_id)=? AND status NOT IN
+           ('queued','running')`` + rowcount 判据)承担,跨进程语义与
+           ``idx_catalog_jobs_one_active`` / ``idx_kg_build_jobs_one_running``
+           等价而更强(一把 PK 行锁,没有第二个唯一面)。**为什么不照抄
+           ``catalog_jobs`` 的「每 run 一行 + 条件唯一索引」**:那个形状的存在理由
+           是候选审阅队列与逐窗进度需要 per-run 历史行;这里 UI 只轮询「当前这条链
+           在不在忙」,而阈值计数器又必须挂在链上——一行 per-chain 状态同时满足
+           两者,并少一个必须在 ``_UNIQUE_PREDICATES`` 里手工 pin 的部分唯一面
+           (漏 pin 会让 ``ShadowReplicator`` 构造期对整个 schema 版本 fail
+           closed)。
+
+        6. 变更历史用块表内的 ``history_json`` 环形列,不新建
+           ``agent_profile_changes`` 表——设计文档把这一项明文留给定稿,此处拍板
+           选 JSON 列。理由:(a) P1 的界面只有「看/改/清空/手动重建」,不含历史
+           回看与回滚,一张可查询的流水表买不到任何 P1 能力;(b) 每张新表都要付
+           manifest 条目 + copy_rank + 停车面 + 深拷贝登记;(c) knowhow
+           ``record_change`` 的形态是为「整表逆序 delta 重放 + 前后置指纹」服务
+           的,而这里的回滚只是单行值交换;(d) 块值本身有硬字符上限,20 条的环形
+           缓冲每行 ≤ 数 KB,有界。写入契约仍抄 knowhow 的那一半:历史条目必须在
+           同一个写事务内、在块 UPDATE 之后追加(before/after + origin + actor +
+           at + revision),超出上限丢最旧。
+
+        **刻意不建任何二级索引**:PK 覆盖全部读路径——块按
+        ``(notebook_id, owner_id IN ('', ?))`` 前缀查、按 PK 点写;启动兜底扫
+        ``agent_profile_jobs`` 的 ``status`` 是每进程一次,表规模是「曾触发过的
+        (库, 成员)」量级。写在这里免得后来者补一个无人使用的索引。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS agent_notebook_profile (
+                  notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id      TEXT NOT NULL DEFAULT '',
+                  label         TEXT NOT NULL,
+                  value         TEXT NOT NULL DEFAULT '',
+                  evidence_json TEXT NOT NULL DEFAULT '[]',
+                  history_json  TEXT NOT NULL DEFAULT '[]',
+                  revision      INTEGER NOT NULL DEFAULT 1,
+                  updated_by    TEXT NOT NULL DEFAULT '',
+                  updated_origin TEXT NOT NULL DEFAULT 'job',
+                  created_at    TEXT NOT NULL,
+                  updated_at    TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id, label)
+                );
+                CREATE TABLE IF NOT EXISTS agent_profile_jobs (
+                  notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id      TEXT NOT NULL DEFAULT '',
+                  status        TEXT NOT NULL DEFAULT 'idle',
+                  pending_signal INTEGER NOT NULL DEFAULT 0,
+                  runs          INTEGER NOT NULL DEFAULT 0,
+                  blocks_written INTEGER NOT NULL DEFAULT 0,
+                  failure_reason TEXT NOT NULL DEFAULT '',
+                  diagnostic    TEXT NOT NULL DEFAULT '',
+                  started_at    TEXT NOT NULL DEFAULT '',
+                  finished_at   TEXT NOT NULL DEFAULT '',
+                  created_at    TEXT NOT NULL,
+                  updated_at    TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, owner_id)
+                );
                 """
             )
 
