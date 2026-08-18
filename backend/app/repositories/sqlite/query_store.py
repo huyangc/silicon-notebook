@@ -504,6 +504,20 @@ class QueryStore:
         的人生效——这一条与读权谓词同义,但这里是 JOIN 出来的,不是那份四值白名单的
         复刻(它一次只看两个群组主体,永远碰不到 `everyone` 与哨兵停车行)。
 
+        ⚠ `_grant_role` 是**这条边自己的** `notebook_grants.role`(P2-T2 新增的一列,
+        零新增查询),不要与上一段里 `gm.role='admin'` 那个**组成员角色**混为一谈:
+        前者答「这条共享边给的是只读还是管理」,后者答「你在这个组里是不是管理员」,
+        `group_admins` 主体的边两者都要为真。service 用它算 `can_manage_content`。
+
+        **登记的取舍**:这条查询只覆盖 `group` / `group_admins` 两个主体,所以由它
+        派生的 `can_manage_content` 也只覆盖这两类边;而后端的管理权谓词
+        (`access_sql.NOTEBOOK_ADMIN_SQL`)是四臂全收。两者今天等价,因为
+        `models/groups.py::GRANTABLE_PRINCIPAL_TYPES` 只收这两个主体——`user` /
+        `everyone` 的授权边在产品里根本没有写入口,更不可能带 `role='admin'`。这条
+        前提由 `test_group_routes.py` 的 grantable-principal 守卫钉住;真要给
+        `user` 主体开写入口,那道守卫会先红,提醒把这条投影一并扩掉。方向也是安全的:
+        投影漏判只会少画按钮,不会多给权限(权威判定永远在守卫那一侧)。
+
         ⚠ **`CROSS JOIN` 是给 SQLite 查询规划器的驱动顺序提示,不是语义**(SQLite 对
         `CROSS JOIN ... ON` 与 `JOIN ... ON` 的结果集完全相同,区别只是前者禁止重排
         表顺序)。少了它,planner 会从 `notebook_grants` 起步、按
@@ -522,7 +536,8 @@ class QueryStore:
         params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return db.execute(
             "SELECT nb.*, u.username AS _owner_username, "
-            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind "
+            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind, "
+            "ng.role AS _grant_role "
             "FROM group_members gm "
             "CROSS JOIN notebook_grants ng ON ng.principal_id = gm.group_id "
             "AND ng.principal_type IN ('group', 'group_admins') "

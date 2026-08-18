@@ -12,8 +12,10 @@ from app.repositories.group_rows import (
 from app.repositories.ports import NotebookTooLargeToCopyError
 from app.repositories.sqlite.access_sql import (
     MEMBER_PROBE_SQL,
+    NOTEBOOK_ADMIN_SQL,
     NOTEBOOK_READ_SQL,
     NOTEBOOK_WRITE_SQL,
+    admin_access_params,
     read_access_params,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -362,6 +364,19 @@ class SharingStore:
         with self.database.connect() as db:
             row = db.execute(
                 NOTEBOOK_WRITE_SQL, (notebook_id, user_id)
+            ).fetchone()
+        return row is not None
+
+    def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """管理权:owner ∪ 管理级有效授权边。谓词见 `access_sql.NOTEBOOK_ADMIN_SQL`。
+
+        P2 能力翻转的判定入口(裁决 P2-1)。刻意与 `user_can_access_notebook` **并列**
+        而不是取代它:`notebook:delete` 与 Agent/MCP 面仍要恒 owner 的那一条,两条谓词
+        必须能被分别引用。
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                NOTEBOOK_ADMIN_SQL, (notebook_id, *admin_access_params(user_id))
             ).fetchone()
         return row is not None
 

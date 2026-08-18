@@ -230,6 +230,35 @@ test("workspace capabilities separate notebook type ownership from the global ba
 });
 
 
+test("group admins get the content-management bits on a notebook that is still `reader`", () => {
+  // 群组知识共享 P2:后端把六个内容管理能力从 owner-only 翻成「owner ∪ 组管理边」,
+  // 而 `access` 刻意仍是 "reader"（权限档没有新增枚举值，裁决 P2-3）。只看 access 的
+  // 界面会让组管理员对着一个 API 全部允许、按钮全部藏起来的只读工作区。
+  assert.deepEqual(workspaceCapabilities("reader", "user", true), {
+    canWriteNotebook: true,
+    canGovernKnowledge: true,
+    canManageReports: true,
+    canManageNotebookSchemas: true,
+    // 全局图谱类型基线仍只认系统管理员——组管理员在**这本库**里有权，不是全站有权。
+    canManageGlobalSchemas: false,
+  });
+  // 显式 false 与省略第三个参数必须逐位相同:旧后端不发 can_manage_content,缺省
+  // 一律取收的那一侧（画多了按钮 = 点进一个必然 404 的动作）。
+  assert.deepEqual(
+    workspaceCapabilities("reader", "user", false),
+    workspaceCapabilities("reader", "user"),
+  );
+  assert.equal(workspaceCapabilities("reader", "user", false).canWriteNotebook, false);
+  // owner 那一侧不受这个参数影响（它本来就为真，false 也不该把它按下去）。
+  assert.equal(workspaceCapabilities("owner", "user", false).canWriteNotebook, true);
+  // 系统管理员这一维与内容管理权正交:组管理员不因此获得全局基线写权。
+  assert.equal(
+    workspaceCapabilities("reader", "admin", true).canManageGlobalSchemas,
+    true,
+  );
+});
+
+
 test("completed paper metadata opens sources while index work opens KG", () => {
   assert.equal(doneItemDestination("paper_meta_done"), "sources");
   assert.equal(doneItemDestination("index_done"), "kg");

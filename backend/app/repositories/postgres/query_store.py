@@ -415,8 +415,8 @@ class QueryStore:
         """`sqlite/query_store.py::granted_notebook_rows` 的镜像(含点查形态)。
 
         完整理由(为什么它是列表投影而不是授权判定、为什么只收两个群组主体、为什么
-        去重留在 service)写在 SQLite 那一份里,两份必须同修。PG 侧有**两处**刻意
-        不同:
+        去重留在 service、`_grant_role` 列与它承载的那条登记取舍)写在 SQLite 那一份
+        里,两份必须同修。PG 侧有**两处**刻意不同:
 
         * 排序键的 `COLLATE "C"` —— 非 C collation 的库里 `ORDER BY id` 与 SQLite 的
           字节序不同,同一批库在两个后端上会排出不同的顺序。
@@ -434,7 +434,8 @@ class QueryStore:
         params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return _compat_notebook_rows(db.execute(
             "SELECT nb.*, u.username AS _owner_username, "
-            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind "
+            "g.id AS _group_id, g.name AS _group_name, g.kind AS _group_kind, "
+            "ng.role AS _grant_role "
             "FROM group_members gm "
             "JOIN notebook_grants ng ON ng.principal_id = gm.group_id "
             "AND ng.principal_type IN ('group', 'group_admins') "

@@ -94,6 +94,36 @@ def fold_shared_notebooks(rows: Sequence[Any]) -> list[dict]:
     return list(folded.values())
 
 
+#: `notebook_grants.role` 里表示「管理级」的取值。与 `models/groups.py::GRANT_ROLES`
+#: 的第二项、以及两份 `access_sql._admin_principal_match_expr` 里那个字面量是同一个值。
+#: 三处刻意不互相 import(models 是 API 层、access_sql 是 SQL 文本、这里是中性行整形,
+#: 互相 import 会成环),由 `test_access_sql_contract` 的一致性断言钉住。
+ADMIN_GRANT_ROLE = "admin"
+
+
+def notebook_grant_confers_admin(row: Any) -> bool:
+    """这条授权边行是否**授予内容管理权**(群组知识共享 P2-T2)。
+
+    `granted_notebook_rows` 的行整形,与 `fold_granted_notebook_groups` 同一条理由住在
+    中性层:两个后端喂同一份判据,分叉了没有任何测试会自然抓到——它不报错,只是某个
+    后端的组管理员在界面上看不到写入口。
+
+    ⚠ 判的是**边自己的 role**(`_grant_role`),不是组成员角色。「你在组里是不是管理员」
+    已经由查询的 `gm.role='admin'` 那一半在 `group_admins` 主体上判过了;这里判的是
+    「库主把这条边发成了只读还是管理」。两个 role 同名不同轴,混用会让每个 `group_admins`
+    边都被当成管理权。
+
+    列缺失(旧行形状/未来的其他行来源)按 **False** 收:方向与
+    `NotebookSummary.can_manage_content` 的默认值一致——投影漏判只少画一个按钮,
+    多判会让用户点进一个必然 404 的动作。
+    """
+    try:
+        role = row["_grant_role"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return role == ADMIN_GRANT_ROLE
+
+
 def fold_granted_notebook_groups(rows: Sequence[Any]) -> dict[str, list[dict]]:
     """授权边列表投影的第二半:``notebook_id -> [{group_id, group_name, kind}]``。
 

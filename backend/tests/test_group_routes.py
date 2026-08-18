@@ -812,8 +812,61 @@ def test_shared_notebook_list_hides_copies_in_flight(tmp_path, monkeypatch, repo
     assert client.get(f"/api/groups/{group_id}/shared-notebooks", headers=owner).json() == []
 
 
-def test_group_grants_do_not_widen_write_access(tmp_path, monkeypatch):
-    """P1 只扩读权。授权边的 role 写成 admin 也一个字的写权都不给(那是 P2)。"""
+def test_a_viewer_grant_still_does_not_widen_write_access(tmp_path, monkeypatch):
+    """`role='viewer'` 的授权边**只**扩读权——P1 的原始断言,P2 之后逐字仍成立。
+
+    P2 翻的是 `role='admin'` 那一档(见下一条),这一条钉的是「翻的只有那一档」:
+    viewer 边不因为主体是 `group_admins` 就顺带获得任何管理能力。此前这条用的是
+    admin 边(P1 时两者行为相同),P2 之后必须换成 viewer 边才还在测这件事。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    member, member_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{member_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={
+            "principal_type": "group_admins",
+            "principal_id": group_id,
+            "role": "viewer",
+        },
+        headers=owner,
+    )
+
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
+    for method, suffix in (
+        ("patch", ""),
+        ("delete", ""),
+        ("post", "/tier"),
+        ("post", "/share"),
+        ("get", "/grants"),
+    ):
+        response = client.request(
+            method.upper(),
+            f"/api/notebooks/{notebook_id}{suffix}",
+            headers=member,
+            json={} if method in ("post", "patch") else None,
+        )
+        assert response.status_code == 404, (method, suffix, response.status_code)
+
+
+def test_an_admin_grant_widens_management_but_never_deletion(tmp_path, monkeypatch):
+    """P2-T2 的能力翻转在这条路由矩阵上的样子——**逐格**说清哪几格翻了。
+
+    这条取代了 P1 的「授权边的 role 写成 admin 也一个字的写权都不给」:那句话在 P2
+    之后**不再为真**,是刻意的边界放宽(裁决 P2-1),不是回归。翻的是 `notebook:manage`
+    那几格(改库信息 / 设 tier / 分享链接 / 看授权边清单);`DELETE /notebooks/{id}`
+    挂的是 `notebook:delete`,恒 owner,组管理员照旧 404。
+
+    ⚠ 「组管理员能删掉库主的整本笔记本」是本次改动最贵的失手形态,所以删库那一格
+    **单独断言**而不是混在循环里——它失败时的信息必须直接说出这件事。
+    """
     client = _client(tmp_path, monkeypatch)
     owner, _owner_id, _ = _new_user(client)
     group_id = _make_group(client, owner)
@@ -835,20 +888,25 @@ def test_group_grants_do_not_widen_write_access(tmp_path, monkeypatch):
     )
 
     assert client.get(f"/api/notebooks/{notebook_id}", headers=member).status_code == 200
-    for method, suffix in (
-        ("patch", ""),
-        ("delete", ""),
-        ("post", "/tier"),
-        ("post", "/share"),
-        ("get", "/grants"),
+    for method, suffix, payload in (
+        ("patch", "", {"name": "组管理员改的名"}),
+        ("post", "/tier", {"tier": "personal"}),
+        ("post", "/share", None),
+        ("get", "/grants", None),
     ):
         response = client.request(
             method.upper(),
             f"/api/notebooks/{notebook_id}{suffix}",
             headers=member,
-            json={} if method in ("post", "patch") else None,
+            json=payload,
         )
-        assert response.status_code == 404, (method, suffix, response.status_code)
+        assert response.status_code != 404, (method, suffix, response.status_code, response.text)
+
+    deleted = client.delete(f"/api/notebooks/{notebook_id}", headers=member)
+    assert deleted.status_code == 404, (
+        "组管理员删掉了库主的整本笔记本 —— notebook:delete 恒 owner(裁决 P2-1)"
+    )
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=owner).status_code == 200
 
 
 def test_group_partition_query_is_bounded_by_my_memberships(repo):
@@ -1660,3 +1718,157 @@ def test_group_only_rows_skip_the_copy_stats_and_member_lookups(tmp_path, monkey
     assert overview[group_only]["size"] == {}
     assert overview[group_only]["members"] == []
     assert overview[linked]["size"]["sources"] == 0
+
+
+# ------------------------------------------- P2-T2:can_manage_content 投影
+
+
+def _grant(client, headers, notebook_id, group_id, principal_type, role):
+    return client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={
+            "principal_type": principal_type,
+            "principal_id": group_id,
+            "role": role,
+        },
+        headers=headers,
+    )
+
+
+def test_can_manage_content_tracks_the_grant_role_in_list_and_detail(
+    tmp_path, monkeypatch
+):
+    """`NotebookSummary.can_manage_content`(裁决 P2-3)在**列表与详情**给同一答案。
+
+    列表侧由 `granted_notebook_rows` 顺带带回的 `_grant_role` 派生(零新增查询),详情侧
+    由同一条查询的点查形态派生 —— 两处必须逐格一致,否则同一本库在卡片上可写、点进去
+    只读(或反过来),而这种分叉不报错、只是界面自相矛盾。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    managed = _make_notebook(client, owner, name="可管理的")
+    read_only = _make_notebook(client, owner, name="只读的")
+    deputy, deputy_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{deputy_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    assert _grant(client, owner, managed, group_id, "group_admins", "admin").status_code == 200
+    assert _grant(client, owner, read_only, group_id, "group", "viewer").status_code == 200
+    own = _make_notebook(client, deputy, name="我自己的")
+
+    listed = {n["id"]: n for n in client.get("/api/notebooks", headers=deputy).json()}
+    assert set(listed) == {own, managed, read_only}
+    assert listed[own]["can_manage_content"] is True       # owner 恒真
+    assert listed[managed]["can_manage_content"] is True   # 管理边
+    assert listed[read_only]["can_manage_content"] is False  # viewer 边
+
+    for notebook_id in (own, managed, read_only):
+        detail = client.get(f"/api/notebooks/{notebook_id}", headers=deputy).json()
+        assert detail["can_manage_content"] == listed[notebook_id]["can_manage_content"], (
+            notebook_id, detail["can_manage_content"],
+        )
+        # access 枚举**不扩**(裁决 P2-3):管理权是正交的第二维。
+        assert detail["access"] == ("owner" if notebook_id == own else "reader")
+
+
+def test_can_manage_content_survives_the_member_row_dedup(tmp_path, monkeypatch, repo):
+    """交叉态:既是只读成员、又持管理边 —— 权限为真,`granted_via` 仍被成员行压掉。
+
+    ⚠ 这是列表与详情最容易分叉的那一格。`granted_via` 的去重口径是「成员行优先」
+    (成员手上的「退出共享」是一个真的有效的动作,不能藏),而 `can_manage_content`
+    是**权限**、不该被展示去重带走。任何把两者写在同一个 early-return 里的实现,都会
+    让这本库在列表上说「可管理」、点进去说「只读」。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, _owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    notebook_id = _make_notebook(client, owner)
+    deputy, deputy_id, _ = _new_user(client)
+    client.put(
+        f"/api/groups/{group_id}/members/{deputy_id}",
+        json={"role": "admin"},
+        headers=owner,
+    )
+    _grant(client, owner, notebook_id, group_id, "group_admins", "admin")
+    repo.add_member(notebook_id, deputy_id)  # 同时还经分享链接加入
+
+    listed = [n for n in client.get("/api/notebooks", headers=deputy).json()]
+    assert [n["id"] for n in listed] == [notebook_id]
+    assert listed[0]["granted_via"] == [], "成员行优先的展示口径被改了"
+    assert listed[0]["can_manage_content"] is True
+
+    detail = client.get(f"/api/notebooks/{notebook_id}", headers=deputy).json()
+    assert detail["granted_via"] == []
+    assert detail["can_manage_content"] is True
+    # 且它确实能用:管理档端点放行。
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/mounted-by-count", headers=deputy
+    ).status_code == 200
+
+
+def test_can_manage_content_matches_the_authoritative_predicate(tmp_path, monkeypatch, repo):
+    """投影必须与**守卫用的那条谓词**同答案(而不是各判各的)。
+
+    投影为了零新增查询走的是列表查询顺带带回的 `_grant_role`,守卫走的是
+    `access_sql.NOTEBOOK_ADMIN_SQL`。两条路径不同,答案必须相同——这条把「不同实现、
+    同一答案」变成可执行的断言,免得投影某天悄悄比谓词宽(那会让界面画出一个必然
+    404 的按钮)。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    group_id = _make_group(client, owner)
+    managed = _make_notebook(client, owner)
+    read_only = _make_notebook(client, owner)
+    deputy, deputy_id, _ = _new_user(client)
+    plain, plain_id, _ = _new_user(client)
+    for user_id, role in ((deputy_id, "admin"), (plain_id, "member")):
+        client.put(
+            f"/api/groups/{group_id}/members/{user_id}",
+            json={"role": role},
+            headers=owner,
+        )
+    _grant(client, owner, managed, group_id, "group", "admin")  # 整组可管理
+    _grant(client, owner, read_only, group_id, "group", "viewer")
+
+    for headers, user_id in ((owner, owner_id), (deputy, deputy_id), (plain, plain_id)):
+        listed = {n["id"]: n for n in client.get("/api/notebooks", headers=headers).json()}
+        for notebook_id in (managed, read_only):
+            if notebook_id not in listed:
+                continue
+            assert listed[notebook_id]["can_manage_content"] is repo.user_can_admin_notebook(
+                notebook_id, user_id
+            ), (notebook_id, user_id)
+
+
+def test_grantable_principal_types_stay_the_two_group_subjects(tmp_path, monkeypatch):
+    """`can_manage_content` 的派生前提:授权边只能经**两个群组主体**发放。
+
+    列表投影(`granted_notebook_rows`)只覆盖 `group` / `group_admins`,而后端的管理权
+    谓词是四臂全收。两者今天等价**只因为**这份白名单——`user` / `everyone` 的边根本
+    没有写入口,更不可能带 `role='admin'`。真要给 `user` 主体开写入口,这条守卫会先红,
+    提醒把那份投影一并扩掉(否则新主体的管理边在界面上完全不可见)。
+    """
+    from app.models.groups import GRANTABLE_PRINCIPAL_TYPES
+    from app.repositories.group_rows import GROUP_PRINCIPAL_TYPES
+
+    assert set(GRANTABLE_PRINCIPAL_TYPES) == {"group", "group_admins"}
+    assert set(GRANTABLE_PRINCIPAL_TYPES) == set(GROUP_PRINCIPAL_TYPES)
+
+    # 行为面:端点确实拒收另外两个主体。
+    client = _client(tmp_path, monkeypatch)
+    owner, owner_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, owner)
+    for principal_type, principal_id in (("user", owner_id), ("everyone", "")):
+        refused = client.post(
+            f"/api/notebooks/{notebook_id}/grants",
+            json={
+                "principal_type": principal_type,
+                "principal_id": principal_id,
+                "role": "admin",
+            },
+            headers=owner,
+        )
+        assert refused.status_code == 422, (principal_type, refused.status_code)

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
     get_current_user,
-    notebook_access_repository,
+    notebook_capability_allowed,
     repository,
     require_notebook_capability,
     require_notebook_read,
@@ -115,8 +115,14 @@ def list_notebook_object_schemas(
     try:
         return repository().list_notebook_object_schemas(
             notebook_id,
-            can_edit=notebook_access_repository().user_can_access_notebook(
-                notebook_id, user.id
+            # ⚠ 必须与**写端点自己**的能力吃同一张表(P2-T2):这个投影驱动前端图谱
+            # Schema 编辑控件的显隐,而写端点挂的正是
+            # `require_notebook_capability("knowledge:write")`。此前它手写
+            # `user_can_access_notebook`(owner-only),P2 把 knowledge:write 翻成
+            # admin 档之后,组管理员会拿到一个「API 收得下、界面画不出来」的只读面板。
+            # 走 notebook_capability_allowed 之后它随表自动跟随,不再是第二份判定。
+            can_edit=notebook_capability_allowed(
+                "knowledge:write", notebook_id, user.id
             ),
         )
     except KeyError:

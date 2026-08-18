@@ -1,17 +1,32 @@
-"""notebook 授权(读权/写权)的 SQL 谓词 —— 「谁能读/写这个 notebook」的唯一定义点。
+"""notebook 授权(读权/管理权/写权)的 SQL 谓词 —— 「谁能读/管/写这个 notebook」的
+唯一定义点。
 
 镜像 `mount_sql.py` 的模式。理由同款:授权判定散落在 sharing_store、memory_store、
 search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副本越多,任何一份漂移
 就越会造成「A 能读 B 不能读」的不一致,而这种不一致没有任何测试会自然抓到——它不
 体现为报错,只体现为某条路径悄悄多给或少给了权限。故谓词只在这里定义一次。
 
-两条谓词是**刻意不对称**的,这是产品的安全边界,不是疏漏:
+三条谓词是**刻意不对称**的,这是产品的安全边界,不是疏漏:
 
-* **写权 = owner-only**。`notebook_members` 里的成员是只读访客;放宽这一条会让只读
-  共享变成可写共享。notebook 不存在时同样为假(无行 → False),与「不泄露存在性」
-  的既有口径一致。群组授权(P1)扩展的是读权,写权**一个字不动**——组管理员的写权
-  是 P2 的能力翻转,不在这里顺手做。
-* **读权 = owner ∪ `notebook_members` 有行 ∪ 有效授权边**。
+* **写权(`NOTEBOOK_WRITE_SQL`)= owner-only**。`notebook_members` 里的成员是只读
+  访客;放宽这一条会让只读共享变成可写共享。notebook 不存在时同样为假(无行 →
+  False),与「不泄露存在性」的既有口径一致。P2 之后它**不再**是全部写入口的判据
+  (见下一条),但它自身语义一个字都没变,仍是「恒 owner」那几格的实现。
+* **管理权(`NOTEBOOK_ADMIN_SQL`)= owner ∨ `role='admin'` 的有效授权边**(P2 能力
+  翻转,已定裁决 P2-1)。这是 P0 以来「写权恒 owner-only」这条边界**第一次有边界地
+  放宽**:组管理员对被共享进本组的库获得内容管理能力(加/删/重解析来源、触发图谱与
+  检索索引构建、knowhow 写、知识治理写、命令目录写、共享管理)。
+  三处**不翻**,各有理由:
+    1. `notebook:delete`(删库)恒 owner——爆炸半径是整本库,且 owner 无法撤销;
+    2. Agent/MCP 面恒 owner(`mcp_server._writable_notebook`)——那是另一套鉴权模型
+       的刻意分歧,CLAUDE.md「MCP 工具面与来源管理」红线已登记;
+    3. `reports:write` 已在 P1 转成行级 `created_by` 判定,不由这张表表达。
+  主体判定与读权**同构**:同一份四值 `principal_type` 白名单,只多一个
+  `ng.role='admin'` 条件(见 `_admin_principal_match_expr`)。
+* **读权(`NOTEBOOK_READ_SQL`)= owner ∪ `notebook_members` 有行 ∪ 有效授权边**。
+
+三者是严格的包含链:`写权 ⊆ 管理权 ⊆ 读权`。owner 三者皆真;管理边持有者可读可管
+不可删库;只读成员与 viewer 边只可读。
 
 ## 有效授权边(P1 群组知识共享)
 
@@ -25,6 +40,11 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 | `group_admins` | 同上,且 `group_members.role = 'admin'` |
 | `everyone` | 恒真 |
 
+**管理级授权边**在此之上多一个条件:该行的 `role` 精确等于 `'admin'`。四条臂一条都
+不特判——`everyone` + `admin` 这个组合由 app 层的发放口径挡住
+(`models/groups.py::GRANTABLE_PRINCIPAL_TYPES` 只收两个群组主体,`everyone` 边根本
+没有写入口),谓词这一侧保持与读权同构,免得两份主体判定分叉。
+
 三条**不许动**的写法约束:
 
 1. **四值一律精确匹配,不写 `NOT IN`/`else`/兜底分支**(设计文档已定裁决 1b)。
@@ -36,6 +56,8 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
    `''` 是它的默认值而不是「everyone」的标记。
 3. **`role` 列在读权判定里不消费**。任何有效授权边都 ≥ viewer,而 viewer 即可读;
    区分 viewer/admin 的 `effective_role` 由 API 投影的独立查询提供,不进热读谓词。
+   ⚠ P2 之后 `role` 进入**管理权**谓词(且只进它):读权那条 SQL 里仍然一个字都没有
+   提到 `role`,两条谓词各读各的。
 
 ## 参数约定
 
@@ -44,9 +66,11 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 
 * `NOTEBOOK_WRITE_SQL` —— `(notebook_id, user_id)`
 * `NOTEBOOK_READ_SQL` —— `(notebook_id, *read_access_params(user_id))`
+* `NOTEBOOK_ADMIN_SQL` —— `(notebook_id, *admin_access_params(user_id))`
 * `MEMBER_PROBE_SQL` —— `(notebook_id, user_id)`
 * `GRANT_PROBE_SQL` —— `grant_probe_params(notebook_id, user_id)`
 * `read_access_clause()` / `read_access_exists_clause()` —— `read_access_params(user_id)`
+* `admin_access_clause()` —— `admin_access_params(user_id)`
 * 传**列引用**(而非占位符)的形式一个参数都不消费,见下。
 
 `member_exists_expr` / `grant_access_expr` / `read_access_clause` 的 ref 参数既可以是
@@ -58,8 +82,8 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 
 消费者清单(改这里就要一起看):
 
-* `sqlite/sharing_store.py`:`user_can_access_notebook`(写权)、`user_can_read_notebook`
-  (读权)、`is_member`(成员探测)。
+* `sqlite/sharing_store.py`:`user_can_access_notebook`(写权)、`user_can_admin_notebook`
+  (管理权)、`user_can_read_notebook`(读权)、`is_member`(成员探测)。
 * `sqlite/memory_store.py`:`_read_access_clause`(嵌进 Memory 各处读查询)、
   `create_candidate_with_initial_revision`(写前判定)、
   `create_answer_with_initial_revision`(答案存 Memory 的范围校验;同名的
@@ -169,6 +193,31 @@ def _principal_match_expr(
     )
 
 
+def _admin_principal_match_expr(
+    grant_alias: str,
+    user_ref: str,
+    group_alias: str,
+    group_admin_alias: str,
+) -> str:
+    """**管理级**授权边的主体判定 = 读权那四条臂 ∧ `role='admin'`(裁决 P2-1)。
+
+    刻意写成「同一个 `_principal_match_expr` 外加一个 `role` 条件」而不是另抄一份四臂:
+    抄一份的话,某天有人只在读权那份里补了第五种主体、或只在这份里漏掉 `role='admin'`
+    的子条件,两条谓词就静默分叉,而分叉的形态恰好是「管理权比读权更宽」——一条越权
+    通道。这里的结构保证「管理权 ⊆ 读权」是**构造性**的,不靠测试去覆盖每一格。
+
+    `everyone` 那条臂**不特判**:`everyone` + `admin` 的行由 app 层发放口径挡住
+    (`GRANTABLE_PRINCIPAL_TYPES` 只收两个群组主体),谓词侧保持同构。
+
+    参数消费与 `_principal_match_expr` 完全相同(`role` 比的是字面量)。
+    """
+    return (
+        f"({grant_alias}.role='admin' AND "
+        + _principal_match_expr(grant_alias, user_ref, group_alias, group_admin_alias)
+        + ")"
+    )
+
+
 def _grant_exists_expr(notebook_ref: str, grant_alias: str, condition: str) -> str:
     """`notebook_grants` 上的 `EXISTS (...)` 骨架,主体判定由 `condition` 决定。"""
     return (
@@ -195,6 +244,27 @@ def grant_access_expr(
         notebook_ref,
         grant_alias,
         _principal_match_expr(grant_alias, user_ref, group_alias, group_admin_alias),
+    )
+
+
+def admin_grant_access_expr(
+    notebook_ref: str,
+    user_ref: str,
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """**管理级**有效授权边(四类主体 ∧ `role='admin'`)的 `EXISTS (...)` 布尔表达式。
+
+    两个 ref 既可以是占位符 `?`,也可以是外层查询的列引用。参数消费与
+    `grant_access_expr` 完全相同(多出来的 `role` 条件比的是字面量)。
+    """
+    return _grant_exists_expr(
+        notebook_ref,
+        grant_alias,
+        _admin_principal_match_expr(
+            grant_alias, user_ref, group_alias, group_admin_alias
+        ),
     )
 
 
@@ -265,6 +335,33 @@ def read_access_clause(
     )
 
 
+def admin_access_clause(
+    nb_alias: str = "nb",
+    *,
+    user_ref: str = "?",
+    grant_alias: str = "ng",
+    group_alias: str = "ngm",
+    group_admin_alias: str = "nga",
+) -> str:
+    """管理权谓词,作用在**已经 join 进来**的 notebooks 行上。
+
+    = owner ∨ 管理级有效授权边。与 `read_access_clause` 的差别只有两处,都刻意:
+    没有 `notebook_members` 那一支(只读成员就是只读成员,群组共享不改变这一点),
+    授权边那一支换成管理级。
+
+    `user_ref` 默认是占位符,此时消费 `admin_access_params(user_id)`;传列引用则一个
+    参数都不消费。它是关键字参数,理由同 `read_access_clause`(见模块 docstring 的
+    「参数约定」)。
+    """
+    return (
+        f"({nb_alias}.created_by={user_ref} OR "
+        + admin_grant_access_expr(
+            f"{nb_alias}.id", user_ref, grant_alias, group_alias, group_admin_alias
+        )
+        + ")"
+    )
+
+
 def read_access_exists_clause(
     row_alias: str = "m",
     nb_alias: str = "access_nb",
@@ -282,10 +379,22 @@ def read_access_exists_clause(
     )
 
 
-# 读权片段消费几个位置参数——从谓词自己的占位符数**推导**而不是手写常量:谓词长
-# 一条臂,这个数就自动跟着长,不存在「改了 SQL 忘了改常量」的漂移形态。
+# 读权/管理权片段消费几个位置参数——从谓词自己的占位符数**推导**而不是手写常量:
+# 谓词长一条臂,这个数就自动跟着长,不存在「改了 SQL 忘了改常量」的漂移形态。
 _READ_ACCESS_PARAM_COUNT = read_access_clause().count("?")
+_ADMIN_ACCESS_PARAM_COUNT = admin_access_clause().count("?")
 _GRANT_PROBE_USER_PARAM_COUNT = GRANT_PROBE_SQL.count("?") - 1
+
+
+def admin_access_params(user_id: str) -> tuple[str, ...]:
+    """`admin_access_clause()` 要消费的位置参数。
+
+    全是同一个 user_id(owner 比一次、管理级授权边三条臂各比一次)。数目**必然**比
+    `read_access_params` 少一个(没有成员那一支),但仍然从占位符数推导而不是写成
+    `_READ_ACCESS_PARAM_COUNT - 1`:后者会把两条谓词的形状绑在一起,读权某天多一条臂
+    就会把管理权的参数数也悄悄带偏。
+    """
+    return (user_id,) * _ADMIN_ACCESS_PARAM_COUNT
 
 
 def read_access_params(user_id: str) -> tuple[str, ...]:
@@ -304,6 +413,12 @@ def grant_probe_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
 
 # 写权(owner-only)的完整查询:有行即有写权。notebook 不存在 → 无行 → 无写权。
 NOTEBOOK_WRITE_SQL = "SELECT 1 FROM notebooks WHERE id=? AND created_by=?"
+
+# 管理权(owner ∪ 管理级有效授权边)的完整查询:有行即有管理权。notebook 不存在 →
+# 无行 → 无管理权,与另外两条同口径。
+NOTEBOOK_ADMIN_SQL = (
+    "SELECT 1 FROM notebooks nb WHERE nb.id=? AND " + admin_access_clause()
+)
 
 # 读权(owner ∪ 只读成员 ∪ 有效授权边)的完整查询:有行即有读权。
 NOTEBOOK_READ_SQL = (

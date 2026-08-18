@@ -732,9 +732,23 @@ def _writable_notebook(
     maintenance tools below — every write operation on this surface, not just
     document uploads.
 
-    ``user_can_access_notebook`` is the product's one write predicate (its own
-    docstring: 「写权:仅 owner(安全边界,勿放宽)」), the same one the HTTP
-    ``require_notebook_access`` dependency resolves to.
+    ``user_can_access_notebook`` is the product's owner-only write predicate
+    (its own docstring: 「写权:仅 owner(安全边界,勿放宽)」).
+
+    ⚠ It is NO LONGER the same predicate the HTTP write surface resolves to.
+    P2-T2 flipped six browser-facing capabilities (sources/kg/knowhow/knowledge/
+    catalog writes and ``notebook:manage``) from owner-only to
+    ``user_can_admin_notebook`` — owner ∪ an effective grant edge with
+    ``role='admin'`` — so a group admin CAN now add/delete sources and start
+    builds through the browser on a notebook shared into a group they
+    administer. This surface deliberately did NOT follow: an Agent token's
+    allowlist is a separate, longer-lived credential whose owner may have been
+    granted admin on a notebook long after the token was issued, and the MCP
+    write tools' blast radius (deleting documents out from under every member's
+    retrieval) is the one this gate was created for. The divergence is a
+    recorded decision (CLAUDE.md/AGENTS.md「MCP 工具面与来源管理」), NOT drift;
+    ``deps._CAPABILITY_LEVELS``'s own comment records the same split from the
+    HTTP side. ``notebook:delete`` stayed owner-only on BOTH surfaces.
 
     The one Agent write this gate deliberately does NOT cover is
     ``put_knowhow_cell_code`` (and its HTTP twins under

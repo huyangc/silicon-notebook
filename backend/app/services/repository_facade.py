@@ -1434,6 +1434,9 @@ class RepositoryFacade:
     def is_member(self, notebook_id: str, user_id: str) -> bool:
         return self._runtime.sharing.is_member(notebook_id, user_id)
 
+    def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool:
+        return self._runtime.sharing.user_can_admin_notebook(notebook_id, user_id)
+
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
         return self._runtime.sharing.user_can_read_notebook(notebook_id, user_id)
 

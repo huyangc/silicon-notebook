@@ -1,18 +1,24 @@
-"""P0-T2:按能力命名的 notebook 写守卫工厂——``app.api.deps.require_notebook_capability``。
+"""P0-T2 建表 / P2-T2 首次翻格:按能力命名的 notebook 写守卫工厂
+——``app.api.deps.require_notebook_capability``。
 
-P0 阶段行为零变化(每个能力名都解析到既有的 owner-only 判定,与旧的
-``require_notebook_access``/``require_notebook_write`` 逐字等价)。这里钉的是:
+P0 阶段行为零变化(每个能力名都解析到既有的 owner-only 判定)。**P2-T2 兑现了这个
+接缝**:六个能力从 ``"owner"`` 档翻到 ``"admin"`` 档(owner ∪ ``role='admin'`` 的有效
+授权边),73 个端点声明一个字未动。这里钉的是:
 
   ① 未登记的能力名当场 ``KeyError``——响亮失败,不许延迟到请求期才暴露;
-  ② 能力值域被冻结在 ``{"owner"}``(P1/P2 群组授权落地时这条断言要跟着改,
-     它就是那道"改这里"的提醒);
-  ③ 结构扫描:``backend/app/api/*.py`` 里不得再残留裸 ``require_notebook_access``
+  ② 能力值域被冻结在 ``{"owner", "admin"}``,并**逐格**钉住哪六个翻了、哪两个没翻
+     ——批量翻格最危险的失手形态是「顺手多翻一格」(尤其 ``notebook:delete``),
+     一个只看值域集合的断言对它完全无感;
+  ③ 每个能力名解析到**对应档位守卫的同一个函数对象**,且 ``@lru_cache`` 让同一能力名
+     恒返回同一对象(P0 预埋的依赖去重从 P2 起真的开始兑现——两档现在返回不同对象);
+  ④ 结构扫描:``backend/app/api/*.py`` 里不得再残留裸 ``require_notebook_access``
      (文本扫描,连注释一起拦),也不得以任何书写形态引用 ``require_notebook_write``
-     标识符(AST 扫描——换行的 ``Depends(\n require_notebook_write)``、
-     ``import ... as`` 别名、中间变量赋值统统按标识符节点抓)——防止新端点绕过
-     能力工厂、悄悄回退到裸守卫;
-  ④ 行为等价抽查:挑 sources:write 与 notebook:manage 两个代表性端点,
-     owner 通过守卫、只读成员 404、陌生人 404——与 T1 既有矩阵同口径。
+     / ``require_notebook_admin`` 标识符(AST 扫描——换行的 ``Depends(\n
+     require_notebook_write)``、``import ... as`` 别名、中间变量赋值统统按标识符
+     节点抓)——防止新端点绕过能力工厂、悄悄挂上某一档的裸守卫;
+  ⑤ 行为抽查:挑 sources:write 与 notebook:manage 两个代表性端点,owner 通过守卫、
+     只读成员 404、陌生人 404;外加 P2 新增的组管理员一列(通过)与
+     ``notebook:delete``(仍 404)。
 
 ⚠ 结构扫描**不检查归类是否正确**:把读端点错挂写能力(或把 kg 端点挂成
 knowhow:write)在结构上不可检测——守卫只保证"必经能力工厂",归类对错靠
@@ -46,23 +52,93 @@ def test_notebook_capability_allowed_rejects_unknown_capability():
 
 
 # --------------------------------------------------------------------------
-# ② 值域冻结
+# ② 值域冻结 + 逐格冻结
 # --------------------------------------------------------------------------
-def test_capability_value_domain_is_frozen_to_owner():
-    """P0 冻结:``_CAPABILITY_LEVELS`` 的值域只有 "owner" 一档。P1/P2 群组
-    授权扩展值域(比如新增 "group_admin")落地时,这条断言必须跟着改——它就是
-    那道提醒"这里也要跟进"的信号,不是要求值域永远只有一种。"""
-    assert set(deps._CAPABILITY_LEVELS.values()) == {"owner"}
+
+#: P2-T2 之后的**逐格**期望值。改这张表 = 声明一次权限边界变更,评审必须看见它。
+#:
+#: 翻成 "admin" 的六格是设计文档裁决 P2-1 点名的内容管理能力;留在 "owner" 的两格
+#: 各有理由(见 deps.py 的表上注释):删库爆炸半径太大且 owner 无法撤销;
+#: reports:write 目前没有任何消费点,留给它真正长出消费点的那次改动去决定档位。
+EXPECTED_CAPABILITY_LEVELS = {
+    "sources:write": "admin",
+    "kg:write": "admin",
+    "knowhow:write": "admin",
+    "knowledge:write": "admin",
+    "catalog:write": "admin",
+    "reports:write": "owner",
+    "notebook:manage": "admin",
+    "notebook:delete": "owner",
+}
 
 
-def test_every_registered_capability_resolves_to_require_notebook_write():
-    """P0 阶段:每个已登记的能力名都解析回**同一个** ``require_notebook_write``
-    函数对象——不是"另一份行为等价的实现",是同一个对象,行为逐字相同
-    (非 owner → 404,不泄露存在性)。"""
+def test_capability_value_domain_is_frozen():
+    """值域冻结在 {"owner", "admin"}。
+
+    P0 冻结在 {"owner"};P2-T2 加了第二档。再新增档位(比如某天的 "member")时这条
+    断言必须跟着改——它就是那道提醒"这里也要跟进"的信号。
+    """
+    assert set(deps._CAPABILITY_LEVELS.values()) == {"owner", "admin"}
+
+
+def test_capability_levels_are_pinned_cell_by_cell():
+    """**逐格**冻结,不只是冻结值域。
+
+    这条才是 P2 翻格的真正闸门:批量把六格从 owner 改成 admin 时,最容易的失手是
+    顺手多翻一格——而 ``notebook:delete`` 翻掉的后果是「组管理员能删掉库主的整本
+    笔记本,且库主无法撤销」。只看值域集合的断言对这种失手完全无感(集合还是那两个
+    值),只有逐格比对才拦得住。反方向同理:漏翻一格会让 API 与界面/文档说的不一致。
+    """
+    assert deps._CAPABILITY_LEVELS == EXPECTED_CAPABILITY_LEVELS
+
+
+def test_never_touched_capabilities_stay_owner_only():
+    """点名钉住**没翻的那两格**,并说清为什么。
+
+    与上一条不是重复:上一条是整表比对(改表就红),这一条把「这两格必须是 owner」
+    这句话本身写成可执行的断言,并且带着理由 —— 它的失败信息直接告诉后来者动的是
+    一条安全边界,而不是「更新一下期望表」。
+    """
+    assert deps._CAPABILITY_LEVELS["notebook:delete"] == "owner", (
+        "删库恒 owner:爆炸半径是整本库,且 owner 事后无法撤销组管理员的删除"
+    )
+    assert deps._CAPABILITY_LEVELS["reports:write"] == "owner", (
+        "reports:write 目前无消费点(P1-T3b 起报告走行级 created_by 判定),"
+        "档位留给它真正长出消费点的那次改动显式决定"
+    )
+
+
+def test_every_registered_capability_resolves_to_its_level_guard():
+    """每个能力名解析回**对应档位守卫的同一个函数对象**。
+
+    不是"另一份行为等价的实现",是同一个对象——工厂只做查表,判定各只有一份实现
+    (未授权 → 404,不泄露存在性)。
+    """
+    expected = {
+        "owner": deps.require_notebook_write,
+        "admin": deps.require_notebook_admin,
+    }
+    for capability, level in deps._CAPABILITY_LEVELS.items():
+        assert deps.require_notebook_capability(capability) is expected[level], (
+            capability, level,
+        )
+    # 两档必须是**不同**的对象,否则「翻格」根本没有发生(整张表还解析到同一个守卫)。
+    assert deps.require_notebook_write is not deps.require_notebook_admin
+
+
+def test_capability_factory_returns_a_stable_object_per_capability():
+    """同一个能力名**恒返回同一个对象**(``@lru_cache`` 的语义)。
+
+    P0 加 ``@lru_cache`` 时它是 no-op(所有能力返回同一个 ``require_notebook_write``);
+    P2 起两档返回不同对象,这一行才开始真的兑现:FastAPI 的每请求依赖缓存按 callable
+    **身份**去重,不缓存的话同一路由声明两个能力依赖就会各拿一个新函数对象、多跑一次
+    判定查询。判据必须是"同一能力名两次调用同一对象",而不是"同一档同一对象"——后者
+    在工厂每次都新建闭包时也照样成立。
+    """
     for capability in deps._CAPABILITY_LEVELS:
-        assert (
-            deps.require_notebook_capability(capability) is deps.require_notebook_write
-        ), capability
+        assert deps.require_notebook_capability(
+            capability
+        ) is deps.require_notebook_capability(capability), capability
 
 
 # --------------------------------------------------------------------------
@@ -112,9 +188,16 @@ def test_no_bare_require_notebook_access_outside_deps_and_mcp():
     )
 
 
-def test_require_notebook_write_identifier_absent_from_route_files():
-    """``require_notebook_write`` 函数本体仍然存在(被能力工厂内部复用作
-    "owner" 级的实现),但路由文件不得以**任何书写形态**引用它——必须一律经
+#: 两档的裸守卫本体。它们仍然存在(能力工厂内部各复用一个),但路由文件一个都不许
+#: 直接引用。``require_notebook_admin`` 从 P2-T2 起同样进这份名单——不进的话,新端点
+#: 可以直接挂 ``Depends(require_notebook_admin)`` 拿到管理档,而这个选择既不进能力表、
+#: 也不会出现在任何一份「哪些能力是 admin 档」的清单里。
+_BARE_LEVEL_GUARDS = ("require_notebook_write", "require_notebook_admin")
+
+
+@pytest.mark.parametrize("guard_name", _BARE_LEVEL_GUARDS)
+def test_bare_level_guard_identifier_absent_from_route_files(guard_name):
+    """两档的守卫本体都不得被路由文件以**任何书写形态**引用——必须一律经
     ``Depends(require_notebook_capability("<能力名>"))`` 声明,才谈得上"按能力
     归类"。
 
@@ -129,21 +212,15 @@ def test_require_notebook_write_identifier_absent_from_route_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
         for node in ast.walk(tree):
             hit = (
-                (isinstance(node, ast.Name) and node.id == "require_notebook_write")
-                or (
-                    isinstance(node, ast.Attribute)
-                    and node.attr == "require_notebook_write"
-                )
-                or (
-                    isinstance(node, ast.alias)
-                    and node.name == "require_notebook_write"
-                )
+                (isinstance(node, ast.Name) and node.id == guard_name)
+                or (isinstance(node, ast.Attribute) and node.attr == guard_name)
+                or (isinstance(node, ast.alias) and node.name == guard_name)
             )
             if hit:
                 offenders.append(path.name)
                 break
     assert offenders == [], (
-        f"发现绕过能力工厂、直接引用 require_notebook_write 的路由文件: {offenders}"
+        f"发现绕过能力工厂、直接引用 {guard_name} 的路由文件: {offenders}"
     )
 
 
@@ -218,3 +295,228 @@ def test_notebook_manage_capability_matches_owner_member_stranger_matrix(
         f"/api/notebooks/{nb}/mounted-by-count", headers=stranger_h
     )
     assert stranger_resp.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# ⑤ P2-T2:组管理员一列(能力翻转的行为面)
+# --------------------------------------------------------------------------
+#
+# 这一节与上面两条抽查互补:那两条钉的是「owner 通过 / 只读成员与陌生人 404」这条
+# **没有变**的基线,这一节钉的是**这次翻了什么**。两者必须同在——只加新一列会让
+# 「顺手把所有人都放行了」照样全绿。
+
+
+def _group_admin_world(client: TestClient, letter: str) -> dict:
+    """一本 owner 的库 + 一个组:`deputy` 是组管理员且持 admin 边,`plain` 只是组员。
+
+    ``letter`` 是这批用户名的首字母——注册校验的用户名形态是「单个小写字母 + 00 +
+    六位数字」,所以每个用例挑一个自己的字母,免得跨用例撞名。
+
+    边发成 `principal_type='group_admins'` + `role='admin'`,即产品里「共享给群组并
+    勾选组管理员可管理」那条路径。`plain` 存在的意义是证明翻的是**管理边**而不是
+    「进了组就能写」——少了他,一个把整组人都放行的实现照样全绿。
+    """
+    owner_h = _login(client, f"{letter}00000001")
+    nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
+
+    deputy_h = _login(client, f"{letter}00000002")
+    deputy_id = client.get("/api/me", headers=deputy_h).json()["id"]
+    plain_h = _login(client, f"{letter}00000003")
+    plain_id = client.get("/api/me", headers=plain_h).json()["id"]
+    stranger_h = _login(client, f"{letter}00000004")
+
+    group_id = client.post(
+        "/api/groups", json={"name": "项目组"}, headers=owner_h
+    ).json()["id"]
+    for user_id, role in ((deputy_id, "admin"), (plain_id, "member")):
+        assert client.put(
+            f"/api/groups/{group_id}/members/{user_id}",
+            json={"role": role},
+            headers=owner_h,
+        ).status_code == 200
+    granted = client.post(
+        f"/api/notebooks/{nb}/grants",
+        json={
+            "principal_type": "group_admins",
+            "principal_id": group_id,
+            "role": "admin",
+        },
+        headers=owner_h,
+    )
+    assert granted.status_code == 200, granted.text
+    return {
+        "notebook": nb,
+        "group": group_id,
+        "owner": owner_h,
+        "deputy": deputy_h,
+        "deputy_id": deputy_id,
+        "plain": plain_h,
+        "stranger": stranger_h,
+        "grant_id": granted.json()["id"],
+    }
+
+
+
+def _seed_source(notebook_id: str) -> str:
+    """直接写一行已解析的 `sources`,不跑真实上传/解析。
+
+    只为让路径上带 `source_id` 的端点能区分「守卫拒绝」与「来源不存在」——两者都是
+    404,不塞这行的话那一格恒等式成立、测不出任何东西。
+    """
+    from app.services.sqlite_repository import _now
+
+    source_id = f"src-{notebook_id[-8:]}"
+    with deps.repository()._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,file_name,file_path,file_size,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, "S", "document", "s.md", "", 0, "parsed",
+             _now(), _now()),
+        )
+    return source_id
+
+
+def test_group_admin_passes_the_flipped_content_capabilities(tmp_path, monkeypatch):
+    """组管理员通过全部**六个**翻了的能力,普通组员与陌生人一律 404。
+
+    六个都点名跑一遍(而不是抽一个代表):`_CAPABILITY_LEVELS` 是一张表,漏翻一格
+    在结构上完全看不出来——只有真的敲一次那个端点才知道它到底解析到哪一档。
+    """
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "a")
+    nb = w["notebook"]
+    src = _seed_source(nb)
+
+    # (能力名, 请求方法, 路径, owner/组管理员的期望码)
+    #
+    # 期望码不都是 200:守卫放行之后是真实业务逻辑,而这些端点在一本空库上各有各的
+    # 合法回答(缺 embedding 配置、没有可构建的来源……)。**判据是「不是 404」**
+    # ——404 是守卫拒绝的形态,别的码都说明请求已经越过守卫进了业务体。
+    probes = [
+        ("sources:write", "post", f"/api/notebooks/{nb}/backfill-vectors"),
+        ("kg:write", "post", f"/api/notebooks/{nb}/kg/build"),
+        ("knowhow:write", "post", f"/api/notebooks/{nb}/knowhow"),
+        ("knowledge:write", "post", f"/api/notebooks/{nb}/object-schemas"),
+        # 命令目录那条端点的路径上带 source_id,而「来源不存在」也回 404 —— 与守卫
+        # 拒绝同码。所以先塞一行真来源(直接写库,不跑一次真实解析),让 owner 那半
+        # 能越过 404 这个形态,否则这一格测的其实什么都不是。
+        ("catalog:write", "post", f"/api/notebooks/{nb}/sources/{src}/command-catalog"),
+        ("notebook:manage", "get", f"/api/notebooks/{nb}/mounted-by-count"),
+    ]
+    for capability, method, path in probes:
+        assert deps._CAPABILITY_LEVELS[capability] == "admin", capability
+        for who in ("owner", "deputy"):
+            resp = getattr(client, method)(path, json={}, headers=w[who]) if method == "post" \
+                else getattr(client, method)(path, headers=w[who])
+            assert resp.status_code != 404, (capability, who, resp.status_code, resp.text)
+        for who in ("plain", "stranger"):
+            resp = getattr(client, method)(path, json={}, headers=w[who]) if method == "post" \
+                else getattr(client, method)(path, headers=w[who])
+            assert resp.status_code == 404, (capability, who, resp.status_code, resp.text)
+
+
+def test_group_admin_still_cannot_delete_the_notebook(tmp_path, monkeypatch):
+    """``notebook:delete`` **没翻**:组管理员对删库仍是 404,owner 才能删。
+
+    这是本轮唯一一格「读得到、管得了、却动不了」的能力,也是翻格时最容易顺手带走的
+    一格——它的失手后果不可撤销。
+    """
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "b")
+    nb = w["notebook"]
+
+    assert deps._CAPABILITY_LEVELS["notebook:delete"] == "owner"
+    # 先证明这位组管理员**确实**持有管理权(否则下面那个 404 可能只是因为他什么都不是)。
+    assert client.get(f"/api/notebooks/{nb}/mounted-by-count", headers=w["deputy"]).status_code == 200
+    assert client.delete(f"/api/notebooks/{nb}", headers=w["deputy"]).status_code == 404
+    assert client.get(f"/api/notebooks/{nb}", headers=w["deputy"]).status_code == 200
+    assert client.delete(f"/api/notebooks/{nb}", headers=w["owner"]).status_code == 204
+
+
+def test_revoking_the_admin_grant_takes_effect_immediately(tmp_path, monkeypatch):
+    """撤边即失能力:管理权是每次请求实时判定,不是一次性授予。"""
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "c")
+    nb = w["notebook"]
+    probe = f"/api/notebooks/{nb}/mounted-by-count"
+
+    assert client.get(probe, headers=w["deputy"]).status_code == 200
+    client.delete(f"/api/notebooks/{nb}/grants/{w['grant_id']}", headers=w["owner"])
+    assert client.get(probe, headers=w["deputy"]).status_code == 404
+
+
+def test_demoting_the_group_admin_takes_effect_immediately(tmp_path, monkeypatch):
+    """组内降级同样即刻失能力——两根轴(边的 role、组成员的 role)任一为假即为假。"""
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "d")
+    nb = w["notebook"]
+    probe = f"/api/notebooks/{nb}/mounted-by-count"
+
+    assert client.get(probe, headers=w["deputy"]).status_code == 200
+    client.put(
+        f"/api/groups/{w['group']}/members/{w['deputy_id']}",
+        json={"role": "member"},
+        headers=w["owner"],
+    )
+    assert client.get(probe, headers=w["deputy"]).status_code == 404
+
+
+def test_a_viewer_grant_does_not_confer_content_capabilities(tmp_path, monkeypatch):
+    """`role='viewer'` 的群组边只给读权,一个内容管理能力都不给。
+
+    判的是**边自己的 role**,不是「他是不是组管理员」。这条与上面那条 world 的差别
+    只有 `role` 一个字段——把 `group_admins` 主体误当成管理权的实现会在这里放行。
+    """
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "f00000001")
+    nb = client.post("/api/notebooks", json={"name": "L"}, headers=owner_h).json()["id"]
+    deputy_h = _login(client, "f00000002")
+    deputy_id = client.get("/api/me", headers=deputy_h).json()["id"]
+    group_id = client.post(
+        "/api/groups", json={"name": "项目组"}, headers=owner_h
+    ).json()["id"]
+    client.put(
+        f"/api/groups/{group_id}/members/{deputy_id}",
+        json={"role": "admin"},
+        headers=owner_h,
+    )
+    client.post(
+        f"/api/notebooks/{nb}/grants",
+        json={
+            "principal_type": "group_admins",
+            "principal_id": group_id,
+            "role": "viewer",
+        },
+        headers=owner_h,
+    )
+
+    assert client.get(f"/api/notebooks/{nb}", headers=deputy_h).status_code == 200
+    assert client.get(
+        f"/api/notebooks/{nb}/mounted-by-count", headers=deputy_h
+    ).status_code == 404
+    assert client.post(
+        f"/api/notebooks/{nb}/backfill-vectors", headers=deputy_h
+    ).status_code == 404
+
+
+def test_group_admin_uploads_count_against_the_owners_document_quota(
+    tmp_path, monkeypatch
+):
+    """裁决 P2-4:组管理员的内容操作仍记 **owner** 的配额,不记他自己的。
+
+    钉住现状而不是引入新行为:文档上限是 `sources` 的 owner 侧口径
+    (`document_limit` 由 `notebooks.created_by` 那位用户的有效上限算出),组管理员
+    往共享库里传文档,吃的是库主的名额。翻转能力时最容易顺手改错的就是这类
+    「按当前请求用户算」的口径。
+    """
+    client = _client(tmp_path, monkeypatch)
+    w = _group_admin_world(client, "e")
+    nb = w["notebook"]
+
+    owner_view = client.get(f"/api/notebooks/{nb}", headers=w["owner"]).json()
+    deputy_view = client.get(f"/api/notebooks/{nb}", headers=w["deputy"]).json()
+    assert owner_view["document_limit"] == deputy_view["document_limit"], (
+        "组管理员看到的文档上限必须仍是**库主**的有效上限"
+    )
+    assert deputy_view["document_limit"] > 0

@@ -924,6 +924,15 @@ class NotebookSharingService:
     def is_member(self, notebook_id: str, user_id: str) -> bool:
         return self._store.is_member(notebook_id, user_id)
 
+    def user_can_admin_notebook(self, notebook_id: str, user_id: str) -> bool:
+        """管理权:owner ∪ `role='admin'` 的有效授权边(P2 能力翻转,裁决 P2-1)。
+
+        谓词的唯一定义点在两个后端的 `access_sql.NOTEBOOK_ADMIN_SQL`,这里一跳直接
+        委托 store —— 与 `user_can_read_notebook` 同款,理由也一样(手写复刻不会跟随
+        谓词扩展)。**不**取代 `user_can_access_notebook`:删库与 Agent/MCP 面仍恒 owner。
+        """
+        return self._store.user_can_admin_notebook(notebook_id, user_id)
+
     def user_can_read_notebook(self, notebook_id: str, user_id: str) -> bool:
         """读权:owner ∪ 只读成员 ∪ 有效授权边(user/group/group_admins/everyone)。
 

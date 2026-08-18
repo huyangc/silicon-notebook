@@ -6367,7 +6367,10 @@ export default function Home() {
   }
 
   const isWorkspace = Boolean(currentNotebookId && currentNotebook);
-  // 只读共享库(Phase 2):无写权,门控写按钮 + 显示只读徽章/退出入口。
+  // 共享进来的库(Phase 2):`access === "reader"`。⚠ 它现在**只**决定「顶栏要不要
+  // 显示来源徽章/退出入口」这类**身份**呈现,不再等同于「不能写」——群组知识共享 P2
+  // 之后,组管理员打开被共享进本组的库时 access 仍是 reader,却持有内容管理权。
+  // 写入口一律看下面的 `readOnlyWorkspace`(由 workspaceCapabilities 派生)。
   const isReader = currentNotebook?.access === "reader";
   // 文档数量上限:管理员豁免(写路径 owner-only ⇒ 当前用户即 owner);document_limit
   // 只在 getNotebook 详情里是真值(列表投影是 0 哨兵),故 0/缺失当「未知」不门控。
@@ -6418,7 +6421,13 @@ export default function Home() {
   const capabilities = workspaceCapabilities(
     currentNotebook?.access,
     currentUser?.role ?? "",
+    currentNotebook?.can_manage_content ?? false,
   );
+  // 内容管理入口的**唯一**判据(群组知识共享 P2)。此前这些入口写的是 `!isReader`,
+  // 而 P2 把六个内容管理能力从 owner-only 翻成「owner ∪ 组管理边」——再按 access 判
+  // 就会让组管理员看到一个 API 全部允许、界面却全部藏起来的只读工作区。
+  // 判据统一走 workspaceCapabilities,不在这里第二次拼 access/can_manage_content。
+  const readOnlyWorkspace = !capabilities.canWriteNotebook;
   // 挂了几个公共知识库决定「提交晋升」按钮的行为(none=禁用/auto=直接用/choose=弹选择器)。
   const promotionTarget = resolvePromotionTarget(currentNotebookBases);
   const menuNotebook = menuNotebookId
@@ -6523,10 +6532,10 @@ export default function Home() {
             checkup={(() => {
               // 体检一条聚合提醒:命中问题即冒、点击直达看板。不复制体检详情、不新增
               // 待办类型(见 pending-center.tsx CheckupAlert)。签名随命中集合变化。
-              // ⚠ 只读成员不冒此提醒:他们能看健康信息但所有修复 CTA 都 !isReader 隐藏了,
+              // ⚠ 只读成员不冒此提醒:他们能看健康信息但所有修复 CTA 都 !readOnlyWorkspace 隐藏了,
               // 「发现可修复的问题」对他们是无可点动作的噪音(评审)。
               const sig = checkupAlertSignature(checkup);
-              if (!sig || !currentNotebook || isReader) return null;
+              if (!sig || !currentNotebook || readOnlyWorkspace) return null;
               return {
                 sig,
                 label: `「${currentNotebook.name}」发现可修复的问题`,
@@ -6717,7 +6726,7 @@ export default function Home() {
                 <span>创建笔记本</span>
               </button>
               <div className="workspace-nav-group">
-                {!isReader && (
+                {!readOnlyWorkspace && (
                   <button className="workspace-nav-button" onClick={() => {
                     const tier = tierActionState(currentNotebook);
                     // 参考库列表随 NotebookSummary.base_notebooks 一起返回(owner/reader 都能看到,
@@ -6754,7 +6763,7 @@ export default function Home() {
                   <Table2 size={17} />
                   <span>Knowhow 表</span>
                 </button>
-                {!isReader && (
+                {!readOnlyWorkspace && (
                   <button className="workspace-nav-button" disabled={shareBusy} onClick={() => openShareModal().catch(reportError)}>
                     <Share2 size={17} />
                     <span>分享</span>
@@ -6803,15 +6812,16 @@ export default function Home() {
                 </div>
               </div>
               <div className="workspace-panel-body sources-body">
-                {!isReader && (
+                {!readOnlyWorkspace && (
                   <button type="button" className="add-source-button" onClick={() => { setLinkSectionOpen(false); openSourceModal(); }}>
+
                     <Plus size={20} strokeWidth={2.7} /> 添加来源
                   </button>
                 )}
                 {/* 显示门:仅当存在信息不完整的论文(或补全任务进行中)才显示;
                     后端单库快照 paper_meta_missing 为 false 且可见页无 missing 来源
                     时隐藏。判据是纯函数 showPaperMetaBackfill(有单测)。 */}
-                {!isReader && showPaperMetaBackfill(currentNotebook, sources, backfillingMeta) && (
+                {!readOnlyWorkspace && showPaperMetaBackfill(currentNotebook, sources, backfillingMeta) && (
                   <button
                     type="button"
                     className="button secondary"
@@ -6874,7 +6884,7 @@ export default function Home() {
                     {backfillingMeta ? "补全中…" : "补全论文信息"}
                   </button>
                 )}
-                {!isReader && currentNotebookId && sources.length > 0 && (
+                {!readOnlyWorkspace && currentNotebookId && sources.length > 0 && (
                   currentNotebook?.kg_ready
                     ? (
                       <>
@@ -6934,7 +6944,7 @@ export default function Home() {
                     {canContinueKgBuild(
                       currentKgBuildView.actionLabel,
                       buildingKg,
-                      isReader,
+                      readOnlyWorkspace,
                     ) && (
                       <button
                         type="button"
@@ -7157,7 +7167,7 @@ export default function Home() {
                               <ExternalLink size={13} />
                             </a>
                           ) : null}
-                          {!isReader && (
+                          {!readOnlyWorkspace && (
                             <button
                               className="source-delete-button"
                               disabled={deletingSource}
@@ -8321,7 +8331,7 @@ export default function Home() {
                     <strong>当前内容由本地解析器生成</strong>
                     <p>MinerU 重试后仍未成功，版面、公式、表格或扫描内容可能存在异常。请先检查内容；MinerU 恢复后可重新解析，不满意也可以删除该来源。</p>
                   </div>
-                  {!sourceDetailBaseId && !isReader && (
+                  {!sourceDetailBaseId && !readOnlyWorkspace && (
                     <div className="source-pdf-fallback-actions">
                       <button
                         type="button"
@@ -8354,7 +8364,7 @@ export default function Home() {
                   notebookId={currentNotebookId}
                   sourceId={sourceDetail.id}
                   sourceTitle={sourceDetail.title}
-                  canEdit={!isReader}
+                  canEdit={!readOnlyWorkspace}
                   onConfirm={confirmCommandCatalog}
                   onOpenReview={setCatalogReview}
                   reviewSeq={catalogReviewSeq}
@@ -8418,7 +8428,7 @@ export default function Home() {
           sourceId={catalogReview.sourceId}
           sourceTitle={catalogReview.sourceTitle}
           jobId={catalogReview.jobId}
-          canEdit={!isReader}
+          canEdit={!readOnlyWorkspace}
           onClose={() => setCatalogReview(null)}
           onOpenTable={openKnowhowTable}
           onToast={setToast}
@@ -8522,7 +8532,7 @@ export default function Home() {
                               <div className="index-sub">{titles.join("、")}{g.count > titles.length ? " 等" : ""}</div>
                             )}
                           </div>
-                          {!isReader && (
+                          {!readOnlyWorkspace && (
                             <div className="index-ctas">
                               <button
                                 type="button"
@@ -8566,7 +8576,7 @@ export default function Home() {
                 overview={contentOverview}
                 loading={contentOverviewLoading}
                 error={contentOverviewError}
-                readOnly={isReader}
+                readOnly={readOnlyWorkspace}
                 onOpenMemory={openAnalyticsMemory}
                 onOpenKnowhow={openAnalyticsKnowhow}
               />
@@ -8608,7 +8618,7 @@ export default function Home() {
                           </div>
                           <div className="index-sub">{view.detail}</div>
                         </div>
-                        {!busy && !isReader && (
+                        {!busy && !readOnlyWorkspace && (
                           <div className="index-ctas">
                             {(!kg.ready || kg.pending_sources > 0) && (
                               <button
@@ -8671,7 +8681,7 @@ export default function Home() {
                           </div>
                           <div className="index-sub">跨文档概念聚类；重算并刷新图谱索引（不重新分析来源）</div>
                         </div>
-                        {!busy && !isReader && (
+                        {!busy && !readOnlyWorkspace && (
                           <div className="index-ctas">
                             {/* codex R4 P2(B):这一格自己的 busy 只看 uk.building/kgRefreshBusy
                                 （概念合并自身的状态标签/色调不该被「补上关联」污染），但共用同一把
@@ -8713,7 +8723,7 @@ export default function Home() {
                         </div>
                         <div className="index-sub">检索索引已损坏，检索与{strictLabel}结果可能不完整，请重建索引。</div>
                       </div>
-                      {!isReader && (
+                      {!readOnlyWorkspace && (
                         <div className="index-ctas">
                           <button type="button" className="index-cta primary"
                                   disabled={rebuilding}
@@ -8763,7 +8773,7 @@ export default function Home() {
                             </div>
                           )}
                         </div>
-                        {!isReader && (
+                        {!readOnlyWorkspace && (
                           <div className="index-ctas">
                             {v.state === "queued" && !s.building ? (
                               <>
@@ -8908,7 +8918,7 @@ export default function Home() {
           <div className="kg-view-body">
             <aside className="kg-rail">
               <input className="kg-search" placeholder="搜索节点名称或类型…" value={kgSearch} onChange={(e) => handleKgSearchChange(e.target.value)} />
-              {!isReader && (
+              {!readOnlyWorkspace && (
               <div className="kg-rail-section">
                 <h3>图谱处理</h3>
                 <div className="kg-action-stack">
@@ -8994,7 +9004,7 @@ export default function Home() {
                     {scaleIndexStatus && (() => {
                       const s = scaleIndexStatus;
                       const v = describeScaleIndex(s);
-                      const clickable = v.primaryOp !== null && !isReader;
+                      const clickable = v.primaryOp !== null && !readOnlyWorkspace;
                       const color = v.tone === "warn" ? "var(--color-warn, #b97a00)"
                         : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
                       const label = `检索索引：${v.stateLabel}${v.state === "indexed" ? ` · ${s.n_nodes} 节点` : ""}`;
@@ -9227,7 +9237,7 @@ export default function Home() {
           {kgAnalysisOpen && currentNotebookId && (
             <KgAnalysisView
               notebookId={currentNotebookId}
-              canAnalyze={!isReader}
+              canAnalyze={!readOnlyWorkspace}
               analysisRunning={kgRefreshBusy}
               analysisBlocked={relinkingKg || buildingKg}
               onAnalyze={confirmGenerateKgAnalysis}
@@ -9241,7 +9251,7 @@ export default function Home() {
         <KnowhowPanel
           notebookId={currentNotebookId}
           apiBase={API_BASE}
-          canEdit={!isReader}
+          canEdit={!readOnlyWorkspace}
           onClose={closeKnowhow}
           initialTableId={knowhowNavigation.jumpTarget?.tableId}
           initialRowId={knowhowNavigation.jumpTarget?.rowId}

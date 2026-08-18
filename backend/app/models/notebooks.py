@@ -173,6 +173,24 @@ class NotebookSummary(BaseModel):
     # (那个按钮打的是成员表,对授权边是空操作,点了会假成功)。详情侧只在非 owner
     # 时发一次点查,owner 零新增查询。
     granted_via: List[GrantedGroupRef] = Field(default_factory=list)
+    # 本用户对该库是否持有**内容管理权**(群组知识共享 P2,裁决 P2-3)。
+    #
+    # = owner ∨ 一条 `role='admin'` 的有效授权边,即 `_CAPABILITY_LEVELS` 里 "admin"
+    # 那六格(来源写 / 图谱构建 / knowhow 写 / 知识治理写 / 命令目录写 / 共享管理)
+    # 的判定结果。前端据此在 `access="reader"` 的库上仍然画出写入口。
+    #
+    # 为什么另加布尔而不给 `access` 加枚举值(裁决 P2-3,沿用 P1 裁决 7 的同款理由):
+    # `access` 是**权限档**,每个消费它的旧分支都按「owner / 非 owner」二分写死;新增
+    # 第三个值会让那些分支各自重新判一次「这个新值算不算可读」,而它们本该一个字不改。
+    # 「能不能管内容」是正交的一维,所以另开一维。
+    #
+    # 默认 **False** —— 「未回填时逐字复现该字段存在之前的行为」(旧后端/旧客户端下
+    # reader 就是只读)。owner 行恒 True。
+    #
+    # ⚠ 它是 **UI 信号不是授权判定**:权威永远是后端守卫
+    # (`require_notebook_capability` / `notebook_capability_allowed`)。方向上宁可少给
+    # ——投影漏判只是少画一个按钮,多判才会让用户点进一个必然 404 的动作。
+    can_manage_content: bool = False
     # owner 视角:本 notebook 是否已开启分享(存在有效 share_token 或 notebook_members)。
     # 驱动前端卡片右下角的「已分享」小人徽标(仿 NotebookLM);reader 看到的原库 is_shared
     # 也为 True,但 reader 卡片本身已带「来自 X」不再重复标记。
