@@ -37,6 +37,7 @@ from app.repositories.group_rows import (
 )
 from app.repositories.ports import (
     GroupAdminRequiredError,
+    GroupAdminShouldShareDirectlyError,
     GroupGrantAlreadyExists,
     GroupMembershipRequiredError,
     GroupNotFoundError,
@@ -608,8 +609,7 @@ class GroupStore:
                     # 这边没有行锁、顺序无关,但两份实现读起来必须是同一段代码。
                     self._require_group_on(db, group_id)
                     self._require_notebook_on(db, notebook_id)
-                    if self._role_on(db, group_id, requested_by) is None:
-                        raise GroupMembershipRequiredError(group_id)
+                    self._require_plain_membership_on(db, group_id, requested_by)
                     db.execute(
                         "INSERT INTO notebook_share_requests "
                         "(id,notebook_id,group_id,requested_by,status,created_at) "
@@ -664,6 +664,31 @@ class GroupStore:
                 (notebook_id, requested_by),
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
+
+    def _require_plain_membership_on(
+        self, db: sqlite3.Connection, group_id: str, user_id: str
+    ) -> None:
+        """在**当前写事务里**复核这个人是目标组的**普通成员**(codex #519 R8 P2)。
+
+        两种不合格各有各的语义,绝不能合并成一句「不许」:
+
+        * **不是成员** → `GroupMembershipRequiredError`(路由 → 404,与群组维度的
+          「看不见」口径一致——他不该知道这个组存不存在);
+        * **是组管理员** → `GroupAdminShouldShareDirectlyError`(路由 → 403 + 一句可操作
+          的说明)。他手上有更直接的路径(`POST /notebooks/{id}/grants`),而契约明写
+          「组管理员分享进自己管理的组永远走既有 grants 端点、不经这张表」。不挡的话他
+          能建出一条 pending 申请再**自己批自己**;而遮蔽成 404 对他毫无意义,组的存在性
+          对一个管理员根本不是秘密。
+
+        放行是**正向精确匹配** `role == 'member'`:组管理员与任何未知取值(含正向 shadow
+        停车写进去的哨兵串)都落进第二支,方向 fail closed。写成 `!= 'admin'` 就反了——
+        哨兵行会被当成普通成员放行。
+        """
+        role = self._role_on(db, group_id, user_id)
+        if role is None:
+            raise GroupMembershipRequiredError(group_id)
+        if role != "member":
+            raise GroupAdminShouldShareDirectlyError(group_id)
 
     def _require_share_decider_on(
         self,

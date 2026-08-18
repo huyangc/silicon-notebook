@@ -1861,3 +1861,91 @@ def test_create_grant_owner_branch_blocks_on_the_notebook_row_and_fails_closed(
                 "SELECT COUNT(*) AS c FROM notebook_grants"
             ).fetchone()["c"]
         ) == 0, "指向已删笔记本的授权边落库了"
+
+
+@pytest.mark.postgres_integration
+def test_manage_recheck_locks_the_group_membership_behind_the_edge(
+    postgres_database, monkeypatch
+):
+    """管理权复检必须锁住**整条生效链**,不只是授权边行(codex #519 R8 P1)。
+
+    管理权来自 `group_admins` 边时,让那条边生效的是一行 `group_members`。R5 只锁了边行,
+    而成员行藏在 `EXISTS (...)` 里锁不着——于是并发的移出组/降级可以提交在探测快照之后、
+    `create_grant` 插入持久边之前,一个管理权**刚刚被撤销**的人照样把访问权散了出去。
+
+    编排:发起人的 `create_grant` 在复检结束后停住(锁在手),另一线程去移出他的组成员
+    资格。锁真的锁住整条链时,那次移除**拿不到锁**(连接上配了 `lock_timeout`,于是抛
+    `LockNotAvailable`);序列化顺序因此是「发边在前、移出组在后」,语义正确。
+
+    ⚠ 把 `FOR SHARE OF ng, ngm` 摘成 `FOR SHARE OF ng`,移除会**当场成功**——这条用例
+    因此钉的是**锁模式本身**,不是「代码里有没有那句 SELECT」。
+    """
+    from psycopg import errors
+
+    assert PostgresMigrator(postgres_database).migrate() == 28
+    now = "2026-07-23T00:00:00+00:00"
+    _seed_group_world(postgres_database, now, ("user-chain-a", "user-chain-b"))
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) "
+            "VALUES ('nb-chain-race','Chain','','','ready','user-chain-a',%s,%s,'personal')",
+            (now, now),
+        )
+        # user-chain-b 经 group_admins 边拿到 nb-chain-race 的管理权。grp-race 里两名
+        # 管理员都在(`_seed_group_world` 建的),所以移除他不会先撞「最后一名组管理员」。
+        connection.execute(
+            "INSERT INTO notebook_grants"
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES ('gnt-chain','nb-chain-race','group_admins','grp-race','admin',"
+            "'user-chain-a',%s)",
+            (now,),
+        )
+    store = _group_store(postgres_database, now)
+    target = store.create_group(
+        name="收边组", kind="project", description="", created_by="user-chain-b"
+    )
+
+    chain_locked = threading.Event()
+    allow_release = threading.Event()
+    original_recheck = store._require_notebook_manage_on
+
+    def hooked_recheck(connection, notebook_id, user_id):
+        result = original_recheck(connection, notebook_id, user_id)
+        chain_locked.set()          # 复检通过,整条链的锁此刻应当都在手上
+        assert allow_release.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(store, "_require_notebook_manage_on", hooked_recheck)
+
+    def hand_out_grant():
+        return store.create_grant(
+            "nb-chain-race",
+            principal_type="group",
+            principal_id=target["id"],
+            role="viewer",
+            created_by="user-chain-b",
+            admin_user_id="user-chain-b",
+        )
+
+    def evict_the_manager():
+        assert chain_locked.wait(timeout=10)
+        try:
+            store.remove_member("grp-race", "user-chain-b")
+            return "removed"
+        except errors.LockNotAvailable:
+            return "blocked"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        granter = executor.submit(hand_out_grant)
+        evictor = executor.submit(evict_the_manager)
+        try:
+            outcome = evictor.result(timeout=20)
+        finally:
+            allow_release.set()
+        assert granter.result(timeout=20)["principal_id"] == target["id"]
+
+    assert outcome == "blocked", (
+        "移出组在发边事务持锁期间就完成了 —— 生效链的成员资格那一环没被锁住,"
+        "一个管理权刚被撤销的人照样把访问权散了出去(codex #519 R8 P1)"
+    )

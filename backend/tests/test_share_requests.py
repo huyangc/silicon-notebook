@@ -188,6 +188,113 @@ def test_create_needs_both_notebook_manage_and_group_membership(tmp_path, monkey
     assert both.status_code == 200, both.text
 
 
+def test_a_group_admin_is_sent_to_the_direct_share_path_not_the_approval_queue(
+    tmp_path, monkeypatch
+):
+    """目标组的**组管理员**不能提交共享申请(codex #519 R8 P2)。
+
+    审批流覆盖的是**另一半**入口:对库有管理权、但对目标组只是普通成员的人。组管理员
+    分享进自己管理的组永远走 `POST /notebooks/{id}/grants`、不经这张表(设计 §4 决策 9,
+    v49/v50 迁移的 docstring 也逐字写着)。此前判据只是「有没有成员行」,于是组管理员能
+    建出一条 pending 申请再**自己批自己**——契约早就写明了,只是实现没兑现。
+
+    响应刻意**不是** 404:他是这个组的管理员,组的存在性对他不是秘密;给一句可操作的
+    说明,告诉他直接共享即可。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, boss_id, _ = _new_user(client)
+    group_id = _make_group(client, boss, name="他管的组")
+    notebook_id = _make_notebook(client, boss, name="他自己的库")
+
+    denied = _submit(client, boss, notebook_id, group_id)
+    assert denied.status_code == 403, denied.text
+    assert denied.headers.get("X-User-Message") == "1"
+    assert denied.json()["detail"] == "你是这个群组的组管理员,直接共享给它即可,不必提交申请"
+    # 一条申请都不该落库——否则他下一步就能自己批准自己。
+    assert _pending_for(client, boss, group_id).json() == []
+
+    # 反向护栏:同一个人走**正确**的那条路(直接发边)照常成功。
+    granted = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group", "principal_id": group_id, "role": "viewer"},
+        headers=boss,
+    )
+    assert granted.status_code == 200, granted.text
+
+
+def test_being_promoted_to_group_admin_in_the_toctou_window_blocks_the_request(
+    tmp_path, monkeypatch
+):
+    """普通成员在路由前置检查之后、写事务之前被**提升为组管理员** → 事务内复检拦下。
+
+    与 R2 P2-1 那条(被移出组)同一条纪律的另一格:承重判定在写事务里,路由那次只给文案。
+    只改路由那半,这个窗口里落下的申请仍然是一条「组管理员给自己开的」待审批申请。
+    """
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, librarian_id, group_id, notebook_id = _make_member_owned_notebook(client)
+
+    store = _app_group_store()
+    original = store.user_group_role
+
+    def promote_then_answer(gid, uid):
+        role = original(gid, uid)
+        if gid == group_id and uid == librarian_id:
+            # 守卫刚读到 "member",紧接着他被提升——写事务尚未开始。
+            store.upsert_member(gid, librarian_id, role="admin", added_by=librarian_id)
+        return role
+
+    monkeypatch.setattr(store, "user_group_role", promote_then_answer)
+    denied = _submit(client, librarian, notebook_id, group_id)
+    monkeypatch.setattr(store, "user_group_role", original)
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"] == "你是这个群组的组管理员,直接共享给它即可,不必提交申请"
+    assert _pending_for(client, boss, group_id).json() == []
+
+
+def test_store_level_share_request_requires_plain_membership(repo):
+    """直接走 store:非成员 → `GroupMembershipRequiredError`;组管理员 →
+    `GroupAdminShouldShareDirectlyError`。两种不合格给**不同**的异常,因为路由要据此
+    分出 404(不泄露存在性)与 403(给可操作说明)两种响应。
+
+    放行是**正向精确匹配** `role == 'member'`:未知取值(正向 shadow 停车写进 `role` 的
+    哨兵串就是这一类)落进第二支、一律不放行,方向 fail closed。写成 `!= 'admin'` 就反了。
+    """
+    from app.repositories.ports import (
+        GroupAdminShouldShareDirectlyError,
+        GroupMembershipRequiredError,
+    )
+
+    store = repo._runtime.groups
+    _seed_users(repo, "pm-admin", "pm-member", "pm-outsider")
+    _seed_notebook(repo, "nb-pm", "pm-member")
+    group = store.create_group(
+        name="g", kind="project", description="", created_by="pm-admin"
+    )
+    store.upsert_member(group["id"], "pm-member", role="member", added_by="pm-admin")
+
+    with pytest.raises(GroupMembershipRequiredError):
+        store.create_share_request("nb-pm", group_id=group["id"], requested_by="pm-outsider")
+    with pytest.raises(GroupAdminShouldShareDirectlyError):
+        store.create_share_request("nb-pm", group_id=group["id"], requested_by="pm-admin")
+    # 未知 role(哨兵)同样不放行——判据是正向匹配 'member',不是「不等于 admin」。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE group_members SET role=? WHERE group_id=? AND user_id=?",
+            ("__parked_sentinel__", group["id"], "pm-member"),
+        )
+    with pytest.raises(GroupAdminShouldShareDirectlyError):
+        store.create_share_request("nb-pm", group_id=group["id"], requested_by="pm-member")
+    # 恢复成普通成员 → 照常放行(复检不能变成恒关的闸)。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE group_members SET role='member' WHERE group_id=? AND user_id=?",
+            (group["id"], "pm-member"),
+        )
+    assert store.create_share_request(
+        "nb-pm", group_id=group["id"], requested_by="pm-member"
+    )["status"] == "pending"
+
+
 def test_duplicate_pending_request_is_idempotent_not_an_error(tmp_path, monkeypatch):
     """撞 `uq_share_requests_one_pending` 返回既有 pending 行(裁决 P2-5),不是 409。"""
     client = _client(tmp_path, monkeypatch)
@@ -754,6 +861,71 @@ def test_approving_a_request_whose_author_lost_manage_rights_is_refused(
     )
     assert rejected.status_code == 200, rejected.text
     assert rejected.json()["status"] == "rejected"
+
+
+def test_losing_the_group_membership_behind_the_edge_also_revokes_manage_rights(
+    tmp_path, monkeypatch
+):
+    """管理权来自 `group_admins` 边时,**撤掉组成员资格**与撤掉边等效(codex #519 R8 P1)。
+
+    `_require_notebook_manage_on` 认的是一条**两环的生效链**:①那条 `notebook_grants`
+    边;②让它生效的那行 `group_members`。既有用例(R4/R6)撤的都是第①环,这条撤第②环。
+    两个消费点各测一次——`approve_share_request`(申请人)与 `create_grant`(发起人)——
+    因为它们共用这一个谓词,而 PG 侧正是在这里只锁了第①环。
+
+    ⚠ 这条是**确定性**用例(先移出组、再动作),证的是「谓词认不认第②环」;PG 侧「那把锁
+    拦不拦得住并发移出组」由 `tests/postgres/test_concurrency.py` 的并发用例承担,两者互补。
+    """
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, alice, name="Alice 的库")
+    bob, bob_id, _ = _new_user(client)
+    # Bob 经 group_admins 边拿到管理权(而不是自己是库主)。
+    conferring = _make_group(client, alice, name="授权组")
+    assert _add_member(client, alice, conferring, bob_id, role="admin").status_code == 200
+    assert client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group_admins", "principal_id": conferring, "role": "admin"},
+        headers=alice,
+    ).status_code == 200
+
+    # Bob 自己管一个组(用来走发起人那条路),另有 Carol 管一个组、Bob 只是普通成员
+    # (用来走申请人那条路)。
+    bobs_group = _make_group(client, bob, name="Bob 的组")
+    carol, _carol_id, _ = _new_user(client)
+    carols_group = _make_group(client, carol, name="Carol 的组")
+    assert _add_member(client, carol, carols_group, bob_id).status_code == 200
+    request_id = _submit(client, bob, notebook_id, carols_group).json()["id"]
+
+    # 前提:此刻两条路都是通的(否则下面的断言全是空转)。
+    assert client.get(f"/api/notebooks/{notebook_id}/share-requests", headers=bob).status_code == 200
+
+    # Alice 把 Bob 移出授权组——授权**边一个字没动**,只有第②环没了。
+    assert client.delete(
+        f"/api/groups/{conferring}/members/{bob_id}", headers=alice
+    ).status_code == 204
+    assert [g["principal_type"] for g in client.get(
+        f"/api/notebooks/{notebook_id}/grants", headers=alice
+    ).json()] == ["group_admins"], "边应当原样还在——本用例撤的是成员资格那一环"
+
+    # ① 发起人侧(`create_grant`):他再也发不出新的授权边。
+    denied = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group", "principal_id": bobs_group, "role": "viewer"},
+        headers=bob,
+    )
+    assert denied.status_code in (403, 404), denied.text
+
+    # ② 申请人侧(`approve_share_request`):他此前提交的申请也兑现不了。
+    refused = client.post(
+        f"/api/groups/{carols_group}/share-requests/{request_id}/approve", headers=carol
+    )
+    assert refused.status_code == 409, refused.text
+    assert "管理权" in refused.json()["detail"]
+    # 零副作用:那条 (group, viewer) 边没有发出去。
+    assert [g["principal_type"] for g in client.get(
+        f"/api/notebooks/{notebook_id}/grants", headers=alice
+    ).json()] == ["group_admins"]
 
 
 def test_a_demoted_manager_cannot_still_hand_out_a_new_grant(tmp_path, monkeypatch):

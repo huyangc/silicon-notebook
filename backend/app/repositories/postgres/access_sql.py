@@ -34,12 +34,20 @@
   进行中授权被撤销),与成员探测锁成员行同理。`OF ng` 不是语法必须——本语句同层
   rangetable 里只有 `notebook_grants ng`,裸 `FOR SHARE` 锁的对象相同;写出来是为了
   让「锁的到底是哪张表的行」不依赖读者去数 FROM 子句。
-  ⚠ **组成员资格刻意不锁**,这是一条已登记的取舍而不是遗漏:`group_members` 只在
-  EXISTS 子查询里,`FOR SHARE` 够不着它(要锁就得改写成 LEFT JOIN,而 PG 不允许对
+  ⚠ **读级探测的组成员资格刻意不锁**,这是一条已登记的取舍而不是遗漏:`group_members`
+  只在 EXISTS 子查询里,`FOR SHARE` 够不着它(要锁就得改写成 LEFT JOIN,而 PG 不允许对
   外连接的可空侧加锁)。后果是**一次在飞的写事务可以带着提交时已经失效的组授权
   落地**——用户在 t0 通过组授权拿到读权、t1 被移出组、他 t0 就开始的那个写事务在
   t2 提交成功。残留物是**一条被移除者自己也读不到的私有 Memory 行**(读路径当场
   为假),既不扩散也不可见,代价远小于为它把热路径改成带锁 join。
+
+  ⚠⚠ **这条取舍只覆盖读级**(`GRANT_PROBE_FOR_SHARE_SQL`,消费者是上面那三个
+  memory_store 站点)。**管理级已经收口**:`ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL` +
+  `ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL` 用内连接把成员行提到顶层一并锁住(codex
+  #519 R8 P1)。两者的判据是**爆炸半径**而不是技术难度:管理级探测的下游是
+  `create_grant` / `approve_share_request`,它们落的是一条把整组读权发出去的**持久
+  授权边**;读级那条的残留物只是一行谁也读不到的私有 Memory。别拿上面那段去论证
+  管理级也可以不锁——它们不是同一件事。
 
 **刻意不收口**(与 SQLite 侧同款,理由写在那份 docstring 里):
 `postgres/query_store.py::joined_notebook_rows`(成员列表查询,只要成员那一半且多一个
@@ -250,9 +258,88 @@ ADMIN_GRANT_PROBE_SQL = (
     + _admin_principal_match_expr("ng", "%s", "ngm", "nga")
 )
 
-# 上面那条加行锁的变体。`OF ng` 同样是显式化:锁**授权边行**,让并发的撤销
-# (`DELETE FROM notebook_grants`)阻塞到本事务提交,序列化成「先批准、后撤销」。
-ADMIN_GRANT_PROBE_FOR_SHARE_SQL = ADMIN_GRANT_PROBE_SQL + " FOR SHARE OF ng"
+# ⚠ 这里**刻意没有** `ADMIN_GRANT_PROBE_FOR_SHARE_SQL`(裸探测 + `FOR SHARE OF ng`)。
+# 它曾经存在(codex #519 R5),R8 P1 证明它只锁住了生效链的一端、留着就是给那个洞留一个
+# 看起来正规的入口——凡是要在写事务里认管理权的地方,都必须用下面那两条**整链**加锁的
+# 语句。裸的 `ADMIN_GRANT_PROBE_SQL`(不加锁,两侧都有)仍然保留:SQLite 侧靠进程写锁
+# 串行,不需要也不存在行锁变体。
+
+
+def _group_chain_join_condition(
+    grant_alias: str,
+    member_alias: str,
+    user_ref: str,
+) -> str:
+    """`group` / `group_admins` 两条臂的**成员资格**,改写成可加锁的 JOIN 条件。
+
+    与 `_restricted_principal_arms` 里那两条 `EXISTS (...)` 逐格等价,只换了一种
+    PostgreSQL **锁得住**的写法:`FOR SHARE` 够不着 EXISTS 子查询里的行,内连接的
+    两侧却都锁得住(外连接的可空侧不行,那正是模块 docstring 里那句「要锁就得改写成
+    LEFT JOIN,而 PG 不允许」讲的另一半)。
+
+    等价性不靠肉眼比对——`tests/postgres/test_admin_grant_chain_lock.py` 用数据驱动
+    矩阵逐格比对「本条 + user 臂」与唯一定义点 `ADMIN_GRANT_PROBE_SQL` 的结果。
+    """
+    return (
+        f"{member_alias}.group_id={grant_alias}.principal_id "
+        f"AND {member_alias}.user_id={user_ref} "
+        f"AND (({grant_alias}.principal_type='group') "
+        f"OR ({grant_alias}.principal_type='group_admins' "
+        f"AND {member_alias}.role='admin'))"
+    )
+
+
+# ---------------------------------------------------------------- 生效链加锁
+#
+# 管理级授权边的**生效链有两环**:①那条 `notebook_grants` 边还在;②让它生效的那条
+# `group_members` 行还在。只锁 ①(codex #519 R5 当时的做法)等于只堵了一半——并发的
+# 移出组/降级可以提交在探测快照之后、`create_grant` / `approve_share_request` 插入
+# 持久边之前,于是一个管理权**刚刚被撤销**的人仍然发出了新的访问权(codex #519 R8 P1)。
+#
+# ⚠ 与模块 docstring 里「组成员资格刻意不锁」那条**已登记取舍**并不矛盾,两者的对象
+# 不同,别读成互相推翻:那条说的是**读级**探测 `GRANT_PROBE_FOR_SHARE_SQL`(消费者是
+# `memory_store` 的三段式热路径),它的残留物是「一条被移除者自己也读不到的私有
+# Memory 行」,既不扩散也不可见;这里是**管理级**探测,残留物是一条把整组读权发出去
+# 的持久授权边,爆炸半径完全不是一个量级。所以读级保持原样、管理级收口。
+#
+# 拆成两条语句是因为 `user` 臂的链只有一环(没有 `group_members` 行可言),而带锁的
+# `UNION` 在 PostgreSQL 里是语法错误(`FOR UPDATE is not allowed with UNION`)。
+
+# user 臂:主体就是这个人自己,链只有边行这一环,锁它即完整。
+ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL = (
+    "SELECT 1 FROM notebook_grants ng "
+    "WHERE ng.notebook_id=%s AND ng.role='admin' "
+    "AND ng.principal_type='user' AND ng.principal_id=%s "
+    "FOR SHARE OF ng"
+)
+
+# group / group_admins 两臂:内连接把成员行提到顶层,`FOR SHARE OF ng, ngm` 在**同一条
+# 语句**里把整条链锁住。原子性是要点:分成「先探测拿主体、再单独锁成员行」两步,两步
+# 之间那条成员行可以被删掉,而此时是否还有**别的**链成立又要重新判断——单条语句没有
+# 这个中间态,任一条链仍然成立就返回行、并且返回的正是被锁住的那条。
+ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL = (
+    "SELECT 1 FROM notebook_grants ng "
+    "JOIN group_members ngm ON "
+    + _group_chain_join_condition("ng", "ngm", "%s")
+    + " WHERE ng.notebook_id=%s AND ng.role='admin' "
+    "FOR SHARE OF ng, ngm"
+)
+
+
+def admin_grant_user_arm_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
+    """`ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL` 的位置参数。"""
+    return (notebook_id, user_id)
+
+
+def admin_grant_group_chain_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
+    """`ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL` 的位置参数。
+
+    ⚠ 顺序**与形参相反**:JOIN ON 写在 WHERE 之前,所以 `user_id` 的占位符先出现。
+    存在这个 helper 就是为了让调用方永远不必自己数占位符——手写 `(notebook_id,
+    user_id)` 会把两个 id 对调,而两者都是不透明字符串,查询只会安静地返回空集
+    (= 管理权判假),不会报错。
+    """
+    return (user_id, notebook_id)
 
 
 def read_access_clause(
