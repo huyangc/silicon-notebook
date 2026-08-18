@@ -16,6 +16,15 @@ This file only proves the things that are genuinely backend-specific:
   ``UniqueViolation``) instead of SQLite's process-wide write mutex;
 - ``read_blocks``' ordering is ``COLLATE "C"``, matching SQLite's default
   binary collation even on a non-C-collated database.
+
+One exception to "SQLite already covers the behaviour": the history ring's
+DIRECTION is asserted here too. It used to be a private per-backend copy of
+the same trimming code, and a copy that kept the OLDEST twenty entries passed
+every conformance case in this file — the row still came back with twenty
+well-formed entries. The shared ``append_profile_history`` in ``ports.py`` now
+makes that divergence unrepresentable, and
+``test_write_block_history_ring_keeps_the_newest_entries`` below is the
+regression that would catch a re-introduced local copy on this backend.
 """
 from __future__ import annotations
 
@@ -25,7 +34,10 @@ from dataclasses import dataclass
 import pytest
 
 from app.repositories.postgres.agent_profile_store import AgentProfileStore
-from app.repositories.ports import AgentProfileRevisionConflict
+from app.repositories.ports import (
+    AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
+    AgentProfileRevisionConflict,
+)
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 NOW = "2026-08-18T00:00:00+00:00"
@@ -159,6 +171,45 @@ def test_write_block_stale_revision_under_for_update_conflicts(agent_profile_har
     assert current["revision"] == 1
 
 
+def test_write_block_history_ring_keeps_the_newest_entries(agent_profile_harness):
+    """The ring is capped at 20 AND keeps the MOST RECENT 20 — dropping the
+    oldest first.
+
+    Both halves are load-bearing and only the second one is fragile: a
+    ``history[:20]`` (keep the oldest) instead of ``history[-20:]`` still
+    yields a 20-entry list of well-formed entries, so a length-only assertion
+    passes and the panel silently shows a frozen prehistory instead of the
+    recent edits. Asserting the ring's CONTENT at both ends is what makes
+    that inversion visible on this backend, where the trimming used to live
+    in a private copy of the SQLite function.
+    """
+    harness = agent_profile_harness
+    block = harness.store.write_block(
+        harness.notebook_id, "", "corpus_shape", value="v0",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    for i in range(1, 25):
+        block = harness.store.write_block(
+            harness.notebook_id, "", "corpus_shape", value=f"v{i}",
+            evidence=[], expected_revision=block["revision"], origin="job", actor="",
+        )
+    assert block["revision"] == 25
+    assert len(block["history"]) == 20
+    # Newest kept, oldest dropped: 25 transitions (None->v0, v0->v1, ...,
+    # v23->v24) trimmed to the last 20 starts at v4->v5.
+    assert block["history"][0]["before"] == "v4"
+    assert block["history"][0]["after"] == "v5"
+    assert block["history"][-1]["before"] == "v23"
+    assert block["history"][-1]["after"] == "v24"
+    assert [entry["revision"] for entry in block["history"]] == list(range(6, 26))
+    # The dropped prehistory really is gone, not merely reordered.
+    assert all(entry["after"] != "v0" for entry in block["history"])
+    # And it survives a fresh jsonb decode, not just the write's return value.
+    assert harness.store.read_block(
+        harness.notebook_id, "", "corpus_shape"
+    )["history"] == block["history"]
+
+
 def test_clear_block_keeps_the_row_and_history_and_a_missing_row_raises(
     agent_profile_harness,
 ):
@@ -237,13 +288,13 @@ def test_job_row_started_at_and_finished_at_are_the_empty_string_sentinel_before
     assert fresh["started_at"] == ""
     assert fresh["finished_at"] == ""
 
-    assert harness.store.claim(harness.notebook_id, "") is True
+    assert harness.store.claim(harness.notebook_id, "") == 1
     claimed = harness.store.job_row(harness.notebook_id, "")
     assert claimed["started_at"] == NOW
     assert claimed["finished_at"] == ""
 
     assert harness.store.settle(
-        harness.notebook_id, "", "done", blocks_written=2, reset_signal=True
+        harness.notebook_id, "", "done", blocks_written=2, consumed=1
     ) is True
     settled = harness.store.job_row(harness.notebook_id, "")
     assert settled["finished_at"] == NOW
@@ -251,18 +302,54 @@ def test_job_row_started_at_and_finished_at_are_the_empty_string_sentinel_before
     assert settled["pending_signal"] == 0
     assert settled["runs"] == 1
 
+    # ``claim``'s reset writes NULL back into these nullable timestamptz
+    # columns; the sentinel normalisation must survive that round trip too.
+    assert harness.store.claim(harness.notebook_id, "") == 0
+    reclaimed = harness.store.job_row(harness.notebook_id, "")
+    assert reclaimed["finished_at"] == ""
+    assert reclaimed["started_at"] == NOW
+
 
 def test_claim_is_for_update_cas_and_settle_is_idempotent(agent_profile_harness):
     harness = agent_profile_harness
     harness.store.bump_signal(harness.notebook_id, "", delta=3)
-    assert harness.store.claim(harness.notebook_id, "") is True
-    assert harness.store.claim(harness.notebook_id, "") is False
+    assert harness.store.claim(harness.notebook_id, "") == 3
+    assert harness.store.claim(harness.notebook_id, "") is None
 
-    assert harness.store.settle(harness.notebook_id, "", "done", reset_signal=True) is True
+    assert harness.store.settle(harness.notebook_id, "", "done", consumed=3) is True
     # A repeated settle after the chain already landed a terminal status
     # touches nothing.
-    assert harness.store.settle(harness.notebook_id, "", "failed", reset_signal=True) is False
+    assert harness.store.settle(harness.notebook_id, "", "failed", consumed=0) is False
     assert harness.store.job_row(harness.notebook_id, "")["status"] == "done"
+
+
+def test_claim_creates_the_row_and_settle_floors_the_signal_with_greatest(
+    agent_profile_harness,
+):
+    """``ON CONFLICT DO NOTHING`` row-ensure and ``GREATEST(0, ...)`` are this
+    backend's spellings of ``INSERT OR IGNORE`` / two-argument ``MAX``; both
+    are SQL-level and therefore genuinely backend-specific."""
+    harness = agent_profile_harness
+    assert harness.store.job_row(harness.notebook_id, "user-fresh") is None
+    assert harness.store.claim(harness.notebook_id, "user-fresh") == 0
+    created = harness.store.job_row(harness.notebook_id, "user-fresh")
+    assert created["status"] == "running"
+    assert created["pending_signal"] == 0
+
+    # Signals landing mid-run survive a settle that consumes only the
+    # snapshot, and an over-large consumed value floors at zero instead of
+    # going negative.
+    harness.store.bump_signal(harness.notebook_id, "user-fresh", delta=12)
+    harness.store.settle(harness.notebook_id, "user-fresh", "done", consumed=0)
+    assert harness.store.job_row(
+        harness.notebook_id, "user-fresh"
+    )["pending_signal"] == 12
+
+    assert harness.store.claim(harness.notebook_id, "user-fresh") == 12
+    harness.store.settle(harness.notebook_id, "user-fresh", "done", consumed=99)
+    assert harness.store.job_row(
+        harness.notebook_id, "user-fresh"
+    )["pending_signal"] == 0
 
 
 def test_sweep_stale_on_start_force_settles_queued_and_running_rows(
@@ -277,7 +364,7 @@ def test_sweep_stale_on_start_force_settles_queued_and_running_rows(
     assert swept == 1
     base_row = harness.store.job_row(harness.notebook_id, "")
     assert base_row["status"] == "failed"
-    assert base_row["failure_reason"] == "服务重启，整理未完成"
+    assert base_row["failure_reason"] == AGENT_PROFILE_RESTART_FAILURE_MESSAGE
     assert base_row["finished_at"] == NOW
 
     idle_row = harness.store.job_row(harness.notebook_id, "user-a")

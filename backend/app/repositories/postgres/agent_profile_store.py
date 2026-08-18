@@ -27,36 +27,11 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.ports import (
-    AGENT_PROFILE_HISTORY_MAX,
     AGENT_PROFILE_JOB_TERMINAL_STATUSES,
+    AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
     AgentProfileRevisionConflict,
+    append_profile_history as _append_history,
 )
-
-
-def _append_history(
-    history: list,
-    before: object,
-    after: str,
-    origin: str,
-    actor: str,
-    at: str,
-    revision: int,
-) -> list:
-    """Append one before/after entry and keep the ring bounded at
-    ``AGENT_PROFILE_HISTORY_MAX`` — identical trimming rule to the SQLite
-    mirror."""
-    entry = {
-        "before": before,
-        "after": after,
-        "origin": origin,
-        "actor": actor,
-        "at": at,
-        "revision": revision,
-    }
-    updated = [*history, entry]
-    if len(updated) > AGENT_PROFILE_HISTORY_MAX:
-        updated = updated[-AGENT_PROFILE_HISTORY_MAX:]
-    return updated
 
 
 class AgentProfileStore:
@@ -68,6 +43,9 @@ class AgentProfileStore:
         now: Callable[[], TimestampInput],
     ) -> None:
         self.database = database
+        # Construction parity with the rest of the bundle only — this store
+        # synthesises no ids (both tables are keyed by caller-supplied
+        # tuples). Same note as the SQLite mirror.
         self.new_id = new_id
         self.now = normalized_clock(now)
 
@@ -302,7 +280,10 @@ class AgentProfileStore:
     def bump_signal(self, notebook_id: str, owner_id: str, delta: int = 1) -> int:
         """Zero-scan primary-key upsert; returns the new ``pending_signal``
         count. The row is created with ``status='idle'`` (column default) on
-        first touch."""
+        first touch. Negative ``delta`` is rejected — see the SQLite mirror
+        for why an uncontrolled decrement is not clamped but refused."""
+        if int(delta) < 0:
+            raise ValueError("agent profile pending_signal delta must not be negative")
         now = self.now()
         with self.database.write() as connection:
             row = connection.execute(
@@ -317,18 +298,34 @@ class AgentProfileStore:
             ).fetchone()
         return int(row["pending_signal"])
 
-    def claim(self, notebook_id: str, owner_id: str) -> bool:
-        """CAS this chain to ``status='running'``. See the SQLite mirror for
-        the single-flight/rowcount reasoning."""
+    def claim(self, notebook_id: str, owner_id: str) -> int | None:
+        """Take the single-flight slot and return the ``pending_signal``
+        snapshot, or ``None`` when it was already held. See the SQLite mirror
+        for the full reasoning (row-ensure so a never-signalled chain is
+        claimable, rowcount-decided CAS, previous-run reset, and why the
+        snapshot comes back from the winning statement itself).
+
+        ``ON CONFLICT DO NOTHING`` is this backend's ``INSERT OR IGNORE``;
+        ``finished_at`` resets to ``NULL`` rather than ``''`` because it is a
+        nullable ``timestamptz`` here — ``_job_row`` normalises that back to
+        the shared ``""`` sentinel on read."""
         now = self.now()
         with self.database.write() as connection:
-            cursor = connection.execute(
-                "UPDATE agent_profile_jobs SET status='running',started_at=%s,"
-                "updated_at=%s WHERE notebook_id=%s AND owner_id=%s "
-                "AND status NOT IN ('queued','running')",
-                (now, now, notebook_id, owner_id),
+            connection.execute(
+                "INSERT INTO agent_profile_jobs "
+                "(notebook_id,owner_id,created_at,updated_at) VALUES (%s,%s,%s,%s) "
+                "ON CONFLICT (notebook_id,owner_id) DO NOTHING",
+                (notebook_id, owner_id, now, now),
             )
-        return cursor.rowcount == 1
+            row = connection.execute(
+                "UPDATE agent_profile_jobs SET status='running',started_at=%s,"
+                "finished_at=NULL,failure_reason='',diagnostic='',blocks_written=0,"
+                "updated_at=%s WHERE notebook_id=%s AND owner_id=%s "
+                "AND status NOT IN ('queued','running') "
+                "RETURNING pending_signal",
+                (now, now, notebook_id, owner_id),
+            ).fetchone()
+        return int(row["pending_signal"]) if row is not None else None
 
     def settle(
         self,
@@ -339,41 +336,41 @@ class AgentProfileStore:
         failure_reason: str = "",
         diagnostic: str = "",
         blocks_written: int = 0,
-        reset_signal: bool,
+        consumed: int,
     ) -> bool:
-        """See the SQLite mirror for the ``reset_signal``/CAS reasoning."""
+        """See the SQLite mirror for the ``consumed``/CAS reasoning.
+        ``GREATEST`` is this backend's spelling of SQLite's two-argument
+        ``MAX`` — same floor, same single statement."""
         if status not in AGENT_PROFILE_JOB_TERMINAL_STATUSES:
             raise ValueError("agent profile job terminal status is not recognised")
         now = self.now()
         written = max(0, int(blocks_written))
+        taken = max(0, int(consumed))
         with self.database.write() as connection:
-            if reset_signal:
-                cursor = connection.execute(
-                    "UPDATE agent_profile_jobs SET status=%s,failure_reason=%s,"
-                    "diagnostic=%s,blocks_written=%s,runs=runs+1,pending_signal=0,"
-                    "finished_at=%s,updated_at=%s WHERE notebook_id=%s AND owner_id=%s "
-                    "AND status IN ('queued','running')",
-                    (status, failure_reason, diagnostic, written, now, now, notebook_id, owner_id),
-                )
-            else:
-                cursor = connection.execute(
-                    "UPDATE agent_profile_jobs SET status=%s,failure_reason=%s,"
-                    "diagnostic=%s,blocks_written=%s,runs=runs+1,"
-                    "finished_at=%s,updated_at=%s WHERE notebook_id=%s AND owner_id=%s "
-                    "AND status IN ('queued','running')",
-                    (status, failure_reason, diagnostic, written, now, now, notebook_id, owner_id),
-                )
+            cursor = connection.execute(
+                "UPDATE agent_profile_jobs SET status=%s,failure_reason=%s,"
+                "diagnostic=%s,blocks_written=%s,runs=runs+1,"
+                "pending_signal=GREATEST(0, pending_signal - %s),"
+                "finished_at=%s,updated_at=%s WHERE notebook_id=%s AND owner_id=%s "
+                "AND status IN ('queued','running')",
+                (
+                    status, failure_reason, diagnostic, written, taken,
+                    now, now, notebook_id, owner_id,
+                ),
+            )
         return cursor.rowcount == 1
 
     def sweep_stale_on_start(self) -> int:
-        """Startup crash recovery — see the SQLite mirror. Returns the row
-        count swept."""
+        """Startup crash recovery — see the SQLite mirror. The reason text is
+        the shared ``AGENT_PROFILE_RESTART_FAILURE_MESSAGE`` constant, not a
+        literal in this SQL: it is user-facing, and a per-backend copy would
+        drift. Returns the row count swept."""
         now = self.now()
         with self.database.write() as connection:
             cursor = connection.execute(
                 "UPDATE agent_profile_jobs SET status='failed',"
-                "failure_reason='服务重启，整理未完成',finished_at=%s,updated_at=%s "
+                "failure_reason=%s,finished_at=%s,updated_at=%s "
                 "WHERE status IN ('queued','running')",
-                (now, now),
+                (AGENT_PROFILE_RESTART_FAILURE_MESSAGE, now, now),
             )
         return cursor.rowcount

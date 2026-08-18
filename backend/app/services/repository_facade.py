@@ -1058,88 +1058,23 @@ class RepositoryFacade:
         800 万+ 边,每行还要匹配两个端点,不适合挂在线请求上。"""
         return self._runtime.unified_kg.relation_provenance_counts(notebook_id)
 
-    # Agentic Memory P1 (T2) — AgentProfileStore one-hop delegates, same shape
-    # as the unified_kg block above: the facade adds no logic here, only a
-    # stable calling surface. No route/service reads these yet (T3-T6 wire
-    # them up); method names are identical to the store's.
-    def read_blocks(self, notebook_id: str, owner_id: str) -> List[dict]:
-        return self._runtime.agent_profile.read_blocks(notebook_id, owner_id)
+    @property
+    def agent_profile(self):
+        """Agentic Memory P1's per-notebook "understanding" store (T2).
 
-    def read_block(self, notebook_id: str, owner_id: str, label: str):
-        return self._runtime.agent_profile.read_block(notebook_id, owner_id, label)
-
-    def write_block(
-        self,
-        notebook_id: str,
-        owner_id: str,
-        label: str,
-        *,
-        value: str,
-        evidence,
-        expected_revision: int,
-        origin: str,
-        actor: str,
-    ) -> dict:
-        return self._runtime.agent_profile.write_block(
-            notebook_id,
-            owner_id,
-            label,
-            value=value,
-            evidence=evidence,
-            expected_revision=expected_revision,
-            origin=origin,
-            actor=actor,
-        )
-
-    def clear_block(
-        self,
-        notebook_id: str,
-        owner_id: str,
-        label: str,
-        *,
-        expected_revision: int,
-        actor: str,
-    ) -> dict:
-        return self._runtime.agent_profile.clear_block(
-            notebook_id, owner_id, label,
-            expected_revision=expected_revision, actor=actor,
-        )
-
-    def clear_all(self, notebook_id: str, owner_id: str) -> int:
-        return self._runtime.agent_profile.clear_all(notebook_id, owner_id)
-
-    def job_row(self, notebook_id: str, owner_id: str):
-        return self._runtime.agent_profile.job_row(notebook_id, owner_id)
-
-    def bump_signal(self, notebook_id: str, owner_id: str, delta: int = 1) -> int:
-        return self._runtime.agent_profile.bump_signal(notebook_id, owner_id, delta)
-
-    def claim(self, notebook_id: str, owner_id: str) -> bool:
-        return self._runtime.agent_profile.claim(notebook_id, owner_id)
-
-    def settle(
-        self,
-        notebook_id: str,
-        owner_id: str,
-        status: str,
-        *,
-        failure_reason: str = "",
-        diagnostic: str = "",
-        blocks_written: int = 0,
-        reset_signal: bool,
-    ) -> bool:
-        return self._runtime.agent_profile.settle(
-            notebook_id,
-            owner_id,
-            status,
-            failure_reason=failure_reason,
-            diagnostic=diagnostic,
-            blocks_written=blocks_written,
-            reset_signal=reset_signal,
-        )
-
-    def sweep_stale_on_start(self) -> int:
-        return self._runtime.agent_profile.sweep_stale_on_start()
+        One hop to the runtime-owned ``AgentProfileStorePort`` seat, the same
+        shape as ``collection_catalog`` below — deliberately NOT ten flat
+        pass-through methods on the facade. The store's method names
+        (``read_blocks``, ``write_block``, ``claim``, ``settle``, …) are
+        generic enough that flattening them onto a 3000-line facade puts a
+        bare ``claim``/``settle``/``clear_all`` into a namespace shared with
+        every other domain: the next store with a ``claim`` collides silently
+        (Python just keeps the later ``def``), and at a call site
+        ``repository.settle(...)`` says nothing about which subsystem is being
+        settled. Consumers (T3-T6) read
+        ``repository.agent_profile.<method>`` instead.
+        """
+        return self._runtime.agent_profile
 
     @property
     def kg_analysis(self):
