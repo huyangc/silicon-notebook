@@ -1724,6 +1724,16 @@ class ReportEngine:
         chunk_block, chunk_map = deps.evidence_context.chunk_context(
             chunks, notebook_id=notebook_id,
             budget_chars=max(0, chunk_budget - element_reserve))
+        # 报告引用附图(T6):`chunk_context` 只在恰好单元素的 chunk 上填
+        # ctx["element_id"](多元素 chunk——典型是"一段正文 + 一张配图"——被
+        # 跳过),而 `_assemble` 的附图批量装配需要该 chunk 的全部候选
+        # element id。镜像 ask_service 的
+        # `{c.chunk_id: c.element_ids for c in selected}`,就地给 ctx 补一个
+        # 字段;`id_map` 在持久化前整体被丢弃(`s.pop("id_map", None)`,见
+        # `_run_sections` 调用点),不影响 sections 的存储形状。
+        _chunk_element_ids = {chunk.chunk_id: list(chunk.element_ids) for chunk in chunks}
+        for _ctx in chunk_map.values():
+            _ctx["element_ids"] = _chunk_element_ids.get(_ctx.get("object_id", ""), [])
         kg_block, kg_map = knowledge_context_with_outline(
             deps.evidence_context, notebook_id, result.top_hits, sub_outline,
             id_offset=len(chunk_map), budget_chars=kg_budget)
@@ -2737,6 +2747,11 @@ class ReportEngine:
         # --- 全局引用重编号(按具体证据锚点去重,不再把同源不同元素折叠) ---
         references: List[dict] = []
         ref_pos: Dict[str, int] = {}       # dedup key -> 全局 1-based
+        # 报告引用附图(T6):reference key -> 候选 element id 列表,供本函数末尾
+        # 一次性批量附图(`attach_reference_images`)。只在**首次**创建某条
+        # reference 时写入(见下面 `_sub` 闭包),同一 dk 的后续命中复用同一条
+        # reference,不会重复计入候选。
+        reference_image_candidates: Dict[str, List[str]] = {}
         corpus_profile = dict(intent_contract.get("corpus_profile") or {})
         citation_source_ids = list(dict.fromkeys(
             str(ctx.get("source_id") or "")
@@ -2845,8 +2860,9 @@ class ReportEngine:
                     dk = _dk(ctx)
                     if dk not in ref_pos:
                         ref_pos[dk] = len(references) + 1
+                        _ref_key = f"k{ref_pos[dk]}"
                         references.append({
-                            "key": f"k{ref_pos[dk]}",
+                            "key": _ref_key,
                             "object_id": str(ctx.get("object_id") or ""),
                             "object_type": str(ctx.get("object_type") or ""),
                             "label": _label(ctx),
@@ -2869,12 +2885,39 @@ class ReportEngine:
                             "from_reference_library": _from_reference_library(ctx),
                             "provenance": dict(ctx.get("provenance") or {}),
                         })
+                        # 报告引用附图(T6):候选 = 自身 element_id ∪ chunk 的
+                        # 完整 element_ids(多元素 chunk 只看 element_id 会漏掉
+                        # 同 chunk 里的配图,见上面 `_draft_section` 对
+                        # chunk_map 的补写)。element/KG/relation ctx 没有
+                        # "element_ids" 键,`.get(..., ())` 安全回退空;
+                        # memory ctx 没有 "element_id" 键,天然不产生候选,
+                        # 不需要像 `attach_citation_images` 那样显式排除
+                        # memory_id(报告的 ctx dict 里压根没有这个概念)。
+                        _image_candidates = {str(ctx.get("element_id") or "")}
+                        _image_candidates.update(
+                            str(eid) for eid in (ctx.get("element_ids") or ())
+                            if eid
+                        )
+                        _image_candidates.discard("")
+                        if _image_candidates:
+                            reference_image_candidates[_ref_key] = sorted(
+                                _image_candidates
+                            )
                     _gk = f"k{ref_pos[dk]}"
                     if _gk not in out_keys:
                         out_keys.append(_gk)
                 return ("[" + ", ".join(out_keys) + "]") if out_keys else ""
 
             remapped[si] = _MARKER.sub(_sub, s.get("markdown") or "")
+
+        # 报告引用附图(T6):全报告**一次**批量附图,预算按 references 最终的
+        # "k1, k2, …" 全局顺序消费(见 `attach_reference_images` docstring)。
+        # 必须在上面的 section 循环结束、`references` 已经是终态之后才调用——
+        # 拆到循环内部按节各调一次,会把"一份报告一次批量点查"变成"每节一次"。
+        if reference_image_candidates:
+            self.dependencies.evidence_context.attach_reference_images(
+                references, reference_image_candidates
+            )
 
         # --- 覆盖度信号:库内证据不足 + 必答主题缺口 + 跨节矛盾。 ---
         # 报告体例要求正文不堆砌诊断,这些信号统一落在结尾局限与 gaps 数据。
