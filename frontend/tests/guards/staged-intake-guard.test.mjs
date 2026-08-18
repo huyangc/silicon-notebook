@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import ts from "typescript";
 
 import {
+  assignmentsIn,
   callSitesIn,
   findFunctionIn,
   ifConditionsIn,
@@ -233,4 +234,49 @@ test("弹窗的两个关闭入口（× 与点遮罩）走同一个 handler，且
   const targets = callSitesIn(close).map((call) => call.target);
   assert.ok(targets.includes("cancelBundleChoice"), "closeSourceModal 必须结清挂起的勾选 resolver");
   assert.ok(targets.includes("resetStagedIntake"), "closeSourceModal 必须清空暂存态");
+});
+
+// 评审 F2：用户关弹窗（resetStagedIntake）或切库（openNotebook）之后，还在飞的
+// zip/文件夹解包链完成时不得把已取消的批次复活进（可能已属于另一个笔记本的）
+// 暂存列表。bundleIntakeGenerationRef 是这条契约的世代计数器——两个清理路径各自
+// 递增，每条异步链在自己起跑那一刻捕获当前世代，落盘前重新比对。
+
+test("世代计数器在两个清理路径（关弹窗/清空/上传成功、切库）各自递增", () => {
+  const reset = findFunctionIn(page, "Home", "resetStagedIntake");
+  assert.ok(
+    assignmentsIn(reset).some(
+      (a) => a.target === "bundleIntakeGenerationRef.current" && a.operator === "+=",
+    ),
+    "resetStagedIntake 必须递增 bundleIntakeGenerationRef：它是关弹窗/清空/上传成功/"
+      + "新建笔记本共用的统一清空点，不递增就等于让这条契约名存实亡",
+  );
+
+  const open = findFunctionIn(page, "Home", "openNotebook");
+  assert.ok(
+    assignmentsIn(open).some(
+      (a) => a.target === "bundleIntakeGenerationRef.current" && a.operator === "+=",
+    ),
+    "openNotebook（切库）同样是暂存批次的清理路径，必须递增同一个世代计数器，"
+      + "否则旧库还在飞的解包链完成时会把结果写进新库打开的弹窗",
+  );
+});
+
+test("每条异步 bundle 链在落盘（入列/写回执/跳过记录）前都比对世代", () => {
+  const guarded = [
+    "stageIncomingFilesSync",
+    "ingestZipFile",
+    "ingestDroppedDirectory",
+    "handleBundleFiles",
+    "stageBundleCandidates",
+  ];
+  for (const name of guarded) {
+    const fn = findFunctionIn(page, "Home", name);
+    const conditions = ifConditionsIn(fn);
+    assert.ok(
+      conditions.some((condition) => condition.includes("bundleIntakeGenerationRef.current")),
+      `${name} 必须在写 updateStaged/setBundleReceipts/appendStagedSkipped 之前比对`
+        + " bundleIntakeGenerationRef：世代已变说明用户已经取消/切库，整条链的结果"
+        + "（含回执）必须静默丢弃，而不是把已取消的文件复活进当前弹窗",
+    );
+  }
 });

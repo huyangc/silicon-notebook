@@ -976,6 +976,10 @@ export default function Home() {
     files: BundleFile[];
     candidates: BundleFile[];
     selected: Set<string>;
+    // 这个勾选面板所属那条异步链在起跑时捕获的世代——confirmBundleChoice 落盘
+    // 时要拿它去比对 bundleIntakeGenerationRef，而不是比对"确认那一刻"的世代
+    // （两者通常相同，但保持「捕获于链起点」的统一语义，见 bundleIntakeGenerationRef）。
+    generation: number;
   } | null>(null);
   // 一批里的多个 zip/文件夹按到达顺序串行处理（见 ingestBundleSources）；命中「多个
   // markdown 需勾选」时，本 resolver 是让串行循环等到用户确认/取消才继续处理下一个
@@ -990,6 +994,13 @@ export default function Home() {
   // 用户主动关闭「添加来源」弹窗后，还在飞的解包链完成时不得把弹窗强行弹回来。
   // 重新打开弹窗时清零。
   const sourceModalDismissedRef = useRef(false);
+  // 暂存批次的世代计数器：resetStagedIntake()（关弹窗/清空/上传成功/新建笔记本）
+  // 与 openNotebook()（切换笔记本）各自 ++。zip/文件夹解包这类异步链在自己
+  // "起跑"那一刻捕获当前世代；写回暂存列表/回执/跳过记录（落盘）前重新比对，
+  // 世代已变说明这批数据在链跑的这段时间里被用户取消或随切库作废，整条链的
+  // 结果必须整体静默丢弃（含回执）——不能把已取消的文件复活进当前弹窗。
+  // `sourceModalDismissedRef` 只挡弹窗重新弹出这一件事，挡不住数据本身被写回。
+  const bundleIntakeGenerationRef = useRef(0);
   // 压缩包/文件夹图片配对回执：每个成功入列的 md 一条，弹窗内持久显示，直至弹窗重置
   // （关闭/清空/上传成功）——对齐「被跳过文件逐条持久列出、不许只发即逝 toast」的
   // 既有红线（stagedSkipped 同一精神，这里是配对细节，独立一块面板，见
@@ -3092,6 +3103,9 @@ export default function Home() {
     setHighlightedElementId("");
     const workspaceEpoch = ++workspaceEpochRef.current;
     sourcePageRequestRef.current += 1;
+    // 切库同样是暂存批次的清理路径:上一个库里还在飞的 zip/文件夹解包链落盘时
+    // 必须整条丢弃,不能把它的结果写进(可能已经属于)新库的「添加来源」弹窗。
+    bundleIntakeGenerationRef.current += 1;
     setSessionLoading(true);
     try {
       askRunEpochRef.current += 1;
@@ -3389,8 +3403,11 @@ export default function Home() {
     setSourceModalOpen(true);
   }
 
-  /** 弹窗内所有暂存态的统一清空点（新建笔记本 / 关闭弹窗 / 清空 / 上传成功共用）。 */
+  /** 弹窗内所有暂存态的统一清空点（新建笔记本 / 关闭弹窗 / 清空 / 上传成功共用）。
+   *  世代先 ++ 再清空：还在飞的异步解包链此后落盘时一律比对失败、整条结果丢弃
+   *  （见 bundleIntakeGenerationRef）。 */
   function resetStagedIntake() {
+    bundleIntakeGenerationRef.current += 1;
     updateStaged(emptyStagedList());
     setStagedSkipped([]);
     setBundleReceipts([]);
@@ -3415,8 +3432,18 @@ export default function Home() {
   // 合并从 stagedRef.current 起算并经 updateStaged 一次性写回：三条并行数组的等长
   // 不变量在 mergeStagedFiles 里维护，跨 await 的异步链不会再读到发起那一刻的旧闭包
   // （旧形态下 pdf + zip 同批时 pdf 会被 zip 的入列静默覆盖掉）。
-  function stageIncomingFilesSync(all: File[]): { added: File[]; skipped: SkippedStagedFile[]; duplicates: File[]; bundles: File[] } {
+  //
+  // `expectedGeneration`：调用方是异步链（文件夹遍历/压缩包解包）时传入它在自己
+  // 起跑那一刻捕获的世代；直接由用户操作触发（文件选择器/拖放普通文件）时省略——
+  // 那类调用本身就在当前世代，无需检查。世代已变（用户取消/切库）时整批结果连同
+  // 跳过记录一起静默丢弃，不落盘、不弹窗（评审 F2）。
+  function stageIncomingFilesSync(
+    all: File[], expectedGeneration?: number,
+  ): { added: File[]; skipped: SkippedStagedFile[]; duplicates: File[]; bundles: File[] } {
     if (all.length === 0) return { added: [], skipped: [], duplicates: [], bundles: [] };
+    if (expectedGeneration !== undefined && expectedGeneration !== bundleIntakeGenerationRef.current) {
+      return { added: [], skipped: [], duplicates: [], bundles: [] };
+    }
     const { accepted: picked, skipped, bundles } = classifyStagedFiles(all, {
       supportedExtensions: supportedSourceExtensions,
       legacyOfficeExtensions: LEGACY_OFFICE_EXTENSIONS,
@@ -3441,9 +3468,11 @@ export default function Home() {
   }
 
   /** 入列 + 串行解包其中的 zip。调用方必须 `await` 或 `.catch(reportError)`——
-   *  丢掉这个 promise 就等于丢掉整条链的错误出口（以及嵌套链的忙碌位归属）。 */
-  async function stageIncomingFiles(all: File[]): Promise<void> {
-    const { bundles } = stageIncomingFilesSync(all);
+   *  丢掉这个 promise 就等于丢掉整条链的错误出口（以及嵌套链的忙碌位归属）。
+   *  `expectedGeneration` 原样透传给 `stageIncomingFilesSync`（见其上方注释）；
+   *  其中的 zip 各自作为独立异步链、在自己起跑时重新捕获世代，不继承这个参数。 */
+  async function stageIncomingFiles(all: File[], expectedGeneration?: number): Promise<void> {
+    const { bundles } = stageIncomingFilesSync(all, expectedGeneration);
     if (bundles.length > 0) await ingestBundleSources(bundles);
   }
 
@@ -3566,17 +3595,23 @@ export default function Home() {
   }
 
   async function ingestZipFile(file: File) {
+    // 这条链自己的世代：起跑那一刻捕获，解压这段真实 I/O 跑完后重新比对
+    // bundleIntakeGenerationRef——不等就说明用户在解压期间取消/切库了，整条
+    // 结果（含跳过记录）静默丢弃，不落盘（评审 F2）。
+    const generation = bundleIntakeGenerationRef.current;
     pushBundleBusy("解析压缩包…");
     try {
       const result = await unpackZipFile(file, bundleCapsFrom(sourceUploadMaxBytes));
+      if (generation !== bundleIntakeGenerationRef.current) return;
       if (!result.ok) {
         appendStagedSkipped([{ name: file.name, reason: bundleErrorMessage(result.error) }]);
         return;
       }
-      await handleBundleFiles(file.name, result.files);
+      await handleBundleFiles(file.name, result.files, generation);
     } catch {
       // 读字节/解包本身抛异常（条目已被移动、权限变化、内存不足…）：这一个压缩包
       // 当作没进来，逐条留痕而不是让整条链带着一个未处理 rejection 静默死掉。
+      if (generation !== bundleIntakeGenerationRef.current) return;
       appendStagedSkipped([{ name: file.name, reason: BUNDLE_READ_FAILED_REASON }]);
     } finally {
       popBundleBusy();
@@ -3587,6 +3622,9 @@ export default function Home() {
   // markdown 时保持既有拖拽行为——文件夹里的文件按普通文件逐个入列，走常规的
   // 类型/大小/批量校验（红线：不含 md 的文件夹不能回归成「拖了没反应」）。
   async function ingestDroppedDirectory(entry: FileSystemDirectoryEntry) {
+    // 同上：这条链自己的世代，遍历/读字节这段真实 I/O 之后重新比对再决定是否
+    // 落盘（评审 F2）。
+    const generation = bundleIntakeGenerationRef.current;
     pushBundleBusy("读取文件夹…");
     try {
       // 总字节预算是**零 I/O** 预检：只累加条目的 File.size 元数据，超限就地止损，
@@ -3595,6 +3633,7 @@ export default function Home() {
       const { entries, truncated, overBudget } = await collectDirectoryFiles(entry, {
         maxTotalBytes: totalLimit,
       });
+      if (generation !== bundleIntakeGenerationRef.current) return;
       if (truncated) {
         appendStagedSkipped([{ name: entry.name, reason: directoryTruncatedMessage() }]);
         return;
@@ -3611,14 +3650,16 @@ export default function Home() {
       if (!directoryHasMarkdown(entries)) {
         // 必须 await：文件夹里可能还夹着 zip，那条嵌套链要在本帧的忙碌位释放**之前**
         // 跑完，否则入口会提前恢复可用、让用户拖进第二个包去覆盖还没确认的勾选。
-        await stageIncomingFiles(entries.map((item) => item.file));
+        await stageIncomingFiles(entries.map((item) => item.file), generation);
         return;
       }
       replaceBundleBusy("读取文件夹图片…");
       const bundleFiles = await readDirectoryAsBundleFiles(entries);
-      await handleBundleFiles(entry.name, bundleFiles);
+      if (generation !== bundleIntakeGenerationRef.current) return;
+      await handleBundleFiles(entry.name, bundleFiles, generation);
     } catch {
       // 遍历/读字节失败：同上，整个文件夹当作没进来并留痕。
+      if (generation !== bundleIntakeGenerationRef.current) return;
       appendStagedSkipped([{ name: entry.name, reason: DIRECTORY_READ_FAILED_REASON }]);
     } finally {
       popBundleBusy();
@@ -3627,14 +3668,18 @@ export default function Home() {
 
   // 虚拟文件集（zip 解包或文件夹遍历产出）→ 按 markdown 数量分派：零个报错、一个
   // 直接处理、多个弹出勾选并挂起，直到用户确认/取消（设计文档 §3.1 第 2 条）。
-  async function handleBundleFiles(label: string, files: BundleFile[]) {
+  // `generation` 是调用方（ingestZipFile/ingestDroppedDirectory）自己那条链起跑
+  // 时捕获的世代——这里是同一条链的延续,不重新捕获。世代已变(用户取消/切库)
+  // 就整体不落盘,连"多个 markdown 需勾选"的弹窗都不弹出(评审 F2)。
+  async function handleBundleFiles(label: string, files: BundleFile[], generation: number) {
+    if (generation !== bundleIntakeGenerationRef.current) return;
     const classification = classifyBundleContents(files);
     if (classification.kind === "empty") {
       appendStagedSkipped([{ name: label, reason: NO_MARKDOWN_IN_BUNDLE_REASON }]);
       return;
     }
     if (classification.kind === "single") {
-      stageBundleCandidates(label, [classification.file], files);
+      stageBundleCandidates(label, [classification.file], files, generation);
       return;
     }
     // 同一时刻只允许存在一个挂起的 resolver。走到这里说明上一条链的 resolver 还没
@@ -3653,6 +3698,7 @@ export default function Home() {
         files,
         candidates: classification.candidates,
         selected: new Set(classification.candidates.map((item) => item.path)),
+        generation,
       });
       // 勾选等待不是「正在解析」：清掉忙碌文案（栈本身保持不变，链仍持有这一帧），
       // 让 sourceFilePickerHint 的「请先在下方选择要添加的 Markdown 文件」那一支真正
@@ -3670,7 +3716,15 @@ export default function Home() {
   // 是因为一条回执若在文件其实没进列表时仍写着「3 张已内联」，就是在伪装成功——
   // 被拒（内联后超限）、被去重、被单次上限挡下的那几份必须带上「未加入待上传列表」
   // 及其原因。
-  function stageBundleCandidates(bundleLabel: string, candidates: BundleFile[], files: BundleFile[]) {
+  //
+  // `generation`：所属那条异步链起跑时捕获的世代（`confirmBundleChoice` 传的是
+  // 挂起面板自己那份，`handleBundleFiles` 单文件分支直接透传）。本函数体全程
+  // 同步、无 await，所以在入口比对一次就覆盖了下面全部落盘点（含跳过记录/入列/
+  // 回执）——世代已变即整体不落盘（评审 F2）。
+  function stageBundleCandidates(
+    bundleLabel: string, candidates: BundleFile[], files: BundleFile[], generation: number,
+  ) {
+    if (generation !== bundleIntakeGenerationRef.current) return;
     // 同批同名 md 的消歧命名（a/README.md 与 b/README.md）：不消歧会被待上传列表的
     // 「同名同大小」去重静默折叠成一份。
     const names = bundleFileNamesFor(candidates.map((item) => item.path));
@@ -3781,13 +3835,17 @@ export default function Home() {
 
   function confirmBundleChoice() {
     if (!bundleChoice) return;
-    const { label, files, candidates, selected } = bundleChoice;
+    const { label, files, candidates, selected, generation } = bundleChoice;
     setBundleChoice(null);
     // 与 setBundleChoice(null) 同一个事件处理里把进行态文案恢复回来（下面还要内联、
     // 还可能接着处理同批的下一个包）：留给 await 之后再恢复会空出一帧「既没有勾选
     // 面板、也没有进行态」的可点窗口。
     syncBundleBusyLabel();
-    stageBundleCandidates(label, candidates.filter((item) => selected.has(item.path)), files);
+    // generation 是这个面板所属链起跑时捕获的那份，不是"现在"——传给
+    // stageBundleCandidates 让它按同一条链的世代把关（评审 F2）。
+    stageBundleCandidates(
+      label, candidates.filter((item) => selected.has(item.path)), files, generation,
+    );
     bundleChoiceResolveRef.current?.();
     bundleChoiceResolveRef.current = null;
   }
