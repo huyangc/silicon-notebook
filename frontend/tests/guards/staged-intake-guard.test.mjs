@@ -276,6 +276,22 @@ test("openNotebook 结清挂起的 bundleChoice 勾选（不只是递增世代�
   );
 });
 
+test("resetStagedIntake 结清挂起的 bundleChoice 勾选（不只是递增世代）", () => {
+  // codex #518 R4 P2：resetStagedIntake 是「清空」「上传成功」等入口**直接**调用的
+  // 统一清空点（不像 openNotebook 有自己单独的 cancelBundleChoice 调用）。只递增
+  // 世代同样挡不住已经挂起的勾选面板——用户点确认时 stageBundleCandidates 会拿它
+  // 捕获的旧世代去比对，把这次确认静默丢弃，面板却还悬在弹窗里看不出发生了什么。
+  // 结构性不变量：两个递增 bundleIntakeGenerationRef 的路径（本函数、openNotebook）
+  // 都必须调用 cancelBundleChoice。
+  const reset = findFunctionIn(page, "Home", "resetStagedIntake");
+  const targets = callSitesIn(reset).map((call) => call.target);
+  assert.ok(
+    targets.includes("cancelBundleChoice"),
+    "resetStagedIntake 必须调用 cancelBundleChoice，否则「清空」「上传成功」这类"
+      + "只调用它、不额外调 cancelBundleChoice 的入口会把用户刚做的勾选静默丢弃",
+  );
+});
+
 test("每条异步 bundle 链在落盘（入列/写回执/跳过记录）前都比对世代", () => {
   const guarded = [
     "stageIncomingFilesSync",
