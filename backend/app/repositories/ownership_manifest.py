@@ -808,6 +808,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.add_url_sources', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.agent_memory_hits', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.agent_profile', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.agent_profile_jobs', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.all_visible_source_ids', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.answer_memory_links', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.answer_memory_source', kind='attribute', target='_runtime'),
@@ -1197,6 +1198,26 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.search_agent_memory.load', kind='attribute', target='agent_memory_hits'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='agent_profile',
+        owner='RepositoryRuntime.agent_profile',
+        kind='property',
+        consumers=(
+            ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>._profile_store', kind='attribute', target='agent_profile'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='agent_profile_jobs',
+        owner='RepositoryRuntime.agent_profile_jobs',
+        kind='property',
+        consumers=(
+            ConsumerSite(path='backend/app/api/agent_profile_routes.py', scope='<module>.rebuild_understanding', kind='attribute', target='agent_profile_jobs'),
         ),
         patches=(
         ),

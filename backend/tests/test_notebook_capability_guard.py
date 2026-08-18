@@ -61,6 +61,11 @@ def test_notebook_capability_allowed_rejects_unknown_capability():
 #: 各有理由(见 deps.py 的表上注释):删库爆炸半径太大且 owner 无法撤销;
 #: notebook:configure(挂载配置 + 链接分享)不随内容管理权转移(P2-T2 评审 P0);
 #: reports:write 目前没有任何消费点,留给它真正长出消费点的那次改动去决定档位。
+#:
+#: agent_profile:write(Agentic Memory P1-T6 的「共享底座」写)是内容写,与
+#: knowhow:write 同格 —— 理解块是这本库被用出来的内容,库主事后照样能改掉/清空它
+#: (不是授予他人的持久授权,也不是挂载配置或删库),所以它属于 P2-1 点名的那一族,
+#: 取 "admin"。它不新增第三档。
 EXPECTED_CAPABILITY_LEVELS = {
     "sources:write": "admin",
     "kg:write": "admin",
@@ -71,6 +76,7 @@ EXPECTED_CAPABILITY_LEVELS = {
     "notebook:manage": "admin",
     "notebook:configure": "owner",
     "notebook:delete": "owner",
+    "agent_profile:write": "admin",
 }
 
 

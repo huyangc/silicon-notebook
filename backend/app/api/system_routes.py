@@ -121,6 +121,7 @@ def system_configuration(
         source_image_max_bytes=settings.mineru_max_image_bytes,
         source_image_max_per_source=settings.mineru_max_images_per_source,
         source_images_enabled=settings.mineru_return_images,
+        agent_profile_enabled=settings.agent_profile_enabled,
     )
 
 

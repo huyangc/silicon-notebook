@@ -2626,6 +2626,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.agent_profile_jobs",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.all_visible_source_ids",
         "target": "_runtime"
       },
@@ -4561,6 +4567,36 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, user_id: 'str', notebook_id: 'str', query: 'str', include_candidates: 'bool', limit: 'int' = 8) -> 'list'"
+  },
+  "agent_profile": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/agent_profile_routes.py",
+        "scope": "<module>._profile_store",
+        "target": "agent_profile"
+      }
+    ],
+    "kind": "property",
+    "owner": "RepositoryRuntime.agent_profile",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self)"
+  },
+  "agent_profile_jobs": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/agent_profile_routes.py",
+        "scope": "<module>.rebuild_understanding",
+        "target": "agent_profile_jobs"
+      }
+    ],
+    "kind": "property",
+    "owner": "RepositoryRuntime.agent_profile_jobs",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self)"
   },
   "all_visible_source_ids": {
     "consumers": [

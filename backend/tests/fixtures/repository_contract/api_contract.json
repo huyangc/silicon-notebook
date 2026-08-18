@@ -9579,6 +9579,10 @@
           "additionalProperties": false,
           "description": "Non-sensitive, authenticated configuration required by the web client.",
           "properties": {
+            "agent_profile_enabled": {
+              "title": "Agent Profile Enabled",
+              "type": "boolean"
+            },
             "parser_engines": {
               "items": {
                 "$ref": "#/components/schemas/ParserEngineCapability"
@@ -9640,7 +9644,8 @@
             "user_activity_view_enabled",
             "source_image_max_bytes",
             "source_image_max_per_source",
-            "source_images_enabled"
+            "source_images_enabled",
+            "agent_profile_enabled"
           ],
           "title": "SystemConfiguration",
           "type": "object"
@@ -9887,6 +9892,204 @@
             "ui_mode"
           ],
           "title": "UiModeUpdate",
+          "type": "object"
+        },
+        "UnderstandingBlockOut": {
+          "additionalProperties": false,
+          "description": "One block row, projected for display/edit. ``evidence`` rides through\nas-is (its shape differs by label and by which chain wrote it — see\n``agent_profile_job.py``'s base/overlay writers — so this stays a bare\nlist rather than a typed union the browser has no use for).",
+          "properties": {
+            "evidence": {
+              "items": {},
+              "title": "Evidence",
+              "type": "array"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            },
+            "updated_origin": {
+              "title": "Updated Origin",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "value",
+            "revision",
+            "updated_at",
+            "updated_origin"
+          ],
+          "title": "UnderstandingBlockOut",
+          "type": "object"
+        },
+        "UnderstandingBlockUpdate": {
+          "additionalProperties": false,
+          "description": "``PUT /notebooks/{id}/understanding/{label}`` body. ``expected_revision``\nis required (not defaulted to 0) so a caller cannot accidentally CAS-create\nover a row it never read; ``0`` is still legal — it is exactly what a\ncaller creating the row for the first time is expected to send.",
+          "properties": {
+            "expected_revision": {
+              "minimum": 0.0,
+              "title": "Expected Revision",
+              "type": "integer"
+            },
+            "scope": {
+              "enum": [
+                "shared",
+                "mine"
+              ],
+              "title": "Scope",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope",
+            "value",
+            "expected_revision"
+          ],
+          "title": "UnderstandingBlockUpdate",
+          "type": "object"
+        },
+        "UnderstandingJobStatus": {
+          "additionalProperties": false,
+          "description": "One consolidation chain's pollable status. Never the store's internal\n``diagnostic`` column — that one is documented as never reaching a\nscreen (``AgentProfileOutputRejected`` / store docstrings).",
+          "properties": {
+            "failure_reason": {
+              "title": "Failure Reason",
+              "type": "string"
+            },
+            "pending": {
+              "title": "Pending",
+              "type": "integer"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "pending",
+            "updated_at",
+            "failure_reason"
+          ],
+          "title": "UnderstandingJobStatus",
+          "type": "object"
+        },
+        "UnderstandingJobs": {
+          "additionalProperties": false,
+          "description": "Both chains' status in one shot: the shared base and the caller's own\noverlay. Either side is ``None`` when that chain has never been claimed\n(no job row yet) — a normal cold-start state, not an error.",
+          "properties": {
+            "base": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UnderstandingJobStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mine": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UnderstandingJobStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "UnderstandingJobs",
+          "type": "object"
+        },
+        "UnderstandingRebuildRequest": {
+          "additionalProperties": false,
+          "description": "``POST /notebooks/{id}/understanding/rebuild`` body.",
+          "properties": {
+            "scope": {
+              "enum": [
+                "shared",
+                "mine"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope"
+          ],
+          "title": "UnderstandingRebuildRequest",
+          "type": "object"
+        },
+        "UnderstandingRebuildResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "started": {
+              "title": "Started",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "started"
+          ],
+          "title": "UnderstandingRebuildResponse",
+          "type": "object"
+        },
+        "UnderstandingResponse": {
+          "additionalProperties": false,
+          "description": "``GET /notebooks/{id}/understanding``. ``enabled=false`` (the total\nkill switch, or the deployment simply never wired a profile store) always\ncarries empty lists and an empty ``job`` rather than 404 — the panel\nneeds to tell \"off\" apart from \"on but nothing written yet\".",
+          "properties": {
+            "base": {
+              "items": {
+                "$ref": "#/components/schemas/UnderstandingBlockOut"
+              },
+              "title": "Base",
+              "type": "array"
+            },
+            "can_edit_base": {
+              "title": "Can Edit Base",
+              "type": "boolean"
+            },
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean"
+            },
+            "job": {
+              "$ref": "#/components/schemas/UnderstandingJobs"
+            },
+            "mine": {
+              "items": {
+                "$ref": "#/components/schemas/UnderstandingBlockOut"
+              },
+              "title": "Mine",
+              "type": "array"
+            }
+          },
+          "required": [
+            "enabled",
+            "can_edit_base"
+          ],
+          "title": "UnderstandingResponse",
           "type": "object"
         },
         "UnifiedKgStatus": {
@@ -20274,6 +20477,207 @@
             }
           },
           "summary": "Set Notebook Tier"
+        }
+      },
+      "/api/notebooks/{notebook_id}/understanding": {
+        "get": {
+          "operationId": "get_understanding_api_notebooks__notebook_id__understanding_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UnderstandingResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Understanding"
+        }
+      },
+      "/api/notebooks/{notebook_id}/understanding/rebuild": {
+        "post": {
+          "operationId": "rebuild_understanding_api_notebooks__notebook_id__understanding_rebuild_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnderstandingRebuildRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UnderstandingRebuildResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Rebuild Understanding"
+        }
+      },
+      "/api/notebooks/{notebook_id}/understanding/{label}": {
+        "delete": {
+          "operationId": "clear_understanding_block_api_notebooks__notebook_id__understanding__label__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "label",
+              "required": true,
+              "schema": {
+                "title": "Label",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "scope",
+              "required": true,
+              "schema": {
+                "title": "Scope",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UnderstandingBlockOut"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Clear Understanding Block"
+        },
+        "put": {
+          "operationId": "update_understanding_block_api_notebooks__notebook_id__understanding__label__put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "label",
+              "required": true,
+              "schema": {
+                "title": "Label",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnderstandingBlockUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UnderstandingBlockOut"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Understanding Block"
         }
       },
       "/api/notebooks/{notebook_id}/unified-kg": {

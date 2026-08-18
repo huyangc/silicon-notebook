@@ -1100,6 +1100,18 @@ class RepositoryFacade:
         """
         return self._runtime.command_catalog
 
+    @property
+    def agent_profile_jobs(self):
+        """Agentic Memory P1 的巡固触发 service(T4/T5)——一跳委托到中性 runtime 上的
+        那**一个**实例,与 ``command_catalog`` 同一条理由:它只吃端口/可调用,自己不
+        import 任何后端;单例是语义要求(阈值闸与单飞落在持久行上,来源管线的 hook、
+        Ask/报告完成的通知与 T6 手动重建按钮必须共用同一条 claim→submit 路径,分身
+        即两套账)。T6 是这个 facade 属性唯一的消费方——其余触发点（source_ingestion、
+        ask_execution、report_engine）已经持有 runtime 自己的 ``self.agent_profile_jobs``,
+        不需要绕这一跳。
+        """
+        return self._runtime.agent_profile_jobs
+
 
 
 
