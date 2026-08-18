@@ -31,6 +31,7 @@ import {
 const panel = await parseModule("agent-profile-panel.tsx");
 const api = await parseModule("../features/agent-profile/profile-api.ts");
 const model = await parseModule("../features/agent-profile/profile-model.ts");
+const page = await parseModule("page.tsx");
 
 const API_MODULE = "../features/agent-profile/profile-api.ts";
 const MODEL_MODULE = "../features/agent-profile/profile-model.ts";
@@ -192,5 +193,23 @@ test("面板只经 profile-api 发请求：不拼 URL、不碰 api-client、不�
   assert.ok(
     importsIn(api).some((item) => item.module.includes("api-client")),
     "profile-api 没有经 api-client 发请求",
+  );
+});
+
+// —— ④ 切库结构性保险 ——————————————————————————————————————————————————
+//
+// page.tsx 关弹窗的 effect(`useEffect(() => setUnderstandingOpen(false), [currentNotebookId])`)
+// 是第二层保险,不是本条守卫的对象——effect 跑在渲染**之后**,`AgentProfilePanel` 在
+// 那之前会先用新的 `notebookId` 重渲染一次,草稿/忙碌位/确认态这时还是旧库的。
+// `key={currentNotebookId}` 让组件随切库**立即整体重挂**,状态清零与 prop 变化同一次
+// 渲染完成,不必等 effect 追上来。判据用 JSX 绑定文本,不含行号——挪动这行不该报红。
+test("AgentProfilePanel 随 currentNotebookId 整体重挂（key，不只靠关弹窗 effect）", () => {
+  const matched = jsxElements(page, "AgentProfilePanel");
+  assert.ok(matched.length > 0, "没找到 AgentProfilePanel 挂载点（改名或删除？守卫失效）");
+  const offenders = matched.filter((element) => element.bindings?.key !== "currentNotebookId");
+  assert.deepEqual(
+    offenders.map((element) => element.scope),
+    [],
+    "AgentProfilePanel 缺 key={currentNotebookId} —— 切库时状态可能残留到下一个库",
   );
 });

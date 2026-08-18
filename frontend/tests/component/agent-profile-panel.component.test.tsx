@@ -118,6 +118,23 @@ test("编辑保存：带读回来的 expected_revision，成功后重取", async
   await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
 });
 
+test("编辑保存：已经写过的块带的是服务端读回来的 revision（不是恒 0）", async () => {
+  const user = userEvent.setup();
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  // "怎么查更容易找到" 对应的 mine 块由 response() 给出,revision 是 block() 的默认值 4。
+  const field = await screen.findByRole("textbox", { name: "怎么查更容易找到" });
+  await user.type(field, "补一句");
+  await user.click(within(field.closest(".item") as HTMLElement).getByRole("button", { name: "保存" }));
+
+  await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1));
+  expect(mockSave).toHaveBeenCalledWith("nb1", "retrieval_notes", {
+    scope: "mine",
+    value: "先写型号再问问题补一句",
+    expected_revision: 4,
+  });
+});
+
 test("没改动时保存禁用（不发一次什么都没变的写请求）", async () => {
   render(<AgentProfilePanel notebookId="nb1" />);
   const field = await screen.findByRole("textbox", { name: "这个库大致是什么" });
@@ -220,6 +237,23 @@ test("服务端说还在跑时：一打开面板按钮就是「整理中…」�
   }
 });
 
+test("卸载面板：清理轮询定时器，之后 advanceTimersByTime 不再新增 fetch 调用", async () => {
+  vi.useFakeTimers();
+  try {
+    const running = { status: "running", pending: 1, updated_at: "", failure_reason: "" };
+    mockFetch.mockResolvedValue(response({ job: { base: running, mine: null } }));
+    const { unmount } = render(<AgentProfilePanel notebookId="nb1" />);
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "整理中…" })).toBeDisabled());
+
+    const callsBeforeUnmount = mockFetch.mock.calls.length;
+    unmount();
+    await vi.advanceTimersByTimeAsync(4000 * 5);
+    expect(mockFetch.mock.calls.length).toBe(callsBeforeUnmount);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("轮询超过尝试上限：停轮询并给中性文案，不宣布结局", async () => {
   vi.useFakeTimers();
   try {
@@ -255,20 +289,107 @@ test("上次整理失败的原因照实上屏（后端刻意写给用户的那�
   expect(await screen.findByText(/服务重启，整理未完成/)).toBeInTheDocument();
 });
 
-test("保存撞 409：后端那句人话原样上屏，并重取一次拿到新的 revision", async () => {
+test("保存撞 409：后端那句人话原样上屏，重取后出现陈旧草稿警示，第二次保存带刷新后的 revision", async () => {
   const user = userEvent.setup();
-  mockSave.mockRejectedValue(humanizedError("这段理解刚被更新过，请刷新后再改", 409));
+  mockSave.mockRejectedValueOnce(humanizedError("这段理解刚被更新过，请刷新后再改", 409));
+  // 第一次 fetch 是挂载时的初始读;第二次是失败后的重取 —— 重取到的是"已经被
+  // 别处改过"的新版本:revision 前进,内容也变了。
+  mockFetch.mockResolvedValueOnce(response());
+  mockFetch.mockResolvedValueOnce(
+    response({ mine: [block("retrieval_notes", "别人整理过的新内容", 6)] }),
+  );
   render(<AgentProfilePanel notebookId="nb1" />);
 
   const field = await screen.findByRole("textbox", { name: "怎么查更容易找到" });
   await user.type(field, "补一句");
-  await user.click(within(field.closest(".item") as HTMLElement).getByRole("button", { name: "保存" }));
+  const item = field.closest(".item") as HTMLElement;
+  await user.click(within(item).getByRole("button", { name: "保存" }));
 
   expect(await screen.findByText("这段理解刚被更新过，请刷新后再改")).toBeInTheDocument();
   // 重取:不重取的话用户手里还是旧 revision,再点保存只会撞同一堵墙。
   await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
   // 写了一半的字不该被一次冲突吃掉。
   expect(screen.getByRole("textbox", { name: "怎么查更容易找到" })).toHaveValue("先写型号再问问题补一句");
+  // 陈旧草稿的显式冲突出口:警示行,不是静默保留也不是静默覆盖。
+  expect(within(item).getByRole("alert")).toHaveTextContent("内容刚被重新整理过");
+
+  // 保存按钮仍可用 —— 这时点下去是一次知情覆盖,第二次提交必须带刷新后的 revision,
+  // 不能沿用第一次那份已经作废的 4。
+  mockSave.mockResolvedValueOnce(block("retrieval_notes", "先写型号再问问题补一句", 7));
+  await user.click(within(item).getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2));
+  expect(mockSave).toHaveBeenNthCalledWith(2, "nb1", "retrieval_notes", {
+    scope: "mine",
+    value: "先写型号再问问题补一句",
+    expected_revision: 6,
+  });
+});
+
+test("放弃我的修改：陈旧草稿的另一条出口——丢弃草稿，回到服务端新值", async () => {
+  const user = userEvent.setup();
+  mockSave.mockRejectedValueOnce(humanizedError("这段理解刚被更新过，请刷新后再改", 409));
+  mockFetch.mockResolvedValueOnce(response());
+  mockFetch.mockResolvedValueOnce(
+    response({ mine: [block("retrieval_notes", "别人整理过的新内容", 6)] }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  const field = await screen.findByRole("textbox", { name: "怎么查更容易找到" });
+  await user.type(field, "补一句");
+  const item = field.closest(".item") as HTMLElement;
+  await user.click(within(item).getByRole("button", { name: "保存" }));
+  expect(await screen.findByText("这段理解刚被更新过，请刷新后再改")).toBeInTheDocument();
+  await waitFor(() => expect(within(item).getByRole("alert")).toBeInTheDocument());
+
+  await user.click(within(item).getByRole("button", { name: "放弃我的修改" }));
+
+  expect(within(item).queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "怎么查更容易找到" })).toHaveValue("别人整理过的新内容");
+});
+
+test("保存在飞时继续打字：草稿不会被吃掉，且落进陈旧提示而不是被静默覆盖", async () => {
+  const user = userEvent.setup();
+  let resolveSave!: (value: UnderstandingBlock) => void;
+  mockSave.mockImplementationOnce(
+    () => new Promise((resolve) => { resolveSave = resolve; }),
+  );
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  const field = await screen.findByRole("textbox", { name: "这个库大致是什么" });
+  await user.type(field, "A");
+  const item = field.closest(".item") as HTMLElement;
+  await user.click(within(item).getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1));
+
+  // 保存还在飞的时候继续打字。
+  await user.type(field, "B");
+  expect(field).toHaveValue("封装工艺资料库AB");
+
+  // 服务端确认的是提交那一刻的值(不含续打的 B);随后 load() 拿到前进了的 revision。
+  mockFetch.mockResolvedValueOnce(
+    response({ base: [block("corpus_shape", "封装工艺资料库A", 5)] }),
+  );
+  resolveSave(block("corpus_shape", "封装工艺资料库A", 5));
+  await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+
+  // 续打的字没有被丢弃 —— 这是丢字修复的核心断言。
+  await waitFor(() => expect(field).toHaveValue("封装工艺资料库AB"));
+  // 且落进了陈旧提示:保存完成后 revision 前进了,草稿的 baseRevision 还是提交前那版。
+  expect(within(item).getByRole("alert")).toHaveTextContent("内容刚被重新整理过");
+});
+
+test("首次加载失败：role=alert 上屏人话，「重试」能再读一次并恢复正常渲染", async () => {
+  const user = userEvent.setup();
+  mockFetch.mockRejectedValueOnce(humanizedError("网络不太好，请稍后重试", 500));
+  render(<AgentProfilePanel notebookId="nb1" />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("网络不太好，请稍后重试");
+  const retry = screen.getByRole("button", { name: "重试" });
+
+  mockFetch.mockResolvedValueOnce(response());
+  await user.click(retry);
+
+  expect(await screen.findByRole("heading", { name: "AI 对这个库的理解" })).toBeInTheDocument();
 });
 
 test("总闸关掉：GET 回 enabled=false 时面板不给任何编辑入口", async () => {

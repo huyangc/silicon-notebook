@@ -17,6 +17,7 @@ import {
   PROFILE_LABEL_ORDER,
   busyForNotebook,
   claimNotebookSlot,
+  draftIsStale,
   emptyUnderstandingBlock,
   isUnderstandingChainBusy,
   orderedUnderstandingBlocks,
@@ -111,6 +112,16 @@ test("忙碌位按库隔离：点完 A 切到 B 再点一次，两次认领互�
   assert.equal(busyForNotebook(busy, "nb-a"), false);
   assert.equal(busyForNotebook(busy, "nb-b"), true);
   assert.equal(busyForNotebook(busy, null), false);
+});
+
+test("陈旧草稿判据：fork 点还是那一版就不陈旧，服务端往前走了才陈旧", () => {
+  const current = block("corpus_shape", "服务端最新值", 5);
+  // 没草稿 —— 无所谓陈旧不陈旧。
+  assert.equal(draftIsStale(current, undefined), false);
+  // 草稿 fork 自当前这一版 —— 用户还在编辑同一版内容,不陈旧。
+  assert.equal(draftIsStale(current, { value: "还没保存的字", baseRevision: 5 }), false);
+  // 草稿 fork 自更早一版,服务端这一行已经往前走了 —— 陈旧,保存会是知情覆盖。
+  assert.equal(draftIsStale(current, { value: "还没保存的字", baseRevision: 4 }), true);
 });
 
 test("忙碌位用的就是那份共享实现，不是又抄了一遍", () => {

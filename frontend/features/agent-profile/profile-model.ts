@@ -126,6 +126,25 @@ export function emptyUnderstandingBlock(label: string): UnderstandingBlock {
 }
 
 /**
+ * 一份还没保存的草稿——`baseRevision` 记的是它 fork 自哪一版服务端内容,不是当前
+ * 服务端版本。轮询/重取会把 `data` 里的块换成更新的版本,但**不会**主动改这个值:
+ * 只有丢掉草稿重新开始编辑,才会捕获一个新的 fork 点(见 `draftIsStale`)。
+ */
+export type UnderstandingDraft = { value: string; baseRevision: number };
+
+/**
+ * 这份草稿是不是已经"陈旧"——它 fork 出去之后,服务端那一行又往前走了一版(被
+ * 后台整理、或用户自己另一次保存推进)。陈旧不代表要丢草稿,只代表保存会是一次
+ * **知情覆盖**,界面必须显式说清楚而不是静默吃掉差异。
+ */
+export function draftIsStale(
+  block: UnderstandingBlock,
+  draft: UnderstandingDraft | undefined,
+): boolean {
+  return draft !== undefined && block.revision !== draft.baseRevision;
+}
+
+/**
  * 把服务端返回的块按固定顺序排好,缺的补成空块。
  *
  * 两件事一起做而不是分两步:服务端只回写过的行(可能一行都没有),而界面必须恒定
