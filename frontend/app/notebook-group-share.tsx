@@ -4,9 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { toUserMessage } from "./errors.ts";
 import {
+  canDropManage,
   foldGroupShares,
+  grantGroupAdminsManage,
   groupKindLabel,
+  isGroupAdmin,
   listGroups,
+  manageGrantIds,
   listMyShareRequests,
   listNotebookGrants,
   requestableGroups,
@@ -27,6 +31,23 @@ import {
 const SHARE_SLOT = "__share__";
 /** 「正在提交申请」的那一格。 */
 const REQUEST_SLOT = "__request__";
+/** 某一项的「增减管理权」占的那一格 —— 与它的撤销格(裸 groupId)必须不同,否则两个
+ *  按钮会一起显示进行态。群组 id 是 `grp-<32 位十六进制>`,不含冒号,拼不出撞车。 */
+const manageSlot = (groupId: string) => `${groupId}:manage`;
+
+/**
+ * 取消管理权可能**把自己的管理权一起取消掉**时给的提醒。
+ *
+ * 组管理员(非库主)对本库的管理权正来自那条 `group_admins` 边:取消它,他当场就打不开
+ * 这个面板了。措辞是**条件式**的——本组件只拿得到 `notebookId`,分不出「我的权限来自这个
+ * 群组」与「我本来就是库主」(库主取消后毫发无损),所以只能如实说「若……则……」。
+ */
+export const SELF_MANAGE_WARNING =
+  "若你对这本笔记本的管理权来自该群组，取消后你将无法再管理它。";
+
+/** 真的把自己管没了之后给的收尾说明 —— 它是**结果**不是错误,所以不走红色错误条。 */
+const SELF_MANAGE_LOST_NOTICE =
+  "已取消该群组的管理权限。你对这本笔记本的管理权来自该群组，现在起无法再管理它。";
 
 /**
  * 借入参考库的「未共享门」提示(设计文档 §6.1)。
@@ -68,6 +89,8 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
   /** 空串 = 不忙;否则是**正在忙的那一项**(条目 id / 申请 id / `SHARE_SLOT` / `REQUEST_SLOT`)。 */
   const [busySlot, setBusySlot] = useState("");
   const [error, setError] = useState("");
+  /** 中性说明(不是错误)——目前只有「你把自己的管理权取消掉了」这一种。 */
+  const [notice, setNotice] = useState("");
   // 切库 / 卸载之后落地的响应一律丢弃。`useEffect` 的局部 `cancelled` 只能覆盖它自己
   // 那一次加载,而写动作之后的 reload 是在事件回调里发的 —— 它同样可能在卸载后落地。
   const liveRef = useRef(true);
@@ -97,22 +120,44 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
     });
   }, [reload]);
 
-  async function run(slot: string, action: () => Promise<void>, fallback: string) {
+  async function run(
+    slot: string,
+    action: () => Promise<void>,
+    fallback: string,
+    /** 动作成功、但紧接着的重取失败时给的说明(见 `SELF_MANAGE_LOST_NOTICE`)。 */
+    reloadDeniedNotice = "",
+  ) {
     setBusySlot(slot);
     setError("");
+    setNotice("");
+    let acted = false;
     try {
       await action();
+      acted = true;
       if (liveRef.current) onChanged();
     } catch (err) {
       if (liveRef.current) setError(toUserMessage(err, fallback));
     } finally {
       // 无论成败都重取:撤销是逐条删边,中途失败会留下一个「删了一半」的状态,
       // 不重取的话界面还按发起前那份清单渲染,用户看不出到底删掉了哪几条。
-      await reload().catch(() => undefined);
-      if (liveRef.current) setBusySlot("");
+      let denied = false;
+      await reload().catch(() => { denied = true; });
+      if (liveRef.current) {
+        setBusySlot("");
+        // 动作**成功了**、重取却被拒 —— 最常见的原因就是这次动作把自己的管理权取消了
+        // (三个 grants 端点都要 `notebook:manage`)。这是用户显式要求的结果,不是故障:
+        // 给一句说明并把清单清空,别让面板挂着一份再也刷不新的旧数据、也别报红。
+        if (acted && denied && reloadDeniedNotice) {
+          setEntries([]);
+          setNotice(reloadDeniedNotice);
+        }
+      }
     }
   }
 
+  // 我担任组管理员的那些组 —— 只用来决定要不要给「取消管理权」挂条件式提醒(见
+  // `SELF_MANAGE_WARNING`),不是权限判定。
+  const myAdminGroupIds = new Set(groups.filter(isGroupAdmin).map((group) => group.id));
   const options = shareableGroups(groups, entries ?? []);
   const requestOptions = requestableGroups(groups, entries ?? [], requests);
   const pendingAndRejected = visibleMyShareRequests(requests);
@@ -126,6 +171,7 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
       </p>
 
       {error && <p className="password-change-status error">{error}</p>}
+      {notice && <p className="tool-hint" style={{ margin: 0 }}>{notice}</p>}
 
       {entries === null ? (
         <p className="tool-hint">加载中…</p>
@@ -142,6 +188,33 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
             {!entry.missing && entry.manage && <span className="tool-hint">组管理员可管理</span>}
             {entry.missing && (
               <span className="tool-hint">该群组已不存在，这条共享不再生效，可以删掉。</span>
+            )}
+            {/* 已存在的共享也要能增减管理权(codex #519 R9 P2):批准共享申请写的是
+                `(group, viewer)` 单边,新建路径的「组管理员可管理」勾选对它够不着——
+                不给这两个入口,P2 的招牌流程走完就永远停在「没有管理权」且无路可改,
+                只能撤销整个共享再重发一次。后端两个端点都是现成的,缺的只是 UI。 */}
+            {!entry.missing && !entry.manage && (
+              <button
+                className="sort-button"
+                disabled={busy}
+                onClick={() => { void run(manageSlot(entry.groupId), async () => {
+                  await grantGroupAdminsManage(notebookId, entry.groupId);
+                }, "开启管理权限失败"); }}
+              >{busySlot === manageSlot(entry.groupId) ? "开启中…" : "允许组管理员管理"}</button>
+            )}
+            {!entry.missing && entry.manage && canDropManage(entry) && (
+              <button
+                className="sort-button"
+                disabled={busy}
+                title={myAdminGroupIds.has(entry.groupId) ? SELF_MANAGE_WARNING : undefined}
+                onClick={() => { void run(manageSlot(entry.groupId), async () => {
+                  // 只删**授予管理权**的那几条边,读权边原样保留——判据与「可管理」
+                  // 标注共用 `confersManage`(R7 P2 立的规矩:两份写法迟早分叉)。
+                  for (const grantId of manageGrantIds(entry)) {
+                    await revokeNotebookGrant(notebookId, grantId);
+                  }
+                }, "取消管理权限失败", SELF_MANAGE_LOST_NOTICE); }}
+              >{busySlot === manageSlot(entry.groupId) ? "取消中…" : "取消组管理员管理"}</button>
             )}
             <button
               className="sort-button"

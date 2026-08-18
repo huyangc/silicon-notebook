@@ -13,10 +13,12 @@ vi.mock("../../app/group-api.ts", async (importOriginal) => {
     submitShareRequest: vi.fn(),
     withdrawShareRequest: vi.fn(),
     revokeNotebookGrant: vi.fn(),
+    grantGroupAdminsManage: vi.fn(),
   };
 });
 
 import {
+  grantGroupAdminsManage,
   listGroups,
   listMyShareRequests,
   listNotebookGrants,
@@ -146,6 +148,95 @@ test("撤销把给管理权的那条边**最后**删——先删它就把自己�
     "gr-view",
     "gr-admin",
   ]);
+});
+
+test("已存在的只读共享能补发管理权——发的是 group_admins/admin,不动那条只读边", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP]);
+  // 批准共享申请写的就是这一条 (group, viewer) 单边 —— P2 招牌流程的终态。
+  vi.mocked(listNotebookGrants).mockResolvedValue([grant({ id: "gr-view" })]);
+  vi.mocked(grantGroupAdminsManage).mockResolvedValue(grant({ id: "gr-admin" }));
+  renderSection();
+
+  await screen.findByText("封装项目");
+  expect(screen.queryByText("组管理员可管理")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "允许组管理员管理" }));
+
+  await waitFor(() => expect(grantGroupAdminsManage).toHaveBeenCalledWith("nb1", "g1"));
+  // 补发管理权绝不能顺手删/改那条只读边。
+  expect(revokeNotebookGrant).not.toHaveBeenCalled();
+});
+
+test("取消管理权只删管理边,只读边留着(共享本身不消失)", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP]);
+  vi.mocked(listNotebookGrants).mockResolvedValue([
+    grant({ id: "gr-view", principal_type: "group", role: "viewer" }),
+    grant({ id: "gr-admin", principal_type: "group_admins", role: "admin" }),
+  ]);
+  vi.mocked(revokeNotebookGrant).mockResolvedValue(undefined);
+  renderSection();
+
+  await screen.findByText("组管理员可管理");
+  await user.click(screen.getByRole("button", { name: "取消组管理员管理" }));
+
+  await waitFor(() => expect(revokeNotebookGrant).toHaveBeenCalledTimes(1));
+  // **只**删管理边。删掉只读边就等于撤销了整个共享,而按钮说的是「取消管理」。
+  expect(revokeNotebookGrant).toHaveBeenCalledWith("nb1", "gr-admin");
+  expect(vi.mocked(revokeNotebookGrant).mock.calls.map(([, id]) => id)).not.toContain("gr-view");
+});
+
+test("管理权判据是 role 不是主体类型:(group, admin) 边同样给「取消」入口并删对边", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP]);
+  // 一条 (group, admin) 把管理权给了整组每个成员;另有一条只读边兜底,所以取消得掉。
+  vi.mocked(listNotebookGrants).mockResolvedValue([
+    grant({ id: "gr-a", principal_type: "group", role: "admin" }),
+    grant({ id: "gr-v", principal_type: "group_admins", role: "viewer" }),
+  ]);
+  vi.mocked(revokeNotebookGrant).mockResolvedValue(undefined);
+  renderSection();
+
+  await screen.findByText("组管理员可管理");
+  await user.click(screen.getByRole("button", { name: "取消组管理员管理" }));
+  await waitFor(() => expect(revokeNotebookGrant).toHaveBeenCalledTimes(1));
+  // 按主体类型挑会删错那条(gr-v),按 role 挑才对。
+  expect(revokeNotebookGrant).toHaveBeenCalledWith("nb1", "gr-a");
+});
+
+test("孤零零一条 (group, admin) 边不给「取消管理」入口——删了它读权也没了", async () => {
+  vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP]);
+  vi.mocked(listNotebookGrants).mockResolvedValue([
+    grant({ id: "gr-solo", principal_type: "group", role: "admin" }),
+  ]);
+  renderSection();
+
+  await screen.findByText("组管理员可管理");
+  // 那不叫「取消管理权」,那叫撤销共享——只留后者,语义才诚实。
+  expect(screen.queryByRole("button", { name: "取消组管理员管理" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "撤销共享" })).toBeInTheDocument();
+});
+
+test("把自己的管理权取消掉之后:给一句说明并清空清单,不报红、也不留刷不新的旧数据", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listGroups).mockResolvedValue([ADMIN_GROUP]);
+  vi.mocked(listNotebookGrants)
+    .mockResolvedValueOnce([
+      grant({ id: "gr-view", principal_type: "group", role: "viewer" }),
+      grant({ id: "gr-admin", principal_type: "group_admins", role: "admin" }),
+    ])
+    // 取消之后他已经不是这本库的管理者,三个 grants 端点一律 404。
+    .mockRejectedValue(new Error("Notebook not found"));
+  vi.mocked(revokeNotebookGrant).mockResolvedValue(undefined);
+  renderSection();
+
+  await screen.findByText("组管理员可管理");
+  await user.click(screen.getByRole("button", { name: "取消组管理员管理" }));
+
+  // 结果不是错误:说明用中性样式,且不能是「加载失败」那种把用户引向重试的话。
+  await screen.findByText(/现在起无法再管理它/);
+  expect(screen.queryByText("共享清单加载失败")).not.toBeInTheDocument();
+  expect(screen.getByText("还没有共享给任何群组。")).toBeInTheDocument();
 });
 
 test("孤儿边标成失效并给删除入口,不显示一条没有名字的共享", async () => {

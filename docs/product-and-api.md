@@ -225,13 +225,13 @@ endpoints), plus one read-only addition on the notebook router.
 | `DELETE /notebooks/{id}/grants/{grant_id}` | `notebook:manage` | notebook-side revocation |
 | `GET /groups/{id}/shared-notebooks` | group admin | "libraries shared with this group" |
 | `DELETE /groups/{id}/shared-notebooks/{nb}` | group admin | group-side revocation; removes every edge pointing at this group |
-| `POST /notebooks/{id}/share-requests` | `notebook:manage` **and** target-group member | **P2** submit a share request; idempotent (an in-flight request returns the existing pending row, not a 409) |
+| `POST /notebooks/{id}/share-requests` | `notebook:manage` **and** target-group **plain member** | **P2** submit a share request; a group's *admin* is refused with 403 — he shares directly via `POST /notebooks/{id}/grants` and never goes through this table. Idempotent (an in-flight request returns the existing pending row, not a 409) |
 | `GET /notebooks/{id}/share-requests` | `notebook:manage` | **P2** the requester's own requests on this library (dialog echoes pending/rejected) |
-| `DELETE /notebooks/{id}/share-requests/{rid}` | `notebook:manage` | **P2** withdraw a **pending** request (whole-row delete, not a third status); already-decided is 409, missing is 404 |
+| `DELETE /notebooks/{id}/share-requests/{rid}` | signed in, **and the request is yours** | **P2** withdraw a **pending** request (whole-row delete, not a third status); already-decided is 409, missing is 404. ⚠ **Deliberately carries no notebook capability dependency**: the authorization axis is request ownership, not current library rights. Since approval refuses a requester who has since lost manage rights, requiring manage here too would make such a request neither approvable nor withdrawable — permanently stuck in the reviewer's queue |
 | `GET /groups/{id}/share-requests` | group admin | **P2** the review queue: pending requests to share into this group |
 | `POST /groups/{id}/share-requests/{rid}/approve` | group admin | **P2** write the `(group, viewer)` edge and mark approved in one transaction; idempotent if already shared; missing/decided is 404 |
 | `POST /groups/{id}/share-requests/{rid}/reject` | group admin | **P2** mark rejected, write no edge; the requester may re-submit for the same (library, group) |
-| `GET /notebooks/{id}/share` | `notebook:manage` | read-only; see below |
+| `GET /notebooks/{id}/share` | `notebook:configure` | read-only; see below. ⚠ **owner-only, not `notebook:manage`** — link sharing is the owner's disposition of the library toward the outside world and does not travel with content-management rights |
 
 Several boundaries are worth stating explicitly:
 

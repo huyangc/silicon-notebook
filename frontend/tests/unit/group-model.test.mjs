@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 
 import {
   adminGroups,
+  canDropManage,
   confersManage,
   creatableGroupKinds,
   foldGroupShares,
+  manageGrantIds,
   grantedViaLabel,
   GROUP_INPUT_LIMITS,
   groupLengthHint,
@@ -93,6 +95,38 @@ test("撤销顺序把给管理权的边排到最后——先删它就把自己�
   assert.deepEqual(revocationOrder(reversed), ["gr-view", "gr-admin"]);
   assert.deepEqual(revocationOrder({ grants: [{ id: "only", role: "viewer" }] }), ["only"]);
   assert.deepEqual(revocationOrder({ grants: [] }), []);
+});
+
+test("取消管理权只删授予管理权的边,读权边留着——判据同样是 confersManage", () => {
+  // 标准模板:(group, viewer) + (group_admins, admin)。
+  const [standard] = foldGroupShares([
+    { id: "gr-view", principal_type: "group", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+    { id: "gr-admin", principal_type: "group_admins", principal_id: "g1", role: "admin", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.deepEqual(manageGrantIds(standard), ["gr-admin"]);   // 只删它
+  assert.ok(canDropManage(standard));                          // 删完还剩只读边
+
+  // ⚠ (group, admin) 也是管理边(整组每个成员都拿到管理权)——按**主体类型**挑就会
+  // 漏掉它、按钮点了没反应。判据必须是 role。
+  const [byRole] = foldGroupShares([
+    { id: "gr-a", principal_type: "group", principal_id: "g1", role: "admin", principal_name: "组", principal_kind: "project", created_at: "" },
+    { id: "gr-v", principal_type: "group_admins", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.deepEqual(manageGrantIds(byRole), ["gr-a"]);
+  assert.ok(canDropManage(byRole));
+
+  // 孤零零一条 (group, admin):它**既是**读权又是管理权,删了这个组什么都看不到了
+  // ——那不叫「取消管理权」,所以界面不给这个入口(改走「撤销共享」)。
+  const [onlyAdmin] = foldGroupShares([
+    { id: "gr-solo", principal_type: "group", principal_id: "g1", role: "admin", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.equal(onlyAdmin.manage, true);
+  assert.equal(canDropManage(onlyAdmin), false);
+  // 纯只读共享:没有管理边可删。
+  const [readOnly] = foldGroupShares([
+    { id: "gr-r", principal_type: "group", principal_id: "g1", role: "viewer", principal_name: "组", principal_kind: "project", created_at: "" },
+  ]);
+  assert.deepEqual(manageGrantIds(readOnly), []);
 });
 
 test("排序判据与「可管理」标注是同一个 confersManage——只看 role,不看主体类型", () => {
