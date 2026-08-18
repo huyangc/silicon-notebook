@@ -71,6 +71,7 @@ from app.models.groups import (
 from app.models.identity import UserProfile
 from app.repositories.ports import (
     GroupAdminRequiredError,
+    GroupAdminShouldShareDirectlyError,
     GroupGrantAlreadyExists,
     GroupMembershipRequiredError,
     GroupNotFoundError,
@@ -100,6 +101,18 @@ def _group_not_found() -> HTTPException:
     含义:能区分出来的任何差别都是一个可探测信号。
     """
     return user_error(404, "群组不存在")
+
+
+def _share_request_not_for_group_admins() -> HTTPException:
+    """组管理员走错了入口:审批流不是给他准备的(codex #519 R8 P2)。
+
+    ⚠ 刻意**不**套 `_group_not_found()` 那套 404 遮蔽:能走到这里说明他是这个组的管理员,
+    组的存在性对他根本不是秘密,回一句「群组不存在」只会让他去查一个没有问题的组。文案
+    给**可操作**的出口——他手上本来就有更直接的那条路。
+    """
+    return user_error(
+        403, "你是这个群组的组管理员,直接共享给它即可,不必提交申请"
+    )
 
 
 def _is_system_admin(user: UserProfile) -> bool:
@@ -489,11 +502,15 @@ def create_share_request_route(
     payload: ShareRequestCreate,
     user: UserProfile = Depends(get_current_user),
 ) -> ShareRequestItem:
-    """提交共享申请。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的成员。
+    """提交共享申请。**双重条件**:对库有管理权(依赖层已挡)+ 是目标组的**普通成员**。
 
-    组成员那一半在这里查(`user_group_role` 非空即成员,普通成员也可——组管理员本就
-    不必申请)。非成员与「组不存在」同为 **404**(群组的可见性口径):库主固然知道自己
-    的库在,但他不知道那个组存不存在,统一 404 不泄露组的存在性。
+    组成员那一半在这里查。判据是 `role == 'member'` 的**正向精确匹配**,不是「有没有
+    成员行」:审批流覆盖的是**另一半**入口——组管理员分享进自己管理的组永远走
+    `POST /notebooks/{id}/grants`、**不经这张表**(设计 §4 决策 9)。放宽成「是成员即可」,
+    组管理员就能建出一条 pending 申请再**自己批自己**(codex #519 R8 P2)。非成员与
+    「组不存在」同为 **404**(群组的可见性口径):库主固然知道自己的库在,但他不知道那个
+    组存不存在,统一 404 不泄露组的存在性;而组管理员拿的是 **403 + 可操作说明**,
+    见 `_share_request_not_for_group_admins`。
 
     幂等:同库同组已有一条待审批申请时,`create_share_request` **返回既有那条**而不是
     报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。但幂等**只对
@@ -513,14 +530,25 @@ def create_share_request_route(
     """
     groups = group_repository()
     group_id = payload.group_id.strip()
-    if groups.user_group_role(group_id, user.id) is None:
+    role = groups.user_group_role(group_id, user.id)
+    if role is None:
         raise _group_not_found()
+    if role != "member":
+        # ⚠ 与下面那个 except 分支**同一个响应**,因此单独摘掉它不会改变任何可观测行为
+        # (变异验证实测:摘掉后全绿)。它不是守卫,是与紧邻的 `role is None` 同形的
+        # **友好前置检查**——承重判定在 store 的写事务里,那半有两条用例钉着。留着它是
+        # 为了「不为一个必然失败的请求开写事务」,不是为了拦住谁。
+        raise _share_request_not_for_group_admins()
     try:
         request = groups.create_share_request(
             notebook_id, group_id=group_id, requested_by=user.id
         )
     except (GroupNotFoundError, GroupMembershipRequiredError):
         raise _group_not_found()
+    except GroupAdminShouldShareDirectlyError:
+        # 前置检查读到 "member" 之后、写事务之前被提升成组管理员(codex #519 R8 P2)。
+        # 与上面那一支**同一个响应**:承重判定在 store 的写事务里,路由这次只给文案。
+        raise _share_request_not_for_group_admins()
     except NotebookNotFoundError:
         # 笔记本维度的「看不见」:与能力守卫拒绝时**同一个状态码**(404,不泄露存在性),
         # 只是文案走 `user_error()` 好让浏览器能直接上屏。刻意不复用 `_group_not_found()`

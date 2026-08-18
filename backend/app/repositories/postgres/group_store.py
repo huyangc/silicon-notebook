@@ -30,6 +30,7 @@ from app.repositories.group_rows import (
 )
 from app.repositories.ports import (
     GroupAdminRequiredError,
+    GroupAdminShouldShareDirectlyError,
     GroupGrantAlreadyExists,
     GroupMembershipRequiredError,
     GroupNotFoundError,
@@ -41,8 +42,10 @@ from app.repositories.ports import (
     ShareRequesterUnauthorizedError,
 )
 from app.repositories.postgres.access_sql import (
-    ADMIN_GRANT_PROBE_FOR_SHARE_SQL,
-    admin_grant_probe_params,
+    ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
+    ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL,
+    admin_grant_group_chain_params,
+    admin_grant_user_arm_params,
 )
 from app.repositories.postgres._store_utils import (
     TimestampInput,
@@ -597,8 +600,9 @@ class GroupStore:
                     # 锁序 group → notebook,不可颠倒(论证见 `_lock_notebook_on`)。
                     self._lock_group_on(connection, group_id, mode="SHARE")
                     self._lock_notebook_on(connection, notebook_id)
-                    if self._role_on(connection, group_id, requested_by) is None:
-                        raise GroupMembershipRequiredError(group_id)
+                    self._require_plain_membership_on(
+                        connection, group_id, requested_by
+                    )
                     connection.execute(
                         "INSERT INTO notebook_share_requests "
                         "(id,notebook_id,group_id,requested_by,status,created_at) "
@@ -644,6 +648,25 @@ class GroupStore:
                 (notebook_id, requested_by),
             ).fetchall()
         return [self._share_request_row(row) for row in rows]
+
+    def _require_plain_membership_on(
+        self, connection: Any, group_id: str, user_id: str
+    ) -> None:
+        """`sqlite/group_store.py::_require_plain_membership_on` 的镜像:目标组的**普通
+        成员**才能提交共享申请;完整理由(为什么两种不合格必须给不同的错误、为什么放行
+        判据写成正向 `== 'member'`)写在 SQLite 那一份。
+
+        ⚠ 这里**不额外加锁**:调用点 `create_share_request` 已经在本事务开头对
+        `groups` 行取了 `FOR SHARE`,而成员资格的每一次变更(`upsert_member` /
+        `remove_member` / `delete_group`)都先取同一行的 `FOR UPDATE`——两者互斥,
+        本次读到的角色在本事务提交前不会被改写。这与 `_require_notebook_manage_on`
+        必须自己锁整条链的处境不同:那里没有任何一把已经在手的锁能覆盖成员行。
+        """
+        role = self._role_on(connection, group_id, user_id)
+        if role is None:
+            raise GroupMembershipRequiredError(group_id)
+        if role != "member":
+            raise GroupAdminShouldShareDirectlyError(group_id)
 
     def _require_share_decider_on(
         self,
@@ -692,10 +715,23 @@ class GroupStore:
            必须先拿到同一把锁,于是删不进来。少了那一层,
            owner 分支这条无锁 SELECT 与随后的 INSERT 之间可以插进一次**已提交**的删库,
            `notebook_grants.notebook_id` 外键当场违例 → 未处理异常 → 500。
-        2. **授权边半**:`ADMIN_GRANT_PROBE_FOR_SHARE_SQL`,顶层查 `notebook_grants`
-           并 `FOR SHARE OF ng` 锁住命中的边行。锁住之后,并发的撤销会**阻塞**到本事务
-           提交,撤销随后生效——序列化顺序是「批准在前、撤销在后」,语义正确:库主看到
-           的是「我撤销时它刚好已经批了」,而不是「我明明撤销了它还是批了」。
+        2. **授权边半**:顶层查 `notebook_grants` 并锁住命中的边行。锁住之后,并发的
+           撤销会**阻塞**到本事务提交,撤销随后生效——序列化顺序是「批准在前、撤销在
+           后」,语义正确:库主看到的是「我撤销时它刚好已经批了」,而不是「我明明撤销了
+           它还是批了」。
+
+           ⚠ **这一半必须锁整条生效链,不能只锁边行**(codex #519 R8 P1)。管理权来自
+           `group` / `group_admins` 边时,让那条边生效的是一行 `group_members`;R5 当时
+           只锁了边行,而成员行藏在 `EXISTS (...)` 里根本锁不着,于是并发的移出组/降级
+           可以提交在探测快照之后、INSERT 之前——一个管理权**刚刚被撤销**的人照样发出
+           了新的访问权。「边还在」与「让边生效的成员资格还在」是同一条链的两个环节,
+           堵一端等于没堵。解法与当年把授权边**提到顶层**是同一招:内连接让成员行也
+           进入顶层 rangetable,`FOR SHARE OF ng, ngm` 一条语句锁住两环。
+
+           拆成 user 臂与 group 链两条语句,是因为 user 臂的链只有一环(主体就是这个人
+           自己,没有成员行),而带锁的 `UNION` 在 PG 里是语法错误。两条**合起来**必须
+           与唯一定义点 `ADMIN_GRANT_PROBE_SQL` 逐格等价,由
+           `tests/postgres/test_admin_grant_chain_lock.py` 的数据驱动矩阵钉住。
         """
         if (
             connection.execute(
@@ -707,8 +743,16 @@ class GroupStore:
             return
         if (
             connection.execute(
-                ADMIN_GRANT_PROBE_FOR_SHARE_SQL,
-                admin_grant_probe_params(notebook_id, user_id),
+                ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL,
+                admin_grant_user_arm_params(notebook_id, user_id),
+            ).fetchone()
+            is not None
+        ):
+            return
+        if (
+            connection.execute(
+                ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
+                admin_grant_group_chain_params(notebook_id, user_id),
             ).fetchone()
             is None
         ):

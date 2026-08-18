@@ -765,9 +765,14 @@ _PG_ONLY_SYMBOLS = {
     # 三段式带锁写法的加锁变体;SQLite 没有行锁概念,不应有对应物。
     "MEMBER_PROBE_FOR_SHARE_SQL",
     "GRANT_PROBE_FOR_SHARE_SQL",
-    # 共享申请审批时锁申请人的管理级授权边(codex #519 R5)。同上:SQLite 的进程写锁
-    # 已把写事务串起来,不需要也不存在行锁变体;裸的 ADMIN_GRANT_PROBE_SQL 两侧都有。
-    "ADMIN_GRANT_PROBE_FOR_SHARE_SQL",
+    # 管理级授权边**整条生效链**的加锁探测(codex #519 R5 立、R8 P1 收口成两条)。
+    # 同上:SQLite 的进程写锁已把写事务串起来,不需要也不存在行锁变体;裸的
+    # ADMIN_GRANT_PROBE_SQL 两侧都有。R5 那条只锁边行的 ADMIN_GRANT_PROBE_FOR_SHARE_SQL
+    # 已**删除**——留着就是给「只堵一端」留一个看起来正规的入口。
+    "ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL",
+    "ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL",
+    "admin_grant_user_arm_params",
+    "admin_grant_group_chain_params",
 }
 _SQLITE_ONLY_SYMBOLS: set[str] = set()
 
@@ -796,6 +801,15 @@ _CALLABLE_PROBES = {
     "grant_probe_params": lambda mod: repr(mod.grant_probe_params("N", "U")),
     "admin_grant_probe_params": lambda mod: repr(
         mod.admin_grant_probe_params("N", "U")
+    ),
+    # PG 独有(整条生效链的加锁探测,codex #519 R8 P1)。登记在这里不是为了双后端比对
+    # ——它们在 `_PG_ONLY_SYMBOLS` 里、进不了交集——而是因为占位符方向守卫会遍历**全部**
+    # public 符号并经 `_probe_value` 取值,漏登记就响亮失败。
+    "admin_grant_user_arm_params": lambda mod: repr(
+        mod.admin_grant_user_arm_params("N", "U")
+    ),
+    "admin_grant_group_chain_params": lambda mod: repr(
+        mod.admin_grant_group_chain_params("N", "U")
     ),
 }
 
@@ -855,9 +869,20 @@ def test_backends_declare_the_same_predicate_surface():
     # 在代码里始终看得见——见 postgres/access_sql.py 的模块 docstring。
     assert pg.MEMBER_PROBE_FOR_SHARE_SQL == pg.MEMBER_PROBE_SQL + " FOR SHARE"
     assert pg.GRANT_PROBE_FOR_SHARE_SQL == pg.GRANT_PROBE_SQL + " FOR SHARE OF ng"
-    assert (
-        pg.ADMIN_GRANT_PROBE_FOR_SHARE_SQL
-        == pg.ADMIN_GRANT_PROBE_SQL + " FOR SHARE OF ng"
+    # 管理级:R8 P1 之后锁的是**整条生效链**,不再是「裸探测 + FOR SHARE OF ng」。
+    # 钉住两件事:①两条语句都真的带锁;②group 链那条必须把成员行也锁进去
+    # (`OF ng, ngm`)——只写 `OF ng` 就退回了 R5 那个只堵一端的形态,而它不报任何错。
+    assert pg.ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL.endswith(" FOR SHARE OF ng")
+    assert pg.ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL.endswith(" FOR SHARE OF ng, ngm")
+    assert "JOIN group_members ngm ON " in pg.ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL, (
+        "成员行必须经**内连接**提到顶层才锁得住——EXISTS 子查询里的行拿不到 FOR SHARE,"
+        "那正是 R8 P1 那个洞的成因"
+    )
+    # R5 那条只锁边行的常量必须保持删除状态:留着就是给「只堵生效链一端」留一个
+    # 看起来正规的入口(它当年正是被这么用的)。
+    assert not hasattr(pg, "ADMIN_GRANT_PROBE_FOR_SHARE_SQL"), (
+        "ADMIN_GRANT_PROBE_FOR_SHARE_SQL 回来了——它只锁授权边行、锁不住让边生效的"
+        "组成员行,写事务里认管理权必须用整链加锁的那两条"
     )
     # 管理级探测必须是「裸探测 + role='admin'」的收窄,而不是另抄一份主体判定:
     # 两条查询只差 role 那个条件,everyone 那条臂在管理级里不存在(裁决 P2-1 收窄)。

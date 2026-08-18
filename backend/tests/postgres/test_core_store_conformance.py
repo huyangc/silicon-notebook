@@ -1129,16 +1129,23 @@ def test_share_request_conflict_is_narrowed_to_the_requester_on_postgres(
 
     PG 的分类走 `exc.diag.constraint_name`(SQLite 走异常文本),两侧分叉了不会报错——
     只会让某一个后端把别人的申请行交给你,或者把一次唯一违例冒成 500。
+
+    ⚠ 两个申请人都必须是目标组的**普通成员**(codex #519 R8 P2):组管理员分享进自己
+    管理的组永远走 `create_grant`、不经这张表,所以由第三个人 `chief` 建组并审批。此前
+    这里用建组的人当申请人,那条路 R8 之后已经被 `GroupAdminShouldShareDirectlyError`
+    挡住——冲突收窄这件事本身与角色无关,换个人即可。
     """
     from app.repositories.ports import ShareRequestAlreadyPendingError
 
     groups = core_stores.groups
+    chief = core_stores.identity.create_user("w00778899", "password-79")
     boss = core_stores.identity.create_user("w00112233", "password-77")
     other = core_stores.identity.create_user("w00445566", "password-78")
     group = groups.create_group(
-        name="冲突组", kind="project", description="", created_by=boss.id
+        name="冲突组", kind="project", description="", created_by=chief.id
     )
-    groups.upsert_member(group["id"], other.id, role="member", added_by=boss.id)
+    groups.upsert_member(group["id"], boss.id, role="member", added_by=chief.id)
+    groups.upsert_member(group["id"], other.id, role="member", added_by=chief.id)
     notebook_id = core_stores.notebooks.create_row(
         NotebookCreate(name="冲突库"), boss.id
     )
@@ -1163,7 +1170,8 @@ def test_share_request_conflict_is_narrowed_to_the_requester_on_postgres(
     def decide_then_answer(nb_id, gid):
         if not calls:
             calls.append(1)
-            groups.approve_share_request(gid, mine["id"], decided_by=boss.id)
+            # 审批必须由组管理员做 —— boss 现在只是普通成员(见 docstring 的 R8 P2 说明)。
+            groups.approve_share_request(gid, mine["id"], decided_by=chief.id)
         return original(nb_id, gid)
 
     groups._pending_share_request = decide_then_answer  # type: ignore[assignment]
@@ -1243,7 +1251,9 @@ def test_concurrent_revocation_cannot_slip_past_the_requester_recheck(
     R4 的复检跑的是不加锁的 `NOTEBOOK_ADMIN_SQL`:PG 在 READ COMMITTED 下让它看到语句
     开始时的快照,库主并发 `DELETE` 掉那条 admin 边并提交,审批事务照样读到撤销前的行、
     照样 INSERT 一条**活的** `(group, viewer)` 边。窗口更窄,但要防的事一件没防住。
-    补上 `ADMIN_GRANT_PROBE_FOR_SHARE_SQL` 之后,撤销会**阻塞**到审批提交。
+    给授权边行补上 `FOR SHARE` 之后,撤销会**阻塞**到审批提交。(R8 P1 之后那把锁由
+    `ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL` / `ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL` 提供,
+    并且连让边生效的那行 `group_members` 一起锁住;本用例钉的仍是边行那一环。)
 
     交错是注入的:阻塞点选在申请人复检**之后、INSERT 授权边之前**(挂在 `new_id("gnt")`
     上),此时复检已经拿到了那条边的 `FOR SHARE`。放行前先用 `pg_stat_activity` 轮询证明

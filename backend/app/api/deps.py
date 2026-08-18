@@ -183,9 +183,13 @@ async def require_notebook_read(
 # 同一写事务内复检并锁住发起人的笔记本侧权限**;其余写端点不加。
 #
 # 落地形态见 `repositories/*/group_store.py::_require_notebook_manage_on`(两段式:owner
-# 半普通查 + `ADMIN_GRANT_PROBE_FOR_SHARE_SQL` 锁住授权边行——行锁够不到 `EXISTS` 子查询
-# 里的行,所以不能直接给 `NOTEBOOK_ADMIN_SQL` 加锁)。当前的两个消费点:`create_grant`
-# (发起人)与 `approve_share_request`(申请人)。新增授权类写端点时照此办理。
+# 半普通查 + 授权边半锁住**整条生效链**——行锁够不到 `EXISTS` 子查询里的行,所以既不能
+# 直接给 `NOTEBOOK_ADMIN_SQL` 加锁,也不能只锁那条 `notebook_grants` 边:让 `group` /
+# `group_admins` 边生效的那行 `group_members` 同样要锁,否则并发的移出组/降级照样能在
+# 探测与 INSERT 之间提交(codex #519 R5 立、R8 P1 收口)。链的两环由
+# `ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL` + `ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL` 覆盖。
+# 当前的两个消费点:`create_grant`(发起人)与 `approve_share_request`(申请人)。
+# 新增授权类写端点时照此办理。
 #
 # ⚠ 第五个消费点是**前端投影**:`NotebookSummary.can_manage_content`
 # (`services/notebook_catalog.py`)。它不是授权判定(权威永远是这里的守卫),而是

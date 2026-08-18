@@ -2795,6 +2795,24 @@ class GroupMembershipRequiredError(RuntimeError):
     """
 
 
+class GroupAdminShouldShareDirectlyError(RuntimeError):
+    """提交共享申请的人**是目标组的组管理员**——他不该走审批流(codex #519 R8 P2)。
+
+    审批流覆盖的是**另一半**入口:对库有管理权、但对目标组只是**普通成员**的人没有直接
+    发边的权限,只能申请。组管理员分享进自己管理的组**永远走 `POST /notebooks/{id}/grants`、
+    不经这张表**(设计 §4 决策 9,v49/v50 迁移的 docstring 也逐字写着这一条)。此前
+    store 与路由的判据都只是「有没有成员行」,于是组管理员也能建出一条 pending 申请、
+    再自己批准自己——**契约早就写明了,只是实现没兑现**。
+
+    放行判据是**正向精确匹配** `role == 'member'`:组管理员与任何未知取值(含正向 shadow
+    停车写进去的哨兵串)一律落进本异常,方向是 fail closed。
+
+    路由映射成 **403** 并给一句**可操作**的说明(「直接共享给它即可」)。⚠ 这里刻意
+    **不**套群组维度那套 404 遮蔽:他是这个组的管理员,组的存在性对他根本不是秘密,回一句
+    「群组不存在」只会让他去查一个没有问题的组。
+    """
+
+
 class NotebookManageRequiredError(RuntimeError):
     """写事务在落库前复核时发现**发起人**已不再对这本笔记本拥有管理权。
 
@@ -2931,6 +2949,12 @@ class GroupStorePort(Protocol):
         等于把另一个的 FK 违例留成 500。`requested_by` 已不是该组成员抛
         `GroupMembershipRequiredError`——三条复核都在**同一写事务内**,路由层那次前置
         查询与写入之间的窗口足够让组被删、让库被删、让人被移出组(codex #519 R2 P2-1)。
+
+        ``requested_by`` 必须是目标组的**普通成员**(`role == 'member'` 正向精确匹配):
+        组管理员分享进自己管理的组永远走 `create_grant`、不经这张表,所以他落进
+        `GroupAdminShouldShareDirectlyError`(路由 → 403 + 可操作说明)。这条同样是
+        **事务内**判据而不只是路由前置检查——中间那个窗口足够让一个普通成员被提升成组
+        管理员(codex #519 R8 P2)。
 
         冲突恢复期间那条 pending 又被决定/撤回时**重试一次插入**(此时部分唯一索引的
         谓词已不再覆盖它),绝不让原始的 DB 唯一违例冒成 500(codex #519 R3)。"""
