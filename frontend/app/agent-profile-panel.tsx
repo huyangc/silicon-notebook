@@ -361,6 +361,10 @@ export function AgentProfilePanel({
   // ——因为整个面板随浮动窗一起卸载重挂)。不做成「超限也自动解锁」是刻意的:那等于
   // 在任务可能真卡死时假装它跑完了,会放行一次重复的模型调用。
   const [pollExhausted, setPollExhausted] = useState(false);
+  // codex R11 P2:每次新的重建认领都要一份**新的**轮询预算。attempts 活在
+  // effect 闭包里,deps 不变就不重启——第二条链在第一条快耗尽预算时启动,会
+  // 只分到剩下的一两拍。epoch 进 deps,新认领即重启 effect、计数归零。
+  const [pollEpoch, setPollEpoch] = useState(0);
 
   const load = useCallback(async () => {
     const next = await fetchUnderstanding(notebookId);
@@ -421,7 +425,7 @@ export function AgentProfilePanel({
         .catch(() => undefined);
     }, UNDERSTANDING_POLL_MS);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [polling, notebookId]);
+  }, [polling, notebookId, pollEpoch]);
 
   const draftOf = useCallback(
     (label: string, fallback: string) => drafts[label]?.value ?? fallback,
@@ -522,6 +526,7 @@ export function AgentProfilePanel({
     // 忙碌位在 await **之前**置上:请求在飞的那段窗口按钮也不能连点。
     claim((prev) => claimNotebookSlot(prev, notebookId));
     setPollExhausted(false);
+    setPollEpoch((epoch) => epoch + 1);   // 新认领 = 新轮询预算(codex R11 P2)
     setError("");
     setNotice("");
     try {
