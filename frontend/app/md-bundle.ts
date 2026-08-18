@@ -902,6 +902,17 @@ function findHtmlImgTags(md: string): MarkdownImageRef[] {
   return out;
 }
 
+/** `at` 之前有多少个连续反斜杠——用来判断 `at` 处的字符是否被转义。 */
+function precedingBackslashRun(md: string, at: number): number {
+  let count = 0;
+  let i = at - 1;
+  while (i >= 0 && md.charAt(i) === "\\") {
+    count += 1;
+    i -= 1;
+  }
+  return count;
+}
+
 /** 列出 md 里的全部图片引用（三种语法形态），按文档顺序，并逐条判定是否「独占一整段」。
  *
  *  独占段的判据镜像服务端 `structural_markdown.parse_blocks`：只有「整段的行内内容
@@ -941,6 +952,15 @@ export function findMarkdownImages(md: string): MarkdownImageRef[] {
       at = tag.end;
       tagIndex += 1;
     } else {
+      // `\!` 转义的是感叹号本身（CommonMark 语义）：`\![alt](x.png)` 不再是图片
+      // 标记，而是字面 `!` 后面跟一个普通链接，交给 parseImageAt 会把它当图片
+      // 解析、进而落一条「不支持的内嵌图片」回执——讲解图片语法本身的文档会因此
+      // 得到一条永久追着用户的错误提示（评审 F2）。奇数个连续反斜杠才算转义；
+      // 偶数个转义的是反斜杠自身，`\\![alt](x.png)` 仍是一张真图片。
+      if (precedingBackslashRun(md, bang) % 2 === 1) {
+        at = bang + 2;
+        continue;
+      }
       parsed = parseImageAt(md, bang);
       if (parsed === null) {
         at = bang + 2;

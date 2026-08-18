@@ -3412,12 +3412,18 @@ export default function Home() {
 
   /** 弹窗内所有暂存态的统一清空点（新建笔记本 / 关闭弹窗 / 清空 / 上传成功共用）。
    *  世代先 ++ 再清空：还在飞的异步解包链此后落盘时一律比对失败、整条结果丢弃
-   *  （见 bundleIntakeGenerationRef）。 */
+   *  （见 bundleIntakeGenerationRef）。同时结清挂起的 bundleChoice 勾选面板——
+   *  世代递增只挡了迟到落盘，挂起的勾选面板、它的 resolver 与忙碌栈帧不会因此
+   *  自动消失；不结清就会让「清空」「上传成功」这类直接调用本函数的入口，让用户
+   *  已经点了确认的勾选被 stageBundleCandidates 的世代比对静默丢弃
+   *  （codex #518 R4 P2）。这样一来，凡是递增 bundleIntakeGenerationRef 的路径
+   *  （本函数、openNotebook）都必然结清 bundleChoice，是结构性不变量。 */
   function resetStagedIntake() {
     bundleIntakeGenerationRef.current += 1;
     updateStaged(emptyStagedList());
     setStagedSkipped([]);
     setBundleReceipts([]);
+    cancelBundleChoice();
   }
 
   /** 关闭「添加来源」弹窗。× 按钮与点遮罩必须走**同一个** handler：遮罩那条路此前

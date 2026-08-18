@@ -756,6 +756,46 @@ test("a tilde fence hides image syntax the same way", () => {
 });
 
 
+test("an escaped bang before image syntax is plain text, not an unsupported image", () => {
+  // CommonMark:`\!` 转义的是感叹号本身,`\![a](x.png)` 不再是图片标记,而是字面 "!"
+  // 后面跟一个普通链接。讲解图片语法本身的文档常这样写——误判成图片会产生一条
+  // 永久追着用户的「不支持的内嵌图片」回执(评审 F2)。
+  assert.deepEqual(findMarkdownImages("\\![a](x.png)\n"), []);
+  const files = [{ path: "x.png", bytes: PNG }];
+  const out = inlineOf("n.md", "\\![a](x.png)\n", files);
+  assert.equal(out.ok, true);
+  assert.equal(out.rewritten, "\\![a](x.png)\n", "转义写法必须原样透传,不改写");
+  assert.deepEqual(
+    out.receipt,
+    { inlined: [], missing: [], unsupported: [], remote: [], noAlt: [] },
+    "转义写法不是图片引用,不该产生任何回执条目",
+  );
+});
+
+
+test("an even run of backslashes escapes itself, leaving the image marker live", () => {
+  // 两个反斜杠转义的是反斜杠自身:`\\` 渲染成一个字面反斜杠,随后的 `!` 未被转义,
+  // `\\![a](x.png)` 仍是一张真图片。
+  const refs = findMarkdownImages("\\\\![a](x.png)\n");
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].src, "x.png");
+});
+
+
+test("an escaped bang mid-line is recognized the same way as at line start", () => {
+  assert.deepEqual(
+    findMarkdownImages("see \\![a](x.png) here\n"),
+    [],
+    "行内其它位置的转义同样要跳过,不只是行首",
+  );
+  assert.deepEqual(
+    findMarkdownImages("see \\\\![a](x.png) here\n").map((r) => r.src),
+    ["x.png"],
+    "偶数个反斜杠在行内其它位置同样保持是真图片",
+  );
+});
+
+
 test("inline-position local images are reported instead of silently left behind", () => {
   const files = [{ path: "x.png", bytes: PNG }];
   const out = inlineOf("n.md", "see ![a](x.png) here\n", files);
