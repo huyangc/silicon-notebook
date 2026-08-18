@@ -13,22 +13,11 @@ from typing import Any, Mapping, Sequence
 from psycopg.types.json import Jsonb
 
 from app.migration.shadow.types import TableSpec
-
-
-_EMPTY_TIME_SENTINELS = frozenset(
-    {
-        "ask_jobs.created_at",
-        "ask_jobs.updated_at",
-        "ask_trace_steps.created_at",
-        "chunk_element_backfills.completed_at",
-        "kg_build_jobs.finished_at",
-        "knowledge_objects.last_reviewed",
-        "merge_review_jobs.started_at",
-        "merge_review_jobs.updated_at",
-        "source_index_backfills.completed_at",
-        "unified_kg_state.last_rebuild_at",
-    }
+from app.repositories.postgres.schema_manifest import (
+    POSTGRES_EMPTY_TIME_SENTINELS as _EMPTY_TIME_SENTINELS,
 )
+
+
 _EMPTY_JSON_LIST_SENTINELS = frozenset(
     {
         "ask_jobs.trace_json",
