@@ -415,10 +415,12 @@ def test_a_report_finishing_while_a_run_is_in_flight_keeps_the_ask_signal(
     service.note_ask_completed(NOTEBOOK_ID, USER_A)      # pending == 1
     assert service.start_overlay(NOTEBOOK_ID, USER_A) is True
 
-    service.note_report_completed(NOTEBOOK_ID, USER_A)   # busy -> no-op
+    service.note_report_completed(NOTEBOOK_ID, USER_A)   # busy -> 落成满阈值信号
 
-    assert len(submitter.calls) == 1
-    assert _job(harness, USER_A)["pending_signal"] == 1
+    # codex R6 P2:撞上在飞 run 的报告不再被丢弃——落成一个满阈值的 bump,
+    # 由在飞 run 的终态重排消费(恰好一次,只是晚一点),既有 ask 信号照常保留。
+    assert len(submitter.calls) == 1                      # 没有第二个并发 job
+    assert _job(harness, USER_A)["pending_signal"] == 1 + 3   # ask 1 + 报告满阈 3
 
 
 def test_the_report_engine_signals_the_report_author_and_never_the_request_user():
@@ -1296,3 +1298,23 @@ def test_an_internal_failure_still_requeues_a_filled_threshold(
     assert [c["name"] for c in submitter.calls] == [
         f"agentprofile-overlay-{NOTEBOOK_ID}"
     ]
+
+
+def test_a_report_discarded_by_a_busy_chain_fires_after_that_run_settles(
+    harness, monkeypatch
+):
+    """codex R6 P2 端到端:报告撞忙 → 信号落地 → 在飞 run settle 后重排接住。"""
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)         # 链路占住(在飞)
+    service = _service(harness, client=_Client(_reply(retrieval_notes="心得")))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)    # busy -> 满阈值 bump
+    assert submitter.calls == []                          # 没插队
+
+    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+
+    assert [c["name"] for c in submitter.calls] == [
+        f"agentprofile-overlay-{NOTEBOOK_ID}"
+    ]                                                     # settle 后重排一轮

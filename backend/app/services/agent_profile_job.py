@@ -1285,12 +1285,14 @@ class AgentProfileConsolidationService:
         A completed report reaches the threshold on its own (design §5.3: it is
         a naturally high-information endpoint — a confirmed intent, an approved
         outline and a full multi-section retrieval, all from one person in one
-        library). So this claims DIRECTLY rather than bumping to the threshold
-        and re-checking: bumping would be two writes to say one thing, and — if
-        the claim then lost to a run already in flight — would leave the
-        counter parked AT the threshold, firing again on the member's very next
-        ask. Claiming instead means a busy chain simply keeps whatever ask
-        signal it had already accumulated.
+        library). The claim is attempted DIRECTLY; only when it loses to a run
+        already in flight does this fall back to bumping a full threshold
+        (codex #520 R6 P2): discarding the loss meant a report finishing while
+        any consolidation was running never triggered its promised refresh.
+        The bump does not re-introduce the parked-at-threshold refire the
+        direct claim was chosen to avoid — the in-flight run's terminal paths
+        all re-check the leftover count and the requeued round CONSUMES its
+        own snapshot, so the signal fires exactly once, just later.
 
         Fail-open in full for the same reason as above: the report is finished
         and persisted before this runs.
@@ -1300,7 +1302,12 @@ class AgentProfileConsolidationService:
                 return
             if not profile_wiring_active(self.settings, self.profiles):
                 return
-            self.start_overlay(notebook_id, user_id)
+            if not self.start_overlay(notebook_id, user_id):
+                self.profiles.bump_signal(
+                    notebook_id,
+                    user_id,
+                    delta=int(self.settings.agent_profile_overlay_trigger),
+                )
         except Exception:  # noqa: BLE001 — never break a finished report
             _log.exception(
                 "agent profile report notification failed for notebook %s",
