@@ -78,6 +78,11 @@ const APPROVED_MESSAGE_READS = Object.freeze({
   },
 });
 const APPROVED_DIAGNOSTIC_READS = Object.freeze({
+  "bundle-intake.ts|<module>.processMarkdownCandidate|diagnostic|error": {
+    count: 2,
+    reason: "InlineResult.error is md-bundle.ts's typed too-large payload ({bytes,limit,...}), "
+      + "not a caught exception; both reads (.bytes/.limit) feed inlineTooLargeMessage's fixed copy",
+  },
   "dev/logs/activity/ActivityDetail.tsx|<module>.AskDetailPane|diagnostic|error": {
     count: 1,
     reason: "owner-only developer activity detail intentionally renders the raw ask failure",
@@ -97,6 +102,12 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
   "memory-panel.tsx|<module>.MemoryPanel.submitTransfer|diagnostic|error": {
     count: 1,
     reason: "per-item transfer diagnostics are selected only for bounded logging",
+  },
+  "page.tsx|<module>.Home.ingestZipFile|diagnostic|error": {
+    count: 1,
+    reason: "ZipBundleResult.error is md-bundle.ts's typed parse-failure payload "
+      + "({code,path,actual,limit,method}), not a caught exception; it is only ever "
+      + "passed through bundleErrorMessage's fixed Chinese copy, never shown raw",
   },
   "page.tsx|<module>.Home.tick|diagnostic|error_message": {
     count: 2,
