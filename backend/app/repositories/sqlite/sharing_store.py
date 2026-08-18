@@ -60,6 +60,18 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # re-grant access explicitly. `groups`/`group_members` need no mention here:
 # they hang off no `notebook_id` at all, so they were never candidates for
 # this per-notebook snapshot in the first place.
+#
+# Also deliberately absent: `notebook_share_requests` (group knowledge
+# sharing P2, schema v50). It doubles as both reasons above: a pending
+# request is transient *process* state, not knowledge — like
+# `catalog_jobs`/`catalog_candidates`, it belongs to the run (here, the
+# member's ask) that produced it, and an approved request has already done
+# its job by writing a `notebook_grants` row, which itself isn't copied. It
+# is also access-control-adjacent — who asked to share the ORIGINAL notebook
+# with which group is a property of that notebook's collaboration history,
+# not of the knowledge inside it. A copy is a brand-new notebook with no
+# such history; its owner starts from a clean slate and requests sharing
+# explicitly if they want it.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id = ?"),
     ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),

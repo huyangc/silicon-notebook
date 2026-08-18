@@ -41,7 +41,11 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v49 adds the group-sharing tables (groups, group_members, notebook_grants)
 # for P1 of group knowledge sharing. Additive only: no consumer reads them
 # yet, so this migration is zero-behavior-change.
-SCHEMA_VERSION = 49
+# v50 adds notebook_share_requests for P2 of group knowledge sharing: a
+# member's request to share their own notebook with a group they belong to,
+# pending a group admin's approval. Additive only: no consumer reads or
+# writes it yet, so this migration is zero-behavior-change.
+SCHEMA_VERSION = 50
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2470,6 +2474,69 @@ class SqliteMigrator:
                   UNIQUE (notebook_id, principal_type, principal_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_notebook_grants_principal ON notebook_grants(principal_type, principal_id);
+                """
+            )
+
+    def _migration_50(self) -> None:
+        """Group knowledge sharing P2: notebook_share_requests (member
+        contribution approval workflow).
+
+        Zero behavior change — one additive table with no reader or writer
+        anywhere in the codebase yet. This lets a notebook member who is not
+        that notebook's owner/admin request that their own notebook be
+        shared with a group they belong to; a group admin later approves or
+        rejects the request. The API surface and frontend land in a later
+        task of the same feature; this migration only lays the schema down.
+
+        Unlike ``notebook_grants.principal_id`` (v49), this table has no
+        polymorphic column — ``group_id`` always references ``groups.id`` —
+        so it carries a real foreign key with no park-strategy tradeoff.
+        ``status`` (pending|approved|rejected) is validated in the
+        application layer, not by a ``CHECK`` constraint, matching every
+        other enumerated column in the group-sharing schema (v49's ``kind``,
+        ``role``, ``principal_type``). ``id`` is the primary key and is
+        explicitly ``NOT NULL`` so this table needs no entry in the shadow
+        migration's ``_SQLITE_NULL_GUARD_KEYS`` — the same reasoning as
+        ``notebook_grants.id`` in v49.
+
+        Both ``notebook_id`` and ``group_id`` are ``ON DELETE CASCADE``:
+        deleting the notebook or the group being requested-into drops the
+        request, so no request can ever point at a notebook or group that no
+        longer exists. ``requested_by`` and ``decided_by`` reference
+        ``users(id)`` with no ON DELETE clause, mirroring every other
+        ``REFERENCES users(id)`` column in this schema (e.g.
+        ``notebook_grants.created_by``). ``decided_at`` is genuinely
+        nullable TEXT with no default — it is unset (SQL NULL, not an empty
+        string) until a group admin approves or rejects the request, so it
+        needs no entry in ``POSTGRES_EMPTY_TIME_SENTINELS`` either: there is
+        no legacy '' convention here to preserve, only true NULL on both
+        backends.
+
+        ``idx_share_requests_group`` is a plain (non-unique) index on
+        ``(group_id, status)`` — the pending-requests-for-this-group lookup
+        a group admin's review queue will use. It is deliberately NOT
+        unique: a notebook can accumulate more than one request to the same
+        group over time (e.g. rejected, then requested again), and nothing
+        in the design requires collapsing them.
+
+        This table is additive with no backfill: no existing row in any
+        other table implies a share request, so there is nothing to
+        populate.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS notebook_share_requests (
+                  id           TEXT NOT NULL PRIMARY KEY,
+                  notebook_id  TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  group_id     TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                  requested_by TEXT NOT NULL REFERENCES users(id),
+                  status       TEXT NOT NULL DEFAULT 'pending',
+                  decided_by   TEXT REFERENCES users(id),
+                  decided_at   TEXT,
+                  created_at   TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_share_requests_group ON notebook_share_requests(group_id, status);
                 """
             )
 

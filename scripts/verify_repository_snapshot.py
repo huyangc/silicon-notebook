@@ -3085,5 +3085,44 @@ MIGRATION_MANIFEST[(48, 49)] = {
 }
 
 
+# v50: group knowledge sharing P2 (zero behavior change — no reader or writer
+# anywhere in the codebase consumes this table yet). Same cascade as every
+# other hop: broadcast onto every prior hop key rebased to v50, then register
+# the explicit (49, 50) single hop. SQL text matches sqlite_master storage
+# verbatim (SQLite strips "IF NOT EXISTS" and keeps the source indentation).
+SHARE_REQUEST_TABLES = {
+    "notebook_share_requests": """CREATE TABLE notebook_share_requests (
+                  id           TEXT NOT NULL PRIMARY KEY,
+                  notebook_id  TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  group_id     TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                  requested_by TEXT NOT NULL REFERENCES users(id),
+                  status       TEXT NOT NULL DEFAULT 'pending',
+                  decided_by   TEXT REFERENCES users(id),
+                  decided_at   TEXT,
+                  created_at   TEXT NOT NULL
+                )""",
+}
+SHARE_REQUEST_INDEXES = {
+    "idx_share_requests_group":
+        "CREATE INDEX idx_share_requests_group "
+        "ON notebook_share_requests(group_id, status)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 50, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SHARE_REQUEST_TABLES},
+        "indexes": {**manifest["indexes"], **SHARE_REQUEST_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(49, 50)] = {
+    "tables": SHARE_REQUEST_TABLES,
+    "columns": {},
+    "indexes": SHARE_REQUEST_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

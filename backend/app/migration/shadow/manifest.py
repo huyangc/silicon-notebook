@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=49, postgres_version=27, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=50, postgres_version=28, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -624,6 +624,19 @@ _TABLES = (
     ),
     _table(
         "notebook_grants", ("id",), ReplicationKeyKind.DECLARED_PK, 82, "timestamptz"
+    ),
+    # SQLite v50 / PostgreSQL v28: group knowledge sharing P2 (zero behavior
+    # change — no reader/writer consumes this table yet). notebook_share_requests
+    # FKs onto notebooks (rank 15), groups (rank 80) and users (rank 11) — all
+    # three rank below 83, so it is FK-consistent appended after its P1
+    # siblings. Unlike notebook_grants.principal_id, group_id here is a real,
+    # non-polymorphic foreign key with no park-strategy tradeoff.
+    _table(
+        "notebook_share_requests",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        83,
+        "timestamptz",
     ),
 )
 

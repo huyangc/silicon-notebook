@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=49) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=50) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -46,6 +46,16 @@ NOTEBOOK_SCOPED_TABLES = [
     # v49 群组知识共享 P1: notebook_grants 直接带 notebook_id 列，与
     # notebook_members 同一形状——按 notebook_id IN (sec_nb) 筛即可。
     "notebook_grants",
+    # v50 群组知识共享 P2: notebook_share_requests 同样直接带 notebook_id 列
+    # (申请挂在被申请共享的库上，随库走)，按 notebook_id IN (sec_nb) 筛即可。
+    # 与 notebook_grants.principal_id 不同, 这张表的 group_id 是真实外键
+    # (无停车方案取舍), 而 GLOBAL_UNION_TABLES 对 groups 的导入发生在
+    # 同一份 FK-off 事务里、且先于合并末尾统一的 `foreign_key_check`——
+    # 只要两侧不存在同 id 不同实体的 group 冲突, 到那一步时引用即已满足,
+    # 不需要像 sweep_orphan_group_grants 那样为它单独扫孤儿; 真出现悬挂
+    # 外键(id 冲突这种边缘情形), `foreign_key_check` 会 fail-loud 中止合并,
+    # 而不是静默留下坏行——这本身就是期望的兜底, 无需另加逻辑。
+    "notebook_share_requests",
 ]
 # notebook_bases 是"挂载方"拥有的行(notebook_id=挂载方, base_notebook_id=被挂的公共知识
 # 库), 按本类通用规则以 notebook_id IN (sec_nb) 筛——sec_nb 恒不含 shared_base(它并入
