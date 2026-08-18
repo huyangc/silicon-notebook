@@ -49,6 +49,7 @@ import {
 } from "./knowhow-navigation";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { KgAnalysisView } from "./kg-analysis-view";
+import { AgentProfilePanel, UnderstandingEntryButton } from "./agent-profile-panel";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import { withoutDecidedMerge } from "./kg-merge-model";
 import {
@@ -938,6 +939,10 @@ export default function Home() {
   const [reportMaxSubqueriesPerSection, setReportMaxSubqueriesPerSection] = useState(
     DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   );
+  // 「AI 对这个库的理解」的部署总闸。默认 false:配置还没读回来、或后端根本没有这项
+  // 能力(旧后端缺字段,`system-api.ts` 同样解析成 false)时不给入口——那颗按钮打开的
+  // 每个端点在关闸时都是 409 / enabled=false。
+  const [agentProfileEnabled, setAgentProfileEnabled] = useState(false);
   // 待上传列表：文件 + 每项文档类型 + 每项是否被用户显式表态，**一个** state 对象。
   // 三条数组必须逐项对齐（uploadDocTypeFields 按下标配对），而入列会被跨 await 的
   // 异步链触发（zip 解包、文件夹遍历）——拆成三个 state 就只能各自 setState，等长
@@ -1146,6 +1151,12 @@ export default function Home() {
   // 复位点恰好两处:openKgView(打开/重开)与 closeKgView(关闭),由
   // kg-analysis-view-toggle.test.mjs 钉住。
   const [kgAnalysisOpen, setKgAnalysisOpen] = useState(false);
+  // 「AI 对这个库的理解」弹窗(P1-T7)。入口在知识图谱视图头部,弹窗本身与「图谱
+  // Schema」一样渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
+  const [understandingOpen, setUnderstandingOpen] = useState(false);
+  // 但切库必须收:面板持有的是**某一个库**的内容与忙碌位,留着它会把 A 库的理解
+  // 挂在 B 库上(与上面类型面板的切库复位同一条理由)。
+  useEffect(() => { setUnderstandingOpen(false); }, [currentNotebookId]);
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
@@ -3021,6 +3032,7 @@ export default function Home() {
       setSourceImageMaxBytes(systemConfiguration.source_image_max_bytes);
       setSourceImageMaxPerSource(systemConfiguration.source_image_max_per_source);
       setSourceImagesEnabled(systemConfiguration.source_images_enabled);
+      setAgentProfileEnabled(systemConfiguration.agent_profile_enabled);
     }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
@@ -8881,6 +8893,25 @@ export default function Home() {
         </section>
       )}
 
+      {understandingOpen && currentNotebookId && (
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setUnderstandingOpen(false); }}>
+          <FloatingModalCard storageKey="understanding.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
+              <div>
+                <h2>AI 对这个库的理解</h2>
+                <p>AI 读过这个库之后形成的印象，以及你自己的检索心得。提问时会一并带上，可以随时改。</p>
+              </div>
+              <button className="icon-button" onClick={() => setUnderstandingOpen(false)} title="Close">×</button>
+            </div>
+            <div className="source-detail-body">
+              <AgentProfilePanel notebookId={currentNotebookId} />
+            </div>
+            </>)}
+          </FloatingModalCard>
+        </section>
+      )}
+
       {graphOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setGraphOpen(false); }}>
           <FloatingModalCard storageKey="graph.window" className="utility-modal-card">
@@ -8943,6 +8974,13 @@ export default function Home() {
               >
                 <Database size={16} /> 图谱 Schema
               </button>
+              {/* 「AI 对这个库的理解」(P1-T7)。后端四个端点都走 require_notebook_read,
+                  只读成员也能看、也能改属于自己的那一份,所以这里同样不做 admin 门控;
+                  部署总闸关掉时按钮整个不渲染(判据在组件内部)。 */}
+              <UnderstandingEntryButton
+                enabled={agentProfileEnabled}
+                onOpen={() => setUnderstandingOpen(true)}
+              />
               <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
             </div>
           </div>
