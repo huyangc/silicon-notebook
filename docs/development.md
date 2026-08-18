@@ -18,7 +18,7 @@ fixtures in tests are outside this rule.
 
 - Backend endpoint bodies live in domain FastAPI routers composed by `backend/app/api/routes.py`; the aggregate is composition-only and owns router order, not product handlers or compatibility exports. Boundary tests inspect endpoint ownership on the domain routers and verify the aggregate's composition declaration semantically; they do not assume `include_router()` flattens child routes, because newer FastAPI versions retain lazy included-router nodes. Domain Pydantic models live under `backend/app/models/`; `backend/app/models/schemas.py` is a legacy compatibility facade that re-exports the same model objects for old imports.
 - One repository factory selects `SQLiteRepository` or `PostgresRepository` from `DATABASE_URL`; both compose the same runtime boundary. `RepositoryFacade` is backend-neutral over an injected `RepositoryRuntime` bundle. Application services do not assemble product SQL, inspect dialects, or import the opposite adapter. Stores own product SQL and raw row selection; established application/query components may assemble domain/application projections such as `NotebookSummaryQuery.from_row`. SQLite retains its compatibility migration/maintenance wrapper and PostgreSQL owns a bounded Psycopg pool plus checksummed migrations. Every facade operation is an explicit compatibility adapter or belongs to the source-checked one-hop delegates whose real targets match the ownership manifest. The dependency direction is factory/wrapper → facade → runtime → services → stores. `sqlite_identity.py` and `sqlite_notebook_sharing.py` remain compatibility re-export shims, and the legacy request-context, `_COPY_CHUNK`, and `_remap_json_ids` exports stay importable.
-- Notebook authorization predicates have one definition point per backend: `backend/app/repositories/{sqlite,postgres}/access_sql.py` (mirroring `mount_sql.py`; placeholder-style mirrors, always changed together). Write stays owner-only and read is owner ∪ read-only member ∪ an effective `notebook_grants` edge (`user`/`group`/`group_admins`/`everyone`, matched against that exact four-value whitelist so shadow-parked rows fail safe) — that asymmetry is a security boundary, and the owner-or-member clauses embedded in Memory read/search SQL derive from the same fragments; the deliberately kept three-step `FOR SHARE`/three-state sites in the memory stores are pinned by an allowlist and must be extended by hand whenever the read predicate widens. Read access implies mountability, but a *restricted* grant (anything short of `everyone`) only mounts while the mounting notebook itself is unshared — that unshared gate stops a borrowed library from being re-shared onward; `tier='base'`/`everyone` bases are exempt. API write endpoints declare a named capability via `app/api/deps.py::require_notebook_capability(...)` (`sources:write`, `kg:write`, `knowhow:write`, `knowledge:write`, `catalog:write`, `reports:write`, `notebook:manage`, `notebook:delete` — all currently resolving to the owner-only predicate; an unregistered name raises `KeyError` at import time), and body-level checks that resolve `notebook_id` from another id go through `notebook_capability_allowed(capability, ...)` against the same table. New write endpoints must use the capability factory, never a bare owner guard. Guards: `backend/tests/test_access_sql_contract.py` (introspective cross-backend parity, placeholder-direction checks, inline-shape scan, two-step allowlist) and `test_notebook_capability_guard.py` (AST identifier scan with empty-scan protection). Group knowledge sharing (design: `docs/superpowers/specs/2026-08-17-group-knowledge-sharing-design_zh.md`) extends the read predicate and flips capability levels without touching endpoint declarations — **except deep reports**, the one registered exception: members of a shared notebook create their own reports and reports are private to their creator, so the nine report write endpoints declare `require_notebook_read` plus an in-body row-level `reports.created_by == current user` check (`report_routes.py::_own_report_or_404`, required by an AST guard on every `{report_id}` route), list/export narrow by the same predicate in SQL, and another member's report answers 404 exactly like a missing one. `reports:write` remains registered with no consumer, reserved for P2 group-admin management actions; the anonymous share page re-checks the creator's live read access per request.
+- Notebook authorization predicates have one definition point per backend: `backend/app/repositories/{sqlite,postgres}/access_sql.py` (mirroring `mount_sql.py`; placeholder-style mirrors, always changed together). Write is owner-only, management is owner ∪ an effective `role='admin'` grant edge (`NOTEBOOK_ADMIN_SQL`, reusing the read predicate's restricted three arms plus `role='admin'` and excluding `everyone`), and read is owner ∪ read-only member ∪ an effective `notebook_grants` edge (`user`/`group`/`group_admins`/`everyone`, matched against that exact four-value whitelist so shadow-parked rows fail safe) — that `write ⊆ management ⊆ read` asymmetry is a security boundary, and the owner-or-member clauses embedded in Memory read/search SQL derive from the same fragments; the deliberately kept three-step `FOR SHARE`/three-state sites in the memory stores are pinned by an allowlist and must be extended by hand whenever the read predicate widens. Read access implies mountability, but a *restricted* grant (anything short of `everyone`) only mounts while the mounting notebook itself is unshared — that unshared gate stops a borrowed library from being re-shared onward; `tier='base'`/`everyone` bases are exempt. API write endpoints declare a named capability via `app/api/deps.py::require_notebook_capability(...)` (nine names across the frozen `{owner, admin}` value domain — P2 flipped the six content-management capabilities `sources:write`/`kg:write`/`knowhow:write`/`knowledge:write`/`catalog:write` + `notebook:manage` to admin, while `notebook:configure` (mount config + link sharing), `notebook:delete`, and `reports:write` stay owner-only; an unregistered name raises `KeyError` at import time), and body-level checks that resolve `notebook_id` from another id go through `notebook_capability_allowed(capability, ...)` against the same table. New write endpoints must use the capability factory, never a bare owner guard. Guards: `backend/tests/test_access_sql_contract.py` (introspective cross-backend parity, placeholder-direction checks, inline-shape scan, two-step allowlist) and `test_notebook_capability_guard.py` (AST identifier scan with empty-scan protection). Group knowledge sharing (design: `docs/superpowers/specs/2026-08-17-group-knowledge-sharing-design_zh.md`) extended the read predicate and flipped those capability levels without touching endpoint declarations (the Agent/MCP surface deliberately did not flip, and P2 adds the `notebook_share_requests` member-contribution approval flow: a member requests sharing a library they manage into a group they only belong to, a group admin approves by inserting the `(group, viewer)` edge in one transaction, and `status` is exact-matched `pending`/`approved`/`rejected` with withdrawal a whole-row `DELETE`) — **except deep reports**, the one registered exception: members of a shared notebook create their own reports and reports are private to their creator, so the nine report write endpoints declare `require_notebook_read` plus an in-body row-level `reports.created_by == current user` check (`report_routes.py::_own_report_or_404`, required by an AST guard on every `{report_id}` route), list/export narrow by the same predicate in SQL, and another member's report answers 404 exactly like a missing one. `reports:write` remains registered with no consumer, reserved for P2 group-admin management actions; the anonymous share page re-checks the creator's live read access per request.
 - Offline production maintenance uses `open_maintenance_cli_repository`: PostgreSQL confirmation/capability rejection happens before factory construction, the command then owns an independent-session fail-fast advisory lock, and repository close is unconditional. `BatchMaintenancePort` is the portable orchestration contract; SQLite text-vector conversion is a separate physical-format port. PostgreSQL keyset predicates and ordering both use `COLLATE "C"`, and model calls happen after page reads release database connections. Batch source inventories exclude hidden projection sources according to phase. The offline full gate never contacts PostgreSQL; real coverage belongs to the dedicated PostgreSQL 16 lane.
 - `prepare_selected_source_graph.py` composes the portable maintenance operations as an all-notebook deployment state machine: durable reverse-index pages, durable source-fact generations, cheap version/count artifact probes with bounded rebuild on mismatch, and an independent fact audit all complete under the offline-maintenance lock. The receipt is content-free and non-authoritative. Only after repository close may the script atomically write the four invisible-shadow env assignments; any phase failure preserves the prior env file. Re-entry revalidates authoritative state and skips current generations/artifacts instead of replaying large-library work.
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
@@ -29,8 +29,8 @@ fixtures in tests are outside this rule.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 49. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v49 and remains readable. Those migrations
+The current schema version is 50. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v50 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -219,8 +219,29 @@ otherwise resurrect.
 PostgreSQL migration v27 is the paired schema. Because v49/v27 adds three tables
 and one UNIQUE constraint, the forward-shadow invariants move to 77 business
 tables and 104 unique surfaces; the branch-counted bound stays at exactly 12 row
-slots (all three tables are shallow). The current pairing is
-SQLite 49 / PostgreSQL 27 / epoch 1.
+slots (all three tables are shallow).
+
+SQLite v50 adds `notebook_share_requests`, the member-contribution approval-flow
+table — a sibling of `notebook_grants` deliberately kept out of the grant table
+so the decision predicate stays status-filter-free. A plain member requests
+sharing a library **they manage** into a group they are only a **member** of; a
+group admin approves, inserting the `(group, viewer)` edge and updating the row
+status in one write transaction. The state machine is one-directional
+`pending → approved/rejected` (withdrawal is a whole-row `DELETE` by the requester
+while `pending`, never a third status), both FKs cascade, and deep copy carries no
+requests. `decided_at` may only be written as SQL `NULL` or an ISO timestamp,
+never the empty string, because it is the one nullable time column this table
+contributes to the forward shadow and PostgreSQL's `timestamptz` would type-error
+on `''`; it is deliberately not in `POSTGRES_EMPTY_TIME_SENTINELS`. The partial
+unique index `uq_share_requests_one_pending`
+(`(notebook_id, group_id, status) WHERE status = 'pending'`) caps one in-flight
+request per (library, group), and the create endpoint returns the existing pending
+row idempotently on conflict rather than 409ing; `status` is exact-matched against
+`pending`/`approved`/`rejected`, never `!=`. PostgreSQL migration v28 is the paired
+schema; because v50/v28 adds one table and one partial UNIQUE index, the
+forward-shadow invariants move to 78 business tables and 106 unique surfaces, the
+branch-counted bound staying at exactly 12 row slots (the new table is shallow
+too). The current pairing is SQLite 50 / PostgreSQL 28 / epoch 1.
 
 Run it only while application/background writers are stopped:
 
@@ -238,18 +259,18 @@ is `--database-url`, and both audit paths are transaction/read-only. The audit
 exits nonzero while any visible source is missing, running, failed,
 incomplete, or fails an integrity reconciliation.
 
-PostgreSQL migration v27 is the current paired
+PostgreSQL migration v28 is the current paired
 business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
 schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 77-table epoch-1 manifest. It also includes
+logical-key guards across the exact 78-table epoch-1 manifest. It also includes
 run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
 batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
 copy as explicit ordinals and their catalog-resolved identity sequences reseed,
 and the final forward checkpoint advances atomically to snapshot H0 after the
-v27 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
+v28 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
 owner-only real directory and exclusive 0600 temporary creation. COPY fully
 qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
 capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
@@ -259,7 +280,7 @@ across open and immediately before publication/PG commit. JSONB prefix proof
 normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
 SQL numeric columns remain type-distinct. It uses bounded
 named server cursors plus statement timeouts/cancellation polls, and performs
-full initial/final migration-derived validation of v27 tables, columns,
+full initial/final migration-derived validation of v28 tables, columns,
 constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
 is intentionally lightweight. The final SQLite fence is acquired only after
 the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
@@ -284,10 +305,10 @@ bundle may exceed the byte cap, and a same-key replacement that grows past the
 cap rolls back and defers when another actual bundle is already accepted. FK
 parents come only from the verified current source snapshot through a
 64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v27 graph has a branch-counted bound of exactly 12 row slots and no
+the fixed v28 graph has a branch-counted bound of exactly 12 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG27 catalog plans cover all
-104 unique surfaces using NULL; deterministic candidates scoped by indexable
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG28 catalog plans cover all
+106 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
 indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first
