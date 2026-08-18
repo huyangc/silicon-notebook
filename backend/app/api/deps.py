@@ -234,6 +234,13 @@ async def require_notebook_read(
 # require_notebook_write / user_can_access_notebook),所以能力值域仍是 {owner, admin}
 # ——它不新增第三档,只是把两个 owner-only 端点从 notebook:manage 拆出来单独命名,
 # 好让「哪些端点恒 owner」在能力表上一眼可见、且不会被下一次批量翻格顺手带走。
+#
+# ⚠ 第六个消费点同样是**响应投影**:Agentic Memory P1(T6)的
+# `agent_profile_routes.py::GET .../understanding` 里的 `can_edit_base` 字段,由
+# `notebook_capability_allowed("agent_profile:write", ...)` 算出,驱动前端「共享底座」
+# 块是只读渲染还是可编辑。它随本表自动跟随(不是第二份手写判定),但翻转这一格时
+# 仍要记得:判定放宽而投影不动,新获授权的成员会在这个面板上只看到只读的共享块
+# ——与上面 `can_manage_content` 同一类失配。
 _CAPABILITY_LEVELS: dict[str, str] = {
     "sources:write": "admin",
     "kg:write": "admin",
@@ -244,6 +251,7 @@ _CAPABILITY_LEVELS: dict[str, str] = {
     "notebook:manage": "admin",
     "notebook:configure": "owner",
     "notebook:delete": "owner",
+    "agent_profile:write": "admin",
 }
 
 

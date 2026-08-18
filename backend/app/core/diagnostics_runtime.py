@@ -94,6 +94,13 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("mounted-by-count",),
     ("share",),
     ("membership",),
+    # Agentic Memory P1(T6)。第二段是固定字面量,label 走 None 打 {id},scope
+    # 只在查询串/请求体里,所以整条路径可以原样进诊断快照。⚠️ 顺序敏感(同上面
+    # knowhow history/diff 的注释):字面末段 "rebuild" 必须排在通配 None 末段
+    # 之前,否则 None 先吞掉 rebuild,把它误归一成 understanding/{id}。
+    ("understanding",),
+    ("understanding", "rebuild"),
+    ("understanding", None),
     # 群组授权边(群组知识共享 P1-T3)。路径里没有任何用户内容:第二段是固定字面量,
     # 授权边 id 走 None 打 {id},主体 id / 角色都在请求体里,所以整条路径可以原样
     # 进诊断快照。

@@ -51,6 +51,11 @@ export type SystemConfiguration = {
    *  处理——这是能力位不是校验值,旧后端从未关闭过这个开关,方向必须是「不凭空弹
    *  警告」而不是「不确定就当关闭」。 */
   source_images_enabled: boolean;
+  /** 「AI 对这个库的理解」入口的能力位,直接反映后端 AGENT_PROFILE_ENABLED。
+   *  与四个理解端点同一批上线,缺失(旧后端)按 `false` 处理——不同于上面那个
+   *  字段:这里不存在「端点已经在、字段还没下发」的组合,缺字段就是这个后端
+   *  压根没有这个特性,渲染入口只会打开一个整片 404 的面板。 */
+  agent_profile_enabled: boolean;
 };
 
 export type ParserEngineCapability = {
@@ -183,6 +188,9 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
   // 存在」的组合。映射成 true 只会让新前端配旧后端时默认打开一个请求全 404 的
   // tab,与开关显式关闭时的失败形态一字不差。
   const activityViewEnabled = record.user_activity_view_enabled;
+  // 同样缺失按 false:这个字段与四个理解端点是同一批新增的,不存在「后端已经有
+  // 端点、字段却没下发」的组合——缺字段可靠地说明这个后端根本没有这个特性。
+  const agentProfileEnabled = record.agent_profile_enabled;
   const supportedExtensions = normalizedExtensions(record.supported_source_extensions)
     ?? DEFAULT_SUPPORTED_SOURCE_EXTENSIONS;
   // 图片护栏值缺失(旧后端)一律按 `null` = 「拿不到这个上限,不做本地预检」,与
@@ -206,6 +214,7 @@ function parseSystemConfiguration(value: unknown): SystemConfiguration {
     source_image_max_bytes: imageMaxBytes,
     source_image_max_per_source: imageMaxPerSource,
     source_images_enabled: imagesEnabled !== false,
+    agent_profile_enabled: agentProfileEnabled === true,
   };
 }
 

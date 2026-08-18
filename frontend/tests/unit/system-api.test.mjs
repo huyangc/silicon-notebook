@@ -31,6 +31,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_image_max_bytes: 5 * 1024 * 1024,
       source_image_max_per_source: 200,
       source_images_enabled: false,
+      agent_profile_enabled: true,
     }), {
       status: 200,
     });
@@ -58,6 +59,7 @@ test("fetchSystemConfiguration uses the authenticated small config endpoint and 
       source_image_max_bytes: 5 * 1024 * 1024,
       source_image_max_per_source: 200,
       source_images_enabled: false,
+      agent_profile_enabled: true,
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -185,6 +187,43 @@ test("fetchSystemConfiguration keeps an explicit true (new backend, switch on)",
   try {
     const config = await fetchSystemConfiguration();
     assert.equal(config.user_activity_view_enabled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchSystemConfiguration treats a missing agent_profile_enabled as unavailable (old backend)", async () => {
+  // Agentic Memory P1(T6)。这个字段与四个理解端点是同一批新增的,缺失可靠地
+  // 说明该后端根本没有这个特性——兜底成 true 会让入口按钮在打不开任何端点的
+  // 旧后端上出现。
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    // agent_profile_enabled 刻意不下发,模拟旧后端。
+  }), {
+    status: 200,
+  });
+  try {
+    const config = await fetchSystemConfiguration();
+    assert.equal(config.agent_profile_enabled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchSystemConfiguration keeps an explicit agent_profile_enabled true", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    source_upload_max_bytes: 50 * 1024 * 1024,
+    source_upload_max_files_per_batch: 20,
+    agent_profile_enabled: true,
+  }), {
+    status: 200,
+  });
+  try {
+    const config = await fetchSystemConfiguration();
+    assert.equal(config.agent_profile_enabled, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

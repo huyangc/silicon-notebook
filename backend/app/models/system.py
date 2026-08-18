@@ -62,3 +62,8 @@ class SystemConfiguration(BaseModel):
     # 类型的图片持久化，关闭时压缩包/文件夹上传里的图片内联对前端毫无意义（服务端
     # 会静默丢弃），前端据此跳过内联并提示用户。
     source_images_enabled: bool
+    # Agentic Memory P1（T6）：「AI 对这个库的理解」入口的能力位，直接反映
+    # Settings.agent_profile_enabled——与四个理解端点同一批上线，前端据此决定要不要
+    # 渲染入口按钮（见 system-api.ts 的解析逻辑：字段缺失按 false 处理，不是 true——
+    # 这个字段与端点是同批新增的，缺失只可能是旧后端，不存在「端点在但字段缺」的组合）。
+    agent_profile_enabled: bool
