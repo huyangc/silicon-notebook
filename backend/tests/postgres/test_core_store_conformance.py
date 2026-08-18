@@ -987,6 +987,97 @@ def test_share_requests_mirror_the_sqlite_approval_flow(core_stores: CoreStores)
     assert groups.list_pending_share_requests(group["id"]) == []
 
 
+def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
+    core_stores: CoreStores,
+):
+    """批准写授权边必须与删组在 `groups` 行上串行,否则留下**孤儿边** —— PG 独有的竞态。
+
+    `approve_share_request` 是真正写 `notebook_grants` 边的地方,而 `principal_id` 是多态
+    无 FK 列,`DELETE FROM groups` 的 CASCADE 带不走它(见 `delete_group` docstring)。
+    不在写事务开头锁 `groups` 行,一个并发的 `delete_group` 可以在「它清完本组的边」与
+    「approve 插入新边」之间穿过去 —— 那条边指向一个已删除的组 = 孤儿边。SQLite 的进程
+    写锁天然串行、复现不了,守卫必须住在这里(G3 conformance)。
+
+    交错是**注入**的、不靠运气:把 approve 的授权边 id 生成(`new_id("gnt")`)挂在一个
+    事件上,让 approve 停在「已锁请求行、尚未插入边」处;再放 `delete_group` 跑到它的
+    阻塞点(补锁后卡在 groups 行锁、删锁后卡在 group DELETE 的 CASCADE),最后放行
+    approve。补了 `FOR SHARE` 后两者在 groups 行上串行、终态无孤儿边;删掉那把锁,这个
+    交错必然造出孤儿边 —— 删锁变异因此必红。
+    """
+    import threading
+
+    groups = core_stores.groups
+    boss = core_stores.identity.create_user("t00112233", "password-72")
+    librarian = core_stores.identity.create_user("t00445566", "password-73")
+    group = groups.create_group(
+        name="并发组", kind="project", description="", created_by=boss.id
+    )
+    groups.upsert_member(group["id"], librarian.id, role="member", added_by=boss.id)
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="并发库"), librarian.id
+    )
+    request = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+
+    parked = threading.Event()   # approve 已锁请求行、停在插入边之前
+    release = threading.Event()  # 放行 approve 去插入边
+    original_new_id = groups.new_id
+
+    def blocking_new_id(prefix: str) -> str:
+        # 只拦授权边 id(approve 的唯一 "gnt" 调用);其余原样放行。
+        if prefix == "gnt":
+            parked.set()
+            assert release.wait(timeout=15), "approve 迟迟未被放行"
+        return original_new_id(prefix)
+
+    failures: list[BaseException] = []
+    lock = threading.Lock()
+
+    def do_approve():
+        try:
+            groups.approve_share_request(group["id"], request["id"], decided_by=boss.id)
+        except BaseException as error:  # noqa: BLE001 — surfaced below
+            with lock:
+                failures.append(error)
+
+    def do_delete():
+        try:
+            groups.delete_group(group["id"])
+        except BaseException as error:  # noqa: BLE001 — surfaced below
+            with lock:
+                failures.append(error)
+
+    groups.new_id = blocking_new_id  # type: ignore[assignment]
+    try:
+        approve_thread = threading.Thread(target=do_approve)
+        approve_thread.start()
+        assert parked.wait(timeout=15), "approve 未在插入授权边之前停住"
+
+        delete_thread = threading.Thread(target=do_delete)
+        delete_thread.start()
+        # 给 delete_group 走到它的阻塞点:补锁后卡在 groups 行锁,删锁后已删完本组的边
+        # 并卡在 group DELETE 的 CASCADE(请求行被 approve 的 FOR UPDATE 占住)。两种情形
+        # delete 都**必然仍在阻塞**——它无法在 approve 提交前独立完成整条写事务。
+        time.sleep(1.0)
+        assert delete_thread.is_alive(), "delete_group 未进入预期的阻塞态,交错未成立"
+
+        release.set()
+        approve_thread.join(timeout=30)
+        delete_thread.join(timeout=30)
+        assert not approve_thread.is_alive() and not delete_thread.is_alive()
+    finally:
+        groups.new_id = original_new_id  # type: ignore[assignment]
+        release.set()
+
+    assert not failures, failures
+    # 组已删除。
+    assert groups.get_group(group["id"]) is None
+    # 终态无孤儿边:那本库上不该再有指向已删组的授权边(补锁后 delete 会把 approve 刚写
+    # 的边一并带走;删锁则会漏下一条 principal_kind="missing" 的孤儿边,这条断言即变红)。
+    assert groups.list_grants(notebook_id) == []
+
+
 def test_group_sharing_shows_up_in_the_owner_facing_projections(
     core_stores: CoreStores,
 ):

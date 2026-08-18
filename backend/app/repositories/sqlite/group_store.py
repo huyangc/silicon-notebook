@@ -543,6 +543,13 @@ class GroupStore:
                     "VALUES (?,?,?,?, 'pending', ?)",
                     (request_id, notebook_id, group_id, requested_by, self.now()),
                 )
+                # 终态投影在**同一写事务内**读回(与 PG 侧同一结构):放到事务外的独立连接
+                # 里读,一个并发删组可以在提交与这次读之间 CASCADE 删掉本行,`row` 变 None →
+                # `_share_request_row(None)` 崩。事务内这行必然存在。SQLite 进程写锁其实已
+                # 串行化,这里主要是与 PG 保持同构、并顺带堵住理论窗口。
+                row = db.execute(
+                    _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
+                ).fetchone()
         except sqlite3.IntegrityError as exc:
             if all(
                 marker in str(exc)
@@ -552,10 +559,6 @@ class GroupStore:
                 if existing is not None:
                     return existing
             raise
-        with self.database.connect() as db:
-            row = db.execute(
-                _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
-            ).fetchone()
         return self._share_request_row(row)
 
     def list_pending_share_requests(self, group_id: str) -> list[dict]:
@@ -592,6 +595,12 @@ class GroupStore:
         `ON CONFLICT DO NOTHING` 写:已共享(同库同组已有边)时静默复用,继续把申请标
         approved——不能因为「已经共享过」就让批准失败,那会留下一条永远批不掉的申请。
         写授权边与改状态在同一事务:批准这件事要么整体生效,要么整体不生效。
+
+        ⚠ 这里**刻意没有** PG 侧那道 `_lock_group_on(mode="SHARE")`:`SqliteDatabase.write()`
+        是进程级写锁,approve 与并发的 `delete_group` 不可能交错,所以插入 `notebook_grants`
+        边与删组之间插不进第三个事务、造不出孤儿边(PG 没有那把锁,必须显式 `FOR SHARE`,
+        理由完整写在 `postgres/group_store.py::approve_share_request`)。与
+        `delete_group` / `create_share_request` 的同款后端分叉一致。
         """
         stamp = self.now()
         with self.database.write() as db:
@@ -615,7 +624,7 @@ class GroupStore:
                 "SET status='approved', decided_by=?, decided_at=? WHERE id=?",
                 (decided_by, stamp, request_id),
             )
-        with self.database.connect() as db:
+            # 终态投影在事务内读回(理由同 create:事务外读会被并发删撞成 None)。
             out = db.execute(
                 _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
             ).fetchone()
@@ -636,7 +645,7 @@ class GroupStore:
             )
             if cursor.rowcount == 0:
                 return None
-        with self.database.connect() as db:
+            # 终态投影在事务内读回(理由同 create:事务外读会被并发删撞成 None)。
             out = db.execute(
                 _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
             ).fetchone()

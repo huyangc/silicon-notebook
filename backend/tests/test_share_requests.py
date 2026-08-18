@@ -425,6 +425,35 @@ def test_decided_at_is_null_while_pending_and_iso_once_decided(repo):
     assert decided["decided_by"] == "sr-admin"
 
 
+def test_decided_at_two_state_invariant_actually_rejects_bad_values():
+    """两态断言必须真的拦得住坏值——**直接调 helper 注入** '' 与错配。
+
+    这条与 `test_decided_at_is_null_while_pending_and_iso_once_decided` 分工:那条走
+    store 的正常写路径,只经过合法值,把 `assert_share_request_decided_at` 的断言体换成
+    `return` 后它仍全绿——「加了守卫≠有效」。这条直接喂坏值,断言体一旦被删就红。
+    """
+    from app.repositories.group_rows import assert_share_request_decided_at
+
+    # 合法两态:不抛。
+    assert_share_request_decided_at("pending", None)
+    assert_share_request_decided_at("approved", "2026-08-18T00:00:00+08:00")
+    assert_share_request_decided_at("rejected", "2026-08-18T00:00:00+08:00")
+
+    # pending 却带 decided_at(尤其空串 '' —— 正是会 poison PG timestamptz 的那种)→ 抛。
+    for bad in ("", "2026-08-18T00:00:00+08:00"):
+        with pytest.raises(AssertionError):
+            assert_share_request_decided_at("pending", bad)
+
+    # 已决定却没有决定时间(None 或空串)→ 抛。
+    for status in ("approved", "rejected"):
+        for bad in (None, ""):
+            with pytest.raises(AssertionError):
+                assert_share_request_decided_at(status, bad)
+
+    # 未知 status(shadow 停车哨兵)放行、不误伤——与「status 精确匹配」红线同向。
+    assert_share_request_decided_at("__parked_sentinel__", "anything")
+
+
 def test_the_partial_unique_index_holds_at_the_store_layer(repo):
     """同库同组的第二次 pending 申请撞唯一索引 → 幂等返回既有行,不抛也不重复。"""
     store = repo._runtime.groups
