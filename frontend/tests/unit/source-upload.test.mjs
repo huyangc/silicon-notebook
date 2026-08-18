@@ -345,3 +345,35 @@ test("classifyStagedFiles: 扩展名大小写不敏感", () => {
   assert.deepEqual(accepted.map((f) => f.name), ["UPPER.PDF"]);
   assert.deepEqual(skipped, []);
 });
+
+// ------------------------------------- classifyStagedFiles：.zip 单独摘出去解包
+
+test("classifyStagedFiles: .zip 不进 accepted 也不进 skipped，单独进 bundles", () => {
+  const { accepted, skipped, bundles } = classifyStagedFiles(
+    [{ name: "notes.pdf", size: 10 }, { name: "bundle.zip", size: 10 }],
+    CLASSIFY_OPTS,
+  );
+  assert.deepEqual(accepted.map((f) => f.name), ["notes.pdf"]);
+  assert.deepEqual(skipped, [], "zip 不该被当成「类型不支持」拒收");
+  assert.deepEqual(bundles.map((f) => f.name), ["bundle.zip"]);
+});
+
+test("classifyStagedFiles: .zip 大小写不敏感，且不受单文件上限约束（解压护栏另有一套）", () => {
+  const { accepted, skipped, bundles } = classifyStagedFiles(
+    [{ name: "HUGE.ZIP", size: 10 ** 9 }],
+    CLASSIFY_OPTS, // maxBytes: 1024
+  );
+  assert.deepEqual(accepted, []);
+  assert.deepEqual(skipped, []);
+  assert.deepEqual(bundles.map((f) => f.name), ["HUGE.ZIP"]);
+});
+
+test("classifyStagedFiles: 纯 zip 批次不产生任何 accepted/skipped，只有 bundles", () => {
+  const { accepted, skipped, bundles } = classifyStagedFiles(
+    [{ name: "a.zip", size: 5 }, { name: "b.zip", size: 5 }],
+    CLASSIFY_OPTS,
+  );
+  assert.deepEqual(accepted, []);
+  assert.deepEqual(skipped, []);
+  assert.equal(bundles.length, 2);
+});

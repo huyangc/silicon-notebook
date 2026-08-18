@@ -131,6 +131,14 @@ import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, f
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
+import {
+  bundleCapsFrom, bundleErrorMessage, classifyBundleContents, collectDirectoryFiles,
+  directoryHasMarkdown, directoryTruncatedMessage, inlineTooLargeMessage,
+  processMarkdownCandidate, readDirectoryAsBundleFiles, unpackZipFile,
+  NO_MARKDOWN_IN_BUNDLE_REASON,
+} from "./bundle-intake.ts";
+import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
+import type { BundleFile } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
@@ -894,8 +902,11 @@ export default function Home() {
     DEFAULT_SUPPORTED_SOURCE_EXTENSIONS,
   );
   const [parserEngines, setParserEngines] = useState<ParserEngineCapability[]>([]);
+  // `.zip` 是前端交换格式（markdown + 图片打包上传），client-side 追加而非并入后端
+  // 下发的 supportedSourceExtensions——那份是后端解析注册表白名单，zip 从不上传给
+  // 后端，只在浏览器里解包（bundle-intake.ts）。
   const supportedSourceAccept = useMemo(
-    () => supportedSourceExtensions.map((ext) => `.${ext}`).join(","),
+    () => [...supportedSourceExtensions.map((ext) => `.${ext}`), ".zip"].join(","),
     [supportedSourceExtensions],
   );
   const supportedSourceUserHint = useMemo(
@@ -912,6 +923,28 @@ export default function Home() {
   // 最近一次「添加文件」里被跳过的文件（类型不支持/超大小/超批量），在弹窗内持久展示。
   // 不能只发 toast：它 2.2 秒即逝，批量选文件时用户根本来不及看清哪些没进列表。
   const [stagedSkipped, setStagedSkipped] = useState<SkippedStagedFile[]>([]);
+  // zip/文件夹解包在飞（解压、遍历目录、内联图片）：非 null 时整个添加文件入口必须
+  // 禁用并换成该动作语义的进行态文案（红线：长任务按钮的忙碌态）。
+  const [bundleBusyLabel, setBundleBusyLabel] = useState<string | null>(null);
+  // zip/文件夹里有多个 markdown 时，等待用户在弹窗内勾选要添加的那几个；非 null 期间
+  // 同样视为「忙碌」，禁止再拖入新的 zip/文件夹（否则第二个 zip 的选择会覆盖第一个）。
+  // selected 默认全选（设计文档 §3.1 第 2 条）。
+  const [bundleChoice, setBundleChoice] = useState<{
+    label: string;
+    files: BundleFile[];
+    candidates: BundleFile[];
+    selected: Set<string>;
+  } | null>(null);
+  // 一批里的多个 zip/文件夹按到达顺序串行处理（见 ingestBundleSources）；命中「多个
+  // markdown 需勾选」时，本 resolver 是让串行循环等到用户确认/取消才继续处理下一个
+  // 压缩包的信号——不这样做，第二个 zip 若也命中多选就会直接覆盖 bundleChoice，
+  // 静默吞掉用户还没来得及做的第一次选择。
+  const bundleChoiceResolveRef = useRef<(() => void) | null>(null);
+  // 压缩包/文件夹图片配对回执：每个成功入列的 md 一条，弹窗内持久显示，直至弹窗重置
+  // （关闭/清空/上传成功）——对齐「被跳过文件逐条持久列出、不许只发即逝 toast」的
+  // 既有红线（stagedSkipped 同一精神，这里是配对细节，独立一块面板，见
+  // bundle-upload-panels.tsx）。
+  const [bundleReceipts, setBundleReceipts] = useState<BundleReceiptEntry[]>([]);
   // 拖放悬停高亮（仅大拖放区）。
   const [dropZoneDragActive, setDropZoneDragActive] = useState(false);
   // 上传在飞:multipart 传大 PDF 可能几十秒,期间「上传 N 个文件」必须禁用改文案。后端按
@@ -2952,6 +2985,7 @@ export default function Home() {
     setStagedFiles([]);
     setStagedDocTypes([]);
     setStagedSkipped([]);
+    setBundleReceipts([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(true);
   }
@@ -2964,6 +2998,7 @@ export default function Home() {
     setStagedFiles([]);
     setStagedDocTypes([]);
     setStagedSkipped([]);
+    setBundleReceipts([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(true);
   }
@@ -3315,15 +3350,17 @@ export default function Home() {
   }
 
   // 选择器与拖放共用的入列逻辑。被跳过的文件（类型不支持/超大小/超批量）写进
-  // stagedSkipped 在弹窗内持久展示，绝不静默丢弃。
+  // stagedSkipped 在弹窗内持久展示，绝不静默丢弃；.zip 单独摘出去解包（不进后端
+  // 上传白名单，是前端交换格式，见 bundle-intake.ts）。
   function stageIncomingFiles(all: File[]) {
     if (all.length === 0) return;
-    const { accepted: picked, skipped } = classifyStagedFiles(all, {
+    const { accepted: picked, skipped, bundles } = classifyStagedFiles(all, {
       supportedExtensions: supportedSourceExtensions,
       legacyOfficeExtensions: LEGACY_OFFICE_EXTENSIONS,
       maxBytes: sourceUploadMaxBytes,
       supportedHint: supportedSourceUserHint,
     });
+    if (bundles.length > 0) void ingestBundleSources(bundles);
     // 追加而非覆盖（"继续添加文件"语义）；按 name+size 去重，避免重复入列。
     const merged = [...stagedFiles];
     const mergedTypes = [...stagedDocTypes];
@@ -3386,15 +3423,196 @@ export default function Home() {
   function handleStageDrop(event: ReactDragEvent<HTMLElement>) {
     event.preventDefault();
     setDropZoneDragActive(false);
-    const dropped = Array.from(event.dataTransfer?.files ?? []);
     if (sourceFilePickerDisabled) {
-      // 禁用态（容量满/批次满/配置加载中）下拖入的文件不入列，但必须在「已跳过」
-      // 列表逐条留痕（codex #485 R2 P2），不能无声消失。
+      // 禁用态（容量满/批次满/配置加载中/zip 或文件夹处理中）下拖入的文件不入列，
+      // 但必须在「已跳过」列表逐条留痕（codex #485 R2 P2），不能无声消失。文件夹本身
+      // 在 dataTransfer.files 里没有条目（浏览器不为目录生成 File），这里只报得出
+      // 同批里被拖入的普通文件，与改动前一致。
+      const dropped = Array.from(event.dataTransfer?.files ?? []);
       const reason = sourceFilePickerHint ?? "当前无法添加文件";
       appendStagedSkipped(dropped.map((file) => ({ name: file.name, reason })));
       return;
     }
-    stageIncomingFiles(dropped);
+    const entries = extractDroppedEntries(event.dataTransfer?.items ?? null);
+    if (entries !== null) {
+      void dispatchDroppedEntries(entries);
+      return;
+    }
+    // File and Directory Entries API 不可用（极少见的浏览器/环境）：回退到改动前的
+    // 扁平文件列表——文件夹在这条路径下本来就拿不到内容，不是新的回归。
+    stageIncomingFiles(Array.from(event.dataTransfer?.files ?? []));
+  }
+
+  // `webkitGetAsEntry` 是 File and Directory Entries API 的 WebKit 前缀方法，主流
+  // 浏览器都实现但不是强制标准；任一项拿不到就整体判「不可用」，统一回退扁平文件列表，
+  // 不做「部分用 entry、部分用 file」的混合语义。
+  function extractDroppedEntries(items: DataTransferItemList | null): FileSystemEntry[] | null {
+    if (!items) return null;
+    const entries: FileSystemEntry[] = [];
+    for (const item of Array.from(items)) {
+      if (typeof item.webkitGetAsEntry !== "function") return null;
+      const entry = item.webkitGetAsEntry();
+      if (entry) entries.push(entry);
+    }
+    return entries;
+  }
+
+  // 拖入的条目按到达顺序串行处理：文件夹递归遍历（见 ingestDroppedDirectory）；普通
+  // 文件先攒起来，最后一次性交给 stageIncomingFiles（其中会再拆出 .zip 单独解包）。
+  async function dispatchDroppedEntries(entries: FileSystemEntry[]) {
+    const plainFiles: File[] = [];
+    for (const entry of entries) {
+      if (entry.isDirectory) {
+        await ingestDroppedDirectory(entry as FileSystemDirectoryEntry);
+        continue;
+      }
+      if (!entry.isFile) continue;
+      try {
+        const file = await new Promise<File>((resolve, reject) => {
+          (entry as FileSystemFileEntry).file(resolve, reject);
+        });
+        plainFiles.push(file);
+      } catch {
+        // 读取失败（极少见，如条目在拖放后被移动/删除）：这一项当作没有到达，
+        // 不阻塞同批其余条目。
+      }
+    }
+    if (plainFiles.length > 0) stageIncomingFiles(plainFiles);
+  }
+
+  // 一批里可能有多个 zip（多选文件选择器 / 一次拖放多个 zip）：严格串行处理，避免
+  // 第二个 zip 的「多个 markdown 需勾选」弹窗覆盖第一个还没确认的选择
+  // （bundleChoiceResolveRef 声明处有完整说明）。
+  async function ingestBundleSources(files: File[]) {
+    for (const file of files) {
+      await ingestZipFile(file);
+    }
+  }
+
+  async function ingestZipFile(file: File) {
+    setBundleBusyLabel("解析压缩包…");
+    try {
+      const result = await unpackZipFile(file, bundleCapsFrom(sourceUploadMaxBytes));
+      if (!result.ok) {
+        appendStagedSkipped([{ name: file.name, reason: bundleErrorMessage(result.error) }]);
+        return;
+      }
+      await handleBundleFiles(file.name, result.files);
+    } finally {
+      setBundleBusyLabel(null);
+    }
+  }
+
+  // 递归遍历一个被拖入的文件夹：含 markdown 时按 zip 同一配对/内联流程处理；不含
+  // markdown 时保持既有拖拽行为——文件夹里的文件按普通文件逐个入列，走常规的
+  // 类型/大小/批量校验（红线：不含 md 的文件夹不能回归成「拖了没反应」）。
+  async function ingestDroppedDirectory(entry: FileSystemDirectoryEntry) {
+    setBundleBusyLabel("读取文件夹…");
+    try {
+      const { entries, truncated } = await collectDirectoryFiles(entry);
+      if (truncated) {
+        appendStagedSkipped([{ name: entry.name, reason: directoryTruncatedMessage() }]);
+        return;
+      }
+      // 只看路径（零 I/O）判断有没有 markdown：不含 md 的文件夹没必要把里面可能
+      // 几十上百个文件的全部字节都读一遍，只为了发现用不上。
+      if (!directoryHasMarkdown(entries)) {
+        stageIncomingFiles(entries.map((item) => item.file));
+        return;
+      }
+      setBundleBusyLabel("读取文件夹图片…");
+      const bundleFiles = await readDirectoryAsBundleFiles(entries);
+      await handleBundleFiles(entry.name, bundleFiles);
+    } finally {
+      setBundleBusyLabel(null);
+    }
+  }
+
+  // 虚拟文件集（zip 解包或文件夹遍历产出）→ 按 markdown 数量分派：零个报错、一个
+  // 直接处理、多个弹出勾选并挂起，直到用户确认/取消（设计文档 §3.1 第 2 条）。
+  async function handleBundleFiles(label: string, files: BundleFile[]) {
+    const classification = classifyBundleContents(files);
+    if (classification.kind === "empty") {
+      appendStagedSkipped([{ name: label, reason: NO_MARKDOWN_IN_BUNDLE_REASON }]);
+      return;
+    }
+    if (classification.kind === "single") {
+      const built = processBundleCandidate(label, classification.file, files);
+      if (built) stageIncomingFiles([built]);
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      bundleChoiceResolveRef.current = resolve;
+      setBundleChoice({
+        label,
+        files,
+        candidates: classification.candidates,
+        selected: new Set(classification.candidates.map((item) => item.path)),
+      });
+    });
+  }
+
+  // 处理单个已选中的 md：内联图片 → 记一条持久回执 → 内联后超过单文件上限则拒绝并
+  // 如实报出，否则以改写后的正文构造一个可入列的 File 并返回。**调用方负责攒批**，
+  // 用同一批结果只调用一次 stageIncomingFiles——它内部读 stagedFiles 闭包值后用
+  // 非函数式 setStagedFiles(merged) 写回，同一 tick 里连续调用多次会互相覆盖、只
+  // 剩最后一次生效（多选场景下前几个文件会静默消失），这正是本函数不在这里直接
+  // 入列的原因（confirmBundleChoice 就是踩过这个坑才拆开的）。
+  function processBundleCandidate(bundleLabel: string, mdFile: BundleFile, files: BundleFile[]): File | null {
+    const processed = processMarkdownCandidate(
+      mdFile,
+      files,
+      { uploadMaxBytes: sourceUploadMaxBytes ?? 0 },
+    );
+    if (!processed.ok) {
+      appendStagedSkipped([{
+        name: processed.fileName,
+        reason: inlineTooLargeMessage(processed.bytes, processed.limit),
+      }]);
+      return null;
+    }
+    setBundleReceipts((previous) => [
+      ...previous,
+      {
+        key: `${bundleLabel}::${processed.fileName}::${previous.length}`,
+        bundleLabel,
+        fileName: processed.fileName,
+        receipt: processed.receipt,
+      },
+    ]);
+    return new File([processed.rewritten], processed.fileName, { type: "text/markdown" });
+  }
+
+  function toggleBundleCandidate(path: string) {
+    setBundleChoice((previous) => {
+      if (!previous) return previous;
+      const selected = new Set(previous.selected);
+      if (selected.has(path)) selected.delete(path); else selected.add(path);
+      return { ...previous, selected };
+    });
+  }
+
+  function confirmBundleChoice() {
+    if (!bundleChoice) return;
+    const { label, files, candidates, selected } = bundleChoice;
+    setBundleChoice(null);
+    // 攒批后只调用一次 stageIncomingFiles（见 processBundleCandidate 的注释——同一
+    // tick 内多次调用会因非函数式 setState 互相覆盖，只剩最后一个勾选的文件入列）。
+    const built: File[] = [];
+    for (const candidate of candidates) {
+      if (!selected.has(candidate.path)) continue;
+      const file = processBundleCandidate(label, candidate, files);
+      if (file) built.push(file);
+    }
+    if (built.length > 0) stageIncomingFiles(built);
+    bundleChoiceResolveRef.current?.();
+    bundleChoiceResolveRef.current = null;
+  }
+
+  function cancelBundleChoice() {
+    setBundleChoice(null);
+    bundleChoiceResolveRef.current?.();
+    bundleChoiceResolveRef.current = null;
   }
 
   // 读文本类文件前 8KB → 批量调 /detect-doc-types → 回填仍为空（未手动选）的类型。
@@ -3504,6 +3722,7 @@ export default function Home() {
     setStagedFiles([]);
     setStagedDocTypes([]);
     setStagedSkipped([]);
+    setBundleReceipts([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(false);
     setToast(outcome.toast);
@@ -5897,16 +6116,25 @@ export default function Home() {
     || sourceUploadMaxFilesPerBatch === null;
   const sourceBatchAtCapacity = sourceUploadMaxFilesPerBatch !== null
     && stagedFiles.length >= sourceUploadMaxFilesPerBatch;
+  // zip/文件夹解包在飞，或正等待用户在下方勾选要添加的 markdown：两者都必须禁用整个
+  // 添加文件入口（红线：长任务按钮的忙碌态）——后者同样要禁，否则再拖入一个 zip 会
+  // 覆盖用户还没确认完的第一次选择（bundleChoiceResolveRef 声明处有完整说明）。
+  const bundleProcessing = bundleBusyLabel !== null || bundleChoice !== null;
   const sourceFilePickerDisabled = docCapacity.atCapacity
     || sourceUploadConfigLoading
-    || sourceBatchAtCapacity;
+    || sourceBatchAtCapacity
+    || bundleProcessing;
   const sourceFilePickerHint = docCapacity.atCapacity
     ? atDocCapacityHint
     : sourceUploadConfigLoading
       ? "正在读取单文件上传上限…"
       : sourceBatchAtCapacity
         ? `单次最多上传 ${sourceUploadMaxFilesPerBatch} 个文件，请先上传当前批次。`
-        : undefined;
+        : bundleBusyLabel
+          ? bundleBusyLabel
+          : bundleChoice
+            ? "请先在下方选择要添加的 Markdown 文件"
+            : undefined;
   const stagedUploadBlockedReason = documentUploadBlockReason(docCapacity, stagedFiles.length);
   const capabilities = workspaceCapabilities(
     currentNotebook?.access,
@@ -7345,7 +7573,7 @@ export default function Home() {
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
-              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
+              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); setBundleReceipts([]); cancelBundleChoice(); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
             {docCapacity.show && (
               <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
@@ -7368,7 +7596,13 @@ export default function Home() {
               <input type="file" multiple accept={supportedSourceAccept} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "或拖放文件"}</strong>
-              <small>{sourceUploadConfigLoading ? "正在读取上传限制…" : `支持 ${supportedSourceUserHint}。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。`}</small>
+              <small>
+                {bundleBusyLabel
+                  ? bundleBusyLabel
+                  : sourceUploadConfigLoading
+                    ? "正在读取上传限制…"
+                    : `支持 ${supportedSourceUserHint}。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。也可拖入带图片的 Markdown 压缩包或文件夹，图片会自动内联。`}
+              </small>
             </label>
             {stagedSkipped.length > 0 && (
               <div className="staged-skipped" role="alert">
@@ -7386,6 +7620,15 @@ export default function Home() {
                 </div>
               </div>
             )}
+            {bundleChoice && (
+              <BundleChoicePanel
+                choice={bundleChoice}
+                onToggle={toggleBundleCandidate}
+                onConfirm={confirmBundleChoice}
+                onCancel={cancelBundleChoice}
+              />
+            )}
+            <BundleReceiptsPanel receipts={bundleReceipts} onDismiss={() => setBundleReceipts([])} />
             <div className="source-action-row">
               <label
                 className={`source-action-button${sourceFilePickerDisabled ? " is-disabled" : ""}`}
@@ -7482,7 +7725,7 @@ export default function Home() {
                     aria-describedby={stagedUploadBlockedReason ? "staged-upload-blocked-reason" : undefined}
                     onClick={() => confirmUpload().catch(reportError)}
                   >{uploadBusy ? "上传中…" : `上传 ${stagedFiles.length} 个文件`}</button>
-                  <button className="sort-button" disabled={uploadBusy} onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
+                  <button className="sort-button" disabled={uploadBusy} onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); setBundleReceipts([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
                 </div>
               </div>
             )}
