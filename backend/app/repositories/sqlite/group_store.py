@@ -41,6 +41,7 @@ from app.repositories.ports import (
     GroupMembershipRequiredError,
     GroupNotFoundError,
     LastGroupAdminError,
+    ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -542,34 +543,44 @@ class GroupStore:
         双重条件」同一手法:承重的复核在写事务内,路由那次只用来给友好文案。
         """
         request_id = self.new_id("shr")
-        try:
-            with self.database.write() as db:
-                self._require_group_on(db, group_id)
-                if self._role_on(db, group_id, requested_by) is None:
-                    raise GroupMembershipRequiredError(group_id)
-                db.execute(
-                    "INSERT INTO notebook_share_requests "
-                    "(id,notebook_id,group_id,requested_by,status,created_at) "
-                    "VALUES (?,?,?,?, 'pending', ?)",
-                    (request_id, notebook_id, group_id, requested_by, self.now()),
-                )
-                # 终态投影在**同一写事务内**读回(与 PG 侧同一结构):放到事务外的独立连接
-                # 里读,一个并发删组可以在提交与这次读之间 CASCADE 删掉本行,`row` 变 None →
-                # `_share_request_row(None)` 崩。事务内这行必然存在。SQLite 进程写锁其实已
-                # 串行化,这里主要是与 PG 保持同构、并顺带堵住理论窗口。
-                row = db.execute(
-                    _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
-                ).fetchone()
-        except sqlite3.IntegrityError as exc:
-            if all(
-                marker in str(exc)
-                for marker in _SHARE_REQUEST_PENDING_UNIQUE_MARKERS
-            ):
+        # 最多两轮:第一轮撞唯一索引后,若那条 pending 恰好在恢复期间被决定/撤回,谓词
+        # 已不再覆盖它,第二轮插得进去。两轮都撞且都消失(病理性反复)给稳定冲突,不 500。
+        for _attempt in range(2):
+            try:
+                with self.database.write() as db:
+                    self._require_group_on(db, group_id)
+                    if self._role_on(db, group_id, requested_by) is None:
+                        raise GroupMembershipRequiredError(group_id)
+                    db.execute(
+                        "INSERT INTO notebook_share_requests "
+                        "(id,notebook_id,group_id,requested_by,status,created_at) "
+                        "VALUES (?,?,?,?, 'pending', ?)",
+                        (request_id, notebook_id, group_id, requested_by, self.now()),
+                    )
+                    # 终态投影在**同一写事务内**读回(与 PG 侧同一结构):放到事务外的独立
+                    # 连接里读,一个并发删组可以在提交与这次读之间 CASCADE 删掉本行,`row`
+                    # 变 None → `_share_request_row(None)` 崩。事务内这行必然存在。
+                    row = db.execute(
+                        _SHARE_REQUEST_SELECT + "WHERE sr.id=?", (request_id,)
+                    ).fetchone()
+                return self._share_request_row(row)
+            except sqlite3.IntegrityError as exc:
+                if not all(
+                    marker in str(exc)
+                    for marker in _SHARE_REQUEST_PENDING_UNIQUE_MARKERS
+                ):
+                    raise
                 existing = self._pending_share_request(notebook_id, group_id)
-                if existing is not None:
-                    return existing
-            raise
-        return self._share_request_row(row)
+                if existing is None:
+                    # 恢复期间那条 pending 被决定/撤回了 —— 重试一次插入,绝不让原始的
+                    # 唯一违例冒成 500(codex #519 R3)。
+                    continue
+                if existing["requested_by"] != requested_by:
+                    # 幂等**只对本人成立**:把别人的申请行返回给他,会让界面报成功而自查
+                    # 列表里没有、也撤不掉(codex #519 R3)。
+                    raise ShareRequestAlreadyPendingError(notebook_id, group_id) from exc
+                return existing
+        raise ShareRequestAlreadyPendingError(notebook_id, group_id)
 
     def list_pending_share_requests(self, group_id: str) -> list[dict]:
         """组管理员的审核队列:该组全部**待审批**申请。`status='pending'` 精确匹配。"""

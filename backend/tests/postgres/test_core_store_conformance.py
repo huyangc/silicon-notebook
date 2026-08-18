@@ -1059,8 +1059,121 @@ def test_share_request_authorization_rechecks_mirror_the_sqlite_store(
         )
 
 
+def test_share_request_conflict_is_narrowed_to_the_requester_on_postgres(
+    core_stores: CoreStores,
+):
+    """幂等按申请者收窄 + 冲突恢复期间被决定则重试插入(codex #519 R3,PG 侧)。
+
+    PG 的分类走 `exc.diag.constraint_name`(SQLite 走异常文本),两侧分叉了不会报错——
+    只会让某一个后端把别人的申请行交给你,或者把一次唯一违例冒成 500。
+    """
+    from app.repositories.ports import ShareRequestAlreadyPendingError
+
+    groups = core_stores.groups
+    boss = core_stores.identity.create_user("w00112233", "password-77")
+    other = core_stores.identity.create_user("w00445566", "password-78")
+    group = groups.create_group(
+        name="冲突组", kind="project", description="", created_by=boss.id
+    )
+    groups.upsert_member(group["id"], other.id, role="member", added_by=boss.id)
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="冲突库"), boss.id
+    )
+
+    mine = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=boss.id
+    )
+    # 本人重复提交 → 幂等返回同一行。
+    assert groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=boss.id
+    )["id"] == mine["id"]
+    # 别人提交 → 明确冲突,绝不把 boss 的行交给他。
+    with pytest.raises(ShareRequestAlreadyPendingError):
+        groups.create_share_request(
+            notebook_id, group_id=group["id"], requested_by=other.id
+        )
+
+    # 冲突恢复期间那条 pending 被决定 → 重试插入而不是让 UniqueViolation 冒成 500。
+    original = groups._pending_share_request
+    calls: list[int] = []
+
+    def decide_then_answer(nb_id, gid):
+        if not calls:
+            calls.append(1)
+            groups.approve_share_request(gid, mine["id"], decided_by=boss.id)
+        return original(nb_id, gid)
+
+    groups._pending_share_request = decide_then_answer  # type: ignore[assignment]
+    try:
+        retried = groups.create_share_request(
+            notebook_id, group_id=group["id"], requested_by=boss.id
+        )
+    finally:
+        groups._pending_share_request = original  # type: ignore[assignment]
+    assert calls, "注入未生效——没有走到冲突恢复路径"
+    assert retried["status"] == "pending" and retried["id"] != mine["id"]
+
+
+@pytest.mark.parametrize(
+    "decision,suffix",
+    [("approve_share_request", "01"), ("reject_share_request", "02")],
+)
+def test_both_decisions_take_the_group_lock_before_rechecking(
+    core_stores: CoreStores, decision: str, suffix: str
+):
+    """批准**与驳回**都必须先锁 `groups` 行,再复核审批资格(codex #519 R3)。
+
+    只有 approve 拿锁时,reject 的事务内复核仍留着 TOCTOU 窗口:一个并发的降级事务可以
+    在复核读到 `admin` 之后、`UPDATE` 之前提交,被降级的人照样把别人的申请判死。锁把
+    「复核 + 决定」整段与成员变更串起来,两条路径的锁序必须一致。
+
+    判据用 `pg_locks`:在决定的写事务**内部**(注入在资格复核这一步)查本事务是否已经
+    持有 `groups` 那一行的行锁。持锁 = 真的锁过;没持 = 复核在裸奔。
+    """
+    groups = core_stores.groups
+    boss = core_stores.identity.create_user(f"x001122{suffix}", "password-79")
+    librarian = core_stores.identity.create_user(f"x004455{suffix}", "password-80")
+    group = groups.create_group(
+        name="锁序组", kind="project", description="", created_by=boss.id
+    )
+    groups.upsert_member(group["id"], librarian.id, role="member", added_by=boss.id)
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="锁序库"), librarian.id
+    )
+    request = groups.create_share_request(
+        notebook_id, group_id=group["id"], requested_by=librarian.id
+    )
+
+    original = groups._require_share_decider_on
+    held: list[int] = []
+
+    def observe_then_recheck(connection, gid, decided_by, is_system_admin):
+        # 本事务此刻是否已持有 groups 上的行锁?`transactionid`/`tuple` 锁都算。
+        held.append(
+            connection.execute(
+                "SELECT COUNT(*) FROM pg_locks l "
+                "JOIN pg_class c ON c.oid = l.relation "
+                "WHERE c.relname = 'groups' AND l.pid = pg_backend_pid() "
+                "AND l.granted"
+            ).fetchone()["count"]
+        )
+        return original(connection, gid, decided_by, is_system_admin)
+
+    groups._require_share_decider_on = observe_then_recheck  # type: ignore[assignment]
+    try:
+        getattr(groups, decision)(group["id"], request["id"], decided_by=boss.id)
+    finally:
+        groups._require_share_decider_on = original  # type: ignore[assignment]
+
+    assert held, "资格复核没被调用——注入失效"
+    assert held[0] > 0, (
+        f"{decision} 在复核审批资格时没有持有 groups 行锁,TOCTOU 窗口仍在"
+    )
+
+
 def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
     core_stores: CoreStores,
+    postgres_settings: Settings,
 ):
     """批准写授权边必须与删组在 `groups` 行上串行,否则留下**孤儿边** —— PG 独有的竞态。
 
@@ -1075,8 +1188,25 @@ def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
     阻塞点(补锁后卡在 groups 行锁、删锁后卡在 group DELETE 的 CASCADE),最后放行
     approve。补了 `FOR SHARE` 后两者在 groups 行上串行、终态无孤儿边;删掉那把锁,这个
     交错必然造出孤儿边 —— 删锁变异因此必红。
+
+    ⚠ **放行判据必须是「delete 真的被锁挡住了」而不是「睡够了 N 秒」**(codex #519 R3
+    必修 A)。本用例最初 `sleep(1.0)` 再断言线程还活着,而部署的
+    `postgres_lock_timeout_seconds` 在测试夹具里正是 **1 秒** —— 等于让被测的交错去和
+    生产的锁超时护栏赛跑:本机跑赢、CI 慢一点就跑输,`delete_group` 抛
+    `LockNotAvailable` 而不是等到锁。改成直接观察 `pg_stat_activity`:轮询到那个后端
+    确实处于 `wait_event_type='Lock'` 就立刻放行,持锁窗口因此是毫秒级、与机器快慢无关,
+    而且比睡一秒**证明得更强**(睡够只证明「时间过去了」,轮询证明「它真的卡在锁上」)。
+    观察连接刻意**绕开连接池**(池上限 2 已被两个线程占满,再取一条会卡在
+    `pool_acquire_timeout`),用一条独立的 psycopg 连接只读 `pg_stat_activity`。
+
+    刻意**不**在生产代码里把 `LockNotAvailable` 收敛成「组已不在」→ 404:①本用例里超时
+    的是 `delete_group` 那一侧,在 approve 里捕获根本修不到这个失败;②更重要的是,把锁
+    超时翻译成业务层的「找不到」会把真正的锁竞争静默吞掉 —— `lock_timeout` 正是部署用来
+    暴露病理性争用的告警,让它变成一句「这条申请不存在」是拿掉体温计。
     """
     import threading
+
+    import psycopg
 
     groups = core_stores.groups
     boss = core_stores.identity.create_user("t00112233", "password-72")
@@ -1120,6 +1250,25 @@ def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
             with lock:
                 failures.append(error)
 
+    def wait_until_a_backend_blocks_on_a_lock(deadline_seconds: float = 10.0) -> bool:
+        """轮询到确有后端卡在锁等待上为止。绕开连接池(池上限 2 已被两个线程占满)。
+
+        判据是 PostgreSQL 自己报的 `wait_event_type='Lock'`,不是「睡够了多久」——
+        持锁窗口因此是毫秒级,与机器快慢无关,也就不会再和 `lock_timeout` 赛跑。
+        """
+        end = time.monotonic() + deadline_seconds
+        with psycopg.connect(postgres_settings.database_url) as observer:
+            while time.monotonic() < end:
+                blocked = observer.execute(
+                    "SELECT COUNT(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() "
+                    "AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+                ).fetchone()[0]
+                if blocked:
+                    return True
+                time.sleep(0.01)
+        return False
+
     groups.new_id = blocking_new_id  # type: ignore[assignment]
     try:
         approve_thread = threading.Thread(target=do_approve)
@@ -1128,10 +1277,10 @@ def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
 
         delete_thread = threading.Thread(target=do_delete)
         delete_thread.start()
-        # 给 delete_group 走到它的阻塞点:补锁后卡在 groups 行锁,删锁后已删完本组的边
-        # 并卡在 group DELETE 的 CASCADE(请求行被 approve 的 FOR UPDATE 占住)。两种情形
-        # delete 都**必然仍在阻塞**——它无法在 approve 提交前独立完成整条写事务。
-        time.sleep(1.0)
+        # delete_group 走到它的阻塞点:补锁后卡在 groups 行锁,删锁后已删完本组的边并卡在
+        # group DELETE 的 CASCADE(请求行被 approve 的 FOR UPDATE 占住)。两种情形它都必然
+        # 在**锁**上等待——观察到就立刻放行,绝不多持一毫秒。
+        assert wait_until_a_backend_blocks_on_a_lock(), "delete_group 未进入锁等待,交错未成立"
         assert delete_thread.is_alive(), "delete_group 未进入预期的阻塞态,交错未成立"
 
         release.set()

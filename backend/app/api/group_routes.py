@@ -75,6 +75,7 @@ from app.repositories.ports import (
     GroupMembershipRequiredError,
     GroupNotFoundError,
     LastGroupAdminError,
+    ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
 )
 
@@ -479,7 +480,10 @@ def create_share_request_route(
     的库在,但他不知道那个组存不存在,统一 404 不泄露组的存在性。
 
     幂等:同库同组已有一条待审批申请时,`create_share_request` **返回既有那条**而不是
-    报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。
+    报 409——申请者刷新页面重复点提交是常见操作,不该弹错误(裁决 P2-5)。但幂等**只对
+    本人成立**:一本库可以有多个管理权持有者(owner + 组管理员),别人已经提过时给
+    409 而不是把他的申请行返回给你——那会让界面报成功、自查列表里查不到、也撤不掉
+    (codex #519 R3)。冲突文案刻意**不点名申请者**。
 
     ⚠ 这里的前置查询**只用来给出友好文案**,承重的复核在 store 的写事务里:组在守卫通过
     之后被删 → `GroupNotFoundError`;申请人在那之后被移出组 → `GroupMembershipRequiredError`
@@ -496,6 +500,8 @@ def create_share_request_route(
         )
     except (GroupNotFoundError, GroupMembershipRequiredError):
         raise _group_not_found()
+    except ShareRequestAlreadyPendingError:
+        raise user_error(409, "这本笔记本已有一条待该群组审批的申请")
     return ShareRequestItem(**request)
 
 

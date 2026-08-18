@@ -34,6 +34,7 @@ from app.repositories.ports import (
     GroupMembershipRequiredError,
     GroupNotFoundError,
     LastGroupAdminError,
+    ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
 )
 from app.repositories.postgres._store_utils import (
@@ -510,28 +511,36 @@ class GroupStore:
         相同:路由那次查询与插入之间,`requested_by` 可以被移出组(codex #519 R2 P2-1)。
         """
         request_id = self.new_id("shr")
-        try:
-            with self.database.write() as connection:
-                self._lock_group_on(connection, group_id, mode="SHARE")
-                if self._role_on(connection, group_id, requested_by) is None:
-                    raise GroupMembershipRequiredError(group_id)
-                connection.execute(
-                    "INSERT INTO notebook_share_requests "
-                    "(id,notebook_id,group_id,requested_by,status,created_at) "
-                    "VALUES (%s,%s,%s,%s, 'pending', %s)",
-                    (request_id, notebook_id, group_id, requested_by, self.now()),
-                )
-                # 终态投影在事务内读回(理由同 approve:事务外读会被并发删撞成 None)。
-                row = connection.execute(
-                    _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
-                ).fetchone()
-        except errors.UniqueViolation as exc:
-            if exc.diag.constraint_name == "uq_share_requests_one_pending":
+        # 见 SQLite 侧同名方法:最多两轮,按申请者收窄的幂等 + 恢复期间被决定就重试插入。
+        for _attempt in range(2):
+            try:
+                with self.database.write() as connection:
+                    self._lock_group_on(connection, group_id, mode="SHARE")
+                    if self._role_on(connection, group_id, requested_by) is None:
+                        raise GroupMembershipRequiredError(group_id)
+                    connection.execute(
+                        "INSERT INTO notebook_share_requests "
+                        "(id,notebook_id,group_id,requested_by,status,created_at) "
+                        "VALUES (%s,%s,%s,%s, 'pending', %s)",
+                        (request_id, notebook_id, group_id, requested_by, self.now()),
+                    )
+                    # 终态投影在事务内读回(理由同 approve:事务外读会被并发删撞成 None)。
+                    row = connection.execute(
+                        _SHARE_REQUEST_SELECT + "WHERE sr.id=%s", (request_id,)
+                    ).fetchone()
+                return self._share_request_row(row)
+            except errors.UniqueViolation as exc:
+                if exc.diag.constraint_name != "uq_share_requests_one_pending":
+                    raise
+                # UniqueViolation 会中止 PG 事务,所以回读必须在 `write()` 块**之外**、
+                # 整体回滚之后另起一个只读事务。
                 existing = self._pending_share_request(notebook_id, group_id)
-                if existing is not None:
-                    return existing
-            raise
-        return self._share_request_row(row)
+                if existing is None:
+                    continue  # 恢复期间那条 pending 被决定/撤回 —— 重试一次插入。
+                if existing["requested_by"] != requested_by:
+                    raise ShareRequestAlreadyPendingError(notebook_id, group_id) from exc
+                return existing
+        raise ShareRequestAlreadyPendingError(notebook_id, group_id)
 
     def list_pending_share_requests(self, group_id: str) -> list[dict]:
         with self.database.connect() as connection:
@@ -648,9 +657,20 @@ class GroupStore:
         decided_by_is_system_admin: bool = False,
     ) -> "dict | None":
         """见 SQLite 侧同名方法:审批资格复核**先于** UPDATE 发出——驳回同样是终态决定,
-        被降级的人不该还能做。"""
+        被降级的人不该还能做。
+
+        ⚠ 锁序与 `approve_share_request` **必须一致**:先 `groups` 行 `FOR SHARE`,再复核
+        资格。少了这把锁,资格复核自己仍有 TOCTOU 窗口——一个并发的降级事务可以在复核读到
+        `admin` 之后、`UPDATE` 之前提交,于是被降级的人照样把别人的申请判死(codex #519
+        R3)。approve 拿了锁而 reject 没拿,等于同一条纪律只兑现了一半。组已被并发删掉 →
+        `GroupNotFoundError` → 落 `None`(路由 404),与 approve 同款收敛。
+        """
         stamp = self.now()
         with self.database.write() as connection:
+            try:
+                self._lock_group_on(connection, group_id, mode="SHARE")
+            except GroupNotFoundError:
+                return None
             self._require_share_decider_on(
                 connection, group_id, decided_by, decided_by_is_system_admin
             )
