@@ -651,19 +651,30 @@ class GroupStore:
             ).fetchone()
         return self._share_request_row(out)
 
-    def delete_share_request(self, notebook_id: str, request_id: str) -> str:
-        """撤回:仅 `status='pending'` 可删(申请者自己的动作,不写 `decided_*`)。
+    def delete_share_request(
+        self, notebook_id: str, request_id: str, requester_id: str
+    ) -> str:
+        """撤回:仅**申请者本人**、且仅 `status='pending'` 可删(不写 `decided_*`)。
 
         返回 `"deleted"` / `"not_found"`;已决定抛 `ShareRequestNotPendingError`(→ 409)。
-        判据按**精确**状态匹配 `status == 'pending'`,绝不用否定式。`notebook_id` 一起验
-        (WHERE 带两列):只按 request_id 删等于让「我有一本库的管理权」变成「我能撤任何库
-        上的任何申请」。
+        判据按**精确**状态匹配 `status == 'pending'`,绝不用否定式。
+
+        WHERE 带**三**列,每一列都在挡一种越权:
+        * `notebook_id` —— 只按 request_id 删等于让「我有一本库的管理权」变成「我能撤任何
+          库上的任何申请」;
+        * `requested_by` —— 撤回是**申请者自己的动作**(裁决 P2-2:它不是决定,所以不写
+          `decided_by`/`decided_at`)。少了这一列,同一本库上的**另一位**管理员就能撤掉
+          别人提交的申请:能力守卫只证明「这个人对这本库有管理权」,证明不了「这条申请是
+          他提的」(codex #519 R1 P1)。判据取 `requested_by` 而不是「有没有管理权」,
+          因为申请人可能在提交后失去管理权,那时他仍应能撤回自己那条。
+        * 不属于自己的申请与根本不存在的申请**同样返回 `not_found`** —— 不泄露「这本库上
+          存在一条别人的待审批申请」。
         """
         with self.database.write() as db:
             row = db.execute(
                 "SELECT status FROM notebook_share_requests "
-                "WHERE id=? AND notebook_id=?",
-                (request_id, notebook_id),
+                "WHERE id=? AND notebook_id=? AND requested_by=?",
+                (request_id, notebook_id, requester_id),
             ).fetchone()
             if row is None:
                 return "not_found"
@@ -673,8 +684,9 @@ class GroupStore:
             # safe。
             if row["status"] == "pending":
                 db.execute(
-                    "DELETE FROM notebook_share_requests WHERE id=? AND notebook_id=?",
-                    (request_id, notebook_id),
+                    "DELETE FROM notebook_share_requests "
+                    "WHERE id=? AND notebook_id=? AND requested_by=?",
+                    (request_id, notebook_id, requester_id),
                 )
                 return "deleted"
             raise ShareRequestNotPendingError(request_id)
