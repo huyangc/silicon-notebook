@@ -369,6 +369,18 @@ export type Evidence = {
   element_id: string;
 };
 
+/**
+ * 一张「本段附图」：绑定证据里带图注的图片元素（图注命中检索才带得出）。
+ * 模型不看图——这是响应装配层的展示增强，不是模型引用过的证据，前端必须与
+ * 引证内容视觉区分。`caption` 为空串代表该图没有图注，由前端只渲染图不渲染说明。
+ * 真源：`backend/app/models/ask.py CitationImage`。
+ */
+export type CitationImage = {
+  element_id: string;
+  asset_id: string;
+  caption: string;
+};
+
 export type AnswerAnchor = {
   key: string;
   object_id: string;
@@ -384,6 +396,8 @@ export type AnswerAnchor = {
   element_id?: string;
   tier?: string;
   notebook_id?: string;
+  /** 空数组同 exclude_if 惯例整体缺席；旧持久化答案缺这个键时按「无附图」回退。 */
+  images?: CitationImage[];
 };
 
 export type Citation = {
@@ -395,6 +409,8 @@ export type Citation = {
   source_file_name?: string;
   tier?: string;
   notebook_id?: string;
+  /** 空数组同 exclude_if 惯例整体缺席；旧持久化答案缺这个键时按「无附图」回退。 */
+  images?: CitationImage[];
 };
 
 /** 可验证的 Knowhow 行枚举。`cells` 的键是 column id；点击行可打开权威完整单元格。 */

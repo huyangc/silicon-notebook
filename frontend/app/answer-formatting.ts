@@ -1,3 +1,14 @@
+/**
+ * 一张「本段附图」的镜像形状（同 workspace-model.ts CitationImage，真源
+ * backend/app/models/ask.py CitationImage）。这个文件的其余类型都是自成一体的
+ * "Like" 镜像而不 import workspace-model，本类型跟随同一惯例单独声明一份。
+ */
+export type CitationImageLike = {
+  element_id: string;
+  asset_id: string;
+  caption: string;
+};
+
 export type AnswerAnchorLike = {
   key: string;
   object_id: string;
@@ -12,6 +23,10 @@ export type AnswerAnchorLike = {
   source_id?: string;
   element_id?: string;
   tier?: string;
+  // 检索结果带图(T1/T2)：与 CitationLike.images 同一惯例——只在绑定证据含带图注
+  // 图片元素时非空,旧答案/无图引用整体缺席这个字段。渲染层(SelectedReferenceDetail)
+  // 二选一读取,与 knowhow/notebook_id 的 anchor 优先、citation 兜底顺序一致。
+  images?: CitationImageLike[];
   // 多领域基准库(Task 14)：只在跨库命中(federated retrieval 从一个挂载的参考库
   // 找到、并非本次 ask 所在 notebook 的证据)时非空；本库内证据这个字段缺席
   // (后端 exclude_if，见 schemas.py AnswerAnchor.notebook_id)。引用徽章据此查
@@ -34,6 +49,9 @@ export type CitationLike = {
   quoted_span: string;
   source_file_name?: string;
   tier?: string;
+  // 检索结果带图(T1/T2)：命中的引用才有此字段，非命中/旧答案整体缺席，见
+  // AnswerAnchorLike.images 的完整注释。
+  images?: CitationImageLike[];
   // 多领域基准库(Task 14)：与 AnswerAnchorLike.notebook_id 同一惯例——只在跨库
   // 命中时非空，供引用徽章查 id→name 映射标来源库名。见 schemas.py
   // Citation.notebook_id 的完整注释。
