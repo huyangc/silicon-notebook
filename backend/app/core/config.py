@@ -687,6 +687,14 @@ class Settings(BaseSettings):
     # ``enabled=false``、前端不显示入口,零额外查询。
     agent_profile_enabled: bool = Field(
         True, validation_alias="AGENT_PROFILE_ENABLED")
+    # 两条巡固链路各自的触发阈值(确定性闸,零模型调用):底座按「来源增删/重解析」
+    # 累计次数,覆盖层按该成员「已完成提问」次数(深度报告完成直接达阈)。``ge=1``
+    # 而不是允许 0:0 会让每一次来源变更/每一次提问都排一次有界 LLM 调用,那不是
+    # 「更灵敏」,是把一个后台整理变成随每次写入触发的同步成本。
+    agent_profile_base_trigger: int = Field(
+        5, ge=1, validation_alias="AGENT_PROFILE_BASE_TRIGGER")
+    agent_profile_overlay_trigger: int = Field(
+        10, ge=1, validation_alias="AGENT_PROFILE_OVERLAY_TRIGGER")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

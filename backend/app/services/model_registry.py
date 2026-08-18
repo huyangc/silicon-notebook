@@ -74,6 +74,7 @@ _WORKLOAD_LABELS = MappingProxyType({
     "knowhow_optimize": "经验表述优化",
     "knowhow_reformat": "经验格式整理",
     "knowhow_complete": "经验空列补全",
+    "agent_profile_consolidate": "库理解整理",
     "retrieval_query_embedding": "检索查询向量",
     "source_element_embedding": "来源元素向量",
     "chunk_embedding": "来源分块向量",
@@ -123,6 +124,10 @@ WORKLOADS = workload_map(
         "kg_conflict_review": "background", "schema_induction": "interactive",
         "memory_preview": "interactive", "knowhow_optimize": "interactive",
         "knowhow_reformat": "interactive", "knowhow_complete": "interactive",
+        # Agentic Memory P1: one bounded call per consolidation run, fired by a
+        # deterministic threshold and never by a user waiting on a response —
+        # "background", the same priority class as the other write-path jobs.
+        "agent_profile_consolidate": "background",
     },
     embedding={
         "retrieval_query_embedding": "interactive",

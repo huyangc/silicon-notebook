@@ -17,6 +17,7 @@ from app.repositories.ports import (
     SharingStorePort,
 )
 from app.repositories.source_files import SourceFileStore
+from app.services.agent_profile_job import AgentProfileConsolidationService
 from app.services.catalog_job import CommandCatalogService
 from app.services.kg_analysis import KgAnalysisService
 from app.services.kg_mutation import KgMutationCoordinator
@@ -412,6 +413,20 @@ class RepositoryRuntime:
             knowledge=self.knowledge,
             unified_kg=self.unified_kg,
         )
+        # Agentic Memory P1 (T4):「AI 对这个库的理解」的巡固任务。后端中性——只吃
+        # 端口(agent_profile/database/sources/queries)与 models/event_log 两个进程级
+        # 对象,故与 command_catalog 同处这个中性 runtime。**单例是必要的而非顺手**:
+        # 阈值闸与单飞都落在持久行上,但「谁来提交后台线程」必须只有一份实现,来源
+        # 管线的 hook 与(T6 的)手动重建按钮才会走同一条 claim→submit 路径。
+        self.agent_profile_jobs = AgentProfileConsolidationService(
+            settings=self.settings,
+            profiles=self.agent_profile,
+            database=self.database,
+            sources=self.source_store,
+            queries=self.queries,
+            models=self.models,
+            event_log=self.event_log,
+        )
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
         # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
@@ -721,6 +736,7 @@ class RepositoryRuntime:
             notebook_meta_sources=notebook_meta_sources,
             apply_notebook_meta=apply_notebook_meta,
             maybe_enqueue_scale_fold=self.scale_artifacts.maybe_enqueue_fold,
+            note_corpus_change=self.agent_profile_jobs.note_corpus_change,
             make_persist_image=make_persist_image,
             delete_source_images=delete_source_images,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,

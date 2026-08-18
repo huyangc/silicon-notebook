@@ -43,6 +43,7 @@ _SAFE_JOB_PREFIXES = (
     ("knowhow-asset-sweep:", "knowhow-asset-sweep"),
     ("knowhow-project-", "knowhow-project"),
     ("conflictresolve-", "conflictresolve"),
+    ("agentprofile-", "agentprofile"),
     ("catalog-", "catalog"),
     ("mergereview-", "mergereview"),
     ("report-plan-", "report-plan"),
@@ -79,6 +80,11 @@ _HEAVY_MAINTENANCE_OPERATIONS = frozenset({
 _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     "papermeta",
     "catalog",
+    # 「AI 对这个库的理解」的巡固:一次有界 LLM 调用 + 几条有界聚合查询,与
+    # catalog/papermeta 同量级,故进**轻活**池。放进重活池会被小时级的全库重建
+    # 饿死——而它每 N 次来源变更才排一次,饿死等于这个特性在活跃的大库上永远
+    # 不生效(恰恰是最需要它的库)。
+    "agentprofile",
     "knowhow-project",
     "knowhow-legacy-reproject",
     "knowhow-asset-sweep",

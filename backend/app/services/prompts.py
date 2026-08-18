@@ -1247,3 +1247,73 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
         f"Sections with hit counts:\n{probe_block}\n\n"
         'Return JSON only: {"verdicts":[{"title":"","sufficiency":"","gap_note":"","action":""}]}'
     )
+
+
+# ---------------------------------------------------------------------------
+# Agentic Memory P1 (T4): the shared-base consolidation call.
+#
+# ONE bounded call per run, and the ONLY model call this feature makes on the
+# write path. Its inputs are aggregate corpus statistics plus the blocks that
+# already exist — deliberately never any member's usage data (design §5.3: the
+# isolation is structural, in the reading SQL, not a "please don't" in this
+# prompt).
+# ---------------------------------------------------------------------------
+
+AGENT_PROFILE_SCHEMA_HINT = (
+    '{"blocks":[{"label":"corpus_shape","value":"","evidence":["source_id"]}]}'
+)
+
+
+def agent_profile_base_prompt(
+    corpus_block: str,
+    current_block: str,
+    *,
+    value_max_chars: int,
+) -> str:
+    """The shared-base ("what kind of library is this") consolidation prompt.
+
+    Three rules carry the whole design here, and each one exists because its
+    absence produces a specific failure this feature cannot tolerate:
+
+    * **Omission is a valid answer.** The inputs are aggregates; a statistic
+      about how many tables a library holds simply cannot establish which
+      concepts recur in it. A model told to fill every block will invent the
+      ones it has no basis for, and an invented block then rides in EVERY
+      planning prompt of every later run.
+    * **User-authored blocks are authority, not drafts** (design §5.4). They
+      are also the cold-start channel: a user telling the agent what the
+      library is must not be overwritten by a job that knows only counts.
+    * **One line, hard character cap.** The renderer collapses whitespace
+      anyway (``agent_profile_block._clean``), but a value written long is a
+      value truncated later — better spent by the model than cut by a slice.
+    """
+    return (
+        "You maintain an agent's shared understanding of ONE knowledge library, "
+        "so that later retrieval in this library can be aimed better. You are "
+        "given aggregate statistics about the library's documents and extracted "
+        "knowledge, plus the understanding blocks that already exist.\n"
+        "Produce at most three blocks, with these exact labels:\n"
+        "- corpus_shape: what kind of library this is; how its material is "
+        "structured.\n"
+        "- key_entities: names/abbreviations/concept families that recur across "
+        "this library.\n"
+        "- corpus_gaps: gaps and parse-quality problems on the MATERIAL side "
+        "(documents that yielded nothing, kinds of content that are absent).\n"
+        "Rules:\n"
+        "1. Every claim must follow from the statistics below. If they do not "
+        "support a block, OMIT that block entirely — an omitted block keeps its "
+        "previous value, an invented one misleads every later search. Never "
+        "guess, and never pad a block by restating raw numbers.\n"
+        "2. A block marked (user-authored) was written by a person: it is "
+        "authoritative. Keep its assertions intact — you may add to it, never "
+        "contradict or drop what it says.\n"
+        f"3. Each value is ONE line of plain text, at most {value_max_chars} "
+        "characters, no Markdown and no line breaks. Write in the language the "
+        "existing blocks use; default to Chinese.\n"
+        "4. evidence lists the document ids that support the block, and may only "
+        "contain ids that appear verbatim in the statistics below. Use an empty "
+        "list when no single document is the reason.\n"
+        f"Return JSON only, matching: {AGENT_PROFILE_SCHEMA_HINT}\n\n"
+        f"{corpus_block}\n\n"
+        f"{current_block}"
+    )

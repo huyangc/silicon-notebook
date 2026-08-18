@@ -91,6 +91,11 @@ class SourcePipelineHooks:
     mark_unified_dirty: Callable[[str], None]
     augment_notebook_metadata: Callable[[str, str], None]
     maybe_enqueue_scale_fold: Callable[[str], None]
+    #: Agentic Memory P1 (T4):这本库的语料变了一次(新增/重解析/删除)。**必须
+    #: 自身 fail-open**——它挂在上传/删除的成功路径末尾,一次后台整理排不上,不
+    #: 是这次上传失败。三个来源生命周期口共用它(新增与重解析都走 process_source,
+    #: 删除走 delete_source),不存在第四处。
+    note_corpus_change: Callable[[str], None]
 
 
 class SourceIngestionService:
@@ -164,6 +169,12 @@ class SourceIngestionService:
         apply_notebook_meta: Callable[..., None],
         maybe_enqueue_scale_fold: Callable[[str], None],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
+        # Agentic Memory P1 (T4). Defaulted to a no-op for the same reason
+        # ``invalidate_knowledge_counts`` above is: narrow test doubles and any
+        # runtime that never wires the understanding feature must keep
+        # composing this service unchanged, and "no consolidation chain" is a
+        # complete, correct behaviour (it is exactly the kill-switch-off path).
+        note_corpus_change: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -200,6 +211,7 @@ class SourceIngestionService:
         self.apply_notebook_meta = apply_notebook_meta
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
         self.invalidate_knowledge_counts = invalidate_knowledge_counts
+        self.note_corpus_change = note_corpus_change
         # 论文元数据 backfill 进程内状态镜像 kg_building（重启即清）
         # nb_id → {"total": N, "done": k, "_gen": G}
         self._paper_meta_backfilling: dict[str, dict] = {}
@@ -345,6 +357,7 @@ class SourceIngestionService:
             mark_unified_dirty=self.kg_mutations.mark_unified_kg_dirty,
             augment_notebook_metadata=self.augment_notebook_metadata,
             maybe_enqueue_scale_fold=self.maybe_enqueue_scale_fold,
+            note_corpus_change=self.note_corpus_change,
         )
 
     def import_sources_compat(
@@ -1356,6 +1369,14 @@ class SourceIngestionService:
         # process_source calls) into a single fold. Never builds a fresh index;
         # helper is fail-safe (never raises).
         hooks.maybe_enqueue_scale_fold(source.notebook_id)
+        # Agentic Memory P1 (T4): one source-lifecycle event for this notebook.
+        # Placed alongside the fold enqueue and AFTER the lease release for the
+        # same reason: it is an independent idle-time settle point that needs
+        # no lease, and it is itself fail-open (a background understanding
+        # refresh that cannot be scheduled must never turn a successful
+        # (re)parse into a failure). New sources and reparses BOTH land here —
+        # `parse_source` delegates to this method.
+        hooks.note_corpus_change(source.notebook_id)
         return self.sources.get_source(source_id)
 
     def parse_source(
@@ -1448,6 +1469,12 @@ class SourceIngestionService:
         self.delete_source_images(source_id)  # Task 9: cascade-clean MinerU image assets
         self.kg_mutations.invalidate_unified_cache(source.notebook_id)
         hooks.mark_unified_dirty(source.notebook_id)
+        # A deletion changes the corpus exactly as much as an addition does —
+        # and it is the event that most often invalidates an existing
+        # understanding block (the document a claim cited is gone). Last step,
+        # after the deletion itself has fully committed, so a failure here can
+        # only lose a background refresh, never the delete.
+        hooks.note_corpus_change(source.notebook_id)
 
     # ------------------------------------------------------ memory-derived
     def memory_kg_eligible(self, notebook_id: str) -> bool:
