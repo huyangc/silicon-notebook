@@ -1190,6 +1190,46 @@ worker。每段起步一次模型调用；一段里的 flag 形状参数超过 `
 
 将 `REASONING_ENUM_TOOLS_ENABLED` 设为 `false` 可完全禁用这一整套：不构建地图、两个动作与来源清单参数一并不提供、无图早退恢复，逐步推理回到接入前的行为，零额外查询开销。
 
+### AI 对这个库的理解
+
+Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要——「AI 对这个库的理解」——以五个固定 label 块的形式，作为 prompt 脚手架注入逐步推理的规划与反思上下文（深度报告每节的深挖检索同样注入，形态逐字一致）。它绝不是证据：`ReasoningResult` 不为它新增任何字段，因此它永远不会进入答案合成、不能被 `[k]` 引用，也不会出现在深度报告正文里。
+
+**五个块与两个归属层。** 三个块构成整本笔记本共享的**底座层**，每位成员都能读到：`corpus_shape`（这个库大致收了哪一类资料）、`key_entities`（反复出现到值得提前知道的名字/主题）、`corpus_gaps`（已经看出来的空缺——没有表格/公式/图片/代码块，或解析质量警告——提问时可以避开）。两个块构成每位成员**私有的覆盖层**：`retrieval_notes`（该成员自己积累的问法经验，只对自己的提问生效、只有自己可见）与 `usage_gaps`（该成员问过但这个库没给出答案的方向，以零命中提问计数而非来源 id 的形式记录）。底座层由按笔记本的巡固 job 在来源变更累计到阈值后刷新；每个覆盖层由按 `(笔记本, 用户)` 的巡固 job 在该成员完成足够多次提问或一次深度报告后刷新（报告完成直接达阈，是刻意登记的、比把报告并入提问计数更简单的触发规则）。
+
+**隔离是结构性的，不是过滤器。** 底座链路的巡固输入在结构上就够不到任何使用/查询/回答数据——它的 SQL 字面上不可能出现 `ask_jobs`/`ask_trace_steps`/`answers`/`memory_items`/`conversations`/`reports` 任一表名，由语义化源码扫描守卫钉住，而不是靠运行期检查。覆盖层链路的巡固输入只读那一位成员自己的检索轨迹，归属谓词（`created_by`/`user_id`）写在取轨迹的那条 SQL 里，而不是事后在应用代码里过滤——与本文档别处 `memory_items.created_by` 的边界同一形状。成员一旦失去该笔记本的读权，覆盖层随即和其他按成员的读一样失效（参与集实时判定）；该成员被移出笔记本时覆盖层会被物理清空。
+
+**数值上限。**
+
+| 项 | 取值 |
+| --- | --- |
+| 块数 | 5（底座层 `corpus_shape`／`key_entities`／`corpus_gaps`；每成员覆盖层 `retrieval_notes`／`usage_gaps`） |
+| 每块字符上限 | 400 |
+| 整块渲染字符上限（全部块拼接） | 1,200 |
+| 每块变更历史环形缓冲 | 20 条 |
+| 底座链路触发阈值 | 累计 5 次来源变更 |
+| 覆盖层链路触发阈值 | 该成员累计 10 次已完成提问，或 1 次已完成深度报告（直接达阈） |
+| 每次巡固读取的覆盖层轨迹取样 | 最近 40 条 |
+| 巡固输出预算 | 2,048 tokens |
+| 语料统计取样文档数 | 40 |
+| 底座链路每条主张保留的证据 id 数 | 8 |
+| 喂给底座 prompt 的高频概念名 | 24 个，单名 ≤48 字符，合计 ≤600 字符 |
+| 覆盖层 prompt 的使用情况段 | 问题清单 ≤3,000 字符，另加 ≤12 条零命中查询样本（每条 ≤120 字符）与固定表头 |
+
+**注入面。** `AGENT_PROFILE_ENABLED` 开启（且已装配画像存储）的 run，会把底座层与当前用户自己的覆盖层同时注入规划 prompt 与反思循环上下文，位置都在集合地图那一段**之前**。一个 Agent 还没为其形成过任何理解的笔记本不注入任何内容、也不记 trace 步——这与 Memory 零命中记 `skip` 步的口径**刻意不同**：Memory 未命中背后是一次 embedding 往返和一次向量扫描，值得记账；而理解块的读取是亚毫秒级的主键点查，它的缺席在一个全新笔记本的每一轮里都是纯噪声。请求确实收窄了检索来源范围时仍然注入——这与集合地图不同（地图在收窄时被清空，因为它承诺的是一批本次枚举不到的集合），理解块不开任何通道、不是证据、不能被 `[k]` 引用，收窄的 run 一样能从「Agent 已经摸出的问法与已知空缺」里受益。在深度报告一侧，理解块只触达每节自己的深挖检索（`_deep_dive`），而深挖恒以 `intent_queries` 起步、不调用规划模型——所以报告路径上理解块实际只落在反思循环里，从不触达报告自己的规划调用。
+
+**端点与角色矩阵。**
+
+| 端点 | 谁能用 |
+| --- | --- |
+| `GET /notebooks/{id}/understanding` | 任意有读权的成员；返回 `enabled`、`base`（块的取值/证据/revision/`updated_at`/`updated_origin`——变更历史环形缓冲本身在 v1 不对外暴露，只给当前取值）、`mine`（当前用户自己的覆盖层，同形状）、`job`（`{base, mine}`，各自的状态/待处理计数/`updated_at`/失败文案，链路从未被认领过时为 `None`）与 `can_edit_base` |
+| `PUT /notebooks/{id}/understanding/{label}`（`scope: "shared"|"mine"`） | `shared` 需要等同 owner 的 `agent_profile:write` 能力；`mine` 只需读权 + 该覆盖层的行级归属 |
+| `DELETE /notebooks/{id}/understanding/{label}?scope=` | 与写端点相同的权限口径；清空取值但保留该行与其历史 |
+| `POST /notebooks/{id}/understanding/rebuild`（`{scope}`） | 与写端点相同的权限口径；手动认领并重跑该链路的巡固，忙碌或总闸关闭时 409 |
+
+`AGENT_PROFILE_ENABLED`（默认 true）是唯一总闸，同时管住注入、巡固触发与两个 API 面的可见性——关闭后处处逐字回到接入前：不注入、不记 trace 步、不排巡固，API 不是 404 而是返回 `enabled=false` 且两个列表为空（让前端能区分「关了」与「还没形成理解」），重建端点 409。
+
+**已登记取舍。** 笔记本深拷贝不带这两张表——副本从零重新形成自己的理解，这是刻意设计：理解块描述的是 Agent 对**这一本**笔记本使用方式的体会，不是来源材料本身该被继承的事实。同步 `POST /ask`（不建立持久 `ask_jobs` 行）不推进覆盖层计数器，与「用量统计按持久 `ask_jobs` 提交次数计数」的既有口径一致。单人笔记本的底座与覆盖层链路刻意**不**合并执行——各自照常排队与运行，登记为 P1 的简化而非正确性要求。任一链路的巡固失败仍会消费认领时刻快照下的 `pending_signal` 计数，因此失败的一轮需要重新攒满阈值才会重试，把成本封在「每个阈值批次至多一次模型调用」，而不是对随后每一次变更都重试。把成员移出共享笔记本会经成员移除路径清空其覆盖层（`kick_all_members` 刻意**不**清理——已登记的例外，因为读侧参与集闸本就让被踢出成员的覆盖层在每个消费方那里都不可达）。
+
 ### 大纲便签与按节合成
 
 被门控在「穷尽」检索档位的逐步推理，可以在反思循环中维护一份有界的、由模型撰写的大纲便签；当终态大纲解析后仍有两节或以上带着存活证据时，答案就按这份大纲逐节合成，而不是一次性通读全部证据来写。总开关是 `REASONING_OUTLINE_ENABLED`（默认 true）；关闭时，或档位不是「穷尽」时，这整套机制完全不存在——没有这个动作、没有对应 schema 分支、没有 trace 步，与这个特性从未接入逐字一致。
@@ -1331,6 +1371,10 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/notebooks/{id}/sources/{source_id}`、`GET /api/notebooks/{id}/sources/{source_id}/elements` —— 同样两个读取，但权限按路径里的**当前活跃**笔记本判，目标在它的有效参与集（自身 + 已生效挂载的参考库）内解析。挂载参考库不等于获得该库的直接成员权限，因此浏览器始终只用活跃笔记本过权限、由后端内部代理读取；参与集每次请求实时判定，被挂库降级/易主/深拷贝中或挂载被取消时当场 404。本库来源走的是同一条路径（参与集首项恒为活跃笔记本自身），响应如实返回来源真正所属的笔记本，供前端据此按只读渲染。写入刻意不代理——重新解析与删除仍是 `/api/sources/{id}` 上受 `sources:write` 能力守卫（P2 起 owner∪组管理员）的直接操作。详情响应比 `/api/sources/{id}` 更窄：去掉 `file_path` 与原始 `error_message`（两者都可能带服务端绝对路径），改回一个如实的 `parse_failed` 布尔；跨库的隐藏合成源（memory/knowhow 投影行，集合地图刻意把它们算进作用域）直接拒绝
 - `GET /api/notebooks/{id}/assets/{asset_id}` —— 图片资产（knowhow 单元格图片、来源插图）适用同一条参与集规则：路径里的笔记本是查看者的活跃笔记本，资产自己声明所属笔记本，不在活跃笔记本有效参与集内的资产一律 404。经挂载库代理来的资产用 `Cache-Control: no-store`，取消挂载即刻生效；活跃笔记本自己的资产保持原有长缓存
 - 命令目录：`GET .../sources/{sid}/command-catalog/preview`（零模型调用的成本预告）、`POST .../sources/{sid}/command-catalog`（发起；该来源已有活跃任务、或上一轮还有候选没审阅完时 409）、`GET .../command-catalog/job`、`POST .../command-catalog/cancel`、`GET .../command-catalog/candidates?job_id=&state=&cursor=&limit=`（keyset 分页 + 各档计数）、`POST .../command-catalog/apply` body `{candidate_ids}` 或 `{all_pending}`（创建或追加「命令目录：<来源>」表，绝不覆盖已有行）、`POST .../command-catalog/dismiss` body `{candidate_ids}` 或 `{all_pending}`（把候选标记为已跳过，不写任何表——不冲突的候选唯一的放弃出口——见[命令目录](#命令目录工具手册)）
+- `GET /api/notebooks/{id}/understanding` —— 「AI 对这个库的理解」；任意有读权的成员；返回 `enabled`、`base`、`mine`、`job`、`can_edit_base`——见[AI 对这个库的理解](#ai-对这个库的理解)
+- `PUT /api/notebooks/{id}/understanding/{label}` body `{scope: "shared"|"mine", value, expected_revision}` —— `shared` 需要 `agent_profile:write` 能力，`mine` 只需读权 + 行级归属；超过 400 字符上限返回 422，`expected_revision` 过期返回 409
+- `DELETE /api/notebooks/{id}/understanding/{label}?scope=` —— 与写端点相同的权限口径；清空取值但保留该行与其历史
+- `POST /api/notebooks/{id}/understanding/rebuild` body `{scope}` —— 与写端点相同的权限口径；忙碌或 `AGENT_PROFILE_ENABLED` 关闭时返回 409
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
 - Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`）、显式的建议式表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`），以及带全库推理取证的单行空列补全建议（`POST .../knowhow/{table_id}/rows/{row_id}/complete`，可选 `target_column_ids`，返回 `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`）
