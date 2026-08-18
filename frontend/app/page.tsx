@@ -8905,7 +8905,10 @@ export default function Home() {
               <button className="icon-button" onClick={() => setUnderstandingOpen(false)} title="Close">×</button>
             </div>
             <div className="source-detail-body">
-              <AgentProfilePanel notebookId={currentNotebookId} />
+              {/* key=当前笔记本:切库那一刻整个面板重挂而不是靠 prop 变化自己刷新——
+                  草稿/忙碌位/确认态必须随库清零,不能等下面那条关弹窗 effect 追上来
+                  (那条 effect 是第二层保险,这里是结构性保证)。 */}
+              <AgentProfilePanel key={currentNotebookId} notebookId={currentNotebookId} />
             </div>
             </>)}
           </FloatingModalCard>

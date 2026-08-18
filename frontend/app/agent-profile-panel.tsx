@@ -45,12 +45,14 @@ import {
   UNDERSTANDING_POLL_MS,
   busyForNotebook,
   claimNotebookSlot,
+  draftIsStale,
   isUnderstandingChainBusy,
   orderedUnderstandingBlocks,
   releaseNotebookClaim,
   understandingValueLength,
   understandingValueTooLong,
   type UnderstandingBlock,
+  type UnderstandingDraft,
   type UnderstandingJobStatus,
   type UnderstandingResponse,
   type UnderstandingScope,
@@ -93,9 +95,12 @@ type ChainProps = {
   canEdit: boolean;
   job: UnderstandingJobStatus | null;
   busy: boolean;
-  draftOf: (label: string, fallback: string) => string;
-  onDraft: (label: string, value: string) => void;
-  savingLabel: string;
+  /** 按 label 存的草稿。fork 点(`baseRevision`)由面板层管理,这里只读。 */
+  drafts: Readonly<Record<string, UnderstandingDraft>>;
+  onDraft: (label: string, value: string, blockRevision: number) => void;
+  /** 丢弃这个块的草稿,回到服务端当前值——陈旧草稿警示行的「放弃我的修改」入口。 */
+  onDiscardDraft: (label: string) => void;
+  savingLabels: ReadonlySet<string>;
   confirmingLabel: string;
   onSave: (scope: UnderstandingScope, block: UnderstandingBlock) => void;
   onAskClear: (label: string) => void;
@@ -112,9 +117,10 @@ function UnderstandingChain({
   canEdit,
   job,
   busy,
-  draftOf,
+  drafts,
   onDraft,
-  savingLabel,
+  onDiscardDraft,
+  savingLabels,
   confirmingLabel,
   onSave,
   onAskClear,
@@ -134,7 +140,7 @@ function UnderstandingChain({
             type="button"
             className="sort-button"
             disabled={busy}
-            title="让 AI 重新读一遍，整理出最新的一份"
+            title={busy ? "整理进行中" : "让 AI 重新读一遍，整理出最新的一份"}
             onClick={() => onRebuild(scope)}
           >
             {busy ? "整理中…" : "重新整理"}
@@ -150,10 +156,14 @@ function UnderstandingChain({
         const blockTitle = PROFILE_BLOCK_TITLES[block.label];
         // 查不到中文标题就整块不渲染:直出内部枚举名不是「降级」,是把黑话上屏。
         if (!blockTitle) return null;
-        const value = draftOf(block.label, block.value);
+        const draft = drafts[block.label];
+        const value = draft?.value ?? block.value;
         const dirty = value !== block.value;
+        // 草稿 fork 出去之后服务端那一行又前进了一版(被别处整理,或用户自己另一次
+        // 保存推进)——保存仍然可以做,但必须显式说清「这是一次知情覆盖」。
+        const stale = draftIsStale(block, draft);
         const tooLong = understandingValueTooLong(value);
-        const saving = savingLabel === block.label;
+        const saving = savingLabels.has(block.label);
         const confirming = confirmingLabel === block.label;
         return (
           <div className="item" key={block.label}>
@@ -167,8 +177,26 @@ function UnderstandingChain({
                   className="textarea"
                   aria-label={blockTitle}
                   value={value}
-                  onChange={(event) => onDraft(block.label, event.target.value)}
+                  onChange={(event) => onDraft(block.label, event.target.value, block.revision)}
                 />
+                {stale ? (
+                  <div
+                    className="tool-hint"
+                    role="alert"
+                    style={{ margin: "4px 0 0", color: "var(--warning)" }}
+                  >
+                    <p style={{ margin: "0 0 4px" }}>
+                      内容刚被重新整理过，下面是你未保存的修改
+                    </p>
+                    <button
+                      type="button"
+                      className="sort-button"
+                      onClick={() => onDiscardDraft(block.label)}
+                    >
+                      放弃我的修改
+                    </button>
+                  </div>
+                ) : null}
                 <p className="tool-hint" style={{ margin: "4px 0 0" }}>
                   {understandingValueLength(value)} / {AGENT_PROFILE_VALUE_MAX_CHARS} 字
                   {tooLong ? "　内容过长，请先删减后再保存" : ""}
@@ -228,8 +256,10 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
   const [data, setData] = useState<UnderstandingResponse | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [savingLabel, setSavingLabel] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, UnderstandingDraft>>({});
+  // 忙碌位是**集合**而不是单值:一次点两块的保存互不相干,单值会让先点的那格的
+  // 「保存中…」被后点的那格挤掉(状态还在飞、界面却已经看不出来)。
+  const [savingLabels, setSavingLabels] = useState<ReadonlySet<string>>(new Set());
   const [confirmingLabel, setConfirmingLabel] = useState("");
   // 忙碌位是**按笔记本的集合**而不是裸布尔:面板虽然一次只看一个库,但这套语义与
   // 「补上关联」「重新合并」逐字相同,共用同一份有单测的实现(见 profile-model.ts
@@ -237,7 +267,14 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
   const [baseBusyIds, setBaseBusyIds] = useState<ReadonlySet<string>>(new Set());
   const [mineBusyIds, setMineBusyIds] = useState<ReadonlySet<string>>(new Set());
   // 轮询超限之后**停轮询**,而不是只发一条提示:服务端只在进程内记状态,任务真卡死
-  // 时它会一直如实回报「在跑」,不设这道闸就会一直发下去。下一次点「重新整理」复位。
+  // 时它会一直如实回报「在跑」,不设这道闸就会一直发下去。
+  //
+  // ⚠ 已登记的取舍:超限之后按钮**维持禁用**,不会自己再恢复——`baseBusy`/`mineBusy`
+  // 仍然读 `data.job` 里那个「running」,而轮询已经停了,`data` 不会再更新。恢复
+  // 只能靠重开这个面板(`pollExhausted` 是本地 state,组件重新挂载就复位;见 page.tsx
+  // 对 `AgentProfilePanel` 的 `key={currentNotebookId}`,同一个库里关了再开同样有效
+  // ——因为整个面板随浮动窗一起卸载重挂)。不做成「超限也自动解锁」是刻意的:那等于
+  // 在任务可能真卡死时假装它跑完了,会放行一次重复的模型调用。
   const [pollExhausted, setPollExhausted] = useState(false);
 
   const load = useCallback(async () => {
@@ -245,6 +282,13 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
     setData(next);
     return next;
   }, [notebookId]);
+
+  const retryLoad = useCallback(() => {
+    setError("");
+    load().catch((err) => {
+      setError(toUserMessage(err, "没能读到这个库的理解，请稍后重试"));
+    });
+  }, [load]);
 
   useEffect(() => {
     let cancelled = false;
@@ -295,14 +339,21 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
   }, [polling, notebookId]);
 
   const draftOf = useCallback(
-    (label: string, fallback: string) => drafts[label] ?? fallback,
+    (label: string, fallback: string) => drafts[label]?.value ?? fallback,
     [drafts],
   );
 
-  const onDraft = useCallback((label: string, value: string) => {
-    setDrafts((prev) => ({ ...prev, [label]: value }));
+  // 一份草稿只在**首次**创建时捕获它 fork 自哪一版(`baseRevision`);同一份草稿上
+  // 继续打字不能重新捕获,否则「服务端已经往前走了」这件事会被每次按键悄悄抹掉。
+  const onDraft = useCallback((label: string, value: string, blockRevision: number) => {
+    setDrafts((prev) => ({
+      ...prev,
+      [label]: { value, baseRevision: prev[label]?.baseRevision ?? blockRevision },
+    }));
   }, []);
 
+  // 无条件丢弃——用于「放弃我的修改」与清空成功之后:这两处都是用户主动表达
+  // 「不要这份草稿了」,不需要比对提交值。
   const dropDraft = useCallback((label: string) => {
     setDrafts((prev) => {
       if (!(label in prev)) return prev;
@@ -312,10 +363,24 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
     });
   }, []);
 
+  // 保存成功之后**只在草稿仍逐字等于本次提交值时**才丢:保存请求在飞的那段窗口
+  // 用户可能续打了几个字,这时草稿已经不是「刚提交的那份」,删掉就是丢字。保留下来
+  // 的草稿的 `baseRevision` 还是提交前那一版,`load()` 换回新 revision 之后会自然
+  // 落进 `draftIsStale` 的陈旧提示——不是新分支,是同一条判据的自然结果。
+  const dropDraftIfUnchanged = useCallback((label: string, submittedValue: string) => {
+    setDrafts((prev) => {
+      const draft = prev[label];
+      if (!draft || draft.value !== submittedValue) return prev;
+      const next = { ...prev };
+      delete next[label];
+      return next;
+    });
+  }, []);
+
   async function saveBlock(scope: UnderstandingScope, block: UnderstandingBlock) {
     const value = draftOf(block.label, block.value);
     if (understandingValueTooLong(value)) return;
-    setSavingLabel(block.label);
+    setSavingLabels((prev) => (prev.has(block.label) ? prev : new Set(prev).add(block.label)));
     setError("");
     setNotice("");
     try {
@@ -324,21 +389,27 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
         value,
         expected_revision: block.revision,
       });
-      dropDraft(block.label);
+      dropDraftIfUnchanged(block.label, value);
       await load();
     } catch (err) {
       setError(toUserMessage(err, "没能保存，请稍后重试"));
       // 409(这段刚被别处更新过)之后必须重取一次:不重取的话用户手里还是旧
       // revision,再点保存只会撞同一堵墙。草稿**刻意保留**——重取只换来最新的
-      // revision 与对照值,用户写了一半的字不该被一次冲突吃掉。
+      // revision 与对照值,用户写了一半的字不该被一次冲突吃掉;revision 前进之后
+      // `draftIsStale` 会自然触发警示行,不需要在这里另外处理。
       await load().catch(() => undefined);
     } finally {
-      setSavingLabel("");
+      setSavingLabels((prev) => {
+        if (!prev.has(block.label)) return prev;
+        const next = new Set(prev);
+        next.delete(block.label);
+        return next;
+      });
     }
   }
 
   async function clearBlock(scope: UnderstandingScope, block: UnderstandingBlock) {
-    setSavingLabel(block.label);
+    setSavingLabels((prev) => (prev.has(block.label) ? prev : new Set(prev).add(block.label)));
     setConfirmingLabel("");
     setError("");
     setNotice("");
@@ -350,7 +421,12 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
       setError(toUserMessage(err, "没能清空，请稍后重试"));
       await load().catch(() => undefined);
     } finally {
-      setSavingLabel("");
+      setSavingLabels((prev) => {
+        if (!prev.has(block.label)) return prev;
+        const next = new Set(prev);
+        next.delete(block.label);
+        return next;
+      });
     }
   }
 
@@ -374,7 +450,17 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
   }
 
   if (data === null) {
-    return <p className="tool-hint">{error || "加载中…"}</p>;
+    if (error) {
+      return (
+        <div className="stack">
+          <p className="tool-hint" role="alert" style={{ color: "var(--danger)" }}>{error}</p>
+          <div>
+            <button type="button" className="sort-button" onClick={retryLoad}>重试</button>
+          </div>
+        </div>
+      );
+    }
+    return <p className="tool-hint">加载中…</p>;
   }
   if (!data.enabled) {
     return <p className="tool-hint">这项功能当前未开启。</p>;
@@ -394,9 +480,10 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
         canEdit={data.can_edit_base}
         job={data.job?.base ?? null}
         busy={baseBusy}
-        draftOf={draftOf}
+        drafts={drafts}
         onDraft={onDraft}
-        savingLabel={savingLabel}
+        onDiscardDraft={dropDraft}
+        savingLabels={savingLabels}
         confirmingLabel={confirmingLabel}
         onSave={(scope, block) => { void saveBlock(scope, block); }}
         onAskClear={setConfirmingLabel}
@@ -412,9 +499,10 @@ export function AgentProfilePanel({ notebookId }: { notebookId: string }) {
         canEdit
         job={data.job?.mine ?? null}
         busy={mineBusy}
-        draftOf={draftOf}
+        drafts={drafts}
         onDraft={onDraft}
-        savingLabel={savingLabel}
+        onDiscardDraft={dropDraft}
+        savingLabels={savingLabels}
         confirmingLabel={confirmingLabel}
         onSave={(scope, block) => { void saveBlock(scope, block); }}
         onAskClear={setConfirmingLabel}
