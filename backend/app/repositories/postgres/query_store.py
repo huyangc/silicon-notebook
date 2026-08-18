@@ -96,6 +96,19 @@ _NOT_MEMORY_OWNED_SQL = (
     f"WHERE sources.id=o.source_id AND {MEMORY_SOURCE_TYPE_PREDICATE})"
 )
 
+#: codex #520 R8 P1(SQLite 侧同名常量的孪生):``canonical_name`` 是代表名整簇
+#: 复制,代表可能选自私有 Memory 派生对象——成员行过滤洗不掉名字,取名字的查询
+#: 按整簇排除(约定外层别名 ``c``)。``source_type`` 不加限定词同上:三张 join 表
+#: 里只有 sources(ms) 有这列。
+_NO_MEMORY_MEMBER_CLUSTER_SQL = (
+    "NOT EXISTS (SELECT 1 FROM concept_clusters mc "
+    "JOIN knowledge_objects mo ON mo.id = mc.member_object_id "
+    "JOIN sources ms ON ms.id = mo.source_id "
+    "WHERE mc.notebook_id = c.notebook_id "
+    "AND mc.canonical_id = c.canonical_id "
+    f"AND {MEMORY_SOURCE_TYPE_PREDICATE})"
+)
+
 
 def _snippet(text: str, needle: str) -> str:
     clean = " ".join(text.split())
@@ -253,6 +266,7 @@ class QueryStore:
             "     AND o.status = ANY(%s) "
             f"     AND {_NOT_MEMORY_OWNED_SQL} "
             "WHERE c.notebook_id = %s AND c.object_type = 'concept' "
+            f"AND {_NO_MEMORY_MEMBER_CLUSTER_SQL} "
             "GROUP BY c.canonical_id "
             "HAVING COALESCE(MIN(NULLIF(c.canonical_name, '')), '') <> '' "
             "ORDER BY members DESC, "

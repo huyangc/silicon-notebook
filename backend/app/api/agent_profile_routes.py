@@ -164,6 +164,13 @@ def get_understanding(
     # 时,一次巡固恰好在两读之间写块并 settle,响应就是「done + 旧块」:前端据此
     # 解除忙碌位、停止轮询,旧文本一直挂到重开面板。job 先走后,同一交错最坏是
     # 「running + 新块」——继续轮询,下一拍自然收敛到 done。
+    #
+    # ⚠ Registered residual (codex #520 R8 P2, accepted): job 读之后、块读之前
+    # 被一次**新** run 认领的交错,返回的是「上一轮终态 + 旧块」——那是认领前一
+    # 刻的**一致**快照,不是撕裂读。用单快照读法也关不掉它的用户可见形态:哪怕
+    # 完美一致的响应,发出 1ms 后开始的 run 同样不在里面,前端同样按「无忙碌」停
+    # 止轮询。轮询的本质就是快照会过期;R7 修掉的是「终态与它代表的写入不配对」
+    # 这个撕裂形态,剩下的陈旧性由下一次交互/重开面板自愈,不再为它引入快照事务。
     base_job = store.job_row(notebook_id, BASE_CHAIN_OWNER)
     mine_job = store.job_row(notebook_id, user.id)
     rows = store.read_blocks(notebook_id, user.id)
