@@ -17,6 +17,7 @@
 - **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
 - PDF/DOCX/PPTX/XLSX 走 MinerU（公式/表格/版面、内嵌图片）；MinerU 不可用或没有可用产出时各自回落本机库解析。每条本地链都是**分级降级**而不是一步跌到最粗的抽取器：PDF 走 PyMuPDF4LLM 版面感知 Markdown、pypdf 仅最后兜底；DOCX 走 mammoth，其语义化 HTML 保住标题层级、列表标记与表格结构（`table_html` 存入 metadata），python-docx 的逐段落/逐行拍平降为最后兜底；PPTX 走 python-pptx，连原始幻灯片 XML 抽取整块丢失的幻灯片表格、图表标题、组合形状与演讲者备注一并取回，原始 XML 抽取降为最后兜底；XLSX/XLSM 走 openpyxl。兜底路径不持久化 DOCX 内嵌图与 PPTX 图片（URL 来源可能只是个短命临时文件），mammoth 的 base64 data URI 直接丢弃、不塞进元素正文。这类降级对**每一种有损**兜底都会披露（PDF、DOCX、PPTX），不只 PDF；工作簿刻意排除——openpyxl 兜底对单元格值全保真，打警告是噪音，而且 MinerU 不支持工作簿的部署会得到一个用户永远消不掉的假警告。工作簿的 MinerU 非空产出还要先与工作簿自身的非空**行数与格数**做一次本地零模型覆盖对账才被采信，**任一维度**覆盖不足即整份丢弃、改用 openpyxl。两个维度缺一不可：只数行看不出宽表下最常见的那种残缺——MinerU 保住了每个 `<tr>`，却把渲染页宽之外的列整片丢掉；非表格文本元素每条最多只顶一行一格，图片块两个分子都不计入。采信阈值为 0.8，行与格两个维度共用（`backend/app/services/parsers.py` 的 `MINERU_WORKBOOK_MIN_ROW_COVERAGE`；数值仅在本节登记）。云端上传路径的工作簿走同一道对账，且内嵌图片只在产出被采信之后才持久化，被拒的产出不会留下孤儿资产。触发警告时来源仍为 `extracted`，对外只暴露 `parse_quality_warning`。旧版二进制 `.xls`（前 OOXML 时代的 BIFF 格式）没有任何 MinerU 分支——MinerU 根本不支持这种容器——一律直接走 `xlrd`（该格式唯一的纯 Python 读取器）；其余旧版二进制 Office 格式（`.doc`、`.ppt`）仍不受支持，界面会引导用户另存为 `.docx`/`.pptx`。
 - MinerU 抽取的内嵌图片在来源正文内联展示；图注与文字保持可搜索。**Markdown 来源的内嵌图片走同一套护栏**：`![alt](src)` 带 alt 文字时，alt 作为图注写入元素 `metadata.caption`，与 MinerU 解析出的 PDF 图注同等参与检索（进 chunk）；无 alt 的普通路径图片仍不产出元素。`src` 为 `data:image/{png,jpeg,gif,webp};base64,...`（与 MinerU 图片资产同一套 mime 白名单，识别不了的 mime 如 svg/bmp/avif 不会被解析为图片，其 `![alt](data:...)` 字面量无论独占一整段、与其他文字混排，还是出现在列表项/标题/表格单元格中，都会被剥离只留 alt 文本，base64 绝不进入元素文本）时，图片字节解码后落为来源图片资产、来源详情正常显示；单图字节上限与每源张数上限复用 MinerU 图片配置（`MINERU_MAX_IMAGE_BYTES` 默认 5MB、`MINERU_MAX_IMAGES_PER_SOURCE` 默认 200），`MINERU_RETURN_IMAGES=false` 时同样不落资产——该开关现在门控所有来源的图片持久化，不再只管 MinerU 解析出的文档。data URI 本身绝不写入元素 metadata；无 alt 且未成功落资产的 data URI 图片不产出元素。已知边界：只处理独占一整段的图片，列表项/表格单元格内的内嵌图片只保留 alt 文本、不落资产。引用本机图片文件路径的 markdown 可先用 `scripts/embed_md_images.py` 就地转成 data URI 再上传（见 README「产品流程」一节）。
+- **Markdown + 图片压缩包上传**：添加来源弹窗还接受一个压缩包，或直接拖入一个文件夹——只要它把 markdown 与其引用的图片保持相对路径放在一起，也就是 Notion/语雀/HackMD 导出天然就是的形态。一套零依赖的浏览器端纯函数管线（`frontend/app/md-bundle.ts` / `bundle-intake.ts`）解析压缩包的 central directory、用浏览器原生 `DecompressionStream('deflate-raw')` 解压、按包内/文件夹相对路径解析每个 `![alt](src)`（处理 `./`、`../`、`%20` 等 URL 编码）、按**魔数**而非扩展名嗅探匹配到的文件、把匹配上的 png/jpeg/gif/webp 图片内联成 base64 `data:` URI——与上面 markdown 摄取护栏认的形态完全一致——最终把这份自包含 markdown 原样交给既有上传接口。`.zip` 只是前端的交换格式：它绝不进入后端的支持后缀白名单，且只有独占一整段的图片才会被内联，与服务端判据逐字镜像，避免前端配对成功而服务端悄悄丢弃。配对回执在弹窗内**持久**列出（不是一闪而过的 toast），分五类：已内联、未找到（附带若干条近似候选路径）、不支持（语法/位置/格式不符，或超过单图/单来源上限）、云端 `http(s)` 链接（v1 不拉取，原始 Markdown 文字保留）、无图注的图片（提示上传后无法被检索——图注是图片进入检索的唯一入口，见下文「引用附图（本段附图）」）。`GET /system/config` 另发 `source_image_max_bytes` / `source_image_max_per_source`（镜像部署的 `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`，旧后端缺字段时为 `null`——含义是「拿不到这个上限，不做本地预检，交给服务端护栏兜底」）与 `source_images_enabled`（镜像 `MINERU_RETURN_IMAGES`；缺字段按 `true` 处理，因为这个开关此前从不存在，不能让旧部署凭空弹出一条假警告），供配对阶段预检单图上限并在图片存储关闭时整体跳过内联、给出持久提示。精确护栏数值见[下表](#markdown-压缩包上传护栏)。
 - **精确短语（用户检索语法）**：用**英文半角双引号**括起来的内容整体参与检索，不做分词。`什么是 "static timing analysis" 的原理` 里那段短语会作为一个不可拆的词项进入词法候选（SQLite 走带引号的 FTS5 词项，PostgreSQL 走转义后的 `ILIKE` 子串），在关键词覆盖率里也只算**一项**——整段命中才得分，散落着 `static`/`timing`/`analysis` 的文档一分不给，因此含完整短语的原文会排在前面；同时这段短语无条件获得一次精确定位探测（下文的精确标识符通道），命中的小节整体取齐。引号是**强偏好**而不是硬过滤：语义检索照常进行，不会因为某篇文档缺这段短语就把它从结果里剔除。打分侧（关键词覆盖率与 BM25/RRF 排序）会归一空白，所以文档里跨换行、多空格写的同一段短语照样算命中；**候选生成侧做不到**——FTS5 trigram 短语与转义后的 `ILIKE` 都是字面连续匹配，写成 `static   timing\n analysis` 的文档若只靠这段短语就捞不上来（要抹平它得加一列归一化的索引文本，而无索引的正则扫描是本层禁止的全库扫）。这时查询里其余词项与语义召回照常工作。识别有三条边界：只认英文半角双引号（中文排版引号 `“…”` 在散文里是普通引用，认它会把大量既有提问悄悄变成带约束的提问）、引号内至少 3 个字（SQLite 的三字符索引更短的索引不到）、一段文本里**不同**的引号内容超过 4 段时整条语法不生效（那是 JSON 之类的机器文本，引号在那里是标点不是约束）；数的是不同内容而非出现次数——推理与报告的内部检索问题会把同一段短语在目标、规范化问题和每条必答主题里各留一份。提问框与深度报告输入框在你敲下引号的当下就回执识别结果——识别到哪几段、或为什么这次没识别——不会让一次没生效的约束静默通过。规划与反思提示语在问题真的带引号时才追加一句「原样保留引号内容」，因此模型改写子查询也不会把它拆散；笔记本搜索框只是整串子串匹配，本来就不分词，那里**被识别的**那几段的引号会被去掉（未被识别的引号原样保留，仍可用来搜字面 JSON/代码）。私有 Memory 的候选生成是把整串当一个短语探测，因此每段被识别的短语会作为额外的 OR 词项进同一条有界查询，让「只含该短语、不含整句」的记忆也能进候选池；评分侧仍拿原串，短语必须整段命中。
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 语义检索（每 notebook 独立缓存）。SQLite FTS5 保留整句精确匹配加分，同时以安全引用的 OR 词项召回拉丁字母/数字词、重叠中文三字片段，以及 `_`/`-`/`.` 连接的完整标识符（`set_db` 这类，受「须含字母、长度 ≥4、至多 16 个」约束）；PostgreSQL 在原生 trigram 候选生成前拆分同一组有界词项，并对 `ILIKE` 分支转义 LIKE 元字符，使 `set_db` 这类词项保持字面量，不会退化成通配把 `setXdb` 也拉进候选。带索引的 Chunk/KG 路径合并有界 ANN 与词法候选窗口，带索引的 Relation 检索按方向平衡补入与词法命中 KG 端点相邻的关系并保留端点顺序。纯词法候选按 keyword-only 参与融合，不会被写入伪造的零语义分。
 - 内置关系在抽取与图消费者之间共用同一套有向端点契约。违反核心类型配对的历史行仍可审计，但不能影响 graph/PPR/canonical/relation 检索；管理员定义对象类型可继续使用已知边 id 扩展。可选跨元素补全按来源代次的持久 keyset 水位推进有界页面，只使用同源索引候选并经过双阶段验证、代次复核与灰度闸，默认关闭；它不会做文档级或整书全表扫描。
@@ -1169,6 +1170,41 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | 每报告新增模型调用 | ≤ 1，任意 depth，≥ 2 节 |
 | 触发全篇综合的最小章节数 | 2 |
 
+## 引用附图（本段附图）
+
+**图注是唯一入口。** 图片元素只有在带非空图注（`metadata.caption`；见上文摄取规则）时才会进入分 chunk / 检索——没有图注的图片压根不可检索，这是刻意的设计，本特性不为它补一条「就近带出」的救济路径。当某条带图注的图片被证据检索命中并进入回答绑定时，该条引用会在旁边带出这张带图注的图片，用一个与引证正文视觉分隔、标注为「本段附图」的独立区块呈现——模型没有看过这张图；这只是响应装配层的增强，检索/证据判定管线本身不变，附图也不是一种新的证据形态。
+
+**响应形状。** `CitationImage`（`{element_id, asset_id, caption}`，图注做截断）是一个有界列表字段，同时挂在 `AnswerAnchor.images` 与 `Citation.images` 上（空列表按 `exclude_if` 惯例整体从 JSON 缺席，因此一条没有附图的回答不会多一个字节）。两处都要有：逐步推理模式的权威显示路径是 `[k]` 锚点，不是 `Citation` 回退列表，只加在 `Citation` 上会让主路径永远看不到图。旧持久化答案缺这个字段时按纯文本渲染——零 migration。
+
+**是装配增强，不是新的检索通道。** 一次共享的批量主键读取（`evidence_context.py`）拿一批候选 element id，过滤出 `element_type='image'` 且 `metadata.asset_id` 非空的行并返回映射；不产生任何新增模型/embedding 调用。它接在四处已经持有完整证据对象的装配点：`ask_chunk` 的 chunk 引用（按该 chunk 完整的 `element_ids` 反查，而不只是可能为空的 `anchor.element_id`——「一段正文 + 一张配图」恰恰是多元素 chunk 的典型形态，只看 `element_id` 会漏掉图）、`ask_reasoning` 的锚点装配（chunk/element/KG 锚点各自提供自己的候选 id）、以及 `ask_graph` 的两处 chunk 引用。天然被排除、无需特判：knowhow 格子投影行 `element_type` 固定为 `knowhow_cell`，永远不命中 `image` 过滤；Memory 派生源虽然会解析出图片元素，但摄取路径刻意不为它接 `persist_image` 闭包，这些行永远没有 `metadata.asset_id`。
+
+**预算是协议边界，不是部署设置。** 它约束的是响应体积和界面视觉噪音，与语料规模、检索档位无关，所以不像 `Settings` 承载的部署旋钮那样可调，而是具名常量：每锚点/引用上限、每次回答的总上限（按**已分配的位**计——同一张图被 5 个锚点引用就占 5 个位，是响应体积的上界而不是「用户能看到几张不同的图」）、更大的每**报告**上限（报告的参考文献天然比一次回答的锚点数更多），以及一个图注截断长度。四处装配的候选先去重、再按 element id 升序排序后再截断，确保同一个问题问两次得到同一批图。精确数值见下表。
+
+**深度报告的装配刻意是独立的一次调用。** `report_engine.py` 在**每份报告一次**——全部章节撰写完成、`references` 已经是最终全局重编号的 `k1, k2, …` 形状之后——才附图（绝不按章节各调一次，那会让每节都能吃到一整份按报告计的预算），且这次调用 fail-open 包裹：图片查询异常只丢图，绝不影响已经生成好的报告正文（与既有 `_resolve_source_families` 的 fail-open 惯例一致）。每条参考文献的候选 id 取自身 `element_id` 与其底层 chunk 完整 `element_ids` 的并集，与 Ask 侧规则逐字一致；报告的引用 ctx 里压根没有 `memory_id` 这个概念，Memory 来源引用天然被排除，无需显式过滤。
+
+**刻意排除的两处。** 报告公开分享页的引用白名单（见上文「群组知识共享/报告公开链接」）从不投影 `asset_id`/`element_id`——与该页面挡掉所有其他内部句柄的边界完全一样——所以一份被公开分享的报告永远不带图，即便底层 `ReportDetail.references` 带了图。管理员活动日志（`/dev/logs` → 活动）的引用详情复用同一套引用详情组件与其既有的防御式回退（拿不到可解析的 `notebookId` 就不渲染图片资产 URL），因此自动降级为纯文字引用，无需为它另写代码。
+
+**前端。** 该区块复用既有的鉴权、按视口懒加载的 `AuthedImage`：弹层/详情面板没打开就不会发出任何图片请求。Ask 侧的锚点弹层与引用详情面板支持点击打开来源或放大；深度报告的引用详情面板刻意**不**接这个跳转（v1 里报告的引用详情面板本就没有「打开来源」的交互——这是与 Ask 侧刻意的不对称，不是遗漏）。
+
+| 上限 | 数值 |
+| --- | ---: |
+| `CITATION_IMAGES_PER_ANCHOR`（每锚点/引用附图数） | 3 |
+| `CITATION_IMAGES_PER_ANSWER`（每次 Ask 回答已分配位数） | 12 |
+| `CITATION_IMAGES_PER_REPORT`（每份深度报告已分配位数） | 24 |
+| `CITATION_IMAGE_CAPTION_CHARS`（图注截断长度） | 200 |
+
+### Markdown 压缩包上传护栏
+
+| 上限 | 数值 |
+| --- | ---: |
+| `MD_BUNDLE_MAX_ENTRIES`（压缩包保留条目数，去掉目录条目/`__MACOSX` 资源叉/精确重复项之后） | 2,000 |
+| `MD_BUNDLE_MAX_DECLARED_ENTRIES`（EOCD 声明条目数的扫描前上限，`MD_BUNDLE_MAX_ENTRIES × 4`） | 8,000 |
+| `MD_BUNDLE_TOTAL_BYTES_FACTOR`（解压后总字节上限系数，`× source_upload_max_bytes`） | 4 |
+| `MD_BUNDLE_MAX_SUGGESTIONS`（每张未匹配图片给出的近似候选路径数） | 3 |
+| `BUNDLE_DIR_MAX_DEPTH`（拖入文件夹的遍历深度） | 16 |
+| `BUNDLE_DIR_MAX_FILES`（拖入文件夹的文件数上限，与 `MD_BUNDLE_MAX_ENTRIES` 同值） | 2,000 |
+| `INLINE_TOO_LARGE_IMAGE_LINES`（超限时逐条列出的图片明细行数，按体积降序） | 3 |
+
 ## API
 
 当前 beta 的关键 API：
@@ -1180,7 +1216,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `POST /api/notebooks/{id}/sources/reparse` —— 体检修复：批量重新解析指定来源（空源/缺片段），后台复用既有解析管线，按 notebook 作用域过滤入参
 - `POST /api/notebooks/{id}/backfill-vectors` —— 体检修复：后台补齐该库缺失的检索向量（只补缺失、幂等，仅嵌入、不动解析）
 - `POST /api/notebooks/{id}/paper-meta/backfill` —— owner 触发的论文元数据补抽（后台、幂等可续跑），返回 `{queued}`；LLM 未配置 409。来源面板的「补全论文信息」按钮**只在确有活可干时显示**：`NotebookSummary` 的 `paper_meta_missing`（仅单库 `GET /api/notebooks/{id}` 精确回填，按补抽排队同口径的 EXISTS 探针计算；列表投影与旧后端为 `null`＝未计算）为 `false` 且当前可见来源页没有 `paper_meta_status="missing"` 的行时隐藏；`null`/缺失按旧行为继续显示（隐藏只能由显式的 `false` 触发），补抽运行期间保持可见以承载「补全中…」态
-- `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）和 `source_upload_max_files_per_batch`（固定的单次请求文件数护栏）
+- `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）、`source_upload_max_files_per_batch`（固定的单次请求文件数护栏），以及供 Markdown 压缩包上传配对预检使用（见上文「引用附图（本段附图）」）的 `source_image_max_bytes` / `source_image_max_per_source`（镜像 `MINERU_MAX_IMAGE_BYTES` / `MINERU_MAX_IMAGES_PER_SOURCE`；旧后端缺字段时为 `null`，含义是「拿不到这个上限，交给服务端护栏兜底」）与 `source_images_enabled`（镜像 `MINERU_RETURN_IMAGES`；缺字段按 `true` 处理，因为该开关此前从不存在，不能让旧部署凭空弹出假警告）
 - `POST /api/notebooks/{id}/sources` —— multipart 文件上传（异步解析/抽取）。每个文件在 multipart 流写入临时 spool 时即受限，超过 `SOURCE_UPLOAD_MAX_MB`（默认 50 MiB）返回 413；每次请求超过 20 个文件也返回 413。浏览器读取上面的两个护栏，取得前禁用文件输入，选择时即时拒绝超限文件，并在发送前复查暂存文件。每个被接受的文件以 `{source_id}_{净化后的客户端文件名}` 落盘；该组件整体压进文件系统 255 字节的单组件上限（按 UTF-8 字节截断主干、保留扩展名——浏览器允许客户端提交最长 255 字节的文件名，加上 37 字节的 id 前缀会在 ext4/XFS/NTFS 上超限导致上传失败）；被压缩的只有派生的磁盘名，存储的文件名与标题保持客户端原值
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`、`GET /api/sources/{id}/elements-page?offset=&limit=&anchor_element_id=` —— owner∪成员口径，按来源自己所属的笔记本判权限。分页读取返回 `{items,total_count,offset,limit}`，`limit` 最大 100；anchor 有效时会把 `offset` 调整为包含目标元素的页。
 - `GET /api/notebooks/{id}/sources/{source_id}/elements-page?offset=&limit=&anchor_element_id=` —— 采用当前活跃 notebook 参与集授权的有界来源详情读取。浏览器使用该端点；代理全量 element 端点继续保留向后兼容。
