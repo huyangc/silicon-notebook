@@ -1135,14 +1135,16 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
     """A deployed v48 database is missing exactly _migration_49's AND
     _migration_50's additions: the three P1 group-sharing tables (groups,
     group_members, notebook_grants), the P2 notebook_share_requests table,
-    and their four indexes combined.
+    and their five indexes combined (three from v49, plus v50's
+    idx_share_requests_group and the partial-unique
+    uq_share_requests_one_pending).
 
     Same rationale as test_deployed_v38_database_verifies_command_catalog_tables
     above: the version gate short-circuits on `current >= SCHEMA_VERSION`, so
     anything smuggled into an already-released migration never runs on a
     deployed database and only a forged deployment at the previous version can
-    see it. All four indexes here ride on the three NEW tables they cover
-    (group_members, notebook_grants, notebook_share_requests), so
+    see it. All five indexes here ride on the four NEW tables they cover
+    (group_members, notebook_grants, notebook_share_requests twice), so
     `DROP TABLE` inside `_rollback_v50`/`_rollback_v49` removes them
     implicitly — unlike v39's `idx_knowhow_tables_nb_title`, no index in
     either migration lands on a pre-existing table, so nothing needs naming
@@ -1170,14 +1172,17 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
 
 def test_deployed_v49_database_verifies_share_request_table(tmp_path):
     """A deployed v49 database is missing exactly _migration_50's addition:
-    notebook_share_requests and its one index (idx_share_requests_group).
+    notebook_share_requests and its two indexes (idx_share_requests_group,
+    the plain lookup index, and uq_share_requests_one_pending, the partial
+    unique index enforcing at most one pending request per (notebook_id,
+    group_id)).
 
     Same rationale as test_deployed_v48_database_verifies_group_sharing_tables
     above, isolated to just the P2 hop: a forged deployment at v49 (P1's
     group-sharing tables present, P2's request table absent) is the only way
     to exercise _migration_50 in isolation, since a live database already at
-    or past v50 short-circuits the version gate. The index rides on the one
-    new table it covers, so `DROP TABLE` inside `_rollback_v50` removes it
+    or past v50 short-circuits the version gate. Both indexes ride on the one
+    new table they cover, so `DROP TABLE` inside `_rollback_v50` removes them
     implicitly.
     """
     module = _load_verifier()

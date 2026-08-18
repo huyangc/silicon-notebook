@@ -3106,6 +3106,10 @@ SHARE_REQUEST_INDEXES = {
     "idx_share_requests_group":
         "CREATE INDEX idx_share_requests_group "
         "ON notebook_share_requests(group_id, status)",
+    "uq_share_requests_one_pending":
+        "CREATE UNIQUE INDEX uq_share_requests_one_pending\n"
+        "                  ON notebook_share_requests(notebook_id, group_id, status) "
+        "WHERE status = 'pending'",
 }
 MIGRATION_MANIFEST = {
     (key[0], 50, *key[2:]): {

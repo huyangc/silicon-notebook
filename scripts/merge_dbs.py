@@ -49,12 +49,18 @@ NOTEBOOK_SCOPED_TABLES = [
     # v50 群组知识共享 P2: notebook_share_requests 同样直接带 notebook_id 列
     # (申请挂在被申请共享的库上，随库走)，按 notebook_id IN (sec_nb) 筛即可。
     # 与 notebook_grants.principal_id 不同, 这张表的 group_id 是真实外键
-    # (无停车方案取舍), 而 GLOBAL_UNION_TABLES 对 groups 的导入发生在
-    # 同一份 FK-off 事务里、且先于合并末尾统一的 `foreign_key_check`——
-    # 只要两侧不存在同 id 不同实体的 group 冲突, 到那一步时引用即已满足,
-    # 不需要像 sweep_orphan_group_grants 那样为它单独扫孤儿; 真出现悬挂
-    # 外键(id 冲突这种边缘情形), `foreign_key_check` 会 fail-loud 中止合并,
-    # 而不是静默留下坏行——这本身就是期望的兜底, 无需另加逻辑。
+    # (无停车方案取舍); GLOBAL_UNION_TABLES 对 groups 的导入是无条件全量
+    # `INSERT OR IGNORE`(不按 sec_nb 过滤), 所以两侧不存在同 id 冲突时,
+    # secondary 的每个 group 行都会原样进入 main.groups, 引用天然满足。
+    # ⚠ 不要以为"id 冲突时 `foreign_key_check` 会 fail-loud 中止合并"——
+    # 那不成立: `INSERT OR IGNORE` 撞主键时只是静默丢弃 secondary 那一行,
+    # id 本身依然存在于 main.groups(留下的是 primary 那个不相干的组), 引用
+    # 该 id 的 notebook_share_requests.group_id 外键照样满足, `foreign_key_
+    # check` 看不出任何异常——真正发生的是"申请被悄悄接到了错误的组上"这类
+    # 静默语义合并, 不是可侦测的悬挂外键。避免它靠的是 id 生成用完整 128 位
+    # uuid4 十六进制, 跨部署随机不撞车(与 group_store.py `create_group` 的
+    # 同款裁决 1c 论证一致), 而不是任何运行期兜底; `foreign_key_check` 这道
+    # 闸只对"真的引用不到任何行"的悬挂外键有效, 对 id 冲突这类问题无能为力。
     "notebook_share_requests",
 ]
 # notebook_bases 是"挂载方"拥有的行(notebook_id=挂载方, base_notebook_id=被挂的公共知识

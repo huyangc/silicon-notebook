@@ -193,6 +193,10 @@ CREATE TABLE notebook_share_requests (
   created_at   TEXT NOT NULL
 );
 CREATE INDEX idx_share_requests_group ON notebook_share_requests(group_id, status);
+-- 防重复 pending(P2-T1 评审裁决 P2-5):同一 (库, 组) 至多一条在飞申请;
+-- 三列版给 shadow 停车留 SENTINEL_TEXT 候选(status),不锁死入向 FK。
+CREATE UNIQUE INDEX uq_share_requests_one_pending
+  ON notebook_share_requests(notebook_id, group_id, status) WHERE status = 'pending';
 ```
 
 Principal 编码取舍:「成员 viewer + 管理员 admin」用**两行**表达(`group` +
