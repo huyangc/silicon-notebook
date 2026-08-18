@@ -416,6 +416,42 @@ test("我发起的待审批申请出现在群组面板顶层,且撤回不依赖�
   await waitFor(() => expect(screen.queryByText("我发起的共享申请")).not.toBeInTheDocument());
 });
 
+test("撤回成功但列表刷新失败:不报失败、行不残留、不诱导重试", async () => {
+  const user = userEvent.setup();
+  // 与批准/驳回**同一种形状**,所以必须走同一条两段式:撤回已经生效,重取失败只是
+  // 这一屏落后了。报成「撤回申请失败」会让人再点一次,而那一次必然 404——申请行
+  // 已经被整行删掉了(裁决 P2-2:撤回不是第三个状态,是 DELETE)。
+  vi.mocked(listMyPendingShareRequests)
+    .mockResolvedValueOnce([shareRequest({ id: "sr-mine", notebook_id: "nb-lost", notebook_name: "Alice 的库" })])
+    .mockRejectedValue(new Error("network"));   // 对账那次失败
+  vi.mocked(withdrawShareRequest).mockResolvedValue(undefined);
+  renderModal();
+
+  await screen.findByText("我发起的共享申请");
+  await user.click(screen.getByRole("button", { name: "撤回" }));
+
+  await waitFor(() => expect(withdrawShareRequest).toHaveBeenCalledWith("nb-lost", "sr-mine"));
+  await waitFor(() => expect(screen.getByText(/列表没能刷新/)).toBeInTheDocument());
+  expect(screen.queryByText("撤回申请失败")).not.toBeInTheDocument();
+  // 那条已撤回的申请不能残留(本地摘行必须发生在 mutate 里,不能只靠对账)。
+  expect(screen.queryByRole("button", { name: "撤回" })).not.toBeInTheDocument();
+});
+
+test("撤回本身失败时仍然报失败,行留着让人重试", async () => {
+  const user = userEvent.setup();
+  vi.mocked(listMyPendingShareRequests)
+    .mockResolvedValue([shareRequest({ id: "sr-mine", notebook_id: "nb-lost", notebook_name: "Alice 的库" })]);
+  vi.mocked(withdrawShareRequest).mockRejectedValue(new Error("nope"));
+  renderModal();
+
+  await screen.findByText("我发起的共享申请");
+  await user.click(screen.getByRole("button", { name: "撤回" }));
+
+  await screen.findByText("撤回申请失败");
+  expect(screen.queryByText(/列表没能刷新/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "撤回" })).toBeInTheDocument();
+});
+
 test("没有待审批申请时不渲染这一节,也不因它加载失败而盖住整个面板", async () => {
   vi.mocked(listMyPendingShareRequests).mockRejectedValue(new Error("boom"));
   renderModal();
