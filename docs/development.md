@@ -29,8 +29,8 @@ fixtures in tests are outside this rule.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
-The current schema version is 50. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v50 and remains readable. Those migrations
+The current schema version is 51. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v51 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -239,9 +239,37 @@ request per (library, group), and the create endpoint returns the existing pendi
 row idempotently on conflict rather than 409ing; `status` is exact-matched against
 `pending`/`approved`/`rejected`, never `!=`. PostgreSQL migration v28 is the paired
 schema; because v50/v28 adds one table and one partial UNIQUE index, the
-forward-shadow invariants move to 78 business tables and 106 unique surfaces, the
+forward-shadow invariants moved to 78 business tables and 106 unique surfaces, the
 branch-counted bound staying at exactly 12 row slots (the new table is shallow
-too). The current pairing is SQLite 50 / PostgreSQL 28 / epoch 1.
+too).
+
+SQLite v51 adds the two agent-understanding tables `agent_notebook_profile` and
+`agent_profile_jobs` backing "AI 对这个库的理解" — a low-cost, LLM-consolidated
+summary of what the agent has learned about a notebook. `agent_notebook_profile`
+holds five label blocks keyed by `(notebook_id, owner_id, label)`: three shared
+base-layer blocks (`corpus_shape`/`key_entities`/`corpus_gaps`, `owner_id=''`,
+refreshed by a per-notebook consolidation job once accumulated source changes
+cross a threshold) and two per-member overlay blocks (`retrieval_notes`/
+`usage_gaps`, `owner_id` = that member's user id, refreshed once that member
+completes enough Ask jobs or a deep report). `owner_id` follows the
+`notebook_grants.principal_id` precedent from v49/v27: `NOT NULL DEFAULT ''`
+rather than nullable, with no foreign key to `users` and no CHECK constraint on
+it or on `label`. `agent_profile_jobs` is a one-row-per-chain status/counter
+table keyed by `(notebook_id, owner_id)`; single-flight is a primary-key-row
+compare-and-swap rather than a separate unique index. Both tables' replication
+key equals their declared primary key exactly, so the forward shadow parks them
+by `REPLICATION_KEY` with no sentinel column and no `_UNIQUE_PREDICATES` entry.
+`agent_notebook_profile.history_json` is a bounded ring buffer of before/after
+entries appended in the same write transaction as the block update, in place of
+a separate change-history table — v1 offers no history-browsing UI, so a
+queryable table would add manifest/copy-rank/parking overhead for no reachable
+capability. Notebook deep copy carries neither table: a copy starts with no
+consolidated understanding of its own, and job rows are transient process state
+like `catalog_jobs`. PostgreSQL migration v29 is the paired schema. Because
+v51/v29 adds two more (shallow) tables, the forward-shadow invariants move to
+80 business tables and 108 unique surfaces; the branch-counted bound remains
+exactly 12 row slots. The current pairing is
+SQLite 51 / PostgreSQL 29 / epoch 1.
 
 Run it only while application/background writers are stopped:
 
@@ -264,7 +292,7 @@ business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
 schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 78-table epoch-1 manifest. It also includes
+logical-key guards across the exact 80-table epoch-1 manifest. It also includes
 run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
 batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids

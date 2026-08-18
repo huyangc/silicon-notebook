@@ -325,7 +325,9 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 每个 `[services.<id>]` 表配置 `display_name`、`kind`、`protocol`、`base_url`、
 `model`、`api_key_env` 与 `max_concurrency`；`[bindings]` 把稳定的 workload id
 （如 `ask_answer`、`reasoning_agent`、`knowhow_complete`、`kg_extract`、
-`retrieval_query_embedding`、`retrieval_rerank`）映射到物理服务。多个 workload
+`retrieval_query_embedding`、`retrieval_rerank`、`agent_profile_consolidate`——模型
+服务状态页里标签为「库理解整理」，即「AI 对这个库的理解」背后的后台巡固调用，
+见下面的 `AGENT_PROFILE_ENABLED`）映射到物理服务。多个 workload
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
 
@@ -609,6 +611,9 @@ KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # Knowhow 格子对象进入 reasoning/graph �
 REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工具，enumerate_elements/enumerate_kg_objects（默认 true；false 同时关闭两个工具与集合地图，零额外查询）
 REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）；同一个开关也管深度报告每节深挖在穷尽档（depth 16，见下方 REPORT_MAX_SECTIONS）的启用，不另设报告专属开关
 REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）；深度报告每节深挖到达穷尽档时同样生效
+AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管住 plan/reflect 注入、后台巡固触发与两个 API 面的可见性（默认 true；false 处处逐字回到接入前——不注入、不记 trace 步、不排巡固，API 返回 enabled=false 而非 404）
+AGENT_PROFILE_BASE_TRIGGER   # 共享底座层（corpus_shape/key_entities/corpus_gaps）重新巡固前累计的来源变更次数（默认 5）
+AGENT_PROFILE_OVERLAY_TRIGGER # 该成员私有覆盖层（retrieval_notes/usage_gaps）重新巡固前累计的已完成提问次数；已完成的深度报告直接达阈（默认 10）
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
 LEXICAL_LANGUAGE_GATE_ENABLED # 语料采样中没有任何 CJK 字符时，丢弃纯 CJK 的词法词项（默认 true；这些探针对该库保证零命中，却各买一次真实的 PostgreSQL LATERAL 探针——7,026 块的英文库实测：64 词项冷 29.7s / 3 词项暖 0.26s，返回同样的 26 行，未过滤形态在报告多节并发下会直接超时。绝不过滤用户引号短语与整句词项，不做拉丁方向，也不作用于选定来源的运行——那条路的词法臂是它唯一的候选来源。设 false 回到接入前逐字一致的行为，用于某库语言采样误判时的临时恢复）
 POSTGRES_LEXICAL_KNN_ENABLED # 主导规模 PostgreSQL 库上 KG 名词法探针的 GiST `<->` KNN 早停（默认 true，设 false 回滚；仅 PostgreSQL——SQLite 适配器声明不具备该能力，判定零成本短路）。需要一个形状匹配的 GiST trigram 索引（覆盖知识对象名表达式）——按**精确**形状探测（单 gist_trgm_ops 键、名表达式、`COLLATE "C"`），运维已建的同形索引直接生效；缺索引时旧语句原样运行——结果层面默认开对未建索引部署零差异;成本层面每次未收窄探针为规模判定付一条已索引的单行版本查询（亚毫秒,与其后的词法 LATERAL 相比是噪声,登记接受）。只对未按来源收窄、且规模 ≥ POSTGRES_LEXICAL_KNN_MIN_ROWS 的库生效。分数仍是 `similarity()`；等相似度并列类内 KNN 路径不仅可能与 legacy 取不同成员，其**自身也不是 run-to-run 稳定的**（并列成员随 GiST 遍历序变化；9.1M 行 base 实测：285 行同名 "DAC" 的 sim=1.0 类）——登记接受的取舍；需要位稳定候选集的部署设 false。同库实测：常见短词单词项 7.4s → 123ms（60×）。索引 DDL 与上线/回滚步骤见运维文档。
