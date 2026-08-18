@@ -130,15 +130,19 @@ import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
-import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
+import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
+import { emptyStagedList, mergeStagedFiles, type StagedList } from "./staged-files.ts";
 import {
-  bundleCapsFrom, bundleErrorMessage, classifyBundleContents, collectDirectoryFiles,
-  directoryHasMarkdown, directoryTruncatedMessage, inlineTooLargeMessage,
-  processMarkdownCandidate, readDirectoryAsBundleFiles, unpackZipFile,
+  bundleCapsFrom, bundleErrorMessage, bundleFileNamesFor, bundleTotalBytesLimit,
+  classifyBundleContents, collectDirectoryFiles, directoryHasMarkdown,
+  directoryTooLargeMessage, directoryTruncatedMessage, inlineTooLargeImageLines,
+  inlineTooLargeMessage, notStagedNote, processMarkdownCandidate,
+  readDirectoryAsBundleFiles, unpackZipFile,
+  ALREADY_STAGED_REASON, BUNDLE_READ_FAILED_REASON, DIRECTORY_READ_FAILED_REASON,
   NO_MARKDOWN_IN_BUNDLE_REASON,
 } from "./bundle-intake.ts";
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
-import type { BundleFile } from "./md-bundle.ts";
+import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
@@ -919,7 +923,30 @@ export default function Home() {
   const [reportMaxSubqueriesPerSection, setReportMaxSubqueriesPerSection] = useState(
     DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   );
-  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  // 待上传列表：文件 + 每项文档类型 + 每项是否被用户显式表态，**一个** state 对象。
+  // 三条数组必须逐项对齐（uploadDocTypeFields 按下标配对），而入列会被跨 await 的
+  // 异步链触发（zip 解包、文件夹遍历）——拆成三个 state 就只能各自 setState，等长
+  // 不变量没有任何一处能一次性维护。合并语义与等长不变量的真源在 staged-files.ts。
+  const [staged, setStaged] = useState<StagedList>(() => emptyStagedList());
+  // 同步 ref 镜像：updateStaged 是**唯一**写入口，写 state 的同时先把新值写进 ref，
+  // 于是「从最新值起算」不再依赖 React 何时提交。这正是 zip/pdf 同批那个静默丢失的
+  // 根因——旧实现从 render 闭包读 stagedFiles 拼好数组再整体写回，zip 解完（跨了
+  // await）时读到的是「还没有 pdf」的旧闭包，把 pdf 覆盖没了。沿用本文件既有的
+  // applyTouchedUpdate 惯例（同一条理由）。
+  const stagedRef = useRef<StagedList>(staged);
+  const stagedFiles = staged.files;
+  const stagedDocTypes = staged.docTypes;
+  const stagedDocTypeTouched = staged.touched;
+  // 兜底：万一将来有路径绕开 updateStaged 直接 setStaged，提交后把 ref 拨回一致。
+  useEffect(() => {
+    stagedRef.current = staged;
+  }, [staged]);
+  function updateStaged(next: StagedList | ((prev: StagedList) => StagedList)): StagedList {
+    const value = typeof next === "function" ? next(stagedRef.current) : next;
+    stagedRef.current = value;
+    setStaged(value);
+    return value;
+  }
   // 最近一次「添加文件」里被跳过的文件（类型不支持/超大小/超批量），在弹窗内持久展示。
   // 不能只发 toast：它 2.2 秒即逝，批量选文件时用户根本来不及看清哪些没进列表。
   const [stagedSkipped, setStagedSkipped] = useState<SkippedStagedFile[]>([]);
@@ -940,6 +967,14 @@ export default function Home() {
   // 压缩包的信号——不这样做，第二个 zip 若也命中多选就会直接覆盖 bundleChoice，
   // 静默吞掉用户还没来得及做的第一次选择。
   const bundleChoiceResolveRef = useRef<(() => void) | null>(null);
+  // 忙碌文案是一个**栈**而不是单值：拖入的文件夹里若含 zip，「读取文件夹…」这一帧
+  // 还没结束，内层「解析压缩包…」就已经开始又结束了。单值形态下内层的清零会把外层
+  // 的进行态一起抹掉——入口看上去恢复可用，其实链还在飞，用户此时再拖一个压缩包就
+  // 会覆盖掉还没确认的勾选（那正是 bundleChoiceResolveRef 要防的形态）。
+  const bundleBusyStackRef = useRef<string[]>([]);
+  // 用户主动关闭「添加来源」弹窗后，还在飞的解包链完成时不得把弹窗强行弹回来。
+  // 重新打开弹窗时清零。
+  const sourceModalDismissedRef = useRef(false);
   // 压缩包/文件夹图片配对回执：每个成功入列的 md 一条，弹窗内持久显示，直至弹窗重置
   // （关闭/清空/上传成功）——对齐「被跳过文件逐条持久列出、不许只发即逝 toast」的
   // 既有红线（stagedSkipped 同一精神，这里是配对细节，独立一块面板，见
@@ -950,20 +985,6 @@ export default function Home() {
   // 上传在飞:multipart 传大 PDF 可能几十秒,期间「上传 N 个文件」必须禁用改文案。后端按
   // 内容哈希在同 notebook 内去重,重复提交不会建出重复来源,但会白传一遍并再跑一次解析。
   const [uploadBusy, setUploadBusy] = useState(false);
-  const [stagedDocTypes, setStagedDocTypes] = useState<string[]>([]);
-  // 与 stagedDocTypes 同序等长：用户是否**手动**动过这一项的类型下拉框。auto-detect
-  // 自动回填不置位（那是系统建议、非用户表态）；上传时据此发 doc_type_explicit，让后端
-  // 只在用户显式表态时才改/重置复用来源的类型（见 uploadDocTypeFields / 后端 reuse 路径）。
-  const [stagedDocTypeTouched, setStagedDocTypeTouched] = useState<boolean[]>([]);
-  // detectStagedTypes 是异步的：检测在飞时用户改了下拉框，回填必须看**最新**的 touched，
-  // 而闭包捕获的 stagedDocTypeTouched 是发起那一刻的旧值。用 ref 镜像最新值，回填时读它。
-  // ref 由改动 touched 的每个 handler 经 applyTouchedUpdate **同步**更新（不等这个
-  // useEffect 提交），否则检测恰在「置 touched」与「useEffect 写 ref」的间隙里 resolve
-  // 就会读到旧 ref、覆盖用户显式选的自动检测。下面的 useEffect 只作兜底（提交后拨齐）。
-  const stagedDocTypeTouchedRef = useRef<boolean[]>([]);
-  useEffect(() => {
-    stagedDocTypeTouchedRef.current = stagedDocTypeTouched;
-  }, [stagedDocTypeTouched]);
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
   // 删除是一个可能触发大量级联清理的同步请求。按 source id 记录进行态，让列表与详情
   // 共用同一把锁；ref 在 React 提交 state 前就同步占位，防住确认框/两个入口的连点竞态。
@@ -2982,12 +3003,8 @@ export default function Home() {
     const notebook = await createNotebook(defaultNotebookPayload());
     await loadNotebookCollection();
     await openNotebook(notebook.id);
-    setStagedFiles([]);
-    setStagedDocTypes([]);
-    setStagedSkipped([]);
-    setBundleReceipts([]);
-    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
-    setSourceModalOpen(true);
+    resetStagedIntake();
+    openSourceModal();
   }
 
   async function submitCreate() {
@@ -2995,12 +3012,8 @@ export default function Home() {
     setCreateOpen(false);
     await loadNotebookCollection();
     await openNotebook(notebook.id);
-    setStagedFiles([]);
-    setStagedDocTypes([]);
-    setStagedSkipped([]);
-    setBundleReceipts([]);
-    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
-    setSourceModalOpen(true);
+    resetStagedIntake();
+    openSourceModal();
   }
 
   async function loadSourcesPage(
@@ -3346,54 +3359,71 @@ export default function Home() {
   function stageFiles(event: ChangeEvent<HTMLInputElement>) {
     const all = Array.from(event.target.files || []);
     event.target.value = "";
-    stageIncomingFiles(all);
+    stageIncomingFiles(all).catch(reportError);
   }
 
-  // 选择器与拖放共用的入列逻辑。被跳过的文件（类型不支持/超大小/超批量）写进
-  // stagedSkipped 在弹窗内持久展示，绝不静默丢弃；.zip 单独摘出去解包（不进后端
-  // 上传白名单，是前端交换格式，见 bundle-intake.ts）。
-  function stageIncomingFiles(all: File[]) {
-    if (all.length === 0) return;
+  /** 打开「添加来源」弹窗：清掉「用户已主动关闭」的标记，让后续入列可以正常揭示弹窗。 */
+  function openSourceModal() {
+    sourceModalDismissedRef.current = false;
+    setSourceModalOpen(true);
+  }
+
+  /** 弹窗内所有暂存态的统一清空点（新建笔记本 / 关闭弹窗 / 清空 / 上传成功共用）。 */
+  function resetStagedIntake() {
+    updateStaged(emptyStagedList());
+    setStagedSkipped([]);
+    setBundleReceipts([]);
+  }
+
+  /** 关闭「添加来源」弹窗。× 按钮与点遮罩必须走**同一个** handler：遮罩那条路此前
+   *  只 setSourceModalOpen(false)，不结清 bundleChoice——等勾选的那条链的 resolver
+   *  就永远不会被调用，它持有的忙碌位再也不释放，重开弹窗后添加入口是灰的。 */
+  function closeSourceModal() {
+    resetStagedIntake();
+    cancelBundleChoice();
+    setLinkSectionOpen(false);
+    // 记住「是用户主动关的」：还在飞的解包链完成时不得把弹窗强行弹回来。
+    sourceModalDismissedRef.current = true;
+    setSourceModalOpen(false);
+  }
+
+  // 选择器与拖放共用的入列逻辑（**同步**部分）。被跳过的文件（类型不支持/超大小/
+  // 超批量）写进 stagedSkipped 在弹窗内持久展示，绝不静默丢弃；.zip 不在这里处理，
+  // 原样交回给调用方去解包（不进后端上传白名单，是前端交换格式，见 bundle-intake.ts）。
+  //
+  // 合并从 stagedRef.current 起算并经 updateStaged 一次性写回：三条并行数组的等长
+  // 不变量在 mergeStagedFiles 里维护，跨 await 的异步链不会再读到发起那一刻的旧闭包
+  // （旧形态下 pdf + zip 同批时 pdf 会被 zip 的入列静默覆盖掉）。
+  function stageIncomingFilesSync(all: File[]): { added: File[]; skipped: SkippedStagedFile[]; duplicates: File[]; bundles: File[] } {
+    if (all.length === 0) return { added: [], skipped: [], duplicates: [], bundles: [] };
     const { accepted: picked, skipped, bundles } = classifyStagedFiles(all, {
       supportedExtensions: supportedSourceExtensions,
       legacyOfficeExtensions: LEGACY_OFFICE_EXTENSIONS,
       maxBytes: sourceUploadMaxBytes,
       supportedHint: supportedSourceUserHint,
     });
-    if (bundles.length > 0) void ingestBundleSources(bundles);
     // 追加而非覆盖（"继续添加文件"语义）；按 name+size 去重，避免重复入列。
-    const merged = [...stagedFiles];
-    const mergedTypes = [...stagedDocTypes];
-    const mergedTouched = [...stagedDocTypeTouched];
-    const added: File[] = [];
-    for (const file of picked) {
-      if (!merged.some((existing) => existing.name === file.name && existing.size === file.size)) {
-        if (
-          sourceUploadMaxFilesPerBatch !== null
-          && merged.length >= sourceUploadMaxFilesPerBatch
-        ) {
-          skipped.push({
-            name: file.name,
-            reason: `超出单次上传上限（${sourceUploadMaxFilesPerBatch} 个），请先上传当前批次再继续添加`,
-          });
-          continue;
-        }
-        merged.push(file);
-        mergedTypes.push("");        // 新文件默认「自动检测」
-        mergedTouched.push(false);   // 且尚未被用户手动设置（与 mergedTypes 同步增长）
-        added.push(file);
-      }
+    const merge = mergeStagedFiles(stagedRef.current, picked, {
+      maxFilesPerBatch: sourceUploadMaxFilesPerBatch,
+    });
+    const allSkipped = [...skipped, ...merge.skipped];
+    appendStagedSkipped(allSkipped);
+    if (merge.added.length === 0) {
+      return { added: [], skipped: allSkipped, duplicates: merge.duplicates, bundles };
     }
-    appendStagedSkipped(skipped);
-    if (added.length === 0) return;
-    setStagedFiles(merged);
-    setStagedDocTypes(mergedTypes);
-    // 同步入 ref：紧接着的 detectStagedTypes 是异步的，它 resolve 时读 ref 决定回填哪些项；
-    // ref 必须已反映这批新文件的 touched（全 false），不能等 useEffect。
-    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, mergedTouched);
-    setSourceModalOpen(true);
+    updateStaged(merge.next);
+    // 用户已经主动关掉弹窗时不再弹回来（异步解包链完成得比用户慢是常态）。
+    if (!sourceModalDismissedRef.current) setSourceModalOpen(true);
     // 对新增的文本类文件做内容检测，预填类型下拉（异步，不阻塞 UI；用户仍可改）。
-    void detectStagedTypes(added, merged);
+    void detectStagedTypes(merge.added);
+    return { added: merge.added, skipped: allSkipped, duplicates: merge.duplicates, bundles };
+  }
+
+  /** 入列 + 串行解包其中的 zip。调用方必须 `await` 或 `.catch(reportError)`——
+   *  丢掉这个 promise 就等于丢掉整条链的错误出口（以及嵌套链的忙碌位归属）。 */
+  async function stageIncomingFiles(all: File[]): Promise<void> {
+    const { bundles } = stageIncomingFilesSync(all);
+    if (bundles.length > 0) await ingestBundleSources(bundles);
   }
 
   // 拖放必须由我们接管：不 preventDefault 的话文件会落在铺满拖放区的原生
@@ -3429,18 +3459,20 @@ export default function Home() {
       // 在 dataTransfer.files 里没有条目（浏览器不为目录生成 File），这里只报得出
       // 同批里被拖入的普通文件，与改动前一致。
       const dropped = Array.from(event.dataTransfer?.files ?? []);
-      const reason = sourceFilePickerHint ?? "当前无法添加文件";
-      appendStagedSkipped(dropped.map((file) => ({ name: file.name, reason })));
+      appendStagedSkipped(dropped.map((file) => ({ name: file.name, reason: sourceFilePickerSkipReason })));
       return;
     }
     const entries = extractDroppedEntries(event.dataTransfer?.items ?? null);
-    if (entries !== null) {
-      void dispatchDroppedEntries(entries);
+    // entries 为空数组说明 webkitGetAsEntry 每一项都返回了 null（个别浏览器/来源在
+    // 某些拖放形态下如此），此时 dataTransfer.files 仍可能有内容——不回退就等于把
+    // 整批拖入静默吞掉。判据必须是「拿到了至少一个条目」而不是「API 可用」。
+    if (entries !== null && entries.length > 0) {
+      dispatchDroppedEntries(entries).catch(reportError);
       return;
     }
     // File and Directory Entries API 不可用（极少见的浏览器/环境）：回退到改动前的
     // 扁平文件列表——文件夹在这条路径下本来就拿不到内容，不是新的回归。
-    stageIncomingFiles(Array.from(event.dataTransfer?.files ?? []));
+    stageIncomingFiles(Array.from(event.dataTransfer?.files ?? [])).catch(reportError);
   }
 
   // `webkitGetAsEntry` 是 File and Directory Entries API 的 WebKit 前缀方法，主流
@@ -3461,6 +3493,7 @@ export default function Home() {
   // 文件先攒起来，最后一次性交给 stageIncomingFiles（其中会再拆出 .zip 单独解包）。
   async function dispatchDroppedEntries(entries: FileSystemEntry[]) {
     const plainFiles: File[] = [];
+    const unreadable: SkippedStagedFile[] = [];
     for (const entry of entries) {
       if (entry.isDirectory) {
         await ingestDroppedDirectory(entry as FileSystemDirectoryEntry);
@@ -3473,11 +3506,33 @@ export default function Home() {
         });
         plainFiles.push(file);
       } catch {
-        // 读取失败（极少见，如条目在拖放后被移动/删除）：这一项当作没有到达，
-        // 不阻塞同批其余条目。
+        // 读取失败（极少见，如条目在拖放后被移动/删除）：这一项不阻塞同批其余条目，
+        // 但必须逐条留痕——静默吞掉就是「拖了没反应」，用户无从知道少了哪个文件。
+        unreadable.push({ name: entry.name, reason: BUNDLE_READ_FAILED_REASON });
       }
     }
-    if (plainFiles.length > 0) stageIncomingFiles(plainFiles);
+    appendStagedSkipped(unreadable);
+    if (plainFiles.length > 0) await stageIncomingFiles(plainFiles);
+  }
+
+  // 忙碌文案的栈式持有：push/pop 成对，pop 后恢复外层那一帧的文案而不是一律清零
+  // （bundleBusyStackRef 声明处有完整说明）。
+  function pushBundleBusy(label: string) {
+    bundleBusyStackRef.current.push(label);
+    setBundleBusyLabel(label);
+  }
+  function replaceBundleBusy(label: string) {
+    const stack = bundleBusyStackRef.current;
+    if (stack.length > 0) stack[stack.length - 1] = label; else stack.push(label);
+    setBundleBusyLabel(label);
+  }
+  function popBundleBusy() {
+    bundleBusyStackRef.current.pop();
+    syncBundleBusyLabel();
+  }
+  function syncBundleBusyLabel() {
+    const stack = bundleBusyStackRef.current;
+    setBundleBusyLabel(stack.length > 0 ? stack[stack.length - 1] : null);
   }
 
   // 一批里可能有多个 zip（多选文件选择器 / 一次拖放多个 zip）：严格串行处理，避免
@@ -3490,7 +3545,7 @@ export default function Home() {
   }
 
   async function ingestZipFile(file: File) {
-    setBundleBusyLabel("解析压缩包…");
+    pushBundleBusy("解析压缩包…");
     try {
       const result = await unpackZipFile(file, bundleCapsFrom(sourceUploadMaxBytes));
       if (!result.ok) {
@@ -3498,8 +3553,12 @@ export default function Home() {
         return;
       }
       await handleBundleFiles(file.name, result.files);
+    } catch {
+      // 读字节/解包本身抛异常（条目已被移动、权限变化、内存不足…）：这一个压缩包
+      // 当作没进来，逐条留痕而不是让整条链带着一个未处理 rejection 静默死掉。
+      appendStagedSkipped([{ name: file.name, reason: BUNDLE_READ_FAILED_REASON }]);
     } finally {
-      setBundleBusyLabel(null);
+      popBundleBusy();
     }
   }
 
@@ -3507,24 +3566,41 @@ export default function Home() {
   // markdown 时保持既有拖拽行为——文件夹里的文件按普通文件逐个入列，走常规的
   // 类型/大小/批量校验（红线：不含 md 的文件夹不能回归成「拖了没反应」）。
   async function ingestDroppedDirectory(entry: FileSystemDirectoryEntry) {
-    setBundleBusyLabel("读取文件夹…");
+    pushBundleBusy("读取文件夹…");
     try {
-      const { entries, truncated } = await collectDirectoryFiles(entry);
+      // 总字节预算是**零 I/O** 预检：只累加条目的 File.size 元数据，超限就地止损，
+      // 一个字节都不读（zip 那条路由 parseZipBundle 的解压护栏把关，这里是它的对偶）。
+      const totalLimit = bundleTotalBytesLimit(sourceUploadMaxBytes);
+      const { entries, truncated, overBudget } = await collectDirectoryFiles(entry, {
+        maxTotalBytes: totalLimit,
+      });
       if (truncated) {
         appendStagedSkipped([{ name: entry.name, reason: directoryTruncatedMessage() }]);
+        return;
+      }
+      if (overBudget) {
+        // overBudget 只可能在给了预算时为真（collectDirectoryFiles 的契约，有单测钉住）；
+        // `?? 0` 只是类型收窄。判据刻意不写成 `overBudget && totalLimit !== null`——
+        // 那样一旦契约变了就会**穿过去**，把一份中途止损的残缺清单当完整清单入列。
+        appendStagedSkipped([{ name: entry.name, reason: directoryTooLargeMessage(totalLimit ?? 0) }]);
         return;
       }
       // 只看路径（零 I/O）判断有没有 markdown：不含 md 的文件夹没必要把里面可能
       // 几十上百个文件的全部字节都读一遍，只为了发现用不上。
       if (!directoryHasMarkdown(entries)) {
-        stageIncomingFiles(entries.map((item) => item.file));
+        // 必须 await：文件夹里可能还夹着 zip，那条嵌套链要在本帧的忙碌位释放**之前**
+        // 跑完，否则入口会提前恢复可用、让用户拖进第二个包去覆盖还没确认的勾选。
+        await stageIncomingFiles(entries.map((item) => item.file));
         return;
       }
-      setBundleBusyLabel("读取文件夹图片…");
+      replaceBundleBusy("读取文件夹图片…");
       const bundleFiles = await readDirectoryAsBundleFiles(entries);
       await handleBundleFiles(entry.name, bundleFiles);
+    } catch {
+      // 遍历/读字节失败：同上，整个文件夹当作没进来并留痕。
+      appendStagedSkipped([{ name: entry.name, reason: DIRECTORY_READ_FAILED_REASON }]);
     } finally {
-      setBundleBusyLabel(null);
+      popBundleBusy();
     }
   }
 
@@ -3537,9 +3613,17 @@ export default function Home() {
       return;
     }
     if (classification.kind === "single") {
-      const built = processBundleCandidate(label, classification.file, files);
-      if (built) stageIncomingFiles([built]);
+      stageBundleCandidates(label, [classification.file], files);
       return;
+    }
+    // 同一时刻只允许存在一个挂起的 resolver。走到这里说明上一条链的 resolver 还没
+    // 被结清（入口的 bundleProcessing 禁用 + 嵌套链一律 await 之后，理论上到不了）；
+    // 真到了也必须先把它 resolve 掉再替换——直接覆盖会让上一条链的 await 永远挂起，
+    // 它的忙碌位也就再也不会释放，添加来源入口从此锁死。
+    const stale = bundleChoiceResolveRef.current;
+    if (stale) {
+      bundleChoiceResolveRef.current = null;
+      stale();
     }
     await new Promise<void>((resolve) => {
       bundleChoiceResolveRef.current = resolve;
@@ -3549,38 +3633,85 @@ export default function Home() {
         candidates: classification.candidates,
         selected: new Set(classification.candidates.map((item) => item.path)),
       });
+      // 勾选等待不是「正在解析」：清掉忙碌文案（栈本身保持不变，链仍持有这一帧），
+      // 让 sourceFilePickerHint 的「请先在下方选择要添加的 Markdown 文件」那一支真正
+      // 可达。入口在此期间仍被 bundleChoice !== null 禁用，不会因为文案清空而放行。
+      setBundleBusyLabel(null);
     });
+    // 用户确认/取消后立刻把本帧的进行态文案恢复回来（下面还要接着内联/处理下一个包）。
+    syncBundleBusyLabel();
   }
 
-  // 处理单个已选中的 md：内联图片 → 记一条持久回执 → 内联后超过单文件上限则拒绝并
-  // 如实报出，否则以改写后的正文构造一个可入列的 File 并返回。**调用方负责攒批**，
-  // 用同一批结果只调用一次 stageIncomingFiles——它内部读 stagedFiles 闭包值后用
-  // 非函数式 setStagedFiles(merged) 写回，同一 tick 里连续调用多次会互相覆盖、只
-  // 剩最后一次生效（多选场景下前几个文件会静默消失），这正是本函数不在这里直接
-  // 入列的原因（confirmBundleChoice 就是踩过这个坑才拆开的）。
-  function processBundleCandidate(bundleLabel: string, mdFile: BundleFile, files: BundleFile[]): File | null {
-    const processed = processMarkdownCandidate(
-      mdFile,
-      files,
-      { uploadMaxBytes: sourceUploadMaxBytes ?? 0 },
-    );
-    if (!processed.ok) {
-      appendStagedSkipped([{
-        name: processed.fileName,
-        reason: inlineTooLargeMessage(processed.bytes, processed.limit),
-      }]);
-      return null;
+  // 一个虚拟文件集里被选中的那几个 md：逐个内联 → 攒批一次性入列 → 按**实际入列
+  // 结果**落持久回执。
+  //
+  // 攒批而不是逐个入列，是因为入列会写同一份待上传列表；回执在入列**之后**才落，
+  // 是因为一条回执若在文件其实没进列表时仍写着「3 张已内联」，就是在伪装成功——
+  // 被拒（内联后超限）、被去重、被单次上限挡下的那几份必须带上「未加入待上传列表」
+  // 及其原因。
+  function stageBundleCandidates(bundleLabel: string, candidates: BundleFile[], files: BundleFile[]) {
+    // 同批同名 md 的消歧命名（a/README.md 与 b/README.md）：不消歧会被待上传列表的
+    // 「同名同大小」去重静默折叠成一份。
+    const names = bundleFileNamesFor(candidates.map((item) => item.path));
+    const built: File[] = [];
+    const pending: Array<{ fileName: string; receipt: InlineReceipt; notes: string[] }> = [];
+    const rejected: SkippedStagedFile[] = [];
+    for (const candidate of candidates) {
+      const processed = processMarkdownCandidate(
+        candidate,
+        files,
+        { uploadMaxBytes: sourceUploadMaxBytes ?? 0 },
+        names.get(candidate.path),
+      );
+      if (!processed.ok) {
+        const reason = inlineTooLargeMessage(processed.bytes, processed.limit);
+        rejected.push({ name: processed.fileName, reason });
+        pending.push({
+          fileName: processed.fileName,
+          receipt: processed.receipt,
+          // 只报「总体积超了」，用户唯一能做的就是把整份文档拆开重试；点名最大的
+          // 那几张图片才是可操作的那部分信息。
+          notes: [notStagedNote(reason), ...inlineTooLargeImageLines(processed.images)],
+        });
+        continue;
+      }
+      built.push(new File([processed.rewritten], processed.fileName, { type: "text/markdown" }));
+      pending.push({ fileName: processed.fileName, receipt: processed.receipt, notes: [] });
     }
+    appendStagedSkipped(rejected);
+    // 内联产物都是 .md，不会再含 bundle，所以走同步入列这一半即可（也因此能拿到
+    // 「哪些真进了列表」来决定回执上的标注）。
+    const outcome = built.length > 0
+      ? stageIncomingFilesSync(built)
+      : { added: [] as File[], skipped: [] as SkippedStagedFile[], duplicates: [] as File[] };
+    const addedNames = new Set(outcome.added.map((file) => file.name));
+    const duplicateNames = new Set(outcome.duplicates.map((file) => file.name));
+    const skippedReasons = new Map(outcome.skipped.map((item) => [item.name, item.reason]));
     setBundleReceipts((previous) => [
       ...previous,
-      {
-        key: `${bundleLabel}::${processed.fileName}::${previous.length}`,
+      ...pending.map((entry, index) => ({
+        key: `${bundleLabel}::${entry.fileName}::${previous.length + index}`,
         bundleLabel,
-        fileName: processed.fileName,
-        receipt: processed.receipt,
-      },
+        fileName: entry.fileName,
+        receipt: entry.receipt,
+        notes: entry.notes.length > 0
+          ? entry.notes
+          : stagedOutcomeNotes(entry.fileName, addedNames, duplicateNames, skippedReasons),
+      })),
     ]);
-    return new File([processed.rewritten], processed.fileName, { type: "text/markdown" });
+  }
+
+  /** 成功内联却没进待上传列表时的回执标注（去重 / 单次上限 / 类型或大小被挡下）。 */
+  function stagedOutcomeNotes(
+    fileName: string,
+    added: ReadonlySet<string>,
+    duplicates: ReadonlySet<string>,
+    skippedReasons: ReadonlyMap<string, string>,
+  ): string[] {
+    if (added.has(fileName)) return [];
+    if (duplicates.has(fileName)) return [notStagedNote(ALREADY_STAGED_REASON)];
+    const reason = skippedReasons.get(fileName);
+    return [reason ? notStagedNote(reason) : notStagedNote(ALREADY_STAGED_REASON)];
   }
 
   function toggleBundleCandidate(path: string) {
@@ -3596,27 +3727,24 @@ export default function Home() {
     if (!bundleChoice) return;
     const { label, files, candidates, selected } = bundleChoice;
     setBundleChoice(null);
-    // 攒批后只调用一次 stageIncomingFiles（见 processBundleCandidate 的注释——同一
-    // tick 内多次调用会因非函数式 setState 互相覆盖，只剩最后一个勾选的文件入列）。
-    const built: File[] = [];
-    for (const candidate of candidates) {
-      if (!selected.has(candidate.path)) continue;
-      const file = processBundleCandidate(label, candidate, files);
-      if (file) built.push(file);
-    }
-    if (built.length > 0) stageIncomingFiles(built);
+    // 与 setBundleChoice(null) 同一个事件处理里把进行态文案恢复回来（下面还要内联、
+    // 还可能接着处理同批的下一个包）：留给 await 之后再恢复会空出一帧「既没有勾选
+    // 面板、也没有进行态」的可点窗口。
+    syncBundleBusyLabel();
+    stageBundleCandidates(label, candidates.filter((item) => selected.has(item.path)), files);
     bundleChoiceResolveRef.current?.();
     bundleChoiceResolveRef.current = null;
   }
 
   function cancelBundleChoice() {
     setBundleChoice(null);
+    syncBundleBusyLabel();
     bundleChoiceResolveRef.current?.();
     bundleChoiceResolveRef.current = null;
   }
 
   // 读文本类文件前 8KB → 批量调 /detect-doc-types → 回填仍为空（未手动选）的类型。
-  async function detectStagedTypes(added: File[], fullList: File[]) {
+  async function detectStagedTypes(added: File[]) {
     const textFiles = added.filter((file) => /\.(md|markdown|csv|txt)$/i.test(file.name));
     if (textFiles.length === 0) return;
     try {
@@ -3627,35 +3755,48 @@ export default function Home() {
       const byName: Record<string, string> = {};
       results.forEach((r) => { if (r.doc_type_id) byName[r.name] = r.doc_type_id; });
       if (Object.keys(byName).length === 0) return;
-      // 按 fullList 的位置回填；只填**未被用户表态过**的项（值空且未 touched），既不
+      // 按**回填这一刻**的列表定位（不是发起时的快照）：检测是异步的，期间用户可能已经
+      // 移除了几项或又添了几项。只填**未被用户表态过**的项（值空且未 touched），既不
       // 覆盖已选的具体类型、也不覆盖「检测在飞时用户改回自动检测」这种空但 touched 的
-      // 显式选择。touched 读 ref 的最新值（闭包里的 stagedDocTypeTouched 是发起那刻的旧
-      // 值）。**绝不动 stagedDocTypeTouched**——auto-detect 是系统建议、不是用户表态。
-      const detected = fullList.map((file) => byName[file.name]);
-      setStagedDocTypes((prev) =>
-        fillAutoDetectedTypes(prev, detected, stagedDocTypeTouchedRef.current),
-      );
+      // 显式选择。**绝不动 touched**——auto-detect 是系统建议、不是用户表态。
+      updateStaged((prev) => ({
+        ...prev,
+        docTypes: fillAutoDetectedTypes(
+          prev.docTypes,
+          prev.files.map((file) => byName[file.name]),
+          prev.touched,
+        ),
+      }));
     } catch {
       // 检测失败不影响上传：保持"自动检测"，用户可手动选。
     }
   }
 
   function setStagedDocType(index: number, value: string) {
-    setStagedDocTypes((prev) => prev.map((dt, i) => (i === index ? value : dt)));
-    // 用户手动改了这一项 → 标记为显式设置（哪怕选回「自动检测」也是一次显式表态）。
-    // 同步更新 ref（不等 useEffect）：否则检测同 tick resolve 会读到旧 touched、覆盖它。
-    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, (prev) => markTouched(prev, index));
+    // 用户手动改了这一项 → 同时标记为显式设置（哪怕选回「自动检测」也是一次显式表态）。
+    // 类型与 touched 在同一次更新里改：拆成两次 setState 会在两者之间留出一个检测可以
+    // resolve 进来的间隙，把用户显式选的空「自动检测」当没表态覆盖掉。
+    updateStaged((prev) => ({
+      ...prev,
+      docTypes: prev.docTypes.map((dt, i) => (i === index ? value : dt)),
+      touched: markTouched(prev.touched, index),
+    }));
   }
 
   function setAllStagedDocTypes(value: string) {
-    setStagedDocTypes((prev) => prev.map(() => value));
-    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, (prev) => markAllTouched(prev));
+    updateStaged((prev) => ({
+      ...prev,
+      docTypes: prev.docTypes.map(() => value),
+      touched: markAllTouched(prev.touched),
+    }));
   }
 
   function removeStagedFile(index: number) {
-    setStagedFiles((prev) => prev.filter((_, i) => i !== index));
-    setStagedDocTypes((prev) => prev.filter((_, i) => i !== index));
-    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, (prev) => prev.filter((_, i) => i !== index));
+    updateStaged((prev) => ({
+      files: prev.files.filter((_, i) => i !== index),
+      docTypes: prev.docTypes.filter((_, i) => i !== index),
+      touched: prev.touched.filter((_, i) => i !== index),
+    }));
   }
 
   async function confirmUpload() {
@@ -3719,11 +3860,7 @@ export default function Home() {
     // 重拉解禁;仍在解析中的慢路径由处理轮询覆盖。
     revalidateAskAvailability();
     reloadCheckup(currentNotebookId);  // 新源可能立即/后续成 H2–H6:刷新体检铃铛(codex 第5轮 P2)
-    setStagedFiles([]);
-    setStagedDocTypes([]);
-    setStagedSkipped([]);
-    setBundleReceipts([]);
-    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
+    resetStagedIntake();
     setSourceModalOpen(false);
     setToast(outcome.toast);
   }
@@ -6135,6 +6272,18 @@ export default function Home() {
           : bundleChoice
             ? "请先在下方选择要添加的 Markdown 文件"
             : undefined;
+  // 禁用态下拖入文件时写进「已跳过」的原因。刻意与 sourceFilePickerHint 分开：那份
+  // 提示在解包途中是一句进行态文案（「解析压缩包…」），把它当跳过原因写进持久列表，
+  // 用户读到的是「这个文件被跳过了，原因：解析压缩包…」——答非所问。
+  const sourceFilePickerSkipReason = docCapacity.atCapacity
+    ? atDocCapacityHint
+    : sourceUploadConfigLoading
+      ? "正在读取上传限制，请稍后重试"
+      : sourceBatchAtCapacity
+        ? `单次最多上传 ${sourceUploadMaxFilesPerBatch} 个文件，请先上传当前批次`
+        : bundleProcessing
+          ? "正在处理已拖入的压缩包或文件夹，请稍后重试"
+          : "当前无法添加文件";
   const stagedUploadBlockedReason = documentUploadBlockReason(docCapacity, stagedFiles.length);
   const capabilities = workspaceCapabilities(
     currentNotebook?.access,
@@ -6525,7 +6674,7 @@ export default function Home() {
               </div>
               <div className="workspace-panel-body sources-body">
                 {!isReader && (
-                  <button type="button" className="add-source-button" onClick={() => { setLinkSectionOpen(false); setSourceModalOpen(true); }}>
+                  <button type="button" className="add-source-button" onClick={() => { setLinkSectionOpen(false); openSourceModal(); }}>
                     <Plus size={20} strokeWidth={2.7} /> 添加来源
                   </button>
                 )}
@@ -7565,7 +7714,7 @@ export default function Home() {
       )}
 
       {sourceModalOpen && (
-        <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSourceModalOpen(false); }}>
+        <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) closeSourceModal(); }}>
           <FloatingModalCard storageKey="source.add.window" className="source-modal-card">
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
@@ -7573,7 +7722,7 @@ export default function Home() {
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
-              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); setBundleReceipts([]); cancelBundleChoice(); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
+              <button className="icon-button" onClick={closeSourceModal} title="Close">×</button>
             </div>
             {docCapacity.show && (
               <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
@@ -7725,7 +7874,7 @@ export default function Home() {
                     aria-describedby={stagedUploadBlockedReason ? "staged-upload-blocked-reason" : undefined}
                     onClick={() => confirmUpload().catch(reportError)}
                   >{uploadBusy ? "上传中…" : `上传 ${stagedFiles.length} 个文件`}</button>
-                  <button className="sort-button" disabled={uploadBusy} onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedSkipped([]); setBundleReceipts([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
+                  <button className="sort-button" disabled={uploadBusy} onClick={resetStagedIntake}>清空</button>
                 </div>
               </div>
             )}

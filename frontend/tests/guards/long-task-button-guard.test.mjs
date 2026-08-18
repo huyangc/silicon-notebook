@@ -21,7 +21,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { jsxElements, parseModule } from "../../test-support/semantic-source.mjs";
+import { jsxElements, parseModule, variableInitializersIn } from "../../test-support/semantic-source.mjs";
 import { CHECKUP_FIX, CHECKUP_FIX_BUSY } from "../../app/vocabulary.ts";
 
 // onClick 源码文本里能唯一认出这个入口的片段 → 这个入口是什么、为什么必须禁用。
@@ -40,6 +40,22 @@ const LONG_TASK_BUTTONS = [
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
   { match: "runMerge(", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重" },
   { match: "reviewAllMerges", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "reviewAllStarting" },
+];
+
+// 长任务入口的另一种形态：**file input**。外层 label 无法 :disabled,所以禁用位落在
+// input 自己身上,身份用它绑定的 accept 表达式认(与 source-drop-zone-guard 同一身份)。
+// 这类入口没有 onClick,上面那张表按 onClick 文本匹配,永远覆盖不到它。
+//
+// 为什么它算长任务:选中/拖入一个 zip 或文件夹后要跨 await 解包、遍历目录、内联图片,
+// 还可能停下来等用户勾选要添加哪几个 markdown。期间不禁用,第二个包的勾选就会覆盖第一个
+// 还没确认的选择(resolver 被替换 → 上一条链永久挂起 → 忙碌位再也不释放)。
+const LONG_TASK_FILE_INPUTS = [
+  {
+    accept: "supportedSourceAccept",
+    why: "添加来源的文件选择器:zip/文件夹解包跨 await,期间必须禁用整个入口",
+    // disabled 绑的是派生常量,所以在它的**初始化表达式**里找在飞标志(解一层引用)。
+    requires: "bundleProcessing",
+  },
 ];
 
 // disabled 存在但恒假(`false` / `undefined` / `null`)等于没写——这类「假装修好」也要报红。
@@ -74,6 +90,57 @@ test("page.tsx 的长任务按钮都带非平凡的 disabled(点完不能再点)
         offenders.push(`${entry.match}：disabled=${disabled} 里没有在飞标志 ${entry.requires} —— ${entry.why}`);
       }
     }
+  }
+
+  assert.deepEqual(offenders, []);
+});
+
+test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达式里含在飞标志", async () => {
+  const page = await parseModule("page.tsx");
+  const inputs = jsxElements(page, "input");
+  const initializers = new Map(
+    variableInitializersIn(page).map((item) => [item.name, item.initializer]),
+  );
+  const offenders = [];
+
+  for (const entry of LONG_TASK_FILE_INPUTS) {
+    const matched = inputs.filter(
+      (element) => (element.bindings?.accept ?? element.attributes?.accept) === entry.accept,
+    );
+    if (matched.length === 0) {
+      offenders.push(`${entry.accept}：没找到任何 file input（入口被改名或删除？守卫失效）`);
+      continue;
+    }
+    for (const element of matched) {
+      const disabled = element.bindings?.disabled ?? element.attributes?.disabled;
+      if (disabled === undefined) {
+        offenders.push(`${entry.accept}：缺 disabled —— ${entry.why}`);
+        continue;
+      }
+      const expression = String(disabled).trim();
+      if (TRIVIALLY_FALSE.has(expression)) {
+        offenders.push(`${entry.accept}：disabled=${expression} 恒假，等于没写 —— ${entry.why}`);
+        continue;
+      }
+      // 解一层变量引用：disabled 通常绑的是派生常量而不是内联表达式。
+      const resolved = `${expression} ${initializers.get(expression) ?? ""}`;
+      if (!resolved.includes(entry.requires)) {
+        offenders.push(
+          `${entry.accept}：disabled=${expression}（=${initializers.get(expression) ?? "?"}）`
+          + ` 里没有在飞标志 ${entry.requires} —— ${entry.why}`,
+        );
+      }
+    }
+  }
+
+  // 在飞标志本身必须真的由两个信号组成：解包在飞、以及正等待用户勾选。少了后者，
+  // 勾选期间入口会重新可点，第二个包就能覆盖还没确认的第一次选择。
+  const processing = initializers.get("bundleProcessing") ?? "";
+  if (!processing.includes("bundleBusyLabel")) {
+    offenders.push(`bundleProcessing 不再包含解包在飞信号 bundleBusyLabel：${processing}`);
+  }
+  if (!processing.includes("bundleChoice")) {
+    offenders.push(`bundleProcessing 不再包含勾选等待信号 bundleChoice：${processing}`);
   }
 
   assert.deepEqual(offenders, []);

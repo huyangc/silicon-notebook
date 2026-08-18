@@ -70,6 +70,10 @@ export type BundleReceiptEntry = {
   bundleLabel: string;
   fileName: string;
   receipt: InlineReceipt;
+  /** 配对结果之外、关于这一份 md 本身的补充说明（未加入待上传列表的原因、超限时
+   *  最大的几张图片…）。回执面板本来只描述「图片配上了没有」，一份被拒或被去重的
+   *  md 若不加标注就会看起来像入列成功了。 */
+  notes?: readonly string[];
 };
 
 export function BundleReceiptsPanel({
@@ -93,11 +97,15 @@ export function BundleReceiptsPanel({
               <span className="staged-skipped-name" title={entry.fileName}>{compactStagedFileName(entry.fileName)}</span>
               <small>{receiptSummaryLine(entry.receipt)}</small>
             </div>
-            {(entry.receipt.missing.length > 0
+            {((entry.notes?.length ?? 0) > 0
+              || entry.receipt.missing.length > 0
               || entry.receipt.unsupported.length > 0
               || entry.receipt.remote.length > 0
               || entry.receipt.noAlt.length > 0) && (
               <ul className="bundle-receipt-list">
+                {(entry.notes ?? []).map((note, index) => (
+                  <li key={`note-${index}`} className="bundle-receipt-note">{note}</li>
+                ))}
                 {entry.receipt.missing.map((item, index) => (
                   <li key={`missing-${index}`}>{missingImageLine(item)}</li>
                 ))}

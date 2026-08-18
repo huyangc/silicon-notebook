@@ -2,18 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ALREADY_STAGED_REASON,
   BUNDLE_DIR_MAX_FILES,
+  BUNDLE_READ_FAILED_REASON,
+  DIRECTORY_READ_FAILED_REASON,
+  INLINE_TOO_LARGE_IMAGE_LINES,
   NO_MARKDOWN_IN_BUNDLE_REASON,
   approxByteSizeLabel,
   bundleCapsFrom,
   bundleErrorMessage,
+  bundleFileNamesFor,
+  bundleTotalBytesLimit,
   classifyBundleContents,
   collectDirectoryFiles,
   directoryHasMarkdown,
+  directoryTooLargeMessage,
   directoryTruncatedMessage,
+  inlineTooLargeImageLines,
   inlineTooLargeMessage,
   missingImageLine,
   noAltImageLine,
+  notStagedNote,
   processMarkdownCandidate,
   readDirectoryAsBundleFiles,
   receiptSummaryLine,
@@ -21,7 +30,7 @@ import {
   unpackZipFile,
   unsupportedImageLine,
 } from "../../app/bundle-intake.ts";
-import { MD_BUNDLE_MAX_ENTRIES } from "../../app/md-bundle.ts";
+import { MD_BUNDLE_MAX_ENTRIES, MD_BUNDLE_TOTAL_BYTES_FACTOR } from "../../app/md-bundle.ts";
 
 const EMPTY = new Uint8Array(0);
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
@@ -128,6 +137,115 @@ test("processMarkdownCandidate: 内联后超过单文件上限 → ok:false 且�
   assert.ok(result.bytes > 5);
   // 回执仍描述了配对本身（这张图确实被配上、只是整体超限）
   assert.equal(result.receipt.inlined.length, 1);
+  // 逐图明细必须透传出来：只报总量，用户唯一能做的就是把整份文档拆开重试
+  assert.equal(result.images.length, 1);
+  assert.equal(result.images[0].path, "pic.png");
+  assert.ok(result.images[0].encodedBytes > 0);
+});
+
+test("processMarkdownCandidate: fileNameOverride 覆盖 basename（同批同名 md 的消歧命名）", () => {
+  const mdFile = { path: "a/README.md", bytes: new TextEncoder().encode("# hi") };
+  const plain = processMarkdownCandidate(mdFile, [mdFile], { uploadMaxBytes: 10_000 });
+  assert.equal(plain.fileName, "README.md");
+  const renamed = processMarkdownCandidate(mdFile, [mdFile], { uploadMaxBytes: 10_000 }, "a-README.md");
+  assert.equal(renamed.fileName, "a-README.md");
+});
+
+// ---------------------------------------------------------------------------
+// bundleFileNamesFor：同批同名 md 的消歧命名
+// ---------------------------------------------------------------------------
+
+test("bundleFileNamesFor: basename 唯一时原样使用，不无谓改名", () => {
+  const names = bundleFileNamesFor(["a/note.md", "b/guide.md"]);
+  assert.equal(names.get("a/note.md"), "note.md");
+  assert.equal(names.get("b/guide.md"), "guide.md");
+});
+
+test("bundleFileNamesFor: basename 撞车时带上包内父目录前缀，且产出不含路径分隔符", () => {
+  const names = bundleFileNamesFor(["a/README.md", "b/README.md", "solo.md"]);
+  assert.equal(names.get("a/README.md"), "a-README.md");
+  assert.equal(names.get("b/README.md"), "b-README.md");
+  // 没撞车的那份不受影响
+  assert.equal(names.get("solo.md"), "solo.md");
+  for (const value of names.values()) {
+    assert.ok(!value.includes("/"), `消歧后的文件名不得含路径分隔符：${value}`);
+    assert.ok(value.endsWith(".md"), `消歧后必须保留扩展名（后端按扩展名分派解析器）：${value}`);
+  }
+});
+
+test("bundleFileNamesFor: 深层路径逐段拼接，仍两两不同", () => {
+  const names = bundleFileNamesFor(["docs/en/README.md", "docs/zh/README.md"]);
+  assert.equal(names.get("docs/en/README.md"), "docs-en-README.md");
+  assert.equal(names.get("docs/zh/README.md"), "docs-zh-README.md");
+  assert.equal(new Set(names.values()).size, 2);
+});
+
+test("bundleFileNamesFor: 消歧后仍撞车时追加序号，绝不产出两个相同名字", () => {
+  // 「a/b/c.md」与「a-b/c.md」拍平后都是 a-b-c.md
+  const names = bundleFileNamesFor(["a/b/c.md", "a-b/c.md"]);
+  assert.equal(new Set(names.values()).size, 2);
+  assert.ok([...names.values()].some((value) => /-2\.md$/.test(value)));
+});
+
+// ---------------------------------------------------------------------------
+// inlineTooLargeImageLines / 未入列标注
+// ---------------------------------------------------------------------------
+
+test("inlineTooLargeImageLines: 按体积降序点名最大的几张，超出上限只报剩余计数", () => {
+  const images = [
+    { src: "s.png", path: "imgs/small.png", encodedBytes: 1024 },
+    { src: "b.png", path: "imgs/big.png", encodedBytes: 5 * 1024 * 1024 },
+    { src: "m.png", path: "imgs/mid.png", encodedBytes: 2 * 1024 * 1024 },
+    { src: "t.png", path: "imgs/tiny.png", encodedBytes: 10 },
+  ];
+  const [line] = inlineTooLargeImageLines(images, 2);
+  assert.match(line, /imgs\/big\.png（约 5\.0 MB）/);
+  assert.match(line, /imgs\/mid\.png（约 2\.0 MB）/);
+  assert.ok(!line.includes("tiny"), `只该点名最大的两张：${line}`);
+  assert.match(line, /另有 2 张/);
+});
+
+test("inlineTooLargeImageLines: 张数不超上限时不写「另有」，零张时不产出任何行", () => {
+  const [line] = inlineTooLargeImageLines([
+    { src: "a.png", path: "a.png", encodedBytes: 2048 },
+  ]);
+  assert.match(line, /a\.png（约 2\.0 KB）/);
+  assert.ok(!line.includes("另有"));
+  assert.deepEqual(inlineTooLargeImageLines([]), []);
+  assert.ok(INLINE_TOO_LARGE_IMAGE_LINES >= 1);
+});
+
+test("notStagedNote: 标注明确说出「未加入待上传列表」并带上原因，不伪装成功", () => {
+  const note = notStagedNote(ALREADY_STAGED_REASON);
+  assert.match(note, /未加入待上传列表/);
+  assert.match(note, new RegExp(ALREADY_STAGED_REASON));
+});
+
+test("读取失败的两条原因文案非空且互相区分（文件 / 文件夹）", () => {
+  assert.ok(BUNDLE_READ_FAILED_REASON.length > 0);
+  assert.ok(DIRECTORY_READ_FAILED_REASON.length > 0);
+  assert.notEqual(BUNDLE_READ_FAILED_REASON, DIRECTORY_READ_FAILED_REASON);
+  assert.match(DIRECTORY_READ_FAILED_REASON, /文件夹/);
+});
+
+// ---------------------------------------------------------------------------
+// bundleTotalBytesLimit：与 zip 解压护栏共用同一个系数
+// ---------------------------------------------------------------------------
+
+test("bundleTotalBytesLimit: 复用 md-bundle 的系数，不另抄一份数字", () => {
+  assert.equal(bundleTotalBytesLimit(1024), 1024 * MD_BUNDLE_TOTAL_BYTES_FACTOR);
+});
+
+test("bundleTotalBytesLimit: 缺失/非正数 = 没有可用上限，不做本地预检", () => {
+  assert.equal(bundleTotalBytesLimit(null), null);
+  assert.equal(bundleTotalBytesLimit(0), null);
+  assert.equal(bundleTotalBytesLimit(-1), null);
+});
+
+test("directoryTooLargeMessage: 报出具体上限，并说明内容未被读取", () => {
+  const msg = directoryTooLargeMessage(200 * 1024 * 1024);
+  assert.match(msg, /200 MB/);
+  assert.match(msg, /未读取内容/);
 });
 
 // ---------------------------------------------------------------------------
@@ -269,6 +387,51 @@ test("collectDirectoryFiles: 命中文件数护栏 → truncated=true，不吃�
   const { entries, truncated } = await collectDirectoryFiles(root, { maxFiles: 2 });
   assert.equal(truncated, true);
   assert.equal(entries.length, 2);
+});
+
+// 边界：恰好等于上限**不是**截断。判据写成 `> maxFiles` 或先 push 再判都会让这条
+// 变红——一个刚好装满的文件夹被报成「未能完整读取」，用户被要求去精简一个本来
+// 完全合法的文件夹。
+test("collectDirectoryFiles: 文件数恰好等于上限时不算截断", async () => {
+  const root = fakeDirEntry("f", [
+    fakeFileEntry("a.txt", "a"),
+    fakeFileEntry("b.txt", "b"),
+  ]);
+  const { entries, truncated } = await collectDirectoryFiles(root, { maxFiles: 2 });
+  assert.equal(truncated, false);
+  assert.equal(entries.length, 2);
+});
+
+test("collectDirectoryFiles: 命中总字节预算 → overBudget=true（与 truncated 分开两个标志）", async () => {
+  const root = fakeDirEntry("f", [
+    fakeFileEntry("a.bin", "0123456789"),  // 10 字节
+    fakeFileEntry("b.bin", "0123456789"),
+    fakeFileEntry("c.bin", "0123456789"),
+  ]);
+  const result = await collectDirectoryFiles(root, { maxTotalBytes: 25 });
+  assert.equal(result.overBudget, true);
+  assert.equal(result.truncated, false, "体积超限不是「文件太多/太深」，两条文案完全不同");
+  assert.equal(result.entries.length, 2, "超预算的那一份就地止损，不继续收集");
+  assert.ok(result.totalBytes <= 25);
+});
+
+test("collectDirectoryFiles: 总量恰好等于预算时放行（边界不误伤）", async () => {
+  const root = fakeDirEntry("f", [
+    fakeFileEntry("a.bin", "0123456789"),
+    fakeFileEntry("b.bin", "0123456789"),
+  ]);
+  const result = await collectDirectoryFiles(root, { maxTotalBytes: 20 });
+  assert.equal(result.overBudget, false);
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.totalBytes, 20);
+});
+
+test("collectDirectoryFiles: 未给预算（null）时不做总量预检，行为与改动前一致", async () => {
+  const root = fakeDirEntry("f", [fakeFileEntry("a.bin", "0123456789")]);
+  const result = await collectDirectoryFiles(root, { maxTotalBytes: null });
+  assert.equal(result.overBudget, false);
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.totalBytes, 10);
 });
 
 test("collectDirectoryFiles: 命中深度护栏时只截停更深的子目录，同级文件仍收集完整", async () => {
