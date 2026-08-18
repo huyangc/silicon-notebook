@@ -88,7 +88,13 @@ def delete_notebook(notebook_id: str) -> None:
 def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
     """Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本
     挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己
-    的公共知识库。"""
+    的公共知识库。
+
+    ⚠ 能力档留在 `notebook:manage`(P2-T2 后 = admin,组管理员可过守卫),但体内
+    还有一道**系统管理员**门(`user.role != "admin"`):发布公共库始终只有系统
+    管理员能做,组管理员过了能力守卫也会被这道 403 挡住。它不与 `notebook:configure`
+    (挂载/链接分享,恒 owner)同轴——那批是 owner 对自己库的配置,这里是系统级
+    发布,两道门的判据不同,刻意不合并。"""
     if user.role != "admin":
         raise user_error(403, "仅管理员可设为公共知识库")
     tier = payload.tier.strip().lower()
