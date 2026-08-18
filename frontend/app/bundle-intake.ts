@@ -85,24 +85,47 @@ export function bundleTotalBytesLimit(uploadMaxBytes: number | null): number | n
   return base === null ? null : base * MD_BUNDLE_TOTAL_BYTES_FACTOR;
 }
 
-/** `source_upload_max_bytes` 尚未从 `/system/config` 到达时，压缩输入上界的具名回退值。
+/** 压缩输入上界的具名回退值，**兼**浏览器安全绝对顶（codex #518 R5 P2）。
  *
  *  取值依据：部署变量 `SOURCE_UPLOAD_MAX_MB` 的取值域是 1–1024，协议最大值即 1024 MiB，
  *  所以任何部署的单文件上限都 ≤ 本值——用它当回退不会比真实配置更宽。它刻意比
  *  「已知配置下的 `uploadMaxBytes × MD_BUNDLE_TOTAL_BYTES_FACTOR`」更严：配置到达
  *  之前宁可保守。
  *
+ *  双重身份的第二半：已知配置时它是 `min(...)` 的**绝对顶**。顶配部署
+ *  （`SOURCE_UPLOAD_MAX_MB=1024`）按系数算出的上界是 4 GiB——那正是这道闸要防的
+ *  「整包读进内存耗死标签页」量级，护栏不能被自己的公式放空。代价（已登记）：
+ *  压缩态超过 1 GiB 的归档即使解开后逐条合法也会被拒，这类极端包请把 md 拆出来
+ *  直接上传。
+ *
  *  这里**不能**沿用别处「拿不到上限就不预检」的口径——那正是本条要堵的洞：不预检
  *  等于把几 GB 的压缩包整包读进内存，标签页当场耗死，连一条结构化拒绝都给不出来。 */
 export const BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES = 1024 * 1024 * 1024;
 
+/** 压缩输入上界里给 zip 容器结构与压缩微膨胀留的固定余量（codex #518 R5 P2）。
+ *
+ *  `File.size` 不保证 ≤ 解出总量：stored 条目带 local/central 两份头
+ *  （`MD_BUNDLE_MAX_ENTRIES`=2000 条 × ~250B ≈ 500 KiB 封顶），deflate 对不可压数据
+ *  还会微膨胀（约 5B/16KiB 块 ≈ 0.03%，1 GiB 顶配下 ≈ 320 KiB），另有 EOCD/注释。
+ *  没有这份余量，「四个恰好贴着单文件上限的合法 md」打包后会因几百字节的头被误拒，
+ *  与 docs 里「不拒掉本来合法的包」的不变量矛盾。4 MiB 把上述各项在绝对顶下全部
+ *  盖住且方向保守（多放行的只是头部字节，解压后总量闸原样兜底）。
+ *  精确数值登记于 `docs/product-and-api*.md`。 */
+export const BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES = 4 * 1024 * 1024;
+
 /** 压缩输入（**读进内存之前**）的体积上界。
  *
- *  直接复用解压后总量那条线：压缩态字节必然不大于它解出来的总量，所以任何能通过
- *  解压后预算的包，压缩态一定也在这条线以内——这道闸不会拒掉任何本来合法的包，
- *  只是把「几 GB 误选」的拒绝时点从「已经分配完整包」提前到「只看了 `File.size`」。 */
+ *  形状：`min(解压后总量线, 绝对顶) + 容器余量`。解压后总量线保证通过它的包大概率
+ *  也过得了解压预算；绝对顶保证公式在顶配部署下不会自我放空（4 GiB → 1 GiB）；
+ *  容器余量保证贴线合法包不因 zip 头/deflate 微膨胀被误拒。这道闸只把「几 GB 误选」
+ *  的拒绝时点从「已经分配完整包」提前到「只看了 `File.size`」，解压后总量仍由
+ *  `parseZipBundle` 的流式预算权威兜底。 */
 export function bundleZipInputLimit(uploadMaxBytes: number | null): number {
-  return bundleTotalBytesLimit(uploadMaxBytes) ?? BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES;
+  const configured = bundleTotalBytesLimit(uploadMaxBytes) ?? Infinity;
+  return (
+    Math.min(configured, BUNDLE_ZIP_INPUT_FALLBACK_CAP_BYTES)
+    + BUNDLE_ZIP_INPUT_OVERHEAD_SLACK_BYTES
+  );
 }
 
 /** 读取一个 zip `File` 的字节并交给 `md-bundle.ts` 的纯函数解析。
