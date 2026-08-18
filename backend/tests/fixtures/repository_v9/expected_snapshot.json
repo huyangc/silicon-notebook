@@ -1677,6 +1677,11 @@
         "type": "index"
       },
       {
+        "name": "uq_share_requests_one_pending",
+        "sql_sha256": "0b1ee538f5b962508765ed0c1b6d991a8d50597d71c8b382819bdc24ff65a4d9",
+        "type": "index"
+      },
+      {
         "name": "agent_access_tokens",
         "sql_sha256": "422fbf0a05c41604a7849112c8f3a3d78c21b211a5b5ac2de2e4522ad4533a23",
         "type": "table"

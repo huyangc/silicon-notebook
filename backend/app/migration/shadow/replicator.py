@@ -126,6 +126,13 @@ _UNIQUE_PREDICATES = {
         ("memory_id", "is", "not", "null", "and", "memory_id", "<>", "''"),
     ),
     "idx_users_username": ("username != ''", ("username", "<>", "''")),
+    # notebook_share_requests (v28): a pending-only uniqueness constraint on
+    # (notebook_id, group_id). See idx_catalog_jobs_one_active above for the
+    # same partial-unique-over-an-enumerated-status shape.
+    "uq_share_requests_one_pending": (
+        "status = 'pending'",
+        ("status", "=", "'pending'"),
+    ),
 }
 
 
