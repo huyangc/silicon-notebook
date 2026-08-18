@@ -3665,7 +3665,9 @@ export default function Home() {
     // 「同名同大小」去重静默折叠成一份。
     const names = bundleFileNamesFor(candidates.map((item) => item.path));
     const built: File[] = [];
-    const pending: Array<{ fileName: string; receipt: InlineReceipt; notes: string[] }> = [];
+    const pending: Array<
+      { fileName: string; receipt: InlineReceipt; notes: string[]; pairingSkipped: boolean }
+    > = [];
     const rejected: SkippedStagedFile[] = [];
     for (const candidate of candidates) {
       const processed = processMarkdownCandidate(
@@ -3680,7 +3682,13 @@ export default function Home() {
         names.get(candidate.path),
       );
       if (!processed.ok) {
-        const reason = inlineTooLargeMessage(processed.bytes, processed.limit);
+        // 零张实际内联（正文本身已超限，或图片配对整个被跳过/没有本地图片）时，
+        // 「请精简图片」是对不上症状的建议——超限的是正文，改说「拆分文档」。
+        const reason = inlineTooLargeMessage(
+          processed.bytes,
+          processed.limit,
+          processed.receipt.inlined.length,
+        );
         rejected.push({ name: processed.fileName, reason });
         pending.push({
           fileName: processed.fileName,
@@ -3688,11 +3696,17 @@ export default function Home() {
           // 只报「总体积超了」，用户唯一能做的就是把整份文档拆开重试；点名最大的
           // 那几张图片才是可操作的那部分信息。
           notes: [notStagedNote(reason), ...inlineTooLargeImageLines(processed.images)],
+          pairingSkipped: processed.pairingSkipped,
         });
         continue;
       }
       built.push(new File([processed.rewritten], processed.fileName, { type: "text/markdown" }));
-      pending.push({ fileName: processed.fileName, receipt: processed.receipt, notes: [] });
+      pending.push({
+        fileName: processed.fileName,
+        receipt: processed.receipt,
+        notes: [],
+        pairingSkipped: processed.pairingSkipped,
+      });
     }
     appendStagedSkipped(rejected);
     // 内联产物都是 .md，不会再含 bundle，所以走同步入列这一半即可（也因此能拿到
@@ -3713,6 +3727,7 @@ export default function Home() {
         notes: entry.notes.length > 0
           ? entry.notes
           : stagedOutcomeNotes(entry.fileName, addedNames, duplicateNames, skippedReasons),
+        pairingSkipped: entry.pairingSkipped,
       })),
     ]);
   }

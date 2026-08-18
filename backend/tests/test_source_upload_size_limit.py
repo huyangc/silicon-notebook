@@ -114,6 +114,36 @@ def test_authenticated_system_config_reflects_image_guard_overrides(tmp_path, mo
     get_settings.cache_clear()
 
 
+def test_authenticated_system_config_accepts_zero_image_guard_overrides(tmp_path, monkeypatch):
+    # `MINERU_MAX_IMAGES_PER_SOURCE=0` / `MINERU_MAX_IMAGE_BYTES=0` are legal
+    # deployment values (equivalent to "persist no images at all") because the
+    # forwarded Settings fields carry no positivity constraint. `SystemConfiguration`
+    # must not add one, or every request on such a deployment 500s and disables
+    # uploads entirely — the browser's `positiveIntOrNull` mirror already treats a
+    # non-positive value as "no usable limit, skip local pre-check".
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/upload-limit-images-zero.db")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("MINERU_MAX_IMAGE_BYTES", "0")
+    monkeypatch.setenv("MINERU_MAX_IMAGES_PER_SOURCE", "0")
+    get_settings.cache_clear()
+    from app.api import deps, source_routes
+    from app.main import create_app
+
+    deps.repository.cache_clear()
+    monkeypatch.setattr(source_routes.kg_scheduler, "submit_job", lambda *_args, **_kwargs: None)
+    zero_client = TestClient(create_app())
+
+    response = zero_client.get("/api/system/config", headers=_auth(zero_client))
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["source_image_max_bytes"] == 0
+    assert payload["source_image_max_per_source"] == 0
+    get_settings.cache_clear()
+
+
 def test_source_multipart_auth_runs_before_the_bounded_body_parser(client):
     response = client.post(
         "/api/notebooks/not-readable/sources",

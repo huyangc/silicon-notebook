@@ -52,8 +52,12 @@ class SystemConfiguration(BaseModel):
     # Settings.mineru_max_image_bytes / mineru_max_images_per_source）：前端在配对
     # 阶段拿它们提前判定「这张图会被服务端跳过」，避免只能等上传后才发现。真正的
     # 护栏仍在服务端（这里只是预检镜像），源见 md-bundle.ts 的 InlineOptions。
-    source_image_max_bytes: int = Field(gt=0)
-    source_image_max_per_source: int = Field(gt=0)
+    # 转发的 Settings 字段本身无约束——`MINERU_MAX_IMAGES_PER_SOURCE=0` /
+    # `MINERU_MAX_IMAGE_BYTES=0` 是合法部署值（等价「一张不存」），挂 `gt=0` 会让
+    # 这类部署每次请求都 500。前端 `positiveIntOrNull` 既有口径本来就把「非正数」
+    # 归一成「没有可用上限，不做本地预检」，接得住 0，这里不必再收窄。
+    source_image_max_bytes: int
+    source_image_max_per_source: int
     # 部署级图片存储总开关，直接反映 Settings.mineru_return_images——它门控所有来源
     # 类型的图片持久化，关闭时压缩包/文件夹上传里的图片内联对前端毫无意义（服务端
     # 会静默丢弃），前端据此跳过内联并提示用户。
