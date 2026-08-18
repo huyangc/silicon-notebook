@@ -1356,6 +1356,127 @@ def test_concurrent_revocation_cannot_slip_past_the_requester_recheck(
     assert remaining == {("group", "viewer")}
 
 
+def test_concurrent_revocation_cannot_slip_past_create_grant(
+    core_stores: CoreStores,
+    postgres_settings: Settings,
+):
+    """`create_grant` 也要锁住**发起人**的授权边行(codex #519 R6 P1)。
+
+    与 R5 的申请人复检同一条竞态、同一条裁决:凡是写 `notebook_grants` 的路径,都必须在
+    同一写事务内复检并**锁住**发起人的笔记本侧权限。不锁的话,库主并发撤销掉发起人的
+    admin 边并提交,而本事务仍读到撤销前的快照,照样发出一条新的授权边——失权者把访问权
+    继续散了出去。
+
+    交错注入在复检**之后、INSERT 之前**(挂 `new_id("gnt")`),再用 `pg_stat_activity`
+    轮询证明撤销真的卡在锁上(不用 sleep 和 1 秒的 `lock_timeout` 赛跑)。
+    """
+    import threading
+
+    import psycopg
+
+    groups = core_stores.groups
+    alice = core_stores.identity.create_user("b00112233", "password-87")  # 库主
+    bob = core_stores.identity.create_user("b00445566", "password-88")    # 发起人
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="发边竞态库"), alice.id
+    )
+    grantor = groups.create_group(
+        name="授权组", kind="project", description="", created_by=alice.id
+    )
+    groups.upsert_member(grantor["id"], bob.id, role="admin", added_by=alice.id)
+    edge = groups.create_grant(
+        notebook_id,
+        principal_type="group_admins",
+        principal_id=grantor["id"],
+        role="admin",
+        created_by=alice.id,
+        admin_user_id=alice.id,
+    )
+    # Bob 自己的组:他要把 Alice 的库再散给它。
+    bobs_group = groups.create_group(
+        name="Bob 的组", kind="project", description="", created_by=bob.id
+    )
+
+    parked = threading.Event()
+    release = threading.Event()
+    # ⚠ park 点必须挂在**复检本身**上,不能挂 `new_id("gnt")`:`create_grant` 在进入写
+    # 事务**之前**就把 grant id 铸好了,挂那里会停在复检与锁之前,证明不了任何事。
+    original_recheck = groups._require_notebook_manage_on
+
+    def parking_recheck(connection, notebook_id_, user_id_):
+        original_recheck(connection, notebook_id_, user_id_)  # 先真复检 + 拿 FOR SHARE
+        parked.set()
+        assert release.wait(timeout=15), "create_grant 迟迟未被放行"
+
+    failures: list[BaseException] = []
+    lock = threading.Lock()
+
+    def do_grant():
+        try:
+            groups.create_grant(
+                notebook_id,
+                principal_type="group",
+                principal_id=bobs_group["id"],
+                role="viewer",
+                created_by=bob.id,
+                admin_user_id=bob.id,
+            )
+        except BaseException as error:  # noqa: BLE001 — surfaced below
+            with lock:
+                failures.append(error)
+
+    def do_revoke():
+        try:
+            groups.delete_grant(notebook_id, edge["id"])
+        except BaseException as error:  # noqa: BLE001 — surfaced below
+            with lock:
+                failures.append(error)
+
+    def wait_until_a_backend_blocks_on_a_lock(deadline_seconds: float = 10.0) -> bool:
+        end = time.monotonic() + deadline_seconds
+        with psycopg.connect(postgres_settings.database_url) as observer:
+            while time.monotonic() < end:
+                blocked = observer.execute(
+                    "SELECT COUNT(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() "
+                    "AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()"
+                ).fetchone()[0]
+                if blocked:
+                    return True
+                time.sleep(0.01)
+        return False
+
+    groups._require_notebook_manage_on = parking_recheck  # type: ignore[assignment]
+    try:
+        grant_thread = threading.Thread(target=do_grant)
+        grant_thread.start()
+        assert parked.wait(timeout=15), "create_grant 未在插入授权边之前停住"
+
+        revoke_thread = threading.Thread(target=do_revoke)
+        revoke_thread.start()
+        # 撤销必须卡在复检持住的那条边行上;不加 FOR SHARE 时它会直接删掉并提交,
+        # 轮询等不到任何锁等待——这条断言就是变异守卫本身。
+        assert wait_until_a_backend_blocks_on_a_lock(), (
+            "撤销没有被锁挡住——create_grant 的发起人复检没有锁住授权边行,竞态仍然成立"
+        )
+        assert revoke_thread.is_alive()
+
+        release.set()
+        grant_thread.join(timeout=30)
+        revoke_thread.join(timeout=30)
+        assert not grant_thread.is_alive() and not revoke_thread.is_alive()
+    finally:
+        groups._require_notebook_manage_on = original_recheck  # type: ignore[assignment]
+        release.set()
+
+    assert not failures, failures
+    # 序列化成「发边在前、撤销在后」:Bob 的边发出去了(那一刻他确实还有权),随后
+    # Alice 的撤销生效。终态里 Bob 的 admin 边已经没了。
+    remaining = {(g["principal_type"], g["role"]) for g in groups.list_grants(notebook_id)}
+    assert ("group_admins", "admin") not in remaining, "撤销最终没有生效"
+    assert remaining == {("group", "viewer")}
+
+
 def test_concurrent_approval_and_group_deletion_leave_no_orphan_grant(
     core_stores: CoreStores,
     postgres_settings: Settings,

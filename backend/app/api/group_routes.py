@@ -75,6 +75,7 @@ from app.repositories.ports import (
     GroupMembershipRequiredError,
     GroupNotFoundError,
     LastGroupAdminError,
+    NotebookManageRequiredError,
     ShareRequestAlreadyPendingError,
     ShareRequestNotPendingError,
     ShareRequesterUnauthorizedError,
@@ -400,6 +401,10 @@ def create_notebook_grant_route(
         raise _group_not_found()
     except GroupAdminRequiredError:
         raise user_error(403, "你不是这个群组的组管理员,无法把知识库共享给它")
+    except NotebookManageRequiredError:
+        # 能力守卫放行之后、写事务之前被撤销了管理边(codex #519 R6 P1)。403 而不是
+        # 404:能走到这一步说明他刚刚还有管理权,库的存在性对他不是秘密。
+        raise user_error(403, "你已不再拥有这本笔记本的管理权")
     except GroupGrantAlreadyExists:
         raise user_error(409, "这本知识库已经共享给该群组了")
     return NotebookGrantItem(**grant)
@@ -530,7 +535,6 @@ def list_my_share_requests_route(
 @router.delete(
     "/notebooks/{notebook_id}/share-requests/{request_id}",
     status_code=204,
-    dependencies=[Depends(require_notebook_capability("notebook:manage"))],
 )
 def delete_share_request_route(
     notebook_id: str,
@@ -543,10 +547,21 @@ def delete_share_request_route(
     是既成的决定,撤回它没有意义——store 在写事务里按精确状态判定,已决定的申请撤回请求
     映射成 **409**;根本没有这条申请(或不属于这本库、或不是本人提交的)则 404。
 
-    ⚠ `user.id` 必须传进 store:能力守卫只证明「这个人对这本库有管理权」,证明不了「这条
-    申请是他提的」。同一本库可以有多个管理权持有者(owner + 组管理员),丢掉这个参数
-    就等于让他们互相撤回对方的待审批申请(codex #519 R1 P1)。别人的申请与不存在的申请
-    同样落 404,不泄露存在性。
+    ⚠ **本端点刻意没有 notebook 能力依赖,只要求登录**(codex #519 R6 P2)。授权轴是
+    **申请归属**而不是当前笔记本权限:store 按三列谓词
+    (`notebook_id` + `request_id` + `requested_by`)兜底,非本人一律 `not_found` → 404,
+    与「这条申请不存在」不可区分(无存在性泄露),跨库拼 URL 因为 `notebook_id` 仍在
+    WHERE 里同样 404。
+
+    挂 `notebook:manage` 是**用错了轴**,而且在 R4 之后会造出死锁形态:R4 让批准拒绝
+    「申请人已失去管理权」的申请,若撤回也要求管理权,这类申请就**既批不了也撤不掉**,
+    永远卡在组管理员的队列里。也**不能**换成 `require_notebook_read`——读权同样可能随那条
+    授权边一起没了。两条裁决是互补的:R4 防止陈旧授权被兑现,本条保证申请人**始终**能收回
+    自己的提议。
+
+    ⚠ `user.id` 必须传进 store:它现在是唯一的授权判据(此前还有能力守卫兜底)。同一本库
+    可以有多个管理权持有者(owner + 组管理员),丢掉这个参数就等于让他们互相撤回对方的
+    待审批申请(codex #519 R1 P1)。
     """
     try:
         outcome = group_repository().delete_share_request(

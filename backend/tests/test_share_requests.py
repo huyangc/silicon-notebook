@@ -493,6 +493,67 @@ def test_withdrawing_a_decided_request_is_409(tmp_path, monkeypatch, decision):
     assert conflict.headers.get("X-User-Message") == "1"
 
 
+def test_a_requester_who_lost_manage_rights_can_still_withdraw(tmp_path, monkeypatch):
+    """撤回按**申请归属**授权,不按当前笔记本权限(codex #519 R6 P2)。
+
+    R4 之后批准会拒绝「申请人已失权」的申请;撤回若也要求管理权,这类申请就**既批不了
+    也撤不掉**,永远卡在组管理员的队列里。两条裁决互补:一个防陈旧授权被兑现,一个保证
+    申请人始终能收回自己的提议。
+    """
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, alice, name="Alice 的库")
+    grantor_group = _make_group(client, alice, name="授权组")
+    bob, bob_id, _ = _new_user(client)
+    _add_member(client, alice, grantor_group, bob_id, role="admin")
+    client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group_admins", "principal_id": grantor_group, "role": "admin"},
+        headers=alice,
+    )
+    carol, _carol_id, _ = _new_user(client)
+    target_group = _make_group(client, carol, name="G1")
+    _add_member(client, carol, target_group, bob_id, role="member")
+    request_id = _submit(client, bob, notebook_id, target_group).json()["id"]
+
+    # 库主撤掉 Bob 的管理边 —— 他对这本库什么权限都没有了。
+    for g in client.get(f"/api/notebooks/{notebook_id}/grants", headers=alice).json():
+        client.delete(f"/api/notebooks/{notebook_id}/grants/{g['id']}", headers=alice)
+    # 连读都读不到了(所以也不能改挂 require_notebook_read)。
+    assert client.get(f"/api/notebooks/{notebook_id}", headers=bob).status_code == 404
+
+    # 但他仍能撤回**自己**那条申请。
+    withdrawn = client.delete(
+        f"/api/notebooks/{notebook_id}/share-requests/{request_id}", headers=bob
+    )
+    assert withdrawn.status_code == 204, withdrawn.text
+    assert _pending_for(client, carol, target_group).json() == []
+
+
+def test_withdraw_stays_owner_scoped_without_the_capability_guard(tmp_path, monkeypatch):
+    """去掉能力依赖之后,三列谓词必须独自兜住:别人 404、跨库 404。"""
+    client = _client(tmp_path, monkeypatch)
+    boss, librarian, _lid, group_id, notebook_id = _make_member_owned_notebook(client)
+    request_id = _submit(client, librarian, notebook_id, group_id).json()["id"]
+
+    # 别人(哪怕他也对这本库有管理权——这里用库主本人)撤不掉:非本人 → 404。
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/share-requests/{request_id}", headers=boss
+    ).status_code == 404
+    # 完全不相干的登录用户同样 404,不泄露存在性。
+    stranger, _sid, _ = _new_user(client)
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}/share-requests/{request_id}", headers=stranger
+    ).status_code == 404
+    # 跨库拼 URL:notebook_id 仍在 WHERE 里 → 404。
+    other_notebook = _make_notebook(client, librarian, name="另一本")
+    assert client.delete(
+        f"/api/notebooks/{other_notebook}/share-requests/{request_id}", headers=librarian
+    ).status_code == 404
+    # 申请分毫未动。
+    assert [r["id"] for r in _pending_for(client, boss, group_id).json()] == [request_id]
+
+
 def test_withdraw_needs_manage_on_that_exact_notebook(tmp_path, monkeypatch):
     """撤回要求对**这本库**有管理权,且 request 必须属于它——防止「一本库的管理权」
     变成「能撤任何库上的任何申请」。"""
@@ -693,6 +754,73 @@ def test_approving_a_request_whose_author_lost_manage_rights_is_refused(
     )
     assert rejected.status_code == 200, rejected.text
     assert rejected.json()["status"] == "rejected"
+
+
+def test_a_demoted_manager_cannot_still_hand_out_a_new_grant(tmp_path, monkeypatch):
+    """`create_grant` 也要在事务内复核**发起人**的笔记本侧权限(codex #519 R6 P1)。
+
+    能力守卫放行之后、写事务开始之前,库主可以撤掉发起人的管理边。少了这一次复核,失权者
+    仍能发出一条**新的**授权边(而且可以发给另一个组),把访问权继续散出去——授权边的效力
+    超出发起人自身权限的存续,这正是「授予他人访问权的写入必须事务内复检」那条裁决要防的。
+    """
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, alice, name="Alice 的库")
+    grantor_group = _make_group(client, alice, name="授权组")
+    bob, bob_id, _ = _new_user(client)
+    _add_member(client, alice, grantor_group, bob_id, role="admin")
+    edge = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group_admins", "principal_id": grantor_group, "role": "admin"},
+        headers=alice,
+    )
+    assert edge.status_code == 200, edge.text
+    # Bob 另建一个组,准备把 Alice 的库再散给它。
+    bobs_group = _make_group(client, bob, name="Bob 的组")
+
+    # 注入点就是那个窗口本身:能力守卫(依赖层)**已经**放行,store 的写事务**尚未**开始。
+    # 在 `create_grant` 进入之前撤掉 Bob 的边,正是「守卫读到有权 → 库主撤权 → 写事务落库」
+    # 这条时序。
+    store = _app_group_store()
+    original_create = store.create_grant
+
+    def revoke_then_create(*args, **kwargs):
+        for g in client.get(
+            f"/api/notebooks/{notebook_id}/grants", headers=alice
+        ).json():
+            client.delete(
+                f"/api/notebooks/{notebook_id}/grants/{g['id']}", headers=alice
+            )
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(store, "create_grant", revoke_then_create)
+    denied = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group", "principal_id": bobs_group, "role": "viewer"},
+        headers=bob,
+    )
+    monkeypatch.setattr(store, "create_grant", original_create)
+    assert denied.status_code == 403, denied.text
+    assert denied.headers.get("X-User-Message") == "1"
+    assert "管理权" in denied.json()["detail"]
+    # 零副作用:一条边都没散出去。
+    assert client.get(f"/api/notebooks/{notebook_id}/grants", headers=alice).json() == []
+
+
+def test_granting_still_works_while_the_initiator_keeps_manage_rights(
+    tmp_path, monkeypatch
+):
+    """反向护栏:发起人仍有管理权时发边照常成功——复检不能变成恒关的闸。"""
+    client = _client(tmp_path, monkeypatch)
+    alice, _alice_id, _ = _new_user(client)
+    notebook_id = _make_notebook(client, alice)
+    group_id = _make_group(client, alice, name="组")
+    granted = client.post(
+        f"/api/notebooks/{notebook_id}/grants",
+        json={"principal_type": "group", "principal_id": group_id, "role": "viewer"},
+        headers=alice,
+    )
+    assert granted.status_code == 200, granted.text
 
 
 def test_approval_still_succeeds_while_the_author_keeps_manage_rights(

@@ -35,6 +35,7 @@ from app.repositories.ports import (
     GroupNotFoundError,
     LastGroupAdminError,
     ShareRequestAlreadyPendingError,
+    NotebookManageRequiredError,
     ShareRequestNotPendingError,
     ShareRequesterUnauthorizedError,
 )
@@ -431,6 +432,14 @@ class GroupStore:
                 self._lock_group_on(connection, principal_id, mode="SHARE")
                 if self._role_on(connection, principal_id, admin_user_id) != "admin":
                     raise GroupAdminRequiredError(principal_id)
+                # **笔记本侧**的那一半同样要在事务内复核(codex #519 R6 P1):
+                # 能力守卫放行之后、本事务开始之前,库主可以撤掉发起人的管理边;
+                # 少了这一次复核,失权者仍能发出一条**新的**授权边(甚至给另一个
+                # 组),把访问权继续散出去。判据见 `api/deps.py` 那条裁决:凡是写
+                # `notebook_grants` 的路径都必须事务内复检并锁住发起人的权限。
+                self._require_notebook_manage_on(
+                    connection, notebook_id, admin_user_id
+                )
                 connection.execute(
                     "INSERT INTO notebook_grants "
                     "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
@@ -587,10 +596,10 @@ class GroupStore:
         if self._role_on(connection, group_id, decided_by) != "admin":
             raise GroupAdminRequiredError(group_id)
 
-    def _require_requester_still_authorized_on(
-        self, connection: Any, notebook_id: str, requested_by: str
+    def _require_notebook_manage_on(
+        self, connection: Any, notebook_id: str, user_id: str
     ) -> None:
-        """`sqlite/group_store.py::_require_requester_still_authorized_on` 的镜像,但这里
+        """`sqlite/group_store.py::_require_notebook_manage_on` 的镜像,但这里
         是**两段式带锁**写法(codex #519 R5)——与 `memory_store._lock_memory_aggregate_on`
         同一手法。
 
@@ -615,7 +624,7 @@ class GroupStore:
         if (
             connection.execute(
                 "SELECT 1 FROM notebooks WHERE id=%s AND created_by=%s",
-                (notebook_id, requested_by),
+                (notebook_id, user_id),
             ).fetchone()
             is not None
         ):
@@ -623,11 +632,11 @@ class GroupStore:
         if (
             connection.execute(
                 ADMIN_GRANT_PROBE_FOR_SHARE_SQL,
-                admin_grant_probe_params(notebook_id, requested_by),
+                admin_grant_probe_params(notebook_id, user_id),
             ).fetchone()
             is None
         ):
-            raise ShareRequesterUnauthorizedError(notebook_id)
+            raise NotebookManageRequiredError(notebook_id)
 
     def approve_share_request(
         self,
@@ -675,9 +684,14 @@ class GroupStore:
                 connection, group_id, decided_by, decided_by_is_system_admin
             )
             notebook_id = row["notebook_id"]
-            self._require_requester_still_authorized_on(
-                connection, notebook_id, row["requested_by"]
-            )
+            # 申请人复检:失权 → 语义是「这条**申请**不能兑现」(409),不是「你没权限」,
+            # 所以把通用的管理权错误翻译成 share-request 专用的那一个(R4 裁决)。
+            try:
+                self._require_notebook_manage_on(
+                    connection, notebook_id, row["requested_by"]
+                )
+            except NotebookManageRequiredError as exc:
+                raise ShareRequesterUnauthorizedError(notebook_id) from exc
             connection.execute(
                 "INSERT INTO notebook_grants "
                 "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
