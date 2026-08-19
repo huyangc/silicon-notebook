@@ -676,9 +676,9 @@ class UsageStats:
     Deliberately no answer text, no Memory content and no evidence excerpts:
     the projections in ``ports.project_trace_step``/``project_report_row``/
     ``project_report_attempt`` keep an action type, a human summary, a
-    duration and one count (asks) or a question and a per-direction hit/miss
-    flag (reports), and this dataclass cannot hold anything those
-    projections did not produce.
+    duration and one count (asks) or a question and per-direction wording
+    plus an error flag (reports), and this dataclass cannot hold anything
+    those projections did not produce.
     """
 
     #: Projected ask rows, newest first (``ports.project_ask_row`` shape).
@@ -686,24 +686,30 @@ class UsageStats:
     total_steps: int
     #: The number ``usage_gaps``' stored evidence records — counted here, by
     #: the server, never restated by the model (design §5.1's exception to
-    #: source-id evidence). Agentic Memory P2 (T4): this now folds together
-    #: TWO accounts — an ask's zero-``count`` retrieval steps AND a report's
-    #: zero-``new`` confirmed directions — deliberately merged rather than
-    #: kept as two separate counters (see ``summarize_usage``), because
-    #: ``usage_gaps``' evidence is a single "how many searches came back
-    #: empty" number, not two.
+    #: source-id evidence).
+    #:
+    #: ⚠ ASK-ONLY, and that is a decision, not an omission (P2-T4 fix round).
+    #: The report sample contributes NOTHING here: its ``attempted`` rows
+    #: carry no trustworthy "came back empty" signal — see
+    #: ``AskStateStorePort.recent_user_report_traces`` for the four
+    #: independent reasons ``new == 0`` does not mean that. Folding reports
+    #: in would inflate the one number a member's private "what this library
+    #: seems to be missing" note is grounded in, with a counter that measures
+    #: something else entirely.
     zero_hit_steps: int
     failed_asks: int
     #: Deduplicated, bounded summaries of the searches that came back empty.
-    #: Ask-derived only — a report's ``attempted`` rows carry no query text
-    #: (``project_report_attempt`` deliberately drops it), so they cannot
-    #: contribute here.
+    #: Ask-only for the same reason ``zero_hit_steps`` is.
     empty_search_summaries: tuple[str, ...] = ()
     #: Agentic Memory P2 (T4). Projected deep-report rows, newest first
     #: (``ports.project_report_row`` shape, each with its ``attempts`` filled
     #: by ``project_report_attempt``). Empty for a member with no completed
     #: reports in this notebook — never ``None``, so callers can iterate it
     #: unconditionally the way they already do ``asks``.
+    #:
+    #: This sample feeds ``retrieval_notes`` ONLY — it is a record of how
+    #: this member PHRASES research directions, not of what those directions
+    #: returned.
     reports: tuple[Mapping[str, Any], ...] = ()
 
 
@@ -716,14 +722,17 @@ def summarize_usage(
     Pure arithmetic over the stores' projections — no I/O, so the isolation
     story stays "the overlay reads exactly one thing (per sample)".
 
-    Agentic Memory P2 (T4): ``reports`` is a SECOND, independent sample —
-    each report row's ``attempts`` came from ``sections_json[i].attempted``,
-    not from a trace step, so it is folded separately from the ``asks`` loop
-    below rather than reshaped to look like one. ``new == 0`` is this
-    account's own zero-hit signal (see ``AskStateStorePort.
-    recent_user_report_traces`` for why that differs from the ask side's
-    ``count``), and rows carrying ``failed: True`` are skipped entirely —
-    a retrieval that errored is not evidence the library came back empty.
+    Agentic Memory P2 (T4): ``reports`` is a SECOND, independent sample and
+    it is carried through UNFOLDED — there is no report loop below, on
+    purpose. Every counter this function produces (``zero_hit_steps``,
+    ``empty_search_summaries``, ``failed_asks``, ``total_steps``) is an
+    ASK-derived outcome statistic, and a report's ``attempted`` rows have no
+    outcome to contribute: the account's only counter, ``new``, measures
+    additions to the run's shared candidate pool, not that direction's
+    results (four independent ways that misreads, enumerated on
+    ``AskStateStorePort.recent_user_report_traces``). What the report sample
+    contributes is WORDING, and wording is not summarised — it is rendered
+    verbatim by ``render_usage_block``.
     """
     total_steps = 0
     zero_hits = 0
@@ -745,13 +754,6 @@ def summarize_usage(
                 seen.add(summary)
                 if len(empties) < AGENT_PROFILE_EMPTY_QUERY_SAMPLES:
                     empties.append(summary)
-    for report in reports:
-        for attempt in report.get("attempts") or ():
-            if attempt.get("failed"):
-                continue
-            if attempt.get("new") != 0:
-                continue
-            zero_hits += 1
     return UsageStats(
         asks=tuple(asks),
         total_steps=total_steps,
@@ -775,29 +777,44 @@ def render_usage_block(stats: UsageStats) -> str:
     ``AGENT_PROFILE_USAGE_SECTION_MAX_CHARS`` rather than opening a second
     budget constant — it is the same "this is a prompt input on a bounded
     budget" rule applied to a second sample, not a second kind of budget.
+
+    ⚠ Sharing ONE budget between two sections needs an allocation rule, or
+    the first section silently starves the second: forty asks at up to 120
+    characters each overrun 3 000 on their own, so a "first come, first
+    served" shared counter would render the report header and then not one
+    report under it, for every member who asks a lot. The rule is a FLOOR,
+    not a split: the ask section may spend at most half the budget WHILE
+    THERE ARE REPORTS TO RENDER, and whatever it leaves unspent rolls over.
+    Two consequences worth keeping:
+
+    * a member with no reports renders byte-for-byte as they did before this
+      section existed (the cap is not applied at all), so this section can
+      never be blamed for a regression in the common case;
+    * neither section can be starved by the other — asks still get first
+      claim on their half.
+
+    ⚠ And the report section NEVER asserts a direction count. The store's
+    ``attempt_limit`` truncation is indistinguishable from "this report ran
+    no directions" once the rows are gone, and with the shipped limits a full
+    sample overruns that cap routinely, so a report whose directions were all
+    truncated away discloses "(directions not sampled)" rather than claiming
+    it searched nothing.
     """
-    # Agentic Memory P2 (T4): ``zero_hit_steps`` is a MERGED count (ask
-    # zero-``count`` steps + report zero-``new`` directions — see
-    # ``summarize_usage``), so its denominator here must be the merged total
-    # too (ask steps + report attempts), or "N of M sampled" would compare a
-    # combined numerator against an ask-only denominator and could even show
-    # N > M for a report-heavy member. Computed locally rather than stored on
-    # ``UsageStats``: nothing downstream of ``summarize_usage`` needs an
-    # ask-only zero-hit count, so a dedicated field would exist only for this
-    # one line.
-    report_direction_total = sum(
-        len(report.get("attempts") or ()) for report in stats.reports
-    )
     lines = [
         "[Your recent searching in this library]",
         f"asks sampled: {len(stats.asks)} (most recent first, at most "
         f"{AGENT_PROFILE_TRACE_SAMPLE})",
         f"of those, ended in failure or cancellation: {stats.failed_asks}",
-        f"retrieval steps/directions that returned nothing: "
-        f"{stats.zero_hit_steps} (of {stats.total_steps + report_direction_total} "
-        f"sampled: {stats.total_steps} ask steps + {report_direction_total} "
-        f"report directions)",
+        f"retrieval steps that returned nothing: {stats.zero_hit_steps} "
+        f"(of {stats.total_steps} steps sampled)",
     ]
+    # The ask half's share of the shared budget — see the docstring. Halved
+    # only when there is a second section that would otherwise get nothing.
+    ask_budget = (
+        AGENT_PROFILE_USAGE_SECTION_MAX_CHARS // 2
+        if stats.reports
+        else AGENT_PROFILE_USAGE_SECTION_MAX_CHARS
+    )
     spent = 0
     rendered = 0
     body: list[str] = []
@@ -818,7 +835,7 @@ def render_usage_block(stats: UsageStats) -> str:
             f"- {question} [{ask.get('status') or 'unknown'}] "
             f"({len(steps)} steps, {empty_here} came back empty)"
         )
-        if spent + len(line) + 1 > AGENT_PROFILE_USAGE_SECTION_MAX_CHARS:
+        if spent + len(line) + 1 > ask_budget:
             break
         body.append(line)
         spent += len(line) + 1
@@ -832,40 +849,122 @@ def render_usage_block(stats: UsageStats) -> str:
         lines.append("searches that came back empty:")
         lines.extend(f"- {text}" for text in stats.empty_search_summaries)
     if stats.reports:
-        lines.append("[Your recent deep reports in this library]")
-        lines.append(
-            f"reports sampled: {len(stats.reports)} (most recent first, at "
-            f"most {AGENT_PROFILE_REPORT_SAMPLE})"
+        report_body = _render_report_sample(
+            stats.reports, AGENT_PROFILE_USAGE_SECTION_MAX_CHARS - spent
         )
-        report_spent = 0
-        report_rendered = 0
-        report_body: list[str] = []
-        for report in stats.reports:
-            question = str(report.get("question") or "")
-            if not question:
-                continue
-            attempts = list(report.get("attempts") or ())
-            empty_here = sum(
-                1
-                for attempt in attempts
-                if not attempt.get("failed") and attempt.get("new") == 0
-            )
-            failed_here = sum(1 for attempt in attempts if attempt.get("failed"))
-            line = (
-                f"- {question} ({len(attempts)} directions searched, "
-                f"{empty_here} came back empty, {failed_here} failed)"
-            )
-            if report_spent + len(line) + 1 > AGENT_PROFILE_USAGE_SECTION_MAX_CHARS:
-                break
-            report_body.append(line)
-            report_spent += len(line) + 1
-            report_rendered += 1
         if report_body:
-            hidden = len(stats.reports) - report_rendered
-            suffix = f" (+{hidden} more not listed)" if hidden > 0 else ""
-            lines.append(f"reports{suffix}:")
             lines.extend(report_body)
     return "\n".join(lines)
+
+
+#: What the report section says when every one of a report's directions fell
+#: off the store's ``attempt_limit`` (or the report genuinely ran none). The
+#: two are INDISTINGUISHABLE by the time the rows reach here, so this is a
+#: disclosure of ignorance, never a count — "0 directions searched" would be
+#: an assertion the sample cannot support, and with the shipped limits it is
+#: the assertion a routine over-cap sample would produce.
+_REPORT_NO_DIRECTIONS = "  (directions not sampled)"
+
+
+def _render_report_sample(
+    reports: Sequence[Mapping[str, Any]], budget: int
+) -> list[str]:
+    """The deep-report half of the usage section, or ``[]`` if it cannot fit.
+
+    Agentic Memory P2 (T4 fix round). Two lines per report: the report's own
+    question, then the wording of the directions it actually ran. WORDING is
+    the entire payload — this sample exists to tell ``retrieval_notes`` how
+    this member phrases research, and it deliberately carries no statement
+    about what any direction returned (``AskStateStorePort.
+    recent_user_report_traces`` enumerates why the persisted account cannot
+    support one).
+
+    ``budget`` is what the ask section left of the SHARED
+    ``AGENT_PROFILE_USAGE_SECTION_MAX_CHARS`` — one budget, allocated, not
+    two budgets. Both the direction list within a report and the report list
+    itself are trimmed against it, each with its own ``(+N more not listed)``
+    disclosure, so the model can never read a trimmed sample as a complete
+    one. Returning ``[]`` rather than a bare header is deliberate: a header
+    with nothing under it reads as "this member has no reports", which is
+    the opposite of what an exhausted budget means.
+    """
+    header = [
+        "[Your recent deep reports in this library]",
+        f"reports sampled: {len(reports)} (most recent first, at most "
+        f"{AGENT_PROFILE_REPORT_SAMPLE}; the directions listed per report are "
+        f"themselves a bounded sample, not a complete account of that report)",
+    ]
+    header_cost = sum(len(line) + 1 for line in header) + len("reports:") + 1
+    remaining = budget - header_cost
+    body: list[str] = []
+    rendered = 0
+    for report in reports:
+        question = str(report.get("question") or "")
+        if not question:
+            # A report row with no question text says nothing about how this
+            # person researches; it still counted in the header total.
+            continue
+        head = f"- {question}"
+        if len(head) + 1 >= remaining:
+            break
+        detail = _render_report_directions(
+            report.get("attempts") or (), remaining - (len(head) + 1)
+        )
+        if detail is None:
+            break
+        body.extend((head, detail))
+        remaining -= (len(head) + 1) + (len(detail) + 1)
+        rendered += 1
+    if not body:
+        return []
+    hidden = len(reports) - rendered
+    suffix = f" (+{hidden} more not listed)" if hidden > 0 else ""
+    return [*header, f"reports{suffix}:", *body]
+
+
+def _render_report_directions(
+    attempts: Sequence[Mapping[str, Any]], remaining: int
+) -> str | None:
+    """One report's direction wording, or ``None`` when it will not fit.
+
+    Directions that errored keep their wording (the member still phrased
+    them; a transport failure says nothing about the phrasing) and are ALSO
+    counted, so the count explains the list rather than contradicting it.
+    Directions whose wording did not survive the projection — a corrupt row,
+    or a legacy entry with no ``query`` — are dropped from the list; if that
+    leaves nothing, the report falls back to the same
+    ``(directions not sampled)`` disclosure a truncated one gets, because
+    from here the two are the same thing: no wording to show.
+    """
+    failed_count = sum(1 for attempt in attempts if attempt.get("failed"))
+    queries = [str(attempt.get("query") or "") for attempt in attempts]
+    queries = [query for query in queries if query]
+    if not queries:
+        if len(_REPORT_NO_DIRECTIONS) + 1 > remaining:
+            return None
+        return _REPORT_NO_DIRECTIONS
+    prefix = "  directions: "
+    # Reserved up front from the WORST case of each suffix, so appending them
+    # afterwards cannot push the line past the budget it was measured
+    # against. Both are short and bounded; over-reserving costs a direction,
+    # under-reserving costs the invariant.
+    failed_suffix = f" ({failed_count} of these failed)" if failed_count else ""
+    reserve = len(f" (+{len(queries)} more not listed)") + len(failed_suffix)
+    used = len(prefix) + reserve + 1
+    listed: list[str] = []
+    for query in queries:
+        piece = ("; " if listed else "") + query
+        if used + len(piece) > remaining:
+            break
+        listed.append(query)
+        used += len(piece)
+    if not listed:
+        return None
+    line = prefix + "; ".join(listed)
+    hidden = len(queries) - len(listed)
+    if hidden > 0:
+        line += f" (+{hidden} more not listed)"
+    return line + failed_suffix
 
 
 def render_current_overlay_blocks(blocks: Sequence[Mapping[str, Any]], owner_id: str) -> str:
@@ -1642,12 +1741,17 @@ class AgentProfileConsolidationService:
         report therefore no longer terminates as ``no_usage_sample`` with
         nothing written: ``_consolidate_overlay``'s empty-sample gate checks
         ``stats.asks`` and ``stats.reports`` together, so this report alone
-        can support a ``retrieval_notes``/``usage_gaps`` refresh. What the
-        report sample can say is narrower than the ask sample, though — see
-        ``AskStateStorePort.recent_user_report_traces`` for exactly which
-        fields survive (a question and, per confirmed direction, whether it
-        came back empty; no step_type/duration/step sequence, because
-        ``sections_json`` never persisted that shape).
+        can support a ``retrieval_notes`` refresh.
+
+        ⚠ ``retrieval_notes`` — NOT ``usage_gaps``. The report sample is
+        much narrower than the ask sample, in kind and not just in degree:
+        it carries the member's question and the WORDING of each confirmed
+        direction, and nothing about what any of them returned.
+        ``sections_json`` never persisted step types, durations or a step
+        sequence, and its one counter (``new``) does not mean what it looks
+        like it means. So a member whose only activity is deep reports gets
+        notes about how they phrase research and NO gap claims at all — see
+        ``AskStateStorePort.recent_user_report_traces``.
         """
         try:
             if not user_id or self.ask_state is None:
@@ -2103,7 +2207,8 @@ class AgentProfileConsolidationService:
         projection keeps an action type, a summary, a duration and a count
         (``ports.project_trace_step``), so even the ``memory`` step
         contributes only "found N"; the report projection keeps a question
-        and, per direction, only whether it came back empty
+        and, per confirmed direction, that direction's own wording plus
+        whether executing it errored
         (``ports.project_report_row``/``project_report_attempt``) — never
         section markdown, citations or evidence text.
         """

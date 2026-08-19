@@ -470,11 +470,27 @@ class AskStateStore:
         ⚠ ``sections_json`` is projected IN THE SQL, not pulled into Python —
         one deep report's ``sections_json`` carries full section markdown and
         can run several hundred KB. The nested ``json_each`` walk extracts
-        only ``$[*].attempted[*].{new,failed}``, defensively: each level is
-        guarded by ``json_valid``/``json_type`` so a malformed or legacy
-        (pre-T4) row degrades to "no attempts" for that section rather than
-        raising and losing the whole sample — the same tolerance
-        ``read_trace``/``project_trace_step`` already have for a corrupt row.
+        only ``$[*].attempted[*].{query,failed}``, defensively, so a
+        malformed or legacy (pre-T4) row degrades to "no attempts" for that
+        section rather than raising and losing the whole sample — the same
+        tolerance ``read_trace``/``project_trace_step`` already have for a
+        corrupt row shape.
+
+        ⚠ The guards are ``json_each``'s own ``type`` COLUMN and nested
+        ``CASE``, NOT ``json_type(x)`` on the element value, and not two
+        predicates joined by ``AND``. Both alternatives raise (verified,
+        SQLite 3.x): ``json_type('hello')`` on the string element of
+        ``["hello"]`` is ``malformed JSON`` because ``json_type`` PARSES its
+        argument, and ``json_type(a.value, '$.new')`` does the same for the
+        string element of ``{"attempted": ["oops"]}``. ``AND`` does not save
+        it either — SQL has no guaranteed evaluation order, so a guard
+        written as ``json_valid(x) AND json_type(x) = 'array'`` can still
+        evaluate the parsing half first. ``CASE`` does have a defined order
+        (``WHEN``s in sequence, only the matching ``THEN``), and ``s.type`` /
+        ``a.type`` are pre-computed columns that parse nothing at all. This
+        matters because one malformed report poisons the WHOLE sample, not
+        just its own row: the statement raises and this member's overlay
+        refresh loses every report they have.
 
         ``ORDER BY r.created_at DESC, r.id DESC, s.key ASC, a.key ASC`` before
         the ``attempt_limit`` cap mirrors the ask side's job-then-step
@@ -503,15 +519,18 @@ class AskStateStore:
             placeholders = ",".join("?" for _ in by_report)
             attempt_rows = db.execute(
                 "SELECT r.id AS report_id, "
-                "json_extract(a.value, '$.new') AS new, "
-                "json_extract(a.value, '$.failed') AS failed "
+                "CASE WHEN a.type = 'object' "
+                "THEN json_extract(a.value, '$.query') END AS query, "
+                "CASE WHEN a.type = 'object' "
+                "THEN json_extract(a.value, '$.failed') END AS failed "
                 "FROM reports r "
                 "JOIN json_each(CASE WHEN json_valid(r.sections_json) "
-                "AND json_type(r.sections_json) = 'array' "
-                "THEN r.sections_json ELSE '[]' END) AS s "
-                "JOIN json_each(CASE WHEN json_type(s.value) = 'object' "
-                "AND json_type(s.value, '$.attempted') = 'array' "
-                "THEN json_extract(s.value, '$.attempted') ELSE '[]' END) AS a "
+                "THEN (CASE WHEN json_type(r.sections_json) = 'array' "
+                "THEN r.sections_json ELSE '[]' END) ELSE '[]' END) AS s "
+                "JOIN json_each(CASE WHEN s.type = 'object' "
+                "THEN (CASE WHEN json_type(s.value, '$.attempted') = 'array' "
+                "THEN json_extract(s.value, '$.attempted') ELSE '[]' END) "
+                "ELSE '[]' END) AS a "
                 f"WHERE r.notebook_id = ? AND r.created_by = ? AND r.status = 'done' "
                 f"AND r.id IN ({placeholders}) "
                 "ORDER BY r.created_at DESC, r.id DESC, s.key ASC, a.key ASC "
@@ -522,7 +541,7 @@ class AskStateStore:
             target = by_report.get(str(row["report_id"]))
             if target is not None:
                 target["attempts"].append(
-                    project_report_attempt(row["new"], row["failed"])
+                    project_report_attempt(row["query"], row["failed"])
                 )
         return reports
 

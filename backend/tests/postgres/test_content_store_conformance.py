@@ -607,11 +607,19 @@ def test_recent_user_report_traces_scopes_to_the_reading_member(content_harness)
     ``test_agent_profile_isolation_guard.py`` over the now two-element
     ``TRACE_READ_METHODS``); this pins that PostgreSQL actually honours it
     AND projects the SAME shape SQLite does, even though the two backends
-    extract ``sections_json[i].attempted[j].{new,failed}`` through completely
-    different SQL (``jsonb_array_elements``/``->>`` here, nested
+    extract ``sections_json[i].attempted[j].{query,failed}`` through
+    completely different SQL (``jsonb_array_elements``/``->>`` here, nested
     ``json_each``/``json_extract`` there) — an understanding block whose
     contents depended on which database ran it would be a long way from
     obvious.
+
+    ⚠ The two MALFORMED shapes are pinned here too (P2-T4 fix round, item 7).
+    They are the reason the SQLite side had to move off ``json_type()``: a
+    string section element and a string attempt element both raise
+    ``malformed JSON`` there, taking the member's WHOLE sample with them.
+    ``jsonb`` is parsed at write time so PostgreSQL never raised — but that
+    is exactly why it needs a test: without one, the two backends could
+    diverge on corrupt data and nothing would say so.
     """
     from app.repositories.postgres._store_utils import jsonb
 
@@ -651,20 +659,44 @@ def test_recent_user_report_traces_scopes_to_the_reading_member(content_harness)
                 {"title": "s0", "attempted": [{"query": "y", "new": 0, "tries": 1}]},
             ]), "failed", "user-content", NOW, NOW),
         )
+        connection.execute(
+            "INSERT INTO reports(id,notebook_id,question,sections_json,status,"
+            "created_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("rep-str-section", "nb-content", "string section?",
+             jsonb(["hello"]), "done", "user-content",
+             "2026-07-21T00:00:00+00:00", NOW),
+        )
+        connection.execute(
+            "INSERT INTO reports(id,notebook_id,question,sections_json,status,"
+            "created_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("rep-str-attempt", "nb-content", "string attempt?",
+             jsonb([{"attempted": ["oops"]}]), "done", "user-content",
+             "2026-07-22T00:00:00+00:00", NOW),
+        )
 
     rows = content_harness.ask.recent_user_report_traces(
         "nb-content", "user-content", report_limit=10, attempt_limit=200
     )
 
-    assert [row["question"] for row in rows] == ["mine?"]
-    assert rows[0]["report_id"] == "rep-mine"
-    # Projected, not passed through: only new/failed survive, in section-then-
-    # attempt order, exactly the shape ``project_report_attempt`` produces.
-    assert rows[0]["attempts"] == [
-        {"new": 1, "failed": False},
-        {"new": 0, "failed": False},
-        {"new": 2, "failed": True},
+    assert [row["question"] for row in rows] == [
+        "mine?", "string attempt?", "string section?"
     ]
+    assert rows[0]["report_id"] == "rep-mine"
+    # Projected, not passed through: only query/failed survive, in section-
+    # then-attempt order, exactly the shape ``project_report_attempt``
+    # produces. ``new`` is dropped at the projection — it measures additions
+    # to the run's shared candidate pool, not this direction's results, and
+    # the P2-T4 fix round removed every consumer of it.
+    assert rows[0]["attempts"] == [
+        {"query": "a", "failed": False},
+        {"query": "b", "failed": False},
+        {"query": "c", "failed": True},
+    ]
+    # Malformed shapes degrade, they do not poison: the string-attempt row
+    # yields one attempt with no wording, the string-section row yields none,
+    # and the healthy report above is untouched.
+    assert rows[1]["attempts"] == [{"query": "", "failed": False}]
+    assert rows[2]["attempts"] == []
     assert content_harness.ask.recent_user_report_traces(
         "nb-content", "user-other", report_limit=10, attempt_limit=200
     )[0]["report_id"] == "rep-theirs"

@@ -2709,29 +2709,56 @@ class AskStateStorePort(Protocol):
     # report cannot say how this member searched, mirroring
     # ``note_report_completed``'s own gate (only fires on ``report_done``).
     #
-    # ⚠ ``new == 0`` (NOT ``count``) is this account's zero-hit signal —
-    # deliberately DIFFERENT from ``_RETRIEVE_COUNT_KEYS`` above, which reads
-    # ONLY ``count`` for an ask's ``"retrieve"`` steps because
-    # ``add_subquery``'s ``new == 0`` there means "reproduced existing
-    # candidates", not "found nothing". In ``sections_json[i].attempted``,
-    # ``new`` is the ONLY count this account keeps (there is no sibling
-    # ``count`` field), and every direction a report executes is a FIRST
-    # execution — a report run never repeats a direction it has already
-    # confirmed — so here ``new == 0`` genuinely means the direction came
-    # back empty. Do not "fix" this to match ``_RETRIEVE_COUNT_KEYS``; the two
-    # mean different things because they read different accounts. Rows
-    # carrying ``failed: true`` are excluded from the zero-hit count
-    # entirely — a retrieval that errored is not the same event as one that
-    # ran and genuinely found nothing.
+    # ⚠ THIS SAMPLE CARRIES NO ZERO-HIT SIGNAL, ON PURPOSE (P2-T4 fix round,
+    # spec review P1). The original design read ``attempted[j].new == 0`` as
+    # "this direction came back empty" and folded it into ``usage_gaps``'
+    # evidence. That reading does not hold, for four independent reasons —
+    # all four have to be false for it to work, and each one alone is fatal:
+    #
+    #   * ``new`` counts KNOWLEDGE OBJECTS newly added to the run's SHARED
+    #     candidate pool, not results for that direction. A direction that
+    #     returned plenty of material already collected by an earlier
+    #     direction scores 0.
+    #   * a report seeds the pool with the SECTION QUESTION before running
+    #     the confirmed directions, so overlapping directions score 0 by
+    #     construction — which is most of them, since the directions of one
+    #     section are by design about one topic.
+    #   * a notebook with no knowledge graph scores 0 for EVERY direction,
+    #     always: there are no KG objects to add.
+    #   * chunk and element hits — the bulk of what most retrieval returns —
+    #     are not counted by ``new`` at all.
+    #
+    # Reading it as "empty" would therefore write "this library has nothing
+    # on X" into a member's PRIVATE, model-authored notes on the strength of
+    # a counter that measures something else. Zero-hit evidence
+    # (``zero_hit_steps`` / ``usage_gaps`` / ``empty_search_summaries``) is
+    # consequently ASK-ONLY, exactly as it was before P2-T4; what this
+    # sample feeds is ``retrieval_notes`` — HOW this member phrases their
+    # research directions — which needs the wording, not an outcome.
+    #
+    # ⚠ ``failed: true`` is kept, but ONLY as a count of directions whose
+    # execution errored. It is not a retrieval outcome either (a retrieval
+    # that threw is not one that ran and found nothing); it exists so the
+    # rendered sample can say how much of a report's direction list is
+    # missing wording rather than silently listing fewer directions.
     #
     # Bounded by BOTH arguments (``report_limit`` most-recent ``done``
     # reports, ``attempt_limit`` attempt rows across them) and PROJECTED
     # through ``project_report_row``/``project_report_attempt``: what comes
     # back is the member's own report question plus, per confirmed
-    # direction, whether it came back empty. Never section markdown, never
-    # citations, never evidence text — ``sections_json`` also carries full
-    # section prose per entry, so the SQL does the ``$[*].attempted``
-    # projection itself rather than pulling the whole blob into Python.
+    # direction, that direction's own wording and whether it errored. Never
+    # section markdown, never citations, never evidence text —
+    # ``sections_json`` also carries full section prose per entry, so the SQL
+    # does the ``$[*].attempted`` projection itself rather than pulling the
+    # whole blob into Python.
+    #
+    # ⚠ ``attempt_limit`` truncation is NOT distinguishable from "this
+    # report had no directions" in what comes back — the rows simply are not
+    # there. The renderer must therefore never turn an empty ``attempts``
+    # list into an assertion about the report (see
+    # ``agent_profile_job.render_usage_block``); with the shipped defaults a
+    # full sample overruns the cap routinely, so this is the common case,
+    # not an edge one.
 
 
 # Memory write/revision values are storage-neutral domain types.  The port
@@ -3898,39 +3925,40 @@ def project_report_row(report_id: object, question: object, created_at: object) 
     }
 
 
-def project_report_attempt(new: object, failed: object) -> dict:
+def project_report_attempt(query: object, failed: object) -> dict:
     """One projected ``attempted`` row from a report's ``sections_json``.
 
     Agentic Memory P2 (T4). ``sections_json[i].attempted`` entries are
-    ``{"query": str, "new": int, "tries": int, "failed"?: bool}`` — the
-    per-direction query TEXT is deliberately not kept here (unlike the
-    report's own ``question``, a single direction's wording is not free text
-    the member typed; it is either their own confirmed direction or a model
-    paraphrase, and ``retrieval_notes``/``usage_gaps`` only need the shape:
-    did this direction come back with anything new).
+    ``{"query": str, "new": int, "tries": int, "failed"?: bool}``. Two of
+    those four are kept, and WHICH two changed in the T4 fix round:
 
-    ``new``/``failed`` arrive in different native shapes depending on which
-    backend's SQL produced them — SQLite's ``json_extract`` hands back a
-    genuine ``int``/``None`` (a JSON boolean degrades to Python ``0``/``1``),
-    PostgreSQL's ``->>`` text extraction hands back ``str``/``None`` — and
-    this is the ONE place both are reconciled into the same ``{int | None,
-    bool}`` pair, so a caller downstream (``summarize_usage``) never has to
-    know which backend answered. Anything that is not recognisably an int or
-    a bool-shaped value degrades to ``None``/``False`` rather than raising —
-    the same tolerance ``project_trace_step`` has for a corrupt row shape.
+    * ``query`` — the direction's own wording, clipped through the same
+      ``_clip_trace_text`` budget as an ask's question. This is what the
+      sample is FOR: ``retrieval_notes`` is a note about how this member
+      phrases research, and a direction they confirmed is their phrasing.
+      It is their own text about their own run, and the block it feeds is
+      readable only by them — the same disclosure ``project_ask_row`` makes
+      for the ask question.
+    * ``failed`` — whether executing that direction errored. A count, not
+      an outcome (see the port docstring).
+
+    ``new`` is deliberately DROPPED. It counts knowledge objects newly added
+    to the run's shared candidate pool, which is not the same thing as "this
+    direction found something" — the port docstring enumerates the four
+    independent ways that reading breaks. Keeping the field "just in case"
+    would leave the wrong number one refactor away from being read as an
+    outcome again.
+
+    ``query``/``failed`` arrive in different native shapes depending on
+    which backend's SQL produced them — SQLite's ``json_extract`` hands back
+    ``str``/``None`` and degrades a JSON boolean to ``0``/``1``, PostgreSQL's
+    ``->>`` text extraction hands back ``str``/``None`` — and this is the ONE
+    place both are reconciled into the same ``{str, bool}`` pair, so a caller
+    downstream (``summarize_usage``) never has to know which backend
+    answered. Anything unrecognisable degrades to ``""``/``False`` rather
+    than raising — the same tolerance ``project_trace_step`` has for a
+    corrupt row shape.
     """
-    n: int | None
-    if isinstance(new, bool):
-        n = None
-    elif isinstance(new, int):
-        n = new
-    elif isinstance(new, str):
-        try:
-            n = int(new)
-        except ValueError:
-            n = None
-    else:
-        n = None
     if isinstance(failed, bool):
         f = failed
     elif isinstance(failed, int):
@@ -3939,7 +3967,7 @@ def project_report_attempt(new: object, failed: object) -> dict:
         f = failed.strip().lower() == "true"
     else:
         f = False
-    return {"new": n, "failed": f}
+    return {"query": _clip_trace_text(query), "failed": f}
 
 
 @dataclass(frozen=True)
