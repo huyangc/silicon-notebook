@@ -250,7 +250,9 @@ class AskExecutionCoordinator:
         service: the service is fail-open too, but the coordinator must not
         depend on the collaborator it was handed being well-behaved.
 
-        Cost at the call site is one primary-key upsert; only when the
+        Cost at the call site is one bounded indexed membership read (P2-T3's
+        ``_member_can_read`` — see its COST note) plus one primary-key
+        upsert; only when the
         threshold is reached does it additionally hand a callable to the light
         background pool (a queue put, never a blocking wait), so the terminal
         event is not meaningfully delayed.
