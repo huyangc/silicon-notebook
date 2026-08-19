@@ -80,6 +80,9 @@ export function ConversationShareModal({
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState("");
   const [watermark, setWatermark] = useState("");
+  // 水位答案 id——「已分享 vs 新增」的权威分类判据(codex #522 R3),按它在权威 turn
+  // 顺序里的位置分,而不是 created_at 时间戳。watermark（时间戳）只作显示与删除兜底。
+  const [watermarkId, setWatermarkId] = useState("");
   const [turns, setTurns] = useState<ConversationDetail["turns"]>([]);
   // 会话详情没加载出来 → 无法算数。Memory 披露此时退化成不带数字的告警，绝不省略。
   const [countsError, setCountsError] = useState(false);
@@ -111,6 +114,7 @@ export function ConversationShareModal({
         if (share) {
           setToken(share.share_token || "");
           setWatermark(share.shared_through_at || "");
+          setWatermarkId(share.shared_through_id || "");
         }
         if (conversation) setTurns(conversation.turns || []);
         else setCountsError(true);
@@ -128,10 +132,16 @@ export function ConversationShareModal({
 
   const shared = Boolean(token);
   const link = shared ? buildPublicConversationLink(token, typeof window !== "undefined" ? window.location.origin : "") : "";
-  const disclosure = useMemo(() => summarizeShareDisclosure(turns, shared ? watermark : ""), [turns, watermark, shared]);
+  const disclosure = useMemo(
+    () => summarizeShareDisclosure(turns, shared ? watermarkId : "", watermark),
+    [turns, watermarkId, watermark, shared],
+  );
   // 前瞻披露:「更新到最新」会把水位推到全部轮次,consent 判据是**这个按钮将要公开
   // 什么**,所以它必须在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。
-  const updatePreview = useMemo(() => summarizeShareUpdate(turns, shared ? watermark : ""), [turns, watermark, shared]);
+  const updatePreview = useMemo(
+    () => summarizeShareUpdate(turns, shared ? watermarkId : "", watermark),
+    [turns, watermarkId, watermark, shared],
+  );
 
   async function doShare(action: "share" | "update") {
     if (busy) return;
@@ -147,6 +157,7 @@ export function ConversationShareModal({
       if (!aliveRef.current) return;
       setToken(resp.share_token || "");
       setWatermark(resp.shared_through_at || "");
+      setWatermarkId(resp.shared_through_id || "");
       setNotice(action === "update" ? "已更新到最新" : "已生成分享链接");
     } catch (err) {
       if (!aliveRef.current) return;
@@ -166,6 +177,7 @@ export function ConversationShareModal({
       if (!aliveRef.current) return;
       setToken("");
       setWatermark("");
+      setWatermarkId("");
       setNotice("已取消分享，原链接立即失效");
     } catch (err) {
       if (!aliveRef.current) return;

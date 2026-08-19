@@ -363,6 +363,36 @@ def test_share_rejects_a_stale_expected_through_id(client):
     assert client.get(_share_url(nb, cid), headers=owner).status_code == 404
 
 
+def test_share_rejects_a_regressing_expected_through_id(client):
+    """Advance-only end to end (codex #522 R3): once the link is pinned to the
+    newest answer, a stale tab POSTing the OLDER answer id must get a 409, and the
+    published watermark must not regress. The route maps the store's
+    ``ConversationShareWatermarkStale`` raise to the same 409 as the deleted case.
+    """
+    owner, owner_id = _new_user(client)
+    nb = _notebook(client, owner)
+    cid = _seed_conversation(
+        nb, owner_id,
+        answers=("2026-01-01T00:00:01", "2026-01-02T00:00:00"),
+    )
+
+    # Advance to the newest answer (ans1).
+    advanced = client.post(
+        _share_url(nb, cid), headers=owner,
+        json={"expected_through_id": f"{cid}-ans1"},
+    )
+    assert advanced.status_code == 200, advanced.text
+    assert advanced.json()["shared_through_id"] == f"{cid}-ans1"
+
+    # A stale tab pins the OLDER answer — rejected, watermark unchanged.
+    stale = client.post(
+        _share_url(nb, cid), headers=owner,
+        json={"expected_through_id": f"{cid}-ans0"},
+    )
+    assert stale.status_code == 409, stale.text
+    assert _share_state(nb, cid)["shared_through_id"] == f"{cid}-ans1"
+
+
 def test_get_share_is_404_when_the_conversation_is_not_shared(client):
     """回读端点在未分享时 404(镜像 get_report_share_route)——token 就是凭证,
     没有它就没有可交出的东西。"""

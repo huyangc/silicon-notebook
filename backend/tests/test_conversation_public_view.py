@@ -24,6 +24,8 @@ from app.models.ask import PublicConversation
 from app.services.conversation_public_view import (
     MAX_REFERENCES,
     MAX_REFERENCED_ASSETS,
+    MAX_REFERENCE_TITLE_CHARS,
+    MAX_SNIPPET_CHARS,
     MAX_TURNS,
     conversation_asset_alias,
     referenced_asset_ids,
@@ -246,7 +248,8 @@ def test_projection_keys_are_exactly_the_allowlist():
         "answer": "见 [k1]。", "anchors": [_anchor("k1")], "citations": [],
     }))
     assert set(turn["references"][0]) == {
-        "key", "title", "file_name", "location", "snippet"
+        "key", "title", "file_name", "location", "snippet",
+        "title_truncated", "snippet_truncated",
     }
     # And the turn itself exposes no reasoning/id surface. ``images`` is the
     # only T4 addition; it carries aliases + captions, never addressable ids.
@@ -493,6 +496,39 @@ def test_reference_filter_drops_empty_entries_but_key_keeps_alignment():
     assert [ref["key"] for ref in turn["references"]] == ["k1", "k3"]
     assert turn["reference_count"] == 3            # pre-filter
     assert turn["truncated_references"] is False
+
+
+def test_reference_truncation_is_disclosed_not_silent():
+    """A title past ``MAX_REFERENCE_TITLE_CHARS`` / an excerpt past
+    ``MAX_SNIPPET_CHARS`` is clipped to its bounded prefix, but the clip is
+    DISCLOSED via ``title_truncated``/``snippet_truncated`` — not dropped
+    silently (codex #522 R3; AGENTS.md 用户编辑的数据不得静默截断). Mutation guard:
+    hardcoding either flag to ``False`` reds this."""
+    long_title = "标" * (MAX_REFERENCE_TITLE_CHARS + 100)
+    long_snippet = "摘" * (MAX_SNIPPET_CHARS + 100)
+    payload = {
+        "answer": "见 [k1]。",
+        "anchors": [_anchor("k1", source_title=long_title, snippet=long_snippet)],
+        "citations": [],
+    }
+    ref = public_turn(_turn("q", payload))["references"][0]
+
+    assert ref["title"] == "标" * MAX_REFERENCE_TITLE_CHARS   # bounded prefix
+    assert ref["title_truncated"] is True
+    assert ref["snippet"] == "摘" * MAX_SNIPPET_CHARS
+    assert ref["snippet_truncated"] is True
+
+
+def test_reference_within_caps_is_not_flagged_truncated():
+    """A title/excerpt at or under the cap must not raise the disclosure flag —
+    otherwise every normal reference would falsely claim it was clipped."""
+    ref = public_turn(_turn("q", {
+        "answer": "见 [k1]。",
+        "anchors": [_anchor("k1", source_title="短标题", snippet="短摘录")],
+        "citations": [],
+    }))["references"][0]
+    assert ref["title_truncated"] is False
+    assert ref["snippet_truncated"] is False
 
 
 def test_reference_list_is_bounded():

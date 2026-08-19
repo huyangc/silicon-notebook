@@ -1369,12 +1369,13 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `MAX_REFERENCED_ASSETS`（图片端点单请求扫描的不同资产上限；必须 ≥ `MAX_TURNS × CITATION_IMAGES_PER_ANSWER`——由 `test_endpoint_scan_cap_covers_every_alias_the_projection_can_emit` 守卫，否则晚轮次图片的别名会永远解析不到） | 6,000 |
 | `MAX_TURNS`（单页公开页渲染的最多轮数；超出部分披露为 `truncated_turns`） | 500 |
 | `MAX_REFERENCES`（每轮引用上限） | 500 |
+| `MAX_REFERENCE_TITLE_CHARS`（每条引用标题/原始文件名字符上限） | 400 |
 | `MAX_SNIPPET_CHARS`（每条引用摘录字符上限） | 1,200 |
 | `MAX_CAPTION_CHARS`（每张图 caption 字符上限） | 500 |
 
-每轮问题**与会话标题**均**原样返回、不截断**：与 `answer_md` 同理，它们是用户自撰的 artifact（标题在重命名端点无长度上限），静默截断会丢掉产生该答案的原始问题、或截断给会话命名的标题。
+每轮问题**与会话标题**均**原样返回、不截断**：与 `answer_md` 同理，它们是用户自撰的 artifact（标题在重命名端点无长度上限），静默截断会丢掉产生该答案的原始问题、或截断给会话命名的标题。引用的标题与摘录是证据元数据、仍受上限约束，但**超限会置 `title_truncated`/`snippet_truncated` 披露**（公开页显示「已截断」提示），不静默丢尾（codex #522 R3）。
 
-六个上限均定义在 `backend/app/services/conversation_public_view.py`。
+七个上限均定义在 `backend/app/services/conversation_public_view.py`。
 
 ## API
 

@@ -9621,6 +9621,12 @@ button.tag:hover {
   word-break: break-word;
 }
 
+/* 引用标题/摘录被截断时的可见提示（codex #522 R3：不静默截断）。 */
+.public-report-references small.public-report-truncated {
+  font-style: italic;
+  color: #7a6a3f;
+}
+
 .public-report-references blockquote {
   margin: 5px 0 0;
   padding: 8px 11px;

@@ -7471,7 +7471,7 @@
           "type": "object"
         },
         "PublicReference": {
-          "description": "One reference in a shared conversation, as an anonymous reader sees it\n(T3). Same shape as ``PublicReportReference``.\n\nNo ``source_id`` / ``element_id`` / ``object_id`` / ``notebook_id`` /\n``memory_id`` / ``provenance`` / ``knowhow`` / ``images``: a public link must\nnot hand out handles into the authenticated API. Built by\n``services/conversation_public_view.py`` as an allowlist — a Memory citation\nkeeps its title/snippet but loses its ``memory_id``. ``key`` (``\"k1\"`` or a\npositional ``\"1\"``) is preserved so the page can number ``[k]`` markers from\nit rather than from a list position the reference filter may have shifted.",
+          "description": "One reference in a shared conversation, as an anonymous reader sees it\n(T3). Same shape as ``PublicReportReference``.\n\nNo ``source_id`` / ``element_id`` / ``object_id`` / ``notebook_id`` /\n``memory_id`` / ``provenance`` / ``knowhow`` / ``images``: a public link must\nnot hand out handles into the authenticated API. Built by\n``services/conversation_public_view.py`` as an allowlist — a Memory citation\nkeeps its title/snippet but loses its ``memory_id``. ``key`` (``\"k1\"`` or a\npositional ``\"1\"``) is preserved so the page can number ``[k]`` markers from\nit rather than from a list position the reference filter may have shifted.\n\n``title_truncated``/``snippet_truncated`` disclose that an over-length title\nor excerpt was clipped to its bounded prefix, so the page can mark it rather\nthan drop the tail silently (codex #522 R3).",
           "properties": {
             "file_name": {
               "default": "",
@@ -7493,10 +7493,20 @@
               "title": "Snippet",
               "type": "string"
             },
+            "snippet_truncated": {
+              "default": false,
+              "title": "Snippet Truncated",
+              "type": "boolean"
+            },
             "title": {
               "default": "",
               "title": "Title",
               "type": "string"
+            },
+            "title_truncated": {
+              "default": false,
+              "title": "Title Truncated",
+              "type": "boolean"
             }
           },
           "title": "PublicReference",

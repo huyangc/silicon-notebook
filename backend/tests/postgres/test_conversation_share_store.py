@@ -208,6 +208,89 @@ def test_expected_through_id_that_no_longer_resolves_is_rejected(postgres_databa
     )["share_token"] == ""
 
 
+def test_share_watermark_is_advance_only_rejecting_a_stale_expected(
+    postgres_database,
+):
+    """The watermark may only ADVANCE (codex #522 R3): once a share pins it to a
+    newer answer, a stale request pinning to an OLDER answer is rejected rather
+    than allowed to regress the published link. Mirrors the SQLite copy; the
+    PostgreSQL comparison uses ``ordinal``. Mutation guard: dropping the
+    advance-only comparison makes the stale reshare regress the watermark to
+    ans-a."""
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    store.share_conversation(notebook_id, conversation_id, expected_through_id="ans-d")
+
+    with pytest.raises(ConversationShareWatermarkStale):
+        store.share_conversation(
+            notebook_id, conversation_id, expected_through_id="ans-a"
+        )
+    assert store.conversation_share_state(
+        notebook_id, conversation_id
+    )["shared_through_id"] == "ans-d"
+
+
+def test_share_watermark_rejects_a_tiebreak_earlier_answer(postgres_database):
+    """Advance-only respects the ``ordinal`` tie-break, not just ``created_at``:
+    ans-c and ans-b share instant t1 (ordered ans-c → ans-b by ordinal). Pinning
+    to ans-b then requesting the same-instant earlier ans-c is a regression and
+    must be rejected. Mutation guard: a pure ``created_at`` comparison would let
+    the reshare succeed."""
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    store.share_conversation(notebook_id, conversation_id, expected_through_id="ans-b")
+
+    with pytest.raises(ConversationShareWatermarkStale):
+        store.share_conversation(
+            notebook_id, conversation_id, expected_through_id="ans-c"
+        )
+    assert store.conversation_share_state(
+        notebook_id, conversation_id
+    )["shared_through_id"] == "ans-b"
+
+
+def test_resharing_the_same_watermark_is_an_idempotent_no_op(postgres_database):
+    """Re-sharing the SAME boundary is the normal "share this snapshot again" and
+    must return the current state without raising (codex #522 R3)."""
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    first = store.share_conversation(
+        notebook_id, conversation_id, expected_through_id="ans-c"
+    )
+    again = store.share_conversation(
+        notebook_id, conversation_id, expected_through_id="ans-c"
+    )
+    assert again["shared_through_id"] == "ans-c"
+    assert again["share_token"] == first["share_token"]
+
+
+def test_share_watermark_still_advances_forward(postgres_database):
+    """The advance-only guard must not block a legitimate forward move."""
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    store.share_conversation(notebook_id, conversation_id, expected_through_id="ans-a")
+    advanced = store.share_conversation(
+        notebook_id, conversation_id, expected_through_id="ans-d"
+    )
+    assert advanced["shared_through_id"] == "ans-d"
+
+
 def test_public_snapshot_falls_back_to_timestamp_when_boundary_answer_deleted(
     postgres_database,
 ):

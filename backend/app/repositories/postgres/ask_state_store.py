@@ -816,6 +816,16 @@ class AskStateStore:
         409, never silently fall back to latest. Omitted/empty falls back to
         the current latest answer (historical behaviour).
 
+        The watermark is ADVANCE-ONLY (codex #522 R3) — see the SQLite
+        ``share_conversation`` for the full rationale: a request whose boundary
+        sorts BEFORE the already-published one is rejected with
+        ``ConversationShareWatermarkStale`` (→ 409) rather than allowed to regress
+        the link. The regression is measured in SQL against both answer rows with
+        the SAME ``(created_at, ordinal)`` keyset the public snapshot uses; the
+        ``FOR UPDATE`` above holds the row lock through the compare AND the
+        UPDATE, so under READ COMMITTED the two are one atomic step. An equal
+        boundary is an idempotent no-op; a strictly newer one advances.
+
         Raises ``KeyError`` when the conversation does not exist in this
         notebook. A conversation with zero answers can still be "shared"
         here (link issued, watermark stays NULL) — the row-level
@@ -842,8 +852,8 @@ class AskStateStore:
             # ``ensure_conversation`` already locks the conversation row the same
             # way.
             conv = db.execute(
-                "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s "
-                "FOR UPDATE",
+                "SELECT id, shared_through_id FROM conversations "
+                "WHERE id=%s AND notebook_id=%s FOR UPDATE",
                 (conversation_id, notebook_id),
             ).fetchone()
             if conv is None:
@@ -869,6 +879,25 @@ class AskStateStore:
                 ).fetchone()
                 through_at = latest["created_at"] if latest is not None else None
                 through_id = latest["id"] if latest is not None else None
+            # Advance-only (codex #522 R3): reject a request whose boundary sorts
+            # BEFORE the already-published one, evaluated in SQL over both answer
+            # rows with the SAME ``(created_at, ordinal)`` keyset the public
+            # snapshot uses (never a pure timestamp). A request boundary that does
+            # not resolve (zero-answer fallback) or a current boundary whose answer
+            # was deleted skips the check and advances; an equal boundary is an
+            # idempotent no-op (short-circuited by ``current_id != through_id``).
+            current_id = conv["shared_through_id"]
+            if through_id and current_id and current_id != through_id:
+                regresses = db.execute(
+                    "SELECT 1 FROM answers r, answers c "
+                    "WHERE r.id=%s AND c.id=%s AND r.conversation_id=%s "
+                    "AND c.conversation_id=%s AND ("
+                    "r.created_at < c.created_at "
+                    "OR (r.created_at = c.created_at AND r.ordinal < c.ordinal))",
+                    (through_id, current_id, conversation_id, conversation_id),
+                ).fetchone()
+                if regresses is not None:
+                    raise ConversationShareWatermarkStale(expected or through_id)
             issued = db.execute(
                 "UPDATE conversations SET share_token=COALESCE(share_token,%s), "
                 "shared_through_at=%s, shared_through_id=%s "
