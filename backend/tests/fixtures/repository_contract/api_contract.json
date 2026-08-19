@@ -2735,6 +2735,30 @@
           "title": "ConversationRenameRequest",
           "type": "object"
         },
+        "ConversationShareResponse": {
+          "description": "The public link + read watermark for one shared conversation (T2).\n\nMirrors ``ReportShareResponse`` but also carries the watermark: \"share\" and\n\"update to latest\" are the same call, so the caller always sees which answer\nthe public snapshot currently ends at. Deliberately excludes the\nconversation's ``created_by`` — that is a server-side gate field, never\nhanded to the client — and every id (``notebook_id``/``conversation_id``/\n``shared_through_id`` is the watermark answer's id, which is a bounded\ninternal cursor the owner already holds, not a cross-notebook handle).",
+          "properties": {
+            "share_token": {
+              "title": "Share Token",
+              "type": "string"
+            },
+            "shared_through_at": {
+              "default": "",
+              "title": "Shared Through At",
+              "type": "string"
+            },
+            "shared_through_id": {
+              "default": "",
+              "title": "Shared Through Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "share_token"
+          ],
+          "title": "ConversationShareResponse",
+          "type": "object"
+        },
         "ConversationSummary": {
           "properties": {
             "id": {
@@ -14858,6 +14882,142 @@
             }
           },
           "summary": "List Conversations"
+        }
+      },
+      "/api/notebooks/{notebook_id}/conversations/{conversation_id}/share": {
+        "delete": {
+          "description": "Revoke the link. The next public request 404s like any unknown token.\nRow-level gated (creator-only) like the other two: the silent zero-row\nUPDATE underneath would report success either way.",
+          "operationId": "unshare_conversation_route_api_notebooks__notebook_id__conversations__conversation_id__share_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Unshare Conversation Route"
+        },
+        "get": {
+          "description": "Read back the existing link + watermark. Write-guarded: the token *is*\nthe grant, so it is served only to the creator, never to a read-only member\n(mirrors ``report_routes.get_report_share_route``). Not shared -> 404, the\nsame as an unknown token.",
+          "operationId": "get_conversation_share_route_api_notebooks__notebook_id__conversations__conversation_id__share_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationShareResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Conversation Share Route"
+        },
+        "post": {
+          "description": "Publish one conversation behind an unguessable link AND advance the read\nwatermark to its current latest answer — \"share\" and \"update to latest\" are\nthe same call (design doc §四), so the button label alone decides which one\nthe user thinks they pressed.\n\nRow-level gated (creator-only). Only conversations with at least one written\nanswer can be shared (design doc §七 item 5): an in-flight or never-answered\nconversation has nothing completed to show. ``share_conversation`` issues the\ntoken TOGETHER with the watermark, so a watermark that comes back empty means\n\"no committed answer to bound the snapshot\" — reject it and roll the token\nback, rather than leave a NULL-watermark shared row behind (the public read\nwould fail closed on it anyway, but it should not exist). Using the store's\nown returned watermark as the signal — instead of a separate \"has answers?\"\npre-check — also closes the window where a concurrent answer insert would\nmake the two disagree.",
+          "operationId": "share_conversation_route_api_notebooks__notebook_id__conversations__conversation_id__share_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "conversation_id",
+              "required": true,
+              "schema": {
+                "title": "Conversation Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationShareResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Share Conversation Route"
         }
       },
       "/api/notebooks/{notebook_id}/duplicates": {

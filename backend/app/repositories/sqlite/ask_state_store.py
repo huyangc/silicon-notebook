@@ -930,6 +930,39 @@ class AskStateStore:
             "shared_through_id": str(row["shared_through_id"] or ""),
         }
 
+    def conversation_creator(
+        self, notebook_id: str, conversation_id: str
+    ) -> "str | None":
+        """The conversation's ``created_by``, read scoped by BOTH ids — the
+        single notebook-scoped row read behind the authenticated share
+        endpoints' ownership gate (design doc §四 / T2).
+
+        Returns the creator id when the conversation exists IN THIS NOTEBOOK,
+        else ``None``. The creator may be the legacy empty string —
+        ``conversations.created_by`` is ``DEFAULT ''`` — so the three states
+        stay distinct: ``None`` (not in this notebook) / ``""`` (creatorless
+        legacy row) / a real id. Filtering on ``notebook_id`` is load-bearing:
+        a conversation id from another notebook must not resolve here, or the
+        api-layer gate would let a cross-notebook id slip through (mirrors
+        ``report_store.get_report``'s notebook-scoped read that
+        ``_own_report_or_404`` relies on).
+
+        NOT an owner-scoped read: it binds no request user, so the api layer
+        applies the creator-equality and empty-creator (fail-closed) checks on
+        top. Deliberately separate from ``conversation_share_state``: the gate
+        must run before ``share_conversation`` issues a token, and it has
+        nothing to do with the read-back-only share state.
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT created_by FROM conversations "
+                "WHERE id=? AND notebook_id=?",
+                (conversation_id, notebook_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["created_by"] or "")
+
     def public_conversation_by_token(self, token: str) -> "dict | None":
         """Resolve one shared conversation by token alone — the only
         session-free read (mirrors ``report_store.public_report_by_token``;

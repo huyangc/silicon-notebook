@@ -84,6 +84,10 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("ask", "jobs", None),
     ("ask", "jobs", None, "cancel"),
     ("conversations",),
+    # 会话公开分享的发放/回读/撤销(T2)。第二段 conversation_id 走 None 打 {id},
+    # 第三段 share 是固定字面量;token 只出现在匿名 /api/public/conversations/{token}
+    # (T3,另一张模板表),不进这条路径。少了它整条会落到兜底 {redacted},丢观测。
+    ("conversations", None, "share"),
     ("edge-review-queue",),
     ("relations", None, "review"),
     ("object-schemas",),

@@ -31,6 +31,7 @@ from app.models.ask import (
     ConversationBulkDeleteResult,
     ConversationDetail,
     ConversationRenameRequest,
+    ConversationShareResponse,
     ConversationSummary,
     FeedbackRequest,
     FeedbackResponse,
@@ -729,6 +730,136 @@ def bulk_delete_conversations(
         return repository().bulk_delete_conversations(notebook_id, older_than_days)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+# --- 会话公开分享(T2:发放/回读/撤销 + 水位推进)------------------------
+#
+# 三个已认证端点,镜像 report_routes 的 share/get/unshare 形态:notebook 层
+# `require_notebook_read`(owner ∪ 只读成员 ∪ 有效授权边)+ 行级 created_by 门。
+# 匿名页(`GET /public/conversations/{token}`)与图片通道是 T3/T4,不在此。
+
+
+def _own_conversation_or_404(
+    repo, notebook_id: str, conversation_id: str
+) -> str:
+    """Row-level gate for the authenticated conversation-share endpoints.
+
+    One notebook-scoped read answers membership and ownership at once (mirrors
+    ``report_routes._own_report_or_404``): ``conversation_creator`` filters on
+    BOTH ids, so a conversation id belonging to another notebook can never
+    resolve here. Three outcomes, IN THIS ORDER:
+
+    * not in this notebook -> 404. "Exists but not yours" and "does not exist"
+      are the same 404 — a distinguishable response would turn the endpoint into
+      an oracle for whose conversations live in a readable notebook.
+    * empty ``created_by`` -> 409, fail closed. ``conversations.created_by`` is
+      ``DEFAULT ''``, so legacy rows can be creatorless. Such a conversation can
+      never be live-re-authorized (design doc §五 / §3.1), and a public link
+      that can never be re-checked is the one state this feature refuses to
+      create — so every share operation on it surfaces the same actionable 409.
+    * creator != caller -> 404 (same indistinguishable 404 as not-found).
+
+    Checking empty BEFORE the equality gate is what makes the 409 reachable:
+    ``''`` never equals a real user id, so an equality-first gate would 404
+    creatorless rows and the fail-closed branch would be dead code.
+
+    Returns the (equal) creator id; callers currently discard it, exactly like
+    the report ``cancel``/``delete``/``unshare`` handlers discard their row.
+    """
+    owner = repo.conversation_creator(notebook_id, conversation_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not owner:
+        raise user_error(409, "这条会话缺少创建者，无法公开分享。")
+    if owner != repo.current_user().id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return owner
+
+
+@router.post(
+    "/notebooks/{notebook_id}/conversations/{conversation_id}/share",
+    response_model=ConversationShareResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def share_conversation_route(
+    notebook_id: str, conversation_id: str
+) -> ConversationShareResponse:
+    """Publish one conversation behind an unguessable link AND advance the read
+    watermark to its current latest answer — "share" and "update to latest" are
+    the same call (design doc §四), so the button label alone decides which one
+    the user thinks they pressed.
+
+    Row-level gated (creator-only). Only conversations with at least one written
+    answer can be shared (design doc §七 item 5): an in-flight or never-answered
+    conversation has nothing completed to show. ``share_conversation`` issues the
+    token TOGETHER with the watermark, so a watermark that comes back empty means
+    "no committed answer to bound the snapshot" — reject it and roll the token
+    back, rather than leave a NULL-watermark shared row behind (the public read
+    would fail closed on it anyway, but it should not exist). Using the store's
+    own returned watermark as the signal — instead of a separate "has answers?"
+    pre-check — also closes the window where a concurrent answer insert would
+    make the two disagree.
+    """
+    repo = repository()
+    _own_conversation_or_404(repo, notebook_id, conversation_id)
+    try:
+        state = repo.share_conversation(notebook_id, conversation_id)
+    except KeyError:
+        # Deleted between the gate read and the share write.
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not state.get("shared_through_at"):
+        repo.unshare_conversation(notebook_id, conversation_id)
+        raise user_error(409, "这条会话还没有已完成的回答，暂时无法分享。")
+    return ConversationShareResponse(
+        share_token=state["share_token"],
+        shared_through_at=state["shared_through_at"],
+        shared_through_id=state["shared_through_id"],
+    )
+
+
+@router.get(
+    "/notebooks/{notebook_id}/conversations/{conversation_id}/share",
+    response_model=ConversationShareResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_conversation_share_route(
+    notebook_id: str, conversation_id: str
+) -> ConversationShareResponse:
+    """Read back the existing link + watermark. Write-guarded: the token *is*
+    the grant, so it is served only to the creator, never to a read-only member
+    (mirrors ``report_routes.get_report_share_route``). Not shared -> 404, the
+    same as an unknown token.
+    """
+    repo = repository()
+    _own_conversation_or_404(repo, notebook_id, conversation_id)
+    try:
+        state = repo.conversation_share_state(notebook_id, conversation_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not state.get("share_token"):
+        raise HTTPException(status_code=404, detail="conversation is not shared")
+    return ConversationShareResponse(
+        share_token=state["share_token"],
+        shared_through_at=state["shared_through_at"],
+        shared_through_id=state["shared_through_id"],
+    )
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/conversations/{conversation_id}/share",
+    status_code=204,
+    dependencies=[Depends(require_notebook_read)],
+)
+def unshare_conversation_route(
+    notebook_id: str, conversation_id: str
+) -> None:
+    """Revoke the link. The next public request 404s like any unknown token.
+    Row-level gated (creator-only) like the other two: the silent zero-row
+    UPDATE underneath would report success either way.
+    """
+    repo = repository()
+    _own_conversation_or_404(repo, notebook_id, conversation_id)
+    repo.unshare_conversation(notebook_id, conversation_id)
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
