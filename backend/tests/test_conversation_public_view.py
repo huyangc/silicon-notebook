@@ -249,7 +249,7 @@ def test_projection_keys_are_exactly_the_allowlist():
     }))
     assert set(turn["references"][0]) == {
         "key", "title", "file_name", "location", "snippet",
-        "title_truncated", "snippet_truncated",
+        "title_truncated", "snippet_truncated", "file_name_truncated",
     }
     # And the turn itself exposes no reasoning/id surface. ``images`` is the
     # only T4 addition; it carries aliases + captions, never addressable ids.
@@ -506,9 +506,11 @@ def test_reference_truncation_is_disclosed_not_silent():
     hardcoding either flag to ``False`` reds this."""
     long_title = "标" * (MAX_REFERENCE_TITLE_CHARS + 100)
     long_snippet = "摘" * (MAX_SNIPPET_CHARS + 100)
+    long_file = "档" * (MAX_REFERENCE_TITLE_CHARS + 100)
     payload = {
         "answer": "见 [k1]。",
-        "anchors": [_anchor("k1", source_title=long_title, snippet=long_snippet)],
+        "anchors": [_anchor("k1", source_title=long_title, snippet=long_snippet,
+                            source_file_name=long_file)],
         "citations": [],
     }
     ref = public_turn(_turn("q", payload))["references"][0]
@@ -517,6 +519,10 @@ def test_reference_truncation_is_disclosed_not_silent():
     assert ref["title_truncated"] is True
     assert ref["snippet"] == "摘" * MAX_SNIPPET_CHARS
     assert ref["snippet_truncated"] is True
+    # The original uploaded filename is client-supplied user data too
+    # (codex #522 R4).
+    assert ref["file_name"] == "档" * MAX_REFERENCE_TITLE_CHARS
+    assert ref["file_name_truncated"] is True
 
 
 def test_reference_within_caps_is_not_flagged_truncated():
@@ -529,6 +535,7 @@ def test_reference_within_caps_is_not_flagged_truncated():
     }))["references"][0]
     assert ref["title_truncated"] is False
     assert ref["snippet_truncated"] is False
+    assert ref["file_name_truncated"] is False
 
 
 def test_reference_list_is_bounded():

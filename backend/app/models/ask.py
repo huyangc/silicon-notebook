@@ -691,6 +691,7 @@ class PublicReference(BaseModel):
     snippet: str = ""
     title_truncated: bool = False
     snippet_truncated: bool = False
+    file_name_truncated: bool = False
 
 
 class PublicImage(BaseModel):

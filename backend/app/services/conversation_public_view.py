@@ -336,14 +336,21 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
     snippet, snippet_truncated = _text_flag(
         row.get("snippet") or row.get("quoted_span"), MAX_SNIPPET_CHARS
     )
+    # The original uploaded filename is client-supplied user data too, so it gets
+    # the same truncation disclosure as the title/excerpt rather than being
+    # silently clipped to a prefix (codex #522 R4; AGENTS.md 数值上限与截断).
+    file_name, file_name_truncated = _text_flag(
+        row.get("source_file_name"), MAX_REFERENCE_TITLE_CHARS
+    )
     return {
         "key": _text(key, 24),
         "title": title,
-        "file_name": _text(row.get("source_file_name"), MAX_REFERENCE_TITLE_CHARS),
+        "file_name": file_name,
         "location": _text(row.get("location_label"), 200),
         "snippet": snippet,
         "title_truncated": title_truncated,
         "snippet_truncated": snippet_truncated,
+        "file_name_truncated": file_name_truncated,
     }
 
 
