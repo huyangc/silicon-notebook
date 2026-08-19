@@ -313,9 +313,12 @@ def render_current_blocks(blocks: Sequence[Mapping[str, Any]], stats: CorpusStat
     spelled out. Those are the only ids ``parse_base_reply`` will accept back
     as evidence — echoing an id that is merely "still in the library" (in
     ``visible_ids`` but outside the sampled statistics) would hand the model
-    a citation the next reply's structural evidence check silently drops, or
-    worse, an id it copies into a brand-new claim that then gets the WHOLE
-    reply rejected. Everything else the block was written on is a bare count.
+    a citation the next reply's structural evidence check silently DROPS —
+    the id vanishes from the new claim's evidence and is only tallied in the
+    ``evidence_dropped`` diagnostic, so the model believes it cited a document
+    the stored evidence no longer names (per-entry salvage, see
+    ``parse_base_reply``'s own docstring — the whole reply is NOT rejected).
+    Everything else the block was written on is a bare count.
 
     User-authored blocks never render this suffix at all: ``write_block``'s
     user path stores no evidence, and ``retire_disposition`` refuses to
@@ -344,16 +347,27 @@ def render_current_blocks(blocks: Sequence[Mapping[str, Any]], stats: CorpusStat
         return ids
 
     def _liveness_suffix(source_ids: list[str]) -> str:
-        # Dedup and cap at the same limit the write side already enforced —
-        # consuming the existing bound, not a new one.
-        ids = list(dict.fromkeys(source_ids))[:AGENT_PROFILE_EVIDENCE_MAX_IDS]
+        # Classify EVERY stored id first, truncate only the named list below —
+        # truncating before classification would let 8 dead ids shadow a 9th
+        # live one into a false "all gone" (the docstring's per-claim
+        # future-proofing depends on this order).
+        ids = list(dict.fromkeys(source_ids))
         if not ids:
             return ""
-        named = [sid for sid in ids if sid in stats.served_ids]
-        still_alive = sum(
-            1 for sid in ids if sid not in stats.served_ids and sid in stats.visible_ids
-        )
-        gone = sum(1 for sid in ids if sid not in stats.visible_ids)
+        # A single if/elif/else chain: the three buckets are a partition BY
+        # CONSTRUCTION, so a future drift in the `served ⊆ visible` invariant
+        # cannot double-count one id as both named and gone.
+        named: list[str] = []
+        still_alive = 0
+        gone = 0
+        for sid in ids:
+            if sid in stats.served_ids:
+                named.append(sid)
+            elif sid in stats.visible_ids:
+                still_alive += 1
+            else:
+                gone += 1
+        named = named[:AGENT_PROFILE_EVIDENCE_MAX_IDS]
         if not named and not still_alive and gone:
             # Every id this block was written on is gone: an unambiguous,
             # fixed trigger shape for the prompt's retirement rule rather
