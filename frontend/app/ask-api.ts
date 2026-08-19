@@ -19,6 +19,7 @@ import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 import type {
   AskResponse,
   ConversationDetail,
+  ConversationShareResponse,
   ConversationSummary,
   SearchHit,
 } from "./workspace-model.ts";
@@ -222,6 +223,27 @@ export const renameConversation = (id: string, title: string) =>
 
 export const deleteConversation = (id: string) =>
   requestVoid(`/conversations/${id}`, { ...options, method: "DELETE" });
+
+// 会话公开分享（T5）。三个端点都在**主 router**（带 router 级鉴权 + 行级 created_by
+// 门），与匿名公开页端点分属两侧——链接口令就是凭证，发放/回读/撤销都是写级动作。
+// 「分享」与「更新到最新」是同一个 POST：幂等复用链接口令，同时把水位推到当前。
+export const shareConversation = (nb: string, cid: string) =>
+  requestJson<ConversationShareResponse>(
+    `/notebooks/${nb}/conversations/${cid}/share`,
+    { ...options, method: "POST" },
+  );
+
+export const getConversationShare = (nb: string, cid: string) =>
+  requestJson<ConversationShareResponse>(
+    `/notebooks/${nb}/conversations/${cid}/share`,
+    options,
+  );
+
+export const unshareConversation = (nb: string, cid: string) =>
+  requestVoid(`/notebooks/${nb}/conversations/${cid}/share`, {
+    ...options,
+    method: "DELETE",
+  });
 
 export const bulkDeleteConversations = (nb: string, days: number) =>
   requestJson<{ deleted: number; deleted_ids: string[] }>(

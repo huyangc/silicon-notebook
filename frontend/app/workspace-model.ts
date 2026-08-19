@@ -425,6 +425,9 @@ export type Citation = {
   source_file_name?: string;
   tier?: string;
   notebook_id?: string;
+  /** 引用到的个人记忆(Memory)id；非空即代表这条引用来自私有记忆。后端同 exclude_if
+   *  惯例只在非空时下发。会话分享弹窗据它统计"包含 K 条个人记忆摘录"的披露。 */
+  memory_id?: string;
   /** 空数组同 exclude_if 惯例整体缺席；旧持久化答案缺这个键时按「无附图」回退。 */
   images?: CitationImage[];
 };
@@ -628,6 +631,16 @@ export type ConversationDetail = {
     mode: string;
     trace: ReasoningTraceStep[];
   };
+};
+
+/** 一条会话的公开链接 + 读取水位（T2）。真源：`backend/app/models/ask.py
+ *  ConversationShareResponse`。「分享」与「更新到最新」是同一个调用，所以每次回执
+ *  都带当前水位，前端据此显示快照截止到哪一轮。 */
+export type ConversationShareResponse = {
+  share_token: string;
+  /** 水位时刻——快照包含到"内容截至何时"的最后一条答案。 */
+  shared_through_at: string;
+  shared_through_id: string;
 };
 
 export type ChatMode = "ask" | "rules" | "reports" | "memory";
