@@ -232,6 +232,27 @@ class RetrievalExperienceDistillationService:
         except Exception:  # noqa: BLE001 — never break a delivered answer
             _log.exception("retrieval experience trigger failed")
 
+    def _maybe_requeue(self) -> None:
+        """Re-arm a full pending batch left behind by a busy window.
+
+        Same critical-section shape as ``note_ask_completed`` — claim and
+        consume atomically, submit outside the lock. Fail-open: a stranded
+        batch is an optimization loss, never an error surface.
+        """
+        try:
+            trigger = max(1, int(
+                getattr(self.settings, "retrieval_experience_trigger", 40)
+            ))
+            with self._lock:
+                if self._running or self._pending < trigger:
+                    return
+                self._running = True
+                snapshot = self._pending
+                self._pending = 0
+            self._submit_claimed(snapshot)
+        except Exception:  # noqa: BLE001 — requeue is best-effort
+            _log.exception("retrieval experience requeue failed")
+
     def _submit_claimed(self, snapshot: int) -> None:
         """Submit the worker for a claim ALREADY taken by the caller.
 
@@ -354,6 +375,10 @@ class RetrievalExperienceDistillationService:
             if claimed_here:
                 with self._lock:
                     self._running = False
+                # codex #524 R4 P2:释放后原子复查积压——busy 期间攒满的整批
+                # 若得不到后续流量会永远滞留。复用与 note_ask_completed 同一
+                # 临界区形态(认领+消费原子),fail-open。
+                self._maybe_requeue()
 
     def _distill(self) -> dict:
         runs = self._observe()

@@ -127,7 +127,7 @@ class AskExecutionCoordinator:
         job_submitter: BackgroundJobSubmitter,
         event_log: "EventLogger",
         ask: "Callable[[], AskServicePort]",
-        note_ask_completed: "Callable[[str, str], None] | None" = None,
+        note_ask_completed: "Callable[[str, str, str], None] | None" = None,
     ) -> None:
         self.ask_state = ask_state
         self.cancellations = cancellations
@@ -223,7 +223,7 @@ class AskExecutionCoordinator:
                 # event. Only the ``done`` path signals: a cancelled or
                 # failed ask says nothing about how this person searches, and
                 # counting it would let a broken provider drive the threshold.
-                self._note_ask_completed(notebook_id, user_id)
+                self._note_ask_completed(notebook_id, user_id, mode.id)
             except AskCancelled:
                 self._finish(job_id, "cancelled")
                 events.put({"event": "cancelled"})
@@ -240,7 +240,9 @@ class AskExecutionCoordinator:
             raise
         return events
 
-    def _note_ask_completed(self, notebook_id: str, user_id: str) -> None:
+    def _note_ask_completed(
+        self, notebook_id: str, user_id: str, mode_id: str
+    ) -> None:
         """Signal the member's overlay chain — fail-open, always.
 
         ⚠ This runs INSIDE the worker's ``try``, whose ``except Exception``
@@ -260,7 +262,7 @@ class AskExecutionCoordinator:
         if self.note_ask_completed is None:
             return
         try:
-            self.note_ask_completed(notebook_id, user_id)
+            self.note_ask_completed(notebook_id, user_id, mode_id)
         except Exception:  # noqa: BLE001 — an answer was delivered; keep it that way
             self.event_log.logger.exception(
                 "agent profile ask notification failed for notebook %s", notebook_id

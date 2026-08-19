@@ -475,7 +475,9 @@ class RepositoryRuntime:
         # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
         # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
 
-    def _note_ask_completed(self, notebook_id: str, user_id: str) -> None:
+    def _note_ask_completed(
+        self, notebook_id: str, user_id: str, mode_id: str = "reasoning"
+    ) -> None:
         """一次提问完成之后要推进的**两条**后台链路。
 
         它们是两个不同的特性,拿到的数据也刻意不同:P1 的巡固被告知是**哪位成员
@@ -495,7 +497,11 @@ class RepositoryRuntime:
         except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
             _log.exception("agent profile ask-completed notification failed")
         try:
-            self.retrieval_experience_jobs.note_ask_completed()
+            # codex #524 R4 P2:计数与采样必须同谓词——采样只取
+            # mode='reasoning'(R3),计数器若对每种模式都 +1,chunk/graph 流量
+            # 会每 40 次拿同一批旧 reasoning run 反复付一次蒸馏模型钱。
+            if mode_id == "reasoning":
+                self.retrieval_experience_jobs.note_ask_completed()
         except Exception:  # noqa: BLE001 — 同上
             _log.exception("retrieval experience ask-completed notification failed")
 
