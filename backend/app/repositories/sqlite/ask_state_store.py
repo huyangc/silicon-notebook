@@ -488,6 +488,11 @@ class AskStateStore:
         with self.database.connect() as db:
             job_rows = db.execute(
                 "SELECT id, mode FROM ask_jobs WHERE status = 'done' "
+                # codex #524 R3 P2:只采样可注入的模式——经验只经
+                # ReasoningRetriever(mode 恒 reasoning)注入,chunk/graph run
+                # 学出的确定性行为翻成 reflect 建议既不可执行,还会在非
+                # reasoning 流量占主导的部署里挤占全部 offered 席位。
+                "AND mode = 'reasoning' "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (job_limit,),
             ).fetchall()

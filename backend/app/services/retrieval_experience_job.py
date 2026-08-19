@@ -217,19 +217,40 @@ class RetrievalExperienceDistillationService:
                 self._pending += 1
                 if self._pending < trigger:
                     return
+                # codex #524 R1/R2/R3 P2 三轮收敛出的形态:单飞认领与快照消费
+                # 必须在**同一个**临界区完成——消费晚于认领哪怕一个锁间隙,
+                # 快 worker 就可能已经跑完并释放槽位,并发的下一次完成会看到
+                # 「阈值仍未被消费」而排出第二个重复批次(双份模型账单)。
+                # busy 时不消费(保留整批,下一次完成补触发);提交失败在
+                # _submit_claimed 里恢复计数并释放槽位。
+                if self._running:
+                    return
+                self._running = True
                 snapshot = self._pending
-            # codex #524 R1 P2 + R2 P2: consume only the SNAPSHOT that crossed
-            # the threshold, and only AFTER a worker was actually scheduled.
-            # Resetting before ``start()`` lost the whole batch whenever the
-            # single-flight slot was busy; resetting to zero afterwards erased
-            # any completion that raced in between ``start()`` and the second
-            # lock acquisition. Subtracting the snapshot preserves exactly the
-            # increments that arrived after the claim.
-            if self.start():
-                with self._lock:
-                    self._pending = max(0, self._pending - snapshot)
+                self._pending = 0
+            self._submit_claimed(snapshot)
         except Exception:  # noqa: BLE001 — never break a delivered answer
             _log.exception("retrieval experience trigger failed")
+
+    def _submit_claimed(self, snapshot: int) -> None:
+        """Submit the worker for a claim ALREADY taken by the caller.
+
+        The caller consumed ``snapshot`` pending completions inside the same
+        critical section that set ``_running`` — on a submission failure both
+        must be restored, or the signals are lost and the slot is stranded.
+        """
+        try:
+            background_jobs.submit(
+                self.run,
+                name="retrievalexperience-global",
+                notify_pending=False,
+            )
+        except BaseException:
+            with self._lock:
+                self._running = False
+                self._pending += snapshot
+            self._emit("failed", latency_ms=0, reason="job_submission_failed")
+            raise
 
     def start(self) -> bool:
         """Claim the single-flight slot and submit the worker; ``False`` = busy.
