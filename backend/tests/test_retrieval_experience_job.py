@@ -229,7 +229,10 @@ def test_the_projection_counts_zero_hits_per_action_and_citations_per_run():
                 {"step_type": "ppr", "summary": "", "detail": {"count": 7}},
                 {"step_type": "exact_lookup", "summary": "", "detail": {"found": 0}},
                 {"step_type": "exact_lookup", "summary": "", "detail": {"found": 0}},
-                {"step_type": "synthesis", "summary": "", "detail": {"citations": 4}},
+                # 真实发射器两键并存:citations 是兜底卡数(零绑定也非零),
+                # anchors 才是真接地信号(codex #524 R9 P2)
+                {"step_type": "synthesis", "summary": "",
+                 "detail": {"citations": 9, "anchors": 4}},
             ]
         )
     )
@@ -849,3 +852,41 @@ def test_offered_entries_are_unique_per_situation_and_action():
                       and str(e.get("action")) == "ppr"]
     assert len(ppr_under_zero) == 1            # 唯一
     assert ppr_under_zero[0]["id"] == "rx-exact"  # 且是相似度最高的
+
+
+def test_provenance_and_support_belong_only_to_runs_that_used_the_action():
+    """codex #524 R9 P2:一个 run 反复调同一动作不是跨 run 模式——条目的
+    provenance 只归属真用过该动作的 run,没用过的 run 不得虚增 support。"""
+    ppr_retry = [{"step_type": "ppr", "detail": {"count": 0}}] * 5
+    fetch = [{"step_type": "retrieve", "detail": {"count": 3}}]
+    runs = [
+        project_run(_run([_intent_step(), *ppr_retry], run_id="job-1")),
+        project_run(_run([_intent_step(), *fetch], run_id="job-2")),
+        project_run(_run([_intent_step(), *fetch], run_id="job-3")),
+    ]
+    groups = _group_by_situation(runs)
+    assert groups[0].runs_for("ppr") == ["job-1"]
+    assert set(groups[0].runs_for("retrieve")) == {"job-2", "job-3"}
+    parsed = parse_distillation_reply(
+        {"entries": [{"op": "ADD", "situation": "s0", "action": "ppr",
+                      "polarity": "bad", "rationale": "老是空手"}]},
+        groups,
+    )
+    assert parsed[0]["provenance"] == ["job-1"]
+
+
+def test_the_grounding_signal_reads_anchors_never_the_fallback_cards():
+    """codex #524 R9 P2:citations 是兜底卡数,零绑定回答里照样非零——接地
+    信号必须取 anchors,缺 anchors 的旧行按 0(保守,不学假成功)。"""
+    from app.repositories.ports import project_run_step
+
+    grounded = project_run_step(
+        {"step_type": "synthesis", "summary": "",
+         "detail": {"citations": 9, "anchors": 4}}
+    )
+    assert grounded["count"] == 4
+    ungrounded = project_run_step(
+        {"step_type": "synthesis", "summary": "",
+         "detail": {"citations": 9}}          # 兜底卡满、零绑定/旧行
+    )
+    assert ungrounded["count"] == 0

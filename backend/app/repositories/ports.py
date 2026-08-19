@@ -3984,6 +3984,26 @@ def project_run_step(step: object) -> dict | None:
         "duration_ms": base["duration_ms"],
         "count": base["count"],
     }
+    if projected["step_type"] in ("synthesis", "answer"):
+        # codex #524 R9 P2:接地信号只认 ``anchors``(模型真正绑上的 [k])。
+        # ``citations`` 是「每条检索证据一张卡」的兜底列表,零绑定的回答里它
+        # 照样非零——经通用键序读它会把不接地的回答学成成功信号。旧轨迹两个
+        # 键都发(P1 起同批落),缺 anchors 的按 0 处理而不是回退 citations。
+        raw_step = step
+        if isinstance(raw_step, (str, bytes, bytearray)):
+            try:
+                raw_step = json.loads(raw_step)
+            except (TypeError, ValueError):
+                raw_step = None
+        anchors = None
+        if isinstance(raw_step, Mapping):
+            detail = raw_step.get("detail")
+            if isinstance(detail, Mapping):
+                candidate = detail.get("anchors")
+                if isinstance(candidate, int) and not isinstance(candidate, bool):
+                    anchors = candidate
+        projected["count"] = anchors if anchors is not None else 0
+        return projected
     if projected["step_type"] != "intent":
         return projected
     if isinstance(step, (str, bytes, bytearray)):
