@@ -490,7 +490,7 @@ class _SituationGroup:
 
     __slots__ = (
         "key", "situation", "runs", "runs_with_actions", "run_ids",
-        "citations", "actions",
+        "citations", "actions", "action_run_ids",
     )
 
     def __init__(self, key: str, situation: dict) -> None:
@@ -509,6 +509,10 @@ class _SituationGroup:
         self.run_ids: list[str] = []
         self.citations = 0
         self.actions: dict[str, list[int]] = {}
+        # codex #524 R9 P2:每个动作记下**哪些 run** 真的用过它——一个 run 的
+        # 重试不是跨 run 的模式,而条目的 provenance/support 若归属全组 run,
+        # 没用过该动作的 run 也会被算进支持数。
+        self.action_run_ids: dict[str, list[str]] = {}
 
     def absorb(self, run: ObservedRun) -> None:
         self.runs += 1
@@ -520,6 +524,11 @@ class _SituationGroup:
             tally = self.actions.setdefault(action.action, [0, 0])
             tally[0] += action.invocations
             tally[1] += action.zero_hits
+            self.action_run_ids.setdefault(action.action, []).append(run.run_id)
+
+    def runs_for(self, action: str) -> list[str]:
+        """The run ids that actually invoked ``action`` in this group."""
+        return list(self.action_run_ids.get(action, ()))
 
 
 def _group_by_situation(runs: Sequence[ObservedRun]) -> list[_SituationGroup]:
@@ -616,8 +625,10 @@ def render_observations(groups: Sequence[_SituationGroup]) -> str:
             tally = group.actions.get(action)
             if tally is None:
                 continue
+            runs_using = len(group.action_run_ids.get(action, ()))
             lines.append(
-                f"  {action}: used={tally[0]} came_back_empty={tally[1]}"
+                f"  {action}: used={tally[0]} came_back_empty={tally[1]} "
+                f"(in {runs_using} of {group.runs_with_actions} runs)"
             )
     return "\n".join(lines)
 
@@ -759,7 +770,9 @@ def parse_distillation_reply(
                 "action": action,
                 "polarity": polarity,
                 "rationale": rationale,
-                "provenance": list(group.run_ids),
+                # codex #524 R9 P2:provenance 只归属真用过该动作的 run——
+                # 全组归属会让 support 被没用过它的 run 虚增。
+                "provenance": group.runs_for(action),
                 # ADD landing on an existing entry must not rewrite its
                 # conclusion — the model said "the library does not hold this
                 # yet", so it was not reasoning about what is stored there.
