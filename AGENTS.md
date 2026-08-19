@@ -241,8 +241,8 @@ Confirmed scope:
 - Schema changes stay version-gated behind `SqliteMigrator` (append `_migration_N` + bump `SCHEMA_VERSION`); startup recovery/seed/admin-upgrade run every boot outside the version gate. Pre-refactor databases must keep loading: the frozen v9 fixture replay (`backend/tests/fixtures/repository_v9/`, `test_repository_v9_fixture.py`) and the backup-only real-database verifier `scripts/verify_repository_snapshot.py` are the remaining guards. The verifier uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, never constructs the repository on an original database/storage path, and reports a retained temporary backup on cleanup failure without private row data. Original DB/WAL metadata and SHM existence/size are guarded; on a live WAL attachment only SHM mtime is exempt.
 - Database-specific test coverage now targets the direct PostgreSQL backend only. Retired tests for the SQLite backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and cross-backend parity must not be restored to the active suite.
 
-The current schema version is 51. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v51 and remains readable. Those migrations
+The current schema version is 52. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v52 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain

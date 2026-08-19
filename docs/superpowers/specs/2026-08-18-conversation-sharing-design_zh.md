@@ -54,7 +54,7 @@ answers(id, notebook_id, question, payload TEXT /* 整个 AskResponse */, create
    的会话**必须拒绝分享**(fail closed):没有创建者就无法做 §五那条实时复核,
    而一条永远复核不了的公开链接是本设计里唯一不可接受的形态。
 
-### 3.2 新增列(SQLite v51 / PostgreSQL v29)
+### 3.2 新增列(SQLite v52 / PostgreSQL v30)
 
 **token 挂在 `conversations` 行上,不另开侧表**——照 `_migration_43` 给报告 token 的
 同一条理由逐字复用:它是一个与所属行同生命周期的可空值,会话被删就带走它的公开链接,
@@ -99,7 +99,7 @@ SELECT ... FROM answers WHERE conversation_id = ?
 
 `conversations` 已在业务表集合内,本次是**加列 + 加一个部分唯一索引**:
 
-- unique surface 计数 +1(当前 106 → 107,**须实证**)
+- unique surface 计数 +1(当前 108 → 109,**已实证**)
 - 停车策略走 **NULL**(可空列),与 `notebooks.share_token`、`reports.share_token`
   两处**已有的同形先例**一致——这是选「列 + 部分唯一索引」而不是新建侧表的第二个理由:
   停车方案是已知good的,不必重新论证。
@@ -266,7 +266,7 @@ O(n) 可接受;绝不接受把别名反向映射持久化成一张新表。
 
 | 任务 | 内容 | 要点 |
 | --- | --- | --- |
-| **T1** | schema v51/PG29 全链路 | 三列 + 部分唯一索引;shadow manifest / 夹具 / snapshot verifier / merge_dbs 分类;surface 计数实证。**深拷贝无需处理**——已实测 `_COPY_VALIDATED_TABLES` 里根本没有 `conversations`(会话不随副本走),所以不存在「要不要带 token」的问题;但要在迁移注释里写下这条,免得后来者看到 `notebooks.share_token`/`reports.share_token` 的先例就以为这里也要显式清空 |
+| **T1** | schema v52/PG30 全链路 | 三列 + 部分唯一索引;shadow manifest / 夹具 / snapshot verifier / merge_dbs 分类;surface 计数实证。**深拷贝无需处理**——已实测 `_COPY_VALIDATED_TABLES` 里根本没有 `conversations`(会话不随副本走),所以不存在「要不要带 token」的问题;但要在迁移注释里写下这条,免得后来者看到 `notebooks.share_token`/`reports.share_token` 的先例就以为这里也要显式清空 |
 | **T2** | 后端发放/回读/撤销 + 水位推进 | 行级 `created_by` 门;空 `created_by` fail closed;水位查询与 `get_conversation` 排序对齐(§3.2 那格要实测定死) |
 | **T3** | 匿名页端点 + 白名单投影 | §五、§七 五条;`public_conversation_by_token` 只收 token;接线守卫 |
 | **T4** | 匿名图片通道 | §六;别名派生与有界反查;`no-store`;撤销即失效用例 |
@@ -281,14 +281,14 @@ O(n) 可接受;绝不接受把别名反向映射持久化成一张新表。
 1. `backend/app/repositories/sqlite/migrations.py` — `_migration_51` + `SCHEMA_VERSION=51`
    (⚠ **追加新迁移,绝不塞进已封版的旧迁移**——版本闸对已部署库短路,`IF NOT EXISTS`
    救不了没被执行到的语句)
-2. `backend/app/repositories/postgres/migrations/0029_conversation_share.sql`
+2. `backend/app/repositories/postgres/migrations/0030_conversation_share.sql`
 3. `backend/app/repositories/postgres/schema_manifest.py` — 50/28 → 51/29
 4. `backend/app/migration/shadow/manifest.py` — `conversations` 的列清单 + 唯一面
 5. 两侧 store(发放/回读/撤销/水位),照 `sharing_store.py` 报告 token 的先例
 6. `backend/tests/fixtures/repository_v9/{manifest.json,expected_snapshot.json}` — 重生成
 7. `backend/tests/test_repository_v9_fixture.py` — `user_version == 51`
 8. `backend/tests/test_repository_snapshot_verifier.py` + `scripts/verify_repository_snapshot.py`
-   — `(50, 51)` + `_rollback_v51` + 用例
+   — `(51, 52)` + `_rollback_v52` + 用例
 9. `scripts/merge_dbs.py` — 分类(会话是 notebook-scoped;token 与水位随行走)
 10. **⚠ 最易漏的一格**:`backend/tests/postgres/` 下**九个**文件里的
     `migrate() == 28` 版本断言(P2-T1 时是 **85 处**)+ packaged 阶段清单补
