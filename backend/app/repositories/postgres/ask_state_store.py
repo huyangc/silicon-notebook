@@ -35,6 +35,10 @@ from app.core.internal_observability import (
     sanitize_answer_payload,
 )
 from app.repositories.postgres.database import PostgresDatabase
+# Single source of truth for the public page's turn ceiling — see the SQLite
+# adapter's import of the same constant for why the token-resolved query bounds
+# its fetch to ``MAX_TURNS + 1`` (codex #522 R6 P2). Pure leaf module, no cycle.
+from app.services.conversation_public_view import MAX_TURNS
 
 
 # Canonical oldest -> newest order for one conversation's answers. Mirrors
@@ -1056,6 +1060,13 @@ class AskStateStore:
                     "WHERE id=%s AND conversation_id=%s",
                     (through_id, conv["id"]),
                 ).fetchone()
+            # ``LIMIT MAX_TURNS + 1`` (cap + 1) after the watermark keyset and
+            # canonical ORDER BY — mirrors the SQLite adapter. It bounds the fetch
+            # to exactly the projected prefix plus the one extra row the projection
+            # needs to set ``truncated_turns``; without it a >MAX_TURNS conversation
+            # forces every anonymous page read (and every image request) to load and
+            # deserialize the whole conversation (codex #522 R6 P2). Never touches
+            # the keyset/order, only caps the row count.
             if watermark is not None:
                 # Keyset on (created_at, ordinal) <= the watermark row's — the
                 # exact prefix ending at the watermark answer.
@@ -1063,9 +1074,10 @@ class AskStateStore:
                     "SELECT id, question, payload, created_at FROM answers "
                     "WHERE conversation_id=%s AND ("
                     "created_at < %s OR (created_at = %s AND ordinal <= %s)"
-                    ") " + CONVERSATION_ANSWERS_ORDER_ASC,
+                    ") " + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT %s",
                     (conv["id"], watermark["created_at"],
-                     watermark["created_at"], watermark["ordinal"]),
+                     watermark["created_at"], watermark["ordinal"],
+                     MAX_TURNS + 1),
                 ).fetchall()
             else:
                 # Watermark answer deleted: fall back to the pure created_at
@@ -1073,8 +1085,8 @@ class AskStateStore:
                 rows = db.execute(
                     "SELECT id, question, payload, created_at FROM answers "
                     "WHERE conversation_id=%s AND created_at <= %s "
-                    + CONVERSATION_ANSWERS_ORDER_ASC,
-                    (conv["id"], conv["shared_through_at"]),
+                    + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT %s",
+                    (conv["id"], conv["shared_through_at"], MAX_TURNS + 1),
                 ).fetchall()
         turns = [
             {

@@ -61,6 +61,13 @@ from app.repositories.ports import (
     project_trace_step,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+# The public projection's turn ceiling is the single source of truth for how many
+# turns one anonymous page renders; the token-resolved query below bounds its
+# fetch to ``MAX_TURNS + 1`` (cap + 1) so a >MAX_TURNS conversation cannot force
+# every anonymous read to load and deserialize the WHOLE conversation's payloads
+# (codex #522 R6 P2). The projection is a pure leaf module (stdlib-only imports),
+# so importing this constant here creates no cycle and keeps the two in lockstep.
+from app.services.conversation_public_view import MAX_TURNS
 
 
 # Canonical oldest -> newest order for one conversation's answers.
@@ -1114,6 +1121,15 @@ class AskStateStore:
                     "WHERE id=? AND conversation_id=?",
                     (through_id, conv["id"]),
                 ).fetchone()
+            # ``LIMIT MAX_TURNS + 1`` (cap + 1) applied AFTER the watermark keyset
+            # predicate and canonical ORDER BY: it bounds the fetch to exactly what
+            # the projection renders (the oldest ``MAX_TURNS`` under the ASC order)
+            # plus one extra row, which is precisely what the projection needs to
+            # set ``truncated_turns`` (``len(turns) > MAX_TURNS``). Without it a
+            # >MAX_TURNS conversation makes every anonymous page read — and every
+            # image request, both routed through here — load and deserialize the
+            # whole conversation's payloads (codex #522 R6 P2). Never touches the
+            # keyset/order itself, only caps the row count.
             if watermark is not None:
                 # Keyset on the full canonical sort tuple
                 # (julianday(created_at), created_at, rowid) <= the watermark
@@ -1125,8 +1141,9 @@ class AskStateStore:
                     "julianday(created_at) < julianday(?) "
                     "OR (julianday(created_at) = julianday(?) AND ("
                     "created_at < ? OR (created_at = ? AND rowid <= ?)))"
-                    ") " + CONVERSATION_ANSWERS_ORDER_ASC,
-                    (conv["id"], wm_at, wm_at, wm_at, wm_at, watermark["rid"]),
+                    ") " + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT ?",
+                    (conv["id"], wm_at, wm_at, wm_at, wm_at, watermark["rid"],
+                     MAX_TURNS + 1),
                 ).fetchall()
             else:
                 # Watermark answer deleted: fall back to the pure created_at
@@ -1134,8 +1151,8 @@ class AskStateStore:
                 rows = db.execute(
                     "SELECT id, question, payload, created_at FROM answers "
                     "WHERE conversation_id=? AND julianday(created_at) <= julianday(?) "
-                    + CONVERSATION_ANSWERS_ORDER_ASC,
-                    (conv["id"], conv["shared_through_at"]),
+                    + CONVERSATION_ANSWERS_ORDER_ASC + " LIMIT ?",
+                    (conv["id"], conv["shared_through_at"], MAX_TURNS + 1),
                 ).fetchall()
         turns = []
         for row in rows:

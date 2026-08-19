@@ -85,7 +85,14 @@ export function ConversationShareModal({
   const [watermarkId, setWatermarkId] = useState("");
   const [turns, setTurns] = useState<ConversationDetail["turns"]>([]);
   // 会话详情没加载出来 → 无法算数。Memory 披露此时退化成不带数字的告警，绝不省略。
+  // **仍可分享**（水位/是否已分享是另一路独立加载的）。
   const [countsError, setCountsError] = useState(false);
+  // 分享状态（是否已分享 + 水位）**非 404** 加载失败 → 当前是否已分享/水位**未知**。
+  // 此时**不可**分享:发空 expected 会让服务端按当前最新兜底发布(可能推进一个已存在
+  // 的隐藏分享,或在未显示任何披露的情况下公开)。与 countsError 是两回事——那个是「披露
+  // 算不出但可分享」,这个是「分享状态未知、禁用分享」(codex #522 R6 P1)。404(未分享)
+  // 是正常态、仍可分享,不置此位。
+  const [shareStateError, setShareStateError] = useState(false);
   const [busy, setBusy] = useState<BusyAction>("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -95,36 +102,42 @@ export function ConversationShareModal({
     setLoading(true);
     setError("");
     // 每次重跑（切会话/切库导致 notebookId/conversationId 变）都要清掉上一轮的
-    // countsError，否则一次失败后即便重跑成功，"可能包含个人记忆摘录"的兜底告警
-    // 会残留在一个已经算得出精确数字的会话上（codex T5 评审 P2-4）。
+    // countsError / shareStateError，否则一次失败后即便重跑成功，兜底告警/禁用态
+    // 会残留在一个已经算得出精确数字、已加载出分享状态的会话上（codex T5 评审 P2-4）。
     setCountsError(false);
-    // 分享状态与会话详情各自成败：详情失败只影响披露计数，不该拦住分享本身。
-    const shareStatus = getConversationShare(notebookId, conversationId)
-      .then((resp) => resp)
-      .catch((err) => {
-        if (httpErrorStatus(err) === 404) return null; // 未分享
-        throw err;
-      });
-    const detail = getConversation(conversationId)
-      .then((d) => d)
-      .catch(() => null);
-    Promise.all([shareStatus, detail])
-      .then(([share, conversation]) => {
+    setShareStateError(false);
+    // 分享状态与会话详情**各自成败、各自 set**：绝不用 Promise.all 的全有全无——
+    // 分享状态非 404 失败时详情可能已成功（披露仍算得出），反之亦然。旧写法把两者
+    // 塞进一个 Promise.all，任一 reject 就在 set turns 之前整体短路，turns 停在 []、
+    // countsError 停在 false，而 loading 仍被 finally 清掉 → CTA 可点 → 发空 expected
+    // → 服务端按当前最新兜底发布，**未显示任何披露就公开了**（codex #522 R6 P1）。
+    const shareDone = getConversationShare(notebookId, conversationId)
+      .then((share) => {
         if (cancelled) return;
-        if (share) {
-          setToken(share.share_token || "");
-          setWatermark(share.shared_through_at || "");
-          setWatermarkId(share.shared_through_id || "");
-        }
-        if (conversation) setTurns(conversation.turns || []);
-        else setCountsError(true);
+        setToken(share.share_token || "");
+        setWatermark(share.shared_through_at || "");
+        setWatermarkId(share.shared_through_id || "");
       })
       .catch((err) => {
-        if (!cancelled) setError(toUserMessage(err, "加载分享状态失败"));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        if (httpErrorStatus(err) === 404) return; // 未分享：正常态，仍可分享
+        // 非 404 → 当前是否已分享/水位**未知**，无法安全发布 → 禁用分享 CTA + 可操作
+        // 错误。这与 countsError（披露算不出但可分享）是两条独立的降级路径。
+        setShareStateError(true);
+        setError(toUserMessage(err, "分享状态加载失败，请重试"));
       });
+    const detailDone = getConversation(conversationId)
+      .then((conversation) => {
+        if (!cancelled) setTurns(conversation.turns || []);
+      })
+      .catch(() => {
+        // 详情失败：披露算不出但仍可分享，退化成不带数字的兜底告警（countsError）。
+        if (!cancelled) setCountsError(true);
+      });
+    // 两条链都自己 catch、绝不 reject，allSettled 在这里只用来「等两者都落定后收 loading」。
+    Promise.allSettled([shareDone, detailDone]).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
@@ -144,7 +157,8 @@ export function ConversationShareModal({
   );
 
   async function doShare(action: "share" | "update") {
-    if (busy) return;
+    // 防御性复查:分享状态未知时绝不发布(CTA 已 disabled,这里兜底 codex #522 R6 P1)。
+    if (busy || shareStateError) return;
     setBusy(action);
     setError("");
     setNotice("");
@@ -251,7 +265,7 @@ export function ConversationShareModal({
                     <button
                       type="button"
                       className="sort-button"
-                      disabled={busy !== ""}
+                      disabled={busy !== "" || shareStateError}
                       onClick={() => void doShare("update")}
                     >
                       <RefreshCw size={13} className={busy === "update" ? "busy-spin" : undefined} />
@@ -275,7 +289,7 @@ export function ConversationShareModal({
                 <button
                   type="button"
                   className="button conversation-share-cta"
-                  disabled={busy !== ""}
+                  disabled={busy !== "" || shareStateError}
                   onClick={() => void doShare("share")}
                 >
                   <Link2 size={14} className={busy === "share" ? "busy-spin" : undefined} />
