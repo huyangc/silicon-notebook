@@ -71,7 +71,13 @@ class RetrievalExperienceStore:
         }
 
     def read_all(self, limit: int) -> list[dict]:
-        """The whole library, bounded and deterministically ordered.
+        """The whole library. Bounded RETURN, UNBOUNDED SCAN — see the SQLite
+        mirror's docstring for why an index here is deliberately deferred
+        (registered, not overlooked) rather than added: the score this table
+        is read for is a set-overlap comparison no index answers, and the row
+        count is capped small enough by eviction that a full scan costs
+        nothing a query run once every ``RETRIEVAL_EXPERIENCE_TRIGGER``
+        completed asks would notice.
 
         ``ORDER BY id COLLATE "C"`` rather than a bare ``ORDER BY id``: the ids
         are lowercase hex, so any sane collation agrees today — but the SQLite
@@ -123,10 +129,29 @@ class RetrievalExperienceStore:
         run ids the STORED list already knows), and a silent
         ``DO UPDATE SET support = support + N`` would be exactly the double
         count the provenance set exists to prevent.
+
+        ⚠ Whether the INSERT actually landed is decided by
+        ``cursor.rowcount`` — 1 means this call's row won, 0 means
+        ``ON CONFLICT`` fired because a concurrent writer's INSERT committed
+        between this method's own ``SELECT ... FOR UPDATE`` (which found
+        nothing — Postgres does not lock rows that do not exist yet) and this
+        INSERT. A row count of 0 falls through to the SAME merge branch the
+        "row already existed" path uses, re-reading the winner's row under
+        ``FOR UPDATE`` first. Before this the branch unconditionally set
+        ``inserted = True`` regardless of what actually happened, which made
+        the merge branch dead code on this path: a losing concurrent INSERT
+        silently discarded its own provenance and rationale instead of
+        merging into the winner's row.
+
+        ⚠ ``provenance`` arrives NEWEST-FIRST — see the SQLite mirror's
+        docstring; reversed here, ONCE, before it touches
+        ``fresh``/``added``/``merged``, for the same reason.
         """
         now = self.now()
         keep = max(1, int(provenance_max))
-        incoming = [str(item) for item in provenance if str(item)]
+        incoming = list(
+            reversed([str(item) for item in provenance if str(item)])
+        )
         with self.database.write() as db:
             row = db.execute(
                 "SELECT support, provenance_json FROM retrieval_experiences "
@@ -135,7 +160,7 @@ class RetrievalExperienceStore:
             ).fetchone()
             if row is None:
                 fresh = list(dict.fromkeys(incoming))[-keep:]
-                db.execute(
+                insert_cursor = db.execute(
                     "INSERT INTO retrieval_experiences "
                     "(id,situation_json,action,polarity,rationale,support,"
                     "adopted,provenance_json,created_at,updated_at) "
@@ -153,12 +178,12 @@ class RetrievalExperienceStore:
                         now,
                     ),
                 )
+                inserted = insert_cursor.rowcount == 1
                 row = db.execute(
                     "SELECT support, provenance_json FROM retrieval_experiences "
                     "WHERE id=%s FOR UPDATE",
                     (experience_id,),
                 ).fetchone()
-                inserted = True
             else:
                 inserted = False
             if row is not None and not inserted:

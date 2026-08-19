@@ -127,6 +127,20 @@ def test_the_action_vocabulary_cannot_reach_retrieval_scope():
         assert not any(word in action for word in forbidden), action
 
 
+def test_the_action_vocabulary_excludes_memory():
+    """``memory`` was removed from the THEN-side vocabulary in the T5 fix
+    round (not overlooked — see ``RETRIEVAL_ACTIONS``'s docstring): a
+    ``memory`` trace step is only ever emitted on a HIT (a miss is a ``skip``
+    step instead), so ``zero_hits`` for it is structurally always 0 — and
+    there is no reflect action id for the model to reach for, so an entry
+    about it would recommend a channel nobody can act on. Pinned as an exact
+    count, not just an exclusion, so a re-addition under a different name
+    still moves the number this test is watching.
+    """
+    assert "memory" not in RETRIEVAL_ACTIONS
+    assert len(RETRIEVAL_ACTIONS) == 8
+
+
 def test_the_batch_never_reads_more_runs_than_one_entry_can_remember():
     """The invariant that makes a cursor-free distillation correct.
 
@@ -512,11 +526,60 @@ def test_a_failing_run_releases_the_single_flight_flag():
         store=Exploding(),
         events=events,
     )
+    # Simulate the claim ``start()`` takes before ever submitting ``run()`` —
+    # without this the assertion below is vacuous, since ``_running`` starts
+    # ``False`` and a gated release correctly leaves it there either way.
+    service._running = True
     service.run()
     assert events.emitted[-1]["status"] == "failed"
     # A flag left set is held until the process dies — this deployment would
     # never distil again, silently.
     assert service._running is False
+
+
+def test_a_claimed_run_releases_the_flag_on_success():
+    """The mirror of the failure-path test above: a run that was genuinely
+    claimed (``start()``'s pre-claim, simulated here) must still release the
+    flag on the happy path."""
+    service = _service(
+        [_run([_intent_step(), {"step_type": "ppr", "detail": {"count": 0}}])],
+        _REPLY,
+    )
+    service._running = True
+    service.run()
+    assert service._running is False
+
+
+def test_an_unclaimed_call_never_touches_the_single_flight_flag():
+    """Only ``start()`` may transition ``_running`` ``False -> True``. A call
+    to ``run()`` that finds the flag already ``False`` at entry — every
+    direct call in this test module, and the future manual "distil now"
+    control the module docstring anticipates — must leave the flag alone in
+    ``finally`` rather than unconditionally writing ``False``.
+
+    A genuinely concurrent legitimate claim appearing WHILE this (unclaimed)
+    call is still running is simulated by flipping the flag ``True`` from
+    inside the store's read: an unconditional release in ``finally`` would
+    clobber that other claim on its way out.
+    """
+    service = _service(
+        [_run([_intent_step(), {"step_type": "ppr", "detail": {"count": 0}}])],
+        _REPLY,
+    )
+
+    class ClaimingDuringRead(_Store):
+        def read_all(self, limit):
+            service._running = True
+            return super().read_all(limit)
+
+    service.experiences = ClaimingDuringRead()
+    assert service._running is False
+    service.run()
+    assert service._running is True, (
+        "run() released a slot it never claimed itself: this call started "
+        "with _running already False, so any release in its `finally` can "
+        "only be clobbering a claim that appeared while it was running"
+    )
 
 
 # ------------------------------------------------------- reply validation
@@ -634,3 +697,32 @@ def test_renderers_emit_counts_and_vocabulary_only():
     assert "runs=3" in text
     assert "ppr: used=3 came_back_empty=3" in text
     assert render_existing([]).endswith("(none)")
+
+
+def test_runs_with_actions_excludes_step_truncated_runs():
+    """A run's trace steps can be truncated down to just its intent step
+    (``RETRIEVAL_EXPERIENCE_BATCH_STEPS``). It still belongs to the situation
+    — its question shape happened, so it counts toward ``runs`` — but it must
+    NOT count toward the action denominator, or a busy shape with many
+    step-truncated runs would make the action tallies read against an
+    inflated ``runs`` number, understating how common each action really is
+    among the runs that had anything to tally at all.
+    """
+    with_action = project_run(
+        _run([_intent_step(), {"step_type": "ppr", "detail": {"count": 1}}],
+             run_id="job-1")
+    )
+    truncated = project_run(_run([_intent_step()], run_id="job-2"))
+    groups = _group_by_situation([with_action, truncated])
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.runs == 2
+    assert group.runs_with_actions == 1
+
+
+def test_renderers_show_the_action_denominator_alongside_total_runs():
+    groups = _groups()
+    text = render_observations(groups)
+    # All three runs in _groups() carry a ppr step, so the two numbers agree
+    # here — the point is that BOTH are present, not that they differ.
+    assert "runs=3 (3 with sampled actions)" in text

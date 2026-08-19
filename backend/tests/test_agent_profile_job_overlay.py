@@ -2042,3 +2042,73 @@ def test_the_runtime_actually_wires_the_access_seat():
         "repository_runtime 里 AgentProfileConsolidationService 的 access 座位"
         "必须接 self.sharing_store——删掉它 R5 静默复活(所有测试仍绿)。"
     )
+
+
+def test_the_runtime_note_ask_completed_fans_out_to_both_chains():
+    """codex 复核(P2-T5 修复轮裁决 9):`_note_ask_completed` 是两条巡固/蒸馏链路
+    唯一的触发点。P1 链(agent-profile 覆盖层)按人按库触发、带两个参数;P2 链
+    (检索经验蒸馏)是部署级全局计数器、零参数——两次调用必须都在,且必须各自
+    落在独立的 ``try`` 块里,否则一条链路抛出的异常会把另一条的计数也吞掉(即使
+    两条链路各自内部都 fail-open,"一条链坏掉不连坐另一条"这条性质必须由调用点
+    自己成立,不能靠被调方的内部约定)。照 ``test_the_runtime_actually_wires_the_
+    access_seat`` 的先例把接线钉成静态断言——删掉任一次调用,或把两次调用并进
+    同一个 try,所有现有测试仍然全绿,只有这条断言会报红。"""
+    import ast
+    from pathlib import Path as _Path
+
+    from app.services import repository_runtime
+
+    source = _Path(repository_runtime.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    target = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_note_ask_completed":
+            target = node
+            break
+    assert target is not None, (
+        "repository_runtime.py 必须定义 _note_ask_completed"
+    )
+
+    def _call_chain(node: ast.AST) -> str | None:
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        parts: list[str] = []
+        while isinstance(func, ast.Attribute):
+            parts.append(func.attr)
+            func = func.value
+        if isinstance(func, ast.Name) and func.id == "self":
+            parts.append("self")
+            return ".".join(reversed(parts))
+        return None
+
+    try_blocks = [node for node in ast.walk(target) if isinstance(node, ast.Try)]
+    owning_try: dict[str, ast.Try] = {}
+    call_args: dict[str, int] = {}
+    for block in try_blocks:
+        for node in ast.walk(block):
+            chain = _call_chain(node)
+            if chain in (
+                "self.agent_profile_jobs.note_ask_completed",
+                "self.retrieval_experience_jobs.note_ask_completed",
+            ):
+                owning_try.setdefault(chain, block)
+                call_args.setdefault(chain, len(node.args))
+
+    assert "self.agent_profile_jobs.note_ask_completed" in owning_try, (
+        "P1 覆盖层巡固的触发调用不在任何 try 块内,或已从 _note_ask_completed "
+        "中丢失"
+    )
+    assert "self.retrieval_experience_jobs.note_ask_completed" in owning_try, (
+        "P2 经验库蒸馏的触发调用不在任何 try 块内,或已从 _note_ask_completed "
+        "中丢失——这条链路是部署级全局计数器,一旦这里的调用被删掉,蒸馏永远不会"
+        "被触发,且没有任何其它测试会报红。"
+    )
+    assert (
+        owning_try["self.agent_profile_jobs.note_ask_completed"]
+        is not owning_try["self.retrieval_experience_jobs.note_ask_completed"]
+    ), "两条链路的触发调用必须落在各自独立的 try 块里,不能共用一个 try"
+    # P1 链带参(notebook_id, user_id),P2 链零参——这条差异本身就是两条链路
+    # 触发语义不同的证据(一个按人按库,一个是部署级全局计数器)。
+    assert call_args["self.agent_profile_jobs.note_ask_completed"] == 2
+    assert call_args["self.retrieval_experience_jobs.note_ask_completed"] == 0

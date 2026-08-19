@@ -178,7 +178,7 @@ class RetrievalExperienceDistillationService:
             if not distillation_wiring_active(self.settings, self.experiences):
                 return
             trigger = max(1, int(
-                getattr(self.settings, "retrieval_experience_trigger", 50)
+                getattr(self.settings, "retrieval_experience_trigger", 40)
             ))
             with self._lock:
                 self._pending += 1
@@ -236,11 +236,31 @@ class RetrievalExperienceDistillationService:
         included: ``KeyboardInterrupt``/``SystemExit`` inherit from it and sail
         past ``except Exception``, and a flag left set means this deployment
         never distils again until it restarts.
+
+        ⚠ The release is gated on ``claimed_here`` — a plain read of
+        ``_running`` taken ONCE, under the lock, before any work starts — and
+        ``finally`` only clears the flag when that read found it already
+        ``True``. This method has to stay safe to call directly: every test in
+        this module does, and the module docstring already anticipates a
+        future manual "distil now" control doing the same. ``start()`` is the
+        only place that may transition the flag ``False -> True`` (its own
+        docstring explains why the claim has to happen there, before the
+        thread exists, rather than in here); a bare call to ``run()`` that
+        finds the flag still ``False`` never claimed the slot, so its
+        ``finally`` must leave the flag alone. Without the gate, two
+        interleaved calls to this method would each decide "I own the slot,
+        release it when I finish" from the SAME shared flag, and whichever
+        finishes first would release it out from under the other — exactly
+        the two-workers race ``start()``'s pre-claim exists to prevent, just
+        moved one method over.
         """
         started = time.monotonic()
 
         def latency_ms() -> int:
             return int((time.monotonic() - started) * 1000)
+
+        with self._lock:
+            claimed_here = self._running
 
         try:
             if not distillation_wiring_active(self.settings, self.experiences):
@@ -268,8 +288,9 @@ class RetrievalExperienceDistillationService:
                 raise
             _log.exception("retrieval experience distillation failed")
         finally:
-            with self._lock:
-                self._running = False
+            if claimed_here:
+                with self._lock:
+                    self._running = False
 
     def _distill(self) -> dict:
         runs = self._observe()
@@ -379,12 +400,24 @@ class RetrievalExperienceDistillationService:
 class _SituationGroup:
     """One question shape plus everything the batch saw under it."""
 
-    __slots__ = ("key", "situation", "runs", "run_ids", "citations", "actions")
+    __slots__ = (
+        "key", "situation", "runs", "runs_with_actions", "run_ids",
+        "citations", "actions",
+    )
 
     def __init__(self, key: str, situation: dict) -> None:
         self.key = key
         self.situation = situation
         self.runs = 0
+        # ⚠ NOT the same denominator as ``runs``. A run's trace steps are
+        # capped (``RETRIEVAL_EXPERIENCE_BATCH_STEPS``), and a run truncated
+        # down to just its intent step still belongs to this situation — its
+        # question shape happened — but it carries zero actions, and folding
+        # it into the SAME "runs=N" the action tallies are read against would
+        # understate how common each action actually is among the runs that
+        # had any action to tally at all. Kept separate so the prompt can show
+        # both numbers rather than silently picking one.
+        self.runs_with_actions = 0
         self.run_ids: list[str] = []
         self.citations = 0
         self.actions: dict[str, list[int]] = {}
@@ -393,6 +426,8 @@ class _SituationGroup:
         self.runs += 1
         self.run_ids.append(run.run_id)
         self.citations += run.observation.citations
+        if run.observation.actions:
+            self.runs_with_actions += 1
         for action in run.observation.actions:
             tally = self.actions.setdefault(action.action, [0, 0])
             tally[0] += action.invocations
@@ -460,6 +495,14 @@ def render_observations(groups: Sequence[_SituationGroup]) -> str:
     in this function that can emit text originating from a document, a question
     or a user — which is the property the whole feature rests on, and the
     reason this renderer takes ``_SituationGroup`` rather than the raw rows.
+
+    The ``runs=N (M with sampled actions)`` split matters: ``N`` is how often
+    this question shape happened, ``M`` is how many of those runs actually
+    carried a sampled action (a step-truncated run belongs to neither the
+    action tallies nor their denominator). Reading the per-action tallies
+    against ``N`` instead of ``M`` would make a busy shape with many
+    step-truncated runs read as rarer per action than it really is among the
+    runs that had anything to tally.
     """
     lines = ["[Recent searches, grouped by question shape]"]
     for index, group in enumerate(groups):
@@ -469,7 +512,8 @@ def render_observations(groups: Sequence[_SituationGroup]) -> str:
         )
         lines.append(f"s{index}: {shape}")
         lines.append(
-            f"  runs={group.runs} total_citations={group.citations}"
+            f"  runs={group.runs} ({group.runs_with_actions} with sampled "
+            f"actions) total_citations={group.citations}"
         )
         for action in RETRIEVAL_ACTIONS:
             tally = group.actions.get(action)

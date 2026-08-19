@@ -70,16 +70,24 @@ class RetrievalExperienceStore:
         # path here.
 
     def read_all(self, limit: int) -> list[dict]:
-        """The whole library, bounded and deterministically ordered.
+        """The whole library. Bounded RETURN, UNBOUNDED SCAN — say both plainly
+        rather than let "bounded" cover for both.
 
-        A full scan is the intended access pattern, not a fallback: entry
-        selection scores each row's situation against the current run's by set
-        overlap over closed enum values, which is not a predicate any index can
-        answer, and the table's row count is hard-capped by the distillation's
-        own eviction. ``ORDER BY id`` (the content hash) rather than by any
-        counter — the caller ranks in memory, and a stable order makes two
-        reads over an unchanged table byte-identical, which is what lets the
-        injection side memoise the result.
+        The ``LIMIT`` bounds what comes BACK, and the distillation's own
+        eviction bounds how big the table ever gets (a few hundred rows). But
+        the scan itself is genuinely unbounded: there is deliberately no index
+        behind ``ORDER BY id`` — entry selection scores each row's situation
+        against the current run's by set overlap over closed enum values,
+        which is not a predicate any index could answer anyway, so an index
+        here would buy nothing but pay for a migration on a query that runs
+        once every ``RETRIEVAL_EXPERIENCE_TRIGGER`` completed asks. Registered,
+        not overlooked: if the cap ever grows past a few hundred rows, revisit
+        this alongside the next schema hop rather than opening one just for it.
+
+        ``ORDER BY id`` (the content hash) rather than by any counter — the
+        caller ranks in memory, and a stable order makes two reads over an
+        unchanged table byte-identical, which is what lets the injection side
+        memoise the result.
         """
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -129,10 +137,24 @@ class RetrievalExperienceStore:
         error condition — with ``begin_immediate`` in place it is unreachable
         on this backend, but the PostgreSQL mirror's ``ON CONFLICT`` has to
         cover it and both backends should end in the same state.
+
+        ⚠ ``provenance`` arrives NEWEST-FIRST — the only caller
+        (``retrieval_experience_job.py``) builds it by absorbing rows from a
+        query ordered ``created_at DESC``. Reversed here, ONCE, before it
+        touches ``fresh``/``added``/``merged``: every downstream trailing
+        ``[-keep:]`` slice assumes the tail is the newest entry, and without
+        this reversal a batch whose SIZE exceeds what fits would drop the
+        genuinely NEWEST run ids from THIS batch (they sit at the front of an
+        unreversed newest-first list) while keeping older ones — the opposite
+        of what the eviction is supposed to do. See
+        ``test_new_runs_add_support_and_the_provenance_list_stays_bounded``
+        and the R1/R2/R3 overlapping-batch test for the shape this fixes.
         """
         now = self.now()
         keep = max(1, int(provenance_max))
-        incoming = [str(item) for item in provenance if str(item)]
+        incoming = list(
+            reversed([str(item) for item in provenance if str(item)])
+        )
         with self.database.write() as db:
             self.database.begin_immediate(db)
             row = db.execute(
