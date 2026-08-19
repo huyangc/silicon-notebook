@@ -322,7 +322,7 @@ primary-key collision) and, because the declared replication key equals it
 verbatim, also what parks its one unique surface on `REPLICATION_KEY` with no
 sentinel column and no `_UNIQUE_PREDICATES` entry. It creates no index: the row
 count is hard-capped, and the only two read paths are a primary-key point
-lookup and a bounded full scan. Because v54/v32 adds one more (leaf, parentless)
+lookup and a bounded-return, unbounded-scan read (index deferred to the next schema hop). Because v54/v32 adds one more (leaf, parentless)
 table, the forward-shadow invariants move to 81 business tables and 110 unique
 surfaces; the branch-counted bound remains exactly 12 row slots. PostgreSQL
 migration v32 is the paired schema, and the current pairing is
