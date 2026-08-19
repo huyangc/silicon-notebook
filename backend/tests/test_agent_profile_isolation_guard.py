@@ -51,7 +51,7 @@ import pytest
 
 import app.repositories
 import app.services
-from app.repositories.ports import AskStateStorePort
+from app.repositories.ports import AskStateStorePort, SharingStorePort
 
 
 _SERVICE_PATH = Path(app.services.__file__).parent / "agent_profile_job.py"
@@ -102,6 +102,10 @@ OVERLAY_CHAIN_FUNCTIONS: frozenset[str] = frozenset({
     # 它只按 settle 的三值结局决定「抹不抹 / 要不要再排一轮」。归覆盖层而不是
     # 中性,是因为它决定的那两件事都只作用于该成员自己的行。
     "_after_overlay_settle",
+    # P2-T3:成员资格复核。归覆盖层而不是中性,是因为它**确实取数**(读侧那条
+    # 授权谓词),而中性的含义是「不取业务数据」。它也绝不该被底座调用——底座的
+    # 产物一库一份、全体成员可见,按某一个人的读权决定要不要刷新它没有意义。
+    "_member_can_read",
 })
 
 #: 与取数无关的函数:构造、事件、结算、纯文本处理。登记在这里表示「我看过它,它不
@@ -182,6 +186,11 @@ OVERLAY_ALLOWED_PORT_CALLS = frozenset({
     # 身份,不是任意成员)。
     "job_row",
     "clear_all",
+    # P2-T3:成员资格复核。它凭什么在列——① 它回答的是「**这条链自己的** owner
+    # 还读不读得到这个库」,输入只有链路身份,读不到任何别人的东西;② 它用的是
+    # 读侧唯一那份授权谓词,不是第二种拼写。它**绝不能**出现在底座那张白名单里
+    # (`ACCESS_CHECK_METHODS` 的反向护栏正面钉住这一条)。
+    "user_can_read_notebook",
 })
 
 #: 层二白名单:**中性**函数允许调用的端口方法名——只有这条链路自己那一行 job 状态
@@ -197,19 +206,33 @@ NEUTRAL_ALLOWED_PORT_CALLS = frozenset({
     "sweep_stale_on_start",
 })
 
-#: 层二检查的四个座位。`ask_state` 是 T5 新增的,登记它的**主要作用是让底座报红**:
-#: 底座函数一旦写出 `self.ask_state.<任何方法>`,它今天必然不在 `ALLOWED_PORT_CALLS`
-#: 里——但这不是这份守卫自身的性质,而是一个**外部前提**:`ALLOWED_PORT_CALLS`
-#: (底座的层二白名单)与 `AskStateStorePort` 的方法名集合当前恰好不相交。这个前提
-#: 本身不是恒真的(明天两边各自演化,谁都不保证永远不撞名字),所以
-#: `test_the_base_allowlist_never_collides_with_ask_state_port_methods` 把它单独钉成
+#: 层二检查的座位。`ask_state` 是 T5 新增的,`access` 是 P2-T3 新增的,登记它们的
+#: **主要作用是让底座报红**:
+#: 底座函数一旦写出 `self.ask_state.<任何方法>` / `self.access.<任何方法>`,它今天
+#: 必然不在 `ALLOWED_PORT_CALLS` 里——但这不是这份守卫自身的性质,而是一个**外部
+#: 前提**:`ALLOWED_PORT_CALLS`(底座的层二白名单)与 `AskStateStorePort` /
+#: `SharingStorePort` 的方法名集合当前恰好不相交。这个前提本身不是恒真的(明天两边
+#: 各自演化,谁都不保证永远不撞名字),所以
+#: `test_the_base_allowlist_never_collides_with_data_seat_port_methods` 把它单独钉成
 #: 一条断言——前提本身也需要一份守卫,而不是被这句注释当成理所当然。`self.database`
-#: 刻意不在这四个座位之中:它上面只调 `connect()`,拿到的连接**只**转交给端口方法
+#: 刻意不在这几个座位之中:它上面只调 `connect()`,拿到的连接**只**转交给端口方法
 #: (见本文件 docstring 的「挡不住」一节)。
-PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state")
+#:
+#: ⚠ **新增座位必须同步加进这里**,否则层二对那个座位上的调用**完全看不见**——白名
+#: 单机制只扫 `self.<座位>.<方法>`,漏登记一个座位等于给这份守卫开了一扇没有报警的
+#: 后门(它不会红,只是什么都不检查)。P2-T3 加 `access` 时正面钉了这一条:
+#: `test_the_overlay_chain_actually_checks_membership` 会在这个元组少掉 `access`
+#: 的那一刻变红。
+PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state", "access")
 
 #: 层三:必须自带 user 谓词的 store 方法(两个后端各一份实现)。
 TRACE_READ_METHODS = ("recent_user_ask_traces",)
+
+#: P2-T3:**按人判定**的端口方法。它们只属于覆盖层——底座的产物一库一份、全体成员
+#: 可见,让它按某一个人的读权改变行为在语义上就是错的(而错法是安静的:块照写,只是
+#: 写不写取决于恰好是谁触发了这一轮)。反向护栏见
+#: `test_the_access_check_never_reaches_the_base_allowlist`。
+ACCESS_CHECK_METHODS = ("user_can_read_notebook",)
 
 #: 层三认的谓词形状。两个后端占位符不同(`?` / `%s`),所以只钉列名与紧随其后的
 #: 比较——列名本身就是判据,`created_by` 出现在一条读 `ask_jobs` 的 SQL 里,没有第
@@ -252,6 +275,26 @@ def _port_calls(node: ast.AST) -> set[str]:
             and owner.attr in PORT_ATTRIBUTES
         ):
             found.add(func.attr)
+    return found
+
+
+def _self_calls(node: ast.AST) -> set[str]:
+    """函数体内 `self.<方法>(…)` 形态的调用(自身方法,不经座位)。
+
+    ⚠ 必须是 AST 判据而不是文本判据。变异实测:先写成
+    ``"_member_can_read" in ast.unparse(node)`` 时,把那次调用**整个删掉**守卫依然
+    全绿——`unparse` 会把 docstring 一起吐出来,而这些函数的 docstring 恰恰在解释
+    这次调用为什么存在。一条被自己的注释满足的断言,比没有断言更糟。
+    """
+    found: set[str] = set()
+    for child in ast.walk(node):
+        if (
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and isinstance(child.func.value, ast.Name)
+            and child.func.value.id == "self"
+        ):
+            found.add(child.func.attr)
     return found
 
 
@@ -392,11 +435,16 @@ def test_the_allowlists_are_not_silently_empty():
     assert len(BASE_CHAIN_FUNCTIONS) >= 9
     assert "corpus_stats" in BASE_CHAIN_FUNCTIONS
     assert len(ALLOWED_PORT_CALLS) >= 9
-    assert len(OVERLAY_CHAIN_FUNCTIONS) >= 11
+    assert len(OVERLAY_CHAIN_FUNCTIONS) >= 12
     assert "usage_stats" in OVERLAY_CHAIN_FUNCTIONS
-    assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 5
+    assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 6
     assert NEUTRAL_FUNCTIONS and len(NEUTRAL_ALLOWED_PORT_CALLS) == 2
     assert TRACE_READ_METHODS and len(_STORE_PATHS) == 2
+    # P2-T3:层二的第四种空转形态——座位元组少一个,那个座位上的所有调用就静默地
+    # 不再被扫描。`test_the_overlay_chain_actually_checks_membership` 是它的功能性
+    # 判据(变异实测),这里再正面写一遍两个取数座位必须在列。
+    assert {"ask_state", "access"} <= set(PORT_ATTRIBUTES)
+    assert ACCESS_CHECK_METHODS
 
 
 def test_the_two_chains_never_share_a_port_allowlist_entry_that_reads_usage():
@@ -412,6 +460,36 @@ def test_the_two_chains_never_share_a_port_allowlist_entry_that_reads_usage():
             "全体成员可见,它读到任何人的提问轨迹都等于把那个人的使用情况公开。"
         )
     assert "ask_state" not in " ".join(sorted(ALLOWED_PORT_CALLS))
+
+
+def test_the_access_check_never_reaches_the_base_allowlist():
+    """反向护栏(P2-T3):**按人判定**的方法绝不能出现在底座的白名单里。
+
+    与上面那条同构,但拦的是另一种失败:轨迹读进底座是「把 A 的使用情况写进大家都
+    看得到的块」,而成员资格判定进底座是更隐蔽的一种——共享底座是 notebook 级的,
+    它写什么不该取决于**恰好是谁**触发了这一轮。真让它读了,失败形态不是报错,而是
+    「同一个库的共享块在 A 触发时刷新、在 B 触发时不刷新」,而两个人看到的是同一份
+    块,没有任何地方会显示这个差别从何而来。
+
+    它也不该进中性那张:中性的含义是「不取业务数据」,而这条读的是授权表。
+    (`NEUTRAL_ALLOWED_PORT_CALLS` 的长度已被 `..._not_silently_empty` 精确钉死,
+    这里再逐条正面写一次,免得那条长度断言将来被放宽时这一面无人看守。)
+    """
+    for method in ACCESS_CHECK_METHODS:
+        assert method not in ALLOWED_PORT_CALLS, (
+            f"{method} 出现在**底座**的端口白名单里。底座的产物一库一份、全体成员"
+            "可见,按某一个成员的读权决定要不要刷新它,会让同一份共享块的刷新与否"
+            "取决于谁恰好触发了这一轮——一个没有任何报错、也没有任何界面能解释的差别。"
+        )
+        assert method not in NEUTRAL_ALLOWED_PORT_CALLS, (
+            f"{method} 出现在**中性**的端口白名单里。中性的含义是「我看过它,它不取"
+            "业务数据」,而这条读的是授权表;它一旦被当成中性,层一层二就都不会再问"
+            "「它替哪条链路判定」。"
+        )
+        assert method in OVERLAY_ALLOWED_PORT_CALLS, (
+            f"{method} 不在覆盖层的白名单里——这条护栏会变成恒真:它当然不在别处,"
+            "因为它已经哪儿都不在了。"
+        )
 
 
 def test_the_memory_exclusion_stays_inside_the_statement():
@@ -438,35 +516,48 @@ def test_the_memory_exclusion_stays_inside_the_statement():
     )
 
 
-def test_the_base_allowlist_never_collides_with_ask_state_port_methods():
-    """自检(T5 修复轮):给 `PORT_ATTRIBUTES` 那条注释的承诺补一份守卫。
+@pytest.mark.parametrize(
+    "seat, port", [("ask_state", AskStateStorePort), ("access", SharingStorePort)]
+)
+def test_the_base_allowlist_never_collides_with_data_seat_port_methods(
+    seat: str, port: type
+):
+    """自检(T5 修复轮,P2-T3 扩到第二个座位):给 `PORT_ATTRIBUTES` 那条注释的
+    承诺补一份守卫。
 
-    那条注释说「底座函数一旦写出 ``self.ask_state.<任何方法>``,它必然不在
+    那条注释说「底座函数一旦写出 ``self.<座位>.<任何方法>``,它必然不在
     ``ALLOWED_PORT_CALLS`` 里」——这句话之所以成立,唯一原因是
-    ``ALLOWED_PORT_CALLS``(底座的层二白名单)与 ``AskStateStorePort`` 的方法名
-    集合**当前恰好不相交**。这不是一个自动成立的性质:明天 `AskStateStorePort`
-    新增一个方法,名字恰好撞上 `ALLOWED_PORT_CALLS` 里已经登记的某个 notebook 级
-    聚合方法名(比如两边都叫 ``read_blocks`` 这类巧合),那句注释描述的「必然」
-    就悄悄不成立了——底座函数写 ``self.ask_state.read_blocks(...)`` 会被层二
-    误判成在调用块本身的 `read_blocks`(实际上那是完全不同的、会读某个用户轨迹
-    的方法),从而放行一条本该报红的调用。introspect `AskStateStorePort` 的
-    公开方法名集合,直接钉住这个交集恒为空。
+    ``ALLOWED_PORT_CALLS``(底座的层二白名单)与该座位背后那个端口的方法名集合
+    **当前恰好不相交**。这不是一个自动成立的性质:明天端口新增一个方法,名字恰好
+    撞上 `ALLOWED_PORT_CALLS` 里已经登记的某个 notebook 级聚合方法名(比如两边都
+    叫 ``read_blocks`` 这类巧合),那句注释描述的「必然」就悄悄不成立了——底座函数
+    写 ``self.ask_state.read_blocks(...)`` 会被层二误判成在调用块本身的
+    `read_blocks`(实际上那是完全不同的、会读某个用户轨迹的方法),从而放行一条
+    本该报红的调用。introspect 端口的公开方法名集合,直接钉住这个交集恒为空。
+
+    P2-T3 把它 parametrize 成两个座位而不是复制一份:``access`` 座位背后的
+    `SharingStorePort` 有 `is_member` / `list_members` 这类短名字,撞名的可能性
+    并不比 `AskStateStorePort` 低,而这条前提对两个座位是同一条。
     """
-    ask_state_methods = {
+    assert seat in PORT_ATTRIBUTES, (
+        f"{seat} 不在 PORT_ATTRIBUTES 里——这条自检守的是那条注释的前提,而前提的"
+        "适用对象本身已经不受层二扫描了。"
+    )
+    port_methods = {
         name
-        for name, value in vars(AskStateStorePort).items()
+        for name, value in vars(port).items()
         if callable(value) and not name.startswith("_")
     }
-    collisions = sorted(ask_state_methods & ALLOWED_PORT_CALLS)
+    collisions = sorted(port_methods & ALLOWED_PORT_CALLS)
     assert collisions == [], (
-        f"`AskStateStorePort` 与底座的 `ALLOWED_PORT_CALLS` 出现同名方法:"
+        f"`{port.__name__}` 与底座的 `ALLOWED_PORT_CALLS` 出现同名方法:"
         f"{collisions}。`PORT_ATTRIBUTES` 那条注释的『必然不在白名单里』前提已经"
-        "不成立——底座函数写 `self.ask_state.<这个名字>` 会被层二误判成在调用"
+        f"不成立——底座函数写 `self.{seat}.<这个名字>` 会被层二误判成在调用"
         "无害的 notebook 级聚合方法。请把冲突的名字之一改名,或者重新评估这条"
         "隔离判据是否还站得住。"
     )
-    assert ask_state_methods, (
-        "AskStateStorePort 的公开方法名一个都没读到——这条断言本身可能被 introspect"
+    assert port_methods, (
+        f"{port.__name__} 的公开方法名一个都没读到——这条断言本身可能被 introspect"
         "写坏了,恒真地绿。"
     )
 
@@ -479,6 +570,33 @@ def test_the_overlay_chain_actually_reads_the_member_trace():
         f"usage_stats 的端口调用变成了 {sorted(calls)}——覆盖层的输入面被改了。"
         "它应当恰好读一样东西:该成员自己的提问轨迹。"
     )
+
+
+def test_the_overlay_chain_actually_checks_membership():
+    """反向护栏(P2-T3):覆盖层确实在**复核成员资格**,而且是经登记座位发出的。
+
+    这条同时是 `PORT_ATTRIBUTES` 的**变异判据**。层二是白名单,所以座位元组里少
+    一个名字不会让任何断言变红——`_port_calls` 只是对那个座位上的调用视而不见,
+    整份守卫安静地全绿。把这句写成正面断言之后,删掉 `access` 座位的那一刻它就红:
+    `_member_can_read` 的调用扫不出来了。
+
+    三个触发点(两个通知钩子 + `start_overlay`)也一并钉住:少任何一个,那条路径
+    就重新变回「迟到的通知能替一个已经被移出的成员重建整条链」。
+    """
+    functions = _functions(_SERVICE_PATH)
+    calls = _port_calls(functions["_member_can_read"])
+    assert calls == set(ACCESS_CHECK_METHODS), (
+        f"_member_can_read 的端口调用变成了 {sorted(calls)}。它应当恰好做一件事:"
+        "经登记座位问一次读侧那份授权谓词。扫不出来通常意味着 `PORT_ATTRIBUTES` "
+        "少了 `access` 座位——那种形态下层二对这个座位上的**所有**调用都视而不见,"
+        "而且不会有任何断言变红。"
+    )
+    for caller in ("note_ask_completed", "note_report_completed", "start_overlay"):
+        assert "_member_can_read" in _self_calls(functions[caller]), (
+            f"{caller} 不再复核成员资格。一次在成员被移出之后才落地的通知会经"
+            "`bump_signal` 的 upsert 重建 job 行,计数攒满后一轮巡固就用移出前的"
+            "轨迹把这个人的块重新写回来(codex #520 R5,P2-T3 关掉的正是它)。"
+        )
 
 
 def test_the_base_chain_actually_reads_something():

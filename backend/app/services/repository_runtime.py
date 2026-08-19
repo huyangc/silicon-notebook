@@ -436,6 +436,12 @@ class RepositoryRuntime:
             # (谓词写在 SQL 里,见 ``recent_user_ask_traces``),底座链路一个字
             # 都不许碰它——那条边界由隔离守卫按函数分组静态钉住。
             ask_state=self.ask_state,
+            # P2-T3:覆盖层的成员资格座位。用的是**读侧同一份谓词**
+            # (`access_sql.NOTEBOOK_READ_SQL`),所以「这条链还该不该存在」与
+            # 「这个人还读不读得到这个库」不会分叉。座位单开一个而不是往
+            # ask_state 上加方法:隔离守卫的端口白名单是按链路分的,而按人判定
+            # 的方法绝不该出现在底座那张里。
+            access=self.sharing_store,
         )
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
