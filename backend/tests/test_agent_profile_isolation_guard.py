@@ -168,16 +168,19 @@ ALLOWED_PORT_CALLS = frozenset({
 #: 那张加两条——两条链路的合法输入本来就是互斥的,合成一张会让「底座能不能读轨迹」
 #: 这个问题不再有答案(而那正是本文件存在的理由)。
 #:
-#: ⚠ `recent_user_ask_traces` 是这里唯一的取数方法,也是全仓唯一一条把「这个库」
-#: 读成「这个人对这个库的使用」的读。它凭什么在列:谓词 `created_by = ?` 写在 SQL
-#: 里(层三静态钉住),产物只写进该成员自己的 owner 行。任何**不按 user 收窄**的
-#: 使用数据读法都不该出现在这里。
+#: ⚠ `recent_user_ask_traces` / `recent_user_report_traces`(P2-T4)是这里仅有的
+#: 两条取数方法,也是全仓唯一把「这个库」读成「这个人对这个库的使用」的两条读。
+#: 它们凭什么在列:两条 SQL 语句都把谓词 `created_by = ?`/`= %s` 写在语句里(层三
+#: 静态钉住),产物只写进该成员自己的 owner 行。任何**不按 user 收窄**的使用数据
+#: 读法都不该出现在这里。
 OVERLAY_ALLOWED_PORT_CALLS = frozenset({
     # 块本身(notebook + 该成员的 owner id = 他自己的覆盖层)
     "read_blocks",
     "write_block",
     # 该成员自己的提问轨迹
     "recent_user_ask_traces",
+    # 该成员自己最近完成的深度报告(P2-T4:sections_json[i].attempted 投影)
+    "recent_user_report_traces",
     # 单飞与阈值(只碰这条链路自己那一行)
     "bump_signal",
     "claim",
@@ -225,8 +228,10 @@ NEUTRAL_ALLOWED_PORT_CALLS = frozenset({
 #: 的那一刻变红。
 PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state", "access")
 
-#: 层三:必须自带 user 谓词的 store 方法(两个后端各一份实现)。
-TRACE_READ_METHODS = ("recent_user_ask_traces",)
+#: 层三:必须自带 user 谓词的 store 方法(两个后端各一份实现)。P2-T4 追加
+#: `recent_user_report_traces`——它读的是 `reports` 表而非 `ask_jobs`/
+#: `ask_trace_steps`,但同样只能读发起人自己的行,同一层三判据照样成立。
+TRACE_READ_METHODS = ("recent_user_ask_traces", "recent_user_report_traces")
 
 #: P2-T3:**按人判定**的端口方法。它们只属于覆盖层——底座的产物一库一份、全体成员
 #: 可见,让它按某一个人的读权改变行为在语义上就是错的(而错法是安静的:块照写,只是
@@ -437,9 +442,12 @@ def test_the_allowlists_are_not_silently_empty():
     assert len(ALLOWED_PORT_CALLS) >= 9
     assert len(OVERLAY_CHAIN_FUNCTIONS) >= 12
     assert "usage_stats" in OVERLAY_CHAIN_FUNCTIONS
-    assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 6
+    # P2-T4: recent_user_report_traces 加入后 OVERLAY_ALLOWED_PORT_CALLS 从 8
+    # 条涨到 9 条;下限跟着抬,免得这条自检本身继续对着一个更宽的白名单打盹。
+    assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 9
     assert NEUTRAL_FUNCTIONS and len(NEUTRAL_ALLOWED_PORT_CALLS) == 2
-    assert TRACE_READ_METHODS and len(_STORE_PATHS) == 2
+    # P2-T4: TRACE_READ_METHODS 现含两条方法,清空成单元素元组同样必须报红。
+    assert len(TRACE_READ_METHODS) >= 2 and len(_STORE_PATHS) == 2
     # P2-T3:层二的第四种空转形态——座位元组少一个,那个座位上的所有调用就静默地
     # 不再被扫描。`test_the_overlay_chain_actually_checks_membership` 是它的功能性
     # 判据(变异实测),这里再正面写一遍两个取数座位必须在列。
@@ -564,11 +572,14 @@ def test_the_base_allowlist_never_collides_with_data_seat_port_methods(
 
 def test_the_overlay_chain_actually_reads_the_member_trace():
     """反向护栏:层二是白名单,把 `usage_stats` 的读**删光**同样能让它绿。
-    所以正面钉住:覆盖层确实在读那一条,而且只读那一条。"""
+    所以正面钉住:覆盖层确实在读这两样,而且只读这两样(P2-T4 把「只读一样」的
+    旧断言扩成「只读这两样」——报告样本上线后 `usage_stats` 的输入面从一条变成
+    两条,仍必须是白名单枚举出的那两条,不多不少)。"""
     calls = _port_calls(_functions(_SERVICE_PATH)["usage_stats"])
-    assert calls == {"recent_user_ask_traces"}, (
+    assert calls == {"recent_user_ask_traces", "recent_user_report_traces"}, (
         f"usage_stats 的端口调用变成了 {sorted(calls)}——覆盖层的输入面被改了。"
-        "它应当恰好读一样东西:该成员自己的提问轨迹。"
+        "它应当恰好读两样东西:该成员自己的提问轨迹,以及该成员自己最近完成的"
+        "深度报告。"
     )
 
 

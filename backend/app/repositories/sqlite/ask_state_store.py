@@ -58,6 +58,8 @@ from app.repositories.ports import (
     ConversationShareWatermarkStale,
     PreparedAskTurn,
     project_ask_row,
+    project_report_attempt,
+    project_report_row,
     project_trace_step,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -443,6 +445,86 @@ class AskStateStore:
             if step is not None and target is not None:
                 target["steps"].append(step)
         return asks
+
+    def recent_user_report_traces(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        report_limit: int,
+        attempt_limit: int,
+    ) -> list[dict]:
+        """ONE member's own recently completed deep reports, projected/bounded.
+
+        Agentic Memory P2 (T4). See ``AskStateStorePort.recent_user_report_
+        traces`` for the full contract (attribution asymmetry, ``status``
+        gate, the ``new == 0`` zero-hit reading). This method's SQL is the
+        two properties that must not diverge from ``recent_user_ask_traces``:
+
+        ⚠ Both statements carry ``created_by = ?`` **in the SQL text**, the
+        attempt statement included even though its ``report_id`` list already
+        came out of the first — same redundant-predicate rule, same reason
+        (``backend/tests/test_agent_profile_isolation_guard.py`` pins it here
+        too, via the now two-element ``TRACE_READ_METHODS``).
+
+        ⚠ ``sections_json`` is projected IN THE SQL, not pulled into Python —
+        one deep report's ``sections_json`` carries full section markdown and
+        can run several hundred KB. The nested ``json_each`` walk extracts
+        only ``$[*].attempted[*].{new,failed}``, defensively: each level is
+        guarded by ``json_valid``/``json_type`` so a malformed or legacy
+        (pre-T4) row degrades to "no attempts" for that section rather than
+        raising and losing the whole sample — the same tolerance
+        ``read_trace``/``project_trace_step`` already have for a corrupt row.
+
+        ``ORDER BY r.created_at DESC, r.id DESC, s.key ASC, a.key ASC`` before
+        the ``attempt_limit`` cap mirrors the ask side's job-then-step
+        ordering: the major key is the report's own recency (not
+        ``s.key``/``a.key`` — pure array-index ordinals, meaningless across
+        reports), so when the ceiling bites, what falls off is the OLDEST
+        report's tail attempts, never a direction from the report the member
+        just finished.
+        """
+        report_limit = max(1, int(report_limit))
+        attempt_limit = max(1, int(attempt_limit))
+        with self.database.connect() as db:
+            report_rows = db.execute(
+                "SELECT id, question, created_at FROM reports "
+                "WHERE notebook_id = ? AND created_by = ? AND status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (notebook_id, user_id, report_limit),
+            ).fetchall()
+            reports = [
+                project_report_row(row["id"], row["question"], row["created_at"])
+                for row in report_rows
+            ]
+            if not reports:
+                return []
+            by_report = {report["report_id"]: report for report in reports}
+            placeholders = ",".join("?" for _ in by_report)
+            attempt_rows = db.execute(
+                "SELECT r.id AS report_id, "
+                "json_extract(a.value, '$.new') AS new, "
+                "json_extract(a.value, '$.failed') AS failed "
+                "FROM reports r "
+                "JOIN json_each(CASE WHEN json_valid(r.sections_json) "
+                "AND json_type(r.sections_json) = 'array' "
+                "THEN r.sections_json ELSE '[]' END) AS s "
+                "JOIN json_each(CASE WHEN json_type(s.value) = 'object' "
+                "AND json_type(s.value, '$.attempted') = 'array' "
+                "THEN json_extract(s.value, '$.attempted') ELSE '[]' END) AS a "
+                f"WHERE r.notebook_id = ? AND r.created_by = ? AND r.status = 'done' "
+                f"AND r.id IN ({placeholders}) "
+                "ORDER BY r.created_at DESC, r.id DESC, s.key ASC, a.key ASC "
+                "LIMIT ?",
+                (notebook_id, user_id, *by_report.keys(), attempt_limit),
+            ).fetchall()
+        for row in attempt_rows:
+            target = by_report.get(str(row["report_id"]))
+            if target is not None:
+                target["attempts"].append(
+                    project_report_attempt(row["new"], row["failed"])
+                )
+        return reports
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

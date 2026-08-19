@@ -599,6 +599,80 @@ def test_recent_user_ask_traces_step_cap_drops_the_oldest_job_first(content_harn
     assert [len(row["steps"]) for row in rows] == [3, 0]
 
 
+def test_recent_user_report_traces_scopes_to_the_reading_member(content_harness):
+    """Agentic Memory P2 (T4): the overlay chain's SECOND read, on PostgreSQL.
+
+    ⚠ Same privacy-boundary contract as ``recent_user_ask_traces`` above —
+    ``created_by = %s`` is written into BOTH statements (pinned statically by
+    ``test_agent_profile_isolation_guard.py`` over the now two-element
+    ``TRACE_READ_METHODS``); this pins that PostgreSQL actually honours it
+    AND projects the SAME shape SQLite does, even though the two backends
+    extract ``sections_json[i].attempted[j].{new,failed}`` through completely
+    different SQL (``jsonb_array_elements``/``->>`` here, nested
+    ``json_each``/``json_extract`` there) — an understanding block whose
+    contents depended on which database ran it would be a long way from
+    obvious.
+    """
+    from app.repositories.postgres._store_utils import jsonb
+
+    mark = "%s"
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,"
+            "updated_at,username,password_hash,password_salt,password_iterations) "
+            f"VALUES ({','.join([mark] * 11)})",
+            ("user-other", "other@example.test", "Other", "user", "active",
+             NOW, NOW, "o00123456", "", "", 0),
+        )
+        connection.execute(
+            "INSERT INTO reports(id,notebook_id,question,sections_json,status,"
+            "created_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("rep-mine", "nb-content", "mine?", jsonb([
+                {"title": "s0", "attempted": [
+                    {"query": "a", "new": 1, "tries": 1},
+                    {"query": "b", "new": 0, "tries": 1},
+                ]},
+                {"title": "s1", "attempted": [
+                    {"query": "c", "new": 2, "tries": 1, "failed": True},
+                ]},
+            ]), "done", "user-content", NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO reports(id,notebook_id,question,sections_json,status,"
+            "created_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("rep-theirs", "nb-content", "theirs?", jsonb([
+                {"title": "s0", "attempted": [{"query": "x", "new": 0, "tries": 1}]},
+            ]), "done", "user-other", NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO reports(id,notebook_id,question,sections_json,status,"
+            "created_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("rep-notdone", "nb-content", "not done?", jsonb([
+                {"title": "s0", "attempted": [{"query": "y", "new": 0, "tries": 1}]},
+            ]), "failed", "user-content", NOW, NOW),
+        )
+
+    rows = content_harness.ask.recent_user_report_traces(
+        "nb-content", "user-content", report_limit=10, attempt_limit=200
+    )
+
+    assert [row["question"] for row in rows] == ["mine?"]
+    assert rows[0]["report_id"] == "rep-mine"
+    # Projected, not passed through: only new/failed survive, in section-then-
+    # attempt order, exactly the shape ``project_report_attempt`` produces.
+    assert rows[0]["attempts"] == [
+        {"new": 1, "failed": False},
+        {"new": 0, "failed": False},
+        {"new": 2, "failed": True},
+    ]
+    assert content_harness.ask.recent_user_report_traces(
+        "nb-content", "user-other", report_limit=10, attempt_limit=200
+    )[0]["report_id"] == "rep-theirs"
+    assert content_harness.ask.recent_user_report_traces(
+        "nb-content", "user-nobody", report_limit=10, attempt_limit=200
+    ) == []
+
+
 def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     content_harness,
 ):

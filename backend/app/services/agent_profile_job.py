@@ -51,6 +51,8 @@ from app.repositories.ports import (
     AGENT_PROFILE_INTERRUPTED_MESSAGE,
     AGENT_PROFILE_MALFORMED_MESSAGE,
     AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
+    AGENT_PROFILE_REPORT_ATTEMPT_LIMIT,
+    AGENT_PROFILE_REPORT_SAMPLE,
     AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE,
     AGENT_PROFILE_TRACE_SAMPLE,
     AGENT_PROFILE_SETTLE_GONE,
@@ -672,9 +674,11 @@ class UsageStats:
     member's own activity in ONE notebook.
 
     Deliberately no answer text, no Memory content and no evidence excerpts:
-    the projection in ``ports.project_trace_step`` keeps an action type, a
-    human summary, a duration and one count, and this dataclass cannot hold
-    anything the projection did not produce.
+    the projections in ``ports.project_trace_step``/``project_report_row``/
+    ``project_report_attempt`` keep an action type, a human summary, a
+    duration and one count (asks) or a question and a per-direction hit/miss
+    flag (reports), and this dataclass cannot hold anything those
+    projections did not produce.
     """
 
     #: Projected ask rows, newest first (``ports.project_ask_row`` shape).
@@ -682,18 +686,44 @@ class UsageStats:
     total_steps: int
     #: The number ``usage_gaps``' stored evidence records — counted here, by
     #: the server, never restated by the model (design §5.1's exception to
-    #: source-id evidence).
+    #: source-id evidence). Agentic Memory P2 (T4): this now folds together
+    #: TWO accounts — an ask's zero-``count`` retrieval steps AND a report's
+    #: zero-``new`` confirmed directions — deliberately merged rather than
+    #: kept as two separate counters (see ``summarize_usage``), because
+    #: ``usage_gaps``' evidence is a single "how many searches came back
+    #: empty" number, not two.
     zero_hit_steps: int
     failed_asks: int
     #: Deduplicated, bounded summaries of the searches that came back empty.
+    #: Ask-derived only — a report's ``attempted`` rows carry no query text
+    #: (``project_report_attempt`` deliberately drops it), so they cannot
+    #: contribute here.
     empty_search_summaries: tuple[str, ...] = ()
+    #: Agentic Memory P2 (T4). Projected deep-report rows, newest first
+    #: (``ports.project_report_row`` shape, each with its ``attempts`` filled
+    #: by ``project_report_attempt``). Empty for a member with no completed
+    #: reports in this notebook — never ``None``, so callers can iterate it
+    #: unconditionally the way they already do ``asks``.
+    reports: tuple[Mapping[str, Any], ...] = ()
 
 
-def summarize_usage(asks: Sequence[Mapping[str, Any]]) -> UsageStats:
-    """Fold the projected sample into the counts the prompt renders.
+def summarize_usage(
+    asks: Sequence[Mapping[str, Any]],
+    reports: Sequence[Mapping[str, Any]] = (),
+) -> UsageStats:
+    """Fold the projected sample(s) into the counts the prompt renders.
 
-    Pure arithmetic over the store's projection — no I/O, so the isolation
-    story stays "the overlay reads exactly one thing".
+    Pure arithmetic over the stores' projections — no I/O, so the isolation
+    story stays "the overlay reads exactly one thing (per sample)".
+
+    Agentic Memory P2 (T4): ``reports`` is a SECOND, independent sample —
+    each report row's ``attempts`` came from ``sections_json[i].attempted``,
+    not from a trace step, so it is folded separately from the ``asks`` loop
+    below rather than reshaped to look like one. ``new == 0`` is this
+    account's own zero-hit signal (see ``AskStateStorePort.
+    recent_user_report_traces`` for why that differs from the ask side's
+    ``count``), and rows carrying ``failed: True`` are skipped entirely —
+    a retrieval that errored is not evidence the library came back empty.
     """
     total_steps = 0
     zero_hits = 0
@@ -715,12 +745,20 @@ def summarize_usage(asks: Sequence[Mapping[str, Any]]) -> UsageStats:
                 seen.add(summary)
                 if len(empties) < AGENT_PROFILE_EMPTY_QUERY_SAMPLES:
                     empties.append(summary)
+    for report in reports:
+        for attempt in report.get("attempts") or ():
+            if attempt.get("failed"):
+                continue
+            if attempt.get("new") != 0:
+                continue
+            zero_hits += 1
     return UsageStats(
         asks=tuple(asks),
         total_steps=total_steps,
         zero_hit_steps=zero_hits,
         failed_asks=failed,
         empty_search_summaries=tuple(empties),
+        reports=tuple(reports),
     )
 
 
@@ -731,14 +769,34 @@ def render_usage_block(stats: UsageStats) -> str:
     it is structure sitting among English instructions, not user-facing copy.
     The questions inside it are of course in whatever language the person
     writes.
+
+    Agentic Memory P2 (T4): a second, clearly-labelled section renders the
+    report sample right after the ask one, sharing
+    ``AGENT_PROFILE_USAGE_SECTION_MAX_CHARS`` rather than opening a second
+    budget constant — it is the same "this is a prompt input on a bounded
+    budget" rule applied to a second sample, not a second kind of budget.
     """
+    # Agentic Memory P2 (T4): ``zero_hit_steps`` is a MERGED count (ask
+    # zero-``count`` steps + report zero-``new`` directions — see
+    # ``summarize_usage``), so its denominator here must be the merged total
+    # too (ask steps + report attempts), or "N of M sampled" would compare a
+    # combined numerator against an ask-only denominator and could even show
+    # N > M for a report-heavy member. Computed locally rather than stored on
+    # ``UsageStats``: nothing downstream of ``summarize_usage`` needs an
+    # ask-only zero-hit count, so a dedicated field would exist only for this
+    # one line.
+    report_direction_total = sum(
+        len(report.get("attempts") or ()) for report in stats.reports
+    )
     lines = [
         "[Your recent searching in this library]",
         f"asks sampled: {len(stats.asks)} (most recent first, at most "
         f"{AGENT_PROFILE_TRACE_SAMPLE})",
         f"of those, ended in failure or cancellation: {stats.failed_asks}",
-        f"retrieval steps that returned nothing: {stats.zero_hit_steps} "
-        f"(of {stats.total_steps} steps sampled)",
+        f"retrieval steps/directions that returned nothing: "
+        f"{stats.zero_hit_steps} (of {stats.total_steps + report_direction_total} "
+        f"sampled: {stats.total_steps} ask steps + {report_direction_total} "
+        f"report directions)",
     ]
     spent = 0
     rendered = 0
@@ -773,6 +831,40 @@ def render_usage_block(stats: UsageStats) -> str:
     if stats.empty_search_summaries:
         lines.append("searches that came back empty:")
         lines.extend(f"- {text}" for text in stats.empty_search_summaries)
+    if stats.reports:
+        lines.append("[Your recent deep reports in this library]")
+        lines.append(
+            f"reports sampled: {len(stats.reports)} (most recent first, at "
+            f"most {AGENT_PROFILE_REPORT_SAMPLE})"
+        )
+        report_spent = 0
+        report_rendered = 0
+        report_body: list[str] = []
+        for report in stats.reports:
+            question = str(report.get("question") or "")
+            if not question:
+                continue
+            attempts = list(report.get("attempts") or ())
+            empty_here = sum(
+                1
+                for attempt in attempts
+                if not attempt.get("failed") and attempt.get("new") == 0
+            )
+            failed_here = sum(1 for attempt in attempts if attempt.get("failed"))
+            line = (
+                f"- {question} ({len(attempts)} directions searched, "
+                f"{empty_here} came back empty, {failed_here} failed)"
+            )
+            if report_spent + len(line) + 1 > AGENT_PROFILE_USAGE_SECTION_MAX_CHARS:
+                break
+            report_body.append(line)
+            report_spent += len(line) + 1
+            report_rendered += 1
+        if report_body:
+            hidden = len(stats.reports) - report_rendered
+            suffix = f" (+{hidden} more not listed)" if hidden > 0 else ""
+            lines.append(f"reports{suffix}:")
+            lines.extend(report_body)
     return "\n".join(lines)
 
 
@@ -1540,17 +1632,22 @@ class AgentProfileConsolidationService:
         Fail-open in full for the same reason as above: the report is finished
         and persisted before this runs.
 
-        ⚠ Trigger, not input (codex #520 R9 P2, registered): the run this
-        schedules reads the member's ASK traces (``usage_stats`` →
-        ``recent_user_ask_traces``) — a report's own per-section retrieval is
-        not persisted in that shape, so for a member whose only activity is
-        this report the run terminates as ``no_usage_sample`` and writes
-        nothing. That is the P1 contract as designed (§5.3: the report is a
-        high-information *moment* to refresh notes distilled from asks), and
-        feeding report section traces in would need a whole new persisted
-        projection with its own ownership predicate and guard surface —
-        registered for P2 alongside the claim-generation rework rather than
-        widened here.
+        ⚠ Trigger AND input (codex #520 R9 P1 registered a gap here; Agentic
+        Memory P2 T4 closed it — this comment used to say "trigger, not
+        input", and that is no longer true). The run this schedules now reads
+        BOTH the member's ask traces (``usage_stats`` →
+        ``recent_user_ask_traces``) AND their recently completed deep reports
+        (``recent_user_report_traces``, projecting
+        ``sections_json[i].attempted``). A member whose only activity is THIS
+        report therefore no longer terminates as ``no_usage_sample`` with
+        nothing written: ``_consolidate_overlay``'s empty-sample gate checks
+        ``stats.asks`` and ``stats.reports`` together, so this report alone
+        can support a ``retrieval_notes``/``usage_gaps`` refresh. What the
+        report sample can say is narrower than the ask sample, though — see
+        ``AskStateStorePort.recent_user_report_traces`` for exactly which
+        fields survive (a question and, per confirmed direction, whether it
+        came back empty; no step_type/duration/step sequence, because
+        ``sections_json`` never persisted that shape).
         """
         try:
             if not user_id or self.ask_state is None:
@@ -1801,12 +1898,16 @@ class AgentProfileConsolidationService:
             raise AgentProfileModelUnavailable()
         blocks = self.profiles.read_blocks(notebook_id, user_id)
         stats = self.usage_stats(notebook_id, user_id)
-        if not stats.asks:
-            # Nothing of this member's is left to summarise (their asks were
-            # deleted, or the chain was claimed manually before they used the
-            # library). Terminal SUCCESS with zero blocks, and NO model call:
-            # an empty sample cannot support either block, so paying for a
-            # reply whose only correct content is "omit both" is pure waste.
+        if not stats.asks and not stats.reports:
+            # Nothing of this member's is left to summarise (their asks and
+            # reports were deleted, or the chain was claimed manually before
+            # they used the library). Terminal SUCCESS with zero blocks, and
+            # NO model call: an empty sample cannot support either block, so
+            # paying for a reply whose only correct content is "omit both" is
+            # pure waste. Agentic Memory P2 (T4): a member whose ONLY activity
+            # is a completed deep report no longer falls into this branch —
+            # ``stats.reports`` alone is enough to proceed, closing the gap
+            # ``note_report_completed``'s own docstring used to register.
             return _BaseOutcome(written=0, chars=0, evidence=0,
                                 diagnostic="no_usage_sample")
         client = self.models.chat(AGENT_PROFILE_WORKLOAD)
@@ -1980,25 +2081,31 @@ class AgentProfileConsolidationService:
 
     # ---------------------------------------------------- overlay: reading
     def usage_stats(self, notebook_id: str, user_id: str) -> UsageStats:
-        """The overlay chain's ENTIRE view — ONE member's own recent asks.
+        """The overlay chain's ENTIRE view — ONE member's own recent asks
+        AND recently completed deep reports.
 
-        Exactly one read: ``recent_user_ask_traces``, whose two statements both
-        carry ``created_by = ?`` **in the SQL text** (see its docstring, and
-        ``test_agent_profile_isolation_guard.py``, which pins that literally in
-        both backends). This is the mirror image of ``corpus_stats``' rule:
-        the base chain must be unable to reach any member's usage, and this
-        chain must be unable to reach any member's usage BUT THIS ONE.
+        Exactly two reads, ``recent_user_ask_traces`` and (Agentic Memory P2,
+        T4) ``recent_user_report_traces``, whose statements all carry
+        ``created_by = ?`` **in the SQL text** (see their docstrings, and
+        ``test_agent_profile_isolation_guard.py``, which pins that literally
+        in both backends over the now two-element ``TRACE_READ_METHODS``).
+        This is the mirror image of ``corpus_stats``' rule: the base chain
+        must be unable to reach any member's usage, and this chain must be
+        unable to reach any member's usage BUT THIS ONE.
 
         The result feeds a block only this member can read. There is therefore
         no path from here into a shared surface — and equally no path from
-        anyone else's activity into here, because the predicate is in the
+        anyone else's activity into here, because both predicates are in the
         statement rather than in a Python filter one refactor away from being
         dropped.
 
-        Private Memory content is not in this sample and cannot be: the
+        Private Memory content is not in this sample and cannot be: the ask
         projection keeps an action type, a summary, a duration and a count
-        (``ports.project_trace_step``), so even the ``memory`` step contributes
-        only "found N".
+        (``ports.project_trace_step``), so even the ``memory`` step
+        contributes only "found N"; the report projection keeps a question
+        and, per direction, only whether it came back empty
+        (``ports.project_report_row``/``project_report_attempt``) — never
+        section markdown, citations or evidence text.
         """
         asks = self.ask_state.recent_user_ask_traces(
             notebook_id,
@@ -2006,7 +2113,13 @@ class AgentProfileConsolidationService:
             job_limit=AGENT_PROFILE_TRACE_SAMPLE,
             step_limit=AGENT_PROFILE_TRACE_STEP_LIMIT,
         )
-        return summarize_usage(asks)
+        reports = self.ask_state.recent_user_report_traces(
+            notebook_id,
+            user_id,
+            report_limit=AGENT_PROFILE_REPORT_SAMPLE,
+            attempt_limit=AGENT_PROFILE_REPORT_ATTEMPT_LIMIT,
+        )
+        return summarize_usage(asks, reports)
 
     # ------------------------------------------------------------ bookkeeping
     def _fail(

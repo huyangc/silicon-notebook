@@ -21,6 +21,8 @@ from app.repositories.ports import (
     ConversationShareWatermarkStale,
     PreparedAskTurn,
     project_ask_row,
+    project_report_attempt,
+    project_report_row,
     project_trace_step,
 )
 from app.repositories.postgres._store_utils import (
@@ -399,6 +401,87 @@ class AskStateStore:
             if step is not None and target is not None:
                 target["steps"].append(step)
         return asks
+
+    def recent_user_report_traces(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        report_limit: int,
+        attempt_limit: int,
+    ) -> list[dict]:
+        """ONE member's own recently completed deep reports, projected/bounded.
+
+        Agentic Memory P2 (T4) — the PostgreSQL half of the SQLite method of
+        the same name; see that docstring and
+        ``AskStateStorePort.recent_user_report_traces`` for the full
+        contract. The properties that must not diverge:
+
+        * ``created_by = %s`` lives **in both SQL statements**, the attempt
+          one included even though its ``report_id`` list came out of the
+          first — same rule as ``recent_user_ask_traces``, pinned by the same
+          guard (now over the two-element ``TRACE_READ_METHODS``).
+        * ``sections_json`` (``jsonb``) is projected to ``$[*].attempted[*]``
+          IN THE SQL via ``jsonb_array_elements``, guarded at each level with
+          ``jsonb_typeof`` so a malformed/legacy row degrades to "no
+          attempts" for that section rather than raising — never pulled whole
+          into Python (one report's section markdown can run several hundred
+          KB).
+        * ``WITH ORDINALITY`` supplies the per-section/per-attempt array
+          index (``s_ord``/``a_ord``) so the final ``ORDER BY`` can put the
+          report's own recency first and still break ties deterministically,
+          the same ``report → section → attempt`` order the SQLite side gets
+          from ``json_each``'s ``key`` for free.
+        * ``->>`` (text) extraction, not ``->`` — this store hands the two
+          scalar columns to ``project_report_attempt`` as ``str | None``,
+          where the SQLite side hands it ``int | None`` from
+          ``json_extract``; that function is the one place both shapes are
+          reconciled.
+        """
+        report_limit = max(1, int(report_limit))
+        attempt_limit = max(1, int(attempt_limit))
+        with self.database.connect() as db:
+            report_rows = db.execute(
+                "SELECT id, question, created_at FROM reports "
+                "WHERE notebook_id = %s AND created_by = %s AND status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT %s",
+                (notebook_id, user_id, report_limit),
+            ).fetchall()
+            reports = [
+                project_report_row(
+                    row["id"], row["question"], iso_timestamp(row["created_at"])
+                )
+                for row in report_rows
+            ]
+            if not reports:
+                return []
+            by_report = {report["report_id"]: report for report in reports}
+            placeholders = ",".join("%s" for _ in by_report)
+            attempt_rows = db.execute(
+                "SELECT r.id AS report_id, "
+                "(a.value ->> 'new') AS new, "
+                "(a.value ->> 'failed') AS failed "
+                "FROM reports r, "
+                "jsonb_array_elements(CASE WHEN jsonb_typeof(r.sections_json) = 'array' "
+                "THEN r.sections_json ELSE '[]'::jsonb END) "
+                "WITH ORDINALITY AS s(value, s_ord), "
+                "jsonb_array_elements(CASE WHEN jsonb_typeof(s.value) = 'object' "
+                "AND jsonb_typeof(s.value -> 'attempted') = 'array' "
+                "THEN s.value -> 'attempted' ELSE '[]'::jsonb END) "
+                "WITH ORDINALITY AS a(value, a_ord) "
+                f"WHERE r.notebook_id = %s AND r.created_by = %s AND r.status = 'done' "
+                f"AND r.id IN ({placeholders}) "
+                "ORDER BY r.created_at DESC, r.id DESC, s_ord ASC, a_ord ASC "
+                "LIMIT %s",
+                (notebook_id, user_id, *by_report.keys(), attempt_limit),
+            ).fetchall()
+        for row in attempt_rows:
+            target = by_report.get(str(row["report_id"]))
+            if target is not None:
+                target["attempts"].append(
+                    project_report_attempt(row["new"], row["failed"])
+                )
+        return reports
 
     def ask_job_detail(self, job_id: str) -> dict:
         with self.database.connect() as db:

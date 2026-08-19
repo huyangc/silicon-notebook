@@ -2667,6 +2667,71 @@ class AskStateStorePort(Protocol):
     # ``project_trace_step``: what comes back is the member's own question text
     # plus, per step, the action type / human summary / duration / one count.
     # Never an answer body, never Memory content, never evidence text.
+    def recent_user_report_traces(
+        self,
+        notebook_id: str,
+        user_id: str,
+        *,
+        report_limit: int,
+        attempt_limit: int,
+    ) -> list[dict]: ...
+    # ⚠ Agentic Memory P2 (T4) — the SECOND read in this port whose
+    # ``user_id`` argument is a PRIVACY BOUNDARY. It lives here, on
+    # ``AskStateStorePort``, even though its SQL selects from ``reports`` — a
+    # table this port otherwise has no business with — for exactly one
+    # reason: this port already carries the ``created_by = ?``/``= %s``
+    # static-guard wiring (``test_agent_profile_isolation_guard.py``'s
+    # ``TRACE_READ_METHODS`` × the two ``ask_state_store.py`` files), and
+    # ``test_the_base_allowlist_never_collides_with_ask_state_port_methods``
+    # (Agentic Memory P1) already asserts this port's method-name set never
+    # intersects the BASE chain's allowlist. Adding a ``report_store`` seat
+    # instead would need a new port attribute, a new base-collision guard and
+    # a new ``_STORE_PATHS`` entry — three more places this isolation could
+    # be left unfinished on.
+    #
+    # ⚠ Attribution asymmetry, REGISTERED (Agentic Memory P2 plan, T4 拍板
+    # 2/主 agent 裁决 Q5): a report's ``created_by`` is its ORIGINAL creator,
+    # not necessarily the member whose retrieval this run is summarising — in
+    # a shared notebook any writable member can (re)trigger generation of a
+    # report someone else created (see
+    # ``report_engine._note_report_completed``'s own docstring). The
+    # direction is deliberately the SAFE one: a member who reruns someone
+    # else's report triggers their OWN overlay refresh (via
+    # ``note_report_completed`` → ``bump_signal``) but that report never
+    # enters the trigger's own sample here (its ``created_by`` is the
+    # original author's id), so the refresh can legitimately come back empty
+    # (``no_usage_sample`` — a normal terminal outcome, never an error)
+    # rather than summarise a report the caller did not create. The
+    # alternative (a ``reports.last_run_by`` column) is a new migration and a
+    # new usage-data surface; P2 explicitly declined it.
+    #
+    # ⚠ Only ``status = 'done'`` reports are eligible — a failed or cancelled
+    # report cannot say how this member searched, mirroring
+    # ``note_report_completed``'s own gate (only fires on ``report_done``).
+    #
+    # ⚠ ``new == 0`` (NOT ``count``) is this account's zero-hit signal —
+    # deliberately DIFFERENT from ``_RETRIEVE_COUNT_KEYS`` above, which reads
+    # ONLY ``count`` for an ask's ``"retrieve"`` steps because
+    # ``add_subquery``'s ``new == 0`` there means "reproduced existing
+    # candidates", not "found nothing". In ``sections_json[i].attempted``,
+    # ``new`` is the ONLY count this account keeps (there is no sibling
+    # ``count`` field), and every direction a report executes is a FIRST
+    # execution — a report run never repeats a direction it has already
+    # confirmed — so here ``new == 0`` genuinely means the direction came
+    # back empty. Do not "fix" this to match ``_RETRIEVE_COUNT_KEYS``; the two
+    # mean different things because they read different accounts. Rows
+    # carrying ``failed: true`` are excluded from the zero-hit count
+    # entirely — a retrieval that errored is not the same event as one that
+    # ran and genuinely found nothing.
+    #
+    # Bounded by BOTH arguments (``report_limit`` most-recent ``done``
+    # reports, ``attempt_limit`` attempt rows across them) and PROJECTED
+    # through ``project_report_row``/``project_report_attempt``: what comes
+    # back is the member's own report question plus, per confirmed
+    # direction, whether it came back empty. Never section markdown, never
+    # citations, never evidence text — ``sections_json`` also carries full
+    # section prose per entry, so the SQL does the ``$[*].attempted``
+    # projection itself rather than pulling the whole blob into Python.
 
 
 # Memory write/revision values are storage-neutral domain types.  The port
@@ -3688,6 +3753,16 @@ def append_profile_history(
 AGENT_PROFILE_TRACE_SAMPLE = 40
 AGENT_PROFILE_TRACE_STEP_LIMIT = 600
 
+#: Agentic Memory P2 (T4) mirror of the pair above, for the OTHER usage
+#: sample the overlay chain reads: a member's own recently COMPLETED deep
+#: reports in this notebook. Both numbers are smaller than the ask pair —
+#: a report persists at most one ``attempted`` row per CONFIRMED retrieval
+#: direction (never per model action, never per section-writing step), so
+#: even an ``exhaustive``-depth report carries far fewer rows than one
+#: exhaustive reasoning ask's trace.
+AGENT_PROFILE_REPORT_SAMPLE = 10
+AGENT_PROFILE_REPORT_ATTEMPT_LIMIT = 200
+
 #: Per-item clip for the two free-text fields that survive the projection (the
 #: member's own question, and a step's human summary). They are the member's
 #: own words about their own run, but they still ride into a prompt on a
@@ -3803,6 +3878,68 @@ def project_ask_row(
         "created_at": str(created_at or ""),
         "steps": [],
     }
+
+
+def project_report_row(report_id: object, question: object, created_at: object) -> dict:
+    """One sampled deep report, narrowed the same way as ``project_ask_row``.
+
+    Agentic Memory P2 (T4). The report's own question is the same kind of
+    input as an ask's own question — the member's own words about their own
+    run, the single most useful free text the overlay can see — so it is kept
+    and clipped through the same ``_clip_trace_text`` budget. ``attempts``
+    starts empty; the caller fills it from the report's persisted
+    ``sections_json[i].attempted`` rows via ``project_report_attempt``.
+    """
+    return {
+        "report_id": str(report_id or ""),
+        "question": _clip_trace_text(question),
+        "created_at": str(created_at or ""),
+        "attempts": [],
+    }
+
+
+def project_report_attempt(new: object, failed: object) -> dict:
+    """One projected ``attempted`` row from a report's ``sections_json``.
+
+    Agentic Memory P2 (T4). ``sections_json[i].attempted`` entries are
+    ``{"query": str, "new": int, "tries": int, "failed"?: bool}`` — the
+    per-direction query TEXT is deliberately not kept here (unlike the
+    report's own ``question``, a single direction's wording is not free text
+    the member typed; it is either their own confirmed direction or a model
+    paraphrase, and ``retrieval_notes``/``usage_gaps`` only need the shape:
+    did this direction come back with anything new).
+
+    ``new``/``failed`` arrive in different native shapes depending on which
+    backend's SQL produced them — SQLite's ``json_extract`` hands back a
+    genuine ``int``/``None`` (a JSON boolean degrades to Python ``0``/``1``),
+    PostgreSQL's ``->>`` text extraction hands back ``str``/``None`` — and
+    this is the ONE place both are reconciled into the same ``{int | None,
+    bool}`` pair, so a caller downstream (``summarize_usage``) never has to
+    know which backend answered. Anything that is not recognisably an int or
+    a bool-shaped value degrades to ``None``/``False`` rather than raising —
+    the same tolerance ``project_trace_step`` has for a corrupt row shape.
+    """
+    n: int | None
+    if isinstance(new, bool):
+        n = None
+    elif isinstance(new, int):
+        n = new
+    elif isinstance(new, str):
+        try:
+            n = int(new)
+        except ValueError:
+            n = None
+    else:
+        n = None
+    if isinstance(failed, bool):
+        f = failed
+    elif isinstance(failed, int):
+        f = bool(failed)
+    elif isinstance(failed, str):
+        f = failed.strip().lower() == "true"
+    else:
+        f = False
+    return {"new": n, "failed": f}
 
 
 @dataclass(frozen=True)
