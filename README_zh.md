@@ -184,7 +184,7 @@ run-scoped capture/guard 并复制一致的 70 表 baseline，随后由一个受
 importer 与本地激活工具；它不是持续复制。SQLite-active 正向 shadow 只使用
 `scripts/shadow_sqlite_to_postgres.py`，且两种流程绝不能指向同一个 target。
 
-Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有业务 SQL 全限定到 run 绑定 schema，在关键绑定处以短写栅栏复核 live SQLite capture 仍启用，采用有界 named server cursor/statement timeout，并在起始和最终验证由正式 migration 派生的完整 v9 表/列/约束/operational+GIN-index/extension catalog。Snapshot/fence 必须用指向当前 SQLite 路径的 fresh 专用连接，不得复用 repository 的线程缓存连接；open 前后以及发布/PG commit 前都要复核 resolved path 与 device/inode。最终 SQLite 栅栏只在 PG 长 proof/ANALYZE 完成后取得，并保持到 PG H0 事务提交成功。
+Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有业务 SQL 全限定到 run 绑定 schema，在关键绑定处以短写栅栏复核 live SQLite capture 仍启用，采用有界 named server cursor/statement timeout，并在起始和最终验证由正式 migration 派生的完整 v30 表/列/约束/operational+GIN-index/extension catalog。Snapshot/fence 必须用指向当前 SQLite 路径的 fresh 专用连接，不得复用 repository 的线程缓存连接；open 前后以及发布/PG commit 前都要复核 resolved path 与 device/inode。最终 SQLite 栅栏只在 PG 长 proof/ANALYZE 完成后取得，并保持到 PG H0 事务提交成功。
 
 - 在发行默认的 SQLite 后端上，搜索使用 SQLite FTS/向量存储；PostgreSQL 后端改用 `pg_trgm`/`ILIKE`。float32 向量仍存为 `bytea`，不安装也不需要 pgvector。
 - PostgreSQL 要求 `pg_trgm` 必须安装在 `public` schema。可用不回显凭据的查询检查：
