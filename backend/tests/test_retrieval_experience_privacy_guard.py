@@ -127,16 +127,24 @@ def _docstring_nodes(tree: ast.Module) -> set[int]:
 
 
 def _forbidden_hits(path: Path) -> list[tuple[str, str, int]]:
+    """扫出危险键名的出现点,第三元是**纯诊断**行号,不是身份。
+
+    ⚠ 累加变量必须叫 `violations`(或 diagnostic/offender/mismatch/error 之一),
+    不能叫 `hits`：`backend/tests/architecture/policy.py` 的
+    `line-number-identity` 规则按**累加变量名**判断一处 `node.lineno` 是
+    「用行号当身份」还是「行号只是报错时给人看的」,而这条规则是 G2
+    (`architecture_contract`) 的硬门。改名会让整条守卫在扩展门上报红。
+    """
     tree = _module_tree(path)
     docstrings = _docstring_nodes(tree)
-    hits: list[tuple[str, str, int]] = []
+    violations: list[tuple[str, str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
-            hits.append(("变量", node.id, node.lineno))
+            violations.append(("变量", node.id, node.lineno))
         elif isinstance(node, ast.Attribute) and node.attr in _FORBIDDEN_NAMES:
-            hits.append(("属性", node.attr, node.lineno))
+            violations.append(("属性", node.attr, node.lineno))
         elif isinstance(node, ast.arg) and node.arg in _FORBIDDEN_NAMES:
-            hits.append(("形参", node.arg, node.lineno))
+            violations.append(("形参", node.arg, node.lineno))
         elif (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
@@ -146,8 +154,8 @@ def _forbidden_hits(path: Path) -> list[tuple[str, str, int]]:
             # 精确相等,不是子串:``"[Recent searches, grouped by question
             # shape]"`` 是渲染给模型的表头,里面的 "question" 是英文单词而不是
             # 一个键。按子串扫会把它误杀,而误杀会让下一个人把整条守卫关掉。
-            hits.append(("字面量", node.value, node.lineno))
-    return hits
+            violations.append(("字面量", node.value, node.lineno))
+    return violations
 
 
 # --------------------------------------------------- 判据一:投影层没有自由文本
