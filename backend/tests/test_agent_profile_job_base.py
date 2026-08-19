@@ -54,8 +54,11 @@ from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.services import background_jobs
 from app.services.agent_profile_job import (
+    AGENT_PROFILE_EVIDENCE_MAX_IDS,
     AGENT_PROFILE_WORKLOAD,
     AgentProfileConsolidationService,
+    CorpusStats,
+    render_current_blocks,
 )
 
 NOW = "2026-08-18T00:00:00+00:00"
@@ -776,6 +779,166 @@ def test_a_user_edited_block_reaches_the_prompt_marked_as_authoritative(harness)
     assert "- corpus_shape (user-authored): 这是工具手册库" in prompt
     assert "- corpus_gaps: 模型上一轮的猜测" in prompt
     assert "authoritative" in prompt
+
+
+# ------------------------------------------------------ evidence liveness (D)
+#
+# codex #520 P2-T1: without this, a block built on a document that has since
+# been deleted or reparsed away rides in every planning prompt forever —
+# ``retire`` (R2 P2) exists but nothing ever told the model a claim's evidence
+# had gone missing. These are pure-function tests against
+# ``render_current_blocks``/``CorpusStats`` directly: what matters here is the
+# liveness partition (served / still-in-the-library / gone), which has
+# nothing to do with the claim/settle machinery the rest of this file drives
+# through a real database.
+
+
+def _stats(*, served: tuple[str, ...] = (), visible: tuple[str, ...] = ()) -> CorpusStats:
+    return CorpusStats(
+        documents=0,
+        per_document=(),
+        documents_without_elements=0,
+        element_totals={},
+        element_document_counts={},
+        kg_objects=(),
+        served_ids=frozenset(served),
+        visible_ids=frozenset(visible),
+    )
+
+
+def _job_block(
+    label: str, source_ids: tuple[str, ...], *, value: str = "v", owner_id: str = ""
+) -> dict:
+    return {
+        "label": label,
+        "value": value,
+        "owner_id": owner_id,
+        "updated_origin": "job",
+        "evidence": [{"claim_index": 0, "source_ids": list(source_ids)}],
+    }
+
+
+def test_evidence_still_in_the_current_statistics_is_named(harness):
+    blocks = [_job_block("corpus_shape", ("s-a", "s-b"))]
+    stats = _stats(served=("s-a", "s-b"), visible=("s-a", "s-b"))
+
+    prompt = render_current_blocks(blocks, stats)
+
+    assert "supported by: s-a, s-b" in prompt
+    assert "no longer in the library" not in prompt
+    assert "still in the library" not in prompt
+    assert "all supporting documents are gone" not in prompt
+
+
+def test_evidence_outside_the_sample_but_still_visible_is_not_reported_as_gone(harness):
+    """The key anti-regression case: liveness must be judged against
+    ``visible_ids`` (the
+    FULL user-visible set), never ``served_ids`` (capped to
+    ``AGENT_PROFILE_STATS_MAX_DOCUMENTS`` and only documents with a listed
+    element kind). A document that merely fell outside the sample — or is
+    healthy prose with nothing to list — is still in the library and must
+    never be reported gone, or the model would be steered into retiring a
+    claim that is still true."""
+    blocks = [_job_block("corpus_shape", ("s-a", "s-b", "s-c"))]
+    # s-a is served; s-b/s-c are visible (still in the library) but did not
+    # make the sampled statistics.
+    stats = _stats(served=("s-a",), visible=("s-a", "s-b", "s-c"))
+
+    prompt = render_current_blocks(blocks, stats)
+
+    assert "supported by: s-a" in prompt
+    assert "+2 more still in the library" in prompt
+    assert "no longer in the library" not in prompt
+    assert "all supporting documents are gone" not in prompt
+
+
+def test_evidence_entirely_gone_renders_the_explicit_marker(harness):
+    blocks = [_job_block("corpus_shape", ("s-a", "s-b"))]
+    stats = _stats(served=(), visible=())
+
+    prompt = render_current_blocks(blocks, stats)
+
+    assert "[all supporting documents are gone]" in prompt
+    assert "supported by" not in prompt
+
+
+def test_a_user_written_block_never_renders_an_evidence_line(harness):
+    blocks = [
+        {
+            "label": "corpus_shape",
+            "value": "这是工具手册库",
+            "owner_id": "",
+            "updated_origin": "user",
+            "evidence": [{"claim_index": 0, "source_ids": ["s-a"]}],
+        }
+    ]
+    stats = _stats(served=(), visible=())
+
+    prompt = render_current_blocks(blocks, stats)
+
+    line = next(
+        line for line in prompt.splitlines() if line.startswith("- corpus_shape")
+    )
+    assert line == "- corpus_shape (user-authored): 这是工具手册库"
+
+
+def test_rendered_ids_are_always_a_subset_of_served_ids(harness):
+    """Echo safety (docstring of ``render_current_blocks``): ``parse_base_reply``
+    structurally rejects an entire reply if it names an id outside
+    ``served_ids``. If a "still in the library"/"gone" id were ever spelled
+    out by name, a model that copies it back would get an unrelated block's
+    write rejected too."""
+    blocks = [_job_block("corpus_shape", ("s-a", "s-b", "s-c"))]
+    stats = _stats(served=("s-a",), visible=("s-a", "s-b"))
+
+    prompt = render_current_blocks(blocks, stats)
+
+    named_segment = prompt.split("supported by: ", 1)[1].split("]")[0].split(";")[0]
+    named_ids = {piece.strip() for piece in named_segment.split(",")}
+    assert named_ids <= stats.served_ids
+    assert named_ids == {"s-a"}
+
+
+def test_the_liveness_suffix_reuses_the_existing_evidence_cap(harness):
+    """No new number: the same ``AGENT_PROFILE_EVIDENCE_MAX_IDS`` the write
+    side already caps ``evidence`` at is the only cap applied here."""
+    served = tuple(f"s-{i}" for i in range(AGENT_PROFILE_EVIDENCE_MAX_IDS + 5))
+    blocks = [_job_block("corpus_shape", served)]
+    stats = _stats(served=served, visible=served)
+
+    prompt = render_current_blocks(blocks, stats)
+
+    named_segment = prompt.split("supported by: ", 1)[1].split("]")[0]
+    assert len(named_segment.split(", ")) == AGENT_PROFILE_EVIDENCE_MAX_IDS
+
+
+def test_a_block_with_no_evidence_renders_no_liveness_suffix(harness):
+    """``evidence: []`` is rule 4's own "no single document is the reason" —
+    it must not be mistaken for "all supporting documents are gone"."""
+    blocks = [_job_block("corpus_shape", ())]
+    stats = _stats(served=(), visible=())
+
+    prompt = render_current_blocks(blocks, stats)
+
+    line = next(
+        line for line in prompt.splitlines() if line.startswith("- corpus_shape")
+    )
+    assert line == "- corpus_shape: v"
+
+
+def test_the_prompt_carries_the_reconciliation_only_rule(harness):
+    client = _Client(_reply([]))
+    harness["profiles"].write_block(
+        NOTEBOOK_ID, "", "corpus_shape", value="v",
+        evidence=[{"claim_index": 0, "source_ids": ["s-a"]}],
+        expected_revision=0, origin="job", actor="",
+    )
+    service = _service(harness, client=client)
+
+    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+
+    prompt = client.prompts[0]
+    assert "not evidence to reuse" in prompt or "not to copy" in prompt
 
 
 # -------------------------------------------------------------------- reading

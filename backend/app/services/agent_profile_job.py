@@ -192,6 +192,16 @@ class CorpusStats:
     #: The ids the prompt actually served, i.e. the only ids an evidence list
     #: may legally contain.
     served_ids: frozenset[str] = field(default_factory=frozenset)
+    #: The FULL user-visible document set this same read saw — a superset of
+    #: ``served_ids``, which is capped to ``AGENT_PROFILE_STATS_MAX_DOCUMENTS``
+    #: and only holds documents that produced a LISTED element kind. This is
+    #: the set ``render_current_blocks`` must judge evidence "still alive"
+    #: against (codex #520 P2-T1): a document dropped out of the top 40, or
+    #: one that is perfectly healthy prose with no tables/formulas/images/code
+    #: blocks, is neither in ``served_ids`` nor gone — judging liveness by
+    #: ``served_ids`` instead would report it as gone and steer the model into
+    #: retiring a claim that is still true.
+    visible_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -283,7 +293,7 @@ def render_corpus_block(stats: CorpusStats) -> str:
     return "\n".join(lines)
 
 
-def render_current_blocks(blocks: Sequence[Mapping[str, Any]]) -> str:
+def render_current_blocks(blocks: Sequence[Mapping[str, Any]], stats: CorpusStats) -> str:
     """The "what you already believe" half of the prompt.
 
     ``(user-authored)`` is the load-bearing marker: design §5.4 makes a
@@ -291,7 +301,73 @@ def render_current_blocks(blocks: Sequence[Mapping[str, Any]]) -> str:
     and it is also the cold-start channel (a user can simply TELL the agent
     what this library is). Without the marker the model cannot tell its own
     previous guess apart from a person's correction of it.
+
+    codex #520 P2-T1: each job-authored block with evidence also carries a
+    bracketed EVIDENCE LIVENESS suffix, so a block built on documents that
+    have since been deleted or reparsed away is visible to the model as such
+    — the retirement channel (R2 P2) existed with no reliable trigger before
+    this, because the model never saw which of its own past claims had lost
+    their footing.
+
+    ⚠ Rendering, NOT recall: only ids still in ``stats.served_ids`` are ever
+    spelled out. Those are the only ids ``parse_base_reply`` will accept back
+    as evidence — echoing an id that is merely "still in the library" (in
+    ``visible_ids`` but outside the sampled statistics) would hand the model
+    a citation the next reply's structural evidence check silently drops, or
+    worse, an id it copies into a brand-new claim that then gets the WHOLE
+    reply rejected. Everything else the block was written on is a bare count.
+
+    User-authored blocks never render this suffix at all: ``write_block``'s
+    user path stores no evidence, and ``retire_disposition`` refuses to
+    retire a user block regardless of what any liveness note might say — a
+    hint pointing at a door that is always locked is pure noise.
     """
+
+    def _evidence_ids(block: Mapping[str, Any]) -> list[str]:
+        """Flatten the stored ``evidence`` column into document ids.
+
+        Shape is ``[{"claim_index": int, "source_ids": [...]}]`` (see
+        ``_write_blocks``); the base chain writes exactly one claim today,
+        but folding over every claim means a future per-claim prompt needs
+        no change here.
+        """
+        raw = block.get("evidence")
+        if not isinstance(raw, list):
+            return []
+        ids: list[str] = []
+        for claim in raw:
+            if not isinstance(claim, Mapping):
+                continue
+            source_ids = claim.get("source_ids")
+            if isinstance(source_ids, list):
+                ids.extend(str(sid) for sid in source_ids if isinstance(sid, str))
+        return ids
+
+    def _liveness_suffix(source_ids: list[str]) -> str:
+        # Dedup and cap at the same limit the write side already enforced —
+        # consuming the existing bound, not a new one.
+        ids = list(dict.fromkeys(source_ids))[:AGENT_PROFILE_EVIDENCE_MAX_IDS]
+        if not ids:
+            return ""
+        named = [sid for sid in ids if sid in stats.served_ids]
+        still_alive = sum(
+            1 for sid in ids if sid not in stats.served_ids and sid in stats.visible_ids
+        )
+        gone = sum(1 for sid in ids if sid not in stats.visible_ids)
+        if not named and not still_alive and gone:
+            # Every id this block was written on is gone: an unambiguous,
+            # fixed trigger shape for the prompt's retirement rule rather
+            # than a count the model has to interpret.
+            return " [all supporting documents are gone]"
+        parts: list[str] = []
+        if named:
+            parts.append("supported by: " + ", ".join(named))
+        if still_alive:
+            parts.append(f"+{still_alive} more still in the library")
+        if gone:
+            parts.append(f"{gone} no longer in the library")
+        return " [" + "; ".join(parts) + "]" if parts else ""
+
     lines = ["[Current understanding]"]
     by_label = {
         str(block.get("label") or ""): block
@@ -306,7 +382,8 @@ def render_current_blocks(blocks: Sequence[Mapping[str, Any]]) -> str:
             continue
         authored = str((block or {}).get("updated_origin") or "") == "user"
         marker = " (user-authored)" if authored else ""
-        lines.append(f"- {label}{marker}: {value}")
+        suffix = "" if authored else _liveness_suffix(_evidence_ids(block or {}))
+        lines.append(f"- {label}{marker}: {value}{suffix}")
     return "\n".join(lines)
 
 
@@ -989,7 +1066,7 @@ class AgentProfileConsolidationService:
         client = self.models.chat(AGENT_PROFILE_WORKLOAD)
         prompt = agent_profile_base_prompt(
             render_corpus_block(stats),
-            render_current_blocks(blocks),
+            render_current_blocks(blocks, stats),
             value_max_chars=AGENT_PROFILE_VALUE_MAX_CHARS,
         )
         raw = client.chat_json(
@@ -1235,6 +1312,9 @@ class AgentProfileConsolidationService:
                 if status not in _PARSED_STATUSES and status != "failed"
             ),
             served_ids=frozenset(sid for sid, _counts in ranked),
+            # Zero new queries: this is the same ``visible_ids`` list already
+            # computed above from ``signals`` in this method's one connection.
+            visible_ids=frozenset(visible_ids),
         )
 
     # -------------------------------------------------- overlay: triggering

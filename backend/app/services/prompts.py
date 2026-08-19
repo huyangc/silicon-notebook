@@ -1297,6 +1297,18 @@ def agent_profile_base_prompt(
     conflating the two would let every quiet run wipe blocks it merely had
     nothing to say about. Retirement stops at user-authored blocks; the server
     refuses those rather than trusting this instruction alone.
+
+    And one more (codex #520 P2-T1): the ratchet's trigger only works if the
+    model is told what the bracketed evidence-liveness note beside a block
+    means and told not to reuse it. That note exists for reconciliation, not
+    citation — some of the ids in it are echoed straight from the statistics
+    below and would pass the server's structural check if copied into a new
+    claim, but most of a block's evidence is written across many runs and
+    falls out of the ``AGENT_PROFILE_STATS_MAX_DOCUMENTS`` sample long before
+    it goes missing from the library; an id copied from the note that is NOT
+    in the statistics below gets the whole reply rejected the moment the
+    server sees it, which is a worse failure than the model simply reasoning
+    fresh from the statistics every time.
     """
     return (
         "You maintain an agent's shared understanding of ONE knowledge library, "
@@ -1333,7 +1345,15 @@ def agent_profile_base_prompt(
         '{"label": "<that label>", "retire": true} and no value. Retire only '
         "what the statistics contradict: having nothing to add is rule 1's "
         "omission, not a retirement. A block marked (user-authored) can never be "
-        "retired; a person's own statement is not yours to withdraw.\n"
+        "retired; a person's own statement is not yours to withdraw. A block "
+        "whose bracketed note reads [all supporting documents are gone] has "
+        "lost every document it was based on and should normally be retired.\n"
+        "6. Some blocks below carry a bracketed note such as "
+        "[supported by: s1, s2; +2 more still in the library; 1 no longer in "
+        "the library] or [all supporting documents are gone]. That note is for "
+        "YOU to reconcile against rule 5, not evidence to reuse: never copy an "
+        "id from it into a new claim's evidence. A new claim's evidence may "
+        "only be drawn from the document ids in the statistics below.\n"
         f"Return JSON only, matching: {AGENT_PROFILE_SCHEMA_HINT}\n\n"
         f"{corpus_block}\n\n"
         f"{current_block}"
