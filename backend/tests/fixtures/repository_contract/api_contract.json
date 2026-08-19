@@ -7518,7 +7518,7 @@
           "type": "object"
         },
         "PublicReport": {
-          "description": "A shared report, readable without a session.",
+          "description": "A shared report, readable without a session.\n\n`question` and `content_md` are served whole — both are the user's own\nartifact, and capping the question bounded nothing while `content_md` (far\nlarger) stays uncapped right beside it.",
           "properties": {
             "content_md": {
               "default": "",
@@ -7562,12 +7562,17 @@
           "type": "object"
         },
         "PublicReportReference": {
-          "description": "One citation as an anonymous reader sees it.\n\nNo `source_id` / `element_id` / `object_id`: a public link must not hand out\nhandles into the authenticated API. See `services/report_public_view.py`.",
+          "description": "One citation as an anonymous reader sees it.\n\nNo `source_id` / `element_id` / `object_id`: a public link must not hand out\nhandles into the authenticated API. See `services/report_public_view.py`.\n\n`title_truncated`/`snippet_truncated`/`file_name_truncated` disclose that an\nover-length value was clipped to its bounded prefix, so the page can mark it\nrather than drop the tail silently (AGENTS.md 用户编辑的数据不得静默截断;\nsame three flags `PublicReference` carries for a shared conversation).",
           "properties": {
             "file_name": {
               "default": "",
               "title": "File Name",
               "type": "string"
+            },
+            "file_name_truncated": {
+              "default": false,
+              "title": "File Name Truncated",
+              "type": "boolean"
             },
             "key": {
               "default": "",
@@ -7584,10 +7589,20 @@
               "title": "Snippet",
               "type": "string"
             },
+            "snippet_truncated": {
+              "default": false,
+              "title": "Snippet Truncated",
+              "type": "boolean"
+            },
             "title": {
               "default": "",
               "title": "Title",
               "type": "string"
+            },
+            "title_truncated": {
+              "default": false,
+              "title": "Title Truncated",
+              "type": "boolean"
             }
           },
           "title": "PublicReportReference",
