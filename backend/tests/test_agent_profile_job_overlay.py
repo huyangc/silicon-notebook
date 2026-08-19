@@ -1289,6 +1289,7 @@ def _add_report(
     notebook_id: str = NOTEBOOK_ID,
     status: str = "done",
     created_at: str = NOW,
+    updated_at: str | None = None,
     attempted: tuple[tuple[dict, ...], ...] = (),
 ) -> None:
     """One persisted report, written directly — mirrors ``_add_ask``.
@@ -1305,7 +1306,7 @@ def _add_report(
             "INSERT INTO reports(id,notebook_id,question,sections_json,"
             "status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
             (report_id, notebook_id, question, json.dumps(sections, ensure_ascii=False),
-             status, user_id, created_at, created_at),
+             status, user_id, created_at, updated_at or created_at),
         )
 
 
@@ -2176,3 +2177,31 @@ def test_the_usage_section_total_respects_the_documented_cap():
         f"usage 段 {len(block)} 字符,远超文档承诺的 "
         f"{AGENT_PROFILE_USAGE_SECTION_MAX_CHARS}(+一行容差)"
     )
+
+
+def test_report_samples_follow_completion_order_not_creation_order(harness):
+    """codex #524 R15 P2:老报告在 report_limit 份更晚**创建**的报告之后才
+    完成(重试/慢跑)时,按 created_at 排窗恰好把「刚触发这次巡固」的那份
+    挤出去;采样与 attempt 排序都必须按终态 updated_at。"""
+    _add_report(
+        harness, "rep-old", user_id=USER_A, question="创建最早、完成最晚",
+        created_at="2026-08-01T00:00:00+00:00",
+        updated_at="2026-08-10T00:00:00+00:00",
+        attempted=(({"query": "迟到方向", "new": 2, "tries": 1},),),
+    )
+    for i in range(3):
+        _add_report(
+            harness, f"rep-new-{i}", user_id=USER_A, question=f"新建 {i}",
+            created_at=f"2026-08-0{i + 2}T00:00:00+00:00",
+            updated_at=f"2026-08-0{i + 2}T01:00:00+00:00",
+            attempted=(({"query": f"q{i}", "new": 1, "tries": 1},),),
+        )
+
+    rows = harness["ask_state"].recent_user_report_traces(
+        NOTEBOOK_ID, USER_A, report_limit=3, attempt_limit=200
+    )
+
+    ids = [row["report_id"] for row in rows]
+    assert "rep-old" in ids          # 完成序窗口容得下它
+    assert ids[0] == "rep-old"       # 且它就是最新完成的那份
+    assert rows[0]["attempts"][0]["query"] == "迟到方向"
