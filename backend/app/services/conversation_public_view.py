@@ -62,10 +62,11 @@ from typing import Any, Iterator, Sequence
 # Mirrors ``report_public_view``'s caps; the report body (``content_md``) is
 # left uncapped and the conversation answer body (``answer_md``) AND the
 # question follow that precedent — a shared Q&A is the user's own artifact.
-# Ask accepts questions up to 4,000 chars; capping the public question (this
-# module once did, at 2,000) silently dropped the tail of the very text that
-# produced the answer, with no disclosure — the same "用户编辑的数据不得静默截断"
-# violation ``answer_md`` already avoids. Both are served whole (codex #522 R1).
+# Ask accepts questions up to ``app.models.ask.ASK_QUESTION_MAX_CHARS`` (4,000);
+# capping the public question (this module once did, at 2,000) silently dropped
+# the tail of the very text that produced the answer, with no disclosure — the
+# same "用户编辑的数据不得静默截断" violation ``answer_md`` already avoids. Both
+# are served whole (codex #522 R1).
 MAX_REFERENCES = 500
 MAX_SNIPPET_CHARS = 1200
 # Per-reference title / original-file-name cap. Unlike the question and the
@@ -216,10 +217,25 @@ def _text_flag(value: Any, limit: int) -> tuple[str, bool]:
 def _question_text(value: Any) -> str:
     """The question, served WHOLE — never truncated (codex #522 R1).
 
-    Ask accepts questions up to 4,000 chars; the public projection used to cap
-    this at 2,000, silently dropping the tail of the very text that produced the
-    answer. Like ``answer_md``, the question is the user's own artifact: serving
-    it whole beats truncating it with no disclosure."""
+    Ask bounds a submitted question at ``app.models.ask.ASK_QUESTION_MAX_CHARS``
+    (4,000); the public projection used to cap this at 2,000, silently dropping
+    the tail of the very text that produced the answer. Like ``answer_md``, the
+    question is the user's own artifact: serving it whole beats truncating it
+    with no disclosure.
+
+    "Whole" is only a *bounded* promise because of that write-side rail — an
+    anonymous response is otherwise unbounded by client input (the finding codex
+    #525 R1 P2 raised against the report projection, closed for Ask by
+    ``AskRequest.question``'s ``max_length`` and by ``ask_notebook``'s matching
+    refusal on the MCP surface).
+    ``test_public_question_is_bounded_by_the_write_side_rail`` pins the two
+    halves together so neither can be relaxed without the other failing.
+
+    Two knowingly-unbounded leftovers, recorded rather than papered over: turns
+    written *before* that rail, and the conversation title (see ``_title_text``).
+    Both would need a disclosure field on the turn plus a public-page change to
+    bound here, so they are tracked as separate work rather than fixed by a
+    silent clip."""
     return str(value or "").strip()
 
 

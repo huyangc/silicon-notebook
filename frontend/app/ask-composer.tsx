@@ -17,6 +17,13 @@ type AskComposerProps = {
   // 硬约束:笔记本无来源且无挂载参考库时为 true —— 锁死输入框与发送键
   // (判据见 ask-availability.isAskBlocked)。与 running 互斥:被锁时不可能在生成中。
   disabled?: boolean;
+  // 内容本身当前不可提交(唯一来源:提问超出 ASK_INPUT_LIMITS.questionMaxChars)。
+  // 与 disabled 刻意分成两个 prop:disabled 会连输入框一起锁死,而超限时输入框**必须**
+  // 保持可编辑——用户正要做的就是把它改短。理由同「不替用户裁剪」:护栏是拦住提交。
+  //
+  // 判据留在本组件而不是只在调用方,是因为提交有两条路:发送键与 Enter。Enter 的
+  // handler 就在下面,调用方够不着它,只 gate 按钮会让超限的问题从键盘照样发出去。
+  submitBlocked?: boolean;
   children?: ReactNode;
 };
 
@@ -30,6 +37,7 @@ export function AskComposer({
   running,
   abortLabel = "中断生成",
   disabled = false,
+  submitBlocked = false,
   children,
 }: AskComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -69,7 +77,7 @@ export function AskComposer({
       && !event.nativeEvent.isComposing
     ) {
       event.preventDefault();
-      if (!running && !disabled && value.trim()) {
+      if (!running && !disabled && !submitBlocked && value.trim()) {
         onSubmit();
       }
     }
@@ -96,7 +104,7 @@ export function AskComposer({
           type="button"
           aria-label={running ? abortLabel : "发送"}
           title={running ? abortLabel : "发送"}
-          disabled={!running && (disabled || !value.trim())}
+          disabled={!running && (disabled || submitBlocked || !value.trim())}
           onClick={running ? onAbort : onSubmit}
         >
           {running ? <Square size={16} strokeWidth={2.5} /> : "→"}

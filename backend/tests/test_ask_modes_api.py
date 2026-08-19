@@ -118,3 +118,40 @@ def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
     assert events[-1]["event"] == "final"
     assert events[-1]["response"]["conclusion"] == "service-stub"
     assert seen["user_id"] == repo.current_user().id
+
+
+def test_ask_refuses_an_over_length_question(tmp_path, monkeypatch):
+    """提问必须在**提交**这一刻就有界。
+
+    问答会话公开分享页把每轮 `question` **原样**发给匿名访客(截断用户自撰 artifact
+    而不披露违反「用户编辑的数据不得静默截断」,那正是 codex #522 R1 拿掉旧 2,000
+    公开上限的理由)——所以「原样返回」只有在写入侧拒收超长问题时才是有界的。这是
+    codex #525 R1 P2 对报告侧提的同一条,平移到 Ask 的三个入口。
+
+    与前端 `ASK_INPUT_LIMITS.questionMaxChars` 是同一条护栏的两半。
+    """
+    from app.models.ask import ASK_QUESTION_MAX_CHARS
+
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    over = "问" * (ASK_QUESTION_MAX_CHARS + 1)
+    at_cap = "问" * ASK_QUESTION_MAX_CHARS
+
+    for path in (f"/api/notebooks/{nb}/ask", f"/api/notebooks/{nb}/ask/stream"):
+        r = client.post(path, json={"question": over, "mode": "chunk"})
+        assert r.status_code == 422, (path, r.status_code)
+    # 意图预检本来就有这条闸;一并钉住,免得三个入口日后分叉——预检 422 而执行放行,
+    # 等于逐步推理在浏览器里被拦、同一个问题却能从别处提交进来。
+    r = client.post(f"/api/notebooks/{nb}/ask/intent", json={"question": over})
+    assert r.status_code == 422
+
+    # 拒绝,不是裁短了存:库里不能留下一份被悄悄截过的问题。超限在 pydantic 校验期
+    # 就被挡下,连会话容器都不该建出来。
+    assert client.get(f"/api/notebooks/{nb}/conversations").json() == []
+
+    # 恰好等于上限**不是** 422——空转保护:一个恒 422 的实现过不了这一段。
+    # 这里的 409 来自空库可用性闸(证据为零),它排在 body 校验之后,所以「不是 422」
+    # 恰好证明问题本身已经通过校验。
+    for path in (f"/api/notebooks/{nb}/ask", f"/api/notebooks/{nb}/ask/stream"):
+        ok = client.post(path, json={"question": at_cap, "mode": "chunk"})
+        assert ok.status_code == 409, (path, ok.status_code, ok.text)

@@ -1836,7 +1836,7 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 
 | Bound | Value |
 | --- | ---: |
-| `REPORT_QUESTION_MAX_CHARS` (research question at **creation**; over-limit is refused with 422, never stored clipped — the composer carries the same `maxLength`) | 4,000 |
+| `REPORT_QUESTION_MAX_CHARS` (research question at **creation**; over-limit is refused with 422, never stored clipped — the composer enforces the same limit by blocking submission and saying so, counted in Unicode code points to match Pydantic rather than clipping the text) | 4,000 |
 | `MAX_REFERENCES` (citations projected per report; excess is disclosed as `truncated_references`) | 500 |
 | `MAX_REFERENCE_TITLE_CHARS` (per-reference title / original file name) | 400 |
 | `MAX_SNIPPET_CHARS` (per-citation excerpt) | 1,200 |
@@ -1860,10 +1860,15 @@ The last three live in `backend/app/services/report_public_view.py`; the creatio
 | `MAX_REFERENCE_TITLE_CHARS` (per-reference title / original file name) | 400 |
 | `MAX_SNIPPET_CHARS` (per-citation excerpt) | 1,200 |
 | `MAX_CAPTION_CHARS` (per-image caption) | 500 |
+| `ASK_QUESTION_MAX_CHARS` (question at **submission**, `backend/app/models/ask.py`; over-limit is refused with 422 and never stored clipped) | 4,000 |
 
-The per-turn question **and the conversation title** are served **whole** (no cap): like `answer_md`, they are the user's own artifacts (the title has no length cap on rename), and truncating them silently would drop the very text that produced the answer or names the conversation. A reference title/excerpt/original-filename is evidence metadata and stays bounded, but an over-length value **sets `title_truncated`/`snippet_truncated`/`file_name_truncated`** (the public page shows a "已截断" hint) rather than dropping the tail silently (codex #522 R3/R4).
+The per-turn question **and the conversation title** are served **whole** (no cap): like `answer_md`, they are the user's own artifacts, and truncating them silently would drop the very text that produced the answer or names the conversation. A reference title/excerpt/original-filename is evidence metadata and stays bounded, but an over-length value **sets `title_truncated`/`snippet_truncated`/`file_name_truncated`** (the public page shows a "已截断" hint) rather than dropping the tail silently (codex #522 R3/R4).
 
-All seven live in `backend/app/services/conversation_public_view.py`.
+"Served whole" is only a **bounded** promise because the write side refuses an over-length question: `AskRequest.question` carries `max_length=ASK_QUESTION_MAX_CHARS`, so `POST /notebooks/{id}/ask`, `POST /notebooks/{id}/ask/stream` and `POST /notebooks/{id}/ask/intent` all answer 422 above it, and the composer blocks submission with the same limit (counted in Unicode code points to match Pydantic; the text is never clipped for the user). Without that rail an anonymous response would be unbounded by client input — the finding codex #525 R1 P2 raised against the report projection, which is why the two caps hold the same value. **The MCP tool `ask_notebook` enforces it too**, with its own message rather than a raw validation error: a long-lived Agent token could previously submit a question of any length and now receives `question too long: … the maximum is 4,000 …`, a deliberate behaviour change, since an MCP client is a write side like any other and material that long belongs in an uploaded source.
+
+Two knowingly-unbounded leftovers, recorded rather than papered over: turns written *before* that rail, and the conversation title (`ConversationRenameRequest.title` has no cap at all). Bounding either inside the projection needs a disclosure field on the turn plus a public-page change — what `PublicReport.question_truncated` cost on the report side — so they are tracked as separate work rather than fixed by a silent clip.
+
+The first seven live in `backend/app/services/conversation_public_view.py`.
 
 ## APIs
 

@@ -1293,6 +1293,7 @@
               "type": "string"
             },
             "question": {
+              "maxLength": 4000,
               "title": "Question",
               "type": "string"
             },

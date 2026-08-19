@@ -654,14 +654,51 @@ def test_truthy_scalar_evidence_fields_degrade_instead_of_500():
 
 
 def test_a_long_question_is_served_whole_not_truncated():
-    """Ask accepts questions far past the retired 2,000-char public cap; the
-    projection must serve the question WHOLE (like ``answer_md``), never
+    """The projection must serve the question WHOLE (like ``answer_md``), never
     silently truncate the very text that produced the answer (codex #522 R1).
-    Mutation guard: restoring ``_text(..., 2000)`` here drops it to 2,000."""
+    Mutation guard: restoring ``_text(..., 2000)`` here drops it to 2,000.
+
+    5,000 chars is past today's write-side rail (``ASK_QUESTION_MAX_CHARS``), so
+    this input now stands for a turn written BEFORE that rail — exactly the row
+    the projection still has to render faithfully rather than clip."""
     long_q = "问" * 5000
     turn = public_turn(_turn(long_q, {"answer": "答。", "anchors": [], "citations": []}))
     assert turn["question"] == long_q
     assert len(turn["question"]) == 5000  # no 2,000 cap
+
+
+def test_public_question_is_bounded_by_the_write_side_rail():
+    """"Served whole" is only a BOUNDED promise because the write side refuses an
+    over-length question — the two halves are one guardrail and this pins them
+    together (codex #525 R1 P2, raised against the report projection and equally
+    true here).
+
+    Without the rail an anonymous response would be unbounded by client input;
+    without "serve whole" the page would silently clip a user's own artifact.
+    Relaxing either half alone fails here: drop ``AskRequest.question``'s
+    ``max_length`` and the model stops refusing; re-cap ``_question_text`` and
+    the sibling test above goes red."""
+    from pydantic import ValidationError
+
+    from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
+
+    at_cap = "问" * ASK_QUESTION_MAX_CHARS
+    assert len(AskRequest(question=at_cap).question) == ASK_QUESTION_MAX_CHARS
+    try:
+        AskRequest(question=at_cap + "问")
+    except ValidationError:
+        pass
+    else:  # pragma: no cover - the whole point of the test
+        raise AssertionError(
+            "AskRequest accepted an over-length question; the public projection "
+            "serves it verbatim, so an anonymous response is now unbounded by "
+            "client input"
+        )
+
+    # And what the write side does admit, the projection still emits whole — no
+    # second, quieter cap hiding inside the disclosure boundary.
+    turn = public_turn(_turn(at_cap, {"answer": "答。", "anchors": [], "citations": []}))
+    assert turn["question"] == at_cap
 
 
 def test_a_long_title_is_served_whole_not_truncated():

@@ -148,7 +148,7 @@ import {
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
-import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
+import { askQuestionLimitHint, bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "../features/kg-maintenance/kg-api";
@@ -2630,6 +2630,17 @@ export default function Home() {
   // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
   // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。
   const askQuotedPhraseHint = useMemo(() => quotedPhraseHint(question), [question]);
+  // 超限只拦提交,不动用户已经敲进去的字(codex #525 R3):按码点数,与后端 422 同一把尺。
+  // 这句提示优先于引号回执——它是此刻唯一挡着发送键的东西,被引号回执盖住的话用户
+  // 只会看到按钮变灰而不知道为什么。
+  //
+  // 量的是 `question.trim()` 而不是原文:runAsk 发出去的就是 trim 过的那一份,后端也
+  // 只校验它。按原文量会在「正好满额 + 一个尾随换行」时把按钮灰掉,而那个请求其实
+  // 收得下 —— 护栏要与 API 严格同界,不能自己更严一点。
+  const askQuestionOverLimit = useMemo(
+    () => askQuestionLimitHint(question.trim()),
+    [question],
+  );
   // 「这次提问还在进行中」——问题理解阶段(尚无持久 job)、等用户补充澄清、以及
   // 真正在跑的 ask 都算。在途 turn 从提交那一刻就要出现,理解阶段的轨迹才有地方
   // 落;只看 asking 会让用户在整段问题理解里对着空会话等待。
@@ -4304,6 +4315,9 @@ export default function Home() {
     ) return;
     const q = nextQuestion.trim();
     if (!q) return;
+    // 防御性复查:可见的闸是发送键与 Enter(两者都读 submitBlocked),这里兜住任何
+    // 绕过它们的调用路径,免得一个必被 422 的请求白跑一趟并留下一条失败会话。
+    if (askQuestionLimitHint(q)) return;
     if (isAskBlocked(currentNotebook) || sourceScopeBlocked) {
       // 自动模式没有勾选框——范围为空只能是笔记本本身无证据，落「添加来源」口径。
       setToast(sourceScopeBlocked && isAdvanced(uiMode)
@@ -7520,17 +7534,21 @@ export default function Home() {
                   running={asking || intentChecking}
                   abortLabel={intentChecking ? "取消问题理解" : "中断生成"}
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
+                  submitBlocked={askQuestionOverLimit !== null}
                 >
                   {/* 与来源页签工具条同一句话的第二处显示 —— 共用 retrievalScopeText，
                       两处不一致在结构上就不可能发生。 */}
                   <span className="retrieval-scope-count" title="勾选的来源与参考库才会参与本次检索">
                     检索范围 · {retrievalScopeText}
                   </span>
-                  {/* 只在用户真的敲了英文双引号时才出现:确认哪几段被当成完整短语,
-                      或说明为什么这次没识别。判据与后端同一份规则的镜像。 */}
-                  {askQuotedPhraseHint && (
+                  {/* 超限提示优先于引号回执:它是此刻唯一挡着提交的东西。
+                      只在用户真的敲了英文双引号时才出现引号回执:确认哪几段被当成
+                      完整短语,或说明为什么这次没识别。判据与后端同一份规则的镜像。 */}
+                  {askQuestionOverLimit ? (
+                    <span className="chat-hint over-limit">{askQuestionOverLimit}</span>
+                  ) : askQuotedPhraseHint ? (
                     <span className="chat-hint">{askQuotedPhraseHint}</span>
-                  )}
+                  ) : null}
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.map((g) => (
                       <button
