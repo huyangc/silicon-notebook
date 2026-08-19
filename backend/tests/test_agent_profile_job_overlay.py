@@ -43,6 +43,7 @@ from app.models.schemas import AskRequest, AskResponse
 from app.repositories.ports import (
     AGENT_PROFILE_MALFORMED_MESSAGE,
     AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
+    AGENT_PROFILE_REPORT_SAMPLE,
     AGENT_PROFILE_TRACE_SAMPLE,
 )
 from app.repositories.sqlite.agent_profile_store import AgentProfileStore
@@ -1241,7 +1242,12 @@ def test_a_failing_signal_never_turns_a_delivered_answer_into_an_error():
 def test_the_sample_size_constant_is_the_one_the_service_uses(harness):
     """The service must not carry a second spelling of the bound: a local
     default here and the real constant there is exactly how "40" becomes two
-    different numbers."""
+    different numbers.
+
+    P2-T4: ``usage_stats`` now makes TWO calls (asks, then reports), so this
+    fake must answer both — a fake missing the report method would make
+    ``usage_stats`` raise ``AttributeError`` before ``job_limit`` is even
+    captured, which is a different failure than the one this test targets."""
     captured: dict = {}
 
     class _Recorder:
@@ -1250,11 +1256,145 @@ def test_the_sample_size_constant_is_the_one_the_service_uses(harness):
             captured.update(job_limit=job_limit, step_limit=step_limit)
             return []
 
+        def recent_user_report_traces(self, notebook_id, user_id, *,
+                                      report_limit, attempt_limit):
+            captured.update(report_limit=report_limit,
+                            attempt_limit=attempt_limit)
+            return []
+
     service = _service(harness)
     service.ask_state = _Recorder()
     service.usage_stats(NOTEBOOK_ID, USER_A)
 
     assert captured["job_limit"] == AGENT_PROFILE_TRACE_SAMPLE
+    assert captured["report_limit"] == AGENT_PROFILE_REPORT_SAMPLE
+
+
+# =====================================================================
+# 7. the report SAMPLE (Agentic Memory P2, T4) — sections_json[i].attempted
+#    joins the ask trace as the overlay chain's second usage input.
+# =====================================================================
+
+
+def _add_report(
+    harness,
+    report_id: str,
+    *,
+    user_id: str,
+    question: str,
+    notebook_id: str = NOTEBOOK_ID,
+    status: str = "done",
+    created_at: str = NOW,
+    attempted: tuple[tuple[dict, ...], ...] = (),
+) -> None:
+    """One persisted report, written directly — mirrors ``_add_ask``.
+
+    ``attempted`` is one tuple of ``attempted`` dicts PER SECTION (a report
+    can have several sections, each with its own ``attempted`` list), so the
+    fixture can exercise the real nested shape
+    ``sections_json[i].attempted[j]`` rather than a flattened stand-in.
+    """
+    sections = [{"title": f"s{i}", "attempted": list(entries)}
+                for i, entries in enumerate(attempted)]
+    with harness["database"].write() as db:
+        db.execute(
+            "INSERT INTO reports(id,notebook_id,question,sections_json,"
+            "status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (report_id, notebook_id, question, json.dumps(sections, ensure_ascii=False),
+             status, user_id, created_at, created_at),
+        )
+
+
+def test_a_report_only_member_is_no_longer_a_no_usage_sample(harness, monkeypatch):
+    """T4 拍板:纯报告用户(零 ask、一份 done 报告)不再落 no_usage_sample。
+
+    ``note_report_completed``'s own docstring used to register this as a gap
+    ("Trigger, not input") — a member whose only activity was the report they
+    just finished would trigger their own overlay refresh and find nothing to
+    summarise. This closes it: the report sample alone is enough.
+    """
+    _with_submitter(monkeypatch, _Submitter())
+    _add_report(
+        harness, "rep-a", user_id=USER_A, question="仅有一份报告",
+        attempted=(({"query": "q1", "new": 3, "tries": 1},),),
+    )
+    service = _service(harness, client=_Client(_reply(
+        retrieval_notes="按报告的检索方向来看", usage_gaps="g",
+    )))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    job = _job(harness, USER_A)
+    assert job["status"] == "done"
+    assert job["diagnostic"] != "no_usage_sample"
+    assert _blocks(harness, USER_A)["retrieval_notes"]["value"] == "按报告的检索方向来看"
+
+
+def test_another_member_s_report_never_enters_the_sample(harness, monkeypatch):
+    """跨用户隔离正向断言:别人 created_by 的报告不进样本。
+
+    B 重跑 A 建的报告是 T4 已登记接受的方向安全代价(触发方是 self.user_id,
+    样本谓词是 reports.created_by)——这里钉住的是它安全的那一半:B 的报告
+    一个字都不出现在 A 的覆盖层输入里,即便它就在同一个 notebook。
+    """
+    _add_report(
+        harness, "rep-b", user_id=USER_B, question="B的报告不该被A看到",
+        attempted=(({"query": "q1", "new": 0, "tries": 1},),),
+    )
+
+    rows = harness["ask_state"].recent_user_report_traces(
+        NOTEBOOK_ID, USER_A, report_limit=10, attempt_limit=200
+    )
+
+    assert rows == []
+
+
+def test_a_failed_attempt_is_not_counted_as_a_zero_hit(harness, monkeypatch):
+    """``failed: true`` 的条目单独计成失败,不计成零命中;``new == 0`` 才计。
+
+    与 T4 拍板 4 的口径一致:检索炸了 ≠ 检索过。同一份报告里三个方向——一个
+    真正命中、一个失败、一个零命中——evidence 的 zero_hit_queries 必须恰好是
+    1,而不是把失败的那个也数进去变成 2。
+    """
+    _with_submitter(monkeypatch, _Submitter())
+    _add_report(
+        harness, "rep-a", user_id=USER_A, question="混合结果的报告",
+        attempted=((
+            {"query": "hit", "new": 2, "tries": 1},
+            {"query": "boom", "new": 5, "tries": 1, "failed": True},
+            {"query": "empty", "new": 0, "tries": 1},
+        ),),
+    )
+    service = _service(harness, client=_Client(_reply(
+        retrieval_notes="n", usage_gaps="g",
+    )))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_A)
+
+    blocks = _blocks(harness, USER_A)
+    assert blocks["usage_gaps"]["evidence"] == [
+        {"claim_index": 0, "zero_hit_queries": 1}
+    ]
+
+
+def test_only_done_reports_enter_the_sample(harness):
+    """只取 status='done' 的报告——失败/取消的报告说明不了这个人怎么检索。"""
+    _add_report(
+        harness, "rep-failed", user_id=USER_A, question="失败的报告",
+        status="failed",
+        attempted=(({"query": "q", "new": 0, "tries": 1},),),
+    )
+    _add_report(
+        harness, "rep-cancelled", user_id=USER_A, question="取消的报告",
+        status="cancelled",
+        attempted=(({"query": "q", "new": 0, "tries": 1},),),
+    )
+
+    rows = harness["ask_state"].recent_user_report_traces(
+        NOTEBOOK_ID, USER_A, report_limit=10, attempt_limit=200
+    )
+
+    assert rows == []
 
 
 # =====================================================================
