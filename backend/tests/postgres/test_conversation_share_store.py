@@ -13,7 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from app.repositories.ports import ConversationShareWatermarkStale
+from app.repositories.ports import (
+    ConversationHasNoShareableAnswer,
+    ConversationShareWatermarkStale,
+)
 from app.repositories.postgres.ask_state_store import (
     AskStateStore as PostgresAskStateStore,
 )
@@ -338,12 +341,15 @@ def test_unknown_and_blank_tokens_return_none(postgres_database):
     assert store.public_conversation_by_token("   ") is None
 
 
-def test_zero_answer_conversation_fails_closed(postgres_database):
-    """The core "never serve an ungated conversation" defence: a conversation
-    with no answers can be handed a token by ``share_conversation`` (the
-    "at least one written answer" policy lives in the API layer, not here),
-    but its watermark stays NULL — and ``public_conversation_by_token`` must
-    return None on a NULL watermark rather than serve an unbounded snapshot.
+def test_zero_answer_conversation_is_refused_atomically_and_leaves_no_token(
+    postgres_database,
+):
+    """The core "never serve an ungated conversation" defence, now enforced in
+    the STORE (codex #522 R5): a conversation with no answers resolves no
+    boundary, so ``share_conversation`` raises ``ConversationHasNoShareableAnswer``
+    inside the ``FOR UPDATE`` transaction and mints NO token — atomic, no
+    share-then-compensate window. Mirrors the SQLite copy. Mutation guard:
+    falling through to the UPDATE on ``through_id is None`` reds this.
     """
     assert PostgresMigrator(postgres_database).migrate() == 30
     with postgres_database.write() as connection:
@@ -362,12 +368,15 @@ def test_zero_answer_conversation_fails_closed(postgres_database):
         )
     store = PostgresAskStateStore(postgres_database, _seams())
 
-    issued = store.share_conversation("nb-empty-pg", "conv-empty-pg")
-    assert issued["share_token"]  # a token IS minted
-    assert issued["shared_through_at"] == ""  # but the watermark stays NULL
+    with pytest.raises(ConversationHasNoShareableAnswer):
+        store.share_conversation("nb-empty-pg", "conv-empty-pg")
 
-    # fail closed: an ungated (NULL-watermark) conversation is never served.
-    assert store.public_conversation_by_token(issued["share_token"]) is None
+    # No token was minted — the row is provably unshared.
+    assert store.conversation_share_state("nb-empty-pg", "conv-empty-pg") == {
+        "share_token": "",
+        "shared_through_at": "",
+        "shared_through_id": "",
+    }
 
 
 def test_conversation_share_state_reads_back_token_and_watermark(
@@ -391,82 +400,6 @@ def test_conversation_share_state_reads_back_token_and_watermark(
     after = store.conversation_share_state(notebook_id, conversation_id)
     assert after["share_token"] == issued["share_token"]
     assert after["shared_through_id"] == "ans-d"  # newest answer at share time
-
-
-def test_discard_unwatermarked_share_spares_a_watermarked_link(postgres_database):
-    """The conditional rollback (codex T2 review, concurrency P2): once a
-    concurrent share advances the watermark, a late rollback must NOT revoke
-    the now-live link. Mirrors the SQLite copy of this contract test."""
-    assert PostgresMigrator(postgres_database).migrate() == 30
-    with postgres_database.write() as connection:
-        connection.execute(
-            "INSERT INTO notebooks(id,name,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s)",
-            ("nb-race-pg", "n", "2026-01-01T00:00:00+00:00",
-             "2026-01-01T00:00:00+00:00"),
-        )
-        connection.execute(
-            "INSERT INTO conversations "
-            "(id,notebook_id,title,created_by,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s)",
-            ("conv-race-pg", "nb-race-pg", "t", "user-local",
-             "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
-        )
-    store = PostgresAskStateStore(postgres_database, _seams())
-
-    issued_a = store.share_conversation("nb-race-pg", "conv-race-pg")
-    token = issued_a["share_token"]
-    assert issued_a["shared_through_at"] == ""
-
-    with postgres_database.write() as connection:
-        connection.execute(
-            "INSERT INTO answers "
-            "(id,notebook_id,conversation_id,question,payload,created_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s)",
-            ("ans-1", "nb-race-pg", "conv-race-pg", "q",
-             '{"conclusion": "c"}', "2026-01-01T00:00:02+00:00"),
-        )
-    issued_b = store.share_conversation("nb-race-pg", "conv-race-pg")
-    assert issued_b["share_token"] == token  # COALESCE reuse
-    assert issued_b["shared_through_at"]
-
-    store.discard_unwatermarked_share("nb-race-pg", "conv-race-pg")
-    assert store.public_conversation_by_token(token) is not None
-    assert store.conversation_share_state(
-        "nb-race-pg", "conv-race-pg"
-    )["share_token"] == token
-
-
-def test_discard_unwatermarked_share_clears_a_genuinely_empty_conversation(
-    postgres_database,
-):
-    """The other half: no answer ever landed -> watermark stays NULL -> the
-    conditional rollback DOES discard the token."""
-    assert PostgresMigrator(postgres_database).migrate() == 30
-    with postgres_database.write() as connection:
-        connection.execute(
-            "INSERT INTO notebooks(id,name,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s)",
-            ("nb-e-pg", "n", "2026-01-01T00:00:00+00:00",
-             "2026-01-01T00:00:00+00:00"),
-        )
-        connection.execute(
-            "INSERT INTO conversations "
-            "(id,notebook_id,title,created_by,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s)",
-            ("conv-e-pg", "nb-e-pg", "t", "user-local",
-             "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
-        )
-    store = PostgresAskStateStore(postgres_database, _seams())
-
-    issued = store.share_conversation("nb-e-pg", "conv-e-pg")
-    assert issued["shared_through_at"] == ""
-
-    store.discard_unwatermarked_share("nb-e-pg", "conv-e-pg")
-    assert store.conversation_share_state(
-        "nb-e-pg", "conv-e-pg"
-    )["share_token"] == ""
-    assert store.public_conversation_by_token(issued["share_token"]) is None
 
 
 def _wait_for_conversation_row_lock(postgres_database) -> None:
@@ -508,10 +441,10 @@ def test_concurrent_share_serializes_on_the_conversation_row(postgres_database):
     released, it freezes at that newer answer (``ans-late``) — proving it read
     AFTER locking. Without ``FOR UPDATE`` the share would read the pre-lock
     newest (``ans-d``) before blocking on its own UPDATE and then write that
-    STALE watermark back; the same stale path, when the pre-lock latest is NULL,
-    is what lets ``discard_unwatermarked_share`` revoke a link another share
-    already returned live. Mutation guard: dropping ``FOR UPDATE`` flips the
-    watermark below to ``ans-d``.
+    STALE watermark back; the same stale ordering, when the pre-lock latest is
+    NULL, would also let a share that should atomically refuse (zero answers)
+    instead mint a token off the pre-lock read. Mutation guard: dropping ``FOR
+    UPDATE`` flips the watermark below to ``ans-d``.
 
     The SQLite adapter needs no such lock — its ``database.write()`` is a
     process-level write lock that already serializes these calls.

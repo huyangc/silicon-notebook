@@ -54,6 +54,7 @@ from app.models.ask import (
 )
 from app.repositories.ports import (
     ConversationBusyError,
+    ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
     PreparedAskTurn,
     project_ask_row,
@@ -894,11 +895,13 @@ class AskStateStore:
         same-instant tie-broken answer is compared by ``rowid``, not merged.
 
         Raises ``KeyError`` when the conversation does not exist in this
-        notebook. A conversation with zero answers can still be "shared"
-        here (link issued, watermark stays NULL) — the row-level
-        ``created_by`` gate and the "at least one written answer" policy
-        (design doc §七 item 5) belong to the API/service layer that calls
-        this method, not to this store method.
+        notebook, and ``ConversationHasNoShareableAnswer`` when it has no
+        committed answer to bound the snapshot — the "at least one written
+        answer" policy (design doc §七 item 5) is enforced HERE, atomically in
+        the same write transaction, so a zero-answer conversation never has a
+        token minted (no more share-then-compensate rollback). The row-level
+        ``created_by`` gate still belongs to the API/service layer that calls
+        this method.
         """
         candidate = new_capability_token("cshr")
         expected = str(expected_through_id or "").strip()
@@ -931,6 +934,17 @@ class AskStateStore:
                 ).fetchone()
                 through_at = latest["created_at"] if latest is not None else None
                 through_id = latest["id"] if latest is not None else None
+            # "At least one written answer" (design doc §七 item 5), enforced
+            # atomically INSIDE this write transaction (codex #522 R5): a
+            # zero-answer conversation resolves no boundary (``through_id is
+            # None``), so we raise BEFORE the UPDATE and never mint a token. An
+            # ``expected_through_id`` that no longer resolves is handled above by
+            # the Stale raise, so ``through_id is None`` here means only the
+            # zero-answer fallback. This replaces the old "mint a NULL-watermark
+            # token, then compensate in the route" path, which left a permanent
+            # token-without-watermark row if the process died between the steps.
+            if through_id is None:
+                raise ConversationHasNoShareableAnswer(conversation_id)
             # Advance-only (codex #522 R3): reject a request whose boundary sorts
             # BEFORE the already-published one. ``current_id`` is the live
             # watermark; the comparison runs in SQL over both answer rows using
@@ -977,39 +991,6 @@ class AskStateStore:
                 "UPDATE conversations SET share_token=NULL, "
                 "shared_through_at=NULL, shared_through_id=NULL "
                 "WHERE id=? AND notebook_id=?",
-                (conversation_id, notebook_id),
-            )
-
-    def discard_unwatermarked_share(
-        self, notebook_id: str, conversation_id: str
-    ) -> None:
-        """Roll back a token issued for a still-empty conversation, but ONLY
-        while its watermark is still NULL (codex T2 review, concurrency P2).
-
-        The API layer shares-then-checks: ``share_conversation`` mints the
-        token even for a zero-answer conversation (watermark NULL), and the
-        route rolls it back when the returned watermark is empty. That rollback
-        must not be the unconditional ``unshare_conversation``: two concurrent
-        POST /share on a conversation whose first answer lands mid-flight share
-        the SAME token (``share_conversation`` is idempotent on the token via
-        ``COALESCE``), and the later call — seeing the now-committed answer —
-        can return that token to its user in a 200 before the earlier call's
-        rollback fires. An unconditional rollback would then nuke a link the
-        user was just told is live.
-
-        The ``AND shared_through_at IS NULL`` guard closes that: once any
-        concurrent share advances the watermark, this rollback no-ops and the
-        live link survives. When no answer ever landed, the watermark stays
-        NULL and the token is correctly discarded — a genuinely empty
-        conversation must not keep a public link. This is deliberately NOT the
-        DELETE endpoint's revoke path, which must clear the token
-        unconditionally.
-        """
-        with self.database.write() as db:
-            db.execute(
-                "UPDATE conversations SET share_token=NULL, "
-                "shared_through_at=NULL, shared_through_id=NULL "
-                "WHERE id=? AND notebook_id=? AND shared_through_at IS NULL",
                 (conversation_id, notebook_id),
             )
 

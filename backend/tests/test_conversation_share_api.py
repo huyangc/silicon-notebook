@@ -9,7 +9,8 @@
 三条承重项,每条一条独立用例 + 反向断言(会话状态没被动过):
   * 行级 created_by 门:别人的会话、跨 notebook 的 cid、陌生人一律 404;
   * 空 `created_by` fail closed(§3.1):创建者缺失的历史会话拒绝分享(409);
-  * 「至少一条已写入答案」(§七 5):零答案会话拒绝分享(409)并回滚 token。
+  * 「至少一条已写入答案」(§七 5):零答案会话被 store 原子拒绝(409),token
+    根本不发放(codex #522 R5,不再是「先发后补偿」)。
 
 会话通常由 `/ask`(依赖模型)创建,所以这里像 T1 store 测试一样**直接建行**,
 把 `created_by` 设成真实用户 id —— 它是行级判定的锚点。
@@ -255,8 +256,10 @@ def test_a_creatorless_conversation_is_refused_fail_closed(client):
 
 def test_a_zero_answer_conversation_cannot_be_shared_and_leaves_no_token(client):
     """会话的"已完成"对应物是水位之前至少有一条已写入答案(§七 5)。零答案会话
-    会被 `share_conversation` 发放 token(watermark 留 NULL),API 层必须拒绝并
-    **回滚刚发的 token**,使事后状态可验证地"未分享"。"""
+    被 `share_conversation` 在同一写事务里**原子拒绝**(抛
+    `ConversationHasNoShareableAnswer`),token 根本不发放(codex #522 R5),API
+    层把它映射成 409,事后状态可验证地"未分享" —— 不再依赖「先发 token 再补偿回滚」
+    那条会在进程中途退出时留下残链的路径。"""
     owner, owner_id = _new_user(client)
     nb = _notebook(client, owner)
     cid = _seed_conversation(nb, owner_id, answers=())   # 无任何答案
