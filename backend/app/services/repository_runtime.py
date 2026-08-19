@@ -375,7 +375,12 @@ class RepositoryRuntime:
             # Agentic Memory P1 (T5):完成一次提问 ⇒ 推进**该成员**在该库的覆盖层
             # 计数。late-bound lambda 而不是直接传方法:巡固服务在本构造函数里
             # 更靠后才建出来(与上面 ``ask`` 同一个理由)。
-            note_ask_completed=lambda nb, uid: self._note_ask_completed(nb, uid),
+            # ⚠ 三参:coordinator 按 (nb, uid, mode_id) 调用(codex #524 R5 P1:
+            # 这里少一个参数,TypeError 会被协调器的 fail-open 吞掉,两条后台
+            # 链一起静默死亡而答案照常交付——由行为用例按真实 arity 钉住)。
+            note_ask_completed=lambda nb, uid, mode_id: self._note_ask_completed(
+                nb, uid, mode_id
+            ),
         )
         # Task 27: SQLite maintenance face for CLI/batch composition roots —
         # lazily wired by the facade `maintenance` property (it needs the

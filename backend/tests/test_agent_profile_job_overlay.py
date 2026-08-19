@@ -2129,3 +2129,19 @@ def test_the_runtime_counts_only_reasoning_asks_toward_distillation():
     # P1 链不受模式过滤(巡固样本读全部模式的轨迹)
     p1_call_at = body.index("agent_profile_jobs.note_ask_completed")
     assert p1_call_at < guard_at, "P1 链不得被模式判据圈住"
+
+
+def test_the_runtime_completion_lambda_accepts_the_coordinator_arity():
+    """codex #524 R5 P1:coordinator 按 (nb, uid, mode_id) 三参调用,runtime 的
+    接线 lambda 少一个参数时 TypeError 被 fail-open 吞掉、两条链静默死亡。
+    静态钉 lambda 形参表含 mode_id(与「actually wires」守卫互补:那条钉存在,
+    这条钉 arity)。"""
+    from app.services import repository_runtime as rr
+
+    source = Path(rr.__file__).read_text(encoding="utf-8")
+    at = source.index("note_ask_completed=lambda")
+    lambda_head = source[at:source.index(":", at)]
+    assert "mode_id" in lambda_head, (
+        "runtime 的 note_ask_completed 接线 lambda 必须接受 mode_id——"
+        "少参的 TypeError 会被协调器 fail-open 吞掉,两条后台链静默死亡"
+    )
