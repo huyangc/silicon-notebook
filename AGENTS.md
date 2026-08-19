@@ -1138,6 +1138,15 @@ Do not hand-roll an error branch. `frontend/tests/guards/errors-guard.test.mjs` 
 
 **Graded-effort控件.** 产品里有两个「五档强度」选择:深度报告的「研究深度」与逐步推理的「检索档位」。它们档名相同(概览/标准/深入/详尽/穷尽),因此必须是**同一个控件**——`frontend/app/effort-picker.tsx` 的 `EffortPicker` 是唯一实现:一个 chip(前缀词 + 当前档名)加向上弹出的 popover(标题 + 当前档名 + 均布圆点滑块 + 该档一句中性说明),点外部/Esc 收起,转入禁用态自动收起。调用方只提供 `{id, label, hint}` 档位表、当前值与 `onChange`;`compact` 只压 chip 尺寸以嵌进问答输入控制行,popover 两处完全一致。档位的**数值阈值不上屏**:界面只表达档名与那句说明,精确上限是 `docs/product-and-api*.md` 的契约表(以及 `frontend/app/ask-retrieval-effort.ts` ⇄ `backend/app/core/ask_retrieval_policy.py` 的双向锁定),不再以 title/折叠块铺在控件上。popover 默认右对齐控件,但打开时会量一次并夹回最近的水平裁剪祖先(问答那侧是 `.workspace-panel { overflow: hidden }`)与视口的交集内,resize 时重算。这不是防御性写法:模式标签折行会把 chip 推到行首,右对齐的 232px popover 实测溢出面板 90px 被裁;而 `right: 0` 与 `left: 0` 各自只在一段宽度里成立(前者在面板 < ~700px 失效,后者在 ~700–930px 失效),所以只能量了再夹。夹取算术在 `frontend/app/effort-picker-logic.ts`(纯函数,`effort-picker-logic.test.mjs` 单测四个分支),量尺寸与写样式留在组件里(`effort-picker.component.test.tsx` 桩掉 rect 验接线)。宽松时首选位不动,宽屏观感与报告那侧保持一致。新增第三个强度选择要复用 `EffortPicker` 而不是再造一套平铺 chip;`frontend/tests/unit/effort-picker.test.mjs` 是回归门,除了检查两个调用点都消费共享控件,还断言 `<input type="range">` 只存在于 `effort-picker.tsx`——把滑块复制回任一调用点(即便共享控件仍在)就报红。
 
+**群组界面的版式.** 群组管理弹窗(`frontend/app/groups-panel.tsx`)与分享弹窗里的「共享给群组」一节(`frontend/app/notebook-group-share.tsx`)共用 `globals.css` 里的一套 `.group-*` 类,四条不变量:
+
+1. **行的横向布局由 `.group-row` 自己给出,不靠调用点的内联样式**。这两处的行原来是块级的 `.checklist-row` 加内联 `style={{ alignItems: "center", gap: 8 }}` —— 这两个属性在块级盒子上一个字都不生效,于是「组名 + 分类 + 人数 + 角色 + 按钮」连成一条没有间距的文字(真机形态:「notebook项目1 人组管理员 已展开」)。`.checklist-row` 本身不动:它另有几处按块级文字行使用的调用点(上传弹窗、分享预览的来源清单),给它加 `display:flex` 会改掉那些。行内的整句说明用 `.group-row-note`(可换行),短元数据用 `.group-row-meta`(`nowrap`,「3 人」这类不该被折断)。
+2. **只读标签用 `.group-chip`,不用 `.new-pill`**。后者是 42px 高的实心黑主按钮;拿它渲染分类/状态标签,会让一个点不动的标签比旁边真正能点的按钮还重。危险动作(删除群组)仍用 `.new-pill.danger-pill`,它确实是按钮。
+3. **详情是「清单里被展开的那一条」,不是清单之后的又一节**。它包在 `.group-detail` 卡里、有自己的标题栏(组名是 `h3`,不是 `.section-title` —— 那个类带 `text-transform: uppercase`,会把用户起的组名整块大写成「NOTEBOOK」),清单里对应的那一行同时标 `.is-active`,展开后把卡带进视口(`scrollIntoView` 在 jsdom 里是 `undefined` 而不是 no-op,调用前必须探测)。清单里那颗按钮的可见文案仍是「查看／已展开」,但无障碍名字带上组名(一屏里它会重复很多次),再点一次收起。
+4. **行内动作比页面主 CTA 小一号**(34px,对齐 `.catalog-card-actions` 的既有做法):42px 会把每一行撑成两倍高,而这些都是局部动作。
+
+`frontend/tests/guards/group-layout-guard.test.mjs` 是回归门(按 JSX 结构与 CSS 规则体判定,不含行号),覆盖上面四条里可形态化的部分:`.group-row` 仍是 flex、两个文件都不再用 `.checklist-row`/内联 `alignItems`、`.new-pill` 只出现在 `<button>` 上、`groups-panel.tsx` 不再出现 `.section-title`。它**不**检查具体间距数值(那是设计取舍,不是不变量)。
+
 ## 界面词汇表 (User-Facing Vocabulary)
 
 Copy shown to users — JSX text, `label`/`title`/`placeholder`/`aria-label`, toasts, errors, table headers — uses only the "interface word", never the internal implementation term. **界面词 ≠ 内部词**: `projection`/`tier`/`canonical`/`chunk`/`KG` and friends keep their original names in code, types, comments, and the architecture docs; only strings rendered to the user get rewritten.

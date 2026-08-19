@@ -49,6 +49,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 提示)。样式表没有可消费的 AST,文本是唯一诚实的输入;文件里对 page.tsx 门控条件
   // 与徽标元素的断言仍走 semantic-source 的语义解析,不读裸文本。
   "tests/guards/source-agent-badge-guard.test.mjs",
+  // 同上,只读 globals.css:断言群组界面的行(`.group-row`)自己是 flex —— 它此前是块级的
+  // `.checklist-row` 加内联 alignItems/gap,那两个属性在块级盒子上静默无效,整行会叠成
+  // 一条没有间距的文字。样式表没有可消费的 AST,jsdom 也不做布局(量出来的 rect 恒为 0),
+  // 文本是唯一诚实的输入;同文件对两个 tsx 的断言仍走 semantic-source 的语义解析。
+  "tests/guards/group-layout-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.
