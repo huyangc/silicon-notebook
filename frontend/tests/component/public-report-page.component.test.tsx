@@ -82,3 +82,38 @@ test("撤销或不存在的 token 给出可读的空态", async () => {
 
   expect(await screen.findByText("链接不可用")).toBeInTheDocument();
 });
+
+test("标题/原始文件名/摘录被截断时逐条显式披露，不静默丢尾", async () => {
+  mocks.fetchPublicReport.mockResolvedValue({
+    ...REPORT,
+    references: [
+      {
+        key: "k1",
+        title: "很长的标题前缀",
+        file_name: "很长的文件名前缀.pdf",
+        location: "p. 2",
+        snippet: "很长的摘录前缀",
+        title_truncated: true,
+        file_name_truncated: true,
+        snippet_truncated: true,
+      },
+    ],
+    reference_count: 1,
+  });
+  render(<PublicReportPage />);
+
+  expect(await screen.findByText("（标题过长，已截断）")).toBeInTheDocument();
+  expect(screen.getByText("（原始文件名过长，已截断）")).toBeInTheDocument();
+  expect(screen.getByText("（摘录过长，已截断）")).toBeInTheDocument();
+});
+
+test("没被截断的引用不挂假提示", async () => {
+  // 空转保护：上一条可以被一个「恒渲染提示」的实现骗过去。REPORT 的两条引用都
+  // 不带 `*_truncated`（旧后端也是这个形状），此时一个提示都不该出现。
+  render(<PublicReportPage />);
+
+  await screen.findByText("引用出处");
+  expect(screen.queryByText("（标题过长，已截断）")).toBeNull();
+  expect(screen.queryByText("（原始文件名过长，已截断）")).toBeNull();
+  expect(screen.queryByText("（摘录过长，已截断）")).toBeNull();
+});

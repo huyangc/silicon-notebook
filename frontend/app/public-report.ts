@@ -13,6 +13,14 @@ export type PublicReportReferenceT = {
   file_name: string;
   location: string;
   snippet: string;
+  /**
+   * 标题/摘录/原始文件名超上限被切成前缀时置真——公开页据此显示「已截断」而不
+   * 静默丢尾（AGENTS.md「用户编辑的数据不得静默截断」）。可选是为了兼容还没带
+   * 这三个字段的旧后端：缺字段按「没截断」处理，不凭空弹出提示。
+   */
+  title_truncated?: boolean;
+  snippet_truncated?: boolean;
+  file_name_truncated?: boolean;
 };
 
 export type PublicReportT = {

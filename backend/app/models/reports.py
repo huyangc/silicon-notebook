@@ -82,6 +82,11 @@ class PublicReportReference(BaseModel):
 
     No `source_id` / `element_id` / `object_id`: a public link must not hand out
     handles into the authenticated API. See `services/report_public_view.py`.
+
+    `title_truncated`/`snippet_truncated`/`file_name_truncated` disclose that an
+    over-length value was clipped to its bounded prefix, so the page can mark it
+    rather than drop the tail silently (AGENTS.md 用户编辑的数据不得静默截断;
+    same three flags `PublicReference` carries for a shared conversation).
     """
 
     key: str = ""
@@ -89,10 +94,18 @@ class PublicReportReference(BaseModel):
     file_name: str = ""
     location: str = ""
     snippet: str = ""
+    title_truncated: bool = False
+    snippet_truncated: bool = False
+    file_name_truncated: bool = False
 
 
 class PublicReport(BaseModel):
-    """A shared report, readable without a session."""
+    """A shared report, readable without a session.
+
+    `question` and `content_md` are served whole — both are the user's own
+    artifact, and capping the question bounded nothing while `content_md` (far
+    larger) stays uncapped right beside it.
+    """
 
     question: str = ""
     content_md: str = ""

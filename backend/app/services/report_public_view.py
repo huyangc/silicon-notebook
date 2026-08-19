@@ -20,6 +20,19 @@ What never crosses, and why:
   source scope (a list of source ids), and credibility internals.  The parts a
   reader benefits from (the corpus basis) are already inside ``content_md``,
   frozen there when the report was generated.
+
+Truncation on this surface is DISCLOSED, never silent (AGENTS.md 用户编辑的数据
+不得静默截断).  The sibling ``conversation_public_view`` was brought to that rule
+by codex #522 R1-R4; this module carries the same three fixes:
+
+* the question is served WHOLE (``_question_text``) — see its docstring;
+* a reference title / original filename / excerpt stays bounded (it is evidence
+  metadata, not the user's own artifact) but an over-length value sets
+  ``title_truncated`` / ``file_name_truncated`` / ``snippet_truncated`` so the
+  page can say so instead of dropping the tail;
+* ``key`` / ``location`` / the timestamps stay silently capped on purpose: they
+  are server-derived labels (``kN``, ``PDF p.3``, an ISO instant), not user text,
+  so there is no user-authored tail for a cap to eat.
 """
 from __future__ import annotations
 
@@ -27,23 +40,73 @@ from typing import Any, Sequence
 
 MAX_REFERENCES = 500
 MAX_SNIPPET_CHARS = 1200
+# Per-reference title / original-file-name cap.  Named (it used to be an inline
+# ``400`` in two places) because the exact value is registered in
+# ``docs/product-and-api*.md`` and the truncation flags below refer to it.
+MAX_REFERENCE_TITLE_CHARS = 400
 
 
 def _text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
 
-def public_reference(reference: Any) -> dict[str, str]:
-    """One citation as an anonymous reader sees it: nothing addressable."""
+def _text_flag(value: Any, limit: int) -> tuple[str, bool]:
+    """Trimmed value capped at ``limit``, plus whether the cap actually bit.
+
+    The public projection must DISCLOSE truncation of an evidence field, never
+    drop the tail silently (AGENTS.md 用户编辑的数据不得静默截断).  The bool lets
+    the page mark a reference whose title/filename/excerpt was clipped."""
+    text = str(value or "").strip()
+    return text[:limit], len(text) > limit
+
+
+def _question_text(value: Any) -> str:
+    """The research question, served WHOLE — never truncated.
+
+    This module used to cap it at 2,000 chars.  Two things make that a silent
+    data loss rather than a safety bound:
+
+    * the question is the user's own artifact.  It is editable at the intent
+      confirmation gate and the intent contract carries it at up to 4,000 chars
+      (``ReportIntentConfirmation.resolved_question``), so a confirmed question
+      can be twice the retired cap — and the tail that got dropped was the tail
+      of the very text that produced the report;
+    * the cap bounded nothing.  ``content_md`` — orders of magnitude larger — is
+      already served whole right below, so clipping the question never made this
+      response any smaller in a way that mattered.
+
+    Same call ``conversation_public_view._question_text`` makes (codex #522 R1).
+    """
+    return str(value or "").strip()
+
+
+def public_reference(reference: Any) -> dict[str, Any]:
+    """One citation as an anonymous reader sees it: nothing addressable.
+
+    ``title``/``file_name``/``snippet`` stay bounded — they are evidence
+    metadata, not the user's own artifact the way the question is — but an
+    over-length value sets the matching ``*_truncated`` flag so the page can
+    DISCLOSE the clip rather than drop the tail silently."""
     row = reference if isinstance(reference, dict) else {}
+    title, title_truncated = _text_flag(
+        row.get("source_title") or row.get("label") or row.get("name"),
+        MAX_REFERENCE_TITLE_CHARS,
+    )
+    snippet, snippet_truncated = _text_flag(row.get("snippet"), MAX_SNIPPET_CHARS)
+    # The original uploaded filename is client-supplied user data too, so it gets
+    # the same disclosure as the title/excerpt.
+    file_name, file_name_truncated = _text_flag(
+        row.get("source_file_name"), MAX_REFERENCE_TITLE_CHARS
+    )
     return {
         "key": _text(row.get("key"), 24),
-        "title": _text(
-            row.get("source_title") or row.get("label") or row.get("name"), 400
-        ),
-        "file_name": _text(row.get("source_file_name"), 400),
+        "title": title,
+        "file_name": file_name,
         "location": _text(row.get("location_label"), 200),
-        "snippet": _text(row.get("snippet"), MAX_SNIPPET_CHARS),
+        "snippet": snippet,
+        "title_truncated": title_truncated,
+        "snippet_truncated": snippet_truncated,
+        "file_name_truncated": file_name_truncated,
     }
 
 
@@ -53,7 +116,7 @@ def public_report_payload(row: dict[str, Any], references: Sequence[Any]) -> dic
         public_reference(reference) for reference in list(references)[:MAX_REFERENCES]
     ]
     return {
-        "question": _text(row.get("question"), 2000),
+        "question": _question_text(row.get("question")),
         "content_md": str(row.get("content_md") or ""),
         "created_at": _text(row.get("created_at"), 64),
         "updated_at": _text(row.get("updated_at"), 64),

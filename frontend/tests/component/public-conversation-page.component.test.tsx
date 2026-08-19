@@ -148,3 +148,44 @@ test("撤销或不存在的链接给出可读的空态", async () => {
 
   expect(await screen.findByText("链接不可用")).toBeInTheDocument();
 });
+
+test("标题/原始文件名/摘录被截断时逐条显式披露，不静默丢尾", async () => {
+  // 与报告公开页同一条红线、同一套文案（`public-report-page.component.test.tsx`
+  // 有逐字对应的一对）。这里补上是因为渲染这三条提示的分支此前没有守卫。
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [
+      {
+        ...CONVERSATION.turns[0],
+        references: [
+          {
+            key: "k1",
+            title: "很长的标题前缀",
+            file_name: "很长的文件名前缀.pdf",
+            location: "p. 2",
+            snippet: "很长的摘录前缀",
+            title_truncated: true,
+            file_name_truncated: true,
+            snippet_truncated: true,
+          },
+        ],
+        reference_count: 1,
+      },
+    ],
+  });
+  render(<PublicConversationPage />);
+
+  expect(await screen.findByText("（标题过长，已截断）")).toBeInTheDocument();
+  expect(screen.getByText("（原始文件名过长，已截断）")).toBeInTheDocument();
+  expect(screen.getByText("（摘录过长，已截断）")).toBeInTheDocument();
+});
+
+test("没被截断的引用不挂假提示", async () => {
+  // 空转保护：上一条可以被一个「恒渲染提示」的实现骗过去。
+  render(<PublicConversationPage />);
+
+  await screen.findByText("LLM 有哪些架构？");
+  expect(screen.queryByText("（标题过长，已截断）")).toBeNull();
+  expect(screen.queryByText("（原始文件名过长，已截断）")).toBeNull();
+  expect(screen.queryByText("（摘录过长，已截断）")).toBeNull();
+});

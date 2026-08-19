@@ -183,11 +183,20 @@ export default function PublicReportPage() {
                 </span>
                 <div className="public-report-refbody">
                   <strong>{reference.title || reference.file_name || "(未命名资料)"}</strong>
+                  {reference.title_truncated && (
+                    <small className="public-report-truncated">（标题过长，已截断）</small>
+                  )}
                   {reference.location && <span className="public-report-locus">{reference.location}</span>}
                   {reference.file_name && reference.file_name !== reference.title && (
                     <small>原始文件：{reference.file_name}</small>
                   )}
+                  {reference.file_name_truncated && (
+                    <small className="public-report-truncated">（原始文件名过长，已截断）</small>
+                  )}
                   {reference.snippet && <blockquote>{reference.snippet}</blockquote>}
+                  {reference.snippet_truncated && (
+                    <small className="public-report-truncated">（摘录过长，已截断）</small>
+                  )}
                 </div>
               </li>
             ))}
