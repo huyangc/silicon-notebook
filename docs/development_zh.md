@@ -80,6 +80,7 @@ Baseline snapshot 发布要求 owner-only 的真实目录并以 0600 独占创�
 最终 live SQLite fence 是跨 commit 的 lease：只在 PG 双锁/run/table lock 与 81 表长 proof/`ANALYZE` 完成后取得，保持到 PG H0 checkpoint + run progress 事务实际提交成功再释放；PG 失败不落 H0 并释放 SQLite，持 fence 时不得再等待 PG pool/advisory lock 或执行长 proof。
 
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。feature 归属的生产模块可迁到 `frontend/features`，KG maintenance HTTP/状态 helper 是首个纵切片。
+- 群组相关面板（`frontend/app/groups-panel.tsx` 与 `frontend/app/notebook-group-share.tsx` 里的「共享给群组」一节）共用 `globals.css` 的一套 `.group-*` 类。行的横向布局属于 `.group-row`，不属于调用点的内联样式：这些行原来是块级 `.checklist-row` 加内联 `alignItems`/`gap`，而这两个属性在块级盒子上静默无效，整行会叠成一条没有间距的文字。`.checklist-row` 本身保持块级——其它调用点按文字行使用它。只读标签用 `.group-chip`，不用 42px 实心主按钮 `.new-pill`；展开的组详情是 `.group-detail` 卡，标题用 `h3` 而不是会整块大写的 `.section-title`。回归门是 `frontend/tests/guards/group-layout-guard.test.mjs`，完整理由见 AGENTS.md 前端章节。
 - workspace HTTP 职责按领域模块拆分。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy；`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`frontend/tests/guards/api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
 - 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle composition 仍是独立债务。
 
