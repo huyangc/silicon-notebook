@@ -952,6 +952,17 @@ class AskStateStore:
         never actually shared through the normal path — fail closed rather
         than serve an ungated conversation).
 
+        The boundary is a pure ``created_at`` closed interval, deliberately
+        (design doc §3.2). It does NOT keyset on ``shared_through_id`` — and a
+        future hardening pass must not "fix" that by adding it: the stored
+        ``shared_through_id`` is the answer's ``id`` (a string), whereas the
+        authoritative tie-break for two answers at the same instant is
+        ``rowid``/``ordinal`` (insertion order), which is a different key. A
+        correct keyset would need the watermark answer's rowid/ordinal, not
+        its id. In practice sequential turns are separated by a whole
+        LLM round-trip, so no two answers share a microsecond-precision
+        ``created_at`` and the timestamp interval alone is exact.
+
         Also returns ``notebook_id`` and ``created_by`` (GATE fields,
         mirroring ``report_store.GATE_FIELDS``) for the caller's live
         authorization re-check (design doc §七 item 3) — they are NOT part

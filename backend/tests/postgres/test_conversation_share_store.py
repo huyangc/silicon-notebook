@@ -162,3 +162,83 @@ def test_public_snapshot_freezes_at_the_watermark_and_advances_on_reshare(
     assert [t["answer_id"] for t in refreshed["turns"]] == [
         "ans-a", "ans-c", "ans-b", "ans-d", "ans-e",
     ]
+
+
+def test_unshare_revokes_the_public_link(postgres_database):
+    """After ``unshare_conversation`` the token resolves to nothing — a
+    revoked link 404s exactly like a token that never existed."""
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    token = store.share_conversation(notebook_id, conversation_id)["share_token"]
+    assert store.public_conversation_by_token(token) is not None
+
+    store.unshare_conversation(notebook_id, conversation_id)
+    assert store.public_conversation_by_token(token) is None
+
+
+def test_unknown_and_blank_tokens_return_none(postgres_database):
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    assert store.public_conversation_by_token("no-such-token") is None
+    assert store.public_conversation_by_token("") is None
+    assert store.public_conversation_by_token("   ") is None
+
+
+def test_zero_answer_conversation_fails_closed(postgres_database):
+    """The core "never serve an ungated conversation" defence: a conversation
+    with no answers can be handed a token by ``share_conversation`` (the
+    "at least one written answer" policy lives in the API layer, not here),
+    but its watermark stays NULL — and ``public_conversation_by_token`` must
+    return None on a NULL watermark rather than serve an unbounded snapshot.
+    """
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("nb-empty-pg", "n", "2026-01-01T00:00:00+00:00",
+             "2026-01-01T00:00:00+00:00"),
+        )
+        connection.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            ("conv-empty-pg", "nb-empty-pg", "t", "user-local",
+             "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    issued = store.share_conversation("nb-empty-pg", "conv-empty-pg")
+    assert issued["share_token"]  # a token IS minted
+    assert issued["shared_through_at"] == ""  # but the watermark stays NULL
+
+    # fail closed: an ungated (NULL-watermark) conversation is never served.
+    assert store.public_conversation_by_token(issued["share_token"]) is None
+
+
+def test_conversation_share_state_reads_back_token_and_watermark(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    # Unshared: empty token, empty watermark (never raises for an existing row).
+    before = store.conversation_share_state(notebook_id, conversation_id)
+    assert before == {
+        "share_token": "",
+        "shared_through_at": "",
+        "shared_through_id": "",
+    }
+
+    issued = store.share_conversation(notebook_id, conversation_id)
+    after = store.conversation_share_state(notebook_id, conversation_id)
+    assert after["share_token"] == issued["share_token"]
+    assert after["shared_through_id"] == "ans-d"  # newest answer at share time
