@@ -915,9 +915,18 @@ def public_conversation_route(token: str) -> PublicConversation:
     # an unknown token — a distinguishable response would report on somebody's
     # group membership to an anonymous caller. Restoring access revives the link
     # (the same idempotent-token semantics ``share`` already promises).
-    if not repo.user_can_read_notebook(
-        str(row.get("notebook_id") or ""), str(row.get("created_by") or "")
-    ):
+    # Independent fail-closed on an empty creator (codex T3 review, defense in
+    # depth). ``user_can_read_notebook`` does NOT reject an empty user id on its
+    # own: a notebook carrying an ``everyone`` grant has a read arm that ignores
+    # the user id and returns True for ``created_by=""``, which would make a
+    # creatorless conversation anonymously readable. T2's share gate already 409s
+    # empty ``created_by`` so no such shared row can exist today — but the
+    # anonymous surface must not rely on an upstream gate as its only defense.
+    # Same 404 as an unknown token.
+    creator = str(row.get("created_by") or "")
+    if not creator:
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    if not repo.user_can_read_notebook(str(row.get("notebook_id") or ""), creator):
         raise HTTPException(status_code=404, detail="shared conversation not found")
     # Pop the GATE fields before projection: ``notebook_id``/``created_by`` are
     # for the live re-check ONLY and must never cross to an anonymous reader

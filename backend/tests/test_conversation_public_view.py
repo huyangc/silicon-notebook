@@ -366,3 +366,52 @@ def test_legacy_payload_without_evidence_level_defaults_to_inferred():
     turn = public_turn(_turn("q", {"conclusion": "旧答案"}))
     assert turn["evidence_level"] == "inferred"
     assert turn["references"] == []
+
+
+def test_duplicate_anchor_key_resolves_last_write_wins_like_the_frontend():
+    """A malformed payload with two anchors sharing key ``k1`` must resolve the
+    SAME one the author sees — the frontend's ``new Map(...)`` is last-wins
+    (codex T3 review, P2). Anchor keys are unique per answer in practice; this
+    pins the direction so a future edit can't silently diverge."""
+    payload = {
+        "answer": "见 [k1]。",
+        "anchors": [
+            _anchor("k1", source_title="第一个"),
+            _anchor("k1", source_title="第二个"),
+        ],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert [ref["key"] for ref in turn["references"]] == ["k1"]
+    assert turn["references"][0]["title"] == "第二个"  # last wins, not "第一个"
+
+
+def test_truthy_scalar_evidence_fields_degrade_instead_of_500():
+    """Stored ``AskResponse`` always serializes anchors/citations/result_sets as
+    lists; a truthy SCALAR can only come from a hand-edited/ancient row. The
+    anonymous surface must degrade (empty refs, zero omitted), never crash on
+    ``for x in 5`` / ``len(5)`` (codex T3 review, P1)."""
+    for bad in (5, 1.5, True):
+        turn = public_turn(_turn("q", {
+            "answer": "见 [k1]。",
+            "anchors": bad,
+            "citations": bad,
+            "result_sets": bad,
+        }))
+        assert turn["references"] == []
+        assert turn["omitted_result_sets"] == 0
+
+
+def test_one_bad_turn_does_not_topple_the_whole_page():
+    """A batch with a scalar-anchors turn beside a normal turn must return BOTH
+    turns (the bad one degraded), not 500 the entire conversation page."""
+    good = _turn("好问题", {"answer": "见 [k1]。", "anchors": [_anchor("k1")]})
+    bad = _turn("坏问题", {"answer": "x", "anchors": 7, "result_sets": 3})
+    payload = public_conversation_payload({
+        "title": "混合", "created_at": "2026-01-01T00:00:00",
+        "shared_through_at": "2026-01-01T00:00:05",
+        "turns": [good, bad],
+    })
+    assert [t["question"] for t in payload["turns"]] == ["好问题", "坏问题"]
+    assert payload["turns"][0]["references"][0]["key"] == "k1"
+    assert payload["turns"][1]["references"] == []
