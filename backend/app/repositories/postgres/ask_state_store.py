@@ -810,8 +810,24 @@ class AskStateStore:
         """
         candidate = new_capability_token("cshr")
         with self.database.write() as db:
+            # ``FOR UPDATE`` serializes concurrent shares of the SAME
+            # conversation (codex #522 R1 concurrency P2). Under READ COMMITTED
+            # two shares could each read ``latest`` before either UPDATE, and a
+            # stale one — reading an OLDER answer, or NULL before the first
+            # answer commits — would then clobber a watermark the other already
+            # returned live, tripping ``discard_unwatermarked_share`` into
+            # revoking a link the user was just handed. Taking the row lock here,
+            # BEFORE reading ``latest``, forces the second share to wait for the
+            # first to commit and then re-read the newest answer, so the
+            # watermark only ever advances. The SQLite adapter needs no lock —
+            # ``database.write()`` there is a process-level write lock that
+            # already serializes these. This holds exactly one row lock (no other
+            # row is locked in this method), so it cannot form a lock cycle;
+            # ``ensure_conversation`` already locks the conversation row the same
+            # way.
             conv = db.execute(
-                "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s",
+                "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s "
+                "FOR UPDATE",
                 (conversation_id, notebook_id),
             ).fetchone()
             if conv is None:

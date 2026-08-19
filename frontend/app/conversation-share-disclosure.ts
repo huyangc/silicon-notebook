@@ -73,3 +73,39 @@ export function summarizeShareDisclosure(
   }
   return { sharedCount, newCount, imageCount, memoryCount: memoryIds.size };
 }
+
+export type ShareUpdatePreview = {
+  /** 「更新到最新」将公开的范围——**全部**轮次(watermark="")的披露。 */
+  afterUpdate: ShareDisclosure;
+  /** 相对**当前已公开**(within 当前水位)的增量:更新会新暴露的去重记忆数。 */
+  newMemoryCount: number;
+  /** 同上,更新会新暴露的附图数(按轮求和,不去重)。 */
+  newImageCount: number;
+};
+
+/**
+ * 「更新到最新」的**前瞻**披露——consent 判据是「这个按钮将要公开什么」(设计 §五
+ * consent 红线;codex #522 R1 P1)。
+ *
+ * 已分享的会话点「更新到最新」会把水位推到**全部**轮次,所以按钮在被点击**之前**
+ * 就必须显示更新后会公开多少条记忆摘录;否则水位之后新轮引用的私有 Memory 会先被
+ * 公开、条数事后才涨——即在**未披露**的情况下公开了新的私有 Memory。
+ *
+ * `afterUpdate` 是全部轮次(watermark="")的披露即更新后公开的范围;`newMemoryCount`/
+ * `newImageCount` 是相对当前已公开(within 当前水位)的增量。当前披露恒为 `afterUpdate`
+ * 的**子集**(afterUpdate 多算的只是水位之后的新轮),故两个增量恒 ≥ 0——记忆按 id
+ * 全局去重,current 的去重集 ⊆ afterUpdate 的去重集,相减即「更新才会新暴露的记忆数」
+ * (已在早前轮次公开过、新轮又引用一次的记忆不计入新增)。
+ */
+export function summarizeShareUpdate(
+  turns: ConversationDetail["turns"],
+  watermark: string,
+): ShareUpdatePreview {
+  const current = summarizeShareDisclosure(turns, watermark);
+  const afterUpdate = summarizeShareDisclosure(turns, "");
+  return {
+    afterUpdate,
+    newMemoryCount: afterUpdate.memoryCount - current.memoryCount,
+    newImageCount: afterUpdate.imageCount - current.imageCount,
+  };
+}

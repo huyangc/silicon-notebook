@@ -8,6 +8,8 @@ BY DEFAULT identity column standing in for SQLite's rowid), not `id`.
 from __future__ import annotations
 
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -318,3 +320,93 @@ def test_discard_unwatermarked_share_clears_a_genuinely_empty_conversation(
         "nb-e-pg", "conv-e-pg"
     )["share_token"] == ""
     assert store.public_conversation_by_token(issued["share_token"]) is None
+
+
+def _wait_for_conversation_row_lock(postgres_database) -> None:
+    """Block until some OTHER backend is waiting on a conversations row lock.
+
+    Mirrors ``test_concurrency._wait_for_memory_row_lock``: a separate
+    autocommit connection polls ``pg_stat_activity`` so the test can prove
+    ``share_conversation`` actually parks on the conversation row lock rather
+    than racing ahead of it."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    deadline = time.monotonic() + 3
+    with psycopg.connect(
+        postgres_database._database_url, autocommit=True, row_factory=dict_row
+    ) as inspector:
+        while time.monotonic() < deadline:
+            waiting = inspector.execute(
+                "SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() "
+                "AND wait_event_type='Lock' AND state='active' "
+                "AND query ILIKE '%conversations%' LIMIT 1"
+            ).fetchone()
+            if waiting is not None:
+                return
+            time.sleep(0.01)
+    raise AssertionError(
+        "share_conversation never waited on the conversation row lock"
+    )
+
+
+@pytest.mark.postgres_integration
+def test_concurrent_share_serializes_on_the_conversation_row(postgres_database):
+    """``FOR UPDATE`` makes a share read ``latest`` only AFTER winning the
+    conversation row lock (codex #522 R1 concurrency P2).
+
+    An external holder locks the conversation row; a concurrent
+    ``share_conversation`` must park on it. While it is parked, a NEWER answer
+    commits. Because the share re-reads ``latest`` only once the lock is
+    released, it freezes at that newer answer (``ans-late``) — proving it read
+    AFTER locking. Without ``FOR UPDATE`` the share would read the pre-lock
+    newest (``ans-d``) before blocking on its own UPDATE and then write that
+    STALE watermark back; the same stale path, when the pre-lock latest is NULL,
+    is what lets ``discard_unwatermarked_share`` revoke a link another share
+    already returned live. Mutation guard: dropping ``FOR UPDATE`` flips the
+    watermark below to ``ans-d``.
+
+    The SQLite adapter needs no such lock — its ``database.write()`` is a
+    process-level write lock that already serializes these calls.
+    """
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.write() as editor:
+            # Hold the conversation row exactly where share_conversation's own
+            # existence check must lock. The concurrent share must block HERE,
+            # before it can read the latest answer.
+            editor.execute(
+                "SELECT id FROM conversations WHERE id=%s FOR UPDATE",
+                (conversation_id,),
+            ).fetchone()
+            share_future = executor.submit(
+                store.share_conversation, notebook_id, conversation_id
+            )
+            _wait_for_conversation_row_lock(postgres_database)
+            # A newer answer lands while the share is parked on the row lock.
+            editor.execute(
+                "INSERT INTO answers "
+                "(id,notebook_id,conversation_id,question,payload,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (
+                    "ans-late",
+                    notebook_id,
+                    conversation_id,
+                    "q",
+                    '{"conclusion": "c"}',
+                    "2026-01-01T00:00:09+00:00",
+                ),
+            )
+        # Editor commits here: releases the row lock AND publishes ans-late.
+        share = share_future.result(timeout=10)
+
+    # Froze at the answer that committed AFTER the lock was taken — the watermark
+    # only ever advances, never regresses to the pre-lock newest.
+    assert share["shared_through_id"] == "ans-late"
+    state = store.conversation_share_state(notebook_id, conversation_id)
+    assert state["shared_through_id"] == "ans-late"

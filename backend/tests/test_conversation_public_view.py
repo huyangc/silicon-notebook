@@ -580,6 +580,17 @@ def test_truthy_scalar_evidence_fields_degrade_instead_of_500():
         assert turn["omitted_result_sets"] == 0
 
 
+def test_a_long_question_is_served_whole_not_truncated():
+    """Ask accepts questions far past the retired 2,000-char public cap; the
+    projection must serve the question WHOLE (like ``answer_md``), never
+    silently truncate the very text that produced the answer (codex #522 R1).
+    Mutation guard: restoring ``_text(..., 2000)`` here drops it to 2,000."""
+    long_q = "问" * 5000
+    turn = public_turn(_turn(long_q, {"answer": "答。", "anchors": [], "citations": []}))
+    assert turn["question"] == long_q
+    assert len(turn["question"]) == 5000  # no 2,000 cap
+
+
 def test_one_bad_turn_does_not_topple_the_whole_page():
     """A batch with a scalar-anchors turn beside a normal turn must return BOTH
     turns (the bad one degraded), not 500 the entire conversation page."""

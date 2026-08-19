@@ -9829,6 +9829,16 @@ button.tag:hover {
   gap: 4px;
 }
 
+/* 「更新到最新」的前瞻披露 + 按钮成组:披露在上、按钮左对齐在下(codex #522 R1)。 */
+.conversation-share-update {
+  display: grid;
+  gap: 8px;
+}
+
+.conversation-share-update .sort-button {
+  justify-self: start;
+}
+
 .conversation-share-cta {
   display: inline-flex;
   align-items: center;
