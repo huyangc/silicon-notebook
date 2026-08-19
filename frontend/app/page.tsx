@@ -1145,6 +1145,11 @@ export default function Home() {
     setSchemas(null);
     setSchemaBusy(false);
     setSchemaView("notebook");
+    // 会话分享弹窗也随切库关闭：它渲染时用 currentNotebookId 作 notebookId,而
+    // sharingSession 是旧库的会话——不关的话弹窗会用「新库 id + 旧会话 id」重载,
+    // 打到 share 端点必然 404(codex T5 评审 P2-4)。会话属于它所在的库,换库后
+    // 展示它的分享弹窗本就无意义。
+    setSharingSession(null);
   }, [currentNotebookId]);
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
