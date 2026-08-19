@@ -50,6 +50,7 @@ from app.repositories.sqlite.ask_state_store import AskStateStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SqliteMigrator
 from app.repositories.sqlite.query_store import QueryStore
+from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.services import background_jobs
 from app.services.agent_profile_job import (
@@ -69,6 +70,9 @@ USER_B = "user-b"
 
 A_QUESTION = "阿尔法项目的时序收敛怎么做"
 B_QUESTION = "贝塔团队的预算表在哪一份文档里"
+
+#: ``_service``'s "leave the fixture's seat alone" sentinel — see there.
+_KEEP = object()
 
 
 # --------------------------------------------------------------------- doubles
@@ -178,6 +182,18 @@ def harness(tmp_path: Path, monkeypatch):
         "sources": SourceStore(database, now=lambda: NOW),
         "queries": QueryStore(database, settings),
         "ask_state": AskStateStore(database, seams),
+        # P2-T3: the membership seat, wired with the REAL store rather than a
+        # permissive double. It matters that it is real and that it is on by
+        # default in every test in this file: the check now sits in front of
+        # every overlay trigger, and a fixture that left it unwired would let
+        # the whole file keep passing while production silently gained (or
+        # lost) a gate nothing here exercises. ``USER_A`` owns ``NOTEBOOK_ID``,
+        # so every pre-existing case reads through it unchanged; ``USER_B`` is
+        # neither owner nor member, which is exactly the removed-member shape.
+        "access": SharingStore(
+            database, settings, now=seams.now,
+            insert_row=SharingStore.insert_row_values,
+        ),
         "event_log": _EventLog(),
     }
 
@@ -193,7 +209,7 @@ def _run_overlay(service, claimed):
     )
 
 
-def _service(harness, *, client: "_Client | None" = None, models=None):
+def _service(harness, *, client: "_Client | None" = None, models=None, access=_KEEP):
     return AgentProfileConsolidationService(
         settings=harness["settings"],
         profiles=harness["profiles"],
@@ -203,6 +219,11 @@ def _service(harness, *, client: "_Client | None" = None, models=None):
         models=models if models is not None else _Models(client),
         event_log=harness["event_log"],
         ask_state=harness["ask_state"],
+        # ``access=None`` is a legitimate production shape (a composition root
+        # that predates P2-T3) and fails open, so it is spelled with a sentinel
+        # rather than ``None``: a caller passing ``None`` means "no checker",
+        # not "use the default".
+        access=harness["access"] if access is _KEEP else access,
     )
 
 
@@ -626,6 +647,106 @@ def test_a_failing_job_row_cleanup_never_blocks_the_access_change():
 
     assert removed == [(NOTEBOOK_ID, USER_B)]
     assert cleared == [(NOTEBOOK_ID, USER_B)]
+
+
+# ------------------------------------------------- P2-T3: late notifications
+# Removal clears the rows (above). What this group is about is the OTHER half:
+# a notification that lands AFTER the removal must not put them back. Before
+# P2-T3 it did — ``bump_signal`` is an upsert, so a late completion recreated
+# the job row, and once the counter filled a run rebuilt that member's blocks
+# out of traces from when they still had access (codex #520 R5).
+
+def test_a_late_ask_notification_does_not_revive_a_removed_member(harness):
+    """The R5 shape, end to end: USER_B is not a member of this notebook, and
+    an Ask completion arriving for them leaves nothing behind at all."""
+    service = _service(harness)
+
+    service.note_ask_completed(NOTEBOOK_ID, USER_B)
+    service.note_ask_completed(NOTEBOOK_ID, USER_B)
+    service.note_ask_completed(NOTEBOOK_ID, USER_B)   # would cross the threshold
+
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_B) is None
+    # And the member who IS entitled is untouched by the same service.
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_A)["pending_signal"] == 1
+
+
+def test_a_late_report_notification_does_not_revive_a_removed_member(harness):
+    """The report hook is the sharper half of R5: its bump is a FULL-threshold
+    one, so a single late report used to recreate the row AND arm it in one
+    call — no counter to fill first."""
+    service = _service(harness, client=_Client({"blocks": []}))
+
+    service.note_report_completed(NOTEBOOK_ID, USER_B)
+
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_B) is None
+
+
+def test_a_removed_member_cannot_have_a_worker_started_for_them(
+    harness, monkeypatch
+):
+    """``start_overlay`` is the one door every path to a worker goes through
+    (both hooks, plus T6's manual rebuild endpoint), and a claim is what
+    creates the durable row. It refuses on its own, not because its callers
+    checked first."""
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+    service = _service(harness)
+
+    assert service.start_overlay(NOTEBOOK_ID, USER_B) is False
+
+    assert submitter.calls == []
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_B) is None
+
+
+def test_a_failing_access_check_admits_the_notification(harness):
+    """FAIL-OPEN, asserted positively rather than left implied.
+
+    Every caller of this check hangs off an already-delivered answer, so a
+    database hiccup in a background bookkeeping read must not change what the
+    user's request did — and failing closed would be strictly worse than the
+    residual it closes: a transient error would silently stop consolidating
+    for members who are perfectly entitled to it, with nothing reporting it.
+    The accepted end state is "revives only when the access read is broken".
+    """
+    class _BrokenAccess:
+        def user_can_read_notebook(self, _nb, _uid):
+            raise RuntimeError("db down")
+
+    service = _service(harness, access=_BrokenAccess())
+
+    service.note_ask_completed(NOTEBOOK_ID, USER_A)
+
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_A)["pending_signal"] == 1
+
+
+def test_an_unwired_access_seat_admits_the_notification(harness):
+    """``access=None`` is a real production shape (a composition root that
+    predates P2-T3) and takes the same fail-open direction as a raising check
+    — this feature never breaks its host, and it never silently stops working
+    for an entitled member either."""
+    service = _service(harness, access=None)
+
+    service.note_ask_completed(NOTEBOOK_ID, USER_B)
+
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_B)["pending_signal"] == 1
+
+
+def test_the_access_check_uses_the_read_side_predicate(harness, monkeypatch):
+    """A read-only SHARE member — not the owner — still gets consolidated.
+
+    The predicate is ``user_can_read_notebook`` (the read side's only
+    definition), NOT ownership and NOT "is this the notebook's creator". A
+    check that drifted to a narrower one would fail closed for every shared
+    notebook's members, and the failure mode is silence: their notes would
+    simply stop refreshing.
+    """
+    _with_submitter(monkeypatch, _Submitter(run=False))
+    harness["access"].add_member(NOTEBOOK_ID, USER_B)
+    service = _service(harness)
+
+    service.note_ask_completed(NOTEBOOK_ID, USER_B)
+
+    assert harness["profiles"].job_row(NOTEBOOK_ID, USER_B)["pending_signal"] == 1
 
 
 # =====================================================================

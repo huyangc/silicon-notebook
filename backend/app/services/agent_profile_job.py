@@ -63,6 +63,7 @@ from app.repositories.ports import (
     AskStateStorePort,
     QueryStorePort,
     RepositoryDatabasePort,
+    SharingStorePort,
     SourceStorePort,
 )
 from app.services import background_jobs
@@ -870,6 +871,7 @@ class AgentProfileConsolidationService:
         models: Any,
         event_log: Any,
         ask_state: "AskStateStorePort | None" = None,
+        access: "SharingStorePort | None" = None,
     ) -> None:
         self.settings = settings
         self.profiles = profiles
@@ -886,6 +888,16 @@ class AgentProfileConsolidationService:
         # root that predates T5), and every overlay entry point degrades to a
         # no-op rather than raising — this feature never breaks its host.
         self.ask_state = ask_state
+        # P2-T3: the OVERLAY chain's membership seat, and the ONLY seat in this
+        # service that answers a question about a person rather than about
+        # data. It is separate from every other seat for the same reason
+        # ``ask_state`` is: the isolation guard's port allowlists are per-chain,
+        # and this method must never appear in the BASE chain's — a
+        # notebook-wide, all-members-can-read block has no business being
+        # conditioned on any individual's access. ``None`` = no checker wired
+        # (a composition root that predates T3), which fails OPEN exactly like
+        # a failing check does; see ``_member_can_read``.
+        self.access = access
 
     # ------------------------------------------------------------- triggering
     def note_corpus_change(self, notebook_id: str) -> None:
@@ -1404,6 +1416,53 @@ class AgentProfileConsolidationService:
         )
 
     # -------------------------------------------------- overlay: triggering
+    def _member_can_read(self, notebook_id: str, user_id: str) -> bool:
+        """Can this member still read this notebook? (P2-T3)
+
+        The overlay chain is per (notebook, member), so "does this chain still
+        have a right to exist" is exactly "can this person still read this
+        library" — and that question has ONE definition in this repository
+        (``access_sql.NOTEBOOK_READ_SQL``, reached through
+        ``SharingStorePort.user_can_read_notebook``). Asking it through the
+        same predicate the read side is served by is the whole point: a second
+        spelling here could answer "still a member" while the read side
+        answered "no" (or the reverse), and the failure mode of that drift is
+        silent in both directions.
+
+        ⚠ FAIL-OPEN, and this is not an oversight to be tightened later. Every
+        caller of this hangs off an ALREADY-DELIVERED answer or an
+        ALREADY-PERSISTED report; a database hiccup in a background bookkeeping
+        read must never be able to change what happened to the user's request.
+        Failing closed here would also be strictly worse than the residual it
+        would close: a transient read error would silently stop consolidating
+        for members who are perfectly entitled to it, and nothing would report
+        that. So the accepted end state is "revives only when the access read
+        itself is broken", registered in ``note_ask_completed``.
+
+        ⚠ It cannot be race-free either, and does not try to be. A removal
+        landing between this check and the bump still recreates a row. That
+        interleaving is covered from the other side, by machinery that already
+        exists: ``NotebookSharingService.remove_member`` clears both the block
+        rows and the job row, P2-T2's claim generation makes any in-flight
+        worker's ``settle`` return ``gone``, and ``_after_overlay_settle``
+        turns that into ``_clear_revoked_overlay``. This check is the cheap
+        front door; that relay is the one that closes behind it.
+
+        ⚠ COST (PR-facing): one bounded indexed read per completed Ask and per
+        completed report, plus one more on the round that actually crosses the
+        threshold (``start_overlay`` re-checks). It is a single-row probe on a
+        background hook that runs after delivery — never on the answering path.
+        """
+        if self.access is None:
+            return True
+        try:
+            return bool(self.access.user_can_read_notebook(notebook_id, user_id))
+        except Exception:  # noqa: BLE001 — see FAIL-OPEN above
+            _log.exception(
+                "agent profile access check failed for notebook %s", notebook_id
+            )
+            return True
+
     def note_ask_completed(self, notebook_id: str, user_id: str) -> None:
         """This member finished one Ask in this notebook.
 
@@ -1424,26 +1483,34 @@ class AgentProfileConsolidationService:
         rather than from conversations — one definition of "an ask happened",
         not two that disagree.
 
-        ⚠ Registered residual (codex #520 R5 P2, accepted): this hook does not
-        verify the member still has notebook access, so a completion landing
-        AFTER their removal can recreate the job row (``bump_signal`` upserts)
-        and, once the counter fills, a later run rebuilds that member's own
-        blocks from their pre-removal traces. Blast radius is again that one
-        member's own notes — the read side never serves them to anyone else —
-        and closing it needs an access-checker seat wired into this service
-        for a check that would itself race the removal it guards against.
+        ⚠ Residual CLOSED in P2-T3 (was codex #520 R5): a completion landing
+        AFTER the member's removal used to recreate the job row
+        (``bump_signal`` upserts) and, once the counter filled, let a later run
+        rebuild that member's own blocks out of their pre-removal traces. The
+        mechanism is now ``_member_can_read`` in front of the bump — the same
+        read-side participant predicate the notebook itself is served by, so
+        "may this chain exist" and "may this person read this library" cannot
+        drift apart. What remains registered is only the fail-open tail: a
+        check that RAISES admits the completion (see ``_member_can_read`` for
+        why that direction is not negotiable), so the window narrowed from
+        "always revives" to "revives only when the access read is broken".
 
-        ⚠ The claim generation added in P2 does NOT close this one, and saying
-        so explicitly matters because the two used to be filed as one family:
-        the row this hook recreates carries a perfectly legitimate NEW
-        generation, so every downstream generation check is satisfied by it.
-        The token separates "which run holds the chain", never "is this person
-        still a member". Still registered, on its own.
+        ⚠ The claim generation added in P2-T2 could not have closed this one,
+        and saying so explicitly matters because the two used to be filed as
+        one family: the row this hook recreates carries a perfectly legitimate
+        NEW generation, so every downstream generation check is satisfied by
+        it. The token separates "which run holds the chain", never "is this
+        person still a member" — hence the separate seat.
         """
         try:
             if not user_id or self.ask_state is None:
                 return
             if not profile_wiring_active(self.settings, self.profiles):
+                return
+            # P2-T3, and it must come BEFORE the bump: the bump is an UPSERT,
+            # so letting it run for a removed member is what recreates the row
+            # this check exists to keep from existing.
+            if not self._member_can_read(notebook_id, user_id):
                 return
             pending = self.profiles.bump_signal(notebook_id, user_id)
             if pending < int(self.settings.agent_profile_overlay_trigger):
@@ -1490,6 +1557,12 @@ class AgentProfileConsolidationService:
                 return
             if not profile_wiring_active(self.settings, self.profiles):
                 return
+            # P2-T3, same reason as in ``note_ask_completed``: this hook's
+            # bump is a full-threshold one, so a late report from a removed
+            # member does not merely nudge the counter — it recreates the row
+            # AND arms it, all in one call.
+            if not self._member_can_read(notebook_id, user_id):
+                return
             # codex R7 P2: the bump comes BEFORE the claim attempt. Bumping
             # only after a failed claim left a window — the in-flight worker
             # could settle AND run its final leftover re-check between our
@@ -1532,8 +1605,18 @@ class AgentProfileConsolidationService:
         reach queue-warning logs, which are a shared channel, and "which member
         is having their searching consolidated" is the exact fact this
         feature's isolation exists to keep out of those.
+
+        ⚠ P2-T3 re-checks membership here too, and the redundancy is
+        deliberate. Both notification hooks already checked before bumping, and
+        T6's manual rebuild endpoint sits behind ``require_notebook_read``; but
+        this is the one door every path to a worker goes through, and a claim
+        is what creates the durable row. One bounded indexed read to make
+        "no worker ever starts for someone who cannot read this notebook" a
+        property of this method rather than a property of its callers.
         """
         if self.ask_state is None:
+            return False
+        if not self._member_can_read(notebook_id, user_id):
             return False
         claimed = self.profiles.claim(notebook_id, user_id)
         if claimed is None:
