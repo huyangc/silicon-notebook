@@ -290,3 +290,42 @@ def test_gate_fields_never_appear_in_the_response(client):
     assert "created_by" not in body
     assert nb not in json.dumps(body, ensure_ascii=False)
     assert owner_id not in json.dumps(body, ensure_ascii=False)
+
+
+def test_empty_creator_is_fail_closed_even_under_an_everyone_grant(client):
+    """Defense in depth (codex T3 review): the anonymous route must 404 a
+    creatorless conversation on its own, not lean on T2's share gate. Set up the
+    exact state T2 refuses to create — a shared conversation with created_by=""
+    on a notebook carrying an ``everyone`` read grant (whose read arm ignores the
+    user id) — by writing it directly, and confirm the route still 404s.
+
+    Without the empty-creator guard, ``user_can_read_notebook(nb, "")`` returns
+    True through the everyone arm and this would leak anonymously — which is
+    exactly what the mutation of that guard turns red.
+    """
+    from app.api.deps import repository
+
+    owner, owner_id = _new_user(client)
+    nb = _notebook(client, owner)
+    cid = _seed_shared_conversation(nb, "")  # creatorless — T2 would 409 a share
+
+    db = repository()._runtime.database
+    with db.write() as conn:
+        # Mint token + watermark directly (the share endpoint refuses this row).
+        conn.execute(
+            "UPDATE conversations SET share_token='EMPTY-CREATOR-TOK', "
+            "shared_through_at='2026-01-01T00:00:01' WHERE id=?",
+            (cid,),
+        )
+        # An everyone read grant: its arm ignores the user id, so
+        # user_can_read_notebook(nb, "") would be True without the guard.
+        conn.execute(
+            "INSERT INTO notebook_grants "
+            "(id, notebook_id, principal_type, principal_id, role, created_at) "
+            "VALUES ('g-everyone', ?, 'everyone', '', 'viewer', "
+            "'2026-01-01T00:00:00')",
+            (nb,),
+        )
+
+    resp = client.get("/api/public/conversations/EMPTY-CREATOR-TOK")
+    assert resp.status_code == 404, resp.text

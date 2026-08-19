@@ -78,6 +78,19 @@ def _text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _as_list(value: Any) -> list:
+    """A stored payload field coerced to a list, or [] for anything else.
+
+    ``X or []`` only guards falsy values; a TRUTHY scalar (``5``, ``1.5``,
+    ``true``) slips through and then crashes ``for x in value`` / ``len(value)``.
+    A stored ``AskResponse`` always serializes ``anchors``/``citations``/
+    ``result_sets`` as lists, so a scalar here can only come from a hand-edited
+    or ancient row — but this is the anonymous surface, and it must DEGRADE
+    (empty list) rather than 500 (codex T3 review, P1). Same ``isinstance``
+    discipline this module already uses for ``payload``/``turns``."""
+    return value if isinstance(value, list) else []
+
+
 def _marker_keys(marker: str) -> list[str]:
     """The anchor keys inside one ``[k1, k2]`` / ``【k1】`` marker group.
 
@@ -113,11 +126,16 @@ def _select_references(
     numbering would then misalign the body's ``[12]`` from the list's 11th row
     (design §七 item 4).
     """
+    # Last-write-wins on a duplicate key, matching the frontend real source
+    # ``new Map(anchors.map(...))`` (answer-formatting.ts:93). Anchor keys are
+    # unique per answer (k1..kN), so a duplicate is malformed and never happens
+    # in a well-formed payload — but if it did, the public page must resolve the
+    # SAME anchor the author sees, not the opposite one (codex T3 review, P2).
     anchors_by_key: dict[str, dict] = {}
     for anchor in anchors:
         if isinstance(anchor, dict):
             key = str(anchor.get("key") or "").strip()
-            if key and key not in anchors_by_key:
+            if key:
                 anchors_by_key[key] = anchor
 
     selected: list[tuple[str, dict]] = []
@@ -176,8 +194,8 @@ def public_turn(turn: Any) -> dict[str, Any]:
     answer_md = str(payload.get("answer") or payload.get("conclusion") or "")
     selected = _select_references(
         answer_md,
-        payload.get("anchors") or [],
-        payload.get("citations") or [],
+        _as_list(payload.get("anchors")),
+        _as_list(payload.get("citations")),
     )
     visible = [
         public_reference(key, reference)
@@ -198,7 +216,7 @@ def public_turn(turn: Any) -> dict[str, Any]:
         "truncated_references": len(selected) > MAX_REFERENCES,
         # C-1: collection cards are out of v1, but the count (content-free) lets
         # the page disclose that something was withheld here.
-        "omitted_result_sets": len(payload.get("result_sets") or []),
+        "omitted_result_sets": len(_as_list(payload.get("result_sets"))),
     }
 
 
@@ -214,6 +232,32 @@ def public_conversation_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": _text(row.get("created_at"), 64),
         # The read watermark: "内容截至何时". Comes from ``shared_through_at``.
         "shared_at": _text(row.get("shared_through_at"), 64),
-        "turns": [public_turn(turn) for turn in list(turns)[:MAX_TURNS]],
+        "turns": [_safe_turn(turn) for turn in list(turns)[:MAX_TURNS]],
         "truncated_turns": len(turns) > MAX_TURNS,
     }
+
+
+def _safe_turn(turn: Any) -> dict[str, Any]:
+    """``public_turn`` with a belt-and-suspenders fallback (codex T3 review).
+
+    After the ``_as_list``/``isinstance`` guards ``public_turn`` is total for any
+    DATA shape, so this catch only fires on a future code regression. When it
+    does, one bad turn must not 500 the whole anonymous page — degrade to a
+    minimal turn that keeps the question (so turn count/order stay aligned) and
+    empties everything else, rather than dropping the row (which would misalign
+    the numbering the way position-based reference numbering was avoided)."""
+    try:
+        return public_turn(turn)
+    except Exception:
+        row = turn if isinstance(turn, dict) else {}
+        return {
+            "question": _text(row.get("question"), MAX_QUESTION_CHARS),
+            "answer_md": "",
+            "asked_at": "",
+            "answered_at": "",
+            "evidence_level": "inferred",
+            "references": [],
+            "reference_count": 0,
+            "truncated_references": False,
+            "omitted_result_sets": 0,
+        }
