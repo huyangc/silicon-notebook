@@ -683,7 +683,10 @@ def parse_distillation_reply(
       this codebase, and for the same reason: a model-built situation map would
       have to be validated against the registry anyway, and any value it got
       wrong would file the entry under a shape of question that never occurs.)
-    * ``action`` matches ``RETRIEVAL_ACTIONS`` exactly. No prefix matching and
+    * ``action`` matches ``RETRIEVAL_ACTIONS`` exactly, AND at least one run
+      in the entry's situation group actually invoked it this batch — the
+      vocabulary says the word is legal, only an observed execution says there
+      is evidence. No prefix matching and
       no nearest-neighbour repair: ``ppr_retrieve`` is not ``ppr``, and
       guessing which one was meant is how an entry ends up about a channel the
       model was not writing about.
@@ -720,6 +723,13 @@ def parse_distillation_reply(
         index, group = resolved
         action = str(item.get("action") or "").strip()
         if action not in RETRIEVAL_ACTIONS:
+            continue
+        if not group.runs_for(action):
+            # codex #524 R10 P2:合法词表里的动作 ≠ 被观测过的动作。本批
+            # 没有任何 run 真用过它,这条结论就没有一次执行作证据——落库
+            # 会得到 support=0 的条目,而注入不要求正支持,幻觉打法会
+            # 反过来指挥真实检索。ADD/UPDATE 统一丢弃:UPDATE 的"新证据"
+            # 同样只能来自本批用过该动作的 run。
             continue
         polarity = str(item.get("polarity") or "").strip().lower()
         if polarity not in EXPERIENCE_POLARITIES:
