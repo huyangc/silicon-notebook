@@ -227,7 +227,22 @@ def select_experiences(
             support, bool) else 0
         scored.append((score, support, str(entry.get("id") or ""), entry))
     scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
-    return [entry for _score, _support, _id, entry in scored[: max(0, int(top_k))]]
+    # codex #524 R14 P2:每个动作只留排名最高的一条——相似指纹可以各存一条
+    # 同动作条目(好/坏极性都有),而渲染块不带指纹,规划模型收到「多用 ppr」
+    # 和「别用 ppr」并排时没有任何依据分辨哪条适用。蒸馏侧 _offered_entries
+    # 已按同一规则去重,这里镜像它;名额在去重后消耗(同 R11)。
+    picked: list[Mapping[str, Any]] = []
+    actions_taken: set[str] = set()
+    limit = max(0, int(top_k))
+    for _score, _support, _id, entry in scored:
+        if len(picked) >= limit:
+            break
+        action = str(entry.get("action") or "")
+        if action in actions_taken:
+            continue
+        actions_taken.add(action)
+        picked.append(entry)
+    return picked
 
 
 def render_experience_block(entries: Sequence[Mapping[str, Any]]) -> str:

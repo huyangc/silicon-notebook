@@ -832,3 +832,22 @@ def test_the_memo_never_serves_another_stores_entries():
     b = _FixedStore("B 库的打法")
     assert _cached_experiences(a)[0]["rationale"] == "A 库的打法"
     assert _cached_experiences(b)[0]["rationale"] == "B 库的打法"
+
+
+def test_injection_keeps_only_the_best_entry_per_action():
+    """codex #524 R14 P2:相似指纹各存一条同动作条目(极性相反)时,渲染块
+    不带指纹,规划模型没有依据分辨哪条适用——每动作只留排名最高的一条,
+    低一名的其他动作条目顶上名额。"""
+    situation = _situation()
+    near = dict(situation)
+    entries = [
+        {"id": "a-good", "situation": situation, "action": "ppr",
+         "polarity": "good", "rationale": "多用", "support": 5},
+        {"id": "a-bad", "situation": near, "action": "ppr",
+         "polarity": "bad", "rationale": "别用", "support": 4},
+        {"id": "b", "situation": near, "action": "retrieve",
+         "polarity": "good", "rationale": "先查原文", "support": 1},
+    ]
+    picked = select_experiences(entries, situation, top_k=2)
+    assert [entry["id"] for entry in picked] == ["a-good", "b"]
+    assert len({entry["action"] for entry in picked}) == len(picked)

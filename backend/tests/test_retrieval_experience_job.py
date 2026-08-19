@@ -394,7 +394,14 @@ def test_a_batch_writes_the_entry_and_then_evicts():
     store = _Store()
     events = _Events()
     service = _service(
-        [_run([_intent_step(), {"step_type": "exact_lookup", "detail": {"found": 0}}])],
+        [
+            _run([_intent_step(),
+                  {"step_type": "exact_lookup", "detail": {"found": 0}}],
+                 run_id="job-1"),
+            _run([_intent_step(),
+                  {"step_type": "exact_lookup", "detail": {"found": 0}}],
+                 run_id="job-2"),
+        ],
         _REPLY,
         store=store,
         events=events,
@@ -404,7 +411,7 @@ def test_a_batch_writes_the_entry_and_then_evicts():
     entry_id, kwargs = store.upserts[0]
     assert kwargs["action"] == "exact_lookup"
     assert kwargs["polarity"] == "bad"
-    assert kwargs["provenance"] == ["job-1"]
+    assert kwargs["provenance"] == ["job-1", "job-2"]
     assert kwargs["replace_conclusion"] is False
     assert entry_id == experience_id(kwargs["situation"], "exact_lookup")
     assert store.evicted == 1
@@ -861,18 +868,19 @@ def test_provenance_and_support_belong_only_to_runs_that_used_the_action():
     fetch = [{"step_type": "retrieve", "detail": {"count": 3}}]
     runs = [
         project_run(_run([_intent_step(), *ppr_retry], run_id="job-1")),
+        project_run(_run([_intent_step(), *ppr_retry], run_id="job-1b")),
         project_run(_run([_intent_step(), *fetch], run_id="job-2")),
         project_run(_run([_intent_step(), *fetch], run_id="job-3")),
     ]
     groups = _group_by_situation(runs)
-    assert groups[0].runs_for("ppr") == ["job-1"]
+    assert groups[0].runs_for("ppr") == ["job-1", "job-1b"]
     assert set(groups[0].runs_for("retrieve")) == {"job-2", "job-3"}
     parsed = parse_distillation_reply(
         {"entries": [{"op": "ADD", "situation": "s0", "action": "ppr",
                       "polarity": "bad", "rationale": "老是空手"}]},
         groups,
     )
-    assert parsed[0]["provenance"] == ["job-1"]
+    assert parsed[0]["provenance"] == ["job-1", "job-1b"]
 
 
 def test_the_grounding_signal_reads_anchors_never_the_fallback_cards():
@@ -977,7 +985,14 @@ def test_a_failed_upsert_still_evicts_the_overflow():
     store = _ExplodingStore()
     events = _Events()
     service = _service(
-        [_run([_intent_step(), {"step_type": "exact_lookup", "detail": {"found": 0}}])],
+        [
+            _run([_intent_step(),
+                  {"step_type": "exact_lookup", "detail": {"found": 0}}],
+                 run_id="job-1"),
+            _run([_intent_step(),
+                  {"step_type": "exact_lookup", "detail": {"found": 0}}],
+                 run_id="job-2"),
+        ],
         _REPLY,
         store=store,
         events=events,
@@ -985,3 +1000,23 @@ def test_a_failed_upsert_still_evicts_the_overflow():
     service.run()          # 失败被 run() 的 fail-open 吞掉,不冒泡
     assert len(store.upserts) == 1
     assert store.evicted == 1          # ← 批次失败,驱逐仍然跑了
+
+
+def test_a_single_run_conclusion_is_rejected_but_a_real_update_is_not():
+    """codex #524 R14 P2:「一个 run 从不构成模式」是服务端闸不是 prompt
+    嘱咐——单 run 的 ADD 拒收;命中真实 offered 条目的 UPDATE 豁免到 ≥1
+    (既有条目的历史 support 补齐了模式的另一半)。"""
+    fetch = [{"step_type": "retrieve", "detail": {"count": 3}}]
+    runs = [project_run(_run([_intent_step(), *fetch], run_id="only-run"))]
+    groups = _group_by_situation(runs)
+    add = {"op": "ADD", "situation": "s0", "action": "retrieve",
+           "polarity": "good", "rationale": "只见过一次"}
+    assert parse_distillation_reply({"entries": [add]}, groups) == []
+    offered = [(0, {"situation": groups[0].situation, "action": "retrieve",
+                    "polarity": "bad", "rationale": "旧结论"})]
+    update = dict(add, op="UPDATE")
+    parsed = parse_distillation_reply({"entries": [update]}, groups, offered)
+    assert len(parsed) == 1 and parsed[0]["replace"] is True
+    # 降级成 ADD 的 UPDATE(offered 里没有该动作)按 ADD 判,单 run 同样拒
+    parsed = parse_distillation_reply({"entries": [update]}, groups, offered=[])
+    assert parsed == []

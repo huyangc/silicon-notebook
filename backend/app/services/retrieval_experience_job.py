@@ -125,6 +125,13 @@ RETRIEVAL_EXPERIENCE_MAX_OUTPUT_TOKENS = 1024
 _MAX_SITUATIONS_PER_BATCH = 4
 _MAX_SIMILAR_ENTRIES = 3
 
+#: codex #524 R14 P2:一条 ADD 至少要有几个**不同 run** 真用过该动作。prompt
+#: 的规则 1 已经写明"一个 run 从不构成模式",但那是对模型的嘱咐不是闸——服务端
+#: 不强制,单 run 结论照样落库、照样可注入。UPDATE 命中真实 offered 条目时豁免
+#: 到 ≥1(R10 闸已保证):既有条目的历史 support 补齐了模式的另一半,本批一个
+#: run 是"新证据",不是"孤证"。被降级成 ADD 的 UPDATE 按 ADD 判。
+_MIN_SUPPORTING_RUNS = 2
+
 #: How close an existing entry's situation has to be before it is shown beside
 #: a new observation. Below it the entry is about a different shape of
 #: question, and including it invites an UPDATE that overwrites a conclusion
@@ -738,7 +745,8 @@ def parse_distillation_reply(
         action = str(item.get("action") or "").strip()
         if action not in RETRIEVAL_ACTIONS:
             continue
-        if not group.runs_for(action):
+        supporting_runs = group.runs_for(action)
+        if not supporting_runs:
             # codex #524 R10 P2:合法词表里的动作 ≠ 被观测过的动作。本批
             # 没有任何 run 真用过它,这条结论就没有一次执行作证据——落库
             # 会得到 support=0 的条目,而注入不要求正支持,幻觉打法会
@@ -788,6 +796,10 @@ def parse_distillation_reply(
                     replace = False
             else:
                 replace = False
+        if not replace and len(supporting_runs) < _MIN_SUPPORTING_RUNS:
+            # ADD(含被降级的 UPDATE)必须 ≥ _MIN_SUPPORTING_RUNS 个不同 run;
+            # 真正的 UPDATE 走上面的 ≥1 豁免。
+            continue
         accepted.append(
             {
                 "situation": situation,
