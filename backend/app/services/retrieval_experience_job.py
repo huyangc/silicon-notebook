@@ -217,16 +217,17 @@ class RetrievalExperienceDistillationService:
                 self._pending += 1
                 if self._pending < trigger:
                     return
-            # codex #524 R1 P2: the counter is reset only AFTER a worker was
-            # actually scheduled. Resetting before ``start()`` lost the whole
-            # batch whenever the single-flight slot was busy — completions
-            # arriving during a model call were neither in that batch nor
-            # retained, so sustained traffic permanently skipped groups of
-            # runs. Kept-on-decline means the very next completion retries,
-            # which lands as soon as the in-flight worker settles.
+                snapshot = self._pending
+            # codex #524 R1 P2 + R2 P2: consume only the SNAPSHOT that crossed
+            # the threshold, and only AFTER a worker was actually scheduled.
+            # Resetting before ``start()`` lost the whole batch whenever the
+            # single-flight slot was busy; resetting to zero afterwards erased
+            # any completion that raced in between ``start()`` and the second
+            # lock acquisition. Subtracting the snapshot preserves exactly the
+            # increments that arrived after the claim.
             if self.start():
                 with self._lock:
-                    self._pending = 0
+                    self._pending = max(0, self._pending - snapshot)
         except Exception:  # noqa: BLE001 — never break a delivered answer
             _log.exception("retrieval experience trigger failed")
 
@@ -356,7 +357,7 @@ class RetrievalExperienceDistillationService:
             RETRIEVAL_EXPERIENCE_SCHEMA_HINT,
             max_tokens=RETRIEVAL_EXPERIENCE_MAX_OUTPUT_TOKENS,
         )
-        parsed = parse_distillation_reply(safe_json(raw), groups)
+        parsed = parse_distillation_reply(safe_json(raw), groups, offered)
         written = 0
         for entry in parsed:
             situation = entry["situation"]
@@ -594,7 +595,9 @@ def _render_value(value: object) -> str:
 # ------------------------------------------------------------------- parsing
 
 def parse_distillation_reply(
-    payload: object, groups: Sequence[_SituationGroup]
+    payload: object,
+    groups: Sequence[_SituationGroup],
+    offered: Sequence[tuple[int, Mapping[str, Any]]] = (),
 ) -> list[dict]:
     """Validate the model's reply against the closed vocabularies.
 
@@ -635,7 +638,9 @@ def parse_distillation_reply(
     entries = payload.get("entries")
     if not isinstance(entries, list):
         return []
-    by_key = {f"s{index}": group for index, group in enumerate(groups)}
+    by_key = {
+        f"s{index}": (index, group) for index, group in enumerate(groups)
+    }
     accepted: list[dict] = []
     for item in entries:
         if not isinstance(item, Mapping):
@@ -643,9 +648,10 @@ def parse_distillation_reply(
         op = str(item.get("op") or "").strip().upper()
         if op not in _OPS or op == "NOOP":
             continue
-        group = by_key.get(str(item.get("situation") or "").strip().lower())
-        if group is None:
+        resolved = by_key.get(str(item.get("situation") or "").strip().lower())
+        if resolved is None:
             continue
+        index, group = resolved
         action = str(item.get("action") or "").strip()
         if action not in RETRIEVAL_ACTIONS:
             continue
@@ -665,6 +671,33 @@ def parse_distillation_reply(
         situation = validate_situation(group.situation)
         if situation is None:
             continue
+        replace = op == "UPDATE"
+        if replace:
+            # codex #524 R2 P2: an UPDATE names an OFFERED entry, and the
+            # offered entry's situation may be merely SIMILAR to this group's
+            # (that is what the similarity floor admits). Hashing the group's
+            # situation would then write a brand-new row while the entry the
+            # model actually revised stays behind — two contradictory tactics
+            # both injectable. Resolve the UPDATE to the offered entry's own
+            # stored situation (its identity); when no offered entry with this
+            # action exists under this index, the model updated something it
+            # was never shown — downgrade to a non-replacing ADD.
+            target = next(
+                (
+                    entry for offered_index, entry in offered
+                    if offered_index == index
+                    and str(entry.get("action") or "") == action
+                ),
+                None,
+            )
+            if target is not None:
+                stored = validate_situation(target.get("situation"))
+                if stored is not None:
+                    situation = stored
+                else:
+                    replace = False
+            else:
+                replace = False
         accepted.append(
             {
                 "situation": situation,
@@ -675,8 +708,9 @@ def parse_distillation_reply(
                 # ADD landing on an existing entry must not rewrite its
                 # conclusion — the model said "the library does not hold this
                 # yet", so it was not reasoning about what is stored there.
-                # Only an explicit UPDATE replaces polarity and rationale.
-                "replace": op == "UPDATE",
+                # Only an explicit UPDATE (resolved to the offered entry's own
+                # identity above) replaces polarity and rationale.
+                "replace": replace,
             }
         )
     return accepted
