@@ -239,6 +239,17 @@ PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state", "access")
 #: `ask_trace_steps`,但同样只能读发起人自己的行,同一层三判据照样成立。
 TRACE_READ_METHODS = ("recent_user_ask_traces", "recent_user_report_traces")
 
+#: P2-T5:``AskStateStorePort`` 上那条**刻意没有任何 user/notebook 谓词**的读。
+#: 它服务的是部署级全局的检索经验库,安全性来自投影(``project_run_row`` /
+#: ``project_run_step``:不透明 run id + 封闭枚举 + 计数,没有问题、没有 summary、
+#: 没有 created_by),而**不是**来自谓词——所以层三对它不成立,它也绝不能被当成
+#: `TRACE_READ_METHODS` 的兄弟。反向护栏见
+#: `test_the_global_trace_read_never_reaches_either_chain`:它对底座与覆盖层
+#: **两条链**都必须不可见。底座的理由是老的那条(共享块不许读任何人的使用数据);
+#: 覆盖层的理由是新的——那条链的全部定义就是「只读本人的」,而一条无谓词的读
+#: 在它手里等于读全体成员的。
+GLOBAL_TRACE_READ_METHODS = ("recent_completed_ask_runs",)
+
 #: P2-T3:**按人判定**的端口方法。它们只属于覆盖层——底座的产物一库一份、全体成员
 #: 可见,让它按某一个人的读权改变行为在语义上就是错的(而错法是安静的:块照写,只是
 #: 写不写取决于恰好是谁触发了这一轮)。反向护栏见
@@ -459,6 +470,47 @@ def test_the_allowlists_are_not_silently_empty():
     # 判据(变异实测),这里再正面写一遍两个取数座位必须在列。
     assert {"ask_state", "access"} <= set(PORT_ATTRIBUTES)
     assert ACCESS_CHECK_METHODS
+    # P2-T5:反向护栏的空转形态是把 GLOBAL_TRACE_READ_METHODS 清空——
+    # 那样 `test_the_global_trace_read_never_reaches_either_chain` 一个
+    # 断言都不执行而 pytest 全绿。
+    assert GLOBAL_TRACE_READ_METHODS
+
+
+def test_the_global_trace_read_never_reaches_either_chain():
+    """反向护栏(P2-T5):无谓词的全局轨迹读对**两条链**都必须不可见。
+
+    `recent_completed_ask_runs` 与上面那两条 `TRACE_READ_METHODS` 长得像、住在同一个
+    端口上、名字只差几个词,而它读的是**全体用户在全部笔记本里**的提问。它对全局经验
+    库是正确的(那张表要学的是「这类问题该怎么查」,收窄到一个人就没有意义了),对
+    这两条链则是各自定义的反面:
+
+    * 底座链路的定义是「一个成员的使用数据都读不到」;
+    * 覆盖层链路的定义是「只读本人的使用数据」——一条无谓词的读在它手里就是读所有人的。
+
+    层二的白名单只管「不许多」,而它挡得住的前提是这个名字还没被谁"顺手加回来";
+    这里正面钉住它三张都不在。中性那张同样不行:中性的含义是「我看过它,它不取业务
+    数据」,而这条读的正是 ask_jobs/ask_trace_steps。
+    """
+    for method in GLOBAL_TRACE_READ_METHODS:
+        assert method not in ALLOWED_PORT_CALLS, (
+            f"{method} 出现在**底座**的端口白名单里。它没有任何 user 谓词,"
+            "底座读它等于把全体成员的使用情况写进一份大家都看得到的块。"
+        )
+        assert method not in OVERLAY_ALLOWED_PORT_CALLS, (
+            f"{method} 出现在**覆盖层**的端口白名单里。覆盖层的全部定义就是"
+            "「只读本人的」,而这条读没有 user 谓词——它一旦进来,层三那条"
+            "`created_by = ?` 的字面量断言也不会救你,因为那条断言只扫"
+            "`TRACE_READ_METHODS` 里的方法。"
+        )
+        assert method not in NEUTRAL_ALLOWED_PORT_CALLS, (
+            f"{method} 出现在**中性**的端口白名单里。中性的含义是「不取业务数据」,"
+            "而它读的正是 ask_jobs / ask_trace_steps。"
+        )
+        assert method not in TRACE_READ_METHODS, (
+            f"{method} 被当成了层三的 trace 读。层三断言 SQL 里必须逐字含 "
+            "`created_by = ?`,而这条方法**刻意没有**那个谓词——把它列进去只会"
+            "让守卫红,而正确的表达是它三张白名单都不在。"
+        )
 
 
 def test_the_two_chains_never_share_a_port_allowlist_entry_that_reads_usage():

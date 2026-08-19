@@ -60,6 +60,8 @@ from app.repositories.ports import (
     project_ask_row,
     project_report_attempt,
     project_report_row,
+    project_run_row,
+    project_run_step,
     project_trace_step,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -445,6 +447,68 @@ class AskStateStore:
             if step is not None and target is not None:
                 target["steps"].append(step)
         return asks
+
+    def recent_completed_ask_runs(
+        self, *, job_limit: int, step_limit: int
+    ) -> list[dict]:
+        """The deployment's most recent COMPLETED asks, projected and bounded —
+        across every notebook and every user.
+
+        Agentic Memory P2 (T5). See ``AskStateStorePort`` for the full
+        contract; the two properties that must not drift are here:
+
+        ⚠ There is NO ``created_by`` predicate and NO ``notebook_id``
+        predicate, and neither is missing by accident. This read feeds the
+        deployment-global retrieval-experience library, whose entries are
+        statements about retrieval TACTICS ("in this shape of question, this
+        action pays off") rather than about anyone's material. Narrowing it to
+        one person would not make it safer, it would make it useless — and it
+        is not what makes it safe. What makes it safe is
+        ``project_run_row``/``project_run_step``: an opaque run id, a closed
+        engine mode, and per step an action type, one count and one duration,
+        plus a bools-and-small-ints situation from the ``intent`` step. The
+        member's question, the step summaries, the notebook and the user id
+        never leave this method.
+
+        ⚠ It reads ONLY ``status = 'done'`` rows. A failed or cancelled ask
+        stopped somewhere in the middle of its retrieval, so its action
+        sequence is a record of an interruption rather than of a strategy, and
+        counting its truncated tail as "these actions came back empty" would
+        teach the library the opposite of what happened. Same gate, same
+        reason, as the report sample's ``status = 'done'``.
+
+        Bounded twice and independently, exactly like
+        ``recent_user_ask_traces``: ``job_limit`` most-recent asks and
+        ``step_limit`` trace rows across all of them, with the same
+        ``ORDER BY j.created_at DESC, j.id DESC, t.seq ASC`` so the row cap
+        drops the OLDEST run's tail steps rather than an arbitrary job's.
+        """
+        job_limit = max(1, int(job_limit))
+        step_limit = max(1, int(step_limit))
+        with self.database.connect() as db:
+            job_rows = db.execute(
+                "SELECT id, mode FROM ask_jobs WHERE status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (job_limit,),
+            ).fetchall()
+            runs = [project_run_row(row["id"], row["mode"]) for row in job_rows]
+            if not runs:
+                return []
+            by_run = {run["run_id"]: run for run in runs}
+            placeholders = ",".join("?" for _ in by_run)
+            step_rows = db.execute(
+                "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                f"WHERE t.job_id IN ({placeholders}) "
+                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT ?",
+                (*by_run.keys(), step_limit),
+            ).fetchall()
+        for row in step_rows:
+            step = project_run_step(row["step_json"])
+            target = by_run.get(str(row["job_id"]))
+            if step is not None and target is not None:
+                target["steps"].append(step)
+        return runs
 
     def recent_user_report_traces(
         self,

@@ -695,6 +695,25 @@ class Settings(BaseSettings):
         5, ge=1, validation_alias="AGENT_PROFILE_BASE_TRIGGER")
     agent_profile_overlay_trigger: int = Field(
         10, ge=1, validation_alias="AGENT_PROFILE_OVERLAY_TRIGGER")
+    # Agentic Memory P2:部署级**全局**的检索策略经验库。两把闸刻意**分开**,
+    # 因为蒸馏与注入是两个独立的决定,而且它们的风险完全不同:蒸馏只是往一张
+    # 没有任何用户可见面的表里攒行(默认 **开**,先把数据攒起来),注入才会改变
+    # 每一次真实提问的规划提示(默认 **关**,等观测)。设计文档的风险条目明说
+    # 「效果不好可以只留蒸馏观测、不注入」——那正是这两个默认值。
+    # 关掉 ``RETRIEVAL_EXPERIENCE_ENABLED`` 即完全回到接入前:不读 ask 轨迹、
+    # 不排蒸馏任务、不发模型调用、零额外查询。
+    retrieval_experience_enabled: bool = Field(
+        True, validation_alias="RETRIEVAL_EXPERIENCE_ENABLED")
+    retrieval_experience_inject_enabled: bool = Field(
+        False, validation_alias="RETRIEVAL_EXPERIENCE_INJECT_ENABLED")
+    # 蒸馏的触发阈值(确定性闸,零模型调用):**全局**累计完成提问数。与两条巡固
+    # 链路的阈值同款 ``ge=1``——0 会让每一次提问都排一次有界 LLM 调用,那不是
+    # 「学得更快」,是把一个后台整理变成随每次问答触发的成本。
+    # ⚠ 计数是**进程内**的,重启归零。这是刻意接受的:经验库是纯增量优化,不是
+    # 正确性要求,重启后少蒸馏一轮的代价是零;而把它持久化就要么新开一张表,
+    # 要么把一个全局计数器塞进一张按 notebook 分区的表里。
+    retrieval_experience_trigger: int = Field(
+        50, ge=1, validation_alias="RETRIEVAL_EXPERIENCE_TRIGGER")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

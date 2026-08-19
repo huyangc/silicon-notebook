@@ -1,0 +1,636 @@
+"""Agentic Memory P2 (T5): the distillation chain and the projection that
+guards its input.
+
+Three groups of coverage, and the FIRST one is the point of the feature:
+
+1. **Structural** — ``RunObservation`` and everything reachable from it carry
+   no free text. The full privacy guard (input-face scanning, the reverse guard
+   on the action vocabulary, the mutation tests) is T6's, but this module's own
+   invariant belongs with the module that establishes it: a T5 that ships with
+   a ``str`` field in the observation has already lost the argument that makes
+   a deployment-global table acceptable, whether or not T6 has landed yet.
+2. **Projection** — what one persisted run becomes.
+3. **The run** — gating, aggregation, reply validation, idempotence.
+"""
+from __future__ import annotations
+
+import typing
+from dataclasses import fields, is_dataclass
+
+import pytest
+
+from app.repositories.ports import (
+    RETRIEVAL_EXPERIENCE_BATCH_RUNS,
+    RETRIEVAL_EXPERIENCE_PROVENANCE_MAX,
+    RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS,
+    project_run_step,
+)
+from app.services.retrieval_experience_job import (
+    RetrievalExperienceDistillationService,
+    distillation_wiring_active,
+    parse_distillation_reply,
+    render_existing,
+    render_observations,
+    _group_by_situation,
+)
+from app.services.retrieval_experience_projection import (
+    RETRIEVAL_ACTIONS,
+    RunObservation,
+    SITUATION_KEYS,
+    experience_id,
+    project_run,
+    situation_domain,
+    situation_similarity,
+    validate_situation,
+)
+
+
+# --------------------------------------------------------------- structural
+
+def _reachable_field_types(root: type) -> list[tuple[str, str, object]]:
+    """Every ``(owner, field, annotation)`` reachable from ``root``."""
+    seen: set[type] = set()
+    pending = [root]
+    found: list[tuple[str, str, object]] = []
+    while pending:
+        current = pending.pop()
+        if current in seen or not is_dataclass(current):
+            continue
+        seen.add(current)
+        hints = typing.get_type_hints(current)
+        for field in fields(current):
+            annotation = hints[field.name]
+            found.append((current.__name__, field.name, annotation))
+            for arg in (annotation, *typing.get_args(annotation)):
+                if isinstance(arg, type) and is_dataclass(arg):
+                    pending.append(arg)
+    return found
+
+
+def _is_closed(annotation: object) -> bool:
+    if annotation in (int, bool):
+        return True
+    origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        return all(isinstance(value, str) for value in typing.get_args(annotation))
+    if origin is tuple:
+        args = [arg for arg in typing.get_args(annotation) if arg is not Ellipsis]
+        return bool(args) and all(
+            is_dataclass(arg) if isinstance(arg, type) else _is_closed(arg)
+            for arg in args
+        )
+    return False
+
+
+def test_the_observation_carries_no_free_text_anywhere_it_can_reach():
+    """The whole reason a cross-user, cross-notebook table is acceptable.
+
+    Everywhere else in this repository, isolation is a predicate in the reading
+    SQL. This table has no tenancy column and no predicate to write, so the
+    guarantee lives here instead: the model that authors an entry's rationale
+    is fed nothing but ints, bools and closed vocabulary words, and therefore
+    cannot carry a question, a document or a person into a row every user
+    reads.
+
+    A bare ``str``/``Any``/``dict``/``list[str]`` field is not a small
+    widening — it is the difference between a guarantee and a promise.
+    """
+    for owner, name, annotation in _reachable_field_types(RunObservation):
+        assert _is_closed(annotation), (
+            f"{owner}.{name}: {annotation!r} 不是 int / bool / Literal / 由它们"
+            "构成的 tuple。这个类型是全局经验库的输入面——一个自由文本字段就足以"
+            "把某个人的问题、某份文档的标题带进一张全体用户都读得到的表,而且不会"
+            "有任何报错。"
+        )
+
+
+def test_the_observation_is_not_empty():
+    """Companion to the rule above, and not redundant with it.
+
+    "Every field is closed" is trivially true of a dataclass with no fields, so
+    without a floor the guard could be satisfied by gutting the type — which is
+    exactly what someone would do to make a failing widening test pass.
+    """
+    found = _reachable_field_types(RunObservation)
+    assert len(found) >= 11, found
+
+
+def test_the_action_vocabulary_cannot_reach_retrieval_scope():
+    """An experience influences HOW a run searches, never WHAT it may read.
+
+    Retrieval scope is the user's own checkbox selection and the one thing this
+    feature must not touch. Making that structural rather than a review promise
+    means the THEN-side vocabulary simply contains no scope-shaped action.
+    """
+    forbidden = ("source", "base", "scope", "notebook", "mount", "library")
+    for action in RETRIEVAL_ACTIONS:
+        assert not any(word in action for word in forbidden), action
+
+
+def test_the_batch_never_reads_more_runs_than_one_entry_can_remember():
+    """The invariant that makes a cursor-free distillation correct.
+
+    An entry de-duplicates ``support`` against the run ids it retains. If one
+    batch could carry more runs than one entry retains, the ids pushed off the
+    tail would come back in the next overlapping batch and be counted a second
+    time — and ``support`` would drift upward with distillation frequency
+    rather than with evidence.
+    """
+    assert RETRIEVAL_EXPERIENCE_BATCH_RUNS <= RETRIEVAL_EXPERIENCE_PROVENANCE_MAX
+
+
+# --------------------------------------------------------------- projection
+
+def _intent_step(**overrides) -> dict:
+    detail = {
+        "resolved_question": "这个库里 set_db 是怎么用的?",
+        "result_scope": "ranked",
+        "completeness_required": False,
+        "retrieval_effort": "standard",
+        "entities": ["set_db"],
+        "constraints": [],
+        "excluded_topics": [],
+        "assumptions": ["假设指的是 2024 版"],
+        "expected_output": "一段说明",
+        "mandatory_topics": ["set_db 的参数", "set_db 的默认值"],
+    }
+    detail.update(overrides)
+    return {"step_type": "intent", "summary": "已按确认后的问题理解开始检索",
+            "detail": detail, "duration_ms": 10}
+
+
+def _run(steps, *, run_id="job-1", mode="reasoning") -> dict:
+    projected = [project_run_step(step) for step in steps]
+    return {
+        "run_id": run_id,
+        "mode": mode,
+        "steps": [step for step in projected if step is not None],
+    }
+
+
+def test_the_step_projection_drops_the_summary_and_the_question():
+    """``project_run_step`` is strictly narrower than ``project_trace_step``.
+
+    The difference IS the feature's privacy argument: a step summary is a human
+    sentence that several emitters interpolate model text or an error string
+    into, and the resolved question is the member's own words. Both are fine in
+    the per-member overlay block; neither may reach a deployment-wide table.
+    """
+    projected = project_run_step(_intent_step())
+    assert projected is not None
+    assert "summary" not in projected
+    assert "resolved_question" not in str(projected)
+    assert set(projected["situation"]) == {
+        "result_scope", "retrieval_effort", "completeness_required",
+        "entity_count", "topic_count", "has_constraints", "has_exclusions",
+    }
+
+
+def test_an_unexpected_enum_value_collapses_to_unknown_rather_than_passing_through():
+    """The narrowing has to hold even when an upstream model misbehaves.
+
+    ``result_scope`` is written by the intent model. If a broken one wrote a
+    sentence there, passing it through would put free text into a situation
+    fingerprint — and from there into a prompt and a shared row.
+    """
+    projected = project_run_step(
+        _intent_step(result_scope="whatever the user meant by 'all of them'")
+    )
+    assert projected["situation"]["result_scope"] == "unknown"
+
+
+def test_a_run_without_an_intent_step_is_skipped():
+    """No situation means the entry's IF side would be "all unknown", which
+    matches every future run equally — worse than having no entry at all."""
+    assert project_run(_run([{"step_type": "retrieve", "detail": {"count": 3}}])) is None
+
+
+def test_the_projection_counts_zero_hits_per_action_and_citations_per_run():
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve", "summary": "初检索", "detail": {"count": 0}},
+                {"step_type": "ppr", "summary": "", "detail": {"count": 7}},
+                {"step_type": "exact_lookup", "summary": "", "detail": {"found": 0}},
+                {"step_type": "exact_lookup", "summary": "", "detail": {"found": 0}},
+                {"step_type": "synthesis", "summary": "", "detail": {"citations": 4}},
+            ]
+        )
+    )
+    assert observed is not None
+    by_action = {a.action: a for a in observed.observation.actions}
+    assert by_action["retrieve"].zero_hits == 1
+    assert by_action["ppr"].zero_hits == 0
+    assert by_action["exact_lookup"].invocations == 2
+    assert by_action["exact_lookup"].zero_hits == 2
+    assert observed.observation.citations == 4
+    assert observed.observation.answered is True
+
+
+def test_the_action_tuple_order_follows_the_vocabulary_not_the_run():
+    """Two runs with the same actions must produce identical observations.
+
+    The batch groups runs by their situation fingerprint and aggregates them;
+    an observation whose tuple order depended on which step happened to run
+    first would make the same batch distil differently between two reads.
+    """
+    forward = project_run(
+        _run([_intent_step(),
+              {"step_type": "ppr", "detail": {"count": 1}},
+              {"step_type": "retrieve", "detail": {"count": 1}}])
+    )
+    backward = project_run(
+        _run([_intent_step(),
+              {"step_type": "retrieve", "detail": {"count": 1}},
+              {"step_type": "ppr", "detail": {"count": 1}}])
+    )
+    assert forward.observation.actions == backward.observation.actions
+
+
+def test_counts_become_bands_rather_than_exact_numbers():
+    few = project_run(_run([_intent_step(entities=["a"])]))
+    many = project_run(_run([_intent_step(entities=["a", "b", "c", "d"])]))
+    none = project_run(_run([_intent_step(entities=[])]))
+    assert few.observation.entity_count == "few"
+    assert many.observation.entity_count == "many"
+    assert none.observation.entity_count == "none"
+
+
+# ------------------------------------------------------- situation registry
+
+def test_every_registered_key_has_a_non_empty_domain():
+    for key in SITUATION_KEYS:
+        assert situation_domain(key), key
+
+
+def test_validate_situation_rejects_an_unregistered_key_or_value():
+    good = project_run(_run([_intent_step()])).observation.situation()
+    assert validate_situation(good) == good
+    assert validate_situation({**good, "extra": "x"}) is None
+    assert validate_situation({k: v for k, v in good.items() if k != "mode"}) is None
+    assert validate_situation({**good, "result_scope": "made-up"}) is None
+
+
+def test_the_id_is_stable_and_order_independent():
+    """Content addressing is what makes the cross-deployment union correct."""
+    left = {"mode": "chunk", "result_scope": "ranked"}
+    right = {"result_scope": "ranked", "mode": "chunk"}
+    assert experience_id(left, "ppr") == experience_id(right, "ppr")
+    assert experience_id(left, "ppr") != experience_id(left, "retrieve")
+
+
+def test_similarity_is_a_plain_agreement_ratio():
+    a = project_run(_run([_intent_step()])).observation.situation()
+    assert situation_similarity(a, a) == 1.0
+    assert situation_similarity(a, {**a, "mode": "chunk"}) == pytest.approx(
+        (len(SITUATION_KEYS) - 1) / len(SITUATION_KEYS)
+    )
+
+
+# --------------------------------------------------------------- the run
+
+class _Store:
+    def __init__(self, existing=None):
+        self.rows = list(existing or [])
+        self.upserts = []
+        self.evicted = 0
+
+    def read_all(self, limit):
+        return self.rows[:limit]
+
+    def upsert_experience(self, experience_id, **kwargs):
+        self.upserts.append((experience_id, kwargs))
+        return {"id": experience_id}
+
+    def evict_to_limit(self, max_entries):
+        self.evicted += 1
+        return 0
+
+    def count(self):
+        return len(self.rows)
+
+
+class _AskState:
+    def __init__(self, runs):
+        self.runs = runs
+        self.calls = []
+
+    def recent_completed_ask_runs(self, *, job_limit, step_limit):
+        self.calls.append((job_limit, step_limit))
+        return self.runs
+
+
+class _Client:
+    def __init__(self, reply):
+        self.reply = reply
+        self.prompts = []
+
+    def chat_json(self, messages, schema_hint, max_tokens=None):
+        self.prompts.append(messages[0]["content"])
+        return self.reply
+
+
+class _Models:
+    def __init__(self, reply, configured=True):
+        self.client = _Client(reply)
+        self._configured = configured
+
+    def configured(self, workload):
+        return self._configured
+
+    def chat(self, workload):
+        return self.client
+
+
+class _Events:
+    def __init__(self):
+        self.emitted = []
+
+    def emit(self, payload):
+        self.emitted.append(payload)
+
+
+class _Settings:
+    retrieval_experience_enabled = True
+    retrieval_experience_trigger = 3
+
+
+def _service(runs, reply, *, settings=None, store=None, models=None, events=None):
+    return RetrievalExperienceDistillationService(
+        settings=settings or _Settings(),
+        experiences=store or _Store(),
+        ask_state=_AskState(runs),
+        models=models or _Models(reply),
+        event_log=events or _Events(),
+    )
+
+
+_REPLY = (
+    '{"entries":[{"op":"ADD","situation":"s0","action":"exact_lookup",'
+    '"polarity":"bad","rationale":"这类问题里精查基本空手"}]}'
+)
+
+
+def test_a_batch_writes_the_entry_and_then_evicts():
+    store = _Store()
+    events = _Events()
+    service = _service(
+        [_run([_intent_step(), {"step_type": "exact_lookup", "detail": {"found": 0}}])],
+        _REPLY,
+        store=store,
+        events=events,
+    )
+    service.run()
+    assert len(store.upserts) == 1
+    entry_id, kwargs = store.upserts[0]
+    assert kwargs["action"] == "exact_lookup"
+    assert kwargs["polarity"] == "bad"
+    assert kwargs["provenance"] == ["job-1"]
+    assert kwargs["replace_conclusion"] is False
+    assert entry_id == experience_id(kwargs["situation"], "exact_lookup")
+    assert store.evicted == 1
+    assert events.emitted[-1]["status"] == "done"
+
+
+def test_the_event_carries_counts_only():
+    """The event log is a separate disclosure surface from the table.
+
+    A stream of (situation, action) pairs beside their timestamps would let an
+    operator reconstruct which shapes of question the deployment is currently
+    seeing — the one aggregate this feature is careful not to publish.
+    """
+    events = _Events()
+    service = _service(
+        [_run([_intent_step(), {"step_type": "exact_lookup", "detail": {"found": 0}}])],
+        _REPLY,
+        events=events,
+    )
+    service.run()
+    payload = events.emitted[-1]
+    assert set(payload) == {
+        "kind", "status", "latency_ms", "runs", "situations", "written", "evicted",
+    }
+    assert all(isinstance(value, (str, int)) for value in payload.values())
+
+
+def test_the_prompt_contains_no_question_text():
+    """The distillation prompt's two blocks are counts and enum words only."""
+    models = _Models(_REPLY)
+    service = _service(
+        [_run([_intent_step(), {"step_type": "exact_lookup", "detail": {"found": 0}}])],
+        _REPLY,
+        models=models,
+    )
+    service.run()
+    prompt = models.client.prompts[0]
+    assert "set_db" not in prompt
+    assert "初检索" not in prompt
+    assert "job-1" not in prompt
+
+
+def test_the_kill_switch_costs_nothing():
+    class Off(_Settings):
+        retrieval_experience_enabled = False
+
+    ask_state = _AskState([_run([_intent_step()])])
+    models = _Models(_REPLY)
+    service = RetrievalExperienceDistillationService(
+        settings=Off(),
+        experiences=_Store(),
+        ask_state=ask_state,
+        models=models,
+        event_log=_Events(),
+    )
+    service.run()
+    assert ask_state.calls == []
+    assert models.client.prompts == []
+    assert distillation_wiring_active(Off(), _Store()) is False
+
+
+def test_an_unconfigured_model_is_learned_before_any_read():
+    ask_state = _AskState([_run([_intent_step()])])
+    service = RetrievalExperienceDistillationService(
+        settings=_Settings(),
+        experiences=_Store(),
+        ask_state=ask_state,
+        models=_Models(_REPLY, configured=False),
+        event_log=_Events(),
+    )
+    service.run()
+    assert ask_state.calls == []
+
+
+def test_the_trigger_fires_only_at_the_threshold():
+    store = _Store()
+    service = RetrievalExperienceDistillationService(
+        settings=_Settings(),
+        experiences=store,
+        ask_state=_AskState([]),
+        models=_Models(_REPLY),
+        event_log=_Events(),
+    )
+    started = []
+    service.start = lambda: started.append(1) or True  # type: ignore[assignment]
+    service.note_ask_completed()
+    service.note_ask_completed()
+    assert started == []
+    service.note_ask_completed()
+    assert started == [1]
+    # The counter resets, so the next round takes another full threshold.
+    service.note_ask_completed()
+    assert started == [1]
+
+
+def test_the_trigger_never_raises_into_the_ask_path():
+    class Boom:
+        retrieval_experience_enabled = True
+
+        @property
+        def retrieval_experience_trigger(self):
+            raise RuntimeError("settings blew up")
+
+    service = RetrievalExperienceDistillationService(
+        settings=Boom(),
+        experiences=_Store(),
+        ask_state=_AskState([]),
+        models=_Models(_REPLY),
+        event_log=_Events(),
+    )
+    service.note_ask_completed()  # must not raise
+
+
+def test_a_failing_run_releases_the_single_flight_flag():
+    class Exploding(_Store):
+        def read_all(self, limit):
+            raise RuntimeError("boom")
+
+    events = _Events()
+    service = _service(
+        [_run([_intent_step(), {"step_type": "ppr", "detail": {"count": 0}}])],
+        _REPLY,
+        store=Exploding(),
+        events=events,
+    )
+    service.run()
+    assert events.emitted[-1]["status"] == "failed"
+    # A flag left set is held until the process dies — this deployment would
+    # never distil again, silently.
+    assert service._running is False
+
+
+# ------------------------------------------------------- reply validation
+
+def _groups():
+    runs = [
+        project_run(
+            _run([_intent_step(), {"step_type": "ppr", "detail": {"count": 0}}],
+                 run_id=f"job-{i}")
+        )
+        for i in range(3)
+    ]
+    return _group_by_situation(runs)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"op": "ADD", "situation": "s9", "action": "ppr", "polarity": "bad",
+         "rationale": "x"},
+        {"op": "ADD", "situation": "s0", "action": "ppr_retrieve",
+         "polarity": "bad", "rationale": "x"},
+        {"op": "ADD", "situation": "s0", "action": "ppr", "polarity": "maybe",
+         "rationale": "x"},
+        {"op": "ADD", "situation": "s0", "action": "ppr", "polarity": "bad",
+         "rationale": ""},
+        {"op": "ADD", "situation": "s0", "action": "ppr", "polarity": "bad",
+         "rationale": "x" * (RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS + 1)},
+        {"op": "REPLACE", "situation": "s0", "action": "ppr", "polarity": "bad",
+         "rationale": "x"},
+        "not an object",
+    ],
+)
+def test_a_malformed_entry_is_dropped(entry):
+    """Per-entry rejection, never repair. ``ppr_retrieve`` is in this list on
+    purpose: it is the reflect ACTION id, not the trace STEP type, and guessing
+    that the model meant ``ppr`` is how an entry ends up about a channel nobody
+    was writing about."""
+    groups = _groups()
+    assert parse_distillation_reply({"entries": [entry]}, groups) == []
+
+
+def test_a_rationale_carrying_an_id_shaped_token_is_dropped():
+    """A tripwire on the input narrowing, not a sanitiser.
+
+    The model is fed no ids at all, so an id in its output means something got
+    through upstream. Scrubbing the rationale would keep the entry and hide the
+    failure.
+    """
+    groups = _groups()
+    entry = {
+        "op": "ADD", "situation": "s0", "action": "ppr", "polarity": "bad",
+        "rationale": "别用 nb-797c0793d47640c283f4559145a39eb7 那种库",
+    }
+    assert parse_distillation_reply({"entries": [entry]}, groups) == []
+
+
+def test_one_bad_entry_does_not_discard_its_sound_neighbours():
+    groups = _groups()
+    parsed = parse_distillation_reply(
+        {
+            "entries": [
+                {"op": "ADD", "situation": "s0", "action": "nonsense",
+                 "polarity": "bad", "rationale": "x"},
+                {"op": "UPDATE", "situation": "s0", "action": "ppr",
+                 "polarity": "good", "rationale": "值得先试"},
+            ]
+        },
+        groups,
+    )
+    assert len(parsed) == 1
+    assert parsed[0]["replace"] is True
+
+
+def test_a_noop_writes_nothing():
+    groups = _groups()
+    assert parse_distillation_reply(
+        {"entries": [{"op": "NOOP", "situation": "s0"}]}, groups
+    ) == []
+
+
+def test_a_reply_that_is_not_an_entries_list_is_discarded_whole():
+    groups = _groups()
+    assert parse_distillation_reply({"entries": "nope"}, groups) == []
+    assert parse_distillation_reply(["entries"], groups) == []
+
+
+def test_the_provenance_of_an_entry_is_every_run_in_its_group():
+    groups = _groups()
+    parsed = parse_distillation_reply(
+        {"entries": [{"op": "ADD", "situation": "s0", "action": "ppr",
+                      "polarity": "bad", "rationale": "空手"}]},
+        groups,
+    )
+    assert parsed[0]["provenance"] == ["job-0", "job-1", "job-2"]
+
+
+# ------------------------------------------------------------- aggregation
+
+def test_grouping_is_deterministic_and_capped():
+    runs = []
+    for i in range(3):
+        runs.append(project_run(_run([_intent_step()], run_id=f"a-{i}")))
+    runs.append(project_run(_run([_intent_step(result_scope="aggregate")],
+                                 run_id="b-0")))
+    groups = _group_by_situation(runs)
+    assert [g.runs for g in groups] == [3, 1]
+    assert _group_by_situation(list(reversed(runs)))[0].key == groups[0].key
+
+
+def test_renderers_emit_counts_and_vocabulary_only():
+    groups = _groups()
+    text = render_observations(groups)
+    assert "s0:" in text
+    assert "runs=3" in text
+    assert "ppr: used=3 came_back_empty=3" in text
+    assert render_existing([]).endswith("(none)")

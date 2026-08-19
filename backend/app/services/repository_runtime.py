@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 import threading
 import weakref
 from typing import Any, Callable
@@ -18,6 +19,9 @@ from app.repositories.ports import (
 )
 from app.repositories.source_files import SourceFileStore
 from app.services.agent_profile_job import AgentProfileConsolidationService
+from app.services.retrieval_experience_job import (
+    RetrievalExperienceDistillationService,
+)
 from app.services.catalog_job import CommandCatalogService
 from app.services.kg_analysis import KgAnalysisService
 from app.services.kg_mutation import KgMutationCoordinator
@@ -73,6 +77,9 @@ from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoor
 from app.services.ask_service import AskService
 from app.services.notebook_scale import NotebookScaleProfile
 from app.services.pending_actions_service import PendingActionsService
+
+_log = logging.getLogger("silicon_notebook.repository_runtime")
+
 
 @dataclass(frozen=True)
 class RepositoryCompatibilitySeams:
@@ -137,6 +144,13 @@ class RepositoryRuntime:
         # wire injection/routes on top of this. See AgentProfileStorePort in
         # repositories/ports.py for the read/write contract.
         self.agent_profile = bundle.agent_profile
+        # Agentic Memory P2 (T5): bare store seat for the deployment-GLOBAL
+        # retrieval-experience library. Its distillation service is built
+        # further down (it needs ``models``/``event_log``); the injection side
+        # is T6. See RetrievalExperienceStorePort in repositories/ports.py —
+        # note in particular why a store with no tenancy column is the right
+        # shape here, and what carries its isolation argument instead.
+        self.retrieval_experiences = bundle.retrieval_experiences
         self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries, self.kg_build_jobs)
         # Source files resolve storage_dir through the database. Construct eagerly
         # BEFORE the catalog so its storage_dir callable can bind THIS store
@@ -361,9 +375,7 @@ class RepositoryRuntime:
             # Agentic Memory P1 (T5):完成一次提问 ⇒ 推进**该成员**在该库的覆盖层
             # 计数。late-bound lambda 而不是直接传方法:巡固服务在本构造函数里
             # 更靠后才建出来(与上面 ``ask`` 同一个理由)。
-            note_ask_completed=lambda nb, uid: (
-                self.agent_profile_jobs.note_ask_completed(nb, uid)
-            ),
+            note_ask_completed=lambda nb, uid: self._note_ask_completed(nb, uid),
         )
         # Task 27: SQLite maintenance face for CLI/batch composition roots —
         # lazily wired by the facade `maintenance` property (it needs the
@@ -443,11 +455,49 @@ class RepositoryRuntime:
             # 的方法绝不该出现在底座那张里。
             access=self.sharing_store,
         )
+        # Agentic Memory P2 (T5):检索打法的蒸馏任务。与它的 P1 兄弟同处这个
+        # **后端中性** runtime,同样只吃端口与两个进程级对象。单例同样是必要的
+        # 而非顺手:阈值计数与单飞都是**进程内**状态,构造两份就等于两个各自计
+        # 到一半的计数器和两条可以同时开跑的链。
+        self.retrieval_experience_jobs = RetrievalExperienceDistillationService(
+            settings=self.settings,
+            experiences=self.retrieval_experiences,
+            # ⚠ 同一个 ask_state 座位,读的却是**没有任何用户/笔记本谓词**的那条
+            # 方法(``recent_completed_ask_runs``)。它的安全性不来自谓词,而来自
+            # 投影——见 ports.py 上那段说明与 retrieval_experience_projection.py。
+            ask_state=self.ask_state,
+            models=self.models,
+            event_log=self.event_log,
+        )
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
         # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
         # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
         # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
+
+    def _note_ask_completed(self, notebook_id: str, user_id: str) -> None:
+        """一次提问完成之后要推进的**两条**后台链路。
+
+        它们是两个不同的特性,拿到的数据也刻意不同:P1 的巡固被告知是**哪位成员
+        在哪个库**(它写的正是那个人在那个库的覆盖层块),P2 的经验库蒸馏则连一个
+        参数都不收——那张表是部署级全局的,一个知道「这是谁的提问」的触发器,离
+        「记下这是谁的提问」只有一次重构之远。
+
+        两次调用**各自**用 try 包住,不是写成一个元组表达式:两边虽然都自己
+        fail-open,但那是它们各自的实现细节,而这里要保证的是「一条链坏掉不会顺带
+        吃掉另一条的计数」——这条性质必须由调用点自己成立,不能靠被调方的内部约定。
+
+        整个方法同样 fail-open:它挂在一个**答案已经交付之后**的钩子上。
+        ``KeyboardInterrupt``/``SystemExit`` 不是「错误」,继续上抛。
+        """
+        try:
+            self.agent_profile_jobs.note_ask_completed(notebook_id, user_id)
+        except Exception:  # noqa: BLE001 — 已交付的答案不因后台记账而改判
+            _log.exception("agent profile ask-completed notification failed")
+        try:
+            self.retrieval_experience_jobs.note_ask_completed()
+        except Exception:  # noqa: BLE001 — 同上
+            _log.exception("retrieval experience ask-completed notification failed")
 
     def _active_source_ids_snapshot(self) -> "set[str]":
         """内存活跃源快照(H2/H3/H4/H5 的 Python 后置减法用)= 活跃租约(process_source 在途)

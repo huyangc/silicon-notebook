@@ -2136,6 +2136,11 @@
         "type": "table"
       },
       {
+        "name": "retrieval_experiences",
+        "sql_sha256": "f78e9c7fe19bf575e86ad35e086451d24f68b7e9f185dd101be1095b70d39a3e",
+        "type": "table"
+      },
+      {
         "name": "shadow_capture_control",
         "sql_sha256": "99c3afc2dbc3c197bd5546a80124627b8e5ecf36ca16881fd1a653fbb42eaa9f",
         "type": "table"
@@ -2206,6 +2211,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 52
+    "user_version": 53
   }
 }

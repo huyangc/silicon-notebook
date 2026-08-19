@@ -44,6 +44,7 @@ BUNDLE_STORE_PORTS = {
     "unified_kg": "UnifiedKgStorePort",
     "model_status": "ModelStatusStorePort",
     "agent_profile": "AgentProfileStorePort",
+    "retrieval_experiences": "RetrievalExperienceStorePort",
 }
 
 

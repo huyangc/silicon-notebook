@@ -85,6 +85,15 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # kind of transient *process* state as `catalog_jobs` above (one chain's run
 # status plus its threshold counter), and a copy arriving mid-count would be
 # counting source-notebook activity toward a notebook that has had none.
+#
+# `retrieval_experiences` (Agentic Memory P2, schema v53) is absent for a
+# structurally different reason and is NOT a decision this snapshot could make
+# either way: it is deployment-GLOBAL — it has no `notebook_id` column and no
+# owner column at all, so every query in this list is built on a predicate it
+# does not have. Deep copy cannot reach it, the same sentence that already
+# covers `groups`/`group_members`. Its rows are general tactics for HOW to
+# search rather than anything belonging to a notebook, so a copy inherits them
+# by simply existing in the same deployment.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id = ?"),
     ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),

@@ -44,6 +44,7 @@ _SAFE_JOB_PREFIXES = (
     ("knowhow-project-", "knowhow-project"),
     ("conflictresolve-", "conflictresolve"),
     ("agentprofile-", "agentprofile"),
+    ("retrievalexperience-", "retrievalexperience"),
     ("catalog-", "catalog"),
     ("mergereview-", "mergereview"),
     ("report-plan-", "report-plan"),
@@ -85,6 +86,10 @@ _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     # 饿死——而它每 N 次来源变更才排一次,饿死等于这个特性在活跃的大库上永远
     # 不生效(恰恰是最需要它的库)。
     "agentprofile",
+    # Agentic Memory P2 的检索打法蒸馏:同样是一次有界 LLM 调用 + 一条有界读,
+    # 与它的 P1 兄弟同量级、同理由进**轻活**池。它比 agentprofile 更该待在这里
+    # ——全库只有这一条链,进重活池被全库重建饿死就等于整个特性永不生效。
+    "retrievalexperience",
     "knowhow-project",
     "knowhow-legacy-reproject",
     "knowhow-asset-sweep",

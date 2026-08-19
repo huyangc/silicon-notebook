@@ -3285,5 +3285,47 @@ MIGRATION_MANIFEST[(52, 53)] = {
 }
 
 
+# v54: retrieval_experiences — Agentic Memory P2's deployment-global
+# retrieval-strategy experience library (still zero behavior change at the
+# schema hop itself: the table is created here and consumed by the P2 service
+# layer). Same cascade as every other new-table hop: broadcast onto every prior
+# hop key rebased to v54, then register the explicit (53, 54) single hop. SQL
+# text matches sqlite_master storage verbatim (SQLite strips "IF NOT EXISTS"
+# and keeps the source indentation). The migration deliberately creates no
+# index — the row count is hard-capped and the primary key covers the only
+# point lookup — so the empty dict is spelled out rather than omitted, so a
+# later reader can see the absence was decided.
+RETRIEVAL_EXPERIENCE_TABLES = {
+    "retrieval_experiences": """CREATE TABLE retrieval_experiences (
+                  id              TEXT PRIMARY KEY,
+                  situation_json  TEXT NOT NULL DEFAULT '{}',
+                  action          TEXT NOT NULL DEFAULT '',
+                  polarity        TEXT NOT NULL DEFAULT '',
+                  rationale       TEXT NOT NULL DEFAULT '',
+                  support         INTEGER NOT NULL DEFAULT 0,
+                  adopted         INTEGER NOT NULL DEFAULT 0,
+                  provenance_json TEXT NOT NULL DEFAULT '[]',
+                  created_at      TEXT NOT NULL,
+                  updated_at      TEXT NOT NULL
+                )""",
+}
+RETRIEVAL_EXPERIENCE_INDEXES: dict[str, str] = {}
+MIGRATION_MANIFEST = {
+    (key[0], 54, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **RETRIEVAL_EXPERIENCE_TABLES},
+        "indexes": {**manifest["indexes"], **RETRIEVAL_EXPERIENCE_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(53, 54)] = {
+    "tables": RETRIEVAL_EXPERIENCE_TABLES,
+    "columns": {},
+    "indexes": RETRIEVAL_EXPERIENCE_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

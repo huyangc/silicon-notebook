@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=51) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=54) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -108,6 +108,19 @@ GLOBAL_UNION_TABLES = [
     # INSERT OR IGNORE 按主键去重即是正确的并集语义，与 users/agent_profiles
     # 同一套"主库优先、副库同 id 冲突即丢弃"处理。
     "groups", "group_members",
+    # v54 Agentic Memory P2 的检索策略经验库。它是**部署级全局**表——没有
+    # notebook_id、没有 owner 列,所以 NOTEBOOK_SCOPED_TABLES / CHILD_TABLES 那两套
+    # 按 notebook 筛的语义对它压根不适用,与 agent_profiles/groups 同一先例。
+    # ⚠ 并集语义之所以正确,全靠它的主键是**内容寻址**的(情境指纹+动作的确定性
+    #   哈希,见 sqlite/migrations.py 的 _migration_54 第 1 条):两个独立部署对同
+    #   一情境+动作算出同一个 id,``INSERT OR IGNORE`` 于是「同一条经验只留一份、
+    #   主库优先」,不同经验则各自成行。若哪天有人把 id 改成递增整数或随机 uuid,
+    #   这一行必须跟着重新论证——递增整数会让两边的 1 号经验撞主键、静默丢掉副库
+    #   那条;随机 uuid 则会让同一条经验在合并后变成两行、support 被拆散。
+    # 计数列(support/adopted)按主库那份保留、不相加:两个部署对同一条经验各自的
+    # 支持次数不可加和(同一批 run 可能在两边都被蒸馏过),而这张表的用途是排序
+    # 提示,宁可低估。
+    "retrieval_experiences",
 ]
 
 OBJECT_SCHEMA_SEMANTIC_COLUMNS = (

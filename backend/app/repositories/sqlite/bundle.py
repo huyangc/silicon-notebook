@@ -28,6 +28,9 @@ from app.repositories.sqlite.model_status_store import ModelStatusStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.report_store import ReportStore
+from app.repositories.sqlite.retrieval_experience_store import (
+    RetrievalExperienceStore,
+)
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
@@ -69,6 +72,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     unified_kg: UnifiedKgStore
     model_status: ModelStatusStore
     agent_profile: AgentProfileStore
+    retrieval_experiences: RetrievalExperienceStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -125,6 +129,9 @@ class SqlitePersistenceBundleFactory:
         agent_profile = AgentProfileStore(
             database, new_id=seams.new_id, now=seams.now
         )
+        # No ``new_id`` seam: every id in retrieval_experiences is
+        # content-addressed and computed by the service layer.
+        retrieval_experiences = RetrievalExperienceStore(database, now=seams.now)
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -149,4 +156,5 @@ class SqlitePersistenceBundleFactory:
             unified_kg=unified_kg,
             model_status=model_status,
             agent_profile=agent_profile,
+            retrieval_experiences=retrieval_experiences,
         )

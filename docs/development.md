@@ -30,7 +30,7 @@ fixtures in tests are outside this rule.
 - Reasoning source identity lookup is an identity-only repository operation: it reads no source text, summaries, elements, KG payloads, or embeddings. Both adapters page the visible authorized roster in stable `(created_at,id)` order through the partial `idx_sources_visible_identity` index on `(notebook_id, created_at, id) WHERE source_type NOT IN ('memory','knowhow')`. The service resolver that consumed this roster is gone with the model-inferred source scope, so `visible_source_identity_rows_bounded` currently has no production caller; the index and both implementations are kept because retrieval scope is still expressed as `(notebook_id,source_id)` keys and an empty source-id set means empty rather than unrestricted.
 
 The current schema version is 52. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v52 and remains readable. Those migrations
+upgrades through migrations v10–v53 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -303,8 +303,30 @@ caller wipes the blocks it just recreated) and `superseded` (a row, but a later
 claim's — the caller must NOT wipe, since the newer generation may already have
 written its own blocks). No new table, index or unique surface, so the
 forward-shadow invariants are unchanged at 80 business tables, 109 unique
-surfaces and 12 row slots. PostgreSQL migration v31 is the paired schema, and
-the current pairing is SQLite 53 / PostgreSQL 31 / epoch 1.
+surfaces and 12 row slots. PostgreSQL migration v31 is the paired schema.
+
+SQLite v54 adds `retrieval_experiences` (Agentic Memory P2): the
+deployment-GLOBAL retrieval-strategy experience library. One entry says "in
+this shape of question, this retrieval action is / is not worth reaching for",
+plus a short model-written rationale, a `support` count of the runs backing it
+and an `adopted` count of the times the model actually picked that action after
+the entry was injected. The table deliberately carries no `notebook_id`, no
+owner column and no foreign key in either direction: it stores general tactics
+for HOW to search, never anyone's content, so notebook deep copy cannot reach
+it (the same structural sentence that covers `groups`/`group_members`) and
+`scripts/merge_dbs.py` classifies it as a global union table. Its primary key
+is a single CONTENT-ADDRESSED `TEXT` column — the deterministic hash of
+(situation fingerprint, action) — which is what makes that union safe across
+independent deployments (an incrementing id would silently drop rows on a
+primary-key collision) and, because the declared replication key equals it
+verbatim, also what parks its one unique surface on `REPLICATION_KEY` with no
+sentinel column and no `_UNIQUE_PREDICATES` entry. It creates no index: the row
+count is hard-capped, and the only two read paths are a primary-key point
+lookup and a bounded full scan. Because v54/v32 adds one more (leaf, parentless)
+table, the forward-shadow invariants move to 81 business tables and 110 unique
+surfaces; the branch-counted bound remains exactly 12 row slots. PostgreSQL
+migration v32 is the paired schema, and the current pairing is
+SQLite 54 / PostgreSQL 32 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

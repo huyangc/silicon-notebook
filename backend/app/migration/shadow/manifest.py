@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=53, postgres_version=31, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=54, postgres_version=32, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -110,6 +110,7 @@ _SQLITE_NULL_GUARD_KEYS = frozenset(
         "promotion_candidates.id",
         "relation_embeddings.relation_id",
         "reports.id",
+        "retrieval_experiences.id",
         "source_authors.id",
         "source_elements.id",
         "source_paper_meta.source_id",
@@ -670,6 +671,28 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         85,
         "timestamptz",
+    ),
+    # SQLite v54 / PostgreSQL v32: Agentic Memory P2's deployment-global
+    # retrieval-strategy experience library. It has NO parent at all — no
+    # notebook_id, no owner, no foreign key of any kind — so the appended rank
+    # is FK-consistent by construction, and it has no incoming foreign key
+    # either (it stays a leaf table).
+    #
+    # The declared replication key is the table's single-column, CONTENT-
+    # ADDRESSED primary key, and that equality is the park precondition (see
+    # the agent-profile note above): _build_unique_surfaces resolves the one
+    # surface to REPLICATION_KEY, so no sentinel column, no nullable column and
+    # no leaf delete/reinsert is involved. Adding a second unique surface —
+    # notably a UNIQUE index over the situation fingerprint, which is the
+    # tempting one — would move this table onto the sentinel/candidate-search
+    # park path for nothing: the content-addressed primary key already makes
+    # "one row per (situation, action)" true.
+    _table(
+        "retrieval_experiences",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        86,
+        "jsonb+timestamptz",
     ),
 )
 
