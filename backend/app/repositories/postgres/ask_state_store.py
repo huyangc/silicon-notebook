@@ -17,6 +17,7 @@ from app.models.ask import (
 )
 from app.repositories.ports import (
     ConversationBusyError,
+    ConversationShareWatermarkStale,
     PreparedAskTurn,
     project_ask_row,
     project_trace_step,
@@ -786,9 +787,14 @@ class AskStateStore:
     # see docs/superpowers/specs/2026-08-18-conversation-sharing-design_zh.md)
     # ------------------------------------------------------------------
 
-    def share_conversation(self, notebook_id: str, conversation_id: str) -> dict:
-        """Issue (or reuse) the public token for one conversation and push
-        its read watermark to the conversation's current latest answer.
+    def share_conversation(
+        self,
+        notebook_id: str,
+        conversation_id: str,
+        expected_through_id: str | None = None,
+    ) -> dict:
+        """Issue (or reuse) the public token for one conversation and pin its
+        read watermark to a specific answer.
 
         Idempotent on the TOKEN only: re-sharing keeps the existing link, so
         a URL already handed out never silently starts 404ing (mirrors
@@ -798,8 +804,17 @@ class AskStateStore:
         without COALESCE). The WATERMARK is deliberately NOT idempotent —
         "share" and "update to latest" are the same call (see the design
         doc §四), so every invocation advances ``shared_through_at``/
-        ``shared_through_id`` to whichever answer is newest at call time,
-        even when the token itself does not change.
+        ``shared_through_id`` to the answer the boundary resolves to, even
+        when the token itself does not change.
+
+        ``expected_through_id`` closes the disclosure TOCTOU (codex #522 R2 P1)
+        — see the SQLite ``share_conversation`` for the full rationale: it is
+        the newest answer id the CLIENT saw in the same turns it disclosed, and
+        the watermark is pinned to exactly that answer (so a newer answer that
+        landed after the client's read is NOT published). When it no longer
+        resolves (deleted) we ``raise ConversationShareWatermarkStale`` for a
+        409, never silently fall back to latest. Omitted/empty falls back to
+        the current latest answer (historical behaviour).
 
         Raises ``KeyError`` when the conversation does not exist in this
         notebook. A conversation with zero answers can still be "shared"
@@ -809,6 +824,7 @@ class AskStateStore:
         this method, not to this store method.
         """
         candidate = new_capability_token("cshr")
+        expected = str(expected_through_id or "").strip()
         with self.database.write() as db:
             # ``FOR UPDATE`` serializes concurrent shares of the SAME
             # conversation (codex #522 R1 concurrency P2). Under READ COMMITTED
@@ -832,13 +848,27 @@ class AskStateStore:
             ).fetchone()
             if conv is None:
                 raise KeyError(conversation_id)
-            latest = db.execute(
-                "SELECT id, created_at FROM answers WHERE conversation_id=%s "
-                + CONVERSATION_ANSWERS_ORDER_DESC + " LIMIT 1",
-                (conversation_id,),
-            ).fetchone()
-            through_at = latest["created_at"] if latest is not None else None
-            through_id = latest["id"] if latest is not None else None
+            if expected:
+                boundary = db.execute(
+                    "SELECT id, created_at FROM answers "
+                    "WHERE id=%s AND conversation_id=%s",
+                    (expected, conversation_id),
+                ).fetchone()
+                if boundary is None:
+                    # The disclosed boundary answer was deleted — fail loudly so
+                    # the caller re-reviews, never publish "latest" behind the
+                    # user's back.
+                    raise ConversationShareWatermarkStale(expected)
+                through_at = boundary["created_at"]
+                through_id = boundary["id"]
+            else:
+                latest = db.execute(
+                    "SELECT id, created_at FROM answers WHERE conversation_id=%s "
+                    + CONVERSATION_ANSWERS_ORDER_DESC + " LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+                through_at = latest["created_at"] if latest is not None else None
+                through_id = latest["id"] if latest is not None else None
             issued = db.execute(
                 "UPDATE conversations SET share_token=COALESCE(share_token,%s), "
                 "shared_through_at=%s, shared_through_id=%s "
@@ -942,13 +972,27 @@ class AskStateStore:
         any other identifier would let this method run as whichever user the
         ContextVar happens to default to).
 
-        Turns are watermark-bounded: only answers with
-        ``created_at <= shared_through_at`` are returned, in the SAME
-        canonical order ``get_conversation`` uses
-        (``CONVERSATION_ANSWERS_ORDER_ASC`` — design doc C-3). An in-flight
+        Turns are watermark-bounded to a clean prefix of the SAME canonical
+        order ``get_conversation`` uses (``CONVERSATION_ANSWERS_ORDER_ASC`` —
+        design doc C-3). The boundary is a KEYSET on the watermark answer's
+        ``(created_at, ordinal)`` tuple, not a pure ``created_at`` interval
+        (codex #522 R2 P2): the canonical order tie-breaks two answers at the
+        same instant by ``ordinal`` (the identity column standing in for
+        SQLite's rowid), so ``created_at <= shared_through_at`` alone would also
+        pull in the tie-break-LATER answer at the watermark's exact instant — an
+        answer that sorts AFTER the watermark and was never meant to be
+        published. We resolve the watermark answer's ``(created_at, ordinal)``
+        from ``shared_through_id`` and include exactly the rows whose
+        ``(created_at, ordinal)`` tuple is ``<=`` the watermark's. An in-flight
         turn (question submitted, no answer row written yet) is excluded by
         construction: the predicate only ever matches committed ``answers``
         rows, never a running ``ask_jobs`` entry.
+
+        When ``shared_through_id`` no longer resolves (the watermark answer was
+        deleted after the share), the keyset has no anchor, so we fall back to
+        the pure ``created_at <= shared_through_at`` interval — slightly less
+        precise on a same-instant tie, but the design edge case must NOT fail
+        closed and 404 an already-shared conversation.
 
         Returns ``None`` for an unknown/revoked token, or for a conversation
         whose watermark is NULL (``share_conversation`` always sets the
@@ -974,12 +1018,34 @@ class AskStateStore:
             ).fetchone()
             if conv is None or conv["shared_through_at"] is None:
                 return None
-            rows = db.execute(
-                "SELECT id, question, payload, created_at FROM answers "
-                "WHERE conversation_id=%s AND created_at <= %s "
-                + CONVERSATION_ANSWERS_ORDER_ASC,
-                (conv["id"], conv["shared_through_at"]),
-            ).fetchall()
+            watermark = None
+            through_id = conv["shared_through_id"]
+            if through_id:
+                watermark = db.execute(
+                    "SELECT created_at, ordinal FROM answers "
+                    "WHERE id=%s AND conversation_id=%s",
+                    (through_id, conv["id"]),
+                ).fetchone()
+            if watermark is not None:
+                # Keyset on (created_at, ordinal) <= the watermark row's — the
+                # exact prefix ending at the watermark answer.
+                rows = db.execute(
+                    "SELECT id, question, payload, created_at FROM answers "
+                    "WHERE conversation_id=%s AND ("
+                    "created_at < %s OR (created_at = %s AND ordinal <= %s)"
+                    ") " + CONVERSATION_ANSWERS_ORDER_ASC,
+                    (conv["id"], watermark["created_at"],
+                     watermark["created_at"], watermark["ordinal"]),
+                ).fetchall()
+            else:
+                # Watermark answer deleted: fall back to the pure created_at
+                # interval rather than fail closed on the already-shared link.
+                rows = db.execute(
+                    "SELECT id, question, payload, created_at FROM answers "
+                    "WHERE conversation_id=%s AND created_at <= %s "
+                    + CONVERSATION_ANSWERS_ORDER_ASC,
+                    (conv["id"], conv["shared_through_at"]),
+                ).fetchall()
         turns = [
             {
                 "answer_id": row["id"],

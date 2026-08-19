@@ -591,6 +591,21 @@ def test_a_long_question_is_served_whole_not_truncated():
     assert len(turn["question"]) == 5000  # no 2,000 cap
 
 
+def test_a_long_title_is_served_whole_not_truncated():
+    """``ConversationRenameRequest.title`` has no length cap and the authenticated
+    UI shows the title whole; the projection must not silently truncate it at the
+    retired 400-char cap (codex #522 R2, same red line as the question). Mutation
+    guard: restoring ``_text(row.get("title"), 400)`` drops it to 400."""
+    long_title = "标" * 1000
+    payload = public_conversation_payload({
+        "title": long_title, "created_at": "2026-01-01T00:00:00",
+        "shared_through_at": "2026-01-01T00:00:05",
+        "turns": [],
+    })
+    assert payload["title"] == long_title
+    assert len(payload["title"]) == 1000  # no 400 cap
+
+
 def test_one_bad_turn_does_not_topple_the_whole_page():
     """A batch with a scalar-anchors turn beside a normal turn must return BOTH
     turns (the bad one degraded), not 500 the entire conversation page."""

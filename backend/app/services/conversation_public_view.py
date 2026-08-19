@@ -201,6 +201,17 @@ def _question_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _title_text(value: Any) -> str:
+    """The conversation title, served WHOLE — never truncated (codex #522 R2).
+
+    ``ConversationRenameRequest.title`` has no length cap, so the authenticated
+    UI can show a title far past the retired 400-char public cap; truncating it
+    only here would silently drop the tail of the user's own title. Like the
+    question and ``answer_md``, the title is the user's artifact — serve it
+    whole."""
+    return str(value or "").strip()
+
+
 def _as_list(value: Any) -> list:
     """A stored payload field coerced to a list, or [] for anything else.
 
@@ -403,7 +414,7 @@ def public_conversation_payload(
     this allowlist would ignore them regardless, but they must not reach here."""
     turns = row.get("turns") if isinstance(row.get("turns"), list) else []
     return {
-        "title": _text(row.get("title"), 400),
+        "title": _title_text(row.get("title")),
         "created_at": _text(row.get("created_at"), 64),
         # The read watermark: "内容截至何时". Comes from ``shared_through_at``.
         "shared_at": _text(row.get("shared_through_at"), 64),

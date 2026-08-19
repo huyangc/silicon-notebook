@@ -637,6 +637,21 @@ class ConversationDetail(ConversationSummary):
     active_job: Optional["ActiveAskJob"] = None
 
 
+class ConversationShareRequest(BaseModel):
+    """The client's disclosure boundary for a share / "update to latest" (codex
+    #522 R2 P1).
+
+    ``expected_through_id`` is the newest answer id the client saw in the SAME
+    turns it computed its disclosure from. The store pins the watermark to
+    exactly that answer, so the published snapshot equals the disclosed one —
+    even if a newer answer landed between the client's read and this POST (the
+    disclosure TOCTOU). Empty (a legacy / no-body client) falls back to
+    "current latest". The body itself is optional so an empty POST still works.
+    """
+
+    expected_through_id: str = ""
+
+
 class ConversationShareResponse(BaseModel):
     """The public link + read watermark for one shared conversation (T2).
 

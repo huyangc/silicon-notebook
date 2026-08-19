@@ -8,6 +8,16 @@
 
 import type { ConversationDetail } from "./workspace-model.ts";
 
+// countsError 兜底文案（设计 §五 consent 红线）。会话详情没加载出来时算不出精确数字,
+// 但披露的**两个面——附图与个人记忆——缺一不可**:公开页两者都会包含,只提其一等于对
+// 另一半静默省略(codex #522 R2 P2)。承重在这里定成常量、由组件 import,并由
+// `conversation-share-disclosure.test.mjs` 钉住"两者都提"(node --test 进不了 .tsx,
+// 与本文件其余纯逻辑同一拆分理由)。
+export const SHARE_DISCLOSURE_COUNTS_ERROR =
+  "公开页可能包含引用到的附图与个人记忆摘录（本次未能统计数量）。";
+export const SHARE_UPDATE_COUNTS_ERROR =
+  "「更新到最新」会公开新增轮次，其中可能包含新引用的附图与个人记忆摘录（本次未能统计数量）。";
+
 export type ShareDisclosure = {
   sharedCount: number;
   newCount: number;

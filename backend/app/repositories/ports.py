@@ -122,6 +122,20 @@ class ConversationBusyError(RuntimeError):
         super().__init__("conversation has a running Ask job")
 
 
+class ConversationShareWatermarkStale(RuntimeError):
+    """``share_conversation`` was handed an ``expected_through_id`` that is no
+    longer a resolvable answer of this conversation (codex #522 R2 P1).
+
+    The client passes the newest answer id it saw in the SAME turns it computed
+    its disclosure from, and the store pins the watermark to exactly that answer
+    so the published snapshot equals the disclosed one. If that answer has since
+    been deleted, the client's disclosure describes a snapshot that can no longer
+    be reproduced — publishing "current latest" instead would silently expose
+    turns the user never reviewed. The safe direction is to reject (the API layer
+    maps this to 409) so the user reloads and re-reviews, NOT to fall back to the
+    latest answer and bypass consent."""
+
+
 class KgBuildAlreadyRunning(RuntimeError):
     """One notebook already has a durable running KG build job."""
 
@@ -649,7 +663,12 @@ class AskStateRepository(Protocol):
     # `discard_unwatermarked_share` is the conditional rollback for a token
     # minted on a still-empty conversation (see the store method).
     def conversation_creator(self, notebook_id: str, conversation_id: str) -> str | None: ...
-    def share_conversation(self, notebook_id: str, conversation_id: str) -> dict: ...
+    def share_conversation(
+        self,
+        notebook_id: str,
+        conversation_id: str,
+        expected_through_id: str | None = None,
+    ) -> dict: ...
     def conversation_share_state(self, notebook_id: str, conversation_id: str) -> dict: ...
     def unshare_conversation(self, notebook_id: str, conversation_id: str) -> None: ...
     def discard_unwatermarked_share(self, notebook_id: str, conversation_id: str) -> None: ...
