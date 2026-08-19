@@ -250,3 +250,14 @@ def test_post_union_eviction_recaps_the_experience_library(fresh_db):
     ).fetchone()[0]
     assert dropped_probe == 0, "adopted=0/support=0 的最低价值行必须被删"
     assert survivors_min is not None
+
+
+def test_merge_core_actually_wires_the_post_union_eviction():
+    """接线守卫:上面那条测的是 helper 本身,直接调用绕过了 merge_core——把
+    调用点删掉它照样绿(变异实测)。这里按源码钉住 merge_core 真的在 GLOBAL_UNION
+    之后调 _evict_experiences_to_limit。"""
+    source = _SCRIPT_PATH.read_text(encoding="utf-8")
+    core = source[source.index("def merge_core"):]
+    union_at = core.index("GLOBAL_UNION_TABLES:")
+    evict_at = core.index("_evict_experiences_to_limit(conn)")
+    assert evict_at > union_at, "收容必须发生在 GLOBAL_UNION 并集之后"
