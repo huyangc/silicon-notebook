@@ -883,11 +883,12 @@ def test_a_user_written_block_never_renders_an_evidence_line(harness):
 
 
 def test_rendered_ids_are_always_a_subset_of_served_ids(harness):
-    """Echo safety (docstring of ``render_current_blocks``): ``parse_base_reply``
-    structurally rejects an entire reply if it names an id outside
-    ``served_ids``. If a "still in the library"/"gone" id were ever spelled
-    out by name, a model that copies it back would get an unrelated block's
-    write rejected too."""
+    """Echo safety (docstring of ``render_current_blocks``): an id outside
+    ``served_ids`` that the model copies back into a claim's ``evidence`` is
+    silently dropped by ``parse_base_reply``'s per-entry salvage (tallied only
+    in ``evidence_dropped``) — the stored block would quietly lose a citation
+    the model believes it made. So only ids the parser will accept back are
+    ever spelled out."""
     blocks = [_job_block("corpus_shape", ("s-a", "s-b", "s-c"))]
     stats = _stats(served=("s-a",), visible=("s-a", "s-b"))
 
@@ -938,7 +939,7 @@ def test_the_prompt_carries_the_reconciliation_only_rule(harness):
     service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     prompt = client.prompts[0]
-    assert "not evidence to reuse" in prompt or "not to copy" in prompt
+    assert "not evidence to reuse" in prompt
 
 
 # -------------------------------------------------------------------- reading
@@ -1382,3 +1383,15 @@ def test_a_cluster_with_any_memory_member_hides_its_name_entirely(harness):
     assert [name for name, _members in stats.key_concepts] == ["干净概念"]
     # 计数维度不受整簇排除影响:可见对象仍被数到(2 个可见 concept)
     assert stats.kg_objects == (("concept", 2),)
+
+
+def test_mixed_dead_and_unsampled_evidence_never_renders_the_all_gone_marker(harness):
+    """钉住 all-gone 分支的第二个合取项(质量评审 M3 变异存活):证据部分健在但
+    掉出取样、部分已删除时,绝不能渲染「全部消失」——那会诱导模型撤回一条仍然
+    成立的断言,而块被清空后不留证据可查。"""
+    blocks = [_job_block("corpus_shape", ("s-alive-1", "s-alive-2", "s-dead"))]
+    stats = _stats(served=(), visible=("s-alive-1", "s-alive-2"))
+    prompt = render_current_blocks(blocks, stats)
+    assert "all supporting documents are gone" not in prompt
+    assert "+2 more still in the library" in prompt
+    assert "1 no longer in the library" in prompt

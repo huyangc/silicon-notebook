@@ -1306,9 +1306,11 @@ def agent_profile_base_prompt(
     claim, but most of a block's evidence is written across many runs and
     falls out of the ``AGENT_PROFILE_STATS_MAX_DOCUMENTS`` sample long before
     it goes missing from the library; an id copied from the note that is NOT
-    in the statistics below gets the whole reply rejected the moment the
-    server sees it, which is a worse failure than the model simply reasoning
-    fresh from the statistics every time.
+    in the statistics below is silently dropped from that claim's stored
+    evidence (per-entry salvage in ``parse_base_reply``, tallied only in the
+    ``evidence_dropped`` diagnostic) — the model believes it cited support
+    that the stored block no longer names, which is a quieter and therefore
+    worse failure than reasoning fresh from the statistics every time.
     """
     return (
         "You maintain an agent's shared understanding of ONE knowledge library, "
