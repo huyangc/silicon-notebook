@@ -373,18 +373,22 @@ def test_a_stored_row_round_trips_to_its_own_content_addressed_id(store):
 
 
 def test_the_version_signal_tracks_inserts_updates_and_evictions(store, clock):
-    """The injection side's memo key: ``(row count, newest updated_at)``.
+    """The injection side's memo key:
+    ``(mutation revision, row count, newest updated_at)``.
 
-    Both halves are load-bearing and each catches what the other misses — an
-    in-place UPDATE leaves the count alone (the id is content-addressed), and
-    an eviction leaves the newest timestamp alone (it deletes the oldest rows).
-    A memo keyed on either one by itself would keep serving a stale library.
+    The DB halves catch what each other misses — an in-place UPDATE leaves the
+    count alone (the id is content-addressed), an eviction leaves the newest
+    timestamp alone (it deletes the oldest rows) — and the in-process revision
+    (codex #524 R12 P2) moves on EVERY write, closing the cases the two DB
+    halves cannot see (lexicographic MAX over offset-carrying text under a
+    UTC-offset change or clock step, same-signature evict+insert batches).
     """
-    assert store.version_signal() == (0, "")
+    assert store.version_signal() == (0, 0, "")
 
     _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
     inserted = store.version_signal()
-    assert inserted == (1, "2026-08-01T00:00:00+00:00")
+    assert inserted[1:] == (1, "2026-08-01T00:00:00+00:00")
+    assert inserted[0] > 0
 
     clock.value = "2026-08-02T00:00:00+00:00"
     store.upsert_experience(
@@ -398,11 +402,15 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(store, clock):
         replace_conclusion=True,
     )
     updated = store.version_signal()
-    assert updated == (1, "2026-08-02T00:00:00+00:00")
+    assert updated[1:] == (1, "2026-08-02T00:00:00+00:00")
+    assert updated[0] > inserted[0]
 
     _seed(store, clock, "rx_two", adopted=0, support=1, at="2026-08-03T00:00:00+00:00")
+    before_evict = store.version_signal()
     assert store.evict_to_limit(1) == 1
-    assert store.version_signal()[0] == 1
+    after_evict = store.version_signal()
+    assert after_evict[1] == 1
+    assert after_evict[0] > before_evict[0]
 
 
 def test_an_adoption_is_deliberately_invisible_to_the_version_signal(store, clock):
@@ -425,3 +433,23 @@ def test_an_adoption_is_deliberately_invisible_to_the_version_signal(store, cloc
     clock.value = "2026-08-19T00:00:00+00:00"
     store.note_adopted(["rx_one"])
     assert store.version_signal() == before
+
+
+def test_a_write_moves_the_signal_even_when_the_db_halves_cannot_see_it(store, clock):
+    """codex #524 R12 P2:不推时钟做一次 replace_conclusion——count 与
+    MAX(updated_at) 都纹丝不动,只有进程内修订能让注入缓存看见这次更新。"""
+    _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
+    before = store.version_signal()
+    store.upsert_experience(
+        "rx_one",
+        situation=SITUATION,
+        action="ppr",
+        polarity="good",
+        rationale="同一时刻改写结论",
+        provenance=[],
+        provenance_max=50,
+        replace_conclusion=True,
+    )
+    after = store.version_signal()
+    assert after[1:] == before[1:]     # DB 两元对这次写完全失明
+    assert after[0] > before[0]        # 修订元看得见

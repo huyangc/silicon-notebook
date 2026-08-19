@@ -339,11 +339,12 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(
     """
     harness = retrieval_experience_harness
     empty = harness.store.version_signal()
-    assert empty == (0, "")
+    assert empty == (0, 0, "")
 
     _upsert(harness, "rx_one", provenance=["run-1"])
     inserted = harness.store.version_signal()
-    assert inserted[0] == 1 and inserted[1] != ""
+    assert inserted[1] == 1 and inserted[2] != ""
+    assert inserted[0] > 0          # codex #524 R12:进程内修订元
 
     # 拨钟:in-place UPDATE 只动时间戳那一半,不拨钟的话 (count, max_ts) 两半
     # 都不变——SQLite 侧同名用例就是这么写的,这里镜像它。
@@ -353,11 +354,15 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(
         rationale="换了一个结论",
     )
     updated = harness.store.version_signal()
-    assert updated[0] == 1 and updated != inserted
+    assert updated[1] == 1 and updated[1:] != inserted[1:]
+    assert updated[0] > inserted[0]
 
     _upsert(harness, "rx_two", provenance=["run-3"])
+    before_evict = harness.store.version_signal()
     assert harness.store.evict_to_limit(1) == 1
-    assert harness.store.version_signal()[0] == 1
+    after_evict = harness.store.version_signal()
+    assert after_evict[1] == 1
+    assert after_evict[0] > before_evict[0]
 
 
 def test_an_adoption_is_deliberately_invisible_to_the_version_signal(

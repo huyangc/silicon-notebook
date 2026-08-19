@@ -962,3 +962,26 @@ def test_the_experience_cache_never_serves_a_store_twin(monkeypatch):
     assert b.reads == 1
     with rr._EXPERIENCE_CACHE_LOCK:
         rr._EXPERIENCE_CACHE.clear()
+
+
+def test_a_failed_upsert_still_evicts_the_overflow():
+    """codex #524 R12 P2:每条 upsert 独立提交,批次中途炸掉若跳过驱逐,
+    300 上限被突破后注入端按 id 只读前 300、任意遮蔽更好的条目。驱逐在
+    finally,失败批也要收尾。"""
+
+    class _ExplodingStore(_Store):
+        def upsert_experience(self, experience_id, **kwargs):
+            super().upsert_experience(experience_id, **kwargs)
+            raise RuntimeError("db went away mid-batch")
+
+    store = _ExplodingStore()
+    events = _Events()
+    service = _service(
+        [_run([_intent_step(), {"step_type": "exact_lookup", "detail": {"found": 0}}])],
+        _REPLY,
+        store=store,
+        events=events,
+    )
+    service.run()          # 失败被 run() 的 fail-open 吞掉,不冒泡
+    assert len(store.upserts) == 1
+    assert store.evicted == 1          # ← 批次失败,驱逐仍然跑了
