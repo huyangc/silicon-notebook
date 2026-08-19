@@ -32,6 +32,7 @@ from app.services.reasoning_retrieval import (
 from app.services.retrieval_experience_block import (
     RETRIEVAL_EXPERIENCE_BLOCK_MAX_CHARS,
     RETRIEVAL_EXPERIENCE_INJECT_TOP_K,
+    _GUIDANCE,
     render_experience_block,
     rendered_row_count,
     select_experiences,
@@ -280,8 +281,13 @@ def test_without_the_intent_contract_the_situation_stops_matching(repo):
     中了。这条与下面的端到端用例是一对——那条证明 Ask 侧真的把它传了下来,这条
     证明「传不传」确实有区别(否则那条会在漏传时照样绿)。
 
-    报告的逐节深挖走的正是这条不传的路(节问题没有意图契约),所以这也是那条路
-    的诚实降级本身的用例:它只会匹配上同样宽泛的条目,而不是匹配错。
+    ⚠ 报告的逐节深挖**不再**走这条完全不传的路(T6 修复轮裁决 3):节的
+    ``intent_contract`` 里持久化的 ``result_scope``/``completeness_required``
+    现在会经 ``report_engine._deep_dive`` 喂进 ``intent_detail``,该行为的用例
+    见 ``test_report_engine.py::test_deep_dive_feeds_current_situation_the_sections_own_persisted_scope``。
+    这条用例证明的只是「完全不传 intent_detail」这一种输入形状本身的行为——
+    ``ReasoningRetriever.run`` 仍然被任何调用方以这种形状调用时,情境仍然
+    诚实地退化。
     """
     notebook = _seed(repo)
     _write(repo, "enumerate", "good", RATIONALE)
@@ -526,6 +532,31 @@ def test_render_of_nothing_is_the_empty_string():
     ]) == ""
 
 
+def test_the_framing_sentence_survives_into_every_non_empty_block():
+    """T6 修复轮裁决 4:整块非空时,``_GUIDANCE`` 那两句框定语
+    ——「这是以往检索攒的打法,只用来选查法,不是证据」——必须逐字在场。
+
+    模型只读渲染出的字符串,读不到这个模块的 docstring:框定语是这个特性唯一的
+    纵深防御(它与「动作词表里没有范围类动作」共同构成红线,而红线的另一半是
+    结构性的、这一半只能是文案),漏渲染它不会有任何异常或类型错误,只会安静地
+    把一句「不是证据、不许改范围」的提醒从每一次 plan/reflect 调用里抹掉。
+    """
+    situation = _situation()
+    rendered = render_experience_block([
+        {"id": "rx_1", "situation": situation, "action": "enumerate",
+         "polarity": "good", "rationale": RATIONALE, "support": 1},
+    ])
+    assert rendered
+    # ``_GUIDANCE`` 本身就是两句合成的一行:句一讲「这是打法,不是证据」,
+    # 句二讲「绝不能改变检索范围」——逐字断言整句,而不是断言某个关键词,免得
+    # 后来的人把措辞改得面目全非却仍然踩线通过。
+    assert _GUIDANCE in rendered
+    assert "NOT evidence" in _GUIDANCE and "WHICH sources" in _GUIDANCE, (
+        "前提断言:_GUIDANCE 真的包含证据与范围两句限定语,否则上面那条"
+        "逐字断言就证明不了任何事"
+    )
+
+
 def test_at_most_top_k_entries_are_selected(repo):
     situation = _situation()
     entries = [
@@ -562,6 +593,60 @@ def test_only_the_entries_whose_action_the_model_chose_are_marked_adopted(repo):
     assert _steps(result, "experience"), "前提:这一轮确实注入了打法"
     assert repo.retrieval_experiences.read_experience(walked)["adopted"] == 1
     assert repo.retrieval_experiences.read_experience(listed)["adopted"] == 0
+
+
+def test_choosing_an_action_whose_entry_the_char_cap_dropped_is_not_adopted(repo):
+    """T6 修复轮裁决 2:采用只能记**送达**集,不是块渲染前的 top-k 选中集。
+
+    三条条目的 rationale 都顶格 ``RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS``
+    (160 字符,评审给的复现形状):整块 600 字符硬顶下,这样的行只装得下 1 条,
+    另外两条进了 ``select_experiences`` 的 top-k、却被 ``render_experience_block``
+    整行丢弃——模型压根没看见它们。若模型选中的动作恰好映射到其中一条被丢弃的
+    条目,修复前的代码用未切片的选中集判定,会把它错记成「模型采用了这条建议」;
+    修复后必须保持 0,因为模型从未在 prompt 里读到它。
+    """
+    notebook = _seed(repo)
+    rationale = "A" * RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS
+    delivered_id = _write(repo, "enumerate", "good", rationale)
+    dropped_id = _write(repo, "ppr", "good", rationale)
+    _write(repo, "exact_lookup", "good", rationale)
+
+    llm = _SeqLLM([{"next_action": "ppr_retrieve"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+    result = _run(retriever, notebook, limits)
+
+    steps = _steps(result, "experience")
+    assert steps, "前提:这一轮确实注入了打法"
+    # 前提断言:三条都顶格 160 字符,真的只送达 1 行——否则下面的「未送达」断言
+    # 就没有验证到它本该验证的形状。
+    assert steps[0].detail["entries"] == 1
+    # 模型选中的是 ``ppr``(未送达的那条,见上面的前提断言),而不是真正送达的
+    # ``enumerate`` ——两者的 ``adopted`` 都必须保持 0。
+    assert repo.retrieval_experiences.read_experience(dropped_id)["adopted"] == 0
+    assert repo.retrieval_experiences.read_experience(delivered_id)["adopted"] == 0
+
+
+def test_a_bad_entry_the_model_ignores_is_not_adopted_even_if_it_picks_the_action(repo):
+    """T6 修复轮裁决 2:``polarity == "bad"`` 的条目永远不能被计入采用。
+
+    一条 ``bad`` 条目说的是「这个动作在这类问题上很少有用」——如果模型偏偏选了
+    这个动作,那是模型在**无视**这条建议(该动作本就可能出于别的理由被选中),
+    不是在采用它。把它计入 ``adopted`` 会奖励那些被无视的建议,与淘汰排序想
+    保留的东西正好相反。
+    """
+    notebook = _seed(repo)
+    ignored_id = _write(repo, "ppr", "bad", OTHER_RATIONALE)
+
+    llm = _SeqLLM([{"next_action": "ppr_retrieve"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+    result = _run(retriever, notebook, limits)
+
+    steps = _steps(result, "experience")
+    assert steps, "前提:这一轮确实注入了这条 bad 条目"
+    assert steps[0].detail["entries"] == 1
+    assert repo.retrieval_experiences.read_experience(ignored_id)["adopted"] == 0
 
 
 def test_nothing_is_written_back_when_the_model_adopts_nothing(repo):

@@ -369,9 +369,17 @@ def test_an_adoption_is_deliberately_invisible_to_the_version_signal(
     misses adoptions, which is correct: ``adopted`` is neither rendered into
     the prompt block nor part of the injection-side selection ordering, so a
     memo that misses it still serves identical rows.
+
+    The clock is advanced BEFORE ``note_adopted`` — without that, this
+    assertion would hold even if ``note_adopted`` wrote ``updated_at``,
+    because ``now()`` at insert time and at adoption time would be identical
+    and the signal would coincidentally match either way. Advancing the clock
+    is what makes "the signal did not move" prove the invariant rather than
+    prove nothing.
     """
     harness = retrieval_experience_harness
     _upsert(harness, "rx_one", provenance=["run-1"])
     before = harness.store.version_signal()
+    harness.clock.value = LATER
     harness.store.note_adopted(["rx_one"])
     assert harness.store.version_signal() == before

@@ -3875,13 +3875,24 @@ class ReasoningRetriever:
                          detail=answer_detail))
         # 采用回写:注入过的条目里,哪几条的动作被模型真的选了。
         #
+        # 判据是 ``experience_block``(真正渲染进 prompt 的那份),不是
+        # ``experience_entries``(块渲染前的 top-k 选中集)——整块硬顶按行丢弃
+        # 装不下的尾部条目(见 render_experience_block),被丢的那些条目模型压根
+        # 没看到。用选中集判定会把「模型因为别的原因巧合选中同一动作」错记成
+        # 「采用了它没看过的建议」。``rendered_row_count`` 按送达行数与
+        # ``experience_entries`` 的选中顺序一一对应(只丢尾部、不重排),所以切片
+        # 到送达行数就是送达集。
+        #
         # 一次有界 UPDATE(至多 ``RETRIEVAL_EXPERIENCE_INJECT_TOP_K`` 个主键),只在
-        # 「真注入过 **且** 真有交集」时才发——所以默认关闭态、以及注入了但模型一次
+        # 「真渲染过 **且** 真有交集」时才发——所以默认关闭态、以及注入了但模型一次
         # 都没采纳的 run,都是零写入。fail-open:``adopted`` 只是淘汰排序的一个键,
         # 一次记账失败不该让一次已经检索完的 run 报错。取消是控制流不是失败,照常
         # 上抛(与本文件其他 fail-open 分支同口径)。
-        if experience_entries and adopted_actions:
-            adopted_ids = adopted_entry_ids(experience_entries, sorted(adopted_actions))
+        if experience_block:
+            delivered_experience_entries = experience_entries[
+                : rendered_experience_count(experience_block)]
+            adopted_ids = adopted_entry_ids(
+                delivered_experience_entries, sorted(adopted_actions))
             if adopted_ids:
                 try:
                     self.retrieval_experiences.note_adopted(adopted_ids)

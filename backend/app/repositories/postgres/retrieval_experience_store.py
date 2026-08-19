@@ -235,7 +235,11 @@ class RetrievalExperienceStore:
 
     def note_adopted(self, experience_ids: Sequence[str], delta: int = 1) -> int:
         """Increment ``adopted`` for entries a run actually acted on. Mirror of
-        the SQLite method, including the refusal to clamp a negative delta."""
+        the SQLite method, including the refusal to clamp a negative delta and
+        the deliberate refusal to touch ``updated_at`` — see the SQLite
+        mirror's docstring for why: that column is the eviction tie-break AND
+        half of ``version_signal()``'s memo key, so an adoption must stay
+        invisible to both."""
         ids = [str(item) for item in experience_ids if str(item)]
         if int(delta) < 0:
             raise ValueError(
@@ -243,12 +247,11 @@ class RetrievalExperienceStore:
             )
         if not ids:
             return 0
-        now = self.now()
         with self.database.write() as db:
             cursor = db.execute(
-                "UPDATE retrieval_experiences SET adopted=adopted+%s,updated_at=%s "
+                "UPDATE retrieval_experiences SET adopted=adopted+%s "
                 "WHERE id = ANY(%s)",
-                (int(delta), now, ids),
+                (int(delta), ids),
             )
         return cursor.rowcount
 

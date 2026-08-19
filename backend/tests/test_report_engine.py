@@ -281,6 +281,93 @@ def test_report_operations_bind_each_exact_workload(repo):
     assert ("chat", "query_rewrite") in provider.calls
 
 
+def test_deep_dive_feeds_current_situation_the_sections_own_persisted_scope(
+    repo, monkeypatch,
+):
+    """T6 修复轮裁决 3(Agentic Memory P2):``_deep_dive`` 必须把
+    ``section["intent_contract"]``——``_bind_outline_to_intent`` 在大纲阶段写进
+    每一节、随 ``reports.outline_json`` 一起持久化的那份报告行自己的意图契约
+    副本——里的 ``result_scope``/``completeness_required`` 喂给
+    ``ReasoningRetriever.run(intent_detail=...)``。
+
+    修复前这里恒不传 ``intent_detail``:任何档位的报告节都会让
+    ``current_situation`` 在这两个键上落回同一个 ``unknown``/``False``,「要求
+    完整枚举」的节与「只要相关性排序」的节因而共享同一份诚实降级出来的广义
+    形状,一条蒸馏自 ``result_scope="ranked"`` 问题的经验条目会在这两类节上
+    同样「匹配」。修复后两类节在这两个键上分道。
+    """
+    from app.services.report_engine import ReportEngine
+    from app.services.retrieval_experience_projection import current_situation
+
+    captured: list[dict | None] = []
+
+    class _CapturingRetriever:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, *args, **kwargs):
+            from app.services.reasoning_retrieval import ReasoningResult
+
+            captured.append(kwargs.get("intent_detail"))
+            return ReasoningResult()
+
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.ReasoningRetriever", _CapturingRetriever,
+    )
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    nb = _mk_nb(repo)
+
+    complete_section = {
+        "title": "完整清单",
+        "scope": "完整清单",
+        "intent_contract": {
+            "result_scope": "complete", "completeness_required": True,
+        },
+    }
+    ranked_section = {
+        "title": "相关性问答",
+        "scope": "相关性问答",
+        "intent_contract": {
+            "result_scope": "ranked", "completeness_required": False,
+        },
+    }
+
+    eng._deep_dive(nb.id, complete_section, "问题")
+    eng._deep_dive(nb.id, ranked_section, "问题")
+
+    # 两节各自把**自己**持久化的 result_scope/completeness_required 原样带下去
+    # ——不是 self 上规划阶段留下的瞬态属性,也不是伪造出的完整意图契约。
+    assert captured == [
+        {"result_scope": "complete", "completeness_required": True},
+        {"result_scope": "ranked", "completeness_required": False},
+    ]
+
+    complete_situation = current_situation(
+        captured[0], mode="reasoning", retrieval_effort="standard")
+    ranked_situation = current_situation(
+        captured[1], mode="reasoning", retrieval_effort="standard")
+    assert complete_situation["result_scope"] == "complete"
+    assert complete_situation["completeness_required"] is True
+    assert ranked_situation["result_scope"] == "ranked"
+    assert ranked_situation["completeness_required"] is False
+    # 报告的 complete 语义不再匹配 ranked 蒸出的条目:修复前两节都会落在同一个
+    # unknown/False 上,这条断言在修复前不成立。
+    assert complete_situation["result_scope"] != ranked_situation["result_scope"]
+    assert (
+        complete_situation["completeness_required"]
+        != ranked_situation["completeness_required"]
+    )
+    # 诚实降级从 6 键 unknown 收窄到 4 键:mode/retrieval_effort 本就由显式参数
+    # 给出,result_scope/completeness_required 现在也不是 unknown/False 了——
+    # 只剩 entity_count/topic_count/has_constraints/has_exclusions 四个键仍然
+    # 诚实地落在未知(节问题没有实体/主题/约束/排除项那份结构)。
+    assert complete_situation["entity_count"] == "none"
+    assert complete_situation["topic_count"] == "none"
+    assert complete_situation["has_constraints"] is False
+    assert complete_situation["has_exclusions"] is False
+
+
 def test_engine_outline_fallback_on_bad_json(repo):
     nb = _mk_nb(repo)
     class _Bad:

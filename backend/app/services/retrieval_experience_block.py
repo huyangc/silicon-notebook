@@ -83,6 +83,19 @@ _GUIDANCE = (
 #: spellings meet, and ``ADOPTION_ACTIONS`` below is its inverse, so "what we
 #: recommended" and "what the model then chose" are read off the same mapping
 #: rather than off two tables that can drift.
+#:
+#: ⚠ ``"enumerate": "enumerate_*"`` is the one entry that is NOT a literal
+#: action id — there is no ``enumerate_*`` in the reflect schema, only the two
+#: concrete siblings ``enumerate_elements``/``enumerate_kg_objects``. The
+#: wildcard is deliberate: the stored vocabulary has no way to distinguish
+#: which of the two an observed run reached for (``project_run_step`` only
+#: keeps the trace step type, and both siblings share ``step_type="enumerate"``
+#: — see ``RunObservation``'s privacy argument for why that narrowing is not
+#: negotiable), so an entry about "enumerate" is genuinely advice about
+#: EITHER. Naming one arbitrarily would be more precise-looking and less
+#: honest. ``ADOPTION_ACTIONS`` below resolves the wildcard on the way back
+#: in — both concrete ids fold to the one word — which is what keeps this
+#: table's one non-literal entry from breaking round-tripping.
 _ACTION_IDS: dict[str, str] = {
     "retrieve": "add_subquery",
     "ppr": "ppr_retrieve",
@@ -270,6 +283,20 @@ def adopted_entry_ids(
     chosen — ``adopted`` is meant to rank entries against each other, and a run
     that happens to walk the graph five times is not five times the evidence
     that the advice was good.
+
+    ⚠ Only ``polarity == "good"`` entries can be adopted. A ``bad`` entry's
+    advice is "avoid this channel" — if the model reaches for that action
+    anyway (several of these actions also fire deterministically regardless of
+    any hint, see ``ADOPTION_ACTIONS``'s own docstring), that is the model
+    ignoring the advice, not following it. Counting it would credit exactly
+    the entries whose advice was disregarded, which is the opposite of what
+    the eviction ordering's ``adopted`` column is supposed to measure.
+
+    ``entries`` must already be the DELIVERED set (the caller is expected to
+    slice its selection down to ``rendered_row_count(block)`` before calling
+    this) — an entry the block's character cap dropped was never shown to the
+    model, so the model choosing that same action for unrelated reasons must
+    not be credited as adoption of advice it never saw.
     """
     wanted = {
         ADOPTION_ACTIONS[action]
@@ -284,6 +311,8 @@ def adopted_entry_ids(
         if not isinstance(entry, Mapping):
             continue
         if str(entry.get("action") or "") not in wanted:
+            continue
+        if str(entry.get("polarity") or "") != "good":
             continue
         entry_id = str(entry.get("id") or "")
         if not entry_id or entry_id in seen:
