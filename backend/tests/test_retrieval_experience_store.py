@@ -62,13 +62,17 @@ def store(tmp_path: Path, clock: _Clock) -> RetrievalExperienceStore:
 
 
 def test_a_fresh_entry_counts_its_provenance_as_support(store):
+    # ``provenance`` arrives NEWEST-FIRST — the only real caller builds it
+    # from a query ordered ``created_at DESC`` — so ``run-2`` (newer) is
+    # listed before ``run-1`` (older) here; the store reverses it before
+    # storing, so the row itself comes back oldest-first.
     row = store.upsert_experience(
         "rx_one",
         situation=SITUATION,
         action="exact_lookup",
         polarity="bad",
         rationale="很少命中",
-        provenance=["run-1", "run-2"],
+        provenance=["run-2", "run-1"],
         provenance_max=10,
         replace_conclusion=False,
     )
@@ -95,7 +99,7 @@ def test_a_repeated_batch_does_not_inflate_support(store):
             action="ppr",
             polarity="good",
             rationale="图谱库里值得先试",
-            provenance=["run-1", "run-2"],
+            provenance=["run-2", "run-1"],  # newest-first, same batch each time
             provenance_max=10,
             replace_conclusion=False,
         )
@@ -110,7 +114,7 @@ def test_new_runs_add_support_and_the_provenance_list_stays_bounded(store):
         action="ppr",
         polarity="good",
         rationale="先试",
-        provenance=["run-1", "run-2"],
+        provenance=["run-2", "run-1"],  # newest-first: run-2 newer than run-1
         provenance_max=3,
         replace_conclusion=False,
     )
@@ -120,7 +124,7 @@ def test_new_runs_add_support_and_the_provenance_list_stays_bounded(store):
         action="ppr",
         polarity="good",
         rationale="先试",
-        provenance=["run-2", "run-3", "run-4"],
+        provenance=["run-4", "run-3", "run-2"],  # newest-first
         provenance_max=3,
         replace_conclusion=False,
     )
@@ -130,6 +134,52 @@ def test_new_runs_add_support_and_the_provenance_list_stays_bounded(store):
     # keeps the bound, and keeping the newest is what makes the next
     # overlapping batch de-duplicate against something useful.
     assert row["provenance"] == ["run-2", "run-3", "run-4"]
+
+
+def test_overlapping_batches_evict_the_genuinely_oldest_run_first(store):
+    """The R1/R2/R3 shape the reviewers reproduced: three successive batches,
+    each overlapping the previous one by design (distillation has no
+    watermark), with ``provenance_max`` shrunk to 3 so eviction actually has
+    to choose.
+
+    Before the fix, ``incoming`` stayed in the caller's newest-first order and
+    the trailing ``[-keep:]`` slice — meant to drop the oldest — instead cut
+    into whichever batch's ids happened to land first in the concatenation,
+    which is not necessarily the oldest ones. The property this test pins:
+    after any sequence of overlapping batches, ``support`` equals the number
+    of DISTINCT run ids actually observed (never inflated by a wrongly
+    re-admitted id), and the surviving provenance is the newest 3, not some
+    row order artifact.
+    """
+    # Batch R1: three runs, newest-first (r3 newest ... r1 oldest).
+    row = store.upsert_experience(
+        "rx_one", situation=SITUATION, action="ppr", polarity="bad",
+        rationale="r1", provenance=["r3", "r2", "r1"],
+        provenance_max=3, replace_conclusion=False,
+    )
+    assert row["support"] == 3
+    assert row["provenance"] == ["r1", "r2", "r3"]
+
+    # Batch R2: overlaps on r2/r3, adds one genuinely new run r4.
+    row = store.upsert_experience(
+        "rx_one", situation=SITUATION, action="ppr", polarity="bad",
+        rationale="r2", provenance=["r4", "r3", "r2"],
+        provenance_max=3, replace_conclusion=False,
+    )
+    assert row["support"] == 4
+    assert row["provenance"] == ["r2", "r3", "r4"]
+
+    # Batch R3: overlaps on r3/r4, adds r5. r1/r2 have aged out of the
+    # bounded provenance list by now — that is the accepted invariant
+    # (batch size <= provenance max), not a bug this test is proving against.
+    row = store.upsert_experience(
+        "rx_one", situation=SITUATION, action="ppr", polarity="bad",
+        rationale="r3", provenance=["r5", "r4", "r3"],
+        provenance_max=3, replace_conclusion=False,
+    )
+    assert row["support"] == 5
+    # The newest 3 survive — r3, r4, r5 — not some mid-sequence artifact.
+    assert row["provenance"] == ["r3", "r4", "r5"]
 
 
 def test_an_add_that_lands_on_an_existing_entry_keeps_its_conclusion(store):

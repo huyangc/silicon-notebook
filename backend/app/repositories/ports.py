@@ -4501,13 +4501,25 @@ class RetrievalExperienceStorePort(Protocol):
         on the way in is what keeps "the id can be re-verified from the row"
         true on both backends.
 
+        ⚠ ``provenance`` is NEWEST-FIRST: the only caller
+        (``retrieval_experience_job.py``) builds it by absorbing rows from a
+        query ordered ``created_at DESC``. Both backends reverse it, ONCE, at
+        the top of this method, before it touches any trailing-slice logic —
+        every truncation below assumes the tail of a list is the newest entry,
+        and a caller-order mismatch there is exactly the bug this reversal
+        closes (see either backend's docstring for the failure shape).
+
         Merge semantics, all inside ONE write transaction:
 
         * ``support`` grows by the number of ``provenance`` run ids that the
           stored provenance list does not ALREADY contain. That de-duplication
           is the whole reason distillation needs no cursor table: re-reading an
           overlapping batch of runs cannot inflate an entry's evidence.
-        * the retained provenance list keeps the newest ``provenance_max`` ids.
+        * the retained provenance list keeps the newest ``provenance_max``
+          ids — genuinely, now: this is the sentence the reversal above exists
+          to make true. Without it, an overlapping sequence of batches could
+          evict runs from the MIDDLE of an entry's history instead of its
+          oldest end, while still reporting a correct ``support`` count.
         * ``replace_conclusion`` decides whether the model's new
           ``polarity``/``rationale`` overwrite the stored ones (a Mem0-style
           UPDATE) or only the counters move (an ADD that landed on an entry

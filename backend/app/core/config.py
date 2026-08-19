@@ -712,8 +712,13 @@ class Settings(BaseSettings):
     # ⚠ 计数是**进程内**的,重启归零。这是刻意接受的:经验库是纯增量优化,不是
     # 正确性要求,重启后少蒸馏一轮的代价是零;而把它持久化就要么新开一张表,
     # 要么把一个全局计数器塞进一张按 notebook 分区的表里。
+    # ⚠ 默认值与 ``RETRIEVAL_EXPERIENCE_BATCH_RUNS``(每批读取的 run 数上限,
+    # 40)对齐,而不是任取一个大于它的数:两者相等让相邻两个批次天然趋于「刚好
+    # 衔接、不重叠」,读全局最近 40 条完成提问的批次读到的正是上一次触发之后
+    # 新增的那些——真正的重叠仍会发生(触发计数到达阈值与实际读取之间有间隙),
+    # 但把默认值对齐到批次大小是把重叠窗口压到最小,而不是放大它。
     retrieval_experience_trigger: int = Field(
-        50, ge=1, validation_alias="RETRIEVAL_EXPERIENCE_TRIGGER")
+        40, ge=1, validation_alias="RETRIEVAL_EXPERIENCE_TRIGGER")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

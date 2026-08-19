@@ -73,6 +73,16 @@ from app.repositories.ports import (
 #: the user's checkbox selection and nothing in this feature is allowed to
 #: touch it. The reverse guard on this tuple is the structural form of that
 #: rule.
+#:
+#: ⚠ No ``memory`` entry, on purpose (removed in the T5 fix round, not
+#: overlooked): a ``memory`` TRACE step is only ever emitted on a HIT — a
+#: miss is recorded as a ``skip`` step instead (see ``project_run``'s
+#: docstring for why ``skip`` steps are discarded whole). ``zero_hits`` for
+#: ``memory`` would therefore be structurally always 0, which is not evidence
+#: of anything. And it fails the other half of the test that earns a slot
+#: here: memory recall is not something the reflect loop CHOOSES to invoke —
+#: there is no ``memory`` action id for the model to reach for — so a THEN
+#: side entry about it would recommend a channel nobody can act on.
 RETRIEVAL_ACTIONS: tuple[str, ...] = (
     "retrieve",
     "ppr",
@@ -81,7 +91,6 @@ RETRIEVAL_ACTIONS: tuple[str, ...] = (
     "expand_community",
     "follow_chain",
     "enumerate",
-    "memory",
     "outline",
 )
 
@@ -93,7 +102,6 @@ RetrievalAction = Literal[
     "expand_community",
     "follow_chain",
     "enumerate",
-    "memory",
     "outline",
 ]
 
@@ -193,6 +201,16 @@ class RunObservation:
     computed. Making it computable means changing the trace WRITE path on a hot
     request path, with its own disclosure argument; that is deliberately left
     to a later phase.
+
+    ⚠ There is no field here for ``skip`` steps either, and that is a
+    SEPARATE registered decision from the outcome-granularity one above, not
+    the same gap: a skip step's reason is a sentence written for a human
+    reading the trace, and folding it in would mean either inventing a closed
+    vocabulary for every skip reason this codebase can produce, or keeping
+    the free text — the exact leak this type exists to rule out. See
+    ``project_run``'s docstring for the full argument. If a later phase wants
+    skip signal here, it needs a NEW closed vocabulary; it must not add a
+    ``str`` reason field to get there.
     """
 
     mode: Literal["chunk", "reasoning", "graph", "unknown"]
@@ -260,6 +278,19 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
     (action type, one count, one duration, plus the intent step's closed
     situation). This function only aggregates and buckets; it reads no field
     that projection did not already restrict.
+
+    ⚠ Step types outside ``RETRIEVAL_ACTIONS`` — most notably every ``skip``
+    step (an exact-lookup teaching message, a memory miss, an enumeration
+    skip reason) — are discarded WHOLE by the loop below, never folded into
+    an "attempted but skipped" tally. Registered as a decision, not an
+    oversight: a skip step's reason is a sentence written for a HUMAN reading
+    the trace, and there is no closed vocabulary that could represent it
+    without either enumerating every skip reason this codebase can produce
+    (a vocabulary that grows every time a retrieval channel grows one), or
+    keeping the free text — which is exactly the leak this module exists to
+    rule out. If a later phase wants skip signal in the experience library,
+    it has to design a NEW closed vocabulary for skip reasons; it must not
+    resurrect the discarded text.
     """
     run_id = str(run.get("run_id") or "")
     if not run_id:

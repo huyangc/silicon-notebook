@@ -118,7 +118,9 @@ def test_jsonb_round_trips_the_situation_and_provenance(
     retrieval_experience_harness,
 ):
     harness = retrieval_experience_harness
-    row = _upsert(harness, "rx_one", provenance=["run-1", "run-2"])
+    # newest-first, matching the only real caller's ``created_at DESC`` order
+    # — the store reverses it, so it comes back oldest-first.
+    row = _upsert(harness, "rx_one", provenance=["run-2", "run-1"])
     assert row["situation"] == SITUATION
     assert row["provenance"] == ["run-1", "run-2"]
     assert isinstance(row["situation"]["completeness_required"], bool)
@@ -144,10 +146,117 @@ def test_an_overlapping_batch_does_not_double_count_support(
     retrieval_experience_harness,
 ):
     harness = retrieval_experience_harness
-    _upsert(harness, "rx_one", provenance=["run-1", "run-2"])
-    row = _upsert(harness, "rx_one", provenance=["run-2", "run-3"])
+    # newest-first per batch, matching the real caller.
+    _upsert(harness, "rx_one", provenance=["run-2", "run-1"])
+    row = _upsert(harness, "rx_one", provenance=["run-3", "run-2"])
     assert row["support"] == 3
     assert row["provenance"] == ["run-1", "run-2", "run-3"]
+
+
+def test_overlapping_batches_evict_the_genuinely_oldest_run_first(
+    retrieval_experience_harness,
+):
+    """The R1/R2/R3 reproduction shape, proved on this backend too — see the
+    SQLite mirror's identically named test for the full explanation of why
+    ``incoming`` has to be reversed before it touches any trailing-slice
+    logic. ``provenance_max`` is shrunk to 3 so eviction actually has to
+    choose, and the property pinned is: after a sequence of overlapping
+    batches, ``support`` equals the number of DISTINCT run ids actually
+    observed, and the survivors are the newest 3 — never a row-order
+    artifact of which batch happened to come first in the merge.
+    """
+    harness = retrieval_experience_harness
+    row = _upsert(
+        harness, "rx_one", provenance=["r3", "r2", "r1"], provenance_max=3,
+    )
+    assert row["support"] == 3
+    assert row["provenance"] == ["r1", "r2", "r3"]
+
+    row = _upsert(
+        harness, "rx_one", provenance=["r4", "r3", "r2"], provenance_max=3,
+    )
+    assert row["support"] == 4
+    assert row["provenance"] == ["r2", "r3", "r4"]
+
+    row = _upsert(
+        harness, "rx_one", provenance=["r5", "r4", "r3"], provenance_max=3,
+    )
+    assert row["support"] == 5
+    assert row["provenance"] == ["r3", "r4", "r5"]
+
+
+def test_a_genuinely_concurrent_insert_falls_back_to_merge(
+    retrieval_experience_harness, monkeypatch,
+):
+    """The fresh-row race that ``cursor.rowcount`` exists to detect (codex
+    R2): two runs distilling the SAME new entry at once. Neither's
+    ``SELECT ... FOR UPDATE`` sees a row — PostgreSQL does not lock rows that
+    do not exist yet — so both reach the INSERT branch, and exactly one wins
+    ``ON CONFLICT (id) DO NOTHING``. Before the fix, the branch assumed it had
+    always inserted and never re-read the winner's row, so the loser's own
+    provenance and rationale were silently discarded instead of merged in.
+
+    The interleaving is reproduced deterministically — not raced against wall
+    clock time — by pausing inside ``_canonical_situation``, the last thing
+    the INSERT branch evaluates before issuing the INSERT itself. Only the
+    FIRST call to it (the "loser", started first) pauses; the winner's own
+    call to it passes straight through, so its INSERT commits first.
+    """
+    import app.repositories.postgres.retrieval_experience_store as module
+
+    harness = retrieval_experience_harness
+    entry_id = experience_id(SITUATION, "exact_lookup")
+    entered = threading.Event()
+    release = threading.Event()
+    paused_once = threading.Event()
+    real_canonical = module._canonical_situation
+
+    def _paused_canonical(situation):
+        if not paused_once.is_set():
+            paused_once.set()
+            entered.set()
+            assert release.wait(timeout=5), "winner never released the loser"
+        return real_canonical(situation)
+
+    monkeypatch.setattr(module, "_canonical_situation", _paused_canonical)
+
+    results: dict[str, dict] = {}
+
+    def _loser() -> None:
+        results["loser"] = harness.store.upsert_experience(
+            entry_id, situation=SITUATION, action="exact_lookup",
+            polarity="bad", rationale="慢的那个", provenance=["run-a"],
+            provenance_max=10, replace_conclusion=False,
+        )
+
+    thread = threading.Thread(target=_loser)
+    thread.start()
+    assert entered.wait(timeout=5), "loser never reached the INSERT branch"
+
+    winner = harness.store.upsert_experience(
+        entry_id, situation=SITUATION, action="exact_lookup",
+        polarity="bad", rationale="快的那个", provenance=["run-b"],
+        provenance_max=10, replace_conclusion=False,
+    )
+    # The winner's write() has committed by the time upsert_experience
+    # returns, so releasing the loser now genuinely reproduces "the row
+    # already exists when my INSERT fires" rather than a lucky ordering.
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "loser thread never finished"
+
+    assert winner["support"] == 1
+    assert winner["provenance"] == ["run-b"]
+
+    loser_row = results["loser"]
+    # The loser's own run id must not be lost: it merged into the winner's
+    # row rather than silently discarding its own contribution.
+    assert loser_row["support"] == 2
+    assert set(loser_row["provenance"]) == {"run-a", "run-b"}
+
+    stored = harness.store.read_experience(entry_id)
+    assert stored["support"] == 2
+    assert set(stored["provenance"]) == {"run-a", "run-b"}
 
 
 def test_a_no_op_merge_leaves_updated_at_alone(retrieval_experience_harness):
