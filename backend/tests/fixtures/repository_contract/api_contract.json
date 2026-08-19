@@ -7407,6 +7407,72 @@
           "title": "PromotionRejectRequest",
           "type": "object"
         },
+        "PublicConversation": {
+          "description": "A shared conversation (multi-turn Q&A), readable without a session (T3).\n\n``shared_at`` is the read watermark — \"内容截至何时\" — so the page can state\nthat new turns after it are not included.",
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "shared_at": {
+              "default": "",
+              "title": "Shared At",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            },
+            "truncated_turns": {
+              "default": false,
+              "title": "Truncated Turns",
+              "type": "boolean"
+            },
+            "turns": {
+              "items": {
+                "$ref": "#/components/schemas/PublicTurn"
+              },
+              "title": "Turns",
+              "type": "array"
+            }
+          },
+          "title": "PublicConversation",
+          "type": "object"
+        },
+        "PublicReference": {
+          "description": "One reference in a shared conversation, as an anonymous reader sees it\n(T3). Same shape as ``PublicReportReference``.\n\nNo ``source_id`` / ``element_id`` / ``object_id`` / ``notebook_id`` /\n``memory_id`` / ``provenance`` / ``knowhow`` / ``images``: a public link must\nnot hand out handles into the authenticated API. Built by\n``services/conversation_public_view.py`` as an allowlist — a Memory citation\nkeeps its title/snippet but loses its ``memory_id``. ``key`` (``\"k1\"`` or a\npositional ``\"1\"``) is preserved so the page can number ``[k]`` markers from\nit rather than from a list position the reference filter may have shifted.",
+          "properties": {
+            "file_name": {
+              "default": "",
+              "title": "File Name",
+              "type": "string"
+            },
+            "key": {
+              "default": "",
+              "title": "Key",
+              "type": "string"
+            },
+            "location": {
+              "default": "",
+              "title": "Location",
+              "type": "string"
+            },
+            "snippet": {
+              "default": "",
+              "title": "Snippet",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "title": "PublicReference",
+          "type": "object"
+        },
         "PublicReport": {
           "description": "A shared report, readable without a session.",
           "properties": {
@@ -7481,6 +7547,60 @@
             }
           },
           "title": "PublicReportReference",
+          "type": "object"
+        },
+        "PublicTurn": {
+          "description": "One Q&A turn in a shared conversation, readable without a session (T3).\n\nExcludes the whole reasoning surface (``reasoning_trace`` / ``intent`` /\n``retrieval_scope`` / ``retrieval_query`` / ``top_relevance`` / ``mode`` /\n``llm_mode`` / ``retrieval_effort`` / ``index_required``) and every\naddressable id. ``evidence_level`` IS exposed — it is part of the answer's\nstated credibility, not an internal flag. Answer-attached images are\ndeliberately absent in v1 (T4 adds the anonymous image channel).",
+          "properties": {
+            "answer_md": {
+              "default": "",
+              "title": "Answer Md",
+              "type": "string"
+            },
+            "answered_at": {
+              "default": "",
+              "title": "Answered At",
+              "type": "string"
+            },
+            "asked_at": {
+              "default": "",
+              "title": "Asked At",
+              "type": "string"
+            },
+            "evidence_level": {
+              "default": "inferred",
+              "title": "Evidence Level",
+              "type": "string"
+            },
+            "omitted_result_sets": {
+              "default": 0,
+              "title": "Omitted Result Sets",
+              "type": "integer"
+            },
+            "question": {
+              "default": "",
+              "title": "Question",
+              "type": "string"
+            },
+            "reference_count": {
+              "default": 0,
+              "title": "Reference Count",
+              "type": "integer"
+            },
+            "references": {
+              "items": {
+                "$ref": "#/components/schemas/PublicReference"
+              },
+              "title": "References",
+              "type": "array"
+            },
+            "truncated_references": {
+              "default": false,
+              "title": "Truncated References",
+              "type": "boolean"
+            }
+          },
+          "title": "PublicTurn",
           "type": "object"
         },
         "QueryIntentAmbiguity": {
@@ -21622,6 +21742,46 @@
             }
           },
           "summary": "Reject Promotion"
+        }
+      },
+      "/api/public/conversations/{token}": {
+        "get": {
+          "description": "The one conversation read that needs no session — the token is the whole\ngrant (T3). Mirrors ``report_routes.public_report_route``.\n\nDeliberately has NO ``Depends(get_current_user)``: this is the anonymous\nsurface. That also means no request user is bound, so nothing here may call\nan owner-scoped repository method — ``current_user`` falls back to the seeded\nadmin when the ContextVar is unset, which would silently run as an\nadministrator. ``public_conversation_by_token`` takes the token alone for\nexactly that reason, and the payload is an explicit allowlist rather than the\nstored row.",
+          "operationId": "public_conversation_route_api_public_conversations__token__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token",
+              "required": true,
+              "schema": {
+                "title": "Token",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PublicConversation"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Public Conversation Route"
         }
       },
       "/api/public/reports/{token}": {

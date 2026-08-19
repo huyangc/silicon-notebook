@@ -3710,6 +3710,15 @@ class RepositoryFacade:
             notebook_id, conversation_id
         )
 
+    def public_conversation_by_token(self, token: str) -> "dict | None":
+        """Resolve one shared conversation by token alone — the ONLY
+        session-free conversation read (T3, mirrors
+        ``public_report_by_token``). Takes nothing but the token: the caller is
+        the anonymous router, which binds no request user, so this must never
+        consult the current-user ContextVar. See
+        ``AskStateStore.public_conversation_by_token``."""
+        return self._runtime.ask_state.public_conversation_by_token(token)
+
     # --- 深度报告 ---
     # Task 25: reports 表行级持久化移入 runtime 所有的 ReportStore;此处保持
     # 冻结签名委托(notebook 存在性守卫留在 create_report 委托里)。脱离连接
