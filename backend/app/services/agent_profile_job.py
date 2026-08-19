@@ -815,7 +815,14 @@ def render_usage_block(stats: UsageStats) -> str:
         if stats.reports
         else AGENT_PROFILE_USAGE_SECTION_MAX_CHARS
     )
-    spent = 0
+    # codex #524 R17 P2:有报告段时,ask 半区的预算要把**表头行和空检索摘要**
+    # 一起计进去——只给问题行记账的话,表头 + 吃满的问题行 + 12 条不设预算的
+    # 摘要合计就能顶到总上限之上,报告段的余量算出来是 0,「互不饿死」的那半句
+    # 承诺恰好在混合使用(有问题也有报告)的成员身上落空。把 ask 半区整体钉在
+    # 一半以内,报告段的余量就构造性地 ≥ 另一半。无报告的成员逐字保持旧行为。
+    spent = (
+        sum(len(line) + 1 for line in lines) if stats.reports else 0
+    )
     rendered = 0
     body: list[str] = []
     for ask in stats.asks:
@@ -843,11 +850,30 @@ def render_usage_block(stats: UsageStats) -> str:
     if body:
         hidden = len(stats.asks) - rendered
         suffix = f" (+{hidden} more not listed)" if hidden > 0 else ""
-        lines.append(f"questions{suffix}:")
+        label = f"questions{suffix}:"
+        lines.append(label)
         lines.extend(body)
+        spent += len(label) + 1
     if stats.empty_search_summaries:
-        lines.append("searches that came back empty:")
-        lines.extend(f"- {text}" for text in stats.empty_search_summaries)
+        if stats.reports:
+            # 摘要同属 ask 半区,在余量内逐条放行(整段表头也计账);放不下的
+            # 静默落掉——它们是"空手而归"的补充证据,不是承诺完整的清单。
+            header = "searches that came back empty:"
+            picked: list[str] = []
+            cost = len(header) + 1
+            for text in stats.empty_search_summaries:
+                line = f"- {text}"
+                if spent + cost + len(line) + 1 > ask_budget:
+                    break
+                picked.append(line)
+                cost += len(line) + 1
+            if picked:
+                lines.append(header)
+                lines.extend(picked)
+                spent += cost
+        else:
+            lines.append("searches that came back empty:")
+            lines.extend(f"- {text}" for text in stats.empty_search_summaries)
     if stats.reports:
         # codex #524 R7 P2:报告段的余量按**已渲染的全部文本**算,不是只按
         # 问题行的 `spent`——表头、计数行与空检索摘要段此前不计账,ask 半吃满
