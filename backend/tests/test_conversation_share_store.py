@@ -20,6 +20,7 @@ from app.repositories.ports import (
     ConversationShareWatermarkStale,
 )
 from app.repositories.sqlite.ask_state_store import AskStateStore
+from app.services.conversation_public_view import public_conversation_payload
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -350,6 +351,68 @@ def test_zero_answer_conversation_is_refused_atomically_and_leaves_no_token(
         "shared_through_at": "",
         "shared_through_id": "",
     }
+
+
+def test_public_snapshot_query_is_bounded_to_cap_plus_one(tmp_path, monkeypatch):
+    """The token-resolved query fetches at most ``MAX_TURNS + 1`` answers, not the
+    whole conversation (codex #522 R6 P2). A holder of a public link — and every
+    image request, both routed through ``public_conversation_by_token`` — must not
+    force loading and deserializing every payload of an arbitrarily long
+    conversation on each read.
+
+    We shrink ``MAX_TURNS`` to 3 (in both the store and the projection module),
+    seed 6 answers, share to the latest, and assert the STORE returns exactly
+    4 = cap + 1 rows (the oldest four under the ASC order); the projection then
+    renders 3 and still discloses ``truncated_turns=True`` off that one extra row.
+
+    Mutation guard: dropping ``LIMIT`` makes the store return all 6 rows, and the
+    ``== 4-row prefix`` assertion reds.
+    """
+    import app.repositories.sqlite.ask_state_store as store_mod
+    import app.services.conversation_public_view as view_mod
+
+    monkeypatch.setattr(store_mod, "MAX_TURNS", 3)
+    monkeypatch.setattr(view_mod, "MAX_TURNS", 3)
+
+    repo = _repo(tmp_path, monkeypatch)
+    db = repo._runtime.database
+    with db.write() as conn:
+        conn.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-big', 'n', '2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO conversations "
+            "(id, notebook_id, title, created_by, created_at, updated_at) "
+            "VALUES ('conv-big', 'nb-big', 't', 'user-local', "
+            "'2026-01-01T00:00:00', '2026-01-01T00:00:06')"
+        )
+        for i in range(6):
+            conn.execute(
+                "INSERT INTO answers "
+                "(id, notebook_id, conversation_id, question, payload, created_at) "
+                "VALUES (?, 'nb-big', 'conv-big', 'q', "
+                "'{\"conclusion\": \"c\"}', ?)",
+                (f"ans-{i:02d}", f"2026-01-01T00:00:0{i}"),
+            )
+    store = AskStateStore(db, repo._runtime.seams)
+
+    token = store.share_conversation("nb-big", "conv-big")["share_token"]
+    row = store.public_conversation_by_token(token)
+
+    # Store capped the fetch to cap + 1 = 4 (the oldest four under ASC order),
+    # not all 6 answers.
+    assert [t["answer_id"] for t in row["turns"]] == [
+        "ans-00", "ans-01", "ans-02", "ans-03",
+    ]
+
+    # The projection renders MAX_TURNS (3) and still detects truncation off the
+    # single extra row the cap+1 fetch carried.
+    payload = public_conversation_payload(
+        row, share_token=token, images_enabled=False
+    )
+    assert len(payload["turns"]) == 3
+    assert payload["truncated_turns"] is True
 
 
 def test_conversation_share_state_reads_back_token_and_watermark(

@@ -21,6 +21,7 @@ from app.repositories.postgres.ask_state_store import (
     AskStateStore as PostgresAskStateStore,
 )
 from app.repositories.postgres.migrator import PostgresMigrator
+from app.services.conversation_public_view import public_conversation_payload
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 
@@ -400,6 +401,58 @@ def test_conversation_share_state_reads_back_token_and_watermark(
     after = store.conversation_share_state(notebook_id, conversation_id)
     assert after["share_token"] == issued["share_token"]
     assert after["shared_through_id"] == "ans-d"  # newest answer at share time
+
+
+def test_public_snapshot_query_is_bounded_to_cap_plus_one(
+    postgres_database, monkeypatch
+):
+    """Mirrors the SQLite copy (codex #522 R6 P2): the token-resolved query fetches
+    at most ``MAX_TURNS + 1`` answers, not the whole conversation. Shrink
+    ``MAX_TURNS`` to 3, seed 6 answers, share to latest, assert the store returns
+    the oldest 4 = cap + 1. Mutation guard: dropping ``LIMIT`` returns all 6."""
+    import app.repositories.postgres.ask_state_store as store_mod
+    import app.services.conversation_public_view as view_mod
+
+    monkeypatch.setattr(store_mod, "MAX_TURNS", 3)
+    monkeypatch.setattr(view_mod, "MAX_TURNS", 3)
+
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("nb-big-pg", "n", "2026-01-01T00:00:00+00:00",
+             "2026-01-01T00:00:00+00:00"),
+        )
+        connection.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            ("conv-big-pg", "nb-big-pg", "t", "user-local",
+             "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:06+00:00"),
+        )
+        for i in range(6):
+            connection.execute(
+                "INSERT INTO answers "
+                "(id,notebook_id,conversation_id,question,payload,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (f"ans-{i:02d}", "nb-big-pg", "conv-big-pg", "q",
+                 '{"conclusion": "c"}', f"2026-01-01T00:00:0{i}+00:00"),
+            )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    token = store.share_conversation("nb-big-pg", "conv-big-pg")["share_token"]
+    row = store.public_conversation_by_token(token)
+
+    assert [t["answer_id"] for t in row["turns"]] == [
+        "ans-00", "ans-01", "ans-02", "ans-03",
+    ]
+
+    payload = public_conversation_payload(
+        row, share_token=token, images_enabled=False
+    )
+    assert len(payload["turns"]) == 3
+    assert payload["truncated_turns"] is True
 
 
 def _wait_for_conversation_row_lock(postgres_database) -> None:
