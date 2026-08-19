@@ -46,6 +46,7 @@ from app.models.identity import UserProfile
 from app.repositories.ports import (
     AskStreamPort,
     ConversationBusyError,
+    ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
 )
 from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
@@ -822,14 +823,13 @@ def share_conversation_route(
 
     Row-level gated (creator-only). Only conversations with at least one written
     answer can be shared (design doc §七 item 5): an in-flight or never-answered
-    conversation has nothing completed to show. ``share_conversation`` issues the
-    token TOGETHER with the watermark, so a watermark that comes back empty means
-    "no committed answer to bound the snapshot" — reject it and roll the token
-    back, rather than leave a NULL-watermark shared row behind (the public read
-    would fail closed on it anyway, but it should not exist). Using the store's
-    own returned watermark as the signal — instead of a separate "has answers?"
-    pre-check — also closes the window where a concurrent answer insert would
-    make the two disagree.
+    conversation has nothing completed to show. ``share_conversation`` enforces
+    that ATOMICALLY — it raises ``ConversationHasNoShareableAnswer`` inside the
+    same write transaction and never mints a token (codex #522 R5), so there is
+    no NULL-watermark row to compensate away afterwards. This replaced the old
+    share-then-check path (mint a NULL-watermark token, then a second
+    ``discard_unwatermarked_share`` rolls it back), which could leave a permanent
+    token-without-watermark row if the process died between the two steps.
     """
     repo = repository()
     _own_conversation_or_404(repo, notebook_id, conversation_id)
@@ -843,14 +843,9 @@ def share_conversation_route(
         # The disclosed boundary answer was deleted — no token was issued; make
         # the user reload and re-review rather than publish an unconsented span.
         raise user_error(409, "这条会话已有变化，请刷新后重新分享。")
-    if not state.get("shared_through_at"):
-        # Conditional rollback: only discard the token while the watermark is
-        # STILL NULL. A concurrent share that saw the first answer land shares
-        # the same (COALESCE-idempotent) token and may already have handed it to
-        # its own caller in a 200 with a real watermark — an unconditional
-        # unshare here would nuke that live link (codex T2 review, concurrency
-        # P2). Once any concurrent share advances the watermark this no-ops.
-        repo.discard_unwatermarked_share(notebook_id, conversation_id)
+    except ConversationHasNoShareableAnswer:
+        # No committed answer to bound the snapshot — the store refused to mint a
+        # token atomically, so nothing to roll back (codex #522 R5).
         raise user_error(409, "这条会话还没有已完成的回答，暂时无法分享。")
     return ConversationShareResponse(
         share_token=state["share_token"],

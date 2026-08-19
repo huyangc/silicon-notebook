@@ -194,6 +194,12 @@ _ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("api", "shared", None),
     # 公开分享的报告：token 是全部授权，所以它按不透明 id 打码，路径本身可见。
     ("api", "public", "reports", None),
+    # 会话公开分享的匿名读页与资产字节(T3/T4)。token / alias 是全部授权,按不透明
+    # id 打码,路径本身可见——镜像上面的 public/reports 模板。少了它们,两条匿名端点会
+    # 落到兜底的 /api/{id}/{id}/{id}(资产路径再多两段),丢观测:慢的匿名读页与慢的
+    # 资产取字节在诊断里分不开。
+    ("api", "public", "conversations", None),
+    ("api", "public", "conversations", None, "assets", None),
     ("api", "sources", None),
     ("api", "sources", None, "elements-page"),
     ("api", "sources", None, "elements", None),

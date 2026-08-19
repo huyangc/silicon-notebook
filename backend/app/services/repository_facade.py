@@ -3707,16 +3707,6 @@ class RepositoryFacade:
             notebook_id, conversation_id
         )
 
-    def discard_unwatermarked_share(
-        self, notebook_id: str, conversation_id: str
-    ) -> None:
-        """Conditional rollback of a token minted for a still-empty
-        conversation (only while the watermark is NULL). See
-        ``AskStateStore.discard_unwatermarked_share``."""
-        return self._runtime.ask_state.discard_unwatermarked_share(
-            notebook_id, conversation_id
-        )
-
     def public_conversation_by_token(self, token: str) -> "dict | None":
         """Resolve one shared conversation by token alone — the ONLY
         session-free conversation read (T3, mirrors

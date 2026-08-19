@@ -17,6 +17,7 @@ from app.models.ask import (
 )
 from app.repositories.ports import (
     ConversationBusyError,
+    ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
     PreparedAskTurn,
     project_ask_row,
@@ -827,11 +828,13 @@ class AskStateStore:
         boundary is an idempotent no-op; a strictly newer one advances.
 
         Raises ``KeyError`` when the conversation does not exist in this
-        notebook. A conversation with zero answers can still be "shared"
-        here (link issued, watermark stays NULL) — the row-level
-        ``created_by`` gate and the "at least one written answer" policy
-        (design doc §七 item 5) belong to the API/service layer that calls
-        this method, not to this store method.
+        notebook, and ``ConversationHasNoShareableAnswer`` when it has no
+        committed answer to bound the snapshot — the "at least one written
+        answer" policy (design doc §七 item 5) is enforced HERE, atomically in
+        the same ``FOR UPDATE`` transaction, so a zero-answer conversation never
+        has a token minted (no more share-then-compensate rollback). The
+        row-level ``created_by`` gate still belongs to the API/service layer that
+        calls this method.
         """
         candidate = new_capability_token("cshr")
         expected = str(expected_through_id or "").strip()
@@ -841,11 +844,13 @@ class AskStateStore:
             # two shares could each read ``latest`` before either UPDATE, and a
             # stale one — reading an OLDER answer, or NULL before the first
             # answer commits — would then clobber a watermark the other already
-            # returned live, tripping ``discard_unwatermarked_share`` into
-            # revoking a link the user was just handed. Taking the row lock here,
-            # BEFORE reading ``latest``, forces the second share to wait for the
-            # first to commit and then re-read the newest answer, so the
-            # watermark only ever advances. The SQLite adapter needs no lock —
+            # returned live. Taking the row lock here, BEFORE reading ``latest``,
+            # forces the second share to wait for the first to commit and then
+            # re-read the newest answer, so the watermark only ever advances.
+            # (The zero-answer atomic refuse below also depends on this ordering:
+            # a share that parks on the lock re-reads ``latest`` after the first
+            # answer commits, so it mints a real token instead of raising.) The
+            # SQLite adapter needs no lock —
             # ``database.write()`` there is a process-level write lock that
             # already serializes these. This holds exactly one row lock (no other
             # row is locked in this method), so it cannot form a lock cycle;
@@ -879,6 +884,18 @@ class AskStateStore:
                 ).fetchone()
                 through_at = latest["created_at"] if latest is not None else None
                 through_id = latest["id"] if latest is not None else None
+            # "At least one written answer" (design doc §七 item 5), enforced
+            # atomically inside this ``FOR UPDATE`` transaction (codex #522 R5): a
+            # zero-answer conversation resolves no boundary (``through_id is
+            # None``), so we raise BEFORE the UPDATE and never mint a token —
+            # rolling back this transaction leaves the row untouched. A stale
+            # ``expected_through_id`` is already handled above by the Stale raise,
+            # so ``through_id is None`` here means only the zero-answer fallback.
+            # This replaces the old "mint a NULL-watermark token, then compensate
+            # in the route" path (which left a permanent token-without-watermark
+            # row if the process died between the steps).
+            if through_id is None:
+                raise ConversationHasNoShareableAnswer(conversation_id)
             # Advance-only (codex #522 R3): reject a request whose boundary sorts
             # BEFORE the already-published one, evaluated in SQL over both answer
             # rows with the SAME ``(created_at, ordinal)`` keyset the public
@@ -919,22 +936,6 @@ class AskStateStore:
                 "UPDATE conversations SET share_token=NULL, "
                 "shared_through_at=NULL, shared_through_id=NULL "
                 "WHERE id=%s AND notebook_id=%s",
-                (conversation_id, notebook_id),
-            )
-
-    def discard_unwatermarked_share(
-        self, notebook_id: str, conversation_id: str
-    ) -> None:
-        """Roll back a token issued for a still-empty conversation, but ONLY
-        while its watermark is still NULL (codex T2 review, concurrency P2).
-        See the SQLite ``discard_unwatermarked_share`` for the full rationale:
-        the ``AND shared_through_at IS NULL`` guard keeps two racing shares
-        from nuking a link the later one already returned live."""
-        with self.database.write() as db:
-            db.execute(
-                "UPDATE conversations SET share_token=NULL, "
-                "shared_through_at=NULL, shared_through_id=NULL "
-                "WHERE id=%s AND notebook_id=%s AND shared_through_at IS NULL",
                 (conversation_id, notebook_id),
             )
 

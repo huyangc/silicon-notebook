@@ -265,6 +265,23 @@ def test_module_wrappers_are_noops_without_an_installed_runtime():
             "/api/conversations/{id}",
         ),
         (
+            # Anonymous shared-conversation read page: the token is the whole
+            # grant, redacted to {id}, but the public/conversations shape is
+            # preserved for observability (codex #522 R5). Dropping the template
+            # falls back to /api/{id}/{id}/{id} and reds this.
+            "/api/public/conversations/tok-secret123",
+            ("tok-secret123",),
+            "/api/public/conversations/{id}",
+        ),
+        (
+            # Anonymous shared-conversation image bytes: token AND alias redacted,
+            # shape preserved so a slow read page and a slow asset fetch stay
+            # distinguishable in diagnostics.
+            "/api/public/conversations/tok-secret123/assets/alias-secret456",
+            ("tok-secret123", "alias-secret456"),
+            "/api/public/conversations/{id}/assets/{id}",
+        ),
+        (
             "/api/files/customer-secret-design.pdf",
             ("customer-secret-design.pdf",),
             "/api/files/{id}",

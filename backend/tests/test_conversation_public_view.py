@@ -421,19 +421,49 @@ def test_unreferenced_asset_alias_does_not_resolve():
     assert resolve_conversation_asset_alias(row, _SHARE_TOKEN, stranger) is None
 
 
-def test_referenced_asset_ids_spans_anchors_and_citations_deduped():
-    """The endpoint enumeration is a SUPERSET of the projection: it walks BOTH
-    anchors and citations on every turn, deduped and bounded."""
+def test_referenced_asset_ids_match_the_projected_selection_exactly():
+    """The endpoint enumeration is EXACTLY the projected selection, NOT the old
+    anchors ∪ citations superset (codex #522 R5): an image on an UNSELECTED
+    reference is never enumerated, so its alias 404s. The share token is public
+    (it is in the image URL), so a collaborator who knows a raw ``asset_id`` can
+    compute its alias themselves — enumerating an un-projected asset would let
+    them fetch an image the page never showed.
+
+    Here anchors win (body has ``[k1]``), so the citation's image ``B`` is
+    unselected; only the selected anchor's image ``A`` is served.
+
+    Mutation guard: reverting ``referenced_asset_ids`` to the old superset walk
+    (all anchors ∪ citations) makes ``B`` resolve and reds this."""
+    row = {"turns": [_turn("q", {
+        "answer": "锚点 [k1]。",
+        "anchors": [_anchor("k1", images=[{"element_id": "AE", "asset_id": "A",
+                                           "caption": ""}])],
+        "citations": [_citation(1, images=[{"element_id": "CE", "asset_id": "B",
+                                            "caption": ""}])],
+    })]}
+    # Only the selected anchor's image is enumerated — the endpoint can serve
+    # exactly the aliases the page emitted, no more.
+    assert referenced_asset_ids(row) == ["A"]
+    # The selected image's alias resolves; the unselected one 404s (None).
+    assert resolve_conversation_asset_alias(
+        row, _SHARE_TOKEN, conversation_asset_alias(_SHARE_TOKEN, "A")
+    ) == "A"
+    assert resolve_conversation_asset_alias(
+        row, _SHARE_TOKEN, conversation_asset_alias(_SHARE_TOKEN, "B")
+    ) is None
+
+
+def test_referenced_asset_ids_dedupe_selected_images_across_turns():
+    """Selected images are deduped across turns in first-seen order. With no
+    anchor markers the fallback selects citations, so each turn's cited image is
+    enumerated; the repeated asset is deduped to one entry."""
     row = {"turns": [
-        _turn("q1", {"answer": "a", "anchors": [
-            _anchor("k1", images=[{"element_id": "E1", "asset_id": "A1", "caption": ""}])],
-            "citations": [
-            _citation(1, images=[{"element_id": "E2", "asset_id": "C1", "caption": ""}])]}),
-        _turn("q2", {"answer": "b", "anchors": [
-            _anchor("k2", images=[{"element_id": "E3", "asset_id": "A1", "caption": ""}])],
-            "citations": []}),  # A1 repeats -> deduped
+        _turn("q1", {"answer": "见清单一。", "anchors": [], "citations": [
+            _citation(1, images=[{"element_id": "E1", "asset_id": "C1", "caption": ""}])]}),
+        _turn("q2", {"answer": "见清单二。", "anchors": [], "citations": [
+            _citation(2, images=[{"element_id": "E2", "asset_id": "C1", "caption": ""}])]}),
     ]}
-    assert referenced_asset_ids(row) == ["A1", "C1"]
+    assert referenced_asset_ids(row) == ["C1"]  # repeat deduped
 
 
 def test_empty_or_blank_alias_never_resolves():

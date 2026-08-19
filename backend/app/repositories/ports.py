@@ -136,6 +136,21 @@ class ConversationShareWatermarkStale(RuntimeError):
     latest answer and bypass consent."""
 
 
+class ConversationHasNoShareableAnswer(RuntimeError):
+    """``share_conversation`` was asked to publish a conversation with no
+    committed answer to bound the snapshot (codex #522 R5).
+
+    "会话的已完成" is "at least one written answer before the watermark" (design
+    doc §七 item 5). A never-answered / in-flight conversation has nothing to
+    show, so the store refuses to mint a token AT ALL — it raises this INSIDE the
+    same write transaction that resolves the boundary, so token issuance and the
+    "has a shareable answer" check are one atomic step. This replaces the old
+    share-then-compensate path (mint a NULL-watermark token, then a second
+    ``discard_unwatermarked_share`` call rolls it back): that compensation left a
+    permanent token-without-watermark row if the process died between the two
+    steps. The API layer maps this to the existing zero-answer 409."""
+
+
 class KgBuildAlreadyRunning(RuntimeError):
     """One notebook already has a durable running KG build job."""
 
@@ -659,9 +674,10 @@ class AskStateRepository(Protocol):
     # notebook/owner argument: the token is the whole authorization, and it must
     # never consult the current-user ContextVar (which falls back to the seeded
     # admin when unset). `conversation_creator` is the notebook-scoped ownership
-    # read behind the authenticated share endpoints' row-level gate;
-    # `discard_unwatermarked_share` is the conditional rollback for a token
-    # minted on a still-empty conversation (see the store method).
+    # read behind the authenticated share endpoints' row-level gate.
+    # `share_conversation` refuses a conversation with no committed answer
+    # atomically (raises `ConversationHasNoShareableAnswer`, no token minted), so
+    # there is no separate rollback method.
     def conversation_creator(self, notebook_id: str, conversation_id: str) -> str | None: ...
     def share_conversation(
         self,
@@ -671,7 +687,6 @@ class AskStateRepository(Protocol):
     ) -> dict: ...
     def conversation_share_state(self, notebook_id: str, conversation_id: str) -> dict: ...
     def unshare_conversation(self, notebook_id: str, conversation_id: str) -> None: ...
-    def discard_unwatermarked_share(self, notebook_id: str, conversation_id: str) -> None: ...
     def public_conversation_by_token(self, token: str) -> dict | None: ...
 
 
