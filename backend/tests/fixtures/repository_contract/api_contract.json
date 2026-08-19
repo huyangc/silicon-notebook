@@ -7441,6 +7441,23 @@
           "title": "PublicConversation",
           "type": "object"
         },
+        "PublicImage": {
+          "description": "One answer-attached image an anonymous reader can fetch (T4).\n\nCarries NO addressable id. The ``asset_id`` is replaced by an opaque,\ntoken-scoped ``alias`` (``services/conversation_public_view.py``'s\n``conversation_asset_alias`` = HMAC-SHA256 of the asset_id under the share\ntoken), and the ``element_id`` is dropped entirely. The bytes are served by\n``GET /public/conversations/{token}/assets/{alias}``, which reverses the\nalias against the snapshot's referenced assets only — so the alias is the\nonly handle a public reader ever gets, and it is meaningless once the token\nis revoked. ``caption`` is the public half of ``CitationImage`` (empty when\nthe image had no caption).",
+          "properties": {
+            "alias": {
+              "default": "",
+              "title": "Alias",
+              "type": "string"
+            },
+            "caption": {
+              "default": "",
+              "title": "Caption",
+              "type": "string"
+            }
+          },
+          "title": "PublicImage",
+          "type": "object"
+        },
         "PublicReference": {
           "description": "One reference in a shared conversation, as an anonymous reader sees it\n(T3). Same shape as ``PublicReportReference``.\n\nNo ``source_id`` / ``element_id`` / ``object_id`` / ``notebook_id`` /\n``memory_id`` / ``provenance`` / ``knowhow`` / ``images``: a public link must\nnot hand out handles into the authenticated API. Built by\n``services/conversation_public_view.py`` as an allowlist — a Memory citation\nkeeps its title/snippet but loses its ``memory_id``. ``key`` (``\"k1\"`` or a\npositional ``\"1\"``) is preserved so the page can number ``[k]`` markers from\nit rather than from a list position the reference filter may have shifted.",
           "properties": {
@@ -7550,7 +7567,7 @@
           "type": "object"
         },
         "PublicTurn": {
-          "description": "One Q&A turn in a shared conversation, readable without a session (T3).\n\nExcludes the whole reasoning surface (``reasoning_trace`` / ``intent`` /\n``retrieval_scope`` / ``retrieval_query`` / ``top_relevance`` / ``mode`` /\n``llm_mode`` / ``retrieval_effort`` / ``index_required``) and every\naddressable id. ``evidence_level`` IS exposed — it is part of the answer's\nstated credibility, not an internal flag. Answer-attached images are\ndeliberately absent in v1 (T4 adds the anonymous image channel).",
+          "description": "One Q&A turn in a shared conversation, readable without a session (T3).\n\nExcludes the whole reasoning surface (``reasoning_trace`` / ``intent`` /\n``retrieval_scope`` / ``retrieval_query`` / ``top_relevance`` / ``mode`` /\n``llm_mode`` / ``retrieval_effort`` / ``index_required``) and every\naddressable id. ``evidence_level`` IS exposed — it is part of the answer's\nstated credibility, not an internal flag. Answer-attached images are\nsurfaced as token-scoped ``PublicImage`` aliases (T4), never raw\n``asset_id``/``element_id``.",
           "properties": {
             "answer_md": {
               "default": "",
@@ -7571,6 +7588,13 @@
               "default": "inferred",
               "title": "Evidence Level",
               "type": "string"
+            },
+            "images": {
+              "items": {
+                "$ref": "#/components/schemas/PublicImage"
+              },
+              "title": "Images",
+              "type": "array"
             },
             "omitted_result_sets": {
               "default": 0,
@@ -21782,6 +21806,53 @@
             }
           },
           "summary": "Public Conversation Route"
+        }
+      },
+      "/api/public/conversations/{token}/assets/{alias}": {
+        "get": {
+          "description": "Anonymous image bytes for a shared conversation (T4, design §六).\n\nThe reader gets an opaque, token-derived ``alias`` from the page projection,\nnever a raw ``asset_id``; this reverses it against the snapshot's referenced\nassets only. Every failure is the SAME 404 as an unknown token — \"not found\"\nand \"not referenced in this share\" are indistinguishable on purpose.\n\nSame anonymous-router discipline and the SAME live creator re-check as the\npage endpoint (shared ``_public_conversation_or_404``): the link's lifetime\nis exactly the creator's read access, so an image must die the instant the\npage does.\n\n⚠ Cross-notebook boundary (design §六): a referenced image may live in a\nMOUNTED reference library, so ``asset[\"notebook_id\"]`` can differ from the\nconversation's notebook. The authorization here is deliberately \"referenced\ninside the frozen snapshot + creator's live read access to the conversation\nnotebook\", NOT a fresh participant-scope re-check of the asset's own\nnotebook. The frozen snapshot IS the grant — when the answer was generated,\nthat library was in the creator's participant set and the evidence (hence the\nimage) was legitimately assembled. We do not widen this to re-authorize the\nasset's notebook (there is no request user to authorize) nor narrow it to\nsame-notebook assets (that would silently drop legitimate federated images).\n\n``Cache-Control: no-store``: revocation must not be architected away by an\nanonymous browser cache — harder here than the cross-library proxy endpoint\n(that one caches only within a mount's lifetime; this is anonymous), so we\ntake the least-ambiguous header.",
+          "operationId": "public_conversation_asset_route_api_public_conversations__token__assets__alias__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token",
+              "required": true,
+              "schema": {
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "alias",
+              "required": true,
+              "schema": {
+                "title": "Alias",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Public Conversation Asset Route"
         }
       },
       "/api/public/reports/{token}": {

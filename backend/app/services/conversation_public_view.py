@@ -33,10 +33,15 @@ What never crosses, and why:
   ``retrieval_scope`` / ``retrieval_query`` / ``top_relevance`` / ``mode`` /
   ``llm_mode`` / ``retrieval_effort`` / ``index_required``. Same "轨迹不外发"
   boundary the report projection draws.
-* answer-attached images — the ``images`` list on each citation/anchor. v1 of
-  the public page does NOT show them (that is T4's anonymous, token-scoped image
-  channel); the allowlist has no image field, so their ``asset_id``/
-  ``element_id`` never leak here either.
+* answer-attached images — the ``images`` list on each citation/anchor (T4).
+  v1 DOES surface them, but only as an opaque, token-scoped ``alias`` +
+  ``caption`` (``PublicImage``): the raw ``asset_id`` is HMAC'd under the share
+  token (``conversation_asset_alias``) and the ``element_id`` is dropped
+  entirely, so no addressable handle crosses. The alias is meaningless once the
+  token is revoked, and the SAME image shared through two conversations gets two
+  different aliases (no cross-link correlation). The bytes are served by the
+  sibling anonymous endpoint ``/public/conversations/{token}/assets/{alias}``,
+  which reverses the alias against the snapshot's referenced assets only.
 * collection result cards (``result_sets``) — deliberately out of v1 (design
   C-1). Not silently dropped: ``omitted_result_sets`` carries the *count* only
   (never any content), so T5's page can say "此回答还包含未公开的清单内容"
@@ -47,6 +52,8 @@ their values is T6's job in ``docs/product-and-api*.md``.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 from typing import Any, Sequence
 
@@ -62,6 +69,105 @@ MAX_QUESTION_CHARS = 2000
 # binds; it exists so a pathological conversation cannot balloon one anonymous
 # response. Truncation is disclosed (``truncated_turns``) rather than silent.
 MAX_TURNS = 500
+
+# T4 — the anonymous image channel.
+#
+# Length of the token-derived image alias, in hex characters. 32 hex = 128 bits
+# of an HMAC-SHA256 digest: unguessable, collision-free across one
+# conversation's bounded image set, and short enough to sit in a URL path
+# segment. Exact value is registered in ``docs/product-and-api*.md`` (T6).
+ASSET_ALIAS_HEX_CHARS = 32
+# Bound on one image's projected caption. Registered in docs (T6).
+MAX_CAPTION_CHARS = 500
+# Safety ceiling on how many DISTINCT referenced assets one endpoint request
+# scans while reversing an alias. Per-answer image count is already bounded
+# upstream and turns are capped at ``MAX_TURNS``; this is a belt-and-suspenders
+# bound so a hand-edited/pathological row cannot make one anonymous request scan
+# unboundedly. Registered in docs (T6).
+MAX_REFERENCED_ASSETS = 5000
+
+
+def conversation_asset_alias(token: str, asset_id: str) -> str:
+    """The opaque, token-scoped handle an anonymous reader gets for one image.
+
+    ``alias = HMAC-SHA256(key=share_token, msg=asset_id)`` truncated to
+    ``ASSET_ALIAS_HEX_CHARS`` hex chars. This is the ONE definition of the
+    derivation — both the projection (which emits it) and the image endpoint
+    (which reverses it) call this, so the two can never compute a different
+    alias for the same (token, asset). Three properties fall out (design §六):
+    the raw ``asset_id`` never crosses (no handle into the authenticated API);
+    revoking the token makes every alias meaningless; and the same image shared
+    through two conversations gets two different aliases (no cross-link
+    correlation). The token is public (it is in the image URL itself), so this
+    is not a secret-comparison — the alias exists to keep ``asset_id`` in, not
+    to keep the token out."""
+    digest = hmac.new(
+        str(token or "").encode("utf-8"),
+        str(asset_id or "").encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return digest[:ASSET_ALIAS_HEX_CHARS]
+
+
+def referenced_asset_ids(
+    row: dict[str, Any], *, limit: int = MAX_REFERENCED_ASSETS
+) -> list[str]:
+    """Distinct ``asset_id``s referenced by ANY anchor/citation image across the
+    snapshot's watermark-bounded turns, in stable first-seen order, bounded.
+
+    This is deliberately a SUPERSET of what the projection reveals as aliases:
+    the projection only aliases the *selected* references (anchors win, else the
+    citation fallback), whereas this walks both lists on every turn. That keeps
+    the endpoint from re-deriving the fragile ``_select_references`` logic, and
+    is safe — an alias the projection never emitted cannot be guessed (128-bit
+    HMAC), so a reader can only ever fetch what the projection showed. Every
+    alias the projection DID emit is resolvable here, since selected refs are a
+    subset of (anchors ∪ citations)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    turns = row.get("turns") if isinstance(row.get("turns"), list) else []
+    for turn in list(turns)[:MAX_TURNS]:
+        payload = turn.get("payload") if isinstance(turn, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        for group in (payload.get("anchors"), payload.get("citations")):
+            for reference in _as_list(group):
+                if not isinstance(reference, dict):
+                    continue
+                for image in _as_list(reference.get("images")):
+                    if not isinstance(image, dict):
+                        continue
+                    asset_id = str(image.get("asset_id") or "")
+                    if not asset_id or asset_id in seen:
+                        continue
+                    seen.add(asset_id)
+                    out.append(asset_id)
+                    if len(out) >= limit:
+                        return out
+    return out
+
+
+def resolve_conversation_asset_alias(
+    row: dict[str, Any],
+    token: str,
+    alias: str,
+    *,
+    limit: int = MAX_REFERENCED_ASSETS,
+) -> str | None:
+    """Reverse a token-derived alias back to its ``asset_id``, or ``None``.
+
+    Recomputes the alias for each referenced asset (bounded) and returns the
+    first match. ``None`` means "no match" — the endpoint 404s on it, not
+    distinguishing "never existed" from "not referenced in this share". The
+    ``token`` is load-bearing: the same alias resolves under the sharing token
+    and to nothing under any other token."""
+    target = str(alias or "").strip()
+    if not target:
+        return None
+    for asset_id in referenced_asset_ids(row, limit=limit):
+        if conversation_asset_alias(token, asset_id) == target:
+            return asset_id
+    return None
 
 # Ported verbatim from ``frontend/app/answer-formatting.ts``
 # (``ANCHOR_MARKER_GROUP_RE``). The selection below mirrors that file's
@@ -185,8 +291,17 @@ def public_reference(key: str, reference: Any) -> dict[str, str]:
     }
 
 
-def public_turn(turn: Any) -> dict[str, Any]:
-    """One Q&A turn projected from its stored ``AskResponse`` payload."""
+def public_turn(
+    turn: Any, *, share_token: str, images_enabled: bool
+) -> dict[str, Any]:
+    """One Q&A turn projected from its stored ``AskResponse`` payload.
+
+    ``share_token`` is threaded in (not read from Settings — this stays a pure
+    function) so each answer-attached image can be projected as a token-derived
+    ``alias`` rather than its raw ``asset_id`` (T4). ``images_enabled`` mirrors
+    the deployment's ``MINERU_RETURN_IMAGES``: when the deployment stores no
+    images, the public page must not hand out aliases that would resolve to
+    bytes it decided not to serve, so NO ``PublicImage`` is emitted."""
     row = turn if isinstance(turn, dict) else {}
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     # Same body the authenticated view renders: ``answer.answer || answer.conclusion``
@@ -217,11 +332,54 @@ def public_turn(turn: Any) -> dict[str, Any]:
         # C-1: collection cards are out of v1, but the count (content-free) lets
         # the page disclose that something was withheld here.
         "omitted_result_sets": len(_as_list(payload.get("result_sets"))),
+        # T4 — images the reader actually sees: those attached to the SELECTED
+        # references (same slice ``visible`` was taken from), projected to an
+        # opaque alias. Never the raw ``asset_id``/``element_id``. Off when the
+        # deployment stores no images.
+        "images": _public_images(
+            selected[:MAX_REFERENCES], share_token, images_enabled
+        ),
     }
 
 
-def public_conversation_payload(row: dict[str, Any]) -> dict[str, Any]:
+def _public_images(
+    selected: Sequence[tuple[str, Any]], share_token: str, images_enabled: bool
+) -> list[dict[str, str]]:
+    """The token-aliased images for a turn's SELECTED references, deduped by
+    ``asset_id`` (an image cited twice shows once) in first-seen order.
+
+    Reads only ``asset_id`` (to derive the alias) and ``caption`` (public) from
+    each image dict; ``element_id`` and every other key are dropped by
+    construction. Returns ``[]`` when the deployment stores no images."""
+    if not images_enabled:
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for _key, reference in selected:
+        row = reference if isinstance(reference, dict) else {}
+        for image in _as_list(row.get("images")):
+            if not isinstance(image, dict):
+                continue
+            asset_id = str(image.get("asset_id") or "")
+            if not asset_id or asset_id in seen:
+                continue
+            seen.add(asset_id)
+            out.append({
+                "alias": conversation_asset_alias(share_token, asset_id),
+                "caption": _text(image.get("caption"), MAX_CAPTION_CHARS),
+            })
+    return out
+
+
+def public_conversation_payload(
+    row: dict[str, Any], *, share_token: str, images_enabled: bool
+) -> dict[str, Any]:
     """Assemble the anonymous view from a token-resolved conversation row.
+
+    ``share_token`` and ``images_enabled`` are threaded down to every turn so
+    answer-attached images can be projected as token-derived aliases (T4). The
+    token is passed in rather than read from the row so this stays a pure
+    function; the route (which has the raw token) supplies it.
 
     The caller (the anonymous route) has already run the live creator
     re-authorization and popped the GATE fields (``notebook_id``/``created_by``);
@@ -232,12 +390,17 @@ def public_conversation_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": _text(row.get("created_at"), 64),
         # The read watermark: "内容截至何时". Comes from ``shared_through_at``.
         "shared_at": _text(row.get("shared_through_at"), 64),
-        "turns": [_safe_turn(turn) for turn in list(turns)[:MAX_TURNS]],
+        "turns": [
+            _safe_turn(turn, share_token=share_token, images_enabled=images_enabled)
+            for turn in list(turns)[:MAX_TURNS]
+        ],
         "truncated_turns": len(turns) > MAX_TURNS,
     }
 
 
-def _safe_turn(turn: Any) -> dict[str, Any]:
+def _safe_turn(
+    turn: Any, *, share_token: str, images_enabled: bool
+) -> dict[str, Any]:
     """``public_turn`` with a belt-and-suspenders fallback (codex T3 review).
 
     After the ``_as_list``/``isinstance`` guards ``public_turn`` is total for any
@@ -247,7 +410,9 @@ def _safe_turn(turn: Any) -> dict[str, Any]:
     empties everything else, rather than dropping the row (which would misalign
     the numbering the way position-based reference numbering was avoided)."""
     try:
-        return public_turn(turn)
+        return public_turn(
+            turn, share_token=share_token, images_enabled=images_enabled
+        )
     except Exception:
         row = turn if isinstance(turn, dict) else {}
         return {
@@ -260,4 +425,5 @@ def _safe_turn(turn: Any) -> dict[str, Any]:
             "reference_count": 0,
             "truncated_references": False,
             "omitted_result_sets": 0,
+            "images": [],
         }

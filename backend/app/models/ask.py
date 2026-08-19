@@ -672,6 +672,23 @@ class PublicReference(BaseModel):
     snippet: str = ""
 
 
+class PublicImage(BaseModel):
+    """One answer-attached image an anonymous reader can fetch (T4).
+
+    Carries NO addressable id. The ``asset_id`` is replaced by an opaque,
+    token-scoped ``alias`` (``services/conversation_public_view.py``'s
+    ``conversation_asset_alias`` = HMAC-SHA256 of the asset_id under the share
+    token), and the ``element_id`` is dropped entirely. The bytes are served by
+    ``GET /public/conversations/{token}/assets/{alias}``, which reverses the
+    alias against the snapshot's referenced assets only — so the alias is the
+    only handle a public reader ever gets, and it is meaningless once the token
+    is revoked. ``caption`` is the public half of ``CitationImage`` (empty when
+    the image had no caption)."""
+
+    alias: str = ""
+    caption: str = ""
+
+
 class PublicTurn(BaseModel):
     """One Q&A turn in a shared conversation, readable without a session (T3).
 
@@ -680,7 +697,8 @@ class PublicTurn(BaseModel):
     ``llm_mode`` / ``retrieval_effort`` / ``index_required``) and every
     addressable id. ``evidence_level`` IS exposed — it is part of the answer's
     stated credibility, not an internal flag. Answer-attached images are
-    deliberately absent in v1 (T4 adds the anonymous image channel)."""
+    surfaced as token-scoped ``PublicImage`` aliases (T4), never raw
+    ``asset_id``/``element_id``."""
 
     question: str = ""
     answer_md: str = ""
@@ -696,6 +714,9 @@ class PublicTurn(BaseModel):
     # at this turn (design §五 / §十). The judgement lives on the projection
     # side, not the renderer, so a legacy payload's format cannot mute it.
     omitted_result_sets: int = 0
+    # T4 — answer-attached images as token-derived aliases (see PublicImage).
+    # Absent list when the deployment stores no images (MINERU_RETURN_IMAGES).
+    images: List[PublicImage] = Field(default_factory=list)
 
 
 class PublicConversation(BaseModel):

@@ -5,7 +5,9 @@ import threading
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+
+from app.core.config import get_settings
 
 from app.api.deps import (
     get_current_user,
@@ -47,7 +49,11 @@ from app.services.query_intent import (
     finalize_query_intent,
     plan_query_intent,
 )
-from app.services.conversation_public_view import public_conversation_payload
+from app.services.conversation_public_view import (
+    public_conversation_payload,
+    resolve_conversation_asset_alias,
+)
+from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.source_scope import retrieval_scope_receipt_context
 
 
@@ -876,6 +882,50 @@ def unshare_conversation_route(
     repo.unshare_conversation(notebook_id, conversation_id)
 
 
+def _public_conversation_or_404(repo, token: str) -> dict:
+    """Resolve a shared conversation by token and run the live creator re-check.
+
+    Shared by the page endpoint and the image endpoint so the two gates can
+    NEVER diverge — the design (§七 item 3) requires the image channel to run
+    "the SAME live re-check" as the page. Both stay legal on the anonymous
+    router because nothing here binds a request user: ``public_conversation_by_token``
+    and ``user_can_read_notebook`` take their ids explicitly and never consult
+    the ContextVar (which falls back to the seeded admin when unset).
+
+    Three failures, all the SAME 404 as an unknown token (a distinguishable
+    response would report on someone's group membership to an anonymous caller):
+
+    * unknown/revoked token — nothing to serve;
+    * empty ``created_by`` — fail-closed defense in depth (codex T3 review).
+      ``user_can_read_notebook`` does NOT reject an empty user id on its own: a
+      notebook carrying an ``everyone`` grant has a read arm that ignores the
+      user id and returns True for ``created_by=""``. T2's share gate already
+      409s an empty creator so no such shared row exists today, but the anonymous
+      surface must not lean on an upstream gate as its only defense;
+    * creator no longer has read access — live re-authorization (design §五 /
+      C-2). A group member may publish a conversation built from a shared
+      notebook's corpus, but that link lasts exactly as long as their read
+      access: revoke the grant / remove them from the group / delete the group
+      and it dies immediately; restore access and the SAME token revives. This
+      lives here rather than as a cascade at every revocation point, for the
+      same reason mount validity is a live predicate — there are several ways to
+      lose read access and a cascade would have to be re-derived at each.
+
+    Returns the row with its GATE fields (``notebook_id``/``created_by``) still
+    present; the page route pops them before projection, the image route only
+    reads notebook scope from them and never projects the row.
+    """
+    row = repo.public_conversation_by_token(token)
+    if row is None:
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    creator = str(row.get("created_by") or "")
+    if not creator:
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    if not repo.user_can_read_notebook(str(row.get("notebook_id") or ""), creator):
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    return row
+
+
 @public_router.get(
     "/public/conversations/{token}", response_model=PublicConversation
 )
@@ -892,48 +942,80 @@ def public_conversation_route(token: str) -> PublicConversation:
     stored row.
     """
     repo = repository()
-    row = repo.public_conversation_by_token(token)
-    if row is None:
-        raise HTTPException(status_code=404, detail="shared conversation not found")
-    # Live re-authorization of the CREATOR (design §五 / §七 item 3, C-2). A
-    # group member may publish a conversation built from a shared notebook's
-    # corpus, but that grant lasts exactly as long as their read access does:
-    # revoke the group grant / remove them from the group / delete the group,
-    # and every link they issued in that notebook must die immediately.
-    #
-    # It has to be here rather than a cascade at each revocation point: there
-    # are several ways to lose read access, and a cascade would have to be
-    # re-derived at every one of them — the same argument that made mount
-    # validity a live predicate instead of stored state. Once neither the member
-    # (blocked by the read guard) nor the creator (blocked by the row-level
-    # gate) can reach ``unshare``, a stale token would otherwise serve the
-    # owner's corpus forever.
-    #
-    # ``user_can_read_notebook`` takes both ids EXPLICITLY, so this stays legal
-    # on the anonymous router: it binds no request user and never consults the
-    # ContextVar (which falls back to the seeded admin when unset). Same 404 as
-    # an unknown token — a distinguishable response would report on somebody's
-    # group membership to an anonymous caller. Restoring access revives the link
-    # (the same idempotent-token semantics ``share`` already promises).
-    # Independent fail-closed on an empty creator (codex T3 review, defense in
-    # depth). ``user_can_read_notebook`` does NOT reject an empty user id on its
-    # own: a notebook carrying an ``everyone`` grant has a read arm that ignores
-    # the user id and returns True for ``created_by=""``, which would make a
-    # creatorless conversation anonymously readable. T2's share gate already 409s
-    # empty ``created_by`` so no such shared row can exist today — but the
-    # anonymous surface must not rely on an upstream gate as its only defense.
-    # Same 404 as an unknown token.
-    creator = str(row.get("created_by") or "")
-    if not creator:
-        raise HTTPException(status_code=404, detail="shared conversation not found")
-    if not repo.user_can_read_notebook(str(row.get("notebook_id") or ""), creator):
-        raise HTTPException(status_code=404, detail="shared conversation not found")
+    row = _public_conversation_or_404(repo, token)
     # Pop the GATE fields before projection: ``notebook_id``/``created_by`` are
     # for the live re-check ONLY and must never cross to an anonymous reader
     # (store docstring). Defense-in-depth — the allowlist ignores them anyway.
     row.pop("notebook_id", None)
     row.pop("created_by", None)
-    return PublicConversation(**public_conversation_payload(row))
+    # The raw share token derives each image's opaque alias (T4); the deployment
+    # image switch is passed as a bool so the projection stays a pure function.
+    return PublicConversation(
+        **public_conversation_payload(
+            row,
+            share_token=token,
+            images_enabled=get_settings().mineru_return_images,
+        )
+    )
+
+
+@public_router.get("/public/conversations/{token}/assets/{alias}")
+def public_conversation_asset_route(token: str, alias: str) -> FileResponse:
+    """Anonymous image bytes for a shared conversation (T4, design §六).
+
+    The reader gets an opaque, token-derived ``alias`` from the page projection,
+    never a raw ``asset_id``; this reverses it against the snapshot's referenced
+    assets only. Every failure is the SAME 404 as an unknown token — "not found"
+    and "not referenced in this share" are indistinguishable on purpose.
+
+    Same anonymous-router discipline and the SAME live creator re-check as the
+    page endpoint (shared ``_public_conversation_or_404``): the link's lifetime
+    is exactly the creator's read access, so an image must die the instant the
+    page does.
+
+    ⚠ Cross-notebook boundary (design §六): a referenced image may live in a
+    MOUNTED reference library, so ``asset["notebook_id"]`` can differ from the
+    conversation's notebook. The authorization here is deliberately "referenced
+    inside the frozen snapshot + creator's live read access to the conversation
+    notebook", NOT a fresh participant-scope re-check of the asset's own
+    notebook. The frozen snapshot IS the grant — when the answer was generated,
+    that library was in the creator's participant set and the evidence (hence the
+    image) was legitimately assembled. We do not widen this to re-authorize the
+    asset's notebook (there is no request user to authorize) nor narrow it to
+    same-notebook assets (that would silently drop legitimate federated images).
+
+    ``Cache-Control: no-store``: revocation must not be architected away by an
+    anonymous browser cache — harder here than the cross-library proxy endpoint
+    (that one caches only within a mount's lifetime; this is anonymous), so we
+    take the least-ambiguous header.
+    """
+    repo = repository()
+    # Image storage off deployment-wide: the projection emits no aliases, so a
+    # reader has none to present, but short-circuit anyway (defense in depth) —
+    # turning MINERU_RETURN_IMAGES off must stop serving bytes for aliases handed
+    # out while it was on.
+    if not get_settings().mineru_return_images:
+        raise HTTPException(status_code=404, detail="shared image not found")
+    row = _public_conversation_or_404(repo, token)
+    asset_id = resolve_conversation_asset_alias(row, token, alias)
+    if not asset_id:
+        raise HTTPException(status_code=404, detail="shared image not found")
+    asset = repo.get_notebook_asset(asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="shared image not found")
+    # Only serve the existing image mime whitelist (reusing the asset service's
+    # allowlist / extension map, never a fresh path join). Assets are only ever
+    # persisted with one of these mimes, so this is belt-and-suspenders.
+    if asset["mime"] not in ALLOWED_MIME_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="shared image not found")
+    path = AssetService(repo).path_for(asset)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="shared image not found")
+    return FileResponse(
+        path,
+        media_type=asset["mime"],
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
