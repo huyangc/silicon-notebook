@@ -561,13 +561,20 @@ class AskStateStore:
         just its own row: the statement raises and this member's overlay
         refresh loses every report they have.
 
-        ``ORDER BY r.created_at DESC, r.id DESC, s.key ASC, a.key ASC`` before
+        ``ORDER BY r.updated_at DESC, r.id DESC, s.key ASC, a.key ASC`` before
         the ``attempt_limit`` cap mirrors the ask side's job-then-step
         ordering: the major key is the report's own recency (not
         ``s.key``/``a.key`` — pure array-index ordinals, meaningless across
         reports), so when the ceiling bites, what falls off is the OLDEST
         report's tail attempts, never a direction from the report the member
         just finished.
+
+        ⚠ Recency is COMPLETION order — ``updated_at``, the terminal write of
+        a ``done`` report — not ``created_at`` (codex #524 R15 P2): a report
+        retried or slow-finished after ``report_limit`` newer ones were
+        CREATED falls outside a creation-ordered window, and it is precisely
+        the report whose completion just triggered this refresh. The
+        PostgreSQL mirror orders the same way.
         """
         report_limit = max(1, int(report_limit))
         attempt_limit = max(1, int(attempt_limit))
@@ -575,7 +582,7 @@ class AskStateStore:
             report_rows = db.execute(
                 "SELECT id, question, created_at FROM reports "
                 "WHERE notebook_id = ? AND created_by = ? AND status = 'done' "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                "ORDER BY updated_at DESC, id DESC LIMIT ?",
                 (notebook_id, user_id, report_limit),
             ).fetchall()
             reports = [
@@ -602,7 +609,7 @@ class AskStateStore:
                 "ELSE '[]' END) AS a "
                 f"WHERE r.notebook_id = ? AND r.created_by = ? AND r.status = 'done' "
                 f"AND r.id IN ({placeholders}) "
-                "ORDER BY r.created_at DESC, r.id DESC, s.key ASC, a.key ASC "
+                "ORDER BY r.updated_at DESC, r.id DESC, s.key ASC, a.key ASC "
                 "LIMIT ?",
                 (notebook_id, user_id, *by_report.keys(), attempt_limit),
             ).fetchall()

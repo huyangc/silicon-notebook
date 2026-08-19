@@ -664,20 +664,22 @@ def test_recent_user_report_traces_scopes_to_the_reading_member(content_harness)
             "created_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
             ("rep-str-section", "nb-content", "string section?",
              jsonb(["hello"]), "done", "user-content",
-             "2026-07-21T00:00:00+00:00", NOW),
+             "2026-07-21T00:00:00+00:00", "2026-07-21T00:00:00+00:00"),
         )
         connection.execute(
             "INSERT INTO reports(id,notebook_id,question,sections_json,status,"
             "created_by,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
             ("rep-str-attempt", "nb-content", "string attempt?",
              jsonb([{"attempted": ["oops"]}]), "done", "user-content",
-             "2026-07-22T00:00:00+00:00", NOW),
+             "2026-07-22T00:00:00+00:00", "2026-07-22T00:00:00+00:00"),
         )
 
     rows = content_harness.ask.recent_user_report_traces(
         "nb-content", "user-content", report_limit=10, attempt_limit=200
     )
 
+    # codex #524 R15:排序按完成序(updated_at),两条畸形行的 updated_at
+    # 因此与各自 created_at 对齐,预期顺序不变。
     assert [row["question"] for row in rows] == [
         "mine?", "string attempt?", "string section?"
     ]

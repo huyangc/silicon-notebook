@@ -498,7 +498,7 @@ class AskStateStore:
             report_rows = db.execute(
                 "SELECT id, question, created_at FROM reports "
                 "WHERE notebook_id = %s AND created_by = %s AND status = 'done' "
-                "ORDER BY created_at DESC, id DESC LIMIT %s",
+                "ORDER BY updated_at DESC, id DESC LIMIT %s",
                 (notebook_id, user_id, report_limit),
             ).fetchall()
             reports = [
@@ -527,7 +527,7 @@ class AskStateStore:
                 "WITH ORDINALITY AS a(value, a_ord) "
                 f"WHERE r.notebook_id = %s AND r.created_by = %s AND r.status = 'done' "
                 f"AND r.id IN ({placeholders}) "
-                "ORDER BY r.created_at DESC, r.id DESC, s_ord ASC, a_ord ASC "
+                "ORDER BY r.updated_at DESC, r.id DESC, s_ord ASC, a_ord ASC "
                 "LIMIT %s",
                 (notebook_id, user_id, *by_report.keys(), attempt_limit),
             ).fetchall()
