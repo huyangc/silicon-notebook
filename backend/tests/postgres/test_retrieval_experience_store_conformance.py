@@ -320,3 +320,55 @@ def test_note_adopted_refuses_a_negative_delta(retrieval_experience_harness):
     _upsert(harness, "rx_one")
     with pytest.raises(ValueError):
         harness.store.note_adopted(["rx_one"], -1)
+
+
+def test_the_version_signal_tracks_inserts_updates_and_evictions(
+    retrieval_experience_harness,
+):
+    """The injection side's memo key, proved on this backend.
+
+    ``updated_at`` is a ``timestamptz`` here and TEXT on SQLite, which is why
+    the method renders it to text: the key is only ever compared for equality
+    against the previously observed one, and one shape beats one per driver.
+
+    All three transitions matter and each catches something the other half
+    misses — an insert moves both, an in-place UPDATE moves only the timestamp
+    (the id is content-addressed, so the count stays put), and an eviction
+    moves only the count (deleting the oldest rows leaves the newest timestamp
+    alone).
+    """
+    harness = retrieval_experience_harness
+    empty = harness.store.version_signal()
+    assert empty == (0, "")
+
+    _upsert(harness, "rx_one", provenance=["run-1"])
+    inserted = harness.store.version_signal()
+    assert inserted[0] == 1 and inserted[1] != ""
+
+    _upsert(
+        harness, "rx_one", provenance=["run-2"], replace_conclusion=True,
+        rationale="换了一个结论",
+    )
+    updated = harness.store.version_signal()
+    assert updated[0] == 1 and updated != inserted
+
+    _upsert(harness, "rx_two", provenance=["run-3"])
+    assert harness.store.evict_to_limit(1) == 1
+    assert harness.store.version_signal()[0] == 1
+
+
+def test_an_adoption_is_deliberately_invisible_to_the_version_signal(
+    retrieval_experience_harness,
+):
+    """``note_adopted`` must not move ``updated_at`` — that column is the last
+    tie-break of the eviction ordering, and letting an adoption refresh it
+    would make a frequently-injected entry immortal. The memo consequently
+    misses adoptions, which is correct: ``adopted`` is neither rendered into
+    the prompt block nor part of the injection-side selection ordering, so a
+    memo that misses it still serves identical rows.
+    """
+    harness = retrieval_experience_harness
+    _upsert(harness, "rx_one", provenance=["run-1"])
+    before = harness.store.version_signal()
+    harness.store.note_adopted(["rx_one"])
+    assert harness.store.version_signal() == before

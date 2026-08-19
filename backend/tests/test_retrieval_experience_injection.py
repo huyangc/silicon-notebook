@@ -16,6 +16,11 @@ import pytest
 
 from app.core.ask_retrieval_policy import ask_retrieval_limits
 from app.core.config import Settings
+from app.models.ask import (
+    AskIntentConfirmation,
+    QueryIntentContract,
+    QueryIntentTopic,
+)
 from app.models.schemas import AskRequest, NotebookCreate
 from app.repositories.ports import RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS
 from app.services.embedding import FakeEmbedder
@@ -44,14 +49,19 @@ HEADER = "[Search tactics learned from earlier runs]"
 
 #: 与 ``ask_service`` 写进 intent 轨迹步的那份 detail 同形。注入侧只经
 #: ``project_run_step`` 读它的封闭字段;原文键放在这里正是为了证明这一点。
+#:
+#: ⚠ 五个键刻意都取**非默认**值(`result_scope` 非 unknown、两个清单非空、两个
+#: 布尔为真):它们正是「有没有把 intent_detail 传下来」这件事的判据。全取默认值
+#: 的话,不传 detail 的情境与传了的只差一个键、相似度仍在地板之上,于是「漏传
+#: intent_detail」这个变异不会让任何用例变红。
 INTENT_DETAIL = {
     "resolved_question": "版图设计要点有哪些",
     "result_scope": "ranked",
     "completeness_required": False,
     "retrieval_effort": "standard",
     "entities": ["版图"],
-    "constraints": [],
-    "excluded_topics": [],
+    "constraints": ["先进工艺"],
+    "excluded_topics": ["封装"],
     "assumptions": [],
     "expected_output": "要点清单",
     "mandatory_topics": ["版图设计要点"],
@@ -107,6 +117,34 @@ def _seed(repo):
         )
     repo.collection_catalog.invalidate()
     return notebook
+
+
+def _confirmed_intent() -> AskIntentConfirmation:
+    """一份**已确认**的意图契约,逐字段对上 ``INTENT_DETAIL``。
+
+    端到端用例必须走这条路而不是让服务端自己兜底出一份空契约:空契约的情境与
+    「压根没传 intent_detail」的情境只差一个键,漏传就测不出来(见上面那条用例
+    的说明)。
+    """
+    contract = QueryIntentContract(
+        # ``objective`` 必须逐字等于提交的问题:服务端冻结时会比对这一条。
+        objective="版图设计要点",
+        resolved_question=INTENT_DETAIL["resolved_question"],
+        result_scope="ranked",
+        completeness_required=False,
+        entities=list(INTENT_DETAIL["entities"]),
+        mandatory_topics=[
+            QueryIntentTopic(id="t1", title="要点", question="版图设计要点")
+        ],
+        constraints=list(INTENT_DETAIL["constraints"]),
+        excluded_topics=list(INTENT_DETAIL["excluded_topics"]),
+        expected_output=INTENT_DETAIL["expected_output"],
+        confirmed=True,
+    )
+    return AskIntentConfirmation(
+        contract=contract,
+        resolved_question=INTENT_DETAIL["resolved_question"],
+    )
 
 
 def _situation(**overrides) -> dict:
@@ -230,6 +268,27 @@ def test_an_entry_about_a_different_shape_of_question_is_not_injected(repo):
     llm = _SeqLLM()
     retriever, limits = _retriever(repo, llm)
     result = _run(retriever, notebook, limits)
+
+    assert not _steps(result, "experience")
+    assert HEADER not in llm.plan_prompts[0]
+
+
+def test_without_the_intent_contract_the_situation_stops_matching(repo):
+    """``intent_detail`` 不是可有可无的装饰:它是情境八个键里六个的唯一来源。
+
+    不传时只剩 ``mode`` 与档位两个键有值,相似度掉到地板以下,同一条经验就选不
+    中了。这条与下面的端到端用例是一对——那条证明 Ask 侧真的把它传了下来,这条
+    证明「传不传」确实有区别(否则那条会在漏传时照样绿)。
+
+    报告的逐节深挖走的正是这条不传的路(节问题没有意图契约),所以这也是那条路
+    的诚实降级本身的用例:它只会匹配上同样宽泛的条目,而不是匹配错。
+    """
+    notebook = _seed(repo)
+    _write(repo, "enumerate", "good", RATIONALE)
+
+    llm = _SeqLLM()
+    retriever, limits = _retriever(repo, llm)
+    result = retriever.run(notebook.id, "版图设计要点", "", limits=limits)
 
     assert not _steps(result, "experience")
     assert HEADER not in llm.plan_prompts[0]
@@ -633,7 +692,8 @@ def test_ask_reasoning_end_to_end_injects_the_block(repo):
     service = repo._runtime.ask_service()
     response = service.ask_reasoning(
         notebook.id,
-        AskRequest(question="版图设计要点", mode="reasoning"),
+        AskRequest(question="版图设计要点", mode="reasoning",
+                   intent=_confirmed_intent()),
         user_id="alice",
     )
 
@@ -641,11 +701,14 @@ def test_ask_reasoning_end_to_end_injects_the_block(repo):
     assert [
         step for step in response.reasoning_trace if step.step_type == "experience"
     ], "打法块必须真的注入到这次 Ask 的轨迹里"
-    assert llm.plan_prompts and HEADER in llm.plan_prompts[0]
-    assert RATIONALE in llm.plan_prompts[0]
-    assert llm.reflect_prompts
+    # ⚠ 这里**没有** plan prompt 可断言,那不是漏测:已确认意图的方向就是权威
+    # 种子,run 不会再调一次规划模型(与 P1 报告侧同一条既有行为)。所以生产上
+    # 这条路的落点是 reflect,断言也就落在那里。
+    assert not llm.plan_prompts, "已确认方向 ⇒ 不再调规划模型"
+    assert llm.reflect_prompts, "reflect 必须真的被调用过"
     for prompt in llm.reflect_prompts:
         assert HEADER in prompt
+        assert RATIONALE in prompt
 
 
 def test_the_report_engine_factory_actually_fills_the_seat(repo):

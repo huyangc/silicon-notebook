@@ -370,3 +370,50 @@ def test_a_stored_row_round_trips_to_its_own_content_addressed_id(store):
     row = store.read_experience(entry_id)
     assert row is not None
     assert experience_id(row["situation"], row["action"]) == entry_id
+
+
+def test_the_version_signal_tracks_inserts_updates_and_evictions(store, clock):
+    """The injection side's memo key: ``(row count, newest updated_at)``.
+
+    Both halves are load-bearing and each catches what the other misses — an
+    in-place UPDATE leaves the count alone (the id is content-addressed), and
+    an eviction leaves the newest timestamp alone (it deletes the oldest rows).
+    A memo keyed on either one by itself would keep serving a stale library.
+    """
+    assert store.version_signal() == (0, "")
+
+    _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
+    inserted = store.version_signal()
+    assert inserted == (1, "2026-08-01T00:00:00+00:00")
+
+    clock.value = "2026-08-02T00:00:00+00:00"
+    store.upsert_experience(
+        "rx_one",
+        situation=SITUATION,
+        action="ppr",
+        polarity="bad",
+        rationale="换了一个结论",
+        provenance=["rx_one-new-run"],
+        provenance_max=50,
+        replace_conclusion=True,
+    )
+    updated = store.version_signal()
+    assert updated == (1, "2026-08-02T00:00:00+00:00")
+
+    _seed(store, clock, "rx_two", adopted=0, support=1, at="2026-08-03T00:00:00+00:00")
+    assert store.evict_to_limit(1) == 1
+    assert store.version_signal()[0] == 1
+
+
+def test_an_adoption_is_deliberately_invisible_to_the_version_signal(store, clock):
+    """``note_adopted`` must not move ``updated_at`` — that column is the last
+    tie-break of the eviction ordering, and letting an adoption refresh it
+    would make a frequently-injected entry immortal. The memo therefore misses
+    adoptions, which is correct: ``adopted`` is neither rendered into the
+    prompt block nor part of the injection-side selection ordering, so a memo
+    that misses it still serves identical rows.
+    """
+    _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
+    before = store.version_signal()
+    store.note_adopted(["rx_one"])
+    assert store.version_signal() == before
