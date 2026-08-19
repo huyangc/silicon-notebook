@@ -26,6 +26,7 @@ import { getConversation, getConversationShare, shareConversation, unshareConver
 import { buildPublicConversationLink } from "./public-conversation.ts";
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
+import { summarizeShareDisclosure, type ShareDisclosure } from "./conversation-share-disclosure.ts";
 import type { ConversationDetail } from "./workspace-model.ts";
 
 /** 复制到剪贴板：优先 navigator.clipboard，回退隐藏 textarea + execCommand。 */
@@ -45,62 +46,6 @@ async function copyToClipboard(text: string): Promise<void> {
   } finally {
     document.body.removeChild(area);
   }
-}
-
-type ShareDisclosure = {
-  sharedCount: number;
-  newCount: number;
-  imageCount: number;
-  memoryCount: number;
-};
-
-/** 一轮的 created_at 是否落在水位（含）之前。水位为空（未分享）时全部计入——那是
- *  按下「分享」将要发布的预览。任一时刻解析失败按"计入"处理（宁可多披露）。 */
-function withinWatermark(createdAt: string, watermark: string): boolean {
-  if (!watermark) return true;
-  const created = new Date(createdAt).getTime();
-  const mark = new Date(watermark).getTime();
-  if (Number.isNaN(created) || Number.isNaN(mark)) return true;
-  return created <= mark;
-}
-
-/**
- * 按水位统计快照的披露计数——纯函数，方便对"Memory 披露不省略"这条红线单测。
- *
- * M（附图）：各轮 anchors ∪ citations 里图片按 asset_id 去重后逐轮求和（读者每轮
- * 看到几张就是几张）。K（记忆）：各轮 citations 里 memory_id 非空的按 memory_id
- * 去重（K 条不同的个人记忆，而不是被引用几次）。
- */
-export function summarizeShareDisclosure(
-  turns: ConversationDetail["turns"],
-  watermark: string,
-): ShareDisclosure {
-  let sharedCount = 0;
-  let newCount = 0;
-  let imageCount = 0;
-  const memoryIds = new Set<string>();
-  for (const turn of turns) {
-    if (!withinWatermark(turn.created_at, watermark)) {
-      newCount += 1;
-      continue;
-    }
-    sharedCount += 1;
-    const response = turn.response || ({} as ConversationDetail["turns"][number]["response"]);
-    const assetIds = new Set<string>();
-    for (const anchor of response.anchors || []) {
-      for (const image of anchor.images || []) {
-        if (image.asset_id) assetIds.add(image.asset_id);
-      }
-    }
-    for (const citation of response.citations || []) {
-      for (const image of citation.images || []) {
-        if (image.asset_id) assetIds.add(image.asset_id);
-      }
-      if (citation.memory_id) memoryIds.add(citation.memory_id);
-    }
-    imageCount += assetIds.size;
-  }
-  return { sharedCount, newCount, imageCount, memoryCount: memoryIds.size };
 }
 
 type BusyAction = "" | "share" | "update" | "revoke" | "copy";
@@ -138,6 +83,10 @@ export function ConversationShareModal({
     let cancelled = false;
     setLoading(true);
     setError("");
+    // 每次重跑（切会话/切库导致 notebookId/conversationId 变）都要清掉上一轮的
+    // countsError，否则一次失败后即便重跑成功，"可能包含个人记忆摘录"的兜底告警
+    // 会残留在一个已经算得出精确数字的会话上（codex T5 评审 P2-4）。
+    setCountsError(false);
     // 分享状态与会话详情各自成败：详情失败只影响披露计数，不该拦住分享本身。
     const shareStatus = getConversationShare(notebookId, conversationId)
       .then((resp) => resp)
