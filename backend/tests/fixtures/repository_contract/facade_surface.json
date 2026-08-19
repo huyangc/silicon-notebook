@@ -2920,7 +2920,19 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.conversation_creator",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.conversation_owner",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.conversation_share_state",
         "target": "_runtime"
       },
       {
@@ -3748,6 +3760,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.public_conversation_by_token",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.public_report_by_token",
         "target": "_runtime"
       },
@@ -3910,6 +3928,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.retrieval_experience_jobs",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.retrieval_experiences",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.revert_knowhow_table",
         "target": "_runtime"
       },
@@ -4013,6 +4043,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.set_notebook_personal",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.share_conversation",
         "target": "_runtime"
       },
       {
@@ -4175,6 +4211,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.unified_kg_status",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.unshare_conversation",
         "target": "_runtime"
       },
       {
@@ -5413,6 +5455,36 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'bool'"
   },
+  "conversation_creator": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._own_conversation_or_404",
+        "target": "conversation_creator"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', conversation_id: 'str') -> \"'str | None'\""
+  },
+  "conversation_share_state": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.get_conversation_share_route",
+        "target": "conversation_share_state"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', conversation_id: 'str') -> 'dict'"
+  },
   "create_knowhow_milestone": {
     "consumers": [
       {
@@ -5583,6 +5655,12 @@
   },
   "current_user": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._own_conversation_or_404",
+        "target": "current_user"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
@@ -6591,6 +6669,12 @@
   },
   "get_notebook_asset": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.public_conversation_asset_route",
+        "target": "get_notebook_asset"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
@@ -8076,6 +8160,21 @@
     "scope": "facade",
     "signature": "(self, table_id: 'str', before_iso: 'str') -> 'dict'"
   },
+  "public_conversation_by_token": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._public_conversation_or_404",
+        "target": "public_conversation_by_token"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, token: 'str') -> \"'dict | None'\""
+  },
   "public_report_by_token": {
     "consumers": [
       {
@@ -9297,6 +9396,21 @@
     "scope": "facade",
     "signature": "<instance attribute>"
   },
+  "share_conversation": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.share_conversation_route",
+        "target": "share_conversation"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', conversation_id: 'str', expected_through_id: 'str | None' = None) -> 'dict'"
+  },
   "share_report": {
     "consumers": [
       {
@@ -9630,6 +9744,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
+  "unshare_conversation": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.unshare_conversation_route",
+        "target": "unshare_conversation"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskStateStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', conversation_id: 'str') -> 'None'"
+  },
   "unshare_report": {
     "consumers": [
       {
@@ -9941,6 +10070,12 @@
   },
   "user_can_read_notebook": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._public_conversation_or_404",
+        "target": "user_can_read_notebook"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",

@@ -1001,7 +1001,7 @@ busy state and follows the long-task-button contract (disable-on-click,
 
 **Agentic Memory P2 additions.** Three hardening changes and one new library
 were added on top of the P1 closed loop above. (1) `agent_profile_jobs` gained
-a claim GENERATION (`claim_token`, SQLite v52/PostgreSQL v30): every `claim()`
+a claim GENERATION (`claim_token`, SQLite v53/PostgreSQL v31): every `claim()`
 mints a fresh value and both `settle()` and `write_block()` treat it as part of
 their compare-and-swap, closing an ABA where a member removed and re-added got
 a job row with the same primary key and `runs` back at 0 — a stale worker's
@@ -1018,7 +1018,7 @@ check fails open on error, matching the rest of this feature's error handling.
 (3) The deep-report sample folded into the overlay chain's input above is T4.
 (4) A separate, deployment-GLOBAL
 retrieval-strategy experience library (`retrieval_experiences`, SQLite
-v53/PostgreSQL v31) is distilled offline from a bounded batch of recently
+v54/PostgreSQL v32) is distilled offline from a bounded batch of recently
 completed asks and injected — behind its own, independently-defaulted-off flag
 — as a small ranked block alongside the profile block in the same plan/reflect
 prompts. Its isolation argument is structural rather than a SQL predicate (the
