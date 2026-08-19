@@ -23,12 +23,25 @@ from typing import Any
 from app.models.ask import PublicConversation
 from app.services.conversation_public_view import (
     MAX_REFERENCES,
+    MAX_REFERENCED_ASSETS,
+    MAX_TURNS,
     conversation_asset_alias,
     referenced_asset_ids,
     resolve_conversation_asset_alias,
     public_conversation_payload as _project_conversation,
     public_turn as _project_turn,
 )
+from app.services.evidence_context import CITATION_IMAGES_PER_ANSWER
+
+
+def test_endpoint_scan_cap_covers_every_alias_the_projection_can_emit():
+    """Invariant (codex T4 review P2): the endpoint's alias reverse-lookup cap
+    must be >= the MOST distinct image aliases the projection can ever emit, or a
+    well-formed long conversation would show an image whose alias the endpoint
+    stops scanning before reaching. The projection's ceiling is ``MAX_TURNS``
+    turns x the upstream per-answer image cap. Pinned across both modules so a
+    future bump to either constant can't silently reopen the gap."""
+    assert MAX_REFERENCED_ASSETS >= MAX_TURNS * CITATION_IMAGES_PER_ANSWER
 
 
 # T4 made the projection require the share token (to derive each image's opaque

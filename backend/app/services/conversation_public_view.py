@@ -80,11 +80,16 @@ ASSET_ALIAS_HEX_CHARS = 32
 # Bound on one image's projected caption. Registered in docs (T6).
 MAX_CAPTION_CHARS = 500
 # Safety ceiling on how many DISTINCT referenced assets one endpoint request
-# scans while reversing an alias. Per-answer image count is already bounded
-# upstream and turns are capped at ``MAX_TURNS``; this is a belt-and-suspenders
-# bound so a hand-edited/pathological row cannot make one anonymous request scan
-# unboundedly. Registered in docs (T6).
-MAX_REFERENCED_ASSETS = 5000
+# scans while reversing an alias. It must stay >= the MOST aliases the
+# projection can ever emit, or a well-formed but very long conversation could
+# show an image whose alias the endpoint stops scanning before it reaches —
+# a broken image for a reader legitimately entitled to it (codex T4 review P2).
+# The projection's max is ``MAX_TURNS`` turns x the upstream per-answer image cap
+# (``evidence_context.CITATION_IMAGES_PER_ANSWER`` = 12) = 6000 distinct assets.
+# This is set to that bound; ``test_endpoint_scan_cap_covers_every_alias_the_projection_can_emit``
+# imports both constants and fails if a future cap bump breaks the invariant, so
+# the two can never silently drift. Registered in docs (T6).
+MAX_REFERENCED_ASSETS = 6000
 
 
 def conversation_asset_alias(token: str, asset_id: str) -> str:
