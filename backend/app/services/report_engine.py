@@ -1564,15 +1564,29 @@ class ReportEngine:
             # Agentic Memory P2 §6.1:检索打法库。与理解块一样只接**逐节检索**
             # 这一处,理由相同(意图理解与大纲规划跑在用户确认门之前)。
             #
-            # ⚠ 这里**不传** ``intent_detail``:报告的每一节没有意图契约那份结构
-            # (节问题由大纲派生),而伪造一份会把「情境」这个键指向一个从没发生
-            # 过的形状。缺席的后果是确定性的:除 mode/档位外每个键落 ``unknown``,
-            # 打法条目因而只在同样宽泛的形状上匹配得上——这是诚实的降级,不是漏接。
+            # ⚠ ``intent_detail`` 只喂两个键,零新增查询:``section["intent_contract"]``
+            # 是 ``_bind_outline_to_intent`` 早已在大纲阶段写进每一节、随
+            # ``reports.outline_json`` 一起持久化的**报告行自己的**意图契约副本
+            # (与 ``_judge_sufficiency`` 读 ``self._planning_result_scope`` 的
+            # 那份同源),这里直接从 ``section`` 取值而不假设 ``self`` 上还留着
+            # 规划阶段设的瞬态属性——生成可能在与规划不同的一次调用里跑。伪造
+            # 一份完整意图契约仍然不做:``current_situation`` 读的八个键里,
+            # ``mode``/``retrieval_effort`` 已由下面的显式参数给出,这里补上
+            # ``result_scope``/``completeness_required`` 后,只剩
+            # ``entity_count``/``topic_count``/``has_constraints``/
+            # ``has_exclusions`` 四个键仍诚实地落 ``unknown``/``False``——节问题
+            # 没有实体/主题/约束/排除项那份结构,编一份出来才是漏接。
             retrieval_experiences=deps.retrieval_experiences,
         ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
               limits=limits,
               intent_queries=([sec_question, *directions]
-                              if directions else None))
+                              if directions else None),
+              intent_detail={
+                  "result_scope": (section.get("intent_contract") or {}).get(
+                      "result_scope"),
+                  "completeness_required": (section.get("intent_contract") or {}).get(
+                      "completeness_required"),
+              })
 
         # The outline's approved retrieval directions are execution requirements,
         # not merely prose hints to the reasoning planner.  Merge their bounded

@@ -243,19 +243,28 @@ class RetrievalExperienceStore:
         count. A negative delta is rejected rather than clamped — this counter
         only ever grows, and the one thing that could make it shrink is a bug
         at the call site, which clamping would hide.
+
+        ⚠ Deliberately does NOT touch ``updated_at``. That column is the last
+        tie-break of the eviction ordering, and it is also half of
+        ``version_signal()``'s memo key — letting an adoption refresh it would
+        make a frequently-injected entry immortal AND invalidate the
+        injection-side memo on every single run that adopts anything, which
+        defeats the memo's entire purpose. An adoption is therefore invisible
+        to both eviction recency and the memo, which is correct: ``adopted``
+        is neither rendered into the prompt block nor part of the injection
+        selection ordering.
         """
         ids = [str(item) for item in experience_ids if str(item)]
         if not ids or int(delta) < 0:
             if int(delta) < 0:
                 raise ValueError("retrieval experience adopted delta must not be negative")
             return 0
-        now = self.now()
         placeholders = ",".join("?" for _ in ids)
         with self.database.write() as db:
             cursor = db.execute(
-                "UPDATE retrieval_experiences SET adopted=adopted+?,updated_at=? "
+                "UPDATE retrieval_experiences SET adopted=adopted+? "
                 f"WHERE id IN ({placeholders})",
-                (int(delta), now, *ids),
+                (int(delta), *ids),
             )
         return cursor.rowcount
 

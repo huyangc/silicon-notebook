@@ -412,8 +412,16 @@ def test_an_adoption_is_deliberately_invisible_to_the_version_signal(store, cloc
     adoptions, which is correct: ``adopted`` is neither rendered into the
     prompt block nor part of the injection-side selection ordering, so a memo
     that misses it still serves identical rows.
+
+    The clock is advanced BEFORE ``note_adopted`` — without that, this
+    assertion would hold even if ``note_adopted`` wrote ``updated_at``,
+    because ``now()`` at seed time and at adoption time would be identical and
+    the signal would coincidentally match either way. Advancing the clock is
+    what makes "the signal did not move" prove the invariant rather than
+    prove nothing.
     """
     _seed(store, clock, "rx_one", adopted=0, support=1, at="2026-08-01T00:00:00+00:00")
     before = store.version_signal()
+    clock.value = "2026-08-19T00:00:00+00:00"
     store.note_adopted(["rx_one"])
     assert store.version_signal() == before

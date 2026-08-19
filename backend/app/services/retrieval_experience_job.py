@@ -29,6 +29,39 @@ that dies takes its own claim with it and the next trigger proceeds. That is
 affordable here precisely because distillation is a pure increment — losing a
 batch costs a batch, never correctness — and it is why this feature needs no
 job table of its own.
+
+⚠ **Two open concerns, registered rather than fixed (Agentic Memory P2, T6
+fix round, item 7)** — neither changes behaviour, both are worth a future
+reader knowing were considered:
+
+* **Second-granular ABA on the injection-side memo.** The injection side
+  (``reasoning_retrieval.py``) memoises the rendered block against
+  ``RetrievalExperienceStorePort.version_signal()`` — ``(row count,
+  MAX(updated_at))``. SQLite's clock is second-granular (the same fact
+  ``memory_revisions`` registered before this feature existed), so a batch
+  that, within the SAME second, evicts as many rows as it writes and happens
+  to leave both halves of the signature unchanged would be invisible to the
+  memo. In practice this is UNREACHABLE at the cadence this chain actually
+  runs at (once every ``RETRIEVAL_EXPERIENCE_TRIGGER`` completed asks
+  deployment-wide, never inside a single request), and even if it were hit,
+  it is SELF-HEALING: the mismatch can only persist for the remainder of that
+  one second, because any later write — including the very next distillation
+  batch, whenever it happens — lands in a different second and moves the
+  signature. Not worth a table just to close a window nothing can open in
+  practice and that heals itself if it somehow did.
+* **``support`` is a positive-feedback signal by design, not by oversight.**
+  An entry with higher ``support`` sorts first among tied-similarity
+  candidates on the injection side (``select_experiences``) and survives
+  eviction longer (``evict_to_limit`` removes the LOWEST ``(adopted,
+  support, updated_at)`` first) — so an entry that has already accumulated
+  support is both more likely to be shown again and less likely to be
+  evicted before it accumulates more. A newer entry about a genuinely
+  useful but less frequently observed shape of question has a structurally
+  harder time catching up. This is the same shape of feedback loop most
+  "what's popular gets shown, what's shown gets popular" ranking systems
+  have, and this design accepts it rather than fights it: the alternative
+  (recency-weighted or exploration-biased selection) would need its own
+  design pass and is out of scope for P2.
 """
 from __future__ import annotations
 
