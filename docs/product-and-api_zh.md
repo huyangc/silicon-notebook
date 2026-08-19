@@ -1374,7 +1374,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 超过上限只可能出现在**创建期护栏上线之前**建的报告上（它们的分享链接已经发出去了）：这时投影按上限截断并置 `question_truncated`，公开页显示「（研究问题过长，已截断）」。这样投影**自身有界**（否则匿名响应会被客户端输入撑到无界），同时不静默丢尾、也不改写用户已经存下来的数据（刻意不做数据迁移）。注意有界性的论据**不是**「正文本来更大」——`content_md` 是模型生成、受生成预算约束，而问题是原始客户端输入。
 
-前端那半护栏按 **Unicode 码点**夹（`clampToCodePoints`），不是 `<textarea maxLength>` 的 UTF-16 code unit：含 emoji 等非 BMP 字符时后者会在半数处就停手，两边号称「同一护栏」却对不上。引用的标题、原始文件名与摘录是证据元数据、仍受上限约束，但**超限会置 `title_truncated`/`file_name_truncated`/`snippet_truncated` 披露**（公开页显示「已截断」提示），不静默丢尾。`key`（24）、`location`（200）与时间戳（64）刻意不披露截断：它们是服务端派生的标签（`kN`、`PDF p.3`、ISO 时刻），没有用户自撰的尾巴可丢。
+前端那半护栏**按 Unicode 码点判**（与后端 Pydantic 同一把尺；`<textarea maxLength>` 数的是 UTF-16 code unit，含 emoji 时会在半数处就停手，两边号称「同一护栏」却对不上），且**超限只拦提交、不动输入**：粘进来的全文原样留在输入框里，提示写明「超出 N 字上限（当前 M 字）」并禁用「生成深度报告」，绝不替用户把尾巴删掉——那正是同一条红线要防的静默截断。引用的标题、原始文件名与摘录是证据元数据、仍受上限约束，但**超限会置 `title_truncated`/`file_name_truncated`/`snippet_truncated` 披露**（公开页显示「已截断」提示），不静默丢尾。`key`（24）、`location`（200）与时间戳（64）刻意不披露截断：它们是服务端派生的标签（`kN`、`PDF p.3`、ISO 时刻），没有用户自撰的尾巴可丢。
 
 后三个上限定义在 `backend/app/services/report_public_view.py`，创建上限定义在 `backend/app/models/reports.py`（前端镜像在 `frontend/app/report-api.ts::REPORT_INPUT_LIMITS`）；与下表的会话侧同名常量彼此独立（两条分享链路各有自己的契约），但截断披露这条口径必须一致。
 

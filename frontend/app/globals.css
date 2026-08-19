@@ -1514,6 +1514,13 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+/* 超限时这句话是此刻唯一挡着提交的东西，必须与常规提示区分开——同色的话按钮变灰
+   而用户看不出为什么（codex #525 R3）。 */
+.report-compose-hint.over-limit {
+  color: var(--danger);
+  white-space: normal;
+}
+
 .report-compose-actions .button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
