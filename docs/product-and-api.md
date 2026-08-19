@@ -1794,10 +1794,11 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 | `MAX_TURNS` (turns rendered on one public page; excess turns are disclosed as `truncated_turns`) | 500 |
 | `MAX_REFERENCES` (citations per turn) | 500 |
 | `MAX_SNIPPET_CHARS` (per-citation excerpt) | 1,200 |
-| `MAX_QUESTION_CHARS` (per-turn question) | 2,000 |
 | `MAX_CAPTION_CHARS` (per-image caption) | 500 |
 
-All seven live in `backend/app/services/conversation_public_view.py`.
+The per-turn question is served **whole** (no cap): like `answer_md`, it is the user's own artifact and truncating it silently would drop the very text that produced the answer.
+
+All six live in `backend/app/services/conversation_public_view.py`.
 
 ## APIs
 

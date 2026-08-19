@@ -26,7 +26,12 @@ import { getConversation, getConversationShare, shareConversation, unshareConver
 import { buildPublicConversationLink } from "./public-conversation.ts";
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
-import { summarizeShareDisclosure, type ShareDisclosure } from "./conversation-share-disclosure.ts";
+import {
+  summarizeShareDisclosure,
+  summarizeShareUpdate,
+  type ShareDisclosure,
+  type ShareUpdatePreview,
+} from "./conversation-share-disclosure.ts";
 import type { ConversationDetail } from "./workspace-model.ts";
 
 /** 复制到剪贴板：优先 navigator.clipboard，回退隐藏 textarea + execCommand。 */
@@ -121,6 +126,9 @@ export function ConversationShareModal({
   const shared = Boolean(token);
   const link = shared ? buildPublicConversationLink(token, typeof window !== "undefined" ? window.location.origin : "") : "";
   const disclosure = useMemo(() => summarizeShareDisclosure(turns, shared ? watermark : ""), [turns, watermark, shared]);
+  // 前瞻披露:「更新到最新」会把水位推到全部轮次,consent 判据是**这个按钮将要公开
+  // 什么**,所以它必须在点击前就披露更新后的记忆/附图条数(codex #522 R1 P1)。
+  const updatePreview = useMemo(() => summarizeShareUpdate(turns, shared ? watermark : ""), [turns, watermark, shared]);
 
   async function doShare(action: "share" | "update") {
     if (busy) return;
@@ -217,15 +225,20 @@ export function ConversationShareModal({
                 </p>
 
                 {disclosure.newCount > 0 && (
-                  <button
-                    type="button"
-                    className="sort-button"
-                    disabled={busy !== ""}
-                    onClick={() => void doShare("update")}
-                  >
-                    <RefreshCw size={13} className={busy === "update" ? "busy-spin" : undefined} />
-                    {" "}{busy === "update" ? "更新中…" : "更新到最新"}
-                  </button>
+                  <div className="conversation-share-update">
+                    {/* consent 红线:披露必须在按钮**之前**呈现,点了才涨会先公开
+                        水位之后新轮引用的私有 Memory(codex #522 R1 P1)。 */}
+                    <ShareUpdateDisclosureLines preview={updatePreview} countsError={countsError} />
+                    <button
+                      type="button"
+                      className="sort-button"
+                      disabled={busy !== ""}
+                      onClick={() => void doShare("update")}
+                    >
+                      <RefreshCw size={13} className={busy === "update" ? "busy-spin" : undefined} />
+                      {" "}{busy === "update" ? "更新中…" : "更新到最新"}
+                    </button>
+                  </div>
                 )}
 
                 <ShareDisclosureLines disclosure={disclosure} countsError={countsError} />
@@ -282,6 +295,40 @@ function ShareDisclosureLines({
           </p>
         )}
       </>)}
+    </div>
+  );
+}
+
+/** 「更新到最新」的前瞻披露:更新后公开页**全部**轮次会包含多少条记忆/附图,以及其中
+ *  几条是本次更新才新暴露的(设计 §五 consent 红线;codex #522 R1 P1)。Memory 那条只要
+ *  afterUpdate.memoryCount>0 或计数加载失败就必显示——绝不静默省略。 */
+function ShareUpdateDisclosureLines({
+  preview,
+  countsError,
+}: {
+  preview: ShareUpdatePreview;
+  countsError: boolean;
+}) {
+  if (countsError) {
+    return (
+      <p className="tool-hint" style={{ margin: 0 }}>
+        「更新到最新」会公开新增轮次，其中可能包含新引用的个人记忆摘录（本次未能统计条数）。
+      </p>
+    );
+  }
+  const { afterUpdate, newMemoryCount, newImageCount } = preview;
+  return (
+    <div className="conversation-share-disclosure">
+      {afterUpdate.imageCount > 0 && (
+        <p className="tool-hint" style={{ margin: 0 }}>
+          更新后公开页共 {afterUpdate.imageCount} 张附图{newImageCount > 0 ? `（新增 ${newImageCount} 张）` : ""}。
+        </p>
+      )}
+      {afterUpdate.memoryCount > 0 && (
+        <p className="tool-hint" style={{ margin: 0 }}>
+          更新后公开页共 {afterUpdate.memoryCount} 条你引用到的个人记忆摘录{newMemoryCount > 0 ? `（新增 ${newMemoryCount} 条）` : ""}。
+        </p>
+      )}
     </div>
   );
 }

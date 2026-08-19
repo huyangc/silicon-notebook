@@ -58,12 +58,14 @@ import re
 from typing import Any, Sequence
 
 # Mirrors ``report_public_view``'s caps; the report body (``content_md``) is
-# left uncapped and the conversation answer body (``answer_md``) follows that
-# precedent — a shared answer is the artifact, truncating it mid-sentence would
-# be worse than serving it whole.
+# left uncapped and the conversation answer body (``answer_md``) AND the
+# question follow that precedent — a shared Q&A is the user's own artifact.
+# Ask accepts questions up to 4,000 chars; capping the public question (this
+# module once did, at 2,000) silently dropped the tail of the very text that
+# produced the answer, with no disclosure — the same "用户编辑的数据不得静默截断"
+# violation ``answer_md`` already avoids. Both are served whole (codex #522 R1).
 MAX_REFERENCES = 500
 MAX_SNIPPET_CHARS = 1200
-MAX_QUESTION_CHARS = 2000
 # Safety ceiling on how many turns one public page renders. A conversation's
 # turn count is bounded by how many times a user asked, so this almost never
 # binds; it exists so a pathological conversation cannot balloon one anonymous
@@ -187,6 +189,16 @@ _MARKER_KEY_SPLIT_RE = re.compile(r"[,，]")
 
 def _text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _question_text(value: Any) -> str:
+    """The question, served WHOLE — never truncated (codex #522 R1).
+
+    Ask accepts questions up to 4,000 chars; the public projection used to cap
+    this at 2,000, silently dropping the tail of the very text that produced the
+    answer. Like ``answer_md``, the question is the user's own artifact: serving
+    it whole beats truncating it with no disclosure."""
+    return str(value or "").strip()
 
 
 def _as_list(value: Any) -> list:
@@ -322,7 +334,7 @@ def public_turn(
         for key, reference in selected[:MAX_REFERENCES]
     ]
     return {
-        "question": _text(row.get("question"), MAX_QUESTION_CHARS),
+        "question": _question_text(row.get("question")),
         "answer_md": answer_md,
         "asked_at": _text(payload.get("asked_at"), 64),
         "answered_at": _text(payload.get("answered_at"), 64),
@@ -421,7 +433,7 @@ def _safe_turn(
     except Exception:
         row = turn if isinstance(turn, dict) else {}
         return {
-            "question": _text(row.get("question"), MAX_QUESTION_CHARS),
+            "question": _question_text(row.get("question")),
             "answer_md": "",
             "asked_at": "",
             "answered_at": "",

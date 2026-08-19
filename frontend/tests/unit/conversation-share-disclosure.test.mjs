@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   summarizeShareDisclosure,
+  summarizeShareUpdate,
   withinWatermark,
 } from "../../app/conversation-share-disclosure.ts";
 
@@ -66,6 +67,46 @@ test("empty watermark (unshared preview) counts every turn", () => {
   assert.equal(d.sharedCount, 2);
   assert.equal(d.newCount, 0);
   assert.equal(d.memoryCount, 2);
+});
+
+// --- Forward-looking "update to latest" disclosure (consent; codex #522 R1) ---
+// "更新到最新" pushes the watermark to ALL turns, so its consent judgement is
+// "what will this button publish". A memory referenced ONLY by a post-watermark
+// turn must be counted in the forward-looking disclosure BEFORE the click — the
+// bug was that its count only rose AFTER the update, i.e. after it was published.
+
+test("summarizeShareUpdate counts post-watermark memory in the forward-looking disclosure", () => {
+  const turns = [
+    turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-in" })] }),
+    turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-late" })] }),
+  ];
+  const watermark = "2026-01-01T00:00:00Z";
+  // Current disclosure freezes at the watermark: only mem-in is public today.
+  assert.equal(summarizeShareDisclosure(turns, watermark).memoryCount, 1);
+  // Forward-looking: "更新到最新" would publish BOTH mem-in and mem-late.
+  const preview = summarizeShareUpdate(turns, watermark);
+  assert.equal(preview.afterUpdate.memoryCount, 2); // mem-late IS counted
+  assert.equal(preview.newMemoryCount, 1);          // and flagged as newly exposed
+});
+
+test("summarizeShareUpdate flags newly exposed images from post-watermark turns", () => {
+  const turns = [
+    turn("2026-01-01T00:00:00Z", { citations: [citation({ images: [{ asset_id: "a1" }] })] }),
+    turn("2026-01-01T00:05:00Z", { citations: [citation({ images: [{ asset_id: "a2" }] })] }),
+  ];
+  const preview = summarizeShareUpdate(turns, "2026-01-01T00:00:00Z");
+  assert.equal(preview.afterUpdate.imageCount, 2);
+  assert.equal(preview.newImageCount, 1);
+});
+
+test("summarizeShareUpdate reports no new memory when a post-watermark turn reuses an already-public id", () => {
+  const turns = [
+    turn("2026-01-01T00:00:00Z", { citations: [citation({ memory_id: "mem-a" })] }),
+    turn("2026-01-01T00:05:00Z", { citations: [citation({ memory_id: "mem-a" })] }),
+  ];
+  const preview = summarizeShareUpdate(turns, "2026-01-01T00:00:00Z");
+  assert.equal(preview.afterUpdate.memoryCount, 1); // mem-a, deduped
+  assert.equal(preview.newMemoryCount, 0);          // already disclosed -> not "new"
 });
 
 // --- Images: dedup by asset_id per turn, summed; anchors ∪ citations ----------

@@ -1370,10 +1370,11 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `MAX_TURNS`（单页公开页渲染的最多轮数；超出部分披露为 `truncated_turns`） | 500 |
 | `MAX_REFERENCES`（每轮引用上限） | 500 |
 | `MAX_SNIPPET_CHARS`（每条引用摘录字符上限） | 1,200 |
-| `MAX_QUESTION_CHARS`（每轮问题字符上限） | 2,000 |
 | `MAX_CAPTION_CHARS`（每张图 caption 字符上限） | 500 |
 
-七个上限均定义在 `backend/app/services/conversation_public_view.py`。
+每轮问题**原样返回、不截断**：与 `answer_md` 同理，它是用户自撰的 artifact，静默截断会丢掉产生该答案的原始问题。
+
+六个上限均定义在 `backend/app/services/conversation_public_view.py`。
 
 ## API
 
