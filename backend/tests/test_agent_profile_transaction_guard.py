@@ -54,26 +54,48 @@ REQUIRED_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
 #: 方法集合」,自检按并集算——否则只登记在 SQL 表里的方法会在改名后静默脱钩。
 _SQL_ONLY_METHODS = frozenset({"settle"})
 
-#: 方法 -> 它的写事务体内必须出现的 **SQL 片段**。
+#: 方法 -> 它的写事务体内必须出现的 **SQL 片段**,按 **后端** 键控。
 #:
 #: 与上面那张表互补:符号集合证明「历史是在事务里算的」,这张表证明「写回历史的那条
 #: 语句也在同一个事务里」。少了它,把 SQL 挪出去而把纯算术留在里面同样能骗过守卫。
-REQUIRED_SQL_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
-    # ``claim_token``:P2 的 claim 代际校验必须与它放行的那次写入同事务。挪到
-    # ``with`` 块之前,单线程测试同样全绿——而真正的后果是校验退回「尽力而为」:
-    # 成员被移出(``clear_job_row``)可以落在校验与写入之间,被移出的成员的私有块
-    # 就这样被一个已经作废的 run 重建出来。P1 的写前 ``job_row`` 探针正是这个
-    # 形状,R4 登记的就是它。
-    "write_block": frozenset({"agent_notebook_profile", "claim_token"}),
-    "clear_block": frozenset({"agent_notebook_profile"}),
-    # ``settle`` 的 CAS 没落地时,「为什么」必须在**同一个**事务里读出来:出了
-    # 事务,一次并发移除就能把 ``superseded``(新一代持有链路,别动它的块)读成
-    # ``gone``(行没了,抹掉这些块)——把「放手」翻成「删除」。两条片段分别钉住
-    # 带代际的 CAS 与那次判别读。
-    "settle": frozenset({
-        "AND claim_token=",
-        "SELECT 1 FROM agent_profile_jobs",
-    }),
+#:
+#: 按后端键控(而不是两侧共用一张)是因为两个后端的并发原语本来就不同:PostgreSQL
+#: 侧的 ``write_block`` 额外必须钉住 ``FOR SHARE``——它是这次生成检查的行锁,SQLite
+#: 侧没有对应片段(那边靠 ``begin_immediate`` 的进程级写序列化,同样的校验不需要、
+#: 也不会出现任何行锁 SQL)。两侧共用一张表会让 SQLite 的字符串常量集合里去凑一个
+#: 永远不存在的 ``FOR SHARE``,或者反过来让 PostgreSQL 那半的行锁悄悄脱离静态判据。
+REQUIRED_SQL_IN_WRITE_TRANSACTION: dict[str, dict[str, frozenset[str]]] = {
+    "sqlite": {
+        # ``claim_token``:P2 的 claim 代际校验必须与它放行的那次写入同事务。挪到
+        # ``with`` 块之前,单线程测试同样全绿——而真正的后果是校验退回「尽力而为」:
+        # 成员被移出(``clear_job_row``)可以落在校验与写入之间,被移出的成员的私有块
+        # 就这样被一个已经作废的 run 重建出来。P1 的写前 ``job_row`` 探针正是这个
+        # 形状,R4 登记的就是它。
+        "write_block": frozenset({"agent_notebook_profile", "claim_token"}),
+        "clear_block": frozenset({"agent_notebook_profile"}),
+        # ``settle`` 的 CAS 没落地时,「为什么」必须在**同一个**事务里读出来:出了
+        # 事务,一次并发移除就能把 ``superseded``(新一代持有链路,别动它的块)读成
+        # ``gone``(行没了,抹掉这些块)——把「放手」翻成「删除」。两条片段分别钉住
+        # 带代际的 CAS 与那次判别读。
+        "settle": frozenset({
+            "AND claim_token=",
+            "SELECT 1 FROM agent_profile_jobs",
+        }),
+    },
+    "postgres": {
+        # 质量评审 P2-2:``FOR SHARE`` 是这个后端让 claim 代际校验与 SQLite 的
+        # ``begin_immediate`` 一样原子的那个锁——不锁住这一行,一次并发的
+        # ``clear_job_row``(成员移出)就能落在校验读与后续写之间,把生成检查
+        # 变回「尽力而为」。少了它,单线程测试照样全绿,只有这条静态判据拦得住。
+        "write_block": frozenset(
+            {"agent_notebook_profile", "claim_token", "FOR SHARE"}
+        ),
+        "clear_block": frozenset({"agent_notebook_profile"}),
+        "settle": frozenset({
+            "AND claim_token=",
+            "SELECT 1 FROM agent_profile_jobs",
+        }),
+    },
 }
 
 #: 会开出新作用域的节点 —— 遍历时不下钻(嵌套函数里的调用不属于事务的执行流)。
@@ -158,6 +180,13 @@ def test_both_backend_stores_are_present():
     )
 
 
+def test_the_sql_fragment_table_is_keyed_by_every_backend():
+    """`REQUIRED_SQL_IN_WRITE_TRANSACTION` 按后端键控之后,少注册一个后端不能
+    悄悄让它退回「共用一张表」——那正是 PG 专属的 ``FOR SHARE`` 片段可能被
+    误套到 SQLite 头上、或整个从守卫里消失的形态。"""
+    assert set(REQUIRED_SQL_IN_WRITE_TRANSACTION) == set(BACKEND_STORES)
+
+
 @pytest.mark.parametrize("backend", sorted(BACKEND_STORES))
 def test_guard_actually_sees_the_methods_it_claims_to_pin(backend: str):
     """守卫自检:被钉的方法都存在、且都真的开了写事务。
@@ -168,7 +197,7 @@ def test_guard_actually_sees_the_methods_it_claims_to_pin(backend: str):
     methods = _method_nodes(BACKEND_STORES[backend])
     pinned = (
         set(REQUIRED_IN_WRITE_TRANSACTION)
-        | set(REQUIRED_SQL_IN_WRITE_TRANSACTION)
+        | set(REQUIRED_SQL_IN_WRITE_TRANSACTION[backend])
         | set(_SQL_ONLY_METHODS)
     )
     missing = sorted(pinned - set(methods))
@@ -217,7 +246,7 @@ def test_history_write_sql_lives_inside_the_write_transaction(backend: str):
     """
     methods = _method_nodes(BACKEND_STORES[backend])
     offenders: list[str] = []
-    for name, required in sorted(REQUIRED_SQL_IN_WRITE_TRANSACTION.items()):
+    for name, required in sorted(REQUIRED_SQL_IN_WRITE_TRANSACTION[backend].items()):
         blocks = _write_transactions(methods[name])
         for fragment in sorted(required):
             found = any(

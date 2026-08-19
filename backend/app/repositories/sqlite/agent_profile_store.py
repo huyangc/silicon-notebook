@@ -476,7 +476,15 @@ class AgentProfileStore:
 
         Reading outside the transaction would let a removal land in between and
         turn a ``"superseded"`` into a ``"gone"`` — i.e. turn "leave the new
-        run's work alone" into "delete it"."""
+        run's work alone" into "delete it". The guarantee behind that is this
+        backend's own: ``begin_immediate`` (see ``write_block``) takes a
+        process-wide exclusive write lock for the whole transaction, so
+        nothing else — not even another process sharing the file — can move
+        between the failed CAS and this re-read; the two are, in effect, one
+        atomic step. The PostgreSQL mirror needs the same-transaction rule
+        too, but for a DIFFERENT reason (no process-wide lock, READ COMMITTED
+        per-statement snapshots instead) — see its own docstring rather than
+        assuming this one's mechanism transfers."""
         if status not in AGENT_PROFILE_JOB_TERMINAL_STATUSES:
             raise ValueError("agent profile job terminal status is not recognised")
         now = self.now()
