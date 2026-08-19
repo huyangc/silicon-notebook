@@ -36,6 +36,7 @@ from app.models.ask import (
     FeedbackRequest,
     FeedbackResponse,
     NotebookSearchResponse,
+    PublicConversation,
     QueryIntentContract,
 )
 from app.models.identity import UserProfile
@@ -46,10 +47,17 @@ from app.services.query_intent import (
     finalize_query_intent,
     plan_query_intent,
 )
+from app.services.conversation_public_view import public_conversation_payload
 from app.services.source_scope import retrieval_scope_receipt_context
 
 
 router = APIRouter()
+# Anonymous surface (T3): the ONE conversation read that needs no session. It
+# MUST NOT be mounted on the main API router — that router carries a router-level
+# ``Depends(get_current_user)`` ("零逐路由遗漏"), which would 401 the very
+# visitors this endpoint exists for. ``main.py`` includes this router WITHOUT
+# that dependency (mirrors ``report_routes.public_router``).
+public_router = APIRouter()
 
 
 def _validate_source_scope(repo, notebook: NotebookSummary,
@@ -866,6 +874,57 @@ def unshare_conversation_route(
     repo = repository()
     _own_conversation_or_404(repo, notebook_id, conversation_id)
     repo.unshare_conversation(notebook_id, conversation_id)
+
+
+@public_router.get(
+    "/public/conversations/{token}", response_model=PublicConversation
+)
+def public_conversation_route(token: str) -> PublicConversation:
+    """The one conversation read that needs no session — the token is the whole
+    grant (T3). Mirrors ``report_routes.public_report_route``.
+
+    Deliberately has NO ``Depends(get_current_user)``: this is the anonymous
+    surface. That also means no request user is bound, so nothing here may call
+    an owner-scoped repository method — ``current_user`` falls back to the seeded
+    admin when the ContextVar is unset, which would silently run as an
+    administrator. ``public_conversation_by_token`` takes the token alone for
+    exactly that reason, and the payload is an explicit allowlist rather than the
+    stored row.
+    """
+    repo = repository()
+    row = repo.public_conversation_by_token(token)
+    if row is None:
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    # Live re-authorization of the CREATOR (design §五 / §七 item 3, C-2). A
+    # group member may publish a conversation built from a shared notebook's
+    # corpus, but that grant lasts exactly as long as their read access does:
+    # revoke the group grant / remove them from the group / delete the group,
+    # and every link they issued in that notebook must die immediately.
+    #
+    # It has to be here rather than a cascade at each revocation point: there
+    # are several ways to lose read access, and a cascade would have to be
+    # re-derived at every one of them — the same argument that made mount
+    # validity a live predicate instead of stored state. Once neither the member
+    # (blocked by the read guard) nor the creator (blocked by the row-level
+    # gate) can reach ``unshare``, a stale token would otherwise serve the
+    # owner's corpus forever.
+    #
+    # ``user_can_read_notebook`` takes both ids EXPLICITLY, so this stays legal
+    # on the anonymous router: it binds no request user and never consults the
+    # ContextVar (which falls back to the seeded admin when unset). Same 404 as
+    # an unknown token — a distinguishable response would report on somebody's
+    # group membership to an anonymous caller. Restoring access revives the link
+    # (the same idempotent-token semantics ``share`` already promises).
+    if not repo.user_can_read_notebook(
+        str(row.get("notebook_id") or ""), str(row.get("created_by") or "")
+    ):
+        raise HTTPException(status_code=404, detail="shared conversation not found")
+    # Pop the GATE fields before projection: ``notebook_id``/``created_by`` are
+    # for the live re-check ONLY and must never cross to an anonymous reader
+    # (store docstring). Defense-in-depth — the allowlist ignores them anyway.
+    row.pop("notebook_id", None)
+    row.pop("created_by", None)
+    return PublicConversation(**public_conversation_payload(row))
 
 
 @router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)

@@ -653,6 +653,64 @@ class ConversationShareResponse(BaseModel):
     shared_through_id: str = ""
 
 
+class PublicReference(BaseModel):
+    """One reference in a shared conversation, as an anonymous reader sees it
+    (T3). Same shape as ``PublicReportReference``.
+
+    No ``source_id`` / ``element_id`` / ``object_id`` / ``notebook_id`` /
+    ``memory_id`` / ``provenance`` / ``knowhow`` / ``images``: a public link must
+    not hand out handles into the authenticated API. Built by
+    ``services/conversation_public_view.py`` as an allowlist — a Memory citation
+    keeps its title/snippet but loses its ``memory_id``. ``key`` (``"k1"`` or a
+    positional ``"1"``) is preserved so the page can number ``[k]`` markers from
+    it rather than from a list position the reference filter may have shifted."""
+
+    key: str = ""
+    title: str = ""
+    file_name: str = ""
+    location: str = ""
+    snippet: str = ""
+
+
+class PublicTurn(BaseModel):
+    """One Q&A turn in a shared conversation, readable without a session (T3).
+
+    Excludes the whole reasoning surface (``reasoning_trace`` / ``intent`` /
+    ``retrieval_scope`` / ``retrieval_query`` / ``top_relevance`` / ``mode`` /
+    ``llm_mode`` / ``retrieval_effort`` / ``index_required``) and every
+    addressable id. ``evidence_level`` IS exposed — it is part of the answer's
+    stated credibility, not an internal flag. Answer-attached images are
+    deliberately absent in v1 (T4 adds the anonymous image channel)."""
+
+    question: str = ""
+    answer_md: str = ""
+    asked_at: str = ""
+    answered_at: str = ""
+    # grounded / overview / inferred (答案可信度分档).
+    evidence_level: str = "inferred"
+    references: List[PublicReference] = Field(default_factory=list)
+    reference_count: int = 0
+    truncated_references: bool = False
+    # C-1: collection result cards are out of v1, but never silently dropped.
+    # Content-free count so the page can disclose that something was withheld
+    # at this turn (design §五 / §十). The judgement lives on the projection
+    # side, not the renderer, so a legacy payload's format cannot mute it.
+    omitted_result_sets: int = 0
+
+
+class PublicConversation(BaseModel):
+    """A shared conversation (multi-turn Q&A), readable without a session (T3).
+
+    ``shared_at`` is the read watermark — "内容截至何时" — so the page can state
+    that new turns after it are not included."""
+
+    title: str = ""
+    created_at: str = ""
+    shared_at: str = ""
+    turns: List[PublicTurn] = Field(default_factory=list)
+    truncated_turns: bool = False
+
+
 class SearchHit(BaseModel):
     scope: str
     notebook_id: str
