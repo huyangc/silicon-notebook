@@ -566,9 +566,18 @@ def _offered_entries(
             if score >= _SIMILARITY_FLOOR:
                 scored.append((score, str(entry.get("id") or ""), entry))
         scored.sort(key=lambda item: (-item[0], item[1]))
+        # codex #524 R6 P2:同一 (situation index, action) 至多展示**一条**——
+        # 模型的 UPDATE 只能用 `sN | action` 指认目标,两条相似旧条目共享同一
+        # 标签时解析必然歧义(首个匹配可能不是模型想改的那条,一次 UPDATE 就
+        # 污染另一条打法)。只留相似度最高的那条,解析按构造无歧义。
+        actions_taken: set[str] = set()
         for _score, entry_id, entry in scored[:_MAX_SIMILAR_ENTRIES]:
             if entry_id in seen:
                 continue
+            action = str(entry.get("action") or "")
+            if action in actions_taken:
+                continue
+            actions_taken.add(action)
             seen.add(entry_id)
             offered.append((index, entry))
     return offered
