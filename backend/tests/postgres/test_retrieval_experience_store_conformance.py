@@ -345,6 +345,9 @@ def test_the_version_signal_tracks_inserts_updates_and_evictions(
     inserted = harness.store.version_signal()
     assert inserted[0] == 1 and inserted[1] != ""
 
+    # 拨钟:in-place UPDATE 只动时间戳那一半,不拨钟的话 (count, max_ts) 两半
+    # 都不变——SQLite 侧同名用例就是这么写的,这里镜像它。
+    harness.clock.value = "2026-08-20T00:00:00+00:00"
     _upsert(
         harness, "rx_one", provenance=["run-2"], replace_conclusion=True,
         rationale="换了一个结论",
