@@ -847,6 +847,22 @@ class AskStateStore:
                 (conversation_id, notebook_id),
             )
 
+    def discard_unwatermarked_share(
+        self, notebook_id: str, conversation_id: str
+    ) -> None:
+        """Roll back a token issued for a still-empty conversation, but ONLY
+        while its watermark is still NULL (codex T2 review, concurrency P2).
+        See the SQLite ``discard_unwatermarked_share`` for the full rationale:
+        the ``AND shared_through_at IS NULL`` guard keeps two racing shares
+        from nuking a link the later one already returned live."""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE conversations SET share_token=NULL, "
+                "shared_through_at=NULL, shared_through_id=NULL "
+                "WHERE id=%s AND notebook_id=%s AND shared_through_at IS NULL",
+                (conversation_id, notebook_id),
+            )
+
     def conversation_share_state(self, notebook_id: str, conversation_id: str) -> dict:
         """The issued token + watermark, for the write-guarded read-back
         endpoint only (mirrors ``report_store.report_share_token``).

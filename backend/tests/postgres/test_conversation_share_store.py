@@ -242,3 +242,79 @@ def test_conversation_share_state_reads_back_token_and_watermark(
     after = store.conversation_share_state(notebook_id, conversation_id)
     assert after["share_token"] == issued["share_token"]
     assert after["shared_through_id"] == "ans-d"  # newest answer at share time
+
+
+def test_discard_unwatermarked_share_spares_a_watermarked_link(postgres_database):
+    """The conditional rollback (codex T2 review, concurrency P2): once a
+    concurrent share advances the watermark, a late rollback must NOT revoke
+    the now-live link. Mirrors the SQLite copy of this contract test."""
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("nb-race-pg", "n", "2026-01-01T00:00:00+00:00",
+             "2026-01-01T00:00:00+00:00"),
+        )
+        connection.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            ("conv-race-pg", "nb-race-pg", "t", "user-local",
+             "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    issued_a = store.share_conversation("nb-race-pg", "conv-race-pg")
+    token = issued_a["share_token"]
+    assert issued_a["shared_through_at"] == ""
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO answers "
+            "(id,notebook_id,conversation_id,question,payload,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            ("ans-1", "nb-race-pg", "conv-race-pg", "q",
+             '{"conclusion": "c"}', "2026-01-01T00:00:02+00:00"),
+        )
+    issued_b = store.share_conversation("nb-race-pg", "conv-race-pg")
+    assert issued_b["share_token"] == token  # COALESCE reuse
+    assert issued_b["shared_through_at"]
+
+    store.discard_unwatermarked_share("nb-race-pg", "conv-race-pg")
+    assert store.public_conversation_by_token(token) is not None
+    assert store.conversation_share_state(
+        "nb-race-pg", "conv-race-pg"
+    )["share_token"] == token
+
+
+def test_discard_unwatermarked_share_clears_a_genuinely_empty_conversation(
+    postgres_database,
+):
+    """The other half: no answer ever landed -> watermark stays NULL -> the
+    conditional rollback DOES discard the token."""
+    assert PostgresMigrator(postgres_database).migrate() == 29
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("nb-e-pg", "n", "2026-01-01T00:00:00+00:00",
+             "2026-01-01T00:00:00+00:00"),
+        )
+        connection.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            ("conv-e-pg", "nb-e-pg", "t", "user-local",
+             "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    issued = store.share_conversation("nb-e-pg", "conv-e-pg")
+    assert issued["shared_through_at"] == ""
+
+    store.discard_unwatermarked_share("nb-e-pg", "conv-e-pg")
+    assert store.conversation_share_state(
+        "nb-e-pg", "conv-e-pg"
+    )["share_token"] == ""
+    assert store.public_conversation_by_token(issued["share_token"]) is None

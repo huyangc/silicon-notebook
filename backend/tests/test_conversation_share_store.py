@@ -191,3 +191,83 @@ def test_conversation_share_state_reads_back_token_and_watermark(
     after = store.conversation_share_state(notebook_id, conversation_id)
     assert after["share_token"] == issued["share_token"]
     assert after["shared_through_id"] == "ans-d"  # newest answer at share time
+
+
+def test_discard_unwatermarked_share_spares_a_watermarked_link(
+    tmp_path, monkeypatch
+):
+    """The conditional rollback (codex T2 review, concurrency P2): once a
+    concurrent share has advanced the watermark, a late rollback must NOT
+    revoke the now-live link. Interleaving reproduced at the store layer:
+
+      A: share_conversation on a zero-answer conversation -> token, NULL wm
+      (first answer lands)
+      B: share_conversation -> reuses A's token, sets a real watermark
+      A: discard_unwatermarked_share -> must be a no-op (wm no longer NULL)
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    db = repo._runtime.database
+    with db.write() as conn:
+        conn.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-race', 'n', '2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO conversations "
+            "(id, notebook_id, title, created_by, created_at, updated_at) "
+            "VALUES ('conv-race', 'nb-race', 't', 'user-local', "
+            "'2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+        )
+    store = AskStateStore(db, repo._runtime.seams)
+
+    # A shares while the conversation is still empty: token minted, watermark NULL.
+    issued_a = store.share_conversation("nb-race", "conv-race")
+    token = issued_a["share_token"]
+    assert issued_a["shared_through_at"] == ""
+
+    # The first answer lands, then B shares: same token, real watermark.
+    with db.write() as conn:
+        conn.execute(
+            "INSERT INTO answers "
+            "(id, notebook_id, conversation_id, question, payload, created_at) "
+            "VALUES ('ans-1', 'nb-race', 'conv-race', 'q', "
+            "'{\"conclusion\": \"c\"}', '2026-01-01T00:00:02')"
+        )
+    issued_b = store.share_conversation("nb-race", "conv-race")
+    assert issued_b["share_token"] == token  # COALESCE reuse
+    assert issued_b["shared_through_at"]  # B handed a live link to its caller
+
+    # A's late rollback must spare B's now-watermarked link.
+    store.discard_unwatermarked_share("nb-race", "conv-race")
+    assert store.public_conversation_by_token(token) is not None
+    state = store.conversation_share_state("nb-race", "conv-race")
+    assert state["share_token"] == token
+
+
+def test_discard_unwatermarked_share_clears_a_genuinely_empty_conversation(
+    tmp_path, monkeypatch
+):
+    """The other half: when no answer ever landed, the watermark stays NULL and
+    the conditional rollback DOES discard the token — an empty conversation
+    must not keep a public link."""
+    repo = _repo(tmp_path, monkeypatch)
+    db = repo._runtime.database
+    with db.write() as conn:
+        conn.execute(
+            "INSERT INTO notebooks (id, name, created_at, updated_at) "
+            "VALUES ('nb-e', 'n', '2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO conversations "
+            "(id, notebook_id, title, created_by, created_at, updated_at) "
+            "VALUES ('conv-e', 'nb-e', 't', 'user-local', "
+            "'2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+        )
+    store = AskStateStore(db, repo._runtime.seams)
+
+    issued = store.share_conversation("nb-e", "conv-e")
+    assert issued["shared_through_at"] == ""  # NULL watermark
+
+    store.discard_unwatermarked_share("nb-e", "conv-e")
+    assert store.conversation_share_state("nb-e", "conv-e")["share_token"] == ""
+    assert store.public_conversation_by_token(issued["share_token"]) is None
