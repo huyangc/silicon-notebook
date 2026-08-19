@@ -849,8 +849,13 @@ def render_usage_block(stats: UsageStats) -> str:
         lines.append("searches that came back empty:")
         lines.extend(f"- {text}" for text in stats.empty_search_summaries)
     if stats.reports:
+        # codex #524 R7 P2:报告段的余量按**已渲染的全部文本**算,不是只按
+        # 问题行的 `spent`——表头、计数行与空检索摘要段此前不计账,ask 半吃满
+        # 后报告段仍能拿到近整半,总段超 3000。
+        rendered_so_far = sum(len(line) + 1 for line in lines)
         report_body = _render_report_sample(
-            stats.reports, AGENT_PROFILE_USAGE_SECTION_MAX_CHARS - spent
+            stats.reports,
+            max(0, AGENT_PROFILE_USAGE_SECTION_MAX_CHARS - rendered_so_far),
         )
         if report_body:
             lines.extend(report_body)

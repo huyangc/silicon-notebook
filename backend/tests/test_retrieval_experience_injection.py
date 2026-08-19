@@ -805,3 +805,30 @@ def test_the_report_engine_factory_actually_fills_the_seat(repo):
     assert (
         engine.dependencies.retrieval_experiences is repo.retrieval_experiences
     )
+
+
+def test_the_memo_never_serves_another_stores_entries():
+    """codex #524 R7 P2:同进程两个 runtime 的 store 可能给出相同 (行数, 时间)
+    签名——缓存键必须含 store 身份,否则 A 库的打法注进 B 库的 run。"""
+    from app.services.reasoning_retrieval import _cached_experiences
+
+    _reset_memo()
+
+    class _FixedStore:
+        def __init__(self, rationale):
+            self._rows = [{
+                "id": f"rx-{rationale}", "action": "ppr", "polarity": "good",
+                "rationale": rationale, "support": 1, "adopted": 0,
+                "situation": _situation(),
+            }]
+
+        def version_signal(self):
+            return (1, "2026-08-19T00:00:00+00:00")   # 两个 store 刻意同签名
+
+        def read_all(self, limit):
+            return list(self._rows)
+
+    a = _FixedStore("A 库的打法")
+    b = _FixedStore("B 库的打法")
+    assert _cached_experiences(a)[0]["rationale"] == "A 库的打法"
+    assert _cached_experiences(b)[0]["rationale"] == "B 库的打法"
