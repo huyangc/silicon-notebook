@@ -35,6 +35,7 @@ pipeline into a file about a threshold counter and a settle discipline.
 """
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 
@@ -161,7 +162,13 @@ def harness(tmp_path: Path, monkeypatch):
     for notebook_id in (NOTEBOOK_ID, OTHER_NOTEBOOK_ID):
         knowledge_counts_cache.invalidate(notebook_id)
 
-    profiles = AgentProfileStore(database, new_id=lambda p: f"{p}-1", now=lambda: NOW)
+    # A COUNTING id seam, not a constant one: this store mints the chain's
+    # ``claim_token`` generation, and two claims sharing a token would be
+    # indistinguishable — the very thing the token exists to prevent.
+    claim_ids = itertools.count(1)
+    profiles = AgentProfileStore(
+        database, new_id=lambda p: f"{p}-{next(claim_ids)}", now=lambda: NOW
+    )
     return {
         "settings": settings,
         "database": database,
@@ -169,6 +176,12 @@ def harness(tmp_path: Path, monkeypatch):
         "sources": SourceStore(database, now=lambda: NOW),
         "queries": QueryStore(database, settings),
     }
+
+
+def _run_base(service, claimed):
+    """Run exactly the way ``start_base`` does: the claim's snapshot AND its
+    generation token (Agentic Memory P2)."""
+    return service.run_base(NOTEBOOK_ID, claimed.pending_signal, claimed.token)
 
 
 def _service(harness, *, client: _Client | None = None):
@@ -439,7 +452,7 @@ def test_an_interrupted_run_also_consumes_its_batch(harness):
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
     with pytest.raises(KeyboardInterrupt):
-        service.run_base(NOTEBOOK_ID, claimed)
+        _run_base(service, claimed)
 
     assert _job(harness)["pending_signal"] == 0
 
@@ -485,7 +498,7 @@ def test_a_base_exception_inside_the_run_still_settles_the_row(harness, interrup
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
     with pytest.raises(interrupt):
-        service.run_base(NOTEBOOK_ID, claimed)
+        _run_base(service, claimed)
 
     row = _job(harness)
     assert row["status"] == "failed"
@@ -500,7 +513,7 @@ def test_an_ordinary_exception_settles_and_propagates(harness):
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
     with pytest.raises(ValueError):
-        service.run_base(NOTEBOOK_ID, claimed)
+        _run_base(service, claimed)
 
     assert _job(harness)["diagnostic"] == "internal_error"
     assert _job(harness)["status"] == "failed"
@@ -539,7 +552,7 @@ def test_an_unconfigured_model_fails_the_chain_and_keeps_the_blocks(harness):
     service = _service(harness, client=None)
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
-    service.run_base(NOTEBOOK_ID, claimed)
+    _run_base(service, claimed)
 
     row = _job(harness)
     assert row["status"] == "failed"
@@ -602,7 +615,7 @@ def test_an_unusable_reply_keeps_every_previous_block(harness, raw, diagnostic):
     service = _service(harness, client=_Client(raw))
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
-    service.run_base(NOTEBOOK_ID, claimed)
+    _run_base(service, claimed)
 
     row = _job(harness)
     assert row["status"] == "failed"
@@ -626,7 +639,7 @@ def test_one_bad_label_discards_the_whole_reply_not_just_that_block(harness):
     )
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
-    service.run_base(NOTEBOOK_ID, claimed)
+    _run_base(service, claimed)
 
     assert _blocks(harness) == {}
     assert _job(harness)["status"] == "failed"
@@ -643,7 +656,7 @@ def test_an_empty_value_omits_the_block_instead_of_clearing_it(harness):
     )
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
-    service.run_base(NOTEBOOK_ID, claimed)
+    _run_base(service, claimed)
 
     assert _blocks(harness)["corpus_shape"]["value"] == "保留我"
     assert _job(harness)["status"] == "done"
@@ -673,7 +686,7 @@ def test_a_block_edited_mid_run_is_skipped_and_not_retried(harness):
     service = _service(harness, client=_Client(reply))
     claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
 
-    service.run_base(NOTEBOOK_ID, claimed)
+    _run_base(service, claimed)
 
     blocks = _blocks(harness)
     assert blocks["corpus_shape"]["value"] == "用户刚改的"
@@ -703,7 +716,7 @@ def test_a_job_written_block_can_be_retired_and_keeps_its_history(harness):
         _reply([{"label": "corpus_shape", "retire": True}])
     ))
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     block = _blocks(harness)["corpus_shape"]
     assert block["value"] == ""
@@ -732,7 +745,7 @@ def test_a_user_written_block_is_never_retired(harness):
         ])
     ))
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     blocks = _blocks(harness)
     assert blocks["corpus_shape"]["value"] == "这是工具手册库"
@@ -751,7 +764,7 @@ def test_retiring_a_block_that_has_nothing_to_withdraw_is_not_a_write(harness):
         _reply([{"label": "corpus_shape", "retire": True}])
     ))
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     row = _job(harness)
     assert row["status"] == "done"
@@ -773,7 +786,7 @@ def test_a_user_edited_block_reaches_the_prompt_marked_as_authoritative(harness)
     client = _Client(_reply([]))
     service = _service(harness, client=client)
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     prompt = client.prompts[0]
     assert "- corpus_shape (user-authored): 这是工具手册库" in prompt
@@ -936,7 +949,7 @@ def test_the_prompt_carries_the_reconciliation_only_rule(harness):
     )
     service = _service(harness, client=client)
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     prompt = client.prompts[0]
     assert "not evidence to reuse" in prompt
@@ -1103,7 +1116,7 @@ def test_the_consolidation_call_uses_its_own_output_budget(harness):
     client.chat_json = spy
     service = _service(harness, client=client)
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     assert seen == [{"max_tokens": AGENT_PROFILE_MAX_OUTPUT_TOKENS}]
     assert AGENT_PROFILE_MAX_OUTPUT_TOKENS <= 8192
@@ -1126,7 +1139,7 @@ def test_evidence_the_statistics_never_served_is_dropped(harness):
         ),
     )
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     block = _blocks(harness)["corpus_gaps"]
     assert block["evidence"] == [{"claim_index": 0, "source_ids": ["src-a"]}]
@@ -1141,7 +1154,7 @@ def test_an_oversized_value_is_clipped_before_it_is_stored(harness):
         ),
     )
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     value = _blocks(harness)["corpus_shape"]["value"]
     assert len(value) == 400
@@ -1160,7 +1173,7 @@ def test_the_event_carries_counts_only(harness):
         ),
     )
 
-    service.run_base(NOTEBOOK_ID, harness["profiles"].claim(NOTEBOOK_ID, ""))
+    _run_base(service, harness["profiles"].claim(NOTEBOOK_ID, ""))
 
     event = harness["event_log"].events[-1]
     assert event["kind"] == "agent_profile_consolidated"

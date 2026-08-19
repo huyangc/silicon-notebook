@@ -3227,5 +3227,63 @@ MIGRATION_MANIFEST[(51, 52)] = {
 }
 
 
+# v53: agent_profile_jobs.claim_token — the consolidation chain's claim
+# generation (Agentic Memory P2, closing the registered R4 ABA). One bare
+# column ALTER on a table THIS FILE ALREADY MANIFESTS, which is what makes this
+# hop different from every other single-column hop (v27 sources.chunked_at, v48
+# sources.agent_profile_id): SQLite's ALTER TABLE ADD COLUMN rewrites the stored
+# CREATE TABLE text in sqlite_master, splicing the new column in after the LAST
+# column definition and before the table constraints. Every rebased (x, 53) key
+# with x < 51 sees agent_profile_jobs as a newly ADDED table and compares its
+# SQL text byte for byte, so the text registered here has to be the POST-ALTER
+# one — hence the table override below alongside the column entry. The (52, 53)
+# hop takes the other branch (the table exists on both sides), where the
+# verifier defers the changed-text check to the per-column comparison precisely
+# because a manifested column ALTER always changes that text.
+AGENT_PROFILE_CLAIM_TOKEN_COLUMNS = {
+    "agent_profile_jobs": {
+        "claim_token": ("claim_token", "TEXT", 1, "''", 0),
+    },
+}
+AGENT_PROFILE_CLAIM_TOKEN_TABLES = {
+    "agent_profile_jobs": """CREATE TABLE agent_profile_jobs (
+                  notebook_id   TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id      TEXT NOT NULL DEFAULT '',
+                  status        TEXT NOT NULL DEFAULT 'idle',
+                  pending_signal INTEGER NOT NULL DEFAULT 0,
+                  runs          INTEGER NOT NULL DEFAULT 0,
+                  blocks_written INTEGER NOT NULL DEFAULT 0,
+                  failure_reason TEXT NOT NULL DEFAULT '',
+                  diagnostic    TEXT NOT NULL DEFAULT '',
+                  started_at    TEXT NOT NULL DEFAULT '',
+                  finished_at   TEXT NOT NULL DEFAULT '',
+                  created_at    TEXT NOT NULL,
+                  updated_at    TEXT NOT NULL, claim_token TEXT NOT NULL DEFAULT '',
+                  PRIMARY KEY (notebook_id, owner_id)
+                )""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 53, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **AGENT_PROFILE_CLAIM_TOKEN_TABLES},
+        "columns": {
+            **manifest["columns"],
+            "agent_profile_jobs": {
+                **manifest["columns"].get("agent_profile_jobs", {}),
+                **AGENT_PROFILE_CLAIM_TOKEN_COLUMNS["agent_profile_jobs"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(52, 53)] = {
+    "tables": {},
+    "columns": AGENT_PROFILE_CLAIM_TOKEN_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

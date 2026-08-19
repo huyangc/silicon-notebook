@@ -29,7 +29,13 @@ from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.ports import (
     AGENT_PROFILE_JOB_TERMINAL_STATUSES,
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
+    AGENT_PROFILE_SETTLE_GONE,
+    AGENT_PROFILE_SETTLE_SUPERSEDED,
+    AGENT_PROFILE_SETTLED,
+    AgentProfileClaim,
+    AgentProfileClaimSuperseded,
     AgentProfileRevisionConflict,
+    AgentProfileSettleOutcome,
     append_profile_history as _append_history,
 )
 
@@ -43,9 +49,9 @@ class AgentProfileStore:
         now: Callable[[], TimestampInput],
     ) -> None:
         self.database = database
-        # Construction parity with the rest of the bundle only — this store
-        # synthesises no ids (both tables are keyed by caller-supplied
-        # tuples). Same note as the SQLite mirror.
+        # Neither table is KEYED by a synthesised id, but ``claim`` mints one
+        # value through this seam — the chain's ``claim_token`` generation.
+        # Same note as the SQLite mirror.
         self.new_id = new_id
         self.now = normalized_clock(now)
 
@@ -79,6 +85,7 @@ class AgentProfileStore:
             "diagnostic": row["diagnostic"],
             "started_at": iso_timestamp(row["started_at"]),
             "finished_at": iso_timestamp(row["finished_at"]),
+            "claim_token": row["claim_token"],
             "created_at": iso_timestamp(row["created_at"]),
             "updated_at": iso_timestamp(row["updated_at"]),
         }
@@ -118,17 +125,45 @@ class AgentProfileStore:
         expected_revision: int,
         origin: str,
         actor: str,
+        claim_token: str = "",
     ) -> dict:
         """Upsert inside ONE write transaction. ``expected_revision=0`` means
         "no row yet"; a concurrent creator racing the same ``INSERT`` is
         caught as ``UniqueViolation`` and re-raised as
         ``AgentProfileRevisionConflict`` rather than left to bubble as a raw
         DB error. Any other ``expected_revision`` is compared, under
-        ``FOR UPDATE``, against the row's stored ``revision``."""
+        ``FOR UPDATE``, against the row's stored ``revision``.
+
+        A non-empty ``claim_token`` adds the generation check the SQLite mirror
+        documents, and takes it FIRST — before either revision branch touches
+        ``agent_notebook_profile``. Two reasons, both deliberate:
+
+        * ``FOR SHARE`` rather than a plain SELECT: this backend's write
+          transaction is not the process-wide file lock SQLite's
+          ``begin_immediate`` gives, so an unlocked read would let a concurrent
+          ``clear_job_row`` (member removal) commit between the check and the
+          write. The share lock holds the row until this transaction ends,
+          which is what makes the check as atomic here as it is there. It is
+          one primary-key row and no other writer of this store takes it, so it
+          adds no contention of its own.
+        * Jobs row first, THEN block rows — one lock order for every write in
+          this store. ``clear_job_row`` and ``clear_all`` each touch only one of
+          the two tables (and in separate transactions), so no cycle exists
+          today; taking them in a fixed order is what keeps that true."""
         now = self.now()
         evidence_list = list(evidence)
         expected = int(expected_revision)
+        token = str(claim_token or "")
         with self.database.write() as connection:
+            if token:
+                claimed = connection.execute(
+                    "SELECT 1 FROM agent_profile_jobs "
+                    "WHERE notebook_id=%s AND owner_id=%s AND claim_token=%s "
+                    "FOR SHARE",
+                    (notebook_id, owner_id, token),
+                ).fetchone()
+                if claimed is None:
+                    raise AgentProfileClaimSuperseded(notebook_id, owner_id)
             if expected == 0:
                 history = _append_history(
                     [], None, value, origin, actor, iso_timestamp(now), 1
@@ -298,18 +333,21 @@ class AgentProfileStore:
             ).fetchone()
         return int(row["pending_signal"])
 
-    def claim(self, notebook_id: str, owner_id: str) -> int | None:
+    def claim(self, notebook_id: str, owner_id: str) -> AgentProfileClaim | None:
         """Take the single-flight slot and return the ``pending_signal``
-        snapshot, or ``None`` when it was already held. See the SQLite mirror
-        for the full reasoning (row-ensure so a never-signalled chain is
-        claimable, rowcount-decided CAS, previous-run reset, and why the
-        snapshot comes back from the winning statement itself).
+        snapshot plus this run's freshly minted generation token, or ``None``
+        when it was already held. See the SQLite mirror for the full reasoning
+        (row-ensure so a never-signalled chain is claimable, rowcount-decided
+        CAS, previous-run reset, why the snapshot comes back from the winning
+        statement itself, and why neither the primary key nor ``runs`` can play
+        the part the token plays).
 
         ``ON CONFLICT DO NOTHING`` is this backend's ``INSERT OR IGNORE``;
         ``finished_at`` resets to ``NULL`` rather than ``''`` because it is a
         nullable ``timestamptz`` here — ``_job_row`` normalises that back to
         the shared ``""`` sentinel on read."""
         now = self.now()
+        token = self.new_id("apc")
         with self.database.write() as connection:
             connection.execute(
                 "INSERT INTO agent_profile_jobs "
@@ -319,13 +357,18 @@ class AgentProfileStore:
             )
             row = connection.execute(
                 "UPDATE agent_profile_jobs SET status='running',started_at=%s,"
+                "claim_token=%s,"
                 "finished_at=NULL,failure_reason='',diagnostic='',blocks_written=0,"
                 "updated_at=%s WHERE notebook_id=%s AND owner_id=%s "
                 "AND status NOT IN ('queued','running') "
                 "RETURNING pending_signal",
-                (now, now, notebook_id, owner_id),
+                (now, token, now, notebook_id, owner_id),
             ).fetchone()
-        return int(row["pending_signal"]) if row is not None else None
+        if row is None:
+            return None
+        return AgentProfileClaim(
+            pending_signal=int(row["pending_signal"]), token=token
+        )
 
     def settle(
         self,
@@ -337,28 +380,47 @@ class AgentProfileStore:
         diagnostic: str = "",
         blocks_written: int = 0,
         consumed: int,
-    ) -> bool:
-        """See the SQLite mirror for the ``consumed``/CAS reasoning.
-        ``GREATEST`` is this backend's spelling of SQLite's two-argument
-        ``MAX`` — same floor, same single statement."""
+        claim_token: str,
+    ) -> AgentProfileSettleOutcome:
+        """See the SQLite mirror for the ``consumed``/CAS reasoning, for why
+        the CAS also carries ``claim_token``, and for why the "why did it not
+        land" re-read must share this transaction (``gone`` and ``superseded``
+        send the caller in opposite directions). ``GREATEST`` is this backend's
+        spelling of SQLite's two-argument ``MAX`` — same floor, same single
+        statement."""
         if status not in AGENT_PROFILE_JOB_TERMINAL_STATUSES:
             raise ValueError("agent profile job terminal status is not recognised")
         now = self.now()
         written = max(0, int(blocks_written))
         taken = max(0, int(consumed))
+        token = str(claim_token or "")
         with self.database.write() as connection:
             cursor = connection.execute(
                 "UPDATE agent_profile_jobs SET status=%s,failure_reason=%s,"
                 "diagnostic=%s,blocks_written=%s,runs=runs+1,"
                 "pending_signal=GREATEST(0, pending_signal - %s),"
                 "finished_at=%s,updated_at=%s WHERE notebook_id=%s AND owner_id=%s "
-                "AND status IN ('queued','running')",
+                "AND status IN ('queued','running') AND claim_token=%s",
                 (
                     status, failure_reason, diagnostic, written, taken,
-                    now, now, notebook_id, owner_id,
+                    now, now, notebook_id, owner_id, token,
                 ),
             )
-        return cursor.rowcount == 1
+            landed = cursor.rowcount == 1
+            survivor = (
+                None if landed
+                else connection.execute(
+                    "SELECT 1 FROM agent_profile_jobs "
+                    "WHERE notebook_id=%s AND owner_id=%s",
+                    (notebook_id, owner_id),
+                ).fetchone()
+            )
+        if landed:
+            return AGENT_PROFILE_SETTLED
+        return (
+            AGENT_PROFILE_SETTLE_GONE if survivor is None
+            else AGENT_PROFILE_SETTLE_SUPERSEDED
+        )
 
     def sweep_stale_on_start(self) -> int:
         """Startup crash recovery — see the SQLite mirror. The reason text is

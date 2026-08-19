@@ -53,7 +53,11 @@ from app.repositories.ports import (
     AGENT_PROFILE_MODEL_UNAVAILABLE_MESSAGE,
     AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE,
     AGENT_PROFILE_TRACE_SAMPLE,
+    AGENT_PROFILE_SETTLE_GONE,
+    AGENT_PROFILE_SETTLE_SUPERSEDED,
+    AGENT_PROFILE_SETTLED,
     AGENT_PROFILE_TRACE_STEP_LIMIT,
+    AgentProfileClaimSuperseded,
     AgentProfileRevisionConflict,
     AgentProfileStorePort,
     AskStateStorePort,
@@ -97,6 +101,25 @@ BASE_CHAIN_OWNER = ""
 BASE_LABELS: tuple[str, ...] = ("corpus_shape", "key_entities", "corpus_gaps")
 
 _JOB_NAME_PREFIX = "agentprofile-"
+
+#: ``_safe_settle``'s fourth value: the settle WRITE itself failed (or raised),
+#: so the store never got to say which of its three outcomes applies.
+#:
+#: Deliberately not folded into ``"gone"``. ``"gone"`` is a fact the store
+#: observed inside a transaction; this is the absence of any observation, and
+#: labelling it with a fact would be a lie the next reader has no way to catch.
+#: The overlay wipe treats it LIKE ``"gone"`` (see ``_WIPE_ON_SETTLE_OUTCOMES``)
+#: — that is exactly what P1's ``settle() -> bool`` did, and it is the
+#: conservative direction: the cost of a wipe we did not need is one
+#: regenerable round of that member's own notes, while the cost of skipping one
+#: we did need is revoked private data left in place.
+_SETTLE_UNKNOWN = "unknown"
+
+#: Which settle outcomes make ``run_overlay`` re-wipe the member's blocks.
+#: ``"superseded"`` is pointedly NOT here: a newer generation holds the chain
+#: and may already have written its own blocks, so wiping would delete work
+#: that is current — strictly worse than the ABA the claim token closes.
+_WIPE_ON_SETTLE_OUTCOMES = frozenset({AGENT_PROFILE_SETTLE_GONE, _SETTLE_UNKNOWN})
 
 #: How many per-document lines the statistics block may carry. The block is a
 #: prompt input on a bounded budget, and a 3 000-document library would
@@ -922,7 +945,8 @@ class AgentProfileConsolidationService:
             background_jobs.submit(
                 self.run_base,
                 notebook_id,
-                int(claimed),
+                int(claimed.pending_signal),
+                claimed.token,
                 name=f"{_JOB_NAME_PREFIX}{notebook_id}",
                 # Not a pending-actions item: nothing here waits for a human
                 # decision, so ringing the bell would train users to ignore it.
@@ -944,6 +968,7 @@ class AgentProfileConsolidationService:
                 notebook_id,
                 BASE_CHAIN_OWNER,
                 "failed",
+                claim_token=claimed.token,
                 failure_reason=AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE,
                 diagnostic="job_submission_failed",
                 consumed=0,
@@ -968,7 +993,9 @@ class AgentProfileConsolidationService:
             return 0
 
     # --------------------------------------------------------------- the run
-    def run_base(self, notebook_id: str, claimed_signal: int = 0) -> dict:
+    def run_base(
+        self, notebook_id: str, claimed_signal: int = 0, claim_token: str = ""
+    ) -> dict:
         """Execute one shared-base consolidation to a terminal state.
 
         ``claimed_signal`` is the ``pending_signal`` snapshot ``claim``
@@ -976,6 +1003,13 @@ class AgentProfileConsolidationService:
         failure and interrupt alike. Signals that arrived WHILE the run was in
         flight therefore survive to trigger the next round, and a failed run
         does NOT re-fire on the next single source change.
+
+        ``claim_token`` is the other half of what ``claim`` handed back: this
+        run's GENERATION. It rides every ``settle`` and every ``write_block``,
+        so a run whose slot was taken over in the meantime (the base chain's
+        version of that is a manual rebuild racing the automatic sweep) settles
+        nothing and writes nothing instead of overwriting the newer round's
+        work with a value computed before it started.
 
         ⚠ That last half is a cost gate, and it is the reason failure consumes.
         Keeping the signal on failure sounds kinder (the changes "still count"),
@@ -997,7 +1031,7 @@ class AgentProfileConsolidationService:
             return round((time.perf_counter() - started) * 1000)
 
         try:
-            outcome = self._consolidate_base(notebook_id)
+            outcome = self._consolidate_base(notebook_id, claim_token)
         except AgentProfileModelUnavailable:
             result = self._fail(
                 notebook_id,
@@ -1007,6 +1041,7 @@ class AgentProfileConsolidationService:
                 latency_ms(),
                 consumed,
                 chain="base",
+                claim_token=claim_token,
             )
             self._maybe_requeue_base(notebook_id)
             return result
@@ -1020,6 +1055,7 @@ class AgentProfileConsolidationService:
                 latency_ms(),
                 consumed,
                 chain="base",
+                claim_token=claim_token,
             )
             self._maybe_requeue_base(notebook_id)
             return result
@@ -1028,6 +1064,7 @@ class AgentProfileConsolidationService:
                 notebook_id,
                 BASE_CHAIN_OWNER,
                 "failed",
+                claim_token=claim_token,
                 failure_reason=AGENT_PROFILE_INTERRUPTED_MESSAGE,
                 diagnostic="worker_interrupted",
                 consumed=consumed,
@@ -1043,6 +1080,7 @@ class AgentProfileConsolidationService:
                 latency_ms(),
                 consumed,
                 chain="base",
+                claim_token=claim_token,
             )
             self._maybe_requeue_base(notebook_id)
             raise
@@ -1050,6 +1088,7 @@ class AgentProfileConsolidationService:
             notebook_id,
             BASE_CHAIN_OWNER,
             "done",
+            claim_token=claim_token,
             diagnostic=outcome.diagnostic,
             blocks_written=outcome.written,
             consumed=consumed,
@@ -1070,7 +1109,9 @@ class AgentProfileConsolidationService:
             "diagnostic": outcome.diagnostic,
         }
 
-    def _consolidate_base(self, notebook_id: str) -> _BaseOutcome:
+    def _consolidate_base(
+        self, notebook_id: str, claim_token: str = ""
+    ) -> _BaseOutcome:
         if not self.models.configured(AGENT_PROFILE_WORKLOAD):
             # Checked before the statistics reads: an unconfigured deployment
             # should pay nothing to learn it is unconfigured.
@@ -1099,13 +1140,14 @@ class AgentProfileConsolidationService:
             # are two distinct observations about the provider.
             raise AgentProfileOutputRejected("unparsable_reply")
         parsed = parse_base_reply(data, stats.served_ids)
-        return self._write_blocks(notebook_id, blocks, parsed)
+        return self._write_blocks(notebook_id, blocks, parsed, claim_token)
 
     def _write_blocks(
         self,
         notebook_id: str,
         current: Sequence[Mapping[str, Any]],
         parsed: Sequence[Mapping[str, Any]],
+        claim_token: str = "",
     ) -> _BaseOutcome:
         by_label = {
             str(block.get("label") or ""): block
@@ -1120,78 +1162,94 @@ class AgentProfileConsolidationService:
         refused: list[str] = []
         preserved: list[str] = []
         dropped = 0
-        for block in parsed:
-            label = str(block["label"])
-            existing = by_label.get(label)
-            expected = int(existing["revision"]) if existing else 0
-            if block.get("retire"):
-                # An explicit withdrawal (codex #520 R2 P2). Written as an
-                # empty value with ``origin="job"`` rather than through
-                # ``clear_block``, which hardcodes ``updated_origin='user'``:
-                # a job's withdrawal recorded in the history as a person's
-                # clear is a lie in the one record that explains why a block
-                # disappeared.
-                disposition = retire_disposition(existing)
-                if disposition == RETIRE_NOOP:
+        # ``AgentProfileClaimSuperseded`` aborts the WHOLE loop rather than
+        # skipping one label the way a revision conflict does: it does not say
+        # "this block moved on", it says "this run no longer holds the chain",
+        # and every remaining write would be the same stale round trying again.
+        # Caught around the loop so the counts above stay honest about what did
+        # land before the generation turned over (partial writes are the
+        # existing semantics for a mid-loop failure, and reporting zero would
+        # hide them).
+        superseded = False
+        try:
+            for block in parsed:
+                label = str(block["label"])
+                existing = by_label.get(label)
+                expected = int(existing["revision"]) if existing else 0
+                if block.get("retire"):
+                    # An explicit withdrawal (codex #520 R2 P2). Written as an
+                    # empty value with ``origin="job"`` rather than through
+                    # ``clear_block``, which hardcodes ``updated_origin='user'``:
+                    # a job's withdrawal recorded in the history as a person's
+                    # clear is a lie in the one record that explains why a block
+                    # disappeared.
+                    disposition = retire_disposition(existing)
+                    if disposition == RETIRE_NOOP:
+                        continue
+                    if disposition == RETIRE_REFUSED:
+                        refused.append(label)
+                        continue
+                    try:
+                        self.profiles.write_block(
+                            notebook_id,
+                            BASE_CHAIN_OWNER,
+                            label,
+                            value="",
+                            evidence=[],
+                            expected_revision=expected,
+                            origin="job",
+                            actor="",
+                            claim_token=claim_token,
+                        )
+                    except AgentProfileRevisionConflict:
+                        conflicts.append(label)
+                        continue
+                    written += 1
+                    retired.append(label)
                     continue
-                if disposition == RETIRE_REFUSED:
-                    refused.append(label)
+                if user_authoritative(existing):
+                    # codex R3 P1: an ordinary job update to a person's block
+                    # would flip its provenance to ``job`` and let the NEXT run
+                    # retire their words. Refused outright — the prompt says not
+                    # to return these labels, and the server does not trust that
+                    # instruction alone.
+                    preserved.append(label)
                     continue
+                evidence = list(block["evidence"])
+                dropped += int(block.get("evidence_dropped") or 0)
                 try:
                     self.profiles.write_block(
                         notebook_id,
                         BASE_CHAIN_OWNER,
                         label,
-                        value="",
-                        evidence=[],
+                        value=str(block["value"]),
+                        # One entry, ``claim_index`` 0: the base prompt asks for
+                        # block-level evidence rather than per-sentence evidence,
+                        # so there is exactly one claim to index. The column's
+                        # shape stays the documented one so a future per-claim
+                        # prompt needs no migration.
+                        evidence=[{"claim_index": 0, "source_ids": evidence}],
                         expected_revision=expected,
                         origin="job",
                         actor="",
+                        claim_token=claim_token,
                     )
                 except AgentProfileRevisionConflict:
+                    # A person edited this block while the run was in flight.
+                    # Their edit wins and this block is skipped — NOT retried: a
+                    # retry would re-apply a value computed before their edit, i.e.
+                    # overwrite it with a slower race. The next run starts from
+                    # their text (which it will see marked user-authored).
                     conflicts.append(label)
                     continue
                 written += 1
-                retired.append(label)
-                continue
-            if user_authoritative(existing):
-                # codex R3 P1: an ordinary job update to a person's block
-                # would flip its provenance to ``job`` and let the NEXT run
-                # retire their words. Refused outright — the prompt says not
-                # to return these labels, and the server does not trust that
-                # instruction alone.
-                preserved.append(label)
-                continue
-            evidence = list(block["evidence"])
-            dropped += int(block.get("evidence_dropped") or 0)
-            try:
-                self.profiles.write_block(
-                    notebook_id,
-                    BASE_CHAIN_OWNER,
-                    label,
-                    value=str(block["value"]),
-                    # One entry, ``claim_index`` 0: the base prompt asks for
-                    # block-level evidence rather than per-sentence evidence,
-                    # so there is exactly one claim to index. The column's
-                    # shape stays the documented one so a future per-claim
-                    # prompt needs no migration.
-                    evidence=[{"claim_index": 0, "source_ids": evidence}],
-                    expected_revision=expected,
-                    origin="job",
-                    actor="",
-                )
-            except AgentProfileRevisionConflict:
-                # A person edited this block while the run was in flight.
-                # Their edit wins and this block is skipped — NOT retried: a
-                # retry would re-apply a value computed before their edit, i.e.
-                # overwrite it with a slower race. The next run starts from
-                # their text (which it will see marked user-authored).
-                conflicts.append(label)
-                continue
-            written += 1
-            chars += len(str(block["value"]))
-            evidence_ids += len(evidence)
+                chars += len(str(block["value"]))
+                evidence_ids += len(evidence)
+        except AgentProfileClaimSuperseded:
+            superseded = True
         diagnostic_parts: list[str] = []
+        if superseded:
+            diagnostic_parts.append("claim_superseded")
         if conflicts:
             diagnostic_parts.append("cas_conflict:" + ",".join(sorted(conflicts)))
         if retired:
@@ -1352,8 +1410,7 @@ class AgentProfileConsolidationService:
         rather than from conversations — one definition of "an ask happened",
         not two that disagree.
 
-        ⚠ Registered residual (codex #520 R5 P2, accepted — same family as
-        the R4 ABA note in ``_consolidate_overlay``): this hook does not
+        ⚠ Registered residual (codex #520 R5 P2, accepted): this hook does not
         verify the member still has notebook access, so a completion landing
         AFTER their removal can recreate the job row (``bump_signal`` upserts)
         and, once the counter fills, a later run rebuilds that member's own
@@ -1361,7 +1418,13 @@ class AgentProfileConsolidationService:
         member's own notes — the read side never serves them to anyone else —
         and closing it needs an access-checker seat wired into this service
         for a check that would itself race the removal it guards against.
-        Registered for the P2 claim-generation rework instead.
+
+        ⚠ The claim generation added in P2 does NOT close this one, and saying
+        so explicitly matters because the two used to be filed as one family:
+        the row this hook recreates carries a perfectly legitimate NEW
+        generation, so every downstream generation check is satisfied by it.
+        The token separates "which run holds the chain", never "is this person
+        still a member". Still registered, on its own.
         """
         try:
             if not user_id or self.ask_state is None:
@@ -1466,7 +1529,8 @@ class AgentProfileConsolidationService:
                 self.run_overlay,
                 notebook_id,
                 user_id,
-                int(claimed),
+                int(claimed.pending_signal),
+                claimed.token,
                 name=f"{_OVERLAY_JOB_NAME_PREFIX}{notebook_id}",
                 notify_pending=False,
             )
@@ -1475,6 +1539,7 @@ class AgentProfileConsolidationService:
                 notebook_id,
                 user_id,
                 "failed",
+                claim_token=claimed.token,
                 failure_reason=AGENT_PROFILE_SUBMISSION_FAILED_MESSAGE,
                 diagnostic="job_submission_failed",
                 consumed=0,
@@ -1485,7 +1550,11 @@ class AgentProfileConsolidationService:
 
     # -------------------------------------------------------- overlay: the run
     def run_overlay(
-        self, notebook_id: str, user_id: str, claimed_signal: int = 0
+        self,
+        notebook_id: str,
+        user_id: str,
+        claimed_signal: int = 0,
+        claim_token: str = "",
     ) -> dict:
         """Execute one overlay consolidation to a terminal state.
 
@@ -1494,6 +1563,14 @@ class AgentProfileConsolidationService:
         ``except Exception`` cannot see them, and EVERY terminal path consumes
         exactly the ``claim`` snapshot so mid-run signals survive while a
         failing provider still cannot be billed once per ask.
+
+        ``claim_token`` is this run's GENERATION, and it is what makes the
+        revoked-overlay clean-up below sound. Every settle now answers with one
+        of three outcomes instead of a bool, and only two of them mean "wipe"
+        (see ``_WIPE_ON_SETTLE_OUTCOMES``): a settle that lost to a LATER claim
+        must leave the blocks alone, because the newer run may have written
+        them. Under P1's bool that case was indistinguishable from "the member
+        was removed" and took the wipe branch.
         """
         started = time.perf_counter()
         consumed = max(0, int(claimed_signal))
@@ -1502,7 +1579,7 @@ class AgentProfileConsolidationService:
             return round((time.perf_counter() - started) * 1000)
 
         try:
-            outcome = self._consolidate_overlay(notebook_id, user_id)
+            outcome = self._consolidate_overlay(notebook_id, user_id, claim_token)
         except AgentProfileModelUnavailable:
             result = self._fail(
                 notebook_id,
@@ -1512,10 +1589,11 @@ class AgentProfileConsolidationService:
                 latency_ms(),
                 consumed,
                 chain="overlay",
+                claim_token=claim_token,
             )
-            if not result.get("settled", True):
-                self._clear_revoked_overlay(notebook_id, user_id)
-            self._maybe_requeue_overlay(notebook_id, user_id)
+            self._after_overlay_settle(
+                notebook_id, user_id, str(result.get("settle_outcome") or "")
+            )
             return result
         except AgentProfileOutputRejected as exc:
             # Fail-open: the notes that were already there stand untouched.
@@ -1527,21 +1605,23 @@ class AgentProfileConsolidationService:
                 latency_ms(),
                 consumed,
                 chain="overlay",
+                claim_token=claim_token,
             )
-            if not result.get("settled", True):
-                self._clear_revoked_overlay(notebook_id, user_id)
-            self._maybe_requeue_overlay(notebook_id, user_id)
+            self._after_overlay_settle(
+                notebook_id, user_id, str(result.get("settle_outcome") or "")
+            )
             return result
         except (KeyboardInterrupt, SystemExit):
             settled = self._safe_settle(
                 notebook_id,
                 user_id,
                 "failed",
+                claim_token=claim_token,
                 failure_reason=AGENT_PROFILE_INTERRUPTED_MESSAGE,
                 diagnostic="worker_interrupted",
                 consumed=consumed,
             )
-            if not settled:
+            if settled in _WIPE_ON_SETTLE_OUTCOMES:
                 self._clear_revoked_overlay(notebook_id, user_id)
             self._emit("failed", notebook_id, chain="overlay",
                        latency_ms=latency_ms())
@@ -1555,27 +1635,32 @@ class AgentProfileConsolidationService:
                 latency_ms(),
                 consumed,
                 chain="overlay",
+                claim_token=claim_token,
             )
-            if not result.get("settled", True):
-                self._clear_revoked_overlay(notebook_id, user_id)
             # codex R5 P2: this terminal path re-checks the leftover count like
             # every other one — without it, signals that filled a threshold
             # during a run that then crashed stay stranded until the member's
             # next ask, which may never come.
-            self._maybe_requeue_overlay(notebook_id, user_id)
+            self._after_overlay_settle(
+                notebook_id, user_id, str(result.get("settle_outcome") or "")
+            )
             raise
         settled = self._safe_settle(
             notebook_id,
             user_id,
             "done",
+            claim_token=claim_token,
             diagnostic=outcome.diagnostic,
             blocks_written=outcome.written,
             consumed=consumed,
         )
-        if not settled:
+        if settled in _WIPE_ON_SETTLE_OUTCOMES:
             # codex R1 P1(写后兜底): the job row vanished between the writes
             # and this settle — only member removal deletes it, so any block
             # this run just recreated is revoked private data. Wipe it again.
+            # ``superseded`` is excluded on purpose (P2): there the row is very
+            # much still there, held by a NEWER claim whose blocks this wipe
+            # would destroy.
             self._clear_revoked_overlay(notebook_id, user_id)
         self._emit(
             "done",
@@ -1586,14 +1671,30 @@ class AgentProfileConsolidationService:
             evidence=outcome.evidence,
             latency_ms=latency_ms(),
         )
-        self._maybe_requeue_overlay(notebook_id, user_id)
+        self._maybe_requeue_overlay(notebook_id, user_id, settled)
         return {
             "notebook_id": notebook_id,
             "blocks_written": outcome.written,
             "diagnostic": outcome.diagnostic,
         }
 
-    def _consolidate_overlay(self, notebook_id: str, user_id: str) -> _BaseOutcome:
+    def _after_overlay_settle(
+        self, notebook_id: str, user_id: str, settled: str
+    ) -> None:
+        """The two things every non-interrupt overlay terminal path does with a
+        settle outcome, in one place so a new failure branch cannot get the pair
+        half right (P1 had this open-coded four times).
+
+        Wipe on ``gone``/``unknown``, never on ``superseded``; then re-check the
+        leftover threshold, which ``superseded`` also skips — the generation
+        that took the chain will run its own re-check when it settles."""
+        if settled in _WIPE_ON_SETTLE_OUTCOMES:
+            self._clear_revoked_overlay(notebook_id, user_id)
+        self._maybe_requeue_overlay(notebook_id, user_id, settled)
+
+    def _consolidate_overlay(
+        self, notebook_id: str, user_id: str, claim_token: str = ""
+    ) -> _BaseOutcome:
         if self.ask_state is None:
             raise AgentProfileOutputRejected("overlay_unavailable")
         if not self.models.configured(AGENT_PROFILE_WORKLOAD):
@@ -1632,26 +1733,31 @@ class AgentProfileConsolidationService:
         # clear_job_row + clear_all (marker first); a missing job row
         # therefore means "revoked" — writing now would recreate private
         # usage-derived blocks with ``expected_revision=0`` and hand them to
-        # the member on re-join. Skip every write. The millisecond window
-        # between this check and the writes is closed by the post-settle
-        # guard in ``run_overlay``.
+        # the member on re-join. Skip every write.
         #
-        # ⚠ Registered residual (codex #520 R4 P2, accepted): this existence
-        # check is ABA-prone — if the SAME member is removed, re-added, and a
-        # NEW overlay run is claimed all within this one model call, the
-        # replacement row passes the check and this stale worker may write
-        # pre-removal notes (or its settle may consume the new run's claim).
-        # Accepted because the blast radius is that one member's own private
-        # notes (never another member's data), the window needs three
-        # membership/scheduling events inside a single LLM call, and the next
-        # consolidation rewrites the blocks from post-rejoin traces anyway.
-        # Closing it needs a claim generation carried through claim/settle —
-        # registered for P2 rather than widening the store contract here.
+        # This probe is now a CHEAP EARLY EXIT, not the defence. P2 carries the
+        # claim generation into ``write_block`` itself, so the authoritative
+        # check happens inside the write transaction; this one just saves a
+        # whole round of writes in the common case, and it costs a single
+        # primary-key point read.
+        #
+        # ⚠ The R4 ABA this used to carry is CLOSED (Agentic Memory P2). A bare
+        # existence check could not tell "the row I claimed" from "a row with
+        # the same key", so a member removed, re-added and re-claimed inside
+        # one model call passed it, and the stale worker could write
+        # pre-removal notes or settle away the new run's claim snapshot. Both
+        # halves are now generation-checked: ``write_block`` refuses a token
+        # that is no longer on the row (``AgentProfileClaimSuperseded``), and
+        # ``settle`` reports ``superseded`` instead of landing on the newer
+        # generation's row. Do not "simplify" the probe back into the only
+        # check — it runs before the write transaction and is by construction
+        # best-effort.
         if self.profiles.job_row(notebook_id, user_id) is None:
             return _BaseOutcome(written=0, chars=0, evidence=0,
                                 diagnostic="revoked_mid_run")
         return self._write_overlay_blocks(
-            notebook_id, user_id, blocks, parsed, stats.zero_hit_steps
+            notebook_id, user_id, blocks, parsed, stats.zero_hit_steps,
+            claim_token,
         )
 
     def _write_overlay_blocks(
@@ -1661,6 +1767,7 @@ class AgentProfileConsolidationService:
         current: Sequence[Mapping[str, Any]],
         parsed: Sequence[Mapping[str, Any]],
         zero_hit_steps: int,
+        claim_token: str = "",
     ) -> _BaseOutcome:
         """Write the parsed overlay blocks under this member's own owner id.
 
@@ -1683,68 +1790,79 @@ class AgentProfileConsolidationService:
         retired: list[str] = []
         refused: list[str] = []
         preserved: list[str] = []
-        for block in parsed:
-            label = str(block["label"])
-            existing = by_label.get(label)
-            expected = int(existing["revision"]) if existing else 0
-            if block.get("retire"):
-                # Same withdrawal protocol as the base chain, same refusal of
-                # user-authored notes — here the person being overruled would
-                # be the note's own owner (codex #520 R2 P2).
-                disposition = retire_disposition(existing)
-                if disposition == RETIRE_NOOP:
+        # Aborts the whole loop rather than skipping one label — see the base
+        # writer for why a superseded claim is categorically different from a
+        # revision conflict.
+        superseded = False
+        try:
+            for block in parsed:
+                label = str(block["label"])
+                existing = by_label.get(label)
+                expected = int(existing["revision"]) if existing else 0
+                if block.get("retire"):
+                    # Same withdrawal protocol as the base chain, same refusal of
+                    # user-authored notes — here the person being overruled would
+                    # be the note's own owner (codex #520 R2 P2).
+                    disposition = retire_disposition(existing)
+                    if disposition == RETIRE_NOOP:
+                        continue
+                    if disposition == RETIRE_REFUSED:
+                        refused.append(label)
+                        continue
+                    try:
+                        self.profiles.write_block(
+                            notebook_id,
+                            user_id,
+                            label,
+                            value="",
+                            evidence=[],
+                            expected_revision=expected,
+                            origin="job",
+                            actor="",
+                            claim_token=claim_token,
+                        )
+                    except AgentProfileRevisionConflict:
+                        conflicts.append(label)
+                        continue
+                    written += 1
+                    retired.append(label)
                     continue
-                if disposition == RETIRE_REFUSED:
-                    refused.append(label)
+                if user_authoritative(existing):
+                    # codex R3 P1: same rule as the base writer — a job update to
+                    # a note the member wrote would launder its provenance and
+                    # open it to retirement next round.
+                    preserved.append(label)
                     continue
+                evidence: list[dict] = (
+                    [{"claim_index": 0, "zero_hit_queries": int(zero_hit_steps)}]
+                    if label == "usage_gaps" else []
+                )
                 try:
                     self.profiles.write_block(
                         notebook_id,
                         user_id,
                         label,
-                        value="",
-                        evidence=[],
+                        value=str(block["value"]),
+                        evidence=evidence,
                         expected_revision=expected,
                         origin="job",
                         actor="",
+                        claim_token=claim_token,
                     )
                 except AgentProfileRevisionConflict:
+                    # The member edited this note while the run was in flight.
+                    # Their edit wins and this block is skipped — never retried:
+                    # a retry would re-apply a value computed before their edit.
                     conflicts.append(label)
                     continue
                 written += 1
-                retired.append(label)
-                continue
-            if user_authoritative(existing):
-                # codex R3 P1: same rule as the base writer — a job update to
-                # a note the member wrote would launder its provenance and
-                # open it to retirement next round.
-                preserved.append(label)
-                continue
-            evidence: list[dict] = (
-                [{"claim_index": 0, "zero_hit_queries": int(zero_hit_steps)}]
-                if label == "usage_gaps" else []
-            )
-            try:
-                self.profiles.write_block(
-                    notebook_id,
-                    user_id,
-                    label,
-                    value=str(block["value"]),
-                    evidence=evidence,
-                    expected_revision=expected,
-                    origin="job",
-                    actor="",
-                )
-            except AgentProfileRevisionConflict:
-                # The member edited this note while the run was in flight.
-                # Their edit wins and this block is skipped — never retried:
-                # a retry would re-apply a value computed before their edit.
-                conflicts.append(label)
-                continue
-            written += 1
-            chars += len(str(block["value"]))
-            evidence_entries += len(evidence)
+                chars += len(str(block["value"]))
+                evidence_entries += len(evidence)
+        except AgentProfileClaimSuperseded:
+            superseded = True
         diagnostic_parts: list[str] = []
+        if superseded:
+            diagnostic_parts.append("claim_superseded")
         if conflicts:
             diagnostic_parts.append("cas_conflict:" + ",".join(sorted(conflicts)))
         if retired:
@@ -1803,6 +1921,7 @@ class AgentProfileConsolidationService:
         consumed: int,
         *,
         chain: str,
+        claim_token: str = "",
     ) -> dict:
         """Settle a run that reached a terminal failure.
 
@@ -1821,16 +1940,24 @@ class AgentProfileConsolidationService:
             notebook_id,
             owner_id,
             "failed",
+            claim_token=claim_token,
             failure_reason=failure_reason,
             diagnostic=diagnostic,
             consumed=max(0, int(consumed)),
         )
         self._emit("failed", notebook_id, chain=chain, latency_ms=latency_ms)
-        # ``settled`` is surfaced so run_overlay can detect the row vanishing
-        # mid-run (member revoked) and run its clean-up guard; run_base ignores
-        # it — the shared base row is never deleted by membership changes.
+        # The settle OUTCOME is surfaced so run_overlay can tell the row
+        # vanishing mid-run (member revoked → wipe) from this run's claim being
+        # superseded (a newer generation owns the chain → hands off); run_base
+        # ignores it — the shared base row is never deleted by membership
+        # changes.
+        #
+        # ⚠ The key is ``settle_outcome``, not P1's ``settled``, and the rename
+        # is the point: the value went from a bool to a string, and every
+        # string except "" is truthy. A stale ``if not result["settled"]`` would
+        # have kept compiling, kept passing, and silently stopped wiping.
         return {"notebook_id": notebook_id, "failed": diagnostic,
-                "settled": settled}
+                "settle_outcome": settled}
 
     def _clear_revoked_overlay(self, notebook_id: str, user_id: str) -> None:
         """Best-effort wipe of overlay rows recreated by a revocation race.
@@ -1839,10 +1966,17 @@ class AgentProfileConsolidationService:
         consolidation was inside the model call has already had clear_all +
         clear_job_row run — but this worker's ``expected_revision=0`` writes
         can recreate the blocks afterwards. The pre-write ``job_row`` check in
-        ``_consolidate_overlay`` closes the minutes-long window (the model
-        call); the millisecond window between that check and the writes is
-        closed HERE, keyed off ``settle`` returning ``False`` (the job row was
-        gone by the time the run tried to settle — only removal deletes it).
+        ``_consolidate_overlay`` is the cheap early exit; the write transaction
+        itself now refuses a superseded claim; and this is the last net, keyed
+        off ``settle`` answering ``gone`` (P2) — no row at settle time, and only
+        removal deletes it.
+
+        ⚠ Keyed off ``gone``, NOT off "the settle did not land". Those were the
+        same thing under P1's bool and are not any more: a settle can also fail
+        to land because a NEWER claim owns the chain (``superseded``), and
+        wiping there would delete the blocks that generation just wrote. The
+        set of outcomes that reach here lives in ``_WIPE_ON_SETTLE_OUTCOMES``.
+
         Fail-open: a failed wipe falls back to the read-side gate, which never
         serves these rows to a non-member anyway.
         """
@@ -1854,7 +1988,9 @@ class AgentProfileConsolidationService:
                 notebook_id,
             )
 
-    def _maybe_requeue_base(self, notebook_id: str) -> None:
+    def _maybe_requeue_base(
+        self, notebook_id: str, settled: str = AGENT_PROFILE_SETTLED
+    ) -> None:
         """codex R1 P2: re-arm the base chain when a full threshold survived.
 
         Signals arriving WHILE a run is in flight survive settlement (settle
@@ -1866,7 +2002,13 @@ class AgentProfileConsolidationService:
         threshold — the cost contract is unchanged. Fail-open: a requeue
         failure leaves the signals pending for the next trigger or T6's manual
         rebuild.
+
+        ``settled == "superseded"`` returns immediately: a newer generation
+        holds the chain and will run this very re-check when IT settles, so
+        doing it here is at best a wasted read and a claim that must lose.
         """
+        if settled == AGENT_PROFILE_SETTLE_SUPERSEDED:
+            return
         try:
             row = self.profiles.job_row(notebook_id, BASE_CHAIN_OWNER)
             if not row:
@@ -1879,12 +2021,17 @@ class AgentProfileConsolidationService:
                 "failed to requeue the base chain for notebook %s", notebook_id
             )
 
-    def _maybe_requeue_overlay(self, notebook_id: str, user_id: str) -> None:
+    def _maybe_requeue_overlay(
+        self, notebook_id: str, user_id: str, settled: str = AGENT_PROFILE_SETTLED
+    ) -> None:
         """Overlay twin of ``_maybe_requeue_base`` (codex R1 P2).
 
         A ``None`` row means the member was revoked mid-run — nothing to
         requeue, and the revocation guard has already handled the blocks.
+        ``settled == "superseded"`` skips for the same reason as the base twin.
         """
+        if settled == AGENT_PROFILE_SETTLE_SUPERSEDED:
+            return
         try:
             row = self.profiles.job_row(notebook_id, user_id)
             if not row:
@@ -1899,14 +2046,29 @@ class AgentProfileConsolidationService:
             )
 
     def _safe_settle(
-        self, notebook_id: str, owner_id: str, status: str, **kwargs: Any
-    ) -> bool:
+        self,
+        notebook_id: str,
+        owner_id: str,
+        status: str,
+        *,
+        claim_token: str,
+        **kwargs: Any,
+    ) -> str:
         """Settle, and never let a settle failure replace the real outcome.
 
         Mirrors ``catalog_job._settle``: if the write itself fails (or the row
         was cascade-deleted mid-run) the caller's own exception/interrupt must
         still be the thing that propagates, and the row falls back to the
-        startup sweep the same way a SIGKILL leftover does.
+        startup sweep the same way a SIGKILL leftover does. That case returns
+        ``_SETTLE_UNKNOWN`` rather than borrowing one of the store's three
+        outcomes — see that constant for why the wipe still treats it like
+        ``gone``.
+
+        ``claim_token`` is keyword-ONLY and required, not swept into
+        ``**kwargs``: it is the one argument whose absence would not fail
+        loudly. Left out, the store would compare against ``''`` and every
+        settle would come back ``superseded``, i.e. no chain would ever release
+        its slot — and nothing about the call site would look wrong.
 
         ⚠ The log line names the notebook but NEVER the owner: which member a
         consolidation ran for is precisely the usage fact this feature's
@@ -1914,8 +2076,14 @@ class AgentProfileConsolidationService:
         shared channel. ``(base)``/``(overlay)`` is as much as it says.
         """
         try:
-            return bool(
-                self.profiles.settle(notebook_id, owner_id, status, **kwargs)
+            return str(
+                self.profiles.settle(
+                    notebook_id,
+                    owner_id,
+                    status,
+                    claim_token=claim_token,
+                    **kwargs,
+                )
             )
         except Exception:  # noqa: BLE001
             _log.exception(
@@ -1923,7 +2091,7 @@ class AgentProfileConsolidationService:
                 "base" if owner_id == BASE_CHAIN_OWNER else "overlay",
                 notebook_id,
             )
-            return False
+            return _SETTLE_UNKNOWN
 
     def _emit(
         self, status: str, notebook_id: str, *, chain: str, **extra: Any

@@ -119,10 +119,11 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 覆盖表，v48 sources.agent_profile_id 出处列，v49 群组知识共享 P1
     # 的 groups / group_members / notebook_grants 三张表，v50 群组知识
     # 共享 P2 的 notebook_share_requests 表，v51 Agentic Memory P1 的
-    # agent_notebook_profile / agent_profile_jobs 两张表，以及 v52 问答会话
+    # agent_notebook_profile / agent_profile_jobs 两张表，v52 问答会话
     # 公开分享 T1 的 conversations.share_token/shared_through_at/
-    # shared_through_id 三列，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 52
+    # shared_through_id 三列，以及 v53 Agentic Memory P2 的
+    # agent_profile_jobs.claim_token 巡固认领代际列，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 53
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

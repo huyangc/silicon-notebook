@@ -286,8 +286,25 @@ analogy with the notebooks/reports siblings. PostgreSQL migration v30 is the
 paired schema. Because v52/v30 only adds columns to an existing table, with no
 new table and no foreign key, the business-table count is unchanged (still 80);
 the new partial unique index alone raises the unique-surface count from 108 to
-109, and the branch-counted bound remains exactly 12 row slots. The current
-pairing is SQLite 52 / PostgreSQL 30 / epoch 1.
+109, and the branch-counted bound remains exactly 12 row slots.
+
+SQLite v53 adds `agent_profile_jobs.claim_token` (Agentic Memory P2): the
+consolidation chain's claim GENERATION, a `TEXT NOT NULL DEFAULT ''` column
+minted afresh on every `claim` and carried as part of the compare-and-swap by
+both `settle` and `write_block`. It closes an ABA in P1's status-only
+single-flight — a member removed and re-added gets a job row with the same
+primary key and a `runs` counter back at 0, so a stale worker's settle used to
+land on the replacement row (consuming the new run's snapshot) and its writes
+used to pass a bare existence check. Because a delete plus recreate always
+changes the token, "the row I claimed" and "the row that is here now" are now
+distinguishable. `settle` consequently returns three outcomes rather than a
+bool: `settled`, `gone` (no row — only member removal deletes it, so the
+caller wipes the blocks it just recreated) and `superseded` (a row, but a later
+claim's — the caller must NOT wipe, since the newer generation may already have
+written its own blocks). No new table, index or unique surface, so the
+forward-shadow invariants are unchanged at 80 business tables, 109 unique
+surfaces and 12 row slots. PostgreSQL migration v31 is the paired schema, and
+the current pairing is SQLite 53 / PostgreSQL 31 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

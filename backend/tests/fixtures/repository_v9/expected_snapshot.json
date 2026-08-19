@@ -1707,7 +1707,7 @@
       },
       {
         "name": "agent_profile_jobs",
-        "sql_sha256": "90f3e1cf37fc5d76b1da31e7044dedcf12d00ef398e4aa00e29486a8facf7d1c",
+        "sql_sha256": "46c6ce0301b9c9d995f9f9384d21f2ba1f21f102854b9b33d8ae255f07cadcea",
         "type": "table"
       },
       {

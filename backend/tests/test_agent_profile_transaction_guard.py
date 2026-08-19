@@ -50,13 +50,30 @@ REQUIRED_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
     "clear_block": frozenset({"_append_history"}),
 }
 
+#: 只出现在下面那张 SQL 表里、不需要符号断言的方法。两张表的并集才是「被钉住的
+#: 方法集合」,自检按并集算——否则只登记在 SQL 表里的方法会在改名后静默脱钩。
+_SQL_ONLY_METHODS = frozenset({"settle"})
+
 #: 方法 -> 它的写事务体内必须出现的 **SQL 片段**。
 #:
 #: 与上面那张表互补:符号集合证明「历史是在事务里算的」,这张表证明「写回历史的那条
 #: 语句也在同一个事务里」。少了它,把 SQL 挪出去而把纯算术留在里面同样能骗过守卫。
 REQUIRED_SQL_IN_WRITE_TRANSACTION: dict[str, frozenset[str]] = {
-    "write_block": frozenset({"agent_notebook_profile"}),
+    # ``claim_token``:P2 的 claim 代际校验必须与它放行的那次写入同事务。挪到
+    # ``with`` 块之前,单线程测试同样全绿——而真正的后果是校验退回「尽力而为」:
+    # 成员被移出(``clear_job_row``)可以落在校验与写入之间,被移出的成员的私有块
+    # 就这样被一个已经作废的 run 重建出来。P1 的写前 ``job_row`` 探针正是这个
+    # 形状,R4 登记的就是它。
+    "write_block": frozenset({"agent_notebook_profile", "claim_token"}),
     "clear_block": frozenset({"agent_notebook_profile"}),
+    # ``settle`` 的 CAS 没落地时,「为什么」必须在**同一个**事务里读出来:出了
+    # 事务,一次并发移除就能把 ``superseded``(新一代持有链路,别动它的块)读成
+    # ``gone``(行没了,抹掉这些块)——把「放手」翻成「删除」。两条片段分别钉住
+    # 带代际的 CAS 与那次判别读。
+    "settle": frozenset({
+        "AND claim_token=",
+        "SELECT 1 FROM agent_profile_jobs",
+    }),
 }
 
 #: 会开出新作用域的节点 —— 遍历时不下钻(嵌套函数里的调用不属于事务的执行流)。
@@ -149,15 +166,19 @@ def test_guard_actually_sees_the_methods_it_claims_to_pin(backend: str):
     「加了守卫 ≠ 有效」的典型形态。
     """
     methods = _method_nodes(BACKEND_STORES[backend])
-    missing = sorted(set(REQUIRED_IN_WRITE_TRANSACTION) - set(methods))
+    pinned = (
+        set(REQUIRED_IN_WRITE_TRANSACTION)
+        | set(REQUIRED_SQL_IN_WRITE_TRANSACTION)
+        | set(_SQL_ONLY_METHODS)
+    )
+    missing = sorted(pinned - set(methods))
     assert missing == [], (
         f"{backend}:守卫登记的方法不存在了:{missing}。改名/删除时同步更新"
-        " REQUIRED_IN_WRITE_TRANSACTION,不要让它静默失效。"
+        " REQUIRED_IN_WRITE_TRANSACTION / REQUIRED_SQL_IN_WRITE_TRANSACTION,"
+        "不要让它静默失效。"
     )
     without_write = sorted(
-        name
-        for name in REQUIRED_IN_WRITE_TRANSACTION
-        if not _write_transactions(methods[name])
+        name for name in pinned if not _write_transactions(methods[name])
     )
     assert without_write == [], (
         f"{backend}:这些方法不再开写事务:{without_write}。历史与值的原子性现在靠什么保证?"
