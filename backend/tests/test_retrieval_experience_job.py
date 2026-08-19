@@ -890,3 +890,21 @@ def test_the_grounding_signal_reads_anchors_never_the_fallback_cards():
          "detail": {"citations": 9}}          # 兜底卡满、零绑定/旧行
     )
     assert ungrounded["count"] == 0
+
+
+def test_an_entry_for_an_action_no_run_invoked_is_rejected():
+    """codex #524 R10 P2:词表合法 ≠ 被观测过。本批没有任何 run 用过的动作,
+    ADD/UPDATE 一律拒收——否则 support=0 的幻觉打法落库后照样可注入。"""
+    groups = _groups()          # 三个 run,只用过 ppr
+    entry = {"op": "ADD", "situation": "s0", "action": "retrieve",
+             "polarity": "good", "rationale": "从未发生过的经验"}
+    assert parse_distillation_reply({"entries": [entry]}, groups) == []
+    update = dict(entry, op="UPDATE")
+    offered = [(0, {"situation": groups[0].situation, "action": "retrieve",
+                    "polarity": "bad", "rationale": "旧结论"})]
+    assert parse_distillation_reply(
+        {"entries": [update]}, groups, offered
+    ) == []
+    # 同批里真用过的动作照常通过,证明拒收不是把整个 parse 关掉
+    ok = dict(entry, action="ppr")
+    assert len(parse_distillation_reply({"entries": [ok]}, groups)) == 1
