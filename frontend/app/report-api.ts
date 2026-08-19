@@ -4,6 +4,21 @@ import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
+/**
+ * 研究问题的长度上限。
+ *
+ * **与 `backend/app/models/reports.py` 的 `REPORT_QUESTION_MAX_CHARS` 同值**，
+ * 改一侧就要改另一侧。
+ *
+ * 两侧都要有，是「数值上限与截断」红线的要求：用户编辑的数据不得静默截断——前端
+ * 显示同一护栏（输入框直接敲不进去），API 超限**明确拒绝**（后端 422，不裁短了存）。
+ * 这条对报告尤其承重：公开分享页把 `reports.question` **原样**发给匿名访客，所以
+ * 「不截断」只有在创建那一刻就挡住超长问题时才成立。
+ */
+export const REPORT_INPUT_LIMITS = {
+  questionMaxChars: 4000,
+} as const;
+
 // 报告的检索范围在**创建那一刻定格**（`generateReport` 因此不带范围）：意图确认与
 // 生成前由后端按持久化的那一份重验，用户在这中间改勾选不会追溯改写已建报告。
 export const createReport = (
