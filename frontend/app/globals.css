@@ -4363,6 +4363,16 @@ button.chat-session-card {
   line-height: 1.5;
 }
 
+/* 提问超限时这句话是此刻唯一挡着发送键的东西，必须与常规提示区分开——同色的话
+   按钮变灰而用户看不出为什么（与报告侧 .report-compose-hint.over-limit 同一条）。
+   两个类的选择器是必需的：`.chat-input-bar span`（一类+一元素）会把这个 span 压回
+   13px/#667085，单靠 `.chat-hint.over-limit` 的类计数相同、后写者才赢，太脆。 */
+.chat-input-controls .chat-hint.over-limit {
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .chat-input {
   flex: 1 1 auto;
   min-width: 0;

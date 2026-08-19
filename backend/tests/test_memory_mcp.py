@@ -681,6 +681,46 @@ async def test_ask_notebook_rejects_conversation_id_over_max_length(mcp_env):
 
 
 @pytest.mark.anyio
+async def test_ask_notebook_rejects_a_question_over_max_length(mcp_env):
+    """MCP 这个 ask 入口与 /ask、/ask/stream 受同一条长度闸约束。
+
+    公开分享页把每轮 question 原样发给匿名访客,所以「原样返回」只有在**每个**写入
+    侧都拒收超长问题时才是有界的——长期 token 的 Agent 客户端也是写入侧。这是一次
+    刻意的行为变化(此前 MCP 可提交任意长度问题),已在 docs 登记。
+
+    检查刻意写在工具体内、而不是交给 `AskRequest` 的校验器:后者抛出的
+    ValidationError 对 Agent 是一坨不可读的 model dump,前者说得清该怎么办——与
+    `conversation_id too long` 同一条既有惯例。
+    """
+    from app.models.ask import ASK_QUESTION_MAX_CHARS
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        rejected = await client.call(
+            "ask_notebook",
+            {"question": "问" * (ASK_QUESTION_MAX_CHARS + 1), "mode": "chunk"},
+        )
+        assert rejected.isError
+        text = rejected.content[0].text
+        # 可操作:说清上限、当前长度和出路,不是一句裸 "invalid"。
+        assert "question too long" in text
+        assert str(ASK_QUESTION_MAX_CHARS) in text
+        assert "source" in text
+
+        # 恰好等于上限**不因长度**被拒(空转保护:恒拒的实现过不了)。空库仍会以
+        # 「先添加来源」拒绝——那正好证明请求已经走过了长度闸、进到了可用性判定。
+        at_cap = await client.call(
+            "ask_notebook",
+            {"question": "问" * ASK_QUESTION_MAX_CHARS, "mode": "chunk"},
+        )
+        assert at_cap.isError
+        assert "too long" not in at_cap.content[0].text
+        assert "来源" in at_cap.content[0].text
+
+
+@pytest.mark.anyio
 async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
     mcp_env, monkeypatch
 ):

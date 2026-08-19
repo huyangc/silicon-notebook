@@ -1412,7 +1412,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 | 上限 | 数值 |
 | --- | ---: |
-| `REPORT_QUESTION_MAX_CHARS`（**创建**报告时研究问题的字符上限；超限 422 拒绝、绝不裁短了存，前端 compose 框同值 `maxLength`） | 4,000 |
+| `REPORT_QUESTION_MAX_CHARS`（**创建**报告时研究问题的字符上限；超限 422 拒绝、绝不裁短了存，前端 compose 框同值护栏——按 Unicode 码点数与 Pydantic 对齐，超限拦住提交并说清，不替用户裁剪） | 4,000 |
 | `MAX_REFERENCES`（单份报告投影的引用上限；超出部分披露为 `truncated_references`） | 500 |
 | `MAX_REFERENCE_TITLE_CHARS`（每条引用标题/原始文件名字符上限） | 400 |
 | `MAX_SNIPPET_CHARS`（每条引用摘录字符上限） | 1,200 |
@@ -1436,10 +1436,15 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `MAX_REFERENCE_TITLE_CHARS`（每条引用标题/原始文件名字符上限） | 400 |
 | `MAX_SNIPPET_CHARS`（每条引用摘录字符上限） | 1,200 |
 | `MAX_CAPTION_CHARS`（每张图 caption 字符上限） | 500 |
+| `ASK_QUESTION_MAX_CHARS`（**提交**提问时的字符上限，定义在 `backend/app/models/ask.py`；超限 422 拒绝、绝不裁短了存） | 4,000 |
 
-每轮问题**与会话标题**均**原样返回、不截断**：与 `answer_md` 同理，它们是用户自撰的 artifact（标题在重命名端点无长度上限），静默截断会丢掉产生该答案的原始问题、或截断给会话命名的标题。引用的标题、摘录与原始文件名是证据元数据、仍受上限约束，但**超限会置 `title_truncated`/`snippet_truncated`/`file_name_truncated` 披露**（公开页显示「已截断」提示），不静默丢尾（codex #522 R3/R4）。
+每轮问题**与会话标题**均**原样返回、不截断**：与 `answer_md` 同理，它们是用户自撰的 artifact，静默截断会丢掉产生该答案的原始问题、或截断给会话命名的标题。引用的标题、摘录与原始文件名是证据元数据、仍受上限约束，但**超限会置 `title_truncated`/`snippet_truncated`/`file_name_truncated` 披露**（公开页显示「已截断」提示），不静默丢尾（codex #522 R3/R4）。
 
-七个上限均定义在 `backend/app/services/conversation_public_view.py`。
+「原样返回」之所以仍是**有界**承诺，全靠写入侧拒收超长问题：`AskRequest.question` 带 `max_length=ASK_QUESTION_MAX_CHARS`，因此 `POST /notebooks/{id}/ask`、`POST /notebooks/{id}/ask/stream` 与 `POST /notebooks/{id}/ask/intent` 超限一律 422，前端提问框同值拦住提交（按 Unicode 码点数与 Pydantic 对齐，绝不替用户裁剪）。少了这条闸，匿名响应就不受客户端输入约束——正是 codex #525 R1 P2 对报告投影提的那条，两个上限同值也是这个缘故。**MCP 工具 `ask_notebook` 同样执行这条闸**，并给自己的可读文案而不是抛一个裸校验错误：长期 token 的 Agent 客户端此前可提交任意长度的问题，现在会收到 `question too long: … the maximum is 4,000 …`。这是一次**刻意**的行为变化——MCP 客户端与浏览器一样是写入侧，而超过这个长度的材料应当作为来源上传、而不是塞进提问。
+
+两处明知未闭合、如实登记而非粉饰的缺口：该闸上线**之前**写入的轮次，以及会话标题（`ConversationRenameRequest.title` 根本没有上限）。要在投影里限住任一处，都需要给该轮加一个披露字段并改公开页——报告侧 `PublicReport.question_truncated` 付的正是这个代价——因此列为独立工作，不用一次静默截断糊过去。
+
+前七个上限均定义在 `backend/app/services/conversation_public_view.py`。
 
 ## API
 

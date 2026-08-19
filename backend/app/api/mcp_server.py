@@ -53,7 +53,7 @@ from app.services.source_display import source_display_title
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.identity import AgentPrincipal, UserProfile
-from app.models.ask import AskRequest
+from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
 from app.models.sources import SourceDetail
 from app.repositories.ports import KgBuildAlreadyRunning, UploadedSourceFile
 from app.repositories.source_files import safe_filename
@@ -1168,6 +1168,25 @@ def create_memory_mcp(
     ) -> dict[str, Any]:
         if mode not in {"chunk", "reasoning"}:
             raise ValueError("mode must be chunk or reasoning")
+        # Same rail the HTTP entry points enforce, checked HERE rather than left
+        # to `AskRequest`'s validator below, for the reason `conversation_id`
+        # already has its own check: a pydantic ValidationError raised deep in
+        # `run_ask` surfaces to an Agent as an opaque model dump, while this
+        # says what to do about it.
+        #
+        # This is a real behaviour change for long-lived Agent tokens, which
+        # could previously submit a question of any length -- deliberate, and
+        # registered in docs. The projection that serves a shared conversation's
+        # question verbatim to anonymous readers cannot be bounded by anything
+        # except the write side, and an MCP client is a write side like any
+        # other. 4,000 characters is a question no Agent should need to exceed;
+        # past it the material belongs in an uploaded source, not in the prompt.
+        if len(question) > ASK_QUESTION_MAX_CHARS:
+            raise ValueError(
+                f"question too long: {len(question)} characters, the maximum is "
+                f"{ASK_QUESTION_MAX_CHARS}. Shorten the question, or add the "
+                f"long material to the notebook as a source and ask about it."
+            )
         if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
             raise ValueError("conversation_id too long")
         repo = repository_provider()

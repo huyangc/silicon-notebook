@@ -1,4 +1,5 @@
 import { requestBlob, requestJson, requestVoid } from "./api-client.ts";
+import { countCodePoints } from "./input-limits.ts";
 import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-view.tsx";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
@@ -19,19 +20,10 @@ export const REPORT_INPUT_LIMITS = {
   questionMaxChars: 4000,
 } as const;
 
-/**
- * 一段文本的 **Unicode 码点**数——与后端 Pydantic `max_length` 数的是同一种单位。
- *
- * 刻意不用 `value.length`（也就是 `<textarea maxLength>` 用的那把尺）：那数的是
- * **UTF-16 code unit**，含 emoji 等非 BMP 字符时一个字符占两个，于是 4,000 的护栏
- * 会在 2,000 个 emoji 处就停手，而 API 其实收 4,000 个——两边号称「同一护栏」却对
- * 不上（codex #525 R2）。中文全在 BMP 内（1 码点 = 1 code unit），所以对绝大多数
- * 输入两者逐字相同；这里只是把「绝大多数」变成「全部」。
- *
- * 仓库里 `GROUP_INPUT_LIMITS` / `MEMORY_INPUT_LIMITS` 仍用 `maxLength`，它们不喂
- * 任何匿名投影，这处更严格是刻意的、不是不一致。
- */
-export const countCodePoints = (value: string): number => Array.from(value).length;
+// 尺子搬到了 `input-limits.ts`（问答那半护栏要用同一把，而让 `ask-api` import
+// `report-api` 只为借一个纯函数会造出一条假的模块依赖）。这里继续导出，既有
+// 引用方与单测无需改动。
+export { countCodePoints };
 
 /**
  * 超限时的提示文案；没超返回 `null`。

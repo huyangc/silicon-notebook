@@ -3,6 +3,7 @@ import {
   requestJson,
   requestVoid,
 } from "./api-client.ts";
+import { countCodePoints } from "./input-limits.ts";
 import {
   humanizedError,
   logDiagnostic,
@@ -25,6 +26,43 @@ import type {
 } from "./workspace-model.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
+
+// --- 输入护栏 ---------------------------------------------------------------
+
+/**
+ * 提问的长度上限。
+ *
+ * **与 `backend/app/models/ask.py` 的 `ASK_QUESTION_MAX_CHARS` 同值**，改一侧就要
+ * 改另一侧。
+ *
+ * 两侧都要有，是「数值上限与截断」红线的要求：用户编辑的数据不得静默截断——前端
+ * 显示同一护栏（超限当场说清并拦住提交），API 超限**明确拒绝**（后端 422，不裁短
+ * 了存）。少了前端这半，用户会敲完一长串才在提交时吃一个 422，而且不知道边界在哪。
+ *
+ * 这条对问答尤其承重：会话公开分享页把每轮 `question` **原样**发给匿名访客（旧的
+ * 2,000 字公开截断在 codex #522 R1 被拿掉，因为静默截断用户自撰的问题正是红线要
+ * 防的），所以「不截断」只有在提交那一刻就挡住超长问题时才成立——与深度报告那侧
+ * codex #525 R1 P2 是同一条。
+ */
+export const ASK_INPUT_LIMITS = {
+  questionMaxChars: 4000,
+} as const;
+
+/**
+ * 超限时的提示文案；没超返回 `null`。
+ *
+ * **超出的文字一个字都不删**——护栏是「拦住提交」，不是「替用户裁剪」。在 `onChange`
+ * 里按上限夹一刀等于用户粘进来 10,000 字、当场只剩 4,000 而且不说一声，正是「用户
+ * 编辑的数据不得静默截断」要防的（codex #525 R3）。留着原文，用户自己精简。
+ *
+ * 按**码点**数，与后端 Pydantic `max_length` 同一把尺（见 `countCodePoints`）。
+ */
+export const askQuestionLimitHint = (question: string): string | null => {
+  const used = countCodePoints(question);
+  const max = ASK_INPUT_LIMITS.questionMaxChars;
+  if (used > max) return `提问超出 ${max} 字上限（当前 ${used} 字），请精简后再提问`;
+  return null;
+};
 
 // The collection search box answers "which notebook contains X", so it calls
 // `searchNotebook` once per visible notebook — and one of those may be a

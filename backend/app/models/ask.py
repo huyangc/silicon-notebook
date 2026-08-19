@@ -175,8 +175,41 @@ class QueryIntentContract(BaseModel):
         return self
 
 
+# The one rail on the length of *the question a client asks*, shared by every
+# entry point that accepts one: the intent preflight, the confirmed question it
+# hands back, and the ask request itself.  It is a protocol boundary, not a
+# tunable, so it lives as a named constant rather than a literal repeated per
+# field; `frontend/app/ask-api.ts::ASK_INPUT_LIMITS` mirrors it.
+#
+# It is load-bearing for the *public* share page: `conversation_public_view`
+# serves each turn's question WHOLE (truncating a user's own artifact with no
+# disclosure violates AGENTS.md 用户编辑的数据不得静默截断, which is why the old
+# 2,000-char public cap came out in codex #522 R1).  "Serve it whole" is only
+# bounded while the write side refuses an over-length question in the first
+# place -- that is the other half of the same red line (前端显示同一护栏, API 超限
+# 明确拒绝), and without it an anonymous response would be unbounded by client
+# input.  Same finding the report side closed in codex #525 R1 P2, where
+# `REPORT_QUESTION_MAX_CHARS` plays exactly this part; the two hold the same
+# value because they bound the same kind of text, but they stay separate
+# constants because they are separate protocol surfaces.
+#
+# Deliberately NOT applied to `QueryIntentContract`: its fields are the
+# understanding model's OUTPUT (already individually capped) rather than the
+# question a user typed, and folding them in here would mean a future change to
+# the asked-question rail silently moved the contract's caps too.
+#
+# Residual, deliberately out of scope and recorded rather than hidden: a
+# conversation whose turns predate this rail can still carry a longer question,
+# and `ConversationRenameRequest.title` has no cap at all -- so the public
+# conversation projection is not yet bounded end to end.  Bounding either inside
+# the projection needs a disclosure field on `PublicTurn` plus a public-page
+# change (what `PublicReport.question_truncated` cost on the report side), which
+# is a separate deliverable, not something to slip in silently here.
+ASK_QUESTION_MAX_CHARS = 4000
+
+
 class AskIntentPreviewRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=4000)
+    question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_CHARS)
     conversation_id: Optional[str] = Field(default=None, max_length=200)
     source_scope: Optional[SourceScope] = None
     # None preserves the historical behavior of every mounted base notebook
@@ -187,7 +220,7 @@ class AskIntentPreviewRequest(BaseModel):
 
 class AskIntentConfirmation(BaseModel):
     contract: QueryIntentContract
-    resolved_question: str = Field(min_length=1, max_length=4000)
+    resolved_question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_CHARS)
     answers: List[QueryIntentAnswer] = Field(default_factory=list, max_length=8)
     # Wall-clock of the understanding phase, measured by the client: it runs in
     # /ask/intent, before any durable job exists, so the server cannot time it.
@@ -197,7 +230,12 @@ class AskIntentConfirmation(BaseModel):
 
 
 class AskRequest(BaseModel):
-    question: str
+    # No `min_length`: an empty question already reaches the engine today and is
+    # handled downstream, so adding one here would change behaviour at every
+    # entry point at once -- a different change from bounding the top end.
+    # `max_length` is the half the public conversation projection leans on; see
+    # `ASK_QUESTION_MAX_CHARS`.
+    question: str = Field(max_length=ASK_QUESTION_MAX_CHARS)
     # Browser-captured submission instant. It is display metadata only and
     # never participates in ordering, authorization, retrieval, or scheduling.
     asked_at: str = Field(default="", max_length=64)
