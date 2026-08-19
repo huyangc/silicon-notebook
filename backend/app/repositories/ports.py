@@ -4557,3 +4557,15 @@ class RetrievalExperienceStorePort(Protocol):
         ...
 
     def count(self) -> int: ...
+
+    def version_signal(self) -> tuple[int, str]:
+        """``(row count, newest updated_at)``, for the injection side's memo.
+
+        Agentic Memory P2 (T6). One cheap aggregate lets a run decide whether
+        the library it already scored is still the library on disk, instead of
+        re-hydrating a few hundred rows and re-parsing their JSON on every
+        single run. Both halves are load-bearing — see either backend's
+        implementation for which change each one catches, and for why an
+        ``adopted`` bump is deliberately invisible to it.
+        """
+        ...

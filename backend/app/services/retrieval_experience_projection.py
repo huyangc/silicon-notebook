@@ -58,6 +58,7 @@ from app.repositories.ports import (
     SITUATION_RESULT_SCOPES,
     SITUATION_RETRIEVAL_EFFORTS,
     SITUATION_UNKNOWN,
+    project_run_step,
 )
 
 #: The closed THEN-side vocabulary: the retrieval actions an experience entry
@@ -380,6 +381,60 @@ def _int_or_zero(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return max(0, value)
+
+
+def current_situation(
+    intent_detail: object, *, mode: str, retrieval_effort: str
+) -> dict:
+    """The IF side of a run that is ABOUT TO happen (Agentic Memory P2 / T6).
+
+    ``project_run`` above answers "what shape of question WAS this" from a
+    finished run's persisted steps; the injection side needs the same answer
+    before any of that exists, from the intent contract the caller is holding.
+    Both must produce the SAME eight keys with the same domains, or an entry
+    filed under one shape would never be selected for the identical shape — so
+    this function reaches the situation through ``project_run_step``, the one
+    narrowing both halves already share, rather than reading the contract's
+    fields itself.
+
+    ⚠ ``intent_detail`` is the raw intent trace-step detail, and it DOES carry
+    the user's own words. It is handed straight to ``project_run_step``, which
+    reads exactly the closed-vocabulary and length fields listed in its
+    docstring and nothing else — this module never touches a prose field of it,
+    which is the property the privacy guard checks by scanning for those field
+    names. Passing the mapping through the single narrowing point is what keeps
+    "the situation cannot carry free text" true here as well as on the
+    observation side.
+
+    ``None``/malformed detail is not an error: every key falls back to
+    ``unknown``/``none``/``False``. A caller with no intent contract (the deep
+    report's per-section retrieval) still gets a scorable situation, just a
+    less discriminating one.
+    """
+    projected = project_run_step({"step_type": "intent", "detail": intent_detail})
+    raw = projected.get("situation") if isinstance(projected, Mapping) else None
+    raw = raw if isinstance(raw, Mapping) else {}
+    # The explicit effort argument wins over the contract's copy of it: the
+    # caller's value is the tier the run is ACTUALLY executing under (its
+    # limits row), while the contract's is what was recorded at confirmation
+    # time. They agree on the Ask path; where they cannot (a caller with no
+    # contract at all), falling back to the contract's value keeps the key from
+    # collapsing to ``unknown`` for no reason.
+    effort = _situation_value(
+        {"retrieval_effort": retrieval_effort}, "retrieval_effort", None
+    )
+    if effort is None:
+        effort = _situation_value(raw, "retrieval_effort", SITUATION_UNKNOWN)
+    return {
+        "mode": _situation_value({"mode": mode}, "mode", SITUATION_UNKNOWN),
+        "result_scope": _situation_value(raw, "result_scope", SITUATION_UNKNOWN),
+        "retrieval_effort": effort,
+        "completeness_required": bool(raw.get("completeness_required")),
+        "entity_count": count_band(_int_or_zero(raw.get("entity_count"))),
+        "topic_count": count_band(_int_or_zero(raw.get("topic_count"))),
+        "has_constraints": bool(raw.get("has_constraints")),
+        "has_exclusions": bool(raw.get("has_exclusions")),
+    }
 
 
 def validate_situation(situation: object) -> dict | None:

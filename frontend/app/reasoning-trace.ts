@@ -22,6 +22,11 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // P1)。只在真的有内容可带时出现:没整理过的库不落这一步(后端刻意不记空步——
   // 它是一次亚毫秒的主键点查,不像记忆检索那样有耗时需要交代)。
   profile: "经验",
+  // experience = 以往检索攒下的「打法」进了这一轮的规划/反思(Agentic Memory
+  // P2)。⚠ 不能叫「经验」——那个词已经被上面的 profile 占了,两步同名会让轨迹
+  // 里出现两条读起来一样、说的却是两回事的步(一条是「这个库是什么」,一条是
+  // 「这类问题该怎么查」)。注入默认关闭,且没蒸出内容时后端不落这一步。
+  experience: "打法",
   answer: "合成",
   // answer = 检索器决定作答并报告采用了哪些证据;synthesis = 答案真的写出来了。
   // 分两步是因为中间那次生成调用往往是整轮里最长的一段,合并会让它彻底隐形。
@@ -123,6 +128,11 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   // 排在后面就会被静默渲染成「N 个候选」。
   if (step.step_type === "profile") {
     return typeof detail.blocks === "number" ? `${detail.blocks} 条已有理解` : "";
+  }
+  // experience 与 profile 同一条理由:它的 detail 是 entries/chars,两个都不是
+  // 「候选数」,落到下面的通用分支就会渲染出一个读起来对、其实错位的数。
+  if (step.step_type === "experience") {
+    return typeof detail.entries === "number" ? `${detail.entries} 条打法` : "";
   }
   if (step.step_type === "memory") {
     return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";

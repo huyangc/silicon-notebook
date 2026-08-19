@@ -533,6 +533,48 @@ test("profile 分支先于通用 count 分支命中", () => {
   );
 });
 
+// Agentic Memory P2:以往检索攒下的「打法」进了这一轮的规划/反思。标签必须与
+// profile 的「经验」区分开——两步同名会让轨迹里出现两条读起来一样、说的却是两
+// 回事的步。
+test("experience 有自己的短标签,且与 profile 不同名", () => {
+  const step = {
+    step_type: "experience",
+    summary: "带上以往检索攒下的打法",
+    detail: { entries: 2, chars: 318 },
+  };
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "打法");
+  assert.equal(getTraceStepDetail(step), "2 条打法");
+  assert.notEqual(TRACE_STEP_LABELS.experience, TRACE_STEP_LABELS.profile);
+
+  // entries 缺失/非数字时给空串,绝不上屏 "undefined 条打法"。
+  assert.equal(
+    getTraceStepDetail({ step_type: "experience", summary: "", detail: {} }),
+    "",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "experience", summary: "", detail: { entries: "2" } }),
+    "",
+  );
+  // chars 单独存在也不足以渲染:它是整块字符数,不是「几条」。
+  assert.equal(
+    getTraceStepDetail({ step_type: "experience", summary: "", detail: { chars: 318 } }),
+    "",
+  );
+});
+
+// 分支顺序守卫(同 profile 的理由):experience 必须排在通用 `detail.count`
+// 分支之前,否则哪天它的 detail 多出一个 count 键就会被渲染成「N 个候选」。
+test("experience 分支先于通用 count 分支命中", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "experience",
+      summary: "",
+      detail: { entries: 1, count: 99 },
+    }),
+    "1 条打法",
+  );
+});
+
 // profile 步不进 source_subgraph 那类隐藏名单:它是用户该看到的一步。
 test("profile 步计入可见步数与总耗时", () => {
   const summary = getReasoningTraceSummary(

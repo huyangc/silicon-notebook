@@ -1296,6 +1296,8 @@ class RepositoryRuntime:
                 agent_profile=self.agent_profile,
                 # T5:报告完成 ⇒ 推进**报告创建者**的覆盖层链路(直接达阈)。
                 agent_profile_jobs=self.agent_profile_jobs,
+                # P2-T6:检索打法库的注入座位(注入本身另有默认关闭的开关)。
+                retrieval_experiences=self.retrieval_experiences,
                 selected_source_graph=self.selected_source_graph,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (
@@ -1390,6 +1392,10 @@ class RepositoryRuntime:
                 # (形态同上面两个集合服务),提问者身份由 ask 在构造 retriever
                 # 时显式传入 —— 绝不让下游回退 ContextVar。
                 agent_profile=self.agent_profile,
+                # P2-T6:检索打法库的注入座位。没有配套的身份参数——那张表没有
+                # 租户维度(见 RetrievalExperienceStorePort)。注入本身还要过一把
+                # 默认**关闭**的开关。
+                retrieval_experiences=self.retrieval_experiences,
                 selected_source_graph=self.selected_source_graph,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (

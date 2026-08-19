@@ -10,6 +10,7 @@ import contextvars
 import json
 import math
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -25,6 +26,7 @@ from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
     exact_probe_terms,
 )
+from app.repositories.ports import RETRIEVAL_EXPERIENCE_MAX_ENTRIES
 from app.services.agent_profile_block import (
     render_profile_block, rendered_row_count,
 )
@@ -37,6 +39,11 @@ from app.services.collection_enumeration import (
     TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
 )
 from app.services.prompts import reflect_prompt, reflect_schema_hint
+from app.services.retrieval_experience_block import (
+    adopted_entry_ids, render_experience_block,
+    rendered_row_count as rendered_experience_count, select_experiences,
+)
+from app.services.retrieval_experience_projection import current_situation
 from app.services.retrieval import (
     NeighborExpansion, RetrievedChunk, RetrievedElement, RetrievedKnowledge,
 )
@@ -181,6 +188,64 @@ def profile_wiring_active(settings, profile_store) -> bool:
         getattr(settings, "agent_profile_enabled", True)
         and profile_store is not None
     )
+
+
+def experience_wiring_active(settings, experience_store) -> bool:
+    """接线层面上,部署级全局的「检索打法」是否注入(kill switch + store 在)。
+
+    与 ``profile_wiring_active`` 同款、同理由的**单点判定**:注入面有读取、渲染、
+    plan 注入、reflect 注入、轨迹步、采用回写六个消费点,各写一份判据就会剩下
+    「不注入了,但每 run 还在读那张表」这类半关状态。
+
+    ⚠ 判据是 ``retrieval_experience_inject_enabled``(默认 **False**),**不是**
+    蒸馏那把 ``retrieval_experience_enabled``(默认 True)。两把闸刻意分开:攒数据
+    与改变每一次真实提问的规划提示是两个独立的决定,而「蒸馏开、注入关」正是本
+    特性的默认形态。拿蒸馏那把闸当判据会让整个部署在没人同意的情况下开始注入。
+
+    ``experience_store is None`` 是「这个调用方没接线」的拼写(镜像 P1 与两个集合
+    服务):knowhow 智能补全与窄测试替身照旧构造得出 ``ReasoningRetriever``,只是
+    那条 run 与接入前逐字相同。
+    """
+    return bool(
+        getattr(settings, "retrieval_experience_inject_enabled", False)
+        and experience_store is not None
+    )
+
+
+#: 本类跑出来的 run 在情境指纹里的 ``mode``。写死而不是从调用方收:``chunk`` 与
+#: ``graph`` 两个引擎根本不经过 ``ReasoningRetriever``,深度报告的逐节深挖用的也
+#: 正是这条逐步推理管线。收一个参数只会多出一个可以被传错的值,而它必须与蒸馏侧
+#: 观测到的 ``ask_jobs.mode`` 对得上——对不上就等于永远选不到自己攒的条目。
+_EXPERIENCE_RUN_MODE = "reasoning"
+
+# 进程级经验库快照。表是**部署级全局**的(没有 notebook/owner 维度),所以一份缓存
+# 服务所有 run;key 是 store 的 ``version_signal()``(行数 + 最新 updated_at),
+# 内容变了就自然失效。
+#
+# 换来的是:每 run 从「读回至多 300 行 + 每行两次 JSON 反序列化 + 逐行打分」降到
+# 「一次聚合查询 + 逐行打分」。刻意**不做** TTL:TTL 会让刚蒸出来的条目要等一段
+# 时间才生效,而这条判据是精确的、代价也只有一次聚合。
+_EXPERIENCE_CACHE_LOCK = threading.Lock()
+_EXPERIENCE_CACHE: Dict[str, object] = {}
+
+
+def _cached_experiences(store) -> List[dict]:
+    """读一次经验库(带进程级 memo)。任何异常由调用方 fail-open 吞掉。
+
+    返回的列表**只读**:多个 run 共享同一份对象,任何原地修改都会污染别的 run。
+    下游 ``select_experiences``/``render_experience_block`` 都是纯函数。
+    """
+    signal = tuple(store.version_signal())
+    with _EXPERIENCE_CACHE_LOCK:
+        if _EXPERIENCE_CACHE.get("signal") == signal:
+            return _EXPERIENCE_CACHE.get("entries")  # type: ignore[return-value]
+    entries = list(store.read_all(RETRIEVAL_EXPERIENCE_MAX_ENTRIES))
+    with _EXPERIENCE_CACHE_LOCK:
+        # 后写者赢:两个 run 同时未命中时都会读一次,写回的是同一份内容(签名相同)
+        # 或更新的那一份(签名不同)。都不是错误,而抢锁读表会把一次 I/O 变成串行点。
+        _EXPERIENCE_CACHE["signal"] = signal
+        _EXPERIENCE_CACHE["entries"] = entries
+    return entries
 
 
 # trace summary 会上屏,所以清单名必须是界面词。刻意**不**复用后端
@@ -1419,6 +1484,7 @@ class ReasoningRetriever:
         collection_enumeration=None,
         agent_profile=None,
         profile_owner_id: str = "",
+        retrieval_experiences=None,
     ):
         self.retrieval = retrieval
         self.model_clients = model_clients
@@ -1438,6 +1504,15 @@ class ReasoningRetriever:
         # 一旦回退,一个人的私有覆盖层就会被注进另一个人的 run。空串是合法且安全
         # 的取值:只注入共享底座,不碰任何人的覆盖层。
         self.profile_owner_id = profile_owner_id
+        # Agentic Memory P2:部署级**全局**的检索打法库
+        # (``RetrievalExperienceStorePort``)。同样缺省 None ⇒ 没接线的调用方与
+        # 接入前逐字相同(见 ``experience_wiring_active``)。
+        #
+        # ⚠ 它**没有**对应的 owner 参数,而 P1 的理解块有——这不是遗漏:那张表
+        # 没有任何租户列,条目也没有任何按人/按库的成分(见
+        # ``retrieval_experience_projection`` 的模块说明)。给它一个 owner 参数
+        # 会凭空造出「这条打法是谁的」这个本特性刻意不存在的概念。
+        self.retrieval_experiences = retrieval_experiences
         # Ask keeps its historical fail-open retrieval behavior. Authoring
         # flows such as knowhow completion opt into strict execution so a
         # failed plan/reflect/retrieval cannot masquerade as deep reasoning.
@@ -1639,7 +1714,7 @@ class ReasoningRetriever:
 
     # --- LLM 决策点 ---
     def plan(self, question, history="", max_subqueries=None, collection_map="",
-             profile_block=""):
+             profile_block="", experience_block=""):
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
@@ -1665,7 +1740,10 @@ class ReasoningRetriever:
                           collection_map=collection_map,
                           # Agent 对该库的已有理解(背景,不是证据):同上,两份
                           # 拼写都加了,production 走的是这一份。
-                          profile_block=profile_block)
+                          profile_block=profile_block,
+                          # 部署级全局的检索打法(同样是背景不是证据,而且只说
+                          # 「用哪个通道」、绝不说「读哪些来源」)。
+                          experience_block=experience_block)
         out = [SubQuery(query=s.query, types=s.types, prefer=s.prefer, reason=s.reason)
                for s in ex.sub_queries]
         return out or fallback
@@ -1963,7 +2041,8 @@ class ReasoningRetriever:
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,
-            limits: Optional[AskRetrievalLimits] = None):
+            limits: Optional[AskRetrievalLimits] = None,
+            intent_detail=None):
         raise_if_cancelled(self.cancel_event)
         self._per_query_scored.clear()
         action_policy = reasoning_action_policy(self.settings)
@@ -2149,6 +2228,48 @@ class ReasoningRetriever:
                     raise
                 except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
                     profile_block = ""
+            # 部署级全局的「检索打法」(Agentic Memory P2 §6.1)。紧挨着上面那块
+            # 读:两者是同一类东西(规划背景,不是证据),形态也刻意做成同一套
+            # ——表头 + 一句框定语 + `- ` 行 + 一个整块硬顶 + 按**送达**行数记步。
+            #
+            # 与理解块的差别只有一条,但它是本特性的红线:理解块讲「这个库是什么」,
+            # 打法讲「这类问题该用哪个通道去查」。后者**绝不**触及来源范围——那是
+            # 用户自己的勾选,而这条约束是结构性的(动作词表里没有任何范围类动作,
+            # 条目本身也没有来源/库字段可渲染),不是提示词里的一句请求。
+            #
+            # fail-open 且**不记 skip 步**,同理由:关闭态是默认形态,没蒸出东西
+            # 的部署(常态)每一轮多一条「无」步是纯噪声。
+            experience_block = ""
+            experience_entries: List = []
+            if experience_wiring_active(self.settings, self.retrieval_experiences):
+                try:
+                    situation = current_situation(
+                        intent_detail,
+                        mode=_EXPERIENCE_RUN_MODE,
+                        retrieval_effort=(
+                            limits.effort if limits is not None else ""),
+                    )
+                    experience_entries = select_experiences(
+                        _cached_experiences(self.retrieval_experiences), situation)
+                    experience_block = render_experience_block(experience_entries)
+                    if experience_block:
+                        record(TraceStep(
+                            step_type="experience",
+                            summary="带上以往检索攒下的打法",
+                            detail={
+                                # 送达行数,不是选中行数:整块 600 字符硬顶按整行
+                                # 丢弃装不下的条目(见 render_experience_block)。
+                                "entries": rendered_experience_count(
+                                    experience_block),
+                                "chars": len(experience_block)}))
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 打法是背景,不是必需品
+                    experience_block = ""
+                    experience_entries = []
+            # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储
+            # 词表)。只在真的注入过条目时才积累——没注入就没有「采用」可言。
+            adopted_actions: set = set()
             # 集合地图:每 run 只建一次(计数走有界缓存,但仍是若干次查询),同一个
             # 字符串既进规划上下文、又进每一轮 reflect 的候选摘要尾部。
             # fail-open:地图建不出来时照常检索作答——它只是让模型「知道有多少」,
@@ -2195,6 +2316,8 @@ class ReasoningRetriever:
                 plan_kwargs["collection_map"] = collection_map_text
             if profile_block:
                 plan_kwargs["profile_block"] = profile_block
+            if experience_block:
+                plan_kwargs["experience_block"] = experience_block
             subqueries = (
                 [SubQuery(query=query) for query in reviewed_queries]
                 if reviewed_queries
@@ -2816,6 +2939,10 @@ class ReasoningRetriever:
             # 与地图同款,拼在 summary 尾部就够,不必给 reflect 再开一个形参。
             if profile_block:
                 summary = f"{summary}\n\n{profile_block}"
+            # 打法块跟在理解块之后、集合地图之前——同上一条注释的理由:地图与它
+            # 后面那个额度句是一句话,不能被别的块插开。
+            if experience_block:
+                summary = f"{summary}\n\n{experience_block}"
             if collection_map_text:
                 summary = (
                     f"{summary}\n\n{collection_map_text}"
@@ -2841,6 +2968,12 @@ class ReasoningRetriever:
             record(TraceStep(step_type="reflect",
                              summary=decision.reason or decision.next_action,
                              detail=reflect_detail))
+            # 采用账目:模型**主动选**了哪些动作。记在这里(而不是收尾按 trace 的
+            # step_type 反推)是刻意的——初检索、PPR/精查 seed pass 都是确定性发生
+            # 的,按 step_type 数会把「注入过」当成「被采用」,而 ``adopted`` 是淘汰
+            # 排序的第一个键。见 ADOPTION_ACTIONS 的说明。
+            if experience_entries:
+                adopted_actions.add(decision.next_action)
             overflow_repair_submission = terminal_overflow_repair or (
                 bool(outline_overflow)
                 and outline_updates >= max_outline_updates
@@ -3740,6 +3873,22 @@ class ReasoningRetriever:
         record(TraceStep(step_type="answer",
                          summary="合成候选",
                          detail=answer_detail))
+        # 采用回写:注入过的条目里,哪几条的动作被模型真的选了。
+        #
+        # 一次有界 UPDATE(至多 ``RETRIEVAL_EXPERIENCE_INJECT_TOP_K`` 个主键),只在
+        # 「真注入过 **且** 真有交集」时才发——所以默认关闭态、以及注入了但模型一次
+        # 都没采纳的 run,都是零写入。fail-open:``adopted`` 只是淘汰排序的一个键,
+        # 一次记账失败不该让一次已经检索完的 run 报错。取消是控制流不是失败,照常
+        # 上抛(与本文件其他 fail-open 分支同口径)。
+        if experience_entries and adopted_actions:
+            adopted_ids = adopted_entry_ids(experience_entries, sorted(adopted_actions))
+            if adopted_ids:
+                try:
+                    self.retrieval_experiences.note_adopted(adopted_ids)
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 见上
+                    pass
         from app.services.retrieval_baseline import (
             build_retrieval_baseline_manifest,
         )

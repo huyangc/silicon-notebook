@@ -286,3 +286,21 @@ class RetrievalExperienceStore:
                 "SELECT COUNT(*) AS n FROM retrieval_experiences"
             ).fetchone()
         return int(row["n"])
+
+    def version_signal(self) -> tuple[int, str]:
+        """``(row count, newest updated_at)`` — the injection side's memo key.
+
+        See the SQLite mirror for why both halves are needed and why an
+        adoption is deliberately invisible here.
+
+        ``::text`` rather than the raw ``timestamptz``: the value is only ever
+        compared for equality against the previously observed one, and a
+        rendered string compares identically on both backends, so the memo key
+        has one shape instead of one per driver.
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at)::text, '') AS m "
+                "FROM retrieval_experiences"
+            ).fetchone()
+        return int(row["n"]), str(row["m"] or "")
