@@ -199,3 +199,41 @@ def test_source_projection_reports_the_third_state(repo):
         detail = repo.get_source(source_id)
         assert detail.kg_analyzed_empty == by_id[source_id].kg_analyzed_empty
         assert detail.kg_extracted == by_id[source_id].kg_extracted
+
+
+def test_postgres_pending_sql_has_no_literal_percent():
+    """PG 侧的整条 SQL 里不得出现**非占位符**的 `%`。
+
+    这条是踩出来的:第一版把前缀判断写成 ``LIKE 'kg objects=0 %'``,而 psycopg 把查询里
+    的 `%` 当占位符起头,于是它在运行时炸成
+    ``ProgrammingError: only '%s', '%b', '%t' are allowed as placeholders``。本地标准门
+    **跑不到**这个错——PG 是独立的一条集成 lane,需要活数据库;它一路绿到 CI 才红。
+
+    所以守卫按 SQL **字符串**判,不需要任何数据库:每个 `%` 后面必须紧跟 psycopg 认得的
+    占位符字母。这也是为什么 ``_pending_sql`` 被抽成了一个纯函数。
+
+    修法本身也顺带堵死了这一类:那句改用 ``starts_with()``,整条 SQL 里除 ``%s`` 之外
+    不再有任何 `%`。
+    """
+    from app.repositories.postgres import knowledge_counts_cache as pg_cache
+
+    for visible_only in (True, False):
+        sql = pg_cache._pending_sql(visible_only=visible_only)
+        offending = [
+            sql[index : index + 12]
+            for index, char in enumerate(sql)
+            if char == "%" and sql[index + 1 : index + 2] not in {"s", "b", "t"}
+        ]
+        assert not offending, (visible_only, offending)
+
+
+def test_postgres_pending_sql_mirrors_the_python_predicate_shape():
+    """PG 镜像必须实际带上那三个判断——否则上面那条「没有裸 %」可以靠**删掉整个条件**
+    来满足。判据本身的对错由 SQLite 侧的真库对账保证,这里只钉「PG 侧没漏掉它」。"""
+    from app.repositories.postgres import knowledge_counts_cache as pg_cache
+
+    sql = pg_cache._pending_sql(visible_only=True)
+    assert "starts_with(" in sql
+    assert KG_EMPTY_RUN_MESSAGE_PREFIX in sql
+    # 零产出 + 有失败窗口仍算待分析(见 CASES),PG 侧同样要有这道护栏。
+    assert sql.count("windows_failed=[1-9][0-9]*/[0-9]+") == 2

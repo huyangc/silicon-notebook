@@ -33,7 +33,15 @@ def _mutation_seq(db: Any, notebook_id: str) -> int:
     return int(row["kg_mutation_seq"])
 
 
-def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
+def _pending_sql(*, visible_only: bool) -> str:
+    """构造 pending 计数的整条 SQL。
+
+    抽成函数是为了让它能被**不需要活 PostgreSQL** 的守卫扫一遍:psycopg 把查询里的
+    ``%`` 当占位符起头,SQL 里任何一个字面 ``%`` 都会在**运行时**炸成
+    ``ProgrammingError``,而本仓库的 PG 集成门是独立的一条 lane——本地标准门跑不到它。
+    真发生过一次(``LIKE 'kg objects=0 %'``),守卫见
+    ``backend/tests/test_kg_empty_extraction_marker.py``。
+    """
     # 判据与 postgres QueryStore 原 _pending_source_count 逐字一致(用 ordinal 排序:
     # postgres 无 rowid)。visible_only 排除 memory/knowhow 隐藏合成源。
     #
@@ -45,7 +53,7 @@ def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
     visible_clause = (
         "AND s.source_type NOT IN ('memory','knowhow') " if visible_only else ""
     )
-    row = db.execute(
+    return (
         "SELECT COUNT(*) AS c FROM sources s "
         "JOIN LATERAL (SELECT 1 AS found FROM source_elements e "
         "WHERE e.source_id=s.id LIMIT 1) parsed ON TRUE "
@@ -72,10 +80,19 @@ def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
         # 理由同 SQLite 侧:partial 重试的消息以 "partial KG retry incomplete;" 起头,与
         # ``kg objects=0 `` 前缀互斥。
         "AND NOT (COALESCE(latest_kg.status,'')='completed' "
-        "AND COALESCE(latest_kg.error_message,'') LIKE 'kg objects=0 %' "
+        # 用 starts_with() 而不是 LIKE 'kg objects=0 %':psycopg 把 SQL 里的 `%`
+        # 当占位符起头,字面 `%` 必须写成 `%%`,而那是个一挪就再犯的坑(已经犯过一次,
+        # 见 _pending_sql 的 docstring)。starts_with 无通配符、无需转义,而且与
+        # Python 判据里的 str.startswith 是逐字同一个操作。
+        "AND starts_with(COALESCE(latest_kg.error_message,''),'kg objects=0 ') "
         "AND COALESCE(latest_kg.error_message,'') "
-        "!~ 'windows_failed=[1-9][0-9]*/[0-9]+')",
-        (notebook_id,),
+        "!~ 'windows_failed=[1-9][0-9]*/[0-9]+')"
+    )
+
+
+def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
+    row = db.execute(
+        _pending_sql(visible_only=visible_only), (notebook_id,)
     ).fetchone()
     return int(row["c"])
 
