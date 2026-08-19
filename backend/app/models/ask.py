@@ -678,13 +678,19 @@ class PublicReference(BaseModel):
     ``services/conversation_public_view.py`` as an allowlist — a Memory citation
     keeps its title/snippet but loses its ``memory_id``. ``key`` (``"k1"`` or a
     positional ``"1"``) is preserved so the page can number ``[k]`` markers from
-    it rather than from a list position the reference filter may have shifted."""
+    it rather than from a list position the reference filter may have shifted.
+
+    ``title_truncated``/``snippet_truncated`` disclose that an over-length title
+    or excerpt was clipped to its bounded prefix, so the page can mark it rather
+    than drop the tail silently (codex #522 R3)."""
 
     key: str = ""
     title: str = ""
     file_name: str = ""
     location: str = ""
     snippet: str = ""
+    title_truncated: bool = False
+    snippet_truncated: bool = False
 
 
 class PublicImage(BaseModel):

@@ -882,6 +882,17 @@ class AskStateStore:
         omitted/empty (a legacy or no-body caller), the watermark falls back to
         the conversation's current latest answer, the historical behaviour.
 
+        The watermark is ADVANCE-ONLY (codex #522 R3): once a share has pinned it
+        to some answer, a later request whose boundary sorts BEFORE the published
+        one — a stale browser tab, or a slow concurrent share — is rejected with
+        ``ConversationShareWatermarkStale`` (→ 409) rather than allowed to REGRESS
+        the link and unpublish turns another share already made public. An equal
+        boundary is an idempotent no-op (re-sharing the same snapshot is normal);
+        a strictly newer one advances as before. The regression is measured with
+        the SAME canonical keyset the public snapshot uses — evaluated in SQL
+        against both answer rows so it can never diverge from that order — so a
+        same-instant tie-broken answer is compared by ``rowid``, not merged.
+
         Raises ``KeyError`` when the conversation does not exist in this
         notebook. A conversation with zero answers can still be "shared"
         here (link issued, watermark stays NULL) — the row-level
@@ -893,7 +904,8 @@ class AskStateStore:
         expected = str(expected_through_id or "").strip()
         with self.database.write() as db:
             conv = db.execute(
-                "SELECT id FROM conversations WHERE id=? AND notebook_id=?",
+                "SELECT id, shared_through_id FROM conversations "
+                "WHERE id=? AND notebook_id=?",
                 (conversation_id, notebook_id),
             ).fetchone()
             if conv is None:
@@ -919,6 +931,31 @@ class AskStateStore:
                 ).fetchone()
                 through_at = latest["created_at"] if latest is not None else None
                 through_id = latest["id"] if latest is not None else None
+            # Advance-only (codex #522 R3): reject a request whose boundary sorts
+            # BEFORE the already-published one. ``current_id`` is the live
+            # watermark; the comparison runs in SQL over both answer rows using
+            # the SAME canonical keyset the public snapshot uses (rowid tie-break,
+            # never a pure timestamp), so it can never diverge from that order. A
+            # request boundary that does not resolve (zero-answer fallback) or a
+            # current boundary that no longer resolves (its answer was deleted)
+            # skips the check and advances — matching the deleted-watermark
+            # fallback in ``public_conversation_by_token``. An equal boundary is an
+            # idempotent no-op (short-circuited by ``current_id != through_id``),
+            # not a regression.
+            current_id = conv["shared_through_id"]
+            if through_id and current_id and current_id != through_id:
+                regresses = db.execute(
+                    "SELECT 1 FROM answers r, answers c "
+                    "WHERE r.id=? AND c.id=? AND r.conversation_id=? "
+                    "AND c.conversation_id=? AND ("
+                    "julianday(r.created_at) < julianday(c.created_at) "
+                    "OR (julianday(r.created_at) = julianday(c.created_at) AND ("
+                    "r.created_at < c.created_at "
+                    "OR (r.created_at = c.created_at AND r.rowid < c.rowid))))",
+                    (through_id, current_id, conversation_id, conversation_id),
+                ).fetchone()
+                if regresses is not None:
+                    raise ConversationShareWatermarkStale(expected or through_id)
             issued = db.execute(
                 "UPDATE conversations SET share_token=COALESCE(share_token,?), "
                 "shared_through_at=?, shared_through_id=? "

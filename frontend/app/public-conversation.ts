@@ -28,6 +28,9 @@ export type PublicReferenceT = {
   file_name: string;
   location: string;
   snippet: string;
+  /** 标题/摘录超上限被切成前缀时置真——公开页据此显示「已截断」而不静默丢尾。 */
+  title_truncated?: boolean;
+  snippet_truncated?: boolean;
 };
 
 /** 一张「本段附图」的公开投影。只带**按链接口令派生的不透明别名**，没有 asset_id。 */

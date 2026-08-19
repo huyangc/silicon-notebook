@@ -1793,12 +1793,13 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 | `MAX_REFERENCED_ASSETS` (distinct assets the asset endpoint scans per request; must stay ≥ `MAX_TURNS × CITATION_IMAGES_PER_ANSWER` — enforced by `test_endpoint_scan_cap_covers_every_alias_the_projection_can_emit`, since a later-turn image's alias would otherwise never resolve) | 6,000 |
 | `MAX_TURNS` (turns rendered on one public page; excess turns are disclosed as `truncated_turns`) | 500 |
 | `MAX_REFERENCES` (citations per turn) | 500 |
+| `MAX_REFERENCE_TITLE_CHARS` (per-reference title / original file name) | 400 |
 | `MAX_SNIPPET_CHARS` (per-citation excerpt) | 1,200 |
 | `MAX_CAPTION_CHARS` (per-image caption) | 500 |
 
-The per-turn question **and the conversation title** are served **whole** (no cap): like `answer_md`, they are the user's own artifacts (the title has no length cap on rename), and truncating them silently would drop the very text that produced the answer or names the conversation.
+The per-turn question **and the conversation title** are served **whole** (no cap): like `answer_md`, they are the user's own artifacts (the title has no length cap on rename), and truncating them silently would drop the very text that produced the answer or names the conversation. A reference title/excerpt is evidence metadata and stays bounded, but an over-length value **sets `title_truncated`/`snippet_truncated`** (the public page shows a "已截断" hint) rather than dropping the tail silently (codex #522 R3).
 
-All six live in `backend/app/services/conversation_public_view.py`.
+All seven live in `backend/app/services/conversation_public_view.py`.
 
 ## APIs
 

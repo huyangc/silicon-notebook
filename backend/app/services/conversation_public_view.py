@@ -66,6 +66,12 @@ from typing import Any, Sequence
 # violation ``answer_md`` already avoids. Both are served whole (codex #522 R1).
 MAX_REFERENCES = 500
 MAX_SNIPPET_CHARS = 1200
+# Per-reference title / original-file-name cap. Unlike the question and the
+# conversation title (the user's own artifacts, served whole), a reference title
+# is evidence metadata and stays bounded — but truncation is DISCLOSED via
+# ``title_truncated`` rather than dropped silently (codex #522 R3; AGENTS.md
+# 用户编辑的数据不得静默截断). Registered in ``docs/product-and-api*.md`` (T6).
+MAX_REFERENCE_TITLE_CHARS = 400
 # Safety ceiling on how many turns one public page renders. A conversation's
 # turn count is bounded by how many times a user asked, so this almost never
 # binds; it exists so a pathological conversation cannot balloon one anonymous
@@ -191,6 +197,16 @@ def _text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _text_flag(value: Any, limit: int) -> tuple[str, bool]:
+    """Trimmed value capped at ``limit``, plus whether the cap actually bit.
+
+    The public projection must DISCLOSE truncation of an evidence field, never
+    drop the tail silently (codex #522 R3; AGENTS.md 用户编辑的数据不得静默截断).
+    The bool lets the page mark a reference whose title/excerpt was clipped."""
+    text = str(value or "").strip()
+    return text[:limit], len(text) > limit
+
+
 def _question_text(value: Any) -> str:
     """The question, served WHOLE — never truncated (codex #522 R1).
 
@@ -297,7 +313,7 @@ def _select_references(
     ]
 
 
-def public_reference(key: str, reference: Any) -> dict[str, str]:
+def public_reference(key: str, reference: Any) -> dict[str, Any]:
     """One reference as an anonymous reader sees it: nothing addressable.
 
     Handles both wire shapes with one allowlist — ``AnswerAnchor`` (title in
@@ -305,17 +321,29 @@ def public_reference(key: str, reference: Any) -> dict[str, str]:
     ``Citation`` (title in ``label``, excerpt in ``quoted_span``). Reads no id
     key from either, so ``source_id``/``element_id``/``object_id``/
     ``notebook_id``/``memory_id``/``provenance``/``knowhow``/``images`` are
-    dropped by construction."""
+    dropped by construction.
+
+    ``title``/``snippet`` stay bounded (evidence metadata, not the user's own
+    artifact the way the question/conversation-title are), but an over-length
+    value sets ``title_truncated``/``snippet_truncated`` so the page can DISCLOSE
+    the clip rather than drop the tail silently (codex #522 R3)."""
     row = reference if isinstance(reference, dict) else {}
+    title, title_truncated = _text_flag(
+        row.get("source_title") or row.get("label") or row.get("name"),
+        MAX_REFERENCE_TITLE_CHARS,
+    )
+    # Anchor excerpt is ``snippet``; citation excerpt is ``quoted_span``.
+    snippet, snippet_truncated = _text_flag(
+        row.get("snippet") or row.get("quoted_span"), MAX_SNIPPET_CHARS
+    )
     return {
         "key": _text(key, 24),
-        "title": _text(
-            row.get("source_title") or row.get("label") or row.get("name"), 400
-        ),
-        "file_name": _text(row.get("source_file_name"), 400),
+        "title": title,
+        "file_name": _text(row.get("source_file_name"), MAX_REFERENCE_TITLE_CHARS),
         "location": _text(row.get("location_label"), 200),
-        # Anchor excerpt is ``snippet``; citation excerpt is ``quoted_span``.
-        "snippet": _text(row.get("snippet") or row.get("quoted_span"), MAX_SNIPPET_CHARS),
+        "snippet": snippet,
+        "title_truncated": title_truncated,
+        "snippet_truncated": snippet_truncated,
     }
 
 

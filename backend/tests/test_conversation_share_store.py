@@ -175,6 +175,92 @@ def test_expected_through_id_that_no_longer_resolves_is_rejected(
     )["share_token"] == ""
 
 
+def test_share_watermark_is_advance_only_rejecting_a_stale_expected(
+    tmp_path, monkeypatch
+):
+    """The watermark may only ADVANCE (codex #522 R3). Once a share pins it to a
+    newer answer, a stale request pinning to an OLDER answer must be rejected
+    (``ConversationShareWatermarkStale`` → 409) rather than silently REGRESS the
+    published link and unpublish turns another share already made public.
+
+    Two-tab scenario: tab A shares up to ans-d (latest); tab B, holding a stale
+    view, POSTs expected=ans-a. It must be rejected and the watermark must stay
+    at ans-d.
+
+    Mutation guard: dropping the advance-only comparison makes the stale reshare
+    succeed and the watermark regress to ans-a.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(repo)
+    store = AskStateStore(repo._runtime.database, repo._runtime.seams)
+
+    store.share_conversation(notebook_id, conversation_id, expected_through_id="ans-d")
+
+    with pytest.raises(ConversationShareWatermarkStale):
+        store.share_conversation(
+            notebook_id, conversation_id, expected_through_id="ans-a"
+        )
+    assert store.conversation_share_state(
+        notebook_id, conversation_id
+    )["shared_through_id"] == "ans-d"
+
+
+def test_share_watermark_rejects_a_tiebreak_earlier_answer(tmp_path, monkeypatch):
+    """Advance-only respects the canonical tie-break, not just the timestamp
+    (codex #522 R3). ans-c and ans-b share the same instant t1, ordered
+    ans-c → ans-b by rowid. Pinning to ans-b then requesting ans-a's tie-mate
+    ans-c (earlier in canonical order, SAME instant) is a REGRESSION and must be
+    rejected.
+
+    Mutation guard: a pure ``created_at`` comparison (dropping the rowid term)
+    would treat ans-c and ans-b as equal and let the reshare succeed."""
+    repo = _repo(tmp_path, monkeypatch)
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(repo)
+    store = AskStateStore(repo._runtime.database, repo._runtime.seams)
+
+    store.share_conversation(notebook_id, conversation_id, expected_through_id="ans-b")
+
+    with pytest.raises(ConversationShareWatermarkStale):
+        store.share_conversation(
+            notebook_id, conversation_id, expected_through_id="ans-c"
+        )
+    assert store.conversation_share_state(
+        notebook_id, conversation_id
+    )["shared_through_id"] == "ans-b"
+
+
+def test_resharing_the_same_watermark_is_an_idempotent_no_op(tmp_path, monkeypatch):
+    """Re-sharing the SAME boundary is not a regression — it is the normal
+    "share this exact snapshot again" and must return the current state without
+    raising (codex #522 R3)."""
+    repo = _repo(tmp_path, monkeypatch)
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(repo)
+    store = AskStateStore(repo._runtime.database, repo._runtime.seams)
+
+    first = store.share_conversation(
+        notebook_id, conversation_id, expected_through_id="ans-c"
+    )
+    again = store.share_conversation(
+        notebook_id, conversation_id, expected_through_id="ans-c"
+    )
+    assert again["shared_through_id"] == "ans-c"
+    assert again["share_token"] == first["share_token"]
+
+
+def test_share_watermark_still_advances_forward(tmp_path, monkeypatch):
+    """The advance-only guard must not block a legitimate forward move: pin to an
+    early answer, then reshare to a later one — the watermark advances."""
+    repo = _repo(tmp_path, monkeypatch)
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(repo)
+    store = AskStateStore(repo._runtime.database, repo._runtime.seams)
+
+    store.share_conversation(notebook_id, conversation_id, expected_through_id="ans-a")
+    advanced = store.share_conversation(
+        notebook_id, conversation_id, expected_through_id="ans-d"
+    )
+    assert advanced["shared_through_id"] == "ans-d"
+
+
 def test_public_snapshot_falls_back_to_timestamp_when_boundary_answer_deleted(
     tmp_path, monkeypatch
 ):
