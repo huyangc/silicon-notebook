@@ -26,6 +26,7 @@ from app.repositories.ports import (
     project_run_step,
 )
 from app.services.retrieval_experience_job import (
+    _offered_entries,
     RetrievalExperienceDistillationService,
     distillation_wiring_active,
     parse_distillation_reply,
@@ -828,3 +829,23 @@ def test_the_worker_release_rearms_a_full_pending_batch(monkeypatch):
     service.run()
     assert submitted[-1] == trigger       # 积压被再排
     assert service._pending == 0
+
+
+def test_offered_entries_are_unique_per_situation_and_action():
+    """codex #524 R6 P2:同一 (sN, action) 只展示相似度最高的一条——两条相似
+    旧条目共享同一标签时,UPDATE 的指认必然歧义,首个匹配可能污染另一条打法。"""
+    groups = _groups()
+    base = dict(groups[0].situation)
+    keys = list(base)
+    near_a = {**base, keys[0]: "unknown" if base[keys[0]] != "unknown" else "none"}
+    near_b = {**base, keys[1]: "unknown" if base[keys[1]] != "unknown" else "none"}
+    existing = [
+        {"id": "rx-b", "action": "ppr", "situation": near_b},
+        {"id": "rx-a", "action": "ppr", "situation": near_a},
+        {"id": "rx-exact", "action": "ppr", "situation": dict(base)},
+    ]
+    offered = _offered_entries(groups, existing)
+    ppr_under_zero = [e for i, e in offered if i == 0
+                      and str(e.get("action")) == "ppr"]
+    assert len(ppr_under_zero) == 1            # 唯一
+    assert ppr_under_zero[0]["id"] == "rx-exact"  # 且是相似度最高的
