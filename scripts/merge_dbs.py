@@ -20,6 +20,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# codex #524 R8 P2:经验库上限直接取协议常量单源(此前是镜像值 + 对账测试;
+# 评审两轮点名后改为真单源)。ports.py 可独立 import(纯类型/常量,实测不拉
+# 数据库驱动),脚本自举 backend 进 sys.path——它本就以仓库内脚本身份运行。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
+from app.repositories.ports import (  # noqa: E402
+    RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
+)
+
 # --- 表分类(SCHEMA_VERSION=54) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
@@ -371,12 +379,11 @@ def _assert_global_schema_compatibility(
 
 
 def _evict_experiences_to_limit(
-    conn: sqlite3.Connection, max_entries: int = 300
+    conn: sqlite3.Connection, max_entries: int = RETRIEVAL_EXPERIENCE_MAX_ENTRIES
 ) -> int:
-    """合库后把 `retrieval_experiences` 收回运行时硬上限(默认 300,与
-    `ports.RETRIEVAL_EXPERIENCE_MAX_ENTRIES` 同值——离线脚本不 import 后端包,
-    数值与淘汰序都镜像 `sqlite/retrieval_experience_store.py::evict_to_limit`,
-    改任一侧必须同改另一侧)。"""
+    """合库后把 `retrieval_experiences` 收回运行时硬上限(协议常量单源;
+    淘汰序仍镜像 `sqlite/retrieval_experience_store.py::evict_to_limit`,
+    改序必须两侧同改——对账测试另钉常量相等作保险)。"""
     if not _table_exists(conn, "retrieval_experiences", "main"):
         return 0
     row = conn.execute("SELECT COUNT(*) FROM main.retrieval_experiences").fetchone()
