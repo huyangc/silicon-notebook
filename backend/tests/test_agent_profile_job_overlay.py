@@ -1187,7 +1187,7 @@ def test_a_completed_ask_signals_the_asking_member_after_the_terminal_row(
 
     coordinator = _ask_coordinator(
         calls, runner=_response,
-        noted=lambda nb, uid: noted.append(("note", nb, uid)) or calls.append(("note",)),
+        noted=lambda nb, uid, mode_id="chunk": noted.append(("note", nb, uid)) or calls.append(("note",)),
     )
 
     _drain(coordinator.start(
@@ -1211,7 +1211,8 @@ def test_a_failed_ask_never_signals(failure):
         raise failure
 
     _drain(_ask_coordinator(
-        calls, runner=_boom, noted=lambda nb, uid: noted.append((nb, uid)),
+        calls, runner=_boom,
+        noted=lambda nb, uid, mode_id="chunk": noted.append((nb, uid)),
     ).start(
         "nb-t5", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
         user_id=USER_A,
@@ -2112,3 +2113,19 @@ def test_the_runtime_note_ask_completed_fans_out_to_both_chains():
     # 触发语义不同的证据(一个按人按库,一个是部署级全局计数器)。
     assert call_args["self.agent_profile_jobs.note_ask_completed"] == 2
     assert call_args["self.retrieval_experience_jobs.note_ask_completed"] == 0
+
+
+def test_the_runtime_counts_only_reasoning_asks_toward_distillation():
+    """codex #524 R4 P2:计数与采样同谓词——采样只取 mode='reasoning',计数器
+    对 chunk/graph 也 +1 就会拿同一批旧 reasoning run 反复付蒸馏钱。"""
+    from app.services import repository_runtime as rr
+
+    source = Path(rr.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def _note_ask_completed"):]
+    body = body[:body.index("def ", 10)]
+    guard_at = body.index('mode_id == "reasoning"')
+    p2_call_at = body.index("retrieval_experience_jobs.note_ask_completed")
+    assert guard_at < p2_call_at, "P2 链计数必须在 reasoning 模式判据之内"
+    # P1 链不受模式过滤(巡固样本读全部模式的轨迹)
+    p1_call_at = body.index("agent_profile_jobs.note_ask_completed")
+    assert p1_call_at < guard_at, "P1 链不得被模式判据圈住"

@@ -805,3 +805,26 @@ def test_a_fast_worker_cannot_double_schedule_the_same_signals(monkeypatch):
     service.note_ask_completed()          # 竞入的下一次完成
     assert submitted == [trigger]         # 不会重复排批
     assert service._pending == 1
+
+
+def test_the_worker_release_rearms_a_full_pending_batch(monkeypatch):
+    """codex #524 R4 P2:busy 期间攒满的整批,worker 退出时原子复查再排——
+    突发流量停止后不永久滞留。"""
+    service = _service([], _REPLY)
+    submitted = []
+    monkeypatch.setattr(
+        service, "_submit_claimed", lambda snapshot: submitted.append(snapshot)
+    )
+    trigger = max(1, int(service.settings.retrieval_experience_trigger))
+    # 第一批:正常触发并占住槽位(stub 不会释放)
+    for _ in range(trigger):
+        service.note_ask_completed()
+    assert submitted == [trigger]
+    # busy 期间又攒满一整批
+    for _ in range(trigger):
+        service.note_ask_completed()
+    assert service._pending == trigger
+    # worker 退出:run() 的 finally 释放并复查
+    service.run()
+    assert submitted[-1] == trigger       # 积压被再排
+    assert service._pending == 0
