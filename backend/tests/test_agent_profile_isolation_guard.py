@@ -98,6 +98,10 @@ OVERLAY_CHAIN_FUNCTIONS: frozenset[str] = frozenset({
     # 本链路自己那一行 + 调 start_overlay)。
     "_clear_revoked_overlay",
     "_maybe_requeue_overlay",
+    # P2(claim 代际):把上面两个的调用条件收进一处,自己不发任何端口调用——
+    # 它只按 settle 的三值结局决定「抹不抹 / 要不要再排一轮」。归覆盖层而不是
+    # 中性,是因为它决定的那两件事都只作用于该成员自己的行。
+    "_after_overlay_settle",
 })
 
 #: 与取数无关的函数:构造、事件、结算、纯文本处理。登记在这里表示「我看过它,它不

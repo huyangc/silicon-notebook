@@ -53,7 +53,11 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # question-answer session sharing. Additive only: the repository methods
 # that use these columns have no caller yet (that lands in a later task),
 # so this migration is zero-behavior-change.
-SCHEMA_VERSION = 52
+# v53 adds agent_profile_jobs.claim_token — the consolidation chain's claim
+# GENERATION. One nullable-free TEXT column with an empty default; existing
+# rows keep '' and the startup sweep force-settles every leftover
+# queued/running row anyway, so no backfill is needed.
+SCHEMA_VERSION = 53
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2762,6 +2766,53 @@ class SqliteMigrator:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_share_token
                   ON conversations(share_token) WHERE share_token IS NOT NULL;
                 """
+            )
+
+    def _migration_53(self) -> None:
+        """Agentic Memory P2: 给巡固链的单飞加一个**代际**。
+
+        P1 的单飞只有 ``status`` CAS。行被删除后重建(成员被移出 →
+        ``clear_job_row`` 删行;重新加入 → 下一次 ``bump_signal``/``claim`` 的
+        ``INSERT OR IGNORE`` 造一行新的)之后,旧 worker 的 ``settle`` 仍会命中
+        新行——这就是 P1 登记的 R4 ABA:**结算错代**(消费掉新 run 的 claim 快照)
+        与**写错代**(``expected_revision=0`` 把移出前的笔记写回去)。
+
+        ``claim_token`` 每次 ``claim()`` 换一个新值,删除+重建必然换值,ABA 因此
+        在结构上关闭:``settle`` 与 ``write_block`` 都把它当 CAS 条件的一部分。
+
+        三条已拍板取舍(登记,免得后来者当疏漏"修"回去):
+
+        1. **``runs`` 计数当不了代际**:它在 settle 时 +1、claim 时不动,行被删重建
+           后新行 ``runs=0``,而首轮 run 的旧 worker 也持有 0——恰好在最常见的形态
+           上碰撞。
+
+        2. **``started_at`` 当不了代际**:SQLite 的 ``now()`` 截到秒
+           (``memory_revisions`` 已登记过这个教训),同秒内的删除+重建会给出同一个
+           值。乐观并发的代际只能是显式分配的不透明值,不能是时间戳。
+
+        3. **``TEXT NOT NULL DEFAULT ''``,不是 nullable**:与
+           ``_migration_51`` 第 1 条同源。这一列不进任何唯一面,所以 NULL 不会像
+           ``owner_id`` 那样破坏 PK;但空串哨兵让「未认领」有一个可写进 SQL 的确定
+           取值(``claim_token=''``),而 ``IS NULL`` 与 ``=?`` 在同一条 CAS 谓词里
+           混用正是这类判据出错的经典形态。既有行升级后落在 ''——它们要么是
+           ``idle``/终态(CAS 的 status 条件已经把它们排除),要么是崩溃遗留的
+           ``running``(启动兜底 ``sweep_stale_on_start`` 无条件扫掉),所以不需要
+           回填。
+
+        **不建索引**:这一列只作为 PK 点查之后的**残余条件**出现
+        (``WHERE notebook_id=? AND owner_id=? AND claim_token=?``),PK 已经把行定位
+        到一行,加索引买不到任何东西。
+
+        ⚠ 必须走 ``add_column_if_missing``(与 ``_migration_48`` 的
+        ``sources.agent_profile_id`` 同一先例):SQLite 没有
+        ``ADD COLUMN IF NOT EXISTS``,而「已部署库补建」那一族测试的做法是**只**回滚
+        ``user_version`` 再重开——整条梯子会在一张已经带着这一列的表上重跑本迁移,
+        裸 ALTER 直接 ``duplicate column name`` 炸在启动路径上。
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "agent_profile_jobs", "claim_token",
+                "TEXT NOT NULL DEFAULT ''",
             )
 
     def _recover_interrupted_jobs(self) -> None:

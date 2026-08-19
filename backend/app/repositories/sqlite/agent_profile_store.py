@@ -18,7 +18,13 @@ from typing import Any, Callable, Mapping, Sequence
 from app.repositories.ports import (
     AGENT_PROFILE_JOB_TERMINAL_STATUSES,
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
+    AGENT_PROFILE_SETTLE_GONE,
+    AGENT_PROFILE_SETTLE_SUPERSEDED,
+    AGENT_PROFILE_SETTLED,
+    AgentProfileClaim,
+    AgentProfileClaimSuperseded,
     AgentProfileRevisionConflict,
+    AgentProfileSettleOutcome,
     append_profile_history as _append_history,
 )
 from app.repositories.sqlite.database import SqliteDatabase
@@ -62,6 +68,7 @@ def _job_row(row) -> dict:
         "diagnostic": row["diagnostic"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
+        "claim_token": row["claim_token"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -76,10 +83,14 @@ class AgentProfileStore:
         now: Callable[[], str],
     ) -> None:
         self.database = database
-        # Kept for construction parity with every other store in the bundle
-        # (bundle.py hands all of them the same seams); this store synthesises
-        # no ids of its own — both its tables are keyed by caller-supplied
-        # (notebook_id, owner_id[, label]) tuples.
+        # Neither table is KEYED by a synthesised id — both are keyed by
+        # caller-supplied (notebook_id, owner_id[, label]) tuples — but
+        # ``claim`` mints one value through this seam: the chain's
+        # ``claim_token`` generation (see ``claim``). It goes through the
+        # bundle's shared id seam rather than calling uuid4 inline so the token
+        # inherits the one collision-proof id shape the whole repository already
+        # agrees on (prefix + full 128-bit uuid hex) — a generation that could
+        # repeat is a generation that does not separate generations.
         self.new_id = new_id
         self.now = now
 
@@ -122,6 +133,7 @@ class AgentProfileStore:
         expected_revision: int,
         origin: str,
         actor: str,
+        claim_token: str = "",
     ) -> dict:
         """Upsert inside ONE write transaction: the value/evidence change and
         the ``revision`` CAS bump happen together, and the transaction's LAST
@@ -147,12 +159,30 @@ class AgentProfileStore:
         row first" (PostgreSQL catches ``UniqueViolation`` for the same
         branch). With ``begin_immediate`` in place that race is closed on this
         backend, but the translation costs nothing and keeps a raw DB error
-        from ever escaping the port's contract."""
+        from ever escaping the port's contract.
+
+        A non-empty ``claim_token`` adds a GENERATION check as the first step
+        INSIDE this same transaction: the chain's job row must still carry that
+        token, or ``AgentProfileClaimSuperseded`` is raised and nothing is
+        written. Being inside the transaction is the whole value — the caller's
+        own pre-write probe runs before ``begin_immediate`` and is therefore
+        best-effort, while this one cannot be overtaken, and unlike a bare
+        existence check it also refuses a row that was deleted and RECREATED
+        while this run was in its model call."""
         now = self.now()
         evidence_list = list(evidence)
         expected = int(expected_revision)
+        token = str(claim_token or "")
         with self.database.write() as db:
             self.database.begin_immediate(db)
+            if token:
+                claimed = db.execute(
+                    "SELECT 1 FROM agent_profile_jobs "
+                    "WHERE notebook_id=? AND owner_id=? AND claim_token=?",
+                    (notebook_id, owner_id, token),
+                ).fetchone()
+                if claimed is None:
+                    raise AgentProfileClaimSuperseded(notebook_id, owner_id)
             row = db.execute(
                 "SELECT value, revision, history_json FROM agent_notebook_profile "
                 "WHERE notebook_id=? AND owner_id=? AND label=?",
@@ -337,10 +367,10 @@ class AgentProfileStore:
             ).fetchone()
         return int(row["pending_signal"])
 
-    def claim(self, notebook_id: str, owner_id: str) -> int | None:
+    def claim(self, notebook_id: str, owner_id: str) -> AgentProfileClaim | None:
         """Take this chain's single-flight slot; return the ``pending_signal``
-        SNAPSHOT at the moment of the claim, or ``None`` when the slot was
-        already held.
+        SNAPSHOT at the moment of the claim plus a fresh generation token, or
+        ``None`` when the slot was already held.
 
         Three things happen in one transaction, and each one matters:
 
@@ -364,8 +394,20 @@ class AgentProfileStore:
 
         ``begin_immediate`` covers the INSERT/UPDATE pair against another
         process sharing the file.
+
+        4. The same UPDATE stamps a NEWLY MINTED ``claim_token``. It is the
+           run's generation: ``settle`` and ``write_block`` both carry it as
+           part of their CAS, so a row that was deleted and recreated (member
+           removed, then re-added) can no longer be mistaken for the row this
+           run claimed. Neither the primary key nor ``runs`` could play that
+           part — the recreated row has the same key and starts over at
+           ``runs=0``, which is precisely the value a first-round stale worker
+           holds. The token is minted BEFORE the UPDATE so the value written to
+           the row and the value handed back are the same object rather than a
+           second read.
         """
         now = self.now()
+        token = self.new_id("apc")
         with self.database.write() as db:
             self.database.begin_immediate(db)
             db.execute(
@@ -375,13 +417,18 @@ class AgentProfileStore:
             )
             row = db.execute(
                 "UPDATE agent_profile_jobs SET status='running',started_at=?,"
+                "claim_token=?,"
                 "finished_at='',failure_reason='',diagnostic='',blocks_written=0,"
                 "updated_at=? WHERE notebook_id=? AND owner_id=? "
                 "AND status NOT IN ('queued','running') "
                 "RETURNING pending_signal",
-                (now, now, notebook_id, owner_id),
+                (now, token, now, notebook_id, owner_id),
             ).fetchone()
-        return int(row["pending_signal"]) if row is not None else None
+        if row is None:
+            return None
+        return AgentProfileClaim(
+            pending_signal=int(row["pending_signal"]), token=token
+        )
 
     def settle(
         self,
@@ -393,7 +440,8 @@ class AgentProfileStore:
         diagnostic: str = "",
         blocks_written: int = 0,
         consumed: int,
-    ) -> bool:
+        claim_token: str,
+    ) -> AgentProfileSettleOutcome:
         """Move a claimed chain to a terminal status, stamping
         ``finished_at`` and incrementing ``runs``.
 
@@ -410,27 +458,59 @@ class AgentProfileStore:
         The floor is in SQL (``MAX(0, ...)``, ``GREATEST`` on PostgreSQL) so
         the read and the subtraction are the same statement — computing it in
         Python would need a separate read and could go negative under a
-        concurrent bump. CAS'd on ``status IN ('queued','running')``: a
-        repeated settle touches 0 rows and returns ``False`` rather than
-        overwriting the outcome that already landed."""
+        concurrent bump. CAS'd on ``status IN ('queued','running')`` AND on the
+        row still carrying this run's ``claim_token``: a repeated settle, and a
+        settle from a superseded claim, both touch 0 rows rather than
+        overwriting the outcome that already landed or consuming a snapshot
+        that belongs to somebody else's run.
+
+        When the CAS does not land, the SAME transaction re-reads the row to
+        say WHY — and the transaction boundary is load-bearing, because the
+        two answers lead the caller in opposite directions:
+
+        * no row → ``"gone"``. Only member removal deletes it, so anything this
+          run wrote is revoked private data and the caller wipes it.
+        * a row, but a different token (or an already-terminal status) →
+          ``"superseded"``. The caller must NOT wipe: a newer generation holds
+          the chain and may already have written its own blocks.
+
+        Reading outside the transaction would let a removal land in between and
+        turn a ``"superseded"`` into a ``"gone"`` — i.e. turn "leave the new
+        run's work alone" into "delete it"."""
         if status not in AGENT_PROFILE_JOB_TERMINAL_STATUSES:
             raise ValueError("agent profile job terminal status is not recognised")
         now = self.now()
         written = max(0, int(blocks_written))
         taken = max(0, int(consumed))
+        token = str(claim_token or "")
         with self.database.write() as db:
+            self.database.begin_immediate(db)
             cursor = db.execute(
                 "UPDATE agent_profile_jobs SET status=?,failure_reason=?,"
                 "diagnostic=?,blocks_written=?,runs=runs+1,"
                 "pending_signal=MAX(0, pending_signal - ?),"
                 "finished_at=?,updated_at=? WHERE notebook_id=? AND owner_id=? "
-                "AND status IN ('queued','running')",
+                "AND status IN ('queued','running') AND claim_token=?",
                 (
                     status, failure_reason, diagnostic, written, taken,
-                    now, now, notebook_id, owner_id,
+                    now, now, notebook_id, owner_id, token,
                 ),
             )
-        return cursor.rowcount == 1
+            landed = cursor.rowcount == 1
+            survivor = (
+                None if landed
+                else db.execute(
+                    "SELECT 1 FROM agent_profile_jobs "
+                    "WHERE notebook_id=? AND owner_id=?",
+                    (notebook_id, owner_id),
+                ).fetchone()
+            )
+        if landed:
+            return AGENT_PROFILE_SETTLED
+        return (
+            AGENT_PROFILE_SETTLE_GONE if survivor is None
+            else AGENT_PROFILE_SETTLE_SUPERSEDED
+        )
 
     def sweep_stale_on_start(self) -> int:
         """Startup crash recovery: this in-process job has no cross-process

@@ -36,6 +36,10 @@ import pytest
 from app.repositories.postgres.agent_profile_store import AgentProfileStore
 from app.repositories.ports import (
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
+    AGENT_PROFILE_SETTLE_GONE,
+    AGENT_PROFILE_SETTLE_SUPERSEDED,
+    AGENT_PROFILE_SETTLED,
+    AgentProfileClaimSuperseded,
     AgentProfileRevisionConflict,
 )
 from app.services.repository_runtime import RepositoryCompatibilitySeams
@@ -100,7 +104,7 @@ def agent_profile_harness(request) -> AgentProfileHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 30
+    assert PostgresMigrator(database).migrate() == 31
     _seed(database, notebook_id=NOTEBOOK_ID)
     yield AgentProfileHarness(
         database=database,
@@ -288,14 +292,17 @@ def test_job_row_started_at_and_finished_at_are_the_empty_string_sentinel_before
     assert fresh["started_at"] == ""
     assert fresh["finished_at"] == ""
 
-    assert harness.store.claim(harness.notebook_id, "") == 1
+    first = harness.store.claim(harness.notebook_id, "")
+    assert first.pending_signal == 1
     claimed = harness.store.job_row(harness.notebook_id, "")
     assert claimed["started_at"] == NOW
     assert claimed["finished_at"] == ""
+    assert claimed["claim_token"] == first.token != ""
 
     assert harness.store.settle(
-        harness.notebook_id, "", "done", blocks_written=2, consumed=1
-    ) is True
+        harness.notebook_id, "", "done", blocks_written=2, consumed=1,
+        claim_token=first.token,
+    ) == AGENT_PROFILE_SETTLED
     settled = harness.store.job_row(harness.notebook_id, "")
     assert settled["finished_at"] == NOW
     assert settled["status"] == "done"
@@ -304,22 +311,30 @@ def test_job_row_started_at_and_finished_at_are_the_empty_string_sentinel_before
 
     # ``claim``'s reset writes NULL back into these nullable timestamptz
     # columns; the sentinel normalisation must survive that round trip too.
-    assert harness.store.claim(harness.notebook_id, "") == 0
+    second = harness.store.claim(harness.notebook_id, "")
+    assert second.pending_signal == 0
     reclaimed = harness.store.job_row(harness.notebook_id, "")
     assert reclaimed["finished_at"] == ""
     assert reclaimed["started_at"] == NOW
+    assert reclaimed["claim_token"] == second.token != first.token
 
 
 def test_claim_is_for_update_cas_and_settle_is_idempotent(agent_profile_harness):
     harness = agent_profile_harness
     harness.store.bump_signal(harness.notebook_id, "", delta=3)
-    assert harness.store.claim(harness.notebook_id, "") == 3
+    claimed = harness.store.claim(harness.notebook_id, "")
+    assert claimed.pending_signal == 3
     assert harness.store.claim(harness.notebook_id, "") is None
 
-    assert harness.store.settle(harness.notebook_id, "", "done", consumed=3) is True
+    assert harness.store.settle(
+        harness.notebook_id, "", "done", consumed=3, claim_token=claimed.token
+    ) == AGENT_PROFILE_SETTLED
     # A repeated settle after the chain already landed a terminal status
-    # touches nothing.
-    assert harness.store.settle(harness.notebook_id, "", "failed", consumed=0) is False
+    # touches nothing — and the row is still there, so the outcome is
+    # "superseded" rather than "gone".
+    assert harness.store.settle(
+        harness.notebook_id, "", "failed", consumed=0, claim_token=claimed.token
+    ) == AGENT_PROFILE_SETTLE_SUPERSEDED
     assert harness.store.job_row(harness.notebook_id, "")["status"] == "done"
 
 
@@ -331,7 +346,8 @@ def test_claim_creates_the_row_and_settle_floors_the_signal_with_greatest(
     are SQL-level and therefore genuinely backend-specific."""
     harness = agent_profile_harness
     assert harness.store.job_row(harness.notebook_id, "user-fresh") is None
-    assert harness.store.claim(harness.notebook_id, "user-fresh") == 0
+    fresh = harness.store.claim(harness.notebook_id, "user-fresh")
+    assert fresh.pending_signal == 0
     created = harness.store.job_row(harness.notebook_id, "user-fresh")
     assert created["status"] == "running"
     assert created["pending_signal"] == 0
@@ -340,13 +356,20 @@ def test_claim_creates_the_row_and_settle_floors_the_signal_with_greatest(
     # snapshot, and an over-large consumed value floors at zero instead of
     # going negative.
     harness.store.bump_signal(harness.notebook_id, "user-fresh", delta=12)
-    harness.store.settle(harness.notebook_id, "user-fresh", "done", consumed=0)
+    harness.store.settle(
+        harness.notebook_id, "user-fresh", "done", consumed=0,
+        claim_token=fresh.token,
+    )
     assert harness.store.job_row(
         harness.notebook_id, "user-fresh"
     )["pending_signal"] == 12
 
-    assert harness.store.claim(harness.notebook_id, "user-fresh") == 12
-    harness.store.settle(harness.notebook_id, "user-fresh", "done", consumed=99)
+    again = harness.store.claim(harness.notebook_id, "user-fresh")
+    assert again.pending_signal == 12
+    harness.store.settle(
+        harness.notebook_id, "user-fresh", "done", consumed=99,
+        claim_token=again.token,
+    )
     assert harness.store.job_row(
         harness.notebook_id, "user-fresh"
     )["pending_signal"] == 0
@@ -369,3 +392,63 @@ def test_sweep_stale_on_start_force_settles_queued_and_running_rows(
 
     idle_row = harness.store.job_row(harness.notebook_id, "user-a")
     assert idle_row["status"] == "idle"
+
+
+def test_the_claim_generation_is_enforced_on_this_backend_too(
+    agent_profile_harness,
+):
+    """The P2 claim generation, proved on PostgreSQL rather than assumed from
+    the SQLite mirror.
+
+    Both halves are genuinely backend-specific here. ``settle``'s
+    "why did the CAS not land" re-read has to share the settling transaction,
+    which on this backend is a real transaction rather than SQLite's
+    process-wide write mutex; and ``write_block``'s generation check takes
+    ``FOR SHARE`` on the job row, without which a concurrent ``clear_job_row``
+    could commit between the check and the write (SQLite's
+    ``begin_immediate`` makes that impossible for free).
+    """
+    harness = agent_profile_harness
+    store = harness.store
+    notebook = harness.notebook_id
+
+    store.write_block(
+        notebook, "user-gen", "retrieval_notes", value="current",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    before = store.read_block(notebook, "user-gen", "retrieval_notes")
+
+    store.bump_signal(notebook, "user-gen", delta=4)
+    stale = store.claim(notebook, "user-gen")
+
+    # Removed, re-added and re-claimed: a byte-identical primary key, a fresh
+    # generation.
+    store.clear_job_row(notebook, "user-gen")
+    store.bump_signal(notebook, "user-gen", delta=7)
+    fresh = store.claim(notebook, "user-gen")
+    assert fresh.token != stale.token
+
+    with pytest.raises(AgentProfileClaimSuperseded):
+        store.write_block(
+            notebook, "user-gen", "retrieval_notes", value="stale",
+            evidence=[], expected_revision=before["revision"],
+            origin="job", actor="", claim_token=stale.token,
+        )
+    assert store.read_block(notebook, "user-gen", "retrieval_notes") == before
+
+    assert store.settle(
+        notebook, "user-gen", "done", blocks_written=3, consumed=4,
+        claim_token=stale.token,
+    ) == AGENT_PROFILE_SETTLE_SUPERSEDED
+    row = store.job_row(notebook, "user-gen")
+    assert row["status"] == "running"
+    assert row["pending_signal"] == 7
+    assert row["runs"] == 0
+
+    # And the row really being gone still reports "gone", which is the branch
+    # the caller's revoked-overlay wipe keys off.
+    store.clear_job_row(notebook, "user-gen")
+    assert store.settle(
+        notebook, "user-gen", "done", consumed=7, claim_token=fresh.token
+    ) == AGENT_PROFILE_SETTLE_GONE
+    assert store.job_row(notebook, "user-gen") is None

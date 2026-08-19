@@ -22,6 +22,10 @@ import pytest
 from app.core.config import Settings
 from app.repositories.ports import (
     AGENT_PROFILE_RESTART_FAILURE_MESSAGE,
+    AGENT_PROFILE_SETTLE_GONE,
+    AGENT_PROFILE_SETTLE_SUPERSEDED,
+    AGENT_PROFILE_SETTLED,
+    AgentProfileClaimSuperseded,
     AgentProfileRevisionConflict,
 )
 from app.repositories.sqlite.agent_profile_store import AgentProfileStore
@@ -309,17 +313,26 @@ def test_claim_returns_the_pending_signal_snapshot_and_only_once(
 ):
     store.bump_signal(NOTEBOOK_ID, "", delta=5)
 
-    assert store.claim(NOTEBOOK_ID, "") == 5
+    claimed = store.claim(NOTEBOOK_ID, "")
+    assert claimed.pending_signal == 5
     row = store.job_row(NOTEBOOK_ID, "")
     assert row["status"] == "running"
     assert row["started_at"] == NOW
+    # The token handed back is the one stamped on the row.
+    assert claimed.token
+    assert row["claim_token"] == claimed.token
 
     # A second claim while still running is refused.
     assert store.claim(NOTEBOOK_ID, "") is None
 
-    # Once settled back to a non-busy state, claim can succeed again.
-    assert store.settle(NOTEBOOK_ID, "", "done", consumed=5) is True
-    assert store.claim(NOTEBOOK_ID, "") == 0
+    # Once settled back to a non-busy state, claim can succeed again — with a
+    # DIFFERENT token, which is the whole point of the generation.
+    assert store.settle(
+        NOTEBOOK_ID, "", "done", consumed=5, claim_token=claimed.token
+    ) == AGENT_PROFILE_SETTLED
+    again = store.claim(NOTEBOOK_ID, "")
+    assert again.pending_signal == 0
+    assert again.token != claimed.token
 
 
 def test_claim_creates_the_row_for_a_never_signalled_chain(
@@ -329,7 +342,7 @@ def test_claim_creates_the_row_for_a_never_signalled_chain(
     has never crossed a threshold — without faking a bump that would corrupt
     the automatic path's counter. The claim itself creates the row."""
     assert store.job_row(NOTEBOOK_ID, "") is None
-    assert store.claim(NOTEBOOK_ID, "") == 0
+    assert store.claim(NOTEBOOK_ID, "").pending_signal == 0
     row = store.job_row(NOTEBOOK_ID, "")
     assert row is not None
     assert row["status"] == "running"
@@ -342,17 +355,17 @@ def test_claim_resets_the_previous_runs_leftovers(store: AgentProfileStore):
     """Without this, a successful run keeps displaying the last failure's
     reason (and its blocks_written / finished_at)."""
     store.bump_signal(NOTEBOOK_ID, "", delta=1)
-    store.claim(NOTEBOOK_ID, "")
+    first = store.claim(NOTEBOOK_ID, "")
     store.settle(
         NOTEBOOK_ID, "", "failed",
         failure_reason="模型未配置", diagnostic="no binding",
-        blocks_written=2, consumed=0,
+        blocks_written=2, consumed=0, claim_token=first.token,
     )
     stale = store.job_row(NOTEBOOK_ID, "")
     assert stale["failure_reason"] == "模型未配置"
     assert stale["finished_at"] == NOW
 
-    assert store.claim(NOTEBOOK_ID, "") == 1
+    assert store.claim(NOTEBOOK_ID, "").pending_signal == 1
     fresh = store.job_row(NOTEBOOK_ID, "")
     assert fresh["status"] == "running"
     assert fresh["failure_reason"] == ""
@@ -368,12 +381,13 @@ def test_settle_consumes_the_claimed_snapshot_and_increments_runs(
     store: AgentProfileStore,
 ):
     store.bump_signal(NOTEBOOK_ID, "", delta=5)
-    snapshot = store.claim(NOTEBOOK_ID, "")
-    assert snapshot == 5
+    claimed = store.claim(NOTEBOOK_ID, "")
+    assert claimed.pending_signal == 5
 
     assert store.settle(
-        NOTEBOOK_ID, "", "done", blocks_written=3, consumed=snapshot
-    ) is True
+        NOTEBOOK_ID, "", "done", blocks_written=3,
+        consumed=claimed.pending_signal, claim_token=claimed.token,
+    ) == AGENT_PROFILE_SETTLED
     row = store.job_row(NOTEBOOK_ID, "")
     assert row["status"] == "done"
     assert row["pending_signal"] == 0
@@ -390,15 +404,18 @@ def test_settle_keeps_signals_that_arrived_while_the_run_was_in_flight(
     still count toward the next round. A blanket reset discarded them and
     left the corpus un-reconsolidated until twelve more arrived."""
     store.bump_signal(NOTEBOOK_ID, "", delta=5)
-    snapshot = store.claim(NOTEBOOK_ID, "")
-    assert snapshot == 5
+    claimed = store.claim(NOTEBOOK_ID, "")
+    assert claimed.pending_signal == 5
 
     # Twelve more source changes land while the run is still going.
     for _ in range(12):
         store.bump_signal(NOTEBOOK_ID, "", delta=1)
     assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 17
 
-    store.settle(NOTEBOOK_ID, "", "done", consumed=snapshot)
+    store.settle(
+        NOTEBOOK_ID, "", "done",
+        consumed=claimed.pending_signal, claim_token=claimed.token,
+    )
     # Only the 5 the run actually looked at were consumed.
     assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 12
 
@@ -409,9 +426,10 @@ def test_settle_with_consumed_zero_leaves_pending_signal_untouched(
     """A failed run consumed nothing, so its triggering changes must still
     count toward the retry."""
     store.bump_signal(NOTEBOOK_ID, "", delta=5)
-    store.claim(NOTEBOOK_ID, "")
+    claimed = store.claim(NOTEBOOK_ID, "")
     store.settle(
-        NOTEBOOK_ID, "", "failed", failure_reason="模型未配置", consumed=0
+        NOTEBOOK_ID, "", "failed", failure_reason="模型未配置", consumed=0,
+        claim_token=claimed.token,
     )
     row = store.job_row(NOTEBOOK_ID, "")
     assert row["status"] == "failed"
@@ -423,8 +441,10 @@ def test_settle_floors_pending_signal_at_zero(store: AgentProfileStore):
     """``consumed`` larger than the current counter (a caller passing a stale
     snapshot) must not drive it negative."""
     store.bump_signal(NOTEBOOK_ID, "", delta=2)
-    store.claim(NOTEBOOK_ID, "")
-    store.settle(NOTEBOOK_ID, "", "done", consumed=99)
+    claimed = store.claim(NOTEBOOK_ID, "")
+    store.settle(
+        NOTEBOOK_ID, "", "done", consumed=99, claim_token=claimed.token
+    )
     assert store.job_row(NOTEBOOK_ID, "")["pending_signal"] == 0
 
 
@@ -432,18 +452,26 @@ def test_settle_is_cas_and_a_repeated_settle_touches_nothing(
     store: AgentProfileStore,
 ):
     store.bump_signal(NOTEBOOK_ID, "", delta=1)
-    snapshot = store.claim(NOTEBOOK_ID, "")
-    assert store.settle(NOTEBOOK_ID, "", "done", consumed=snapshot) is True
-    # Already terminal: a second settle is a no-op, not an overwrite.
-    assert store.settle(NOTEBOOK_ID, "", "failed", consumed=0) is False
+    claimed = store.claim(NOTEBOOK_ID, "")
+    assert store.settle(
+        NOTEBOOK_ID, "", "done",
+        consumed=claimed.pending_signal, claim_token=claimed.token,
+    ) == AGENT_PROFILE_SETTLED
+    # Already terminal: a second settle is a no-op, not an overwrite. The row
+    # is still there, so the outcome is "superseded", not "gone".
+    assert store.settle(
+        NOTEBOOK_ID, "", "failed", consumed=0, claim_token=claimed.token
+    ) == AGENT_PROFILE_SETTLE_SUPERSEDED
     assert store.job_row(NOTEBOOK_ID, "")["status"] == "done"
 
 
 def test_settle_rejects_a_non_terminal_status(store: AgentProfileStore):
     store.bump_signal(NOTEBOOK_ID, "", delta=1)
-    store.claim(NOTEBOOK_ID, "")
+    claimed = store.claim(NOTEBOOK_ID, "")
     with pytest.raises(ValueError):
-        store.settle(NOTEBOOK_ID, "", "running", consumed=1)
+        store.settle(
+            NOTEBOOK_ID, "", "running", consumed=1, claim_token=claimed.token
+        )
 
 
 # ------------------------------------------------------------ sweep_stale_on_start
@@ -474,3 +502,163 @@ def test_sweep_stale_on_start_force_settles_queued_and_running_chains(
 
     # Idempotent: nothing left to sweep the second time.
     assert store.sweep_stale_on_start() == 0
+
+
+# --------------------------------------------------- claim generation (P2)
+def test_a_settle_from_a_superseded_claim_lands_on_nothing(
+    store: AgentProfileStore,
+):
+    """THE ABA case (Agentic Memory P2, closing the registered R4 residual).
+
+    A member is removed (``clear_job_row``) and re-added while their overlay
+    run is inside its model call; the re-add lets a NEW run claim the chain.
+    Under P1's status-only CAS the stale worker's settle matched the
+    replacement row — it consumed the new run's snapshot and moved the new
+    run's status to terminal, releasing a slot it never held.
+
+    The token makes the two rows distinguishable even though their primary key
+    is byte-identical: the stale settle now touches nothing and reports
+    ``superseded`` — NOT ``gone``, which is what makes the caller keep its
+    hands off blocks the new generation may already have written.
+    """
+    store.bump_signal(NOTEBOOK_ID, "user-a", delta=4)
+    stale = store.claim(NOTEBOOK_ID, "user-a")
+
+    # Removal, re-add, and a fresh claim — all while the stale run is running.
+    store.clear_job_row(NOTEBOOK_ID, "user-a")
+    store.bump_signal(NOTEBOOK_ID, "user-a", delta=7)
+    fresh = store.claim(NOTEBOOK_ID, "user-a")
+    assert fresh.token != stale.token
+
+    assert store.settle(
+        NOTEBOOK_ID, "user-a", "done", blocks_written=3,
+        consumed=stale.pending_signal, claim_token=stale.token,
+    ) == AGENT_PROFILE_SETTLE_SUPERSEDED
+
+    row = store.job_row(NOTEBOOK_ID, "user-a")
+    # The new generation still holds the slot, with its own snapshot intact.
+    assert row["status"] == "running"
+    assert row["claim_token"] == fresh.token
+    assert row["pending_signal"] == 7
+    assert row["blocks_written"] == 0
+    assert row["runs"] == 0
+
+
+def test_a_settle_after_a_real_removal_reports_gone(store: AgentProfileStore):
+    """The other half of the tri-state, and the reason it cannot collapse back
+    into a bool: here the row really is gone (only member removal deletes it),
+    so the caller's revoked-overlay wipe MUST fire."""
+    store.bump_signal(NOTEBOOK_ID, "user-a", delta=2)
+    claimed = store.claim(NOTEBOOK_ID, "user-a")
+    store.clear_job_row(NOTEBOOK_ID, "user-a")
+
+    assert store.settle(
+        NOTEBOOK_ID, "user-a", "done",
+        consumed=claimed.pending_signal, claim_token=claimed.token,
+    ) == AGENT_PROFILE_SETTLE_GONE
+    # A settle never resurrects the row.
+    assert store.job_row(NOTEBOOK_ID, "user-a") is None
+
+
+def test_a_write_from_a_superseded_claim_changes_no_byte(
+    store: AgentProfileStore,
+):
+    """The write half of the same ABA. The service's pre-write ``job_row``
+    probe passes here — a row IS present — so only the generation carried into
+    the write transaction can refuse this."""
+    store.write_block(
+        NOTEBOOK_ID, "user-a", "retrieval_notes",
+        value="post-rejoin", evidence=[], expected_revision=0,
+        origin="job", actor="",
+    )
+    before = store.read_block(NOTEBOOK_ID, "user-a", "retrieval_notes")
+
+    stale = store.claim(NOTEBOOK_ID, "user-a")
+    store.clear_job_row(NOTEBOOK_ID, "user-a")
+    fresh = store.claim(NOTEBOOK_ID, "user-a")
+    assert fresh.token != stale.token
+
+    with pytest.raises(AgentProfileClaimSuperseded):
+        store.write_block(
+            NOTEBOOK_ID, "user-a", "retrieval_notes",
+            value="pre-removal", evidence=[],
+            expected_revision=before["revision"],
+            origin="job", actor="", claim_token=stale.token,
+        )
+    assert store.read_block(NOTEBOOK_ID, "user-a", "retrieval_notes") == before
+
+    # The CURRENT generation writes through the same call unchanged.
+    store.write_block(
+        NOTEBOOK_ID, "user-a", "retrieval_notes",
+        value="current", evidence=[], expected_revision=before["revision"],
+        origin="job", actor="", claim_token=fresh.token,
+    )
+    assert store.read_block(
+        NOTEBOOK_ID, "user-a", "retrieval_notes"
+    )["value"] == "current"
+
+
+def test_a_write_without_a_token_asserts_no_generation(
+    store: AgentProfileStore,
+):
+    """The user-facing edit path holds no claim and must not be forced to fake
+    one: an empty ``claim_token`` skips the generation check entirely, even
+    while a run holds the chain."""
+    store.claim(NOTEBOOK_ID, "user-a")
+    row = store.write_block(
+        NOTEBOOK_ID, "user-a", "retrieval_notes",
+        value="mine", evidence=[], expected_revision=0,
+        origin="user", actor="user-a",
+    )
+    assert row["value"] == "mine"
+
+
+def test_the_startup_sweep_strands_every_in_flight_token(
+    store: AgentProfileStore,
+):
+    """``sweep_stale_on_start`` deliberately ignores the token (it force-settles
+    rows whose workers died with the previous process). The consequence is the
+    wanted one: a worker that somehow survived the sweep can no longer settle,
+    because the row it holds a token for is terminal."""
+    store.bump_signal(NOTEBOOK_ID, "user-a", delta=1)
+    claimed = store.claim(NOTEBOOK_ID, "user-a")
+    assert store.sweep_stale_on_start() == 1
+
+    assert store.settle(
+        NOTEBOOK_ID, "user-a", "done",
+        consumed=claimed.pending_signal, claim_token=claimed.token,
+    ) == AGENT_PROFILE_SETTLE_SUPERSEDED
+    assert store.job_row(NOTEBOOK_ID, "user-a")["status"] == "failed"
+
+
+def test_a_deployed_v52_database_gains_the_claim_token_column(tmp_path: Path):
+    """已部署库补建:回滚到 v52 再开一次,v53 必须补上这一列。
+
+    同时钉住本迁移必须**可重跑**:「已部署库补建」这一族测试的做法是只回滚
+    ``user_version``,整条梯子会在一张**可能已经带着这一列**的表上重跑本迁移。
+    SQLite 没有 ``ADD COLUMN IF NOT EXISTS``,裸 ALTER 会以
+    ``duplicate column name`` 炸在启动路径上——五条历史补建用例一起红,而它们
+    与 Agent 库理解毫无关系,单看报错完全指不回这里。
+    """
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'deployed.db'}")
+    database = SqliteDatabase(settings, tmp_path)
+    SqliteMigrator(database, settings).migrate()
+
+    with database.write() as db:
+        db.execute("ALTER TABLE agent_profile_jobs DROP COLUMN claim_token")
+        db.execute("PRAGMA user_version = 52")
+    database.close_local()
+
+    reopened = SqliteDatabase(settings, tmp_path)
+    SqliteMigrator(reopened, settings).migrate()
+    with reopened.connect() as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(agent_profile_jobs)")}
+        assert "claim_token" in columns
+
+    # Re-running the ladder over the already-patched table must be a no-op,
+    # not a duplicate-column error.
+    with reopened.write() as db:
+        db.execute("PRAGMA user_version = 52")
+    reopened.close_local()
+    again = SqliteDatabase(settings, tmp_path)
+    assert SqliteMigrator(again, settings).migrate()

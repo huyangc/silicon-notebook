@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=52, postgres_version=30, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=53, postgres_version=31, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -658,6 +658,12 @@ _TABLES = (
         84,
         "jsonb+timestamptz",
     ),
+    # SQLite v53 / PostgreSQL v31 added agent_profile_jobs.claim_token (the
+    # claim generation). Nothing here moves: columns are parsed from the .sql
+    # by postgres_catalog.py rather than restated in this manifest, the new
+    # column joins no unique surface (so the REPLICATION_KEY park above still
+    # resolves the same way), and a plain NOT NULL text column needs no
+    # pipeline entry.
     _table(
         "agent_profile_jobs",
         ("notebook_id", "owner_id"),

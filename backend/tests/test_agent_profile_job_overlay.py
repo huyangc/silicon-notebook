@@ -28,6 +28,7 @@ what is under test is this service's protocol, not the ingestion stack.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import queue
 import threading
@@ -152,15 +153,36 @@ def harness(tmp_path: Path, monkeypatch):
     knowledge_counts_cache.invalidate(NOTEBOOK_ID)
 
     seams = SimpleNamespace(now=lambda: NOW, new_id=lambda prefix: f"{prefix}-1")
+
+    # The profile store gets a COUNTING id seam rather than the constant one
+    # the other seats share: it mints the chain's ``claim_token`` generation,
+    # and a constant would make two successive claims indistinguishable —
+    # i.e. it would reintroduce, inside the test harness, exactly the ABA the
+    # token exists to close.
+    claim_ids = itertools.count(1)
+
     return {
         "settings": settings,
         "database": database,
-        "profiles": AgentProfileStore(database, new_id=seams.new_id, now=seams.now),
+        "profiles": AgentProfileStore(
+            database,
+            new_id=lambda prefix: f"{prefix}-{next(claim_ids)}",
+            now=seams.now,
+        ),
         "sources": SourceStore(database, now=lambda: NOW),
         "queries": QueryStore(database, settings),
         "ask_state": AskStateStore(database, seams),
         "event_log": _EventLog(),
     }
+
+
+def _run_overlay(service, claimed):
+    """Run exactly the way ``start_overlay`` does: the claim's snapshot AND its
+    generation token (Agentic Memory P2 — the token is what makes a stale
+    worker's settle/write land on nothing)."""
+    return service.run_overlay(
+        NOTEBOOK_ID, USER_A, claimed.pending_signal, claimed.token
+    )
 
 
 def _service(harness, *, client: "_Client | None" = None, models=None):
@@ -275,7 +297,12 @@ def test_the_threshold_schedules_exactly_one_run_per_batch(harness, monkeypatch)
         service.note_ask_completed(NOTEBOOK_ID, USER_A)
 
     assert len(submitter.calls) == 1
-    assert submitter.calls[0]["args"] == (NOTEBOOK_ID, USER_A, 3)
+    # The worker is handed BOTH halves of the claim: the snapshot it may
+    # consume, and the generation token that says which incarnation of the row
+    # it holds (Agentic Memory P2).
+    notebook, member, snapshot, token = submitter.calls[0]["args"]
+    assert (notebook, member, snapshot) == (NOTEBOOK_ID, USER_A, 3)
+    assert token == _job(harness, USER_A)["claim_token"] != ""
     assert submitter.calls[0]["notify_pending"] is False
     # ⚠ The job name must not name the member: thread names reach the queue
     # warning logs, and "whose searching is being consolidated" is exactly the
@@ -403,7 +430,10 @@ def test_a_finished_report_claims_directly_without_parking_the_counter(
 
     assert len(submitter.calls) == 1
     # claim 的快照就是刚落的满阈值信号(3):它会随这次 run 的 settle 被消费。
-    assert submitter.calls[0]["args"] == (NOTEBOOK_ID, USER_A, 3)
+    # 第四个参数是 P2 的 claim 代际。
+    notebook, member, snapshot, token = submitter.calls[0]["args"]
+    assert (notebook, member, snapshot) == (NOTEBOOK_ID, USER_A, 3)
+    assert token == _job(harness, USER_A)["claim_token"] != ""
     assert _job(harness, USER_A)["status"] == "running"
     assert _job(harness, USER_A)["pending_signal"] == 3
 
@@ -735,10 +765,11 @@ def test_a_base_exception_still_settles_the_row(harness, monkeypatch):
         raise KeyboardInterrupt()
 
     service = _service(harness, client=_Client(_interrupt))
-    assert service.profiles.claim(NOTEBOOK_ID, USER_A) == 0
+    claimed = service.profiles.claim(NOTEBOOK_ID, USER_A)
+    assert claimed.pending_signal == 0
 
     with pytest.raises(KeyboardInterrupt):
-        service.run_overlay(NOTEBOOK_ID, USER_A, 0)
+        _run_overlay(service, claimed)
 
     assert _job(harness, USER_A)["status"] == "failed"
 
@@ -764,10 +795,10 @@ def test_settle_consumes_exactly_the_claim_snapshot(harness, monkeypatch):
     for _ in range(3):
         harness["profiles"].bump_signal(NOTEBOOK_ID, USER_A)
     claimed = harness["profiles"].claim(NOTEBOOK_ID, USER_A)
-    assert claimed == 3
+    assert claimed.pending_signal == 3
     harness["profiles"].bump_signal(NOTEBOOK_ID, USER_A)   # arrives mid-run
 
-    service.run_overlay(NOTEBOOK_ID, USER_A, claimed)
+    _run_overlay(service, claimed)
 
     assert _job(harness, USER_A)["pending_signal"] == 1
 
@@ -793,7 +824,7 @@ def test_a_member_edit_during_the_run_wins_and_is_not_retried(harness, monkeypat
 
     service = _service(harness, client=_Client(_edit_then_reply))
     claimed = profiles.claim(NOTEBOOK_ID, USER_A)
-    service.run_overlay(NOTEBOOK_ID, USER_A, claimed or 0)
+    _run_overlay(service, claimed)
 
     assert _blocks(harness, USER_A)["retrieval_notes"]["value"] == "我自己写的"
     assert "cas_conflict:retrieval_notes" in _job(harness, USER_A)["diagnostic"]
@@ -1124,7 +1155,7 @@ def test_a_member_removed_during_the_model_call_gets_no_resurrected_blocks(harne
         return _reply(retrieval_notes="复活的心得")
 
     service = _service(harness, client=_Client(reply))
-    result = service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+    result = _run_overlay(service, claimed)
 
     assert result["diagnostic"] == "revoked_mid_run"
     assert result["blocks_written"] == 0
@@ -1156,7 +1187,7 @@ def test_a_removal_between_the_precheck_and_the_writes_is_wiped_after_settle(
 
     monkeypatch.setattr(profiles, "settle", settle_after_removal)
     service = _service(harness, client=_Client(_reply(retrieval_notes="心得")))
-    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+    _run_overlay(service, claimed)
 
     # 写后兜底把竞态窗口里刚重建的块清掉了
     assert _blocks(harness, USER_A) == {}
@@ -1176,7 +1207,7 @@ def test_a_threshold_that_filled_up_mid_run_requeues_the_next_round(
     submitter = _with_submitter(monkeypatch, _Submitter(run=False))
     profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
     claimed = profiles.claim(NOTEBOOK_ID, USER_A)
-    assert claimed == 3
+    assert claimed.pending_signal == 3
 
     def reply(_prompt: str) -> str:
         # 运行期间又攒满一个阈值(触发方的 claim 都会被 running 拒,这里直接 bump)
@@ -1184,7 +1215,7 @@ def test_a_threshold_that_filled_up_mid_run_requeues_the_next_round(
         return _reply(retrieval_notes="心得")
 
     service = _service(harness, client=_Client(reply))
-    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+    _run_overlay(service, claimed)
 
     # settle 扣掉快照 3,剩 3 ≥ 阈值 → 自动重排了一轮(行已被 claim 成 running)
     assert [c["name"] for c in submitter.calls] == [
@@ -1205,7 +1236,7 @@ def test_a_leftover_below_the_threshold_does_not_requeue(harness, monkeypatch):
         return _reply(retrieval_notes="心得")
 
     service = _service(harness, client=_Client(reply))
-    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+    _run_overlay(service, claimed)
 
     assert submitter.calls == []
     assert _job(harness, USER_A)["status"] == "done"
@@ -1248,7 +1279,7 @@ def test_a_job_update_to_a_member_written_note_is_refused(harness):
     )
     claimed = profiles.claim(NOTEBOOK_ID, USER_A)
     service = _service(harness, client=_Client(_reply(retrieval_notes="模型想改写")))
-    result = service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+    result = _run_overlay(service, claimed)
 
     row = _blocks(harness, USER_A)["retrieval_notes"]
     assert row["value"] == "我自己的心得"          # 原文保留
@@ -1270,7 +1301,7 @@ def test_a_member_cleared_note_hands_the_label_back_to_the_agent(harness):
     )
     claimed = profiles.claim(NOTEBOOK_ID, USER_A)
     service = _service(harness, client=_Client(_reply(retrieval_notes="新的整理")))
-    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+    _run_overlay(service, claimed)
 
     row = _blocks(harness, USER_A)["retrieval_notes"]
     assert row["value"] == "新的整理"
@@ -1294,7 +1325,7 @@ def test_an_internal_failure_still_requeues_a_filled_threshold(
 
     service = _service(harness, client=_Client(reply))
     with pytest.raises(RuntimeError):
-        service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+        _run_overlay(service, claimed)
 
     assert [c["name"] for c in submitter.calls] == [
         f"agentprofile-overlay-{NOTEBOOK_ID}"
@@ -1314,8 +1345,138 @@ def test_a_report_discarded_by_a_busy_chain_fires_after_that_run_settles(
     service.note_report_completed(NOTEBOOK_ID, USER_A)    # busy -> 满阈值 bump
     assert submitter.calls == []                          # 没插队
 
-    service.run_overlay(NOTEBOOK_ID, USER_A, int(claimed))
+    _run_overlay(service, claimed)
 
     assert [c["name"] for c in submitter.calls] == [
         f"agentprofile-overlay-{NOTEBOOK_ID}"
     ]                                                     # settle 后重排一轮
+
+
+# =====================================================================
+# Agentic Memory P2: the claim generation closes the registered R4 ABA
+# =====================================================================
+
+
+def test_a_removed_and_readded_member_does_not_lose_the_new_runs_work(
+    harness, monkeypatch
+):
+    """THE ABA case, end to end (closes the registered codex #520 R4 P2).
+
+    The member is removed, re-added, and a NEW overlay run claims the chain —
+    all inside the stale run's model call. Under P1 the stale worker found a
+    row (its bare existence check passed), wrote its pre-removal notes with
+    ``expected_revision=0``, and then its settle landed on the replacement row:
+    it consumed the NEW run's snapshot and released a slot it never held.
+
+    With the generation carried through both writes and settle:
+
+    * ``write_block`` refuses the stale token, so not one byte of the new
+      generation's block changes;
+    * ``settle`` reports ``superseded``, so the new run's ``pending_signal``
+      and ``running`` status survive intact;
+    * and — the half that is easiest to get backwards — the revoked-overlay
+      WIPE must NOT fire. Wiping here would delete the blocks the new
+      generation just wrote, which is worse than the ABA itself.
+    """
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    _with_submitter(monkeypatch, _Submitter(run=False))
+    profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
+    stale = profiles.claim(NOTEBOOK_ID, USER_A)
+
+    wipes: list[str] = []
+    original_clear_all = profiles.clear_all
+
+    def counting_clear_all(notebook_id, owner_id):
+        wipes.append(owner_id)
+        return original_clear_all(notebook_id, owner_id)
+
+    monkeypatch.setattr(profiles, "clear_all", counting_clear_all)
+
+    def reply(_prompt: str) -> str:
+        # Removed, re-added, and re-claimed while this call is outstanding.
+        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        profiles.clear_all(NOTEBOOK_ID, USER_A)
+        wipes.clear()                       # only count wipes AFTER the removal
+        profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=5)
+        fresh = profiles.claim(NOTEBOOK_ID, USER_A)
+        # The new generation writes its own note before the stale run returns.
+        profiles.write_block(
+            NOTEBOOK_ID, USER_A, "retrieval_notes", value="重新加入之后的心得",
+            evidence=[], expected_revision=0, origin="job", actor="",
+            claim_token=fresh.token,
+        )
+        return _reply(retrieval_notes="移出之前的心得")
+
+    service = _service(harness, client=_Client(reply))
+    _run_overlay(service, stale)
+
+    row = _job(harness, USER_A)
+    assert row["status"] == "running", "新一代仍持有链路"
+    assert row["pending_signal"] == 5, "旧 worker 不得消费新一代的快照"
+    assert row["runs"] == 0
+    blocks = _blocks(harness, USER_A)
+    assert blocks["retrieval_notes"]["value"] == "重新加入之后的心得"
+    assert blocks["retrieval_notes"]["revision"] == 1, "一次都没被覆盖"
+    assert wipes == [], "superseded 绝不能触发撤销清理——那会删掉新一代刚写的块"
+
+
+def test_a_real_removal_still_wipes_the_blocks_it_recreated(harness, monkeypatch):
+    """The other branch of the same tri-state, kept next to the ABA case on
+    purpose: when the row really is gone the wipe MUST still fire. A fix that
+    made ``superseded`` safe by never wiping would pass the test above and
+    silently reopen the revocation leak this one pins."""
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+
+    wipes: list[str] = []
+    original_clear_all = profiles.clear_all
+
+    def counting_clear_all(notebook_id, owner_id):
+        wipes.append(owner_id)
+        return original_clear_all(notebook_id, owner_id)
+
+    original_settle = profiles.settle
+
+    def settle_after_removal(notebook_id, owner_id, status, **kwargs):
+        # Removal lands in the microseconds between the writes and the settle,
+        # so the pre-write probe cannot have seen it.
+        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        return original_settle(notebook_id, owner_id, status, **kwargs)
+
+    monkeypatch.setattr(profiles, "settle", settle_after_removal)
+    monkeypatch.setattr(profiles, "clear_all", counting_clear_all)
+    service = _service(harness, client=_Client(_reply(retrieval_notes="心得")))
+    _run_overlay(service, claimed)
+
+    assert wipes == [USER_A], "行真的没了 → 必须把这一轮重建的块清掉"
+    assert _blocks(harness, USER_A) == {}
+
+
+def test_a_superseded_claim_writes_nothing_and_says_so(harness, monkeypatch):
+    """The write half on its own: the pre-write ``job_row`` probe PASSES here
+    (a row is present — it is just a later generation's), so only the token
+    inside the write transaction can stop this run."""
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    _with_submitter(monkeypatch, _Submitter(run=False))
+    profiles.write_block(
+        NOTEBOOK_ID, USER_A, "retrieval_notes", value="现任",
+        evidence=[], expected_revision=0, origin="job", actor="",
+    )
+    stale = profiles.claim(NOTEBOOK_ID, USER_A)
+
+    def reply(_prompt: str) -> str:
+        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        profiles.claim(NOTEBOOK_ID, USER_A)      # a new generation takes over
+        return _reply(retrieval_notes="陈旧的心得")
+
+    service = _service(harness, client=_Client(reply))
+    result = _run_overlay(service, stale)
+
+    assert result["blocks_written"] == 0
+    assert "claim_superseded" in result["diagnostic"]
+    block = _blocks(harness, USER_A)["retrieval_notes"]
+    assert block["value"] == "现任"
+    assert block["revision"] == 1

@@ -1,0 +1,40 @@
+-- Mirror SQLite v53: agent_profile_jobs.claim_token, the consolidation chain's
+-- claim GENERATION.
+--
+-- P1's single-flight was a status CAS only. Once the row is deleted and
+-- recreated (a member removed runs clear_job_row; re-adding them lets the next
+-- bump_signal/claim upsert a fresh row), a stale worker's settle still matched
+-- the NEW row -- the registered R4 ABA: it settled the wrong generation
+-- (consuming the new run's claim snapshot) and could write pre-removal blocks
+-- back with expected_revision=0. claim() now stamps a fresh token on every
+-- claim, and both settle() and write_block() carry it as part of their CAS
+-- predicate, so a delete+recreate can never be mistaken for the same claim.
+--
+-- Three already-decided trade-offs (recorded so the next reader can tell a
+-- decision from an oversight):
+--
+-- 1. The existing `runs` counter cannot serve as the generation: it is
+--    incremented by settle and untouched by claim, so a recreated row starts at
+--    0 -- exactly the value a first-round stale worker is holding.
+--
+-- 2. `started_at` cannot serve either: SQLite's clock is second-granular (the
+--    memory_revisions lesson), so a delete+recreate inside one second yields the
+--    same value on that backend. An optimistic-concurrency generation has to be
+--    an explicitly allocated opaque value, never a timestamp.
+--
+-- 3. text NOT NULL DEFAULT '' rather than a nullable column, mirroring v27's
+--    notebook_grants.principal_id and v29's owner_id reasoning. This column
+--    joins no unique surface, so NULL would not break the primary key here --
+--    but the '' sentinel gives "never claimed" one writable value inside the CAS
+--    predicate (claim_token = ''), and mixing `IS NULL` with `= %s` in one
+--    predicate is precisely how this class of check goes wrong. No backfill is
+--    needed: rows that survive an upgrade are either idle/terminal (the CAS's
+--    status condition already excludes them) or crash leftovers in
+--    queued/running, which the startup sweep force-settles unconditionally.
+--
+-- No index: the column only ever appears as a residual condition after the
+-- primary key has already located the single row
+-- (WHERE notebook_id = %s AND owner_id = %s AND claim_token = %s).
+
+ALTER TABLE agent_profile_jobs
+  ADD COLUMN claim_token text COLLATE "C" NOT NULL DEFAULT '';

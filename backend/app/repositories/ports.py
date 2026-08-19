@@ -3805,6 +3805,59 @@ def project_ask_row(
     }
 
 
+@dataclass(frozen=True)
+class AgentProfileClaim:
+    """What a winning ``claim`` hands its run: the threshold snapshot AND the
+    GENERATION token that proves which incarnation of the row it holds.
+
+    Two values, one object, on purpose. They are an ``int`` and a ``str``, so a
+    tuple would be positional and a caller passing them on in the wrong order
+    would type-check, run, and silently settle the wrong generation with the
+    wrong count — which is the exact failure class this token exists to close
+    (Agentic Memory P2, the registered R4 ABA).
+    """
+
+    pending_signal: int
+    token: str
+
+
+#: ``settle``'s three outcomes. Two of them mean "the CAS did not land", and
+#: telling them apart is the whole point of the tri-state: the caller's
+#: revoked-overlay wipe must fire for one and MUST NOT fire for the other.
+AGENT_PROFILE_SETTLED = "settled"
+#: The job row is gone. Only member removal deletes it (``clear_job_row``), so
+#: any block this run wrote is revoked private data and gets wiped.
+AGENT_PROFILE_SETTLE_GONE = "gone"
+#: The row is there but belongs to a LATER claim (a different ``claim_token``,
+#: or it already reached a terminal status). This run is void — and wiping here
+#: would delete the blocks the NEW generation may have just written, which is
+#: strictly worse than the ABA it would be trying to fix.
+AGENT_PROFILE_SETTLE_SUPERSEDED = "superseded"
+AgentProfileSettleOutcome = Literal["settled", "gone", "superseded"]
+
+
+class AgentProfileClaimSuperseded(RuntimeError):
+    """``write_block``'s ``claim_token`` no longer matches the chain's job row:
+    this worker's claim was superseded (the row was deleted and recreated, or
+    a later claim took the slot) while the run was in flight — typically
+    inside its minutes-long model call.
+
+    Deliberately NOT an ``AgentProfileRevisionConflict``. That one means "a
+    concurrent writer changed this block", and the caller answers it by
+    skipping that one label and keeping the rest of the run. This one means
+    "the entire run is void", and a caller that lumped the two together would
+    keep writing the remaining pre-removal blocks after the first one was
+    refused."""
+
+    def __init__(self, notebook_id: str, owner_id: str) -> None:
+        super().__init__(
+            "agent profile claim superseded: "
+            f"{notebook_id}/{owner_id or '(base)'}"
+        )
+        self.notebook_id = notebook_id
+        self.owner_id = owner_id
+
+
 class AgentProfileRevisionConflict(RuntimeError):
     """``write_block``/``clear_block``'s ``expected_revision`` no longer
     matches the row's stored ``revision`` — a concurrent edit (another user,
@@ -3862,6 +3915,7 @@ class AgentProfileStorePort(Protocol):
         expected_revision: int,
         origin: str,
         actor: str,
+        claim_token: str = "",
     ) -> dict:
         """Upsert one block inside a single write transaction: the
         value/evidence change and the ``revision`` optimistic-concurrency
@@ -3873,7 +3927,21 @@ class AgentProfileStorePort(Protocol):
         any other value is compared against the stored ``revision`` and
         raises ``AgentProfileRevisionConflict`` on mismatch (including
         "someone else's write created the row first").
-        """
+
+        A non-empty ``claim_token`` additionally requires — inside that SAME
+        write transaction — that the chain's ``agent_profile_jobs`` row still
+        carries this token, raising ``AgentProfileClaimSuperseded`` otherwise.
+        That is what turns the consolidation job's pre-write "is the row still
+        there?" probe from best-effort into atomic: the probe closes the
+        minutes-long model call, and this closes the microseconds between the
+        probe and the write, including the ABA case where the row was deleted
+        and recreated in between (a bare existence check passes there; a
+        generation check cannot).
+
+        The default ``""`` means "no generation asserted" and is the user-facing
+        edit path: a person editing their own block through the API holds no
+        claim, and requiring one would make the token a second, wrong kind of
+        lock."""
         ...
     def clear_block(
         self,
@@ -3909,10 +3977,11 @@ class AgentProfileStorePort(Protocol):
         a negative bump would be an uncontrolled decrement racing whatever
         run is in flight."""
         ...
-    def claim(self, notebook_id: str, owner_id: str) -> int | None:
+    def claim(self, notebook_id: str, owner_id: str) -> "AgentProfileClaim | None":
         """Take this chain's single-flight slot, returning the
-        ``pending_signal`` SNAPSHOT observed at the moment of the claim, or
-        ``None`` when the slot was already taken.
+        ``pending_signal`` SNAPSHOT observed at the moment of the claim plus a
+        freshly minted generation token, or ``None`` when the slot was already
+        taken.
 
         The row is created first if it does not exist (``INSERT OR IGNORE`` /
         ``ON CONFLICT DO NOTHING``), so a chain that was never signalled is
@@ -3928,10 +3997,19 @@ class AgentProfileStorePort(Protocol):
         ``finished_at``) and stamps ``started_at``. Without that reset a
         successful run would keep displaying the last failure's reason.
 
-        The snapshot is the whole point of returning an int: the run that
-        holds the slot passes it back as ``settle(consumed=...)``, so signals
-        that arrive WHILE it runs survive into the next round instead of
-        being zeroed by a run that never saw them.
+        The snapshot is half the point of the return value: the run that holds
+        the slot passes it back as ``settle(consumed=...)``, so signals that
+        arrive WHILE it runs survive into the next round instead of being
+        zeroed by a run that never saw them.
+
+        The token is the other half. Every claim mints a NEW one and stamps it
+        on the row, so "the row I claimed" and "the row that is here now" become
+        distinguishable even when the second one has the same primary key: a
+        member removed and re-added gets a row that is byte-identical in
+        (notebook_id, owner_id) and starts over at ``runs=0``, which is why
+        neither the key nor the run counter could serve as a generation. The
+        holder passes the token to ``settle`` and ``write_block``, and both
+        refuse to act on a row that no longer carries it.
         """
         ...
     def settle(
@@ -3944,7 +4022,8 @@ class AgentProfileStorePort(Protocol):
         diagnostic: str = "",
         blocks_written: int = 0,
         consumed: int,
-    ) -> bool:
+        claim_token: str,
+    ) -> "AgentProfileSettleOutcome":
         """Move a claimed chain to a terminal status (``done``/``failed``/
         ``cancelled``), stamping ``finished_at`` and incrementing ``runs``.
 
@@ -3966,8 +4045,22 @@ class AgentProfileStorePort(Protocol):
         worker existed): nothing looked at those signals, so that path passes
         ``0``.
 
-        CAS'd on ``status IN ('queued','running')`` so a settle racing a
-        second settle for the same chain can only land once."""
+        CAS'd on ``status IN ('queued','running')`` AND on ``claim_token``
+        matching the caller's, so a settle racing a second settle for the same
+        chain can only land once, and a settle from a SUPERSEDED claim cannot
+        land at all.
+
+        The three outcomes are the reason this is not a bool. ``"settled"`` is
+        the CAS landing. When it does not land, the store re-reads the row
+        INSIDE THE SAME TRANSACTION and reports ``"gone"`` (no row — only
+        member removal deletes it) or ``"superseded"`` (a row is there, but it
+        belongs to a later claim or already reached a terminal status). The
+        caller acts on those two in opposite directions: ``"gone"`` triggers
+        the revoked-overlay wipe, ``"superseded"`` must never — the newer
+        generation may already have written blocks, and wiping them would be a
+        worse bug than the ABA the token closes. A single ``False`` cannot
+        carry that distinction, which is exactly how P1 ended up wiping on the
+        wrong branch."""
         ...
     def sweep_stale_on_start(self) -> int:
         """Startup crash recovery: every ``queued``/``running`` row (there is
