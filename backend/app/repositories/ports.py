@@ -4578,8 +4578,8 @@ class RetrievalExperienceStorePort(Protocol):
 
     def count(self) -> int: ...
 
-    def version_signal(self) -> tuple[int, str]:
-        """``(row count, newest updated_at)``, for the injection side's memo.
+    def version_signal(self) -> tuple[int, int, str]:
+        """``(mutation revision, row count, newest updated_at)``, for the injection side's memo.
 
         Agentic Memory P2 (T6). One cheap aggregate lets a run decide whether
         the library it already scored is still the library on disk, instead of

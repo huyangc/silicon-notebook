@@ -52,6 +52,8 @@ class RetrievalExperienceStore:
         self.now = normalized_clock(now)
         # No ``new_id`` seam, same note as the SQLite mirror: every id in this
         # table is CONTENT-ADDRESSED and computed by the caller.
+        # codex #524 R12 P2:进程内单调修订计数(镜像 SQLite 侧,理由见彼处)。
+        self._mutations = 0
 
     @staticmethod
     def _experience_row(row) -> dict:
@@ -231,6 +233,7 @@ class RetrievalExperienceStore:
             result = db.execute(
                 "SELECT * FROM retrieval_experiences WHERE id=%s", (experience_id,)
             ).fetchone()
+        self._mutations += 1
         return self._experience_row(result)
 
     def note_adopted(self, experience_ids: Sequence[str], delta: int = 1) -> int:
@@ -281,6 +284,7 @@ class RetrievalExperienceStore:
                 'id COLLATE "C" DESC OFFSET %s)',
                 (keep,),
             )
+        self._mutations += 1
         return cursor.rowcount
 
     def count(self) -> int:
@@ -290,8 +294,10 @@ class RetrievalExperienceStore:
             ).fetchone()
         return int(row["n"])
 
-    def version_signal(self) -> tuple[int, str]:
-        """``(row count, newest updated_at)`` — the injection side's memo key.
+    def version_signal(self) -> tuple[int, int, str]:
+        """``(mutation revision, row count, newest updated_at)`` — the
+        injection side's memo key. See the SQLite mirror for why the revision
+        exists (offset-carrying text MAX is not a content identity).
 
         See the SQLite mirror for why both halves are needed and why an
         adoption is deliberately invisible here.
@@ -306,4 +312,4 @@ class RetrievalExperienceStore:
                 "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at)::text, '') AS m "
                 "FROM retrieval_experiences"
             ).fetchone()
-        return int(row["n"]), str(row["m"] or "")
+        return self._mutations, int(row["n"]), str(row["m"] or "")

@@ -34,21 +34,21 @@ job table of its own.
 fix round, item 7)** — neither changes behaviour, both are worth a future
 reader knowing were considered:
 
-* **Second-granular ABA on the injection-side memo.** The injection side
-  (``reasoning_retrieval.py``) memoises the rendered block against
-  ``RetrievalExperienceStorePort.version_signal()`` — ``(row count,
-  MAX(updated_at))``. SQLite's clock is second-granular (the same fact
-  ``memory_revisions`` registered before this feature existed), so a batch
-  that, within the SAME second, evicts as many rows as it writes and happens
-  to leave both halves of the signature unchanged would be invisible to the
-  memo. In practice this is UNREACHABLE at the cadence this chain actually
-  runs at (once every ``RETRIEVAL_EXPERIENCE_TRIGGER`` completed asks
-  deployment-wide, never inside a single request), and even if it were hit,
-  it is SELF-HEALING: the mismatch can only persist for the remainder of that
-  one second, because any later write — including the very next distillation
-  batch, whenever it happens — lands in a different second and moves the
-  signature. Not worth a table just to close a window nothing can open in
-  practice and that heals itself if it somehow did.
+* **In-process ABA on the injection-side memo — closed, not just registered
+  (codex #524 R12 P2).** The injection side (``reasoning_retrieval.py``)
+  memoises the rendered block against
+  ``RetrievalExperienceStorePort.version_signal()`` — ``(mutation revision,
+  row count, MAX(updated_at))``. The two DB-derived halves alone are not a
+  content identity: ``updated_at`` is offset-carrying ISO text compared
+  lexicographically, so a UTC-offset change or a clock step backwards could
+  make a real update invisible, and a batch that evicts as many rows as it
+  writes could leave both unchanged. The first element — an in-process
+  monotonic revision the store bumps on every ``upsert_experience`` /
+  ``evict_to_limit`` — closes the whole class for in-process writes, which is
+  exactly the boundary the cache lives at (its key also requires the same
+  live store object via weakref). Cross-process writes are still covered
+  only by the DB halves; the only cross-process writer is the offline
+  ``merge_dbs.py``, which does not run beside a serving deployment.
 * **``support`` is a positive-feedback signal by design, not by oversight.**
   An entry with higher ``support`` sorts first among tied-similarity
   candidates on the injection side (``select_experiences``) and survives
@@ -405,20 +405,28 @@ class RetrievalExperienceDistillationService:
         )
         parsed = parse_distillation_reply(safe_json(raw), groups, offered)
         written = 0
-        for entry in parsed:
-            situation = entry["situation"]
-            self.experiences.upsert_experience(
-                experience_id(situation, entry["action"]),
-                situation=situation,
-                action=entry["action"],
-                polarity=entry["polarity"],
-                rationale=entry["rationale"],
-                provenance=entry["provenance"],
-                provenance_max=RETRIEVAL_EXPERIENCE_PROVENANCE_MAX,
-                replace_conclusion=entry["replace"],
+        # codex #524 R12 P2:每条 upsert 独立提交,驱逐必须放 finally——
+        # 中途一条失败若跳过驱逐,300 上限被突破后注入端按 id 只读前 300,
+        # 更好的条目会被任意遮蔽,且要等到下一次成功蒸馏才自愈。进程被硬杀
+        # 的残余超额同样由下一个批次的这次无条件驱逐收走。
+        try:
+            for entry in parsed:
+                situation = entry["situation"]
+                self.experiences.upsert_experience(
+                    experience_id(situation, entry["action"]),
+                    situation=situation,
+                    action=entry["action"],
+                    polarity=entry["polarity"],
+                    rationale=entry["rationale"],
+                    provenance=entry["provenance"],
+                    provenance_max=RETRIEVAL_EXPERIENCE_PROVENANCE_MAX,
+                    replace_conclusion=entry["replace"],
+                )
+                written += 1
+        finally:
+            evicted = self.experiences.evict_to_limit(
+                RETRIEVAL_EXPERIENCE_MAX_ENTRIES
             )
-            written += 1
-        evicted = self.experiences.evict_to_limit(RETRIEVAL_EXPERIENCE_MAX_ENTRIES)
         return {
             "runs": len(runs),
             "situations": len(groups),

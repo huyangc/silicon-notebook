@@ -61,6 +61,13 @@ class RetrievalExperienceStore:
     def __init__(self, database: SqliteDatabase, *, now: Callable[[], str]) -> None:
         self.database = database
         self.now = now
+        # codex #524 R12 P2:进程内单调修订计数,version_signal 的第一元。
+        # (count, MAX(updated_at)) 不是内容身份:updated_at 是带 offset 的
+        # ISO 文本,MAX() 按字典序——offset 变化(DST/改时区)或时钟回拨时,
+        # 一次真实更新可以不改变这两个数,注入侧缓存就永久陈旧。计数器只在
+        # 本进程有效,而缓存键本就含"同一个活 store 对象"(弱引用),两者恰好
+        # 同界;跨进程写入仍由 (count, max) 兜底,与修复前一致。
+        self._mutations = 0
         # No ``new_id`` seam on purpose. Every id in this table is
         # CONTENT-ADDRESSED and computed by the caller from the entry's own
         # (situation, action) — a random id would break both the primary key's
@@ -233,6 +240,9 @@ class RetrievalExperienceStore:
             result = db.execute(
                 "SELECT * FROM retrieval_experiences WHERE id=?", (experience_id,)
             ).fetchone()
+        # 无论落在哪个分支都 bump:少数"什么都没改"的调用多付一次聚合读,
+        # 换掉"哪个分支算写"的分支追踪——那正是会随下一个分支悄悄漂移的账。
+        self._mutations += 1
         return _experience_row(result)
 
     def note_adopted(self, experience_ids: Sequence[str], delta: int = 1) -> int:
@@ -299,6 +309,7 @@ class RetrievalExperienceStore:
                 "ORDER BY adopted ASC, support ASC, updated_at ASC, id ASC LIMIT ?)",
                 (overflow,),
             )
+        self._mutations += 1
         return cursor.rowcount
 
     def count(self) -> int:
@@ -308,14 +319,22 @@ class RetrievalExperienceStore:
             ).fetchone()
         return int(row["n"])
 
-    def version_signal(self) -> tuple[int, str]:
-        """``(row count, newest updated_at)`` — the injection side's memo key.
+    def version_signal(self) -> tuple[int, int, str]:
+        """``(mutation revision, row count, newest updated_at)`` — the
+        injection side's memo key.
 
-        Both halves are needed and neither is redundant: the count alone misses
-        an in-place UPDATE (a re-distilled entry keeps its content-addressed
-        id), and the max alone misses an eviction (deleting the oldest rows
-        leaves the newest timestamp untouched). Together they change whenever
-        anything ``read_all`` would return has changed.
+        The count alone misses an in-place UPDATE (a re-distilled entry keeps
+        its content-addressed id), and the max alone misses an eviction
+        (deleting the oldest rows leaves the newest timestamp untouched). And
+        the two DB halves TOGETHER are still not a content identity (codex
+        #524 R12 P2): ``updated_at`` is offset-carrying ISO text and ``MAX()``
+        compares lexicographically, so a UTC-offset change (DST, a timezone
+        move) or a clock step backwards can make a real update invisible. The
+        in-process ``_mutations`` revision closes that class by construction,
+        and it is exactly co-extensive with the cache it feeds — the memo key
+        also requires the SAME live store object (weakref identity), so every
+        write the cached object can see bumps the revision it reports.
+        Cross-process writes remain covered by the two DB halves, as before.
 
         ⚠ ``note_adopted`` deliberately does NOT move ``updated_at`` (see its
         own docstring: ``updated_at`` is the last tie-break of the eviction
@@ -330,4 +349,4 @@ class RetrievalExperienceStore:
                 "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m "
                 "FROM retrieval_experiences"
             ).fetchone()
-        return int(row["n"]), str(row["m"] or "")
+        return self._mutations, int(row["n"]), str(row["m"] or "")
