@@ -32,6 +32,14 @@
 -- anywhere in the codebase yet -- the API surface, the row-level created_by
 -- gate and the "must have at least one written answer" policy all land in a
 -- later task of the same feature. This migration only lays the schema down.
+--
+-- Deep copy needs no handling here (unlike notebooks.share_token /
+-- reports.share_token, whose copy paths explicitly clear the token): the
+-- notebook deep-copy validated-table set does not include `conversations` at
+-- all (sharing_store's _COPY_VALIDATED_TABLES, both backends), so these three
+-- columns never travel with a copy and there is nothing to clear. Do NOT add
+-- a clear-on-copy step by analogy with the token siblings -- it would be dead
+-- code against a table the copy never touches.
 
 ALTER TABLE conversations ADD COLUMN share_token text COLLATE "C";
 ALTER TABLE conversations ADD COLUMN shared_through_at timestamptz;
