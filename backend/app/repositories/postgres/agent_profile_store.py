@@ -143,13 +143,35 @@ class AgentProfileStore:
           ``begin_immediate`` gives, so an unlocked read would let a concurrent
           ``clear_job_row`` (member removal) commit between the check and the
           write. The share lock holds the row until this transaction ends,
-          which is what makes the check as atomic here as it is there. It is
-          one primary-key row and no other writer of this store takes it, so it
-          adds no contention of its own.
+          which is what makes the check as atomic here as it is there. This is
+          NOT contention-free: ``bump_signal``, ``claim``, ``settle`` and
+          ``clear_job_row`` all write this exact row too, so a concurrent one
+          of those blocks behind the share lock until this transaction
+          commits or rolls back. The cost is bounded, not absent — it is one
+          primary-key row and the wait is at most this one short transaction's
+          own lifetime, never a scan or a lock escalation.
         * Jobs row first, THEN block rows — one lock order for every write in
           this store. ``clear_job_row`` and ``clear_all`` each touch only one of
           the two tables (and in separate transactions), so no cycle exists
-          today; taking them in a fixed order is what keeps that true."""
+          today among THIS store's own methods; taking them in a fixed order
+          is what keeps that true.
+
+        ⚠ Known, accepted exception to that last claim: both tables carry
+        ``ON DELETE CASCADE`` back to ``notebooks``, so a single
+        ``DELETE FROM notebooks`` — a transaction this store does not own or
+        take part in — deletes matching rows in BOTH tables inside that one
+        outside transaction, in whatever order PostgreSQL's own cascade
+        resolution picks; this module cannot force that order to match
+        "jobs row first".
+        A notebook delete racing a ``write_block`` call for that same
+        notebook can therefore form a genuine lock cycle (cascade holds one
+        table's row and waits on the other while ``write_block`` holds the
+        reverse). PostgreSQL's deadlock detector resolves that by aborting
+        one side with a loud ``deadlock detected`` error rather than hanging
+        or silently corrupting either write — a registered, acceptable
+        outcome for an event (notebook deletion) that already invalidates
+        whatever this call was trying to do, not a bug in this ordering
+        rule."""
         now = self.now()
         evidence_list = list(evidence)
         expected = int(expected_revision)
@@ -382,12 +404,27 @@ class AgentProfileStore:
         consumed: int,
         claim_token: str,
     ) -> AgentProfileSettleOutcome:
-        """See the SQLite mirror for the ``consumed``/CAS reasoning, for why
-        the CAS also carries ``claim_token``, and for why the "why did it not
-        land" re-read must share this transaction (``gone`` and ``superseded``
-        send the caller in opposite directions). ``GREATEST`` is this backend's
-        spelling of SQLite's two-argument ``MAX`` — same floor, same single
-        statement."""
+        """See the SQLite mirror for the ``consumed``/CAS reasoning and for why
+        the CAS also carries ``claim_token`` (``gone`` and ``superseded`` send
+        the caller in opposite directions). The "why did it not land" re-read
+        still has to share this transaction, but NOT for the same reason
+        SQLite's does: SQLite's ``begin_immediate`` serializes this whole
+        transaction behind one process-wide write lock, so nothing else can
+        move while it runs. This backend has no such lock — it runs under
+        READ COMMITTED, where each statement takes its own fresh snapshot. If
+        a concurrent ``clear_job_row`` (member removal) COMMITS in the gap
+        between the failed ``UPDATE`` above and the survivor ``SELECT``
+        below, that ``SELECT`` sees it and reports ``gone`` — which is the
+        benign direction: a removal that has genuinely already committed is
+        exactly what ``gone`` is supposed to report, so this is a
+        per-statement snapshot picking up a real fact, not a race the
+        transaction boundary fails to close. What the same-transaction
+        requirement actually buys here is narrower than "atomic": it stops
+        the survivor check from running in a SEPARATE later
+        transaction/connection, where it could observe a state shaped by
+        events that have nothing to do with why THIS ``UPDATE`` lost.
+        ``GREATEST`` is this backend's spelling of SQLite's two-argument
+        ``MAX`` — same floor, same single statement."""
         if status not in AGENT_PROFILE_JOB_TERMINAL_STATUSES:
             raise ValueError("agent profile job terminal status is not recognised")
         now = self.now()

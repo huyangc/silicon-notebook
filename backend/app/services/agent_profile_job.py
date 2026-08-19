@@ -946,7 +946,7 @@ class AgentProfileConsolidationService:
                 self.run_base,
                 notebook_id,
                 int(claimed.pending_signal),
-                claimed.token,
+                claim_token=claimed.token,
                 name=f"{_JOB_NAME_PREFIX}{notebook_id}",
                 # Not a pending-actions item: nothing here waits for a human
                 # decision, so ringing the bell would train users to ignore it.
@@ -994,7 +994,7 @@ class AgentProfileConsolidationService:
 
     # --------------------------------------------------------------- the run
     def run_base(
-        self, notebook_id: str, claimed_signal: int = 0, claim_token: str = ""
+        self, notebook_id: str, claimed_signal: int = 0, *, claim_token: str
     ) -> dict:
         """Execute one shared-base consolidation to a terminal state.
 
@@ -1043,7 +1043,17 @@ class AgentProfileConsolidationService:
                 chain="base",
                 claim_token=claim_token,
             )
-            self._maybe_requeue_base(notebook_id)
+            # codex P2-1: read the REAL settle outcome, not the recheck's own
+            # default. ``_fail`` already carries it back as ``settle_outcome``
+            # (see its own docstring) — passing nothing here silently
+            # defaulted every call to ``AGENT_PROFILE_SETTLED``, so a claim
+            # that actually lost to a newer generation (``superseded``) still
+            # walked into the leftover recheck and could claim a spurious
+            # THIRD generation while the second one's own settle was about to
+            # run the exact same recheck.
+            self._maybe_requeue_base(
+                notebook_id, str(result.get("settle_outcome") or "")
+            )
             return result
         except AgentProfileOutputRejected as exc:
             # Fail-open: the blocks that were already there stand untouched.
@@ -1057,7 +1067,9 @@ class AgentProfileConsolidationService:
                 chain="base",
                 claim_token=claim_token,
             )
-            self._maybe_requeue_base(notebook_id)
+            self._maybe_requeue_base(
+                notebook_id, str(result.get("settle_outcome") or "")
+            )
             return result
         except (KeyboardInterrupt, SystemExit):
             self._safe_settle(
@@ -1072,7 +1084,7 @@ class AgentProfileConsolidationService:
             self._emit("failed", notebook_id, chain="base", latency_ms=latency_ms())
             raise
         except Exception:
-            self._fail(
+            result = self._fail(
                 notebook_id,
                 BASE_CHAIN_OWNER,
                 AGENT_PROFILE_INTERNAL_FAILURE_MESSAGE,
@@ -1082,9 +1094,11 @@ class AgentProfileConsolidationService:
                 chain="base",
                 claim_token=claim_token,
             )
-            self._maybe_requeue_base(notebook_id)
+            self._maybe_requeue_base(
+                notebook_id, str(result.get("settle_outcome") or "")
+            )
             raise
-        self._safe_settle(
+        settled = self._safe_settle(
             notebook_id,
             BASE_CHAIN_OWNER,
             "done",
@@ -1102,7 +1116,7 @@ class AgentProfileConsolidationService:
             evidence=outcome.evidence,
             latency_ms=latency_ms(),
         )
-        self._maybe_requeue_base(notebook_id)
+        self._maybe_requeue_base(notebook_id, settled)
         return {
             "notebook_id": notebook_id,
             "blocks_written": outcome.written,
@@ -1530,7 +1544,7 @@ class AgentProfileConsolidationService:
                 notebook_id,
                 user_id,
                 int(claimed.pending_signal),
-                claimed.token,
+                claim_token=claimed.token,
                 name=f"{_OVERLAY_JOB_NAME_PREFIX}{notebook_id}",
                 notify_pending=False,
             )
@@ -1554,7 +1568,8 @@ class AgentProfileConsolidationService:
         notebook_id: str,
         user_id: str,
         claimed_signal: int = 0,
-        claim_token: str = "",
+        *,
+        claim_token: str,
     ) -> dict:
         """Execute one overlay consolidation to a terminal state.
 

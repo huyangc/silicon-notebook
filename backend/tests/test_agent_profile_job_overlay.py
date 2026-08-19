@@ -118,7 +118,13 @@ class _Submitter:
         self.calls: list[dict] = []
 
     def __call__(self, fn, *args, name=None, notify_pending=False, **kwargs):
-        self.calls.append({"name": name, "args": args, "notify_pending": notify_pending})
+        # ``kwargs`` recorded too (P2-T2): ``claim_token`` moved from a
+        # positional arg to a keyword-only one, and a caller inspecting only
+        # ``args`` would otherwise see it silently vanish from the record.
+        self.calls.append(
+            {"name": name, "args": args, "kwargs": kwargs,
+             "notify_pending": notify_pending}
+        )
         if self.fail is not None:
             raise self.fail
         if self.run:
@@ -179,9 +185,11 @@ def harness(tmp_path: Path, monkeypatch):
 def _run_overlay(service, claimed):
     """Run exactly the way ``start_overlay`` does: the claim's snapshot AND its
     generation token (Agentic Memory P2 — the token is what makes a stale
-    worker's settle/write land on nothing)."""
+    worker's settle/write land on nothing). ``claim_token`` is keyword-only on
+    ``run_overlay`` (P2-T2 tightening) — no default, so a caller cannot forget
+    it and silently reintroduce the ABA a missing token used to open."""
     return service.run_overlay(
-        NOTEBOOK_ID, USER_A, claimed.pending_signal, claimed.token
+        NOTEBOOK_ID, USER_A, claimed.pending_signal, claim_token=claimed.token
     )
 
 
@@ -299,8 +307,11 @@ def test_the_threshold_schedules_exactly_one_run_per_batch(harness, monkeypatch)
     assert len(submitter.calls) == 1
     # The worker is handed BOTH halves of the claim: the snapshot it may
     # consume, and the generation token that says which incarnation of the row
-    # it holds (Agentic Memory P2).
-    notebook, member, snapshot, token = submitter.calls[0]["args"]
+    # it holds (Agentic Memory P2). ``claim_token`` is keyword-only on
+    # ``run_overlay`` (P2-T2), so it now rides in ``kwargs`` rather than
+    # ``args``.
+    notebook, member, snapshot = submitter.calls[0]["args"]
+    token = submitter.calls[0]["kwargs"]["claim_token"]
     assert (notebook, member, snapshot) == (NOTEBOOK_ID, USER_A, 3)
     assert token == _job(harness, USER_A)["claim_token"] != ""
     assert submitter.calls[0]["notify_pending"] is False
@@ -430,8 +441,10 @@ def test_a_finished_report_claims_directly_without_parking_the_counter(
 
     assert len(submitter.calls) == 1
     # claim 的快照就是刚落的满阈值信号(3):它会随这次 run 的 settle 被消费。
-    # 第四个参数是 P2 的 claim 代际。
-    notebook, member, snapshot, token = submitter.calls[0]["args"]
+    # P2 的 claim 代际是关键字参数(``run_overlay`` 的 ``claim_token`` 现在
+    # keyword-only),因此从 ``kwargs`` 而不是 ``args`` 里取。
+    notebook, member, snapshot = submitter.calls[0]["args"]
+    token = submitter.calls[0]["kwargs"]["claim_token"]
     assert (notebook, member, snapshot) == (NOTEBOOK_ID, USER_A, 3)
     assert token == _job(harness, USER_A)["claim_token"] != ""
     assert _job(harness, USER_A)["status"] == "running"
@@ -1243,6 +1256,42 @@ def test_a_leftover_below_the_threshold_does_not_requeue(harness, monkeypatch):
     assert _job(harness, USER_A)["pending_signal"] == 1
 
 
+def test_a_superseded_settle_does_not_requeue(harness, monkeypatch):
+    """spec P2-1 / 质量 P3-3:``superseded`` 时一个更新的世代已经持有这个
+    成员自己的链路 slot,而且会在它自己的终态跑同一次剩余复查——旧世代如果
+    照常重排,会在新世代已经跑完、留下一份够阈值的 ``pending_signal`` 时抢
+    claim 出一份不该存在的第三世代。这与底座链路的同名用例是同一条契约在两条
+    链上各自的验证:``run_overlay`` 一直把真实 settle 结果传给
+    ``_maybe_requeue_overlay``(不像修复前的 ``run_base``),这里是回归钉子。
+    """
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    submitter = _with_submitter(monkeypatch, _Submitter(run=False))
+
+    def reply(_prompt: str) -> str:
+        # 模拟一次竞态:旧世代还卡在模型调用里的时候,这个成员自己的链路
+        # 已经被重新认领、跑完并落终态——留下一份够触发下一轮的 pending_signal。
+        profiles.clear_job_row(NOTEBOOK_ID, USER_A)
+        newer = profiles.claim(NOTEBOOK_ID, USER_A)
+        profiles.bump_signal(NOTEBOOK_ID, USER_A, delta=3)
+        profiles.settle(
+            NOTEBOOK_ID, USER_A, "done", claim_token=newer.token, consumed=0,
+        )
+        return _reply(retrieval_notes="心得")
+
+    service = _service(harness, client=_Client(reply))
+    stale = profiles.claim(NOTEBOOK_ID, USER_A)
+
+    _run_overlay(service, stale)
+
+    assert _job(harness, USER_A)["status"] == "done"
+    assert _job(harness, USER_A)["pending_signal"] == 3, "新世代自己的终态还没跑复查"
+    assert submitter.calls == [], (
+        "settle 报 superseded 时不该再抢一次——行已终态,那次抢会成功,"
+        "白起一份不该存在的第三世代"
+    )
+
+
 def test_removal_deletes_the_job_marker_before_the_blocks(harness):
     """codex R3 P1:清理顺序本身是契约。
 
@@ -1451,6 +1500,42 @@ def test_a_real_removal_still_wipes_the_blocks_it_recreated(harness, monkeypatch
     _run_overlay(service, claimed)
 
     assert wipes == [USER_A], "行真的没了 → 必须把这一轮重建的块清掉"
+    assert _blocks(harness, USER_A) == {}
+
+
+def test_a_settle_that_itself_fails_still_wipes_conservatively(harness, monkeypatch):
+    """质量评审 P2-1:``_SETTLE_UNKNOWN`` 的保守方向必须钉死在行为上,不能只
+    活在注释里。
+
+    settle 这次写入本身失败(抛异常),``_safe_settle`` 既分不清「这是移除留下
+    的 gone」也分不清「这是新一代持有链路的 superseded」——它只知道自己没能
+    观察到任何一个结局。P1 的 ``settle() -> bool`` 一律把这种「不知道」按更
+    保守的方向解读:宁可多做一次可再生的心得重建,也不留下已撤销的私有数据。
+    ``_WIPE_ON_SETTLE_OUTCOMES`` 因此把 ``_SETTLE_UNKNOWN`` 与 ``gone`` 分在
+    同一边——这里直接断言 wipe 真的被触发,而不是相信那条注释。"""
+    profiles = harness["profiles"]
+    _seed_one_ask(harness)
+    claimed = profiles.claim(NOTEBOOK_ID, USER_A)
+
+    wipes: list[str] = []
+    original_clear_all = profiles.clear_all
+
+    def counting_clear_all(notebook_id, owner_id):
+        wipes.append(owner_id)
+        return original_clear_all(notebook_id, owner_id)
+
+    def broken_settle(*_args, **_kwargs):
+        raise RuntimeError("settle 的写入本身失败(抖动/连接错误)")
+
+    monkeypatch.setattr(profiles, "settle", broken_settle)
+    monkeypatch.setattr(profiles, "clear_all", counting_clear_all)
+    service = _service(harness, client=_Client(_reply(retrieval_notes="心得")))
+
+    _run_overlay(service, claimed)
+
+    assert wipes == [USER_A], (
+        "settle 自己都没能落地——按更保守的方向必须当成 gone 同样 wipe"
+    )
     assert _blocks(harness, USER_A) == {}
 
 

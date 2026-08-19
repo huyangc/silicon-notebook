@@ -57,6 +57,7 @@ from app.services import background_jobs
 from app.services.agent_profile_job import (
     AGENT_PROFILE_EVIDENCE_MAX_IDS,
     AGENT_PROFILE_WORKLOAD,
+    BASE_CHAIN_OWNER,
     AgentProfileConsolidationService,
     CorpusStats,
     render_current_blocks,
@@ -180,8 +181,12 @@ def harness(tmp_path: Path, monkeypatch):
 
 def _run_base(service, claimed):
     """Run exactly the way ``start_base`` does: the claim's snapshot AND its
-    generation token (Agentic Memory P2)."""
-    return service.run_base(NOTEBOOK_ID, claimed.pending_signal, claimed.token)
+    generation token (Agentic Memory P2). ``claim_token`` is keyword-only on
+    ``run_base`` (P2-T2 tightening) — no default, so a caller cannot forget it
+    and silently reintroduce the ABA a missing token used to open."""
+    return service.run_base(
+        NOTEBOOK_ID, claimed.pending_signal, claim_token=claimed.token
+    )
 
 
 def _service(harness, *, client: _Client | None = None):
@@ -395,6 +400,49 @@ def test_signals_arriving_during_a_run_survive_the_settle(harness, monkeypatch):
     assert client.prompts and len(client.prompts) == 2
     assert _job(harness)["pending_signal"] == 0
     assert _job(harness)["status"] == "done"
+
+
+def test_a_superseded_settle_skips_the_leftover_recheck(harness, monkeypatch):
+    """spec P2-1 / 质量 P3-3(变异 6):``run_base`` 的四处结算收尾都必须把真实
+    settle 结果传给 ``_maybe_requeue_base``——修复前这四处调用一律不传参数,
+    等价于永远假装 settle 成功(``AGENT_PROFILE_SETTLED``)。
+
+    ``superseded`` 时一个更新的世代已经持有这条链路的 slot,而且会在它自己的
+    终态跑同一次剩余复查(见 ``_maybe_requeue_base`` 自己的文档);旧世代如果
+    假装自己正常结算,不但多做一次没用的读,还可能在新世代已经跑完、留下一份
+    够阈值的 ``pending_signal`` 时抢claim 出一份不该存在的第三世代。"""
+    submitter = _Submitter(run=False)
+    monkeypatch.setattr(background_jobs, "submit", submitter)
+    profiles = harness["profiles"]
+
+    def reply(_prompt: str) -> str:
+        # 模拟一次手动重建的竞态(run_base 自己文档里点名的场景):旧世代还
+        # 卡在模型调用里的时候,链路已经被重新认领、跑完并落终态——留下一份
+        # 够触发下一轮的 pending_signal。
+        profiles.clear_job_row(NOTEBOOK_ID, BASE_CHAIN_OWNER)
+        newer = profiles.claim(NOTEBOOK_ID, BASE_CHAIN_OWNER)
+        for _ in range(3):
+            profiles.bump_signal(NOTEBOOK_ID, BASE_CHAIN_OWNER)
+        profiles.settle(
+            NOTEBOOK_ID,
+            BASE_CHAIN_OWNER,
+            "done",
+            claim_token=newer.token,
+            consumed=0,
+        )
+        return _reply([{"label": "corpus_shape", "value": "v", "evidence": []}])
+
+    service = _service(harness, client=_Client(reply))
+    stale = profiles.claim(NOTEBOOK_ID, BASE_CHAIN_OWNER)
+
+    _run_base(service, stale)
+
+    assert _job(harness)["status"] == "done"
+    assert _job(harness)["pending_signal"] == 3, "新世代自己的终态还没跑复查"
+    assert submitter.calls == [], (
+        "settle 报 superseded 时不该再抢一次——行已终态,那次抢会成功,"
+        "白起一份不该存在的第三世代"
+    )
 
 
 def test_a_failed_run_still_consumes_its_batch(harness, monkeypatch):
