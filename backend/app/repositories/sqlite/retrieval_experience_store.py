@@ -295,3 +295,27 @@ class RetrievalExperienceStore:
                 "SELECT COUNT(*) AS n FROM retrieval_experiences"
             ).fetchone()
         return int(row["n"])
+
+    def version_signal(self) -> tuple[int, str]:
+        """``(row count, newest updated_at)`` — the injection side's memo key.
+
+        Both halves are needed and neither is redundant: the count alone misses
+        an in-place UPDATE (a re-distilled entry keeps its content-addressed
+        id), and the max alone misses an eviction (deleting the oldest rows
+        leaves the newest timestamp untouched). Together they change whenever
+        anything ``read_all`` would return has changed.
+
+        ⚠ ``note_adopted`` deliberately does NOT move ``updated_at`` (see its
+        own docstring: ``updated_at`` is the last tie-break of the eviction
+        ordering, and letting an adoption refresh it would make a
+        frequently-injected entry immortal). So an adoption is invisible to
+        this signal — which is correct for its one consumer: ``adopted`` is
+        neither rendered into the prompt block nor part of the selection
+        ordering, so a memo that misses it still serves identical rows.
+        """
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m "
+                "FROM retrieval_experiences"
+            ).fetchone()
+        return int(row["n"]), str(row["m"] or "")

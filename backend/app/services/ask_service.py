@@ -336,6 +336,7 @@ class AskService:
         collection_catalog=None,
         collection_enumeration=None,
         agent_profile=None,
+        retrieval_experiences=None,
         selected_source_graph=None,
         scale_version: Callable[[str], Any] = lambda _notebook_id: None,
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
@@ -367,6 +368,11 @@ class AskService:
         # Agentic Memory P1:Agent 对该库的已有理解 store(``AgentProfileStorePort``)。
         # 缺省 None ⇒ 那条 run 与接入前逐字相同(见 ``profile_wiring_active``)。
         self.agent_profile = agent_profile
+        # Agentic Memory P2:部署级全局的检索打法库
+        # (``RetrievalExperienceStorePort``)。同样缺省 None,而且注入还另有一把
+        # 默认**关闭**的开关 —— 两者任一不满足,这条 run 与接入前逐字相同
+        # (见 ``experience_wiring_active``)。
+        self.retrieval_experiences = retrieval_experiences
         self.selected_source_graph = selected_source_graph
         self.scale_version = scale_version
         self.selected_graph_hydrate = selected_graph_hydrate
@@ -2466,6 +2472,9 @@ class AskService:
                     # 那会在 ContextVar 未设时读到 seeded admin 的覆盖层)。这条
                     # 路径上 `user_id` 就是本次提问的持久化归属。
                     profile_owner_id=user_id,
+                    # Agentic Memory P2:检索打法库。刻意**没有** owner 参数
+                    # ——那张表没有任何租户维度,条目也不属于任何人。
+                    retrieval_experiences=self.retrieval_experiences,
                 ).run(
                     notebook_id,
                     research_question,
@@ -2473,6 +2482,12 @@ class AskService:
                     on_step=checked_trace,
                     intent_queries=intent_queries,
                     limits=limits,
+                    # 打法库按「这是什么形状的问题」选条目,而那个形状就是这一步
+                    # 已经写进轨迹的意图契约投影。交**同一个** detail(而不是另
+                    # 攒一份结构)保证注入侧与蒸馏侧看到的是同一份东西——两者不
+                    # 同就等于条目永远选不中它自己那个形状。它在检索器里只经
+                    # ``project_run_step`` 收窄,原文字段一个都不读。
+                    intent_detail=intent_step.detail,
                 )
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,

@@ -534,6 +534,13 @@ class ReportEngineDependencies:
     # 「读理解」、一个是「排整理」,同一个对象兼两职会让「只接注入、不接触发」
     # 这种完全合理的部署形态无法表达。
     agent_profile_jobs: Any = None
+    # Agentic Memory P2:部署级全局的检索打法库
+    # (``RetrievalExperienceStorePort``)。与上面两个座位同样必须**显式**接线;
+    # 注入另有一把默认关闭的开关。缺省 None ⇒ 与接入前逐字相同。
+    #
+    # ⚠ 与 P1 那个座位不同,这里没有对应的 owner 字段:打法库没有任何租户维度,
+    # 一条打法不属于任何人,所以「报告创建者是谁」对它不是一个有意义的问题。
+    retrieval_experiences: Any = None
 
 
 class ReportEngine:
@@ -1554,6 +1561,14 @@ class ReportEngine:
             # 注进这份报告。
             agent_profile=deps.agent_profile,
             profile_owner_id=self.user_id,
+            # Agentic Memory P2 §6.1:检索打法库。与理解块一样只接**逐节检索**
+            # 这一处,理由相同(意图理解与大纲规划跑在用户确认门之前)。
+            #
+            # ⚠ 这里**不传** ``intent_detail``:报告的每一节没有意图契约那份结构
+            # (节问题由大纲派生),而伪造一份会把「情境」这个键指向一个从没发生
+            # 过的形状。缺席的后果是确定性的:除 mode/档位外每个键落 ``unknown``,
+            # 打法条目因而只在同样宽泛的形状上匹配得上——这是诚实的降级,不是漏接。
+            retrieval_experiences=deps.retrieval_experiences,
         ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
               limits=limits,
               intent_queries=([sec_question, *directions]
