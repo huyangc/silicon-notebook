@@ -97,7 +97,7 @@ def _seed_conversation_with_tied_timestamps(database) -> tuple[str, str]:
 def test_public_snapshot_turn_order_matches_get_conversation_bit_for_bit(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -126,7 +126,7 @@ def test_public_snapshot_freezes_at_the_watermark_and_advances_on_reshare(
     """"Freeze + explicit update" (design doc §二): a turn written after the
     share call must NOT appear until the conversation is explicitly
     re-shared ("update to latest"), which reuses the same token."""
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -167,7 +167,7 @@ def test_public_snapshot_freezes_at_the_watermark_and_advances_on_reshare(
 def test_unshare_revokes_the_public_link(postgres_database):
     """After ``unshare_conversation`` the token resolves to nothing — a
     revoked link 404s exactly like a token that never existed."""
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -181,7 +181,7 @@ def test_unshare_revokes_the_public_link(postgres_database):
 
 
 def test_unknown_and_blank_tokens_return_none(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     store = PostgresAskStateStore(postgres_database, _seams())
 
     assert store.public_conversation_by_token("no-such-token") is None
@@ -196,7 +196,7 @@ def test_zero_answer_conversation_fails_closed(postgres_database):
     but its watermark stays NULL — and ``public_conversation_by_token`` must
     return None on a NULL watermark rather than serve an unbounded snapshot.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO notebooks(id,name,created_at,updated_at) "
@@ -224,7 +224,7 @@ def test_zero_answer_conversation_fails_closed(postgres_database):
 def test_conversation_share_state_reads_back_token_and_watermark(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -248,7 +248,7 @@ def test_discard_unwatermarked_share_spares_a_watermarked_link(postgres_database
     """The conditional rollback (codex T2 review, concurrency P2): once a
     concurrent share advances the watermark, a late rollback must NOT revoke
     the now-live link. Mirrors the SQLite copy of this contract test."""
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO notebooks(id,name,created_at,updated_at) "
@@ -293,7 +293,7 @@ def test_discard_unwatermarked_share_clears_a_genuinely_empty_conversation(
 ):
     """The other half: no answer ever landed -> watermark stays NULL -> the
     conditional rollback DOES discard the token."""
-    assert PostgresMigrator(postgres_database).migrate() == 29
+    assert PostgresMigrator(postgres_database).migrate() == 30
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO notebooks(id,name,created_at,updated_at) "

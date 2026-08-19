@@ -62,7 +62,7 @@ NOTEBOOK_SCOPED_TABLES = [
     # 同款裁决 1c 论证一致), 而不是任何运行期兜底; `foreign_key_check` 这道
     # 闸只对"真的引用不到任何行"的悬挂外键有效, 对 id 冲突这类问题无能为力。
     "notebook_share_requests",
-    # v51 问答会话公开分享 T1: conversations 新增 share_token/shared_through_at/
+    # v52 问答会话公开分享 T1: conversations 新增 share_token/shared_through_at/
     # shared_through_id 三列, 均随行走——不需要新分类, `conversations` 早已在
     # 上面这份清单里。与 reports.share_token/notebooks.share_token 同一先例:
     # token 冲突概率由 256 位随机凭据(new_capability_token)兜底, 本脚本不做
