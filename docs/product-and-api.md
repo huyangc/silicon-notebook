@@ -1797,7 +1797,7 @@ Missing or malformed frame, blueprint, or claim-ledger data is discarded and fal
 | `MAX_SNIPPET_CHARS` (per-citation excerpt) | 1,200 |
 | `MAX_CAPTION_CHARS` (per-image caption) | 500 |
 
-The per-turn question **and the conversation title** are served **whole** (no cap): like `answer_md`, they are the user's own artifacts (the title has no length cap on rename), and truncating them silently would drop the very text that produced the answer or names the conversation. A reference title/excerpt is evidence metadata and stays bounded, but an over-length value **sets `title_truncated`/`snippet_truncated`** (the public page shows a "已截断" hint) rather than dropping the tail silently (codex #522 R3).
+The per-turn question **and the conversation title** are served **whole** (no cap): like `answer_md`, they are the user's own artifacts (the title has no length cap on rename), and truncating them silently would drop the very text that produced the answer or names the conversation. A reference title/excerpt/original-filename is evidence metadata and stays bounded, but an over-length value **sets `title_truncated`/`snippet_truncated`/`file_name_truncated`** (the public page shows a "已截断" hint) rather than dropping the tail silently (codex #522 R3/R4).
 
 All seven live in `backend/app/services/conversation_public_view.py`.
 

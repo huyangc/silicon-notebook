@@ -7478,6 +7478,11 @@
               "title": "File Name",
               "type": "string"
             },
+            "file_name_truncated": {
+              "default": false,
+              "title": "File Name Truncated",
+              "type": "boolean"
+            },
             "key": {
               "default": "",
               "title": "Key",
