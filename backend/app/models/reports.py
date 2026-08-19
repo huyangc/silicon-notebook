@@ -121,12 +121,18 @@ class PublicReportReference(BaseModel):
 class PublicReport(BaseModel):
     """A shared report, readable without a session.
 
-    `question` and `content_md` are served whole — both are the user's own
-    artifact, and capping the question bounded nothing while `content_md` (far
-    larger) stays uncapped right beside it.
+    `content_md` is served whole. `question` is served whole up to
+    `REPORT_QUESTION_MAX_CHARS` — which creation now refuses to exceed, so for
+    any report created since that rail it *is* the whole question — and past it
+    (only reachable for a pre-rail row) it is bounded with `question_truncated`
+    set rather than clipped silently or returned unbounded.
     """
 
     question: str = ""
+    # Only ever True for a report created before `REPORT_QUESTION_MAX_CHARS`
+    # existed: creation now refuses a longer question, so for every new report
+    # the question is served whole and this stays False.
+    question_truncated: bool = False
     content_md: str = ""
     created_at: str = ""
     updated_at: str = ""

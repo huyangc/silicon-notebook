@@ -107,6 +107,13 @@ test("标题/原始文件名/摘录被截断时逐条显式披露，不静默丢
   expect(screen.getByText("（摘录过长，已截断）")).toBeInTheDocument();
 });
 
+test("研究问题被截断时页头显式披露（只可能出现在护栏上线前建的报告上）", async () => {
+  mocks.fetchPublicReport.mockResolvedValue({ ...REPORT, question_truncated: true });
+  render(<PublicReportPage />);
+
+  expect(await screen.findByText("（研究问题过长，已截断）")).toBeInTheDocument();
+});
+
 test("没被截断的引用不挂假提示", async () => {
   // 空转保护：上一条可以被一个「恒渲染提示」的实现骗过去。REPORT 的两条引用都
   // 不带 `*_truncated`（旧后端也是这个形状），此时一个提示都不该出现。
@@ -116,4 +123,6 @@ test("没被截断的引用不挂假提示", async () => {
   expect(screen.queryByText("（标题过长，已截断）")).toBeNull();
   expect(screen.queryByText("（原始文件名过长，已截断）")).toBeNull();
   expect(screen.queryByText("（摘录过长，已截断）")).toBeNull();
+  // REPORT 不带 `question_truncated`（旧后端也是这个形状），页头也不该挂提示。
+  expect(screen.queryByText("（研究问题过长，已截断）")).toBeNull();
 });
