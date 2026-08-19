@@ -217,3 +217,36 @@ def test_orphan_sweep_keeps_edges_whose_group_survived_the_union(fresh_db):
     assert fresh_db.execute(
         "SELECT COUNT(*) FROM notebook_grants"
     ).fetchone()[0] == 1
+
+
+def test_post_union_eviction_recaps_the_experience_library(fresh_db):
+    """codex #524 R1 P2:两个各自合法 300 行的库并出最多 600 行,普通读者只按
+    id 序取前 300、下一次蒸馏(可能没配模型)之前无人淘汰——并集后必须立刻按
+    运行时同一淘汰序收容,且删的是 (adopted, support, updated_at, id) 升序的
+    最低价值行。"""
+    conn = fresh_db
+    for i in range(310):
+        conn.execute(
+            "INSERT INTO retrieval_experiences"
+            "(id, situation_json, action, polarity, rationale, support,"
+            " adopted, provenance_json, created_at, updated_at)"
+            " VALUES (?, '{}', 'ppr', 'bad', '', ?, ?, '[]',"
+            " '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00')",
+            (f"rx-{i:04d}", i, i % 3),
+        )
+    conn.commit()
+    evicted = merge_dbs._evict_experiences_to_limit(conn)
+    assert evicted == 10
+    kept = conn.execute(
+        "SELECT COUNT(*) FROM retrieval_experiences"
+    ).fetchone()[0]
+    assert kept == 300
+    # 淘汰序:adopted 升序优先——adopted=0 且 support 最低的先走
+    survivors_min = conn.execute(
+        "SELECT MIN(support) FROM retrieval_experiences WHERE adopted = 0"
+    ).fetchone()[0]
+    dropped_probe = conn.execute(
+        "SELECT COUNT(*) FROM retrieval_experiences WHERE id = 'rx-0000'"
+    ).fetchone()[0]
+    assert dropped_probe == 0, "adopted=0/support=0 的最低价值行必须被删"
+    assert survivors_min is not None

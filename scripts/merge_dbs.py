@@ -370,6 +370,28 @@ def _assert_global_schema_compatibility(
         )
 
 
+def _evict_experiences_to_limit(
+    conn: sqlite3.Connection, max_entries: int = 300
+) -> int:
+    """合库后把 `retrieval_experiences` 收回运行时硬上限(默认 300,与
+    `ports.RETRIEVAL_EXPERIENCE_MAX_ENTRIES` 同值——离线脚本不 import 后端包,
+    数值与淘汰序都镜像 `sqlite/retrieval_experience_store.py::evict_to_limit`,
+    改任一侧必须同改另一侧)。"""
+    if not _table_exists(conn, "retrieval_experiences", "main"):
+        return 0
+    row = conn.execute("SELECT COUNT(*) FROM main.retrieval_experiences").fetchone()
+    overflow = int(row[0]) - max_entries
+    if overflow <= 0:
+        return 0
+    conn.execute(
+        "DELETE FROM main.retrieval_experiences WHERE id IN ("
+        "SELECT id FROM main.retrieval_experiences "
+        "ORDER BY adopted ASC, support ASC, updated_at ASC, id ASC LIMIT ?)",
+        (overflow,),
+    )
+    return overflow
+
+
 def sweep_orphan_group_grants(conn: sqlite3.Connection) -> int:
     """清掉指向已不存在群组的 `notebook_grants` 行, 返回清掉的条数。
 
@@ -470,6 +492,18 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
         # `principal_id` 无外键, 见 sweep_orphan_group_grants 的说明)。
         with conn:
             orphan_grants = sweep_orphan_group_grants(conn)
+
+        # codex #524 R1 P2:经验库并集后立刻按运行时同一淘汰序收容——两个各自
+        # 合法 300 行的库并出最多 600 行,而普通读者只按 id 序取前 300、下一次
+        # 蒸馏(部署可能根本没配模型)之前不会有人淘汰,等于永久性忽略任意一半。
+        # 淘汰序与 evict_to_limit 逐字同款((adopted, support, updated_at, id)
+        # 升序删到上限),这里不 import store(离线脚本自己持有连接)但序是同
+        # 一份契约,改一处必须同改另一处——两侧注释互相指认。
+        with conn:
+            evicted = _evict_experiences_to_limit(conn)
+        if evicted:
+            print(f"[merge] 经验库并集超容,按运行时淘汰序收容删除 {evicted} 条")
+        row_counts["retrieval_experiences_evicted"] = evicted
         if orphan_grants:
             print(f"[merge] 清理指向已不存在群组的共享授权 {orphan_grants} 条")
         row_counts["notebook_grants_orphans_removed"] = orphan_grants
