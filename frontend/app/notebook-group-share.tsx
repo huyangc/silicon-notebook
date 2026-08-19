@@ -179,16 +179,19 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
         <p className="tool-hint">还没有共享给任何群组。</p>
       ) : (
         entries.map((entry) => (
-          <div className="checklist-row" key={entry.groupId} style={{ alignItems: "center", gap: 8 }}>
-            <span style={{ flex: 1, wordBreak: "break-word" }}>
-              {entry.missing ? "已失效的群组共享" : entry.name}
-            </span>
-            {!entry.missing && <span className="new-pill">{groupKindLabel(entry.kind)}</span>}
-            {/* 同组两条边(成员只读 + 组管理员可管)折成一项时,标注它带了管理权。 */}
-            {!entry.missing && entry.manage && <span className="tool-hint">组管理员可管理</span>}
-            {entry.missing && (
-              <span className="tool-hint">该群组已不存在，这条共享不再生效，可以删掉。</span>
-            )}
+          <div className="group-row" key={entry.groupId}>
+            <div className="group-row-main">
+              <span className="group-row-name">
+                {entry.missing ? "已失效的群组共享" : entry.name}
+              </span>
+              {!entry.missing && <span className="group-chip">{groupKindLabel(entry.kind)}</span>}
+              {/* 同组两条边(成员只读 + 组管理员可管)折成一项时,标注它带了管理权。 */}
+              {!entry.missing && entry.manage && <span className="group-row-meta">组管理员可管理</span>}
+              {entry.missing && (
+                <span className="group-row-note">该群组已不存在，这条共享不再生效，可以删掉。</span>
+              )}
+            </div>
+            <div className="group-row-actions">
             {/* 已存在的共享也要能增减管理权(codex #519 R9 P2):批准共享申请写的是
                 `(group, viewer)` 单边,新建路径的「组管理员可管理」勾选对它够不着——
                 不给这两个入口,P2 的招牌流程走完就永远停在「没有管理权」且无路可改,
@@ -231,6 +234,7 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
                 }
               }, "撤销共享失败"); }}
             >{busySlot === entry.groupId ? "撤销中…" : "撤销共享"}</button>
+            </div>
           </div>
         ))
       )}
@@ -238,12 +242,12 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
       {options.length > 0 ? (<>
         {/* 未共享门的提示挨着**将要触发它的那个按钮**(设计文档 §6.1)。 */}
         <p className="tool-hint" style={{ margin: 0 }}>{BORROWED_BASE_SHARE_WARNING}</p>
-        <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
+        <div className="group-form-row">
           <select
+            className="group-input"
             value={picked}
             aria-label="选择群组"
             disabled={busy}
-            style={{ flex: 1 }}
             onChange={(event) => setPicked(event.target.value)}
           >
             <option value="">选择一个群组…</option>
@@ -264,7 +268,7 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
           >{busySlot === SHARE_SLOT ? "共享中…" : "共享给该群组"}</button>
         </div>
         {/* 「组管理员可管理」:追加一条 group_admins/admin 边,组管理员因此能改内容。 */}
-        <label className="checklist-row" style={{ alignItems: "center", gap: 8, cursor: "pointer" }}>
+        <label className="group-row group-check">
           <input
             type="checkbox"
             checked={manage}
@@ -272,7 +276,7 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
             onChange={(event) => setManage(event.target.checked)}
             aria-label="组管理员可管理这本笔记本"
           />
-          <span className="tool-hint" style={{ margin: 0 }}>
+          <span className="group-row-note">
             允许该群组的组管理员管理这本笔记本（添加/删除来源、构建索引、编辑知识）。
           </span>
         </label>
@@ -291,12 +295,12 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
           <p className="tool-hint" style={{ margin: 0 }}>
             你不是这些群组的组管理员，无法直接共享；提交申请后由组管理员审批。
           </p>
-          <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
+          <div className="group-form-row">
             <select
+              className="group-input"
               value={requestPick}
               aria-label="选择要申请的群组"
               disabled={busy}
-              style={{ flex: 1 }}
               onChange={(event) => setRequestPick(event.target.value)}
             >
               <option value="">选择一个群组…</option>
@@ -323,19 +327,23 @@ export function NotebookGroupShare({ notebookId, onChanged }: NotebookGroupShare
         <div className="stack" style={{ gap: 8 }}>
           <span className="section-title">我的共享申请</span>
           {pendingAndRejected.map((req) => (
-            <div className="checklist-row" key={req.id} style={{ alignItems: "center", gap: 8 }}>
-              <span style={{ flex: 1, wordBreak: "break-word" }}>{req.group_name || "群组"}</span>
-              <span className={req.status === "rejected" ? "tool-hint" : "new-pill"}>
-                {shareRequestStatusLabel(req.status)}
-              </span>
+            <div className="group-row" key={req.id}>
+              <div className="group-row-main">
+                <span className="group-row-name">{req.group_name || "群组"}</span>
+                <span className={`group-chip ${req.status === "rejected" ? "is-rejected" : "is-pending"}`}>
+                  {shareRequestStatusLabel(req.status)}
+                </span>
+              </div>
               {req.status === "pending" && (
-                <button
-                  className="sort-button"
-                  disabled={busy}
-                  onClick={() => { void run(req.id, async () => {
-                    await withdrawShareRequest(notebookId, req.id);
-                  }, "撤回申请失败"); }}
-                >{busySlot === req.id ? "撤回中…" : "撤回申请"}</button>
+                <div className="group-row-actions">
+                  <button
+                    className="sort-button"
+                    disabled={busy}
+                    onClick={() => { void run(req.id, async () => {
+                      await withdrawShareRequest(notebookId, req.id);
+                    }, "撤回申请失败"); }}
+                  >{busySlot === req.id ? "撤回中…" : "撤回申请"}</button>
+                </div>
               )}
             </div>
           ))}

@@ -139,7 +139,7 @@ test("组管理员可加人、改角色、撤销共享给本组的知识库", as
   const { onChanged } = renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
 
   // 成员清单:显示名与用户名一起给出,免得两个 display_name 相同的人分不开。
   await screen.findByText("爱丽丝（alice）");
@@ -170,9 +170,9 @@ test("普通成员没有管理入口,也不去读「共享给本组的知识库�
   renderModal();
 
   await screen.findByText("工艺部");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[1]);
+  await user.click(screen.getByRole("button", { name: "查看群组 工艺部" }));
 
-  await screen.findByText("工艺部 · 部门");
+  await screen.findByRole("heading", { name: "工艺部" });
   expect(listGroupSharedNotebooks).not.toHaveBeenCalled();
   // 「待审批申请」也只属于组管理员这一层——普通成员连查都不查。
   expect(listGroupShareRequests).not.toHaveBeenCalled();
@@ -214,7 +214,7 @@ test("组管理员看到「待审批申请」区,可批准(写边、刷新)或�
   const { onChanged } = renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
 
   await screen.findByText("待审批申请");
   expect(screen.getByText("候选库甲")).toBeInTheDocument();
@@ -236,7 +236,7 @@ test("驳回申请不写边,只刷新审核队列", async () => {
   renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
   await screen.findByText("待审批申请");
 
   await user.click(screen.getByRole("button", { name: "驳回" }));
@@ -251,8 +251,8 @@ test("删除群组是两步确认,并说清共享会被一并收回", async () =
   renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
-  await screen.findByText("封装项目 · 项目");
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
+  await screen.findByRole("heading", { name: "封装项目" });
 
   await user.click(screen.getByRole("button", { name: "删除群组" }));
   expect(deleteGroup).not.toHaveBeenCalled();
@@ -270,8 +270,8 @@ test("退出被后端拒绝(最后一名组管理员是 409)时必须上屏,不�
   renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
-  await screen.findByText("封装项目 · 项目");
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
+  await screen.findByRole("heading", { name: "封装项目" });
   await user.click(screen.getByRole("button", { name: "退出群组" }));
   await user.click(screen.getByRole("button", { name: "确认退出" }));
 
@@ -281,7 +281,7 @@ test("退出被后端拒绝(最后一名组管理员是 409)时必须上屏,不�
   expect(banner).toHaveClass("error");
   // 失败之后确认态保留、组仍在:界面不能假装退出成功。
   expect(screen.getByRole("button", { name: "确认退出" })).toBeInTheDocument();
-  expect(screen.getByText("封装项目 · 项目")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "封装项目" })).toBeInTheDocument();
 });
 
 
@@ -294,7 +294,7 @@ test("组说明可显示与编辑,保存后让外层重取(组名进笔记本卡
   const { onChanged } = renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
 
   const description = await screen.findByLabelText("群组说明");
   expect(description).toHaveValue("封装工艺相关的项目组");
@@ -315,7 +315,7 @@ test("普通成员只读到说明,没有编辑框", async () => {
   renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
 
   await screen.findByText("只读的说明");
   expect(screen.queryByLabelText("群组说明")).not.toBeInTheDocument();
@@ -332,11 +332,11 @@ test("打开另一个组失败时不残留上一个组的成员与共享清单",
   renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
   await screen.findByText("甲组的库");
 
   vi.mocked(getGroup).mockRejectedValue(new Error("boom"));
-  await user.click(screen.getAllByRole("button", { name: "查看" })[1]);
+  await user.click(screen.getByRole("button", { name: "查看群组 工艺部" }));
 
   await screen.findByText("群组详情加载失败");
   expect(screen.queryByText("甲组的库")).not.toBeInTheDocument();
@@ -353,7 +353,7 @@ test("移出成员是两步确认,第一下不发请求", async () => {
   const { onChanged } = renderModal();
 
   await screen.findByText("封装项目");
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
   await screen.findByText("爱丽丝（alice）");
 
   await user.click(screen.getAllByRole("button", { name: "移出群组" })[1]);
@@ -388,7 +388,7 @@ test("组名与说明的长度护栏在前端同显,快到上限时出声", asyn
   await user.paste("x".repeat(115));
   expect(screen.getByText("群组名称还可输入 5 个字")).toBeInTheDocument();
 
-  await user.click(screen.getAllByRole("button", { name: "查看" })[0]);
+  await user.click(screen.getByRole("button", { name: "查看群组 封装项目" }));
   await screen.findByLabelText("群组说明");
   expect(screen.getByLabelText("群组新名称")).toHaveAttribute("maxlength", "120");
   expect(screen.getByLabelText("群组说明")).toHaveAttribute("maxlength", "1000");
@@ -472,7 +472,7 @@ test("批准成功但列表刷新失败:不报失败、行不残留、不诱导�
   vi.mocked(approveShareRequest).mockResolvedValue(shareRequest({ id: "sr-ok", status: "approved" }));
   renderModal();
 
-  await user.click((await screen.findAllByRole("button", { name: "查看" }))[0]);
+  await user.click(await screen.findByRole("button", { name: "查看群组 封装项目" }));
   await screen.findByText("待审批申请");
   await user.click(await screen.findByRole("button", { name: "批准" }));
 
@@ -491,7 +491,7 @@ test("批准本身失败时仍然报失败(分离不能变成把错误吞掉)", 
   vi.mocked(approveShareRequest).mockRejectedValue(new Error("nope"));
   renderModal();
 
-  await user.click((await screen.findAllByRole("button", { name: "查看" }))[0]);
+  await user.click(await screen.findByRole("button", { name: "查看群组 封装项目" }));
   await user.click(await screen.findByRole("button", { name: "批准" }));
 
   await screen.findByText("批准申请失败");
