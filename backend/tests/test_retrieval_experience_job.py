@@ -908,3 +908,57 @@ def test_an_entry_for_an_action_no_run_invoked_is_rejected():
     # 同批里真用过的动作照常通过,证明拒收不是把整个 parse 关掉
     ok = dict(entry, action="ppr")
     assert len(parse_distillation_reply({"entries": [ok]}, groups)) == 1
+
+
+def test_offer_slots_are_consumed_after_dedup_not_before():
+    """codex #524 R11 P2:三条排前的同动作条目只该占一个名额,低一名的
+    别的动作条目要能顶上——先切片再去重会让名单欠额。"""
+    groups = _groups()
+    situation = dict(groups[0].situation)
+    existing = [
+        {"id": f"ppr-{i}", "situation": situation, "action": "ppr",
+         "polarity": "bad", "rationale": "r"}
+        for i in range(3)
+    ] + [
+        {"id": "ret-1", "situation": situation, "action": "retrieve",
+         "polarity": "good", "rationale": "r"},
+        {"id": "ex-1", "situation": situation, "action": "exact_lookup",
+         "polarity": "good", "rationale": "r"},
+    ]
+    offered = _offered_entries(groups, existing)
+    got = [entry["id"] for _index, entry in offered]
+    # 每动作一条、名额 3:ppr 去重后只剩 1,retrieve/exact_lookup 顶上
+    assert len(got) == 3
+    assert len({entry["action"] for _i, entry in offered}) == 3
+
+
+def test_the_experience_cache_never_serves_a_store_twin(monkeypatch):
+    """codex #524 R11 P2:id() 可在旧 store 回收后被新对象复用,配上相同
+    version signal 会跨库串缓存。真实 id 复用不可确定性复现,这里用模块级
+    ``id`` 补丁把碰撞钉死:按 id 键的实现必然误命中(拿到 from-a),按弱引用
+    身份的实现对不同活对象必然 miss 并重读。"""
+    from app.services import reasoning_retrieval as rr
+
+    class _Store:
+        def __init__(self, rows):
+            self.rows = rows
+            self.reads = 0
+        def version_signal(self):
+            return (1, "2026-01-01T00:00:00")
+        def read_all(self, limit):
+            self.reads += 1
+            return list(self.rows)
+
+    monkeypatch.setattr(rr, "id", lambda _obj: 42, raising=False)
+    with rr._EXPERIENCE_CACHE_LOCK:
+        rr._EXPERIENCE_CACHE.clear()
+    a = _Store([{"id": "from-a"}])
+    assert rr._cached_experiences(a) == [{"id": "from-a"}]
+    b = _Store([{"id": "from-b"}])          # "id 碰撞"的孪生新库
+    assert rr._cached_experiences(b) == [{"id": "from-b"}]
+    assert b.reads == 1
+    # 同一活对象、同签名:第二次命中缓存,不再读表
+    assert rr._cached_experiences(b) == [{"id": "from-b"}]
+    assert b.reads == 1
+    with rr._EXPERIENCE_CACHE_LOCK:
+        rr._EXPERIENCE_CACHE.clear()

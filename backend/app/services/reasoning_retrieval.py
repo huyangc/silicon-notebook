@@ -12,6 +12,7 @@ import math
 import re
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
@@ -235,18 +236,24 @@ def _cached_experiences(store) -> List[dict]:
     返回的列表**只读**:多个 run 共享同一份对象,任何原地修改都会污染别的 run。
     下游 ``select_experiences``/``render_experience_block`` 都是纯函数。
     """
-    # codex #524 R7 P2:缓存键含 store 身份(id())——同进程多 runtime(测试、
-    # 评估、热切换)下,两个不同库的 (行数, 最新时间) 完全可能相同,只比签名会
-    # 把 A 库的打法注进 B 库的 run。id() 复用风险由签名兜底:旧 store 被回收后
-    # 同 id 的新 store 还需签名逐位相同才会误命中,而那正是"同一份内容"。
-    signal = (id(store), *tuple(store.version_signal()))
+    # codex #524 R7→R11 P2:store 身份用**弱引用**而不是 id()——id() 在旧
+    # store 被回收后可以被新对象复用,配上恰好相同的 (行数, 最新时间) 签名就会
+    # 把 A 库的打法注进 B 库的 run。弱引用把这个洞按构造关掉:旧 store 一死,
+    # ``ref() is store`` 就再也不可能为真;两个活对象则本来就不共享身份。
+    signal = tuple(store.version_signal())
     with _EXPERIENCE_CACHE_LOCK:
-        if _EXPERIENCE_CACHE.get("signal") == signal:
+        ref = _EXPERIENCE_CACHE.get("store_ref")
+        if (
+            ref is not None
+            and ref() is store  # type: ignore[operator]
+            and _EXPERIENCE_CACHE.get("signal") == signal
+        ):
             return _EXPERIENCE_CACHE.get("entries")  # type: ignore[return-value]
     entries = list(store.read_all(RETRIEVAL_EXPERIENCE_MAX_ENTRIES))
     with _EXPERIENCE_CACHE_LOCK:
         # 后写者赢:两个 run 同时未命中时都会读一次,写回的是同一份内容(签名相同)
         # 或更新的那一份(签名不同)。都不是错误,而抢锁读表会把一次 I/O 变成串行点。
+        _EXPERIENCE_CACHE["store_ref"] = weakref.ref(store)
         _EXPERIENCE_CACHE["signal"] = signal
         _EXPERIENCE_CACHE["entries"] = entries
     return entries

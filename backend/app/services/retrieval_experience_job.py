@@ -580,7 +580,12 @@ def _offered_entries(
         # 标签时解析必然歧义(首个匹配可能不是模型想改的那条,一次 UPDATE 就
         # 污染另一条打法)。只留相似度最高的那条,解析按构造无歧义。
         actions_taken: set[str] = set()
-        for _score, entry_id, entry in scored[:_MAX_SIMILAR_ENTRIES]:
+        accepted = 0
+        # codex #524 R11 P2:名额在**去重之后**才消耗——先切片再去重会让排前
+        # 的重复动作/已展示条目白占名额,低一名的合格条目明明存在却展示不出。
+        for _score, entry_id, entry in scored:
+            if accepted >= _MAX_SIMILAR_ENTRIES:
+                break
             if entry_id in seen:
                 continue
             action = str(entry.get("action") or "")
@@ -589,6 +594,7 @@ def _offered_entries(
             actions_taken.add(action)
             seen.add(entry_id)
             offered.append((index, entry))
+            accepted += 1
     return offered
 
 
