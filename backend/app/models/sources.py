@@ -14,6 +14,48 @@ def has_pdf_python_fallback_warning(error_message: object) -> bool:
 
 _WINDOWS_FAILED = re.compile(r"windows_failed=(\d+)/(\d+)")
 
+# 一次**跑完了、且合法地产出零个知识对象**的 KG 抽取,在 extraction_runs 里留下的
+# 正向标记。写者是 source_ingestion.run_extraction 成功路径那条 f-string,它以
+# ``kg objects={n}`` 起头,故 n=0 时整条消息以本前缀开头。
+#
+# 为什么需要一个**正向**标记,而不是「completed 且没有失败标记」:``no-llm``(抽取
+# 模型未配置)写的也是一条 completed 且不带任何失败标记的记录,但那种源确实还没被
+# 分析过——模型配好之后「分析新增」必须重新捡起它。只有本前缀能把「分析过、这篇
+# 里没有可整理的知识」与「压根没分析」分开。
+#
+# ⚠ 取值与名字都不可改:四处存储层(双后端 × 计数/目标选择/来源投影)按它做前缀
+# 匹配,已入库的历史行也带着这个前缀。改措辞会让存量行整体失配、把一批已分析的
+# 来源打回「待分析」并重新付一遍模型钱。
+KG_RUN_MESSAGE_OBJECTS_PREFIX = "kg objects="
+KG_EMPTY_RUN_MESSAGE_PREFIX = f"{KG_RUN_MESSAGE_OBJECTS_PREFIX}0 "
+
+
+def kg_analyzed_without_objects(status: object, error_message: object) -> bool:
+    """最近一次 KG 抽取**已完成、且如实产出零个知识对象**吗?
+
+    与 ``extraction_warning_text`` 同住一个模块、同一个理由:它是喂给「已分析 /
+    待分析」这组判定的派生谓词,而四处存储层各按自己的方言把同一条判据写进 SQL。
+    Python 侧留这一份是**判据的权威表述**——SQL 片段(两个后端各一份
+    ``kg_run_sql.py``)必须与它逐条对应,守卫见
+    ``tests/test_kg_empty_extraction_marker.py``。
+
+    三条缺一不可:
+    - ``status == 'completed'``:running/failed 的 run 什么都证明不了;
+    - 消息以 ``KG_EMPTY_RUN_MESSAGE_PREFIX`` 开头:抽取真的跑到了成功路径且产出为零
+      (排除 ``no-llm``、排除中止,见该常量的说明);
+    - 没有失败窗口、也不是 partial 重试的半成品:``windows_failed=N/T``(N≥1)说明这
+      一轮有窗口没跑成,零产出可能只是因为那些窗口丢了,不能据此判「这篇没有知识」。
+    """
+    if str(status or "") != "completed":
+        return False
+    message = str(error_message or "")
+    if not message.startswith(KG_EMPTY_RUN_MESSAGE_PREFIX):
+        return False
+    if "retry_incomplete=1" in message:
+        return False
+    match = _WINDOWS_FAILED.search(message)
+    return not (match and int(match.group(1)) > 0)
+
 
 def extraction_warning_text(error_message: object) -> Optional[str]:
     """最近一次 KG 抽取留下网络失败窗口时的**用户可见**告警,从抽取记录的
@@ -137,6 +179,15 @@ class SourceSummary(BaseModel):
     parse_quality_warning: bool = False
     # 该 source 是否已抽取 KG / 已入图
     kg_extracted: bool = False
+    # 最近一次分析**跑完了、而这篇文档里确实没有可整理成知识图谱的内容**(正文极少、
+    # 或几乎全是没有图注的图片)。与 kg_extracted 是互斥的两态,合起来给界面三态:
+    # 已分析(kg_extracted) / 已分析·无知识(本字段) / 待分析(两者皆假)。
+    #
+    # 为什么必须新增一个字段而不是把 kg_extracted 置真:这批来源在检索里确实拿不出
+    # 知识对象,谎称「已分析」会让用户以为图谱里有它。而沿用旧的二态则相反——它会
+    # 永远显示「待分析」,让计数降不下来、每次「分析新增」都重跑一遍,那正是本字段
+    # 要修的现场。派生规则见 kg_analyzed_without_objects。
+    kg_analyzed_empty: bool = False
     # 论文元数据投影:作者姓名按署名序;非论文/未抽取为空(paper-metadata)。
     authors: List[str] = Field(default_factory=list)
     pub_year: Optional[int] = None

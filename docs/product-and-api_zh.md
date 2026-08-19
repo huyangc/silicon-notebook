@@ -595,7 +595,9 @@ UTF-8 字节计）。提交的标题逐字存进来源行的标题；磁盘文�
 例外是「重复提交解析到既有来源」——它不新增文档，在已满时仍然放行，否则上面那条幂等承诺恰好
 会在最需要重试的时候失效。解析
 在后台进行，用 `get_source_status` 轮询：它返回 `parse_status`、`status`、`element_count`、
-`kg_extracted`（是否已跑过知识抽取）、`agent_created`，以及派生的 `parse_failed` 布尔与
+`kg_extracted`（图谱里是否有这份来源的知识对象）、`kg_analyzed_empty`（分析**跑完了**、而这份
+文档确实没有可整理的知识——正文极少或整份是没有图注的扫描件）、`agent_created`，以及派生的
+`parse_failed` 布尔与
 `parse_quality_warning`，而不是原始 `error_message`（后者是逐字保存的 `str(exc)`，经常带着
 服务端绝对路径）。`parse_quality_warning` 是 MinerU 降级信号：即使来源已到 `extracted`，版面、
 公式与表格仍可能有误，准备引用它的 Agent 需要知道这一点。`reparse_source` 重跑一份来源的解析与抽取；该
@@ -1408,6 +1410,8 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
 - 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
 - 深度报告（两阶段）：`POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`；先做不接触语料的问题理解，并停在 `status=intent_ready` 等人工确认，除非请求带 `auto_generate=true` 且问题清晰（无阻断性歧义）——此时意图同样通过同一份确定性冻结自动确认（不二次调用理解模型）后再进入规划。`GET .../reports/{rid}` 会返回持久化的 `understanding` 与状态/进度。`POST .../reports/{rid}/intent` body `{resolved_question, answers:[{id,answer}]}` 校验所有必填歧义，并原子认领进入语料规划的唯一转换，返回 `{status:"planning"}`；重复或过期确认返回 409 且不会启动第二个任务。规划完成后停在 `outline_ready`；若原始请求含 `auto_generate=true`，则意图阶段同样自动确认（仅当无阻断性歧义）之后自动进入生成。富 `outline` 含每节 `intent_ids`、`intent_questions`、可编辑 `sub_queries`、客观 `coverage`、视角/张力/充分性，详情继续包含 `content_md` 与实时 `section_status`。`PATCH .../reports/{rid}/outline` body `{sections}` 仅在 `outline_ready` 编辑草案；服务端保留 intent catalog，最多接受 `REPORT_MAX_SECTIONS` 节，每节最多接受 `REPORT_MAX_SUBQUERIES_PER_SECTION` 条非空检索方向。浏览器从 `/api/system/config` 同步这两项护栏并阻止超限提交；直接 API 客户端的章节或检索方向超限时收到 422，不再被静默截断。没有有效节或某个必答主题失去最后一个章节绑定时也返回 422。`POST .../reports/{rid}/generate` body `{depth?}` 可从 `outline_ready` 或仍保有大纲的 `failed` 报告原子启动**阶段2 生成**，其他状态返回 409；重试在认领事务内保留确认意图/大纲并清空旧生成产物。生成章节含后端重算的 `evidence_level`/`grounded`；引用可携带精确 `source_id`/`element_id`。另 `GET /reports`（列表）、`POST .../cancel`、`DELETE`、`POST .../reports/export` `{report_ids}` → `reports.zip`。节级并发采用上文报告专用的数据库保护护栏，不再复用 `KG_JOB_CONCURRENCY`。
+
+  **「待分析来源」不含「分析过、这篇确实没有可整理的知识」。** 判据不是「这份来源没有知识对象」——正文极少、或整份是没有图注的图片的文档，分析跑完了本来就是零个对象，把它算成待分析会让计数**永远降不下来**：来源徽标一直显示「待分析」，看板一直提示「继续分析」，而每一轮分析都会把这些来源按完整模型成本重跑一遍、再得到零。判定为「已分析·无知识」需要最近一次 `kg` 抽取记录同时满足：状态为 `completed`、消息带成功路径写下的零对象标记、没有失败窗口、且不是 partial 重试的半成品。`no-llm`（抽取模型未配置）**刻意不算**——那种来源确实还没被分析过，配好模型之后必须被重新捡起。判据的权威表述只有一份：`backend/app/models/sources.py` 的 `kg_analyzed_without_objects`；两条计数查询按方言镜像它（那个位置必须是一条 `COUNT`），并由 `backend/tests/test_kg_empty_extraction_marker.py` 逐用例与它对账。增量分析跳过这些来源，整库重建仍会选中它们——换模型或带 OCR 重新解析之后，走的就是那条路回来。
 
 报告规划护栏默认为：每节四条检索方向、八个直接元素候选，语料地图
 侦察分别取 12 个 KG 条目、八个 PPR chunk 和八条已确认 Memory。它们可通过

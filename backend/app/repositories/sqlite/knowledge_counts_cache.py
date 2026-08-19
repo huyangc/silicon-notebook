@@ -150,6 +150,36 @@ def object_type_total(
     return sum(c for (ot, _st), c in raw.items() if ot == object_type)
 
 
+# 「已分析、但这篇里没有可整理的知识」不是待分析——把它排除在 pending 之外。
+#
+# 判据的**权威表述**是 ``app.models.sources.kg_analyzed_without_objects``;这里是它的
+# SQLite 方言镜像,因为这个位置必须是一条 COUNT(逐行拉回 Python 判就是 N+1)。两者
+# 由 ``backend/tests/test_kg_empty_extraction_marker.py`` 逐用例对账,PG 侧同款镜像在
+# ``postgres/knowledge_counts_cache.py``。
+#
+# 只有两条 GLOB,没有第三条 ``retry_incomplete`` 排除:partial 重试写的消息一律以
+# "partial KG retry incomplete;" 起头,与这里要求的 ``kg objects=0 `` 前缀互斥,再查
+# 一次是白付一次索引探测。Python 侧那份保留了显式的 retry_incomplete 判断——它是
+# 判据的表述,不受这条只对本 SQL 成立的短路影响。
+#
+# 代价:每个来源多两次 extraction_runs 的有界探测(各一次 LIMIT 1 索引 seek)。这条
+# 查询本来就与来源数成正比且 memoized 在 kg_mutation_seq 上,常数因子可接受;换来的
+# 是零对象来源不再永远占着「待分析」并在每次「分析新增」里重付一遍模型钱。
+_ANALYZED_WITHOUT_OBJECTS_EXCLUSION = (
+    "AND NOT (COALESCE((SELECT er.status FROM extraction_runs er "
+    " WHERE er.source_id=s.id AND er.run_type='kg' "
+    " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'')='completed' "
+    "AND COALESCE((SELECT er.error_message FROM extraction_runs er "
+    " WHERE er.source_id=s.id AND er.run_type='kg' "
+    " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
+    " GLOB 'kg objects=0 *' "
+    "AND COALESCE((SELECT er.error_message FROM extraction_runs er "
+    " WHERE er.source_id=s.id AND er.run_type='kg' "
+    " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
+    " NOT GLOB '*windows_failed=[1-9]*/*')"
+)
+
+
 def _pending_source_count_query(
     db: sqlite3.Connection, notebook_id: str, *, visible_only: bool
 ) -> int:
@@ -174,7 +204,8 @@ def _pending_source_count_query(
         "SELECT er.error_message FROM extraction_runs er "
         "WHERE er.source_id=s.id AND er.run_type='kg' "
         "ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),''),"
-        "'retry_incomplete=1')>0))",
+        "'retry_incomplete=1')>0)) "
+        + _ANALYZED_WITHOUT_OBJECTS_EXCLUSION,
         (notebook_id,),
     ).fetchone()
     return int(row[0])

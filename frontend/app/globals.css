@@ -5346,6 +5346,23 @@ button.chat-session-card {
   background: #f0faf5;
 }
 
+/* 「已分析·无知识」——分析跑完了、这份文档里确实没有可整理成知识图谱的内容。
+   刻意既不用 --in 的绿(没有任何东西进图,绿色是在说一件没发生的事),也不用
+   AnomalyBadge 的红/黄(这不是异常,是一条需要解释的事实):保持中性 pill,只用
+   虚线边把「完成但为空」与「待分析」在视觉上分开。
+
+   ⚠ pointer-events 必须在这一态重新打开:上面那条 .source-kg-badge 的
+   pointer-events:none 会让浏览器**直接跳过 title tooltip**(理由与
+   .source-agent-badge 刻意不继承那条完全相同,见其旁注)。而这一态的全部解释
+   ——为什么再分析也不会变、扫描件该怎么办——都在 title 里,关掉就等于没写。
+   它下方同样没有需要接管点击的控件(.source-row-actions 是普通 flex 兄弟,不覆盖
+   行主按钮),所以打开它不会抢走任何点击。 */
+.source-kg-badge--empty {
+  pointer-events: auto;
+  border-style: dashed;
+  cursor: help;
+}
+
 /* 异常提示分级(anomaly-tiers spec)——唯一渲染路径,经 AnomalyBadge 组件
    (anomaly-badge.tsx)+ sourceAnomalies()(anomaly-severity.ts)产出。新增
    异常小字必须走这里,不要在调用处再手搓内联样式或裸 ⚠。 */

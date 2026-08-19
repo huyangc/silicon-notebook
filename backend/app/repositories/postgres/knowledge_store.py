@@ -616,7 +616,13 @@ class KnowledgeStore:
             "COALESCE((SELECT er.error_message FROM extraction_runs er "
             " WHERE er.source_id=s.id AND er.run_type='kg' "
             " ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1),'') "
-            "AS latest_kg_error "
+            "AS latest_kg_error,"
+            # 见 SQLite 侧同名列的说明:与 latest_kg_error 配对的状态,供
+            # models.sources.kg_analyzed_without_objects 判「已分析但零产出」。
+            "COALESCE((SELECT er.status FROM extraction_runs er "
+            " WHERE er.source_id=s.id AND er.run_type='kg' "
+            " ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1),'') "
+            "AS latest_kg_status "
             "FROM sources s WHERE s.notebook_id=%s "
             "AND (%s::timestamptz IS NULL "
             " OR (s.created_at,s.id COLLATE \"C\")>(%s,%s)) "

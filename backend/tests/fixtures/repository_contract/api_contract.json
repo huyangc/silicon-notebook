@@ -8344,6 +8344,11 @@
               "title": "Id",
               "type": "string"
             },
+            "kg_analyzed_empty": {
+              "default": false,
+              "title": "Kg Analyzed Empty",
+              "type": "boolean"
+            },
             "kg_extracted": {
               "default": false,
               "title": "Kg Extracted",
@@ -8846,6 +8851,11 @@
               "title": "Id",
               "type": "string"
             },
+            "kg_analyzed_empty": {
+              "default": false,
+              "title": "Kg Analyzed Empty",
+              "type": "boolean"
+            },
             "kg_extracted": {
               "default": false,
               "title": "Kg Extracted",
@@ -9282,6 +9292,11 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "kg_analyzed_empty": {
+              "default": false,
+              "title": "Kg Analyzed Empty",
+              "type": "boolean"
             },
             "kg_extracted": {
               "default": false,
@@ -10266,6 +10281,11 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "kg_analyzed_empty": {
+              "default": false,
+              "title": "Kg Analyzed Empty",
+              "type": "boolean"
             },
             "kg_extracted": {
               "default": false,
@@ -22217,6 +22237,7 @@
       "file_path": "<fixture-root>/storage/notebooks/nb-api/src-api_fixture.md",
       "file_size": 52,
       "id": "src-api",
+      "kg_analyzed_empty": false,
       "kg_extracted": true,
       "notebook_id": "nb-api",
       "paper_meta": null,

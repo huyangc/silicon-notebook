@@ -13,6 +13,7 @@ from app.models.sources import (
     SourceElement,
     SourceSummary,
     extraction_warning_text,
+    kg_analyzed_without_objects,
     has_pdf_python_fallback_warning,
     paper_meta_status,
 )
@@ -1241,6 +1242,10 @@ class SourceStore:
             if paper_meta is _UNSET
             else paper_meta
         )
+        # 一次读取喂两个派生字段(告警 + 「已分析但零产出」);见 SQLite 侧同名方法。
+        latest_run_status, latest_run_error = self.latest_run_state(
+            connection, source_id
+        )
         summary = SourceSummary(
             id=source_id,
             notebook_id=row["notebook_id"],
@@ -1260,9 +1265,12 @@ class SourceStore:
             source_url=row.get("source_url", ""),
             # v48 provenance: "the column is not NULL", never the raw agent id.
             agent_created=row.get("agent_profile_id") is not None,
-            extraction_warning=self.extraction_warning(connection, source_id),
+            extraction_warning=extraction_warning_text(latest_run_error),
             parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
             kg_extracted=kg_extracted,
+            kg_analyzed_empty=kg_analyzed_without_objects(
+                latest_run_status, latest_run_error
+            ),
             authors=[author["name"] for author in meta["authors"]] if meta else [],
             pub_year=meta["pub_year"] if meta else None,
             venue=meta["venue"] if meta else None,
@@ -1280,6 +1288,7 @@ class SourceStore:
         element_counts: dict[str, int] = {}
         kg_extracted_ids: set[str] = set()
         latest_error: dict[str, str] = {}
+        latest_status: dict[str, str] = {}
         for offset in range(0, len(source_ids), self.IN_CHUNK):
             batch = source_ids[offset : offset + self.IN_CHUNK]
             marker = placeholders(batch)
@@ -1307,12 +1316,17 @@ class SourceStore:
             ).fetchall():
                 kg_extracted_ids.add(row["source_id"])
             for row in connection.execute(
-                "SELECT source_id,error_message FROM extraction_runs "
+                "SELECT source_id,status,error_message FROM extraction_runs "
                 f"WHERE source_id IN ({marker}) "
                 "ORDER BY source_id COLLATE \"C\",created_at DESC,ordinal DESC",
                 batch,
             ).fetchall():
-                latest_error.setdefault(row["source_id"], row["error_message"] or "")
+                # 同一行的两列一起取:选中的是哪一行完全由上面的 ORDER BY 决定,
+                # status 只是搭同一趟车,不新增查询。
+                if row["source_id"] in latest_error:
+                    continue
+                latest_error[row["source_id"]] = row["error_message"] or ""
+                latest_status[row["source_id"]] = row["status"] or ""
 
         def warning(source_id: str) -> str | None:
             # 派生规则只有一份(app.models.sources),这里只负责取到「最近一次抽取的
@@ -1345,6 +1359,10 @@ class SourceStore:
                 extraction_warning=warning(source_id),
                 parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
                 kg_extracted=source_id in kg_extracted_ids,
+                kg_analyzed_empty=kg_analyzed_without_objects(
+                    latest_status.get(source_id, ""),
+                    latest_error.get(source_id, ""),
+                ),
                 authors=[author["name"] for author in meta["authors"]] if meta else [],
                 pub_year=meta["pub_year"] if meta else None,
                 venue=meta["venue"] if meta else None,
@@ -1354,14 +1372,22 @@ class SourceStore:
         return output
 
     def extraction_warning(self, connection, source_id: str) -> str | None:
+        return extraction_warning_text(
+            self.latest_run_state(connection, source_id)[1]
+        )
+
+    @staticmethod
+    def latest_run_state(connection, source_id: str) -> "tuple[str, str]":
+        """最近一次抽取记录的 ``(status, error_message)``——两个派生字段的共同输入。
+        与 SQLite 侧同名方法逐条对应(含「刻意不加 run_type 过滤」那条理由)。"""
         run = connection.execute(
-            "SELECT error_message FROM extraction_runs WHERE source_id=%s "
+            "SELECT status,error_message FROM extraction_runs WHERE source_id=%s "
             "ORDER BY created_at DESC,ordinal DESC LIMIT 1",
             (source_id,),
         ).fetchone()
         if run is None:
-            return None
-        return extraction_warning_text(run["error_message"])
+            return ("", "")
+        return (str(run["status"] or ""), str(run["error_message"] or ""))
 
     @staticmethod
     def meta_source_rows(

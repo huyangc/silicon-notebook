@@ -48,6 +48,7 @@ from typing import (
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
+from app.models.sources import kg_analyzed_without_objects
 from app.repositories.ports import (
     GovernanceStorePort,
     KgBuildJobStorePort,
@@ -2198,6 +2199,16 @@ class KnowledgeLifecycleService:
                 is_partial = has_graph and self._is_partial_kg_error(
                     str(row["latest_kg_error"] or "")
                 )
+                # 「跑完了、这篇里确实没有可整理的知识」不是待分析目标。没有这一条,
+                # 零对象来源(正文极少 / 几乎全是图片的扫描件)会在**每一次**「分析新增」
+                # 里被重新选中,重付一遍窗口的模型钱,而且抽完还是零、下一轮照样被选中
+                # ——用户看到的就是「一直分析不完」。判据在 models.sources,与计数、
+                # 来源徽标共用同一份表述。
+                # 刻意只作用于增量模式:`mode == "rebuild"` 仍然重抽全部有元素的来源,
+                # 换了模型或重新解析(带 OCR)之后要把这批来源捡回来,走的就是那条路。
+                analyzed_empty = kg_analyzed_without_objects(
+                    row["latest_kg_status"], row["latest_kg_error"]
+                )
                 if mode == "rebuild":
                     if has_elements:
                         targets.append((source_id, False))
@@ -2205,7 +2216,7 @@ class KnowledgeLifecycleService:
                         skipped_no_elements.append(source_id)
                 elif retry_partial and is_partial:
                     targets.append((source_id, True))
-                elif has_kg or is_partial:
+                elif has_kg or is_partial or analyzed_empty:
                     skipped.append(source_id)
                 elif has_elements:
                     targets.append((source_id, False))
