@@ -808,7 +808,13 @@ def share_conversation_route(
         # Deleted between the gate read and the share write.
         raise HTTPException(status_code=404, detail="Conversation not found")
     if not state.get("shared_through_at"):
-        repo.unshare_conversation(notebook_id, conversation_id)
+        # Conditional rollback: only discard the token while the watermark is
+        # STILL NULL. A concurrent share that saw the first answer land shares
+        # the same (COALESCE-idempotent) token and may already have handed it to
+        # its own caller in a 200 with a real watermark — an unconditional
+        # unshare here would nuke that live link (codex T2 review, concurrency
+        # P2). Once any concurrent share advances the watermark this no-ops.
+        repo.discard_unwatermarked_share(notebook_id, conversation_id)
         raise user_error(409, "这条会话还没有已完成的回答，暂时无法分享。")
     return ConversationShareResponse(
         share_token=state["share_token"],

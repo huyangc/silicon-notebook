@@ -3662,8 +3662,11 @@ class RepositoryFacade:
         )
 
     # --- 会话公开分享(T2:发放/回读/撤销 + 水位推进)---
-    # 直接委托给 AskStateStore 的 T1 方法(镜像 report_store 分享方法的委托形态,
-    # 见下面 share_report 等);ports.py 不为分享方法声明协议,与报告面同款。
+    # 直接委托给 AskStateStore 的方法(镜像 report_store 分享方法的委托形态,见下面
+    # share_report 等)。这些方法声明在 ports.py 的 AskStateRepository 协议
+    # `--- Public share links ---` 段,与报告面 ReportRepository 的同名段同款
+    # (codex T2 评审:早先这里的注释说反了,称"报告面也不进协议",实则报告分享方法
+    # 确在协议里——现已补齐会话侧声明并改正此注释)。
     def conversation_creator(
         self, notebook_id: str, conversation_id: str
     ) -> "str | None":
@@ -3694,6 +3697,16 @@ class RepositoryFacade:
     def unshare_conversation(self, notebook_id: str, conversation_id: str) -> None:
         """Revoke the public link. See ``AskStateStore.unshare_conversation``."""
         return self._runtime.ask_state.unshare_conversation(
+            notebook_id, conversation_id
+        )
+
+    def discard_unwatermarked_share(
+        self, notebook_id: str, conversation_id: str
+    ) -> None:
+        """Conditional rollback of a token minted for a still-empty
+        conversation (only while the watermark is NULL). See
+        ``AskStateStore.discard_unwatermarked_share``."""
+        return self._runtime.ask_state.discard_unwatermarked_share(
             notebook_id, conversation_id
         )
 
