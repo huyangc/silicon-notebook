@@ -271,6 +271,10 @@ export type SourceSummary = {
   /** MinerU 重试耗尽后由该格式对应的本地解析器完成；原始上游错误不对外暴露。 */
   parse_quality_warning?: boolean;
   kg_extracted?: boolean;
+  // 分析跑完了、这份文档里确实没有可整理成知识图谱的内容。与 kg_extracted
+  // 并列的互斥态,合起来给来源徽标三态(见 source-kg-badge.ts)。旧后端不发
+  // 这个字段 → undefined → 徽标逐字回到原来的两态。
+  kg_analyzed_empty?: boolean;
   /** 该来源是否由 Agent 经 MCP 接入通道添加。可选：旧后端缺字段按 false 处理。 */
   agent_created?: boolean;
   authors?: string[];

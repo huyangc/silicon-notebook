@@ -458,7 +458,16 @@ class KnowledgeStore:
             "COALESCE((SELECT er.error_message FROM extraction_runs er "
             " WHERE er.source_id=s.id AND er.run_type='kg' "
             " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
-            "AS latest_kg_error "
+            "AS latest_kg_error,"
+            # 与 latest_kg_error 配对的那一行的状态。调用方(_kg_target_batches)拿
+            # (status, error) 喂 models.sources.kg_analyzed_without_objects,把「已分析、
+            # 但这篇没有可整理的知识」与「还没分析」分开——否则零对象来源每次「分析新增」
+            # 都会被重新选中、重付一遍模型钱,而且永远选不完。判据留在 Python 那一份,
+            # 这里只多取一列(同一条 LIMIT 1 索引探测的形状)。
+            "COALESCE((SELECT er.status FROM extraction_runs er "
+            " WHERE er.source_id=s.id AND er.run_type='kg' "
+            " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
+            "AS latest_kg_status "
             "FROM sources s WHERE s.notebook_id=? "
             "AND (? IS NULL OR (s.created_at,s.id)>(?,?)) "
             "AND s.source_type NOT IN ('memory','knowhow') "

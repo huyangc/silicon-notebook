@@ -1836,6 +1836,11 @@ def create_memory_mcp(
                     "parse_quality_warning": detail.parse_quality_warning,
                     "element_count": detail.element_count,
                     "kg_extracted": detail.kg_extracted,
+                    # 分析跑完了、这篇里确实没有可整理的知识(正文极少 / 几乎全是
+                    # 没有图注的图片)。与 kg_extracted 并列而不是复用它:Agent 需要
+                    # 分清「还没分析」和「分析过、图谱里就是没有它」——前者值得重跑,
+                    # 后者重跑多少次都一样,该做的是换解析方式(如开 OCR)。
+                    "kg_analyzed_empty": detail.kg_analyzed_empty,
                     "agent_created": detail.agent_created,
                 }
 

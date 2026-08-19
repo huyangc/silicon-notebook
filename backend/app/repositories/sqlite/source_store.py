@@ -14,6 +14,7 @@ from app.models.sources import (
     SourceElement,
     SourceSummary,
     extraction_warning_text,
+    kg_analyzed_without_objects,
     has_pdf_python_fallback_warning,
     paper_meta_status,
 )
@@ -1541,6 +1542,9 @@ class SourceStore:
             self.paper_meta_for_sources(db, [row["id"]]).get(row["id"])
             if paper_meta is _UNSET else paper_meta
         )
+        # 一次读取喂两个派生字段(告警 + 「已分析但零产出」),不是两次:两者的输入
+        # 就是同一行「最近一次抽取记录」。query 数因此与改动前一致。
+        latest_run_status, latest_run_error = self.latest_run_state(db, row["id"])
         summary = SourceSummary(
             id=row["id"],
             notebook_id=row["notebook_id"],
@@ -1565,9 +1569,12 @@ class SourceStore:
                 row["agent_profile_id"] is not None
                 if "agent_profile_id" in row.keys() else False
             ),
-            extraction_warning=self.extraction_warning(db, row["id"]),
+            extraction_warning=extraction_warning_text(latest_run_error),
             parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
             kg_extracted=kg_extracted,
+            kg_analyzed_empty=kg_analyzed_without_objects(
+                latest_run_status, latest_run_error
+            ),
             authors=[a["name"] for a in pm["authors"]] if pm else [],
             pub_year=pm["pub_year"] if pm else None,
             venue=pm["venue"] if pm else None,
@@ -1600,6 +1607,7 @@ class SourceStore:
         element_counts: Dict[str, int] = {}
         kg_extracted_ids: set = set()
         latest_error: Dict[str, str] = {}
+        latest_status: Dict[str, str] = {}
         for i in range(0, len(source_ids), self.IN_CHUNK):
             batch = source_ids[i:i + self.IN_CHUNK]
             ph = ",".join("?" for _ in batch)
@@ -1628,11 +1636,17 @@ class SourceStore:
             ).fetchall():
                 kg_extracted_ids.add(r["source_id"])
             for r in db.execute(
-                f"SELECT source_id, error_message FROM extraction_runs "
+                f"SELECT source_id, status, error_message FROM extraction_runs "
                 f"WHERE source_id IN ({ph}) ORDER BY source_id, created_at DESC",
                 batch,
             ).fetchall():
-                latest_error.setdefault(r["source_id"], r["error_message"] or "")
+                # 同一行的两列一起 setdefault:哪一行算「最近一次」由上面的 ORDER BY
+                # 决定(tie-break 等价性见本方法 docstring),status 只是搭同一趟车,
+                # 不新增查询、也不改变选中的是哪一行。
+                if r["source_id"] in latest_error:
+                    continue
+                latest_error[r["source_id"]] = r["error_message"] or ""
+                latest_status[r["source_id"]] = r["status"] or ""
 
         def _warning(source_id: str) -> Optional[str]:
             # 派生规则只有一份(app.models.sources),这里只负责取到「最近一次抽取的
@@ -1670,6 +1684,9 @@ class SourceStore:
                 extraction_warning=_warning(sid),
                 parse_quality_warning=has_pdf_python_fallback_warning(row["error_message"]),
                 kg_extracted=sid in kg_extracted_ids,
+                kg_analyzed_empty=kg_analyzed_without_objects(
+                    latest_status.get(sid, ""), latest_error.get(sid, "")
+                ),
                 authors=[a["name"] for a in pm["authors"]] if pm else [],
                 pub_year=pm["pub_year"] if pm else None,
                 venue=pm["venue"] if pm else None,
@@ -1684,12 +1701,28 @@ class SourceStore:
         `windows_failed=N/T` token rather than stored on the source row —
         the parsing itself lives in `app.models.sources.extraction_warning_text`
         (single implementation); this method only fetches its input."""
+        return extraction_warning_text(self.latest_run_state(db, source_id)[1])
+
+    @staticmethod
+    def latest_run_state(
+        db: sqlite3.Connection, source_id: str
+    ) -> "tuple[str, str]":
+        """最近一次抽取记录的 ``(status, error_message)``,两个派生字段的共同输入。
+
+        抽出来是因为 ``extraction_warning`` 与 ``kg_analyzed_empty`` 问的是**同一行**:
+        各读一次就是把 get_source 的点查从 4 条变成 5 条,而它们的答案本来就来自同一次
+        读取。返回值一律是字符串(无记录 → ``("", "")``),让两个派生谓词都不必再判 None。
+
+        刻意不加 ``run_type='kg'`` 过滤:``extraction_runs`` 只有一个写者、且写死
+        ``'kg'``,而批量兄弟 ``sources_from_rows`` 的 tie-break 等价性论证(见其
+        docstring)建立在两侧走同一条索引、同一份 WHERE 之上——只在一侧加过滤会让
+        那段论证失效。将来真出现第二种 run_type 时,两处必须一起加。"""
         run = db.execute(
-            "SELECT error_message FROM extraction_runs WHERE source_id=? "
+            "SELECT status, error_message FROM extraction_runs WHERE source_id=? "
             "ORDER BY created_at DESC LIMIT 1", (source_id,)).fetchone()
         if run is None:
-            return None
-        return extraction_warning_text(run["error_message"])
+            return ("", "")
+        return (str(run["status"] or ""), str(run["error_message"] or ""))
 
     @staticmethod
     def meta_source_rows(

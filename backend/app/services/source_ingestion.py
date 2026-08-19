@@ -19,6 +19,7 @@ from app.core.llm import cap_kwargs
 from app.models.sources import (
     AddUrlSourcesResult,
     HIDDEN_SYNTHETIC_SOURCE_TYPES,
+    KG_RUN_MESSAGE_OBJECTS_PREFIX,
     PDF_PYTHON_FALLBACK_WARNING_PREFIX,
     RejectedUrl,
     SourceDetail,
@@ -1987,7 +1988,8 @@ class SourceIngestionService:
             self.finish_extraction_run(
                 run_id,
                 "completed",
-                f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} "
+                f"{KG_RUN_MESSAGE_OBJECTS_PREFIX}{n_obj} relations={n_rel} "
+                f"doc_type={kg_doc_type} "
                 f"windows_failed={fw}/{tw} windows_skipped={graph.windows_skipped} "
                 f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped} "
                 f"completion_mode={completion_stats.get('mode', 'off')} "

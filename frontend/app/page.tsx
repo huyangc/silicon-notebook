@@ -131,6 +131,7 @@ import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElementsPage, getNotebookSource, getNotebookSourceElementsPage, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
+import { sourceKgBadge } from "./source-kg-badge.ts";
 import { classifyStagedFiles, compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile } from "./source-upload.ts";
 import { emptyStagedList, mergeStagedFiles, type StagedList } from "./staged-files.ts";
 import {
@@ -7129,6 +7130,7 @@ export default function Home() {
                   ) : (
                     sources.map((source) => {
                       const deletingSource = deletingSourceIds.has(source.id);
+                      const kgBadge = sourceKgBadge(source);
                       return (
                       <div
                         key={source.id}
@@ -7171,10 +7173,10 @@ export default function Home() {
                         <div className="source-row-actions">
                           {currentNotebook?.kg_ready && (
                             <span
-                              className={`source-kg-badge${source.kg_extracted ? " source-kg-badge--in" : ""}`}
-                              title={source.kg_extracted ? "已分析：该来源已完成知识图谱分析" : "待分析：该来源尚未加入知识图谱"}
+                              className={kgBadge.className}
+                              title={kgBadge.title}
                             >
-                              {source.kg_extracted ? "已分析" : "待分析"}
+                              {kgBadge.label}
                             </span>
                           )}
                           {source.agent_created && (

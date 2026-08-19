@@ -60,7 +60,21 @@ def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
         "OR COALESCE(latest_kg.status,'completed')!='completed' "
         "OR COALESCE(latest_kg.error_message,'') "
         "~ 'windows_failed=[1-9][0-9]*/[0-9]+' "
-        "OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0)",
+        "OR strpos(COALESCE(latest_kg.error_message,''),'retry_incomplete=1')>0) "
+        # 「已分析、但这篇里没有可整理的知识」不是待分析。判据的权威表述是
+        # ``app.models.sources.kg_analyzed_without_objects``,这里是它的 PG 方言镜像
+        # (本位置必须是一条 COUNT);两者由
+        # ``backend/tests/test_kg_empty_extraction_marker.py`` 逐用例对账,SQLite 侧
+        # 同款镜像见 ``sqlite/knowledge_counts_cache.py``。
+        #
+        # 这里**零额外探测**:latest_kg 已是上面那个 LATERAL ... LIMIT 1 的结果,状态与
+        # 消息都在手,新条件只是对同一行再加两个判断。没有第三条 retry_incomplete 排除,
+        # 理由同 SQLite 侧:partial 重试的消息以 "partial KG retry incomplete;" 起头,与
+        # ``kg objects=0 `` 前缀互斥。
+        "AND NOT (COALESCE(latest_kg.status,'')='completed' "
+        "AND COALESCE(latest_kg.error_message,'') LIKE 'kg objects=0 %' "
+        "AND COALESCE(latest_kg.error_message,'') "
+        "!~ 'windows_failed=[1-9][0-9]*/[0-9]+')",
         (notebook_id,),
     ).fetchone()
     return int(row["c"])
