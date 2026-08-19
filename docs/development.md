@@ -305,7 +305,7 @@ is `--database-url`, and both audit paths are transaction/read-only. The audit
 exits nonzero while any visible source is missing, running, failed,
 incomplete, or fails an integrity reconciliation.
 
-PostgreSQL migration v28 is the current paired
+PostgreSQL migration v30 is the current paired
 business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
@@ -316,7 +316,7 @@ batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
 copy as explicit ordinals and their catalog-resolved identity sequences reseed,
 and the final forward checkpoint advances atomically to snapshot H0 after the
-v28 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
+v30 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
 owner-only real directory and exclusive 0600 temporary creation. COPY fully
 qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
 capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
@@ -326,7 +326,7 @@ across open and immediately before publication/PG commit. JSONB prefix proof
 normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
 SQL numeric columns remain type-distinct. It uses bounded
 named server cursors plus statement timeouts/cancellation polls, and performs
-full initial/final migration-derived validation of v28 tables, columns,
+full initial/final migration-derived validation of v30 tables, columns,
 constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
 is intentionally lightweight. The final SQLite fence is acquired only after
 the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
