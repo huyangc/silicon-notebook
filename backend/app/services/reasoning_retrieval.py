@@ -235,7 +235,11 @@ def _cached_experiences(store) -> List[dict]:
     返回的列表**只读**:多个 run 共享同一份对象,任何原地修改都会污染别的 run。
     下游 ``select_experiences``/``render_experience_block`` 都是纯函数。
     """
-    signal = tuple(store.version_signal())
+    # codex #524 R7 P2:缓存键含 store 身份(id())——同进程多 runtime(测试、
+    # 评估、热切换)下,两个不同库的 (行数, 最新时间) 完全可能相同,只比签名会
+    # 把 A 库的打法注进 B 库的 run。id() 复用风险由签名兜底:旧 store 被回收后
+    # 同 id 的新 store 还需签名逐位相同才会误命中,而那正是"同一份内容"。
+    signal = (id(store), *tuple(store.version_signal()))
     with _EXPERIENCE_CACHE_LOCK:
         if _EXPERIENCE_CACHE.get("signal") == signal:
             return _EXPERIENCE_CACHE.get("entries")  # type: ignore[return-value]

@@ -2145,3 +2145,34 @@ def test_the_runtime_completion_lambda_accepts_the_coordinator_arity():
         "runtime 的 note_ask_completed 接线 lambda 必须接受 mode_id——"
         "少参的 TypeError 会被协调器 fail-open 吞掉,两条后台链静默死亡"
     )
+
+
+def test_the_usage_section_total_respects_the_documented_cap():
+    """codex #524 R7 P2:报告段余量按已渲染全部文本算——ask 半吃满 + 摘要段
+    满载时,整段(含表头)不得实质超过 3000 上限(容差=一行截断粒度)。"""
+    from app.services.agent_profile_job import (
+        AGENT_PROFILE_USAGE_SECTION_MAX_CHARS,
+        UsageStats,
+        render_usage_block,
+    )
+
+    asks = tuple(
+        {"question": "问" * 118, "status": "done",
+         "steps": ({"step_type": "retrieve", "count": 0},)}
+        for _ in range(40)
+    )
+    reports = tuple(
+        {"question": "报" * 118, "created_at": "2026-08-19T00:00:00+00:00",
+         "attempts": ({"query": "方" * 118, "failed": False},) * 4}
+        for _ in range(10)
+    )
+    stats = UsageStats(
+        asks=asks, failed_asks=0, zero_hit_steps=40, total_steps=40,
+        empty_search_summaries=tuple("查" * 118 for _ in range(12)),
+        reports=reports,
+    )
+    block = render_usage_block(stats)
+    assert len(block) <= AGENT_PROFILE_USAGE_SECTION_MAX_CHARS + 400, (
+        f"usage 段 {len(block)} 字符,远超文档承诺的 "
+        f"{AGENT_PROFILE_USAGE_SECTION_MAX_CHARS}(+一行容差)"
+    )
