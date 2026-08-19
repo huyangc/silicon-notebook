@@ -69,6 +69,15 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
 # *process* state (one chain's run status plus its threshold counter), the same
 # reason `catalog_jobs`/`catalog_candidates` are absent from this snapshot on
 # the SQLite side.
+#
+# `retrieval_experiences` (Agentic Memory P2, schema v31) is absent for a
+# structurally different reason and is NOT a decision this snapshot could make
+# either way: it is deployment-GLOBAL — no `notebook_id` column, no owner
+# column — so every query in this list is built on a predicate it does not
+# have. Deep copy cannot reach it, exactly as it cannot reach
+# `groups`/`group_members`. Its rows are general tactics for HOW to search
+# rather than anything belonging to a notebook, so a copy inherits them by
+# simply living in the same deployment.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id=%s"),
     ("sources", "SELECT * FROM sources WHERE notebook_id=%s"),

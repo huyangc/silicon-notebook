@@ -23,6 +23,8 @@ from app.repositories.ports import (
     project_ask_row,
     project_report_attempt,
     project_report_row,
+    project_run_row,
+    project_run_step,
     project_trace_step,
 )
 from app.repositories.postgres._store_utils import (
@@ -401,6 +403,45 @@ class AskStateStore:
             if step is not None and target is not None:
                 target["steps"].append(step)
         return asks
+
+    def recent_completed_ask_runs(
+        self, *, job_limit: int, step_limit: int
+    ) -> list[dict]:
+        """PostgreSQL mirror of the SQLite method — see that docstring for the
+        contract (no user/notebook predicate BY DESIGN, safety carried by the
+        projection, ``status = 'done'`` only, bounded twice).
+
+        The one backend difference: ``step_json`` is ``jsonb`` here and TEXT on
+        SQLite, so it goes through ``json_value`` before the shared
+        ``project_run_step`` — which is exactly why that narrowing lives in
+        ``ports.py`` once instead of being written twice.
+        """
+        job_limit = max(1, int(job_limit))
+        step_limit = max(1, int(step_limit))
+        with self.database.connect() as db:
+            job_rows = db.execute(
+                "SELECT id, mode FROM ask_jobs WHERE status = 'done' "
+                "ORDER BY created_at DESC, id DESC LIMIT %s",
+                (job_limit,),
+            ).fetchall()
+            runs = [project_run_row(row["id"], row["mode"]) for row in job_rows]
+            if not runs:
+                return []
+            by_run = {run["run_id"]: run for run in runs}
+            placeholders = ",".join("%s" for _ in by_run)
+            step_rows = db.execute(
+                "SELECT t.job_id AS job_id, t.step_json AS step_json "
+                "FROM ask_trace_steps t JOIN ask_jobs j ON j.id = t.job_id "
+                f"WHERE t.job_id IN ({placeholders}) "
+                "ORDER BY j.created_at DESC, j.id DESC, t.seq ASC LIMIT %s",
+                (*by_run.keys(), step_limit),
+            ).fetchall()
+        for row in step_rows:
+            step = project_run_step(json_value(row["step_json"], None))
+            target = by_run.get(str(row["job_id"]))
+            if step is not None and target is not None:
+                target["steps"].append(step)
+        return runs
 
     def recent_user_report_traces(
         self,

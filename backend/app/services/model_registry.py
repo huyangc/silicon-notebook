@@ -75,6 +75,7 @@ _WORKLOAD_LABELS = MappingProxyType({
     "knowhow_reformat": "经验格式整理",
     "knowhow_complete": "经验空列补全",
     "agent_profile_consolidate": "库理解整理",
+    "retrieval_experience_distill": "检索打法总结",
     "retrieval_query_embedding": "检索查询向量",
     "source_element_embedding": "来源元素向量",
     "chunk_embedding": "来源分块向量",
@@ -128,6 +129,10 @@ WORKLOADS = workload_map(
         # deterministic threshold and never by a user waiting on a response —
         # "background", the same priority class as the other write-path jobs.
         "agent_profile_consolidate": "background",
+        # Agentic Memory P2: one bounded call per distillation batch,
+        # fired by a deterministic global threshold and never by a user
+        # waiting on a response — "background", like its P1 sibling.
+        "retrieval_experience_distill": "background",
     },
     embedding={
         "retrieval_query_embedding": "interactive",

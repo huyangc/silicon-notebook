@@ -199,6 +199,7 @@ def test_packaged_index_migration_phases_are_exact():
         (29, "agent_profile"),
         (30, "conversation_share"),
         (31, "agent_profile_claim_token"),
+        (32, "retrieval_experiences"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:

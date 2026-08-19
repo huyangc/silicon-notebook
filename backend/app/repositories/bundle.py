@@ -27,6 +27,7 @@ from app.repositories.ports import (
     RepositoryDatabasePort,
     RepositorySeams,
     ReportStorePort,
+    RetrievalExperienceStorePort,
     SharingStorePort,
     SourceStorePort,
     UnifiedKgStorePort,
@@ -58,6 +59,7 @@ class PersistenceBundle(Protocol):
     unified_kg: UnifiedKgStorePort
     model_status: ModelStatusStorePort
     agent_profile: AgentProfileStorePort
+    retrieval_experiences: RetrievalExperienceStorePort
 
 
 class PersistenceBundleFactory(Protocol):

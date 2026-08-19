@@ -1112,8 +1112,35 @@ class RepositoryFacade:
         """
         return self._runtime.agent_profile_jobs
 
+    @property
+    def retrieval_experiences(self):
+        """Agentic Memory P2's deployment-GLOBAL retrieval-experience store
+        (T5).
 
+        One hop to the runtime-owned ``RetrievalExperienceStorePort`` seat,
+        the same shape and the same reasoning as ``agent_profile`` above:
+        method names like ``read_all``/``count``/``upsert_experience`` are far
+        too generic to flatten onto a facade shared with every other domain.
 
+        ⚠ Read that port's docstring before adding a consumer. It is the only
+        store here with no tenancy column at all, which means callers get NO
+        help from a predicate: what may become a row is decided one layer up,
+        by ``retrieval_experience_projection``. A consumer that writes rows
+        assembled from anywhere else has quietly removed the whole guarantee.
+        """
+        return self._runtime.retrieval_experiences
+
+    @property
+    def retrieval_experience_jobs(self):
+        """Agentic Memory P2 的检索打法蒸馏 service(T5)——一跳委托到中性 runtime 上
+        的那**一个**实例,与 ``agent_profile_jobs`` 同一条理由落在 runtime;单例在
+        这里是**语义要求**且比它更硬:阈值计数与单飞都是纯**进程内**状态,分身出第二
+        个实例就是两个各自计到一半的计数器加两条可以同时开跑的链。
+
+        今天没有消费方(触发点 ask_execution 走的是 runtime 自己的那一份),这个属性
+        是为 T6 的注入面与将来可能的手动「立即总结」入口留的同一条一跳。
+        """
+        return self._runtime.retrieval_experience_jobs
 
     def _count(self, db: object, table: str, column: str, value: str) -> int:
         return self._runtime.notebook_summaries.count(db, table, column, value)

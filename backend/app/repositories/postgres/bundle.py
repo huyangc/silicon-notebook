@@ -30,6 +30,9 @@ from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.notebook_store import NotebookStore
 from app.repositories.postgres.query_store import QueryStore
 from app.repositories.postgres.report_store import ReportStore
+from app.repositories.postgres.retrieval_experience_store import (
+    RetrievalExperienceStore,
+)
 from app.repositories.postgres.sharing_store import SharingStore
 from app.repositories.postgres.source_store import SourceStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
@@ -150,6 +153,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     unified_kg: UnifiedKgStore
     model_status: ModelStatusStore
     agent_profile: AgentProfileStore
+    retrieval_experiences: RetrievalExperienceStore
 
 
 class PostgresPersistenceBundleFactory:
@@ -216,6 +220,11 @@ class PostgresPersistenceBundleFactory:
             agent_profile = AgentProfileStore(
                 database, new_id=seams.new_id, now=seams.now
             )
+            # No ``new_id`` seam: every id in retrieval_experiences is
+            # content-addressed and computed by the service layer.
+            retrieval_experiences = RetrievalExperienceStore(
+                database, now=seams.now
+            )
             return PostgresPersistenceBundle(
                 database=database,
                 identity=identity,
@@ -240,6 +249,7 @@ class PostgresPersistenceBundleFactory:
                 unified_kg=unified_kg,
                 model_status=model_status,
                 agent_profile=agent_profile,
+                retrieval_experiences=retrieval_experiences,
             )
         except BaseException:
             database.close()

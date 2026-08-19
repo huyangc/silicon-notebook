@@ -2667,6 +2667,38 @@ class AskStateStorePort(Protocol):
     # ``project_trace_step``: what comes back is the member's own question text
     # plus, per step, the action type / human summary / duration / one count.
     # Never an answer body, never Memory content, never evidence text.
+    def recent_completed_ask_runs(
+        self, *, job_limit: int, step_limit: int
+    ) -> list[dict]: ...
+    # ⚠ Agentic Memory P2 (T5) — the DELIBERATELY UNSCOPED read on this port,
+    # and the only one. It takes no ``notebook_id`` and no ``user_id`` because
+    # it feeds the deployment-GLOBAL retrieval-experience library: what that
+    # library learns is "in this shape of question, this retrieval action pays
+    # off", a statement about tactics that would be worthless if it could only
+    # be drawn from one person's runs.
+    #
+    # It therefore CANNOT borrow the safety argument of the two reads above,
+    # and must not be mistaken for a relative of them. Theirs is a predicate in
+    # the SQL text. This one's is the PROJECTION: the rows come back through
+    # ``project_run_row``/``project_run_step``, which keep an opaque run id, a
+    # closed-vocabulary engine mode, per step an action type / one count / one
+    # duration, and — from the ``intent`` step alone — a situation made of
+    # bools, small ints and closed enum values. No question, no summary, no
+    # ``created_by``, no ``notebook_id``, no timestamp. Nothing that comes out
+    # of here can identify a person, a library or a topic, which is why it is
+    # safe to aggregate across all of them.
+    #
+    # ⚠ It must never appear in ANY of the agent-profile chains' port
+    # allowlists. Both of those chains are defined by what they may NOT reach —
+    # the base chain by "no member's usage at all", the overlay chain by "no
+    # member's usage but its own owner's" — and a read with no user predicate
+    # violates both by construction. ``test_agent_profile_isolation_guard.py``
+    # pins that as a reverse guard (``GLOBAL_TRACE_READ_METHODS``).
+    #
+    # Bounded by BOTH arguments (``job_limit`` most-recent completed asks,
+    # ``step_limit`` trace rows across them), exactly like
+    # ``recent_user_ask_traces``, and for the same reason: one exhaustive
+    # reasoning ask can carry a hundred steps.
     def recent_user_report_traces(
         self,
         notebook_id: str,
@@ -3888,6 +3920,120 @@ def project_trace_step(step: object) -> dict | None:
     }
 
 
+#: Agentic Memory P2 (T5): the CLOSED vocabularies the global experience
+#: library's "situation" side may take values from. They live here, beside
+#: ``project_run_step`` which enforces them, rather than in the service module
+#: that consumes them, for the same reason ``project_trace_step`` lives here:
+#: this is the one narrowing both backends share, and a second spelling of a
+#: narrowing rule is a spelling that can silently widen on one side only.
+#: ``retrieval_experience_projection.py`` imports these tuples rather than
+#: restating them.
+#:
+#: Anything outside a vocabulary collapses to ``SITUATION_UNKNOWN`` — never to
+#: the raw value. That is what makes "no free text reaches an experience entry"
+#: a property of this function rather than of the caller's diligence: a model
+#: that writes an unexpected ``result_scope`` into its intent contract cannot
+#: get that string past this point.
+SITUATION_UNKNOWN = "unknown"
+SITUATION_ASK_MODES = ("chunk", "reasoning", "graph")
+SITUATION_RESULT_SCOPES = ("ranked", "complete", "aggregate", "hybrid")
+SITUATION_RETRIEVAL_EFFORTS = (
+    "overview", "standard", "deep", "thorough", "exhaustive",
+)
+
+
+def _closed_value(raw: object, vocabulary: tuple[str, ...]) -> str:
+    text = str(raw or "").strip().lower()
+    return text if text in vocabulary else SITUATION_UNKNOWN
+
+
+def _list_len(raw: object) -> int:
+    return len(raw) if isinstance(raw, (list, tuple)) else 0
+
+
+def project_run_step(step: object) -> dict | None:
+    """Narrow ONE persisted trace step for the GLOBAL experience library.
+
+    Agentic Memory P2 (T5). Strictly narrower than ``project_trace_step``,
+    which it delegates to, and the difference is the entire privacy argument of
+    the feature: ``summary`` is DROPPED. That field is a human sentence written
+    per step, and several emitters interpolate model text or an error string
+    into it. It is fine in the agent-profile overlay sample — that block is
+    readable only by the member whose run produced it — and it is unacceptable
+    here, where the resulting entry is visible to every user of the deployment.
+
+    What survives is the action type, one count and one duration: enough to say
+    "this action ran and came back empty", which is exactly the half of the
+    outcome signal P2 keeps at step granularity.
+
+    The ``intent`` step additionally contributes the run's SITUATION, and this
+    is the only place any of it is read. Every value is either a ``bool``, an
+    ``int`` count, or a member of a closed vocabulary above — the step's
+    ``resolved_question``, its per-topic questions and its ``assumptions`` /
+    ``expected_output`` prose are not read at all, and the two enumerated
+    fields cannot pass an unexpected string through (see ``_closed_value``).
+    Entity and topic LISTS contribute their LENGTH only; the service layer
+    buckets those into coarse bands, and their contents never leave this
+    function.
+    """
+    base = project_trace_step(step)
+    if base is None:
+        return None
+    projected = {
+        "step_type": base["step_type"],
+        "duration_ms": base["duration_ms"],
+        "count": base["count"],
+    }
+    if projected["step_type"] != "intent":
+        return projected
+    if isinstance(step, (str, bytes, bytearray)):
+        try:
+            step = json.loads(step)
+        except (TypeError, ValueError):
+            return projected
+    if not isinstance(step, Mapping):
+        return projected
+    detail = step.get("detail")
+    if not isinstance(detail, Mapping):
+        return projected
+    projected["situation"] = {
+        "result_scope": _closed_value(
+            detail.get("result_scope"), SITUATION_RESULT_SCOPES
+        ),
+        "retrieval_effort": _closed_value(
+            detail.get("retrieval_effort"), SITUATION_RETRIEVAL_EFFORTS
+        ),
+        "completeness_required": bool(detail.get("completeness_required")),
+        "entity_count": _list_len(detail.get("entities")),
+        "topic_count": _list_len(detail.get("mandatory_topics")),
+        "has_constraints": _list_len(detail.get("constraints")) > 0,
+        "has_exclusions": _list_len(detail.get("excluded_topics")) > 0,
+    }
+    return projected
+
+
+def project_run_row(job_id: object, mode: object) -> dict:
+    """One sampled completed ask, for the GLOBAL experience library.
+
+    Agentic Memory P2 (T5). Compare ``project_ask_row`` directly: that one
+    keeps the member's own question, their job status and a timestamp, because
+    its product is readable only by that member. This one keeps an OPAQUE run
+    id and a closed-vocabulary engine mode, and nothing else — no question, no
+    ``created_by``, no ``notebook_id``, no timestamp.
+
+    The run id is bookkeeping, not content: it is what lets one entry's
+    provenance list de-duplicate runs it has already counted, which is why the
+    distillation needs no cursor table. It never reaches a prompt (see
+    ``ObservedRun`` in ``retrieval_experience_projection.py``) and it is never
+    stored beside anything that would say whose run it was.
+    """
+    return {
+        "run_id": str(job_id or ""),
+        "mode": _closed_value(mode, SITUATION_ASK_MODES),
+        "steps": [],
+    }
+
+
 def project_ask_row(
     job_id: object, question: object, status: object, created_at: object
 ) -> dict:
@@ -4253,3 +4399,149 @@ class AgentProfileStorePort(Protocol):
         the row count deleted (0 or 1 — the primary key is
         ``(notebook_id, owner_id)``)."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# Agentic Memory P2 (A / T5): the deployment-GLOBAL retrieval-strategy
+# experience library.
+# ---------------------------------------------------------------------------
+
+#: Hard ceiling on how many experience entries the deployment keeps. When the
+#: table grows past it, the distillation run evicts ascending by
+#: ``(adopted, support, updated_at)`` — unused entries first, then thinly
+#: supported ones, and only then by age.
+#:
+#: The number is small on purpose and is a QUALITY bound, not a storage one.
+#: Every read of this table is a bounded full scan (there is no index, and no
+#: query narrows it), and the injection side scores every row against the
+#: current situation in memory; a library of tens of thousands of entries would
+#: not make the advice better, it would make the top-k a lottery among near
+#: duplicates while costing a scan on a hot path.
+RETRIEVAL_EXPERIENCE_MAX_ENTRIES = 300
+
+#: How many opaque run ids ONE entry retains as provenance. This set is what
+#: makes distillation idempotent: a run id already listed does not increment
+#: ``support`` again, so re-reading an overlapping batch cannot inflate the
+#: evidence behind an entry.
+#:
+#: ⚠ Its relationship with ``RETRIEVAL_EXPERIENCE_BATCH_RUNS`` is an
+#: INVARIANT, not a coincidence: one batch must never carry more runs than one
+#: entry can remember, or the ids evicted from the tail come back in the next
+#: overlapping batch and get counted a second time. Pinned by
+#: ``test_retrieval_experience_job.py``.
+RETRIEVAL_EXPERIENCE_PROVENANCE_MAX = 60
+
+#: How many completed asks ONE distillation batch reads. Bounded twice, like
+#: the agent-profile trace sample: this count, and the step ceiling below (one
+#: exhaustive reasoning ask can carry a hundred trace steps, so "N asks" alone
+#: is not a bound).
+RETRIEVAL_EXPERIENCE_BATCH_RUNS = 40
+RETRIEVAL_EXPERIENCE_BATCH_STEPS = 600
+
+#: Longest rationale accepted from the distillation model. Entries ride into a
+#: bounded prompt block on the injection side, and a rationale is one sentence
+#: of advice about how to search — not an explanation. Over-length is a
+#: REJECTION of that one entry rather than a silent clip: a truncated sentence
+#: of advice reads as confident and complete while having lost its qualifier.
+RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS = 160
+
+
+class RetrievalExperienceStorePort(Protocol):
+    """Durable rows for ``retrieval_experiences`` — Agentic Memory P2's
+    deployment-GLOBAL retrieval-strategy experience library.
+
+    ⚠ This is the only store in the repository with NO tenancy column at all:
+    no ``notebook_id``, no ``created_by``, no ``owner_id``. That is the point
+    of the table and also the reason its safety argument has to be a different
+    one from every other store here. Everywhere else, isolation is a predicate
+    in the SQL text (``memory_items.created_by``, ``agent_notebook_profile``'s
+    ``owner_id IN ('', ?)``). There is no predicate to write here, so the
+    isolation is instead STRUCTURAL and lives one layer up, in what may become
+    a row at all: the distillation input is projected to
+    ``RunObservation`` — a frozen dataclass whose every field is an ``int``, a
+    ``bool`` or a closed ``Literal``, with no free-text field anywhere in its
+    reachable shape — so the model that writes ``rationale`` has never seen a
+    question, an answer, a document title or an id. See
+    ``app/services/retrieval_experience_projection.py``.
+
+    Every read here is bounded by construction: a primary-key point lookup, or
+    a full scan over a table whose row count is hard-capped at
+    ``RETRIEVAL_EXPERIENCE_MAX_ENTRIES`` (the injection side scores rows in
+    memory rather than asking the database to rank them — the situation
+    similarity is a set overlap over closed enum values, which no index can
+    answer).
+    """
+
+    def read_all(self, limit: int) -> list[dict]: ...
+    def read_experience(self, experience_id: str) -> dict | None: ...
+    def upsert_experience(
+        self,
+        experience_id: str,
+        *,
+        situation: Mapping[str, Any],
+        action: str,
+        polarity: str,
+        rationale: str,
+        provenance: Sequence[str],
+        provenance_max: int,
+        replace_conclusion: bool,
+    ) -> dict:
+        """Create or merge ONE entry, keyed by its content-addressed id.
+
+        ⚠ ``experience_id`` is computed by the CALLER (from ``situation`` and
+        ``action``, via ``retrieval_experience_projection.experience_id``) and
+        is never re-derived here. It is passed in rather than computed inside
+        so the hash function has exactly one definition — the same one the
+        injection side and the merge tool reason about.
+
+        ``situation`` is serialised here rather than by the caller, with sorted
+        keys, so both backends store the same canonical text and a row read
+        back re-canonicalises to the identical hash input. PostgreSQL stores it
+        as ``jsonb``, which does not preserve key order or whitespace; sorting
+        on the way in is what keeps "the id can be re-verified from the row"
+        true on both backends.
+
+        Merge semantics, all inside ONE write transaction:
+
+        * ``support`` grows by the number of ``provenance`` run ids that the
+          stored provenance list does not ALREADY contain. That de-duplication
+          is the whole reason distillation needs no cursor table: re-reading an
+          overlapping batch of runs cannot inflate an entry's evidence.
+        * the retained provenance list keeps the newest ``provenance_max`` ids.
+        * ``replace_conclusion`` decides whether the model's new
+          ``polarity``/``rationale`` overwrite the stored ones (a Mem0-style
+          UPDATE) or only the counters move (an ADD that landed on an entry
+          that already existed).
+        * ``updated_at`` moves ONLY when something actually changed. An
+          otherwise-empty merge must not refresh the timestamp, because
+          ``updated_at`` is the last tie-break of the eviction ordering — an
+          entry that keeps being re-observed with no new runs and no new
+          conclusion would otherwise be immortal.
+        """
+        ...
+
+    def note_adopted(self, experience_ids: Sequence[str], delta: int = 1) -> int:
+        """Increment ``adopted`` for the entries a run actually acted on.
+
+        No consumer in T5 — the injection side (T6) is the only caller there
+        will ever be. It ships with the store rather than later because
+        ``adopted`` is the FIRST key of the eviction ordering: without a writer
+        the column is constantly zero, and eviction silently degrades to
+        ``(support, updated_at)``, which is a different policy from the one the
+        migration documents. Returns the row count updated.
+        """
+        ...
+
+    def evict_to_limit(self, max_entries: int) -> int:
+        """Trim the table to ``max_entries`` rows, ascending by
+        ``(adopted, support, updated_at, id)``; returns the row count deleted.
+
+        ``id`` is the final tie-break so the deletion is deterministic even
+        when three entries were written in the same second by the same batch
+        (SQLite's clock is second-granular — the ``memory_revisions`` lesson).
+        Without it, "which of the tied entries survived" would differ between
+        two runs over identical data, and between the two backends.
+        """
+        ...
+
+    def count(self) -> int: ...

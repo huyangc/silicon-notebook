@@ -1445,3 +1445,96 @@ def agent_profile_overlay_prompt(
         f"{usage_block}\n\n"
         f"{current_block}"
     )
+
+
+#: Agentic Memory P2 (T5): the distillation reply. Server-generated keys only —
+#: the model NAMES a situation by its index (``s0``, ``s1``) rather than
+#: constructing one, exactly like the evidence-key discipline elsewhere in this
+#: codebase. That is not a convenience: a model-constructed situation map would
+#: have to be validated against the closed registry anyway, and any value it
+#: got wrong would be an entry silently filed under a shape of question that
+#: never occurs. Naming an index makes "the situation is one the server
+#: observed" true by construction.
+RETRIEVAL_EXPERIENCE_SCHEMA_HINT = (
+    '{"entries":[{"op":"ADD","situation":"s0","action":"exact_lookup",'
+    '"polarity":"bad","rationale":""},{"op":"NOOP","situation":"s1"}]}'
+)
+
+
+def retrieval_experience_prompt(
+    observation_block: str,
+    existing_block: str,
+    *,
+    actions: "tuple[str, ...]",
+    rationale_max_chars: int,
+) -> str:
+    """The distillation prompt for the deployment-GLOBAL experience library.
+
+    ⚠ Read the two input blocks before changing anything here: they contain no
+    prose at all. Every line is counts and closed vocabulary words — question
+    shapes as enum values, retrieval actions as fixed identifiers, invocation
+    and empty-result tallies as integers. The model has never seen a question,
+    an answer, a document title, a notebook name or an id, and cannot have,
+    because ``retrieval_experience_projection.RunObservation`` has no free-text
+    field anywhere in its reachable shape.
+
+    That is what makes ``rationale`` safe to accept as free text: it is written
+    by a model whose entire input was numbers and enum words, so it is
+    structurally incapable of carrying a topic, a person or a library into a
+    table every user reads. The guarantee is the INPUT shape, never an
+    instruction in this prompt — an instruction would be exactly the
+    "ask the model to anonymise" pattern this design rejected.
+
+    Three rules carry the design:
+
+    * **NOOP is the expected answer most of the time.** Forty runs of ordinary
+      searching usually establish nothing new. A model told to produce entries
+      will manufacture them, and a manufactured entry then steers real
+      retrieval — worse than an empty library, because it looks like evidence.
+    * **One entry says one thing about one action.** An entry that hedges
+      across several actions cannot be scored, cannot be retired, and cannot be
+      compared with the entry that contradicts it.
+    * **Failures outrank successes.** They are also the only signal this
+      feature observes per action: which actions came back empty is counted per
+      step, while "the answer was well supported" is only known for the run as
+      a whole (see ``RunObservation``'s docstring). Saying so plainly here
+      stops the model from reading a run-level citation count as a verdict on
+      whichever action it happens to be writing about.
+    """
+    action_list = ", ".join(actions)
+    return (
+        "You maintain a small library of RETRIEVAL TACTICS for a document "
+        "question-answering system. Each entry says: in one shape of question, "
+        "one retrieval action is or is not worth reaching for.\n"
+        "You are given aggregated statistics from recently completed searches, "
+        "grouped by question shape, plus the entries the library already holds "
+        "for similar shapes. Decide what — if anything — the library should "
+        "learn.\n"
+        "Rules:\n"
+        "1. NOOP is the normal answer. Only record something when the numbers "
+        "show a CLEAR and REPEATED pattern across several runs. One run is "
+        "never a pattern, and an invented tactic misdirects every later "
+        "search.\n"
+        "2. One entry is about exactly ONE action for ONE situation. Never "
+        "hedge across actions in a single entry.\n"
+        "3. Prefer what FAILED. 'This action keeps coming back empty in this "
+        "shape of question' is the most useful thing you can record. Note that "
+        "empty-result counts are per action, while the citation count is for "
+        "the whole run — never attribute a run's success or failure to one "
+        "particular action.\n"
+        "4. op is ADD for a conclusion the library does not hold yet, UPDATE to "
+        "revise the polarity or wording of an entry listed below, NOOP to leave "
+        "a situation alone. UPDATE only when the new numbers actually "
+        "contradict or sharpen the existing entry.\n"
+        f"5. situation must be one of the ids given below (s0, s1, ...). action "
+        f"must be exactly one of: {action_list}. polarity is 'good' or 'bad'.\n"
+        f"6. rationale is ONE short line, at most {rationale_max_chars} "
+        "characters, saying WHEN to reach for the action or avoid it. No "
+        "Markdown, no line breaks, no numbers copied out of the statistics. "
+        "Write in the language the existing entries use; default to Chinese.\n"
+        "7. Say nothing about which documents, libraries or people were "
+        "involved: you have not been told, and a guess would be wrong.\n"
+        f"Return JSON only, matching: {RETRIEVAL_EXPERIENCE_SCHEMA_HINT}\n\n"
+        f"{observation_block}\n\n"
+        f"{existing_block}"
+    )

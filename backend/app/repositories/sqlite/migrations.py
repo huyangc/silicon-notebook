@@ -57,7 +57,10 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # GENERATION. One nullable-free TEXT column with an empty default; existing
 # rows keep '' and the startup sweep force-settles every leftover
 # queued/running row anyway, so no backfill is needed.
-SCHEMA_VERSION = 53
+# v54 adds retrieval_experiences — Agentic Memory P2's DEPLOYMENT-GLOBAL
+# retrieval-strategy experience library. One synthesised content-addressed
+# TEXT primary key, no notebook_id, no owner, no foreign key.
+SCHEMA_VERSION = 54
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2813,6 +2816,81 @@ class SqliteMigrator:
             self.add_column_if_missing(
                 db, "agent_profile_jobs", "claim_token",
                 "TEXT NOT NULL DEFAULT ''",
+            )
+
+    def _migration_54(self) -> None:
+        """Agentic Memory P2 (A/T5): 部署级**全局**的检索策略经验库。
+
+        一条经验 = 「在**这类问题形态**下,**这个检索动作**值得/不值得用」加一句
+        模型撰写的理由。它跨用户、跨笔记本共享,因此本表刻意**没有**
+        ``notebook_id``、**没有** owner 列——不是漏了,是这张表的定位:它存的是
+        「怎么查」的通用打法,不是任何人的、任何库的内容。
+
+        七条已拍板取舍(逐条登记,免得后来者当疏漏"修"回去):
+
+        1. **``id`` 是内容寻址的合成主键**,取「情境指纹 + 动作」的确定性哈希
+           (``retrieval_experience_projection.experience_id``)。这一条同时买到
+           三样东西:
+           (a) 「同一情境同一动作只有一行」由主键自己保证,不需要第二个唯一面;
+           (b) ``scripts/merge_dbs.py`` 的 ``GLOBAL_UNION_TABLES`` 用
+               ``INSERT OR IGNORE`` 做跨部署并集,要求 id 跨独立部署稳定且不碰撞
+               ——内容哈希正好满足,而**递增整数 id 会静默丢行**(两个部署各自的
+               1 号经验撞主键,后者被无声丢弃);
+           (c) 停车方案:``replicator.py::_build_unique_surfaces`` 的第一条分支是
+               ``set(索引列) == set(replication_key)`` → ``REPLICATION_KEY``,
+               单列 PK 逐字等于 shadow manifest 里声明的 replication key,于是
+               零哨兵列、零 nullable 列、零叶表 delete/reinsert。
+
+        2. **绝不给「情境指纹」单独加 UNIQUE 索引**。去重已由第 1 条的主键完成;
+           多一个唯一面就多一个必须手工推导停车策略的面(而它还是个 TEXT 列,
+           会掉进哨兵/候选搜索那条更贵的路径)。
+
+        3. **无外键、无 CHECK**。``action``/``polarity`` 取自应用层封闭词表
+           (``retrieval_experience_projection`` 的 ``RETRIEVAL_ACTIONS`` /
+           ``EXPERIENCE_POLARITIES``),与 v51 两张表对 ``label``/``status`` 的
+           同款惯例;而 CHECK 会破坏第 1(c) 条的停车前提。无入向外键 ⇒ 叶表。
+
+        4. **两个时间列都 ``NOT NULL``**,所以本表**不进**
+           ``schema_manifest.POSTGRES_EMPTY_TIME_SENTINELS``——那个集合只服务
+           「SQLite ``TEXT NOT NULL DEFAULT ''`` 的可选时间列 ↔ PG nullable
+           ``timestamptz``」这一种形态。这里两列在每条写路径上都必写。
+
+        5. **``provenance_json`` 只放不透明 run id**,绝不放 ``notebook_id`` /
+           ``user_id``:后两者能把「某人在某个库里问过某类问题」从一张全局表里
+           拼回来,而这张表的每一行都对全体部署可见。它的作用是**幂等**:同一批
+           run 被重复蒸馏时,靠 run id 集合去重,``support`` 不会重复累加。它有界
+           (``RETRIEVAL_EXPERIENCE_PROVENANCE_MAX``),而「每批读取的 run 数
+           ≤ 该上限」是一条被测试钉住的不变式——批次大于它,溢出丢弃的那些 run id
+           就会在下一批里被重新计一次数。
+
+        6. **``support`` 与 ``adopted`` 是两个不同的数**,不能合并:``support``
+           是「多少次 run 支持这条结论」(蒸馏侧累加),``adopted`` 是「注入之后模型
+           真的选了这个动作多少次」(T6 的注入侧累加)。淘汰按
+           ``(adopted, support, updated_at)`` 升序——先淘汰没人用的,再淘汰证据薄
+           的,最后才看新旧。两个数合成一个就没法表达「证据很多但从没人采纳」。
+
+        7. **刻意不建任何二级索引**。全表行数有硬上限
+           (``RETRIEVAL_EXPERIENCE_MAX_ENTRIES``),读路径只有两条:按 id 点查
+           (主键覆盖)与「读全表在内存里按当前情境打分取 top-k」(有界全扫,300 行
+           量级)。淘汰用的 ``(adopted, support, updated_at)`` 排序同样是那次有界
+           全扫的一部分。给一张恒定几百行的表加索引,买到的是零。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS retrieval_experiences (
+                  id              TEXT PRIMARY KEY,
+                  situation_json  TEXT NOT NULL DEFAULT '{}',
+                  action          TEXT NOT NULL DEFAULT '',
+                  polarity        TEXT NOT NULL DEFAULT '',
+                  rationale       TEXT NOT NULL DEFAULT '',
+                  support         INTEGER NOT NULL DEFAULT 0,
+                  adopted         INTEGER NOT NULL DEFAULT 0,
+                  provenance_json TEXT NOT NULL DEFAULT '[]',
+                  created_at      TEXT NOT NULL,
+                  updated_at      TEXT NOT NULL
+                );
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:
