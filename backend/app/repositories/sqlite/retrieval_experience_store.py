@@ -274,6 +274,9 @@ class RetrievalExperienceStore:
 
         Count and delete share one transaction so a concurrent insert cannot
         make the computed overflow describe a table that no longer exists.
+        ``scripts/merge_dbs.py::_evict_experiences_to_limit`` mirrors this
+        ordering for the post-union recap (codex #524 R1 P2) — change either
+        side only together with the other.
         ``id`` as the final tie-break makes the choice deterministic even for
         entries written in the same second by the same batch (SQLite's clock is
         second-granular) — without it, "which of the tied entries survived"

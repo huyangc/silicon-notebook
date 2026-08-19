@@ -726,3 +726,22 @@ def test_renderers_show_the_action_denominator_alongside_total_runs():
     # All three runs in _groups() carry a ppr step, so the two numbers agree
     # here — the point is that BOTH are present, not that they differ.
     assert "runs=3 (3 with sampled actions)" in text
+
+
+def test_completions_arriving_while_the_worker_is_busy_are_not_lost(monkeypatch):
+    """codex #524 R1 P2:单飞占用时 start() 拒绝,阈值计数必须保留——重置发生在
+    「真的排上了」之后。否则模型调用期间攒满的一整批 run 既不在本批样本里、
+    也不会触发下一批,持续流量下成组静默丢失。"""
+    service = _service([], _REPLY)
+    _with_inline_submitter(monkeypatch) if "_with_inline_submitter" in globals() else None
+    service._running = True          # 模拟在飞 worker 占住单飞位
+    trigger = max(1, int(service.settings.retrieval_experience_trigger))
+    for _ in range(trigger):
+        service.note_ask_completed()
+    assert service._pending >= trigger   # 没被清零(修复前这里是 0)
+    service._running = False
+    submitted = []
+    monkeypatch.setattr(service, "start", lambda: submitted.append(1) or True)
+    service.note_ask_completed()          # 下一次完成立刻补触发
+    assert submitted == [1]
+    assert service._pending == 0

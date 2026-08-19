@@ -217,8 +217,16 @@ class RetrievalExperienceDistillationService:
                 self._pending += 1
                 if self._pending < trigger:
                     return
-                self._pending = 0
-            self.start()
+            # codex #524 R1 P2: the counter is reset only AFTER a worker was
+            # actually scheduled. Resetting before ``start()`` lost the whole
+            # batch whenever the single-flight slot was busy — completions
+            # arriving during a model call were neither in that batch nor
+            # retained, so sustained traffic permanently skipped groups of
+            # runs. Kept-on-decline means the very next completion retries,
+            # which lands as soon as the in-flight worker settles.
+            if self.start():
+                with self._lock:
+                    self._pending = 0
         except Exception:  # noqa: BLE001 — never break a delivered answer
             _log.exception("retrieval experience trigger failed")
 
