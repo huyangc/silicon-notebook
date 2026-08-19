@@ -95,6 +95,21 @@ SELECT ... FROM answers WHERE conversation_id = ?
 
 另:水位的**边界含义是闭区间**(`<=`),因为它取自分享那一刻已存在的最后一条答案。
 
+**R2 精修(codex #522 R2 P1/P2)——水位钉死在客户端披露到的那条,边界改 keyset**:
+`POST .../share` 收一个 `expected_through_id`(弹窗据以算披露的那批 turns 的最新答案
+id),服务端把 `shared_through_at`/`shared_through_id` 钉在**正好那条**——哪怕这中间又落
+了更新的答案也不纳入(consent 安全方向:发布的快照 == 披露的快照,关闭「披露到 X、发布到
+更新的 Y」的 TOCTOU);披露的边界答案已被删则拒绝(409 让用户刷新重看,绝不静默退回当前
+最新),省略/空则回退当前最新(旧客户端)。**公开页边界从纯 `created_at <=` 区间改成对水位
+答案完整排序元组的 keyset**:`shared_through_id` 非空且解析得到时,取该答案的
+`(created_at, rowid)`(PG 侧 `ordinal`),按
+`(julianday(created_at), created_at, rowid) <= 水位元组`(PG 为 `(created_at, ordinal)`)
+取满——这正是上面第 92 行说「id 不是正确 keyset 键、要用 rowid/ordinal」的兑现;纯时刻
+区间会把与水位**同刻但排在其后**(rowid 更大)的那条也纳入,即上面 §二冻结语义不该发布的
+轮次。`shared_through_id` 解析不到(答案删了)时回退纯 `julianday(created_at) <= 水位时刻`
+区间——边缘情况可接受略不精确,但绝不 fail closed 把已分享会话变 404。`shared_through_id`
+因此是**承重键**,不再只是展示。
+
 ### 3.3 shadow 正向复制
 
 `conversations` 已在业务表集合内,本次是**加列 + 加一个部分唯一索引**:

@@ -226,11 +226,18 @@ export const deleteConversation = (id: string) =>
 
 // 会话公开分享（T5）。三个端点都在**主 router**（带 router 级鉴权 + 行级 created_by
 // 门），与匿名公开页端点分属两侧——链接口令就是凭证，发放/回读/撤销都是写级动作。
-// 「分享」与「更新到最新」是同一个 POST：幂等复用链接口令，同时把水位推到当前。
-export const shareConversation = (nb: string, cid: string) =>
+// 「分享」与「更新到最新」是同一个 POST：幂等复用链接口令，同时把水位推到 client
+// 披露到的那条答案。`expectedThroughId` 是弹窗据以算披露的那批 turns 里**最新**一条
+// 的 answer_id：服务端把水位钉死在它上,发布的快照 == 披露的快照,关闭「披露到 X、实际
+// 公开到更新的 Y」的 TOCTOU(codex #522 R2 P1)。空串回退「当前最新」(旧行为)。
+export const shareConversation = (nb: string, cid: string, expectedThroughId = "") =>
   requestJson<ConversationShareResponse>(
     `/notebooks/${nb}/conversations/${cid}/share`,
-    { ...options, method: "POST" },
+    {
+      ...options,
+      method: "POST",
+      body: JSON.stringify({ expected_through_id: expectedThroughId }),
+    },
   );
 
 export const getConversationShare = (nb: string, cid: string) =>

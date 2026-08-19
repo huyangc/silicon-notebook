@@ -2735,6 +2735,18 @@
           "title": "ConversationRenameRequest",
           "type": "object"
         },
+        "ConversationShareRequest": {
+          "description": "The client's disclosure boundary for a share / \"update to latest\" (codex\n#522 R2 P1).\n\n``expected_through_id`` is the newest answer id the client saw in the SAME\nturns it computed its disclosure from. The store pins the watermark to\nexactly that answer, so the published snapshot equals the disclosed one —\neven if a newer answer landed between the client's read and this POST (the\ndisclosure TOCTOU). Empty (a legacy / no-body client) falls back to\n\"current latest\". The body itself is optional so an empty POST still works.",
+          "properties": {
+            "expected_through_id": {
+              "default": "",
+              "title": "Expected Through Id",
+              "type": "string"
+            }
+          },
+          "title": "ConversationShareRequest",
+          "type": "object"
+        },
         "ConversationShareResponse": {
           "description": "The public link + read watermark for one shared conversation (T2).\n\nMirrors ``ReportShareResponse`` but also carries the watermark: \"share\" and\n\"update to latest\" are the same call, so the caller always sees which answer\nthe public snapshot currently ends at. Deliberately excludes the\nconversation's ``created_by`` — that is a server-side gate field, never\nhanded to the client — and every id (``notebook_id``/``conversation_id``/\n``shared_through_id`` is the watermark answer's id, which is a bounded\ninternal cursor the owner already holds, not a cross-notebook handle).",
           "properties": {
@@ -15117,7 +15129,7 @@
           "summary": "Get Conversation Share Route"
         },
         "post": {
-          "description": "Publish one conversation behind an unguessable link AND advance the read\nwatermark to its current latest answer — \"share\" and \"update to latest\" are\nthe same call (design doc §四), so the button label alone decides which one\nthe user thinks they pressed.\n\nRow-level gated (creator-only). Only conversations with at least one written\nanswer can be shared (design doc §七 item 5): an in-flight or never-answered\nconversation has nothing completed to show. ``share_conversation`` issues the\ntoken TOGETHER with the watermark, so a watermark that comes back empty means\n\"no committed answer to bound the snapshot\" — reject it and roll the token\nback, rather than leave a NULL-watermark shared row behind (the public read\nwould fail closed on it anyway, but it should not exist). Using the store's\nown returned watermark as the signal — instead of a separate \"has answers?\"\npre-check — also closes the window where a concurrent answer insert would\nmake the two disagree.",
+          "description": "Publish one conversation behind an unguessable link AND advance the read\nwatermark — \"share\" and \"update to latest\" are the same call (design doc\n§四), so the button label alone decides which one the user thinks they\npressed.\n\n``expected_through_id`` (the newest answer the client saw in the turns it\ndisclosed) pins the watermark to EXACTLY that answer (codex #522 R2 P1): the\npublished snapshot then equals the disclosed one, closing the TOCTOU where an\nin-flight answer completes (or another tab adds a turn) between the client's\ndisclosure read and this POST and the watermark would otherwise jump to an\nunreviewed, unconsented answer. When the disclosed boundary answer has since\nbeen deleted the store raises ``ConversationShareWatermarkStale`` → 409, so\nthe user reloads and re-reviews rather than publishing \"latest\" silently.\nAn empty/absent body falls back to \"current latest\" (legacy behaviour).\n\nRow-level gated (creator-only). Only conversations with at least one written\nanswer can be shared (design doc §七 item 5): an in-flight or never-answered\nconversation has nothing completed to show. ``share_conversation`` issues the\ntoken TOGETHER with the watermark, so a watermark that comes back empty means\n\"no committed answer to bound the snapshot\" — reject it and roll the token\nback, rather than leave a NULL-watermark shared row behind (the public read\nwould fail closed on it anyway, but it should not exist). Using the store's\nown returned watermark as the signal — instead of a separate \"has answers?\"\npre-check — also closes the window where a concurrent answer insert would\nmake the two disagree.",
           "operationId": "share_conversation_route_api_notebooks__notebook_id__conversations__conversation_id__share_post",
           "parameters": [
             {
@@ -15139,6 +15151,23 @@
               }
             }
           ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ConversationShareRequest"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Payload"
+                }
+              }
+            }
+          },
           "responses": {
             "200": {
               "content": {

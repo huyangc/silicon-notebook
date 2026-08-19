@@ -4,7 +4,7 @@ import queue
 import threading
 from typing import Any, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import get_settings
@@ -33,6 +33,7 @@ from app.models.ask import (
     ConversationBulkDeleteResult,
     ConversationDetail,
     ConversationRenameRequest,
+    ConversationShareRequest,
     ConversationShareResponse,
     ConversationSummary,
     FeedbackRequest,
@@ -42,7 +43,11 @@ from app.models.ask import (
     QueryIntentContract,
 )
 from app.models.identity import UserProfile
-from app.repositories.ports import AskStreamPort, ConversationBusyError
+from app.repositories.ports import (
+    AskStreamPort,
+    ConversationBusyError,
+    ConversationShareWatermarkStale,
+)
 from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
@@ -796,12 +801,24 @@ def _own_conversation_or_404(
     dependencies=[Depends(require_notebook_read)],
 )
 def share_conversation_route(
-    notebook_id: str, conversation_id: str
+    notebook_id: str,
+    conversation_id: str,
+    payload: ConversationShareRequest | None = Body(default=None),
 ) -> ConversationShareResponse:
     """Publish one conversation behind an unguessable link AND advance the read
-    watermark to its current latest answer — "share" and "update to latest" are
-    the same call (design doc §四), so the button label alone decides which one
-    the user thinks they pressed.
+    watermark — "share" and "update to latest" are the same call (design doc
+    §四), so the button label alone decides which one the user thinks they
+    pressed.
+
+    ``expected_through_id`` (the newest answer the client saw in the turns it
+    disclosed) pins the watermark to EXACTLY that answer (codex #522 R2 P1): the
+    published snapshot then equals the disclosed one, closing the TOCTOU where an
+    in-flight answer completes (or another tab adds a turn) between the client's
+    disclosure read and this POST and the watermark would otherwise jump to an
+    unreviewed, unconsented answer. When the disclosed boundary answer has since
+    been deleted the store raises ``ConversationShareWatermarkStale`` → 409, so
+    the user reloads and re-reviews rather than publishing "latest" silently.
+    An empty/absent body falls back to "current latest" (legacy behaviour).
 
     Row-level gated (creator-only). Only conversations with at least one written
     answer can be shared (design doc §七 item 5): an in-flight or never-answered
@@ -816,11 +833,16 @@ def share_conversation_route(
     """
     repo = repository()
     _own_conversation_or_404(repo, notebook_id, conversation_id)
+    expected = payload.expected_through_id if payload else ""
     try:
-        state = repo.share_conversation(notebook_id, conversation_id)
+        state = repo.share_conversation(notebook_id, conversation_id, expected)
     except KeyError:
         # Deleted between the gate read and the share write.
         raise HTTPException(status_code=404, detail="Conversation not found")
+    except ConversationShareWatermarkStale:
+        # The disclosed boundary answer was deleted — no token was issued; make
+        # the user reload and re-review rather than publish an unconsented span.
+        raise user_error(409, "这条会话已有变化，请刷新后重新分享。")
     if not state.get("shared_through_at"):
         # Conditional rollback: only discard the token while the watermark is
         # STILL NULL. A concurrent share that saw the first answer land shares

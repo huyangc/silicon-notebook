@@ -16,8 +16,9 @@
 //
 // 两条披露（设计 §五 是用户 consent 红线）：包含 M 张附图、包含 K 条个人记忆摘录。
 // 计数不来自 share 回执（它只给链接口令 + 水位），而是打开弹窗时加载该会话、按**水位
-// 之前**的轮次统计。**Memory 披露绝不可静默省略**：只要 K>0 必显示；加载失败时退化成
-// 不带数字的「可能包含个人记忆摘录」，而不是不显示。
+// 之前**的轮次统计。**附图与 Memory 披露都绝不可静默省略**：M>0 / K>0 各自必显示；加载
+// 失败时退化成不带数字、但**两者都提**的兜底文案（见 conversation-share-disclosure 里的
+// SHARE_*_COUNTS_ERROR 常量），而不是只提其一或不显示。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Link2, RefreshCw, X } from "lucide-react";
@@ -27,6 +28,8 @@ import { buildPublicConversationLink } from "./public-conversation.ts";
 import { FloatingModalCard } from "./floating-modal-card.tsx";
 import { httpErrorStatus, toUserMessage } from "./errors.ts";
 import {
+  SHARE_DISCLOSURE_COUNTS_ERROR,
+  SHARE_UPDATE_COUNTS_ERROR,
   summarizeShareDisclosure,
   summarizeShareUpdate,
   type ShareDisclosure,
@@ -136,7 +139,11 @@ export function ConversationShareModal({
     setError("");
     setNotice("");
     try {
-      const resp = await shareConversation(notebookId, conversationId);
+      // 水位钉死在弹窗据以算披露的那批 `turns` 的**最新**一条(ASC 排序,末条即最新)。
+      // 发布的快照 == 披露的快照(codex #522 R2 P1)。详情没加载出来(countsError)时
+      // turns 为空,expected="" 回退「当前最新」——那种情形披露也已退化成不带数字的告警。
+      const expectedThroughId = turns.length ? turns[turns.length - 1].answer_id : "";
+      const resp = await shareConversation(notebookId, conversationId, expectedThroughId);
       if (!aliveRef.current) return;
       setToken(resp.share_token || "");
       setWatermark(resp.shared_through_at || "");
@@ -283,7 +290,7 @@ function ShareDisclosureLines({
     <div className="conversation-share-disclosure">
       {countsError ? (
         <p className="tool-hint" style={{ margin: 0 }}>
-          公开页可能包含引用到的个人记忆摘录（本次未能统计条数）。
+          {SHARE_DISCLOSURE_COUNTS_ERROR}
         </p>
       ) : (<>
         {disclosure.imageCount > 0 && (
@@ -312,7 +319,7 @@ function ShareUpdateDisclosureLines({
   if (countsError) {
     return (
       <p className="tool-hint" style={{ margin: 0 }}>
-        「更新到最新」会公开新增轮次，其中可能包含新引用的个人记忆摘录（本次未能统计条数）。
+        {SHARE_UPDATE_COUNTS_ERROR}
       </p>
     );
   }

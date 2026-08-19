@@ -54,6 +54,7 @@ from app.models.ask import (
 )
 from app.repositories.ports import (
     ConversationBusyError,
+    ConversationShareWatermarkStale,
     PreparedAskTurn,
     project_ask_row,
     project_trace_step,
@@ -850,17 +851,36 @@ class AskStateStore:
     # see docs/superpowers/specs/2026-08-18-conversation-sharing-design_zh.md)
     # ------------------------------------------------------------------
 
-    def share_conversation(self, notebook_id: str, conversation_id: str) -> dict:
-        """Issue (or reuse) the public token for one conversation and push
-        its read watermark to the conversation's current latest answer.
+    def share_conversation(
+        self,
+        notebook_id: str,
+        conversation_id: str,
+        expected_through_id: str | None = None,
+    ) -> dict:
+        """Issue (or reuse) the public token for one conversation and pin its
+        read watermark to a specific answer.
 
         Idempotent on the TOKEN only: re-sharing keeps the existing link, so
         a URL already handed out never silently starts 404ing (mirrors
         ``report_store.share_report``). The WATERMARK is deliberately NOT
         idempotent — "share" and "update to latest" are the same call (see
         the design doc §四), so every invocation advances
-        ``shared_through_at``/``shared_through_id`` to whichever answer is
-        newest at call time, even when the token itself does not change.
+        ``shared_through_at``/``shared_through_id`` to the answer the boundary
+        resolves to, even when the token itself does not change.
+
+        ``expected_through_id`` closes the disclosure TOCTOU (codex #522 R2 P1):
+        it is the newest answer id the CLIENT saw in the same turns it computed
+        its disclosure from. When given and it resolves to an answer OF THIS
+        conversation, the watermark is pinned to EXACTLY that answer — even if a
+        newer answer has since landed, that newer one is NOT published, because
+        the user only reviewed (and consented to) up to here. When given but it
+        no longer resolves (the answer was deleted), we ``raise
+        ConversationShareWatermarkStale`` rather than silently fall back to the
+        latest answer: the client's disclosure describes a snapshot that can no
+        longer be reproduced, and publishing "latest" would bypass consent (the
+        API layer maps the raise to a 409 that tells the user to reload). When
+        omitted/empty (a legacy or no-body caller), the watermark falls back to
+        the conversation's current latest answer, the historical behaviour.
 
         Raises ``KeyError`` when the conversation does not exist in this
         notebook. A conversation with zero answers can still be "shared"
@@ -870,6 +890,7 @@ class AskStateStore:
         this method, not to this store method.
         """
         candidate = new_capability_token("cshr")
+        expected = str(expected_through_id or "").strip()
         with self.database.write() as db:
             conv = db.execute(
                 "SELECT id FROM conversations WHERE id=? AND notebook_id=?",
@@ -877,13 +898,27 @@ class AskStateStore:
             ).fetchone()
             if conv is None:
                 raise KeyError(conversation_id)
-            latest = db.execute(
-                "SELECT id, created_at FROM answers WHERE conversation_id=? "
-                + CONVERSATION_ANSWERS_ORDER_DESC + " LIMIT 1",
-                (conversation_id,),
-            ).fetchone()
-            through_at = latest["created_at"] if latest is not None else None
-            through_id = latest["id"] if latest is not None else None
+            if expected:
+                boundary = db.execute(
+                    "SELECT id, created_at FROM answers "
+                    "WHERE id=? AND conversation_id=?",
+                    (expected, conversation_id),
+                ).fetchone()
+                if boundary is None:
+                    # The disclosed boundary answer was deleted — fail loudly so
+                    # the caller re-reviews, never publish "latest" behind the
+                    # user's back.
+                    raise ConversationShareWatermarkStale(expected)
+                through_at = boundary["created_at"]
+                through_id = boundary["id"]
+            else:
+                latest = db.execute(
+                    "SELECT id, created_at FROM answers WHERE conversation_id=? "
+                    + CONVERSATION_ANSWERS_ORDER_DESC + " LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+                through_at = latest["created_at"] if latest is not None else None
+                through_id = latest["id"] if latest is not None else None
             issued = db.execute(
                 "UPDATE conversations SET share_token=COALESCE(share_token,?), "
                 "shared_through_at=?, shared_through_id=? "
@@ -1004,30 +1039,36 @@ class AskStateStore:
         any other identifier would let this method run as whichever user the
         ContextVar happens to default to).
 
-        Turns are watermark-bounded: only answers with
-        ``julianday(created_at) <= julianday(shared_through_at)`` are
-        returned, in the SAME canonical order ``get_conversation`` uses
-        (``CONVERSATION_ANSWERS_ORDER_ASC`` — design doc C-3). An in-flight
-        turn (question submitted, no answer row written yet) is excluded by
-        construction: the predicate only ever matches committed ``answers``
-        rows, never a running ``ask_jobs`` entry.
+        Turns are watermark-bounded to a clean prefix of the SAME canonical
+        order ``get_conversation`` uses (``CONVERSATION_ANSWERS_ORDER_ASC`` —
+        design doc C-3). The boundary is a KEYSET on the watermark answer's
+        full canonical sort tuple, not a pure timestamp interval (codex #522
+        R2 P2): the canonical order tie-breaks two answers at the same instant
+        by ``rowid`` (insertion order), so ``created_at <= shared_through_at``
+        alone would also pull in the tie-break-LATER answer at the watermark's
+        exact instant — an answer that sorts AFTER the watermark and was never
+        meant to be published. We resolve the watermark answer's
+        ``(created_at, rowid)`` from ``shared_through_id`` and include exactly
+        the rows whose ``(julianday(created_at), created_at, rowid)`` tuple is
+        ``<=`` the watermark's — the lexicographic prefix ending at the
+        watermark row. (This is the keyset the T1 docstring said a correct fix
+        would need — the stored ``shared_through_id`` is only the id, so the
+        rowid must be looked up.) An in-flight turn (question submitted, no
+        answer row written yet) is excluded by construction: the predicate only
+        ever matches committed ``answers`` rows, never a running ``ask_jobs``
+        entry.
+
+        When ``shared_through_id`` no longer resolves (the watermark answer was
+        deleted after the share), the keyset has no anchor, so we fall back to
+        the pure ``julianday(created_at) <= julianday(shared_through_at)``
+        interval — slightly less precise on a same-instant tie, but the design
+        edge case must NOT fail closed and 404 an already-shared conversation.
 
         Returns ``None`` for an unknown/revoked token, or for a conversation
         whose watermark is NULL (``share_conversation`` always sets the
         watermark together with the token, so NULL here means this row was
         never actually shared through the normal path — fail closed rather
         than serve an ungated conversation).
-
-        The boundary is a pure ``created_at`` closed interval, deliberately
-        (design doc §3.2). It does NOT keyset on ``shared_through_id`` — and a
-        future hardening pass must not "fix" that by adding it: the stored
-        ``shared_through_id`` is the answer's ``id`` (a string), whereas the
-        authoritative tie-break for two answers at the same instant is
-        ``rowid``/``ordinal`` (insertion order), which is a different key. A
-        correct keyset would need the watermark answer's rowid/ordinal, not
-        its id. In practice sequential turns are separated by a whole
-        LLM round-trip, so no two answers share a microsecond-precision
-        ``created_at`` and the timestamp interval alone is exact.
 
         Also returns ``notebook_id`` and ``created_by`` (GATE fields,
         mirroring ``report_store.GATE_FIELDS``) for the caller's live
@@ -1047,12 +1088,37 @@ class AskStateStore:
             ).fetchone()
             if conv is None or not conv["shared_through_at"]:
                 return None
-            rows = db.execute(
-                "SELECT id, question, payload, created_at FROM answers "
-                "WHERE conversation_id=? AND julianday(created_at) <= julianday(?) "
-                + CONVERSATION_ANSWERS_ORDER_ASC,
-                (conv["id"], conv["shared_through_at"]),
-            ).fetchall()
+            watermark = None
+            through_id = conv["shared_through_id"]
+            if through_id:
+                watermark = db.execute(
+                    "SELECT created_at, rowid AS rid FROM answers "
+                    "WHERE id=? AND conversation_id=?",
+                    (through_id, conv["id"]),
+                ).fetchone()
+            if watermark is not None:
+                # Keyset on the full canonical sort tuple
+                # (julianday(created_at), created_at, rowid) <= the watermark
+                # row's — the exact prefix ending at the watermark answer.
+                wm_at = watermark["created_at"]
+                rows = db.execute(
+                    "SELECT id, question, payload, created_at FROM answers "
+                    "WHERE conversation_id=? AND ("
+                    "julianday(created_at) < julianday(?) "
+                    "OR (julianday(created_at) = julianday(?) AND ("
+                    "created_at < ? OR (created_at = ? AND rowid <= ?)))"
+                    ") " + CONVERSATION_ANSWERS_ORDER_ASC,
+                    (conv["id"], wm_at, wm_at, wm_at, wm_at, watermark["rid"]),
+                ).fetchall()
+            else:
+                # Watermark answer deleted: fall back to the pure created_at
+                # interval rather than fail closed on the already-shared link.
+                rows = db.execute(
+                    "SELECT id, question, payload, created_at FROM answers "
+                    "WHERE conversation_id=? AND julianday(created_at) <= julianday(?) "
+                    + CONVERSATION_ANSWERS_ORDER_ASC,
+                    (conv["id"], conv["shared_through_at"]),
+                ).fetchall()
         turns = []
         for row in rows:
             try:

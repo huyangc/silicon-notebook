@@ -319,6 +319,50 @@ def test_share_freezes_the_watermark_and_reshare_advances_it(client):
                       headers=owner).json()["shared_through_id"] == f"{cid}-new"
 
 
+def test_share_pins_the_watermark_to_the_clients_expected_answer(client):
+    """The disclosure TOCTOU fix (codex #522 R2 P1): the client passes the newest
+    answer it saw (and disclosed) as ``expected_through_id``; the watermark pins
+    to EXACTLY that answer, not to whatever is latest at POST time. Here a NEWER
+    answer already exists, yet passing the older one freezes the snapshot there.
+
+    Mutation guard: dropping the body param / ignoring ``expected_through_id`` in
+    the route pins to the latest answer instead, flipping ``shared_through_id``.
+    """
+    owner, owner_id = _new_user(client)
+    nb = _notebook(client, owner)
+    cid = _seed_conversation(
+        nb, owner_id,
+        answers=("2026-01-01T00:00:01", "2026-01-02T00:00:00"),
+    )
+
+    resp = client.post(
+        _share_url(nb, cid), headers=owner,
+        json={"expected_through_id": f"{cid}-ans0"},
+    )
+    assert resp.status_code == 200, resp.text
+    # Pinned to the disclosed answer (ans0), NOT the newer ans1.
+    assert resp.json()["shared_through_id"] == f"{cid}-ans0"
+
+
+def test_share_rejects_a_stale_expected_through_id(client):
+    """When the disclosed boundary answer no longer resolves (deleted since the
+    client read it), the store raises and the route returns 409 — never a silent
+    pin-to-latest that would publish an unreviewed span (codex #522 R2 P1). No
+    token is issued."""
+    owner, owner_id = _new_user(client)
+    nb = _notebook(client, owner)
+    cid = _seed_conversation(nb, owner_id)
+
+    resp = client.post(
+        _share_url(nb, cid), headers=owner,
+        json={"expected_through_id": "ans-that-never-existed"},
+    )
+    assert resp.status_code == 409, resp.text
+    # Nothing was shared.
+    assert _share_state(nb, cid)["share_token"] == ""
+    assert client.get(_share_url(nb, cid), headers=owner).status_code == 404
+
+
 def test_get_share_is_404_when_the_conversation_is_not_shared(client):
     """回读端点在未分享时 404(镜像 get_report_share_route)——token 就是凭证,
     没有它就没有可交出的东西。"""

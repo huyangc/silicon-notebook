@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  SHARE_DISCLOSURE_COUNTS_ERROR,
+  SHARE_UPDATE_COUNTS_ERROR,
   summarizeShareDisclosure,
   summarizeShareUpdate,
   withinWatermark,
@@ -123,6 +125,20 @@ test("M dedups images by asset_id within a turn and spans anchors and citations"
   ];
   // turn 1: {a1, a2} = 2; turn 2: {a3} = 1 -> 3 summed.
   assert.equal(summarizeShareDisclosure(turns, "").imageCount, 3);
+});
+
+// --- countsError fallback discloses BOTH images and memory (codex #522 R2 P2) -
+// When the conversation detail fails to load the modal can't compute exact
+// counts, but the consent surface has TWO halves — attached images AND private
+// memory — and dropping either from the fallback is a silent omission. Both
+// fallback strings must name both. Mutation guard: deleting 附图 from either
+// constant reds this.
+
+test("countsError fallbacks name BOTH images and memory, never just one", () => {
+  for (const message of [SHARE_DISCLOSURE_COUNTS_ERROR, SHARE_UPDATE_COUNTS_ERROR]) {
+    assert.ok(message.includes("附图"), `fallback must mention images: ${message}`);
+    assert.ok(message.includes("个人记忆"), `fallback must mention memory: ${message}`);
+  }
 });
 
 // --- withinWatermark degrades safe (unparseable -> include, "宁可多披露") ------

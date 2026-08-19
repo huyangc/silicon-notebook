@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from app.repositories.ports import ConversationShareWatermarkStale
 from app.repositories.postgres.ask_state_store import (
     AskStateStore as PostgresAskStateStore,
 )
@@ -164,6 +165,69 @@ def test_public_snapshot_freezes_at_the_watermark_and_advances_on_reshare(
     assert [t["answer_id"] for t in refreshed["turns"]] == [
         "ans-a", "ans-c", "ans-b", "ans-d", "ans-e",
     ]
+
+
+def test_expected_through_id_pins_the_watermark_to_that_exact_answer(
+    postgres_database,
+):
+    """Mirrors the SQLite copy — see its docstring. PostgreSQL's tie-break is
+    ``ordinal``. Pinning to ans-c publishes only [ans-a, ans-c]: ans-d is later
+    (proving we did not jump to latest), ans-b shares ans-c's instant but sorts
+    AFTER it (higher ordinal) and the keyset excludes it where the pure
+    ``created_at <=`` predicate would not."""
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    share = store.share_conversation(
+        notebook_id, conversation_id, expected_through_id="ans-c"
+    )
+    assert share["shared_through_id"] == "ans-c"
+
+    public = store.public_conversation_by_token(share["share_token"])
+    assert [t["answer_id"] for t in public["turns"]] == ["ans-a", "ans-c"]
+
+
+def test_expected_through_id_that_no_longer_resolves_is_rejected(postgres_database):
+    """Deleted disclosed boundary -> ``ConversationShareWatermarkStale`` (409),
+    never a silent pin-to-latest. No token issued."""
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    with pytest.raises(ConversationShareWatermarkStale):
+        store.share_conversation(
+            notebook_id, conversation_id, expected_through_id="ans-gone"
+        )
+    assert store.conversation_share_state(
+        notebook_id, conversation_id
+    )["share_token"] == ""
+
+
+def test_public_snapshot_falls_back_to_timestamp_when_boundary_answer_deleted(
+    postgres_database,
+):
+    """Watermark answer deleted after a share -> the keyset has no anchor, so
+    the already-shared link falls back to the pure ``created_at`` interval
+    rather than fail closed to 404. Mutation guard: failing closed reds this."""
+    assert PostgresMigrator(postgres_database).migrate() == 30
+    notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
+        postgres_database
+    )
+    store = PostgresAskStateStore(postgres_database, _seams())
+
+    token = store.share_conversation(notebook_id, conversation_id)["share_token"]
+
+    with postgres_database.write() as connection:
+        connection.execute("DELETE FROM answers WHERE id='ans-d'")
+
+    public = store.public_conversation_by_token(token)
+    assert public is not None
+    assert [t["answer_id"] for t in public["turns"]] == ["ans-a", "ans-c", "ans-b"]
 
 
 def test_unshare_revokes_the_public_link(postgres_database):

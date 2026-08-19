@@ -3678,11 +3678,18 @@ class RepositoryFacade:
             notebook_id, conversation_id
         )
 
-    def share_conversation(self, notebook_id: str, conversation_id: str) -> dict:
-        """Issue (or reuse) the public token and push the read watermark to the
-        current latest answer. See ``AskStateStore.share_conversation``."""
+    def share_conversation(
+        self,
+        notebook_id: str,
+        conversation_id: str,
+        expected_through_id: str | None = None,
+    ) -> dict:
+        """Issue (or reuse) the public token and pin the read watermark. When
+        ``expected_through_id`` is given it pins to exactly that answer (the
+        disclosure TOCTOU fix); empty falls back to the current latest. See
+        ``AskStateStore.share_conversation``."""
         return self._runtime.ask_state.share_conversation(
-            notebook_id, conversation_id
+            notebook_id, conversation_id, expected_through_id
         )
 
     def conversation_share_state(
