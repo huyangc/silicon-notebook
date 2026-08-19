@@ -637,6 +637,22 @@ class ConversationDetail(ConversationSummary):
     active_job: Optional["ActiveAskJob"] = None
 
 
+class ConversationShareResponse(BaseModel):
+    """The public link + read watermark for one shared conversation (T2).
+
+    Mirrors ``ReportShareResponse`` but also carries the watermark: "share" and
+    "update to latest" are the same call, so the caller always sees which answer
+    the public snapshot currently ends at. Deliberately excludes the
+    conversation's ``created_by`` — that is a server-side gate field, never
+    handed to the client — and every id (``notebook_id``/``conversation_id``/
+    ``shared_through_id`` is the watermark answer's id, which is a bounded
+    internal cursor the owner already holds, not a cross-notebook handle)."""
+
+    share_token: str
+    shared_through_at: str = ""
+    shared_through_id: str = ""
+
+
 class SearchHit(BaseModel):
     scope: str
     notebook_id: str

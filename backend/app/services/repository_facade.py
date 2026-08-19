@@ -3661,6 +3661,42 @@ class RepositoryFacade:
             notebook_id, older_than_days
         )
 
+    # --- 会话公开分享(T2:发放/回读/撤销 + 水位推进)---
+    # 直接委托给 AskStateStore 的 T1 方法(镜像 report_store 分享方法的委托形态,
+    # 见下面 share_report 等);ports.py 不为分享方法声明协议,与报告面同款。
+    def conversation_creator(
+        self, notebook_id: str, conversation_id: str
+    ) -> "str | None":
+        """One notebook-scoped read of a conversation's creator, for the
+        authenticated share endpoints' row-level gate. ``None`` when the
+        conversation is not in this notebook. See
+        ``AskStateStore.conversation_creator``."""
+        return self._runtime.ask_state.conversation_creator(
+            notebook_id, conversation_id
+        )
+
+    def share_conversation(self, notebook_id: str, conversation_id: str) -> dict:
+        """Issue (or reuse) the public token and push the read watermark to the
+        current latest answer. See ``AskStateStore.share_conversation``."""
+        return self._runtime.ask_state.share_conversation(
+            notebook_id, conversation_id
+        )
+
+    def conversation_share_state(
+        self, notebook_id: str, conversation_id: str
+    ) -> dict:
+        """Issued token + watermark for the write-guarded read-back endpoint.
+        See ``AskStateStore.conversation_share_state``."""
+        return self._runtime.ask_state.conversation_share_state(
+            notebook_id, conversation_id
+        )
+
+    def unshare_conversation(self, notebook_id: str, conversation_id: str) -> None:
+        """Revoke the public link. See ``AskStateStore.unshare_conversation``."""
+        return self._runtime.ask_state.unshare_conversation(
+            notebook_id, conversation_id
+        )
+
     # --- 深度报告 ---
     # Task 25: reports 表行级持久化移入 runtime 所有的 ReportStore;此处保持
     # 冻结签名委托(notebook 存在性守卫留在 create_report 委托里)。脱离连接
