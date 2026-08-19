@@ -19,6 +19,24 @@ export const REPORT_INPUT_LIMITS = {
   questionMaxChars: 4000,
 } as const;
 
+/**
+ * 把输入夹到 `max` 个 **Unicode 码点**，与后端 Pydantic 的 `max_length` 同一把尺。
+ *
+ * 刻意不用 `<textarea maxLength>`：HTML 那个属性数的是 **UTF-16 code unit**，而
+ * Pydantic 数的是码点。含 emoji 等非 BMP 字符时一个字符占两个 code unit，于是
+ * `maxLength={4000}` 会在 2,000 个 emoji 处就停手，而 API 其实收 4,000 个——两边
+ * 号称「同一护栏」却对不上（codex #525 R2 P2）。方向上它是保守的（前端更严，不会
+ * 放过 API 会拒的输入），但红线要的是**同一条**护栏，不是一条更紧的。
+ *
+ * 中文全在 BMP 内（1 码点 = 1 code unit），所以对绝大多数输入两者逐字相同；这里
+ * 只是把「绝大多数」变成「全部」。仓库里 `GROUP_INPUT_LIMITS` / `MEMORY_INPUT_LIMITS`
+ * 仍用 `maxLength`，它们不喂任何匿名投影，这处更严格是刻意的、不是不一致。
+ */
+export const clampToCodePoints = (value: string, max: number): string => {
+  const points = Array.from(value);
+  return points.length <= max ? value : points.slice(0, max).join("");
+};
+
 // 报告的检索范围在**创建那一刻定格**（`generateReport` 因此不带范围）：意图确认与
 // 生成前由后端按持久化的那一份重验，用户在这中间改勾选不会追溯改写已建报告。
 export const createReport = (

@@ -134,6 +134,10 @@ export default function PublicReportPage() {
       <header className="public-report-head">
         <p className="public-report-eyebrow">深度报告 · 只读分享</p>
         <h1>{report.question || "深度报告"}</h1>
+        {/* 只可能出现在创建期护栏上线之前建的报告上；截断绝不静默。 */}
+        {report.question_truncated && (
+          <p className="public-report-note public-report-truncated">（研究问题过长，已截断）</p>
+        )}
         <p className="public-report-meta">
           {report.updated_at && (
             <span>

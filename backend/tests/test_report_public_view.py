@@ -14,6 +14,7 @@ R1-R4 收口，本面同批平移——问题原样返回，引用的标题/摘�
 """
 from __future__ import annotations
 
+from app.models.reports import REPORT_QUESTION_MAX_CHARS
 from app.services.report_public_view import (
     MAX_REFERENCE_TITLE_CHARS,
     MAX_SNIPPET_CHARS,
@@ -120,14 +121,28 @@ def test_a_value_exactly_at_the_cap_is_not_reported_as_truncated():
 
 
 def test_the_research_question_is_served_whole():
-    """问题是用户自撰的 artifact（意图确认门可编辑，合同里到 4,000 字符），旧的
-    2,000 字符上限静默吃掉的正是产生这份报告的那段文字；而它也从来不是安全边界
-    ——远大于它的 `content_md` 就在旁边原样返回。"""
-    question = "问" * 4000
+    """问题是用户自撰的 artifact，旧的 2,000 字符上限静默吃掉的正是产生这份报告的
+    那段文字。凡是**今天能创建出来的**问题都原样返回、披露位为假——创建端点已经
+    拒收更长的输入。"""
+    question = "问" * REPORT_QUESTION_MAX_CHARS
 
     payload = public_report_payload({"question": question, "content_md": ""}, [])
 
     assert payload["question"] == question
+    assert payload["question_truncated"] is False
+
+
+def test_a_legacy_over_length_question_is_bounded_and_disclosed():
+    """创建期护栏上线**之前**建的报告可以带超长问题，而它的分享链接已经发出去了。
+
+    投影必须自己有界（否则匿名响应被客户端输入撑到无界，codex #525 R2 P2），同时
+    把这件事说出来——既不静默丢尾，也不改写用户存下来的数据。"""
+    question = "问" * (REPORT_QUESTION_MAX_CHARS + 1)
+
+    payload = public_report_payload({"question": question, "content_md": ""}, [])
+
+    assert len(payload["question"]) == REPORT_QUESTION_MAX_CHARS
+    assert payload["question_truncated"] is True
 
 
 def test_the_report_body_is_still_served_whole():

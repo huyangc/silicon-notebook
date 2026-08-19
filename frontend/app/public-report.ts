@@ -25,6 +25,12 @@ export type PublicReportReferenceT = {
 
 export type PublicReportT = {
   question: string;
+  /**
+   * 研究问题被夹到上限时为真——只可能出现在创建期护栏上线**之前**建的报告上
+   * （之后建的报告创建端点就拒收超长问题，问题一律原样返回）。可选是为了兼容
+   * 还没带这个字段的旧后端：缺字段按「没截断」处理。
+   */
+  question_truncated?: boolean;
   content_md: string;
   created_at: string;
   updated_at: string;

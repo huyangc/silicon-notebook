@@ -25,7 +25,9 @@ Truncation on this surface is DISCLOSED, never silent (AGENTS.md 用户编辑的
 不得静默截断).  The sibling ``conversation_public_view`` was brought to that rule
 by codex #522 R1-R4; this module carries the same three fixes:
 
-* the question is served WHOLE (``_question_text``) — see its docstring;
+* the question is served whole up to the create rail and, past it (only
+  reachable for pre-rail rows), bounded with ``question_truncated`` — see
+  ``_question_text``;
 * a reference title / original filename / excerpt stays bounded (it is evidence
   metadata, not the user's own artifact) but an over-length value sets
   ``title_truncated`` / ``file_name_truncated`` / ``snippet_truncated`` so the
@@ -37,6 +39,8 @@ by codex #522 R1-R4; this module carries the same three fixes:
 from __future__ import annotations
 
 from typing import Any, Sequence
+
+from app.models.reports import REPORT_QUESTION_MAX_CHARS
 
 MAX_REFERENCES = 500
 MAX_SNIPPET_CHARS = 1200
@@ -60,27 +64,37 @@ def _text_flag(value: Any, limit: int) -> tuple[str, bool]:
     return text[:limit], len(text) > limit
 
 
-def _question_text(value: Any) -> str:
-    """The research question, served WHOLE — never truncated.
+def _question_text(value: Any) -> tuple[str, bool]:
+    """The research question plus whether a legacy row forced a bound.
 
     The value is ``reports.question``, the create-time question: confirmation
     writes its edited ``resolved_question`` into ``understanding`` (which this
     projection deliberately never exposes) and never rewrites the column.  It is
-    the user's own artifact either way, and this module used to cap it at 2,000
-    chars — silently dropping the tail of the very text that produced the
-    report, which is exactly what AGENTS.md 用户编辑的数据不得静默截断 forbids.
+    the user's own artifact, and this module used to cap it at 2,000 chars —
+    silently dropping the tail of the very text that produced the report, which
+    is exactly what AGENTS.md 用户编辑的数据不得静默截断 forbids.
 
-    Serving it whole is only sound because the *create* API bounds it first
-    (``models/reports.py::REPORT_QUESTION_MAX_CHARS``).  That is the other half
-    of the same red line — 前端显示同一护栏, API 超限明确拒绝 — and without it
-    this line would return an arbitrarily large client-controlled string on
-    every anonymous request (codex #525 R1 P2).  Note the argument is NOT "the
-    body is bigger anyway": ``content_md`` is model-generated and bounded by the
-    generation budget, whereas the question is raw client input.
+    So it is served **whole up to the create rail** and, past it, bounded *with
+    disclosure* rather than either silently clipped or unbounded:
 
-    Same call ``conversation_public_view._question_text`` makes (codex #522 R1).
+    * for anything creatable today the flag can never fire — the create API
+      refuses a longer question (``REPORT_QUESTION_MAX_CHARS``), so this is the
+      identical "served whole" behavior, byte for byte;
+    * a report created *before* that rail existed can still hold a longer
+      question, and its already-issued share link would otherwise return an
+      arbitrarily large client-controlled string on every anonymous request
+      (codex #525 R2 P2).  Bounding it here makes the projection self-bounded
+      whatever the column holds, and ``question_truncated`` keeps the user's
+      data from disappearing quietly.
+
+    Deliberately no migration: rewriting a stored question would modify the
+    user's own data to fix a projection problem.
+
+    Note the bound's justification is NOT "the body is bigger anyway":
+    ``content_md`` is model-generated and bounded by the generation budget,
+    whereas the question is raw client input.
     """
-    return str(value or "").strip()
+    return _text_flag(value, REPORT_QUESTION_MAX_CHARS)
 
 
 def public_reference(reference: Any) -> dict[str, Any]:
@@ -118,8 +132,11 @@ def public_report_payload(row: dict[str, Any], references: Sequence[Any]) -> dic
     visible = [
         public_reference(reference) for reference in list(references)[:MAX_REFERENCES]
     ]
+    question, question_truncated = _question_text(row.get("question"))
     return {
-        "question": _question_text(row.get("question")),
+        "question": question,
+        # Only ever True for a report created before the create rail existed.
+        "question_truncated": question_truncated,
         "content_md": str(row.get("content_md") or ""),
         "created_at": _text(row.get("created_at"), 64),
         "updated_at": _text(row.get("updated_at"), 64),

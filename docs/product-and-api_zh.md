@@ -1370,7 +1370,11 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 | `MAX_REFERENCE_TITLE_CHARS`（每条引用标题/原始文件名字符上限） | 400 |
 | `MAX_SNIPPET_CHARS`（每条引用摘录字符上限） | 1,200 |
 
-研究问题与报告正文（`content_md`）均**原样返回、不截断**。问题此前被截到 2,000 字符，静默丢掉的正是产生这份报告的那段文字（公开页发的是 `reports.question`，即**创建时**那一份——确认门只把编辑后的 `resolved_question` 写进 `understanding`，从不回写这一列）。「原样返回」之所以成立，是因为**创建端点先把它限住**（`REPORT_QUESTION_MAX_CHARS`）：这是同一条红线的另一半（前端显示同一护栏、API 超限明确拒绝），少了它匿名响应就会被客户端输入撑到无界。注意论据**不是**「正文本来更大」——`content_md` 是模型生成、受生成预算约束，而问题是原始客户端输入。引用的标题、原始文件名与摘录是证据元数据、仍受上限约束，但**超限会置 `title_truncated`/`file_name_truncated`/`snippet_truncated` 披露**（公开页显示「已截断」提示），不静默丢尾。`key`（24）、`location`（200）与时间戳（64）刻意不披露截断：它们是服务端派生的标签（`kN`、`PDF p.3`、ISO 时刻），没有用户自撰的尾巴可丢。
+报告正文（`content_md`）**原样返回**。研究问题在 `REPORT_QUESTION_MAX_CHARS` 以内也**原样返回**——而创建端点已经拒收更长的输入，所以**今天能建出来的每一份报告，问题都是完整的**。问题此前被截到 2,000 字符，静默丢掉的正是产生这份报告的那段文字（公开页发的是 `reports.question`，即**创建时**那一份——确认门只把编辑后的 `resolved_question` 写进 `understanding`，从不回写这一列）。
+
+超过上限只可能出现在**创建期护栏上线之前**建的报告上（它们的分享链接已经发出去了）：这时投影按上限截断并置 `question_truncated`，公开页显示「（研究问题过长，已截断）」。这样投影**自身有界**（否则匿名响应会被客户端输入撑到无界），同时不静默丢尾、也不改写用户已经存下来的数据（刻意不做数据迁移）。注意有界性的论据**不是**「正文本来更大」——`content_md` 是模型生成、受生成预算约束，而问题是原始客户端输入。
+
+前端那半护栏按 **Unicode 码点**夹（`clampToCodePoints`），不是 `<textarea maxLength>` 的 UTF-16 code unit：含 emoji 等非 BMP 字符时后者会在半数处就停手，两边号称「同一护栏」却对不上。引用的标题、原始文件名与摘录是证据元数据、仍受上限约束，但**超限会置 `title_truncated`/`file_name_truncated`/`snippet_truncated` 披露**（公开页显示「已截断」提示），不静默丢尾。`key`（24）、`location`（200）与时间戳（64）刻意不披露截断：它们是服务端派生的标签（`kN`、`PDF p.3`、ISO 时刻），没有用户自撰的尾巴可丢。
 
 后三个上限定义在 `backend/app/services/report_public_view.py`，创建上限定义在 `backend/app/models/reports.py`（前端镜像在 `frontend/app/report-api.ts::REPORT_INPUT_LIMITS`）；与下表的会话侧同名常量彼此独立（两条分享链路各有自己的契约），但截断披露这条口径必须一致。
 

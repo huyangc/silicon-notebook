@@ -31,7 +31,7 @@ import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { buildPublicReportLink } from "./public-report";
 // report-api 只 `import type` 回本文件(类型导入会被完全擦除),所以这条值导入不成环。
-import { REPORT_INPUT_LIMITS } from "./report-api";
+import { clampToCodePoints, REPORT_INPUT_LIMITS } from "./report-api";
 import { quotedPhraseHint } from "./query-syntax";
 import { sourceImageAssetUrl } from "./source-image";
 import { isAdvanced, type UiMode } from "./ui-mode.ts";
@@ -2013,15 +2013,17 @@ export function ReportsPanel({
         <textarea
           className="report-compose-input"
           rows={2}
-          // 与后端 `REPORT_QUESTION_MAX_CHARS` 同值的前端护栏：公开分享页原样返回
-          // 研究问题，所以超长必须在这里就敲不进去，而不是提交后被裁短了存。
-          maxLength={REPORT_INPUT_LIMITS.questionMaxChars}
           placeholder={creationDisabled
             ? (creationDisabledReason || "请先选择检索来源")
             : "想深入研究什么？例如：对比库内各时序收敛方法的适用场景、代价与已知坑"}
           value={question}
           disabled={creating || creationDisabled}
-          onChange={(event) => setQuestion(event.target.value)}
+          // 与后端 `REPORT_QUESTION_MAX_CHARS` 同值的前端护栏：公开分享页原样返回
+          // 研究问题，所以超长必须在这里就进不来，而不是提交后被裁短了存。按**码点**
+          // 夹（不是 `maxLength` 的 UTF-16 code unit），才与 Pydantic 同一把尺。
+          onChange={(event) => setQuestion(
+            clampToCodePoints(event.target.value, REPORT_INPUT_LIMITS.questionMaxChars),
+          )}
         />
         <div className="report-compose-actions">
           {/* 逐节检索走的就是问答那套逐步推理,英文双引号在这里同样生效——

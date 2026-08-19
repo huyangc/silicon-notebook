@@ -9621,7 +9621,10 @@ button.tag:hover {
   word-break: break-word;
 }
 
-/* 引用标题/摘录被截断时的可见提示（codex #522 R3：不静默截断）。 */
+/* 被截断时的可见提示（codex #522 R3 / #525 R2：不静默截断）。选择器不再限定在
+   引用清单里——研究问题的那条提示挂在页头，锁死在 .public-report-references 下面
+   就只有引用条目能上色，页头那条会退成一条看不出是警示的普通说明。 */
+.public-report-truncated,
 .public-report-references small.public-report-truncated {
   font-style: italic;
   color: #7a6a3f;
