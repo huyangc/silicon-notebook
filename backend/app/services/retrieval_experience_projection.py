@@ -117,6 +117,12 @@ ExperiencePolarity = Literal["good", "bad"]
 #: couple of things or a dozen", and a finer band would make the situation
 #: fingerprint more identifying without making the advice better.
 CountBand = Literal["none", "few", "many"]
+#: codex #524 R16 P3:内容寻址主键的哈希截断长度(SHA-256 hex 前缀,128 bit)。
+#: 这是**持久身份格式**,不是可调预算——改动它会让同一条 (situation, action)
+#: 在新旧部署里哈希出两个不同主键,跨部署 merge_dbs 的全局并集从"同条目
+#: 去重"退化成"同条目双行、证据各分一半"。协议边界,具名钉死,绝不调。
+EXPERIENCE_ID_HASH_HEX_CHARS = 32
+
 _FEW_MAX = 2
 
 #: The closed KEY registry of a situation fingerprint. A key outside it, or a
@@ -486,7 +492,7 @@ def experience_id(situation: Mapping[str, Any], action: str) -> str:
         ensure_ascii=False,
     )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"rx_{digest[:32]}"
+    return f"rx_{digest[:EXPERIENCE_ID_HASH_HEX_CHARS]}"
 
 
 def situation_similarity(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
