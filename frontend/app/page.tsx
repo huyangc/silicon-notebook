@@ -179,6 +179,7 @@ import {
   testSystemModelService,
 } from "./model-services.ts";
 import { FloatingModalCard } from "./floating-modal-card";
+import { ConversationShareModal } from "./conversation-share-modal";
 import {
   CommandCatalogReview,
   CommandCatalogSection,
@@ -1074,6 +1075,9 @@ export default function Home() {
   const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
+  // 会话公开分享弹窗：null=未打开，否则是正在分享的那条会话（按 id 作 key 重挂，
+  // 切会话即重置弹窗态，避免把上一条的分享态按到新会话头上）。
+  const [sharingSession, setSharingSession] = useState<ConversationSummary | null>(null);
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
   const [askMode, setAskMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [askRetrievalEffort, setAskRetrievalEffort] = useState<AskRetrievalEffortId>(
@@ -7344,6 +7348,7 @@ export default function Home() {
                               </small>
                             </button>
                             <div className="chat-session-card-actions">
+                              <button type="button" title="分享" onClick={() => setSharingSession(session)}><Share2 size={14} /></button>
                               <button type="button" title="重命名" onClick={() => beginRenameSession(session)}><Edit3 size={14} /></button>
                               <button type="button" title="删除" onClick={() => requestDeleteSession(session)}><Trash2 size={14} /></button>
                             </div>
@@ -8478,6 +8483,16 @@ export default function Home() {
           onOpenTable={openKnowhowTable}
           onToast={setToast}
           onReviewed={() => setCatalogReviewSeq((seq) => seq + 1)}
+        />
+      )}
+
+      {sharingSession && currentNotebookId && (
+        <ConversationShareModal
+          key={sharingSession.id}
+          notebookId={currentNotebookId}
+          conversationId={sharingSession.id}
+          title={sharingSession.title || ""}
+          onClose={() => setSharingSession(null)}
         />
       )}
 

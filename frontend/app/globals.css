@@ -9660,6 +9660,194 @@ button.tag:hover {
   }
 }
 
+/* 会话公开页：多轮问答竖排。复用 .public-report 的容器/引用出处/正文样式，
+   只补每轮的问题条、附图区与轮次分隔。 */
+.public-conversation .public-turn {
+  display: grid;
+  gap: 14px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.public-conversation .public-turn:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.public-turn-question {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.public-turn-role {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #eef2f8;
+  color: #3f4b5b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.public-turn-qbody {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.public-turn-qbody p {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.public-turn-time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.public-turn-answer {
+  position: relative;
+}
+
+.public-turn-evidence {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  border: 1px solid #cfd8e6;
+  background: #fff;
+  color: #4a5666;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.public-turn-evidence.evidence-grounded {
+  border-color: #b7dfc4;
+  color: #1f7a44;
+  background: #f2fbf5;
+}
+
+.public-turn-evidence.evidence-inferred {
+  border-color: #e6d3b7;
+  color: #8a6a2a;
+  background: #fdf8ef;
+}
+
+.public-turn-omitted {
+  color: #8a6a2a;
+}
+
+/* 附图区必须与引证内容视觉区分——它不是模型引用过的证据（模型不看图）。 */
+.public-turn-images {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed #cfd8e6;
+  border-radius: 12px;
+  background: #f7fafc;
+}
+
+.public-turn-images-label {
+  margin: 0;
+  color: #5e6a79;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.public-turn-images-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.public-turn-figure {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.public-turn-figure img {
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.public-turn-figure figcaption {
+  color: #5e6a79;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.public-conversation .public-report-references {
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* 会话分享弹窗（conversation-share-modal.tsx）。 */
+.conversation-share-body {
+  display: grid;
+  gap: 12px;
+}
+
+.conversation-share-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.conversation-share-link input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.conversation-share-link .sort-button {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.conversation-share-disclosure {
+  display: grid;
+  gap: 4px;
+}
+
+.conversation-share-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  justify-self: start;
+}
+
+.conversation-share-body .button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.conversation-share-revoke {
+  justify-self: start;
+  border-color: #e2b6b6;
+  color: #a02929;
+}
+
 /* 分享链接的常见去处是打印/存 PDF:去掉屏幕上的卡片外壳,并且不让一条引用
    出处被分页切成两半。 */
 @media print {
