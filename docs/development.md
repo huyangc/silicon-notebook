@@ -365,7 +365,7 @@ across open and immediately before publication/PG commit. JSONB prefix proof
 normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
 SQL numeric columns remain type-distinct. It uses bounded
 named server cursors plus statement timeouts/cancellation polls, and performs
-full initial/final migration-derived validation of v30 tables, columns,
+full initial/final migration-derived validation of v32 tables, columns,
 constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
 is intentionally lightweight. The final SQLite fence is acquired only after
 the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
