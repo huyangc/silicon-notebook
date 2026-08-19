@@ -23,9 +23,31 @@ from typing import Any
 from app.models.ask import PublicConversation
 from app.services.conversation_public_view import (
     MAX_REFERENCES,
-    public_conversation_payload,
-    public_turn,
+    conversation_asset_alias,
+    referenced_asset_ids,
+    resolve_conversation_asset_alias,
+    public_conversation_payload as _project_conversation,
+    public_turn as _project_turn,
 )
+
+
+# T4 made the projection require the share token (to derive each image's opaque
+# alias) and the deployment image switch. These same-named thin wrappers thread
+# a fixed token + images-on default so every T3 assertion below stays
+# byte-identical with zero call-site churn; the T4 tests pass the switch
+# explicitly, and the real endpoint (test_public_conversation_asset_api.py)
+# exercises the un-defaulted underlying function end to end.
+_SHARE_TOKEN = "conversation-share-token"
+
+
+def public_turn(turn, *, share_token=_SHARE_TOKEN, images_enabled=True):
+    return _project_turn(turn, share_token=share_token, images_enabled=images_enabled)
+
+
+def public_conversation_payload(row, *, share_token=_SHARE_TOKEN, images_enabled=True):
+    return _project_conversation(
+        row, share_token=share_token, images_enabled=images_enabled
+    )
 
 
 # ---- helpers -------------------------------------------------------------
@@ -213,11 +235,12 @@ def test_projection_keys_are_exactly_the_allowlist():
     assert set(turn["references"][0]) == {
         "key", "title", "file_name", "location", "snippet"
     }
-    # And the turn itself exposes no reasoning/id surface.
+    # And the turn itself exposes no reasoning/id surface. ``images`` is the
+    # only T4 addition; it carries aliases + captions, never addressable ids.
     assert set(turn) == {
         "question", "answer_md", "asked_at", "answered_at", "evidence_level",
         "references", "reference_count", "truncated_references",
-        "omitted_result_sets",
+        "omitted_result_sets", "images",
     }
 
 
@@ -247,23 +270,165 @@ def test_memory_citation_keeps_excerpt_but_strips_memory_id():
     assert "memory_id" not in turn["references"][0]
 
 
-# ---- 承重 ③:附图 v1 不外发,不泄露 asset_id/element_id -----------------
+# ---- 承重 ③ (T4):附图作为 token 别名外发,绝不泄露 asset_id/element_id -----
 
 
-def test_answer_images_are_not_exposed_in_v1():
-    """Images are T4's anonymous channel; v1's public turn has no image field
-    and must not leak `asset_id`/`element_id` from a turn's images."""
+def test_answer_images_are_projected_as_token_aliases_not_raw_ids():
+    """T4: an answer-attached image crosses as an opaque, token-derived alias +
+    caption — never its raw ``asset_id``/``element_id``. Emitting the raw
+    ``asset_id`` (or the ``element_id``) into ``PublicImage`` turns this red."""
     payload = {
         "answer": "带图证据 [k1]。",
         "anchors": [_anchor("k1")],
         "citations": [],
     }
     turn = public_turn(_turn("q", payload))
-    assert "images" not in turn
-    assert "images" not in turn["references"][0]
+
+    assert turn["images"] == [{
+        "alias": conversation_asset_alias(_SHARE_TOKEN, "ASSET-k1"),
+        "caption": "图注",
+    }]
+    # The raw handles never appear anywhere in the turn.
     haystack = _all_strings(turn)
-    assert "ASSET-k1" not in haystack
-    assert "IMGELE-k1" not in haystack
+    assert "ASSET-k1" not in haystack   # raw asset_id
+    assert "IMGELE-k1" not in haystack  # element_id dropped entirely
+    # References themselves never gain an image field.
+    assert "images" not in turn["references"][0]
+
+
+def test_image_alias_is_derived_from_the_share_token():
+    """The alias is HMAC(asset_id) under the share token, so a DIFFERENT token
+    produces a different alias — that is what makes revocation total and
+    cross-link correlation impossible. Load-bearing for the endpoint round-trip:
+    if the alias ignored the token, the two channels would still agree but the
+    security properties would be gone."""
+    a = conversation_asset_alias("token-A", "ASSET-x")
+    b = conversation_asset_alias("token-B", "ASSET-x")
+    assert a != b
+    assert a == conversation_asset_alias("token-A", "ASSET-x")  # deterministic
+    assert len(a) == 32
+
+
+def test_images_are_deduped_by_asset_id_across_selected_references():
+    """The same image cited by two selected anchors shows once (first-seen)."""
+    payload = {
+        "answer": "首 [k1] 再 [k2]。",
+        "anchors": [
+            _anchor("k1", images=[{"element_id": "E1", "asset_id": "SHARED",
+                                   "caption": "甲"}]),
+            _anchor("k2", images=[{"element_id": "E2", "asset_id": "SHARED",
+                                   "caption": "乙"}]),
+        ],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert turn["images"] == [{
+        "alias": conversation_asset_alias(_SHARE_TOKEN, "SHARED"),
+        "caption": "甲",  # first-seen caption wins
+    }]
+
+
+def test_images_come_from_selected_references_only():
+    """Images ride the SELECTED references. When anchors win, a citation's
+    images do not appear (mirrors the reference selection)."""
+    payload = {
+        "answer": "锚点 [k1]。",
+        "anchors": [_anchor("k1", images=[{"element_id": "AE", "asset_id": "A-ASSET",
+                                            "caption": "锚图"}])],
+        "citations": [_citation(1, images=[{"element_id": "CE", "asset_id": "C-ASSET",
+                                            "caption": "引图"}])],
+    }
+    turn = public_turn(_turn("q", payload))
+    aliases = [image["alias"] for image in turn["images"]]
+    assert aliases == [conversation_asset_alias(_SHARE_TOKEN, "A-ASSET")]
+    assert conversation_asset_alias(_SHARE_TOKEN, "C-ASSET") not in aliases
+
+
+def test_images_are_empty_when_the_deployment_stores_no_images():
+    """MINERU_RETURN_IMAGES off -> the projection emits no aliases, so the page
+    never hands out a handle to bytes the deployment declined to serve."""
+    payload = {
+        "answer": "带图证据 [k1]。",
+        "anchors": [_anchor("k1")],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload), images_enabled=False)
+    assert turn["images"] == []
+
+
+def test_malformed_scalar_image_is_skipped_not_crashed():
+    """A non-dict image entry (hand-edited/ancient row) is skipped, matching the
+    ``_as_list``/``isinstance`` discipline the rest of the module uses."""
+    payload = {
+        "answer": "锚点 [k1]。",
+        "anchors": [_anchor("k1", images=[7, {"asset_id": "OK", "caption": "c"},
+                                          "junk"])],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload))
+    assert turn["images"] == [{
+        "alias": conversation_asset_alias(_SHARE_TOKEN, "OK"),
+        "caption": "c",
+    }]
+
+
+# ---- T4:别名反查(端点侧)与投影共用同一份派生 --------------------------
+
+
+def test_alias_round_trips_against_the_referenced_assets():
+    """The alias the projection emits resolves back to its asset_id via the
+    endpoint helper — the two share ``conversation_asset_alias``. And the token
+    is load-bearing: the SAME alias resolves to nothing under another token
+    (the endpoint would 404)."""
+    row = {"turns": [_turn("q", {
+        "answer": "带图 [k1]。",
+        "anchors": [_anchor("k1", images=[{"element_id": "E", "asset_id": "REF-ASSET",
+                                           "caption": "c"}])],
+        "citations": [],
+    })]}
+    alias = conversation_asset_alias(_SHARE_TOKEN, "REF-ASSET")
+    assert resolve_conversation_asset_alias(row, _SHARE_TOKEN, alias) == "REF-ASSET"
+    # Wrong token -> no match (revocation / cross-link isolation).
+    assert resolve_conversation_asset_alias(row, "other-token", alias) is None
+
+
+def test_unreferenced_asset_alias_does_not_resolve():
+    """An alias for an asset that is NOT referenced anywhere in the snapshot
+    resolves to nothing — the endpoint serves only referenced assets."""
+    row = {"turns": [_turn("q", {
+        "answer": "带图 [k1]。",
+        "anchors": [_anchor("k1", images=[{"element_id": "E", "asset_id": "IN-SNAP",
+                                           "caption": "c"}])],
+        "citations": [],
+    })]}
+    stranger = conversation_asset_alias(_SHARE_TOKEN, "NOT-IN-SNAPSHOT")
+    assert resolve_conversation_asset_alias(row, _SHARE_TOKEN, stranger) is None
+
+
+def test_referenced_asset_ids_spans_anchors_and_citations_deduped():
+    """The endpoint enumeration is a SUPERSET of the projection: it walks BOTH
+    anchors and citations on every turn, deduped and bounded."""
+    row = {"turns": [
+        _turn("q1", {"answer": "a", "anchors": [
+            _anchor("k1", images=[{"element_id": "E1", "asset_id": "A1", "caption": ""}])],
+            "citations": [
+            _citation(1, images=[{"element_id": "E2", "asset_id": "C1", "caption": ""}])]}),
+        _turn("q2", {"answer": "b", "anchors": [
+            _anchor("k2", images=[{"element_id": "E3", "asset_id": "A1", "caption": ""}])],
+            "citations": []}),  # A1 repeats -> deduped
+    ]}
+    assert referenced_asset_ids(row) == ["A1", "C1"]
+
+
+def test_empty_or_blank_alias_never_resolves():
+    row = {"turns": [_turn("q", {
+        "answer": "带图 [k1]。",
+        "anchors": [_anchor("k1", images=[{"element_id": "E", "asset_id": "X",
+                                           "caption": "c"}])],
+        "citations": [],
+    })]}
+    assert resolve_conversation_asset_alias(row, _SHARE_TOKEN, "") is None
+    assert resolve_conversation_asset_alias(row, _SHARE_TOKEN, "   ") is None
 
 
 # ---- C-1:清单卡不外发,但留计数信号 ------------------------------------
