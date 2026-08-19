@@ -115,6 +115,32 @@ def test_report_create_rejects_blank_question_and_missing_nb(client, monkeypatch
     assert r.status_code == 404
 
 
+def test_report_create_refuses_an_over_length_question(client, monkeypatch):
+    """研究问题必须在**创建**这一刻就有界(codex #525 R1 P2)。
+
+    公开分享页把 `reports.question` **原样**发给匿名访客(截断用户自撰 artifact
+    而不披露违反「用户编辑的数据不得静默截断」),而确认门只写 `resolved_question`
+    进 understanding、从不回写这一列——所以「原样返回」只有在创建端点拒收超长问题
+    时才是有界的。这条与前端 `REPORT_INPUT_LIMITS.questionMaxChars` 是同一条护栏的
+    两半。"""
+    from app.models.reports import REPORT_QUESTION_MAX_CHARS
+    import app.api.report_routes as routes_mod
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+
+    over = "问" * (REPORT_QUESTION_MAX_CHARS + 1)
+    r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": over})
+    assert r.status_code == 422
+    # 拒绝，不是裁短了存：库里不能留下一份被悄悄截过的问题。
+    assert client.get(f"/api/notebooks/{nb['id']}/reports").json() == []
+
+    # 恰好等于上限仍然收——上限是护栏不是陷阱(空转保护:一个恒 422 的实现过不了)。
+    at_cap = "问" * REPORT_QUESTION_MAX_CHARS
+    ok = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": at_cap})
+    assert ok.status_code == 200, ok.text
+
+
 def test_cancel_registry_live_thread_path(client, monkeypatch):
     """取消先持久化终态，再通知当前进程的活动线程。"""
     from app.services.report_engine import (

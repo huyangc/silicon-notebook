@@ -63,17 +63,20 @@ def _text_flag(value: Any, limit: int) -> tuple[str, bool]:
 def _question_text(value: Any) -> str:
     """The research question, served WHOLE — never truncated.
 
-    This module used to cap it at 2,000 chars.  Two things make that a silent
-    data loss rather than a safety bound:
+    The value is ``reports.question``, the create-time question: confirmation
+    writes its edited ``resolved_question`` into ``understanding`` (which this
+    projection deliberately never exposes) and never rewrites the column.  It is
+    the user's own artifact either way, and this module used to cap it at 2,000
+    chars — silently dropping the tail of the very text that produced the
+    report, which is exactly what AGENTS.md 用户编辑的数据不得静默截断 forbids.
 
-    * the question is the user's own artifact.  It is editable at the intent
-      confirmation gate and the intent contract carries it at up to 4,000 chars
-      (``ReportIntentConfirmation.resolved_question``), so a confirmed question
-      can be twice the retired cap — and the tail that got dropped was the tail
-      of the very text that produced the report;
-    * the cap bounded nothing.  ``content_md`` — orders of magnitude larger — is
-      already served whole right below, so clipping the question never made this
-      response any smaller in a way that mattered.
+    Serving it whole is only sound because the *create* API bounds it first
+    (``models/reports.py::REPORT_QUESTION_MAX_CHARS``).  That is the other half
+    of the same red line — 前端显示同一护栏, API 超限明确拒绝 — and without it
+    this line would return an arbitrarily large client-controlled string on
+    every anonymous request (codex #525 R1 P2).  Note the argument is NOT "the
+    body is bigger anyway": ``content_md`` is model-generated and bounded by the
+    generation budget, whereas the question is raw client input.
 
     Same call ``conversation_public_view._question_text`` makes (codex #522 R1).
     """

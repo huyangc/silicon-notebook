@@ -5,9 +5,28 @@ from pydantic import BaseModel, Field, field_validator
 from app.core.internal_observability import public_report_sections
 from app.models.source_scope import BaseNotebookScope, SourceScope
 
+# The one rail on a research question's length, shared by the create request and
+# the confirmed question the intent gate hands back.  It is a protocol boundary,
+# not a tunable, so it lives as a named constant rather than a literal repeated
+# per field; `frontend/app/report-api.ts::REPORT_INPUT_LIMITS` mirrors it.
+#
+# It is load-bearing for the *public* share page: `report_public_view` serves
+# `reports.question` WHOLE (truncating a user's own artifact with no disclosure
+# violates AGENTS.md 用户编辑的数据不得静默截断), and `reports.question` is the
+# create-time value -- confirmation writes `resolved_question` into
+# `understanding` and never rewrites the column.  So "serve it whole" is only
+# safe while creation refuses an over-length question in the first place: that
+# is the other half of the same red line (前端显示同一护栏, API 超限明确拒绝),
+# and without it an anonymous response would be unbounded by client input
+# (codex #525 R1 P2).
+REPORT_QUESTION_MAX_CHARS = 4000
+
 
 class ReportCreate(BaseModel):
-    question: str
+    # No `min_length`: the create route already refuses an empty/whitespace
+    # question with its own 422, and adding one here would only change which
+    # layer produces the same status for the same input.
+    question: str = Field(max_length=REPORT_QUESTION_MAX_CHARS)
     history: str = ""
     depth: int = 2
     auto_generate: bool = False
@@ -36,7 +55,7 @@ class ReportClarificationAnswer(BaseModel):
 
 
 class ReportIntentConfirm(BaseModel):
-    resolved_question: str = Field(min_length=1, max_length=4000)
+    resolved_question: str = Field(min_length=1, max_length=REPORT_QUESTION_MAX_CHARS)
     answers: List[ReportClarificationAnswer] = Field(default_factory=list, max_length=8)
 
 
