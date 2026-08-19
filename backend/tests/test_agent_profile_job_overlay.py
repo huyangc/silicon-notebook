@@ -1686,3 +1686,32 @@ def test_a_superseded_claim_writes_nothing_and_says_so(harness, monkeypatch):
     block = _blocks(harness, USER_A)["retrieval_notes"]
     assert block["value"] == "现任"
     assert block["revision"] == 1
+
+
+def test_the_runtime_actually_wires_the_access_seat():
+    """codex 复核(P2-T3 spec 评审 P2):`repository_runtime.py` 是生产里 access
+    座位唯一的来源,删掉那一行整仓测试仍会全绿(overlay fixture 自己接线,守卫只
+    扫 agent_profile_job.py),而 R5 会原样复活且无人报错。照 startup sweep 守卫
+    的先例,把接线钉成静态断言。"""
+    import ast
+    from pathlib import Path as _Path
+
+    from app.services import repository_runtime
+
+    source = _Path(repository_runtime.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    wired = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == "access":
+            value = node.value
+            if (
+                isinstance(value, ast.Attribute)
+                and value.attr == "sharing_store"
+                and isinstance(value.value, ast.Name)
+                and value.value.id == "self"
+            ):
+                wired = True
+    assert wired, (
+        "repository_runtime 里 AgentProfileConsolidationService 的 access 座位"
+        "必须接 self.sharing_store——删掉它 R5 静默复活(所有测试仍绿)。"
+    )
