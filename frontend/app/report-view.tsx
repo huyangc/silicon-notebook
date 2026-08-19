@@ -31,7 +31,7 @@ import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { buildPublicReportLink } from "./public-report";
 // report-api 只 `import type` 回本文件(类型导入会被完全擦除),所以这条值导入不成环。
-import { clampToCodePoints, REPORT_INPUT_LIMITS } from "./report-api";
+import { reportQuestionLimitHint } from "./report-api";
 import { quotedPhraseHint } from "./query-syntax";
 import { sourceImageAssetUrl } from "./source-image";
 import { isAdvanced, type UiMode } from "./ui-mode.ts";
@@ -2007,6 +2007,10 @@ export function ReportsPanel({
   }
 
   // ---- 列表视图 ----
+  // 超限只拦提交,不动用户输入(codex #525 R3):按码点数,与后端同一把尺。
+  const questionLimitHint = reportQuestionLimitHint(question);
+  const questionTooLong = questionLimitHint !== null;
+
   return (
     <div className="report-panel">
       {!readOnly && <div className="report-compose">
@@ -2018,18 +2022,17 @@ export function ReportsPanel({
             : "想深入研究什么？例如：对比库内各时序收敛方法的适用场景、代价与已知坑"}
           value={question}
           disabled={creating || creationDisabled}
-          // 与后端 `REPORT_QUESTION_MAX_CHARS` 同值的前端护栏：公开分享页原样返回
-          // 研究问题，所以超长必须在这里就进不来，而不是提交后被裁短了存。按**码点**
-          // 夹（不是 `maxLength` 的 UTF-16 code unit），才与 Pydantic 同一把尺。
-          onChange={(event) => setQuestion(
-            clampToCodePoints(event.target.value, REPORT_INPUT_LIMITS.questionMaxChars),
-          )}
+          // 刻意**不**加 `maxLength`、也不在这里夹：超限的处理是「拦住提交并说清楚」
+          // （见下方 hint 与按钮的 disabled），不是替用户把粘进来的尾巴删掉。
+          onChange={(event) => setQuestion(event.target.value)}
         />
         <div className="report-compose-actions">
           {/* 逐节检索走的就是问答那套逐步推理,英文双引号在这里同样生效——
               回执与提问框共用同一份规则,不另写一套措辞。 */}
-          <span className="report-compose-hint">
-            {quotedPhraseHint(question)
+          {/* 超限提示优先于引号回执：它是此刻唯一挡着提交的东西。 */}
+          <span className={`report-compose-hint${questionTooLong ? " over-limit" : ""}`}>
+            {questionLimitHint
+              ?? quotedPhraseHint(question)
               ?? "后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页"}
           </span>
           <div className="report-compose-controls">
@@ -2046,7 +2049,7 @@ export function ReportsPanel({
             <button
               className="button"
               type="button"
-              disabled={creating || creationDisabled || !question.trim()}
+              disabled={creating || creationDisabled || !question.trim() || questionTooLong}
               onClick={() => void submitCreate()}
             >
               {creating ? "提交中…" : "生成深度报告"}

@@ -99,10 +99,13 @@ test("the quote parse exists only in the shared module", async () => {
     assert.ok(imported.includes("quotedPhraseHint"), `${consumer} 未引入共享回执`);
     const rendered = module.getFullText().match(/quotedPhraseHint\(/g) ?? [];
     assert.ok(rendered.length >= 1, `${consumer} 引入了却没调用`);
-    // 回执落在 JSX 里(而不是只算给某个变量再丢掉)。
+    // 回执落在 JSX 里(而不是只算给某个变量再丢掉)。允许它是 JSX 表达式里一条
+    // `??` 链的某一节——report-view 的那句提示位现在要先让位给「问题超出字数上限」
+    // 的告警(codex #525 R3),回执排在它后面仍然是真渲染。仍然要求它**直接**起于
+    // `{`(至多隔一个先手变量),这样「算进某个变量再丢掉」照旧报红。
     assert.match(
       module.getFullText(),
-      /\{\s*(askQuotedPhraseHint|quotedPhraseHint\(question\))/,
+      /\{\s*(?:[A-Za-z_$][\w$]*\s*\?\?\s*)?(askQuotedPhraseHint|quotedPhraseHint\(question\))/,
       `${consumer} 未把回执渲染进 JSX`,
     );
   }
