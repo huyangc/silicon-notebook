@@ -639,6 +639,7 @@ def test_a_rationale_carrying_an_id_shaped_token_is_dropped():
 
 def test_one_bad_entry_does_not_discard_its_sound_neighbours():
     groups = _groups()
+    offered = [(0, {"action": "ppr", "situation": dict(groups[0].situation)})]
     parsed = parse_distillation_reply(
         {
             "entries": [
@@ -649,9 +650,44 @@ def test_one_bad_entry_does_not_discard_its_sound_neighbours():
             ]
         },
         groups,
+        offered,
     )
     assert len(parsed) == 1
     assert parsed[0]["replace"] is True
+
+
+def test_an_update_resolves_to_the_offered_entrys_own_identity():
+    """codex #524 R2 P2:offered 条目的情境可能只是「相似」而非相同——UPDATE
+    必须落在被展示那一行自己的身份上,否则旧结论留在库里、新结论另起一行,
+    两条互相矛盾的打法都可被注入。"""
+    groups = _groups()
+    stored = dict(groups[0].situation)
+    # 与 group 情境相差一键(相似但不同)的已存条目
+    flipped_key = next(iter(stored))
+    stored = {**stored, flipped_key: "unknown" if stored[flipped_key] != "unknown" else "none"}
+    offered = [(0, {"action": "ppr", "situation": stored})]
+    parsed = parse_distillation_reply(
+        {"entries": [{"op": "UPDATE", "situation": "s0", "action": "ppr",
+                      "polarity": "good", "rationale": "改判"}]},
+        groups,
+        offered,
+    )
+    assert len(parsed) == 1
+    assert parsed[0]["replace"] is True
+    assert parsed[0]["situation"] == stored          # 用的是已存行的身份
+    assert parsed[0]["situation"] != dict(groups[0].situation)
+
+
+def test_an_update_naming_an_unoffered_entry_downgrades_to_a_plain_add():
+    groups = _groups()
+    parsed = parse_distillation_reply(
+        {"entries": [{"op": "UPDATE", "situation": "s0", "action": "ppr",
+                      "polarity": "good", "rationale": "凭空更新"}]},
+        groups,
+        offered=(),
+    )
+    assert len(parsed) == 1
+    assert parsed[0]["replace"] is False              # 不许改写从未展示过的行
 
 
 def test_a_noop_writes_nothing():

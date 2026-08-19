@@ -261,3 +261,13 @@ def test_merge_core_actually_wires_the_post_union_eviction():
     union_at = core.index("GLOBAL_UNION_TABLES:")
     evict_at = core.index("_evict_experiences_to_limit(conn)")
     assert evict_at > union_at, "收容必须发生在 GLOBAL_UNION 并集之后"
+
+
+def test_the_offline_eviction_cap_matches_the_runtime_protocol_constant():
+    """codex #524 R2 P2:merge_dbs 是纯 stdlib 离线脚本、刻意不 import 后端包,
+    上限因此是第二份拼写——本测试把两份钉成相等,任一侧漂移即红(单一真源的
+    测试化替代)。"""
+    from app.repositories.ports import RETRIEVAL_EXPERIENCE_MAX_ENTRIES
+
+    offline_default = merge_dbs._evict_experiences_to_limit.__defaults__[0]
+    assert offline_default == RETRIEVAL_EXPERIENCE_MAX_ENTRIES
