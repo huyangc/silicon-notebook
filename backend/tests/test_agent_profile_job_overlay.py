@@ -2205,3 +2205,34 @@ def test_report_samples_follow_completion_order_not_creation_order(harness):
     assert "rep-old" in ids          # 完成序窗口容得下它
     assert ids[0] == "rep-old"       # 且它就是最新完成的那份
     assert rows[0]["attempts"][0]["query"] == "迟到方向"
+
+
+def test_report_half_survives_a_full_load_of_empty_search_summaries(harness):
+    """codex #524 R17 P2:表头与空检索摘要不计账时,吃满的问题行 + 12 条
+    摘要能把 rendered_so_far 顶过总上限,报告段余量归 0——混合使用的成员
+    的报告方向从此进不了巡固。ask 半区(表头+问题+摘要)整体钉在一半以内,
+    报告段构造性拿到另一半。"""
+    for index in range(AGENT_PROFILE_TRACE_SAMPLE):
+        _add_ask(
+            harness, f"job-{index:02d}", user_id=USER_A,
+            question=f"{index:02d}" + "问" * 110,
+            created_at=f"2026-08-18T00:{index:02d}:00+00:00",
+            steps=({"step_type": "retrieve",
+                    "summary": f"空手查询 {index:02d} " + "词" * 100,
+                    "detail": {"count": 0}},),
+        )
+    _add_report(
+        harness, "rep-mix", user_id=USER_A,
+        question="混合成员的报告" + "题" * 80,
+        created_at="2026-08-18T01:00:00+00:00",
+        attempted=(({"query": "方向" * 30, "new": 1, "tries": 1},),),
+    )
+
+    stats = _service(harness).usage_stats(NOTEBOOK_ID, USER_A)
+    block = render_usage_block(stats)
+
+    assert "[Your recent deep reports in this library]" in block
+    assert "- 混合成员的报告" in block, (
+        "满额空检索摘要不得把报告段饿死到一行都渲染不出"
+    )
+    assert len(block) <= AGENT_PROFILE_USAGE_SECTION_MAX_CHARS * 1.35
