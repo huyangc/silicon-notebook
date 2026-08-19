@@ -485,15 +485,19 @@ def test_the_trigger_fires_only_at_the_threshold():
         event_log=_Events(),
     )
     started = []
-    service.start = lambda: started.append(1) or True  # type: ignore[assignment]
+    service._submit_claimed = (  # type: ignore[assignment]
+        lambda snapshot: started.append(snapshot)
+    )
     service.note_ask_completed()
     service.note_ask_completed()
     assert started == []
     service.note_ask_completed()
-    assert started == [1]
-    # The counter resets, so the next round takes another full threshold.
+    assert started == [3]          # 快照=认领时的全部积压
+    # 认领临界区已消费计数并占住单飞位(worker 被 stub、不会释放):
+    # 下一次完成只计数、不重复排批。
     service.note_ask_completed()
-    assert started == [1]
+    assert started == [3]
+    assert service._pending == 1
 
 
 def test_the_trigger_never_raises_into_the_ask_path():
@@ -765,11 +769,9 @@ def test_renderers_show_the_action_denominator_alongside_total_runs():
 
 
 def test_completions_arriving_while_the_worker_is_busy_are_not_lost(monkeypatch):
-    """codex #524 R1 P2:单飞占用时 start() 拒绝,阈值计数必须保留——重置发生在
-    「真的排上了」之后。否则模型调用期间攒满的一整批 run 既不在本批样本里、
-    也不会触发下一批,持续流量下成组静默丢失。"""
+    """codex #524 R1/R3 P2:单飞占用时**不消费**,阈值计数保留——认领与消费在
+    同一临界区,busy 期间攒满的整批由下一次完成补触发,不丢也不重复。"""
     service = _service([], _REPLY)
-    _with_inline_submitter(monkeypatch) if "_with_inline_submitter" in globals() else None
     service._running = True          # 模拟在飞 worker 占住单飞位
     trigger = max(1, int(service.settings.retrieval_experience_trigger))
     for _ in range(trigger):
@@ -777,7 +779,29 @@ def test_completions_arriving_while_the_worker_is_busy_are_not_lost(monkeypatch)
     assert service._pending >= trigger   # 没被清零(修复前这里是 0)
     service._running = False
     submitted = []
-    monkeypatch.setattr(service, "start", lambda: submitted.append(1) or True)
+    monkeypatch.setattr(
+        service, "_submit_claimed", lambda snapshot: submitted.append(snapshot)
+    )
     service.note_ask_completed()          # 下一次完成立刻补触发
-    assert submitted == [1]
+    assert submitted == [trigger + 1]     # 整批(含 busy 期间的)一次消费
     assert service._pending == 0
+    assert service._running is True       # 认领已在临界区内完成
+
+
+def test_a_fast_worker_cannot_double_schedule_the_same_signals(monkeypatch):
+    """codex #524 R3 P2:认领与消费同临界区——快 worker 在消费落地前释放槽位
+    也不可能让并发完成看到「未消费的阈值」而排出第二个重复批次。"""
+    service = _service([], _REPLY)
+    submitted = []
+    monkeypatch.setattr(
+        service, "_submit_claimed", lambda snapshot: submitted.append(snapshot)
+    )
+    trigger = max(1, int(service.settings.retrieval_experience_trigger))
+    for _ in range(trigger):
+        service.note_ask_completed()
+    assert submitted == [trigger]
+    # 模拟快 worker 立刻结束释放槽位——此刻 pending 已在认领临界区被消费为 0
+    service._running = False
+    service.note_ask_completed()          # 竞入的下一次完成
+    assert submitted == [trigger]         # 不会重复排批
+    assert service._pending == 1
