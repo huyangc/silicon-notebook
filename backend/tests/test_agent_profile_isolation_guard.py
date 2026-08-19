@@ -92,6 +92,12 @@ OVERLAY_CHAIN_FUNCTIONS: frozenset[str] = frozenset({
     "usage_stats",
     "summarize_usage",
     "render_usage_block",
+    # P2-T4:`render_usage_block` 的报告分段与它的方向清单。纯文本、零端口
+    # 调用,但归**覆盖层**而不是中性——中性的含义是「不碰某个成员的数据」,
+    # 而这两个函数处理的正是该成员自己的报告问题与检索方向措辞。放中性会让
+    # 「往中性一扔就谁也不扫」这条后门恰好开在私有措辞上。
+    "_render_report_sample",
+    "_render_report_directions",
     "render_current_overlay_blocks",
     "parse_overlay_reply",
     # codex R1: P1 撤销竞态的写后兜底(只删该成员自己的行)与 P2 的重排(只读

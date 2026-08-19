@@ -434,9 +434,17 @@ class AskStateStore:
           from ``json_each``'s ``key`` for free.
         * ``->>`` (text) extraction, not ``->`` — this store hands the two
           scalar columns to ``project_report_attempt`` as ``str | None``,
-          where the SQLite side hands it ``int | None`` from
-          ``json_extract``; that function is the one place both shapes are
-          reconciled.
+          where the SQLite side hands it whatever ``json_extract`` yields;
+          that function is the one place both shapes are reconciled.
+
+        ⚠ The per-attempt ``jsonb_typeof(a.value) = 'object'`` guard on the
+        two extracted columns is BEHAVIOURAL PARITY, not a fix: ``jsonb`` is
+        parsed at write time, so ``'"oops"'::jsonb ->> 'query'`` already
+        returns NULL here rather than raising the way SQLite's
+        ``json_extract`` on the same shape does (P2-T4 fix round, item 7).
+        It is written out anyway so the two statements read as the same
+        rule, and so a later edit on this side cannot quietly acquire the
+        looser semantics the SQLite side is not allowed to have.
         """
         report_limit = max(1, int(report_limit))
         attempt_limit = max(1, int(attempt_limit))
@@ -459,8 +467,10 @@ class AskStateStore:
             placeholders = ",".join("%s" for _ in by_report)
             attempt_rows = db.execute(
                 "SELECT r.id AS report_id, "
-                "(a.value ->> 'new') AS new, "
-                "(a.value ->> 'failed') AS failed "
+                "CASE WHEN jsonb_typeof(a.value) = 'object' "
+                "THEN (a.value ->> 'query') END AS query, "
+                "CASE WHEN jsonb_typeof(a.value) = 'object' "
+                "THEN (a.value ->> 'failed') END AS failed "
                 "FROM reports r, "
                 "jsonb_array_elements(CASE WHEN jsonb_typeof(r.sections_json) = 'array' "
                 "THEN r.sections_json ELSE '[]'::jsonb END) "
@@ -479,7 +489,7 @@ class AskStateStore:
             target = by_report.get(str(row["report_id"]))
             if target is not None:
                 target["attempts"].append(
-                    project_report_attempt(row["new"], row["failed"])
+                    project_report_attempt(row["query"], row["failed"])
                 )
         return reports
 

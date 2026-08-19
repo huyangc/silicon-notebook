@@ -55,10 +55,13 @@ from app.repositories.sqlite.sharing_store import SharingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.services import background_jobs
 from app.services.agent_profile_job import (
+    AGENT_PROFILE_USAGE_SECTION_MAX_CHARS,
     AGENT_PROFILE_WORKLOAD,
     BASE_CHAIN_OWNER,
     OVERLAY_LABELS,
     AgentProfileConsolidationService,
+    render_usage_block,
+    summarize_usage,
 )
 from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
 from app.services.ask_modes import ASK_MODES
@@ -1349,20 +1352,26 @@ def test_another_member_s_report_never_enters_the_sample(harness, monkeypatch):
     assert rows == []
 
 
-def test_a_failed_attempt_is_not_counted_as_a_zero_hit(harness, monkeypatch):
-    """``failed: true`` 的条目单独计成失败,不计成零命中;``new == 0`` 才计。
+def test_a_report_contributes_nothing_to_the_zero_hit_evidence(harness, monkeypatch):
+    """P2-T4 修复轮裁决 1:``usage_gaps`` 的证据回到 **ask-only**。
 
-    与 T4 拍板 4 的口径一致:检索炸了 ≠ 检索过。同一份报告里三个方向——一个
-    真正命中、一个失败、一个零命中——evidence 的 zero_hit_queries 必须恰好是
-    1,而不是把失败的那个也数进去变成 2。
+    这一条钉的是修复轮推翻的那个论证。原实现把 ``attempted[j].new == 0``
+    读成「这个方向空手而归」并计进 ``zero_hit_queries``,而 ``new`` 数的是
+    run **共享候选池**的新增知识对象——节问题先播种、方向重叠必然 0、无图库
+    恒 0、chunk/element 命中根本不计。按它计零命中,等于用一个量别的东西的
+    计数器,把「这个库没有 X 资料」固化进该成员的私有笔记。
+
+    fixture 里三个方向的 ``new`` 全是 0(最常见的真实形态,不是构造的边角),
+    只有一个 ``failed``。证据必须恰好是 **0**——不是 2(把非失败的两条计
+    进去),也不是 3。
     """
     _with_submitter(monkeypatch, _Submitter())
     _add_report(
-        harness, "rep-a", user_id=USER_A, question="混合结果的报告",
+        harness, "rep-a", user_id=USER_A, question="new 恒零的真实形态",
         attempted=((
-            {"query": "hit", "new": 2, "tries": 1},
-            {"query": "boom", "new": 5, "tries": 1, "failed": True},
-            {"query": "empty", "new": 0, "tries": 1},
+            {"query": "重叠方向甲", "new": 0, "tries": 1},
+            {"query": "重叠方向乙", "new": 0, "tries": 1, "failed": True},
+            {"query": "重叠方向丙", "new": 0, "tries": 1},
         ),),
     )
     service = _service(harness, client=_Client(_reply(
@@ -1373,8 +1382,38 @@ def test_a_failed_attempt_is_not_counted_as_a_zero_hit(harness, monkeypatch):
 
     blocks = _blocks(harness, USER_A)
     assert blocks["usage_gaps"]["evidence"] == [
-        {"claim_index": 0, "zero_hit_queries": 1}
+        {"claim_index": 0, "zero_hit_queries": 0}
     ]
+
+
+def test_a_failed_direction_is_counted_but_its_wording_is_still_listed(harness):
+    """P2-T4 修复轮裁决 8:``failed`` 的语义改为「执行失败计数」。
+
+    修复轮把零命中语义整个移走之后,``failed`` 不再是「不计成零命中」的排除
+    项,而是它自己的一件事:该方向的**执行**炸了。措辞仍然是这个人自己确认的
+    方向,所以它照样进方向清单——传输炸了说明不了措辞不好——只是另有一个计数
+    在旁边解释这份清单。
+    """
+    _add_report(
+        harness, "rep-a", user_id=USER_A, question="有失败方向的报告",
+        attempted=((
+            {"query": "正常方向", "new": 2, "tries": 1},
+            {"query": "炸掉的方向", "new": 5, "tries": 1, "failed": True},
+        ),),
+    )
+
+    rows = harness["ask_state"].recent_user_report_traces(
+        NOTEBOOK_ID, USER_A, report_limit=10, attempt_limit=200
+    )
+
+    # 投影只留 query/failed——``new`` 被丢掉,不留在任何一层。
+    assert rows[0]["attempts"] == [
+        {"query": "正常方向", "failed": False},
+        {"query": "炸掉的方向", "failed": True},
+    ]
+    block = render_usage_block(summarize_usage((), rows))
+    assert "正常方向; 炸掉的方向" in block
+    assert "(1 of these failed)" in block
 
 
 def test_only_done_reports_enter_the_sample(harness):
@@ -1395,6 +1434,154 @@ def test_only_done_reports_enter_the_sample(harness):
     )
 
     assert rows == []
+
+
+def test_the_report_section_actually_reaches_the_rendered_prompt(harness):
+    """P2-T4 修复轮裁决 9(渲染面守卫):报告分段与那条分母行真的在输出里。
+
+    这一条存在的理由很具体:整段报告渲染是一块**没有任何别的用例会碰到**的
+    代码——它不写库、不发事件、只是把文字拼进一个 prompt。删掉整段渲染,
+    上面那些「进不进样本」的用例一条都不会红,而模型从此再也看不到这个人怎么
+    写检索方向。所以这里逐项断言:分段表头在、每份报告的问题在、方向措辞在、
+    以及那条**回到 ask-only 口径**的零命中分母行(裁决 1 的落点)措辞正确。
+    """
+    _add_report(
+        harness, "rep-a", user_id=USER_A, question="宽带隙器件的热管理",
+        attempted=((
+            {"query": "GaN 结温测量方法", "new": 3, "tries": 1},
+            {"query": "衬底导热率对比", "new": 0, "tries": 1},
+        ),),
+    )
+    rows = harness["ask_state"].recent_user_report_traces(
+        NOTEBOOK_ID, USER_A, report_limit=10, attempt_limit=200
+    )
+
+    block = render_usage_block(summarize_usage((), rows))
+
+    assert "[Your recent deep reports in this library]" in block
+    assert "reports sampled: 1" in block
+    assert "- 宽带隙器件的热管理" in block
+    assert "  directions: GaN 结温测量方法; 衬底导热率对比" in block
+    # ⚠ 分母回到 ask-only(裁决 1)。零 ask 时它是 "0 (of 0 steps sampled)",
+    # 绝不能把报告方向数加进这条分母——那正是修复轮移走的那个混算。
+    assert "retrieval steps that returned nothing: 0 (of 0 steps sampled)" in block
+    assert "directions searched" not in block  # 旧的空手断言措辞不得复活
+    assert "came back empty" not in block
+
+
+def test_a_report_whose_directions_were_all_truncated_makes_no_assertion(harness):
+    """P2-T4 修复轮裁决 6(截断诚实):渲染不出方向就披露,不写「0 directions」。
+
+    ``attempt_limit`` 截断与「这份报告一个方向都没跑」在返回的行里**无法区分**
+    ——行就是不在那儿。默认配置(6 节 × 4 方向 × 10 份 = 240 > 200)让截断成为
+    常态而不是边角,所以这里用 ``attempt_limit=1`` 复现同一形态:第二份报告的
+    方向被全部截掉,它那一行必须给出「未取样」的披露,而不是一句它撑不起的
+    「searched 0 directions」。
+    """
+    _add_report(
+        harness, "rep-new", user_id=USER_A, question="较新的报告",
+        created_at="2026-08-18T02:00:00+00:00",
+        attempted=(({"query": "留下来的方向", "new": 1, "tries": 1},),),
+    )
+    _add_report(
+        harness, "rep-old", user_id=USER_A, question="较旧的报告",
+        created_at="2026-08-18T01:00:00+00:00",
+        attempted=(({"query": "被截掉的方向", "new": 1, "tries": 1},),),
+    )
+
+    rows = harness["ask_state"].recent_user_report_traces(
+        NOTEBOOK_ID, USER_A, report_limit=10, attempt_limit=1
+    )
+
+    # 截断按报告新鲜度落在最旧的那份尾部——刚跑完那份的方向绝不先掉。
+    assert [row["report_id"] for row in rows] == ["rep-new", "rep-old"]
+    assert rows[1]["attempts"] == []
+
+    block = render_usage_block(summarize_usage((), rows))
+    assert "  directions: 留下来的方向" in block
+    assert "(directions not sampled)" in block
+    assert "0 directions" not in block
+
+
+def test_a_malformed_sections_json_does_not_poison_the_whole_sample(harness):
+    """P2-T4 修复轮裁决 7:两种畸形形状实测会让整条语句 raise。
+
+    ``json_type()`` 会**解析**它的参数,所以 ``["hello"]`` 的字符串节元素和
+    ``{"attempted": ["oops"]}`` 的字符串 attempt 都会撞上 SQLite 的
+    ``malformed JSON``。爆炸半径不是那一行——语句整个抛,这个成员**全部**报告
+    一起从样本里消失,而 store 的 docstring 当时承诺的是「降级成没有方向」。
+    这里两种形状各一份,再加一份正常报告,断言正常那份完好无损。
+    """
+    with harness["database"].write() as db:
+        for report_id, blob, created in (
+            ("rep-str-section", '["hello"]', "2026-08-18T01:00:00+00:00"),
+            ("rep-str-attempt", '[{"attempted":["oops"]}]',
+             "2026-08-18T02:00:00+00:00"),
+        ):
+            db.execute(
+                "INSERT INTO reports(id,notebook_id,question,sections_json,"
+                "status,created_by,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (report_id, NOTEBOOK_ID, f"畸形-{report_id}", blob, "done",
+                 USER_A, created, created),
+            )
+    _add_report(
+        harness, "rep-ok", user_id=USER_A, question="正常的报告",
+        created_at="2026-08-18T03:00:00+00:00",
+        attempted=(({"query": "完好的方向", "new": 1, "tries": 1},),),
+    )
+
+    rows = harness["ask_state"].recent_user_report_traces(
+        NOTEBOOK_ID, USER_A, report_limit=10, attempt_limit=200
+    )
+
+    assert [row["report_id"] for row in rows] == [
+        "rep-ok", "rep-str-attempt", "rep-str-section",
+    ]
+    assert rows[0]["attempts"] == [{"query": "完好的方向", "failed": False}]
+    # 畸形的两份降级成「没有方向」,而不是把整份样本带走。
+    assert rows[1]["attempts"] == [{"query": "", "failed": False}]
+    assert rows[2]["attempts"] == []
+    block = render_usage_block(summarize_usage((), rows))
+    assert "  directions: 完好的方向" in block
+    assert block.count("(directions not sampled)") == 2
+
+
+def test_the_two_usage_sections_share_one_budget_and_neither_starves(harness):
+    """P2-T4 修复轮裁决 3:ask 段与报告段共用**一份** 3000 字符预算。
+
+    共享一个计数器而不分配,等于让 ask 段先到先得——四十条提问各自 120 字符
+    早就超过 3000,于是「报告表头下面一条报告都没有」会是提问频繁的成员的
+    **常态**。这里钉的是两件事:总量仍在一份预算内(不是偷偷开第二份),且两
+    段都真的有内容。
+    """
+    for index in range(AGENT_PROFILE_TRACE_SAMPLE):
+        _add_ask(
+            harness, f"job-{index:02d}", user_id=USER_A,
+            question=f"{index:02d}" + "问" * 110,
+            created_at=f"2026-08-18T00:{index:02d}:00+00:00",
+            steps=({"step_type": "retrieve", "summary": "查",
+                    "detail": {"count": 1}},),
+        )
+    for index in range(3):
+        _add_report(
+            harness, f"rep-{index}", user_id=USER_A,
+            question=f"报告{index}" + "题" * 100,
+            created_at=f"2026-08-18T01:{index:02d}:00+00:00",
+            attempted=(({"query": "方向" * 40, "new": 1, "tries": 1},),),
+        )
+
+    stats = _service(harness).usage_stats(NOTEBOOK_ID, USER_A)
+    block = render_usage_block(stats)
+
+    assert len(block) <= AGENT_PROFILE_USAGE_SECTION_MAX_CHARS * 1.35, (
+        "两段合计必须仍在一份预算的量级内——数值宽放是因为固定表头/披露行"
+        "不计入 body 预算(既有口径),但绝不该出现两份 3000 的体量。"
+    )
+    # 最新那条提问(样本按 created_at 倒序)必须在;它是 ask 段没被饿死的证据。
+    assert "questions" in block and "- 39" in block
+    assert "[Your recent deep reports in this library]" in block
+    assert "- 报告0" in block, "ask 段不得吃光预算让报告段一行都渲染不出"
 
 
 # =====================================================================
