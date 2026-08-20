@@ -328,6 +328,27 @@ surfaces; the branch-counted bound remains exactly 12 row slots. PostgreSQL
 migration v32 is the paired schema, and the current pairing is
 SQLite 54 / PostgreSQL 32 / epoch 1.
 
+SQLite v55 adds two things in one migration (Agentic Memory P3): the leaf
+table `agent_observations` (one outgoing FK to `notebooks`, no incoming FK —
+an external Agent's per-`(notebook, owner)` observation log, ring-bounded and
+consumed only by the untrusted overlay-consolidation prompt) and a nullable
+`user_profiles.search_profile_json` column (the per-user search/answer style
+preference document; NULL means "never set", same contract as `ui_mode`).
+`agent_observations`'s idempotency unique index,
+`idx_agent_observations_request` on
+`(notebook_id, owner_id, agent_profile_id, client_request_id)
+WHERE client_request_id IS NOT NULL`, parks on NULL the same way
+`idx_conversations_share_token` does; a second, non-unique index,
+`idx_agent_observations_scope`, supports the ring-eviction delete and the
+bounded reads but adds nothing to the unique surface count.
+`user_profiles.search_profile_json` adds no unique surface, FK, or JSON
+column registration (same treatment as `ui_mode`). Because v55/v33 adds one
+more leaf table with only an outgoing FK, the forward-shadow invariants move
+to 82 business tables and 112 unique surfaces (the new table's declared PK
+plus its one partial index); the branch-counted bound remains exactly 12 row
+slots. PostgreSQL migration v33 is the paired schema, and the current
+pairing is SQLite 55 / PostgreSQL 33 / epoch 1.
+
 Run it only while application/background writers are stopped:
 
 ```bash
@@ -479,7 +500,7 @@ The verification gates are tiered:
 | G2 extended | `scripts/check_extended.sh`: G1 plus real-index/performance, cold graph/index contracts, and repository-wide semantic scans | Once daily at `17 18 * * *` UTC (02:17 Asia/Shanghai), plus manual dispatch |
 | G3 PostgreSQL | `scripts/check_postgres.sh`: direct PostgreSQL adapter integration | Independent PR/push/manual CI job |
 
-G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 12 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, and the production frontend build. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build owns TypeScript validation and must keep `ignoreBuildErrors` unset, so G1 does not parse the same TypeScript program once with `tsc --noEmit` and immediately again in the build; `npm run lint` remains available as a focused G0 command. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract` repository-wide semantic scans, and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 20 published tools: seven Memory/context, four knowhow, one citation point-read, five source-management, and three build tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 12 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, and the production frontend build. Node's test runner and Vitest are each capped at four workers, leaving CPU headroom for the backend critical path. The Next build owns TypeScript validation and must keep `ignoreBuildErrors` unset, so G1 does not parse the same TypeScript program once with `tsc --noEmit` and immediately again in the build; `npm run lint` remains available as a focused G0 command. Its backend lane excludes `slow` real-index/performance tests, `graph_index_contract` cold graph/index contracts, `architecture_contract` repository-wide semantic scans, and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly the 22 published tools: seven Memory/context, four knowhow, one citation point-read, five source-management, three build, and two notebook-understanding tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 

@@ -152,6 +152,13 @@ CJK_TERMS = {
     # 但真要出现(如某天写「簇状图」)不该被这条规则误杀,与「边」那行同一个道理。
     "社区": re.compile(r"社区"),
     "概念簇": re.compile(r"(?:canonical|概念|合并)\s*簇"),
+    # —— Agentic Memory P3「Agent 记录」。「观察队列」是该特性 agent_observations
+    # 表的内部实现措辞（后端注释/文档通篇如此），界面词是「Agent 记录」——与「巡固」/
+    # 「底座/覆盖层画像」同一处理:无歧义复合形态直接收进黑名单。
+    "观察队列": re.compile(r"观察队列"),
+    # —— Agentic Memory P3「我的回答偏好」。「回答风格偏好」是 config.py 注释里
+    # 「检索/回答风格偏好」文档的内部措辞，界面词是「我的回答偏好」。
+    "回答风格偏好": re.compile(r"回答风格偏好"),
 }
 
 CJK = re.compile(r"[一-鿿]")

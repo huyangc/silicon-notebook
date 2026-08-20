@@ -128,6 +128,7 @@ def test_黑名单词出现在渲染文本里必被抓到(tmp_path, term):
         'const f = "共 3 个 chunk";',                     # ASCII 词紧邻中文
         'const g = "保存到 Memory";',                      # 残留英文散文
         'const h = "Schema 已更新";',                      # 大小写变体
+        'const i = "这条观察队列记录已同步";',                # Agentic Memory P3
     ],
 )
 def test_各类渲染位置都覆盖(tmp_path, code):
@@ -140,6 +141,8 @@ def test_各类渲染位置都覆盖(tmp_path, code):
         'const a = "保存完成后再插入图片。";',   # 「插入图片」含「入图」子串
         'const b = "点这里插入图片";',
         'const c = "已加入图谱";',              # 既有排除项,一并钉住
+        'const d = "本次分析观察到三处异常";',    # 「观察」单独出现,不含「队列」
+        'const e = "后台任务队列已清空";',       # 「队列」单独出现,不含「观察」
     ],
 )
 def test_正常词组不因子串被误报(tmp_path, code):

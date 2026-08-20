@@ -588,7 +588,7 @@ header 必须单引号，否则 shell 会先展开它；这样落到配置里的
 `-s user` 时该配置只在当前目录生效。若客户端不支持插值，落盘的就是原始 header：应使用最小
 scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的二十个工具如下，
+每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的二十二个工具如下，
 权威清单是 `mcp_server.PUBLIC_TOOLS`：
 
 | 分组 | 工具 | Scope |
@@ -602,6 +602,7 @@ scope、短有效期，保护本机配置，并在使用后撤销/轮换。
 | 来源状态读取 | `get_source_status` | `knowledge:read` |
 | 构建 | `build_kg`、`build_retrieval_index` | `maintenance:execute`（owner-only） |
 | 构建状态读取 | `get_build_status` | `knowledge:read` |
+| 库理解（Agent） | `get_notebook_profile`、`add_observation` | `agent_profile:read` / `agent_observation:write` |
 
 `list_notebooks` 与 `select_notebook` **不需要任何 scope**：判据只有 token 存活、目标笔记本在
 白名单内、且对它有读权限。因此无论 token 权限收得多窄，session 都能正常起步。
@@ -690,6 +691,22 @@ token，两个 scope 都要授予。
 笔记本，也能保存格子代码附件。代码附件是惰性数据——从不执行、不进索引/embedding/KG
 投影，而删除或重新解析文档会波及每个成员的检索，两个面因此采用不同的权限模型。这处
 分歧是拍板取舍不是疏漏，`backend/tests/test_memory_mcp.py` 对两侧行为各钉一条测试。
+
+**库理解（Agentic Memory P3）。** `get_notebook_profile`（scope `agent_profile:read`）读取
+的正是网页端「AI 对这个库的理解」面板同一份数据：共享 `base` 层加调用者自己的 `mine`
+覆盖层（绝不是别人的），每块只投影 `{label, value, updated_at}`——不带 `evidence` 来源
+id、不带 `revision`、不带变更历史，因此只持有这一个 scope 的 token 无法借此探测本无权
+读取的来源 id。响应里每块都标 `content_is_untrusted_evidence: true` 与
+`citable: false`：它是规划用的提示脚手架，绝不能被引用。`AGENT_PROFILE_ENABLED` 关闭、
+或该库尚未生成过理解时，工具返回 `enabled: false` 与空块，而不是报错。
+`add_observation`（scope `agent_observation:write`）向调用者自己在该库的观察队列追加一行
+不超过 `AGENT_OBSERVATION_TEXT_MAX_CHARS`（500）字符的记录，按 `client_request_id` 幂等去
+重（与 `propose_memory` 同一套机制）。它立即返回——写入本身只是一次有界 INSERT 加同一
+事务内的有界环形淘汰 DELETE，零模型调用，因此没有异步状态可轮询。它是**第二个**绕开
+`_writable_notebook` owner-only 门的 Agent 写（第一个是 `put_knowhow_cell_code`）：爆炸半径
+结构上只到 token 持有者自己的覆盖层而非整库检索，因此只读成员自己的 Agent 也能用它；这条
+观察记录的用途与边界详见下面「Notebook understanding blocks」一节。特性关闭时
+`add_observation` 直接报错，而不是静默收下一批永远不会被巡固任务读取的数据。
 
 只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后，admin queue 展示脱敏后的结构化提取
 候选与服务端验证过的 evidence，而不是原始 Memory revision/provenance 浏览器。提案会固定精确的
@@ -1290,6 +1307,37 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 
 `AGENT_PROFILE_ENABLED`（默认 true）是唯一总闸，同时管住注入、巡固触发与两个 API 面的可见性——关闭后处处逐字回到接入前：不注入、不记 trace 步、不排巡固，API 不是 404 而是返回 `enabled=false` 且两个列表为空（让前端能区分「关了」与「还没形成理解」），重建端点 409。
 
+**Agent 观察记录喂覆盖层，且不可信（Agentic Memory P3）。** 持有 `agent_observation:write` scope
+的外部 Agent 可随时调用 MCP 工具 `add_observation`，向自己在这个 `(笔记本, 用户)` 下的观察
+队列追加一行——「我在处理这个库时发现了 X」——与任何一次巡固运行完全解耦。这是原始、
+**不可信**的输入：与上面这一位成员自己的提问/报告不同，写下观察的是另一方而非其覆盖层
+将被塑造的那个人，所以只要一次巡固运行有观察记录要读，就会先给模型发一条 `system`
+消息，说明每一行都是外部 Agent 使用接口留下的数据、绝不是指令，且一条观察只有在**与**
+该成员自己的提问或报告**相符**时才能支撑某个论断——它绝不能单独构成一个块的全部依据。
+一个从未用过这个工具的成员看到的 prompt 与本特性接入前逐字一致（没有 `system` 消息、
+没有多出来的段落）——不可信框架的成本不由从未用过该工具的人承担。**仅有观察记录、没有
+提问也没有报告时，不会触发巡固**：100% 不可信的输入不足以支撑一次模型调用，覆盖层链路
+既有的空样本闸维持不变。当一次运行确实读到了观察记录时，它们会渲染在提问/报告样本之后
+**独立的一段**，用**自己的**字符预算（见下表），而不是与提问/报告共享预算——否则一个
+爱写短句的 Agent 就能靠数量把一位成员真实的活动挤出同一个池子。观察记录永远不会移动
+`usage_gaps` 所依据的零命中查询计数；那个信号继续只从该成员自己的检索轨迹派生，与本特性
+接入前一致。
+
+管理这些记录完全走「我的」半侧——清空或查看观察队列只需要笔记本读权加行级归属，不需要
+`agent_profile:write`（共享底座那个能力），因为这些行是调用者自己的。
+`GET /notebooks/{id}/agent-observations` 按新到旧列出调用者自己的观察（`limit` 默认 20，
+上限 200——即下面的环形上限）；`DELETE /notebooks/{id}/agent-observations` 清空，可选按
+某个 `agent_profile_id` 收窄。两端点在特性关闭时都 409。网页面板把这个入口显示为「我的
+检索心得」下的「Agent 记录」，并明确说明观察记录只会用来更新成员自己的理解、绝不是证据
+也不能被引用。
+
+| 观察相关设置 | 取值 |
+| --- | --- |
+| 每 `(笔记本, 用户)` 的观察环形上限（Agentic Memory P3） | 200 条——`append_observation` 在同一写事务内淘汰超出这个上限的最旧记录 |
+| 单条观察字符上限 | 500（`add_observation` 的 `text`） |
+| 每次巡固读取的观察取样 | 最近 20 条，与上面提问/报告取样各自独立查询 |
+| 渲染出的观察段字符上限 | 600——**自己的**预算，不占用上面 3,000 字符使用情况段的份额 |
+
 **已登记取舍。** 笔记本深拷贝不带这两张表——副本从零重新形成自己的理解，这是刻意设计：理解块描述的是 Agent 对**这一本**笔记本使用方式的体会，不是来源材料本身该被继承的事实。同步 `POST /ask`（不建立持久 `ask_jobs` 行）不推进覆盖层计数器，与「用量统计按持久 `ask_jobs` 提交次数计数」的既有口径一致。单人笔记本的底座与覆盖层链路刻意**不**合并执行——各自照常排队与运行，登记为 P1 的简化而非正确性要求。任一链路的巡固失败仍会消费认领时刻快照下的 `pending_signal` 计数，因此失败的一轮需要重新攒满阈值才会重试，把成本封在「每个阈值批次至多一次模型调用」，而不是对随后每一次变更都重试。把成员移出共享笔记本会经成员移除路径清空其覆盖层（`kick_all_members` 刻意**不**清理——已登记的例外，因为读侧参与集闸本就让被踢出成员的覆盖层在每个消费方那里都不可达）。
 
 ### 检索策略经验
@@ -1329,6 +1377,57 @@ Agent 维护一份低成本、经 LLM 巡固的、关于笔记本的理解摘要
 | 极性词表 | 2 个（`good`/`bad`） |
 | 注入——送达条目数 | ≤3，相似度地板 0.5 |
 | 注入——整块字符上限 | 600（表头+框定语+行；装不下的行整行丢弃） |
+
+### 我的回答偏好（用户检索/回答风格 Profile）
+
+Agentic Memory P3 的第二条、相互独立的 B 线：一份很小的按用户偏好文档
+`user_profiles.search_profile_json`（`NULL` = 用户从未设置过偏好、也从未有归纳任务写过
+值——与 `ui_mode` 同一套契约），在账户菜单的「我的回答偏好」里编辑，并作为一行有界文本
+注入 Ask 的规划与答案合成 prompt。它绝不触碰检索——形状里没有任何来源、笔记本或范围
+字段——只影响回答怎么组织、怎么措辞。
+
+**形状。** 四个封闭字段，各自携带 `{value, origin, updated_at}`：`answer_language`
+（`auto`/`zh`/`en`）、`answer_shape`（`auto`/`bullets`/`table_first`/`prose`）、
+`answer_detail`（`auto`/`concise`/`detailed`）、`domain_terms`（自由文本列表，≤10 条、每条
+≤32 字符）。`origin` 为 `"user"` 表示用户显式设置过，为 `"job"` 表示由 T7 归纳任务写入。
+字段缺席——而不是存一个显式 `"auto"`——才是「可再被归纳」的标记，也是渲染器判定「这个
+字段不用说」的依据；用户把某字段改回自动即删除该条目，而不是存一个显式的 `auto`——与
+理解块「清空即交还」是同一套契约。归纳任务绝不能覆盖当前存储 origin 为 `"user"` 的字段——
+与 `agent_profile_job` 的 `user_authoritative` 对提示块已经在强制的同一条规则，这里作用在
+偏好字段而非提示块上。
+
+**v1 只归纳一个字段，纯确定性，零模型调用。** 一个后台任务（有自己独立的按用户触发阈值，
+与理解块的两条巡固链路各自独立）读取该用户最近若干次已完成提问的语言，样本数足够大且
+某一种语言占明确多数时写入 `answer_language`（`origin="job"`）；样本不足或没有明确多数时
+不写——写一个猜出来的 `auto` 会挡住之后更好的样本再填这个字段。**另有两个候选信号 v1
+刻意不归纳**（已登记，非遗漏）：用户常用的检索档位（目前没有能安全消费它的下游，纯风险
+无收益）；用户常用的领域术语（把用户过去的措辞固化进未来每一次 prompt，与「你倾向用
+中文提问」是不同性质的主张；v1 把 `domain_terms` 完全交给用户自己填）。**归纳出的值绝不
+单独进入 prompt**——镜像 P2 检索策略经验库「先接好管线、注入待验证」的姿态：一个推断错的
+`answer_language` 会与答案 prompt 「按提问语言回答」的默认规则直接矛盾，所以设置界面照常
+显示推断值（带「自动判断」徽标），用户必须显式确认（也就是执行一次 `origin="user"` 写入）
+才能让它进入模型调用。`domain_terms` 与任何显式选择的 `answer_shape`/`answer_detail`/
+`answer_language`（`origin="user"`）立即生效注入——那些是用户真正提出过的要求。
+
+**注入面：只接 Ask，v1 刻意不接深度报告。** `search_profile_wiring_active`（受
+`USER_SEARCH_PROFILE_ENABLED` 门控）开启且该用户至少有一个用户显式设置的字段时，渲染出
+的这行会同时出现在规划 prompt 与每一次答案合成调用里，并带一句明确的边界说明：只影响
+措辞与组织形态，绝不影响证据可用性或 `[k]` 绑定。它不注入反思循环——措辞偏好与下一步该
+选哪个检索动作无关，这一点与会影响反思的理解块、检索策略经验条目不同。报告生成
+（`report_engine.py`）v1 完全不读它；后续阶段可能扩展进去。
+
+**数值上限。**
+
+| 项 | 取值 |
+| --- | --- |
+| 字段数 | 4（`answer_language`、`answer_shape`、`answer_detail`、`domain_terms`） |
+| `domain_terms` 上限 | ≤10 条，每条 ≤32 字符 |
+| 渲染出的风格块字符上限 | 200（`SEARCH_PROFILE_BLOCK_MAX_CHARS`）——术语逐条装入直到预算耗尽，不整段丢弃 |
+| 归纳取样规模 | 最近 30 次已完成提问（`SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT`） |
+| 归纳最小样本地板 | 10（`SEARCH_PROFILE_LANGUAGE_MIN_SAMPLES`）——低于此不写 |
+| 归纳多数阈值 | 占全样本 0.7（`SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO`；「其他」语言占比仍留在分母里） |
+| 归纳任务触发阈值 | 该用户累计 20 次已完成提问（`USER_SEARCH_PROFILE_TRIGGER`，默认） |
+| 部署开关 | `USER_SEARCH_PROFILE_ENABLED`（默认 true）——关闭后处处逐字回到接入前；`GET /me` 仍照常返回该行上已存在的取值，不会伪造成 `search_profile: null`，但 `PATCH /me/search-profile` 409 |
 
 ### 大纲便签与按节合成
 

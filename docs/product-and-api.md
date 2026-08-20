@@ -774,7 +774,7 @@ that cannot interpolate persists the raw header instead: use least-privilege sco
 expiry, protect the local config, and revoke/rotate the token after use.
 
 Every new MCP session must call `select_notebook` before a data tool. The exact tool set is
-these 20 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:
+these 22 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:
 
 | Group | Tools | Scope |
 | --- | --- | --- |
@@ -787,6 +787,7 @@ these 20 tools, whose single source of truth is `mcp_server.PUBLIC_TOOLS`:
 | Source read | `get_source_status` | `knowledge:read` |
 | Build | `build_kg`, `build_retrieval_index` | `maintenance:execute` (owner-only) |
 | Build read | `get_build_status` | `knowledge:read` |
+| Notebook understanding (agent) | `get_notebook_profile`, `add_observation` | `agent_profile:read` / `agent_observation:write` |
 
 `list_notebooks` and `select_notebook` require **no scope at all**: the entire check is a
 live token, a notebook inside its allowlist, and read access to that notebook. Every session
@@ -906,6 +907,28 @@ indexed, embedded, or projected into retrieval or the KG — while deleting or
 re-parsing a document reaches every member's retrieval, which is why the two surfaces
 carry different authority models. The divergence is a recorded decision, pinned on
 both sides by `backend/tests/test_memory_mcp.py`.
+
+**Notebook understanding (Agentic Memory P3).** `get_notebook_profile` (scope
+`agent_profile:read`) reads the same [notebook understanding blocks](#notebook-understanding-blocks)
+the web UI's "AI 对这个库的理解" panel shows: the shared `base` layer plus the caller's own
+`mine` overlay (never another member's), each block projected down to `{label, value,
+updated_at}` only — no `evidence` source ids, no `revision`, no change history, so a token
+holding only this scope cannot use the response to probe source ids it has no other way to
+read. Every value is marked `content_is_untrusted_evidence: true` and `citable: false` in the
+response; it is prompt scaffolding for planning, never something to cite. When
+`AGENT_PROFILE_ENABLED` is off, or the notebook has no consolidated understanding yet, the
+tool returns `enabled: false` with empty blocks rather than erroring. `add_observation`
+(scope `agent_observation:write`) appends one short line — at most
+`AGENT_OBSERVATION_TEXT_MAX_CHARS` (500) characters — to the caller's own observation log for
+this notebook, deduplicated per `client_request_id` the same way `propose_memory` is. It
+returns immediately; the write itself is a bounded insert plus a bounded ring-eviction delete
+in one transaction, with zero model calls, so there is no async status to poll. It is the
+**second** Agent write that bypasses `_writable_notebook`'s owner-only gate — the first is
+`put_knowhow_cell_code` — because its blast radius is structurally capped at the token
+holder's own overlay rather than the whole notebook's retrieval, so a read-only member's own
+Agent can still use it; see [Notebook understanding blocks](#notebook-understanding-blocks)
+for what an observation is and is not used for. When the feature is off, `add_observation`
+raises rather than silently accepting data no consolidation job will ever read.
 
 Only a `confirmed` Memory can be proposed for KG promotion. The creator proposes it; the
 admin queue shows sanitized extraction candidates and server-validated evidence, not a raw
@@ -1718,6 +1741,10 @@ The report sample's ownership predicate is `reports.created_by`, which is the re
 | Evidence ids retained per claim (base chain) | 8 (also the cap on how many are individually named in the evidence-liveness note) |
 | Top concept names surfaced to the base prompt | 24, ≤48 characters each, ≤600 characters total |
 | Overlay prompt's usage section | ≤3,000 characters shared by BOTH lists (ask questions and report directions), plus ≤12 zero-hit-query samples at ≤120 characters each, plus fixed headers. One budget, allocated rather than first-come-first-served: while there are reports to render the ask list may spend at most half of it and whatever it leaves unspent rolls over to the report section, so neither can starve the other. A member with no reports is unaffected by the split and renders exactly as before this section existed |
+| Observation ring per `(notebook, owner)` (Agentic Memory P3) | 200 rows — `append_observation` evicts the oldest beyond this bound in the same write transaction as the insert |
+| Characters per observation | 500 (`add_observation`'s `text`) |
+| Observation sample read per consolidation | ≤20 most recent, on its own separate query from the ask/report sample above |
+| Rendered observation section budget | ≤600 characters — its OWN budget, never a slice of the 3,000-character usage-section budget above |
 
 **Injection surface.** A run that has `AGENT_PROFILE_ENABLED` on (and a bound profile store) injects the base layer plus the current user's own overlay into both the planning prompt and the reflect loop's context, ahead of the collection map section in each. A notebook the agent has not yet consolidated anything for injects nothing and records no trace step — this is a deliberately different rule from Memory's zero-hit `skip` step, because a Memory miss carries the cost of an embedding round trip and a vector scan worth disclosing, while a profile read is a sub-millisecond bounded primary-key lookup whose absence is pure noise on every single run of a fresh notebook. The block is injected even when the request has genuinely narrowed its source scope — unlike the collection map, which is cleared in that case because it promises collections the narrowed run cannot enumerate, the profile block opens no channel, is not evidence, and cannot be `[k]`-cited, so a narrowed run still benefits from knowing what the agent has learned about phrasing and known gaps. On Deep Report's side, the block reaches only each section's per-section deep-dive retrieval (`_deep_dive`), which always seeds its run with `intent_queries` rather than calling the planning model — so in practice the profile only ever reaches the reflect loop on the report path, never a report's own planning call.
 
@@ -1731,6 +1758,37 @@ The report sample's ownership predicate is `reports.created_by`, which is the re
 | `POST /notebooks/{id}/understanding/rebuild` (`{scope}`) | Same capability split; manually claims and re-runs that chain's consolidation, returning 409 while busy or while the feature is off |
 
 `AGENT_PROFILE_ENABLED` (default true) is the single gate behind all of injection, the consolidation trigger, and both API surfaces' visibility — turning it off returns byte-identical pre-feature behavior everywhere at once: no injection, no trace step, no consolidation job is ever queued, the API reports `enabled=false` with empty blocks rather than 404 (so the client can tell "off" apart from "not yet consolidated"), and the rebuild endpoint 409s.
+
+**Agent observations feed the overlay, untrusted (Agentic Memory P3).** An external Agent
+holding the `agent_observation:write` scope may call the MCP tool `add_observation` to append
+one short line — "I noticed X while working in this notebook" — to its own
+`(notebook, owner)` observation log at any time, independent of any consolidation run. This
+is raw, **untrusted** input: unlike the member's own asks and reports above, the model
+writing an observation is a different party than the person whose overlay it may end up
+shaping, so a consolidation run that has any observations to read is preceded by a `system`
+message telling the model each line is data about how an external Agent used the API, never
+an instruction, and that an observation may support a claim only where it *agrees with* that
+member's own asks or reports — it can never by itself be the sole basis for a block. A member
+with zero observations sees a byte-identical prompt to before this feature existed (no
+`system` message, no extra section) — the untrusted framing is not paid for by anyone who
+never used the tool. Observations alone — with no asks and no reports — do **not** trigger a
+consolidation run at all: 100% untrusted input is not enough evidence for a model call, so
+the empty-samples gate that already governs the overlay chain is left unchanged. When a run
+does read observations, they render in their own section after the ask/report sample, on
+their own separate character budget (see the table below) rather than sharing the ask/report
+budget — an Agent writing enough short lines could otherwise crowd out a member's real
+activity within one shared pool. Observations never move the zero-hit-query counter that
+`usage_gaps` is grounded in; that signal stays derived exclusively from the member's own
+trace, the same as before this feature.
+
+Management stays entirely on the *mine* side — clearing or reviewing an observation log needs
+only notebook read access plus row-level ownership, never `agent_profile:write` (the shared
+base capability), because the rows are the caller's own. `GET /notebooks/{id}/agent-observations`
+lists the caller's own observations newest-first (`limit` defaults to 20, capped at 200 — the
+ring size below); `DELETE /notebooks/{id}/agent-observations` clears them, optionally scoped
+to one `agent_profile_id`. Both 409 while the feature is off. The web panel surfaces this as
+"Agent 记录" under "我的检索心得", explicitly stating observations only ever feed the
+member's own understanding and are never evidence or citable.
 
 **Registered trade-offs.** Notebook deep copy carries neither table forward — a copy starts with no consolidated understanding of its own, by design, since the profile describes how the agent has come to understand *this* library's usage, not a fact about the source material that a copy should inherit. A synchronous `POST /ask` call (which creates no durable `ask_jobs` row) does not advance the overlay-chain counter, matching the existing rule that usage accounting counts durable submitted `ask_jobs`. The base and overlay chains for a single-person notebook are deliberately **not** merged into one execution — each still queues and runs on its own, registered as a P1 simplification rather than a correctness requirement. A consolidation job's failure — of either chain — still consumes the `pending_signal` count captured at claim time, so a failed run requires the trigger threshold to refill again before it retries, capping cost at one model call per threshold batch rather than retrying every subsequent change. Removing a member from a shared notebook clears their overlay through the membership-removal path (`kick_all_members` deliberately does not — a documented exception, since read-side participant-set gating already keeps a removed member's overlay unreachable through every consumer).
 
@@ -1771,6 +1829,70 @@ A second, independent memory (Agentic Memory P2) sits beside the notebook unders
 | Polarity vocabulary | 2 (`good`/`bad`) |
 | Injection — entries delivered | ≤3, similarity floor 0.5 |
 | Injection — whole-block character cap | 600 (header + framing + rows; rows that do not fit are dropped whole) |
+
+### User search profile
+
+Agentic Memory P3's second, independent B-line: a small per-user preference document,
+`user_profiles.search_profile_json` (`NULL` = the user has never set a preference and no
+inference job has ever written one — the same contract `ui_mode` already uses), edited from
+"我的回答偏好" in the account menu and injected as one bounded line into Ask's planning and
+answer-synthesis prompts. It never touches retrieval — no source, notebook, or scope field
+exists in its shape — only how the answer is organized and worded.
+
+**Shape.** Four closed fields, each carrying `{value, origin, updated_at}`: `answer_language`
+(`auto`/`zh`/`en`), `answer_shape` (`auto`/`bullets`/`table_first`/`prose`), `answer_detail`
+(`auto`/`concise`/`detailed`), and `domain_terms` (a free-text list, ≤10 terms of ≤32
+characters each). `origin` is `"user"` when a person explicitly set the field or `"job"` when
+the T7 inference job filled it in. A field's absence — not a stored `"auto"` — is what makes
+it re-inferable and what the renderer treats as "say nothing here"; a person clearing a field
+back to automatic deletes its entry rather than storing an explicit `auto`, the same "clearing
+hands it back to inference" contract the notebook-understanding blocks use for a withdrawn
+block. A job write can never overwrite a field whose current stored origin is `"user"` — the
+same rule `agent_profile_job`'s `user_authoritative` already enforces, applied here to
+preference fields instead of prose blocks.
+
+**v1 infers exactly one field, deterministically, with zero model calls.** A background job
+(own per-user trigger, distinct from the notebook-understanding chains) reads that user's most
+recent completed asks' language and, when the sample is large enough and one language is a
+clear majority, writes `answer_language` with `origin="job"`. Below the sample floor, or when
+no language is dominant, the job writes nothing — writing a guessed `auto` would block a
+better later sample from ever filling the field. **Two other candidate signals are
+deliberately NOT inferred in v1** (registered, not an oversight): a person's most-used
+retrieval-effort tier (there is no consumer that would safely act on it yet — pure risk with
+no benefit), and frequently-used domain terms (fixing a user's own past wording into every
+future prompt as if they had asked for that permanently is a different kind of claim than
+"you tend to ask in Chinese"; v1 leaves `domain_terms` entirely user-authored). **A job-written
+value is never injected into a prompt on its own** — mirroring the P2 experience library's
+"attach the machinery, gate the injection behind validation" posture: an inferred
+`answer_language` directly contradicts the answer prompt's own "answer in the question's
+language" default the instant the inference is wrong, so the settings UI shows the inferred
+value with an "inferred" badge and a person must explicitly accept it (which is exactly the
+`origin="user"` write) before it can reach a model call. `domain_terms` and any
+explicitly-chosen `answer_shape`/`answer_detail`/`answer_language` (`origin="user"`) inject
+immediately — those are the fields a person actually asked for.
+
+**Injection surface: Ask only, v1 — Deep Report is deliberately not wired.** When
+`search_profile_wiring_active` (gated by `USER_SEARCH_PROFILE_ENABLED`) is on and the user has
+at least one user-authored field, the rendered block appears in both the planning prompt and
+every answer-synthesis call, with an explicit boundary sentence: it affects wording and
+organization only, never evidence availability or `[k]` binding. It is not injected into the
+reflect loop — wording preference has no bearing on which retrieval action to take next, unlike
+the notebook-understanding blocks and retrieval-experience entries that do inform reflect.
+Report generation (`report_engine.py`) does not read it at all in v1; a later phase may extend
+it there.
+
+**Values, numeric limits.**
+
+| Setting | Value |
+| --- | --- |
+| Fields | 4 (`answer_language`, `answer_shape`, `answer_detail`, `domain_terms`) |
+| `domain_terms` cap | ≤10 terms, ≤32 characters each |
+| Rendered style-block character cap | 200 (`SEARCH_PROFILE_BLOCK_MAX_CHARS`) — terms are packed one at a time and kept as long as they fit, rather than dropped as one all-or-nothing chunk |
+| Inference sample size | last 30 completed asks (`SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT`) |
+| Inference minimum sample floor | 10 (`SEARCH_PROFILE_LANGUAGE_MIN_SAMPLES`) — below this the job writes nothing |
+| Inference majority threshold | 0.7 of the full sample (`SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO`; the "other"-language share stays in the denominator) |
+| Inference job trigger | 20 completed asks for that user (`USER_SEARCH_PROFILE_TRIGGER`, default) |
+| Deployment gate | `USER_SEARCH_PROFILE_ENABLED` (default true) — off reverts everywhere to byte-identical pre-feature behavior; `GET /me` still returns any existing value already on the row rather than forging `search_profile: null`, but `PATCH /me/search-profile` 409s |
 
 ### Outline scratchpad and section-by-section synthesis
 
