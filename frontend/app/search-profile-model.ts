@@ -28,25 +28,28 @@ export const ANSWER_DETAIL_OPTIONS: AnswerDetail[] = ["auto", "concise", "detail
 
 // Record<string,string>（而非 Record<AnswerLanguage,string> 这类字面量联合）是
 // 刻意的——与 vocabulary.ts 里其余表（REPORT_DEPTH、ASK_STATUS…）同一形状，保持
-// label() 的一处签名对所有调用方都适用；「取值全覆盖」由 search-profile-model.test.mjs
-// 对着上面的 OPTIONS 数组逐个断言，而不是指望 TS 的结构类型来保证。
-const ANSWER_LANGUAGE_LABELS: Record<string, string> = {
+// label() 的一处签名对所有调用方都适用。**导出**这几张表(而不是只导出经过
+// label() 包过一层的函数)是为了让 search-profile-model.test.mjs 能用
+// `Object.hasOwn` 直接断言「取值全覆盖」——包一层之后测试侧只能拿到已经应用了
+// 中性兜底词的结果,一个值漏译时 label() 会把它悄悄补成兜底词,断言「不等于某个
+// 哨兵串」永远为真,漏译反而测不出来。
+export const ANSWER_LANGUAGE_LABELS: Record<string, string> = {
   auto: "跟随提问",
   zh: "中文",
   en: "英文",
 };
-const ANSWER_SHAPE_LABELS: Record<string, string> = {
+export const ANSWER_SHAPE_LABELS: Record<string, string> = {
   auto: "自动",
   bullets: "要点清单",
   table_first: "表格优先",
   prose: "连贯段落",
 };
-const ANSWER_DETAIL_LABELS: Record<string, string> = {
+export const ANSWER_DETAIL_LABELS: Record<string, string> = {
   auto: "自动",
   concise: "简明",
   detailed: "详尽",
 };
-const ORIGIN_LABELS: Record<string, string> = {
+export const ORIGIN_LABELS: Record<string, string> = {
   user: "你设置的",
   job: "自动判断",
 };
