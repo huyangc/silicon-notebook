@@ -100,6 +100,21 @@ def test_initial_retrieve_step_truncates_result_ids(rrepo):
     assert len(step.detail["result_ids"]) == TRACE_RESULT_IDS_MAX
 
 
+def test_initial_retrieve_step_writes_empty_result_ids_on_zero_hits(rrepo):
+    """Q-P2-3:① 初检索的零命中形状——空笔记本,result_ids 必须是 ``[]``、
+    键必须存在(不是缺席,那是 skip 分支才有的信号)。"""
+    nb = rrepo.create_notebook(NotebookCreate(name="nb"))
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "不存在的东西"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "不存在的东西", "")
+    step = next(t for t in res.trace if t.step_type == "retrieve")
+    assert step.detail["count"] == 0
+    assert step.detail["result_ids"] == []
+    assert "result_ids" in step.detail
+
+
 def test_ppr_seed_step_carries_result_ids_and_zero_hit_writes_empty_list(rrepo):
     """② PPR seed:内容(stub 两段新 chunk)+ 零命中(真实 ppr_retrieve 返回空)。
 
@@ -148,6 +163,20 @@ def test_exact_lookup_seed_step_carries_result_ids(rrepo):
     assert step.detail["result_ids"] == ["ck-main", "ck-args"]
 
 
+def test_exact_lookup_seed_step_writes_empty_result_ids_on_zero_hits(rrepo):
+    """Q-P2-3:③ 精确查找 seed 的零命中形状——问题里的标识符不在手册里。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "no_such_cmd"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "no_such_cmd 命令是怎样的", "")
+    step = next(t for t in res.trace if t.step_type == "exact_lookup")
+    assert step.detail["found"] == 0
+    assert step.detail["result_ids"] == []
+
+
 def test_expand_step_carries_result_ids(rrepo):
     """④ expand:result_ids == 邻居对象的 object_id。"""
     nb = _seed_two_nodes(rrepo)
@@ -164,6 +193,27 @@ def test_expand_step_carries_result_ids(rrepo):
         nb.id, "RTL到GDSII流程", "")
     step = next(t for t in res.trace if t.step_type == "expand")
     assert step.detail["result_ids"] == [proc.object_id]
+
+
+def test_expand_step_writes_empty_result_ids_on_zero_hits(rrepo):
+    """Q-P2-3:④ expand 的零命中形状——展开一个没有任何边的孤立节点。"""
+    nb = rrepo.create_notebook(NotebookCreate(name="nb"))
+    rrepo.store_kg(nb.id, None, [
+        {"local_id": "C1", "object_type": "claim",
+         "payload": {"name": "孤立节点", "section_path": "1"}, "evidence": []},
+    ], [])
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "孤立节点")
+                 if h.object_type == "claim")
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "孤立节点", "types": ["claim"]}]},
+        reflects=[
+            {"next_action": "expand_graph", "expand": {"object_id": claim.object_id}},
+            {"next_action": "answer", "sufficient": True}]))
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "孤立节点", "")
+    step = next(t for t in res.trace if t.step_type == "expand")
+    assert step.detail["found"] == 0
+    assert step.detail["result_ids"] == []
 
 
 def test_add_subquery_retrieve_step_carries_result_ids(rrepo):
@@ -188,6 +238,24 @@ def test_add_subquery_retrieve_step_carries_result_ids(rrepo):
     steps = [t for t in res.trace if t.step_type == "retrieve"]
     followup_step = next(t for t in steps if t.detail.get("query") == "布局布线步骤")
     assert followup_step.detail["result_ids"] == [proc.object_id]
+
+
+def test_add_subquery_retrieve_step_writes_empty_result_ids_on_zero_hits(rrepo):
+    """Q-P2-3:⑤ add_subquery 的零命中形状——子查询命中的对象已全部在
+    ``collected`` 里(布局布线步骤在首轮无类型限制的查询里已经被收进来)。"""
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "add_subquery",
+             "new_sub_query": {"query": "布局布线步骤"}},
+            {"next_action": "answer", "sufficient": True}]))
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+    steps = [t for t in res.trace if t.step_type == "retrieve"]
+    followup_step = next(t for t in steps if t.detail.get("query") == "布局布线步骤")
+    assert followup_step.detail["new"] == 0
+    assert followup_step.detail["result_ids"] == []
 
 
 def test_coverage_pass_retrieve_step_carries_result_ids(rrepo, monkeypatch):
@@ -224,6 +292,36 @@ def test_coverage_pass_retrieve_step_carries_result_ids(rrepo, monkeypatch):
         assert len(step.detail["result_ids"]) == 4  # 4 条新 object_id,零去重
 
 
+def test_coverage_pass_retrieve_step_writes_empty_result_ids_on_zero_hits(
+    rrepo, monkeypatch,
+):
+    """Q-P2-3:⑥ 已确认方向补种的零命中形状——search 桩返回空列表。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+    ))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever, "search",
+        lambda notebook_id, query, types=None, prefer="balanced": [])
+    result = retriever.run(
+        nb.id,
+        "完整问题",
+        intent_queries=["完整问题", "主题一方向", "主题二方向", "主题三方向"],
+        limits=ask_retrieval_limits("overview"),
+    )
+    covered = [s for s in result.trace
+              if s.step_type == "retrieve"
+              and (s.detail or {}).get("source") == "confirmed_intent"]
+    assert covered, "首轮装不下的已确认方向必须补种"
+    for step in covered:
+        assert step.detail["new"] == 0
+        assert step.detail["result_ids"] == []
+
+
 def test_ppr_action_step_carries_result_ids(rrepo):
     """⑦ ppr 动作步:与 seed 不同的新 chunk,证明这是独立写点。"""
     nb = _seed_two_nodes(rrepo)
@@ -251,6 +349,22 @@ def test_ppr_action_step_carries_result_ids(rrepo):
     assert action_step.detail["result_ids"] == ["ck-action"]
 
 
+def test_ppr_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
+    """Q-P2-3:⑦ ppr 动作步的零命中形状——动作调用返回空列表。"""
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "ppr_retrieve", "ppr_query": "跨文档"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.ppr_retrieve = lambda notebook_id, query: []
+    res = rr.run(nb.id, "这个流程是怎样的", "")
+    action_step = next(t for t in res.trace
+                       if t.step_type == "ppr" and t.detail.get("phase") == "action")
+    assert action_step.detail["found"] == 0
+    assert action_step.detail["result_ids"] == []
+
+
 def test_exact_lookup_action_step_carries_result_ids(rrepo):
     """⑧ exact_lookup 动作步(镜像既有 exact-equality 用例,单独钉一次)。"""
     nb = _seed_manual_notebook(rrepo)
@@ -264,6 +378,21 @@ def test_exact_lookup_action_step_carries_result_ids(rrepo):
         nb.id, "这个命令怎么用", "")             # 问题本身无名称 → seed 不触发
     step = next(t for t in res.trace if t.step_type == "exact_lookup")
     assert step.detail["result_ids"] == ["ck-main", "ck-args"]
+
+
+def test_exact_lookup_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
+    """Q-P2-3:⑧ exact_lookup 动作步的零命中形状——名称不在手册里。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "no_such_cmd"},
+                  {"next_action": "answer", "sufficient": True}]))
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "这个命令怎么用", "")
+    step = next(t for t in res.trace if t.step_type == "exact_lookup")
+    assert step.detail["found"] == 0
+    assert step.detail["result_ids"] == []
 
 
 def test_skip_branches_never_write_result_ids(rrepo):
