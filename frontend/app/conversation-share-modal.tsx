@@ -209,7 +209,11 @@ export function ConversationShareModal({
       setToken(resp.share_token || "");
       setWatermark(resp.shared_through_at || "");
       setWatermarkId(resp.shared_through_id || "");
-      setNotice(action === "update" ? "已更新到最新" : "已生成分享链接");
+      setNotice(
+        action === "update"
+          ? (bounded ? "已更新到这一条" : "已更新到最新")
+          : (bounded ? "已生成分享链接（到这一条为止）" : "已生成分享链接"),
+      );
     } catch (err) {
       if (!aliveRef.current) return;
       setError(toUserMessage(err, action === "update" ? "更新失败" : "分享失败"));
@@ -276,9 +280,13 @@ export function ConversationShareModal({
               {notice && <p className="tool-hint" style={{ margin: 0 }}>{notice}</p>}
 
               <p className="tool-hint" style={{ margin: 0 }}>
-                {bounded
-                  ? "发布成一条免登录的只读快照，只包含这条回答以及它之前的问答。之后的问答不会出现在链接里。撤销即刻失效。"
-                  : "发布成一条免登录的只读快照。分享后新问的问题不会自动出现，需要再点一次「更新到最新」。撤销即刻失效。"}
+                {!bounded
+                  ? "发布成一条免登录的只读快照。分享后新问的问题不会自动出现，需要再点一次「更新到最新」。撤销即刻失效。"
+                  : boundary.watermarkAhead
+                    // 这一支绝不能承诺「只包含这条回答之前」——链接的范围由此前的分享
+                    // 决定，比这条回答更靠后，而复制按钮就在这句话下面（codex #530 R1 P1）。
+                    ? "这条会话此前已经分享过，链接覆盖的范围比你点的这条回答更靠后。公开范围只能往后推、不能收回，所以它不会被缩小到这一条。撤销即刻失效。"
+                    : "发布成一条免登录的只读快照，只包含这条回答以及它之前的问答。之后的问答不会出现在链接里。撤销即刻失效。"}
               </p>
 
               {shared ? (<>

@@ -283,3 +283,57 @@ test("水位越过边界且其后还有新轮:仍然一个发布按钮都不给�
   expect(screen.queryByRole("button", { name: /更新到最新/ })).toBeNull();
   expect(mocks.shareConversation).not.toHaveBeenCalled();
 });
+
+
+// --- codex #530 R1 的两条回归门 ----------------------------------------------
+
+test("codex #530 R1 P1：水位越过边界时，绝不承诺「只包含这条回答之前」", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:01",
+    shared_through_id: "a2",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a1");
+
+  // 复制按钮就在这句话下面：读完它直接复制发出去，发的会是比承诺更多的轮次。
+  await screen.findByLabelText("分享链接");
+  expect(screen.queryByText(/只包含这条回答以及它之前的问答/)).toBeNull();
+  expect(screen.getByText(/覆盖的范围比你点的这条回答更靠后/)).toBeInTheDocument();
+});
+
+test("codex #530 R1 P2：边界模式的推进回执说「已更新到这一条」，不说「已更新到最新」", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL3); // a1..a3，推进到 a2 时 a3 仍未公开
+  mocks.shareConversation.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:01",
+    shared_through_id: "a2",
+  });
+
+  renderModal("a2");
+
+  fireEvent.click(await screen.findByRole("button", { name: /更新到这一条/ }));
+  expect(await screen.findByText("已更新到这一条")).toBeInTheDocument();
+  expect(screen.queryByText("已更新到最新")).toBeNull();
+});
+
+test("非边界模式的两条回执逐字不变", async () => {
+  mocks.getConversationShare.mockRejectedValue(humanizedError("not shared", 404));
+  mocks.getConversation.mockResolvedValue(DETAIL);
+  mocks.shareConversation.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:01",
+    shared_through_id: "a2",
+  });
+
+  renderModal();
+
+  fireEvent.click(await screen.findByRole("button", { name: /生成分享链接/ }));
+  expect(await screen.findByText("已生成分享链接")).toBeInTheDocument();
+});
