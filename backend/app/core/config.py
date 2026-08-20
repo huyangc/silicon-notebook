@@ -630,6 +630,17 @@ class Settings(BaseSettings):
     reasoning_max_follow_chain_actions: int = Field(
         3, ge=0, validation_alias="REASONING_MAX_FOLLOW_CHAIN_ACTIONS"
     )
+    # Agentic Memory P4 (T5): reflect 动作 consult_memory 的总开关与 per-run 次数
+    # 上限。仅在 deep 及以上档且 ``RETRIEVAL_EXPERIENCE_INJECT_ENABLED`` 也开着时
+    # 才提供这个动作(见 ``reasoning_retrieval.consult_memory_active`` 的单点判定
+    # ——总闸并入注入闸,不是独立策略位:注入闸关着时经验库对全部署都读不到,
+    # 只按这里的 kill switch 放行会让模型看到一个能调但永远拉不到经验的动作)。
+    reasoning_consult_memory_enabled: bool = Field(
+        True, validation_alias="REASONING_CONSULT_MEMORY_ENABLED"
+    )
+    reasoning_max_consult_memory: int = Field(
+        2, ge=0, validation_alias="REASONING_MAX_CONSULT_MEMORY"
+    )
     reasoning_community_peers_cap_factor: int = Field(
         2, ge=1, validation_alias="REASONING_COMMUNITY_PEERS_CAP_FACTOR"
     )

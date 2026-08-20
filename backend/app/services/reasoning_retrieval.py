@@ -15,7 +15,9 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
+from typing import (
+    Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, TYPE_CHECKING,
+)
 
 from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
@@ -29,7 +31,7 @@ from app.repositories.lexical_query import (
 )
 from app.repositories.ports import RETRIEVAL_EXPERIENCE_MAX_ENTRIES
 from app.services.agent_profile_block import (
-    render_profile_block, rendered_row_count,
+    clip_block_value, render_profile_block, rendered_row_count,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE
@@ -41,8 +43,10 @@ from app.services.collection_enumeration import (
 )
 from app.services.prompts import reflect_prompt, reflect_schema_hint
 from app.services.retrieval_experience_block import (
-    adopted_entry_ids, render_experience_block,
-    rendered_row_count as rendered_experience_count, select_experiences,
+    CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
+    render_consult_block, render_experience_block,
+    rendered_row_count as rendered_experience_count, select_consultable,
+    select_experiences, worst_experience_for,
 )
 from app.services.retrieval_experience_projection import current_situation
 from app.services.retrieval import (
@@ -1168,6 +1172,135 @@ def outline_wiring_active(settings, limits) -> bool:
     )
 
 
+# ------------------------------------------------- consult_memory (Agentic
+#                                                    Memory P4, T5)
+#
+# The zero-parameter reflect ACTION that lets the model pull from the SAME
+# deployment-global retrieval-experience library the passive block above
+# injects every round — see ``retrieval_experience_block.select_consultable``
+# for what makes this a different SELECTION rather than a second copy of
+# ``select_experiences``.
+CONSULT_MEMORY_ACTION = "consult_memory"
+
+#: deep 及以上档才提供这个动作。与大纲便签的档位闸同一条道理(低档不该为一次
+#: 额外的模型驱动反思轮付成本)但阈值不同:大纲只在 exhaustive,因为它触发按节
+#: 合成——真正花钱的是那一步,而 consult_memory 自己就是一次反思轮内的零参数
+#: 选择,成本上限是「多花一轮反思」,不是「多调一次按节合成」,所以从 deep 起
+#: 就值得。与报告 depth→档位映射共用同一张表名字形状(见 report_engine.py 的
+#: `_SUFFICIENCY_LLM_EFFORTS`),数值口径独立维护。
+_CONSULT_MEMORY_EFFORTS = frozenset({"deep", "thorough", "exhaustive"})
+
+
+def consult_memory_active(settings, limits, experience_store) -> bool:
+    """本 run 是否提供 consult_memory 这个 reflect 动作。
+
+    三个条件缺一不可,且**总闸并入** ``experience_wiring_active``——这是 P4
+    开工裁决①对设计文档字面的收窄,登记为刻意偏离:``RETRIEVAL_EXPERIENCE_
+    INJECT_ENABLED`` 关闭时经验库对整个部署都读不到东西,若只按「kill switch +
+    档位」放行,模型会看到一个能调但永远拉不到任何经验的动作——那笔反思轮
+    预算纯属浪费,而 kill switch 本身也无法单独表达「档位够但经验库关着」这
+    第三种状态。因此这里**不是**独立策略位的形态(参见 ``allow_ppr`` 那类由
+    调用方按 profile 单独开关的位——``allow_consult_memory`` 仍然存在,但只
+    起「按调用方场景关闭」的防御性作用,不是本判据的一部分)。
+
+    与 ``outline_wiring_active``/``enumeration_wiring_active`` 同款单点判定:
+    动作说明、schema 分支、``reflect()`` 的 ``allowed_actions`` 三处共用这一个
+    函数算出的布尔值,任何一处与其余不同步都会让模型看到一个调不动或没被
+    告知的动作。
+
+    ``experience_store is None`` 走 ``experience_wiring_active`` 自己「调用方
+    没接线」的既有拼写,不在这里重复判断。
+    """
+    return bool(
+        getattr(settings, "reasoning_consult_memory_enabled", True)
+        and limits is not None
+        and getattr(limits, "effort", "") in _CONSULT_MEMORY_EFFORTS
+        and experience_wiring_active(settings, experience_store)
+    )
+
+
+#: 四个可实测「本轮新增证据数」的动作分支(存储词表拼写,见
+#: ``retrieval_experience_projection.RETRIEVAL_ACTIONS``),T6 步级零命中提示
+#: 只track 这四个——它们各自已经在 dispatch 里算出一个确定性的「新增数」
+#: (ppr/exact_lookup 的 ``new``、expand 的 ``neigh``、follow_chain 的
+#: ``new_chains``),复用它判零命中不需要新读。``retrieve``(add_subquery)
+#: 刻意不在其中:它的「新增为 0」在措辞上已经是「换个问法」而非「换个通道」,
+#: 与本提示要解决的「同一通道反复空转」是两回事;``enumerate``/
+#: ``expand_community``/``outline`` 同样不track,前两者已有自己的账目回喂
+#: (集合枚举的续跑账目、`community_focals_done`），后者不产证据。
+_ZERO_HIT_TRACKED_ACTIONS: Tuple[str, ...] = ("ppr", "exact_lookup", "expand", "follow_chain")
+
+#: 同一个动作连续(累计)多少次零新增才够格被提示一次。与
+#: ``_ZERO_HIT_NUDGE_MAX_PER_RUN`` 都是确定性阈值,不是学出来的——P4 开工
+#: 裁决③明确「先攒观测数据,不做 state-signature 全匹配」。
+_ZERO_HIT_NUDGE_THRESHOLD = 2
+#: 一个 run 最多主动提示几次(与动作种类无关的总闸,防止四个动作同时触发时
+#: 一轮账目被四条提示同时撑长)。
+_ZERO_HIT_NUDGE_MAX_PER_RUN = 2
+
+
+def _zero_hit_nudge_note(
+    zero_hit_by_action: Mapping[str, int],
+    nudged_actions: set,
+    entries: Sequence[Mapping[str, object]],
+    situation: Mapping[str, object],
+) -> Optional[Tuple[str, str]]:
+    """挑出**至多一个**够格提示的动作,连带它对应的经验库「坏」条目理由。
+
+    纯函数:不读 self、不做 I/O——调用方负责传入已经算好的 run 态(计数字典、
+    已提示过的动作集合)和已经读过一次的经验库快照。按
+    ``_ZERO_HIT_TRACKED_ACTIONS`` 的固定顺序找第一个够格的动作,找不到匹配的
+    「坏」条目就跳过、继续找下一个——不够格的动作没有理由可讲,提示一句空话
+    比不提示更糟。返回 ``(action, note)``,``action`` 是存储词表拼写(调用方用
+    它更新 ``nudged_actions``),``note`` 是可以直接拼进 ``summary`` 的中文提示,
+    rationale 原样嵌入(P4 开工裁决⑤)。
+    """
+    for action in _ZERO_HIT_TRACKED_ACTIONS:
+        if action in nudged_actions:
+            continue
+        if zero_hit_by_action.get(action, 0) < _ZERO_HIT_NUDGE_THRESHOLD:
+            continue
+        entry = worst_experience_for(entries, situation, action)
+        if entry is None:
+            continue
+        action_id = action_id_for(action)
+        rationale = clip_rationale(entry.get("rationale"))
+        note = (
+            f"（提示:「{action_id}」这类动作在当前场景已连续 "
+            f"{zero_hit_by_action[action]} 次未拿到新证据;以往打法经验:"
+            f"{rationale}。可考虑改用其他动作。）"
+        )
+        return action, note
+    return None
+
+
+def _undelivered_retrieval_note(
+    blocks: Sequence[Mapping[str, object]], profile_block: str, owner_id: str,
+) -> str:
+    """本人自己的检索心得覆盖行,若共享理解块的整块字符硬顶把它截没了。
+
+    consult_memory 的「本人覆盖层」半（P4 开工裁决②）:``profile_block``
+    每轮都会自动注入,但它是**整串截断**(见 ``render_profile_block``),挤在
+    一份拥挤的理解块末尾的一行可以被整体切掉而模型从未看到。这里复用
+    run() 已经读过一次的 ``blocks``(零新增查询),只找这一个成员自己的
+    ``retrieval_notes`` 覆盖行(``owner_id`` 非空匹配,不是共享底座的 ''
+    行),再检查它是否真的出现在已渲染的 ``profile_block`` 里——出现了就说明
+    模型本来就看得到,不必再讲一遍。
+    """
+    if not owner_id:
+        return ""
+    for block in blocks or ():
+        if (
+            str(block.get("label") or "") == "retrieval_notes"
+            and str(block.get("owner_id") or "") == owner_id
+        ):
+            value = clip_block_value(block.get("value"))
+            if value and value not in profile_block:
+                return value
+            return ""
+    return ""
+
+
 def _norm_query(q: str) -> str:
     """子查询防重的归一化键:压空白 + casefold。保守精确匹配、不做语义归一——
     宁可放过真改写的近似查询(由回喂账目提示模型约束),不误杀新角度。"""
@@ -1571,6 +1704,15 @@ class ReasoningRetriever:
         # knowhow completion sets this False for the same reason it turns PPR
         # off — see the call site for why this specific channel is unsafe there.
         self.allow_exact_lookup = True
+        # Agentic Memory P4 (T5). Mirrors allow_ppr/allow_exact_lookup in shape
+        # only — the effort-tier + injection-switch gate in
+        # ``consult_memory_active`` already keeps this action off for every
+        # deployment/profile that has not opted into both, so True here is
+        # inert until that gate opens. knowhow completion still sets this
+        # False explicitly (defense in depth: it never passes ``limits``,
+        # which alone keeps the action unreachable, but a future call site
+        # that starts passing one should not silently inherit this channel).
+        self.allow_consult_memory = True
         # Authoring flows whose synthesis only accepts server-issued evidence
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
@@ -1792,11 +1934,16 @@ class ReasoningRetriever:
                for s in ex.sub_queries]
         return out or fallback
 
-    def reflect(self, question, candidates_summary, outline: bool = False):
+    def reflect(self, question, candidates_summary, outline: bool = False,
+                consult_memory: bool = False):
         """``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
         ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
         prompt/schema 与接入前逐字相同。档位是 run() 的参数而不是实例状态,所以
-        这把闸只能从调用处传进来——与枚举那把由实例状态算出的闸并列、互不影响。"""
+        这把闸只能从调用处传进来——与枚举那把由实例状态算出的闸并列、互不影响。
+
+        ``consult_memory`` = 本 run 提供 consult_memory 动作(deep 及以上档 且
+        经验库注入闸开着,见 ``consult_memory_active``)。同款默认 False、同款
+        由调用处传入。"""
         raise_if_cancelled(self.cancel_event)
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
         client = self.model_clients.chat("reasoning_agent")
@@ -1815,7 +1962,7 @@ class ReasoningRetriever:
                 "content": reflect_prompt(
                     question, candidates_summary,
                     element_kinds=element_kinds, object_types=object_types,
-                    outline=outline,
+                    outline=outline, consult_memory=consult_memory,
                 ),
             }]
             if self.untrusted_evidence:
@@ -1825,7 +1972,9 @@ class ReasoningRetriever:
                 })
             raw = client.chat_json(
                 messages,
-                reflect_schema_hint(element_kinds, object_types, outline),
+                reflect_schema_hint(
+                    element_kinds, object_types, outline, consult_memory
+                ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event)
@@ -1846,7 +1995,8 @@ class ReasoningRetriever:
             ) + (
                 (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION)
                 if enumeration else ()
-            ) + ((OUTLINE_ACTION,) if outline else ())
+            ) + ((OUTLINE_ACTION,) if outline else ()
+            ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ())
             if action not in allowed_actions:
                 if self.fail_closed:
                     raise ValueError("reasoning model returned an invalid action")
@@ -2163,6 +2313,11 @@ class ReasoningRetriever:
         # 把空转上限从 3 轮抬到 19 轮。正当流程里绑定轮本来就伴随检索动作(那些动作
         # 自己会重置 stale),所以中性对真实用法零影响,只掐掉纯整理的空转。
         outline_active = outline_wiring_active(self.settings, limits)
+        # Agentic Memory P4 (T5): 是否提供 consult_memory 动作,与 outline_active
+        # 同款单点判定、同款 run 级不变量(判据只吃 settings/limits/store,循环内
+        # 不会变)。
+        consult_memory_flag = consult_memory_active(
+            self.settings, limits, self.retrieval_experiences)
         outline: List[OutlineSection] = []
         outline_updates = 0
         # 大纲采用引导已经发出过几轮(仅内存,run 级)。见 `_outline_nudge_note`:
@@ -2194,6 +2349,27 @@ class ReasoningRetriever:
         # 已算出、等着下一轮便签展示的候选。展示后即摘除;run 结束时仍在队里的
         # (终态轮 apply 算出来的那批)如实丢弃——提示服务于**继续检索**的轮次。
         kg_gap_pending: List = []
+
+        # Agentic Memory P4 (T5): consult_memory 动作的 run 级预算与账目。
+        # ``consult_delivered_ids`` 与「本轮已注入的被动打法块」共用去重口径:
+        # 一条经验已经在被动块或前一次 consult_memory 调用里出现过,再送一次
+        # 只是同一句话的重复,不是新信息。``consult_rows_accum``/
+        # ``consult_overlay_note`` 是「本 run 至今累计选中的」,每次调用都重新
+        # 整体渲染(而不是各自再开一份 600 字符块),这样两次调用的合计仍受同
+        # 一个 CONSULT_MEMORY_BLOCK_MAX_CHARS 约束(设计说明见 render_consult_
+        # block 的 docstring)。
+        consult_used = 0
+        consult_delivered_ids: set = set()
+        consult_rows_accum: List = []
+        consult_overlay_note = ""
+        consult_block_text = ""
+
+        # Agentic Memory P4 (T6): 步级零命中提示的 run 级账目。四个可实测「本轮
+        # 新增数」的动作分支各自计数(见 _ZERO_HIT_TRACKED_ACTIONS 的说明),
+        # ``nudged_actions`` 保证同一个动作一个 run 只提醒一次。
+        zero_hit_by_action: Dict[str, int] = {}
+        nudged_actions: set = set()
+        nudges_used = 0
 
         # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
         # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
@@ -2252,11 +2428,15 @@ class ReasoningRetriever:
             # 扫描的耗时账目,而这里是一次 ≤10 行的主键前缀点查,亚毫秒。每个还没
             # 整理过的库(常态)每一轮都多一条「无」步是纯噪声。
             profile_block = ""
+            # Agentic Memory P4 (T5): 原始行留存,供 consult_memory 的「本人覆盖层」
+            # 半复用(见 _undelivered_retrieval_note)——零新增查询,关闭态/读取
+            # 失败都保持空列表,consult_memory 那半自然查不到任何东西。
+            profile_raw_blocks: List = []
             if profile_wiring_active(self.settings, self.agent_profile):
                 try:
-                    blocks = self.agent_profile.read_blocks(
+                    profile_raw_blocks = self.agent_profile.read_blocks(
                         notebook_id, self.profile_owner_id)
-                    profile_block = render_profile_block(blocks)
+                    profile_block = render_profile_block(profile_raw_blocks)
                     if profile_block:
                         record(TraceStep(
                             step_type="profile",
@@ -2272,6 +2452,7 @@ class ReasoningRetriever:
                     raise
                 except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
                     profile_block = ""
+                    profile_raw_blocks = []
             # 部署级全局的「检索打法」(Agentic Memory P2 §6.1)。紧挨着上面那块
             # 读:两者是同一类东西(规划背景,不是证据),形态也刻意做成同一套
             # ——表头 + 一句框定语 + `- ` 行 + 一个整块硬顶 + 按**送达**行数记步。
@@ -2975,6 +3156,36 @@ class ReasoningRetriever:
                         + (f" 等 {len(still)} 个"
                            if len(still) > _INTENT_PENDING_DISCLOSE else "")
                         + "。若仍需覆盖,请优先用 add_subquery 提交对应方向。）")
+            # Agentic Memory P4 (T6): 步级零命中提示。服务端**确定性推送**(不花
+            # 步预算),与上面的 consult_memory(模型主动拉、要花一轮反思)是同一份
+            # 经验库的两条不同消费路径,共用 zero_hit_by_action / worst_experience_
+            # for / clip_rationale。闸只看 experience_wiring_active——**没有**
+            # consult_memory_active 的档位限制,因为它不产生额外模型调用,只是把
+            # summary 多几个字;fail-open,读库炸不记 skip(与理解块/打法块同口径:
+            # 一次读失败不该在轨迹里留下噪声)。
+            if (
+                experience_wiring_active(
+                    self.settings, self.retrieval_experiences)
+                and nudges_used < _ZERO_HIT_NUDGE_MAX_PER_RUN
+            ):
+                try:
+                    nudge_situation = current_situation(
+                        intent_detail, mode=_EXPERIENCE_RUN_MODE,
+                        retrieval_effort=(
+                            limits.effort if limits is not None else ""))
+                    picked_nudge = _zero_hit_nudge_note(
+                        zero_hit_by_action, nudged_actions,
+                        _cached_experiences(self.retrieval_experiences),
+                        nudge_situation)
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 提示是背景,不是必需品
+                    picked_nudge = None
+                if picked_nudge:
+                    nudge_action, nudge_note_text = picked_nudge
+                    nudged_actions.add(nudge_action)
+                    nudges_used += 1
+                    summary = f"{summary}\n\n{nudge_note_text}"
             # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
             enum_note = _enumeration_note(enum_chains)
             if enum_note:
@@ -3034,6 +3245,13 @@ class ReasoningRetriever:
             # 后面那个额度句是一句话,不能被别的块插开。
             if experience_block:
                 summary = f"{summary}\n\n{experience_block}"
+            # Agentic Memory P4 (T5): consult_memory 的累计结果,同样排在集合
+            # 地图之前——地图与它后面那个额度句是一句话,不能被别的块插开
+            # (同上两条注释的理由)。``consult_block_text`` 每次成功调用后整体
+            # 重渲染(见 render_consult_block 的 docstring),所以这里只是原样
+            # 拼接,不需要再判断是不是第一次出现。
+            if consult_block_text:
+                summary = f"{summary}\n\n{consult_block_text}"
             if collection_map_text:
                 summary = (
                     f"{summary}\n\n{collection_map_text}"
@@ -3045,7 +3263,11 @@ class ReasoningRetriever:
             # 以及 _construct_reasoning_retriever 对 fail_closed 的处理):关闭态与
             # 低档位下调用形状与接入前逐字一致,既有的 reflect 测试替身不必为一个
             # 它们永远收不到的参数改签名。
-            reflect_kwargs = {"outline": True} if outline_active else {}
+            reflect_kwargs = {}
+            if outline_active:
+                reflect_kwargs["outline"] = True
+            if consult_memory_flag:
+                reflect_kwargs["consult_memory"] = True
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             reflect_detail = {"next_action": decision.next_action,
@@ -3180,6 +3402,10 @@ class ReasoningRetriever:
                         ctx = self.get(notebook_id, oid)
                         node_name = str(ctx.get("name", "")).strip() if ctx else ""
                     node_name = node_name or oid
+                    # Agentic Memory P4 (T6): 本轮零新增计数(见 ppr 分支同款注释)。
+                    if not neigh:
+                        zero_hit_by_action["expand"] = (
+                            zero_hit_by_action.get("expand", 0) + 1)
                     expand_detail = {"object_id": oid, "name": node_name,
                                      "edge_type": decision.expand_edge_type,
                                      "found": len(neigh),
@@ -3551,6 +3777,72 @@ class ReasoningRetriever:
                 apply_outline_update(
                     decision, overflow_repair=overflow_repair_submission
                 )
+            elif decision.next_action == CONSULT_MEMORY_ACTION:
+                # Agentic Memory P4 (T5)。防御性双查:`consult_memory_flag`/
+                # `self.allow_consult_memory` 都已经在 reflect() 的白名单里生效
+                # (关闭时这个动作根本不会出现在模型的选项里),这里再判一次是
+                # 与 exact_lookup/ppr 同款的纵深防御——测试替身或畸形响应仍可能
+                # 吐出这个 next_action。
+                if not consult_memory_flag or not self.allow_consult_memory:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过回想以往打法(当前场景未提供该能力)",
+                        detail={"reason": "consult_memory_disabled"}))
+                elif consult_used >= action_policy.max_consult_memory:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary=("跳过回想以往打法(已达次数上限 "
+                                 f"{action_policy.max_consult_memory})"),
+                        detail={"reason": "consult_memory_cap"}))
+                else:
+                    consult_used += 1
+                    consult_situation = current_situation(
+                        intent_detail, mode=_EXPERIENCE_RUN_MODE,
+                        retrieval_effort=(
+                            limits.effort if limits is not None else ""))
+                    new_consult_rows = select_consultable(
+                        _cached_experiences(self.retrieval_experiences),
+                        consult_situation,
+                        exclude_ids=(
+                            consult_delivered_ids
+                            | {str(e.get("id") or "")
+                               for e in experience_entries}
+                        ),
+                        zero_hit_actions=set(zero_hit_by_action),
+                        top_k=CONSULT_MEMORY_TOP_K,
+                    )
+                    overlay_note = _undelivered_retrieval_note(
+                        profile_raw_blocks, profile_block,
+                        self.profile_owner_id)
+                    is_new_overlay = bool(overlay_note) and (
+                        overlay_note != consult_overlay_note)
+                    if not new_consult_rows and not is_new_overlay:
+                        record(TraceStep(
+                            step_type="skip",
+                            summary="回想以往打法:未找到与当前场景匹配的新记录",
+                            detail={"reason": "consult_memory_nothing_new"}))
+                    else:
+                        consult_rows_accum.extend(new_consult_rows)
+                        consult_delivered_ids.update(
+                            str(r.get("id") or "") for r in new_consult_rows)
+                        if is_new_overlay:
+                            consult_overlay_note = overlay_note
+                        consult_block_text = render_consult_block(
+                            consult_rows_accum,
+                            extra_lines=(
+                                [consult_overlay_note]
+                                if consult_overlay_note else ()
+                            ),
+                        )
+                        record(TraceStep(
+                            step_type="consult_memory",
+                            summary=(
+                                "回想以往检索打法"
+                                + (f",新增 {len(new_consult_rows)} 条"
+                                   if new_consult_rows else "")
+                            ),
+                            detail={"entries": len(new_consult_rows),
+                                    "chars": len(consult_block_text)}))
             elif decision.next_action == "ppr_retrieve":
                 if self._unsafe_scope_restricted():
                     record(TraceStep(
@@ -3579,6 +3871,11 @@ class ReasoningRetriever:
                     for c in new:
                         seen_chunks.add(c.chunk_id)
                     chunks.extend(new)
+                    # Agentic Memory P4 (T6): 本轮零新增计数,纯内存 O(1) 累加,
+                    # 不改变本分支任何既有行为。
+                    if not new:
+                        zero_hit_by_action["ppr"] = (
+                            zero_hit_by_action.get("ppr", 0) + 1)
                     record(TraceStep(step_type="ppr",
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
                                      detail={"query": pq, "found": len(new), "phase": "action",
@@ -3667,6 +3964,10 @@ class ReasoningRetriever:
                     exact_terms_done.update(_norm_query(t) for t in fresh)
                     exact_lookup_log.append(
                         _ExactLookupAttempt(terms=list(fresh), new=len(new)))
+                    # Agentic Memory P4 (T6): 本轮零新增计数(见 ppr 分支同款注释)。
+                    if not new:
+                        zero_hit_by_action["exact_lookup"] = (
+                            zero_hit_by_action.get("exact_lookup", 0) + 1)
                     record(TraceStep(
                         step_type="exact_lookup",
                         summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
@@ -3764,6 +4065,10 @@ class ReasoningRetriever:
                     else:
                         summary_text = "两跳推导未找到满足证据/类型/适用条件的路径"
                         best_trust = 0.0
+                    # Agentic Memory P4 (T6): 本轮零新增计数(见 ppr 分支同款注释)。
+                    if not new_chains:
+                        zero_hit_by_action["follow_chain"] = (
+                            zero_hit_by_action.get("follow_chain", 0) + 1)
                     record(TraceStep(
                         step_type="follow_chain", summary=summary_text,
                         detail={"hops": 2, "count": len(new_chains),

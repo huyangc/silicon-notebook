@@ -2069,6 +2069,14 @@ def complete_row(
         # reference. Leaving it on would spend the run's listing budget on
         # items the synthesis step is required to ignore.
         reasoning_retriever.allow_enumeration = False
+        # Agentic Memory P4 (T5): consult_memory is already unreachable here
+        # because this call never passes `limits` (consult_memory_active
+        # requires one) — but this profile's `run(...)` call below could grow
+        # one later without anyone revisiting this policy block, and the
+        # global experience library's advice was never validated against a
+        # JSON-envelope query, so turn it off explicitly for the same
+        # defense-in-depth reason as its neighbors above.
+        reasoning_retriever.allow_consult_memory = False
         reasoning_retriever.untrusted_evidence = True
         reasoning_result = reasoning_retriever.run(
             notebook_id,

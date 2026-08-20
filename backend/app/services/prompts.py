@@ -463,6 +463,7 @@ def reflect_schema_hint(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
     outline: bool = False,
+    consult_memory: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -477,6 +478,13 @@ def reflect_schema_hint(
     is offered only at the exhaustive effort).  The two gates are independent
     because the features are: enumeration is available at every effort, the
     outline is not.
+
+    ``consult_memory`` (Agentic Memory P4, T5) is a THIRD independent gate, same
+    principle again: the action only exists at deep-and-above effort while the
+    global retrieval-experience library injection switch is also on (see
+    ``reasoning_retrieval.consult_memory_active``). It adds no schema FIELDS —
+    the action takes no parameters — only one more word to the ``next_action``
+    enum, so False leaves every other byte of the schema untouched.
     """
     actions = (
         "answer|expand_graph|add_subquery|"
@@ -506,6 +514,8 @@ def reflect_schema_hint(
             '"collection":"",'
             '"source_id":"","source_title":""},'
         )
+    if consult_memory:
+        actions += "|consult_memory"
     outline_branch = ""
     if outline:
         actions += "|update_outline"
@@ -539,6 +549,7 @@ def reflect_prompt(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
     outline: bool = False,
+    consult_memory: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
@@ -549,6 +560,11 @@ def reflect_prompt(
     ``outline`` True = the outline scratchpad action is offered this run (only
     at the exhaustive effort, see ``reasoning_retrieval.outline_wiring_active``);
     False = it is not, and again every byte is what it was before it existed.
+
+    ``consult_memory`` True = the consult_memory action is offered this run
+    (deep-and-above effort AND the experience-library injection switch, see
+    ``reasoning_retrieval.consult_memory_active``); False = it is not, and
+    every byte of this prompt is what it was before the action existed.
     """
     enumeration_tools = bool(element_kinds or object_types)
     # The reflect-local half of the scope-grounding rule: this is the prompt with
@@ -661,6 +677,20 @@ def reflect_prompt(
         "one-sentence answer only burns turns.\n"
         if outline else ""
     )
+    # Agentic Memory P4 (T5). Zero parameters — the model just picks the
+    # action, the server decides what to hand back — so there is nothing to
+    # tell it HOW to fill in beyond WHEN to reach for it.
+    consult_memory_action = (
+        "- consult_memory: before repeating an action (ppr_retrieve, "
+        "exact_lookup, expand_graph, follow_chain) that has already come back "
+        "empty a few times in THIS run, recall tactical hints from earlier "
+        "runs on this shape of question, plus your own earlier notes for this "
+        "library. Takes no parameters. Returns advice on WHICH channel tends "
+        "to pay off, never evidence — nothing it returns is citable with [k], "
+        "and it never says which sources may be read. Use it sparingly, only "
+        "when genuinely unsure what to try next.\n"
+        if consult_memory else ""
+    )
     completeness_rule = (
         "In reason, you may call a collection completely retrieved ONLY when "
         "an enumerate action has reported its coverage as complete for that "
@@ -713,6 +743,7 @@ def reflect_prompt(
         "paraphrase returns nothing.\n"
         f"{enumerate_actions}"
         f"{outline_action}"
+        f"{consult_memory_action}"
         f"{SCOPE_DEIXIS_GROUNDING}"
         f"{quoted_phrase_grounding(question)}"
         f"{scope_fields_rule}"
