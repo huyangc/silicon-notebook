@@ -1296,6 +1296,8 @@ class RepositoryRuntime:
             copy_stats=copy_stats,
             # T5:成员被移出后,他在这本库里的私有「理解」覆盖层随之清空。
             profiles=self.agent_profile,
+            # P3(codex #535 R6):观察行同批清空,同一条空白起点契约。
+            observations=self.agent_observations,
         )
         return self.sharing
 
