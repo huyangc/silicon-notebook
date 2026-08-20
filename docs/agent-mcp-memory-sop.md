@@ -37,7 +37,7 @@ curl -s http://127.0.0.1:8000/api/ready
 
 Expect `"ready": true`. Open <http://127.0.0.1:3000> and sign in. A fresh local database seeds `admin` with local default password `admin`; existing deployments use their configured credentials.
 
-For a remote deployment, use the addresses that deployment publishes rather than rewriting these by hand: its own web address for the UI and `/api/ready`, and — for MCP — the slashed `MCP_PUBLIC_URL` printed by the onboarding instructions (§4). They are not necessarily the same origin: a proxy may publish MCP separately, and the backend's own port may be private or plain HTTP.
+For a remote deployment, use the addresses that deployment publishes rather than rewriting these by hand: its own web address for the UI and `/api/ready`, and — for MCP — the `MCP_PUBLIC_URL` printed verbatim by the onboarding instructions (§4). They are not necessarily the same origin: a proxy may publish MCP separately, and the backend's own port may be private or plain HTTP.
 
 Use a notebook the account can read. To test formal context retrieval, that notebook should contain a source, KG object, or confirmed Memory.
 
@@ -304,7 +304,7 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | Notebook outside allowlist | Issue a new token whose explicit allowlist contains that notebook. |
 | Scope/permission error | Reissue a least-privilege token with the required scope; a client cannot elevate it. |
 | Codex cannot see the server | Run `codex mcp list`, export the token before starting Codex, and start a new session/restart the app or extension. |
-| `404`, or a refused connection, while configuring a client | Use the slashed endpoint the deployment publishes — `MCP_PUBLIC_URL` plus `/`, as printed by the onboarding instructions on the token receipt. The `<host>:8000/mcp/` form applies only to a confirmed direct-backend deployment; behind a proxy the backend port may be private, and reaching for it can also drop the token to cleartext (§4). |
+| `404`, or a refused connection, while configuring a client | Retry the endpoint the deployment publishes, exactly as the token receipt's onboarding instructions print it. Adding a trailing slash, or falling back to `<host>:8000/mcp/`, applies only to a confirmed backend-direct endpoint: a proxy may route only the published path, its backend port may be private, and reaching for that port can also drop the token to cleartext (§4). |
 | `307 Temporary Redirect` on `POST /mcp` | Expected — the MCP app is mounted at `/mcp` with its own root route. Configure `/mcp/` instead of relying on the client to follow the redirect. |
 | `400 Bad Request: Missing session ID` | A tool call reached the server before `initialize` plus `notifications/initialized`, or the `MCP-Session-Id` header was lost. Real clients handle this; hand-written `curl` must not skip it (§8). |
 | Claude Code sends a literal `${...}` as the token | The variable was not exported in the shell that launched `claude`, or its name is misspelled — an undefined variable is passed through verbatim. Export it and start a new session. |
