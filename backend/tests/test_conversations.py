@@ -265,6 +265,46 @@ def test_conversation_mutation_routes(tmp_path, monkeypatch):
     ).status_code == 200
 
 
+def test_rename_refuses_an_over_length_title_and_stores_nothing_clipped(tmp_path, monkeypatch):
+    """会话标题必须在**重命名**这一刻就有界。
+
+    公开分享页把标题 `_title_text` **原样**发给匿名访客(旧的 400 字公开截断在
+    codex #522 R2 被拿掉,因为静默截断用户自撰的标题正是「用户编辑的数据不得静默
+    截断」要防的)——所以「原样返回」只有在写入侧拒收超长标题时才是**有界**的。
+    这是 codex #525 R1 P2 对报告投影提的同一条,#526 已为提问那半闭合,这里闭合标题
+    这半。重命名是标题唯一能超过服务端自动取的前 60 字的途径,所以这一个端点就是
+    它的全部写入侧。
+
+    与前端 `ASK_INPUT_LIMITS.conversationTitleMaxChars` 是同一条护栏的两半。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.models.ask import CONVERSATION_TITLE_MAX_CHARS
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+    from app.api.ask_routes import repository
+    client = TestClient(app)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repository(), nb)
+    cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q"}).json()["conversation_id"]
+
+    before = client.get(f"/api/conversations/{cid}").json()["title"]
+    over = "标" * (CONVERSATION_TITLE_MAX_CHARS + 1)
+    assert client.patch(f"/api/conversations/{cid}", json={"title": over}).status_code == 422
+    # 拒绝,不是裁短了存:库里绝不能留下一份被悄悄截过的标题——那正是公开投影不再
+    # 截断之后、唯一还能让匿名响应重新变成"被静默改写过的用户文本"的路径。
+    assert client.get(f"/api/conversations/{cid}").json()["title"] == before
+
+    # 恰好等于上限**不是** 422,而且原样存下——空转保护:一个恒 422、或者悄悄裁到
+    # 199 字的实现都过不了这一段。
+    at_cap = "标" * CONVERSATION_TITLE_MAX_CHARS
+    assert client.patch(f"/api/conversations/{cid}", json={"title": at_cap}).status_code == 200
+    assert client.get(f"/api/conversations/{cid}").json()["title"] == at_cap
+
+
 def test_list_conversations_used_reasoning_last_turn(repo):
     """used_reasoning 反映会话最后一轮是否走了推理（reasoning_trace 非空）。"""
     from app.models.schemas import AskResponse, TraceStep

@@ -714,6 +714,10 @@ def get_conversation(conversation_id: str, user: UserProfile = Depends(get_curre
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
+# Over-length titles are refused here with 422 and never stored clipped:
+# `ConversationRenameRequest.title` carries `max_length=CONVERSATION_TITLE_MAX_CHARS`,
+# so FastAPI rejects the body before this function runs. That refusal is what
+# lets the public share page serve the title verbatim; see the constant.
 @router.patch("/conversations/{conversation_id}")
 def rename_conversation(conversation_id: str, payload: ConversationRenameRequest, user: UserProfile = Depends(get_current_user)):
     if notebook_access_repository().conversation_owner(conversation_id) != user.id:

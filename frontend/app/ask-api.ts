@@ -44,8 +44,22 @@ const options = { tag: "api", unauthorized: "clear-and-reload" as const };
  * 防的），所以「不截断」只有在提交那一刻就挡住超长问题时才成立——与深度报告那侧
  * codex #525 R1 P2 是同一条。
  */
+/**
+ * 会话标题的长度上限（`conversationTitleMaxChars`）。
+ *
+ * **与 `backend/app/models/ask.py` 的 `CONVERSATION_TITLE_MAX_CHARS` 同值**，改一侧
+ * 就要改另一侧。
+ *
+ * 与提问同一条红线的另一半：会话公开分享页把标题也**原样**发给匿名访客（旧的 400
+ * 字公开截断在 codex #522 R2 被拿掉），所以「不截断」同样只有在重命名那一刻就挡住
+ * 超长标题时才是**有界**的。重命名是标题唯一能超过服务端自动取的前 60 字的途径。
+ *
+ * 取 200 而不是 4,000：那是给**问题正文**定的尺，用它给一行**标签**定界等于宣称我们
+ * 打算服务 4,000 字的会话名。200 与后端同源，也是 `QueryIntentTopic.title` 的既有口径。
+ */
 export const ASK_INPUT_LIMITS = {
   questionMaxChars: 4000,
+  conversationTitleMaxChars: 200,
 } as const;
 
 /**
@@ -61,6 +75,23 @@ export const askQuestionLimitHint = (question: string): string | null => {
   const used = countCodePoints(question);
   const max = ASK_INPUT_LIMITS.questionMaxChars;
   if (used > max) return `提问超出 ${max} 字上限（当前 ${used} 字），请精简后再提问`;
+  return null;
+};
+
+/**
+ * 会话标题超限时的提示文案；没超返回 `null`。`askQuestionLimitHint` 的平移。
+ *
+ * 同样**一个字都不删**：拦住保存，让用户自己改短（codex #525 R3）。同样按**码点**数，
+ * 与后端 Pydantic `max_length` 同一把尺——刻意不使用 `<input maxLength>`，它数的是
+ * UTF-16 code unit，含非 BMP 字符时会比 API 更早停手（codex #525 R2）。
+ *
+ * 顺带的可见后果：护栏上线**之前**改过的超长标题，一点开重命名就会当场显示这句话。
+ * 那是对的——那份草稿此刻确实提交不了，说清楚比让保存键莫名变灰好。
+ */
+export const conversationTitleLimitHint = (title: string): string | null => {
+  const used = countCodePoints(title);
+  const max = ASK_INPUT_LIMITS.conversationTitleMaxChars;
+  if (used > max) return `标题超出 ${max} 字上限（当前 ${used} 字），请精简后再保存`;
   return null;
 };
 

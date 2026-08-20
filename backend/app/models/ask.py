@@ -199,12 +199,12 @@ class QueryIntentContract(BaseModel):
 # the asked-question rail silently moved the contract's caps too.
 #
 # Residual, deliberately out of scope and recorded rather than hidden: a
-# conversation whose turns predate this rail can still carry a longer question,
-# and `ConversationRenameRequest.title` has no cap at all -- so the public
-# conversation projection is not yet bounded end to end.  Bounding either inside
-# the projection needs a disclosure field on `PublicTurn` plus a public-page
-# change (what `PublicReport.question_truncated` cost on the report side), which
-# is a separate deliverable, not something to slip in silently here.
+# conversation whose turns predate this rail can still carry a longer question
+# (the *title* half of this note is closed -- see
+# `CONVERSATION_TITLE_MAX_CHARS`).  Bounding a pre-rail row inside the projection
+# needs a disclosure field on `PublicTurn` plus a public-page change (what
+# `PublicReport.question_truncated` cost on the report side), which is a separate
+# deliverable, not something to slip in silently here.
 ASK_QUESTION_MAX_CHARS = 4000
 
 
@@ -623,8 +623,34 @@ class AskResponse(BaseModel):
         return normalized
 
 
+# The rail on a conversation TITLE, the other half of what the public share page
+# serves verbatim.  Renaming is the only way a title exceeds the 60 characters
+# `ensure_conversation` slices off the first question, so this endpoint is the
+# whole write side of that field.
+#
+# It is load-bearing for the *public* page for exactly the reason
+# `ASK_QUESTION_MAX_CHARS` is: `conversation_public_view._title_text` serves the
+# title WHOLE, because clipping a user's own title with no disclosure is what
+# AGENTS.md 用户编辑的数据不得静默截断 forbids (the old 400-char public cap came
+# out in codex #522 R2 for that reason).  "Serve it whole" is only a *bounded*
+# promise while the write side refuses an over-length title -- otherwise an
+# anonymous response stays unbounded by client input, which is the finding codex
+# #525 R1 P2 raised and #526 closed for the question half.
+#
+# 200, not `ASK_QUESTION_MAX_CHARS`: that value bounds question-length prose,
+# and reusing it here would say a 4,000-character conversation *label* is a
+# shape we intend to serve.  200 matches `QueryIntentTopic.title` in this module
+# and leaves better than 3x headroom over the 60 characters the server itself
+# generates, while staying a plausible one-line label.
+#
+# No `min_length`, mirroring `AskRequest.question`: an empty title is accepted
+# today and the route stores it, so adding one would change behaviour at the
+# bottom end -- a different change from bounding the top.
+CONVERSATION_TITLE_MAX_CHARS = 200
+
+
 class ConversationRenameRequest(BaseModel):
-    title: str
+    title: str = Field(max_length=CONVERSATION_TITLE_MAX_CHARS)
 
 
 class ConversationBulkDeleteResult(BaseModel):

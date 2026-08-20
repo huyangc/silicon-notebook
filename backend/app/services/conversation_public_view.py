@@ -231,22 +231,33 @@ def _question_text(value: Any) -> str:
     ``test_public_question_is_bounded_by_the_write_side_rail`` pins the two
     halves together so neither can be relaxed without the other failing.
 
-    Two knowingly-unbounded leftovers, recorded rather than papered over: turns
-    written *before* that rail, and the conversation title (see ``_title_text``).
-    Both would need a disclosure field on the turn plus a public-page change to
-    bound here, so they are tracked as separate work rather than fixed by a
-    silent clip."""
+    One knowingly-unbounded leftover, recorded rather than papered over: turns
+    written *before* that rail. Bounding one here would need a disclosure field
+    on the turn plus a public-page change, so it is tracked as separate work
+    rather than fixed by a silent clip. (The conversation title, the other
+    leftover this note used to carry, now has its own write-side rail — see
+    ``_title_text``.)"""
     return str(value or "").strip()
 
 
 def _title_text(value: Any) -> str:
     """The conversation title, served WHOLE — never truncated (codex #522 R2).
 
-    ``ConversationRenameRequest.title`` has no length cap, so the authenticated
-    UI can show a title far past the retired 400-char public cap; truncating it
-    only here would silently drop the tail of the user's own title. Like the
-    question and ``answer_md``, the title is the user's artifact — serve it
-    whole."""
+    Truncating it only here would silently drop the tail of the user's own
+    title, past the retired 400-char public cap. Like the question and
+    ``answer_md``, the title is the user's artifact — serve it whole.
+
+    Same two-halves guardrail as ``_question_text``: "whole" is a *bounded*
+    promise only because the write side refuses an over-length title.
+    ``ConversationRenameRequest.title`` carries
+    ``max_length=CONVERSATION_TITLE_MAX_CHARS`` (200) — renaming is the only way
+    a title grows past the 60 characters ``ensure_conversation`` slices off the
+    first question, so that one endpoint is the whole write side.
+    ``test_public_title_is_bounded_by_the_write_side_rail`` pins the two halves
+    together so neither can be relaxed without the other failing.
+
+    A title renamed *before* that rail can still be longer, exactly like a
+    pre-rail question; it is rendered faithfully rather than clipped."""
     return str(value or "").strip()
 
 

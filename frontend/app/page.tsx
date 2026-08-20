@@ -148,7 +148,7 @@ import {
 import { BundleChoicePanel, BundleReceiptsPanel, type BundleReceiptEntry } from "./bundle-upload-panels.tsx";
 import type { BundleFile, InlineReceipt } from "./md-bundle.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
-import { askQuestionLimitHint, bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
+import { askQuestionLimitHint, bulkDeleteConversations, cancelAskJob, conversationTitleLimitHint, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebooksBounded, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createNotebookObjectSchema, createObjectSchema, deleteNotebookObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listNotebookObjectSchemas, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateNotebookObjectSchema, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, getReportShare, shareReport, unshareReport, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchRelinkStatus, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgRebuildStatus, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "../features/kg-maintenance/kg-api";
@@ -2641,6 +2641,13 @@ export default function Home() {
     () => askQuestionLimitHint(question.trim()),
     [question],
   );
+  // 会话重命名的同一条护栏。量的同样是 `trim()` 后的那一份——commitRenameSession
+  // 发出去的就是它,按原文量会在「正好满额 + 一个尾随空格」时把保存键灰掉,而那个
+  // PATCH 其实收得下。
+  const sessionTitleOverLimit = useMemo(
+    () => conversationTitleLimitHint(sessionTitleDraft.trim()),
+    [sessionTitleDraft],
+  );
   // 「这次提问还在进行中」——问题理解阶段(尚无持久 job)、等用户补充澄清、以及
   // 真正在跑的 ask 都算。在途 turn 从提交那一刻就要出现,理解阶段的轨迹才有地方
   // 落;只看 asking 会让用户在整段问题理解里对着空会话等待。
@@ -4926,6 +4933,10 @@ export default function Home() {
       setRenamingSessionId(null);
       return;
     }
+    // 防御性复查:可见的闸是保存键与 Enter(两者都读 sessionTitleOverLimit),这里兜住
+    // 任何绕过它们的调用路径,免得发一个必被 422 的 PATCH。刻意**不**在这里裁短——
+    // 护栏是拦住保存,不是替用户改标题(codex #525 R3)。
+    if (conversationTitleLimitHint(next)) return;
     await renameConversation(sessionId, next);
     await loadSessions(currentNotebookId);
     setRenamingSessionId(null);
@@ -7345,17 +7356,26 @@ export default function Home() {
                       <article className={`chat-session-card ${session.id === conversationId ? "active" : ""}`} key={session.id}>
                         {renamingSessionId === session.id ? (
                           <div className="chat-session-rename">
+                            {/* 刻意没有 maxLength:那把尺数的是 UTF-16 code unit,与后端
+                                Pydantic 的码点口径对不上,而且它是**静默裁剪**——两条都
+                                是红线(codex #525 R2/R3)。超限时输入框保持可编辑,用户
+                                正要做的就是把它改短。 */}
                             <input
                               autoFocus
                               value={sessionTitleDraft}
+                              aria-invalid={sessionTitleOverLimit !== null}
                               onChange={(event) => setSessionTitleDraft(event.target.value)}
                               onKeyDown={(event) => {
-                                if (event.key === "Enter") commitRenameSession(session.id).catch(reportError);
+                                if (event.key === "Enter" && !sessionTitleOverLimit) commitRenameSession(session.id).catch(reportError);
                                 if (event.key === "Escape") setRenamingSessionId(null);
                               }}
                             />
-                            <button type="button" title="保存" onClick={() => commitRenameSession(session.id).catch(reportError)}><Check size={15} /></button>
+                            <button type="button" title="保存" disabled={sessionTitleOverLimit !== null} onClick={() => commitRenameSession(session.id).catch(reportError)}><Check size={15} /></button>
                             <button type="button" title="取消" onClick={() => setRenamingSessionId(null)}><X size={15} /></button>
+                            {/* 此刻唯一挡着保存键的东西,不写出来用户只看到按钮变灰。 */}
+                            {sessionTitleOverLimit && (
+                              <span className="chat-session-rename-hint">{sessionTitleOverLimit}</span>
+                            )}
                           </div>
                         ) : (
                           <>

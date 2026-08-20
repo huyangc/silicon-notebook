@@ -1431,6 +1431,17 @@ button.chat-session-card {
   color: #111827;
 }
 
+/* 同 .icon-button:disabled 那条:这个选择器把 background/color 写死了,浏览器默认的
+   :disabled 变灰对它完全无效——标题超限时保存键挂了 disabled 也还是一副可点的样子。
+   :hover 一并压掉,否则悬停时它反而更「亮」。 */
+.chat-session-rename button:disabled,
+.chat-session-rename button:disabled:hover {
+  opacity: .55;
+  cursor: default;
+  border-color: #d8dee8;
+  color: #475569;
+}
+
 .chat-session-rename {
   grid-column: 1 / -1;
   display: grid;
@@ -1447,6 +1458,22 @@ button.chat-session-card {
   padding: 0 10px;
   color: #263241;
   outline: 0;
+}
+
+/* 标题超限时这句话是此刻唯一挡着保存键的东西，必须看得见（与提问框的
+   .chat-hint.over-limit、报告侧的 .report-compose-hint.over-limit 同一条）。
+   父级是三列 grid，这个 span 是第四个子元素、会落到新一行的第一列——
+   1 / -1 让它横跨整行，否则提示被挤成第一列那点宽度。 */
+.chat-session-rename-hint {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 输入框自己也要标出来：只有下面一句红字的话，用户的视线还在框里。 */
+.chat-session-rename input[aria-invalid="true"] {
+  border-color: var(--danger);
 }
 
 .chat-session-empty {
