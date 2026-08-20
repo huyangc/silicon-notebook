@@ -573,3 +573,47 @@ def test_worst_experience_for_only_returns_bad_polarity_for_the_named_action():
     assert found is not None
     assert found["rationale"] == RATIONALE_PPR
     assert worst_experience_for(entries, situation, "follow_chain") is None
+
+
+def test_a_broken_experience_store_read_skips_the_turn_instead_of_failing_the_run(
+    repo, monkeypatch,
+):
+    """codex #538 R1 P2:注入开着时一次瞬态经验库读取失败不得把整次 run 打挂
+    ——执行体整体 fail-open,记 consult_memory_unavailable 的 skip。"""
+    import app.services.reasoning_retrieval as rr
+
+    notebook = _seed(repo)
+    _write_experience(repo, "ppr", "bad", "ppr rarely helps here.")
+    llm = _SeqLLM([{"next_action": "consult_memory"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever = _retriever(repo, llm)
+
+    def _boom(store):
+        raise RuntimeError("experience store went away")
+
+    monkeypatch.setattr(rr, "_cached_experiences", _boom)
+    result, _limits = _run(retriever, notebook, "deep")
+    skip_reasons = [
+        s.detail.get("reason") for s in result.trace if s.step_type == "skip"
+    ]
+    assert "consult_memory_unavailable" in skip_reasons
+
+
+def test_consult_returns_entries_the_passive_block_selected_but_never_delivered(repo):
+    """codex #538 R1 P2:排除集只含真送达的被动块前缀——被 600 字符硬顶挤掉
+    的 top-3 尾巴模型从没见过,consult 必须还得出来。三条同场景满长 rationale
+    条目让被动块只装得下部分,consult 一轮应送达剩余条目。"""
+    notebook = _seed(repo)
+    filler = "x" * 150
+    _write_many_experiences(repo, [
+        ("ppr", "bad", f"ppr {filler}a."),
+        ("exact_lookup", "bad", f"exact {filler}b."),
+        ("follow_chain", "bad", f"chain {filler}c."),
+    ])
+    llm = _SeqLLM([{"next_action": "consult_memory"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever = _retriever(repo, llm)
+    result, _limits = _run(retriever, notebook, "deep")
+    assert _steps(result, "consult_memory"), (
+        "被动块装不下的条目应可经 consult 送达"
+    )

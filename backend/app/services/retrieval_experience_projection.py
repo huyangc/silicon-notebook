@@ -469,16 +469,25 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
     if situation is None:
         return None
 
+    def _action_attributable(action: str) -> bool:
+        return (
+            run_attributable and action_attributable.get(action, False)
+            and not action_poisoned.get(action, False)
+        )
+
     actions = tuple(
         ActionObservation(
             action=action,  # type: ignore[arg-type]
             invocations=invocations[action],
             zero_hits=zero_hits.get(action, 0),
-            attributable=(
-                run_attributable and action_attributable.get(action, False)
-                and not action_poisoned.get(action, False)
+            attributable=_action_attributable(action),
+            # codex #538 R1 P2:不可归因(含被截断 poison)的动作 anchored_hits
+            # 一律归零——留着保留前缀算出的交集,会在与别的可归因 run 同组聚合
+            # 时被当成有效成功计入 anchored= 分子,而分母只数别的 run。
+            anchored_hits=(
+                action_anchored_hits.get(action, 0)
+                if _action_attributable(action) else 0
             ),
-            anchored_hits=action_anchored_hits.get(action, 0),
         )
         # Iterated over the VOCABULARY rather than over the observed dict, so
         # the tuple order is fixed by this file rather than by the order steps
