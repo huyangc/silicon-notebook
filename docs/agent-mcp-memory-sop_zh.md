@@ -116,8 +116,8 @@ curl -s http://127.0.0.1:8000/api/ready
 | `http://notebook.example.internal:8000/mcp` | `307` 重定向到 `/mcp/` |
 | `http://notebook.example.internal:8000/mcp/` | 真正的鉴权 endpoint |
 
-`MCP_PUBLIC_URL` 自己必须**不带**结尾斜杠：启动只接受路径精确为 `/mcp` 的 URL。因此接入说明里
-印出的是不带斜杠的形态，斜杠在写进客户端配置那一步补上。
+`MCP_PUBLIC_URL` 自己必须**不带**结尾斜杠：启动只接受路径精确为 `/mcp` 的 URL。这个差异由接入说明
+替读者消化掉了——它会在配置值旁边直接给出带斜杠的客户端地址。
 
 ### Codex CLI
 

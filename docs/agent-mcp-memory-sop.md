@@ -117,8 +117,8 @@ A worked example, for a remote deployment with nothing in front of the backend:
 | `http://notebook.example.internal:8000/mcp/` | The authenticated MCP endpoint |
 
 `MCP_PUBLIC_URL` itself must stay slashless: startup rejects any path other than exactly `/mcp`.
-The onboarding Markdown therefore prints the slashless form, and the trailing slash is added when
-writing it into a client configuration.
+The onboarding Markdown resolves that difference on the reader's behalf — it publishes the slashed
+client endpoint next to the configured value.
 
 ### Codex CLI
 
