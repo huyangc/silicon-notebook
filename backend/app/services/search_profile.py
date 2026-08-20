@@ -490,6 +490,21 @@ _CJK_RANGES: "tuple[tuple[int, int], ...]" = (
 )
 
 
+#: codex #535 R12 P2:平假名/片假名(含半角片假名)。汉字重的日文问题
+#: (「これは日本語の質問です」)统一表意区占比一样能过 0.3 阈值——但假名
+#: 是日文专属的强信号,中文正文里不出现。任何假名在场即整句不判 zh。
+_KANA_RANGES: "tuple[tuple[int, int], ...]" = (
+    (0x3040, 0x309F),   # Hiragana
+    (0x30A0, 0x30FF),   # Katakana
+    (0xFF66, 0xFF9F),   # Halfwidth Katakana
+)
+
+
+def _is_kana(ch: str) -> bool:
+    code = ord(ch)
+    return any(low <= code <= high for low, high in _KANA_RANGES)
+
+
 def _is_cjk(ch: str) -> bool:
     code = ord(ch)
     return any(low <= code <= high for low, high in _CJK_RANGES)
@@ -547,17 +562,22 @@ def classify_ask_language(text: "str | None") -> str:
     total = 0
     cjk = 0
     latin_alpha = 0
+    kana = 0
     for ch in text:
         if ch.isspace():
             continue
         total += 1
-        if _is_cjk(ch):
+        if _is_kana(ch):
+            kana += 1
+        elif _is_cjk(ch):
             cjk += 1
         elif ch.isascii() and ch.isalpha():
             latin_alpha += 1
     if total == 0:
         return "other"
-    if cjk / total >= _ASK_LANGUAGE_CJK_RATIO:
+    # codex #535 R12 P2:假名在场即不判 zh——汉字重的日文问题会过统一表意区
+    # 阈值,但假名是日文专属信号;这类问题落 "other",绝不归纳成中文偏好。
+    if kana == 0 and cjk / total >= _ASK_LANGUAGE_CJK_RATIO:
         return "zh"
     if latin_alpha / total >= _ASK_LANGUAGE_LATIN_ALPHA_RATIO:
         return "en"

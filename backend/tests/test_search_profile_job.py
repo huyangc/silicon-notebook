@@ -494,3 +494,13 @@ def test_sync_ask_paths_deliberately_do_not_notify_inference():
             break
     else:  # pragma: no cover
         raise AssertionError("ask_current not found")
+
+
+def test_kana_bearing_questions_are_never_chinese():
+    """codex #535 R12 P2:汉字重的日文问题(假名在场)不判 zh——假名是日文
+    专属信号,重复的日文提问绝不能归纳出中文回答偏好。"""
+    assert classify_ask_language("これは日本語の質問です") == "other"
+    assert classify_ask_language("データベースの設定を確認してください") == "other"
+    assert classify_ask_language("ﾃﾞｰﾀ設定の質問") == "other"   # 半角片假名
+    # 无假名的中文照常
+    assert classify_ask_language("这个库的检索配置在哪里？") == "zh"
