@@ -73,6 +73,8 @@ test("scope options expose all and only the approved capabilities", () => {
     "sources:write",
     "sources:delete",
     "maintenance:execute",
+    "agent_profile:read",
+    "agent_observation:write",
   ]);
 });
 

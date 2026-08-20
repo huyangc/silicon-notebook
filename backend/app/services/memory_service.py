@@ -76,6 +76,29 @@ AGENT_SCOPES = frozenset(
         # "sources:write" above). No new capability, just the Agent-side door to
         # an existing one.
         "maintenance:execute",
+        # Agentic Memory P3 (T3): read-only access to this notebook's "AI
+        # understanding" blocks — the shared base chain plus, when this
+        # token's holder has one, their own overlay. Deliberately its own
+        # scope rather than folded into "knowledge:read": the blocks are
+        # prompt scaffolding the product itself marks as
+        # content_is_untrusted_evidence/non-citable, a different trust class
+        # from the notebook's actual knowledge that scope gates, and a token
+        # minted before this feature existed should not silently gain access
+        # to it.
+        "agent_profile:read",
+        # Agentic Memory P3 (T3): append one short line to this notebook's
+        # per-(notebook, owner) observation log — raw material for a LATER,
+        # untrusted-marked consolidation pass into the caller's own overlay
+        # (see agent_profile_job.py), never evidence and never executed
+        # itself. Deliberately does NOT pass through
+        # `mcp_server._writable_notebook`'s owner-only gate — see that
+        # function's own docstring for the full argument (mirrors
+        # "knowhow:code", the first such exception): the blast radius here is
+        # structurally capped at the token holder's own overlay, not the
+        # whole notebook's retrieval, so requiring notebook OWNERSHIP would
+        # deny a read-only member's own Agent the ability to write into that
+        # member's own private overlay.
+        "agent_observation:write",
     }
 )
 _AGENT_TOKEN_RE = re.compile(r"^snm_([^.]+)\.(.+)$")

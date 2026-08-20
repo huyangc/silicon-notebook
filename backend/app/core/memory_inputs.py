@@ -20,6 +20,15 @@ MEMORY_TASK_CONTEXT_MAX_SERIALIZED_BYTES = 8_192
 MEMORY_EVIDENCE_MAX_COUNT = 50
 MEMORY_EVIDENCE_MAX_SERIALIZED_BYTES = 32_768
 MEMORY_CLIENT_REQUEST_ID_MAX_CHARS = 200
+# Agentic Memory P3 (T3): one line an external Agent appends to
+# `agent_observations` via the MCP `add_observation` tool. Deliberately much
+# shorter than MEMORY_CONTENT_MAX_CHARS — this is a short, throwaway usage
+# note ("what did I just do"), never a document body, and the overlay
+# consolidation prompt that later reads it back (agent_profile_job.py) has
+# its own small per-section render budget (AGENT_PROFILE_OBSERVATION_
+# SECTION_MAX_CHARS) that a handful of near-max-length rows could already
+# exhaust on their own.
+AGENT_OBSERVATION_TEXT_MAX_CHARS = 500
 
 
 class MemoryInputError(ValueError):
@@ -63,6 +72,19 @@ def normalize_client_request_id(value: Any) -> str:
         value,
         field="client_request_id",
         max_chars=MEMORY_CLIENT_REQUEST_ID_MAX_CHARS,
+    )
+
+
+def normalize_observation_text(value: Any) -> str:
+    """Agentic Memory P3 (T3): `add_observation`'s `text` argument.
+
+    Normalized (stripped, non-blank, length-capped) BEFORE any repository
+    lookup happens — mirroring `_validate_proposal_input`'s ordering for
+    `propose_memory`, so a malformed argument fails cheaply and cannot reach
+    `AgentObservationStorePort.append_observation` at all.
+    """
+    return normalize_text(
+        value, field="text", max_chars=AGENT_OBSERVATION_TEXT_MAX_CHARS
     )
 
 

@@ -982,6 +982,12 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         assert (await client.call(
             "ask_notebook", {"question": "No scope", "mode": "chunk"}
         )).isError
+        # Agentic Memory P3 (T3): the two newest data tools, each pinned by
+        # their own scope like everything else above.
+        assert (await client.call("get_notebook_profile", {})).isError
+        assert (await client.call("add_observation", {
+            "text": "No scope", "client_request_id": "budget-no-scope",
+        })).isError
 
 
 # The seven ORIGINAL (pre-knowhow) memory-surface tools this specific stress
@@ -3528,3 +3534,225 @@ async def test_the_mcp_transport_answers_over_sse_not_buffered_json(mcp_env):
     assert accepted.status_code == 200
     assert accepted.headers["content-type"].startswith("text/event-stream")
     assert json_only.status_code == 406
+
+# --- Agentic Memory P3 (T3): notebook understanding + observation log -----
+# get_notebook_profile ("agent_profile:read") and add_observation
+# ("agent_observation:write") -- the 21st and 22nd tools.
+_PROFILE_READ = ["agent_profile:read"]
+_OBSERVATION_WRITE = ["agent_observation:write"]
+
+
+def _write_profile_block(
+    repo, notebook_id: str, owner_id: str, label: str, *, value: str,
+    evidence: list | None = None,
+) -> None:
+    """Seed one ``agent_notebook_profile`` row directly through the store --
+    the SAME write path T6's manual "edit" and T4's consolidation job use.
+    ``owner_id=""`` (mirrors ``agent_profile_job.BASE_CHAIN_OWNER``, not
+    imported here to keep this test file's import list independent of that
+    module's own import chain) is the shared base chain; any other owner id
+    is that member's private overlay."""
+    repo.agent_profile.write_block(
+        notebook_id, owner_id, label,
+        value=value, evidence=evidence or [], expected_revision=0,
+        origin="user", actor=owner_id or "system",
+    )
+
+
+@pytest.mark.anyio
+async def test_get_notebook_profile_returns_base_and_only_own_overlay(mcp_env):
+    """Grouping is by each row's OWN ``owner_id`` column -- never by
+    guessing which labels "belong" to which chain from their names.
+
+    Alice ALSO has a row under a base-chain label (``corpus_shape``) written
+    under her OWN overlay (``owner_id=alice.id``) -- an edge case a manual
+    store-level edit could produce, since the label/scope pairing is only
+    enforced by the HTTP route, not by the store itself. ``read_blocks``
+    legitimately returns both this row and the real base row under the SAME
+    label, because they are two distinct ``(notebook_id, owner_id, label)``
+    rows: correct behaviour keeps them apart by ``owner_id``; label-based
+    grouping cannot, and picks whichever one iterates last.
+
+    Bob is a SEPARATE notebook member with his own overlay under the same
+    label. His row is not even fetched by ``read_blocks(notebook_id,
+    alice.id)`` (SQL: ``owner_id IN ('', ?)``) when Alice's token calls this
+    tool, so its absence here is a store-level guarantee this test also
+    exercises, though it is not what the mutation below targets.
+
+    P3 mutation guard (verified manually with a temporary edit to
+    ``_profile_projection``, then reverted -- see task report): switching
+    the grouping from ``row["owner_id"] == owner_id`` to membership in
+    ``BASE_LABELS``/``OVERLAY_LABELS`` turns this red -- ``rows`` (shared
+    across both the "shared" and "mine" calls) then lets Alice's PRIVATE
+    ``corpus_shape`` row win the ``by_label["corpus_shape"]`` slot in the
+    "shared" projection too (SQL orders ``owner_id, label`` so her row
+    sorts after the real base row), silently presenting her own private
+    opinion as the notebook's shared consensus to any member who calls this
+    tool -- not only to Alice herself.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    _write_profile_block(
+        repo, notebook_id, "", "corpus_shape", value="Mostly PDFs about RF design."
+    )
+    _write_profile_block(
+        repo, notebook_id, mcp_env["alice"].id, "corpus_shape",
+        value="Alice's own private opinion -- must never be shown as shared.",
+    )
+    _write_profile_block(
+        repo, notebook_id, mcp_env["alice"].id, "retrieval_notes",
+        value="Prefer exact_lookup for part numbers.",
+    )
+    _write_profile_block(
+        repo, notebook_id, mcp_env["bob"].id, "retrieval_notes",
+        value="Bob's own private overlay note -- must never reach Alice.",
+    )
+    token = _agent_token(mcp_env, _PROFILE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call("get_notebook_profile", {}))
+
+    assert payload["enabled"] is True
+    assert payload["notebook_id"] == notebook_id
+    assert payload["shared"] == [
+        {
+            "label": "corpus_shape",
+            "value": "Mostly PDFs about RF design.",
+            "updated_at": payload["shared"][0]["updated_at"],
+        }
+    ]
+    mine_by_label = {item["label"]: item["value"] for item in payload["mine"]}
+    assert mine_by_label == {
+        "corpus_shape": "Alice's own private opinion -- must never be shown as shared.",
+        "retrieval_notes": "Prefer exact_lookup for part numbers.",
+    }
+    assert "Bob's own private overlay" not in json.dumps(payload, ensure_ascii=False)
+    assert payload["content_is_untrusted_evidence"] is True
+    assert payload["citable"] is False
+
+
+@pytest.mark.anyio
+async def test_get_notebook_profile_never_leaks_evidence_source_ids(mcp_env):
+    """``evidence``/``revision``/``updated_origin``/``history`` are a
+    WHITELIST exclusion, not redaction after the fact -- a token holding
+    only ``agent_profile:read`` (no ``knowledge:read``) must not be able to
+    probe for source ids it otherwise has no way to enumerate."""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    _write_profile_block(
+        repo, notebook_id, "", "key_entities", value="DAC08, ADC12 parts.",
+        evidence=[{"source_id": "src-should-never-leak-9f21"}],
+    )
+    token = _agent_token(mcp_env, _PROFILE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        payload = _payload(await client.call("get_notebook_profile", {}))
+
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "src-should-never-leak-9f21" not in serialized
+    assert "evidence" not in payload["shared"][0]
+    assert set(payload["shared"][0].keys()) == {"label", "value", "updated_at"}
+
+
+@pytest.mark.anyio
+async def test_get_notebook_profile_reports_disabled_instead_of_failing(
+    mcp_env, monkeypatch
+):
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _PROFILE_READ)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        monkeypatch.setenv("AGENT_PROFILE_ENABLED", "false")
+        get_settings.cache_clear()
+        try:
+            payload = _payload(await client.call("get_notebook_profile", {}))
+        finally:
+            monkeypatch.setenv("AGENT_PROFILE_ENABLED", "true")
+            get_settings.cache_clear()
+
+    payload.pop("truncation")
+    assert payload == {
+        "notebook_id": notebook_id, "enabled": False, "shared": [], "mine": [],
+    }
+
+
+@pytest.mark.anyio
+async def test_add_observation_is_idempotent_per_client_request_id(mcp_env):
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, _OBSERVATION_WRITE)
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        first = _payload(await client.call("add_observation", {
+            "text": "Tried exact_lookup for part numbers; worked well.",
+            "client_request_id": "obs-1",
+        }))
+        second = _payload(await client.call("add_observation", {
+            "text": "A different body -- must be ignored on replay.",
+            "client_request_id": "obs-1",
+        }))
+
+    assert first["accepted"] is True
+    assert first["deduplicated"] is False
+    assert second["observation_id"] == first["observation_id"]
+    assert second["deduplicated"] is True
+    rows = repo.agent_observations.list_observations(
+        notebook_id, mcp_env["alice"].id, limit=10
+    )
+    assert len(rows) == 1
+    assert rows[0]["text"] == "Tried exact_lookup for part numbers; worked well."
+
+
+@pytest.mark.anyio
+async def test_add_observation_is_allowed_for_a_read_only_shared_notebook(mcp_env):
+    """The deliberate counterpart of
+    ``test_source_writes_are_refused_in_a_read_only_shared_notebook``: the
+    two Agent write surfaces use DIFFERENT authority models on purpose (see
+    ``mcp_server._writable_notebook``'s own docstring, point 2 of its "two
+    writes" section). Bob is a read-only member of Alice's notebook -- the
+    very share where his ``add_source_text`` is refused accepts his
+    observation write, into HIS OWN overlay only.
+
+    P3 mutation guard (verified manually, then reverted -- see task report):
+    swapping ``add_observation``'s ``_selected_notebook`` for
+    ``_writable_notebook`` turns this red, because Bob is not the
+    notebook's owner.
+    """
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    bob_token = _agent_token(mcp_env, _OBSERVATION_WRITE, user="bob")
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        result = _payload(await client.call("add_observation", {
+            "text": "Bob's own usage note.",
+            "client_request_id": "bob-obs-1",
+        }))
+
+    assert result["accepted"] is True
+    rows = repo.agent_observations.list_observations(
+        notebook_id, mcp_env["bob"].id, limit=10
+    )
+    assert len(rows) == 1
+    assert rows[0]["agent_profile_id"] == mcp_env["bob_profile"].id
+    # Never lands in Alice's own scope -- owner_id is baked into the read
+    # predicate, not inferred client-side.
+    assert repo.agent_observations.list_observations(
+        notebook_id, mcp_env["alice"].id, limit=10
+    ) == []
+
+
+@pytest.mark.anyio
+async def test_add_observation_requires_its_own_scope(mcp_env):
+    notebook_id = mcp_env["notebook"].id
+    token = _agent_token(mcp_env, ["knowledge:read"])
+
+    async with OfficialMcpClient(mcp_env["app"], token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        assert (await client.call("add_observation", {
+            "text": "No scope for this.", "client_request_id": "no-scope-1",
+        })).isError
