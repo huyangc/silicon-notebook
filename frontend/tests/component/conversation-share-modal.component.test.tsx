@@ -408,3 +408,90 @@ test("非边界模式的介绍语逐字不变", async () => {
     await screen.findByText(/分享后新问的问题不会自动出现，需要再点一次「更新到最新」/),
   ).toBeInTheDocument();
 });
+
+
+// --- codex #530 R3：弹窗打开之后的漂移 ---------------------------------------
+//
+// token 是稳定的，所以另一个标签页推进同一条分享时，这边的链接当场就指向更多轮次，
+// 而范围文案还停在初次加载那一刻。复制是那句声明变成行动的一刻，闸放在那里。
+
+function stubClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+    writable: true,
+  });
+  return writeText;
+}
+
+test("codex #530 R3 P1：复制前复核水位，别处已推进则刷新并拦下这次复制", async () => {
+  const writeText = stubClipboard();
+  mocks.getConversationShare
+    .mockResolvedValueOnce({
+      share_token: "tok-1",
+      shared_through_at: "2026-01-01T00:00:00",
+      shared_through_id: "a1",
+    })
+    // 弹窗打开期间，另一个标签页把同一条分享推到了 a2。
+    .mockResolvedValue({
+      share_token: "tok-1",
+      shared_through_at: "2026-01-01T00:00:01",
+      shared_through_id: "a2",
+    });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a1");
+
+  // 初次加载：链接正好停在这条回答上。
+  expect(await screen.findByText(/链接的内容就到这条回答为止/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /复制/ }));
+
+  await waitFor(() =>
+    expect(screen.getByText(/分享范围已在别处变化/)).toBeInTheDocument(),
+  );
+  // 这一次不复制：那句范围声明已经不成立了。
+  expect(writeText).not.toHaveBeenCalled();
+  // 刷新后如实改口成「已越过这条回答」。
+  expect(screen.getByText(/这条回答已经在链接里了/)).toBeInTheDocument();
+});
+
+test("水位没变时复制照常，只是多了一次复核", async () => {
+  const writeText = stubClipboard();
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a1");
+
+  fireEvent.click(await screen.findByRole("button", { name: /复制/ }));
+
+  await waitFor(() => expect(screen.getByText("分享链接已复制")).toBeInTheDocument());
+  expect(writeText).toHaveBeenCalledTimes(1);
+});
+
+test("复核时发现已在别处撤销：拦下复制，界面回到未分享", async () => {
+  const writeText = stubClipboard();
+  mocks.getConversationShare
+    .mockResolvedValueOnce({
+      share_token: "tok-1",
+      shared_through_at: "2026-01-01T00:00:00",
+      shared_through_id: "a1",
+    })
+    .mockRejectedValue(humanizedError("not shared", 404));
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a1");
+
+  fireEvent.click(await screen.findByRole("button", { name: /复制/ }));
+
+  await waitFor(() =>
+    expect(screen.getByText(/分享范围已在别处变化/)).toBeInTheDocument(),
+  );
+  expect(writeText).not.toHaveBeenCalled();
+  expect(await screen.findByRole("button", { name: /分享到这一条/ })).toBeInTheDocument();
+});

@@ -121,6 +121,8 @@ export function ConversationShareModal({
   // 是正常态、仍可分享,不置此位。
   const [shareStateError, setShareStateError] = useState(false);
   const [busy, setBusy] = useState<BusyAction>("");
+  const busyRef = useRef<BusyAction>("");
+  busyRef.current = busy;
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -267,11 +269,69 @@ export function ConversationShareModal({
     }
   }
 
+  /** 重读分享状态并回答「与此刻显示的范围是否一致」（codex #530 R3 P1）。
+   *
+   *  它关的是**弹窗打开之后**的漂移：另一个标签页推进同一条分享时 token 是稳定的，
+   *  于是链接当场就指向更多轮次，而这边的范围文案还停在初次加载那一刻。前面几条修的
+   *  都是「加载时就已经不一致」，这条是「加载后才不一致」。
+   *
+   *  ⚠ 它**只**关得住按钮那条路。链接框是可选中的 readonly input（`onFocus` 还会全选），
+   *  用户手动选中复制我们拦不住——所以这是尽力而为的收敛，不是保证。也正因如此，读不到
+   *  状态时按「不一致」处理：拦不住的路已经够多了，这条能拦的不该放过。
+   *
+   *  刻意**不**碰 `shareStateError`：那个位表示「不知道是否已分享 → 不能安全发布」，而
+   *  发布本身是安全的（`expected_through_id` 显式送出，服务端按 advance-only 钉住或 409），
+   *  危险的只有「照着一句已经过时的范围声明把链接发出去」。一次网络抖动不该顺手废掉发布。 */
+  async function refreshShareState(): Promise<boolean> {
+    try {
+      const share = await getConversationShare(notebookId, conversationId);
+      if (!aliveRef.current) return true;
+      const nextToken = share.share_token || "";
+      const nextAt = share.shared_through_at || "";
+      const nextId = share.shared_through_id || "";
+      const same = nextToken === token && nextAt === watermark && nextId === watermarkId;
+      setToken(nextToken);
+      setWatermark(nextAt);
+      setWatermarkId(nextId);
+      return same;
+    } catch (err) {
+      if (!aliveRef.current) return true;
+      if (httpErrorStatus(err) === 404) {
+        // 已在别处撤销。链接当场失效，与「范围变了」是两回事，但同样不该继续复制。
+        setToken("");
+        setWatermark("");
+        setWatermarkId("");
+        return token === "";
+      }
+      return false;
+    }
+  }
+
+  // 另一个标签页改了分享之后，用户多半是切回本窗口才动手复制的——所以窗口重新获得焦点
+  // 时先对一次账，让范围文案在任何复制方式（含手动选中）之前就已经刷新。不做轮询：这是
+  // 事件驱动的一次读取，弹窗本身也活不长。
+  useEffect(() => {
+    if (!token) return;
+    const onFocus = () => {
+      if (busyRef.current) return; // 别打断正在飞的动作
+      void refreshShareState();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  });
+
   async function doCopy() {
     if (busy || !link) return;
     setBusy("copy");
     setError("");
     try {
+      // 复制是链接真正离开本机的那一刻，也是上面那句范围声明变成行动的那一刻。
+      const stillCurrent = await refreshShareState();
+      if (!aliveRef.current) return;
+      if (!stillCurrent) {
+        setNotice("分享范围已在别处变化，上面的说明已刷新——确认后再复制。");
+        return;
+      }
       await copyToClipboard(link);
       if (aliveRef.current) setNotice("分享链接已复制");
     } catch {
