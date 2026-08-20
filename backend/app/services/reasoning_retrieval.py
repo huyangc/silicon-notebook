@@ -22,7 +22,7 @@ from app.core.ask_retrieval_policy import (
     ask_retrieval_limits,
 )
 from app.core.config import DEFAULT_REASONING_PER_QUERY_LIMIT, Settings
-from app.models.ask import TraceStep
+from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
     exact_probe_terms,
@@ -2472,9 +2472,23 @@ class ReasoningRetriever:
                             if h.object_id not in collected:
                                 collected[h.object_id] = h
                                 rec.new += 1
+            # Agentic Memory P4 (T1): "result_ids" is the raw material for
+            # step→anchor attribution (P2 registered this as a later phase —
+            # see RunObservation's docstring). The rule is HARD and applies to
+            # every write site below that reaches this comment's twin: a step
+            # that actually dispatched I/O writes "result_ids" unconditionally
+            # (an empty list on a genuine zero-hit result IS the signal — it
+            # is what lets the read side tell "old trace, field absent" apart
+            # from "ran, found nothing"), while a "skip" branch never writes
+            # the key at all. IDs are bounded to TRACE_RESULT_IDS_MAX — see
+            # that constant's docstring in app.models.ask for the disclosure
+            # argument. Cost is zero: every id list truncated here already
+            # sits in a local variable this line was going to read anyway.
             record(TraceStep(step_type="retrieve",
                              summary=f"初检索得到 {len(collected)} 个候选节点",
-                             detail={"count": len(collected)}))
+                             detail={"count": len(collected),
+                                     "result_ids": list(collected.keys())[
+                                         :TRACE_RESULT_IDS_MAX]}))
 
             # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
             # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
@@ -2489,7 +2503,9 @@ class ReasoningRetriever:
                 chunks.extend(seeded)
                 record(TraceStep(step_type="ppr",
                                  summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
-                                 detail={"found": len(seeded), "phase": "seed"}))
+                                 detail={"found": len(seeded), "phase": "seed",
+                                         "result_ids": [c.chunk_id for c in seeded][
+                                             :TRACE_RESULT_IDS_MAX]}))
 
             # 精确查找 seed pass(确定性兜底,镜像上面的 PPR seed pass):权威问题里
             # 点名了完整命令/接口名时无条件先按名称定位它所在的小节并整节取齐,不赌
@@ -2524,7 +2540,9 @@ class ReasoningRetriever:
                     step_type="exact_lookup",
                     summary=f"按名称精确查找:新增 {len(found)} 段原文",
                     detail={"terms": list(seed_terms), "found": len(found),
-                            "phase": "seed"}))
+                            "phase": "seed",
+                            "result_ids": [c.chunk_id for c in found][
+                                :TRACE_RESULT_IDS_MAX]}))
 
             # Do not let reflect see a completely empty evidence state and
             # prematurely declare it sufficient.  This runs after every
@@ -3164,7 +3182,9 @@ class ReasoningRetriever:
                     node_name = node_name or oid
                     expand_detail = {"object_id": oid, "name": node_name,
                                      "edge_type": decision.expand_edge_type,
-                                     "found": len(neigh)}
+                                     "found": len(neigh),
+                                     "result_ids": [h.object_id for h in neigh][
+                                         :TRACE_RESULT_IDS_MAX]}
                     if expansion.truncated:
                         # 只在真截断的步上加这两个键(detail 逐键不变的冻结基线
                         # 口径:无条件写 False 会让每一条 expand 步的 detail 都
@@ -3232,12 +3252,17 @@ class ReasoningRetriever:
                         display = (label_of[exec_query] if matched_direction is not None
                                   else sq.query)
                         added = 0
+                        # P4 (T1): also collect the newly-added ids alongside
+                        # the existing `added` count — this loop used to only
+                        # count, and result_ids needs the identities.
+                        new_ids: list = []
                         for h in self.search(notebook_id, exec_query,
                                              sq.types, sq.prefer)[:per_query_take]:
                             raise_if_cancelled(self.cancel_event)
                             if h.object_id not in collected:
                                 collected[h.object_id] = h
                                 added += 1
+                                new_ids.append(h.object_id)
                         # 账目记在 exec_query(方向原文)的身份上,而非模型提交
                         # 的简称——这样它同时从未覆盖清单(_still_uncovered_
                         # directions 按 a.query in label_of 识别)摘除,且后续
@@ -3250,7 +3275,9 @@ class ReasoningRetriever:
                             used_queries.append(exec_query)
                         record(TraceStep(step_type="retrieve",
                                          summary=f"补充子查询: {display}",
-                                         detail={"query": display, "new": added}))
+                                         detail={"query": display, "new": added,
+                                                 "result_ids": new_ids[
+                                                     :TRACE_RESULT_IDS_MAX]}))
             elif decision.next_action == "search_elements":
                 if elements_searches >= self.settings.reasoning_max_element_searches:
                     record(TraceStep(step_type="skip",
@@ -3554,7 +3581,9 @@ class ReasoningRetriever:
                     chunks.extend(new)
                     record(TraceStep(step_type="ppr",
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
-                                     detail={"query": pq, "found": len(new), "phase": "action"}))
+                                     detail={"query": pq, "found": len(new), "phase": "action",
+                                             "result_ids": [c.chunk_id for c in new][
+                                                 :TRACE_RESULT_IDS_MAX]}))
             elif decision.next_action == "exact_lookup":
                 # 名称已在 reflect() 里清洗过(去包裹标点,不截长——见 clean_exact_term)。
                 # fail_closed 的硬闸(:485 一带)先对超长 exact_term 生效;这里才截到
@@ -3642,7 +3671,9 @@ class ReasoningRetriever:
                         step_type="exact_lookup",
                         summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
                         detail={"term": term, "terms": list(fresh),
-                                "found": len(new), "phase": "reflect"}))
+                                "found": len(new), "phase": "reflect",
+                                "result_ids": [c.chunk_id for c in new][
+                                    :TRACE_RESULT_IDS_MAX]}))
             elif decision.next_action == "follow_chain":
                 action_key = (
                     decision.chain_start_object_id,
