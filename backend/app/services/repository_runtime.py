@@ -22,6 +22,7 @@ from app.services.agent_profile_job import AgentProfileConsolidationService
 from app.services.retrieval_experience_job import (
     RetrievalExperienceDistillationService,
 )
+from app.services.search_profile_job import SearchProfileInferenceService
 from app.services.catalog_job import CommandCatalogService
 from app.services.kg_analysis import KgAnalysisService
 from app.services.kg_mutation import KgMutationCoordinator
@@ -485,6 +486,27 @@ class RepositoryRuntime:
             models=self.models,
             event_log=self.event_log,
         )
+        # Agentic Memory P3(B-Profile,T7):每用户「检索/回答风格偏好」文档里
+        # 唯一一个 v1 会归纳的字段(``answer_language``)的确定性、零模型触发
+        # service。单例同样是必要的而非顺手:每用户阈值计数是**进程内**状态,
+        # 分身出第二个实例就是两份各自计到一半的计数器。它比它的两个 P1/P2
+        # 兄弟更薄——没有模型调用,读写都在同一个进程内锁的临界区内同步完成,
+        # 不需要后台线程池句柄(见 ``search_profile_job`` 模块 docstring)。
+        self.search_profile_jobs = SearchProfileInferenceService(
+            settings=self.settings,
+            # ⚠ 读的是``recent_user_ask_languages``——同一个 ask_state 座位上
+            # 第三条按``created_by``收窄的读,层三隔离守卫钉在
+            # ``TRACE_READ_METHODS``里(与另外两条同一份 ``ask_state_store.py``,
+            # 认同一个列名),但它**不属于** P1 的底座/覆盖层链路,登记只为覆盖
+            # 层三判据。
+            ask_state=self.ask_state,
+            # 唯一的写入座位:读-改-写 ``user_profiles.search_profile_json`` 必须
+            # 走 ``IdentityRepository.set_user_search_profile``(T6),而不是另开
+            # 一个座位——该方法本就在同一个写事务内做「job 不覆盖 user 字段」的
+            # 合并,详见 ``search_profile.merge_field``。
+            identity=self.identity,
+            event_log=self.event_log,
+        )
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
         # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
@@ -494,14 +516,16 @@ class RepositoryRuntime:
     def _note_ask_completed(
         self, notebook_id: str, user_id: str, mode_id: str = "reasoning"
     ) -> None:
-        """一次提问完成之后要推进的**两条**后台链路。
+        """一次提问完成之后要推进的**三条**后台链路。
 
-        它们是两个不同的特性,拿到的数据也刻意不同:P1 的巡固被告知是**哪位成员
+        它们是三个不同的特性,拿到的数据也刻意不同:P1 的巡固被告知是**哪位成员
         在哪个库**(它写的正是那个人在那个库的覆盖层块),P2 的经验库蒸馏则连一个
         参数都不收——那张表是部署级全局的,一个知道「这是谁的提问」的触发器,离
-        「记下这是谁的提问」只有一次重构之远。
+        「记下这是谁的提问」只有一次重构之远。P3(T7)的检索偏好归纳只收**这个人
+        是谁**,不收 notebook_id——一个人的语言不因笔记本而变,归纳按人、跨库累计
+        (见 ``search_profile_job`` 模块 docstring)。
 
-        两次调用**各自**用 try 包住,不是写成一个元组表达式:两边虽然都自己
+        三次调用**各自**用 try 包住,不是写成一个元组表达式:三边虽然都自己
         fail-open,但那是它们各自的实现细节,而这里要保证的是「一条链坏掉不会顺带
         吃掉另一条的计数」——这条性质必须由调用点自己成立,不能靠被调方的内部约定。
 
@@ -520,6 +544,13 @@ class RepositoryRuntime:
                 self.retrieval_experience_jobs.note_ask_completed()
         except Exception:  # noqa: BLE001 — 同上
             _log.exception("retrieval experience ask-completed notification failed")
+        try:
+            # Agentic Memory P3(T7):语言归纳不按 mode 过滤——它读的是问题文本
+            # 本身的字符形状,与检索走哪条引擎无关,chunk/graph/reasoning 三种
+            # 模式的提问都是这个人真实语言的证据。
+            self.search_profile_jobs.note_ask_completed(user_id)
+        except Exception:  # noqa: BLE001 — 同上
+            _log.exception("search profile ask-completed notification failed")
 
     def _active_source_ids_snapshot(self) -> "set[str]":
         """内存活跃源快照(H2/H3/H4/H5 的 Python 后置减法用)= 活跃租约(process_source 在途)

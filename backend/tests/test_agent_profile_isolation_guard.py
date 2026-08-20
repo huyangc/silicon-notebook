@@ -260,7 +260,17 @@ PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state", "access",
 #: 层三:必须自带 user 谓词的 store 方法(两个后端各一份实现)。P2-T4 追加
 #: `recent_user_report_traces`——它读的是 `reports` 表而非 `ask_jobs`/
 #: `ask_trace_steps`,但同样只能读发起人自己的行,同一层三判据照样成立。
-TRACE_READ_METHODS = ("recent_user_ask_traces", "recent_user_report_traces")
+#: Agentic Memory P3(B-Profile,T7)再追加 `recent_user_ask_languages`——它
+#: **不属于**`agent_profile_job.py` 的底座/覆盖层/中性任何一条链(那是
+#: `search_profile_job.py` 的读,一个完全不同的巡固链路,层一/层二的三个
+#: 集合都不扫描那个模块),登记进这里**只**为了让层三的「SQL 必须逐字带
+#: `created_by` 谓词」判据覆盖它——它与另外两条方法住在同一份
+#: `ask_state_store.py`、认同一个列名,层三的扫描器不关心调用方是谁。
+TRACE_READ_METHODS = (
+    "recent_user_ask_traces",
+    "recent_user_report_traces",
+    "recent_user_ask_languages",
+)
 
 #: Agentic Memory P3(T4,T3-T5 修复轮补 `list_observations`)。层三的**第二
 #: 组**——必须自带 owner 谓词的观察 store 方法。刻意与 `TRACE_READ_METHODS`
@@ -544,7 +554,9 @@ def test_the_allowlists_are_not_silently_empty():
     assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 10
     assert NEUTRAL_FUNCTIONS and len(NEUTRAL_ALLOWED_PORT_CALLS) == 2
     # P2-T4: TRACE_READ_METHODS 现含两条方法,清空成单元素元组同样必须报红。
-    assert len(TRACE_READ_METHODS) >= 2 and len(_STORE_PATHS) == 2
+    # Agentic Memory P3(T7)补 recent_user_ask_languages 后下限从 2 抬到 3——
+    # 清到只剩前两条也不该算「达标」,那正是补它之前的状态。
+    assert len(TRACE_READ_METHODS) >= 3 and len(_STORE_PATHS) == 2
     # P2-T3:层二的第四种空转形态——座位元组少一个,那个座位上的所有调用就静默地
     # 不再被扫描。`test_the_overlay_chain_actually_checks_membership` 是它的功能性
     # 判据(变异实测),这里再正面写一遍两个取数座位必须在列。
