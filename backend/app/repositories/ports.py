@@ -2579,8 +2579,20 @@ class SQLiteMaintenancePort(
 #: ``SAMPLE_LIMIT`` bounds the read; ``MIN_SAMPLES`` is the floor below which
 #: the job writes nothing at all (a person's first few questions are not
 #: enough evidence either way); ``MAJORITY_RATIO`` is how dominant one
-#: language's share of the (non-"other") sample has to be before the job
-#: calls it a "明确多数" rather than a toss-up it should stay silent about.
+#: language's share of the FULL bounded sample has to be before the job
+#: calls it a "明确多数" rather than a toss-up it should stay silent about —
+#: "other" counts in the denominator (it is real, sampled evidence that this
+#: person's recent questions were not all clearly one language) but can never
+#: itself be the winning candidate (``search_profile_job._WRITABLE_LANGUAGES``
+#: is the closed ``("zh", "en")`` tuple the job may ever write). T9 fix round:
+#: this docstring previously said "non-'other' sample", which described a
+#: denominator the code has never actually computed — deliberately keeping
+#: the full sample here means "other" rows dilute a real language's apparent
+#: majority instead of being silently excluded from the count, the more
+#: conservative of the two readings (see :func:`app.services.search_profile.
+#: classify_ask_language`'s own docstring for the flip side of this same
+#: choice, and ``test_search_profile_job.py`` for the boundary case this
+#: keeps distinguishable from the excluded-denominator alternative).
 SEARCH_PROFILE_LANGUAGE_SAMPLE_LIMIT = 30
 SEARCH_PROFILE_LANGUAGE_MIN_SAMPLES = 10
 SEARCH_PROFILE_LANGUAGE_MAJORITY_RATIO = 0.7

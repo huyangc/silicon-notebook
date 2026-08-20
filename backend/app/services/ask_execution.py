@@ -252,12 +252,26 @@ class AskExecutionCoordinator:
         service: the service is fail-open too, but the coordinator must not
         depend on the collaborator it was handed being well-behaved.
 
-        Cost at the call site is one bounded indexed membership read (P2-T3's
-        ``_member_can_read`` — see its COST note) plus one primary-key
-        upsert; only when the
-        threshold is reached does it additionally hand a callable to the light
-        background pool (a queue put, never a blocking wait), so the terminal
-        event is not meaningfully delayed.
+        ``self.note_ask_completed`` (when wired — see ``repository_runtime.py
+        ::RepositoryRuntime._note_ask_completed``) is actually THREE chained
+        notifications, and their costs are not the same shape. T9 fix round:
+        this docstring previously described only the first of the three
+        (P1's agent-profile consolidation): one bounded indexed membership
+        read (P2-T3's ``_member_can_read`` — see its COST note) plus one
+        primary-key upsert, handing a callable to the light background pool
+        (a queue put, never a blocking wait) only once its own threshold is
+        reached. The SECOND link (P2's retrieval-experience distillation)
+        follows the same "cheap synchronous check, background hand-off only
+        past threshold" shape. The THIRD link (P3/T7's
+        ``SearchProfileInferenceService.note_ask_completed``) does NOT: its
+        threshold check is cheap, but once past it the job's bounded
+        read-then-write runs SYNCHRONOUSLY, inline, under a process-local
+        lock (see that module's own docstring for why) — "never a blocking
+        wait" does not hold for this third link, only "bounded" does. All
+        three calls remain fail-open at THIS call site regardless, so a slow
+        or failing third link still cannot turn a delivered answer into a
+        reported failure; it can only add its own bounded latency to this
+        one worker's post-delivery bookkeeping step.
         """
         if self.note_ask_completed is None:
             return

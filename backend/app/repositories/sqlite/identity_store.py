@@ -368,7 +368,16 @@ class IdentityStore:
 
         缺 profile 行(理论上不会发生——create_user/_seed 必建)时补插一行,
         镜像 ``set_user_ui_mode`` 的自愈语义(自助写自己的偏好不该因为一行
-        缺失的种子数据就 404)。目标用户不存在 → KeyError。"""
+        缺失的种子数据就 404)。目标用户不存在 → KeyError。
+
+        T9 修复轮(P2-6):合并结果与既存 ``search_profile_json`` 逐字相同时
+        (最常见的形状——T7 job 每次触发都重新归纳同一个已经写过的
+        ``answer_language``,连续两次 job 写入十有八九产出相同的赢家)跳过
+        ``UPDATE`` 本身,只回读现有行。这个读本来就发生在同一个块里(上面
+        的 ``SELECT``),比较是纯字符串比较,零额外查询;省下的是一次
+        ``UPDATE`` 语句本身以及它顺带推进的 ``updated_at``——一个语义不变
+        的写入不该让「最后编辑时间」跳动,也不该占用 SQLite 那把进程内
+        write_lock 哪怕多一条语句的时间。"""
         if origin not in SEARCH_PROFILE_ORIGINS:
             raise ValueError("invalid search-profile origin")
         now = _now()
@@ -384,6 +393,8 @@ class IdentityStore:
             for field, value in fields.items():
                 profile_doc = merge_field(profile_doc, field, value, origin)
             serialized = serialize_search_profile(profile_doc)
+            if row is not None and serialized == raw:
+                return self._user_profile(user, row)
             cursor = db.execute(
                 "UPDATE user_profiles SET search_profile_json = ?, updated_at = ? "
                 "WHERE user_id = ?",

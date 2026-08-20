@@ -2311,22 +2311,6 @@ class ReasoningRetriever:
                 except Exception:  # noqa: BLE001 — 打法是背景,不是必需品
                     experience_block = ""
                     experience_entries = []
-            # Agentic Memory P3(B-Profile,T8):用户的检索/回答风格偏好,一次
-            # 主键点读(按 profile_owner_id = 本次提问 user_id)。与上面两块同款
-            # fail-open,同理由不记 skip 步——常态是这条 run 没有可渲染的偏好,
-            # 每轮多一条「无」步是噪声。空 owner(见 profile_owner_id 的类型注释,
-            # 空串是合法且安全的取值)与关闸都合法地产出空串,不触发任何读取。
-            style_block = ""
-            if self.profile_owner_id and search_profile_wiring_active(
-                    self.settings, self.identity_store):
-                try:
-                    style_profile = self.identity_store.get_user_search_profile(
-                        self.profile_owner_id)
-                    style_block = render_style_block(style_profile) if style_profile else ""
-                except AskCancelled:
-                    raise
-                except Exception:  # noqa: BLE001 — 风格提示是背景,不是必需品
-                    style_block = ""
             # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储
             # 词表)。只在真的注入过条目时才积累——没注入就没有「采用」可言。
             adopted_actions: set = set()
@@ -2366,6 +2350,33 @@ class ReasoningRetriever:
             # A reviewed intent contract is authoritative. Do not ask a second
             # model to reinterpret it before retrieval; the reflect loop may
             # still add evidence-driven subqueries after the frozen seed pass.
+            #
+            # Agentic Memory P3(B-Profile,T8):用户的检索/回答风格偏好,一次
+            # 主键点读(按 profile_owner_id = 本次提问 user_id)。⚠ 挪到这里
+            # (``reviewed_queries`` 已经算出、且只在它为空——也就是 ``self.
+            # plan(...)`` 真的会被调用——时才读):正式 UI 路径永远带着已确认
+            # 意图(``reviewed_queries`` 非空),``self.plan()`` 整个不执行,
+            # 提前点读就是给这条最常见的路径白付一次 identity store 读取。与
+            # 上面 profile_block/experience_block 两块故意不同——那两块要喂进
+            # reflect 循环(整个 run 期间反复消费,不只是 plan() 这一次调用),
+            # 提前一次性读没有「按分支延后」的空间;这一块只喂 ``plan()`` 的
+            # ``style_block`` 形参(见其上 reflect 刻意不注入风格块的说明),
+            # 挪迟没有安全隐患,只是把读取推到真正需要它的分支里。fail-open
+            # 同款,同理由不记 skip 步——常态是这条 run 没有可渲染的偏好,每轮
+            # 多一条「无」步是噪声。空 owner(见 profile_owner_id 的类型注释,
+            # 空串是合法且安全的取值)与关闸都合法地产出空串,不触发任何读取。
+            style_block = ""
+            if not reviewed_queries and self.profile_owner_id and (
+                    search_profile_wiring_active(
+                        self.settings, self.identity_store)):
+                try:
+                    style_profile = self.identity_store.get_user_search_profile(
+                        self.profile_owner_id)
+                    style_block = render_style_block(style_profile) if style_profile else ""
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 风格提示是背景,不是必需品
+                    style_block = ""
             # 可选参数按「有才传」:没有档位就不覆盖 planner 上限、没有地图就不传
             # 地图,调用形状与接入前逐字一致(镜像 _construct_reasoning_retriever
             # 对 fail_closed 的处理)。
