@@ -461,3 +461,29 @@ def test_member_removal_clears_that_members_observations(harness):
     assert store.list_observations("nb-1", "user-a", limit=10) == []
     assert len(store.list_observations("nb-1", "user-b", limit=10)) == 1
     assert len(store.list_observations("nb-2", "user-a", limit=10)) == 1
+
+
+def test_same_instant_different_offset_spellings_tie_break_on_id(harness):
+    """codex #535 R7 P2:同一绝对时刻的 +02:00/+01:00 拼写在 julianday 上
+    并列——存活行必须由 id 决定(与 PG 的 timestamptz+id 一致),不得按文本
+    拼写。"""
+    # 同一绝对时刻的两种拼写——用脚本时钟直造,绕开单调 _Clock
+    spellings = iter(["2026-08-20T12:00:00+02:00", "2026-08-20T11:00:00+01:00"])
+    counter = {"n": 0}
+
+    def tie_new_id(prefix: str) -> str:
+        counter["n"] += 1
+        return f"{prefix}-tie-{counter['n']:06d}"
+
+    store = AgentObservationStore(
+        harness.database, new_id=tie_new_id, now=lambda: next(spellings)
+    )
+    store.append_observation("nb-1", "user-a", "agent-1",
+                             text="plus2", client_request_id="tie-a")
+    store.append_observation("nb-1", "user-a", "agent-1",
+                             text="plus1", client_request_id="tie-b")
+    rows = store.recent_observations("nb-1", "user-a", limit=10)
+    ids = [row["id"] for row in rows]
+    assert ids == sorted(ids, reverse=True), (
+        "并列时刻必须按 id 降序,不得按 created_at 文本拼写"
+    )

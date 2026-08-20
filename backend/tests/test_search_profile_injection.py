@@ -432,3 +432,25 @@ def test_every_answer_prompt_call_site_in_app_passes_style_block():
         "broken (e.g. app_root resolved to the wrong directory), not that "
         "the call sites vanished"
     )
+
+
+def test_the_chunk_planning_expand_query_call_passes_style_block():
+    """codex #535 R7 P2:chunk 模式的规划调用同样要收风格块——AST 钉
+    ask_service.py 里所有 expand_query( 调用点都带 style_block=(当前恰
+    chunk 一处;reasoning 的规划在 reasoning_retrieval 内部走 plan_kwargs)。"""
+    import ast
+    from pathlib import Path
+
+    source = Path("backend/app/services/ask_service.py").read_text("utf-8")
+    tree = ast.parse(source)
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "expand_query"
+    ]
+    assert calls, "expand_query call site not found in ask_service.py"
+    for call in calls:
+        keywords = {kw.arg for kw in call.keywords}
+        assert "style_block" in keywords, (
+            f"expand_query(...) at ask_service.py:{call.lineno} missing style_block="
+        )

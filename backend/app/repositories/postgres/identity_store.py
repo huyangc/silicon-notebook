@@ -395,7 +395,13 @@ class IdentityStore:
             raise ValueError("invalid search-profile origin")
         now = utc_now()
         with self.database.write() as db:
-            user = db.execute("SELECT * FROM users WHERE id=%s", (user_id,)).fetchone()
+            # codex #535 R7 P2:profile 行还不存在时,对它的 FOR UPDATE 锁不到
+            # 任何东西——两个并发首写各自对空文档 merge,后提交的 ON CONFLICT 会
+            # 整份覆盖先提交的字段。先锁**父 users 行**(合法用户恒存在)把缺行
+            # 情形也串行化;行已存在时多这把锁无害(同一事务内的另一行锁)。
+            user = db.execute(
+                "SELECT * FROM users WHERE id=%s FOR UPDATE", (user_id,)
+            ).fetchone()
             if user is None:
                 raise KeyError(user_id)
             row = db.execute(

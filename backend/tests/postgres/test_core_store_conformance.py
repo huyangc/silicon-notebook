@@ -4173,3 +4173,46 @@ def test_hidden_source_ids_scope_memory_to_its_owner(
     assert core_stores.sources.hidden_source_ids(
         notebook_id, "user-nobody"
     ) == ["src-scope-knowhow"]
+
+
+def test_concurrent_first_writes_on_a_missing_profile_row_both_survive(
+    core_stores: CoreStores,
+):
+    """codex #535 R7 P2:profile 行不存在时 FOR UPDATE 锁不到任何东西,两个
+    并发首写各自对空文档 merge,后提交的 ON CONFLICT 会整份覆盖先提交的字段。
+    先锁父 users 行(合法用户恒存在)把缺行情形也串行化——两个字段都必须活。"""
+    store = core_stores.identity
+    user = store.create_user("f00223456", "correct horse battery staple")
+    with core_stores.database.write() as db:
+        db.execute("DELETE FROM user_profiles WHERE user_id=%s", (user.id,))
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def _write(field: str, value: str, origin: str) -> None:
+        try:
+            barrier.wait(timeout=5)
+            store.set_user_search_profile(user.id, {field: value}, origin=origin)
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_write, args=("answer_shape", "prose", "user")),
+        threading.Thread(target=_write, args=("answer_language", "en", "job")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    assert not errors, errors
+
+    final = _fetch_one(
+        core_stores,
+        "SELECT search_profile_json FROM user_profiles WHERE user_id=%s",
+        (user.id,),
+    )
+    from app.services.search_profile import parse_search_profile
+
+    parsed = parse_search_profile(final["search_profile_json"])
+    assert parsed["fields"]["answer_shape"]["value"] == "prose"
+    assert parsed["fields"]["answer_language"]["value"] == "en"

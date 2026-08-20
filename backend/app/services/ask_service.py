@@ -1780,6 +1780,9 @@ class AskService:
                                   retrieval_query, history,
                                   max_subqueries=self.settings.chunk_max_subqueries,
                                   corpus_langs=self.candidates.notebook_languages(notebook_id),
+                                  # codex #535 R7 P2:chunk 规划同样收风格块,
+                                  # 否则「注入规划与合成两处」只对 reasoning 成立。
+                                  style_block=style_block,
                                   cancel_event=cancel_event)
                 sub_queries = [s.query for s in ex.sub_queries]
             else:
