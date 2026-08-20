@@ -9,6 +9,7 @@ from app.core.config import Settings
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.ports import RepositorySeams
 from app.repositories.postgres._store_utils import jsonb, normalize_timestamp
+from app.repositories.postgres.agent_observation_store import AgentObservationStore
 from app.repositories.postgres.agent_profile_store import AgentProfileStore
 from app.repositories.postgres.ask_state_store import AskStateStore
 from app.repositories.postgres.catalog_store import CatalogStore
@@ -154,6 +155,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     model_status: ModelStatusStore
     agent_profile: AgentProfileStore
     retrieval_experiences: RetrievalExperienceStore
+    agent_observations: AgentObservationStore
 
 
 class PostgresPersistenceBundleFactory:
@@ -225,6 +227,9 @@ class PostgresPersistenceBundleFactory:
             retrieval_experiences = RetrievalExperienceStore(
                 database, now=seams.now
             )
+            agent_observations = AgentObservationStore(
+                database, new_id=seams.new_id, now=seams.now
+            )
             return PostgresPersistenceBundle(
                 database=database,
                 identity=identity,
@@ -250,6 +255,7 @@ class PostgresPersistenceBundleFactory:
                 model_status=model_status,
                 agent_profile=agent_profile,
                 retrieval_experiences=retrieval_experiences,
+                agent_observations=agent_observations,
             )
         except BaseException:
             database.close()

@@ -6,6 +6,7 @@ from typing import Protocol, runtime_checkable
 
 from app.core.config import Settings
 from app.repositories.ports import (
+    AgentObservationStorePort,
     AgentProfileStorePort,
     AskStateStorePort,
     CatalogStorePort,
@@ -60,6 +61,7 @@ class PersistenceBundle(Protocol):
     model_status: ModelStatusStorePort
     agent_profile: AgentProfileStorePort
     retrieval_experiences: RetrievalExperienceStorePort
+    agent_observations: AgentObservationStorePort
 
 
 class PersistenceBundleFactory(Protocol):

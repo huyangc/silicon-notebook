@@ -45,6 +45,7 @@ BUNDLE_STORE_PORTS = {
     "model_status": "ModelStatusStorePort",
     "agent_profile": "AgentProfileStorePort",
     "retrieval_experiences": "RetrievalExperienceStorePort",
+    "agent_observations": "AgentObservationStorePort",
 }
 
 

@@ -8,6 +8,7 @@ from typing import Any
 from app.core.config import Settings
 from app.repositories.bundle import PersistenceBundle
 from app.repositories.ports import RepositorySeams
+from app.repositories.sqlite.agent_observation_store import AgentObservationStore
 from app.repositories.sqlite.agent_profile_store import AgentProfileStore
 from app.repositories.sqlite.ask_state_store import AskStateStore
 from app.repositories.sqlite.catalog_store import CatalogStore
@@ -73,6 +74,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     model_status: ModelStatusStore
     agent_profile: AgentProfileStore
     retrieval_experiences: RetrievalExperienceStore
+    agent_observations: AgentObservationStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -132,6 +134,9 @@ class SqlitePersistenceBundleFactory:
         # No ``new_id`` seam: every id in retrieval_experiences is
         # content-addressed and computed by the service layer.
         retrieval_experiences = RetrievalExperienceStore(database, now=seams.now)
+        agent_observations = AgentObservationStore(
+            database, new_id=seams.new_id, now=seams.now
+        )
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -157,4 +162,5 @@ class SqlitePersistenceBundleFactory:
             model_status=model_status,
             agent_profile=agent_profile,
             retrieval_experiences=retrieval_experiences,
+            agent_observations=agent_observations,
         )

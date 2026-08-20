@@ -1131,6 +1131,21 @@ class RepositoryFacade:
         return self._runtime.retrieval_experiences
 
     @property
+    def agent_observations(self):
+        """Agentic Memory P3's per-(notebook, owner) observation log store
+        (T2).
+
+        One hop to the runtime-owned ``AgentObservationStorePort`` seat, the
+        same shape and the same reasoning as ``agent_profile`` above: method
+        names like ``append_observation``/``clear_observations`` are far too
+        generic to flatten onto a facade shared with every other domain.
+        Consumers (T3's MCP ``add_observation`` tool, T4's untrusted
+        overlay-consolidation sample, T5's "my observations" API) read
+        ``repository.agent_observations.<method>`` instead.
+        """
+        return self._runtime.agent_observations
+
+    @property
     def retrieval_experience_jobs(self):
         """Agentic Memory P2 的检索打法蒸馏 service(T5)——一跳委托到中性 runtime 上
         的那**一个**实例,与 ``agent_profile_jobs`` 同一条理由落在 runtime;单例在
