@@ -3965,6 +3965,15 @@ class ReasoningRetriever:
                                 if str(r.get("id") or "") in delivered_ids
                             ]
                             consult_delivered_ids.update(delivered_ids)
+                            # codex #538 R5 P2:accum 收敛为**已送达**行——未送达
+                            # 行滞留会在下次调用被再选(不在 delivered 集)、再
+                            # append 成重复,且渲染器先撞上滞留的原始未送达行就
+                            # 停,把它身后的所有候选永久堵死。收敛后未送达行
+                            # 干净地退回候选池,下次照常可选可渲染。
+                            consult_rows_accum = [
+                                r for r in consult_rows_accum
+                                if str(r.get("id") or "") in consult_delivered_ids
+                            ]
                             overlay_newly_delivered = (
                                 is_new_overlay and rendered.overlay_rendered)
                             if rendered.overlay_rendered:

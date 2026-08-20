@@ -701,3 +701,41 @@ def test_consult_on_the_final_turn_is_rejected_without_spending_budget(repo, mon
     ]
     assert "consult_memory_last_turn" in skip_reasons
     assert not _steps(result, "consult_memory")
+
+
+def test_the_accum_passed_to_a_later_render_holds_only_delivered_rows(repo, monkeypatch):
+    """codex #538 R5 P2:未送达行不得滞留累计块——否则下次调用把它再选一遍
+    append 成重复,且渲染器撞上它就停、堵住身后候选。spy 第二次
+    render_consult_block 的 rows 入参:①无重复 id;②不含第一次未送达的行
+    (它应干净退回候选池、作为**新选中**再进来,而不是既在 accum 又在新增)。
+    注:共享 600 上限饱和后第二轮仍可能 block_full——那是已登记设计;本用例
+    钉的是 accum 的纯净性,不是第二轮必然送达。"""
+    import app.services.reasoning_retrieval as rr
+
+    notebook = _seed(repo)
+    filler = "w" * 150
+    for i, action in enumerate(
+        ("ppr", "exact_lookup", "follow_chain", "expand", "retrieve", "outline")
+    ):
+        _write_experience(repo, action, "bad", f"{action} {filler}{i}.")
+    calls: list = []
+    real = rr.render_consult_block
+
+    def spy(rows, **kwargs):
+        calls.append([str(r.get("id") or "") for r in rows])
+        return real(rows, **kwargs)
+
+    monkeypatch.setattr(rr, "render_consult_block", spy)
+    llm = _SeqLLM([
+        {"next_action": "consult_memory"},
+        {"next_action": "consult_memory"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    _run(retriever, notebook, "deep")
+
+    assert len(calls) >= 2, "两次 consult 都应走到渲染"
+    second = calls[1]
+    assert len(second) == len(set(second)), (
+        "滞留的未送达行被再选后 append 成了重复: " + str(second)
+    )
