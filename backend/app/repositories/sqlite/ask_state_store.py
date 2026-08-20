@@ -644,7 +644,10 @@ class AskStateStore:
             rows = db.execute(
                 "SELECT question FROM ask_jobs "
                 "WHERE created_by = ? AND status = 'done' "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                # codex #535 R10 P2:julianday 先行——created_at 文本序在 offset
+                # 混排(DST/合库)下不是时间序,采样会漏掉更新的问题;与 PG 的
+                # timestamptz 序对齐(「Ask 会话即时入历史」同款红线)。
+                "ORDER BY julianday(created_at) DESC, id DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
         return [{"language": classify_ask_language(row["question"])} for row in rows]
