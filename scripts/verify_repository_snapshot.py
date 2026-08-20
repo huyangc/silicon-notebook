@@ -3327,5 +3327,58 @@ MIGRATION_MANIFEST[(53, 54)] = {
 }
 
 
+# v55: agent_observations (Agentic Memory P3's per-(notebook, owner, agent)
+# append-only observation log) + user_profiles.search_profile_json. Both are
+# zero behavior change at this schema hop — no reader/writer exists yet.
+# Same cascade as every other hop: broadcast onto every prior hop key rebased
+# to v55, then register the explicit (54, 55) single hop. SQL text matches
+# sqlite_master storage verbatim (SQLite strips "IF NOT EXISTS" and keeps the
+# source indentation).
+AGENT_OBSERVATION_TABLES = {
+    "agent_observations": """CREATE TABLE agent_observations (
+                  id                TEXT PRIMARY KEY,
+                  notebook_id       TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id          TEXT NOT NULL DEFAULT '',
+                  agent_profile_id  TEXT NOT NULL DEFAULT '',
+                  text              TEXT NOT NULL DEFAULT '',
+                  client_request_id TEXT,
+                  created_at        TEXT NOT NULL
+                )""",
+}
+AGENT_OBSERVATION_INDEXES = {
+    "idx_agent_observations_request":
+        "CREATE UNIQUE INDEX idx_agent_observations_request\n"
+        "                  ON agent_observations(notebook_id, owner_id, agent_profile_id, client_request_id)\n"
+        "                  WHERE client_request_id IS NOT NULL",
+}
+SEARCH_PROFILE_COLUMNS = {
+    "user_profiles": {
+        "search_profile_json": ("search_profile_json", "TEXT", 0, None, 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 55, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **AGENT_OBSERVATION_TABLES},
+        "columns": {
+            **manifest["columns"],
+            "user_profiles": {
+                **manifest["columns"].get("user_profiles", {}),
+                **SEARCH_PROFILE_COLUMNS["user_profiles"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **AGENT_OBSERVATION_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(54, 55)] = {
+    "tables": AGENT_OBSERVATION_TABLES,
+    "columns": SEARCH_PROFILE_COLUMNS,
+    "indexes": AGENT_OBSERVATION_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1034,6 +1034,7 @@
         "id": "<profile-id-1>",
         "memory_mode": "manual",
         "model_settings": {},
+        "search_profile_json": null,
         "ui_mode": null,
         "updated_at": "<timestamp>",
         "upload_document_limit": null,
@@ -1049,6 +1050,7 @@
         "id": "<profile-id-2>",
         "memory_mode": "manual",
         "model_settings": {},
+        "search_profile_json": null,
         "ui_mode": null,
         "updated_at": "<timestamp>",
         "upload_document_limit": null,
@@ -1060,6 +1062,7 @@
         "id": "<profile-id-3>",
         "memory_mode": "manual",
         "model_settings": {},
+        "search_profile_json": null,
         "ui_mode": null,
         "updated_at": "<timestamp>",
         "upload_document_limit": null,
@@ -1110,6 +1113,11 @@
   },
   "schema": {
     "objects": [
+      {
+        "name": "idx_agent_observations_request",
+        "sql_sha256": "41157920ae94b456a0d13374d76f00f2545086d43f930cec110c8a124ede414b",
+        "type": "index"
+      },
       {
         "name": "idx_agent_profiles_owner_status",
         "sql_sha256": "f2e301ea51275f35f96da261235cd1f52a110411aebae450dbe38a68d72a18b9",
@@ -1706,6 +1714,11 @@
         "type": "table"
       },
       {
+        "name": "agent_observations",
+        "sql_sha256": "897a3dba953c1df6c45def61dafcb5fbb240dd2f2075eb9e1bf17c35d9e7641f",
+        "type": "table"
+      },
+      {
         "name": "agent_profile_jobs",
         "sql_sha256": "46c6ce0301b9c9d995f9f9384d21f2ba1f21f102854b9b33d8ae255f07cadcea",
         "type": "table"
@@ -2187,7 +2200,7 @@
       },
       {
         "name": "user_profiles",
-        "sql_sha256": "0573b86d37207fd121753a45979793bac292c697fc7f79923e903bfebb329d0e",
+        "sql_sha256": "0462ef8eca00dd7068a62952c6dcac2b06d9255f3d40603ab62e9ea87c46ce3f",
         "type": "table"
       },
       {
@@ -2211,6 +2224,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 54
+    "user_version": 55
   }
 }

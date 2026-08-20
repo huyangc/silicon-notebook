@@ -28,7 +28,7 @@ from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
 )
 
-# --- 表分类(SCHEMA_VERSION=54) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=55) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -75,6 +75,15 @@ NOTEBOOK_SCOPED_TABLES = [
     # 上面这份清单里。与 reports.share_token/notebooks.share_token 同一先例:
     # token 冲突概率由 256 位随机凭据(new_capability_token)兜底, 本脚本不做
     # 任何专门的 token 冲突检测或清空。
+    "agent_observations",
+    # v55 Agentic Memory P3, T1: agent_observations. 与下面 SKIP_SECONDARY_
+    # TABLES 里的 agent_notebook_profile/agent_profile_jobs **刻意不同**:
+    # 那两张表存的是"这本库被用出来的理解"(共享底座 + 每位成员的覆盖层),对
+    # 副库那份旧语料的理解在合并后就不成立, 所以整体跳过; 这张表存的是逐条
+    # 观察行本身, 每行都直接带 notebook_id 外键, 语义与 sources/knowledge_
+    # objects 等其余知识行完全一致——本次合并后, 副库那些观察行仍然是"关于
+    # 这个 notebook 的一条真实记录", 没有理由丢弃, 按 notebook_id IN (sec_nb)
+    # 筛即可与其余知识一起正常合并。
 ]
 # notebook_bases 是"挂载方"拥有的行(notebook_id=挂载方, base_notebook_id=被挂的公共知识
 # 库), 按本类通用规则以 notebook_id IN (sec_nb) 筛——sec_nb 恒不含 shared_base(它并入

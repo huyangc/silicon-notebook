@@ -139,6 +139,15 @@ _UNIQUE_PREDICATES = {
         "status = 'pending'",
         ("status", "=", "'pending'"),
     ),
+    # agent_observations (v33): the add_observation idempotency index. Same
+    # NULL-park shape as the share-token indexes above, except the park
+    # column is client_request_id rather than a token — a write that omits
+    # a client_request_id simply does not participate in this partial
+    # unique surface.
+    "idx_agent_observations_request": (
+        "client_request_id IS NOT NULL",
+        ("client_request_id", "is", "not", "null"),
+    ),
 }
 
 

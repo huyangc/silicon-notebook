@@ -60,7 +60,12 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v54 adds retrieval_experiences — Agentic Memory P2's DEPLOYMENT-GLOBAL
 # retrieval-strategy experience library. One synthesised content-addressed
 # TEXT primary key, no notebook_id, no owner, no foreign key.
-SCHEMA_VERSION = 54
+# v55 adds agent_observations (Agentic Memory P3's per-(notebook, owner,
+# agent) append-only observation log, MCP-writable via add_observation) and
+# user_profiles.search_profile_json (nullable; NULL means "not set yet",
+# same as v45's ui_mode). Zero behavior change: no reader or writer exists
+# yet.
+SCHEMA_VERSION = 55
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -2891,6 +2896,124 @@ class SqliteMigrator:
                   updated_at      TEXT NOT NULL
                 );
                 """
+            )
+
+    def _migration_55(self) -> None:
+        """Agentic Memory P3 (T1): ``agent_observations`` + ``user_profiles.
+        search_profile_json``. Zero behavior change — the store, port and
+        MCP tool that read/write these land in later tasks of the same
+        feature; this migration only lays the schema down.
+
+        ``agent_observations`` is an append-only log of short lines an
+        external Agent writes via the (later-landing) ``add_observation``
+        MCP tool — one line "I noticed X while working in this notebook".
+        They feed the per-member overlay consolidation job (T4) as
+        UNTRUSTED input, never the answer/report path itself.
+
+        Eight already-decided trade-offs (recorded so the next reader can
+        tell a decision from an oversight):
+
+        1. ``owner_id`` is the identity chain — whose overlay this
+           observation eventually feeds. ``NOT NULL DEFAULT ''`` sentinel,
+           not nullable, same reasoning as ``agent_notebook_profile.
+           owner_id``/``notebook_grants.principal_id`` (see
+           ``_migration_51``/``_migration_49``): a nullable owner_id would
+           make every row incomparable under a UNIQUE index that includes
+           it. It does not participate in any unique surface on this table
+           at all (unlike ``agent_notebook_profile``, whose PK IS
+           ``(notebook_id, owner_id, label)``) — the idempotency key below
+           needs ``agent_profile_id`` too, which owner_id alone cannot
+           stand in for.
+
+        2. ``agent_profile_id`` is a bare provenance id with NO foreign key
+           — same precedent as ``sources.agent_profile_id`` (v48) and
+           ``catalog_candidates.job_id`` (v39): an out-of-band identifier
+           that is never joined against, only carried for attribution and
+           per-Agent clearing.
+
+        3. No incoming foreign key on this table at all (it stays a leaf
+           table); the one OUTGOING foreign key to ``notebooks`` is kept —
+           it is the only mechanism that cascades this table's rows away
+           when the notebook itself is deleted, mirroring
+           ``agent_notebook_profile``'s own FK to ``notebooks``.
+
+        4. ``client_request_id`` stays NULLABLE, paired with a PARTIAL
+           unique index over
+           ``(notebook_id, owner_id, agent_profile_id, client_request_id)
+           WHERE client_request_id IS NOT NULL``. This nullable column +
+           partial index IS the shadow park strategy itself (see the park
+           argument recorded alongside T1 in the P3 implementation plan):
+           a write that carries no client_request_id parks for free by
+           simply not participating in the unique surface. The application
+           layer must NEVER write NULL here — the MCP write path
+           normalizes an empty/missing client_request_id into a rejected
+           request the same way ``memory_inputs.normalize_client_request_id``
+           already does for Memory proposals — so in practice every row this
+           service ever writes carries a real value; NULL is a shape this
+           column supports for the shadow migration's benefit only. Do NOT
+           change this column to ``NOT NULL DEFAULT ''``: that would push
+           every "no request id supplied" row onto the SENTINEL_TEXT park
+           path (there is no such row today, but the column's nullability
+           is the contract, not an accident of the current caller). Do NOT
+           turn the index non-partial either — a non-partial unique index
+           would make the NULL park strategy inapplicable to this surface.
+
+        5. No other index is created. There are exactly two read paths —
+           ``recent_observations``/``list_observations`` scan by
+           ``(notebook_id, owner_id)`` and the idempotency check point-reads
+           the partial unique index above — and the table's own row count
+           is capped by an application-layer ring eviction
+           (``AGENT_OBSERVATION_RING_MAX`` per ``(notebook_id, owner_id)``,
+           landing with the store in a later task), so a
+           ``(notebook_id, owner_id)`` index would only ever cover rows
+           already bounded to a small ring.
+
+        6. Deep notebook copy does NOT carry this table — same as
+           ``agent_notebook_profile``/``agent_profile_jobs`` (see
+           ``_migration_51``): observations are process state about how an
+           Agent has been using THIS notebook, not knowledge a copy should
+           inherit. A fresh copy starts with an empty observation log.
+
+        7. ``scripts/merge_dbs.py`` unions this table by NOTEBOOK ownership
+           (``NOTEBOOK_SCOPED_TABLES``), not as a deployment-global table —
+           unlike ``retrieval_experiences`` (v54), which is intentionally
+           notebook-less. Every row here belongs to one notebook via its
+           REQUIRED ``notebook_id`` foreign key, so merging two deployments
+           re-parents each notebook's observation rows the same way every
+           other per-notebook table already does.
+
+        8. ``user_profiles.search_profile_json`` is nullable; NULL means
+           "the user has never set a preference and no consolidation job
+           has ever written one" — same contract as v45's ``ui_mode``. It
+           is NOT backfilled for existing rows, and it does NOT go into
+           ``schema_manifest.POSTGRES_JSON_COLUMNS`` on the PostgreSQL
+           side even though it holds a JSON document: like ``ui_mode``, it
+           is read and written whole (one document per user, no per-key
+           query ever touches it), and the existing ``ui_mode`` precedent
+           already stores a comparably-shaped small preference value as
+           plain text rather than ``jsonb``. Keeping it plain text avoids a
+           JSON-parse-on-every-read cost this column's access pattern never
+           needs.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS agent_observations (
+                  id                TEXT PRIMARY KEY,
+                  notebook_id       TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  owner_id          TEXT NOT NULL DEFAULT '',
+                  agent_profile_id  TEXT NOT NULL DEFAULT '',
+                  text              TEXT NOT NULL DEFAULT '',
+                  client_request_id TEXT,
+                  created_at        TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_observations_request
+                  ON agent_observations(notebook_id, owner_id, agent_profile_id, client_request_id)
+                  WHERE client_request_id IS NOT NULL;
+                """
+            )
+            self.add_column_if_missing(
+                db, "user_profiles", "search_profile_json", "TEXT",
             )
 
     def _recover_interrupted_jobs(self) -> None:

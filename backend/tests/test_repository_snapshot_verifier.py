@@ -48,6 +48,25 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v55(db: sqlite3.Connection) -> None:
+    """Undo _migration_55 (Agentic Memory P3, T1: agent_observations +
+    user_profiles.search_profile_json).
+
+    Same rule as the siblings below: a new migration has to be undone in the
+    forged "before" snapshot too, or its objects already exist there and the
+    verifier reports them as manifested additions that never happened.
+    Rollback runs newest-first, so this precedes _rollback_v54 at every call
+    site. Reverse migration order: DROP INDEX before DROP TABLE (the index
+    depends on the table existing), then the unrelated user_profiles column
+    drop last. agent_observations has no incoming foreign key from anywhere,
+    so the table drop alone (after its own index) is the whole table-side
+    rollback.
+    """
+    db.execute("DROP INDEX idx_agent_observations_request")
+    db.execute("DROP TABLE agent_observations")
+    db.execute("ALTER TABLE user_profiles DROP COLUMN search_profile_json")
+
+
 def _rollback_v54(db: sqlite3.Connection) -> None:
     """Undo _migration_54 (Agentic Memory P2: retrieval_experiences).
 
@@ -55,9 +74,10 @@ def _rollback_v54(db: sqlite3.Connection) -> None:
     forged "before" snapshot too, or its objects already exist there and the
     verifier reports them as manifested additions that never happened.
     Rollback runs newest-first, so this precedes _rollback_v52 at every call
-    site. The table has no incoming foreign key from anywhere (it has no
-    foreign key at all, in either direction) and the migration creates no
-    index, so this one DROP is the whole rollback.
+    site (and follows _rollback_v55, which must run first). The table has no
+    incoming foreign key from anywhere (it has no foreign key at all, in
+    either direction) and the migration creates no index, so this one DROP
+    is the whole rollback.
 
     There is deliberately no ``_rollback_v53``: v53 only adds the
     ``agent_profile_jobs.claim_token`` COLUMN, and ``_rollback_v51`` below
@@ -623,6 +643,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
         rollback.execute("DROP INDEX idx_sources_nb_parse_status_type")  # _migration_15
         rollback.execute("DROP INDEX idx_sources_memory_id")             # _migration_14
         rollback.execute("ALTER TABLE sources DROP COLUMN memory_id")    # _migration_14
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -678,6 +699,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path):
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -747,6 +769,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -809,6 +832,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
         rollback.execute("DROP TABLE knowhow_milestones")
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -876,6 +900,7 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
                 "2030-01-01T00:00:00+00:00",
             ),
         )
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -909,6 +934,7 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
         _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -938,6 +964,7 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
         _rollback_v34(rollback)
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -983,6 +1010,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
         rollback.execute("DROP TABLE catalog_jobs")                     # _migration_39
         rollback.execute("DROP INDEX idx_sources_visible_identity")     # _migration_38
         rollback.execute("DROP INDEX idx_source_elements_source_type")  # _migration_37
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1047,6 +1075,7 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         rollback.execute("DROP INDEX idx_knowhow_tables_nb_title")
         rollback.execute("DROP TABLE catalog_candidates")
         rollback.execute("DROP TABLE catalog_jobs")
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1081,6 +1110,7 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
         rollback.execute("DROP INDEX idx_knowledge_source_facts_source_generation_global")
         rollback.execute("DROP TABLE knowledge_source_fact_elements")
         rollback.execute("DROP TABLE knowledge_source_facts")
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1118,6 +1148,7 @@ def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
         rollback.execute(
             "ALTER TABLE knowledge_source_facts DROP COLUMN projection_origin"
         )
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1146,6 +1177,7 @@ def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1175,6 +1207,7 @@ def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1201,6 +1234,7 @@ def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1256,6 +1290,7 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1294,6 +1329,7 @@ def test_deployed_v49_database_verifies_share_request_table(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1329,6 +1365,7 @@ def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         _rollback_v52(rollback)
         _rollback_v51(rollback)
@@ -1363,6 +1400,7 @@ def test_deployed_v53_database_verifies_retrieval_experience_table(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v55(rollback)
         _rollback_v54(rollback)
         rollback.execute("PRAGMA user_version = 53")
 
@@ -1444,6 +1482,7 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
             "VALUES (?,?,?,?,?,?,?,?,?)",
             _V23_CLUSTER_ROWS,
         )
+        _rollback_v55(db)
         _rollback_v54(db)
         _rollback_v52(db)
         _rollback_v51(db)

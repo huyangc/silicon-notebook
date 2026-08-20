@@ -86,6 +86,24 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # status plus its threshold counter), and a copy arriving mid-count would be
 # counting source-notebook activity toward a notebook that has had none.
 #
+# Also deliberately absent: `agent_observations` (Agentic Memory P3, T1,
+# schema v55). Same reasoning as `agent_notebook_profile`/`agent_profile_jobs`
+# directly above, and the copy starts with an empty observation log: an
+# observation is process state about how an external Agent has been using
+# THIS notebook, not knowledge a copy should inherit — the copy's owner
+# hasn't done any of the work an observation line describes yet.
+#
+# ⚠ This is a DIFFERENT operation from `scripts/merge_dbs.py`, which DOES
+# carry `agent_observations` forward (in its `NOTEBOOK_SCOPED_TABLES`, see
+# that script's own comment on the entry). The two do not contradict each
+# other: a deep copy manufactures a brand-new notebook whose owner has no
+# history yet, so carrying usage state forward would misattribute someone
+# else's activity to a notebook that has had none; a merge reconciles two
+# copies of the SAME deployment/notebook lineage, where a secondary
+# database's observation rows describe real activity against that same
+# notebook and belong with the rest of its knowledge. Do not "fix" either
+# file to match the other.
+#
 # `retrieval_experiences` (Agentic Memory P2, schema v53) is absent for a
 # structurally different reason and is NOT a decision this snapshot could make
 # either way: it is deployment-GLOBAL — it has no `notebook_id` column and no

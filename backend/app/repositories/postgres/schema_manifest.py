@@ -28,7 +28,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the current SQLite v54 / PostgreSQL v32
+# Every ordinary application table in the current SQLite v55 / PostgreSQL v33
 # compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
 # the migration ledger/shadow control tables are adapter-internal. Import and
 # shadow preflight use this reverse-totality list to reject unrelated/live
@@ -36,6 +36,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 POSTGRES_BUSINESS_TABLES = (
     "agent_access_tokens",
     "agent_notebook_profile",
+    "agent_observations",
     "agent_profile_jobs",
     "agent_profiles",
     "agent_token_notebooks",
@@ -240,10 +241,10 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v54. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v55. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=54,
-    postgres_version=32,
+    sqlite_version=55,
+    postgres_version=33,
 )
