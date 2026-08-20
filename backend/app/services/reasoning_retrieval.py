@@ -1265,10 +1265,14 @@ def _zero_hit_nudge_note(
             continue
         action_id = action_id_for(action)
         rationale = clip_rationale(entry.get("rationale"))
+        # 修复轮 spec③附带修复:rationale 是模型撰写的自由文本,可能是英文句子
+        # 并自带半角句号结尾——把它拼进两个中文句子中间(...经验:{rationale}。
+        # 可考虑...)会在英文句号后再贴一个中文句号,读起来像标点重复。用中文
+        # 引号把 rationale 整体框起来,不依赖它内部用什么语言收尾。
         note = (
             f"（提示:「{action_id}」这类动作在当前场景已连续 "
             f"{zero_hit_by_action[action]} 次未拿到新证据;以往打法经验:"
-            f"{rationale}。可考虑改用其他动作。）"
+            f"「{rationale}」。可考虑改用其他动作。）"
         )
         return action, note
     return None
@@ -1305,6 +1309,29 @@ def _norm_query(q: str) -> str:
     """子查询防重的归一化键:压空白 + casefold。保守精确匹配、不做语义归一——
     宁可放过真改写的近似查询(由回喂账目提示模型约束),不误杀新角度。"""
     return " ".join(str(q).split()).casefold()
+
+
+def _capped_result_ids(ids: List[str]) -> Tuple[List[str], bool]:
+    """Bound a raw result-object-id list to ``TRACE_RESULT_IDS_MAX`` and report
+    whether that actually cut anything off.
+
+    Agentic Memory P4 (修复轮 spec②): every ``result_ids`` write site truncates
+    to the same cap, but until now none of them disclosed WHEN the cap
+    actually bound — a truncated list is indistinguishable from a genuinely
+    short one, so the read side (``retrieval_experience_projection.py`` pass
+    2) could not tell "this action's real result set might include an anchor
+    id that got cut off the tail" apart from "this action really only
+    produced N ids". The sparse ``result_ids_truncated`` marker the caller
+    attaches when this returns ``True`` mirrors the existing
+    ``anchor_evidence_ids_truncated`` / ``neighbor_truncated`` convention
+    (only appears on the day the cap actually binds — "detail 逐键不变" frozen
+    baseline), and the read side treats it as poison for that action's
+    attribution within the run (see ``project_run``'s pass 2), the same way a
+    truncated anchor list poisons the whole run in pass 1.
+    """
+    if len(ids) > TRACE_RESULT_IDS_MAX:
+        return ids[:TRACE_RESULT_IDS_MAX], True
+    return list(ids), False
 
 
 # 已确认检索方向在轨迹/回喂里的展示上界。方向种子是「方向本身 + 换行 + 整份已
@@ -2665,11 +2692,14 @@ class ReasoningRetriever:
             # that constant's docstring in app.models.ask for the disclosure
             # argument. Cost is zero: every id list truncated here already
             # sits in a local variable this line was going to read anyway.
+            _result_ids, _result_ids_truncated = _capped_result_ids(
+                list(collected.keys()))
+            _initial_detail = {"count": len(collected), "result_ids": _result_ids}
+            if _result_ids_truncated:
+                _initial_detail["result_ids_truncated"] = True
             record(TraceStep(step_type="retrieve",
                              summary=f"初检索得到 {len(collected)} 个候选节点",
-                             detail={"count": len(collected),
-                                     "result_ids": list(collected.keys())[
-                                         :TRACE_RESULT_IDS_MAX]}))
+                             detail=_initial_detail))
 
             # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
             # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
@@ -2682,11 +2712,15 @@ class ReasoningRetriever:
                 for c in seeded:
                     seen_chunks.add(c.chunk_id)
                 chunks.extend(seeded)
+                _result_ids, _result_ids_truncated = _capped_result_ids(
+                    [c.chunk_id for c in seeded])
+                _ppr_seed_detail = {"found": len(seeded), "phase": "seed",
+                                    "result_ids": _result_ids}
+                if _result_ids_truncated:
+                    _ppr_seed_detail["result_ids_truncated"] = True
                 record(TraceStep(step_type="ppr",
                                  summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
-                                 detail={"found": len(seeded), "phase": "seed",
-                                         "result_ids": [c.chunk_id for c in seeded][
-                                             :TRACE_RESULT_IDS_MAX]}))
+                                 detail=_ppr_seed_detail))
 
             # 精确查找 seed pass(确定性兜底,镜像上面的 PPR seed pass):权威问题里
             # 点名了完整命令/接口名时无条件先按名称定位它所在的小节并整节取齐,不赌
@@ -2717,13 +2751,16 @@ class ReasoningRetriever:
                 exact_terms_done.update(_norm_query(t) for t in seed_terms)
                 exact_lookup_log.append(
                     _ExactLookupAttempt(terms=list(seed_terms), new=len(found)))
+                _result_ids, _result_ids_truncated = _capped_result_ids(
+                    [c.chunk_id for c in found])
+                _exact_seed_detail = {"terms": list(seed_terms), "found": len(found),
+                                      "phase": "seed", "result_ids": _result_ids}
+                if _result_ids_truncated:
+                    _exact_seed_detail["result_ids_truncated"] = True
                 record(TraceStep(
                     step_type="exact_lookup",
                     summary=f"按名称精确查找:新增 {len(found)} 段原文",
-                    detail={"terms": list(seed_terms), "found": len(found),
-                            "phase": "seed",
-                            "result_ids": [c.chunk_id for c in found][
-                                :TRACE_RESULT_IDS_MAX]}))
+                    detail=_exact_seed_detail))
 
             # Do not let reflect see a completely empty evidence state and
             # prematurely declare it sufficient.  This runs after every
@@ -2805,10 +2842,16 @@ class ReasoningRetriever:
                 # 单条失败语义(fail-open;fail_closed 下照抛;AskCancelled 始终上抛)
                 # 都与首轮逐字一致 —— 这些种子本就是首轮装不下的溢出,不是模型动作。
                 added = 0
+                # Agentic Memory P4(修复轮 spec①):这条补种路径此前是 8 个
+                # result_ids 写点里唯一漏掉的一个——它同样发起真实 I/O(与
+                # add_subquery 分支同型),不写 result_ids 会让「已确认方向」这条
+                # 归因链单独在起点断掉,即便命中了答案锚点也读不出来。
+                new_ids: List[str] = []
                 for h in _run_search(SubQuery(query=query)):
                     if h.object_id not in collected:
                         collected[h.object_id] = h
                         added += 1
+                        new_ids.append(h.object_id)
                 # 账目与 add_subquery 分支同型:进 attempted(供 reflect 回喂与防重)、
                 # 进 used_queries(它是"方面数",决定配额轮转与最终证据预算)。
                 # label 恒写(取自注册表的唯一简称):补种只处理 pending_intent_queries,
@@ -2822,11 +2865,16 @@ class ReasoningRetriever:
                 # 完整原文是「方向+已确认问题契约」的复合串,原样进 NDJSON 推给浏览器
                 # 并持久化没有意义,还会把契约全文重复吐给前端。执行仍用 query 原文
                 # (上面的 _run_search 调用),detail 只影响展示。
+                _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
+                _coverage_detail = {"query": label_of[query], "new": added,
+                                    "source": "confirmed_intent",
+                                    "result_ids": _result_ids}
+                if _result_ids_truncated:
+                    _coverage_detail["result_ids_truncated"] = True
                 record(TraceStep(
                     step_type="retrieve",
                     summary=f"补充已确认方向:{label_of[query]}",
-                    detail={"query": label_of[query], "new": added,
-                            "source": "confirmed_intent"}))
+                    detail=_coverage_detail))
             # 披露不在这里落笔:预算耗尽只代表"补种这一步没跑完",不代表
             # run 最终结果——reflect 循环随后可能用 add_subquery 把
             # uncovered_intent_queries 里的方向补上(见下方 add_subquery 分支的
@@ -3402,15 +3450,27 @@ class ReasoningRetriever:
                         ctx = self.get(notebook_id, oid)
                         node_name = str(ctx.get("name", "")).strip() if ctx else ""
                     node_name = node_name or oid
-                    # Agentic Memory P4 (T6): 本轮零新增计数(见 ppr 分支同款注释)。
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,计数
+                    # 才是真正的"连续"零命中(见 ppr 分支同款注释)——旧版只累加
+                    # 不清零,提示措辞里的"已连续 N 次"其实是"历史累计 N 次",
+                    # 中间哪怕命中过也不影响这个数继续往上走。
                     if not neigh:
                         zero_hit_by_action["expand"] = (
                             zero_hit_by_action.get("expand", 0) + 1)
+                    else:
+                        zero_hit_by_action["expand"] = 0
+                    _result_ids, _result_ids_truncated = _capped_result_ids(
+                        [h.object_id for h in neigh])
                     expand_detail = {"object_id": oid, "name": node_name,
                                      "edge_type": decision.expand_edge_type,
                                      "found": len(neigh),
-                                     "result_ids": [h.object_id for h in neigh][
-                                         :TRACE_RESULT_IDS_MAX]}
+                                     "result_ids": _result_ids}
+                    if _result_ids_truncated:
+                        # 与 neighbor_truncated 是两个独立信号:后者说的是
+                        # self.neighbors() 自己截断了邻居查询,这个说的是这份
+                        # detail 自己的 result_ids 列表被这个函数的截断上限
+                        # 切了尾巴——两者可能只有一个成立。
+                        expand_detail["result_ids_truncated"] = True
                     if expansion.truncated:
                         # 只在真截断的步上加这两个键(detail 逐键不变的冻结基线
                         # 口径:无条件写 False 会让每一条 expand 步的 detail 都
@@ -3499,11 +3559,14 @@ class ReasoningRetriever:
                                   if matched_direction is not None else ""))
                         if exec_query not in used_queries:
                             used_queries.append(exec_query)
+                        _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
+                        _subquery_detail = {"query": display, "new": added,
+                                            "result_ids": _result_ids}
+                        if _result_ids_truncated:
+                            _subquery_detail["result_ids_truncated"] = True
                         record(TraceStep(step_type="retrieve",
                                          summary=f"补充子查询: {display}",
-                                         detail={"query": display, "new": added,
-                                                 "result_ids": new_ids[
-                                                     :TRACE_RESULT_IDS_MAX]}))
+                                         detail=_subquery_detail))
             elif decision.next_action == "search_elements":
                 if elements_searches >= self.settings.reasoning_max_element_searches:
                     record(TraceStep(step_type="skip",
@@ -3871,16 +3934,22 @@ class ReasoningRetriever:
                     for c in new:
                         seen_chunks.add(c.chunk_id)
                     chunks.extend(new)
-                    # Agentic Memory P4 (T6): 本轮零新增计数,纯内存 O(1) 累加,
-                    # 不改变本分支任何既有行为。
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,纯内存
+                    # O(1),不改变本分支任何既有行为(除了让"连续"变真话)。
                     if not new:
                         zero_hit_by_action["ppr"] = (
                             zero_hit_by_action.get("ppr", 0) + 1)
+                    else:
+                        zero_hit_by_action["ppr"] = 0
+                    _result_ids, _result_ids_truncated = _capped_result_ids(
+                        [c.chunk_id for c in new])
+                    _ppr_action_detail = {"query": pq, "found": len(new), "phase": "action",
+                                          "result_ids": _result_ids}
+                    if _result_ids_truncated:
+                        _ppr_action_detail["result_ids_truncated"] = True
                     record(TraceStep(step_type="ppr",
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
-                                     detail={"query": pq, "found": len(new), "phase": "action",
-                                             "result_ids": [c.chunk_id for c in new][
-                                                 :TRACE_RESULT_IDS_MAX]}))
+                                     detail=_ppr_action_detail))
             elif decision.next_action == "exact_lookup":
                 # 名称已在 reflect() 里清洗过(去包裹标点,不截长——见 clean_exact_term)。
                 # fail_closed 的硬闸(:485 一带)先对超长 exact_term 生效;这里才截到
@@ -3964,17 +4033,24 @@ class ReasoningRetriever:
                     exact_terms_done.update(_norm_query(t) for t in fresh)
                     exact_lookup_log.append(
                         _ExactLookupAttempt(terms=list(fresh), new=len(new)))
-                    # Agentic Memory P4 (T6): 本轮零新增计数(见 ppr 分支同款注释)。
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
+                    # 分支同款注释)。
                     if not new:
                         zero_hit_by_action["exact_lookup"] = (
                             zero_hit_by_action.get("exact_lookup", 0) + 1)
+                    else:
+                        zero_hit_by_action["exact_lookup"] = 0
+                    _result_ids, _result_ids_truncated = _capped_result_ids(
+                        [c.chunk_id for c in new])
+                    _exact_reflect_detail = {"term": term, "terms": list(fresh),
+                                             "found": len(new), "phase": "reflect",
+                                             "result_ids": _result_ids}
+                    if _result_ids_truncated:
+                        _exact_reflect_detail["result_ids_truncated"] = True
                     record(TraceStep(
                         step_type="exact_lookup",
                         summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
-                        detail={"term": term, "terms": list(fresh),
-                                "found": len(new), "phase": "reflect",
-                                "result_ids": [c.chunk_id for c in new][
-                                    :TRACE_RESULT_IDS_MAX]}))
+                        detail=_exact_reflect_detail))
             elif decision.next_action == "follow_chain":
                 action_key = (
                     decision.chain_start_object_id,
@@ -4065,10 +4141,13 @@ class ReasoningRetriever:
                     else:
                         summary_text = "两跳推导未找到满足证据/类型/适用条件的路径"
                         best_trust = 0.0
-                    # Agentic Memory P4 (T6): 本轮零新增计数(见 ppr 分支同款注释)。
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
+                    # 分支同款注释)。
                     if not new_chains:
                         zero_hit_by_action["follow_chain"] = (
                             zero_hit_by_action.get("follow_chain", 0) + 1)
+                    else:
+                        zero_hit_by_action["follow_chain"] = 0
                     record(TraceStep(
                         step_type="follow_chain", summary=summary_text,
                         detail={"hops": 2, "count": len(new_chains),

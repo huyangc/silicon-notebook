@@ -368,6 +368,16 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
             continue
         if str(step.get("step_type") or "") not in ("synthesis", "answer"):
             continue
+        # 修复轮 Q-P1-1: 按键存在判定,镜像 result_ids 的规则(见
+        # ``ports.project_run_step``)——不止一种 step_type 等于 "synthesis"/
+        # "answer" 的行(逐节撰写进度步、枚举回答分支、reasoning_retrieval.py
+        # 的候选池汇总步都同名),只有真正携带 anchor_evidence_ids 键的那一条
+        # 才是可用的锚点来源。``step_limit`` 会把一个 run 的 trace 行按 seq
+        # 截尾,真正带锚点的"synthesis"步完全可能被切掉、只留下前面那条
+        # 不带锚点的"answer"候选步——把它当成"锚点已知为空"会把每个动作的
+        # anchored_hits 全部算成 0,而真相是这条 run 的锚点根本不可读。
+        if "anchor_evidence_ids" not in step:
+            continue
         if step.get("anchor_ids_truncated"):
             # A truncated anchor list is not usable as an attribution
             # target — some of the answer's real citations are missing from
@@ -400,6 +410,13 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
     # ``anchored_hits`` below; neither ever holds a raw id itself.
     action_attributable: dict[str, bool] = {}
     action_anchored_hits: dict[str, int] = {}
+    # 修复轮 spec②: 一个动作若在本 run 内任一次调用的 result_ids 被写侧截断
+    # (``TraceStep.detail["result_ids_truncated"]``),这个动作在本 run 的
+    # attribution 整体作废——被截掉的尾巴里可能恰好就是答案绑定的那个锚点,
+    # "没交上截断的那部分"与"确实没命中"在读侧分不出来。镜像的是 pass 1
+    # 里锚点列表本身被截断时对整个 run 的 poison 语义,只是这里的爆炸半径
+    # 收窄到"这一个动作",不连坐同一 run 里其它没截断的动作。
+    action_poisoned: dict[str, bool] = {}
     entity_count = 0
     topic_count = 0
     for step in steps:
@@ -438,6 +455,8 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
             # ``run_anchor_ids`` happens right here, in a local variable that
             # never becomes a field on anything this function returns.
             action_attributable[step_type] = True
+            if step.get("result_ids_truncated"):
+                action_poisoned[step_type] = True
             raw_result_ids = step.get("result_ids")
             if isinstance(raw_result_ids, (list, tuple)):
                 action_anchored_hits[step_type] = action_anchored_hits.get(
@@ -457,6 +476,7 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
             zero_hits=zero_hits.get(action, 0),
             attributable=(
                 run_attributable and action_attributable.get(action, False)
+                and not action_poisoned.get(action, False)
             ),
             anchored_hits=action_anchored_hits.get(action, 0),
         )

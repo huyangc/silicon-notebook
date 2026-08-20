@@ -4228,6 +4228,12 @@ def project_run_step(step: object) -> dict | None:
             projected["result_ids"] = _bounded_id_list(
                 step_detail.get("result_ids"), TRACE_RESULT_IDS_MAX
             )
+            # 修复轮 spec②: 稀疏截断标——只在写侧真的截过 result_ids 时才
+            # 出现(镜像 anchor_ids_truncated 的"detail 逐键不变"冻结基线
+            # 口径)。下游 project_run 据它把这一次调用的 attribution 单独
+            # 判 poison,而不是把截掉的尾巴悄悄当成"就这么多"。
+            if step_detail.get("result_ids_truncated"):
+                projected["result_ids_truncated"] = True
     if projected["step_type"] in ("synthesis", "answer"):
         # codex #524 R9 P2:接地信号只认 ``anchors``(模型真正绑上的 [k])。
         # ``citations`` 是「每条检索证据一张卡」的兜底列表,零绑定的回答里它
@@ -4242,29 +4248,44 @@ def project_run_step(step: object) -> dict | None:
         anchors = None
         anchor_ids: list[str] = []
         anchor_ids_truncated = False
+        # 修复轮 Q-P1-1: 不止一种 step_type=="synthesis"/"answer" 的行——
+        # 逐节撰写进度步、按枚举回答分支的 "answer" 步、reasoning_retrieval.py
+        # 那条候选池汇总的 "answer" 步都同名但从不带 anchor_evidence_ids;
+        # 只有 ask_service.py 那唯一一处最终答案写点带这个键。
+        # ``step_limit`` 还会把一个 run 的 trace 行按 seq 截尾(见
+        # ``recent_completed_ask_runs``),真正带锚点的那条"synthesis"步完全
+        # 可能被切掉而只留下前面那条不带锚点的"answer"候选步——这不是「一个
+        # 空锚点集」,是「这条 run 没有可用的锚点信号」,两者不能用同一个值
+        # 表达。
+        has_anchor_key = False
         if isinstance(raw_step, Mapping):
             detail = raw_step.get("detail")
             if isinstance(detail, Mapping):
                 candidate = detail.get("anchors")
                 if isinstance(candidate, int) and not isinstance(candidate, bool):
                     anchors = candidate
-                # Agentic Memory P4 (T2): the write side (ask_service.py)
-                # already writes this unconditionally, including empty on a
-                # zero-anchor answer, so no absent-vs-empty ambiguity applies
-                # here the way it does for ``result_ids`` above.
-                anchor_ids = _bounded_id_list(
-                    detail.get("anchor_evidence_ids"), TRACE_ANCHOR_EVIDENCE_IDS_MAX
-                )
-                anchor_ids_truncated = bool(
-                    detail.get("anchor_evidence_ids_truncated")
-                )
+                has_anchor_key = "anchor_evidence_ids" in detail
+                if has_anchor_key:
+                    anchor_ids = _bounded_id_list(
+                        detail.get("anchor_evidence_ids"),
+                        TRACE_ANCHOR_EVIDENCE_IDS_MAX,
+                    )
+                    anchor_ids_truncated = bool(
+                        detail.get("anchor_evidence_ids_truncated")
+                    )
         projected["count"] = anchors if anchors is not None else 0
-        projected["anchor_evidence_ids"] = anchor_ids
-        if anchor_ids_truncated:
-            # Sparse — only present on the (unexpected) day the write-side
-            # cap actually bound. Mirrors the "detail 逐键不变" frozen-baseline
-            # convention every other conditional trace-detail key follows.
-            projected["anchor_ids_truncated"] = True
+        if has_anchor_key:
+            # 按键存在投影,镜像上面 result_ids 的规则——没有这个键的行(包括
+            # 上面枚举的那几种同名但不携带锚点的行)整段不投影这个字段,而不是
+            # 投影一个看起来"零锚点"的空列表。project_run 的 pass 1 据此把
+            # "这条 run 没带锚点信号"与"这条 run 确认锚点为空"区分开。
+            projected["anchor_evidence_ids"] = anchor_ids
+            if anchor_ids_truncated:
+                # Sparse — only present on the (unexpected) day the write-side
+                # cap actually bound. Mirrors the "detail 逐键不变" frozen-
+                # baseline convention every other conditional trace-detail key
+                # follows.
+                projected["anchor_ids_truncated"] = True
         return projected
     if projected["step_type"] != "intent":
         return projected
