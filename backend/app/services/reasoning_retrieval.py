@@ -2365,6 +2365,7 @@ class ReasoningRetriever:
         # 不会变)。
         consult_memory_flag = consult_memory_active(
             self.settings, limits, self.retrieval_experiences)
+        consult_delivered_this_turn = False
         outline: List[OutlineSection] = []
         outline_updates = 0
         # 大纲采用引导已经发出过几轮(仅内存,run 级)。见 `_outline_nudge_note`:
@@ -3465,8 +3466,16 @@ class ReasoningRetriever:
                         decision.expand_edge_type, decision.expand_direction)
                     neigh = expansion.hits
                     raise_if_cancelled(self.cancel_event)
+                    # codex #538 R3 P2:零命中判定与归因 id 都只看**新插入**的
+                    # 邻居——两个展开节点共享的邻居早已在 collected 里,本次
+                    # setdefault 什么都没加:拿原始 neigh 判会把空手轮当命中
+                    # 清零计数,把既有对象计入 result_ids 后又被答案引用时,
+                    # 蒸馏会把功劳记给一次什么都没贡献的 expand 调用。
+                    newly_added_neighbors = []
                     for h in neigh:
-                        collected.setdefault(h.object_id, h)
+                        if h.object_id not in collected:
+                            collected[h.object_id] = h
+                            newly_added_neighbors.append(h)
                     # 展示用人读节点名(优先 collected 命中, 再查 node_context, 兜底裸 id),
                     # 避免 trace 里出现 "顺关系深挖 ko-8375b40126" 这种用户看不懂的内部 id。
                     node_name = ""
@@ -3480,13 +3489,13 @@ class ReasoningRetriever:
                     # 才是真正的"连续"零命中(见 ppr 分支同款注释)——旧版只累加
                     # 不清零,提示措辞里的"已连续 N 次"其实是"历史累计 N 次",
                     # 中间哪怕命中过也不影响这个数继续往上走。
-                    if not neigh:
+                    if not newly_added_neighbors:
                         zero_hit_by_action["expand"] = (
                             zero_hit_by_action.get("expand", 0) + 1)
                     else:
                         zero_hit_by_action["expand"] = 0
                     _result_ids, _result_ids_truncated = _capped_result_ids(
-                        [h.object_id for h in neigh])
+                        [h.object_id for h in newly_added_neighbors])
                     expand_detail = {"object_id": oid, "name": node_name,
                                      "edge_type": decision.expand_edge_type,
                                      "found": len(neigh),
@@ -3951,6 +3960,8 @@ class ReasoningRetriever:
                             if rendered.overlay_rendered:
                                 consult_overlay_note = pending_overlay
                             consult_block_text = rendered.rendered_text
+                            consult_delivered_this_turn = bool(
+                                newly_delivered or overlay_newly_delivered)
                             if not newly_delivered and not overlay_newly_delivered:
                                 # 本次调用真的选中了新东西(否则已经在上面短路成
                                 # "nothing_new"),但全部被硬顶挤在块外——预算已经
@@ -4314,7 +4325,17 @@ class ReasoningRetriever:
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + enum_rows_used
             ) == before
-            stale = stale + 1 if no_progress else 0
+            if no_progress and consult_delivered_this_turn:
+                # codex #538 R3 P2:送达了内容的 consult 轮对 stale **持平**——
+                # 不带新证据(照 outline 论证不能清零,否则反复回想可把熔断
+                # 空转上限无限抬高),但也不能递增:模型在 stale 逼近上限时
+                # 选它(恰是连续空手后最可能选它的时刻),递增会当轮熔断,刚
+                # 送达的打法块永远到不了下一轮 reflect,一步预算白花。skip
+                # 各态(cap/nothing_new/block_full/unavailable)照常递增。
+                pass
+            else:
+                stale = stale + 1 if no_progress else 0
+            consult_delivered_this_turn = False
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if stale >= self.settings.reasoning_stale_limit:
                 record(TraceStep(step_type="skip",

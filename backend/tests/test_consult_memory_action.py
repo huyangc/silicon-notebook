@@ -642,3 +642,40 @@ def test_the_zero_hit_priority_set_filters_to_positive_counts():
     assert "zero_hit_by_action.items() if c > 0" in call_src, (
         "select_consultable 的 zero_hit_actions 必须按正计数过滤"
     )
+
+
+def test_a_delivering_consult_turn_does_not_advance_the_stale_breaker(repo):
+    """codex #538 R3 P2:模型在 stale 逼近上限时选 consult(恰是连续空手后最
+    可能选它的时刻)——送达内容的 consult 轮不带新证据,若照常递增 stale 会
+    当轮熔断,刚送达的打法块永远到不了下一轮 reflect。持平(不增不清):后续
+    reflect 必须真的发生且 prompt 携带打法块。skip 各态照常递增。"""
+    notebook = _seed(repo)
+    filler = "y" * 150
+    _write_experience(repo, "ppr", "bad", f"ppr {filler}a.")
+    _write_experience(repo, "exact_lookup", "bad", f"exact {filler}b.")
+    _write_experience(repo, "follow_chain", "bad", f"chain {filler}c.")
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "set_db"},   # 空手 stale 1
+        {"next_action": "exact_lookup", "exact_term": "set_db2"},  # 空手 stale 2
+        {"next_action": "consult_memory"},                          # 送达,持平
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    result, _limits = _run(retriever, notebook, "deep")
+
+    assert _steps(result, "consult_memory"), "consult 应真的送达"
+    skip_reasons = [
+        s.detail.get("reason") for s in result.trace if s.step_type == "skip"
+    ]
+    assert "stale_circuit_breaker" not in skip_reasons, (
+        "送达的 consult 轮不得把 stale 推到熔断"
+    )
+    # 打法块必须真的到了下一轮 reflect 的 prompt
+    passive = next(s for s in result.trace if s.step_type == "experience")
+    consult = _steps(result, "consult_memory")[0]
+    delivered_marker = "c." if passive.detail["entries"] == 2 else None
+    assert delivered_marker, "前提:被动块只送达 2/3 条"
+    assert any(delivered_marker in p and "chain" in p
+               for p in llm.reflect_prompts), (
+        "送达的打法块必须出现在后续 reflect prompt 里"
+    )
