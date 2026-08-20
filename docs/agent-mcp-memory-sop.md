@@ -37,7 +37,7 @@ curl -s http://127.0.0.1:8000/api/ready
 
 Expect `"ready": true`. Open <http://127.0.0.1:3000> and sign in. A fresh local database seeds `admin` with local default password `admin`; existing deployments use their configured credentials.
 
-For a remote deployment, substitute its host and backend port in every URL below, including `/api/ready`. The MCP endpoint lives on that same origin and port.
+For a remote deployment, use the addresses that deployment publishes rather than rewriting these by hand: its own web address for the UI and `/api/ready`, and — for MCP — the slashed `MCP_PUBLIC_URL` printed by the onboarding instructions (§4). They are not necessarily the same origin: a proxy may publish MCP separately, and the backend's own port may be private or plain HTTP.
 
 Use a notebook the account can read. To test formal context retrieval, that notebook should contain a source, KG object, or confirmed Memory.
 
