@@ -3885,77 +3885,99 @@ class ReasoningRetriever:
                         detail={"reason": "consult_memory_cap"}))
                 else:
                     consult_used += 1
-                    consult_situation = current_situation(
-                        intent_detail, mode=_EXPERIENCE_RUN_MODE,
-                        retrieval_effort=(
-                            limits.effort if limits is not None else ""))
-                    new_consult_rows = select_consultable(
-                        _cached_experiences(self.retrieval_experiences),
-                        consult_situation,
-                        exclude_ids=(
-                            consult_delivered_ids
-                            | {str(e.get("id") or "")
-                               for e in experience_entries}
-                        ),
-                        zero_hit_actions=set(zero_hit_by_action),
-                        top_k=CONSULT_MEMORY_TOP_K,
-                    )
-                    overlay_note = _undelivered_retrieval_note(
-                        profile_raw_blocks, profile_block,
-                        self.profile_owner_id)
-                    is_new_overlay = bool(overlay_note) and (
-                        overlay_note != consult_overlay_note)
-                    if not new_consult_rows and not is_new_overlay:
-                        record(TraceStep(
-                            step_type="skip",
-                            summary="回想以往打法:未找到与当前场景匹配的新记录",
-                            detail={"reason": "consult_memory_nothing_new"}))
-                    else:
-                        consult_rows_accum.extend(new_consult_rows)
-                        # 修复轮 spec④/Q-P1-3:先渲染,再按渲染结果(而不是按
-                        # 选中集)更新账目——被 600 字符硬顶挤掉的行/心得没有
-                        # 出现在模型看到的文本里,不该被标成"已经发过了",否则
-                        # 下一次调用会把它排除在候选之外,永远没有机会重新出现。
-                        pending_overlay = (
-                            overlay_note if is_new_overlay
-                            else consult_overlay_note)
-                        rendered = render_consult_block(
-                            consult_rows_accum,
-                            extra_lines=(
-                                [pending_overlay] if pending_overlay else ()
+                    # codex #538 R1 P2:整个执行体 fail-open——注入开着时一次
+                    # 瞬态/畸形的经验库读取(_cached_experiences 会发 version_signal
+                    # 聚合查询)不得把整次 Ask/报告 run 打挂;这是可选的建议面,
+                    # 与被动块的既有 fail-open 同口径。取消照常上抛。
+                    try:
+                        consult_situation = current_situation(
+                            intent_detail, mode=_EXPERIENCE_RUN_MODE,
+                            retrieval_effort=(
+                                limits.effort if limits is not None else ""))
+                        # codex #538 R1 P2 两条:①排除集只含**真送达**的被动块前缀
+                        # ——选中未送达的行(600 字符块常装不下 top-3)模型从没见过,
+                        # 排除它等于让 consult 永远还不出这些打法;②零命中优先集只取
+                        # 当前计数>0 的动作——命中清零后键还留在字典里,按键集判会把
+                        # 刚成功的动作当「哑火」排前,挤掉真失败的。
+                        delivered_passive_ids = {
+                            str(e.get("id") or "")
+                            for e in experience_entries[
+                                : rendered_experience_count(experience_block)]
+                        } if experience_block else set()
+                        new_consult_rows = select_consultable(
+                            _cached_experiences(self.retrieval_experiences),
+                            consult_situation,
+                            exclude_ids=(
+                                consult_delivered_ids | delivered_passive_ids
                             ),
+                            zero_hit_actions={
+                                a for a, c in zero_hit_by_action.items() if c > 0
+                            },
+                            top_k=CONSULT_MEMORY_TOP_K,
                         )
-                        delivered_ids = set(rendered.delivered_ids)
-                        newly_delivered = [
-                            r for r in new_consult_rows
-                            if str(r.get("id") or "") in delivered_ids
-                        ]
-                        consult_delivered_ids.update(delivered_ids)
-                        overlay_newly_delivered = (
-                            is_new_overlay and rendered.overlay_rendered)
-                        if rendered.overlay_rendered:
-                            consult_overlay_note = pending_overlay
-                        consult_block_text = rendered.rendered_text
-                        if not newly_delivered and not overlay_newly_delivered:
-                            # 本次调用真的选中了新东西(否则已经在上面短路成
-                            # "nothing_new"),但全部被硬顶挤在块外——预算已经
-                            # 花掉(``consult_used`` 已 += 1),模型这一轮却什么
-                            # 新内容都没看到。独立 reason 与"候选池本身没有
-                            # 匹配"区分开,方便回看轨迹时分辨是哪一种。
+                        overlay_note = _undelivered_retrieval_note(
+                            profile_raw_blocks, profile_block,
+                            self.profile_owner_id)
+                        is_new_overlay = bool(overlay_note) and (
+                            overlay_note != consult_overlay_note)
+                        if not new_consult_rows and not is_new_overlay:
                             record(TraceStep(
                                 step_type="skip",
-                                summary="回想以往打法:本轮候选未能装入打法块(预算已用)",
-                                detail={"reason": "consult_memory_block_full"}))
+                                summary="回想以往打法:未找到与当前场景匹配的新记录",
+                                detail={"reason": "consult_memory_nothing_new"}))
                         else:
-                            record(TraceStep(
-                                step_type="consult_memory",
-                                summary=(
-                                    "回想以往检索打法"
-                                    + (f",新增 {len(newly_delivered)} 条"
-                                       if newly_delivered else "")
+                            consult_rows_accum.extend(new_consult_rows)
+                            # 修复轮 spec④/Q-P1-3:先渲染,再按渲染结果(而不是按
+                            # 选中集)更新账目——被 600 字符硬顶挤掉的行/心得没有
+                            # 出现在模型看到的文本里,不该被标成"已经发过了",否则
+                            # 下一次调用会把它排除在候选之外,永远没有机会重新出现。
+                            pending_overlay = (
+                                overlay_note if is_new_overlay
+                                else consult_overlay_note)
+                            rendered = render_consult_block(
+                                consult_rows_accum,
+                                extra_lines=(
+                                    [pending_overlay] if pending_overlay else ()
                                 ),
-                                detail={"entries": len(newly_delivered),
-                                        "chars": len(consult_block_text)}))
+                            )
+                            delivered_ids = set(rendered.delivered_ids)
+                            newly_delivered = [
+                                r for r in new_consult_rows
+                                if str(r.get("id") or "") in delivered_ids
+                            ]
+                            consult_delivered_ids.update(delivered_ids)
+                            overlay_newly_delivered = (
+                                is_new_overlay and rendered.overlay_rendered)
+                            if rendered.overlay_rendered:
+                                consult_overlay_note = pending_overlay
+                            consult_block_text = rendered.rendered_text
+                            if not newly_delivered and not overlay_newly_delivered:
+                                # 本次调用真的选中了新东西(否则已经在上面短路成
+                                # "nothing_new"),但全部被硬顶挤在块外——预算已经
+                                # 花掉(``consult_used`` 已 += 1),模型这一轮却什么
+                                # 新内容都没看到。独立 reason 与"候选池本身没有
+                                # 匹配"区分开,方便回看轨迹时分辨是哪一种。
+                                record(TraceStep(
+                                    step_type="skip",
+                                    summary="回想以往打法:本轮候选未能装入打法块(预算已用)",
+                                    detail={"reason": "consult_memory_block_full"}))
+                            else:
+                                record(TraceStep(
+                                    step_type="consult_memory",
+                                    summary=(
+                                        "回想以往检索打法"
+                                        + (f",新增 {len(newly_delivered)} 条"
+                                           if newly_delivered else "")
+                                    ),
+                                    detail={"entries": len(newly_delivered),
+                                            "chars": len(consult_block_text)}))
+                    except AskCancelled:
+                        raise
+                    except Exception:  # noqa: BLE001 — 建议面绝不挂 run
+                        record(TraceStep(
+                            step_type="skip",
+                            summary="回想以往打法:读取记录失败,本轮跳过",
+                            detail={"reason": "consult_memory_unavailable"}))
             elif decision.next_action == "ppr_retrieve":
                 if self._unsafe_scope_restricted():
                     record(TraceStep(

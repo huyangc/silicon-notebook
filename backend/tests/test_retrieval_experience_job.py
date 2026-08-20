@@ -1254,3 +1254,21 @@ def test_a_single_run_conclusion_is_rejected_but_a_real_update_is_not():
     # 降级成 ADD 的 UPDATE(offered 里没有该动作)按 ADD 判,单 run 同样拒
     parsed = parse_distillation_reply({"entries": [update]}, groups, offered=[])
     assert parsed == []
+
+
+def test_a_poisoned_action_contributes_zero_anchored_hits_to_aggregation():
+    """codex #538 R1 P2:被截断 poison 的动作 anchored_hits 必须归零——留着
+    保留前缀的交集,与别的可归因 run 同组聚合时会被计成有效成功。"""
+    truncated_run = _run([
+        _intent_step(),
+        {"step_type": "ppr",
+         "detail": {"count": 2, "result_ids": ["c1", "c2"],
+                    "result_ids_truncated": True}},
+        {"step_type": "synthesis", "summary": "",
+         "detail": {"citations": 1, "anchors": 1,
+                    "anchor_evidence_ids": ["c1"]}},
+    ], run_id="poisoned")
+    observed = project_run(truncated_run)
+    ppr = next(a for a in observed.observation.actions if a.action == "ppr")
+    assert ppr.attributable is False
+    assert ppr.anchored_hits == 0, "poison 动作的保留前缀交集不得计入分子"
