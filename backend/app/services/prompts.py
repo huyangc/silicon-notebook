@@ -463,6 +463,7 @@ def reflect_schema_hint(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
     outline: bool = False,
+    consult_memory: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -477,6 +478,13 @@ def reflect_schema_hint(
     is offered only at the exhaustive effort).  The two gates are independent
     because the features are: enumeration is available at every effort, the
     outline is not.
+
+    ``consult_memory`` (Agentic Memory P4, T5) is a THIRD independent gate, same
+    principle again: the action only exists at deep-and-above effort while the
+    global retrieval-experience library injection switch is also on (see
+    ``reasoning_retrieval.consult_memory_active``). It adds no schema FIELDS —
+    the action takes no parameters — only one more word to the ``next_action``
+    enum, so False leaves every other byte of the schema untouched.
     """
     actions = (
         "answer|expand_graph|add_subquery|"
@@ -506,6 +514,8 @@ def reflect_schema_hint(
             '"collection":"",'
             '"source_id":"","source_title":""},'
         )
+    if consult_memory:
+        actions += "|consult_memory"
     outline_branch = ""
     if outline:
         actions += "|update_outline"
@@ -539,6 +549,7 @@ def reflect_prompt(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
     outline: bool = False,
+    consult_memory: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
@@ -549,6 +560,11 @@ def reflect_prompt(
     ``outline`` True = the outline scratchpad action is offered this run (only
     at the exhaustive effort, see ``reasoning_retrieval.outline_wiring_active``);
     False = it is not, and again every byte is what it was before it existed.
+
+    ``consult_memory`` True = the consult_memory action is offered this run
+    (deep-and-above effort AND the experience-library injection switch, see
+    ``reasoning_retrieval.consult_memory_active``); False = it is not, and
+    every byte of this prompt is what it was before the action existed.
     """
     enumeration_tools = bool(element_kinds or object_types)
     # The reflect-local half of the scope-grounding rule: this is the prompt with
@@ -661,6 +677,20 @@ def reflect_prompt(
         "one-sentence answer only burns turns.\n"
         if outline else ""
     )
+    # Agentic Memory P4 (T5). Zero parameters — the model just picks the
+    # action, the server decides what to hand back — so there is nothing to
+    # tell it HOW to fill in beyond WHEN to reach for it.
+    consult_memory_action = (
+        "- consult_memory: before repeating an action (ppr_retrieve, "
+        "exact_lookup, expand_graph, follow_chain) that has already come back "
+        "empty a few times in THIS run, recall tactical hints from earlier "
+        "runs on this shape of question, plus your own earlier notes for this "
+        "library. Takes no parameters. Returns advice on WHICH channel tends "
+        "to pay off, never evidence — nothing it returns is citable with [k], "
+        "and it never says which sources may be read. Use it sparingly, only "
+        "when genuinely unsure what to try next.\n"
+        if consult_memory else ""
+    )
     completeness_rule = (
         "In reason, you may call a collection completely retrieved ONLY when "
         "an enumerate action has reported its coverage as complete for that "
@@ -713,6 +743,7 @@ def reflect_prompt(
         "paraphrase returns nothing.\n"
         f"{enumerate_actions}"
         f"{outline_action}"
+        f"{consult_memory_action}"
         f"{SCOPE_DEIXIS_GROUNDING}"
         f"{quoted_phrase_grounding(question)}"
         f"{scope_fields_rule}"
@@ -1597,12 +1628,13 @@ def retrieval_experience_prompt(
     * **One entry says one thing about one action.** An entry that hedges
       across several actions cannot be scored, cannot be retired, and cannot be
       compared with the entry that contradicts it.
-    * **Failures outrank successes.** They are also the only signal this
-      feature observes per action: which actions came back empty is counted per
-      step, while "the answer was well supported" is only known for the run as
-      a whole (see ``RunObservation``'s docstring). Saying so plainly here
-      stops the model from reading a run-level citation count as a verdict on
-      whichever action it happens to be writing about.
+    * **Failures outrank successes.** Which actions came back empty is always
+      counted per action (see ``RunObservation``'s docstring). Success is too,
+      now, but only where it could actually be checked against what the answer
+      cited — an ``anchored=`` figure on an action's line is that per-action
+      evidence; its absence means the batch (or that particular action) has
+      nothing but the run-level ``total_citations`` to go on, and that number
+      must never be read as a verdict on one particular action.
     """
     action_list = ", ".join(actions)
     return (
@@ -1621,10 +1653,14 @@ def retrieval_experience_prompt(
         "2. One entry is about exactly ONE action for ONE situation. Never "
         "hedge across actions in a single entry.\n"
         "3. Prefer what FAILED. 'This action keeps coming back empty in this "
-        "shape of question' is the most useful thing you can record. Note that "
-        "empty-result counts are per action, while the citation count is for "
-        "the whole run — never attribute a run's success or failure to one "
-        "particular action.\n"
+        "shape of question' is still the most useful thing you can record, and "
+        "empty-result counts are always per action. When an action's line also "
+        "carries an 'anchored=' figure, that count IS per-action success "
+        "evidence: results from that action that the answer actually cited, "
+        "counted only among the runs where such a check was possible. When a "
+        "line has no 'anchored=' figure, that batch predates this check for "
+        "that action — total_citations is a WHOLE-RUN number in every case "
+        "and must never be attributed to one particular action.\n"
         "4. op is ADD for a conclusion the library does not hold yet, UPDATE to "
         "revise the polarity or wording of an entry listed below, NOOP to leave "
         "a situation alone. UPDATE only when the new numbers actually "

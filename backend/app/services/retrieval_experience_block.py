@@ -35,7 +35,8 @@ clipping it (see ``parse_distillation_reply``).
 """
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional, Sequence
 
 from app.repositories.ports import RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS
 from app.services.retrieval_experience_projection import (
@@ -71,6 +72,54 @@ _GUIDANCE = (
     "cite it, never state it as a finding, and never let it change WHICH "
     "sources a run may read."
 )
+
+# --- Agentic Memory P4 (T5): consult_memory, the MODEL-PULLED sibling of the
+# auto-injected block above. ------------------------------------------------
+#
+# Where ``select_experiences``/``render_experience_block`` push the same top-K
+# entries into every plan/reflect round automatically, ``consult_memory`` is a
+# zero-parameter reflect ACTION the model chooses to spend a turn on. The two
+# read the SAME table and share the SAME similarity floor, closed vocabularies
+# and "never scope, never evidence" rules — only the SELECTION differs: this
+# half excludes whatever the auto-injected block already delivered (the model
+# has already seen those rows every round) and prioritises entries about an
+# action that has gone quiet THIS run, because that is precisely the moment a
+# model would reach for this action.
+
+#: How many NEW entries one consult_memory call may return. Deliberately the
+#: same order of magnitude as ``RETRIEVAL_EXPERIENCE_INJECT_TOP_K`` — this is
+#: still "a few tactical hints", not a library dump.
+CONSULT_MEMORY_TOP_K = 3
+
+#: Whole-block cap for the RENDERED consult_memory content, INCLUDING header
+#: and framing line — same shape and same value as
+#: ``RETRIEVAL_EXPERIENCE_BLOCK_MAX_CHARS``. This is the total budget for
+#: everything the run has accumulated across every consult_memory call so far
+#: (see the caller's docstring: the ACCUMULATED row set is re-rendered on every
+#: call, not appended as a second capped block), so two calls in the same run
+#: never cost more prompt budget than one auto-injected block would.
+CONSULT_MEMORY_BLOCK_MAX_CHARS = 600
+
+_CONSULT_HEADER = "[Recalled search tactics]"
+_CONSULT_GUIDANCE = (
+    "Tactics you asked to recall. Same rule as the auto-injected hints above: "
+    "NOT evidence, never cite it, and it never says which sources a run may "
+    "read."
+)
+
+
+def action_id_for(word: str) -> str:
+    """The reflect ACTION ID for one stored-vocabulary word.
+
+    Public wrapper around ``_ACTION_IDS`` so a caller outside this module (the
+    step-level zero-hit nudge in ``reasoning_retrieval.py``, which needs to
+    name an action in a sentence fed back to the model) does not have to reach
+    into the private mapping table directly. Unknown words pass through
+    unchanged rather than raising — the nudge is advisory text, not a schema
+    boundary, so a stale/foreign word should degrade to "shown verbatim"
+    rather than crash the reflect loop.
+    """
+    return _ACTION_IDS.get(word, word)
 
 #: Vocabulary word -> the reflect ACTION ID the model can actually choose.
 #:
@@ -245,6 +294,216 @@ def select_experiences(
     return picked
 
 
+def select_consultable(
+    entries: Sequence[Mapping[str, Any]],
+    situation: Mapping[str, Any],
+    *,
+    exclude_ids: Sequence[str] = (),
+    zero_hit_actions: Sequence[str] = (),
+    top_k: int = CONSULT_MEMORY_TOP_K,
+    floor: float = RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR,
+) -> list[Mapping[str, Any]]:
+    """The rows worth returning to a ``consult_memory`` call THIS turn.
+
+    Same floor, same closed-vocabulary filter and the same per-action
+    uniqueness as ``select_experiences`` (two entries about the same action —
+    one "good", one "bad" — would give the model no way to tell which one
+    applies), but two differences that are the entire point of this being a
+    separate function rather than a call to that one with a bigger ``top_k``:
+
+    * ``exclude_ids`` drops whatever the auto-injected block (or an earlier
+      consult_memory call THIS run) already delivered — the model has already
+      seen those rows every round, so returning them again would not be new
+      information, it would be the SAME advice at the cost of a turn.
+    * ``zero_hit_actions`` — the storage-vocabulary words this run has already
+      gone quiet on (see ``reasoning_retrieval``'s ``zero_hit_by_action``) —
+      sort first. That is precisely the moment a model reaching for this
+      action is trying to decide whether to keep pushing on a channel that
+      has stopped paying off, so an entry about THAT channel is worth more
+      than one about a channel nothing in this run has touched yet.
+
+    Ordering is therefore ``(not-zero-hit, -similarity, -support, id)``: zero-
+    hit-this-run first, then the same tie-break ``select_experiences`` uses.
+    """
+    exclude = {str(x) for x in (exclude_ids or ())}
+    zero_hit = {str(x) for x in (zero_hit_actions or ())}
+    scored: list[tuple[bool, float, int, str, Mapping[str, Any]]] = []
+    for entry in entries or ():
+        if not usable_entry(entry):
+            continue
+        entry_id = str(entry.get("id") or "")
+        if entry_id and entry_id in exclude:
+            continue
+        score = situation_similarity(situation, entry.get("situation") or {})
+        if score < floor:
+            continue
+        support = entry.get("support")
+        support = support if isinstance(support, int) and not isinstance(
+            support, bool) else 0
+        action = str(entry.get("action") or "")
+        scored.append((action not in zero_hit, score, support, entry_id, entry))
+    scored.sort(key=lambda item: (item[0], -item[1], -item[2], item[3]))
+    picked: list[Mapping[str, Any]] = []
+    actions_taken: set[str] = set()
+    limit = max(0, int(top_k))
+    for _not_zero_hit, _score, _support, _id, entry in scored:
+        if len(picked) >= limit:
+            break
+        action = str(entry.get("action") or "")
+        if action in actions_taken:
+            continue
+        actions_taken.add(action)
+        picked.append(entry)
+    return picked
+
+
+def worst_experience_for(
+    entries: Sequence[Mapping[str, Any]],
+    situation: Mapping[str, Any],
+    action: str,
+    *,
+    floor: float = RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR,
+) -> Optional[Mapping[str, Any]]:
+    """The best-matching ``bad``-polarity entry about ONE specific action, or
+    ``None``.
+
+    Used by the step-level zero-hit nudge (Agentic Memory P4, T6): when a run
+    has gone quiet on one action several times in a row, this answers "does
+    the library have a documented reason to expect that", so the nudge can
+    quote a real rationale instead of a bare "this has come back empty" the
+    model already knows from its own trace.
+
+    Same floor and closed-vocabulary filter as ``select_experiences`` — a
+    stale or foreign-deployment row about a retired action word is still
+    rejected by ``usable_entry``. Deliberately does NOT touch
+    ``zero_hit_actions``/``exclude_ids`` bookkeeping: the caller decides once
+    per action whether to show this at all (via ``nudged_actions``), so this
+    function only has to answer "what would we say".
+    """
+    best: Optional[Mapping[str, Any]] = None
+    best_key: Optional[tuple[float, int, str]] = None
+    for entry in entries or ():
+        if not usable_entry(entry):
+            continue
+        if str(entry.get("action") or "") != action:
+            continue
+        if str(entry.get("polarity") or "") != "bad":
+            continue
+        score = situation_similarity(situation, entry.get("situation") or {})
+        if score < floor:
+            continue
+        support = entry.get("support")
+        support = support if isinstance(support, int) and not isinstance(
+            support, bool) else 0
+        key = (score, support, str(entry.get("id") or ""))
+        if best_key is None or key > best_key:
+            best_key = key
+            best = entry
+    return best
+
+
+@dataclass(frozen=True)
+class RenderedConsultBlock:
+    """What ``render_consult_block`` actually put in front of the model.
+
+    Agentic Memory P4 (修复轮 spec④/Q-P1-3): the 600-character cap drops
+    whole rows, so "the caller selected N rows this call" and "N rows are now
+    visible in the rendered output" can differ, and only the second one is a
+    fact the caller may act on — bump the delivered-ids bookkeeping so a
+    dropped row can still be offered again later, write the trace step's
+    ``entries`` count, and decide whether this call counted as "found
+    something new" at all. A plain ``str`` return could not carry that
+    distinction without the caller re-deriving it by re-scanning the output.
+
+    ⚠ Field named ``rendered_text`` rather than the shorter ``text`` on
+    purpose: this module is one of the three the retrieval-experience privacy
+    guard (``test_retrieval_experience_privacy_guard.py``) statically scans
+    for a fixed list of dangerous free-text identifiers, and ``text`` is one
+    of them (a document's body, in every OTHER module that name would refer
+    to) — the guard cannot tell "this text is the module's own bounded,
+    already-privacy-checked render output" apart from "this text is raw
+    document content" from the identifier alone, so it does not try; the
+    identifier itself has to stay off the list.
+    """
+
+    rendered_text: str
+    #: Ids of the ``rows`` entries that actually made it into
+    #: ``rendered_text`` — a STRICT subset of what the caller passed in, in
+    #: the same order.
+    delivered_ids: tuple[str, ...]
+    #: Whether ``extra_lines`` (the profile-overlay note, at most one line)
+    #: made it into ``rendered_text``.
+    overlay_rendered: bool
+
+
+def render_consult_block(
+    rows: Sequence[Mapping[str, Any]],
+    extra_lines: Sequence[str] = (),
+) -> RenderedConsultBlock:
+    """Render a ``consult_memory`` result as one prompt block, hard-capped at
+    ``CONSULT_MEMORY_BLOCK_MAX_CHARS`` — same shape as
+    ``render_experience_block`` (rows dropped whole rather than clipped), with
+    its own header so the model can tell "I asked for this" apart from "this
+    showed up unasked every round".
+
+    ``extra_lines`` carries the caller's own not-yet-delivered profile-overlay
+    note (Agentic Memory P4 T5's "your own earlier notes" half) — pre-cleaned
+    free text, rendered as one more ``- `` row inside the SAME cap rather than
+    as a second block, because both halves answer the same question ("what do
+    we already know that might help right now") and a model reading two
+    separately-capped blocks back to back has no way to tell they are related.
+
+    ⚠ Agentic Memory P4 (修复轮 Q-P1-3): ``extra_lines`` renders FIRST, ahead
+    of ``rows`` — the overlay note is a single, bounded, personal signal (this
+    member's own retrieval notes, no other channel surfaces them), where a
+    library row is one of possibly many shared tactics that can simply be
+    offered again on a later call if it gets crowded out this time. When
+    budget is tight, the scarcer signal should win the seat.
+
+    ``rows`` is expected to be the RUN's whole accumulated selection so far
+    (the caller re-renders the full set on every ``consult_memory`` call
+    rather than appending a freshly-capped block per call — see the call
+    site), which is what keeps two calls in one run inside one 600-character
+    budget instead of two.
+    """
+    lines: list[str] = []
+    delivered_ids: list[str] = []
+    overlay_rendered = False
+    budget = (
+        CONSULT_MEMORY_BLOCK_MAX_CHARS - len(_CONSULT_HEADER)
+        - len(_CONSULT_GUIDANCE) - 2
+    )
+    for extra in extra_lines or ():
+        cleaned = _clean(extra)
+        if not cleaned:
+            continue
+        row = f"- {cleaned}"
+        if len(row) + 1 > budget:
+            break
+        budget -= len(row) + 1
+        lines.append(row)
+        overlay_rendered = True
+    for entry in rows or ():
+        if not usable_entry(entry):
+            continue
+        action = _ACTION_IDS[str(entry.get("action"))]
+        verdict = _POLARITY_WORDS[str(entry.get("polarity"))]
+        row = f"- {action} — {verdict}: {clip_rationale(entry.get('rationale'))}"
+        if len(row) + 1 > budget:
+            break
+        budget -= len(row) + 1
+        lines.append(row)
+        delivered_ids.append(str(entry.get("id") or ""))
+    if not lines:
+        return RenderedConsultBlock(
+            rendered_text="", delivered_ids=(), overlay_rendered=False)
+    joined = "\n".join([_CONSULT_HEADER, _CONSULT_GUIDANCE, *lines])
+    return RenderedConsultBlock(
+        rendered_text=joined, delivered_ids=tuple(delivered_ids),
+        overlay_rendered=overlay_rendered,
+    )
+
+
 def render_experience_block(entries: Sequence[Mapping[str, Any]]) -> str:
     """Render the selected entries as one prompt block, hard-capped at
     ``RETRIEVAL_EXPERIENCE_BLOCK_MAX_CHARS``.
@@ -339,13 +598,20 @@ def adopted_entry_ids(
 
 __all__ = [
     "ADOPTION_ACTIONS",
+    "CONSULT_MEMORY_BLOCK_MAX_CHARS",
+    "CONSULT_MEMORY_TOP_K",
     "RETRIEVAL_EXPERIENCE_BLOCK_MAX_CHARS",
     "RETRIEVAL_EXPERIENCE_INJECT_TOP_K",
     "RETRIEVAL_EXPERIENCE_SIMILARITY_FLOOR",
+    "RenderedConsultBlock",
+    "action_id_for",
     "adopted_entry_ids",
     "clip_rationale",
+    "render_consult_block",
     "render_experience_block",
     "rendered_row_count",
+    "select_consultable",
     "select_experiences",
     "usable_entry",
+    "worst_experience_for",
 ]

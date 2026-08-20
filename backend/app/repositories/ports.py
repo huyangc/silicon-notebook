@@ -65,6 +65,7 @@ from app.models.ask import (
     AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
     ConversationBulkDeleteResult, ConversationSummary, FeedbackRequest,
     FeedbackResponse, NotebookSearchResponse, QueryIntentContract, RuleCard,
+    TRACE_ANCHOR_EVIDENCE_IDS_MAX, TRACE_RESULT_IDS_MAX,
 )
 from app.models.knowledge import (
     DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
@@ -4025,6 +4026,52 @@ def _clip_trace_text(value: object) -> str:
     return text
 
 
+def _step_detail_mapping(step: object) -> Mapping | None:
+    """Best-effort ``detail`` mapping for a possibly-JSON-string step row.
+
+    Agentic Memory P4 (T2): a third, self-contained copy of the JSON-decode-
+    then-extract-``detail`` pattern ``project_run_step`` already repeats
+    inline inside its synthesis/answer and ``intent`` branches below — pulled
+    out here rather than duplicated a third time inline, since the new
+    ``result_ids`` branch needs the exact same mapping a third time and
+    reusing this one helper keeps that branch a two-line check instead of
+    another six-line try/except block.
+    """
+    raw = step
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(raw, Mapping):
+        return None
+    detail = raw.get("detail")
+    return detail if isinstance(detail, Mapping) else None
+
+
+def _bounded_id_list(raw: object, cap: int) -> list[str]:
+    """Coerce ``raw`` into a bounded list of non-empty string ids.
+
+    Agentic Memory P4 (T2): the read-side twin of the write-side truncation
+    already applied at every ``TraceStep(detail=...)`` emit site — the write
+    side already caps to the same constants, so this is a defense-in-depth
+    re-application, not the primary enforcement point. Drops anything that is
+    not a non-empty ``str`` (a stray ``int``, ``None``, ``bool``, or an empty
+    string a malformed row might carry) rather than trying to repair it, then
+    truncates to ``cap`` entries. Shared by both ``result_ids`` (non-synthesis
+    steps) and ``anchor_evidence_ids`` (synthesis/answer steps) below.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+    result: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item:
+            result.append(item)
+        if len(result) >= cap:
+            break
+    return result
+
+
 def project_trace_step(step: object) -> dict | None:
     """Narrow ONE persisted trace step to the fields the overlay chain may see.
 
@@ -4039,6 +4086,15 @@ def project_trace_step(step: object) -> dict | None:
     Returns ``None`` for anything that is not a step object, so a corrupt row
     is skipped rather than failing the read (the same tolerance ``read_trace``
     has had since the trace sub-table existed).
+
+    ⚠ Agentic Memory P4 (T2): the ``result_ids`` / ``anchor_evidence_ids``
+    step→anchor attribution raw material ``project_run_step`` below reads is
+    deliberately NOT projected here. This function feeds the agent-profile
+    overlay chain (readable only by the member whose own run produced it, via
+    a rendered PROSE block), which has no use for a bare id list; growing this
+    function's return shape widens what every caller of it — including ones
+    added later, that may not share ``project_run_step``'s narrower privacy
+    argument — sees, for no benefit.
     """
     if isinstance(step, (str, bytes, bytearray)):
         try:
@@ -4114,9 +4170,26 @@ def project_run_step(step: object) -> dict | None:
     readable only by the member whose run produced it — and it is unacceptable
     here, where the resulting entry is visible to every user of the deployment.
 
-    What survives is the action type, one count and one duration: enough to say
+    What survives is the action type, one count, one duration, and (Agentic
+    Memory P4, T2) a bounded list of opaque result/anchor ids: enough to say
     "this action ran and came back empty", which is exactly the half of the
-    outcome signal P2 keeps at step granularity.
+    outcome signal P2 keeps at step granularity, PLUS enough for a later
+    consumer to compute step→anchor attribution — the "not recoverable" gap
+    ``RunObservation``'s docstring registers as a later phase.
+
+    ⚠ The id lists themselves do NOT go into ``RunObservation`` — that
+    dataclass stays ``int`` / ``bool`` / closed-``Literal``-only, per the
+    privacy guard (``test_retrieval_experience_privacy_guard.py``). The
+    intended shape for a later phase is: the CALLER (``project_run`` in
+    ``retrieval_experience_projection.py``) intersects one step's
+    ``result_ids`` against the run's own ``anchor_evidence_ids`` LOCALLY,
+    inside its own loop, and folds the result down to a count (an
+    ``attributable: bool`` / ``anchored_hits: int`` pair) before it ever
+    touches a dataclass field — the raw ids themselves live only in this
+    function's return value and that loop's local variables, never in a
+    field that a global, all-users-readable table stores. This function's
+    job stops at making the raw material available; it neither computes nor
+    persists the intersection itself.
 
     The ``intent`` step additionally contributes the run's SITUATION, and this
     is the only place any of it is read. Every value is either a ``bool``, an
@@ -4136,6 +4209,31 @@ def project_run_step(step: object) -> dict | None:
         "duration_ms": base["duration_ms"],
         "count": base["count"],
     }
+    if projected["step_type"] not in ("synthesis", "answer"):
+        # Agentic Memory P4 (T2): pass ``result_ids`` through by KEY
+        # PRESENCE, not by step type — this file does not import the service
+        # layer's ``RETRIEVAL_ACTIONS`` vocabulary (that would be a layering
+        # inversion: ports is beneath services), so it cannot tell "this step
+        # type is a retrieval action" from the step alone. Key presence is
+        # the write side's own signal: every write site that dispatched I/O
+        # writes "result_ids" unconditionally (including an empty list on a
+        # genuine zero-hit result), while a "skip" branch and every trace row
+        # persisted before this phase never has the key at all. Projecting
+        # only when the key exists is what lets a later consumer tell "old
+        # trace, or a step type that never emits this" apart from "ran, found
+        # nothing" — writing an empty list either way would erase that
+        # distinction.
+        step_detail = _step_detail_mapping(step)
+        if isinstance(step_detail, Mapping) and "result_ids" in step_detail:
+            projected["result_ids"] = _bounded_id_list(
+                step_detail.get("result_ids"), TRACE_RESULT_IDS_MAX
+            )
+            # 修复轮 spec②: 稀疏截断标——只在写侧真的截过 result_ids 时才
+            # 出现(镜像 anchor_ids_truncated 的"detail 逐键不变"冻结基线
+            # 口径)。下游 project_run 据它把这一次调用的 attribution 单独
+            # 判 poison,而不是把截掉的尾巴悄悄当成"就这么多"。
+            if step_detail.get("result_ids_truncated"):
+                projected["result_ids_truncated"] = True
     if projected["step_type"] in ("synthesis", "answer"):
         # codex #524 R9 P2:接地信号只认 ``anchors``(模型真正绑上的 [k])。
         # ``citations`` 是「每条检索证据一张卡」的兜底列表,零绑定的回答里它
@@ -4148,13 +4246,46 @@ def project_run_step(step: object) -> dict | None:
             except (TypeError, ValueError):
                 raw_step = None
         anchors = None
+        anchor_ids: list[str] = []
+        anchor_ids_truncated = False
+        # 修复轮 Q-P1-1: 不止一种 step_type=="synthesis"/"answer" 的行——
+        # 逐节撰写进度步、按枚举回答分支的 "answer" 步、reasoning_retrieval.py
+        # 那条候选池汇总的 "answer" 步都同名但从不带 anchor_evidence_ids;
+        # 只有 ask_service.py 那唯一一处最终答案写点带这个键。
+        # ``step_limit`` 还会把一个 run 的 trace 行按 seq 截尾(见
+        # ``recent_completed_ask_runs``),真正带锚点的那条"synthesis"步完全
+        # 可能被切掉而只留下前面那条不带锚点的"answer"候选步——这不是「一个
+        # 空锚点集」,是「这条 run 没有可用的锚点信号」,两者不能用同一个值
+        # 表达。
+        has_anchor_key = False
         if isinstance(raw_step, Mapping):
             detail = raw_step.get("detail")
             if isinstance(detail, Mapping):
                 candidate = detail.get("anchors")
                 if isinstance(candidate, int) and not isinstance(candidate, bool):
                     anchors = candidate
+                has_anchor_key = "anchor_evidence_ids" in detail
+                if has_anchor_key:
+                    anchor_ids = _bounded_id_list(
+                        detail.get("anchor_evidence_ids"),
+                        TRACE_ANCHOR_EVIDENCE_IDS_MAX,
+                    )
+                    anchor_ids_truncated = bool(
+                        detail.get("anchor_evidence_ids_truncated")
+                    )
         projected["count"] = anchors if anchors is not None else 0
+        if has_anchor_key:
+            # 按键存在投影,镜像上面 result_ids 的规则——没有这个键的行(包括
+            # 上面枚举的那几种同名但不携带锚点的行)整段不投影这个字段,而不是
+            # 投影一个看起来"零锚点"的空列表。project_run 的 pass 1 据此把
+            # "这条 run 没带锚点信号"与"这条 run 确认锚点为空"区分开。
+            projected["anchor_evidence_ids"] = anchor_ids
+            if anchor_ids_truncated:
+                # Sparse — only present on the (unexpected) day the write-side
+                # cap actually bound. Mirrors the "detail 逐键不变" frozen-
+                # baseline convention every other conditional trace-detail key
+                # follows.
+                projected["anchor_ids_truncated"] = True
         return projected
     if projected["step_type"] != "intent":
         return projected

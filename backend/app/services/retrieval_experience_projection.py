@@ -175,13 +175,48 @@ class ActionObservation:
     Aggregated per action rather than kept as a step SEQUENCE: an ordered list
     would be a strictly richer signal, and it would also make the observation
     describe the run closely enough that a distinctive sequence identifies the
-    run. Three integers per action is the least that can still say "this action
-    ran and came back empty".
+    run. Five scalars per action is the least that can still say "this action
+    ran, came back empty this often, and — where the run's own results could be
+    checked against what the answer actually cited — helped this often".
+
+    ⚠ Agentic Memory P4 (T3): ``anchored_hits`` / ``attributable`` are the
+    step→anchor attribution this module's own ``RunObservation`` docstring
+    used to register as unrecoverable. Two fields, not one
+    ``attributed_hits: int | None``: the privacy guard's judgement-one scanner
+    (``test_retrieval_experience_privacy_guard.py``) walks field ANNOTATIONS
+    and accepts exactly ``int`` / ``bool`` / a closed ``Literal`` — an
+    ``Optional[int]`` annotation is a ``Union`` shape the scanner has no rule
+    for, so it would either need a new exception carved into a judgement that
+    exists specifically to have none, or slip through unnoticed. A plain
+    ``bool`` needs no exception:
+
+    * ``attributable`` — whether this run/action pair COULD be checked at all
+      (the run's synthesis step produced a usable, non-truncated anchor set,
+      AND at least one invocation of this action carried its own
+      ``result_ids``). ``False`` means "no evidence either way", not "this
+      action did not help" — the overwhelming common case is a run persisted
+      before this phase, where the answer is simply that attribution never
+      logs anything.
+    * ``anchored_hits`` — how many of this action's OWN results (across every
+      invocation this run) turned out to be ids the answer actually bound as
+      an anchor. Meaningful only when ``attributable`` is ``True``; ``0`` when
+      it is ``False`` is not "zero hits observed", it is "not observed at
+      all" — the same shape of ambiguity ``zero_hits`` already lives with for
+      an action that never ran, resolved the same way: a companion flag
+      rather than a sentinel value.
+
+    The intersection itself — one step's ``result_ids`` against the run's
+    ``anchor_evidence_ids`` — happens once, locally, inside ``project_run``'s
+    own loop, using local variables that never become a field on this type.
+    See that function's docstring for why the raw ids cannot live here even
+    transiently.
     """
 
     action: RetrievalAction
     invocations: int
     zero_hits: int
+    anchored_hits: int
+    attributable: bool
 
 
 @dataclass(frozen=True)
@@ -198,16 +233,24 @@ class RunObservation:
     de-duplication), not content, and keeping it outside this type means the
     guard's rule needs no exception carved into it — see ``ObservedRun``.
 
-    OUTCOME GRANULARITY, registered as a v1 limitation because it is easy to
-    misread this type as saying more than it does: failures are observed PER
-    ACTION (``zero_hits``), successes only PER RUN (``citations``,
-    ``answered``). Step→anchor attribution is not recoverable from what runs
-    persist today — ``ask_trace_steps.detail`` records counts and never result
-    ids for ``retrieve``/``ppr``/``exact_lookup``/``expand``/``enumerate`` — so
-    "this action's results are what the answer ended up citing" cannot be
-    computed. Making it computable means changing the trace WRITE path on a hot
-    request path, with its own disclosure argument; that is deliberately left
-    to a later phase.
+    OUTCOME GRANULARITY (updated Agentic Memory P4, T3 — this paragraph used
+    to say attribution was unrecoverable; it no longer is, but the shape of
+    what is observed is still worth spelling out precisely). Failures are
+    observed PER ACTION (``zero_hits``) — always, for every persisted run,
+    old or new. Successes are observed PER ACTION TOO now, but only where
+    attribution is POSSIBLE (``ActionObservation.anchored_hits`` /
+    ``attributable`` — see that type's docstring): the write path
+    (``TraceStep.detail["result_ids"]`` on ``retrieve``/``ppr``/
+    ``exact_lookup``/``expand``, ``TraceStep.detail["anchor_evidence_ids"]``
+    on the run's ``synthesis``/``answer`` step) has to have run for THIS
+    request, and the run's own anchor set has to be complete (not truncated
+    by its own protocol cap). A run persisted before this phase, or a request
+    whose action produced no ``result_ids`` (``expand_community``,
+    ``follow_chain``, ``enumerate``, ``outline`` — the write side never
+    touches these step types), has ``attributable=False`` for that
+    action/run, and its success can only be read at RUN granularity —
+    ``citations``/``answered`` below remain the fallback for exactly that
+    case, not a redundant copy of the same signal.
 
     ⚠ There is no field here for ``skip`` steps either, and that is a
     SEPARATE registered decision from the outcome-granularity one above, not
@@ -306,11 +349,74 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
     if not isinstance(steps, Sequence):
         return None
 
+    # Pass 1 of 2 (Agentic Memory P4, T3): whether this run's own answer
+    # anchors are a USABLE attribution target at all, and if so, the
+    # (function-LOCAL, never persisted) id set pass 2 intersects each
+    # action's ``result_ids`` against.
+    #
+    # ⚠ This has to be its own pass, not folded into pass 2 below: a run's
+    # synthesis/answer step is not guaranteed to be the LAST entry in
+    # ``steps`` (nothing about a persisted trace promises step order), and
+    # computing a per-action ``anchored_hits`` needs the COMPLETE anchor set
+    # before it can intersect a single action's ``result_ids`` against it. A
+    # single forward pass would make attribution depend on step order,
+    # which nothing here guarantees.
+    run_anchor_ids: set[str] = set()
+    run_attributable = False
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        if str(step.get("step_type") or "") not in ("synthesis", "answer"):
+            continue
+        # 修复轮 Q-P1-1: 按键存在判定,镜像 result_ids 的规则(见
+        # ``ports.project_run_step``)——不止一种 step_type 等于 "synthesis"/
+        # "answer" 的行(逐节撰写进度步、枚举回答分支、reasoning_retrieval.py
+        # 的候选池汇总步都同名),只有真正携带 anchor_evidence_ids 键的那一条
+        # 才是可用的锚点来源。``step_limit`` 会把一个 run 的 trace 行按 seq
+        # 截尾,真正带锚点的"synthesis"步完全可能被切掉、只留下前面那条
+        # 不带锚点的"answer"候选步——把它当成"锚点已知为空"会把每个动作的
+        # anchored_hits 全部算成 0,而真相是这条 run 的锚点根本不可读。
+        if "anchor_evidence_ids" not in step:
+            continue
+        if step.get("anchor_ids_truncated"):
+            # A truncated anchor list is not usable as an attribution
+            # target — some of the answer's real citations are missing from
+            # it, so a "no hit" reading would be indistinguishable from "the
+            # missing tail would have hit". One truncated step poisons the
+            # whole run's attribution (not just itself): discard whatever
+            # this run's other synthesis/answer step(s) contributed and stop
+            # looking.
+            run_anchor_ids = set()
+            run_attributable = False
+            break
+        run_attributable = True
+        raw_ids = step.get("anchor_evidence_ids")
+        if isinstance(raw_ids, (list, tuple)):
+            run_anchor_ids.update(
+                item for item in raw_ids if isinstance(item, str) and item
+            )
+
     situation: Mapping[str, Any] | None = None
     citations = 0
     answered = False
     invocations: dict[str, int] = {}
     zero_hits: dict[str, int] = {}
+    # Pass 2's own per-action attribution accumulators — ``action_attributable``
+    # records KEY PRESENCE (did at least one invocation of this action carry
+    # its own ``result_ids`` at all — see ``project_run_step``'s docstring for
+    # why that is the write side's own "old trace vs. this phase" signal),
+    # ``action_anchored_hits`` the running intersection count. Both are
+    # function-local and fold into ``ActionObservation.attributable`` /
+    # ``anchored_hits`` below; neither ever holds a raw id itself.
+    action_attributable: dict[str, bool] = {}
+    action_anchored_hits: dict[str, int] = {}
+    # 修复轮 spec②: 一个动作若在本 run 内任一次调用的 result_ids 被写侧截断
+    # (``TraceStep.detail["result_ids_truncated"]``),这个动作在本 run 的
+    # attribution 整体作废——被截掉的尾巴里可能恰好就是答案绑定的那个锚点,
+    # "没交上截断的那部分"与"确实没命中"在读侧分不出来。镜像的是 pass 1
+    # 里锚点列表本身被截断时对整个 run 的 poison 语义,只是这里的爆炸半径
+    # 收窄到"这一个动作",不连坐同一 run 里其它没截断的动作。
+    action_poisoned: dict[str, bool] = {}
     entity_count = 0
     topic_count = 0
     for step in steps:
@@ -342,15 +448,46 @@ def project_run(run: Mapping[str, Any]) -> ObservedRun | None:
         count = step.get("count")
         if isinstance(count, int) and not isinstance(count, bool) and count <= 0:
             zero_hits[step_type] = zero_hits.get(step_type, 0) + 1
+        if "result_ids" in step:
+            # This invocation ran under the write path that records result
+            # ids at ALL — an old-shape trace row (persisted before this
+            # phase) never carries this key. The intersection against
+            # ``run_anchor_ids`` happens right here, in a local variable that
+            # never becomes a field on anything this function returns.
+            action_attributable[step_type] = True
+            if step.get("result_ids_truncated"):
+                action_poisoned[step_type] = True
+            raw_result_ids = step.get("result_ids")
+            if isinstance(raw_result_ids, (list, tuple)):
+                action_anchored_hits[step_type] = action_anchored_hits.get(
+                    step_type, 0
+                ) + sum(
+                    1 for rid in raw_result_ids
+                    if isinstance(rid, str) and rid in run_anchor_ids
+                )
 
     if situation is None:
         return None
+
+    def _action_attributable(action: str) -> bool:
+        return (
+            run_attributable and action_attributable.get(action, False)
+            and not action_poisoned.get(action, False)
+        )
 
     actions = tuple(
         ActionObservation(
             action=action,  # type: ignore[arg-type]
             invocations=invocations[action],
             zero_hits=zero_hits.get(action, 0),
+            attributable=_action_attributable(action),
+            # codex #538 R1 P2:不可归因(含被截断 poison)的动作 anchored_hits
+            # 一律归零——留着保留前缀算出的交集,会在与别的可归因 run 同组聚合
+            # 时被当成有效成功计入 anchored= 分子,而分母只数别的 run。
+            anchored_hits=(
+                action_anchored_hits.get(action, 0)
+                if _action_attributable(action) else 0
+            ),
         )
         # Iterated over the VOCABULARY rather than over the observed dict, so
         # the tuple order is fixed by this file rather than by the order steps

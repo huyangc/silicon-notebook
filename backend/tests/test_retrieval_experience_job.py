@@ -246,6 +246,177 @@ def test_the_projection_counts_zero_hits_per_action_and_citations_per_run():
     assert observed.observation.answered is True
 
 
+# --------------------------------------- step→anchor attribution (P4, T3)
+
+def test_a_run_with_no_result_ids_at_all_is_not_attributable():
+    """老轨迹(``result_ids`` 键整体缺席):即使 synthesis 步存在且带
+    ``anchor_evidence_ids``,per-action 的 ``attributable``/``anchored_hits``
+    也必须是 (False, 0),其余字段与升级前逐字相同。"""
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "ppr", "detail": {"count": 3}},  # 无 result_ids
+                {"step_type": "synthesis",
+                 "detail": {"anchors": 2, "anchor_evidence_ids": ["ko-1", "ko-2"]}},
+            ]
+        )
+    )
+    assert observed is not None
+    ppr = next(a for a in observed.observation.actions if a.action == "ppr")
+    assert (ppr.attributable, ppr.anchored_hits) == (False, 0)
+    # 其余字段逐字同升级前
+    assert ppr.invocations == 1
+    assert ppr.zero_hits == 0
+    assert observed.observation.citations == 2
+    assert observed.observation.answered is True
+
+
+def test_a_run_with_results_but_zero_anchors_is_attributable_with_no_hits():
+    """新轨迹,有 result_ids,但答案零锚点:可归因,命中数为 0——``(True, 0)``,
+    与老轨迹的 ``(False, 0)`` 手感不同但数值恰好一样,靠 ``attributable`` 区分。"""
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 3, "result_ids": ["c-1", "c-2", "c-3"]}},
+                {"step_type": "synthesis",
+                 "detail": {"anchors": 0, "anchor_evidence_ids": []}},
+            ]
+        )
+    )
+    assert observed is not None
+    retrieve = next(a for a in observed.observation.actions if a.action == "retrieve")
+    assert (retrieve.attributable, retrieve.anchored_hits) == (True, 0)
+
+
+def test_partial_binding_counts_only_the_intersecting_ids():
+    """部分绑定:该动作的 result_ids 里只有一部分真的被答案引用——
+    ``anchored_hits`` 只数交集,不是该动作全部结果数,也不是答案全部锚点数。"""
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 4,
+                            "result_ids": ["c-1", "c-2", "c-3", "c-4"]}},
+                {"step_type": "ppr",
+                 "detail": {"count": 2, "result_ids": ["c-5", "c-6"]}},
+                {"step_type": "synthesis",
+                 # c-2/c-3 来自 retrieve,c-5 来自 ppr,ko-9 谁都没产出过
+                 "detail": {"anchors": 4,
+                            "anchor_evidence_ids": ["c-2", "c-3", "c-5", "ko-9"]}},
+            ]
+        )
+    )
+    assert observed is not None
+    by_action = {a.action: a for a in observed.observation.actions}
+    assert (by_action["retrieve"].attributable, by_action["retrieve"].anchored_hits) == (True, 2)
+    assert (by_action["ppr"].attributable, by_action["ppr"].anchored_hits) == (True, 1)
+
+
+def test_a_truncated_anchor_list_makes_the_whole_run_unattributable():
+    """``anchor_ids_truncated`` 在场:答案锚点列表本身被协议上限截断过,
+    「没命中」与「被截掉的尾巴本会命中」区分不开——整个 run 的每个动作都判
+    False,不只是 synthesis 步自己。"""
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 1, "result_ids": ["c-1"]}},
+                {"step_type": "synthesis",
+                 "detail": {"anchors": 999, "anchor_evidence_ids": ["c-1"],
+                            "anchor_evidence_ids_truncated": True}},
+            ]
+        )
+    )
+    assert observed is not None
+    retrieve = next(a for a in observed.observation.actions if a.action == "retrieve")
+    assert (retrieve.attributable, retrieve.anchored_hits) == (False, 0)
+
+
+def test_a_truncated_result_ids_list_poisons_only_that_action_not_the_whole_run():
+    """修复轮 spec②:某个动作自己的 result_ids 被写侧截断(``result_ids_
+    truncated``)时,只有**这个动作**在本 run 里 attributable=False——被截掉
+    的尾巴里可能恰好是答案绑定的锚点,"没交上截断的那部分"与"确实没命中"
+    分不清楚。没被截断的另一个动作不受连坐,镜像的是 pass 1 对锚点列表
+    本身截断时"整个 run 判 False"的语义,但这里爆炸半径只到"这一个动作"。
+    """
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 21,
+                            "result_ids": ["c-1"] * 20,
+                            "result_ids_truncated": True}},
+                {"step_type": "ppr",
+                 "detail": {"count": 1, "result_ids": ["c-2"]}},
+                {"step_type": "synthesis",
+                 "detail": {"anchors": 1, "anchor_evidence_ids": ["c-2"]}},
+            ]
+        )
+    )
+    assert observed is not None
+    by_action = {a.action: a for a in observed.observation.actions}
+    assert (by_action["retrieve"].attributable,
+           by_action["retrieve"].anchored_hits) == (False, 0)
+    assert (by_action["ppr"].attributable,
+           by_action["ppr"].anchored_hits) == (True, 1)
+
+
+def test_a_run_whose_synthesis_step_was_dropped_by_the_step_limit_is_not_attributable():
+    """不能依赖步序/步的存在——一个 run 的 trace 步数被
+    ``RETRIEVAL_EXPERIENCE_BATCH_STEPS`` 截断,synthesis 步整个不在
+    ``steps`` 里(``_run`` helper 之外、手工模拟"店家已经截过"的最终形状):
+    没有可用的锚点集合,attributable 必须是 False,即使该动作自己带着
+    result_ids。"""
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 1, "result_ids": ["c-1"]}},
+                # 无 synthesis/answer 步——store 的 step_limit 把它截掉了
+            ]
+        )
+    )
+    assert observed is not None
+    retrieve = next(a for a in observed.observation.actions if a.action == "retrieve")
+    assert (retrieve.attributable, retrieve.anchored_hits) == (False, 0)
+
+
+def test_a_surviving_answer_step_with_no_anchor_key_is_not_a_usable_anchor_source():
+    """修复轮 Q-P1-1:比上一条更精确的截尾常态形状——不是"synthesis/answer
+    步整个不在 steps 里",而是**同名但不带锚点**的另一种 "answer" 步活了
+    下来(reasoning_retrieval.py 自己的候选池汇总步,``summary="合成候选"``,
+    detail 只有 kg/elements 计数,从来不写 anchor_evidence_ids),真正带
+    ``anchor_evidence_ids`` 的那条 synthesis 步被 step_limit 切掉了。
+
+    按 step_type 判定会把这条"answer"步误认成一个合法的(空)锚点来源,让
+    这个 run 的每个动作的 anchored_hits 全部被算成 0——而真相是这条 run
+    的锚点根本不可读,必须与"没有 synthesis/answer 步"同一判决:
+    ``(False, 0)``。"""
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "retrieve",
+                 "detail": {"count": 1, "result_ids": ["c-1"]}},
+                # 候选池汇总的 "answer" 步——同名但从不携带 anchor_evidence_ids。
+                {"step_type": "answer", "summary": "合成候选",
+                 "detail": {"kg": 5, "elements": 3}},
+                # 真正带锚点的 synthesis 步不在这里——模拟它被 step_limit 切掉。
+            ]
+        )
+    )
+    assert observed is not None
+    retrieve = next(a for a in observed.observation.actions if a.action == "retrieve")
+    assert (retrieve.attributable, retrieve.anchored_hits) == (False, 0)
+
+
 def test_the_action_tuple_order_follows_the_vocabulary_not_the_run():
     """Two runs with the same actions must produce identical observations.
 
@@ -779,6 +950,69 @@ def test_renderers_show_the_action_denominator_alongside_total_runs():
     assert "runs=3 (3 with sampled actions)" in text
 
 
+# ------------------------------------- rendering: step→anchor attribution
+
+def test_an_all_old_shape_batch_renders_byte_identical_to_pre_t4():
+    """中性回归的硬验收点:一批全是老轨迹(没有一个 run 带 result_ids)时,
+    ``render_observations`` 的输出必须与 T4 落地前**逐字节**相同——升级后
+    第一批老轨迹的蒸馏 prompt 不该有任何变化。"""
+    groups = _groups()
+    text = render_observations(groups)
+    assert text == (
+        "[Recent searches, grouped by question shape]\n"
+        "s0: completeness_required=no, entity_count=few, has_constraints=no, "
+        "has_exclusions=no, mode=reasoning, result_scope=ranked, "
+        "retrieval_effort=standard, topic_count=few\n"
+        "  runs=3 (3 with sampled actions) total_citations=0\n"
+        "  ppr: used=3 came_back_empty=3 (in 3 of 3 runs)"
+    )
+    assert "anchored=" not in text
+
+
+def test_a_mixed_batch_only_shows_anchored_on_the_attributable_action():
+    """混合批次(同一情境下,一部分 run 老轨迹、一部分带归因证据):
+    只有真的能归因的动作(ppr)带 ``anchored=`` 子句,分母是 attributable
+    run 数分之 runs_using;从未归因过的动作(retrieve)保持沉默,与升级前
+    一样。"""
+    old_ppr_a = project_run(
+        _run([_intent_step(), {"step_type": "ppr", "detail": {"count": 0}}],
+             run_id="mix-1")
+    )
+    old_ppr_b = project_run(
+        _run([_intent_step(), {"step_type": "ppr", "detail": {"count": 0}}],
+             run_id="mix-2")
+    )
+    new_ppr = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "ppr",
+                 "detail": {"count": 2, "result_ids": ["x-1", "x-2"]}},
+                {"step_type": "synthesis",
+                 "detail": {"anchors": 2,
+                            "anchor_evidence_ids": ["x-1", "z-9"]}},
+            ],
+            run_id="mix-3",
+        )
+    )
+    old_retrieve = project_run(
+        _run([_intent_step(), {"step_type": "retrieve", "detail": {"count": 5}}],
+             run_id="mix-4")
+    )
+    groups = _group_by_situation([old_ppr_a, old_ppr_b, new_ppr, old_retrieve])
+    assert len(groups) == 1, "四个 run 必须共享同一份默认 situation 才能同组"
+    text = render_observations(groups)
+    assert (
+        "  ppr: used=3 came_back_empty=2 (in 3 of 4 runs) "
+        "anchored=1 (attributable in 1 of 3 runs)" in text
+    )
+    assert "  retrieve: used=1 came_back_empty=0 (in 1 of 4 runs)" in text
+    retrieve_line = next(
+        line for line in text.splitlines() if line.strip().startswith("retrieve:")
+    )
+    assert "anchored=" not in retrieve_line
+
+
 def test_completions_arriving_while_the_worker_is_busy_are_not_lost(monkeypatch):
     """codex #524 R1/R3 P2:单飞占用时**不消费**,阈值计数保留——认领与消费在
     同一临界区,busy 期间攒满的整批由下一次完成补触发,不丢也不重复。"""
@@ -1020,3 +1254,21 @@ def test_a_single_run_conclusion_is_rejected_but_a_real_update_is_not():
     # 降级成 ADD 的 UPDATE(offered 里没有该动作)按 ADD 判,单 run 同样拒
     parsed = parse_distillation_reply({"entries": [update]}, groups, offered=[])
     assert parsed == []
+
+
+def test_a_poisoned_action_contributes_zero_anchored_hits_to_aggregation():
+    """codex #538 R1 P2:被截断 poison 的动作 anchored_hits 必须归零——留着
+    保留前缀的交集,与别的可归因 run 同组聚合时会被计成有效成功。"""
+    truncated_run = _run([
+        _intent_step(),
+        {"step_type": "ppr",
+         "detail": {"count": 2, "result_ids": ["c1", "c2"],
+                    "result_ids_truncated": True}},
+        {"step_type": "synthesis", "summary": "",
+         "detail": {"citations": 1, "anchors": 1,
+                    "anchor_evidence_ids": ["c1"]}},
+    ], run_id="poisoned")
+    observed = project_run(truncated_run)
+    ppr = next(a for a in observed.observation.actions if a.action == "ppr")
+    assert ppr.attributable is False
+    assert ppr.anchored_hits == 0, "poison 动作的保留前缀交集不得计入分子"

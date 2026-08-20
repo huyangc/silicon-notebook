@@ -5,7 +5,10 @@
 隔离是「取数 SQL 里的一条谓词」,这里没有谓词可写,所以保证被挪到了更早一层:
 **能被观测成一行的东西本身就没有自由文本**。
 
-这份文件把那句话变成静态判据。五条,方向各不相同:
+这份文件把那句话变成静态判据。七条,方向各不相同(六、七是 Agentic Memory P4
+T3 新增,为 ``result_ids``/``anchor_evidence_ids`` 这两个新读取面补的一对
+判据——判据二的禁键扫描不认它们:它们是**合法**的新键名,只是必须被关进
+``project_run`` 一个函数里,判据六、七补的正是这道"关得住"的证明):
 
 * **判据一(投影层无文本)**:`RunObservation` 与从它可达的每个类型,每个字段的
   注解必须是 `int` / `bool` / `Literal[...]`(或指向它们的模块级别名)/ 由这些
@@ -24,6 +27,16 @@
 * **判据五(反向守卫:词表够不到检索范围)**:存储动作词表、它渲染给模型的动作
   id、以及采用账目认的那批 id,三张表都不含任何范围类词。经验只影响**怎么查**,
   绝不影响**能读什么**——后者只由用户的勾选决定。
+* **判据六(运行时:观测结果里不含 id)**:拿真实携带 id 形状字符串的 run 跑一遍
+  ``project_run``,序列化整个 ``ObservedRun.observation`` 后,那两个 id 串在
+  任何位置都不出现——证明「两个 int/bool 字段」这个设计没有在哪个分支里把原始
+  id 悄悄塞进了某个字段。
+* **判据七(静态:`result_ids`/`anchor_evidence_ids` 只活在 `project_run` 里)**:
+  这是五条里唯一挡「**移动**」变异的第二处——把交集计算从 ``project_run`` 挪到
+  同一模块里的另一个函数(``validate_situation``、``experience_id``……),语义
+  不变,但会让"id 只是函数局部变量"这句承诺失去唯一站得住脚的理由。判据只扫
+  ``retrieval_experience_projection.py``:这两个键名的读取只应该出现在
+  ``project_run`` 一个函数的子树里。
 
 **这份守卫能挡什么、不能挡什么**(只声称真的挡得住的):
   · 挡得住:给观测类型加自由文本字段;把类掏空来蒙混;在三个模块任一处读危险
@@ -61,6 +74,7 @@ from app.services.retrieval_experience_projection import (
     RETRIEVAL_ACTIONS,
     SITUATION_KEYS,
     experience_id,
+    project_run,
     validate_situation,
 )
 
@@ -264,11 +278,17 @@ def test_the_observation_type_has_no_free_text_field_anywhere_it_can_reach():
 
 
 def test_gutting_the_observation_type_does_not_satisfy_the_rule():
-    """判据一的下限。「每个字段都是封闭的」对空 dataclass 恒真。"""
+    """判据一的下限。「每个字段都是封闭的」对空 dataclass 恒真。
+
+    Agentic Memory P4 (T3):11→13——``ActionObservation`` 新增
+    ``anchored_hits``/``attributable`` 两个字段后可达字段总数从 14 涨到 16,
+    下限保守跟涨到 13(不写死到精确的 16,与本守卫此前"下限低于精确计数"的
+    一贯做法一致)。
+    """
     fields = _reachable_fields(
         "RunObservation", _module_tree(_SCANNED_MODULES["projection"])
     )
-    assert len(fields) >= 11, fields
+    assert len(fields) >= 13, fields
 
 
 def test_the_alias_resolution_actually_resolves_something():
@@ -511,3 +531,141 @@ def test_the_three_action_tables_agree_with_each_other():
     assert set(ADOPTION_ACTIONS.values()) <= set(RETRIEVAL_ACTIONS)
     assert set(EXPERIENCE_POLARITIES) == {"good", "bad"}
     assert len(SITUATION_KEYS) == 8
+
+
+# --------------------------------------------- 判据六:运行时,观测里不含 id
+
+def test_running_project_run_never_leaks_a_result_or_anchor_id_into_the_observation():
+    """判据六。判据一是**静态**的——它读注解,不管值。这条造一个真实携带 id 的
+    run,跑一遍 ``project_run``,再对序列化后的 ``ObservedRun.observation`` 做
+    子串扫描:证明「``anchored_hits``/``attributable`` 两个 int/bool 字段」这
+    个设计真的没有在哪个分支里把原始 id 塞进了某个字段。
+    """
+    from dataclasses import asdict
+
+    anchor_id = "ko-" + "a" * 32
+    result_id = "chunk-" + "b" * 32
+    run = {
+        "run_id": "job-privacy-guard",
+        "mode": "reasoning",
+        "steps": [
+            {"step_type": "intent", "situation": _situation()},
+            {"step_type": "ppr", "count": 3, "result_ids": [result_id, anchor_id]},
+            {
+                "step_type": "synthesis",
+                "count": 2,
+                "anchor_evidence_ids": [anchor_id, result_id],
+            },
+        ],
+    }
+    observed = project_run(run)
+    assert observed is not None
+    # 前提:这条 run 确实产生了非零的 anchored_hits——否则下面的「不含 id」
+    # 断言对一条从没算出过命中的观测毫无区分力。
+    by_action = {a.action: a for a in observed.observation.actions}
+    assert by_action["ppr"].anchored_hits == 2
+    assert by_action["ppr"].attributable is True
+
+    serialized = repr(asdict(observed.observation))
+    assert anchor_id not in serialized, serialized
+    assert result_id not in serialized, serialized
+
+
+# ------------------------------ 判据七:result_ids/anchor_evidence_ids 只活在
+#                                 project_run 一个函数里
+
+#: Agentic Memory P4 (T3) 新增的读取面。合法(判据二的禁键表不含它们——它们
+#: 不是自由文本,是不透明句柄的字段名),但只应该在 ``retrieval_experience_
+#: projection.py`` 的 ``project_run`` 一个函数的子树里出现。⚠ 判据必须与判据
+#: 二同一副骨架——**三个模块一起扫**,而不是只扫 projection.py:把交集计算从
+#: ``project_run`` 挪到 job 模块的 ``_observe``(或 block 模块的任何函数)是
+#: 语义完全不变的移动变异,只扫 projection.py 会对它视而不见——那正是「id 只
+#: 活在 project_run 局部变量」这句承诺唯一站得住脚的理由。
+_ATTRIBUTION_KEYS = {"result_ids", "anchor_evidence_ids"}
+
+
+def _function_node(tree: ast.Module, name: str) -> ast.FunctionDef | None:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    return None
+
+
+def _attribution_hits_outside_project_run(path: Path) -> list[tuple[str, str, int]]:
+    """``result_ids``/``anchor_evidence_ids`` 出现在 ``path`` 这个文件里,
+    ``project_run`` 子树**之外**的每一处。文件里如果根本没有 ``project_run``
+    函数(job.py、block.py,以及任何临时测试文件),"子树之外"就是"整个文件"
+    ——这两个键名在那样的文件里出现,一次都不许。
+    """
+    tree = _module_tree(path)
+    scoped = _function_node(tree, "project_run")
+    scoped_ids = {id(node) for node in ast.walk(scoped)} if scoped is not None else set()
+    docstrings = _docstring_nodes(tree)
+    violations: list[tuple[str, str, int]] = []
+    for node in ast.walk(tree):
+        if id(node) in scoped_ids:
+            continue
+        if isinstance(node, ast.Name) and node.id in _ATTRIBUTION_KEYS:
+            violations.append(("变量", node.id, node.lineno))
+        elif isinstance(node, ast.Attribute) and node.attr in _ATTRIBUTION_KEYS:
+            violations.append(("属性", node.attr, node.lineno))
+        elif isinstance(node, ast.arg) and node.arg in _ATTRIBUTION_KEYS:
+            violations.append(("形参", node.arg, node.lineno))
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and node.value in _ATTRIBUTION_KEYS
+        ):
+            violations.append(("字面量", node.value, node.lineno))
+    return violations
+
+
+@pytest.mark.parametrize("module_name", sorted(_SCANNED_MODULES))
+def test_result_and_anchor_ids_are_read_only_inside_project_run(module_name):
+    """判据七,**本守卫的核心**,参数化到三个模块——但真正的性质与判据二一样是
+    「三个一起」:把交集计算从 ``projection.py`` 的 ``project_run`` 挪到
+    ``job.py`` 的 ``_observe``,语义完全不变,只扫 projection.py 的判据会全绿。
+    在 projection.py 内部,这两个键只许出现在 ``project_run`` 子树里——挪到
+    ``validate_situation``、``experience_id``、``situation_similarity`` 或
+    任何其他函数同样违规。在 job.py / block.py 里,出现一次就是违规,因为
+    ``project_run`` 在那两个文件里根本不存在。
+    """
+    violations = _attribution_hits_outside_project_run(_SCANNED_MODULES[module_name])
+    assert not violations, (
+        f"{module_name} 模块在 project_run 之外出现了 {violations}。"
+        "result_ids/anchor_evidence_ids 只应该在 projection.py 的 project_run "
+        "内部被读取——出现在别处(包括挪到另一个模块)意味着「归因用的原始 "
+        "id」有了第二条活路，而这个设计的唯一承诺就是它只活在一个函数的局部"
+        "变量里。"
+    )
+
+
+def test_the_attribution_scan_can_actually_see_a_violation_outside_project_run():
+    """空转保护:扫描器必须真的认得出两种违规——同模块内挪到别的函数,以及
+    挪到一个根本没有 ``project_run`` 的模块。"""
+    import tempfile
+
+    same_module_violation = (
+        '"""docstring 提到 result_ids 不该报警。"""\n'
+        "def project_run(run):\n"
+        "    return run.get(\"result_ids\")\n"
+        "def validate_situation(row):\n"
+        "    a = row.get(\"anchor_evidence_ids\")\n"
+        "    b = row[\"result_ids\"]\n"
+        "    return a, b\n"
+    )
+    other_module_violation = (
+        "def _observe(row):\n"
+        "    return row.get(\"result_ids\"), row.get(\"anchor_evidence_ids\")\n"
+    )
+    for source in (same_module_violation, other_module_violation):
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+            handle.write(source)
+            path = Path(handle.name)
+        try:
+            violations = _attribution_hits_outside_project_run(path)
+        finally:
+            path.unlink()
+        names = {name for _kind, name, _line in violations}
+        assert names == {"anchor_evidence_ids", "result_ids"}, (source, violations)

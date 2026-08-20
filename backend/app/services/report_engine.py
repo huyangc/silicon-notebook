@@ -1576,6 +1576,13 @@ class ReportEngine:
             # ``entity_count``/``topic_count``/``has_constraints``/
             # ``has_exclusions`` 四个键仍诚实地落 ``unknown``/``False``——节问题
             # 没有实体/主题/约束/排除项那份结构,编一份出来才是漏接。
+            #
+            # Agentic Memory P4(T5/T6)零改动地跟着接入:``consult_memory_active``
+            # 与步级零命中提示都只读 ``limits.effort``/``retrieval_experiences``,
+            # 上面这份 ``limits`` 与这一行本来就传给了每一节深挖,所以 depth
+            # 映射到 deep 及以上档时,这两个 reflect 侧特性在报告的逐节深挖里
+            # 自动生效——不需要本类 import 任何 P4 内部件(镜像大纲便签 PR-5
+            # 「档位表贯通、控件复用不变」的先例)。
             retrieval_experiences=deps.retrieval_experiences,
             # Agentic Memory P3(B-Profile,T8)刻意**不接**:``identity_store``
             # 缺省 None ⇒ ``search_profile_wiring_active`` 恒假 ⇒ 逐节深挖的规划

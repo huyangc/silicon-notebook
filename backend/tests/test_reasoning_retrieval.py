@@ -914,6 +914,28 @@ def test_run_dedups_expand_and_respects_step_cap(rrepo):
     assert res.trace[-1].step_type == "answer"     # 仍正常收尾
 
 
+def test_expand_of_already_collected_neighbors_attributes_nothing(rrepo):
+    """codex #538 R3 P2:展开得到的邻居若早已在 collected 里(此处被初检索
+    收过),这次 expand 什么都没贡献——found 照报原始邻居数,但 result_ids
+    必须为空、零命中计数按空手轮累加。变异回「按原始 neigh 计」即红。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "expand_graph",
+                   "expand": {"object_id": claim.object_id}},
+                  {"next_action": "answer", "sufficient": True}]))
+    res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+    expand_step = next(t for t in res.trace if t.step_type == "expand")
+    assert expand_step.detail["found"] >= 1, "前提:确实查到了邻居"
+    assert expand_step.detail["result_ids"] == [], (
+        "邻居已被初检索收集,这次 expand 零贡献,不得计入归因"
+    )
+
+
 def test_run_add_subquery_without_payload_continues(rrepo):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
@@ -2670,7 +2692,8 @@ def test_run_exact_lookup_seed_pass_takes_the_whole_named_section(rrepo):
         nb.id, "set_db 命令是怎样的", "")
 
     step = next(t for t in res.trace if t.step_type == "exact_lookup")
-    assert step.detail == {"terms": ["set_db"], "found": 2, "phase": "seed"}
+    assert step.detail == {"terms": ["set_db"], "found": 2, "phase": "seed",
+                           "result_ids": ["ck-main", "ck-args"]}
     assert step.summary == "按名称精确查找:新增 2 段原文"
     # 主描述与参数表都在——分块把它们切开、普通检索只留其一,正是本通道要治的。
     assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
@@ -2764,7 +2787,8 @@ def test_run_exact_lookup_action_pulls_the_section_the_model_named(rrepo):
 
     step = next(t for t in res.trace if t.step_type == "exact_lookup")
     assert step.detail == {"term": "set_db", "terms": ["set_db"],
-                           "found": 2, "phase": "reflect"}
+                           "found": 2, "phase": "reflect",
+                           "result_ids": ["ck-main", "ck-args"]}
     assert step.summary == "按名称精确查找「set_db」:新增 2 段原文"
     assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
     assert calls == ['"set_db"']
@@ -2967,7 +2991,7 @@ def test_allow_exact_lookup_policy_flag_disables_seed_and_action(rrepo):
     seed_step = next(t for t in res2.trace if t.step_type == "exact_lookup")
     assert seed_step.detail == {
         "terms": ["table_title", "known_cells", "content_md"],
-        "found": 0, "phase": "seed",
+        "found": 0, "phase": "seed", "result_ids": [],
     }
 
 
@@ -3039,7 +3063,8 @@ def test_run_ppr_seed_precedes_exact_seed_and_shares_chunk_dedup(rrepo):
     assert ppr_idx < exact_idx                                # PPR seed 排在精确查找 seed 之前
 
     ppr_step = res.trace[ppr_idx]
-    assert ppr_step.detail == {"found": 2, "phase": "seed"}   # PPR 先到,两段都算它的新增
+    assert ppr_step.detail == {"found": 2, "phase": "seed",   # PPR 先到,两段都算它的新增
+                               "result_ids": ["ck-main", "ppr-only"]}
 
     exact_step = res.trace[exact_idx]
     # 精确查找命中 ck-main + ck-args,但 ck-main 已被 PPR 领走 → 只剩 ck-args 算新增。

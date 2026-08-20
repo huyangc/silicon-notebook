@@ -112,6 +112,58 @@ class Citation(BaseModel):
     )
 
 
+# Agentic Memory P4 (T1): the hard cap on how many result-object ids a single
+# "result_ids" trace-step detail may carry (retrieve/ppr/exact_lookup/expand
+# steps — see the write sites in reasoning_retrieval.py). Four-point
+# disclosure argument for why this is allowed onto ``TraceStep.detail`` at
+# all:
+#   ① these are opaque handles (a chunk_id / object_id), not content — the
+#     step's own ``summary`` already tells a human what happened in plainer
+#     language (a name, a hit count) than a bare id ever could;
+#   ② the only surface that could otherwise leak these to an anonymous
+#     visitor — report/conversation public sharing — structurally excludes
+#     ``reasoning_trace`` from its projection entirely (public report/
+#     conversation views never carry a trace field), so this never reaches
+#     an unauthenticated reader;
+#   ③ trace detail already carries bare ids at several existing emit sites
+#     (``expand``'s ``object_id``, ``follow_chain``'s skip detail, the
+#     outline step's bound-evidence ids) — this is the same disclosure
+#     shape the trace already has, not a new one;
+#   ④ the constants live here, beside ``TraceStep`` itself, rather than in
+#     ``app.repositories.ports`` (where the read-side projection that
+#     re-applies this cap lives) because ``ask_service`` — the module that
+#     writes these details on the hot request path — does not import
+#     ``app.repositories.ports`` at runtime, and this module is already its
+#     dependency for ``TraceStep``.
+# Precise values are documented in ``docs/product-and-api*.md``, not here.
+TRACE_RESULT_IDS_MAX = 20
+
+# Agentic Memory P4 (T1): the hard cap on ``anchor_evidence_ids`` in the
+# final ``synthesis``/``answer`` trace step's detail — the answer's actually
+# bound [k] anchors, by ``AnswerAnchor.object_id``. Set to 96, the largest
+# ``ranked_final_cap`` across all retrieval-effort tiers (the exhaustive
+# tier's), so a genuinely complete RANKED answer's anchor list is never
+# truncated by this cap in practice under the existing per-tier retrieval
+# budget — for that shape of run it is a protocol ceiling, not a real-world
+# limit. Same four-point disclosure argument as ``TRACE_RESULT_IDS_MAX``
+# above.
+#
+# ⚠ Registered exception (修复轮 96 上界披露): a COLLECTION-ENUMERATION run
+# is not bound by ``ranked_final_cap`` at all — every row that enters the
+# synthesis preview gets an isolated ``k5001+`` anchor id (see the citation
+# contract in ``docs/product-and-api*.md``), and a large enumerated list can
+# genuinely bind more than 96 of them. When that happens this cap DOES bind,
+# the write side sets the sparse ``anchor_evidence_ids_truncated`` marker, and
+# the read side (``retrieval_experience_projection.py``'s pass 1) treats a
+# truncated anchor list as poison for the WHOLE run's step→anchor
+# attribution, not just the excess tail. That is the deliberately SAFE
+# direction: losing attribution signal for an oversized enumeration run costs
+# nothing but a slightly thinner distillation sample, where silently
+# accepting a truncated anchor set would teach the library "no hit" for
+# actions whose real result may have been in the cut-off tail.
+TRACE_ANCHOR_EVIDENCE_IDS_MAX = 96
+
+
 class TraceStep(BaseModel):
     """推理模式 agent 的一步轨迹(供前端折叠展示)。"""
     step_type: str            # intent | plan | retrieve | enumerate | reflect | expand | follow_chain | fallback | answer | skip

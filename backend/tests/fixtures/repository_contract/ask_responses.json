@@ -469,7 +469,8 @@
           },
           {
             "detail": {
-              "count": 0
+              "count": 0,
+              "result_ids": []
             },
             "duration_ms": 8,
             "step_type": "retrieve",
@@ -511,6 +512,7 @@
           },
           {
             "detail": {
+              "anchor_evidence_ids": [],
               "anchors": 0,
               "citations": 0,
               "enumerated_collections": 0,
@@ -609,7 +611,8 @@
           },
           {
             "detail": {
-              "count": 0
+              "count": 0,
+              "result_ids": []
             },
             "duration_ms": 8,
             "step_type": "retrieve",
@@ -651,6 +654,7 @@
           },
           {
             "detail": {
+              "anchor_evidence_ids": [],
               "anchors": 0,
               "citations": 0,
               "enumerated_collections": 0,
@@ -777,7 +781,10 @@
           },
           {
             "detail": {
-              "count": 1
+              "count": 1,
+              "result_ids": [
+                "<ko-id-1>"
+              ]
             },
             "duration_ms": 8,
             "step_type": "retrieve",
@@ -809,6 +816,9 @@
           },
           {
             "detail": {
+              "anchor_evidence_ids": [
+                "<ko-id-1>"
+              ],
               "anchors": 1,
               "citations": 1,
               "enumerated_collections": 0,
@@ -963,7 +973,10 @@
           },
           {
             "detail": {
-              "count": 1
+              "count": 1,
+              "result_ids": [
+                "<ko-id-1>"
+              ]
             },
             "duration_ms": 8,
             "step_type": "retrieve",
@@ -995,6 +1008,9 @@
           },
           {
             "detail": {
+              "anchor_evidence_ids": [
+                "<ko-id-1>"
+              ],
               "anchors": 1,
               "citations": 1,
               "enumerated_collections": 0,

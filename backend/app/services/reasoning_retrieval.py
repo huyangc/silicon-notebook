@@ -15,21 +15,23 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
+from typing import (
+    Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, TYPE_CHECKING,
+)
 
 from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
     ask_retrieval_limits,
 )
 from app.core.config import DEFAULT_REASONING_PER_QUERY_LIMIT, Settings
-from app.models.ask import TraceStep
+from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
     exact_probe_terms,
 )
 from app.repositories.ports import RETRIEVAL_EXPERIENCE_MAX_ENTRIES
 from app.services.agent_profile_block import (
-    render_profile_block, rendered_row_count,
+    clip_block_value, render_profile_block, rendered_row_count,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE
@@ -41,8 +43,10 @@ from app.services.collection_enumeration import (
 )
 from app.services.prompts import reflect_prompt, reflect_schema_hint
 from app.services.retrieval_experience_block import (
-    adopted_entry_ids, render_experience_block,
-    rendered_row_count as rendered_experience_count, select_experiences,
+    CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
+    render_consult_block, render_experience_block,
+    rendered_row_count as rendered_experience_count, select_consultable,
+    select_experiences, worst_experience_for,
 )
 from app.services.retrieval_experience_projection import current_situation
 from app.services.retrieval import (
@@ -1168,10 +1172,186 @@ def outline_wiring_active(settings, limits) -> bool:
     )
 
 
+# ------------------------------------------------- consult_memory (Agentic
+#                                                    Memory P4, T5)
+#
+# The zero-parameter reflect ACTION that lets the model pull from the SAME
+# deployment-global retrieval-experience library the passive block above
+# injects every round — see ``retrieval_experience_block.select_consultable``
+# for what makes this a different SELECTION rather than a second copy of
+# ``select_experiences``.
+CONSULT_MEMORY_ACTION = "consult_memory"
+
+#: deep 及以上档才提供这个动作。与大纲便签的档位闸同一条道理(低档不该为一次
+#: 额外的模型驱动反思轮付成本)但阈值不同:大纲只在 exhaustive,因为它触发按节
+#: 合成——真正花钱的是那一步,而 consult_memory 自己就是一次反思轮内的零参数
+#: 选择,成本上限是「多花一轮反思」,不是「多调一次按节合成」,所以从 deep 起
+#: 就值得。与报告 depth→档位映射共用同一张表名字形状(见 report_engine.py 的
+#: `_SUFFICIENCY_LLM_EFFORTS`),数值口径独立维护。
+_CONSULT_MEMORY_EFFORTS = frozenset({"deep", "thorough", "exhaustive"})
+
+
+def consult_memory_active(settings, limits, experience_store) -> bool:
+    """本 run 是否提供 consult_memory 这个 reflect 动作。
+
+    三个条件缺一不可,且**总闸并入** ``experience_wiring_active``——这是 P4
+    开工裁决①对设计文档字面的收窄,登记为刻意偏离:``RETRIEVAL_EXPERIENCE_
+    INJECT_ENABLED`` 关闭时经验库对整个部署都读不到东西,若只按「kill switch +
+    档位」放行,模型会看到一个能调但永远拉不到任何经验的动作——那笔反思轮
+    预算纯属浪费,而 kill switch 本身也无法单独表达「档位够但经验库关着」这
+    第三种状态。因此这里**不是**独立策略位的形态(参见 ``allow_ppr`` 那类由
+    调用方按 profile 单独开关的位——``allow_consult_memory`` 仍然存在,但只
+    起「按调用方场景关闭」的防御性作用,不是本判据的一部分)。
+
+    与 ``outline_wiring_active``/``enumeration_wiring_active`` 同款单点判定:
+    动作说明、schema 分支、``reflect()`` 的 ``allowed_actions`` 三处共用这一个
+    函数算出的布尔值,任何一处与其余不同步都会让模型看到一个调不动或没被
+    告知的动作。
+
+    ``experience_store is None`` 走 ``experience_wiring_active`` 自己「调用方
+    没接线」的既有拼写,不在这里重复判断。
+    """
+    return bool(
+        getattr(settings, "reasoning_consult_memory_enabled", True)
+        and limits is not None
+        and getattr(limits, "effort", "") in _CONSULT_MEMORY_EFFORTS
+        and experience_wiring_active(settings, experience_store)
+    )
+
+
+#: 四个可实测「本轮新增证据数」的动作分支(存储词表拼写,见
+#: ``retrieval_experience_projection.RETRIEVAL_ACTIONS``),T6 步级零命中提示
+#: 只track 这四个——它们各自已经在 dispatch 里算出一个确定性的「新增数」
+#: (ppr/exact_lookup 的 ``new``、expand 的 ``neigh``、follow_chain 的
+#: ``new_chains``),复用它判零命中不需要新读。``retrieve``(add_subquery)
+#: 刻意不在其中:它的「新增为 0」在措辞上已经是「换个问法」而非「换个通道」,
+#: 与本提示要解决的「同一通道反复空转」是两回事;``enumerate``/
+#: ``expand_community``/``outline`` 同样不track,前两者已有自己的账目回喂
+#: (集合枚举的续跑账目、`community_focals_done`），后者不产证据。
+_ZERO_HIT_TRACKED_ACTIONS: Tuple[str, ...] = ("ppr", "exact_lookup", "expand", "follow_chain")
+
+#: 同一个动作连续(累计)多少次零新增才够格被提示一次。与
+#: ``_ZERO_HIT_NUDGE_MAX_PER_RUN`` 都是确定性阈值,不是学出来的——P4 开工
+#: 裁决③明确「先攒观测数据,不做 state-signature 全匹配」。
+_ZERO_HIT_NUDGE_THRESHOLD = 2
+#: 一个 run 最多主动提示几次(与动作种类无关的总闸,防止四个动作同时触发时
+#: 一轮账目被四条提示同时撑长)。
+_ZERO_HIT_NUDGE_MAX_PER_RUN = 2
+
+
+def _zero_hit_nudge_ready(
+    zero_hit_by_action: Mapping[str, int], nudged_actions: set,
+) -> bool:
+    """纯内存判断:``_ZERO_HIT_TRACKED_ACTIONS`` 里是否至少有一个动作已达阈值
+    且还没被提示过。
+
+    修复轮 spec⑤/Q-P2-1:调用方在这条判断之前会先读一次经验库快照
+    (``_cached_experiences``)——那是一次 O(库大小) 的内存拷贝(有进程内 TTL
+    memo,但 memo 过期后仍是真读),而 reflect 每一轮都会走到这段代码。多数
+    轮次没有任何动作命中阈值(初期几轮、或阈值已经用完两次配额),这时候连
+    "读一次快照" 都不该发生——判断本身只需要两个已经在手里的 dict/set,
+    是零成本的纯内存操作,理应排在读库之前而不是之后。
+    """
+    return any(
+        action not in nudged_actions
+        and zero_hit_by_action.get(action, 0) >= _ZERO_HIT_NUDGE_THRESHOLD
+        for action in _ZERO_HIT_TRACKED_ACTIONS
+    )
+
+
+def _zero_hit_nudge_note(
+    zero_hit_by_action: Mapping[str, int],
+    nudged_actions: set,
+    entries: Sequence[Mapping[str, object]],
+    situation: Mapping[str, object],
+) -> Optional[Tuple[str, str]]:
+    """挑出**至多一个**够格提示的动作,连带它对应的经验库「坏」条目理由。
+
+    纯函数:不读 self、不做 I/O——调用方负责传入已经算好的 run 态(计数字典、
+    已提示过的动作集合)和已经读过一次的经验库快照。按
+    ``_ZERO_HIT_TRACKED_ACTIONS`` 的固定顺序找第一个够格的动作,找不到匹配的
+    「坏」条目就跳过、继续找下一个——不够格的动作没有理由可讲,提示一句空话
+    比不提示更糟。返回 ``(action, note)``,``action`` 是存储词表拼写(调用方用
+    它更新 ``nudged_actions``),``note`` 是可以直接拼进 ``summary`` 的中文提示,
+    rationale 原样嵌入(P4 开工裁决⑤)。
+    """
+    for action in _ZERO_HIT_TRACKED_ACTIONS:
+        if action in nudged_actions:
+            continue
+        if zero_hit_by_action.get(action, 0) < _ZERO_HIT_NUDGE_THRESHOLD:
+            continue
+        entry = worst_experience_for(entries, situation, action)
+        if entry is None:
+            continue
+        action_id = action_id_for(action)
+        rationale = clip_rationale(entry.get("rationale"))
+        # 修复轮 spec③附带修复:rationale 是模型撰写的自由文本,可能是英文句子
+        # 并自带半角句号结尾——把它拼进两个中文句子中间(...经验:{rationale}。
+        # 可考虑...)会在英文句号后再贴一个中文句号,读起来像标点重复。用中文
+        # 引号把 rationale 整体框起来,不依赖它内部用什么语言收尾。
+        note = (
+            f"（提示:「{action_id}」这类动作在当前场景已连续 "
+            f"{zero_hit_by_action[action]} 次未拿到新证据;以往打法经验:"
+            f"「{rationale}」。可考虑改用其他动作。）"
+        )
+        return action, note
+    return None
+
+
+def _undelivered_retrieval_note(
+    blocks: Sequence[Mapping[str, object]], profile_block: str, owner_id: str,
+) -> str:
+    """本人自己的检索心得覆盖行,若共享理解块的整块字符硬顶把它截没了。
+
+    consult_memory 的「本人覆盖层」半（P4 开工裁决②）:``profile_block``
+    每轮都会自动注入,但它是**整串截断**(见 ``render_profile_block``),挤在
+    一份拥挤的理解块末尾的一行可以被整体切掉而模型从未看到。这里复用
+    run() 已经读过一次的 ``blocks``(零新增查询),只找这一个成员自己的
+    ``retrieval_notes`` 覆盖行(``owner_id`` 非空匹配,不是共享底座的 ''
+    行),再检查它是否真的出现在已渲染的 ``profile_block`` 里——出现了就说明
+    模型本来就看得到,不必再讲一遍。
+    """
+    if not owner_id:
+        return ""
+    for block in blocks or ():
+        if (
+            str(block.get("label") or "") == "retrieval_notes"
+            and str(block.get("owner_id") or "") == owner_id
+        ):
+            value = clip_block_value(block.get("value"))
+            if value and value not in profile_block:
+                return value
+            return ""
+    return ""
+
+
 def _norm_query(q: str) -> str:
     """子查询防重的归一化键:压空白 + casefold。保守精确匹配、不做语义归一——
     宁可放过真改写的近似查询(由回喂账目提示模型约束),不误杀新角度。"""
     return " ".join(str(q).split()).casefold()
+
+
+def _capped_result_ids(ids: List[str]) -> Tuple[List[str], bool]:
+    """Bound a raw result-object-id list to ``TRACE_RESULT_IDS_MAX`` and report
+    whether that actually cut anything off.
+
+    Agentic Memory P4 (修复轮 spec②): every ``result_ids`` write site truncates
+    to the same cap, but until now none of them disclosed WHEN the cap
+    actually bound — a truncated list is indistinguishable from a genuinely
+    short one, so the read side (``retrieval_experience_projection.py`` pass
+    2) could not tell "this action's real result set might include an anchor
+    id that got cut off the tail" apart from "this action really only
+    produced N ids". The sparse ``result_ids_truncated`` marker the caller
+    attaches when this returns ``True`` mirrors the existing
+    ``anchor_evidence_ids_truncated`` / ``neighbor_truncated`` convention
+    (only appears on the day the cap actually binds — "detail 逐键不变" frozen
+    baseline), and the read side treats it as poison for that action's
+    attribution within the run (see ``project_run``'s pass 2), the same way a
+    truncated anchor list poisons the whole run in pass 1.
+    """
+    if len(ids) > TRACE_RESULT_IDS_MAX:
+        return ids[:TRACE_RESULT_IDS_MAX], True
+    return list(ids), False
 
 
 # 已确认检索方向在轨迹/回喂里的展示上界。方向种子是「方向本身 + 换行 + 整份已
@@ -1571,6 +1751,15 @@ class ReasoningRetriever:
         # knowhow completion sets this False for the same reason it turns PPR
         # off — see the call site for why this specific channel is unsafe there.
         self.allow_exact_lookup = True
+        # Agentic Memory P4 (T5). Mirrors allow_ppr/allow_exact_lookup in shape
+        # only — the effort-tier + injection-switch gate in
+        # ``consult_memory_active`` already keeps this action off for every
+        # deployment/profile that has not opted into both, so True here is
+        # inert until that gate opens. knowhow completion still sets this
+        # False explicitly (defense in depth: it never passes ``limits``,
+        # which alone keeps the action unreachable, but a future call site
+        # that starts passing one should not silently inherit this channel).
+        self.allow_consult_memory = True
         # Authoring flows whose synthesis only accepts server-issued evidence
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
@@ -1792,11 +1981,16 @@ class ReasoningRetriever:
                for s in ex.sub_queries]
         return out or fallback
 
-    def reflect(self, question, candidates_summary, outline: bool = False):
+    def reflect(self, question, candidates_summary, outline: bool = False,
+                consult_memory: bool = False):
         """``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
         ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
         prompt/schema 与接入前逐字相同。档位是 run() 的参数而不是实例状态,所以
-        这把闸只能从调用处传进来——与枚举那把由实例状态算出的闸并列、互不影响。"""
+        这把闸只能从调用处传进来——与枚举那把由实例状态算出的闸并列、互不影响。
+
+        ``consult_memory`` = 本 run 提供 consult_memory 动作(deep 及以上档 且
+        经验库注入闸开着,见 ``consult_memory_active``)。同款默认 False、同款
+        由调用处传入。"""
         raise_if_cancelled(self.cancel_event)
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
         client = self.model_clients.chat("reasoning_agent")
@@ -1815,7 +2009,7 @@ class ReasoningRetriever:
                 "content": reflect_prompt(
                     question, candidates_summary,
                     element_kinds=element_kinds, object_types=object_types,
-                    outline=outline,
+                    outline=outline, consult_memory=consult_memory,
                 ),
             }]
             if self.untrusted_evidence:
@@ -1825,7 +2019,9 @@ class ReasoningRetriever:
                 })
             raw = client.chat_json(
                 messages,
-                reflect_schema_hint(element_kinds, object_types, outline),
+                reflect_schema_hint(
+                    element_kinds, object_types, outline, consult_memory
+                ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event)
@@ -1846,7 +2042,8 @@ class ReasoningRetriever:
             ) + (
                 (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION)
                 if enumeration else ()
-            ) + ((OUTLINE_ACTION,) if outline else ())
+            ) + ((OUTLINE_ACTION,) if outline else ()
+            ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ())
             if action not in allowed_actions:
                 if self.fail_closed:
                     raise ValueError("reasoning model returned an invalid action")
@@ -2163,6 +2360,12 @@ class ReasoningRetriever:
         # 把空转上限从 3 轮抬到 19 轮。正当流程里绑定轮本来就伴随检索动作(那些动作
         # 自己会重置 stale),所以中性对真实用法零影响,只掐掉纯整理的空转。
         outline_active = outline_wiring_active(self.settings, limits)
+        # Agentic Memory P4 (T5): 是否提供 consult_memory 动作,与 outline_active
+        # 同款单点判定、同款 run 级不变量(判据只吃 settings/limits/store,循环内
+        # 不会变)。
+        consult_memory_flag = consult_memory_active(
+            self.settings, limits, self.retrieval_experiences)
+        consult_delivered_this_turn = False
         outline: List[OutlineSection] = []
         outline_updates = 0
         # 大纲采用引导已经发出过几轮(仅内存,run 级)。见 `_outline_nudge_note`:
@@ -2194,6 +2397,27 @@ class ReasoningRetriever:
         # 已算出、等着下一轮便签展示的候选。展示后即摘除;run 结束时仍在队里的
         # (终态轮 apply 算出来的那批)如实丢弃——提示服务于**继续检索**的轮次。
         kg_gap_pending: List = []
+
+        # Agentic Memory P4 (T5): consult_memory 动作的 run 级预算与账目。
+        # ``consult_delivered_ids`` 与「本轮已注入的被动打法块」共用去重口径:
+        # 一条经验已经在被动块或前一次 consult_memory 调用里出现过,再送一次
+        # 只是同一句话的重复,不是新信息。``consult_rows_accum``/
+        # ``consult_overlay_note`` 是「本 run 至今累计选中的」,每次调用都重新
+        # 整体渲染(而不是各自再开一份 600 字符块),这样两次调用的合计仍受同
+        # 一个 CONSULT_MEMORY_BLOCK_MAX_CHARS 约束(设计说明见 render_consult_
+        # block 的 docstring)。
+        consult_used = 0
+        consult_delivered_ids: set = set()
+        consult_rows_accum: List = []
+        consult_overlay_note = ""
+        consult_block_text = ""
+
+        # Agentic Memory P4 (T6): 步级零命中提示的 run 级账目。四个可实测「本轮
+        # 新增数」的动作分支各自计数(见 _ZERO_HIT_TRACKED_ACTIONS 的说明),
+        # ``nudged_actions`` 保证同一个动作一个 run 只提醒一次。
+        zero_hit_by_action: Dict[str, int] = {}
+        nudged_actions: set = set()
+        nudges_used = 0
 
         # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
         # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
@@ -2252,11 +2476,15 @@ class ReasoningRetriever:
             # 扫描的耗时账目,而这里是一次 ≤10 行的主键前缀点查,亚毫秒。每个还没
             # 整理过的库(常态)每一轮都多一条「无」步是纯噪声。
             profile_block = ""
+            # Agentic Memory P4 (T5): 原始行留存,供 consult_memory 的「本人覆盖层」
+            # 半复用(见 _undelivered_retrieval_note)——零新增查询,关闭态/读取
+            # 失败都保持空列表,consult_memory 那半自然查不到任何东西。
+            profile_raw_blocks: List = []
             if profile_wiring_active(self.settings, self.agent_profile):
                 try:
-                    blocks = self.agent_profile.read_blocks(
+                    profile_raw_blocks = self.agent_profile.read_blocks(
                         notebook_id, self.profile_owner_id)
-                    profile_block = render_profile_block(blocks)
+                    profile_block = render_profile_block(profile_raw_blocks)
                     if profile_block:
                         record(TraceStep(
                             step_type="profile",
@@ -2272,6 +2500,7 @@ class ReasoningRetriever:
                     raise
                 except Exception:  # noqa: BLE001 — 见上:理解是背景,不是必需品
                     profile_block = ""
+                    profile_raw_blocks = []
             # 部署级全局的「检索打法」(Agentic Memory P2 §6.1)。紧挨着上面那块
             # 读:两者是同一类东西(规划背景,不是证据),形态也刻意做成同一套
             # ——表头 + 一句框定语 + `- ` 行 + 一个整块硬顶 + 按**送达**行数记步。
@@ -2472,9 +2701,26 @@ class ReasoningRetriever:
                             if h.object_id not in collected:
                                 collected[h.object_id] = h
                                 rec.new += 1
+            # Agentic Memory P4 (T1): "result_ids" is the raw material for
+            # step→anchor attribution (P2 registered this as a later phase —
+            # see RunObservation's docstring). The rule is HARD and applies to
+            # every write site below that reaches this comment's twin: a step
+            # that actually dispatched I/O writes "result_ids" unconditionally
+            # (an empty list on a genuine zero-hit result IS the signal — it
+            # is what lets the read side tell "old trace, field absent" apart
+            # from "ran, found nothing"), while a "skip" branch never writes
+            # the key at all. IDs are bounded to TRACE_RESULT_IDS_MAX — see
+            # that constant's docstring in app.models.ask for the disclosure
+            # argument. Cost is zero: every id list truncated here already
+            # sits in a local variable this line was going to read anyway.
+            _result_ids, _result_ids_truncated = _capped_result_ids(
+                list(collected.keys()))
+            _initial_detail = {"count": len(collected), "result_ids": _result_ids}
+            if _result_ids_truncated:
+                _initial_detail["result_ids_truncated"] = True
             record(TraceStep(step_type="retrieve",
                              summary=f"初检索得到 {len(collected)} 个候选节点",
-                             detail={"count": len(collected)}))
+                             detail=_initial_detail))
 
             # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
             # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
@@ -2487,9 +2733,15 @@ class ReasoningRetriever:
                 for c in seeded:
                     seen_chunks.add(c.chunk_id)
                 chunks.extend(seeded)
+                _result_ids, _result_ids_truncated = _capped_result_ids(
+                    [c.chunk_id for c in seeded])
+                _ppr_seed_detail = {"found": len(seeded), "phase": "seed",
+                                    "result_ids": _result_ids}
+                if _result_ids_truncated:
+                    _ppr_seed_detail["result_ids_truncated"] = True
                 record(TraceStep(step_type="ppr",
                                  summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
-                                 detail={"found": len(seeded), "phase": "seed"}))
+                                 detail=_ppr_seed_detail))
 
             # 精确查找 seed pass(确定性兜底,镜像上面的 PPR seed pass):权威问题里
             # 点名了完整命令/接口名时无条件先按名称定位它所在的小节并整节取齐,不赌
@@ -2520,11 +2772,16 @@ class ReasoningRetriever:
                 exact_terms_done.update(_norm_query(t) for t in seed_terms)
                 exact_lookup_log.append(
                     _ExactLookupAttempt(terms=list(seed_terms), new=len(found)))
+                _result_ids, _result_ids_truncated = _capped_result_ids(
+                    [c.chunk_id for c in found])
+                _exact_seed_detail = {"terms": list(seed_terms), "found": len(found),
+                                      "phase": "seed", "result_ids": _result_ids}
+                if _result_ids_truncated:
+                    _exact_seed_detail["result_ids_truncated"] = True
                 record(TraceStep(
                     step_type="exact_lookup",
                     summary=f"按名称精确查找:新增 {len(found)} 段原文",
-                    detail={"terms": list(seed_terms), "found": len(found),
-                            "phase": "seed"}))
+                    detail=_exact_seed_detail))
 
             # Do not let reflect see a completely empty evidence state and
             # prematurely declare it sufficient.  This runs after every
@@ -2606,10 +2863,16 @@ class ReasoningRetriever:
                 # 单条失败语义(fail-open;fail_closed 下照抛;AskCancelled 始终上抛)
                 # 都与首轮逐字一致 —— 这些种子本就是首轮装不下的溢出,不是模型动作。
                 added = 0
+                # Agentic Memory P4(修复轮 spec①):这条补种路径此前是 8 个
+                # result_ids 写点里唯一漏掉的一个——它同样发起真实 I/O(与
+                # add_subquery 分支同型),不写 result_ids 会让「已确认方向」这条
+                # 归因链单独在起点断掉,即便命中了答案锚点也读不出来。
+                new_ids: List[str] = []
                 for h in _run_search(SubQuery(query=query)):
                     if h.object_id not in collected:
                         collected[h.object_id] = h
                         added += 1
+                        new_ids.append(h.object_id)
                 # 账目与 add_subquery 分支同型:进 attempted(供 reflect 回喂与防重)、
                 # 进 used_queries(它是"方面数",决定配额轮转与最终证据预算)。
                 # label 恒写(取自注册表的唯一简称):补种只处理 pending_intent_queries,
@@ -2623,11 +2886,16 @@ class ReasoningRetriever:
                 # 完整原文是「方向+已确认问题契约」的复合串,原样进 NDJSON 推给浏览器
                 # 并持久化没有意义,还会把契约全文重复吐给前端。执行仍用 query 原文
                 # (上面的 _run_search 调用),detail 只影响展示。
+                _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
+                _coverage_detail = {"query": label_of[query], "new": added,
+                                    "source": "confirmed_intent",
+                                    "result_ids": _result_ids}
+                if _result_ids_truncated:
+                    _coverage_detail["result_ids_truncated"] = True
                 record(TraceStep(
                     step_type="retrieve",
                     summary=f"补充已确认方向:{label_of[query]}",
-                    detail={"query": label_of[query], "new": added,
-                            "source": "confirmed_intent"}))
+                    detail=_coverage_detail))
             # 披露不在这里落笔:预算耗尽只代表"补种这一步没跑完",不代表
             # run 最终结果——reflect 循环随后可能用 add_subquery 把
             # uncovered_intent_queries 里的方向补上(见下方 add_subquery 分支的
@@ -2957,6 +3225,42 @@ class ReasoningRetriever:
                         + (f" 等 {len(still)} 个"
                            if len(still) > _INTENT_PENDING_DISCLOSE else "")
                         + "。若仍需覆盖,请优先用 add_subquery 提交对应方向。）")
+            # Agentic Memory P4 (T6): 步级零命中提示。服务端**确定性推送**(不花
+            # 步预算),与上面的 consult_memory(模型主动拉、要花一轮反思)是同一份
+            # 经验库的两条不同消费路径,共用 zero_hit_by_action / worst_experience_
+            # for / clip_rationale。闸只看 experience_wiring_active——**没有**
+            # consult_memory_active 的档位限制,因为它不产生额外模型调用,只是把
+            # summary 多几个字;fail-open,读库炸不记 skip(与理解块/打法块同口径:
+            # 一次读失败不该在轨迹里留下噪声)。
+            #
+            # 修复轮 spec⑤/Q-P2-1:``_zero_hit_nudge_ready`` 是纯内存判断,排在
+            # ``experience_wiring_active``(部署开关)与 ``nudges_used`` 配额
+            # 检查之后、``_cached_experiences`` 读库之前——大多数轮次没有任何
+            # 动作够格,此时压根不该付一次经验库快照的读取成本。
+            if (
+                experience_wiring_active(
+                    self.settings, self.retrieval_experiences)
+                and nudges_used < _ZERO_HIT_NUDGE_MAX_PER_RUN
+                and _zero_hit_nudge_ready(zero_hit_by_action, nudged_actions)
+            ):
+                try:
+                    nudge_situation = current_situation(
+                        intent_detail, mode=_EXPERIENCE_RUN_MODE,
+                        retrieval_effort=(
+                            limits.effort if limits is not None else ""))
+                    picked_nudge = _zero_hit_nudge_note(
+                        zero_hit_by_action, nudged_actions,
+                        _cached_experiences(self.retrieval_experiences),
+                        nudge_situation)
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 提示是背景,不是必需品
+                    picked_nudge = None
+                if picked_nudge:
+                    nudge_action, nudge_note_text = picked_nudge
+                    nudged_actions.add(nudge_action)
+                    nudges_used += 1
+                    summary = f"{summary}\n\n{nudge_note_text}"
             # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
             enum_note = _enumeration_note(enum_chains)
             if enum_note:
@@ -3016,6 +3320,13 @@ class ReasoningRetriever:
             # 后面那个额度句是一句话,不能被别的块插开。
             if experience_block:
                 summary = f"{summary}\n\n{experience_block}"
+            # Agentic Memory P4 (T5): consult_memory 的累计结果,同样排在集合
+            # 地图之前——地图与它后面那个额度句是一句话,不能被别的块插开
+            # (同上两条注释的理由)。``consult_block_text`` 每次成功调用后整体
+            # 重渲染(见 render_consult_block 的 docstring),所以这里只是原样
+            # 拼接,不需要再判断是不是第一次出现。
+            if consult_block_text:
+                summary = f"{summary}\n\n{consult_block_text}"
             if collection_map_text:
                 summary = (
                     f"{summary}\n\n{collection_map_text}"
@@ -3027,7 +3338,11 @@ class ReasoningRetriever:
             # 以及 _construct_reasoning_retriever 对 fail_closed 的处理):关闭态与
             # 低档位下调用形状与接入前逐字一致,既有的 reflect 测试替身不必为一个
             # 它们永远收不到的参数改签名。
-            reflect_kwargs = {"outline": True} if outline_active else {}
+            reflect_kwargs = {}
+            if outline_active:
+                reflect_kwargs["outline"] = True
+            if consult_memory_flag:
+                reflect_kwargs["consult_memory"] = True
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             reflect_detail = {"next_action": decision.next_action,
@@ -3151,8 +3466,16 @@ class ReasoningRetriever:
                         decision.expand_edge_type, decision.expand_direction)
                     neigh = expansion.hits
                     raise_if_cancelled(self.cancel_event)
+                    # codex #538 R3 P2:零命中判定与归因 id 都只看**新插入**的
+                    # 邻居——两个展开节点共享的邻居早已在 collected 里,本次
+                    # setdefault 什么都没加:拿原始 neigh 判会把空手轮当命中
+                    # 清零计数,把既有对象计入 result_ids 后又被答案引用时,
+                    # 蒸馏会把功劳记给一次什么都没贡献的 expand 调用。
+                    newly_added_neighbors = []
                     for h in neigh:
-                        collected.setdefault(h.object_id, h)
+                        if h.object_id not in collected:
+                            collected[h.object_id] = h
+                            newly_added_neighbors.append(h)
                     # 展示用人读节点名(优先 collected 命中, 再查 node_context, 兜底裸 id),
                     # 避免 trace 里出现 "顺关系深挖 ko-8375b40126" 这种用户看不懂的内部 id。
                     node_name = ""
@@ -3162,9 +3485,27 @@ class ReasoningRetriever:
                         ctx = self.get(notebook_id, oid)
                         node_name = str(ctx.get("name", "")).strip() if ctx else ""
                     node_name = node_name or oid
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,计数
+                    # 才是真正的"连续"零命中(见 ppr 分支同款注释)——旧版只累加
+                    # 不清零,提示措辞里的"已连续 N 次"其实是"历史累计 N 次",
+                    # 中间哪怕命中过也不影响这个数继续往上走。
+                    if not newly_added_neighbors:
+                        zero_hit_by_action["expand"] = (
+                            zero_hit_by_action.get("expand", 0) + 1)
+                    else:
+                        zero_hit_by_action["expand"] = 0
+                    _result_ids, _result_ids_truncated = _capped_result_ids(
+                        [h.object_id for h in newly_added_neighbors])
                     expand_detail = {"object_id": oid, "name": node_name,
                                      "edge_type": decision.expand_edge_type,
-                                     "found": len(neigh)}
+                                     "found": len(neigh),
+                                     "result_ids": _result_ids}
+                    if _result_ids_truncated:
+                        # 与 neighbor_truncated 是两个独立信号:后者说的是
+                        # self.neighbors() 自己截断了邻居查询,这个说的是这份
+                        # detail 自己的 result_ids 列表被这个函数的截断上限
+                        # 切了尾巴——两者可能只有一个成立。
+                        expand_detail["result_ids_truncated"] = True
                     if expansion.truncated:
                         # 只在真截断的步上加这两个键(detail 逐键不变的冻结基线
                         # 口径:无条件写 False 会让每一条 expand 步的 detail 都
@@ -3232,12 +3573,17 @@ class ReasoningRetriever:
                         display = (label_of[exec_query] if matched_direction is not None
                                   else sq.query)
                         added = 0
+                        # P4 (T1): also collect the newly-added ids alongside
+                        # the existing `added` count — this loop used to only
+                        # count, and result_ids needs the identities.
+                        new_ids: list = []
                         for h in self.search(notebook_id, exec_query,
                                              sq.types, sq.prefer)[:per_query_take]:
                             raise_if_cancelled(self.cancel_event)
                             if h.object_id not in collected:
                                 collected[h.object_id] = h
                                 added += 1
+                                new_ids.append(h.object_id)
                         # 账目记在 exec_query(方向原文)的身份上,而非模型提交
                         # 的简称——这样它同时从未覆盖清单(_still_uncovered_
                         # directions 按 a.query in label_of 识别)摘除,且后续
@@ -3248,9 +3594,14 @@ class ReasoningRetriever:
                                   if matched_direction is not None else ""))
                         if exec_query not in used_queries:
                             used_queries.append(exec_query)
+                        _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
+                        _subquery_detail = {"query": display, "new": added,
+                                            "result_ids": _result_ids}
+                        if _result_ids_truncated:
+                            _subquery_detail["result_ids_truncated"] = True
                         record(TraceStep(step_type="retrieve",
                                          summary=f"补充子查询: {display}",
-                                         detail={"query": display, "new": added}))
+                                         detail=_subquery_detail))
             elif decision.next_action == "search_elements":
                 if elements_searches >= self.settings.reasoning_max_element_searches:
                     record(TraceStep(step_type="skip",
@@ -3524,6 +3875,139 @@ class ReasoningRetriever:
                 apply_outline_update(
                     decision, overflow_repair=overflow_repair_submission
                 )
+            elif decision.next_action == CONSULT_MEMORY_ACTION:
+                # Agentic Memory P4 (T5)。防御性双查:`consult_memory_flag`/
+                # `self.allow_consult_memory` 都已经在 reflect() 的白名单里生效
+                # (关闭时这个动作根本不会出现在模型的选项里),这里再判一次是
+                # 与 exact_lookup/ppr 同款的纵深防御——测试替身或畸形响应仍可能
+                # 吐出这个 next_action。
+                if not consult_memory_flag or not self.allow_consult_memory:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过回想以往打法(当前场景未提供该能力)",
+                        detail={"reason": "consult_memory_disabled"}))
+                elif consult_used >= action_policy.max_consult_memory:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary=("跳过回想以往打法(已达次数上限 "
+                                 f"{action_policy.max_consult_memory})"),
+                        detail={"reason": "consult_memory_cap"}))
+                elif steps >= max_steps:
+                    # codex #538 R4 P2:这是最后一个允许的循环轮——回想的产出
+                    # 只进**下一轮** reflect 的上下文,而下一轮不存在了:执行
+                    # 只会花掉末轮预算渲染一段没有任何模型调用会读到的文本,
+                    # 还顶掉一次本可以真正取证的收尾检索。直接拒绝,不扣
+                    # consult 预算(这轮本来就没送达任何东西)。
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过回想以往打法(已是最后一轮,建议无人消费)",
+                        detail={"reason": "consult_memory_last_turn"}))
+                else:
+                    consult_used += 1
+                    # codex #538 R1 P2:整个执行体 fail-open——注入开着时一次
+                    # 瞬态/畸形的经验库读取(_cached_experiences 会发 version_signal
+                    # 聚合查询)不得把整次 Ask/报告 run 打挂;这是可选的建议面,
+                    # 与被动块的既有 fail-open 同口径。取消照常上抛。
+                    try:
+                        consult_situation = current_situation(
+                            intent_detail, mode=_EXPERIENCE_RUN_MODE,
+                            retrieval_effort=(
+                                limits.effort if limits is not None else ""))
+                        # codex #538 R1 P2 两条:①排除集只含**真送达**的被动块前缀
+                        # ——选中未送达的行(600 字符块常装不下 top-3)模型从没见过,
+                        # 排除它等于让 consult 永远还不出这些打法;②零命中优先集只取
+                        # 当前计数>0 的动作——命中清零后键还留在字典里,按键集判会把
+                        # 刚成功的动作当「哑火」排前,挤掉真失败的。
+                        delivered_passive_ids = {
+                            str(e.get("id") or "")
+                            for e in experience_entries[
+                                : rendered_experience_count(experience_block)]
+                        } if experience_block else set()
+                        new_consult_rows = select_consultable(
+                            _cached_experiences(self.retrieval_experiences),
+                            consult_situation,
+                            exclude_ids=(
+                                consult_delivered_ids | delivered_passive_ids
+                            ),
+                            zero_hit_actions={
+                                a for a, c in zero_hit_by_action.items() if c > 0
+                            },
+                            top_k=CONSULT_MEMORY_TOP_K,
+                        )
+                        overlay_note = _undelivered_retrieval_note(
+                            profile_raw_blocks, profile_block,
+                            self.profile_owner_id)
+                        is_new_overlay = bool(overlay_note) and (
+                            overlay_note != consult_overlay_note)
+                        if not new_consult_rows and not is_new_overlay:
+                            record(TraceStep(
+                                step_type="skip",
+                                summary="回想以往打法:未找到与当前场景匹配的新记录",
+                                detail={"reason": "consult_memory_nothing_new"}))
+                        else:
+                            consult_rows_accum.extend(new_consult_rows)
+                            # 修复轮 spec④/Q-P1-3:先渲染,再按渲染结果(而不是按
+                            # 选中集)更新账目——被 600 字符硬顶挤掉的行/心得没有
+                            # 出现在模型看到的文本里,不该被标成"已经发过了",否则
+                            # 下一次调用会把它排除在候选之外,永远没有机会重新出现。
+                            pending_overlay = (
+                                overlay_note if is_new_overlay
+                                else consult_overlay_note)
+                            rendered = render_consult_block(
+                                consult_rows_accum,
+                                extra_lines=(
+                                    [pending_overlay] if pending_overlay else ()
+                                ),
+                            )
+                            delivered_ids = set(rendered.delivered_ids)
+                            newly_delivered = [
+                                r for r in new_consult_rows
+                                if str(r.get("id") or "") in delivered_ids
+                            ]
+                            consult_delivered_ids.update(delivered_ids)
+                            # codex #538 R5 P2:accum 收敛为**已送达**行——未送达
+                            # 行滞留会在下次调用被再选(不在 delivered 集)、再
+                            # append 成重复,且渲染器先撞上滞留的原始未送达行就
+                            # 停,把它身后的所有候选永久堵死。收敛后未送达行
+                            # 干净地退回候选池,下次照常可选可渲染。
+                            consult_rows_accum = [
+                                r for r in consult_rows_accum
+                                if str(r.get("id") or "") in consult_delivered_ids
+                            ]
+                            overlay_newly_delivered = (
+                                is_new_overlay and rendered.overlay_rendered)
+                            if rendered.overlay_rendered:
+                                consult_overlay_note = pending_overlay
+                            consult_block_text = rendered.rendered_text
+                            consult_delivered_this_turn = bool(
+                                newly_delivered or overlay_newly_delivered)
+                            if not newly_delivered and not overlay_newly_delivered:
+                                # 本次调用真的选中了新东西(否则已经在上面短路成
+                                # "nothing_new"),但全部被硬顶挤在块外——预算已经
+                                # 花掉(``consult_used`` 已 += 1),模型这一轮却什么
+                                # 新内容都没看到。独立 reason 与"候选池本身没有
+                                # 匹配"区分开,方便回看轨迹时分辨是哪一种。
+                                record(TraceStep(
+                                    step_type="skip",
+                                    summary="回想以往打法:本轮候选未能装入打法块(预算已用)",
+                                    detail={"reason": "consult_memory_block_full"}))
+                            else:
+                                record(TraceStep(
+                                    step_type="consult_memory",
+                                    summary=(
+                                        "回想以往检索打法"
+                                        + (f",新增 {len(newly_delivered)} 条"
+                                           if newly_delivered else "")
+                                    ),
+                                    detail={"entries": len(newly_delivered),
+                                            "chars": len(consult_block_text)}))
+                    except AskCancelled:
+                        raise
+                    except Exception:  # noqa: BLE001 — 建议面绝不挂 run
+                        record(TraceStep(
+                            step_type="skip",
+                            summary="回想以往打法:读取记录失败,本轮跳过",
+                            detail={"reason": "consult_memory_unavailable"}))
             elif decision.next_action == "ppr_retrieve":
                 if self._unsafe_scope_restricted():
                     record(TraceStep(
@@ -3552,9 +4036,22 @@ class ReasoningRetriever:
                     for c in new:
                         seen_chunks.add(c.chunk_id)
                     chunks.extend(new)
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,纯内存
+                    # O(1),不改变本分支任何既有行为(除了让"连续"变真话)。
+                    if not new:
+                        zero_hit_by_action["ppr"] = (
+                            zero_hit_by_action.get("ppr", 0) + 1)
+                    else:
+                        zero_hit_by_action["ppr"] = 0
+                    _result_ids, _result_ids_truncated = _capped_result_ids(
+                        [c.chunk_id for c in new])
+                    _ppr_action_detail = {"query": pq, "found": len(new), "phase": "action",
+                                          "result_ids": _result_ids}
+                    if _result_ids_truncated:
+                        _ppr_action_detail["result_ids_truncated"] = True
                     record(TraceStep(step_type="ppr",
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
-                                     detail={"query": pq, "found": len(new), "phase": "action"}))
+                                     detail=_ppr_action_detail))
             elif decision.next_action == "exact_lookup":
                 # 名称已在 reflect() 里清洗过(去包裹标点,不截长——见 clean_exact_term)。
                 # fail_closed 的硬闸(:485 一带)先对超长 exact_term 生效;这里才截到
@@ -3638,11 +4135,24 @@ class ReasoningRetriever:
                     exact_terms_done.update(_norm_query(t) for t in fresh)
                     exact_lookup_log.append(
                         _ExactLookupAttempt(terms=list(fresh), new=len(new)))
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
+                    # 分支同款注释)。
+                    if not new:
+                        zero_hit_by_action["exact_lookup"] = (
+                            zero_hit_by_action.get("exact_lookup", 0) + 1)
+                    else:
+                        zero_hit_by_action["exact_lookup"] = 0
+                    _result_ids, _result_ids_truncated = _capped_result_ids(
+                        [c.chunk_id for c in new])
+                    _exact_reflect_detail = {"term": term, "terms": list(fresh),
+                                             "found": len(new), "phase": "reflect",
+                                             "result_ids": _result_ids}
+                    if _result_ids_truncated:
+                        _exact_reflect_detail["result_ids_truncated"] = True
                     record(TraceStep(
                         step_type="exact_lookup",
                         summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
-                        detail={"term": term, "terms": list(fresh),
-                                "found": len(new), "phase": "reflect"}))
+                        detail=_exact_reflect_detail))
             elif decision.next_action == "follow_chain":
                 action_key = (
                     decision.chain_start_object_id,
@@ -3733,6 +4243,13 @@ class ReasoningRetriever:
                     else:
                         summary_text = "两跳推导未找到满足证据/类型/适用条件的路径"
                         best_trust = 0.0
+                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零(见 ppr
+                    # 分支同款注释)。
+                    if not new_chains:
+                        zero_hit_by_action["follow_chain"] = (
+                            zero_hit_by_action.get("follow_chain", 0) + 1)
+                    else:
+                        zero_hit_by_action["follow_chain"] = 0
                     record(TraceStep(
                         step_type="follow_chain", summary=summary_text,
                         detail={"hops": 2, "count": len(new_chains),
@@ -3827,7 +4344,17 @@ class ReasoningRetriever:
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + enum_rows_used
             ) == before
-            stale = stale + 1 if no_progress else 0
+            if no_progress and consult_delivered_this_turn:
+                # codex #538 R3 P2:送达了内容的 consult 轮对 stale **持平**——
+                # 不带新证据(照 outline 论证不能清零,否则反复回想可把熔断
+                # 空转上限无限抬高),但也不能递增:模型在 stale 逼近上限时
+                # 选它(恰是连续空手后最可能选它的时刻),递增会当轮熔断,刚
+                # 送达的打法块永远到不了下一轮 reflect,一步预算白花。skip
+                # 各态(cap/nothing_new/block_full/unavailable)照常递增。
+                pass
+            else:
+                stale = stale + 1 if no_progress else 0
+            consult_delivered_this_turn = False
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if stale >= self.settings.reasoning_stale_limit:
                 record(TraceStep(step_type="skip",

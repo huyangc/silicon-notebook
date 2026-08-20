@@ -46,6 +46,7 @@ from app.core.ask_retrieval_policy import RetrievalEffort, ask_retrieval_limits
 from app.core.config import Settings
 from app.core.llm import cap_kwargs
 from app.models.ask import (
+    TRACE_ANCHOR_EVIDENCE_IDS_MAX,
     AskRequest,
     AskResponse,
     Citation,
@@ -3082,9 +3083,27 @@ class AskService:
                         # 只是模型这一轮没看到清单预览。trace 已闭合,这是唯一
                         # 挂点。
                         "enumeration_block_dropped": enumeration_block_dropped,
+                        # Agentic Memory P4 (T1): the answer's actually-bound
+                        # [k] anchors, by object_id — the raw material for
+                        # step→anchor attribution (see TRACE_ANCHOR_EVIDENCE_
+                        # IDS_MAX's docstring in app.models.ask for the
+                        # disclosure argument and the cap's derivation).
+                        # Written unconditionally, including the empty-list
+                        # zero-anchor case — a synthesis step with no anchors
+                        # is itself a real signal, not an absent one.
+                        "anchor_evidence_ids": [
+                            anchor.object_id for anchor in anchors
+                        ][:TRACE_ANCHOR_EVIDENCE_IDS_MAX],
                     },
                     duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
                 )
+                if len(anchors) > TRACE_ANCHOR_EVIDENCE_IDS_MAX:
+                    # Sparse marker (mirrors the "neighbor_truncated" pattern
+                    # in reasoning_retrieval.py's expand step): the cap is a
+                    # protocol ceiling that should never actually bind in
+                    # practice under the existing per-tier retrieval budgets,
+                    # so this key only appears on the (unexpected) day it does.
+                    synthesis_step.detail["anchor_evidence_ids_truncated"] = True
                 if outline_planned:
                     # 这组键在大纲**规划跑过**时就出现,而不只在按节合成真的被尝试
                     # 过时(codex r6):大纲只装配出 1 个有证据节时按节合成被绕过,
