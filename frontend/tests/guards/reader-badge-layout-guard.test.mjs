@@ -63,6 +63,16 @@ test(".workspace-header 仍是固定高度——上面两条的前提没变", ()
   assert.match(block(".workspace-header"), /height:\s*72px/);
 });
 
+test("紧凑桌面宽度不渲染顶栏的「退出共享」——它是把标题挤没的那一个", () => {
+  // 它固定 ~98px 且不缩。1000px 视口下顶栏左半只有 288px,扣掉「返回主页」和它之后
+  // 标题只剩 37px(26px 字号,一个字都放不下);不渲染它之后回到 105px,与群组共享形态
+  // 持平(codex #529 R7 P2)。能力没丢:同一动作在笔记本卡片菜单里一直都在。
+  const compact = css.slice(css.indexOf("@media (max-width: 1200px) {"));
+  assert.ok(css.includes("@media (max-width: 1200px) {"), "缺紧凑桌面宽度的那道断点");
+  assert.match(compact, /\.reader-badge-action\s*\{[^}]*display:\s*none/,
+    "紧凑桌面宽度仍渲染顶栏动作,标题会被它挤没");
+});
+
 test("窄屏(前提不成立处)必须放开换行,否则标题被挤没", () => {
   // ≤760px 时顶栏已经是 `height: auto`,前提没了,恒单行就只剩代价:320px 上
   // 「返回主页」+ 徽章 +「退出共享」实测只给标题留 43px(26px 字号连一个半字都放不下),
