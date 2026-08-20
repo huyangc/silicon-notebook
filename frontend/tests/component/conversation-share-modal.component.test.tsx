@@ -495,3 +495,30 @@ test("复核时发现已在别处撤销：拦下复制，界面回到未分享",
   expect(writeText).not.toHaveBeenCalled();
   expect(await screen.findByRole("button", { name: /分享到这一条/ })).toBeInTheDocument();
 });
+
+
+test("codex #530 R4 P2：复核读不到时说「读不到」，绝不谎称范围已变化", async () => {
+  const writeText = stubClipboard();
+  mocks.getConversationShare
+    .mockResolvedValueOnce({
+      share_token: "tok-1",
+      shared_through_at: "2026-01-01T00:00:00",
+      shared_through_id: "a1",
+    })
+    .mockRejectedValue(new Error("网络中断")); // 非 404 的瞬时失败
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a1");
+
+  fireEvent.click(await screen.findByRole("button", { name: /复制/ }));
+
+  await waitFor(() =>
+    expect(screen.getByText(/暂时无法确认分享范围/)).toBeInTheDocument(),
+  );
+  // 什么都没变，也什么都没刷新——不能说成「已在别处变化」。
+  expect(screen.queryByText(/分享范围已在别处变化/)).toBeNull();
+  // 拦下复制仍是刻意的 fail-closed：读不到就证明不了那句范围声明还成立。
+  expect(writeText).not.toHaveBeenCalled();
+  // 界面确实没被改动：范围文案仍是初次加载那一句。
+  expect(screen.getByText(/链接的内容就到这条回答为止/)).toBeInTheDocument();
+});

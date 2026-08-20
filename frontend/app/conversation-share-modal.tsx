@@ -61,6 +61,11 @@ async function copyToClipboard(text: string): Promise<void> {
 
 type BusyAction = "" | "share" | "update" | "revoke" | "copy";
 
+/** 复制前那次水位复核的结果。三值而非布尔：`changed`（确实变了，界面已刷新）与
+ *  `unavailable`（这次读不到，界面**没**变）都拦下复制，但对用户是两件不同的事，
+ *  给同一句话就是在编造一次并不存在的变化（codex #530 R4 P2）。 */
+type ShareStateCheck = "same" | "changed" | "unavailable";
+
 /** 会话列表那个入口的既有文案，一个字未动。 */
 const UNBOUNDED_SCOPE_COPY =
   "发布成一条免登录的只读快照。分享后新问的问题不会自动出现，需要再点一次「更新到最新」。撤销即刻失效。";
@@ -282,10 +287,10 @@ export function ConversationShareModal({
    *  刻意**不**碰 `shareStateError`：那个位表示「不知道是否已分享 → 不能安全发布」，而
    *  发布本身是安全的（`expected_through_id` 显式送出，服务端按 advance-only 钉住或 409），
    *  危险的只有「照着一句已经过时的范围声明把链接发出去」。一次网络抖动不该顺手废掉发布。 */
-  async function refreshShareState(): Promise<boolean> {
+  async function refreshShareState(): Promise<ShareStateCheck> {
     try {
       const share = await getConversationShare(notebookId, conversationId);
-      if (!aliveRef.current) return true;
+      if (!aliveRef.current) return "same";
       const nextToken = share.share_token || "";
       const nextAt = share.shared_through_at || "";
       const nextId = share.shared_through_id || "";
@@ -293,17 +298,21 @@ export function ConversationShareModal({
       setToken(nextToken);
       setWatermark(nextAt);
       setWatermarkId(nextId);
-      return same;
+      return same ? "same" : "changed";
     } catch (err) {
-      if (!aliveRef.current) return true;
+      if (!aliveRef.current) return "same";
       if (httpErrorStatus(err) === 404) {
         // 已在别处撤销。链接当场失效，与「范围变了」是两回事，但同样不该继续复制。
         setToken("");
         setWatermark("");
         setWatermarkId("");
-        return token === "";
+        return token === "" ? "same" : "changed";
       }
-      return false;
+      // ⚠ 「读不到」与「变了」必须分开回报（codex #530 R4 P2）。两者都拦下复制——拦是
+      // 刻意的 fail-closed，见上面的注释——但说成「已在别处变化，说明已刷新」是**假的**：
+      // 什么都没变，也什么都没刷新。这个 PR 从头到尾修的就是「别说不真的范围」，收尾处
+      // 自己犯一次同样的错说不过去。
+      return "unavailable";
     }
   }
 
@@ -326,10 +335,14 @@ export function ConversationShareModal({
     setError("");
     try {
       // 复制是链接真正离开本机的那一刻，也是上面那句范围声明变成行动的那一刻。
-      const stillCurrent = await refreshShareState();
+      const check = await refreshShareState();
       if (!aliveRef.current) return;
-      if (!stillCurrent) {
+      if (check === "changed") {
         setNotice("分享范围已在别处变化，上面的说明已刷新——确认后再复制。");
+        return;
+      }
+      if (check === "unavailable") {
+        setNotice("暂时无法确认分享范围，请稍后重试。");
         return;
       }
       await copyToClipboard(link);
