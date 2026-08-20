@@ -702,10 +702,15 @@ def test_public_question_is_bounded_by_the_write_side_rail():
 
 
 def test_a_long_title_is_served_whole_not_truncated():
-    """``ConversationRenameRequest.title`` has no length cap and the authenticated
-    UI shows the title whole; the projection must not silently truncate it at the
-    retired 400-char cap (codex #522 R2, same red line as the question). Mutation
-    guard: restoring ``_text(row.get("title"), 400)`` drops it to 400."""
+    """The authenticated UI shows the title whole; the projection must not
+    silently truncate it at the retired 400-char cap (codex #522 R2, same red
+    line as the question). Mutation guard: restoring
+    ``_text(row.get("title"), 400)`` drops it to 400.
+
+    1,000 chars is past today's write-side rail
+    (``CONVERSATION_TITLE_MAX_CHARS``), so this input now stands for a title
+    renamed BEFORE that rail — exactly the row the projection still has to
+    render faithfully rather than clip."""
     long_title = "标" * 1000
     payload = public_conversation_payload({
         "title": long_title, "created_at": "2026-01-01T00:00:00",
@@ -714,6 +719,44 @@ def test_a_long_title_is_served_whole_not_truncated():
     })
     assert payload["title"] == long_title
     assert len(payload["title"]) == 1000  # no 400 cap
+
+
+def test_public_title_is_bounded_by_the_write_side_rail():
+    """The title half of the same two-halves guardrail the question already has.
+
+    "Served whole" is a BOUNDED promise only because the write side refuses an
+    over-length title (codex #525 R1 P2, raised against the report projection and
+    equally true here). Renaming is the only way a title grows past the 60
+    characters ``ensure_conversation`` slices off the first question, so
+    ``ConversationRenameRequest`` is the whole write side of this field.
+
+    Relaxing either half alone fails here: drop the ``max_length`` and the model
+    stops refusing; re-cap ``_title_text`` and the sibling test above goes red."""
+    from pydantic import ValidationError
+
+    from app.models.ask import CONVERSATION_TITLE_MAX_CHARS, ConversationRenameRequest
+
+    at_cap = "标" * CONVERSATION_TITLE_MAX_CHARS
+    assert len(ConversationRenameRequest(title=at_cap).title) == CONVERSATION_TITLE_MAX_CHARS
+    try:
+        ConversationRenameRequest(title=at_cap + "标")
+    except ValidationError:
+        pass
+    else:  # pragma: no cover - the whole point of the test
+        raise AssertionError(
+            "ConversationRenameRequest accepted an over-length title; the public "
+            "projection serves it verbatim, so an anonymous response is now "
+            "unbounded by client input"
+        )
+
+    # And what the write side does admit, the projection still emits whole — no
+    # second, quieter cap hiding inside the disclosure boundary.
+    payload = public_conversation_payload({
+        "title": at_cap, "created_at": "2026-01-01T00:00:00",
+        "shared_through_at": "2026-01-01T00:00:05",
+        "turns": [],
+    })
+    assert payload["title"] == at_cap
 
 
 def test_one_bad_turn_does_not_topple_the_whole_page():

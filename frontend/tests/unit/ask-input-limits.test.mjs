@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ASK_INPUT_LIMITS, askQuestionLimitHint } from "../../app/ask-api.ts";
+import { ASK_INPUT_LIMITS, askQuestionLimitHint, conversationTitleLimitHint } from "../../app/ask-api.ts";
 import { countCodePoints } from "../../app/input-limits.ts";
 
 // 与 `report-input-limits.test.mjs` 同构——两条契约：
@@ -44,4 +44,40 @@ test("上限与后端 ASK_QUESTION_MAX_CHARS 同值（改一侧就要改另一�
   // backend/app/models/ask.py::ASK_QUESTION_MAX_CHARS —— 会话公开分享页把每轮
   // question 原样发给匿名访客，「不截断」只有在提交侧就挡住超长问题时才成立。
   assert.equal(MAX, 4000);
+});
+
+// --- 会话标题 ---------------------------------------------------------------
+// 同一条红线的另一半：公开分享页把标题也原样发给匿名访客，所以「不截断」同样只有在
+// 重命名那一刻就挡住超长标题时才是有界的。尺子与「不裁剪」两条契约逐字相同。
+
+const TITLE_MAX = ASK_INPUT_LIMITS.conversationTitleMaxChars;
+
+test("标题恰好等于上限不算超限（空转保护）", () => {
+  assert.equal(conversationTitleLimitHint("标".repeat(TITLE_MAX)), null);
+  assert.equal(conversationTitleLimitHint("时序收敛怎么做"), null);
+  assert.equal(conversationTitleLimitHint(""), null);
+});
+
+test("标题超限给出带实际字数的可操作提示", () => {
+  const hint = conversationTitleLimitHint("标".repeat(TITLE_MAX + 5));
+  assert.ok(hint, "超限必须有提示，否则保存键变灰而用户不知道为什么");
+  assert.match(hint, new RegExp(String(TITLE_MAX)), "提示里要有上限");
+  assert.match(hint, new RegExp(String(TITLE_MAX + 5)), "提示里要有当前字数");
+});
+
+test("标题也按码点判超限（按 code unit 会把满额的 emoji 标题误判成超限）", () => {
+  const emoji = "😀".repeat(TITLE_MAX);
+  assert.equal(emoji.length, TITLE_MAX * 2);
+  assert.equal(conversationTitleLimitHint(emoji), null);
+  assert.ok(conversationTitleLimitHint("😀".repeat(TITLE_MAX + 1)));
+});
+
+test("标题上限与后端 CONVERSATION_TITLE_MAX_CHARS 同值（改一侧就要改另一侧）", () => {
+  // backend/app/models/ask.py::CONVERSATION_TITLE_MAX_CHARS —— 200 而不是 4,000：
+  // 那把尺是给问题正文定的，标题是一行标签，服务端自动取的也只有前 60 字。
+  assert.equal(TITLE_MAX, 200);
+});
+
+test("两个上限是各自独立的常量，不是同一个数（标题不得跟着问题上限漂移）", () => {
+  assert.notEqual(TITLE_MAX, MAX);
 });

@@ -2726,6 +2726,7 @@
         "ConversationRenameRequest": {
           "properties": {
             "title": {
+              "maxLength": 200,
               "title": "Title",
               "type": "string"
             }
