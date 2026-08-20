@@ -51,7 +51,11 @@ import pytest
 
 import app.repositories
 import app.services
-from app.repositories.ports import AskStateStorePort, SharingStorePort
+from app.repositories.ports import (
+    AgentObservationStorePort,
+    AskStateStorePort,
+    SharingStorePort,
+)
 
 
 _SERVICE_PATH = Path(app.services.__file__).parent / "agent_profile_job.py"
@@ -59,6 +63,15 @@ _REPO_ROOT = Path(app.repositories.__file__).parent
 _STORE_PATHS = {
     "sqlite": _REPO_ROOT / "sqlite" / "ask_state_store.py",
     "postgres": _REPO_ROOT / "postgres" / "ask_state_store.py",
+}
+#: Agentic Memory P3 (T4). The observation seat's store files — a SEPARATE
+#: dict from ``_STORE_PATHS`` above (which is scoped to ``ask_state_store.py``
+#: on purpose, per its own docstring's contract). ``agent_observations`` lives
+#: on its own store file on each backend, so it needs its own path map for the
+#: layer-three scan below to find it.
+_OBSERVATION_STORE_PATHS = {
+    "sqlite": _REPO_ROOT / "sqlite" / "agent_observation_store.py",
+    "postgres": _REPO_ROOT / "postgres" / "agent_observation_store.py",
 }
 
 #: 底座链路的函数/方法名。名字改了就报红(见
@@ -187,6 +200,13 @@ OVERLAY_ALLOWED_PORT_CALLS = frozenset({
     "recent_user_ask_traces",
     # 该成员自己最近完成的深度报告(P2-T4:sections_json[i].attempted 投影)
     "recent_user_report_traces",
+    # Agentic Memory P3(T4):外部 Agent 经 MCP `add_observation` 写下的、关于
+    # 它自己怎么用这个库的短句,只限该成员自己的 owner 行。它凭什么在列:SQL
+    # 语句把谓词 `owner_id = ?`/`= %s` 写在语句里(层三静态钉住,见
+    # `OBSERVATION_READ_METHODS`),投影 `project_observation_row` 也从不带
+    # 回 owner_id。绝不能进 `ALLOWED_PORT_CALLS`(底座那张)——那会让共享底座
+    # 读到某个成员的私有观察。
+    "recent_observations",
     # 单飞与阈值(只碰这条链路自己那一行)
     "bump_signal",
     "claim",
@@ -231,13 +251,32 @@ NEUTRAL_ALLOWED_PORT_CALLS = frozenset({
 #: 单机制只扫 `self.<座位>.<方法>`,漏登记一个座位等于给这份守卫开了一扇没有报警的
 #: 后门(它不会红,只是什么都不检查)。P2-T3 加 `access` 时正面钉了这一条:
 #: `test_the_overlay_chain_actually_checks_membership` 会在这个元组少掉 `access`
-#: 的那一刻变红。
-PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state", "access")
+#: 的那一刻变红。Agentic Memory P3(T4)同样加了 `observations`——少了它,
+#: `usage_stats` 里 `self.observations.recent_observations(...)` 那次调用会对
+#: 层二完全隐形。
+PORT_ATTRIBUTES = ("profiles", "sources", "queries", "ask_state", "access",
+                    "observations")
 
 #: 层三:必须自带 user 谓词的 store 方法(两个后端各一份实现)。P2-T4 追加
 #: `recent_user_report_traces`——它读的是 `reports` 表而非 `ask_jobs`/
 #: `ask_trace_steps`,但同样只能读发起人自己的行,同一层三判据照样成立。
 TRACE_READ_METHODS = ("recent_user_ask_traces", "recent_user_report_traces")
+
+#: Agentic Memory P3(T4)。层三的**第二组**——必须自带 owner 谓词的观察 store
+#: 方法。刻意与 `TRACE_READ_METHODS` 分开而不是并进同一个元组:那条元组的判据
+#: 扫的是 `_STORE_PATHS`(`ask_state_store.py`)里的 `created_by` 谓词,而
+#: `recent_observations` 住在**另一份文件**(`agent_observation_store.py`)、
+#: 认的是**另一个列名**(`owner_id`)——混进一个元组会让扫描器去
+#: `ask_state_store.py` 里找一个根本不存在的方法,`test_the_trace_read_...`
+#: 那条「方法必须存在」的断言就会先于「谓词必须在 SQL 里」报红,报错信息答非所问。
+OBSERVATION_READ_METHODS = ("recent_observations",)
+
+#: 层三(第二组)认的谓词形状,镜像 `USER_PREDICATE_TOKENS` 但换一个列名:
+#: `owner_id` 是 `agent_observations` 表实际的列名(见 `_migration_55`),
+#: 两个后端的占位符分别是 `?`/`%s`,四种间距写法都收(与既有
+#: `USER_PREDICATE_TOKENS` 同一防御理由——列名本身就是判据)。
+OWNER_PREDICATE_TOKENS = ("owner_id = ?", "owner_id = %s",
+                          "owner_id=?", "owner_id=%s")
 
 #: P2-T5:``AskStateStorePort`` 上那条**刻意没有任何 user/notebook 谓词**的读。
 #: 它服务的是部署级全局的检索经验库,安全性来自投影(``project_run_row`` /
@@ -446,6 +485,40 @@ def test_the_trace_read_carries_the_user_predicate_in_sql(
         )
 
 
+@pytest.mark.parametrize("backend", sorted(_OBSERVATION_STORE_PATHS))
+@pytest.mark.parametrize("method_name", OBSERVATION_READ_METHODS)
+def test_the_observation_read_carries_the_owner_predicate_in_sql(
+    backend: str, method_name: str
+):
+    """层三(第二组,Agentic Memory P3 T4):观察读的每一条 SQL 字面量都必须自带
+    `owner_id` 谓词。
+
+    与 `test_the_trace_read_carries_the_user_predicate_in_sql` 同构、同一个理由,
+    换一张 store 文件和一个列名:`agent_observations` 按 `owner_id` 而不是
+    `created_by` 收窄,过滤挪到 Python 侧的失败形态完全相同——某个成员的观察
+    被总结进另一个成员的私有块,没有任何报错。
+    """
+    functions = _functions(_OBSERVATION_STORE_PATHS[backend])
+    assert method_name in functions, (
+        f"{backend} 的 agent_observation_store 里找不到 {method_name}——覆盖层的"
+        "观察取数方法被改名或删掉了,而层三会因此静默地什么都不检查。"
+    )
+    statements = _sql_literals(functions[method_name])
+    assert statements, (
+        f"{backend}.{method_name} 里一条 SQL 字面量都扫不到:要么它不再自己发查询"
+        "(那这条隔离的判据就落到了别处,必须重新登记),要么 SQL 被拼成了这个守卫"
+        "读不到的形状。"
+    )
+    for sql in statements:
+        assert any(token in sql for token in OWNER_PREDICATE_TOKENS), (
+            f"{backend}.{method_name} 里有一条读不带 `owner_id` 谓词:\n"
+            f"  {' '.join(sql.split())[:200]}\n"
+            "覆盖层的观察输入必须在**语句层面**只包含这个成员自己的行。Python 侧"
+            "过滤不算——那是一行随时可能被重构掉的代码,而它一旦没了,别人的观察"
+            "就会被总结进这个人的私有理解块里。"
+        )
+
+
 def test_the_allowlists_are_not_silently_empty():
     """自检:三层的判据都不能被清空成恒真断言。
 
@@ -461,7 +534,8 @@ def test_the_allowlists_are_not_silently_empty():
     assert "usage_stats" in OVERLAY_CHAIN_FUNCTIONS
     # P2-T4: recent_user_report_traces 加入后 OVERLAY_ALLOWED_PORT_CALLS 从 8
     # 条涨到 9 条;下限跟着抬,免得这条自检本身继续对着一个更宽的白名单打盹。
-    assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 9
+    # Agentic Memory P3(T4)再加 recent_observations,下限从 9 抬到 10。
+    assert len(OVERLAY_ALLOWED_PORT_CALLS) >= 10
     assert NEUTRAL_FUNCTIONS and len(NEUTRAL_ALLOWED_PORT_CALLS) == 2
     # P2-T4: TRACE_READ_METHODS 现含两条方法,清空成单元素元组同样必须报红。
     assert len(TRACE_READ_METHODS) >= 2 and len(_STORE_PATHS) == 2
@@ -474,6 +548,13 @@ def test_the_allowlists_are_not_silently_empty():
     # 那样 `test_the_global_trace_read_never_reaches_either_chain` 一个
     # 断言都不执行而 pytest 全绿。
     assert GLOBAL_TRACE_READ_METHODS
+    # Agentic Memory P3(T4):层三第二组的四种空转形态,同 TRACE_READ_METHODS/
+    # _STORE_PATHS 那一条同构——`OBSERVATION_READ_METHODS`/`_OBSERVATION_STORE_
+    # PATHS` 任一被清空,`test_the_observation_read_carries_the_owner_predicate_
+    # in_sql` 就会 parametrize 出零个用例而整条判据一个字都不检查。
+    assert OBSERVATION_READ_METHODS
+    assert len(_OBSERVATION_STORE_PATHS) == 2
+    assert "observations" in PORT_ATTRIBUTES
 
 
 def test_the_global_trace_read_never_reaches_either_chain():
@@ -583,13 +664,19 @@ def test_the_memory_exclusion_stays_inside_the_statement():
 
 
 @pytest.mark.parametrize(
-    "seat, port", [("ask_state", AskStateStorePort), ("access", SharingStorePort)]
+    "seat, port",
+    [
+        ("ask_state", AskStateStorePort),
+        ("access", SharingStorePort),
+        # Agentic Memory P3(T4):第三个座位,同一条前提。
+        ("observations", AgentObservationStorePort),
+    ],
 )
 def test_the_base_allowlist_never_collides_with_data_seat_port_methods(
     seat: str, port: type
 ):
-    """自检(T5 修复轮,P2-T3 扩到第二个座位):给 `PORT_ATTRIBUTES` 那条注释的
-    承诺补一份守卫。
+    """自检(T5 修复轮,P2-T3 扩到第二个座位,P3-T4 扩到第三个):给
+    `PORT_ATTRIBUTES` 那条注释的承诺补一份守卫。
 
     那条注释说「底座函数一旦写出 ``self.<座位>.<任何方法>``,它必然不在
     ``ALLOWED_PORT_CALLS`` 里」——这句话之所以成立,唯一原因是
@@ -603,7 +690,11 @@ def test_the_base_allowlist_never_collides_with_data_seat_port_methods(
 
     P2-T3 把它 parametrize 成两个座位而不是复制一份:``access`` 座位背后的
     `SharingStorePort` 有 `is_member` / `list_members` 这类短名字,撞名的可能性
-    并不比 `AskStateStorePort` 低,而这条前提对两个座位是同一条。
+    并不比 `AskStateStorePort` 低,而这条前提对两个座位是同一条。P3-T4 加第三个
+    座位 ``observations``:`AgentObservationStorePort` 的
+    `append_observation`/`recent_observations`/`list_observations`/
+    `clear_observations` 同样可能撞上未来某个 notebook 级聚合方法名,前提对它
+    是同一条。
     """
     assert seat in PORT_ATTRIBUTES, (
         f"{seat} 不在 PORT_ATTRIBUTES 里——这条自检守的是那条注释的前提,而前提的"
@@ -630,14 +721,19 @@ def test_the_base_allowlist_never_collides_with_data_seat_port_methods(
 
 def test_the_overlay_chain_actually_reads_the_member_trace():
     """反向护栏:层二是白名单,把 `usage_stats` 的读**删光**同样能让它绿。
-    所以正面钉住:覆盖层确实在读这两样,而且只读这两样(P2-T4 把「只读一样」的
-    旧断言扩成「只读这两样」——报告样本上线后 `usage_stats` 的输入面从一条变成
-    两条,仍必须是白名单枚举出的那两条,不多不少)。"""
+    所以正面钉住:覆盖层确实在读这三样,而且只读这三样(P2-T4 把「只读一样」的
+    旧断言扩成「只读这两样」;Agentic Memory P3(T4)再扩成「只读这三样」——
+    观察样本上线后 `usage_stats` 的输入面从两条变成三条,仍必须是白名单枚举出的
+    那三条,不多不少)。"""
     calls = _port_calls(_functions(_SERVICE_PATH)["usage_stats"])
-    assert calls == {"recent_user_ask_traces", "recent_user_report_traces"}, (
+    assert calls == {
+        "recent_user_ask_traces",
+        "recent_user_report_traces",
+        "recent_observations",
+    }, (
         f"usage_stats 的端口调用变成了 {sorted(calls)}——覆盖层的输入面被改了。"
-        "它应当恰好读两样东西:该成员自己的提问轨迹,以及该成员自己最近完成的"
-        "深度报告。"
+        "它应当恰好读三样东西:该成员自己的提问轨迹、该成员自己最近完成的"
+        "深度报告,以及外部 Agent 关于该成员使用情况写下的观察。"
     )
 
 
