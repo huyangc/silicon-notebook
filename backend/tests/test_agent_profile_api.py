@@ -279,3 +279,30 @@ def test_limit_default_and_bounds(tmp_path, monkeypatch):
     )
     assert at_ring_max.status_code == 200, at_ring_max.text
     assert AGENT_OBSERVATION_SAMPLE_MAX <= AGENT_OBSERVATION_RING_MAX
+
+
+def test_agent_names_resolve_past_the_first_roster_page():
+    """codex #535 R2 P2:owner 超过一页(100)个 Agent profile 时,老 profile 的
+    观察归因不得落到未知兜底——名字解析按 roster 分页翻到尽头。纯函数级:直接
+    喂一个 250 条的假 roster 给共享 helper。"""
+    from app.services.agent_profile_block import (
+        AGENT_PROFILE_NAME_PAGE,
+        resolve_agent_profile_names,
+    )
+
+    class _P:
+        def __init__(self, i):
+            self.id = f"agent-{i:04d}"
+            self.name = f"Agent {i}"
+
+    roster = [_P(i) for i in range(2 * AGENT_PROFILE_NAME_PAGE + 50)]
+    calls = []
+
+    def list_profiles(owner_id, offset, limit):
+        calls.append((offset, limit))
+        return roster[offset:offset + limit]
+
+    names = resolve_agent_profile_names(list_profiles, "user-a")
+    assert len(names) == len(roster)
+    assert names["agent-0249"] == "Agent 249"
+    assert calls == [(0, 100), (100, 100), (200, 100)]

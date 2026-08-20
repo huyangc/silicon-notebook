@@ -150,3 +150,24 @@ test("术语标签输入:回车添加,点击移除,超长/重复被拒并提示"
   await testUser.click(screen.getByText("PPA ×"));
   expect(screen.queryByText("PPA ×")).not.toBeInTheDocument();
 });
+
+
+test("采用:推断值旁的「设为你的选择」把当前值写进请求体(codex #535 R2)", async () => {
+  mocks.patchSearchProfile.mockResolvedValue(baseUser({
+    version: 1,
+    fields: { answer_language: { value: "zh", origin: "user", updated_at: "x" } },
+  }));
+  const testUser = userEvent.setup();
+  const initial = baseUser({
+    version: 1,
+    fields: { answer_language: { value: "zh", origin: "job", updated_at: "x" } },
+  });
+  render(<SearchProfileModal currentUser={initial} onSaved={() => undefined} onClose={() => undefined} />);
+
+  // 下拉框已选中推断值——再选同一项不触发 onChange,唯一确认入口是这颗按钮
+  expect(screen.getByLabelText("回答语言")).toHaveValue("zh");
+  await testUser.click(screen.getByText("设为你的选择"));
+  await testUser.click(screen.getByText("保存"));
+
+  expect(mocks.patchSearchProfile).toHaveBeenCalledWith({ answer_language: "zh" });
+});

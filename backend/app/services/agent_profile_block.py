@@ -89,6 +89,31 @@ _GUIDANCE = (
 AGENT_PROFILE_NAME_PAGE = 100
 
 
+def resolve_agent_profile_names(list_profiles, owner_id: str) -> dict:
+    """Full id→name roster for ONE owner, paging until the roster runs dry.
+
+    codex #535 R2 P2: the previous single-page ``(0, AGENT_PROFILE_NAME_PAGE)``
+    read silently dropped every profile past the first page — an owner with
+    more than ``AGENT_PROFILE_NAME_PAGE`` Agent profiles saw observations from
+    the older ones attributed to the unknown-Agent fallback. There is no
+    protocol cap on an owner's profile count, so a fixed result-changing page
+    was exactly the numeric-limit shape CLAUDE.md's red line forbids. Paging
+    is bounded by the owner's own roster size (each page issues one bounded
+    query); both consumers (``mcp_server._profile_names`` and
+    ``agent_profile_routes._observation_agent_names``) call THIS helper so the
+    two stay one lookup by construction.
+    """
+    names: dict = {}
+    offset = 0
+    while True:
+        page = list(list_profiles(owner_id, offset, AGENT_PROFILE_NAME_PAGE))
+        for profile in page:
+            names[profile.id] = profile.name
+        if len(page) < AGENT_PROFILE_NAME_PAGE:
+            return names
+        offset += AGENT_PROFILE_NAME_PAGE
+
+
 def _clean(value: object) -> str:
     """Strip + collapse all internal whitespace (incl. newlines) to single
     spaces (mirrors ``reasoning_retrieval._outline_text`` for model-authored

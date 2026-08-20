@@ -49,7 +49,7 @@ from app.api.source_routes import (
 from app.services.evidence_context import _knowhow_ref
 from app.services import background_jobs
 from app.services.agent_profile_block import (
-    AGENT_PROFILE_NAME_PAGE,
+    resolve_agent_profile_names,
     AGENT_PROFILE_VALUE_MAX_CHARS,
     PROFILE_LABEL_ORDER,
 )
@@ -1005,13 +1005,10 @@ def _markdown_source_file_name(title: str) -> str:
 
 
 def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
-    # Page size is `AGENT_PROFILE_NAME_PAGE` — same number, same reason, as
-    # `agent_profile_routes._observation_agent_names`'s identical lookup; see
-    # that constant's own docstring.
-    return {
-        profile.id: profile.name
-        for profile in service.list_agent_profiles(owner_id, 0, AGENT_PROFILE_NAME_PAGE)
-    }
+    # Full paged roster via the shared helper — same lookup, by construction,
+    # as `agent_profile_routes._observation_agent_names` (codex #535 R2 P2:
+    # a single fixed page dropped profiles past the first hundred).
+    return resolve_agent_profile_names(service.list_agent_profiles, owner_id)
 
 
 def _profile_projection(rows: list[dict], owner_id: str) -> list[dict[str, Any]]:

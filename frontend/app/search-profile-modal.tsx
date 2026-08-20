@@ -150,7 +150,28 @@ export function SearchProfileModal({ currentUser, onSaved, onClose }: SearchProf
     if (drafts[field].kind !== "unset") return null;
     const state = parsed[field];
     if (!state) return null;
-    return <span className="badge search-profile-origin">{searchProfileOriginLabel(state.origin)}</span>;
+    return (
+      <>
+        <span className="badge search-profile-origin">{searchProfileOriginLabel(state.origin)}</span>
+        {state.origin === "job" ? (
+          // codex #535 R2 P2：推断值在下拉框里已是选中项，再选同一项不触发
+          // onChange，用户没有任何入口把它确认成「你设置的」（只有 user 来源
+          // 的值才会注入回答提示）。这颗按钮把当前推断值显式写进草稿，保存
+          // 即完成 origin=user 的确认写入。
+          <button
+            type="button"
+            className="search-profile-field-adopt"
+            disabled={busy}
+            onClick={() => setDrafts((prev) => ({
+              ...prev,
+              [field]: { kind: "set", value: state.value },
+            }))}
+          >
+            设为你的选择
+          </button>
+        ) : null}
+      </>
+    );
   }
 
   return (
