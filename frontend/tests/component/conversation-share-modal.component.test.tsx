@@ -337,3 +337,74 @@ test("非边界模式的两条回执逐字不变", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /生成分享链接/ }));
   expect(await screen.findByText("已生成分享链接")).toBeInTheDocument();
 });
+
+
+// --- codex #530 R2 的两条回归门 ----------------------------------------------
+//
+// 两条都是「链接与复制按钮当场可用，而上方那句话说的是别的范围」。
+
+test("codex #530 R2 P2：链接停在更早一轮时，说清这条回答**还没**进链接", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1", // 链接只到第一轮
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a2"); // 用户点的是第二轮
+
+  await screen.findByLabelText("分享链接");
+  // 照着「只包含这条回答以及它之前的问答」复制，发出去的快照缺了这条回答。
+  expect(screen.queryByText(/只包含这条回答以及它之前的问答/)).toBeNull();
+  expect(screen.getByText(/还不包含这条回答/)).toBeInTheDocument();
+  // 出路仍在同屏。
+  expect(screen.getByRole("button", { name: /更新到这一条/ })).toBeInTheDocument();
+});
+
+test("codex #530 R2 P1：水位指向本地看不到的答案时，范围声明为未知而不是更窄", async () => {
+  // 读完详情之后，另一个标签页把分享推进到了 turns 里没有的一轮。
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:09",
+    shared_through_id: "a9-not-loaded-here",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a1");
+
+  await screen.findByLabelText("分享链接");
+  expect(screen.queryByText(/只包含这条回答以及它之前的问答/)).toBeNull();
+  expect(screen.getByText(/无法确认当前链接的范围/)).toBeInTheDocument();
+  // 数字答不上来就不给数字：退化成同时点名附图与个人记忆的兜底文案。
+  expect(screen.getByText(SHARE_DISCLOSURE_COUNTS_ERROR)).toBeInTheDocument();
+});
+
+test("链接正好停在这条回答上：如实说「就到这条回答为止」", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:01",
+    shared_through_id: "a2",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal("a2");
+
+  await screen.findByLabelText("分享链接");
+  expect(screen.getByText(/链接的内容就到这条回答为止/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /更新到这一条/ })).toBeNull();
+});
+
+test("非边界模式的介绍语逐字不变", async () => {
+  mocks.getConversationShare.mockResolvedValue({
+    share_token: "tok-1",
+    shared_through_at: "2026-01-01T00:00:00",
+    shared_through_id: "a1",
+  });
+  mocks.getConversation.mockResolvedValue(DETAIL);
+
+  renderModal();
+
+  expect(
+    await screen.findByText(/分享后新问的问题不会自动出现，需要再点一次「更新到最新」/),
+  ).toBeInTheDocument();
+});
