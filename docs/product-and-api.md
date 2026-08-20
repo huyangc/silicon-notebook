@@ -682,10 +682,11 @@ needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
 then connect to the Streamable HTTP server at `/mcp/` (`/mcp` reaches it through a 307).
 The one-time token receipt also links to anonymous `GET /api/agent-mcp/onboarding`, a
-machine-readable Markdown handoff that publishes the client endpoint as `MCP_PUBLIC_URL` plus
-the mounted route's trailing slash — `POST /mcp` is a 307 to `/mcp/`, so an Agent is never left
-depending on its client preserving method, body and Authorization across that redirect — and
-derives its tool list from `mcp_server.PUBLIC_TOOLS`. The user gives this link and token to
+machine-readable Markdown handoff that prints `MCP_PUBLIC_URL` verbatim as the endpoint to
+configure — never a rewritten variant, since a proxy may publish only that exact route — while
+stating that a backend-direct `POST /mcp` is a 307 to `/mcp/`, so an Agent whose client does not
+preserve method, body and Authorization across a redirect knows the remedy. Its tool list is
+derived from `mcp_server.PUBLIC_TOOLS`. The user gives this link and token to
 the Agent separately; the endpoint never accepts, embeds, or reflects a bearer token and is
 available even while repository warm-up is still running.
 Requests carrying any query string or Authorization header are rejected. Startup likewise

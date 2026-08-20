@@ -86,9 +86,9 @@ Never commit the token or place it in documentation or script arguments. Share i
 ### The endpoint URL
 
 The authoritative endpoint is the one the deployment publishes as `MCP_PUBLIC_URL` and echoes in
-the onboarding instructions linked on the token receipt. Use that value verbatim, adding the
-trailing slash described below. Only when no such value is available does the direct-backend
-default apply: `<scheme>://<host>:<backend port>/mcp/`, where the port is `8000`.
+the onboarding instructions linked on the token receipt. Configure that value verbatim. Only when
+no such value is available does the direct-backend default apply: `<scheme>://<host>:<backend
+port>/mcp/`, where the port is `8000`.
 
 Everything except the path varies by deployment, and each part fails differently when guessed:
 
@@ -103,9 +103,11 @@ Everything except the path varies by deployment, and each part fails differently
   to the backend port to reach it directly, which puts the bearer token on the wire in
   cleartext.
 - **Trailing slash.** The MCP application is mounted at `/mcp` and its own route is `/`, so
-  `POST /mcp` answers `307 Temporary Redirect` to `/mcp/`. Clients that follow a 307 (method and
-  body preserved — the official Python MCP client always does) work either way; writing `/mcp/`
-  removes the dependency on that behavior.
+  `POST /mcp` reaching the backend answers `307 Temporary Redirect` to `/mcp/`. Clients that
+  follow a 307 with method, body and Authorization intact (the official Python MCP client always
+  does) work as configured. For one that does not, the slashed form is the fix when you address
+  the backend directly — behind a proxy it exists only if the proxy routes it, so try it, do not
+  assume it.
 
 A worked example, for a remote deployment with nothing in front of the backend:
 
@@ -117,8 +119,9 @@ A worked example, for a remote deployment with nothing in front of the backend:
 | `http://notebook.example.internal:8000/mcp/` | The authenticated MCP endpoint |
 
 `MCP_PUBLIC_URL` itself must stay slashless: startup rejects any path other than exactly `/mcp`.
-The onboarding Markdown resolves that difference on the reader's behalf — it publishes the slashed
-client endpoint next to the configured value.
+The onboarding Markdown prints that configured value verbatim and never fabricates a slashed
+variant — a proxy may publish only the unslashed route — but it does state the redirect and the
+remedy, so an Agent whose client cannot follow a 307 is not left guessing.
 
 ### Codex CLI
 
@@ -259,26 +262,35 @@ full lifecycle is three requests:
 
 ```bash
 MCP_URL='http://127.0.0.1:8000/mcp/'
-AUTH="Authorization: Bearer $SILICON_NOTEBOOK_AGENT_TOKEN"
 CT='content-type: application/json'
 ACCEPT='accept: application/json, text/event-stream'
+# The token is fed through a `-K -` config on stdin, never as a `-H` argument:
+# argv is readable by any process on the host and lands in command audit logs.
+auth() { printf 'header = "Authorization: Bearer %s"\n' "$SILICON_NOTEBOOK_AGENT_TOKEN"; }
 
 # 1. initialize -> 200, and the response header mcp-session-id carries the session
-curl -sD - -o /dev/null -X POST "$MCP_URL" -H "$AUTH" -H "$CT" -H "$ACCEPT" \
+auth | curl -K - -sD - -o /dev/null -X POST "$MCP_URL" -H "$CT" -H "$ACCEPT" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 
 SESSION='<mcp-session-id from the response headers above>'
 
 # 2. notifications/initialized -> 202, empty body
-curl -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
-  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
+  -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
 # 3. tools/list -> 200 with the full published tool list
-curl -s -X POST "$MCP_URL" \
-  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+auth | curl -K - -s -X POST "$MCP_URL" \
+  -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 4. terminate -> 200, and the session id is 404 from here on
+auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
+  -H "MCP-Session-Id: $SESSION"
 ```
+
+Step 4 is not optional housekeeping: sessions are stateful and the server sets no idle timeout,
+so every skipped `DELETE` leaves a transport parked in memory until the process restarts.
 
 A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means the
 `MCP-Session-Id` header was dropped rather than that the server has no tools.
