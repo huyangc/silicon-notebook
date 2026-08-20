@@ -506,7 +506,9 @@ def test_select_consultable_excludes_ids_and_prioritises_zero_hit_actions():
 def test_render_consult_block_drops_whole_rows_over_cap():
     """整块 600 字符硬顶按**整行**丢弃(镜像 render_experience_block 的同名
     用例):单行的 rationale 早在 clip_rationale 那道 160 字符闸就封顶了,
-    真正撑爆整块预算的是**多行**累加。"""
+    真正撑爆整块预算的是**多行**累加。修复轮:返回值改为
+    ``RenderedConsultBlock``,``delivered_ids`` 必须是被丢弃行之外的真子集。
+    """
     situation = _situation()
     near_cap_rationale = "x" * 150
     rows = [
@@ -516,20 +518,45 @@ def test_render_consult_block_drops_whole_rows_over_cap():
         for index, action in enumerate(("ppr", "exact_lookup", "follow_chain"))
     ]
     rendered = render_consult_block(rows)
-    assert rendered.startswith(CONSULT_HEADER)
-    assert len(rendered) <= CONSULT_MEMORY_BLOCK_MAX_CHARS
+    assert rendered.rendered_text.startswith(CONSULT_HEADER)
+    assert len(rendered.rendered_text) <= CONSULT_MEMORY_BLOCK_MAX_CHARS
     from app.services.retrieval_experience_block import rendered_row_count
-    assert rendered_row_count(rendered) < len(rows), "至少一行装不下"
-    assert not rendered.endswith("…"), "整块不做尾部截断"
+    assert rendered_row_count(rendered.rendered_text) < len(rows), "至少一行装不下"
+    assert not rendered.rendered_text.endswith("…"), "整块不做尾部截断"
+    # delivered_ids 必须是真正渲染进块的行——严格子集,且顺序与传入一致。
+    assert len(rendered.delivered_ids) < len(rows)
+    assert set(rendered.delivered_ids) <= {r["id"] for r in rows}
+    assert rendered.overlay_rendered is False
 
     short_rows = [{
         "id": "rx_" + "b" * 32, "situation": situation, "action": "ppr",
         "polarity": "bad", "rationale": RATIONALE_PPR, "support": 1,
     }]
     rendered = render_consult_block(short_rows, extra_lines=["yours: 心得"])
-    assert rendered.startswith(CONSULT_HEADER)
-    assert "心得" in rendered
-    assert len(rendered) <= CONSULT_MEMORY_BLOCK_MAX_CHARS
+    assert rendered.rendered_text.startswith(CONSULT_HEADER)
+    assert "心得" in rendered.rendered_text
+    assert len(rendered.rendered_text) <= CONSULT_MEMORY_BLOCK_MAX_CHARS
+    assert rendered.delivered_ids == (short_rows[0]["id"],)
+    assert rendered.overlay_rendered is True
+
+
+def test_render_consult_block_prioritises_the_overlay_note_when_budget_is_tight():
+    """修复轮 Q-P1-3:``extra_lines``(本人覆盖层的未送达心得)先渲染。用满打
+    满算的行占满预算,再补一条心得——旧实现(rows 先渲染)会让心得整条被挤掉;
+    新实现必须仍然把它塞进去,即便代价是挤掉最后一行经验库条目。"""
+    situation = _situation()
+    near_cap_rationale = "x" * 150
+    rows = [
+        {"id": f"rx_{'abcdef'[index]}" + "0" * 27, "situation": situation,
+         "action": action, "polarity": "bad",
+         "rationale": f"{index}{near_cap_rationale}", "support": 9}
+        for index, action in enumerate(("ppr", "exact_lookup", "follow_chain"))
+    ]
+    overlay = "yours: " + ("y" * 100)
+    rendered = render_consult_block(rows, extra_lines=[overlay])
+    assert rendered.overlay_rendered is True, "心得必须优先于经验库行占到预算"
+    assert "yours:" in rendered.rendered_text
+    assert len(rendered.rendered_text) <= CONSULT_MEMORY_BLOCK_MAX_CHARS
 
 
 def test_worst_experience_for_only_returns_bad_polarity_for_the_named_action():

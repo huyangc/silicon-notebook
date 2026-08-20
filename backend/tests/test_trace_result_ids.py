@@ -4,17 +4,24 @@
 (``retrieval_experience_projection.py`` 消费这批 id 折成
 ``attributable``/``anchored_hits``)是 T3+T4 的地盘,这里不碰。
 
-写侧硬判据(见 ``reasoning_retrieval.py`` 里紧贴七个写点的注释、以及
+写侧硬判据(见 ``reasoning_retrieval.py`` 里紧贴八个写点的注释、以及
 ``ask_service.py`` 里紧贴 synthesis 步的注释):走到发起 I/O 的路径就无条件写
-``result_ids``/``anchor_evidence_ids``(零命中写 ``[]``),``skip`` 分支一律不写。
-读侧硬判据(见 ``ports.py::project_run_step`` 的 docstring):非 synthesis/answer
-步按 ``detail`` 里 **有没有** ``result_ids`` 这把键透传,而不是按 step_type 猜;
-synthesis/answer 步的 ``anchor_evidence_ids`` 无条件透传(空列表也算,因为
-写侧本来就无条件写)。``project_trace_step`` 对这批新键一个字都不碰。
+``result_ids``/``anchor_evidence_ids``(零命中写 ``[]``),``skip`` 分支一律不写;
+截断发生时补稀疏 ``result_ids_truncated``/``anchor_evidence_ids_truncated``
+标记(修复轮 spec②,只在真截断那天出现)。
+读侧硬判据(见 ``ports.py::project_run_step`` 的 docstring,修复轮 Q-P1-1 改写):
+非 synthesis/answer 步按 ``detail`` 里 **有没有** ``result_ids`` 这把键透传,
+而不是按 step_type 猜;synthesis/answer 步的 ``anchor_evidence_ids`` **同样**
+按键存在透传——同名但不携带锚点的步(枚举回答分支、逐节撰写进度步、
+reasoning_retrieval.py 的候选池汇总 "answer" 步,以及 ``step_limit`` 截尾后
+只剩这类步的 run)整段不投影这个字段,而不是投影一个看起来"零锚点"的空
+列表。``result_ids_truncated``/``anchor_ids_truncated`` 同理按键存在透传。
+``project_trace_step`` 对这批新键一个字都不碰。
 
-七个写点(reasoning_retrieval.py):
-  ① 初检索 retrieve 步  ② PPR seed  ③ 精确查找 seed  ④ expand
-  ⑤ add_subquery 的 retrieve 步  ⑥ ppr 动作步  ⑦ exact_lookup 动作步
+八个写点(reasoning_retrieval.py,修复轮 spec①新增第⑧个):
+  ① 初检索 retrieve 步  ② PPR seed  ③ 精确查找 seed  ④ 已确认方向补种
+  (coverage)pass  ⑤ expand  ⑥ add_subquery 的 retrieve 步  ⑦ ppr 动作步
+  ⑧ exact_lookup 动作步
 外加 ask_service.py 的 synthesis 步(``anchor_evidence_ids``)。
 """
 from __future__ import annotations
@@ -42,6 +49,7 @@ from app.services.retrieval import RetrievedChunk, RetrievedElement
 from tests.model_testkit import bind_chat_client
 from tests.test_reasoning_retrieval import (
     _SeqLLM,
+    _mk_rk,
     _retriever_counting_exact_lookup,
     _seed_manual_notebook,
     _seed_two_nodes,
@@ -50,7 +58,7 @@ from tests.test_reasoning_retrieval import (
 
 
 # --------------------------------------------------------------- write side
-# reasoning_retrieval.py's seven emit sites.
+# reasoning_retrieval.py's eight emit sites (修复轮 spec①新增第⑧个).
 
 
 def test_initial_retrieve_step_carries_result_ids(rrepo):
@@ -182,8 +190,42 @@ def test_add_subquery_retrieve_step_carries_result_ids(rrepo):
     assert followup_step.detail["result_ids"] == [proc.object_id]
 
 
+def test_coverage_pass_retrieve_step_carries_result_ids(rrepo, monkeypatch):
+    """⑥ 已确认方向补种(coverage pass,修复轮 spec①新增):首轮装不下的
+    已确认方向在预算内被补跑时,同样要写 result_ids——这条路径此前是唯一
+    漏掉的写点,不写就会让"已确认方向"这条归因链在起点断掉,即便命中了
+    答案锚点也读不出来。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+    ))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever, "search",
+        lambda notebook_id, query, types=None, prefer="balanced": [
+            _mk_rk(f"{query}-{i}", f"{query}-{i}") for i in range(4)
+        ])
+    result = retriever.run(
+        nb.id,
+        "完整问题 set_db",
+        # overview:首轮 2 个 → 主题二/主题三 溢出到补种。
+        intent_queries=["完整问题", "主题一方向", "主题二方向", "主题三方向"],
+        limits=ask_retrieval_limits("overview"),
+    )
+    covered = [s for s in result.trace
+              if s.step_type == "retrieve"
+              and (s.detail or {}).get("source") == "confirmed_intent"]
+    assert covered, "首轮装不下的已确认方向必须补种"
+    for step in covered:
+        assert "result_ids" in step.detail
+        assert len(step.detail["result_ids"]) == 4  # 4 条新 object_id,零去重
+
+
 def test_ppr_action_step_carries_result_ids(rrepo):
-    """⑥ ppr 动作步:与 seed 不同的新 chunk,证明这是独立写点。"""
+    """⑦ ppr 动作步:与 seed 不同的新 chunk,证明这是独立写点。"""
     nb = _seed_two_nodes(rrepo)
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
@@ -210,7 +252,7 @@ def test_ppr_action_step_carries_result_ids(rrepo):
 
 
 def test_exact_lookup_action_step_carries_result_ids(rrepo):
-    """⑦ exact_lookup 动作步(镜像既有 exact-equality 用例,单独钉一次)。"""
+    """⑧ exact_lookup 动作步(镜像既有 exact-equality 用例,单独钉一次)。"""
     nb = _seed_manual_notebook(rrepo)
     rrepo.settings.graph_ppr_enabled = False
     bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
@@ -429,12 +471,17 @@ def test_project_run_step_synthesis_branch_omits_the_truncated_flag_when_false()
     assert "anchor_ids_truncated" not in projected
 
 
-def test_project_run_step_synthesis_branch_missing_ids_key_defaults_empty():
-    """旧轨迹(P4 之前写下的行)没有 anchor_evidence_ids 键 —— 按 0 处理,不报错。"""
+def test_project_run_step_synthesis_branch_missing_ids_key_omits_the_field():
+    """修复轮 Q-P1-1:旧轨迹(P4 之前写下的行,或本来就不带锚点的同名步——
+    枚举回答分支、逐节撰写进度步、reasoning_retrieval.py 的候选池汇总
+    "answer" 步)没有 anchor_evidence_ids 键——按键存在投影(镜像
+    result_ids 的规则):这个字段整体不出现,不是出现一个看起来"零锚点"的
+    空列表。``count``(来自 "anchors" 整数键,与 anchor_evidence_ids 无关)
+    照常投影,不受这条规则影响。"""
     step = {"step_type": "synthesis", "summary": "s",
             "detail": {"citations": 3, "anchors": 2}}
     projected = project_run_step(step)
-    assert projected["anchor_evidence_ids"] == []
+    assert "anchor_evidence_ids" not in projected
     assert projected["count"] == 2
 
 

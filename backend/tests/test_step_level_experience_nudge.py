@@ -405,6 +405,73 @@ def test_max_two_nudges_per_run_across_different_actions(repo):
     assert "「exact_lookup」这类动作在当前场景已连续" not in full_transcript
 
 
+class _CountingExperienceStore:
+    """包一层真 store,只数 ``version_signal()`` 被调用几次,其余方法原样代理。
+
+    修复轮 spec⑤/Q-P2-1:``_cached_experiences`` 每次被调用都会先算一次
+    ``version_signal()`` 才能查缓存命不命中,所以数它的调用次数就是数
+    "代码路径有没有走到读经验库这一步"的忠实计数器,不受进程级 memo 命中与
+    否影响。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.version_signal_calls = 0
+
+    def version_signal(self):
+        self.version_signal_calls += 1
+        return self._inner.version_signal()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_nudge_precheck_skips_the_cache_read_when_no_action_qualifies(repo):
+    """修复轮 spec⑤/Q-P2-1:阈值判断前移到纯内存——没有任何动作达标的轮次,
+    ``_zero_hit_nudge_note`` 不该被调用,更不该多读一次经验库快照。
+
+    ``version_signal()`` 在整条 run 里预期恰好被调用一次:run() 顶部"被动
+    打法块"那次固定读取。这里只安排一次 exact_lookup 未命中(阈值是 2),
+    nudge 路径的纯内存判断应该在读库之前就短路。
+
+    变异验证:把 ``_zero_hit_nudge_ready`` 的调用从 ``if`` 条件里删掉(总是
+    进 try 块),这条用例会翻红(``version_signal_calls`` 变成 2)。
+    """
+    notebook, _oid = _seed(repo)
+    _write_experience(repo, "exact_lookup",
+                      "bad", "exact_lookup rarely finds this shape.")
+    counting_store = _CountingExperienceStore(repo.retrieval_experiences)
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "set_db"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    retriever.retrieval_experiences = counting_store
+    _run(retriever, notebook, "standard")
+
+    assert counting_store.version_signal_calls == 1
+
+
+def test_nudge_precheck_does_read_again_once_the_threshold_is_crossed(repo):
+    """对照组:两次真连续零命中确实达到阈值时,nudge 路径必须真的去读一次
+    经验库——证明上一条用例通过不是因为整条 nudge 机制失效,而是"没有动作
+    达标时不读"这一条精确规则在起作用。"""
+    notebook, _oid = _seed(repo)
+    _write_experience(repo, "exact_lookup",
+                      "bad", "exact_lookup rarely finds this shape.")
+    counting_store = _CountingExperienceStore(repo.retrieval_experiences)
+    llm = _SeqLLM([
+        {"next_action": "exact_lookup", "exact_term": "set_db"},
+        {"next_action": "exact_lookup", "exact_term": "get_db"},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever = _retriever(repo, llm)
+    retriever.retrieval_experiences = counting_store
+    _run(retriever, notebook, "standard")
+
+    assert counting_store.version_signal_calls >= 2
+
+
 def test_fail_open_on_a_broken_experience_store(repo):
     """读库炸了不该打断这条 run——只是没有提示,不记 skip 步。"""
     notebook, _oid = _seed(repo)
