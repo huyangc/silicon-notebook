@@ -475,3 +475,22 @@ def test_fullwidth_latin_and_halfwidth_katakana_are_not_chinese():
     assert classify_ask_language("ｱｲｳｴｵ ｶｷｸｹｺ ｻｼｽｾｿ") != "zh"
     # 全角标点混在中文正文里照常计入 CJK
     assert classify_ask_language("这个库支持哪些格式？请列出全部！") == "zh"
+
+
+def test_sync_ask_paths_deliberately_do_not_notify_inference():
+    """codex #535 R4 P2 的驳回护栏:同步 ask(ask_current——POST /ask 与 MCP
+    ask_notebook 的路径)刻意不触发三条 note_ask_completed 链,P1 起的登记
+    口径(CLAUDE.md「同步 POST /ask 不计入覆盖层触发计数」)。若有人接入,
+    本用例红,提醒他那是在改三条链共同的计数语义、需单独过评审。"""
+    import ast
+    from pathlib import Path
+
+    source = Path("backend/app/services/ask_service.py").read_text("utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "ask_current":
+            body_src = ast.get_source_segment(source, node) or ""
+            assert "note_ask_completed" not in body_src
+            break
+    else:  # pragma: no cover
+        raise AssertionError("ask_current not found")

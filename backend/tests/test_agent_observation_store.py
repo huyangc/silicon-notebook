@@ -409,3 +409,27 @@ def test_append_observation_rejects_empty_client_request_id(harness: Harness):
         harness.store.append_observation(
             NOTEBOOK_ID, "user-a", "agent-1", text="x", client_request_id="",
         )
+
+
+def test_idempotency_window_is_bounded_by_ring_retention(harness):
+    """codex #535 R4 P2(登记为有界合同,非缺陷):幂等只在行仍被环形保留时
+    成立——RING_MAX 条更新的观察把某 request_id 的行淘汰后,重试同一 id 会
+    写出一条**新**行(deduplicated=False)。tool 描述与 docs 同句登记;要
+    永久幂等就得再开一张 key 表,对以秒计的重试合同不值一次迁移。"""
+    store = harness.store
+    first_id, first_dup = store.append_observation(
+        "nb-1", "user-a", "agent-1", text="old", client_request_id="req-old",
+    )
+    assert first_dup is False
+    from app.repositories.ports import AGENT_OBSERVATION_RING_MAX
+
+    for index in range(AGENT_OBSERVATION_RING_MAX):
+        store.append_observation(
+            "nb-1", "user-a", "agent-1",
+            text=f"newer {index}", client_request_id=f"req-newer-{index}",
+        )
+    retry_id, retry_dup = store.append_observation(
+        "nb-1", "user-a", "agent-1", text="old again", client_request_id="req-old",
+    )
+    assert retry_dup is False
+    assert retry_id != first_id

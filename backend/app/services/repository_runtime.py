@@ -513,6 +513,15 @@ class RepositoryRuntime:
         # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
         # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
 
+    # codex #535 R4 P2(驳回,登记决定):本通知只由流式 AskExecutionCoordinator
+    # 触发,同步 `POST /notebooks/{id}/ask` 与 MCP `ask_notebook`(经
+    # ask_current)刻意**不**接入——这是 P1 就登记的口径(CLAUDE.md「Agent 库
+    # 理解」条:「同步 POST /ask 不计入覆盖层触发计数」),P2 经验库与 P3 语言
+    # 归纳共用同一个钩子、同一条边界。接同步路径要么在 ask_current 里再挂一次
+    # (流式路径包着它,会双计),要么把钩子下沉进 ask_current 并让流式去重——
+    # 两者都在改三条链共同的计数语义,不是 P3 单方面能拍的;如放开,单独一件
+    # 事过评审。反向护栏:test_search_profile_job.py 的
+    # test_sync_ask_paths_deliberately_do_not_notify_inference。
     def _note_ask_completed(
         self, notebook_id: str, user_id: str, mode_id: str = "reasoning"
     ) -> None:
