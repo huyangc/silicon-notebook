@@ -184,6 +184,17 @@ def test_clearing_a_field_deletes_the_entry_and_job_can_refill_it():
     assert refilled["fields"]["answer_language"]["origin"] == "job"
 
 
+def test_job_origin_cannot_clear_a_user_authored_field():
+    """T2/T6 修复轮:job 的 value=None 清空同样必须过 job-vs-user 守卫,不能
+    绕过它——否则一个后台归纳 job 可以用「清空」把用户的显式选择静默抹掉,
+    等同于 test_job_origin_does_not_overwrite_a_user_authored_field 挡的
+    那类覆盖,只是换了个动作形状。"""
+    profile = merge_field(_empty(), "answer_language", "en", "user")
+    result = merge_field(profile, "answer_language", None, "job")
+    assert result["fields"]["answer_language"]["value"] == "en"
+    assert result["fields"]["answer_language"]["origin"] == "user"
+
+
 def test_merge_field_does_not_mutate_its_input():
     original = merge_field(_empty(), "answer_language", "en", "user")
     snapshot = json.loads(serialize_search_profile(original))

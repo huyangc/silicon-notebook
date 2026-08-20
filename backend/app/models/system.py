@@ -68,9 +68,9 @@ class SystemConfiguration(BaseModel):
     # 这个字段与端点是同批新增的，缺失只可能是旧后端，不存在「端点在但字段缺」的组合）。
     agent_profile_enabled: bool
     # Agentic Memory P3（B-Profile，T6）：「我的回答偏好」入口的能力位，直接反映
-    # Settings.user_search_profile_enabled——前端据此决定要不要在账户菜单渲染入口
-    # （见 system-api.ts：字段缺失按 true 处理，与 agent_profile_enabled 的「缺失
-    # 按 false」相反——这里默认值本身就是开启，旧后端缺这个字段不该把入口隐藏成
-    # 一个「看起来关闭了」的状态；真正的写路径仍由 PATCH /me/search-profile 的
-    # 409 兜底）。
+    # Settings.user_search_profile_enabled——字段本批只随 GET /system/config 下发，
+    # 前端消费（system-api.ts 的解析逻辑）从 T9 起才接线：届时字段缺失按 true 处理，
+    # 与 agent_profile_enabled 的「缺失按 false」相反——这里默认值本身就是开启，
+    # 旧后端缺这个字段不该把入口隐藏成一个「看起来关闭了」的状态；真正的写路径
+    # 仍由 PATCH /me/search-profile 的 409 兜底。
     user_search_profile_enabled: bool

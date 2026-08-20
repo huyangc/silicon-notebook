@@ -16,6 +16,7 @@ from app.repositories.identity_errors import (
 )
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.search_profile import (
+    SEARCH_PROFILE_ORIGINS,
     merge_field,
     parse_search_profile,
     serialize_search_profile,
@@ -368,7 +369,7 @@ class IdentityStore:
         缺 profile 行(理论上不会发生——create_user/_seed 必建)时补插一行,
         镜像 ``set_user_ui_mode`` 的自愈语义(自助写自己的偏好不该因为一行
         缺失的种子数据就 404)。目标用户不存在 → KeyError。"""
-        if origin not in {"user", "job"}:
+        if origin not in SEARCH_PROFILE_ORIGINS:
             raise ValueError("invalid search-profile origin")
         now = _now()
         with self.database.write() as db:

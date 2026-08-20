@@ -200,17 +200,22 @@ def merge_field(profile: Mapping[str, Any], field: str, value: Any, origin: str)
     one read-modify-write transaction, and an in-place mutation would make
     that fold order-dependent in surprising ways).
 
-    * ``value is None`` clears the field: the stored entry is deleted
-      outright (not written as an explicit "auto"), so it falls back to "not
-      set" for both display and future re-inference. See the module
-      docstring for why deletion, not a stored auto value.
-    * ``origin="user"`` unconditionally overwrites — a person's explicit
-      choice always wins, including over a field a previous job run had
-      filled in.
     * ``origin="job"`` MUST skip (return the field untouched, no exception)
       when the field's *current* stored origin is ``"user"`` — the one rule
       that keeps a background inference from ever overwriting a person's own
-      edit. This mirrors ``agent_profile_job.user_authoritative``.
+      edit. This mirrors ``agent_profile_job.user_authoritative``. This guard
+      is checked BEFORE the "clear" branch below, and covers it too: a
+      job's ``value=None`` is a clear, not an overwrite, but deleting a
+      user-authored field without authority is the same laundering this
+      rule blocks, not a smaller exception to it.
+    * ``value is None`` clears the field (once the guard above lets the call
+      through): the stored entry is deleted outright (not written as an
+      explicit "auto"), so it falls back to "not set" for both display and
+      future re-inference. See the module docstring for why deletion, not a
+      stored auto value.
+    * ``origin="user"`` unconditionally overwrites or clears — a person's
+      explicit choice always wins, including over a field a previous job run
+      had filled in.
     * An unknown ``field``/``origin`` name, or a value that fails
       :func:`_validate_field_value`, raises ``ValueError`` — these are all
       programming errors on the caller's side (the wire model already
@@ -226,16 +231,22 @@ def merge_field(profile: Mapping[str, Any], field: str, value: Any, origin: str)
 
     fields = dict(profile.get("fields") or {})
 
-    if value is None:
-        fields.pop(field, None)
-        return {"version": SEARCH_PROFILE_VERSION, "fields": fields}
-
     existing = fields.get(field)
     if origin == "job" and existing is not None and existing.get("origin") == "user":
-        # Job writes never launder over a user-authored field. Return the
-        # field as-is (not an error — this is the expected, silent outcome
-        # of a job batch that happens to touch a field the user has already
-        # set).
+        # Job writes never launder over a user-authored field — including
+        # a job's own CLEAR (``value is None``). This guard must run BEFORE
+        # the "value is None" branch below, not after: a job that clears a
+        # field it has no authority to touch is the same violation as a job
+        # that overwrites it with a new value — deleting a user's explicit
+        # choice is exactly the kind of "laundering over a person's own
+        # edit" this rule exists to block, not a smaller, safer variant of
+        # it. Return the field as-is (not an error — this is the expected,
+        # silent outcome of a job batch that happens to touch a field the
+        # user has already set).
+        return {"version": SEARCH_PROFILE_VERSION, "fields": fields}
+
+    if value is None:
+        fields.pop(field, None)
         return {"version": SEARCH_PROFILE_VERSION, "fields": fields}
 
     if not _validate_field_value(field, value):
