@@ -700,8 +700,9 @@ class Settings(BaseSettings):
     # ``reasoning_retrieval.search_profile_wiring_active``,T7 归纳 job 的
     # 触发闸、T8 的 Ask plan/answer 注入闸与本端点的可写性/可见性判据三处必须
     # 共用它(镜像上面 agent_profile_enabled 的教训)。关掉即完全回到接入前:
-    # 不归纳、不注入、``PATCH /me/search-profile`` 一律 409、``GET /me`` 仍
-    # 回 ``search_profile: null``(与列缺失同一口径,不额外区分)。
+    # 不归纳、不注入、``PATCH /me/search-profile`` 一律 409——但读路径不看这个
+    # 开关,``GET /me`` 仍照常返回该用户上次归纳/编辑留下的既存值(列本身没有
+    # 被清空),不是伪造成 ``search_profile: null``。
     user_search_profile_enabled: bool = Field(
         True, validation_alias="USER_SEARCH_PROFILE_ENABLED")
     # T7 归纳 job 的触发阈值(确定性闸,零模型调用——v1 归纳规则本身就是零 LLM

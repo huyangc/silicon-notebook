@@ -198,6 +198,10 @@ def test_patch_search_profile_is_409_when_globally_disabled(tmp_path, monkeypatc
         headers={"Authorization": f"Bearer {token}"},
     )
     assert r.status_code == 409, r.text
+    # user_error() must be the origin of this 409 -- deps.USER_MESSAGE_HEADER
+    # marks detail as ready-to-display Chinese user copy (CLAUDE.md "错误
+    # 文案" red line), not a raw str(exc) a caller forgot to translate.
+    assert r.headers.get("X-User-Message") == "1"
 
 
 def test_patch_search_profile_requires_auth(client):

@@ -25,6 +25,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.services.search_profile import (
+    SEARCH_PROFILE_ORIGINS,
     merge_field,
     parse_search_profile,
     serialize_search_profile,
@@ -383,7 +384,7 @@ class IdentityStore:
         这条竞态本身只发生在 profile 行整个不存在的边界情形;一旦行存在,
         ``FOR UPDATE`` 才是本方法真正的并发保证。目标用户不存在 →
         KeyError。"""
-        if origin not in {"user", "job"}:
+        if origin not in SEARCH_PROFILE_ORIGINS:
             raise ValueError("invalid search-profile origin")
         now = utc_now()
         with self.database.write() as db:
