@@ -1,0 +1,273 @@
+"""PostgreSQL conformance for ``AgentObservationStorePort`` (Agentic Memory
+P3, T2).
+
+Scope is deliberately narrow, mirroring ``test_agent_profile_store_
+conformance.py``'s own rationale: the SQLite side already has full
+behavioural coverage in ``tests/test_agent_observation_store.py`` (identical
+fixtures, identical assertions — this store is a behavioural mirror by
+design). This file only proves the things that are genuinely
+backend-specific:
+
+- the idempotency check is expressed as ``INSERT ... ON CONFLICT (...) WHERE
+  client_request_id IS NOT NULL DO NOTHING`` rather than SQLite's
+  ``begin_immediate`` + a pre-insert ``SELECT`` — a losing concurrent writer
+  must land on the SAME row a winning one just created, not raise;
+- eviction orders by ``id COLLATE "C" DESC`` to match SQLite's default binary
+  collation on a non-C-collated database, and the SAME rows must survive on
+  both backends given the SAME inputs;
+- ``created_at`` round-trips through a real ``timestamptz`` column and must
+  still come back as ISO text through ``project_observation_row``.
+"""
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+
+import pytest
+
+from app.repositories.ports import AGENT_OBSERVATION_RING_MAX
+from app.repositories.postgres.agent_observation_store import AgentObservationStore
+from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+NOW = "2026-08-20T00:00:00+00:00"
+NOTEBOOK_ID = "nb-agent-observation"
+OTHER_NOTEBOOK_ID = "nb-agent-observation-2"
+
+pytestmark = pytest.mark.postgres_integration
+
+
+class _Clock:
+    """A monotonically advancing ISO timestamp — mirrors the SQLite test's
+    own ``_Clock``, one call, one second later, so eviction-ordering
+    assertions exercise ``created_at`` rather than the ``id`` tie-break
+    alone."""
+
+    def __init__(self, start: str = NOW) -> None:
+        from datetime import datetime
+
+        self._base = datetime.fromisoformat(start)
+        self._n = 0
+
+    def __call__(self) -> str:
+        from datetime import timedelta
+
+        value = (self._base + timedelta(seconds=self._n)).isoformat()
+        self._n += 1
+        return value
+
+
+def _seams(clock) -> RepositoryCompatibilitySeams:
+    lock = threading.Lock()
+    counter: dict[str, int] = {}
+
+    def new_id(prefix: str) -> str:
+        with lock:
+            counter[prefix] = counter.get(prefix, 0) + 1
+            return f"{prefix}-obs-{counter[prefix]:06d}"
+
+    return RepositoryCompatibilitySeams(
+        new_id=new_id,
+        now=clock,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+
+
+def _seed(database, *, notebook_ids) -> None:
+    mark = "%s"
+    with database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            f"VALUES ({','.join([mark] * 11)})",
+            (
+                "user-owner", "owner@example.test", "Owner", "admin", "active",
+                NOW, NOW, "u00654322", "", "", 0,
+            ),
+        )
+        for notebook_id in notebook_ids:
+            connection.execute(
+                "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+                "created_at,updated_at,tier) "
+                f"VALUES ({','.join([mark] * 9)})",
+                (
+                    notebook_id, "NB", "", "engineering", "ready", "user-owner",
+                    NOW, NOW, "personal",
+                ),
+            )
+
+
+@dataclass
+class AgentObservationHarness:
+    database: object
+    store: AgentObservationStore
+    clock: _Clock
+
+
+@pytest.fixture
+def agent_observation_harness(request) -> AgentObservationHarness:
+    clock = _Clock()
+    seams = _seams(clock)
+    database = request.getfixturevalue("postgres_database")
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(database).migrate() == 33
+    _seed(database, notebook_ids=(NOTEBOOK_ID, OTHER_NOTEBOOK_ID))
+    yield AgentObservationHarness(
+        database=database,
+        store=AgentObservationStore(database, new_id=seams.new_id, now=seams.now),
+        clock=clock,
+    )
+
+
+def test_append_observation_round_trips_created_at_as_iso_text(
+    agent_observation_harness,
+):
+    harness = agent_observation_harness
+    observation_id, deduplicated = harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1",
+        text="jsonb round trip? no — plain text column", client_request_id="req-1",
+    )
+    assert deduplicated is False
+    rows = harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10)
+    assert len(rows) == 1
+    assert rows[0]["id"] == observation_id
+    assert rows[0]["created_at"] == NOW
+    assert set(rows[0]) == {"id", "agent_profile_id", "text", "created_at"}
+
+
+def test_append_observation_on_conflict_do_nothing_lands_on_the_winning_row(
+    agent_observation_harness,
+):
+    harness = agent_observation_harness
+    first_id, first_dup = harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1",
+        text="first", client_request_id="same-request",
+    )
+    assert first_dup is False
+
+    second_id, second_dup = harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1",
+        text="second — must be ignored", client_request_id="same-request",
+    )
+    assert second_id == first_id
+    assert second_dup is True
+
+    with harness.database.connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS n FROM agent_observations "
+            "WHERE notebook_id=%s AND owner_id=%s",
+            (NOTEBOOK_ID, "user-a"),
+        ).fetchone()
+    assert row["n"] == 1
+
+
+def test_idempotency_key_includes_agent_profile_id(agent_observation_harness):
+    harness = agent_observation_harness
+    id_a, dup_a = harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1",
+        text="from agent 1", client_request_id="shared-req",
+    )
+    id_b, dup_b = harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-2",
+        text="from agent 2", client_request_id="shared-req",
+    )
+    assert dup_a is False
+    assert dup_b is False
+    assert id_a != id_b
+
+
+def test_eviction_orders_by_created_at_desc_id_collate_c_desc_same_as_sqlite(
+    agent_observation_harness,
+):
+    """Same inputs, same surviving rows as the SQLite mirror's own eviction
+    test — the two backends must never independently decide which rows in a
+    tied ordering survive."""
+    harness = agent_observation_harness
+    total = AGENT_OBSERVATION_RING_MAX + 5
+    inserted_ids: list[str] = []
+    for i in range(total):
+        observation_id, deduplicated = harness.store.append_observation(
+            NOTEBOOK_ID, "user-a", "agent-1",
+            text=f"note {i}", client_request_id=f"req-{i}",
+        )
+        assert deduplicated is False
+        inserted_ids.append(observation_id)
+
+    rows = harness.store.list_observations(NOTEBOOK_ID, "user-a", limit=total)
+    assert len(rows) == AGENT_OBSERVATION_RING_MAX
+    kept_ids = {row["id"] for row in rows}
+    assert kept_ids == set(inserted_ids[-AGENT_OBSERVATION_RING_MAX:])
+
+    with harness.database.connect() as connection:
+        total_rows = connection.execute(
+            "SELECT COUNT(*) AS n FROM agent_observations "
+            "WHERE notebook_id=%s AND owner_id=%s",
+            (NOTEBOOK_ID, "user-a"),
+        ).fetchone()["n"]
+    assert total_rows == AGENT_OBSERVATION_RING_MAX
+
+
+def test_recent_observations_is_scoped_by_owner_id(agent_observation_harness):
+    harness = agent_observation_harness
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1", text="a-only", client_request_id="r1",
+    )
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-b", "agent-1", text="b-only", client_request_id="r1",
+    )
+    a_rows = harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10)
+    b_rows = harness.store.recent_observations(NOTEBOOK_ID, "user-b", limit=10)
+    assert [row["text"] for row in a_rows] == ["a-only"]
+    assert [row["text"] for row in b_rows] == ["b-only"]
+
+
+def test_clear_observations_by_agent_profile_only_removes_that_agent(
+    agent_observation_harness,
+):
+    harness = agent_observation_harness
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1", text="keep-target", client_request_id="r1",
+    )
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-2", text="other-agent", client_request_id="r1",
+    )
+    removed = harness.store.clear_observations(
+        NOTEBOOK_ID, "user-a", agent_profile_id="agent-1"
+    )
+    assert removed == 1
+    remaining = harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10)
+    assert [row["agent_profile_id"] for row in remaining] == ["agent-2"]
+
+
+def test_clear_observations_without_agent_profile_removes_everything_in_scope(
+    agent_observation_harness,
+):
+    harness = agent_observation_harness
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1", text="a", client_request_id="r1",
+    )
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-2", text="b", client_request_id="r2",
+    )
+    removed = harness.store.clear_observations(NOTEBOOK_ID, "user-a")
+    assert removed == 2
+    assert harness.store.recent_observations(NOTEBOOK_ID, "user-a", limit=10) == []
+
+
+def test_notebook_delete_cascades_observation_rows(agent_observation_harness):
+    harness = agent_observation_harness
+    harness.store.append_observation(
+        NOTEBOOK_ID, "user-a", "agent-1", text="a", client_request_id="r1",
+    )
+    harness.store.append_observation(
+        OTHER_NOTEBOOK_ID, "user-a", "agent-1", text="b", client_request_id="r1",
+    )
+    with harness.database.write() as connection:
+        connection.execute("DELETE FROM notebooks WHERE id=%s", (NOTEBOOK_ID,))
+    with harness.database.connect() as connection:
+        remaining = connection.execute(
+            "SELECT notebook_id FROM agent_observations"
+        ).fetchall()
+    assert [row["notebook_id"] for row in remaining] == [OTHER_NOTEBOOK_ID]
