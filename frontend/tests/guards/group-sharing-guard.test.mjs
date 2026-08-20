@@ -63,13 +63,25 @@ test("访问权变动之后必须连当前工作区一起对账,而不只是刷�
   const insideGroup = callsIn(groupPath);
   assert.ok(insideGroup.includes("listNotebooks"), "没重取清单");
   assert.ok(insideGroup.includes("reconcileOpenNotebook"), "重取了清单却不对账当前工作区");
+  // 两次复核会叠在一起(切回标签页一次、弹窗里的动作又一次),而先发的那次可以后回。
+  // 没有请求世代闸,旧响应会把撤销前的清单盖回去——工作区已经跳走了,列表里那本读不到
+  // 的库却又活过来(codex #529 R4 P2)。`navEpoch` 挡的是导航,挡不住这个。
+  assert.ok(
+    ifConditionsIn(groupPath).some((condition) => /accessRefreshSeqRef/.test(condition)),
+    "重取清单没有过期结果闸,旧响应会把撤销前的快照盖回去",
+  );
 
-  // 链接共享的退出走同一个对账,不另抄一份。
+  // 链接共享的退出走**同一个收口**,不另抄一份重取+对账:抄一份就会漏掉其中一道闸,
+  // 而它恰恰漏过——请求世代闸是 R4 补的,那时它自己那份拷贝里就没有(codex #529 R4)。
   const leave = findFunction(page, "handleLeaveShared");
   assert.ok(leave, "缺 handleLeaveShared");
   assert.ok(
-    callsIn(leave).includes("reconcileOpenNotebook"),
-    "「退出只读共享」没复用同一个对账实现",
+    callsIn(leave).includes("refreshAfterAccessChange"),
+    "「退出只读共享」没复用同一个收口",
+  );
+  assert.ok(
+    !callsIn(leave).includes("listNotebooks"),
+    "「退出只读共享」又自己抄了一份重取——那份必然漏闸",
   );
 
   // history 只在这次 fallback 导航**真的成功**之后才写:用户在它在飞时自己点去别处,

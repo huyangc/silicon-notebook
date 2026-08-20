@@ -1981,6 +1981,9 @@ export default function Home() {
   // 的 cancelled 变 true,但只有前者需要放弃刷新。同 sourcesRef 的既有轻量方案。
   const currentNotebookIdRef = useRef<string | null>(null);
   const revalidateAccessRef = useRef<() => void>(() => {});
+  // 「只有最新一次访问权复核的结果算数」:先发后回的旧响应必须整条丢弃,不能把撤销前的
+  // 笔记本清单盖回去。与本文件既有的 `sourcePageRequestRef` 等过期结果 guard 同一形状。
+  const accessRefreshSeqRef = useRef(0);
   // Live refs for source paging/query so long-lived poll effects (paper-meta
   // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
   // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
@@ -6256,11 +6259,19 @@ export default function Home() {
    * 改的只是「我能看到哪些库」。这里一次 `listNotebooks()` 既刷清单、又喂给上面的对账,
    * 不为同一件事发两次同样的请求。
    */
-  async function refreshAfterAccessChange() {
-    // 世代必须在**第一个 await 之前**取,它是「这次对账发起时用户在哪」的快照。
-    const navEpoch = workspaceEpochRef.current;
+  async function refreshAfterAccessChange(
+    // 「这次对账发起时用户在哪」的快照。默认参数在**第一个 await 之前**求值,所以直接
+    // 调用是对的;`handleLeaveShared` 传自己更早取的那一份(它在 await 撤销请求之前)。
+    navEpoch: number = workspaceEpochRef.current,
+  ) {
+    // ⚠ 两次复核可以叠在一起(切回标签页触发一次,用户紧接着在弹窗里退出群组又触发一次),
+    // 而**先发的那次可以后回**。没有这道请求世代闸,旧响应会用 `setNotebooks` 把撤销前的
+    // 快照盖回去——工作区已经正确跳走了,列表里那本读不到的库却又活了过来,要等下一次刷新
+    // 才消失(codex #529 R4 P2)。`navEpoch` 挡的是导航,挡不住这个:那是两回事。
+    const seq = ++accessRefreshSeqRef.current;
     const remaining = await listNotebooks();
-    // 清单照刷:它无害且必要,被世代挡掉的只有导航那一步。
+    if (accessRefreshSeqRef.current !== seq) return;
+    // 清单照刷:它无害且必要,被 navEpoch 挡掉的只有导航那一步。
     setNotebooks(remaining);
     await reconcileOpenNotebook(remaining, navEpoch);
   }
@@ -6272,9 +6283,9 @@ export default function Home() {
     setLeaveBusy(true);
     try {
       await leaveNotebook(leftId);
-      const remaining = await listNotebooks();
-      setNotebooks(remaining);
-      await reconcileOpenNotebook(remaining, navEpoch);
+      // 走同一条收口:重取、请求世代闸、对账都别再抄一份(抄一份就会漏掉其中一道闸——
+      // 这次漏的正是请求世代)。
+      await refreshAfterAccessChange(navEpoch);
       setToast("已退出只读共享");
     } finally {
       setLeaveBusy(false);
