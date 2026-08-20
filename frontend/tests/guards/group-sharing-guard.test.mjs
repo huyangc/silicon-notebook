@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  assignmentsIn,
   callsIn,
   findFunction,
   ifConditionsIn,
@@ -202,5 +203,39 @@ test("挂载选择器分三档,第三档是「共享给我的」", () => {
   assert.ok(
     pageText.includes('render("共享给我的", groups.shared, "shared")'),
     "缺第三档:共享/群组授权进来的库会被标成「我的笔记本」",
+  );
+});
+
+
+// 本地那条对账只覆盖「在这台浏览器上发起」的改动。被别人移出群组、组被别的管理员删掉、
+// 库主撤销共享——都发生在别处,本浏览器收不到任何事件,人会继续坐在一本读不到的库里,
+// 直到某次交互撞上 403(codex #529 R3 P1)。没有推送通道,所以退而求其次:标签页重新
+// 可见时复用**同一条**对账路径。这条钉的正是「同一条」——另开一个只刷列表的旁路,
+// 用户照样被留在那本库里。
+test("远端撤销:标签页重新可见时复用同一条对账路径", () => {
+  const revalidator = findFunction(page, "revalidate");
+  assert.ok(revalidator, "缺 visibilitychange 复核入口 revalidate");
+
+  // 走 live ref 而不是直接捕获:那个 effect 只挂载一次,直接捕获会读到挂载时的旧闭包。
+  assert.ok(
+    callsIn(revalidator).some((call) => /revalidateAccessRef\.current/.test(call)),
+    "复核没有走 live ref",
+  );
+  // 节流:密集 alt-tab 不该每切回一次就发一次 listNotebooks()。
+  assert.ok(
+    ifConditionsIn(revalidator).some(
+      (condition) => /ACCESS_REVALIDATE_MIN_INTERVAL_MS/.test(condition),
+    ),
+    "复核没有节流",
+  );
+
+  const home = findFunction(page, "Home");
+  assert.ok(home, "找不到页面组件 Home");
+  assert.ok(
+    assignmentsIn(home).some(
+      (assignment) => assignment.target.includes("revalidateAccessRef.current")
+        && /refreshAfterAccessChange/.test(assignment.value),
+    ),
+    "live ref 没有接到 refreshAfterAccessChange——复核成了只刷列表的旁路",
   );
 });
