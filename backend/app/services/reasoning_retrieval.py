@@ -3892,6 +3892,16 @@ class ReasoningRetriever:
                         summary=("跳过回想以往打法(已达次数上限 "
                                  f"{action_policy.max_consult_memory})"),
                         detail={"reason": "consult_memory_cap"}))
+                elif steps >= max_steps:
+                    # codex #538 R4 P2:这是最后一个允许的循环轮——回想的产出
+                    # 只进**下一轮** reflect 的上下文,而下一轮不存在了:执行
+                    # 只会花掉末轮预算渲染一段没有任何模型调用会读到的文本,
+                    # 还顶掉一次本可以真正取证的收尾检索。直接拒绝,不扣
+                    # consult 预算(这轮本来就没送达任何东西)。
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过回想以往打法(已是最后一轮,建议无人消费)",
+                        detail={"reason": "consult_memory_last_turn"}))
                 else:
                     consult_used += 1
                     # codex #538 R1 P2:整个执行体 fail-open——注入开着时一次

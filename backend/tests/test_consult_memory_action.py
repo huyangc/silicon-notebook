@@ -679,3 +679,25 @@ def test_a_delivering_consult_turn_does_not_advance_the_stale_breaker(repo):
                for p in llm.reflect_prompts), (
         "送达的打法块必须出现在后续 reflect prompt 里"
     )
+
+
+def test_consult_on_the_final_turn_is_rejected_without_spending_budget(repo, monkeypatch):
+    """codex #538 R4 P2:最后一个循环轮选 consult——产出只进下一轮 reflect,
+    而下一轮不存在:执行只会白花末轮渲染没人读的文本。拒绝并记
+    consult_memory_last_turn,不扣 consult 预算。"""
+    notebook = _seed(repo)
+    filler = "z" * 150
+    _write_experience(repo, "ppr", "bad", f"ppr {filler}a.")
+    _write_experience(repo, "exact_lookup", "bad", f"exact {filler}b.")
+    _write_experience(repo, "follow_chain", "bad", f"chain {filler}c.")
+    monkeypatch.setattr(repo.settings, "reasoning_max_steps", 1)
+    llm = _SeqLLM([{"next_action": "consult_memory"},
+                   {"next_action": "answer", "sufficient": True}])
+    retriever = _retriever(repo, llm)
+    result, _limits = _run(retriever, notebook, "deep")
+
+    skip_reasons = [
+        s.detail.get("reason") for s in result.trace if s.step_type == "skip"
+    ]
+    assert "consult_memory_last_turn" in skip_reasons
+    assert not _steps(result, "consult_memory")
