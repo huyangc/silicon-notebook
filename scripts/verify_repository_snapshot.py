@@ -3333,10 +3333,14 @@ MIGRATION_MANIFEST[(53, 54)] = {
 # Same cascade as every other hop: broadcast onto every prior hop key rebased
 # to v55, then register the explicit (54, 55) single hop. SQL text matches
 # sqlite_master storage verbatim (SQLite strips "IF NOT EXISTS" and keeps the
-# source indentation).
+# source indentation). Updated by the T2/T6 fix round (still v55 — the
+# migration was NOT yet merged/shipped when the round landed, so it was
+# amended in place rather than appended as a new hop): `id` gained an
+# explicit NOT NULL, and the non-unique `idx_agent_observations_scope`
+# covering index was added.
 AGENT_OBSERVATION_TABLES = {
     "agent_observations": """CREATE TABLE agent_observations (
-                  id                TEXT PRIMARY KEY,
+                  id                TEXT PRIMARY KEY NOT NULL,
                   notebook_id       TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
                   owner_id          TEXT NOT NULL DEFAULT '',
                   agent_profile_id  TEXT NOT NULL DEFAULT '',
@@ -3350,6 +3354,11 @@ AGENT_OBSERVATION_INDEXES = {
         "CREATE UNIQUE INDEX idx_agent_observations_request\n"
         "                  ON agent_observations(notebook_id, owner_id, agent_profile_id, client_request_id)\n"
         "                  WHERE client_request_id IS NOT NULL",
+    # T2/T6 修复轮:非唯一 scope 索引,依据实测数字(见迁移注释)追加,不进
+    # shadow unique surface。
+    "idx_agent_observations_scope":
+        "CREATE INDEX idx_agent_observations_scope\n"
+        "                  ON agent_observations(notebook_id, owner_id, created_at, id)",
 }
 SEARCH_PROFILE_COLUMNS = {
     "user_profiles": {
