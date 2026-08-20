@@ -2465,6 +2465,31 @@ def create_memory_mcp(
                         text=clean_text, client_request_id=clean_request_id,
                     )
                 )
+            # codex #535 R11 P2: the access check above and the append are two
+            # steps, so a member removed IN BETWEEN can have their rows cleared
+            # by the removal path first and this append land after — an orphan
+            # row that resurrects on rejoin, violating the blank-slate
+            # contract. Recheck access AFTER the append (same posture as the
+            # P2 overlay chains' pre-bump membership recheck): either the
+            # removal's clear ran after our append (it took our row with it),
+            # or it ran before — then this recheck sees the revocation and the
+            # compensating clear removes what we just wrote. A recheck ERROR
+            # keeps the row (fail-open: the append was legitimate under the
+            # access state this tool verified moments ago).
+            try:
+                repo.require_agent_access(
+                    principal, "agent_observation:write", notebook_id
+                )
+            except PermissionError:
+                repo.agent_observations.clear_observations(
+                    notebook_id, principal.owner_id
+                )
+                raise ValueError(
+                    "notebook access was revoked while this observation was "
+                    "being written; the observation was discarded"
+                )
+            except Exception:  # noqa: BLE001 — fail-open, see above
+                pass
             # Returns immediately -- the write itself is one bounded INSERT
             # plus one bounded eviction DELETE, zero model calls, so there is
             # nothing to queue. "Asynchronous" here means only that THIS

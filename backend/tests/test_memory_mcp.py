@@ -3780,6 +3780,42 @@ async def test_add_observation_is_allowed_for_a_read_only_shared_notebook(mcp_en
 
 
 @pytest.mark.anyio
+async def test_add_observation_landing_after_member_removal_is_compensated(
+    mcp_env, monkeypatch,
+):
+    """codex #535 R11 P2:访问校验与 append 是两步——成员在中间被移出时,移除
+    路径先清了他的行、append 随后落地,留下重新加入即复活的孤儿行。修复是
+    append 之后**复核访问**:撤销即补偿清理并报错。这里用 append 包装器把
+    「移除恰落在两步之间」确定性排出来(真实并发无法稳定复现)。"""
+    repo = repository()
+    notebook_id = mcp_env["notebook"].id
+    bob = mcp_env["bob"]
+    bob_token = _agent_token(mcp_env, _OBSERVATION_WRITE, user="bob")
+
+    store = repo.agent_observations
+    real_append = store.append_observation
+
+    def append_then_remove(*args, **kwargs):
+        result = real_append(*args, **kwargs)
+        # 模拟移除恰好在 append 与复核之间完成:清行 + 撤成员
+        repo.remove_member(notebook_id, bob.id)
+        return result
+
+    monkeypatch.setattr(store, "append_observation", append_then_remove)
+
+    async with OfficialMcpClient(mcp_env["app"], bob_token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        result = await client.call("add_observation", {
+            "text": "landed after removal", "client_request_id": "race-1",
+        })
+
+    assert result.isError
+    assert repo.agent_observations.list_observations(
+        notebook_id, bob.id, limit=10
+    ) == [], "移除后落地的观察必须被补偿清理,不得留下复活孤儿行"
+
+
+@pytest.mark.anyio
 async def test_add_observation_requires_its_own_scope(mcp_env):
     notebook_id = mcp_env["notebook"].id
     token = _agent_token(mcp_env, ["knowledge:read"])
