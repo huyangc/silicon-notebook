@@ -1597,12 +1597,13 @@ def retrieval_experience_prompt(
     * **One entry says one thing about one action.** An entry that hedges
       across several actions cannot be scored, cannot be retired, and cannot be
       compared with the entry that contradicts it.
-    * **Failures outrank successes.** They are also the only signal this
-      feature observes per action: which actions came back empty is counted per
-      step, while "the answer was well supported" is only known for the run as
-      a whole (see ``RunObservation``'s docstring). Saying so plainly here
-      stops the model from reading a run-level citation count as a verdict on
-      whichever action it happens to be writing about.
+    * **Failures outrank successes.** Which actions came back empty is always
+      counted per action (see ``RunObservation``'s docstring). Success is too,
+      now, but only where it could actually be checked against what the answer
+      cited — an ``anchored=`` figure on an action's line is that per-action
+      evidence; its absence means the batch (or that particular action) has
+      nothing but the run-level ``total_citations`` to go on, and that number
+      must never be read as a verdict on one particular action.
     """
     action_list = ", ".join(actions)
     return (
@@ -1621,10 +1622,14 @@ def retrieval_experience_prompt(
         "2. One entry is about exactly ONE action for ONE situation. Never "
         "hedge across actions in a single entry.\n"
         "3. Prefer what FAILED. 'This action keeps coming back empty in this "
-        "shape of question' is the most useful thing you can record. Note that "
-        "empty-result counts are per action, while the citation count is for "
-        "the whole run — never attribute a run's success or failure to one "
-        "particular action.\n"
+        "shape of question' is still the most useful thing you can record, and "
+        "empty-result counts are always per action. When an action's line also "
+        "carries an 'anchored=' figure, that count IS per-action success "
+        "evidence: results from that action that the answer actually cited, "
+        "counted only among the runs where such a check was possible. When a "
+        "line has no 'anchored=' figure, that batch predates this check for "
+        "that action — total_citations is a WHOLE-RUN number in every case "
+        "and must never be attributed to one particular action.\n"
         "4. op is ADD for a conclusion the library does not hold yet, UPDATE to "
         "revise the polarity or wording of an entry listed below, NOOP to leave "
         "a situation alone. UPDATE only when the new numbers actually "
