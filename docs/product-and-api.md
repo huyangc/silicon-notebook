@@ -920,7 +920,11 @@ response; it is prompt scaffolding for planning, never something to cite. When
 tool returns `enabled: false` with empty blocks rather than erroring. `add_observation`
 (scope `agent_observation:write`) appends one short line — at most
 `AGENT_OBSERVATION_TEXT_MAX_CHARS` (500) characters — to the caller's own observation log for
-this notebook, deduplicated per `client_request_id` the same way `propose_memory` is. It
+this notebook, deduplicated per `client_request_id` the same way `propose_memory` is. The
+idempotency window is **bounded by ring retention** (a registered contract, not a defect):
+once `AGENT_OBSERVATION_RING_MAX` newer observations have evicted a row, retrying its old
+`client_request_id` writes a fresh row — an everlasting key table is not worth a migration
+for a retry contract measured in seconds. It
 returns immediately; the write itself is a bounded insert plus a bounded ring-eviction delete
 in one transaction, with zero model calls, so there is no async status to poll. It is the
 **second** Agent write that bypasses `_writable_notebook`'s owner-only gate — the first is

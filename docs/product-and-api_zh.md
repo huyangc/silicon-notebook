@@ -701,7 +701,9 @@ id、不带 `revision`、不带变更历史，因此只持有这一个 scope 的
 或该库尚未生成过理解时，工具返回 `enabled: false` 与空块，而不是报错。
 `add_observation`（scope `agent_observation:write`）向调用者自己在该库的观察队列追加一行
 不超过 `AGENT_OBSERVATION_TEXT_MAX_CHARS`（500）字符的记录，按 `client_request_id` 幂等去
-重（与 `propose_memory` 同一套机制）。它立即返回——写入本身只是一次有界 INSERT 加同一
+重（与 `propose_memory` 同一套机制）。幂等窗口**以环形保留为界**（登记的合同而非缺陷）：
+当 `AGENT_OBSERVATION_RING_MAX` 条更新的观察把某行淘汰后，重试它的旧 `client_request_id`
+会写出一条新行——为以秒计的重试合同单开一张永久 key 表不值一次迁移。它立即返回——写入本身只是一次有界 INSERT 加同一
 事务内的有界环形淘汰 DELETE，零模型调用，因此没有异步状态可轮询。它是**第二个**绕开
 `_writable_notebook` owner-only 门的 Agent 写（第一个是 `put_knowhow_cell_code`）：爆炸半径
 结构上只到 token 持有者自己的覆盖层而非整库检索，因此只读成员自己的 Agent 也能用它；这条

@@ -6821,7 +6821,14 @@ export default function Home() {
             onOpenMemory={showGlobalMemory}
             onOpenGroups={() => setGroupsOpen(true)}
             onToggleAdvancedMode={() => handleToggleAdvancedMode().catch(reportError)}
-            onOpenSearchProfile={() => setSearchProfileModalOpen(true)}
+            onOpenSearchProfile={() => {
+              // codex #535 R4 P2:归纳 job 可能在本次浏览器会话期间更新了偏好
+              // 文档,currentUser 还是登录时那份——先刷一次 /me 再开弹窗,推断
+              // 徽标与「设为你的选择」才拿得到新值;刷新失败照常打开(纯优化,
+              // 不能把设置入口做成依赖一次网络往返)。
+              setSearchProfileModalOpen(true);
+              void fetchMe().then(setCurrentUser).catch(() => undefined);
+            }}
             onChangePassword={() => setPasswordModalOpen(true)}
             onLogout={() => handleLogout().catch(reportError)}
           />
