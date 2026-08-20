@@ -2670,7 +2670,8 @@ def test_run_exact_lookup_seed_pass_takes_the_whole_named_section(rrepo):
         nb.id, "set_db 命令是怎样的", "")
 
     step = next(t for t in res.trace if t.step_type == "exact_lookup")
-    assert step.detail == {"terms": ["set_db"], "found": 2, "phase": "seed"}
+    assert step.detail == {"terms": ["set_db"], "found": 2, "phase": "seed",
+                           "result_ids": ["ck-main", "ck-args"]}
     assert step.summary == "按名称精确查找:新增 2 段原文"
     # 主描述与参数表都在——分块把它们切开、普通检索只留其一,正是本通道要治的。
     assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
@@ -2764,7 +2765,8 @@ def test_run_exact_lookup_action_pulls_the_section_the_model_named(rrepo):
 
     step = next(t for t in res.trace if t.step_type == "exact_lookup")
     assert step.detail == {"term": "set_db", "terms": ["set_db"],
-                           "found": 2, "phase": "reflect"}
+                           "found": 2, "phase": "reflect",
+                           "result_ids": ["ck-main", "ck-args"]}
     assert step.summary == "按名称精确查找「set_db」:新增 2 段原文"
     assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
     assert calls == ['"set_db"']
@@ -2967,7 +2969,7 @@ def test_allow_exact_lookup_policy_flag_disables_seed_and_action(rrepo):
     seed_step = next(t for t in res2.trace if t.step_type == "exact_lookup")
     assert seed_step.detail == {
         "terms": ["table_title", "known_cells", "content_md"],
-        "found": 0, "phase": "seed",
+        "found": 0, "phase": "seed", "result_ids": [],
     }
 
 
@@ -3039,7 +3041,8 @@ def test_run_ppr_seed_precedes_exact_seed_and_shares_chunk_dedup(rrepo):
     assert ppr_idx < exact_idx                                # PPR seed 排在精确查找 seed 之前
 
     ppr_step = res.trace[ppr_idx]
-    assert ppr_step.detail == {"found": 2, "phase": "seed"}   # PPR 先到,两段都算它的新增
+    assert ppr_step.detail == {"found": 2, "phase": "seed",   # PPR 先到,两段都算它的新增
+                               "result_ids": ["ck-main", "ppr-only"]}
 
     exact_step = res.trace[exact_idx]
     # 精确查找命中 ck-main + ck-args,但 ck-main 已被 PPR 领走 → 只剩 ck-args 算新增。
