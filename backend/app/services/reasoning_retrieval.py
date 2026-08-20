@@ -49,6 +49,7 @@ from app.services.retrieval import (
     NeighborExpansion, RetrievedChunk, RetrievedElement, RetrievedKnowledge,
 )
 from app.services.retrieval_run import retrieval_fanout_slot
+from app.services.search_profile import render_style_block
 from app.services.reports.policy import (
     DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR,
     DEFAULT_REASONING_MAX_EXACT_LOOKUPS,
@@ -1516,6 +1517,7 @@ class ReasoningRetriever:
         agent_profile=None,
         profile_owner_id: str = "",
         retrieval_experiences=None,
+        identity_store=None,
     ):
         self.retrieval = retrieval
         self.model_clients = model_clients
@@ -1544,6 +1546,14 @@ class ReasoningRetriever:
         # ``retrieval_experience_projection`` 的模块说明)。给它一个 owner 参数
         # 会凭空造出「这条打法是谁的」这个本特性刻意不存在的概念。
         self.retrieval_experiences = retrieval_experiences
+        # Agentic Memory P3(B-Profile,T8):``IdentityStorePort``,用于规划侧
+        # 按 ``profile_owner_id`` 点读该用户的检索/回答风格偏好文档并渲染进
+        # ``plan()``/``expand_query_prompt`` 的 ``style_block`` 形参。同样缺省
+        # None ⇒ 没接线的调用方(knowhow 智能补全、窄测试替身)与接入前逐字相同
+        # (见 ``search_profile_wiring_active``)。合成侧(``answer_prompt``)的
+        # 风格提示不经这里——那是 ``ask_service`` 自己独立的一次点读,见
+        # ``AskService._search_profile_style_block``。
+        self.identity_store = identity_store
         # Ask keeps its historical fail-open retrieval behavior. Authoring
         # flows such as knowhow completion opt into strict execution so a
         # failed plan/reflect/retrieval cannot masquerade as deep reasoning.
@@ -1745,7 +1755,7 @@ class ReasoningRetriever:
 
     # --- LLM 决策点 ---
     def plan(self, question, history="", max_subqueries=None, collection_map="",
-             profile_block="", experience_block=""):
+             profile_block="", experience_block="", style_block=""):
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
@@ -1774,7 +1784,10 @@ class ReasoningRetriever:
                           profile_block=profile_block,
                           # 部署级全局的检索打法(同样是背景不是证据,而且只说
                           # 「用哪个通道」、绝不说「读哪些来源」)。
-                          experience_block=experience_block)
+                          experience_block=experience_block,
+                          # 用户的检索/回答风格偏好(Agentic Memory P3,B-Profile,
+                          # T8):同样是背景不是证据,只影响组织形态/措辞。
+                          style_block=style_block)
         out = [SubQuery(query=s.query, types=s.types, prefer=s.prefer, reason=s.reason)
                for s in ex.sub_queries]
         return out or fallback
@@ -2298,6 +2311,22 @@ class ReasoningRetriever:
                 except Exception:  # noqa: BLE001 — 打法是背景,不是必需品
                     experience_block = ""
                     experience_entries = []
+            # Agentic Memory P3(B-Profile,T8):用户的检索/回答风格偏好,一次
+            # 主键点读(按 profile_owner_id = 本次提问 user_id)。与上面两块同款
+            # fail-open,同理由不记 skip 步——常态是这条 run 没有可渲染的偏好,
+            # 每轮多一条「无」步是噪声。空 owner(见 profile_owner_id 的类型注释,
+            # 空串是合法且安全的取值)与关闸都合法地产出空串,不触发任何读取。
+            style_block = ""
+            if self.profile_owner_id and search_profile_wiring_active(
+                    self.settings, self.identity_store):
+                try:
+                    style_profile = self.identity_store.get_user_search_profile(
+                        self.profile_owner_id)
+                    style_block = render_style_block(style_profile) if style_profile else ""
+                except AskCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 — 风格提示是背景,不是必需品
+                    style_block = ""
             # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储
             # 词表)。只在真的注入过条目时才积累——没注入就没有「采用」可言。
             adopted_actions: set = set()
@@ -2349,6 +2378,8 @@ class ReasoningRetriever:
                 plan_kwargs["profile_block"] = profile_block
             if experience_block:
                 plan_kwargs["experience_block"] = experience_block
+            if style_block:
+                plan_kwargs["style_block"] = style_block
             subqueries = (
                 [SubQuery(query=query) for query in reviewed_queries]
                 if reviewed_queries

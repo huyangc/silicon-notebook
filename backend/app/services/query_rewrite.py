@@ -47,7 +47,8 @@ def expand_query(client, question: str, history: str = "", *,
                  system_instruction: str = "",
                  collection_map: str = "",
                  profile_block: str = "",
-                 experience_block: str = "") -> ExpandedQuery:
+                 experience_block: str = "",
+                 style_block: str = "") -> ExpandedQuery:
     """一次 LLM 调用:问题(任意语言)→ 同语言规范改写 + 1..max_subqueries 个具体子查询
     (保持问题本身的语言)。keywords 按 corpus_langs 双语化(供纯词法 FTS/KG 名匹配),
     sub_queries 单语言(多语向量 embedder 一次即跨语,无需二次嵌入)。
@@ -58,7 +59,10 @@ def expand_query(client, question: str, history: str = "", *,
     见 agent_profile_block),空串=不注入。它是**背景**不是证据,只影响怎么查。
     experience_block:部署级全局的检索打法块(见 retrieval_experience_block),
     空串=不注入(默认形态)。它同样是**背景**不是证据,而且只说「用哪个通道」,
-    绝不说「读哪些来源」——来源范围只由用户勾选决定。"""
+    绝不说「读哪些来源」——来源范围只由用户勾选决定。
+    style_block:用户的检索/回答风格偏好提示(Agentic Memory P3,B-Profile,
+    见 app.services.search_profile.render_style_block),空串=不注入(默认
+    形态)。同样是**背景**,只影响组织形态/措辞,绝不触及来源范围或检索档位。"""
     from app.services.prompts import expand_query_prompt, EXPAND_SCHEMA_HINT
     fallback = ExpandedQuery(query=question,
                              sub_queries=[SubQuerySpec(query=normalize_terms(question))])
@@ -81,6 +85,7 @@ def expand_query(client, question: str, history: str = "", *,
                 collection_map=collection_map,
                 profile_block=profile_block,
                 experience_block=experience_block,
+                style_block=style_block,
             ),
         }]
         if system_instruction:

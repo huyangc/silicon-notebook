@@ -1449,6 +1449,11 @@ class RepositoryRuntime:
                 # 租户维度(见 RetrievalExperienceStorePort)。注入本身还要过一把
                 # 默认**关闭**的开关。
                 retrieval_experiences=self.retrieval_experiences,
+                # Agentic Memory P3(B-Profile,T8):用户检索/回答风格偏好的读
+                # 座位——``self.identity`` 本来就是这个运行时唯一的
+                # ``IdentityStorePort`` 实例(上面 ``current_user_id`` 已经在用
+                # 它)。提问者身份同样由 ask 侧显式传入,不经这里。
+                identity_store=self.identity,
                 selected_source_graph=self.selected_source_graph,
                 scale_version=lambda nb: tuple(self.scale_artifacts.version(nb)),
                 selected_graph_hydrate=lambda ids: (

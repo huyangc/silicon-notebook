@@ -8,8 +8,11 @@
     用户写过的字段(不覆盖、不报错);``value=None`` 删除字段条目(清空);
     未知字段/未知 origin/非法值报 ValueError。
   * ``render_style_block``:空 profile 渲染空串;"auto" 值不渲染;超预算时
-    从最不具体的一端(domain_terms)开始丢,直到落进
-    ``SEARCH_PROFILE_BLOCK_MAX_CHARS``。
+    domain_terms 逐条装入直到预算耗尽(不整段丢),仍超预算才继续从最不
+    具体的一端(detail→shape→language)整条丢,直到落进
+    ``SEARCH_PROFILE_BLOCK_MAX_CHARS``。T8 改动:此前 v1 是把 domain_terms
+    整段丢弃,评审发现 320 字符输入 vs ~96 字符可渲染预算会静默丢光全部
+    术语;裁决见 p3-rulings.md「T6 domain_terms」条。
   * 变异验证:删掉 ``merge_field`` 里的 origin 检查后,「job 不覆盖 user」这条
     断言必须报红(证明测试真的钉住了这条规则,而不是巧合通过)。
 """
@@ -252,19 +255,40 @@ def test_render_never_leaks_ids_notebook_or_source_words():
     assert "source_id" not in block and "user id" not in block
 
 
-def test_overflowing_domain_terms_are_dropped_before_shorter_fields():
+def test_overflowing_domain_terms_are_packed_one_at_a_time_not_dropped_whole():
+    """T8:满长 domain_terms(10 x 32 字符)远超可渲染预算,但渲染器逐条装入
+    直到预算耗尽,不是把整个列表丢光——评审发现的 320 输入 vs ~96 预算错配
+    (见 p3-rulings.md「T6 domain_terms」条)。"""
     profile = merge_field(_empty(), "answer_language", "zh", "user")
     long_terms = [
-        "x" * SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS
-        for _ in range(SEARCH_PROFILE_DOMAIN_TERMS_MAX)
+        f"{i:02d}-" + "x" * (SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS - 3)
+        for i in range(SEARCH_PROFILE_DOMAIN_TERMS_MAX)
     ]
     profile = merge_field(profile, "domain_terms", long_terms, "user")
     block = render_style_block(profile)
     assert len(block) <= SEARCH_PROFILE_BLOCK_MAX_CHARS
     # The bounded block must still say SOMETHING (the language preference
-    # survives) even though the oversized term list got dropped whole.
+    # survives).
     assert "Chinese" in block
-    assert "x" * SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS not in block
+    # At least one whole term made it in -- this is the load-bearing part of
+    # this test: a whole-segment drop would leave EVERY term out, while
+    # per-term packing must surface at least the first one.
+    assert long_terms[0] in block
+    # Not every term fits (that's the overflow scenario this test exercises)
+    # -- and a term that got dropped must be dropped WHOLE, never truncated
+    # mid-word into a substring that still happens to appear elsewhere.
+    assert long_terms[-1] not in block
+
+
+def test_domain_terms_that_do_fit_are_never_truncated_mid_word():
+    """A term that fits the budget appears in the block WHOLE -- packing
+    never emits a partial prefix of a term it decided to include."""
+    profile = merge_field(
+        _empty(), "domain_terms", ["A" * SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS], "user"
+    )
+    block = render_style_block(profile)
+    assert block
+    assert ("A" * SEARCH_PROFILE_DOMAIN_TERM_MAX_CHARS) in block
 
 
 # --------------------------------------------------------------------------- #

@@ -316,6 +316,17 @@ class IdentityRepository(Protocol):
     def set_user_search_profile(
         self, user_id: str, fields: "Mapping[str, object]", origin: str
     ) -> UserProfile: ...
+    # Agentic Memory P3(B-Profile,T8):一次主键点读该用户的检索/回答风格偏好
+    # **文档**(``app.services.search_profile.parse_search_profile`` 的返回形状,
+    # 而非整个 ``UserProfile``——Ask/reasoning-plan 注入点只需要这一份 JSON 去
+    # 喂 ``render_style_block``,不需要 email/display_name/role 这些字段,
+    # 也不必像 ``current_user()``/``_user_profile`` 那样再 join ``users`` 表)。
+    # 行不存在、列缺失(旧库未跑迁移)或畸形 JSON 一律 fail-open 到
+    # ``None``——调用方(``AskService._search_profile_style_block``/
+    # ``ReasoningRetriever.run()``)据此把风格提示渲染成空串,调用形状与接入前
+    # 逐字相同。绝不读 ``current_user()`` ContextVar——调用方必须显式传入
+    # user_id(见两处调用方各自的红线注释)。
+    def get_user_search_profile(self, user_id: str) -> "dict | None": ...
     def change_user_password(
         self, user_id: str, old_password: str, new_password: str, *, keep_token: str | None = None
     ) -> None: ...

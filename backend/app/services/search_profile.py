@@ -309,44 +309,60 @@ def render_style_block(profile: Mapping[str, Any]) -> str:
     block (compare :func:`merge_field`, which never stores "auto" for this
     exact reason).
 
-    Bounded to :data:`SEARCH_PROFILE_BLOCK_MAX_CHARS`: if the naive render
-    would exceed it, parts are dropped from the least-specific end
-    (``domain_terms`` first — the single most likely overflow source, since
-    it alone can carry up to 10 × 32 characters) until it fits, rather than
-    truncating mid-word. An empty profile (or one where nothing survives the
-    budget) renders to ``""`` — a call site must treat that identically to
-    "the feature never ran" (the historical, pre-feature call shape).
+    Bounded to :data:`SEARCH_PROFILE_BLOCK_MAX_CHARS`. ``domain_terms`` is
+    the single most likely overflow source (it alone can carry up to 10 x 32
+    characters against a ~200-char budget, dwarfing the other three fields
+    combined), so it does NOT get dropped as one all-or-nothing chunk the way
+    the other three fields do. Terms are packed in ONE AT A TIME and kept as
+    long as they fit — a profile with ten terms and a 96-character remaining
+    budget still surfaces however many whole terms fit, rather than losing
+    every one of them because the full list didn't. Only once the term list
+    is down to zero does the fallback continue dropping the other
+    (single-sentence, rarely oversized) parts from the least-specific end —
+    detail, then shape, then language — the same one-chunk-at-a-time
+    trimming they always used. A term is never truncated mid-word: it is
+    either whole in the block or entirely absent from it. An empty profile
+    (or one where nothing survives the budget) renders to ``""`` — a call
+    site must treat that identically to "the feature never ran" (the
+    historical, pre-feature call shape).
     """
     fields = profile.get("fields") or {}
-    parts: list[str] = []
+    fixed_parts: list[str] = []
 
     language_entry = fields.get("answer_language") or {}
     language = language_entry.get("value")
     if language and language != "auto" and language in _LANGUAGE_PHRASES:
-        parts.append(_LANGUAGE_PHRASES[language])
+        fixed_parts.append(_LANGUAGE_PHRASES[language])
 
     shape_entry = fields.get("answer_shape") or {}
     shape = shape_entry.get("value")
     if shape and shape != "auto" and shape in _SHAPE_PHRASES:
-        parts.append(_SHAPE_PHRASES[shape])
+        fixed_parts.append(_SHAPE_PHRASES[shape])
 
     detail_entry = fields.get("answer_detail") or {}
     detail = detail_entry.get("value")
     if detail and detail != "auto" and detail in _DETAIL_PHRASES:
-        parts.append(_DETAIL_PHRASES[detail])
+        fixed_parts.append(_DETAIL_PHRASES[detail])
 
     terms_entry = fields.get("domain_terms") or {}
     terms = terms_entry.get("value")
-    if isinstance(terms, list) and terms:
-        parts.append("familiar terms: " + ", ".join(terms))
+    remaining_terms: list[str] = list(terms) if isinstance(terms, list) else []
 
-    while parts:
+    while True:
+        parts = list(fixed_parts)
+        if remaining_terms:
+            parts.append("familiar terms: " + ", ".join(remaining_terms))
+        if not parts:
+            return ""
         block = _BLOCK_PREAMBLE + "; ".join(parts) + "."
         if len(block) <= SEARCH_PROFILE_BLOCK_MAX_CHARS:
             return block
-        parts.pop()  # drop the least-specific (rightmost) part and retry
-
-    return ""
+        if remaining_terms:
+            # Drop exactly one term (the least-specific unit available) and
+            # retry before ever touching a fixed part.
+            remaining_terms.pop()
+        else:
+            fixed_parts.pop()  # detail, then shape, then language
 
 
 # --------------------------------------------------------------------------- #

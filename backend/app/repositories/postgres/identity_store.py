@@ -419,6 +419,25 @@ class IdentityStore:
                 ).fetchone()
             return self._user_profile(user, profile)
 
+    def get_user_search_profile(self, user_id: str) -> "dict | None":
+        """一次主键点读该用户的检索/回答风格偏好**文档**(Agentic Memory P3,
+        T8)——镜像 SQLite 侧同名方法:不是整个 ``UserProfile``,不 join
+        ``users`` 表,只读 ``search_profile_json`` 一列供
+        ``render_style_block`` 消费。空 ``user_id``、行不存在、列缺失(旧库
+        未跑迁移)与畸形 JSON 全部 fail-open 到 ``None``。只读,不需要
+        ``FOR UPDATE``(没有读-改-写)。"""
+        if not user_id:
+            return None
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT search_profile_json FROM user_profiles WHERE user_id=%s",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        parsed = parse_search_profile(row.get("search_profile_json"))
+        return parsed if parsed["fields"] else None
+
     def change_user_password(
         self,
         user_id: str,

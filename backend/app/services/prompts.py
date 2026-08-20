@@ -288,10 +288,16 @@ def answer_prompt(
     section_title: str = "",
     section_index: int = 0,
     section_total: int = 0,
+    style_block: str = "",
 ) -> str:
     """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
     history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
-    什么」变成一个要靠数逗号回答的问题。"""
+    什么」变成一个要靠数逗号回答的问题。``style_block`` (Agentic Memory P3, T8)
+    is the SAME keyword-only shape: the per-user search-profile style hint
+    from ``search_profile.render_style_block`` (organization/wording only —
+    the block's own preamble states that boundary), empty string when the
+    feature/switch is off or the user has no profile set, which reproduces
+    this function's pre-feature output byte for byte."""
     history_section = (
         "Prior conversation (for context; the current question may refer to it):\n"
         f"{history_block}\n\n"
@@ -301,6 +307,11 @@ def answer_prompt(
     section_section = _answer_section_directive(
         sectioned, section_title, section_index, section_total
     )
+    # Rendered AFTER the numbered rules and BEFORE the Question line — a style
+    # nudge is not a rule (it must never be read as authorizing a new [k]
+    # binding or relaxing rule 2's grounding requirement) and must not be
+    # mistaken for part of the question itself.
+    style_section = f"{style_block}\n\n" if style_block else ""
     return (
         "You answer an engineer's question using the notebook knowledge below, "
         "and you may reason beyond it.\n"
@@ -371,6 +382,7 @@ def answer_prompt(
         "collection on its own.\n\n"
         f"{history_section}"
         f"{section_section}"
+        f"{style_section}"
         f"Question: {question}\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         'Return JSON only: {"answer":"<text with [k] markers>","grounded":true|false}'
@@ -386,6 +398,7 @@ PLAN_SCHEMA_HINT = (
 def plan_prompt(
     question: str, history_block: str = "", collection_map: str = "",
     profile_block: str = "", experience_block: str = "",
+    *, style_block: str = "",
 ) -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
@@ -415,6 +428,11 @@ def plan_prompt(
     # sources may be read — and it is empty whenever the injection switch is
     # off (its default), so the prompt then reads exactly as it did before.
     experience_section = f"{experience_block}\n\n" if experience_block else ""
+    # The per-user search-profile style hint (Agentic Memory P3, T8) — see
+    # ``expand_query_prompt``'s identical comment. This function is a BACKUP
+    # spelling (see the NOTE above); the parameter is added here too so the
+    # two spellings never state different plans.
+    style_section = f"{style_block}\n\n" if style_block else ""
     return (
         "You plan how to retrieve a knowledge graph (KG) to answer an "
         "engineer's question. The KG has 4 node types: concept (definitions), "
@@ -433,6 +451,7 @@ def plan_prompt(
         f"{history_section}"
         f"{profile_section}"
         f"{experience_section}"
+        f"{style_section}"
         f"{collection_section}"
         f"Question: {question}\n\n"
         'Return JSON only: {"sub_queries":[{"query":"","types":[],'
@@ -784,7 +803,8 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
                         corpus_langs: Optional[List[str]] = None,
                         collection_map: str = "",
                         profile_block: str = "",
-                        experience_block: str = "") -> str:
+                        experience_block: str = "",
+                        *, style_block: str = "") -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
         f"{history_block}\n\n" if history_block else "")
@@ -802,6 +822,14 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
     # land to reach a planning model.  Empty string = byte-for-byte the prompt
     # this function produced before the feature existed.
     experience_section = f"{experience_block}\n\n" if experience_block else ""
+    # The per-user search-profile style hint (Agentic Memory P3, T8):
+    # ``search_profile.render_style_block``'s output, empty when the feature
+    # is off or the user has no profile set — this function is what
+    # production sends, so this is where it has to land to reach a planning
+    # model. It carries organization/wording preference only (its own
+    # preamble states that boundary); it is NOT a scope or search-channel
+    # instruction, unlike the profile/experience blocks above it.
+    style_section = f"{style_block}\n\n" if style_block else ""
     types_line = (
         "- types: which KG node types to search (subset of concept/claim/formula/"
         "procedure; omit/empty = all). prefer: keyword|semantic|balanced.\n"
@@ -849,6 +877,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         f"{history_section}"
         f"{profile_section}"
         f"{experience_section}"
+        f"{style_section}"
         f"{collection_section}"
         f"Question: {question}\n\n"
         'Return JSON only: {"query":"","high_level_keywords":[],'
