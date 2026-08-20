@@ -2,7 +2,7 @@
 
 [中文](./agent-mcp-memory-sop_zh.md) · [Back to README](../README.md)
 
-This runbook connects a locally running `silicon-notebook` to Codex CLI, Claude Code, or a Python Agent. It covers the UI-issued least-privilege token, Streamable HTTP MCP setup, retrieval, candidate Memory proposal, user review, troubleshooting, and revocation.
+This runbook connects a `silicon-notebook` deployment — local or remote — to Codex CLI, Claude Code, or a Python Agent. It covers the UI-issued least-privilege token, Streamable HTTP MCP setup, retrieval, candidate Memory proposal, user review, troubleshooting, and revocation.
 
 The Memory described here is private, notebook-bound `silicon-notebook` Memory. It is separate from a client Agent's own preference or personalization memory.
 
@@ -11,7 +11,8 @@ The Memory described here is private, notebook-bound `silicon-notebook` Memory. 
 ```text
 Codex CLI / Claude Code / Python Agent
   └─ Authorization: Bearer <Agent token>
-      └─ Streamable HTTP http://127.0.0.1:8000/mcp
+      └─ Streamable HTTP http://127.0.0.1:8000/mcp/
+         (remote: http(s)://<host>:<backend port>/mcp/ — see §4)
           ├─ token notebook allowlist
           ├─ source, KG, and confirmed Memory (formal plane)
           ├─ Agent candidate Memory (review plane)
@@ -35,6 +36,8 @@ curl -s http://127.0.0.1:8000/api/ready
 ```
 
 Expect `"ready": true`. Open <http://127.0.0.1:3000> and sign in. A fresh local database seeds `admin` with local default password `admin`; existing deployments use their configured credentials.
+
+For a remote deployment, substitute its host and backend port in every URL below, including `/api/ready`. The MCP endpoint lives on that same origin and port.
 
 Use a notebook the account can read. To test formal context retrieval, that notebook should contain a source, KG object, or confirmed Memory.
 
@@ -78,7 +81,38 @@ minimal token.
 
 Never commit the token or place it in documentation or script arguments. Share it only with the intended Agent over a trusted channel, separately from the onboarding URL; after configuration, keep it in the client's secret/environment mechanism and do not repeat it in later conversation. The examples read it from the process environment.
 
-## 4. Configure Codex CLI
+## 4. Configure the MCP client
+
+### The endpoint URL
+
+The endpoint is `<scheme>://<host>:<backend port>/mcp/`. Everything except the path is
+deployment-specific, and each part fails differently when it is wrong:
+
+- **Port.** The backend serves MCP on its own port (`8000` by default), not on 80/443. A bare
+  `http://notebook.example.internal/mcp` reaches whatever answers on port 80 — usually the
+  frontend or a reverse proxy — and returns `404`.
+- **Scheme.** Plain HTTP is the current product default (see §9). `https://` works only if the
+  deployment actually terminates TLS; against an HTTP-only host it is a refused connection, not
+  a fallback.
+- **Trailing slash.** The MCP application is mounted at `/mcp` and its own route is `/`, so
+  `POST /mcp` answers `307 Temporary Redirect` to `/mcp/`. Clients that follow a 307 (method and
+  body preserved — the official Python MCP client always does) work either way; writing `/mcp/`
+  removes the dependency on that behavior.
+
+A worked remote example:
+
+| URL tried | Result |
+| --- | --- |
+| `https://notebook.example.internal/mcp` | Connection refused — nothing terminates TLS on 443 |
+| `http://notebook.example.internal/mcp` | `404` — port 80 is not the backend |
+| `http://notebook.example.internal:8000/mcp` | `307` redirect to `/mcp/` |
+| `http://notebook.example.internal:8000/mcp/` | The authenticated MCP endpoint |
+
+The server-side `MCP_PUBLIC_URL` is a separate value and must stay slashless: startup rejects any
+path other than exactly `/mcp`. The onboarding Markdown therefore prints the slashless form; add
+the trailing slash when writing it into a client configuration.
+
+### Codex CLI
 
 In the same shell that will launch Codex:
 
@@ -86,7 +120,7 @@ In the same shell that will launch Codex:
 export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time token from the UI>'
 
 codex mcp add silicon-notebook \
-  --url http://127.0.0.1:8000/mcp \
+  --url http://127.0.0.1:8000/mcp/ \
   --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
 
 codex mcp list
@@ -100,7 +134,7 @@ A trusted repository may instead use project-scoped `.codex/config.toml` without
 
 ```toml
 [mcp_servers.silicon-notebook]
-url = "http://127.0.0.1:8000/mcp"
+url = "http://127.0.0.1:8000/mcp/"
 bearer_token_env_var = "SILICON_NOTEBOOK_AGENT_TOKEN"
 enabled = true
 enabled_tools = [
@@ -117,15 +151,44 @@ See the [official Codex MCP documentation](https://developers.openai.com/codex/m
 
 ### Claude Code
 
-The currently supported explicit-header form is:
+Claude Code resolves `${VAR}` inside a header at connect time, so the token never has to be
+written into a configuration file (verified on Claude Code 2.1.226):
 
 ```bash
+export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time token from the UI>'
+
 claude mcp add --transport http silicon-notebook \
-  http://127.0.0.1:8000/mcp \
-  --header "Authorization: Bearer <one-time token from the UI>"
+  'http://127.0.0.1:8000/mcp/' \
+  --header 'Authorization: Bearer ${SILICON_NOTEBOOK_AGENT_TOKEN}'
+
+claude mcp list
 ```
 
-Claude Code may persist the raw header locally. Protect that configuration, use short-lived least-privilege tokens, and revoke/rotate them. Do not assume shell interpolation inside the header.
+Four details decide whether that actually works:
+
+- **Single-quote the header.** Double quotes let the shell expand `${…}` before `claude` ever
+  sees it, which writes either the literal token into the configuration or — if the variable is
+  not set yet — an empty string.
+- **`~/.claude.json` stores the literal `${SILICON_NOTEBOOK_AGENT_TOKEN}`**, and Claude Code
+  substitutes it when it connects. `${VAR:-default}` is supported too.
+- **Export the variable in the same shell that starts `claude`, and restart the session after
+  changing it.** The value is read from the environment of the running client process, not
+  re-read per request.
+- **An undefined variable is passed through verbatim.** A misspelled name is sent as the literal
+  characters `Bearer ${TYPOD_NAME}` and fails as a bad token, with no configuration-time error.
+  The mistake is silent, so only a real connection proves the value resolved.
+
+`claude mcp add` writes to the *local* scope by default — `projects.<cwd>.mcpServers` in
+`~/.claude.json`, visible only from that directory. Use `-s user` to register it for every
+project on the machine, or `-s project` for a checked-in `.mcp.json` (with `${VAR}` only, never a
+literal token).
+
+`claude mcp list` runs a live health check and prints `✔ Connected` per server. That plus the
+curl lifecycle in §8 is what confirms the token resolved; the entry appearing in the list does
+not.
+
+If a client cannot interpolate and the raw token ends up on disk, treat that file as a
+credential: short expiry, least privilege, rotate and revoke.
 
 ## 5. First Agent task
 
@@ -170,7 +233,7 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 
 - `/api/ready` is ready.
 - The token's default notebook is allowlisted and scopes match the use case.
-- `codex mcp list` or the client MCP page shows `silicon-notebook`.
+- `codex mcp list` shows `silicon-notebook`, or `claude mcp list` reports it `✔ Connected`.
 - A new session calls `list_notebooks`, then `select_notebook` successfully.
 - `search_notebook_context` excludes unconfirmed candidates.
 - With `memory:read_candidates`, `search_agent_memory` recalls the proposed candidate.
@@ -179,6 +242,38 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 - When the token carries `maintenance:execute`: `build_kg` returns a job id and `get_build_status` reflects it; a refusal while another build runs is the expected queueing signal, not a failure.
 - `delete_source` refuses a source that a person uploaded, and succeeds only on one the Agent added.
 - The verification token is revoked after the test; disable the Profile if it is no longer needed.
+
+### Verify the transport by hand
+
+`curl` cannot skip the MCP session handshake: a bare `tools/list` on a fresh connection answers
+`400 Bad Request: Missing session ID`, which is a protocol state, not a configuration fault. The
+full lifecycle is three requests:
+
+```bash
+MCP_URL='http://127.0.0.1:8000/mcp/'
+AUTH="Authorization: Bearer $SILICON_NOTEBOOK_AGENT_TOKEN"
+CT='content-type: application/json'
+ACCEPT='accept: application/json, text/event-stream'
+
+# 1. initialize -> 200, and the response header mcp-session-id carries the session
+curl -sD - -o /dev/null -X POST "$MCP_URL" -H "$AUTH" -H "$CT" -H "$ACCEPT" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+SESSION='<mcp-session-id from the response headers above>'
+
+# 2. notifications/initialized -> 202, empty body
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$MCP_URL" \
+  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# 3. tools/list -> 200 with the full published tool list
+curl -s -X POST "$MCP_URL" \
+  -H "$AUTH" -H "$CT" -H "$ACCEPT" -H "MCP-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means the
+`MCP-Session-Id` header was dropped rather than that the server has no tools.
 
 ## 9. Troubleshooting
 
@@ -189,9 +284,14 @@ Return to **Private Memory**, filter status to **待确认** and origin to **Age
 | Notebook outside allowlist | Issue a new token whose explicit allowlist contains that notebook. |
 | Scope/permission error | Reissue a least-privilege token with the required scope; a client cannot elevate it. |
 | Codex cannot see the server | Run `codex mcp list`, export the token before starting Codex, and start a new session/restart the app or extension. |
+| `404`, or a refused connection, while configuring a client | The endpoint is `<host>:<backend port>/mcp/` (§4). Port 80/443 typically serves the frontend or has no TLS listener at all. |
+| `307 Temporary Redirect` on `POST /mcp` | Expected — the MCP app is mounted at `/mcp` with its own root route. Configure `/mcp/` instead of relying on the client to follow the redirect. |
+| `400 Bad Request: Missing session ID` | A tool call reached the server before `initialize` plus `notifications/initialized`, or the `MCP-Session-Id` header was lost. Real clients handle this; hand-written `curl` must not skip it (§8). |
+| Claude Code sends a literal `${...}` as the token | The variable was not exported in the shell that launched `claude`, or its name is misspelled — an undefined variable is passed through verbatim. Export it and start a new session. |
+| `claude mcp list` does not show the server in another directory | `claude mcp add` defaults to the local, per-directory scope. Re-add it with `-s user`. |
 | Candidate is missing | Add `memory:read_candidates`; formal context intentionally excludes candidates. |
 | Python cannot import `mcp`/`httpx` | Activate the project venv and install `backend/requirements.txt`. |
-| Remote plain HTTP | Loopback HTTP is acceptable. Public deployments must set `MCP_REQUIRE_HTTPS=1` and point `MCP_PUBLIC_URL` at the public HTTPS `/mcp` URL. |
+| Remote plain HTTP | Loopback HTTP is fine. Remotely, plain HTTP is currently *allowed* by default — the backend only logs a startup warning and relaxes Host/Origin checks — so the bearer token crosses every hop in cleartext. A configured hostname does not make a deployment secure: treat plain HTTP as acceptable only on a trusted private network, and set `MCP_REQUIRE_HTTPS=1` with `MCP_PUBLIC_URL` on the public HTTPS `/mcp` URL for anything crossing an untrusted one. |
 | `build_kg` refuses: a build is already running | Expected queueing signal, not an error. The notebook-scoped single-flight guard is doing its job; poll `get_build_status` until it clears instead of retrying immediately. |
 | `delete_source` refuses: added by a user | By design. Only sources an Agent added are removable through MCP. The browser's source list shows which ones those are with the 「Agent 添加」 badge; a person's document must be deleted in the UI. |
 | A source or build write tool refuses on a notebook that reads fine | Source-management and build writes are owner-only. The allowlist may include a notebook the token's owner only joined as a read-only member; reading works there, and those writes never do. The one exception is the `knowhow:code` cell-code write, which is scope-driven by design and works for a read-only member. |
