@@ -2476,11 +2476,24 @@ def create_memory_mcp(
             # compensating clear removes what we just wrote. A recheck ERROR
             # keeps the row (fail-open: the append was legitimate under the
             # access state this tool verified moments ago).
+            # codex #535 R13 P2: the recheck is NOTEBOOK read access only, not
+            # the full ``require_agent_access`` — token-level failures
+            # (revocation, expiry, scope loss, allowlist edits) between the
+            # two steps do not make the row illegitimate (the owner is still
+            # a member and it is their own private queue), and compensating
+            # on them would wipe EVERY observation this user retains in the
+            # notebook, including other Agents' rows, on what may be an
+            # idempotent no-op retry. Member removal is the one event whose
+            # cleanup this append can race, and clearing the member's whole
+            # ``(notebook, owner)`` scope is exactly what that removal path
+            # itself does — so the compensation matches its semantics.
             try:
-                repo.require_agent_access(
-                    principal, "agent_observation:write", notebook_id
+                still_member = repo.user_can_read_notebook(
+                    notebook_id, principal.owner_id
                 )
-            except PermissionError:
+            except Exception:  # noqa: BLE001 — fail-open, see above
+                still_member = True
+            if not still_member:
                 repo.agent_observations.clear_observations(
                     notebook_id, principal.owner_id
                 )
@@ -2488,8 +2501,6 @@ def create_memory_mcp(
                     "notebook access was revoked while this observation was "
                     "being written; the observation was discarded"
                 )
-            except Exception:  # noqa: BLE001 — fail-open, see above
-                pass
             # Returns immediately -- the write itself is one bounded INSERT
             # plus one bounded eviction DELETE, zero model calls, so there is
             # nothing to queue. "Asynchronous" here means only that THIS
